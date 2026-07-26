@@ -18,6 +18,7 @@ use crate::hashes::{commit_fold, h2, h3, TYPE_CODE_LITERAL};
 use crate::join::{JOIN_DOMAIN, join_eq_check, join_value_commitment};
 use crate::path::path_reach_check;
 use crate::revoke::{revoke_unset_check, revoke_unset_check_committed, SIG_DOMAIN_STATUS_IDX_COMMIT};
+use crate::sameas::{canon_of, sameas_entails_row};
 use crate::scan::{PatternSpec, scan_check};
 
 // ---------------------------------------------------------------------------
@@ -2017,5 +2018,165 @@ fn derivation_rejects_root_mismatch() {
     // The proof derives (X type C2) but claims the row (X type C1).
     derivation_check::<1, 4, 4>(
         commitments, d_schema(), [D_X, D_TYPE, D_C1], counts, enc, 3, rule, prem, concl,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// sameas -- union-find canonicalisation + representative-membership
+// (sq-rsd3v.6, #3265). Tiny (K=1, N=8, U=4) monomorphisation. Term encodings
+// are arbitrary distinct nonzero constants (the relation only cares about
+// equality structure), exactly as the derivation_check tests above.
+// ---------------------------------------------------------------------------
+
+global SA_SAMEAS: Field = 41; // owl:sameAs (the PUBLIC vocabulary encoding)
+global SA_P: Field = 51; // <worksAt>
+global SA_O: Field = 61; // <acme>
+global SA_A: Field = 101; // <alice>
+global SA_B: Field = 102; // <alice-2>, committed sameAs <alice>
+global SA_C: Field = 103; // <alice-3>, committed sameAs <alice-2>
+global SA_GHOST: Field = 999; // a term with NO committed sameAs edge
+
+// The committed base graph, in an N=8 bucket:
+//   { (A P O), (A sameAs B), (B sameAs C) }
+// so A ~ B ~ C, and (C P O) is entailed under OWL-RL eq-rep-s WITHOUT
+// disclosing (A P O) or either equality.
+fn sa_graph() -> ([[[Field; 3]; 8]; 1], [u32; 1], [Field; 1]) {
+    let enc: [[[Field; 3]; 8]; 1] = [[
+        [SA_A, SA_P, SA_O],
+        [SA_A, SA_SAMEAS, SA_B],
+        [SA_B, SA_SAMEAS, SA_C],
+        [0, 0, 0],
+        [0, 0, 0],
+        [0, 0, 0],
+        [0, 0, 0],
+        [0, 0, 0],
+    ]];
+    let counts: [u32; 1] = [3];
+    let mut leaves: [Field; 8] = [0; 8];
+    for i in 0..8 {
+        leaves[i] = h3(enc[0][i][0], enc[0][i][1], enc[0][i][2]);
+    }
+    let commitments: [Field; 1] = [commit_fold(leaves, 3)];
+    (enc, counts, commitments)
+}
+
+// The HONEST spanning forest of the committed sameAs edges, rooted at A:
+//   entry 0: A -> A (root)
+//   entry 1: B -> A, parent 0, justified by (A sameAs B)
+//   entry 2: C -> A, parent 1, justified by (B sameAs C)
+// Entry 3 is inactive padding (entry_count = 3).
+fn sa_table() -> ([Field; 4], [Field; 4], [u32; 4], u32) {
+    ([SA_A, SA_B, SA_C, 0], [SA_A, SA_A, SA_A, 0], [0, 0, 1, 3], 3)
+}
+
+// canon_of reads the representative for a table member and is the IDENTITY on
+// a term with no entry (OWL-RL eq-ref: every term is its own class). Padding
+// entries are invisible.
+#[test]
+fn canon_of_maps_members_and_fixes_strangers() {
+    let (mem, rep, _parent, n) = sa_table();
+    assert(canon_of(mem, rep, n, SA_A) == SA_A);
+    assert(canon_of(mem, rep, n, SA_B) == SA_A);
+    assert(canon_of(mem, rep, n, SA_C) == SA_A);
+    // Not a member: its own representative.
+    assert(canon_of(mem, rep, n, SA_P) == SA_P);
+    assert(canon_of(mem, rep, n, SA_GHOST) == SA_GHOST);
+    // Idempotence (module-doc L3).
+    assert(canon_of(mem, rep, n, canon_of(mem, rep, n, SA_C)) == SA_A);
+}
+
+// ACCEPT: (C P O) is entailed from the hidden base triple (A P O) via the
+// two-edge equality chain A ~ B ~ C. Only `row` is public; the base triple,
+// its slot, and the whole equality chain stay private.
+#[test]
+fn sameas_accepts_row_rewritten_across_the_equality_chain() {
+    let (enc, counts, commitments) = sa_graph();
+    let (mem, rep, parent, n) = sa_table();
+    sameas_entails_row::<1, 8, 4>(
+        commitments, SA_SAMEAS, [SA_C, SA_P, SA_O], counts, enc, n, mem, rep, parent, 0, 0,
+    );
+}
+
+// FORGE (the core soundness regression -- the OVER-MERGE): a prover adds a
+// table entry merging a fabricated term into A's class WITHOUT any committed
+// `A owl:sameAs GHOST` triple, then claims A's facts for it. Constraints 3a/3b
+// are all satisfied (the parent is earlier, the representative agrees), so
+// shape alone cannot catch it -- only the committed-edge anchor can.
+#[test(should_fail_with = "canon merge not justified by a committed owl:sameAs triple")]
+fn sameas_rejects_unjustified_merge() {
+    let (enc, counts, commitments) = sa_graph();
+    let mem: [Field; 4] = [SA_A, SA_B, SA_C, SA_GHOST];
+    let rep: [Field; 4] = [SA_A, SA_A, SA_A, SA_A];
+    let parent: [u32; 4] = [0, 0, 1, 0];
+    sameas_entails_row::<1, 8, 4>(
+        commitments, SA_SAMEAS, [SA_GHOST, SA_P, SA_O], counts, enc, 4, mem, rep, parent, 0, 0,
+    );
+}
+
+// FORGE: the representative must be constant along a tree edge. A non-root
+// that keeps its own representative would let a prover split a class (and, in
+// the general table, launder a merge through an intermediate).
+#[test(should_fail_with = "canon entry disagrees with its parent's representative")]
+fn sameas_rejects_representative_break() {
+    let (enc, counts, commitments) = sa_graph();
+    let mem: [Field; 4] = [SA_A, SA_B, SA_C, 0];
+    // Entry 1 is a non-root but claims itself as representative.
+    let rep: [Field; 4] = [SA_A, SA_B, SA_A, 0];
+    let parent: [u32; 4] = [0, 0, 1, 3];
+    sameas_entails_row::<1, 8, 4>(
+        commitments, SA_SAMEAS, [SA_C, SA_P, SA_O], counts, enc, 3, mem, rep, parent, 0, 0,
+    );
+}
+
+// FORGE: a forward-referencing parent. Without the strict-backwards rule a
+// prover could build a CYCLE of mutually-justifying entries with no root, and
+// the induction that makes the forest well-founded would have no base case.
+#[test(should_fail_with = "canon parent is not an earlier entry")]
+fn sameas_rejects_forward_parent() {
+    let (enc, counts, commitments) = sa_graph();
+    let mem: [Field; 4] = [SA_A, SA_B, SA_C, 0];
+    let rep: [Field; 4] = [SA_A, SA_A, SA_A, 0];
+    // Entry 1 points FORWARD at entry 2.
+    let parent: [u32; 4] = [0, 2, 1, 3];
+    sameas_entails_row::<1, 8, 4>(
+        commitments, SA_SAMEAS, [SA_C, SA_P, SA_O], counts, enc, 3, mem, rep, parent, 0, 0,
+    );
+}
+
+// FORGE: duplicate members would make `canon_of` multi-valued (the prover picks
+// whichever representative suits the row), breaking idempotence -- L3.
+#[test(should_fail_with = "duplicate member in canon table")]
+fn sameas_rejects_duplicate_member() {
+    let (enc, counts, commitments) = sa_graph();
+    // Entry 2 re-enters B (already at index 1). Its edge is separately
+    // justified by the committed (A sameAs B), so ONLY uniqueness catches it.
+    let mem: [Field; 4] = [SA_A, SA_B, SA_B, 0];
+    let rep: [Field; 4] = [SA_A, SA_A, SA_A, 0];
+    let parent: [u32; 4] = [0, 0, 0, 3];
+    sameas_entails_row::<1, 8, 4>(
+        commitments, SA_SAMEAS, [SA_B, SA_P, SA_O], counts, enc, 3, mem, rep, parent, 0, 0,
+    );
+}
+
+// FORGE: an HONEST table cannot license a row outside the proven class. GHOST
+// has no entry, so canon(GHOST) = GHOST != A = canon(A) -- the representative-
+// membership step is what refuses it.
+#[test(should_fail_with = "disclosed row is not the committed triple up to owl:sameAs")]
+fn sameas_rejects_row_outside_the_class() {
+    let (enc, counts, commitments) = sa_graph();
+    let (mem, rep, parent, n) = sa_table();
+    sameas_entails_row::<1, 8, 4>(
+        commitments, SA_SAMEAS, [SA_GHOST, SA_P, SA_O], counts, enc, n, mem, rep, parent, 0, 0,
+    );
+}
+
+// FORGE: the base triple must be an ACTIVE slot. Slot 5 is padding, so a
+// fabricated base fact smuggled into the padding region has no witness.
+#[test(should_fail_with = "witnessed base triple is not an active committed slot")]
+fn sameas_rejects_base_triple_in_padding() {
+    let (enc, counts, commitments) = sa_graph();
+    let (mem, rep, parent, n) = sa_table();
+    sameas_entails_row::<1, 8, 4>(
+        commitments, SA_SAMEAS, [SA_C, SA_P, SA_O], counts, enc, n, mem, rep, parent, 0, 5,
     );
 }

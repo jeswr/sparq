@@ -40,6 +40,12 @@ pub mod holder;
 pub mod issuer;
 pub mod manifest;
 pub mod revocation;
+// [OPUS-5] sq-rsd3v.6: owl:sameAs EQUALITY reasoning — the host mirror of the
+// in-circuit union-find canonicalisation gadget, plus its witness builder.
+// SEPARATE from `derivation` on purpose: encoding-equality re-checks are the
+// wrong proxy under equality reasoning. Research-grade, NOT externally audited
+// (sq-qhy4); no manifest/dispatch wiring and no compiled member yet.
+pub mod sameas;
 pub mod toml;
 pub mod verifier;
 
@@ -59,6 +65,8 @@ pub use capture::{
 pub use manifest::{BranchWitness, FragmentManifest};
 // [OPUS-4.8] sq-314: derivation-step capability + entailment regime end-to-end.
 pub use derivation::{regime_admits, DerivationStep, EntailmentRule};
+// [OPUS-5] sq-rsd3v.6: the owl:sameAs canonicalisation witness + host re-check.
+pub use sameas::{CanonEntry, CanonError, CanonTable, OWL_SAME_AS};
 // [OPUS-4.8] sq-cfmv: the fail-closed (method × circuit) dispatch resolver.
 #[cfg(feature = "dual-leaf")]
 pub use dispatch::{resolve_circuit, resolve_circuit_for_scheme, DispatchError};

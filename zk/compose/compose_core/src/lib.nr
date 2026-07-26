@@ -38,5 +38,12 @@ pub mod path;
 // (sq-qhy4); the in-circuit relation only -- the off-circuit ProofTree->slot
 // witness mapper + a compiled bin-package monomorphisation are follow-ups.
 pub mod derivation;
+// [OPUS-5] sq-rsd3v.6 (#3265): owl:sameAs EQUALITY reasoning -- in-circuit
+// union-find canonicalisation + representative-membership. SEPARATELY gated
+// from `derivation` on purpose: encoding-equality re-checks are UNSOUND under
+// equality reasoning, so `owl:sameAs` must NOT ride the fixed-shape RDFS /
+// OWL-RL-minus-sameAs path. Research-grade, NOT externally audited (sq-qhy4);
+// no cost claim (`bb gates` not run) and no compiled bin package yet.
+pub mod sameas;
 
 mod tests;

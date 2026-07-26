@@ -1752,6 +1752,18 @@ pub enum CheckError {
     /// `derivation` module; until then only the disclosed base grounds a step.)
     // [OPUS-4.8] sq-314.
     UngroundedDerivationAntecedent { step: usize, antecedent: usize },
+    /// A derivation step introduces or consumes an `owl:sameAs` fact
+    /// (sq-rsd3v.6): the `owl:sameAs` encoding stands in a predicate slot of an
+    /// antecedent or of the derived triple. The fixed-shape RDFS / OWL-RL-minus-
+    /// sameAs path re-checks rules by term-encoding equality, which is a term
+    /// IDENTITY test and is therefore the WRONG proxy under equality reasoning
+    /// (`owl:sameAs` quotients the term universe). Equality reasoning needs the
+    /// in-circuit union-find canonicalisation of the [`crate::sameas`] module,
+    /// which is a SEPARATE, not-yet-composable member — so such a step is
+    /// refused fail-closed rather than allowed to ride this path silently. See
+    /// [`crate::derivation::DerivationStep::mentions_equality_predicate`].
+    // [OPUS-5] sq-rsd3v.6 (#3265).
+    EqualityReasoningUnsupported { step: usize },
     /// [OPUS-4.8] sq-sfsi (hidden JOIN, step 4): a `JoinEdge` references a
     /// non-existent sub-proof index (`scan_a`/`scan_b`/`join_proof`) or a
     /// committed-graph index (`graph_a`/`graph_b`) outside the referenced scan's
@@ -2167,6 +2179,10 @@ impl std::fmt::Display for CheckError {
             CheckError::UngroundedDerivationAntecedent { step, antecedent } => write!(
                 f,
                 "derivation step {step} antecedent {antecedent} is ungrounded (sq-314: it is neither an earlier step's derived triple nor a disclosed scan row — a derived triple cannot rest on an antecedent the proof does not establish)"
+            ),
+            CheckError::EqualityReasoningUnsupported { step } => write!(
+                f,
+                "derivation step {step} introduces or consumes an owl:sameAs fact (sq-rsd3v.6: encoding-equality re-checks are the wrong proxy under equality reasoning — owl:sameAs needs the separate in-circuit canonicalisation member, so it is refused fail-closed here)"
             ),
             CheckError::JoinDanglingEdge { edge } => write!(
                 f,
@@ -4432,7 +4448,10 @@ fn status_ref_from_revocation(rev: &crate::manifest::RevocationStatus) -> Option
 
 /// Normalize a hex key for set membership: strip an optional `0x` prefix and
 /// lowercase, so K-membership is representation-insensitive.
-fn normalize_hex(h: &str) -> String {
+// [OPUS-5] sq-rsd3v.6: `pub(crate)` so `sameas`'s canon-table re-check
+// normalizes encodings through the SAME function `bind_entailment` grounds
+// derivation antecedents with (one source of truth, no drift).
+pub(crate) fn normalize_hex(h: &str) -> String {
     h.strip_prefix("0x").unwrap_or(h).to_ascii_lowercase()
 }
 
@@ -5466,18 +5485,22 @@ fn bind_entailment(
 
     // RDFS schema-vocabulary encodings (salt-independent IRIs). If any fails to
     // encode the whole check fails closed (it cannot happen for these constants).
+    // [OPUS-5] sq-rsd3v.6: `owl:sameAs` joins the list — not as a rule term, but
+    // so the equality guard below can recognise (and refuse) an equality fact.
     let (
         Some(rdf_type),
         Some(rdfs_subclassof),
         Some(rdfs_subpropertyof),
         Some(rdfs_domain),
         Some(rdfs_range),
+        Some(owl_sameas),
     ) = (
         encode_iri_hex("http://www.w3.org/1999/02/22-rdf-syntax-ns#type"),
         encode_iri_hex("http://www.w3.org/2000/01/rdf-schema#subClassOf"),
         encode_iri_hex("http://www.w3.org/2000/01/rdf-schema#subPropertyOf"),
         encode_iri_hex("http://www.w3.org/2000/01/rdf-schema#domain"),
         encode_iri_hex("http://www.w3.org/2000/01/rdf-schema#range"),
+        encode_iri_hex(crate::sameas::OWL_SAME_AS),
     ) else {
         return Err(CheckError::MalformedDerivationStep { step: 0 });
     };
@@ -5486,6 +5509,14 @@ fn bind_entailment(
     // EARLIER steps (forward chaining only — no cyclic self-grounding).
     let mut derived_so_far: BTreeSet<[String; 3]> = BTreeSet::new();
     for (si, step) in steps.iter().enumerate() {
+        // 4a-0. EQUALITY GUARD (sq-rsd3v.6): `owl:sameAs` must never ride the
+        // fixed-shape path. Checked BEFORE the shape check, because the shapes
+        // that matter here are shape-VALID (an `rdfs7` whose sub-property is
+        // `owl:sameAs` consumes an equality; one whose super-property is
+        // `owl:sameAs` introduces one), so shape alone would let them through.
+        if step.mentions_equality_predicate(&owl_sameas) {
+            return Err(CheckError::EqualityReasoningUnsupported { step: si });
+        }
         // 4a. Well-formed rule instance AND the regime admits the rule.
         if !regime_admits(regime, step.rule)
             || !step.is_well_formed(
