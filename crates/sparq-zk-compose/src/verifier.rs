@@ -710,6 +710,15 @@ pub struct RevocationPolicy {
     /// depth the prover used (the `revoke_unset_d{depth}` member).
     // [OPUS-4.8] sq-3e5 + sq-h2v: authoritative-root derivation depth.
     hidden_index_depth: Option<u32>,
+    /// [OPUS-5] sq-6qe: OPTIONAL Merkle depth for the ACCEPTED-SET commitment —
+    /// the relying party's `(list, version, status_list_root)` trust anchor moved
+    /// behind a single root, so a future fully-hidden revocation proof can hide
+    /// WHICH list/version it pertains to. `None` => the accepted-set anchor is not
+    /// derived. Setting it does NOT change any verification behaviour today: no
+    /// circuit member or manifest mode consumes the anchor yet, so the IRI +
+    /// version are still disclosed in the clear on the committed-index path.
+    // [OPUS-5] sq-6qe: accepted-set anchor derivation depth (host side only).
+    accepted_set_depth: Option<u32>,
 }
 
 impl RevocationPolicy {
@@ -724,6 +733,7 @@ impl RevocationPolicy {
             freshness_window,
             authoritative: std::collections::BTreeMap::new(),
             hidden_index_depth: None,
+            accepted_set_depth: None,
         }
     }
 
@@ -736,6 +746,7 @@ impl RevocationPolicy {
             freshness_window: 0,
             authoritative: std::collections::BTreeMap::new(),
             hidden_index_depth: None,
+            accepted_set_depth: None,
         }
     }
 
@@ -791,8 +802,99 @@ impl RevocationPolicy {
         self.hidden_index_depth
     }
 
-    /// The oldest version still considered fresh.
-    fn min_version(&self) -> u64 {
+    /// [OPUS-5] sq-6qe: derive the ACCEPTED-SET commitment (sub-option A of
+    /// `research/zk-statuslist-hide-iri-version.md` §3) at Merkle depth `depth`
+    /// (builder style) — the relying party's `(list, version, status_list_root)`
+    /// trust anchor folded into ONE root, so a future fully-hidden revocation
+    /// proof can show "some accepted `(list, version)` has my hidden index unset"
+    /// without disclosing which.
+    ///
+    /// # This does NOT change verification today (honest)
+    /// Setting this only makes [`Self::accepted_set_root`] derivable. There is no
+    /// compiled `revoke_hidden_ref_*` member, no fully-hidden manifest mode, and
+    /// no verifier gate that consumes the anchor, so the status-list IRI and
+    /// version are STILL disclosed in the clear on the committed-index path —
+    /// sq-6qe is OPEN. Not externally audited (sq-qhy4).
+    ///
+    /// `depth` must be wide enough for the freshness-curated accepted set
+    /// (`2^depth >= |entries|`), else [`Self::accepted_set_root`] is `None`
+    /// (fail-closed — never a truncated anchor). The accepted-set root also
+    /// requires [`Self::with_hidden_index_depth`], since each entry carries the
+    /// status-list Merkle root derived at THAT depth.
+    // [OPUS-5] sq-6qe: opt-in accepted-set anchor depth.
+    pub fn with_accepted_set_depth(mut self, depth: u32) -> Self {
+        self.accepted_set_depth = Some(depth);
+        self
+    }
+
+    /// [OPUS-5] sq-6qe: the relying party's accepted `(list, version,
+    /// status_list_root)` entries in CANONICAL leaf order, FRESHNESS-CURATED.
+    ///
+    /// Order is the sorted `(status_list, version)` order of the authoritative
+    /// snapshot map — the canonical order both the relying party (deriving the
+    /// anchor) and the prover (building its membership path) must commit, exactly
+    /// as [`KeySet::hidden_issuer_root`] fixes the key-set order.
+    ///
+    /// # Freshness curation is the soundness-relevant part
+    /// Only snapshots whose version is INSIDE the policy's freshness window
+    /// `[min_version, now]` become entries. Because the future circuit's liveness
+    /// statement is membership in this set, a STALE (or future-dated) version is
+    /// not a member at all and no proof can be built against it — the audit-#12
+    /// freshness gate survives the move behind the commitment. The in-circuit
+    /// `version >= min_version` comparison of the design record is then
+    /// defence-in-depth on top of membership, not the only freshness check.
+    ///
+    /// `None` if the hidden-index depth is unset (there is no depth at which to
+    /// derive each entry's status-list root) or any snapshot's root is
+    /// underivable at that depth — fail-closed, never a partial anchor.
+    // [OPUS-5] sq-6qe: canonical, freshness-curated accepted entries.
+    pub fn accepted_entries(&self) -> Option<Vec<crate::revocation::AcceptedStatusEntry>> {
+        let depth = self.hidden_index_depth?;
+        let mut entries = Vec::new();
+        for ((list, version), snapshot) in &self.authoritative {
+            if !self.is_fresh(*version) {
+                continue;
+            }
+            let root = crate::revocation::merkle_root(snapshot, depth)?;
+            entries.push(crate::revocation::AcceptedStatusEntry {
+                status_list: list.clone(),
+                version: *version,
+                status_list_root: root,
+            });
+        }
+        Some(entries)
+    }
+
+    /// [OPUS-5] sq-6qe: the AUTHORITATIVE accepted-set Merkle root over
+    /// [`Self::accepted_entries`] at the policy's accepted-set depth — the public
+    /// input a future fully-hidden revocation proof would be bound to, derived
+    /// from the relying party's OWN curated snapshots (never the prover's).
+    ///
+    /// `None` if [`Self::with_accepted_set_depth`] / [`Self::with_hidden_index_depth`]
+    /// were not set, or the curated set overflows the depth (fail-closed).
+    // [OPUS-5] sq-6qe: accepted-set trust anchor (host side only — no gate yet).
+    pub fn accepted_set_root(&self) -> Option<Fr> {
+        let set_depth = self.accepted_set_depth?;
+        crate::revocation::accepted_set_root(&self.accepted_entries()?, set_depth)
+    }
+
+    /// [OPUS-5] sq-6qe: the 0-based slot of `(list, version)` in the canonical
+    /// accepted-set leaf order — the index a prover proves membership at (private
+    /// in-circuit; the verifier never needs it). `None` if the pair is not a
+    /// freshness-curated member. Mirrors [`KeySet::member_index`].
+    // [OPUS-5] sq-6qe: prover-side convenience.
+    pub fn accepted_member_index(&self, list: &str, version: u64) -> Option<usize> {
+        self.accepted_entries()?
+            .iter()
+            .position(|e| e.status_list == list && e.version == version)
+    }
+
+    /// The oldest version still considered fresh — the policy's epoch FLOOR.
+    ///
+    /// [OPUS-5] sq-6qe: this is also the public `min_version` input of the
+    /// designed fully-hidden revocation member. It discloses only the relying
+    /// party's own policy floor, not the credential's epoch.
+    pub fn min_version(&self) -> u64 {
         self.now.saturating_sub(self.freshness_window)
     }
 
@@ -2951,6 +3053,15 @@ fn resolve_status_ref(
 /// disclosed in the clear (both issuer-bound); only the index + liveness bit are
 /// hidden on the committed path. Closing the IRI/version leak is sq-6qe (a new
 /// committed-reference circuit + sig path; see `research/zk-statuslist-hide-iri-version.md`).
+/// [OPUS-5] sq-6qe progress — the leak is NOT yet closed: the HOST-side trust
+/// anchor has landed ([`RevocationPolicy::accepted_set_root`] over
+/// [`crate::revocation::AcceptedStatusEntry`], plus [`RevocationPolicy::min_version`]
+/// as the designed public epoch floor), so a relying party can derive the
+/// accepted-`(list, version, status_list_root)` commitment the design's
+/// fully-hidden member is bound to. But there is NO compiled `revoke_hidden_ref_*`
+/// circuit member, NO fully-hidden `RevocationStatus` mode, and NO verifier gate
+/// consuming that anchor, so THIS function's disclosure is unchanged: `rev.status_list`
+/// and `rev.version` are read in the clear below on every path.
 /// [OPUS-4.8] sq-hwe: the host Merkle builder is now SPARSE
 /// ([`crate::revocation::merkle_root`]) — `O(set-bits * depth)`, independent of
 /// `2^depth` — so it no longer bounds the list size; the remaining size bound is
@@ -7822,6 +7933,146 @@ mod tests {
                 Err(CheckError::UnattestedCommitment { proof: 0, .. })
             ),
             "an unattested flat scan must be refused identically in both feature states"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // [OPUS-5] sq-6qe: the ACCEPTED-SET trust anchor (host side).
+    // ---------------------------------------------------------------
+
+    fn status_snapshot(list: &str, version: u64, bits: Vec<u8>) -> StatusListSnapshot {
+        StatusListSnapshot { status_list: list.to_string(), version, bits }
+    }
+
+    /// A policy accepting versions 8..=10 with three attached snapshots — one
+    /// STALE (v7), two FRESH (v9, v10) — at hidden-index depth 4 and accepted-set
+    /// depth 3.
+    fn accepted_set_policy() -> RevocationPolicy {
+        RevocationPolicy::up_to(10, 2)
+            .with_snapshots([
+                status_snapshot("http://ex/a", 7, vec![0u8, 0]),
+                status_snapshot("http://ex/a", 9, vec![0u8, 0]),
+                status_snapshot("http://ex/b", 10, vec![0b0000_0100u8, 0]),
+            ])
+            .with_hidden_index_depth(4)
+            .with_accepted_set_depth(3)
+    }
+
+    // [OPUS-5] sq-6qe: the SOUNDNESS-relevant property of the accepted set — it is
+    // FRESHNESS-CURATED. Because the designed fully-hidden statement is membership
+    // in this set, a stale (or future-dated) version must not be a member at all,
+    // or moving the audit-#12 freshness gate behind the commitment would silently
+    // drop it. Also pins the CANONICAL leaf order (sorted by (list, version)) that
+    // the relying party and the prover must both commit.
+    #[test]
+    fn accepted_entries_are_freshness_curated_and_canonically_ordered() {
+        let policy = accepted_set_policy();
+        let entries = policy.accepted_entries().expect("entries derivable");
+        let names: Vec<(String, u64)> = entries
+            .iter()
+            .map(|e| (e.status_list.clone(), e.version))
+            .collect();
+        assert_eq!(
+            names,
+            vec![("http://ex/a".to_string(), 9), ("http://ex/b".to_string(), 10)],
+            "stale v7 excluded; the rest in sorted (list, version) order"
+        );
+        assert_eq!(policy.min_version(), 8, "now=10, window=2");
+        assert_eq!(policy.accepted_member_index("http://ex/a", 9), Some(0));
+        assert_eq!(policy.accepted_member_index("http://ex/b", 10), Some(1));
+        assert_eq!(
+            policy.accepted_member_index("http://ex/a", 7),
+            None,
+            "a stale (list, version) is not a member — no proof can be built for it"
+        );
+
+        // A FUTURE-dated snapshot (beyond `now`) is likewise excluded.
+        let with_future = accepted_set_policy()
+            .with_snapshot(status_snapshot("http://ex/c", 11, vec![0u8, 0]));
+        assert_eq!(
+            with_future.accepted_member_index("http://ex/c", 11),
+            None,
+            "a future-dated version is outside [min_version, now] and not accepted"
+        );
+        assert_eq!(
+            with_future.accepted_set_root(),
+            accepted_set_policy().accepted_set_root(),
+            "an out-of-window snapshot must not move the anchor"
+        );
+    }
+
+    // [OPUS-5] sq-6qe: the anchor is derived from the relying party's OWN
+    // authoritative bitstrings — each entry's `status_list_root` is exactly
+    // `revocation::merkle_root` of its snapshot at the hidden-index depth, and the
+    // policy root is the accepted-set fold over those entries. So a change to the
+    // authoritative bits (a newly REVOKED credential) moves the anchor, which is
+    // what keeps the future in-circuit bit-unset fold bound to real liveness data.
+    #[test]
+    fn accepted_set_root_folds_the_policys_own_authoritative_roots() {
+        let policy = accepted_set_policy();
+        let entries = policy.accepted_entries().unwrap();
+        assert_eq!(
+            entries[0].status_list_root,
+            crate::revocation::merkle_root(&status_snapshot("http://ex/a", 9, vec![0u8, 0]), 4)
+                .unwrap(),
+            "entry root is merkle_root of the RP's own snapshot at hidden_index_depth"
+        );
+        assert_eq!(
+            policy.accepted_set_root(),
+            crate::revocation::accepted_set_root(&entries, 3),
+            "the policy anchor is the accepted-set fold over those entries"
+        );
+
+        // Revoking a bit in an authoritative snapshot changes that entry's root and
+        // therefore the whole anchor.
+        let revoked = RevocationPolicy::up_to(10, 2)
+            .with_snapshots([
+                status_snapshot("http://ex/a", 9, vec![0b0000_0001u8, 0]),
+                status_snapshot("http://ex/b", 10, vec![0b0000_0100u8, 0]),
+            ])
+            .with_hidden_index_depth(4)
+            .with_accepted_set_depth(3);
+        assert_ne!(
+            revoked.accepted_set_root(),
+            policy.accepted_set_root(),
+            "a revoked authoritative bit must move the accepted-set anchor"
+        );
+    }
+
+    // [OPUS-5] sq-6qe: fail-closed derivation. Without an opted-in accepted-set
+    // depth, or without the hidden-index depth each entry's status-list root is
+    // derived at, or when the curated set overflows the tree, the anchor is `None`
+    // — never a partial or truncated trust anchor.
+    #[test]
+    fn accepted_set_root_is_fail_closed_when_underspecified_or_overflowing() {
+        let base = RevocationPolicy::up_to(10, 2).with_snapshots([
+            status_snapshot("http://ex/a", 9, vec![0u8, 0]),
+            status_snapshot("http://ex/b", 10, vec![0u8, 0]),
+        ]);
+        assert_eq!(
+            base.clone().with_hidden_index_depth(4).accepted_set_root(),
+            None,
+            "no accepted-set depth opted in => no anchor"
+        );
+        assert_eq!(
+            base.clone().with_accepted_set_depth(3).accepted_set_root(),
+            None,
+            "no hidden-index depth => entry roots are underivable => no anchor"
+        );
+        assert_eq!(
+            base.clone()
+                .with_hidden_index_depth(4)
+                .with_accepted_set_depth(0)
+                .accepted_set_root(),
+            None,
+            "2 curated entries do not fit a 2^0 tree => fail closed, not truncated"
+        );
+        assert!(
+            base.with_hidden_index_depth(4)
+                .with_accepted_set_depth(1)
+                .accepted_set_root()
+                .is_some(),
+            "2 curated entries fit a 2^1 tree"
         );
     }
 }

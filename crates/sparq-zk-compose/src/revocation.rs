@@ -45,18 +45,33 @@
 //! unchanged — only the host-side construction is cheaper. Cross-checked against
 //! the dense oracle in the unit tests.
 //!
+//! # The sq-6qe ACCEPTED-SET anchor (host-side only — the leak is NOT yet closed)
+//! [OPUS-5] sq-6qe: [`AcceptedStatusEntry`] / [`accepted_set_leaf`] /
+//! [`accepted_set_root`] / [`accepted_set_witness`] are the host mirror of the
+//! sub-option-A accepted-set commitment in
+//! `research/zk-statuslist-hide-iri-version.md` §3 — the relying party commits
+//! every `(list, version, status_list_root)` triple it currently trusts to ONE
+//! Merkle root, so a future fully-hidden circuit can prove "some accepted
+//! `(list, version)` has my hidden index unset" without the verifier learning
+//! WHICH list/version. This module ships the ANCHOR DERIVATION and the prover's
+//! membership path ONLY. There is no compiled `revoke_hidden_ref_*` member, no
+//! manifest mode, and no verifier gate that consumes it, so **the status-list IRI
+//! and version are still disclosed in the clear on the committed-index path** —
+//! sq-6qe remains OPEN. Nothing here is externally audited (sq-qhy4).
+//!
 //! # Residual scope (honest)
 //! Only the `revoke_unset_d10` circuit member is currently COMPILED, so although
 //! the host builder now scales, an end-to-end hidden-revocation PROOF is still
 //! bounded by the compiled member's depth (compiling a larger member —
 //! `revoke_unset_d17` etc. — is mechanical: the relation is depth-generic; tracked
 //! as follow-up). And the status-list IRI + version are still disclosed in the
-//! clear on the committed-index path (sq-6qe). See the crate verifier docs
+//! clear on the committed-index path (sq-6qe, above). See the crate verifier docs
 //! (`bind_hidden_revocation`).
 
 use crate::manifest::StatusListSnapshot;
 use sparq_zk::field::{field_to_hex, Fr};
 use sparq_zk::poseidon2;
+use sparq_zk::sig;
 
 /// The Poseidon2 two-input compression used for Merkle internal nodes — the Rust
 /// mirror of the circuit's `h2(a, b) = Poseidon2::hash([a, b], 2)`. Cross-tested
@@ -323,6 +338,131 @@ pub fn revoke_prover_toml(
     s
 }
 
+// =====================================================================
+// [OPUS-5] sq-6qe: the ACCEPTED-SET commitment (host side).
+//
+// The relying party's set of `(status list IRI, version, status-list Merkle root)`
+// triples it currently trusts, committed as ONE Poseidon2 Merkle root. This is the
+// trust anchor of `research/zk-statuslist-hide-iri-version.md` §3 sub-option A:
+// the FUTURE `revoke_hidden_ref_d{D}_a{A}` member proves, in zero knowledge, that
+// the credential's HIDDEN `(list, version)` is a member of this set — which also
+// PRIVATELY binds the `status_list_root` the bit-unset fold then runs against — so
+// the relying party publishes only the SET root and never learns which list,
+// version, or root the presentation pertains to.
+//
+// SCOPE (honest): anchor derivation + the prover's membership path ONLY. No
+// circuit member, manifest mode, or verifier gate consumes this yet, so the
+// IRI/version disclosure on the committed-index path is UNCHANGED. Not externally
+// audited (sq-qhy4).
+// =====================================================================
+
+/// [OPUS-5] sq-6qe: one entry of the relying party's ACCEPTED SET — a
+/// `(status list IRI, version, status-list Merkle root)` triple it trusts.
+///
+/// The relying party builds these from its OWN authoritative, freshness-curated
+/// snapshots (`RevocationPolicy::accepted_entries`), so the accepted set moves the
+/// audit-#12 trust anchor BEHIND a commitment without introducing a new trust
+/// assumption: the roots are still the relying party's own, derived from
+/// [`merkle_root`] over bitstrings it resolved and authenticated out of band.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedStatusEntry {
+    /// The status-list IRI (hashed to a field via
+    /// [`sparq_zk::sig::status_list_id_to_field`] for the leaf).
+    pub status_list: String,
+    /// The status list's publication version (the audit-#12 freshness counter).
+    pub version: u64,
+    /// The depth-`hidden_index_depth` Poseidon2 Merkle root of that
+    /// `(list, version)`'s AUTHORITATIVE bitstring — i.e. [`merkle_root`] of the
+    /// relying party's own snapshot. The future circuit folds the bit-unset
+    /// inclusion against THIS root, kept private.
+    pub status_list_root: Fr,
+}
+
+/// [OPUS-5] sq-6qe: the accepted-set Merkle LEAF for one entry —
+/// [`sparq_zk::sig::accepted_status_leaf`] over the field-mapped IRI. The host and
+/// the future in-circuit leaf recompute the SAME hash from the same three inputs,
+/// so there is one source of truth and no host/circuit drift.
+///
+/// Binding all three in one leaf is load-bearing: because the leaf commits the
+/// triple ATOMICALLY, a prover cannot pair list₁'s identity with list₂'s root —
+/// the membership fold would not reproduce the public accepted-set root.
+pub fn accepted_set_leaf(entry: &AcceptedStatusEntry) -> Fr {
+    sig::accepted_status_leaf(
+        &sig::status_list_id_to_field(&entry.status_list),
+        entry.version,
+        &entry.status_list_root,
+    )
+}
+
+/// The padding leaf for unoccupied accepted-set slots — `Fr::from(0)`, the SAME
+/// padding [`crate::issuer`]'s key-set tree uses, so the shared sparse fold
+/// (`sparse_root_from_leaves`) produces a tree bit-identical to the one the
+/// generalised `key_set_membership` relation folds.
+///
+/// A padding slot is not a usable membership witness: the circuit recomputes the
+/// leaf as [`sparq_zk::sig::accepted_status_leaf`] of the private triple, and a
+/// Poseidon2 output equal to `0` is negligible-probability, so a prover cannot
+/// "prove membership" at an empty slot.
+fn accepted_padding_leaf() -> Fr {
+    Fr::from(0u64)
+}
+
+/// The non-padding accepted-set leaves in the caller's order. `None` if
+/// `set_depth > 31` or the set overflows a depth-`set_depth` tree (fail-closed —
+/// a relying party whose accepted set does not fit must widen `set_depth`, never
+/// silently truncate its trust anchor).
+fn accepted_leaves(entries: &[AcceptedStatusEntry], set_depth: u32) -> Option<Vec<Fr>> {
+    if set_depth > 31 || entries.len() as u128 > (1u128 << set_depth) {
+        return None;
+    }
+    Some(entries.iter().map(accepted_set_leaf).collect())
+}
+
+/// [OPUS-5] sq-6qe: the ACCEPTED-SET Merkle root over `entries` at depth
+/// `set_depth` — the relying party's committed liveness policy, and the public
+/// input the future fully-hidden revocation proof is bound to.
+///
+/// `entries` MUST be in the CANONICAL leaf order both sides agree on: sorted by
+/// `(status_list, version)`, which is exactly what
+/// `RevocationPolicy::accepted_entries` emits (its `BTreeMap` iteration order).
+/// The relying party derives the anchor from its own entries; the prover builds
+/// its membership path over the same order, so the roots agree — the same
+/// canonical-order discipline `KeySet::hidden_issuer_root` uses.
+///
+/// Uses the shared SPARSE fold, so the cost is `O(n·set_depth)` in the number of
+/// accepted `(list, version)` pairs, never `O(2^set_depth)`. `None` if
+/// `set_depth > 31` or the set overflows the tree (fail-closed — a relying party
+/// whose accepted set does not fit must widen `set_depth`, never silently
+/// truncate its trust anchor).
+pub fn accepted_set_root(entries: &[AcceptedStatusEntry], set_depth: u32) -> Option<Fr> {
+    crate::issuer::sparse_root_from_leaves(
+        accepted_leaves(entries, set_depth)?,
+        set_depth,
+        accepted_padding_leaf(),
+    )
+}
+
+/// [OPUS-5] sq-6qe: the PROVER's accepted-set membership path for `index` — the
+/// sibling at each level, BOTTOM-UP (level 0 = leaves), length `set_depth`. Folds
+/// to [`accepted_set_root`] under the circuit's fold, so it is the private witness
+/// the future member consumes alongside the private `(list_id, version,
+/// status_list_root)` triple.
+///
+/// `None` if `index >= 2^set_depth`, `set_depth > 31`, or the set overflows the
+/// tree. The verifier never needs this — the index stays private.
+pub fn accepted_set_witness(
+    entries: &[AcceptedStatusEntry],
+    set_depth: u32,
+    index: u64,
+) -> Option<Vec<Fr>> {
+    crate::issuer::sparse_witness_from_leaves(
+        accepted_leaves(entries, set_depth)?,
+        set_depth,
+        index,
+        accepted_padding_leaf(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,5 +649,143 @@ mod tests {
         let s = snap(vec![0u8]);
         assert_eq!(merkle_root(&s, 32), None);
         assert_eq!(merkle_witness(&s, 32, 0), None);
+    }
+
+    // ---------------------------------------------------------------
+    // [OPUS-5] sq-6qe: accepted-set commitment (host anchor).
+    // ---------------------------------------------------------------
+
+    fn entry(list: &str, version: u64, root: u64) -> AcceptedStatusEntry {
+        AcceptedStatusEntry {
+            status_list: list.to_string(),
+            version,
+            status_list_root: Fr::from(root),
+        }
+    }
+
+    // Canonical three-entry set used by the fold/binding tests.
+    fn entries() -> Vec<AcceptedStatusEntry> {
+        vec![
+            entry("http://ex/a", 7, 0x1111),
+            entry("http://ex/a", 8, 0x2222),
+            entry("http://ex/b", 7, 0x3333),
+        ]
+    }
+
+    // [OPUS-5] sq-6qe: the host leaf IS `sig::accepted_status_leaf` over the
+    // field-mapped IRI — one source of truth with the future in-circuit leaf. If
+    // this drifts, a host-built anchor and a circuit-built path would disagree and
+    // every proof would (silently) fail to verify.
+    #[test]
+    fn accepted_set_leaf_is_the_sig_primitive() {
+        let e = entry("http://ex/status", 42, 0xabcd);
+        assert_eq!(
+            accepted_set_leaf(&e),
+            sig::accepted_status_leaf(
+                &sig::status_list_id_to_field("http://ex/status"),
+                42,
+                &Fr::from(0xabcdu64)
+            )
+        );
+    }
+
+    // [OPUS-5] sq-6qe: the LOAD-BEARING invariant — the prover's membership path
+    // for every occupied slot re-folds (under the circuit's bottom-up fold, with
+    // directions from the index bits) to the published accepted-set root. This is
+    // what makes the anchor usable as a public input at all.
+    #[test]
+    fn accepted_set_witness_refolds_to_root() {
+        let es = entries();
+        for set_depth in [2u32, 3, 6] {
+            let root = accepted_set_root(&es, set_depth).expect("root");
+            for (i, e) in es.iter().enumerate() {
+                let sibs = accepted_set_witness(&es, set_depth, i as u64).expect("witness");
+                assert_eq!(sibs.len(), set_depth as usize);
+                let mut node = accepted_set_leaf(e);
+                let mut pos = i as u64;
+                for sib in &sibs {
+                    node = if pos & 1 == 1 { h2(*sib, node) } else { h2(node, *sib) };
+                    pos >>= 1;
+                }
+                assert_eq!(node, root, "fold for entry {i} at depth {set_depth}");
+            }
+        }
+    }
+
+    // [OPUS-5] sq-6qe: the atomic triple binding, observed at the SET level. A
+    // prover that pairs list a's identity with list b's root — the exact
+    // substitution the single-leaf construction exists to prevent — changes the
+    // root, so it cannot reproduce the relying party's public anchor. Also pins
+    // that each of the three components independently binds.
+    #[test]
+    fn accepted_set_root_binds_list_version_and_root_atomically() {
+        let depth = 3;
+        let base = accepted_set_root(&entries(), depth).expect("root");
+
+        // Swap the two lists' roots (identity a with root of b, and vice versa).
+        let mut swapped = entries();
+        let a_root = swapped[0].status_list_root;
+        swapped[0].status_list_root = swapped[2].status_list_root;
+        swapped[2].status_list_root = a_root;
+        assert_ne!(
+            accepted_set_root(&swapped, depth),
+            Some(base),
+            "cross-paired (list, root) must not reproduce the anchor"
+        );
+
+        // Each component alone binds.
+        let mut other_list = entries();
+        other_list[0].status_list = "http://ex/c".to_string();
+        assert_ne!(accepted_set_root(&other_list, depth), Some(base), "IRI binds");
+
+        let mut other_version = entries();
+        other_version[0].version = 9;
+        assert_ne!(accepted_set_root(&other_version, depth), Some(base), "version binds");
+
+        let mut other_root = entries();
+        other_root[0].status_list_root = Fr::from(0x9999u64);
+        assert_ne!(accepted_set_root(&other_root, depth), Some(base), "root binds");
+    }
+
+    // [OPUS-5] sq-6qe: the canonical LEAF ORDER is load-bearing — the relying
+    // party and the prover must commit the same order or the roots disagree.
+    // Reordering the same entries yields a different anchor, which is why
+    // `RevocationPolicy::accepted_entries` emits the sorted `BTreeMap` order.
+    #[test]
+    fn accepted_set_root_depends_on_leaf_order() {
+        let depth = 3;
+        let base = accepted_set_root(&entries(), depth).expect("root");
+        let mut reordered = entries();
+        reordered.swap(0, 2);
+        assert_ne!(accepted_set_root(&reordered, depth), Some(base));
+    }
+
+    // [OPUS-5] sq-6qe: fail-closed sizing. An accepted set that does not fit the
+    // depth yields `None` rather than a silently truncated trust anchor, and an
+    // implausible depth is refused. An out-of-range witness index is `None` too.
+    #[test]
+    fn accepted_set_is_fail_closed_on_overflow_and_bad_depth() {
+        let es = entries(); // 3 entries
+        assert_eq!(accepted_set_root(&es, 1), None, "3 entries do not fit 2^1");
+        assert!(accepted_set_root(&es, 2).is_some(), "3 entries fit 2^2");
+        assert_eq!(accepted_set_root(&es, 32), None, "implausible depth refused");
+        assert_eq!(accepted_set_witness(&es, 32, 0), None);
+        assert_eq!(accepted_set_witness(&es, 2, 4), None, "index 4 is out of a 2^2 tree");
+    }
+
+    // [OPUS-5] sq-6qe: an EMPTY accepted set still commits (to the all-padding
+    // root) — it is a well-formed anchor that no membership proof can satisfy, so
+    // a relying party with no curated snapshots is fail-closed rather than
+    // undefined.
+    #[test]
+    fn empty_accepted_set_commits_to_the_padding_root() {
+        let depth = 3;
+        let empty = accepted_set_root(&[], depth).expect("empty set still commits");
+        let mut node = accepted_padding_leaf();
+        for _ in 0..depth {
+            node = h2(node, node);
+        }
+        assert_eq!(empty, node);
+        assert_ne!(accepted_set_root(&entries(), depth), Some(empty));
     }
 }

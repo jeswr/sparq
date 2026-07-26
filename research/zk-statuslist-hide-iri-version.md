@@ -1,8 +1,10 @@
 # Hiding the status-list IRI + version on the committed-index revocation path (sq-6qe)
 
-Status: **design for review — the cryptographic PRIMITIVES are implemented in
-`sparq-zk::sig` (see §6); the circuit + verifier + manifest path is DEFERRED to a
-follow-up bead.** Author: SPARQ agent (Claude Opus 4.8 — Fable unavailable, tag
+Status: **design for review — the cryptographic PRIMITIVES (`sparq-zk::sig`) and
+the HOST-SIDE accepted-set anchor (`sparq-zk-compose::revocation` +
+`RevocationPolicy`) are implemented (see §6); the CIRCUIT + manifest mode +
+verifier gate are still DEFERRED, so the IRI/version leak this record describes is
+STILL OPEN.** Author: SPARQ agent (Claude Opus 4.8 — Fable unavailable, tag
 for re-review). Inputs: the existing committed-index revocation estate
 (`zk/compose/compose_core/src/revoke.nr`, `…/issuer.nr`,
 `crates/sparq-zk-compose/src/{revocation.rs,verifier.rs,manifest.rs}`,
@@ -13,7 +15,8 @@ Companion: `research/zk-soundness-audit.md`, `research/zkp-query-proofs-plan.md`
 [OPUS-4.8] This record describes work that is PROVISIONAL — graduate it into an
 architecture note (or fold into the crate README / SKILL) once the circuit lands,
 per the AGENTS.md "research records become architecture docs" rule. It must not be
-read as describing shipped code: only §6's `sparq-zk::sig` primitives exist today.
+read as describing shipped code: only §6's landed increments exist today (the
+`sparq-zk::sig` primitives and the host-side accepted-set anchor). [OPUS-5]
 
 ## 1. The gap
 
@@ -156,7 +159,9 @@ by `bench/zk-compose/scripts/gate_counts.sh`. A new member MUST get a baseline o
 (`noir-optimisation` §2.4): measure deltas against the existing revocation member,
 not the raw floor of an isolated small circuit.
 
-## 6. What is implemented now (the tractable increment)
+## 6. What is implemented now (the tractable increments)
+
+### 6a. The `sparq-zk::sig` primitives
 
 The cryptographic PRIMITIVES the deferred circuit + verifier will consume are
 landed in `crates/sparq-zk/src/sig.rs`, domain-separated and unit-tested
@@ -179,22 +184,57 @@ member will recompute in-circuit (single source of truth), so the in-circuit
 opening/membership will byte-match the host without drift — the same discipline
 the existing `status_index_commitment` cross-vector test pins.
 
-## 7. Deferred (the follow-up bead)
+### 6b. [OPUS-5] The host-side ACCEPTED-SET anchor (`sparq-zk-compose`)
+
+The §3 sub-option-A trust anchor and the prover's membership path are landed in
+`crates/sparq-zk-compose/src/revocation.rs` + `verifier.rs`, unit-tested:
+
+- `revocation::{AcceptedStatusEntry, accepted_set_leaf, accepted_set_root,
+  accepted_set_witness}` — the accepted-set Merkle tree over
+  `sig::accepted_status_leaf(list_id, version, status_list_root)` leaves, built on
+  the SHARED sparse fold (`issuer::sparse_root_from_leaves` /
+  `sparse_witness_from_leaves`, `Fr::from(0)` padding), so it is bit-identical to
+  the tree the generalised `key_set_membership` relation folds and costs
+  `O(n·set_depth)` rather than `O(2^set_depth)`.
+- `RevocationPolicy::{with_accepted_set_depth, accepted_entries, accepted_set_root,
+  accepted_member_index, min_version}` — the relying party derives the anchor from
+  its OWN authoritative snapshots, FRESHNESS-CURATED (only versions inside
+  `[min_version, now]` become leaves) and in the canonical sorted
+  `(status_list, version)` order both sides must commit. `min_version` is now
+  public: it is the designed public epoch-FLOOR input of §3(c).
+
+Because membership is restricted to the curated window, the audit-#12 freshness
+gate SURVIVES the move behind the commitment: a stale or future-dated version is
+not a member, so no proof can be built against it. The in-circuit
+`version >= min_version` of §3(c) is then defence-in-depth, not the only check.
+
+**What this does NOT do (honest):** there is no compiled `revoke_hidden_ref_*`
+member, no fully-hidden `RevocationStatus` mode, and no verifier gate that
+consumes the anchor. `verifier::bind_revocation` still reads
+`rev.status_list` / `rev.version` in the clear on every path, so the sq-6qe
+disclosure gap is UNCHANGED and the bead stays OPEN. Nothing here is externally
+audited (sq-qhy4).
+
+## 7. Deferred (the follow-up beads)
 
 1. The Noir member `revoke_hidden_ref_d{D}_a{A}` (relations (a)–(d) of §3),
-   cross-vector-tested against the §6 host primitives (poseidon2_noir_cross style).
-2. A new `CircuitId` variant + `derive_*` id, `Prover.toml` renderer, and host
-   witness builder (the accepted-set membership witness — reuse the sparse-Merkle
-   `merkle_witness` machinery for both trees).
+   cross-vector-tested against the §6a host primitives + the §6b accepted-set
+   leaf/fold (poseidon2_noir_cross style), plus a `gate_count_snapshot.json`
+   baseline (§5).
+2. A new `CircuitId` variant + `derive_*` id and a `Prover.toml` renderer. The
+   host witness builders are DONE (§6b `accepted_set_witness` for the accepted-set
+   tree, `merkle_witness` for the status-list tree); only the renderer, which needs
+   the member's input names, is outstanding.
 3. Manifest: a fully-hidden `RevocationStatus` mode (`status_list` / `version` /
    `index` all `None`, carrying `ref_commitment` + `index_commitment`) and a
    `HiddenIndexRevocation` carrying `accepted_set_root` + `min_version`.
-4. Verifier: a `bind_fully_hidden_revocation` gate that derives the accepted-set
-   root from `RevocationPolicy`'s curated snapshots, supplies it + `min_version` as
-   public inputs, and `bb verify`s — never trusting the prover's declared root.
-   Plus the issuer-side `status_ref_fully_committed_digest` attestation path in
+4. Verifier: a `bind_fully_hidden_revocation` gate that supplies
+   `RevocationPolicy::accepted_set_root()` + `min_version()` (§6b) as public inputs
+   and `bb verify`s — never trusting the prover's declared root. Plus the
+   issuer-side `status_ref_fully_committed_digest` attestation path in
    `bind_issuer_attestations` / `resolve_status_ref`.
-5. `RevocationPolicy::accepted_set(...)` + a `with_min_version` builder, and the
-   re-blinding requirement (§4) enforced/documented in the holder flow.
-6. SKILL.md (`skills/zk-query-proofs`): document the fully-hidden mode once it is
-   end-to-end usable.
+5. The re-blinding requirement (§4) enforced/documented in the holder flow — the
+   single most important operational requirement, and NOT yet addressed anywhere.
+6. SKILL.md (`skills/zk-query-proofs`): document the fully-hidden MODE once it is
+   end-to-end usable. (The §6b host anchor is already listed there, explicitly
+   flagged as anchor-only with the leak still open.)

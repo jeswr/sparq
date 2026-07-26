@@ -72,6 +72,15 @@ pub use verifier::{dispatch_fragment, verify_fragment_manifest, FragmentDispatch
 pub use verifier::EntailmentPolicy;
 // [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation host helpers.
 pub use revocation::{merkle_root, merkle_witness, revoke_prover_toml, MerkleWitness};
+// [OPUS-5] sq-6qe: the ACCEPTED-SET commitment host helpers — the relying party's
+// `(list, version, status_list_root)` trust anchor behind one Merkle root, so a
+// FUTURE fully-hidden revocation member can hide which list/version a presentation
+// pertains to. Anchor + prover path ONLY: no circuit member, manifest mode, or
+// verifier gate consumes it yet, so the IRI + version are STILL disclosed on the
+// committed-index path (sq-6qe remains OPEN). Not externally audited (sq-qhy4).
+pub use revocation::{
+    accepted_set_leaf, accepted_set_root, accepted_set_witness, AcceptedStatusEntry,
+};
 // [OPUS-4.8] sq-z9l: hidden-issuer-attestation host helpers (in-circuit
 // Schnorr-over-BabyJubJub + hidden-key set membership).
 // [OPUS-4.8] sq-8k3h: `*_sparse` are the `O(n·depth)` builders for a very large
