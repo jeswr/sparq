@@ -13,6 +13,11 @@ fails loud unless the case carries an explicit `PERMANENT` disposition whose
 pinned symmetric difference matches exactly (`*.disposition` ledger, per the
 sq-pbz04.1 audit precedent).
 
+Corpus constraints are enforced, not conventional: a case document with a blank
+node, or with an assertion at an `rdf:`/`rdfs:`/`xsd:`/`owl:` subject (which
+normalization drops from both sides, masking any real divergence there), is
+rejected rather than run.
+
 Everything is behind the `rl-oracle` feature (default build is an empty lib):
 
 ```sh

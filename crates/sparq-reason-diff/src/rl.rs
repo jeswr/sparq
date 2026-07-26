@@ -27,7 +27,9 @@
 //!    ~100 triples emitted even for an empty input under
 //!    `axiomatic_triples=False`). Dropped from both sides. COROLLARY: the corpus
 //!    must not place user data at W3C-vocabulary subjects — a real divergence
-//!    there would be masked (see `bench/reason-diff/rl/capture.py`).
+//!    there would be masked. This is NOT a convention: it is ENFORCED fail-loud by
+//!    [`lint_no_w3c_vocab_subjects`], which every case runs through on the way in
+//!    (see also `bench/reason-diff/rl/capture.py`).
 //!
 //! Everything else — including entailments ABOUT user terms via W3C-vocabulary
 //! predicates/objects (e.g. `ex:C rdfs:subClassOf ex:D`) — is compared verbatim.
@@ -37,6 +39,11 @@
 //! * **No blank nodes.** Canonical multiset comparison across two tool stacks has
 //!   no stable bnode labels; [`canonical_lines`] errors on any bnode rather than
 //!   guessing an alignment. RDF lists / restrictions in the corpus use NAMED nodes.
+//! * **No user data at W3C-vocabulary subjects.** [`normalize`] drops every triple
+//!   whose subject is in the `rdf:`/`rdfs:`/`xsd:`/`owl:` namespaces, so an assertion
+//!   made THERE — and every entailment either side draws at that subject — would be
+//!   invisible to the differ. [`lint_no_w3c_vocab_subjects`] rejects such an input
+//!   document rather than letting a corpus edit silently mask a real RL divergence.
 //! * Literals stay in canonical lexical form (sparq's dictionary inlines small
 //!   integers and re-renders them canonically, so `"01"^^xsd:integer` would
 //!   round-trip as `"1"^^xsd:integer` and produce a spurious diff).
@@ -92,6 +99,51 @@ pub fn normalize(lines: &[String]) -> Vec<String> {
 
 fn is_w3c_vocab_subject(line: &str) -> bool {
     W3C_VOCAB_PREFIXES.iter().any(|p| line.starts_with(p))
+}
+
+/// [SONNET-4.6] sq-ovl6f — fail-loud enforcement of the corpus invariant that
+/// [`normalize`]'s W3C-vocabulary-subject rule silently depends on: **no corpus INPUT
+/// document may assert a triple at an `rdf:`/`rdfs:`/`xsd:`/`owl:` subject**.
+///
+/// Such a triple, and every entailment either side draws AT that subject, is dropped
+/// by [`normalize`] on both sides — so a real RL divergence there would be masked and
+/// the harness would report a green MATCH it did not earn. Rejecting the document is
+/// the only honest option: the normalization cannot be selectively disabled for one
+/// subject without also un-dropping owlrl's ~100-triple vocabulary self-description
+/// block, which is precisely what the rule exists to remove.
+///
+/// Applied to the PARSED INPUT only, never to a closure: the oracle's (and sparq's)
+/// own vocabulary self-description legitimately populates those subjects in the
+/// closure — that being the whole reason [`normalize`] drops them.
+///
+/// The offending-subject test is the SAME `is_w3c_vocab_subject` predicate
+/// [`normalize`] filters on, applied to the same canonical rendering, so the lint
+/// pins exactly the set of triples that would be masked — no second, driftable copy
+/// of the namespace rule.
+pub fn lint_no_w3c_vocab_subjects(dict: &Dict, triples: &[[Id; 3]]) -> Result<(), String> {
+    let mut offenders: Vec<String> = triples
+        .iter()
+        .map(|&[s, p, o]| format!("{} {} {} .", dict.term(s), dict.term(p), dict.term(o)))
+        .filter(|line| is_w3c_vocab_subject(line))
+        .collect();
+    if offenders.is_empty() {
+        return Ok(());
+    }
+    // Sorted for a deterministic report; NOT deduped — the count stays a faithful
+    // multiset count of the assertions that would be masked.
+    offenders.sort_unstable();
+    Err(format!(
+        "corpus document asserts {} triple(s) at a W3C-vocabulary subject:\n{}\
+         the reason-diff normalization DROPS every W3C-vocab-subject triple from both \
+         sides, so a real RL divergence at these subjects would be masked and the case \
+         would pass vacuously. Re-express the case over user-namespace subjects (a \
+         W3C-vocab term stays legal in PREDICATE or OBJECT position).",
+        offenders.len(),
+        offenders
+            .iter()
+            .map(|l| format!("  {}\n", l))
+            .collect::<String>(),
+    ))
 }
 
 fn is_reflexive_same_as(line: &str) -> bool {
@@ -250,8 +302,13 @@ pub fn diff_multisets(golden: &[String], ours: &[String]) -> (Vec<String>, Vec<S
 /// Parses one corpus `.nt` document, materializes sparq-reason's OWL 2 RL closure
 /// via the PUBLIC `materialize` entry point, and returns the normalized canonical
 /// line multiset.
+///
+/// Errors if the input violates the W3C-vocab-subject corpus invariant
+/// ([`lint_no_w3c_vocab_subjects`]) — checked BEFORE materialization, on the asserted
+/// triples only.
 pub fn sparq_rl_closure_lines(nt_text: &str) -> Result<Vec<String>, String> {
     let (mut dict, mut triples) = Graph::parse_to_triples(nt_text, "ntriples")?;
+    lint_no_w3c_vocab_subjects(&dict, &triples)?;
     sparq_reason::materialize(sparq_reason::Profile::OwlRl, &mut dict, &mut triples);
     Ok(normalize(&canonical_lines(&dict, &triples)?))
 }
@@ -507,6 +564,67 @@ mod tests {
         ))
         .unwrap_err()
         .contains("unrecognized"));
+    }
+
+    // [SONNET-4.6] sq-ovl6f — the W3C-vocab-subject invariant is ENFORCED, not merely
+    // documented: an input assertion at a vocab subject is rejected, while the same
+    // vocab term in predicate/object position stays legal.
+    #[test]
+    fn lint_rejects_w3c_vocab_subjects_and_permits_vocab_predicates_and_objects() {
+        let (mut dict, _) = Graph::parse_to_triples("", "ntriples").unwrap();
+        let user = dict.intern_iri("http://ex.org/C");
+        let sub_class_of = dict.intern_iri("http://www.w3.org/2000/01/rdf-schema#subClassOf");
+
+        // Legal: W3C vocab in PREDICATE and OBJECT position, user subject.
+        assert!(lint_no_w3c_vocab_subjects(&dict, &[[user, sub_class_of, sub_class_of]]).is_ok());
+        // Legal: the empty document.
+        assert!(lint_no_w3c_vocab_subjects(&dict, &[]).is_ok());
+
+        // Rejected: one offender per W3C namespace, subject position.
+        for iri in [
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+            "http://www.w3.org/2000/01/rdf-schema#Class",
+            "http://www.w3.org/2001/XMLSchema#string",
+            "http://www.w3.org/2002/07/owl#Thing",
+        ] {
+            let vocab = dict.intern_iri(iri);
+            let err = lint_no_w3c_vocab_subjects(&dict, &[[vocab, sub_class_of, user]])
+                .expect_err("W3C-vocab subject must be rejected");
+            assert!(err.contains(iri), "offender not named in: {err}");
+            assert!(err.contains("masked"), "no rationale in: {err}");
+        }
+
+        // The lint pins exactly what `normalize` would drop: every offending line it
+        // reports is one `normalize` removes, and it counts them all.
+        let owl_thing = dict.intern_iri("http://www.w3.org/2002/07/owl#Thing");
+        let xsd_string = dict.intern_iri("http://www.w3.org/2001/XMLSchema#string");
+        let triples = [
+            [user, sub_class_of, user],
+            [owl_thing, sub_class_of, user],
+            [xsd_string, sub_class_of, user],
+        ];
+        let err = lint_no_w3c_vocab_subjects(&dict, &triples).unwrap_err();
+        assert!(err.contains("2 triple(s)"), "wrong offender count: {err}");
+        let lines = canonical_lines(&dict, &triples).unwrap();
+        assert_eq!(normalize(&lines).len(), lines.len() - 2);
+    }
+
+    // [SONNET-4.6] sq-ovl6f — the enforcement is on the LOADER path every case runs
+    // through, so a corpus edit that masks a divergence fails loud instead of passing.
+    #[test]
+    fn closure_loader_rejects_a_masking_corpus_document() {
+        let masking = "<http://www.w3.org/2002/07/owl#Thing> \
+                       <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> \
+                       <http://ex.org/Sneaky> .\n";
+        let err = sparq_rl_closure_lines(masking)
+            .expect_err("a W3C-vocab-subject assertion must not load");
+        assert!(err.contains("owl#Thing"), "got: {err}");
+
+        // Same triple with the user term moved into subject position loads fine.
+        let ok = "<http://ex.org/Sneaky> \
+                  <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> \
+                  <http://www.w3.org/2002/07/owl#Thing> .\n";
+        assert!(sparq_rl_closure_lines(ok).is_ok());
     }
 
     #[test]
