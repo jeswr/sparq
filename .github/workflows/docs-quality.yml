@@ -755,6 +755,14 @@ jobs:
         run: python3 scripts/auto-arm.py --self-test
       - name: "Arm-path wiring inspection (contents: write + probe-before-arm — #3760)"
         run: python3 scripts/tests/test_arm_capability_wiring.py
+      # [OPUS-5] sq-w1dxx: release.yml's container contract was pinned by a test that NOTHING
+      # ran, so every assertion in it was decorative. Wire it in beside its sibling
+      # workflow-contract tests: it pins the multi-arch push + the smoke/Trivy pre-push gates
+      # (sq-fvzi6, sq-n6rv, sq-p9xq) AND the trigger-gated ghcr tag sets — a `workflow_dispatch`
+      # dev-build must never push `:latest` (the tag deploy/paas + deploy/aws pin) and must carry
+      # a clean version-threaded tag. Needs PyYAML — installed once in the shared setup above.
+      - name: Release container contract (multi-arch push + trigger-gated ghcr tags)
+        run: python3 scripts/tests/test_release_container_multiarch.py
 
   # ----------------------------- ADVISORY -----------------------------
   # [FABLE-5] sq-6vshe.20: the three former advisory jobs as step-groups on ONE

@@ -6,6 +6,13 @@
 # semver/minor/latest tags, and one amd64+arm64 push with SBOM + provenance. The mutation test
 # proves the platform assertion is non-vacuous.
 #
+# [OPUS-5] sq-w1dxx: also pins the trigger-dependent TAG contract. `docker/metadata-action`
+# derives `type=semver` from the git ref, which on a `workflow_dispatch` is the branch — so an
+# unguarded tag list makes a dispatch dev-build push only the moving `:latest` (the tag the
+# deploy configs pin) with no clean semver. The assertions below require every tag to be
+# version-threaded from the `setup` job and the canonical/dispatch tag sets to be disjoint;
+# `test_ungated_latest_tag_fails_contract` proves that assertion is non-vacuous.
+#
 # Run: python3 scripts/tests/test_release_container_multiarch.py
 
 from __future__ import annotations
@@ -30,7 +37,14 @@ def _step_named(steps: list[dict], name: str) -> tuple[int, dict]:
 def assert_release_container_contract(workflow_text: str) -> None:
     """Assert the release job emits the documented multi-platform image without losing gates."""
     workflow = yaml.safe_load(workflow_text)
-    steps = workflow["jobs"]["docker"]["steps"]
+    docker_job = workflow["jobs"]["docker"]
+    steps = docker_job["steps"]
+
+    # [OPUS-5] sq-w1dxx: the tags are threaded from the `setup` job's resolved version, so the
+    # dependency edge that makes `needs.setup.outputs.version` resolvable is load-bearing.
+    needs = docker_job.get("needs")
+    needs = [needs] if isinstance(needs, str) else (needs or [])
+    assert "setup" in needs, "docker job must depend on `setup` to read the resolved version"
 
     qemu_index, qemu = _step_named(steps, "Set up QEMU for arm64")
     buildx_indices = [
@@ -45,13 +59,24 @@ def assert_release_container_contract(workflow_text: str) -> None:
     ), "QEMU action must be pinned to a full commit SHA"
     assert qemu.get("with", {}).get("platforms") == "arm64"
 
-    _, metadata = _step_named(steps, "Image metadata (tags + OCI labels from the git tag)")
-    tags = set(metadata["with"]["tags"].splitlines())
+    _, metadata = _step_named(
+        steps, "Image metadata (tags + OCI labels from the resolved release version)"
+    )
+    tags = set(filter(None, metadata["with"]["tags"].splitlines()))
+    # [OPUS-5] sq-w1dxx: every tag is threaded from the `setup` job's resolved version (`value=`)
+    # and gated on the trigger (`enable=`), so the two paths emit disjoint tag sets: a `v*` tag
+    # push publishes semver + major.minor + `latest`; a developer/test dispatch publishes ONLY its
+    # own raw version tag — never `latest` (which `deploy/paas` + `deploy/aws` pin) and never a
+    # moving major.minor.
+    version = "${{ needs.setup.outputs.version }}"
+    not_dispatch = "enable=${{ github.event_name != 'workflow_dispatch' }}"
+    is_dispatch = "enable=${{ github.event_name == 'workflow_dispatch' }}"
     assert tags == {
-        "type=semver,pattern={{version}}",
-        "type=semver,pattern={{major}}.{{minor}}",
-        "type=raw,value=latest",
-    }, "release image tags must preserve full semver, major.minor, and latest"
+        f"type=semver,pattern={{{{version}}}},value={version},{not_dispatch}",
+        f"type=semver,pattern={{{{major}}}}.{{{{minor}}}},value={version},{not_dispatch}",
+        f"type=raw,value=latest,{not_dispatch}",
+        f"type=raw,value={version},{is_dispatch}",
+    }, "release image tags must stay version-threaded, with `latest` gated off dispatch"
 
     _, smoke = _step_named(steps, "Build image for smoke test (load locally)")
     smoke_with = smoke["with"]
@@ -87,6 +112,40 @@ class ReleaseContainerMultiarch(unittest.TestCase):
         original = WORKFLOW.read_text(encoding="utf-8")
         mutated = original.replace(
             "platforms: linux/amd64,linux/arm64", "platforms: linux/amd64", 1
+        )
+        self.assertNotEqual(mutated, original, "mutation fixture did not alter the workflow")
+        with self.assertRaises(AssertionError):
+            assert_release_container_contract(mutated)
+
+    def test_ungated_latest_tag_fails_contract(self):
+        """[OPUS-5] sq-w1dxx: reinstating the pre-fix tag list must go red."""
+        original = WORKFLOW.read_text(encoding="utf-8")
+        mutated = original.replace(
+            "type=raw,value=latest,enable=${{ github.event_name != 'workflow_dispatch' }}",
+            "type=raw,value=latest",
+            1,
+        )
+        self.assertNotEqual(mutated, original, "mutation fixture did not alter the workflow")
+        with self.assertRaises(AssertionError):
+            assert_release_container_contract(mutated)
+
+    def test_dropping_the_version_thread_fails_contract(self):
+        """[OPUS-5] sq-w1dxx: reverting the tags to git-ref-derived semver must go red."""
+        original = WORKFLOW.read_text(encoding="utf-8")
+        mutated = original.replace(",value=${{ needs.setup.outputs.version }},enable=", ",enable=")
+        self.assertNotEqual(mutated, original, "mutation fixture did not alter the workflow")
+        with self.assertRaises(AssertionError):
+            assert_release_container_contract(mutated)
+
+    def test_dropping_the_setup_dependency_fails_contract(self):
+        """[OPUS-5] sq-w1dxx: `needs.setup.outputs.version` is unresolvable without the edge."""
+        original = WORKFLOW.read_text(encoding="utf-8")
+        # Anchor on `packages: write`, which is unique to the docker job — four other jobs also
+        # declare `needs: setup`, so a bare replace would mutate the wrong one.
+        mutated = original.replace(
+            "    needs: setup\n    permissions:\n      contents: read\n      packages: write",
+            "    permissions:\n      contents: read\n      packages: write",
+            1,
         )
         self.assertNotEqual(mutated, original, "mutation fixture did not alter the workflow")
         with self.assertRaises(AssertionError):
