@@ -49,6 +49,14 @@ on:
       - "scripts/tests/test_no_deprecated_models.py"
       - ".claude/settings.json"
       - ".claude/workflows/fable-architect-drain.js"
+      # [OPUS-5] the LABELS -> MODEL CHAIN surfaces (review of PR #4211). The `area:gui` carve-out
+      # is decided in route-resolve.py from labels written by these two files, so the end-to-end
+      # suite must re-run when either the role derivation or the label WRITE path changes. The
+      # write path is load-bearing: a discarded --add-label failure that still sets status:ready
+      # is what silently inverted the carve-out.
+      - "scripts/triage.py"
+      - "scripts/retriage.py"
+      - ".github/workflows/triage-issue.yml"
       - ".github/workflows/routing-self-tests.yml"
       # [OPUS-5] reg#677 — PR `area:` attribution. The scheduler partitions by
       # `area:<name>`; an unlabelled PR takes the serializing `__global__` partition
@@ -92,6 +100,14 @@ on:
       - "scripts/tests/test_no_deprecated_models.py"
       - ".claude/settings.json"
       - ".claude/workflows/fable-architect-drain.js"
+      # [OPUS-5] the LABELS -> MODEL CHAIN surfaces (review of PR #4211). The `area:gui` carve-out
+      # is decided in route-resolve.py from labels written by these two files, so the end-to-end
+      # suite must re-run when either the role derivation or the label WRITE path changes. The
+      # write path is load-bearing: a discarded --add-label failure that still sets status:ready
+      # is what silently inverted the carve-out.
+      - "scripts/triage.py"
+      - "scripts/retriage.py"
+      - ".github/workflows/triage-issue.yml"
       - ".github/workflows/routing-self-tests.yml"
       # [OPUS-5] reg#677 — PR `area:` attribution. The scheduler partitions by
       # `area:<name>`; an unlabelled PR takes the serializing `__global__` partition

@@ -23,6 +23,7 @@ BARE ALIASES ARE THEMSELVES A FINDING. `opus` resolved to claude-opus-4-8 for da
 shipped, so "it points at the right model today" is not a property you can assert about an alias.
 Every routing position must name a FULL model id.
 """
+import importlib.util
 import json
 import re
 import sys
@@ -33,6 +34,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "routing-self-tests.yml"
+TRIAGE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "triage-issue.yml"
 
 # Retired 2026-07-26. Both halves matter: the ALIAS (what a chain writes) and the concrete PROVIDER
 # ID (what the alias resolved to) — banning only the alias lets the model return under a new name.
@@ -54,6 +56,14 @@ def _routing_doc():
         import tomli as tomllib
     with open(REPO_ROOT / "orchestration" / "routing.toml", "rb") as fh:
         return tomllib.load(fh)
+
+
+def _load_script(mod_name, filename):
+    """Import a hyphenated scripts/*.py module (same shape as dispatch-plan.py's loader)."""
+    spec = importlib.util.spec_from_file_location(mod_name, REPO_ROOT / "scripts" / filename)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 class TestRoutingTable(unittest.TestCase):
@@ -223,6 +233,219 @@ class TestProviderPreference(unittest.TestCase):
                          "area:gui must derive role:gui, not role:site — otherwise the carve-out "
                          "is inexpressible and GUI silently takes the opus5-first default")
         self.assertIn("area:site", ui_labels, "role:site must still cover area:site")
+
+
+class TestLabelsToModelChain(unittest.TestCase):
+    """[OPUS-5] THE DECISIVE SUITE — LABELS IN, MODEL CHAIN OUT (review of PR #4211).
+
+    Every assertion in `TestProviderPreference` above reads `orchestration/routing.toml` or a
+    constant in `scripts/triage.py`. All of them were GREEN while the maintainer's only exception
+    was INVERTED for 100% of the live GUI backlog, because the table said the right thing and no
+    real issue could reach it:
+
+      * `role:gui` was not a label in this repo, and `gh issue edit --add-label` does not create a
+        missing one — it fails, and both writers discarded that failure while the sibling
+        `status:ready` write succeeded, so GUI issues promoted role-LESS onto `[defaults]`;
+      * even with the label, `triage._role()` returns an EXPLICIT `role:*` before it consults any
+        surface label, and 35 of 35 open `area:gui` issues already carried one (33 `role:impl`,
+        1 `role:perf`, 1 `role:research`).
+
+    A guard that stops at the routing table cannot see either. These tests start from the labels a
+    live issue actually carries and end at the chain the dispatcher will walk — the layer where the
+    directive is either honoured or inverted.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.doc = _routing_doc()
+        cls.rr = _load_script("route_resolve_e2e", "route-resolve.py")
+
+    def chain(self, labels):
+        return self.rr.resolve(labels, self.doc)[0]
+
+    # -- the exception binds -------------------------------------------------------------------
+    def test_area_gui_with_a_preexisting_explicit_role_is_sol_first(self):
+        """THE ONE THAT WOULD HAVE CAUGHT IT. 33 of 35 open `area:gui` issues carry `role:impl`
+        (e.g. #3367). Before the fix they resolved `role:impl` -> ["opus5","sol"], i.e. the exact
+        inversion of "except for GUI work where sol should remain prioritised".
+
+        MUTANT: delete the carve-out from `route-resolve.resolve()` => RED.
+        """
+        for role in ("impl", "perf", "site", "ci", "gui"):
+            chain = self.chain(["area:gui", f"role:{role}", "priority:P2"])
+            self.assertEqual(chain[0], "sol",
+                             f"area:gui + role:{role} must stay sol-first (maintainer 2026-07-26)")
+
+    def test_area_gui_with_no_role_at_all_is_sol_first(self):
+        """The fail-open case the write path produced: a GUI issue promoted with NO role label
+        resolves through `[defaults]`, which is opus5-first. The carve-out must bind there too."""
+        self.assertEqual(self.chain(["area:gui", "priority:P2", "area:sparq-gui"])[0], "sol")
+
+    def test_gui_carve_out_is_preference_not_exclusion_end_to_end(self):
+        """GUI work must stay dispatchable during an OpenAI outage."""
+        for role in ("impl", "perf", "site", "ci", "gui"):
+            self.assertIn("opus5", self.chain(["area:gui", f"role:{role}"]))
+
+    def test_gui_carve_out_re_orders_but_never_re_routes(self):
+        """The directive speaks only about MODEL priority. The carve-out must not change which
+        agent implements the work — the desktop GUI is Rust/Tauri, so a `role:impl` GUI issue
+        keeps `sparq-rust-impl`. MUTANT: turn the carve-out back into a route => RED."""
+        self.assertEqual(self.rr.resolve(["area:gui", "role:impl"], self.doc)[1],
+                         self.rr.resolve(["role:impl"], self.doc)[1])
+        self.assertEqual(self.rr.resolve(["area:gui", "role:perf"], self.doc)[1],
+                         self.rr.resolve(["role:perf"], self.doc)[1])
+
+    # -- the exclusion that already worked, now asserted at the deciding layer ------------------
+    def test_site_surfaces_are_opus5_first_end_to_end(self):
+        """`site*` is NOT in the carve-out (maintainer: "Let's just go with area:gui work").
+        MUTANT: add any site* label to `GUI_CARVE_OUT_LABELS` => RED."""
+        for area in ("area:site", "area:site-specs", "area:site-papers", "area:sitemap"):
+            self.assertEqual(self.chain([area, "role:impl", "priority:P2"])[0], "opus5",
+                             f"{area} must take the opus5-first default")
+            self.assertEqual(self.chain([area, "role:site", "priority:P2"])[0], "opus5")
+        self.assertEqual(self.chain(["surface:frontend", "role:site"])[0], "opus5")
+        self.assertEqual(self.chain(["dashboard", "role:site"])[0], "opus5")
+
+    def test_the_selector_is_an_exact_label_not_a_substring(self):
+        """`"gui" in label` would sweep `area:guide` into the sol carve-out."""
+        self.assertEqual(self.chain(["area:guide", "role:impl"])[0], "opus5")
+        self.assertEqual(self.chain(["kind:guidance", "role:impl"])[0], "opus5")
+
+    def test_carve_out_label_set_is_exactly_area_gui(self):
+        """MUTANT: widen `GUI_CARVE_OUT_LABELS` => RED. Pinned as a set as well as behaviourally,
+        so widening it over a label with no open issues still fails."""
+        self.assertEqual(sorted(self.rr.GUI_CARVE_OUT_LABELS), ["area:gui"])
+
+    def test_both_gui_selectors_agree(self):
+        """Two places name the GUI surface — the resolver's carve-out (which decides the chain) and
+        triage's `GUI_SURFACE_LABELS` (which derives the role). They must not drift apart: a widening
+        of either one is the likely future mistake."""
+        triage_src = (REPO_ROOT / "scripts" / "triage.py").read_text(encoding="utf-8")
+        m = re.search(r"(?m)^GUI_SURFACE_LABELS = \(([^)]*)\)", triage_src)
+        self.assertIsNotNone(m, "GUI_SURFACE_LABELS not found or reshaped")
+        triage_labels = {x.strip().strip("\"'") for x in m.group(1).split(",") if x.strip()}
+        self.assertEqual(triage_labels, set(self.rr.GUI_CARVE_OUT_LABELS))
+
+    # -- precedence ----------------------------------------------------------------------------
+    def test_a_security_surface_still_wins_over_the_gui_carve_out(self):
+        """`area:gui` + `area:sparq-zk` is a ZK issue first. The soundness chain must be returned
+        UNMODIFIED — a preference rule must never re-order a soundness lane."""
+        self.assertEqual(self.rr.resolve(["area:gui", "area:sparq-zk", "role:impl"], self.doc),
+                         (["opus5"], "sparq-reviewer", True))
+
+    def test_the_carve_out_never_injects_sol_into_a_chain_that_lacks_it(self):
+        """The directive's own qualifier is "tasks for which they are BOTH possible implementors".
+        `role:research` is deliberately anthropic-side + escalating; the carve-out must leave it
+        alone rather than quietly making it cross-provider (which would hide the stall).
+        MUTANT: drop the both-in-chain condition => RED."""
+        chain, _agent, escalate = self.rr.resolve(["area:gui", "role:research"], self.doc)
+        self.assertEqual(chain, ["opus5"])
+        self.assertTrue(escalate)
+
+    def test_gui_docs_keep_the_docs_route(self):
+        """Docs writing already leads with sol by the separate directive; the carve-out must not
+        change the docs agent or chain."""
+        self.assertEqual(self.rr.resolve(["area:gui", "role:docs"], self.doc)[:2],
+                         (["sol", "terra", "opus5"], "sparq-docs"))
+
+    # -- non-GUI work is unaffected ------------------------------------------------------------
+    def test_non_gui_implementation_work_is_opus5_first_end_to_end(self):
+        """The first directive, asserted the same way: labels in, chain out."""
+        for role in ("impl", "site", "ci", "perf"):
+            self.assertEqual(self.chain([f"role:{role}", "area:sparq-core", "priority:P1"])[0],
+                             "opus5")
+        self.assertEqual(self.chain(["area:sparq-core", "priority:P1"])[0], "opus5")
+
+
+class TestLabelWritesAreFailClosed(unittest.TestCase):
+    """[OPUS-5] The write path that turned "carve-out missing" into "carve-out INVERTED".
+
+    `gh issue edit --add-label` does not create a missing label; it fails and applies nothing from
+    that call. Both writers used ONE edit PER label and discarded the result, so a failed `role:*`
+    write left the SUCCESSFUL `status:ready` write standing — the issue promoted with no role and
+    `route-resolve` fell through to `[defaults]`. Fail-open on the dispatch path.
+
+    Measured against a stubbed `gh` (role:gui absent from the repo, label-create denied):
+    the pre-fix step exits 0 having applied `status:ready` alone; the post-fix step exits 1 having
+    applied nothing.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.raw = TRIAGE_WORKFLOW.read_text(encoding="utf-8")
+        cls.doc = yaml.safe_load(cls.raw)
+        cls.steps = cls.doc["jobs"]["triage"]["steps"]
+        cls.step = next(s for s in cls.steps
+                        if "Static triage" in (s.get("name") or ""))
+        cls.retriage_src = (REPO_ROOT / "scripts" / "retriage.py").read_text(encoding="utf-8")
+
+    def test_the_triage_step_exists(self):
+        """Anti-vacuity: if the step is renamed away, every assertion below would scan nothing."""
+        self.assertIn("run", self.step)
+
+    def test_the_label_write_is_not_neutralised_by_a_trailing_true(self):
+        """MUTANT: restore `|| true` on the `gh issue edit` line => RED. This is the exact edit
+        that made the promotion fail-open."""
+        for line in self.step["run"].splitlines():
+            if "gh issue edit" in line:
+                self.assertNotRegex(
+                    line.strip(), r"(\|\|\s*true|;\s*true|\|\|\s*:)\s*$",
+                    "a discarded label-write status is fail-open on the dispatch path")
+
+    def test_the_step_uses_pipefail(self):
+        """Without `set -euo pipefail` the write failure does not fail the step."""
+        self.assertIn("set -euo pipefail", self.step["run"])
+
+    def test_the_delta_is_written_by_a_single_all_or_nothing_edit(self):
+        """MUTANT: go back to `for l in $add; do gh issue edit … --add-label "$l"; done` => RED.
+        Per-label edits are the defect even WITHOUT `|| true`: with `set -e` the loop aborts on the
+        first failure, but any label already applied in an earlier iteration stays — and the
+        sort order puts `role:*` and `status:ready` in separate calls."""
+        run = self.step["run"]
+        self.assertNotRegex(
+            run, r"for\s+l\s+in\s+\$add;\s*do\s+gh\s+issue\s+edit",
+            "adds must not be applied one gh call per label")
+        self.assertEqual(run.count("gh issue edit"), 1,
+                         "the whole label delta must go in ONE gh issue edit invocation")
+
+    def test_missing_labels_are_ensured_before_the_write(self):
+        """MUTANT: delete the `gh label create` ensure => a brand-new routing label reds every
+        triage run instead of being created. The ensure is best-effort; the ADD is the hard gate."""
+        run = self.step["run"]
+        self.assertIn("gh label create", run)
+        self.assertLess(run.index("gh label create"), run.index("gh issue edit"),
+                        "labels must be ensured BEFORE the edit that needs them")
+
+    def test_auto_creation_is_restricted_to_the_labels_triage_emits(self):
+        """The ensure must not be able to mint an arbitrary repo label."""
+        self.assertRegex(self.step["run"], r"role:\*\|status:\*\|needs:\*")
+
+    def test_retriage_reads_the_return_code_of_its_label_write(self):
+        """MUTANT: drop the rc check in `retriage.apply_labels` => RED. `_gh` is `check=False`, so
+        an unread return code is a silently discarded write inside a cron."""
+        src = self.retriage_src
+        self.assertIn("def apply_labels(", src)
+        body = src[src.index("def apply_labels("):]
+        body = body[:body.index("\n\ndef ") if "\n\ndef " in body else len(body)]
+        self.assertIn("r.returncode != 0", body,
+                      "apply_labels must read the return code of the edit")
+        self.assertIn("return False", body,
+                      "a failed write must be reported to the caller, not discarded")
+
+    def test_retriage_main_exits_non_zero_when_a_write_failed(self):
+        """MUTANT: `return 0` unconditionally in main() => RED. A cron that exits 0 having failed
+        to promote is invisible."""
+        src = self.retriage_src
+        main = src[src.index("def main():"):]
+        self.assertRegex(main, r"if failed:[\s\S]*?return 1",
+                         "retriage must exit non-zero when any label write failed")
+
+    def test_retriage_writes_the_delta_in_one_call(self):
+        """The all-or-nothing property, on the cron side. MUTANT: restore the per-label loop
+        (`for lb in add: _gh([... "--add-label", lb])`) => RED."""
+        main = self.retriage_src[self.retriage_src.index("def main():"):]
+        self.assertNotRegex(main, r"for lb in add:",
+                            "retriage must not apply adds one gh call per label")
 
 
 class TestSettingsHooks(unittest.TestCase):
@@ -429,7 +652,11 @@ class TestWorkflowWiring(unittest.TestCase):
         deprecated model can be reintroduced by a PR that never runs this gate."""
         trigger_section = self.raw[:self.raw.index("permissions:")]
         for surface in ("orchestration/routing.toml", ".claude/settings.json",
-                        ".claude/workflows/fable-architect-drain.js"):
+                        ".claude/workflows/fable-architect-drain.js",
+                        # [OPUS-5] the labels -> chain surfaces. Without these a PR could re-break
+                        # the carve-out (or re-open the label write path) and never run this gate.
+                        "scripts/route-resolve.py", "scripts/triage.py", "scripts/retriage.py",
+                        ".github/workflows/triage-issue.yml"):
             self.assertEqual(
                 trigger_section.count(f'"{surface}"'), 2,
                 f"{surface} must re-run this gate on BOTH pull_request and push")
