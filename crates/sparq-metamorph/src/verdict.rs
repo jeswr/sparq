@@ -28,6 +28,17 @@ pub enum OracleKind {
     Norec,
     /// Cross-engine differential oracle (see [`crate::differential`]).
     Differential,
+    /// Ternary logic partitioning under **set** semantics — the `DISTINCT` variant, whose
+    /// partitions recombine by set union (see [`crate::distinct`]). [OPUS-5] sq-gum8.12
+    TlpDistinct,
+    /// Ternary logic partitioning recombined through an **aggregate** — `COUNT`/`SUM`
+    /// over the three branches, with SPARQL's aggregate error semantics (see
+    /// [`crate::aggregate`]). [OPUS-5] sq-gum8.12
+    TlpAggregate,
+    /// Cross-engine differential oracle in **`ORDER BY` mode** — compared up to
+    /// permutation within each sort-key equivalence class (see
+    /// [`crate::differential::check_differential_ordered`]). [OPUS-5] sq-gum8.12
+    DifferentialOrdered,
 }
 
 impl std::fmt::Display for OracleKind {
@@ -36,6 +47,9 @@ impl std::fmt::Display for OracleKind {
             OracleKind::Tlp => write!(f, "tlp"),
             OracleKind::Norec => write!(f, "norec"),
             OracleKind::Differential => write!(f, "differential"),
+            OracleKind::TlpDistinct => write!(f, "tlp-distinct"),
+            OracleKind::TlpAggregate => write!(f, "tlp-aggregate"),
+            OracleKind::DifferentialOrdered => write!(f, "differential-ordered"),
         }
     }
 }
@@ -154,13 +168,22 @@ mod tests {
 
     #[test]
     fn oracle_kind_displays_and_serialises() {
-        assert_eq!(OracleKind::Tlp.to_string(), "tlp");
-        assert_eq!(OracleKind::Norec.to_string(), "norec");
-        assert_eq!(OracleKind::Differential.to_string(), "differential");
-        let json = serde_json::to_string(&OracleKind::Differential).unwrap();
-        assert_eq!(json, "\"differential\"");
-        let back: OracleKind = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, OracleKind::Differential);
+        // Display and the serde wire form must agree for every kind — the ledger reads
+        // back what the campaign logs wrote.
+        for (kind, wire) in [
+            (OracleKind::Tlp, "tlp"),
+            (OracleKind::Norec, "norec"),
+            (OracleKind::Differential, "differential"),
+            (OracleKind::TlpDistinct, "tlp-distinct"),
+            (OracleKind::TlpAggregate, "tlp-aggregate"),
+            (OracleKind::DifferentialOrdered, "differential-ordered"),
+        ] {
+            assert_eq!(kind.to_string(), wire);
+            let json = serde_json::to_string(&kind).unwrap();
+            assert_eq!(json, format!("\"{wire}\""));
+            let back: OracleKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, kind);
+        }
     }
 
     #[test]

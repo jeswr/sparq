@@ -5,7 +5,7 @@
 # nightly lane, sharded PER CATEGORY. Running only the 'all' category hides
 # category-dense bugs — the sq-lr2ii sargable-decimal bug reproduces at seeds
 # 4695+ in 'equality'/'filter' but is invisible in 'all' 0..20000 (density) — so
-# each of the generator's 9 query categories gets its own shard, plus three shards
+# each of the generator's 16 query categories gets its own shard, plus three shards
 # that re-run a prefix of the same day window through the STORE-MODE read paths
 # (mmap / block-compressed / dict-spill rebuilds), which otherwise get zero
 # standing correctness differential.
@@ -94,7 +94,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The 9 generator categories (crates/sparq-bench/src/fuzz.rs gen_query).
+          # The 16 generator categories (crates/sparq-bench/src/fuzz.rs `CATEGORIES`).
+          # ONE SHARD PER CATEGORY is an invariant the fuzz.rs unit test
+          # `every_category_has_a_nightly_shard` pins against this file, and an
+          # unknown category name here exits non-zero rather than quietly fuzzing the
+          # fallback shape.
           - { name: bgp, category: bgp, count: 120000, mode: "" }
           - { name: filter, category: filter, count: 120000, mode: "" }
           - { name: equality, category: equality, count: 120000, mode: "" }
@@ -104,6 +108,16 @@ jobs:
           - { name: limit, category: limit, count: 120000, mode: "" }
           - { name: distinct, category: distinct, count: 120000, mode: "" }
           - { name: order, category: order, count: 120000, mode: "" }
+          # sq-j80vk: the SPARQL 1.1 surfaces added to the generator — property
+          # paths, aggregates/GROUP BY/HAVING, sub-selects, EXISTS/NOT EXISTS,
+          # VALUES, BIND and GRAPH — which had no standing differential before.
+          - { name: path, category: path, count: 120000, mode: "" }
+          - { name: aggregate, category: aggregate, count: 120000, mode: "" }
+          - { name: subquery, category: subquery, count: 120000, mode: "" }
+          - { name: exists, category: exists, count: 120000, mode: "" }
+          - { name: values, category: values, count: 120000, mode: "" }
+          - { name: bind, category: bind, count: 120000, mode: "" }
+          - { name: graph, category: graph, count: 120000, mode: "" }
           # Store-mode differentials: re-run a PREFIX of the same day window with
           # the store rebuilt through each out-of-core/compressed read path (env-
           # selected in fuzz.rs). Much slower per seed (mmap save/reopen; dict-spill

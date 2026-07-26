@@ -1374,6 +1374,49 @@ fn per_statement_severity_is_occurrence_scoped() {
     );
 }
 
+/// [SONNET-4.6] (sq-7os4t) The two qualified-count parameters are distinct
+/// causing statements even though the parser combines them into one component.
+/// Their annotations must therefore be selected independently for each result.
+#[test]
+fn per_statement_overrides_apply_to_qualified_count_causing_statement() {
+    let shapes = r#"
+        ex:S a sh:PropertyShape ; sh:targetNode ex:n ; sh:path ex:p ;
+          sh:qualifiedValueShape [ sh:nodeKind sh:IRI ] ;
+          sh:qualifiedMinCount 2 {| sh:severity sh:Warning |} ;
+          sh:qualifiedMaxCount 0 {| sh:message "qualified maximum" |} .
+    "#;
+    let r = run("ex:n ex:p ex:value .", shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    assert_eq!(r.results.len(), 2, "{}", r.to_text());
+
+    let min = r
+        .results
+        .iter()
+        .find(|x| {
+            x.source_component
+                .ends_with("QualifiedMinCountConstraintComponent")
+        })
+        .expect("qualified minimum result");
+    assert_eq!(min.severity, SH_WARNING);
+
+    let max = r
+        .results
+        .iter()
+        .find(|x| {
+            x.source_component
+                .ends_with("QualifiedMaxCountConstraintComponent")
+        })
+        .expect("qualified maximum result");
+    assert_eq!(max.severity, SH_VIOLATION);
+    assert!(
+        max.effective_messages()
+            .iter()
+            .any(|m| matches!(m, Term::Literal(l) if l.value() == "qualified maximum")),
+        "qualified maximum result must use its statement annotation: {}",
+        r.to_text()
+    );
+}
+
 // ----------------------------------------------------------------------------
 // [FABLE-5] (sq-1jemy) Per-statement overrides on RECURSING components. A
 // `{| sh:message … |}` / `{| sh:severity … |}` on a shape-referencing constraint

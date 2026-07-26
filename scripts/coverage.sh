@@ -110,6 +110,9 @@ PER_COMMIT_CRATES=(
   # [FABLE-5] sq-lsp7k.1.1: sparq-forms — opt-in headless SHACL-to-form derivation.
   # No cargo features (whole surface default-compiled), so no measure() case arm.
   sparq-forms
+  # [SONNET-4.6] sq-97cxm: sparq-jsonld — native JSON-LD 1.1 processing and RDF conversion.
+  # No cargo features (whole surface default-compiled), so no measure() case arm.
+  sparq-jsonld
   # [OPUS-4.8] sq-bif.7: the OPT-IN ODRL usage-control policy crate, untracked by BOTH
   # gates. The STATELESS evaluator (parse/eval/compare/hierarchy) is default-on, but the
   # stateful `odrl:count` counter stores (the `count`/`count_file`/`count_backend` modules
@@ -220,7 +223,7 @@ SHARD_GROUPS=(
   # shard's CRATE SET is byte-identical to before, so every non-engine floor is enforced by
   # the SAME crate group as prior — only the shard NUMBER moved (the ci.yml matrix is [1,2,3]).
   # shard 1 (was 2; ~336s measured)
-  "sparq-core sparq-mpc sparq-fedclient sparq-geo sparq-cli sparq-conformance sparq-text sparq-policy sparq-nlq sparq-sim"
+  "sparq-core sparq-mpc sparq-fedclient sparq-geo sparq-cli sparq-conformance sparq-text sparq-policy sparq-nlq sparq-sim sparq-jsonld"
   # shard 2 (was 3; ~336s measured; + sparq-reason-el [EL rbox+hasse] + sparq-reason-ql [QL experimental], sq-qcnn.23)
   "sparq-vectors sparq-zk-compose sparq-gpu sparq-serve sparq-reason sparq-reason-el sparq-reason-ql sparq-hdt sparq-shacl sparq-fedplan sparq-zk sparq-substrate sparq-introspect"
   # shard 3 (was 4; ~336s measured; + sparq-engine-serialize [seam 1] + sparq-engine-service [seam A2], sq-6vshe.4)
@@ -519,8 +522,18 @@ measure() {
     # (`numeric` = XSD value tower, `join` = the four id-tuple join kernels, `compare` =
     # the SPARQL term total order, `rows` = the id-tuple Row/Key/Posting vocabulary). A
     # default-feature build compiles NONE of it (empty crate -> meaningless number); this
-    # names the maximal set so the measured line% reflects the real code the floor gates,
-    # exactly as sparq-core/-fedclient/-policy above name their whole-surface features.
+    # names the CORRECTNESS-CORE set so the measured line% reflects the real code the floor
+    # gates, exactly as sparq-core/-fedclient/-policy above name their whole-surface features.
+    #
+    # [OPUS-5] PR #3799: do NOT add `overhead` here. It used to be true that this was also the
+    # crate's MAXIMAL feature set; it no longer is — the feature-matrix leg now enables
+    # `rows,numeric,join,compare,overhead` so `src/overhead.rs`'s tests actually gate (they
+    # were compiled by NO required check before). `overhead` is the zero-overhead DELTA
+    # TIMING harness, not correctness surface: instrumenting it would fold ~2k lines of
+    # measurement/reporting code into the denominator behind only a handful of tests and
+    # would push this crate under its floor of 96 for no correctness gain. Coverage measures
+    # the correctness core; the matrix leg EXECUTES everything. They are deliberately
+    # different sets — keep them that way.
     sparq-substrate)
       cargo_args+=(--features numeric,join,compare,rows)
       features+=("numeric" "join" "compare" "rows") ;;

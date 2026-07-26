@@ -53,7 +53,24 @@ export function SameBoxTable({ comparison }: { comparison: SameBoxComparison }) 
           <tbody>
             {comparison.rows.map((r) => (
               <tr key={r.query} className="border-b last:border-0 hover:bg-muted/30">
-                <td className="px-3 py-2 font-mono">{r.query}</td>
+                <td className="px-3 py-2 font-mono">
+                  {r.query}
+                  {r.corpus_variant || r.sparq_oracle_workload ? (
+                    <sup
+                      className="ml-0.5 cursor-help text-muted-foreground"
+                      title={[
+                        r.corpus_variant,
+                        r.sparq_oracle_workload
+                          ? `count oracle: ${r.sparq_oracle_workload}`
+                          : null,
+                      ]
+                        .filter(Boolean)
+                        .join(" — ")}
+                    >
+                      †
+                    </sup>
+                  ) : null}
+                </td>
                 <td className="px-3 py-2 text-right font-mono tabular-nums text-muted-foreground">
                   {fmtNum(r.rows)}
                 </td>

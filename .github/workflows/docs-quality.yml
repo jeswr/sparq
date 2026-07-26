@@ -266,9 +266,24 @@ jobs:
       # should-FAIL banned spellings must fire AND should-PASS proper-noun / paper-title /
       # third-party-doc / URL / allow-marker lines (+ the GeoSPARQL / italic-closer / bold
       # false-positive families) must not regress. Hermetic (no git/network).
+      #
+      # [OPUS-5] issue #3811 — the gate is now DATA-DRIVEN (scripts/banned-terminology.json)
+      # and each banned term declares its OWN file surface. The trigger: ~98 occurrences of a
+      # maintainer-banned trust term reached PR #3451 as a `pub` Rust type AND a PUBLISHED
+      # .ttl rdfs:comment with a green `ci-summary / gate`, because this gate hard-coded its
+      # list and scanned only *.md — neither extension was reachable. Adding a future banned
+      # term is now one object in the JSON, not a code change.
+      #
+      # These three steps are the whole enforcement path; deleting any one of them silently
+      # disarms the gate, so scripts/tests/test_banned_terminology.py asserts all three call
+      # sites exist, that neither the steps nor the job carry a skip `if:`, that the job name
+      # does not read as advisory (ci_summary_gate.py would stop gating on it), and that the
+      # workflow still triggers on merge_group (the queue must evaluate it).
       - name: Self-test the terminology gate (both directions)
         run: python3 scripts/check-terminology.py --self-test
-      - name: terminology (RDF 1.2 / SPARQL 1.2 wording) — GATING
+      - name: Self-test the banned-terminology gate (fixtures + workflow wiring)
+        run: python3 scripts/tests/test_banned_terminology.py
+      - name: terminology (RDF 1.2 / SPARQL 1.2 + banned wording) — GATING
         run: python3 scripts/check-terminology.py
 
       # ---- former job: no-perf-numbers (docs) ----
@@ -390,6 +405,16 @@ jobs:
         run: bash scripts/tests/test_beir_gather_sentinel.sh
       - name: Self-test console envelope extractor (exact names + CRLF + allowlist)
         run: bash scripts/tests/test_extract_console_envelopes.sh
+      # [SONNET-4.6] PR #3990 review: bench/geo/gsb.sh advertises a HARD sha256 pin on the
+      # GeoSPARQL Compliance Benchmark, but a CACHED extraction was accepted on file COUNTS
+      # alone — a stale or locally edited corpus would have been scored silently, making the
+      # recorded compliance number irreproducible. The cache is now gated on a recorded proof
+      # (pinned tarball digest + a content digest of the extracted tree); this hermetic
+      # self-test pins that a count-preserving edit, an absent proof, and a proof naming a
+      # different tarball digest are all rejected. No network, no corpus: it fabricates a
+      # correctly-shaped tree in a scratch dir and drives the real script with GSB_FETCH=0.
+      - name: Self-test gsb.sh cache pin (count-preserving edit never scored)
+        run: bash bench/geo/gsb.sh --self-test
       # [OPUS-4.8] sq-neq8: hermetic self-test of the coverage-ratchet gate's PURE logic
       # (max-remeasure aggregation sq-x4jy + floor-monotonicity sq-neq8) so a regression in
       # the gate ITSELF is caught here, before the gate is trusted to guard real coverage.
@@ -435,6 +460,29 @@ jobs:
           python3 scripts/gh_retry.py --self-test
           python3 scripts/auto-arm.py --self-test
           python3 scripts/rearm-sweeper.py --self-test
+      # [OPUS-5] issue #1135 — the crates.io PUBLISHING protections, gated here because
+      # the release path itself (release-plz.yml) runs ONLY on push:main and therefore
+      # never registers on this PR's `gate`: a defect in it would otherwise surface for
+      # the first time at release time, when the mistake is irreversible.
+      #   * release_pr_guard.py    — the branch/author/title Release-PR exclusion that
+      #                              auto-arm.py, rearm-sweeper.py, check-pr-arm-base.py,
+      #                              batch-merge.py and pr-backlog.py all consult.
+      #   * release-interval-guard — the fail-closed minimum-release-interval belt.
+      #   * test_release_publish_guard.py — parses .github/workflows/release-plz.yml
+      #     STRUCTURALLY (not by substring) so `if: false`, a deleted step, a reordered
+      #     step or a re-pointed `--dry-run` input each red this gate. Measured in this
+      #     repo: every uncaught mutant has lived at the YAML seam, not in the Python.
+      #     [OPUS-5] PR #4192 review: it now pins the guard step's `run:` by EQUALITY and
+      #     asserts `continue-on-error` is ABSENT — a `|| true` suffix, an `exit 0;`
+      #     prefix, `continue-on-error: 'true'` and `continue-on-error: ${{ true }}` all
+      #     survived the looser containment/identity readings. It also drives `run()`'s
+      #     crates.io CALL SITE (not just `decide()`), and executes .claude/settings.json's
+      #     hook wrapper to prove an unrunnable arm guard denies rather than allows.
+      - name: Self-test crates.io publishing protections (#1135)
+        run: |
+          python3 scripts/release_pr_guard.py --self-test
+          python3 scripts/release-interval-guard.py --self-test
+          python3 scripts/tests/test_release_publish_guard.py
       # [OPUS-4.8] sq-ur7o: every SHA-pinned `taiki-e/install-action` step MUST carry an
       # explicit `with: tool:`. install-action picks the tool from its @<tool> git ref; the
       # code-scanning=0 SHA-pin policy DROPS that selector, so without `with: tool:` the
@@ -455,8 +503,14 @@ jobs:
       # fail-OPEN-on-error — with NO network/gh dependency (the base lookup is injected). Mirrors
       # coverage-gate.py / check-install-action-tool.py --self-test (stdlib-only, no deps).
       # [GPT-5.6] #3605: it also runs the real settings command from an unrelated cwd and
-      # proves a missing guard script returns an explicit allow instead of bricking every Bash.
-      - name: Self-test stacked-PR arm guard (cwd-independent + fail-open)
+      # proves an unrunnable guard script returns an explicit decision with exit 0 instead
+      # of bricking every Bash.
+      # [OPUS-5] PR #4192 review, finding 3: that explicit decision used to be `allow` for
+      # EVERY command, which inverted the script's deliberately fail-CLOSED release axis
+      # exactly when there is no guard. The wrapper now DENIES `gh pr merge` and allows
+      # everything else; both halves are pinned in the self-test (an all-deny would
+      # re-create the #3605 all-Bash deadlock, so the allow row is load-bearing too).
+      - name: Self-test stacked-PR arm guard (cwd-independent; fail-closed on arms)
         run: python3 scripts/check-pr-arm-base.py --self-test
       # [OPUS-4.8] sq-53cq: anti-drift guard for the two-hop dashboard publish. The in-repo
       # source-of-truth bench/dashboard/* reaches the live site via bench.yml's "Seed Pages
@@ -488,6 +542,18 @@ jobs:
         run: shellcheck scripts/check-site-links.sh scripts/tests/test_check_site_links.sh
       - name: Self-test check-site-links.sh (basePath remap + broken-link teeth)
         run: bash scripts/tests/test_check_site_links.sh
+      # [SONNET-4.6] sq-vw3ax.11.3: the fail-closed release alias contract check
+      # (scripts/check-release-aliases.sh) runs on the RELEASE path (release.yml), where a
+      # silently shrunken extraction would only surface after a bad release shipped. Its
+      # hermetic self-test therefore runs HERE on every PR: it pins the golden alias contract
+      # extracted from the real /download component (so an intentional alias change must
+      # update the golden in the same PR), the release-blocking teeth, and — PR #3528 review —
+      # that every partial-extraction mutation (reformat / key rename / pattern-key drift)
+      # exits 2 instead of approving a reduced contract.
+      - name: shellcheck check-release-aliases.sh + its self-test
+        run: shellcheck scripts/check-release-aliases.sh scripts/tests/test_check_release_aliases.sh
+      - name: Self-test check-release-aliases.sh (golden contract + partial-extraction teeth)
+        run: bash scripts/tests/test_check_release_aliases.sh
       # [OPUS-4.8] sq-mkza: end-to-end proof that BOTH honesty gates now cover the
       # paper-factory `.typ` sources (site/papers/**/*.typ) — the highest-stakes
       # OUTWARD surface. Before sq-mkza a hard-coded perf ratio or an unqualified
@@ -533,6 +599,22 @@ jobs:
       # scripts/check-*.py --self-test lints above.
       - name: Self-test the paper-evidence binding verifier (drift + missing-anchor FAIL; real evidence PASS — sq-gum8.13)
         run: python3 scripts/verify-paper-evidence.py --self-test
+      # [SONNET-4.6] sq-gum8.5 (epic sq-gum8): the constraint-count evaluation pack
+      # (bench/zk-compose/constraint_counts.json + CONSTRAINT_COUNTS.md) is GENERATED — every
+      # integer is joined from the regression-gated snapshot
+      # crates/sparq-zk-compose/tests/gate_count_snapshot.json, nothing is hand-typed. Without a
+      # gate the pack's guarantees rested on a contributor remembering to re-run the generator:
+      # a re-baselined snapshot, a hand-edited artefact, or a NEW snapshot member belonging to no
+      # described family could all merge with the committed pack silently stale. `--check` is that
+      # gate — it re-generates in-memory and fails unless BOTH artefacts are byte-identical, then
+      # re-verifies the COMMITTED JSON against the snapshot (every member size, scaling delta,
+      # invariance, both lanes) and the honesty guards (no related-work figure transcribed; the
+      # metric never flipped to wall-clock/canonical). classify() fails on an unclassified member,
+      # so a new circuit family cannot silently drop out. Stdlib-only, needs NO nargo/bb, no
+      # network — and this lane carries no paths filter, so it runs whenever the snapshot, the
+      # generator, or either artefact changes.
+      - name: "constraint-pack reproducibility (bench/zk-compose, sq-gum8.5) — GATING"
+        run: python3 bench/zk-compose/scripts/constraint_pack.py --check
       # [OPUS-4.8] sq-dhss (epic sq-lhwo): the agent-efficiency Phase-1 telemetry
       # harness (scripts/agent-telemetry/) is the BLOCKING measurement baseline —
       # it parses Claude Code transcript JSONL and aggregates token/cache/$ usage
@@ -761,12 +843,14 @@ jobs:
       - name: "Arm-path wiring inspection (contents: write + probe-before-arm — #3760)"
         run: python3 scripts/tests/test_arm_capability_wiring.py
       # [OPUS-5] sq-w1dxx: release.yml's container contract was pinned by a test that NOTHING
-      # ran, so every assertion in it was decorative. Wire it in beside its sibling
-      # workflow-contract tests: it pins the multi-arch push + the smoke/Trivy pre-push gates
-      # (sq-fvzi6, sq-n6rv, sq-p9xq) AND the trigger-gated ghcr tag sets — a `workflow_dispatch`
-      # dev-build must never push `:latest` (the tag deploy/paas + deploy/aws pin) and must carry
-      # a clean version-threaded tag. Needs PyYAML — installed once in the shared setup above.
-      - name: Release container contract (multi-arch push + trigger-gated ghcr tags)
+      # ran, so every assertion in it was decorative. Wire it in beside its sibling tests.
+      # sq-fvzi6 pins the multi-arch push; sq-n6rv + sq-p9xq pin sparq-server's trigger-gated
+      # GHCR tags so a workflow_dispatch dev build never pushes `:latest`, which deploy/paas
+      # and deploy/aws follow.
+      # [GPT-5] sq-fqrv4: also pin multi-arch push + smoke/Trivy pre-push gates for both native
+      # deployment servers, including the sparq-lws-core release contract.
+      # Needs PyYAML, installed once in the shared setup above.
+      - name: Release container contracts (both multi-arch images + safe ghcr tags)
         run: python3 scripts/tests/test_release_container_multiarch.py
       # [GPT-5] #3770 — structural backstop for the recurring failure-swallow shape:
       # once a sweep records a hard failure, a later transient exception must never

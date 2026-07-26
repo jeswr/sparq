@@ -31,7 +31,12 @@ const SH: &str = "http://www.w3.org/ns/shacl#";
 /// [OPUS-4.8] Pass-count floor for the `sh:sparql` node+property sub-suites at
 /// the pinned suite commit (`sq-qap0`). A ratchet: it may only RISE. Mirrors
 /// `w3c_core.rs`'s `BASELINE_PASS`. The CI `shacl-conformance` job re-checks it.
-const SHACL_SPARQL_FLOOR: usize = 5;
+/// [SONNET-4.6] sq-z1xv8 — the VALUE now lives once in the zero-dependency
+/// `sparq-conformance-floors` crate, which `sparq-conformance`'s central
+/// `scoreboard::SUITES` reads too, so the enforced floor and the reported floor are
+/// ONE `const` and cannot drift (replacing the old textual re-read of this file).
+/// Raise it THERE; the measurement narrative stays here.
+const SHACL_SPARQL_FLOOR: usize = sparq_conformance_floors::shacl::SPARQL_FLOOR;
 
 fn sparql_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

@@ -755,9 +755,11 @@ pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize 
 /// reif-dtr recovers the classic vocabulary from as-written quotations, but reif-ctr
 /// never runs, so inference never mints a triple term (in particular the documented
 /// `owl:sameAs` bridge composition derives no variant quotation). Same in-place /
-/// return-count / idempotency contract as [`materialize_owl_rl`]. Batch-only for
-/// now: `MaterializedOwlGraph`'s Fallback re-materialization always runs the full
-/// bridge.
+/// return-count / idempotency contract as [`materialize_owl_rl`]. The incremental
+/// counterpart is `MaterializedOwlGraph::with_reify_mode`, whose Fallback
+/// re-materialization runs the mode it was constructed with (third increment); plain
+/// `MaterializedOwlGraph::new` is `ReifyMode::Bridge`, i.e. this function's
+/// [`materialize_owl_rl`] default.
 #[cfg(feature = "quoted-triples")]
 pub fn materialize_owl_rl_reify(
     dict: &mut Dict,
@@ -2283,6 +2285,65 @@ mod tests {
                 "http://ex/marker"
             ),
             "eq-rep substitution"
+        );
+    }
+
+    // [SONNET-4.6] sq-y4ll5: direct production-path coverage for prp-ifp and the
+    // OWL-RL guard against the excluded ReflexiveObjectProperty feature.
+    #[test]
+    fn sameas_and_inverse_functional() {
+        // ex:hasSSN a InverseFunctionalProperty ; a hasSSN s ; b hasSSN s
+        // ⊢ a sameAs b. Then eq-rep carries a's marker edge to b.
+        let mut dict = Dict::new();
+        let (ssn, a, b, value, mark) = (
+            ex(&mut dict, "hasSSN"),
+            ex(&mut dict, "a"),
+            ex(&mut dict, "b"),
+            ex(&mut dict, "value"),
+            ex(&mut dict, "marker"),
+        );
+        let ty = dict.intern_iri(rdf::TYPE.as_str());
+        let inv_func = owl(&mut dict, "InverseFunctionalProperty");
+        let p = ex(&mut dict, "p");
+        let mut triples =
+            vec![[ssn, ty, inv_func], [a, ssn, value], [b, ssn, value], [a, p, mark]];
+        materialize_owl_rl(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        let same_as = [OWL, "sameAs"].concat();
+        assert!(
+            has(
+                &dict,
+                &set,
+                "http://ex/a",
+                &same_as,
+                "http://ex/b"
+            ),
+            "prp-ifp ⊢ sameAs"
+        );
+        assert!(
+            has(&dict, &set, "http://ex/b", "http://ex/p", "http://ex/marker"),
+            "eq-rep substitution after prp-ifp"
+        );
+    }
+
+    #[test]
+    fn reflexive_property_does_not_materialize_self_edges() {
+        // ReflexiveObjectProperty is excluded from OWL 2 RL. Merely declaring :p
+        // owl:ReflexiveProperty must therefore not invent :x :p :x for graph terms.
+        let mut dict = Dict::new();
+        let (p, x, y) = (ex(&mut dict, "p"), ex(&mut dict, "x"), ex(&mut dict, "y"));
+        let ty = dict.intern_iri(rdf::TYPE.as_str());
+        let reflexive = owl(&mut dict, "ReflexiveProperty");
+        let mut triples = vec![[p, ty, reflexive], [x, p, y]];
+        materialize_owl_rl(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(
+            !set.contains(&[x, p, x]),
+            "OWL-RL must not derive a reflexive edge for :x"
+        );
+        assert!(
+            !set.contains(&[y, p, y]),
+            "OWL-RL must not derive a reflexive edge for :y"
         );
     }
 

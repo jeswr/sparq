@@ -692,15 +692,19 @@ cargo build -p sparq-cli --features serialize-rdf
     clearly-positive real-data B/triple measurement — the col2-clustered synthetic win did NOT hold
     on WatDiv). The `spqcprm2` cargo feature (which implies `mmap`) exposes the emit config gate:
     `compress::with_emit_format(EmitFormat::V2, || …)` on a thread, or `SPARQ_EMIT_FORMAT=v2` for a
-    process, routes the store's `save_compressed` and the streaming `CompressedPermWriter` through
-    the V2 encoder. On the CLI that same choice is a per-invocation FLAG — `sparq-cli save …
+    process, routes the store's `save_compressed`, the streaming `CompressedPermWriter`, AND the
+    in-RAM compressed profile (`TripleStore::from_triples_compressed` / `Graph::into_compressed`,
+    i.e. `SPARQ_STORE_PROFILE=compressed` — [FABLE-5] sq-559dp) through the V2 encoder. On the CLI
+    that same choice is a per-invocation FLAG — `sparq-cli save …
     compressed --format-v2` / `sparq-cli recompress … --v2` ([SONNET-4.6] sq-kmve2) — which maps
     onto the per-thread override (so it beats the env var) and is a hard exit-2 error on a build
     without `spqcprm2`, never a silent V1 write. `CompressedPerm::encode_v2` builds a `V2` perm directly; `encode_emit` honours
     the gate in one place. With the feature OFF, `emit_format()` is a `const V1`, so the default
     build cannot emit V2 and every shipped index stays `SPQCPRM1` bit-for-bit.
-  - **Public API (`sparq_core::compress`).** With `mmap`: `enum Format`, `const FILE_MAGIC_V2`,
-    `fn CompressedPerm::encode_emit`. With `spqcprm2`: `enum EmitFormat`, `fn with_emit_format`,
+  - **Public API (`sparq_core::compress`).** Always: `fn CompressedPerm::encode_emit` (a plain
+    inlined `encode` when the gate is compiled out, so the `mmap`-off wasm in-RAM stream is
+    byte-identical). With `mmap`: `enum Format`, `const FILE_MAGIC_V2`.
+    With `spqcprm2`: `enum EmitFormat`, `fn with_emit_format`,
     `fn CompressedPerm::encode_v2`, `fn CompressedPermWriter::create_with`.
 - **JSON-LD W3C conformance is RATCHETED (honest baseline, not 100%).** A ratcheted W3C
   JSON-LD 1.1 conformance gate (sq-oy1f.2 + sq-3uos5 + sq-oy1f.19 + sq-oy1f) drives the official
