@@ -174,9 +174,11 @@ go red on regression. Run `cargo kani -p sparq-substrate --features compare` (Ka
 the `kani` cfg; the normal build strips the module). Honest boundaries: this proves the
 shared ALGORITHM over the bounded model, NOT the engine's `Value` impl
 (`sparq-engine/src/exec.rs` — covered by unit tests, the sparq-reason engine-parity suite and
-W3C conformance; next-wave in `research/mechanized-proof-program.md` §6); within the dateTime
-kind the indeterminate mixed-timezone window still falls back lexically (residual seam,
-beaded); and `exact_cmp` impls bounded by the i128 tower keep collapsed ties for lexicals
+W3C conformance; next-wave in `research/mechanized-proof-program.md` §6); the harnesses model a
+CONTRACT-CONFORMING `strict_cmp`, i.e. one TOTAL within the dateTime/date kinds (sq-2k5py made
+that a documented trait obligation, satisfied by `Timeline::cmp_tl_total` — the partial
+relational comparison's lexical fallback is the intransitive shape, pinned by the `witness4_*`
+unit test rather than by Kani); and `exact_cmp` impls bounded by the i128 tower keep collapsed ties for lexicals
 beyond ~38 significant digits (beaded).
 
 ### `overhead` — `#[cfg(feature = "overhead")]` — the zero-overhead DELTA harness

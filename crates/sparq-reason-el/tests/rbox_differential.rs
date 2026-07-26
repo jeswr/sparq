@@ -82,6 +82,25 @@ fn cr10_does_not_lift_downward() {
 }
 
 #[test]
+fn cr10_lifts_self_restriction_to_super_role() {
+    // [SONNET-4.6] sq-l2o9e: r ⊑ s, A ⊑ ∃r.Self, ∃s.Self ⊑ D. The r-self loop is also
+    // locally reflexive for its super-role s, so CR-Self-2 must derive A ⊑ D. A generic
+    // existential `(A,A)` link remains insufficient; this fixture specifically carries
+    // `ObjectHasSelf` provenance.
+    let ttl = format!(
+        "{PRE}
+         :r rdfs:subPropertyOf :s .
+         :A rdfs:subClassOf [
+             a owl:Restriction ; owl:onProperty :r ; owl:hasSelf \"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>
+         ] .
+         [
+             a owl:Restriction ; owl:onProperty :s ; owl:hasSelf \"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>
+         ] rdfs:subClassOf :D ."
+    );
+    assert_closure(&ttl, &["A", "D"], &[("A", "D")]);
+}
+
+#[test]
 fn cr11_transitive_role() {
     // r transitive (r ∘ r ⊑ r),  A ⊑ ∃r.B,  B ⊑ ∃r.D,  ∃r.D ⊑ E.
     // (A,B) ∈ R(r) and (B,D) ∈ R(r) compose to (A,D) ∈ R(r) (CR11), so CR4 over `∃r.D ⊑ E`

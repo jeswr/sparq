@@ -442,12 +442,8 @@ ruleset change was needed. What landed:
   the quoted-needle guard) + wiring inspection (enforce-default, ci-full override,
   label-toggle triggers, the nightly backstop job).
 
-**Deferred** (proceed-and-document): the §6.1 *selection-bug alarm* — auto-filing
-a P1 bead/issue that names the offending nightly job + the suspect PRs landed
-since the last green nightly — is a distinct, more involved correlation feature
-(it must cross-reference the per-PR selection summaries). The backstop itself
-(the full nightly run that reds the gate on any regression) is live now; the
-auto-alarm is tracked as a follow-up bead.
+**Shipped** (sq-va7at, PR #1526): the §6.1 *selection-bug alarm* now correlates
+failed nightly jobs with suspect landed PRs and auto-files a deduplicated issue.
 
 ## 7. Firm positions (decision record)
 

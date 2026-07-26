@@ -51,6 +51,22 @@
 //! permits its sub-actions in the evaluator — so the bridge maps the **request**
 //! action, which is concrete).
 //!
+//! ## SPARQL-query profile decision — [SONNET-4.6] sq-lrtc3.2
+//!
+//! A SPARQL query is represented by the standard `odrl:read` action; sparq does
+//! **not** mint a profile-specific query action IRI. Query execution observes graph
+//! content and therefore fits the existing `read` action and [`Mode::Read`] exactly,
+//! while a new action would require every policy producer and ODRL processor to learn
+//! sparq-specific vocabulary without providing a narrower enforcement mode.
+//!
+//! This contract does not map `odrl:use` transitively. The ODRL evaluator may use the
+//! action hierarchy to decide that a `use` permission covers a concrete `read`
+//! request, but materialization maps the **request action**, never the permission's
+//! ancestor action. A request presented merely as `odrl:use` remains unmapped because
+//! that umbrella also covers mutation actions; treating it as query/read would silently
+//! narrow an ambiguous request and could grant the wrong capability. Callers must
+//! present SPARQL query requests as `odrl:read`.
+//!
 //! # Prohibitions → `auth:deny<Mode>` (deny-overrides) — [OPUS-4.8] sq-w693
 //!
 //! A matched ODRL **Prohibition** is the dual of a Permit: it carves an action out
