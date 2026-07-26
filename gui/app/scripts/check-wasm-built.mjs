@@ -1,7 +1,7 @@
 // [OPUS-4.8] sq-ixc3.8 — hard-fail the GUI frontend build if the wasm bundle is absent.
 //
 // The operational workbench runs the in-tab WASM engine, so the build embeds the lean
-// `--features shacl,jsonld` bundle (the same one the site syncs). That bundle is git-ignored
+// `--features shacl,jsonld,…,forms` bundle (the same one the site syncs). That bundle is git-ignored
 // (`js/wasm/` is a build artifact), so a fresh checkout must build it FIRST:
 //
 //     (cd ../../js && npm ci && npm run build:wasm)
