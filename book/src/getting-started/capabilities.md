@@ -43,13 +43,14 @@ against a formal SPARQL 1.2 conformance suite.
 
 ## Research scaffolds (no security guarantee yet)
 
-Two capabilities are **research scaffolds**. They are honest models of the protocols, but they do
-**not** yet provide the cryptographic guarantee a relying party would need. Treat any engineering
-numbers as indicative, not as an audited cryptographic guarantee. The two maturity caveats below
-are single-sourced verbatim (build-time `{{#include}}`) from their canonical guides, so they
-cannot drift from the source of truth — see the
+Three capabilities are **research scaffolds**. They are honest models of the protocols, but they
+do **not** yet provide the cryptographic guarantee a relying party would need. Treat any
+engineering numbers as indicative, not as an audited cryptographic guarantee. The three maturity
+caveats below are single-sourced verbatim (build-time `{{#include}}`) from their canonical guides,
+so they cannot drift from the source of truth — see the
 [zk-query-proofs guide](https://github.com/jeswr/sparq/blob/main/skills/zk-query-proofs/SKILL.md),
-the [mpc guide](https://github.com/jeswr/sparq/blob/main/skills/mpc/SKILL.md), and
+the [mpc guide](https://github.com/jeswr/sparq/blob/main/skills/mpc/SKILL.md),
+the [e2ee-ng guide](https://github.com/jeswr/sparq/blob/main/skills/e2ee-ng/SKILL.md), and
 [SECURITY.md](https://github.com/jeswr/sparq/blob/main/SECURITY.md) for the full scope.
 
 **Zero-knowledge query proofs** —
@@ -59,6 +60,20 @@ the [mpc guide](https://github.com/jeswr/sparq/blob/main/skills/mpc/SKILL.md), a
 **Federated MPC** —
 
 {{#include ../../../skills/mpc/SKILL.md:scaffold-caveat}}
+
+<!-- [OPUS-5] issue #2548 — E2EE was documented nowhere in this guide. Its caveat is
+     {{#include}}d from the skills/e2ee-ng/SKILL.md `scaffold-caveat` anchor (the Maturity
+     block AND the Profile-SE leakage statement — the disclosure is half the caveat), so the
+     hedges stay intact at the source. The profile definitions live in the E2EE-SPARQL
+     proposal draft, not here. -->
+**End-to-end-encrypted RDF** — three profiles are specified in the
+[E2EE-SPARQL proposal draft](https://sparq.jeswr.org/specs/e2ee-sparql): client-side query over a
+blob store, broker-relayed collaboration through an untrusted relay, and a structure-exposed
+profile in which an ordinary server answers the *structural* fragment of a query while literal
+values stay encrypted. In the first two the query runs locally after decryption; the third
+discloses the whole graph structure to the server. No profile provides forward secrecy.
+
+{{#include ../../../skills/e2ee-ng/SKILL.md:scaffold-caveat}}
 
 ## Interfaces
 

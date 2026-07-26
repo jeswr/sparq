@@ -17,6 +17,12 @@ type HmacSha256 = Hmac<Sha256>;
 const LABEL_OBJECT_KEY: &[u8] = b"urn:jeswr:w3id:e2ee-ng:draft:2026-07 object-key v0";
 const LABEL_BLOCK_KEY: &[u8] = b"urn:jeswr:w3id:e2ee-ng:draft:2026-07 block-key v0";
 const LABEL_WRAP_KEY: &[u8] = b"urn:jeswr:w3id:e2ee-ng:draft:2026-07 recipient-wrap v0";
+// Profile SE (`se` feature) value-key label. Note the *different* URN stem: an SE
+// literal key belongs to the `e2ee-sparql` draft, not to the `e2ee-ng` block
+// profile, so an SE value key and an E2EE-NG object/block key can never coincide
+// even if a deployment feeds the same input keying material to both.
+#[cfg(feature = "se")]
+const LABEL_VALUE_KEY: &[u8] = b"urn:jeswr:w3id:e2ee-sparql:draft:2026-07 value-key v0";
 
 /// HKDF-Extract (RFC 5869 §2.2): `PRK = HMAC(salt, ikm)`.
 fn extract(salt: &[u8], ikm: &[u8]) -> [u8; 32] {
@@ -80,6 +86,36 @@ pub fn block_key(object_key: &[u8; 32], block: &BlockId, chunk_index: u64) -> [u
         LABEL_BLOCK_KEY,
         object_key,
         &[block.as_bytes(), &chunk_index.to_be_bytes()],
+    )
+}
+
+/// Profile SE per-position value key
+/// `= HKDF(dek; predicate || graph_present || graph)` — the AEAD key for one
+/// encrypted **literal value** (see [`crate::literal`]).
+///
+/// Binding the per-predicate DEK to the predicate (and, when the value sits in a
+/// named graph, to that graph IRI) means a DEK leaked for one predicate cannot
+/// open another predicate's values, and a value cannot be replayed from one
+/// named graph into another. `graph = None` is the default graph and is encoded
+/// distinguishably from `Some("")` via an explicit presence byte, so the two can
+/// never derive the same key.
+///
+/// The *subject* is deliberately NOT an input here — it is bound in the AEAD
+/// associated data instead (optionally, per
+/// [`ValueContext::subject`](crate::literal::ValueContext::subject)), because
+/// [`crate::literal::equality_tag`] must be comparable across subjects.
+#[cfg(feature = "se")]
+#[cfg_attr(docsrs, doc(cfg(feature = "se")))]
+pub fn value_key(dek: &Secret32, predicate: &str, graph: Option<&str>) -> [u8; 32] {
+    let present = [u8::from(graph.is_some())];
+    derive(
+        LABEL_VALUE_KEY,
+        dek.expose(),
+        &[
+            predicate.as_bytes(),
+            &present,
+            graph.unwrap_or("").as_bytes(),
+        ],
     )
 }
 

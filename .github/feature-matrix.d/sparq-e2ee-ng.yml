@@ -1,0 +1,47 @@
+# Feature-matrix fragment for `sparq-e2ee-ng`.
+#
+# One self-contained leg mapping per opt-in feature(group). Assembled into the
+# feature-matrix `opt-in-features` strategy by scripts/assemble-feature-matrix.py
+# (the `setup` job emits the combined matrix as JSON consumed via fromJSON). Adding a
+# leg for THIS crate edits only THIS file, so concurrent opt-in-feature PRs for
+# DIFFERENT crates never textually conflict (bead sq-ibrze). [OPUS-4.8]
+#
+# CONTRACT (gate-critical): each leg's emitted check-run NAME is `opt-in <name>`,
+# discovered as a REQUIRED check by the ci-summary `gate` aggregator BY NAME. Keep
+# `name` free of the whole words "advisory"/"informational" or the leg stops gating.
+# Fields: name (required -> check-run name), crate (required), features (required,
+# non-empty comma list), test (bool — run `cargo test` for the leg).
+
+# [OPUS-5] issue #2548 — sparq-e2ee-ng's opt-in Profile SE ("structure-exposed")
+# encrypted-literal codec. The whole `literal` module, `keyschedule::value_key`, and
+# `tests/literal_se.rs` (which is `#![cfg(feature = "se")]` in its entirety) are gated
+# on `se`. sparq-e2ee-ng is a non-default workspace member, so ci.yml's `--workspace`
+# archive compiles the crate's DEFAULT (capability/envelope/epoch) surface only and
+# passes NO `--features se` — the 21 SE tests are therefore compiled EMPTY and run ZERO
+# times without this leg (verified locally: `cargo test -p sparq-e2ee-ng` reports
+# `literal_se: 0 tests`, `--features se` reports 21). This leg is the ONLY thing that
+# executes them, and the C1 guard (scripts/check-feature-test-execution.py) fails
+# without it.
+#
+# This stays at the DEFAULT `test` tier deliberately — never demote it to `tier: check`.
+# The leg's subject is cryptographic: AEAD sealing under a fresh random nonce,
+# domain-separated HKDF value-key derivation, associated-data position binding
+# (predicate / graph / optional subject), pad-class discipline, fail-closed canonical
+# lexical parsing, and the separately-opt-in equality tag. Those are behaviours a
+# `cargo check` cannot observe; they only hold if the tests actually RUN. The feature
+# adds NO third-party dependency (it reuses the crate's existing AEAD / HKDF / HMAC /
+# deterministic-CBOR primitives) and adds no server-side decryption hook, so the leg
+# needs no extra system deps and `sparq-core` / `sparq-engine` / `sparq-substrate` stay
+# cipher-free.
+#
+# HONESTY: green here means the codec behaves as designed, NOT that the construction is
+# reviewed. The crate is research-grade and externally unaudited; production use stays
+# gated by sq-qhy4. Profile SE also leaves the full graph topology CLEARTEXT by
+# construction (research/e2ee-queryable-options.md §3.c; the profile's normative leakage
+# statement is clause SE-2 of site/specs/e2ee-sparql.typ) — a passing leg is not a
+# privacy result.
+# <!-- privacy-claims-allow: NEGATIVE/scoped — denies that a green leg is a review or a privacy result; names the open sq-qhy4 gate. -->
+- name: "sparq-e2ee-ng (se — Profile SE encrypted-literal codec)"
+  crate: "sparq-e2ee-ng"
+  features: "se"
+  test: true

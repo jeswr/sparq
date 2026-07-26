@@ -8,6 +8,20 @@ Solid + SPARQL spec-proposal program). This record **gates** the E2EE-queryable 
 bead **sq-tag1q.5** (`site/specs/e2ee-sparql.typ`): the spec must normatively define only
 the profiles this survey concludes are *specifiable today*.
 
+> **[LANDED] `[OPUS-5]` 2026-07-26 (issue #2548).** The gated spec now exists —
+> [`site/specs/e2ee-sparql.typ`](../site/specs/e2ee-sparql.typ), published at
+> `/specs/e2ee-sparql` — and it took §5's recommendation, including the T0–T4 tiers as a
+> normative vocabulary, the impossibility statement in the body, the rejections with citations,
+> and the informative ZK/MPC annex. Two deviations, both deliberate: (a) it defines **three**
+> profiles, adding **Profile BR** (broker-relayed, NextGraph-shaped) from
+> [`e2ee-queryable-nextgraph-variant-2026-07.md`](./e2ee-queryable-nextgraph-variant-2026-07.md)
+> between CS and SE, per the program reconciliation; and (b) §3.c's **Profile SE** value codec
+> is now *implemented* as an opt-in feature of `crates/sparq-e2ee-ng` rather than remaining
+> design-only — the profile's key distribution and authoring pipeline are still unimplemented,
+> and the whole estate remains research-grade and externally unaudited (sq-qhy4). §5.6's
+> prohibitions (no server-side decrypt UDF, no ORE, no SSE indexes) are carried as normative
+> clauses `CORE-6`, `REJ-1`, and `REJ-3`.
+
 > **Honesty banner.** General **server-side SPARQL evaluation over end-to-end-encrypted
 > data without leakage does not exist** — not in the literature, not in any deployed
 > system, and not in sparq. Every known scheme that lets an untrusted server answer

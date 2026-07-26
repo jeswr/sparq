@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Opt-in E2EE-NG profile primitives for sparq: deterministic capability encoding, read/publish/admin capability separation, recipient-wrapped secrets, randomized block/commit envelopes, a domain-separated key schedule, signatures, and epoch transitions. RESEARCH-GRADE, NOT externally audited — production use gated by sq-qhy4."
+description = "Opt-in E2EE-NG profile primitives for sparq: deterministic capability encoding, read/publish/admin capability separation, recipient-wrapped secrets, randomized block/commit envelopes, a domain-separated key schedule, signatures, and epoch transitions, plus an opt-in (`se`) encrypted-literal codec for the structure-exposed Profile SE, whose disclosure posture leaves graph structure cleartext. RESEARCH-GRADE, NOT externally audited — production use gated by sq-qhy4."
 repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
@@ -60,3 +60,10 @@ proptest = "1"
 # opt-in tier at the primitives layer). The feature exists so a downstream selecting
 # `sparq-e2ee-ng` stays explicit and future sync/broker tiers can gate additively.
 default = []
+# OPT-IN Profile SE ("structure-exposed") encrypted-literal codec: `src/literal.rs`
+# plus `keyschedule::value_key`. OFF by default because SE is a DIFFERENT, weaker
+# disclosure posture from the block profile — it leaves the full graph topology
+# CLEARTEXT for an untrusted server to query and protects only literal VALUES
+# (research/e2ee-queryable-options.md §3.c). Adds NO third-party dependency: it
+# reuses this crate's existing AEAD / HKDF / HMAC / deterministic-CBOR primitives.
+se = []

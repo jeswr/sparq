@@ -118,6 +118,23 @@ export const SPECS: Spec[] = [
     blurb:
       "A greenfield, implementation-ready proposal for named-graph-aware replicated RDF datasets: dotted add-wins observed-remove state, mandatory origin skolemisation, evaluate-at-origin SPARQL Update compilation, a canonical out-of-band delta journal, precisely scoped dataset convergence, and separate replica, delta-relay, and origin-evaluator conformance classes.",
   },
+  // [OPUS-5] sq-tag1q.5 / issue #2548 — the E2EE spec artifact the program was gating on.
+  // Consolidates the four E2EE research records (survey + privacy authority + wire binding +
+  // reconciliation) into ONE draft with three profiles. HONESTY: it leads with the negative
+  // result (no leakage-free server-side SPARQL over E2EE data exists), makes leakage a
+  // normative vocabulary, and claims no proven cryptographic property (gate sq-qhy4).
+  {
+    slug: "e2ee-sparql",
+    source: "e2ee-sparql.typ",
+    title:
+      "E2EE-SPARQL: End-to-End-Encrypted RDF Datasets with SPARQL Query — Profiles and Disclosed Leakage",
+    shortName: "e2ee-sparql",
+    status: "unofficial",
+    date: "2026-07-26",
+    editors: "Jesse Wright · the sparq project",
+    blurb:
+      "Three conformance profiles for querying RDF that a server cannot read, starting from the negative result that leakage-free server-side SPARQL over end-to-end-encrypted data does not exist: Profile CS (mandatory — blob-store server, full SPARQL 1.1 evaluated client-side), Profile BR (optional — an untrusted always-on relay for multi-writer collaboration, query still always local), and Profile SE (optional — literal values encrypted, graph structure cleartext, so an ordinary server evaluates the structural fragment, at the cost of disclosing the full graph topology). Leakage is a normative vocabulary (tiers T0–T4) every profile must declare; deterministic/order-revealing value encryption and server-side decryption are rejected on the attack record. Research-grade, NOT externally audited (sq-qhy4), and no forward secrecy in any profile.",
+  },
 ];
 
 export function specBySlug(slug: string): Spec | undefined {
