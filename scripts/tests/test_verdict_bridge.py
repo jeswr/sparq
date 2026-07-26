@@ -116,6 +116,24 @@ class TestVerdictParsing(unittest.TestCase):
             with self.subTest(ordering=[c["id"] for c in ordering]):
                 self.assertEqual(vb.head_bound_verdict(ordering, HEAD).value, "fail")
 
+    def test_recency_is_created_at_not_comment_id(self):
+        """Comment ids are not monotone across a PR's timeline (reviews, transfers,
+        cross-posted bodies), so ordering by id can silently resurrect a stale pass.
+        Here the RETRACTION carries the LOWER id but the LATER created_at."""
+        stale_pass = comment(
+            f"{HEAD}\n\nVERDICT: pass", created_at="2026-01-01T00:00:00Z", cid=900
+        )
+        retraction = comment(
+            f"{HEAD}\n\nVERDICT: fail", created_at="2026-01-02T00:00:00Z", cid=100
+        )
+        self.assertEqual(
+            vb.head_bound_verdict([stale_pass, retraction], HEAD).value, "fail"
+        )
+        self.assertEqual(
+            decision(pr(labels={vb.REVIEW_ATTESTATION}), [stale_pass, retraction]),
+            "retract",
+        )
+
     def test_editing_an_older_pass_cannot_reorder_it_ahead_of_a_newer_fail(self):
         """Ordering uses immutable created_at — an edit must not defeat a retraction."""
         early = dict(

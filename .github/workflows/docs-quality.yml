@@ -748,6 +748,23 @@ jobs:
         run: python3 scripts/check-fast-fix-ring-guard.py --self-test
       - name: "Enforce the fast-fix ring fail-closed cross-repo guard (#3475) — GATING"
         run: python3 scripts/check-fast-fix-ring-guard.py
+      # [OPUS-5] The VERDICT-comment -> review:pass bridge (scripts/verdict-bridge.py,
+      # .github/workflows/verdict-bridge.yml). It is the ONLY automated writer of the
+      # label the whole arming chain admits on, so a regression in it either strands
+      # green PRs outside the merge queue again or — far worse — attests a PR whose
+      # verdict is stale. The suite pins BOTH: the pure fail-closed predicate
+      # (line-anchored trailing verdict, FULL 40-hex head binding, trusted
+      # author_association, latest-by-immutable-created_at retraction, hold labels,
+      # never-retract-on-absence) AND the YAML seam, parsed STRUCTURALLY with PyYAML so
+      # an `if: false`, a deleted step, a wrong sparse-checkout/ref/cron input, or a
+      # privilege escalation reds here — substring assertions catch none of those.
+      # A cross-file check imports the LIVE auto-arm.py / rearm-sweeper.py so the
+      # bridge can never attest a PR those policies would refuse. Stdlib + PyYAML
+      # (installed in the shared setup above); no gh, no git, no network.
+      - name: Self-test verdict-bridge.py (fail-closed predicate — head binding + retraction)
+        run: python3 scripts/verdict-bridge.py --self-test
+      - name: Verdict-bridge policy + workflow-seam inspection (structural YAML)
+        run: python3 scripts/tests/test_verdict_bridge.py
       # [OPUS-5] sparq-org/sparq#3760 — THE ARM PATH. The re-arm sweeper spent days unable
       # to enable auto-merge at all ("Resource not accessible by integration
       # (enablePullRequestAutoMerge)") because its job declared `contents: read` while the
