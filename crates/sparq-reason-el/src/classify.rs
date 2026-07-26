@@ -565,13 +565,15 @@ fn add_self_link_rbox(
 }
 
 /// The classification result: for each NAMED class, the set of NAMED super-classes it is
-/// subsumed by (excluding itself, ⊤, and fresh normalization names), plus the unsatisfiable
-/// (`⊑ ⊥`) named classes.
+/// subsumed by (excluding itself, ⊤, and fresh normalization names), plus named-class
+/// unsatisfiability and the separate global `⊤ ⊑ ⊥` verdict.
 pub struct Classification {
     /// `subsumers[c]` = named concepts strictly subsuming the named concept `c`.
     pub subsumers: FxHashMap<Concept, Vec<Concept>>,
     /// Named concepts `c` with `⊥ ∈ S(c)` — i.e. `c ⊑ owl:Nothing` (unsatisfiable).
     pub unsatisfiable: Vec<Concept>,
+    /// [SONNET-4.6] sq-26zuf: whether `⊥ ∈ S(⊤)`, i.e. the ontology derives `⊤ ⊑ ⊥`.
+    pub thing_unsatisfiable: bool,
 }
 
 /// Projects the saturation onto NAMED classes only: drops ⊤/⊥/fresh-name subsumers and
@@ -580,6 +582,7 @@ pub struct Classification {
 pub fn classify(sat: &Saturation, names: &Names) -> Classification {
     let mut subsumers: FxHashMap<Concept, Vec<Concept>> = FxHashMap::default();
     let mut unsatisfiable = Vec::new();
+    let thing_unsatisfiable = sat.s[TOP as usize].contains(&BOTTOM);
     for c in 0..sat.s.len() as Concept {
         if names.dict_of(c).is_none() {
             continue; // not a named class (⊤/⊥/fresh).
@@ -601,6 +604,7 @@ pub fn classify(sat: &Saturation, names: &Names) -> Classification {
     Classification {
         subsumers,
         unsatisfiable,
+        thing_unsatisfiable,
     }
 }
 

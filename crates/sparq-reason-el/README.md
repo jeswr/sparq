@@ -44,7 +44,7 @@ For a typed view (super-classes, subsumption test, unsatisfiable classes) use
 - **CR4 existential traversal** — the load-bearing rule RL lacks; reasons through `∃r` links.
 - **Same dict/Graph seam as RL** — emits the lattice as `rdfs:subClassOf` triples queryable by
   plain BGP eval; no store changes.
-- **Unsatisfiable-class detection** — `owl:disjointWith` clashes surface `C ⊑ owl:Nothing`.
+- **Unsatisfiability** — named clashes surface in `unsatisfiable_classes`; global `owl:Thing ⊑ owl:Nothing` in `Report::thing_unsatisfiable`.
 - **Safe nominals — CR6** — singleton `owl:oneOf` (`{a}`) and object-valued `owl:hasValue`
   (`∃r.{a}`) classify (the reachability-guarded merge rule; every derivation sound, with
   negative tests pinning the guard). Completeness is claimed for typical safe usage, NOT for
