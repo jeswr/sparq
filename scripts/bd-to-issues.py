@@ -809,6 +809,44 @@ def _self_test():
         chk("the cache records the verdict, not the raw permission", shared, {"randomuser": False})
     finally:
         globals()["_run"] = real_run
+
+    # --- THE YAML SEAM: a self-test no workflow INVOKES is not a gate (review round 2) ----------
+    # Measured on the merged tree: `bd-to-issues.py --self-test` was invoked by NO workflow, and
+    # `ci-close-merged-beads.py --self-test` ran only POST-merge in bead-autoclose.yml
+    # (pull_request_target: [closed], ref: main) — after the change it would have caught was
+    # already on main. Every assertion above was therefore ungated on the PR that could break it.
+    #
+    # SCOPED ON PURPOSE. A whole-file substring search passes for the WRONG reason here, because
+    # each filename appears in BOTH the `paths:` filter and the `run:` block — that exact vacuity
+    # has already been measured twice on this repo's routing gate. So: count the filename inside
+    # the `paths:` region only (exactly 2 — the pull_request filter AND the push filter), and
+    # assert the `--self-test` invocation inside the steps region only.
+    wf = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                      "..", ".github", "workflows", "routing-self-tests.yml")
+    wf_src = open(wf, encoding="utf-8").read()
+    paths_region = wf_src[:wf_src.index("permissions:")]
+    steps_region = wf_src[wf_src.index("    steps:"):]
+    for script in ("scripts/bd-to-issues.py", "scripts/ci-close-merged-beads.py"):
+        chk(f"{script} is a path trigger on BOTH pull_request and push",
+            paths_region.count(f'"{script}"'), 2)
+        chk(f"{script} --self-test is actually INVOKED, not merely path-filtered",
+            f"python3 {script} --self-test" in steps_region, True)
+    # ci-summary auto-discovers a sibling as GATING iff its name contains neither "advisory"
+    # nor "informational" — a rename would silently demote this to a non-blocking check.
+    job_name = re.search(r"^    name: (.+)$", wf_src, re.M).group(1).lower()
+    chk("the job name keeps this workflow gate-discoverable",
+        ("advisory" in job_name, "informational" in job_name), (False, False))
+    # merge_group cannot carry a paths filter; without the trigger the queue ref never exposes
+    # this gating check and the merge queue would merge past it.
+    chk("merge_group trigger present (the queue ref must expose the gate)",
+        bool(re.search(r"(?m)^  merge_group:", wf_src)), True)
+    # The two scripts share a marker regex that must not drift. Pin that they are gated
+    # TOGETHER, so a change to either re-runs both.
+    chk("MARKER_RE stays in sync with ci-close-merged-beads _MARKER_RE",
+        MARKER_RE.pattern,
+        re.search(r"_MARKER_RE = re\.compile\(r\"(.+?)\"\)",
+                  open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "ci-close-merged-beads.py"), encoding="utf-8").read()).group(1))
     dup = [dict(legit), dict(legit, number=46)]
     chk("two issues sharing a bd-id are never owned (fail closed)",
         migration_owned(dup, {"maintainer"}), set())
