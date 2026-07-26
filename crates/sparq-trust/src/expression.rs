@@ -1101,10 +1101,18 @@ pub fn mint_status_attestation(
 
 // ─────────────────────────────── helpers ───────────────────────────────
 
-/// `true` for a UTC `xsd:dateTime` lexical `YYYY-MM-DDTHH:MM:SS[.fff]Z`.
+/// `true` for a **valid** UTC `xsd:dateTime` lexical `YYYY-MM-DDTHH:MM:SS[.fff]Z`.
 /// Deliberately strict (UTC only): the rewrite embeds the lexical in FILTER
 /// comparisons, and a single timezone form keeps lexical and timeline order
 /// aligned across engines.
+///
+/// Beyond the fixed `…Z` structure this range-checks the calendar and clock
+/// fields — Gregorian month (01–12), day-of-month under the proleptic-Gregorian
+/// leap-year rule, hour (00–23), minute (00–59) and second (00–59) — so an
+/// impossible instant such as `2026-99-99T99:99:99Z`, `2026-02-30T00:00:00Z` or a
+/// non-leap-year `02-29` is rejected here rather than interpolated into a status
+/// / certification-validity FILTER and left to downstream engine behaviour.
+/// (`xsd:dateTime` forbids leap seconds, so a `:60` second is out of range.)
 fn is_utc_datetime_lexical(lex: &str) -> bool {
     let b = lex.as_bytes();
     if b.len() < 20 || b[b.len() - 1] != b'Z' {
@@ -1122,8 +1130,36 @@ fn is_utc_datetime_lexical(lex: &str) -> bool {
         }
     }
     let frac = &b[19..b.len() - 1];
-    frac.is_empty()
-        || (frac[0] == b'.' && frac.len() > 1 && frac[1..].iter().all(u8::is_ascii_digit))
+    if !(frac.is_empty()
+        || (frac[0] == b'.' && frac.len() > 1 && frac[1..].iter().all(u8::is_ascii_digit)))
+    {
+        return false;
+    }
+
+    // The structural loop above fixed every position below to an ASCII digit, so
+    // these field reads cannot underflow: range-check the calendar and clock.
+    let two = |i: usize| u32::from(b[i] - b'0') * 10 + u32::from(b[i + 1] - b'0');
+    let year = u32::from(b[0] - b'0') * 1000
+        + u32::from(b[1] - b'0') * 100
+        + u32::from(b[2] - b'0') * 10
+        + u32::from(b[3] - b'0');
+    let (month, day, hour, minute, second) = (two(5), two(8), two(11), two(14), two(17));
+    if !(1..=12).contains(&month) || day == 0 || hour > 23 || minute > 59 || second > 59 {
+        return false;
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ => {
+            if leap {
+                29
+            } else {
+                28
+            }
+        }
+    };
+    day <= max_day
 }
 
 /// Unix seconds → canonical UTC `xsd:dateTime` lexical (proleptic Gregorian;
@@ -1979,14 +2015,32 @@ mod tests {
 
     #[test]
     fn utc_datetime_lexical_validation_is_strict() {
+        // Valid: canonical, fractional seconds, boundary clock, and genuine leap days.
         assert!(is_utc_datetime_lexical("2026-07-05T00:00:00Z"));
         assert!(is_utc_datetime_lexical("2026-07-05T23:59:59.123Z"));
+        assert!(is_utc_datetime_lexical("2024-02-29T00:00:00Z")); // 2024 divisible by 4 → leap
+        assert!(is_utc_datetime_lexical("2000-02-29T12:30:45Z")); // 2000 divisible by 400 → leap
         for bad in [
+            // structural
             "2026-07-05T00:00:00",       // no zone
             "2026-07-05T00:00:00+02:00", // non-UTC offset
             "2026-07-05 00:00:00Z",      // no T
             "garbage",
             "2026-07-05T00:00:00.Z", // empty fraction
+            // calendar range
+            "2026-99-99T99:99:99Z", // every field out of range
+            "2026-00-05T00:00:00Z", // month 00
+            "2026-13-05T00:00:00Z", // month 13
+            "2026-07-00T00:00:00Z", // day 00
+            "2026-07-32T00:00:00Z", // day 32
+            "2026-02-30T00:00:00Z", // February never has 30 days
+            "2026-04-31T00:00:00Z", // April has 30 days
+            "2026-02-29T00:00:00Z", // 2026 is NOT a leap year
+            "1900-02-29T00:00:00Z", // 1900 divisible by 100 but not 400 → not leap
+            // clock range
+            "2026-07-05T24:00:00Z", // hour 24
+            "2026-07-05T00:60:00Z", // minute 60
+            "2026-07-05T00:00:60Z", // second 60 (xsd:dateTime forbids leap seconds)
         ] {
             assert!(!is_utc_datetime_lexical(bad), "must reject: {}", bad);
         }
