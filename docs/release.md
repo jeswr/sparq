@@ -374,6 +374,16 @@ you flip.
    label. Adding `review:pass` to the Release PR does not make it armable. It fails closed:
    an unknown head branch refuses rather than admits. The Release PR is merged by a
    maintainer, by hand, deliberately.
+
+   **Read "armed" literally.** The PreToolUse hook recognises `gh pr merge` **with**
+   `--auto`. A direct `gh pr merge <n> --squash` (no `--auto`), `--admin`, a
+   `gh api graphql … enablePullRequestAutoMerge` mutation, a REST
+   `PUT …/pulls/<n>/merge`, a backslash line-continuation, or shell-variable indirection
+   all reach `gh` unblocked — verified by executing the hook against a fake `gh`. That is a
+   deliberate scope (the hook governs *arming*), not an oversight, and it is why
+   protection 2 exists: the interval guard runs inside `release-plz.yml` itself and does
+   not care how the merge happened. If the guard script itself cannot run,
+   `.claude/settings.json`'s wrapper **denies** any `gh pr merge` rather than allowing it.
 2. **A minimum release interval.** `scripts/release-interval-guard.py --enforce` runs in
    `release-plz.yml`'s `release-plz-release` job **before** the tag/publish step.
    `MIN_RELEASE_INTERVAL` is 24 hours, measured from `max(newest v* tag date, newest
