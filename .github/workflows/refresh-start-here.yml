@@ -24,6 +24,14 @@
 # `contents: write` — a downgrade of `issues` to `read`, or an escalation of `contents` to `write`,
 # reds scripts/tests/test_start_here_render.py::TestRefreshWorkflowWiring.
 #
+# TRUST NOTE on the `pull_request` trigger. For `pull_request` events GitHub runs the workflow file
+# as it exists on the PR, so a SAME-REPO PR that edits this file runs its own version on close with
+# `issues: write`. That blast radius is bounded to editing issues, which anyone who can push a
+# branch here can already do with their own token — and fork PRs (the untrusted case) are skipped by
+# the job `if` below AND get a read-only token regardless. If that ever stops being acceptable, drop
+# the `pull_request` trigger and rely on `issues: [closed]` plus the cron; prompt PR removal is a
+# latency nicety, not a correctness requirement.
+#
 # NOT A GATE. This is a scheduled maintenance job, not a PR check; the renderer's own hermetic
 # `--self-test` plus scripts/tests/test_start_here_render.py run as part of the gating
 # `routing-self-tests` workflow, which is where a broken renderer must fail.
