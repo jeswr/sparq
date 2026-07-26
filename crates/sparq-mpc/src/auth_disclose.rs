@@ -1,10 +1,19 @@
 // [OPUS-4.8] sq-6fv7 (sq-ka8m residual; design Hole 4): route the THREE disclose
 // path opens — the square-protocol `a²`, the masked open `c = sum + r`, and the
-// boolean `verdict` — through the §2.5 batched IT-MAC check, the malicious-secure
+// boolean `verdict` — through the §2.5 batched IT-MAC check, the IT-MAC-hardened
 // twin of `compare::disclose_threshold_verdict`.
-//! Honest-majority **malicious-with-abort** secure threshold disclosure over an
+//! Honest-majority **tamper-evident-with-abort** threshold disclosure over an
 //! EXISTING secret-shared sum — the IT-MAC upgrade of the semi-honest
 //! [`crate::compare::disclose_threshold_verdict`] (Hole 4, the federation £100k path).
+//!
+//! **⚠ This module is EXPERIMENTAL and is NOT malicious-secure.** Its public entry
+//! point is [`experimental_tamper_evident_disclose_threshold_verdict`] — renamed from
+//! `malicious_disclose_threshold_verdict` in review round 2, because the old name
+//! claimed a tier the code demonstrably misses (see "Integrity coverage is NOT total"
+//! below, and that function's own docs for why a rename, rather than a revert, is the
+//! containment that is actually available). The prose below describes the IT-MAC
+//! construction as designed; read the residual section before treating any of it as a
+//! guarantee against an actively-deviating party. `[SONNET-4.6]`
 //!
 //! ## What this closes (sq-ka8m residual)
 //!
@@ -86,8 +95,9 @@
 //! Everything above describes the *masked-open* construction, which capped this path's
 //! sum at `2^`[`crate::compare::DECOMP_VALUE_BITS`]` = 2^20` — a 40-bit gap behind the
 //! semi-honest [`crate::compare::disclose_threshold_verdict`], which sq-bgsn had already
-//! lifted to the full `2^60`. [`malicious_disclose_threshold_verdict`] now routes
-//! through `auth_bit_decompose_rabbit` instead: the Rabbit (eprint 2021/119) wrap
+//! lifted to the full `2^60`.
+//! [`experimental_tamper_evident_disclose_threshold_verdict`] now routes through
+//! `auth_bit_decompose_rabbit` instead: the Rabbit (eprint 2021/119) wrap
 //! recovery, with **every** product and degree-reduce in its solved-bits / LTBits /
 //! ripple-add / ripple-sub chain a [`crate::shamir::MacSession::auth_mul`], its single
 //! masked open MAC-checked before `c` is read, its range proof
@@ -121,6 +131,19 @@
 //!   operands (Chida-et-al. style), treat this path as a research/semi-honest surface:
 //!   do NOT deploy it as the integrity tier against a genuinely malicious party.** See
 //!   "What the MAC-check does NOT cover" on `auth_bit_decompose_rabbit`. `[SONNET-4.6]`
+//! - **Containment applied (review round 2).** The entry point was renamed
+//!   `malicious_disclose_threshold_verdict` →
+//!   [`experimental_tamper_evident_disclose_threshold_verdict`], so the API no longer
+//!   advertises the tier it misses; a doc caveat on a `malicious_*`-named drop-in is
+//!   not containment. Two things this deliberately did NOT do, and why. **(a) It did not revert the sq-km34.6 Rabbit
+//!   lift.** `auth_secret_is_zero` is byte-identical to `origin/main`, where the
+//!   masked-open `auth_verify_sum_in_range` fed it the same adopted second-operand mask
+//!   TWICE — the pre-lift production path was exploitable in exactly the same way, at a
+//!   40-bit-narrower magnitude. Reverting would delete the witness, not the break.
+//!   **(b) It did not "fix" the composition in this module.** Any in-module repair is
+//!   local to one `auth_mul` call site while the adoption is a property of the
+//!   primitive, present at every gate on the chain; the honest fix is the `MacSession`
+//!   change named above, and a partial patch here would read as closure. `[SONNET-4.6]`
 //! - The dishonest-majority SPDZ regime (route (b) / sq-j5ok) is NOT entered. `[OPUS-4.8]`
 
 use crate::authenticated::{auth_add, auth_add_constant, auth_scale, auth_sub, AuthenticatedShare};
@@ -138,7 +161,7 @@ use crate::shamir::{MacSession, ShamirBackend, Share};
 /// [`PartialResult`] carrying ONLY the boolean `sum > public_threshold`, never the
 /// exact sum, with every opened value MAC-checked before it is acted on.
 ///
-/// # ⚠ NOT malicious-secure today — do not deploy as the integrity tier
+/// # ⚠ EXPERIMENTAL — NOT malicious-secure; not an integrity tier
 ///
 /// [SONNET-4.6] Review round 1 demonstrated an end-to-end break:
 /// [`crate::shamir::MacSession::auth_mul`] ADOPTS a value tamper on its second operand,
@@ -150,6 +173,22 @@ use crate::shamir::{MacSession, ShamirBackend, Share};
 /// tampered OPEN, not an arbitrary malicious party. Confidentiality (only the verdict
 /// bit is disclosed) is unaffected. See the module docs' "Integrity coverage is NOT
 /// total" for the `MacSession`-level fix this needs.
+///
+/// **Review round 2 — why this function is no longer named `malicious_*`.** A caveat in
+/// the docs is not containment: an API called `malicious_disclose_threshold_verdict` is
+/// read as *the* integrity tier, and a drop-in with that name returning a wrong verdict
+/// under its own named adversarial setting is a misrepresentation no doc comment fixes.
+/// The defect is NOT in the sq-km34.6 Rabbit lift and reverting it would not remove the
+/// break — `auth_secret_is_zero` is unchanged from the pre-lift `origin/main`, where
+/// the masked-open `auth_verify_sum_in_range` fed it the same adopted second-operand
+/// mask TWICE, so the previous production path was exploitable identically and at a
+/// 40-bit-narrower magnitude. Nor can the composition be repaired inside this module:
+/// [`crate::shamir::MacSession::mac_check`] can only cover values that are opened, so
+/// binding both multiplication operands is a `MacSession` change (Chida-et-al. gate
+/// verification). The containment that IS available today is the one applied here —
+/// the name and the tier statement no longer claim a guarantee the code does not
+/// deliver. Renaming is cheap and total: `sparq-mpc` is `publish = false` and nothing
+/// in the workspace depends on it, so no caller is silently retargeted. `[SONNET-4.6]`
 ///
 /// `sum_shares` is the degree-`t` sharing of the cumulative aggregate;
 /// `public_threshold` is the public bar (e.g. £100k). [OPUS-4.8] sq-km34.6:
@@ -166,12 +205,13 @@ use crate::shamir::{MacSession, ShamirBackend, Share};
 ///
 /// Honest-majority, **tamper-evident-with-abort on the opened values** (design §3 aims
 /// at malicious-with-abort; the delivered tier is weaker). `[OPUS-4.8]` `[SONNET-4.6]`
-pub fn malicious_disclose_threshold_verdict(
+pub fn experimental_tamper_evident_disclose_threshold_verdict(
     backend: &ShamirBackend,
     sum_shares: &[Share],
     public_threshold: u64,
 ) -> Result<PartialResult, MpcError> {
-    let verdict = malicious_threshold_over_sum(backend, sum_shares, public_threshold)?;
+    let verdict =
+        experimental_tamper_evident_threshold_over_sum(backend, sum_shares, public_threshold)?;
     Ok(PartialResult {
         holder: HolderId::new("federation"),
         vars: vec![oxrdf::Variable::new_unchecked("over_threshold")],
@@ -181,11 +221,11 @@ pub fn malicious_disclose_threshold_verdict(
     })
 }
 
-/// The boolean core of [`malicious_disclose_threshold_verdict`]: run the full
-/// MAC-checked decompose + range-proof + compare chain over the existing `[sum]`
-/// and return `sum > public_threshold`. Separated so tests can assert the boolean
+/// The boolean core of [`experimental_tamper_evident_disclose_threshold_verdict`]: run
+/// the full MAC-checked decompose + range-proof + compare chain over the existing
+/// `[sum]` and return `sum > public_threshold`. Separated so tests can assert the boolean
 /// directly (the `PartialResult` wrapper is the only difference from the public fn).
-fn malicious_threshold_over_sum(
+fn experimental_tamper_evident_threshold_over_sum(
     backend: &ShamirBackend,
     sum_shares: &[Share],
     public_threshold: u64,
@@ -199,7 +239,8 @@ fn malicious_threshold_over_sum(
     // `2^DECOMP_VALUE_BITS = 2^20` cap is gone).
     if public_threshold >= RABBIT_VALUE_MAX_EXCLUSIVE {
         return Err(MpcError::Protocol(format!(
-            "malicious_disclose_threshold_verdict: public_threshold = {public_threshold} is out of \
+            "experimental_tamper_evident_disclose_threshold_verdict: public_threshold = \
+             {public_threshold} is out of \
              range (must be < 2^{RABBIT_VALUE_BITS} = {RABBIT_VALUE_MAX_EXCLUSIVE}; the \
              authenticated in-MPC Rabbit bit-decomposition recovers the secret sum through the \
              modular wrap, so with p = 2^61-1 the supported magnitude is the full \
@@ -256,7 +297,7 @@ fn malicious_threshold_over_sum(
 /// AND an [`MacSession::auth_mul`], so the recovered sum bits stay MAC-carried.
 ///
 /// [OPUS-4.8] sq-km34.6 — now **TEST-ONLY**: superseded on the production
-/// [`malicious_disclose_threshold_verdict`] path by the authenticated Rabbit
+/// [`experimental_tamper_evident_disclose_threshold_verdict`] path by the authenticated Rabbit
 /// [`auth_bit_decompose_rabbit`], which recovers the sum exactly through the modular
 /// wrap (no statistical value/mask slack) and so supports the full
 /// [`RABBIT_VALUE_BITS`] = 60 magnitude rather than this path's
@@ -371,7 +412,8 @@ fn auth_verify_sum_in_range(
     let recompose_diff = auth_sub(auth_sum, &recomposed)?;
     if !auth_secret_is_zero(session, backend, &recompose_diff)? {
         return Err(MpcError::Protocol(format!(
-            "malicious_disclose_threshold_verdict: in-protocol range proof FAILED — the \
+            "experimental_tamper_evident_disclose_threshold_verdict: in-protocol range \
+             proof FAILED — the \
              secret-shared sum does not equal the bit-composition of its recovered \
              {DECOMP_MASK_BITS} bits (the masked open `sum + r` wrapped the field modulus \
              p = 2^61-1, or the sum has content above bit {DECOMP_MASK_BITS}). The verdict would \
@@ -384,7 +426,8 @@ fn auth_verify_sum_in_range(
     // zero ⇔ [[high_part]] == 0.
     if !auth_secret_is_zero(session, backend, &high_part)? {
         return Err(MpcError::Protocol(format!(
-            "malicious_disclose_threshold_verdict: in-protocol range proof FAILED — the \
+            "experimental_tamper_evident_disclose_threshold_verdict: in-protocol range \
+             proof FAILED — the \
              secret-shared sum is >= 2^{DECOMP_VALUE_BITS} = {DECOMP_VALUE_MAX_EXCLUSIVE} (a bit \
              at or above position {DECOMP_VALUE_BITS} is set). That exceeds the statistically-safe \
              magnitude the in-MPC masked bit-decomposition supports, so the verdict is REJECTED \
@@ -735,7 +778,8 @@ fn auth_verify_value_in_range_rabbit(
     let recompose_diff = auth_sub(auth_value, &recomposed)?;
     if !auth_secret_is_zero(session, backend, &recompose_diff)? {
         return Err(MpcError::Protocol(format!(
-            "malicious_disclose_threshold_verdict (Rabbit): in-protocol range proof FAILED — the \
+            "experimental_tamper_evident_disclose_threshold_verdict (Rabbit): in-protocol \
+             range proof FAILED — the \
              secret-shared sum does not equal the bit-composition of its recovered \
              {RABBIT_VALUE_BITS} bits (the sum has content above bit {RABBIT_VALUE_BITS}, i.e. \
              sum >= 2^{RABBIT_VALUE_BITS} = {RABBIT_VALUE_MAX_EXCLUSIVE}). The verdict would be \
@@ -908,7 +952,8 @@ fn open_auth_verdict(
         Ok(true)
     } else {
         Err(MpcError::Protocol(format!(
-            "malicious_disclose_threshold_verdict: verdict reconstructed to a non-boolean field \
+            "experimental_tamper_evident_disclose_threshold_verdict: verdict reconstructed \
+             to a non-boolean field \
              element {} (expected 0 or 1) — refusing to coerce",
             bit.value()
         )))
@@ -997,7 +1042,9 @@ mod tests {
                 )
                 .unwrap();
                 let shares = share_sum(&backend, sum);
-                let got = malicious_threshold_over_sum(&backend, &shares, thr).unwrap();
+                let got =
+                    experimental_tamper_evident_threshold_over_sum(&backend, &shares, thr)
+                        .unwrap();
                 assert_eq!(
                     got,
                     sum > thr,
@@ -1019,7 +1066,9 @@ mod tests {
             ] {
                 let backend = ShamirBackend::new_seeded(n, sum.wrapping_add(thr)).unwrap();
                 let shares = share_sum(&backend, sum);
-                let mal = malicious_threshold_over_sum(&backend, &shares, thr).unwrap();
+                let mal =
+                    experimental_tamper_evident_threshold_over_sum(&backend, &shares, thr)
+                        .unwrap();
                 let semi = disclose_threshold_verdict(&backend, &shares, thr).unwrap();
                 let semi_bool = semi.rows[0][0]
                     .as_ref()
@@ -1039,7 +1088,9 @@ mod tests {
     fn public_partial_result_carries_only_the_bool() {
         let backend = ShamirBackend::new_seeded(5, 7).unwrap();
         let shares = share_sum(&backend, 200_000);
-        let pr = malicious_disclose_threshold_verdict(&backend, &shares, 100_000).unwrap();
+        let pr =
+            experimental_tamper_evident_disclose_threshold_verdict(&backend, &shares, 100_000)
+                .unwrap();
         assert_eq!(pr.rows.len(), 1);
         assert_eq!(pr.rows[0].len(), 1);
         assert_eq!(pr.vars.len(), 1);
@@ -1127,13 +1178,17 @@ mod tests {
         let shares = share_sum(&backend, 100);
         // Threshold at/over 2^RABBIT_VALUE_BITS.
         assert!(matches!(
-            malicious_threshold_over_sum(&backend, &shares, RABBIT_VALUE_MAX_EXCLUSIVE),
+            experimental_tamper_evident_threshold_over_sum(
+                &backend,
+                &shares,
+                RABBIT_VALUE_MAX_EXCLUSIVE
+            ),
             Err(MpcError::Protocol(_))
         ));
         // An over-magnitude sum aborts via the in-protocol range proof.
         let big = share_sum(&backend, RABBIT_VALUE_MAX_EXCLUSIVE + 5);
         assert!(matches!(
-            malicious_threshold_over_sum(&backend, &big, 100_000),
+            experimental_tamper_evident_threshold_over_sum(&backend, &big, 100_000),
             Err(MpcError::Protocol(_))
         ));
     }
@@ -1212,7 +1267,7 @@ mod tests {
             let backend = ShamirBackend::new_seeded(5, sum.wrapping_add(11)).unwrap();
             let shares = share_sum(&backend, sum);
             assert!(
-                malicious_threshold_over_sum(&backend, &shares, 100_000).is_ok(),
+                experimental_tamper_evident_threshold_over_sum(&backend, &shares, 100_000).is_ok(),
                 "in-range sum {sum} must pass the MAC-checked Rabbit range proof"
             );
         }
@@ -1229,7 +1284,7 @@ mod tests {
             let shares = share_sum(&backend, sum);
             assert!(
                 matches!(
-                    malicious_threshold_over_sum(&backend, &shares, 100_000),
+                    experimental_tamper_evident_threshold_over_sum(&backend, &shares, 100_000),
                     Err(MpcError::Protocol(_))
                 ),
                 "out-of-range sum {sum} must be rejected fail-closed by the range proof"
@@ -1359,7 +1414,9 @@ mod tests {
                 )
                 .unwrap();
                 let shares = share_sum(&backend, sum);
-                let got = malicious_threshold_over_sum(&backend, &shares, thr).unwrap();
+                let got =
+                    experimental_tamper_evident_threshold_over_sum(&backend, &shares, thr)
+                        .unwrap();
                 assert_eq!(
                     got,
                     sum > thr,
@@ -1382,7 +1439,8 @@ mod tests {
         ] {
             let backend = ShamirBackend::new_seeded(5, sum.wrapping_add(thr)).unwrap();
             let shares = share_sum(&backend, sum);
-            let mal = malicious_threshold_over_sum(&backend, &shares, thr).unwrap();
+            let mal =
+                experimental_tamper_evident_threshold_over_sum(&backend, &shares, thr).unwrap();
             let semi = disclose_threshold_verdict(&backend, &shares, thr).unwrap();
             let semi_bool = semi.rows[0][0]
                 .as_ref()
@@ -1424,7 +1482,8 @@ mod tests {
         );
     }
 
-    /// Replay the PRODUCTION pipeline (`malicious_threshold_over_sum`) with a tamper
+    /// Replay the PRODUCTION pipeline (`experimental_tamper_evident_threshold_over_sum`)
+    /// with a tamper
     /// injected at `tamper` — a consistent degree-`t` codeword of a wrong value with
     /// the MAC untouched, the canonical Hole-2 deviation that Reed–Solomon cannot see
     /// at `n = 2t+1`. Returns whatever the pipeline returns, so the caller can assert
@@ -1730,13 +1789,13 @@ mod tests {
         ] {
             let b_lo = ShamirBackend::new_seeded(5, lo.wrapping_add(1)).unwrap();
             let b_hi = ShamirBackend::new_seeded(5, hi.wrapping_add(2)).unwrap();
-            let v_lo = malicious_disclose_threshold_verdict(
+            let v_lo = experimental_tamper_evident_disclose_threshold_verdict(
                 &b_lo,
                 &share_sum(&b_lo, lo),
                 threshold,
             )
             .unwrap();
-            let v_hi = malicious_disclose_threshold_verdict(
+            let v_hi = experimental_tamper_evident_disclose_threshold_verdict(
                 &b_hi,
                 &share_sum(&b_hi, hi),
                 threshold,
