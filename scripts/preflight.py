@@ -123,20 +123,31 @@ TEST_PATH_HINTS = (
 )
 TEST_NAME_RE = re.compile(r"(^|/)(test_[^/]*\.py|[^/]*_test\.py|[^/]*\.rs)$")
 
-SUPPRESS_RE = re.compile(r"preflight-allow:\s*(?P<check>[a-z0-9-]+)\s*(?P<dash>[-—])\s*(?P<why>\S.*)")
+# The separator MUST be surrounded by whitespace. Without that, `[a-z0-9-]+`
+# backtracks and eats its own hyphen: `preflight-allow: guard-untested —` parsed as
+# check=`guard`, why=`untested —`, i.e. a marker with NO reason silently produced a
+# well-formed match for a check name nobody wrote. Found by mutation M3 (the
+# `why.strip()` conjunct survived deletion because it was unreachable — the test
+# that "proved" a missing reason does not suppress was actually passing on the
+# accidental check-name mismatch). Requiring `\s+[-—]\s+` makes the reason
+# genuinely mandatory and makes a hyphenated check name parse whole.
+SUPPRESS_RE = re.compile(r"preflight-allow:\s*(?P<check>[a-z0-9][a-z0-9-]*)\s+[-—]\s+(?P<why>\S.*)")
 
 
 def suppressed(lines: list[str], idx: int, check: str) -> bool:
     """A `preflight-allow: <check> — <why>` marker on the line or the one above it.
 
     A marker with no `— why` clause does NOT suppress: the whole value of the
-    escape hatch is the recorded reason.
+    escape hatch is the recorded reason. That is enforced by SUPPRESS_RE itself
+    (the `\\S.*` reason group is not optional), so there is deliberately NO
+    second `why` test here — a redundant conjunct would be unreachable code
+    masquerading as a guard.
     """
     for probe in (idx, idx - 1):
         if probe < 0 or probe >= len(lines):
             continue
         m = SUPPRESS_RE.search(lines[probe])
-        if m and m.group("check") == check and m.group("why").strip():
+        if m and m.group("check") == check:
             return True
     return False
 
@@ -180,11 +191,24 @@ def added_symbols(added_lines: dict[str, list[str]]) -> list[tuple[str, str]]:
     return out
 
 
+SELFTEST_MARKER_RE = re.compile(r"--self-test|def\s+self_test\b")
+
+
 def test_corpus(root: Path) -> list[tuple[str, str]]:
     """(relpath, text) for every file that can host a test naming a guard.
 
-    Includes `#[cfg(test)]` Rust source (a unit test lives inside the very file
-    that defines the guard), so an in-file `mod tests` counts.
+    Three kinds of host, matching how this repo actually writes tests:
+      * anything under a tests/ (or benches/) directory;
+      * Rust source carrying `#[cfg(test)]` — a unit test lives inside the very
+        file that defines the guard;
+      * a `scripts/*.py` carrying an in-file `--self-test` block — the dominant
+        convention here (check-readme-template.py, check-terminology.py, …), and
+        the one whose omission produced a MEASURED false positive on
+        scripts/release-interval-guard.py::check_version_group, which is tested
+        at its own self_test() and by nothing under tests/.
+
+    An ordinary call site never counts: a src file with no test marker is not a
+    host, so `foo()` being invoked somewhere does not satisfy the guard.
     """
     corpus: list[tuple[str, str]] = []
     try:
@@ -196,13 +220,18 @@ def test_corpus(root: Path) -> list[tuple[str, str]]:
     for rel in tracked:
         is_test_dir = any(h in "/" + rel for h in TEST_PATH_HINTS)
         is_rust_src = RUST_SRC_RE.match(rel) is not None
-        if not (is_test_dir or is_rust_src) or not TEST_NAME_RE.search(rel):
+        is_py_script = PY_SCRIPT_RE.match(rel) is not None
+        if not (is_test_dir or is_rust_src or is_py_script):
+            continue
+        if not (is_py_script or TEST_NAME_RE.search(rel)):
             continue
         try:
             text = (root / rel).read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
         if is_rust_src and not is_test_dir and "#[cfg(test)]" not in text:
+            continue
+        if is_py_script and not is_test_dir and not SELFTEST_MARKER_RE.search(text):
             continue
         corpus.append((rel, text))
     return corpus
