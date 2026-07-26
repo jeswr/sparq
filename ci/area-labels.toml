@@ -588,8 +588,8 @@ area = "sparq-zk"
 # the deliberately conservative choice: it over-serializes against other prose work
 # rather than guessing a crate. Rows above win, and
 # test_every_skill_surface_has_a_map_row REPORTS (does not gate on) a surface with no
-# specific row, so adding one stays visible without a new skill on `main` reding an
-# unrelated PR. It is safe to demote precisely BECAUSE of this catch-all: attribution
+# specific row, so adding one stays visible without a new skill on `main` turning an
+# unrelated PR red. It is safe to demote precisely BECAUSE of this catch-all: attribution
 # stays total either way, and a missing row costs only a coarser (`docs`) lane, never
 # a wrong crate.
 [[map]]
