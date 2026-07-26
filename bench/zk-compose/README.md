@@ -254,6 +254,11 @@ Two guards make the pack non-vacuous:
 - `--check` fails if any related-work entry ever claims transcribed figures, or if the metric
   block is ever flipped to wall-clock / canonical.
 
+`--check` is **not** a manual courtesy: it runs as a **GATING** step of the `docs-quality
+quick-gates` job (`.github/workflows/docs-quality.yml`), which carries no paths filter and so
+runs on every PR — a re-baselined snapshot, a hand-edited artefact, or an unclassified new
+snapshot member reds the required `ci-summary / gate` instead of merging unnoticed.
+
 After an **intentional** circuit change: re-run `scripts/gate_counts.sh`, re-baseline
 `crates/sparq-zk-compose/tests/gate_count_snapshot.json`, then re-run this generator so the
 pack re-joins the new numbers.

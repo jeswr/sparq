@@ -560,6 +560,22 @@ jobs:
       # scripts/check-*.py --self-test lints above.
       - name: Self-test the paper-evidence binding verifier (drift + missing-anchor FAIL; real evidence PASS — sq-gum8.13)
         run: python3 scripts/verify-paper-evidence.py --self-test
+      # [SONNET-4.6] sq-gum8.5 (epic sq-gum8): the constraint-count evaluation pack
+      # (bench/zk-compose/constraint_counts.json + CONSTRAINT_COUNTS.md) is GENERATED — every
+      # integer is joined from the regression-gated snapshot
+      # crates/sparq-zk-compose/tests/gate_count_snapshot.json, nothing is hand-typed. Without a
+      # gate the pack's guarantees rested on a contributor remembering to re-run the generator:
+      # a re-baselined snapshot, a hand-edited artefact, or a NEW snapshot member belonging to no
+      # described family could all merge with the committed pack silently stale. `--check` is that
+      # gate — it re-generates in-memory and fails unless BOTH artefacts are byte-identical, then
+      # re-verifies the COMMITTED JSON against the snapshot (every member size, scaling delta,
+      # invariance, both lanes) and the honesty guards (no related-work figure transcribed; the
+      # metric never flipped to wall-clock/canonical). classify() fails on an unclassified member,
+      # so a new circuit family cannot silently drop out. Stdlib-only, needs NO nargo/bb, no
+      # network — and this lane carries no paths filter, so it runs whenever the snapshot, the
+      # generator, or either artefact changes.
+      - name: "constraint-pack reproducibility (bench/zk-compose, sq-gum8.5) — GATING"
+        run: python3 bench/zk-compose/scripts/constraint_pack.py --check
       # [OPUS-4.8] sq-dhss (epic sq-lhwo): the agent-efficiency Phase-1 telemetry
       # harness (scripts/agent-telemetry/) is the BLOCKING measurement baseline —
       # it parses Claude Code transcript JSONL and aggregates token/cache/$ usage
