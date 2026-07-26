@@ -1,0 +1,54 @@
+{
+  "schema": "sparq.acbench.odre.capabilities/1",
+  "_comment": [
+    "DECLARED capability table for the pinned ODRE reference implementation, bead sq-i6du2.8.",
+    "Every row is transcribed from the implementation's OWN published support tables (the",
+    "pyodre 1.0.6 project description / README, which marks each ODRL term supported or",
+    "unsupported) and, where noted, from a read of its source. Nothing here is measured by",
+    "this lane: it is the DECLARED scope used to decide which cases are comparable at all.",
+    "A case whose constructs include a term declared unsupported is reported as",
+    "OUT-OF-SCOPE-FOR-SYSTEM (the odrl-policy-bridge paper's third measure category), never",
+    "as agreement and never as a divergence.",
+    "Update procedure: bump `pinned_version`, re-transcribe, and record the run that",
+    "observed any change."
+  ],
+  "system": "ODRE (Open Digital Rights Enforcement) — Python implementation",
+  "paper": "arXiv:2409.17602 (Cimmino, Cano-Benito, Garcia-Castro, 2024)",
+  "distribution": "pyodre",
+  "pinned_version": "1.0.6",
+  "source": "pyodre 1.0.6 published support tables (project description) + source read of pyodre/odre.py and pyodre/python_functions.py",
+  "left_operands": {
+    "constraint:dateTime": "supported",
+    "constraint:purpose": "unsupported",
+    "constraint:count": "unsupported",
+    "constraint:systemDevice": "unsupported"
+  },
+  "operators": {
+    "eq": "supported",
+    "neq": "supported",
+    "lt": "supported",
+    "lteq": "supported",
+    "gt": "supported",
+    "gteq": "supported",
+    "isA": "unsupported",
+    "isAnyOf": "unsupported",
+    "isNoneOf": "unsupported",
+    "isPartOf": "unsupported",
+    "isAllOf": "unsupported",
+    "hasPart": "unsupported"
+  },
+  "rule_kinds": {
+    "rule:permission": "evaluated",
+    "rule:prohibition": "evaluated-as-permission",
+    "rule:obligation": "evaluated-as-permission"
+  },
+  "request_model": {
+    "status": "absent",
+    "note": "`ODRE.enforce(policy)` takes no request: odrl:assignee, odrl:target and the requested action are not read when selecting rules. Request binding, where this lane performs it, is a HARNESS step and is declared as such."
+  },
+  "notes": [
+    "`odrl:count` is listed unsupported by the implementation's own table; a count-limited grant is therefore not comparable here in either direction.",
+    "`odrl:purpose` is listed unsupported; the U3 purpose-of-use corpus is out-of-scope-for-ODRE by declaration, not by measurement.",
+    "Constraint discovery reads odrl:operator / odrl:leftOperand / odrl:rightOperand directly from the rule node (pyodre/odre.py `_constraints`), so an ODRL 2.2 `odrl:constraint`-linked constraint node is outside the query's reach — see the `odre-standard-encoding-ignores-constraints` ledger entry."
+  ]
+}

@@ -125,7 +125,7 @@ jobs:
       # Build once, distinctly, so a compile error is reported separately from an
       # oracle failure.
       - name: Build the metamorph driver
-        run: cargo build -p sparq-metamorph --release --bins
+        run: cargo build -p sparq-metamorph --profile release-fast --bins
       - name: Compute the seed window
         id: window
         env:
@@ -172,7 +172,7 @@ jobs:
           # (VIOLATION/ENGINE-FAILURE seed lines + the FIRST FAILING CASE block
           # with replay + queries + graph), which the failure steps below upload
           # and file. pipefail keeps the exit code.
-          ./target/release/metamorph-driver "$START" "$COUNT" 2>&1 \
+          ./target/release-fast/metamorph-driver "$START" "$COUNT" 2>&1 \
             | tee "$RUNNER_TEMP/metamorph-log.txt"
       # ── failure path: preserve the repro + auto-file the finding ────────────────
       - name: Auto-file the finding (GitHub issue + P1 bug bead, deduped)

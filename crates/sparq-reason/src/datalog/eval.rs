@@ -50,6 +50,7 @@ use sparq_core::dict::{Dict, Id};
 use sparq_substrate::join::{self as sjoin, JoinKeys, NoBudget};
 use sparq_substrate::numeric::{as_numeric, ArithOp, Num};
 use sparq_substrate::rows::{Row, NO_ID};
+use std::cmp::Ordering;
 
 const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
 
@@ -297,6 +298,9 @@ fn join_rows(
 /// variables and fold the selected aggregate, minting computed numeric results.
 /// Returns rows `[on₀ … onₖ₋₁, value]` in the OUTER join
 /// layout (`ON` columns first, in `ON` order). Empty groups produce no row.
+///
+/// The numeric functions' operand/result typing and their float/`NaN`/`-0.0`
+/// determinism rule live on [`fold_numeric_group`].
 fn aggregate_table(dict: &mut Dict, agg: &AggAtom, store: &FactStore) -> Vec<Row> {
     let empty: Row = std::iter::repeat_n(NO_ID, agg.n_slots).collect();
     let mut rows: Vec<Row> = vec![empty];
@@ -342,50 +346,149 @@ fn aggregate_table(dict: &mut Dict, agg: &AggAtom, store: &FactStore) -> Vec<Row
         row.push(value_id);
         out.push(row);
     }
-    for (key, values) in groups {
-        let value_id = match agg.func {
-            AggFunc::Count => unreachable!(),
-            AggFunc::Min | AggFunc::Max => values
-                .iter()
-                .copied()
-                .reduce(|a, b| {
-                    let ord = a.1.cmp_total(b.1);
-                    if (agg.func == AggFunc::Min && ord.is_le())
-                        || (agg.func == AggFunc::Max && ord.is_ge())
-                    {
-                        a
-                    } else {
-                        b
-                    }
-                })
-                .map(|(id, _)| id),
-            AggFunc::Sum | AggFunc::Avg => {
-                let count = values.len() as i64;
-                values
-                    .iter()
-                    .map(|(_, n)| *n)
-                    .reduce(|a, b| a.binop(b, ArithOp::Add).expect("addition is total"))
-                    .and_then(|sum| {
-                        let result = if agg.func == AggFunc::Avg {
-                            sum.binop(Num::Int(count), ArithOp::Div)?
-                        } else {
-                            sum
-                        };
-                        Some(dict.intern_lit(
-                            &result.canonical_lexical(),
-                            result.datatype().as_str(),
-                            None,
-                        ))
-                    })
-            }
-        };
-        if let Some(value_id) = value_id {
+    for (key, mut values) in groups {
+        if let Some(value_id) = fold_numeric_group(dict, agg.func, &mut values) {
             let mut row: Row = Row::from_slice(&key);
             row.push(value_id);
             out.push(row);
         }
     }
     out
+}
+
+/// Fold one `ON`-group's `(term id, numeric value)` pairs into the aggregate's
+/// result term — `None` for an empty group (and for an exact-type division by zero,
+/// which `AVG` cannot reach since a non-empty group has a non-zero count).
+///
+/// # Numeric semantics of `SUM` / `MIN` / `MAX` / `AVG` (sq-r2nor)
+///
+/// The DECIDED rule, matching the `FILTER` posture documented on the module: the
+/// operands are the **whole shared XSD numeric tower** — `xsd:float` and `xsd:double`
+/// are first-class alongside the exact `integer`/`decimal` tiers, not rejected. Rows
+/// whose value term is not a well-formed numeric literal fail closed (the caller drops
+/// them before this point); a group left empty by that filtering produces no row.
+///
+/// * **`SUM` / `AVG` promote** per XPath operand promotion
+///   ([`Num::binop`]): any `xsd:double` operand makes the result `xsd:double`, any
+///   `xsd:float` (and no double) makes it `xsd:float`; otherwise the exact tier is kept
+///   (`AVG` over integers is an `xsd:decimal`, as SPARQL requires).
+/// * **`MIN` / `MAX` never promote or mint** — they return one of the INPUT terms
+///   verbatim, so `MIN` over `{"1"^^xsd:long, "9"^^xsd:short}` yields the `xsd:long`.
+///
+/// ## Determinism (the explicit rule the float tiers need)
+///
+/// Floating-point addition is **not associative**, and the value order has ties across
+/// tiers, so a fold in hash-iteration order could derive a different closure from the
+/// same store depending on the order facts happened to be derived in (semi-naive vs
+/// forced-full, or a different insertion order). Aggregates are already non-monotonic —
+/// that is why they are stratified — but they must still be a FUNCTION of the completed
+/// lower strata. So the fold order is pinned:
+///
+/// * `SUM`/`AVG` add in ascending [`Num::cmp_total`] order, ties broken by RDF-term
+///   CONTENT (`cmp_term_content`), so the result depends only on the group's multiset
+///   of value terms;
+/// * `MIN`/`MAX` are order-independent by construction: `cmp_total` is a total order, and
+///   a tie between two DISTINCT terms of equal value (`"1"^^xsd:integer` vs
+///   `"1.0"^^xsd:double`, or `+0.0` vs `-0.0`) is resolved by that same content order for
+///   both functions.
+///
+/// The tie-break is deliberately NOT the dictionary [`Id`]: an id is assigned by
+/// interning order, which is not itself a function of the completed lower strata — see
+/// `cmp_term_content`.
+///
+/// ## `NaN` and `-0.0`
+///
+/// [`Num::cmp_total`] totalises `NaN` BELOW `-INF`, so `MIN` of a group containing a
+/// `NaN` is that `NaN`, and `MAX` ignores `NaN`s unless every value is one. `NaN` is
+/// deliberately NOT a row-level failure here, unlike `FILTER` — which uses the
+/// *relational* comparison, where `NaN` is an XPath type error. `SUM`/`AVG` propagate
+/// `NaN` per IEEE-754. `+0.0` and `-0.0` compare EQUAL under `cmp_total`, so the sign of
+/// the term `MIN`/`MAX` returns for such a group is decided by the content tie-break
+/// (`-0.0` sorts before `0.0` lexically): it is not determined by the values alone, but it
+/// IS determined by the group's terms. `SUM`/`AVG` follow IEEE-754 (`+0.0 + -0.0` is
+/// `+0.0`).
+// `pub(super)` so the acceptance suite can pin the fold-order rule directly, with the
+// group handed to it in adversarial permutations (the join/hash order is not steerable
+// from the program text). [SONNET-4.6]
+pub(super) fn fold_numeric_group(
+    dict: &mut Dict,
+    func: AggFunc,
+    values: &mut [(Id, Num)],
+) -> Option<Id> {
+    match func {
+        AggFunc::Count => unreachable!("COUNT is folded from the count maps, not the value list"),
+        AggFunc::Min | AggFunc::Max => values
+            .iter()
+            .copied()
+            .reduce(|a, b| {
+                let keep_a = match a.1.cmp_total(b.1) {
+                    Ordering::Equal => cmp_term_content(dict, a.0, b.0) != Ordering::Greater,
+                    Ordering::Less => func == AggFunc::Min,
+                    Ordering::Greater => func == AggFunc::Max,
+                };
+                if keep_a {
+                    a
+                } else {
+                    b
+                }
+            })
+            .map(|(id, _)| id),
+        AggFunc::Sum | AggFunc::Avg => {
+            let count = values.len() as i64;
+            values.sort_by(|a, b| {
+                a.1.cmp_total(b.1)
+                    .then_with(|| cmp_term_content(dict, a.0, b.0))
+            });
+            values
+                .iter()
+                .map(|(_, n)| *n)
+                .reduce(|a, b| a.binop(b, ArithOp::Add).expect("addition is total"))
+                .and_then(|sum| {
+                    let result = if func == AggFunc::Avg {
+                        sum.binop(Num::Int(count), ArithOp::Div)?
+                    } else {
+                        sum
+                    };
+                    Some(dict.intern_lit(
+                        &result.canonical_lexical(),
+                        result.datatype().as_str(),
+                        None,
+                    ))
+                })
+        }
+    }
+}
+
+/// A total order on two term ids by RDF-term CONTENT — the tie-break
+/// [`fold_numeric_group`] applies to two terms of equal numeric value.
+///
+/// It is deliberately NOT the dictionary [`Id`] order. An `Id` is assigned by INTERNING
+/// order, which is not a function of the completed lower strata: an earlier stratum's
+/// aggregate mints its computed literals while iterating a hash map, so two evaluations
+/// of the same program over the same facts (semi-naive vs forced-full, or a different
+/// insertion order) can intern two equal-valued terms with opposite ids — as can two
+/// separately loaded copies of logically equal input. An id tie-break would then let
+/// `MIN`/`MAX` emit a DIFFERENT input term, and `SUM`/`AVG` add equal-valued operands in
+/// a different (promotion-sensitive, so not value-preserving) order, for the same logical
+/// facts. Ordering the literal's `(datatype, lexical form, language)` instead depends on
+/// nothing but the terms themselves.
+///
+/// Every id reaching here is a numeric literal — the caller drops rows whose value term
+/// is not one — so the non-literal arm is unreachable; it falls back to the id purely to
+/// keep the order total.
+fn cmp_term_content(dict: &Dict, a: Id, b: Id) -> Ordering {
+    if a == b {
+        return Ordering::Equal;
+    }
+    match (dict.term(a), dict.term(b)) {
+        (oxrdf::Term::Literal(x), oxrdf::Term::Literal(y)) => x
+            .datatype()
+            .as_str()
+            .cmp(y.datatype().as_str())
+            .then_with(|| x.value().cmp(y.value()))
+            .then_with(|| x.language().cmp(&y.language())),
+        _ => a.cmp(&b),
+    }
 }
 
 /// Fire one rule against the current store, appending (possibly duplicate)

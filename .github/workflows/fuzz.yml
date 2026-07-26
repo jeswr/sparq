@@ -480,21 +480,33 @@ jobs:
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           # Share the nightly differential lane's cache key: both build the exact
-          # same sparq-bench release binary, and differential.yml's main-scoped
+          # same sparq-bench release-fast binary, and differential.yml's main-scoped
           # nightly save keeps this warm for every PR.
           shared-key: differential-nightly
       # Build distinctly so a compile error is reported separately from a mismatch.
       - name: Build the differential fuzzer
-        run: cargo build -p sparq-bench --release
+        run: cargo build -p sparq-bench --profile release-fast
       - name: Run the fixed differential regression windows
         run: |
           set -euo pipefail
-          b=./target/release/sparq-bench
+          b=./target/release-fast/sparq-bench
           # Canonical broad smoke (all categories, deterministic seeds).
           "$b" fuzz 0 2000 all
           # sq-lr2ii known-catch windows (category-dense; 'all' misses this class).
           "$b" fuzz 4695 2200 equality
           "$b" fuzz 4695 2200 filter
+          # sq-j80vk: fixed per-category regression windows over the SPARQL 1.1
+          # surfaces added to the generator (property paths, aggregates/GROUP BY/
+          # HAVING, sub-selects, EXISTS, VALUES, BIND, GRAPH). 'all' picks ONE
+          # category per seed, so the 2000-seed broad window above leaves each of the
+          # 16 categories only ~125 cases — too thin to be a per-PR net for a
+          # specific evaluation path. These are deterministic REGRESSION windows, not
+          # known-catch ones: no historical bug is pinned to these seeds yet, and if
+          # the nightly lane finds one its window gets pinned here the way sq-lr2ii's
+          # was. ~2 s per category at release-fast throughput.
+          for c in path aggregate subquery exists values bind graph; do
+            "$b" fuzz 0 10000 "$c"
+          done
           # Store-mode read paths over the fixed window: the same seeds re-run with
           # the store rebuilt through mmap / block-compressed / dict-spill (the
           # dict-spill external build is the slowest per seed — smaller window).

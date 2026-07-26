@@ -167,12 +167,146 @@ def test_cli_end_to_end():
         check("cli.corrupted.no_timing_rows", e["rows"], [])
 
 
+# --- 6. protocol caveats are machine-attached, not prose (sq-rpdae) ----------
+def test_protocol_caveat():
+    with tempfile.TemporaryDirectory() as td:
+        comp = os.path.join(td, "competitor.tsv")
+        env = os.path.join(td, "envelope.json")
+        r = run_cli(["ref-counts", "--replay", REPLAY_SRBENCH, "--scenario", "srbench_join",
+                     "--raw-reports"])
+        with open(comp, "w") as f:
+            f.write(r.stdout)
+            f.write("timing\trsp_replay_push_triples_per_s\t12345\ttriples_per_s\n")
+        caveat = "window alignment differs: agreement is replay-contingent, not semantic"
+        r = run_cli(["count-match", "--scenario", "srbench_join", "--competitor", comp,
+                     "--replay", REPLAY_SRBENCH, "--out", env, "--protocol-caveat", caveat])
+        check("caveat.exit", r.returncode, 0)
+        e = json.load(open(env))
+        check("caveat.in_envelope", e["protocol_caveats"], [caveat])
+        # the load-bearing half: it rides on every emitted row, so a consumer reading
+        # only `rows` cannot lose it
+        check("caveat.on_every_row",
+              all(r_.get("protocol_caveats") == [caveat] for r_ in e["rows"]), True)
+        check("caveat.rows_present", len(e["rows"]) >= 1, True)
+        # absent by default => no empty key noise on the existing envelopes
+        r = run_cli(["count-match", "--scenario", "srbench_join", "--competitor", comp,
+                     "--replay", REPLAY_SRBENCH, "--out", env])
+        e = json.load(open(env))
+        check("caveat.default_empty", e["protocol_caveats"], [])
+        check("caveat.absent_from_rows",
+              any("protocol_caveats" in r_ for r_ in e["rows"]), False)
+
+
+# --- 7. SCALED matched-workload replay + runner-sourced oracle (sq-3f5ay) ----
+#
+# The scaled replay is GENERATED, not committed (~10^5 lines), so what these tests
+# pin is the chain that makes it usable: the generator is deterministic and matches
+# its committed manifest sha256; its srbench_join counts hit the closed form; and
+# the runner-sourced oracle path refuses an oracle that disagrees with the
+# independent model — otherwise a scaled throughput row could be published off a
+# workload nothing had actually verified.
+MANIFEST = os.path.join(HERE, "replay", "scaled.manifest.json")
+
+
+def test_gen_replay_matches_manifest():
+    pin = json.load(open(MANIFEST))
+    with tempfile.TemporaryDirectory() as td:
+        out = os.path.join(td, "scaled.ts.tsv")
+        r = run_cli(["gen-replay", "--out", out])
+        check("gen.exit", r.returncode, 0)
+        check("gen.sha256_matches_pin", rc.sha256_file(out), pin["sha256"])
+        events = rc.parse_replay(out)
+        check("gen.events", len(events), pin["events"])
+        # the closed form: sensors * obs_per_sensor joined rows in EVERY window
+        counts = rc.ref_counts(events, "srbench_join")
+        check("gen.windows", len(counts), pin["windows"])
+        check("gen.rows_per_window",
+              set(counts), {pin["srbench_join_rows_per_window"]})
+        # a drifted parameter must be REFUSED against the pin, not silently accepted
+        r = run_cli(["gen-replay", "--out", os.path.join(td, "drift.tsv"), "--sensors", "99"])
+        check("gen.drift_refused", r.returncode, 2)
+        check("gen.drift_names_sha", "sha256" in r.stderr, True)
+
+
+def test_oracle_runner_path():
+    """The scaled leg's gate, exercised on the SMALL committed replay (same code path,
+    no 21 MB temp file): oracle counts sourced from a replay-runner-shaped TSV."""
+    with tempfile.TemporaryDirectory() as td:
+        oracle_tsv = os.path.join(td, "sparq.tsv")
+        comp = os.path.join(td, "competitor.tsv")
+        env = os.path.join(td, "envelope.json")
+        with open(oracle_tsv, "w") as f:
+            f.write("meta\tengine\tsparq-rsp\n")
+            counts = rc.ref_counts(rc.parse_replay(REPLAY_SRBENCH), "srbench_join")
+            for k, rows in enumerate(counts):
+                f.write("w%d\t%d\n" % (k, rows))
+            f.write("timing\trsp_replay_push_triples_per_s\t777\ttriples_per_s\n")
+        r = run_cli(["ref-counts", "--replay", REPLAY_SRBENCH, "--scenario", "srbench_join",
+                     "--raw-reports"])
+        with open(comp, "w") as f:
+            # relabel the ref-evaluator stand-in as the engine it stands in for, so the
+            # side-by-side assertion below reads on real engine labels
+            for line in r.stdout.splitlines():
+                if line.startswith("meta\tengine\t"):
+                    line = "meta\tengine\trsp4j-yasper"
+                f.write(line + "\n")
+            f.write("timing\trsp_replay_push_triples_per_s\t555\ttriples_per_s\n")
+        r = run_cli(["count-match", "--scenario", "srbench_join", "--competitor", comp,
+                     "--oracle-runner", oracle_tsv, "--replay", REPLAY_SRBENCH, "--out", env])
+        check("runner.exit", r.returncode, 0)
+        e = json.load(open(env))
+        check("runner.verdict", e["verdict"], "COUNT-MATCHED")
+        check("runner.cross_check_agrees", e["count_match"]["oracle_cross_check"]["agrees"], True)
+        # the SIDE-BY-SIDE: both engines' throughput, engine-labelled, both caveated
+        by_engine = {r_["engine"]: r_["value"] for r_ in e["rows"]
+                     if r_["metric"] == "rsp_replay_push_triples_per_s"}
+        check("runner.side_by_side", by_engine, {"sparq-rsp": "777", "rsp4j-yasper": "555"})
+        check("runner.all_rows_caveated",
+              all(r_["time_model_caveat"] is True for r_ in e["rows"]), True)
+
+        # INVARIANT: an oracle that disagrees with the independent model publishes NOTHING
+        with open(oracle_tsv) as f:
+            bad = f.read().replace("w0\t3", "w0\t4", 1)
+        check("runner.corruption_applied", "w0\t4" in bad, True)
+        with open(oracle_tsv, "w") as f:
+            f.write(bad)
+        r = run_cli(["count-match", "--scenario", "srbench_join", "--competitor", comp,
+                     "--oracle-runner", oracle_tsv, "--replay", REPLAY_SRBENCH, "--out", env])
+        check("runner.bad_oracle.exit", r.returncode, 3)
+        e = json.load(open(env))
+        check("runner.bad_oracle.verdict", e["verdict"], "ORACLE-CROSS-CHECK-FAILED")
+        check("runner.bad_oracle.no_rows", e["rows"], [])
+        check("runner.bad_oracle.divergence_reported",
+              e["count_match"]["oracle_cross_check"]["divergences"],
+              {"w0": {"runner": 4, "model": 3}})
+
+
+def test_windows_of():
+    """The bucketing used by ref_counts must select exactly the covering windows —
+    it replaced an O(events x windows) rescan, so an off-by-one here would silently
+    change every scaled count."""
+    for rng, step, ts, want in [
+        (10, 10, 0, [0]), (10, 10, 9, [0]), (10, 10, 10, [1]),
+        (20, 10, 0, [0]), (20, 10, 15, [0, 1]), (20, 10, 25, [1, 2]),
+        (20, 20, 19, [0]), (20, 20, 20, [1]),
+    ]:
+        got = list(rc.windows_of(ts, rng, step))
+        check("windows_of(ts=%d,rng=%d,step=%d)" % (ts, rng, step), got, want)
+        # cross-check against the naive predicate the bucketing replaced
+        naive = [k for k in range(0, ts // step + 1) if rc.in_window(ts, k, rng, step)]
+        check("windows_of.agrees_with_naive(ts=%d,rng=%d)" % (ts, rng), got, naive)
+
+
 def main():
     test_parse_replay()
     test_ref_counts_match_oracle()
     test_map_reports()
     test_gate()
     test_cli_end_to_end()
+    test_protocol_caveat()
+    test_windows_of()
+    test_gen_replay_matches_manifest()
+    test_oracle_runner_path()
     print("\n%d passed, %d failed" % (PASS, FAIL))
     return 1 if FAIL else 0
 

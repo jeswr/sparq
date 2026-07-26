@@ -339,6 +339,12 @@ impl TripleStore {
     /// browser, where holding 2.5x more triples in the same RAM matters more than the
     /// per-scan decode cost. Cardinality stats are computed from the raw perms *before*
     /// encoding (so neither the build nor the planner ever decodes a whole index).
+    ///
+    /// [FABLE-5] sq-559dp — encodes through `CompressedPerm::encode_emit`, the SAME one-place
+    /// emit-format gate the on-disk save path uses, so `SPARQ_STORE_PROFILE=compressed` can opt
+    /// into the `SPQCPRM2` frame-of-reference block stream (`spqcprm2` feature +
+    /// `SPARQ_EMIT_FORMAT=v2` / `with_emit_format`) instead of being pinned to V1. The default
+    /// build has the gate compiled out, so the in-RAM stream stays byte-identical to V1.
     pub fn from_triples_compressed(triples: Vec<[Id; 3]>) -> Self {
         let raw = Self::build_raw_perms(triples);
         let pred_stats = Self::compute_pred_stats(&raw);
@@ -346,7 +352,7 @@ impl TripleStore {
         for (i, pd) in raw.into_iter().enumerate() {
             if let PermData::Owned(v) = pd {
                 if !v.is_empty() {
-                    perms[i] = PermData::Compressed(crate::compress::CompressedPerm::encode(&v));
+                    perms[i] = PermData::Compressed(crate::compress::CompressedPerm::encode_emit(&v));
                 }
             }
         }
@@ -1183,6 +1189,77 @@ mod tests {
         for p in 1..=13 {
             assert_eq!(raw.pred_stat(p), cmp.pred_stat(p), "pred_stat differs for {p}");
         }
+    }
+
+    /// [FABLE-5] sq-559dp — the IN-RAM compressed profile honours the SPQCPRM2 emit gate.
+    /// `from_triples_compressed` now encodes through `CompressedPerm::encode_emit` (the same
+    /// one-place gate `save_compressed` uses), so `SPARQ_STORE_PROFILE=compressed` can opt into
+    /// the frame-of-reference col2 reset instead of being pinned to V1. Asserts three things:
+    ///
+    /// 1. DEFAULT (no override) still builds `V1` perms — the byte-identity invariant; and
+    /// 2. under `with_emit_format(V2)` every non-empty perm is `V2` — the gate actually reaches
+    ///    the in-RAM path; and
+    /// 3. on a corpus whose objects cluster inside a block (large absolute ids, small in-block
+    ///    spread — the `reset_d1` shape the FoR encoding targets) the V2 store's resident bytes
+    ///    are STRICTLY lower, i.e. the acceptance "lower comp_store_bpt" direction holds. This
+    ///    is a SHAPE assertion on a designed corpus, not a canonical benchmark number: V2 is not
+    ///    universally smaller (a far-from-frame reset costs zigzag bytes), which is exactly why
+    ///    the emit gate stays opt-in.
+    ///
+    /// Both formats must also answer every pattern exactly as the raw store does.
+    #[cfg(feature = "spqcprm2")]
+    #[test]
+    fn in_ram_compressed_honours_v2_emit_gate() {
+        use crate::compress::{with_emit_format, EmitFormat};
+
+        // Clustered objects: 3-byte absolute ids (>= 2^21) with a small in-block spread, each
+        // subject carrying several predicates so most rows hit the `reset_d1` (col2 absolute in
+        // V1 / frame-delta in V2) branch of the block encoder.
+        let mut triples: Vec<[Id; 3]> = Vec::new();
+        for s in 1..600u32 {
+            for p in 1..9u32 {
+                triples.push([s, p, 4_000_000 + s * 8 + p]);
+            }
+        }
+        let raw = TripleStore::from_triples(triples.clone());
+        let v1 = TripleStore::from_triples_compressed(triples.clone());
+        let v2 = with_emit_format(EmitFormat::V2, || TripleStore::from_triples_compressed(triples));
+
+        let mut checked = 0;
+        for i in 0..6 {
+            if let (PermData::Compressed(a), PermData::Compressed(b)) = (&v1.perms[i], &v2.perms[i]) {
+                assert_eq!(a.format(), crate::compress::Format::V1, "default in-RAM emit must stay V1 (perm {})", i);
+                assert_eq!(b.format(), crate::compress::Format::V2, "emit gate did not reach the in-RAM path (perm {})", i);
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "no compressed permutations were built");
+
+        // Same answers in both formats, for every bound/unbound shape.
+        let dump = |s: &Scan| {
+            let mut v: Vec<[Id; 3]> = s.rows.iter().map(|r| s.to_spo(r)).collect();
+            v.sort_unstable();
+            v
+        };
+        for &s in &[None, Some(1), Some(300), Some(601)] {
+            for &p in &[None, Some(1), Some(8), Some(9)] {
+                for &o in &[None, Some(4_000_009), Some(4_002_400), Some(7)] {
+                    let pat: Pattern = [s, p, o];
+                    let want = dump(&raw.scan(&pat));
+                    assert_eq!(dump(&v1.scan(&pat)), want, "V1 rows differ for {:?}", pat);
+                    assert_eq!(dump(&v2.scan(&pat)), want, "V2 rows differ for {:?}", pat);
+                    assert_eq!(v2.estimate(&pat), want.len(), "V2 estimate wrong for {:?}", pat);
+                }
+            }
+        }
+
+        let bytes = |s: &TripleStore| s.perms.iter().map(PermData::heap_bytes).sum::<usize>();
+        assert!(
+            bytes(&v2) < bytes(&v1),
+            "V2 in-RAM store must be smaller on a clustered-object corpus: v2={} v1={}",
+            bytes(&v2),
+            bytes(&v1)
+        );
     }
     /// The COMPRESSED on-disk format must round-trip exactly: `save_compressed` → `open`
     /// must answer every triple pattern with the same rows, in the same scan order, with

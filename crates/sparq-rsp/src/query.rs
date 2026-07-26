@@ -42,8 +42,10 @@ use oxrdf::{Term, Triple, Variable};
 use sparq_engine::PreparedQuery;
 use spargebra::Query;
 
+use crate::budget::BudgetSpec;
 use crate::eval::{EvalMode, WindowEval};
 use crate::window::WindowSpec;
+use sparq_engine::QueryBudget;
 
 /// The relation-to-stream operator: what part of each window's result is
 /// streamed to the callback.
@@ -133,6 +135,9 @@ pub struct ContinuousQuery {
     /// Previous window's full result, in engine row order —
     /// the ISTREAM/DSTREAM diff base. Unused (empty) under RSTREAM.
     prev_rows: Vec<Vec<Option<Term>>>,
+    /// [SONNET-4.6] sq-xqu: the per-window-evaluation resource budget
+    /// (unlimited by default).
+    budget: BudgetSpec,
 }
 
 impl ContinuousQuery {
@@ -154,6 +159,7 @@ impl ContinuousQuery {
             eval: WindowEval::new(spec, EvalMode::default()),
             r2s: R2S::RStream,
             prev_rows: Vec::new(),
+            budget: BudgetSpec::default(),
         })
     }
 
@@ -161,6 +167,51 @@ impl ContinuousQuery {
     /// `ContinuousQuery::register(q, spec)?.with_r2s(R2S::IStream)`.
     pub fn with_r2s(mut self, r2s: R2S) -> Self {
         self.r2s = r2s;
+        self
+    }
+
+    /// [SONNET-4.6] sq-xqu: sets the per-window-evaluation resource budget
+    /// (builder style). The budget is applied to EVERY window evaluation, and
+    /// every limit in it is COOPERATIVE: `max_rows`, `max_bytes` and the
+    /// `cancel` flag are observed at the executor's coarse polling sites, so
+    /// they take effect at the NEXT poll rather than instantly — an evaluation
+    /// that reaches no polling site (answered straight from the index, or
+    /// finished before the first poll) runs to completion unchecked.
+    /// `max_bytes` caps the executor-accounted ESTIMATED evaluation working
+    /// set, not total process memory nor the memory of the materialised
+    /// windows themselves. A `deadline` inside `budget` stays an ABSOLUTE
+    /// instant (it does not reset per window — once it passes, every later
+    /// window fails); for a deadline REFRESHED at each window evaluation use
+    /// [`with_window_timeout`](Self::with_window_timeout). A tripped budget
+    /// surfaces as the evaluation error of the `push`/`flush` that closed
+    /// the window (`"query budget exceeded (…)"`), so — like any evaluation
+    /// error — remaining closed windows are dropped.
+    pub fn with_budget(mut self, budget: QueryBudget) -> Self {
+        self.budget.base = budget;
+        self
+    }
+
+    /// [SONNET-4.6] sq-xqu: installs a REFRESHED deadline for EACH window
+    /// evaluation (builder style): at every window evaluation start the
+    /// effective budget's deadline becomes the EARLIER of the budget's own
+    /// absolute deadline (if any) and `now + timeout`, so one pathological
+    /// window aborts with `"query budget exceeded (timeout)"` instead of
+    /// stalling the embedder's push loop — and a refreshed window deadline
+    /// never grants time past the absolute one. Like the other limits the
+    /// deadline is observed CO-OPERATIVELY, at the executor's next polling
+    /// site, so it is not a strict cap on an evaluation's wall-clock
+    /// duration: an evaluation that reaches no polling site (answered from
+    /// the index, or finished before the first poll) is never checked. A
+    /// `timeout` so large
+    /// that `now + timeout` is unrepresentable can never trip and is treated
+    /// as unlimited (the budget's own absolute deadline, if any, still
+    /// applies). Native only — the engine's wall-clock deadline does not
+    /// exist on `wasm32` (where `std::time::Instant` is unusable); the
+    /// row/byte/cancel limits of [`with_budget`](Self::with_budget) stay
+    /// fully portable.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_window_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.budget.per_window_timeout = Some(timeout);
         self
     }
 
@@ -230,8 +281,12 @@ impl ContinuousQuery {
         let prepared = &self.prepared;
         let r2s = self.r2s;
         let prev_rows = &mut self.prev_rows;
+        let budget = &self.budget;
         self.eval.eval_closed(flush, &mut |start, end, graph| {
-            let result = sparq_engine::query_prepared(graph, prepared)?;
+            // [SONNET-4.6] sq-xqu: one effective budget per window evaluation
+            // (the per-window timeout's deadline is measured from NOW).
+            let result =
+                sparq_engine::query_prepared_with_budget(graph, prepared, &budget.window_budget())?;
             let rows = match r2s {
                 R2S::RStream => result.rows,
                 R2S::IStream | R2S::DStream => {
@@ -277,6 +332,9 @@ pub struct ContinuousConstruct {
     r2s: R2S,
     /// Previous window's constructed graph (the ISTREAM/DSTREAM diff base).
     prev: Vec<Triple>,
+    /// [SONNET-4.6] sq-xqu: the per-window-evaluation resource budget
+    /// (unlimited by default).
+    budget: BudgetSpec,
 }
 
 impl ContinuousConstruct {
@@ -294,12 +352,34 @@ impl ContinuousConstruct {
             eval: WindowEval::new(spec, EvalMode::default()),
             r2s: R2S::RStream,
             prev: Vec::new(),
+            budget: BudgetSpec::default(),
         })
     }
 
     /// Sets the relation-to-stream operator (builder style).
     pub fn with_r2s(mut self, r2s: R2S) -> Self {
         self.r2s = r2s;
+        self
+    }
+
+    /// [SONNET-4.6] sq-xqu: sets the per-window-evaluation resource budget
+    /// (builder style). Semantics as
+    /// [`ContinuousQuery::with_budget`](crate::ContinuousQuery::with_budget):
+    /// applied to every window evaluation; a tripped budget is the evaluation
+    /// error of the `push`/`flush` that closed the window.
+    pub fn with_budget(mut self, budget: QueryBudget) -> Self {
+        self.budget.base = budget;
+        self
+    }
+
+    /// [SONNET-4.6] sq-xqu: installs a refreshed deadline for EACH window
+    /// evaluation (tightened to at most `now + timeout` per window).
+    /// Semantics as
+    /// [`ContinuousQuery::with_window_timeout`](crate::ContinuousQuery::with_window_timeout);
+    /// native only.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_window_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.budget.per_window_timeout = Some(timeout);
         self
     }
 
@@ -345,8 +425,13 @@ impl ContinuousConstruct {
         let prepared = &self.prepared;
         let r2s = self.r2s;
         let prev = &mut self.prev;
+        let budget = &self.budget;
         self.eval.eval_closed(flush, &mut |start, end, graph| {
-            let cur = sparq_engine::construct_prepared(graph, prepared)?;
+            let cur = sparq_engine::construct_prepared_with_budget(
+                graph,
+                prepared,
+                &budget.window_budget(),
+            )?;
             let triples = match r2s {
                 R2S::RStream => cur.clone(),
                 // Constructed graphs are SETS: exact set difference, in the
@@ -369,6 +454,9 @@ pub struct ContinuousAsk {
     /// Parsed once at registration; executed per window via the prepared seam.
     prepared: PreparedQuery,
     eval: WindowEval,
+    /// [SONNET-4.6] sq-xqu: the per-window-evaluation resource budget
+    /// (unlimited by default).
+    budget: BudgetSpec,
 }
 
 impl ContinuousAsk {
@@ -384,7 +472,29 @@ impl ContinuousAsk {
             sparql: sparql.to_owned(),
             prepared,
             eval: WindowEval::new(spec, EvalMode::default()),
+            budget: BudgetSpec::default(),
         })
+    }
+
+    /// [SONNET-4.6] sq-xqu: sets the per-window-evaluation resource budget
+    /// (builder style). Semantics as
+    /// [`ContinuousQuery::with_budget`](crate::ContinuousQuery::with_budget):
+    /// applied to every window evaluation; a tripped budget is the evaluation
+    /// error of the `push`/`flush` that closed the window.
+    pub fn with_budget(mut self, budget: QueryBudget) -> Self {
+        self.budget.base = budget;
+        self
+    }
+
+    /// [SONNET-4.6] sq-xqu: installs a refreshed deadline for EACH window
+    /// evaluation (tightened to at most `now + timeout` per window).
+    /// Semantics as
+    /// [`ContinuousQuery::with_window_timeout`](crate::ContinuousQuery::with_window_timeout);
+    /// native only.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_window_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.budget.per_window_timeout = Some(timeout);
+        self
     }
 
     /// Sets the window materialisation strategy (builder style). Call BEFORE
@@ -427,8 +537,10 @@ impl ContinuousAsk {
 
     fn emit(&mut self, flush: bool, on_result: &mut impl FnMut(AskResult)) -> Result<(), String> {
         let prepared = &self.prepared;
+        let budget = &self.budget;
         self.eval.eval_closed(flush, &mut |start, end, graph| {
-            let value = sparq_engine::ask_prepared(graph, prepared)?;
+            let value =
+                sparq_engine::ask_prepared_with_budget(graph, prepared, &budget.window_budget())?;
             on_result(AskResult { start, end, value });
             Ok(())
         })

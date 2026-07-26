@@ -1,0 +1,98 @@
+# [SONNET-4.6] sq-zgbso.2 — ODRL stateless core: stratum A.
+# Derives atomic constraint satisfaction (odrlx:atomicSat) and the positive
+# odrl:or logical-constraint satisfaction (odrlx:lcSat). The only NAF on a DERIVED
+# fact is over stratum A0's `odrlx:shape odrlx:Ambiguous`, which is COMPLETE before
+# this stratum runs (stratified); every other derivation here is monotone.
+#
+# Stratification (5 strata, WAC/ACP pattern):
+#   A0 (odrl-a0.n3): odrlx:shape odrlx:Ambiguous — the operand/combinator-arity guard
+#   A (this file): action facts + atomicSat + lcSat(or)
+#   B (odrl-b.n3): andSubUnsat + anyRuleConstrUnsat + unconstrained prohibMatches
+#                  + deny emission for unconstrained prohibitions
+#   C (odrl-c.n3): lcSat(and) + CONSTRAINED prohibMatches + deny emission
+#   D (odrl-d.n3): permission grant emission (NAF over the now-complete prohibMatches)
+#
+# [OPUS-5] EVERY satisfaction rule below negates stratum A0's `odrlx:shape
+# odrlx:Ambiguous` (stratified NAF over A0's COMPLETE output). Satisfaction here is
+# keyed on the constraint NODE, so without that guard a node carrying SEVERAL operand
+# triples is marked satisfied as soon as ANY ONE of the cross-product combinations
+# holds — "some operand is satisfied" where "every operand is satisfied" is required
+# (the measured fail-OPEN of PR #3458: an expired permission granted). With the guard,
+# satisfaction is only ever derived for a node carrying exactly one operand tuple,
+# where the two quantifiers coincide. See odrl-a0.n3 for the full rationale.
+#
+# odrlx: predicates are sparq-internal derivation facts; never exposed in auth view.
+
+@prefix odrl:   <http://www.w3.org/ns/odrl/2/> .
+@prefix auth:   <https://sparq.dev/ns/auth#> .
+@prefix odrlx:  <https://sparq.dev/ns/odrlx#> .
+@prefix string: <http://www.w3.org/2000/10/swap/string#> .
+@prefix log:    <http://www.w3.org/2000/10/swap/log#> .
+
+# ── action → WAC/ACP allow-mode mapping ──────────────────────────────────────
+odrl:read    odrlx:mode auth:read .
+odrl:display odrlx:mode auth:read .
+odrl:present odrlx:mode auth:read .
+odrl:print   odrlx:mode auth:read .
+odrl:play    odrlx:mode auth:read .
+odrl:append  odrlx:mode auth:append .
+odrl:modify  odrlx:mode auth:write .
+odrl:delete  odrlx:mode auth:write .
+odrl:write   odrlx:mode auth:write .
+
+# ── action → WAC/ACP deny-mode mapping (prohibition side) ────────────────────
+odrl:read    odrlx:denyMode auth:denyRead .
+odrl:display odrlx:denyMode auth:denyRead .
+odrl:present odrlx:denyMode auth:denyRead .
+odrl:print   odrlx:denyMode auth:denyRead .
+odrl:play    odrlx:denyMode auth:denyRead .
+odrl:append  odrlx:denyMode auth:denyAppend .
+odrl:modify  odrlx:denyMode auth:denyWrite .
+odrl:delete  odrlx:denyMode auth:denyWrite .
+odrl:write   odrlx:denyMode auth:denyWrite .
+
+# ── atomic constraint satisfaction ───────────────────────────────────────────
+
+# dateTime lteq: request time ≤ upper bound.
+# Lexicographic comparison equals XSD dateTime VALUE comparison ONLY on the canonical
+# UTC subset YYYY-MM-DDTHH:MM:SSZ (fixed length, no offset, no fractional seconds,
+# hour ≤ 23). The Rust driver (materialize_odrl_n3) validates every xsd:dateTime
+# lexical form — policy right-operands AND the request time — against that subset and
+# REJECTS the whole policy otherwise (fail-closed), so these string:* comparisons are
+# never applied to offset/fractional/equivalent-instant forms they would mis-order.
+{ ?c odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lteq ; odrl:rightOperand ?deadline .
+  ?req a odrl:Request ; odrl:dateTime ?now .
+  ?now string:notGreaterThan ?deadline .
+  ?S0 log:notIncludes { ?c odrlx:shape odrlx:Ambiguous } . }
+=> { ?c odrlx:atomicSat ?req } .
+
+# dateTime gteq: request time ≥ lower bound.
+{ ?c odrl:leftOperand odrl:dateTime ; odrl:operator odrl:gteq ; odrl:rightOperand ?floor .
+  ?req a odrl:Request ; odrl:dateTime ?now .
+  ?floor string:notGreaterThan ?now .
+  ?S0 log:notIncludes { ?c odrlx:shape odrlx:Ambiguous } . }
+=> { ?c odrlx:atomicSat ?req } .
+
+# recipient eq: request party IS the named principal.
+{ ?c odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ; odrl:rightOperand ?r .
+  ?req a odrl:Request ; odrl:assignee ?r .
+  ?S0 log:notIncludes { ?c odrlx:shape odrlx:Ambiguous } . }
+=> { ?c odrlx:atomicSat ?req } .
+
+# recipient neq: request party is NOT the excluded principal.
+# Safe in stratum A: negates only the INPUT predicate odrl:assignee, which is
+# complete at the start of every stratum.
+{ ?c odrl:leftOperand odrl:recipient ; odrl:operator odrl:neq ; odrl:rightOperand ?excl .
+  ?req a odrl:Request ; odrl:assignee ?p .
+  ?S log:notIncludes { ?req odrl:assignee ?excl } .
+  ?S0 log:notIncludes { ?c odrlx:shape odrlx:Ambiguous } . }
+=> { ?c odrlx:atomicSat ?req } .
+
+# ── odrl:or logical constraint: satisfied when ANY sub-constraint is atomicSat ─
+# Positive in atomicSat; the only negation is over A0's complete Ambiguous mark, so a
+# node carrying a SECOND combinator (`odrl:and`/`odrl:xone` alongside this `odrl:or`)
+# is NOT satisfied by an or-member alone — that mixed shape is read by both this rule
+# and stratum C's and-rule, and taking the disjunctive reading would widen. [OPUS-5]
+{ ?lc odrl:or ?c . ?c odrlx:atomicSat ?req .
+  ?S0 log:notIncludes { ?lc odrlx:shape odrlx:Ambiguous } . }
+=> { ?lc odrlx:lcSat ?req } .

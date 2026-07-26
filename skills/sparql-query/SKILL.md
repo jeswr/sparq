@@ -208,19 +208,26 @@ paths up to that bound. Set `cyclic: true` to request only non-empty paths retur
 ```rust
 // Cargo.toml: sparq-engine = { version = "0.1", features = ["paths"] }
 use oxrdf::{NamedNode, Term};
-use sparq_engine::{enumerate_paths, PathMode, PathSpec, Via};
+use sparq_engine::{enumerate_paths, Endpoint, PathMode, PathSpec, Via};
 
 let paths = enumerate_paths(&g, &PathSpec {
     mode: PathMode::Shortest,
     cyclic: false,
-    start: Some(Term::NamedNode(NamedNode::new("http://ex/alice")?)),
-    end: Some(Term::NamedNode(NamedNode::new("http://ex/bob")?)),
+    start: Some(Endpoint::Node(Term::NamedNode(NamedNode::new("http://ex/alice")?))),
+    end: Some(Endpoint::Node(Term::NamedNode(NamedNode::new("http://ex/bob")?))),
     via: Via::Predicate(NamedNode::new("http://ex/knows")?),
     max_length: None,
 })?;
 assert!(paths.iter().all(|path| path.nodes.len() == path.edges.len() + 1));
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
+
+Each endpoint is `None` (unrestricted), `Endpoint::Node` (one fixed node), or `Endpoint::Pattern`
+— a SPARQL group graph pattern plus the pattern variable whose bindings are the candidate nodes.
+The pattern is evaluated once into a deterministic candidate set; solutions leaving that variable
+unbound, or binding a term absent from the graph, contribute no candidate. In the dedicated syntax
+the endpoint variable declared just before `=` is the one the pattern must bind, so write
+`START ?s = { ?s a ex:Person }`; a pattern that never binds it is a loud error.
 
 `PathSpec::via` also accepts `Via::Pattern`, whose SPARQL group graph pattern must bind the
 reserved `?from` and `?to` endpoint variables. The pattern is evaluated once to materialize the

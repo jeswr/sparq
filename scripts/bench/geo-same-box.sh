@@ -23,7 +23,8 @@
 # sparq_tsv but is NOT a competitor row (replaying the fixture set against Jena
 # is out of scope here; Jena is the like-for-like COVERAGE bar per the registry).
 #
-# METHODOLOGY / INVARIANT (counts-not-coordinates, per the bench/geo gate design):
+# METHODOLOGY / INVARIANT (counts-not-coordinates except nearest entity IDs):
+# [SONNET-4.6] sq-6jl8z
 #   * sparq is timed IN-PROCESS via bench/geo/run.sh (examples/bench_geo: load +
 #     index once, best-of-N per workload), which HARD-asserts every count vs
 #     bench/geo/expected.tsv — the sparq-side oracle.
@@ -33,10 +34,10 @@
 #     scripts/bench-adapters/http_sparql_adapter.py (best-of-N; query_us includes
 #     HTTP framing + SPARQL-JSON parse — a recorded mode ASYMMETRY vs sparq's
 #     in-process index surface, never adjusted away).
-#   * NO TIMING WITHOUT RESULT-SET-SIZE AGREEMENT per query: a competitor timing
-#     enters the envelope's timing table ONLY where its count equals sparq's
-#     expected.tsv-gated count. A disagreement is itself a recorded RESULT
-#     (both counts kept, the timing withheld, nothing adjusted). Both engines'
+#   * NO TIMING WITHOUT RESULT AGREEMENT per query: radius/box workloads compare
+#     result-set size; nearest_k workloads compare the exact entity-IRI SET from
+#     an untimed oracle replay in addition to size. A disagreement is itself a
+#     recorded RESULT (both results kept, timing withheld). Both engines'
 #     within* metric is spherical great-circle on the same mean sphere (sparq:
 #     haversine; jena: spatialF:nearby — the standard geof:distance+uom:metre
 #     form is non-executable on jena 5.4.0, root-caused in sq-a8anf /
@@ -223,6 +224,16 @@ if want sparq; then
     log "sparq FAILED/timeout or count drift (see $TMP/sparq.err):"
     tail -5 "$TMP/sparq.err" >&2 || true
   fi
+  if [ "$SPARQ_STATUS" = "ok" ]; then
+    for spec in "nearest_k10 10" "nearest_k100 100"; do
+      read -r wl k <<< "$spec"
+      if ! timeout "$TIMEOUT_S" "$BENCH_GEO" nearest-ids "$CORPUS" "$k" \
+          > "$TMP/sparq-$wl.ids"; then
+        log "sparq: $wl entity-ID oracle FAILED; timing will be withheld"
+        rm -f "$TMP/sparq-$wl.ids"
+      fi
+    done
+  fi
 fi
 
 # ---- 2. jena-geosparql: HTTP leg (graceful skip when the engine is absent) -----
@@ -265,6 +276,31 @@ print("%s\t%s" % (c, d["query_us"]))
 PYEOF
           )"; then
             printf '%s\t%s\n' "$wl" "$PARSED" >> "$TMP/jena-geosparql.tsv"
+            if [[ "$wl" == nearest_k* ]]; then
+              if ! TIMEOUT_S="$TIMEOUT_S" timeout "$TIMEOUT_S" python3 - \
+                  "$ENDPOINT" "$QUERIES/$wl.rq" "$TMP/jena-$wl.ids" <<'PYEOF'
+import json, os, sys, urllib.parse, urllib.request
+endpoint, query_path, out_path = sys.argv[1:]
+query = open(query_path, encoding="utf-8").read()
+request = urllib.request.Request(
+    endpoint,
+    data=urllib.parse.urlencode({"query": query}).encode(),
+    headers={"Accept": "application/sparql-results+json"},
+)
+with urllib.request.urlopen(
+    request, timeout=int(os.environ["TIMEOUT_S"])
+) as response:
+    bindings = json.load(response)["results"]["bindings"]
+entities = sorted(row["e"]["value"] for row in bindings)
+with open(out_path, "w", encoding="utf-8") as output:
+    for entity in entities:
+        output.write("<%s>\n" % entity)
+PYEOF
+              then
+                log "jena-geosparql: $wl entity-ID oracle FAILED; timing will be withheld"
+                rm -f "$TMP/jena-$wl.ids"
+              fi
+            fi
           else
             printf '%s\tERROR\tsidecar-parse-error\n' "$wl" >> "$TMP/jena-geosparql.tsv"
           fi
@@ -308,6 +344,13 @@ def read_tsv(engine):
     return rows
 
 
+def read_ids(engine, workload):
+    path = os.path.join(tmp, "%s-%s.ids" % (engine, workload))
+    if not os.path.exists(path):
+        return None
+    return sorted(line.strip() for line in open(path) if line.strip())
+
+
 engines_meta = {}
 if "sparq" in only:
     engines_meta["sparq"] = {
@@ -349,15 +392,36 @@ note_canonical = (
     "deliverable; the canonical run is the quiet-box wave (sq-hmd7l.26)."
 )
 
-# INVARIANT: no timing without result-set-size agreement per query.
+# INVARIANT: no timing without count agreement, plus exact entity-set agreement
+# for nearest-neighbour workloads.
 sparq_rows = data.get("sparq", {})
 cross = {}
 timings = {}
 for w in workloads:
     s = sparq_rows.get(w, {}).get("count", "n/a")
     j = data.get("jena-geosparql", {}).get(w, {}).get("count", "n/a")
-    agree = s == j and s not in ("n/a", "ERROR")
+    count_agree = s == j and s not in ("n/a", "ERROR")
+    sparq_ids = read_ids("sparq", w) if w.startswith("nearest_k") else None
+    jena_ids = read_ids("jena", w) if w.startswith("nearest_k") else None
+    expected_k = int(w.removeprefix("nearest_k")) if w.startswith("nearest_k") else None
+    ids_agree = (
+        sparq_ids == jena_ids
+        and sparq_ids is not None
+        and len(sparq_ids) == expected_k
+        and len(set(sparq_ids)) == expected_k
+        if w.startswith("nearest_k")
+        else None
+    )
+    agree = count_agree and (ids_agree is not False)
     cross[w] = {"sparq": s, "jena-geosparql": j, "agree": agree}
+    if w.startswith("nearest_k"):
+        cross[w].update({
+            "oracle": "entity-id-set",
+            "expected_k": expected_k,
+            "sparq_entity_ids": sparq_ids if sparq_ids is not None else "n/a",
+            "jena_entity_ids": jena_ids if jena_ids is not None else "n/a",
+            "entity_ids_agree": ids_agree,
+        })
     row = {}
     if "sparq" in engines_meta:
         row["sparq_us"] = sparq_rows.get(w, {}).get("us", "n/a")
@@ -370,9 +434,24 @@ for w in workloads:
         else:
             # Disagreement IS the result: both counts stay recorded above; the
             # timing is WITHHELD (never adjusted, never silently dropped).
-            row["jena_geosparql_us"] = (
-                "WITHHELD(count-disagree: sparq=%s jena=%s)" % (s, j)
-            )
+            if not count_agree:
+                reason = "count-disagree: sparq=%s jena=%s" % (s, j)
+            else:
+                sparq_id_set = set(sparq_ids or [])
+                jena_id_set = set(jena_ids or [])
+                reason = (
+                    "entity-list-disagree: counts=%s, "
+                    "sparq-rows=%d jena-rows=%d, "
+                    "|sparq\\jena|=%d |jena\\sparq|=%d"
+                    % (
+                        s,
+                        len(sparq_ids or []),
+                        len(jena_ids or []),
+                        len(sparq_id_set - jena_id_set),
+                        len(jena_id_set - sparq_id_set),
+                    )
+                )
+            row["jena_geosparql_us"] = "WITHHELD(%s)" % reason
     timings[w] = row
 
 envelope = {
@@ -392,8 +471,11 @@ envelope = {
     "statuses": statuses,
     "count_crosscheck": cross,
     "count_crosscheck_note": (
-        "COUNTS-NOT-COORDINATES (bench/geo gate design): only result-set SIZES "
-        "are compared — float geometry is not bit-stable. sparq counts are "
+        "COUNTS-NOT-COORDINATES for radius/box workloads: result-set sizes are "
+        "compared because float geometry is not bit-stable. nearest_k instead "
+        "requires exact entity-IRI-set equality from untimed oracle replays, "
+        "preventing a degenerate ORDER BY from passing merely by returning k "
+        "rows. sparq counts are "
         "additionally hard-gated vs bench/geo/expected.tsv by run.sh. A "
         "disagreement is a recorded RESULT; the competitor timing for that "
         "workload is withheld, never adjusted. Metric note (sq-a8anf): both "

@@ -27,7 +27,6 @@
 //!   canonical expanded form (scoped contexts, container maps, `@nest`, `@reverse`,
 //!   `@included`, `@json`, keyword aliases), threading `frameExpansion` for the framing
 //!   pipeline.
-//!
 //! - [`node_map`] — **Node Map Generation** + Generate Blank Node Identifier (bead
 //!   `sq-oy1f.26`, JSON-LD 1.1 API §7.2/§7.4): [`node_map::generate_node_map`] indexes an
 //!   expanded document's node objects by graph and `@id`, minting deterministic blank-node
