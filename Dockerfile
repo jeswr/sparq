@@ -70,9 +70,10 @@ RUN cargo install --locked cargo-auditable
 RUN cargo auditable build --release --locked -p sparq-server ${CARGO_FLAGS}
 
 # -------- runtime --------
-# [GPT-5.6] SHA-pinned to the multi-platform OCI index (Scorecard PinnedDependencies), so
-# Buildx can select the amd64 or arm64 runtime. Tag kept on its own comment line above the
-# FROM (an inline trailing `# tag` breaks FROM's arg parser — see builder above).
+# [GPT-5.6] SHA-pinned for supply-chain integrity (Scorecard PinnedDependencies). This is
+# the multi-platform OCI index used by Buildx for the amd64 and arm64 release images.
+# Refresh the digest when :nonroot advances with base-layer/security updates. Tag kept on
+# its own comment line above the FROM (an inline trailing `# tag` breaks FROM's arg parser).
 # Tag: gcr.io/distroless/cc-debian12:nonroot
 FROM gcr.io/distroless/cc-debian12:nonroot@sha256:fccdbb0a547c14e23fcf4ce8ad62ca5d43b4faae8d22cd292f490fef9946c96e
 
