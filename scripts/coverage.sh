@@ -519,8 +519,18 @@ measure() {
     # (`numeric` = XSD value tower, `join` = the four id-tuple join kernels, `compare` =
     # the SPARQL term total order, `rows` = the id-tuple Row/Key/Posting vocabulary). A
     # default-feature build compiles NONE of it (empty crate -> meaningless number); this
-    # names the maximal set so the measured line% reflects the real code the floor gates,
-    # exactly as sparq-core/-fedclient/-policy above name their whole-surface features.
+    # names the CORRECTNESS-CORE set so the measured line% reflects the real code the floor
+    # gates, exactly as sparq-core/-fedclient/-policy above name their whole-surface features.
+    #
+    # [OPUS-5] PR #3799: do NOT add `overhead` here. It used to be true that this was also the
+    # crate's MAXIMAL feature set; it no longer is — the feature-matrix leg now enables
+    # `rows,numeric,join,compare,overhead` so `src/overhead.rs`'s tests actually gate (they
+    # were compiled by NO required check before). `overhead` is the zero-overhead DELTA
+    # TIMING harness, not correctness surface: instrumenting it would fold ~2k lines of
+    # measurement/reporting code into the denominator behind only a handful of tests and
+    # would push this crate under its floor of 96 for no correctness gain. Coverage measures
+    # the correctness core; the matrix leg EXECUTES everything. They are deliberately
+    # different sets — keep them that way.
     sparq-substrate)
       cargo_args+=(--features numeric,join,compare,rows)
       features+=("numeric" "join" "compare" "rows") ;;
