@@ -50,6 +50,13 @@ import argparse, json, os, re, sys
 
 MARGIN = 2  # surviving-mutant slack above the measured value
 
+# [SONNET-4.6] sq-has2g: the `-shard-<k>-<n>` suffix the nightly lane appends to a sub-sharded
+# crate's output dir AND to its artifact name (ci.yml maps `--shard k/n` -> "-shard-k-n"), i.e.
+# target/mutants/<crate>-shard-2-24/mutants.out/outcomes.json, and after `gh run download`
+# mutants-outcomes-nightly-<crate>-shard-2-24/outcomes.json. cargo-mutants does NOT record the
+# shard inside outcomes.json, so this path suffix is the ONLY available shard identity.
+SHARD_SUFFIX = re.compile(r"-shard-(\d+)-(\d+)$")
+
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 DEFAULT_BASELINE = os.path.join(ROOT, "bench", "mutants-baseline.json")
 
@@ -97,7 +104,40 @@ def crate_of(outcomes_path, doc):
     # appends (target/mutants/sparq-engine-shard-2-6/...). Strip it so all of a crate's
     # shards fall under one key and measured_rows() can aggregate them. Only reached when
     # the outcomes doc has no Mutant scenario to read the package from.
-    return re.sub(r"-shard-\d+-\d+$", "", name)
+    return SHARD_SUFFIX.sub("", name)
+
+
+def shard_of(outcomes_path):
+    """[SONNET-4.6] sq-has2g: (k, n) SHARD IDENTITY for an outcomes.json, or None when the
+    path carries none (an unsharded whole-crate run).
+
+    Counting input FILES is not a shard set: n files tell you how many artifacts were passed,
+    not WHICH `--shard k/n` slices they are. Without the identity, `--seed` cannot tell one
+    complete shard from a 23-of-24 subset or from the same shard copied twice, and each of
+    those sums to a ceiling below the whole-crate truth. The identity lives in the artifact /
+    output DIRECTORY name (SHARD_SUFFIX above) — cargo-mutants does not put it in the JSON —
+    so scan the path components leaf-to-root and take the first that carries it. Nothing
+    downstream may INFER a shard set from the file count alone.
+    """
+    for part in reversed(os.path.abspath(outcomes_path).split(os.sep)):
+        m = SHARD_SUFFIX.search(part)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+    return None
+
+
+def run_label(outcomes_path, sid):
+    """[SONNET-4.6] sq-has2g: short label naming ONE contributing outcomes.json in a
+    diagnostic — "shard k/n" when the path carries an identity, else the run's output dir. The
+    IMMEDIATE parent is always "mutants.out", so an unsharded run is named by the dir above
+    it; with 24 engine shards, "mutants.out: only 4/400 completed" would not say which shard
+    to re-run."""
+    if sid is not None:
+        return f"shard {sid[0]}/{sid[1]}"
+    d = os.path.dirname(os.path.abspath(outcomes_path))
+    if os.path.basename(d) == "mutants.out":
+        d = os.path.dirname(d)
+    return os.path.basename(d)
 
 
 def summarise(doc):
@@ -169,6 +209,11 @@ def measured_rows(outcome_paths):
     the honest whole-crate measurement is the per-category SUM, so accumulate. `shards`
     records how many outcomes files contributed, which lets --check flag a PARTIAL
     measurement instead of silently under-reporting.
+
+    `shard_ids` records each contributing file's (k, n) identity (None when unsharded) so
+    seed() can REQUIRE a complete, disjoint set rather than trusting the file count; a file
+    repeating an identity already counted for this crate is skipped here, because summing it
+    would inflate the surviving count and could spuriously FAIL --check.
     """
     rows = {}
     seen_paths = set()
@@ -188,11 +233,20 @@ def measured_rows(outcome_paths):
         surviving, caught, unviable, timeout, total = summarise(doc)
         acc = rows.setdefault(crate, {
             "surviving": 0, "caught": 0, "timeout": 0, "unviable": 0, "shards": 0,
-            "truncated": [],
+            "truncated": [], "shard_ids": [], "repeated_shards": [],
         })
+        sid = shard_of(p)
+        if sid is not None and sid in acc["shard_ids"]:
+            # Same `--shard k/n` slice supplied twice under DIFFERENT paths (two downloads of
+            # one artifact, a copy alongside the original): the realpath guard above cannot see
+            # it, and summing it would double-count that slice's mutants.
+            print(f"  skip {p} (shard {sid[0]}/{sid[1]} of {crate} already counted)")
+            acc["repeated_shards"].append(sid)
+            continue
+        acc["shard_ids"].append(sid)
         planned, done = completeness(p, surviving + caught + timeout + unviable)
         if planned is not None and done < planned:
-            acc["truncated"].append((os.path.basename(os.path.dirname(real)), done, planned))
+            acc["truncated"].append((run_label(real, sid), done, planned))
         acc["surviving"] += surviving
         acc["caught"] += caught
         acc["timeout"] += timeout
@@ -241,12 +295,78 @@ def _comment_block():
         "invocation (scripts/mutants-gate.py --seed target/mutants/<crate>-shard-*/…/"
         "outcomes.json) — the shards partition the mutant set, so the whole-crate figure is "
         "their SUM and --seed aggregates them. Seeding from ONE shard would commit a ceiling "
-        "~1/n of the truth. --check on a partial shard set is tolerated (it can only "
-        "under-report, never spuriously fail) and prints a PARTIAL marker.",
+        "~1/n of the truth, so --seed ENFORCES a complete set: it reads each artifact's "
+        "`-shard-k-n` identity from its path and REFUSES a missing, repeated, or "
+        "mixed-denominator shard (as it refuses a truncated run) unless "
+        "--allow-partial-shards is passed. --check on a partial shard set is tolerated (it "
+        "can only under-report, never spuriously fail) and prints a PARTIAL marker.",
     ]
 
 
-def seed(outcome_paths, baseline_path, allow_higher, allow_truncated=False):
+def shard_denominator(row):
+    """[SONNET-4.6] sq-has2g: the `--shard k/n` denominator n for a sub-sharded crate (which a
+    complete set also has one artifact each of), else the number of contributing files. Read
+    from the shard IDENTITY rather than the file count, so a deliberately partial
+    (--allow-partial-shards) seed still records `shards: n` — recording `1` there would make
+    the entry indistinguishable from a whole-crate run and would silence --check's PARTIAL
+    marker on every later run of that crate."""
+    ns = {n for _, n in (i for i in row["shard_ids"] if i is not None)}
+    return max(ns) if ns else row["shards"]
+
+
+def shard_set_errors(row):
+    """[SONNET-4.6] sq-has2g: reasons this crate's outcomes files are NOT one whole-crate
+    measurement -> a list of human-readable problems (empty == safe to seed from).
+
+    A sharded crate's whole-crate surviving count is the SUM over shards, so the sum is only
+    the truth when the inputs are EXACTLY the n disjoint slices of one `--shard k/n` split.
+    Any of: a single slice, a 23-of-24 subset, the same slice twice under different paths, or
+    slices from two different splits (k/24 mixed with k/8, which OVERLAP), yields a number
+    below the whole-crate figure — and since a LOWER surviving count reads as BETTER test
+    quality, it would commit a too-tight ceiling that looks like an excellent result. This is
+    the same failure mode as a truncated run, so it fails CLOSED the same way.
+
+    Both `--shard` index conventions are accepted (a complete 1..n or a complete 0..n-1 set),
+    consistently within one crate: this gate must not silently depend on which one
+    cargo-mutants uses, only on the set being COMPLETE.
+
+    UNSHARDED mode is kept clearly distinct: no path carries an identity, and then exactly ONE
+    file is expected (two whole-crate runs of the same crate must not be summed either).
+    """
+    ids = row["shard_ids"]
+    problems = []
+    if row["repeated_shards"]:
+        dupes = ", ".join(f"{k}/{n}" for k, n in sorted(set(row["repeated_shards"])))
+        problems.append(f"shard(s) {dupes} supplied more than once (a repeated slice cannot "
+                        f"stand in for a missing one)")
+    known = [i for i in ids if i is not None]
+    if not known:
+        if len(ids) > 1:
+            problems.append(f"{len(ids)} outcomes files carry NO `-shard-k-n` identity — they "
+                            f"look like {len(ids)} separate whole-crate runs, and summing "
+                            f"those double-counts the crate")
+        return problems
+    if len(known) != len(ids):
+        problems.append(f"{len(ids) - len(known)} of {len(ids)} outcomes files carry no "
+                        f"`-shard-k-n` identity — a sharded and an unsharded run of the same "
+                        f"crate overlap, so their sum is not a whole-crate figure")
+        return problems
+    denominators = sorted({n for _, n in known})
+    if len(denominators) > 1:
+        problems.append(f"conflicting shard denominators {denominators} — slices of different "
+                        f"`--shard k/n` splits OVERLAP, so they cannot be summed")
+        return problems
+    n = denominators[0]
+    ks = sorted({k for k, _ in known})
+    if set(ks) not in ({i + 1 for i in range(n)}, set(range(n))):
+        have = ", ".join(f"{k}/{n}" for k in ks)
+        problems.append(f"{len(ks)} of {n} shards supplied ({have}) — an incomplete shard set "
+                        f"sums to LESS than the whole-crate surviving count")
+    return problems
+
+
+def seed(outcome_paths, baseline_path, allow_higher, allow_truncated=False,
+         allow_partial_shards=False):
     measured = measured_rows(outcome_paths)
     # [SONNET-4.6] sq-has2g: REFUSE to seed from a truncated run. cargo-mutants writes
     # outcomes.json incrementally, so a job killed at its timeout yields a well-formed but
@@ -255,6 +375,7 @@ def seed(outcome_paths, baseline_path, allow_higher, allow_truncated=False):
     # dishonest number, and it fails CLOSED here rather than being reviewable-in-diff (the
     # committed entry looks entirely plausible). --allow-truncated is the deliberate escape
     # hatch, and it is never appropriate for seeding a ceiling that will later gate.
+    refused = False
     truncated = {c: r["truncated"] for c, r in measured.items() if r["truncated"]}
     if truncated and not allow_truncated:
         for crate, items in sorted(truncated.items()):
@@ -265,6 +386,23 @@ def seed(outcome_paths, baseline_path, allow_higher, allow_truncated=False):
         print(f"\nrefusing to seed from {sum(len(v) for v in truncated.values())} truncated "
               f"run(s): re-run to completion, or pass --allow-truncated if you have "
               f"independently established the numbers are whole")
+        refused = True
+    # [SONNET-4.6] sq-has2g: REFUSE an INCOMPLETE / OVERLAPPING shard set, for the same reason
+    # a truncated run is refused — both commit a ceiling derived from a fraction of the crate's
+    # mutants, and both look entirely plausible in the reviewed diff. Truncation detection
+    # cannot catch this: each shard of a 23-of-24 subset is individually COMPLETE against its
+    # own mutants.json. --allow-partial-shards is the deliberate escape hatch and is never
+    # appropriate for a ceiling that will later gate.
+    incomplete = {c: p for c, p in ((c, shard_set_errors(r)) for c, r in measured.items()) if p}
+    if incomplete and not allow_partial_shards:
+        for crate, problems in sorted(incomplete.items()):
+            for problem in problems:
+                print(f"::error::{crate}: {problem}")
+        print(f"\nrefusing to seed {len(incomplete)} crate(s) from an incomplete shard set: "
+              f"pass ALL n `--shard k/n` artifacts to one --seed, or --allow-partial-shards "
+              f"if you have independently established the numbers are whole")
+        refused = True
+    if refused:
         return 1
     existing = load(baseline_path)["crates"] if os.path.exists(baseline_path) else {}
     out = dict(existing)  # carry forward crates not measured this run
@@ -285,8 +423,9 @@ def seed(outcome_paths, baseline_path, allow_higher, allow_truncated=False):
         # `--shard k/n` runs rather than one whole-crate run — and so --check can warn when
         # a later run supplies fewer shards than the entry was seeded from. Omitted for the
         # single-run crates so their existing entries stay byte-identical.
-        if row["shards"] > 1:
-            entry["shards"] = row["shards"]
+        shards = shard_denominator(row)
+        if shards > 1:
+            entry["shards"] = shards
         if prev is None:
             entry["ceiling"] = proposed
             new.append(f"{crate}={proposed} ({row['surviving']} survived)")
@@ -379,10 +518,15 @@ def main():
     ap.add_argument("--allow-truncated", action="store_true",
                     help="permit --seed from a run that did not finish all its planned "
                          "mutants (detected via mutants.json); normally refused")
+    ap.add_argument("--allow-partial-shards", action="store_true",
+                    help="permit --seed from an INCOMPLETE/overlapping `--shard k/n` set "
+                         "(missing, repeated or mixed-denominator shards); normally refused "
+                         "because the sum is then below the whole-crate surviving count")
     a = ap.parse_args()
     baseline = os.path.abspath(a.baseline)
     if a.seed:
-        sys.exit(seed(a.outcomes, baseline, a.allow_higher, a.allow_truncated))
+        sys.exit(seed(a.outcomes, baseline, a.allow_higher, a.allow_truncated,
+                      a.allow_partial_shards))
     sys.exit(check(a.outcomes, baseline, a.require_all))
 
 
@@ -463,25 +607,37 @@ def self_test():
     # the old last-write-wins behaviour seeded a ceiling ~1/n of the true surviving count.
     with tempfile.TemporaryDirectory() as td:
         _m = [0]
-        def shard(crate, missed=0, caught=0, timeout=0, unviable=0):
-            """Write one shard's outcomes.json in cargo-mutants' real shape: a Baseline
-            entry plus one Mutant-scenario entry per mutant, each stamping the package so
-            crate_of() resolves every shard of a crate to the same key."""
+        def shard(crate, k=None, n=None, missed=0, caught=0, timeout=0, unviable=0):
+            """Write one run's outcomes.json in cargo-mutants' real shape: a Baseline entry
+            plus one Mutant-scenario entry per mutant, each stamping the package so crate_of()
+            resolves every shard of a crate to the same key.
+
+            The directory reproduces the nightly lane's REAL naming — `<crate>-shard-<k>-<n>`
+            for a `--shard k/n` slice (that suffix is the identity shard_of() reads), or an
+            unsuffixed dir for a whole-crate run. Every call also gets a unique parent, so two
+            calls with the SAME k/n are distinct paths (the realpath guard cannot dedupe them)
+            — which is exactly how a duplicated artifact reaches the gate."""
             _m[0] += 1
-            d = os.path.join(td, f"{crate}-shard-{_m[0]}"); os.makedirs(d, exist_ok=True)
+            leaf = f"{crate}-shard-{k}-{n}" if k is not None else f"{crate}-run{_m[0]}"
+            d = os.path.join(td, f"a{_m[0]}", leaf, "mutants.out")
+            os.makedirs(d, exist_ok=True)
             p = os.path.join(d, "outcomes.json")
             outcomes = [{"scenario": "Baseline", "summary": "Success"}]
-            for summary, n in (("MissedMutant", missed), ("CaughtMutant", caught),
-                               ("Timeout", timeout), ("Unviable", unviable)):
+            for summary, count in (("MissedMutant", missed), ("CaughtMutant", caught),
+                                   ("Timeout", timeout), ("Unviable", unviable)):
                 outcomes += [{"scenario": {"Mutant": {"package": crate}},
-                              "summary": summary}] * n
+                              "summary": summary}] * count
             with open(p, "w") as f: json.dump({"outcomes": outcomes}, f)
             return p
 
+        # the shard identity is read from the path, NOT inferred from the file count
+        assert shard_of(shard("sparq-engine", 2, 24)) == (2, 24)
+        assert shard_of(shard("sparq-engine")) is None, "unsharded run carries no identity"
+
         # three disjoint shards of one crate: 4+3+2 survivors == 9 whole-crate survivors
-        s1 = shard("sparq-engine", missed=4, caught=10)
-        s2 = shard("sparq-engine", missed=3, caught=20)
-        s3 = shard("sparq-engine", missed=2, caught=30)
+        s1 = shard("sparq-engine", 1, 3, missed=4, caught=10)
+        s2 = shard("sparq-engine", 2, 3, missed=3, caught=20)
+        s3 = shard("sparq-engine", 3, 3, missed=2, caught=30)
         rows = measured_rows([s1, s2, s3])
         assert set(rows) == {"sparq-engine"}, rows
         assert rows["sparq-engine"]["surviving"] == 9, rows
@@ -521,6 +677,50 @@ def self_test():
         assert seed([solo], base2, allow_higher=False) == 0
         assert "shards" not in load(base2)["crates"]["sparq-hdt"]
 
+        # --- INCOMPLETE / OVERLAPPING SHARD SET: --seed must REFUSE ----------------------
+        # Counting files is not a shard set. Each of these sums to LESS than the whole-crate
+        # surviving count, and a lower count reads as BETTER test quality — so every one of
+        # them would commit a too-tight ceiling that looks like an excellent result.
+        def seed_refused(paths, why, **kw):
+            b = os.path.join(td, f"refuse-{seed_refused.n}.json"); seed_refused.n += 1
+            assert seed(paths, b, allow_higher=False, **kw) == 1, why
+            assert not os.path.exists(b), f"a refused seed must not write a baseline ({why})"
+            return b
+        seed_refused.n = 0
+
+        seed_refused([s1], "one shard of 3 is not the whole crate")
+        seed_refused([s1, s2], "2 of 3 shards is not the whole crate")
+        # the same slice twice under DIFFERENT paths (a re-download / a copy): the realpath
+        # guard cannot see it, and it must not stand in for the missing 2/3 + 3/3.
+        s1_copy = shard("sparq-engine", 1, 3, missed=4, caught=10)
+        assert s1_copy != s1 and os.path.realpath(s1_copy) != os.path.realpath(s1)
+        seed_refused([s1, s1_copy, s3], "a repeated shard cannot fill in for a missing one")
+        # ...and it is not double-counted on the way to that refusal
+        assert measured_rows([s1, s1_copy, s3])["sparq-engine"]["surviving"] == 6
+        # slices of two DIFFERENT splits overlap, so their sum is meaningless
+        seed_refused([s1, s2, shard("sparq-engine", 3, 4, missed=1, caught=1)],
+                     "mixed shard denominators must be refused")
+        # a sharded and an unsharded run of the same crate also overlap
+        seed_refused([s1, s2, s3, shard("sparq-engine", missed=9, caught=60)],
+                     "mixing a sharded set with a whole-crate run must be refused")
+        # two whole-crate runs of one crate are not two shards either
+        seed_refused([shard("sparq-hdt", missed=1, caught=5),
+                      shard("sparq-hdt", missed=1, caught=5)],
+                     "two unsharded runs of one crate must not be summed")
+
+        # a COMPLETE set seeds — under either `--shard` index convention (0..n-1 or 1..n), so
+        # the gate depends on the set being complete, not on cargo-mutants' numbering.
+        base_zero = os.path.join(td, "baseline-zero.json")
+        z = [shard("sparq-engine", k, 3, missed=1, caught=5) for k in (0, 1, 2)]
+        assert seed(z, base_zero, allow_higher=False) == 0, "0-based complete set must seed"
+        assert load(base_zero)["crates"]["sparq-engine"]["measured_surviving"] == 3
+
+        # the escape hatch is deliberate, and STILL records `shards: n` from the identity
+        # (not the file count) so --check keeps flagging later runs of that crate as PARTIAL.
+        base_partial = os.path.join(td, "baseline-partial.json")
+        assert seed([s1], base_partial, allow_higher=False, allow_partial_shards=True) == 0
+        assert load(base_partial)["crates"]["sparq-engine"]["shards"] == 3
+
         # --- TRUNCATION: a run cut short by the job timeout must NOT seed a ceiling -----
         # cargo-mutants writes outcomes.json incrementally, so a killed job leaves a
         # well-formed PARTIAL artifact. mutants.json (the full planned list) reveals it.
@@ -545,11 +745,20 @@ def self_test():
         assert load(base4)["crates"]["sparq-engine"]["ceiling"] == 1 + MARGIN
 
         # truncation in ANY contributing shard blocks the whole crate's seed — otherwise a
-        # 7-of-8-shards-complete engine sweep would quietly commit a short count.
-        ok1 = shard("sparq-engine", missed=2, caught=8); plan(ok1, 10)
+        # 7-of-8-shards-complete engine sweep would quietly commit a short count. The two
+        # refusals are INDEPENDENT: each shard of an incomplete set can be individually
+        # complete against its own (shard-scoped) mutants.json, so only the shard-set check
+        # catches a missing shard, and only the truncation check catches a cut-short one.
+        ok1 = shard("sparq-engine", 1, 2, missed=2, caught=8); plan(ok1, 10)
+        ok2 = shard("sparq-engine", 2, 2, missed=1, caught=4); plan(ok2, 5)
+        tr2 = shard("sparq-engine", 2, 2, missed=1, caught=3); plan(tr2, 400)
+        seed_refused([ok1, tr2], "a truncated shard blocks the whole crate's seed")
+        # the diagnostic must NAME the offending shard (every path's parent is "mutants.out")
+        assert measured_rows([tr2])["sparq-engine"]["truncated"][0][0] == "shard 2/2"
+        seed_refused([ok1], "shard 1/2 alone is not the whole-crate figure, however complete")
         base5 = os.path.join(td, "baseline5.json")
-        assert seed([ok1, t2], base5, allow_higher=False) == 1
-        assert seed([ok1], base5, allow_higher=False) == 0  # the good shard alone is fine
+        assert seed([ok1, ok2], base5, allow_higher=False) == 0, "complete+untruncated seeds"
+        assert load(base5)["crates"]["sparq-engine"]["measured_surviving"] == 3
 
         # absent mutants.json (older artifact) -> undetectable, fall back to seeding
         t3 = shard("sparq-engine", missed=1, caught=1)
