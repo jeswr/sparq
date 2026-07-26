@@ -14,7 +14,7 @@ natural runtime for sparq's browser SHACL story.
 ```sh
 bash run.sh --smoke        # acceptance: exit 0 iff the agreement gate is green
 bash run.sh                # best-of-$ITERS (default 3) + results/ envelope
-bash run.sh --bundle-only  # ONLY the deterministic minified-bundle byte column
+bash run.sh --bundle-only  # ONLY the minified-bundle byte column
 ```
 
 ## Workloads — the SAME (data × shapes) pairs as `bench/shacl`
@@ -91,10 +91,16 @@ And the ratio prices a **capability gap** as well as an implementation one:
 the peer is SHACL Core only, while the sparq artifact also carries
 SHACL-SPARQL and the SPARQL engine behind it.
 
-These bytes are **deterministic** (no wall clock), so unlike the timing rows
-they need no quiet box. Raw `bytes` are the stable metric; `gzip9_bytes` is
-Node zlib and therefore zlib-version-dependent — the same posture as
-[`bench/wasm-compare/bundle.mjs`](../wasm-compare/bundle.mjs).
+These bytes carry no wall clock, so unlike the timing rows they need no quiet
+box — but the peer half is **not reproducible and not canonical**: `run.sh`
+installs the peer stack *and esbuild* from bare package names with no committed
+lockfile, so a later gather can resolve different peer, transitive, or bundler
+code and emit different bytes. The recorded `package_versions` are **provenance
+for that run, not a recipe to re-derive it**; pinning them properly means a
+committed manifest + lockfile installed with `npm ci` — the posture
+[`bench/wasm-compare/bundle.mjs`](../wasm-compare/bundle.mjs) already has for
+its peer (exact version + tarball sha256). Raw `bytes` are the more stable
+metric; `gzip9_bytes` is Node zlib and therefore zlib-version-dependent.
 
 **Size-trim levers** (`TRIM_SWEEP=1`, `WASM_OPT_PROBE=1`) are described in
 [`research/gap-shacl-wasm-2026-07.md`](../../research/gap-shacl-wasm-2026-07.md#size-trim-levers-sq-c6c2s).

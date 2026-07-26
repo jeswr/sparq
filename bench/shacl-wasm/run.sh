@@ -9,8 +9,8 @@
 #                           # iff the per-workload #violations+conforms
 #                           # agreement gate is green for both engines)
 #   bash run.sh             # best-of-$ITERS (default 3) + envelope
-#   bash run.sh --bundle-only  # ONLY the deterministic byte comparison (no
-#                           # Node runtime timing, no agreement gate)
+#   bash run.sh --bundle-only  # ONLY the bundle-byte comparison (no Node
+#                           # runtime timing, no agreement gate)
 #
 # Stages:
 #   1. wasm-pack build crates/sparq-shacl-wasm --target nodejs --release
@@ -18,10 +18,13 @@
 #      second column). Skipped when pkg/ already exists unless REBUILD=1.
 #   2. npm-install the GATHER-ONLY peer deps (never committed; AGENTS.md —
 #      engines stay out of git) into $MODULES_DIR (default /tmp scratch).
-#   2b. [SONNET-4.6 sq-c6c2s] node bundle.mjs — the DETERMINISTIC minified
-#      browser-bundle byte comparison: esbuild-bundled (minified, tree-shaken)
-#      rdf-validate-shacl vs the wasm artifact, gzip-9 wire bytes. Skipped WITH
-#      NOTICE when esbuild/peer deps are absent (column ABSENT, never a 0).
+#      UNPINNED: bare package names, no committed lockfile — the resolved
+#      versions are recorded as provenance, so stage 2b's peer bytes are NOT
+#      reproducible by a later gather.
+#   2b. [SONNET-4.6 sq-c6c2s] node bundle.mjs — the minified browser-bundle byte
+#      comparison: esbuild-bundled (minified, tree-shaken) rdf-validate-shacl vs
+#      the wasm artifact, gzip-9 wire bytes. Skipped WITH NOTICE when
+#      esbuild/peer deps are absent (column ABSENT, never a 0).
 #   3. node harness.mjs — the shared report->count reduction, the agreement
 #      gate, timing rows ONLY after the gate, one canonical-competitor-results
 #      envelope (canonical:false on the work box). Stage 2b's result is folded
@@ -70,7 +73,7 @@ for a in "$@"; do
   case "$a" in
     --smoke) ITERS=1 ;;
     --bundle-only) BUNDLE_ONLY=1 ;;
-    -h|--help) sed -n '2,56p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,59p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "error: unknown argument '$a' (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -98,6 +101,12 @@ WASM_PACK_VERSION="$(wasm-pack --version 2>/dev/null || echo unknown)"
 # The exact package set from bench/competitors.json's install_recipe, PLUS
 # esbuild — the bundler that turns that stack into the minified, tree-shaken
 # browser bundle stage 2b weighs. All gather-only; none of it is committed.
+# UNPINNED ON PURPOSE (for now): bare names, no committed manifest/lockfile, so
+# top-level AND transitive versions float. The resolved versions are recorded in
+# the envelope as PROVENANCE — they do NOT make stage 2b's peer bytes
+# reproducible, which is why that column is labelled non-canonical. Pinning it
+# properly means a committed package.json + package-lock.json installed with
+# `npm ci` (the posture bench/wasm-compare/bundle.mjs already has for oxigraph).
 PEER_PKGS=(rdf-validate-shacl @rdfjs/data-model @rdfjs/dataset @rdfjs/term-map
            @rdfjs/namespace @rdfjs/parser-n3 @rdfjs/environment clownface esbuild)
 if [ ! -d "$MODULES_DIR/node_modules/rdf-validate-shacl" ] \
@@ -118,13 +127,14 @@ GIT_COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT="$OUT_DIR/shacl-wasm-vendored-${TS}.json"
 
-# ---- 2b. [SONNET-4.6 sq-c6c2s] deterministic minified-bundle byte comparison --
+# ---- 2b. [SONNET-4.6 sq-c6c2s] minified-bundle byte comparison ---------------
 # The peer's UNPACKED npm footprint is not a wire size, so the first-read record
 # (research/gap-shacl-wasm-2026-07.md) made no byte-ratio claim. This stage
 # builds the comparable number: what a bundler actually emits for a browser app.
-# Deterministic (bytes, no wall clock) => no quiet box needed. Its result is
-# folded into the stage-3 envelope; a failure here NEVER fails the run — the
-# column goes ABSENT rather than fabricated, exactly like the peer timing column.
+# Bytes, no wall clock => no quiet box needed; but the peer install above is
+# unpinned, so these bytes are point-in-time, not reproducible/canonical. Its
+# result is folded into the stage-3 envelope; a failure here NEVER fails the run
+# — the column goes ABSENT rather than fabricated, like the peer timing column.
 BUNDLE_OUT=""
 if [ "${NO_BUNDLE:-0}" = "1" ]; then
   log "NOTICE: NO_BUNDLE=1 — minified-bundle byte column ABSENT"

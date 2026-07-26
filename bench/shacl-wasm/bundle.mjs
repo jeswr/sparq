@@ -1,7 +1,9 @@
 #!/usr/bin/env node
-// [SONNET-4.6] sq-c6c2s — DETERMINISTIC minified-browser-bundle byte comparison
-// for the browser SHACL story: the esbuild-bundled `rdf-validate-shacl` peer vs
-// the wasm-pack artifact of `sparq-shacl-wasm`.
+// [SONNET-4.6] sq-c6c2s — minified-browser-bundle byte comparison for the
+// browser SHACL story: the esbuild-bundled `rdf-validate-shacl` peer vs the
+// wasm-pack artifact of `sparq-shacl-wasm`. Machine-independent (no wall clock)
+// but NOT reproducible across gathers — read REPRODUCIBILITY below before
+// citing the peer bytes or the ratio.
 //
 //   node bundle.mjs --pkg [label=]<wasm-pack out dir> [--pkg ...]
 //                   --modules-dir <gather-only node_modules parent>
@@ -14,13 +16,21 @@
 // number is what a bundler actually emits for a browser app, so this script
 // builds that bundle with esbuild and compares gzip-9 wire bytes.
 //
-// DETERMINISM (why these bytes can be canonical while timings cannot): every
-// input is pinned content — the peer's resolved npm versions (recorded in the
-// envelope) run through a pinned esbuild version, and the sparq side is the
-// repo commit plus the recorded wasm-pack/rustc toolchain. No wall clock is
-// involved, so a quiet box buys nothing here. gzip-9 is Node zlib and therefore
-// zlib-version-dependent — informative, with the raw byte counts as the stable
-// metric (the same posture as bench/wasm-compare/bundle.mjs).
+// REPRODUCIBILITY (read this before citing the peer bytes). No wall clock is
+// involved, so these numbers are machine-independent and a quiet box buys
+// nothing — but they are NOT reproducible across gathers. run.sh installs the
+// peer stack from BARE package names (esbuild included) with no committed
+// lockfile, so a later gather can resolve different validator, RDF/JS,
+// transitive, or bundler code and emit different bytes. The recorded
+// `package_versions` and per-bundle sha256 are PROVENANCE for the run that
+// produced them, NOT a recipe to re-derive them; the peer column and the ratio
+// are therefore point-in-time and NOT canonical. Only the sparq side is pinned
+// (repo commit + the recorded wasm-pack/rustc toolchain). Pinning the peer half
+// would take a committed manifest + lockfile installed with `npm ci` — compare
+// bench/wasm-compare/bundle.mjs, which pins its peer to npm:oxigraph@<PIN> and
+// records the tarball sha256. gzip-9 is Node zlib and therefore
+// zlib-version-dependent — informative, with the raw byte counts as the more
+// stable metric.
 //
 // TWO PEER VARIANTS, and which one is like-for-like:
 //   - `validator-only` — `rdf-validate-shacl` alone. A LOWER BOUND on the peer:
@@ -255,6 +265,11 @@ async function buildPeerBundles(modulesDir) {
     bundler: `esbuild ${esbuildVersion}`,
     options: 'bundle, minify, treeShaking, format=esm, platform=browser, target=es2022, legalComments=none',
     package_versions: versions,
+    install_pinning:
+      'FLOATING: run.sh npm-installs these packages (and esbuild) by bare name with no ' +
+      'committed lockfile, so top-level AND transitive versions are whatever the registry ' +
+      'resolved at gather time. These versions are recorded as PROVENANCE for this run — they ' +
+      'do not make the bytes reproducible by a later gather.',
     lower_bound_note:
       'Peer bytes are a LOWER BOUND twice over: (1) Node core imports reached by the ' +
       'RDF/JS stack are stubbed to EMPTY modules rather than polyfilled, so a real ' +
@@ -337,11 +352,17 @@ async function main() {
   const envelope = {
     gather: 'shacl-wasm-minified-bundle-bytes',
     bead: 'sq-c6c2s',
-    deterministic: true,
-    deterministic_note:
-      'Bytes only — no wall clock, so no quiet box is required and these numbers ARE ' +
-      'canonical-capable. Raw `bytes` are the stable metric; `gzip9_bytes` is Node zlib ' +
-      'level 9 and therefore zlib-version-dependent (informative wire size).',
+    machine_independent: true,
+    reproducible: false,
+    reproducibility_note:
+      'Bytes only — no wall clock, so no quiet box is required and the numbers do not depend ' +
+      'on machine load. They are NOT reproducible across gathers, and NOT canonical: the peer ' +
+      'stack (esbuild included) is installed from bare package names with no committed ' +
+      'lockfile, so a later gather can resolve different peer, transitive, or bundler code and ' +
+      'emit different bytes. `peer_minified_bundle.package_versions` and the per-bundle sha256 ' +
+      'are PROVENANCE for this run, not a recipe to re-derive it. Only the sparq rows are ' +
+      'pinned (git_commit + the recorded wasm-pack/rustc toolchain). Raw `bytes` are the more ' +
+      'stable metric; `gzip9_bytes` is Node zlib level 9 and therefore zlib-version-dependent.',
     git_commit: args.gitCommit || 'unknown',
     sparq: sparqRows,
     peer_minified_bundle: peer,

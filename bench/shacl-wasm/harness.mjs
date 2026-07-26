@@ -340,7 +340,13 @@ async function main() {
       const b = JSON.parse(readFileSync(args.peerBundle, 'utf-8'));
       peerBundle = {
         source: args.peerBundle,
-        deterministic: true,
+        machine_independent: true,
+        reproducible: false,
+        reproducibility_note:
+          'Bytes only (no wall clock), but NOT reproducible and NOT canonical: the peer stack ' +
+          'and esbuild are installed unpinned (no committed lockfile), so a later gather can ' +
+          'emit different bytes. `package_versions` is provenance for the run below. See ' +
+          'bundle.mjs.',
         peer: b.peer_minified_bundle,
         sparq: b.sparq,
         ratio: b.ratio,
