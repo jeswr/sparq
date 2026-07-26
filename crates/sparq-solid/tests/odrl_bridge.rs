@@ -243,6 +243,12 @@ fn sparql_query_requires_concrete_read_action() {
     let use_request = Request::new(odrl("use")).on(N1).by(ALICE);
     let use_outcome = use_store.materialize_odrl_permission(&use_policy, &use_request);
     assert!(!use_outcome.granted, "odrl:use must stay unmapped: {use_outcome:?}");
+    assert!(
+        use_outcome.reasons.iter().any(|reason| reason.contains("no WAC/ACP mode mapping")),
+        "expected an unmapped-action refusal, not a policy denial: {use_outcome:?}"
+    );
+    assert!(use_outcome.mode.is_none());
+    assert!(use_outcome.grant_triple.is_none());
     assert_eq!(use_store.query_as(&alice, Mode::Read, sel).unwrap().rows.len(), 0);
 
     // A query is represented by the concrete `odrl:read` action, which maps to

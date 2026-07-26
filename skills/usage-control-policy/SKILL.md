@@ -300,7 +300,8 @@ enforcement capability. An `odrl:use` **request** does not transitively become q
 materializes no grant, so `query_as` sees nothing from it. The hierarchy still applies while
 evaluating a policy (`odrl:use` permission can cover a concrete `odrl:read` request), but the bridge
 maps the concrete request action rather than guessing which descendant of the broad `use` umbrella
-was intended. Always construct query requests with `Request::new(ODRL_READ)`.
+was intended. Always construct query requests with the concrete read action:
+`Request::new("http://www.w3.org/ns/odrl/2/read")`.
 
 **Fail-closed:** a grant is materialized only on a *definite Permit* AND a *mappable action* AND a *concrete party (WebID) + target graph*. A Deny, unsatisfied constraint, undischarged duty, unmapped action, or partyless/targetless request materializes **nothing**.
 
