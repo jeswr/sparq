@@ -216,8 +216,18 @@ the row below is a same-artifact, same-scoring comparison rather than an estimat
 artifact is GPL-2.0, so it is fetched gather-only under a pinned sha256 and never
 vendored; the runner reproduces the benchmark's own scoring table and its own answer
 comparator (ordered rows, `geo:wktLiteral` whitespace/case-folded, `geo:gmlLiteral`
-XML-canonicalised, any `-alternative-N.srx` accepted). All 206 queries evaluated in every
-configuration; none errored.
+put through a bounded XML normaliser — documented in `canonical_xml`, and deliberately
+NOT claimed to be XML C14N — any `-alternative-N.srx` accepted). All 206 queries
+evaluated in every configuration; none errored.
+
+**Caveat — the recorded numbers (the sparq row above and the configuration matrix below)
+predate a comparator fix and are a LOWER BOUND on the `gmlLiteral` requirements** (PR
+#3990 review round 1). They were measured with an answer
+comparator that dropped XML entity references while parsing `.srx`, so every *escaped*
+expected GML answer was mangled before comparison and could not match; the GML normaliser
+was also lossy (empty elements, escaping, malformed input). Both are fixed, but re-running
+the benchmark needs the gather-only download, so the table has NOT yet been re-derived —
+treat the sparq row as provisional until it is.
 
 The row above is sparq's **best** configuration, and it is also the SHIPPED-DEFAULT query
 entry point (`geosparql_rewrite` is opt-in and off by default). Both configuration axes

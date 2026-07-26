@@ -390,6 +390,16 @@ jobs:
         run: bash scripts/tests/test_beir_gather_sentinel.sh
       - name: Self-test console envelope extractor (exact names + CRLF + allowlist)
         run: bash scripts/tests/test_extract_console_envelopes.sh
+      # [SONNET-4.6] PR #3990 review: bench/geo/gsb.sh advertises a HARD sha256 pin on the
+      # GeoSPARQL Compliance Benchmark, but a CACHED extraction was accepted on file COUNTS
+      # alone — a stale or locally edited corpus would have been scored silently, making the
+      # recorded compliance number irreproducible. The cache is now gated on a recorded proof
+      # (pinned tarball digest + a content digest of the extracted tree); this hermetic
+      # self-test pins that a count-preserving edit, an absent proof, and a proof naming a
+      # different tarball digest are all rejected. No network, no corpus: it fabricates a
+      # correctly-shaped tree in a scratch dir and drives the real script with GSB_FETCH=0.
+      - name: Self-test gsb.sh cache pin (count-preserving edit never scored)
+        run: bash bench/geo/gsb.sh --self-test
       # [OPUS-4.8] sq-neq8: hermetic self-test of the coverage-ratchet gate's PURE logic
       # (max-remeasure aggregation sq-x4jy + floor-monotonicity sq-neq8) so a regression in
       # the gate ITSELF is caught here, before the gate is trusted to guard real coverage.

@@ -130,8 +130,11 @@ cargo run --release -p sparq-geo --features geosparql_rewrite,geof_accessors \
 ```
 
 - **Data + queries** — `gsb.sh`, mirroring `geographica.sh`: the upstream tarball is pinned
-  by sha256 and the extracted tree is counted before use. **Never vendored**, for two
-  independent reasons: the upstream is GPL-2.0, and AGENTS.md keeps datasets out of git.
+  by sha256, the extracted tree is counted before use, and a CACHED extraction is reused only
+  against a recorded proof (the pinned tarball digest plus a content digest of the tree), so a
+  stale or locally edited corpus is re-extracted rather than silently scored — `gsb.sh
+  --self-test` pins that rule. **Never vendored**, for two independent reasons: the upstream
+  is GPL-2.0, and AGENTS.md keeps datasets out of git.
 - **System under test** — one sparq GeoSPARQL stack driven uniformly across all 206 queries
   (nothing is special-cased per query): RDF/XML load, `sparq-reason` RDFS materialisation,
   the `geof:` registry with `geof_accessors`, and a query entry point. The last two are
@@ -143,9 +146,14 @@ cargo run --release -p sparq-geo --features geosparql_rewrite,geof_accessors \
 - **Scoring** — reproduces the benchmark's own weighting (each requirement `1/30`, split
   over its query groups, a 4-query serialisation group splitting `1/3, 1/3, 1/6, 1/6`) and
   its own comparator (ordered rows; `geo:wktLiteral` whitespace-stripped and lower-cased;
-  `geo:gmlLiteral` XML-canonicalised; any `-alternative-N.srx` accepted). The scoring table
-  and comparator carry unit tests that run under a plain `cargo test --all-features` — no
-  download needed to know the harness scores correctly.
+  `geo:gmlLiteral` put through the **bounded** XML normaliser `canonical_xml`; any
+  `-alternative-N.srx` accepted). That normaliser states exactly which formatting
+  differences it folds, and errors — so the literal is compared verbatim rather than as a
+  partial parse — on the malformed / DTD / PI / comment cases it does not model. It is
+  deliberately NOT claimed to be XML C14N: the corpus is a gather-only download, so no
+  differential test against the upstream canonicaliser can run from this tree. The scoring
+  table and comparator carry unit tests that run under a plain `cargo test --all-features`
+  — no download needed to know the harness scores correctly.
 - **Triage** — `GSB_DEBUG=<query-id-prefix>` dumps the rewritten query plus actual-vs-expected
   result sets for the matching failures. Every non-passing requirement in the recorded run
   was triaged this way before being written down as a gap.
