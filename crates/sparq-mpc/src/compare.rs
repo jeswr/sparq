@@ -506,6 +506,8 @@ fn square_protocol_random_bit(dealer: &mut ShamirDealer) -> Result<Vec<Share>, M
         //    and it is independent of the sign bit of a.
         let a_sq_2t = shamir::mul_shares_raw(&a, &a)?;
         let c = shamir::reconstruct_degree(&a_sq_2t, 2 * t)?;
+        // One interactive open (counted even on the negligible c == 0 retry).
+        dealer.note_open();
         // 3. c == 0 (a was 0; probability 1/p) ⇒ discard and retry with fresh [a].
         if c == Fp::zero() {
             continue;
@@ -663,6 +665,7 @@ fn secure_bit_decompose(
     //    the backend's robust reconstruct, exactly like every other open.
     let masked = shamir::add_shares(a_shares, &r_value)?;
     let c = a.reconstruct(&masked)?.value();
+    dealer.note_open();
 
     // 3. Bitwise subtraction [a]_bits = c_bits ⊖ [r]_bits with a ripple borrow.
     //    a_k = c_k XOR r_k XOR borrow_in ; borrow_out = (¬c_k ∧ r_k) ∨ (borrow_in ∧
@@ -949,6 +952,7 @@ fn secure_bit_decompose_rabbit(
     // 2. Open c = (x + r) mod p — the ONLY opening; (near-)uniform, hides x.
     let masked = shamir::add_shares(x_shares, &r_value)?;
     let c = backend.reconstruct(&masked)?.value();
+    dealer.note_open();
 
     // 3a. Wrap indicator w = 1{c < r} via the public-vs-shared LTBits.
     let w = rabbit_lt_bits_public_less_than_shared(dealer, c, &r_bits)?;
@@ -1036,6 +1040,7 @@ fn secret_is_zero(dealer: &mut ShamirDealer, v: &[Share]) -> Result<bool, MpcErr
     // (mirrors `HiddenValueJoin::secure_equal`); m == 0 ⇔ v == 0. `v` itself is
     // never reconstructed.
     let m = shamir::reconstruct_degree(&m_shares, 2 * t)?;
+    dealer.note_open();
     Ok(m == Fp::zero())
 }
 

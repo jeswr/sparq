@@ -297,6 +297,7 @@ impl ShamirBackend {
             t: self.t,
             rng,
             mults: 0,
+            opens: 0,
         }
     }
 
@@ -330,6 +331,9 @@ pub struct ShamirDealer {
     /// Monotone count of successful [`Self::degree_reduce`] rounds — see
     /// [`Self::mult_count`].
     mults: usize,
+    /// Monotone count of interactive opens noted by dealer-driven sub-protocols —
+    /// see [`Self::open_count`] / [`Self::note_open`].
+    opens: usize,
 }
 
 impl std::fmt::Debug for ShamirDealer {
@@ -363,9 +367,34 @@ impl ShamirDealer {
     /// internal circuit changes. Masked-product OPENS — paths that reconstruct a
     /// degree-`2t` product directly (the square-protocol bit dealing, the
     /// zero-tests) rather than re-sharing it — are opens, not degree reductions,
-    /// and are deliberately not counted here.
+    /// and are deliberately not counted here: they have their own twin counter,
+    /// [`Self::open_count`].
     pub(crate) fn mult_count(&self) -> usize {
         self.mults
+    }
+
+    /// Number of interactive OPENS the dealer-driven comparison sub-protocols have
+    /// performed so far — the twin of [`Self::mult_count`] for the reconstructions
+    /// that [`Self::mult_count`] deliberately excludes: the square-protocol
+    /// `c = a²` open behind every jointly-random mask bit, the masked
+    /// bit-decomposition open (`c = (x + r) mod p` on the Rabbit path), and the
+    /// zero-test product open `m = v·r` of the in-protocol range proofs. [OPUS-5]
+    ///
+    /// A monotone count incremented via [`Self::note_open`] at each such open site
+    /// (the reconstruct routines themselves are dealer-free, so the sites note the
+    /// open explicitly). Cost reporters take DELTAS (e.g.
+    /// `SortMergeCost::scan_opens` in `sort_merge_join`) so the modelled
+    /// communication includes the opens as well as the multiplications. Verdict /
+    /// padded-reveal opens performed directly by an operator through the backend
+    /// are NOT noted here — operators count those themselves.
+    pub(crate) fn open_count(&self) -> usize {
+        self.opens
+    }
+
+    /// Record one interactive open performed by a dealer-driven sub-protocol —
+    /// see [`Self::open_count`].
+    pub(crate) fn note_open(&mut self) {
+        self.opens += 1;
     }
 
     /// Draw one uniform field element from the masking RNG (advances state).

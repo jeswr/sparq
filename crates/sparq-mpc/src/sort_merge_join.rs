@@ -111,14 +111,27 @@
 //!
 //! ## Communication / round cost (MODELLED — counted, not measured)
 //!
-//! [`SortMergeCost`] reports what a real deployment would pay, derived from `n`
-//! (never a hard-coded number, AGENTS.md): the sort's `O(n log² n)` compare-exchanges
-//! (each a secure comparison + a conditional swap), the segmented scan's secure
-//! multiplications — counted EXACTLY from the dealer's multiplication counter, so
-//! each of the `n − 1` adjacency equalities contributes its full bit-decomposition
-//! circuit, not one multiplication per call — the oblivious shuffle's switch
-//! count/depth, and the padded reveal opens. The in-process simulation's wall-clock
-//! is NOT an MPC latency.
+//! [`SortMergeCost`] is an interactive-OPERATION count of the modelled protocol,
+//! derived from `n` (never a hard-coded number, AGENTS.md) — NOT a complete
+//! deployment communication bill. What is counted, and at what granularity:
+//!
+//! - **Sort**: the `O(n log² n)` compare-exchanges and the network depth, at GATE
+//!   granularity — each gate is one secure comparison + one conditional swap, and
+//!   its interior Rabbit circuit is NOT expanded into per-gate
+//!   multiplication/open counts here.
+//! - **Segmented scan**: counted EXACTLY from the dealer's counters — BOTH the
+//!   secure multiplications ([`SortMergeCost::scan_mults`]: each of the `n − 1`
+//!   adjacency equalities contributes its full bit-decomposition circuit, not one
+//!   multiplication per call) AND the interactive opens its Rabbit machinery
+//!   performs ([`SortMergeCost::scan_opens`]: the square-protocol mask-bit opens,
+//!   the masked decomposition opens, the range-proof zero-test opens).
+//! - **Shuffle**: switch count/depth; **padded reveal**: its degree-`t` opens
+//!   ([`SortMergeCost::opens`]).
+//!
+//! NOT modelled: the share-distribution traffic of dealing / re-sharing itself
+//! (the in-process dealer deals each sharing locally; a real deployment pays
+//! per-party messages for every sharing and degree-reduction round). The
+//! in-process simulation's wall-clock is NOT an MPC latency.
 
 use crate::compare::{
     check_party_count, secure_equal_to_bit_shared, secure_greater_than_shared,
@@ -143,8 +156,10 @@ pub enum SortMergeJoinKind {
 }
 
 /// MODELLED communication / round cost of one [`sort_merge_semi_anti`]. Counted,
-/// never measured (see the module cost note). No hard-coded numbers: derived from
-/// the union size and the built networks.
+/// never measured — and NOT a complete deployment bill: see the module cost note
+/// for what each field counts, at what granularity, and what is not modelled at
+/// all (share-distribution traffic; the sort's interior per-gate circuit). No
+/// hard-coded numbers: derived from the union size and the built networks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SortMergeCost {
     /// Union size `n = |L| + |R|` (public).
@@ -165,10 +180,22 @@ pub struct SortMergeCost {
     /// open). Masked-product opens inside the Rabbit machinery (the solved-bits
     /// square protocol, the zero-tests) reconstruct a degree-`2t` product directly
     /// instead of re-sharing it: they are opens, not secure multiplications, and
-    /// are not counted here.
+    /// are counted separately in [`SortMergeCost::scan_opens`].
     pub scan_mults: usize,
-    /// Degree-`t` opens performed at the padded reveal (one selector per revealed
-    /// slot, plus the payload id of each kept row).
+    /// [OPUS-5] Interactive opens performed inside the segmented merge scan's
+    /// Rabbit machinery — COUNTED from the dealer's open counter
+    /// ([`crate::shamir::ShamirDealer`]), the same delta discipline as
+    /// [`SortMergeCost::scan_mults`], whose count deliberately excludes them. Per
+    /// adjacency equality this is one square-protocol `c = a²` open behind every
+    /// jointly-random mask bit, the masked open `c = (x + r) mod p` of each of the
+    /// two bit-decompositions, and the zero-test product open `m = v·r` of each
+    /// in-protocol range proof. Reported separately so the scan's interactive work
+    /// is fully accounted (multiplications AND opens), not silently dropped.
+    pub scan_opens: usize,
+    /// Degree-`t` opens performed at the padded reveal ONLY (one selector per
+    /// revealed slot, plus the payload id of each kept row). The scan's interior
+    /// Rabbit opens are in [`SortMergeCost::scan_opens`]; the sort's interior
+    /// opens are not counted (gate-granularity model — module cost note).
     pub opens: usize,
     /// The final oblivious shuffle's cost over the `n` reveal slots.
     pub shuffle: crate::oblivious::ShuffleCost,
@@ -327,12 +354,15 @@ fn sort_merge_semi_anti_faulted(
     //         adjacent, so a group is a maximal run of equal keys; we broadcast
     //         "the run contains an R row" to every member with a forward + backward
     //         OR pass gated by the adjacent-equal bit. ---
-    // [OPUS-5] scan_mults is a DELTA of the dealer's secure-multiplication counter,
-    // not a hand-kept tally: each adjacency equality below is a full bit-decomposed
+    // [OPUS-5] scan_mults / scan_opens are DELTAS of the dealer's counters, not
+    // hand-kept tallies: each adjacency equality below is a full bit-decomposed
     // circuit (two Rabbit decompositions + range proofs + per-bit equalities + the
     // AND-tree), so tallying it as one multiplication per call — as this code once
-    // did — understates the modelled cost by orders of magnitude.
+    // did — understates the modelled cost by orders of magnitude; and its interior
+    // Rabbit opens (mask bits, masked decompositions, zero-tests) are interactive
+    // communication too, reported in scan_opens rather than dropped.
     let scan_mults_before = dealer.mult_count();
+    let scan_opens_before = dealer.open_count();
     // Adjacent-key equalities eq[k] = [key_k == key_{k+1}] (secret), for k in 0..n-1.
     let mut eq: Vec<Vec<Share>> = Vec::with_capacity(n.saturating_sub(1));
     for k in 0..n.saturating_sub(1) {
@@ -399,8 +429,9 @@ fn sort_merge_semi_anti_faulted(
         selectors.push(secure_mul(&mut dealer, gate, &cond)?);
     }
     // The scan (adjacency equalities + OR passes + selectors) ends here; the shuffle
-    // below reports its own cost, so snapshot the counter delta now.
+    // below reports its own cost, so snapshot the counter deltas now.
     let scan_mults = dealer.mult_count() - scan_mults_before;
+    let scan_opens = dealer.open_count() - scan_opens_before;
 
     // --- (4) Oblivious reveal: pack (selector, pid) per position, oblivious-shuffle
     //         so the revealed order hides the sorted-key order, open the selector
@@ -460,6 +491,7 @@ fn sort_merge_semi_anti_faulted(
         sort_compare_exchanges: net.gate_count(),
         sort_depth_rounds: net.depth(),
         scan_mults,
+        scan_opens,
         opens,
         shuffle: shuffle_cost,
     };
@@ -1349,5 +1381,69 @@ mod tests {
              ({one_per_equality_tally})",
             cost.scan_mults
         );
+    }
+
+    /// [OPUS-5] Review round 5 (PR #3585). `scan_mults` counts only the dealer's
+    /// degree-reduction rounds; the scan's Rabbit machinery ALSO performs
+    /// interactive opens — the square-protocol `c = a²` open behind every
+    /// jointly-random mask bit, the masked open of each bit-decomposition, and the
+    /// zero-test product open of each range proof — which the cost report used to
+    /// drop entirely. `scan_opens` now reports them, counted from the dealer's
+    /// open counter.
+    ///
+    /// Unlike the multiplication count (data-dependent via the public bits of the
+    /// masked open), the OPEN count is data-independent — a retry costs an extra
+    /// open only on the ~`2^{-61}` `a == 0` draw — so the pin is EXACT: each
+    /// `secure_equal_to_bit_shared` performs `2·(RABBIT_MASK_BITS + 2)` opens (per
+    /// operand: one open per mask bit, one masked decomposition open, one
+    /// range-proof zero-test open), and the scan's other steps (OR passes,
+    /// selectors) open nothing.
+    #[test]
+    fn scan_opens_reports_the_rabbit_interactive_opens_exactly() {
+        use crate::compare::RABBIT_MASK_BITS;
+        let backend = ShamirBackend::new_seeded(3, 4245).unwrap();
+
+        // Derive the per-equality open count and cross-check it against ONE
+        // independently-measured call through the same counter the operator reads.
+        let per_equality = 2 * (RABBIT_MASK_BITS + 2);
+        let mut dealer = backend.dealer();
+        let a = dealer.share(Fp::new(5));
+        let b = dealer.share(Fp::new(9));
+        let before = dealer.open_count();
+        secure_equal_to_bit_shared(&mut dealer, &backend, &a, &b).unwrap();
+        let one_eq_opens = dealer.open_count() - before;
+        assert_eq!(
+            one_eq_opens, per_equality,
+            "one secure_equal_to_bit_shared performed {one_eq_opens} interactive \
+             opens, not the derived 2 masked decompositions + 2 zero-tests + \
+             2 * {RABBIT_MASK_BITS} mask-bit opens = {per_equality}"
+        );
+
+        // A union of n = 4 → 3 adjacency equalities; nothing else in the scan
+        // (the OR passes, the selectors) performs an open.
+        let left = vec![(Fp::new(1), vec![lit("a")]), (Fp::new(2), vec![lit("b")])];
+        let right = [Fp::new(2), Fp::new(7)];
+        let (_, cost) = sort_merge_semi_anti(
+            &backend,
+            &left,
+            &right,
+            vec![var("x")],
+            SortMergeJoinKind::Semi,
+        )
+        .unwrap();
+        let n = cost.union_size;
+        assert_eq!(n, 4);
+        assert_eq!(
+            cost.scan_opens,
+            (n - 1) * per_equality,
+            "scan_opens = {} must report every interactive Rabbit open the scan's \
+             {} adjacency equalities perform",
+            cost.scan_opens,
+            n - 1
+        );
+        // The padded reveal stays a SEPARATE counter: n selector opens plus one
+        // payload-id open for the single kept row (L key 2 matches R key 2) — the
+        // scan's interior opens must not leak into it.
+        assert_eq!(cost.opens, n + 1);
     }
 }
