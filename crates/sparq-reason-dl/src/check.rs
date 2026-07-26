@@ -204,7 +204,10 @@ use crate::extract::extract;
 use crate::model::{Axiom, ClassExpression, ObjectPropertyExpression, Ontology};
 use crate::profile::profiles;
 use crate::tableau::{self, Budget, ExhaustedBudget};
-use oxrdf::{NamedNode, Term as OTerm};
+#[cfg(feature = "dl_transitive")]
+use oxrdf::NamedNode;
+#[cfg(any(feature = "dl_transitive", feature = "dispatch_ql"))]
+use oxrdf::Term as OTerm;
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{is_inline, Dict, Id, TermParts};
 use sparq_reason::{inconsistencies, materialize, Profile};
@@ -507,9 +510,10 @@ impl DirectChecker {
         // conclusion extraction with declarations for premise-confirmed roles so a bare
         // conclusion role assertion is classifiable without weakening L1 globally.
         // [SONNET-4.6] Role declarations are needed only by the transitive-role extension.
+        let conclusion_for_extraction = conclusion.to_vec();
         #[cfg(feature = "dl_transitive")]
         let conclusion_for_extraction = {
-            let mut conclusion_for_extraction = conclusion.to_vec();
+            let mut conclusion_for_extraction = conclusion_for_extraction;
             let mut premise_roles = FxHashSet::default();
             if prem
                 .axioms()
@@ -535,8 +539,6 @@ impl DirectChecker {
             }
             conclusion_for_extraction
         };
-        #[cfg(not(feature = "dl_transitive"))]
-        let conclusion_for_extraction = conclusion.to_vec();
         let concl = match extract(dict, &conclusion_for_extraction) {
             Ok(onto) => onto,
             Err(e) => return unknown_extraction(format!("conclusion: {}", e)),
