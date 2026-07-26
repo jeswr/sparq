@@ -23,9 +23,15 @@ assert!(verdict.is_pass()); // Pass | Violation (wrong result) | EngineFailure
 # Ok::<(), sparq_metamorph::EngineFailure>(())
 ```
 
-External engines (Fuseki, Virtuoso, Oxigraph, …) via the `protocol-drivers` cargo
-feature (off by default; pulls `ureq`): build an `EndpointConfig` preset, wrap it in an
-`HttpSparqlEngine`, and pass it to `check_differential` alongside sparq.
+External engines via the `protocol-drivers` cargo feature (off by default; pulls
+`ureq`): build an `EndpointConfig` preset — `fuseki`, `oxigraph`, `virtuoso`,
+`blazegraph`, `graphdb`, `qlever`, `millenniumdb`, or `generic` for anything else —
+wrap it in an `HttpSparqlEngine`, and pass it to `check_differential` alongside sparq.
+Each preset carries a `PresetEvidence` recording whether its URL/method/negotiation
+conventions were confirmed against a running instance or encoded from upstream
+documentation, so a misconfigured endpoint cannot masquerade as a found bug;
+`tests/preset_live_conformance.rs` is the opt-in, off-CI probe that checks one against
+a live endpoint.
 
 ## ✨ Features
 

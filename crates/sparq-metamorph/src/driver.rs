@@ -10,20 +10,32 @@
 //! Implemented here:
 //!
 //! * [`EndpointConfig`] — declarative endpoint description (URL, query method, extra
-//!   parameters, headers, timeout), with presets for the engines whose protocol
-//!   behaviour is standard ([`EndpointConfig::generic`], [`EndpointConfig::fuseki`],
-//!   [`EndpointConfig::oxigraph`]).
-//! * A **quirk layer** for engines that deviate from the plain protocol:
-//!   [`EndpointConfig::virtuoso`] encodes Virtuoso's documented preferences
-//!   (form-encoded POST against `/sparql`, an explicit `format=` output parameter —
-//!   Virtuoso's content negotiation historically ignores a bare `Accept` on some
-//!   deployments).
+//!   parameters, headers, timeout), with a preset per campaign engine.
+//! * A **quirk layer** for engines that deviate from the plain protocol — a
+//!   non-default URL shape ([`EndpointConfig::blazegraph`]'s namespace path,
+//!   [`EndpointConfig::graphdb`]'s repository path, [`EndpointConfig::qlever`]'s bare
+//!   server root), a non-default transmission method ([`EndpointConfig::qlever`],
+//!   [`EndpointConfig::millenniumdb`]), or an extra parameter needed for a comparable
+//!   answer ([`EndpointConfig::virtuoso`]'s `format=`, [`EndpointConfig::graphdb`]'s
+//!   `infer=false`).
+//! * [`PresetEvidence`] — per-config provenance, because an unvalidated preset is a
+//!   *silent* misconfiguration source in a campaign. Each preset records whether its
+//!   conventions were confirmed against a running instance or encoded from upstream
+//!   documentation; `tests/preset_live_conformance.rs` is the opt-in, off-CI probe that
+//!   promotes one to [`PresetEvidence::LiveInstance`].
 //!
-//! Presets for Blazegraph, GraphDB, QLever, and MillenniumDB are deliberately **not**
-//! shipped yet: their URL/quirk conventions must be validated against live instances
-//! during campaign bring-up (tracked as follow-up work), and an unvalidated preset
-//! would be a silent misconfiguration source. [`EndpointConfig::generic`] plus manual
-//! URL/parameters covers them meanwhile.
+//! | Preset | URL shape | Method | Quirk | Evidence |
+//! | --- | --- | --- | --- | --- |
+//! | [`fuseki`](EndpointConfig::fuseki) | `{base}/{dataset}/query` | form POST | — | docs |
+//! | [`oxigraph`](EndpointConfig::oxigraph) | `{base}/query` | form POST | — | docs |
+//! | [`virtuoso`](EndpointConfig::virtuoso) | `{base}/sparql` | form POST | `format=` | docs |
+//! | [`blazegraph`](EndpointConfig::blazegraph) | `{base}/namespace/{ns}/sparql` | form POST | namespace path | live |
+//! | [`graphdb`](EndpointConfig::graphdb) | `{base}/repositories/{repo}` | form POST | `infer=false` | docs |
+//! | [`qlever`](EndpointConfig::qlever) | `{base}` (server root) | GET | no path suffix | docs |
+//! | [`millenniumdb`](EndpointConfig::millenniumdb) | `{base}/sparql` | raw-body POST | `application/sparql-query` | docs |
+//!
+//! [OPUS-5] The Blazegraph / GraphDB / QLever / MillenniumDB presets, their quirk
+//! layers, and [`PresetEvidence`] are bead `sq-gum8.10`.
 
 use std::time::Duration;
 
@@ -43,8 +55,33 @@ pub enum QueryMethod {
     /// sparq-engine's own `SERVICE` transport choice).
     PostForm,
     /// `GET` with the query URL-encoded in the query string (§2.1.1; subject to URL
-    /// length limits — some engines, e.g. QLever's public endpoints, prefer it).
+    /// length limits — the shape some engines are driven with by default, see
+    /// [`EndpointConfig::qlever`]).
     Get,
+}
+
+/// What backs a preset's URL shape, transmission method, and negotiation choices.
+///
+/// Recorded per config so a campaign run can tell a preset that was confirmed against a
+/// running instance from one encoded only from upstream documentation. A wrong URL or
+/// quirk convention is a *silent* misconfiguration source: a bad path usually surfaces
+/// loudly as [`FailureKind::HttpStatus`], but a subtly wrong parameter — a `format=` the
+/// engine ignores, an inference flag left at a non-comparable default — instead yields
+/// results that differ from every other engine for reasons that are not an engine bug.
+/// A [`crate::ledger`] entry raised through an `UpstreamDocs` preset should have its
+/// endpoint configuration ruled out before it is filed upstream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresetEvidence {
+    /// Not a preset — the caller supplied the URL and method
+    /// ([`EndpointConfig::generic`]).
+    CallerSupplied,
+    /// Confirmed by an actual request/response exchange with a running instance. The
+    /// preset's own documentation names the deployment that was probed.
+    LiveInstance,
+    /// Encoded from the engine's upstream documentation or source. **No live
+    /// confirmation is recorded in this repository** — run the ignored
+    /// `preset_live_conformance` integration test against an instance to check one.
+    UpstreamDocs,
 }
 
 /// Declarative description of one SPARQL-protocol endpoint.
@@ -68,6 +105,8 @@ pub struct EndpointConfig {
     /// 64 MiB — sufficient for any sane SPARQL result set; raise for unusually large
     /// results in a campaign run (e.g. full-graph dumps). [SONNET-4.6]
     pub max_body_bytes: u64,
+    /// What backs this configuration's conventions — see [`PresetEvidence`].
+    pub evidence: PresetEvidence,
 }
 
 impl EndpointConfig {
@@ -81,19 +120,36 @@ impl EndpointConfig {
             headers: Vec::new(),
             timeout: Duration::from_secs(60),
             max_body_bytes: 64 * 1024 * 1024,
+            evidence: PresetEvidence::CallerSupplied,
+        }
+    }
+
+    /// [`EndpointConfig::generic`] carrying a preset's name, URL, and provenance.
+    fn preset(name: &str, query_url: String, evidence: PresetEvidence) -> Self {
+        EndpointConfig {
+            evidence,
+            ..EndpointConfig::generic(name, &query_url)
         }
     }
 
     /// Apache Jena Fuseki: standard protocol at `{base}/{dataset}/query`.
     pub fn fuseki(base_url: &str, dataset: &str) -> Self {
         let base = base_url.trim_end_matches('/');
-        EndpointConfig::generic("fuseki", &format!("{base}/{dataset}/query"))
+        EndpointConfig::preset(
+            "fuseki",
+            format!("{base}/{dataset}/query"),
+            PresetEvidence::UpstreamDocs,
+        )
     }
 
     /// Oxigraph server: standard protocol at `{base}/query`.
     pub fn oxigraph(base_url: &str) -> Self {
         let base = base_url.trim_end_matches('/');
-        EndpointConfig::generic("oxigraph", &format!("{base}/query"))
+        EndpointConfig::preset(
+            "oxigraph",
+            format!("{base}/query"),
+            PresetEvidence::UpstreamDocs,
+        )
     }
 
     /// OpenLink Virtuoso quirk layer: `{base}/sparql`, form-encoded POST, plus an
@@ -102,11 +158,113 @@ impl EndpointConfig {
     /// on some deployments).
     pub fn virtuoso(base_url: &str) -> Self {
         let base = base_url.trim_end_matches('/');
-        let mut config = EndpointConfig::generic("virtuoso", &format!("{base}/sparql"));
+        let mut config = EndpointConfig::preset(
+            "virtuoso",
+            format!("{base}/sparql"),
+            PresetEvidence::UpstreamDocs,
+        );
         config.extra_params.push((
             "format".to_string(),
             "application/sparql-results+json".to_string(),
         ));
+        config
+    }
+
+    /// Blazegraph (NanoSparqlServer) quirk layer: the **namespace-scoped** endpoint
+    /// `{base}/namespace/{namespace}/sparql`, where `base_url` includes the web
+    /// application's context path — `/blazegraph` for the 2.x standalone jar,
+    /// `/bigdata` for the older WAR deployments — and `namespace` names the KB instance
+    /// (Blazegraph's own default is `kb`). Pointing at `{base}/sparql` instead silently
+    /// targets whichever namespace the deployment made default, which is why the
+    /// namespace is a required argument here rather than an optional suffix.
+    ///
+    /// Form-encoded POST with a plain `Accept` header is sufficient. Blazegraph's
+    /// *default* output is SPARQL-Results-XML, but it honours `Accept`, so the REST
+    /// API's Accept-overriding `format=` parameter is deliberately **not** set — one
+    /// less quirk to keep in sync.
+    ///
+    /// Evidence: [`PresetEvidence::LiveInstance`]. Confirmed against the Wikidata Query
+    /// Service, a public Blazegraph deployment, at
+    /// `https://query.wikidata.org/bigdata/namespace/wdq/sparql` — `ASK {}` over
+    /// form-encoded POST, GET, and raw `application/sparql-query` POST each returned
+    /// HTTP 200 with `Content-Type: application/sparql-results+json` when `Accept`
+    /// asked for it, and `application/sparql-results+xml` when it did not.
+    pub fn blazegraph(base_url: &str, namespace: &str) -> Self {
+        let base = base_url.trim_end_matches('/');
+        EndpointConfig::preset(
+            "blazegraph",
+            format!("{base}/namespace/{namespace}/sparql"),
+            PresetEvidence::LiveInstance,
+        )
+    }
+
+    /// Ontotext GraphDB quirk layer (RDF4J REST protocol): the repository URL *is* the
+    /// query endpoint, `{base}/repositories/{repository}` with no `/query` suffix
+    /// (updates go to `{base}/repositories/{repository}/statements`). GraphDB's default
+    /// `graphdb.connector.port` is 7200.
+    ///
+    /// Quirk: RDF4J's `infer` parameter defaults to **true**, so a repository with a
+    /// ruleset answers over entailed statements as well as asserted ones. That is not a
+    /// wrong answer, but it makes GraphDB incomparable with engines that do no
+    /// inference — [`crate::differential`] would report every entailed row as a
+    /// mismatch. The preset pins `infer=false` so the endpoint answers over explicit
+    /// statements only; drop it from `extra_params` to hunt bugs in the entailment path
+    /// instead (self-referential oracles like [`crate::tlp`] stay valid either way).
+    pub fn graphdb(base_url: &str, repository: &str) -> Self {
+        let base = base_url.trim_end_matches('/');
+        let mut config = EndpointConfig::preset(
+            "graphdb",
+            format!("{base}/repositories/{repository}"),
+            PresetEvidence::UpstreamDocs,
+        );
+        config
+            .extra_params
+            .push(("infer".to_string(), "false".to_string()));
+        config
+    }
+
+    /// QLever quirk layer: the SPARQL endpoint is the server **root** — there is no
+    /// `/sparql` path suffix (QLever names only `/ping`, `/metrics`, and its Graph Store
+    /// route), and the port is whatever the server was started with, as QLever's
+    /// `--port` is a required argument with no default. So `base_url` is used verbatim,
+    /// minus any trailing slash.
+    ///
+    /// Quirk: [`QueryMethod::Get`]. QLever accepts all three SPARQL 1.1 Protocol forms;
+    /// GET is the shape its own UI and public API endpoints are driven with, and it
+    /// keeps the query in the request line for endpoint-side logging. A long generated
+    /// case can outgrow a deployment's URL-length limit — set
+    /// `.method = QueryMethod::PostForm` for those runs. Note that QLever enforces
+    /// §2.1.2 for a form-encoded POST (the URL query string must then be empty), so do
+    /// not hand this preset a `base_url` that already carries parameters.
+    ///
+    /// No `format=`/`action=` override is set: QLever honours `Accept` and already
+    /// defaults to `application/sparql-results+json` for SELECT and ASK.
+    pub fn qlever(base_url: &str) -> Self {
+        let mut config = EndpointConfig::preset(
+            "qlever",
+            base_url.trim_end_matches('/').to_string(),
+            PresetEvidence::UpstreamDocs,
+        );
+        config.method = QueryMethod::Get;
+        config
+    }
+
+    /// MillenniumDB quirk layer: `{base}/sparql` on the `mdb server` protocol port
+    /// (1234 by default — the separate 4321 port serves the web interface, not the
+    /// protocol endpoint).
+    ///
+    /// Quirk: [`QueryMethod::PostSparqlQuery`]. The documented request form is a POST
+    /// with `Content-Type: application/sparql-query` carrying the query as the raw
+    /// body; support for a form-encoded `query=` field is not documented, so the preset
+    /// does not assume it. `Accept` is honoured for output selection.
+    pub fn millenniumdb(base_url: &str) -> Self {
+        let base = base_url.trim_end_matches('/');
+        let mut config = EndpointConfig::preset(
+            "millenniumdb",
+            format!("{base}/sparql"),
+            PresetEvidence::UpstreamDocs,
+        );
+        config.method = QueryMethod::PostSparqlQuery;
         config
     }
 }
@@ -370,6 +528,110 @@ mod tests {
         assert!(virtuoso
             .extra_params
             .contains(&("format".to_string(), "application/sparql-results+json".to_string())));
+    }
+
+    /// Blazegraph's namespace-scoped path — `{base}/namespace/{ns}/sparql`, NOT
+    /// `{base}/sparql`, which would silently target the deployment's default namespace.
+    #[test]
+    fn blazegraph_preset_targets_the_namespace_scoped_endpoint() {
+        let config = EndpointConfig::blazegraph("http://localhost:9999/blazegraph/", "kb");
+        assert_eq!(
+            config.query_url,
+            "http://localhost:9999/blazegraph/namespace/kb/sparql"
+        );
+        assert_eq!(config.method, QueryMethod::PostForm);
+        // `Accept` alone drives negotiation; no `format=` override is set.
+        assert!(config.extra_params.is_empty(), "{:?}", config.extra_params);
+
+        let parts = build_request_parts(&config, "ASK { }");
+        assert_eq!(parts.http_method, "POST");
+        assert_eq!(
+            parts.url,
+            "http://localhost:9999/blazegraph/namespace/kb/sparql"
+        );
+        assert_eq!(parts.content_type, Some("application/x-www-form-urlencoded"));
+        assert_eq!(parts.body.as_deref(), Some("query=ASK+%7B+%7D"));
+    }
+
+    /// GraphDB: the repository URL *is* the query endpoint (no `/query` suffix), and
+    /// inference is pinned off so the endpoint stays comparable with non-entailing
+    /// engines under the differential oracle.
+    #[test]
+    fn graphdb_preset_targets_the_repository_url_and_disables_inference() {
+        let config = EndpointConfig::graphdb("http://localhost:7200", "campaign");
+        assert_eq!(config.query_url, "http://localhost:7200/repositories/campaign");
+        assert_eq!(config.method, QueryMethod::PostForm);
+
+        let parts = build_request_parts(&config, "SELECT * WHERE { ?s ?p ?o }");
+        assert_eq!(parts.url, "http://localhost:7200/repositories/campaign");
+        let body = parts.body.unwrap();
+        assert!(body.starts_with("query=SELECT"), "{body}");
+        assert!(body.ends_with("&infer=false"), "{body}");
+    }
+
+    /// QLever: the bare server root is the endpoint, driven by GET.
+    #[test]
+    fn qlever_preset_uses_get_against_the_bare_server_root() {
+        let config = EndpointConfig::qlever("http://localhost:7001/");
+        assert_eq!(config.query_url, "http://localhost:7001");
+        assert_eq!(config.method, QueryMethod::Get);
+
+        let parts = build_request_parts(&config, "ASK { }");
+        assert_eq!(parts.http_method, "GET");
+        assert_eq!(parts.url, "http://localhost:7001?query=ASK+%7B+%7D");
+        assert_eq!(parts.body, None);
+        assert_eq!(parts.content_type, None);
+    }
+
+    /// MillenniumDB: raw-body POST under `application/sparql-query`, query verbatim.
+    #[test]
+    fn millenniumdb_preset_posts_the_raw_query_to_the_sparql_path() {
+        let config = EndpointConfig::millenniumdb("http://localhost:1234");
+        assert_eq!(config.query_url, "http://localhost:1234/sparql");
+        assert_eq!(config.method, QueryMethod::PostSparqlQuery);
+
+        let parts = build_request_parts(&config, "SELECT * WHERE { ?s ?p ?o } LIMIT 10");
+        assert_eq!(parts.http_method, "POST");
+        assert_eq!(parts.url, "http://localhost:1234/sparql");
+        assert_eq!(parts.content_type, Some("application/sparql-query"));
+        assert_eq!(
+            parts.body.as_deref(),
+            Some("SELECT * WHERE { ?s ?p ?o } LIMIT 10")
+        );
+    }
+
+    /// Every preset must declare its provenance: a preset left at
+    /// [`PresetEvidence::CallerSupplied`] would read as "the caller chose this URL" and
+    /// hide the fact that the crate is asserting a convention on the caller's behalf.
+    #[test]
+    fn every_preset_declares_its_evidence() {
+        let presets = [
+            EndpointConfig::fuseki("http://h:3030", "ds"),
+            EndpointConfig::oxigraph("http://h:7878"),
+            EndpointConfig::virtuoso("http://h:8890"),
+            EndpointConfig::blazegraph("http://h:9999/blazegraph", "kb"),
+            EndpointConfig::graphdb("http://h:7200", "r"),
+            EndpointConfig::qlever("http://h:7001"),
+            EndpointConfig::millenniumdb("http://h:1234"),
+        ];
+        for config in &presets {
+            assert_ne!(
+                config.evidence,
+                PresetEvidence::CallerSupplied,
+                "preset {} did not declare its evidence",
+                config.name
+            );
+        }
+        // Only Blazegraph is recorded as confirmed against a running instance; the rest
+        // are documentation-derived until `preset_live_conformance` says otherwise.
+        assert_eq!(
+            EndpointConfig::blazegraph("http://h:9999/blazegraph", "kb").evidence,
+            PresetEvidence::LiveInstance
+        );
+        assert_eq!(
+            EndpointConfig::generic("g", "http://h/sparql").evidence,
+            PresetEvidence::CallerSupplied
+        );
     }
 
     /// Serve exactly one canned HTTP response on an ephemeral **loopback** port (no
