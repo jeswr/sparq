@@ -2606,6 +2606,14 @@ pub fn eval_select_json_chunks(graph: &Graph, pattern: &GraphPattern, flush: Opt
 /// `budget::check` as an `Err` exactly as before — but note that on the streaming path
 /// early chunks may already have been flushed when the trip is detected (the server maps a
 /// post-first-byte trip to a truncated body, since the HTTP status is already committed).
+///
+/// [SONNET-4.6] (sq-yfcu2) The budget also bounds the SERIALIZE step, not just evaluation:
+/// the general (multi-pattern) path re-checks it mid-serialize and gates the final chunk on
+/// `budget::check`, so a deadline that falls due *while the materialised set is being
+/// serialised* is reported as `Err("query budget exceeded (timeout)")` rather than answered
+/// with a complete-but-late result. That is a deliberate behaviour change for late-but-
+/// complete results — the budget is a bound on the whole request, and a caller that has
+/// stopped waiting must not be charged for a body produced after its deadline.
 pub fn eval_select_json_emit(
     graph: &Graph,
     pattern: &GraphPattern,
@@ -2657,15 +2665,35 @@ pub fn eval_select_json_emit(
     };
 
     let mut s = head;
+    // [SONNET-4.6] (sq-yfcu2) The serialize loops below are budget-checked too: the
+    // pre-serialize `budget::check` above prices the ROW / BYTE caps exactly (the rows
+    // are already materialised, so the count is known — unlike the single-pattern
+    // streaming path, which is why this path may fan out under any budget), but
+    // serialising a large materialised set is itself unbounded WORK, so a DEADLINE (or a
+    // cancellation) can fall due *during* it. Both branches therefore re-check the budget
+    // mid-serialize and gate the final chunk on `budget::check` — a late-but-complete
+    // result is reported as the budget error, never returned as if it were in time.
     #[cfg(feature = "parallel")]
     if bindings.rows.len() >= PAR_THRESHOLD {
         use rayon::prelude::*;
+        // Limit snapshot the workers re-check at each par-chunk boundary (the installing
+        // thread's sticky flag is out of reach inside rayon).
+        let limits = budget::snapshot();
         // One string per chunk (≈ per worker), not per row. Chunks stay in order → identical bytes.
         let chunk = bindings.rows.len().div_ceil(rayon::current_num_threads() * 4).max(1);
         let frags: Vec<String> = bindings
             .rows
             .par_chunks(chunk)
             .map(|rows| {
+                // Coarse deadline/cancel re-check at the chunk boundary: once the budget is
+                // past, every later chunk produces nothing, so at most the chunks already in
+                // flight (~one per worker) run to completion. The post-fan-out gate below
+                // turns that into the budget error and discards this (now partial) result —
+                // a skipped chunk never escapes as a truncated body. Under no budget this is
+                // one non-tripping read per chunk.
+                if limits.hit(0) {
+                    return String::new();
+                }
                 let mut f = String::new();
                 for (k, row) in rows.iter().enumerate() {
                     if k > 0 {
@@ -2678,21 +2706,36 @@ pub fn eval_select_json_emit(
             .collect();
         // Accumulate into `s` (which already holds the head) and hand a chunk to `emit` at
         // each flush boundary. The concatenation is byte-identical to the old `emit_chunk`
-        // Vec layout; only the chunk boundaries differ.
-        for (i, f) in frags.into_iter().enumerate() {
-            if i > 0 {
+        // Vec layout; only the chunk boundaries differ. A skipped (empty) fragment is
+        // dropped rather than separated by a comma; every non-skipped chunk holds at least
+        // one row object, so on the untripped path the `wrote` flag is exactly `i > 0`.
+        let mut wrote = false;
+        for f in frags {
+            if f.is_empty() {
+                continue;
+            }
+            if wrote {
                 s.push(',');
             }
+            wrote = true;
             s.push_str(&f);
             if flush.is_some_and(|n| s.len() >= n) && emit(std::mem::take(&mut s)).is_break() {
                 return Ok(());
             }
         }
+        // Post-serialization gate: a deadline that fell due (or a cancellation raised)
+        // while the fan-out ran is the query's answer, not this now-late result.
+        budget::check(bindings.rows.len())?;
         s.push_str("]}}");
         let _ = emit(s);
         return Ok(());
     }
     for (i, row) in bindings.rows.iter().enumerate() {
+        // Coarse re-check every 1024 serialised rows; the post-loop gate turns the early
+        // stop into the budget error, so a truncated body is never returned as success.
+        if i & 1023 == 0 && budget::exhausted(bindings.rows.len()) {
+            break;
+        }
         if i > 0 {
             s.push(',');
         }
@@ -2701,6 +2744,7 @@ pub fn eval_select_json_emit(
             return Ok(());
         }
     }
+    budget::check(bindings.rows.len())?; // post-serialization gate (sticky)
     s.push_str("]}}");
     let _ = emit(s);
     Ok(())
