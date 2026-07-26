@@ -687,6 +687,8 @@ impl ShamirDealer {
             dealer: self,
             alpha,
             key,
+            #[cfg(test)]
+            sigma_opens: 0,
         }
     }
 }
@@ -733,6 +735,11 @@ pub struct MacSession<'a> {
     /// The secret-shared, un-openable `[α]` handed to callers via [`Self::mac_key`]
     /// and consumed by the §2.3 add-constant MAC term.
     key: crate::authenticated::MacKey,
+    /// **Test-only.** Count of `σ` opens spent by [`Self::mac_check_and_open`] — the
+    /// instrument behind the §2.5/§5 amortisation test. Not present in a production
+    /// build, so it costs the session nothing.
+    #[cfg(test)]
+    sigma_opens: u64,
 }
 
 impl std::fmt::Debug for MacSession<'_> {
@@ -1062,10 +1069,13 @@ impl MacSession<'_> {
     /// opened (the verdict bit, the intermediate opens of a chain — every value whose
     /// integrity the verdict depends on):
     ///
-    /// 1. Draw public random challenge coefficients `χ_1..χ_k ∈ F_p` from the session
-    ///    RNG. CRITICAL ORDER: the challenges are drawn AFTER the share vectors are
-    ///    fixed (the `[[y_j]]` are already computed when this is called), so a
-    ///    deviating party cannot adapt its tampering to the challenge.
+    /// 1. Derive the public challenge coefficients `χ_1..χ_k ∈ F_p` by **Fiat–Shamir
+    ///    over the ALREADY-FIXED share vectors** (`mac_check_challenges`, crate-private
+    ///    — the coin is an implementation detail, not a public surface). CRITICAL
+    ///    ORDER: the challenges are a deterministic function of the `[[y_j]]` that are
+    ///    being checked, so "drawn after the shares are fixed" is a *structural* fact
+    ///    rather than a call-ordering convention — a deviating party cannot adapt its
+    ///    tampering to the challenge, because changing the tamper changes `χ`.
     /// 2. Open the values `y_j` and form the public `y = Σ_j χ_j·y_j`.
     /// 3. Each (simulated) party locally forms its share of
     ///    `[σ] = Σ_j χ_j·[m_{y_j}] − y·[α]` (all LINEAR → free), then open `σ`.
@@ -1074,33 +1084,49 @@ impl MacSession<'_> {
     ///    MAC (impossible without `α`) makes `σ ≠ 0` with probability `≥ 1 − 1/p ≈
     ///    1 − 2^{−61}`. On `σ ≠ 0` this returns [`MpcError::MacCheckFailed`] (ABORT).
     ///
+    /// **One `σ` open per BATCH, not per value** — this is the amortisation the design
+    /// (§5, "Output: one batched MAC-check") banks on: an all-pairs hidden join's
+    /// `|L|·|R|` equality opens are authenticated by a *single* `σ` open, so the
+    /// marginal round cost of the malicious upgrade is `O(1)` per opened batch, not
+    /// `O(1)` per opened value. Pass the WHOLE batch in one call; calling this once
+    /// per value forfeits exactly that amortisation.
+    ///
     /// `σ` is **leakage-free**: it is identically `0` for honest executions and is a
     /// random-coefficient combination of MACs minus the same of values otherwise — it
     /// reveals nothing about the inputs (design §2.5 confidentiality note; the
     /// coZK-2025/1026 mitigation is that the check runs BEFORE the result is acted on).
     /// `α` is never reconstructed: only `σ` (which is `0`) and the public `y_j` are
-    /// opened. Returns `Ok(())` on a passing check; the caller then opens the verdict.
-    /// `[OPUS-4.8]`
-    pub fn mac_check(
+    /// opened.
+    ///
+    /// Returns the **opened, MAC-verified** values `y_1..y_k`, positionally aligned
+    /// with `values` — so the caller acts on exactly the values the check covered, and
+    /// on a failing check gets an `Err` and NO value at all (the abort-before-acting
+    /// discipline). Prefer this over [`Self::mac_check`] + a separate open: the latter
+    /// re-opens each value a second time and leaves the "checked" and "acted on"
+    /// quantities bound only by convention. `[OPUS-4.8]`
+    pub fn mac_check_and_open(
         &mut self,
         values: &[crate::authenticated::AuthenticatedShare],
-    ) -> Result<(), MpcError> {
+    ) -> Result<Vec<Fp>, MpcError> {
         if values.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let t = self.dealer.threshold();
-        // 1. Public challenge coefficients χ_j, drawn AFTER the shares are fixed.
-        let chis: Vec<Fp> = (0..values.len()).map(|_| self.dealer.draw_fp()).collect();
+        let n = self.dealer.parties();
+        // 1. Public challenge coefficients χ_j, bound by Fiat–Shamir to the shares
+        //    being checked (so they are unavoidably derived AFTER those are fixed).
+        let chis = mac_check_challenges(n, t, values);
 
         // 2./3. Build [σ] = Σ_j χ_j·[m_{y_j}] − (Σ_j χ_j·y_j)·[α] as a free local
         //       linear combination, and accumulate the public y = Σ_j χ_j·y_j.
-        let n = self.dealer.parties();
         let mut sigma_shares: Vec<Share> =
             (1..=n as u64).map(|x| Share { x, y: Fp::zero() }).collect();
         let mut y_pub = Fp::zero();
+        let mut opened = Vec::with_capacity(values.len());
         for (chi, av) in chis.iter().zip(values.iter()) {
             // Open the value y_j (public on this path) and accumulate χ_j·y_j.
             let y_j = self.dealer.reconstruct(av.value_shares())?;
+            opened.push(y_j);
             y_pub = y_pub.add(chi.mul(y_j));
             // Add χ_j·[m_{y_j}] into [σ].
             let weighted_mac = scale(av.mac_shares(), *chi);
@@ -1117,6 +1143,11 @@ impl MacSession<'_> {
         //    Lagrange and the σ == 0 check below is the SOLE detector (soundness from
         //    the secret α); with redundancy (n > 2t+1) the robust path additionally
         //    flags a degree-`t` inconsistency. Either way a tamper is caught.
+        //    This is the ONE σ open the whole batch shares (the §5 amortisation).
+        #[cfg(test)]
+        {
+            self.sigma_opens += 1;
+        }
         let sigma = self.dealer.reconstruct(&sigma_shares)?;
         if sigma != Fp::zero() {
             return Err(MpcError::MacCheckFailed {
@@ -1129,7 +1160,33 @@ impl MacSession<'_> {
                 ),
             });
         }
-        Ok(())
+        Ok(opened)
+    }
+
+    /// The §2.5 batched MAC-check as a pure GATE — [`Self::mac_check_and_open`] with the
+    /// opened values discarded. `Ok(())` means every `[[y_j]]` in the batch is
+    /// MAC-consistent; the caller then opens what it needs.
+    ///
+    /// Prefer [`Self::mac_check_and_open`] on any path that goes on to open one of the
+    /// checked values: it hands back the values the check actually covered, so the
+    /// value acted on cannot drift from the value verified, and it avoids opening each
+    /// `y_j` a second time. Use this form only when the batch is checked for its own
+    /// sake (nothing is opened afterwards). `[OPUS-4.8]`
+    pub fn mac_check(
+        &mut self,
+        values: &[crate::authenticated::AuthenticatedShare],
+    ) -> Result<(), MpcError> {
+        self.mac_check_and_open(values).map(|_| ())
+    }
+
+    /// **Test-only.** How many `σ` opens this session has spent on batched MAC-checks
+    /// — one per [`Self::mac_check_and_open`] call over a NON-empty batch, regardless
+    /// of the batch size. It exists so the amortisation acceptance (a single batched
+    /// check covers `|L|·|R|` equality opens) is MEASURED against the real code path
+    /// rather than asserted in prose.
+    #[cfg(test)]
+    pub(crate) fn sigma_opens_for_test(&self) -> u64 {
+        self.sigma_opens
     }
 
     /// **Test-only.** The cleartext session MAC key `α`, so tests can verify the
@@ -1149,6 +1206,95 @@ impl MacSession<'_> {
     pub(crate) fn alpha_shares_for_test(&self) -> Vec<Share> {
         self.key.shares_for_test()
     }
+}
+
+/// Domain-separation tag for the §2.5 batched MAC-check public coin. Versioned and
+/// fixed: changing it changes every derived challenge (which is harmless — the coin is
+/// re-derived from scratch on each check — but it must never collide with another
+/// hash use in the crate, e.g. [`crate::term_encode::DOMAIN_TAG`]).
+pub(crate) const MAC_CHECK_DOMAIN_TAG: &[u8] = b"sparq-mpc/mac-check-challenge/v1\0";
+
+/// [OPUS-4.8] sq-km34.4 — the **public coin** for the §2.5 batched MAC-check: the
+/// challenge coefficients `χ_1..χ_k ∈ F_p`, derived by Fiat–Shamir from a
+/// domain-separated transcript of the share vectors being checked.
+///
+/// ## Why Fiat–Shamir rather than a dealer RNG draw
+///
+/// The design (§2.5 step 2) requires the `χ_j` to be a **public coin derived AFTER the
+/// shares are fixed**, so a deviating party cannot adapt its tampering to the
+/// challenge. Drawing them from the dealer's private masking CSPRNG satisfies that only
+/// by call ORDERING, and — more importantly — is not something `n` parties could ever
+/// AGREE on without a trusted dealer, since the stream is one party's secret state.
+/// Hashing the (already-fixed) `[[y_j]]` transcript makes both properties structural:
+/// the coin is a deterministic function of exactly the shares under check, so it cannot
+/// precede them, and every party derives the SAME `χ` from public transcript data. In
+/// the in-process simulation the transcript is the full share vectors; in a real
+/// deployment it is the standard commit-then-challenge step (each party broadcasts a
+/// binding commitment to its already-fixed shares, then `χ = H(commitments)`), for
+/// which this is the faithful stand-in.
+///
+/// ## Why grinding does not degrade the soundness bound
+///
+/// A Fiat–Shamir coin is normally weakened by grinding (retry until the hash is
+/// favourable). It is not here: to know whether a candidate `χ` yields `σ = 0` the
+/// adversary must evaluate `σ = Σ_j χ_j·(δ_{m,j} − α·δ_{y,j})`, which needs the SECRET
+/// `α`. It cannot test its guesses offline, so each protocol run is a single blind
+/// attempt and the bound stays `≥ 1 − 1/p ≈ 1 − 2^{−61}` — the same statistical
+/// parameter as an ideal coin. (Nothing here is externally audited — sq-qhy4; the MPC
+/// estate is research-grade and semi-honest outside this authenticated path.)
+///
+/// The `χ_j` are uniform over ALL of `F_p`, zero included: a `χ_j = 0` drops value `j`
+/// from that check, which is exactly the `1/p` term already inside the soundness bound
+/// (forcing them nonzero would skew the distribution the bound is stated over).
+pub(crate) fn mac_check_challenges(
+    n: usize,
+    t: usize,
+    values: &[crate::authenticated::AuthenticatedShare],
+) -> Vec<Fp> {
+    use sha2::{Digest, Sha512};
+
+    /// Absorb one share vector: its length, then each `(x, y)` as fixed-width
+    /// big-endian words. Length-prefixing keeps the transcript unambiguous (two
+    /// different share layouts can never serialise to the same bytes).
+    fn absorb(hasher: &mut Sha512, shares: &[Share]) {
+        hasher.update((shares.len() as u64).to_be_bytes());
+        for s in shares {
+            hasher.update(s.x.to_be_bytes());
+            hasher.update(s.y.value().to_be_bytes());
+        }
+    }
+
+    // The transcript root commits to the whole batch: the protocol parameters, the
+    // batch size, and BOTH halves ([y_j] and [α·y_j]) of every authenticated sharing.
+    let mut transcript = Sha512::new();
+    transcript.update(MAC_CHECK_DOMAIN_TAG);
+    transcript.update((n as u64).to_be_bytes());
+    transcript.update((t as u64).to_be_bytes());
+    transcript.update((values.len() as u64).to_be_bytes());
+    for av in values {
+        absorb(&mut transcript, av.value_shares());
+        absorb(&mut transcript, av.mac_shares());
+    }
+    let root = transcript.finalize();
+
+    // Expand the root into one challenge per value. Each χ_j depends on the WHOLE
+    // batch (via the root), so tampering with any single [[y_j]] re-randomises every
+    // coefficient — an adversary cannot hold the other challenges fixed while it
+    // searches for a favourable one.
+    (0..values.len())
+        .map(|j| {
+            let mut h = Sha512::new();
+            h.update(MAC_CHECK_DOMAIN_TAG);
+            h.update(&root[..]);
+            h.update((j as u64).to_be_bytes());
+            let digest = h.finalize();
+            // 128 bits reduced mod the 61-bit p: statistically uniform over F_p, the
+            // same fold `crate::term_encode` uses.
+            let mut be = [0u8; 16];
+            be.copy_from_slice(&digest[..16]);
+            Fp::new((u128::from_be_bytes(be) % (crate::field::P as u128)) as u64)
+        })
+        .collect()
 }
 
 /// Evaluate a polynomial (coeffs low-to-high) at `x` by Horner's method.
@@ -2315,5 +2461,227 @@ mod tests {
             )),
             Err(MpcError::Protocol(_))
         ));
+    }
+
+    // ---- sq-km34.4: the batched MAC-check at open (design §2.5) ----------------
+    //
+    // The acceptance for this bead is twofold and both halves are MEASURED here:
+    //   (a) a SINGLE batched check amortises `|L|·|R|` equality opens — pinned by the
+    //       σ-open counter, not by prose;
+    //   (b) a tamper anywhere in that batch ABORTS, and aborts *before* any opened
+    //       value reaches the caller.
+    // Plus the public-coin property the design calls for: the challenges are bound by
+    // Fiat–Shamir to the already-fixed shares.
+
+    /// Build the `|L|·|R|` authenticated masked products an all-pairs hidden-value join
+    /// opens — `[[m_ij]] = [[l_i − r_j]] · [[mask_ij]]`, whose opened `m_ij` is `0`
+    /// exactly when the keys match. This is the batch §2.5 has to authenticate in ONE
+    /// check; returns the authenticated products alongside the expected match graph.
+    fn all_pairs_equality_batch(
+        session: &mut MacSession,
+        left: &[u64],
+        right: &[u64],
+    ) -> (Vec<crate::authenticated::AuthenticatedShare>, Vec<bool>) {
+        let mut products = Vec::with_capacity(left.len() * right.len());
+        let mut expected_match = Vec::with_capacity(left.len() * right.len());
+        for &l in left {
+            for &r in right {
+                let auth_l = session.authenticated_share(Fp::new(l));
+                let auth_r = session.authenticated_share(Fp::new(r));
+                let diff = crate::authenticated::auth_sub(&auth_l, &auth_r).unwrap();
+                let mask_value = session.draw_nonzero_fp();
+                let auth_mask = session.authenticated_share(mask_value);
+                products.push(session.auth_mul(&diff, &auth_mask).unwrap());
+                expected_match.push(l == r);
+            }
+        }
+        (products, expected_match)
+    }
+
+    /// Corrupt the VALUE sharing into a CONSISTENT degree-`t` sharing of a different
+    /// value (shift every share's `y` by δ) while leaving the MAC untouched — the
+    /// Hole-2 deviation Reed–Solomon cannot see, which only the IT-MAC catches.
+    fn tamper_value(
+        av: &crate::authenticated::AuthenticatedShare,
+        delta: u64,
+    ) -> crate::authenticated::AuthenticatedShare {
+        let shifted: Vec<Share> = av
+            .value_shares()
+            .iter()
+            .map(|s| Share {
+                x: s.x,
+                y: s.y.add(Fp::new(delta)),
+            })
+            .collect();
+        crate::authenticated::AuthenticatedShare::new(shifted, av.mac_shares().to_vec()).unwrap()
+    }
+
+    /// **Acceptance (a).** One batched check authenticates all `|L|·|R|` equality opens
+    /// with ONE `σ` open, and returns every opened value correctly — while checking the
+    /// same values one-at-a-time costs `|L|·|R|` σ opens. That ratio IS the design's
+    /// "output: +1 batched check, `O(1)` per opened batch, not per opened value".
+    #[test]
+    fn batched_mac_check_amortises_all_pairs_equality_opens() {
+        let backend = ShamirBackend::new_seeded(5, 0x5121).unwrap();
+        let mut dealer = backend.dealer();
+        let mut session = dealer.new_mac_session();
+
+        // |L| = 6, |R| = 7 ⇒ 42 equality opens; rows 3 and 5 of L match rows in R.
+        let left = [10u64, 20, 30, 40, 50, 60];
+        let right = [30u64, 31, 32, 33, 34, 35, 50];
+        let (products, expected_match) = all_pairs_equality_batch(&mut session, &left, &right);
+        assert_eq!(products.len(), left.len() * right.len());
+        assert_eq!(session.sigma_opens_for_test(), 0, "no check run yet");
+
+        // ONE call over the WHOLE batch.
+        let opened = session.mac_check_and_open(&products).unwrap();
+        assert_eq!(
+            session.sigma_opens_for_test(),
+            1,
+            "the whole |L|·|R| batch must share ONE σ open — that is the §2.5/§5 \
+             amortisation this bead delivers"
+        );
+
+        // The check hands back exactly the values it authenticated, and they carry the
+        // real match graph (m_ij == 0 ⇔ l_i == r_j), so the batch was not vacuous.
+        assert_eq!(opened.len(), products.len());
+        for (idx, (m, &matches)) in opened.iter().zip(expected_match.iter()).enumerate() {
+            assert_eq!(
+                *m == Fp::zero(),
+                matches,
+                "pair {idx}: opened masked product must be zero exactly on a key match"
+            );
+            assert_eq!(
+                *m,
+                backend.reconstruct(products[idx].value_shares()).unwrap(),
+                "pair {idx}: the returned value must be the opened value sharing"
+            );
+        }
+
+        // The un-amortised alternative: one check per value costs one σ open EACH.
+        for p in &products {
+            session.mac_check(std::slice::from_ref(p)).unwrap();
+        }
+        assert_eq!(
+            session.sigma_opens_for_test(),
+            1 + products.len() as u64,
+            "checking the same values one-at-a-time spends |L|·|R| σ opens — the cost \
+             the single batched check replaces"
+        );
+    }
+
+    /// **Acceptance (b).** A tamper on ANY single pair of the `|L|·|R|` batch aborts the
+    /// one batched check, and the caller receives NO opened value — the abort happens
+    /// before the inconsistent result can be acted on (coZK-2025/1026 discipline).
+    #[test]
+    fn tamper_anywhere_in_the_batch_aborts_before_any_value_is_returned() {
+        let left = [7u64, 8, 9, 10];
+        let right = [9u64, 11, 12, 13, 14];
+        // Tamper the first, a middle, and the last pair in turn.
+        for bad_index in [0usize, 9, left.len() * right.len() - 1] {
+            let backend = ShamirBackend::new_seeded(5, 0x7000 + bad_index as u64).unwrap();
+            let mut dealer = backend.dealer();
+            let mut session = dealer.new_mac_session();
+            let (mut products, _) = all_pairs_equality_batch(&mut session, &left, &right);
+
+            // Honest batch passes and yields every value.
+            let clean = session.mac_check_and_open(&products).unwrap();
+            assert_eq!(clean.len(), products.len());
+
+            products[bad_index] = tamper_value(&products[bad_index], 12345);
+            let err = session
+                .mac_check_and_open(&products)
+                .expect_err("a tampered value in the batch must abort the batched check");
+            assert!(
+                matches!(err, MpcError::MacCheckFailed { .. }),
+                "expected MacCheckFailed at batch index {bad_index}, got {err:?}"
+            );
+        }
+    }
+
+    /// The public coin is **Fiat–Shamir over the fixed shares**: deterministic given the
+    /// batch (so every party derives the same `χ` without a trusted dealer), and
+    /// re-randomised by any tamper (so the challenge cannot precede, or be adapted to,
+    /// the shares it authenticates).
+    #[test]
+    fn mac_check_challenges_are_bound_to_the_fixed_shares() {
+        let backend = ShamirBackend::new_seeded(5, 0xC0DE).unwrap();
+        let mut dealer = backend.dealer();
+        let mut session = dealer.new_mac_session();
+        let batch: Vec<_> = [3u64, 5, 8]
+            .iter()
+            .map(|&v| session.authenticated_share(Fp::new(v)))
+            .collect();
+
+        let chis = mac_check_challenges(5, 2, &batch);
+        assert_eq!(chis.len(), batch.len(), "one challenge per value");
+        assert_eq!(
+            chis,
+            mac_check_challenges(5, 2, &batch),
+            "the coin must be a deterministic function of the fixed shares"
+        );
+
+        // Any tamper re-randomises the WHOLE challenge vector — an adversary cannot
+        // hold the other coefficients fixed while searching for a favourable one.
+        let mut tampered = batch.clone();
+        tampered[1] = tamper_value(&tampered[1], 1);
+        let chis_tampered = mac_check_challenges(5, 2, &tampered);
+        assert_ne!(
+            chis, chis_tampered,
+            "changing a share must change the Fiat–Shamir challenges"
+        );
+        assert_ne!(
+            chis[0], chis_tampered[0],
+            "the challenges are derived from a root over the whole batch, so even an \
+             untouched value's coefficient moves"
+        );
+
+        // Domain/parameter separation: the same shares under different (n, t) give a
+        // different coin, so a transcript cannot be replayed across parameterisations.
+        assert_ne!(chis, mac_check_challenges(5, 1, &batch));
+        assert_ne!(chis, mac_check_challenges(7, 2, &batch));
+    }
+
+    /// **The random challenge has to be REAL.** Two tampers that cancel — pair `i`
+    /// shifted by `+δ` and pair `j` by `−δ` — contribute `−α·(χ_i·δ − χ_j·δ)` to `σ`.
+    /// Under an unweighted sum (`χ ≡ 1`) that is identically `0` and the batched check
+    /// is FOOLED; under the §2.5 random challenges it is `−α·δ·(χ_i − χ_j) ≠ 0` except
+    /// with probability `≈ 1/p`. This is the test that pins `mac_check_and_open` to the
+    /// actual [`mac_check_challenges`] coin rather than to any constant weighting.
+    #[test]
+    fn cancelling_tampers_are_caught_because_the_challenges_are_random() {
+        let left = [4u64, 5, 6];
+        let right = [6u64, 7, 8, 9];
+        for delta in [1u64, 999, 1 << 40] {
+            let backend = ShamirBackend::new_seeded(5, 0xCA11 + delta).unwrap();
+            let mut dealer = backend.dealer();
+            let mut session = dealer.new_mac_session();
+            let (mut products, _) = all_pairs_equality_batch(&mut session, &left, &right);
+
+            // Equal-and-opposite value shifts on two different pairs: their MACs are
+            // untouched, so the per-value MAC deficits are exactly +δ·α and −δ·α, which
+            // an unweighted check would sum to zero.
+            products[2] = tamper_value(&products[2], delta);
+            products[7] = tamper_value(&products[7], crate::field::P - delta);
+
+            let err = session
+                .mac_check_and_open(&products)
+                .expect_err("cancelling tampers must still abort under random challenges");
+            assert!(
+                matches!(err, MpcError::MacCheckFailed { .. }),
+                "expected MacCheckFailed for δ = {delta}, got {err:?}"
+            );
+        }
+    }
+
+    /// The empty batch opens nothing and spends no `σ` open — checking "nothing about
+    /// to be opened" must not cost a round, and must not fail closed either.
+    #[test]
+    fn empty_batch_opens_nothing_and_spends_no_sigma_open() {
+        let backend = ShamirBackend::new_seeded(3, 0x0E0E).unwrap();
+        let mut dealer = backend.dealer();
+        let mut session = dealer.new_mac_session();
+        assert!(session.mac_check_and_open(&[]).unwrap().is_empty());
+        assert_eq!(session.sigma_opens_for_test(), 0);
     }
 }

@@ -326,8 +326,15 @@ adapted to Shamir-over-`F_p`:
    per pair: the masked product `m`). Each has an authenticated sharing `[[y_j]] = ([y_j],
    [m_{y_j}])` with `m_{y_j} = α·y_j`.
 2. Draw public random challenge coefficients `χ_1..χ_k ∈ F_p` (Fiat–Shamir / a jointly-tossed
-   coin; in the sim, from the session RNG — but derived *after* shares are fixed, so a party
-   cannot adapt to it).
+   coin), derived *after* shares are fixed, so a party cannot adapt to it. **As implemented
+   (sq-km34.4):** Fiat–Shamir — a domain-separated SHA-512 transcript over `(n, t, k)` and both
+   halves `([y_j], [α·y_j])` of every authenticated sharing under check, expanded to one `χ_j`
+   per value and folded into `F_p`. That makes "after the shares are fixed" *structural* (the
+   coin is a function of exactly those shares, so it cannot precede them and re-randomises under
+   any tamper) and makes the coin something every party derives identically from public
+   transcript data, which a draw from one dealer's private RNG stream could never be. Grinding
+   does not erode the bound: testing a candidate `χ` for `σ = 0` requires the secret `α`, so the
+   adversary cannot evaluate its guesses offline and each run is a single blind attempt.
 3. Open the values `y_j` (the actual results). Compute the public linear combination
    `y = Σ_j χ_j·y_j`.
 4. Each party locally forms its share of `[σ] = Σ_j χ_j·[m_{y_j}] − y·[α]` (all linear → free,
