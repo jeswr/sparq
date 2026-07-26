@@ -551,6 +551,41 @@ no network); the Python close-script carries a `--self-test`.
   two beads on the same crate launch and conflict (this gap once dispatched two
   sparq-server beads at once — sq-8rpq). Carries an `--explain` (per-bead keep/drop
   reasons) and a hermetic `--dry-run-self-test`.
+- **`scripts/pr-area-labels.py`** + **`ci/area-labels.toml`** — the thing that makes the
+  conflict-partition *work on PRs*. <!-- [OPUS-5] reg#677 --> The scheduler partitions by
+  `area:<name>`: an in-flight PR **reserves** its areas and a ready issue **defers** while
+  any of its areas is reserved — so a PR with **no `area:` label** maps to the serializing
+  `__global__` partition and defers **every** issue, whatever crate it names. Measured
+  2026-07-26 (registry #677): **84 of 87 open PRs carried no `area:` label**, because
+  nothing in the pipeline ever applied one; the live chain was candidates 12 → frontier 3
+  → lease 3 → max_concurrent 8 → account pool 28, i.e. **28 account slots idle while 3
+  workers ran**, and raising `max_concurrent`/`package_width` measured **net +0** workers
+  (registry #689). This deriver reads a PR's changed paths and applies the `area:` labels
+  the paths imply — `crates/<name>/…` → `area:<name>` implicitly, everything else from the
+  reviewable `[[map]]` table in `ci/area-labels.toml`. It is **additive only** (a
+  human-applied `area:` is never removed), **idempotent**, **never creates a label** (the
+  add-labels REST call silently would, so a typo'd area is dropped with a `::warning`
+  instead), and **fail-closed**: unresolvable paths or more than `[policy] max_areas`
+  distinct areas keep the PR on `__global__` — *unclassified* and *genuinely cross-cutting*
+  are now distinguishable, which is the actual bug. The changed-file list is the one input
+  attribution cannot check for itself, so it is enumerated with the **paginated REST**
+  endpoint *and* cross-checked against `changedFiles`; any disagreement is
+  `incomplete-paths` → `__global__`. (`gh pr view --json files` is GraphQL
+  `files(first: 100)` and **silently truncates** — measured on PR #3581: `changedFiles`
+  646, `--json files` 100. A truncated list derives a proper **subset** of the true areas,
+  and a too-narrow reservation puts two workers on one crate, where a too-broad one merely
+  delays. Renames consume `previous_filename`, so a cross-crate move implicates both
+  ends.) `--dry-run` is the default; `--apply`
+  mutates; `--backfill` sweeps every open PR (use `--pace` — each label add fires a
+  `pull_request: labeled` event that ci/bench/fuzz/feature-matrix all react to). Wired to
+  every PR by `.github/workflows/pr-area-label.yml` (least-privilege
+  `pull-requests: write`, checkout pinned to the **default branch** so a privileged token
+  never runs PR-authored code, explicit fork read-only-token path, and **no `if:` at any
+  level** — every skip decision is in Python, where a mutant dies). Guards:
+  `scripts/tests/test_pr_area_labels.py`, run by `routing-self-tests.yml`.
+  **When you add a top-level directory, add a `[[map]]` row** or every PR touching it
+  silently starves the frontier again — the totality test over `git ls-files` is what
+  catches this.
 - **`.claude/workflows/autonomous-scheduler.js`** (epic sq-sgu1) — the **self-driving
   bead-frontier loop**, MATERIALISED as a committed, re-runnable harness Workflow so it
   survives a session restart. <!-- [OPUS-4.8] durable scheduler --> Each wave it reads the
