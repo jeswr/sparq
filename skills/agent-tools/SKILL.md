@@ -1,6 +1,6 @@
 ---
 name: agent-tools
-description: Use when an LLM/agent should access a sparq RDF dataset over the Model Context Protocol (MCP) as first-class tools — run SPARQL queries, mine the dataset schema, list class profiles or namespace prefixes, read stats or a VoID descriptor, optionally SHACL-validate against caller-supplied shapes or derive a shape-aware describe_form FormDescription for a focus node, and (gated, off by default) apply SPARQL updates. Covers the opt-in sparq-mcp crate — a JSON-RPC 2.0 MCP server (initialize, tools/list, tools/call) exposing query (SELECT/ASK to SPARQL-JSON), construct (CONSTRUCT/DESCRIBE to N-Triples), introspect (effective schema as JSON or token-budgeted text), stats, classes (class IRIs with instance and predicate counts), prefixes (namespace declarations and term counts), void (W3C VoID N-Triples), an opt-in read-only validate tool, and a gated update tool that is OFF by default; the transport-agnostic handle_message dispatch core plus the optional stdio feature; and the honest trust model (a local agent-tool server with no built-in auth, read-only by default, queries bounded by a QueryBudget). Also covers the opt-in solid feature — SolidMcpServer, a pod-backed server over sparq-solid's PodStore with WAC/ACP-authorized session-scoped query plus LDP resource tools (resource_get, container_list from stored ldp:contains data, and gated resource_put/resource_delete/container_create with existence non-disclosure and atomic ACL write-through). Complements genai-retrieval (sparq-nlq/sparq-introspect) — that is the NL-to-SPARQL loop; this is the MCP front door.
+description: Use when an LLM/agent should access a sparq RDF dataset over the Model Context Protocol (MCP) as first-class tools — run SPARQL queries, mine the dataset schema, list class profiles or namespace prefixes, read stats or a VoID descriptor, optionally SHACL-validate against caller-supplied shapes or derive a shape-aware describe_form FormDescription for a focus node, and (gated, off by default) apply SPARQL updates. Covers the opt-in sparq-mcp crate — a JSON-RPC 2.0 MCP server (initialize, tools/list, tools/call) exposing query (SELECT/ASK to SPARQL-JSON), construct (CONSTRUCT/DESCRIBE to N-Triples), introspect (effective schema as JSON or token-budgeted text), stats, classes (class IRIs with instance and predicate counts), prefixes (namespace declarations and term counts), void (W3C VoID N-Triples), an opt-in read-only validate tool, and a gated update tool that is OFF by default; the transport-agnostic handle_message dispatch core plus the optional stdio feature; and the honest trust model (a local agent-tool server with no built-in auth, read-only by default, queries bounded by a QueryBudget). Also covers the opt-in solid feature — SolidMcpServer, a pod-backed server over sparq-solid's PodStore with WAC/ACP-authorized session-scoped query plus LDP resource tools (resource_get, container_list from stored ldp:contains data, and gated resource_put/resource_delete/container_create with existence non-disclosure and atomic ACL write-through), plus the MCP resources capability with subscribe:true — resources/list, resources/read, resources/subscribe and content-free notifications/resources/updated bound to Solid Notifications semantics, authorized at subscribe time and again at every delivery. Complements genai-retrieval (sparq-nlq/sparq-introspect) — that is the NL-to-SPARQL loop; this is the MCP front door.
 ---
 
 # sparq agent-tools (MCP)
@@ -91,8 +91,43 @@ nonexistent one (existence non-disclosure, draft §9.3); ACL writes are gated on
 `acl:Control` of the governed resource and re-derive authorization **atomically with
 fail-closed rollback**; creation is authorized at the closest existing parent container
 (the Solid creation rule); every content write re-materializes the view so the next
-tool call sees it. RDF sources only (Turtle / N-Triples) in v1; non-RDF binaries and
-notifications are out of scope (spec gaps stay beaded, not spun).
+tool call sees it. RDF sources only (Turtle / N-Triples) in v1; non-RDF binaries stay
+out of scope (spec gaps stay beaded, not spun).
+
+#### The `resources` surface + notifications (draft §8/§10) — [SONNET-4.6] sq-cmjmr
+
+Pod mode declares the MCP **`resources`** capability with **`subscribe: true`** and
+binds it to Solid Notifications Protocol semantics:
+
+| method | behaviour |
+| --- | --- |
+| `resources/list` | the pod documents this session may READ, one resource per document, `uri` = the resource IRI. An unreadable document is simply ABSENT — never an entry, never an error |
+| `resources/read` | the same N-Triples bytes `resource_get` serves, in the MCP `contents` shape; unreadable and nonexistent share one error (`-32002`) |
+| `resources/subscribe` | subscribes to the topic IRI (the MCP spelling of a Solid Notifications subscription on that topic) |
+| `resources/unsubscribe` | idempotent and uniform — an unknown topic gets the same empty result, so it discloses nothing |
+
+**Authorization is checked twice** (draft §10): at subscribe time (no read access ⇒ the
+existence-non-disclosure not-found error, so subscribing cannot probe for resources) and
+**again before every delivery**. When a session's read access is revoked mid-stream,
+deliveries stop **silently** — no notification at all, least of all a "your access was
+revoked" one, which would itself disclose that a resource it may no longer read had
+changed. The subscription survives, so restoring access resumes deliveries. The
+delivery check runs at the target's authorization anchor, so a `Delete` (whose resource
+no longer has a policy of its own) is authorized by the container that governs its IRI.
+
+Emission is **pull-based**, matching the transport-agnostic dispatch core: a mutating
+tool call queues what it changed and the embedder drains it with
+`SolidMcpServer::take_notifications()` after each `handle_message`, writing the messages
+to its transport. Payloads are **content-free** — `notifications/resources/updated`
+carries the topic IRI and an ActivityStreams 2.0 verb (`Create`/`Update`/`Delete`, and
+`Add`/`Remove` when a container's stored `ldp:contains` membership grew/shrank), never
+the changed triples; the subscriber re-reads through the authorized read path. Change
+detection digests each subscribed topic before/after a mutation, so the SPARQL `update`
+tool — which does not report the documents it touched — is covered like the LDP tools.
+Honest limit: the digest is a 64-bit order-independent content digest, not a
+cryptographic hash, so a collision could suppress one signal (a missed update, never a
+leak — the same class the Solid Notifications reconnect contract asks clients to
+reconcile by re-reading). v1 requires a subscribed topic to exist at subscribe time.
 
 Every tool ships a proper MCP `inputSchema` (JSON-Schema). `tools/list` returns
 `name` / `description` / `inputSchema` per tool. A `tools/call` result is the MCP

@@ -44,13 +44,10 @@ transport (line-delimited JSON-RPC 2.0 over this process's stdin/stdout).
 
 - **`query`** — run a read-only SELECT/ASK; returns SPARQL 1.1 Query Results JSON. Bounded by a configurable `QueryBudget` (default 30 s / 1M rows).
 - **`construct`** — run a read-only CONSTRUCT/DESCRIBE; returns N-Triples text.
-- **`introspect`** — the effective schema the graph actually uses (classes, predicates,
-  prefixes, characteristic sets) as JSON or token-budgeted text; exact counts, no sampling.
+- **`introspect`** — the effective schema the graph actually uses (classes, predicates, prefixes, characteristic sets) as JSON or token-budgeted text; exact counts, no sampling.
 - **`shapes`** — given a class IRI, the data-grounded SHACL-style shape of that class:
-  the valid predicates, their datatypes/object-kinds, observed range, and the
-  cardinalities the data supports (`min_count`/`max_count` only when proven, never
-  fabricated). Structured grounding so a **client** LLM can write NL→SPARQL — **no
-  server-side model**. Ships in the default build.
+  valid predicates, datatypes/object-kinds, observed range, and only the cardinalities
+  the data proves. Structured grounding for a **client** LLM — no server-side model.
 - **`stats`** — dataset totals (triples, distinct subjects, typed entities, class / predicate / namespace counts).
 - **`classes`** — list class IRIs with instance and predicate counts, largest class first. <!-- [GPT-5.6] sq-cekgj -->
 - **`prefixes`** — list detected namespace declarations and distinct IRI term counts, largest namespace first. <!-- [GPT-5.6] sq-kx5b0 -->
@@ -59,11 +56,9 @@ transport (line-delimited JSON-RPC 2.0 over this process's stdin/stdout).
   **server-side**: NL→SPARQL→validate→execute via `sparq-nlq`, returning the executed
   SPARQL + the real result rows (+ in-graph citations). Embeds a **configurable** LLM
   call (`ANTHROPIC_API_KEY`, or an OpenAI-compatible `SPARQ_NLQ_ENDPOINT_URL`+`_MODEL`);
-  no model is bundled. With no backend configured it is unadvertised and a call returns
-  a clear "not configured" error — never a fabricated answer. An ergonomics/grounding
-  aid (no token-saving claim); the structured tools are the no-LLM default.
-- **`update`** *(gated, OFF by default)* — apply an atomic SPARQL 1.1 Update. Neither
-  advertised in `tools/list` nor callable unless `ServerConfig::allow_update` is set.
+  no model is bundled. Unconfigured it is unadvertised and returns a clear "not
+  configured" error — never a fabricated answer. The structured tools are the default.
+- **`update`** *(gated, OFF by default)* — apply an atomic SPARQL 1.1 Update; neither advertised in `tools/list` nor callable unless `ServerConfig::allow_update` is set.
 - **`template_list` / `template_invoke`** *(feature `templates`, OFF by default)* — named
   parameterized templates (registered on `ServerConfig::templates`) invoked with **typed,
   fail-closed** JSON arguments through the #901 injection-safe algebra binding; an UPDATE
@@ -77,16 +72,21 @@ transport (line-delimited JSON-RPC 2.0 over this process's stdin/stdout).
 `sparq-solid` `PodStore` (named graph per document, WAC/ACP-authorized, bound to one
 session) with LDP tools per the MCP-Solid proposal draft — session-scoped `query`,
 `resource_get`, `container_list` (containment from stored `ldp:contains` data, never
-IRI-path guessing), and `update` / `resource_put` / `resource_delete` /
-`container_create` behind the same off-by-default write gate. A resource the session
-cannot read errors **identically to one that does not exist** (existence
-non-disclosure), and `.acl`/`.acr` writes route through the pod store's atomic
-fail-closed ACL write-through. RDF sources only (Turtle / N-Triples) in v1.
+IRI-path guessing), and gated `update` / `resource_put` / `resource_delete` /
+`container_create`. A resource the session cannot read errors **identically to one that
+does not exist**; `.acl`/`.acr` writes route through the pod store's atomic fail-closed
+ACL write-through. RDF sources only (Turtle / N-Triples) in v1. It also declares the MCP
+**`resources`** capability with **`subscribe: true`**: `resources/list` / `resources/read`
+expose readable documents (`uri` = the resource IRI) and `resources/subscribe` binds a
+Solid Notifications subscription on the topic. A change queues a **content-free**
+`notifications/resources/updated` (topic + ActivityStreams verb, never the triples),
+drained via `take_notifications()`; read access is re-checked **at every delivery**, so a
+revoked session silently stops receiving — never told, since a revocation notice would
+itself disclose the change. <!-- [SONNET-4.6] sq-cmjmr -->
 
-Each tool ships a proper MCP `inputSchema` (JSON-Schema); `tools/list` returns
-`name` / `description` / `inputSchema` per tool. `tools/call` wraps output in the MCP
-`CallToolResult` shape; a bad query is an MCP tool error (`isError: true`), not a
-protocol error, so the agent can read it and retry.
+Each tool ships a proper MCP `inputSchema` (JSON-Schema); `tools/call` wraps output in
+the MCP `CallToolResult` shape, and a bad query is an MCP tool error (`isError: true`),
+not a protocol error, so the agent can read it and retry.
 
 ## 🔒 Trust model — read this
 
