@@ -86,8 +86,10 @@ measured reality: **62 of the 71 `test: true` legs have *confirmed* feature-gate
 tests** (50 with explicitly `cfg(feature)`-gated `tests/` files, 7 with gated test
 fns in `src/`, 5 whose feature gates a `mod` containing `#[test]` fns), 9 more are
 borderline (feature code and ungated `#[test]` fns co-located in one file), and
-exactly **1** leg (sparq-py `arrow`, already `test: false`) is a clear check-tier
-candidate. The matrix is *not* over-specified in the class-B sense — the sq-vya1
+**no leg is currently a clear check-tier candidate**. The sparq-py `arrow` leg is
+`test: false`, but criterion (c) correctly retains it because
+`cfg_attr(not(feature = "arrow"), forbid(unsafe_code))` protects the feature-off
+build. The matrix is *not* over-specified in the class-B sense — the sq-vya1
 GUARD discipline means nearly every leg exists precisely because it is the only
 thing that runs a feature-gated suite (those suites compile EMPTY in the workspace
 archive). The pyramid machinery below is still worth building, but for corrected
@@ -189,8 +191,9 @@ the `sparq-server --no-default-features` job.)
 
 **Demotion candidates (the honest total):**
 
-- **Clear (1):** sparq-py (arrow) — `test: false` already; the feature gates only
-  a non-test fn + a module with zero `#[test]` fns. Pure class A.
+- **Clear (0):** none. sparq-py (arrow) is `test: false`, but it is c-only:
+  `cfg_attr(not(feature = "arrow"), forbid(unsafe_code))` makes compiling the
+  feature-off safety brace part of the ratchet, so it remains tier `test`.
 - **Audit-pending (9, b-coloc):** sparq-core `compact-index`, sparq-engine
   `serialize-rdf` / `query-solution` / `params` / `explain-json` /
   `semijoin-bitmap` / `streaming-serialization`, sparq-fedplan `adaptive-replan`,
@@ -349,28 +352,27 @@ before the check tier that replaces it is live and gating.
 |---|---|---|---|---|
 | 1 | `sq-6g9kr` (P1) — detector + ratchet script (mechanizes the sq-vya1 guard; must parse nested `any`/`all` cfg combinators, fail-closed) | `scripts/feature-matrix-tiers.py`, `scripts/tests/test_feature_matrix_tiers.py` | sonnet | — |
 | 2 | `sq-ldg8c` (P2) — assembler tier/event awareness + check-tier job + enforcement wiring (zero annotations — behavior-preserving) | `scripts/assemble-feature-matrix.py`, `scripts/tests/test_feature_matrix_assemble.py`, `.github/workflows/feature-matrix.yml` | sonnet | 1 |
-| 3 | `sq-s5dvo` (P2) — THE FLIP: per-test-body audit of the 9 b-coloc legs (§2.1), then annotate only audit-cleared legs (+ sparq-py `arrow`) `tier: check`; mutation demo + before/after counts | `.github/feature-matrix.d/*.yml` (26 fragments) | sonnet (+ escalated review of the demotion list) | 2 |
+| 3 | `sq-s5dvo` (P2) — THE FLIP: per-test-body audit of the 9 b-coloc legs (§2.1), then annotate only audit-cleared legs `tier: check`; mutation demo + before/after counts | `.github/feature-matrix.d/*.yml` (26 fragments) | sonnet (+ escalated review of the demotion list) | 2 |
 | 4 | `sq-p1ccp` (P2) — docs graduation: GUARD header + AGENTS.md gate docs describe the tier system as shipped | `AGENTS.md`, `.github/workflows/feature-matrix.yml` (comments) | haiku | 3 |
 
 The chain is deliberate: each intermediate state is fail-safe (§6). Bead 3 is the
 only soundness-sensitive PR (it is the demotion); its review is escalated per the
-arm-gate doctrine, and its audit may legitimately return "demote nothing beyond
-sparq-py `arrow`" — that is a valid outcome, recorded here as such.
+arm-gate doctrine, and its audit may legitimately return "demote nothing" — that
+is a valid outcome, recorded here as such.
 
 ## 9. Estimated reduction (counts, honest)
 
 Counts, not percentages, against the §1 engine-PR baseline (58 legs ran,
 ≈130 runner-minutes):
 
-- **Floor (certain):** 1 leg demoted (sparq-py `arrow`, ~1 min) — leg count
-  58 → 57 + 1 check-tier job. Essentially a no-op for cost; the durable value at
-  the floor is the mechanized guard + the ratchet.
-- **Ceiling (if the per-test audit clears all 9 b-coloc legs):** 10 legs demoted,
-  of which 7 ran on the baseline PR (6 sparq-engine legs at 248–349 s each +
-  sparq-py; core/fedplan/reason legs were already selection-filtered there) —
+- **Floor (certain):** 0 legs demoted — leg count remains 58. The durable value
+  at the floor is the mechanized guard + the ratchet.
+- **Ceiling (if the per-test audit clears all 9 b-coloc legs):** 9 legs demoted,
+  of which 6 ran on the baseline PR (the 6 sparq-engine legs;
+  core/fedplan/reason legs were already selection-filtered there) —
   roughly **28–30 of the 130 leg runner-minutes** move into a check-tier job
   costing an estimated 3–6 min (clippy-profile, shared target dir; measured at
-  implementation, not promised). Leg count 58 → 51 + 1–2 check shards.
+  implementation, not promised). Leg count 58 → 52 + 1–2 check shards.
 - **What this is NOT:** the epic's hoped-for "~50 legs → a dozen". That premise
   assumed most legs were compile-rot protection; the evidence (§2.1) shows 62/71
   carry real feature-gated test suites that nothing else runs. Their bill is
@@ -381,6 +383,22 @@ Counts, not percentages, against the §1 engine-PR baseline (58 legs ran,
   stops re-widening by default, and the enforcement step stops the sq-vya1
   silent-gap class (a feature-gated suite with no leg) mechanically instead of
   by review discipline.
+
+### 9.1 Flip audit observation (2026-07-26)
+
+No b-coloc leg was audit-cleared or demoted in this flip; the nine candidates
+remain audit-pending. The proposed sparq-py `arrow` demotion was rejected by the
+detector's criterion (c): its feature-off `forbid(unsafe_code)` cfg attribute is
+intentionally sensitive. The measured before/after count is therefore
+**0 → 0 check-tier legs**.
+
+The detector mutation demonstration remains pinned in
+`TestMutationFailOpen::test_mutation_check_divergence`: the fail-open mutant
+classifies an unreadable or missing source tree non-sensitive, while the
+production fail-closed path classifies the same input sensitive. The
+tier-enforcement tests additionally make a sensitive `tier: check` leg fail
+invariant (1), demonstrating that adding a feature-gated test under a demoted
+feature turns the ratchet red.
 
 ## 10. Graduation
 
