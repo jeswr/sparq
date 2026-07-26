@@ -21,6 +21,11 @@
 //! Model: Opus 4.8 (Fable 5 unavailable — flag for re-review/upgrade).
 
 pub mod build;
+// [OPUS-4.8] sq-1s2.3 (FL1 follow-up): package native per-circuit ProofArtifacts into
+// the browser-shippable captured car-hire ProofManifest (the /showcase/zk-car-hire
+// in-tab verify fallback). Pure serialization — no toolchain; research-grade, NOT
+// externally audited (sq-qhy4).
+pub mod capture;
 // [OPUS-4.8] sq-314: derivation steps + entailment-regime enforcement.
 pub mod derivation;
 // [OPUS-4.8] sq-cfmv: fail-closed (commitment-method × circuit) dispatch matrix.
@@ -42,6 +47,11 @@ pub use manifest::{
     AttestedStatusRef, BindingEdge, BindingMode, CircuitId, EntailmentRegime, FieldHex, FilterOp,
     HiddenIndexRevocation, HolderPokProof, HolderSetProof, ProofInputs, ProofManifest,
     RevocationStatus, StatusListSnapshot, SubProof,
+};
+// [OPUS-4.8] sq-1s2.3 (FL1 follow-up): browser-shippable captured-manifest packaging.
+pub use capture::{
+    public_inputs_to_hex, CaptureError, CapturedCarHireManifest, CapturedSubProof,
+    CAR_HIRE_CAPTURE_NOTE,
 };
 // [OPUS-4.8] sq-3kd2g.6: the wave-1 extended-fragment presentation wrapper +
 // per-solution UNION branch attribution schema. Opt-in (`extended-fragment`).

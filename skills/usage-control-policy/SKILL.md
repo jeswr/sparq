@@ -247,6 +247,33 @@ let _ = PROFILE_IRI; // https://sparq.dev/ns/odrl-secprop-profile#
 - **One leftOperand per requireable dimension** (`requiresUnlinkabilityScope`, `requiresPostQuantumForgery`, `requiresZeroKnowledge`, `requiresSoundness`, `requiresSelectiveDisclosure`, `requiresSingleUse`, `requiresAssurance`, …); the full set is `secprop::SECPROP_LEFT_OPERANDS`. Each is **sugar** for the generic primitive "a constraint over dimension X" — the one `secx:overDimension` fact per leftOperand is what the admissibility rule reads, so one rule covers all (design §4.5).
 - **This is the bridge VOCABULARY only.** It NAMES the requireable dimensions; it does **not** perform the admissibility reduction (that is the N3 ruleset, Phase 2 `sq-ufsi9`, over the per-method annotation graph, Phase 3 `sq-bevd3` in `sparq-zk`), and it asserts **NO** security property of any method. Whether a sparq method actually *has* a property is recorded — with its epistemic basis — elsewhere; **sparq's whole ZK estate is research-grade and externally UNAUDITED** (bead `sq-qhy4`), and `sparq-mpc` is semi-honest-only. The conservative `requiresAssurance gteq secx:Proven` gate mechanically removes every unaudited method — this is how `sq-qhy4` enters the admissibility data flow, not merely the prose.
 
+### Proof-discharge obligations — the ODRL half of the ZK↔ODRL envelope (same feature) — [SONNET-4.6] sq-yh427
+
+`discharge_requirements(&Policy)` answers *"before I can decide this request, what would a presented proof have to establish?"* — it projects a parsed policy to the `secx:requires…` constraints it carries, each resolved to its dimension, operator and required level, in rule order (permissions before prohibitions). Rules that mention no `secx:` property are omitted, so an empty result means no presentation is needed.
+
+```rust,ignore
+// cargo: sparq-policy with --features secprop-leftoperands
+use sparq_policy::secprop::{discharge_requirements, Deontic, DischargeExpr};
+
+for r in discharge_requirements(&policy) {
+    // r.rule / r.deontic / r.requirement — WALK the tree; the combinator decides.
+    match &r.requirement {
+        DischargeExpr::Any(alts) => { /* establishing ANY ONE of `alts` suffices */ }
+        DischargeExpr::ExactlyOne(alts) => { /* establishing TWO of `alts` FAILS */ }
+        DischargeExpr::All(conjuncts) => { /* every one must hold */ }
+        DischargeExpr::Atomic(o) => { let _ = (o.dimension, &o.required); }
+        DischargeExpr::Other(c) => { let _ = (&c.left, c.operator, &c.right); }
+    }
+}
+```
+
+- **The `odrl:` combinator is preserved, and is load-bearing.** The result is a `DischargeExpr` **tree per rule**, not a flat list: under `odrl:or` establishing *either* branch suffices, and under `odrl:xone` establishing more than one is a *failure*. `DischargeExpr::obligations()` gives a flat inventory of the leaves, but it is explicitly **NON-decisional** — `and`, `or` and `xone` over the same leaves flatten identically, so reading it as the requirement overstates what a presentation must prove.
+- **Non-`secx:` branches survive WHOLE as `DischargeExpr::Other(Constraint)`** rather than being pruned or thinned: dropping a core-ODRL operand out of an `odrl:or` would turn an alternative into a mandate, and keeping only its `leftOperand` would leave `recipient eq Bob` and `recipient eq Carol` indistinguishable. The full `(leftOperand, operator, rightOperand)` triple is carried, so the branch is decidable from the tree alone — which is what makes `odrl:xone` readable, since there the *count* of holding branches, not the set of dimensions mentioned, is the verdict.
+- **`Deontic` is load-bearing.** An obligation on a *prohibition* is not a bar to clear: a prohibition fires when its whole constraint expression holds, and deny-overrides. A host must not read the two the same way — and one leaf alone does not fire a multi-constraint prohibition.
+- **Duty constraints are excluded** — the single-node base case checks a `Duty` by *action* discharge and never evaluates the duty's own constraints, so listing them would misdescribe what `evaluate` will check.
+- **It reports; it does not discharge.** Extraction verifies nothing, orders no levels (the `secx:atLeast` partial order and the admissibility reduction live in `sparq-trust`, `sq-ufsi9`), and leaves the stateless `evaluate` path unchanged — a `secx:` constraint with no supplied evidence stays fail-closed unsatisfied.
+- **The wire half of the envelope is deferred, deliberately.** A VC 2.0 Verifiable Presentation carrying a Data-Integrity proof under a `sparql-zk`-style cryptosuite is **not** implemented: no such cryptosuite exists in this workspace (`sparq-vc` implements `eddsa-rdfc-2022` only), its identifier and claim shape are still under cross-agent design with the Solid-server sibling (`#890`(b)), and sparq's ZK estate has **no** external accredited-cryptographer sign-off (`sq-qhy4`). <!-- privacy-claims-allow: NEGATIVE — records that the ZK presentation envelope is unimplemented and the estate unaudited; sq-qhy4 -->
+
 ## Bridge to WAC/ACP enforcement (opt-in `odrl-bridge`) — [OPUS-4.8] sq-h3uk
 
 `sparq-solid` can **materialize** a matched ODRL permission into its `<urn:sparq:auth>` AUTH_GRAPH so the existing graph-level WAC/ACP enforcement applies it — **no new enforcement engine**. Behind the off-by-default `odrl-bridge` cargo feature on `sparq-solid` (it pulls in `sparq-policy` only when enabled; the default solid build stays ODRL-free). This is the **single-node** bridge of epic sq-3183, **research-track**, NOT the (gated) federated/ZK-disclosure path.

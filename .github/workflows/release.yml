@@ -122,11 +122,11 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - name: Install cargo-cyclonedx
-        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
         with:
           tool: cargo-cyclonedx
       # [OPUS-4.8] sq-toze.27 (GS-3): Node for the JS/npm SBOM of the published WASM client.
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
       # [OPUS-4.8] sq-gl3cf: pass VERSION explicitly. gen-sbom-vex.sh honors $VERSION (falling
@@ -332,7 +332,7 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
 
@@ -548,7 +548,7 @@ jobs:
       - name: Generate SHA256SUMS
         run: cd assets && sha256sum -- * > SHA256SUMS
       - name: Create release
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           # [OPUS-4.8] sq-gl3cf: attach to the RESOLVED tag. The action defaults tag_name to
           # `github.ref`, which on a workflow_dispatch is the branch (wrong) — pin it to the
@@ -582,9 +582,35 @@ jobs:
   # including dispatch-driven developer/test releases; a maintainer who does not want container
   # publishing can delete this job (or add `if: false`) without affecting the binaries/release
   # jobs above.
+  #
+  # [OPUS-5] sq-w1dxx: the image tags are version-THREADED from `setup`, not derived from the git
+  # ref. `docker/metadata-action`'s `type=semver` reads `github.ref` by default, which on a
+  # `workflow_dispatch` is the BRANCH — so a dispatch used to produce NO semver tag and push only
+  # the moving `:latest`, silently overwriting the canonical released image that `deploy/paas` and
+  # `deploy/aws` pin (`ghcr.io/sparq-org/sparq-server:latest`) with a developer/test build. Now the
+  # two trigger paths emit disjoint, unambiguous tag sets:
+  #   * `v*` tag push (canonical release): `{{version}}`, `{{major}}.{{minor}}`, and `latest`.
+  #   * `workflow_dispatch` (developer/test): ONLY `dev-<inputs.tag>` (e.g. `dev-v0.1.0-dev`).
+  #     No `latest`, no moving `{{major}}.{{minor}}` — a dev build can never claim a tag a
+  #     deployment follows, and is still pullable by its exact namespaced dispatch tag.
+  #
+  # [OPUS-5] the `dev-` prefix is what makes that disjointness hold for ANY input, not just a
+  # well-behaved one. `inputs.tag` is a `required: true` free-form string: gating on the trigger
+  # alone still let a dispatch with `tag: latest` (or `v1.2.3`, or a moving `1.2`) resolve
+  # `type=raw,value=${{ needs.setup.outputs.version }}` straight onto the canonical tag it names
+  # and overwrite the released image. Prefixing unconditionally makes the collision STRUCTURAL,
+  # not a matter of developer discipline: every canonical tag is either the literal `latest` or
+  # starts with a digit (metadata-action strips the leading `v` from `{{version}}`), so no
+  # `dev-`-prefixed tag can ever be one. This is enforced over adversarial inputs by
+  # `scripts/tests/test_release_container_multiarch.py`.
+  # The dispatch path deliberately uses `type=raw` (not `type=semver`) so a non-semver `inputs.tag`
+  # still yields a tag: metadata-action *warns and skips* an unparseable semver, which would leave
+  # `tags:` empty and make the push meaningless.
   docker:
     name: build + push container (ghcr.io)
     runs-on: ubuntu-latest
+    # [OPUS-5] sq-w1dxx: the resolved version is the single source of the image tags on both paths.
+    needs: setup
     permissions:
       contents: read
       packages: write # push to ghcr.io with GITHUB_TOKEN
@@ -611,15 +637,19 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Image metadata (tags + OCI labels from the git tag)
+      - name: Image metadata (tags + OCI labels from the resolved release version)
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/${{ github.repository_owner }}/sparq-server
+          # [OPUS-5] sq-w1dxx: `value=` overrides metadata-action's default git-ref parsing with the
+          # `setup` job's resolved version; the `enable=` guards keep the canonical (tag push) and
+          # developer (dispatch) tag sets mutually exclusive — see the job header.
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
+            type=semver,pattern={{version}},value=${{ needs.setup.outputs.version }},enable=${{ github.event_name != 'workflow_dispatch' }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.setup.outputs.version }},enable=${{ github.event_name != 'workflow_dispatch' }}
+            type=raw,value=latest,enable=${{ github.event_name != 'workflow_dispatch' }}
+            type=raw,value=dev-${{ needs.setup.outputs.version }},enable=${{ github.event_name == 'workflow_dispatch' }}
       # [OPUS-4.8] sq-n6rv: SMOKE BEFORE PUSH. Build the image locally first, `docker run`
       # it, and prove it serves /health + a query — so a container that exits immediately on
       # boot (the sq-n6rv regression) can never reach ghcr.io. The build is cached to GHA, so
@@ -677,7 +707,7 @@ jobs:
           trivyignores: .trivyignore
       - name: Upload Trivy SARIF to code-scanning
         if: always()
-        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
+        uses: github/codeql-action/upload-sarif@7188fc363630916deb702c7fdcf4e481b751f97a # v4.37.1
         with:
           sarif_file: trivy-results.sarif
           category: trivy-release-image

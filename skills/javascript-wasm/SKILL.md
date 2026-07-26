@@ -99,11 +99,11 @@ removeQuads(quads): void                             // applyDelta([], quads) �
 free(): void                                         // also Symbol.dispose
 ```
 
-`Bindings` (RDF/JS Query-spec, Map-like): `.get('var') -> RDF.Term | undefined`, `.has`, `.keys()`, `.values()`, `.entries()`, `.size`, `.equals`, immutable `.set/.delete/.filter/.map/.merge`, iterable, plus `.toMap() -> Map<string, Term>` (the Oxigraph-shaped bare-string-keyed view — #1123). Terms: `.termType` (`'NamedNode' | 'Literal' | 'BlankNode' | ...`), `.value`, plus `.language` / `.datatype` on literals.
+`Bindings` (RDF/JS Query-spec, Map-like): `.get('var') -> RDF.Term | undefined`, `.has`, `.keys()`, `.values()`, `.entries()`, `.size`, `.equals`, immutable `.set/.delete/.filter/.map/.merge`, iterable, plus `.toMap() -> Map<string, Term>` (the Oxigraph-shaped bare-string-keyed view — #1123). Terms: `.termType` (`'NamedNode' | 'Literal' | 'BlankNode' | ...`), `.value`, plus `.language` / `.datatype` / `.direction` (`'ltr' | 'rtl' | ''`, RDF 1.2 base direction) on literals.
 
 `Dataset` (named export — the full RDF/JS [`Dataset`](https://rdf.js.org/dataset-spec/) over the engine; async factories `Dataset.create/fromString/fromQuads`): `DatasetCore` (`add/delete/has/match/size/[Symbol.iterator]`) PLUS the algebra `union/intersection/difference/addAll/deleteMatches/contains/equals/filter/map/forEach/some/every/reduce/import/toStream/toArray/toString/toCanonical`. The binary set ops (`union/intersection/difference/addAll/contains/equals`) are INTEROP-aware — the operand may be another sparq `Dataset` OR any foreign RDF/JS dataset/store (N3.Store, @rdfjs/dataset), detected via `[Symbol.iterator]`. Full SPARQL surface one accessor away via `dataset.store`. (`toCanonical/equals/contains` are RDFC-1.0 blank-node-ISOMORPHISM-aware — `toCanonical` emits canonical `_:c14nN` N-Quads, `equals` compares canonical forms, `contains` matches a relabelled subgraph; backed by the engine's RDFC-1.0 surfaced over the opt-in `canon` wasm feature.)
 
-Other named exports from `@jeswr/sparq`: `DataFactory` (RDF/JS factory: `namedNode`, `blankNode`, `literal`, `variable`, `quad`, ...) and term classes `NamedNode/BlankNode/Literal/Variable/DefaultGraph/Quad`; `init` (idempotent wasm bootstrap); compression helpers `decompress / decompressToString / sniffCodec`; SPARQL helpers `termFromSparqlJson / termToNT / quadsToNQuads / detectQueryForm / SparqlJsonRowsParser`; and the `SparqDictionaryClient` (server dictionary-fetch protocol).
+Other named exports from `@jeswr/sparq`: `DataFactory` (RDF/JS factory: `namedNode`, `blankNode`, `literal`, `variable`, `quad`, ...) and term classes `NamedNode/BlankNode/Literal/Variable/DefaultGraph/Quad`; `init` (idempotent wasm bootstrap); compression helpers `decompress / decompressToString / sniffCodec`; SPARQL helpers `termFromSparqlJson / termToNT / quadsToNQuads / detectQueryForm / SparqlJsonRowsParser`; and the `SparqDictionaryClient` (server dictionary-fetch protocol). `termFromSparqlJson` accepts the SPARQL 1.2 JSON directional-literal shape — `{ type: 'literal', value: 'x', 'xml:lang': 'en', 'its:dir': 'ltr' }` yields a `Literal` with `.language === 'en'`, `.direction === 'ltr'`, and datatype `rdf:dirLangString` (round-tripped by `termToNT` as `"x"@en--ltr`); without `its:dir` the literal stays plain `rdf:langString`.
 
 Raw wasm `Store` (from `../wasm/sparq_wasm.js`, re-exported as `WasmStore` internally) — use only when you need CONSTRUCT/DESCRIBE, batch cursors, or **query-plan introspection**. Methods return SPARQL-JSON / N-Triples / plan-text **strings**, not RDF/JS terms: `Store.load/loadDataset/loadCompressed(text, format)`, `Store.loadBytes(bytes, format)` / `Store.loadBytesWithBase(bytes, format, base)` (ingest a `Uint8Array` directly, `bytes-ingest` bundle only — see below), `.query(sparql)`, `.queryChunks(sparql)`, `.queryCursor(sparql, batchSize)`, `.queryQuads(sparql)` (CONSTRUCT/DESCRIBE -> N-Triples), `.queryQuadsChunks(sparql, batchSize)`, `.count`, `.ask`, `.askWithMaxRows(sparql, maxRows)`, `.explain(sparql)`, `.explainAnalyze(sparql)`, `.validate(data, shapes, format)` (SHACL report as a JSON **string**, shacl bundle only), `.serialize(format, pretty, indent, abbreviate, prefixes?)` (the store's contents as a Turtle / TriG / JSON-LD **string**, serialize-rdf bundle only — see below), `.parseShaclCompact(text, base?)` (SHACL Compact Syntax → the shapes graph as a Turtle **string**, scs bundle only — see below), `.update`, `.updateInPlace`, `.applyDelta(inserts, deletes)`, `.size`, `.heapBytes()`.
 
@@ -197,6 +197,26 @@ The building blocks are exported for assembling other hosts (a service-worker `f
 downstream: `SolidServer`, `createPodDispatcher`, and the `http.js` helpers (`MAX_BODY_BYTES`,
 `flattenRequestHeaders`, `readRequestBody`, `copyWasmResponse`, `writeNodeResponse`) from the
 package root, and the raw wasm glue via the `./wasm` subpath export.
+
+[SONNET-4.6] **Bounded linear memory → HTTP 507 (sq-wubkf).** The whole pod lives in one wasm32
+linear memory, so an allocation that cannot grow it aborts into an `unreachable` trap and the
+triggering request gets no HTTP answer. `sparq-lws-wasm` installs a `System`-delegating
+`#[global_allocator]` that tracks **live** heap bytes, and `handleRequest` refuses a request whose
+projected peak (`live + 4 × body + 1 MiB` headroom) would cross a ceiling — default 3 GiB — with a
+507 whose status and `insufficient storage` body are byte-identical to the store-quota 507 above,
+before the router runs. Because the accounting is of live bytes rather than of pages ever grown,
+bytes returned to the allocator lower the total again and restore headroom, which a pages-grown
+high-water mark could not — but only the counter arithmetic is tested. That an LDP `DELETE` frees
+**enough** for a refused request to be admitted again has no end-to-end wasm32 test (the store
+keeps its map capacity after removing an entry), so treat recovery from sustained pressure as the
+accounting's intent rather than a demonstrated property. Read and tune it
+from the host with `lwsMemoryLiveBytes()`, `lwsMemoryPeakBytes()`, `lwsMemoryCeilingBytes()`, and
+`lwsSetMemoryCeilingBytes(bytes)` (`0` disables the bound; a negative or non-finite argument throws
+rather than silently unbounding) — lower the ceiling when one module hosts several pods. This
+covers *sustained* pressure only: a single request whose own transient peak overshoots the
+remaining headroom still traps, and is still handled by trap recovery below. The allocator never
+refuses an allocation — a null return from `GlobalAlloc::alloc` aborts, which is the very trap
+being removed, so the bound is enforced at the request boundary instead.
 
 [SONNET-4.6] **Trap recovery (sq-250si).** The wasm artifact uses `panic=abort` (release profile):
 a Rust panic or allocation failure at the wasm32 linear-memory ceiling lowers to an `unreachable`

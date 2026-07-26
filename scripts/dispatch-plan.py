@@ -42,6 +42,14 @@ packages_of = _ready.packages_of
 labels_of = _ready.labels_of
 valid_priority = _ready.valid_priority
 resolve = _route.resolve
+# [OPUS-5] The registry's dispatch.yml does `getattr(dispatch, "roleless_ready", None)` and, when
+# a target planner lacks it, prints "target planner has no roleless_ready() — ready-but-roleless
+# issues are NOT counted for this target" and skips the enumeration entirely. sparq WAS that
+# target: the silent-invisibility class went unreported here on every tick. Re-exported from the
+# readiness engine so the orchestrator reports a real number for sparq instead of degrading.
+roleless_ready = _ready.roleless_ready
+ready_candidates = _ready.ready_candidates
+GLOBAL = _ready.GLOBAL
 
 try:
     import tomllib
@@ -71,7 +79,12 @@ def plan_dispatch(ready_issues, routing_doc):
     for it in ready_issues:
         labels = labels_of(it)
         role = _role_of(labels)
-        package = sorted(packages_of(labels))[0]
+        # Package semantics mirror the registry's plan_package byte-for-byte (issue #3691):
+        # exactly one unique area -> that area; zero or multiple -> the serializing GLOBAL
+        # partition. The old first-of-sorted pick disagreed with the registry cross-check on
+        # multi-area issues, perma-deferring them at dispatch.
+        pkgs = packages_of(labels)
+        package = next(iter(pkgs)) if len(pkgs) == 1 else _ready.GLOBAL
         model_chain, agent, escalate = resolve(labels, routing_doc)
         if role is None:
             # No declared role → the resolver returned [defaults]; do NOT guess an agent/role.
@@ -162,7 +175,7 @@ def _self_test():
     sec = compute_ready([iss(2, R + ["priority:P0", "role:impl", "area:sparq-zk"])])
     p_sec = plan_dispatch(sec, doc)
     row = p_sec[0]
-    chk("zk -> opus", row["model_chain"], ["opus"])
+    chk("zk -> opus5-led", row["model_chain"], ["opus5", "opus"])
     chk("zk -> reviewer/escalate", (row["agent"], row["escalate"]), ("sparq-reviewer", True))
     chk("zk role stays declared", row["role"], "impl")
 
@@ -180,7 +193,7 @@ def _self_test():
     ci = compute_ready([iss(8, R + ["priority:P1", "role:ci", "area:ci"])])
     row = plan_dispatch(ci, doc)[0]
     chk("ci -> frontier-only row", (row["role"], row["model_chain"], row["agent"], row["escalate"]),
-        ("ci", ["sol", "fable"], "sparq-ci-infra", False))
+        ("ci", ["sol", "opus5", "fable"], "sparq-ci-infra", False))
     chk("ci row has no sub-frontier tier", sorted(set(row["model_chain"]) & {"sonnet", "haiku"}), [])
 
     # --- Fixture: package-conflict pair → only the higher-priority one is planned ----------------
@@ -203,6 +216,15 @@ def _self_test():
     p_norole = plan_dispatch([iss(7, ["priority:P1", "area:sparq-core"])], doc)
     row = p_norole[0]
     chk("no-role -> flagged", (row["role"], row["agent"], row["model_chain"]), (None, None, []))
+
+        # --- #3691 package-semantics fixtures (mirror registry plan_package) --------------------------
+    one = plan_dispatch([iss(90, R + ["priority:P2", "role:impl", "area:sparq-core"])], doc)
+    chk("#3691 exactly-one area maps to that area", one[0]["package"], "sparq-core")
+    multi = plan_dispatch([iss(91, R + ["priority:P2", "role:perf", "area:bench", "area:sparq-serve"])], doc)
+    chk("#3691 multi-area maps to the GLOBAL serializing partition (first-of-sorted pick => red)",
+        multi[0]["package"], _ready.GLOBAL)
+    zero = plan_dispatch([iss(92, R + ["priority:P2", "role:docs"])], doc)
+    chk("#3691 zero-area maps to GLOBAL", zero[0]["package"], _ready.GLOBAL)
 
     print("dispatch-plan self-test", "PASSED" if ok else "FAILED")
     return 0 if ok else 1

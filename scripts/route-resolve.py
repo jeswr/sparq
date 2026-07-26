@@ -66,26 +66,28 @@ def _self_test():
         ok = ok and good
         print(f"  {'ok  ' if good else 'FAIL'} {n}: {got} (want {want})")
 
-    # impl + a security surface (area:sparq-zk) -> security rule wins over role -> Opus, escalate
+    # impl + a security surface (area:sparq-zk) -> security rule wins over role -> Opus-5-led
+    # (opus-4.8 tail fallback, 2026-07-24), escalate
     mc, ag, esc = resolve(["role:impl", "area:sparq-zk"], doc)
-    chk("impl+zk -> opus/escalate", (mc, ag, esc), (["opus"], "sparq-reviewer", True))
+    chk("impl+zk -> opus5-led/escalate", (mc, ag, esc), (["opus5", "opus"], "sparq-reviewer", True))
     # plain impl -> sol-led chain (maintainer directive 2026-07-18)
     mc, ag, esc = resolve(["role:impl", "area:sparq-core"], doc)
-    chk("impl -> sol-led", (mc, ag, esc), (["sol", "fable", "opus"], "sparq-rust-impl", False))
+    chk("impl -> sol-led", (mc, ag, esc), (["sol", "opus5", "fable", "opus"], "sparq-rust-impl", False))
     # docs -> haiku-led
     chk("docs -> haiku", resolve(["role:docs", "area:x"], doc)[0][0], "haiku")
     # [FABLE-5] UI ownership: site -> terra-led (GPT-5.6 codex, the original dashboard builder)
-    chk("site -> sol-led (GPT owns UI; terra is docs-only)", resolve(["role:site", "area:site"], doc)[0], ["sol", "fable", "opus"])
-    # [FABLE-5] frontier-tier infra authorship (standing rule 2026-07-17): ci -> fable-first,
-    # FRONTIER-ONLY chain — no sub-frontier model (sonnet/haiku) anywhere in it, so exhaustion
+    chk("site -> sol-led (GPT owns UI; terra is docs-only)", resolve(["role:site", "area:site"], doc)[0], ["sol", "opus5", "fable", "opus"])
+    # [FABLE-5] frontier-tier infra authorship (standing rule 2026-07-17): ci -> sol-first
+    # (opus5 the primary anthropic tier since 2026-07-24, fable its tail fallback), FRONTIER-ONLY
+    # chain — no sub-frontier model (sonnet/haiku) anywhere in it, so exhaustion
     # DEFERS at the registry claim step (retried next tick) instead of degrading tier.
     mc, ag, esc = resolve(["role:ci", "area:ci"], doc)
-    chk("ci -> frontier-only sol-first", (mc, ag, esc), (["sol", "fable"], "sparq-ci-infra", False))
+    chk("ci -> frontier-only sol-first", (mc, ag, esc), (["sol", "opus5", "fable"], "sparq-ci-infra", False))
     chk("ci chain has no sub-frontier tier", sorted(set(mc) & {"sonnet", "haiku"}), [])
     # no role -> defaults (sol-led, 2026-07-18)
     chk("no role -> defaults", resolve(["area:sparq-core"], doc)[0][0], "sol")
     # perf -> sol-led with the fable/opus fallbacks (new order pinned)
-    chk("perf -> sol-led", resolve(["role:perf", "area:sparq-engine"], doc)[0], ["sol", "fable", "opus"])
+    chk("perf -> sol-led", resolve(["role:perf", "area:sparq-engine"], doc)[0], ["sol", "opus5", "fable", "opus"])
     # review role -> opus + escalate
     chk("review -> opus/escalate", resolve(["role:review"], doc)[1:], ("sparq-reviewer", True))
     print("route-resolve self-test", "PASSED" if ok else "FAILED")

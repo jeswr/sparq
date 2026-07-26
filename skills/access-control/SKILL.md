@@ -88,7 +88,9 @@ Materialize the authorization view from the access-control documents, then enfor
 - `PodStore::new(graph) -> PodStore` — wrap a loaded dataset. Before the first
   `materialize_*` call **every** session (including the owner) sees nothing.
 - `store.materialize_wac()` / `store.materialize_acp() -> Result<MaterializeStats, _>` —
-  run the N3 rules to (re)install `<urn:sparq:auth>`. On `wasm32-unknown-unknown` the
+  run the N3 rules to (re)install `<urn:sparq:auth>`. ACP uses one three-stratum
+  in-memory reasoning run; `MaterializeStats::strata_facts` reports its term-level closure
+  size after each stratum, before RDF list expansion and interning. On `wasm32-unknown-unknown` the
   informational `MaterializeStats::millis` is reported as `0.0` (no `std::time::Instant`);
   the auth view is identical ([OPUS-4.8] sq-7agop).
 - `store.materialize_acp_with(&AccessProvenance) -> Result<MaterializeStats, _>` —
@@ -310,6 +312,38 @@ Materialize the authorization view from the access-control documents, then enfor
   assignee, never an over-broad public deny). Only a rule with **no** recipient constraint AND
   **no** assignee grants `auth:Public`. Mapping
   table in the [`usage-control-policy`](../usage-control-policy/SKILL.md) skill.
+- `odrl_bridge::materialize_odrl_n3(&mut Graph, policy_ttl: &str, &Request) -> Result<BridgeOutcome, String>`
+  — **opt-in** (`odrl-bridge`; [SONNET-4.6] sq-zgbso.2, [OPUS-5] sq-zgbso.2): an alternative
+  materialization path that runs the stateless ODRL core as **five stratified `reason_n3` calls**
+  (`rules/odrl-{a0,a,b,c,d}.n3`), mirroring the WAC/ACP N3-stratification pattern instead of the
+  Rust evaluator. The relationship to `materialize_policy` is two claims, both checked over a
+  GENERATED corpus in `tests/odrl_n3_differential.rs` (a hand-picked sample previously missed two
+  fail-open defects, so the scope statement below is deliberately explicit):
+  - **Never more permissive — everywhere.** For every policy and request, either the call returns
+    `Err` (refusing the policy outright; the caller materializes nothing and must fail closed), or
+    every allow it emits is also emitted by the Rust path AND every deny the Rust path emits is
+    also emitted by it. Under `∪ allow ∖ ∪ deny` that is exactly "never widens access".
+  - **Decision-equivalent — within a NARROWED scope**: permissions AND prohibitions over
+    `odrl:dateTime` `lteq`/`gteq` and `odrl:recipient` `eq`/`neq`, combined by ≤1
+    `odrl:or`/`odrl:and` logical constraint per rule, **each constraint node carrying exactly one
+    operand tuple and at most one combinator**, under an **admissible `odrl:conflict` strategy**,
+    for a **concrete mapped action** (the `odrl:use` umbrella is excluded — the Rust evaluator lets
+    a `use` permission permit a `read` request while the strata match action IRIs exactly).
+  **Fail-closed & injection-safe**: `policy_ttl` is parsed
+  **strictly as Turtle** (N3 `=>` rules and every Turtle-extension are a syntax `Err`) and only the
+  validated ground terms are re-serialized into the reasoner input, so a crafted policy cannot smuggle
+  rules or derive `auth:*` directly; a triple mentioning a reserved/engine-owned IRI term, a
+  non-canonical `xsd:dateTime` lexical form (only `YYYY-MM-DDTHH:MM:SSZ` compares correctly
+  lexically), an **ambiguous constraint node** (several operand triples in one position, or several
+  combinators — satisfaction is keyed on the constraint NODE, so such a node would be decided from
+  one cross-product combination: "some operand satisfied" where "every operand satisfied" is
+  required), an **`odrl:conflict` strategy the bridge cannot honour** (`odrl:perm`, an unknown
+  strategy IRI, or `odrl:invalid` with a detected conflict — the same
+  `sparq_policy::conflict_admissibility` verdict the Rust path refuses on), an out-of-scope
+  **prohibition** construct (which the Rust evaluator might satisfy —
+  silently ignoring it would drop a deny and WIDEN access), or an invalid request-field IRI all return
+  `Err` and materialize **nothing**. Grants/denies land in `<urn:sparq:auth>` +
+  `<urn:sparq:auth-bridged>` exactly as the Rust bridge writes them.
 - `store.refresh_odrl_grant(&Policy, &Request, BridgeKind)` / `refresh_odrl_grants()` —
   **opt-in** (`odrl-bridge`; [OPUS-4.8] sq-dpk4): re-evaluate **bridged** ODRL grants when
   the policy changes and **retract** the ones that no longer hold (a withdrawn permission, a

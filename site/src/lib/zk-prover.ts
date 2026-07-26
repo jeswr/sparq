@@ -29,7 +29,13 @@
 /** Field encodings of `"<age>"^^xsd:integer`, precomputed natively via
  *  `sparq_zk_compose::build::encode_int_literal` (the SAME encoder the scan proof
  *  uses for the operand column). Each is the `operand_enc` public input that binds
- *  the hidden age to the committed credential. */
+ *  the hidden age to the committed credential.
+ *
+ *  DRIFT GUARD (sq-1s2.4): these values are pinned against the native encoder by
+ *  `crates/sparq-zk-compose/tests/site_age_enc_drift.rs`. If a circuit / encoder bump
+ *  changes the term encoding, that test fails RED and prints the regenerated hex to
+ *  paste here — do NOT let these go stale, or the live in-browser age-gate becomes
+ *  unsatisfiable (the witness solve fails). */
 const AGE_OPERAND_ENC: Record<number, string> = {
   24: "0x1c8a81ea95b253e105b99209deff1a4908be9568e588fbd89afea9f49f5f20cf",
   25: "0x2b5caeb2bbd290ab32434a9109030784c7faebadee7a9908d24dccb847910d1d",
@@ -49,13 +55,20 @@ export const AGE_THRESHOLD = 25;
  * [OPUS-4.8] sq-8dx2 — the fallback "captured ProofManifest + live in-tab verify".
  *
  * `verifyCapturedManifest` fetches the pre-captured car-hire manifest
- * (`/zk/car-hire-manifest.json`, produced by `scripts/capture-zk-manifest.mjs`) and
- * runs a GENUINE bb.js `verifyProof` over its single bundled sub-proof — the age-gate
- * — in your tab. This is the honest fallback for devices/browsers where live PROVING
- * (the expensive part) is too heavy: verify is cheap, and the bundled proof bytes are
- * a real UltraHonk transcript (a tamper of any byte makes verify reject). It is NOT a
- * fresh proof — it replays one captured proof and checks it live. The hidden age is
- * not among the captured public inputs.
+ * (`/zk/car-hire-manifest.json`, produced by `scripts/capture-zk-manifest.mjs` or the
+ * native `sparq_zk_compose::capture` seam) and runs a GENUINE bb.js `verifyProof` over
+ * its bundled age-gate sub-proof — in your tab. This is the honest fallback for
+ * devices/browsers where live PROVING (the expensive part) is too heavy: verify is
+ * cheap, and the bundled proof bytes are a real UltraHonk transcript (a tamper of any
+ * byte makes verify reject). It is NOT a fresh proof — it replays one captured proof
+ * and checks it live. The hidden age is not among the captured public inputs.
+ *
+ * The manifest carries a `subProofs` ARRAY (the fuller car-hire manifest may bundle
+ * several native per-circuit sub-proofs). The in-tab fallback verifies the age-gate
+ * member (`filter_int_d2`) — the only circuit whose ACIR is shipped to the browser;
+ * verifying the other bundled members in-tab needs their circuits shipped (a follow-up).
+ * This interface MUST stay in lock-step with the crate's serialized shape
+ * (`sparq_zk_compose::capture::{CapturedCarHireManifest, CapturedSubProof}`).
  */
 export interface CapturedSubProof {
   member: string;
@@ -66,10 +79,13 @@ export interface CapturedSubProof {
 export interface CapturedManifest {
   type: string;
   note: string;
-  circuit: string;
   capturedAt: string;
-  subProof: CapturedSubProof;
+  subProofs: CapturedSubProof[];
 }
+
+/** The age-gate circuit member — the only one whose ACIR the browser ships, hence the
+ *  only bundled sub-proof the in-tab fallback can `verifyProof`. */
+const AGE_GATE_MEMBER = "filter_int_d2";
 export interface VerifyResult {
   /** True iff bb.js verified the captured sub-proof in-tab. */
   verified: boolean;
@@ -330,7 +346,13 @@ export async function verifyCapturedManifest(): Promise<VerifyResult> {
   const res = await fetch(`${basePath()}/zk/car-hire-manifest.json`);
   if (!res.ok) throw new Error(`manifest fetch failed: ${res.status}`);
   const manifest = (await res.json()) as CapturedManifest;
-  const sp = manifest.subProof;
+  // The fuller manifest bundles a `subProofs` array; verify the age-gate member (the
+  // only circuit whose ACIR the browser ships). Fall back to the first sub-proof so a
+  // singular-member fixture still verifies.
+  const sp =
+    manifest.subProofs?.find((p) => p.member === AGE_GATE_MEMBER) ??
+    manifest.subProofs?.[0];
+  if (!sp) throw new Error("captured manifest has no sub-proofs");
 
   const { backend, threads } = await loadProver();
   const proofBytes = Uint8Array.from(sp.proof);

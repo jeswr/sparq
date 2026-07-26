@@ -88,13 +88,26 @@ Gate counts below are the **deterministic** committed snapshot
 `1.0.0-beta.21`; 3% regression tolerance absorbs ~0.5–0.75% cross-platform variance).
 Members independently re-run on this box matched the snapshot to the gate:
 `filter_int_d2 = 17416`, `revoke_unset_d10 = 899`, `scan_k1_n16_r4 = 5991`,
-`hidden_issuer_d4 = 16946`, and — for this revision — the four newly-added members
+`hidden_issuer_d4 = 24452`, and — for this revision — the four newly-added members
 `filter_signed_int_d2 = 17416`, `filter_signed_int_d4 = 17416`,
 `filter_decimal_i3_f2 = 17416`, and `holder_set_d4 = 10650`. The bench mirror
 `bench/zk-compose/gate_counts_latest.json` is regenerated from the same snapshot
 member list and a CI test (tests/gate_count.rs) fails if the two ever disagree, so
-the catalog and the regression gate cannot drift.
+the catalog and the regression gate cannot drift **once the gate runs**.
 
+> **Drift caveat (learned the hard way, sq-7pifo).** That consistency guarantee is
+> only as good as the lane that executes it. `gate_count_regression` is
+> deliberately not `#[ignore]`d, but the default CI lanes have no `nargo`/`bb` (so
+> it self-skipped) and the zk-toolchain lane ran `-- --ignored` (so it was skipped
+> there too) — it therefore ran in **no** CI lane and the baselines went silently
+> stale: the `sq-l15mi` torsion-key soundness fix (#1962) grew `hidden_issuer_d4`
+> **16946 → 24452 (+44.29%)** and nothing tripped, as did the `sq-25mgo`
+> saturating-exponent fix for `filter_f64` (3113 → 3634) and `filter_value_dl_f64`
+> (4157 → 4502). The zk-toolchain lane now runs the non-ignored `gate_count` +
+> `sparql_catalog` binaries with the toolchain present, so an intentional circuit
+> change must re-baseline in the same PR. Numbers in this record are the
+> post-re-baseline snapshot.
+>
 > **All timings below are INDICATIVE / NON-CANONICAL** (native `bb prove` or Node
 > `generateProof` on a shared EC2 work box), not a benchmark of record. Per project
 > policy, EC2 measurements are not baked into docs or tests. Gate counts are the only
@@ -106,13 +119,13 @@ the catalog and the regression gate cannot drift.
 | --- | ---: | --- |
 | `scan_k2_n64_r8` | 34821 | **Heaviest.** K=2 × N=64 × R=8; commitment-recompute sweep + completeness double-loop dominate |
 | `scan_k2_n64_r4` | 27054 | 2nd heaviest |
+| `hidden_issuer_d4` | 24452 | In-circuit signature verification — heaviest non-scan operator (incl. the sq-ru0yx M-1 challenge-reduction no-wrap bound, +14, and the sq-l15mi prime-order-subgroup guards on `pk` and `R`, +7506) |
 | `scan_k1_n64_r8` | 18850 | |
 | `join_eq_na64_nb64` | 18681 | Largest hidden cross-credential join (64×64) |
 | `filter_int_d1..d4` | 17416 | Flat in D — blake3 over the canonical token fits one 64-byte block |
 | `filter_f64_d1..d4` | 17416 | Same token-binding cost as `filter_int` (tie) |
 | `filter_signed_int_d2` / `_d4` | 17416 | Signed `xsd:integer`; same canonical-token blake3 binding — tie, flat in magnitude-digit count |
 | `filter_decimal_i3_f2` | 17416 | `xsd:decimal` (3 int + 2 frac digits); same token binding — tie |
-| `hidden_issuer_d4` | 16946 | In-circuit signature verification — heaviest non-scan / non-filter operator (incl. the sq-ru0yx M-1 challenge-reduction no-wrap bound, +14) |
 | `scan_k1_n64_r4` | 14923 | |
 | `join_eq_na16_nb64` / `na64_nb16` | 12885 | Equal by bucket-size symmetry |
 | `scan_k2_n16_r8` | 11261 | |
@@ -122,7 +135,7 @@ the catalog and the regression gate cannot drift.
 | `scan_k1_n16_r8` | 7038 | |
 | `join_eq_na16_nb16` | 7025 | Smallest join |
 | `scan_k1_n16_r4` | 5991 | Smallest scan |
-| `filter_f64` (raw) | 3113 | Raw-bits building block — no string hashing; cheapest non-revoke member |
+| `filter_f64` (raw) | 3634 | Raw-bits building block — no string hashing; cheapest non-revoke member listed here |
 | `revoke_unset_d10` | 899 | **Cheapest.** Depth-10 Merkle bit-unset |
 
 Scaling: scan members scale ~linearly in `k*n`, with `r` adding a row-soundness pass.
@@ -140,15 +153,19 @@ scalar-mul plus the depth-4 set-membership fold (≈ +316 gates over `holder_pok
 
 1. **Scan is the heavy end** (`scan_k2_n64_r8 = 34821`): the per-graph Poseidon2
    commitment recompute plus the completeness double-loop dominate.
-2. **In-circuit signature verification is expensive** (`hidden_issuer_d4 = 16946`):
-   two ~251-bit twisted-Edwards scalar muls implemented in explicit Field constraints
-   (the `embedded_curve_*` blackboxes are Grumpkin — the wrong curve). This is the
-   single heaviest non-scan / non-filter operator — *comparable to a full filter
-   member*. The brief's expectation that signature verification is expensive is
-   **borne out, with a nuance:** on the actual snapshot the largest scan bucket
-   (34821) and the composable filter members (17416) edge it out, because only
-   depth-4 / 16-issuer membership is compiled; a larger trusted-issuer set would push
-   the signature member higher.
+2. **In-circuit signature verification is expensive** (`hidden_issuer_d4 = 24452`):
+   **four** ~251-bit twisted-Edwards scalar muls implemented in explicit Field
+   constraints (the `embedded_curve_*` blackboxes are Grumpkin — the wrong curve) —
+   `s*G` and `e*pk` for the Schnorr verification equation, plus the two `[L]*P`
+   prime-order-subgroup checks on `pk` and `R` that the `sq-l15mi` torsion-key
+   soundness fix (#1962) added to close a no-secret forgery via a cofactor-8 torsion
+   key. Those two guards are the whole +7506 over the pre-fix 16946 — an
+   *intentional, correctness-motivated* cost, not drift. This is the single heaviest
+   non-scan operator: only the two largest scan buckets (34821 / 27054) exceed it,
+   and it is now **~1.4× a composable filter member** (17416) rather than comparable
+   to one. The brief's expectation that signature verification is expensive is
+   therefore **borne out**, and only depth-4 / 16-issuer membership is compiled — a
+   larger trusted-issuer set would push it higher still.
 3. **Filter token-binding** (`17416`): the blake3 blackbox over the canonical
    `"<digits>"^^xsd:integer` token is the cost driver and fits one 64-byte block — so
    `D` does not move gates (it only leaks `ceil(log10(value))`).
