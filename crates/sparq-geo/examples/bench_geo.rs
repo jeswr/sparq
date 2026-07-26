@@ -1,7 +1,7 @@
 //! GeoIndex benchmark: build + query latency on ~100k points, PLUS a
 //! deterministic TSV-emitting bench mode (the G1 runner for `bench/geo/`).
 //!
-//! Two modes:
+//! Modes:
 //!
 //! ```sh
 //! # 1. Human-readable latency report (the original mode; numbers land in the README):
@@ -36,6 +36,12 @@
 //! contract to the ci-bench hook (which harvests the `_us` columns as advisory
 //! `geo_<name>_us` trend metrics). Correctness lives in `expected.tsv`, NOT in
 //! the binary — exactly like LUBM / SHACL. [OPUS-4.8] (sq-tf8n)
+//!
+//! ## Mode 3 — `nearest-ids <corpus.nt> <k>`
+//!
+//! This untimed correctness oracle loads the corpus, builds the same index as
+//! bench mode, replays `index.nearest(QUERY_CENTER, k)`, and emits one entity
+//! IRI per line for exact competitor-result comparison.
 //!
 //! ## Mode 4 — `query <corpus.nt> <query.rq> [iters]` (needs the `engine` feature)
 //!

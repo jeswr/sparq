@@ -227,7 +227,11 @@ if want sparq; then
   if [ "$SPARQ_STATUS" = "ok" ]; then
     for spec in "nearest_k10 10" "nearest_k100 100"; do
       read -r wl k <<< "$spec"
-      "$BENCH_GEO" nearest-ids "$CORPUS" "$k" > "$TMP/sparq-$wl.ids"
+      if ! timeout "$TIMEOUT_S" "$BENCH_GEO" nearest-ids "$CORPUS" "$k" \
+          > "$TMP/sparq-$wl.ids"; then
+        log "sparq: $wl entity-ID oracle FAILED; timing will be withheld"
+        rm -f "$TMP/sparq-$wl.ids"
+      fi
     done
   fi
 fi
@@ -273,8 +277,9 @@ PYEOF
           )"; then
             printf '%s\t%s\n' "$wl" "$PARSED" >> "$TMP/jena-geosparql.tsv"
             if [[ "$wl" == nearest_k* ]]; then
-              if ! python3 - "$ENDPOINT" "$QUERIES/$wl.rq" "$TMP/jena-$wl.ids" <<'PYEOF'
-import json, sys, urllib.parse, urllib.request
+              if ! TIMEOUT_S="$TIMEOUT_S" timeout "$TIMEOUT_S" python3 - \
+                  "$ENDPOINT" "$QUERIES/$wl.rq" "$TMP/jena-$wl.ids" <<'PYEOF'
+import json, os, sys, urllib.parse, urllib.request
 endpoint, query_path, out_path = sys.argv[1:]
 query = open(query_path, encoding="utf-8").read()
 request = urllib.request.Request(
@@ -282,9 +287,11 @@ request = urllib.request.Request(
     data=urllib.parse.urlencode({"query": query}).encode(),
     headers={"Accept": "application/sparql-results+json"},
 )
-with urllib.request.urlopen(request) as response:
+with urllib.request.urlopen(
+    request, timeout=int(os.environ["TIMEOUT_S"])
+) as response:
     bindings = json.load(response)["results"]["bindings"]
-entities = sorted({row["e"]["value"] for row in bindings})
+entities = sorted(row["e"]["value"] for row in bindings)
 with open(out_path, "w", encoding="utf-8") as output:
     for entity in entities:
         output.write("<%s>\n" % entity)
@@ -341,7 +348,7 @@ def read_ids(engine, workload):
     path = os.path.join(tmp, "%s-%s.ids" % (engine, workload))
     if not os.path.exists(path):
         return None
-    return sorted(set(line.strip() for line in open(path) if line.strip()))
+    return sorted(line.strip() for line in open(path) if line.strip())
 
 
 engines_meta = {}
@@ -396,8 +403,12 @@ for w in workloads:
     count_agree = s == j and s not in ("n/a", "ERROR")
     sparq_ids = read_ids("sparq", w) if w.startswith("nearest_k") else None
     jena_ids = read_ids("jena", w) if w.startswith("nearest_k") else None
+    expected_k = int(w.removeprefix("nearest_k")) if w.startswith("nearest_k") else None
     ids_agree = (
-        sparq_ids == jena_ids and sparq_ids is not None
+        sparq_ids == jena_ids
+        and sparq_ids is not None
+        and len(sparq_ids) == expected_k
+        and len(set(sparq_ids)) == expected_k
         if w.startswith("nearest_k")
         else None
     )
@@ -406,6 +417,7 @@ for w in workloads:
     if w.startswith("nearest_k"):
         cross[w].update({
             "oracle": "entity-id-set",
+            "expected_k": expected_k,
             "sparq_entity_ids": sparq_ids if sparq_ids is not None else "n/a",
             "jena_entity_ids": jena_ids if jena_ids is not None else "n/a",
             "entity_ids_agree": ids_agree,
@@ -422,9 +434,24 @@ for w in workloads:
         else:
             # Disagreement IS the result: both counts stay recorded above; the
             # timing is WITHHELD (never adjusted, never silently dropped).
-            row["jena_geosparql_us"] = (
-                "WITHHELD(result-disagree: sparq=%s jena=%s)" % (s, j)
-            )
+            if not count_agree:
+                reason = "count-disagree: sparq=%s jena=%s" % (s, j)
+            else:
+                sparq_id_set = set(sparq_ids or [])
+                jena_id_set = set(jena_ids or [])
+                reason = (
+                    "entity-list-disagree: counts=%s, "
+                    "sparq-rows=%d jena-rows=%d, "
+                    "|sparq\\jena|=%d |jena\\sparq|=%d"
+                    % (
+                        s,
+                        len(sparq_ids or []),
+                        len(jena_ids or []),
+                        len(sparq_id_set - jena_id_set),
+                        len(jena_id_set - sparq_id_set),
+                    )
+                )
+            row["jena_geosparql_us"] = "WITHHELD(%s)" % reason
     timings[w] = row
 
 envelope = {
