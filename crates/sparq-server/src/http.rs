@@ -6446,8 +6446,8 @@ async fn run_query_pinned(
                 // decides how a mid-stream truncation is signalled (trailer vs. an aborted
                 // chunked framing) — see `StreamingJsonBody`. Resolved here, while the
                 // request headers are still in scope.
-                let trailers_ok = client_accepts_trailers(headers);
-                return stream_select_json(gen, prepared.query, budget, head_only, allow, qr_guard, trailers_ok, &config)
+                let shape = StreamShape { head_only, trailers_ok: client_accepts_trailers(headers) };
+                return stream_select_json(gen, prepared.query, budget, shape, allow, qr_guard, &config)
                     .await;
             }
             let pquery = prepared.query;
@@ -7036,6 +7036,18 @@ impl http_body::Body for StreamingJsonBody {
     }
 }
 
+/// [SONNET-4.6] (sq-7d3dj.26) The two request-head facts that decide the SHAPE of a streamed
+/// SELECT-JSON response, carried together rather than as adjacent `bool` parameters: they are
+/// resolved at the same place from the same request, and a pair of positional booleans is
+/// exactly the signature a caller can silently transpose.
+struct StreamShape {
+    /// `HEAD`: emit the status + headers the GET would have produced, never a body.
+    head_only: bool,
+    /// The client sent `TE: trailers` (see [`client_accepts_trailers`]), so the completeness
+    /// verdict can travel as a trailer instead of an aborted chunked framing.
+    trailers_ok: bool,
+}
+
 /// [OPUS-4.8] (sq-7d3dj.34.2) Streams a SELECT result as SPARQL-results JSON.
 ///
 /// The engine runs on a `spawn_blocking` worker and hands each ~64 KiB chunk
@@ -7066,16 +7078,17 @@ async fn stream_select_json(
     // `query_json_stream_prepared_with_budget` without re-parsing (the HTTP floor win).
     query: sparq_engine::PreparedQuery,
     budget: QueryBudget,
-    head_only: bool,
+    // [SONNET-4.6] (sq-7d3dj.26) `HEAD`-ness and `TE: trailers` negotiation, both read off the
+    // request head by the caller — see [`StreamShape`].
+    shape: StreamShape,
     allow: crate::service_config::ServiceAllowlist,
     // [SONNET-4.6] (sq-qsm5z) The RAII registry guard, as a type-erased send-able box so the
     // signature compiles in both feature states without a conditional type. Moved into the worker
     // so the row is present for the full streaming evaluation; dropped when the worker exits.
     qr_guard: Option<Box<dyn std::any::Any + Send>>,
-    // [SONNET-4.6] (sq-7d3dj.26) The client sent `TE: trailers` (see `client_accepts_trailers`).
-    trailers_ok: bool,
     config: &ServerConfig,
 ) -> Response {
+    let StreamShape { head_only, trailers_ok } = shape;
     let ct = Format::Json.select_content_type();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamItem>(STREAM_CHANNEL_CAP);
     tokio::task::spawn_blocking(move || {
