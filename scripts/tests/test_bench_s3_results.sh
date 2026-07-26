@@ -22,6 +22,13 @@
 #   5. PLAN IS OFFLINE — `plan` is the reviewable artifact for the maintainer
 #      credential step, so it must make ZERO AWS calls.
 #   6. PROVISION IS IDEMPOTENT — re-running against existing resources succeeds.
+#   7. ATTACHMENT IS VERIFIED, NOT ASSUMED — the profile must carry EXACTLY the upload
+#      role. add-role-to-instance-profile returns nonzero both benignly (already
+#      attached) and fatally (profile holds another role, no grant, service failure);
+#      reading every failure as benign is how a `provisioned`/`READY` verdict could be
+#      printed over a profile whose credentials cannot PutObject — the silent
+#      unretrievable run this whole module exists to prevent. So provision must FAIL,
+#      check must withhold READY, and the launcher must omit the profile instead.
 #
 # Run:  bash scripts/tests/test_bench_s3_results.sh   (exit 0 = all pass, 1 = a failure)
 #
@@ -56,11 +63,29 @@ CALLS="$SANDBOX/aws-calls.log"
 #               creates there would only pin the stub, not the script.
 #   no-profile  get-instance-profile fails (absent), everything else succeeds
 #   all-fail    every call fails
+#
+# ORTHOGONAL to the mode, AWS_STUB_PROFILE_ROLE decides which role an EXISTING instance
+# profile reports (`iam get-instance-profile --query …Roles[].RoleName`):
+#   unset            the role the script asks for, i.e. a correctly-attached profile
+#   ""               a profile that exists carrying NO role
+#   <another name>   a profile carrying SOMEONE ELSE'S role — and, as on real AWS where a
+#                    profile holds at most one role, add-role-to-instance-profile then
+#                    FAILS (LimitExceeded). This is the case that used to be silently
+#                    swallowed as "already attached".
+# Under `fresh` the profile carries the role only once add-role has actually been
+# recorded, so the provision path's post-attach verification is real rather than stubbed.
 # --------------------------------------------------------------------------- #
 cat > "$BIN/aws" <<'STUB'
 #!/usr/bin/env bash
 seen() { grep -q -- "$1" "$AWS_CALL_LOG" 2>/dev/null; }
 printf '%s\n' "$*" >> "$AWS_CALL_LOG"
+# The role list get-instance-profile reports for an existing profile.
+stub_profile_roles() {
+  case "${AWS_STUB_MODE:-all-ok}" in
+    fresh) seen "iam add-role-to-instance-profile" && printf '%s\n' "${AWS_STUB_PROFILE_ROLE-sparq-bench-results}" ;;
+    *)     printf '%s\n' "${AWS_STUB_PROFILE_ROLE-sparq-bench-results}" ;;
+  esac
+}
 case "${AWS_STUB_MODE:-all-ok}" in
   all-fail) exit 1 ;;
   no-profile)
@@ -72,8 +97,15 @@ case "${AWS_STUB_MODE:-all-ok}" in
       "iam get-instance-profile") seen "iam create-instance-profile" || exit 1 ;;
     esac ;;
 esac
+# A profile already holding a different role cannot take another one.
+case "$1 $2" in
+  "iam add-role-to-instance-profile")
+    if [ -n "${AWS_STUB_PROFILE_ROLE:-}" ] && [ "${AWS_STUB_MODE:-all-ok}" != "fresh" ]; then exit 254; fi ;;
+esac
 case "$1 $2" in
   "sts get-caller-identity") echo "111122223333" ;;
+  "iam get-instance-profile")
+    case "$*" in *"InstanceProfile.Roles"*) stub_profile_roles ;; esac ;;
 esac
 exit 0
 STUB
@@ -116,6 +148,25 @@ OUT=$(AWS_STUB_MODE=no-profile SPARQ_BENCH_S3_BUCKET=bkt SPARQ_BENCH_INSTANCE_PR
 RC=$?
 want "missing profile => empty iam_args (launch not blocked)" "" "$OUT"
 want "missing profile => rc 0 (launch not blocked)" "0" "$RC"
+
+# ... and so does a profile that EXISTS but does not carry the upload role. Attaching it
+# would look provisioned while the box's credentials could not PutObject.
+reset_calls
+OUT=$(AWS_STUB_MODE=all-ok AWS_STUB_PROFILE_ROLE=someone-elses-role \
+  SPARQ_BENCH_S3_BUCKET=bkt SPARQ_BENCH_INSTANCE_PROFILE=prof bash -c ". '$LIB'; bench_s3_iam_args" 2>/dev/null)
+RC=$?
+want "profile carrying the WRONG role => empty iam_args" "" "$OUT"
+want "profile carrying the WRONG role => rc 0 (launch not blocked)" "0" "$RC"
+reset_calls
+OUT=$(AWS_STUB_MODE=all-ok AWS_STUB_PROFILE_ROLE= \
+  SPARQ_BENCH_S3_BUCKET=bkt SPARQ_BENCH_INSTANCE_PROFILE=prof bash -c ". '$LIB'; bench_s3_iam_args" 2>/dev/null)
+want "profile carrying NO role => empty iam_args" "" "$OUT"
+
+# Membership is an exact whole-name match, never a prefix.
+reset_calls
+OUT=$(AWS_STUB_MODE=all-ok AWS_STUB_PROFILE_ROLE=sparq-bench-results-readonly \
+  SPARQ_BENCH_S3_BUCKET=bkt SPARQ_BENCH_INSTANCE_PROFILE=prof bash -c ". '$LIB'; bench_s3_iam_args" 2>/dev/null)
+want "role match is exact, not a prefix" "" "$OUT"
 
 # --------------------------------------------------------------------------- #
 # 4. DOLLAR-FREE user-data line (invariant 3).
@@ -188,13 +239,44 @@ AWS_STUB_MODE=fresh SPARQ_BENCH_S3_BUCKET=bkt bash "$LIB" provision >/dev/null 2
 want "provision is idempotent (2nd run succeeds)" "0" "$?"
 want "2nd provision issues no new create-*" "$CREATES_BEFORE" "$(grep -c -- 'create-' "$CALLS")"
 
+# 7c. FAILING to attach the role must NOT be reported as success. add-role-to-instance-profile
+# returns nonzero both when the role is already attached (benign) and when the profile holds
+# a different role / the caller lacks the grant (fatal); provision must tell them apart by
+# verifying membership, not assume the benign reading and print "provisioned".
+#
+# The `timeout` is load-bearing, not defensive plumbing. Swallow the attach failure again
+# and provision still eventually errors — but only after burning the 30x2s IAM
+# eventual-consistency poll waiting for a role that will never appear, so a plain rc check
+# would stay green over the reintroduced bug. A KNOWN-failed attach must be diagnosed from
+# the failure itself, in well under a second; rc 124 here means that regressed.
+reset_calls
+timeout 15 env AWS_STUB_MODE=all-ok AWS_STUB_PROFILE_ROLE=someone-elses-role SPARQ_BENCH_S3_BUCKET=bkt \
+  bash "$LIB" provision >"$SANDBOX/prov-wrong.out" 2>&1
+want "provision FAILS promptly when the role cannot be attached (124 = fell into the poll)" "1" "$?"
+# Anchored on the SUCCESS banner, not the bare word: the failure path legitimately says
+# "NOT provisioned", and a substring match would score that honest message as a failure.
+if grep -qF '[bench-s3] provisioned.' "$SANDBOX/prov-wrong.out"; then
+  bad "provision printed its success banner over a profile that lacks the upload role"
+else
+  ok "provision does not claim success when the role is unattached"
+fi
+if grep -q 'ERROR' "$SANDBOX/prov-wrong.out"; then ok "provision reports the attach failure loudly"; else bad "provision failed silently"; fi
+
 # --------------------------------------------------------------------------- #
-# 8. check: reports NOT-ready when a resource is missing.
+# 8. check: reports NOT-ready when a resource is missing OR mis-wired.
 # --------------------------------------------------------------------------- #
 AWS_STUB_MODE=no-profile SPARQ_BENCH_S3_BUCKET=bkt bash "$LIB" check >/dev/null 2>&1
 want "check fails when the instance profile is missing" "1" "$?"
 AWS_STUB_MODE=all-ok SPARQ_BENCH_S3_BUCKET=bkt bash "$LIB" check >/dev/null 2>&1
 want "check passes when everything exists" "0" "$?"
+# READY must mean uploads can actually happen — a profile that exists but carries the
+# wrong role (or none) is NOT ready, however healthy the bucket and role look.
+AWS_STUB_MODE=all-ok AWS_STUB_PROFILE_ROLE=someone-elses-role SPARQ_BENCH_S3_BUCKET=bkt \
+  bash "$LIB" check >"$SANDBOX/check-wrong.out" 2>&1
+want "check is NOT ready when the profile carries the wrong role" "1" "$?"
+if grep -q 'READY' "$SANDBOX/check-wrong.out"; then bad "check reported READY for a profile that cannot upload"; else ok "check withholds READY when the profile lacks the role"; fi
+AWS_STUB_MODE=all-ok AWS_STUB_PROFILE_ROLE= SPARQ_BENCH_S3_BUCKET=bkt bash "$LIB" check >/dev/null 2>&1
+want "check is NOT ready when the profile carries no role at all" "1" "$?"
 
 # --------------------------------------------------------------------------- #
 # 9. fetch: right URI, and never fatal to the caller.

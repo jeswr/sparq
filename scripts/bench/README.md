@@ -208,8 +208,12 @@ AWS_PROFILE=pss     scripts/bench/bench-s3-results.sh check
 export SPARQ_BENCH_S3_BUCKET=sparq-bench-results-<account-id>
 ```
 
-`provision` is idempotent. It also prints the **`iam:PassRole` policy the launcher
-principal separately needs** — attaching an instance profile requires it, and
+`provision` is idempotent, and verifies that the instance profile really does carry
+the upload role before reporting success — an `add-role-to-instance-profile` failure
+is benign when the role is already attached but fatal when the profile holds a
+different one, so it is checked rather than assumed. `check` likewise reports READY
+only on actual role attachment, not on the profile merely existing. It also prints
+the **`iam:PassRole` policy the launcher principal separately needs** — attaching an instance profile requires it, and
 without it `run-instances` fails `AccessDenied`.
 
 **The instance role is write-only, deliberately:** `s3:PutObject` +
@@ -228,8 +232,9 @@ so a partial upload is distinguishable from a completed one. `bench_s3_fetch`
 pulls them into `RESULTS_LOCAL/s3/`, and the launchers call it **before** the SSH
 tar so a dead sshd cannot skip it.
 
-**Degradation is always toward launching, never toward blocking:** a missing or
-unreadable instance profile logs a warning and launches without the channel rather
-than failing an expensive run over an IAM read grant. The uploader is a best-effort
+**Degradation is always toward launching, never toward blocking:** an instance
+profile that is missing, unreadable, or that does not carry the upload role logs a
+warning and launches without the channel rather than failing an expensive run over
+an IAM read grant. The uploader is a best-effort
 side-car — it does not run under `set -e` and always exits 0, so a telemetry
 failure can never abort a gather.

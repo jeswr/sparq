@@ -23,7 +23,8 @@
 #   scripts/bench/bench-s3-results.sh plan            # print the exact IAM/S3 objects
 #                                                     # + policy JSON. Makes NO aws call.
 #   AWS_PROFILE=… …/bench-s3-results.sh provision     # idempotent create (ADMIN creds)
-#   AWS_PROFILE=… …/bench-s3-results.sh check         # verify bucket+role+profile
+#   AWS_PROFILE=… …/bench-s3-results.sh check         # verify bucket + role + that the
+#                                                     # profile CARRIES that role
 #   AWS_PROFILE=… …/bench-s3-results.sh fetch <run-id> <dest-dir>
 #   AWS_PROFILE=… …/bench-s3-results.sh teardown      # remove what provision created
 #   scripts/bench/bench-s3-results.sh --self-test     # pure-predicate self-checks
@@ -80,16 +81,44 @@ bench_s3_enabled() { [ -n "${SPARQ_BENCH_S3_BUCKET:-}" ]; }
 # bench_s3_uri <run-id>  ->  s3://<bucket>/<run-id>
 bench_s3_uri() { printf 's3://%s/%s' "$SPARQ_BENCH_S3_BUCKET" "$1"; }
 
+# rc 0 iff the instance profile EXISTS *and* carries EXACTLY the configured role.
+#
+# Existence is NOT the useful predicate. An instance profile can exist while holding no
+# role at all, or while holding SOMEONE ELSE'S role — and a box launched with either
+# gets credentials that cannot PutObject, which is precisely the silent unretrievable
+# run this module exists to prevent. `provision` (verify), `check` (report) and
+# `bench_s3_iam_args` (degrade) all route through this one predicate so the three can
+# never drift into disagreeing about what "attached" means.
+#
+# Needs only iam:GetInstanceProfile — the same grant `bench_s3_passrole_policy` already
+# hands the launcher principal; --query is evaluated client-side.
+# bench_s3_profile_has_role [profile] [role]
+bench_s3_profile_has_role() {
+  local profile="${1:-$SPARQ_BENCH_INSTANCE_PROFILE}" role="${2:-$SPARQ_BENCH_S3_ROLE}" roles
+  roles=$(aws iam get-instance-profile --instance-profile-name "$profile" \
+    --query 'InstanceProfile.Roles[].RoleName' --output text 2>/dev/null) || return 1
+  # Whitespace-pad both sides so the match is an exact WHOLE role name, never a prefix:
+  # `sparq-bench-results` must not be satisfied by `sparq-bench-results-readonly`.
+  # `--output text` renders a list tab-separated (sometimes newline-separated); squeeze
+  # either into single spaces first.
+  case " $(printf '%s' "$roles" | tr -s '[:space:]' ' ') " in
+    *" $role "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # The `--iam-instance-profile` argument for `aws ec2 run-instances`, or NOTHING.
 #
 # Degrades to empty (channel silently off, launcher unchanged) rather than failing the
-# launch when the profile has not been provisioned yet or the caller lacks iam:Get* —
-# an unretrievable run is bad, but a run that never STARTS because of a missing IAM
-# read grant is worse, and the operator gets a loud warning either way.
+# launch when the profile has not been provisioned yet, does not carry the upload role,
+# or the caller lacks iam:Get* — an unretrievable run is bad, but a run that never
+# STARTS because of a missing IAM read grant is worse, and the operator gets a loud
+# warning either way. Attaching a profile KNOWN not to carry the role would be the worst
+# of the three: the launch looks provisioned and the uploads fail on the box.
 bench_s3_iam_args() {
   bench_s3_enabled || return 0
-  if ! aws iam get-instance-profile --instance-profile-name "$SPARQ_BENCH_INSTANCE_PROFILE" >/dev/null 2>&1; then
-    bench_s3_log "WARN: instance profile '$SPARQ_BENCH_INSTANCE_PROFILE' not found/readable — launching WITHOUT the durable S3 results channel."
+  if ! bench_s3_profile_has_role; then
+    bench_s3_log "WARN: instance profile '$SPARQ_BENCH_INSTANCE_PROFILE' is not found/readable, or does not carry role '$SPARQ_BENCH_S3_ROLE' — launching WITHOUT the durable S3 results channel."
     bench_s3_log "WARN: run '$BENCH_S3_DIR/bench-s3-results.sh provision' with admin credentials first (bead sq-ffaa9)."
     return 0
   fi
@@ -247,15 +276,39 @@ cmd_provision() {
     aws iam create-instance-profile --instance-profile-name "$SPARQ_BENCH_INSTANCE_PROFILE" >/dev/null
   fi
   # Idempotent: re-adding an already-attached role returns LimitExceeded/EntityAlreadyExists.
-  aws iam add-role-to-instance-profile --instance-profile-name "$SPARQ_BENCH_INSTANCE_PROFILE" \
-    --role-name "$SPARQ_BENCH_S3_ROLE" >/dev/null 2>&1 || bench_s3_log "role already attached to the profile"
+  # But a nonzero rc is AMBIGUOUS — it equally covers "the profile already holds a
+  # DIFFERENT role" (a profile takes at most one), AccessDenied, invalid input and plain
+  # service failure. Reading every failure as "already attached" would print `provisioned`
+  # over a profile whose credentials cannot PutObject, so on failure VERIFY membership and
+  # stop loudly when it is absent, rather than handing launchers a known-broken profile.
+  if ! aws iam add-role-to-instance-profile --instance-profile-name "$SPARQ_BENCH_INSTANCE_PROFILE" \
+      --role-name "$SPARQ_BENCH_S3_ROLE" >/dev/null 2>&1; then
+    if bench_s3_profile_has_role; then
+      bench_s3_log "role $SPARQ_BENCH_S3_ROLE already attached to $SPARQ_BENCH_INSTANCE_PROFILE"
+    else
+      bench_s3_log "ERROR: could not attach role $SPARQ_BENCH_S3_ROLE to instance profile $SPARQ_BENCH_INSTANCE_PROFILE,"
+      bench_s3_log "ERROR: and the profile does not carry it — it may hold a different role (a profile takes"
+      bench_s3_log "ERROR: at most one; detach with 'aws iam remove-role-from-instance-profile'), or these"
+      bench_s3_log "ERROR: credentials lack iam:AddRoleToInstanceProfile. NOT provisioned: a box launched with"
+      bench_s3_log "ERROR: this profile could not upload its results."
+      return 1
+    fi
+  fi
 
   # IAM is eventually consistent: a profile used by run-instances too soon after
-  # creation fails with "Invalid IAM Instance Profile name". Poll before declaring done.
+  # creation fails with "Invalid IAM Instance Profile name". Poll before declaring done —
+  # on ROLE MEMBERSHIP, not mere existence, since existence is what the profile already
+  # had before the role was ever attached.
+  local attached=0
   for _ in $(seq 1 30); do
-    aws iam get-instance-profile --instance-profile-name "$SPARQ_BENCH_INSTANCE_PROFILE" >/dev/null 2>&1 && break
+    if bench_s3_profile_has_role; then attached=1; break; fi
     sleep 2
   done
+  if [ "$attached" != 1 ]; then
+    bench_s3_log "ERROR: instance profile $SPARQ_BENCH_INSTANCE_PROFILE never reported role $SPARQ_BENCH_S3_ROLE as attached."
+    bench_s3_log "ERROR: NOT provisioned — re-run 'check' before launching; boxes would upload nothing."
+    return 1
+  fi
 
   cat >&2 <<EOF
 [bench-s3] provisioned. Enable the channel for canonical launches with:
@@ -281,8 +334,12 @@ cmd_check() {
   else
     bench_s3_log "FAIL role $SPARQ_BENCH_S3_ROLE missing"; rc=1
   fi
-  if aws iam get-instance-profile --instance-profile-name "$SPARQ_BENCH_INSTANCE_PROFILE" >/dev/null 2>&1; then
-    bench_s3_log "OK   instance profile $SPARQ_BENCH_INSTANCE_PROFILE exists"
+  # The profile EXISTING is not the guarantee launchers need — it must carry the upload
+  # role, or the box boots with credentials that cannot PutObject and the run is lost.
+  if bench_s3_profile_has_role; then
+    bench_s3_log "OK   instance profile $SPARQ_BENCH_INSTANCE_PROFILE carries role $SPARQ_BENCH_S3_ROLE"
+  elif aws iam get-instance-profile --instance-profile-name "$SPARQ_BENCH_INSTANCE_PROFILE" >/dev/null 2>&1; then
+    bench_s3_log "FAIL instance profile $SPARQ_BENCH_INSTANCE_PROFILE exists but does NOT carry role $SPARQ_BENCH_S3_ROLE — a box launched with it cannot upload results"; rc=1
   else
     bench_s3_log "FAIL instance profile $SPARQ_BENCH_INSTANCE_PROFILE missing"; rc=1
   fi
