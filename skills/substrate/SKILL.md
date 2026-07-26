@@ -82,6 +82,8 @@ promotes the pair to **`f32`** through `Num::f32`. [OPUS-5] #3796
 > `cmp_relational_integer_and_decimal_vs_float_compare_in_the_float_tier`. Do not
 > re-introduce the unconditional `f64` fallback.
 
+A second, unrelated `xsd:float` defect is still open in a different crate:
+
 > **REMAINING BOUNDARY — the engine's `=`/`<` on an `xsd:float` still do not see the `f32`
 > value.** This is a DIFFERENT defect from the one above, in a different crate, and it is
 > still open. `sparq-engine` does not call `cmp_relational` at all; its `=`/`<` ride the
