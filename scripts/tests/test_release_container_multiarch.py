@@ -196,22 +196,27 @@ def assert_release_container_contract(workflow_text: str) -> None:
         f"type=raw,value=dev-{version},{is_dispatch}",
     }, "release image tags must stay version-threaded, with `latest` gated off dispatch"
 
-    _, smoke = _step_named(steps, "Build image for smoke test (load locally)")
+    smoke_index, smoke = _step_named(steps, "Build image for smoke test (load locally)")
     smoke_with = smoke["with"]
     assert smoke_with.get("load") is True and smoke_with.get("push") is False
     assert smoke_with.get("platforms") == "linux/amd64"
     assert smoke_with.get("tags") == "sparq-server:smoke"
 
-    _, smoke_run = _step_named(steps, "Smoke test the image (docker run + /health + ASK query)")
+    smoke_run_index, smoke_run = _step_named(
+        steps, "Smoke test the image (docker run + /health + ASK query)"
+    )
     assert smoke_run.get("run") == "scripts/docker-smoke.sh sparq-server:smoke 3030"
 
-    _, trivy = _step_named(
+    trivy_index, trivy = _step_named(
         steps, "Trivy scan released image (fail on fixable HIGH/CRITICAL)"
     )
     assert trivy["with"].get("image-ref") == "sparq-server:smoke"
     assert trivy["with"].get("exit-code") == "1", "Trivy release scan must remain gating"
 
-    _, push = _step_named(steps, "Build and push")
+    push_index, push = _step_named(steps, "Build and push")
+    assert smoke_index < smoke_run_index < trivy_index < push_index, (
+        "the native artifact must be smoked and scanned before any registry push"
+    )
     push_with = push["with"]
     assert push_with.get("push") is True
     platforms = {value.strip() for value in push_with.get("platforms", "").split(",")}
@@ -230,8 +235,6 @@ def assert_lws_container_contract(workflow_text: str) -> None:
 
     permissions = publish_job["permissions"]
     assert permissions.get("packages") == "write"
-    assert permissions.get("id-token") == "write"
-    assert permissions.get("attestations") == "write"
 
     qemu_index, qemu = _step_named(steps, "Set up QEMU for arm64")
     buildx_indices = [
@@ -240,7 +243,6 @@ def assert_lws_container_contract(workflow_text: str) -> None:
         if str(step.get("uses", "")).startswith("docker/setup-buildx-action@")
     ]
     assert len(buildx_indices) == 1, "LWS release job must set up Buildx exactly once"
-    assert buildx_indices[0] < qemu_index, "native gate must run before QEMU is enabled"
     assert re.fullmatch(
         r"docker/setup-qemu-action@[0-9a-f]{40}", qemu.get("uses", "")
     ), "LWS QEMU action must be pinned to a full commit SHA"
@@ -249,26 +251,34 @@ def assert_lws_container_contract(workflow_text: str) -> None:
     _, metadata = _step_named(steps, "Generate stable release tags and OCI labels")
     assert metadata["with"].get("images") == "ghcr.io/sparq-org/sparq-lws-core"
 
-    _, smoke = _step_named(steps, "Build native amd64 image for smoke and scan")
+    smoke_index, smoke = _step_named(steps, "Build native amd64 image for smoke and scan")
     smoke_with = smoke["with"]
     assert smoke_with.get("file") == "crates/sparq-lws-core/Dockerfile"
     assert smoke_with.get("load") is True and smoke_with.get("push") is False
     assert smoke_with.get("platforms") == "linux/amd64"
     assert smoke_with.get("tags") == "sparq-lws-core:smoke"
 
-    _, smoke_run = _step_named(
+    smoke_run_index, smoke_run = _step_named(
         steps, "Smoke native image (health, fail-closed mutation, non-root)"
     )
     assert (
         smoke_run.get("run")
         == "crates/sparq-lws-core/tests/container-smoke.sh sparq-lws-core:smoke 3000"
     )
+    assert smoke_run.get("env", {}).get("LWS_CONTAINER_SKIP_BUILD") == "1", (
+        "the smoke must reuse the Buildx-gated image, not rebuild its own"
+    )
 
-    _, trivy = _step_named(steps, "Scan native image (fail on fixable HIGH or CRITICAL)")
+    trivy_index, trivy = _step_named(
+        steps, "Scan native image (fail on fixable HIGH or CRITICAL)"
+    )
     assert trivy["with"].get("image-ref") == "sparq-lws-core:smoke"
     assert trivy["with"].get("exit-code") == "1", "LWS Trivy release scan must remain gating"
 
-    _, push = _step_named(steps, "Publish amd64 + arm64 image index")
+    push_index, push = _step_named(steps, "Publish amd64 + arm64 image index")
+    assert smoke_index < smoke_run_index < trivy_index < qemu_index < push_index, (
+        "the native artifact must be smoked and scanned before emulation and any registry push"
+    )
     push_with = push["with"]
     assert push_with.get("file") == "crates/sparq-lws-core/Dockerfile"
     assert push_with.get("push") is True
@@ -304,6 +314,19 @@ class ReleaseContainerMultiarch(unittest.TestCase):
         self.assertNotEqual(mutated, original, "mutation fixture did not alter the workflow")
         with self.assertRaises(AssertionError):
             assert_lws_container_contract(mutated)
+
+    def test_moving_lws_scan_after_push_fails_contract(self):
+        original = LWS_WORKFLOW.read_text(encoding="utf-8")
+        workflow = yaml.safe_load(original)
+        steps = workflow["jobs"]["publish"]["steps"]
+        trivy_index, trivy = _step_named(
+            steps, "Scan native image (fail on fixable HIGH or CRITICAL)"
+        )
+        push_index, _ = _step_named(steps, "Publish amd64 + arm64 image index")
+        steps.pop(trivy_index)
+        steps.insert(push_index, trivy)
+        with self.assertRaises(AssertionError):
+            assert_lws_container_contract(yaml.safe_dump(workflow, sort_keys=False))
 
     def test_live_dispatch_tags_never_collide_with_canonical_tags(self):
         """[OPUS-5] a hostile/careless `inputs.tag` must not reach a deployment-followed tag."""

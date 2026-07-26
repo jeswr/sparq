@@ -761,10 +761,12 @@ jobs:
       - name: "Arm-path wiring inspection (contents: write + probe-before-arm — #3760)"
         run: python3 scripts/tests/test_arm_capability_wiring.py
       # [OPUS-5] sq-w1dxx: release.yml's container contract was pinned by a test that NOTHING
-      # ran, so every assertion in it was decorative. Wire it in beside its sibling
-      # [GPT-5] workflow-contract tests: pin the multi-arch push + smoke/Trivy pre-push gates
-      # for both native deployment servers (sq-fqrv4), plus sparq-server's trigger-gated GHCR
-      # tags — a workflow_dispatch dev build must never push a deployment-followed tag.
+      # ran, so every assertion in it was decorative. Wire it in beside its sibling tests.
+      # sq-fvzi6 pins the multi-arch push; sq-n6rv + sq-p9xq pin sparq-server's trigger-gated
+      # GHCR tags so a workflow_dispatch dev build never pushes `:latest`, which deploy/paas
+      # and deploy/aws follow.
+      # [GPT-5] sq-fqrv4: also pin multi-arch push + smoke/Trivy pre-push gates for both native
+      # deployment servers, including the sparq-lws-core release contract.
       # Needs PyYAML, installed once in the shared setup above.
       - name: Release container contracts (both multi-arch images + safe ghcr tags)
         run: python3 scripts/tests/test_release_container_multiarch.py
