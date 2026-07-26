@@ -112,8 +112,8 @@ single largest divergence from NextGraph's documented design.
 
 ## 3. One CRDT, one artifact — the binding contract
 
-#2005 flagged the requirement ("the two designs must share one CRDT"); this section makes
-it checkable. Profile BR's commit bodies carry **SPARQL-CRDT deltas** exactly as frozen by
+Record #2005 flagged the requirement ("the two designs must share one CRDT"); this section
+makes it checkable. Profile BR's commit bodies carry **SPARQL-CRDT deltas** exactly as frozen by
 sq-tag1q.4. The binding is:
 
 - **B1 — No second CRDT.** The E2EE-NG binding **MUST NOT** define, name, or version an
@@ -160,7 +160,7 @@ engine nor the CRDT algebra. Both records already required exactly this.
 
 ## 4. Consolidated honesty position
 
-#2005 §6 (the CS-vs-BR leakage table) and #2005 BR-8 (the mandatory leakage statement)
+Record #2005 §6 (the CS-vs-BR leakage table) and #2005 BR-8 (the mandatory leakage statement)
 stand as canonical. #2001 §5 is the **per-message ledger** from which a deployment's BR-8
 statement is generated — the two are layered, not competing. Three amendments:
 

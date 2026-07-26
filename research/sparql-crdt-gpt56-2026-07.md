@@ -20,7 +20,7 @@ proposal draft or duplicate E2EE envelope/key design.
 > Where this record and the frozen proposal `site/specs/sparql-crdt.typ` (sq-tag1q.4)
 > differ, **the proposal wins**: notably its `CRDT-SCOPE` puts `COPY`/`MOVE`/`ADD` outside
 > the profile, superseding those three rows of §5.2.
-
+>
 > **Honesty boundary.** The algorithms below are *designed* to make replicas that have
 > accepted the same valid deltas expose the same RDF dataset. The algebra is based on
 > established dotted observed-remove and delta-state CRDT constructions, but this exact

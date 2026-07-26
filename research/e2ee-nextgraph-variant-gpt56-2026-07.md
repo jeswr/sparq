@@ -16,7 +16,7 @@ sparq or NextGraph compatibility.
 > — the E2EE layer defines no CRDT of its own. See the contradiction ledger and the
 > one-CRDT binding contract in
 > [`e2ee-program-reconciliation-2026-07.md`](./e2ee-program-reconciliation-2026-07.md).
-
+>
 > **Honesty and audit boundary.** Every confidentiality, integrity, authorization,
 > revocation, and convergence property below is **designed/intended**, not proven.
 > The construction has not received an external cryptographic review. Production use

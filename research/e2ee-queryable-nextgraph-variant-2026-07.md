@@ -32,7 +32,7 @@ seen by a serving broker) than the pure client-only model.
 > [`e2ee-nextgraph-variant-gpt56-2026-07.md`](./e2ee-nextgraph-variant-gpt56-2026-07.md)
 > (v0 wire binding) and [`sparql-crdt-gpt56-2026-07.md`](./sparql-crdt-gpt56-2026-07.md)
 > (the one shared CRDT).
-
+>
 > **Honesty banner.** Nothing here is a cryptographic-soundness claim. Every privacy
 > property is stated as **designed / intended**, never *proven* — the ZK/crypto
 > production gate **sq-qhy4** (P0, open) is live and no external accredited-cryptographer
