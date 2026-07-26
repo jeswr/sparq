@@ -351,6 +351,13 @@ def main(argv=None, runner=None, out=None):
     ap.add_argument("--dry-run", action="store_true",
                     help="explicit no-op default; mutually exclusive with --apply")
     ap.add_argument("--limit", type=int, default=300, help="backfill PR page ceiling")
+    ap.add_argument("--pace", type=float, default=0.0,
+                    help="seconds to wait between label writes during a backfill. Adding a "
+                         "label fires a `pull_request: labeled` event, and ci/bench/fuzz/"
+                         "feature-matrix all trigger on it (as guarded no-op runs). A "
+                         "one-pass backfill of ~85 PRs therefore queues hundreds of short "
+                         "jobs at once; pacing keeps the runners from congesting, which this "
+                         "repo has previously seen turn into FALSE gate failures.")
     ap.add_argument("--head-repo", default=None,
                     help="the PR head repo full_name. When it is not --repo the PR is a "
                          "FORK PR whose `pull_request` token is READ-ONLY: report and exit 0.")
@@ -401,6 +408,9 @@ def main(argv=None, runner=None, out=None):
             kept += 1
         if args.apply and plan["add"]:
             apply_areas(args.repo, plan["number"], plan["add"], runner=runner)
+            if args.pace > 0:
+                import time
+                time.sleep(args.pace)
     mode = "APPLIED" if args.apply else "DRY RUN (nothing written)"
     print(f"-- {mode}: {len(prs)} PR(s); {changed} relabelled; "
           f"{kept} left on {GLOBAL} (fail-closed)", file=out)

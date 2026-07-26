@@ -557,3 +557,14 @@ area = "sparq-vc"
 [[map]]
 pattern = "skills/zk-query-proofs/**"
 area = "sparq-zk"
+
+# CATCH-ALL for a skills surface that does not yet have its own row above — a PR that
+# ADDS a skill (live case: #3464 adding skills/e2ee-ng/) would otherwise be unresolved
+# and take `__global__`, which is the starvation this file exists to remove. `docs` is
+# the deliberately conservative choice: it over-serializes against other prose work
+# rather than guessing a crate. Rows above win, and
+# test_every_skill_surface_has_a_map_row keeps pressure to add the specific row once the
+# surface lands on the default branch.
+[[map]]
+pattern = "skills/**"
+area = "docs"
