@@ -378,6 +378,21 @@ impl Num {
         }
     }
 
+    /// [SONNET-4.6] The value promoted directly to `f32`, without an intermediate `f64`
+    /// rounding.
+    #[inline]
+    fn promoted_f32(self) -> f32 {
+        match self {
+            Num::Int(i) => i as f32,
+            Num::Dec(d) => d
+                .lexical()
+                .parse::<f32>()
+                .expect("a Dec lexical is always a valid f32 lexical"),
+            Num::Float(f) => f,
+            Num::Double(d) => d as f32,
+        }
+    }
+
     /// As an exact [`Dec`] for the exact tiers (`Int` / `Dec`); `None` for `Float` /
     /// `Double` (which are not exactly representable as a fixed-point decimal).
     #[inline]
@@ -470,7 +485,7 @@ impl Num {
             return Some(Num::Double(apply_f64(self.f64(), o.f64(), op)));
         }
         if rank == 2 {
-            let (a, b) = (self.f64() as f32, o.f64() as f32);
+            let (a, b) = (self.promoted_f32(), o.promoted_f32());
             return Some(Num::Float(apply_f64(a as f64, b as f64, op) as f32));
         }
         // Exact tier: integer / decimal.
@@ -770,10 +785,18 @@ pub fn parse_xsd_f64(v: &str) -> Option<f64> {
     sparq_core::parse_xsd_f64(v)
 }
 
-/// Parse an xsd:float lexical (the [`parse_xsd_f64`] spellings, narrowed to `f32`).
+/// Parse an xsd:float lexical directly at `f32` precision.
 #[inline]
 pub fn parse_xsd_f32(v: &str) -> Option<f32> {
-    parse_xsd_f64(v).map(|d| d as f32)
+    match v {
+        "NaN" => Some(f32::NAN),
+        "INF" | "+INF" => Some(f32::INFINITY),
+        "-INF" => Some(f32::NEG_INFINITY),
+        _ if v.bytes().all(|c| c.is_ascii_digit() || matches!(c, b'+' | b'-' | b'.' | b'e' | b'E')) => {
+            v.parse::<f32>().ok()
+        }
+        _ => None,
+    }
 }
 
 /// Float/double serialisation: an INTEGRAL value prints as a plain integer ("6",
@@ -863,6 +886,23 @@ mod tests {
     fn float_double_exponent_forms_parse() {
         assert!(matches!(as_numeric(&typed("1.5E2", xsd::DOUBLE)), Some(Num::Double(d)) if d == 150.0));
         assert!(matches!(as_numeric(&typed("1.5", xsd::FLOAT)), Some(Num::Float(f)) if f == 1.5));
+    }
+
+    #[test]
+    fn float_promotion_and_parse_are_single_rounded() {
+        // [SONNET-4.6] This integer is a double-rounding witness: converting through
+        // f64 produces 0x5e800000, while direct correctly-rounded f32 conversion produces
+        // the adjacent value 0x5e800001.
+        const WITNESS: i64 = 4_611_686_293_305_294_849;
+        const CORRECT_BITS: u32 = 0x5e80_0001;
+
+        let promoted = Num::Int(WITNESS)
+            .binop(Num::Float(0.0), ArithOp::Add)
+            .expect("mixed integer/float addition is defined");
+        assert!(matches!(promoted, Num::Float(f) if f.to_bits() == CORRECT_BITS));
+
+        let parsed = parse_xsd_f32("4611686293305294849").expect("valid xsd:float lexical");
+        assert_eq!(parsed.to_bits(), CORRECT_BITS);
     }
 
     #[test]
