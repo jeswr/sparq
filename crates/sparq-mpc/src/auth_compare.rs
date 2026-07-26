@@ -656,6 +656,72 @@ mod tests {
         }
     }
 
+    /// [SONNET-4.6] **The COORDINATED Hole-2 deviation — a deviating party re-shares
+    /// wrongly in BOTH degree-reduces of the same `auth_mul`, and is still caught.**
+    ///
+    /// [`mac_carry_soundness_distinguished_by_in_reduce_tamper`] deviates only in the
+    /// VALUE reduce, so by itself it does not exercise the other two cases the design's
+    /// adversary model admits (§2.4: up to `t` corruptions, deviating in both rounds,
+    /// choosing the deviations jointly). This test walks all three:
+    ///
+    /// - `(δ_v ≠ 0, δ_m = 0)` — value reduce only → `σ = −α·δ_v ≠ 0`;
+    /// - `(δ_v = 0, δ_m ≠ 0)` — MAC reduce only → `σ = δ_m ≠ 0`;
+    /// - `(δ_v ≠ 0, δ_m ≠ 0)` — BOTH, coordinated → `σ = δ_m − α·δ_v`, which the
+    ///   adversary can only zero by picking `δ_m = α·δ_v`, i.e. by guessing the secret
+    ///   `α` its `≤ t` shares are independent of (probability `1/p ≈ 2^-61`).
+    ///
+    /// Every case must `MacCheckFailed`-abort. This is what makes the design record's
+    /// "MAC-covered in both rounds, including under coordinated deviation" claim
+    /// non-vacuous rather than an assertion about the single-round case only.
+    #[test]
+    fn coordinated_tamper_in_both_reduces_is_caught() {
+        // n = 5, t = 2 → the minimal honest-majority count, where the degree-2t product
+        // has ZERO RS redundancy and the MAC is the sole detector.
+        let backend = ShamirBackend::new_seeded(5, 0xC0_0D).unwrap();
+        assert_eq!(backend.parties(), 2 * backend.threshold() + 1);
+
+        let x_val = Fp::new(6);
+        let y_val = Fp::new(7);
+        let reshare_party = 0usize;
+
+        // (δ_v, δ_m): value-only, MAC-only, and both-coordinated.
+        for (value_delta, mac_delta) in [
+            (Fp::new(123), Fp::zero()),
+            (Fp::zero(), Fp::new(456)),
+            (Fp::new(123), Fp::new(456)),
+        ] {
+            let mut dealer = backend.dealer();
+            let mut session = dealer.new_mac_session();
+            let x = session.authenticated_share(x_val);
+            let y = session.authenticated_share(y_val);
+            let z = session
+                .auth_mul_with_both_reduces_tampered_for_test(
+                    &x,
+                    &y,
+                    reshare_party,
+                    value_delta,
+                    mac_delta,
+                )
+                .unwrap();
+
+            // Both sharings stay internally CONSISTENT degree-t codewords — the robust
+            // open succeeds and RS flags nothing. The catch is the MAC, not redundancy.
+            backend
+                .reconstruct(z.value_shares())
+                .expect("an in-reduce deviation leaves a consistent degree-t sharing");
+
+            assert!(
+                matches!(
+                    session.mac_check(std::slice::from_ref(&z)),
+                    Err(MpcError::MacCheckFailed { .. })
+                ),
+                "coordinated in-reduce deviation (delta_v = {:?}, delta_m = {:?}) must abort",
+                value_delta,
+                mac_delta
+            );
+        }
+    }
+
     /// `mac_check` of a clean degree-2t-style product (`auth_mul`) on an unequal
     /// challenge batch is sound: a single forged value among several is caught even
     /// when batched with honest values (random-linear-combination batching).
