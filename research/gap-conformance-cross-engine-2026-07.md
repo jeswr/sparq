@@ -194,22 +194,81 @@ peers' core sub-scores where those can be split out; the peer TOTALS above are o
 
 ### 3.7 OGC GeoSPARQL (published third-party benchmark, requirements-weighted)
 
-sparq: **197** hand-curated DE-9IM topology + WKT/GML assertions — a sparq-AUTHORED
-battery, NOT the OGC compliance benchmark, so it is **not on the same axis** as the
-percentages below. The published cross-engine data is the Jovanovik/Homburg/Spasić
-"GeoSPARQL Compliance Benchmark" (ISPRS IJGI 10(7):487, 2021; arXiv:2102.06139), whose
-"compliance %" is **requirements-weighted** (30 requirements × 3.33% each over 206
-queries) — a DIFFERENT unit from a test-count pass-rate, and it tests GeoSPARQL **1.0**.
+The published cross-engine data is the Jovanovik/Homburg/Spasić "GeoSPARQL Compliance
+Benchmark" (ISPRS IJGI 10(7):487, 2021; arXiv:2102.06139), whose "compliance %" is
+**requirements-weighted** (30 requirements × 3.33% each over 206 queries) — a DIFFERENT
+unit from a test-count pass-rate, and it tests GeoSPARQL **1.0**. sparq's own 197
+hand-curated DE-9IM/WKT/GML assertions are on a different axis and stay reported
+separately; **sparq has now also been run through the benchmark itself** (sq-ql2iy), so
+the row below is a same-artifact, same-scoring comparison rather than an estimate.
 
 | System | GeoSPARQL compliance (requirements-weighted, of 30 reqs / 206 queries) | Source |
 |---|---|---|
-| **sparq** | NOT-COMPARABLE — sparq ratchets its own 197 DE-9IM/WKT/GML assertions, has not been run through the 206-query GeoSPARQL benchmark | `ogc_compliance_ratchet.rs` |
+| **sparq** | **72.22%** (143/206 correct) | `bench/geo/gsb.sh` + `crates/sparq-geo/examples/gsb_compliance.rs` |
 | GeoSPARQL Fuseki 3.17 | 82.75% (177/206 correct) | arXiv:2102.06139 Table 2 |
 | Ontotext GraphDB 9.3.3 | 69.75% | same |
 | OpenLink Virtuoso 7.3 | 63.46% | same |
 | Eclipse RDF4J 3.4.0 | 58.33% | same |
 | Stardog 7.4.0 / Blazegraph 2.1.5 / plain Jena Fuseki 3.14 | 56.67% | same |
 | Apache Marmotta 3.4.0 | 46.67% | same |
+
+**How the sparq row was produced** (`bench/geo/gsb.sh` → `gsb_compliance`). The upstream
+artifact is GPL-2.0, so it is fetched gather-only under a pinned sha256 and never
+vendored; the runner reproduces the benchmark's own scoring table and its own answer
+comparator (ordered rows, `geo:wktLiteral` whitespace/case-folded, `geo:gmlLiteral`
+XML-canonicalised, any `-alternative-N.srx` accepted). All 206 queries evaluated in every
+configuration; none errored.
+
+The row above is sparq's **best** configuration, and it is also the SHIPPED-DEFAULT query
+entry point (`geosparql_rewrite` is opt-in and off by default). Both configuration axes
+were measured, because both change the score materially:
+
+| RDFS closure | query entry point | correct | compliance |
+|---|---|---|---|
+| on | standard (`sparq_engine::query`) | **143/206** | **72.22%** |
+| off | standard | 144/206 | 70.00% |
+| on | `geosparql_rewrite` | 134/206 | 68.47% |
+| off | `geosparql_rewrite` | 140/206 | 68.33% |
+
+Two things the matrix says. First, RDFS materialisation is worth ~2 points *despite*
+lowering the raw correct-answer count: it wins R25–R27 outright while costing partial
+credit on R3/R8/R9, where the benchmark's expected answers resolve `geo:hasGeometry` to
+the asserted triple only (R3's `my:M` is a `my:PlaceOfInterest`, `rdfs:subClassOf
+geo:Feature`, with no asserted `rdf:type geo:Feature` — the benchmark is internally
+inconsistent with its own R25–R27 requirements there). Second, **`geosparql_rewrite`
+currently *costs* ~4 points**: see the R28–R30 gap row below.
+
+Per-requirement result in the best configuration (29 of 30 requirements carry queries;
+R17 has none and is credited by the benchmark's own rule):
+
+| Result | Requirements |
+|---|---|
+| full marks | R1, R2, R4, R5, R6, R7, R10, R11, R12, R14, R15, R18, R20, R21, R22, R23, R24, R25, R26, R27 |
+| partial | R8 (1/2), R9 (1/6) |
+| zero | R3, R13, R16, R19, R28, R29, R30 |
+
+R3/R8/R9 are the RDFS trade-off just described, not capability gaps. The rest are genuine,
+reproducible gaps, not harness artifacts (each triaged with `GSB_DEBUG=<query-id>`):
+
+- **R28–R30 (query-rewrite extension, 24 queries).** Zero in EVERY configuration, and the
+  one place the opt-in rewrite should have earned points. These queries ask the topology
+  properties of `my:G`, whose `geo:sf*`/`eh*`/`rcc8*` triples the benchmark deliberately
+  leaves unasserted. `sparq-geo`'s `geosparql_rewrite` expands the pattern to
+  `(hasDefaultGeometry|hasGeometry)/asWKT` on both sides plus a `geof:` FILTER, which
+  diverges from the expected answers three ways — it *replaces* rather than unions with
+  the asserted-triple arm, it never matches a `geo:Geometry` subject directly (the
+  expected answers include the geometry IRIs), and the property alternation duplicates
+  rows. Net effect: it gains nothing on R28–R30 and *loses* R4 (8/8 → 3/8) and R5 (8/8 →
+  4/8), which is the whole ~4-point cost in the matrix. See the follow-up issue.
+- **R13/R16 (empty geometry, 4 queries).** An empty `geo:wktLiteral` / `geo:gmlLiteral` is
+  a parse error in `sparq-geo` rather than an empty geometry, so `geof:sfEquals` on two
+  empty literals leaves the variable unbound where the benchmark expects `true`.
+- **R19 (non-topological `geof:` functions, 28 queries).** Every group evaluates, but none
+  matches lexically: `geof:distance` differs from the reference metre values (~2%),
+  `geof:buffer` is scored against a reference that buffered in coordinate units while
+  sparq honours `uom:metre`, and `convexHull`/`envelope`/`boundary` return the same
+  geometry with a different start vertex, winding, or `MULTI*` wrapper. The benchmark
+  compares serialisations, not geometries — every published system is scored the same way.
 
 ### 3.8 W3C RIF Core
 
@@ -253,7 +312,7 @@ is a first-class outcome, not a hidden sparq win.
 | RDF-syntax (Turtle/NT/NQ/TriG) | **NOT-COMPARABLE** | peers publish 100% at a 291/68/85/335-test RDF-1.1-era suite; sparq runs rdf-turtle (313) at a later pin inside the inference lane — different denominators + sparq publishes no per-syntax EARL row. No regression implied; just not the same measurement. |
 | JSON-LD 1.1 (all 6 lanes) | **BEHIND** (behind most published processors) | at loosely-comparable denominators, mature JSON-LD processors (Titanium, JSON-LD.ex, jsonld-cpp, jsonld.js) sit at 97–100% on expand/compact/toRdf/flatten/frame; sparq is 66–96%. sparq's JSON-LD is a native round-trip implementation with honest recorded gaps (remote-context/writer-shape), not a full JSON-LD processor — genuine gap rows below. |
 | SHACL core | **PARITY** (with the 100% reference impls) | sparq 98/98 core == the full core partition of the W3C matrix; TopBraid/dotNetRDF are 121/121 over core+SPARQL, pySHACL 119/121. On the CORE partition sparq is at the ceiling; the gap is SHACL-SPARQL breadth (sparq asserts node+property 5 + component 3), not core. |
-| OGC GeoSPARQL | **NOT-COMPARABLE** | published benchmark is requirements-weighted over 206 queries (GeoSPARQL 1.0); sparq ratchets its own 197-assertion DE-9IM battery. Different unit + different artifact. A real comparison needs running sparq through the 206-query benchmark (follow-up bead). |
+| OGC GeoSPARQL | **BEHIND** (2nd of 9 on the published table) | sq-ql2iy ran sparq through the SAME 206-query benchmark with the SAME requirements-weighted scoring: **72.22%**, ahead of GraphDB 9.3.3 (69.75%) and every other peer, but 10.5 points behind the GeoSPARQL-Fuseki 3.17 leader (82.75%). Directly comparable, and behind the leader — gap rows in §3.7 and fix beads in §5. |
 | RIF Core | **NOT-COMPARABLE** (leaning AHEAD of the 2010 record) | sparq's 3 W3C-Core passes + 73-assertion expressivity extension exceed the 2010 record's best (Oracle 24% of 42 Core), but the 2010 suite is v1.21 and only 3 systems ever submitted — too thin + too stale to rank meaningfully. |
 | SolidLab ODRL | **PARITY** (exact match with the reference evaluator) | 67/68 on the identical suite with the identical oracle — the one strictly comparable, strictly matched row. |
 | Solid WAC/ACP | **NOT-COMPARABLE** | sparq is library-level; peers are whole-server wire-level and their CTH counts are deliberately withheld. Different subject entirely. |
@@ -266,11 +325,20 @@ is a first-class outcome, not a hidden sparq win.
   the honest recorded divergences (remote-context, writer-shape). This is the one
   clearly-BEHIND family with a same-family comparison. **BEHIND → immediate fix bead
   per the §5.3 rule.**
-- **GeoSPARQL benchmark run (P3).** To turn the GeoSPARQL row from NOT-COMPARABLE into
-  a real comparison, run sparq-geo through the 206-query Jovanovik benchmark
-  (`github.com/OpenLinkSoftware/GeoSPARQLBenchmark`) and record the requirements-weighted
-  compliance % alongside Fuseki 82.75% et al. (This is a bench run, out of scope for
-  this docs bead — a candidate `sq-hmd7l`-family sibling.)
+- **GeoSPARQL benchmark run — DONE (sq-ql2iy).** sparq-geo now runs the 206-query
+  Jovanovik benchmark (`bench/geo/gsb.sh` + `crates/sparq-geo/examples/gsb_compliance.rs`),
+  scoring **72.22%** against Fuseki 82.75% et al. The row in §3.7 is a same-artifact
+  comparison and the verdict moved NOT-COMPARABLE → BEHIND.
+- **GeoSPARQL query-rewrite semantics (P1).** The largest scoring gap and the only one
+  that is a REGRESSION rather than a missing feature: R28–R30 (24 of the 63 wrong answers,
+  10% of the total score) score zero with the rewrite on AND off, and turning the opt-in
+  rewrite on additionally *loses* R4/R5 — a net −4 points versus not using it. The
+  expansion replaces the asserted-triple arm instead of unioning with it, never matches a
+  `geo:Geometry` subject directly, and duplicates rows via the property alternation.
+  Fixing it is worth ~10 points and would put sparq within 5 of the leader. **BEHIND →
+  immediate fix bead per the §5.3 rule.**
+- **Empty geometry literals (P3).** R13/R16: an empty `geo:wktLiteral` / `geo:gmlLiteral`
+  should parse as an empty geometry, not error.
 - **SPARQL 1.1 entailment-regime breadth (tracked, not new).** sparq asserts 47+1/70 by
   design (audited fragments only); broadening is already tracked under the `sq-pbz04`
   reasoner epic — no new bead, cross-referenced here for the honesty record.
