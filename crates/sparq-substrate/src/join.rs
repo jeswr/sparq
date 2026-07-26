@@ -2100,6 +2100,26 @@ mod tests {
 // exercises the filter loop's all()-semantics; the loop body is pair-independent), and rows
 // wider than 2 columns (column indexing is exercised by the asymmetric lk=0/rk=1 layout).
 //
+// ENCODING (why arrays + pre-sized buffers, and why it does NOT re-scope the domain): the
+// first cut generated each relation as a symbolic-length `Vec<Row>` built by `push`. CBMC
+// models a heap object of symbolic size plus the amortised-growth reallocation chain, and
+// the two validator-class blow-ups that result put every harness in this suite past the
+// lane's per-harness wall-clock budget with the solver still growing — the change-coupled
+// PR tier reds on that. The generator now fills a FIXED-SIZE `[Row; MAX_ROWS]` whose key
+// column is nondecreasing across the whole array, and each harness joins a symbolic-length
+// PREFIX `&rows[..any_len()]`; every output buffer is `Vec::with_capacity(MAX_OUT)`, so no
+// reallocation happens inside the proved region. And the two output relations are compared
+// by [`assert_same_sequence`] — equal lengths plus equality at ONE symbolic index — rather
+// than by `assert_eq!` on the vectors, which made the <= 9-element comparison the longest
+// loop in the harness and forced every other loop to be expanded to that same bound.
+//
+// None of this re-scopes the claim. A prefix of a nondecreasing array is nondecreasing, and
+// conversely every sorted `n <= MAX_ROWS` relation over `0..=MAX_ID` is a prefix of some
+// sorted `MAX_ROWS`-row array, so both encodings quantify over exactly the same set of
+// input pairs; and an assertion on an UNCONSTRAINED index is discharged for every index, so
+// the symbolic-index check is sequence equality, not a sample of it. Bounds, ids, unwind
+// and the asserted properties are all as stated above.
+//
 // MUTATION SPOT-CHECK (verified red, then reverted, on this workstation — see the PR body):
 // flipping the `extra_shared.iter().all(..)` guard in [`merge_join`] to `.any(..)` turns
 // every no-extra-pair match into a non-emission, and `merge_join_equals_nested_loop_reference`
@@ -2112,7 +2132,8 @@ mod tests {
 // a dup-key pair on each side sharing one key (4 rows out of one key group) plus a second
 // key group, with the `extra_shared` filter strictly rejecting — under this suite's own
 // unwind bound, pinning the exact outputs with ordinary MERGE-BLOCKING assertions.
-// `kani::cover!` restates the witness over the SYMBOLIC generator as a supplementary
+// `kani::cover!` restates the witness SHAPE over the SYMBOLIC generator (the generator
+// alone — leg (b) already pins merge-blockingly what that shape emits) as a supplementary
 // reachability report ONLY: an UNSATISFIABLE cover does NOT fail the `cargo kani` verdict
 // (the summary counts failed checks, not unsatisfied covers), so the asserts, never the
 // covers, are what gate.
@@ -2133,16 +2154,25 @@ mod kani_proofs {
     /// into reach at 3 rows while keeping the solver state space tiny.
     const MAX_ID: Id = 2;
 
-    /// A symbolic relation of up to [`MAX_ROWS`] two-column rows, nondecreasing (duplicates
-    /// allowed — load-bearing for the multi-match case) on the key column `key_col`; the
-    /// other column holds an unconstrained payload id. `key_col` is concrete at each call
-    /// site, so the column shuffle folds away.
-    fn any_sorted_rows(key_col: usize) -> Vec<Row> {
-        let n: usize = kani::any();
-        kani::assume(n <= MAX_ROWS);
-        let mut rows: Vec<Row> = Vec::new();
+    /// The largest output any in-domain input pair can produce: every left row matching
+    /// every right row. Used to pre-size the output buffers so no reallocation happens
+    /// inside the proved region (see ENCODING in the module header).
+    const MAX_OUT: usize = MAX_ROWS * MAX_ROWS;
+
+    /// A symbolic relation backed by a FIXED-SIZE array of [`MAX_ROWS`] two-column rows,
+    /// nondecreasing (duplicates allowed — load-bearing for the multi-match case) on the
+    /// key column `key_col` across the WHOLE array; the other column holds an unconstrained
+    /// payload id. `key_col` is concrete at each call site, so the column shuffle folds away.
+    ///
+    /// Callers take a symbolic-length PREFIX (`&rows[..any_len()]`), which is exactly the
+    /// "up to `MAX_ROWS` sorted rows" domain: a prefix of a nondecreasing array is itself
+    /// nondecreasing, and every sorted `n`-row relation over `0..=MAX_ID` extends to some
+    /// sorted `MAX_ROWS`-row array. See ENCODING in the module header for why the backing
+    /// store is an array rather than a symbolic-length `Vec`.
+    fn any_sorted_rows(key_col: usize) -> [Row; MAX_ROWS] {
+        let mut rows: [Row; MAX_ROWS] = Default::default();
         let mut prev: Id = 0;
-        for i in 0..n {
+        for (i, slot) in rows.iter_mut().enumerate() {
             let key: Id = kani::any();
             kani::assume(key <= MAX_ID);
             kani::assume(i == 0 || key >= prev);
@@ -2150,12 +2180,38 @@ mod kani_proofs {
             let payload: Id = kani::any();
             kani::assume(payload <= MAX_ID);
             let (c0, c1) = if key_col == 0 { (key, payload) } else { (payload, key) };
-            let mut row = Row::new();
-            row.push(c0);
-            row.push(c1);
-            rows.push(row);
+            slot.push(c0);
+            slot.push(c1);
         }
         rows
+    }
+
+    /// A symbolic relation length in `0..=MAX_ROWS` — the prefix of [`any_sorted_rows`] a
+    /// harness actually joins, so the empty and short relations stay in the proved domain.
+    fn any_len() -> usize {
+        let n: usize = kani::any();
+        kani::assume(n <= MAX_ROWS);
+        n
+    }
+
+    /// Sequence equality of two emitted relations, checked at a SYMBOLIC index rather than
+    /// by iterating: equal lengths, plus `out[k] == reference[k]` for an ARBITRARY in-range
+    /// `k`. Because `k` is unconstrained, CBMC discharges that element assertion for EVERY
+    /// index, so this is exactly `out == reference` — but it costs one indexed read instead
+    /// of a [`MAX_OUT`]-iteration comparison loop, which is the difference between this
+    /// suite fitting the lane's per-harness solver budget and not (see ENCODING in the
+    /// module header).
+    ///
+    /// The index is drawn INSIDE the non-empty branch on purpose: `kani::assume` constrains
+    /// the whole path formula, so an unsatisfiable `k < 0` on the empty-output path would
+    /// retroactively make the length assertion vacuous there.
+    fn assert_same_sequence(out: &[Row], reference: &[Row], what: &str) {
+        assert_eq!(out.len(), reference.len(), "{}: emitted row COUNT differs", what);
+        if !out.is_empty() {
+            let k: usize = kani::any();
+            kani::assume(k < out.len());
+            assert_eq!(out[k], reference[k], "{}: emitted row differs", what);
+        }
     }
 
     /// The obviously-correct reference: scan every (left, right) pair, emit the combined
@@ -2169,7 +2225,7 @@ mod kani_proofs {
         extra_shared: &[(usize, usize)],
         right_only: &[usize],
     ) -> Vec<Row> {
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(MAX_OUT);
         for lrow in left {
             for rrow in right {
                 if lrow[lk] == rrow[rk]
@@ -2193,12 +2249,13 @@ mod kani_proofs {
     #[kani::proof]
     #[kani::unwind(12)]
     fn merge_join_equals_nested_loop_reference() {
-        let left = any_sorted_rows(0);
-        let right = any_sorted_rows(1);
-        let mut out = Vec::new();
-        merge_join(&left, 0, &right, 1, &[], &[0], &NoBudget, &mut out);
-        let reference = nested_loop_join(&left, 0, &right, 1, &[], &[0]);
-        assert_eq!(out, reference, "merge_join must equal the nested-loop reference");
+        let lrows = any_sorted_rows(0);
+        let rrows = any_sorted_rows(1);
+        let (left, right) = (&lrows[..any_len()], &rrows[..any_len()]);
+        let mut out = Vec::with_capacity(MAX_OUT);
+        merge_join(left, 0, right, 1, &[], &[0], &NoBudget, &mut out);
+        let reference = nested_loop_join(left, 0, right, 1, &[], &[0]);
+        assert_same_sequence(&out, &reference, "merge_join vs the nested-loop reference");
     }
 
     /// PROVED (bounded): same equivalence with one `extra_shared` pair — the left payload
@@ -2207,12 +2264,13 @@ mod kani_proofs {
     #[kani::proof]
     #[kani::unwind(12)]
     fn merge_join_extra_shared_equals_nested_loop_reference() {
-        let left = any_sorted_rows(0);
-        let right = any_sorted_rows(1);
-        let mut out = Vec::new();
-        merge_join(&left, 0, &right, 1, &[(1, 0)], &[0], &NoBudget, &mut out);
-        let reference = nested_loop_join(&left, 0, &right, 1, &[(1, 0)], &[0]);
-        assert_eq!(out, reference, "merge_join with extra_shared must equal the reference");
+        let lrows = any_sorted_rows(0);
+        let rrows = any_sorted_rows(1);
+        let (left, right) = (&lrows[..any_len()], &rrows[..any_len()]);
+        let mut out = Vec::with_capacity(MAX_OUT);
+        merge_join(left, 0, right, 1, &[(1, 0)], &[0], &NoBudget, &mut out);
+        let reference = nested_loop_join(left, 0, right, 1, &[(1, 0)], &[0]);
+        assert_same_sequence(&out, &reference, "merge_join with extra_shared vs the reference");
     }
 
     /// A concrete two-column row, for the merge-blocking concrete-witness leg.
@@ -2246,11 +2304,12 @@ mod kani_proofs {
     ///     in left-major order, the second left key group takes the group-advance arm
     ///     without emitting, and the `extra_shared` filter strictly rejects 3 of the 4
     ///     matches. These are safety checks — any regression turns the harness RED.
-    /// (c) Symbolic covers (supplementary ONLY) — `kani::cover!` restates the witness
-    ///     shape over the SYMBOLIC generator as a reachability report. A plain cover
-    ///     that goes UNSATISFIABLE does NOT fail the `cargo kani` verdict, so the covers
-    ///     cannot gate; leg (b) is the gate, and an unsatisfied cover in the nightly
-    ///     report is the drift signal that the symbolic domain was re-scoped.
+    /// (c) Symbolic cover (supplementary ONLY) — `kani::cover!` restates the witness
+    ///     shape over the SYMBOLIC generator, constraining the GENERATOR alone, as a
+    ///     reachability report: the equivalence harnesses' domain still contains that
+    ///     shape. A plain cover that goes UNSATISFIABLE does NOT fail the `cargo kani`
+    ///     verdict, so it cannot gate; leg (b) is the gate, and an unsatisfied cover in
+    ///     the nightly report is the drift signal that the symbolic domain was re-scoped.
     #[kani::proof]
     #[kani::unwind(12)]
     fn domain_merge_join_dup_key_multimatch_survives_the_bound() {
@@ -2270,7 +2329,7 @@ mod kani_proofs {
         assert!(left[0][0] <= left[1][0] && left[1][0] <= left[2][0]);
         assert!(right[0][1] <= right[1][1] && right[1][1] <= right[2][1]);
 
-        let mut plain = Vec::new();
+        let mut plain = Vec::with_capacity(MAX_OUT);
         merge_join(&left, 0, &right, 1, &[], &[0], &NoBudget, &mut plain);
         // The shared key group (key 0: 2 left rows x 2 right rows) multi-match-emits
         // exactly 4 rows in left-major x right-minor order; left key 1 finds no right
@@ -2279,31 +2338,29 @@ mod kani_proofs {
             vec![row3(0, 1, 2), row3(0, 1, 0), row3(0, 2, 2), row3(0, 2, 0)];
         assert_eq!(plain, expected, "dup-key multi-match + group advance must emit these rows");
 
-        let mut filtered = Vec::new();
+        let mut filtered = Vec::with_capacity(MAX_OUT);
         merge_join(&left, 0, &right, 1, &[(1, 0)], &[0], &NoBudget, &mut filtered);
         // The extra_shared (left col 1 == right col 0) filter strictly rejects 3 of the
         // 4 key matches — only left [0,2] x right [2,0] agrees — so the filtered proof
         // is not vacuously equal to the unfiltered one.
         assert_eq!(filtered, vec![row3(0, 2, 2)], "extra_shared must strictly reject in-domain");
 
-        // (c) Supplementary symbolic covers — reachability reports, NOT gates (an
-        // UNSATISFIABLE cover does not fail the verdict): the same witness shape is
-        // still reachable in the SYMBOLIC generator domain under this unwind bound.
+        // (c) Supplementary symbolic cover — a reachability report, NOT a gate (an
+        // UNSATISFIABLE cover does not fail the verdict): the witness SHAPE above is
+        // still drawable from the SYMBOLIC generator under its `assume` bounds, i.e.
+        // the equivalence harnesses' domain has not been pruned empty of it. The cover
+        // deliberately constrains only the GENERATOR (no `merge_join` call): what that
+        // shape then emits is pinned concretely, and merge-blockingly, by leg (b).
         let sym_left = any_sorted_rows(0);
         let sym_right = any_sorted_rows(1);
-        let mut sym_plain = Vec::new();
-        merge_join(&sym_left, 0, &sym_right, 1, &[], &[0], &NoBudget, &mut sym_plain);
-        let mut sym_filtered = Vec::new();
-        merge_join(&sym_left, 0, &sym_right, 1, &[(1, 0)], &[0], &NoBudget, &mut sym_filtered);
+        let (sym_nl, sym_nr) = (any_len(), any_len());
         kani::cover!(
-            sym_left.len() == MAX_ROWS
-                && sym_right.len() == MAX_ROWS
+            sym_nl == MAX_ROWS
+                && sym_nr == MAX_ROWS
                 && sym_left[0][0] == sym_left[1][0]
                 && sym_right[0][1] == sym_right[1][1]
                 && sym_left[0][0] == sym_right[0][1]
                 && sym_left[2][0] != sym_left[0][0]
-                && sym_plain.len() >= 4
         );
-        kani::cover!(sym_filtered.len() < sym_plain.len());
     }
 }
