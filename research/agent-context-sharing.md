@@ -71,7 +71,7 @@ be derived, not remembered.** This single rule removes the largest source of bot
 A single structured block, the **task ledger**, carried with the task and consumed by the next stage.
 Every stage **owns exactly one slot** and **replaces** it — never appends.
 
-```
+```text
 issue.created   → { intent, acceptance, known_constraints, decomposition_notes }
 worker.attempt  → { approach_tried, blocker, files_touched, why_no_diff?, confidence }
 review.round    → { findings[], severity, what_would_change_my_mind }
