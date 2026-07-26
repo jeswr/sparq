@@ -3,6 +3,9 @@
 /bench/native-qlever/
 # Competitor gather output (scripts/gather-competitors.sh) — regenerable, never committed.
 /bench/competitor-results/
+# MPC heavy/ceiling matrix output (scripts/mpc-ec2-ceiling.sh, sq-hoaj) — measured
+# Tier-3 wall-clock envelopes; regenerable, never committed (no-hard-coded-perf rule).
+/bench/mpc-ceiling-results/
 # RIF full-suite pass-rate output (bench/rif/run.sh over the fetched W3C archive) —
 # regenerable, never committed (pass/fail counts belong in run output, not markdown).
 /bench/rif/results.tsv
