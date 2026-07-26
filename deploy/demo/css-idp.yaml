@@ -1,0 +1,40 @@
+# [SONNET-4.6] sq-80afk — throwaway in-memory Solid-OIDC identity provider.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: css-idp
+  annotations:
+    run.googleapis.com/ingress: all
+    run.googleapis.com/invoker-iam-disabled: "true"
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "1"
+        # Request-based billing: CPU is allocated only while requests are handled.
+        run.googleapis.com/cpu-throttling: "true"
+    spec:
+      containerConcurrency: 40
+      timeoutSeconds: 300
+      containers:
+        - name: css-idp
+          # Replace the tag with an immutable sha256 digest before deployment.
+          image: docker.io/solidproject/community-server:latest
+          args:
+            - "-b"
+            - "https://css-idp-PROJECT_NUMBER.REGION.run.app"
+          ports:
+            - name: http1
+              containerPort: 3000
+          resources:
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          # Cloud Run's default TCP-style startup check; no production HTTP/liveness probes.
+          startupProbe:
+            tcpSocket:
+              port: 3000
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 1
