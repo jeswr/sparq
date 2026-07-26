@@ -1,0 +1,31 @@
+# Feature-matrix fragment for `sparq-fedplan-mpc`.
+#
+# One self-contained leg mapping per opt-in feature(group). Assembled into the
+# feature-matrix `opt-in-features` strategy by scripts/assemble-feature-matrix.py
+# (the `setup` job emits the combined matrix as JSON consumed via fromJSON). Adding a
+# leg for THIS crate edits only THIS file, so concurrent opt-in-feature PRs for
+# DIFFERENT crates never textually conflict (bead sq-ibrze). [OPUS-4.8]
+#
+# CONTRACT (gate-critical): each leg's emitted check-run NAME is `opt-in <name>`,
+# discovered as a REQUIRED check by the ci-summary `gate` aggregator BY NAME. Keep
+# `name` free of the whole words "advisory"/"informational" or the leg stops gating.
+# Fields: name (required -> check-run name), crate (required), features (required,
+# non-empty comma list), test (bool — run `cargo test` for the leg).
+
+# [OPUS-5] sq-vm6jj: sparq-fedplan-mpc had NO leg here, and the whole crate surface is
+# `#[cfg(feature = "fedplan-mpc")]` with `default = []` — so the default build compiles
+# it EMPTY and ci.yml's `cargo nextest archive --workspace --all-targets` (no
+# `--features`) listed ZERO of its in-src unit tests. The workspace `--all-features`
+# clippy pass in ci.yml compiles the feature-on code, but nothing RUNS the suite; this
+# leg is what executes it. `fedplan-mpc` is the crate's only opt-in feature and it
+# implies the upstreams it needs (`dep:sparq-fedplan`, `dep:sparq-mpc`,
+# `sparq-fedplan/fedplan`), so ONE leg covers the whole crate. It is also "sensitive"
+# to scripts/feature-matrix-tiers.py (criterion (c): `cfg(not(feature =
+# "fedplan-mpc"))` in src/lib.rs), so the leg must stay `test: true` — do not demote it
+# to `tier: check`. Verified locally: `cargo test -p sparq-fedplan-mpc --features
+# fedplan-mpc` => 64 passed, 0 failed; `cargo test -p sparq-fedplan-mpc` (default-off)
+# => 0 tests, confirming the default build stays empty.
+- name: "sparq-fedplan-mpc (fedplan-mpc)"
+  crate: "sparq-fedplan-mpc"
+  features: "fedplan-mpc"
+  test: true
