@@ -40,12 +40,14 @@ fixtures; `--features nlq-endpoint` points `EndpointLlm` at **your own** base UR
 
 - **Grounded generation** — the introspect crate's token-budgeted schema summary (exact
   counts from the store's permutation indexes, not guesses) + two schema-agnostic few-shots.
-- **Index-grounded entity/relation linking** ([`link`](src/link.rs), opt-in via
-  `NlqConfig::link_entities`, default **off**) — resolves proper nouns to the IRIs present
-  in *this* store (label index over `rdfs:label`/`skos:prefLabel`/… plus predicate
-  local-names) and expands each with structurally-similar siblings via
-  [`sparq-sim`](../sparq-sim) — no model, no network. Off by default: it changes the prompt
-  string (re-record fixtures first). <!-- [OPUS-4.8] sq-uw40 -->
+- **Index-grounded linking — no model, no network** ([`link`](src/link.rs), opt-in, both default **off**:
+  each changes the prompt string, so re-record fixtures first). `NlqConfig::link_entities` resolves proper
+  nouns to IRIs present in *this* store (label index over `rdfs:label`/`skos:prefLabel`/… plus predicate
+  local-names) and expands each with structurally-similar siblings via [`sparq-sim`](../sparq-sim).
+  `NlqConfig::link_values` adds the **exact dictionary** tier: a question span that IS a literal the store
+  holds binds with its **datatype and language tag** (`"1994"^^xsd:gYear`, `"France"@en`) plus the predicates
+  it objects, and an IRI written verbatim is probed via `Graph::id_of` — so `FILTER`/value-bound queries stop
+  guessing lexical forms the store does not have. <!-- [OPUS-4.8] sq-uw40 · [SONNET-4.6] sq-na0q -->
 - **Validate before execute** — parses with `spargebra` *before* the engine sees the
   query; execution failures (unsupported forms, budget trips) are repair signals too.
 - **Dictionary-grounded repair** ([`constrain`](src/constrain.rs), opt-in via
@@ -85,8 +87,7 @@ fixtures; `--features nlq-endpoint` points `EndpointLlm` at **your own** base UR
   user-supplied** (args or `SPARQ_NLQ_ENDPOINT_*` env), so an external user runs it against
   their **own** endpoint (Ollama, vLLM, OpenAI…). Nothing is baked in, it never phones
   home; **quality depends on the user-chosen model**. <!-- sq-2m6zm.6 -->
-- **Exec-accuracy harness** ([`eval`](src/eval.rs)) — grades executed SPARQL the QALD way
-  (**answer-set F1**, not query-string equality) against a live-recomputed gold query.
+- **Exec-accuracy harness** ([`eval`](src/eval.rs)) — grades executed SPARQL the QALD way (**answer-set F1**, not query-string equality) against a live-recomputed gold query.
 
 ## Honest status — what is and is not measured
 
@@ -111,8 +112,7 @@ fixtures; `--features nlq-endpoint` points `EndpointLlm` at **your own** base UR
   (§4.3), [`research/genai-design.md`](../../research/genai-design.md) (§4); grounding in
   [`sparq-introspect`](../sparq-introspect); **threat model** in
   [`research/nlq-threat-model.md`](../../research/nlq-threat-model.md).
-- **Performance** — the eval harnesses run network-free in CI; tracked figures live on the
-  [benchmarks dashboard](https://sparq.jeswr.org/dev/bench), not in docs.
+- **Performance** — the eval harnesses run network-free in CI; tracked figures live on the [benchmarks dashboard](https://sparq.jeswr.org/dev/bench), not in docs.
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md).
 
 ## License
