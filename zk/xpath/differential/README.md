@@ -43,11 +43,19 @@ Each answer is then cross-checked, and a mismatch **aborts generation**:
   window reference.
 
 Where sparq's evaluator is itself wrong against the spec that `noir_XPath` implements, the
-case is **not** silently dropped: it is emitted as a **commented-out assertion carrying the
-spec value**, stated in the generated file's header, and pinned by a unit test here so the
-workaround **expires** (goes red) the day the engine is fixed. Two such divergences are
-recorded today — `SUBSTR` with `start < 1` (the engine shifts the window instead of keeping
-it) and `ROUND` losing the sign of a negative zero.
+case is **not** dropped or downgraded: it stays a **live assertion**, but against the **F&O
+spec value** rather than the oracle's, and is labelled **SPEC-REFERENCE** both at the row and
+in the generated file's header. Read such a row as `noir_XPath == XPath F&O`, not as
+`noir_XPath == sparq`. Keeping it live is the point: these are edges `noir_XPath` has already
+*fixed*, so a regression on one must fail the run — a commented-out assertion cannot fail
+and would verify nothing. Two divergences are recorded today — `SUBSTR` with `start < 1`
+(the engine shifts the window instead of keeping it) and `ROUND` losing the sign of a
+negative zero.
+
+Three unit tests hold that arrangement in place: one asserts no assertion is ever emitted
+commented out and that `substring("12345", 0, 3)` and `round_double(-0.5)` in particular
+reach the circuit live; two assert each divergence still reproduces, so the special-casing
+**expires** (goes red) the day the engine is fixed.
 
 ## TCB — stated honestly
 

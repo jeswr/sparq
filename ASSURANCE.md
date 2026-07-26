@@ -102,7 +102,8 @@ expression with the Python `elementpath` engine and (for floats) pins the IEEE-7
 pattern**, so circuits are checked bit-exactly against a second implementation, not against
 hand-copied strings. **PROOF M1 (bead sq-3x7dl.14.2)** adds a *second, sparq-side* oracle for the
 same circuits: [`zk/xpath/differential`](zk/xpath/differential) generates a Noir test file whose
-every expected value is read back from **sparq's own Rust SPARQL/XSD evaluator**, over a
+expected values are read back from **sparq's own Rust SPARQL/XSD evaluator** (bar a labelled
+handful — see *Limits*), over a
 unicode-aware corpus covering precisely the edges qt3 lacks (non-exact `op:numeric-divide`,
 `fn:substring` with `start < 1`, mixed int/float comparisons outside the i8 range, NUL-padded and
 multibyte strings, pre-1970 `xs:dateTime`) — the cases beads `sq-3x7dl.4`–`.7` fixed.
@@ -124,7 +125,11 @@ multibyte strings, pre-1970 `xs:dateTime`) — the cases beads `sq-3x7dl.4`–`.
   the (itself unaudited) sparq Rust XSD evaluator, the sampled corpus, and the trusted
   Noir→ACIR→Barretenberg lowering — `nargo test` exercises witness generation only. Two live
   divergences where *sparq's own evaluator* is wrong against XPath F&O are recorded in the
-  generated file's header rather than asserted, and are pinned by self-expiring unit tests.
+  generated file's header. Those rows are still asserted **live**, but against the F&O value and
+  labelled `SPEC-REFERENCE` — read them as *circuit vs the spec*, not *circuit vs sparq* — so the
+  edges stay executable and a `noir_XPath` regression on one fails the lane. Unit tests pin that
+  no assertion is ever emitted commented out, and self-expiring tests retire the special-casing
+  the day the engine is fixed.
 
 ## 3. Metamorphic self-checks (TLP / NoREC)
 
