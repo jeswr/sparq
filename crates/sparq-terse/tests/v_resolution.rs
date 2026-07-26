@@ -222,13 +222,23 @@ fn staleness_guard_aborts_on_a_stale_store() {
     .unwrap();
     let ctx = ResolveCtx::lexical(&g_b).with_vector_store(&store);
 
+    let mut embed_calls = 0;
     let err = terse_to_sparql_with(
         "SELECT ?f WHERE { ?f <http://example.org/about> V(\"fuzzy phrase\") }",
         &ctx,
-        |_p| Some(vec![1.0, 0.0, 0.0, 0.0]),
+        |_p| {
+            embed_calls += 1;
+            Some(vec![1.0, 0.0, 0.0, 0.0])
+        },
     )
     .expect_err("a stale store must abort the V() resolution");
     assert!(matches!(err, TerseError::StaleStore { .. }), "got {err:?}");
+    // The staleness guard runs BEFORE the embedder: a store that cannot serve the fallback
+    // must not cost a model/network round-trip (nor disclose the phrase to it).
+    assert_eq!(
+        embed_calls, 0,
+        "a stale store cannot serve the fallback => the embedder must not be consulted"
+    );
 }
 
 #[test]
