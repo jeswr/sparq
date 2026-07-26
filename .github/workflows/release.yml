@@ -406,7 +406,9 @@ jobs:
       # (`frontendDist`), and bundles installers for the host platform into
       # gui/src-tauri/target/release/bundle/<format>/. `--ci` disables interactive prompts;
       # no signing env vars are set, so the bundles are produced UNSIGNED (see the job header
-      # — signing is needs:user sq-v286.8). `--verbose` aids first-CI-run diagnosis.
+      # — signing is needs:user sq-v286.8). [SONNET-4.6] sq-3w29b: release bundles explicitly
+      # enable the native HDT importer and federated SERVICE client; both crate features stay
+      # off for lean development builds. `--verbose` aids first-CI-run diagnosis.
       #
       # PROVEN vs DOCUMENTED-UNTESTED (honest status — this workflow is tag-triggered, so it
       # does NOT run on this PR; validate on the first real `v*` tag):
@@ -423,7 +425,7 @@ jobs:
       #     on the matrix) so the release ships the working bundles + attestation; sq-gl3cf tracks it.
       - name: Build Tauri desktop bundle (unsigned)
         working-directory: gui/src-tauri
-        run: cargo tauri build --ci --verbose -c tauri.ci.conf.json
+        run: cargo tauri build --ci --verbose -c tauri.ci.conf.json --features hdt,federation
 
       # Collect every produced installer into a flat staging dir under a STABLE, PREDICTABLE
       # per-OS name (the scheme the /download page hardcodes — see the documented names in the
