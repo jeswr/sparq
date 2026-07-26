@@ -170,22 +170,55 @@ impl PermData {
 struct Overlay {
     added: Vec<[Id; 3]>,
     deleted: FxHashSet<[Id; 3]>,
+    /// CACHED perm-sorted projections of `added`, indexed by `perm as usize`
+    /// (sq-7d3dj.16). See [`Overlay::added_sorted`].
+    added_by_perm: [std::sync::OnceLock<Vec<[Id; 3]>>; 6],
 }
 
 impl Overlay {
-    /// The `added` triples matching the inclusive `[lo, hi]` key range, as rows in
-    /// `perm` column order, SORTED in that order (re-sorted per scan — the overlay is
-    /// small between compactions, so this is O(k log k) on k matching insertions).
-    fn added_rows(&self, perm: Perm, lo: [Id; 3], hi: [Id; 3]) -> Vec<[Id; 3]> {
+    /// All of `added` projected into `perm` column order and SORTED in it — computed
+    /// ONCE per permutation and reused until `added` changes (sq-7d3dj.16).
+    ///
+    /// Built LAZILY on the first scan that needs this permutation rather than eagerly
+    /// for all six in [`TripleStore::apply_delta`]: a write batch then stays O(batch)
+    /// (it only drops the caches, see [`Overlay::invalidate_added`]) instead of paying
+    /// O(6·k log k) per call, and a store only ever materialises the projections its
+    /// query mix actually scans — so the memory cost is bounded by the permutations in
+    /// use, not a flat 6×. SPO needs no projection or sort at all: `added` is already
+    /// canonical-SPO sorted, so that permutation ALIASES it and costs nothing.
+    ///
+    /// `OnceLock` (not `RefCell`) because scans take `&self` and `TripleStore` must stay
+    /// `Sync`; a race just recomputes the same value and discards the loser.
+    fn added_sorted(&self, perm: Perm) -> &[[Id; 3]] {
         let order = perm.order();
-        let mut rows: Vec<[Id; 3]> = self
-            .added
-            .iter()
-            .map(|t| [t[order[0]], t[order[1]], t[order[2]]])
-            .filter(|r| *r >= lo && *r <= hi)
-            .collect();
-        rows.sort_unstable();
-        rows
+        if order == [0, 1, 2] {
+            return &self.added; // SPO: `added` is already the projection, already sorted
+        }
+        self.added_by_perm[perm as usize].get_or_init(|| {
+            let mut rows: Vec<[Id; 3]> =
+                self.added.iter().map(|t| [t[order[0]], t[order[1]], t[order[2]]]).collect();
+            rows.sort_unstable();
+            rows
+        })
+    }
+
+    /// Drops every cached projection — called whenever `added` is about to change, so a
+    /// cache can never outlive the `added` it was derived from.
+    fn invalidate_added(&mut self) {
+        for slot in &mut self.added_by_perm {
+            slot.take();
+        }
+    }
+
+    /// The `added` triples matching the inclusive `[lo, hi]` key range, as rows in
+    /// `perm` column order, SORTED in that order. A BORROWED sub-slice of the cached
+    /// perm-sorted projection located by two binary searches — O(log k + m) on k
+    /// insertions and m matches, and allocation-free.
+    fn added_rows(&self, perm: Perm, lo: [Id; 3], hi: [Id; 3]) -> &[[Id; 3]] {
+        let rows = self.added_sorted(perm);
+        let start = rows.partition_point(|r| *r < lo);
+        let end = rows.partition_point(|r| *r <= hi);
+        &rows[start..end]
     }
 
     /// Merges the (perm-sorted) base rows with the overlay for one scan: base rows whose
@@ -220,15 +253,20 @@ impl Overlay {
     }
 
     /// How many overlay triples fall in the `[lo, hi]` range of `perm` — the exact
-    /// correction to a base range count. O(|overlay|).
+    /// correction to a base range count. The `added` side rides the cached perm-sorted
+    /// projection (O(log k), two binary searches); the `deleted` side is an unordered
+    /// hash set and stays O(|deleted|).
     fn count_correction(&self, perm: Perm, lo: [Id; 3], hi: [Id; 3]) -> (usize, usize) {
         let order = perm.order();
-        let in_range = |t: &[Id; 3]| {
-            let r = [t[order[0]], t[order[1]], t[order[2]]];
-            r >= lo && r <= hi
-        };
-        let add = self.added.iter().filter(|t| in_range(t)).count();
-        let del = self.deleted.iter().filter(|t| in_range(t)).count();
+        let add = self.added_rows(perm, lo, hi).len();
+        let del = self
+            .deleted
+            .iter()
+            .filter(|t| {
+                let r = [t[order[0]], t[order[1]], t[order[2]]];
+                r >= lo && r <= hi
+            })
+            .count();
         (add, del)
     }
 
@@ -237,7 +275,17 @@ impl Overlay {
     }
 
     fn heap_bytes(&self) -> usize {
-        self.added.capacity() * std::mem::size_of::<[Id; 3]>() + self.deleted.capacity() * 13
+        // The cached perm-sorted projections are part of the overlay's footprint; SPO
+        // aliases `added` and so never occupies a slot.
+        let cached: usize = self
+            .added_by_perm
+            .iter()
+            .filter_map(|slot| slot.get())
+            .map(|rows| rows.capacity() * std::mem::size_of::<[Id; 3]>())
+            .sum();
+        self.added.capacity() * std::mem::size_of::<[Id; 3]>()
+            + self.deleted.capacity() * 13
+            + cached
     }
 }
 
@@ -705,6 +753,11 @@ impl TripleStore {
             return;
         }
         let mut ov = self.overlay.take().unwrap_or_default();
+        // `added` is about to change, so every cached perm-sorted projection of it is
+        // stale from here on. Dropping them up front (O(1) per permutation) keeps the
+        // write path O(batch) — the projections are rebuilt lazily by the next scan
+        // that needs them, and only for the permutations it actually scans.
+        ov.invalidate_added();
         for t in deletes {
             if let Ok(i) = ov.added.binary_search(t) {
                 ov.added.remove(i); // retract a pending insertion
@@ -878,8 +931,8 @@ impl TripleStore {
         // the rows keep the permutation's sort order (merge joins stay valid).
         //
         // ZERO-COPY FAST PATH (sq-7d3dj.3) [OPUS-4.8]: even WITH an overlay, most ranges a small
-        // overlay does not touch. `count_correction` (O(|overlay|)) tells us exactly how
-        // many `added`/`deleted` triples fall in this range; when it is `(0, 0)` the
+        // overlay does not touch. `count_correction` tells us exactly how many
+        // `added`/`deleted` triples fall in this range; when it is `(0, 0)` the
         // overlay contributes nothing here — no `added` row projects into `[lo, hi]` (so
         // nothing is interleaved) and no in-range base row is deleted (so nothing is
         // dropped) — hence `merge` would reproduce `base` verbatim, rows AND sort order.
@@ -1426,28 +1479,72 @@ mod tests {
         }
         assert!(!store.contains([9999, 9999, 9999]));
 
-        let svals = [None, Some(1), Some(200), Some(420), Some(9999)];
-        let pvals = [None, Some(1), Some(5), Some(11)];
-        let ovals = [None, Some(2), Some(1500), Some(2050)];
-        for &s in &svals {
-            for &p in &pvals {
-                for &o in &ovals {
-                    let pat: Pattern = [s, p, o];
-                    for sort_col in [None, Some(0), Some(1), Some(2)] {
-                        let (ov_scan, rb_scan) = match sort_col {
-                            None => (store.scan(&pat), rebuilt.scan(&pat)),
-                            Some(c) => (store.scan_sorted(&pat, c), rebuilt.scan_sorted(&pat, c)),
-                        };
-                        // Rows must be SORTED in the chosen permutation's order…
-                        assert!(ov_scan.rows.windows(2).all(|w| w[0] <= w[1]), "unsorted overlay scan for {pat:?}");
-                        // …and identical (same perm choice — `choose` is pattern-only) to the rebuild.
-                        assert_eq!(ov_scan.perm, rb_scan.perm);
-                        assert_eq!(ov_scan.rows, rb_scan.rows, "rows differ for {pat:?} sort {sort_col:?}");
+        // Every pattern x sort-column, over every permutation the planner can pick, must
+        // agree with the rebuild — rows AND sort order. Reused below to re-check the SAME
+        // store after a SECOND delta, which is what pins cache invalidation (sq-7d3dj.16).
+        let sweep = |store: &TripleStore, rebuilt: &TripleStore, label: &str| {
+            let svals = [None, Some(1), Some(200), Some(420), Some(9999)];
+            let pvals = [None, Some(1), Some(5), Some(11)];
+            let ovals = [None, Some(2), Some(1500), Some(2050)];
+            for &s in &svals {
+                for &p in &pvals {
+                    for &o in &ovals {
+                        let pat: Pattern = [s, p, o];
+                        for sort_col in [None, Some(0), Some(1), Some(2)] {
+                            let (ov_scan, rb_scan) = match sort_col {
+                                None => (store.scan(&pat), rebuilt.scan(&pat)),
+                                Some(c) => (store.scan_sorted(&pat, c), rebuilt.scan_sorted(&pat, c)),
+                            };
+                            // Rows must be SORTED in the chosen permutation's order…
+                            assert!(
+                                ov_scan.rows.windows(2).all(|w| w[0] <= w[1]),
+                                "unsorted overlay scan for {pat:?} ({label})"
+                            );
+                            // …and identical (same perm choice — `choose` is pattern-only) to the rebuild.
+                            assert_eq!(ov_scan.perm, rb_scan.perm);
+                            assert_eq!(
+                                ov_scan.rows, rb_scan.rows,
+                                "rows differ for {pat:?} sort {sort_col:?} ({label})"
+                            );
+                        }
+                        assert_eq!(
+                            store.estimate(&pat),
+                            rebuilt.scan(&pat).rows.len(),
+                            "estimate wrong for {pat:?} ({label})"
+                        );
                     }
-                    assert_eq!(store.estimate(&pat), rebuilt.scan(&pat).rows.len(), "estimate wrong for {pat:?}");
                 }
             }
-        }
+        };
+        sweep(&store, &rebuilt, "first delta");
+
+        // sq-7d3dj.16: the sweep above has now materialised a cached perm-sorted projection
+        // of `added` for EVERY permutation it scanned. A SECOND delta must invalidate all of
+        // them — it both GROWS `added` (fresh insertions) and SHRINKS it (a delete of a
+        // pending insertion retracts it, the `added.remove` path), so a stale cache would
+        // surface retracted rows and miss new ones. Re-running the identical sweep against a
+        // fresh rebuild of the twice-updated set is what catches that.
+        let more_inserts: Vec<[Id; 3]> = (0..300).map(|_| [451 + rng() % 50, 13 + rng() % 3, 2101 + rng() % 100]).collect();
+        // Retract a sample of the FIRST batch's pending insertions, and delete more base triples.
+        let pending: Vec<[Id; 3]> = inserts.iter().copied().filter(|t| triples.binary_search(t).is_err()).collect();
+        let more_deletes: Vec<[Id; 3]> =
+            pending.iter().step_by(3).copied().chain(triples.iter().skip(1).step_by(11).copied()).collect();
+        store.apply_delta(&more_inserts, &more_deletes);
+
+        let mut reference2: Vec<[Id; 3]> = reference.clone();
+        let del2: std::collections::HashSet<[Id; 3]> = more_deletes.iter().copied().collect();
+        reference2.retain(|t| !del2.contains(t));
+        reference2.extend(more_inserts.iter().copied().filter(|t| !del2.contains(t)));
+        reference2.sort_unstable();
+        reference2.dedup();
+        let rebuilt2 = TripleStore::from_triples(reference2);
+        assert_eq!(store.len(), rebuilt2.len(), "len must reflect the second delta");
+        sweep(&store, &rebuilt2, "second delta");
+
+        // Restore the single-delta state the revert check below expects.
+        let undo_ins: Vec<[Id; 3]> = more_deletes.iter().copied().filter(|t| reference.binary_search(t).is_ok()).collect();
+        store.apply_delta(&undo_ins, &more_inserts);
+        sweep(&store, &rebuilt, "reverted to first delta");
 
         // Reverting every EFFECTIVE change must drop the overlay entirely (no residual
         // overhead): re-insert the base triples that were deleted, delete the genuinely
@@ -1529,6 +1626,70 @@ mod tests {
         assert!(matches!(scan.rows, Cow::Owned(_)), "a delete-only touched range must take the merge path");
         assert!(!scan.rows.contains(&[7, 1, 5]), "the deleted row must be absent");
         assert_eq!(scan.rows.len(), base_store.scan(&pat).rows.len() - 1, "exactly one row dropped");
+
+        // (v) sq-7d3dj.16 — CACHE INVALIDATION, witnessed by the `Cow` variant. The cached
+        // perm-sorted projection of `added` must never outlive the `added` it came from, in
+        // BOTH directions: a range currently on the zero-copy path must LEAVE it when an
+        // insertion lands there, and must RETURN to it when that insertion is retracted.
+        //
+        // The warm-up below scans P-bound and O-bound patterns as well as S-bound ones,
+        // because SPO alone would NOT exercise a cache: `added` is already canonical-SPO
+        // sorted, so that permutation aliases it and can never go stale. POS/PSO and
+        // OSP/OPS are the permutations that really do materialise a projection, so those
+        // are the ones a missing invalidation would serve stale rows from.
+        let pat7: Pattern = [Some(7), None, None];
+        let pat_p: Pattern = [None, Some(1), None];
+        let pat_o: Pattern = [None, None, Some(11)];
+        assert!(matches!(store.scan(&pat7).rows, Cow::Borrowed(_)), "subject 7 starts clean (cache warmed)");
+        // Warm the non-SPO projections. Object 11 exists ONLY as the overlay's insertion,
+        // so the O-bound scan is exactly one overlay row — a stale OSP cache is then visible
+        // as a wrong row rather than as a needle in the base.
+        let warm_p = store.scan(&pat_p).rows.len();
+        // OSP rows are (o, s, p), so the single overlay insertion (50, 1, 11) reads (11, 50, 1).
+        assert_eq!(store.scan(&pat_o).rows.as_ref(), [[11, 50, 1]], "OSP warm-up sees only the inserted object 11");
+
+        // GROW: insert into the warmed ranges. Every projection must be rebuilt, so the scans
+        // see the new row, subject 7 leaves the fast path, and all of it matches a rebuild.
+        store.apply_delta(&[[7, 1, 11]], &[]);
+        let mut grown: Vec<[Id; 3]> = triples.clone();
+        grown.retain(|t| *t != [50, 1, 1]);
+        grown.extend([[50, 1, 11], [7, 1, 11]]);
+        let grown_rebuild = TripleStore::from_triples(grown);
+        let scan = store.scan(&pat7);
+        assert!(matches!(scan.rows, Cow::Owned(_)), "an insertion into the range must leave the fast path");
+        assert!(scan.rows.contains(&[7, 1, 11]), "the freshly inserted row must be visible (stale cache would hide it)");
+        assert_eq!(scan.rows, grown_rebuild.scan(&pat7).rows, "grown rows must equal the rebuild");
+        assert!(scan.rows.windows(2).all(|w| w[0] <= w[1]), "grown rows must stay sorted");
+        // The NON-SPO caches warmed above must have been invalidated too — these are the
+        // assertions a missing `invalidate_added` fails, since SPO can never go stale.
+        assert_eq!(
+            store.scan(&pat_o).rows.as_ref(),
+            [[11, 7, 1], [11, 50, 1]],
+            "OSP must see BOTH object-11 rows (a stale cache keeps only the old one)"
+        );
+        assert_eq!(store.scan(&pat_p).rows.len(), warm_p + 1, "POS must count the new predicate-1 row");
+        for pat in [pat_p, pat_o] {
+            let scan = store.scan(&pat);
+            assert_eq!(scan.rows, grown_rebuild.scan(&pat).rows, "grown cross-perm rows differ for {pat:?}");
+            assert!(scan.rows.windows(2).all(|w| w[0] <= w[1]), "grown cross-perm rows must stay sorted");
+        }
+
+        // SHRINK: retract that pending insertion (the `added.remove` path). Every projection
+        // must be rebuilt again, so the row disappears and subject 7 returns to zero-copy.
+        store.apply_delta(&[], &[[7, 1, 11]]);
+        let scan = store.scan(&pat7);
+        assert!(matches!(scan.rows, Cow::Borrowed(_)), "retracting the insertion must restore the fast path");
+        assert!(!scan.rows.contains(&[7, 1, 11]), "the retracted row must be gone (stale cache would keep it)");
+        assert_eq!(scan.rows, base_store.scan(&pat7).rows, "retracted rows must equal the untouched base");
+        assert_eq!(
+            store.scan(&pat_o).rows.as_ref(),
+            [[11, 50, 1]],
+            "OSP must drop the retracted row (a stale cache keeps it)"
+        );
+        assert_eq!(store.scan(&pat_p).rows.len(), warm_p, "POS must be back to its pre-insert count");
+        for pat in [pat7, pat_p, pat_o, [Some(50), None, None]] {
+            assert_eq!(store.scan(&pat).rows, rebuilt.scan(&pat).rows, "reverted cross-perm rows differ for {pat:?}");
+        }
     }
 
     /// [SONNET-4.6 sq-7d3dj.32.1] Each built raw-mode permutation Vec must carry zero
