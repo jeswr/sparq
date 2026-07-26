@@ -31,11 +31,8 @@ use spargebra::algebra::{Expression, GraphPattern, PropertyPathExpression};
 use spargebra::term::{NamedNodePattern, TermPattern, TriplePattern};
 use spargebra::Query;
 use sparq_core::dict::TermParts;
+use sparq_core::strdist::edit_distance;
 use sparq_core::Graph;
-
-mod distance;
-
-use distance::edit_distance;
 
 /// `rdf:type` — the predicate whose *object* is a class IRI, the one object position
 /// we treat as a vocabulary term (every other object is data, not schema).
@@ -437,14 +434,6 @@ mod tests {
         let msg = dictionary_repair_message(&unknowns);
         assert!(msg.contains("predicate <http://example.org/know>"));
         assert!(msg.contains("did you mean <http://example.org/knows>?"));
-    }
-
-    #[test]
-    fn edit_distance_basics() {
-        assert_eq!(edit_distance("knows", "know"), 1);
-        assert_eq!(edit_distance("Person", "Persons"), 1);
-        assert_eq!(edit_distance("abc", "abc"), 0);
-        assert_eq!(edit_distance("", "abc"), 3);
     }
 
     /// The set of unknown-predicate IRIs reported for `q`, sorted for order-insensitive

@@ -976,4 +976,17 @@ mod tests {
         let rows = vec![[iri("http://e/a"), iri("http://e/p"), lit_int("abc")]];
         assert!(inconsistency(&rows, &d).is_some());
     }
+
+    #[test]
+    fn parse_xsd_float_rejects_non_xsd_rust_spellings() {
+        for lex in ["inf", "infinity", "Infinity", "INFINITY", "nan", "NAN"] {
+            assert_eq!(parse_xsd_float(lex), None, "{}", lex);
+            assert_eq!(xsd_value(lex, &format!("{}float", XSD)), None, "{}", lex);
+            assert_eq!(xsd_value(lex, &format!("{}double", XSD)), None, "{}", lex);
+        }
+
+        for lex in ["INF", "+INF", "-INF", "NaN", "1", "-1.5", "2E+3"] {
+            assert!(parse_xsd_float(lex).is_some(), "{}", lex);
+        }
+    }
 }
