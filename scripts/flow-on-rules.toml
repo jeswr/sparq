@@ -138,8 +138,8 @@ Merged PR #{pr} ({pr_title}) added a new bench suite `bench/{suite}`.
 
 Add a `FEATURED_SUITES` entry for it in `bench/dashboard/dashboard.js` (with the
 correct `key`/`title`/`aliases`) so its metrics surface on the dashboard, or flag
-it `featured = false` in its `benchmarks.toml` entry if it is intentionally
-unfeatured (e.g. a research spike).
+it `featured = false` in its registry entry (`bench/registry.d/<suite>.toml`) if
+it is intentionally unfeatured (e.g. a research spike).
 """
 
 # --- Competitor-relevant engine change → gather follow-up ----------------------

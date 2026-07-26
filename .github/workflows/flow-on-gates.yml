@@ -186,6 +186,16 @@ jobs:
       # mirroring the test_gates.py pattern. Stdlib-only, no git/network. [SONNET-4.6]
       - name: Self-test the new-bench-registered gate (G3, sq-1cb6l)
         run: python3 scripts/tests/test_check_new_bench_registered.py
+      # [OPUS-5] sq-jfrp0 (issue #2679): the bench registry every gate above reads is
+      # bench/benchmarks.toml + bench/registry.d/*.toml assembled (likewise
+      # competitors.json + competitors.d/, CATALOG.md + catalog.d/). This suite is
+      # HARD because a malformed or id-colliding fragment would make a registered
+      # benchmark invisible to G1/G3/drift-scan/flow-on. It also asserts the
+      # COMMITTED tree assembles (scripts/bench_registry.py --check), so a bad
+      # fragment fails at PR time rather than silently degrading a later scan.
+      # Stdlib-only, no git/network.
+      - name: Self-test the bench-registry assembler (sq-jfrp0)
+        run: python3 scripts/tests/test_bench_registry.py
       # [SONNET-4.6] sq-8hfhi: wire the reactive flow-on engine tests into CI so a
       # rule/engine regression (like the #1655 false-positive fnmatch/{suite} defect
       # fixed in #1664) is caught pre-merge, not post-merge. 31 tests covering: rule

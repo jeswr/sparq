@@ -15,19 +15,28 @@
 # table row and this docstring are the two halves of the same rule — change one
 # and update the other; the divergence is what sq-ncvq.10 exists to prevent.
 #
+# [OPUS-5] sq-jfrp0 (issue #2679): "the registry" below means the ASSEMBLED registry
+# — bench/benchmarks.toml PLUS the per-suite fragments bench/registry.d/*.toml, joined
+# in sorted-filename order by scripts/bench_registry.py. A NEW entry belongs in its own
+# fragment file; appending to the trunk is the shared-append-point pattern that made
+# sibling bench PRs conflict, and (c) below reports it.
+#
 # RULE (G3): when a PR introduces a NEW bench suite — either
-#   (T1) a NEW `[[benchmark]]` id in bench/benchmarks.toml (an id present at HEAD
+#   (T1) a NEW `[[benchmark]]` id in the assembled registry (an id present at HEAD
 #        but not at the base ref), OR
 #   (T2) a NEW `bench/<suite>/` directory (a file added under a suite dir that did
-#        not exist at the base ref),
+#        not exist at the base ref; the bench/{registry,competitors,catalog}.d/
+#        FRAGMENT dirs are not suites and are skipped),
 # then that suite must be
-#   (a) REGISTERED in bench/benchmarks.toml — a `[[benchmark]]` entry whose `id`
+#   (a) REGISTERED in the assembled registry — a `[[benchmark]]` entry whose `id`
 #       (T1, registered by construction) or whose `source`/`invoke`/`dataset`
 #       references `bench/<suite>/` (T2); AND
 #   (b) for a CAPABILITY suite, either PROMOTED on the dashboard — its id or family
 #       token appears in the FEATURED_SUITES block of bench/dashboard/dashboard.js —
-#       OR explicitly flagged `featured = false` in its bench/benchmarks.toml entry
-#       (the design's documented escape hatch).
+#       OR explicitly flagged `featured = false` in its registry entry
+#       (the design's documented escape hatch); AND
+#   (c) DECLARED IN A FRAGMENT — a NEW id must be added in bench/registry.d/<suite>.toml,
+#       not appended to the bench/benchmarks.toml trunk ([OPUS-5] sq-jfrp0).
 #
 # ESCAPE HATCH (design §2.1): `featured = false` on the benchmark's TOML entry
 # marks it an intentionally-unfeatured suite (internal harness / micro-bench /
@@ -48,6 +57,7 @@
 # DIFF SOURCE (CI): the PR's changed/added files + the base-ref toml content
 #   git diff --name-status origin/<base>...HEAD     (added bench/<suite>/ dirs)
 #   git show origin/<base>:bench/benchmarks.toml     (base ids, to diff vs HEAD)
+#   git ls-tree origin/<base> bench/registry.d/ + git show each fragment (sq-jfrp0)
 # In tests / --dry-run every git/disk fact is injected via fixtures + overrides,
 # so the evaluate() core is fully hermetic (no live git, no network). stdlib-only.
 #
@@ -70,6 +80,15 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BENCH_REGISTRY = REPO_ROOT / "bench" / "benchmarks.toml"
 DASHBOARD_JS = REPO_ROOT / "bench" / "dashboard" / "dashboard.js"
+
+# [OPUS-5] sq-jfrp0 (issue #2679): the registry is now `bench/benchmarks.toml` PLUS
+# the per-suite fragments in `bench/registry.d/*.toml`, so this gate must read the
+# ASSEMBLED view (both at HEAD and at the base ref) or a benchmark registered in a
+# fragment would look unregistered. `scripts/` is sys.path[0] when this script is
+# run as `python3 scripts/check-new-bench-registered.py`, but the tests load it by
+# file path, so put it on the path explicitly.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bench_registry  # noqa: E402
 
 # A line in a status-prefixed diff: "A\tpath", "M\tpath", "R100\told\tnew", etc.
 _STATUS_RE = re.compile(r"^([A-Z])\d*\t(.*)$")
@@ -159,19 +178,52 @@ def git_diff(base: str) -> tuple[list[str], list[str]]:
     return parse_status_lines(out.splitlines())
 
 
-def git_base_toml(base: str) -> str:
-    """The base ref's bench/benchmarks.toml content ('' if it did not exist)."""
-    ref = _normalize_base(base)
+def _git_show(ref: str, path: str) -> str | None:
     try:
         return subprocess.run(
-            ["git", "show", f"{ref}:bench/benchmarks.toml"],
+            ["git", "show", f"{ref}:{path}"],
             cwd=REPO_ROOT,
             capture_output=True,
             text=True,
             check=True,
         ).stdout
     except subprocess.CalledProcessError:  # pragma: no cover - CI-only path
-        return ""  # file absent at base => every HEAD id is new
+        return None
+
+
+def git_base_toml(base: str) -> str:
+    """The base ref's ASSEMBLED registry — its bench/benchmarks.toml plus every
+    bench/registry.d/*.toml it carried ('' if neither existed).
+
+    [OPUS-5] sq-jfrp0: without the fragments, moving an entry from the trunk into a
+    fragment (or a sibling PR landing a fragment) would read as a brand-new id at
+    HEAD and mint a spurious G3 violation."""
+    ref = _normalize_base(base)
+    trunk = _git_show(ref, "bench/benchmarks.toml")
+    frags: list[tuple[str, str]] = []
+    try:
+        listing = subprocess.run(
+            ["git", "ls-tree", "-r", "--name-only", ref, "bench/registry.d/"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    except subprocess.CalledProcessError:  # pragma: no cover - CI-only path
+        listing = ""
+    for path in sorted(listing.splitlines()):
+        if not path.endswith(".toml"):
+            continue
+        text = _git_show(ref, path)
+        if text is not None:
+            frags.append((path.rsplit("/", 1)[-1], text))
+    if trunk is None and not frags:
+        return ""  # registry absent at base => every HEAD id is new
+    try:
+        return bench_registry.assemble_registry(trunk or "", frags)
+    except bench_registry.RegistryError:  # pragma: no cover - malformed base tree
+        # The base ref is already merged; never let its state fail THIS PR's gate.
+        return (trunk or "") + "\n" + "\n".join(t for _n, t in frags)
 
 
 def git_base_bench_suites(base: str) -> set[str]:
@@ -319,6 +371,11 @@ def added_bench_suites(added: list[str], base_suites: set[str]) -> list[str]:
         if not m:
             continue
         suite = m.group(1)
+        # [OPUS-5] sq-jfrp0: bench/registry.d/, bench/competitors.d/ and
+        # bench/catalog.d/ are REGISTRY FRAGMENT dirs, not bench suites — adding a
+        # fragment must not be mis-read as adding a new unregistered suite.
+        if suite in bench_registry.NON_SUITE_BENCH_DIRS:
+            continue
         if suite in base_suites or suite in seen:
             continue
         seen.add(suite)
@@ -342,17 +399,24 @@ def evaluate(
     base_toml: str,
     featured_text: str,
     base_suites: set[str] | None = None,
+    head_trunk_toml: str | None = None,
 ) -> list[tuple[str, list[str]]]:
     """Return [(suite-or-id, [missing-reasons])] for every new bench suite that
     violates G3. An empty list means the gate PASSES.
 
     `added` is the diff's added-file list; `head_toml`/`base_toml` are the
-    registry at HEAD/base; `featured_text` is the lowercased FEATURED_SUITES
-    body; `base_suites` is the set of suite dirs that already existed at base
-    (so a file added to a pre-existing suite is not a 'new suite')."""
+    ASSEMBLED registry at HEAD/base; `featured_text` is the lowercased
+    FEATURED_SUITES body; `base_suites` is the set of suite dirs that already
+    existed at base (so a file added to a pre-existing suite is not a 'new
+    suite'). `head_trunk_toml` is the HEAD content of the TRUNK file alone
+    (bench/benchmarks.toml, without the bench/registry.d/ fragments) — when given,
+    a NEW id appended to the trunk instead of to its own fragment is reported
+    (sq-jfrp0: the trunk is the shared append point that made sibling bench PRs
+    conflict). Pass None to skip that check."""
     base_suites = base_suites if base_suites is not None else set()
     head_blocks = registry_blocks(head_toml)
     violations: list[tuple[str, list[str]]] = []
+    trunk_ids = set(registry_ids(head_trunk_toml)) if head_trunk_toml else set()
 
     # De-dup so a suite reached via BOTH a new dir and a new id is reported once.
     seen: set[str] = set()
@@ -363,15 +427,27 @@ def evaluate(
         family: str,
         *,
         registered: bool,
+        new_id: str | None = None,
     ) -> None:
         if label in seen:
             return
         seen.add(label)
         missing: list[str] = []
+        # [OPUS-5] sq-jfrp0: a NEW benchmark belongs in its own fragment file. The
+        # trunk is the shared append point two sibling bench PRs collided on.
+        if new_id and new_id in trunk_ids:
+            missing.append(
+                f"its `[[benchmark]]` entry in a NEW fragment file "
+                f"`bench/registry.d/<suite>.toml` — id `{new_id}` was appended to "
+                f"bench/benchmarks.toml instead, which is the shared append point "
+                f"that makes concurrent bench PRs conflict "
+                f"(see bench/registry.d/README.md)"
+            )
         if not registered:
             missing.append(
-                f"a registered [[benchmark]] entry in bench/benchmarks.toml whose "
-                f"source/invoke/dataset references bench/{label}/"
+                f"a registered [[benchmark]] entry in bench/registry.d/<suite>.toml "
+                f"(or bench/benchmarks.toml) whose source/invoke/dataset references "
+                f"bench/{label}/"
             )
         # Dashboard requirement only for capability suites.
         if family not in NONCAPABILITY_SUITE_FAMILIES:
@@ -399,7 +475,7 @@ def evaluate(
         suite = suite_for_block(block) if block else None
         label = suite or bid
         family = suite_family(suite) if suite else suite_family(bid)
-        check(label, block, family, registered=True)
+        check(label, block, family, registered=True, new_id=bid)
 
     return violations
 
@@ -422,7 +498,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument(
         "--base-toml",
-        help="hermetic input: the base ref's bench/benchmarks.toml content.",
+        help="hermetic input: the base ref's ASSEMBLED registry content "
+        "(benchmarks.toml + registry.d fragments), bypassing the git lookups.",
     )
     ap.add_argument(
         "--dry-run",
@@ -447,7 +524,15 @@ def main(argv: list[str] | None = None) -> int:
         _, added = git_diff(args.base)
         base_suites = git_base_bench_suites(args.base)
 
-    head_toml = _read(BENCH_REGISTRY)
+    head_trunk_toml = _read(BENCH_REGISTRY)
+    # [OPUS-5] sq-jfrp0: gate on the ASSEMBLED registry (trunk + bench/registry.d/).
+    try:
+        head_toml = bench_registry.registry_text()
+    except bench_registry.RegistryError as e:
+        # A malformed fragment is the author's own error and must be visible here,
+        # not swallowed into a confusing "unregistered suite" verdict.
+        print(f"G3 new-bench->registry+dashboard: FAIL — bad registry fragment: {e}")
+        return 0 if (args.advisory or args.dry_run) else 1
     if args.base_toml is not None:
         base_toml = Path(args.base_toml).read_text(encoding="utf-8")
     else:
@@ -460,6 +545,7 @@ def main(argv: list[str] | None = None) -> int:
         base_toml=base_toml,
         featured_text=featured_text,
         base_suites=base_suites,
+        head_trunk_toml=head_trunk_toml,
     )
 
     if not violations:
@@ -474,9 +560,11 @@ def main(argv: list[str] | None = None) -> int:
         for m in missing:
             print(f"    - {m}")
     print(
-        "\nA new bench suite must be REGISTERED in bench/benchmarks.toml and "
-        "(if a capability suite) either added to FEATURED_SUITES in "
-        "bench/dashboard/dashboard.js OR flagged `featured = false` in its toml "
+        "\nA new bench suite must be REGISTERED — in its own fragment file "
+        "bench/registry.d/<suite>.toml (see bench/registry.d/README.md; the "
+        "registry gates read bench/benchmarks.toml + bench/registry.d/*.toml "
+        "assembled) — and (if a capability suite) either added to FEATURED_SUITES "
+        "in bench/dashboard/dashboard.js OR flagged `featured = false` in its toml "
         "entry (research/maintenance-flow-on-automation-design.md §2.1, gate G3)."
     )
 

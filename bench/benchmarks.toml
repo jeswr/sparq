@@ -6,6 +6,15 @@
 # the actual code/scripts as of 2026-06-13 — do not edit a command without
 # re-checking the source it cites.
 #
+# [OPUS-5] sq-jfrp0 (issue #2679) — ADDING A BENCHMARK? DO NOT APPEND HERE.
+# This file is the historical TRUNK. A new entry goes in its own fragment file,
+# `bench/registry.d/<suite>.toml` (see bench/registry.d/README.md), because every
+# bench PR appending to this ONE file made sibling bench PRs conflict by
+# construction. The registry every gate reads is the ASSEMBLED view — this file
+# plus `bench/registry.d/*.toml` in sorted-filename order — produced by
+# `scripts/bench_registry.py` (`--registry` to print it, `--check` to validate).
+# Editing an EXISTING entry in place is still fine.
+#
 # Field semantics:
 #   id                  stable slug
 #   name                human title
@@ -35,20 +44,7 @@
 # QUERY — engine compute + differential correctness vs reference engines
 # =============================================================================
 
-# [GPT-5.6] sq-1rg2q M1 — deterministic public-API smoke for the opt-in OO wrapper.
-[[benchmark]]
-id          = "sparq-wrapper-smoke"
-name        = "Rust-native RDF object traversal correctness smoke"
-category    = "conformance"
-measures    = "correctness: outgoing traversal plus typed string access over a fixed two-triple graph; self-asserting, emits wrapper_smoke=ok"
-invoke      = "cargo run -p sparq-wrapper --example wrapper_smoke"
-source      = "crates/sparq-wrapper/examples/wrapper_smoke.rs"
-dataset     = "fixed two-triple Turtle fixture embedded in the example"
-quiet_box_sensitive = false
-pinning     = "fixture and expected value are source-pinned"
-records_to  = "stdout; nonzero exit or assertion panic on mismatch"
-featured    = false
-status      = "ok"
+# [OPUS-5] sq-jfrp0: `sparq-wrapper-smoke` now lives in bench/registry.d/sparq-wrapper.toml.
 
 # [GPT-5.6] Flow-on reconciliation for seven merged suite directories that predated a registry
 # disposition. Comparative suites omit `featured`; internal/reference micro-harnesses use the G3

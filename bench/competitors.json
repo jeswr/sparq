@@ -21,7 +21,15 @@
     "HONESTY NOTE (per parent sq-i0nm design C): competitor numbers gathered on a GitHub-hosted CI",
     "runner are NOISY and not comparable to the pinned EC2/quiet-box reference band. Every gathered",
     "datapoint records its `env` (host class, cpu, os, quiet_box flag) so the dashboard can label a",
-    "noisy gh-runner point distinctly from an EC2 reference line. See `bench/CATALOG.md` QUIET-BOX note."
+    "noisy gh-runner point distinctly from an EC2 reference line. See `bench/CATALOG.md` QUIET-BOX note.",
+    "",
+    "[OPUS-5] sq-jfrp0 (issue #2679) — ADDING A COMPETITOR? DO NOT APPEND TO `competitors` HERE.",
+    "This file is the historical TRUNK. A new competitor goes in its own fragment file,",
+    "`bench/competitors.d/<id>.json` (see bench/competitors.d/README.md), because every bench PR",
+    "appending to this ONE array made sibling bench PRs conflict by construction. The registry",
+    "consumers read is the ASSEMBLED view — this file plus `bench/competitors.d/*.json` in",
+    "sorted-filename order — produced by `scripts/bench_registry.py` (`--competitors` to print it,",
+    "`--check` to validate). Editing an EXISTING entry in place is still fine."
   ],
   "schema_version": 1,
   "results_layout": {

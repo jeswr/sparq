@@ -59,6 +59,12 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# [OPUS-5] sq-jfrp0 (issue #2679): the bench registry is bench/benchmarks.toml PLUS
+# the per-suite fragments in bench/registry.d/*.toml, assembled at read time. The
+# tests load this module by file path, so put scripts/ on sys.path explicitly.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bench_registry  # noqa: E402
+
 # Labels every drift issue carries.
 BASE_LABELS = ["drift", "auto"]
 
@@ -176,14 +182,22 @@ def crate_is_public(root: Path, crate: str) -> bool:
 
 
 def bench_registry_sources(root: Path) -> str:
-    """The raw text of bench/benchmarks.toml (we match `source` lines textually,
-    mirroring gate-new-crate.py — a full TOML parse of the array is unnecessary
-    and the registry is hand-authored prose-heavy TOML)."""
+    """The raw text of the ASSEMBLED bench registry — bench/benchmarks.toml plus the
+    per-suite fragments in bench/registry.d/*.toml ([OPUS-5] sq-jfrp0). We match
+    `source` lines textually, mirroring gate-new-crate.py — a full TOML parse of the
+    array is unnecessary and the registry is hand-authored prose-heavy TOML.
+
+    A malformed fragment degrades to the trunk alone: this is the REACTIVE scanner,
+    and the merge-time gate (check-new-bench-registered.py) is the place that
+    reports a bad fragment."""
     reg = root / "bench" / "benchmarks.toml"
     try:
-        return reg.read_text(encoding="utf-8")
-    except OSError:
-        return ""
+        return bench_registry.registry_text(root)
+    except bench_registry.RegistryError:
+        try:
+            return reg.read_text(encoding="utf-8")
+        except OSError:
+            return ""
 
 
 def crate_has_registered_bench(registry_text: str, crate: str) -> bool:

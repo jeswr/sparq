@@ -168,6 +168,18 @@ fi
 
 # --- registry presence -------------------------------------------------------
 [ -f "$REGISTRY" ] || die "registry $REGISTRY not found (run from a sparq checkout)"
+# [OPUS-5] sq-jfrp0 (issue #2679): a competitor may be registered in its own
+# fragment file under bench/competitors.d/ instead of in the trunk JSON (one file
+# per competitor, so concurrent bench PRs stop conflicting on the shared array).
+# When fragments exist, gather from the ASSEMBLED registry — a read-only temp copy;
+# this script still never edits the tracked JSON.
+if compgen -G "bench/competitors.d/*.json" >/dev/null 2>&1; then
+  ASSEMBLED_REGISTRY="$(mktemp)"
+  trap 'rm -f "$ASSEMBLED_REGISTRY"' EXIT
+  python3 scripts/bench_registry.py --competitors >"$ASSEMBLED_REGISTRY" \
+    || die "could not assemble bench/competitors.json + bench/competitors.d/*.json"
+  REGISTRY="$ASSEMBLED_REGISTRY"
+fi
 if have jq; then
   jq . "$REGISTRY" >/dev/null || die "$REGISTRY does not parse as JSON"
 fi

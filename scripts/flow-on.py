@@ -47,6 +47,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RULES = REPO_ROOT / "scripts" / "flow-on-rules.toml"
 BENCH_REGISTRY = REPO_ROOT / "bench" / "benchmarks.toml"
 
+# [OPUS-5] sq-jfrp0 (issue #2679): the bench registry is BENCH_REGISTRY plus the
+# per-suite fragments in bench/registry.d/*.toml, assembled at read time. The tests
+# load this module by file path, so put scripts/ on sys.path explicitly.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bench_registry  # noqa: E402
+
 # Labels every flow-on issue carries (in addition to a rule's own labels and the
 # routing labels computed by routing_labels() below).
 BASE_LABELS = ["flow-on", "auto"]
@@ -255,9 +261,15 @@ def _any_glob_match(globs: list[str], paths: list[str]) -> bool:
 
 def _bench_suite_needs_dashboard_follow_on(suite: str) -> bool:
     """Return whether a registered suite lacks an unfeatured disposition."""
+    # [OPUS-5] sq-jfrp0: read the ASSEMBLED registry (trunk + bench/registry.d/).
     try:
-        registry = BENCH_REGISTRY.read_text(encoding="utf-8")
-    except OSError:
+        registry = bench_registry.registry_text()
+    except bench_registry.RegistryError:
+        try:
+            registry = BENCH_REGISTRY.read_text(encoding="utf-8")
+        except OSError:
+            return False
+    if not registry:
         return False
     # [GPT-5.6] Match the same registry reference fields as merge gate G3. An
     # unregistered research harness may live under bench/, but it has no metric

@@ -64,6 +64,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BENCH_REGISTRY = REPO_ROOT / "bench" / "benchmarks.toml"
 
+# [OPUS-5] sq-jfrp0 (issue #2679): the bench registry is BENCH_REGISTRY plus the
+# per-suite fragments in bench/registry.d/*.toml, assembled at read time. The tests
+# load this module by file path, so put scripts/ on sys.path explicitly.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bench_registry  # noqa: E402
+
 # A line in a status-prefixed diff: "A\tpath", "M\tpath", "R100\told\tnew", etc.
 _STATUS_RE = re.compile(r"^([A-Z])\d*\t(.*)$")
 
@@ -163,14 +169,22 @@ def crate_is_stub(crate: str, changed: list[str]) -> bool:
 
 
 def crate_has_registered_bench(crate: str) -> bool:
-    """True iff bench/benchmarks.toml has a `source` field referencing the crate.
+    """True iff the ASSEMBLED bench registry (bench/benchmarks.toml +
+    bench/registry.d/*.toml) has a `source` field referencing the crate.
 
     Mirrors the reactive rule's expectation (`source = crates/<x>`): we match any
     benchmark whose `source` line contains `crates/<crate>/` or `crates/<crate>"`
     (end of the path component), so a registered bench for the crate counts."""
     try:
-        text = BENCH_REGISTRY.read_text(encoding="utf-8")
-    except OSError:
+        text = bench_registry.registry_text()
+    except bench_registry.RegistryError:
+        # A malformed fragment is reported by G3; here, fall back to the trunk so
+        # this gate never mistakes a syntax error for a missing benchmark.
+        try:
+            text = BENCH_REGISTRY.read_text(encoding="utf-8")
+        except OSError:
+            return False
+    if not text:
         return False
     needle = re.compile(
         rf"^\s*source\s*=.*crates/{re.escape(crate)}(?:/|\b)", re.MULTILINE

@@ -12,6 +12,25 @@ conventions first, then a per-category map that points at the registry, then a
 > how to run it**. Per-area numbers also live next to each harness (e.g.
 > `bench/zk/README.md`, `bench/qlever-baselines.md`, `bench/inference/eye-comparison.md`).
 
+## Adding a benchmark, a competitor, or a note — use a fragment file
+
+<!-- [OPUS-5] sq-jfrp0 (issue #2679) -->
+Bench PRs used to conflict by construction: every one of them appended to the same
+three files. Each registry now has a **fragment directory** that is the append
+point, assembled at read time (sorted by filename) by
+[`scripts/bench_registry.py`](../scripts/bench_registry.py):
+
+| what you are adding | put it in | not in |
+|---|---|---|
+| a `[[benchmark]]` entry | [`registry.d/<suite>.toml`](./registry.d/README.md) | `benchmarks.toml` |
+| a competitor engine | [`competitors.d/<id>.json`](./competitors.d/README.md) | `competitors.json` |
+| a per-suite "needs care" note | [`catalog.d/<suite>.md`](./catalog.d/README.md) | this file |
+
+Two PRs adding different suites then never touch the same path. Editing an
+*existing* entry in place is still fine. Validate with
+`python3 scripts/bench_registry.py --check`; print the assembled views with
+`--registry` / `--competitors` / `--catalog`.
+
 ## Conventions (the methodology, codified)
 
 - **Measure first.** Probes like `probe-compress`, `compare-compress`,

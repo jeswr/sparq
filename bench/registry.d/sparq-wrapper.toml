@@ -1,0 +1,18 @@
+# [OPUS-5] sq-jfrp0 (issue #2679) — first registry FRAGMENT: moved verbatim out of
+# bench/benchmarks.toml so the assembled-registry path is exercised for real, not
+# only in the unit tests. See README.md in this directory for the convention.
+
+# [GPT-5.6] sq-1rg2q M1 — deterministic public-API smoke for the opt-in OO wrapper.
+[[benchmark]]
+id          = "sparq-wrapper-smoke"
+name        = "Rust-native RDF object traversal correctness smoke"
+category    = "conformance"
+measures    = "correctness: outgoing traversal plus typed string access over a fixed two-triple graph; self-asserting, emits wrapper_smoke=ok"
+invoke      = "cargo run -p sparq-wrapper --example wrapper_smoke"
+source      = "crates/sparq-wrapper/examples/wrapper_smoke.rs"
+dataset     = "fixed two-triple Turtle fixture embedded in the example"
+quiet_box_sensitive = false
+pinning     = "fixture and expected value are source-pinned"
+records_to  = "stdout; nonzero exit or assertion panic on mismatch"
+featured    = false
+status      = "ok"
