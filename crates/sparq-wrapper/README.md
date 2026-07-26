@@ -60,6 +60,10 @@ hatch.
   graph when requested) whose insert/remove operations target one configured
   named graph. This proposal follows rdfjs/wrapper draft PR #95 and is not
   landed upstream. <!-- [GPT-5.6] sq-1rg2q.6 -->
+- The reserved `proposed-graph-scope-events`, `proposed-async-store`,
+  `proposed-async-node`, `proposed-async-events`, and `proposed-json` seams are
+  default-off placeholders. Their APIs are intentionally empty until the
+  corresponding proposal work lands. <!-- [SONNET-4.6] sq-1rg2q.1 -->
 - All crate features are off by default, and the dependency on `sparq-core`
   disables its default features to keep this capability isolated.
 
