@@ -576,7 +576,7 @@ fn main() {
                 "ERROR"
             }
             Ok(actual) => {
-                if expected.iter().any(|e| *e == actual) {
+                if expected.contains(&actual) {
                     correct += 1;
                     score += task.weight;
                     "PASS"
