@@ -421,6 +421,10 @@ class FakeGitHub:
         self.writes: list[list[str]] = []
         self.reads: list[str] = []
         self.total_count_override: int | None = None
+        # Fires ONCE, immediately before the first single-PR (reconfirm) read is served.
+        # This is what lets a test interpose a concurrent actor's change into the exact
+        # window between the sweep's snapshot and its write — the double-fire race.
+        self.before_confirm = None
 
     # -- writes --
     def write(self, argv: list[str]) -> str:
@@ -473,6 +477,9 @@ class FakeGitHub:
         raise AssertionError(f"unexpected read: {argv}")
 
     def _pr_one(self, argv: list[str]) -> dict:
+        if self.before_confirm is not None:
+            hook, self.before_confirm = self.before_confirm, None
+            hook(self)
         number = int(next(a for a in argv if a.startswith("number=")).split("=", 1)[1])
         node = next((n for n in self.nodes if n.get("number") == number), None)
         return {"data": {"repository": {"pullRequest": node}}}
@@ -1089,48 +1096,85 @@ class TestDoubleFireIdempotence(unittest.TestCase):
         self.assertEqual(fake.labels_of(4200), {vb.REVIEW_ATTESTATION})
 
     def test_a_STALE_sweep_decision_cannot_resurrect_a_label_an_event_just_removed(self):
-        """THE race the conversion creates, executed.
+        """THE race the conversion creates, executed through the REAL driver loop.
 
-        Interleaving: the sweep reads at T0 (verdict = pass) and is still working through
-        its other ~100 PRs when a reviewer posts a retraction at T1. The event run reads,
-        decides retract, and writes. The sweep then reaches PR #4200 with its T0 snapshot
-        and would write `review:pass` — arming a PR whose review was just withdrawn.
+        Interleaving, produced by the fake rather than described in prose: the sweep
+        reads PR #4200 at T0 (verdict = pass, decision = promote) and is still working
+        through its other ~100 PRs. At T1 — inside the window, injected by
+        ``before_confirm`` — a reviewer posts a retraction and the event run removes the
+        attestation. The sweep then reaches its write with a T0 snapshot that says
+        `promote`, and would arm a PR whose review was just withdrawn.
 
-        reconfirm() re-reads immediately before the write, sees the retraction, and
-        abandons. Delete that call and this test reds with review:pass on the PR.
+        The pre-write re-read is the only thing that stops it. Mutant P01 (delete the
+        `confirmed.action != decision.action` skip) reds HERE.
         """
         fake = FakeGitHub([node(4200)], comments={4200: list(PASS_COMMENT)})
+
+        def a_retraction_lands_mid_sweep(f):
+            f._comments[4200] = list(PASS_COMMENT) + [
+                vb.comment(
+                    f"{HEAD}\n\nVERDICT: fail", created_at="2099-01-01T00:00:00Z", cid=99
+                )
+            ]
+
+        fake.before_confirm = a_retraction_lands_mid_sweep
         sweep = bridge(fake)
+        self.assertEqual(sweep.run(), 0)
+        self.assertEqual(
+            fake.writes, [], "a stale sweep resurrected a retracted attestation"
+        )
+        self.assertNotIn(vb.REVIEW_ATTESTATION, fake.labels_of(4200))
+        self.assertTrue(
+            any("SKIP superseded" in line for line in sweep.logs), sweep.logs
+        )
 
-        # T0: the sweep takes its snapshot and decides, but has not written yet.
-        stale_nodes = sweep.list_open()
-        stale_pr = sweep.parse_node(stale_nodes[0], "success")
-        stale_decision = vb.decide(stale_pr, sweep.comments(4200))
-        self.assertEqual(stale_decision.action, "promote")
+    def test_promote_and_the_unreviewed_flag_are_mutually_exclusive_by_construction(self):
+        """Why the promote dispatch entry removes NOTHING.
 
-        # T1: a retraction lands and the EVENT run processes it.
-        fake._comments[4200] = list(PASS_COMMENT) + [
-            vb.comment(
-                f"{HEAD}\n\nVERDICT: fail", created_at="2099-01-01T00:00:00Z", cid=99
+        `decide()` returns `unflag` before it can ever return `promote` when the
+        informational label is present, so no confirmed `promote` can coexist with it.
+        The removal that used to be paired with `promote` was therefore dead — and dead
+        code on a write path is exactly where a stale-snapshot read hides. This pins the
+        precondition so the pairing cannot be reintroduced on a false premise.
+        """
+        for extra in ([], ["area:sparq-core"], ["kind:task"]):
+            with self.subTest(extra=extra):
+                flagged = pr(labels=set(extra) | {vb.UNREVIEWED_LABEL})
+                self.assertNotEqual(
+                    vb.decide(flagged, PASS_COMMENT).action,
+                    "promote",
+                    "a flagged PR must unflag first; promote is a later cycle",
+                )
+        fake = FakeGitHub([node(4200)], comments={4200: PASS_COMMENT})
+        bridge(fake).run()
+        self.assertEqual(
+            fake.writes,
+            [["pr", "edit", "4200", "--repo", REPO, "--add-label", vb.REVIEW_ATTESTATION]],
+        )
+
+    def test_main_refuses_an_event_run_whose_payload_named_no_pull_request(self):
+        """`--mode event --pr ''` must be a no-op, NOT a fall-through to the whole-repo
+        sweep: that is the difference between an unroutable webhook and letting any
+        commenter start a ~9-minute repository-wide run. Mutant P11 reds here."""
+        started: list = []
+        original_run_bridge, original_argv = vb.run_bridge, sys.argv
+        try:
+            vb.run_bridge = lambda b, **kw: started.append(b) or 0
+            sys.argv = ["verdict-bridge.py", "--repo", REPO, "--mode", "event", "--pr", ""]
+            self.assertEqual(vb.main(), 0)
+            self.assertEqual(started, [], "an unroutable event started a full sweep")
+
+            sys.argv = ["verdict-bridge.py", "--repo", REPO, "--mode", "event", "--pr", "42"]
+            self.assertEqual(vb.main(), 0)
+            self.assertEqual([b.only_pr for b in started], [42])
+
+            sys.argv = ["verdict-bridge.py", "--repo", REPO, "--mode", "sweep", "--pr", ""]
+            self.assertEqual(vb.main(), 0)
+            self.assertEqual(
+                [b.only_pr for b in started], [42, None], "the cron sweep must still run"
             )
-        ]
-        bridge(fake, only_pr=4200).run()
-        self.assertEqual(fake.labels_of(4200), set(), "the event run must not attest")
-
-        # T2: the sweep finally reaches this PR carrying its stale `promote`.
-        fresh, confirmed = sweep.reconfirm(stale_pr, stale_decision)
-        self.assertNotEqual(
-            confirmed.action,
-            stale_decision.action,
-            "a stale promote must be superseded by the retraction",
-        )
-        sweep.run()
-        self.assertNotIn(
-            vb.REVIEW_ATTESTATION,
-            fake.labels_of(4200),
-            "a stale sweep resurrected a retracted attestation",
-        )
-        del fresh
+        finally:
+            vb.run_bridge, sys.argv = original_run_bridge, original_argv
 
     def test_a_HEAD_CHANGE_between_read_and_write_abandons_the_write(self):
         """A force-push invalidates every head-bound verdict. The pre-write re-read is a
@@ -1153,6 +1197,29 @@ class TestDoubleFireIdempotence(unittest.TestCase):
         self.assertEqual(b.reconfirm(pull, vb.Decision("promote", ""))[1].action, "none")
         fake.nodes = [node(4200, baseRefName="feature/stack")]
         self.assertEqual(b.reconfirm(pull, vb.Decision("promote", ""))[1].action, "none")
+
+    def test_a_DROPPED_webhook_is_still_reconciled_by_the_sweep(self):
+        """CONSTRAINT: the cron is the backstop for events GitHub never delivers.
+
+        Modelled by simply not running the event path at all. The sweep must reach the
+        same terminal state — otherwise the conversion has traded a latency bug for a
+        lost-work bug, which is strictly worse.
+        """
+        for name, (overrides, comments, expected) in {
+            "promote": (dict(), PASS_COMMENT, {vb.REVIEW_ATTESTATION}),
+            "flag": (dict(), [], {vb.UNREVIEWED_LABEL}),
+            "retract": (dict(labels=[vb.REVIEW_ATTESTATION]), FAIL_COMMENT, set()),
+            "unflag": (dict(labels=[vb.UNREVIEWED_LABEL]), FAIL_COMMENT, set()),
+        }.items():
+            with self.subTest(action=name):
+                delivered = FakeGitHub(
+                    [node(4200, **overrides)], comments={4200: comments}
+                )
+                bridge(delivered, only_pr=4200).run()
+                dropped = FakeGitHub([node(4200, **overrides)], comments={4200: comments})
+                bridge(dropped).run()  # cron only — the webhook never arrived
+                self.assertEqual(dropped.labels_of(4200), expected)
+                self.assertEqual(dropped.labels_of(4200), delivered.labels_of(4200))
 
     def test_a_write_still_happens_when_nothing_changed_under_the_run(self):
         """The guard must not be a blanket refusal — that would be a silent kill switch
@@ -1738,8 +1805,15 @@ class TestConcurrencyGrouping(unittest.TestCase):
     def setUpClass(cls):
         cls.doc = load_workflow(WORKFLOW)
         raw = " ".join(str(cls.doc["concurrency"]["group"]).split())
-        cls.prefix, _, rest = raw.partition("${{")
-        cls.inner = rest[: rest.rindex("}}")]
+        if "${{" in raw:
+            cls.prefix, _, rest = raw.partition("${{")
+            cls.inner = rest[: rest.rindex("}}")]
+        else:
+            # A CONSTANT group. Handled rather than crashed on: a setUpClass exception
+            # is an error-kill that names no guard, and "the harness blew up" reads the
+            # same as "the property is checked" in a mutation report. Let the matrix
+            # tests below report the actual defect instead.
+            cls.prefix, cls.inner = raw, "''"
 
     def group_for(self, ctx) -> str:
         return self.prefix + str(_ExprParser(_tokenize(self.inner), ctx).parse())

@@ -751,7 +751,7 @@ class VerdictBridge:
                 continue
             # Compare-and-set against a FRESH read; see reconfirm()'s docstring.
             try:
-                fresh, confirmed = self.reconfirm(pr, decision)
+                _fresh, confirmed = self.reconfirm(pr, decision)
             except (GhError, json.JSONDecodeError, KeyError, ValueError) as error:
                 self.log(f"[{PROGRAM}] PR #{pr.number}: SKIP reconfirm-failed ({error})")
                 errors += 1
@@ -762,14 +762,17 @@ class VerdictBridge:
                     f"{decision.action} -> {confirmed.action} ({confirmed.reason})"
                 )
                 continue
+            # `promote` removes NOTHING. `decide()` returns `unflag` before it can return
+            # `promote` whenever UNREVIEWED_LABEL is present, so a confirmed promote can
+            # never coexist with the flag: the pairing was dead code, and dead code on a
+            # write path is where a stale-snapshot read hides. Pinned by
+            # test_promote_and_the_unreviewed_flag_are_mutually_exclusive_by_construction.
             add, remove = {
-                "promote": (REVIEW_ATTESTATION, UNREVIEWED_LABEL),
+                "promote": (REVIEW_ATTESTATION, ""),
                 "retract": ("", REVIEW_ATTESTATION),
                 "flag": (UNREVIEWED_LABEL, ""),
                 "unflag": ("", UNREVIEWED_LABEL),
             }[decision.action]
-            if decision.action == "promote" and UNREVIEWED_LABEL not in fresh.labels:
-                remove = ""
             try:
                 self.edit_labels(pr.number, add=add, remove=remove)
                 writes += 1
