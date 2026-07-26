@@ -35,8 +35,13 @@ here, per the repository's no-baked-benchmark-numbers rule):
 Both backends hold the format invariants these sinks rest on: byte-valid RFC 1952
 output, `Z_FULL_FLUSH` segments that concatenate into a single member, and a
 correct combined CRC32 — note that `flate2::Crc` (including `combine`) also
-switches implementation with the feature. Verified by decoding each backend's
-output with an independent strict single-member decoder.
+switches implementation with the feature. Checked by round-tripping each
+backend's output through flate2's strict single-member `GzDecoder`, plus direct
+assertions on the fixed RFC 1952 header bytes. Be precise about what that buys:
+because flate2 picks decoder and CRC by the same backend precedence, the
+round-trip runs under the backend it is testing, so it is a self-consistency
+check, **not** an implementation-independent interoperability check. Validating
+the wire against a separate gzip implementation is not yet covered.
 "#]
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
