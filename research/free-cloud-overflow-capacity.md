@@ -139,7 +139,10 @@ implication: the only class where overflow would relieve the maintainer's stated
 Class E, the workers — is the one class that must not overflow onto a self-managed free VM.**
 Overflow can relieve *gate and benchmark* load. It cannot relieve *worker* load safely on
 always-free infrastructure. If worker count truly becomes the ceiling, the answer is the §0.3
-concurrency headroom and the managed providers in §4.2 — not an Oracle box.
+concurrency headroom and the managed providers of §3.4/§3.5 — not an Oracle box.
+
+(Cross-reference convention in this record: `§N.M` where section *N* has no `N.M` heading refers
+to numbered item *M* of section *N* — so §0.3 is the third finding in §0 and §4.1 is item 1 of §4.)
 
 ### 2.4 Do not use self-hosted runners at all
 
@@ -376,7 +379,28 @@ never means "skip the gate".
 - **Orphan-proofing is mandatory and already solved.** Reuse the three-watchdog design and
   tag-scoped orphan sweep from `ec2-build-farm-design.md` §4/§6 verbatim.
 
-### 5.4 A failure mode specific to free tiers
+### 5.4 Observed while writing this record: each provider is a multiplier on transient risk
+
+The PR carrying this document went RED on its first CI run. The cause was not the document: a
+`dorny/paths-filter` step failed with GitHub's own `"Sorry, this diff is temporarily unavailable
+due to heavy server load"` server error, one gating leg concluded failure, and `ci-summary`
+fail-fast RED'd the whole gate — correctly, per its "a newest-run failure is never forgiven"
+rule. A re-run cleared it.
+
+That is worth recording because it is a live instance of the exact class the maintainer asked to
+design against, arriving from the provider we already depend on. Two lessons follow:
+
+- **Fail-fast on a gating leg is right for *correctness* signals and expensive for *transient*
+  ones.** The gate cannot distinguish them, so every additional provider in the critical path
+  adds another independent source of transient RED that a human or an agent then has to
+  triage and re-run.
+- **Therefore each added provider carries a cost that is not capacity-shaped.** This is a second,
+  independent argument for §5.1's invariant: overflow must sit *outside* the gating path, as
+  advisory capacity, so that a provider's bad minute cannot RED anything. An overflow design that
+  put a third-party runner inside the gate would import that provider's transient rate directly
+  into the merge train.
+
+### 5.5 A failure mode specific to free tiers
 
 Oracle's idle reclamation stops an instance after 7 days below the utilisation thresholds, and a
 stopped A1 instance **may fail to restart** because restarting re-enters the capacity lottery.
