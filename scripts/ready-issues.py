@@ -475,6 +475,35 @@ def _self_test():
           [[it["number"] for it in compute_ready(
               [pr(73 + i, ["area:sparq-store", label]), waiting], conflict_log=quiet)]
            for i, label in enumerate(sorted(PARKED_AREA_LABELS))], [[20], [20], [20]])
+    # [OPUS-5] sparq#4336 CONTAINMENT fixtures. The registry's dispatch.yml runs THIS --self-test,
+    # so these are the assertions that gate the fleet's own copy of the key algebra.
+    check("sub-crate key resolves to its crate", partition_path("sparq-server-http"),
+          ("sparq-server",))
+    check("real sibling crate resolves to itself", partition_path("sparq-engine-serialize"),
+          ("sparq-engine-serialize",))
+    check("invented sub-crate key resolves to its crate", partition_path("sparq-server-zzz"),
+          ("sparq-server",))
+    check("degenerate key falls all the way to global", partition_path(""), ())
+    check("unrelated crates do not conflict",
+          keys_conflict("sparq-core", "sparq-engine"), False)
+    check("sibling regions of one crate conflict",
+          keys_conflict("sparq-core-store", "sparq-core-nt-dict"), True)
+    check("parent+child enter the frontier together? (must not)",
+          [i["number"] for i in compute_ready(
+              [iss(80, R + ["priority:P1", "area:sparq-server"]),
+               iss(81, R + ["priority:P1", "area:sparq-server-http"])], conflict_log=quiet)], [80])
+    check("child+parent, reversed order (must not)",
+          [i["number"] for i in compute_ready(
+              [iss(80, R + ["priority:P1", "area:sparq-server-http"]),
+               iss(81, R + ["priority:P1", "area:sparq-server"])], conflict_log=quiet)], [80])
+    check("open PR on the parent crate blocks a sub-crate issue",
+          compute_ready([pr(82, ["area:sparq-server"]),
+                         iss(83, R + ["priority:P1", "area:sparq-server-http"])],
+                        conflict_log=quiet), [])
+    check("unknown key under an unknown parent still over-reserves",
+          keys_conflict("upstream", "upstream-noir"), True)
+    check("single-segment unknown key keeps its own partition",
+          partition_path("deps"), ("deps",))
     check("valid_priority single", valid_priority({"priority:P0"}), 0)
     check("valid_priority ambiguous", valid_priority({"priority:P1", "priority:P2"}), None)
     check("valid_priority out-of-range", valid_priority({"priority:P7"}), None)
@@ -620,9 +649,21 @@ def main():
     ap.add_argument("--self-test", action="store_true")
     ap.add_argument("--diagnose", action="store_true",
                     help="print the full visibility taxonomy instead of just the frontier")
+    ap.add_argument("--dump-partitions", action="store_true",
+                    help="print the recognised partition roots (and the resolution of any KEYs) "
+                         "as JSON — the machine-readable contract the registry's dispatch.yml "
+                         "mirror must agree with; offline, no API calls")
+    ap.add_argument("keys", nargs="*", metavar="KEY",
+                    help="area: keys to resolve with --dump-partitions")
     args = ap.parse_args()
     if args.self_test:
         return _self_test()
+    if args.dump_partitions:
+        json.dump({"roots": sorted(workspace_roots()),
+                   "resolved": {k: list(partition_path(k)) for k in args.keys}},
+                  sys.stdout, indent=2, sort_keys=True)
+        print()
+        return 0
     issues = _fetch(args.repo)
     linked = linked_issue_numbers(_fetch_pulls(args.repo), args.repo)
     visible = dispatchable_view(issues, linked)

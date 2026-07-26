@@ -31,7 +31,9 @@ import importlib.util
 import io
 import json
 import re
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -119,6 +121,249 @@ class TestUnlabelledOccupantAttribution(unittest.TestCase):
         board = [iss(72, ["status:in-progress"]),
                  iss(20, READY + ["priority:P1", "area:sparq-core"])]
         self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet)), [20])
+
+
+class TestSubCrateContainment(unittest.TestCase):
+    """sparq#4336 — the UNDER-serialisation defect: a region key never overlapped its crate.
+
+    `conflict()` compared partition keys by exact-string set overlap, so `area:sparq-server-http`
+    did not overlap `area:sparq-server`. Both entered the frontier in one tick, and a sub-crate
+    issue entered despite an open PR holding the parent crate: two workers, one crate, no lock.
+    57.1% of same-crate 24h PR pairs share a file (research/crate-region-parallelism.md §4), and a
+    semantic collision (both compile, both pass, together broken) is invisible to git.
+
+    Every test here goes END-TO-END through compute_ready() where it can, so deleting
+    `keys_conflict`, flattening `partition_path` to the identity, or reverting `conflict()` to
+    `pkgs & blockers.keys()` reds this class.
+    """
+
+    # The four live labels that are NOT workspace crates -> they are regions inside one.
+    CONTAINED = {"sparq-server-http": "sparq-server",
+                 "sparq-core-nt-dict": "sparq-core",
+                 "sparq-core-store": "sparq-core",
+                 "sparq-engine-exec": "sparq-engine"}
+    # The fifth label from the issue's table. It IS a real workspace crate at origin/main, so the
+    # table was already stale — see test_conformance_floors_is_a_real_crate_and_must_stay_split.
+    NOT_CONTAINED = "sparq-conformance-floors"
+
+    def test_every_live_sub_crate_label_conflicts_with_its_parent_crate(self):
+        for child, parent in self.CONTAINED.items():
+            with self.subTest(child=child):
+                self.assertTrue(ready.keys_conflict(child, parent),
+                                f"{child} names a region inside {parent}")
+                self.assertTrue(ready.keys_conflict(parent, child), "conflict must be symmetric")
+                self.assertEqual(ready.partition_path(child), (parent,))
+
+    def test_parent_crate_issue_blocks_a_sub_crate_issue_in_the_same_tick(self):
+        # Ordering A: the PARENT is selected first (lower number wins the priority tie).
+        board = [iss(1, READY + ["priority:P1", "area:sparq-server"]),
+                 iss(2, READY + ["priority:P1", "area:sparq-server-http"])]
+        self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet)), [1],
+                         "area:sparq-server-http must not enter alongside area:sparq-server")
+
+    def test_sub_crate_issue_blocks_a_parent_crate_issue_in_the_same_tick(self):
+        # Ordering B: the CHILD is selected first. Both orderings, per the acceptance criteria.
+        board = [iss(1, READY + ["priority:P1", "area:sparq-server-http"]),
+                 iss(2, READY + ["priority:P1", "area:sparq-server"])]
+        self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet)), [1],
+                         "area:sparq-server must not enter alongside area:sparq-server-http")
+
+    def test_open_pr_holding_the_parent_crate_blocks_a_sub_crate_issue(self):
+        # The OCCUPANCY half of the defect, demonstrated live in the issue.
+        board = [pr(70, ["area:sparq-server"]),
+                 iss(20, READY + ["priority:P1", "area:sparq-server-http"])]
+        self.assertEqual(ready.compute_ready(board, conflict_log=quiet), [],
+                         "an open PR on sparq-server must hold the whole crate")
+
+    def test_open_pr_holding_a_sub_crate_blocks_a_parent_crate_issue(self):
+        board = [pr(70, ["area:sparq-core-store"]),
+                 iss(20, READY + ["priority:P1", "area:sparq-core"])]
+        self.assertEqual(ready.compute_ready(board, conflict_log=quiet), [],
+                         "an open PR on a region must hold its containing crate")
+
+    def test_sibling_sub_crate_keys_of_one_parent_conflict_with_each_other(self):
+        # A sibling hole is the SAME defect one level down: sparq-core-store and
+        # sparq-core-nt-dict are both files in crates/sparq-core. Neither string is a prefix of
+        # the other, so a naive prefix-on-the-raw-key rule would pass the parent tests and still
+        # put two workers in sparq-core.
+        self.assertTrue(ready.keys_conflict("sparq-core-store", "sparq-core-nt-dict"))
+        board = [iss(1, READY + ["priority:P1", "area:sparq-core-store"]),
+                 iss(2, READY + ["priority:P1", "area:sparq-core-nt-dict"])]
+        self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet)), [1])
+
+    def test_unrelated_crates_still_do_not_conflict(self):
+        # The fix must not collapse everything into one lock and destroy the frontier.
+        for a, b in (("sparq-core", "sparq-engine"), ("sparq-server", "sparq-hdt"),
+                     ("sparq-zk", "sparq-mpc"), ("site", "bench")):
+            with self.subTest(pair=(a, b)):
+                self.assertFalse(ready.keys_conflict(a, b))
+        board = [iss(n, READY + ["priority:P1", f"area:{a}"]) for n, a in
+                 ((1, "sparq-core"), (2, "sparq-engine"), (3, "sparq-hdt"), (4, "site"))]
+        self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet)), [1, 2, 3, 4])
+
+    def test_real_sibling_crates_sharing_a_name_prefix_stay_independent(self):
+        # `sparq-engine-serialize` is a REAL crate directory, so it is NOT a region inside
+        # `sparq-engine` even though the strings nest. Only the workspace tree can tell these
+        # apart from `sparq-engine-exec`; a hand-written containment table cannot.
+        for crate in ("sparq-engine-serialize", "sparq-engine-service", "sparq-reason-dl",
+                      "sparq-lws-core", "sparq-zk-compose"):
+            with self.subTest(crate=crate):
+                self.assertEqual(ready.partition_path(crate), (crate,))
+        self.assertFalse(ready.keys_conflict("sparq-engine", "sparq-engine-serialize"))
+        self.assertFalse(ready.keys_conflict("sparq-engine-exec", "sparq-engine-serialize"))
+        self.assertTrue(ready.keys_conflict("sparq-engine", "sparq-engine-exec"),
+                        "the non-crate sibling must still collapse into the crate")
+
+    def test_conformance_floors_is_a_real_crate_and_must_stay_split(self):
+        # Issue #4336's table lists area:sparq-conformance-floors as a region inside
+        # crates/sparq-conformance. It is NOT: crates/sparq-conformance-floors is a workspace
+        # member at origin/main. The table was stale before it was written down, which is the
+        # whole argument for deriving containment from the tree instead of listing it.
+        self.assertTrue((REPO_ROOT / "crates" / self.NOT_CONTAINED / "Cargo.toml").is_file())
+        self.assertEqual(ready.partition_path(self.NOT_CONTAINED), (self.NOT_CONTAINED,))
+        self.assertFalse(ready.keys_conflict("sparq-conformance", self.NOT_CONTAINED))
+
+
+class TestTotalPartitionMapping(unittest.TestCase):
+    """The durable half: an UNKNOWN key must fail SAFE with no code change.
+
+    Under-serialisation corrupts; over-serialisation only delays. So the map is total and every
+    unrecognised key resolves UPWARD to the coarsest thing that could contain it.
+    """
+
+    def test_newly_invented_sub_crate_key_resolves_to_its_crate(self):
+        # Nobody registers this label anywhere. It must still be caught by the lock.
+        for invented in ("sparq-server-zzz", "sparq-core-brand-new-region",
+                         "sparq-engine-exec-v2", "sparq-hdt-writer"):
+            with self.subTest(key=invented):
+                parent = ready.partition_path(invented)[0]
+                self.assertIn(parent, ready.workspace_roots())
+                self.assertTrue(invented.startswith(parent + "-"))
+        board = [pr(70, ["area:sparq-server"]),
+                 iss(20, READY + ["priority:P1", "area:sparq-server-zzz"])]
+        self.assertEqual(ready.compute_ready(board, conflict_log=quiet), [],
+                         "an invented region key must fail SAFE into its crate's lock")
+
+    def test_unknown_key_under_an_unknown_parent_still_resolves_upward(self):
+        # `upstream` is not a directory, so the workspace cannot confirm it — the key's own head
+        # segment is then the coarsest partition it names, and honouring it OVER-reserves.
+        self.assertEqual(ready.partition_path("upstream-noir"), ("upstream",))
+        self.assertTrue(ready.keys_conflict("upstream", "upstream-noir"))
+        self.assertTrue(ready.keys_conflict("upstream-noir", "upstream-oxigraph"))
+
+    def test_single_segment_unknown_key_keeps_its_own_partition(self):
+        # It names nothing narrower than itself, so it cannot be under-serialising, and routing it
+        # to __global__ would be a fleet stall, not a fix: MEASURED on the live 2026-07-26
+        # snapshot, a __global__ terminal fallback took the frontier from 6 to 0 because open PR
+        # #4238 carries `area:deps` and `deps` is not a directory.
+        for key in ("upstream", "deps", "workspace", "release", "accuracy", "frobnicate"):
+            with self.subTest(key=key):
+                self.assertEqual(ready.partition_path(key), (key,))
+        board = [iss(1, READY + ["priority:P1", "area:deps"]),
+                 iss(2, READY + ["priority:P1", "area:sparq-core"])]
+        self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet)), [1, 2])
+
+    def test_degenerate_key_fails_all_the_way_closed_to_global(self):
+        # The terminal of the resolution chain. A key with no head segment to latch onto reserves
+        # EVERYTHING rather than nothing.
+        for degenerate in ("", "-", "---"):
+            with self.subTest(key=degenerate):
+                self.assertEqual(ready.partition_path(degenerate), ())
+                self.assertTrue(ready.keys_conflict(degenerate, "sparq-core"))
+                self.assertTrue(ready.keys_conflict(degenerate, ready.GLOBAL))
+
+    def test_global_conflicts_with_every_key_and_the_mapping_is_total(self):
+        self.assertEqual(ready.partition_path(ready.GLOBAL), ())
+        for key in ("sparq-core", "sparq-server-http", "site-papers", "deps", "zz-top"):
+            with self.subTest(key=key):
+                self.assertTrue(ready.keys_conflict(ready.GLOBAL, key))
+                self.assertTrue(ready.keys_conflict(key, ready.GLOBAL))
+                self.assertIsInstance(ready.partition_path(key), tuple)
+
+    def test_containment_is_reflexive_and_symmetric(self):
+        for key in ("sparq-core", "sparq-core-store", ready.GLOBAL, "deps"):
+            with self.subTest(key=key):
+                self.assertTrue(ready.keys_conflict(key, key))
+        self.assertEqual(ready.keys_conflict("sparq-core", "sparq-core-store"),
+                         ready.keys_conflict("sparq-core-store", "sparq-core"))
+
+
+class TestWorkspaceDerivedRoots(unittest.TestCase):
+    """Roots are READ FROM THE TREE. A table would already be stale (see conformance-floors)."""
+
+    def test_roots_come_from_the_real_repository_tree(self):
+        roots = ready.workspace_roots()
+        for crate in (p.name for p in (REPO_ROOT / "crates").iterdir() if p.is_dir()):
+            self.assertIn(crate, roots, f"crate {crate} must be a recognised partition root")
+        for top in ("site", "bench", "scripts", "research", "crates"):
+            self.assertIn(top, roots)
+        self.assertNotIn(".github", roots, "dot-directories are not area: key names")
+
+    def test_a_crate_added_with_no_code_change_is_recognised_immediately(self):
+        # The anti-staleness property, exercised against a synthetic tree rather than asserted.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "crates" / "sparq-brandnew").mkdir(parents=True)
+            (base / "crates" / "sparq-brandnew-region").mkdir(parents=True)
+            (base / "site").mkdir()
+            roots = ready.workspace_roots(str(base))
+            self.assertEqual(roots, {"crates", "site", "sparq-brandnew", "sparq-brandnew-region"})
+            # present in the tree -> its own partition; absent -> collapses into its parent
+            self.assertEqual(ready.partition_path("sparq-brandnew-region", roots),
+                             ("sparq-brandnew-region",))
+            self.assertEqual(ready.partition_path("sparq-brandnew-unlisted", roots),
+                             ("sparq-brandnew",))
+            self.assertFalse(ready.keys_conflict("sparq-brandnew", "sparq-brandnew-region", roots))
+            self.assertTrue(ready.keys_conflict("sparq-brandnew", "sparq-brandnew-unlisted", roots))
+
+    def test_an_unreadable_tree_over_reserves_rather_than_under_reserves(self):
+        # If the scan finds nothing, every key falls back to its head segment. That collapses all
+        # `sparq-*` keys onto `sparq` — a fleet-wide slowdown, never a double dispatch.
+        roots = ready.workspace_roots("/nonexistent/sparq-checkout")
+        self.assertEqual(roots, set())
+        self.assertEqual(ready.partition_path("sparq-core", roots), ("sparq",))
+        self.assertTrue(ready.keys_conflict("sparq-core", "sparq-engine", roots),
+                        "with no tree to read, unrelated crates must OVER-reserve")
+
+    def test_dump_partitions_exports_the_mapping_for_the_registry_parity_fixture(self):
+        # The registry's dispatch.yml mirrors this key space in `busy_packages_of_pulls`; the two
+        # must agree or the fleet double-dispatches. This is the machine-readable contract.
+        out = subprocess.run(
+            [sys.executable, str(SCRIPTS / "ready-issues.py"), "--dump-partitions",
+             "sparq-server-http", "sparq-engine-serialize", "deps"],
+            capture_output=True, text=True, check=True).stdout
+        dumped = json.loads(out)
+        self.assertIn("sparq-core", dumped["roots"])
+        self.assertEqual(dumped["resolved"]["sparq-server-http"], ["sparq-server"])
+        self.assertEqual(dumped["resolved"]["sparq-engine-serialize"], ["sparq-engine-serialize"])
+        self.assertEqual(dumped["resolved"]["deps"], ["deps"])
+
+
+class TestConflictAttribution(unittest.TestCase):
+    """A conflict line must name the RAW held label and the COARSEST holder, deterministically."""
+
+    def test_conflict_line_names_the_raw_parent_label_not_the_resolved_path(self):
+        lines = []
+        board = [pr(70, ["area:sparq-server"]),
+                 iss(20, READY + ["priority:P1", "area:sparq-server-http"])]
+        ready.compute_ready(board, conflict_log=lines.append)
+        self.assertEqual(lines, ["conflict #20: area sparq-server held by pr#70"])
+
+    def test_conflict_line_names_the_raw_child_label_when_the_child_holds(self):
+        lines = []
+        board = [pr(70, ["area:sparq-core-store"]),
+                 iss(20, READY + ["priority:P1", "area:sparq-core"])]
+        ready.compute_ready(board, conflict_log=lines.append)
+        self.assertEqual(lines, ["conflict #20: area sparq-core-store held by pr#70"])
+
+    def test_the_coarsest_holder_is_reported_when_several_conflict(self):
+        # __global__ (path length 0) outranks any named area; named areas tie-break alphabetically.
+        lines = []
+        board = [iss(70, ["status:in-progress"] + ["area:sparq-server"]),
+                 iss(71, ["status:in-progress"] + ["area:sparq-core"]),
+                 iss(30, READY + ["priority:P0"])]
+        ready.compute_ready(board, conflict_log=lines.append)
+        self.assertEqual(lines, ["conflict #30: area sparq-core held by issue#71"])
 
 
 class TestInProgressReviewStatus(unittest.TestCase):
