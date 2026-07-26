@@ -8510,7 +8510,11 @@ fn bind_join(
 /// the two things the rewrite could break: the output BAG (multiplicities included, so a
 /// dropped or duplicated group is caught) and the fact that grouping actually happened —
 /// the output's join column is non-decreasing, which the previous `FxHashMap` iteration
-/// order did not give. [SONNET-4.6]
+/// order did not give. The hand-picked cases below are the readable pins;
+/// `randomized_differential_vs_naive_reference` is the actual result-equivalence
+/// evidence — a deterministic randomized differential against a grouping-free reference
+/// join, over both the sort and the no-sort branch, with faulty-reference controls proving
+/// the comparison is non-vacuous. [SONNET-4.6]
 #[cfg(test)]
 mod bind_join_run_grouping {
     use super::*;
@@ -8599,6 +8603,174 @@ mod bind_join_run_grouping {
         let mut got = run(&g, rows, Some(Variable::new("k").unwrap()));
         got.sort_unstable();
         assert_eq!(got, expected(&g, &subjects));
+    }
+
+    // ---------------------------------------------------------------------------------
+    // Randomized differential vs a grouping-free reference join.
+    // ---------------------------------------------------------------------------------
+
+    /// Which output the faulty reference drops. Each variant is a way the run grouping
+    /// could silently lose bag cardinality, and the differential MUST go red against it —
+    /// otherwise the comparison below proves nothing.
+    #[derive(Clone, Copy)]
+    enum Fault {
+        /// Honest reference.
+        None,
+        /// Emit a join value's matches for its FIRST result row only — loses the
+        /// multiplicity a duplicated result row owes.
+        DropDuplicateRows,
+        /// Skip one whole join value — loses a group.
+        DropOneGroup,
+        /// Keep one match per result row — loses the multi-match fan-out.
+        DropExtraMatches,
+    }
+
+    /// Reference join with NEITHER grouping strategy: one full scan of the pattern, then a
+    /// nested loop over the result rows. Independent of both the old `FxHashMap` grouping
+    /// and the new sorted-run walk, so agreement with it is real evidence about the bag. It
+    /// also reaches the store differently — ONE unbound-subject scan, against `bind_join`'s
+    /// per-value BOUND binary-search ranges — so that probe is cross-checked as well.
+    /// Rows are `[payload, k, v]`, returned sorted so callers compare MULTISETS rather than
+    /// emission order.
+    fn naive_bind_join(g: &Graph, rows: &[Row], age: Id, fault: Fault) -> Vec<[Id; 3]> {
+        let pat: IdPattern = [None, Some(age), None];
+        let scan = g.store.scan(&pat);
+        let triples: Vec<[Id; 3]> = scan.rows.iter().map(|r| scan.to_spo(r)).collect();
+        let mut out: Vec<[Id; 3]> = Vec::new();
+        let mut emitted_keys: Vec<Id> = Vec::new();
+        let mut victim: Option<Id> = None;
+        for row in rows {
+            let key = row[1];
+            let mut objs: Vec<Id> =
+                triples.iter().filter(|t| t[0] == key).map(|t| t[2]).collect();
+            if objs.is_empty() {
+                continue;
+            }
+            match fault {
+                Fault::None => {}
+                Fault::DropDuplicateRows => {
+                    if emitted_keys.contains(&key) {
+                        continue;
+                    }
+                    emitted_keys.push(key);
+                }
+                Fault::DropOneGroup => {
+                    if *victim.get_or_insert(key) == key {
+                        continue;
+                    }
+                }
+                Fault::DropExtraMatches => objs.truncate(1),
+            }
+            objs.sort_unstable();
+            out.extend(objs.into_iter().map(|v| [row[0], key, v]));
+        }
+        out.sort_unstable();
+        out
+    }
+
+    /// `bind_join` of a two-column result `(?p, ?k)` — the join column is NOT column 0, so
+    /// the run walk's index arithmetic is exercised too — with `?k ex:age ?v`. Returns the
+    /// output rows sorted, for multiset comparison.
+    fn run_multiset(g: &Graph, rows: Vec<Row>, age: Id, sorted: bool) -> Vec<[Id; 3]> {
+        let p = Variable::new("p").unwrap();
+        let k = Variable::new("k").unwrap();
+        let v = Variable::new("v").unwrap();
+        let sorted_by = sorted.then(|| k.clone());
+        let result = Bindings { vars: vec![p, k.clone()], rows, sorted_by };
+        let id_pat: IdPattern = [None, Some(age), None];
+        let pos_vars = [Some(k), None, Some(v)];
+        let out = bind_join(g, result, &id_pat, &pos_vars, 1, 0, None);
+        let mut got: Vec<[Id; 3]> = out.rows.iter().map(|r| [r[0], r[1], r[2]]).collect();
+        got.sort_unstable();
+        got
+    }
+
+    /// xorshift64 — a deterministic generator, so a failure reproduces from its seed
+    /// (the workspace has no test-only `rand` dependency, and CI must not flake).
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, n: u64) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0 % n
+        }
+    }
+
+    /// The result-equivalence obligation for the run-grouping rewrite: over randomized
+    /// graphs and result bags, `bind_join` must agree as a MULTISET with the grouping-free
+    /// reference — on the actual-sort branch (`sorted_by: None`) and on the no-sort branch
+    /// (truthfully sorted rows plus matching `sorted_by`) alike.
+    ///
+    /// The generated domain spans what the finding asks for: empty graphs and empty result
+    /// bags; subjects with 0 / 1 / 2-3 `ex:age` objects (no match, singleton, multi-match
+    /// fan-out); a payload column drawn from a tiny pool so IDENTICAL duplicate rows occur
+    /// and their multiplicity is checked; mostly-singleton high-NDV groups; real subject ids
+    /// that have no `ex:age` triple; and `NO_ID` join values from rows naming a subject the
+    /// graph never mentions.
+    #[test]
+    fn randomized_differential_vs_naive_reference() {
+        // Per-fault detection counts: a control that never fires would make the
+        // differential vacuous, so each must be exercised at least once.
+        let mut caught = [0usize; 3];
+        let mut total_out = 0usize;
+        for seed in 1u64..=64 {
+            let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            let n_subj = rng.below(12) as usize; // 0 → an empty graph
+            let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
+            for s in 0..n_subj {
+                // 0 ages → a real id with no match; 2-3 → the multi-match fan-out.
+                for a in 0..rng.below(4) {
+                    ttl.push_str(&format!("ex:n{} ex:age {} .\n", s, 100 * s as u64 + a));
+                }
+                // Keeps `ex:n{s}` in the dictionary even with zero ages.
+                ttl.push_str(&format!("ex:n{} ex:name \"n{}\" .\n", s, s));
+            }
+            let g = Graph::load_str(&ttl, "turtle").unwrap();
+            let age = id(&g, "http://ex/age");
+
+            let n_rows = rng.below(20) as usize; // 0 → an empty result bag
+            let pool = (n_subj + 3) as u64; // the last 3 are absent → NO_ID join values
+            let mut rows: Vec<Row> = Vec::new();
+            for _ in 0..n_rows {
+                let s = rng.below(pool);
+                let key = id(&g, &format!("http://ex/n{}", s));
+                // Payload from a 3-value pool, so identical rows repeat.
+                rows.push(Row::from_slice(&[rng.below(3) as Id + 1, key]));
+            }
+
+            let want = naive_bind_join(&g, &rows, age, Fault::None);
+            total_out += want.len();
+
+            // The actual-sort branch: scrambled rows, no sortedness claimed.
+            let got = run_multiset(&g, rows.clone(), age, false);
+            assert_eq!(got, want, "sort branch, seed {}", seed);
+
+            // The no-sort branch: truthfully sorted rows WITH matching metadata. The
+            // reference is row-order-independent, so the same `want` applies.
+            let mut asc = rows.clone();
+            asc.sort_by_key(|r| r[1]);
+            assert_eq!(run_multiset(&g, asc, age, true), want, "no-sort branch, seed {}", seed);
+
+            // Controls: a reference that drops a duplicate row, a group, or an extra match
+            // must be REJECTED by the very comparison that just passed.
+            for (i, fault) in
+                [Fault::DropDuplicateRows, Fault::DropOneGroup, Fault::DropExtraMatches]
+                    .into_iter()
+                    .enumerate()
+            {
+                let faulty = naive_bind_join(&g, &rows, age, fault);
+                if faulty != want {
+                    assert_ne!(got, faulty, "differential must reject fault {}, seed {}", i, seed);
+                    caught[i] += 1;
+                }
+            }
+        }
+        assert!(total_out > 0, "the generated corpus produced no output rows at all");
+        for (i, n) in caught.iter().enumerate() {
+            assert!(*n > 0, "control fault {} never fired — the differential is vacuous", i);
+        }
     }
 }
 
