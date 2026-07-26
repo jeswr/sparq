@@ -49,16 +49,24 @@ fi
 
 if [ "$MODEL" = feature ]; then
   if [ ! -s "$FEATURE_OUT" ]; then
-    awk '
+    if ! awk '
       BEGIN { OFS = " " }
       {
+        if (NF != 5 || $1 !~ /^<.*>$/ ||
+            $2 != "<http://www.opengis.net/ont/geosparql#asWKT>") {
+          print "gen.sh: unexpected corpus shape at line " NR > "/dev/stderr"
+          exit 1
+        }
         entity = $1
         geometry = substr(entity, 1, length(entity) - 1) "/geometry>"
         $1 = geometry
         print entity, "<http://www.opengis.net/ont/geosparql#hasGeometry>", geometry, "."
         print
       }
-    ' "$OUT" > "$FEATURE_OUT.tmp"
+    ' "$OUT" > "$FEATURE_OUT.tmp"; then
+      rm -f "$FEATURE_OUT.tmp"
+      exit 1
+    fi
     EXPECTED_LINES=$((2 * $(wc -l < "$OUT")))
     if [ "$(wc -l < "$FEATURE_OUT.tmp")" -ne "$EXPECTED_LINES" ]; then
       echo "feature transform produced unexpected line count" >&2
