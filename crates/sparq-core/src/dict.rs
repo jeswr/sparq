@@ -1353,6 +1353,24 @@ impl Dict {
     // flat by invariant), then the table (blob base + appended arena). On a plain
     // arena dict only the table branch does work, so the bulk-load hot path keeps its
     // shape (two predictable never-taken branches).
+    //
+    // [OPUS-5] (sq-7d3dj.21b) HASH-BEFORE-MEMCMP — VERIFIED ALREADY PRESENT ON EVERY DEDUP
+    // PATH; deliberately NOT re-implemented. The bead asked to compare a stored 64-bit hash
+    // before falling to the string compare, "skip if already done — verify first". It is done:
+    //   * `mapped_find` binary-searches the SORTED 64-bit `dict-hash.bin` array and calls `eq`
+    //     only on entries whose FULL 64-bit hash matches — a strictly stronger prefilter than
+    //     the bead described.
+    //   * `self.table` is a `hashbrown::HashTable<Id>`, whose `find(hash, eq)` matches the
+    //     hash's top-7-bit `h2` tag against a 16-slot SIMD control group and invokes `eq` only
+    //     on a tag hit — i.e. ~127/128 of probed slots are rejected before any `memcmp`.
+    //   * the sharded merge (`ShardedDict::intern_partials`/`intern_terms`) and the spill path
+    //     (`dictspill`) route by `hash % n_leaf` first and then land in one of the two above.
+    // Adding a per-entry stored `u64` would mean `HashTable<(Id, u64)>` — 4 → 16 bytes per
+    // entry after padding, i.e. ~3-4x the lookup table on a 100M-term dict (a `dict_bytes_
+    // per_term` ratchet regression) — to filter the ~0.8% of probes the `h2` tag already lets
+    // through. Rejected on that trade, not on effort. Pinned by
+    // `mapped_find_compares_full_hash_before_eq` so a refactor cannot silently drop the
+    // stronger mmap-side prefilter.
 
     #[inline]
     fn find_iri(&self, hash: u64, iri: &str) -> Option<Id> {
@@ -3573,6 +3591,50 @@ mod tests {
         let mut sdok = ShardedDict::new(4);
         sdok.intern_partials(&[(pdok, Vec::<[Id; 3]>::new())])
             .expect("a well-formed triple-term partial must intern without error");
+    }
+
+    /// [OPUS-5] sq-7d3dj.21b — HASH-BEFORE-MEMCMP is already in place on the mmap dedup path,
+    /// in its strongest form: `mapped_find` binary-searches the sorted 64-bit hash array and
+    /// calls the `eq` (string-compare) closure ONLY for entries whose FULL 64-bit hash matches.
+    /// The bead asked for this filter to be added; the verification says it exists, so this
+    /// test pins it instead — a refactor that dropped the hash gate and linearly `eq`-scanned
+    /// would turn every miss from O(log n) hash probes + 0 compares into O(n) compares, which
+    /// this catches by COUNTING `eq` invocations rather than by timing.
+    #[cfg(feature = "mmap")]
+    #[test]
+    fn mapped_find_compares_full_hash_before_eq() {
+        use std::cell::Cell;
+        let mut d = Dict::new();
+        for i in 0..64 {
+            d.intern(&Term::NamedNode(NamedNode::new_unchecked(format!("http://ex/t{}", i))));
+        }
+        let dir = std::env::temp_dir().join(format!("sparq-dict-hashfirst-{}", std::process::id()));
+        d.save_mmap(&dir).unwrap();
+        let m = Dict::open_mmap(&dir).unwrap();
+
+        // (a) A hash that is present: `eq` runs for exactly the entries carrying that hash.
+        //     With 64 distinct terms and a 64-bit hash that is one entry, so one compare —
+        //     NOT the 64 a compare-everything scan would make.
+        let present = hash_iri("http://ex/t7");
+        let calls = Cell::new(0usize);
+        let found = m.mapped_find(present, |s| {
+            calls.set(calls.get() + 1);
+            stored_ref_is_iri(s, "http://ex/t7", &m.prefixes)
+        });
+        assert!(found.is_some(), "the term must be found through the mapped index");
+        assert_eq!(calls.get(), 1, "eq must run once — only for the entry whose 64-bit hash matched");
+
+        // (b) A hash that is absent: `eq` must NEVER run. This is the load-bearing half — it is
+        //     what makes a dictionary MISS cost zero string compares.
+        let calls = Cell::new(0usize);
+        let found = m.mapped_find(hash_iri("http://ex/absent"), |_| {
+            calls.set(calls.get() + 1);
+            true // would report a bogus hit if the hash gate were ever removed
+        });
+        assert_eq!(found, None, "an absent hash must not resolve to any id");
+        assert_eq!(calls.get(), 0, "eq must not run at all when no stored 64-bit hash matches");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[cfg(feature = "mmap")]
