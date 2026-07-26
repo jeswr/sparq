@@ -567,7 +567,15 @@ no network); the Python close-script carries a `--self-test`.
   add-labels REST call silently would, so a typo'd area is dropped with a `::warning`
   instead), and **fail-closed**: unresolvable paths or more than `[policy] max_areas`
   distinct areas keep the PR on `__global__` — *unclassified* and *genuinely cross-cutting*
-  are now distinguishable, which is the actual bug. `--dry-run` is the default; `--apply`
+  are now distinguishable, which is the actual bug. The changed-file list is the one input
+  attribution cannot check for itself, so it is enumerated with the **paginated REST**
+  endpoint *and* cross-checked against `changedFiles`; any disagreement is
+  `incomplete-paths` → `__global__`. (`gh pr view --json files` is GraphQL
+  `files(first: 100)` and **silently truncates** — measured on PR #3581: `changedFiles`
+  646, `--json files` 100. A truncated list derives a proper **subset** of the true areas,
+  and a too-narrow reservation puts two workers on one crate, where a too-broad one merely
+  delays. Renames consume `previous_filename`, so a cross-crate move implicates both
+  ends.) `--dry-run` is the default; `--apply`
   mutates; `--backfill` sweeps every open PR (use `--pace` — each label add fires a
   `pull_request: labeled` event that ci/bench/fuzz/feature-matrix all react to). Wired to
   every PR by `.github/workflows/pr-area-label.yml` (least-privilege

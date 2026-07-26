@@ -16,9 +16,21 @@ THE CONTRACT
     can never be dropped (`apply_areas` records every request; the test asserts no
     DELETE is ever issued).
   * FAIL CLOSED: it emits NO labels — leaving the PR on `__global__` — when the changed
-    paths are unavailable (`no-paths`), when ANY path is unattributable (`unresolved`),
-    or when more than `[policy] max_areas` distinct areas are implicated
-    (`cross-cutting`). Unknown blast radius must serialize. See ci/area-labels.toml.
+    paths are unavailable (`no-paths`), only PARTIALLY available (`incomplete-paths`),
+    when ANY path is unattributable (`unresolved`), or when more than
+    `[policy] max_areas` distinct areas are implicated (`cross-cutting`). Unknown blast
+    radius must serialize. See ci/area-labels.toml.
+  * THE INPUT BOUNDARY IS THE PROOF OBLIGATION. Attribution is a pure function of the
+    path string, so within a COMPLETE list under-reservation is impossible. It is the
+    list itself that cannot be trusted: `gh pr view --json files` is GraphQL
+    `files(first: 100)` and SILENTLY TRUNCATES (measured on this repo: PR #3581 reports
+    `changedFiles = 646` and `--json files` returns 100). A truncated list derives a
+    PROPER SUBSET of the true areas — the CORRUPTING direction, because a too-narrow
+    reservation puts two workers on one crate, while a too-broad one only delays. So the
+    file list is enumerated with the PAGINATED REST endpoint AND cross-checked against
+    the authoritative `changedFiles` count; any disagreement is `incomplete-paths`.
+    Renames are consumed via `previous_filename` (REST-only), so a cross-crate move
+    implicates BOTH the source and the destination crate.
   * It NEVER creates a label. GitHub's "add labels to an issue" REST call SILENTLY
     CREATES an unknown label, so a typo'd area would become permanent repo state; every
     candidate area is therefore checked against the repo's live label set first and
@@ -182,18 +194,25 @@ def attribute(path, policy):
     return None
 
 
-def derive_areas(paths, policy, known_areas):
+def derive_areas(paths, policy, known_areas, complete=True):
     """(areas, reason) for a changed-path list. EMPTY areas == stay on `__global__`.
 
     `known_areas` is the set of area names for which an `area:<name>` label ACTUALLY
     exists in the repo; an area outside it is treated as unresolved, because applying
     it would silently create a label (see module docstring).
 
-    The reason vocabulary is exactly {"resolved", "no-paths", "unresolved",
-    "cross-cutting"}; the latter three all mean "emit nothing, stay on `__global__`" and
-    are distinguished only so the log says WHY. Callers branch on `== "resolved"`, so a
-    future reason is fail-closed by construction.
+    `complete` is the verdict of `paths_are_complete` — whether `paths` is KNOWN to be
+    the whole changed-file list. A partial list derives a proper SUBSET of the true
+    areas, which is the corrupting direction, so it emits nothing.
+
+    The reason vocabulary is exactly {"resolved", "no-paths", "incomplete-paths",
+    "unresolved", "cross-cutting"}; the latter four all mean "emit nothing, stay on
+    `__global__`" and are distinguished only so the log says WHY. Callers branch on
+    `== "resolved"`, so a future reason is fail-closed by construction.
     """
+    if not complete:
+        # TRUNCATED / partial enumeration. See `paths_are_complete`.
+        return frozenset(), "incomplete-paths"
     if not paths:
         return frozenset(), "no-paths"
     areas, unresolved = set(), []
@@ -213,15 +232,38 @@ def derive_areas(paths, policy, known_areas):
     return frozenset(areas), "resolved"
 
 
+def paths_are_complete(enumerated, changed):
+    """Is an enumeration of `enumerated` changed-file ENTRIES the WHOLE changed set?
+
+    `changed` is GitHub's authoritative `changedFiles` count for the PR, fetched
+    independently of the file list. They disagree exactly when the enumeration was
+    capped — GraphQL's `files(first: 100)`, or the REST endpoint's 3000-file ceiling.
+
+    Fail closed on anything that is not a confident, exact agreement: a missing or
+    non-integer `changed` means we could not establish completeness at all, which is
+    NOT the same as having established it.
+    """
+    if not isinstance(enumerated, int) or isinstance(enumerated, bool) or enumerated < 0:
+        return False
+    if not isinstance(changed, int) or isinstance(changed, bool) or changed < 0:
+        return False
+    return enumerated == changed
+
+
 def plan_for_pr(pr, policy, known_areas):
-    """The full decision for one PR dict {number, labels:[str], files:[str]}.
+    """The full decision for one PR dict {number, labels:[str], files:[str], complete:bool}.
 
     Returns a dict with the derived areas, the labels to ADD (never to remove), and the
     reason. `partition` is what the scheduler will see AFTER the add.
+
+    `complete` must be EXACTLY `True` for any label to be emitted. A record that omits it
+    — a fetcher that never established that its file list is whole — therefore fails
+    CLOSED rather than deriving from a possibly-truncated list.
     """
     existing = {lb[len(AREA_PREFIX):] for lb in pr.get("labels") or []
                 if isinstance(lb, str) and lb.startswith(AREA_PREFIX)}
-    areas, reason = derive_areas(pr.get("files") or [], policy, known_areas)
+    areas, reason = derive_areas(pr.get("files") or [], policy, known_areas,
+                                 complete=pr.get("complete") is True)
     add = sorted(areas - existing)
     after = existing | areas
     return {
@@ -281,29 +323,68 @@ def known_area_labels(repo, runner=None):
             if ln.startswith(AREA_PREFIX) and len(ln) > len(AREA_PREFIX)}
 
 
+def fetch_changed_files(repo, number, runner=None):
+    """(paths, entry_count) for a PR, enumerated with the PAGINATED REST endpoint.
+
+    `gh pr view --json files` is GraphQL `files(first: 100)` and is NOT used anywhere in
+    this module: it silently truncates, and a truncated list derives a proper SUBSET of
+    the true areas (module docstring). `gh api --paginate` walks every page.
+
+    `paths` contains, for each entry, the file's CURRENT path and — for a rename — its
+    `previous_filename` as well, so a move out of `crates/A/` into `crates/B/` implicates
+    BOTH crates. `entry_count` counts ENTRIES, not paths, because that is the number
+    `changedFiles` is comparable with.
+    """
+    raw = _gh(["api", "--paginate", f"repos/{repo}/pulls/{number}/files?per_page=100",
+               "--jq", r'.[] | [.filename, (.previous_filename // "")] | @tsv'],
+              runner=runner)
+    paths, entries = [], 0
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        entries += 1
+        current, _, previous = line.partition("\t")
+        for p in (current.strip(), previous.strip()):
+            if p and p not in paths:
+                paths.append(p)
+    return paths, entries
+
+
+def _with_changed_files(repo, record, changed, runner=None):
+    """Attach the enumerated paths + the completeness verdict to a PR record."""
+    paths, entries = fetch_changed_files(repo, record["number"], runner=runner)
+    record["files"] = paths
+    record["complete"] = paths_are_complete(entries, changed)
+    return record
+
+
 def fetch_pr(repo, number, runner=None):
+    # `changedFiles` is the authoritative count and is fetched INDEPENDENTLY of the file
+    # list, so the two can be cross-checked. `files` is deliberately NOT requested here.
     raw = _gh(["pr", "view", str(number), "--repo", repo,
-               "--json", "number,labels,files"], runner=runner)
+               "--json", "number,labels,changedFiles"], runner=runner)
     data = json.loads(raw)
-    return {
+    return _with_changed_files(repo, {
         "number": data.get("number", number),
         "labels": [lb.get("name") for lb in data.get("labels") or []],
-        "files": [f.get("path") for f in data.get("files") or []],
-    }
+    }, data.get("changedFiles"), runner=runner)
 
 
 def fetch_open_prs(repo, limit=300, runner=None):
+    # Same rule as fetch_pr: the list call carries metadata + the authoritative count,
+    # never the capped GraphQL `files` connection. The per-PR REST enumeration costs one
+    # extra call per open PR; a backfill is a hand-run, dry-run-by-default operation, and
+    # a wrong narrow label is not worth saving ~90 requests.
     raw = _gh(["pr", "list", "--repo", repo, "--state", "open", "--limit", str(limit),
-               "--json", "number,labels,files,isDraft,title"], runner=runner)
+               "--json", "number,labels,changedFiles,isDraft,title"], runner=runner)
     out = []
     for data in json.loads(raw):
-        out.append({
+        out.append(_with_changed_files(repo, {
             "number": data.get("number"),
             "labels": [lb.get("name") for lb in data.get("labels") or []],
-            "files": [f.get("path") for f in data.get("files") or []],
             "title": data.get("title") or "",
             "isDraft": bool(data.get("isDraft")),
-        })
+        }, data.get("changedFiles"), runner=runner))
     return out
 
 
@@ -331,6 +412,9 @@ def _emit(plan, pr, policy, known_areas, apply, out):
                 detail += f" (+{len(blockers) - 8} more)"
         elif plan["reason"] == "cross-cutting":
             detail = f"  spans >{policy.max_areas} areas"
+        elif plan["reason"] == "incomplete-paths":
+            detail = ("  changed-file enumeration disagreed with `changedFiles` — the "
+                      "list is partial, so any narrowing would be a proper SUBSET")
         print(f"#{n} KEEP {GLOBAL} [{plan['reason']}]{detail}", file=out)
         return 0
     if plan["noop"]:
@@ -462,6 +546,15 @@ def _self_test():
     assert areas(ok)[1] == "resolved" and len(areas(ok)[0]) == policy.max_areas
     # No paths at all => global.
     assert areas([]) == (frozenset(), "no-paths")
+    # A PARTIAL changed-file list => global. This is the truncation boundary: the same
+    # paths derive a real (but SUBSET) answer when the list is known whole.
+    partial = ["crates/sparq-core/src/lib.rs"]
+    assert derive_areas(partial, policy, known, complete=False) == (
+        frozenset(), "incomplete-paths")
+    assert derive_areas(partial, policy, known, complete=True)[1] == "resolved"
+    assert paths_are_complete(100, 646) is False
+    assert paths_are_complete(646, 646) is True
+    assert paths_are_complete(0, None) is False
     # An area with no live label is unresolved, never auto-created.
     assert derive_areas(["crates/sparq-core/src/lib.rs"], policy, set()) == (
         frozenset(), "unresolved")
@@ -475,17 +568,23 @@ def _self_test():
     assert attribute("scripts/pr-area-labels.py", policy) == "ci"
     # Additive only: derivation never proposes removing a human label.
     plan = plan_for_pr({"number": 1, "labels": ["area:sparq-core", "review:parked"],
-                        "files": ["crates/sparq-engine/src/lib.rs"]}, policy, known)
+                        "files": ["crates/sparq-engine/src/lib.rs"],
+                        "complete": True}, policy, known)
     assert plan["add"] == ["area:sparq-engine"], plan
     assert plan["partition"] == ["sparq-core", "sparq-engine"], plan
     # Idempotent: nothing to add when the derived area is already there.
     assert plan_for_pr({"number": 2, "labels": ["area:sparq-engine"],
-                        "files": ["crates/sparq-engine/src/lib.rs"]},
+                        "files": ["crates/sparq-engine/src/lib.rs"], "complete": True},
                        policy, known)["noop"] is True
     # A fail-closed PR that already carries a HUMAN area keeps it (not global).
     keep = plan_for_pr({"number": 3, "labels": ["area:sparq-zk"],
-                        "files": ["no/such/dir/x.txt"]}, policy, known)
+                        "files": ["no/such/dir/x.txt"], "complete": True}, policy, known)
     assert keep["add"] == [] and keep["partition"] == ["sparq-zk"], keep
+    # A record with NO completeness verdict fails CLOSED — a fetcher that never
+    # established that its list is whole must not narrow anything.
+    blind = plan_for_pr({"number": 4, "labels": [],
+                         "files": ["crates/sparq-engine/src/lib.rs"]}, policy, known)
+    assert blind["add"] == [] and blind["reason"] == "incomplete-paths", blind
     print("pr-area-labels self-test OK")
     return 0
 

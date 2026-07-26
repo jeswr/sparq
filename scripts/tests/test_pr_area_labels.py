@@ -98,10 +98,22 @@ class FakeGH:
     discriminating: they check the resulting label set, not the absence of a string in
     the source. A hypothetical "prune stale areas" feature would remove a label here and
     turn the additive-only test red.
+
+    It also models the INPUT BOUNDARY faithfully, because that is where the interesting
+    failure lives:
+      * `changedFiles` is served from the FULL entry list — it is GitHub's authoritative
+        count and is NOT affected by any page cap;
+      * `api .../pulls/N/files` serves ONE PAGE unless `--paginate` is passed, exactly as
+        `gh` does, so dropping the flag really loses the tail;
+      * on top of that it serves at most `cap` entries, which reproduces a ceiling the
+        caller cannot page past — GraphQL `files(first: 100)`, or REST's 3000-file cap;
+      * an entry may be `"path"` or `("new_path", "previous_path")`, so a rename carries
+        `previous_filename` exactly as the REST payload does.
     """
 
     def __init__(self, prs, labels):
-        # prs: {number: {"labels": [..], "files": [..], "title": str, "isDraft": bool}}
+        # prs: {number: {"labels": [..], "files": [entry..], "cap": int|None,
+        #                "title": str, "isDraft": bool}}
         self.prs = {n: dict(p) for n, p in prs.items()}
         self.labels = list(labels)
         self.calls: list[list[str]] = []
@@ -110,20 +122,46 @@ class FakeGH:
     def writes(self):
         return [c for c in self.calls if c[:2] == ["pr", "edit"]]
 
+    @staticmethod
+    def _entries(pr):
+        out = []
+        for f in pr["files"]:
+            out.append((f, "") if isinstance(f, str) else (f[0], f[1] or ""))
+        return out
+
+    def _files_payload(self, n, url, paginate):
+        """What `gh api [--paginate] .../pulls/N/files --jq ...|@tsv` would print.
+
+        Without `--paginate`, `gh` returns the FIRST PAGE only — modelled here, so
+        dropping the flag really loses the tail. `cap` is the separate, unpageable
+        ceiling."""
+        entries = self._entries(self.prs[n])
+        cap = self.prs[n].get("cap")
+        if cap is not None:
+            entries = entries[:cap]
+        if not paginate:
+            m = re.search(r"per_page=(\d+)", url)
+            entries = entries[:int(m.group(1)) if m else 30]
+        return "".join(f"{new}\t{prev}\n" for new, prev in entries)
+
     def __call__(self, args):
         self.calls.append(list(args))
         if args[0] == "api":
+            url = next((a for a in args if a.startswith("repos/")), "")
+            m = re.search(r"/pulls/(\d+)/files", url)
+            if m:
+                return self._files_payload(int(m.group(1)), url, "--paginate" in args)
             return "".join(f"{name}\n" for name in self.labels)
         if args[:2] == ["pr", "view"]:
             n = int(args[2])
             pr = self.prs[n]
             return json.dumps({"number": n,
                                "labels": [{"name": lb} for lb in pr["labels"]],
-                               "files": [{"path": p} for p in pr["files"]]})
+                               "changedFiles": len(self._entries(pr))})
         if args[:2] == ["pr", "list"]:
             return json.dumps([
                 {"number": n, "labels": [{"name": lb} for lb in p["labels"]],
-                 "files": [{"path": f} for f in p["files"]],
+                 "changedFiles": len(self._entries(p)),
                  "title": p.get("title", ""), "isDraft": p.get("isDraft", False)}
                 for n, p in sorted(self.prs.items())])
         if args[:2] == ["pr", "edit"]:
@@ -222,10 +260,13 @@ class TestPolicyTable(unittest.TestCase):
         (`docs`, via the `skills/**` catch-all), never a WRONG crate — the direction that
         would put two workers on one crate. Attribution stays total either way.
 
-        What is NOT demoted: those surfaces must still ATTRIBUTE, from their REAL tracked
-        files (not a synthetic probe). Delete the `skills/**` catch-all row and this goes
-        red — that deletion is the change that would really send those PRs to
-        `__global__`. Surfaces lacking a specific row are printed as drift."""
+        What is NOT demoted: every surface must still ATTRIBUTE, over its REAL tracked
+        files. Surfaces lacking a specific row are printed as drift.
+
+        The catch-all row that MAKES the demotion safe is pinned separately, by
+        `test_a_future_skill_surface_resolves_through_the_catch_all`. MEASURED: with a
+        specific row now present for every surface on `main`, deleting the catch-all does
+        NOT red this test — so this test alone would be a vacuous guard on it."""
         patterns = {p for p, _ in self.policy.rows}
         known = self.members | self.policy.non_crate
         drift, unattributed = [], []
@@ -243,6 +284,24 @@ class TestPolicyTable(unittest.TestCase):
         if drift:
             print(f"\n  [drift, advisory] skills/ surfaces with no specific [[map]] row "
                   f"(they take the `docs` catch-all): {drift}")
+
+    def test_a_future_skill_surface_resolves_through_the_catch_all(self):
+        """The load-bearing half of the demotion above: a skills surface that has NO
+        `[[map]]` row must still attribute, or "the row is only advisory" is false and a
+        new surface silently takes `__global__` again.
+
+        This is a SYNTHETIC probe, deliberately — a surface with no row is by definition
+        one that has not landed yet, so no real tracked path can exercise the catch-all
+        while the table is complete. Delete the `skills/**` row and this goes red."""
+        known = self.members | self.policy.non_crate
+        patterns = {p for p, _ in self.policy.rows}
+        surface = "surface-that-does-not-exist-yet"
+        self.assertNotIn(f"skills/{surface}/**", patterns)
+        for probe in (f"skills/{surface}/SKILL.md",
+                      f"skills/{surface}/references/deep/nested.md"):
+            self.assertIn(M.attribute(probe, self.policy), known,
+                          f"{probe} attributes to nothing — the `skills/**` catch-all is "
+                          f"gone, so a new surface takes __global__")
 
     def test_landed_anticipated_roots_are_reported_as_drift_but_still_attribute(self):
         """Same demotion, same reasoning, for `[policy] anticipated_roots`. An entry whose
@@ -432,14 +491,16 @@ class TestDerivation(unittest.TestCase):
     def test_plan_never_proposes_removing_a_human_area_label(self):
         plan = M.plan_for_pr({"number": 1,
                               "labels": ["area:sparq-core", "review:parked"],
-                              "files": ["crates/sparq-engine/src/lib.rs"]},
+                              "files": ["crates/sparq-engine/src/lib.rs"],
+                              "complete": True},
                              self.policy, self.known)
         self.assertEqual(plan["add"], ["area:sparq-engine"])
         self.assertEqual(plan["partition"], ["sparq-core", "sparq-engine"])
 
     def test_fail_closed_pr_that_already_has_a_human_area_keeps_it(self):
         plan = M.plan_for_pr({"number": 2, "labels": ["area:sparq-zk"],
-                              "files": ["no/such/top/level/x.txt"]},
+                              "files": ["no/such/top/level/x.txt"],
+                              "complete": True},
                              self.policy, self.known)
         self.assertEqual(plan["add"], [])
         self.assertEqual(plan["partition"], ["sparq-zk"])
@@ -447,7 +508,8 @@ class TestDerivation(unittest.TestCase):
 
     def test_already_labelled_pr_is_a_noop(self):
         plan = M.plan_for_pr({"number": 3, "labels": ["area:sparq-engine"],
-                              "files": ["crates/sparq-engine/src/lib.rs"]},
+                              "files": ["crates/sparq-engine/src/lib.rs"],
+                              "complete": True},
                              self.policy, self.known)
         self.assertTrue(plan["noop"])
         self.assertEqual(plan["add"], [])
@@ -579,6 +641,165 @@ class TestEffects(unittest.TestCase):
                 M._gh(["api", "x"], sleep=lambda _s: None)
         finally:
             sp.run = orig
+
+
+# ============================================================== the INPUT boundary
+
+
+class TestChangedFileEnumeration(unittest.TestCase):
+    """The changed-path list is the ONE input attribution cannot check for itself.
+
+    `attribute` is a pure function of the path string, so within a COMPLETE list two PRs
+    touching one file always derive the same area and always serialize. The property
+    fails only if the list is PARTIAL: a truncated list derives a proper SUBSET of the
+    true areas, and a too-narrow reservation is the CORRUPTING direction (two workers on
+    one crate), where a too-broad one merely delays.
+
+    Measured on this repo (2026-07-26): PR #3581 reports `changedFiles = 646` while
+    `gh pr view --json files` — GraphQL `files(first: 100)` — returns 100.
+
+    Two independent guards, each with its own test below: enumerate with the PAGINATED
+    REST endpoint, AND cross-check the count against `changedFiles`. The cross-check is
+    the one that survives a future API change.
+    """
+
+    # The reviewer's demonstration case, rebuilt exactly: 115 entries in path order, so a
+    # 100-entry cap drops the alphabetically-late `crates/sparq-zk/**` tail.
+    TRUNCATING = (["Cargo.lock"]
+                  + [f"crates/sparq-core/src/m{i:03d}.rs" for i in range(110)]
+                  + [f"crates/sparq-zk/src/z{i}.rs" for i in range(4)])
+
+    def setUp(self):
+        self.policy = M.load_policy()
+        self.live = [f"area:{a}" for a in
+                     sorted(self.policy.members | self.policy.non_crate)]
+
+    def fake(self, files, cap=None, labels=()):
+        return FakeGH({7: {"labels": list(labels), "files": list(files), "cap": cap}},
+                      self.live)
+
+    def test_the_truncated_tail_really_would_have_changed_the_answer(self):
+        """Fixture-validity check, so the guard test below cannot pass for the wrong
+        reason. The first 100 entries and the full 115 must derive DIFFERENT area sets,
+        and the truncated one must be a PROPER SUBSET — otherwise `incomplete-paths` in
+        the next test would prove nothing."""
+        known = self.policy.members | self.policy.non_crate
+        seen, _ = M.derive_areas(self.TRUNCATING[:100], self.policy, known)
+        truth, _ = M.derive_areas(self.TRUNCATING, self.policy, known)
+        self.assertEqual(set(seen), {"deps", "sparq-core"})
+        self.assertEqual(set(truth), {"deps", "sparq-core", "sparq-zk"})
+        self.assertTrue(seen < truth, "fixture does not demonstrate under-reservation")
+
+    def test_a_truncated_file_list_fails_closed_instead_of_deriving_a_subset(self):
+        """THE guard. The API serves only 100 of 115 entries while `changedFiles` still
+        reports 115; the cross-check must catch the disagreement and emit NOTHING.
+
+        Delete the completeness check in `plan_for_pr`/`derive_areas` and this goes red
+        with `area:deps` + `area:sparq-core` applied and `area:sparq-zk` missing — the PR
+        would then be editing `crates/sparq-zk/**` while the scheduler dispatched a
+        `sparq-zk` issue against it."""
+        f = self.fake(self.TRUNCATING, cap=100)
+        out = _run(f, ["--pr", "7", "--apply"])
+        self.assertEqual(f.writes, [], "a TRUNCATED file list must not narrow anything")
+        self.assertEqual(f.prs[7]["labels"], [])
+        self.assertIn("incomplete-paths", out)
+        self.assertNotIn("area:sparq-core", out)
+
+    def test_more_than_one_hundred_paths_are_all_enumerated(self):
+        """The paging half. Same 115 entries, no cap: every page must be read, so the
+        full `{deps, sparq-core, sparq-zk}` is derived and applied.
+
+        Stop paginating (or go back to `gh pr view --json files`) and this goes red — the
+        cross-check then reports `incomplete-paths` and nothing is applied at all."""
+        f = self.fake(self.TRUNCATING)
+        _run(f, ["--pr", "7", "--apply"])
+        self.assertEqual(sorted(f.prs[7]["labels"]),
+                         ["area:deps", "area:sparq-core", "area:sparq-zk"])
+
+    def test_the_file_list_is_never_read_from_the_capped_graphql_field(self):
+        """Structural, over BOTH entry points — the `--pr` path and the backfill, which
+        was the second consumer of `--json files`. No `--json` selection anywhere may
+        request `files`; the list must come from a `--paginate`d REST `/pulls/N/files`
+        call. Reintroducing `--json ...,files` on EITHER path reds here even if the
+        cross-check were also removed (a merely-fetched `files` field is the trap: it is
+        inert until someone reads it, and then it under-reserves silently)."""
+        for argv, n in ((["--pr", "7", "--apply"], 7), (["--backfill", "--apply"], 7)):
+            f = self.fake(self.TRUNCATING)
+            _run(f, argv)
+            for call in f.calls:
+                if "--json" not in call:
+                    continue
+                fields = call[call.index("--json") + 1].split(",")
+                self.assertNotIn("files", fields,
+                                 f"`--json files` is GraphQL files(first: 100): {call}")
+                self.assertIn("changedFiles", fields,
+                              f"the authoritative count must be fetched too: {call}")
+            rest = [c for c in f.calls
+                    if c[0] == "api" and any(f"/pulls/{n}/files" in a for a in c)]
+            self.assertEqual(len(rest), 1,
+                             f"expected one REST file enumeration for {argv}: {f.calls}")
+            self.assertIn("--paginate", rest[0], "the REST enumeration must page")
+
+    def test_the_backfill_uses_the_same_enumeration_as_the_single_pr_path(self):
+        """The backfill was the second consumer of `--json files`; a guard on only the
+        `--pr` path would leave it under-reserving."""
+        f = FakeGH({11: {"labels": [], "files": self.TRUNCATING, "cap": 100},
+                    12: {"labels": [], "files": self.TRUNCATING}}, self.live)
+        _run(f, ["--backfill", "--apply"])
+        self.assertEqual(f.prs[11]["labels"], [], "truncated PR must stay __global__")
+        self.assertEqual(sorted(f.prs[12]["labels"]),
+                         ["area:deps", "area:sparq-core", "area:sparq-zk"])
+
+    def test_a_cross_crate_rename_implicates_the_source_crate_too(self):
+        """Renames report only the NEW path (`filename` in REST, `path` in GraphQL). A
+        move out of `crates/sparq-core/` into `crates/sparq-zk/` really touches BOTH
+        crates, so `previous_filename` is consumed. Stop consuming it and this goes red
+        with only `area:sparq-zk` — under-reservation again, same quantifier slip."""
+        f = self.fake([("crates/sparq-zk/src/moved.rs", "crates/sparq-core/src/moved.rs")])
+        _run(f, ["--pr", "7", "--apply"])
+        self.assertEqual(sorted(f.prs[7]["labels"]),
+                         ["area:sparq-core", "area:sparq-zk"])
+
+    def test_a_rename_out_of_an_unmapped_path_fails_closed(self):
+        """The consumed previous path is held to the SAME standard as a current one: an
+        unattributable source poisons the PR rather than being quietly ignored."""
+        f = self.fake([("crates/sparq-zk/src/moved.rs", "no/such/top/level/moved.rs")])
+        out = _run(f, ["--pr", "7", "--apply"])
+        self.assertEqual(f.writes, [])
+        self.assertIn("unresolved", out)
+
+    def test_a_rename_counts_as_one_entry_against_changedFiles(self):
+        """Cross-check arithmetic: a rename contributes TWO paths but ONE changed file.
+        Counting paths instead of entries would make every rename look truncated and
+        send correct PRs back to `__global__` (safe, but wrong and silent)."""
+        paths, entries = M.fetch_changed_files(
+            REPO, 7,
+            runner=self.fake([("crates/sparq-zk/a.rs", "crates/sparq-core/a.rs"),
+                              "crates/sparq-zk/b.rs"]))
+        self.assertEqual(entries, 2)
+        self.assertEqual(sorted(paths), ["crates/sparq-core/a.rs",
+                                         "crates/sparq-zk/a.rs", "crates/sparq-zk/b.rs"])
+
+    def test_paths_are_complete_only_on_an_exact_confident_agreement(self):
+        self.assertTrue(M.paths_are_complete(646, 646))
+        self.assertTrue(M.paths_are_complete(0, 0))
+        self.assertFalse(M.paths_are_complete(100, 646))     # the measured #3581 case
+        self.assertFalse(M.paths_are_complete(3000, 4000))   # the REST 3000-file ceiling
+        self.assertFalse(M.paths_are_complete(5, None))      # count unavailable
+        self.assertFalse(M.paths_are_complete(5, "5"))       # not an int
+        self.assertFalse(M.paths_are_complete(None, 5))
+
+    def test_a_pr_record_with_no_completeness_verdict_fails_closed(self):
+        """A future caller that assembles a PR record without establishing completeness
+        must get `__global__`, not a narrowing derived from an unchecked list. Flip the
+        `is True` to a truthy/`get(..., True)` default and this goes red."""
+        known = self.policy.members | self.policy.non_crate
+        blind = M.plan_for_pr({"number": 9, "labels": [],
+                               "files": ["crates/sparq-core/src/lib.rs"]},
+                              self.policy, known)
+        self.assertEqual(blind["add"], [])
+        self.assertEqual(blind["reason"], "incomplete-paths")
+        self.assertEqual(blind["partition"], [M.GLOBAL])
 
 
 # ======================================================================== YAML seam

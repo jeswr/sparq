@@ -29,8 +29,20 @@
 # THE FAIL-CLOSED RULE (do not weaken it)
 # ===========================================================================
 # `__global__` is expressed as "the PR carries NO `area:` label". The deriver emits
-# NO labels — i.e. leaves the PR on `__global__` — in exactly three cases:
+# NO labels — i.e. leaves the PR on `__global__` — in exactly four cases:
 #
+#   0. `incomplete-paths` — the changed-file enumeration disagreed with GitHub's
+#                        authoritative `changedFiles` count, so the list is PARTIAL.
+#                        This is the input-boundary case and the only one that is not
+#                        about the table: attribution is a pure function of the path
+#                        string, so within a COMPLETE list under-reservation is
+#                        impossible — but a TRUNCATED list derives a proper SUBSET of
+#                        the true areas, which is the CORRUPTING direction (a wrong
+#                        narrow reservation puts two workers on one crate; a wrong
+#                        broad one only delays). Measured 2026-07-26: PR #3581 reports
+#                        `changedFiles = 646` while `gh pr view --json files` — GraphQL
+#                        `files(first: 100)` — returns 100. The deriver therefore uses
+#                        the PAGINATED REST endpoint AND cross-checks the count.
 #   1. `no-paths`      — the changed-file list is empty/unavailable.
 #   2. `unresolved`    — ANY changed path has no rule here, or resolves to an
 #                        `area:` label that does not exist in the repo. STRICT on
