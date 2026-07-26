@@ -466,14 +466,25 @@ fn type_map_key_precedes_existing_types() {
 }
 
 #[test]
-fn id_coercion_keyword_shaped_value_yields_null_id() {
-    // Value Expansion (§5.3.2 step 1) is literal: a keyword-shaped token under `@type: @id`
-    // IRI-expands to null, so the value expands to `{"@id": null}` — retained with a JSON
-    // null exactly as the W3C expand/0122 expected output retains `"@id": null` on the
-    // `@id`-keyword path (its manifest notes the result "will not be valid JSON-LD").
+fn id_coercion_keyword_shaped_value_is_dropped() {
     assert_expands(
         r#"{"@context": {"p": {"@id": "http://ex/p", "@type": "@id"}}, "p": "@kw"}"#,
-        r#"[{"http://ex/p": [{"@id": null}]}]"#,
+        r#"[]"#,
+    );
+}
+
+#[test]
+fn property_index_null_re_expansion_is_dropped() {
+    assert_expands(
+        r#"{
+            "@context": {
+                "@vocab": "http://ex/",
+                "items": {"@container": "@index", "@index": "kind"},
+                "kind": {"@type": "@vocab"}
+            },
+            "items": {"@kw": "kept"}
+        }"#,
+        r#"[{"http://ex/items": [{"@value": "kept"}]}]"#,
     );
 }
 
