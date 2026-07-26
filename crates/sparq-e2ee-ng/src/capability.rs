@@ -101,11 +101,17 @@ pub struct PublicGrant {
     pub publisher_pub: Option<[u8; PUBLIC_KEY_LEN]>,
     /// Parent grant id for a delegated grant (profile field 16).
     pub parent_grant_id: Option<CapId>,
+    /// Optional **maximum epoch** ceiling (profile field 17): the last epoch this
+    /// grant may be exercised in. This is a *separate* bound from [`Self::epoch`]
+    /// — `epoch` is the exact epoch (and epoch-specific [`Self::topic`]) the grant
+    /// is scoped to, whereas `max_epoch` bounds how far a delegated chain may be
+    /// carried forward. `None` means unbounded; when set it MUST be `>= epoch`.
+    pub max_epoch: Option<Epoch>,
     /// Admin signature over the canonical public grant (§8.2 field 14).
     pub admin_sig: Option<[u8; SIGNATURE_LEN]>,
 }
 
-// wire keys (§8.2 + profile allocations 15/16)
+// wire keys (§8.2 + profile allocations 15/16/17)
 const K_VERSION: u64 = 1;
 const K_REPO: u64 = 2;
 const K_BRANCH: u64 = 3;
@@ -122,6 +128,7 @@ const K_CAP_NONCE: u64 = 13;
 const K_ADMIN_SIG: u64 = 14;
 const K_PUBLISHER_PK: u64 = 15;
 const K_PARENT_GRANT: u64 = 16;
+const K_MAX_EPOCH: u64 = 17;
 const VERSION: u64 = 0;
 
 // validity sub-map keys
@@ -167,6 +174,9 @@ impl PublicGrant {
         }
         if let Some(p) = &self.parent_grant_id {
             e.push((K_PARENT_GRANT, enc_bytes(p.as_bytes())));
+        }
+        if let Some(m) = &self.max_epoch {
+            e.push((K_MAX_EPOCH, enc_uint(m.0)));
         }
         e
     }
@@ -231,6 +241,7 @@ impl PublicGrant {
         let mut cap_nonce = None;
         let mut publisher_pub = None;
         let mut parent = None;
+        let mut max_epoch = None;
         let mut admin_sig = None;
 
         read_struct_map(r, |r, key| match key {
@@ -308,6 +319,10 @@ impl PublicGrant {
                 parent = Some(CapId::from_bytes(r.bytes_fixed::<32>()?));
                 Ok(true)
             }
+            K_MAX_EPOCH => {
+                max_epoch = Some(Epoch(r.uint()?));
+                Ok(true)
+            }
             K_ADMIN_SIG => {
                 admin_sig = Some(r.bytes_fixed::<SIGNATURE_LEN>()?);
                 Ok(true)
@@ -344,10 +359,17 @@ impl PublicGrant {
         if authority.contains(&Authority::Publish) != publisher_pub.is_some() {
             return Err(Error::Separation("publisher key presence must match publish authority"));
         }
+        let epoch = epoch.ok_or(Error::Schema("missing epoch"))?;
+        // The ceiling is a forward bound on the grant's own scope: a grant whose
+        // max_epoch precedes the epoch it is scoped to could never be exercised,
+        // so it is a malformed grant rather than a maximally-narrow one.
+        if max_epoch.is_some_and(|m| m.0 < epoch.0) {
+            return Err(Error::Schema("max_epoch precedes the grant epoch"));
+        }
         Ok(PublicGrant {
             repo: repo.ok_or(Error::Schema("missing repo"))?,
             branch: branch.ok_or(Error::Schema("missing branch"))?,
-            epoch: epoch.ok_or(Error::Schema("missing epoch"))?,
+            epoch,
             topic: topic.ok_or(Error::Schema("missing topic"))?,
             authority,
             validity,
@@ -356,6 +378,7 @@ impl PublicGrant {
             cap_nonce: cap_nonce.ok_or(Error::Schema("missing cap_nonce"))?,
             publisher_pub,
             parent_grant_id: parent,
+            max_epoch,
             admin_sig,
         })
     }
@@ -370,7 +393,11 @@ pub struct Delegation {
     pub authority: Vec<Authority>,
     /// Child validity window — MUST be within the parent's.
     pub validity: Validity,
-    /// Optional maximum epoch — MUST NOT exceed the parent's epoch semantics.
+    /// Optional maximum epoch the child may be exercised in — MUST NOT exceed a
+    /// ceiling the parent is already under, and MUST NOT precede the epoch the
+    /// grant is scoped to. Leaving it `None` inherits the parent's ceiling. This
+    /// narrows the grant's *forward* extent; it never rewrites the exact epoch
+    /// (and epoch-specific topic) the child inherits from its parent.
     pub max_epoch: Option<u64>,
 }
 
@@ -536,7 +563,7 @@ impl Capability {
                 Ok(true)
             }
             // Skip every public field in this pass.
-            K_VERSION | K_EPOCH => {
+            K_VERSION | K_EPOCH | K_MAX_EPOCH => {
                 r.uint()?;
                 Ok(true)
             }
@@ -601,8 +628,11 @@ impl Drop for Capability {
 /// Delegate a **new** public grant from `parent`, narrowing constraints, and
 /// sign it with the admin key. The child's authority set MUST be a subset of the
 /// parent's, its validity window within the parent's, and its `max_epoch` (if
-/// any) no greater than the parent's epoch bound. Cryptographic key possession
-/// is still required to act — a signed grant alone is not a decryption key.
+/// any) no greater than the parent's ceiling. The child always keeps the
+/// parent's exact `epoch` and epoch-specific `topic` — an epoch ceiling is
+/// carried in the separate, admin-signed `max_epoch` field, never by rewriting
+/// the epoch scope out from under the topic. Cryptographic key possession is
+/// still required to act — a signed grant alone is not a decryption key.
 pub fn delegate(
     parent: &PublicGrant,
     admin: &SecretSigningKey,
@@ -621,12 +651,20 @@ pub fn delegate(
     {
         return Err(Error::Delegation("validity window widens parent"));
     }
-    let epoch = match d.max_epoch {
-        Some(m) if m > parent.epoch.0 => {
-            return Err(Error::Delegation("max_epoch exceeds parent epoch"))
+    // The epoch ceiling is its own authenticated field: the child keeps the
+    // parent's exact epoch scope (and therefore the parent's epoch-specific
+    // topic), and narrows only how far forward the grant may be carried.
+    let max_epoch = match (d.max_epoch, parent.max_epoch) {
+        (Some(m), Some(p)) if m > p.0 => {
+            return Err(Error::Delegation("max_epoch exceeds parent max_epoch"))
         }
-        Some(m) => Epoch(m),
-        None => parent.epoch,
+        (Some(m), _) if m < parent.epoch.0 => {
+            return Err(Error::Delegation("max_epoch precedes the grant epoch"))
+        }
+        (Some(m), _) => Some(Epoch(m)),
+        // An unspecified ceiling inherits the parent's, so a delegation can
+        // never escape a bound the parent is already under.
+        (None, p) => p,
     };
     // A delegated grant does not itself carry the publisher key pair unless
     // publish is delegated AND the parent carried one to bind.
@@ -641,7 +679,7 @@ pub fn delegate(
     let mut child = PublicGrant {
         repo: parent.repo,
         branch: parent.branch,
-        epoch,
+        epoch: parent.epoch,
         topic: parent.topic,
         authority: child_auth,
         validity: d.validity,
@@ -650,6 +688,7 @@ pub fn delegate(
         cap_nonce: Secret32::random().0, // fresh nonce so the child cap_id differs
         publisher_pub,
         parent_grant_id: Some(parent.cap_id()),
+        max_epoch,
         admin_sig: None,
     };
     child.sign(admin);
@@ -680,6 +719,7 @@ pub fn base_grant(
         cap_nonce: Secret32::random().0,
         publisher_pub: None,
         parent_grant_id: None,
+        max_epoch: None,
         admin_sig: None,
     }
 }
@@ -761,6 +801,32 @@ mod tests {
         assert_eq!(admin_cap.admin_sk, Some([5u8; 32]));
         admin_cap.zeroize_secrets();
         assert_eq!(admin_cap.admin_sk, Some([0u8; 32]));
+    }
+
+    /// The epoch ceiling is a forward bound, so a grant whose `max_epoch`
+    /// precedes its own epoch scope is malformed and must fail closed on decode
+    /// (it could never be exercised). A ceiling at or after the epoch decodes.
+    #[test]
+    fn decode_rejects_max_epoch_before_grant_epoch() {
+        let mut g = base_grant(
+            RepoId::from_bytes([1u8; 32]),
+            BranchId::from_bytes([2u8; 32]),
+            Epoch(7),
+            TopicId::from_bytes([3u8; 32]),
+            Validity { not_before: 100, not_after: 200 },
+            vec!["wss://broker.example".to_string()],
+        );
+        g.authority = vec![Authority::Read];
+        g.max_epoch = Some(Epoch(3));
+        assert!(matches!(
+            PublicGrant::decode(&g.encode(), Limits::default()),
+            Err(Error::Schema(_))
+        ));
+
+        g.max_epoch = Some(Epoch(7));
+        let ok = PublicGrant::decode(&g.encode(), Limits::default()).unwrap();
+        assert_eq!(ok.max_epoch, Some(Epoch(7)));
+        assert_eq!(ok.epoch, Epoch(7));
     }
 
     /// A read-only grant carrying a publisher_pub violates the

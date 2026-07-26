@@ -404,21 +404,75 @@ fn delegation_narrows_only() {
     parent.publisher_pub = Some(SecretSigningKey::from_seed([2u8; 32]).public().to_bytes());
     parent.sign(&admin);
 
-    // Valid narrowing: drop publish, tighten validity.
+    // Valid narrowing: drop publish, tighten validity, cap the forward extent.
     let child = delegate(
         &parent,
         &admin,
         Delegation {
             authority: vec![Authority::Read],
             validity: Validity { not_before: 120, not_after: 180 },
-            max_epoch: Some(5),
+            max_epoch: Some(9),
         },
     )
     .unwrap();
     child.verify(&admin.public()).unwrap();
     assert_eq!(child.parent_grant_id, Some(parent.cap_id()));
     assert_eq!(child.authority, vec![Authority::Read]);
-    assert_eq!(child.epoch, Epoch(5));
+    // The epoch ceiling is its OWN field: the child keeps the parent's exact
+    // epoch scope and its epoch-specific topic, so the grant never claims an
+    // epoch that disagrees with the topic it carries.
+    assert_eq!(child.epoch, parent.epoch);
+    assert_eq!(child.topic, parent.topic);
+    assert_eq!(child.max_epoch, Some(Epoch(9)));
+
+    // ...and that ceiling is admin-authenticated: it survives a canonical
+    // round-trip, and tampering with it invalidates the signature.
+    let decoded = PublicGrant::decode(&child.encode(), lim()).unwrap();
+    assert_eq!(decoded, child);
+    decoded.verify(&admin.public()).unwrap();
+    let mut tampered = child.clone();
+    tampered.max_epoch = Some(Epoch(11));
+    assert!(tampered.verify(&admin.public()).is_err());
+
+    // A ceiling below the epoch the grant is scoped to is unusable, not narrow.
+    assert!(matches!(
+        delegate(
+            &parent,
+            &admin,
+            Delegation {
+                authority: vec![Authority::Read],
+                validity: Validity { not_before: 120, not_after: 180 },
+                max_epoch: Some(5),
+            }
+        ),
+        Err(Error::Delegation(_))
+    ));
+
+    // Re-delegating may only lower the ceiling, never raise it.
+    assert!(matches!(
+        delegate(
+            &child,
+            &admin,
+            Delegation {
+                authority: vec![Authority::Read],
+                validity: Validity { not_before: 120, not_after: 180 },
+                max_epoch: Some(10),
+            }
+        ),
+        Err(Error::Delegation(_))
+    ));
+    // An unspecified ceiling inherits the parent's rather than escaping it.
+    let grandchild = delegate(
+        &child,
+        &admin,
+        Delegation {
+            authority: vec![Authority::Read],
+            validity: Validity { not_before: 120, not_after: 180 },
+            max_epoch: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(grandchild.max_epoch, Some(Epoch(9)));
 
     // Widen authority -> rejected.
     assert!(matches!(

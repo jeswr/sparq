@@ -123,7 +123,10 @@ read.validate()?; write.validate()?; adm.validate()?;                     // sep
   already obtained. `HistoryPolicy` is an honest disclosure of that, not a secrecy
   guarantee.
 - **Delegation only narrows.** `delegate` rejects any child grant that widens the
-  authority set, validity window, or epoch bound relative to its parent.
+  authority set, validity window, or epoch bound relative to its parent. The epoch
+  bound is the child's own signed `PublicGrant::max_epoch` ceiling — the child keeps
+  the parent's exact `epoch` and its epoch-specific `topic`, so a narrowed grant
+  never claims an epoch that disagrees with the topic it carries.
 - **Determinism is load-bearing.** `cap_id` and `CommitId` are hashes of canonical
   bytes; the golden vectors in `tests/vectors.rs` pin the exact wire format. A
   change to those bytes is a wire-format break, not a refactor.
