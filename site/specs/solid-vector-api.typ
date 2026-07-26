@@ -7,7 +7,11 @@
 // `crates/sparq-solid/tests/conformance/solid-sparql-query/spec.html` (pinned upstream
 // commit `5ea9718…`, see that directory's PROVENANCE.md). Every authorization,
 // dataset-construction, and non-disclosure rule of the base document is INHERITED
-// UNCHANGED and re-applied to the vector surface; nothing here relaxes a base requirement.
+// UNCHANGED and re-applied to the vector surface. Exactly ONE departure is declared, not
+// smuggled: SV-ND-4 accepts that a requester holding an eligible entry observes that some
+// index is bound even when the descriptor is unreadable to them, so an unreadable
+// descriptor and an absent one are not fully observationally equivalent. It is stated at
+// the assertion, in the relationship section, and in the open-issues list.
 // The base document mints its terms in `http://www.w3.org/ns/solid/sparql#`, NOT in the
 // namespace named in the originating bead — see the editor's note in the namespace section.
 //
@@ -142,7 +146,11 @@ This document therefore does three things and deliberately no more:
 == Relationship to the base specification <sec-relationship>
 
 This document is an #strong[add-on], not a profile, a fork, or a revision. It adds
-requirements; it removes and relaxes none. Where a requirement of
+requirements; it removes and relaxes none, with one departure it declares rather than
+argues away: SV-ND-4 accepts that a requester holding an eligible entry can observe that
+#emph[some] index is bound, even where the index descriptor is a resource they cannot read,
+so an unreadable descriptor and an absent one are not fully observationally equivalent
+(@sec-nondisclosure). Where a requirement of
 #cite("SOLID-SPARQL-QUERY") and a requirement of this document both apply, both must be
 satisfied. The following are inherited unchanged. Most are simply cited where they are
 needed; a few are #emph[re-derived] for a ranked surface, where the base rule's structural
@@ -304,14 +312,18 @@ yield zero solutions. #rid("SV-OPT-4")
   single-tenant store an error is the honest answer, but here the error boundary is a probe
   that reads back an index's dimension — and its existence — one guess at a time
   (@sec-nondisclosure). Zero solutions is the answer that keeps a bound index and no index
-  indistinguishable to a requester with nothing to search.
+  indistinguishable to a requester with nothing to search — which is the whole of what it
+  buys, and the whole of what SV-ND-4 claims.
 
-  It does #strong[not] close the channel completely, and this draft does not claim it does.
-  A requester who holds at least one eligible entry can still sweep dimensions and watch for
-  the one that returns solutions, recovering the index's dimension — and hence its existence
-  — even where SV-DISC-3 would have withheld both. Closing that would mean either refusing
-  literal query vectors from requesters not entitled to the descriptor, or padding the
-  response; neither is specified here, and @sec-open records the gap.
+  It does #strong[not] close the channel for anyone else, and this draft does not claim it
+  does. A requester who holds at least one eligible entry learns that an index is bound the
+  moment an ordinary `vec:` pattern returns a solution, with no probing at all, even where
+  SV-DISC-3 withheld the descriptor. The same requester can go further and sweep dimensions,
+  watching for the one that returns solutions, to recover the index's declared dimension as
+  well as its existence. Closing either would mean refusing `vec:` patterns — or at least
+  literal query vectors — from requesters not entitled to the descriptor, or padding the
+  response; none is specified here, SV-ND-4 records the resulting boundary, and @sec-open
+  records the gap.
 ]
 
 #note[
@@ -423,7 +435,10 @@ is that document's to extend, not this one's (@sec-open).
 If no index is bound, the service MUST evaluate `vec:` patterns over an empty eligible
 entry set, yielding zero solutions — not an error. #rid("SV-IDX-5") This keeps a service
 that has an index today and none tomorrow indistinguishable, from the requester's side,
-from a service whose pod simply contains nothing similar.
+from a service whose pod simply contains nothing similar — for the requester whose eligible
+entry set is empty either way. A requester who holds eligible entries sees solutions in the
+bound case and none in the unbound one, and so can tell the two apart; SV-ND-4 states that
+limit and @sec-nondisclosure explains why this draft accepts it.
 
 == Index entries are bound to one source resource <sec-entry>
 
@@ -1036,7 +1051,8 @@ in full. Most of it is carried by assertions already stated — bindings and sco
 SV-AUTH-1 and SV-AUTH-3, result-set shape under approximation by SV-MODE-2, ancillary
 surfaces by SV-DESC-3 and @sec-discovery — and this document does not restate those with
 fresh identifiers. Three obligations, however, take a shape that ranking gives them and
-nothing else states:
+nothing else states, and a fourth assertion records the one thing this section does
+#strong[not] conceal:
 
 + #strong[Cardinality.] The number of solutions a `vec:` pattern returns MUST NOT be a
   function of any entry outside the pattern's ranked set. Under exact evaluation this is
@@ -1055,12 +1071,53 @@ nothing else states:
 + #strong[Timing.] A service SHOULD ensure that observable differences in processing time do
   not disclose the existence or contents of resources outside the authorized dataset.
   #rid("SV-ND-3")
++ #strong[The bound index is not itself concealed.] A requester holding at least one
+  eligible entry observes solutions where a service with no bound index yields none, and MAY
+  therefore conclude that #emph[some] index is bound. This document does not require that
+  inference to be prevented, and a service is not required to withhold or pad results in
+  order to prevent it. What a service MUST NOT disclose to a requester who cannot read the
+  index descriptor is anything further about the descriptor #emph[as a resource] — its IRI,
+  its provenance record, its scope, its entry counts, or any other fact it carries — through
+  the service description (SV-DISC-3, SV-DISC-4) or any other surface, and it MUST NOT
+  disclose any entry sourced from a resource that requester cannot read (SV-AUTH-1,
+  SV-SEC-1). #rid("SV-ND-4")
 
 The seed exclusion in SV-ND-1 is not an afterthought: #cite("SPARQL-VEC-GENAI") excludes a
 node-IRI seed from its own results, so with #emph[k] at or above the number of eligible
 entries the attainable maximum is short by the seed's own entries. A cardinality rule stated
 without that term would be unsatisfiable exactly when the pod is small — the case a personal
 data store makes common.
+
+SV-ND-4 is where this document draws a boundary rather than asserting a stronger invariant
+it cannot keep, so the boundary is stated plainly. Eligibility (SV-AUTH-1) turns on the
+#emph[source resource], never on the descriptor: a requester who can read `/notes/a` gets
+`/notes/a`'s neighbours whether or not they may read the descriptor of the index those
+entries live in. The consequence is that the bound index's #emph[existence] is observable to
+any requester who has something to search, by the ordinary result set alone and without any
+of the probing @sec-optionality discusses. This draft accepts that channel and scopes the
+claim to match it: what SV-IDX-5 and SV-OPT-4 make indistinguishable is a bound index and no
+index #strong[to a requester whose eligible entry set is empty] — the requester with nothing
+to search, for whom both cases yield zero solutions. For every other requester the binding is
+observable, and no assertion of this document says otherwise.
+
+#note[
+  The alternative was considered and rejected. Making descriptor readability a precondition
+  for eligibility — evaluate every `vec:` pattern over an empty eligible set when the
+  requester cannot read the descriptor — would close the channel, and would also disable the
+  add-on for precisely the readers it exists to serve: SV-DESC-4 asks an owner to keep the
+  descriptor at least as restrictive as the most restrictive resource in its scope, so on any
+  index spanning a shared resource and a private one, the sharee is exactly the requester who
+  can read some scoped resource and not the descriptor. That rule would make the shared case
+  return nothing, and it would leave SV-MODE-7's descriptor-unreadable branch (@sec-open)
+  describing a request that can no longer return a solution. Concealing existence is not worth
+  that, and the honest move is to say which requester the concealment holds for.
+
+  It is a narrow departure from the base document's rule that an unreadable resource and an
+  absent one be observationally equivalent, and it is recorded as one in @sec-relationship
+  rather than argued away: the unreadable resource is the descriptor, and what leaks about it
+  is one bit — that some index is bound. Its IRI, its scope, its provenance, and every entry
+  under it remain governed by SV-AUTH-1, SV-DESC-3, SV-DISC-3, and SV-SEC-1.
+]
 
 #note[
   SV-ND-3 is weaker than the rest, and deliberately so — it is a SHOULD in the base document
@@ -1093,6 +1150,13 @@ description clients actually read.
 A service description MAY identify the bound index with `solid-sparql:vectorIndex`, and
 MUST omit it — as it MUST omit the features themselves — from descriptions served to a
 requester who cannot read the index descriptor. #rid("SV-DISC-3")
+
+What SV-DISC-3 keeps from such a requester is the descriptor's IRI and everything reachable
+through it. It does not keep the binding's existence, which SV-ND-4 declines to conceal and
+which that requester can observe in the results of any `vec:` pattern once they hold an
+eligible entry. The rule is worth stating even so: the descriptor IRI is a resource
+identifier the requester may not dereference, and advertising a feature naming it invites a
+request that must then be refused.
 
 A service description MUST NOT enumerate index scopes, indexed resources, entry counts, or
 any other index-derived inventory that is not filtered to the requester's readable subset.
@@ -1279,11 +1343,15 @@ Each of these is a real gap, recorded rather than papered over.
 + #strong[Surface form.] Inherited unresolved from #cite("SPARQL-VEC-GENAI"): whether the
   normative surface should be magic predicates, a `SERVICE` form, or extension functions.
   This document takes no position beyond declining to invent a second one.
-+ #strong[The residual dimension oracle.] SV-OPT-4 converts a wrong-dimension literal query
-  vector into zero solutions, but a requester with any eligible entry can still recover the
-  bound index's dimension by sweeping. A future revision must decide whether to refuse
-  literal query vectors from requesters not entitled to the descriptor, to pad, or to accept
-  the channel and say so.
++ #strong[The observable binding, and the residual dimension oracle.] SV-ND-4 accepts that a
+  requester holding any eligible entry can see that an index is bound — solutions appear
+  where an unbound service would return none — and SV-OPT-4's zero-solutions rule converts
+  the wrong-dimension probe but still lets that requester recover the bound index's declared
+  dimension by sweeping. Both channels have the same shape and the same candidate remedies:
+  evaluate `vec:` patterns over an empty eligible set for requesters not entitled to the
+  descriptor, which costs the shared-index case (@sec-nondisclosure); or pad responses, which
+  is unspecified here. This revision accepts both channels and says so; a future one must
+  decide whether that is the right trade for a personal data store.
 + #strong[Advertising approximation without disclosing the index.] SV-DISC-2 requires an
   approximate service to advertise `solid-sparql:ApproximateVectorSearch`, while SV-DISC-3
   requires the features to be omitted from descriptions served to a requester who cannot read
@@ -1340,7 +1408,7 @@ Each of these is a real gap, recorded rather than papered over.
   [`SV-AUTH`], [@sec-authz], [Query service], [eligibility, pre-ranking enforcement,
     currency],
   [`SV-ND`], [@sec-nondisclosure], [Query service], [cardinality, error indistinguishability,
-    timing],
+    timing, the limit of index-existence concealment],
   [`SV-DISC`], [@sec-discovery], [Query service (SV-DISC-1..4); client (SV-DISC-5)],
     [service description and advertisement],
   [`SV-SEC`], [@sec-security], [Query service (SV-SEC-1, 4); deployment (SV-SEC-2);
@@ -1378,6 +1446,12 @@ and a bound index covers all three of the first-named containers' resources.
   only in `/private/journal`, and the same pattern seeded on a term occurring nowhere, both
   return zero solutions with indistinguishable responses — no error, no distinct status.
   (@sec-seed, @sec-nondisclosure)
++ #strong[Unreadable descriptor.] Where #emph[R] can read `/notes/a` but not the bound
+  index's descriptor, a `vec:` pattern still returns `/notes/a`'s neighbours, and the service
+  description served to #emph[R] names neither the descriptor nor the vector features. Where
+  #emph[R] can read no resource in the index's scope, the same pattern returns zero solutions,
+  indistinguishable from the same request against a service with no bound index.
+  (@sec-nondisclosure, @sec-discovery)
 + #strong[Wrong-dimension literal vector.] A literal query vector whose dimension differs
   from the bound index's returns zero solutions with the same response as one issued against
   a service with no bound index — not the sibling document's query error. (@sec-optionality)
