@@ -87,13 +87,17 @@ def _gh(args):
 # [OPUS-5] The closed set of labels the static pass can emit. `ensure_labels` will create these and
 # NOTHING else, so a typo in triage.py can never mint an arbitrary repo label.
 _EMITTABLE_LABEL = ("role:", "status:", "needs:", "priority:")
+# Per-run memo. A live sweep promotes hundreds of issues but emits only a handful of DISTINCT
+# labels, so without this the ensure would cost ~3 API calls per issue for no new information.
+_ENSURED = set()
 
 
 def _ensure_labels(repo, labels):
     """Idempotently create every emittable label BEFORE the edit. Best-effort by design: creating an
     existing label reports an error, and the ADD below is the hard gate that actually decides."""
     for lb in sorted(labels):
-        if lb.startswith(_EMITTABLE_LABEL):
+        if lb.startswith(_EMITTABLE_LABEL) and (repo, lb) not in _ENSURED:
+            _ENSURED.add((repo, lb))
             _gh(["label", "create", lb, "-R", repo, "--color", "ededed",
                  "--description", "orchestration routing label (auto-created by retriage)"])
 
@@ -445,6 +449,15 @@ def _self_test():
         apply_labels("o/r", 42, ["area:sparq-core", "role:impl"], [])
         chk("only role:/status:/needs:/priority: labels are auto-created",
             sorted(c[2] for c in writes if c[0:2] == ["label", "create"]), ["role:impl"])
+        # The ensure is memoised per run: a sweep promoting hundreds of issues emits only a
+        # handful of DISTINCT labels, so re-creating them per issue is pure API cost.
+        writes.clear()
+        apply_labels("o/r", 43, ["role:impl", "needs:area"], [])
+        chk("an already-ensured label is not re-created for the next issue "
+            "(role:impl was ensured above; only the new needs:area is created)",
+            [c[2] for c in writes if c[0:2] == ["label", "create"]], ["needs:area"])
+        chk("...but the edit itself still happens for that issue",
+            len([c for c in writes if c[0:2] == ["issue", "edit"]]), 1)
     finally:
         globals()["_gh"] = real_gh
 
