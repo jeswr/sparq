@@ -46,8 +46,11 @@ required-features = ["server"]
 # binary executes the same rewritten plans the CLI and the canonical benchmarks measure
 # (#1735 — result-equivalent, zero new deps; see the feature's own comment below). Like
 # `jsonld` it is a BINARY-crate default only — sparq-engine's LIBRARY default stays OFF, and
-# `--no-default-features --features server,jsonld` drops it for an explicit rewrite-dark build.
-default = ["server", "jsonld", "algebra-rewrite", "explain-json"]
+# `--no-default-features --features server,jsonld` drops it for an explicit planner/rewrite-dark
+# build.
+# [SONNET-4.6] (sq-7d3dj.30.15) `dp-planner` follows the same binary-default pattern: HTTP
+# measurements now use the DPccp join ordering already used by the CLI/canonical benchmarks.
+default = ["server", "jsonld", "dp-planner", "algebra-rewrite", "explain-json"]
 # [FABLE-5] (sq-ixc3.19) `explain-json` (default ON): the STRUCTURED explain response —
 # `Accept: application/x-sparq-explain+json` on `/sparql` answers with sparq-engine's typed
 # plan tree (`explain_json::PlanNode`, sq-u4lgr/#902) as camelCase JSON
@@ -71,6 +74,10 @@ explain-json = ["sparq-engine/explain-json"]
 # The pure serialiser library build (`--no-default-features`) is unaffected either way — this
 # only changes which sparq-engine the QUERY path compiles against.
 algebra-rewrite = ["sparq-engine/algebra-rewrite"]
+# [SONNET-4.6] (sq-7d3dj.30.15) Default-on forwarding feature for sparq-engine's opt-in
+# DPccp join-order planner. This adds no dependency and leaves sparq-engine's library default
+# lean; `--no-default-features --features server,jsonld` retains the greedy planner.
+dp-planner = ["sparq-engine/dp-planner"]
 # [OPUS-4.8] (sq-vpx4) Compiles internal TEST SEAMS — currently the durable-write
 # failure-injection hook on the `--persist` seal path, exposed via
 # `AppState::with_config_inject_durable_failure` for the graceful-degradation

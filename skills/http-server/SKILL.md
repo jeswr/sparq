@@ -492,6 +492,13 @@ curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/ld+json' \
 > for an explicitly rewrite-dark build; the sparq-engine LIBRARY default remains OFF for lean
 > library consumers.
 
+<!-- [SONNET-4.6] sq-7d3dj.30.15: comment separates adjacent blockquotes (markdownlint MD028). -->
+
+> **Default-on DP join planner (`dp-planner` feature — [SONNET-4.6] sq-7d3dj.30.15).** The
+> shipped server forwards sparq-engine's DPccp join-order planner, matching the CLI and
+> canonical benchmark binary. Drop it with `--no-default-features --features server,jsonld`
+> for an explicit greedy-planner build; sparq-engine's library default remains OFF.
+
 **2. EXPLAIN a query plan (no execution) or analyze (execute + per-operator trace).**
 `text/plain` response. Use `explain` / `explain=plan` (or `Accept: text/x-sparq-explain`)
 for the dry run, `explain=analyze` to run + trace (SELECT/ASK only):
