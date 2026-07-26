@@ -32,10 +32,13 @@ returns). Numbers below were measured by Opus 4.8.
 | `family_curve/`                   | sq-pn2 standalone timing harness (own cargo project) |
 | `sparql_feature_catalog.json`     | sq-1s2.1.2 SPARQL 1.1 feature → ZK coverage + gate-cost catalog |
 | `bb_gates_matrix.json`            | sq-ot3x per-config (commitment-method × circuit) legality + gate-cost matrix |
+| `constraint_counts.json`          | sq-gum8.5 constraint-count evaluation pack (machine-readable) |
+| `CONSTRAINT_COUNTS.md`            | sq-gum8.5 constraint-count evaluation pack (reviewer-facing tables) |
 | `scripts/gate_counts.sh`          | regenerate the gate-count JSON |
 | `scripts/prove_verify.sh`         | time prove+verify for one member |
 | `scripts/sparql_catalog.py`       | regenerate the SPARQL feature catalog (joins the snapshot) |
 | `scripts/bb_gates_matrix.py`      | regenerate the per-config bb-gates matrix (joins the snapshot) |
+| `scripts/constraint_pack.py`      | regenerate + verify the constraint-count evaluation pack |
 
 > The gate-count JSON is also the source the in-crate **regression gate**
 > (`crates/sparq-zk-compose/tests/gate_count.rs`, sq-c5f) baselines against —
@@ -187,6 +190,73 @@ member is missing a matrix row, if a legality cell violates the dispatch rule
 or if an illegal cell carries a fabricated cost. After an **intentional** circuit
 change, re-run `scripts/gate_counts.sh` (re-baseline the snapshot) and then this
 generator to re-join the new numbers.
+
+## sq-gum8.5: the constraint-count evaluation pack
+
+`constraint_counts.json` + `CONSTRAINT_COUNTS.md` are the **submission-support** evaluation
+artefact for the live zkSPARQL ISWC 2026 submission (`zksparql.org`; design record
+`research/paper-selection.md` §3.1 and §5-P1). They exist because the one thing this estate
+can report **canonically** is a deterministic integer — a compiled circuit size — and a
+reviewer asks about it in a shape the raw snapshot does not have: per family, per family
+parameter, with the scaling and the invariances made explicit.
+
+The pack reorganises the regression-gated gate counts into:
+
+1. **Per-family member tables**, with each member's family parameters parsed out of its name
+   (`scan(k, n, r)`, `join_eq(na, nb)`, `path_reach(d, k, n)`, the four FILTER lanes, and the
+   credential-layer members), split into a **query layer** and a **credential layer** — the
+   two things the manifest unifies.
+2. **Single-parameter scaling pairs** — every pair inside a family differing in exactly one
+   *numeric* parameter, with the gate delta and ratio. No curve is fitted and nothing is
+   extrapolated: only the pairs the compiled family actually contains are reported. A
+   categorical parameter (the value lane's datatype) is deliberately **not** swept, because a
+   "delta" along it would describe two unrelated circuits rather than a trend.
+3. **Invariances** — axes along which the count provably does not move in this snapshot. The
+   load-bearing case is the blake3-token FILTER lanes: the canonical token fits one 64-byte
+   blake3 block for every supported digit count, so `d` does not move the circuit at all.
+4. The **string-lane vs value-lane** comparison, both sides joined from the snapshot.
+5. A **related-work block** recording, per cited system, that **no** figure of it is
+   transcribed — and why a cross-system constraint ratio would not be a measurement.
+
+**Honesty is load-bearing** (the same rules the spec draft's §16.2 states):
+
+- A `circuit_size` is a **size**, not a **time**. The pack carries **no** wall-clock figure by
+  design; work-box timings are non-canonical and live separately in `family_cost_curve.json`.
+- A gate count says nothing about **what** a circuit proves. Coverage is
+  `site/specs/zksparql.typ` §7.1 + `sparql_feature_catalog.json`; the `path_reach` family
+  proves a strictly weaker **bounded-existence** statement whatever its size.
+- The estate is internally re-audited but **NOT externally audited** (`sq-qhy4`); the forge
+  suite is toolchain-gated (`sq-1gir`); the value lane carries the INV-VL / CR-G8 downgrade.
+  The pack asserts **no** soundness, privacy, or zero-knowledge property.
+- **No third-party figure is reproduced.** Constraint counts are incomparable across proof
+  systems and arithmetizations, so no cross-system ratio is computed.
+
+### Regenerate and verify
+
+```sh
+bench/zk-compose/scripts/constraint_pack.py --write   # rewrite both artefacts
+bench/zk-compose/scripts/constraint_pack.py --check   # committed copies still current?
+bench/zk-compose/scripts/constraint_pack.py --format markdown   # to stdout
+```
+
+Like the other two generators it reads the regression-gated snapshot
+(`crates/sparq-zk-compose/tests/gate_count_snapshot.json`) and needs **no** `nargo`/`bb`, so
+it is deterministic and a re-run is byte-identical — that byte-identity is the acceptance
+criterion of the bead, and `--check` is what enforces it. `--check` additionally re-verifies
+the *committed* JSON against the snapshot (every member size, every scaling delta, every
+invariance, both lanes of every comparison), so a hand edit cannot introduce a number the
+generator would never emit.
+
+Two guards make the pack non-vacuous:
+
+- `classify()` **fails** on a snapshot member matching no described family — a new circuit
+  family cannot silently drop out of the evaluation; describe it in `FAMILIES` first.
+- `--check` fails if any related-work entry ever claims transcribed figures, or if the metric
+  block is ever flipped to wall-clock / canonical.
+
+After an **intentional** circuit change: re-run `scripts/gate_counts.sh`, re-baseline
+`crates/sparq-zk-compose/tests/gate_count_snapshot.json`, then re-run this generator so the
+pack re-joins the new numbers.
 
 ## sq-pn2: full-family prove/verify cost curve
 
