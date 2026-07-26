@@ -259,7 +259,10 @@ pub fn check_question<'q>(
 /// [`GuardConfig::allow_federation`] is set. Empty means "nothing forbidden": the query
 /// may proceed to the dictionary check and execution.
 ///
-/// This is an **algebra**-level decision, like [`crate::policy`]: it inspects typed
+// A plain code span, NOT an intra-doc link: `policy` is `#[cfg(feature = "query-policy")]`,
+// so `[`crate::policy`]` is unresolved under default features and the workspace rustdoc
+// `-D warnings` gate reds. [SONNET-4.6]
+/// This is an **algebra**-level decision, like `crate::policy`: it inspects typed
 /// parser output, so it cannot be fooled by a `SERVICE` hidden in a comment, a string
 /// literal, or a prefixed name. Order is stable (first appearance); duplicates on the
 /// same endpoint are kept, since each is a distinct outbound clause.
