@@ -4685,7 +4685,34 @@ fn bind_query_correctness(manifest: &ProofManifest) -> Result<(), CheckError> {
 /// path + a FULL-bb accept test (sq-r2s8) and the forge-and-verify regression suite
 /// (sq-hlul) are the follow-ups. What IS enforced is the security-critical
 /// direction: a forged / cross-scan / wrong-slot / spurious hidden join is rejected.
+///
+/// # Cross-credential scope constraint (sq-cuvmj) — READ BEFORE CLAIMING THE USE CASE
+/// The headline use case for a hidden `JoinEdge` is joining two genuinely DIFFERENT
+/// credentials. In the current manifest schema that case only reaches this gate when
+/// both credentials carry the SAME issuer-signed status reference, because
+/// [`ProofManifest::revocation`] is SCALAR: [`resolve_status_ref`] (run earlier, in
+/// [`bind_issuer_attestations`]) requires EVERY scan-covering commitment's attested
+/// status to resolve to that ONE reference, so two credentials with distinct
+/// `(list, index, version)` slots cannot both be attested and the manifest is
+/// rejected upstream ([`CheckError::RevocationReferenceMismatch`]) before any join
+/// is inspected.
+///
+/// This is FAIL-CLOSED — it is an over-restriction, not a hole. The construction it
+/// blocks (present a live credential A alongside a REVOKED credential B, joined,
+/// hoping B's liveness goes unchecked because there is only one `revocation` field)
+/// has no false-accept: pointing `revocation` at A's slot makes B's attestation
+/// mismatch, and pointing it at B's slot makes [`bind_revocation`] read B's SET
+/// status bit and reject [`CheckError::CredentialRevoked`]
+/// (`research/zk-bind-composition-review.md` §Finding B, attempt 5).
+///
+/// The practical consequence for this gate: what it validates today is hidden joins
+/// ACROSS GRAPHS OF ONE CREDENTIAL (or across credentials sharing a status slot),
+/// NOT arbitrary multi-credential joins. Do not describe `bind_joins` as enabling
+/// arbitrary cross-credential joins until the manifest carries per-credential
+/// revocation references; the obligations such a migration owes are pre-registered
+/// on [`ProofManifest::revocation`].
 // [OPUS-4.8] sq-sfsi: bind_joins gate (commitment-matching + query slot binding).
+// [OPUS-5] sq-cuvmj: + the scalar-revocation cross-credential scope constraint.
 fn bind_joins(manifest: &ProofManifest) -> Result<(), CheckError> {
     if manifest.join_edges.is_empty() {
         // No hidden joins declared: nothing for this gate to validate. A query
@@ -7768,9 +7795,22 @@ fn test_attestation(
     salt: Fr,
     sk: &sparq_zk::sig::SecretKey,
 ) -> crate::manifest::CommitmentAttestation {
+    test_attestation_at_index(commitment, salt, sk, TEST_STATUS_INDEX)
+}
+
+/// As [`test_attestation`], but over a CHOSEN status-list `index` — the signature is
+/// formed over that index's `status_ref_digest`, so the attestation is internally
+/// valid and the manifest reaches the reference-resolution step. Lets a test build a
+/// presentation whose two credentials occupy DISTINCT status slots (sq-cuvmj).
+#[cfg(test)]
+fn test_attestation_at_index(
+    commitment: Fr,
+    salt: Fr,
+    sk: &sparq_zk::sig::SecretKey,
+    index: u64,
+) -> crate::manifest::CommitmentAttestation {
     let list_id = sparq_zk::sig::status_list_id_to_field(TEST_STATUS_LIST);
-    let status_ref =
-        sparq_zk::sig::status_ref_digest(&list_id, TEST_STATUS_INDEX, TEST_STATUS_VERSION);
+    let status_ref = sparq_zk::sig::status_ref_digest(&list_id, index, TEST_STATUS_VERSION);
     crate::manifest::CommitmentAttestation {
         commitment: FieldHex::from_field(&commitment),
         issuer_public_key: sparq_zk::sig::public_key_to_hex(&sk.public_key()),
@@ -7780,7 +7820,7 @@ fn test_attestation(
             .to_string(),
         salt: Some(FieldHex::from_field(&salt)),
         status: Some(crate::manifest::AttestedStatusRef {
-            index: Some(TEST_STATUS_INDEX),
+            index: Some(index),
             version: Some(TEST_STATUS_VERSION),
             index_commitment: None,
             ref_commitment: None,
@@ -8545,6 +8585,91 @@ mod tests {
                 Err(CheckError::UnattestedCommitment { proof: 0, .. })
             ),
             "an unattested flat scan must be refused identically in both feature states"
+        );
+    }
+
+    /// A single-graph BGP `Scan` over a CHOSEN committed graph (the issuer gate
+    /// verifies the signature over the given commitment value; it never recomputes
+    /// it from triples, so a test may pick the commitment freely).
+    fn flat_scan_with_commit(commit: Fr) -> ProofInputs {
+        ProofInputs::Scan {
+            id: CircuitId::Scan { k: 1, n: 16, r: 4 },
+            commitments: vec![FieldHex::from_field(&commit)],
+            pattern_is_const: [true, true, false],
+            pattern_const_enc: [fh("0x1"), fh("0x2"), fh("0x0")],
+            rows: vec![],
+            row_count: 0,
+            attribution: vec![false],
+        }
+    }
+
+    /// [OPUS-5] sq-cuvmj: THE SCALAR-`revocation` TRIPWIRE.
+    ///
+    /// Pins the single-reference invariant `ProofManifest::revocation` documents: a
+    /// presentation carrying TWO credentials whose issuer-signed status references
+    /// occupy DISTINCT slots is structurally REJECTED, because every scan-covering
+    /// commitment must resolve to the ONE disclosed reference. Both attestations
+    /// here are internally VALID (key in K, signature verifies over each one's own
+    /// `status_ref_digest`, distinct salts), so the manifest reaches
+    /// `resolve_status_ref` and the rejection is the reference comparison itself —
+    /// not an incidental signature or salt failure.
+    ///
+    /// This is FAIL-CLOSED, not a false-accept (§Finding B of
+    /// `research/zk-bind-composition-review.md`): the second credential's liveness is
+    /// never skipped, it simply cannot be presented. The cost is that hidden
+    /// cross-credential joins ([`bind_joins`]) are restricted to credentials sharing
+    /// a status slot.
+    ///
+    /// TRIPWIRE: a future `Vec` migration of `revocation`/`hidden_revocation` WILL
+    /// turn this test red — that is the point. Before changing it, discharge the
+    /// per-commitment obligations pre-registered on `ProofManifest::revocation`;
+    /// flipping the expectation to "accepted" without them is exactly the
+    /// unchecked-second-credential regression this pins.
+    #[test]
+    fn two_credentials_with_distinct_status_refs_are_rejected() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())]);
+        let c_a = Fr::from(100u64); // credential A, status index TEST_STATUS_INDEX
+        let c_b = Fr::from(200u64); // credential B, a DIFFERENT slot on the same list
+        let other_index = TEST_STATUS_INDEX + 6;
+
+        let mut m = minimal_manifest("SELECT * WHERE { ?s <http://ex/p> ?o }");
+        m.sub_proofs = vec![
+            crate::manifest::SubProof {
+                inputs: flat_scan_with_commit(c_a),
+                proof_hex: String::new(),
+            },
+            crate::manifest::SubProof {
+                inputs: flat_scan_with_commit(c_b),
+                proof_hex: String::new(),
+            },
+        ];
+        m.commitment_attestations = vec![
+            test_attestation(c_a, Fr::from(7u64), &sk),
+            test_attestation_at_index(c_b, Fr::from(9u64), &sk, other_index),
+        ];
+        // The ONE disclosed reference — A's slot. B's issuer-signed reference cannot
+        // also match it.
+        m.revocation = Some(test_revocation());
+
+        let err = bind_issuer_attestations(&m, &k, &std::collections::BTreeSet::new())
+            .unwrap_err();
+        assert!(
+            matches!(err, CheckError::RevocationReferenceMismatch { .. }),
+            "two credentials on distinct status slots must be refused at the reference gate (sq-cuvmj fail-closed), got {err:?}"
+        );
+
+        // CONTROL: the SAME manifest with both credentials on the SAME slot is
+        // accepted — so the rejection above is the distinct-reference constraint,
+        // not a vacuous failure of the two-scan fixture itself.
+        let mut same_slot = m.clone();
+        same_slot.commitment_attestations = vec![
+            test_attestation(c_a, Fr::from(7u64), &sk),
+            test_attestation(c_b, Fr::from(9u64), &sk),
+        ];
+        assert!(
+            bind_issuer_attestations(&same_slot, &k, &std::collections::BTreeSet::new()).is_ok(),
+            "two credentials sharing one status slot must pass — the fixture is otherwise valid"
         );
     }
 
