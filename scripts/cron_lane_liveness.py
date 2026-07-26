@@ -600,6 +600,12 @@ def list_open_alarm_issues(repo: str) -> dict[str, int]:
         if not isinstance(batch, list):
             raise AlarmError("issue list: response is not an array")
         for item in batch:
+            # The REST issues endpoint also returns PULL REQUESTS. A PR carrying
+            # the label (e.g. the one that introduced this alarm, quoting the
+            # marker) must never be mistaken for the open alarm issue — editing
+            # or closing it would be badly wrong.
+            if "pull_request" in item:
+                continue
             body = item.get("body") or ""
             for line in body.splitlines():
                 if KEY_PREFIX in line:

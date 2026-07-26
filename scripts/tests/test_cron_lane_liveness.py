@@ -502,6 +502,17 @@ class TestIdempotence(_EndToEnd):
         self.assertEqual(edits[0][3], "4242")
         self.assertEqual(fake.kinds().count("issue create"), 0)
 
+    def test_a_labelled_PULL_REQUEST_is_never_mistaken_for_the_alarm_issue(self):
+        """The REST issues endpoint also returns PRs — including the PR that
+        introduced this alarm, whose body quotes the dedupe marker."""
+        fake = FakeGh(open_issues=[
+            {"number": 4368, "pull_request": {"url": "…"},
+             "body": f"<!-- {cll.KEY_PREFIX}: z.yml -->"}])
+        cll._gh = fake
+        self.run_main(DEAD_STATE)
+        self.assertEqual(fake.kinds().count("issue create"), 1)
+        self.assertEqual(fake.kinds().count("issue edit"), 0)
+
     def test_a_recovered_lane_closes_its_open_alarm_issue(self):
         fake = FakeGh(open_issues=[
             {"number": 4242, "body": f"<!-- {cll.KEY_PREFIX}: z.yml -->"}])
