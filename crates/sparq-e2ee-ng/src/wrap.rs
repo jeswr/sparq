@@ -8,7 +8,12 @@
 //! ECDH to the recipient's public key, the shared secret is run through the
 //! domain-separated [`crate::keyschedule::wrap_key`] (binding both public keys),
 //! and the payload is AEAD-sealed under that key. Only the recipient's private
-//! key recovers it. Forward secrecy is per-message via the ephemeral key.
+//! key recovers it. Each wrap draws a fresh ephemeral sender key and nonce, so
+//! wraps are independent — but this is ephemeral-*static* ECDH and does **not**
+//! provide forward secrecy: a recorded [`WrappedSecret`] carries `ephemeral_pub`,
+//! so if the recipient's long-term private key is later compromised an attacker
+//! can recompute `X25519(recipient_sk, ephemeral_pub)`, re-derive the wrap key,
+//! and decrypt the historical ciphertext.
 //! Both seal and open reject a non-contributory (low-order-point) exchange
 //! before key derivation, so the wrap key always depends on both keys.
 

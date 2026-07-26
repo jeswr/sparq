@@ -95,7 +95,9 @@ read.validate()?; write.validate()?; adm.validate()?;                     // sep
 - **`sign`** — `SecretSigningKey` / `PublicVerifyingKey` (Ed25519) for the three
   separated authorities.
 - **`wrap`** — recipient-wrapped secrets: `wrap`/`unwrap` + `WrappedSecret`
-  (X25519 ECDH → wrap key → AEAD; forward-secret per message).
+  (X25519 ECDH → wrap key → AEAD; fresh ephemeral key + nonce per wrap). This is
+  ephemeral-*static* ECDH: **not forward-secret** — compromise of the recipient's
+  long-term private key exposes previously recorded wraps.
 - **`capability`** — `PublicGrant` (deterministic encode/decode, `cap_id`,
   admin `sign`/`verify`), `Capability` (`new_read`/`new_write`/`new_admin`,
   `validate`, `encode_secret`/`decode_secret`), and `delegate` (narrow-only).
