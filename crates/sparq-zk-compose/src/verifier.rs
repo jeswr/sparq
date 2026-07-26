@@ -7810,6 +7810,921 @@ mod tests {
             "an unattested flat scan must be refused identically in both feature states"
         );
     }
+
+    // ========================================================================
+    // [OPUS-4.8] sq-qcnn.38 (epic sq-qcnn, test-quality program W2-R6): DIRECT,
+    // deterministic, value-asserting unit tests for the PROVER-FREE fail-closed
+    // and encoding surface of the composition verifier that the bb-gated e2e
+    // suite reaches only through a live nargo/bb toolchain. Each test exercises a
+    // structural / fail-closed error branch that REJECTS *before* any bb call
+    // (the crypto gate is unreachable without the toolchain), so a dummy prover is
+    // never invoked on these paths.
+    //
+    // HONESTY / SCOPE (load-bearing): these are COVERAGE-ONLY tests. NOTHING here
+    // asserts, implies, advances, or depends on any ZK soundness, zero-knowledge,
+    // or privacy property — the verifier is NOT-yet-sound and its external
+    // accredited-cryptographer sign-off is PENDING (sq-qhy4); these tests do NOT
+    // constitute or substitute for that audit. They pin DETERMINISTIC error
+    // CLASSIFICATION, field/encoding round-trips, and FAIL-CLOSED reject paths
+    // only. No cryptographic guarantee is made or implied.
+    // ========================================================================
+
+    /// A prover whose `compose_dir` is a scratch path. The fail-closed branches
+    /// tested below all return BEFORE the prover is used (no nargo/bb spawn), so
+    /// this stands in without a toolchain — a test that accidentally reached the
+    /// crypto stage would fail loudly (missing binary), not silently pass.
+    fn dummy_prover() -> CircuitProver {
+        CircuitProver::new(std::env::temp_dir())
+    }
+
+    fn tmp_work(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "sparq_zk_compose_verifier_ut_{}_{}_{:?}",
+            tag,
+            std::process::id(),
+            std::thread::current().id()
+        ))
+    }
+
+    fn scan_inputs(commit: Fr) -> ProofInputs {
+        ProofInputs::Scan {
+            id: CircuitId::Scan { k: 1, n: 16, r: 4 },
+            commitments: vec![FieldHex::from_field(&commit)],
+            pattern_is_const: [true, true, false],
+            pattern_const_enc: [fh("0x1"), fh("0x2"), fh("0x0")],
+            rows: vec![],
+            row_count: 0,
+            attribution: vec![false],
+        }
+    }
+
+    /// A minimal manifest whose single scan sub-proof references `commit`, with the
+    /// honest revocation reference attached (so message reconstruction is possible).
+    fn scan_manifest(commit: Fr) -> ProofManifest {
+        let mut m = minimal_manifest("SELECT * WHERE { ?s <http://ex/p> ?o }");
+        m.sub_proofs = vec![crate::manifest::SubProof {
+            inputs: scan_inputs(commit),
+            proof_hex: String::new(),
+        }];
+        m.revocation = Some(test_revocation());
+        m
+    }
+
+    fn snapshot(bits: Vec<u8>) -> StatusListSnapshot {
+        StatusListSnapshot {
+            status_list: TEST_STATUS_LIST.to_string(),
+            version: TEST_STATUS_VERSION,
+            bits,
+        }
+    }
+
+    fn holder_bound_att(
+        commit: Fr,
+        salt: Fr,
+        sk: &sparq_zk::sig::SecretKey,
+        digest_hex: &str,
+    ) -> crate::manifest::CommitmentAttestation {
+        let mut a = test_attestation(commit, salt, sk);
+        a.holder = Some(crate::manifest::AttestedHolderBinding {
+            holder_pk_digest: fh(digest_hex),
+            holder_public_key: None,
+        });
+        a
+    }
+
+    // --- CheckError Display: every variant renders a distinct, non-empty, ------
+    // reason-naming message (the operator-facing surface). Deterministic string
+    // assertions; no crypto claim. A dropped/duplicated arm or a mutated literal
+    // is caught by the substring checks.
+    #[test]
+    fn check_error_display_renders_each_variant() {
+        use crate::driver::DriverError;
+        let cases: Vec<(CheckError, &str)> = vec![
+            (CheckError::CircuitIdMismatch { proof: 1, declared: CircuitId::FilterInt { d: 1 }, derived: None }, "circuit id"),
+            (CheckError::DanglingEdge { edge: 2 }, "missing proof"),
+            (CheckError::EdgeKindMismatch { edge: 2 }, "incompatible"),
+            (CheckError::BindingInconsistent { edge: 2 }, "operand"),
+            (CheckError::ProofRejected { proof: 0 }, "bb rejected"),
+            (CheckError::MissingProof { proof: 0 }, "no proof bytes"),
+            (CheckError::MalformedProof { proof: 0 }, "malformed"),
+            (CheckError::MalformedField { proof: 0, what: "operand_enc" }, "operand_enc"),
+            (CheckError::PublicInputMismatch { proof: 0 }, "public inputs"),
+            (CheckError::UnboundPattern { pattern: 0 }, "pattern"),
+            (CheckError::UnboundFilter { variable: "x".into() }, "x"),
+            (CheckError::UnmappableFilterVar { variable: "y".into() }, "y"),
+            (CheckError::UnattestedCommitment { proof: 0, commitment: "0xC".into() }, "0xC"),
+            (CheckError::InvalidIssuerSignature { commitment: "0xC".into() }, "0xC"),
+            (CheckError::IssuerKeyNotInKeySet { commitment: "0xC".into() }, "0xC"),
+            (CheckError::UntrustedDeclaredKey { key: "0xK".into() }, "0xK"),
+            (CheckError::AttestationKeyNotInDeclaredSet { commitment: "0xC".into(), key: "0xK".into() }, "0xK"),
+            (CheckError::AttributionUnderDeclared { pattern: 0, proof_graph: 1 }, "attribution"),
+            (CheckError::AttributionUnbound { pattern: 0 }, "attribution"),
+            (CheckError::SaltReused { salt: "0xS".into() }, "0xS"),
+            (CheckError::ScanCommitmentSaltMissing { proof: 0, commitment: "0xC".into() }, "salt"),
+            (CheckError::AttributionMalformed { proof: 0, expected: 1, got: 0 }, "attribution"),
+            (CheckError::ScanCommitmentsNotStrictlyIncreasing { proof: 0, at: 1 }, "increasing"),
+            (CheckError::NonceReplay, "replay"),
+            (CheckError::NonceBindingMismatch, "nonce"),
+            (CheckError::ScanCommitmentStatusMissing { proof: 0, commitment: "0xC".into() }, "status"),
+            (CheckError::RevocationReferenceMissing { proof: 0 }, "revocation"),
+            (CheckError::RevocationReferenceMismatch { commitment: "0xC".into() }, "0xC"),
+            (CheckError::RevocationReferenceModeInvalid { commitment: "0xC".into() }, "0xC"),
+            (CheckError::HiddenRevocationRequired { proof: 0 }, "hidden"),
+            (CheckError::HiddenRevocationIndexCommitmentMismatch, "index"),
+            (CheckError::StatusSnapshotMissing { status_list: "L".into(), version: 1 }, "L"),
+            (CheckError::StatusSnapshotTampered { status_list: "L".into(), version: 1 }, "L"),
+            (CheckError::CredentialRevoked { status_list: "L".into(), index: 3 }, "REVOKED"),
+            (CheckError::StatusListStale { status_list: "L".into(), version: 1 }, "stale"),
+            (CheckError::HiddenRevocationNotEnabled, "hidden-index"),
+            (CheckError::HiddenRevocationDepthMismatch { declared: 4, policy: 5 }, "depth"),
+            (CheckError::HiddenRevocationRootUnavailable { status_list: "L".into(), version: 1 }, "root"),
+            (CheckError::HiddenRevocationRootMismatch, "root"),
+            (CheckError::HiddenRevocationProofRejected, "bb rejected"),
+            (CheckError::HiddenRevocationMalformedProof, "malformed"),
+            (CheckError::HiddenIssuerNotEnabled, "hidden-issuer"),
+            (CheckError::HiddenIssuerDepthMismatch { declared: 4, policy: 5 }, "depth"),
+            (CheckError::HiddenIssuerRootUnavailable, "root"),
+            (CheckError::HiddenIssuerRootMismatch, "root"),
+            (CheckError::HiddenIssuerMessageMismatch { commitment: "0xC".into() }, "0xC"),
+            (CheckError::HiddenIssuerUnreferencedCommitment { commitment: "0xC".into() }, "0xC"),
+            (CheckError::HiddenIssuerProofRejected, "bb rejected"),
+            (CheckError::HiddenIssuerMalformedProof, "malformed"),
+            (CheckError::HolderPokUnreferencedCommitment { commitment: "0xC".into() }, "0xC"),
+            (CheckError::HolderPokBindingMissing { commitment: "0xC".into() }, "0xC"),
+            (CheckError::HolderPokMissing { commitment: "0xC".into() }, "0xC"),
+            (CheckError::HolderPokDigestMismatch { commitment: "0xC".into() }, "0xC"),
+            (CheckError::HolderPokProofRejected { commitment: "0xC".into() }, "bb rejected"),
+            (CheckError::HolderPokMalformedProof, "malformed"),
+            (CheckError::HolderSetNotEnabled, "hidden-holder"),
+            (CheckError::HolderSetDepthMismatch { declared: 4, policy: 5 }, "depth"),
+            (CheckError::HolderSetRootUnavailable, "root"),
+            (CheckError::HolderSetRootMismatch, "root"),
+            (CheckError::HolderSetUnreferencedCommitment { commitment: "0xC".into() }, "0xC"),
+            (CheckError::HolderSetProofRejected { commitment: "0xC".into() }, "bb rejected"),
+            (CheckError::HolderSetMalformedProof, "malformed"),
+            (CheckError::HolderRegistryEmpty, "registry"),
+            (CheckError::HolderNotTrusted { holder: "0xH".into() }, "0xH"),
+            (CheckError::HolderPopMalformed, "unverifiable"),
+            (CheckError::HolderPopInvalid { holder: "0xH".into() }, "0xH"),
+            (CheckError::HolderBindingMissing, "bearer"),
+            (CheckError::HolderKeyMismatch, "holder key"),
+            (CheckError::EntailmentRegimeNotAccepted { regime: "rdfs" }, "rdfs"),
+            (CheckError::UnexpectedDerivationSteps, "Simple"),
+            (CheckError::MissingDerivationSteps { regime: "rdfs" }, "rdfs"),
+            (CheckError::MalformedDerivationStep { step: 2 }, "step"),
+            (CheckError::UngroundedDerivationAntecedent { step: 2, antecedent: 1 }, "ungrounded"),
+            (CheckError::JoinDanglingEdge { edge: 0 }, "join edge"),
+            (CheckError::JoinEdgeKindMismatch { edge: 0 }, "join edge"),
+            (CheckError::JoinCommitmentMismatch { edge: 0 }, "join edge"),
+            (CheckError::JoinSlotMismatch { edge: 0 }, "join edge"),
+            (CheckError::JoinCommitmentChainMismatch { edge: 0 }, "join edge"),
+            (CheckError::Driver(DriverError::Tool { tool: "bb".into(), stderr: "boom".into() }), "boom"),
+        ];
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for (err, needle) in &cases {
+            let s = err.to_string();
+            assert!(!s.is_empty(), "Display must be non-empty for {err:?}");
+            assert!(
+                s.contains(needle),
+                "Display for {err:?} must contain {needle:?}, got: {s}"
+            );
+            seen.insert(s);
+        }
+        // Distinctness is not exhaustive (some share a `commitment` needle) but the
+        // set of rendered strings must be broad — a collapsed match arm would fail
+        // one of the substring checks above regardless.
+        assert!(seen.len() >= cases.len() - 8, "renderings are largely distinct");
+    }
+
+    /// `Sparqzk` and `Driver` Display arms delegate to the inner error's message.
+    #[test]
+    fn check_error_display_delegates_to_inner() {
+        use crate::driver::DriverError;
+        let d = CheckError::Driver(DriverError::Spawn {
+            tool: "nargo".into(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "x"),
+        });
+        assert!(d.to_string().contains("nargo"));
+        // `From<DriverError>` lands in the Driver arm.
+        let via: CheckError = DriverError::Io(std::io::Error::other("disk")).into();
+        assert!(matches!(via, CheckError::Driver(_)));
+        assert!(via.to_string().contains("disk"));
+    }
+
+    // --- bind_hidden_revocation: fail-closed early returns (no bb) ------------
+
+    #[test]
+    fn hidden_revocation_absent_is_ok() {
+        let m = scan_manifest(Fr::from(100u64));
+        let pol = RevocationPolicy::accept_version(TEST_STATUS_VERSION)
+            .with_hidden_index_depth(4);
+        assert!(bind_hidden_revocation(&m, &pol, &dummy_prover(), &tmp_work("hr_absent"), &fh("0x2a")).is_ok());
+    }
+
+    #[test]
+    fn hidden_revocation_not_enabled_rejects() {
+        let mut m = scan_manifest(Fr::from(100u64));
+        m.hidden_revocation = Some(crate::manifest::HiddenIndexRevocation {
+            depth: 4,
+            root: fh("0x1"),
+            index_commitment: None,
+            proof_hex: String::new(),
+        });
+        // Policy did NOT opt into the hidden-index path.
+        let pol = RevocationPolicy::accept_version(TEST_STATUS_VERSION);
+        assert!(matches!(
+            bind_hidden_revocation(&m, &pol, &dummy_prover(), &tmp_work("hr_ne"), &fh("0x2a")),
+            Err(CheckError::HiddenRevocationNotEnabled)
+        ));
+    }
+
+    #[test]
+    fn hidden_revocation_depth_mismatch_rejects() {
+        let mut m = scan_manifest(Fr::from(100u64));
+        m.hidden_revocation = Some(crate::manifest::HiddenIndexRevocation {
+            depth: 4,
+            root: fh("0x1"),
+            index_commitment: None,
+            proof_hex: String::new(),
+        });
+        let pol = RevocationPolicy::accept_version(TEST_STATUS_VERSION).with_hidden_index_depth(5);
+        assert!(matches!(
+            bind_hidden_revocation(&m, &pol, &dummy_prover(), &tmp_work("hr_dm"), &fh("0x2a")),
+            Err(CheckError::HiddenRevocationDepthMismatch { declared: 4, policy: 5 })
+        ));
+    }
+
+    #[test]
+    fn hidden_revocation_root_unavailable_rejects() {
+        let mut m = scan_manifest(Fr::from(100u64));
+        m.hidden_revocation = Some(crate::manifest::HiddenIndexRevocation {
+            depth: 4,
+            root: fh("0x1"),
+            index_commitment: None,
+            proof_hex: String::new(),
+        });
+        // Enabled + depth matches + a reference is present, but NO authoritative
+        // snapshot is attached => the verifier cannot derive its own root.
+        let pol = RevocationPolicy::accept_version(TEST_STATUS_VERSION).with_hidden_index_depth(4);
+        assert!(matches!(
+            bind_hidden_revocation(&m, &pol, &dummy_prover(), &tmp_work("hr_ru"), &fh("0x2a")),
+            Err(CheckError::HiddenRevocationRootUnavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn hidden_revocation_root_mismatch_rejects() {
+        let mut m = scan_manifest(Fr::from(100u64));
+        m.hidden_revocation = Some(crate::manifest::HiddenIndexRevocation {
+            depth: 4,
+            root: fh("0xdeadbeef"), // NOT the authoritative root
+            index_commitment: None,
+            proof_hex: String::new(),
+        });
+        let pol = RevocationPolicy::accept_version(TEST_STATUS_VERSION)
+            .with_hidden_index_depth(4)
+            .with_snapshot(snapshot(vec![0u8]));
+        assert!(matches!(
+            bind_hidden_revocation(&m, &pol, &dummy_prover(), &tmp_work("hr_rm"), &fh("0x2a")),
+            Err(CheckError::HiddenRevocationRootMismatch)
+        ));
+    }
+
+    #[test]
+    fn hidden_revocation_index_commitment_mismatch_rejects() {
+        let auth_root = crate::revocation::merkle_root(&snapshot(vec![0u8]), 4).unwrap();
+        let mut m = scan_manifest(Fr::from(100u64));
+        m.hidden_revocation = Some(crate::manifest::HiddenIndexRevocation {
+            depth: 4,
+            root: FieldHex::from_field(&auth_root), // matches authoritative root
+            index_commitment: None,
+            proof_hex: String::new(),
+        });
+        // test_revocation() carries index_commitment: None, so the required
+        // issuer-signed index commitment is absent => fail-closed.
+        let pol = RevocationPolicy::accept_version(TEST_STATUS_VERSION)
+            .with_hidden_index_depth(4)
+            .with_snapshot(snapshot(vec![0u8]));
+        assert!(matches!(
+            bind_hidden_revocation(&m, &pol, &dummy_prover(), &tmp_work("hr_ic"), &fh("0x2a")),
+            Err(CheckError::HiddenRevocationIndexCommitmentMismatch)
+        ));
+    }
+
+    #[test]
+    fn hidden_revocation_malformed_proof_rejects() {
+        let auth_root = crate::revocation::merkle_root(&snapshot(vec![0u8]), 4).unwrap();
+        let ic = Fr::from(777u64);
+        let mut m = scan_manifest(Fr::from(100u64));
+        m.revocation = Some(crate::manifest::RevocationStatus {
+            status_list: TEST_STATUS_LIST.to_string(),
+            index: None,
+            version: TEST_STATUS_VERSION,
+            index_commitment: Some(FieldHex::from_field(&ic)),
+        });
+        m.hidden_revocation = Some(crate::manifest::HiddenIndexRevocation {
+            depth: 4,
+            root: FieldHex::from_field(&auth_root),
+            index_commitment: Some(FieldHex::from_field(&ic)),
+            proof_hex: "zz-not-hex".to_string(), // passes every structural check, fails hex-decode
+        });
+        let pol = RevocationPolicy::accept_version(TEST_STATUS_VERSION)
+            .with_hidden_index_depth(4)
+            .with_snapshot(snapshot(vec![0u8]));
+        assert!(matches!(
+            bind_hidden_revocation(&m, &pol, &dummy_prover(), &tmp_work("hr_mp"), &fh("0x2a")),
+            Err(CheckError::HiddenRevocationMalformedProof)
+        ));
+    }
+
+    // --- bind_hidden_issuer_attestations: fail-closed early returns (no bb) ---
+
+    #[test]
+    fn hidden_issuer_absent_is_ok() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())]);
+        let m = scan_manifest(Fr::from(100u64));
+        assert!(bind_hidden_issuer_attestations(&m, &k, &dummy_prover(), &tmp_work("hi_absent"), &fh("0x2a")).is_ok());
+    }
+
+    #[test]
+    fn hidden_issuer_not_enabled_rejects() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())]);
+        let mut m = scan_manifest(Fr::from(100u64));
+        m.hidden_issuer_attestations = vec![crate::manifest::HiddenIssuerAttestation {
+            commitment: FieldHex::from_field(&Fr::from(100u64)),
+            depth: 4,
+            key_set_root: fh("0x1"),
+            message: fh("0x2"),
+            salt: None,
+            proof_hex: String::new(),
+        }];
+        assert!(matches!(
+            bind_hidden_issuer_attestations(&m, &k, &dummy_prover(), &tmp_work("hi_ne"), &fh("0x2a")),
+            Err(CheckError::HiddenIssuerNotEnabled)
+        ));
+    }
+
+    #[test]
+    fn hidden_issuer_depth_mismatch_rejects() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())])
+            .with_hidden_issuer_depth(5);
+        let mut m = scan_manifest(Fr::from(100u64));
+        m.hidden_issuer_attestations = vec![crate::manifest::HiddenIssuerAttestation {
+            commitment: FieldHex::from_field(&Fr::from(100u64)),
+            depth: 4,
+            key_set_root: fh("0x1"),
+            message: fh("0x2"),
+            salt: None,
+            proof_hex: String::new(),
+        }];
+        assert!(matches!(
+            bind_hidden_issuer_attestations(&m, &k, &dummy_prover(), &tmp_work("hi_dm"), &fh("0x2a")),
+            Err(CheckError::HiddenIssuerDepthMismatch { declared: 4, policy: 5 })
+        ));
+    }
+
+    #[test]
+    fn hidden_issuer_unreferenced_commitment_rejects() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())])
+            .with_hidden_issuer_depth(4);
+        // Scan references commitment 100; the hidden entry covers 999 (no scan).
+        let mut m = scan_manifest(Fr::from(100u64));
+        m.hidden_issuer_attestations = vec![crate::manifest::HiddenIssuerAttestation {
+            commitment: FieldHex::from_field(&Fr::from(999u64)),
+            depth: 4,
+            key_set_root: fh("0x1"),
+            message: fh("0x2"),
+            salt: Some(FieldHex::from_field(&Fr::from(7u64))),
+            proof_hex: String::new(),
+        }];
+        assert!(matches!(
+            bind_hidden_issuer_attestations(&m, &k, &dummy_prover(), &tmp_work("hi_ur"), &fh("0x2a")),
+            Err(CheckError::HiddenIssuerUnreferencedCommitment { .. })
+        ));
+    }
+
+    #[test]
+    fn hidden_issuer_malformed_proof_rejects() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())])
+            .with_hidden_issuer_depth(4);
+        let commit = Fr::from(100u64);
+        // A clear attestation supplies the salt so the referenced-message set
+        // includes commitment 100; the hidden entry then covers it, and its blob
+        // is malformed => HiddenIssuerMalformedProof.
+        let mut m = scan_manifest(commit);
+        m.commitment_attestations = vec![test_attestation(commit, Fr::from(7u64), &sk)];
+        m.hidden_issuer_attestations = vec![crate::manifest::HiddenIssuerAttestation {
+            commitment: FieldHex::from_field(&commit),
+            depth: 4,
+            key_set_root: fh("0x1"),
+            message: fh("0x2"),
+            salt: None,
+            proof_hex: "zz-not-hex".to_string(),
+        }];
+        assert!(matches!(
+            bind_hidden_issuer_attestations(&m, &k, &dummy_prover(), &tmp_work("hi_mp"), &fh("0x2a")),
+            Err(CheckError::HiddenIssuerMalformedProof)
+        ));
+    }
+
+    // --- bind_holder_set: fail-closed early returns (no bb) ------------------
+
+    #[test]
+    fn holder_set_absent_is_ok() {
+        let reg = HolderRegistry::empty();
+        let m = scan_manifest(Fr::from(100u64));
+        assert!(bind_holder_set(&m, &reg, &dummy_prover(), &tmp_work("hs_absent"), &fh("0x2a")).is_ok());
+    }
+
+    #[test]
+    fn holder_set_not_enabled_rejects() {
+        let reg = HolderRegistry::from_hex_keys(["0xabc"]);
+        let mut m = scan_manifest(Fr::from(100u64));
+        m.holder_set_proofs = vec![crate::manifest::HolderSetProof {
+            commitment: FieldHex::from_field(&Fr::from(100u64)),
+            depth: 4,
+            holder_set_root: fh("0x1"),
+            proof_hex: String::new(),
+        }];
+        assert!(matches!(
+            bind_holder_set(&m, &reg, &dummy_prover(), &tmp_work("hs_ne"), &fh("0x2a")),
+            Err(CheckError::HolderSetNotEnabled)
+        ));
+    }
+
+    #[test]
+    fn holder_set_depth_mismatch_rejects() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(2);
+        let holder_hex = sparq_zk::sig::public_key_to_hex(&sk.public_key());
+        let reg = HolderRegistry::from_hex_keys([holder_hex]).with_hidden_holder_set_depth(5);
+        let mut m = scan_manifest(Fr::from(100u64));
+        m.holder_set_proofs = vec![crate::manifest::HolderSetProof {
+            commitment: FieldHex::from_field(&Fr::from(100u64)),
+            depth: 4,
+            holder_set_root: fh("0x1"),
+            proof_hex: String::new(),
+        }];
+        assert!(matches!(
+            bind_holder_set(&m, &reg, &dummy_prover(), &tmp_work("hs_dm"), &fh("0x2a")),
+            Err(CheckError::HolderSetDepthMismatch { declared: 4, policy: 5 })
+        ));
+    }
+
+    #[test]
+    fn holder_set_unreferenced_commitment_rejects() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(2);
+        let holder_hex = sparq_zk::sig::public_key_to_hex(&sk.public_key());
+        let reg = HolderRegistry::from_hex_keys([holder_hex]).with_hidden_holder_set_depth(4);
+        let mut m = scan_manifest(Fr::from(100u64));
+        m.holder_set_proofs = vec![crate::manifest::HolderSetProof {
+            commitment: FieldHex::from_field(&Fr::from(999u64)), // no scan references it
+            depth: 4,
+            holder_set_root: fh("0x1"),
+            proof_hex: String::new(),
+        }];
+        assert!(matches!(
+            bind_holder_set(&m, &reg, &dummy_prover(), &tmp_work("hs_ur"), &fh("0x2a")),
+            Err(CheckError::HolderSetUnreferencedCommitment { .. })
+        ));
+    }
+
+    #[test]
+    fn holder_set_malformed_proof_rejects() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(2);
+        let holder_hex = sparq_zk::sig::public_key_to_hex(&sk.public_key());
+        let reg = HolderRegistry::from_hex_keys([holder_hex]).with_hidden_holder_set_depth(4);
+        let commit = Fr::from(100u64);
+        let mut m = scan_manifest(commit);
+        m.holder_set_proofs = vec![crate::manifest::HolderSetProof {
+            commitment: FieldHex::from_field(&commit),
+            depth: 4,
+            holder_set_root: fh("0x1"),
+            proof_hex: "zz-not-hex".to_string(),
+        }];
+        assert!(matches!(
+            bind_holder_set(&m, &reg, &dummy_prover(), &tmp_work("hs_mp"), &fh("0x2a")),
+            Err(CheckError::HolderSetMalformedProof)
+        ));
+    }
+
+    // --- bind_holder_pok: fail-closed early returns (no bb) ------------------
+
+    #[test]
+    fn holder_pok_absent_and_not_required_is_ok() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())]);
+        let m = scan_manifest(Fr::from(100u64));
+        let pol = HolderBindingPolicy::allow_bearer();
+        assert!(bind_holder_pok(&m, &k, &pol, &dummy_prover(), &tmp_work("pok_absent"), &fh("0x2a")).is_ok());
+    }
+
+    #[test]
+    fn holder_pok_malformed_commitment_rejects() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())]);
+        let mut m = scan_manifest(Fr::from(100u64));
+        m.holder_pok_proofs = vec![crate::manifest::HolderPokProof {
+            commitment: fh("0xnot-a-field"),
+            proof_hex: String::new(),
+        }];
+        let pol = HolderBindingPolicy::allow_bearer();
+        assert!(matches!(
+            bind_holder_pok(&m, &k, &pol, &dummy_prover(), &tmp_work("pok_mc"), &fh("0x2a")),
+            Err(CheckError::HolderPokMalformedProof)
+        ));
+    }
+
+    #[test]
+    fn holder_pok_unreferenced_commitment_rejects() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())]);
+        let mut m = scan_manifest(Fr::from(100u64));
+        m.holder_pok_proofs = vec![crate::manifest::HolderPokProof {
+            commitment: FieldHex::from_field(&Fr::from(999u64)),
+            proof_hex: String::new(),
+        }];
+        let pol = HolderBindingPolicy::allow_bearer();
+        assert!(matches!(
+            bind_holder_pok(&m, &k, &pol, &dummy_prover(), &tmp_work("pok_ur"), &fh("0x2a")),
+            Err(CheckError::HolderPokUnreferencedCommitment { .. })
+        ));
+    }
+
+    #[test]
+    fn holder_pok_binding_missing_rejects() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())]);
+        let commit = Fr::from(100u64);
+        let mut m = scan_manifest(commit);
+        // Covering attestation carries NO holder binding (bearer) => nothing to bind.
+        m.commitment_attestations = vec![test_attestation(commit, Fr::from(7u64), &sk)];
+        m.holder_pok_proofs = vec![crate::manifest::HolderPokProof {
+            commitment: FieldHex::from_field(&commit),
+            proof_hex: String::new(),
+        }];
+        let pol = HolderBindingPolicy::allow_bearer();
+        assert!(matches!(
+            bind_holder_pok(&m, &k, &pol, &dummy_prover(), &tmp_work("pok_bm"), &fh("0x2a")),
+            Err(CheckError::HolderPokBindingMissing { .. })
+        ));
+    }
+
+    #[test]
+    fn holder_pok_required_but_missing_rejects() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())]);
+        let commit = Fr::from(100u64);
+        let mut m = scan_manifest(commit);
+        // Holder-bound covering attestation, HolderPop binding, but NO PoK presented
+        // and the policy MANDATES an in-circuit PoK => fail-closed.
+        m.commitment_attestations =
+            vec![holder_bound_att(commit, Fr::from(7u64), &sk, "0x2b")];
+        m.binding = BindingMode::HolderPop {
+            challenge: fh("0x2a"),
+            holder: "0xabc".to_string(),
+            pop: "0xdef".to_string(),
+            cryptosuite: "poseidon2-schnorr-v1".to_string(),
+        };
+        let pol = HolderBindingPolicy::require_binding().require_in_circuit_pok();
+        assert!(matches!(
+            bind_holder_pok(&m, &k, &pol, &dummy_prover(), &tmp_work("pok_missing"), &fh("0x2a")),
+            Err(CheckError::HolderPokMissing { .. })
+        ));
+    }
+
+    // --- verify_holder_attestation_signature: fail-closed (no bb) ------------
+
+    #[test]
+    fn holder_att_sig_issuer_not_in_keyset_rejects() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let commit = Fr::from(100u64);
+        let att = holder_bound_att(commit, Fr::from(7u64), &sk, "0x2b");
+        // Trusted K does NOT contain the issuer key.
+        let k = KeySet::from_hex_keys(["0xdeadbeef"]);
+        let m = scan_manifest(commit);
+        assert!(matches!(
+            verify_holder_attestation_signature(&m, &k, &att),
+            Err(CheckError::IssuerKeyNotInKeySet { .. })
+        ));
+    }
+
+    #[test]
+    fn holder_att_sig_bad_digest_rejects() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let commit = Fr::from(100u64);
+        // Holder digest hex is unparseable => InvalidIssuerSignature (fail-closed).
+        let att = holder_bound_att(commit, Fr::from(7u64), &sk, "0xnot-a-field");
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())]);
+        let m = scan_manifest(commit);
+        assert!(matches!(
+            verify_holder_attestation_signature(&m, &k, &att),
+            Err(CheckError::InvalidIssuerSignature { .. })
+        ));
+    }
+
+    #[test]
+    fn holder_att_sig_missing_revocation_rejects() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let commit = Fr::from(100u64);
+        let att = holder_bound_att(commit, Fr::from(7u64), &sk, "0x2b");
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())]);
+        let mut m = scan_manifest(commit);
+        m.revocation = None; // no reference to recompute the signed status digest
+        assert!(matches!(
+            verify_holder_attestation_signature(&m, &k, &att),
+            Err(CheckError::RevocationReferenceMissing { .. })
+        ));
+    }
+
+    // --- resolve_status_ref / status_ref_from_revocation: mode discipline ----
+
+    #[test]
+    fn status_ref_from_revocation_mode_selection() {
+        let list_id = sparq_zk::sig::status_list_id_to_field(TEST_STATUS_LIST);
+        // Clear-index mode.
+        let clear = crate::manifest::RevocationStatus {
+            status_list: TEST_STATUS_LIST.to_string(),
+            index: Some(3),
+            version: 1,
+            index_commitment: None,
+        };
+        assert!(status_ref_from_revocation(&clear, &list_id).is_some());
+        // Committed-index mode.
+        let committed = crate::manifest::RevocationStatus {
+            status_list: TEST_STATUS_LIST.to_string(),
+            index: None,
+            version: 1,
+            index_commitment: Some(FieldHex::from_field(&Fr::from(5u64))),
+        };
+        assert!(status_ref_from_revocation(&committed, &list_id).is_some());
+        // Neither set => malformed mode => None.
+        let neither = crate::manifest::RevocationStatus {
+            status_list: TEST_STATUS_LIST.to_string(),
+            index: None,
+            version: 1,
+            index_commitment: None,
+        };
+        assert!(status_ref_from_revocation(&neither, &list_id).is_none());
+        // Both set => malformed mode => None.
+        let both = crate::manifest::RevocationStatus {
+            status_list: TEST_STATUS_LIST.to_string(),
+            index: Some(3),
+            version: 1,
+            index_commitment: Some(FieldHex::from_field(&Fr::from(5u64))),
+        };
+        assert!(status_ref_from_revocation(&both, &list_id).is_none());
+    }
+
+    #[test]
+    fn resolve_status_ref_mode_invalid_rejects() {
+        let list_id = sparq_zk::sig::status_list_id_to_field(TEST_STATUS_LIST);
+        let rev = test_revocation();
+        // Attested reference sets NEITHER index nor index_commitment => invalid mode.
+        let att_status = crate::manifest::AttestedStatusRef {
+            index: None,
+            version: TEST_STATUS_VERSION,
+            index_commitment: None,
+        };
+        assert!(matches!(
+            resolve_status_ref(&rev, &att_status, &list_id, "0xC"),
+            Err(CheckError::RevocationReferenceModeInvalid { .. })
+        ));
+    }
+
+    // --- scan_referenced_messages: no-reference & message-forming paths ------
+
+    #[test]
+    fn scan_referenced_messages_no_reference_is_empty() {
+        let mut m = scan_manifest(Fr::from(100u64));
+        m.revocation = None;
+        assert!(scan_referenced_messages(&m).unwrap().is_empty());
+    }
+
+    #[test]
+    fn scan_referenced_messages_forms_message_for_referenced_commitment() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let commit = Fr::from(100u64);
+        let mut m = scan_manifest(commit);
+        m.commitment_attestations = vec![test_attestation(commit, Fr::from(7u64), &sk)];
+        let out = scan_referenced_messages(&m).unwrap();
+        assert_eq!(out.len(), 1, "the single referenced+salted commitment yields one message");
+        assert!(out.contains_key(&field_to_hex(&commit)));
+    }
+
+    // --- bind_issuer_attestations: additional fail-closed branches -----------
+
+    #[test]
+    fn issuer_untrusted_declared_key_rejects() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())]);
+        let mut m = scan_manifest(Fr::from(100u64));
+        // Declared key_set widens beyond K => the prover listed an untrusted key.
+        m.key_set = vec!["0xdeadbeef".to_string()];
+        assert!(matches!(
+            bind_issuer_attestations(&m, &k, &std::collections::BTreeSet::new()),
+            Err(CheckError::UntrustedDeclaredKey { .. })
+        ));
+    }
+
+    #[test]
+    fn issuer_key_not_in_keyset_rejects() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let commit = Fr::from(100u64);
+        let mut m = scan_manifest(commit);
+        m.commitment_attestations = vec![test_attestation(commit, Fr::from(7u64), &sk)];
+        // Trusted K does NOT contain the attestation's issuer key.
+        let k = KeySet::from_hex_keys(["0xdeadbeef"]);
+        assert!(matches!(
+            bind_issuer_attestations(&m, &k, &std::collections::BTreeSet::new()),
+            Err(CheckError::IssuerKeyNotInKeySet { .. })
+        ));
+    }
+
+    #[test]
+    fn issuer_scan_commitment_status_missing_rejects() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let commit = Fr::from(100u64);
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())]);
+        let mut m = scan_manifest(commit);
+        let mut att = test_attestation(commit, Fr::from(7u64), &sk);
+        att.status = None; // scan-covering attestation MUST bind a status reference
+        m.commitment_attestations = vec![att];
+        assert!(matches!(
+            bind_issuer_attestations(&m, &k, &std::collections::BTreeSet::new()),
+            Err(CheckError::ScanCommitmentStatusMissing { .. })
+        ));
+    }
+
+    #[test]
+    fn issuer_scan_commitment_salt_missing_rejects() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let commit = Fr::from(100u64);
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())]);
+        let mut m = scan_manifest(commit);
+        let mut att = test_attestation(commit, Fr::from(7u64), &sk);
+        att.salt = None; // scan-covering attestation MUST carry a salt
+        m.commitment_attestations = vec![att];
+        assert!(matches!(
+            bind_issuer_attestations(&m, &k, &std::collections::BTreeSet::new()),
+            Err(CheckError::ScanCommitmentSaltMissing { .. })
+        ));
+    }
+
+    #[test]
+    fn issuer_revocation_reference_missing_rejects() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let commit = Fr::from(100u64);
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())]);
+        let mut m = scan_manifest(commit);
+        m.commitment_attestations = vec![test_attestation(commit, Fr::from(7u64), &sk)];
+        m.revocation = None; // the disclosed reference is required to recompute the digest
+        assert!(matches!(
+            bind_issuer_attestations(&m, &k, &std::collections::BTreeSet::new()),
+            Err(CheckError::RevocationReferenceMissing { .. })
+        ));
+    }
+
+    // --- bind_holder_pop: fail-closed early returns (no bb) ------------------
+
+    #[test]
+    fn holder_pop_challenge_binding_is_ok() {
+        // A plain `Challenge` binding presents no holder => no PoP to check.
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())]);
+        let m = scan_manifest(Fr::from(100u64));
+        let reg = HolderRegistry::empty();
+        let pol = HolderBindingPolicy::allow_bearer();
+        assert!(bind_holder_pop(&m, &reg, &k, &pol, &fh("0x2a")).is_ok());
+    }
+
+    #[test]
+    fn holder_pop_empty_registry_rejects() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())]);
+        let mut m = scan_manifest(Fr::from(100u64));
+        m.binding = BindingMode::HolderPop {
+            challenge: fh("0x2a"),
+            holder: "0xabc".to_string(),
+            pop: "0xdef".to_string(),
+            cryptosuite: "poseidon2-schnorr-v1".to_string(),
+        };
+        // No trust anchor => a HolderPop can never be accepted (fail-closed).
+        let reg = HolderRegistry::empty();
+        let pol = HolderBindingPolicy::allow_bearer();
+        assert!(matches!(
+            bind_holder_pop(&m, &reg, &k, &pol, &fh("0x2a")),
+            Err(CheckError::HolderRegistryEmpty)
+        ));
+    }
+
+    #[test]
+    fn holder_pop_untrusted_holder_rejects() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())]);
+        let mut m = scan_manifest(Fr::from(100u64));
+        let other_hex = sparq_zk::sig::public_key_to_hex(
+            &sparq_zk::sig::SecretKey::from_seed(42).public_key(),
+        );
+        m.binding = BindingMode::HolderPop {
+            challenge: fh("0x2a"),
+            holder: "0xabc".to_string(), // not a registry member
+            pop: "0xdef".to_string(),
+            cryptosuite: "poseidon2-schnorr-v1".to_string(),
+        };
+        let reg = HolderRegistry::from_hex_keys([other_hex]);
+        let pol = HolderBindingPolicy::allow_bearer();
+        assert!(matches!(
+            bind_holder_pop(&m, &reg, &k, &pol, &fh("0x2a")),
+            Err(CheckError::HolderNotTrusted { .. })
+        ));
+    }
+
+    #[test]
+    fn holder_pop_unknown_cryptosuite_rejects() {
+        // Holder IS a registry member, but the PoP cryptosuite is unknown =>
+        // unverifiable => HolderPopMalformed (fail-closed, no silent accept).
+        let holder_sk = sparq_zk::sig::SecretKey::from_seed(9);
+        let holder_hex = sparq_zk::sig::public_key_to_hex(&holder_sk.public_key());
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())]);
+        let mut m = scan_manifest(Fr::from(100u64));
+        m.binding = BindingMode::HolderPop {
+            challenge: fh("0x2a"),
+            holder: holder_hex.clone(),
+            pop: "0xdef".to_string(),
+            cryptosuite: "urn:bogus:not-a-suite".to_string(),
+        };
+        let reg = HolderRegistry::from_hex_keys([holder_hex]);
+        let pol = HolderBindingPolicy::allow_bearer();
+        assert!(matches!(
+            bind_holder_pop(&m, &reg, &k, &pol, &fh("0x2a")),
+            Err(CheckError::HolderPopMalformed)
+        ));
+    }
+
+    #[test]
+    fn holder_pop_invalid_signature_rejects() {
+        // Holder in registry, known cryptosuite, parseable key/sig, valid challenge,
+        // but the PoP signature does NOT verify over the challenge => HolderPopInvalid.
+        let holder_sk = sparq_zk::sig::SecretKey::from_seed(9);
+        let holder_hex = sparq_zk::sig::public_key_to_hex(&holder_sk.public_key());
+        // A syntactically-valid signature over a DIFFERENT message (a mismatched nonce).
+        let wrong_pop = holder_sk.sign_commitment(&Fr::from(1u64));
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())]);
+        let mut m = scan_manifest(Fr::from(100u64));
+        m.binding = BindingMode::HolderPop {
+            challenge: fh("0x2a"),
+            holder: holder_hex.clone(),
+            pop: wrong_pop,
+            cryptosuite: sparq_zk::sig::SignatureScheme::Poseidon2SchnorrV1
+                .cryptosuite_iri()
+                .to_string(),
+        };
+        let reg = HolderRegistry::from_hex_keys([holder_hex]);
+        let pol = HolderBindingPolicy::allow_bearer();
+        assert!(matches!(
+            bind_holder_pop(&m, &reg, &k, &pol, &fh("0x2a")),
+            Err(CheckError::HolderPopInvalid { .. })
+        ));
+    }
+
+    // --- pure accessors / encoding helpers: deterministic round-trips --------
+
+    #[test]
+    fn normalize_hex_strips_prefix_and_lowercases() {
+        assert_eq!(normalize_hex("0xABC"), "abc");
+        assert_eq!(normalize_hex("DEf"), "def");
+        assert_eq!(normalize_hex("0x0"), "0");
+    }
+
+    #[test]
+    fn encode_pattern_slot_variable_is_zero() {
+        assert_eq!(encode_pattern_slot(&None), Some(FieldHex("0x0".to_string())));
+    }
+
+    #[test]
+    fn encode_pattern_slot_iri_is_deterministic() {
+        let t = oxrdf::Term::NamedNode(oxrdf::NamedNode::new("http://ex/p").unwrap());
+        let a = encode_pattern_slot(&Some(t.clone()));
+        let b = encode_pattern_slot(&Some(t));
+        assert!(a.is_some());
+        assert_eq!(a, b, "IRI slot encoding is salt-independent and deterministic");
+    }
+
+    #[test]
+    fn keyset_membership_is_representation_insensitive() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let pk = sparq_zk::sig::public_key_to_hex(&sk.public_key());
+        let k = KeySet::from_hex_keys([pk.clone()]);
+        assert!(k.contains_hex(&pk));
+        assert!(!k.contains_hex("0xdeadbeef"));
+    }
 }
 
 // [OPUS-4.8] sq-3kd2g.6: FAIL-CLOSED wave-1 fragment DISPATCH tests — the
