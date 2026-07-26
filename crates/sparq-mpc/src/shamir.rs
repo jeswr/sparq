@@ -465,10 +465,20 @@ impl ShamirDealer {
     /// degree-`2t` equality open at `n = 2t+1` — there is no in-protocol check here
     /// that detects it. Each fresh re-sharing draws its own random masking
     /// coefficients, so any `≤ t` parties' view of the sub-shares is independent of
-    /// the reduced secret (the standard BGW privacy argument). Malicious hardening
-    /// (IT-MACs / verifiable resharing) is future work behind the SAME backend, not
-    /// claimed here. See `research/mpc-security-models-and-benchmarks.md` §3 (the
+    /// the reduced secret (the standard BGW privacy argument).
+    /// See `research/mpc-security-models-and-benchmarks.md` §3 (the
     /// "general Shamir multiplication needs degree reduction" gap) and §6 step 6.
+    ///
+    /// **This primitive is not hardened — the AUTHENTICATED caller is (sq-km34.3).**
+    /// The wrong-re-sharing deviation above ("Hole 2") is not detectable *here*, and
+    /// this method makes no attempt to detect it: a party that re-shares `h_i + δ`
+    /// emits a perfectly consistent degree-`t` codeword, so there is nothing for
+    /// Reed–Solomon to flag even at over-provisioned `n`. It is COVERED one level up,
+    /// on the authenticated path: [`MacSession::auth_mul`] calls this reduce TWICE
+    /// over independent inputs (once for `[z]`, once for `[α·z] = reduce([α·x]·[y])`),
+    /// so a `δ` injected into either reduce breaks the `m_z = α·z` relation and
+    /// [`MacSession::mac_check`] aborts. A caller that uses this reduce directly,
+    /// WITHOUT the MAC session, gets the semi-honest guarantee only.
     ///
     /// Returns a fresh degree-`t` sharing on the canonical points `x = 1..n`.
     pub fn degree_reduce(&mut self, shares_2t: &[Share]) -> Result<Vec<Share>, MpcError> {
