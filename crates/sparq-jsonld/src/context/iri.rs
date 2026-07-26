@@ -26,24 +26,191 @@ pub(crate) fn is_absolute_iri(s: &str) -> bool {
     }
 }
 
-/// [OPUS-5] sq-gzsky — True iff `s` is a WELL-FORMED absolute IRI: [`is_absolute_iri`]
-/// (a valid scheme) *and* free of the characters RFC 3987 excludes from an IRI —
-/// SPACE, `"`, `<`, `>`, `\`, `^`, `` ` ``, `{`, `|`, `}` and the C0/C1 control ranges.
+/// [OPUS-5] sq-gzsky — True iff `s` is a WELL-FORMED absolute IRI, i.e. it parses against
+/// the RFC 3987 `IRI` production
+/// `scheme ":" ihier-part [ "?" iquery ] [ "#" ifragment ]`.
 ///
 /// [`is_absolute_iri`] only inspects the scheme, which is the right (cheap) predicate
 /// where the value has already been produced by IRI expansion. This stricter form is for
 /// the places the spec says a processor MUST *validate* an authored IRI — notably a value
 /// object's `@type` datatype (§5.1.2 step 15.5, W3C expand/#t0123: `"http://example.com/baz
 /// z"` must raise `invalid typed value`).
+///
+/// Each component is checked against its own character class (`ipchar` / `iquery` /
+/// `ifragment` / `iuserinfo` / `ireg-name`, with `iunreserved` covering the `ucschar`
+/// ranges), and every `%` must introduce exactly two `HEXDIG` — so `http://example.com/%ZZ`
+/// is rejected, unlike a character blacklist. Deliberate residual laxity, both beyond what
+/// §5.1.2 needs: a bracketed `IP-literal` host is checked for *shape* (`HEXDIG` / `:` / `.`,
+/// or an `IPvFuture` `v…`) rather than parsed as a numeric address, and a `port` is not
+/// required to fit any integer width.
+///
+/// [SONNET-4.6] (PR #4041 review round 1) replaces the original scheme-plus-blacklist
+/// form, which accepted invalid percent-encoding and ignored component boundaries.
 pub(crate) fn is_well_formed_absolute_iri(s: &str) -> bool {
-    is_absolute_iri(s)
-        && !s.chars().any(|c| {
-            c.is_control()
-                || matches!(
-                    c,
-                    ' ' | '"' | '<' | '>' | '\\' | '^' | '`' | '{' | '|' | '}' | '\u{7f}'
-                )
+    // scheme ":" — the only part of the grammar `is_absolute_iri` covers.
+    let Some(colon) = s.find(':') else {
+        return false;
+    };
+    if !is_valid_scheme(&s[..colon]) {
+        return false;
+    }
+    // Split the trailing components off, outermost first (RFC 3986 Appendix B).
+    let rest = &s[colon + 1..];
+    let (rest, fragment) = match rest.find('#') {
+        Some(i) => (&rest[..i], Some(&rest[i + 1..])),
+        None => (rest, None),
+    };
+    let (rest, query) = match rest.find('?') {
+        Some(i) => (&rest[..i], Some(&rest[i + 1..])),
+        None => (rest, None),
+    };
+    // ihier-part: "//" iauthority ipath-abempty / ipath-absolute / ipath-rootless / empty.
+    let (authority, path) = match rest.strip_prefix("//") {
+        Some(after) => {
+            let end = after.find('/').unwrap_or(after.len());
+            (Some(&after[..end]), &after[end..])
+        }
+        None => (None, rest),
+    };
+    if let Some(a) = authority {
+        if !is_valid_iauthority(a) {
+            return false;
+        }
+        // ipath-abempty: empty, or rooted at "/".
+        if !path.is_empty() && !path.starts_with('/') {
+            return false;
+        }
+    }
+    is_valid_component(path, |c| is_ipchar(c) || c == '/')
+        && query.is_none_or(|q| {
+            is_valid_component(q, |c| is_ipchar(c) || c == '/' || c == '?' || is_iprivate(c))
         })
+        && fragment.is_none_or(|f| is_valid_component(f, |c| is_ipchar(c) || c == '/' || c == '?'))
+}
+
+/// True iff every character of `s` is `allowed` *and* every `%` introduces two `HEXDIG`
+/// (RFC 3987 `pct-encoded`). The percent-encoding rule is what a character blacklist
+/// cannot express.
+fn is_valid_component(s: &str, allowed: impl Fn(char) -> bool) -> bool {
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let (Some(hi), Some(lo)) = (chars.next(), chars.next()) else {
+                return false;
+            };
+            if !hi.is_ascii_hexdigit() || !lo.is_ascii_hexdigit() {
+                return false;
+            }
+        } else if !allowed(c) {
+            return false;
+        }
+    }
+    true
+}
+
+/// RFC 3987 `iauthority = [ iuserinfo "@" ] ihost [ ":" port ]`.
+fn is_valid_iauthority(s: &str) -> bool {
+    // `@` is legal inside neither iuserinfo nor ihost, so the LAST one delimits.
+    let host_port = match s.rfind('@') {
+        Some(i) => {
+            if !is_valid_component(&s[..i], |c| is_iunreserved(c) || is_sub_delim(c) || c == ':') {
+                return false;
+            }
+            &s[i + 1..]
+        }
+        None => s,
+    };
+    // IP-literal hosts are bracketed and may be followed by ":" port.
+    if let Some(after_bracket) = host_port.strip_prefix('[') {
+        let Some(end) = after_bracket.find(']') else {
+            return false;
+        };
+        let literal = &after_bracket[..end];
+        let literal_ok = match literal.strip_prefix('v') {
+            // IPvFuture = "v" 1*HEXDIG "." 1*( unreserved / sub-delims / ":" )
+            Some(future) => match future.split_once('.') {
+                Some((ver, tail)) => {
+                    !ver.is_empty()
+                        && ver.chars().all(|c| c.is_ascii_hexdigit())
+                        && !tail.is_empty()
+                        && tail
+                            .chars()
+                            .all(|c| is_iunreserved(c) || is_sub_delim(c) || c == ':')
+                }
+                None => false,
+            },
+            // IPv6address (shape only — see the caller's doc comment).
+            None => {
+                !literal.is_empty()
+                    && literal
+                        .chars()
+                        .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
+            }
+        };
+        return literal_ok && is_valid_port_suffix(&after_bracket[end + 1..]);
+    }
+    // ireg-name / IPv4address (a character-class subset of ireg-name), plus ":" port.
+    // ireg-name may be empty (`file:///path`), and a colon can only start the port.
+    let (name, port_suffix) = match host_port.find(':') {
+        Some(i) => (&host_port[..i], &host_port[i..]),
+        None => (host_port, ""),
+    };
+    is_valid_component(name, |c| is_iunreserved(c) || is_sub_delim(c))
+        && is_valid_port_suffix(port_suffix)
+}
+
+/// True iff `s` is either empty or `":" *DIGIT` (RFC 3986 `port`).
+fn is_valid_port_suffix(s: &str) -> bool {
+    match s.strip_prefix(':') {
+        Some(port) => port.chars().all(|c| c.is_ascii_digit()),
+        None => s.is_empty(),
+    }
+}
+
+/// RFC 3987 `ipchar = iunreserved / pct-encoded / sub-delims / ":" / "@"` (the
+/// `pct-encoded` alternative is handled by [`is_valid_component`]).
+fn is_ipchar(c: char) -> bool {
+    is_iunreserved(c) || is_sub_delim(c) || c == ':' || c == '@'
+}
+
+/// RFC 3987 `iunreserved = ALPHA / DIGIT / "-" / "." / "_" / "~" / ucschar`.
+fn is_iunreserved(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~') || is_ucschar(c)
+}
+
+/// RFC 3986 `sub-delims`.
+fn is_sub_delim(c: char) -> bool {
+    matches!(
+        c,
+        '!' | '$' | '&' | '\'' | '(' | ')' | '*' | '+' | ',' | ';' | '='
+    )
+}
+
+/// RFC 3987 `ucschar` — the non-ASCII code points an IRI may carry unescaped.
+fn is_ucschar(c: char) -> bool {
+    matches!(u32::from(c),
+        0xA0..=0xD7FF
+        | 0xF900..=0xFDCF
+        | 0xFDF0..=0xFFEF
+        | 0x1_0000..=0x1_FFFD
+        | 0x2_0000..=0x2_FFFD
+        | 0x3_0000..=0x3_FFFD
+        | 0x4_0000..=0x4_FFFD
+        | 0x5_0000..=0x5_FFFD
+        | 0x6_0000..=0x6_FFFD
+        | 0x7_0000..=0x7_FFFD
+        | 0x8_0000..=0x8_FFFD
+        | 0x9_0000..=0x9_FFFD
+        | 0xA_0000..=0xA_FFFD
+        | 0xB_0000..=0xB_FFFD
+        | 0xC_0000..=0xC_FFFD
+        | 0xD_0000..=0xD_FFFD
+        | 0xE_1000..=0xE_FFFD)
+}
+
+/// RFC 3987 `iprivate` — private-use code points, legal only in `iquery`.
+fn is_iprivate(c: char) -> bool {
+    matches!(u32::from(c), 0xE000..=0xF8FF | 0xF_0000..=0xF_FFFD | 0x10_0000..=0x10_FFFD)
 }
 
 /// True iff `s` is a syntactically valid URI scheme: `ALPHA *( ALPHA / DIGIT / "+" / "-" /
@@ -489,6 +656,117 @@ mod tests {
         assert!(!is_absolute_iri("_:b0"));
         assert!(is_blank_node("_:b0"));
         assert!(!is_blank_node("http://x"));
+    }
+
+    // -----------------------------------------------------------------------
+    // is_well_formed_absolute_iri — the RFC 3987 `IRI` production.
+    // [SONNET-4.6] (PR #4041 review round 1) The predicate used to be
+    // `is_absolute_iri` plus a character blacklist, so invalid percent-encoding
+    // and component-misplaced characters slipped through.
+    // -----------------------------------------------------------------------
+
+    /// IRIs that must be accepted, one per grammar feature the validator has to
+    /// admit (percent-encoding, userinfo, port, IP-literal, empty host, ucschar,
+    /// iprivate-in-query, sub-delims, rootless path).
+    const WELL_FORMED: &[&str] = &[
+        "http://example.com/bazz",
+        "http://example.com/%20quoted",
+        "http://example.com/a%2Fb",
+        "http://example.com/a?q=1&r=2#frag",
+        "http://user:pw@example.com:8080/p",
+        "http://example.com:8080/p",
+        "http://[::1]:8080/p",
+        "http://[v7.host]/p",
+        "file:///etc/hosts",
+        "http://example.com",
+        "http://example.com/\u{3c0}",
+        "http://example.com/a?q=\u{e000}",
+        "http://example.com/a!$&'()*+,;=:@b",
+        "urn:example:dt",
+        "mailto:a@example.org",
+    ];
+
+    /// IRIs that must be rejected, paired with the rule each one violates.
+    const MALFORMED: &[(&str, &str)] = &[
+        ("http://example.com/%ZZ", "pct-encoded needs two HEXDIG"),
+        ("http://example.com/%A", "truncated pct-encoded"),
+        ("http://example.com/%", "bare percent"),
+        ("http://example.com/baz z", "SPACE is not an ipchar"),
+        ("http://example.com/a<b", "`<` is not an ipchar"),
+        ("http://example.com/a|b", "`|` is not an ipchar"),
+        ("http://example.com/a\u{7f}b", "DEL is not an ipchar"),
+        ("http://example.com/a\u{0}b", "NUL is not an ipchar"),
+        ("http://ex ample.com/p", "SPACE is not an ireg-name char"),
+        ("http://exa/mple.com/%GG", "pct-encoded in a later segment"),
+        ("http://example.com:port/p", "port must be *DIGIT"),
+        ("http://example.com/a?q=%2", "truncated pct-encoded in iquery"),
+        ("http://example.com/a#f%2", "truncated pct-encoded in ifragment"),
+        ("http://[zzz]/p", "IP-literal shape"),
+        ("http://[::1/p", "unterminated IP-literal"),
+        ("http://example.com/a\u{e000}b", "iprivate is iquery-only"),
+        ("example.com/no-scheme", "no scheme"),
+        ("_:dt", "a blank node identifier is not an IRI"),
+        ("1http://example.com", "scheme must start with ALPHA"),
+    ];
+
+    #[test]
+    fn well_formed_iris_are_accepted() {
+        for iri in WELL_FORMED {
+            assert!(
+                is_well_formed_absolute_iri(iri),
+                "expected well-formed: {:?}",
+                iri
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_iris_are_rejected() {
+        for (iri, why) in MALFORMED {
+            assert!(
+                !is_well_formed_absolute_iri(iri),
+                "expected malformed ({}): {:?}",
+                why,
+                iri
+            );
+        }
+    }
+
+    /// The stricter predicate is a strict refinement of [`is_absolute_iri`]: every
+    /// well-formed IRI has a valid scheme, but not every valid scheme makes an IRI.
+    #[test]
+    fn well_formed_refines_is_absolute_iri() {
+        for iri in WELL_FORMED {
+            assert!(is_absolute_iri(iri), "{:?}", iri);
+        }
+        assert!(is_absolute_iri("http://example.com/%ZZ"));
+        assert!(!is_well_formed_absolute_iri("http://example.com/%ZZ"));
+    }
+
+    /// Mutation tripwire for the hand-written grammar, mirroring
+    /// `resolve_iri_matches_oxiri_on_shared_corpus`: oxiri stays a dev-dependency so
+    /// the crate keeps zero mandatory dependencies, but its RFC 3987 parser pins the
+    /// accept/reject verdict on both corpora.
+    #[test]
+    fn well_formed_matches_oxiri_on_shared_corpus() {
+        for iri in WELL_FORMED {
+            assert!(
+                oxiri::Iri::parse(*iri).is_ok(),
+                "corpus says well-formed but oxiri rejects: {:?}",
+                iri
+            );
+        }
+        for (iri, why) in MALFORMED {
+            if !is_absolute_iri(iri) {
+                continue; // scheme-level rejections are not oxiri's disagreement surface
+            }
+            assert!(
+                oxiri::Iri::parse(*iri).is_err(),
+                "corpus says malformed ({}) but oxiri accepts: {:?}",
+                why,
+                iri
+            );
+        }
     }
 
     // RFC 3986 §5.4 normal-example reference-resolution vectors.

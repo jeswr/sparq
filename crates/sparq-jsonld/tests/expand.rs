@@ -719,6 +719,27 @@ fn malformed_datatype_iri_is_an_invalid_typed_value() {
     );
 }
 
+/// Same step, through the grammar rather than a character blacklist: `%` must introduce
+/// two HEXDIG, so `%ZZ` is not a well-formed IRI even though every character in it is
+/// individually legal. [SONNET-4.6] (PR #4041 review round 1) regression test.
+#[test]
+fn invalid_percent_encoding_in_datatype_iri_is_an_invalid_typed_value() {
+    assert_error(
+        r#"{"http://ex/p": {"@value": "bar", "@type": "http://example.com/%ZZ"}}"#,
+        JsonLdErrorCode::InvalidTypedValue,
+    );
+}
+
+/// The VALID percent-encoded datatype next door still expands — the grammar must reject
+/// bad escapes, not percent-encoding as such.
+#[test]
+fn valid_percent_encoded_datatype_iri_still_expands() {
+    assert_expands(
+        r#"{"http://ex/p": {"@value": "bar", "@type": "http://example.com/%20dt"}}"#,
+        r#"[{"http://ex/p": [{"@value": "bar", "@type": "http://example.com/%20dt"}]}]"#,
+    );
+}
+
 /// The well-formed datatype next door still expands — the validation must reject the
 /// illegal character, not the shape.
 #[test]
