@@ -150,6 +150,16 @@ def externally_gated(bead):
 # package from the bead's own text, and when nothing is derivable make the parked state EXPLICIT
 # with `needs:area` (a gate ready-issues.py already respects + maintainer-visible) instead of
 # silently reserving the global partition.
+#
+# [OPUS-5] SCOPE OF THAT CLAIM, corrected in review round 2. It holds for the ZERO-area case only.
+# `limit=2` below means a bead CAN emit two areas, and the two consumers then disagree about what
+# that means: ready-issues.py `packages_of` treats it as the SET {a, b}, while dispatch-plan.py
+# collapses any non-singleton package set to `_ready.GLOBAL` — so a two-area issue lands in the
+# serializing __global__ partition at PLAN time after all, which is precisely the outcome the
+# needs:area park exists to avoid. MEASURED on the live board 2026-07-26: 55 of the 895 migrated
+# issues carry >=2 `area:` labels (most from their bd labels rather than from derivation, so
+# lowering this limit would not retro-fix them). Tracked separately; not silently reworded here,
+# because the right fix is a decision about which consumer is authoritative, not a doc edit.
 _SURFACE_AREAS = {"site": "site", "gui": "gui", "bench": "bench", "ci": "ci", "docs": "docs",
                   "js": "js", "wasm": "sparq-wasm", "workflows": "ci", "release": "release",
                   "orchestration": "orchestration", "deps": "deps", "workspace": "workspace"}
@@ -534,6 +544,28 @@ def _label_node_ids(repo, names):
     return ids
 
 
+def _split_chunk(chunk, half=None):
+    """Split an over-limit chunk STRICTLY downward, or fail loud.
+
+    [OPUS-5] The split must SHRINK. GitHub executes the leading aliases before refusing an
+    oversize mutation, and these mutations are ADD-only, so a chunk re-queued at its original
+    size loops forever while re-applying its prefix on every pass — the process never exits and
+    never errors, it just spins. Review round 2 measured exactly that: mutating the halving
+    HUNG the self-test instead of failing it, which is a weak kill (a hang reads as a stuck
+    runner, not a caught defect). The invariant below turns that into a loud SystemExit.
+
+    `half` is injectable ONLY so the guard is reachable from the self-test. A post-condition no
+    input can violate is a tripwire nobody can prove still works — deleting it would red nothing
+    (measured: it survived mutation until this seam existed). Production always uses the default.
+    """
+    half = max(1, len(chunk) // 2) if half is None else half
+    halves = [chunk[:half], chunk[half:]]
+    if sum(len(h) for h in halves) != len(chunk) or any(len(h) >= len(chunk) for h in halves):
+        raise SystemExit(f"label reconcile: non-progressing split of {len(chunk)} -> "
+                         f"{[len(h) for h in halves]} — would loop while partially applying")
+    return halves
+
+
 def apply_reconcile(repo, plan, node_ids, batch=8, pause=2.0, log=print):
     """Apply `plan` ({issue_number: [labels]}) with ONE GraphQL request per `batch` issues.
 
@@ -572,9 +604,10 @@ def apply_reconcile(repo, plan, node_ids, batch=8, pause=2.0, log=print):
                 if len(chunk) == 1:
                     raise SystemExit(f"label reconcile: issue #{chunk[0]} is irreducibly over the "
                                      f"GraphQL resource limit: {err[:300]}")
-                half = max(1, len(chunk) // 2)
-                log(f"  request over the GraphQL resource limit — splitting {len(chunk)} -> {half}")
-                queue[:0] = [chunk[:half], chunk[half:]]
+                halves = _split_chunk(chunk)          # strictly downward, or a loud SystemExit
+                log(f"  request over the GraphQL resource limit — splitting {len(chunk)} -> "
+                    f"{len(halves[0])}")
+                queue[:0] = halves
                 break
             if "secondary rate" in err or "abuse" in err or "was submitted too quickly" in err:
                 wait = 30 * (2 ** attempt)
@@ -937,11 +970,42 @@ def _self_test():
          if lb.startswith("priority:")], [])
     chk("a missing single-valued family IS still filled in",
         "role:impl" in plan_reconcile(beads, {"sq-a": 15}, {15: ["area:x"]}, cr).get(15, []), True)
+    # [OPUS-5] `area:` was in _SINGLE_VALUED but UNGUARDED — dropping it from the tuple redded
+    # nothing, unlike its two siblings. The "human-curated area is preserved" case above passes
+    # for a DIFFERENT reason (its bead derives no area at all, so the `needs:area` discard does
+    # the work). This is the case that isolates the family suppression: the bead derives
+    # area:sparq-solid while the issue already carries a different area, so a second area label
+    # would put one issue in two package partitions — which dispatch-plan.py then collapses to
+    # the serializing __global__ partition, i.e. strictly worse than leaving it alone.
+    chk("never adds a SECOND area: label when the issue already has a different one",
+        [lb for lb in plan_reconcile(beads, {"sq-a": 16}, {16: ["area:sparq-core"]},
+                                     cr).get(16, []) if lb.startswith("area:")], [])
     chk("batching chunks evenly", [len(c) for c in _chunks(range(45), 20)], [20, 20, 5])
     chk("empty reconcile does zero API calls", apply_reconcile("o/r", {}, {}), 0)
     # Adaptive split on the server's `Resource limits for this query exceeded` refusal (a real
     # 20-mutation batch hit it on the first chunk). Every issue must still be applied EXACTLY
     # once overall, and a single irreducible issue must fail loud rather than loop.
+    # [OPUS-5] Split-invariant assertions run BEFORE the apply_reconcile block on purpose: a
+    # broken split makes apply_reconcile raise, which would abort _self_test mid-way and turn
+    # every later assertion into an unnamed traceback instead of a named FAIL line.
+    def _shrinks(n):
+        try:
+            return all(0 < len(h) < n for h in _split_chunk(list(range(n))))
+        except SystemExit:
+            return "SystemExit"
+    chk("every split strictly shrinks (a non-progressing split loops forever)",
+        [n for n in range(2, 65) if _shrinks(n) is not True], [])
+    chk("a split preserves every element exactly once",
+        _split_chunk([1, 2, 3, 4, 5]), [[1, 2], [3, 4, 5]])
+    # The guard itself, exercised through the injectable seam — otherwise it is an unreachable
+    # post-condition that could be deleted with nothing going red.
+    for bad, why in ((5, "no shrink"), (0, "empty head, full tail"), (9, "tail dropped")):
+        try:
+            _split_chunk([1, 2, 3, 4, 5], half=bad)
+            chk(f"non-progressing split is rejected ({why})", "returned", "SystemExit")
+        except SystemExit:
+            chk(f"non-progressing split is rejected ({why})", "SystemExit", "SystemExit")
+
     calls = []
 
     def fake_run(args, check=True):
@@ -964,6 +1028,24 @@ def _self_test():
         # is NEVER re-issued at the same size (that would loop while partially applying).
         chk("oversize batch splits strictly downward, never retried at the same size",
             calls, [5, 2, 3, 1, 2])
+        # CALL-SITE PIN: apply_reconcile must route its split through the guarded helper. An
+        # inlined halving at the call site is correct TODAY and therefore invisible to every
+        # assertion above — measured as a surviving mutant. Stub the helper with a sentinel and
+        # require it to reach the caller: if the call site stops using it, nothing raises.
+        sentinel = RuntimeError("split helper reached")
+
+        def _boom(chunk, half=None):
+            raise sentinel
+        real_split = globals()["_split_chunk"]
+        globals()["_split_chunk"] = _boom
+        try:
+            apply_reconcile("o/r", plan5, {n: f"I_{n}" for n in plan5}, batch=5, pause=0)
+            chk("apply_reconcile splits via the guarded _split_chunk", "not called", "called")
+        except RuntimeError as exc:
+            chk("apply_reconcile splits via the guarded _split_chunk",
+                "called" if exc is sentinel else repr(exc), "called")
+        finally:
+            globals()["_split_chunk"] = real_split
         calls.clear()
         globals()["_run"] = lambda a, check=True: type("R", (), {
             "returncode": 1, "stdout": "", "stderr": "Resource limits for this query exceeded"})()
