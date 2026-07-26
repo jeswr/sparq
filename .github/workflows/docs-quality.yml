@@ -462,6 +462,12 @@ jobs:
       #     STRUCTURALLY (not by substring) so `if: false`, a deleted step, a reordered
       #     step or a re-pointed `--dry-run` input each red this gate. Measured in this
       #     repo: every uncaught mutant has lived at the YAML seam, not in the Python.
+      #     [OPUS-5] PR #4192 review: it now pins the guard step's `run:` by EQUALITY and
+      #     asserts `continue-on-error` is ABSENT — a `|| true` suffix, an `exit 0;`
+      #     prefix, `continue-on-error: 'true'` and `continue-on-error: ${{ true }}` all
+      #     survived the looser containment/identity readings. It also drives `run()`'s
+      #     crates.io CALL SITE (not just `decide()`), and executes .claude/settings.json's
+      #     hook wrapper to prove an unrunnable arm guard denies rather than allows.
       - name: Self-test crates.io publishing protections (#1135)
         run: |
           python3 scripts/release_pr_guard.py --self-test
@@ -487,8 +493,14 @@ jobs:
       # fail-OPEN-on-error — with NO network/gh dependency (the base lookup is injected). Mirrors
       # coverage-gate.py / check-install-action-tool.py --self-test (stdlib-only, no deps).
       # [GPT-5.6] #3605: it also runs the real settings command from an unrelated cwd and
-      # proves a missing guard script returns an explicit allow instead of bricking every Bash.
-      - name: Self-test stacked-PR arm guard (cwd-independent + fail-open)
+      # proves an unrunnable guard script returns an explicit decision with exit 0 instead
+      # of bricking every Bash.
+      # [OPUS-5] PR #4192 review, finding 3: that explicit decision used to be `allow` for
+      # EVERY command, which inverted the script's deliberately fail-CLOSED release axis
+      # exactly when there is no guard. The wrapper now DENIES `gh pr merge` and allows
+      # everything else; both halves are pinned in the self-test (an all-deny would
+      # re-create the #3605 all-Bash deadlock, so the allow row is load-bearing too).
+      - name: Self-test stacked-PR arm guard (cwd-independent; fail-closed on arms)
         run: python3 scripts/check-pr-arm-base.py --self-test
       # [OPUS-4.8] sq-53cq: anti-drift guard for the two-hop dashboard publish. The in-repo
       # source-of-truth bench/dashboard/* reaches the live site via bench.yml's "Seed Pages
