@@ -19,6 +19,10 @@ import {
   SOURCE,
   familyMetricCount,
 } from "@/data/benchmarks";
+import {
+  METRIC_BADGE_WIDEST_LABEL,
+  metricBadgeLabel,
+} from "@/lib/metric-badge";
 
 export const metadata: Metadata = {
   title: "Benchmarks",
@@ -88,13 +92,33 @@ export default function BenchmarksOverviewPage() {
                 <CardHeader>
                   <div className="flex items-center justify-between gap-2">
                     <CardTitle className="text-base">{f.title}</CardTitle>
-                    {count === 0 ? (
-                      <Badge variant="muted">soon</Badge>
-                    ) : (
-                      <Badge variant="muted">
-                        {count} metric{count === 1 ? "" : "s"}
-                      </Badge>
-                    )}
+                    {/* [SONNET-4.6] sq-hfd82 — data-vr-mask: the per-family metric COUNT is
+                        derived from the committed benchmarks snapshot, which the benchmark
+                        workflow refreshes continuously (the metric total grew by more than half
+                        again within three days of the last baseline re-mint). sq-mcsbp masked the
+                        provenance strip above for exactly this reason but left these badges
+                        unmasked, so benchmarks-index.png went stale again within days — the
+                        fastest-recurring cause of the nightly visual red. Mask it ("mask, don't
+                        chase"); the card grid layout is what the snapshot actually guards.
+
+                        Masking alone is not enough: a Playwright mask tracks the element's LIVE
+                        bounding box, so a pill that resizes on a digit or singular/plural change
+                        moves the pixels around it. The invisible ghost below reserves the widest
+                        label the pill can ever show (see @/lib/metric-badge), and the live label
+                        is centred over it — so the pill's geometry, and the mask over it, are
+                        identical for every count. */}
+                    <Badge
+                      variant="muted"
+                      className="relative tabular-nums"
+                      data-vr-mask
+                    >
+                      <span aria-hidden className="invisible">
+                        {METRIC_BADGE_WIDEST_LABEL}
+                      </span>
+                      <span className="absolute inset-0 flex items-center justify-center">
+                        {metricBadgeLabel(count)}
+                      </span>
+                    </Badge>
                   </div>
                 </CardHeader>
                 <CardContent>
