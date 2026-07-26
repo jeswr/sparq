@@ -457,6 +457,10 @@ impl<S: ChangeSink> ChangeRelay<S> {
     /// CONFIRMED, which is what makes delivery **at-least-once**: a crash anywhere in the
     /// pass re-delivers, and nothing is ever skipped.
     ///
+    /// The live [`acked_through_seq`](Self::acked_through_seq) advances only once the
+    /// durable cursor write SUCCEEDS, so a [`RelayError::Cursor`] leaves the relay exactly
+    /// where the durable cursor still points and the same pump can simply be retried.
+    ///
     /// A failing record stops the pass immediately (no reordering, no hole); records
     /// already delivered before it are still flushed and their progress persisted, so a
     /// long batch does not lose ground to one bad record. The failure surfaces as
@@ -510,9 +514,14 @@ impl<S: ChangeSink> ChangeRelay<S> {
         }
 
         if let Some(seq) = accepted_through {
-            self.acked_through_seq = Some(seq);
+            // The DURABLE cursor is authoritative, so it is written FIRST: advancing the
+            // in-memory watermark before the write lands would let a failed pump (an
+            // unwritable cursor directory, a failed rename) leave the live relay ahead of
+            // what was ever persisted, and the retry would skip exactly those records.
+            // Persist-then-adopt keeps a failed pump always safe to retry.
             write_cursor(&self.cursor_path, seq, self.config.fsync)
                 .map_err(RelayError::Cursor)?;
+            self.acked_through_seq = Some(seq);
         }
 
         if let Some((seq, e)) = failure {

@@ -350,6 +350,69 @@ fn ack_watermark_gates_retention_and_a_trimmed_offset_fails_closed() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// A FAILED cursor persist must not advance the live relay: the durable cursor is
+/// authoritative, so a pump whose `write_cursor` fails leaves `acked_through_seq` exactly
+/// where the durable cursor still points and the retry RE-DELIVERS the same records
+/// (at-least-once) instead of skipping them. The failure is a real one — the cursor's parent
+/// directory is replaced by a regular file, so the atomic write cannot create its temp file.
+/// (Mutation witness: adopt the watermark before `write_cursor` returns Ok and the post-repair
+/// pump delivers 0 records, silently dropping seq 0..=3 from the feed.)
+#[test]
+fn a_failed_cursor_write_does_not_advance_the_relay_and_re_delivers() {
+    let dir = scratch("cursorfail");
+    let _ = fs::remove_dir_all(&dir);
+    let (_ring, _gen) = seeded_log(&dir, 4, ChangeLogConfig::default());
+    let log = ChangeLog::open(&dir).expect("reader");
+
+    // The cursor lives one level down so the whole parent can be made unwritable.
+    let cursor_dir = dir.join("cursor.d");
+    fs::create_dir_all(&cursor_dir).expect("cursor dir");
+    let cursor = cursor_dir.join("relay.cursor");
+    let mut relay = ChangeRelay::open(&cursor, ScriptedSink::new()).expect("open relay");
+    assert_eq!(relay.acked_through_seq(), None, "fresh cursor is empty");
+
+    // Break cursor persistence: the parent is now a FILE, so neither `create_dir_all` nor
+    // the temp-file write beneath it can succeed.
+    fs::remove_dir_all(&cursor_dir).expect("drop cursor dir");
+    fs::write(&cursor_dir, b"not a directory").expect("occupy the path");
+
+    let err = relay.pump(&log).expect_err("cursor persistence must fail");
+    assert!(
+        matches!(err, RelayError::Cursor(_)),
+        "expected a cursor error, got {}",
+        err
+    );
+    assert_eq!(
+        relay.sink().seen,
+        vec![0, 1, 2, 3],
+        "the sink still took the batch — that is why the retry must re-deliver"
+    );
+    assert_eq!(
+        relay.acked_through_seq(),
+        None,
+        "the live watermark must not advance past what was durably written"
+    );
+
+    // Repair the cursor directory; the SAME relay retries and re-delivers the whole batch.
+    fs::remove_file(&cursor_dir).expect("free the path");
+    fs::create_dir_all(&cursor_dir).expect("restore cursor dir");
+    let report = relay.pump(&log).expect("retry after repair");
+    assert_eq!(report.delivered, 4, "re-delivers rather than skipping");
+    assert_eq!(report.acked_through_seq, Some(3));
+    assert_eq!(
+        relay.sink().seen,
+        vec![0, 1, 2, 3, 0, 1, 2, 3],
+        "at-least-once: the batch is re-delivered, never gapped"
+    );
+
+    // And the watermark is now genuinely durable — a restart resumes after seq 3.
+    drop(relay);
+    let restarted = ChangeRelay::open(&cursor, ScriptedSink::new()).expect("reopen");
+    assert_eq!(restarted.acked_through_seq(), Some(3));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// If retention drops records the relay's cursor still needs (an operator trimming past the
 /// watermark), the next pump **fails closed** — it never silently resumes at a later offset,
 /// which would hand the broker a feed with an invisible hole.
