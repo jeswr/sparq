@@ -53,15 +53,18 @@ and must stay **under $5/month**. This is the security + cost design.
          "StringEquals": { "token.actions.githubusercontent.com:aud": "sts.amazonaws.com" },
          "StringLike": {
            "token.actions.githubusercontent.com:sub":
-             "repo:sparq-org/sparq:environment:_:repository_owner:sparq-org:repo:sparq-org/sparq:workflow_ref:sparq-org/sparq/.github/workflows/bench-ec2.yml@refs/heads/main:ref:refs/heads/main:runner_environment:github-hosted"
+             "repo:sparq-org/sparq:ref:refs/heads/main:runner_environment:github-hosted"
          }
        }
      }]
    }
    ```
    (The `sub` condition pins it to the `main` branch of `sparq-org/sparq` — fork PRs and other refs
-   cannot assume it. The long `sub` above is the `include_claim_keys` form; see the hardening
-   checklist immediately below for why, and for the shorter fallback.)
+   cannot assume it. The `runner_environment` segment is **only** present if the repository's
+   subject claim has been customised with `include_claim_keys: ["repo", "ref", "runner_environment"]`
+   — with the DEFAULT claim template the `sub` is just `repo:sparq-org/sparq:ref:refs/heads/main`
+   and this policy will not match. Pick one and apply both halves together; see item 2 of the
+   checklist below.)
 
    > **ORG MIGRATION — the live role is still on the OLD org, and that is why the lane died.**
    > The repository moved `jeswr/sparq` → `sparq-org/sparq`. The workflow was updated (`bench-ec2.yml`
