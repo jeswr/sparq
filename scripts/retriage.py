@@ -30,6 +30,7 @@ import json
 import os
 import subprocess
 import sys
+import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import triage  # noqa: E402  (same-directory static-triage module)
@@ -100,23 +101,57 @@ def _trusted_factory(repo):
     return trusted
 
 
+FETCH_CEILING = 10000
+
+
+def _flatten_pages(pages):
+    """Flatten `gh api --paginate --slurp` output, dropping PRs (the issues endpoint returns
+    both) and any non-list/non-dict junk."""
+    return [i for page in pages if isinstance(page, list) for i in page
+            if isinstance(i, dict) and "pull_request" not in i]
+
+
+def _fetch_label(repo, label, ceiling=FETCH_CEILING):
+    """Every OPEN issue carrying `label`, via REAL cursor pagination.
+
+    [OPUS-5] This was `gh issue list --limit 500`, which SILENTLY TRUNCATES: the CLI stops at
+    the limit and reports nothing. MEASURED live on sparq-org/sparq 2026-07-26 — 719 open
+    `status:untriaged` issues, `--limit 500` returned exactly 500 and dropped 219 (#2360..#2750),
+    newest-first, so the oldest parked issues were the permanent casualties. Retriage is a WORK
+    QUEUE sweep, so a truncated fetch is not a slow drain: those issues are never candidates on
+    any tick, at any point in the future, with no signal. `gh api --paginate` follows Link
+    headers to exhaustion; the explicit ceiling still fails closed on a runaway snapshot (same
+    shape as scripts/ready-issues.py `_fetch`).
+
+    Field note: the REST payload names the author `user.login`, NOT the `author.login` that
+    `gh issue list --json author` emits. Getting that wrong makes every author read as "" and
+    `_trusted_factory` then rejects EVERY issue — a silent total stall, not a visible error.
+    `_self_test` pins it.
+    """
+    r = _gh(["api", "--paginate", "--slurp",
+             f"repos/{repo}/issues?state=open&labels={urllib.parse.quote(label)}&per_page=100"])
+    if r.returncode != 0:
+        raise SystemExit(f"retriage: could not list {label} issues")
+    rows = _flatten_pages(json.loads(r.stdout or "[]"))
+    if len(rows) >= ceiling:
+        raise SystemExit(f"retriage: fetched {len(rows)} '{label}' issues >= ceiling {ceiling} — "
+                         "snapshot looks runaway (fail-closed). Raise the ceiling deliberately.")
+    return rows
+
+
 def _fetch_candidates(repo):
     # Two label queries: parked status:untriaged issues, plus (#2474) flow-on issues —
     # plan_retriage's _needs_triage then keeps only the label-less-status flow-on subset,
     # so an already-routed flow-on issue is never churned. Deduped by issue number.
     issues, seen = [], set()
     for label in ("status:untriaged", FLOW_ON_LABEL):
-        r = _gh(["issue", "list", "-R", repo, "--state", "open", "--label", label,
-                 "--limit", "500", "--json", "number,labels,author"])
-        if r.returncode != 0:
-            raise SystemExit(f"retriage: could not list {label} issues")
-        for it in json.loads(r.stdout or "[]"):
+        for it in _fetch_label(repo, label):
             num = it.get("number")
             if num in seen:
                 continue
             seen.add(num)
             issues.append({"number": num, "labels": it.get("labels") or [],
-                           "author": ((it.get("author") or {}).get("login") or "")})
+                           "author": ((it.get("user") or {}).get("login") or "")})
     return issues
 
 
@@ -188,6 +223,87 @@ def _self_test():
     chk("quarantine skipped", 5 in actions, False)
     chk("untrusted author skipped", 6 in actions, False)
     chk("needs:user untouched", 7 in actions, False)
+
+    # --- candidate FETCH must not silently truncate the work queue (review of #3823) ------------
+    # `gh issue list --limit 500` stops at the limit and reports nothing. MEASURED live
+    # 2026-07-26: 719 open status:untriaged issues, 500 returned, 219 dropped (#2360..#2750)
+    # newest-first. Retriage is a work-queue sweep, so those never become candidates on ANY
+    # future tick. The stub below emulates BOTH CLI shapes faithfully — `gh api --paginate`
+    # exhausts the Link chain, `gh issue list --limit N` truncates newest-first — so reverting
+    # to the limited call is EXECUTABLE here and fails on the missing rows rather than on an
+    # unrecognised command. That is what makes this a behavioural guard and not a spelling test.
+    class _Resp:
+        def __init__(self, stdout, returncode=0):
+            self.stdout, self.returncode = stdout, returncode
+
+    total = 620                     # > 500, so a --limit 500 fetch must lose the oldest 120
+    def _row(n, name):
+        return {"number": n, "labels": [{"name": name}, {"name": "priority:P2"},
+                                        {"name": "role:impl"}, {"name": "area:sparq-core"}],
+                "user": {"login": "jeswr"}, "author": {"login": "jeswr"}}
+
+    corpus = {"status:untriaged": [_row(n, "status:untriaged") for n in range(1, total + 1)],
+              # #7 and #8 carry BOTH labels, so the second query re-returns them: the dedupe
+              # is the only thing keeping them out of the candidate list twice.
+              FLOW_ON_LABEL: [_row(n, FLOW_ON_LABEL) for n in (7, 8)]}
+    seen_cmds = []
+
+    def _stub_gh(args):
+        """Faithful emulator of BOTH gh shapes, so either implementation is EXECUTABLE here.
+
+        `gh api --paginate` follows the Link chain to exhaustion; WITHOUT --paginate gh returns
+        only the first page. `gh issue list --limit N` truncates newest-first. Modelling the
+        truncation both ways is what lets a reverted fetch fail on missing ROWS rather than on
+        an unrecognised command line.
+        """
+        seen_cmds.append(list(args))
+        if args[0] == "api":
+            label = urllib.parse.unquote(args[-1].split("labels=")[1].split("&")[0])
+            rows = corpus.get(label, [])
+            pages = [rows[i:i + 100] for i in range(0, len(rows), 100)] or [[]]
+            return _Resp(json.dumps(pages if "--paginate" in args else pages[:1]))
+        if args[0:2] == ["issue", "list"]:
+            label = args[args.index("--label") + 1]
+            rows = corpus.get(label, [])
+            limit = int(args[args.index("--limit") + 1]) if "--limit" in args else len(rows)
+            return _Resp(json.dumps(sorted(rows, key=lambda r: -r["number"])[:limit]))
+        raise AssertionError(f"unexpected gh invocation: {args}")
+
+    real_gh = globals()["_gh"]
+    globals()["_gh"] = _stub_gh
+    try:
+        cands = _fetch_candidates("o/r")
+        nums = sorted(c["number"] for c in cands)
+        chk("every labelled issue is fetched, not just the first page", len(nums), total)
+        chk("the OLDEST issues survive the fetch (the truncation casualties)",
+            nums[:3], [1, 2, 3])
+        chk("no issue is dropped or duplicated", (nums[0], nums[-1], len(set(nums))),
+            (1, total, total))
+        # #7/#8 carry both query labels; without the dedupe they enter the queue twice and
+        # plan_retriage emits two label-edit actions for the same issue.
+        chk("an issue matching BOTH label queries appears exactly once",
+            [nums.count(n) for n in (7, 8)], [1, 1])
+        # REST names the author `user.login`; reading `author.login` yields "" for every issue
+        # and _trusted_factory then rejects the entire queue — a silent total stall.
+        chk("author login is read from the REST `user` field",
+            {c["author"] for c in cands}, {"jeswr"})
+        chk("the fetch uses cursor pagination, not a fixed page limit",
+            all(c[0] == "api" and "--paginate" in c for c in seen_cmds), True)
+        # fail-closed ceiling: a runaway snapshot must raise, never silently half-report
+        try:
+            _fetch_label("o/r", "status:untriaged", ceiling=10)
+            chk("runaway snapshot fails closed", "no raise", "SystemExit")
+        except SystemExit:
+            chk("runaway snapshot fails closed", "SystemExit", "SystemExit")
+        # PR rows come back from the issues endpoint and must not enter the triage queue
+        corpus["status:untriaged"].append(
+            {"number": 9001, "labels": [{"name": "status:untriaged"}],
+             "user": {"login": "jeswr"}, "pull_request": {"url": "x"}})
+        chk("pull requests are not retriage candidates",
+            9001 in {c["number"] for c in _fetch_candidates("o/r")}, False)
+    finally:
+        globals()["_gh"] = real_gh
+
     print("retriage self-test", "PASSED" if ok else "FAILED")
     return 0 if ok else 1
 

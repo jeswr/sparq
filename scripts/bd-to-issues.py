@@ -210,7 +210,10 @@ def derive_areas(bead, crates=None, limit=2):
 
     Returns [] when nothing is derivable; the caller then parks the issue `needs:area` rather than
     guessing. A wrong partition is worse than an explicit park: the park is maintainer-visible and
-    retriage re-promotes it the moment an area lands, whereas a wrong area silently routes the work."""
+    the retriage cron re-promotes it once an area lands, whereas a wrong area silently routes the
+    work. That readmission holds only for a park the sweep can SEE and whose author it trusts —
+    the fetch is paginated for exactly this reason (retriage.py `_fetch_label`); its predecessor
+    truncated at 500 and 219 of 719 parks were unreachable on every tick (issue #3831)."""
     crates = crate_names() if crates is None else crates
     title = bead.get("title") or ""
     low = title.lower()
