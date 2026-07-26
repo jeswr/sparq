@@ -48,6 +48,19 @@ pub(crate) mod backup;
 /// the same-lineage / fail-closed boundaries.
 #[cfg(feature = "change-stream")]
 pub mod change_stream;
+/// [SONNET-4.6] (sq-l6zks, gh-3216) The **push side** of that stream: a
+/// [`ChangeSink`](change_sink::ChangeSink) trait an EXTERNAL BROKER integration (Kafka, NATS,
+/// a webhook, a downstream index) implements, plus the
+/// [`ChangeRelay`](change_sink::ChangeRelay) pump that reads the durable log from a **durable
+/// cursor** and delivers records in order, at-least-once — that cursor doubling as the
+/// [`RetentionPolicy::acked_through_seq`](change_stream::RetentionPolicy::acked_through_seq)
+/// hard safety bound. Compiled only behind the opt-in `change-sink` feature (default OFF,
+/// implies `change-stream`). **No broker client is vendored**: the feature adds no dependency
+/// and no async runtime; the one built-in sink is the dependency-free NDJSON
+/// [`JsonLinesSink`](change_sink::JsonLinesSink) bridge. See the module docs for the honest
+/// at-least-once / no-authenticity boundaries.
+#[cfg(feature = "change-sink")]
+pub mod change_sink;
 /// [OPUS-4.8] (sq-bu1a) The INCREMENTAL DELTA-STREAM / point-in-time-recovery companion to the
 /// Option-A base backup ([`backup`]): export the change between two same-lineage generations as a
 /// self-describing delta artifact keyed off generation/writer-seq, and replay an ordered chain of
@@ -117,6 +130,20 @@ pub use change_stream::{
 };
 #[cfg(all(feature = "change-stream", not(feature = "backup")))]
 pub use backup::BackupError;
+// [SONNET-4.6] (sq-l6zks, gh-3216) The external-broker SINK seam (feature `change-sink`):
+// `ChangeSink` is the trait a broker integration implements (`deliver` one record, `flush` to
+// confirm durability); `ChangeRelay` is the ordered, at-least-once pump with the durable
+// cursor (`pump` / `acked_through_seq` / `retention_policy` — the ack watermark that gates
+// segment retention), tuned by `RelayConfig` and reporting `RelayReport`. `SinkError`
+// classifies a refusal retryable-vs-permanent (permanent POISONS the relay: fail-closed, never
+// a silent skip) and `RelayError` is the pump's fail-closed error. `JsonLinesSink` +
+// `record_to_json` are the ONE built-in, dependency-free NDJSON bridge (no Kafka/NATS client is
+// vendored — that would be a separate, heavier opt-in).
+#[cfg(feature = "change-sink")]
+pub use change_sink::{
+    record_to_json, ChangeRelay, ChangeSink, JsonLinesSink, RelayConfig, RelayError, RelayReport,
+    SinkError, CURSOR_MAGIC, DEFAULT_MAX_RECORDS_PER_PUMP,
+};
 pub use applier::{GraphApplier, DEFAULT_COMPACT_THRESHOLD};
 pub use epoch::{Epoch, PodEpochs, PodId};
 pub use footprint::{Footprint, TargetGraph};

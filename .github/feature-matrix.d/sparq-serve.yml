@@ -34,3 +34,19 @@
   crate: "sparq-serve"
   features: "change-stream"
   test: true
+
+# [SONNET-4.6] sq-l6zks (gh-3216): the EXTERNAL-BROKER sink seam on top of that log. The whole
+# `change_sink` module (the `ChangeSink` trait, the `ChangeRelay` at-least-once pump + durable
+# cursor, the dependency-free `JsonLinesSink` NDJSON bridge), its 8 unit tests, and the
+# `tests/change_sink.rs` end-to-end suite are behind the default-OFF `change-sink` feature —
+# the same silent-skip gap the leg above closes for `change-stream`. Also dependency-free (it
+# only pulls in `change-stream`; no broker client, no async runtime), so the leg is cheap. It
+# runs `clippy --all-targets -D warnings` with the feature ON plus `cargo test`, which drives
+# the real durable round-trip: record commits → relay them in order → restart the relay and
+# resume from the durable cursor → fail-closed on a permanent sink refusal or a trimmed cursor.
+# Verified locally: `cargo test -p sparq-serve --features change-sink` (8 unit + 7 integration
+# tests) and the default / change-sink / all-features build+test states are green.
+- name: "sparq-serve (change-sink — external-broker CDC relay)"
+  crate: "sparq-serve"
+  features: "change-sink"
+  test: true

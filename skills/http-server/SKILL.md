@@ -787,8 +787,20 @@ active segment, never a partial segment — under a `RetentionPolicy` composing 
 watermark (a HARD safety bound: any unacked record keeps its segment), `max_age`, and
 `max_total_bytes` pressure; the default policy is a no-op and nothing is ever dropped implicitly.
 A `poll` from a trimmed-away offset **fails closed** (never a silent skip) — consumers resume from
-`ChangeLog::first_seq`. A `ChangeSink` trait for an external broker (Kafka/NATS) is
-tracked as a **separate later opt-in** (deferred follow-up bead `sq-l6zks`).
+`ChangeLog::first_seq`. **External-broker sink (`sparq-serve` feature `change-sink`, default OFF,
+implies `change-stream`; `sq-l6zks`, gh-3216)**: the PUSH side of that log — a `ChangeSink` trait
+(`deliver` one record, `flush` to confirm durability) an embedder implements over THEIR broker
+client, plus a `ChangeRelay` pump that polls the log from a **durable cursor** file and delivers
+records in ascending `seq`, **at-least-once** (the cursor advances only after the sink flushes, so a
+crash re-delivers — key on `seq` for idempotence). `relay.retention_policy()` hands that cursor to
+`RetentionPolicy::acked_through_seq`, so no segment is dropped before this sink has taken it, and a
+cursor whose next record was trimmed away **fails closed**. A `rebase` gap record is delivered as
+its own message, never flattened away. A `SinkError::Permanent` **poisons** the relay (fail-closed,
+never a silent skip); `SinkError::Retryable` leaves it armed to re-deliver. **No broker client is
+vendored** — the feature adds NO dependency and no async runtime (library-first §6.1); the one
+built-in sink is `JsonLinesSink`, an NDJSON bridge over any `io::Write` (a file, or the stdin of a
+Kafka/NATS producer sidecar), with `record_to_json` as the reusable payload. A first-party
+Kafka/NATS connector carrying real client deps would be a separate, heavier opt-in crate.
 **Recording seam (`sq-bdaw5`):** install `ChangeLog::into_commit_hook(on_error)` via
 `Writer::spawn_with_commit_hook` and every commit-publish is recorded **on the writer thread** —
 one append+fsync per PUBLISHED GENERATION, gapless by construction (the writer is the sole
@@ -832,8 +844,9 @@ token (pass as `at=`/`after=`), `lastSequenceNumber`, `totalRecords` (commit cou
 `hasMoreRecords`. A poll is a READ (gated by the read auth). A sequence-anchored `iteratorType` with
 no anchor is a fail-closed `400` (never a silent replay-all). With the feature off the route + the
 recording hook are `#[cfg]`-stripped (byte-identical); with it on, recording rides the sequenced
-writer's group commit and does not serialise submitters. The `ChangeSink` broker trait stays a
-separate later opt-in (`sq-l6zks`).
+writer's group commit and does not serialise submitters. Pushing that log onward to an external
+broker is the SEPARATE `sparq-serve` `change-sink` opt-in (`ChangeSink` + `ChangeRelay`, `sq-l6zks`
+— see the change-stream section above); this HTTP endpoint is the pull side and is unchanged by it.
 
 **`GET /queries` + `DELETE /queries/{id}` — running-query registry (`sparq-server` feature
 `query-registry`, default OFF; sq-qsm5z, [SONNET-4.6]).** An opt-in in-memory registry of

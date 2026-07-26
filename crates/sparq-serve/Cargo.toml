@@ -55,6 +55,18 @@ backup = ["sparq-engine/serialize-rdf"]
 # self-contained FNV-1a; framing/IO is std-only). No HTTP, no async runtime (library-first
 # §6.1). sparq-server's `GET /streams` HTTP poll endpoint is a SEPARATE later opt-in.
 change-stream = ["sparq-engine/serialize-rdf"]
+# [SONNET-4.6] sq-l6zks (gh-3216): `change-sink` (default OFF, implies `change-stream`) — the
+# `ChangeSink` SEAM that relays the durable CDC log onward to an EXTERNAL BROKER (Kafka / NATS /
+# a webhook / a downstream index). It is the trait + the ordered, at-least-once `ChangeRelay`
+# pump with a durable cursor (so a restart resumes exactly where the sink left off, and the
+# cursor doubles as the `RetentionPolicy::acked_through_seq` hard safety bound) + ONE
+# dependency-free bridge sink (`JsonLinesSink`: NDJSON to any `io::Write` — a file, or the stdin
+# of a Kafka/NATS producer sidecar). It adds NO dependency and NO async runtime: no broker client
+# is vendored here (no rdkafka / async-nats / TLS-SASL stack), because a first-party connector
+# carrying real client deps is a SEPARATE, heavier opt-in — an embedder implements `ChangeSink`
+# over their own client, exactly as sparq-server's `AuditSink` does for SIEM/OTel targets.
+# Library-first §6.1 holds: sync, runtime-agnostic, no HTTP types.
+change-sink = ["change-stream"]
 # [OPUS-4.8] sq-jluc: the response-bytes result cache (research/concurrent-serving.md
 # §5 row 2 + §6.3) — OPT-IN and OFF by default. It is a LEAN feature: it adds NO new
 # dependency (the cache key/map reuse the in-tree `rustc-hash` and `std::hash`; the
