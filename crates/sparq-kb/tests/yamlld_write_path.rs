@@ -27,7 +27,7 @@
 //! Run: `cargo test -p sparq-kb --features validate --test yamlld_write_path -- --nocapture`
 #![cfg(feature = "validate")]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use sparq_kb::validate::{parse_turtle, validate_instances};
 use sparq_kb::PKG_FINDINGS;
@@ -36,6 +36,11 @@ const FIXTURE_HANDAUTHORED: &str =
     include_str!("fixtures/agents-findings.handauthored.ttl");
 
 const BASE: &str = "https://sparq.dev/ns/pkg/example#";
+
+/// The DQV namespace. Every triple of the quality-measurement projection (sq-2489d.7)
+/// mentions it — in the predicate (`dqv:hasQualityMeasurement` / `dqv:isMeasurementOf` /
+/// `dqv:computedOn` / `dqv:value`) or the object (`a dqv:QualityMeasurement`).
+const DQV_NS: &str = "http://www.w3.org/ns/dqv#";
 
 /// A canonical, order-independent string form of a triple, for set comparison.
 fn triple_set(ttl: &str) -> BTreeSet<String> {
@@ -80,21 +85,80 @@ fn compiled_findings_match_handauthored_triple_for_triple() {
     let handauthored = triple_set(FIXTURE_HANDAUTHORED);
 
     let missing: Vec<_> = handauthored.difference(&compiled).cloned().collect();
-    let extra: Vec<_> = compiled.difference(&handauthored).cloned().collect();
+    // The compiler now ALSO projects each `pkg:confidence` shorthand into a reified
+    // `dqv:QualityMeasurement` (sq-2489d.7). That projection postdates the frozen
+    // hand-authored fixture, so it is accounted for separately — and asserted on its own
+    // terms by `compiled_findings_project_a_dqv_measurement_per_confidence` below. Any
+    // NON-DQV extra is still an invented fact and still fails the round-trip.
+    let (dqv, extra): (Vec<_>, Vec<_>) = compiled
+        .difference(&handauthored)
+        .cloned()
+        .partition(|t| t.contains(DQV_NS));
 
     assert!(
         missing.is_empty() && extra.is_empty(),
         "write-path compile is NOT triple-equivalent to the hand-authored tier.\n\
          {} triple(s) the hand-authored tier had but the compile dropped:\n  {}\n\
-         {} triple(s) the compile invented that the hand-authored tier lacked:\n  {}",
+         {} non-DQV triple(s) the compile invented that the hand-authored tier lacked:\n  {}",
         missing.len(),
         missing.join("\n  "),
         extra.len(),
         extra.join("\n  "),
     );
     eprintln!(
-        "=== round-trip: compiled tier == hand-authored tier ({} triples) ===",
+        "=== round-trip: compiled tier == hand-authored tier + {} projected DQV triple(s) \
+         ({} triples total) ===",
+        dqv.len(),
         compiled.len()
+    );
+}
+
+/// (3) The DQV projection (sq-2489d.7) is COMPLETE and AGREES with the shorthand: every
+/// `pkg:confidence` in the compiled tier is reified as a `dqv:QualityMeasurement`
+/// `dqv:computedOn` that same subject, carrying the SAME value as `dqv:value`. So the
+/// modelled quality axis and the shorthand can never disagree, and the
+/// `finding-quality-dqv` canned query sees the real ingest, not only the example file.
+#[test]
+fn compiled_findings_project_a_dqv_measurement_per_confidence() {
+    let triples = parse_turtle(PKG_FINDINGS, BASE).expect("compiled findings parse");
+
+    let iri = |suffix: &str| format!("{}{}", DQV_NS, suffix);
+    // subject -> pkg:confidence value, and subject -> dqv:value of its measurement.
+    let mut confidence: BTreeMap<String, String> = BTreeMap::new();
+    let mut computed_on: BTreeMap<String, String> = BTreeMap::new();
+    let mut measured: BTreeMap<String, String> = BTreeMap::new();
+    for t in &triples {
+        let p = t.predicate.as_str();
+        if p == "https://sparq.dev/ns/pkg#confidence" {
+            confidence.insert(t.subject.to_string(), t.object.to_string());
+        } else if p == iri("computedOn") {
+            computed_on.insert(t.subject.to_string(), t.object.to_string());
+        } else if p == iri("value") {
+            measured.insert(t.subject.to_string(), t.object.to_string());
+        }
+    }
+
+    assert!(
+        !confidence.is_empty(),
+        "the compiled tier must carry pkg:confidence values — otherwise this test is vacuous"
+    );
+    for (subject, conf) in &confidence {
+        let measurement = computed_on
+            .iter()
+            .find(|(_, subj)| *subj == subject)
+            .map(|(m, _)| m.clone())
+            .unwrap_or_else(|| {
+                panic!("no dqv:QualityMeasurement is dqv:computedOn {subject}")
+            });
+        assert_eq!(
+            measured.get(&measurement),
+            Some(conf),
+            "the dqv:value of {measurement} must MATCH the pkg:confidence of {subject}"
+        );
+    }
+    eprintln!(
+        "=== DQV projection: {} pkg:confidence value(s), each reified + agreeing ===",
+        confidence.len()
     );
 }
 

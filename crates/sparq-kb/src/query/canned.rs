@@ -126,9 +126,11 @@ SELECT ?label ?source ?section ?assurance ?conf WHERE {
 /// `dqv:isMeasurementOf`, and its `dqv:value`. This answers the same epistemic-weight
 /// question as the [`FINDING_PROVENANCE`] `pkg:confidence` column, but via the standard
 /// DQV model — so the confidence axis is queryable as named, distinct metrics, not one
-/// overloaded scalar. Over a graph that records only the `pkg:confidence` shorthand (no
-/// reified measurement) this returns zero rows — the shorthand still answers via
-/// [`FINDING_PROVENANCE`]; the two are complementary, never contradictory.
+/// overloaded scalar. The ingest projectors reify every Finding/Source `pkg:confidence`
+/// as a measurement (sq-2489d.7), so this is non-empty over the shipped graph; over a
+/// graph that records only the shorthand it returns zero rows and [`FINDING_PROVENANCE`]
+/// still answers. The two are complementary, never contradictory: the projection carries
+/// the shorthand's own value across, so they agree by construction.
 pub const FINDING_QUALITY_DQV: CannedQuery = CannedQuery {
     name: "finding-quality-dqv",
     about: "GROUND: the DQV quality measurements (subject + metric + value) — the modelled confidence axis",

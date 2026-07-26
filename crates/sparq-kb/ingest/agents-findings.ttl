@@ -5,6 +5,7 @@
 
 @prefix cito: <http://purl.org/spar/cito/> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix dqv: <http://www.w3.org/ns/dqv#> .
 @prefix fabio: <http://purl.org/spar/fabio/> .
 @prefix kb: <https://sparq.dev/ns/pkg/kb#> .
 @prefix pkg: <https://sparq.dev/ns/pkg#> .
@@ -42,7 +43,13 @@ kb:doc-agents-md a pkg:Source , pkg:Document , fabio:Expression ;
   pkg:followUpPriority 0 ;
   pkg:confidence 1.0 ;
   dcterms:subject kb:topic-merge-discipline ;
-  dcterms:subject kb:topic-subagent-rules .
+  dcterms:subject kb:topic-subagent-rules ;
+  dqv:hasQualityMeasurement kb:meas-doc-agents-md-reliability .
+
+kb:meas-doc-agents-md-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-agents-md ;
+  dqv:value 1.0 .
 
 # === Findings (the @graph) ===
 
@@ -56,7 +63,13 @@ kb:find-merge-ci-summary-gate a pkg:Finding ;
   prov:wasDerivedFrom kb:doc-agents-md ;
   cito:citesAsEvidence kb:doc-agents-md ;
   dcterms:source "AGENTS.md#contribution-workflow--prs-reviews-resolved-the-ci-summary-gate" ;
-  dcterms:subject kb:topic-merge-discipline .
+  dcterms:subject kb:topic-merge-discipline ;
+  dqv:hasQualityMeasurement kb:meas-find-merge-ci-summary-gate-conf .
+
+kb:meas-find-merge-ci-summary-gate-conf a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:ConfidenceMeasurement ;
+  dqv:computedOn kb:find-merge-ci-summary-gate ;
+  dqv:value 0.98 .
 
 kb:find-zk-circuit-gate a pkg:Finding ;
   rdfs:label "A ZK-circuit change re-runs forge_gates + differential_fuzz + the gate-count snapshot and re-opens the soundness audit"@en-GB ;
@@ -69,7 +82,13 @@ kb:find-zk-circuit-gate a pkg:Finding ;
   cito:citesAsEvidence kb:doc-agents-md ;
   dcterms:source "AGENTS.md#post-batch-re-evaluation-checklist--what-to-re-run-after-a-change" ;
   dcterms:subject kb:topic-zk-discipline ;
-  dcterms:subject kb:topic-merge-discipline .
+  dcterms:subject kb:topic-merge-discipline ;
+  dqv:hasQualityMeasurement kb:meas-find-zk-circuit-gate-conf .
+
+kb:meas-find-zk-circuit-gate-conf a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:ConfidenceMeasurement ;
+  dqv:computedOn kb:find-zk-circuit-gate ;
+  dqv:value 0.95 .
 
 kb:find-zk-member-checklist a pkg:Finding ;
   rdfs:label "Adding/removing a zk/compose member needs the gate-count snapshot updated and the Rust gate run, not just nargo test"@en-GB ;
@@ -81,7 +100,13 @@ kb:find-zk-member-checklist a pkg:Finding ;
   prov:wasDerivedFrom kb:doc-agents-md ;
   cito:citesAsEvidence kb:doc-agents-md ;
   dcterms:source "AGENTS.md#zk-circuit-member-checklist--adding-or-removing-a-zkcompose-member" ;
-  dcterms:subject kb:topic-zk-discipline .
+  dcterms:subject kb:topic-zk-discipline ;
+  dqv:hasQualityMeasurement kb:meas-find-zk-member-checklist-conf .
+
+kb:meas-find-zk-member-checklist-conf a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:ConfidenceMeasurement ;
+  dqv:computedOn kb:find-zk-member-checklist ;
+  dqv:value 0.95 .
 
 kb:find-zk-privacy-claims-gate a pkg:Finding ;
   rdfs:label "Any ZK/MPC privacy or soundness claim must stay hedged/negative — the privacy-claims gate is a HARD ci-summary job"@en-GB ;
@@ -94,7 +119,13 @@ kb:find-zk-privacy-claims-gate a pkg:Finding ;
   cito:citesAsEvidence kb:doc-agents-md ;
   dcterms:source "AGENTS.md#post-batch-re-evaluation-checklist--what-to-re-run-after-a-change" ;
   dcterms:subject kb:topic-zk-discipline ;
-  dcterms:subject kb:topic-merge-discipline .
+  dcterms:subject kb:topic-merge-discipline ;
+  dqv:hasQualityMeasurement kb:meas-find-zk-privacy-claims-gate-conf .
+
+kb:meas-find-zk-privacy-claims-gate-conf a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:ConfidenceMeasurement ;
+  dqv:computedOn kb:find-zk-privacy-claims-gate ;
+  dqv:value 0.97 .
 
 kb:find-zk-arming-model a pkg:Finding ;
   rdfs:label "A verified-clean non-perf PR auto-arms; never arm auto-merge on a stacked PR whose base is not main"@en-GB ;
@@ -106,7 +137,13 @@ kb:find-zk-arming-model a pkg:Finding ;
   prov:wasDerivedFrom kb:doc-agents-md ;
   cito:citesAsEvidence kb:doc-agents-md ;
   dcterms:source "AGENTS.md#contribution-workflow--prs-reviews-resolved-the-ci-summary-gate" ;
-  dcterms:subject kb:topic-merge-discipline .
+  dcterms:subject kb:topic-merge-discipline ;
+  dqv:hasQualityMeasurement kb:meas-find-zk-arming-model-conf .
+
+kb:meas-find-zk-arming-model-conf a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:ConfidenceMeasurement ;
+  dqv:computedOn kb:find-zk-arming-model ;
+  dqv:value 0.93 .
 
 kb:find-subagent-shared-contract a pkg:Finding ;
   rdfs:label "Every dispatched sub-agent follows the shared contract; task briefs state the task only"@en-GB ;
@@ -118,7 +155,13 @@ kb:find-subagent-shared-contract a pkg:Finding ;
   prov:wasDerivedFrom kb:doc-agents-md ;
   cito:citesAsEvidence kb:doc-agents-md ;
   dcterms:source "AGENTS.md#the-sub-agent-shared-contract--write-terse-task-only-briefs" ;
-  dcterms:subject kb:topic-subagent-rules .
+  dcterms:subject kb:topic-subagent-rules ;
+  dqv:hasQualityMeasurement kb:meas-find-subagent-shared-contract-conf .
+
+kb:meas-find-subagent-shared-contract-conf a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:ConfidenceMeasurement ;
+  dqv:computedOn kb:find-subagent-shared-contract ;
+  dqv:value 0.97 .
 
 kb:find-subagent-worktree-isolation a pkg:Finding ;
   rdfs:label "Every mutating sub-agent runs in its OWN isolated worktree+branch, never the shared main checkout"@en-GB ;
@@ -130,7 +173,13 @@ kb:find-subagent-worktree-isolation a pkg:Finding ;
   prov:wasDerivedFrom kb:doc-agents-md ;
   cito:citesAsEvidence kb:doc-agents-md ;
   dcterms:source "AGENTS.md#worktree-isolation--every-mutating-agent-gets-its-own-worktreebranch" ;
-  dcterms:subject kb:topic-subagent-rules .
+  dcterms:subject kb:topic-subagent-rules ;
+  dqv:hasQualityMeasurement kb:meas-find-subagent-worktree-isolation-conf .
+
+kb:meas-find-subagent-worktree-isolation-conf a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:ConfidenceMeasurement ;
+  dqv:computedOn kb:find-subagent-worktree-isolation ;
+  dqv:value 0.96 .
 
 kb:find-subagent-staging a pkg:Finding ;
   rdfs:label "Sub-agents stage only changed files by explicit path; never git add -A and never stage .beads/"@en-GB ;
@@ -142,7 +191,13 @@ kb:find-subagent-staging a pkg:Finding ;
   prov:wasDerivedFrom kb:doc-agents-md ;
   cito:citesAsEvidence kb:doc-agents-md ;
   dcterms:source "AGENTS.md#the-sub-agent-shared-contract--write-terse-task-only-briefs" ;
-  dcterms:subject kb:topic-subagent-rules .
+  dcterms:subject kb:topic-subagent-rules ;
+  dqv:hasQualityMeasurement kb:meas-find-subagent-staging-conf .
+
+kb:meas-find-subagent-staging-conf a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:ConfidenceMeasurement ;
+  dqv:computedOn kb:find-subagent-staging ;
+  dqv:value 0.96 .
 
 kb:find-subagent-no-push-selfid a pkg:Finding ;
   rdfs:label "Sub-agents commit in-worktree (no push/merge), gate in-worktree without weakening a gate, and self-identify in every comment"@en-GB ;
@@ -154,7 +209,13 @@ kb:find-subagent-no-push-selfid a pkg:Finding ;
   prov:wasDerivedFrom kb:doc-agents-md ;
   cito:citesAsEvidence kb:doc-agents-md ;
   dcterms:source "AGENTS.md#the-sub-agent-shared-contract--write-terse-task-only-briefs" ;
-  dcterms:subject kb:topic-subagent-rules .
+  dcterms:subject kb:topic-subagent-rules ;
+  dqv:hasQualityMeasurement kb:meas-find-subagent-no-push-selfid-conf .
+
+kb:meas-find-subagent-no-push-selfid-conf a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:ConfidenceMeasurement ;
+  dqv:computedOn kb:find-subagent-no-push-selfid ;
+  dqv:value 0.95 .
 
 kb:find-subagent-proceed-no-greenlight a pkg:Finding ;
   rdfs:label "Sub-agents proceed without the maintainer's greenlight, documenting the default and filing a feedback issue"@en-GB ;
@@ -166,7 +227,13 @@ kb:find-subagent-proceed-no-greenlight a pkg:Finding ;
   prov:wasDerivedFrom kb:doc-agents-md ;
   cito:citesAsEvidence kb:doc-agents-md ;
   dcterms:source "AGENTS.md#standing-rule--proceed-without-waiting-for-the-maintainers-greenlight-2026-06-21" ;
-  dcterms:subject kb:topic-subagent-rules .
+  dcterms:subject kb:topic-subagent-rules ;
+  dqv:hasQualityMeasurement kb:meas-find-subagent-proceed-no-greenlight-conf .
+
+kb:meas-find-subagent-proceed-no-greenlight-conf a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:ConfidenceMeasurement ;
+  dqv:computedOn kb:find-subagent-proceed-no-greenlight ;
+  dqv:value 0.94 .
 
 kb:find-subagent-provenance-honesty a pkg:Finding ;
   rdfs:label "Sub-agents tag [OPUS-4.8] + the Opus trailer and keep ZK/MPC + perf claims gate-safe"@en-GB ;
@@ -179,4 +246,10 @@ kb:find-subagent-provenance-honesty a pkg:Finding ;
   cito:citesAsEvidence kb:doc-agents-md ;
   dcterms:source "AGENTS.md#the-sub-agent-shared-contract--write-terse-task-only-briefs" ;
   dcterms:subject kb:topic-subagent-rules ;
-  dcterms:subject kb:topic-zk-discipline .
+  dcterms:subject kb:topic-zk-discipline ;
+  dqv:hasQualityMeasurement kb:meas-find-subagent-provenance-honesty-conf .
+
+kb:meas-find-subagent-provenance-honesty-conf a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:ConfidenceMeasurement ;
+  dqv:computedOn kb:find-subagent-provenance-honesty ;
+  dqv:value 0.93 .

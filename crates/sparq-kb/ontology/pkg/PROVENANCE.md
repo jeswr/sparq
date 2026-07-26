@@ -76,10 +76,13 @@ no new bespoke predicate:
 | `pkg:SourceReliabilityMeasurement` | `dqv:Metric` | the metric a Source's `pkg:confidence` measures |
 
 A subject's `pkg:confidence` is kept as a convenience shorthand (every canned query
-reads it directly, no regression) and is **also** expressible as the `dqv:value` of a
+reads it directly, no regression) and is **also** materialised as the `dqv:value` of a
 reified `dqv:QualityMeasurement` that `dqv:isMeasurementOf` one of these metrics,
-`dqv:computedOn` the subject (the `finding-quality-dqv` canned query surfaces them; the
-example file demonstrates both forms agreeing). DQV carries
+`dqv:computedOn` the subject. Both ingest projectors (`ingest_pkg.py` and
+`yamlld_compile.py`) emit that reification for every Finding/Source confidence
+(`sq-2489d.7`), copying the shorthand's own value across — so the two forms agree by
+construction and the `finding-quality-dqv` canned query answers over the REAL ingest,
+not only over the example file. DQV carries
 `prov:wasGeneratedBy`/`wasAttributedTo` natively, so a measurement composes with
 `sparq-prov` for free, and `pkg:Source rdfs:subClassOf dcat:CatalogRecord` (DQV's
 anchor) was already paid.

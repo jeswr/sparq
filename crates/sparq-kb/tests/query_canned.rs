@@ -211,6 +211,78 @@ exq:meas a dqv:QualityMeasurement ;
     );
 }
 
+/// The DQV axis is queryable over the **REAL ingest**, not only over a fixture
+/// (sq-2489d.7). Phase 3 modelled DQV in `pkg.ttl` and demonstrated it in the example
+/// file, but `ingest/pkg-instances.ttl` carried the `pkg:confidence` shorthand alone, so
+/// `finding-quality-dqv` matched nothing over the graph agents actually query. The
+/// ingest projectors now reify every Finding/Source confidence, so this asserts:
+/// non-empty rows, BOTH named metrics present, and every value a well-formed 0..1
+/// decimal. No fixture is loaded — this is `load_pkg()`, the shipped graph.
+#[test]
+fn ground_finding_quality_dqv_is_non_empty_over_the_real_ingest() {
+    let r = run(&canned::FINDING_QUALITY_DQV, None);
+    assert!(
+        !r.rows.is_empty(),
+        "the real ingest must carry reified dqv:QualityMeasurements (sq-2489d.7), but \
+         finding-quality-dqv returned 0 rows"
+    );
+
+    let mut metrics: Vec<String> = Vec::new();
+    for (i, row) in r.rows.iter().enumerate() {
+        assert!(
+            matches!(&row[0], Some(Term::NamedNode(_))),
+            "row {i}: the dqv:computedOn subject must be an IRI"
+        );
+        let value = lit(&r, i, 2).parse::<f64>().unwrap_or(-1.0);
+        assert!(
+            (0.0..=1.0).contains(&value),
+            "row {i}: dqv:value must be in 0..1; got {value}"
+        );
+        metrics.push(term_str(&row[1]));
+    }
+    // Both named metrics pkg.ttl declares are exercised: a Finding's epistemic weight and
+    // a Source's reliability. (The ingest carries Findings AND Sources with confidence.)
+    for metric in ["confidencemeasurement", "sourcereliabilitymeasurement"] {
+        assert!(
+            metrics.iter().any(|m| m == metric),
+            "the real ingest must project pkg:{metric}; got {metrics:?}"
+        );
+    }
+}
+
+/// The DQV projection over the real ingest is COMPLETE and AGREES with the shorthand
+/// (sq-2489d.7): NO `pkg:confidence` in the shipped graph is left without a reified
+/// measurement, and none disagrees with its measurement's `dqv:value`. This is the
+/// assertion that would go red if any one ingest tier (`pkg-instances.ttl`, the compiled
+/// agents-findings tier, the trust-graph tier) regressed to the bare shorthand — a
+/// per-tier "is it non-empty" check would not, since the other tiers would still answer.
+#[test]
+fn ground_every_confidence_in_the_real_ingest_has_an_agreeing_dqv_measurement() {
+    const UNREIFIED: &str = r#"
+PREFIX pkg: <https://sparq.dev/ns/pkg#>
+PREFIX dqv: <http://www.w3.org/ns/dqv#>
+SELECT ?s ?conf WHERE {
+  ?s pkg:confidence ?conf .
+  FILTER NOT EXISTS {
+    ?m dqv:computedOn ?s ; dqv:value ?conf .
+  }
+}"#;
+    let g = load_pkg().expect("PKG loads");
+    let r = ask_pkg(&g, UNREIFIED).expect("completeness query runs");
+    let offenders: Vec<String> = r
+        .rows
+        .iter()
+        .map(|row| format!("{} (confidence {})", term_str(&row[0]), term_str(&row[1])))
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "every pkg:confidence in the ingest must be reified as an AGREEING \
+         dqv:QualityMeasurement (sq-2489d.7); {} subject(s) are not: {:?}",
+        offenders.len(),
+        offenders
+    );
+}
+
 #[test]
 fn ground_unexplored_sources_is_the_honest_none_answer() {
     // Over the Phase-1 ingest every source is pkg:Explored, so the targeted-follow-up

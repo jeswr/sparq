@@ -5,6 +5,7 @@
 
 @prefix cito: <http://purl.org/spar/cito/> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix dqv: <http://www.w3.org/ns/dqv#> .
 @prefix fabio: <http://purl.org/spar/fabio/> .
 @prefix kb: <https://sparq.dev/ns/pkg/kb#> .
 @prefix pkg: <https://sparq.dev/ns/pkg#> .
@@ -31,7 +32,13 @@ kb:doc-research-trust-graph-authorisation-2026-07 a pkg:Source , pkg:Document , 
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
   pkg:confidence 0.9 ;
-  dcterms:subject kb:topic-trust-graph-authz .
+  dcterms:subject kb:topic-trust-graph-authz ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-trust-graph-authorisation-2026-07-reliability .
+
+kb:meas-doc-research-trust-graph-authorisation-2026-07-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-trust-graph-authorisation-2026-07 ;
+  dqv:value 0.9 .
 
 # === Findings (the @graph) ===
 
@@ -45,7 +52,13 @@ kb:find-trust-graph-unlinkability-not-v1 a pkg:Finding ;
   prov:wasDerivedFrom kb:doc-research-trust-graph-authorisation-2026-07 ;
   cito:citesAsEvidence kb:doc-research-trust-graph-authorisation-2026-07 ;
   dcterms:source "research/trust-graph-authorisation-2026-07.md#2 (explicit non-goals: anything ZK/private)" ;
-  dcterms:subject kb:topic-trust-graph-authz .
+  dcterms:subject kb:topic-trust-graph-authz ;
+  dqv:hasQualityMeasurement kb:meas-find-trust-graph-unlinkability-not-v1-conf .
+
+kb:meas-find-trust-graph-unlinkability-not-v1-conf a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:ConfidenceMeasurement ;
+  dqv:computedOn kb:find-trust-graph-unlinkability-not-v1 ;
+  dqv:value 0.97 .
 
 kb:find-trust-graph-clear-path a pkg:Finding ;
   rdfs:label "The trust-graph layer is a clear-path authorisation mechanism — operator-anchored keys and signed attestations, not cryptographic anonymity"@en-GB ;
@@ -57,7 +70,13 @@ kb:find-trust-graph-clear-path a pkg:Finding ;
   prov:wasDerivedFrom kb:doc-research-trust-graph-authorisation-2026-07 ;
   cito:citesAsEvidence kb:doc-research-trust-graph-authorisation-2026-07 ;
   dcterms:source "research/trust-graph-authorisation-2026-07.md#honesty-framing + #3 soundness posture" ;
-  dcterms:subject kb:topic-trust-graph-authz .
+  dcterms:subject kb:topic-trust-graph-authz ;
+  dqv:hasQualityMeasurement kb:meas-find-trust-graph-clear-path-conf .
+
+kb:meas-find-trust-graph-clear-path-conf a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:ConfidenceMeasurement ;
+  dqv:computedOn kb:find-trust-graph-clear-path ;
+  dqv:value 0.97 .
 
 kb:find-trust-graph-closure-decision-record a pkg:Finding ;
   rdfs:label "The certification-edge closure model — a depth-bounded closure into effective trust rules ahead of the UNCHANGED admission gate — was decided in research/trust-graph-authorisation-2026-07.md"@en-GB ;
@@ -69,7 +88,13 @@ kb:find-trust-graph-closure-decision-record a pkg:Finding ;
   prov:wasDerivedFrom kb:doc-research-trust-graph-authorisation-2026-07 ;
   cito:citesAsEvidence kb:doc-research-trust-graph-authorisation-2026-07 ;
   dcterms:source "research/trust-graph-authorisation-2026-07.md#2 design + #0 corrected premise" ;
-  dcterms:subject kb:topic-trust-graph-authz .
+  dcterms:subject kb:topic-trust-graph-authz ;
+  dqv:hasQualityMeasurement kb:meas-find-trust-graph-closure-decision-record-conf .
+
+kb:meas-find-trust-graph-closure-decision-record-conf a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:ConfidenceMeasurement ;
+  dqv:computedOn kb:find-trust-graph-closure-decision-record ;
+  dqv:value 0.95 .
 
 kb:find-trust-graph-mpc-semi-honest a pkg:Finding ;
   rdfs:label "sparq-mpc remains honest-majority semi-honest only; the trust-graph program asserts no settled cryptographic soundness, privacy, or unlinkability guarantee"@en-GB ;
@@ -81,4 +106,10 @@ kb:find-trust-graph-mpc-semi-honest a pkg:Finding ;
   prov:wasDerivedFrom kb:doc-research-trust-graph-authorisation-2026-07 ;
   cito:citesAsEvidence kb:doc-research-trust-graph-authorisation-2026-07 ;
   dcterms:source "research/trust-graph-authorisation-2026-07.md#honesty-framing" ;
-  dcterms:subject kb:topic-trust-graph-authz .
+  dcterms:subject kb:topic-trust-graph-authz ;
+  dqv:hasQualityMeasurement kb:meas-find-trust-graph-mpc-semi-honest-conf .
+
+kb:meas-find-trust-graph-mpc-semi-honest-conf a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:ConfidenceMeasurement ;
+  dqv:computedOn kb:find-trust-graph-mpc-semi-honest ;
+  dqv:value 0.97 .

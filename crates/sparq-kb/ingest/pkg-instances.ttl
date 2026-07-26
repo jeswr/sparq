@@ -4,9 +4,11 @@
 # Structured-parse of .beads/issues.jsonl (-> pkg:Task) + heaviest skills'
 # front-matter (-> pkg:Source/pkg:Technique). The AGENTS.md Findings tier is
 # AUTHORED in ingest/agents-findings.yaml.ld and deterministically COMPILED by
-# yamlld_compile.py (FO-bridge Phase 4, sq-mztg8.2). Conforms to pkg.shapes.ttl
-# (0 violations); the bd backlog's stale closed->open edges are EXCLUDED (see
-# the script header + the SHACL honesty report).
+# yamlld_compile.py (FO-bridge Phase 4, sq-mztg8.2). Every pkg:confidence on a
+# Finding/Source is ALSO projected as a reified dqv:QualityMeasurement
+# (sq-2489d.7), so the DQV-modelled quality axis is queryable over this graph.
+# Conforms to pkg.shapes.ttl (0 violations); the bd backlog's stale closed->open
+# edges are EXCLUDED (see the script header + the SHACL honesty report).
 
 
 @prefix pkg:     <https://sparq.dev/ns/pkg#> .
@@ -18,6 +20,7 @@
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
 @prefix kb:      <https://sparq.dev/ns/pkg/kb#> .
+@prefix dqv:     <http://www.w3.org/ns/dqv#> .
 
 
 # === Tier stamp (sq-tzars.7): this graph IS the hand-authored tier ===
@@ -266,8 +269,8 @@ kb:task-sq-0wo9e_3 a pkg:Task ;
   pkg:label "needs-design-review" ;
   pkg:label "opt-in" ;
   pkg:label "research" ;
-  pkg:dependsOn kb:task-sq-0wo9e_2 ;
-  dcterms:isPartOf kb:task-sq-0wo9e .
+  dcterms:isPartOf kb:task-sq-0wo9e ;
+  pkg:dependsOn kb:task-sq-0wo9e_2 .
 
 kb:task-sq-0wo9e_4 a pkg:Task ;
   dcterms:title "P3: taxonomy block (Euclidean default; hyperbolic/box ONLY past a measured-distortion gate) + disjointness repulsion/mask" ;
@@ -311,8 +314,8 @@ kb:task-sq-0wo9e_6 a pkg:Task ;
   pkg:label "needs-design-review" ;
   pkg:label "opt-in" ;
   pkg:label "research" ;
-  dcterms:isPartOf kb:task-sq-0wo9e ;
-  pkg:dependsOn kb:task-sq-0wo9e_5 .
+  pkg:dependsOn kb:task-sq-0wo9e_5 ;
+  dcterms:isPartOf kb:task-sq-0wo9e .
 
 kb:task-sq-0wo9e_7 a pkg:Task ;
   dcterms:title "P6: eval harness (on/off ablation matrix, dataset-gated) + formal-properties test suite" ;
@@ -644,8 +647,8 @@ kb:task-sq-1s2_1_3 a pkg:Task ;
   pkg:label "area:zk" ;
   pkg:label "from:design" ;
   pkg:label "from:maintainer" ;
-  dcterms:isPartOf kb:task-sq-1s2_1 ;
-  pkg:dependsOn kb:task-sq-1s2_1_2 .
+  pkg:dependsOn kb:task-sq-1s2_1_2 ;
+  dcterms:isPartOf kb:task-sq-1s2_1 .
 
 kb:task-sq-1s2_2 a pkg:Task ;
   dcterms:title "Design record research/zk-field-native-encoding.md: encoding scheme + soundness analysis (NEW lexical-form->value collapse = term-vs-value identity, audit obligation) + SPARQL gate-benchmark catalog [OPUS-4.8] (researcher agent a803626e in flight)" ;
@@ -913,8 +916,8 @@ kb:task-sq-2mke a pkg:Task ;
   pkg:label "area:gui" ;
   pkg:label "from:design" ;
   pkg:label "kind:feature" ;
-  dcterms:isPartOf kb:task-sq-ixc3 ;
   pkg:dependsOn kb:task-sq-x0kp ;
+  dcterms:isPartOf kb:task-sq-ixc3 ;
   dcterms:relation kb:doc-research-gui-design .
 
 kb:task-sq-2msb a pkg:Task ;
@@ -1061,8 +1064,8 @@ kb:task-sq-384j a pkg:Task ;
   pkg:priority 2 ;
   pkg:label "docs" ;
   dcterms:isPartOf kb:task-sq-w9sr ;
-  pkg:dependsOn kb:task-sq-p26u ;
-  pkg:dependsOn kb:task-sq-h0tr .
+  pkg:dependsOn kb:task-sq-h0tr ;
+  pkg:dependsOn kb:task-sq-p26u .
 
 kb:task-sq-38zk a pkg:Task ;
   dcterms:title "MPC: WAN-tier protocol selection — constant-round secure comparison (Rabbit/DGK) + Boolean backend (GMW/BMR) for string/regex FILTER; round-per-depth Shamir is wrong for WAN" ;
@@ -1191,8 +1194,8 @@ kb:task-sq-3jtd_3 a pkg:Task ;
   pkg:label "area:sparq-reason" ;
   pkg:label "area:sparq-solid" ;
   pkg:label "from-pss" ;
-  dcterms:isPartOf kb:task-sq-3jtd ;
   pkg:dependsOn kb:task-sq-jwsp ;
+  dcterms:isPartOf kb:task-sq-3jtd ;
   dcterms:relation kb:doc-research-solid-access-control-design ;
   dcterms:relation kb:doc-research-sparq-solid-scope .
 
@@ -1467,8 +1470,8 @@ kb:task-sq-4hga a pkg:Task ;
   dcterms:identifier "sq-4hga" ;
   pkg:status pkg:Closed ;
   pkg:priority 3 ;
-  pkg:dependsOn kb:task-sq-mkza ;
   dcterms:isPartOf kb:task-sq-gum8 ;
+  pkg:dependsOn kb:task-sq-mkza ;
   dcterms:relation kb:doc-research-paper-factory-honesty-gate-coverage .
 
 kb:task-sq-4i39 a pkg:Task ;
@@ -1585,8 +1588,8 @@ kb:task-sq-4wo a pkg:Task ;
   pkg:label "area:sparq-core" ;
   pkg:label "area:sparq-hdt" ;
   pkg:label "kind:perf" ;
-  dcterms:isPartOf kb:task-sq-q6a1 ;
   dcterms:isPartOf kb:task-sq-eq26 ;
+  dcterms:isPartOf kb:task-sq-q6a1 ;
   dcterms:relation kb:doc-research-parsing-optimization-plan .
 
 kb:task-sq-4wo_1 a pkg:Task ;
@@ -2135,6 +2138,13 @@ kb:task-sq-6ep a pkg:Task ;
   pkg:label "area:sparq-geo" ;
   pkg:label "from-md-todo" .
 
+kb:task-sq-6f717 a pkg:Task ;
+  dcterms:title "PR #3511 review finding 6: merge-queue coverage docs overstate recovery — batch-merge comments cite bisection (not implemented), branch-protection.md/ci-summary.yml still claim full matrix on merge groups; update contracts + add trigger tests for relocated heavy lanes (formal-verification, ZK)" ;
+  dcterms:identifier "sq-6f717" ;
+  pkg:status pkg:Open ;
+  pkg:issueType pkg:Bug ;
+  pkg:priority 2 .
+
 kb:task-sq-6fv7 a pkg:Task ;
   dcterms:title "sparq-mpc: route disclose_threshold_verdict decomposition opens (a^2, c=sum+r, verdict) through MAC-check — sq-ka8m residual (PR #504 referenced this as sq-m4zi)" ;
   dcterms:identifier "sq-6fv7" ;
@@ -2579,9 +2589,9 @@ kb:task-sq-8ac8l a pkg:Task ;
   pkg:label "area:sparq-zk" ;
   pkg:label "blocked:external-audit" ;
   pkg:label "from:research" ;
+  pkg:dependsOn kb:task-sq-qhy4 ;
   pkg:dependsOn kb:task-sq-bevd3 ;
-  dcterms:isPartOf kb:task-sq-0dksu ;
-  pkg:dependsOn kb:task-sq-qhy4 .
+  dcterms:isPartOf kb:task-sq-0dksu .
 
 kb:task-sq-8bhq a pkg:Task ;
   dcterms:title "deps: migrate quick-xml 0.37->0.40 (Dependabot PR #19)" ;
@@ -2645,9 +2655,9 @@ kb:task-sq-8ic6 a pkg:Task ;
   pkg:label "ci" ;
   pkg:label "docs" ;
   pkg:blockedBy kb:task-sq-9jw5 ;
-  pkg:blockedBy kb:task-sq-my8 ;
   pkg:blockedBy kb:task-sq-puyy ;
   skos:related kb:task-sq-5fd1 ;
+  pkg:blockedBy kb:task-sq-my8 ;
   pkg:dependsOn kb:task-sq-inzv .
 
 kb:task-sq-8jv7 a pkg:Task ;
@@ -2699,8 +2709,8 @@ kb:task-sq-8mwz a pkg:Task ;
   pkg:status pkg:Closed ;
   pkg:issueType pkg:Feature ;
   pkg:priority 2 ;
-  pkg:dependsOn kb:task-sq-bwwl ;
-  pkg:dependsOn kb:task-sq-sco0 .
+  pkg:dependsOn kb:task-sq-sco0 ;
+  pkg:dependsOn kb:task-sq-bwwl .
 
 kb:task-sq-8n00 a pkg:Task ;
   dcterms:title "CHORE (run only when PR queue is EMPTY — touches ~all files, conflicts every in-flight PR): one-shot workspace cargo fmt + pin rustfmt toolchain version so local(1.9.0)/CI agree; many agents work around the drift" ;
@@ -2717,8 +2727,8 @@ kb:task-sq-8n1c a pkg:Task ;
   pkg:label "area:gui" ;
   pkg:label "from:design" ;
   pkg:label "kind:release" ;
-  dcterms:isPartOf kb:task-sq-ixc3 ;
   skos:related kb:task-sq-v286 ;
+  dcterms:isPartOf kb:task-sq-ixc3 ;
   pkg:dependsOn kb:task-sq-2e93 ;
   dcterms:relation kb:doc-research-gui-design .
 
@@ -3402,8 +3412,8 @@ kb:task-sq-bevd3 a pkg:Task ;
   pkg:label "area:sparq-zk" ;
   pkg:label "from:research" ;
   pkg:label "kind:ontology" ;
-  pkg:dependsOn kb:task-sq-5oru9 ;
-  dcterms:isPartOf kb:task-sq-0dksu .
+  dcterms:isPartOf kb:task-sq-0dksu ;
+  pkg:dependsOn kb:task-sq-5oru9 .
 
 kb:task-sq-bgsn a pkg:Task ;
   dcterms:title "sq-mnv5 residual: WIDER MAGNITUDE for in-MPC bit-decomposition — DECOMP_VALUE_BITS=20 is forced by p=2^61-1 (60-bit mask headroom, kappa=40 leaves 20 for value); lift via a larger field OR a non-masked-open comparison (Rabbit, eprint 2021/119). Large standalone." ;
@@ -3553,8 +3563,8 @@ kb:task-sq-bif_3 a pkg:Task ;
   pkg:label "area:test" ;
   pkg:label "ci" ;
   pkg:label "kind:correctness" ;
-  dcterms:isPartOf kb:task-sq-bif ;
-  pkg:dependsOn kb:task-sq-bif_1 .
+  pkg:dependsOn kb:task-sq-bif_1 ;
+  dcterms:isPartOf kb:task-sq-bif .
 
 kb:task-sq-bif_4 a pkg:Task ;
   dcterms:title "Test: sparq-prov correctness suite — PROV-O derivation/update/datetime + reason coverage" ;
@@ -4202,8 +4212,8 @@ kb:task-sq-daru a pkg:Task ;
   pkg:label "area:gui" ;
   pkg:label "from:design" ;
   pkg:label "kind:feature" ;
-  pkg:dependsOn kb:task-sq-n5aw ;
   dcterms:isPartOf kb:task-sq-ixc3 ;
+  pkg:dependsOn kb:task-sq-n5aw ;
   dcterms:relation kb:doc-research-gui-design .
 
 kb:task-sq-db6 a pkg:Task ;
@@ -4228,8 +4238,8 @@ kb:task-sq-ddc0 a pkg:Task ;
   dcterms:identifier "sq-ddc0" ;
   pkg:status pkg:Closed ;
   pkg:priority 2 ;
-  pkg:dependsOn kb:task-sq-mkza ;
   dcterms:isPartOf kb:task-sq-gum8 ;
+  pkg:dependsOn kb:task-sq-mkza ;
   dcterms:relation kb:doc-research-paper-factory-honesty-gate-coverage .
 
 kb:task-sq-dfs a pkg:Task ;
@@ -4404,8 +4414,8 @@ kb:task-sq-dz10l a pkg:Task ;
   pkg:label "area:sparq-mpc" ;
   pkg:label "from:research" ;
   pkg:label "kind:ontology" ;
-  pkg:dependsOn kb:task-sq-5oru9 ;
-  dcterms:isPartOf kb:task-sq-0dksu .
+  dcterms:isPartOf kb:task-sq-0dksu ;
+  pkg:dependsOn kb:task-sq-5oru9 .
 
 kb:task-sq-dzfu a pkg:Task ;
   dcterms:title "Perf gate: wall-clock timing metrics flake the hard gate (parse_ns_per_byte) — make timing robust (best/median-of-N) or track-only" ;
@@ -4486,8 +4496,8 @@ kb:task-sq-egy6 a pkg:Task ;
   dcterms:identifier "sq-egy6" ;
   pkg:status pkg:Closed ;
   pkg:priority 2 ;
-  pkg:dependsOn kb:task-sq-8thu ;
-  pkg:dependsOn kb:task-sq-lfmf .
+  pkg:dependsOn kb:task-sq-lfmf ;
+  pkg:dependsOn kb:task-sq-8thu .
 
 kb:task-sq-eifd a pkg:Task ;
   dcterms:title "bench infra: shared external-engine benchmark-runner adapters (http-sparql / report-cli / python-lib)" ;
@@ -4708,8 +4718,8 @@ kb:task-sq-fi03 a pkg:Task ;
   pkg:status pkg:Closed ;
   pkg:issueType pkg:Feature ;
   pkg:priority 2 ;
-  pkg:dependsOn kb:task-sq-8mwz ;
-  pkg:dependsOn kb:task-sq-bwwl .
+  pkg:dependsOn kb:task-sq-bwwl ;
+  pkg:dependsOn kb:task-sq-8mwz .
 
 kb:task-sq-fi8v a pkg:Task ;
   dcterms:title "Infra: multi-account agent fan-out — launch headless 'claude -p' subprocesses via Bash under a SEPARATE account credential (2nd ANTHROPIC_API_KEY / Bedrock / Vertex) to scale past single-session limits; --max-budget-usd per-run cost cap; coordinate via git+worktrees; route to account-B near-limit in the autonomous scheduler. NEEDS:USER account-B credential. Fold into research/autonomous-scheduler-design.md." ;
@@ -5159,8 +5169,8 @@ kb:task-sq-he72 a pkg:Task ;
   pkg:label "area:gui" ;
   pkg:label "from:design" ;
   pkg:label "kind:feature" ;
-  pkg:dependsOn kb:task-sq-2mke ;
   dcterms:isPartOf kb:task-sq-ixc3 ;
+  pkg:dependsOn kb:task-sq-2mke ;
   dcterms:relation kb:doc-research-gui-design .
 
 kb:task-sq-hhxc a pkg:Task ;
@@ -5368,9 +5378,9 @@ kb:task-sq-i1dt a pkg:Task ;
   pkg:status pkg:Closed ;
   pkg:issueType pkg:Feature ;
   pkg:priority 2 ;
+  pkg:dependsOn kb:task-sq-c2ql ;
   pkg:dependsOn kb:task-sq-xqfg ;
-  pkg:dependsOn kb:task-sq-z8s7 ;
-  pkg:dependsOn kb:task-sq-c2ql .
+  pkg:dependsOn kb:task-sq-z8s7 .
 
 kb:task-sq-i1tl a pkg:Task ;
   dcterms:title "Merge-throughput OPTION (deliberate, not urgent): move jeswr/sparq → a free GitHub org to unlock native merge queue (public repo ⇒ available on Free org). PREREQ: set a custom-domain CNAME for Pages first (host moves jeswr.github.io→org.github.io); update any AWS OIDC trust policy repo path; recreate org features. Do only if path-filter+bundling don't suffice" ;
@@ -5565,6 +5575,13 @@ kb:task-sq-ip3a a pkg:Task ;
   pkg:status pkg:Closed ;
   pkg:priority 3 .
 
+kb:task-sq-iq1vo a pkg:Task ;
+  dcterms:title "PR #3511 review finding 5: remove/narrow the actions/cache blocks that overlap the shared site-wasm rust-cache (js/pages/gui/visual/hero lanes still save duplicate caches on PR branches)" ;
+  dcterms:identifier "sq-iq1vo" ;
+  pkg:status pkg:Open ;
+  pkg:issueType pkg:Bug ;
+  pkg:priority 2 .
+
 kb:task-sq-it1x a pkg:Task ;
   dcterms:title "MVCC / ACID transaction isolation — opt-in" ;
   dcterms:identifier "sq-it1x" ;
@@ -5688,8 +5705,8 @@ kb:task-sq-ixc3_4 a pkg:Task ;
   pkg:issueType pkg:Feature ;
   pkg:priority 1 ;
   pkg:label "engine" ;
-  dcterms:isPartOf kb:task-sq-oy1f ;
   dcterms:isPartOf kb:task-sq-ixc3 ;
+  dcterms:isPartOf kb:task-sq-oy1f ;
   dcterms:relation kb:doc-research-jsonld-pretty-compaction-scope .
 
 kb:task-sq-ixc3_5 a pkg:Task ;
@@ -5700,8 +5717,8 @@ kb:task-sq-ixc3_5 a pkg:Task ;
   pkg:priority 3 ;
   pkg:label "wasm" ;
   pkg:dependsOn kb:task-sq-fe1s ;
-  pkg:dependsOn kb:task-sq-ixc3_3 ;
   dcterms:isPartOf kb:task-sq-ixc3 ;
+  pkg:dependsOn kb:task-sq-ixc3_3 ;
   dcterms:relation kb:doc-research-jsonld-pretty-compaction-scope .
 
 kb:task-sq-ixc3_6 a pkg:Task ;
@@ -5737,8 +5754,8 @@ kb:task-sq-ixc3_9 a pkg:Task ;
   pkg:priority 1 ;
   pkg:label "area:gui" ;
   pkg:label "frontend:gui" ;
-  dcterms:isPartOf kb:task-sq-ixc3 ;
   pkg:dependsOn kb:task-sq-ixc3_8 ;
+  dcterms:isPartOf kb:task-sq-ixc3 ;
   dcterms:relation kb:doc-research-gui-design .
 
 kb:task-sq-ixjt a pkg:Task ;
@@ -5963,8 +5980,8 @@ kb:task-sq-jnkm a pkg:Task ;
   pkg:label "mpc" ;
   pkg:label "research" ;
   pkg:label "security" ;
-  dcterms:isPartOf kb:task-sq-0jsc ;
-  pkg:dependsOn kb:task-sq-18lk .
+  pkg:dependsOn kb:task-sq-18lk ;
+  dcterms:isPartOf kb:task-sq-0jsc .
 
 kb:task-sq-jpki a pkg:Task ;
   dcterms:title "GUI: adopt repo-root npm/pnpm workspaces + a TRACKED generated wasm d.ts to DELETE the hand-written WasmStore mirror" ;
@@ -6242,9 +6259,9 @@ kb:task-sq-km34_4 a pkg:Task ;
   pkg:label "area:sparq-mpc" ;
   pkg:label "mpc" ;
   pkg:label "security" ;
-  pkg:dependsOn kb:task-sq-km34_3 ;
+  pkg:dependsOn kb:task-sq-km34_2 ;
   dcterms:isPartOf kb:task-sq-km34 ;
-  pkg:dependsOn kb:task-sq-km34_2 .
+  pkg:dependsOn kb:task-sq-km34_3 .
 
 kb:task-sq-km34_5 a pkg:Task ;
   dcterms:title "MPC: malicious-secure equality / hidden join (promote secure_equal SemiHonestOnly -> Abort at n=2t+1)" ;
@@ -6256,9 +6273,9 @@ kb:task-sq-km34_5 a pkg:Task ;
   pkg:label "mpc" ;
   pkg:label "security" ;
   pkg:dependsOn kb:task-sq-km34_4 ;
+  pkg:dependsOn kb:task-sq-km34_3 ;
   dcterms:isPartOf kb:task-sq-km34 ;
-  pkg:dependsOn kb:task-sq-km34_2 ;
-  pkg:dependsOn kb:task-sq-km34_3 .
+  pkg:dependsOn kb:task-sq-km34_2 .
 
 kb:task-sq-km34_6 a pkg:Task ;
   dcterms:title "MPC: malicious-secure comparison (authenticated bit-decomp greater-than; MAC-checked boolean verdict)" ;
@@ -6269,10 +6286,10 @@ kb:task-sq-km34_6 a pkg:Task ;
   pkg:label "area:sparq-mpc" ;
   pkg:label "mpc" ;
   pkg:label "security" ;
-  dcterms:isPartOf kb:task-sq-km34 ;
+  pkg:dependsOn kb:task-sq-km34_3 ;
   pkg:dependsOn kb:task-sq-km34_4 ;
-  pkg:dependsOn kb:task-sq-km34_2 ;
-  pkg:dependsOn kb:task-sq-km34_3 .
+  dcterms:isPartOf kb:task-sq-km34 ;
+  pkg:dependsOn kb:task-sq-km34_2 .
 
 kb:task-sq-km34_7 a pkg:Task ;
   dcterms:title "MPC: registry wiring for malicious mode (new_malicious + authenticated_abort descriptor + fail-closed select)" ;
@@ -6283,8 +6300,8 @@ kb:task-sq-km34_7 a pkg:Task ;
   pkg:label "area:sparq-mpc" ;
   pkg:label "mpc" ;
   pkg:label "security" ;
-  dcterms:isPartOf kb:task-sq-km34 ;
-  pkg:dependsOn kb:task-sq-km34_5 .
+  pkg:dependsOn kb:task-sq-km34_5 ;
+  dcterms:isPartOf kb:task-sq-km34 .
 
 kb:task-sq-km34_8 a pkg:Task ;
   dcterms:title "MPC: adversarial tests — a tampering party is CAUGHT (the witness the upgrade is real)" ;
@@ -6296,9 +6313,9 @@ kb:task-sq-km34_8 a pkg:Task ;
   pkg:label "kind:test" ;
   pkg:label "mpc" ;
   pkg:label "security" ;
-  pkg:dependsOn kb:task-sq-km34_4 ;
+  dcterms:isPartOf kb:task-sq-km34 ;
   pkg:dependsOn kb:task-sq-km34_5 ;
-  dcterms:isPartOf kb:task-sq-km34 .
+  pkg:dependsOn kb:task-sq-km34_4 .
 
 kb:task-sq-km34_9 a pkg:Task ;
   dcterms:title "MPC: add AXIS-1 (semi-honest vs malicious) to the metrics/bench matrix — MEASURE the authentication lift" ;
@@ -6553,8 +6570,8 @@ kb:task-sq-lrju a pkg:Task ;
   pkg:priority 2 ;
   pkg:label "ci" ;
   pkg:label "docs" ;
-  pkg:dependsOn kb:task-sq-im8u ;
-  dcterms:isPartOf kb:task-sq-w9sr .
+  dcterms:isPartOf kb:task-sq-w9sr ;
+  pkg:dependsOn kb:task-sq-im8u .
 
 kb:task-sq-lrp9 a pkg:Task ;
   dcterms:title "bench: HDT suite — load-and-decode triple-count gate + load_s/ratio advisory + hdt-cpp competitor (decode-only, query-over-HDT NON-goal)" ;
@@ -6699,8 +6716,8 @@ kb:task-sq-mj2z a pkg:Task ;
   pkg:status pkg:Closed ;
   pkg:issueType pkg:Feature ;
   pkg:priority 2 ;
-  pkg:dependsOn kb:task-sq-bwwl ;
-  pkg:dependsOn kb:task-sq-8mwz .
+  pkg:dependsOn kb:task-sq-8mwz ;
+  pkg:dependsOn kb:task-sq-bwwl .
 
 kb:task-sq-mk9n a pkg:Task ;
   dcterms:title "SHACL-AF: node-expression FUNCTION form + sh:expression constraint + SHACL-function registry" ;
@@ -6815,8 +6832,8 @@ kb:task-sq-mraf a pkg:Task ;
   dcterms:identifier "sq-mraf" ;
   pkg:status pkg:Closed ;
   pkg:priority 3 ;
-  pkg:dependsOn kb:task-sq-mkza ;
   dcterms:isPartOf kb:task-sq-gum8 ;
+  pkg:dependsOn kb:task-sq-mkza ;
   dcterms:relation kb:doc-research-paper-factory-honesty-gate-coverage .
 
 kb:task-sq-msl6 a pkg:Task ;
@@ -6957,13 +6974,13 @@ kb:task-sq-ncvq_10 a pkg:Task ;
   pkg:priority 2 ;
   pkg:label "docs" ;
   pkg:label "infra" ;
-  pkg:dependsOn kb:task-sq-ncvq_4 ;
-  pkg:dependsOn kb:task-sq-ncvq_7 ;
+  pkg:dependsOn kb:task-sq-ncvq_6 ;
   pkg:dependsOn kb:task-sq-ncvq_5 ;
+  pkg:dependsOn kb:task-sq-ncvq_4 ;
   dcterms:isPartOf kb:task-sq-ncvq ;
   pkg:dependsOn kb:task-sq-ncvq_9 ;
-  pkg:dependsOn kb:task-sq-ncvq_8 ;
-  pkg:dependsOn kb:task-sq-ncvq_6 .
+  pkg:dependsOn kb:task-sq-ncvq_7 ;
+  pkg:dependsOn kb:task-sq-ncvq_8 .
 
 kb:task-sq-ncvq_11 a pkg:Task ;
   dcterms:title "Reusable drift-scanner: scripts/drift-scan.py (+ scheduled CI lane) for the periodic full sweep" ;
@@ -7039,8 +7056,8 @@ kb:task-sq-ncvq_2 a pkg:Task ;
   pkg:priority 1 ;
   pkg:label "docs" ;
   pkg:label "infra" ;
-  dcterms:isPartOf kb:task-sq-ncvq ;
-  pkg:dependsOn kb:task-sq-ncvq_1 .
+  pkg:dependsOn kb:task-sq-ncvq_1 ;
+  dcterms:isPartOf kb:task-sq-ncvq .
 
 kb:task-sq-ncvq_3 a pkg:Task ;
   dcterms:title "flow-on.yml: GH Actions on pull_request[closed] if merged -> run flow-on.py" ;
@@ -7050,8 +7067,8 @@ kb:task-sq-ncvq_3 a pkg:Task ;
   pkg:priority 2 ;
   pkg:label "docs" ;
   pkg:label "infra" ;
-  dcterms:isPartOf kb:task-sq-ncvq ;
-  pkg:dependsOn kb:task-sq-ncvq_2 .
+  pkg:dependsOn kb:task-sq-ncvq_2 ;
+  dcterms:isPartOf kb:task-sq-ncvq .
 
 kb:task-sq-ncvq_4 a pkg:Task ;
   dcterms:title "Gate G1: new-crate-completeness check (new crate -> bench registered + README + SKILL if public)" ;
@@ -7119,8 +7136,8 @@ kb:task-sq-ncz0 a pkg:Task ;
   pkg:status pkg:Closed ;
   pkg:issueType pkg:Feature ;
   pkg:priority 2 ;
-  pkg:dependsOn kb:task-sq-z8s7 ;
-  pkg:dependsOn kb:task-sq-c2ql .
+  pkg:dependsOn kb:task-sq-c2ql ;
+  pkg:dependsOn kb:task-sq-z8s7 .
 
 kb:task-sq-ndaz a pkg:Task ;
   dcterms:title "page: /surface/geosparql (tier-e hosted/walkthrough + map)" ;
@@ -7399,8 +7416,8 @@ kb:task-sq-ouq a pkg:Task ;
   pkg:priority 3 ;
   pkg:label "area:parsing" ;
   pkg:label "kind:perf" ;
-  pkg:dependsOn kb:task-sq-db6 ;
   dcterms:isPartOf kb:task-sq-4wo ;
+  pkg:dependsOn kb:task-sq-db6 ;
   dcterms:relation kb:doc-research-parsing-optimization-plan .
 
 kb:task-sq-ouq7 a pkg:Task ;
@@ -7673,8 +7690,8 @@ kb:task-sq-oy1f_5 a pkg:Task ;
   pkg:label "from:maintainer" ;
   pkg:label "json-ld" ;
   pkg:label "roadmap" ;
-  pkg:dependsOn kb:task-sq-ixc3_4 ;
   dcterms:isPartOf kb:task-sq-oy1f ;
+  pkg:dependsOn kb:task-sq-ixc3_4 ;
   dcterms:relation kb:doc-research-jsonld-support-roadmap .
 
 kb:task-sq-oy1f_6 a pkg:Task ;
@@ -7906,8 +7923,8 @@ kb:task-sq-pfae_6 a pkg:Task ;
   dcterms:identifier "sq-pfae.6" ;
   pkg:status pkg:Open ;
   pkg:priority 2 ;
-  pkg:dependsOn kb:task-sq-pfae_4 ;
-  dcterms:isPartOf kb:task-sq-pfae .
+  dcterms:isPartOf kb:task-sq-pfae ;
+  pkg:dependsOn kb:task-sq-pfae_4 .
 
 kb:task-sq-pfae_7 a pkg:Task ;
   dcterms:title "P6: live status/revocation + minimal justification" ;
@@ -7923,16 +7940,16 @@ kb:task-sq-pfae_8 a pkg:Task ;
   pkg:status pkg:Open ;
   pkg:priority 3 ;
   pkg:dependsOn kb:task-sq-pfae_4 ;
-  pkg:dependsOn kb:task-sq-qhy4 ;
-  dcterms:isPartOf kb:task-sq-pfae .
+  dcterms:isPartOf kb:task-sq-pfae ;
+  pkg:dependsOn kb:task-sq-qhy4 .
 
 kb:task-sq-pfae_9 a pkg:Task ;
   dcterms:title "P8: cost/decidability spike (work-box timings non-canonical)" ;
   dcterms:identifier "sq-pfae.9" ;
   pkg:status pkg:Open ;
   pkg:priority 3 ;
-  dcterms:isPartOf kb:task-sq-pfae ;
-  pkg:dependsOn kb:task-sq-pfae_5 .
+  pkg:dependsOn kb:task-sq-pfae_5 ;
+  dcterms:isPartOf kb:task-sq-pfae .
 
 kb:task-sq-pi44 a pkg:Task ;
   dcterms:title "sparq-vectors: incremental add/remove of vectors against an existing store (delta sidecar) without full rebuild" ;
@@ -8075,8 +8092,8 @@ kb:task-sq-pwr_3 a pkg:Task ;
   pkg:priority 3 ;
   pkg:label "area:sparq-mpc" ;
   pkg:label "kind:research" ;
-  pkg:dependsOn kb:task-sq-fix4 ;
   dcterms:isPartOf kb:task-sq-pwr ;
+  pkg:dependsOn kb:task-sq-fix4 ;
   dcterms:relation kb:doc-research-mpc-untrusted-planner-routing-design .
 
 kb:task-sq-pxdu a pkg:Task ;
@@ -8108,8 +8125,8 @@ kb:task-sq-py8h a pkg:Task ;
   pkg:status pkg:Closed ;
   pkg:issueType pkg:Feature ;
   pkg:priority 2 ;
-  pkg:dependsOn kb:task-sq-dvuc ;
-  dcterms:isPartOf kb:task-sq-0jsc .
+  dcterms:isPartOf kb:task-sq-0jsc ;
+  pkg:dependsOn kb:task-sq-dvuc .
 
 kb:task-sq-py8h_1 a pkg:Task ;
   dcterms:title "MPC: bounded property-path — disclosed-key regime (unroll fixed-k path over disclosed global IRIs to a DisclosedKeyJoin fold + union + dedup, crypto-free)" ;
@@ -8126,8 +8143,8 @@ kb:task-sq-py8h_2 a pkg:Task ;
   pkg:status pkg:Closed ;
   pkg:issueType pkg:Feature ;
   pkg:priority 2 ;
-  dcterms:isPartOf kb:task-sq-py8h ;
   pkg:dependsOn kb:task-sq-dvuc ;
+  dcterms:isPartOf kb:task-sq-py8h ;
   pkg:dependsOn kb:task-sq-py8h_1 .
 
 kb:task-sq-py8h_3 a pkg:Task ;
@@ -8145,9 +8162,9 @@ kb:task-sq-py8h_4 a pkg:Task ;
   pkg:status pkg:Closed ;
   pkg:issueType pkg:Feature ;
   pkg:priority 3 ;
-  dcterms:isPartOf kb:task-sq-py8h ;
+  pkg:dependsOn kb:task-sq-rrz4 ;
   pkg:dependsOn kb:task-sq-py8h_3 ;
-  pkg:dependsOn kb:task-sq-rrz4 .
+  dcterms:isPartOf kb:task-sq-py8h .
 
 kb:task-sq-py8h_5 a pkg:Task ;
   dcterms:title "MPC: bounded property-path — planner guard + cost-model wiring (reject statically-large unrolls, refuse hidden UNBOUNDED paths via NoBackendSatisfies, wire into CommCounter/matrix runner)" ;
@@ -8155,8 +8172,8 @@ kb:task-sq-py8h_5 a pkg:Task ;
   pkg:status pkg:Closed ;
   pkg:issueType pkg:Feature ;
   pkg:priority 3 ;
-  pkg:dependsOn kb:task-sq-py8h_2 ;
-  dcterms:isPartOf kb:task-sq-py8h .
+  dcterms:isPartOf kb:task-sq-py8h ;
+  pkg:dependsOn kb:task-sq-py8h_2 .
 
 kb:task-sq-pyn7 a pkg:Task ;
   dcterms:title "Wire the /try playground 'Compact → shapes' SCS input mode (#796) onto Store.parseShaclCompact" ;
@@ -8573,8 +8590,8 @@ kb:task-sq-rsd3v a pkg:Task ;
   pkg:label "area:sparq-zk-compose" ;
   pkg:label "research" ;
   pkg:label "zk" ;
-  pkg:dependsOn kb:task-sq-pfae ;
   pkg:dependsOn kb:task-sq-1s2 ;
+  pkg:dependsOn kb:task-sq-pfae ;
   dcterms:relation kb:doc-research-zk-inference-and-credentials .
 
 kb:task-sq-rsd3v_1 a pkg:Task ;
@@ -8607,8 +8624,8 @@ kb:task-sq-rsd3v_3 a pkg:Task ;
   pkg:label "area:sparq-zk-compose" ;
   pkg:label "research" ;
   pkg:label "zk" ;
-  pkg:dependsOn kb:task-sq-rsd3v_2 ;
   dcterms:isPartOf kb:task-sq-rsd3v ;
+  pkg:dependsOn kb:task-sq-rsd3v_2 ;
   dcterms:relation kb:doc-research-zk-inference-and-credentials .
 
 kb:task-sq-rsd3v_4 a pkg:Task ;
@@ -8620,8 +8637,8 @@ kb:task-sq-rsd3v_4 a pkg:Task ;
   pkg:label "area:sparq-zk-compose" ;
   pkg:label "research" ;
   pkg:label "zk" ;
-  dcterms:isPartOf kb:task-sq-rsd3v ;
   pkg:dependsOn kb:task-sq-rsd3v_1 ;
+  dcterms:isPartOf kb:task-sq-rsd3v ;
   dcterms:relation kb:doc-research-zk-inference-and-credentials .
 
 kb:task-sq-rsd3v_5 a pkg:Task ;
@@ -8644,8 +8661,8 @@ kb:task-sq-rsd3v_6 a pkg:Task ;
   pkg:label "area:sparq-zk-compose" ;
   pkg:label "research" ;
   pkg:label "zk" ;
-  dcterms:isPartOf kb:task-sq-rsd3v ;
   pkg:dependsOn kb:task-sq-rsd3v_2 ;
+  dcterms:isPartOf kb:task-sq-rsd3v ;
   dcterms:relation kb:doc-research-zk-inference-and-credentials .
 
 kb:task-sq-rsd3v_7 a pkg:Task ;
@@ -8656,8 +8673,8 @@ kb:task-sq-rsd3v_7 a pkg:Task ;
   pkg:label "area:sparq-zk-compose" ;
   pkg:label "research" ;
   pkg:label "zk" ;
-  pkg:dependsOn kb:task-sq-rsd3v_2 ;
   dcterms:isPartOf kb:task-sq-rsd3v ;
+  pkg:dependsOn kb:task-sq-rsd3v_2 ;
   dcterms:relation kb:doc-research-zk-inference-and-credentials ;
   dcterms:relation kb:doc-research-zkp-performance-landscape .
 
@@ -8672,9 +8689,9 @@ kb:task-sq-rsd3v_8 a pkg:Task ;
   pkg:label "research" ;
   pkg:label "zk" ;
   dcterms:isPartOf kb:task-sq-rsd3v ;
-  pkg:dependsOn kb:task-sq-rsd3v_5 ;
-  pkg:dependsOn kb:task-sq-rsd3v_2 ;
   pkg:dependsOn kb:task-sq-rsd3v_4 ;
+  pkg:dependsOn kb:task-sq-rsd3v_2 ;
+  pkg:dependsOn kb:task-sq-rsd3v_5 ;
   dcterms:relation kb:doc-research-zk-inference-and-credentials .
 
 kb:task-sq-rsxf a pkg:Task ;
@@ -8970,6 +8987,13 @@ kb:task-sq-t4b9 a pkg:Task ;
   pkg:priority 2 ;
   pkg:label "infra" .
 
+kb:task-sq-t55kz a pkg:Task ;
+  dcterms:title "ci: MSRV job checks latest stable, not the declared 1.88 floor (vacuous pin)" ;
+  dcterms:identifier "sq-t55kz" ;
+  pkg:status pkg:Closed ;
+  pkg:issueType pkg:Bug ;
+  pkg:priority 2 .
+
 kb:task-sq-t58w a pkg:Task ;
   dcterms:title "Solid HTTP/CTH wire-conformance oracle for the WAC+ACP paper (lift it past library-level decision parity)" ;
   dcterms:identifier "sq-t58w" ;
@@ -9002,9 +9026,9 @@ kb:task-sq-t58w_3 a pkg:Task ;
   pkg:priority 3 ;
   pkg:label "area:sparq-solid" ;
   pkg:label "blocked:docker" ;
-  pkg:dependsOn kb:task-sq-t58w_7 ;
   pkg:dependsOn kb:task-sq-t58w_2 ;
-  dcterms:isPartOf kb:task-sq-t58w .
+  dcterms:isPartOf kb:task-sq-t58w ;
+  pkg:dependsOn kb:task-sq-t58w_7 .
 
 kb:task-sq-t58w_4 a pkg:Task ;
   dcterms:title "Decision: should sparq-server ever expose a WAC/ACP HTTP decision (403 + WAC-Allow), or does enforcement stay in PSS (gh-55)? [OPUS-4.8]" ;
@@ -9042,8 +9066,8 @@ kb:task-sq-t58w_7 a pkg:Task ;
   pkg:status pkg:Closed ;
   pkg:priority 3 ;
   pkg:label "area:sparq-solid" ;
-  dcterms:isPartOf kb:task-sq-t58w ;
-  pkg:dependsOn kb:task-sq-t58w_6 .
+  pkg:dependsOn kb:task-sq-t58w_6 ;
+  dcterms:isPartOf kb:task-sq-t58w .
 
 kb:task-sq-t58w_8 a pkg:Task ;
   dcterms:title "Register the Solid differential oracle + WAC/ACP parity floors in the conformance scoreboard (SUITES + scoreboard_floors.rs) [OPUS-4.8]" ;
@@ -9051,8 +9075,8 @@ kb:task-sq-t58w_8 a pkg:Task ;
   pkg:status pkg:Closed ;
   pkg:priority 3 ;
   pkg:label "area:sparq-solid" ;
-  dcterms:isPartOf kb:task-sq-t58w ;
-  pkg:dependsOn kb:task-sq-t58w_7 .
+  pkg:dependsOn kb:task-sq-t58w_7 ;
+  dcterms:isPartOf kb:task-sq-t58w .
 
 kb:task-sq-t58w_9 a pkg:Task ;
   dcterms:title "JS reference-engine differential twin: diff sparq-solid decisions vs @solidlab/policy-engine (WAC+ACP) / @solid/acl-check (WAC) under js/ node:test [OPUS-4.8]" ;
@@ -9060,8 +9084,8 @@ kb:task-sq-t58w_9 a pkg:Task ;
   pkg:status pkg:Closed ;
   pkg:priority 3 ;
   pkg:label "area:sparq-solid" ;
-  pkg:dependsOn kb:task-sq-t58w_7 ;
-  dcterms:isPartOf kb:task-sq-t58w .
+  dcterms:isPartOf kb:task-sq-t58w ;
+  pkg:dependsOn kb:task-sq-t58w_7 .
 
 kb:task-sq-t7oe a pkg:Task ;
   dcterms:title "Add readme-template --enforce to the sparq-rust-feature agent gate checklist (+ AGENTS.md) to stop recurring crate-README cap breaches" ;
@@ -9138,8 +9162,8 @@ kb:task-sq-tg6b a pkg:Task ;
   pkg:label "mpc" ;
   pkg:label "perf" ;
   pkg:label "research" ;
-  dcterms:isPartOf kb:task-sq-0jsc ;
-  pkg:dependsOn kb:task-sq-sxm .
+  pkg:dependsOn kb:task-sq-sxm ;
+  dcterms:isPartOf kb:task-sq-0jsc .
 
 kb:task-sq-th1u a pkg:Task ;
   dcterms:title "Bench: pytest FFI-overhead micro-bench (tests/bench_py.py)" ;
@@ -9239,10 +9263,10 @@ kb:task-sq-toze_10 a pkg:Task ;
   pkg:priority 2 ;
   pkg:label "infra" ;
   pkg:label "security" ;
-  pkg:dependsOn kb:task-sq-toze_7 ;
   dcterms:isPartOf kb:task-sq-toze ;
-  pkg:dependsOn kb:task-sq-toze_1 ;
+  pkg:dependsOn kb:task-sq-toze_7 ;
   pkg:dependsOn kb:task-sq-toze_4 ;
+  pkg:dependsOn kb:task-sq-toze_1 ;
   dcterms:relation kb:doc-research-production-certification-plan .
 
 kb:task-sq-toze_11 a pkg:Task ;
@@ -9252,8 +9276,8 @@ kb:task-sq-toze_11 a pkg:Task ;
   pkg:priority 2 ;
   pkg:label "infra" ;
   pkg:label "security" ;
-  pkg:dependsOn kb:task-sq-toze_1 ;
-  dcterms:isPartOf kb:task-sq-toze .
+  dcterms:isPartOf kb:task-sq-toze ;
+  pkg:dependsOn kb:task-sq-toze_1 .
 
 kb:task-sq-toze_12 a pkg:Task ;
   dcterms:title "[cert][assess] SBOM + supply-chain (engineer+auditor, perfect score)" ;
@@ -9262,11 +9286,11 @@ kb:task-sq-toze_12 a pkg:Task ;
   pkg:priority 2 ;
   pkg:label "infra" ;
   pkg:label "security" ;
-  pkg:dependsOn kb:task-sq-toze_1 ;
-  pkg:dependsOn kb:task-sq-toze_3 ;
+  pkg:dependsOn kb:task-sq-toze_2 ;
   dcterms:isPartOf kb:task-sq-toze ;
+  pkg:dependsOn kb:task-sq-toze_3 ;
   pkg:dependsOn kb:task-sq-toze_8 ;
-  pkg:dependsOn kb:task-sq-toze_2 .
+  pkg:dependsOn kb:task-sq-toze_1 .
 
 kb:task-sq-toze_13 a pkg:Task ;
   dcterms:title "[cert][assess] NIST SSDF SP 800-218 (engineer+auditor)" ;
@@ -9275,12 +9299,12 @@ kb:task-sq-toze_13 a pkg:Task ;
   pkg:priority 2 ;
   pkg:label "infra" ;
   pkg:label "security" ;
-  pkg:dependsOn kb:task-sq-toze_8 ;
   pkg:dependsOn kb:task-sq-toze_7 ;
-  dcterms:isPartOf kb:task-sq-toze ;
-  pkg:dependsOn kb:task-sq-toze_6 ;
+  pkg:dependsOn kb:task-sq-toze_2 ;
   pkg:dependsOn kb:task-sq-toze_1 ;
-  pkg:dependsOn kb:task-sq-toze_2 .
+  pkg:dependsOn kb:task-sq-toze_6 ;
+  dcterms:isPartOf kb:task-sq-toze ;
+  pkg:dependsOn kb:task-sq-toze_8 .
 
 kb:task-sq-toze_14 a pkg:Task ;
   dcterms:title "[cert][assess] SLSA build provenance (engineer+auditor)" ;
@@ -9289,11 +9313,11 @@ kb:task-sq-toze_14 a pkg:Task ;
   pkg:priority 2 ;
   pkg:label "infra" ;
   pkg:label "security" ;
-  dcterms:isPartOf kb:task-sq-toze ;
-  pkg:dependsOn kb:task-sq-toze_1 ;
-  pkg:dependsOn kb:task-sq-toze_3 ;
   pkg:dependsOn kb:task-sq-toze_9 ;
-  pkg:dependsOn kb:task-sq-toze_8 .
+  pkg:dependsOn kb:task-sq-toze_3 ;
+  pkg:dependsOn kb:task-sq-toze_1 ;
+  pkg:dependsOn kb:task-sq-toze_8 ;
+  dcterms:isPartOf kb:task-sq-toze .
 
 kb:task-sq-toze_15 a pkg:Task ;
   dcterms:title "[cert][assess] OpenSSF Scorecard + Best-Practices badge (engineer+auditor)" ;
@@ -9302,10 +9326,10 @@ kb:task-sq-toze_15 a pkg:Task ;
   pkg:priority 2 ;
   pkg:label "infra" ;
   pkg:label "security" ;
-  dcterms:isPartOf kb:task-sq-toze ;
   pkg:dependsOn kb:task-sq-toze_1 ;
-  pkg:dependsOn kb:task-sq-toze_5 ;
-  pkg:dependsOn kb:task-sq-toze_4 .
+  pkg:dependsOn kb:task-sq-toze_4 ;
+  dcterms:isPartOf kb:task-sq-toze ;
+  pkg:dependsOn kb:task-sq-toze_5 .
 
 kb:task-sq-toze_16 a pkg:Task ;
   dcterms:title "[cert][assess] Memory-safety attestation (engineer+auditor, perfect score)" ;
@@ -9314,9 +9338,9 @@ kb:task-sq-toze_16 a pkg:Task ;
   pkg:priority 2 ;
   pkg:label "infra" ;
   pkg:label "security" ;
+  pkg:dependsOn kb:task-sq-toze_6 ;
   dcterms:isPartOf kb:task-sq-toze ;
-  pkg:dependsOn kb:task-sq-toze_1 ;
-  pkg:dependsOn kb:task-sq-toze_6 .
+  pkg:dependsOn kb:task-sq-toze_1 .
 
 kb:task-sq-toze_17 a pkg:Task ;
   dcterms:title "[cert][assess] ISO/IEC 27001 Annex A — audit-ready mapping (engineer+auditor)" ;
@@ -9325,9 +9349,9 @@ kb:task-sq-toze_17 a pkg:Task ;
   pkg:priority 2 ;
   pkg:label "infra" ;
   pkg:label "security" ;
+  pkg:dependsOn kb:task-sq-toze_1 ;
   dcterms:isPartOf kb:task-sq-toze ;
-  pkg:dependsOn kb:task-sq-toze_7 ;
-  pkg:dependsOn kb:task-sq-toze_1 .
+  pkg:dependsOn kb:task-sq-toze_7 .
 
 kb:task-sq-toze_18 a pkg:Task ;
   dcterms:title "[cert][assess] EU Cyber Resilience Act (engineer+auditor)" ;
@@ -9336,12 +9360,12 @@ kb:task-sq-toze_18 a pkg:Task ;
   pkg:priority 2 ;
   pkg:label "infra" ;
   pkg:label "security" ;
-  pkg:dependsOn kb:task-sq-toze_3 ;
-  pkg:dependsOn kb:task-sq-toze_2 ;
-  pkg:dependsOn kb:task-sq-toze_1 ;
-  dcterms:isPartOf kb:task-sq-toze ;
   pkg:dependsOn kb:task-sq-toze_9 ;
-  pkg:dependsOn kb:task-sq-toze_4 .
+  pkg:dependsOn kb:task-sq-toze_2 ;
+  dcterms:isPartOf kb:task-sq-toze ;
+  pkg:dependsOn kb:task-sq-toze_4 ;
+  pkg:dependsOn kb:task-sq-toze_3 ;
+  pkg:dependsOn kb:task-sq-toze_1 .
 
 kb:task-sq-toze_19 a pkg:Task ;
   dcterms:title "[cert][assess] Privacy — GDPR + ISO 27701 + SOC2-Privacy + data-flow/DPIA (engineer+auditor)" ;
@@ -9369,8 +9393,8 @@ kb:task-sq-toze_20 a pkg:Task ;
   pkg:priority 2 ;
   pkg:label "infra" ;
   pkg:label "security" ;
-  pkg:dependsOn kb:task-sq-toze_1 ;
   dcterms:isPartOf kb:task-sq-toze ;
+  pkg:dependsOn kb:task-sq-toze_1 ;
   dcterms:relation kb:doc-research-zk-soundness-audit .
 
 kb:task-sq-toze_21 a pkg:Task ;
@@ -9390,19 +9414,19 @@ kb:task-sq-toze_22 a pkg:Task ;
   pkg:priority 2 ;
   pkg:label "infra" ;
   pkg:label "security" ;
-  pkg:dependsOn kb:task-sq-toze_13 ;
-  pkg:dependsOn kb:task-sq-toze_20 ;
-  pkg:dependsOn kb:task-sq-toze_10 ;
-  pkg:dependsOn kb:task-sq-toze_18 ;
-  pkg:dependsOn kb:task-sq-toze_19 ;
-  pkg:dependsOn kb:task-sq-toze_14 ;
-  dcterms:isPartOf kb:task-sq-toze ;
-  pkg:dependsOn kb:task-sq-toze_21 ;
   pkg:dependsOn kb:task-sq-toze_15 ;
   pkg:dependsOn kb:task-sq-toze_12 ;
   pkg:dependsOn kb:task-sq-toze_17 ;
+  pkg:dependsOn kb:task-sq-toze_19 ;
+  pkg:dependsOn kb:task-sq-toze_16 ;
   pkg:dependsOn kb:task-sq-toze_11 ;
-  pkg:dependsOn kb:task-sq-toze_16 .
+  pkg:dependsOn kb:task-sq-toze_13 ;
+  pkg:dependsOn kb:task-sq-toze_10 ;
+  pkg:dependsOn kb:task-sq-toze_21 ;
+  pkg:dependsOn kb:task-sq-toze_20 ;
+  pkg:dependsOn kb:task-sq-toze_18 ;
+  pkg:dependsOn kb:task-sq-toze_14 ;
+  dcterms:isPartOf kb:task-sq-toze .
 
 kb:task-sq-toze_23 a pkg:Task ;
   dcterms:title "[cert][gap GX-9] dist.yml release binaries lack SLSA provenance attestation" ;
@@ -9619,6 +9643,13 @@ kb:task-sq-tp1m a pkg:Task ;
   pkg:label "area:gui" ;
   pkg:label "from:maintainer" ;
   dcterms:isPartOf kb:task-sq-ixc3 .
+
+kb:task-sq-tqo0f a pkg:Task ;
+  dcterms:title "ci: MSRV job checks latest stable, not the declared 1.88 floor (vacuous pin)" ;
+  dcterms:identifier "sq-tqo0f" ;
+  pkg:status pkg:Closed ;
+  pkg:issueType pkg:Bug ;
+  pkg:priority 2 .
 
 kb:task-sq-tstv a pkg:Task ;
   dcterms:title "Fix .claude/agents/sparq-site.md frontmatter: description: has an unquoted colon ('...Pages app: benchmarks...') -> YAML parse error per scripts/check-skill-frontmatter.py. Doesn't break CI today (gate globs only skills/**/SKILL.md) but mis-renders. Quote the description; AND extend the skill-frontmatter gate glob to also cover .claude/agents/*.md (fixing any other agent-def that then fails) so agent defs are gated + recurrence prevented." ;
@@ -9964,8 +9995,8 @@ kb:task-sq-v286_4 a pkg:Task ;
   pkg:status pkg:Closed ;
   pkg:priority 1 ;
   dcterms:isPartOf kb:task-sq-v286 ;
-  pkg:dependsOn kb:task-sq-v286_3 ;
   pkg:dependsOn kb:task-sq-v286_2 ;
+  pkg:dependsOn kb:task-sq-v286_3 ;
   dcterms:relation kb:doc-research-release-ci-design .
 
 kb:task-sq-v286_5 a pkg:Task ;
@@ -9973,8 +10004,8 @@ kb:task-sq-v286_5 a pkg:Task ;
   dcterms:identifier "sq-v286.5" ;
   pkg:status pkg:Closed ;
   pkg:priority 2 ;
-  dcterms:isPartOf kb:task-sq-v286 ;
   pkg:dependsOn kb:task-sq-v286_4 ;
+  dcterms:isPartOf kb:task-sq-v286 ;
   dcterms:relation kb:doc-research-release-ci-design .
 
 kb:task-sq-v286_6 a pkg:Task ;
@@ -9982,8 +10013,8 @@ kb:task-sq-v286_6 a pkg:Task ;
   dcterms:identifier "sq-v286.6" ;
   pkg:status pkg:Closed ;
   pkg:priority 2 ;
-  pkg:dependsOn kb:task-sq-v286_2 ;
   dcterms:isPartOf kb:task-sq-v286 ;
+  pkg:dependsOn kb:task-sq-v286_2 ;
   dcterms:relation kb:doc-research-release-ci-design .
 
 kb:task-sq-v286_7 a pkg:Task ;
@@ -10262,8 +10293,8 @@ kb:task-sq-vw3ax_5 a pkg:Task ;
   pkg:label "area:site" ;
   pkg:label "frontend:website" ;
   pkg:label "kind:design" ;
-  pkg:dependsOn kb:task-sq-vw3ax_3 ;
   pkg:dependsOn kb:task-sq-vw3ax_2 ;
+  pkg:dependsOn kb:task-sq-vw3ax_3 ;
   dcterms:isPartOf kb:task-sq-vw3ax ;
   dcterms:relation kb:doc-research-website-redesign .
 
@@ -10547,8 +10578,8 @@ kb:task-sq-x0kp a pkg:Task ;
   pkg:label "area:gui" ;
   pkg:label "from:design" ;
   pkg:label "kind:feature" ;
-  dcterms:isPartOf kb:task-sq-ixc3 ;
   pkg:dependsOn kb:task-sq-n5aw ;
+  dcterms:isPartOf kb:task-sq-ixc3 ;
   dcterms:relation kb:doc-research-gui-design .
 
 kb:task-sq-x32t a pkg:Task ;
@@ -10676,8 +10707,8 @@ kb:task-sq-xojl a pkg:Task ;
   pkg:priority 1 ;
   pkg:label "area:sparq-zk" ;
   pkg:label "from:maintainer" ;
-  pkg:dependsOn kb:task-sq-zzxt ;
-  dcterms:isPartOf kb:task-sq-1s2_5 .
+  dcterms:isPartOf kb:task-sq-1s2_5 ;
+  pkg:dependsOn kb:task-sq-zzxt .
 
 kb:task-sq-xom2 a pkg:Task ;
   dcterms:title "Audit: does any OBSERVABLE/canonical output depend on sparq-core's thread-count-dependent dict-id assignment order (parallel sharded merge)?" ;
@@ -10709,8 +10740,8 @@ kb:task-sq-xqfg a pkg:Task ;
   pkg:status pkg:Closed ;
   pkg:issueType pkg:Feature ;
   pkg:priority 2 ;
-  pkg:dependsOn kb:task-sq-y464 ;
-  pkg:dependsOn kb:task-sq-c2ql .
+  pkg:dependsOn kb:task-sq-c2ql ;
+  pkg:dependsOn kb:task-sq-y464 .
 
 kb:task-sq-xqu a pkg:Task ;
   dcterms:title "RSP: per-registered-query QueryBudget for window evaluation" ;
@@ -10800,8 +10831,8 @@ kb:task-sq-y32f a pkg:Task ;
   pkg:status pkg:Open ;
   pkg:issueType pkg:Feature ;
   pkg:priority 2 ;
-  pkg:dependsOn kb:task-sq-ujz8 ;
-  dcterms:isPartOf kb:task-sq-0jsc .
+  dcterms:isPartOf kb:task-sq-0jsc ;
+  pkg:dependsOn kb:task-sq-ujz8 .
 
 kb:task-sq-y464 a pkg:Task ;
   dcterms:title "ZK: holder-bound issuer signed-message family + holder key digest (sq-c2ql T1)" ;
@@ -11017,9 +11048,9 @@ kb:task-sq-z8s7 a pkg:Task ;
   pkg:status pkg:Closed ;
   pkg:issueType pkg:Feature ;
   pkg:priority 2 ;
+  pkg:dependsOn kb:task-sq-y464 ;
   pkg:dependsOn kb:task-sq-c2ql ;
-  pkg:dependsOn kb:task-sq-h8rg ;
-  pkg:dependsOn kb:task-sq-y464 .
+  pkg:dependsOn kb:task-sq-h8rg .
 
 kb:task-sq-z9l a pkg:Task ;
   dcterms:title "ZK: in-circuit issuer-signature gadget + hidden-key set membership" ;
@@ -11114,8 +11145,8 @@ kb:task-sq-zngy a pkg:Task ;
   pkg:label "area:ci" ;
   pkg:label "ci" ;
   pkg:label "docs" ;
-  pkg:dependsOn kb:task-sq-h0tr ;
-  pkg:dependsOn kb:task-sq-iigf .
+  pkg:dependsOn kb:task-sq-iigf ;
+  pkg:dependsOn kb:task-sq-h0tr .
 
 kb:task-sq-znld a pkg:Task ;
   dcterms:title "Reject non-UTF-8 dictionary blob in mmap loader (from_utf8_unchecked soundness hole)" ;
@@ -11202,7 +11233,13 @@ kb:doc-research-adr-horizontal-scaling a pkg:Source , pkg:Document , fabio:Expre
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-adr-horizontal-scaling-reliability .
+
+kb:meas-doc-research-adr-horizontal-scaling-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-adr-horizontal-scaling ;
+  dqv:value 0.9 .
 
 kb:doc-research-agent-effectiveness-program a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/agent-effectiveness-program.md — sparq design record" ;
@@ -11210,7 +11247,13 @@ kb:doc-research-agent-effectiveness-program a pkg:Source , pkg:Document , fabio:
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-agent-effectiveness-program-reliability .
+
+kb:meas-doc-research-agent-effectiveness-program-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-agent-effectiveness-program ;
+  dqv:value 0.9 .
 
 kb:doc-research-capability-benchmark-program a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/capability-benchmark-program.md — sparq design record" ;
@@ -11218,7 +11261,13 @@ kb:doc-research-capability-benchmark-program a pkg:Source , pkg:Document , fabio
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-capability-benchmark-program-reliability .
+
+kb:meas-doc-research-capability-benchmark-program-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-capability-benchmark-program ;
+  dqv:value 0.9 .
 
 kb:doc-research-ci-ec2-design a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/ci-ec2-design.md — sparq design record" ;
@@ -11226,7 +11275,13 @@ kb:doc-research-ci-ec2-design a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-ci-ec2-design-reliability .
+
+kb:meas-doc-research-ci-ec2-design-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-ci-ec2-design ;
+  dqv:value 0.9 .
 
 kb:doc-research-competitor-benchmark-landscape a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/competitor-benchmark-landscape.md — sparq design record" ;
@@ -11234,7 +11289,13 @@ kb:doc-research-competitor-benchmark-landscape a pkg:Source , pkg:Document , fab
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-competitor-benchmark-landscape-reliability .
+
+kb:meas-doc-research-competitor-benchmark-landscape-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-competitor-benchmark-landscape ;
+  dqv:value 0.9 .
 
 kb:doc-research-concurrent-serving a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/concurrent-serving.md — sparq design record" ;
@@ -11242,7 +11303,13 @@ kb:doc-research-concurrent-serving a pkg:Source , pkg:Document , fabio:Expressio
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-concurrent-serving-reliability .
+
+kb:meas-doc-research-concurrent-serving-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-concurrent-serving ;
+  dqv:value 0.9 .
 
 kb:doc-research-coverage-and-benchmark-plan a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/coverage-and-benchmark-plan.md — sparq design record" ;
@@ -11250,7 +11317,13 @@ kb:doc-research-coverage-and-benchmark-plan a pkg:Source , pkg:Document , fabio:
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-coverage-and-benchmark-plan-reliability .
+
+kb:meas-doc-research-coverage-and-benchmark-plan-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-coverage-and-benchmark-plan ;
+  dqv:value 0.9 .
 
 kb:doc-research-coverage-bench-gap-audit a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/coverage-bench-gap-audit.md — sparq design record" ;
@@ -11258,7 +11331,13 @@ kb:doc-research-coverage-bench-gap-audit a pkg:Source , pkg:Document , fabio:Exp
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-coverage-bench-gap-audit-reliability .
+
+kb:meas-doc-research-coverage-bench-gap-audit-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-coverage-bench-gap-audit ;
+  dqv:value 0.9 .
 
 kb:doc-research-crypto-erase-at-rest a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/crypto-erase-at-rest.md — sparq design record" ;
@@ -11266,7 +11345,13 @@ kb:doc-research-crypto-erase-at-rest a pkg:Source , pkg:Document , fabio:Express
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-crypto-erase-at-rest-reliability .
+
+kb:meas-doc-research-crypto-erase-at-rest-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-crypto-erase-at-rest ;
+  dqv:value 0.9 .
 
 kb:doc-research-data-structures a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/data-structures.md — sparq design record" ;
@@ -11274,7 +11359,13 @@ kb:doc-research-data-structures a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-data-structures-reliability .
+
+kb:meas-doc-research-data-structures-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-data-structures ;
+  dqv:value 0.9 .
 
 kb:doc-research-dict-id-order-determinism-audit a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/dict-id-order-determinism-audit.md — sparq design record" ;
@@ -11282,7 +11373,13 @@ kb:doc-research-dict-id-order-determinism-audit a pkg:Source , pkg:Document , fa
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-dict-id-order-determinism-audit-reliability .
+
+kb:meas-doc-research-dict-id-order-determinism-audit-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-dict-id-order-determinism-audit ;
+  dqv:value 0.9 .
 
 kb:doc-research-dogfooding-sparq-knowledge-graph a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/dogfooding-sparq-knowledge-graph.md — sparq design record" ;
@@ -11290,7 +11387,13 @@ kb:doc-research-dogfooding-sparq-knowledge-graph a pkg:Source , pkg:Document , f
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-dogfooding-sparq-knowledge-graph-reliability .
+
+kb:meas-doc-research-dogfooding-sparq-knowledge-graph-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-dogfooding-sparq-knowledge-graph ;
+  dqv:value 0.9 .
 
 kb:doc-research-fast-ingestion a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/fast-ingestion.md — sparq design record" ;
@@ -11298,7 +11401,13 @@ kb:doc-research-fast-ingestion a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-fast-ingestion-reliability .
+
+kb:meas-doc-research-fast-ingestion-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-fast-ingestion ;
+  dqv:value 0.9 .
 
 kb:doc-research-feature-research-vector-genai a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/feature-research-vector-genai.md — sparq design record" ;
@@ -11306,7 +11415,13 @@ kb:doc-research-feature-research-vector-genai a pkg:Source , pkg:Document , fabi
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-feature-research-vector-genai-reliability .
+
+kb:meas-doc-research-feature-research-vector-genai-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-feature-research-vector-genai ;
+  dqv:value 0.9 .
 
 kb:doc-research-feature-showcase-site-design a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/feature-showcase-site-design.md — sparq design record" ;
@@ -11314,7 +11429,13 @@ kb:doc-research-feature-showcase-site-design a pkg:Source , pkg:Document , fabio
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-feature-showcase-site-design-reliability .
+
+kb:meas-doc-research-feature-showcase-site-design-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-feature-showcase-site-design ;
+  dqv:value 0.9 .
 
 kb:doc-research-federation-client-design a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/federation-client-design.md — sparq design record" ;
@@ -11322,7 +11443,13 @@ kb:doc-research-federation-client-design a pkg:Source , pkg:Document , fabio:Exp
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-federation-client-design-reliability .
+
+kb:meas-doc-research-federation-client-design-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-federation-client-design ;
+  dqv:value 0.9 .
 
 kb:doc-research-genai-design a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/genai-design.md — sparq design record" ;
@@ -11330,7 +11457,13 @@ kb:doc-research-genai-design a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-genai-design-reliability .
+
+kb:meas-doc-research-genai-design-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-genai-design ;
+  dqv:value 0.9 .
 
 kb:doc-research-gui-design a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/gui-design.md — sparq design record" ;
@@ -11338,7 +11471,13 @@ kb:doc-research-gui-design a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-gui-design-reliability .
+
+kb:meas-doc-research-gui-design-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-gui-design ;
+  dqv:value 0.9 .
 
 kb:doc-research-hw-bench-results a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/hw-bench-results.md — sparq design record" ;
@@ -11346,7 +11485,13 @@ kb:doc-research-hw-bench-results a pkg:Source , pkg:Document , fabio:Expression 
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-hw-bench-results-reliability .
+
+kb:meas-doc-research-hw-bench-results-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-hw-bench-results ;
+  dqv:value 0.9 .
 
 kb:doc-research-inference-sota a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/inference-sota.md — sparq design record" ;
@@ -11354,7 +11499,13 @@ kb:doc-research-inference-sota a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-inference-sota-reliability .
+
+kb:meas-doc-research-inference-sota-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-inference-sota ;
+  dqv:value 0.9 .
 
 kb:doc-research-jsonld-pretty-compaction-scope a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/jsonld-pretty-compaction-scope.md — sparq design record" ;
@@ -11362,7 +11513,13 @@ kb:doc-research-jsonld-pretty-compaction-scope a pkg:Source , pkg:Document , fab
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-jsonld-pretty-compaction-scope-reliability .
+
+kb:meas-doc-research-jsonld-pretty-compaction-scope-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-jsonld-pretty-compaction-scope ;
+  dqv:value 0.9 .
 
 kb:doc-research-jsonld-support-roadmap a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/jsonld-support-roadmap.md — sparq design record" ;
@@ -11370,7 +11527,13 @@ kb:doc-research-jsonld-support-roadmap a pkg:Source , pkg:Document , fabio:Expre
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-jsonld-support-roadmap-reliability .
+
+kb:meas-doc-research-jsonld-support-roadmap-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-jsonld-support-roadmap ;
+  dqv:value 0.9 .
 
 kb:doc-research-maintenance-flow-on-automation-design a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/maintenance-flow-on-automation-design.md — sparq design record" ;
@@ -11378,7 +11541,13 @@ kb:doc-research-maintenance-flow-on-automation-design a pkg:Source , pkg:Documen
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-maintenance-flow-on-automation-design-reliability .
+
+kb:meas-doc-research-maintenance-flow-on-automation-design-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-maintenance-flow-on-automation-design ;
+  dqv:value 0.9 .
 
 kb:doc-research-mpc-bounded-property-path-design a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/mpc-bounded-property-path-design.md — sparq design record" ;
@@ -11386,7 +11555,13 @@ kb:doc-research-mpc-bounded-property-path-design a pkg:Source , pkg:Document , f
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-mpc-bounded-property-path-design-reliability .
+
+kb:meas-doc-research-mpc-bounded-property-path-design-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-mpc-bounded-property-path-design ;
+  dqv:value 0.9 .
 
 kb:doc-research-mpc-cozk-reaudit a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/mpc-cozk-reaudit.md — sparq design record" ;
@@ -11394,7 +11569,13 @@ kb:doc-research-mpc-cozk-reaudit a pkg:Source , pkg:Document , fabio:Expression 
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-mpc-cozk-reaudit-reliability .
+
+kb:meas-doc-research-mpc-cozk-reaudit-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-mpc-cozk-reaudit ;
+  dqv:value 0.9 .
 
 kb:doc-research-mpc-m4-distributed-sig-feasibility a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/mpc-m4-distributed-sig-feasibility.md — sparq design record" ;
@@ -11402,7 +11583,13 @@ kb:doc-research-mpc-m4-distributed-sig-feasibility a pkg:Source , pkg:Document ,
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-mpc-m4-distributed-sig-feasibility-reliability .
+
+kb:meas-doc-research-mpc-m4-distributed-sig-feasibility-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-mpc-m4-distributed-sig-feasibility ;
+  dqv:value 0.9 .
 
 kb:doc-research-mpc-malicious-security-design a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/mpc-malicious-security-design.md — sparq design record" ;
@@ -11410,7 +11597,13 @@ kb:doc-research-mpc-malicious-security-design a pkg:Source , pkg:Document , fabi
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-mpc-malicious-security-design-reliability .
+
+kb:meas-doc-research-mpc-malicious-security-design-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-mpc-malicious-security-design ;
+  dqv:value 0.9 .
 
 kb:doc-research-mpc-sparql-capability-matrix a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/mpc-sparql-capability-matrix.md — sparq design record" ;
@@ -11418,7 +11611,13 @@ kb:doc-research-mpc-sparql-capability-matrix a pkg:Source , pkg:Document , fabio
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-mpc-sparql-capability-matrix-reliability .
+
+kb:meas-doc-research-mpc-sparql-capability-matrix-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-mpc-sparql-capability-matrix ;
+  dqv:value 0.9 .
 
 kb:doc-research-mpc-untrusted-planner-routing-design a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/mpc-untrusted-planner-routing-design.md — sparq design record" ;
@@ -11426,7 +11625,13 @@ kb:doc-research-mpc-untrusted-planner-routing-design a pkg:Source , pkg:Document
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-mpc-untrusted-planner-routing-design-reliability .
+
+kb:meas-doc-research-mpc-untrusted-planner-routing-design-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-mpc-untrusted-planner-routing-design ;
+  dqv:value 0.9 .
 
 kb:doc-research-mpc-zkp-build-out-delta a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/mpc-zkp-build-out-delta.md — sparq design record" ;
@@ -11434,7 +11639,13 @@ kb:doc-research-mpc-zkp-build-out-delta a pkg:Source , pkg:Document , fabio:Expr
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-mpc-zkp-build-out-delta-reliability .
+
+kb:meas-doc-research-mpc-zkp-build-out-delta-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-mpc-zkp-build-out-delta ;
+  dqv:value 0.9 .
 
 kb:doc-research-mpc-zkp-research-and-architecture a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/mpc-zkp-research-and-architecture.md — sparq design record" ;
@@ -11442,7 +11653,13 @@ kb:doc-research-mpc-zkp-research-and-architecture a pkg:Source , pkg:Document , 
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-mpc-zkp-research-and-architecture-reliability .
+
+kb:meas-doc-research-mpc-zkp-research-and-architecture-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-mpc-zkp-research-and-architecture ;
+  dqv:value 0.9 .
 
 kb:doc-research-optimization-techniques a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/optimization-techniques.md — sparq design record" ;
@@ -11450,7 +11667,13 @@ kb:doc-research-optimization-techniques a pkg:Source , pkg:Document , fabio:Expr
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-optimization-techniques-reliability .
+
+kb:meas-doc-research-optimization-techniques-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-optimization-techniques ;
+  dqv:value 0.9 .
 
 kb:doc-research-owl2-el-ql-reasoning-spike a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/owl2-el-ql-reasoning-spike.md — sparq design record" ;
@@ -11458,7 +11681,13 @@ kb:doc-research-owl2-el-ql-reasoning-spike a pkg:Source , pkg:Document , fabio:E
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-owl2-el-ql-reasoning-spike-reliability .
+
+kb:meas-doc-research-owl2-el-ql-reasoning-spike-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-owl2-el-ql-reasoning-spike ;
+  dqv:value 0.9 .
 
 kb:doc-research-paper-contributions-inventory a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/paper-contributions-inventory.md — sparq design record" ;
@@ -11466,7 +11695,13 @@ kb:doc-research-paper-contributions-inventory a pkg:Source , pkg:Document , fabi
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-paper-contributions-inventory-reliability .
+
+kb:meas-doc-research-paper-contributions-inventory-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-paper-contributions-inventory ;
+  dqv:value 0.9 .
 
 kb:doc-research-paper-factory-design a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/paper-factory-design.md — sparq design record" ;
@@ -11474,7 +11709,13 @@ kb:doc-research-paper-factory-design a pkg:Source , pkg:Document , fabio:Express
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-paper-factory-design-reliability .
+
+kb:meas-doc-research-paper-factory-design-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-paper-factory-design ;
+  dqv:value 0.9 .
 
 kb:doc-research-paper-factory-honesty-gate-coverage a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/paper-factory-honesty-gate-coverage.md — sparq design record" ;
@@ -11482,7 +11723,13 @@ kb:doc-research-paper-factory-honesty-gate-coverage a pkg:Source , pkg:Document 
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-paper-factory-honesty-gate-coverage-reliability .
+
+kb:meas-doc-research-paper-factory-honesty-gate-coverage-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-paper-factory-honesty-gate-coverage ;
+  dqv:value 0.9 .
 
 kb:doc-research-parsing-optimization-plan a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/parsing-optimization-plan.md — sparq design record" ;
@@ -11490,7 +11737,13 @@ kb:doc-research-parsing-optimization-plan a pkg:Source , pkg:Document , fabio:Ex
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-parsing-optimization-plan-reliability .
+
+kb:meas-doc-research-parsing-optimization-plan-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-parsing-optimization-plan ;
+  dqv:value 0.9 .
 
 kb:doc-research-parsing-perf-delta a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/parsing-perf-delta.md — sparq design record" ;
@@ -11498,7 +11751,13 @@ kb:doc-research-parsing-perf-delta a pkg:Source , pkg:Document , fabio:Expressio
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-parsing-perf-delta-reliability .
+
+kb:meas-doc-research-parsing-perf-delta-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-parsing-perf-delta ;
+  dqv:value 0.9 .
 
 kb:doc-research-production-certification-plan a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/production-certification-plan.md — sparq design record" ;
@@ -11506,7 +11765,13 @@ kb:doc-research-production-certification-plan a pkg:Source , pkg:Document , fabi
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-production-certification-plan-reliability .
+
+kb:meas-doc-research-production-certification-plan-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-production-certification-plan ;
+  dqv:value 0.9 .
 
 kb:doc-research-property-paths-assessment a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/property-paths-assessment.md — sparq design record" ;
@@ -11514,7 +11779,13 @@ kb:doc-research-property-paths-assessment a pkg:Source , pkg:Document , fabio:Ex
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-property-paths-assessment-reliability .
+
+kb:meas-doc-research-property-paths-assessment-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-property-paths-assessment ;
+  dqv:value 0.9 .
 
 kb:doc-research-property-paths-design a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/property-paths-design.md — sparq design record" ;
@@ -11522,7 +11793,13 @@ kb:doc-research-property-paths-design a pkg:Source , pkg:Document , fabio:Expres
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-property-paths-design-reliability .
+
+kb:meas-doc-research-property-paths-design-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-property-paths-design ;
+  dqv:value 0.9 .
 
 kb:doc-research-rdf12-parser a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/rdf12-parser.md — sparq design record" ;
@@ -11530,7 +11807,13 @@ kb:doc-research-rdf12-parser a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-rdf12-parser-reliability .
+
+kb:meas-doc-research-rdf12-parser-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-rdf12-parser ;
+  dqv:value 0.9 .
 
 kb:doc-research-release-ci-design a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/release-ci-design.md — sparq design record" ;
@@ -11538,7 +11821,13 @@ kb:doc-research-release-ci-design a pkg:Source , pkg:Document , fabio:Expression
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-release-ci-design-reliability .
+
+kb:meas-doc-research-release-ci-design-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-release-ci-design ;
+  dqv:value 0.9 .
 
 kb:doc-research-roadmap-completion-audit a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/roadmap-completion-audit.md — sparq design record" ;
@@ -11546,7 +11835,13 @@ kb:doc-research-roadmap-completion-audit a pkg:Source , pkg:Document , fabio:Exp
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-roadmap-completion-audit-reliability .
+
+kb:meas-doc-research-roadmap-completion-audit-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-roadmap-completion-audit ;
+  dqv:value 0.9 .
 
 kb:doc-research-roadmap a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/roadmap.md — sparq design record" ;
@@ -11554,7 +11849,13 @@ kb:doc-research-roadmap a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-roadmap-reliability .
+
+kb:meas-doc-research-roadmap-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-roadmap ;
+  dqv:value 0.9 .
 
 kb:doc-research-security-properties-ontology-design a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/security-properties-ontology-design.md — sparq design record" ;
@@ -11562,7 +11863,13 @@ kb:doc-research-security-properties-ontology-design a pkg:Source , pkg:Document 
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-security-properties-ontology-design-reliability .
+
+kb:meas-doc-research-security-properties-ontology-design-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-security-properties-ontology-design ;
+  dqv:value 0.9 .
 
 kb:doc-research-solid-access-control-design a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/solid-access-control-design.md — sparq design record" ;
@@ -11570,7 +11877,13 @@ kb:doc-research-solid-access-control-design a pkg:Source , pkg:Document , fabio:
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-solid-access-control-design-reliability .
+
+kb:meas-doc-research-solid-access-control-design-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-solid-access-control-design ;
+  dqv:value 0.9 .
 
 kb:doc-research-solid-acp-differential-oracle-design a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/solid-acp-differential-oracle-design.md — sparq design record" ;
@@ -11578,7 +11891,13 @@ kb:doc-research-solid-acp-differential-oracle-design a pkg:Source , pkg:Document
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-solid-acp-differential-oracle-design-reliability .
+
+kb:meas-doc-research-solid-acp-differential-oracle-design-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-solid-acp-differential-oracle-design ;
+  dqv:value 0.9 .
 
 kb:doc-research-solid-trust-graph-authz-design a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/solid-trust-graph-authz-design.md — sparq design record" ;
@@ -11586,7 +11905,13 @@ kb:doc-research-solid-trust-graph-authz-design a pkg:Source , pkg:Document , fab
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-solid-trust-graph-authz-design-reliability .
+
+kb:meas-doc-research-solid-trust-graph-authz-design-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-solid-trust-graph-authz-design ;
+  dqv:value 0.9 .
 
 kb:doc-research-sparq-solid-scope a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/sparq-solid-scope.md — sparq design record" ;
@@ -11594,7 +11919,13 @@ kb:doc-research-sparq-solid-scope a pkg:Source , pkg:Document , fabio:Expression
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-sparq-solid-scope-reliability .
+
+kb:meas-doc-research-sparq-solid-scope-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-sparq-solid-scope ;
+  dqv:value 0.9 .
 
 kb:doc-research-structure-aware-vectorisation a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/structure-aware-vectorisation.md — sparq design record" ;
@@ -11602,7 +11933,13 @@ kb:doc-research-structure-aware-vectorisation a pkg:Source , pkg:Document , fabi
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-structure-aware-vectorisation-reliability .
+
+kb:meas-doc-research-structure-aware-vectorisation-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-structure-aware-vectorisation ;
+  dqv:value 0.9 .
 
 kb:doc-research-term-index-compression a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/term-index-compression.md — sparq design record" ;
@@ -11610,7 +11947,13 @@ kb:doc-research-term-index-compression a pkg:Source , pkg:Document , fabio:Expre
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-term-index-compression-reliability .
+
+kb:meas-doc-research-term-index-compression-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-term-index-compression ;
+  dqv:value 0.9 .
 
 kb:doc-research-threat-model a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/threat-model.md — sparq design record" ;
@@ -11618,7 +11961,13 @@ kb:doc-research-threat-model a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-threat-model-reliability .
+
+kb:meas-doc-research-threat-model-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-threat-model ;
+  dqv:value 0.9 .
 
 kb:doc-research-website-redesign a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/website-redesign.md — sparq design record" ;
@@ -11626,7 +11975,13 @@ kb:doc-research-website-redesign a pkg:Source , pkg:Document , fabio:Expression 
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-website-redesign-reliability .
+
+kb:meas-doc-research-website-redesign-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-website-redesign ;
+  dqv:value 0.9 .
 
 kb:doc-research-wikidata-lowresource-stage1 a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/wikidata-lowresource-stage1.md — sparq design record" ;
@@ -11634,7 +11989,13 @@ kb:doc-research-wikidata-lowresource-stage1 a pkg:Source , pkg:Document , fabio:
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-wikidata-lowresource-stage1-reliability .
+
+kb:meas-doc-research-wikidata-lowresource-stage1-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-wikidata-lowresource-stage1 ;
+  dqv:value 0.9 .
 
 kb:doc-research-zk-age-gatecount-reduction a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/zk-age-gatecount-reduction.md — sparq design record" ;
@@ -11642,7 +12003,13 @@ kb:doc-research-zk-age-gatecount-reduction a pkg:Source , pkg:Document , fabio:E
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-zk-age-gatecount-reduction-reliability .
+
+kb:meas-doc-research-zk-age-gatecount-reduction-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-zk-age-gatecount-reduction ;
+  dqv:value 0.9 .
 
 kb:doc-research-zk-holder-pop-design a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/zk-holder-pop-design.md — sparq design record" ;
@@ -11650,7 +12017,13 @@ kb:doc-research-zk-holder-pop-design a pkg:Source , pkg:Document , fabio:Express
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-zk-holder-pop-design-reliability .
+
+kb:meas-doc-research-zk-holder-pop-design-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-zk-holder-pop-design ;
+  dqv:value 0.9 .
 
 kb:doc-research-zk-inference-and-credentials a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/zk-inference-and-credentials.md — sparq design record" ;
@@ -11658,7 +12031,13 @@ kb:doc-research-zk-inference-and-credentials a pkg:Source , pkg:Document , fabio
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-zk-inference-and-credentials-reliability .
+
+kb:meas-doc-research-zk-inference-and-credentials-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-zk-inference-and-credentials ;
+  dqv:value 0.9 .
 
 kb:doc-research-zk-soundness-audit a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/zk-soundness-audit.md — sparq design record" ;
@@ -11666,7 +12045,13 @@ kb:doc-research-zk-soundness-audit a pkg:Source , pkg:Document , fabio:Expressio
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-zk-soundness-audit-reliability .
+
+kb:meas-doc-research-zk-soundness-audit-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-zk-soundness-audit ;
+  dqv:value 0.9 .
 
 kb:doc-research-zk-statuslist-hide-iri-version a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/zk-statuslist-hide-iri-version.md — sparq design record" ;
@@ -11674,7 +12059,13 @@ kb:doc-research-zk-statuslist-hide-iri-version a pkg:Source , pkg:Document , fab
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-zk-statuslist-hide-iri-version-reliability .
+
+kb:meas-doc-research-zk-statuslist-hide-iri-version-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-zk-statuslist-hide-iri-version ;
+  dqv:value 0.9 .
 
 kb:doc-research-zk-test-bench-design a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/zk-test-bench-design.md — sparq design record" ;
@@ -11682,7 +12073,13 @@ kb:doc-research-zk-test-bench-design a pkg:Source , pkg:Document , fabio:Express
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-zk-test-bench-design-reliability .
+
+kb:meas-doc-research-zk-test-bench-design-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-zk-test-bench-design ;
+  dqv:value 0.9 .
 
 kb:doc-research-zk-verifier-reaudit a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/zk-verifier-reaudit.md — sparq design record" ;
@@ -11690,7 +12087,13 @@ kb:doc-research-zk-verifier-reaudit a pkg:Source , pkg:Document , fabio:Expressi
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-zk-verifier-reaudit-reliability .
+
+kb:meas-doc-research-zk-verifier-reaudit-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-zk-verifier-reaudit ;
+  dqv:value 0.9 .
 
 kb:doc-research-zkp-performance-landscape a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/zkp-performance-landscape.md — sparq design record" ;
@@ -11698,7 +12101,13 @@ kb:doc-research-zkp-performance-landscape a pkg:Source , pkg:Document , fabio:Ex
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-zkp-performance-landscape-reliability .
+
+kb:meas-doc-research-zkp-performance-landscape-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-zkp-performance-landscape ;
+  dqv:value 0.9 .
 
 kb:doc-research-zkp-query-proofs-plan a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "research/zkp-query-proofs-plan.md — sparq design record" ;
@@ -11706,7 +12115,13 @@ kb:doc-research-zkp-query-proofs-plan a pkg:Source , pkg:Document , fabio:Expres
   dcterms:format "text/markdown" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 2 ;
-  pkg:confidence 0.9 .
+  pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-doc-research-zkp-query-proofs-plan-reliability .
+
+kb:meas-doc-research-zkp-query-proofs-plan-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-research-zkp-query-proofs-plan ;
+  dqv:value 0.9 .
 
 
 # === Sources + Techniques (skills front-matter parse) ===
@@ -11716,26 +12131,38 @@ kb:skill-http-server a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "http-server skill — sparq surface guide" ;
   dcterms:identifier "skills/http-server/SKILL.md" ;
   dcterms:format "text/markdown" ;
-  dcterms:abstract "Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint (sparq-server) — /sparql query+update over GET/POST, content negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph Store N-Triples/prefix-Turtle/RDF-XML/JSON-LD — JSON-LD via the default-on jsonld feature), Graph Store read AND write (PUT/POST/DELETE/PATCH on graph resources, RDF/XML + default-on JSON-LD bodies accepted, atomic SPARQL-Update + opt-in Solid N3-Patch on PATCH), EXPLAIN, Prometheus /metrics, WebSocket + SSE subscriptions, and opt-in time-travel ?generation pinning. Use when starting the server, querying/updating a running endpoint, choosing Accept/Content-Type, or embedding the axum router." ;
+  dcterms:abstract "Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint (sparq-server) — /sparql query+update over GET/POST (plus the query-only HTTP QUERY method, w3c/sparql-protocol#40, for Oxigraph interop), content negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph Store N-Triples/prefix-Turtle/RDF-XML/JSON-LD — JSON-LD via the default-on jsonld feature), Graph Store read AND write (PUT/POST/DELETE/PATCH on graph resources, RDF/XML + default-on JSON-LD bodies accepted, atomic SPARQL-Update + opt-in Solid N3-Patch on PATCH), EXPLAIN, Prometheus /metrics, WebSocket + SSE subscriptions, opt-in grouped facet counts and prefix completion, and generation-pinned snapshot reads (a Sparq-Generation header + ?generation=N pin in the DEFAULT build, bounded to the ring's concurrency-retention window; opt-in time-travel widens it). Use when starting the server, querying/updating a ru" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 1 ;
   pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-skill-http-server-reliability ;
   dcterms:subject kb:surface-http-server .
+
+kb:meas-skill-http-server-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:skill-http-server ;
+  dqv:value 0.9 .
 
 kb:surface-http-server a pkg:Technique ;
   skos:prefLabel "http-server surface"@en-GB ;
-  rdfs:comment "Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint (sparq-server) — /sparql query+update over GET/POST, content negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph Store N-Triples/prefix-Turtle/RDF-XML/JSON-LD — JSON-LD via the default-on jsonld feature), Graph Store" ;
+  rdfs:comment "Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint (sparq-server) — /sparql query+update over GET/POST (plus the query-only HTTP QUERY method, w3c/sparql-protocol#40, for Oxigraph interop), content negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph Store N-Triples/p" ;
   dcterms:isReferencedBy kb:skill-http-server .
 
 kb:skill-vector-search a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "vector-search skill — sparq surface guide" ;
   dcterms:identifier "skills/vector-search/SKILL.md" ;
   dcterms:format "text/markdown" ;
-  dcterms:abstract "Semantic / ANN vector search over a sparq RDF graph: build a memory-mapped per-term-id embedding store (.spqv), then run cosine top-k with an in-RAM HNSW, a persistent on-disk DiskANN/Vamana graph (.spqg), or an exact brute-force baseline; verbalize entities (label+type+description) for embedding, scalar/product quantize (SQ/PQ) for large stores, fuse with another ranked signal (RRF / score blend) for hybrid retrieval, run predicate-constrained (filtered) ANN over a BGP-selected dict-id mask behind the opt-in `filtered-ann` feature, and — behind the opt-in `vec-predicate` feature — run k-NN INSIDE plain SPARQL via the `vec:nearest` / `vec:search` magic predicates. Use when adding embedding/semantic-search/nearest-neighbour over a sparq Graph in the sparq-vectors crate." ;
+  dcterms:abstract "Semantic / ANN vector search over a sparq RDF graph: build a memory-mapped per-term-id embedding store (.spqv), then run cosine top-k with an in-RAM HNSW, a persistent on-disk DiskANN/Vamana graph (.spqg), or an exact brute-force baseline; verbalize entities (label+type+description) for embedding, scalar/product quantize (SQ/PQ) for large stores, fuse with another ranked signal (RRF / score blend) for hybrid retrieval, run predicate-constrained (filtered) ANN over a BGP-selected dict-id mask behind the opt-in `filtered-ann` feature, run recall-gated concept dedup + k-NN over a RAW (id, vector) matrix behind the opt-in `approx-ann` feature (build_ann/knn/dedup: merges apply only after measured ANN recall vs an exact ground truth clears a pre-registered gate), and — behind the opt-in `vec-predicate` feature — run k-NN INSIDE plain SPARQL via the `vec:nearest` / `vec:search` magic predicate" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 1 ;
   pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-skill-vector-search-reliability ;
   dcterms:subject kb:surface-vector-search .
+
+kb:meas-skill-vector-search-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:skill-vector-search ;
+  dqv:value 0.9 .
 
 kb:surface-vector-search a pkg:Technique ;
   skos:prefLabel "vector-search surface"@en-GB ;
@@ -11750,7 +12177,13 @@ kb:skill-sparql-query a pkg:Source , pkg:Document , fabio:Expression ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 1 ;
   pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-skill-sparql-query-reliability ;
   dcterms:subject kb:surface-sparql-query .
+
+kb:meas-skill-sparql-query-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:skill-sparql-query ;
+  dqv:value 0.9 .
 
 kb:surface-sparql-query a pkg:Technique ;
   skos:prefLabel "sparql-query surface"@en-GB ;
@@ -11761,26 +12194,38 @@ kb:skill-shacl-validation a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "shacl-validation skill — sparq surface guide" ;
   dcterms:identifier "skills/shacl-validation/SKILL.md" ;
   dcterms:format "text/markdown" ;
-  dcterms:abstract "Validate RDF data against SHACL shapes with the sparq engine: SHACL Core constraints (class, datatype incl. the SHACL-1.2 disjunctive list form, cardinality, ranges, paths, logical, node/property, qualified, closed incl. sh:ByTypes, in/hasValue, and the SHACL-1.2 list constraints sh:memberShape / sh:uniqueMembers / sh:min+maxListLength / sh:uniqueValuesFor), SHACL-SPARQL sh:sparql constraints (§5.2), and custom SPARQL-based constraint components (sh:ConstraintComponent, §6) — then read the conformance/violations validation report (W3C report vocabulary as Turtle or human text). Also runs opt-in SHACL Advanced Features (SHACL-AF) rules — sh:rule (sh:TripleRule + sh:SPARQLRule) — to INFER triples (feature `shacl-af`). Use when an agent needs to check whether a sparq_core::Graph conforms to shapes, run shape validation, produce a SHACL validation report, or apply SHACL rules to infer/expand" ;
+  dcterms:abstract "Validate RDF data against SHACL shapes with the sparq engine: SHACL Core constraints (class, datatype incl. the SHACL-1.2 disjunctive list form, cardinality, ranges, paths, logical, node/property, qualified, closed incl. sh:ByTypes, in/hasValue, the SHACL-1.2 list constraints sh:memberShape / sh:uniqueMembers / sh:min+maxListLength / sh:uniqueValuesFor, and the SHACL-1.2 value constraints sh:subsetOf / sh:someValue / sh:singleLine / sh:rootClass with path-valued sh:equals/disjoint/lessThan comparands and severity-threshold sh:conforms), SHACL-SPARQL sh:sparql constraints (§5.2), and custom SPARQL-based constraint components (sh:ConstraintComponent, §6) — then read the conformance/violations validation report as N-Triples, deterministic JSON, W3C report-vocabulary Turtle, or human text. Also runs opt-in SHACL Advanced Features (SHACL-AF) rules — sh:rule (sh:TripleRule + sh:SPARQLRule) — t" ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 1 ;
   pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-skill-shacl-validation-reliability ;
   dcterms:subject kb:surface-shacl-validation .
+
+kb:meas-skill-shacl-validation-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:skill-shacl-validation ;
+  dqv:value 0.9 .
 
 kb:surface-shacl-validation a pkg:Technique ;
   skos:prefLabel "shacl-validation surface"@en-GB ;
-  rdfs:comment "Validate RDF data against SHACL shapes with the sparq engine: SHACL Core constraints (class, datatype incl. the SHACL-1.2 disjunctive list form, cardinality, ranges, paths, logical, node/property, qualified, closed incl. sh:ByTypes, in/hasValue, and the SHACL-1.2 list constraints sh:memberShape / sh" ;
+  rdfs:comment "Validate RDF data against SHACL shapes with the sparq engine: SHACL Core constraints (class, datatype incl. the SHACL-1.2 disjunctive list form, cardinality, ranges, paths, logical, node/property, qualified, closed incl. sh:ByTypes, in/hasValue, the SHACL-1.2 list constraints sh:memberShape / sh:uni" ;
   dcterms:isReferencedBy kb:skill-shacl-validation .
 
 kb:skill-genai-retrieval a pkg:Source , pkg:Document , fabio:Expression ;
   dcterms:title "genai-retrieval skill — sparq surface guide" ;
   dcterms:identifier "skills/genai-retrieval/SKILL.md" ;
   dcterms:format "text/markdown" ;
-  dcterms:abstract "Use when an LLM/agent needs to answer natural-language questions over a sparq RDF Graph with SPARQL, or to build token-budgeted retrieval/grounding context (schema card, VoID, characteristic-set join hints) about an unknown RDF dataset. Covers the sparq-nlq NL→SPARQL loop (ground→generate→validate→execute→repair, offline record/replay, optional live Anthropic backend), its sparq_nlq::eval exec-accuracy harness (answer-set F1, oracle-vs-end-to-end, grounded-vs-ungrounded; live LLM test off by default), and sparq-introspect (schema/VoID/seed-scoped summaries + planner join hints)." ;
+  dcterms:abstract "Use when an LLM/agent needs to answer natural-language questions over a sparq RDF Graph with SPARQL, or to build token-budgeted retrieval/grounding context (schema card, VoID, characteristic-set join hints) about an unknown RDF dataset. Covers the sparq-nlq NL→SPARQL loop (ground→generate→validate→execute→repair, offline record/replay, optional live Anthropic backend or a configurable provider-agnostic OpenAI-compatible endpoint client), its sparq_nlq::eval exec-accuracy harness (answer-set F1, oracle-vs-end-to-end, grounded-vs-ungrounded; live LLM test off by default), and sparq-introspect (schema/VoID/seed-scoped summaries + planner join hints)." ;
   pkg:exploredStatus pkg:Explored ;
   pkg:followUpPriority 1 ;
   pkg:confidence 0.9 ;
+  dqv:hasQualityMeasurement kb:meas-skill-genai-retrieval-reliability ;
   dcterms:subject kb:surface-genai-retrieval .
+
+kb:meas-skill-genai-retrieval-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:skill-genai-retrieval ;
+  dqv:value 0.9 .
 
 kb:surface-genai-retrieval a pkg:Technique ;
   skos:prefLabel "genai-retrieval surface"@en-GB ;
@@ -11795,6 +12240,7 @@ kb:surface-genai-retrieval a pkg:Technique ;
 
 @prefix cito: <http://purl.org/spar/cito/> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix dqv: <http://www.w3.org/ns/dqv#> .
 @prefix fabio: <http://purl.org/spar/fabio/> .
 @prefix kb: <https://sparq.dev/ns/pkg/kb#> .
 @prefix pkg: <https://sparq.dev/ns/pkg#> .
@@ -11832,7 +12278,13 @@ kb:doc-agents-md a pkg:Source , pkg:Document , fabio:Expression ;
   pkg:followUpPriority 0 ;
   pkg:confidence 1.0 ;
   dcterms:subject kb:topic-merge-discipline ;
-  dcterms:subject kb:topic-subagent-rules .
+  dcterms:subject kb:topic-subagent-rules ;
+  dqv:hasQualityMeasurement kb:meas-doc-agents-md-reliability .
+
+kb:meas-doc-agents-md-reliability a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;
+  dqv:computedOn kb:doc-agents-md ;
+  dqv:value 1.0 .
 
 # === Findings (the @graph) ===
 
@@ -11846,7 +12298,13 @@ kb:find-merge-ci-summary-gate a pkg:Finding ;
   prov:wasDerivedFrom kb:doc-agents-md ;
   cito:citesAsEvidence kb:doc-agents-md ;
   dcterms:source "AGENTS.md#contribution-workflow--prs-reviews-resolved-the-ci-summary-gate" ;
-  dcterms:subject kb:topic-merge-discipline .
+  dcterms:subject kb:topic-merge-discipline ;
+  dqv:hasQualityMeasurement kb:meas-find-merge-ci-summary-gate-conf .
+
+kb:meas-find-merge-ci-summary-gate-conf a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:ConfidenceMeasurement ;
+  dqv:computedOn kb:find-merge-ci-summary-gate ;
+  dqv:value 0.98 .
 
 kb:find-zk-circuit-gate a pkg:Finding ;
   rdfs:label "A ZK-circuit change re-runs forge_gates + differential_fuzz + the gate-count snapshot and re-opens the soundness audit"@en-GB ;
@@ -11859,7 +12317,13 @@ kb:find-zk-circuit-gate a pkg:Finding ;
   cito:citesAsEvidence kb:doc-agents-md ;
   dcterms:source "AGENTS.md#post-batch-re-evaluation-checklist--what-to-re-run-after-a-change" ;
   dcterms:subject kb:topic-zk-discipline ;
-  dcterms:subject kb:topic-merge-discipline .
+  dcterms:subject kb:topic-merge-discipline ;
+  dqv:hasQualityMeasurement kb:meas-find-zk-circuit-gate-conf .
+
+kb:meas-find-zk-circuit-gate-conf a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:ConfidenceMeasurement ;
+  dqv:computedOn kb:find-zk-circuit-gate ;
+  dqv:value 0.95 .
 
 kb:find-zk-member-checklist a pkg:Finding ;
   rdfs:label "Adding/removing a zk/compose member needs the gate-count snapshot updated and the Rust gate run, not just nargo test"@en-GB ;
@@ -11871,7 +12335,13 @@ kb:find-zk-member-checklist a pkg:Finding ;
   prov:wasDerivedFrom kb:doc-agents-md ;
   cito:citesAsEvidence kb:doc-agents-md ;
   dcterms:source "AGENTS.md#zk-circuit-member-checklist--adding-or-removing-a-zkcompose-member" ;
-  dcterms:subject kb:topic-zk-discipline .
+  dcterms:subject kb:topic-zk-discipline ;
+  dqv:hasQualityMeasurement kb:meas-find-zk-member-checklist-conf .
+
+kb:meas-find-zk-member-checklist-conf a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:ConfidenceMeasurement ;
+  dqv:computedOn kb:find-zk-member-checklist ;
+  dqv:value 0.95 .
 
 kb:find-zk-privacy-claims-gate a pkg:Finding ;
   rdfs:label "Any ZK/MPC privacy or soundness claim must stay hedged/negative — the privacy-claims gate is a HARD ci-summary job"@en-GB ;
@@ -11884,7 +12354,13 @@ kb:find-zk-privacy-claims-gate a pkg:Finding ;
   cito:citesAsEvidence kb:doc-agents-md ;
   dcterms:source "AGENTS.md#post-batch-re-evaluation-checklist--what-to-re-run-after-a-change" ;
   dcterms:subject kb:topic-zk-discipline ;
-  dcterms:subject kb:topic-merge-discipline .
+  dcterms:subject kb:topic-merge-discipline ;
+  dqv:hasQualityMeasurement kb:meas-find-zk-privacy-claims-gate-conf .
+
+kb:meas-find-zk-privacy-claims-gate-conf a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:ConfidenceMeasurement ;
+  dqv:computedOn kb:find-zk-privacy-claims-gate ;
+  dqv:value 0.97 .
 
 kb:find-zk-arming-model a pkg:Finding ;
   rdfs:label "A verified-clean non-perf PR auto-arms; never arm auto-merge on a stacked PR whose base is not main"@en-GB ;
@@ -11896,7 +12372,13 @@ kb:find-zk-arming-model a pkg:Finding ;
   prov:wasDerivedFrom kb:doc-agents-md ;
   cito:citesAsEvidence kb:doc-agents-md ;
   dcterms:source "AGENTS.md#contribution-workflow--prs-reviews-resolved-the-ci-summary-gate" ;
-  dcterms:subject kb:topic-merge-discipline .
+  dcterms:subject kb:topic-merge-discipline ;
+  dqv:hasQualityMeasurement kb:meas-find-zk-arming-model-conf .
+
+kb:meas-find-zk-arming-model-conf a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:ConfidenceMeasurement ;
+  dqv:computedOn kb:find-zk-arming-model ;
+  dqv:value 0.93 .
 
 kb:find-subagent-shared-contract a pkg:Finding ;
   rdfs:label "Every dispatched sub-agent follows the shared contract; task briefs state the task only"@en-GB ;
@@ -11908,7 +12390,13 @@ kb:find-subagent-shared-contract a pkg:Finding ;
   prov:wasDerivedFrom kb:doc-agents-md ;
   cito:citesAsEvidence kb:doc-agents-md ;
   dcterms:source "AGENTS.md#the-sub-agent-shared-contract--write-terse-task-only-briefs" ;
-  dcterms:subject kb:topic-subagent-rules .
+  dcterms:subject kb:topic-subagent-rules ;
+  dqv:hasQualityMeasurement kb:meas-find-subagent-shared-contract-conf .
+
+kb:meas-find-subagent-shared-contract-conf a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:ConfidenceMeasurement ;
+  dqv:computedOn kb:find-subagent-shared-contract ;
+  dqv:value 0.97 .
 
 kb:find-subagent-worktree-isolation a pkg:Finding ;
   rdfs:label "Every mutating sub-agent runs in its OWN isolated worktree+branch, never the shared main checkout"@en-GB ;
@@ -11920,7 +12408,13 @@ kb:find-subagent-worktree-isolation a pkg:Finding ;
   prov:wasDerivedFrom kb:doc-agents-md ;
   cito:citesAsEvidence kb:doc-agents-md ;
   dcterms:source "AGENTS.md#worktree-isolation--every-mutating-agent-gets-its-own-worktreebranch" ;
-  dcterms:subject kb:topic-subagent-rules .
+  dcterms:subject kb:topic-subagent-rules ;
+  dqv:hasQualityMeasurement kb:meas-find-subagent-worktree-isolation-conf .
+
+kb:meas-find-subagent-worktree-isolation-conf a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:ConfidenceMeasurement ;
+  dqv:computedOn kb:find-subagent-worktree-isolation ;
+  dqv:value 0.96 .
 
 kb:find-subagent-staging a pkg:Finding ;
   rdfs:label "Sub-agents stage only changed files by explicit path; never git add -A and never stage .beads/"@en-GB ;
@@ -11932,7 +12426,13 @@ kb:find-subagent-staging a pkg:Finding ;
   prov:wasDerivedFrom kb:doc-agents-md ;
   cito:citesAsEvidence kb:doc-agents-md ;
   dcterms:source "AGENTS.md#the-sub-agent-shared-contract--write-terse-task-only-briefs" ;
-  dcterms:subject kb:topic-subagent-rules .
+  dcterms:subject kb:topic-subagent-rules ;
+  dqv:hasQualityMeasurement kb:meas-find-subagent-staging-conf .
+
+kb:meas-find-subagent-staging-conf a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:ConfidenceMeasurement ;
+  dqv:computedOn kb:find-subagent-staging ;
+  dqv:value 0.96 .
 
 kb:find-subagent-no-push-selfid a pkg:Finding ;
   rdfs:label "Sub-agents commit in-worktree (no push/merge), gate in-worktree without weakening a gate, and self-identify in every comment"@en-GB ;
@@ -11944,7 +12444,13 @@ kb:find-subagent-no-push-selfid a pkg:Finding ;
   prov:wasDerivedFrom kb:doc-agents-md ;
   cito:citesAsEvidence kb:doc-agents-md ;
   dcterms:source "AGENTS.md#the-sub-agent-shared-contract--write-terse-task-only-briefs" ;
-  dcterms:subject kb:topic-subagent-rules .
+  dcterms:subject kb:topic-subagent-rules ;
+  dqv:hasQualityMeasurement kb:meas-find-subagent-no-push-selfid-conf .
+
+kb:meas-find-subagent-no-push-selfid-conf a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:ConfidenceMeasurement ;
+  dqv:computedOn kb:find-subagent-no-push-selfid ;
+  dqv:value 0.95 .
 
 kb:find-subagent-proceed-no-greenlight a pkg:Finding ;
   rdfs:label "Sub-agents proceed without the maintainer's greenlight, documenting the default and filing a feedback issue"@en-GB ;
@@ -11956,7 +12462,13 @@ kb:find-subagent-proceed-no-greenlight a pkg:Finding ;
   prov:wasDerivedFrom kb:doc-agents-md ;
   cito:citesAsEvidence kb:doc-agents-md ;
   dcterms:source "AGENTS.md#standing-rule--proceed-without-waiting-for-the-maintainers-greenlight-2026-06-21" ;
-  dcterms:subject kb:topic-subagent-rules .
+  dcterms:subject kb:topic-subagent-rules ;
+  dqv:hasQualityMeasurement kb:meas-find-subagent-proceed-no-greenlight-conf .
+
+kb:meas-find-subagent-proceed-no-greenlight-conf a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:ConfidenceMeasurement ;
+  dqv:computedOn kb:find-subagent-proceed-no-greenlight ;
+  dqv:value 0.94 .
 
 kb:find-subagent-provenance-honesty a pkg:Finding ;
   rdfs:label "Sub-agents tag [OPUS-4.8] + the Opus trailer and keep ZK/MPC + perf claims gate-safe"@en-GB ;
@@ -11969,4 +12481,10 @@ kb:find-subagent-provenance-honesty a pkg:Finding ;
   cito:citesAsEvidence kb:doc-agents-md ;
   dcterms:source "AGENTS.md#the-sub-agent-shared-contract--write-terse-task-only-briefs" ;
   dcterms:subject kb:topic-subagent-rules ;
-  dcterms:subject kb:topic-zk-discipline .
+  dcterms:subject kb:topic-zk-discipline ;
+  dqv:hasQualityMeasurement kb:meas-find-subagent-provenance-honesty-conf .
+
+kb:meas-find-subagent-provenance-honesty-conf a dqv:QualityMeasurement ;
+  dqv:isMeasurementOf pkg:ConfidenceMeasurement ;
+  dqv:computedOn kb:find-subagent-provenance-honesty ;
+  dqv:value 0.93 .

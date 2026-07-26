@@ -207,6 +207,53 @@ class TestCompileEnd2End(unittest.TestCase):
         with self.assertRaises(yc.CompileError):
             yc.compile_yaml_ld(src, echo=False)
 
+    def test_confidence_is_reified_as_a_dqv_measurement(self):
+        # sq-2489d.7: every pkg:confidence on a Finding/Source is ALSO emitted as a
+        # reified dqv:QualityMeasurement carrying the SAME value, so the DQV-modelled
+        # quality axis is queryable over the real ingest and cannot drift from the
+        # shorthand. A Finding measures pkg:ConfidenceMeasurement, a Source measures
+        # pkg:SourceReliabilityMeasurement.
+        src = (
+            '"@context":\n'
+            '  confidence: { "@id": "pkg:confidence", "@type": "xsd:decimal" }\n'
+            'sources:\n'
+            '  - "@id": kb:doc-x\n'
+            '    "@type": pkg:Source\n'
+            '    confidence: 0.8\n'
+            '"@graph":\n'
+            '  - "@id": kb:find-1\n'
+            '    "@type": pkg:Finding\n'
+            '    confidence: 0.9\n'
+        )
+        ttl = yc.compile_yaml_ld(src, echo=False)
+        self.assertIn("@prefix dqv: <http://www.w3.org/ns/dqv#> .", ttl)
+        # the Finding: back-link + measurement, value equal to the shorthand.
+        self.assertIn("dqv:hasQualityMeasurement kb:meas-find-1-conf", ttl)
+        self.assertIn("kb:meas-find-1-conf a dqv:QualityMeasurement ;", ttl)
+        self.assertIn("dqv:isMeasurementOf pkg:ConfidenceMeasurement ;", ttl)
+        self.assertIn("dqv:computedOn kb:find-1 ;", ttl)
+        self.assertIn("dqv:value 0.9 .", ttl)
+        # the Source measures the OTHER metric.
+        self.assertIn("kb:meas-doc-x-reliability a dqv:QualityMeasurement ;", ttl)
+        self.assertIn("dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;", ttl)
+        self.assertIn("dqv:value 0.8 .", ttl)
+
+    def test_no_measurement_without_confidence_or_a_measured_type(self):
+        # A subject with no pkg:confidence, and a confidence-bearing subject that is
+        # neither a Finding nor a Source, carry NO measurement — the projection is
+        # driven by the shorthand, never invented.
+        self.assertIsNone(yc.dqv_metric_for(["skos:Concept"]))
+        self.assertEqual(yc.dqv_metric_for(["pkg:Finding"]), yc.METRIC_CONFIDENCE)
+        src = (
+            '"@context":\n'
+            '  prefLabel: { "@id": "skos:prefLabel", "@language": "en-GB" }\n'
+            'concepts:\n'
+            '  - "@id": kb:topic-x\n'
+            '    "@type": skos:Concept\n'
+            '    prefLabel: "Topic X"\n'
+        )
+        self.assertNotIn("dqv:QualityMeasurement", yc.compile_yaml_ld(src, echo=False))
+
     def test_real_authoring_source_compiles_with_11_findings(self):
         # the committed authoring source compiles cleanly and carries the 11 Findings.
         text = AUTHORING_SRC.read_text(encoding="utf-8")

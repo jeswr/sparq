@@ -41,7 +41,13 @@ import sys
 # write-path Findings tier is now AUTHORED in agents-findings.yaml.ld and compiled here
 # (replacing the raw-Turtle agents-findings.ttl tier) — see yamlld_compile.py.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from yamlld_compile import compile_yaml_ld  # noqa: E402
+from yamlld_compile import (  # noqa: E402
+    DQV_HAS_MEASUREMENT,
+    METRIC_SOURCE_RELIABILITY,
+    compile_yaml_ld,
+    dqv_measurement_block,
+    measurement_iri,
+)
 
 PKG = "https://sparq.dev/ns/pkg#"
 KB = "https://sparq.dev/ns/pkg/kb#"
@@ -106,7 +112,13 @@ PREFIXES = """\
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
 @prefix kb:      <https://sparq.dev/ns/pkg/kb#> .
+@prefix dqv:     <http://www.w3.org/ns/dqv#> .
 """
+
+# The reliability this projector assigns to the pkg:Source nodes it mints (the project's
+# OWN design records + skill surfaces). Single constant so the pkg:confidence shorthand
+# and its reified dqv:QualityMeasurement (sq-2489d.7) can never disagree.
+PROJECTED_SOURCE_CONFIDENCE = "0.9"
 
 
 def esc(s: str) -> str:
@@ -221,7 +233,16 @@ def project_beads(path):
         lines.append(f'  dcterms:format "text/markdown" ;')
         lines.append(f"  pkg:exploredStatus pkg:Explored ;")
         lines.append(f"  pkg:followUpPriority 2 ;")
-        lines.append(f"  pkg:confidence 0.9 .")
+        lines.append(f"  pkg:confidence {PROJECTED_SOURCE_CONFIDENCE} ;")
+        lines.append(
+            f"  {DQV_HAS_MEASUREMENT} "
+            f"{measurement_iri(diri, METRIC_SOURCE_RELIABILITY)} ."
+        )
+        lines.extend(
+            dqv_measurement_block(
+                diri, METRIC_SOURCE_RELIABILITY, PROJECTED_SOURCE_CONFIDENCE
+            )
+        )
 
     stats = {
         "tasks": len(issues),
@@ -291,8 +312,17 @@ def project_skills(skills_dir):
         lines.append(f'  dcterms:abstract "{esc(desc)[:900]}" ;')
         lines.append(f"  pkg:exploredStatus pkg:Explored ;")
         lines.append(f"  pkg:followUpPriority 1 ;")
-        lines.append(f"  pkg:confidence 0.9 ;")
+        lines.append(f"  pkg:confidence {PROJECTED_SOURCE_CONFIDENCE} ;")
+        lines.append(
+            f"  {DQV_HAS_MEASUREMENT} "
+            f"{measurement_iri(src, METRIC_SOURCE_RELIABILITY)} ;"
+        )
         lines.append(f"  dcterms:subject {tech} .")
+        lines.extend(
+            dqv_measurement_block(
+                src, METRIC_SOURCE_RELIABILITY, PROJECTED_SOURCE_CONFIDENCE
+            )
+        )
         # The surface the skill documents, as a pkg:Technique (skos:Concept).
         lines.append(f"\n{tech} a pkg:Technique ;")
         lines.append(f'  skos:prefLabel "{esc(sname)} surface"@en-GB ;')
@@ -324,9 +354,11 @@ def main():
         "# Structured-parse of .beads/issues.jsonl (-> pkg:Task) + heaviest skills'\n"
         "# front-matter (-> pkg:Source/pkg:Technique). The AGENTS.md Findings tier is\n"
         "# AUTHORED in ingest/agents-findings.yaml.ld and deterministically COMPILED by\n"
-        "# yamlld_compile.py (FO-bridge Phase 4, sq-mztg8.2). Conforms to pkg.shapes.ttl\n"
-        "# (0 violations); the bd backlog's stale closed->open edges are EXCLUDED (see\n"
-        "# the script header + the SHACL honesty report).\n\n"
+        "# yamlld_compile.py (FO-bridge Phase 4, sq-mztg8.2). Every pkg:confidence on a\n"
+        "# Finding/Source is ALSO projected as a reified dqv:QualityMeasurement\n"
+        "# (sq-2489d.7), so the DQV-modelled quality axis is queryable over this graph.\n"
+        "# Conforms to pkg.shapes.ttl (0 violations); the bd backlog's stale closed->open\n"
+        "# edges are EXCLUDED (see the script header + the SHACL honesty report).\n\n"
     )
 
     # [SONNET-4.6] sq-tzars.7: stamp this output as the HAND-AUTHORED tier. The stamp is a
@@ -381,11 +413,16 @@ def main():
         for a, b in bstats["stale"]:
             f.write(f"{a}\t{b}\n")
 
+    # Every reified DQV measurement in the output (sq-2489d.7): the research-doc + skill
+    # Sources this projector mints, plus the Finding/Source measurements the YAML-LD
+    # compiler emitted into the appended Findings tier.
+    dqv_n = out_text.count("a dqv:QualityMeasurement")
     print(
         f"[ingest] tasks={bstats['tasks']} deps_emitted={bstats['deps_emitted']} "
         f"stale_excluded={bstats['stale_excluded']} "
         f"research_docs={bstats['research_docs']} spec_links={bstats['spec_links']} "
-        f"skills={sstats['skills']} findings={findings_n} -> {args.out}",
+        f"skills={sstats['skills']} findings={findings_n} "
+        f"dqv_measurements={dqv_n} -> {args.out}",
         file=sys.stderr,
     )
     print(f"[ingest] stale-edge sidecar -> {sidecar}", file=sys.stderr)

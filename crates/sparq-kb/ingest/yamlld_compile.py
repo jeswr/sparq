@@ -351,6 +351,7 @@ class ConceptResolver:
 _BASE_PREFIXES = {
     "pkg": "https://sparq.dev/ns/pkg#",
     "kb": "https://sparq.dev/ns/pkg/kb#",
+    "dqv": "http://www.w3.org/ns/dqv#",
     "prov": "http://www.w3.org/ns/prov#",
     "skos": "http://www.w3.org/2004/02/skos/core#",
     "dcterms": "http://purl.org/dc/terms/",
@@ -369,6 +370,57 @@ _ASSURANCE = {
     "claimed": "secx:Claimed",
     "conjectured": "secx:Conjectured",
 }
+
+
+# --- DQV quality-model projection (sq-2489d.7) -------------------------------------
+# Phase 3 (sq-2489d.3) adopted DQV in pkg.ttl: `pkg:confidence` is `rdfs:subPropertyOf
+# dqv:value`, DEFINED as the value of a named `dqv:QualityMeasurement`. Phase 3 only
+# DEMONSTRATED the reified form in examples/pkg-example.ttl, so the real ingest carried
+# the shorthand alone and the `finding-quality-dqv` canned query matched nothing over it.
+# These helpers project the reified measurement MECHANICALLY from the shorthand, and are
+# shared by BOTH ingest paths (this compiler and ingest_pkg.py) so the two forms cannot
+# drift apart: the measurement's `dqv:value` is the *same* rendered term as the
+# `pkg:confidence` object it reifies.
+
+PKG_CONFIDENCE = "pkg:confidence"
+DQV_HAS_MEASUREMENT = "dqv:hasQualityMeasurement"
+# The two named `dqv:Metric` individuals pkg.ttl declares for the numeric 0..1 axis.
+METRIC_CONFIDENCE = "pkg:ConfidenceMeasurement"  # a Finding's epistemic weight
+METRIC_SOURCE_RELIABILITY = "pkg:SourceReliabilityMeasurement"  # a Source's reliability
+# The minted-IRI suffix per metric, mirroring the example file's `meas-…-conf` naming.
+_METRIC_SUFFIX = {METRIC_CONFIDENCE: "conf", METRIC_SOURCE_RELIABILITY: "reliability"}
+
+
+def dqv_metric_for(type_terms: list[str]) -> str | None:
+    """The `dqv:Metric` a subject's `pkg:confidence` measures, from its rdf:type terms.
+
+    A Finding's confidence is epistemic weight; a Source's is reliability (pkg.ttl's two
+    named metrics). Any other subject carries no measurement -> None.
+    """
+    if "pkg:Finding" in type_terms:
+        return METRIC_CONFIDENCE
+    if "pkg:Source" in type_terms:
+        return METRIC_SOURCE_RELIABILITY
+    return None
+
+
+def measurement_iri(subject: str, metric: str) -> str:
+    """The measurement IRI for `(subject, metric)` — deterministic, so re-running either
+    ingest path mints the same node rather than a fresh one."""
+    local = subject.split(":", 1)[1] if ":" in subject else subject
+    return f"kb:meas-{local}-{_METRIC_SUFFIX[metric]}"
+
+
+def dqv_measurement_block(subject: str, metric: str, value: str) -> list[str]:
+    """The Turtle lines of the reified `dqv:QualityMeasurement` for one
+    `(subject, metric, value)`. `value` is an already-rendered Turtle term (the very
+    term emitted as the subject's `pkg:confidence`, so the two agree by construction)."""
+    return [
+        f"\n{measurement_iri(subject, metric)} a dqv:QualityMeasurement ;",
+        f"  dqv:isMeasurementOf {metric} ;",
+        f"  dqv:computedOn {subject} ;",
+        f"  dqv:value {value} .",
+    ]
 
 
 def _esc(s: str) -> str:
@@ -454,17 +506,31 @@ class Emitter:
         # preserves insertion order).
         keys = [k for k in node if k not in ("@id", "@type")]
         rendered: list[str] = []
+        confidence: str | None = None
         for k in keys:
             pred = self._pred(k)
             terms = self._obj_terms(k, node[k])
             for t in terms:
                 rendered.append(f"  {pred} {t}")
+                if pred == PKG_CONFIDENCE:
+                    confidence = t
+        # DQV (sq-2489d.7): reify the `pkg:confidence` shorthand of a Finding/Source as a
+        # named `dqv:QualityMeasurement` + its back-link, so the modelled quality axis is
+        # queryable over the REAL ingest and not only over the example file.
+        metric = dqv_metric_for(type_terms)
+        measurement: list[str] = []
+        if confidence is not None and metric is not None:
+            rendered.append(
+                f"  {DQV_HAS_MEASUREMENT} {measurement_iri(nid, metric)}"
+            )
+            measurement = dqv_measurement_block(nid, metric, confidence)
         if not rendered:
             # a bare `nid a Type .` — close the type line.
             self.lines[-1] = self.lines[-1].rstrip()[:-1] + "."
             return
         body = " ;\n".join(rendered) + " ."
         self.lines.append(body)
+        self.lines.extend(measurement)
 
 
 def _fmt_decimal(v: Any) -> str:
