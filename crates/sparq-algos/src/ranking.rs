@@ -82,7 +82,17 @@ pub fn scores_by_dict_id(g: &NodeGraph, ranks: &[f64], budget: ScoreBudget) -> F
             // Mirrors `centrality::top_k`: sort by score descending, then node index
             // ascending. The `O(n)` index vector is transient — it is dropped before the
             // caller's (bounded) map becomes resident.
-            let mut ranked: Vec<(usize, f64)> = ranks.iter().copied().enumerate().collect();
+            //
+            // Non-finite scores are dropped BEFORE the truncation, not after: `total_cmp`
+            // sorts `NaN` above `+inf` above every finite score, so a post-truncation
+            // filter would let them occupy — and then vacate — the k retained slots,
+            // silently shrinking the map below `min(k, finite_count)`.
+            let mut ranked: Vec<(usize, f64)> = ranks
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|(_, score)| score.is_finite())
+                .collect();
             ranked.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
             ranked.truncate(k);
             collect_scores(g, ranked.into_iter())

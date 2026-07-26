@@ -133,6 +133,50 @@ fn non_finite_scores_are_dropped_rather_than_poisoning_the_ordering() {
     assert!(scores.values().all(|s| s.is_finite()));
 }
 
+/// `total_cmp` sorts `NaN` above `+inf` above every finite score, so a `TopK` budget that
+/// filtered non-finite values only *after* truncating would hand the retained slots to the
+/// poison values and return fewer — possibly zero — finite scores than the budget allows.
+#[test]
+fn top_k_drops_non_finite_scores_before_truncating_rather_than_after() {
+    let g = graph(HUB);
+    let ng = NodeGraph::build(&g);
+    let clean = pagerank(&ng, PageRankConfig::default());
+
+    // Poison the two TOP-ranked nodes, so a post-truncation filter would empty the map.
+    let (sink, hub) = (id_of(&g, "http://e/zsink"), id_of(&g, "http://e/zhub"));
+    let index_of = |id: Id| (0..ng.len()).find(|&i| ng.dict_id(i) == id).expect("node");
+    let mut ranks = clean.clone();
+    ranks[index_of(sink)] = f64::NAN;
+    ranks[index_of(hub)] = f64::INFINITY;
+
+    // `min(k, finite_count)` entries, all finite, and they are the highest finite scores:
+    // with the sink and hub poisoned, the three tied leaves are what remains.
+    let finite_count = ng.len() - 2;
+    for k in [1, 2, finite_count, finite_count + 1, 999] {
+        let scores = scores_by_dict_id(&ng, &ranks, ScoreBudget::TopK(k));
+        assert_eq!(
+            scores.len(),
+            k.min(finite_count),
+            "TopK({k}) must retain min(k, finite_count) entries"
+        );
+        assert!(scores.values().all(|s| s.is_finite()), "TopK({k}) kept a non-finite score");
+        assert!(!scores.contains_key(&sink), "TopK({k}) kept the NaN-scored node");
+        assert!(!scores.contains_key(&hub), "TopK({k}) kept the +inf-scored node");
+        // Retained scores are the true global ranks, untouched by the poisoning.
+        for (id, score) in &scores {
+            assert_eq!(*score, clean[index_of(*id)], "TopK({k}) mis-keyed a score");
+        }
+    }
+
+    // -inf sorts BELOW every finite score, so it is excluded by ordering alone — but it
+    // must not consume a slot either when the budget exceeds the finite count.
+    let mut with_neg_inf = clean.clone();
+    with_neg_inf[0] = f64::NEG_INFINITY;
+    let scores = scores_by_dict_id(&ng, &with_neg_inf, ScoreBudget::TopK(999));
+    assert_eq!(scores.len(), ng.len() - 1);
+    assert!(!scores.contains_key(&ng.dict_id(0)));
+}
+
 #[test]
 #[should_panic(expected = "does not match the node graph")]
 fn a_mismatched_score_vector_panics_rather_than_mis_attributing() {
