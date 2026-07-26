@@ -710,9 +710,12 @@ pub fn run_render_roundtrip_arm(export_text: &str) -> Result<RenderRoundTripRepo
 /// DIRECT arm already exercises every ALCH axiom / class-expression shape the renderer
 /// emits. The bead also expected refusals to dominate the slice (OWL-Full-heavy); they do
 /// not — these 7 are OWL-1-era WebOnt cases, and only 3 of the 13 documents are refused.
-/// It is worth running anyway because it is closed-form and cheap, and because it makes the
-/// corpus coverage EXHAUSTIVE rather than merely large. Exact counts are pinned in
-/// `tests/dl_suite.rs` (`DL_RDF_BASED_ROUNDTRIP_*`).
+/// It is worth running anyway because it is closed-form and cheap, and because it makes
+/// coverage exhaustive over the ELIGIBLE slice — every non-`Rejected` case with a
+/// recognised check kind, sanctioned DIRECT and/or RDF-BASED — rather than merely large.
+/// That is NOT the whole export: the 1 case tagged with neither semantics, and any case
+/// carrying no recognised check kind, is outside BOTH arms and stays unmeasured. Exact
+/// counts are pinned in `tests/dl_suite.rs` (`DL_RDF_BASED_ROUNDTRIP_*`).
 ///
 /// # Errors
 /// Returns `Err` only on an export-level failure (the RDF/XML export itself failed to

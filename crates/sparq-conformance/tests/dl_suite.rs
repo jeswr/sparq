@@ -427,8 +427,11 @@ mod gated {
     /// So the bead's own "marginal value is honestly LOW" call was right, and understated
     /// it: the extension adds 13 documents (+1.9% corpus), not hundreds. It is pinned
     /// anyway because it is closed-form and cheap, and because pinning it CLOSES the
-    /// question — the corpus is now exhaustively covered, and this const records the true
-    /// size so the "hundreds of unexamined documents" premise cannot be re-raised.
+    /// question — the ELIGIBLE slice (non-`Rejected`, recognised check kind, DIRECT and/or
+    /// RDF-BASED) is now exhaustively covered, and this const records the true size so the
+    /// "hundreds of unexamined documents" premise cannot be re-raised. The 1 case tagged
+    /// with NEITHER semantics, and any case with no recognised check kind, is in neither
+    /// arm: the two arms are disjoint, but their union is not the whole export.
     ///
     /// 10 of the 13 round-trip; violations are 0 — the renderer is faithful on every
     /// RDF-BASED-only document L1 accepts, so this slice found NO new fidelity bug (unlike
