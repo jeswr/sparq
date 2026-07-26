@@ -354,16 +354,29 @@ fn document_blank_labels(parsed: &parser::Parsed) -> FxHashSet<&str> {
     seen
 }
 
-/// The smallest numbered prefix in `family` absent from all existing labels.
+/// The smallest numbered `family{k}_` prefix that no existing label starts with.
 fn fresh_blank_prefix(seen: &FxHashSet<&str>, family: &str) -> String {
-    let mut k = 0usize;
-    loop {
-        let prefix = format!("{}{}_", family, k);
-        if !seen.iter().any(|l| l.starts_with(&prefix)) {
-            return prefix;
+    let mut taken = FxHashSet::default();
+    for label in seen {
+        let Some(suffix) = label.strip_prefix(family) else {
+            continue;
+        };
+        let Some((digits, _)) = suffix.split_once('_') else {
+            continue;
+        };
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
         }
+        if let Ok(k) = digits.parse::<usize>() {
+            taken.insert(k);
+        }
+    }
+
+    let mut k = 0usize;
+    while taken.contains(&k) {
         k += 1;
     }
+    format!("{}{}_", family, k)
 }
 
 /// `t` with every blank label pushed into the carried namespace `prefix`
@@ -474,8 +487,10 @@ fn run_closure(
     mode: StepMode,
 ) -> (FactIndex, Vec<DerivationStep>) {
     // [SONNET-4.6] Rule existentials live in a namespace proven fresh against
-    // every source blank label, preventing a literal `_:__sk…` from being
-    // captured by a minted conclusion blank.
+    // every blank label in the parsed source, preventing a literal `_:__sk…`
+    // from being captured by a minted conclusion blank. Labels ingested later
+    // through document builtins or nested closure evaluation are outside this
+    // initial-source guarantee.
     let sk_prefix = fresh_blank_prefix(&document_blank_labels(&parsed), "__sk");
     let parser::Parsed { facts: facts0, mut rules, mut backward_rules, base } = parsed;
     // Premises evaluate left-to-right with no coroutining — reorder each
@@ -4249,14 +4264,22 @@ mod tests {
         let ty = dict.intern_iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
         let source = dict.intern_iri("http://ex/Source");
         let parent = dict.intern_iri("http://ex/Parent");
+        let has_parent = dict.intern_iri("http://ex/hasParent");
+        let alice = dict.intern_iri("http://ex/alice");
         let source_node =
             triples.iter().find(|[_, p, o]| *p == ty && *o == source).unwrap()[0];
         let parent_node =
             triples.iter().find(|[_, p, o]| *p == ty && *o == parent).unwrap()[0];
+        let parent_object =
+            triples.iter().find(|[s, p, _]| *s == alice && *p == has_parent).unwrap()[2];
 
         assert_ne!(
             source_node, parent_node,
             "a minted rule existential must not capture a source blank label"
+        );
+        assert_eq!(
+            parent_node, parent_object,
+            "the existential must co-refer across its :hasParent and rdf:type triples"
         );
     }
 
