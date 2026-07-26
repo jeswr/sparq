@@ -26,6 +26,18 @@
 //! implemented per the W3C OWL 2 Profiles specification (2012-12-11). This covers a
 //! narrow slice of the full 414-case `ProfileIdentificationTest` conformance suite.
 //!
+//! # Concrete domain (opt-in `dl_datatypes`) — the checker ABSTAINS
+//! [SONNET-4.6] sq-pbz04.4.19. With the `dl_datatypes` feature on, L1 admits data
+//! properties, data ranges and the `∃T.dr` / `∀T.dr` quantifiers. This L2 grammar walk does
+//! **not** model the profiles' datatype rules (each profile restricts BOTH the data-range
+//! syntax and the admissible datatype MAP, and the three restrictions differ), so an
+//! ontology carrying any concrete-domain construct yields [`Membership::Unknown`] for all
+//! three profiles rather than a guessed `In`/`NotIn`. That is the crate's fail-closed
+//! discipline applied one layer up: an unmodelled construct must never manufacture a
+//! definitive profile verdict in EITHER direction. The L4 dispatch reads the abstention as
+//! "not in any profile" and routes such ontologies straight to the ALCH(D) tableau — the only
+//! branch whose argument covers them (`tableau` module docs §5b).
+//!
 //! # References
 //! - OWL 2 EL §2: `<https://www.w3.org/TR/owl2-profiles/#OWL_2_EL>`
 //! - OWL 2 QL §3: `<https://www.w3.org/TR/owl2-profiles/#OWL_2_QL>`
@@ -120,11 +132,81 @@ impl ProfileSet {
 /// graph before this function is ever called.
 #[must_use]
 pub fn profiles(onto: &Ontology) -> ProfileSet {
+    // [SONNET-4.6] sq-pbz04.4.19 (opt-in `dl_datatypes`): a concrete-domain construct puts
+    // the ontology outside what this grammar walk models, so abstain for ALL THREE profiles
+    // rather than guess either direction (module docs "Concrete domain").
+    #[cfg(feature = "dl_datatypes")]
+    if let Some(reason) = onto.axioms().iter().find_map(concrete_domain_construct) {
+        return ProfileSet {
+            el: Membership::Unknown(reason.clone()),
+            ql: Membership::Unknown(reason.clone()),
+            rl: Membership::Unknown(reason),
+        };
+    }
     ProfileSet {
         el: check_el(onto),
         ql: check_ql(onto),
         rl: check_rl(onto),
     }
+}
+
+/// `Some(reason)` iff the axiom carries a concrete-domain construct — a data-property axiom
+/// or a data quantifier nested anywhere in one of its class expressions
+/// ([SONNET-4.6] sq-pbz04.4.19, opt-in `dl_datatypes`).
+#[cfg(feature = "dl_datatypes")]
+fn concrete_domain_construct(axiom: &Axiom) -> Option<String> {
+    let nested = |ce: &ClassExpression| ce_has_data_quantifier(ce);
+    match axiom {
+        Axiom::SubDataPropertyOf { .. } => {
+            Some("SubDataPropertyOf (concrete domain not modelled by L2)".to_string())
+        }
+        Axiom::DataPropertyDomain { .. } => {
+            Some("DataPropertyDomain (concrete domain not modelled by L2)".to_string())
+        }
+        Axiom::DataPropertyRange { .. } => {
+            Some("DataPropertyRange (concrete domain not modelled by L2)".to_string())
+        }
+        Axiom::SubClassOf { sub, sup } if nested(sub) || nested(sup) => {
+            Some("data quantifier in SubClassOf (concrete domain not modelled by L2)".to_string())
+        }
+        Axiom::EquivalentClasses(left, right) | Axiom::DisjointClasses(left, right)
+            if nested(left) || nested(right) =>
+        {
+            Some("data quantifier in a class axiom (concrete domain not modelled by L2)".to_string())
+        }
+        Axiom::ClassAssertion { class, .. } if nested(class) => {
+            Some("data quantifier in ClassAssertion (concrete domain not modelled by L2)".to_string())
+        }
+        _ => None,
+    }
+}
+
+/// `true` iff a data quantifier occurs anywhere inside the class expression.
+#[cfg(feature = "dl_datatypes")]
+fn ce_has_data_quantifier(ce: &ClassExpression) -> bool {
+    match ce {
+        ClassExpression::DataSomeValuesFrom(_, _) | ClassExpression::DataAllValuesFrom(_, _) => true,
+        ClassExpression::ObjectIntersectionOf(members)
+        | ClassExpression::ObjectUnionOf(members) => members.iter().any(ce_has_data_quantifier),
+        ClassExpression::ObjectComplementOf(inner) => ce_has_data_quantifier(inner),
+        ClassExpression::ObjectSomeValuesFrom(_, filler)
+        | ClassExpression::ObjectAllValuesFrom(_, filler) => ce_has_data_quantifier(filler),
+        ClassExpression::Class(_) | ClassExpression::Thing | ClassExpression::Nothing => false,
+    }
+}
+
+/// The `Err` a profile grammar predicate returns for a concrete-domain construct.
+///
+/// [`profiles`] abstains on such an ontology BEFORE any grammar predicate runs, so this is
+/// never the verdict a caller sees; the arms exist so each grammar walk stays TOTAL over
+/// [`Axiom`] / [`ClassExpression`] (and stays fail-closed if a future caller reaches a
+/// predicate directly). [SONNET-4.6] sq-pbz04.4.19
+#[cfg(feature = "dl_datatypes")]
+fn concrete_domain_not_modelled<T>(what: &str, ctx: &str) -> Result<T, String> {
+    Err(format!(
+        "{} in {}: the concrete domain is not modelled by the L2 profile grammar",
+        what, ctx
+    ))
 }
 
 /// Check OWL 2 profile membership from an extraction result.
@@ -193,6 +275,20 @@ fn el_axiom(axiom: &Axiom) -> Result<(), String> {
         // properties, a special case of property chains). [GPT-5.6] sq-zfwzq
         #[cfg(feature = "dl_transitive")]
         Axiom::TransitiveObjectProperty { .. } => Ok(()),
+        // [SONNET-4.6] sq-pbz04.4.19: `profiles` ABSTAINS on a concrete-domain construct
+        // before this predicate runs (module docs); the arm keeps the walk total.
+        #[cfg(feature = "dl_datatypes")]
+        Axiom::SubDataPropertyOf { .. } => {
+            concrete_domain_not_modelled("SubDataPropertyOf", "the OWL 2 EL axiom grammar")
+        }
+        #[cfg(feature = "dl_datatypes")]
+        Axiom::DataPropertyDomain { .. } => {
+            concrete_domain_not_modelled("DataPropertyDomain", "the OWL 2 EL axiom grammar")
+        }
+        #[cfg(feature = "dl_datatypes")]
+        Axiom::DataPropertyRange { .. } => {
+            concrete_domain_not_modelled("DataPropertyRange", "the OWL 2 EL axiom grammar")
+        }
     }
 }
 
@@ -237,6 +333,16 @@ fn el_ce(ce: &ClassExpression, ctx: &str) -> Result<(), String> {
             "{}: ObjectAllValuesFrom is not permitted in OWL 2 EL (EL §2)",
             ctx
         )),
+        // [SONNET-4.6] sq-pbz04.4.19: `profiles` ABSTAINS on a concrete-domain construct
+        // before this predicate runs (module docs); the arm keeps the walk total.
+        #[cfg(feature = "dl_datatypes")]
+        ClassExpression::DataSomeValuesFrom(_, _) => {
+            concrete_domain_not_modelled("DataSomeValuesFrom", ctx)
+        }
+        #[cfg(feature = "dl_datatypes")]
+        ClassExpression::DataAllValuesFrom(_, _) => {
+            concrete_domain_not_modelled("DataAllValuesFrom", ctx)
+        }
     }
 }
 
@@ -293,6 +399,20 @@ fn ql_axiom(axiom: &Axiom) -> Result<(), String> {
         Axiom::TransitiveObjectProperty { .. } => Err(
             "TransitiveObjectProperty is not permitted in OWL 2 QL (QL §3)".into(),
         ),
+        // [SONNET-4.6] sq-pbz04.4.19: `profiles` ABSTAINS on a concrete-domain construct
+        // before this predicate runs (module docs); the arm keeps the walk total.
+        #[cfg(feature = "dl_datatypes")]
+        Axiom::SubDataPropertyOf { .. } => {
+            concrete_domain_not_modelled("SubDataPropertyOf", "the OWL 2 QL axiom grammar")
+        }
+        #[cfg(feature = "dl_datatypes")]
+        Axiom::DataPropertyDomain { .. } => {
+            concrete_domain_not_modelled("DataPropertyDomain", "the OWL 2 QL axiom grammar")
+        }
+        #[cfg(feature = "dl_datatypes")]
+        Axiom::DataPropertyRange { .. } => {
+            concrete_domain_not_modelled("DataPropertyRange", "the OWL 2 QL axiom grammar")
+        }
     }
 }
 
@@ -339,6 +459,16 @@ fn ql_sub_ce(ce: &ClassExpression, ctx: &str) -> Result<(), String> {
             "{}: ObjectAllValuesFrom is not a valid QL sub-class expression (QL §3)",
             ctx
         )),
+        // [SONNET-4.6] sq-pbz04.4.19: `profiles` ABSTAINS on a concrete-domain construct
+        // before this predicate runs (module docs); the arm keeps the walk total.
+        #[cfg(feature = "dl_datatypes")]
+        ClassExpression::DataSomeValuesFrom(_, _) => {
+            concrete_domain_not_modelled("DataSomeValuesFrom", ctx)
+        }
+        #[cfg(feature = "dl_datatypes")]
+        ClassExpression::DataAllValuesFrom(_, _) => {
+            concrete_domain_not_modelled("DataAllValuesFrom", ctx)
+        }
     }
 }
 
@@ -398,6 +528,16 @@ fn ql_super_ce(ce: &ClassExpression, ctx: &str) -> Result<(), String> {
             "{}: ObjectAllValuesFrom is not a valid QL super-class expression (QL §3)",
             ctx
         )),
+        // [SONNET-4.6] sq-pbz04.4.19: `profiles` ABSTAINS on a concrete-domain construct
+        // before this predicate runs (module docs); the arm keeps the walk total.
+        #[cfg(feature = "dl_datatypes")]
+        ClassExpression::DataSomeValuesFrom(_, _) => {
+            concrete_domain_not_modelled("DataSomeValuesFrom", ctx)
+        }
+        #[cfg(feature = "dl_datatypes")]
+        ClassExpression::DataAllValuesFrom(_, _) => {
+            concrete_domain_not_modelled("DataAllValuesFrom", ctx)
+        }
     }
 }
 
@@ -445,6 +585,20 @@ fn rl_axiom(axiom: &Axiom) -> Result<(), String> {
         // properties). [GPT-5.6] sq-zfwzq
         #[cfg(feature = "dl_transitive")]
         Axiom::TransitiveObjectProperty { .. } => Ok(()),
+        // [SONNET-4.6] sq-pbz04.4.19: `profiles` ABSTAINS on a concrete-domain construct
+        // before this predicate runs (module docs); the arm keeps the walk total.
+        #[cfg(feature = "dl_datatypes")]
+        Axiom::SubDataPropertyOf { .. } => {
+            concrete_domain_not_modelled("SubDataPropertyOf", "the OWL 2 RL axiom grammar")
+        }
+        #[cfg(feature = "dl_datatypes")]
+        Axiom::DataPropertyDomain { .. } => {
+            concrete_domain_not_modelled("DataPropertyDomain", "the OWL 2 RL axiom grammar")
+        }
+        #[cfg(feature = "dl_datatypes")]
+        Axiom::DataPropertyRange { .. } => {
+            concrete_domain_not_modelled("DataPropertyRange", "the OWL 2 RL axiom grammar")
+        }
     }
 }
 
@@ -513,6 +667,16 @@ fn rl_sub_ce(ce: &ClassExpression, ctx: &str) -> Result<(), String> {
             "{}: ObjectAllValuesFrom is not a valid RL sub-class expression (RL §4)",
             ctx
         )),
+        // [SONNET-4.6] sq-pbz04.4.19: `profiles` ABSTAINS on a concrete-domain construct
+        // before this predicate runs (module docs); the arm keeps the walk total.
+        #[cfg(feature = "dl_datatypes")]
+        ClassExpression::DataSomeValuesFrom(_, _) => {
+            concrete_domain_not_modelled("DataSomeValuesFrom", ctx)
+        }
+        #[cfg(feature = "dl_datatypes")]
+        ClassExpression::DataAllValuesFrom(_, _) => {
+            concrete_domain_not_modelled("DataAllValuesFrom", ctx)
+        }
     }
 }
 
@@ -566,5 +730,140 @@ fn rl_super_ce(ce: &ClassExpression, ctx: &str) -> Result<(), String> {
             "{}: ObjectSomeValuesFrom is not a valid RL super-class expression (RL §4)",
             ctx
         )),
+        // [SONNET-4.6] sq-pbz04.4.19: `profiles` ABSTAINS on a concrete-domain construct
+        // before this predicate runs (module docs); the arm keeps the walk total.
+        #[cfg(feature = "dl_datatypes")]
+        ClassExpression::DataSomeValuesFrom(_, _) => {
+            concrete_domain_not_modelled("DataSomeValuesFrom", ctx)
+        }
+        #[cfg(feature = "dl_datatypes")]
+        ClassExpression::DataAllValuesFrom(_, _) => {
+            concrete_domain_not_modelled("DataAllValuesFrom", ctx)
+        }
+    }
+}
+
+// -------------------------------------------------------------------------------------------
+// Direct unit tests (the integration suite lives in tests/profile.rs)
+// -------------------------------------------------------------------------------------------
+
+/// [SONNET-4.6] sq-pbz04.4.19 — the concrete-domain ABSTENTION path (opt-in `dl_datatypes`).
+#[cfg(all(test, feature = "dl_datatypes"))]
+mod concrete_domain_tests {
+    use super::*;
+    use crate::cdomain::Datatype;
+    use crate::model::{DataPropertyExpression, DataRange};
+
+    fn dp() -> DataPropertyExpression {
+        DataPropertyExpression::DataProperty(11)
+    }
+    fn dr() -> DataRange {
+        DataRange::Datatype(Datatype::XsdInteger)
+    }
+    fn onto(axioms: Vec<Axiom>) -> Ontology {
+        Ontology { axioms }
+    }
+
+    /// Every concrete-domain AXIOM kind makes all three verdicts `Unknown` — never a guessed
+    /// `In` (which would fabricate a profile claim) and never a guessed `NotIn` (which would
+    /// fabricate a refutation).
+    #[test]
+    fn concrete_domain_axioms_abstain_in_all_three_profiles() {
+        let cases = vec![
+            Axiom::SubDataPropertyOf {
+                sub: dp(),
+                sup: DataPropertyExpression::DataProperty(12),
+            },
+            Axiom::DataPropertyDomain {
+                property: dp(),
+                domain: ClassExpression::Class(1),
+            },
+            Axiom::DataPropertyRange {
+                property: dp(),
+                range: dr(),
+            },
+        ];
+        for axiom in cases {
+            let ps = profiles(&onto(vec![axiom.clone()]));
+            assert!(ps.el.is_unknown(), "EL must abstain on {:?}", axiom);
+            assert!(ps.ql.is_unknown(), "QL must abstain on {:?}", axiom);
+            assert!(ps.rl.is_unknown(), "RL must abstain on {:?}", axiom);
+            assert!(!ps.in_any() && !ps.in_all());
+        }
+    }
+
+    /// A data quantifier NESTED inside an ordinary class axiom abstains too — the scan has
+    /// to look through the class-expression tree, not just at the axiom kind.
+    #[test]
+    fn nested_data_quantifiers_abstain() {
+        let deep = ClassExpression::ObjectIntersectionOf(vec![
+            ClassExpression::Class(2),
+            ClassExpression::some(
+                3,
+                ClassExpression::ObjectComplementOf(Box::new(ClassExpression::DataAllValuesFrom(
+                    dp(),
+                    dr(),
+                ))),
+            ),
+        ]);
+        for axiom in [
+            Axiom::SubClassOf {
+                sub: ClassExpression::Class(1),
+                sup: deep.clone(),
+            },
+            Axiom::EquivalentClasses(ClassExpression::Class(1), deep.clone()),
+            Axiom::DisjointClasses(ClassExpression::Class(1), deep.clone()),
+            Axiom::ClassAssertion {
+                class: deep.clone(),
+                individual: 9,
+            },
+        ] {
+            assert!(
+                profiles(&onto(vec![axiom.clone()])).el.is_unknown(),
+                "a nested data quantifier must abstain: {:?}",
+                axiom
+            );
+        }
+        // A datatype-free ontology is unaffected — the pre-pass must not over-trigger.
+        let plain = onto(vec![Axiom::SubClassOf {
+            sub: ClassExpression::Class(1),
+            sup: ClassExpression::Class(2),
+        }]);
+        assert!(profiles(&plain).in_all());
+    }
+
+    /// The grammar predicates stay TOTAL: reached directly (as a future caller might), each
+    /// refuses the concrete-domain constructs rather than panicking or silently accepting.
+    #[test]
+    fn grammar_predicates_remain_total_over_the_concrete_domain() {
+        let axioms = [
+            Axiom::SubDataPropertyOf {
+                sub: dp(),
+                sup: dp(),
+            },
+            Axiom::DataPropertyDomain {
+                property: dp(),
+                domain: ClassExpression::Class(1),
+            },
+            Axiom::DataPropertyRange {
+                property: dp(),
+                range: dr(),
+            },
+        ];
+        for axiom in &axioms {
+            assert!(el_axiom(axiom).is_err());
+            assert!(ql_axiom(axiom).is_err());
+            assert!(rl_axiom(axiom).is_err());
+        }
+        for ce in [
+            ClassExpression::DataSomeValuesFrom(dp(), dr()),
+            ClassExpression::DataAllValuesFrom(dp(), dr()),
+        ] {
+            assert!(el_ce(&ce, "ctx").is_err());
+            assert!(ql_sub_ce(&ce, "ctx").is_err());
+            assert!(ql_super_ce(&ce, "ctx").is_err());
+            assert!(rl_sub_ce(&ce, "ctx").is_err());
+            assert!(rl_super_ce(&ce, "ctx").is_err());
+        }
     }
 }

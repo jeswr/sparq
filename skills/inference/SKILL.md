@@ -421,6 +421,36 @@ With the feature OFF the crate compiles to exactly the pre-extension code (fail-
 consistency/entailment cases from abstentions to definitive verdicts (floors re-pinned with
 evidence in `tests/dl_suite.rs`).
 
+**Opt-in concrete domain (`dl_datatypes` cargo feature, OFF by default, bead sq-pbz04.4.19
+[SONNET-4.6]):** extends the fragment to **ALCH(D)** over an *admitted sub-lattice* of the OWL 2
+datatype map (`cdomain::Datatype`: `rdfs:Literal` as ⊤_D, the `owl:real ⊃ owl:rational ⊃
+xsd:decimal ⊃ ℤ` tier chain with the 13 integer-derived types as exact `i128` intervals, plus
+the singleton families `xsd:string` / `xsd:boolean` / `xsd:dateTime` / `xsd:anyURI`). L1
+recognises data properties, a datatype IRI in a DATA-RANGE position, `∃T.dr` / `∀T.dr`
+restrictions on a data property, and `rdfs:domain` / `rdfs:range` / `rdfs:subPropertyOf` over
+them (instead of refusing them, sq-pbz04.4.9); L2 **ABSTAINS** (`Membership::Unknown`) on any
+concrete-domain ontology — it does not model the profiles' datatype rules, so it never guesses
+`In` or `NotIn`; the L3 tableau grows **concrete nodes** (leaves labelled by NNF data-range
+literals) with the `∃_D` / `∀_D` rules and a **D-clash** decided by `cdomain::satisfiable`, with
+the termination / soundness / completeness argument EXTENDED AND WRITTEN OUT in `tableau.rs`
+module docs **§5b** (the unary, feature-path-free `ALC(D)` restriction of Baader–Hanschke 1991 /
+Lutz 2002 — blocking is UNCHANGED, since concrete nodes are leaves and nothing propagates back
+out of the concrete domain). L4 dispatch routes any concrete-domain ontology STRAIGHT to the
+tableau. This is what makes **value-space disjointness decidable**: `p rdfs:range xsd:integer` +
+`p rdfs:range xsd:string` leaves `p` with an EMPTY extension, so any class demanding a `p`-value
+is unsatisfiable (the `WebOnt-I5.3-015` mechanism). The oracle is **exact, never three-valued**,
+because L1 keeps refusing everything it cannot decide: facets (`owl:withRestrictions` /
+`owl:onDatatype`), `owl:datatypeComplementOf`, enumerated data ranges, data-property
+ASSERTIONS, every unadmitted datatype (`xsd:double`/`float`, the binary + token-derived types,
+`rdf:PlainLiteral`/`XMLLiteral`, `xsd:date`, `xsd:dateTimeStamp`), and conclusion-side
+data-property entailment encodings all stay `ExtractError::DataConstruct` / `UnencodedConclusion`
+in BOTH feature states. The lattice is pinned by a **differential-parity lane**
+(`tests/cdomain.rs`) against `sparq_reason::dtype::d_value_key`, the repo's D-entailment value
+seam. With the feature OFF the crate compiles to exactly the pre-extension code. The
+`sparq-conformance` `dl-direct` arm does **NOT** enable it, so every pinned DL floor is
+UNCHANGED by this bead; graduating the corpus's datatype rows is a deliberate follow-up re-pin
+against the export snapshot, not a silent one.
+
 **L4 — fragment-dispatch checker + entailment-by-refutation (`check`, opt-in `dispatch`
 feature, bead sq-pbz04.4.4):** NOW BUILT. `check::DirectChecker` (constructed with `new()` or
 `with_budget(Budget)`) dispatches an extracted ontology IN ORDER — RL (via `sparq-reason`

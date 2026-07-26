@@ -276,6 +276,119 @@
 //! Sattler 1999; with inverses this section's argument would fail at the same point §5's
 //! does. ∎
 //!
+//! # 5b. The concrete domain — the opt-in `dl_datatypes` extension ([SONNET-4.6] sq-pbz04.4.19)
+//!
+//! Under the OPT-IN `dl_datatypes` cargo feature (OFF by default; with it off this module
+//! compiles to exactly the tableau above) the fragment grows a **concrete domain**:
+//! ALCH(D). L1 additionally admits named DATA properties `T`, data ranges `dr` over the
+//! admitted datatype sub-lattice (`crate::cdomain::Datatype`), the two concrete
+//! quantifiers `∃T.dr` / `∀T.dr`, and `rdfs:domain` / `rdfs:range` / `rdfs:subPropertyOf`
+//! over data properties. Everything else about datatypes — facets, data-property
+//! ASSERTIONS, `owl:datatypeComplementOf`, `owl:oneOf` data ranges, and every unadmitted
+//! datatype — stays a fail-closed L1 refusal in BOTH feature states.
+//!
+//! ## The restriction that makes this easy, stated up front
+//!
+//! The fragment admits only **unary** concrete predicates (a data range constrains ONE
+//! value) and **no feature paths** (no `∃(u₁, u₂).P` relating two concrete successors). This
+//! is the classical `ALC(D)` restriction under which the concrete domain contributes exactly
+//! one extra clash test and NOTHING else — no new interaction with blocking, no new
+//! termination obligation (Baader & Hanschke 1991; Lutz 2002, *Description Logics with
+//! Concrete Domains — A Survey*, §3). The moment a future bead adds feature paths or n-ary
+//! predicates, this section's argument stops applying and must be redone.
+//!
+//! ## The forest gains concrete nodes
+//!
+//! Alongside the abstract nodes, a branch carries **concrete nodes**: leaves, each labelled
+//! by a finite set of NNF data-range literals (`d` or `¬d`), reached by concrete edges
+//! `x –T→ c` from abstract nodes only. A concrete node has NO outgoing edges and is never an
+//! ancestor of anything, so it takes no part in blocking.
+//!
+//! Two completion rules are added, mirroring the abstract ∃/∀ rules:
+//!
+//! - **∃_D-rule:** if `∃T.dr ∈ L(x)`, `x` is **not blocked**, and no concrete edge
+//!   `x –S→ c` with `S ⊑* T` has `dr ∈ L(c)`: create a fresh concrete node `c` with
+//!   `L(c) = {dr}` and the edge `x –T→ c`.
+//! - **∀_D-rule:** if `∀T.dr ∈ L(x)`, there is a concrete edge `x –S→ c` with `S ⊑* T`, and
+//!   `dr ∉ L(c)`: add `dr` to `L(c)`. (Fires into concrete successors of blocked nodes too,
+//!   for the same reason the ∀-rule does.)
+//!
+//! and one clash condition is added:
+//!
+//! - **D-clash:** a concrete node whose label is UNSATISFIABLE in the concrete domain, i.e.
+//!   `crate::cdomain::satisfiable` returns `false` for its positive/negated datatypes.
+//!
+//! Data properties share `System::super_roles` with object properties: L1 refuses any IRI
+//! declared as both an object and a data property (the punning guard), so the two namespaces
+//! are disjoint and one closure serves both without interference.
+//!
+//! ## The oracle is EXACT, so the tableau stays two-valued
+//!
+//! `crate::cdomain::satisfiable` decides — never abstains — over the admitted sub-lattice,
+//! and L1 refuses everything outside it. So a D-clash is as decisive as a `{A, ¬A}` clash,
+//! and no `Unknown` state has to be threaded through the search. (Everything the oracle
+//! cannot decide is refused BEFORE the tableau starts, which is the same fail-closed
+//! discipline §1/§7 already state for out-of-fragment input.)
+//!
+//! ## Termination (§3 extended)
+//!
+//! `sub(O)` is unchanged: a data quantifier is a LEAF of the concept closure (its filler is
+//! a data range, not a class expression — `crate::nnf` module docs), and the data ranges
+//! themselves are interned into a separate finite table whose members are the NNF literals
+//! over the finitely many datatypes named in the input. Concrete nodes are created ONLY by
+//! the ∃_D-rule, at most one per `(abstract node, ∃T.dr ∈ sub(O))` pair, and they generate
+//! nothing, so they add a factor bounded by `|sub(O)|` to the node count and no depth at
+//! all. Every abstract-side bound of §3 (and §5a) is untouched. ∎
+//!
+//! ## Soundness (§4 extended)
+//!
+//! Extend the §4 witness map `π` to concrete nodes, mapping each to a data VALUE. A forest
+//! is satisfiable when, in addition to §4's conditions, every concrete node `c` has
+//! `π(c) ∈ dr^D` for all `dr ∈ L(c)` and `(π(x), π(c)) ∈ T^I` for every concrete edge
+//! `x –T→ c`. Then:
+//!
+//! - **∃_D preserves satisfiability.** `∃T.dr ∈ L(x)` and `π(x) ∈ (∃T.dr)^I` give a value
+//!   `v` with `(π(x), v) ∈ T^I` and `v ∈ dr^D`; set `π(c) = v` for the fresh `c`.
+//! - **∀_D preserves satisfiability.** `∀T.dr ∈ L(x)`, edge `x –S→ c` with `S ⊑* T`, so
+//!   `(π(x), π(c)) ∈ S^I ⊆ T^I` and `π(x) ∈ (∀T.dr)^I` force `π(c) ∈ dr^D`: adding `dr` to
+//!   `L(c)` keeps the condition.
+//! - **A D-clash is unsatisfiable.** If the oracle reports the label empty then no value
+//!   satisfies all of `L(c)`, so no `π(c)` exists — the branch had no model. This is where
+//!   the oracle's exactness in the UNSAT direction is load-bearing.
+//!
+//! §4's conclusion is unchanged: all branches clashing ⇒ the input had no model. ∎
+//!
+//! ## Completeness (§5 extended)
+//!
+//! From a quiescent, clash-free forest, extend the §5 interpretation. For each concrete node
+//! `c` the oracle reports `L(c)` satisfiable, so choose a value `val(c)` in its
+//! intersection — this is where the oracle's exactness in the SAT direction is load-bearing.
+//! Interpret each data property as
+//! `T^I = { (n, val(c)) : n ∈ Δ, concrete edge n –S→ c, S ⊑* T }`, which makes the data role
+//! hierarchy hold by the same containment argument as §5's `E(R)`. The §5 induction gains
+//! two cases:
+//!
+//! - `∃T.dr ∈ L(n)`: `n` is an unblocked forest node (the §5 domain `Δ` contains only
+//!   unblocked nodes), so ∃_D-quiescence gives an edge `n –S→ c`, `S ⊑* T`, `dr ∈ L(c)`;
+//!   then `(n, val(c)) ∈ T^I` and `val(c) ∈ dr^D` by the choice of `val(c)`.
+//! - `∀T.dr ∈ L(n)` and `(n, v) ∈ T^I`: by construction `v = val(c)` for a concrete edge
+//!   `n –S→ c` with `S ⊑* T`, so ∀_D-quiescence put `dr ∈ L(c)`, hence `v ∈ dr^D`.
+//!
+//! **Blocking still suffices.** A blocked node `y` (with `L(y) ⊆ L(x)` for an ancestor `x`)
+//! is *not* in `Δ`; §5 routes every edge into `y` to `σ(y) = x` instead. Any `∃T.dr ∈ L(y)`
+//! is also in `L(x)`, and `x` is unblocked, so `x` already has the required concrete
+//! successor — the concrete obligations transfer downward through `L(y) ⊆ L(x)` exactly like
+//! the abstract ones. Since concrete nodes are leaves, nothing ever propagates UP out of the
+//! concrete domain, so the "absent inverses" proviso of §5/§5a is not weakened. ∎
+//!
+//! ## What is NOT claimed
+//!
+//! Completeness holds for the ALCH(D) fragment **as admitted by L1** — unary,
+//! facet-free, feature-path-free data ranges over the admitted datatype sub-lattice. No
+//! claim is made for OWL 2's full datatype map, for faceted data ranges, or for data-property
+//! assertions; those remain design-record §5 deferrals and are refused before the tableau
+//! runs.
+//!
 //! # 6. Budgets and determinism
 //!
 //! Budgets are **deterministic counts only** ([`Budget`]): `max_nodes` bounds the total
@@ -322,7 +435,11 @@
 //! - In-repo: `research/owl2-direct-semantics-scoping.md` §3 (the spec this module
 //!   implements) and §5 (the deferral ledger).
 
+#[cfg(feature = "dl_datatypes")]
+use crate::cdomain::{self, Datatype};
 use crate::extract::ExtractError;
+#[cfg(feature = "dl_datatypes")]
+use crate::model::DataRange;
 use crate::model::{Axiom, ClassExpression, Ontology};
 use crate::nnf::{is_nnf, nnf, nnf_complement, subexpression_closure};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -510,6 +627,24 @@ enum Shape {
     Exists(Id, ConceptId),
     /// `∀R.C` over the named property `R`.
     ForAll(Id, ConceptId),
+    /// `∃T.dr` over the named DATA property `T` (module docs §5b, opt-in `dl_datatypes`).
+    #[cfg(feature = "dl_datatypes")]
+    DataExists(Id, DataRangeId),
+    /// `∀T.dr` over the named DATA property `T` (module docs §5b, opt-in `dl_datatypes`).
+    #[cfg(feature = "dl_datatypes")]
+    DataForAll(Id, DataRangeId),
+}
+
+/// Index into [`System::data_ranges`] — an interned NNF data-range literal (module docs §5b).
+#[cfg(feature = "dl_datatypes")]
+type DataRangeId = u32;
+
+/// An interned NNF data-range literal: the datatype and whether it is negated.
+#[cfg(feature = "dl_datatypes")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DataLiteral {
+    datatype: Datatype,
+    negated: bool,
 }
 
 /// The preprocessed, immutable constraint system one tableau run works over.
@@ -535,9 +670,68 @@ struct System {
     /// `sub⁺(O)` closure; empty when the input declares no transitive role.
     #[cfg(feature = "dl_transitive")]
     forall_plus: FxHashMap<ConceptId, Vec<(Id, ConceptId)>>,
+    /// Interned NNF data-range literals; `DataRangeId` indexes this (module docs §5b).
+    /// Kept OUT of [`System::shapes`] so the §3-step-1 concept-closure cross-check — and
+    /// with it the termination argument — is unaffected. [SONNET-4.6] sq-pbz04.4.19
+    #[cfg(feature = "dl_datatypes")]
+    data_ranges: Vec<DataLiteral>,
+    /// Data range → id (structural dedup).
+    #[cfg(feature = "dl_datatypes")]
+    data_range_ids: FxHashMap<DataRange, DataRangeId>,
 }
 
 impl System {
+    /// Intern an NNF data-range literal (module docs §5b). Panics in debug on a non-NNF
+    /// input, matching the concept interner's contract.
+    #[cfg(feature = "dl_datatypes")]
+    fn intern_data_range(&mut self, dr: &DataRange) -> DataRangeId {
+        if let Some(&id) = self.data_range_ids.get(dr) {
+            return id;
+        }
+        let literal = match dr {
+            DataRange::Datatype(d) => DataLiteral {
+                datatype: *d,
+                negated: false,
+            },
+            DataRange::DataComplementOf(inner) => match inner.as_ref() {
+                DataRange::Datatype(d) => DataLiteral {
+                    datatype: *d,
+                    negated: true,
+                },
+                DataRange::DataComplementOf(_) => {
+                    debug_assert!(false, "tableau data-range interner requires NNF input");
+                    // Fail closed rather than mis-reading a non-NNF range: `¬rdfs:Literal`
+                    // is ⊥_D, so an unreachable malformed range can only ever CLASH.
+                    DataLiteral {
+                        datatype: Datatype::RdfsLiteral,
+                        negated: true,
+                    }
+                }
+            },
+        };
+        let id = self.data_ranges.len() as DataRangeId;
+        self.data_ranges.push(literal);
+        self.data_range_ids.insert(dr.clone(), id);
+        id
+    }
+
+    /// `true` iff the interned data-range literals in `label` have a non-empty joint value
+    /// space — the D-clash test of module docs §5b, delegated to the exact oracle.
+    #[cfg(feature = "dl_datatypes")]
+    fn data_label_satisfiable(&self, label: &BTreeSet<DataRangeId>) -> bool {
+        let mut positive: Vec<Datatype> = Vec::with_capacity(label.len());
+        let mut negative: Vec<Datatype> = Vec::new();
+        for &id in label {
+            let lit = self.data_ranges[id as usize];
+            if lit.negated {
+                negative.push(lit.datatype);
+            } else {
+                positive.push(lit.datatype);
+            }
+        }
+        cdomain::satisfiable(&positive, &negative)
+    }
+
     /// Intern an NNF class expression, recursively interning its subexpressions.
     fn intern(&mut self, ce: &ClassExpression) -> ConceptId {
         if let Some(&id) = self.ids.get(ce) {
@@ -565,6 +759,14 @@ impl System {
             }
             ClassExpression::ObjectAllValuesFrom(p, filler) => {
                 Shape::ForAll(p.named(), self.intern(filler))
+            }
+            #[cfg(feature = "dl_datatypes")]
+            ClassExpression::DataSomeValuesFrom(t, dr) => {
+                Shape::DataExists(t.named(), self.intern_data_range(dr))
+            }
+            #[cfg(feature = "dl_datatypes")]
+            ClassExpression::DataAllValuesFrom(t, dr) => {
+                Shape::DataForAll(t.named(), self.intern_data_range(dr))
             }
         };
         let id = self.shapes.len() as ConceptId;
@@ -605,6 +807,26 @@ struct Node {
 struct Forest {
     nodes: Vec<Node>,
     edges: Vec<(usize, Id, usize)>,
+    /// Concrete (data) nodes — leaves labelled by interned NNF data-range literals, in
+    /// creation order (module docs §5b, opt-in `dl_datatypes`).
+    #[cfg(feature = "dl_datatypes")]
+    data_nodes: Vec<BTreeSet<DataRangeId>>,
+    /// Concrete edges `(abstract source, data property, concrete target)`, in creation
+    /// order.
+    #[cfg(feature = "dl_datatypes")]
+    data_edges: Vec<(usize, Id, usize)>,
+}
+
+/// An empty forest (no nodes, no edges) — the starting point of `preprocess`.
+fn empty_forest() -> Forest {
+    Forest {
+        nodes: Vec::new(),
+        edges: Vec::new(),
+        #[cfg(feature = "dl_datatypes")]
+        data_nodes: Vec::new(),
+        #[cfg(feature = "dl_datatypes")]
+        data_edges: Vec::new(),
+    }
 }
 
 impl Forest {
@@ -621,6 +843,18 @@ impl Forest {
             return self.nodes[n].label.contains(comp);
         }
         false
+    }
+
+    /// Insert the interned data range `drid` into the concrete node `c`'s label; returns
+    /// `true` on a **D-clash** — the label's joint value space is empty (module docs §5b).
+    /// No-op (and no clash) if already present: the label was satisfiable before, and it is
+    /// the same set.
+    #[cfg(feature = "dl_datatypes")]
+    fn add_data(&mut self, c: usize, drid: DataRangeId, sys: &System) -> bool {
+        if !self.data_nodes[c].insert(drid) {
+            return false;
+        }
+        !sys.data_label_satisfiable(&self.data_nodes[c])
     }
 
     /// Ancestor subset blocking, evaluated on the CURRENT labels (module docs §2): `y`
@@ -658,10 +892,7 @@ fn internalise(sub: &ClassExpression, sup: &ClassExpression) -> ClassExpression 
 /// seed_clash)` where `seed_clash` means the asserted ABox facts alone already clash.
 fn preprocess(onto: &Ontology, extra: Option<&ClassExpression>) -> (System, Forest, bool) {
     let mut sys = System::default();
-    let mut forest = Forest {
-        nodes: Vec::new(),
-        edges: Vec::new(),
-    };
+    let mut forest = empty_forest();
     let mut roots: FxHashMap<Id, usize> = FxHashMap::default();
     let mut universal_set: FxHashSet<ConceptId> = FxHashSet::default();
     let mut seeds: Vec<ClassExpression> = Vec::new(); // closure cross-check (§3 step 1)
@@ -671,6 +902,13 @@ fn preprocess(onto: &Ontology, extra: Option<&ClassExpression>) -> (System, Fore
     let mut direct: FxHashMap<Id, FxHashSet<Id>> = FxHashMap::default();
     for axiom in onto.axioms() {
         if let Axiom::SubObjectPropertyOf { sub, sup } = axiom {
+            direct.entry(sub.named()).or_default().insert(sup.named());
+        }
+        // [SONNET-4.6] sq-pbz04.4.19 (opt-in `dl_datatypes`): data-property inclusions join
+        // the SAME closure — L1's punning guard keeps the object- and data-property
+        // namespaces disjoint, so one map serves both without interference (module docs §5b).
+        #[cfg(feature = "dl_datatypes")]
+        if let Axiom::SubDataPropertyOf { sub, sup } = axiom {
             direct.entry(sub.named()).or_default().insert(sup.named());
         }
         // [GPT-5.6] sq-zfwzq (opt-in `dl_transitive`): record `Trans(T)` declarations for
@@ -733,6 +971,30 @@ fn preprocess(onto: &Ontology, extra: Option<&ClassExpression>) -> (System, Fore
             Axiom::SubObjectPropertyOf { .. } => {} // handled above
             #[cfg(feature = "dl_transitive")]
             Axiom::TransitiveObjectProperty { .. } => {} // handled above (RBox pass)
+            #[cfg(feature = "dl_datatypes")]
+            Axiom::SubDataPropertyOf { .. } => {} // handled above (RBox pass)
+            #[cfg(feature = "dl_datatypes")]
+            Axiom::DataPropertyDomain { property, domain } => {
+                // ∃T.⊤_D ⊑ domain (module docs §5b). `⊤_D` is `rdfs:Literal`; internalising
+                // this GCI is what produces the only `¬dr` the fragment ever needs — the
+                // NNF complement `∀T.¬rdfs:Literal`, i.e. `∀T.⊥_D`.
+                let some_top = ClassExpression::DataSomeValuesFrom(
+                    property.clone(),
+                    DataRange::Datatype(Datatype::RdfsLiteral),
+                );
+                push_universal(&mut sys, &mut seeds, internalise(&some_top, domain));
+            }
+            #[cfg(feature = "dl_datatypes")]
+            Axiom::DataPropertyRange { property, range } => {
+                // ⊤ ⊑ ∀T.range (module docs §5b).
+                let all_range =
+                    ClassExpression::DataAllValuesFrom(property.clone(), range.clone());
+                push_universal(
+                    &mut sys,
+                    &mut seeds,
+                    internalise(&ClassExpression::Thing, &all_range),
+                );
+            }
             Axiom::ObjectPropertyDomain { property, domain } => {
                 // ∃R.⊤ ⊑ domain.
                 let some_top = ClassExpression::some(property.named(), ClassExpression::Thing);
@@ -967,6 +1229,27 @@ fn saturate(f: &mut Forest, sys: &System, s: &mut Search) -> Result<Step, Exhaus
                     }
                 }
             }
+            // [SONNET-4.6] sq-pbz04.4.19 ∀_D-rule (module docs §5b, opt-in `dl_datatypes`):
+            // for `∀T.dr ∈ L(src)` and a concrete edge `src –S→ c` with `S ⊑* T`, add `dr`
+            // to `L(c)`. Fires into the concrete successors of blocked nodes too, exactly
+            // like the abstract ∀-rule.
+            #[cfg(feature = "dl_datatypes")]
+            for ei in 0..f.data_edges.len() {
+                let (src, role, tgt) = f.data_edges[ei];
+                let ids: Vec<ConceptId> = f.nodes[src].label.iter().copied().collect();
+                for cid in ids {
+                    if let Shape::DataForAll(t, drid) = &sys.shapes[cid as usize] {
+                        let (t, drid) = (*t, *drid);
+                        if sys.is_subrole(role, t) && !f.data_nodes[tgt].contains(&drid) {
+                            s.count_rule()?;
+                            if f.add_data(tgt, drid, sys) {
+                                return Ok(Step::Clash);
+                            }
+                            changed = true;
+                        }
+                    }
+                }
+            }
         }
         // ⊔-rule: first unresolved disjunction in scan order.
         for (n, node) in f.nodes.iter().enumerate() {
@@ -1004,6 +1287,31 @@ fn saturate(f: &mut Forest, sys: &System, s: &mut Search) -> Result<Step, Exhaus
                     });
                     f.edges.push((n, r, fresh));
                     if f.add(fresh, filler, sys) {
+                        return Ok(Step::Clash);
+                    }
+                    expanded = true;
+                    break 'nodes;
+                }
+                // [SONNET-4.6] sq-pbz04.4.19 ∃_D-rule (module docs §5b, opt-in
+                // `dl_datatypes`): create a fresh CONCRETE successor for an unsatisfied
+                // `∃T.dr` on an UNBLOCKED node. Concrete nodes are leaves — they generate
+                // nothing further — but they still count against `max_nodes` so the budget
+                // bounds the whole forest.
+                #[cfg(feature = "dl_datatypes")]
+                if let Shape::DataExists(t, drid) = &sys.shapes[cid as usize] {
+                    let (t, drid) = (*t, *drid);
+                    let satisfied = f.data_edges.iter().any(|&(src, erole, tgt)| {
+                        src == n && sys.is_subrole(erole, t) && f.data_nodes[tgt].contains(&drid)
+                    });
+                    if satisfied || f.is_blocked(n) {
+                        continue;
+                    }
+                    s.count_rule()?;
+                    s.count_node()?;
+                    let fresh = f.data_nodes.len();
+                    f.data_nodes.push(BTreeSet::new());
+                    f.data_edges.push((n, t, fresh));
+                    if f.add_data(fresh, drid, sys) {
                         return Ok(Step::Clash);
                     }
                     expanded = true;

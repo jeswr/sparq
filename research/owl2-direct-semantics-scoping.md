@@ -252,7 +252,7 @@ wrong species check would poison the lane. Untagged species assertions are not c
 | Transitive roles (S) | **IMPLEMENTED (opt-in)** — bead sq-zfwzq [GPT-5.6] shipped the first-in-line extension behind the OFF-by-default `dl_transitive` cargo feature: L1 recognises `owl:TransitiveProperty` (→ `TransitiveObjectProperty`), the L3 tableau adds the ∀₊-propagation rule, and the extended termination/soundness/completeness argument (Horrocks & Sattler 1999: *no* blocking change absent inverses — the `E(R) ∪ ⋃ E(T)⁺` model construction) is WRITTEN OUT in `tableau.rs` module docs §5a, per this ledger's discipline (deferrals are argued, never silently added). L4 dispatch routes transitive ontologies straight to the tableau (the only transitivity-complete branch); the RL/EL guards recognise the axiom kind fail-closed as defence in depth. With the feature OFF, behaviour is byte-identical to v1 (fail-closed refusal). | done (sq-zfwzq); inverses/cardinality/nominals below remain the next rows |
 | Cardinalities / functionality (N/Q/F) | need the choose-rule + node merging; merging + blocking interaction is the classic unsoundness trap; with inverses added later this escalates to pairwise blocking | post-v1, only with a written argument |
 | Nominals in class expressions (`oneOf`, `hasValue`, O) | the O+I+Q interaction is where NEXPTIME bites and where naive blocking is unsound; a "fresh-concept" approximation is sound but **incomplete** and would blur the completeness ledger | revisit only after I and Q are argued |
-| Datatypes / data properties (D) | a datatype-aware tableau needs a concrete-domain satisfiability oracle; sparq already has the seam (`sparq-substrate` numeric tower; `dtype.rs`; EL `cdomain`) but wiring it into a tableau is its own design problem. **sq-pbz04.4.9 hardened the L1 boundary here:** a bare OWL 2 datatype-map IRI (`xsd:*`, `rdfs:Literal`, `rdf:PlainLiteral`/`XMLLiteral`, `owl:real`/`rational`) reaching ANY class-expression position — including an `rdfs:range`/`rdfs:domain` object — now refuses extraction as a `DataConstruct` rather than reading as an opaque object class (which silently dropped the value-space meaning; two disjoint datatype ranges were invisibly unrelated, e.g. WebOnt-I5.3-015). Uniform position check, same discipline as the literal / `owl:onDatatype` refusals. | future record; reuse the shared tower, never a private one |
+| Datatypes / data properties (D) | **PARTIALLY IMPLEMENTED (opt-in)** — bead sq-pbz04.4.19 [SONNET-4.6] shipped a datatype-aware L1 + a concrete-domain satisfiability oracle wired into the L3 tableau, behind the OFF-by-default `dl_datatypes` cargo feature, over an **ADMITTED datatype sub-lattice** of the OWL 2 datatype map. The design is §5c below; the extended termination/soundness/completeness argument is WRITTEN OUT in `tableau.rs` module docs §5b, per this ledger's discipline (deferrals are argued, never silently added). sq-pbz04.4.9's fail-closed L1 boundary is **narrowed, not removed**: every datatype construct the oracle does not decide EXACTLY — facets (`owl:withRestrictions`/`owl:onDatatype`), `owl:datatypeComplementOf`, `owl:oneOf` data ranges, data-property ASSERTIONS, and every unadmitted datatype (`xsd:double`/`float`, the binary and token-derived types, `rdf:PlainLiteral`/`XMLLiteral`, `xsd:date`, `xsd:dateTimeStamp`) — still refuses extraction as a `DataConstruct` in BOTH feature states. With the feature OFF, behaviour is byte-identical to the pre-extension code. | facets next (they DO need the shared exact-decimal tower, as `sparq-reason-el`'s `cdomain` shows); conclusion-side data-property entailment encodings after that |
 | `sameAs` / `differentFrom` in the tableau path | equality reasoning = merging (see cardinalities); RL branch already covers them for RL ontologies | with N/Q |
 | Keys, property chains, `hasSelf`, property disjointness/(a)symmetry/(ir)reflexivity | outside ALCH; RL branch handles their assertional consequences for RL ontologies | per-construct evaluation later |
 | OWL 2 DL species validation (global restrictions) | needs regularity/simple-role machinery; wrong checks poison the profile lane | post-v1 bead if the lane's value warrants it |
@@ -265,6 +265,77 @@ graduate the bulk of its 414 cases; the consistency/entailment lanes will gradua
 boolean/∃/∀-shaped and RL/EL-profile subsets and leave the cardinality/inverse-heavy rest
 out-of-fragment. The scoreboard row is labelled **"scoped fragment — NOT full OWL 2 DL"**
 and the lane never counts an abstention as a pass.
+
+
+### 5c. The datatype-aware tableau — ALCH(D) over an admitted sub-lattice (sq-pbz04.4.19, [SONNET-4.6])
+
+**Amendment to §3 and to the Datatypes row above.** This is the design the ledger's "future
+record" called for. It deliberately unlocks a *narrow* slice, because the value of the
+deferral was never "datatypes are hard" but "a datatype oracle that is only *approximately*
+right silently manufactures verdicts".
+
+**The shape of the problem.** Two `rdfs:range` axioms on one data property are jointly
+unsatisfiable exactly when their value spaces are disjoint (`WebOnt-I5.3-015`: `xsd:integer`
+vs `xsd:string` ⇒ the property has no values ⇒ every class demanding one is unsatisfiable).
+Reading the datatypes as opaque classes loses that; refusing (sq-pbz04.4.9) is honest but
+gives up the case. Deciding it needs an oracle for "is this conjunction of data ranges
+inhabited?".
+
+**Design decision 1 — restrict the fragment so ONE local check suffices.** Admit only
+**unary** concrete predicates (a data range constrains one value) and **no feature paths**
+(no `∃(u₁,u₂).P` relating two concrete successors). This is the classical `ALC(D)`
+restriction (Baader & Hanschke 1991; Lutz 2002 §3) under which the concrete domain adds
+exactly one clash test and nothing else — no blocking interaction, no new termination
+obligation. The tableau grows *concrete nodes* (leaves labelled by NNF data-range literals,
+reached by concrete edges from abstract nodes) plus an `∃_D`/`∀_D` rule pair mirroring
+`∃`/`∀`. The full argument — including why subset blocking still suffices — is in
+`tableau.rs` §5b.
+
+**Design decision 2 — make the oracle EXACT, and push the honesty boundary into L1.** A
+three-valued oracle would force an `Unknown` state through the whole search. Instead the
+oracle is total and exact over a small **admitted sub-lattice**, and L1 refuses everything
+else, so the tableau stays two-valued. The sub-lattice is:
+
+- `rdfs:Literal` as `⊤_D` (the union of every value space, admitted or not);
+- the `owl:real` family as a **tier chain** `owl:real ⊃ owl:rational ⊃ xsd:decimal ⊃ ℤ`,
+  with the 13 integer-derived types modelled as exact **integer intervals** over `i128`
+  (their value spaces differ from `xsd:integer` only by XSD 1.1 §3.4's fixed
+  `minInclusive`/`maxInclusive` facets). The integer level is *not* a tree — `xsd:long` and
+  `xsd:nonNegativeInteger` are incomparable but overlap — so interval arithmetic decides it;
+- the singleton families `xsd:string`, `xsd:boolean`, `xsd:dateTime`, `xsd:anyURI`, pairwise
+  disjoint from each other and from the reals.
+
+Deciding a conjunction is then: pin the family (two distinct families ⇒ empty), intersect
+inside it, subtract the negated members. Non-emptiness is concluded ONLY from named
+witnesses (`√2 ∈ real ∖ rational`, `⅓ ∈ rational ∖ decimal`, `0.5 ∈ decimal ∖ ℤ`, a
+language-tagged plain literal in `rdfs:Literal` minus every admitted family), each a fact
+about the datatype map rather than about the implementation.
+
+**Design decision 3 — no private numeric tower.** The sub-lattice is decided
+*structurally*, so there is no value arithmetic here to drift from
+`sparq_substrate::numeric`. What could still drift is the lattice itself, so it is pinned by
+a **differential-parity lane** (`tests/cdomain.rs`) against `sparq_reason::dtype::d_value_key`
+— the repo's existing D-entailment value seam — asserting EXACT agreement over the XSD
+literal matrix in both the intersection and the containment directions. That lane already
+earned its keep: it caught that admitting `xsd:dateTimeStamp` would claim a strict
+containment (`dateTimeStamp ⊊ dateTime`) the value seam cannot witness, because
+`sparq_core::temporal::Temporal::of_lit` does not enforce the required-timezone facet — so
+`xsd:dateTimeStamp` was dropped from the admitted set rather than asserted on faith.
+
+**What is NOT claimed.** Completeness holds for ALCH(D) *as admitted by L1*. Facets,
+enumerated data ranges, data-property assertions, the full OWL 2 datatype map, and the
+CONCLUSION-side refutation encodings for data-property axioms (the fresh-CLASS witness trick
+of §4 has no data-range counterpart — there is no "fresh datatype") all remain deferred and
+fail closed. L2 does not model the profiles' datatype rules and therefore ABSTAINS
+(`Membership::Unknown`) on any concrete-domain ontology rather than guessing `In`/`NotIn`;
+L4 dispatch routes those ontologies straight to the ALCH(D) tableau.
+
+**Conformance.** `sparq-conformance`'s `dl-direct` feature does **not** enable
+`dl_datatypes`, so every pinned floor (`DL_PROFILE_FLOOR`, `DL_DIRECT_FLOOR`, the abstained
+totals, `DOCUMENTED_DIVERGENCES`) is UNCHANGED and unmeasured by this bead. Graduating the
+corpus's datatype rows — `WebOnt-I5.3-015` among them — means enabling the feature there and
+re-pinning against the export snapshot with fresh evidence; that is a deliberate follow-up
+re-pin, not a silent one.
 
 ---
 

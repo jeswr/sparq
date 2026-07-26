@@ -20,6 +20,10 @@
 // of {recognised axiom, recognised class-expression backbone, ignorable declaration/annotation,
 // ground assertion} or it produces an [`ExtractError`]. Nothing falls through silently.
 
+#[cfg(feature = "dl_datatypes")]
+use crate::cdomain::Datatype;
+#[cfg(feature = "dl_datatypes")]
+use crate::model::{DataPropertyExpression, DataRange};
 use crate::model::{Axiom, ClassExpression, ObjectPropertyExpression, Ontology};
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{is_inline, Dict, Id, TermParts, NO_ID};
@@ -515,6 +519,43 @@ fn classify_triple(
         )));
     }
 
+    // --- Concrete-domain axiom predicates (opt-in `dl_datatypes`) ------------------------
+    // [SONNET-4.6] sq-pbz04.4.19. Placed BEFORE the object-property arms: a
+    // `rdfs:subPropertyOf` / `rdfs:domain` / `rdfs:range` whose subject is a DECLARED data
+    // property is a concrete-domain axiom, not an object-property one. `Index::build`'s
+    // declaration pre-pass makes `idx.data_props` complete before any triple is classified,
+    // so this routing is independent of triple order (RDF graphs are sets).
+    #[cfg(feature = "dl_datatypes")]
+    if p == v.sub_property_of && (idx.data_props.contains(&s) || idx.data_props.contains(&o)) {
+        // A MIXED inclusion (one data property, one object property) has no OWL 2 reading —
+        // the two property namespaces are disjoint. Refuse rather than guess.
+        if !(idx.data_props.contains(&s) && idx.data_props.contains(&o)) {
+            return Err(ExtractError::Unclassifiable(format!(
+                "rdfs:subPropertyOf mixes a data property with a non-data property ({} / {})",
+                term_iri(dict, s),
+                term_iri(dict, o)
+            )));
+        }
+        let sub = decode_data_property(dict, idx, s)?;
+        let sup = decode_data_property(dict, idx, o)?;
+        onto.axioms.push(Axiom::SubDataPropertyOf { sub, sup });
+        return Ok(());
+    }
+    #[cfg(feature = "dl_datatypes")]
+    if p == v.domain && idx.data_props.contains(&s) {
+        let property = decode_data_property(dict, idx, s)?;
+        let domain = decode_class(dict, v, idx, o)?;
+        onto.axioms.push(Axiom::DataPropertyDomain { property, domain });
+        return Ok(());
+    }
+    #[cfg(feature = "dl_datatypes")]
+    if p == v.range && idx.data_props.contains(&s) {
+        let property = decode_data_property(dict, idx, s)?;
+        let range = decode_data_range(dict, idx, o)?;
+        onto.axioms.push(Axiom::DataPropertyRange { property, range });
+        return Ok(());
+    }
+
     // --- Axiom predicates ---------------------------------------------------------------
     if p == v.sub_class_of {
         let sub = decode_class(dict, v, idx, s)?;
@@ -881,6 +922,13 @@ fn decode_restriction(
             term_iri(dict, id)
         ))
     })?;
+    // [SONNET-4.6] sq-pbz04.4.19 (opt-in `dl_datatypes`): a restriction on a DECLARED data
+    // property is a concrete-domain restriction (`∃T.dr` / `∀T.dr`); its filler must be a
+    // data range, and a class filler there is malformed rather than guessable.
+    #[cfg(feature = "dl_datatypes")]
+    if idx.data_props.contains(&prop) {
+        return decode_data_restriction(dict, idx, id, prop);
+    }
     let property = decode_object_property(dict, idx, prop)?;
     let some = idx.some_values_from.get(&id).copied();
     let all = idx.all_values_from.get(&id).copied();
@@ -975,6 +1023,114 @@ fn decode_class_list(
         ));
     }
     Ok(out)
+}
+
+/// Decodes an `owl:Restriction` node whose `owl:onProperty` is a DECLARED data property into
+/// `∃T.dr` / `∀T.dr`, or refuses ([SONNET-4.6] sq-pbz04.4.19, opt-in `dl_datatypes`).
+///
+/// Data ranges have no nesting in the admitted fragment, so — unlike
+/// [`decode_restriction`] — there is no recursion and no depth/cycle bookkeeping.
+#[cfg(feature = "dl_datatypes")]
+fn decode_data_restriction(
+    dict: &Dict,
+    idx: &Index,
+    id: Id,
+    prop: Id,
+) -> Result<ClassExpression, ExtractError> {
+    let property = decode_data_property(dict, idx, prop)?;
+    let some = idx.some_values_from.get(&id).copied();
+    let all = idx.all_values_from.get(&id).copied();
+    match (some, all) {
+        (Some(_), Some(_)) => Err(ExtractError::MalformedClassExpression(format!(
+            "restriction {} has both someValuesFrom and allValuesFrom",
+            term_iri(dict, id)
+        ))),
+        (Some(filler), None) => Ok(ClassExpression::DataSomeValuesFrom(
+            property,
+            decode_data_range(dict, idx, filler)?,
+        )),
+        (None, Some(filler)) => Ok(ClassExpression::DataAllValuesFrom(
+            property,
+            decode_data_range(dict, idx, filler)?,
+        )),
+        (None, None) => Err(ExtractError::MalformedClassExpression(format!(
+            "restriction {} missing its someValuesFrom/allValuesFrom filler",
+            term_iri(dict, id)
+        ))),
+    }
+}
+
+/// Decodes a node used in a DATA-RANGE position ([SONNET-4.6] sq-pbz04.4.19, opt-in
+/// `dl_datatypes`).
+///
+/// ONLY a bare datatype IRI from the ADMITTED sub-lattice (`crate::cdomain::Datatype`) is
+/// accepted. Everything else — a datatype the oracle deliberately declines (`xsd:double`,
+/// `xsd:token`, `rdf:PlainLiteral`, …), a faceted `owl:onDatatype` node, an
+/// `owl:datatypeComplementOf`, an `owl:oneOf` enumeration, a literal, a class IRI, a blank
+/// node — stays a fail-closed [`ExtractError::DataConstruct`], exactly as before this
+/// feature existed. The oracle is exact only over what it admits, so this is the boundary
+/// that keeps the tableau two-valued (`crate::tableau` module docs §5b).
+#[cfg(feature = "dl_datatypes")]
+fn decode_data_range(dict: &Dict, idx: &Index, id: Id) -> Result<DataRange, ExtractError> {
+    if is_literal(dict, id) {
+        return Err(ExtractError::DataConstruct(
+            "literal in a data-range position".to_string(),
+        ));
+    }
+    if is_triple_term(dict, id) {
+        return Err(ExtractError::Unclassifiable(
+            "RDF 1.2 triple term in a data-range position".to_string(),
+        ));
+    }
+    if let Some(name) = idx.data_shape.get(&id) {
+        return Err(ExtractError::DataConstruct(format!(
+            "data range using {} (facets / complements are not in the admitted fragment)",
+            name
+        )));
+    }
+    if let Some(name) = idx.out_of_fragment_shape.get(&id) {
+        return Err(ExtractError::DataConstruct(format!(
+            "data range using {} (enumerated data ranges are not in the admitted fragment)",
+            name
+        )));
+    }
+    // `is_literal` above already covered every inline id, so `term_parts` is safe here.
+    let TermParts::Iri { prefix, suffix } = dict.term_parts(id) else {
+        return Err(ExtractError::DataConstruct(format!(
+            "non-IRI {} in a data-range position",
+            term_iri(dict, id)
+        )));
+    };
+    let iri = format!("{}{}", prefix, suffix);
+    Datatype::from_iri(&iri).map(DataRange::Datatype).ok_or_else(|| {
+        ExtractError::DataConstruct(format!(
+            "datatype {} is outside the admitted concrete-domain sub-lattice",
+            iri
+        ))
+    })
+}
+
+/// Decodes a node used in a DATA-property position ([SONNET-4.6] sq-pbz04.4.19, opt-in
+/// `dl_datatypes`) — the data-side twin of [`decode_object_property`].
+#[cfg(feature = "dl_datatypes")]
+fn decode_data_property(
+    dict: &Dict,
+    idx: &Index,
+    id: Id,
+) -> Result<DataPropertyExpression, ExtractError> {
+    if idx.punned_props.contains(&id) {
+        return Err(ExtractError::Unclassifiable(format!(
+            "property IRI {} is declared as multiple property types (ambiguous classification)",
+            term_iri(dict, id)
+        )));
+    }
+    if is_inline(id) || !matches!(dict.term_parts(id), TermParts::Iri { .. }) {
+        return Err(ExtractError::Unclassifiable(format!(
+            "{} in a data-property position (named properties only in L1)",
+            term_iri(dict, id)
+        )));
+    }
+    Ok(DataPropertyExpression::DataProperty(id))
 }
 
 /// Decodes a node used in an object-property position. In L1 only a NAMED object property is
@@ -1321,6 +1477,19 @@ impl Index {
     // cross-type punned declaration. Identical re-assertion (same value) is silently allowed.
     fn build(triples: &[[Id; 3]], v: &Vocab) -> Result<Index, ExtractError> {
         let mut idx = Index::default();
+        // [SONNET-4.6] sq-pbz04.4.19 (opt-in `dl_datatypes`): DECLARATION PRE-PASS. The
+        // usage-typing arms below type a `rdfs:domain`/`rdfs:range`/`rdfs:subPropertyOf`
+        // subject (and an `owl:onProperty` object) as an OBJECT property; with a concrete
+        // domain that would mis-type — and pun-poison — every declared data property. Seed
+        // `data_props` from ALL `rdf:type owl:DatatypeProperty` triples first so the guards
+        // below see the complete declaration set regardless of triple order (RDF graphs are
+        // sets, and the extractor's verdict must be order-independent).
+        #[cfg(feature = "dl_datatypes")]
+        for &[s, p, o] in triples {
+            if p == v.ty && o == v.owl_datatype_property {
+                idx.data_props.insert(s);
+            }
+        }
         for &[s, p, o] in triples {
             if p == v.on_property {
                 // owl:onProperty is functional on a restriction node — exactly one value.
@@ -1339,10 +1508,18 @@ impl Index {
                 // Symmetric to the declaration arms: records the pun so the verdict is
                 // order-independent (RDF graphs are sets; declaration before usage must
                 // produce the same Unclassifiable refusal as usage before declaration).
-                if idx.annotation_props.contains(&o) || idx.data_props.contains(&o) {
-                    idx.punned_props.insert(o);
+                // [SONNET-4.6] sq-pbz04.4.19: a restriction ON a declared data property is
+                // a concrete-domain restriction, not a pun — leave it to the data path.
+                #[cfg(feature = "dl_datatypes")]
+                let declared_data = idx.data_props.contains(&o);
+                #[cfg(not(feature = "dl_datatypes"))]
+                let declared_data = false;
+                if !declared_data {
+                    if idx.annotation_props.contains(&o) || idx.data_props.contains(&o) {
+                        idx.punned_props.insert(o);
+                    }
+                    idx.object_props.insert(o); // usage-based typing
                 }
-                idx.object_props.insert(o); // usage-based typing
             } else if p == v.some_values_from {
                 if let Some(prev) = idx.some_values_from.insert(s, o) {
                     if prev != o {
@@ -1460,16 +1637,27 @@ impl Index {
                 // object property (usage-based typing) — but only the subject/relevant operand.
                 // [SONNET-4.6] sq-pbz04.4.1 order-asymmetry fix: symmetric pun-check for
                 // each IRI being typed as object property via usage, matching the on_property arm.
+                // [SONNET-4.6] sq-pbz04.4.19: a DECLARED data property in one of these
+                // positions is a concrete-domain axiom subject — skip the object-property
+                // usage typing (and its pun record) so the data path can claim it.
+                #[cfg(feature = "dl_datatypes")]
+                let is_data = |idx: &Index, id: Id| idx.data_props.contains(&id);
+                #[cfg(not(feature = "dl_datatypes"))]
+                let is_data = |_: &Index, _: Id| false;
                 if p == v.sub_property_of {
-                    if idx.annotation_props.contains(&s) || idx.data_props.contains(&s) {
-                        idx.punned_props.insert(s);
+                    if !is_data(&idx, s) {
+                        if idx.annotation_props.contains(&s) || idx.data_props.contains(&s) {
+                            idx.punned_props.insert(s);
+                        }
+                        idx.object_props.insert(s);
                     }
-                    idx.object_props.insert(s);
-                    if idx.annotation_props.contains(&o) || idx.data_props.contains(&o) {
-                        idx.punned_props.insert(o);
+                    if !is_data(&idx, o) {
+                        if idx.annotation_props.contains(&o) || idx.data_props.contains(&o) {
+                            idx.punned_props.insert(o);
+                        }
+                        idx.object_props.insert(o);
                     }
-                    idx.object_props.insert(o);
-                } else {
+                } else if !is_data(&idx, s) {
                     if idx.annotation_props.contains(&s) || idx.data_props.contains(&s) {
                         idx.punned_props.insert(s);
                     }

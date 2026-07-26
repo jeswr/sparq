@@ -452,6 +452,27 @@ impl DirectChecker {
                 branch: Branch::AlchTableau,
             };
         }
+        // [SONNET-4.6] sq-pbz04.4.19 (opt-in `dl_datatypes`): an ontology carrying a
+        // CONCRETE-DOMAIN construct routes STRAIGHT to the ALCH(D) tableau — the only branch
+        // whose soundness/completeness argument covers it (tableau module docs §5b). The RL
+        // and EL branches apply no datatype rule (their guards below keep that fail-closed as
+        // defence in depth) and L2 abstains for such an ontology anyway, so this arm is
+        // explicit routing rather than a behaviour change. With the feature OFF the arm does
+        // not exist (extraction refuses every datatype construct before dispatch).
+        #[cfg(feature = "dl_datatypes")]
+        if onto.axioms().iter().any(|a| {
+            matches!(
+                a,
+                Axiom::SubDataPropertyOf { .. }
+                    | Axiom::DataPropertyDomain { .. }
+                    | Axiom::DataPropertyRange { .. }
+            )
+        }) {
+            return ConsistencyOutcome {
+                verdict: tableau_consistency(&onto, self.budget),
+                branch: Branch::AlchTableau,
+            };
+        }
         let ps = profiles(&onto);
         if ps.rl.is_in() {
             return rl_branch(dict, triples, &onto);
@@ -658,6 +679,13 @@ fn collect_role_ids(onto: &Ontology, into: &mut FxHashSet<Id>) {
             Axiom::TransitiveObjectProperty { property } => {
                 into.insert(property.named());
             }
+            // [SONNET-4.6] sq-pbz04.4.19: this set seeds `owl:ObjectProperty` declarations,
+            // so a DATA property must never enter it — only a `DataPropertyDomain`'s class
+            // expression can nest an object property.
+            #[cfg(feature = "dl_datatypes")]
+            Axiom::SubDataPropertyOf { .. } | Axiom::DataPropertyRange { .. } => {}
+            #[cfg(feature = "dl_datatypes")]
+            Axiom::DataPropertyDomain { domain, .. } => collect_role_ids_in_ce(domain, into),
         }
     }
 }
@@ -677,6 +705,9 @@ fn collect_role_ids_in_ce(class: &ClassExpression, into: &mut FxHashSet<Id>) {
             collect_role_ids_in_ce(filler, into);
         }
         ClassExpression::Class(_) | ClassExpression::Thing | ClassExpression::Nothing => {}
+        // A data quantifier names a DATA property (see `collect_role_ids`).
+        #[cfg(feature = "dl_datatypes")]
+        ClassExpression::DataSomeValuesFrom(_, _) | ClassExpression::DataAllValuesFrom(_, _) => {}
     }
 }
 
@@ -746,6 +777,17 @@ fn pr1_punning_violation(onto: &Ontology) -> Option<String> {
             Axiom::SubClassOf { .. }
             | Axiom::EquivalentClasses(_, _)
             | Axiom::DisjointClasses(_, _) => {}
+            // [SONNET-4.6] sq-pbz04.4.19: a data property occupies the PROPERTY namespace
+            // for the punning scan exactly like an object property does.
+            #[cfg(feature = "dl_datatypes")]
+            Axiom::SubDataPropertyOf { sub, sup } => {
+                properties.extend([sub.named(), sup.named()]);
+            }
+            #[cfg(feature = "dl_datatypes")]
+            Axiom::DataPropertyDomain { property, .. }
+            | Axiom::DataPropertyRange { property, .. } => {
+                properties.insert(property.named());
+            }
         }
     }
     while let Some(ce) = ces.pop() {
@@ -761,6 +803,13 @@ fn pr1_punning_violation(onto: &Ontology) -> Option<String> {
             | ClassExpression::ObjectAllValuesFrom(p, filler) => {
                 properties.insert(p.named());
                 ces.push(filler);
+            }
+            // [SONNET-4.6] sq-pbz04.4.19: a data quantifier's property is in the PROPERTY
+            // namespace, and its filler is a data range (never a class expression).
+            #[cfg(feature = "dl_datatypes")]
+            ClassExpression::DataSomeValuesFrom(p, _)
+            | ClassExpression::DataAllValuesFrom(p, _) => {
+                properties.insert(p.named());
             }
         }
     }
@@ -818,6 +867,10 @@ fn axiom_ces(axiom: &Axiom) -> Vec<&ClassExpression> {
         Axiom::SubObjectPropertyOf { .. } | Axiom::ObjectPropertyAssertion { .. } => Vec::new(),
         #[cfg(feature = "dl_transitive")]
         Axiom::TransitiveObjectProperty { .. } => Vec::new(),
+        #[cfg(feature = "dl_datatypes")]
+        Axiom::DataPropertyDomain { domain, .. } => vec![domain],
+        #[cfg(feature = "dl_datatypes")]
+        Axiom::SubDataPropertyOf { .. } | Axiom::DataPropertyRange { .. } => Vec::new(),
     }
 }
 
@@ -838,6 +891,9 @@ fn implicated_construct(ce: &ClassExpression) -> Option<String> {
         }
         ClassExpression::ObjectSomeValuesFrom(_, filler)
         | ClassExpression::ObjectAllValuesFrom(_, filler) => implicated_construct(filler),
+        // A data quantifier nests no class expression, so it implicates no RL divergence.
+        #[cfg(feature = "dl_datatypes")]
+        ClassExpression::DataSomeValuesFrom(_, _) | ClassExpression::DataAllValuesFrom(_, _) => None,
     }
 }
 
@@ -889,6 +945,15 @@ fn el_unapplied_kind(onto: &Ontology) -> Option<String> {
         // (defence in depth; dispatch routes transitive ontologies to the tableau first).
         #[cfg(feature = "dl_transitive")]
         Axiom::TransitiveObjectProperty { .. } => Some("TransitiveObjectProperty".to_string()),
+        // [SONNET-4.6] sq-pbz04.4.19: the EL classifier runs with its DEFAULT features (no
+        // `cdomain`), so it applies NO concrete-domain axiom — abstain (defence in depth;
+        // `profiles` already abstains, so dispatch reaches the tableau first).
+        #[cfg(feature = "dl_datatypes")]
+        Axiom::SubDataPropertyOf { .. } => Some("SubDataPropertyOf".to_string()),
+        #[cfg(feature = "dl_datatypes")]
+        Axiom::DataPropertyDomain { .. } => Some("DataPropertyDomain".to_string()),
+        #[cfg(feature = "dl_datatypes")]
+        Axiom::DataPropertyRange { .. } => Some("DataPropertyRange".to_string()),
     })
 }
 
@@ -902,6 +967,11 @@ fn ce_mentions_thing(ce: &ClassExpression) -> bool {
         ClassExpression::ObjectComplementOf(inner) => ce_mentions_thing(inner),
         ClassExpression::ObjectSomeValuesFrom(_, filler)
         | ClassExpression::ObjectAllValuesFrom(_, filler) => ce_mentions_thing(filler),
+        // A data quantifier's filler is a data range — it can never mention `owl:Thing`.
+        #[cfg(feature = "dl_datatypes")]
+        ClassExpression::DataSomeValuesFrom(_, _) | ClassExpression::DataAllValuesFrom(_, _) => {
+            false
+        }
     }
 }
 
@@ -1045,6 +1115,17 @@ fn collect_ids(onto: &Ontology, into: &mut FxHashSet<Id>) {
             Axiom::SubClassOf { .. }
             | Axiom::EquivalentClasses(_, _)
             | Axiom::DisjointClasses(_, _) => {}
+            // [SONNET-4.6] sq-pbz04.4.19: a data property is an id of the model like any
+            // other property.
+            #[cfg(feature = "dl_datatypes")]
+            Axiom::SubDataPropertyOf { sub, sup } => {
+                into.extend([sub.named(), sup.named()]);
+            }
+            #[cfg(feature = "dl_datatypes")]
+            Axiom::DataPropertyDomain { property, .. }
+            | Axiom::DataPropertyRange { property, .. } => {
+                into.insert(property.named());
+            }
         }
     }
     while let Some(ce) = ces.pop() {
@@ -1060,6 +1141,13 @@ fn collect_ids(onto: &Ontology, into: &mut FxHashSet<Id>) {
             | ClassExpression::ObjectAllValuesFrom(p, filler) => {
                 into.insert(p.named());
                 ces.push(filler);
+            }
+            // [SONNET-4.6] sq-pbz04.4.19: the data property is an id; its filler is a data
+            // range, not a class expression, so nothing is pushed back on the worklist.
+            #[cfg(feature = "dl_datatypes")]
+            ClassExpression::DataSomeValuesFrom(p, _)
+            | ClassExpression::DataAllValuesFrom(p, _) => {
+                into.insert(p.named());
             }
         }
     }
@@ -1149,6 +1237,18 @@ fn refutation_checks(conclusion: &Axiom, fresh: &mut FreshNames) -> Option<Vec<V
                 },
             ]])
         }
+        // [SONNET-4.6] sq-pbz04.4.19: NO argued refutation encoding for a concrete-domain
+        // CONCLUSION axiom yet. The object-property tricks do not lift directly — the
+        // fresh-CLASS witness has no data-range counterpart (data ranges come from a fixed
+        // map; there is no "fresh datatype"), so a data-property subsumption/domain/range
+        // conclusion needs its own argument. Abstain fail-closed (`UnencodedConclusion`)
+        // rather than guess: this is the growth-guard the enum's docs describe, and it is
+        // the honest boundary of this bead (premise-side concrete-domain reasoning is
+        // supported; conclusion-side is not).
+        #[cfg(feature = "dl_datatypes")]
+        Axiom::SubDataPropertyOf { .. }
+        | Axiom::DataPropertyDomain { .. }
+        | Axiom::DataPropertyRange { .. } => None,
         // The two-step-chain lift of the fresh-class trick for a TRANSITIVITY conclusion
         // (module docs; [GPT-5.6] sq-zfwzq — sound AND complete): `O ⊨ Trans(R)` iff
         // `O ∪ {R(a,b), R(b,c), B(c), (∀R.¬B)(a)}` is unsatisfiable, with `a`/`b`/`c`/`B`
