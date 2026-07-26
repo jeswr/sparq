@@ -1,11 +1,12 @@
 //! [SONNET-4.6] sq-zgbso.2 — Rust-vs-N3 decision differential for the stateless ODRL core.
 //!
-//! Asserts that the four-stratum N3 rule set (`rules/odrl-{a,b,c,d}.n3`) produces
+//! Asserts that the five-stratum N3 rule set (`rules/odrl-{a0,a,b,c,d}.n3`) produces
 //! EXACTLY the same `auth:*` triple set as `materialize_policy` for every case in the
 //! corpus. Both sides must also equal an independently-stated expected set so that a
 //! both-wrong agreement cannot pass.
 //!
-//! Supported scope (bead sq-zgbso.2):
+//! Decision-EQUIVALENCE scope — NARROWED [OPUS-5] after the PR #3458 review found two
+//! fail-OPEN defects the pre-existing scope statement did not exclude:
 //! - Unconstrained permissions and prohibitions
 //! - `odrl:dateTime` lteq / gteq constraints (canonical UTC lexical forms only —
 //!   every other lexical form is REJECTED fail-closed, see the `dt*` tests)
@@ -14,6 +15,19 @@
 //! - `odrl:and` logical constraint combinator
 //! - Constrained prohibitions over the same atomic/or/and scope (deny-overrides;
 //!   out-of-scope prohibition constructs are REFUSED, never silently ignored)
+//! - **each constraint node carrying exactly ONE operand tuple and at most one
+//!   combinator** — satisfaction is keyed on the constraint NODE, so an ambiguous node
+//!   is refused rather than decided from one cross-product combination
+//! - **an admissible `odrl:conflict` strategy** — `odrl:perm`, an unknown strategy IRI,
+//!   and `odrl:invalid` with a detected conflict are refused on BOTH paths
+//! - **a concrete, mapped request action** — the `odrl:use` umbrella is excluded: the
+//!   Rust evaluator lets a `use` permission permit a `read` request while the strata
+//!   match action IRIs exactly, so the N3 path is strictly more restrictive there
+//!
+//! OUTSIDE that scope the weaker — and load-bearing — property is that the N3 path is
+//! **never more permissive** than the Rust reference path. Both properties are checked
+//! over a GENERATED corpus at the bottom of this file, not only over the hand-picked
+//! cases above (the hand-picked corpus is what let the two defects through).
 //!
 //! The `inj*` tests are adversarial: policy/request content carrying N3 implication
 //! rules, source-terminating quotes/newlines, and `>`-bearing IRIs must either be
@@ -630,6 +644,13 @@ fn inj8_caller_minted_request_typed_subject_rejected() {
 struct Shape {
     name: &'static str,
     defs: &'static str,
+    /// Whether this shape is inside the scope on which the two paths are claimed
+    /// decision-EQUIVALENT (not merely "N3 never more permissive"): a single operand
+    /// tuple per constraint node, `odrl:recipient` under eq/neq or `odrl:dateTime`
+    /// under lteq/gteq, optionally combined by ONE `odrl:or`/`odrl:and` over such
+    /// members. Everything else is out of scope BY CONSTRUCTION — the N3 path refuses
+    /// it or declines to satisfy it, which is safe but not equivalent.
+    in_scope: bool,
 }
 
 const PAST: &str = "\"2000-01-01T00:00:00Z\"^^xsd:dateTime";
@@ -637,102 +658,125 @@ const FUTURE: &str = "\"2099-01-01T00:00:00Z\"^^xsd:dateTime";
 const NOW: &str = "2026-07-25T00:00:00Z";
 
 const SHAPES: &[Shape] = &[
-    Shape { name: "none", defs: "" },
+    Shape { name: "none", defs: "", in_scope: true },
     // ── in-scope atomic, satisfied and unsatisfied for the alice@NOW request ──
     Shape {
         name: "recipient-eq-alice",
+        in_scope: true,
         defs: "_:c@S@ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ;\n  odrl:rightOperand <urn:alice> .",
     },
     Shape {
         name: "recipient-eq-bob",
+        in_scope: true,
         defs: "_:c@S@ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ;\n  odrl:rightOperand <urn:bob> .",
     },
     Shape {
         name: "recipient-neq-alice",
+        in_scope: true,
         defs: "_:c@S@ odrl:leftOperand odrl:recipient ; odrl:operator odrl:neq ;\n  odrl:rightOperand <urn:alice> .",
     },
     Shape {
         name: "recipient-neq-bob",
+        in_scope: true,
         defs: "_:c@S@ odrl:leftOperand odrl:recipient ; odrl:operator odrl:neq ;\n  odrl:rightOperand <urn:bob> .",
     },
     Shape {
         name: "datetime-lteq-past",
+        in_scope: true,
         defs: "_:c@S@ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lteq ;\n  odrl:rightOperand @PAST@ .",
     },
     Shape {
         name: "datetime-lteq-future",
+        in_scope: true,
         defs: "_:c@S@ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lteq ;\n  odrl:rightOperand @FUTURE@ .",
     },
     Shape {
         name: "datetime-gteq-past",
+        in_scope: true,
         defs: "_:c@S@ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:gteq ;\n  odrl:rightOperand @PAST@ .",
     },
     Shape {
         name: "datetime-gteq-future",
+        in_scope: true,
         defs: "_:c@S@ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:gteq ;\n  odrl:rightOperand @FUTURE@ .",
     },
     // ── out-of-scope atomic (the strata cannot decide these) ──────────────────
     Shape {
         name: "purpose-eq (out of scope)",
+        in_scope: false,
         defs: "_:c@S@ odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;\n  odrl:rightOperand <urn:marketing> .",
     },
     Shape {
         name: "datetime-lt-strict (out of scope)",
+        in_scope: false,
         defs: "_:c@S@ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lt ;\n  odrl:rightOperand @FUTURE@ .",
     },
     Shape {
         name: "recipient-isAnyOf (out of scope)",
+        in_scope: false,
         defs: "_:c@S@ odrl:leftOperand odrl:recipient ; odrl:operator odrl:isAnyOf ;\n  odrl:rightOperand \"urn:alice|urn:bob\" .",
     },
     Shape {
         name: "structurally-incomplete (no operator/right)",
+        in_scope: false,
         defs: "_:c@S@ odrl:leftOperand odrl:recipient .",
     },
     // ── AMBIGUOUS nodes: the defect-1 family. Satisfaction is keyed on the NODE,
     //    so pre-fix any one satisfiable cross-product combination granted. ──────
     Shape {
         name: "AMBIG two-operand (recipient eq alice + dateTime lteq PAST)",
+        in_scope: false,
         defs: "_:c@S@ odrl:leftOperand odrl:recipient , odrl:dateTime ;\n  odrl:operator odrl:eq , odrl:lteq ;\n  odrl:rightOperand <urn:alice> , @PAST@ .",
     },
     Shape {
         name: "AMBIG multi-right (recipient eq alice,bob)",
+        in_scope: false,
         defs: "_:c@S@ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ;\n  odrl:rightOperand <urn:alice> , <urn:bob> .",
     },
     Shape {
         name: "AMBIG multi-left (recipient+purpose eq alice)",
+        in_scope: false,
         defs: "_:c@S@ odrl:leftOperand odrl:recipient , odrl:purpose ; odrl:operator odrl:eq ;\n  odrl:rightOperand <urn:alice> .",
     },
     Shape {
         name: "AMBIG multi-operator (recipient eq/neq alice)",
+        in_scope: false,
         defs: "_:c@S@ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq , odrl:neq ;\n  odrl:rightOperand <urn:alice> .",
     },
     Shape {
         name: "AMBIG rightOperand + rightOperandReference",
+        in_scope: false,
         defs: "_:c@S@ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ;\n  odrl:rightOperand <urn:alice> ; odrl:rightOperandReference <urn:bob> .",
     },
     // ── logical constraints, satisfied and unsatisfied ────────────────────────
     Shape {
         name: "or(recipient-eq-bob, datetime-lteq-past)",
+        in_scope: true,
         defs: "_:c@S@ a odrl:LogicalConstraint ; odrl:or _:x@S@ , _:y@S@ .\n_:x@S@ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ; odrl:rightOperand <urn:bob> .\n_:y@S@ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lteq ; odrl:rightOperand @PAST@ .",
     },
     Shape {
         name: "or(recipient-eq-alice, datetime-lteq-past)",
+        in_scope: true,
         defs: "_:c@S@ a odrl:LogicalConstraint ; odrl:or _:x@S@ , _:y@S@ .\n_:x@S@ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ; odrl:rightOperand <urn:alice> .\n_:y@S@ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lteq ; odrl:rightOperand @PAST@ .",
     },
     Shape {
         name: "and(recipient-eq-alice, datetime-lteq-future)",
+        in_scope: true,
         defs: "_:c@S@ a odrl:LogicalConstraint ; odrl:and _:x@S@ , _:y@S@ .\n_:x@S@ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ; odrl:rightOperand <urn:alice> .\n_:y@S@ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lteq ; odrl:rightOperand @FUTURE@ .",
     },
     Shape {
         name: "and(recipient-eq-alice, datetime-lteq-past)",
+        in_scope: true,
         defs: "_:c@S@ a odrl:LogicalConstraint ; odrl:and _:x@S@ , _:y@S@ .\n_:x@S@ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ; odrl:rightOperand <urn:alice> .\n_:y@S@ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lteq ; odrl:rightOperand @PAST@ .",
     },
     Shape {
         name: "and(AMBIG two-operand member)",
+        in_scope: false,
         defs: "_:c@S@ a odrl:LogicalConstraint ; odrl:and _:x@S@ .\n_:x@S@ odrl:leftOperand odrl:recipient , odrl:dateTime ; odrl:operator odrl:eq , odrl:lteq ;\n  odrl:rightOperand <urn:alice> , @PAST@ .",
     },
     Shape {
         name: "or(AMBIG two-operand member)",
+        in_scope: false,
         defs: "_:c@S@ a odrl:LogicalConstraint ; odrl:or _:x@S@ .\n_:x@S@ odrl:leftOperand odrl:recipient , odrl:dateTime ; odrl:operator odrl:eq , odrl:lteq ;\n  odrl:rightOperand <urn:alice> , @PAST@ .",
     },
     // MIXED combinators on one node: the or-rule would satisfy it from the satisfied
@@ -740,10 +784,12 @@ const SHAPES: &[Shape] = &[
     // unsatisfied member — the defect-1 quantifier hole one level up.
     Shape {
         name: "AMBIG mixed or+and combinators",
+        in_scope: false,
         defs: "_:c@S@ a odrl:LogicalConstraint ; odrl:or _:x@S@ ; odrl:and _:y@S@ .\n_:x@S@ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ; odrl:rightOperand <urn:alice> .\n_:y@S@ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lteq ; odrl:rightOperand @PAST@ .",
     },
     Shape {
         name: "xone(recipient-eq-alice, datetime-lteq-past)",
+        in_scope: false,
         defs: "_:c@S@ a odrl:LogicalConstraint ; odrl:xone _:x@S@ , _:y@S@ .\n_:x@S@ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ; odrl:rightOperand <urn:alice> .\n_:y@S@ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lteq ; odrl:rightOperand @PAST@ .",
     },
 ];
@@ -809,11 +855,22 @@ struct Coverage {
     rust_refused: usize,
     rust_granted: usize,
     rust_denied: usize,
+    /// Cases inside the claimed decision-EQUIVALENCE scope, and how many of them
+    /// actually produced a grant / a deny (non-vacuity for the equality assertion).
+    equiv_cases: usize,
+    equiv_grants: usize,
+    equiv_denies: usize,
 }
 
 /// The load-bearing check: assert the N3 path is never more permissive than the Rust
 /// reference path for ONE generated (policy, request) pair.
-fn assert_not_more_permissive(label: &str, policy_ttl: &str, party: &str, cov: &mut Coverage) {
+fn assert_not_more_permissive(
+    label: &str,
+    policy_ttl: &str,
+    party: &str,
+    shape_in_scope: bool,
+    cov: &mut Coverage,
+) {
     cov.total += 1;
     let request = Request::new(format!("{}read", ODRL)).on(TARGET).by(party).at(NOW);
 
@@ -897,6 +954,31 @@ fn assert_not_more_permissive(label: &str, policy_ttl: &str, party: &str, cov: &
             out.deny_triple
         );
     }
+
+    // (4) INSIDE the claimed decision-equivalence scope the two paths must agree
+    //     EXACTLY, not merely in the safe direction. The scope is: a supported single
+    //     operand tuple per constraint node (optionally under ONE odrl:or/odrl:and over
+    //     such members), a concrete mapped action (not the `odrl:use` umbrella), and an
+    //     admissible odrl:conflict strategy — the last read off the reference path
+    //     itself (`!rust.refused`) rather than re-derived here. This is what licenses
+    //     the equivalence sentence in the crate docs and the access-control SKILL: the
+    //     claim is CHECKED over the generated sub-corpus, not asserted.
+    if shape_in_scope && !rust.refused {
+        cov.equiv_cases += 1;
+        if rust.grant_triple.is_some() {
+            cov.equiv_grants += 1;
+        }
+        if rust.deny_triple.is_some() {
+            cov.equiv_denies += 1;
+        }
+        assert_eq!(
+            (out.grant_triple.as_ref(), out.deny_triple.as_ref()),
+            (rust.grant_triple.as_ref(), rust.deny_triple.as_ref()),
+            "{}: this case is INSIDE the claimed decision-equivalence scope, so the two \
+             paths must agree exactly",
+            label
+        );
+    }
 }
 
 #[test]
@@ -912,6 +994,11 @@ fn generated_n3_is_never_more_permissive_than_the_rust_reference() {
                 // strata match action IRIs exactly — is a per-shape property. Sweeping it
                 // across all five conflict strategies only re-ran the same refusals.
                 let actions: &[&str] = if *cname == "unset" { &["read", "use"] } else { &["read"] };
+                // The `odrl:use` umbrella is deliberately OUTSIDE the equivalence scope:
+                // the Rust evaluator lets a `use` permission permit a `read` request
+                // while the strata match action IRIs exactly, so the N3 path is strictly
+                // more restrictive there (safe, not equivalent).
+
                 for action in actions {
                     let policy = generate_policy(conflict, *kind, action, shape);
                     for party in ["urn:alice", "urn:bob"] {
@@ -919,7 +1006,13 @@ fn generated_n3_is_never_more_permissive_than_the_rust_reference() {
                             "gen[shape={} kind={} conflict={} action={} party={}]\n{}",
                             shape.name, kind.0, cname, action, party, policy
                         );
-                        assert_not_more_permissive(&label, &policy, party, &mut cov);
+                        assert_not_more_permissive(
+                            &label,
+                            &policy,
+                            party,
+                            shape.in_scope && *action == "read",
+                            &mut cov,
+                        );
                     }
                 }
             }
@@ -936,15 +1029,24 @@ fn generated_n3_is_never_more_permissive_than_the_rust_reference() {
     assert!(cov.rust_granted >= 20, "Rust must actually grant somewhere, got {}", cov.rust_granted);
     assert!(cov.rust_denied >= 20, "Rust must actually deny somewhere, got {}", cov.rust_denied);
     assert!(cov.rust_refused >= 20, "Rust must refuse somewhere, got {}", cov.rust_refused);
+    // The EQUALITY assertion is likewise trivially satisfiable by an empty in-scope
+    // sub-corpus, or by one in which both paths always emit nothing.
+    assert!(cov.equiv_cases >= 100, "equivalence sub-corpus too small: {}", cov.equiv_cases);
+    assert!(cov.equiv_grants >= 10, "equivalence scope must include grants: {}", cov.equiv_grants);
+    assert!(cov.equiv_denies >= 10, "equivalence scope must include denies: {}", cov.equiv_denies);
     println!(
         "generated differential: {} cases; n3 grant/deny/refuse = {}/{}/{}; \
-         rust grant/deny/refuse = {}/{}/{}",
+         rust grant/deny/refuse = {}/{}/{}; equivalence sub-corpus = {} cases \
+         ({} grants, {} denies)",
         cov.total,
         cov.n3_granted,
         cov.n3_denied,
         cov.n3_refused,
         cov.rust_granted,
         cov.rust_denied,
-        cov.rust_refused
+        cov.rust_refused,
+        cov.equiv_cases,
+        cov.equiv_grants,
+        cov.equiv_denies
     );
 }

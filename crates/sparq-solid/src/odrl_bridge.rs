@@ -2357,12 +2357,12 @@ const REQUEST_IRI: &str = "urn:odrl-req";
 ///    evaluator requires ALL, so a second LC could widen; likewise no
 ///    `odrl:duty`/`odrl:obligation` anywhere — the strata do not check duty
 ///    discharge, so granting a duty-carrying permission would widen;
-/// 2a. no constraint node (a rule's own, or a member of its logical constraint) may
+/// 3. no constraint node (a rule's own, or a member of its logical constraint) may
 ///    be AMBIGUOUS — several distinct `odrl:leftOperand`/`odrl:operator`/right-operand
 ///    objects, or several distinct logical combinators, on one node
 ///    (`unambiguous_operands`). This is the driver half of the stratum-A0 fail-OPEN
 ///    fix and applies to BOTH rule kinds. [OPUS-5];
-/// 3. every PROHIBITION must name `odrl:action`/`odrl:target`/`odrl:assignee`
+/// 4. every PROHIBITION must name `odrl:action`/`odrl:target`/`odrl:assignee`
 ///    (the strata match prohibitions structurally on all three; the Rust
 ///    evaluator treats a missing attribute as matching ANY request) and every
 ///    prohibition constraint — atomic, or each `odrl:or`/`odrl:and` member —
