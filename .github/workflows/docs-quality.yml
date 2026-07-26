@@ -266,9 +266,24 @@ jobs:
       # should-FAIL banned spellings must fire AND should-PASS proper-noun / paper-title /
       # third-party-doc / URL / allow-marker lines (+ the GeoSPARQL / italic-closer / bold
       # false-positive families) must not regress. Hermetic (no git/network).
+      #
+      # [OPUS-5] issue #3811 — the gate is now DATA-DRIVEN (scripts/banned-terminology.json)
+      # and each banned term declares its OWN file surface. The trigger: ~98 occurrences of a
+      # maintainer-banned trust term reached PR #3451 as a `pub` Rust type AND a PUBLISHED
+      # .ttl rdfs:comment with a green `ci-summary / gate`, because this gate hard-coded its
+      # list and scanned only *.md — neither extension was reachable. Adding a future banned
+      # term is now one object in the JSON, not a code change.
+      #
+      # These three steps are the whole enforcement path; deleting any one of them silently
+      # disarms the gate, so scripts/tests/test_banned_terminology.py asserts all three call
+      # sites exist, that neither the steps nor the job carry a skip `if:`, that the job name
+      # does not read as advisory (ci_summary_gate.py would stop gating on it), and that the
+      # workflow still triggers on merge_group (the queue must evaluate it).
       - name: Self-test the terminology gate (both directions)
         run: python3 scripts/check-terminology.py --self-test
-      - name: terminology (RDF 1.2 / SPARQL 1.2 wording) — GATING
+      - name: Self-test the banned-terminology gate (fixtures + workflow wiring)
+        run: python3 scripts/tests/test_banned_terminology.py
+      - name: terminology (RDF 1.2 / SPARQL 1.2 + banned wording) — GATING
         run: python3 scripts/check-terminology.py
 
       # ---- former job: no-perf-numbers (docs) ----
