@@ -261,12 +261,29 @@ fn elk_differential_for_a_brand_new_restriction_node() {
     let mut inc = IncrementalClassifier::new(&dict, &start);
     assert_closure(&dict, &inc.hierarchy(), &classes, &[("X", "P")], "pre");
     assert_matches_full_reclassification(&dict, &inc, "pre");
+    let pre_named = inc.hierarchy().report().named_classes;
 
     let r = inc.apply_edits(&dict, &edit, &[]);
     assert_eq!(
         r.disposition,
         EditDisposition::Incremental,
         "a fresh class-expression node is delta-local"
+    );
+    // `IncrementalReport::report`'s documented contract for `named_classes`: the LIVE concept-index
+    // size, not the pre-edit snapshot. The edit mints a fresh normalization name for the new
+    // restriction node, so the count must have grown — and it must be the live index size, which
+    // `hierarchy()` reports too.
+    assert!(
+        r.report.named_classes > pre_named,
+        "the fresh restriction node mints a concept, so the live index must grow \
+         (pre {}, post {})",
+        pre_named,
+        r.report.named_classes
+    );
+    assert_eq!(
+        inc.hierarchy().report().named_classes,
+        r.report.named_classes,
+        "the hierarchy must carry the same live count the edit reported"
     );
     assert_closure(
         &dict,

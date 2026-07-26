@@ -261,6 +261,11 @@ impl IncrementalClassifier {
                 self.ex.axioms.extend(added_axioms.axioms);
                 let delta = &self.ex.axioms[first..];
                 report.added_axioms = delta.len();
+                // The delta interned the edit's named classes and minted its own fresh
+                // normalization names, so re-read the live index size with the SAME semantics the
+                // full extraction uses (`extract::extract`'s closing `names.concept_count()`).
+                // Without this the counter would report the pre-edit index forever.
+                self.ex.report.named_classes = self.ex.names.concept_count();
                 report.reseeded_memberships = Self::resume(&mut self.sat, &self.ex, first);
             }
             EditDisposition::Full(_) => {
