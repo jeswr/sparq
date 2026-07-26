@@ -15,11 +15,11 @@
 #intro-section("abstract", "Abstract")[
   This document defines a small verifier-to-holder contract for asking a SPARQL question
   subject to explicit source-trust requirements. A request contains exactly one SPARQL query,
-  one RDF trust envelope, and one nonce. The envelope supports directly enumerated issuers and
-  issuers certified by a governance framework. In both modes, acceptance depends on positive,
-  time-windowed status attestations; absence is never interpreted as non-revocation. The
-  response uses RDF 1.2 reifiers with PROV-O attribution normatively, with an informative,
-  lossless named-graph mapping for SPARQL 1.1 systems.
+  one RDF trust-requirements graph, and one nonce. The graph supports directly enumerated
+  issuers and issuers certified by a governance framework. In both modes, acceptance depends
+  on positive, time-windowed status attestations; absence is never interpreted as
+  non-revocation. The response uses RDF 1.2 reifiers with PROV-O attribution normatively,
+  with an informative, lossless named-graph mapping for SPARQL 1.1 systems.
 ]
 
 #sotd()
@@ -49,7 +49,7 @@ admissible portion of a response dataset.
 
 == Design goals
 
-- One query, one reusable RDF envelope, and one nonce; no new SPARQL syntax.
+- One query, one reusable RDF trust-requirements graph, and one nonce; no new SPARQL syntax.
 - Two composable trust modes: enumerated parties and framework-certified issuers.
 - Open-world, monotone non-revocation expressed by existence of positive evidence.
 - A certification-scope layer capable of service-, type-, predicate-set-, and shape-level
@@ -65,7 +65,7 @@ The key words #strong[MUST], #strong[MUST NOT], #strong[REQUIRED], #strong[SHALL
 
 A #dfn[verifier] sends a request. A #dfn[holder] evaluates it and returns a response. A
 #dfn[contributing statement] is an RDF statement used in deriving a returned query answer. A
-#dfn[trust envelope] is the RDF graph containing one or more
+#dfn[trust-requirements graph] is the RDF graph containing one or more
 `trustx:TrustRequirements` resources. A #dfn[reference instant] is the
 `xsd:dateTime` selected by `trustx:requiresValidStatusAt`.
 
@@ -81,16 +81,16 @@ NOT] turn missing evidence into a positive result.
 [TX-REQ-001] A request #strong[MUST] contain exactly:
 
 + one SPARQL 1.1 `ASK` or `SELECT` query $Q$;
-+ one RDF trust envelope $T R$; and
++ one RDF trust-requirements graph $T R$; and
 + one unpredictable nonce supplied by the verifier.
 
-[TX-REQ-002] The envelope #strong[MUST] contain at least one
+[TX-REQ-002] The trust-requirements graph #strong[MUST] contain at least one
 `trustx:TrustRequirements` resource whose `trustx:question` identifies $Q$, and exactly
 one `trustx:requiresValidStatusAt` reference instant per resource.
 
 [TX-REQ-003] The holder #strong[MUST] bind the nonce, the canonical query representation,
-and the canonical trust envelope to the response. A replay with another nonce or a response
-whose query or envelope differs #strong[MUST] be rejected.
+and the canonical trust-requirements graph to the response. A replay with another nonce or a
+response whose query or requirements graph differs #strong[MUST] be rejected.
 
 #note[
   The nonce is the freshness challenge already represented by the zkSPARQL manifest; this
@@ -112,7 +112,7 @@ ASK {
 }
 ```
 
-= Trust envelope and trust modes
+= Trust requirements and trust modes
 
 This section normatively defines the `trustx:` certification-scope layer. Until a standards
 body assigns a namespace, `trustx:` denotes `https://sparq.dev/ns/trust#`; these terms are
@@ -175,7 +175,7 @@ requirements. The vendored `sec-req:` regulatory-requirements ontology is distin
 
 == Combining the modes
 
-The two examples above, placed in one envelope and bound to the same query, express direct
+The two examples above, placed in one requirements graph and bound to the same query, express direct
 issuer trust #emph[or] framework certification. A holder #strong[MUST NOT] combine a
 partially satisfied direct requirement with a partially satisfied framework requirement.
 
@@ -374,7 +374,7 @@ monotone existence questions; it does not infer negative facts from omission.
 
 Status attestations have validity windows. A status change inside a window is not visible
 until newer positive evidence is obtained. The verifier chooses the reference instant and
-acceptable windows in the envelope; this proposal defines no universal duration.
+acceptable windows in the requirements graph; this proposal defines no universal duration.
 
 == SPARQL 1.2 implementation gap
 

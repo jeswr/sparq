@@ -59,7 +59,7 @@ export const SPECS: Spec[] = [
     date: "2026-07-26",
     editors: "Jesse Wright · the sparq project",
     blurb:
-      "One SPARQL query, one RDF trust envelope, and one nonce: enumerated-party and framework-certified trust modes, positive time-windowed status evidence, certification-scope checks, and RDF 1.2 reifier provenance with a lossless SPARQL 1.1 named-graph mapping. ZK is not externally audited (sq-qhy4); MPC is honest-majority semi-honest only.",
+      "One SPARQL query, one RDF trust-requirements graph, and one nonce: enumerated-party and framework-certified trust modes, positive time-windowed status evidence, certification-scope checks, and RDF 1.2 reifier provenance with a lossless SPARQL 1.1 named-graph mapping. ZK is not externally audited (sq-qhy4); MPC is honest-majority semi-honest only.",
   },
   {
     slug: "zksparql",
