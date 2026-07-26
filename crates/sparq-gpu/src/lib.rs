@@ -30,6 +30,21 @@
 //! - WGSL has **no f64**: the f64 filter compares IEEE-754 *bit patterns* mapped
 //!   to a monotonic u64 key (sign-flip trick) — exact, no precision loss, but a
 //!   real portability cost worth knowing about (see README §limits).
+//!
+//! # Security posture — threat model DEFERRED, not clean
+//!
+//! `sparq-gpu` is listed **out of scope** in `research/threat-model.md`: it is
+//! `publish = false`, nothing in the workspace depends on it, and the T24d verdict
+//! is PARK — so there is no attacker-reachable path through these kernels to model
+//! yet. Read that as *unmodelled*, **not** as *audited safe*. The crate is
+//! `#![forbid(unsafe_code)]`, but a wired-in GPU backend would add boundaries this
+//! crate has never been assessed against (untrusted column data reaching WGSL,
+//! adapter/driver trust, device-memory residues between queries, readback integrity).
+//!
+//! The deferral has an explicit trigger — publishing the crate, or any workspace
+//! crate depending on it — and `tests/prototype_stage_tripwire.rs` fails the moment
+//! either happens, so the model must be written in the same change that makes these
+//! kernels reachable. Tracked as bead **sq-vrye** / issue #3387.
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 use bytemuck::{Pod, Zeroable};

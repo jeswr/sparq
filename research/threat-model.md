@@ -31,7 +31,7 @@ actually verifies.
 |---|---|---|
 | `sparq-zk`, `sparq-zk-compose` | The ZK estate has its **own** adversarial threat model. **Verdict: v1 verifier soundness is BROKEN** (a prover can forge arbitrary accepted results). | `research/zk-soundness-audit.md` (12 confirmed issues, 6 critical) |
 | `sparq-mpc` | `publish = false` research scaffold; crypto primitive not yet chosen — not ready for a production threat model. | Bead **sq-jskw** (DEFER until a primitive is chosen) |
-| `sparq-gpu` | `publish = false`; measure-first PCIe-break-even prototype. | Bead **sq-vrye** (DEFER until it exits the prototype stage) |
+| `sparq-gpu` | `publish = false`; measure-first PCIe-break-even prototype (verdict PARK), depended on by nothing — no attacker-reachable path to model. | Bead **sq-vrye** (DEFER until it exits the prototype stage). The exit trigger — publication, or any workspace crate depending on it — is enforced by `crates/sparq-gpu/tests/prototype_stage_tripwire.rs`, which goes red so the model gets written in the same change. |
 | `sparq-nlq` | LLM→SPARQL; young API, prompt-injection + query-budget surface not stabilized. | Bead **sq-j1wv** (DEFER until the API stabilizes) |
 
 Capability crates not load-bearing for the core production path (`sparq-geo`,
