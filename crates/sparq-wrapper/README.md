@@ -71,6 +71,8 @@ hatch.
 
 - [`skills/rdf-wrapper/SKILL.md`](../../skills/rdf-wrapper/SKILL.md) — usage
   recipes and the feature matrix.
+- [`docs/proposed/README.md`](docs/proposed/README.md) — status index for each
+  default-off proposal module.
 - [rdfjs/wrapper](https://github.com/rdfjs/wrapper) — object-mapping prior art.
 - [Grapoi](https://github.com/rdf-ext/grapoi) and
   [Clownface](https://github.com/zazuko/clownface) — traversal ergonomics.

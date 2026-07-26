@@ -8,14 +8,14 @@
 //! typed focus kinds and bound node factories live in the feature-gated
 //! `typed_focus` submodule (cargo feature `proposed-typed-focus`).
 
-#[cfg(feature = "proposed-cardinality")]
-pub mod cardinality;
 #[cfg(feature = "proposed-async-events")]
 pub mod async_events;
 #[cfg(feature = "proposed-async-node")]
 pub mod async_node;
 #[cfg(feature = "proposed-async-store")]
 pub mod async_store;
+#[cfg(feature = "proposed-cardinality")]
+pub mod cardinality;
 #[cfg(feature = "proposed-codecs")]
 pub mod codecs;
 #[cfg(feature = "proposed-graph-scope")]
