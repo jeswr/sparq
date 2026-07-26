@@ -2343,7 +2343,7 @@ mod tests {
         keyed.insert(vec![String::new()], vec![subj.clone()]);
         keyed.insert(vec!["k".to_string()], vec![subj.clone()]);
         let idx = JoinIndex { child_cols: vec![0], keyed, all: Vec::new() };
-        assert_eq!(idx.lookup(&["k".to_string()]), &[subj.clone()]);
+        assert_eq!(idx.lookup(&["k".to_string()]), std::slice::from_ref(&subj));
         // The empty cell is NULL: it must NOT match the empty-string key that IS in the index.
         assert!(idx.lookup(&[String::new()]).is_empty());
         // A key that is simply absent misses too.
