@@ -27,10 +27,12 @@ sparq-engine = { path = "../../crates/sparq-engine" }
 sparq-parse = { path = "../../crates/sparq-parse" }
 # [OPUS-4.8] HDT load path under test (bench-hdt / bench-hdt-zip): the direct
 # sparq-side SPO decoder (`graph_from_reader`) vs the upstream wavelet-building
-# path (`load_reader_via_upstream`). The `hdt`(sophia) dep lets the bench build a
+# path (`load_reader_via_upstream`). The `hdt` `nt` feature lets the bench build a
 # realistic `.hdt` fixture from N-Triples in-process (no external rdf2hdt needed).
+# [GPT-5] sq-th5i: keep the benchmark oracle on the same upstream release and
+# feature set as sparq-hdt's decode-parity tests.
 sparq-hdt = { path = "../../crates/sparq-hdt" }
-hdt = { version = "0.4", features = ["sophia"] }
+hdt = { version = "0.7", default-features = false, features = ["nt"] }
 # Reference parsers (same versions the workspace pins).
 oxttl = { version = "0.2", features = ["rdf-12"] }
 oxrdf = { version = "0.3", features = ["rdf-12"] }
