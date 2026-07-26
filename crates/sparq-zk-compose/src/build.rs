@@ -421,6 +421,93 @@ pub fn build_filter_int(
     ))
 }
 
+/// The BOOLEAN-lane verdict for `value <op> bound` over the XSD boolean order
+/// `false < true` (sq-5xdlk) — the host mirror of the `filter_value_dl_int`
+/// member's `integer_verdict` applied to the boolean value hooks
+/// `{0 = false, 1 = true}` (`zk/compose/compose_core/src/filter_value.nr`).
+///
+/// `EQ`/`NE` are the ordinary boolean equality; `LT`/`LE`/`GT`/`GE` are the
+/// DEGENERATE orderings XPath's `op:boolean-less-than` / `op:boolean-greater-than`
+/// define, i.e. exactly `false < true` — they are meaningful, not errors, which is
+/// why the integer member serves this lane unchanged.
+// [OPUS-5] sq-5xdlk: boolean value-lane verdict oracle. Opt-in (`dual-leaf`).
+#[cfg(feature = "dual-leaf")]
+pub fn boolean_verdict(value: bool, op: FilterOp, bound: bool) -> bool {
+    match op {
+        FilterOp::Lt => !value && bound,
+        FilterOp::Le => !value || bound,
+        FilterOp::Gt => value && !bound,
+        FilterOp::Ge => value || !bound,
+        FilterOp::Eq => value == bound,
+        FilterOp::Ne => value != bound,
+    }
+}
+
+/// A built DUAL-LEAF `xsd:boolean` value-lane FILTER (sq-5xdlk): the public
+/// [`ProofInputs`] plus the member's two PRIVATE field witnesses.
+///
+/// The witnesses are the dual-leaf components `sparq_zk::dual_leaf_boolean::
+/// encode_boolean` produced for the committed literal, so `inputs.operand_enc`
+/// is by construction the leaf those witnesses rebind to in-circuit.
+// [OPUS-5] sq-5xdlk: boolean value-lane host wiring. Opt-in, NOT-yet-sound.
+#[cfg(feature = "dual-leaf")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuiltFilterValueDlBoolean {
+    /// Public inputs for the shared [`CircuitId::FilterValueDl`] member, carrying
+    /// the BOOLEAN `datatype_const` and `bound ∈ {0, 1}`.
+    pub inputs: ProofInputs,
+    /// PRIVATE: the boolean `VALUE_HOOK` (`0` = false, `1` = true) as a field.
+    pub value_hook: FieldHex,
+    /// PRIVATE: the OFF-circuit blake3 lexical hash, carried as a free witness.
+    pub lexical_component: FieldHex,
+}
+
+/// Build a DUAL-LEAF `xsd:boolean` value-lane FILTER over the committed literal
+/// `literal` under operator `op` against the constant `bound` (sq-5xdlk — the
+/// circuit half of the boolean lane whose host encoder is sq-hh7a4).
+///
+/// NO new Noir member is involved: this targets the EXISTING
+/// [`CircuitId::FilterValueDl`] (`filter_value_dl_int`) with
+/// `datatype_const = `[`crate::manifest::boolean_datatype_const`]`()` and the
+/// boolean hooks `{0, 1}` inside its `u64` domain (see that function's docs for
+/// why the lanes cannot cross).
+///
+/// The disclosed verdict is COMPUTED here ([`boolean_verdict`]) rather than taken
+/// from the caller, so an honest host cannot accidentally disclose a verdict the
+/// member will refuse to prove; a test constructing the LYING case builds the
+/// [`ProofInputs::FilterValueDl`] variant directly with a flipped `expected`.
+///
+/// Returns the encoder's `Err` unchanged when `literal` is not a canonical
+/// `xsd:boolean` (`"true"`/`"false"`): the §6 fail-closed co-binding rejects the
+/// non-canonical XSD-legal spellings `"1"`/`"0"` and every non-boolean datatype,
+/// so a desynced leaf is never built here.
+///
+/// DOCUMENTED RISK: inherits the value lane's INV-VL downgrade (#769 accepted,
+/// CR-G8 / sq-qhy4). NOT externally audited; no soundness / privacy claim.
+// [OPUS-5] sq-5xdlk: boolean value-lane host wiring. Opt-in, NOT-yet-sound.
+#[cfg(feature = "dual-leaf")]
+pub fn build_filter_value_dl_boolean(
+    literal: &oxrdf::Literal,
+    op: FilterOp,
+    bound: bool,
+) -> Result<BuiltFilterValueDlBoolean, sparq_zk::dual_leaf::DualLeafError> {
+    let components = sparq_zk::dual_leaf_boolean::encode_boolean(literal)?;
+    // The encoder maps ONLY the canonical lexicals, so the hook is exactly {0, 1}.
+    let value = components.value_hook != Fr::from(0u64);
+    Ok(BuiltFilterValueDlBoolean {
+        inputs: ProofInputs::FilterValueDl {
+            id: CircuitId::FilterValueDl,
+            operand_enc: hexf(&components.leaf()),
+            op,
+            bound: u64::from(bound),
+            datatype_const: crate::manifest::boolean_datatype_const(),
+            expected: boolean_verdict(value, op, bound),
+        },
+        value_hook: hexf(&components.value_hook),
+        lexical_component: hexf(&components.lexical_component),
+    })
+}
+
 /// Encode an xsd:integer literal `value` to its term encoding under `salt`
 /// (salt-independent for literals; convenience for callers wiring a filter to
 /// a known constant).
