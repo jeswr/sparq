@@ -20,8 +20,21 @@
 //!     disagree with the regression-gated value);
 //!   * every per-member `circuit_size_per_member` value EQUALS the snapshot;
 //!   * every GAP (`status` containing "NO ZK CIRCUIT YET") carries
-//!     `circuit_size: null` and an EMPTY `zk_members` (NEVER a fabricated number);
+//!     `circuit_size: null` and an EMPTY `zk_members` (NEVER a fabricated number),
+//!     and no side-channel number either (`floor_`/`value_lane_circuit_size`);
 //!   * the `summary` counts match the actual query rows.
+//!
+//! Status vocabulary (three buckets, in the order the tests apply them):
+//!
+//!   * GAP — any status containing the marker. Two flavours, both `circuit_size:
+//!     null`: a plain gap (buildable, just not built) and an EXCLUDED BY DESIGN row
+//!     (non-monotone / closed-world — OPTIONAL, aggregation, negation).
+//!   * `covered` (exact) — a member proves the feature AS STATED.
+//!   * everything else is `partial`, which now covers TWO shapes: the
+//!     verifier-side/desugared rows (no member, null size) and the BOUNDED rows
+//!     (the `path_reach` family), which DO carry real joined member sizes but prove
+//!     a strictly weaker statement than the SPARQL feature. A bounded row must
+//!     never be relabelled `covered` — see `bounded_paths_are_not_labelled_covered`.
 //!
 //! If this fails after an INTENTIONAL circuit change, re-run
 //! `bench/zk-compose/scripts/gate_counts.sh` (re-baseline the snapshot + bench
@@ -76,6 +89,24 @@ struct Query {
     floor_member: Option<String>,
     #[serde(default)]
     floor_circuit_size: Option<u64>,
+    /// Honesty flag for the bounded property-path closures (`p+`/`p*`): they hold
+    /// ONLY under the EXISTENCE-ONLY bounded statement
+    /// (research/zksparql-fragment-extension.md §4), never the unbounded SPARQL
+    /// closure. `false`/absent for every other row. It is the machine-readable
+    /// sibling of the `BOUNDED_DEPTH_EXISTENCE_ONLY` flag, NOT a licence to
+    /// relabel the row `covered` — see `bounded_paths_are_not_labelled_covered`.
+    #[serde(default)]
+    bounded: bool,
+    /// The LANDED dual-leaf value-lane sibling (`filter_value_dl_*`) of a
+    /// blake3-bound numeric FILTER lane — joined like every other number.
+    #[serde(default)]
+    value_lane_member: Option<String>,
+    #[serde(default)]
+    value_lane_circuit_size: Option<u64>,
+    /// A PROJECTION (an explicit ESTIMATE), only legal where no measured value
+    /// lane exists for the row.
+    #[serde(default)]
+    projected_after: Option<String>,
 }
 
 impl Query {
@@ -110,11 +141,14 @@ fn catalog_members_exist_in_snapshot() {
                 ));
             }
         }
-        if let Some(fm) = &q.floor_member {
-            if !snapshot.members.contains_key(fm) {
-                errors.push(format!(
-                    "{id}: floor_member '{fm}' is absent from the snapshot"
-                ));
+        for (what, name) in [
+            ("floor_member", &q.floor_member),
+            ("value_lane_member", &q.value_lane_member),
+        ] {
+            if let Some(m) = name {
+                if !snapshot.members.contains_key(m) {
+                    errors.push(format!("{id}: {what} '{m}' is absent from the snapshot"));
+                }
             }
         }
         if q.is_gap() && !q.zk_members.is_empty() {
@@ -150,13 +184,28 @@ fn covered_circuit_sizes_match_snapshot() {
                 None => errors.push(format!("{id}: per-member {m} absent from snapshot")),
             }
         }
-        if let (Some(fm), Some(fsize)) = (&q.floor_member, q.floor_circuit_size) {
-            if let Some(&snap) = snapshot.members.get(fm) {
-                if snap != fsize {
-                    errors.push(format!(
-                        "{id}: floor {fm} catalog={fsize} != snapshot={snap}"
-                    ));
+        // The side-channel numbers (the raw-compare floor and the LANDED value-lane
+        // sibling) are joined too — they are the numbers a reader compares the
+        // headline against, so an unjoined one would be the easiest place to drift.
+        for (what, name, size) in [
+            ("floor", &q.floor_member, q.floor_circuit_size),
+            ("value_lane", &q.value_lane_member, q.value_lane_circuit_size),
+        ] {
+            match (name, size) {
+                (Some(m), Some(sz)) => {
+                    if let Some(&snap) = snapshot.members.get(m) {
+                        if snap != sz {
+                            errors.push(format!("{id}: {what} {m} catalog={sz} != snapshot={snap}"));
+                        }
+                    }
                 }
+                (Some(m), None) => {
+                    errors.push(format!("{id}: {what}_member {m} carries no joined size"))
+                }
+                (None, Some(sz)) => {
+                    errors.push(format!("{id}: {what}_circuit_size={sz} names no member"))
+                }
+                (None, None) => {}
             }
         }
         if q.is_covered() {
@@ -206,6 +255,30 @@ fn gaps_carry_no_fabricated_number() {
                     q.flag
                 ));
             }
+            // ...nor a number smuggled in through a side channel.
+            for (what, size) in [
+                ("floor_circuit_size", q.floor_circuit_size),
+                ("value_lane_circuit_size", q.value_lane_circuit_size),
+            ] {
+                if let Some(sz) = size {
+                    errors.push(format!(
+                        "{id}: GAP carries {what}={sz} — a gap has NO gate number anywhere on the row"
+                    ));
+                }
+            }
+            if !q.circuit_size_per_member.is_empty() {
+                errors.push(format!(
+                    "{id}: GAP carries circuit_size_per_member {:?}",
+                    q.circuit_size_per_member
+                ));
+            }
+        }
+        // A PROJECTION may never sit beside a MEASUREMENT of the same reduction: once
+        // the value lane lands and is measured, the estimate is stale by definition.
+        if q.projected_after.is_some() && q.value_lane_circuit_size.is_some() {
+            errors.push(format!(
+                "{id}: carries both a projected_after ESTIMATE and a MEASURED value lane — drop the projection"
+            ));
         }
     }
     assert!(
@@ -258,9 +331,15 @@ fn summary_matches_rows() {
 }
 
 /// Sanity: the catalog spans the full SPARQL 1.1 feature surface the §6 design
-/// requires — including EVERY property-path modifier — and is honest that the
-/// general-traversal modifiers are gaps. Guards against a future edit silently
-/// dropping a feature row (the value of the catalog is its COMPLETENESS).
+/// requires — including EVERY property-path modifier — and is honest about which
+/// the fragment gate accepts. After the fragment-gate extension (sq-3kd2g.6) the
+/// closures `+`/`*` are ACCEPTED and dispatch to the `path_reach` family, so they
+/// are no longer GAPs — but they stay in the `partial` bucket under an
+/// existence-only bounded statement (flagged `bounded`), `?` stays a GAP for want
+/// of a `d=1` member, and constructs the gate rejects fail-closed
+/// (OPTIONAL, aggregates, BIND, negation) stay honest GAPs. Guards against a
+/// future edit silently dropping a feature row or misstating its status (the
+/// value of the catalog is its COMPLETENESS and its honesty vs the gate).
 #[test]
 fn catalog_spans_required_features() {
     let (_snapshot, catalog) = load();
@@ -280,16 +359,82 @@ fn catalog_spans_required_features() {
         );
     }
 
-    // The general-traversal closures (+/*/?) have NO circuit today and must be
-    // honestly labelled gaps, not fabricated as covered.
+    // The UNBOUNDED-depth closures `+`/`*` are now ACCEPTED by the extended
+    // fragment gate (fragment_query) and dispatch to the bounded
+    // `path_reach_d{d}_k{k}_n{n}` family (sq-3kd2g.6, opt-in `extended-fragment`).
+    // They hold ONLY in the BOUNDED, existence-only sense (design §4: the depth
+    // bound is a public input) — so each must NOT be a stale GAP, must carry the
+    // `bounded` honesty flag, and must name only `path_reach_*` members joined from
+    // the regression-gated snapshot. Their closures have NO fixed depth
+    // (`PathClosure::{OneOrMore,ZeroOrMore}.fixed_k() == None`), so any compiled
+    // `d>=2` member satisfies the dispatcher. This is the anti-drift guard for the
+    // flip side of §1's Q13/Q14 finding: a closure must never be left a stale GAP
+    // now that the gate accepts it — and, symmetrically, never be flattened into an
+    // unbounded `covered` claim (`bounded_paths_are_not_labelled_covered` pins that
+    // other direction).
+    for id in ["Q17_path_one_or_more", "Q18_path_zero_or_more"] {
+        let q = &catalog.queries[id];
+        assert!(
+            !q.is_gap(),
+            "{id}: bounded path closure is accepted by the fragment gate and maps to \
+             the path_reach family — it must not be a stale GAP"
+        );
+        assert!(
+            q.bounded,
+            "{id}: a path closure holds ONLY under the bounded existence-only \
+             statement (design §4) — must carry the `bounded` honesty flag so it is \
+             never read as an unbounded-closure claim"
+        );
+        assert!(
+            !q.zk_members.is_empty()
+                && q.zk_members.iter().all(|m| m.starts_with("path_reach_")),
+            "{id}: bounded path closure must name only path_reach_* members, found {:?}",
+            q.zk_members
+        );
+    }
+
+    // `p?` (Q16, ZeroOrOne) is a FIXED-depth closure: the dispatcher pins it to
+    // depth bound 1 (`PathClosure::ZeroOrOne.fixed_k() == 1`) and rejects any bound
+    // member whose `d != 1` (`FragmentDispatchError::PathDepthExceedsClosure`) so a
+    // deeper chain cannot masquerade as `p?` — a deeper member is deliberately NOT a
+    // substitute, because proofs at different depth bounds are DIFFERENT statements
+    // (design §4 req 1). Every compiled `path_reach` member is `d>=2` — there is NO
+    // `d=1` member — so an accepted `p?` query can bind none of them and it is NOT
+    // covered today. It stays an honest GAP until a `d=1` member is compiled and
+    // snapshotted. The invariant this pins: `p?` may be marked covered ONLY if it
+    // names a `path_reach_d1_*` member (guarding against a regression that re-lists
+    // the deeper members and re-claims coverage).
+    {
+        let q = &catalog.queries["Q16_path_zero_or_one"];
+        if q.is_covered() {
+            assert!(
+                q.zk_members.iter().any(|m| m.starts_with("path_reach_d1_")),
+                "Q16 (p?) is a fixed depth-1 closure: it may be `covered` only when it \
+                 names a d=1 member (path_reach_d1_*), else the dispatcher rejects every \
+                 listed member as PathDepthExceedsClosure. Found {:?}",
+                q.zk_members
+            );
+        } else {
+            assert!(
+                q.is_gap() && q.zk_members.is_empty(),
+                "Q16 (p?): with no compiled d=1 member it must be an honest GAP with no \
+                 listed members, found status/members {:?}",
+                q.zk_members
+            );
+        }
+    }
+
+    // The constructs the gate REJECTS fail-closed (OUT-by-design or not-yet-built)
+    // must stay honest GAPs — never fabricated as covered/partial.
     for id in [
-        "Q16_path_zero_or_one",
-        "Q17_path_one_or_more",
-        "Q18_path_zero_or_more",
+        "Q10_optional",              // non-monotone (closed-world) — OUT
+        "Q19_aggregate_group_by",    // pattern-level completeness — OUT
+        "Q21_bind_expression",       // expression estate — phase 3
+        "Q23_negation_minus_notexists", // closed-world negation — OUT
     ] {
         assert!(
             catalog.queries[id].is_gap(),
-            "{id}: general property-path traversal has no circuit — must be a GAP"
+            "{id}: rejected fail-closed by the fragment gate — must be an honest GAP"
         );
     }
 
@@ -324,5 +469,115 @@ fn catalog_spans_required_features() {
     // Every query carries a non-empty SPARQL snippet (it is a query catalog).
     for (id, q) in &catalog.queries {
         assert!(!q.sparql.trim().is_empty(), "{id}: empty SPARQL");
+    }
+}
+
+/// The honesty edge that did NOT exist before the `path_reach` family landed: `p+`
+/// and `p*` now have a REAL circuit, so they are no longer gaps — but the circuit
+/// proves a BOUNDED, existence-only statement (∃ a chain of length ≤ D, D a public
+/// input; never "no longer path exists", never completeness). Labelling them plain
+/// `covered` would claim SPARQL's unbounded closure. Labelling them a gap would deny
+/// a landed, gate-counted member. Both directions are drift, so pin the middle: a
+/// `partial` row whose status spells out the bound and what is NOT proved.
+#[test]
+fn bounded_paths_are_not_labelled_covered() {
+    let (snapshot, catalog) = load();
+    for id in ["Q17_path_one_or_more", "Q18_path_zero_or_more"] {
+        let q = &catalog.queries[id];
+        assert!(!q.is_covered(), "{id}: a BOUNDED statement must not be labelled `covered`");
+        assert!(!q.is_gap(), "{id}: the path_reach family HAS landed — not a gap");
+        assert_eq!(
+            q.flag.as_deref(),
+            Some("BOUNDED_DEPTH_EXISTENCE_ONLY"),
+            "{id}: a bounded row must be flagged as such, not as verifier-side"
+        );
+        for must in ["BOUNDED", "NOT proved"] {
+            assert!(
+                q.status.contains(must),
+                "{id}: status must state the limit ({must:?}), found {:?}",
+                q.status
+            );
+        }
+        // The row's members are real, and its numbers are the snapshot's.
+        assert!(
+            q.zk_members.iter().all(|m| m.starts_with("path_reach_")),
+            "{id}: expected the path_reach family, found {:?}",
+            q.zk_members
+        );
+        let want = q
+            .zk_members
+            .iter()
+            .map(|m| snapshot.members[m])
+            .max()
+            .expect("bounded row names members");
+        assert_eq!(
+            q.circuit_size,
+            Some(want),
+            "{id}: bounded circuit_size must be the joined max of its members"
+        );
+    }
+}
+
+/// The value hook LANDED for the integer / decimal / double lanes, so those rows
+/// must carry the MEASURED sibling (joined from the snapshot) rather than the old
+/// `ESTIMATE ~3200` projection — and the signed-int lane, which has no compiled
+/// value-lane member, must still carry the projection and NOT a number.
+#[test]
+fn landed_value_lanes_are_measured_not_projected() {
+    let (snapshot, catalog) = load();
+    for (id, member) in [
+        ("Q03_filter_integer_ge", "filter_value_dl_int"),
+        ("Q05_filter_decimal_le", "filter_value_dl_decimal"),
+        ("Q06_filter_double_gt", "filter_value_dl_f64"),
+    ] {
+        let q = &catalog.queries[id];
+        assert_eq!(
+            q.value_lane_member.as_deref(),
+            Some(member),
+            "{id}: must name its landed dual-leaf value-lane sibling"
+        );
+        assert_eq!(
+            q.value_lane_circuit_size,
+            Some(snapshot.members[member]),
+            "{id}: the value-lane size must be JOINED from the snapshot"
+        );
+        assert!(
+            q.projected_after.is_none(),
+            "{id}: the lane is measured — the ESTIMATE must be gone"
+        );
+    }
+    let signed = &catalog.queries["Q04_filter_signed_integer_ge"];
+    assert!(
+        signed.value_lane_member.is_none() && signed.value_lane_circuit_size.is_none(),
+        "Q04: no signed value-lane member is compiled — it must claim none"
+    );
+    assert!(
+        signed
+            .projected_after
+            .as_deref()
+            .is_some_and(|p| p.contains("ESTIMATE")),
+        "Q04: without a measurement the row must keep its self-labelled ESTIMATE"
+    );
+}
+
+/// A gap that is EXCLUDED BY DESIGN (non-monotone / closed-world) must say so
+/// rather than read as "not built yet": OPTIONAL, aggregation and negation are not
+/// waiting on engineering, and a reader deciding whether to wait for them needs
+/// that distinction. They stay gaps (null everywhere) either way.
+#[test]
+fn design_exclusions_say_why() {
+    let (_snapshot, catalog) = load();
+    for id in [
+        "Q10_optional",
+        "Q19_aggregate_group_by",
+        "Q23_negation_minus_notexists",
+    ] {
+        let q = &catalog.queries[id];
+        assert!(q.is_gap(), "{id}: a design exclusion is still a gap (null, no members)");
+        assert!(
+            q.status.contains("EXCLUDED BY DESIGN"),
+            "{id}: status must distinguish 'not admissible' from 'not built yet', found {:?}",
+            q.status
+        );
     }
 }

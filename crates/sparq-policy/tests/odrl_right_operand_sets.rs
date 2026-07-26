@@ -14,7 +14,11 @@
 //! * a member that carries a set-encoding separator (`|`/whitespace/`,`) cannot
 //!   be encoded faithfully — the whole constraint fails closed rather than
 //!   splitting into unintended members (a fail-OPEN hazard);
-//! * a malformed CYCLIC list terminates and still yields its complete member set.
+//! * a MALFORMED collection (broken/dangling tail, cycle, forked cell, or a
+//!   member-less head asserting `rdf:rest` with no `rdf:first`) REFUSES the whole
+//!   parse on BOTH rule kinds rather than contributing its valid prefix — or, for
+//!   the member-less head, being read as an ordinary unmatchable value (sq-srjuc —
+//!   both drop authored members and widen decisions).
 
 use sparq_policy::{evaluate, parse_policy_str, Operator, Policy, Request, Value};
 
@@ -241,10 +245,77 @@ fn separator_carrying_member_fails_the_whole_constraint_closed() {
     }
 }
 
-/// A malformed CYCLIC list terminates the parse and still yields its complete
-/// member set (every cons cell is visited exactly once).
+/// An EMPTY list (`rdf:nil` directly as the object) has no members: ordinary
+/// request values never match (fail-closed, same as the pre-fold parse).
 #[test]
-fn cyclic_list_terminates_and_yields_complete_member_set() {
+fn empty_list_right_operand_never_matches_ordinary_values() {
+    let p = purpose_policy("isAnyOf", "( )");
+    assert!(!evaluate(&p, &purpose("urn:purpose/a")).allow);
+}
+
+// ===========================================================================
+// sq-srjuc — a MALFORMED collection rightOperand REFUSES the parse ([FABLE-5]).
+//
+// The fold used to walk the chain prefix-tolerantly, contributing the valid
+// PREFIX of a broken-tail/dangling/forked collection (and, for a cycle, the full
+// member set of the loop). Dropping an authored member from a SET encoding widens
+// decisions on both rule kinds — `isNoneOf` on a permission excludes fewer values
+// than authored (the dropped member now grants), and any set-op constraint gating
+// a PROHIBITION narrows the carve-out, so deny-overrides is bypassed. Degrading
+// the single constraint to the unsatisfiable guard is not a sound fallback either
+// (an unsatisfiable constraint DISABLES a prohibition — the same direction), so
+// the whole parse is refused, matching `fold_list_operands` (sq-dkuff).
+//
+// Written with explicit cons-cell triples: Turtle's `( … )` sugar always emits
+// well-formed collections, so these shapes cannot be authored any other way.
+// ===========================================================================
+
+/// The `isNoneOf`-on-a-permission widening witness: a BROKEN TAIL (`rdf:first`
+/// with no `rdf:rest`) truncates `{a, b}` to `{a}`, and `purpose isNoneOf a`
+/// would then GRANT purpose `b` — which the policy author excluded. Refused.
+#[test]
+fn broken_tail_right_operand_refuses_the_parse() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+<urn:pol/p> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:isNoneOf ;
+                      odrl:rightOperand _:l1 ] ] .
+_:l1 rdf:first <urn:purpose/a> .
+"#;
+    let err = parse_policy_str(ttl, "turtle").unwrap_err();
+    assert!(
+        err.contains("MALFORMED collection rightOperand"),
+        "a broken-tail rightOperand list must refuse the parse, got: {err}"
+    );
+}
+
+/// A DANGLING tail (`rdf:rest` pointing at a node that is neither a cons cell nor
+/// `rdf:nil`) has no well-defined member set — the walk cannot know whether members
+/// were lost. Refused rather than truncated to the reachable prefix.
+#[test]
+fn dangling_tail_right_operand_refuses_the_parse() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+<urn:pol/p> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:isAnyOf ;
+                      odrl:rightOperand _:l1 ] ] .
+_:l1 rdf:first <urn:purpose/a> ; rdf:rest <urn:not/a-cons-cell> .
+"#;
+    let err = parse_policy_str(ttl, "turtle").unwrap_err();
+    assert!(
+        err.contains("MALFORMED collection rightOperand"),
+        "a dangling-tail rightOperand list must refuse the parse, got: {err}"
+    );
+}
+
+/// A CYCLIC list never reaches `rdf:nil`, so the collection has no well-defined
+/// member set even though the loop happens to enumerate every cell. Refused.
+#[test]
+fn cyclic_right_operand_refuses_the_parse() {
     let ttl = r#"
 @prefix odrl: <http://www.w3.org/ns/odrl/2/> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
@@ -255,16 +326,149 @@ fn cyclic_list_terminates_and_yields_complete_member_set() {
 _:l1 rdf:first <urn:purpose/a> ; rdf:rest _:l2 .
 _:l2 rdf:first <urn:purpose/b> ; rdf:rest _:l1 .
 "#;
-    let p = parse_policy_str(ttl, "turtle").unwrap();
-    assert!(evaluate(&p, &purpose("urn:purpose/a")).allow);
-    assert!(evaluate(&p, &purpose("urn:purpose/b")).allow);
-    assert!(!evaluate(&p, &purpose("urn:purpose/c")).allow);
+    let err = parse_policy_str(ttl, "turtle").unwrap_err();
+    assert!(
+        err.contains("MALFORMED collection rightOperand"),
+        "a cyclic rightOperand list must refuse the parse, got: {err}"
+    );
 }
 
-/// An EMPTY list (`rdf:nil` directly as the object) has no members: ordinary
-/// request values never match (fail-closed, same as the pre-fold parse).
+/// A FORKED cons cell (two distinct `rdf:rest` values) is ambiguous: honouring one
+/// deterministic fork silently drops the other branch's authored members. Refused.
 #[test]
-fn empty_list_right_operand_never_matches_ordinary_values() {
-    let p = purpose_policy("isAnyOf", "( )");
-    assert!(!evaluate(&p, &purpose("urn:purpose/a")).allow);
+fn forked_cell_right_operand_refuses_the_parse() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+<urn:pol/p> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:isAnyOf ;
+                      odrl:rightOperand _:l1 ] ] .
+_:l1 rdf:first <urn:purpose/a> ; rdf:rest _:l2 , rdf:nil .
+_:l2 rdf:first <urn:purpose/b> ; rdf:rest rdf:nil .
+"#;
+    let err = parse_policy_str(ttl, "turtle").unwrap_err();
+    assert!(
+        err.contains("MALFORMED collection rightOperand"),
+        "a forked rightOperand cons cell must refuse the parse, got: {err}"
+    );
+}
+
+/// The PROHIBITION direction, on the rule kind where degrading to the
+/// unsatisfiable guard would itself widen: a truncated `isPartOf` set narrows the
+/// carve-out, so the sibling permission grants where the author denied. Refused —
+/// on the prohibition too, not only on permissions.
+#[test]
+fn malformed_right_operand_on_prohibition_refuses_the_parse() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+<urn:pol/p> a odrl:Set ;
+  odrl:permission  [ odrl:action odrl:read ; odrl:target <urn:asset/x> ] ;
+  odrl:prohibition [ odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:isPartOf ;
+                      odrl:rightOperand _:l1 ] ] .
+_:l1 rdf:first <urn:purpose/a> ; rdf:rest _:l2 .
+_:l2 rdf:first <urn:purpose/b> .
+"#;
+    let err = parse_policy_str(ttl, "turtle").unwrap_err();
+    assert!(
+        err.contains("MALFORMED collection rightOperand"),
+        "a malformed rightOperand list gating a PROHIBITION must refuse the parse, got: {err}"
+    );
+}
+
+/// A HEAD-position REST-ONLY cell (`rdf:rest` with no `rdf:first`) is invisible to
+/// the `rdf:first`-keyed cons-cell table, so before sq-srjuc it bypassed collection
+/// validation entirely and folded as one ordinary value — the unmatchable blank node
+/// `_:l1`. On a PROHIBITION that is the widening direction: the carve-out's
+/// `isPartOf` constraint can never be satisfied, the prohibition never fires, and the
+/// sibling permission GRANTS. Refused instead, like every other malformed shape.
+#[test]
+fn rest_only_head_right_operand_on_prohibition_refuses_the_parse() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+<urn:pol/p> a odrl:Set ;
+  odrl:permission  [ odrl:action odrl:read ; odrl:target <urn:asset/x> ] ;
+  odrl:prohibition [ odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:isPartOf ;
+                      odrl:rightOperand _:l1 ] ] .
+_:l1 rdf:rest _:l2 .
+_:l2 rdf:first <urn:purpose/a> ; rdf:rest rdf:nil .
+"#;
+    let err = parse_policy_str(ttl, "turtle").unwrap_err();
+    assert!(
+        err.contains("MALFORMED collection rightOperand"),
+        "a member-less rest-only rightOperand head gating a PROHIBITION must refuse the \
+         parse (else the prohibition is disabled and the sibling permission grants), got: {err}"
+    );
+}
+
+/// The permission direction of the same shape, so the refusal is not prohibition-only:
+/// a rest-only head under `isNoneOf` would exclude nothing at all.
+#[test]
+fn rest_only_head_right_operand_on_permission_refuses_the_parse() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+<urn:pol/p> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:isNoneOf ;
+                      odrl:rightOperand _:l1 ] ] .
+_:l1 rdf:rest rdf:nil .
+"#;
+    let err = parse_policy_str(ttl, "turtle").unwrap_err();
+    assert!(
+        err.contains("MALFORMED collection rightOperand"),
+        "a member-less rest-only rightOperand head must refuse the parse, got: {err}"
+    );
+}
+
+/// The same refusal reaches the *other* fold entry point: a rightOperand list on an
+/// atomic constraint nested inside a compound `odrl:LogicalConstraint` (the
+/// logical-constraint atom table), here on a prohibition's carve-out.
+#[test]
+fn malformed_right_operand_inside_logical_constraint_refuses_the_parse() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+<urn:pol/p> a odrl:Set ;
+  odrl:permission  [ odrl:action odrl:read ; odrl:target <urn:asset/x> ] ;
+  odrl:prohibition [ odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ a odrl:LogicalConstraint ; odrl:or _:c1 ] ] .
+_:c1 odrl:leftOperand odrl:purpose ; odrl:operator odrl:isNoneOf ;
+     odrl:rightOperand _:l1 .
+_:l1 rdf:first <urn:purpose/a> ; rdf:rest _:l1 .
+"#;
+    let err = parse_policy_str(ttl, "turtle").unwrap_err();
+    assert!(
+        err.contains("MALFORMED collection rightOperand"),
+        "a malformed rightOperand inside a compound must refuse the parse, got: {err}"
+    );
+}
+
+/// Guard against over-refusal: a WELL-FORMED rightOperand collection that happens
+/// to be written as explicit cons cells (not Turtle `( … )` sugar) still parses and
+/// folds to the complete set encoding.
+#[test]
+fn explicit_well_formed_cons_cells_still_parse() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+<urn:pol/p> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:isAnyOf ;
+                      odrl:rightOperand _:l1 ] ] .
+_:l1 rdf:first <urn:purpose/a> ; rdf:rest _:l2 .
+_:l2 rdf:first <urn:purpose/b> ; rdf:rest rdf:nil .
+"#;
+    let p = parse_policy_str(ttl, "turtle").unwrap();
+    assert_eq!(
+        p.permissions[0].constraints[0].right,
+        Value::Str("urn:purpose/a|urn:purpose/b".to_owned()),
+        "a well-formed explicit cons-cell list must still fold to the full set"
+    );
+    assert!(evaluate(&p, &purpose("urn:purpose/b")).allow);
+    assert!(!evaluate(&p, &purpose("urn:purpose/c")).allow);
 }

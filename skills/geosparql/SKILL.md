@@ -246,6 +246,14 @@ Results are the lowest-dimension geometry capturing the answer and serialise bac
 - **Ad-hoc query timing:** `bench_geo query <corpus.nt> <query.rq> [iters]` (the crate example,
   default `engine` feature) — in-process `query_with_functions` + `geof_registry()`, emitting
   `name\tcount\tus`.
+- **Cross-engine CONFORMANCE (not timing):** `bench/geo/gsb.sh` + the `gsb_compliance` example
+  run sparq through the published 206-query GeoSPARQL Compliance Benchmark (ISPRS IJGI
+  10(7):487, 2021) with the benchmark's own requirements-weighted scoring, so sparq sits on the same axis
+  as the published Fuseki/GraphDB/Virtuoso percentages. Gather-only (the artifact is GPL-2.0
+  and is never vendored). The recorded score, the configuration matrix behind it, and the
+  per-requirement gaps — the largest by far being the query-rewrite extension, which currently
+  *lowers* the score — are in `research/gap-conformance-cross-engine-2026-07.md` §3.7.
+  <!-- [SONNET-4.6] sq-ql2iy -->
 
 ## See also
 

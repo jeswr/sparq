@@ -490,3 +490,111 @@ fn incremental_owl_graph_falls_back_and_stays_parity_identical() {
         "the insert completed a construct premise set"
     );
 }
+
+/// [OPUS-5] sq-afun3 (third increment): STRICT OPACITY through the INCREMENTAL handle.
+/// `MaterializedOwlGraph::with_reify_mode(…, DestructureOnly)` keeps the mode across
+/// re-materializations, so (a) the closure equals the MATCHING strict batch oracle
+/// initially AND after a mutation, and (b) no triple term is ever minted by
+/// inference — not even by the mutation that completes a construct premise set (which
+/// under `new`/Bridge does mint one: the sibling test above, on this very fixture).
+#[test]
+fn incremental_strict_opacity_matches_the_strict_batch_oracle() {
+    const FIXTURE: &str = r#"@prefix : <http://ex/> .
+           @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+           @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+           :certainty rdfs:domain :Assertion .
+           :alice :age 30 ~ :r {| :certainty 0.9 |} .
+        "#;
+    let (mut dict, base) = parse(FIXTURE);
+    // The oracle is `materialize_owl_rl_reify` in the SAME mode — a Bridge oracle would
+    // mint terms into this dict and destroy the never-minted assertions below.
+    let oracle = |dict: &mut Dict, base: &[[Id; 3]]| -> Vec<[Id; 3]> {
+        let mut all = base.to_vec();
+        materialize_owl_rl_reify(dict, &mut all, ReifyMode::DestructureOnly);
+        let mut v: Vec<[Id; 3]> = all
+            .into_iter()
+            .collect::<FxHashSet<_>>()
+            .into_iter()
+            .collect();
+        v.sort_unstable();
+        v
+    };
+    let mut g = MaterializedOwlGraph::with_reify_mode(&mut dict, &base, ReifyMode::DestructureOnly);
+    assert_eq!(
+        g.reify_mode(),
+        ReifyMode::DestructureOnly,
+        "the constructed reify mode is what the graph maintains"
+    );
+    assert_eq!(
+        g.mode(),
+        OwlMode::Fallback,
+        "mode detection is unchanged — reify vocabulary still routes to Fallback"
+    );
+    assert_eq!(
+        g.closure(),
+        oracle(&mut dict, &base),
+        "initial closure == from-scratch STRICT closure"
+    );
+    // reif-dtr still fires (the loader-written quotation is destructured).
+    let (r, alice, age) = (
+        dict.intern_iri(&format!("{EX}r")),
+        dict.intern_iri(&format!("{EX}alice")),
+        dict.intern_iri(&format!("{EX}age")),
+    );
+    let rdf = |dict: &mut Dict, frag: &str| dict.intern_iri(&format!("{RDF}{frag}"));
+    let subject = rdf(&mut dict, "subject");
+    assert!(
+        g.contains(&[r, subject, alice]),
+        "destructure is unaffected by strict mode"
+    );
+
+    // The mutation that, in Bridge mode, completes a construct premise set over an
+    // EXISTING triple and mints `<<( :alice :age 30 )>>`.
+    let r2 = dict.intern_iri(&format!("{EX}r2"));
+    let thirty = dict.intern_lit("30", xsd::INTEGER.as_str(), None);
+    let delta = [
+        [r2, subject, alice],
+        [r2, rdf(&mut dict, "predicate"), age],
+        [r2, rdf(&mut dict, "object"), thirty],
+    ];
+    g.insert(&mut dict, &delta);
+    let base2: Vec<[Id; 3]> = g.base_triples().collect();
+    assert_eq!(
+        g.closure(),
+        oracle(&mut dict, &base2),
+        "post-insert closure == from-scratch STRICT closure"
+    );
+    // THE pin: strict mode never constructs, so no reifies triple for r2 exists at all…
+    let reifies = rdf(&mut dict, "reifies");
+    assert!(
+        !g.closure().iter().any(|t| t[0] == r2 && t[1] == reifies),
+        "strict mode must derive no rdf:reifies triple for the classic-reification node"
+    );
+    // …and the quotation it would have minted was never interned (the loader wrote
+    // `<<( :alice :age 30 )>>` nowhere in this fixture — the `~ :r` form quotes it, so
+    // guard against vacuity by checking the Bridge contrast in a FRESH dict below).
+    let (mut bdict, bbase) = parse(FIXTURE);
+    let mut bg = MaterializedOwlGraph::new(&mut bdict, &bbase);
+    let (balice, bage) = (
+        bdict.intern_iri(&format!("{EX}alice")),
+        bdict.intern_iri(&format!("{EX}age")),
+    );
+    let br2 = bdict.intern_iri(&format!("{EX}r2"));
+    let bthirty = bdict.intern_lit("30", xsd::INTEGER.as_str(), None);
+    let bdelta = [
+        [br2, rdf(&mut bdict, "subject"), balice],
+        [br2, rdf(&mut bdict, "predicate"), bage],
+        [br2, rdf(&mut bdict, "object"), bthirty],
+    ];
+    bg.insert(&mut bdict, &bdelta);
+    let breifies = rdf(&mut bdict, "reifies");
+    assert!(
+        bg.closure().iter().any(|t| t[0] == br2 && t[1] == breifies),
+        "NON-VACUITY: the same edit sequence under the default Bridge mode DOES construct"
+    );
+    assert_eq!(
+        bg.reify_mode(),
+        ReifyMode::Bridge,
+        "`new` is the full bridge"
+    );
+}

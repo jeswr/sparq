@@ -857,8 +857,12 @@ if [ -n "$RSP_REF" ] && [ "$RSP_REF" != "refs/heads/main" ]; then
   echo "note: rsp skipped (PR tier — RSP-QL example build/run is main-only, like the javac/rapper suites)" >&2
 elif command -v cargo >/dev/null 2>&1 && [ -x "$RSP_RUN" ]; then
   # Always (re)build: rust-cache restores target/, so a file-exists check can run a STALE binary.
-  if ! cargo build --release -q -p sparq-rsp --example rsp_oracle; then
-    echo "ERROR: rsp_oracle example failed to build" >&2
+  # `replay_runner` (sq-3f5ay) is built alongside so run.sh's replay-FILE equivalence guard
+  # actually runs here (it self-skips when the example is missing): it re-derives the same
+  # per-window counts through the pinned replay FILES, catching an export/example drift the
+  # in-code oracle path cannot see.
+  if ! cargo build --release -q -p sparq-rsp --example rsp_oracle --example replay_runner; then
+    echo "ERROR: rsp_oracle / replay_runner examples failed to build" >&2
     exit 1
   fi
   if RSP_BIN="$RSP_BIN" bash "$RSP_RUN" > "$TMP/rsp.tsv" 2>"$TMP/rsp.err"; then

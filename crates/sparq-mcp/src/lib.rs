@@ -20,6 +20,10 @@
 //!   container/resource CRUD tools (`resource_get`/`container_list`, plus the gated
 //!   `resource_put`/`resource_delete`/`container_create`) with WAC/ACP-authorized,
 //!   session-scoped semantics over a `sparq_solid::PodStore`. [FABLE-5] sq-u16eq
+//!   It also serves the MCP **`resources`** surface (`resources/list`, `resources/read`,
+//!   and `resources/subscribe` / `resources/unsubscribe` with `subscribe: true`), bound
+//!   to Solid Notifications semantics: content-free `notifications/resources/updated`
+//!   messages, authorized at subscribe time AND at every delivery. [SONNET-4.6] sq-cmjmr
 //! - `templates` (feature `templates`) — the `template_list` / `template_invoke` tools:
 //!   named parameterized SPARQL templates registered on `ServerConfig::templates` and
 //!   invoked with typed JSON arguments through the injection-safe algebra binding
@@ -53,6 +57,12 @@ pub mod transport;
 #[cfg(feature = "solid")]
 #[cfg_attr(docsrs, doc(cfg(feature = "solid")))]
 pub mod solid;
+
+// [SONNET-4.6] sq-cmjmr: the subscription registry + notification machinery the pod
+// server's `resources/subscribe` surface is built on. Crate-internal — the public seam
+// is `SolidMcpServer::take_notifications`.
+#[cfg(feature = "solid")]
+pub(crate) mod notifications;
 
 pub use server::{McpServer, ServerConfig, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS};
 pub use tools::ToolSpec;

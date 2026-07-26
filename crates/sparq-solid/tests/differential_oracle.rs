@@ -42,7 +42,12 @@ use sparq_solid::{materialize_acp, materialize_wac, AuthIndex, Mode, Session};
 /// The floor for the divergence count — it is and must stay ZERO. A ratchet that only ever
 /// goes UP would be meaningless for a divergence count (the only acceptable value is 0), so
 /// the "floor" printed for grep-parity with the SHACL/geo runners is the hard 0.
-const DIVERGENCE_FLOOR: usize = 0;
+/// [SONNET-4.6] sq-z1xv8 — the VALUE now lives once in the zero-dependency
+/// `sparq-conformance-floors` crate, which `sparq-conformance`'s central
+/// `scoreboard::SUITES` reads too, so the enforced floor and the reported floor are
+/// ONE `const` and cannot drift (replacing the old textual re-read of this file).
+/// Raise it THERE; the measurement narrative stays here.
+const DIVERGENCE_FLOOR: usize = sparq_conformance_floors::solid::DIVERGENCE_FLOOR;
 
 /// Map the engine's [`Mode`] to the reference evaluator's independent [`RefMode`].
 fn ref_mode(mode: Mode) -> RefMode {

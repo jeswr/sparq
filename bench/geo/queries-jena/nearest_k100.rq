@@ -1,7 +1,7 @@
 # [FABLE-5] sq-a8anf — PINNED jena-geosparql rendering of the `nearest_k100`
 # workload for scripts/bench/geo-same-box.sh. Same rendering rationale + oracle
 # as nearest_k10.rq (standard GeoSPARQL has no k-nearest function; ORDER BY
-# distance + LIMIT k; result-set SIZE == k is the only cross-checked value),
+# distance + LIMIT k; the exact returned entity-IRI set is cross-checked),
 # and the same sq-a8anf sort-key correction: geof:distance(..., uom:metre)
 # throws per row on jena 5.4.0, which in ORDER BY silently degenerates the
 # ordering to the ?e tie-break (vacuously-green ==k crosscheck; wave-1 jena

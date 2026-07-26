@@ -103,9 +103,10 @@ fn fixture_snapshot(revoked: bool) -> StatusListSnapshot {
 }
 fn fixture_revocation() -> RevocationStatus {
     RevocationStatus {
-        status_list: STATUS_LIST.to_string(),
+        ref_commitment: None,
+        status_list: Some(STATUS_LIST.to_string()),
         index: Some(STATUS_INDEX),
-        version: STATUS_VERSION,
+        version: Some(STATUS_VERSION),
         index_commitment: None,
     }
 }
@@ -149,8 +150,9 @@ fn attest_holder(
             .to_string(),
         salt: Some(FieldHex::from_field(&salt)),
         status: Some(AttestedStatusRef {
+            ref_commitment: None,
             index: Some(STATUS_INDEX),
-            version: STATUS_VERSION,
+            version: Some(STATUS_VERSION),
             index_commitment: None,
         }),
         holder: Some(
@@ -225,6 +227,7 @@ fn holder_pok_unreferenced_commitment_rejected() {
     let holder = SecretKey::from_seed(777);
     let registry = HolderRegistry::from_hex_keys([public_key_to_hex(&holder.public_key())]);
     let m = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT * WHERE {}".into(),
         issuers: vec![],
@@ -285,6 +288,7 @@ fn holder_pok_malformed_commitment_rejected() {
     let holder = SecretKey::from_seed(777);
     let registry = HolderRegistry::from_hex_keys([public_key_to_hex(&holder.public_key())]);
     let m = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT * WHERE {}".into(),
         issuers: vec![],
@@ -344,6 +348,7 @@ fn holder_pok_absent_and_not_required_is_noop() {
     let holder = SecretKey::from_seed(777);
     let registry = HolderRegistry::from_hex_keys([public_key_to_hex(&holder.public_key())]);
     let m = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT * WHERE {}".into(),
         issuers: vec![],
@@ -463,6 +468,7 @@ fn full_manifest(
 ) -> ProofManifest {
     let commitment = fixture_commitment();
     ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
         issuers: vec![],

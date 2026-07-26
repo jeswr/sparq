@@ -66,11 +66,11 @@
       "environment": "canonical",
       "kind": "conformance-ratchet-floor",
       "family": "OGC GeoSPARQL",
-      "source": "crates/sparq-geo/tests/ogc_compliance_ratchet.rs::OGC_RATCHET_FLOOR (mirrored in crates/sparq-conformance/src/scoreboard.rs; guarded by tests/scoreboard_floors.rs)",
+      "source": "crates/sparq-conformance-floors/src/lib.rs::geo::OGC_TOPOLOGY_FLOOR (the single shared const; enforced as OGC_RATCHET_FLOOR in crates/sparq-geo/tests/ogc_compliance_ratchet.rs and reported by crates/sparq-conformance/src/scoreboard.rs, both by import)",
       "binding": {
         "kind": "rust-anchor",
-        "file": "crates/sparq-geo/tests/ogc_compliance_ratchet.rs",
-        "anchor": "OGC_RATCHET_FLOOR"
+        "file": "crates/sparq-conformance-floors/src/lib.rs",
+        "anchor": "OGC_TOPOLOGY_FLOOR"
       },
       "note": "OGC GeoSPARQL topology compliance ratchet floor: a monotone lower bound on passing sf/eh/rcc8 topology + WKT/GML equivalence assertions that CI enforces and that may only RISE (raised 119 -> 158 -> 197 as coverage grew). Deterministic and machine-independent (a const a test asserts), not a timing."
     },
@@ -98,8 +98,8 @@
       "environment": "canonical",
       "kind": "conformance-ratchet-floor",
       "family": "W3C SHACL",
-      "source": "crates/sparq-shacl/tests/w3c_core.rs::BASELINE_PASS (mirrored in scoreboard.rs; guarded by tests/scoreboard_floors.rs)",
-      "binding": { "kind": "rust-anchor", "file": "crates/sparq-shacl/tests/w3c_core.rs", "anchor": "BASELINE_PASS" },
+      "source": "crates/sparq-conformance-floors/src/lib.rs::shacl::CORE_FLOOR (the single shared const; enforced as BASELINE_PASS in crates/sparq-shacl/tests/w3c_core.rs and reported by scoreboard.rs, both by import)",
+      "binding": { "kind": "rust-anchor", "file": "crates/sparq-conformance-floors/src/lib.rs", "anchor": "CORE_FLOOR" },
       "note": "W3C SHACL core (data-shapes sht:Validate) ratchet floor. Deterministic; CI-enforced; may only rise."
     },
     "conformance.shacl_sparql_floor": {
@@ -108,8 +108,8 @@
       "environment": "canonical",
       "kind": "conformance-ratchet-floor",
       "family": "W3C SHACL",
-      "source": "crates/sparq-shacl/tests/w3c_sparql.rs::SHACL_SPARQL_FLOOR (mirrored in scoreboard.rs; guarded by tests/scoreboard_floors.rs)",
-      "binding": { "kind": "rust-anchor", "file": "crates/sparq-shacl/tests/w3c_sparql.rs", "anchor": "SHACL_SPARQL_FLOOR" },
+      "source": "crates/sparq-conformance-floors/src/lib.rs::shacl::SPARQL_FLOOR (the single shared const; enforced as SHACL_SPARQL_FLOOR in crates/sparq-shacl/tests/w3c_sparql.rs and reported by scoreboard.rs, both by import)",
+      "binding": { "kind": "rust-anchor", "file": "crates/sparq-conformance-floors/src/lib.rs", "anchor": "SPARQL_FLOOR" },
       "note": "W3C SHACL-SPARQL (sh:sparql node + property constraint sub-suites) ratchet floor. Deterministic; CI-enforced; may only rise."
     },
     "conformance.solid_wac_floor": {

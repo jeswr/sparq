@@ -359,3 +359,57 @@ tag-cutting). This is the "config-flip" the design record (§6 item 4) calls "th
 > Provenance honesty: crates.io trusted publishing is an **auth** mechanism only — it does **not**
 > put a provenance link on the crates.io page (no upstream scheme exists, unlike npm/PyPI). The
 > "do not describe a crates.io publish as signed" caveat in §4 is unchanged.
+
+### 8d. Publish-rate protections (issue #1135) — what stops a runaway release
+
+**A crates.io version can never be unpublished.** Three protections stand between an
+automated pipeline and the registry. All three are already in place; none of them is what
+you flip.
+
+1. **The Release PR can never be armed.** `scripts/release_pr_guard.py` is the single
+   predicate every arming/merging path consults — `auto-arm.py`, `rearm-sweeper.py`, the
+   `check-pr-arm-base.py` PreToolUse hook (which is where agent-typed `gh pr merge --auto`
+   goes), `batch-merge.py`, `pr-backlog.py`. It keys on **head branch, author and title —
+   never a label**, because anything holding `pull-requests: write` can add or remove a
+   label. Adding `review:pass` to the Release PR does not make it armable. It fails closed:
+   an unknown head branch refuses rather than admits. The Release PR is merged by a
+   maintainer, by hand, deliberately.
+
+   **Read "armed" literally.** The PreToolUse hook recognises `gh pr merge` **with**
+   `--auto`. A direct `gh pr merge <n> --squash` (no `--auto`), `--admin`, a
+   `gh api graphql … enablePullRequestAutoMerge` mutation, a REST
+   `PUT …/pulls/<n>/merge`, a backslash line-continuation, or shell-variable indirection
+   all reach `gh` unblocked — verified by executing the hook against a fake `gh`. That is a
+   deliberate scope (the hook governs *arming*), not an oversight, and it is why
+   protection 2 exists: the interval guard runs inside `release-plz.yml` itself and does
+   not care how the merge happened. If the guard script itself cannot run,
+   `.claude/settings.json`'s wrapper **denies** any `gh pr merge` rather than allowing it.
+2. **A minimum release interval.** `scripts/release-interval-guard.py --enforce` runs in
+   `release-plz.yml`'s `release-plz-release` job **before** the tag/publish step.
+   `MIN_RELEASE_INTERVAL` is 24 hours, measured from `max(newest v* tag date, newest
+   crates.io publication)`. It refuses on any indeterminacy — shallow checkout, unreadable
+   tag list, unparseable date, unreachable crates.io, a future-dated last release. A
+   definitive crates.io 404 is the only accepted "never published" answer. There is no
+   override flag: publishing inside the window is done by hand, consciously.
+3. **Version-group coverage.** The same guard refuses when a crate cargo *would* publish is
+   absent from `release-plz.toml`'s `version_group` — release-plz would version it
+   independently of the locked workspace version and publish it anyway, so what ships would
+   not be what the config describes. While `publish = false` this is a loud warning; it
+   becomes a hard refusal on the flip.
+
+See what would be published, without touching anything:
+
+```sh
+python3 scripts/release-interval-guard.py --dry-run
+```
+
+It prints the publishable crate list, each version, the dependency-first publish order and
+the cadence verdict it *would* return. It only ever runs `git`, never `cargo`.
+
+> **Open item blocking the flip.** As measured by `--dry-run` on 2026-07-26, **26** crates
+> are cargo-publishable (no `publish = false`) while only **17** are in the `version_group`.
+> The nine outside it are `sparq-arrow`, `sparq-fedplan`, `sparq-forms`, `sparq-mcp`,
+> `sparq-reason-el`, `sparq-reason-ql`, `sparq-shaclc`, `sparq-substrate`, `sparq-wrapper`.
+> Each needs a decision: add a `[[package]]` entry with `version_group = "sparq"` (it ships),
+> or set `publish = false` in its `Cargo.toml` (it does not). The "17 crates" figure in §8c
+> and §0a describes the version_group, not cargo's publishable set.

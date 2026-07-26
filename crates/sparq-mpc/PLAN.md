@@ -311,6 +311,20 @@ dataset size, clean `/tmp` scratch, bench data git-ignored. Report real envelope
 — minutes, not "seconds" — and never extrapolate to the WAN/dishonest-majority
 regime that has zero published data points.
 
+The sq-hoaj **ceiling-run HARNESS is built** — `scripts/mpc-ec2-ceiling.sh`,
+the orphan-proof EC2 orchestrator that sweeps the hidden-value join across
+N ∈ {7,9,11} × rows ∈ {100,1000,10000} (10⁴ rows = 10⁸ `secure_equal` opens, the
+deliberate ceiling probe) under the netem LAN profile on a box that HAS the
+`CAP_NET_ADMIN` the dev box lacks. It carries the full safety recipe (tag
+`purpose=sparq-bench`, `--instance-initiated-shutdown-behavior terminate`, two
+independent watchdogs + a `df` floor watchdog, `/tmp` cleanup, the 10⁴ row cap,
+and an `orphan-check-bench.sh` sweep on exit) and a hermetic `--self-test` that
+pins those rails without touching AWS. It records the dishonest-majority and
+WAN-at-scale regimes as explicit `no-data-research-risk` cells (never a fabricated
+number); the row cap is HARD (a larger scale is refused, not extrapolated).
+*Executing* it — producing the git-ignored minutes-envelope JSON — still needs a
+credentialed host, so the measured envelope is not baked into any doc.
+
 ---
 
 ## Decision-point / dependency summary

@@ -190,6 +190,26 @@ pub trait CompareTerm: Sized {
     ///
     /// This is the engine's `value_compare_strict`; it stays engine-resident because it
     /// is also driven by the relational `<` / `>` operators and is coupled to `oxrdf`.
+    ///
+    /// # Contract: TOTALITY within the temporal kinds — [SONNET-4.6] sq-2k5py
+    ///
+    /// For a pair that BOTH classify as [`DateTime`](LiteralKind::DateTime) (or both as
+    /// [`Date`](LiteralKind::Date)) this must return `Some`: the temporal kinds admit **no**
+    /// string fallback. The relational operators' comparison is deliberately PARTIAL — a
+    /// tz-less dateTime against a tz-carrying one inside XPath's ±14h window is
+    /// indeterminate (a type error) — but routing those pairs to the lexical fallback mixes
+    /// timeline-decided and lexical-decided pairs inside ONE kind, which is the same
+    /// intransitivity shape the sq-wjl8i witnesses had: two zoned dateTimes can be the same
+    /// instant (timeline-Equal) while a tz-less one sits lexically BETWEEN them. An
+    /// implementation must extend the timeline order to a TOTAL one over that window —
+    /// `sparq_core::temporal::Timeline::cmp_tl_total` (instant-assuming-UTC, then timezone
+    /// PRESENCE) is the definition both the engine and the reasoner use, and its doc carries
+    /// the witness. Extending the total order does NOT change relational semantics.
+    ///
+    /// The other kinds have no such obligation: the [`String`](LiteralKind::String) /
+    /// [`Lang`](LiteralKind::Lang) / [`Other`](LiteralKind::Other) kinds are lexical
+    /// EVERYWHERE (a `None` there falls back to the same byte order the arm would give), so
+    /// no pair inside one of them mixes two different orders.
     fn strict_cmp(&self, other: &Self) -> Option<Ordering>;
 
     /// If the term is an RDF-1.2 quoted triple, its `(subject, predicate, object)`
@@ -224,6 +244,13 @@ pub trait CompareTerm: Sized {
 /// every other kind orders by [`strict_cmp`](CompareTerm::strict_cmp) where it decides
 /// (dateTime/date by timeline, booleans, same-tag / same-other-XSD lexically), else by
 /// the lexical [`value_str`](CompareTerm::value_str) fallback.
+///
+/// That lexical fallback is only lawful for the kinds that are lexical EVERYWHERE. Inside
+/// the [`DateTime`](LiteralKind::DateTime) / [`Date`](LiteralKind::Date) kinds it is
+/// **not**: mixing timeline-decided and lexical-decided pairs in one kind is intransitive
+/// exactly as the cross-kind fallback was, so
+/// [`strict_cmp`](CompareTerm::strict_cmp) is contracted to be TOTAL there (its
+/// "TOTALITY within the temporal kinds" section carries the witness). [SONNET-4.6] sq-2k5py
 ///
 /// Where SPARQL 1.1 §15.1 / the `<` operator define an order (the cross-class ranks;
 /// numeric, string, boolean, dateTime same-kind pairs) this order agrees with the spec;
@@ -302,7 +329,10 @@ pub fn compare_terms<T: CompareTerm>(x: &T, y: &T) -> Option<Ordering> {
             }
             // Same non-numeric kind: strict value order where decidable (dateTime/date
             // by timeline, booleans, same-tag / same-other-XSD lexically), else the
-            // deterministic lexical fallback.
+            // deterministic lexical fallback. The fallback is reachable only for the
+            // lexical-everywhere kinds: for the DateTime/Date kinds `strict_cmp` is
+            // contracted TOTAL, because a kind mixing timeline-decided and lexical-decided
+            // pairs is intransitive. [SONNET-4.6] sq-2k5py
             if let Some(o) = x.strict_cmp(y) {
                 return Some(o);
             }
@@ -632,6 +662,16 @@ mod kani_proofs {
             // `None` ⇒ the caller falls back to the lexical string form. The model's only
             // strict family is `Strict`. (The engine also decides plain-string pairs here —
             // lexically, identical to the fallback the model routes them through.)
+            //
+            // [SONNET-4.6] sq-2k5py — HONESTY BOUNDARY: the `Strict` (DateTime-kind) arm is
+            // TOTAL, which is now the documented `strict_cmp` CONTRACT rather than a
+            // modelling convenience. These harnesses therefore prove transitivity for a
+            // CONTRACT-CONFORMING implementation; they do NOT model the partial (relational)
+            // temporal comparison, whose indeterminate mixed-timezone window fell through to
+            // the lexical fallback and was intransitive — that witness is the
+            // `witness4_datetime_kind_indeterminate_window_needs_a_total_strict_cmp` unit
+            // test, and the real implementations satisfy the contract via
+            // `sparq_core::temporal::Timeline::cmp_tl_total`.
             match (self, other) {
                 (M::Strict(a), M::Strict(b)) => Some(a.cmp(b)),
                 _ => None,
@@ -947,9 +987,12 @@ mod kani_proofs {
         });
     }
 
-    /// TRANSITIVITY: double literals (NaN-free — with NaN the comparator is partial, see the
-    /// witness). Includes the `±0.0` equal-but-lexically-distinct pair: a mutation that let
-    /// numeric ties fall through to the string form would go red here.
+    /// TRANSITIVITY: double literals over the `DBLS` table, which is NaN-free because `NaN`
+    /// is the separate `M::Nan` variant — NOT because NaN is undecided: since the sq-wjl8i
+    /// totalisation NaN takes a fixed first-among-numerics position, and transitivity WITH
+    /// NaN is proved by `transitivity_mixed_literal_kinds_incl_nan`. Includes the `±0.0`
+    /// equal-but-lexically-distinct pair: a mutation that let numeric ties fall through to
+    /// the string form would go red here.
     #[kani::proof]
     #[kani::unwind(4)]
     fn transitivity_double_literals() {
@@ -1528,5 +1571,95 @@ mod tests {
         assert_eq!(compare_terms(&nan, &nan), Some(Ordering::Equal), "NaN ties with itself");
         // And against another kind, NaN ranks as a numeric (kind rank, not lexical "NaN").
         assert_eq!(compare_terms(&nan, &T::StrLit("A".into())), Some(Ordering::Less));
+    }
+
+    /// An `xsd:dateTime`-kind literal model for the sq-2k5py contract: the parsed instant
+    /// (assuming UTC), the timezone-PRESENCE bit, and the lexical form — plus a `total`
+    /// switch selecting which comparison [`CompareTerm::strict_cmp`] surfaces. `false`
+    /// reproduces the OLD relational (PARTIAL) comparison, whose indeterminate mixed-presence
+    /// window returned `None` and so dropped the pair to the lexical fallback; `true` is the
+    /// contracted TOTAL order (`sparq_core::temporal::Timeline::cmp_tl_total`: instant, then
+    /// presence). [SONNET-4.6] sq-2k5py
+    #[derive(Clone, Debug)]
+    struct TzLit {
+        instant: i64,
+        has_tz: bool,
+        lex: &'static str,
+        total: bool,
+    }
+
+    impl CompareTerm for TzLit {
+        fn term_class(&self) -> TermClass {
+            TermClass::Literal
+        }
+        fn literal_kind(&self) -> LiteralKind {
+            LiteralKind::DateTime
+        }
+        fn value_str(&self) -> Option<String> {
+            Some(self.lex.to_string())
+        }
+        fn as_f64(&self) -> Option<f64> {
+            None // a temporal is not numeric
+        }
+        fn exact_cmp(&self, _other: &Self) -> Option<Ordering> {
+            None // no numeric tier
+        }
+        fn strict_cmp(&self, other: &Self) -> Option<Ordering> {
+            // XPath: same (or no) timezone compares directly, and MIXED presence is
+            // decidable only outside the ±14h window.
+            let decidable = self.has_tz == other.has_tz || (self.instant - other.instant).abs() > 14 * 3600;
+            if decidable {
+                return Some(self.instant.cmp(&other.instant));
+            }
+            // The indeterminate window: `None` (the relational type error) unless the
+            // implementation honours the totality contract.
+            self.total.then(|| self.instant.cmp(&other.instant).then(self.has_tz.cmp(&other.has_tz)))
+        }
+        fn triple_parts(&self) -> Option<[Self; 3]> {
+            None
+        }
+    }
+
+    /// FIXED witness 4 — the DateTime-kind RESIDUAL of the sq-wjl8i kind-first fix: a
+    /// `strict_cmp` that leaves XPath's indeterminate mixed-timezone window `None` sends
+    /// those pairs — and ONLY those — to the lexical fallback, so one literal kind mixes
+    /// timeline-decided and lexical-decided pairs. Two zoned dateTimes in OPPOSITE offsets are
+    /// the SAME instant (timeline-Equal) while the tz-less `13:00:00` sits lexically
+    /// BETWEEN them: `x ~ y` yet `x < z` and `z < y`, an inconsistent comparator — the same intransitivity SHAPE as the sq-wjl8i witnesses. Honouring the
+    /// totality contract (instant, then timezone presence) removes it. [SONNET-4.6] sq-2k5py
+    #[test]
+    fn witness4_datetime_kind_indeterminate_window_needs_a_total_strict_cmp() {
+        // 13:00 UTC as "12:00:00-01:00" (zoned), as "14:00:00+01:00" (zoned), and the
+        // tz-less "13:00:00" — one instant, three lexicals.
+        let at = |lex: &'static str, has_tz: bool, total: bool| TzLit { instant: 13 * 3600, has_tz, lex, total };
+        let mk = |total: bool| {
+            (
+                at("2024-03-15T12:00:00-01:00", true, total),
+                at("2024-03-15T14:00:00+01:00", true, total),
+                at("2024-03-15T13:00:00", false, total),
+            )
+        };
+
+        // PARTIAL `strict_cmp` (the pre-fix behaviour): x ~ y, but z falls lexically
+        // BETWEEN them — `sort_by` is fed an inconsistent comparator.
+        let (x, y, z) = mk(false);
+        assert_eq!(x.strict_cmp(&z), None, "the pair really is XPath-indeterminate");
+        assert_eq!(compare_terms(&x, &y), Some(Ordering::Equal), "same instant, both zoned");
+        assert_eq!(compare_terms(&x, &z), Some(Ordering::Less), "lexical fallback: \"…T12:00:00-01:00\" < \"…T13:00:00\"");
+        assert_eq!(compare_terms(&z, &y), Some(Ordering::Less), "lexical fallback: \"…T13:00:00\" < \"…T14:00:00+01:00\"");
+        // `x ~ y` and `z < y` force `z < x` if the comparator is consistent. It is not:
+        assert_ne!(compare_terms(&z, &x), Some(Ordering::Less), "INTRANSITIVE: z < y and y ~ x, yet z > x");
+
+        // TOTAL `strict_cmp` (the contract): the equal-instant class is ordered by
+        // timezone presence, so the tz-less value sits strictly below BOTH zoned ones.
+        let (x, y, z) = mk(true);
+        assert_eq!(compare_terms(&x, &y), Some(Ordering::Equal), "same instant, both zoned — still Equal");
+        assert_eq!(compare_terms(&z, &x), Some(Ordering::Less), "tz-less before zoned");
+        assert_eq!(compare_terms(&z, &y), Some(Ordering::Less), "…consistently, for both members of the class");
+        assert_eq!(compare_terms(&x, &z), Some(Ordering::Greater), "antisymmetric");
+        // The window is the ONLY thing that changed: a decidable pair still orders by
+        // instant, tz-less or not (here 20h apart, outside the ±14h window).
+        let far = TzLit { instant: 13 * 3600 - 20 * 3600, has_tz: false, lex: "2024-03-14T17:00:00", total: true };
+        assert_eq!(compare_terms(&far, &x), Some(Ordering::Less));
     }
 }

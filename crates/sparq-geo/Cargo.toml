@@ -136,6 +136,13 @@ crs-definitions = { version = "0.5.0", default-features = false, features = ["pr
 rustc-hash.workspace = true
 
 [dev-dependencies]
+# [SONNET-4.6] sq-z1xv8 — the shared ratchet-floor constants. DEV-ONLY (zero-dep,
+# `publish = false`): the conformance ratchet floor this crate's test runner enforces is
+# the SAME `const` sparq-conformance's central scoreboard reports, so the two cannot
+# drift, and the dep edge puts this crate in the floors crate's reverse-dependency
+# closure (which is what makes CI test-selection sound for the floor — it replaces the
+# guard test's old runtime read of this file's source).
+sparq-conformance-floors = { path = "../sparq-conformance-floors" }
 # [GPT-5.6] Random accepted WKT geometries for parse/serialize fixpoint coverage.
 proptest = "1"
 # Deterministic random geometries for property tests + the benchmark example.
@@ -149,3 +156,22 @@ rand = "0.10"
 # the dependency is dev-only and the shipped crate is unaffected. `default-features
 # = false` drops the rayon `parallel` feature the closure does not need here.
 sparq-reason = { path = "../sparq-reason", version = "0.1.0", default-features = false }
+# [SONNET-4.6] sq-ql2iy: TEST/EXAMPLE-ONLY feature addition. The GeoSPARQL
+# Compliance Benchmark ships its dataset as RDF/XML only, so the
+# `gsb_compliance` example needs `sparq-core`'s opt-in `rdfxml` loader. Declared
+# here rather than on the `[dependencies]` entry so the SHIPPED crate — and the
+# wasm bundle downstream of it — still links no `oxrdfxml`.
+sparq-core = { path = "../sparq-core", version = "0.1.0", features = ["rdfxml"] }
+
+# [SONNET-4.6] sq-ql2iy — the 206-query GeoSPARQL Compliance Benchmark runner.
+# Needs the opt-in query-rewrite entry point (the QRW requirements R28–R30) and
+# the opt-in accessor functions (part of requirement R19), so it is skipped by a
+# default `cargo build --examples` and compiled under `--all-features`.
+# `test = true` so `cargo test --all-features` runs the harness's own unit tests
+# (the scoring table + the answer comparator) — the half of the runner that does
+# NOT need the gather-only benchmark download, and the half that decides whether
+# a run is scored correctly.
+[[example]]
+name = "gsb_compliance"
+required-features = ["geosparql_rewrite", "geof_accessors"]
+test = true

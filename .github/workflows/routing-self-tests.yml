@@ -24,6 +24,15 @@ on:
       - "scripts/route-resolve.py"
       - "scripts/dispatch-plan.py"
       - "scripts/ready-issues.py"
+      # [OPUS-5] the bd->issues migration pair. Their --self-tests were DEAD in this repo's
+      # PR CI: bd-to-issues.py's was invoked by no workflow at all, and
+      # ci-close-merged-beads.py's ran only POST-merge inside bead-autoclose.yml
+      # (pull_request_target: [closed], ref: main), i.e. after the change it would have
+      # caught was already on main. They also share a marker regex that must not drift
+      # ("keep in sync with scripts/ci-close-merged-beads.py _MARKER_RE"), so a change to
+      # either must re-run BOTH here.
+      - "scripts/bd-to-issues.py"
+      - "scripts/ci-close-merged-beads.py"
       # batch-merge.py imports ci_select.classify_change (#3433 class-partitioned
       # batching) — run its hermetic self-test on the PR that could break either side.
       - "scripts/batch-merge.py"
@@ -42,6 +51,15 @@ on:
       - "scripts/route-resolve.py"
       - "scripts/dispatch-plan.py"
       - "scripts/ready-issues.py"
+      # [OPUS-5] the bd->issues migration pair. Their --self-tests were DEAD in this repo's
+      # PR CI: bd-to-issues.py's was invoked by no workflow at all, and
+      # ci-close-merged-beads.py's ran only POST-merge inside bead-autoclose.yml
+      # (pull_request_target: [closed], ref: main), i.e. after the change it would have
+      # caught was already on main. They also share a marker regex that must not drift
+      # ("keep in sync with scripts/ci-close-merged-beads.py _MARKER_RE"), so a change to
+      # either must re-run BOTH here.
+      - "scripts/bd-to-issues.py"
+      - "scripts/ci-close-merged-beads.py"
       # batch-merge.py imports ci_select.classify_change (#3433 class-partitioned
       # batching) — run its hermetic self-test on the PR that could break either side.
       - "scripts/batch-merge.py"
@@ -80,3 +98,15 @@ jobs:
           python3 scripts/dispatch-plan.py --self-test
           python3 scripts/batch-merge.py --self-test
           python3 scripts/tests/test_readiness_visibility.py
+
+      # [OPUS-5] The bd->issues migration pair, previously ungated on a PR (see the `paths:`
+      # note above). Both are hermetic: stdlib only, every subprocess boundary stubbed, no
+      # gh/network/token. `bd-to-issues.py --self-test` carries the migration TRUST-BOUNDARY
+      # assertions (_writer_logins permission contract + the migration_owned author check),
+      # which is precisely the surface that must fail on the PR that weakens it rather than
+      # at the next bulk `--apply`.
+      - name: Validate the bd->issues migration and autoclose contracts
+        run: |
+          set -euo pipefail
+          python3 scripts/bd-to-issues.py --self-test
+          python3 scripts/ci-close-merged-beads.py --self-test

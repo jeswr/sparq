@@ -1794,24 +1794,45 @@ impl<'a> Validator<'a> {
                     .count() as u64;
                 if let Some(min) = min {
                     if count < *min {
-                        out.push(self.result(
-                            sid,
-                            focus,
-                            None,
-                            "QualifiedMinCountConstraintComponent",
-                            format!("Fewer than {min} values conform to the qualified shape"),
-                        ));
+                        // [SONNET-4.6] (sq-7os4t) A Qualified component merges
+                        // several parameter statements. Select the annotation on
+                        // the statement that caused this particular result.
+                        let meta = self.shapes.shapes[sid]
+                            .qualified_min_meta
+                            .get(comp_idx)
+                            .cloned()
+                            .unwrap_or_default();
+                        if !meta.is_deactivated() {
+                            let component_meta = self.active_meta.replace(meta);
+                            out.push(self.result(
+                                sid,
+                                focus,
+                                None,
+                                "QualifiedMinCountConstraintComponent",
+                                format!("Fewer than {min} values conform to the qualified shape"),
+                            ));
+                            self.active_meta = component_meta;
+                        }
                     }
                 }
                 if let Some(max) = max {
                     if count > *max {
-                        out.push(self.result(
-                            sid,
-                            focus,
-                            None,
-                            "QualifiedMaxCountConstraintComponent",
-                            format!("More than {max} values conform to the qualified shape"),
-                        ));
+                        let meta = self.shapes.shapes[sid]
+                            .qualified_max_meta
+                            .get(comp_idx)
+                            .cloned()
+                            .unwrap_or_default();
+                        if !meta.is_deactivated() {
+                            let component_meta = self.active_meta.replace(meta);
+                            out.push(self.result(
+                                sid,
+                                focus,
+                                None,
+                                "QualifiedMaxCountConstraintComponent",
+                                format!("More than {max} values conform to the qualified shape"),
+                            ));
+                            self.active_meta = component_meta;
+                        }
                     }
                 }
             }

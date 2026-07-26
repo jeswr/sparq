@@ -150,6 +150,19 @@ def externally_gated(bead):
 # package from the bead's own text, and when nothing is derivable make the parked state EXPLICIT
 # with `needs:area` (a gate ready-issues.py already respects + maintainer-visible) instead of
 # silently reserving the global partition.
+#
+# [OPUS-5] SCOPE OF THAT CLAIM, corrected in review round 2. It holds for the ZERO-area case only.
+# `limit=2` below means a bead CAN emit two areas, and the two consumers then disagree about what
+# that means: ready-issues.py `packages_of` treats it as the SET {a, b}, while dispatch-plan.py
+# collapses any non-singleton package set to `_ready.GLOBAL` — so a two-area issue lands in the
+# serializing __global__ partition at PLAN time after all, which is precisely the outcome the
+# needs:area park exists to avoid. MEASURED on the live board 2026-07-26: 55 of the 895 migrated
+# issues carry >=2 `area:` labels. Re-running derive_areas over their reconstructed bead text
+# reproduces >=2 for only 13 of those 55 (the reconstruction from the issue title/body is
+# approximate, so treat 13 as +/-1); the other 42 inherited both labels from their bd record or
+# from hand-labelling. So lowering this limit would NOT retro-fix the bulk of them, which is why
+# the fix is a decision about which consumer is authoritative rather than a change here.
+# Tracked separately (#3838); deliberately not reworded away.
 _SURFACE_AREAS = {"site": "site", "gui": "gui", "bench": "bench", "ci": "ci", "docs": "docs",
                   "js": "js", "wasm": "sparq-wasm", "workflows": "ci", "release": "release",
                   "orchestration": "orchestration", "deps": "deps", "workspace": "workspace"}
@@ -210,7 +223,10 @@ def derive_areas(bead, crates=None, limit=2):
 
     Returns [] when nothing is derivable; the caller then parks the issue `needs:area` rather than
     guessing. A wrong partition is worse than an explicit park: the park is maintainer-visible and
-    retriage re-promotes it the moment an area lands, whereas a wrong area silently routes the work."""
+    the retriage cron re-promotes it once an area lands, whereas a wrong area silently routes the
+    work. That readmission holds only for a park the sweep can SEE and whose author it trusts —
+    the fetch is paginated for exactly this reason (retriage.py `_fetch_label`); its predecessor
+    truncated at 500 and 219 of 719 parks were unreachable on every tick (issue #3831)."""
     crates = crate_names() if crates is None else crates
     title = bead.get("title") or ""
     low = title.lower()
@@ -531,6 +547,28 @@ def _label_node_ids(repo, names):
     return ids
 
 
+def _split_chunk(chunk, half=None):
+    """Split an over-limit chunk STRICTLY downward, or fail loud.
+
+    [OPUS-5] The split must SHRINK. GitHub executes the leading aliases before refusing an
+    oversize mutation, and these mutations are ADD-only, so a chunk re-queued at its original
+    size loops forever while re-applying its prefix on every pass — the process never exits and
+    never errors, it just spins. Review round 2 measured exactly that: mutating the halving
+    HUNG the self-test instead of failing it, which is a weak kill (a hang reads as a stuck
+    runner, not a caught defect). The invariant below turns that into a loud SystemExit.
+
+    `half` is injectable ONLY so the guard is reachable from the self-test. A post-condition no
+    input can violate is a tripwire nobody can prove still works — deleting it would red nothing
+    (measured: it survived mutation until this seam existed). Production always uses the default.
+    """
+    half = max(1, len(chunk) // 2) if half is None else half
+    halves = [chunk[:half], chunk[half:]]
+    if sum(len(h) for h in halves) != len(chunk) or any(len(h) >= len(chunk) for h in halves):
+        raise SystemExit(f"label reconcile: non-progressing split of {len(chunk)} -> "
+                         f"{[len(h) for h in halves]} — would loop while partially applying")
+    return halves
+
+
 def apply_reconcile(repo, plan, node_ids, batch=8, pause=2.0, log=print):
     """Apply `plan` ({issue_number: [labels]}) with ONE GraphQL request per `batch` issues.
 
@@ -569,9 +607,10 @@ def apply_reconcile(repo, plan, node_ids, batch=8, pause=2.0, log=print):
                 if len(chunk) == 1:
                     raise SystemExit(f"label reconcile: issue #{chunk[0]} is irreducibly over the "
                                      f"GraphQL resource limit: {err[:300]}")
-                half = max(1, len(chunk) // 2)
-                log(f"  request over the GraphQL resource limit — splitting {len(chunk)} -> {half}")
-                queue[:0] = [chunk[:half], chunk[half:]]
+                halves = _split_chunk(chunk)          # strictly downward, or a loud SystemExit
+                log(f"  request over the GraphQL resource limit — splitting {len(chunk)} -> "
+                    f"{len(halves[0])}")
+                queue[:0] = halves
                 break
             if "secondary rate" in err or "abuse" in err or "was submitted too quickly" in err:
                 wait = 30 * (2 ** attempt)
@@ -734,6 +773,16 @@ def _self_test():
     chk("non-bead marker payload does not scan", MARKER_RE.search("<!-- bd-id:not-a-bead -->"), None)
     chk("dotted subtask ids still scan",
         MARKER_RE.search("<!-- bd-id:sq-7d3dj.32.2.3 -->").group(1), "sq-7d3dj.32.2.3")
+    # [OPUS-5] _body was UNTESTED: reading a wrong/absent key (e.g. bead["body"] instead of
+    # bead["description"]) silently ships every migrated issue with an EMPTY description —
+    # content loss across a ~900-issue bulk run, with no error and a still-valid marker. The
+    # fixture carries ONLY `description`, so a wrong-key read cannot pass by coincidence.
+    body_out = _body({"description": "  the real bead prose  "}, "sq-body")
+    chk("migrated body carries the bead description", "the real bead prose" in body_out, True)
+    chk("migrated body is marker-addressable and self-identified",
+        (MARKER_RE.search(body_out).group(1), body_out.startswith(SELF_ID)), ("sq-body", True))
+    chk("a description-less bead still yields a valid marker body",
+        MARKER_RE.search(_body({}, "sq-empty")).group(1), "sq-empty")
 
     # --- migration-owned provenance (audit 2026-07-25) -------------------------------------------
     # The 2026-07-17 bulk run predates MIGRATION_LABEL: ~750 marker-only issues. Without a third
@@ -742,7 +791,14 @@ def _self_test():
     # the decoy threat model's attacker is unprivileged, so the author check is what closes the hole.
     legit = {"number": 42, "title": "sq-legit: do the thing",
              "body": "x\n<!-- bd-id:sq-legit -->\n", "author": {"login": "maintainer"}}
-    decoy = {"number": 43, "title": "please look at this",
+    # [OPUS-5] The decoy MUST satisfy the title contract. Review round 2 measured that the old
+    # title ("please look at this") also violated the title check, so `chk("unprivileged decoy
+    # author is NOT owned")` short-circuited there and NEVER reached `login in writers` — deleting
+    # the author check outright left the whole self-test green. A decoy that copies a marker to
+    # capture a bead id would obviously copy the title format too; the author check is the ONLY
+    # thing standing between an unprivileged forger and a hijacked migration mapping, so it is
+    # the one that has to be isolated here.
+    decoy = {"number": 43, "title": "sq-victim: do the thing",
              "body": "<!-- bd-id:sq-victim -->", "author": {"login": "randomuser"}}
     wrongtitle = {"number": 44, "title": "unrelated title",
                   "body": "<!-- bd-id:sq-titleless -->", "author": {"login": "maintainer"}}
@@ -750,8 +806,101 @@ def _self_test():
                  "body": "matches `<!-- bd-id:… -->`", "author": {"login": "maintainer"}}
     owned = migration_owned([legit, decoy, wrongtitle, prose_iss], {"maintainer"})
     chk("write-author + title contract is migration-owned", owned, {"sq-legit"})
-    chk("unprivileged decoy author is NOT owned", "sq-victim" in owned, False)
+    # ISOLATES the author check: the decoy now satisfies title + unique-marker, so the ONLY
+    # remaining reason it is not owned is that its author lacks write permission.
+    chk("title-contract-satisfying decoy from an unprivileged author is NOT owned",
+        "sq-victim" in owned, False)
     chk("write author WITHOUT the title contract is NOT owned", "sq-titleless" in owned, False)
+
+    # --- _writer_logins: the LOAD-BEARING half of the trust boundary (review round 2) ------------
+    # migration_owned only consumes the `writers` set; the code that BUILDS it was untested, so
+    # "every login is a writer" and "any [bot] is trusted" were both free mutations. Stub the
+    # subprocess boundary (`_run`) so the permission contract is asserted without network.
+    class _Resp:
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    perms = {"maintainer": "admin", "triager": "write", "curator": "maintain",
+             "randomuser": "read", "watcher": ""}
+    api_calls = []
+
+    def _stub_run(args, check=True):
+        api_calls.append(args)
+        assert args[0:2] == ["gh", "api"], args
+        login = args[2].split("/")[-2]
+        return _Resp(perms.get(login, "") + "\n")
+
+    real_run = globals()["_run"]
+    globals()["_run"] = _stub_run
+    try:
+        got = _writer_logins("o/r", ["maintainer", "triager", "curator", "randomuser", "watcher"])
+        chk("only admin/maintain/write logins are writers", got,
+            {"maintainer", "triager", "curator"})
+        chk("a read-only collaborator is NOT a writer", "randomuser" in got, False)
+        chk("an empty/absent permission is NOT a writer (fail closed)", "watcher" in got, False)
+        # `[bot]` logins never hit the collaborators API — an App is not a collaborator — so the
+        # allowlist is the ONLY gate. Trusting the suffix would let anyone who can create a
+        # `*[bot]`-suffixed account author a decoy the migration then treats as its own.
+        n_before = len(api_calls)
+        bots = _writer_logins("o/r", ["sparq-orchestrator[bot]", "attacker[bot]"])
+        chk("only the migration's own App bot is trusted", bots, {"sparq-orchestrator[bot]"})
+        chk("an unlisted [bot] login is NOT a writer", "attacker[bot]" in bots, False)
+        chk("bot logins are decided by the allowlist, not by the permissions API",
+            len(api_calls) - n_before, 0)
+        # the cache must not launder an untrusted login into a trusted one
+        shared = {}
+        _writer_logins("o/r", ["randomuser"], cache=shared)
+        chk("a cached negative stays negative", _writer_logins("o/r", ["randomuser"],
+                                                              cache=shared), set())
+        chk("the cache records the verdict, not the raw permission", shared, {"randomuser": False})
+    finally:
+        globals()["_run"] = real_run
+
+    # --- THE YAML SEAM: a self-test no workflow INVOKES is not a gate (review round 2) ----------
+    # Measured on the merged tree: `bd-to-issues.py --self-test` was invoked by NO workflow, and
+    # `ci-close-merged-beads.py --self-test` ran only POST-merge in bead-autoclose.yml
+    # (pull_request_target: [closed], ref: main) — after the change it would have caught was
+    # already on main. Every assertion above was therefore ungated on the PR that could break it.
+    #
+    # SCOPED ON PURPOSE. A whole-file substring search passes for the WRONG reason here, because
+    # each filename appears in BOTH the `paths:` filter and the `run:` block — that exact vacuity
+    # has already been measured twice on this repo's routing gate. So: count the filename inside
+    # the `paths:` region only (exactly 2 — the pull_request filter AND the push filter), and
+    # assert the `--self-test` invocation inside the steps region only.
+    wf = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                      "..", ".github", "workflows", "routing-self-tests.yml")
+    wf_src = open(wf, encoding="utf-8").read()
+    paths_region = wf_src[:wf_src.index("permissions:")]
+    steps_region = wf_src[wf_src.index("    steps:"):]
+    for script in ("scripts/bd-to-issues.py", "scripts/ci-close-merged-beads.py"):
+        chk(f"{script} is a path trigger on BOTH pull_request and push",
+            paths_region.count(f'"{script}"'), 2)
+        chk(f"{script} --self-test is actually INVOKED, not merely path-filtered",
+            f"python3 {script} --self-test" in steps_region, True)
+    # [OPUS-5] GATING STATUS, guarded against the rule that is ACTUALLY live. ci-summary's
+    # discovery changed on 2026-07-25 (#3773): a check is non-gating iff it is EXPLICITLY
+    # DECLARED in .github/advisory-registry.json, keyed on workflow file + job id. The old
+    # `\b(advisory|informational)\b` NAME rule is gone — it had silently neutralised four real
+    # gates — so a rename can no longer demote anything, and asserting on the job NAME would
+    # guard a rule that no longer exists. The real demotion path is a registry entry, so that
+    # is what is asserted: this job must not be declared advisory.
+    registry = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                           "..", ".github", "advisory-registry.json"),
+                              encoding="utf-8"))
+    declared = {(e.get("workflow"), e.get("job_id")) for e in registry.get("jobs", {}).values()}
+    chk("the routing gate is NOT declared advisory (a declaration is what demotes it now)",
+        ("routing-self-tests.yml", "validate") in declared, False)
+    # merge_group cannot carry a paths filter; without the trigger the queue ref never exposes
+    # this gating check and the merge queue would merge past it.
+    chk("merge_group trigger present (the queue ref must expose the gate)",
+        bool(re.search(r"(?m)^  merge_group:", wf_src)), True)
+    # The two scripts share a marker regex that must not drift. Pin that they are gated
+    # TOGETHER, so a change to either re-runs both.
+    chk("MARKER_RE stays in sync with ci-close-merged-beads _MARKER_RE",
+        MARKER_RE.pattern,
+        re.search(r"_MARKER_RE = re\.compile\(r\"(.+?)\"\)",
+                  open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "ci-close-merged-beads.py"), encoding="utf-8").read()).group(1))
     dup = [dict(legit), dict(legit, number=46)]
     chk("two issues sharing a bd-id are never owned (fail closed)",
         migration_owned(dup, {"maintainer"}), set())
@@ -842,11 +991,42 @@ def _self_test():
          if lb.startswith("priority:")], [])
     chk("a missing single-valued family IS still filled in",
         "role:impl" in plan_reconcile(beads, {"sq-a": 15}, {15: ["area:x"]}, cr).get(15, []), True)
+    # [OPUS-5] `area:` was in _SINGLE_VALUED but UNGUARDED — dropping it from the tuple redded
+    # nothing, unlike its two siblings. The "human-curated area is preserved" case above passes
+    # for a DIFFERENT reason (its bead derives no area at all, so the `needs:area` discard does
+    # the work). This is the case that isolates the family suppression: the bead derives
+    # area:sparq-solid while the issue already carries a different area, so a second area label
+    # would put one issue in two package partitions — which dispatch-plan.py then collapses to
+    # the serializing __global__ partition, i.e. strictly worse than leaving it alone.
+    chk("never adds a SECOND area: label when the issue already has a different one",
+        [lb for lb in plan_reconcile(beads, {"sq-a": 16}, {16: ["area:sparq-core"]},
+                                     cr).get(16, []) if lb.startswith("area:")], [])
     chk("batching chunks evenly", [len(c) for c in _chunks(range(45), 20)], [20, 20, 5])
     chk("empty reconcile does zero API calls", apply_reconcile("o/r", {}, {}), 0)
     # Adaptive split on the server's `Resource limits for this query exceeded` refusal (a real
     # 20-mutation batch hit it on the first chunk). Every issue must still be applied EXACTLY
     # once overall, and a single irreducible issue must fail loud rather than loop.
+    # [OPUS-5] Split-invariant assertions run BEFORE the apply_reconcile block on purpose: a
+    # broken split makes apply_reconcile raise, which would abort _self_test mid-way and turn
+    # every later assertion into an unnamed traceback instead of a named FAIL line.
+    def _shrinks(n):
+        try:
+            return all(0 < len(h) < n for h in _split_chunk(list(range(n))))
+        except SystemExit:
+            return "SystemExit"
+    chk("every split strictly shrinks (a non-progressing split loops forever)",
+        [n for n in range(2, 65) if _shrinks(n) is not True], [])
+    chk("a split preserves every element exactly once",
+        _split_chunk([1, 2, 3, 4, 5]), [[1, 2], [3, 4, 5]])
+    # The guard itself, exercised through the injectable seam — otherwise it is an unreachable
+    # post-condition that could be deleted with nothing going red.
+    for bad, why in ((5, "no shrink"), (0, "empty head, full tail"), (9, "tail dropped")):
+        try:
+            _split_chunk([1, 2, 3, 4, 5], half=bad)
+            chk(f"non-progressing split is rejected ({why})", "returned", "SystemExit")
+        except SystemExit:
+            chk(f"non-progressing split is rejected ({why})", "SystemExit", "SystemExit")
+
     calls = []
 
     def fake_run(args, check=True):
@@ -869,6 +1049,24 @@ def _self_test():
         # is NEVER re-issued at the same size (that would loop while partially applying).
         chk("oversize batch splits strictly downward, never retried at the same size",
             calls, [5, 2, 3, 1, 2])
+        # CALL-SITE PIN: apply_reconcile must route its split through the guarded helper. An
+        # inlined halving at the call site is correct TODAY and therefore invisible to every
+        # assertion above — measured as a surviving mutant. Stub the helper with a sentinel and
+        # require it to reach the caller: if the call site stops using it, nothing raises.
+        sentinel = RuntimeError("split helper reached")
+
+        def _boom(chunk, half=None):
+            raise sentinel
+        real_split = globals()["_split_chunk"]
+        globals()["_split_chunk"] = _boom
+        try:
+            apply_reconcile("o/r", plan5, {n: f"I_{n}" for n in plan5}, batch=5, pause=0)
+            chk("apply_reconcile splits via the guarded _split_chunk", "not called", "called")
+        except RuntimeError as exc:
+            chk("apply_reconcile splits via the guarded _split_chunk",
+                "called" if exc is sentinel else repr(exc), "called")
+        finally:
+            globals()["_split_chunk"] = real_split
         calls.clear()
         globals()["_run"] = lambda a, check=True: type("R", (), {
             "returncode": 1, "stdout": "", "stderr": "Resource limits for this query exceeded"})()

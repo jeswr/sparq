@@ -159,8 +159,9 @@ pub fn stratify(dict: &Dict, program: &Program) -> Result<Stratification, String
             nodes.len() - 1
         })
     };
-    // (head, body, negative) edges over node indices.
-    let mut edges: Vec<(usize, usize, bool)> = Vec::new();
+    // Dependency edges over node indices, represented as (body, head).
+    let mut pos_edges: Vec<(usize, usize)> = Vec::new();
+    let mut neg_edges: Vec<(usize, usize)> = Vec::new();
     for rule in &program.rules {
         let heads: Vec<usize> = rule
             .head
@@ -170,14 +171,18 @@ pub fn stratify(dict: &Dict, program: &Program) -> Result<Stratification, String
         for (b, neg) in rule_edges(rule, ty) {
             let b = ix(b, &mut node_ix, &mut nodes);
             for &h in &heads {
-                edges.push((h, b, neg));
+                if neg {
+                    neg_edges.push((b, h));
+                } else {
+                    pos_edges.push((b, h));
+                }
             }
         }
         // Co-head nodes must share a stratum: mutual positive edges.
         for &h1 in &heads {
             for &h2 in &heads {
                 if h1 != h2 {
-                    edges.push((h1, h2, false));
+                    pos_edges.push((h2, h1));
                 }
             }
         }
@@ -197,9 +202,9 @@ pub fn stratify(dict: &Dict, program: &Program) -> Result<Stratification, String
             .flat_map(|r| &r.head)
             .any(|a| atom_key(a, ty) == Key::TypeAny);
         for c in classes {
-            edges.push((any, c, false)); // TypeAny reads every class
+            pos_edges.push((c, any)); // TypeAny reads every class
             if any_is_head {
-                edges.push((c, any, false)); // every class may receive TypeAny facts
+                pos_edges.push((any, c)); // every class may receive TypeAny facts
             }
         }
     }
@@ -216,34 +221,14 @@ pub fn stratify(dict: &Dict, program: &Program) -> Result<Stratification, String
             .flat_map(|r| &r.head)
             .any(|a| atom_key(a, ty) == Key::Top);
         for c in concrete {
-            edges.push((top, c, false));
+            pos_edges.push((c, top));
             if top_is_head {
-                edges.push((c, top, false));
+                pos_edges.push((top, c));
             }
         }
     }
     let n = nodes.len();
-    let mut stratum = vec![0usize; n];
-    loop {
-        let mut changed = false;
-        for &(h, b, neg) in &edges {
-            let req = stratum[b] + usize::from(neg);
-            if stratum[h] < req {
-                if req > n {
-                    return Err(format!(
-                        "datalog program is NOT stratifiable: {} lies on a \
-                         recursion cycle through NOT/AGGREGATE (no stratified model exists)",
-                        node_name(dict, nodes[h])
-                    ));
-                }
-                stratum[h] = req;
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
+    let stratum = stratify_edges(n, &pos_edges, &neg_edges, &|i| node_name(dict, nodes[i]))?;
     // A rule's stratum is its head node's (co-heads converge to one value).
     let rule_stratum: Vec<usize> = program
         .rules
@@ -255,6 +240,47 @@ pub fn stratify(dict: &Dict, program: &Program) -> Result<Stratification, String
         rule_stratum,
         n_strata,
     })
+}
+
+/// [SONNET-4.6] Run the dialect-neutral stratum-raising fixpoint.
+///
+/// Edges are `(body_node, head_node)`; negative edges impose the strict
+/// `head > body` constraint used for negation and aggregation.
+pub(crate) fn stratify_edges(
+    n_nodes: usize,
+    pos_edges: &[(usize, usize)],
+    neg_edges: &[(usize, usize)],
+    name_of: &dyn Fn(usize) -> String,
+) -> Result<Vec<usize>, String> {
+    let mut stratum = vec![0usize; n_nodes];
+    loop {
+        let mut changed = false;
+        for &(b, h) in pos_edges {
+            let req = stratum[b];
+            if stratum[h] < req {
+                stratum[h] = req;
+                changed = true;
+            }
+        }
+        for &(b, h) in neg_edges {
+            let req = stratum[b] + 1;
+            if stratum[h] < req {
+                if req > n_nodes {
+                    return Err(format!(
+                        "datalog program is NOT stratifiable: {} lies on a \
+                         recursion cycle through NOT/AGGREGATE (no stratified model exists)",
+                        name_of(h)
+                    ));
+                }
+                stratum[h] = req;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    Ok(stratum)
 }
 
 fn node_name(dict: &Dict, k: Key) -> String {

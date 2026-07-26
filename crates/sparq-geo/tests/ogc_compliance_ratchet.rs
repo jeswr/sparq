@@ -65,9 +65,10 @@ use sparq_geo::GeoError;
 /// REVERSE direction so the spec's symmetry/asymmetry is pinned, MULTI* operands,
 /// and the contains-view of the point/line/polygon inclusion rows). Each new
 /// fixture's expected boolean is the OGC matrix truth value AND the value the
-/// engine GENUINELY returns — none is a faked pass. The mirrored central
-/// scoreboard floor (`crates/sparq-conformance/src/scoreboard.rs`) and the
-/// floor-sync guard move in the same commit.
+/// engine GENUINELY returns — none is a faked pass. [SONNET-4.6] sq-z1xv8: the
+/// central scoreboard floor (`crates/sparq-conformance/src/scoreboard.rs`) is no
+/// longer a mirror — it imports the same shared const, so raising it here is a
+/// single edit in `sparq-conformance-floors`.
 ///
 /// [SONNET-4.6] sq-lk3aw.1 — raised 158 -> 197: 39 net-new hand-derived
 /// DE-9IM assertions extend coverage across five under-covered axes:
@@ -78,7 +79,12 @@ use sparq_geo::GeoError;
 /// (4) point vs line (interior-point `sfWithin` and endpoint `sfTouches`);
 /// (5) additional rcc8/eh DISJOINT assertions over the existing polygon pairs
 /// that were missing the reverse-symmetric or multi-pair coverage.
-const OGC_RATCHET_FLOOR: usize = 197;
+/// [SONNET-4.6] sq-z1xv8 — the VALUE now lives once in the zero-dependency
+/// `sparq-conformance-floors` crate, which `sparq-conformance`'s central
+/// `scoreboard::SUITES` reads too, so the enforced floor and the reported floor are
+/// ONE `const` and cannot drift (replacing the old textual re-read of this file).
+/// Raise it THERE; the measurement narrative stays here.
+const OGC_RATCHET_FLOOR: usize = sparq_conformance_floors::geo::OGC_TOPOLOGY_FLOOR;
 
 /// One topology relation under test, named by its `geof:` local name and bound
 /// to its lexical-level implementation.

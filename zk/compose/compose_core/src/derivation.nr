@@ -53,9 +53,19 @@
 //! rdfs9/rdfs7 (shipped host-side) + rdfs2/rdfs3/rdfs5/rdfs11 -- all the same
 //! fixed variable-sharing shape, matching `EntailmentRule` in the host module
 //! (single source of truth for the shapes). `owl:sameAs` is gated SEPARATELY
-//! (`sq-rsd3v.7`): encoding-equality is UNSOUND under equality reasoning and
-//! MUST NOT ride this fixed-shape path. A node with an unknown `rule` tag has
-//! no satisfying shape and is rejected.
+//! (`sq-rsd3v.6`, the `sameas` module): encoding-equality is UNSOUND under
+//! equality reasoning and MUST NOT ride this fixed-shape path. A node with an
+//! unknown `rule` tag has no satisfying shape and is rejected.
+//!
+//! Note WHERE that refusal lives: this relation does NOT test for the
+//! `owl:sameAs` encoding (it has no such public input, and an rdfs7 firing over
+//! a `sameAs` fact is a legitimate RDFS instance in-circuit). The gate is
+//! HOST-side --
+//! `DerivationStep::mentions_equality_predicate` + `bind_entailment`'s
+//! `CheckError::EqualityReasoningUnsupported` -- so a manifest cannot present an
+//! equality step on this path. Do not read the absence of an in-circuit check
+//! as "the circuit permits sameAs reasoning": it permits the RDFS rule, and the
+//! equality SEMANTICS come only from `sameas.nr`'s canonicalisation.
 //!
 //! # HONEST STATUS (sq-qhy4)
 //! Research-grade, NOT externally audited. This is the in-circuit RELATION; the
@@ -63,7 +73,7 @@
 //! mapper) and the compiled bin-package monomorphisation + `bb gates` cost
 //! measurement are follow-ups. NO cost claim is made here (repo policy forbids
 //! unmeasured numbers; `bb gates` MUST confirm the per-node figure first).
-//! Completeness-under-entailment is explicitly OUT of scope (`sq-rsd3v.6`).
+//! Completeness-under-entailment is explicitly OUT of scope (`sq-rsd3v.7`).
 
 use crate::hashes::{commit_fold, h3};
 
