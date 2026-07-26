@@ -111,6 +111,13 @@ RULES = [
     # -- surfaces that are frequently NAME-DROPPED by neighbouring beads ---------
     # Ordered ahead of the spec/paper/zk rules: a paper's Limitations section names
     # the crate it limits, and an ODRL bead names the paper that surfaced it.
+    # sq-wvne is a trust-graph REQUIREMENT whose three pieces are all circuits:
+    # its body names sparq-zk-compose/src/issuer.rs, verifier.rs and
+    # tests/holder_pok_binding.rs. Labelling it trust-only would send a worker to
+    # a crate that holds none of the code it must change.
+    ("trust-zk-composite", "title", r"zkaps-grade unlinkable presentation",
+     ["sparq-trust", "sparq-zk-compose"],
+     "the composite is built in sparq-zk-compose; the requirement is the trust graph's"),
     ("trust-graph", "title",
      r"solid-authz-trust|trust-graph|pfae\.|live-status gate",
      ["sparq-trust"], "the solid trust-graph / admission surface"),
@@ -161,6 +168,12 @@ RULES = [
      ["sparq-zk"], "Baby-JubJub Schnorr lives in crates/sparq-zk"),
 
     # -- reasoner family ---------------------------------------------------------
+    # A DL bead that moves a measured floor also edits the floor: every
+    # DL_*_FLOOR / DL_PROFILE_NEGATIVE_* constant and tests/dl_suite.rs live in
+    # crates/sparq-conformance, not in the reasoner.
+    ("reason-dl-floor", "text", r"dl_[a-z_]*floor|dl_profile_negative|dl_suite\.rs",
+     ["sparq-reason-dl", "sparq-conformance"],
+     "the DL lane plus the conformance floor constants it ratchets"),
     ("reason-dl", "title",
      r"\bdl l[0-9]\b|tableau|tableux|pbz04\.4|owl profile dispatch",
      ["sparq-reason-dl"], "the DL (ALCH tableau / profile-dispatch) lane"),
