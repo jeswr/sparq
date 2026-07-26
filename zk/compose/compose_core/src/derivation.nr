@@ -1,7 +1,7 @@
 // [OPUS-4.8] sq-rsd3v.2 (#2614): in-circuit ZK-over-hidden-antecedent
 // derivation_step member (RDFS-first). Epic sq-rsd3v; parent #2616.
 //! In-circuit RDFS derivation relation -- the GREENFIELD "row A1" member of
-//! `research/zk-inference-and-credentials.md §3.3`: prove a disclosed row is
+//! `research/zk-inference-and-credentials.md sec 3.3`: prove a disclosed row is
 //! ENTAILED (SOUNDNESS-of-derivation) under an RDFS regime WITHOUT disclosing
 //! the antecedent base facts.
 //!
@@ -12,7 +12,7 @@
 //! grounds the DAG LEAVES to committed-graph MEMBERSHIP instead, so the base
 //! facts a derivation rests on are HIDDEN private witnesses (row A1).
 //!
-//! # The statement (design §3.3, one `ProofTree` per derived disclosed row)
+//! # The statement (design sec 3.3, one `ProofTree` per derived disclosed row)
 //! A `ProofTree` is a flat, premises-before-conclusion DAG of `M` nodes. Each
 //! active node is EITHER:
 //!   - a LEAF (`rule == RULE_LEAF`): an asserted base fact, ANCHORED to
@@ -49,7 +49,7 @@
 //!            facts live only in `enc`/`prem`/`concl` and never appear in a
 //!            public input -- that is the antecedent privacy this member adds.
 //!
-//! # Rule scope v1 (fail-closed outside it; design §3.5)
+//! # Rule scope v1 (fail-closed outside it; design sec 3.5)
 //! rdfs9/rdfs7 (shipped host-side) + rdfs2/rdfs3/rdfs5/rdfs11 -- all the same
 //! fixed variable-sharing shape, matching `EntailmentRule` in the host module
 //! (single source of truth for the shapes). `owl:sameAs` is gated SEPARATELY
@@ -95,7 +95,7 @@ fn triple_eq(a: [Field; 3], b: [Field; 3]) -> bool {
 /// `row` occurs in some active slot of the graph `(enc, count)` -- the
 /// `scan.nr` / `join.nr` present-in-graph discipline (whole graph in-circuit;
 /// membership is equality against witnessed slots, no Merkle machinery). This
-/// is the leaf-anchoring primitive of design §3.3 step 3.
+/// is the leaf-anchoring primitive of design sec 3.3 step 3.
 fn row_present_in<let N: u32>(enc: [[Field; 3]; N], count: u32, row: [Field; 3]) -> bool {
     let mut present = false;
     for i in 0..N {
@@ -184,7 +184,7 @@ fn rule_shape_ok(
 /// `commitments` (PUBLIC) MUST byte-equal the scan sub-proofs' `commitments[g]`
 /// (the verifier's entailment-binding gate -- NOT enforced here; this is the
 /// in-circuit relation). `schema` (PUBLIC) MUST equal the verifier-recomputed
-/// RDFS-vocabulary encodings (design §3.3: schema-as-PUBLIC is the term
+/// RDFS-vocabulary encodings (design sec 3.3: schema-as-PUBLIC is the term
 /// encodings only -- the schema ANTECEDENTS are still grounded as leaves, never
 /// trusted). `root` (PUBLIC) is the disclosed derived triple encoding, bound to
 /// the DAG's terminal conclusion.
