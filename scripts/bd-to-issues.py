@@ -157,9 +157,12 @@ def externally_gated(bead):
 # collapses any non-singleton package set to `_ready.GLOBAL` — so a two-area issue lands in the
 # serializing __global__ partition at PLAN time after all, which is precisely the outcome the
 # needs:area park exists to avoid. MEASURED on the live board 2026-07-26: 55 of the 895 migrated
-# issues carry >=2 `area:` labels (most from their bd labels rather than from derivation, so
-# lowering this limit would not retro-fix them). Tracked separately; not silently reworded here,
-# because the right fix is a decision about which consumer is authoritative, not a doc edit.
+# issues carry >=2 `area:` labels. Re-running derive_areas over their reconstructed bead text
+# reproduces >=2 for only 13 of those 55 (the reconstruction from the issue title/body is
+# approximate, so treat 13 as +/-1); the other 42 inherited both labels from their bd record or
+# from hand-labelling. So lowering this limit would NOT retro-fix the bulk of them, which is why
+# the fix is a decision about which consumer is authoritative rather than a change here.
+# Tracked separately (#3838); deliberately not reworded away.
 _SURFACE_AREAS = {"site": "site", "gui": "gui", "bench": "bench", "ci": "ci", "docs": "docs",
                   "js": "js", "wasm": "sparq-wasm", "workflows": "ci", "release": "release",
                   "orchestration": "orchestration", "deps": "deps", "workspace": "workspace"}
