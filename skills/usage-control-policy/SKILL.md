@@ -405,6 +405,22 @@ let (matched, retracted) =
 // ambiguous re-eval (no constraint evidence) → retracted == 0 (deny KEPT, fail-closed).
 ```
 
+## The ODRL-as-N3 second decision path — `evaluate` is its ORACLE — [OPUS-5] sq-zgbso
+
+Maintainer issue [#1582](https://github.com/jeswr/sparq/issues/1582) asked for ODRL to be evaluated by **N3 inference rules**, the way `sparq-solid` already evaluates WAC and ACP, rather than by hand-written Rust. Phase `sq-zgbso.2` landed that — but as an **addition, not a migration**, and the distinction is load-bearing for anyone reading this SKILL:
+
+- **`sparq_policy::evaluate` is still the only production decision path.** Everything above this section describes it, and `materialize_odrl_permission` / `materialize_odrl_policy` call it.
+- **The N3 path is a parallel implementation** — `crates/sparq-solid/rules/odrl-{a0,a,b,c,d}.n3`, driven by `sparq_solid::odrl_bridge::materialize_odrl_n3`, behind the same `odrl-bridge` feature. It is **not** a drop-in alternative and does not decide every policy this crate decides.
+- **`evaluate` is the oracle, not a peer.** `crates/sparq-solid/tests/odrl_n3_differential.rs` pins the rules against this crate's decisions over a swept corpus and enforces two **safety inclusions**: *N3 allows ⊆ Rust allows* (the rules never grant what `evaluate` denies) and *Rust denies ⊆ N3 denies* (they never drop a carve-out). Both directions are access-control-critical — the two defects caught in review of that phase (`tests/odrl_n3_failopen_regression.rs`) were both fail-**open**: the N3 path granting what `evaluate` denied.
+
+**Exact decision equality is required only inside a deliberately narrow equivalence scope:** unconstrained permissions/prohibitions; `odrl:dateTime` `lteq`/`gteq` where the operand is in canonical UTC lexical form; `odrl:recipient` `eq`/`neq`; and `odrl:and`/`odrl:or` over constraint nodes carrying exactly one operand tuple and at most one combinator.
+
+**Everything else on this page has no N3 counterpart and stays Rust-only** — duties, `odrl:purpose` (and its subsumption taxonomy), `odrl:spatial`, `odrl:count` both stateless and under `count-enforcement`, `odrl:xone`, `odrl:PartyCollection`/`odrl:AssetCollection` membership, the static conflict/containment analysis, the `secprop` profile, strict `lt`/`gt` dateTime bounds, and the `odrl:use` umbrella (the rules match action IRIs exactly). The N3 driver **refuses** such a policy rather than deciding it — it does not silently decide a narrower thing. Stateful `count` is refused by construction, not by omission: an atomic exercise-and-increment is *mutation*, and a pure inference rule cannot decrement a budget.
+
+**If you change the decision algebra** in `sparq-policy/src/eval.rs`, that is not a local change: narrowing what `evaluate` allows, or widening what it denies, can break an inclusion the N3 rules cannot satisfy until they move with it. `sparq-solid` depends on `sparq-policy` under `odrl-bridge`, so the differential is in the reverse-dependency closure of such an edit.
+
+Phases `sq-zgbso.4`–`.6` (build-time rule compilation, flipping the strata onto the compiled evaluator, and the RDFS-as-compiled-N3 follow-on) have **not** run; the two HARD constraints the issue set — no performance degradation and no build-size increase — are stated in the design record and are not yet claimed as met. Design + landed state: [`research/odrl-n3-compiled-rules.md`](../../research/odrl-n3-compiled-rules.md).
+
 ## Pattern-scoped ODRL targets (sub-graph result masking) — [OPUS-4.8] sq-f9u1y
 
 An ODRL target can denote a **triple-pattern sub-graph** of a source graph rather than the whole graph — a *pattern asset*. Two layers, at different maturity:

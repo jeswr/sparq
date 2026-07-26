@@ -403,6 +403,25 @@ impl Decision {
 /// WAC/ACP path produces, with ODRL's richer purpose/recipient/time constraints
 /// and duty obligations layered on top.
 ///
+/// # Cross-crate contract — this function is the ODRL oracle
+///
+/// [OPUS-5] sq-zgbso (#1582): `sparq-solid` carries a *second*, independent ODRL
+/// decision procedure — the stateless core as N3 inference rules
+/// (`crates/sparq-solid/rules/odrl-*.n3`, behind that crate's `odrl-bridge` feature) —
+/// and `crates/sparq-solid/tests/odrl_n3_differential.rs` pins that path against **this**
+/// function. It enforces *N3 allows ⊆ Rust allows* and *Rust denies ⊆ N3 denies* over the
+/// swept corpus, plus exact decision equality inside a narrow equivalence scope
+/// (unconstrained rules, canonical-UTC `odrl:dateTime` `lteq`/`gteq`, `odrl:recipient`
+/// `eq`/`neq`, single-operand `odrl:and`/`odrl:or`). Everything outside that scope has no
+/// N3 counterpart and the N3 driver refuses it.
+///
+/// So a change to the decision algebra below is not local: narrowing what this function
+/// allows, or widening what it denies, can break an inclusion the N3 rules cannot satisfy
+/// until they move with it. The two directions are access-control-critical — both
+/// fail-open defects caught in review (`tests/odrl_n3_failopen_regression.rs` in
+/// `sparq-solid`) were the N3 path granting what this function denied. See the crate
+/// README and `research/odrl-n3-compiled-rules.md`.
+///
 /// # Examples
 ///
 /// ```

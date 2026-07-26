@@ -6,9 +6,48 @@
 > actual code, states the feasibility envelope honestly, and decomposes the work into
 > measurement-gated child beads (`sq-zgbso.1`–`.6`).
 
-**Status:** DESIGN / measurement-first plan. **Epic:** `sq-zgbso` (issue #1582).
+**Status:** DESIGN / measurement-first plan; **partially executed** — see *Landed state*
+below. **Epic:** `sq-zgbso` (issue #1582).
 **Gate:** everything past the first bead is blocked on the `sq-zgbso.1` spike verdict —
 no architectural commitment before the numbers exist.
+
+<!-- [OPUS-5] sq-zgbso: status reconciliation only. The plan below was written before any bead ran and still reads in the future tense ("results do NOT exist yet", "only .1 is dispatchable"); .1–.3 have since landed. the *Landed state* section records which beads shipped so the record stops asserting a state that is no longer true. No plan, verdict, or measurement is restated here. -->
+## Landed state (status reconciliation, added after the fact — read before §5–§6)
+
+The plan in §5–§6 is written in the future tense throughout. It has since been partially
+executed; read the rest of this record as the *design*, and this section as *what exists*:
+
+| Bead | State | Where it landed |
+|------|-------|-----------------|
+| `sq-zgbso.1` — spike (GATE) | **Landed** (#1601) | `crates/sparq-solid/rules/odrl-spike.n3`, `examples/odrl_n3_spike.rs`, `tests/odrl_n3_spike.rs` |
+| `sq-zgbso.2` — ODRL core as N3 strata | **Landed** (#3458) | `crates/sparq-solid/rules/odrl-{a0,a,b,c,d}.n3`, `src/odrl_bridge.rs` (`materialize_odrl_n3`), `tests/odrl_n3_differential.rs`, `tests/odrl_n3_failopen_regression.rs` |
+| `sq-zgbso.3` — id-level compiled-rule evaluator | **Landed** (#1619) | `crates/sparq-reason/src/n3/compiled.rs`, default-OFF `compiled-rules` feature, `tests/compiled_equivalence.rs` |
+| `sq-zgbso.4` — `build.rs` build-time compile + `materialize_wac/acp` flip | **Not started** | — |
+| `sq-zgbso.5` — ODRL strata flip to the compiled path | **Not started** | — |
+| `sq-zgbso.6` — RDFS-as-compiled-N3 spike (GATE for OWL-RL) | **Not started** | — |
+
+Two consequences worth stating plainly, because they change how the rest of this record
+should be read:
+
+1. **The N3 path is an addition, not a migration.** `sparq_policy::evaluate` is still the
+   default and only production ODRL decision path; `materialize_odrl_n3` is a parallel
+   implementation kept honest by a differential. §4's option (a) "status quo … rejected as
+   the end state" has therefore *not* yet been retired — the estate currently runs the two
+   evaluation stacks the option table names as the real maintenance cost. The HARD
+   constraints in §2 are still unmet as stated, because `.4` (the bead that actually
+   removes the runtime N3 parse and would let the ledger be measured) has not run.
+2. **`.2` shipped a narrower ODRL surface than §3 scoped.** §3 predicted the stateless core
+   including `xone` would be expressible. What landed covers unconstrained rules,
+   canonical-UTC `odrl:dateTime` `lteq`/`gteq`, `odrl:recipient` `eq`/`neq`, and
+   single-operand `odrl:and`/`odrl:or`; `xone`, `purpose`, `spatial` and stateless `count`
+   have no rules and the driver refuses those policies. That narrowing was a review
+   response to two fail-open defects (a multi-operand constraint node marked satisfied by
+   one satisfiable operand; the conflict-refusal guard never being called), both of which
+   granted access the Rust oracle denied. The oracle contract this created is now recorded
+   in `crates/sparq-policy/README.md` and on `sparq_policy::evaluate` itself.
+
+Measured results for the landed beads live in their bead comments and PR bodies as
+non-canonical work-box figures, per §6; none are restated here.
 
 **The ask, condensed (issue #1582):** (1) move ODRL evaluation out of hand-written Rust
 into Notation3 inference rules, the way WAC and ACP evaluation are done; (2) HARD
@@ -223,7 +262,8 @@ sq-zgbso.1 (spike verdict)
 Parallelism audit: the only concurrently-runnable sets are `{.2 (sparq-solid),
 .3 (sparq-reason)}` and `{.5 (sparq-solid), .6 (sparq-reason)}` — one bead per crate,
 zero shared files. `Cargo.toml`/`odrl_bridge.rs` overlaps across phases are strictly
-sequenced by the dep edges. Only `sq-zgbso.1` is dispatchable now, by design.
+sequenced by the dep edges. Only `sq-zgbso.1` was dispatchable when this was written, by
+design; `.1`–`.3` have since landed and `.4` is the frontier (see *Landed state*).
 
 **Verdict semantics of the spike (`sq-zgbso.1`):** two independent GO/NO-GO calls —
 (i) *ODRL-as-N3*: correctness parity holds and the runtime ratio is acceptable given
@@ -235,7 +275,7 @@ as coherent as WAC/ACP today (option (b) as consolation is then worth a follow-u
 
 ---
 
-## 6. Measurement plan (what will be measured — results do NOT exist yet)
+## 6. Measurement plan (what will be measured — results did NOT exist when this was written; `.1`–`.3` have since been measured — see *Landed state*)
 
 Stated up front so downstream `verify` is mechanical and nobody invents a number. All
 wall-clock figures are best-of-N on the work box, reported in bead comments + PR bodies
