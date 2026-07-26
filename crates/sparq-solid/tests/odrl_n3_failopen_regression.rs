@@ -217,3 +217,141 @@ fn defect2_conflict_invalid_tracks_rust_admissibility_both_ways() {
         .expect("N3 admits the unconflicted invalid-policy");
     assert!(out.granted, "the unconflicted policy still grants on the N3 path");
 }
+
+// ── The RULES layer on its own ───────────────────────────────────────────────
+//
+// The driver refuses an ambiguous constraint node before reasoning, so the tests above
+// cannot tell whether `rules/odrl-a0.n3` does anything. These drive the five strata
+// DIRECTLY, bypassing the driver's validator, and pin the rule-layer half of the fix:
+// with the A0 guard removed they derive the fail-OPEN grant again.
+//
+// The two layers deliberately overlap and neither subsumes the other: A0 closes the
+// GRANT direction inside the rules, while the driver's refusal is the only disposition
+// that is also safe on the DENY side (suppressing an ambiguous prohibition's
+// satisfaction would drop its deny and widen access).
+
+use sparq_core::dict::Dict;
+use sparq_reason::reason_n3;
+
+const ODRL_A0: &str = include_str!("../rules/odrl-a0.n3");
+const ODRL_A: &str = include_str!("../rules/odrl-a.n3");
+const ODRL_B: &str = include_str!("../rules/odrl-b.n3");
+const ODRL_C: &str = include_str!("../rules/odrl-c.n3");
+const ODRL_D: &str = include_str!("../rules/odrl-d.n3");
+
+/// Run the five strata over `facts` exactly as `materialize_odrl_n3` chains them, and
+/// return the `auth:`-namespace triples of the final closure as `"s p o"` strings.
+fn strata_auth_triples(facts: &str) -> Vec<String> {
+    let mut src = facts.to_owned();
+    let mut out = Vec::new();
+    for rules in [ODRL_A0, ODRL_A, ODRL_B, ODRL_C, ODRL_D] {
+        let mut dict = Dict::new();
+        let closure = reason_n3(&mut dict, &format!("{}\n{}", src, rules))
+            .unwrap_or_else(|e| panic!("stratum must reason: {}", e));
+        let mut next = String::new();
+        out.clear();
+        for t in &closure {
+            let (s, p, o) = (dict.term(t[0]), dict.term(t[1]), dict.term(t[2]));
+            next.push_str(&format!("{} {} {} .\n", s, p, o));
+            if format!("{}", p).contains("https://sparq.dev/ns/auth#") {
+                out.push(format!("{} {} {}", s, p, o));
+            }
+        }
+        src = next;
+    }
+    out
+}
+
+/// The request facts `serialize_request_n3` emits for alice reading `urn:t/1` at a time
+/// long after the policy's `dateTime lteq 2000-01-01` bound has lapsed.
+const REQ_FACTS: &str = r#"<urn:odrl-req> a <http://www.w3.org/ns/odrl/2/Request> ;
+  <http://www.w3.org/ns/odrl/2/action> <http://www.w3.org/ns/odrl/2/read> ;
+  <http://www.w3.org/ns/odrl/2/target> <urn:t/1> ;
+  <http://www.w3.org/ns/odrl/2/assignee> <urn:alice> ;
+  <http://www.w3.org/ns/odrl/2/dateTime> "2026-07-25T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+"#;
+
+#[test]
+fn rules_layer_does_not_satisfy_a_multi_operand_constraint_node() {
+    // The reviewer's exact node, fed straight to the strata: `recipient eq alice`
+    // (satisfied) AND `dateTime lteq 2000-01-01` (expired) on ONE constraint node.
+    let facts = format!(
+        r#"{}<urn:pol/1> <http://www.w3.org/ns/odrl/2/permission> <urn:perm/1> .
+<urn:perm/1> <http://www.w3.org/ns/odrl/2/action> <http://www.w3.org/ns/odrl/2/read> ;
+  <http://www.w3.org/ns/odrl/2/target> <urn:t/1> ;
+  <http://www.w3.org/ns/odrl/2/assignee> <urn:alice> ;
+  <http://www.w3.org/ns/odrl/2/constraint> <urn:c/1> .
+<urn:c/1> <http://www.w3.org/ns/odrl/2/leftOperand> <http://www.w3.org/ns/odrl/2/recipient> ,
+    <http://www.w3.org/ns/odrl/2/dateTime> ;
+  <http://www.w3.org/ns/odrl/2/operator> <http://www.w3.org/ns/odrl/2/eq> ,
+    <http://www.w3.org/ns/odrl/2/lteq> ;
+  <http://www.w3.org/ns/odrl/2/rightOperand> <urn:alice> ,
+    "2000-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+"#,
+        REQ_FACTS
+    );
+    let auth = strata_auth_triples(&facts);
+    assert!(
+        auth.is_empty(),
+        "the strata must not satisfy a constraint node whose operands they cannot fully \
+         evaluate — one satisfiable cross-product combination is NOT 'every operand is \
+         satisfied'; derived: {:?}",
+        auth
+    );
+}
+
+#[test]
+fn rules_layer_still_satisfies_a_single_operand_constraint_node() {
+    // The guard must suppress ONLY ambiguous nodes: the same permission with a single,
+    // satisfied operand tuple still grants. Without this the test above would pass just
+    // as well on strata that grant nothing at all.
+    let facts = format!(
+        r#"{}<urn:pol/1> <http://www.w3.org/ns/odrl/2/permission> <urn:perm/1> .
+<urn:perm/1> <http://www.w3.org/ns/odrl/2/action> <http://www.w3.org/ns/odrl/2/read> ;
+  <http://www.w3.org/ns/odrl/2/target> <urn:t/1> ;
+  <http://www.w3.org/ns/odrl/2/assignee> <urn:alice> ;
+  <http://www.w3.org/ns/odrl/2/constraint> <urn:c/1> .
+<urn:c/1> <http://www.w3.org/ns/odrl/2/leftOperand> <http://www.w3.org/ns/odrl/2/recipient> ;
+  <http://www.w3.org/ns/odrl/2/operator> <http://www.w3.org/ns/odrl/2/eq> ;
+  <http://www.w3.org/ns/odrl/2/rightOperand> <urn:alice> .
+"#,
+        REQ_FACTS
+    );
+    let auth = strata_auth_triples(&facts);
+    assert_eq!(
+        auth,
+        vec!["<urn:alice> <https://sparq.dev/ns/auth#read> <urn:t/1>".to_owned()],
+        "an unambiguous, satisfied constraint must still grant"
+    );
+}
+
+#[test]
+fn rules_layer_does_not_satisfy_a_mixed_combinator_logical_constraint() {
+    // One node carrying BOTH `odrl:or` (satisfied member) and `odrl:and` (unsatisfied
+    // member): the or-rule would satisfy it from the one member while the and-rule reads
+    // the SAME node as a conjunction — the defect-1 quantifier hole one level up.
+    let facts = format!(
+        r#"{}<urn:pol/1> <http://www.w3.org/ns/odrl/2/permission> <urn:perm/1> .
+<urn:perm/1> <http://www.w3.org/ns/odrl/2/action> <http://www.w3.org/ns/odrl/2/read> ;
+  <http://www.w3.org/ns/odrl/2/target> <urn:t/1> ;
+  <http://www.w3.org/ns/odrl/2/assignee> <urn:alice> ;
+  <http://www.w3.org/ns/odrl/2/constraint> <urn:lc/1> .
+<urn:lc/1> <http://www.w3.org/ns/odrl/2/or> <urn:c/sat> ;
+  <http://www.w3.org/ns/odrl/2/and> <urn:c/unsat> .
+<urn:c/sat> <http://www.w3.org/ns/odrl/2/leftOperand> <http://www.w3.org/ns/odrl/2/recipient> ;
+  <http://www.w3.org/ns/odrl/2/operator> <http://www.w3.org/ns/odrl/2/eq> ;
+  <http://www.w3.org/ns/odrl/2/rightOperand> <urn:alice> .
+<urn:c/unsat> <http://www.w3.org/ns/odrl/2/leftOperand> <http://www.w3.org/ns/odrl/2/dateTime> ;
+  <http://www.w3.org/ns/odrl/2/operator> <http://www.w3.org/ns/odrl/2/lteq> ;
+  <http://www.w3.org/ns/odrl/2/rightOperand> "2000-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+"#,
+        REQ_FACTS
+    );
+    let auth = strata_auth_triples(&facts);
+    assert!(
+        auth.is_empty(),
+        "a logical-constraint node with two different combinators has no single reading; \
+         neither lcSat rule may fire; derived: {:?}",
+        auth
+    );
+}

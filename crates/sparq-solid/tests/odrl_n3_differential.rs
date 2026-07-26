@@ -595,3 +595,356 @@ fn inj8_caller_minted_request_typed_subject_rejected() {
     );
     assert!(graph.named.is_empty(), "INJ8: nothing may be materialized");
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// GENERATED differential — [OPUS-5], PR #3458 review.
+//
+// The hand-picked corpus above is exactly what let two fail-OPEN defects through:
+// every case in it happened to use single-operand constraint nodes and no
+// `odrl:conflict` declaration, so neither the constraint-node quantifier defect nor the
+// missing conflict-refusal guard had a witness. This sweep ENUMERATES the policy space
+// instead — every constraint shape × rule kind × conflict strategy × requesting party —
+// and asserts the load-bearing safety property directly.
+//
+// # The property
+//
+// For every generated policy and request, EITHER `materialize_odrl_n3` returns `Err`
+// (refusing the policy as a whole — the caller materializes nothing and must fail
+// closed), OR:
+//   * every ALLOW triple the N3 path emits is also emitted by the Rust path
+//     (N3 allows ⊆ Rust allows — the N3 path never grants what the reference denies);
+//   * every DENY triple the Rust path emits is also emitted by the N3 path
+//     (Rust denies ⊆ N3 denies — the N3 path never drops a carve-out);
+//   * a Rust REFUSAL materializes nothing on the N3 side either.
+//
+// Under `∪ allow ∖ ∪ deny` enforcement those three together are exactly "the N3 path is
+// never more permissive than the Rust reference path".
+//
+// The sweep is exhaustive and deterministic (no RNG, no shrinking to reproduce): a
+// failure names the exact policy shape, conflict strategy and party.
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// A generated constraint-node shape. `defs` are standalone triples defining the node
+/// `_:c@S@`; `@S@` is replaced by a per-rule suffix so a permission and a prohibition in
+/// the same policy get distinct constraint nodes. An empty `defs` means "no constraint".
+struct Shape {
+    name: &'static str,
+    defs: &'static str,
+}
+
+const PAST: &str = "\"2000-01-01T00:00:00Z\"^^xsd:dateTime";
+const FUTURE: &str = "\"2099-01-01T00:00:00Z\"^^xsd:dateTime";
+const NOW: &str = "2026-07-25T00:00:00Z";
+
+const SHAPES: &[Shape] = &[
+    Shape { name: "none", defs: "" },
+    // ── in-scope atomic, satisfied and unsatisfied for the alice@NOW request ──
+    Shape {
+        name: "recipient-eq-alice",
+        defs: "_:c@S@ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ;\n  odrl:rightOperand <urn:alice> .",
+    },
+    Shape {
+        name: "recipient-eq-bob",
+        defs: "_:c@S@ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ;\n  odrl:rightOperand <urn:bob> .",
+    },
+    Shape {
+        name: "recipient-neq-alice",
+        defs: "_:c@S@ odrl:leftOperand odrl:recipient ; odrl:operator odrl:neq ;\n  odrl:rightOperand <urn:alice> .",
+    },
+    Shape {
+        name: "recipient-neq-bob",
+        defs: "_:c@S@ odrl:leftOperand odrl:recipient ; odrl:operator odrl:neq ;\n  odrl:rightOperand <urn:bob> .",
+    },
+    Shape {
+        name: "datetime-lteq-past",
+        defs: "_:c@S@ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lteq ;\n  odrl:rightOperand @PAST@ .",
+    },
+    Shape {
+        name: "datetime-lteq-future",
+        defs: "_:c@S@ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lteq ;\n  odrl:rightOperand @FUTURE@ .",
+    },
+    Shape {
+        name: "datetime-gteq-past",
+        defs: "_:c@S@ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:gteq ;\n  odrl:rightOperand @PAST@ .",
+    },
+    Shape {
+        name: "datetime-gteq-future",
+        defs: "_:c@S@ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:gteq ;\n  odrl:rightOperand @FUTURE@ .",
+    },
+    // ── out-of-scope atomic (the strata cannot decide these) ──────────────────
+    Shape {
+        name: "purpose-eq (out of scope)",
+        defs: "_:c@S@ odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;\n  odrl:rightOperand <urn:marketing> .",
+    },
+    Shape {
+        name: "datetime-lt-strict (out of scope)",
+        defs: "_:c@S@ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lt ;\n  odrl:rightOperand @FUTURE@ .",
+    },
+    Shape {
+        name: "recipient-isAnyOf (out of scope)",
+        defs: "_:c@S@ odrl:leftOperand odrl:recipient ; odrl:operator odrl:isAnyOf ;\n  odrl:rightOperand \"urn:alice|urn:bob\" .",
+    },
+    Shape {
+        name: "structurally-incomplete (no operator/right)",
+        defs: "_:c@S@ odrl:leftOperand odrl:recipient .",
+    },
+    // ── AMBIGUOUS nodes: the defect-1 family. Satisfaction is keyed on the NODE,
+    //    so pre-fix any one satisfiable cross-product combination granted. ──────
+    Shape {
+        name: "AMBIG two-operand (recipient eq alice + dateTime lteq PAST)",
+        defs: "_:c@S@ odrl:leftOperand odrl:recipient , odrl:dateTime ;\n  odrl:operator odrl:eq , odrl:lteq ;\n  odrl:rightOperand <urn:alice> , @PAST@ .",
+    },
+    Shape {
+        name: "AMBIG multi-right (recipient eq alice,bob)",
+        defs: "_:c@S@ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ;\n  odrl:rightOperand <urn:alice> , <urn:bob> .",
+    },
+    Shape {
+        name: "AMBIG multi-left (recipient+purpose eq alice)",
+        defs: "_:c@S@ odrl:leftOperand odrl:recipient , odrl:purpose ; odrl:operator odrl:eq ;\n  odrl:rightOperand <urn:alice> .",
+    },
+    Shape {
+        name: "AMBIG multi-operator (recipient eq/neq alice)",
+        defs: "_:c@S@ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq , odrl:neq ;\n  odrl:rightOperand <urn:alice> .",
+    },
+    Shape {
+        name: "AMBIG rightOperand + rightOperandReference",
+        defs: "_:c@S@ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ;\n  odrl:rightOperand <urn:alice> ; odrl:rightOperandReference <urn:bob> .",
+    },
+    // ── logical constraints, satisfied and unsatisfied ────────────────────────
+    Shape {
+        name: "or(recipient-eq-bob, datetime-lteq-past)",
+        defs: "_:c@S@ a odrl:LogicalConstraint ; odrl:or _:x@S@ , _:y@S@ .\n_:x@S@ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ; odrl:rightOperand <urn:bob> .\n_:y@S@ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lteq ; odrl:rightOperand @PAST@ .",
+    },
+    Shape {
+        name: "or(recipient-eq-alice, datetime-lteq-past)",
+        defs: "_:c@S@ a odrl:LogicalConstraint ; odrl:or _:x@S@ , _:y@S@ .\n_:x@S@ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ; odrl:rightOperand <urn:alice> .\n_:y@S@ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lteq ; odrl:rightOperand @PAST@ .",
+    },
+    Shape {
+        name: "and(recipient-eq-alice, datetime-lteq-future)",
+        defs: "_:c@S@ a odrl:LogicalConstraint ; odrl:and _:x@S@ , _:y@S@ .\n_:x@S@ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ; odrl:rightOperand <urn:alice> .\n_:y@S@ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lteq ; odrl:rightOperand @FUTURE@ .",
+    },
+    Shape {
+        name: "and(recipient-eq-alice, datetime-lteq-past)",
+        defs: "_:c@S@ a odrl:LogicalConstraint ; odrl:and _:x@S@ , _:y@S@ .\n_:x@S@ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ; odrl:rightOperand <urn:alice> .\n_:y@S@ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lteq ; odrl:rightOperand @PAST@ .",
+    },
+    Shape {
+        name: "and(AMBIG two-operand member)",
+        defs: "_:c@S@ a odrl:LogicalConstraint ; odrl:and _:x@S@ .\n_:x@S@ odrl:leftOperand odrl:recipient , odrl:dateTime ; odrl:operator odrl:eq , odrl:lteq ;\n  odrl:rightOperand <urn:alice> , @PAST@ .",
+    },
+    Shape {
+        name: "or(AMBIG two-operand member)",
+        defs: "_:c@S@ a odrl:LogicalConstraint ; odrl:or _:x@S@ .\n_:x@S@ odrl:leftOperand odrl:recipient , odrl:dateTime ; odrl:operator odrl:eq , odrl:lteq ;\n  odrl:rightOperand <urn:alice> , @PAST@ .",
+    },
+    // MIXED combinators on one node: the or-rule would satisfy it from the satisfied
+    // or-member while the and-rule reads the SAME node as a conjunction with an
+    // unsatisfied member — the defect-1 quantifier hole one level up.
+    Shape {
+        name: "AMBIG mixed or+and combinators",
+        defs: "_:c@S@ a odrl:LogicalConstraint ; odrl:or _:x@S@ ; odrl:and _:y@S@ .\n_:x@S@ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ; odrl:rightOperand <urn:alice> .\n_:y@S@ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lteq ; odrl:rightOperand @PAST@ .",
+    },
+    Shape {
+        name: "xone(recipient-eq-alice, datetime-lteq-past)",
+        defs: "_:c@S@ a odrl:LogicalConstraint ; odrl:xone _:x@S@ , _:y@S@ .\n_:x@S@ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ; odrl:rightOperand <urn:alice> .\n_:y@S@ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lteq ; odrl:rightOperand @PAST@ .",
+    },
+];
+
+/// Which rules the generated policy carries.
+const RULE_KINDS: &[(&str, bool, bool)] =
+    &[("permission", true, false), ("prohibition", false, true), ("both", true, true)];
+
+/// The `odrl:conflict` declaration under test — the defect-2 family.
+const CONFLICTS: &[(&str, &str)] = &[
+    ("unset", ""),
+    ("prohibit", "odrl:conflict odrl:prohibit ;"),
+    ("perm", "odrl:conflict odrl:perm ;"),
+    ("invalid", "odrl:conflict odrl:invalid ;"),
+    ("unknown-iri", "odrl:conflict <urn:strategy/made-up> ;"),
+];
+
+fn render(defs: &str, suffix: &str) -> String {
+    defs.replace("@S@", suffix).replace("@PAST@", PAST).replace("@FUTURE@", FUTURE)
+}
+
+/// Assemble one generated policy: the `conflict` declaration, the requested rule kinds,
+/// each carrying `shape` as its `odrl:constraint`.
+fn generate_policy(
+    conflict: &str,
+    (_kind, perm, proh): (&str, bool, bool),
+    action: &str,
+    shape: &Shape,
+) -> String {
+    let mut rules = String::new();
+    let mut defs = String::new();
+    for (on, suffix, pred) in [(perm, "p", "permission"), (proh, "h", "prohibition")] {
+        if !on {
+            continue;
+        }
+        let attach =
+            if shape.defs.is_empty() { String::new() } else { format!(" ;\n  odrl:constraint _:c{}", suffix) };
+        rules.push_str(&format!(
+            "  odrl:{} [ odrl:action odrl:{} ; odrl:target <urn:t/1> ; odrl:assignee <urn:alice>{} ] ;\n",
+            pred, action, attach
+        ));
+        if !shape.defs.is_empty() {
+            defs.push('\n');
+            defs.push_str(&render(shape.defs, suffix));
+        }
+    }
+    format!(
+        "@prefix odrl: <http://www.w3.org/ns/odrl/2/> .\n\
+         @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+         <urn:pol/gen> a odrl:Set ; {}\n{}  odrl:uid <urn:pol/gen> .\n{}\n",
+        conflict, rules, defs
+    )
+}
+
+/// Tally of what the sweep actually exercised — a guard against a VACUOUS pass in which
+/// every generated policy merely refused and the subset checks never had to bite.
+#[derive(Default)]
+struct Coverage {
+    total: usize,
+    n3_refused: usize,
+    n3_granted: usize,
+    n3_denied: usize,
+    rust_refused: usize,
+    rust_granted: usize,
+    rust_denied: usize,
+}
+
+/// The load-bearing check: assert the N3 path is never more permissive than the Rust
+/// reference path for ONE generated (policy, request) pair.
+fn assert_not_more_permissive(label: &str, policy_ttl: &str, party: &str, cov: &mut Coverage) {
+    cov.total += 1;
+    let request = Request::new(format!("{}read", ODRL)).on(TARGET).by(party).at(NOW);
+
+    let parsed = parse_policy_str(policy_ttl, "turtle");
+    let mut n3_graph = Graph::new();
+    let n3 = materialize_odrl_n3(&mut n3_graph, policy_ttl, &request);
+
+    let Ok(policy) = parsed else {
+        // The Rust reference evaluator cannot even read this policy; the N3 path must
+        // refuse rather than materialize from a shape only one path understands.
+        assert!(
+            n3.is_err(),
+            "{}: policy is unreadable by the Rust reference path, so the N3 path must \
+             refuse it — got {:?}",
+            label,
+            n3
+        );
+        cov.n3_refused += 1;
+        return;
+    };
+
+    let mut rust_graph = Graph::new();
+    let rust = materialize_policy(&mut rust_graph, &policy, &request);
+    if rust.refused {
+        cov.rust_refused += 1;
+    }
+    if rust.grant_triple.is_some() {
+        cov.rust_granted += 1;
+    }
+    if rust.deny_triple.is_some() {
+        cov.rust_denied += 1;
+    }
+
+    let Ok(out) = n3 else {
+        // Refused outright: nothing is materialized and the caller fails closed. That is
+        // never more permissive than any Rust outcome.
+        cov.n3_refused += 1;
+        assert!(n3_graph.named.is_empty(), "{}: a refusal must materialize nothing", label);
+        return;
+    };
+    if out.grant_triple.is_some() {
+        cov.n3_granted += 1;
+    }
+    if out.deny_triple.is_some() {
+        cov.n3_denied += 1;
+    }
+
+    // (1) A Rust REFUSAL must not become an N3 materialization.
+    assert!(
+        !rust.refused || (!out.granted && !out.prohibited),
+        "{}: the Rust reference path REFUSED the policy ({:?}) but the N3 path \
+         materialized {:?}/{:?} — fail-OPEN",
+        label,
+        rust.reasons,
+        out.grant_triple,
+        out.deny_triple
+    );
+
+    // (2) N3 allows ⊆ Rust allows — the N3 path never grants what the reference denies.
+    if let Some(g) = &out.grant_triple {
+        assert_eq!(
+            rust.grant_triple.as_ref(),
+            Some(g),
+            "{}: the N3 path emitted the ALLOW {:?} that the Rust reference path did not \
+             ({:?}) — fail-OPEN",
+            label,
+            g,
+            rust.grant_triple
+        );
+    }
+
+    // (3) Rust denies ⊆ N3 denies — the N3 path never drops a carve-out.
+    if let Some(d) = &rust.deny_triple {
+        assert_eq!(
+            out.deny_triple.as_ref(),
+            Some(d),
+            "{}: the Rust reference path emitted the DENY {:?} that the N3 path dropped \
+             ({:?}) — fail-OPEN",
+            label,
+            d,
+            out.deny_triple
+        );
+    }
+}
+
+#[test]
+fn generated_n3_is_never_more_permissive_than_the_rust_reference() {
+    let mut cov = Coverage::default();
+    for shape in SHAPES {
+        for kind in RULE_KINDS {
+            for (cname, conflict) in CONFLICTS {
+                // The `odrl:use` UMBRELLA action is swept only under the unset conflict:
+                // the two dimensions do not interact (the conflict verdict is a top-level
+                // short-circuit taken before any action is looked at), and the umbrella
+                // divergence — the Rust evaluator lets `use` permit `read` while the
+                // strata match action IRIs exactly — is a per-shape property. Sweeping it
+                // across all five conflict strategies only re-ran the same refusals.
+                let actions: &[&str] = if *cname == "unset" { &["read", "use"] } else { &["read"] };
+                for action in actions {
+                    let policy = generate_policy(conflict, *kind, action, shape);
+                    for party in ["urn:alice", "urn:bob"] {
+                        let label = format!(
+                            "gen[shape={} kind={} conflict={} action={} party={}]\n{}",
+                            shape.name, kind.0, cname, action, party, policy
+                        );
+                        assert_not_more_permissive(&label, &policy, party, &mut cov);
+                    }
+                }
+            }
+        }
+    }
+
+    // NON-VACUITY: the property above is trivially satisfiable by refusing everything.
+    // Pin that the sweep genuinely exercised the comparison — real grants and real
+    // denies came out of BOTH paths, and the refusal path fired too.
+    assert!(cov.total >= 500, "sweep must be broad, ran {}", cov.total);
+    assert!(cov.n3_granted >= 20, "N3 must actually grant somewhere, got {}", cov.n3_granted);
+    assert!(cov.n3_denied >= 20, "N3 must actually deny somewhere, got {}", cov.n3_denied);
+    assert!(cov.n3_refused >= 20, "the refusal path must fire, got {}", cov.n3_refused);
+    assert!(cov.rust_granted >= 20, "Rust must actually grant somewhere, got {}", cov.rust_granted);
+    assert!(cov.rust_denied >= 20, "Rust must actually deny somewhere, got {}", cov.rust_denied);
+    assert!(cov.rust_refused >= 20, "Rust must refuse somewhere, got {}", cov.rust_refused);
+    println!(
+        "generated differential: {} cases; n3 grant/deny/refuse = {}/{}/{}; \
+         rust grant/deny/refuse = {}/{}/{}",
+        cov.total,
+        cov.n3_granted,
+        cov.n3_denied,
+        cov.n3_refused,
+        cov.rust_granted,
+        cov.rust_denied,
+        cov.rust_refused
+    );
+}
