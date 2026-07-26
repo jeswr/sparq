@@ -73,8 +73,9 @@ let g = Graph::from_parts(dict, triples);
   triple from classic-reification data — restricted to EXISTING triples over leaf
   components so the Herbrand base stays **finite** (termination argument in the `reify`
   module docs). Triple terms stay **opaque**: reification never asserts the referent triple,
-  and nothing rewrites inside a triple term. Off by default — the bridge is a deliberate,
-  non-normative entailment extension; plain `Profile::OwlRl` closures are unchanged.
+  and nothing rewrites inside a triple term; `ReifyMode::DestructureOnly` drops reif-ctr for
+  STRICT opacity (batch, or `MaterializedOwlGraph::with_reify_mode`). Off by default — a
+  deliberate, non-normative extension; plain `Profile::OwlRl` closures are unchanged.
 - **Proof trees** (`explain` feature) — `why(triple)` returns which rule fired from which
   premises, recursively down to asserted facts (a flat, ZK-witness-friendly shape).
 - **RIF/XML importer** (opt-in `rif-xml`) — parse the W3C RIF-Core XML presentation
