@@ -407,8 +407,9 @@ jobs:
       # gui/src-tauri/target/release/bundle/<format>/. `--ci` disables interactive prompts;
       # no signing env vars are set, so the bundles are produced UNSIGNED (see the job header
       # — signing is needs:user sq-v286.8). [SONNET-4.6] sq-3w29b: release bundles explicitly
-      # enable the native HDT importer and federated SERVICE client; both crate features stay
-      # off for lean development builds. `--verbose` aids first-CI-run diagnosis.
+      # enable the native HDT importer, federated SERVICE client, and ODRL policy tool. These
+      # native capabilities stay off for lean development builds; Forms remains opt-in until a
+      # release explicitly selects its larger SHACL model stack. `--verbose` aids diagnosis.
       #
       # PROVEN vs DOCUMENTED-UNTESTED (honest status — this workflow is tag-triggered, so it
       # does NOT run on this PR; validate on the first real `v*` tag):
@@ -416,8 +417,11 @@ jobs:
       #     gui/app/out) is REPRODUCED locally on this work box (x64-linux): it produces
       #     gui/app/out/index.html with ROOT-RELATIVE assets, the path `frontendDist` reads.
       #   * The empty-`beforeBuildCommand` skip is confirmed from tauri-cli source (run_hook).
-      #   * Linux rows (ubuntu-latest, ubuntu-24.04-arm): the GUI crate build + webkit deps are
-      #     already proven green in gui.yml; the .deb/.AppImage bundle step is the new surface.
+      #   * The exact plain-Cargo release feature set (`hdt,federation,odrl,custom-protocol`) is
+      #     clippied and tested on Linux in gui.yml. This explicitly pins `custom-protocol`
+      #     alongside the user-supplied features rather than relying only on tauri-cli injection.
+      #   * Linux rows (ubuntu-latest, ubuntu-24.04-arm): the GUI crate feature build + webkit
+      #     deps are proven green in gui.yml; the .deb/.AppImage bundle step is the new surface.
       #   * macOS rows: WKWebView ships with the OS; the .dmg/.app bundle is documented-untested.
       #   * Windows row: WebView2 ships with the OS; the prepare-hook ENOENT root cause is fixed,
       #     and the .msi/NSIS .exe bundle step itself is still documented-untested. If a platform
@@ -425,7 +429,7 @@ jobs:
       #     on the matrix) so the release ships the working bundles + attestation; sq-gl3cf tracks it.
       - name: Build Tauri desktop bundle (unsigned)
         working-directory: gui/src-tauri
-        run: cargo tauri build --ci --verbose -c tauri.ci.conf.json --features hdt,federation
+        run: cargo tauri build --ci --verbose -c tauri.ci.conf.json --features hdt,federation,odrl
 
       # Collect every produced installer into a flat staging dir under a STABLE, PREDICTABLE
       # per-OS name (the scheme the /download page hardcodes — see the documented names in the
