@@ -22,13 +22,16 @@ and the existing, already-tested auto-arm policy still performs the arm with its
 
 FAIL-CLOSED HEAD BINDING (the load-bearing property)
 ----------------------------------------------------
-A verdict is honoured only when ALL of the following hold; ANY missing input means
-"no verdict", never "pass":
+A verdict is honoured as a PASS only when ALL of the following hold; no missing,
+malformed or unreadable input can ever produce a pass — or leave an older one standing:
 
 * the comment's last non-blank line is exactly ``VERDICT: pass`` / ``VERDICT: fail``
   (optionally bold-wrapped) — a mention of the phrase anywhere else does not count;
 * the comment body contains the CURRENT head SHA in FULL 40-hex form as a standalone
-  token — a short prefix, or a SHA that is merely an ancestor, does NOT bind;
+  token — a short prefix, or a SHA that is merely an ancestor, does NOT bind.  This is
+  an OCCURRENCE test, deliberately: a head SHA quoted inside a commit URL or a
+  ``diff --git`` index line also binds.  Binding is only what PAIRS a comment to a head;
+  what makes it a *verdict* is the trusted author's trailing ``VERDICT:`` line;
 * the comment's ``author_association`` is OWNER / MEMBER / COLLABORATOR — an unknown or
   drive-by association is not a reviewer.
 
@@ -38,12 +41,31 @@ Ordering deliberately ignores ``updated_at``: ordering by an edit timestamp woul
 someone edit an OLD pass comment to jump it ahead of a NEWER fail and defeat the
 retraction.  ``created_at`` is immutable.
 
+AMBIGUOUS VERDICTS (strict-alone is fail-OPEN in composition)
+--------------------------------------------------------------
+Strictness that merely DISCARDS a malformed line is fail-closed in isolation and
+fail-OPEN in composition.  If a reviewer's retraction reads ``VERDICT: FAIL`` or
+``VERDICT: fail (retracting my pass)``, discarding it leaves an OLDER, strictly-formatted
+pass as the newest surviving verdict — and the superseded pass promotes.  Because review
+agents are forbidden from touching labels, a comment is a reviewer's ONLY retraction
+channel, so this is the load-bearing path.
+
+So a last non-blank line that is verdict-SHAPED (``^VERDICT\b``, any case, optionally
+bold-wrapped) but does not parse strictly yields ``AMBIGUOUS`` rather than ``None``.  An
+ambiguous verdict never promotes, defeats any earlier pass at the same head, and REMOVES
+an existing ``review:pass``: guessing the polarity of an unparseable retraction is worse
+than refusing to arm.  A verdict-shaped line that is quoted, fenced, blockquoted or
+bulleted is NOT verdict-shaped for this purpose (it is a mention, not a declaration), so
+the instruction that tells reviewers what to write still cannot influence anything.
+
 ACTIONS
 -------
 promote   head-bound verdict is pass, no hold label, ``review:pass`` absent -> add it.
-retract   head-bound verdict is fail and ``review:pass`` is present -> remove it.
-          Requires POSITIVE evidence (a head-bound fail).  Absence of a verdict NEVER
-          retracts, so a label an orchestrator applied by hand is never fought.
+retract   head-bound verdict is fail (or AMBIGUOUS) and ``review:pass`` is present ->
+          remove it.  Requires POSITIVE evidence (a head-bound verdict-shaped line from
+          a trusted reviewer).  Absence of a verdict NEVER retracts, so a label an
+          orchestrator applied by hand is never fought.  Deleting the pass COMMENT is
+          therefore not a retraction gesture the bridge can see — post a fail instead.
 flag      green + mergeable + non-draft + no head-bound verdict + no ``review:*`` label
           -> add ``review:unreviewed``.  Purely informational: no arming predicate
           anywhere consumes this label, so it can never block or cause a merge.
@@ -94,7 +116,16 @@ HOLD_LABELS = frozenset(
 TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 
 VERDICT_RE = re.compile(r"^\s*(?:\*\*)?VERDICT:\s*(pass|fail)(?:\*\*)?\s*$")
+# Verdict-SHAPED but not strictly parseable: "VERDICT: FAIL", "VERDICT: fail (retracting
+# my pass)", "VERDICT - pass".  Anchored at the START of the last non-blank line, so a
+# blockquoted (`> `), fenced, bulleted or back-ticked MENTION is not verdict-shaped and
+# keeps reading as "no verdict", exactly as before.
+VERDICT_SHAPE_RE = re.compile(r"^\s*(?:\*\*|__)?VERDICT\b", re.IGNORECASE)
 FULL_SHA_RE = re.compile(r"(?<![0-9a-fA-F])([0-9a-fA-F]{40})(?![0-9a-fA-F])")
+
+# A trusted, head-bound, verdict-shaped line whose polarity cannot be read.  Never a
+# pass, and it defeats an earlier pass — see the module docstring.
+AMBIGUOUS = "ambiguous"
 
 
 class GhError(RuntimeError):
@@ -105,7 +136,7 @@ class GhError(RuntimeError):
 class Verdict:
     """A line-anchored, head-bound review verdict."""
 
-    value: str  # "pass" | "fail"
+    value: str  # "pass" | "fail" | AMBIGUOUS
     author: str
     created_at: str
     comment_id: int
@@ -139,11 +170,16 @@ def hold_labels(labels: Iterable[str]) -> list[str]:
 
 
 def trailing_verdict(body: str | None) -> str | None:
-    """The verdict on the comment's LAST non-blank line, or None.
+    """``"pass"`` / ``"fail"`` / ``AMBIGUOUS`` for the LAST non-blank line, else None.
 
     Line-anchored on purpose: the brief mandates the verdict be the final line, and a
     substring search for "VERDICT: pass" matches the INSTRUCTION that tells reviewers to
     write it (the exact false-pass this project has already been bitten by).
+
+    A verdict-SHAPED final line that does not parse strictly returns ``AMBIGUOUS``, NOT
+    None.  Returning None would let an older, well-formed pass survive a malformed
+    retraction at the same head and promote it — strict-and-discard is fail-open in
+    composition.  See the module docstring.
     """
     if not body:
         return None
@@ -151,12 +187,19 @@ def trailing_verdict(body: str | None) -> str | None:
         if not line.strip():
             continue
         match = VERDICT_RE.match(line)
-        return match.group(1).lower() if match else None
+        if match:
+            return match.group(1).lower()
+        return AMBIGUOUS if VERDICT_SHAPE_RE.match(line) else None
     return None
 
 
 def binds_head(body: str | None, head_sha: str) -> bool:
-    """True iff the body cites the CURRENT head as a standalone full 40-hex SHA."""
+    """True iff the body cites the CURRENT head as a standalone full 40-hex SHA.
+
+    An OCCURRENCE test by design (a SHA inside a commit URL or a diff header binds too):
+    it PAIRS a comment with a head.  What makes the comment a verdict is the trusted
+    author's trailing ``VERDICT:`` line, which this does not and need not attest.
+    """
     if not body or len(head_sha) != 40:
         return False
     target = head_sha.lower()
@@ -205,7 +248,13 @@ def is_green_and_ready(pr: PullRequest) -> bool:
 
 
 def decide(pr: PullRequest, comments: Sequence[dict]) -> Decision:
-    """Pure core. No I/O — every guard below is unit-tested in isolation."""
+    """Pure core. No I/O — every guard below is unit-tested in isolation.
+
+    NOTE ON SCOPE: ``promote`` deliberately does NOT consult ``gate_conclusion`` or
+    ``mergeable`` — it only attests that a review happened, and ``auto-arm``'s
+    ``--auto`` holds a red or conflicting PR out of the queue on its own.
+    ``is_green_and_ready`` therefore guards ``flag`` (visibility) only.
+    """
     if pr.state.upper() != "OPEN":
         return Decision("none", f"not-open ({pr.state or 'UNKNOWN'})")
     if not pr.base_ref:
@@ -228,6 +277,29 @@ def decide(pr: PullRequest, comments: Sequence[dict]) -> Decision:
         if is_green_and_ready(pr):
             return Decision("flag", "green + mergeable but invisible to every lane")
         return Decision("none", "no head-bound verdict")
+
+    if verdict.value == AMBIGUOUS:
+        # A trusted reviewer wrote a verdict-SHAPED line at THIS head that does not
+        # parse.  Reading it as "no verdict" would resurrect an older pass (fail-open);
+        # guessing its polarity would arm on a coin flip.  Refuse both: never promote,
+        # and drop an attestation this line may well be retracting.
+        if has_attestation:
+            return Decision(
+                "retract",
+                f"ambiguous verdict line by {verdict.author} supersedes "
+                f"{REVIEW_ATTESTATION} — polarity unreadable, refusing to arm",
+            )
+        if (
+            not flagged
+            and is_green_and_ready(pr)
+            and not any(label.startswith("review:") for label in pr.labels)
+        ):
+            return Decision(
+                "flag", f"ambiguous verdict line by {verdict.author} — needs a re-review"
+            )
+        return Decision(
+            "none", f"ambiguous verdict line by {verdict.author} — polarity unreadable"
+        )
 
     if flagged:
         return Decision("unflag", f"verdict arrived ({verdict.value})")
@@ -587,6 +659,39 @@ def self_test() -> None:
     )
     assert decide(pr_fixture(), [quoted]).action == "flag", "substring must not pass"
     assert trailing_verdict("VERDICT: pass\n\ntrailing prose") is None
+    # A MENTION (quoted / blockquoted / fenced / bulleted) is not verdict-shaped.
+    for mention in ("> VERDICT: pass", "- VERDICT: pass", "`VERDICT: pass`", "```"):
+        assert trailing_verdict(mention) is None, mention
+
+    # AMBIGUITY: a verdict-SHAPED final line that does not parse must NOT read as "no
+    # verdict" — that would leave an older, well-formed pass as the newest verdict.
+    for shaped in (
+        "VERDICT: FAIL",
+        "VERDICT: fail (retracting my pass)",
+        "**VERDICT: Fail**",
+        "VERDICT - pass",
+        "verdict: paas",
+    ):
+        assert trailing_verdict(shaped) == AMBIGUOUS, shaped
+    stale_pass = comment(
+        f"{HEAD}\n\nVERDICT: pass", created_at="2026-01-01T00:00:00Z", cid=1
+    )
+    for shaped in ("VERDICT: FAIL", "VERDICT: fail (retracting my pass)"):
+        retraction = comment(
+            f"{HEAD}\n\n{shaped}", created_at="2026-02-01T00:00:00Z", cid=2
+        )
+        combo = [stale_pass, retraction]
+        assert head_bound_verdict(combo, HEAD).value == AMBIGUOUS, shaped
+        assert decide(pr_fixture(), combo).action != "promote", shaped
+        # ... and it REMOVES an attestation it may be retracting.
+        held = decide(pr_fixture(labels={REVIEW_ATTESTATION}), combo)
+        assert held.action == "retract", (shaped, held)
+    # An ambiguous line from an UNTRUSTED author is still ignored entirely (no DoS on
+    # arming by a drive-by "VERDICT: FAIL").
+    drive_by_shaped = comment(
+        f"{HEAD}\n\nVERDICT: FAIL", association="NONE", created_at="2026-02-01T00:00:00Z", cid=3
+    )
+    assert decide(pr_fixture(), [stale_pass, drive_by_shaped]).action == "promote"
 
     # Provenance: an untrusted association is not a reviewer.
     for association in ("CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "NONE", "", "owner "):

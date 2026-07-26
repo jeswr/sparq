@@ -23,6 +23,7 @@ Stdlib unittest + PyYAML. No network, no gh, no git.
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -83,7 +84,89 @@ class TestVerdictParsing(unittest.TestCase):
         self.assertIsNone(vb.trailing_verdict("VERDICT: pass\nbut actually no"))
 
     def test_verdict_line_must_not_carry_trailing_content(self):
-        self.assertIsNone(vb.trailing_verdict("VERDICT: pass (with caveats)"))
+        """It is never read as a PASS — it degrades to AMBIGUOUS, not to a verdict."""
+        for line in ("VERDICT: pass (with caveats)", "VERDICT: pass, mostly"):
+            with self.subTest(line=line):
+                self.assertEqual(vb.trailing_verdict(line), vb.AMBIGUOUS)
+
+    def test_a_verdict_shaped_line_that_does_not_parse_is_ambiguous_not_absent(self):
+        """Returning None here is the composition fail-open: an older, well-formed pass
+        would survive the retraction and stay ``found[-1]``."""
+        for line in (
+            "VERDICT: FAIL",
+            "VERDICT: fail (retracting my pass)",
+            "**VERDICT: Fail**",
+            "VERDICT - fail",
+            "verdict: fial",
+            "VERDICT:",
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(vb.trailing_verdict(line), vb.AMBIGUOUS)
+
+    def test_a_mention_of_the_phrase_is_still_not_verdict_shaped(self):
+        """Quoted / blockquoted / fenced / bulleted mentions stay 'no verdict' — the
+        instruction that tells reviewers what to write must influence nothing."""
+        for line in (
+            "> VERDICT: pass",
+            "- VERDICT: pass",
+            "* VERDICT: fail",
+            "`VERDICT: pass`",
+            "the brief says to end with VERDICT: pass",
+            "```",
+        ):
+            with self.subTest(line=line):
+                self.assertIsNone(vb.trailing_verdict(line))
+
+    def test_an_unparseable_retraction_defeats_an_earlier_pass_at_the_same_head(self):
+        """THE composition hole. A reviewer's only retraction channel is a comment, so a
+        slightly-misformatted retraction must never leave the superseded pass standing."""
+        stale_pass = comment(
+            f"{HEAD}\n\nVERDICT: pass", created_at="2026-01-01T00:00:00Z", cid=1
+        )
+        for line in ("VERDICT: FAIL", "VERDICT: fail (retracting my pass)"):
+            with self.subTest(line=line):
+                retraction = comment(
+                    f"{HEAD}\n\n{line}", created_at="2026-02-01T00:00:00Z", cid=2
+                )
+                self.assertEqual(
+                    vb.head_bound_verdict([stale_pass, retraction], HEAD).value,
+                    vb.AMBIGUOUS,
+                )
+                self.assertNotEqual(decision(pr(), [stale_pass, retraction]), "promote")
+                self.assertEqual(
+                    decision(
+                        pr(labels={vb.REVIEW_ATTESTATION}), [stale_pass, retraction]
+                    ),
+                    "retract",
+                    "an unreadable retraction must not leave review:pass standing",
+                )
+
+    def test_an_untrusted_ambiguous_line_cannot_suppress_a_trusted_pass(self):
+        """Ambiguity is fail-closed, but only for REVIEWERS — otherwise any drive-by
+        commenter could deny arming to every PR in the repo."""
+        trusted_pass = comment(
+            f"{HEAD}\n\nVERDICT: pass", created_at="2026-01-01T00:00:00Z", cid=1
+        )
+        for association in ("NONE", "CONTRIBUTOR", "BOT", ""):
+            with self.subTest(association=association):
+                drive_by = comment(
+                    f"{HEAD}\n\nVERDICT: FAIL",
+                    association=association,
+                    created_at="2026-02-01T00:00:00Z",
+                    cid=2,
+                )
+                self.assertEqual(decision(pr(), [trusted_pass, drive_by]), "promote")
+
+    def test_an_ambiguous_line_bound_to_another_head_is_ignored(self):
+        """Head binding still gates ambiguity — a retraction of a SUPERSEDED head must
+        not suppress a fresh pass."""
+        fresh = comment(
+            f"{HEAD}\n\nVERDICT: pass", created_at="2026-01-01T00:00:00Z", cid=1
+        )
+        old = comment(
+            f"{OTHER}\n\nVERDICT: FAIL", created_at="2026-02-01T00:00:00Z", cid=2
+        )
+        self.assertEqual(decision(pr(), [fresh, old]), "promote")
 
     def test_binds_head_requires_the_full_forty_hex_sha(self):
         self.assertTrue(vb.binds_head(f"reviewed {HEAD}", HEAD))
@@ -219,6 +302,373 @@ def decision(pull, comments) -> str:
     return vb.decide(pull, comments).action
 
 
+# ------------------------------------------------------------------- driver (write path)
+#
+# `decide()` only produces a WORD. The layer that turns that word into arming authority is
+# `VerdictBridge` — the dispatch table, the dry-run short-circuit, the write cap, the
+# base-branch filter and the paged reads. A guard with no red test on THIS layer is the
+# expensive kind: mis-wiring `"flag"` to `review:pass` would attest every never-reviewed
+# green PR in the repo, and every decide()-level and YAML-level test would still pass.
+
+REPO = "sparq-org/sparq"
+
+
+def node(number: int, **overrides) -> dict:
+    """A GraphQL pullRequest node as `list_open` returns it."""
+    labels = overrides.pop("labels", ())
+    base = {
+        "number": number,
+        "state": "OPEN",
+        "isDraft": False,
+        "baseRefName": "main",
+        "headRefOid": HEAD,
+        "mergeable": "MERGEABLE",
+        "labels": {
+            "nodes": [{"name": name} for name in labels],
+            "pageInfo": {"hasNextPage": overrides.pop("labels_overflow", False)},
+        },
+    }
+    base.update(overrides)
+    return base
+
+
+def check_run(name: str = "gate", *, conclusion="success", status="completed", rid=1, started="2026-01-01T00:00:00Z") -> dict:
+    return {
+        "name": name,
+        "status": status,
+        "conclusion": conclusion,
+        "id": rid,
+        "started_at": started,
+    }
+
+
+class FakeGitHub:
+    """Hermetic stand-in for the `gh` CLI: serves the driver's three reads, RECORDS every
+    write. No network, no subprocess."""
+
+    def __init__(self, nodes, *, comments=None, runs=None, pr_page=50, run_page=100):
+        self.nodes = list(nodes)
+        self._comments = dict(comments or {})
+        self._runs = dict(runs or {})
+        self.pr_page = pr_page
+        self.run_page = run_page
+        self.writes: list[list[str]] = []
+        self.reads: list[str] = []
+        self.total_count_override: int | None = None
+
+    # -- writes --
+    def write(self, argv: list[str]) -> str:
+        self.writes.append(list(argv))
+        return ""
+
+    # -- reads --
+    def read(self, argv: list[str]) -> str:
+        self.reads.append(" ".join(argv))
+        if argv[:2] == ["api", "graphql"]:
+            return json.dumps(self._pr_page(argv))
+        path = argv[1]
+        if "/check-runs" in path:
+            return json.dumps(self._check_runs(path))
+        if "/comments" in path:
+            return json.dumps(self._comment_page(path))
+        raise AssertionError(f"unexpected read: {argv}")
+
+    def _pr_page(self, argv: list[str]) -> dict:
+        cursor = next(
+            (a.split("=", 1)[1] for a in argv if a.startswith("cursor=")), "0"
+        )
+        start = int(cursor)
+        page = self.nodes[start : start + self.pr_page]
+        end = start + len(page)
+        total = (
+            self.total_count_override
+            if self.total_count_override is not None
+            else len(self.nodes)
+        )
+        return {
+            "data": {
+                "repository": {
+                    "pullRequests": {
+                        "pageInfo": {
+                            "hasNextPage": end < len(self.nodes),
+                            "endCursor": str(end),
+                        },
+                        "totalCount": total,
+                        "nodes": page,
+                    }
+                }
+            }
+        }
+
+    def _check_runs(self, path: str) -> dict:
+        sha = path.split("/commits/", 1)[1].split("/", 1)[0]
+        page = int(path.rsplit("&page=", 1)[1])
+        runs = self._runs.get(sha, [check_run()])
+        start = (page - 1) * self.run_page
+        return {
+            "total_count": len(runs),
+            "check_runs": runs[start : start + self.run_page],
+        }
+
+    def _comment_page(self, path: str) -> list:
+        number = int(path.split("/issues/", 1)[1].split("/", 1)[0])
+        page = int(path.rsplit("&page=", 1)[1])
+        body = self._comments.get(number, [])
+        return body[(page - 1) * 100 : page * 100]
+
+
+def bridge(fake: FakeGitHub, **kw) -> "vb.VerdictBridge":
+    logs: list[str] = []
+    b = vb.VerdictBridge(
+        REPO,
+        kw.pop("default_branch", "main"),
+        gh=fake.write,
+        gh_read=fake.read,
+        log=logs.append,
+        **kw,
+    )
+    b.logs = logs  # type: ignore[attr-defined]
+    return b
+
+
+PASS_COMMENT = [vb.comment(f"reviewed {HEAD}\n\nVERDICT: pass")]
+FAIL_COMMENT = [vb.comment(f"reviewed {HEAD}\n\nVERDICT: fail")]
+
+
+class TestWritePathDispatch(unittest.TestCase):
+    """Every decision maps to the RIGHT label edit — the mutation that matters most is
+    silent: a dispatch-table entry pointing `flag` at the attestation label."""
+
+    def edit(self, fake: FakeGitHub) -> list[str]:
+        self.assertEqual(len(fake.writes), 1, f"expected exactly one write: {fake.writes}")
+        return fake.writes[0]
+
+    def test_promote_adds_the_attestation_label_and_removes_nothing_else(self):
+        fake = FakeGitHub([node(4200)], comments={4200: PASS_COMMENT})
+        self.assertEqual(bridge(fake).run(), 0)
+        argv = self.edit(fake)
+        self.assertEqual(
+            argv, ["pr", "edit", "4200", "--repo", REPO, "--add-label", vb.REVIEW_ATTESTATION]
+        )
+        self.assertNotIn("--remove-label", argv)
+
+    def test_a_flagged_pr_is_unflagged_first_then_promoted_on_the_next_sweep(self):
+        """The informational label is cleared before the attestation is written, so the
+        two labels are never both live. Cycle 1 unflags; cycle 2 (labels updated by the
+        first write) promotes. Neither cycle may write the attestation AND leave the
+        flag, which would leave the PR in two lanes at once."""
+        first = FakeGitHub(
+            [node(4200, labels=[vb.UNREVIEWED_LABEL])], comments={4200: PASS_COMMENT}
+        )
+        bridge(first).run()
+        self.assertEqual(
+            self.edit(first),
+            ["pr", "edit", "4200", "--repo", REPO, "--remove-label", vb.UNREVIEWED_LABEL],
+        )
+        second = FakeGitHub([node(4200)], comments={4200: PASS_COMMENT})
+        bridge(second).run()
+        self.assertEqual(
+            self.edit(second),
+            ["pr", "edit", "4200", "--repo", REPO, "--add-label", vb.REVIEW_ATTESTATION],
+        )
+
+    def test_retract_removes_the_attestation_and_adds_nothing(self):
+        fake = FakeGitHub(
+            [node(4200, labels=[vb.REVIEW_ATTESTATION])], comments={4200: FAIL_COMMENT}
+        )
+        bridge(fake).run()
+        argv = self.edit(fake)
+        self.assertEqual(
+            argv,
+            ["pr", "edit", "4200", "--repo", REPO, "--remove-label", vb.REVIEW_ATTESTATION],
+        )
+        self.assertNotIn("--add-label", argv)
+
+    def test_an_unreadable_retraction_also_removes_the_attestation(self):
+        """End-to-end proof of the composition fix, through the real write path."""
+        comments = [
+            vb.comment(f"{HEAD}\n\nVERDICT: pass", created_at="2026-01-01T00:00:00Z", cid=1),
+            vb.comment(
+                f"{HEAD}\n\nVERDICT: fail (retracting my pass)",
+                created_at="2026-02-01T00:00:00Z",
+                cid=2,
+            ),
+        ]
+        fake = FakeGitHub([node(4200, labels=[vb.REVIEW_ATTESTATION])], comments={4200: comments})
+        bridge(fake).run()
+        argv = self.edit(fake)
+        self.assertEqual(argv[argv.index("--remove-label") + 1], vb.REVIEW_ATTESTATION)
+        self.assertNotIn("--add-label", argv)
+
+    def test_flag_writes_ONLY_the_informational_label(self):
+        """If this ever wrote review:pass, every green never-reviewed PR in the repo
+        would be attested and armed. The decide()-level suite cannot see that."""
+        fake = FakeGitHub([node(4200)], comments={4200: []})
+        bridge(fake).run()
+        argv = self.edit(fake)
+        self.assertEqual(
+            argv, ["pr", "edit", "4200", "--repo", REPO, "--add-label", vb.UNREVIEWED_LABEL]
+        )
+        self.assertNotIn(vb.REVIEW_ATTESTATION, argv)
+
+    def test_unflag_removes_only_the_informational_label(self):
+        fake = FakeGitHub(
+            [node(4200, labels=[vb.UNREVIEWED_LABEL])], comments={4200: FAIL_COMMENT}
+        )
+        bridge(fake).run()
+        argv = self.edit(fake)
+        self.assertEqual(
+            argv,
+            ["pr", "edit", "4200", "--repo", REPO, "--remove-label", vb.UNREVIEWED_LABEL],
+        )
+        self.assertNotIn(vb.REVIEW_ATTESTATION, argv)
+
+    def test_a_none_decision_writes_nothing(self):
+        fake = FakeGitHub(
+            [node(4200, labels=["needs:user"])], comments={4200: PASS_COMMENT}
+        )
+        self.assertEqual(bridge(fake).run(), 0)
+        self.assertEqual(fake.writes, [])
+
+
+class TestWritePathSafetyRails(unittest.TestCase):
+    """dry-run, the write cap, the stacked-PR filter and the fail-closed label read."""
+
+    def test_dry_run_performs_no_write_at_all(self):
+        """--dry-run is this PR's central evidence; if it wrote, the evidence would be
+        a live mutation of the repo."""
+        fake = FakeGitHub([node(4200)], comments={4200: PASS_COMMENT})
+        b = bridge(fake, dry_run=True)
+        self.assertEqual(b.run(), 0)
+        self.assertEqual(fake.writes, [], "a dry run must not touch a single label")
+        self.assertTrue(any("PROMOTE" in line for line in b.logs), b.logs)
+
+    def test_the_per_run_write_cap_is_enforced(self):
+        fake = FakeGitHub(
+            [node(n) for n in (1, 2, 3)],
+            comments={n: PASS_COMMENT for n in (1, 2, 3)},
+        )
+        b = bridge(fake, max_writes=2)
+        self.assertEqual(b.run(), 0)
+        self.assertEqual(len(fake.writes), 2, fake.writes)
+        self.assertTrue(any("write cap" in line for line in b.logs), b.logs)
+
+    def test_a_stacked_pr_is_never_touched(self):
+        """base != the default branch: auto-arm refuses these outright (the stacked-PR
+        auto-merge trap), so attesting one would paint a misleading label."""
+        fake = FakeGitHub(
+            [node(4200, baseRefName="feature/stack-base")], comments={4200: PASS_COMMENT}
+        )
+        self.assertEqual(bridge(fake).run(), 0)
+        self.assertEqual(fake.writes, [])
+
+    def test_a_label_set_that_exceeds_one_page_fails_CLOSED(self):
+        """An unseen label could be a hold, so the PR must be SKIPPED, not promoted."""
+        fake = FakeGitHub(
+            [node(4200, labels_overflow=True)], comments={4200: PASS_COMMENT}
+        )
+        b = bridge(fake)
+        self.assertEqual(b.run(), 1, "an unreadable label set must be reported as an error")
+        self.assertEqual(fake.writes, [], "a partially-read label set must never promote")
+        self.assertTrue(any("SKIP inspect-failed" in line for line in b.logs), b.logs)
+
+    def test_a_failed_label_edit_is_counted_as_an_error(self):
+        def explode(argv):
+            raise vb.GhError("403 label edit denied")
+
+        fake = FakeGitHub([node(4200)], comments={4200: PASS_COMMENT})
+        b = vb.VerdictBridge(REPO, "main", gh=explode, gh_read=fake.read, log=lambda _: None)
+        self.assertEqual(b.run(), 1)
+
+    def test_run_bridge_reds_the_workflow_on_a_hard_error(self):
+        """The exit code is the only signal the cron surfaces."""
+
+        class Boom:
+            def run(self):
+                return 3
+
+        self.assertEqual(vb.run_bridge(Boom(), log=lambda _: None), 1)
+
+    def test_run_bridge_survives_exhausted_TRANSIENT_reads_with_a_warning(self):
+        class Transient:
+            def run(self):
+                raise vb.gh_retry.GhTransientExhausted("502 x5")
+
+        logs: list[str] = []
+        self.assertEqual(vb.run_bridge(Transient(), log=logs.append), 0)
+        self.assertTrue(any("::warning" in line for line in logs), logs)
+
+
+class TestPagedReads(unittest.TestCase):
+    """PRs here carry up to ~1181 check-runs; a page-1 read silently truncates."""
+
+    def test_check_runs_are_paged_and_cross_checked_against_total_count(self):
+        runs = [check_run(f"filler-{i}", rid=i) for i in range(150)]
+        runs.append(check_run("gate", rid=999, started="2026-01-01T05:00:00Z"))
+        fake = FakeGitHub([node(4200)], runs={HEAD: runs}, run_page=100)
+        b = bridge(fake)
+        self.assertEqual(len(b.check_runs(HEAD)), 151)
+        self.assertEqual(
+            b.gate_conclusion(HEAD), "success", "the gate run lives beyond page 1"
+        )
+
+    def test_a_short_check_run_page_that_contradicts_total_count_raises(self):
+        fake = FakeGitHub([node(4200)], runs={HEAD: [check_run()]})
+        fake._runs[HEAD] = [check_run()]
+        original = fake._check_runs
+        fake._check_runs = lambda path: dict(original(path), total_count=99)  # type: ignore[assignment]
+        with self.assertRaises(vb.GhError):
+            bridge(fake).check_runs(HEAD)
+
+    def test_comments_are_paged_so_a_verdict_beyond_page_one_is_seen(self):
+        chatter = [
+            vb.comment(f"noise {i}", cid=i, created_at="2026-01-01T00:00:00Z")
+            for i in range(100)
+        ]
+        verdict = vb.comment(
+            f"reviewed {HEAD}\n\nVERDICT: pass", cid=5000, created_at="2026-02-01T00:00:00Z"
+        )
+        fake = FakeGitHub([node(4200)], comments={4200: chatter + [verdict]})
+        b = bridge(fake)
+        self.assertEqual(len(b.comments(4200)), 101)
+        b.run()
+        self.assertEqual(len(fake.writes), 1, "the verdict on page 2 must be honoured")
+        self.assertIn(vb.REVIEW_ATTESTATION, fake.writes[0])
+
+    def test_open_prs_are_paged_and_cross_checked_against_total_count(self):
+        fake = FakeGitHub([node(n) for n in range(1, 121)], pr_page=50)
+        self.assertEqual(len(bridge(fake).list_open()), 120)
+        fake.total_count_override = 200
+        with self.assertRaises(vb.GhError):
+            bridge(fake).list_open()
+
+
+class TestGateResolution(unittest.TestCase):
+    """`gate` is resolved NEWEST-run-per-name; a cancelled twin must not read as live."""
+
+    def test_the_newest_gate_run_wins_over_an_older_success(self):
+        old = check_run("gate", conclusion="success", rid=1, started="2026-01-01T00:00:00Z")
+        new = check_run("gate", conclusion="failure", rid=2, started="2026-01-01T09:00:00Z")
+        for ordering in ([old, new], [new, old]):
+            with self.subTest(order=[r["id"] for r in ordering]):
+                fake = FakeGitHub([node(4200)], runs={HEAD: ordering})
+                self.assertEqual(bridge(fake).gate_conclusion(HEAD), "failure")
+
+    def test_an_incomplete_newest_run_reads_as_NO_gate_not_as_the_older_result(self):
+        old = check_run("gate", conclusion="success", rid=1, started="2026-01-01T00:00:00Z")
+        rerun = check_run(
+            "gate", conclusion=None, status="in_progress", rid=2, started="2026-01-01T09:00:00Z"
+        )
+        fake = FakeGitHub([node(4200)], runs={HEAD: [old, rerun]})
+        self.assertIsNone(bridge(fake).gate_conclusion(HEAD))
+
+    def test_a_red_gate_still_never_flags_but_a_verdict_is_still_honoured(self):
+        red = [check_run("gate", conclusion="failure")]
+        fake = FakeGitHub([node(4200)], runs={HEAD: red}, comments={4200: []})
+        self.assertEqual(bridge(fake).run(), 0)
+        self.assertEqual(fake.writes, [], "a red PR is not the invisible population")
+
+
 class TestCrossPolicyConsistency(unittest.TestCase):
     """The bridge must be safe against the LIVE arming policies, not a copy of them."""
 
@@ -319,6 +769,31 @@ class TestWorkflowWiring(unittest.TestCase):
         self.assertIn("--repo", step["run"])
         self.assertIn("--default-branch", step["run"])
         self.assertEqual(step["env"]["REPO"], "${{ github.repository }}")
+
+    def test_the_scheduled_sweep_is_never_a_hard_coded_dry_run(self):
+        """`DRY_RUN: --dry-run` (or a literal `--dry-run` in the `run:`) turns the whole
+        workflow into a permanent no-op while EVERY other structural test still passes.
+        The flag may only come from the workflow_dispatch input."""
+        step = self.step_by_run_needle(LIVE_RUN_NEEDLE)
+        self.assertNotIn(
+            "--dry-run", step["run"], "the sweep's argv must not hard-code --dry-run"
+        )
+        self.assertIn("$DRY_RUN", step["run"], "the flag must come from the env")
+        dry_run = str(step["env"]["DRY_RUN"])
+        self.assertIn(
+            "github.event.inputs.dry_run",
+            dry_run,
+            "DRY_RUN must be gated on the manual dispatch input, nothing else",
+        )
+        self.assertTrue(
+            dry_run.startswith("${{") and dry_run.endswith("}}"),
+            f"DRY_RUN must be an expression, not the literal {dry_run!r}",
+        )
+        inputs = (triggers(self.doc).get("workflow_dispatch") or {}).get("inputs") or {}
+        self.assertIn("dry_run", inputs, "the expression references an undeclared input")
+        self.assertFalse(
+            inputs["dry_run"].get("default"), "a scheduled sweep must default to writing"
+        )
 
     def test_the_informational_label_is_reified_before_use(self):
         """Without `gh label create`, every flag decision fails its label edit."""
