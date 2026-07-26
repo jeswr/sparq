@@ -92,8 +92,8 @@ is a triple payload, so graph names inside a TriG/N-Quads body are not authorita
 **Action for the consumer, not for sparq:** the deviation note in
 `crates/sparq-lws-core/src/store/http.rs:22-34` is now stale on two counts (it says HTTP does not
 isolate named graphs, and that GSP write verbs return `501`). Both are false on this tree. That
-comment lives outside this issue's routed scope, and **it has no task record yet** — this record is
-the only place it is currently written down (§5, item 12).
+comment lives outside this issue's routed scope, so it is not corrected here; it is filed as its own
+tracking issue instead (§5.1, W6).
 
 ### 1.2 — P1-2 AC-SPARQL is built; what is missing is publication
 
@@ -218,18 +218,19 @@ precede the gate.
 Replace #1346's "P0 + P1" milestone with a tighter one. Call it **"a blessed, reachable surface"**:
 
 1. **Make the freeze enforceable, then ratify it.** Add a per-PR `cargo-semver-checks` gate scoped
-   to the tier-1 surface in `docs/api-stability.md`. Then ratify — flip the markers from *proposed*
-   to *in force*. Gate first: ratifying an unenforced promise is worse than not ratifying.
+   to the tier-1 surface in `docs/api-stability.md` (§5.1 W1). Then ratify — flip the markers from
+   *proposed* to *in force* (§5.2, Q1). Gate first: ratifying an unenforced promise is worse than
+   not ratifying.
 2. **Resolve parser fidelity vs distribution.** Decide among upstream / sparq-owned parser crate /
-   documented-git-pin (§4 Q2), then execute. Until this lands, "production-ready for a consumer" is
-   not a claim sparq can make, because two consumers depending on sparq two different ways get two
-   different parsers.
-3. **Publish the served-surface Protocol conformance result.** Cheap — the lane already runs. Emit a
-   report artifact the way the inference report is emitted. This converts existing work into the
-   consumer-facing trust signal that was actually asked for.
-4. **Write the two missing operator documents** — the DR runbook (P2-1) and the authoritative-store
-   operations guide (P2-5). Both are assembly of verified existing behaviour, not new engineering,
-   and both are on the path to any real deployment.
+   documented-git-pin (§4 Q2), then execute (§5.2). Until this lands, "production-ready for a
+   consumer" is not a claim sparq can make, because two consumers depending on sparq two different
+   ways get two different parsers.
+3. **Publish the served-surface Protocol conformance result** (§5.1 W2). Cheap — the lane already
+   runs. Emit a report artifact the way the inference report is emitted. This converts existing work
+   into the consumer-facing trust signal that was actually asked for.
+4. **Write the two missing operator documents** — the DR runbook (P2-1, §5.1 W3) and the
+   authoritative-store operations guide (P2-5, §5.1 W4). Both are assembly of verified existing
+   behaviour, not new engineering, and both are on the path to any real deployment.
 
 Explicitly **not** in this milestone: replication (P2-2), first-party OIDC (P2-3), and blessing
 `/authz` (§3). Each is a genuine gap, and each is gated on a decision that the current consumer —
@@ -280,43 +281,50 @@ than a follow-up to it.
    equivalence needs a test and is a new work item. If no, record that so the behavioural-only
    coverage is not later mistaken for more than it is.
 
-## 5 — Phased plan (proposed sequencing — not yet tracked work)
+## 5 — Phased plan
 
-Ordered. Each is a separate unit of work. **None of these has a task record**: this is a *proposed*
-decomposition for the maintainer to accept or reject, not a backlog that exists somewhere. Nothing
-here is started, and nothing here should be cited as captured work until the corresponding tracking
-records are created — which is a deliberate follow-on to accepting this record, not part of it.
+Each executable item below is filed as its own tracking issue as part of landing this record, so the
+work has an identity outside this Markdown; the list here is a *summary* of that captured work and
+its dependency edges, not the record of it. Entries that are maintainer **decisions** rather than
+executable work are deliberately not filed as tasks — they stay as open questions in §4, and the work
+each one gates is filed only once it is answered (filing before the decision would encode an answer).
 
-1. **Per-PR `cargo-semver-checks` gate over the tier-1 surface** defined in `docs/api-stability.md`.
-   Blocks (2). *(ci-infra)*
-2. **Ratify the tier-1 freeze** — flip the in-code markers and `docs/api-stability.md` from
-   *proposed* to *in force*. Maintainer action; depends on (1) and Q1. *(docs/governance)*
-3. **Resolve parser fidelity for published artifacts** per the Q2 decision, so a non-git consumer
-   gets the conformant parser. Depends on Q2. *(build/supply-chain)*
-4. **Crates.io + npm bootstrap publish**, then flip `release-plz.toml` `publish = true`. Depends on
-   (3) and Q3. *(release)*
-5. **Publish the served-surface SPARQL 1.1 Protocol conformance report** as an artifact from the
-   existing `http-protocol` lane, alongside the inference report. Independent; can run in parallel.
-   *(conformance)*
-6. **Backup → restore → PITR disaster-recovery runbook**, validated end to end against the existing
-   `backup` feature. Independent. *(docs + sparq-server)*
-7. **Authoritative-store operations guide** — sizing, `--persist` guarantees, writer-ceiling
-   implications, auth × bind matrix, backup/restore pointers, high-tenancy many-small-named-graphs
-   profile. Depends on (6) for its DR section. *(docs)*
-8. **AC-SPARQL out-of-class scenarios (1, 14, 15, 16) on the `/authz/query` surface** — service
-   description, Update refusal, protocol-binding equivalence, caching. Precondition for ever
-   blessing `/authz`. *(sparq-server)*
-9. **Timing-channel non-disclosure assessment** for the access-controlled query path. Gated on Q6.
-   *(sparq-solid)*
-10. **`/authz` wire-contract freeze**, sequenced with the TS `prod-solid-server` migration, not
-    before. Depends on (8). *(governance)*
-11. **Horizontal-scaling ADR sign-off or explicit deferral.** Gated on Q4. *(research/governance)*
-12. **Correct the stale DEVIATIONS note** in `crates/sparq-lws-core/src/store/http.rs:22-34` (§1.1):
-    it still says HTTP does not isolate named graphs and that GSP write verbs return `501`, both of
-    which are false on this tree. Independent and cheap. *(sparq-lws-core)*
+### 5.1 — Executable now (tracked)
 
-Items 1–7 and 12 are the recommended milestone. Items 8–11 are gated on maintainer decisions or on
-the downstream migration and should not block it.
+- **W1 — Per-PR `cargo-semver-checks` gate** over the tier-1 surface defined in
+  `docs/api-stability.md`. Blocks the ratification decision (§4 Q1). *(ci-infra)*
+- **W2 — Publish the served-surface SPARQL 1.1 Protocol conformance report** as an artifact from the
+  existing `http-protocol` lane, alongside the inference report. No dependencies; can run in
+  parallel. *(conformance)*
+- **W3 — Backup → restore → PITR disaster-recovery runbook**, validated end to end against the
+  existing `backup` feature. No dependencies. *(docs + sparq-server)*
+- **W4 — Authoritative-store operations guide** — sizing, `--persist` guarantees, writer-ceiling
+  implications, auth × bind matrix, backup/restore pointers, high-tenancy many-small-named-graphs
+  profile. Depends on W3 for its DR section. *(docs)*
+- **W5 — AC-SPARQL out-of-class scenarios (1, 14, 15, 16) on the `/authz/query` surface** — service
+  description, Update refusal, protocol-binding equivalence, caching. Precondition for ever blessing
+  `/authz` (§3). *(sparq-server)*
+- **W6 — Correct the stale DEVIATIONS note** in `crates/sparq-lws-core/src/store/http.rs:22-34`
+  (§1.1): it still says HTTP does not isolate named graphs and that GSP write verbs return `501`,
+  both of which are false on this tree. No dependencies, and cheap. *(sparq-lws-core)*
+
+W1–W4 and W6 are the recommended milestone (§2). W5 is sequenced with the downstream migration and
+should not block that milestone.
+
+### 5.2 — Gated on a maintainer decision (not filed as work)
+
+Each of these is an open question in §4 first; the executable work is scoped and filed once answered.
+
+- **Ratify the tier-1 freeze** — flip the in-code markers and `docs/api-stability.md` from *proposed*
+  to *in force*. Maintainer signature (Q1); sequence after W1.
+- **Resolve parser fidelity for published artifacts** so a non-git consumer gets the conformant
+  parser. The chosen route (Q2) determines what the work actually is.
+- **Crates.io + npm bootstrap publish**, then flip `release-plz.toml` `publish = true`. Blocked on a
+  one-time registry-side maintainer action outside the repository (Q3), and on the Q2 route.
+- **Timing-channel non-disclosure assessment** for the access-controlled query path (Q6).
+- **`/authz` wire-contract freeze**, sequenced with the TS `prod-solid-server` migration, not before
+  (§3). Also depends on W5.
+- **Horizontal-scaling ADR sign-off or explicit deferral** (Q4).
 
 ## 6 — Corrections to #1346's premise, collected
 
