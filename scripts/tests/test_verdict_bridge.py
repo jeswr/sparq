@@ -22,7 +22,9 @@ Stdlib unittest + PyYAML. No network, no gh, no git.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import re
 import sys
@@ -1160,16 +1162,19 @@ class TestDoubleFireIdempotence(unittest.TestCase):
         original_run_bridge, original_argv = vb.run_bridge, sys.argv
         try:
             vb.run_bridge = lambda b, **kw: started.append(b) or 0
-            sys.argv = ["verdict-bridge.py", "--repo", REPO, "--mode", "event", "--pr", ""]
-            self.assertEqual(vb.main(), 0)
+
+            def main_with(*args) -> int:
+                sys.argv = ["verdict-bridge.py", "--repo", REPO, *args]
+                with contextlib.redirect_stdout(io.StringIO()):
+                    return vb.main()
+
+            self.assertEqual(main_with("--mode", "event", "--pr", ""), 0)
             self.assertEqual(started, [], "an unroutable event started a full sweep")
 
-            sys.argv = ["verdict-bridge.py", "--repo", REPO, "--mode", "event", "--pr", "42"]
-            self.assertEqual(vb.main(), 0)
+            self.assertEqual(main_with("--mode", "event", "--pr", "42"), 0)
             self.assertEqual([b.only_pr for b in started], [42])
 
-            sys.argv = ["verdict-bridge.py", "--repo", REPO, "--mode", "sweep", "--pr", ""]
-            self.assertEqual(vb.main(), 0)
+            self.assertEqual(main_with("--mode", "sweep", "--pr", ""), 0)
             self.assertEqual(
                 [b.only_pr for b in started], [42, None], "the cron sweep must still run"
             )
