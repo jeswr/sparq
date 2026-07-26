@@ -27,8 +27,17 @@
 //! # What this does and does not catch
 //!
 //! It catches *sustained* pressure: a pod whose retained bytes have crept up to the ceiling refuses
-//! further writes with 507, and — because the accounting is of **live** bytes, not of pages ever
-//! grown — deleting resources releases the pressure and the pod starts accepting writes again.
+//! further writes with 507. Because the accounting is of **live** bytes rather than of pages ever
+//! grown, bytes returned to the allocator lower the total again and restore headroom — something a
+//! pages-grown high-water mark could never do.
+//!
+//! That is a property of the *counters*, and it is all the tests below pin. Whether a given LDP
+//! `DELETE` returns **enough** bytes to move a refused request back under the ceiling is **not**
+//! measured: nothing here instruments the store, which keeps its map capacity after removing an
+//! entry, and the wasm integration test restores the ceiling rather than deleting data. Recovery
+//! from sustained pressure is therefore the accounting's intent, not a demonstrated property of
+//! the delete path; establishing it needs a wasm32 end-to-end test that deletes a stored resource
+//! and observes admission return under an unchanged ceiling.
 //!
 //! It does **not** catch a single request whose own transient peak overshoots the remaining
 //! headroom by more than [`projected_request_bytes`] predicts; only fallible allocation throughout
@@ -285,8 +294,11 @@ mod tests {
         assert!(admits(0, u64::MAX, u64::MAX));
     }
 
+    // Counter-level only: this drives `Accounting` directly, so it pins that a *deallocation*
+    // restores headroom, NOT that any request path (an LDP DELETE, say) frees enough to get there.
+    // See the module docs — the end-to-end claim needs a wasm32 test that does not exist yet.
     #[test]
-    fn freed_bytes_restore_admission() {
+    fn recorded_deallocations_restore_headroom() {
         let counters = Accounting::new();
         let ceiling = 4 * REQUEST_HEADROOM_BYTES;
         counters.record_alloc(4 * REQUEST_HEADROOM_BYTES as usize);
@@ -297,7 +309,7 @@ mod tests {
         counters.record_dealloc(3 * REQUEST_HEADROOM_BYTES as usize);
         assert!(
             admits(ceiling, counters.live(), 0),
-            "deleting resources releases the pressure — unlike a pages-grown high-water mark"
+            "bytes returned to the allocator lower the live total — unlike a pages-grown high-water mark"
         );
     }
 

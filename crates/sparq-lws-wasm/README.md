@@ -63,7 +63,9 @@ console.log(response.status);
   `handleRequest` refuses a request whose projected peak would cross the ceiling with
   a clean HTTP 507 instead of trapping at the linear-memory wall. `lwsMemoryLiveBytes`,
   `lwsMemoryPeakBytes`, `lwsMemoryCeilingBytes`, and `lwsSetMemoryCeilingBytes` expose
-  the counters and the knob; freeing resources restores admission.
+  the counters and the knob. The total is of live bytes rather than pages ever grown, so
+  bytes returned to the allocator restore headroom — but that an LDP `DELETE` frees enough
+  to re-admit a refused request is not yet demonstrated end to end.
 - No Tokio reactor, native listener, filesystem, TLS, OIDC verifier, PoP,
   notifications, or network backend is linked into the wasm artifact.
 

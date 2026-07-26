@@ -205,7 +205,11 @@ triggering request gets no HTTP answer. `sparq-lws-wasm` installs a `System`-del
 projected peak (`live + 4 × body + 1 MiB` headroom) would cross a ceiling — default 3 GiB — with a
 507 whose status and `insufficient storage` body are byte-identical to the store-quota 507 above,
 before the router runs. Because the accounting is of live bytes rather than of pages ever grown,
-deleting resources releases the pressure and the pod resumes accepting writes. Read and tune it
+bytes returned to the allocator lower the total again and restore headroom, which a pages-grown
+high-water mark could not — but only the counter arithmetic is tested. That an LDP `DELETE` frees
+**enough** for a refused request to be admitted again has no end-to-end wasm32 test (the store
+keeps its map capacity after removing an entry), so treat recovery from sustained pressure as the
+accounting's intent rather than a demonstrated property. Read and tune it
 from the host with `lwsMemoryLiveBytes()`, `lwsMemoryPeakBytes()`, `lwsMemoryCeilingBytes()`, and
 `lwsSetMemoryCeilingBytes(bytes)` (`0` disables the bound; a negative or non-finite argument throws
 rather than silently unbounding) — lower the ceiling when one module hosts several pods. This
