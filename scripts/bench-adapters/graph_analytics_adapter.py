@@ -11,9 +11,13 @@
 #   Graphalytics PageRank is defined as a FIXED number of power-method sweeps.
 #     * igraph's `Graph.pagerank()` does not expose that: it SOLVES for the stationary
 #       distribution (PRPACK). It therefore cannot reproduce a 10-sweep reference, and the
-#       adapter says so via `semantics=converged` — the harness then gates it against a
-#       CONVERGED reference and labels the row. Timing igraph's exact solve against
-#       sparq's 10 sweeps is NOT an iteration-matched comparison.
+#       adapter says so via `semantics=converged`. There is no converged oracle in this
+#       suite, and the fixed-sweep reference is NOT one — gating igraph against it would
+#       print a large per-vertex delta that reads as an igraph correctness failure when it
+#       is only a difference of termination rule. So the harness does not gate that row at
+#       all: it records an incomparable SEMANTIC-GAP and prints no timing. Timing igraph's
+#       exact solve against sparq's 10 sweeps would not be an iteration-matched comparison
+#       either way.
 #     * NetworKit's `centrality.PageRank` exposes `maxIterations`, so it CAN run the
 #       fixed-sweep form; the adapter sets it and reports `semantics=fixed-iterations`.
 #   WCC has no such ambiguity on any engine — that row is directly comparable.
@@ -84,7 +88,9 @@ def run_igraph(args, props, vertices, edges):
 
     if args.algo == "pr":
         damping = float(props["pr.damping-factor"])
-        # PRPACK solves for the stationary distribution; there is no fixed-sweep knob.
+        # PRPACK solves for the stationary distribution; there is no fixed-sweep knob. The
+        # harness reads `semantics=converged` and declines to gate this row against the
+        # fixed-sweep reference rather than reporting a meaningless mismatch.
         scores, us = best_of(lambda: g.pagerank(damping=damping, directed=directed), args.iters)
         print("semantics=converged")
         return {v: scores[i] for i, v in enumerate(vertices)}, us, True

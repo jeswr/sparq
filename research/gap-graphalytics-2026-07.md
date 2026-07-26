@@ -120,11 +120,15 @@ Filed as separate P2 feature requests rather than being papered over:
 **Comparable.** WCC across sparq / igraph / NetworKit: identical semantics, exact
 partition, no termination ambiguity.
 
-**Not iteration-matched.** igraph's `pagerank()` solves for the stationary distribution
-(PRPACK) and exposes no fixed-sweep knob, so it cannot reproduce a ten-sweep reference; the
-adapter reports `semantics=converged` and the harness labels the row. NetworKit does expose
-`maxIterations` and can run the spec form. Printing an exact solve and ten power-method
-sweeps side by side without that label would be a misleading comparison.
+**Not comparable — igraph PageRank.** igraph's `pagerank()` solves for the stationary
+distribution (PRPACK) and exposes no fixed-sweep knob, so it cannot reproduce a ten-sweep
+reference; the adapter reports `semantics=converged`. The suite holds only the fixed-sweep
+reference, which is *not* an oracle for a converged solve — gating against it would print a
+per-vertex delta that reads as an igraph correctness failure when it is only a difference of
+termination rule. The harness therefore records the row as `SEMANTIC-GAP`: not gated, not
+timed. Generating an independent converged oracle so igraph's PageRank *can* be validated is
+open work (a Phase 2 item), and until it exists no igraph PageRank number is reported.
+NetworKit does expose `maxIterations`, runs the spec form, and is gated normally.
 
 **Not the same job — and this cuts both ways.** igraph and NetworKit are embedded graph
 libraries handed a prepared edge array; `sparq-algos` runs over an RDF triple store's

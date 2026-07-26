@@ -6,14 +6,23 @@
 # printed once that gate is green. A red gate is reported as red — never dropped, never
 # softened into a footnote next to a number.
 #
-# THREE HONEST OUTCOMES per algorithm, and no fourth:
-#   OK       — the engine implements the Graphalytics semantics and its output validated.
-#   GAP      — sparq-algos does not implement the algorithm. Printed as a FEATURE GAP row
-#              with no timing. Never faked, never silently skipped.
-#   MISMATCH — the engine has a related algorithm whose SEMANTICS differ from the spec
-#              (sparq's CDLP; igraph's randomised label propagation). The divergence is
-#              printed. It does not fail the run, because it is a known, documented
-#              semantic gap rather than a regression — see research/gap-graphalytics-2026-07.md.
+# FOUR HONEST OUTCOMES per algorithm, and no fifth:
+#   OK           — the engine implements the Graphalytics semantics and its output validated.
+#   GAP          — sparq-algos does not implement the algorithm. Printed as a FEATURE GAP row
+#                  with no timing. Never faked, never silently skipped.
+#   MISMATCH     — the engine has a related algorithm whose SEMANTICS differ from the spec
+#                  (sparq's CDLP; igraph's randomised label propagation). It was gated
+#                  against the spec reference and the divergence is printed. It does not
+#                  fail the run, because it is a known, documented semantic gap rather than a
+#                  regression — see research/gap-graphalytics-2026-07.md.
+#   SEMANTIC-GAP — the engine's answer is not even ADDRESSED by the reference we hold, so it
+#                  is not gated at all: igraph's PageRank solves for the stationary
+#                  distribution and the reference is a fixed ten-sweep vector. No converged
+#                  oracle is generated here, so the row is neither validated nor timed.
+#
+# NO TIMING WITHOUT A GREEN GATE. Every runner's output is CAPTURED, not streamed; its
+# `metric_us` lines reach the transcript only after that engine's gate comes back green. On
+# any other path the log is still shown for diagnosis, with the timing lines stripped out.
 #
 # THE ORACLE IS INDEPENDENT. The committed reference outputs under data/*/ are produced by
 # `gx.py reference`, a from-the-spec Python implementation — a different language and a
@@ -156,6 +165,13 @@ gate_self_test() {
   printf '1 1.000000100000e-01\n2 9.000000000000e-01\n' > "$d/ok-pr"
   # (c) a missing vertex must be rejected.
   printf '1 1.000000000000e-01\n' > "$d/short-pr"
+  # (c2) a NON-FINITE value must be rejected. NaN is the important one: every comparison
+  #      against it is false, so a tolerance check alone silently ACCEPTS it, and a diverged
+  #      power method is exactly what produces one. The infinities are pinned here too so
+  #      they are rejected by rule rather than by arithmetic accident.
+  printf '1 nan\n2 9.000000000000e-01\n' > "$d/nan-pr"
+  printf '1 inf\n2 9.000000000000e-01\n' > "$d/posinf-pr"
+  printf '1 -inf\n2 9.000000000000e-01\n' > "$d/neginf-pr"
   printf '1 1\n2 1\n3 3\n' > "$d/ref-wcc"
   # (d) merging two reference groups must be rejected ...
   printf '1 7\n2 7\n3 7\n' > "$d/merged-wcc"
@@ -183,11 +199,15 @@ $expect. The validation gate is not trustworthy, so no result below would mean a
 bad-pr pr 1
 ok-pr pr 0
 short-pr pr 1
+nan-pr pr 1
+posinf-pr pr 1
+neginf-pr pr 1
 merged-wcc wcc 1
 split-wcc wcc 1
 relabelled-wcc wcc 0
 CASES
-  log "gate self-test: the validator rejects wrong answers and accepts equivalent ones"
+  log "gate self-test: the validator rejects wrong answers (including non-finite ones) and \
+accepts equivalent ones"
 }
 gate_self_test
 
@@ -228,14 +248,26 @@ resolve_reference() {
 }
 
 # ---- 2. gate one engine's output, then report its timing ---------------------------------
-# $1 engine  $2 algo  $3 output file  $4 reference  $5 timing us  $6 status(conformant|…)
+# Reproduces a captured runner log with every `metric_us` line REMOVED. Used on every path
+# that has not passed the validation gate — a runner error, a semantic gap, a red gate. The
+# invariant is "validate, THEN time": an engine whose output did not validate must not leave
+# a number behind in the transcript, where it would be quoted without its verdict.
+strip_timings() { grep -v '^metric_us ' "$1" || true; }
+
+# $1 engine  $2 algo  $3 output file  $4 reference  $5 captured runner log  $6 status
+# The log is CAPTURED, not streamed, precisely so this function can decide whether its
+# timing lines are allowed to be printed at all — validation runs first, and the log is
+# echoed verbatim only after a green gate.
 gate_and_record() {
-  local engine="$1" algo="$2" out="$3" ref="$4" us="$5" status="$6"
+  local engine="$1" algo="$2" out="$3" ref="$4" log="$5" status="$6" us
+  us="$(sed -n 's/^metric_us algo=//p' "$log")"
   if python3 "$GX_PY" validate --reference "$ref" --actual "$out" --algo "$algo" \
        > "$TMP/v-$engine-$algo" 2>&1; then
+    sed 's/^/  '"$engine"' /' "$log"
     sed 's/^/  /' "$TMP/v-$engine-$algo"
-    record "$engine" "$algo" OK "algo_us=$us"
+    record "$engine" "$algo" OK "algo_us=${us:-n/a}"
   else
+    strip_timings "$log" | sed 's/^/  '"$engine"' /'
     sed 's/^/  /' "$TMP/v-$engine-$algo"
     if [ "$status" = "conformant" ]; then
       log "$engine/$algo: gate RED on an algorithm declared CONFORMANT — this is a failure"
@@ -292,14 +324,14 @@ for algo in $ALGOS; do
     continue
   elif [ "$rc" -ne 0 ]; then
     log "$upper: the sparq runner exited $rc"
-    sed 's/^/[gx]   /' "$TMP/sparq-$algo.log" >&2
+    strip_timings "$TMP/sparq-$algo.log" | sed 's/^/[gx]   /' >&2
     record sparq "$algo" ERROR "runner exit $rc"
     echo ""
     continue
   fi
-  sed 's/^/  sparq /' "$TMP/sparq-$algo.log"
-  SPARQ_US="$(sed -n 's/^metric_us algo=//p' "$TMP/sparq-$algo.log")"
-  gate_and_record sparq "$algo" "$OUT" "$REF" "${SPARQ_US:-n/a}" "$status"
+  # The runner's log — timings included — is printed by gate_and_record, and only once the
+  # gate is green.
+  gate_and_record sparq "$algo" "$OUT" "$REF" "$TMP/sparq-$algo.log" "$status"
 
   # -- the competitor legs (gather-time only; never part of the smoke acceptance) --
   if [ "$SMOKE" = "0" ]; then
@@ -316,21 +348,36 @@ for algo in $ALGOS; do
         continue
       elif [ "$crc" -ne 0 ]; then
         log "$engine/$algo: adapter exited $crc"
-        sed 's/^/[gx]   /' "$TMP/$engine-$algo.log" >&2
+        strip_timings "$TMP/$engine-$algo.log" | sed 's/^/[gx]   /' >&2
         record "$engine" "$algo" ERROR "adapter exit $crc"
         continue
       fi
-      sed 's/^/  '"$engine"' /' "$TMP/$engine-$algo.log"
-      CUS="$(sed -n 's/^metric_us algo=//p' "$TMP/$engine-$algo.log")"
       SEM="$(sed -n 's/^semantics=//p' "$TMP/$engine-$algo.log")"
+      # A PageRank whose TERMINATION SEMANTICS are not the spec's fixed sweep count is NOT
+      # gated against the fixed-sweep reference. $REF is the ten-sweep vector; an engine
+      # that solves for the stationary distribution instead (igraph/PRPACK) does not
+      # approximate it, so running that gate would print a large per-vertex delta that reads
+      # as an igraph correctness failure when it is nothing of the kind. The honest verdict
+      # is that the two are incomparable on this axis. This harness generates NO converged
+      # oracle, so there is no reference this row could legitimately be validated against —
+      # it is therefore neither validated nor timed, exactly like a feature gap.
+      if [ "$algo" = "pr" ] && [ -n "$SEM" ] && [ "$SEM" != "fixed-iterations" ]; then
+        strip_timings "$TMP/$engine-$algo.log" | sed 's/^/  '"$engine"' /'
+        echo "  $engine: SEMANTIC GAP — PageRank termination semantics '$SEM' vs the"
+        echo "  Graphalytics fixed-sweep definition. The fixed-sweep reference is not a valid"
+        echo "  oracle for it and no converged oracle exists here, so this row is neither"
+        echo "  validated nor timed. See research/gap-graphalytics-2026-07.md."
+        record "$engine" "$algo" SEMANTIC-GAP "termination semantics '$SEM'; not gated, no timing"
+        continue
+      fi
       if [ -n "$SEM" ] && [ "$SEM" != "fixed-iterations" ]; then
-        log "$engine/$algo: termination semantics '$SEM' differ from the Graphalytics"
-        log "  fixed-iteration definition — this row is NOT iteration-matched with sparq."
+        log "$engine/$algo: semantics '$SEM' differ from the Graphalytics definition —"
+        log "  this row is NOT semantics-matched with sparq."
       fi
       # A competitor is never declared conformant by this harness: its verdict is recorded
       # from the same gate, and a red gate marks the row MISMATCH rather than failing a run
       # whose subject is sparq.
-      gate_and_record "$engine" "$algo" "$COUT" "$REF" "${CUS:-n/a}" nonconformant
+      gate_and_record "$engine" "$algo" "$COUT" "$REF" "$TMP/$engine-$algo.log" nonconformant
     done
   fi
   echo ""

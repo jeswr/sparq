@@ -24,6 +24,7 @@
 #   gx.py validate  --reference FILE --actual FILE --algo pr|wcc|cdlp [--epsilon 1e-4]
 #   gx.py info      --dataset DIR [--name N]
 import argparse
+import math
 import os
 import sys
 from collections import Counter
@@ -248,11 +249,31 @@ def read_output(path, float_values):
 
 
 def validate_float(reference, actual, epsilon):
-    """Per-vertex relative agreement. Returns a list of human-readable failures."""
+    """Per-vertex relative agreement. Returns a list of human-readable failures.
+
+    NON-FINITE VALUES ARE REJECTED BEFORE THE TOLERANCE COMPARISON, and that ordering is
+    load-bearing: every comparison against a NaN is false, so `abs(nan - r) > bound` does
+    not fire and an output that was NaN at every vertex would otherwise validate — the gate
+    would be decoration on exactly the failure mode a diverging power method produces. The
+    infinities are covered by the same explicit rule rather than by the luck of the
+    arithmetic happening to exceed the bound, and a non-finite REFERENCE is a broken oracle,
+    which is a failure and not a pass.
+    """
     failures = []
     for v in sorted(reference):
         r = reference[v]
         a = actual[v]
+        if not math.isfinite(r):
+            failures.append(
+                "vertex %d: the REFERENCE value is not finite (%s) — the oracle is broken"
+                % (v, repr(r))
+            )
+            continue
+        if not math.isfinite(a):
+            failures.append(
+                "vertex %d: expected %.12e got a NON-FINITE value (%s)" % (v, r, repr(a))
+            )
+            continue
         bound = epsilon * abs(r) + ABS_FLOOR
         if abs(a - r) > bound:
             failures.append(

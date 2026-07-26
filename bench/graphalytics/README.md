@@ -51,10 +51,12 @@ committed under `data/*/` are generated from it, and **every run re-derives them
 "whatever sparq printed last", which validates nothing.
 
 `run.sh` also runs a **gate self-test** before anything else: it feeds the validator known-
-wrong answers of each kind (a float outside epsilon, a missing vertex, a merged partition,
-a split partition) and known-equivalent ones (a float inside epsilon, a pure relabelling),
-and aborts unless the validator rejects the former and accepts the latter. A gate that
-cannot go red would make every green row below it meaningless.
+wrong answers of each kind (a float outside epsilon, a NaN, either infinity, a missing
+vertex, a merged partition, a split partition) and known-equivalent ones (a float inside
+epsilon, a pure relabelling), and aborts unless the validator rejects the former and accepts
+the latter. A gate that cannot go red would make every green row below it meaningless — and
+NaN is the sharp case, because every comparison against it is false, so a tolerance check
+that does not reject non-finite values *explicitly* accepts a wholly diverged result.
 
 ## The committed fixture is NOT an LDBC dataset
 
@@ -70,12 +72,15 @@ projection must preserve a degree-0 node), and three weakly connected components
 **Comparable.** WCC across all three engines: same semantics, exact partition, no
 termination ambiguity.
 
-**Not iteration-matched.** Graphalytics PageRank is a *fixed sweep count*. NetworKit
-exposes `maxIterations` and can run that form. igraph's `pagerank()` *solves* for the
-stationary distribution (PRPACK) and has no such knob, so its output is gated against a
-converged reference and its row is labelled `semantics=converged`. Timing an exact solve
-against ten power-method sweeps is not a like-for-like comparison, and the harness says so
-rather than printing the two side by side unlabelled.
+**Not comparable at all — igraph PageRank.** Graphalytics PageRank is a *fixed sweep count*.
+NetworKit exposes `maxIterations` and can run that form, so it is gated normally. igraph's
+`pagerank()` *solves* for the stationary distribution (PRPACK) and has no such knob, so the
+fixed-sweep reference is not its oracle — gating against it would print a large per-vertex
+delta that reads as an igraph correctness failure when it is only a difference of
+termination rule. **This suite generates no converged oracle**, so the row is recorded as a
+`SEMANTIC-GAP`: labelled `semantics=converged`, neither validated nor timed. Producing an
+independent converged oracle and gating igraph against *that* is future work, not something
+the harness quietly does today.
 
 **Not the same job.** igraph and NetworKit are embedded graph libraries handed a prepared
 edge array. `sparq-algos` runs over an RDF triple store's dictionary ids. The harness

@@ -197,12 +197,14 @@ fn run() -> Result<ExitCode, String> {
         .join(props.get_or("edge-file", &format!("{name}.e")));
     let directed = props.bool_or("directed", true)?;
 
-    let nt_path = std::env::temp_dir().join(format!("sparq-graphalytics-{name}.nt"));
+    // A PRIVATE, uniquely-named scratch directory — see [`ScratchDir`] for why a fixed
+    // temp-dir path is not acceptable here. Bound for the rest of `run`, so the N-Triples
+    // file lives exactly as long as it is needed and the tree is removed on the way out.
+    let scratch = ScratchDir::new()?;
+    let nt_path = scratch.path("graph.nt");
     let t = Instant::now();
     let (n_vertices, n_edges) = materialize_nt(&vertex_file, &edge_file, directed, &nt_path)?;
     println!("metric_us materialize={}", t.elapsed().as_micros());
-    // Best-effort cleanup: the file is scratch, and a stale one would just be overwritten.
-    let _cleanup = ScratchFile(nt_path.clone());
 
     // ---- 2. load into the dict-encoded store, then project --------------------------------
     let t = Instant::now();
@@ -297,13 +299,84 @@ fn gap_description(algo: &str) -> &'static str {
     }
 }
 
-/// Deletes a scratch file on drop. Failure is ignored — it lives in the temp dir.
-struct ScratchFile(PathBuf);
+/// A private, uniquely-named scratch directory for the run, removed on drop.
+///
+/// The materialised N-Triples used to go to a FIXED `<temp>/sparq-graphalytics-<name>.nt`,
+/// which is wrong twice over:
+///
+/// * **Concurrency.** Two runs of the same dataset — the ordinary case when a harness fans
+///   algorithms out, or when two jobs share a box — would truncate and read *each other's*
+///   file, silently invalidating both results while every gate still looked green.
+/// * **Symlink following.** [`File::create`] follows a symlink at the final component, so
+///   anyone able to write the shared temp dir could pre-create that predictable name
+///   pointing at another file this process may write, and have the run overwrite it.
+///
+/// [`std::fs::create_dir`] fixes both: it does not follow a symlink at the final component
+/// and fails with [`ErrorKind::AlreadyExists`](std::io::ErrorKind::AlreadyExists) rather
+/// than reusing an existing entry, so it is an atomic *exclusive claim* on the name. Every
+/// scratch path is then formed inside a directory this process is known to own, and is
+/// narrowed to owner-only immediately (it is created empty, so nothing is exposed meanwhile).
+struct ScratchDir {
+    dir: PathBuf,
+}
 
-impl Drop for ScratchFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+impl ScratchDir {
+    /// Claims a fresh directory under the system temp dir.
+    ///
+    /// The name mixes the pid with an attempt counter and a clock nonce, retrying on
+    /// collision: the pid alone is not sufficient, because a crashed run can leave a
+    /// directory behind under a pid the OS later recycles.
+    fn new() -> Result<ScratchDir, String> {
+        let base = std::env::temp_dir();
+        let pid = std::process::id();
+        for attempt in 0..64u32 {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let dir = base.join(format!("sparq-graphalytics-{}-{}-{:x}", pid, attempt, nonce));
+            match std::fs::create_dir(&dir) {
+                Ok(()) => {
+                    restrict_to_owner(&dir)?;
+                    return Ok(ScratchDir { dir });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(format!("scratch directory {:?}: {}", dir, e)),
+            }
+        }
+        Err(format!(
+            "could not claim a unique scratch directory under {:?} in 64 attempts",
+            base
+        ))
     }
+
+    /// A path INSIDE the owned directory. The dataset name is deliberately not part of it:
+    /// `--name` is caller-supplied, and all the uniqueness lives in the directory anyway.
+    fn path(&self, file: &str) -> PathBuf {
+        self.dir.join(file)
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        // Best effort: it is scratch under the temp dir, and failing a run over a cleanup
+        // error would be worse than leaving a directory behind.
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Narrows a just-created directory to `rwx------`, so a shared temp dir does not expose the
+/// materialised graph to other users. A no-op where the platform has no Unix mode bits.
+#[cfg(unix)]
+fn restrict_to_owner(dir: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| format!("{:?}: {}", dir, e))
+}
+
+#[cfg(not(unix))]
+fn restrict_to_owner(_dir: &Path) -> Result<(), String> {
+    Ok(())
 }
 
 /// The per-vertex result of an algorithm, before it is rendered to the Graphalytics output
@@ -508,4 +581,76 @@ fn export_edgelist(ng: &NodeGraph, vertex_ids: &[i64]) -> Vec<u8> {
         }
     }
     buf
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// Concurrent runs must not share a scratch path. This is exactly the property the old
+    /// fixed `<temp>/sparq-graphalytics-<name>.nt` did not have: two simultaneous runs of
+    /// the same dataset truncated each other's N-Triples mid-load, so both engines were
+    /// timed and validated against a graph neither of them wrote.
+    #[test]
+    fn concurrent_scratch_dirs_are_distinct_and_writable() {
+        let dirs: Vec<ScratchDir> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..16)
+                .map(|_| s.spawn(|| ScratchDir::new().expect("claim a scratch directory")))
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("scratch-dir thread"))
+                .collect()
+        });
+
+        let paths: Vec<PathBuf> = dirs.iter().map(|d| d.path("graph.nt")).collect();
+        let unique: HashSet<&PathBuf> = paths.iter().collect();
+        assert_eq!(
+            unique.len(),
+            paths.len(),
+            "scratch paths collided across concurrent runs: {:?}",
+            paths
+        );
+
+        // Each is a real, owned directory the run can write its own file into.
+        for (i, p) in paths.iter().enumerate() {
+            std::fs::write(p, format!("run {}\n", i)).expect("write inside an owned scratch dir");
+            assert_eq!(std::fs::read_to_string(p).unwrap(), format!("run {}\n", i));
+        }
+
+        let roots: Vec<PathBuf> = dirs.iter().map(|d| d.dir.clone()).collect();
+        drop(dirs);
+        for root in &roots {
+            assert!(!root.exists(), "scratch directory {:?} outlived its run", root);
+        }
+    }
+
+    /// The scratch directory is owner-only: a shared temp dir must not expose the
+    /// materialised graph to other users on the box.
+    #[cfg(unix)]
+    #[test]
+    fn scratch_dir_is_private_to_the_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = ScratchDir::new().expect("claim a scratch directory");
+        let mode = std::fs::metadata(&scratch.dir).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "scratch dir mode {:o} is not rwx------", mode);
+    }
+
+    /// The security half of the fix rests on `create_dir` being an EXCLUSIVE claim that does
+    /// not follow a symlink at the final component. Pinned here because a platform where it
+    /// silently reused the existing entry would reintroduce the overwrite bug without any
+    /// visible change to `ScratchDir`.
+    #[cfg(unix)]
+    #[test]
+    fn create_dir_refuses_a_pre_existing_symlink() {
+        let scratch = ScratchDir::new().expect("claim a scratch directory");
+        let victim = scratch.path("victim");
+        std::fs::create_dir(&victim).expect("victim dir");
+        let squatted = scratch.path("squatted");
+        std::os::unix::fs::symlink(&victim, &squatted).expect("plant the symlink");
+
+        let err = std::fs::create_dir(&squatted).expect_err("create_dir must not follow it");
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+    }
 }
