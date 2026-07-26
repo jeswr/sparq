@@ -37,6 +37,23 @@
 # the point. The high-gate covered members (the blake3-bound `filter_*` family at
 # 17,416) are auto-flagged HIGH_GATE_* as the value-hook reduction target (§2.6).
 #
+# sq-3kd2g.11 refresh — status now reflects ACCEPTED SYNTAX at the verifier
+# fragment gate (crates/sparq-zk/src/verify.rs::fragment_query), not merely
+# whether a desugared form compiles to some circuit. The fragment-gate extension
+# (sq-3kd2g.3 gate + sq-3kd2g.6 builder/dispatch, research/zksparql-fragment-
+# extension.md §§1,3,4,7) made property paths, UNION, VALUES and subqueries
+# ACCEPTED, while OPTIONAL/MINUS/BIND/aggregates/EXISTS stay REJECTED fail-closed.
+# So a row is `covered` only when the gate accepts the syntax AND a dedicated
+# circuit member proves the feature AS STATED; `partial` when accepted but either
+# composed verifier-side (no dedicated member) or proved only under a BOUNDED
+# statement; `gap` when the gate rejects it fail-closed, OR when it is accepted but
+# no compiled member can be bound (p?, which pins depth to exactly 1 — see Q16).
+# This fixes the §1 Q13/Q14 drift where `covered` had meant only "a desugared form
+# compiles" while the path syntax was still rejected. The closures p+/p* map to
+# the path_reach family under an EXISTENCE-ONLY bounded statement (§4) and carry
+# a `bounded` honesty flag alongside STATUS_BOUNDED; the depth bound is a public
+# input, never a claim of unbounded closure.
+#
 # It does NOT require live `bb`/`nargo`: every number comes off the committed
 # snapshot, so the harness is deterministic and non-flaky (CI-safe). To refresh
 # the underlying gate counts, re-run bench/zk-compose/scripts/gate_counts.sh and
@@ -117,6 +134,19 @@ VALUE_HOOK_TARGET = "value-hook (research/zk-field-native-encoding.md §2.6)"
 # `value_lane_member` and its MEASURED joined size instead, because keeping a
 # projection next to a measurement is exactly the drift this catalog exists to stop.
 VALUE_HOOK_PROJECTED = "ESTIMATE ~3200 — MUST be re-measured with bb gates (NOT a measurement)"
+
+# The compiled bounded-depth path-reachability family (the sq-3kd2g.2 circuits,
+# dispatched by sq-3kd2g.6's builder under the opt-in `extended-fragment` feature).
+# These members carry the property-path closures p?/p+/p* under the BOUNDED,
+# EXISTENCE-ONLY statement of research/zksparql-fragment-extension.md §4 — the depth
+# bound is a PUBLIC input; a bounded proof never asserts absence or completeness.
+# circuit_size is joined from the snapshot like every other member (never fabricated).
+PATH_REACH_MEMBERS = [
+    "path_reach_d2_k1_n16",
+    "path_reach_d4_k1_n16",
+    "path_reach_d4_k2_n16",
+    "path_reach_d8_k1_n16",
+]
 
 # ---------------------------------------------------------------------------
 # The query catalog — §6.2 of research/zk-field-native-encoding.md, transcribed.
@@ -290,7 +320,8 @@ CATALOG: list[dict] = [
             "EXCLUDED BY DESIGN, not merely unbuilt (research/zksparql-fragment-extension.md "
             "§3.2): a solution that leaves the optional side UNBOUND asserts that no compatible "
             "extension exists — a closed-world, non-monotone claim a membership proof cannot "
-            "carry. crates/sparq-zk/src/verify.rs fail-closes on LeftJoin in BOTH the base and "
+            "carry. crates/sparq-zk/src/verify.rs fail-closes on LeftJoin "
+            "(VerifyError::UnsupportedFragment) in BOTH the base and "
             "the extended fragment gate. The BOUND case is semantically a plain Join (Q12), so "
             "admitting OPTIONAL would add no sound expressiveness; authors rewrite to a Join or "
             "to a UNION of the explicit cases. (This row previously read `partial — the left-join "
@@ -329,7 +360,7 @@ CATALOG: list[dict] = [
         "sparql": "SELECT ?o WHERE { ?s :p/:q ?o }",
         "zk_members": ["scan_k2_n16_r4", "scan_k2_n16_r8", "scan_k2_n64_r4", "scan_k2_n64_r8"],
         "status": STATUS_COVERED,
-        "note": "Desugars to a multi-pattern BGP (one extra scan slot per step) → the k=2 scan lattice.",
+        "note": "Path syntax now ACCEPTED by the fragment gate (rewritten to a fresh-intermediate BGP — the SPARQL 1.1 translation, design §4); the desugared multi-pattern BGP maps to the k=2 scan lattice. (Pre-extension this row was 'covered' only because the desugared form compiled while the path syntax was still rejected — §1 drift, now resolved.)",
     },
     {
         "id": "Q14_path_inverse",
@@ -337,7 +368,7 @@ CATALOG: list[dict] = [
         "sparql": "SELECT ?s WHERE { ?o ^:p ?s }",
         "zk_members": ["scan_k1_n16_r4", "scan_k1_n16_r8", "scan_k1_n64_r4", "scan_k1_n64_r8"],
         "status": STATUS_COVERED,
-        "note": "Subject/object slot swap on a single BGP → the k=1 scan family (no extra cost over a forward pattern).",
+        "note": "Path syntax now ACCEPTED by the fragment gate (endpoint swap, design §4); maps to the k=1 scan family (no extra cost over a forward pattern). (Pre-extension this row was 'covered' only because the desugared form compiled while the path syntax was still rejected — §1 drift, now resolved.)",
     },
     {
         "id": "Q15_path_alternative",
@@ -346,7 +377,8 @@ CATALOG: list[dict] = [
         "zk_members": [],
         "status": STATUS_PARTIAL,
         "note": (
-            "Desugars to a UNION of per-predicate branches and lands with exactly the Q11 branch "
+            "ACCEPTED by the fragment gate; desugars to a UNION of per-predicate branches and "
+            "lands with exactly the Q11 branch "
             "attribution (research/zksparql-fragment-extension.md §4 table): the verifier "
             "re-derives the branches from the query text and checks the witnessing branch's "
             "sub-proofs. No dedicated member — the cost is that branch's own scan (Q01/Q02) or "
@@ -367,32 +399,33 @@ CATALOG: list[dict] = [
         ),
         "note": (
             "NOT provable today. The extended fragment gate admits `?` and routes it to the "
-            "path_reach family with allow_zero=true and a FIXED depth bound of 1, but no d=1 "
-            "member is compiled, so dispatch fail-closes (PathDepthExceedsClosure, "
+            "path_reach family with allow_zero=true and a FIXED depth bound of 1 "
+            "(PathClosure::ZeroOrOne.fixed_k() == 1), but no d=1 "
+            "member is compiled — every compiled member is d>=2 — so dispatch fail-closes "
+            "(PathDepthExceedsClosure, "
             "crates/sparq-zk-compose/src/verifier.rs). A DEEPER member is deliberately NOT "
             "accepted as a substitute: proofs at different depth bounds are DIFFERENT statements "
             "(research/zksparql-fragment-extension.md §4 req 1), and a d=2 member would prove a "
-            "two-step path the query never asked for."
+            "two-step path the query never asked for. p+/p* (Q17/Q18) are unaffected because "
+            "their closures have no fixed depth (fixed_k() == None), so any compiled bound "
+            "satisfies the dispatcher."
         ),
     },
     {
         "id": "Q17_path_one_or_more",
         "feature": "Property path + (one-or-more, transitive closure) — BOUNDED depth only",
         "sparql": "SELECT ?o WHERE { :s :p+ ?o }",
-        "zk_members": [
-            "path_reach_d2_k1_n16",
-            "path_reach_d4_k1_n16",
-            "path_reach_d4_k2_n16",
-            "path_reach_d8_k1_n16",
-        ],
+        "zk_members": PATH_REACH_MEMBERS,
         "status": STATUS_BOUNDED,
+        "bounded": True,
         "reduction_target": (
             "UNBOUNDED closure stays OUT (not circuit-realizable); reaching further is a "
             "compile-time lattice extension (larger d / n), and each d is a DISTINCT verification "
             "key by design so the bound cannot be silently widened"
         ),
         "note": (
-            "path_reach family (sq-3kd2g.2 #1591 / sq-3kd2g.6; opt-in `extended-fragment`). The "
+            "ACCEPTED by the fragment gate and mapped to the bounded path_reach family "
+            "(sq-3kd2g.2 #1591 / sq-3kd2g.6; opt-in `extended-fragment`). The "
             "member proves EXACTLY: there exists a chain of committed triples (t_1..t_l) with "
             "1<=l<=D, each a member of a committed graph in the disclosed attribution set with "
             "predicate p, chained object-to-subject, connecting the endpoints — where D is a "
@@ -402,7 +435,8 @@ CATALOG: list[dict] = [
             "eval_D is a SUBSET of eval and failing to prove at depth D proves NOTHING. Compiled "
             "lattice today: (d,k,n) in {(2,1,16),(4,1,16),(4,2,16),(8,1,16)}, EXACT-match dispatch "
             "(no wrong-bucket fallback). Reported as `partial`, not `covered`, because the proved "
-            "statement is strictly weaker than SPARQL `p+`. Padding soundness is forge-tested but "
+            "statement is strictly weaker than SPARQL `p+` — the `bounded` honesty flag marks "
+            "that explicitly. Padding soundness is forge-tested but "
             "NOT externally audited (sq-qhy4)."
         ),
     },
@@ -410,25 +444,22 @@ CATALOG: list[dict] = [
         "id": "Q18_path_zero_or_more",
         "feature": "Property path * (zero-or-more, reflexive transitive closure) — BOUNDED depth only",
         "sparql": "SELECT ?o WHERE { :s :p* ?o }",
-        "zk_members": [
-            "path_reach_d2_k1_n16",
-            "path_reach_d4_k1_n16",
-            "path_reach_d4_k2_n16",
-            "path_reach_d8_k1_n16",
-        ],
+        "zk_members": PATH_REACH_MEMBERS,
         "status": STATUS_BOUNDED,
+        "bounded": True,
         "reduction_target": (
             "as Q17 — the unbounded closure stays OUT; only the compiled (d,k,n) lattice grows"
         ),
         "note": (
-            "The SAME path_reach members as Q17 — the closure is a PUBLIC input (`allow_zero` = "
+            "ACCEPTED by the fragment gate; the SAME path_reach members as Q17 — the closure is "
+            "a PUBLIC input (`allow_zero` = "
             "true), not a separate member, and the verifier rejects a proof whose allow_zero "
             "disagrees with the closure re-derived from the query. Adds the zero-length case "
             "(0<=l<=D): it holds when the endpoints are the same term AND that term OCCURS in the "
             "committed union, so the circuit requires an occurrence witness rather than bare "
             "equality (research/zksparql-fragment-extension.md §4 req 5). Same bounded "
-            "EXISTENCE-ONLY statement, same public depth bound, same not-externally-audited "
-            "caveat (sq-qhy4) as Q17."
+            "EXISTENCE-ONLY statement, same public depth bound, same `bounded` honesty flag and "
+            "same not-externally-audited caveat (sq-qhy4) as Q17."
         ),
     },
     {
@@ -651,6 +682,12 @@ def build_catalog(snapshot: dict) -> dict:
             "status": status,
             "flag": flag,
         }
+        # Honesty flag for the bounded property-path closures (p?/p+/p*): they are
+        # covered ONLY under the EXISTENCE-ONLY bounded statement (§4), never the
+        # unbounded SPARQL closure. Surfaced so a consumer can never read a bounded
+        # path proof as an unbounded-reachability claim.
+        if entry.get("bounded"):
+            out["bounded"] = True
         # Report the per-member sizes and the covered range so a site surface can
         # render either the headline (max) or the spread.
         if per_member:
@@ -683,12 +720,17 @@ def build_catalog(snapshot: dict) -> dict:
             "as the value-hook reduction target). circuit_size is JOINED from "
             "crates/sparq-zk-compose/tests/gate_count_snapshot.json (the "
             "regression-gated source of truth) so it can never drift; gaps carry "
-            "null and are NEVER given a fabricated number. Regenerate with "
-            "bench/zk-compose/scripts/sparql_catalog.py (--check asserts the "
-            "committed copy is byte-identical); gated by "
+            "null and are NEVER given a fabricated number. STATUS derives from the "
+            "verifier fragment gate (crates/sparq-zk/src/verify.rs::fragment_query): "
+            "accepted-with-a-dedicated-member = covered, accepted-but-composed-"
+            "verifier-side or accepted-under-a-BOUNDED-statement = partial, "
+            "rejected-fail-closed = gap — NOT whether a "
+            "desugared form merely compiles (sq-3kd2g.11 fixes the §1 Q13/Q14 drift). "
+            "Regenerate with bench/zk-compose/scripts/sparql_catalog.py (--check "
+            "asserts the committed copy is byte-identical); gated by "
             "crates/sparq-zk-compose/tests/sparql_catalog.rs. Design: "
-            "research/zk-field-native-encoding.md §6 (PR #765) + the fragment "
-            "dispositions of research/zksparql-fragment-extension.md §3-§5. "
+            "research/zk-field-native-encoding.md §6 (PR #765) + "
+            "research/zksparql-fragment-extension.md §§1,3-5 (epic sq-3kd2g / #1591). "
             "NOT a soundness or privacy claim: the ZK estate is internally "
             "re-audited but NOT externally audited (sq-qhy4), the composition "
             "verifier is NOT-yet-sound, and 'covered' means a member exists and "

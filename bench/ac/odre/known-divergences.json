@@ -1,0 +1,101 @@
+{
+  "schema": "sparq.acbench.odre.divergences/1",
+  "_comment": [
+    "The DIVERGENCE LEDGER for the ODRE decision-agreement lane (bead sq-i6du2.8).",
+    "",
+    "Every sparq-vs-ODRE disagreement the run observes must match exactly one entry here or",
+    "the run FAILS with exit 3 (unclassified divergence). An entry is a pre-registered,",
+    "sourced explanation — not a mute. The three classes are the ones the bead fixes:",
+    "  mapping-gap        the two systems were not asked the same question: the divergence",
+    "                     is attributable to the input mapping or to a capability one side",
+    "                     does not model at all.",
+    "  semantics-gap      both systems read the same policy and disagree about what ODRL",
+    "                     MEANS; a documented, defensible difference of reading.",
+    "  implementation-bug neither of the above: one implementation does not do what its own",
+    "                     specification/documentation says.",
+    "",
+    "`evidence` states HOW the entry is justified and is the honesty hinge:",
+    "  source-read  derived from reading the pinned implementation's source; PREDICTED, not",
+    "               yet confirmed by a run on this box.",
+    "  observed     confirmed by a recorded run of this lane (name the run).",
+    "A source-read entry is a hypothesis. The report labels it as such, and no claim about",
+    "either system's correctness is made from it."
+  ],
+  "pinned_odre_version": "1.0.6",
+  "entries": [
+    {
+      "id": "odre-no-request-binding",
+      "class": "mapping-gap",
+      "title": "ODRE has no request model: assignee/target/action are not consulted when selecting rules",
+      "when": {
+        "sparq_decision": "deny",
+        "odre_decision": "allow",
+        "deny_kinds_subset_of": [
+          "assignee-mismatch",
+          "target-mismatch",
+          "action-mismatch",
+          "no-permission"
+        ],
+        "encodings": ["standard", "odre-native"]
+      },
+      "evidence": "source-read",
+      "source": "pyodre 1.0.6 pyodre/odre.py: `enforce(self, policy, format, interpolations)` takes no request; `_rules` selects every odrl:permission/prohibition/obligation object and `_constraints`/`_action` never read odrl:assignee or odrl:target.",
+      "note": "This is why the lane also runs the `projected` encoding, where the harness performs request binding before handing the policy to ODRE. A divergence of this shape under `projected` is NOT covered by this entry and will fail the run."
+    },
+    {
+      "id": "odre-standard-encoding-ignores-constraints",
+      "class": "implementation-bug",
+      "title": "Constraints linked through odrl:constraint are not reached by ODRE's constraint query, so a constrained rule fires unconstrained",
+      "when": {
+        "sparq_decision": "deny",
+        "odre_decision": "allow",
+        "deny_kinds_any": ["constraint-unsat"],
+        "encodings": ["standard"]
+      },
+      "evidence": "source-read",
+      "source": "pyodre 1.0.6 pyodre/odre.py `_constraints` selects `<rule> odrl:operator ?op ; odrl:leftOperand ?l ; odrl:rightOperand ?r` — constraint properties directly on the RULE node. ODRL 2.2 (W3C REC, sec. 2.5) attaches them to a separate node via odrl:constraint, which that pattern does not reach; `decision = len(constraints_set) == 0` then admits the rule.",
+      "note": "Classified implementation-bug rather than semantics-gap because it diverges from the ODRL Recommendation's own encoding, not from a defensible alternative reading of it. Scoped to the `standard` encoding: the `odre-native` encoding inlines the constraints precisely so this does not silently dominate the study. UNCONFIRMED until a run with pyodre installed observes it — `evidence: source-read`."
+    },
+    {
+      "id": "odre-prohibition-fires-like-permission",
+      "class": "semantics-gap",
+      "title": "ODRE evaluates a prohibition as an enforceable rule; sparq applies deny-overrides",
+      "when": {
+        "sparq_decision": "deny",
+        "odre_decision": "allow",
+        "deny_kinds_any": ["prohibition-override"],
+        "encodings": ["standard", "odre-native", "projected"]
+      },
+      "evidence": "source-read",
+      "source": "pyodre 1.0.6 pyodre/odre.py `_rules` VALUES-binds odrl:permission, odrl:obligation AND odrl:prohibition into one rule list and adds each satisfied rule's action to the usage decision — a prohibition contributes positively. sparq-policy applies deny-overrides (crates/sparq-policy/src/eval.rs `evaluate` step 1), the fail-closed side and the documented divergence from ODRL's unset-`odrl:conflict` default (crates/sparq-policy/README.md, issue #1375).",
+      "note": "A genuine difference of reading on both sides: neither is 'correct' here, and this lane does not adjudicate. It records that a policy's prohibitions change the decision in sparq and do not in ODRE."
+    },
+    {
+      "id": "odre-arbitrary-action-selection",
+      "class": "implementation-bug",
+      "title": "For a rule carrying several odrl:action values, ODRE reports an arbitrary one",
+      "when": {
+        "sparq_decision": "allow",
+        "odre_decision": "deny",
+        "constructs_any": ["rule:multi-action"],
+        "encodings": ["standard", "odre-native"]
+      },
+      "evidence": "source-read",
+      "source": "pyodre 1.0.6 pyodre/odre.py `_action` returns `[str(row.action) for row in graph.query(...)][0]` — the first row of an UNORDERED SPARQL result set. A rule granting Read+Write+Control therefore contributes exactly one of them to the usage decision, chosen non-deterministically (rdflib result order varies with PYTHONHASHSEED).",
+      "note": "Pre-registered as a flake guard as much as a finding: without it, a run in which the arbitrary pick happens to miss the requested action would surface as an unexplained sparq-allow/ODRE-deny. run.sh pins PYTHONHASHSEED to make a run reproducible; that pins the symptom, not the cause. Not applicable to `projected`, where the harness filters each bound rule down to the requested action."
+    },
+    {
+      "id": "odre-refuses-unmapped-uri",
+      "class": "mapping-gap",
+      "title": "ODRE's interpreter refuses any URI outside its prefix map",
+      "when": {
+        "odre_decision": "error",
+        "error_contains": "Unknown URI",
+        "encodings": ["standard", "odre-native", "projected"]
+      },
+      "evidence": "source-read",
+      "source": "pyodre 1.0.6 pyodre/python_interpreter.py `__interpreted_function_mappings` raises for any URI not matching a registered prefix (odrl / xsd / odre-time / odre-demo by default).",
+      "note": "The harness pre-registers the sparq acl action namespace through ODRE's own documented `add_prefix_mapping` extension point, so this should be residual — e.g. an IRI-valued right operand from a corpus vocabulary. A refusal is recorded as a mapping gap, never coerced into a decision."
+    }
+  ]
+}

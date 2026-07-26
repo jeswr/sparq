@@ -89,6 +89,14 @@ struct Query {
     floor_member: Option<String>,
     #[serde(default)]
     floor_circuit_size: Option<u64>,
+    /// Honesty flag for the bounded property-path closures (`p+`/`p*`): they hold
+    /// ONLY under the EXISTENCE-ONLY bounded statement
+    /// (research/zksparql-fragment-extension.md §4), never the unbounded SPARQL
+    /// closure. `false`/absent for every other row. It is the machine-readable
+    /// sibling of the `BOUNDED_DEPTH_EXISTENCE_ONLY` flag, NOT a licence to
+    /// relabel the row `covered` — see `bounded_paths_are_not_labelled_covered`.
+    #[serde(default)]
+    bounded: bool,
     /// The LANDED dual-leaf value-lane sibling (`filter_value_dl_*`) of a
     /// blake3-bound numeric FILTER lane — joined like every other number.
     #[serde(default)]
@@ -323,9 +331,15 @@ fn summary_matches_rows() {
 }
 
 /// Sanity: the catalog spans the full SPARQL 1.1 feature surface the §6 design
-/// requires — including EVERY property-path modifier — and is honest that the
-/// general-traversal modifiers are gaps. Guards against a future edit silently
-/// dropping a feature row (the value of the catalog is its COMPLETENESS).
+/// requires — including EVERY property-path modifier — and is honest about which
+/// the fragment gate accepts. After the fragment-gate extension (sq-3kd2g.6) the
+/// closures `+`/`*` are ACCEPTED and dispatch to the `path_reach` family, so they
+/// are no longer GAPs — but they stay in the `partial` bucket under an
+/// existence-only bounded statement (flagged `bounded`), `?` stays a GAP for want
+/// of a `d=1` member, and constructs the gate rejects fail-closed
+/// (OPTIONAL, aggregates, BIND, negation) stay honest GAPs. Guards against a
+/// future edit silently dropping a feature row or misstating its status (the
+/// value of the catalog is its COMPLETENESS and its honesty vs the gate).
 #[test]
 fn catalog_spans_required_features() {
     let (_snapshot, catalog) = load();
@@ -345,14 +359,84 @@ fn catalog_spans_required_features() {
         );
     }
 
-    // `?` pins the depth bound to exactly 1 and NO `path_reach_d1` member is
-    // compiled, so dispatch fail-closes (PathDepthExceedsClosure) — a deeper member
-    // is deliberately not a substitute, because proofs at different depth bounds are
-    // different statements. It must stay an honest GAP.
-    assert!(
-        catalog.queries["Q16_path_zero_or_one"].is_gap(),
-        "Q16: `?` has no compiled path_reach_d1 member — must be a GAP"
-    );
+    // The UNBOUNDED-depth closures `+`/`*` are now ACCEPTED by the extended
+    // fragment gate (fragment_query) and dispatch to the bounded
+    // `path_reach_d{d}_k{k}_n{n}` family (sq-3kd2g.6, opt-in `extended-fragment`).
+    // They hold ONLY in the BOUNDED, existence-only sense (design §4: the depth
+    // bound is a public input) — so each must NOT be a stale GAP, must carry the
+    // `bounded` honesty flag, and must name only `path_reach_*` members joined from
+    // the regression-gated snapshot. Their closures have NO fixed depth
+    // (`PathClosure::{OneOrMore,ZeroOrMore}.fixed_k() == None`), so any compiled
+    // `d>=2` member satisfies the dispatcher. This is the anti-drift guard for the
+    // flip side of §1's Q13/Q14 finding: a closure must never be left a stale GAP
+    // now that the gate accepts it — and, symmetrically, never be flattened into an
+    // unbounded `covered` claim (`bounded_paths_are_not_labelled_covered` pins that
+    // other direction).
+    for id in ["Q17_path_one_or_more", "Q18_path_zero_or_more"] {
+        let q = &catalog.queries[id];
+        assert!(
+            !q.is_gap(),
+            "{id}: bounded path closure is accepted by the fragment gate and maps to \
+             the path_reach family — it must not be a stale GAP"
+        );
+        assert!(
+            q.bounded,
+            "{id}: a path closure holds ONLY under the bounded existence-only \
+             statement (design §4) — must carry the `bounded` honesty flag so it is \
+             never read as an unbounded-closure claim"
+        );
+        assert!(
+            !q.zk_members.is_empty()
+                && q.zk_members.iter().all(|m| m.starts_with("path_reach_")),
+            "{id}: bounded path closure must name only path_reach_* members, found {:?}",
+            q.zk_members
+        );
+    }
+
+    // `p?` (Q16, ZeroOrOne) is a FIXED-depth closure: the dispatcher pins it to
+    // depth bound 1 (`PathClosure::ZeroOrOne.fixed_k() == 1`) and rejects any bound
+    // member whose `d != 1` (`FragmentDispatchError::PathDepthExceedsClosure`) so a
+    // deeper chain cannot masquerade as `p?` — a deeper member is deliberately NOT a
+    // substitute, because proofs at different depth bounds are DIFFERENT statements
+    // (design §4 req 1). Every compiled `path_reach` member is `d>=2` — there is NO
+    // `d=1` member — so an accepted `p?` query can bind none of them and it is NOT
+    // covered today. It stays an honest GAP until a `d=1` member is compiled and
+    // snapshotted. The invariant this pins: `p?` may be marked covered ONLY if it
+    // names a `path_reach_d1_*` member (guarding against a regression that re-lists
+    // the deeper members and re-claims coverage).
+    {
+        let q = &catalog.queries["Q16_path_zero_or_one"];
+        if q.is_covered() {
+            assert!(
+                q.zk_members.iter().any(|m| m.starts_with("path_reach_d1_")),
+                "Q16 (p?) is a fixed depth-1 closure: it may be `covered` only when it \
+                 names a d=1 member (path_reach_d1_*), else the dispatcher rejects every \
+                 listed member as PathDepthExceedsClosure. Found {:?}",
+                q.zk_members
+            );
+        } else {
+            assert!(
+                q.is_gap() && q.zk_members.is_empty(),
+                "Q16 (p?): with no compiled d=1 member it must be an honest GAP with no \
+                 listed members, found status/members {:?}",
+                q.zk_members
+            );
+        }
+    }
+
+    // The constructs the gate REJECTS fail-closed (OUT-by-design or not-yet-built)
+    // must stay honest GAPs — never fabricated as covered/partial.
+    for id in [
+        "Q10_optional",              // non-monotone (closed-world) — OUT
+        "Q19_aggregate_group_by",    // pattern-level completeness — OUT
+        "Q21_bind_expression",       // expression estate — phase 3
+        "Q23_negation_minus_notexists", // closed-world negation — OUT
+    ] {
+        assert!(
+            catalog.queries[id].is_gap(),
+            "{id}: rejected fail-closed by the fragment gate — must be an honest GAP"
+        );
+    }
 
     // The complex-FILTER datatype lanes must all be present and covered.
     for id in [

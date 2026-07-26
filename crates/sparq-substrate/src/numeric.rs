@@ -194,6 +194,38 @@ impl Dec {
         self.mant as f64 / 10f64.powi(self.scale as i32)
     }
 
+    /// The value as an `f32`, rounded to single precision **exactly once** — the
+    /// single-precision half of [`Dec::f64`], used by [`Num::f32`] for XPath `xs:float`
+    /// promotion.
+    ///
+    /// Deliberately NOT `self.f64() as f32`: that rounds TWICE (once into the `f64`
+    /// quotient, once in the narrowing) and two roundings are not the correctly-rounded
+    /// single conversion. Witness (exact rational arithmetic):
+    /// `Dec { mant: 46_116_862_933_052_948_481, scale: 1 }` — i.e. `4611686293305294848.1` —
+    /// has correctly-rounded `f32` bits `0x5E80_0001`, but `f64()` lands exactly on the
+    /// midpoint `0x5E80_0000`/`0x5E80_0001`, which ties-to-even narrows DOWN to
+    /// `0x5E80_0000`. [OPUS-5] issue #3796
+    ///
+    /// - **scale 0** (the representation an `xsd:integer` beyond `i64` takes) is an exact
+    ///   integer, and `i128 as f32` is a single correctly-rounded conversion.
+    /// - **scale > 0**: [`Dec::lexical`] writes `mant * 10^-scale` EXACTLY, and Rust's
+    ///   decimal → binary parser is correctly rounded, so the round-trip through that exact
+    ///   lexical is one rounding of the true value. This path allocates, so it is kept off
+    ///   the scale-0 fast path; float promotion of a scaled decimal is a cold seam.
+    #[inline]
+    pub fn f32(self) -> f32 {
+        if self.scale == 0 {
+            return self.mant as f32;
+        }
+        match self.lexical().parse::<f32>() {
+            Ok(f) => f,
+            // Unreachable: `Dec::lexical` always writes `[-]digits[.digits]`, which
+            // `f32::from_str` accepts (overflow saturates to INF rather than failing).
+            // Fall back to the f64 route rather than panic on an arithmetic path.
+            Err(_) => self.f64() as f32,
+        }
+    }
+
     /// The plain (never exponent) decimal lexical at this value's scale: scale 0 prints
     /// as an integer ("3"); otherwise exactly `scale` fraction digits ("3.0", "0.05").
     pub fn lexical(self) -> String {
@@ -378,6 +410,31 @@ impl Num {
         }
     }
 
+    /// The value as an `f32` — the XPath **`xs:float` promotion** of this value, rounded to
+    /// single precision **exactly once**.
+    ///
+    /// This is the single shared promotion helper [`Num::binop`]'s float tier rides on (and
+    /// the substrate `overhead` kernel's inline replica of it), so the two cannot drift.
+    /// Deliberately NOT `self.f64() as f32`: routing an exact operand through `f64` first
+    /// rounds TWICE, and double rounding is not the correctly-rounded single conversion
+    /// XPath/XSD numeric promotion requires. Witness (verified by exact rational
+    /// arithmetic): the `i64` value `4_611_686_293_305_294_849` has correctly-rounded `f32`
+    /// bits `0x5E80_0001`, but `as f64 as f32` yields `0x5E80_0000` — one ULP low. So
+    /// `SUM(?int, "0.0"^^xsd:float)` and `AVG` over a mixed integer/float column returned a
+    /// wrong float for integer magnitudes above 2^53 before this. [OPUS-5] issue #3796
+    ///
+    /// Per tier: `Int` and `Dec` convert directly (see [`Dec::f32`]); `Float` is already the
+    /// value; `Double` narrows once (`f64 as f32` is itself correctly rounded).
+    #[inline]
+    pub fn f32(self) -> f32 {
+        match self {
+            Num::Int(i) => i as f32,
+            Num::Dec(d) => d.f32(),
+            Num::Float(f) => f,
+            Num::Double(d) => d as f32,
+        }
+    }
+
     /// As an exact [`Dec`] for the exact tiers (`Int` / `Dec`); `None` for `Float` /
     /// `Double` (which are not exactly representable as a fixed-point decimal).
     #[inline]
@@ -432,13 +489,33 @@ impl Num {
     /// and by `MIN`/`MAX` — XPath `op:numeric-less-than` / `op:numeric-equal` semantics.
     ///
     /// Unlike [`cmp_total`](Self::cmp_total), this comparison is **partial**: `NaN`
-    /// produces `None` (a SPARQL type error), and `+0.0` equals `-0.0`. Same-tier pairs
-    /// (`Int`/`Dec`) compare by exact value via [`Dec::cmp`]; mixed or inexact pairs fall
-    /// back to `f64::partial_cmp` (XPath promotion — a float/double operand promotes the
-    /// pair to `f64`, which is correct for the relational operators but can collapse
-    /// distinct exact values at the 2^53 boundary; that is an accepted consequence of the
-    /// XPath spec, not a bug). Returns `None` when either operand is `NaN`, matching the
-    /// engine's `values_equal`/`value_compare_strict` path (SPARQL type error on NaN).
+    /// produces `None` (a SPARQL type error), and `+0.0` equals `-0.0`. Returns `None` when
+    /// either operand is `NaN`, matching the engine's `values_equal`/`value_compare_strict`
+    /// path (SPARQL type error on NaN).
+    ///
+    /// # Which tier a mixed pair is compared in
+    ///
+    /// XPath promotes the operands of a comparison to the **LEAST common type** in the
+    /// hierarchy `xs:integer -> xs:decimal -> xs:float -> xs:double` (F&O *Operator
+    /// Mapping*: if one operand is `xs:double` the other becomes double; OTHERWISE if one
+    /// is `xs:float` the other becomes **float**). So:
+    ///
+    /// - both `Int`/`Dec` — exact value via [`Dec::cmp`], no floating promotion at all;
+    /// - either operand `Double` — promote the pair to `f64`;
+    /// - otherwise an operand is `Float` — promote the pair to **`f32`**, through
+    ///   [`Num::f32`](Self::f32) so the promotion is a SINGLE correctly-rounded conversion.
+    ///
+    /// [OPUS-5] This last case used to fall through to `f64` like everything else, and the
+    /// doc here asserted that was correct. It is not: `xs:double` is only the common type
+    /// when an operand really IS a double. The error is invisible below 2^53 and appears
+    /// above it — `Num::Int(4611686293305294849)` versus the `f32` `0x5E80_0001` (the
+    /// correctly-rounded promotion of that very integer, = 2^62 + 2^39) compared `Less`
+    /// where XPath requires `Equal`. Pinned by
+    /// `tests::cmp_relational_integer_and_decimal_vs_float_compare_in_the_float_tier`.
+    ///
+    /// Within the `f64` tier the 2^53 collapse for a large `Int` operand IS spec-correct
+    /// (integer -> double is a single correctly-rounded conversion), so that is an accepted
+    /// consequence of XPath, not a bug.
     ///
     /// # When to use `cmp_total` vs `cmp_relational`
     ///
@@ -456,7 +533,15 @@ impl Num {
                 return Some(ord);
             }
         }
-        // Mixed or inexact: f64 promotion.  NaN → None (SPARQL type error).
+        // FLOAT tier: no operand is a Double, but one is a Float, so XPath's least common
+        // type is `xs:float` — promote BOTH through `Num::f32` (a single correctly-rounded
+        // conversion) and decide there. Comparing this pair as `f64` is a different, wrong
+        // answer above 2^53. [OPUS-5] issue #3796
+        if self.rank().max(o.rank()) == 2 {
+            return self.f32().partial_cmp(&o.f32());
+        }
+        // DOUBLE tier (or an exact pair whose `Dec::cmp` overflowed): f64 promotion.
+        // NaN → None (SPARQL type error).
         self.f64().partial_cmp(&o.f64())
     }
 
@@ -470,8 +555,10 @@ impl Num {
             return Some(Num::Double(apply_f64(self.f64(), o.f64(), op)));
         }
         if rank == 2 {
-            let (a, b) = (self.f64() as f32, o.f64() as f32);
-            return Some(Num::Float(apply_f64(a as f64, b as f64, op) as f32));
+            // Promote each operand with a SINGLE rounding (`Num::f32`, NOT `f64() as f32`)
+            // and evaluate in `f32`, so no value on the `xsd:float` tier is rounded twice.
+            // [OPUS-5] issue #3796
+            return Some(Num::Float(apply_f32(self.f32(), o.f32(), op)));
         }
         // Exact tier: integer / decimal.
         let (a, b) = (self.to_dec()?, o.to_dec()?);
@@ -733,6 +820,26 @@ fn apply_f64(a: f64, b: f64, op: ArithOp) -> f64 {
     }
 }
 
+/// The `xsd:float` tier's arithmetic, evaluated NATIVELY in `f32` — each IEEE-754 binary32
+/// operation is correctly rounded once, so the result carries no double rounding.
+///
+/// The previous shape (`apply_f64(a as f64, b as f64, op) as f32`) rounded the operation a
+/// second time. That particular double rounding is benign for +/-/* by Figueroa's theorem
+/// (`f64`'s 53-bit significand exceeds `2*24 + 2`) and a 4M-pair × 4-op random scan over the
+/// full `f32` bit space (including subnormals) found no divergence — but the native form is
+/// single-rounded by construction rather than by an argument, and it leaves no
+/// `as f64 ... as f32` shape in this module for the next reader to have to re-audit.
+/// [OPUS-5] issue #3796
+#[inline]
+fn apply_f32(a: f32, b: f32, op: ArithOp) -> f32 {
+    match op {
+        ArithOp::Add => a + b,
+        ArithOp::Sub => a - b,
+        ArithOp::Mul => a * b,
+        ArithOp::Div => a / b,
+    }
+}
+
 /// Round `x` half towards POSITIVE INFINITY (XPath `fn:round`) WITHOUT the classic
 /// double-rounding defect of `(x + 0.5).floor()`.
 ///
@@ -770,10 +877,34 @@ pub fn parse_xsd_f64(v: &str) -> Option<f64> {
     sparq_core::parse_xsd_f64(v)
 }
 
-/// Parse an xsd:float lexical (the [`parse_xsd_f64`] spellings, narrowed to `f32`).
+/// Parse an xsd:float lexical: the [`parse_xsd_f64`] spellings, valued at SINGLE precision.
+///
+/// ACCEPTANCE (which lexicals are well-formed XSD `floatRep`) stays the single shared body
+/// in `sparq_core::parse_xsd_f64` reached through [`parse_xsd_f64`] — re-deriving the
+/// spelling rules here is exactly the drift sq-9781x removed, and the reasoner's
+/// `dtype::d_value_key` parity test pins the agreement.
+///
+/// Only the VALUE is computed here, and it is computed by a DIRECT `&str -> f32` parse.
+/// The previous `parse_xsd_f64(v).map(|d| d as f32)` rounded twice — once into `f64`, once
+/// in the narrowing — so an `xsd:float` literal could be mis-ingested by one ULP before any
+/// arithmetic ran. Witness (verified by exact rational arithmetic): the lexical
+/// `"4611686293305294849"` has correctly-rounded `f32` bits `0x5E80_0001`, but parsing at
+/// `f64` and narrowing yields `0x5E80_0000`. Rust's decimal → binary parser is correctly
+/// rounded at both widths, so the direct parse is one rounding of the true value.
+/// [OPUS-5] issue #3796
 #[inline]
 pub fn parse_xsd_f32(v: &str) -> Option<f32> {
-    parse_xsd_f64(v).map(|d| d as f32)
+    let wide = parse_xsd_f64(v)?;
+    // The XSD specials have no decimal expansion to re-parse; take them from the shared
+    // acceptance result directly (`f32::from_str` would also accept `inf`/`nan` spellings
+    // XSD forbids, so it must never be the gate).
+    if wide.is_nan() {
+        return Some(f32::NAN);
+    }
+    if wide.is_infinite() {
+        return Some(if wide > 0.0 { f32::INFINITY } else { f32::NEG_INFINITY });
+    }
+    v.parse::<f32>().ok()
 }
 
 /// Float/double serialisation: an INTEGRAL value prints as a plain integer ("6",
@@ -1253,6 +1384,180 @@ mod tests {
         assert!(matches!(Num::Int(4).binop(Num::Float(2.0), ArithOp::Div), Some(Num::Float(f)) if (f - 2.0f32).abs() < 1e-6));
     }
 
+    // -----------------------------------------------------------------------
+    // xsd:float promotion / parse must round to single precision EXACTLY ONCE.
+    // [OPUS-5] issue #3796
+    //
+    // Every fixture below was constructed and cross-checked with EXACT RATIONAL
+    // arithmetic, not with floats: `H = (2m+1) * 2^38` is an f32 MIDPOINT that is
+    // exactly representable in f64, so an integer one unit away from `H` rounds to
+    // `H` in f64 and then ties-to-even in the narrowing — landing on the wrong
+    // side. `..._DOUBLE_ROUNDED` is what `as f64 as f32` produces (the pre-fix
+    // behaviour); `..._CORRECT` is the correctly-rounded single conversion.
+    //
+    // The assertions are on `f32::to_bits()` deliberately: the two candidates are
+    // ADJACENT floats and format identically at ordinary precision, which is why
+    // the existing small-value coverage could not see this.
+    // -----------------------------------------------------------------------
+
+    /// `H + 1` for `H = (2^24+1) * 2^38`: true value is ABOVE the midpoint, so correct
+    /// rounding goes UP, but the f64 detour ties-to-even DOWN.
+    const F32_UP_I64: i64 = 4_611_686_293_305_294_849;
+    const F32_UP_DOUBLE_ROUNDED: u32 = 0x5E80_0000;
+    const F32_UP_CORRECT: u32 = 0x5E80_0001;
+    /// `H - 1` for `H = (2^24+3) * 2^38`: true value is BELOW the midpoint, so correct
+    /// rounding goes DOWN, but the f64 detour ties-to-even UP. (Both error directions
+    /// are covered so a fix that merely biases one way cannot pass.)
+    const F32_DOWN_I64: i64 = 4_611_686_843_061_108_735;
+    const F32_DOWN_DOUBLE_ROUNDED: u32 = 0x5E80_0002;
+    const F32_DOWN_CORRECT: u32 = 0x5E80_0001;
+
+    #[test]
+    fn num_f32_promotion_of_i64_is_single_rounded_bit_exact() {
+        // DIRECT unit test of the public `Num::f32` promotion helper.
+        assert_eq!(Num::Int(F32_UP_I64).f32().to_bits(), F32_UP_CORRECT);
+        assert_eq!(Num::Int(F32_DOWN_I64).f32().to_bits(), F32_DOWN_CORRECT);
+        // ... and it is NOT the double-rounded value the f64 detour produces.
+        assert_eq!((F32_UP_I64 as f64 as f32).to_bits(), F32_UP_DOUBLE_ROUNDED);
+        assert_ne!(Num::Int(F32_UP_I64).f32().to_bits(), F32_UP_DOUBLE_ROUNDED);
+        assert_eq!((F32_DOWN_I64 as f64 as f32).to_bits(), F32_DOWN_DOUBLE_ROUNDED);
+        assert_ne!(Num::Int(F32_DOWN_I64).f32().to_bits(), F32_DOWN_DOUBLE_ROUNDED);
+        // The other tiers of the helper: Float is the identity, Double narrows once,
+        // and small exactly-representable values are unaffected.
+        assert_eq!(Num::Float(1.5f32).f32().to_bits(), 1.5f32.to_bits());
+        assert_eq!(Num::Double(0.1f64).f32().to_bits(), (0.1f64 as f32).to_bits());
+        assert_eq!(Num::Int(42).f32().to_bits(), 42.0f32.to_bits());
+    }
+
+    #[test]
+    fn num_f32_promotion_of_over_i64_integer_is_single_rounded_bit_exact() {
+        // An xsd:integer beyond i64 is carried as a scale-0 `Dec`; the same midpoint
+        // construction at 2^70 (so it cannot fit i64) witnesses the same defect.
+        let up = Dec { mant: 1_180_591_691_086_155_481_089, scale: 0 };
+        let down = Dec { mant: 1_180_591_831_823_643_836_415, scale: 0 };
+        assert_eq!(Num::Dec(up).f32().to_bits(), 0x6280_0001);
+        assert_eq!(Num::Dec(down).f32().to_bits(), 0x6280_0001);
+        assert_eq!((up.f64() as f32).to_bits(), 0x6280_0000);
+        assert_eq!((down.f64() as f32).to_bits(), 0x6280_0002);
+    }
+
+    #[test]
+    fn dec_f32_is_single_rounded_bit_exact_at_both_scales() {
+        // DIRECT unit test of the public `Dec::f32`.
+        // scale 0 (exact integer) — the i128 -> f32 conversion.
+        assert_eq!(Dec { mant: 1_180_591_691_086_155_481_089, scale: 0 }.f32().to_bits(), 0x6280_0001);
+        // scale > 0 — `4611686293305294848.1` and `4611686843061108735.9`, each one tenth
+        // off an f32 midpoint, so the exact value is unambiguously on one side.
+        let a = Dec { mant: 46_116_862_933_052_948_481, scale: 1 };
+        let b = Dec { mant: 46_116_868_430_611_087_359, scale: 1 };
+        assert_eq!(a.lexical(), "4611686293305294848.1");
+        assert_eq!(b.lexical(), "4611686843061108735.9");
+        assert_eq!(a.f32().to_bits(), F32_UP_CORRECT);
+        assert_eq!(b.f32().to_bits(), F32_DOWN_CORRECT);
+        assert_eq!((a.f64() as f32).to_bits(), F32_UP_DOUBLE_ROUNDED);
+        assert_eq!((b.f64() as f32).to_bits(), F32_DOWN_DOUBLE_ROUNDED);
+        // Ordinary small decimals are untouched by the change.
+        assert_eq!(Dec { mant: 15, scale: 1 }.f32().to_bits(), 1.5f32.to_bits());
+        assert_eq!(Dec { mant: -5, scale: 0 }.f32().to_bits(), (-5.0f32).to_bits());
+    }
+
+    #[test]
+    fn num_binop_float_promotion_of_integer_is_bit_exact() {
+        // The reported impact: `SUM(?int, "0.0"^^xsd:float)` / `AVG` over a mixed
+        // integer/float column. `Int + Float(0.0)` promotes to the float tier.
+        let zero = Num::Float(0.0);
+        for (n, want) in [(F32_UP_I64, F32_UP_CORRECT), (F32_DOWN_I64, F32_DOWN_CORRECT)] {
+            let got = match Num::Int(n).binop(zero, ArithOp::Add) {
+                Some(Num::Float(f)) => f,
+                other => panic!("int + float must stay on the float tier, got {:?}", other),
+            };
+            assert_eq!(got.to_bits(), want, "SUM(?int, 0.0f) for n={}", n);
+            // The float operand may also come first; promotion is symmetric.
+            let got_rev = match zero.binop(Num::Int(n), ArithOp::Add) {
+                Some(Num::Float(f)) => f,
+                other => panic!("float + int must stay on the float tier, got {:?}", other),
+            };
+            assert_eq!(got_rev.to_bits(), want);
+        }
+        // Multiplication by 1.0f and subtraction of 0.0f carry the value through too.
+        assert_eq!(
+            match Num::Int(F32_UP_I64).binop(Num::Float(1.0), ArithOp::Mul) {
+                Some(Num::Float(f)) => f.to_bits(),
+                other => panic!("unexpected {:?}", other),
+            },
+            F32_UP_CORRECT
+        );
+        assert_eq!(
+            match Num::Int(F32_DOWN_I64).binop(Num::Float(0.0), ArithOp::Sub) {
+                Some(Num::Float(f)) => f.to_bits(),
+                other => panic!("unexpected {:?}", other),
+            },
+            F32_DOWN_CORRECT
+        );
+    }
+
+    #[test]
+    fn parse_xsd_f32_is_single_rounded_bit_exact() {
+        // The PARSE path — a literal is mis-ingested before any arithmetic runs.
+        // Plain and scientific spellings of the SAME exact value must both land on the
+        // correctly-rounded f32.
+        for lex in ["4611686293305294849", "4.611686293305294849E18"] {
+            assert_eq!(
+                parse_xsd_f32(lex).expect("well-formed xsd:float lexical").to_bits(),
+                F32_UP_CORRECT,
+                "parse_xsd_f32({:?})",
+                lex
+            );
+            assert_eq!(
+                (parse_xsd_f64(lex).expect("well-formed") as f32).to_bits(),
+                F32_UP_DOUBLE_ROUNDED,
+                "the f64-then-narrow route is the WRONG value for {:?}",
+                lex
+            );
+        }
+        for lex in ["4611686843061108735", "4.611686843061108735E18"] {
+            assert_eq!(
+                parse_xsd_f32(lex).expect("well-formed xsd:float lexical").to_bits(),
+                F32_DOWN_CORRECT,
+                "parse_xsd_f32({:?})",
+                lex
+            );
+            assert_eq!(
+                (parse_xsd_f64(lex).expect("well-formed") as f32).to_bits(),
+                F32_DOWN_DOUBLE_ROUNDED,
+                "the f64-then-narrow route is the WRONG value for {:?}",
+                lex
+            );
+        }
+        // ACCEPTANCE is unchanged: still the shared sparq-core spelling rules, so the
+        // XSD specials parse and the Rust-only spellings stay rejected.
+        assert_eq!(parse_xsd_f32("NaN").map(f32::is_nan), Some(true));
+        assert_eq!(parse_xsd_f32("INF"), Some(f32::INFINITY));
+        assert_eq!(parse_xsd_f32("+INF"), Some(f32::INFINITY));
+        assert_eq!(parse_xsd_f32("-INF"), Some(f32::NEG_INFINITY));
+        assert_eq!(parse_xsd_f32("-0.0").map(f32::to_bits), Some((-0.0f32).to_bits()));
+        for bad in ["inf", "Infinity", "nan", "NAN", "0x1p3", "1.0f", "", "abc"] {
+            assert_eq!(parse_xsd_f32(bad), None, "must reject {:?}", bad);
+        }
+        // Out-of-f32-range magnitudes saturate to the XSD specials, as before.
+        assert_eq!(parse_xsd_f32("1E40"), Some(f32::INFINITY));
+        assert_eq!(parse_xsd_f32("-1E40"), Some(f32::NEG_INFINITY));
+    }
+
+    #[test]
+    fn of_literal_xsd_float_literal_is_single_rounded_bit_exact() {
+        // End-to-end through the classifier the engine actually calls.
+        let up = as_numeric(&typed("4611686293305294849", xsd::FLOAT))
+            .expect("well-formed xsd:float literal");
+        assert!(matches!(up, Num::Float(f) if f.to_bits() == F32_UP_CORRECT), "got {:?}", up);
+        let down = as_numeric(&typed("4.611686843061108735E18", xsd::FLOAT))
+            .expect("well-formed xsd:float literal");
+        assert!(matches!(down, Num::Float(f) if f.to_bits() == F32_DOWN_CORRECT), "got {:?}", down);
+        // The xsd:integer literal of the same digits promotes to the same f32.
+        let as_int = as_numeric(&typed("4611686293305294849", xsd::INTEGER)).expect("integer");
+        assert_eq!(as_int.f32().to_bits(), F32_UP_CORRECT);
+    }
+
     #[test]
     fn num_binop_double_tier_stays_double() {
         let a = Num::Double(10.0);
@@ -1500,6 +1805,55 @@ mod tests {
         assert_eq!(int_lo.cmp_relational(dbl), Some(Equal));
         // ±0.0 are equal (f64 comparison)
         assert_eq!(Num::Double(-0.0).cmp_relational(Num::Double(0.0)), Some(Equal));
+    }
+
+    /// XPath promotes a mixed numeric pair to the LEAST common type, NOT always to
+    /// `xs:double`. The hierarchy is `xs:integer -> xs:decimal -> xs:float -> xs:double`
+    /// (F&O "Operator Mapping": if one operand is `xs:double` the other becomes double;
+    /// OTHERWISE if one is `xs:float` the other becomes FLOAT). So integer/decimal versus
+    /// `xs:float` must be decided in the FLOAT tier — comparing it as `f64` is wrong, and
+    /// wrong in a way that is invisible below 2^53.
+    ///
+    /// `cmp_relational` used to fall through to `f64` unconditionally for every mixed pair.
+    /// The sibling test above only ever exercises integer-versus-DOUBLE, where `f64` is
+    /// genuinely the right tier, so it could not see this.
+    ///
+    /// Fixture: the `f32` nearest `4611686293305294849` is exactly `0x5E80_0001`
+    /// (= 2^62 + 2^39), so under correct float-tier promotion the two are EQUAL, while the
+    /// f64 route makes the integer strictly Less. [OPUS-5] issue #3796
+    #[test]
+    fn cmp_relational_integer_and_decimal_vs_float_compare_in_the_float_tier() {
+        use Ordering::*;
+        const N: i64 = 4_611_686_293_305_294_849;
+        let n = Num::Int(N);
+        let f = Num::Float(f32::from_bits(0x5E80_0001));
+        assert_eq!(n.f32().to_bits(), 0x5E80_0001, "promotion fixture drifted");
+
+        // THE case: least common type is xs:float, so these are equal.
+        assert_eq!(n.cmp_relational(f), Some(Equal), "integer vs float must promote to f32");
+        assert_eq!(f.cmp_relational(n), Some(Equal), "and must be symmetric");
+
+        // Pin the wrong answer the f64 route produces, so the fixture cannot silently
+        // stop witnessing the defect.
+        assert_eq!(n.f64().partial_cmp(&f.f64()), Some(Less), "f64 route is the bug");
+
+        // Ordering against the ADJACENT floats must still be strict, so an
+        // everything-is-Equal implementation cannot pass.
+        assert_eq!(n.cmp_relational(Num::Float(f32::from_bits(0x5E80_0000))), Some(Greater));
+        assert_eq!(n.cmp_relational(Num::Float(f32::from_bits(0x5E80_0002))), Some(Less));
+
+        // xsd:decimal versus xsd:float takes the same tier (decimal -> float).
+        let d = Num::Dec(Dec { mant: 46_116_862_933_052_948_490, scale: 1 });
+        assert_eq!(d.cmp_relational(f), Some(Equal), "decimal vs float must promote to f32");
+
+        // A DOUBLE operand genuinely does promote the pair to f64 — unchanged behaviour.
+        let dbl = Num::Double(f32::from_bits(0x5E80_0001) as f64);
+        assert_eq!(n.cmp_relational(dbl), Some(Less), "double operand still uses the f64 tier");
+
+        // Float-tier NaN is still a type error, and same-tier float ordering is intact.
+        assert_eq!(n.cmp_relational(Num::Float(f32::NAN)), None);
+        assert_eq!(Num::Float(1.5).cmp_relational(Num::Int(2)), Some(Less));
+        assert_eq!(Num::Float(-0.0).cmp_relational(Num::Int(0)), Some(Equal));
     }
 
     // [SONNET-4.6] sq-qcnn.40 — targeted tests killing the surviving mutants identified

@@ -562,12 +562,20 @@ jobs:
       - name: Test (SHACL-derived forms, native lane)
         run: cargo test --features forms
 
-      # [SONNET-4.6] Compile the exact optional-capability union shipped by release.yml, plus
-      # custom-protocol (which cargo-tauri enables for desktop bundles), to catch dependency
-      # feature-unification failures before a tag. Keep this list in sync with release.yml's
-      # "Build Tauri desktop bundle" command.
+      # [SONNET-4.6] Compile the exact optional-capability union shipped by release.yml to catch
+      # dependency feature-unification failures before a tag. `custom-protocol` is intentionally
+      # omitted here: unlike the bundle job, this job does not export gui/app/out for Tauri to
+      # embed at compile time. Keep this list in sync with release.yml's "Build Tauri desktop
+      # bundle" command. This lane also preserves the combined native capability coverage on
+      # every release platform.
       - name: Clippy (release feature union, -D warnings)
-        run: cargo clippy --all-targets --features hdt,federation,odrl,forms,custom-protocol -- -D warnings
+        run: cargo clippy --all-targets --features hdt,federation,odrl,forms -- -D warnings
+
+      # HDT's feature-on path is compile-covered above; the tests executed in this combined
+      # Linux state exercise the federation, ODRL, and forms paths together.
+      - name: Test (desktop release features, native lane)
+        if: runner.os == 'Linux'
+        run: cargo test --features hdt,federation,odrl,forms
 
   # [SONNET-4.6] sq-ymr2e.6 — SHRUNK tauri-driver smoke: max-3-assertion real-IPC test.
   #

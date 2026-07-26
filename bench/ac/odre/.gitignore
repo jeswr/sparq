@@ -1,0 +1,8 @@
+# [OPUS-5] sq-i6du2.8 — the ODRE lane's build + run artifacts are never committed
+# (mirrors bench/ac/.gitignore). `Cargo.lock` for the exporter IS tracked, like the
+# sibling standalone bench projects, so `--locked` builds stay reproducible.
+exporter/target/
+# Regenerable run artifacts: cases.json, odre-decisions.json, agreement-report.json.
+# The agreement report is a RUN RECORD, not a committed number — keeping it out of the
+# tree is what stops a stale figure from being cited as current.
+out/

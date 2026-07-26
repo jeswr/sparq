@@ -446,6 +446,22 @@
         }
       }
     },
+    "revoke_hidden_ref_d10_a4": {
+      "circuit_size": 4308,
+      "lane": "string",
+      "configs": {
+        "string-canonical": {
+          "legal": true
+        },
+        "dual-leaf": {
+          "legal": true
+        },
+        "value-only": {
+          "legal": false,
+          "reason": "IllegalPair"
+        }
+      }
+    },
     "revoke_unset_d10": {
       "circuit_size": 899,
       "lane": "string",
@@ -617,10 +633,10 @@
     }
   },
   "summary": {
-    "circuits": 35,
+    "circuits": 36,
     "methods": 3,
-    "configs": 105,
-    "legal_configs": 70,
-    "illegal_configs": 35
+    "configs": 108,
+    "legal_configs": 72,
+    "illegal_configs": 36
   }
 }

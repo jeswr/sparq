@@ -90,7 +90,10 @@ def triage(labels, issue_type="task", trusted=True):
     # [FABLE-5] a no-area issue reserves the readiness engine's serializing __global__ partition, so
     # it must NEVER auto-promote to status:ready (each one collapses the whole dispatch frontier at
     # backlog scale — audit-2026-07-17). Park it needs:area (a gate ready-issues.py already respects,
-    # and maintainer-visible) so a human/LLM assigns a crate; then the retriage cron re-promotes it.
+    # and maintainer-visible) so a human/LLM assigns a crate; then the retriage cron re-promotes it
+    # — but ONLY if the sweep can see the park and trusts its author. retriage's fetch is paginated
+    # (retriage.py `_fetch_label`) precisely so "the next tick picks it up" is not conditional on
+    # the issue being one of the 500 newest; that was false for 219 of 719 parks (issue #3831).
     has_area = any(lb.startswith("area:") for lb in labels)
     # [OPUS-4.8] an epic is a tracking umbrella, never dispatchable — it must not gain status:ready
     # (the readiness engine also excludes kind:epic as the hard dispatch gate; this keeps the tracker

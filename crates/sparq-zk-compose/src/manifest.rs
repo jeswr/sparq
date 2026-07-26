@@ -279,8 +279,15 @@ pub struct AttestedStatusRef {
     /// fail-closed by the verifier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index: Option<u64>,
-    /// The status-list version (as issuer-signed).
-    pub version: u64,
+    /// The status-list version (as issuer-signed). `None` ONLY on the sq-kndw
+    /// FULLY-HIDDEN path, where the version is folded into `ref_commitment` and is
+    /// therefore absent from the signed object as well as from the manifest. On the
+    /// clear-index and committed-index paths this is MANDATORY — a `None` version
+    /// there is rejected fail-closed ([`crate::verifier::CheckError::RevocationReferenceModeInvalid`]),
+    /// never silently defaulted to 0.
+    // [OPUS-5] sq-kndw: version withholdable on the fully-hidden path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u64>,
     /// [OPUS-4.8] sq-ayv: the hiding COMMITMENT to the index the issuer signed (in
     /// place of the clear `index`), hex. When `Some`, the issuer signed
     /// `status_ref_commit_digest(H(list), index_commitment, version)` and the clear
@@ -289,6 +296,65 @@ pub struct AttestedStatusRef {
     /// (audit #12) path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index_commitment: Option<FieldHex>,
+    /// [OPUS-5] sq-kndw: the hiding COMMITMENT to the `(list IRI, version)` PAIR the
+    /// issuer signed, hex — [`sparq_zk::sig::status_ref_commitment`]`(H(list),
+    /// version, ref_blinding)`. When `Some`, the issuer signed the FULLY-COMMITTED
+    /// digest [`sparq_zk::sig::status_ref_fully_committed_digest`]`(ref_commitment,
+    /// index_commitment)`, which folds NEITHER the clear list id NOR the clear
+    /// version — so the signed object discloses nothing about which list or which
+    /// publication epoch the credential belongs to. `None` for the clear-index and
+    /// committed-index paths.
+    ///
+    /// Requires `index_commitment` to be `Some` and `index` / `version` to be
+    /// `None`; any other combination is a malformed mode and is rejected
+    /// fail-closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_commitment: Option<FieldHex>,
+}
+
+impl AttestedStatusRef {
+    /// The CLEAR-index attested reference (audit #12). The issuer signs
+    /// [`sparq_zk::sig::status_ref_digest`]`(H(list), index, version)`.
+    pub fn clear(index: u64, version: u64) -> Self {
+        AttestedStatusRef {
+            index: Some(index),
+            version: Some(version),
+            index_commitment: None,
+            ref_commitment: None,
+        }
+    }
+
+    /// The COMMITTED-index attested reference (sq-ayv). The issuer signs
+    /// [`sparq_zk::sig::status_ref_commit_digest`]`(H(list), index_commitment,
+    /// version)`; `index_commitment` must be
+    /// [`sparq_zk::sig::status_index_commitment`]`(index, blinding)`.
+    pub fn committed(index_commitment: &sparq_zk::Fr, version: u64) -> Self {
+        AttestedStatusRef {
+            index: None,
+            version: Some(version),
+            index_commitment: Some(FieldHex::from_field(index_commitment)),
+            ref_commitment: None,
+        }
+    }
+
+    /// [OPUS-5] sq-kndw: the FULLY-HIDDEN attested reference. The issuer signs
+    /// [`sparq_zk::sig::status_ref_fully_committed_digest`]`(ref_commitment,
+    /// index_commitment)` — no clear list id, no clear version. Build the inputs
+    /// with [`sparq_zk::sig::status_ref_commitment`]`(H(list), version,
+    /// ref_blinding)` and [`sparq_zk::sig::status_index_commitment`]`(index,
+    /// blinding)`.
+    ///
+    /// ⚠️ Both blindings MUST be freshly sampled per presentation and the
+    /// credential re-signed; a reused pair is a cross-presentation correlation
+    /// handle (see [`FullyHiddenRevocation`]).
+    pub fn fully_hidden(ref_commitment: &sparq_zk::Fr, index_commitment: &sparq_zk::Fr) -> Self {
+        AttestedStatusRef {
+            index: None,
+            version: None,
+            index_commitment: Some(FieldHex::from_field(index_commitment)),
+            ref_commitment: Some(FieldHex::from_field(ref_commitment)),
+        }
+    }
 }
 
 /// The ISSUER-ATTESTED holder binding carried by a [`CommitmentAttestation`]
@@ -397,18 +463,49 @@ impl AttestedHolderBinding {
 /// checks the disclosed status-list snapshot's bit at `index` is UNSET and the
 /// `version` is within its freshness window.
 ///
-/// # Privacy (interim, documented deferral)
-/// `index` is disclosed in the CLEAR here — a linkability channel (a relying
-/// party can correlate two presentations of the same credential by its index).
-/// The full-privacy upgrade is an IN-CIRCUIT hidden-index status-list inclusion +
-/// bit-unset proof bound to a disclosed list version, revealing only "the (hidden)
-/// index is in-range and unset in version V". See the verifier module docs
-/// (audit #12 remaining-step note).
+/// # The three disclosure MODES (exactly one is well-formed)
+/// | mode | `status_list` | `index` | `version` | `index_commitment` | `ref_commitment` |
+/// |---|---|---|---|---|---|
+/// | CLEAR (audit #12)          | `Some` | `Some` | `Some` | `None` | `None` |
+/// | COMMITTED-index (sq-ayv)   | `Some` | `None` | `Some` | `Some` | `None` |
+/// | FULLY-HIDDEN (sq-kndw)     | `None` | `None` | `None` | `Some` | `Some` |
+///
+/// Any other combination is a malformed mode and is rejected FAIL-CLOSED by
+/// [`crate::verifier`] (`RevocationReferenceModeInvalid`) — the mode is resolved
+/// at ONE chokepoint (`resolve_status_ref`) so a new mode cannot bypass the
+/// issuer-binding cross-check.
+///
+/// # Privacy (per mode, honest)
+/// - CLEAR: `index` is disclosed (a linkability channel — a relying party can
+///   correlate two presentations of the same credential by its list slot).
+/// - COMMITTED-index (sq-ayv): index + liveness bit hidden; the status-list IRI
+///   and the `version` are STILL disclosed (a coarser correlation channel — which
+///   list, which publication epoch).
+/// - FULLY-HIDDEN (sq-kndw / sq-6qe): IRI + version hidden too. Nothing
+///   holder-identifying is disclosed; the statement reduces to "some accepted
+///   `(list, version)` in the relying party's committed set, at or above its
+///   public epoch floor, has my hidden index unset". Requires a
+///   [`FullyHiddenRevocation`] proof. The residual disclosures are policy-side,
+///   not holder-side: the accepted-set root (the RP's own policy fingerprint), the
+///   public `min_version` floor, and the member depths `(D, A)` via the vk.
+///
+///   ⚠️ `ref_commitment` + `index_commitment` are HIDING but STABLE per issuance,
+///   so REUSING them across presentations reinstates full linkability and voids
+///   the guarantee. See [`FullyHiddenRevocation`] for the enforcement.
+///
+/// NOT externally audited (sq-qhy4); no soundness / privacy property is asserted
+/// as achieved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RevocationStatus {
     /// IRI of the status-list credential (bound under the issuer signature via
-    /// [`sparq_zk::sig::status_list_id_to_field`]).
-    pub status_list: String,
+    /// [`sparq_zk::sig::status_list_id_to_field`]). `None` ONLY on the sq-kndw
+    /// FULLY-HIDDEN path, where the IRI is folded into `ref_commitment` and hence
+    /// absent from both the signed object and the manifest. MANDATORY on the clear
+    /// and committed-index paths — a `None` IRI there is a malformed mode and is
+    /// rejected fail-closed.
+    // [OPUS-5] sq-kndw: list IRI withholdable (fully-hidden path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_list: Option<String>,
     /// The CLEAR index into the list (the audit-#12 clear-index path). `None` when
     /// the credential uses the sq-ayv COMMITTED-index path — the clear index is
     /// WITHHELD and `index_commitment` carries a hiding commitment instead, so the
@@ -432,9 +529,17 @@ pub struct RevocationStatus {
     /// version-less manifests parseable, but the verifier's status check is
     /// mandatory and a version-0 reference still must match the issuer-signed
     /// digest and a fresh snapshot, so the default does not bypass the gate.
+    ///
+    /// [OPUS-5] sq-kndw: now `Option<u64>` — `None` on the FULLY-HIDDEN path,
+    /// where the version is committed inside `ref_commitment` and proven
+    /// `>= min_version` IN-CIRCUIT instead of being disclosed. On the clear and
+    /// committed-index paths a `None` version is a malformed mode and is rejected
+    /// fail-closed (it is NOT defaulted to 0 — that would let a manifest silently
+    /// drop the freshness anchor).
     // [OPUS-4.8] audit #12: issuer-bound, freshness-checked version.
-    #[serde(default)]
-    pub version: u64,
+    // [OPUS-5] sq-kndw: version withholdable (fully-hidden path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u64>,
     /// [OPUS-4.8] sq-ayv: the hiding COMMITMENT to the index (in place of the clear
     /// `index`), hex. When `Some`, the issuer signed
     /// `status_ref_commit_digest(H(list), index_commitment, version)` and the
@@ -445,6 +550,68 @@ pub struct RevocationStatus {
     /// then checked there, never skipped — fail-closed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index_commitment: Option<FieldHex>,
+    /// [OPUS-5] sq-kndw: the hiding COMMITMENT to the `(list IRI, version)` pair,
+    /// hex — [`sparq_zk::sig::status_ref_commitment`]`(H(list), version,
+    /// ref_blinding)`. When `Some` (the FULLY-HIDDEN mode) the verifier
+    /// (a) recomputes the issuer-signed digest
+    /// [`sparq_zk::sig::status_ref_fully_committed_digest`]`(ref_commitment,
+    /// index_commitment)` from THIS field to check the signature, and (b) requires
+    /// the fully-hidden revocation proof's PUBLIC `ref_commitment` to byte-equal
+    /// it — the cross-binding that ties the in-circuit private `(list, version)` to
+    /// the reference the ISSUER signed. Without (b) the in-circuit "ref open"
+    /// relation would constrain nothing.
+    ///
+    /// A fully-hidden reference REQUIRES a [`ProofManifest::fully_hidden_revocation`]
+    /// proof (revocation is then checked there, never skipped — fail-closed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_commitment: Option<FieldHex>,
+}
+
+impl RevocationStatus {
+    /// The CLEAR-index disclosed reference (audit #12) — index and version in the
+    /// clear. Pairs with [`AttestedStatusRef::clear`].
+    pub fn clear(status_list: impl Into<String>, index: u64, version: u64) -> Self {
+        RevocationStatus {
+            status_list: Some(status_list.into()),
+            index: Some(index),
+            version: Some(version),
+            index_commitment: None,
+            ref_commitment: None,
+        }
+    }
+
+    /// The COMMITTED-index disclosed reference (sq-ayv) — the clear index is
+    /// withheld; the list IRI and version are still disclosed. Pairs with
+    /// [`AttestedStatusRef::committed`], and REQUIRES a
+    /// [`ProofManifest::hidden_revocation`] proof.
+    pub fn committed(
+        status_list: impl Into<String>,
+        index_commitment: &sparq_zk::Fr,
+        version: u64,
+    ) -> Self {
+        RevocationStatus {
+            status_list: Some(status_list.into()),
+            index: None,
+            version: Some(version),
+            index_commitment: Some(FieldHex::from_field(index_commitment)),
+            ref_commitment: None,
+        }
+    }
+
+    /// [OPUS-5] sq-kndw: the FULLY-HIDDEN disclosed reference — no list IRI, no
+    /// index, no version; only the two hiding commitments the issuer signed. Pairs
+    /// with [`AttestedStatusRef::fully_hidden`], and REQUIRES a
+    /// [`ProofManifest::fully_hidden_revocation`] proof (liveness is decided there,
+    /// never skipped).
+    pub fn fully_hidden(ref_commitment: &sparq_zk::Fr, index_commitment: &sparq_zk::Fr) -> Self {
+        RevocationStatus {
+            status_list: None,
+            index: None,
+            version: None,
+            index_commitment: Some(FieldHex::from_field(index_commitment)),
+            ref_commitment: Some(FieldHex::from_field(ref_commitment)),
+        }
+    }
 }
 
 /// A snapshot of a Bitstring/StatusList2021-style status list (audit #12): the
@@ -636,6 +803,32 @@ pub enum CircuitId {
     /// [`RevocationStatus`] check leaked). Supports lists up to `2^depth` indices.
     // [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation circuit member.
     RevokeUnset { depth: u32 },
+    /// `revoke_hidden_ref_d{depth}_a{set_depth}` — the FULLY-HIDDEN revocation
+    /// member (sq-kndw, the deferred remainder of sq-6qe;
+    /// `research/zk-statuslist-hide-iri-version.md` §3 sub-option A). The privacy
+    /// upgrade over [`Self::RevokeUnset`]: it hides the status-list IRI and the
+    /// VERSION on top of the index and the liveness bit.
+    ///
+    /// The proof's PUBLIC inputs are `challenge`, `ref_commitment`,
+    /// `index_commitment`, `accepted_set_root` and `min_version`. The list id, the
+    /// version, both blindings, the status-list Merkle root, the accepted-set slot
+    /// and path, the holder's index, the leaf bit and the status-list path are all
+    /// PRIVATE. The relying party's `status_list_root` is bound PRIVATELY, inside
+    /// the accepted-set leaf `Poseidon2([ZKSIG_AL, list_id, version,
+    /// status_list_root])`, so it never has to name the snapshot to check the fold.
+    ///
+    /// `depth` is the status-list tree depth (`≤ 2^depth` indices, as
+    /// [`Self::RevokeUnset`]); `set_depth` is the accepted-set tree depth
+    /// (`≤ 2^set_depth` accepted `(list, version)` pairs). Both are disclosed by
+    /// the member name / vk — a cardinality bound, inherent to fixed-depth Merkle.
+    /// [`crate::build::derive_revoke_hidden_ref_id`] is the single source of the
+    /// compiled family list; a `(depth, set_depth)` outside it derives `None`
+    /// (fail-closed, no wrong-bucket fallback).
+    ///
+    /// Opt-in and research-grade: NOT externally audited (sq-qhy4); no soundness /
+    /// ZK-privacy property is asserted as achieved.
+    // [OPUS-5] sq-kndw: fully-hidden revocation circuit member.
+    RevokeHiddenRef { depth: u32, set_depth: u32 },
     /// `hidden_issuer_d{depth}` — in-circuit Schnorr-over-Baby-JubJub signature
     /// verification + hidden-key set membership over a depth-`depth` Poseidon2
     /// Merkle tree of the issuer key set K (sq-z9l). The proof's PUBLIC inputs are
@@ -762,6 +955,11 @@ impl CircuitId {
             #[cfg(feature = "dual-leaf")]
             CircuitId::FilterValueDlDecimal => "filter_value_dl_decimal".to_string(),
             CircuitId::RevokeUnset { depth } => format!("revoke_unset_d{depth}"),
+            // [OPUS-5] sq-kndw: the (status-list depth, accepted-set depth) pair
+            // names the compiled fully-hidden member, e.g. revoke_hidden_ref_d10_a4.
+            CircuitId::RevokeHiddenRef { depth, set_depth } => {
+                format!("revoke_hidden_ref_d{depth}_a{set_depth}")
+            }
             CircuitId::HiddenIssuer { depth } => format!("hidden_issuer_d{depth}"),
             // [OPUS-4.8] sq-xqfg (HolderPoP T5): depth-free single member.
             CircuitId::HolderPok => "holder_pok".to_string(),
@@ -1558,6 +1756,29 @@ pub struct ProofManifest {
     // [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation proof (privacy upgrade).
     #[serde(default)]
     pub hidden_revocation: Option<HiddenIndexRevocation>,
+    /// [OPUS-5] sq-kndw: the FULLY-HIDDEN revocation proof — the privacy upgrade
+    /// over [`Self::hidden_revocation`], hiding the status-list IRI and version on
+    /// top of the index and the liveness bit. Present exactly when
+    /// `revocation` is in the FULLY-HIDDEN mode (`status_list`/`index`/`version`
+    /// all `None`, `ref_commitment` + `index_commitment` `Some`); a fully-hidden
+    /// reference WITHOUT this proof is rejected fail-closed
+    /// (`FullyHiddenRevocationRequired` — revocation is never skipped), and this
+    /// proof without a fully-hidden reference is likewise rejected (there would be
+    /// no issuer-signed commitments to bind it to).
+    ///
+    /// Deliberately a SEPARATE field from `hidden_revocation` rather than more
+    /// `Option`s inside it: the two modes have disjoint public-input vectors and
+    /// disjoint trust anchors (an authoritative status-list root vs an accepted-set
+    /// root), so keeping them apart makes the illegal mixed state unrepresentable
+    /// and leaves the audited committed-index gate's code path untouched.
+    ///
+    /// Gated by an opt-in [`crate::verifier::RevocationPolicy`] accepted-set depth
+    /// (`with_accepted_set_depth`) — with no accepted-set anchor the relying party
+    /// has no root to bind the proof to and rejects. NOT externally audited
+    /// (sq-qhy4).
+    // [OPUS-5] sq-kndw: fully-hidden revocation proof. Opt-in, research-grade.
+    #[serde(default)]
+    pub fully_hidden_revocation: Option<FullyHiddenRevocation>,
     /// OPTIONAL hidden-issuer attestation proofs (sq-z9l): zero-knowledge proofs
     /// that scan-covering commitments were each signed by SOME issuer whose key is
     /// in the committed key set K, WITHOUT disclosing which issuer. The privacy
@@ -1654,6 +1875,76 @@ pub struct HiddenIndexRevocation {
     /// REQUIRES this to be `Some` (fail-closed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index_commitment: Option<FieldHex>,
+    /// The bb proof blob (hex), in the same `len|proof|len|pi|vk` layout as a
+    /// [`SubProof::proof_hex`] (see [`crate::verifier::encode_artifacts`]).
+    pub proof_hex: String,
+}
+
+/// [OPUS-5] sq-kndw: a FULLY-HIDDEN revocation proof — the bb proof produced by
+/// the `revoke_hidden_ref_d{depth}_a{set_depth}` circuit
+/// ([`CircuitId::RevokeHiddenRef`]), together with the public inputs it commits.
+/// The privacy upgrade over [`HiddenIndexRevocation`]: the status-list IRI and the
+/// VERSION are hidden as well as the index and the liveness bit.
+///
+/// # Trust anchor (the audit-#12 anchor, moved behind a commitment)
+/// `accepted_set_root` and `min_version` are PUBLIC inputs the prover commits, but
+/// NEITHER is trusted as a prover claim. The verifier derives both from its OWN
+/// [`crate::verifier::RevocationPolicy`] — the accepted-set root over its
+/// freshness-curated `(list, version, status_list_root)` entries, and its own
+/// epoch floor — and rejects unless the declared values byte-equal them, then
+/// reconstructs the public-input vector from ITS OWN values before `bb verify`.
+/// So the liveness fact is still bound to the relying party's own authenticated
+/// status bytes; the only new thing hidden is WHICH of its accepted lists/epochs
+/// the credential belongs to. No new trust assumption is introduced.
+///
+/// Because membership is restricted to the freshness-curated window, a stale or
+/// future-dated version is not a leaf at all and no proof can be built against it
+/// — the audit-#12 freshness gate SURVIVES the move behind the commitment. The
+/// in-circuit `version >= min_version` is defence-in-depth on top of that.
+///
+/// # ⚠️ The re-blinding requirement (the guarantee depends on it)
+/// `ref_commitment` and `index_commitment` are HIDING but STABLE per issuance. A
+/// holder that presents the SAME pair twice hands the relying party a perfect
+/// cross-presentation correlation handle and voids the entire privacy guarantee
+/// — this is the single most important operational requirement of the design
+/// (`research/zk-statuslist-hide-iri-version.md` §4). The verifier therefore
+/// enforces SINGLE-USE of the pair through the same durable
+/// [`crate::verifier::SeenNonces`] store the nonce replay defence uses
+/// (`FullyHiddenRevocationLinkageReplay`). Honest limit: single-use enforcement
+/// protects the holder only against an HONEST relying party — a malicious one can
+/// simply not run it, and by then it has already observed the pair. The real fix
+/// is upstream: the ISSUER must mint a fresh `(ref_blinding, blinding)` pair and
+/// re-sign per presentation (a re-randomisable commitment + signature scheme,
+/// which sparq does NOT implement, would remove the round trip).
+///
+/// NOT externally audited (sq-qhy4). Research-grade; no soundness / ZK-privacy
+/// property is asserted as achieved.
+// [OPUS-5] sq-kndw: fully-hidden revocation proof (deferred remainder of sq-6qe).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FullyHiddenRevocation {
+    /// The status-list Merkle depth (the `d{depth}` half of the member name).
+    /// MUST equal the depth the relying party derives its per-entry status-list
+    /// roots with ([`crate::verifier::RevocationPolicy::with_hidden_index_depth`]).
+    pub depth: u32,
+    /// The accepted-set Merkle depth (the `a{set_depth}` half of the member name).
+    /// MUST equal [`crate::verifier::RevocationPolicy::with_accepted_set_depth`].
+    pub set_depth: u32,
+    /// The hiding `(list, version)` reference commitment the proof was produced
+    /// against (public input 1). Byte-matched against the ISSUER-SIGNED
+    /// [`RevocationStatus::ref_commitment`] — the cross-binding that ties the
+    /// in-circuit private `(list, version)` to the issuer's reference.
+    pub ref_commitment: FieldHex,
+    /// The hiding index commitment the proof was produced against (public input 2).
+    /// Byte-matched against the ISSUER-SIGNED [`RevocationStatus::index_commitment`]
+    /// exactly as on the committed-index path (sq-ayv).
+    pub index_commitment: FieldHex,
+    /// The accepted-set Merkle root the proof was produced against (public input
+    /// 3). Checked byte-equal to
+    /// [`crate::verifier::RevocationPolicy::accepted_set_root`].
+    pub accepted_set_root: FieldHex,
+    /// The public epoch FLOOR the proof was produced against (public input 4).
+    /// Checked equal to [`crate::verifier::RevocationPolicy::min_version`].
+    pub min_version: u64,
     /// The bb proof blob (hex), in the same `len|proof|len|pi|vk` layout as a
     /// [`SubProof::proof_hex`] (see [`crate::verifier::encode_artifacts`]).
     pub proof_hex: String,
@@ -2076,8 +2367,9 @@ mod holder_binding_tests {
             salt: Some(FieldHex::from_field(&salt)),
             status: Some(AttestedStatusRef {
                 index: Some(5),
-                version: 1,
+                version: Some(1),
                 index_commitment: None,
+                ref_commitment: None,
             }),
             holder: AttestedHolderBinding::from_holder_key(&hpk, true).ok(),
         };
@@ -2107,6 +2399,7 @@ mod holder_binding_tests {
             hidden_issuer_attestations: vec![],
             holder_pok_proofs: vec![],
             holder_set_proofs: vec![],
+            fully_hidden_revocation: None,
         };
 
         let json = manifest.to_json();
@@ -2382,6 +2675,7 @@ mod canonical_edge_tests {
             hidden_issuer_attestations: vec![],
             holder_pok_proofs: vec![],
             holder_set_proofs: vec![],
+            fully_hidden_revocation: None,
         }
     }
 
@@ -2669,6 +2963,7 @@ mod path_schema_tests {
             hidden_issuer_attestations: vec![],
             holder_pok_proofs: vec![],
             holder_set_proofs: vec![],
+            fully_hidden_revocation: None,
         };
         let fm = FragmentManifest::new(
             manifest.clone(),

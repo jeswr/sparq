@@ -91,6 +91,19 @@ abox = []
 # cannot spawn — carries zero threading code. No new dependency (std scoped threads only).
 par = []
 
+# [SONNET-4.6] sq-clsv6 (Phase E5): INCREMENTAL classification under TBox edits —
+# `IncrementalClassifier`, a stateful classifier that keeps its CR1–CR6 saturation alive across
+# edits and folds a MONOTONE extension (added class axioms + brand-new class-expression nodes) into
+# it instead of re-running the fixpoint. Deliberately scoped: a RETRACTION — and any RBox /
+# concrete-domain / live-node change — falls back to a full re-classification, reported via
+# `IncrementalReport::disposition`, because EL saturation keeps no derivation provenance and the
+# DRed / affected-context repair (ELK, Kazakov & Klinov ISWC 2013) is NOT implemented. The
+# post-edit hierarchy equals a full re-classification on BOTH paths (tests/incremental.rs). OFF by
+# default so the stateless E1–E4 build (and the lean wasm port) carries zero edit-tracking state or
+# code; the `Classifier` / `classify_graph` entries are byte-identical in either feature state. No
+# new dependency — reuses oxrdf + rustc-hash. Spike: research/owl2-el-ql-reasoning-spike.md §5 (E5).
+incremental = []
+
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
 # (required to publish — crates.io strips `path`).
