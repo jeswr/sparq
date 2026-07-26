@@ -52,6 +52,15 @@ EXIT_USAGE = 2
 EXIT_UNCLASSIFIED = 3
 EXIT_INCOMPLETE = 5
 
+# The statuses a per-encoding result may carry once ODRE has actually run. Each records a
+# real outcome of handing the case to the pinned release. `missing` and `skipped-no-odre`
+# are ABSENCES, not outcomes: for a `present` run `input_errors` refuses them, so key
+# coverage cannot masquerade as verdict coverage (see item 4 there).
+REAL_RUN_STATUSES = ("ok", "odre-error", "encoding-error", "encoding-unrepresentable")
+# Of those, the ones whose `error` text the classifier and the out-of-scope reason read.
+ERROR_STATUSES = ("odre-error", "encoding-error", "encoding-unrepresentable")
+DECISION_VALUES = ("allow", "deny")
+
 HARNESS_INTERVENTIONS = [
     {
         "id": "clock-pinning",
@@ -187,6 +196,17 @@ def input_errors(corpus, decisions, ledger, capabilities):
        absent results become `skipped` verdicts, drop out of the comparable set, and the
        surviving cases still produce a `complete` report with a confident agreement rate
        over whatever fraction of the corpus happened to survive.
+    4. **Every result IS a result.** Item 3 only proves the encoding KEYS are all there,
+       and key coverage is not verdict coverage: under a `present` ODRE a result object
+       reading `{"status": "missing"}` or `{"status": "skipped-no-odre"}` carries the key
+       but no verdict, and `build_report` would count it `skipped`, drop it from the
+       comparable set, and still publish `complete` with a rate over the remainder — the
+       exact silent-degradation item 3 exists to prevent, one level down. So for a
+       `present` run every case/encoding result must carry a real-run status
+       (`REAL_RUN_STATUSES`) with the fields that status implies: an `ok` needs an
+       allow/deny decision, an error-shaped status needs the error text the classifier and
+       the out-of-scope reason are built from. For an ABSENT run the mirror holds — every
+       result must be `skipped-no-odre`, since nothing can have been decided.
 
     Returns a list of human-readable errors; empty means the inputs are usable.
     """
@@ -254,6 +274,46 @@ def input_errors(corpus, decisions, ledger, capabilities):
         errors.append(
             "%d case(s) do not carry a result for every declared encoding (%s%s)."
             % (len(incomplete), "; ".join(incomplete[:5]), " …" if len(incomplete) > 5 else "")
+        )
+
+    present = odre_meta["status"] == "present"
+    malformed = []
+    for case in decisions["cases"]:
+        got = case.get("encodings") or {}
+        for enc in sorted(expected_encodings & set(got)):
+            result = got[enc]
+            where = "%s/%s" % (case["id"], enc)
+            if not isinstance(result, dict) or "status" not in result:
+                malformed.append("%s: not a result object" % where)
+                continue
+            status = result["status"]
+            if not present:
+                if status != "skipped-no-odre":
+                    malformed.append(
+                        "%s: status %r, but ODRE is %r — nothing can have been decided"
+                        % (where, status, odre_meta["status"])
+                    )
+            elif status not in REAL_RUN_STATUSES:
+                malformed.append(
+                    "%s: status %r records no ODRE outcome (expected one of %s)"
+                    % (where, status, ", ".join(REAL_RUN_STATUSES))
+                )
+            elif status == "ok" and result.get("decision") not in DECISION_VALUES:
+                malformed.append(
+                    "%s: status 'ok' but decision is %r, not one of %s"
+                    % (where, result.get("decision"), ", ".join(DECISION_VALUES))
+                )
+            elif status in ERROR_STATUSES and not (result.get("error") or "").strip():
+                malformed.append(
+                    "%s: status %r carries no error text to classify or report against"
+                    % (where, status)
+                )
+    if malformed:
+        errors.append(
+            "%d case/encoding result(s) do not record a usable outcome (%s%s) — carrying "
+            "the encoding key is not the same as carrying a verdict, and such a result "
+            "would be counted as a skip inside an otherwise `complete` report."
+            % (len(malformed), "; ".join(malformed[:5]), " …" if len(malformed) > 5 else "")
         )
 
     return errors
@@ -361,11 +421,12 @@ def build_report(corpus, decisions, ledger, capabilities):
         verdicts = {}
 
         for enc in encodings:
-            # `missing` is unreachable from the CLI: `input_errors` refuses a decision
-            # file that does not cover every case under every encoding, precisely so an
-            # absent result cannot become a `skipped` verdict inside a `complete` report.
-            # Kept as the rendering for a direct build_report call, never as a fallback
-            # the gate relies on.
+            # Both `missing` renderings below are unreachable from the CLI: `input_errors`
+            # refuses a decision file that does not cover every case under every encoding
+            # AND, for a `present` ODRE, one whose results are not real-run outcomes — so
+            # `skipped` here is reachable only on the honest ODRE-absent path, never as an
+            # absence hiding inside a `complete` report. Kept as the rendering for a direct
+            # build_report call, never as a fallback the gate relies on.
             result = odre_case["encodings"].get(
                 enc,
                 {"status": "missing", "decision": None, "actions": [], "error": "no ODRE result for this case/encoding"},
@@ -728,8 +789,10 @@ def self_test():
       4. ODRE absent          -> schema-complete report, and NO agreement rate
       5. unattributable deny  -> must not inherit a ledger entry's excuse
       6. input gate           -> a truncated, duplicated or unpinned-version decision
-                                 file must fail the LANE (exit 2, nothing published)
-                                 rather than degrade into skips in a `complete` report
+                                 file — or one whose encoding keys are all present but
+                                 whose results record no verdict — must fail the LANE
+                                 (exit 2, nothing published) rather than degrade into
+                                 skips in a `complete` report
 
     If scenario 3 or 6 ever passes, this lane's headline invariant is broken and the
     self-test fails loudly instead of the lane quietly reporting green.
@@ -893,6 +956,53 @@ def self_test():
     def unknown_version(_corpus, decisions):
         decisions["odre"]["version"] = "unknown"
 
+    # …and the same file with every encoding key PRESENT, but a result object behind one
+    # of them that records no verdict. Key coverage is not verdict coverage: each of these
+    # used to sail through the gate and be tallied as a `skipped` inside a `complete`
+    # report, publishing an agreement rate over whatever fraction still had a real result.
+    def _absence(status):
+        return {
+            "status": status,
+            "decision": None,
+            "actions": [],
+            "interventions": [],
+            "error": None,
+        }
+
+    def missing_result_object(_corpus, decisions):
+        decisions["cases"][0]["encodings"]["projected"] = _absence("missing")
+
+    def skipped_result_in_present_run(_corpus, decisions):
+        decisions["cases"][1]["encodings"]["standard"] = _absence("skipped-no-odre")
+
+    def unknown_status(_corpus, decisions):
+        decisions["cases"][0]["encodings"]["standard"]["status"] = "not-a-status"
+
+    def null_ok_decision(_corpus, decisions):
+        decisions["cases"][0]["encodings"]["standard"]["decision"] = None
+
+    def errorless_odre_error(_corpus, decisions):
+        decisions["cases"][0]["encodings"]["standard"].update(
+            {"status": "odre-error", "decision": None, "error": None}
+        )
+
+    def odre_absent(_corpus, decisions):
+        """The HONEST skip: ODRE never ran, so every result is `skipped-no-odre`."""
+        decisions["odre"].update({"status": "absent", "version": None, "reason": "self-test"})
+        for case in decisions["cases"]:
+            for enc in case["encodings"]:
+                case["encodings"][enc] = _absence("skipped-no-odre")
+
+    def odre_absent_but_decided(_corpus, decisions):
+        odre_absent(_corpus, decisions)
+        decisions["cases"][0]["encodings"]["standard"] = {
+            "status": "ok",
+            "decision": "allow",
+            "actions": [],
+            "interventions": [],
+            "error": None,
+        }
+
     for name, mutate, expected in (
         ("intact inputs", lambda c, d: None, EXIT_OK),
         ("a corpus case with no ODRE result", drop_case, EXIT_USAGE),
@@ -901,6 +1011,13 @@ def self_test():
         ("a case id the corpus does not contain", unexpected_case, EXIT_USAGE),
         ("an ODRE version that is not the pin", wrong_version, EXIT_USAGE),
         ("an unreadable ODRE version", unknown_version, EXIT_USAGE),
+        ("a `missing` result inside a present run", missing_result_object, EXIT_USAGE),
+        ("a `skipped-no-odre` result inside a present run", skipped_result_in_present_run, EXIT_USAGE),
+        ("a result carrying an unknown status", unknown_status, EXIT_USAGE),
+        ("an `ok` result with no decision", null_ok_decision, EXIT_USAGE),
+        ("an `odre-error` result with no error text", errorless_odre_error, EXIT_USAGE),
+        ("an honest ODRE-absent run", odre_absent, EXIT_OK),
+        ("an ODRE-absent run that decided a case anyway", odre_absent_but_decided, EXIT_USAGE),
     ):
         code, written = _st_run_lane(ledger, mutate)
         if code != expected:

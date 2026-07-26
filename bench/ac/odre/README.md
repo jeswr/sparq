@@ -54,7 +54,10 @@ It also **fails (exit 2) before computing anything** when the inputs are not the
 would claim to be: an installed `pyodre` that is not the pinned version (the ledger's
 divergence excuses are transcribed from that release specifically), or an
 `odre-decisions.json` that does not cover every corpus case under every encoding exactly
-once. Those are input errors, not a batch of skips inside a `complete` report.
+once — or that carries every encoding key but a result behind one that records no verdict
+(a `missing`/`skipped-no-odre`/unknown status, or an `ok` with no decision, under an ODRE
+that ran). Key coverage is not verdict coverage. Those are input errors, not a batch of
+skips inside a `complete` report.
 
 `run.sh` runs `agreement.py --self-test` on every invocation: synthetic scenarios drive
 the real classifier, the real gate and the real input checks, and the unexplained
