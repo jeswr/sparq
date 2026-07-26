@@ -33,7 +33,6 @@
   crate: "sparq-engine"
   features: "persistent-stats"
   test: true
-  tier: "check"
 
 - name: "sparq-engine (zk)"
   crate: "sparq-engine"
@@ -143,7 +142,6 @@
   crate: "sparq-engine"
   features: "query-solution"
   test: true
-  tier: "check"
 
 # [OPUS-4.8] sq-rp3um: parameterized prepared queries — safe value binding to
 # prevent SPARQL injection (#901). The whole `params` module (`pub mod params`:
@@ -163,7 +161,6 @@
   crate: "sparq-engine"
   features: "params"
   test: true
-  tier: "check"
 
 # [OPUS-4.8] sq-u4lgr (#902): structured EXPLAIN — the typed `PlanNode` plan tree,
 # its hand-written JSON projection, per-operator q-error, and the bounded
@@ -184,7 +181,6 @@
   crate: "sparq-engine"
   features: "explain-json"
   test: true
-  tier: "check"
 
 # [OPUS-4.8] sq-gr8mb (survey §A3): exact-bitmap semi-join reducer on dense u32 ids.
 # The `semijoin` module (`src/semijoin.rs`, `pub(crate) mod semijoin` in lib.rs — the
@@ -205,7 +201,6 @@
   crate: "sparq-engine"
   features: "semijoin-bitmap"
   test: true
-  tier: "check"
 
 # [OPUS-4.8] sq-5zf8i (survey §A4): Yannakakis bottom-up full-semijoin PREPASS for acyclic
 # BGPs. The prepass driver (`eval_bgp_yannakakis` + `semijoin_reduce` + the `SjRelation`
@@ -349,7 +344,6 @@
   crate: "sparq-engine"
   features: "templates"
   test: true
-  tier: "check"
 
 # [FABLE-5] (sq-lsp7k.3.1, PR #2007): programmatic full-path enumeration over one
 # predicate (`paths` module: `enumerate_paths`, `PathSpec`, `PathMode`, `PathSolution`).

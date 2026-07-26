@@ -320,53 +320,46 @@ def _feature_adjacent_to_test_attr(content: str, feature: str) -> bool:
 # Pattern to find the start of cfg / cfg_attr attributes (inner and outer form).
 _CFG_START_RE = re.compile(r"#!?\[cfg(?:_attr)?\s*\(")
 
-# String literal masking: matches regular and byte string literals including
-# escaped-quote sequences.  Does NOT handle raw strings r#"..."# (uncommon
-# in the files we scan and not a source of cfg-pattern false positives in
-# practice).  DOTALL is intentionally omitted: multi-line strings are unusual
-# in cfg/test attribute positions and the non-dotall mode is faster + safer.
-_STRLIT_MASK_RE = re.compile(r'b?"[^"\\]*(?:\\.[^"\\]*)*"')
+# [SONNET-4.6] String literal masking keeps physical lines intact so a decoy
+# quote cannot consume subsequent live cfg attributes.
+_STRLIT_MASK_RE = re.compile(r'b?"[^"\\\r\n]*(?:\\.[^"\\\r\n]*)*"')
+_RAW_STRLIT_MASK_RE = re.compile(
+    r'(?<![A-Za-z0-9_])(?:br|r)(?P<hashes>#{0,255})"[\s\S]*?"(?P=hashes)'
+)
 
 
 def _sanitize_for_cfg_scan(content: str) -> str:
     """Prepare Rust source content for safe cfg-expression extraction.
 
     Two passes:
-    1. Mask string literal contents with underscores.  This prevents
+    1. Blank whole-line comments (``//`` including ``///``/``//!`` docs).
+       This prevents quotes and cfg-like text in comments from affecting the
+       literal scanner.
+    2. Mask regular and raw string literal contents with underscores.  This prevents
        ``#[cfg(feature = \\"name\\")])`` embedded inside a Rust string
        literal from being mistakenly extracted as a live cfg attribute.
        The masking is ONE-WAY (no restore needed): real cfg attributes
        outside string literals retain their feature names; bogus patterns
        inside string literals get their names replaced with underscores,
        so ``_mentions_feature(node, F)`` returns False for them.
-    2. Blank whole-line comments (``//`` including ``///``/``//!`` docs).
-       This prevents doc-comment prose that mentions cfg patterns from
-       being scanned as live attributes.
+       Newline characters are retained in multiline raw strings.
     """
-    # Pass 1: mask string literal contents.
+    # Pass 1: blank whole-line comments, PRESERVING LENGTH and line structure.
+    lines = content.splitlines(keepends=True)
+    uncommented = "".join(
+        "".join(" " if c not in ("\n", "\r") else c for c in line)
+        if line.lstrip().startswith("//")
+        else line
+        for line in lines
+    )
+
+    # Pass 2: mask string literal contents while retaining CR/LF.
     def _mask(m: "re.Match") -> str:
         s = m.group()
-        # Keep prefix (b or empty) and the outer quotes; fill inside with '_'
-        # so no '#', '[', '(' characters remain inside the string.
-        prefix_end = 2 if s.startswith('b"') else 1
-        return s[:prefix_end] + "_" * (len(s) - prefix_end - 1) + '"'
+        return "".join(c if c in ("\n", "\r") else "_" for c in s)
 
-    masked = _STRLIT_MASK_RE.sub(_mask, content)
-
-    # Pass 2: blank whole-line comments, PRESERVING LENGTH.
-    # We replace every non-newline character in a comment line with a space
-    # so that positions in the sanitised string align exactly with positions
-    # in the original — the two-phase extraction in _extract_cfg_expressions
-    # depends on this len(safe) == len(original) invariant.
-    lines = masked.splitlines(keepends=True)
-    out: List[str] = []
-    for line in lines:
-        if line.lstrip().startswith("//"):
-            # Blank non-newline chars, keep CR/LF to preserve byte offsets.
-            out.append("".join(" " if c not in ("\n", "\r") else c for c in line))
-        else:
-            out.append(line)
-    return "".join(out)
+    masked = _RAW_STRLIT_MASK_RE.sub(_mask, uncommented)
+    return _STRLIT_MASK_RE.sub(_mask, masked)
 
 
 def _extract_cfg_expressions(content: str) -> List[str]:

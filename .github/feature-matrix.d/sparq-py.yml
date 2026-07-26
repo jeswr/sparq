@@ -25,3 +25,4 @@
   crate: "sparq-py"
   features: "arrow"
   test: false
+  tier: "check"

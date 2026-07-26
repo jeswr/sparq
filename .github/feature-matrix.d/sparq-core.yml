@@ -46,7 +46,6 @@
   crate: "sparq-core"
   features: "iri-fast"
   test: true
-  tier: "check"
 
 # [OPUS-4.8] sq-wihld (survey §A1): opt-in per-block Bloom filters on the high-NDV
 # leading column of a block-compressed permutation. OFF by default (lean core); this
