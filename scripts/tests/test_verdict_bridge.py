@@ -365,11 +365,40 @@ def decision(pull, comments) -> str:
 REPO = "sparq-org/sparq"
 
 
+def commits_connection(logins=("claude",), *, messages=(), total=None) -> dict:
+    """A GraphQL ``commits`` connection carrying ONE commit per author login.
+
+    ``total`` defaults to the node count (a complete read). Passing a LARGER ``total``
+    models a TRUNCATED connection, which must refuse every grant.
+    """
+    nodes = [
+        {
+            "commit": {
+                "message": message,
+                "authors": {"nodes": [{"user": {"login": login}}]},
+                "committer": {"user": {"login": "web-flow"}},
+            }
+        }
+        for login, message in zip(
+            logins, list(messages) + [""] * len(logins), strict=False
+        )
+    ]
+    return {"totalCount": len(nodes) if total is None else total, "nodes": nodes}
+
+
 def node(number: int, **overrides) -> dict:
-    """A GraphQL pullRequest node as `list_open` returns it."""
+    """A GraphQL pullRequest node as `list_open` returns it.
+
+    Modelled on the REAL population (censused 2026-07-26): the PR is opened by the
+    orchestrator App and its commits are authored by `claude`, while reviewers comment
+    under a DIFFERENT login. A fixture whose author fields were absent would make every
+    grant fail closed for the wrong reason and hide real regressions.
+    """
     labels = overrides.pop("labels", ())
     reviews = overrides.pop("reviews", ())
     base = {
+        "author": {"login": overrides.pop("author", "sparq-orchestrator")},
+        "commits": overrides.pop("commits", commits_connection()),
         "reviews": {
             "nodes": [
                 {
