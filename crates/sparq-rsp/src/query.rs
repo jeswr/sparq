@@ -14,7 +14,7 @@
 //! [`GraphResult`]s (with R2S set-diff semantics over the constructed
 //! triples). [`ContinuousAsk`] delivers one boolean per window.
 //!
-//! # R2S semantics (multiset, row-hash based)
+//! # R2S semantics (exact multiset differences)
 //!
 //! SPARQL SELECT results are multisets of rows. The three operators:
 //!
@@ -27,20 +27,16 @@
 //!   [`crate::window`]): a result only "disappears" when a later, possibly
 //!   empty, window closes without it.
 //!
-//! Diffs are computed over 64-bit **row hashes** (`FxHasher` over the bound
-//! terms), counted as multisets, so a row appearing twice in `cur` and once in
-//! `prev` ISTREAMs exactly once. Emission order is deterministic: ISTREAM
-//! preserves the engine's row order of the current window, DSTREAM the row
-//! order of the previous window. (A hash collision between two *different*
-//! rows inside one query's results could suppress a diff; with 64-bit hashes
-//! this is vanishingly unlikely and accepted for speed.)
+//! Diffs compare complete rows and count them as multisets, so a row appearing
+//! twice in `cur` and once in `prev` ISTREAMs exactly once. Emission order is
+//! deterministic: ISTREAM preserves the engine's row order of the current
+//! window, DSTREAM the row order of the previous window.
 //!
 //! CONSTRUCT results are triple SETS (the engine dedups), so
 //! [`ContinuousConstruct`]'s ISTREAM/DSTREAM are exact set differences over
 //! full triples — no hashing caveat.
 
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 
 use oxrdf::{Term, Triple, Variable};
 use sparq_engine::PreparedQuery;
@@ -134,10 +130,9 @@ pub struct ContinuousQuery {
     prepared: PreparedQuery,
     eval: WindowEval,
     r2s: R2S,
-    /// Previous window's full result, in engine row order, with row hashes —
+    /// Previous window's full result, in engine row order —
     /// the ISTREAM/DSTREAM diff base. Unused (empty) under RSTREAM.
     prev_rows: Vec<Vec<Option<Term>>>,
-    prev_hashes: Vec<u64>,
 }
 
 impl ContinuousQuery {
@@ -159,7 +154,6 @@ impl ContinuousQuery {
             eval: WindowEval::new(spec, EvalMode::default()),
             r2s: R2S::RStream,
             prev_rows: Vec::new(),
-            prev_hashes: Vec::new(),
         })
     }
 
@@ -236,13 +230,12 @@ impl ContinuousQuery {
         let prepared = &self.prepared;
         let r2s = self.r2s;
         let prev_rows = &mut self.prev_rows;
-        let prev_hashes = &mut self.prev_hashes;
         self.eval.eval_closed(flush, &mut |start, end, graph| {
             let result = sparq_engine::query_prepared(graph, prepared)?;
             let rows = match r2s {
                 R2S::RStream => result.rows,
                 R2S::IStream | R2S::DStream => {
-                    diff_rows(r2s, result.rows, prev_rows, prev_hashes)
+                    diff_rows(r2s, result.rows, prev_rows)
                 }
             };
             on_result(WindowResult { start, end, vars: result.vars, rows });
@@ -442,52 +435,47 @@ impl ContinuousAsk {
     }
 }
 
-/// Applies ISTREAM/DSTREAM to a SELECT result: multiset row-hash diff of the
-/// current window's full result against the previous window's, then advances
-/// the diff base.
+/// Applies ISTREAM/DSTREAM to a SELECT result: exact term-level multiset diff
+/// of the current window's full result against the previous window's, then
+/// advances the diff base.
 // [SONNET-4.6] sq-2n1q3.3: made pub(crate) so ContinuousMultiQuery can reuse it.
 pub(crate) fn diff_rows(
     r2s: R2S,
     cur_rows: Vec<Vec<Option<Term>>>,
     prev_rows: &mut Vec<Vec<Option<Term>>>,
-    prev_hashes: &mut Vec<u64>,
 ) -> Vec<Vec<Option<Term>>> {
-    let cur_hashes: Vec<u64> = cur_rows.iter().map(|r| row_hash(r)).collect();
     let emitted = match r2s {
         // cur ∖ prev, in current row order.
-        R2S::IStream => multiset_minus(&cur_rows, &cur_hashes, prev_hashes),
+        R2S::IStream => multiset_minus(&cur_rows, prev_rows),
         // prev ∖ cur, in previous row order.
-        R2S::DStream => multiset_minus(prev_rows, prev_hashes, &cur_hashes),
+        R2S::DStream => multiset_minus(prev_rows, &cur_rows),
         R2S::RStream => unreachable!("diff_rows() is only called for ISTREAM/DSTREAM"),
     };
     *prev_rows = cur_rows;
-    *prev_hashes = cur_hashes;
     emitted
 }
 
-/// `keep ∖ minus` as multisets of row hashes: each hash in `minus` cancels at
+/// `keep ∖ minus` as multisets of complete rows: each row in `minus` cancels at
 /// most that many occurrences in `keep`; survivors are returned in `keep`'s
 /// row order.
 fn multiset_minus(
     keep_rows: &[Vec<Option<Term>>],
-    keep_hashes: &[u64],
-    minus: &[u64],
+    minus: &[Vec<Option<Term>>],
 ) -> Vec<Vec<Option<Term>>> {
-    let mut budget: HashMap<u64, usize> = HashMap::with_capacity(minus.len());
-    for h in minus {
-        *budget.entry(*h).or_insert(0) += 1;
+    let mut budget: HashMap<&[Option<Term>], usize> = HashMap::with_capacity(minus.len());
+    for row in minus {
+        *budget.entry(row.as_slice()).or_insert(0) += 1;
     }
     keep_rows
         .iter()
-        .zip(keep_hashes)
-        .filter(|(_, h)| match budget.get_mut(h) {
+        .filter(|row| match budget.get_mut(row.as_slice()) {
             Some(n) if *n > 0 => {
                 *n -= 1;
                 false // cancelled by an occurrence on the other side
             }
             _ => true, // survives the difference: emit
         })
-        .map(|(row, _)| row.clone())
+        .cloned()
         .collect()
 }
 
@@ -498,10 +486,31 @@ fn set_minus(keep: &[Triple], minus: &[Triple]) -> Vec<Triple> {
     keep.iter().filter(|t| !minus.contains(*t)).cloned().collect()
 }
 
-/// 64-bit hash of one result row (bound terms + unbound positions).
-// [SONNET-4.6] sq-2n1q3.3: made pub(crate) so ContinuousMultiQuery can reuse it.
-pub(crate) fn row_hash(row: &[Option<Term>]) -> u64 {
-    let mut h = rustc_hash::FxHasher::default();
-    row.hash(&mut h);
-    h.finish()
+#[cfg(test)]
+mod tests {
+    use super::{diff_rows, R2S};
+    use oxrdf::{Literal, Term};
+
+    fn row(value: &str) -> Vec<Option<Term>> {
+        vec![Some(Literal::new_simple_literal(value).into()), None]
+    }
+
+    /// [SONNET-4.6] sq-ifv: cancellation is keyed by complete terms and retains
+    /// the multiplicity and input order of rows that do not cancel.
+    #[test]
+    fn select_diff_uses_exact_term_rows() {
+        let a = row("a");
+        let b = row("b");
+        let c = row("c");
+        let mut previous = vec![a.clone(), b.clone(), b.clone()];
+
+        let emitted = diff_rows(
+            R2S::IStream,
+            vec![b.clone(), c.clone(), b.clone(), c.clone()],
+            &mut previous,
+        );
+
+        assert_eq!(emitted, vec![c.clone(), c]);
+        assert_eq!(previous, vec![b.clone(), row("c"), b, row("c")]);
+    }
 }

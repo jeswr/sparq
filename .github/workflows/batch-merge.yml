@@ -2,9 +2,14 @@
 #
 # WHAT: when MORE than the merge queue's window (8) of reviewed, orchestrator-armed
 # sparq-agent/* worker PRs are waiting, the pure policy in scripts/batch-merge.py batches
-# the overflow into ONE sparq-omnibus/<utcstamp> integration PR (fresh off main, no-ff
-# merges; conflicting constituents are skipped and stay individually armed) and arms it —
-# the merge queue picks the strategy. It also closes constituents of MERGED omnibus PRs
+# the overflow into ONE sparq-omnibus/<class>-<utcstamp> integration PR PER CHANGE-CLASS
+# (issue #3433: `slim` = docs-/orchestration-only constituents per ci_select's audited
+# allowlist, so the batch rides the slim merge-group lane set of #3428 and never waits on
+# a full-matrix run; `engine` = everything else; at most 15 constituents per omnibus —
+# batch-15 per 15-minute run tracks the 60-merges/hour target and keeps a v2 culprit
+# bisect at log2(15) ~= 4 runs). Each omnibus is fresh off main, built with no-ff
+# merges; conflicting constituents are skipped and stay individually armed; the batcher
+# arms the PR — the merge queue picks the strategy. It also closes constituents of MERGED omnibus PRs
 # whose branches now add nothing vs main, closes a FAILED / conflicting / OVER-AGE
 # omnibus (the age bound is the liveness backstop for merge-group failures, which are
 # invisible on the PR head; v1: no bisection — constituents stay individually armed),
@@ -40,8 +45,9 @@ on:
         required: false
         default: "false"
   schedule:
-    # Three times an hour, offset from the registry's on-the-hour/quarter crons.
-    - cron: "7,27,47 * * * *"
+    # Every 15 minutes (issue #3433 throughput program: batch-15 per class per run
+    # ~= the 60-merges/hour target), offset +7 from the registry's quarter-hour crons.
+    - cron: "7,22,37,52 * * * *"
   # The moment any head CI concludes the armed set may have grown past the window.
   workflow_run:
     workflows: [ci-summary]
@@ -95,7 +101,7 @@ jobs:
           token: ${{ steps.app-token.outputs.token || github.token }}
 
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 

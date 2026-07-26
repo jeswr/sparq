@@ -568,3 +568,21 @@ fn initialize_reports_the_pod_server_name() {
     assert_eq!(resp["result"]["serverInfo"]["name"], "sparq-mcp-solid");
     assert!(resp["result"]["protocolVersion"].is_string());
 }
+
+// [SONNET-4.6] sq-bvnqm: the pod server negotiates the protocol version exactly
+// like the base server — accept a supported proposal, offer the latest otherwise.
+#[test]
+fn pod_initialize_negotiates_the_protocol_version() {
+    let mut s = server_for(ALICE, false);
+    let resp = rpc(
+        &mut s,
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#,
+    );
+    assert_eq!(resp["result"]["protocolVersion"], "2024-11-05");
+
+    let resp = rpc(
+        &mut s,
+        r#"{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"1999-01-01"}}"#,
+    );
+    assert_eq!(resp["result"]["protocolVersion"], sparq_mcp::PROTOCOL_VERSION);
+}

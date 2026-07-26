@@ -417,6 +417,8 @@ def main():
             _json.dump(summary, fh, indent=2)
             fh.write("\n")
 
+    # [SONNET-4.6] Keep this exit after --json-out is persisted: envelope callers
+    # must be able to ingest honest measurements while still receiving a failed gate.
     if parity_gate == "fail":
         sys.exit(parity_note)
 

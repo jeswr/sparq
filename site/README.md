@@ -41,7 +41,7 @@ npm ci
 npm run dev        # sync-wasm → public/wasm, then next dev
 npm run build      # → out/  (static export)
 npm run lint
-npm run test:unit  # node:test — pure helper logic (REPL dataset, …)
+npm run test:unit  # node:test helpers + native sparq-policy parity fixture (needs cargo)
 npm run test:e2e   # Playwright — headless browser smoke tests (see below)
 ```
 

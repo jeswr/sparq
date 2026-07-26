@@ -379,6 +379,11 @@ fn reason_kind(reason: &UnknownReason) -> String {
         UnknownReason::ElUnappliedAxioms(_) => "EL unapplied axiom kinds",
         UnknownReason::ElTopGuard => "EL top guard",
         UnknownReason::QlConsistencyPending => "QL consistency pending (sq-pbz04.3.4)",
+        // [FABLE-5] sq-fj8lj: the graduated QL branch (dl-direct enables
+        // `sparq-reason-dl/dispatch_ql`) abstains with the QL crate's own capture
+        // accounting; `QlConsistencyPending` above is unreachable in this build but the
+        // variant (and its tri-state mapping test) is kept.
+        UnknownReason::QlCaptureGap(_) => "QL capture gap (sparq-reason-ql accounting)",
         UnknownReason::ResourceBudget(_) => "deterministic count budget exhausted",
         UnknownReason::UnencodedConclusion(_) => "unencoded conclusion-axiom kind",
         UnknownReason::ConclusionAnonymousIndividual(_) => {

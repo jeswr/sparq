@@ -487,9 +487,12 @@ fn parse_xsd_float(lex: &str) -> Option<f64> {
         "-INF" => Some(f64::NEG_INFINITY),
         "NaN" => Some(f64::NAN),
         _ => {
-            // xsd float/double syntax is a subset of Rust's; reject the forms
-            // Rust accepts but XSD does not.
-            if lex.contains(['x', 'X']) || lex.ends_with(['f', 'F', 'd', 'D']) || lex.contains("inf") {
+            // [SONNET-4.6] XSD's numeric float/double forms contain only
+            // decimal digits, signs, a decimal point, and an exponent marker.
+            if !lex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || matches!(b, b'+' | b'-' | b'.' | b'e' | b'E'))
+            {
                 return None;
             }
             lex.parse::<f64>().ok()
@@ -814,5 +817,18 @@ mod tests {
         let d = Recognized::with_defaults([format!("{XSD}integer")].into_iter().collect());
         let rows = vec![[iri("http://e/a"), iri("http://e/p"), lit_int("abc")]];
         assert!(inconsistency(&rows, &d).is_some());
+    }
+
+    #[test]
+    fn parse_xsd_float_rejects_non_xsd_rust_spellings() {
+        for lex in ["inf", "infinity", "Infinity", "INFINITY", "nan", "NAN"] {
+            assert_eq!(parse_xsd_float(lex), None, "{}", lex);
+            assert_eq!(xsd_value(lex, &format!("{}float", XSD)), None, "{}", lex);
+            assert_eq!(xsd_value(lex, &format!("{}double", XSD)), None, "{}", lex);
+        }
+
+        for lex in ["INF", "+INF", "-INF", "NaN", "1", "-1.5", "2E+3"] {
+            assert!(parse_xsd_float(lex).is_some(), "{}", lex);
+        }
     }
 }

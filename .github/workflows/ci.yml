@@ -131,14 +131,35 @@ jobs:
   #     (`conclusion != "success" and != "skipped" and != "neutral"` is the only thing it
   #     fails on), so the gate goes green fast. Fast doc/lint siblings (docs-quality, etc.)
   #     still run and still gate.
-  # SAFE-BY-DEFAULT: rust_changed is forced 'true' on EVERY event except `pull_request`.
-  # On `push` to main (the canonical build), `merge_group` (the merge queue re-runs the
-  # whole set), `schedule`, and `workflow_dispatch` the full matrix ALWAYS runs — only a
-  # PR diff that is purely non-Rust is ever allowed to skip. The Rust path set is broad on
+  # SAFE-BY-DEFAULT: rust_changed is forced 'true' on `push` to main (the canonical
+  # build), `schedule`, and `workflow_dispatch` — the full matrix ALWAYS runs there. On
+  # `pull_request` only a diff that is purely non-Rust skips. The Rust path set is broad on
   # purpose: any `*.rs`, any `Cargo.toml`, `Cargo.lock`, the `rust-toolchain*` pin, OR this
   # workflow file itself (so editing a Rust job here re-runs that job). If the diff cannot
   # be computed for any reason, the filter's absence of a match defaults to NOT skipping
-  # only because we hard-force 'true' off the PR path — i.e. we never silently skip Rust.
+  # only because we hard-force 'true' off the PR/merge_group path — we never silently skip.
+  #
+  # [FABLE-5] MERGE-GROUP CHANGE-CLASS GATE (path-aware CI; extends #3420/#3421 to this
+  # rust_changed layer). merge_group used to hard-force rust_changed=true, so even a
+  # docs-only/orchestration-only queued batch (the observed #2533 class) paid the
+  # rust_changed-only lanes (lint / msrv / geiger / docker-smoke / coverage-floors) on
+  # every enqueue — the select-conjunct lanes already skip via the batch-diff selection
+  # (ci-select.yml passes merge_group.base_sha/head_sha). The decide step below now
+  # resolves the SAME batch diff (the #3421 fetch pattern) and classifies it with
+  # `scripts/ci_select.py --classify-only` — the IDENTICAL `classify_change()` path the
+  # `select` pre-job runs on this event, so the two layers cannot disagree on a resolved
+  # diff (no duplicated path lists; ci_select.py stays the single source of truth).
+  # Class docs-only/orchestration-only => rust_changed=false + docker_changed=false
+  # (sound: every path in the dorny `rust`/`docker` filter sets classifies `engine`, so
+  # those classes PROVE both filters would be false — same trust model as the PR-level
+  # gate, a pure function of the authoritative diff). Any OTHER class, an unresolvable
+  # SHA pair, or ANY classifier error => true/true (fail-safe = full run, cost never
+  # soundness). Gate accounting: the skipped legs report `skipped` and the required
+  # ci-summary gate attributes them to the (green, same-diff) `select` pre-job —
+  # attributed skips, never missing legs (scripts/ci_summary_gate.py, sq-fmx4u.3).
+  # NOT gated by-class here: vectorized-feature-off.yml stays FULL on merge groups on
+  # purpose — the feature-OFF wasm byte-drift class only manifests on merged bundles
+  # (the documented #3421 unsound-skip exception).
   changes:
     name: detect rust changes
     # [FABLE-5] label-trigger guard (see the pull_request trigger note): a
@@ -162,9 +183,10 @@ jobs:
       docker_changed: ${{ steps.decide.outputs.docker_changed }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      # Only run the path filter on pull_request; on every other event we force-run the
-      # full matrix (see decide step), so the filter's result is irrelevant there and we
-      # skip it to avoid the unreliable push/merge_group base-diff.
+      # Only run the path filter on pull_request: merge_group gets the batch-diff
+      # change-class gate in the decide step below (dorny's push/merge_group base-diff is
+      # unreliable; the merge_group event payload's base_sha/head_sha pair is not), and
+      # every other event force-runs the full matrix, so the filter is irrelevant there.
       - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
         id: filter
         if: github.event_name == 'pull_request'
@@ -200,17 +222,57 @@ jobs:
               - '.github/workflows/ci.yml'
       - name: Decide rust_changed (safe-by-default off the PR path)
         id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            # push / merge_group / schedule / workflow_dispatch -> always run the full matrix.
-            echo "rust_changed=true" >> "$GITHUB_OUTPUT"
-            echo "docker_changed=true" >> "$GITHUB_OUTPUT"
-            echo "event=${{ github.event_name }} -> forcing rust_changed=true + docker_changed=true (full matrix)"
-          else
+          if [ "${EVENT_NAME}" = "pull_request" ]; then
             echo "rust_changed=${{ steps.filter.outputs.rust }}" >> "$GITHUB_OUTPUT"
             echo "docker_changed=${{ steps.filter.outputs.docker }}" >> "$GITHUB_OUTPUT"
             echo "pull_request -> paths-filter says rust=${{ steps.filter.outputs.rust }} docker=${{ steps.filter.outputs.docker }}"
+          elif [ "${EVENT_NAME}" = "merge_group" ]; then
+            # [FABLE-5] MERGE-GROUP CHANGE-CLASS GATE (see the job header note): diff the
+            # queued batch (base_sha...head_sha, the #3421 fetch pattern) and classify it
+            # via scripts/ci_select.py --classify-only — the same classify_change() the
+            # `select` pre-job runs on this event. docs-only/orchestration-only batch =>
+            # skip the rust_changed/docker_changed lanes; ANY other class, an unknown
+            # token, an unresolvable SHA pair, or a classifier error => full (fail-safe).
+            rust=true
+            docker=true
+            ok=true
+            # --depth=2147483647 (git's INFINITE_DEPTH; --unshallow that is also
+            # valid on a complete repo): this job's checkout is depth-1, and the
+            # classifier's three-dot diff needs the merge-base — a shallow SHA
+            # fetch leaves both commits PRESENT (the cat-file guards pass) but
+            # unconnected, so `git diff base...head` dies with "no merge base"
+            # and the fail-safe would silently force class=engine on EVERY
+            # batch, reducing this whole gate to a no-op. Same rationale as
+            # ci-select.yml's fetch-depth: 0 checkout.
+            git fetch --no-tags --quiet --depth=2147483647 origin "${MG_BASE_SHA}" "${MG_HEAD_SHA}" 2>/dev/null \
+              || git fetch --no-tags --quiet --depth=2147483647 origin "${MG_BASE_SHA}" 2>/dev/null \
+              || ok=false
+            git cat-file -e "${MG_BASE_SHA}^{commit}" 2>/dev/null || ok=false
+            git cat-file -e "${MG_HEAD_SHA}^{commit}" 2>/dev/null || ok=false
+            if [ "${ok}" = "true" ]; then
+              cls="$(python3 scripts/ci_select.py --classify-only --event merge_group \
+                       --base "${MG_BASE_SHA}" --head "${MG_HEAD_SHA}")" || cls=engine
+              case "${cls}" in
+                docs-only|orchestration-only) rust=false; docker=false ;;
+                *) rust=true; docker=true ;;
+              esac
+            else
+              echo "::warning::could not resolve merge_group base/head SHAs for the batch diff — running the full matrix (fail-safe)."
+            fi
+            echo "rust_changed=${rust}" >> "$GITHUB_OUTPUT"
+            echo "docker_changed=${docker}" >> "$GITHUB_OUTPUT"
+            echo "merge_group -> change_class=${cls:-<unresolved>} rust_changed=${rust} docker_changed=${docker}"
+          else
+            # push / schedule / workflow_dispatch -> always run the full matrix.
+            echo "rust_changed=true" >> "$GITHUB_OUTPUT"
+            echo "docker_changed=true" >> "$GITHUB_OUTPUT"
+            echo "event=${EVENT_NAME} -> forcing rust_changed=true + docker_changed=true (full matrix)"
           fi
 
   # [FABLE-5] sq-fmx4u.3: change-based test-selection pre-job (reusable — see the
@@ -305,8 +367,15 @@ jobs:
       # scripts/ci-free-disk.sh.
       - name: Free runner disk before build + archive
         run: ./scripts/ci-free-disk.sh
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Rust (preinstalled stable)
+        # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
+        # ships a rustup stable toolchain; the SHA-pinned action's `rustup
+        # toolchain install stable` re-downloads the whole toolchain whenever
+        # the image lags the newest release. Use the preinstalled one —
+        # `rustup default`/`component add` never trigger a toolchain download.
+        run: |
+          rustup default stable
+          rustup show active-toolchain
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -319,11 +388,12 @@ jobs:
           shared-key: "test-workspace"
       # [OPUS-4.8] sq-x4jy: cargo-nextest is the test runner — each test in its OWN
       # process (a stray abort can't take the whole binary down), a never-executed
-      # BINARY reported as a DETERMINISTIC failure, and --retries 2 (set on the run
-      # side) lets a residual transient binary race self-heal. SHA-pinned install
+      # BINARY reported as a DETERMINISTIC failure, and retries = 2 (now set by
+      # .config/nextest.toml [profile.ci], selected on the run side — registry#563
+      # item 2) lets a residual transient binary race self-heal. SHA-pinned install
       # action (a pin already vetted elsewhere in this workflow).
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
         with:
           tool: nextest
       # [OPUS-4.8] Build + ARCHIVE the whole workspace test set once. `--all-targets`
@@ -491,10 +561,17 @@ jobs:
       # ~14 GB free. Same in-repo, SHA-pin-free, best-effort step as build-archive.
       - name: Free runner disk before download + test
         run: ./scripts/ci-free-disk.sh
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Rust (preinstalled stable)
+        # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
+        # ships a rustup stable toolchain; the SHA-pinned action's `rustup
+        # toolchain install stable` re-downloads the whole toolchain whenever
+        # the image lags the newest release. Use the preinstalled one —
+        # `rustup default`/`component add` never trigger a toolchain download.
+        run: |
+          rustup default stable
+          rustup show active-toolchain
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
         with:
           tool: nextest
       - name: Download nextest archive
@@ -510,7 +587,9 @@ jobs:
       #     uniform remainder, split evenly. Filter is applied FIRST, then the count
       #     partition runs over the filtered (not-heavy) set, so the three bulk shards
       #     cover every non-heavy test exactly once.
-      # --retries 2 preserved per shard (transient binary-race self-heal, sq-x4jy).
+      # retries = 2 preserved per shard via `--profile ci` (.config/nextest.toml —
+      # transient binary-race self-heal, sq-x4jy; moved off the inline flag by
+      # registry#563 item 2 so the retry policy has one home).
       #
       # [OPUS-4.8] `--extract-to . --extract-overwrite` is LOAD-BEARING — it is the fix
       # for the bulk-shard failures #159 originally shipped with. WHY: sparq-cli's
@@ -532,9 +611,13 @@ jobs:
       # PASS; without it they reproduce the exact NotFound panic. (Touching ONLY this
       # run-step keeps it on the build-once archive path — sq-vyxy stays closed.)
       # [OPUS-4.8] sq-c76x: TWO retry layers, each fixing a DIFFERENT failure class —
-      #   1. `--retries 2` (kept, unchanged): nextest's PER-TEST retry. A single flaky
-      #      test process re-runs in-place; the test passes iff any attempt passes. This
-      #      is the residual-variance / transient-binary-race self-heal (sq-x4jy).
+      #   1. `retries = 2` (kept, count unchanged — now sourced from
+      #      .config/nextest.toml [profile.ci] via `--profile ci`, registry#563 item 2):
+      #      nextest's PER-TEST retry. A single flaky test process re-runs in-place; the
+      #      test passes iff any attempt passes, and a retried-then-passing test is
+      #      reported FLAKY in the log + end-of-run summary (final-status-level =
+      #      "flaky"), so retries never silently mask a flaky test. This is the
+      #      residual-variance / transient-binary-race self-heal (sq-x4jy).
       #   2. The `for attempt` STEP-LEVEL retry below (new): re-invokes the WHOLE
       #      `cargo nextest run` up to MAX_ATTEMPTS times. This catches failures that a
       #      per-test retry CANNOT — a transient archive-extraction error, residual disk
@@ -629,7 +712,7 @@ jobs:
             esac
           fi
           common=(--archive-file nextest.tar.zst --workspace-remap . \
-                  --extract-to . --extract-overwrite --retries 2)
+                  --extract-to . --extract-overwrite --profile ci)
           if [ -n "${{ matrix.filter }}" ]; then
             # Dedicated heavy shard: intersect HEAVY with this shard's single test so
             # the shard's set is provably a SUBSET of HEAVY (belt-and-braces: if the
@@ -878,18 +961,31 @@ jobs:
       - name: clippy (wasm32 target, sparq-text-wasm, deny warnings)
         run: cargo clippy -p sparq-text-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
       # [OPUS-4.8] sq-lfmf (W-shacl): the tier-b SHACL validation bundle. Build + clippy it
-      # on wasm32 in BOTH feature states (default SHACL Core + SHACL-SPARQL, and the opt-in
-      # `shacl-af` sh:rule feature) so the SHACL bundle (sparq-shacl + its no-default-features
-      # sparq-engine/sparq-core wasm32 graph, carrying the pure-Rust `sh:pattern` regex) is
-      # gate-protected exactly like the other wasm bundles.
+      # on wasm32 in EVERY feature state (default SHACL Core + SHACL-SPARQL, the opt-in
+      # `shacl-af` sh:rule feature, the opt-in `stateful` pre-parsed-handle feature, and the
+      # combined `shacl-af`+`stateful` state via --all-features) so the SHACL bundle
+      # (sparq-shacl + its no-default-features sparq-engine/sparq-core wasm32 graph,
+      # carrying the pure-Rust `sh:pattern` regex) is gate-protected exactly like the other
+      # wasm bundles.
       - name: Build sparq-shacl-wasm for the browser target
         run: cargo build -p sparq-shacl-wasm --target wasm32-unknown-unknown
       - name: Build sparq-shacl-wasm for the browser target (shacl-af feature)
         run: cargo build -p sparq-shacl-wasm --target wasm32-unknown-unknown --features shacl-af
+      # [FABLE-5] sq-01xlp: the opt-in `stateful` (pre-parsed ParsedGraph handle) state.
+      - name: Build sparq-shacl-wasm for the browser target (stateful feature)
+        run: cargo build -p sparq-shacl-wasm --target wasm32-unknown-unknown --features stateful
+      # [FABLE-5] sq-01xlp: the combined state (`shacl-af`+`stateful` — both opt-in features
+      # can be enabled together, and stateful validation inherits sh:rule behaviour).
+      - name: Build sparq-shacl-wasm for the browser target (all features)
+        run: cargo build -p sparq-shacl-wasm --target wasm32-unknown-unknown --all-features
       - name: clippy (wasm32 target, sparq-shacl-wasm, deny warnings)
         run: cargo clippy -p sparq-shacl-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
       - name: clippy (wasm32 target, sparq-shacl-wasm, shacl-af feature, deny warnings)
         run: cargo clippy -p sparq-shacl-wasm --target wasm32-unknown-unknown --all-targets --features shacl-af -- -D warnings
+      - name: clippy (wasm32 target, sparq-shacl-wasm, stateful feature, deny warnings)
+        run: cargo clippy -p sparq-shacl-wasm --target wasm32-unknown-unknown --all-targets --features stateful -- -D warnings
+      - name: clippy (wasm32 target, sparq-shacl-wasm, all features, deny warnings)
+        run: cargo clippy -p sparq-shacl-wasm --target wasm32-unknown-unknown --all-targets --all-features -- -D warnings
       - name: Guard the wasm dependency graph (no native-only deps)
         # [OPUS-4.8] sq-9qz6: enforce the "flate2/zstd/rayon/sparq-parse must never
         # enter the wasm graph" invariant (was comment-only) — fails if a native-only
@@ -911,7 +1007,7 @@ jobs:
       # RUNS the exported API (JsError/serialisation across the JS boundary), so the
       # web.rs #[wasm_bindgen_test]s run via wasm-pack in the Node executor — closing
       # exactly that gap. Verified locally: 20 passed.
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 20
       - name: Install wasm-pack
@@ -968,14 +1064,23 @@ jobs:
       # [OPUS-4.8] sq-lfmf (W-shacl): drive the REAL #[wasm_bindgen] Validator exports
       # (crates/sparq-shacl-wasm/tests/web.rs) in a genuine wasm runtime — SHACL validation +
       # the JSON / Turtle / text report serialisation across the JS boundary, which a
-      # `cargo build --target wasm32` above never RUNS. Both feature states: default, then
-      # with the opt-in `shacl-af` (sh:rule) feature.
+      # `cargo build --target wasm32` above never RUNS. Every feature state: default, the
+      # opt-in `shacl-af` (sh:rule) feature, the opt-in `stateful` feature, then the
+      # combined `shacl-af`+`stateful` state (--all-features).
       - name: Headless wasm tests (sparq-shacl-wasm, wasm-pack test --node)
         working-directory: crates/sparq-shacl-wasm
         run: wasm-pack test --node
       - name: Headless wasm tests (sparq-shacl-wasm, wasm-pack test --node, shacl-af feature)
         working-directory: crates/sparq-shacl-wasm
         run: wasm-pack test --node --features shacl-af
+      # [FABLE-5] sq-01xlp: drive the opt-in pre-parsed `ParsedGraph` exports (incl. the
+      # JsError-returning `parse` the native suite cannot run) in a real wasm runtime.
+      - name: Headless wasm tests (sparq-shacl-wasm, wasm-pack test --node, stateful feature)
+        working-directory: crates/sparq-shacl-wasm
+        run: wasm-pack test --node --features stateful
+      - name: Headless wasm tests (sparq-shacl-wasm, wasm-pack test --node, all features)
+        working-directory: crates/sparq-shacl-wasm
+        run: wasm-pack test --node --all-features
       # [OPUS-4.8] sq-aq5: sparq-introspect wasm-safety. The crate is pure sorted scans over
       # sparq-core's public read API (no threads, no syscalls, no wall clock) so it is a
       # tier-b browser surface for in-tab schema cards. It is NOT a #[wasm_bindgen] BUNDLE
@@ -1051,9 +1156,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          components: rustfmt, clippy
+      - name: Rust (preinstalled stable, rustfmt+clippy)
+        # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
+        # ships a rustup stable toolchain; the SHA-pinned action's `rustup
+        # toolchain install stable` re-downloads the whole toolchain whenever
+        # the image lags the newest release. Use the preinstalled one —
+        # `rustup default`/`component add` never trigger a toolchain download.
+        run: |
+          rustup default stable
+          rustup component add rustfmt clippy
+          rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       # GATES: the whole workspace (sparq-py included) is clippy-clean under -D warnings.
       # A new warning — from new code or a Rust-stable bump that adds a lint — fails CI.
@@ -1148,13 +1260,42 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
+    env:
+      # Clear the workflow-level -fuse-ld=lld for THIS job only: the floor
+      # toolchain (1.88) does not supply rustc's ld.lld shim path the way the
+      # current preinstalled stable does, and the runner image ships no lld —
+      # so on 1.88 the flag dies deterministically ("collect2: cannot find
+      # 'ld'", 3/3 on this PR once the gate stopped being vacuous). Plain GNU
+      # ld is fine here: this lane is `cargo check` (only build scripts and
+      # proc-macros link) and its meaning is the VERSION floor, not link speed.
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install Rust (pinned MSRV)
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # 1.88
+      - name: Rust (pinned MSRV toolchain 1.88)
+        # [FABLE-5] PR #3511 review finding 4: this gate was VACUOUS — the
+        # pre-existing step was the SHA-pinned action with a trailing `# 1.88`
+        # comment but NO `toolchain:` input (the action's default is `stable`),
+        # so the "MSRV check" had been compiling on LATEST STABLE all along; the
+        # first CI-economy pass preserved that broken behaviour. FIXED: install
+        # the declared floor toolchain and check ON it, so the floor is a checked
+        # invariant again (this lane's entire meaning IS the version — it is the
+        # one stable-family lane that must never ride the runner image's rolling
+        # preinstalled stable). `--profile minimal` = rustc+cargo only; no clippy
+        # or docs run on the floor toolchain. COMPILER POLICY, explicit: every
+        # other stable lane deliberately uses the image's preinstalled stable
+        # (rolling; may briefly lag a fresh release during runner-image rollout —
+        # an accepted CI-economy tradeoff, see the `lint` job's note), while THIS
+        # lane pins the exact floor. Keep the pin == root Cargo.toml
+        # rust-version (sq-qmth).
+        run: |
+          rustup toolchain install 1.88 --profile minimal --no-self-update
+          rustup default 1.88
+          rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: cargo check on the declared MSRV
-        run: cargo check --workspace --exclude sparq-py --exclude sparq-hdt
+        # [SONNET-4.6] Test targets must compile at the declared floor too; they can
+        # otherwise hide newer temporary-lifetime-extension behavior from this gate.
+        run: cargo check --workspace --all-targets --exclude sparq-py --exclude sparq-hdt
 
   conformance:
     # W3C SPARQL conformance RATCHET (roadmap T13/38). The full 1229-test scope is at
@@ -1178,7 +1319,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Rust (preinstalled stable)
+        # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
+        # ships a rustup stable toolchain; the SHA-pinned action's `rustup
+        # toolchain install stable` re-downloads the whole toolchain whenever
+        # the image lags the newest release. Use the preinstalled one —
+        # `rustup default`/`component add` never trigger a toolchain download.
+        run: |
+          rustup default stable
+          rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Fetch W3C test suites (pinned)
         run: ./scripts/fetch-conformance.sh
@@ -1300,7 +1449,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Rust (preinstalled stable)
+        # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
+        # ships a rustup stable toolchain; the SHA-pinned action's `rustup
+        # toolchain install stable` re-downloads the whole toolchain whenever
+        # the image lags the newest release. Use the preinstalled one —
+        # `rustup default`/`component add` never trigger a toolchain download.
+        run: |
+          rustup default stable
+          rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Fetch W3C SHACL test suite (pinned)
         run: ./crates/sparq-shacl/fetch-shacl-tests.sh
@@ -1425,7 +1582,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Rust (preinstalled stable)
+        # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
+        # ships a rustup stable toolchain; the SHA-pinned action's `rustup
+        # toolchain install stable` re-downloads the whole toolchain whenever
+        # the image lags the newest release. Use the preinstalled one —
+        # `rustup default`/`component add` never trigger a toolchain download.
+        run: |
+          rustup default stable
+          rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Run OGC GeoSPARQL topology compliance ratchet
         # The runner asserts its own floor (OGC_RATCHET_FLOOR) + fail==0; capture the
@@ -1559,7 +1724,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Rust (preinstalled stable)
+        # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
+        # ships a rustup stable toolchain; the SHA-pinned action's `rustup
+        # toolchain install stable` re-downloads the whole toolchain whenever
+        # the image lags the newest release. Use the preinstalled one —
+        # `rustup default`/`component add` never trigger a toolchain download.
+        run: |
+          rustup default stable
+          rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Run Solid WAC + ACP decision-parity suites
         # The runners assert their own pinned floors; capture the output so the grep
@@ -1657,7 +1830,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Rust (preinstalled stable)
+        # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
+        # ships a rustup stable toolchain; the SHA-pinned action's `rustup
+        # toolchain install stable` re-downloads the whole toolchain whenever
+        # the image lags the newest release. Use the preinstalled one —
+        # `rustup default`/`component add` never trigger a toolchain download.
+        run: |
+          rustup default stable
+          rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Fetch SolidLab ODRL Test Suite (pinned)
         run: bash scripts/fetch-odrl-suite.sh
@@ -1751,7 +1932,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Rust (preinstalled stable)
+        # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
+        # ships a rustup stable toolchain; the SHA-pinned action's `rustup
+        # toolchain install stable` re-downloads the whole toolchain whenever
+        # the image lags the newest release. Use the preinstalled one —
+        # `rustup default`/`component add` never trigger a toolchain download.
+        run: |
+          rustup default stable
+          rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Run sparq-text BM25 differential oracle
         # The runner asserts its own floor (TEXT_ORACLE_FLOOR) + per-hit score
@@ -1848,7 +2037,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Rust (preinstalled stable)
+        # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
+        # ships a rustup stable toolchain; the SHA-pinned action's `rustup
+        # toolchain install stable` re-downloads the whole toolchain whenever
+        # the image lags the newest release. Use the preinstalled one —
+        # `rustup default`/`component add` never trigger a toolchain download.
+        run: |
+          rustup default stable
+          rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Run sparq-rsp RSP expressivity / SRBench correctness oracle
         # The runner asserts its own floor (RSP_EXPRESSIVITY_FLOOR) + every
@@ -1950,7 +2147,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Rust (preinstalled stable)
+        # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
+        # ships a rustup stable toolchain; the SHA-pinned action's `rustup
+        # toolchain install stable` re-downloads the whole toolchain whenever
+        # the image lags the newest release. Use the preinstalled one —
+        # `rustup default`/`component add` never trigger a toolchain download.
+        run: |
+          rustup default stable
+          rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Fetch W3C JSON-LD 1.1 API test suite (toRdf/fromRdf/compact, pinned)
         run: ./scripts/fetch-jsonld-tests.sh
@@ -2080,7 +2285,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Rust (preinstalled stable)
+        # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
+        # ships a rustup stable toolchain; the SHA-pinned action's `rustup
+        # toolchain install stable` re-downloads the whole toolchain whenever
+        # the image lags the newest release. Use the preinstalled one —
+        # `rustup default`/`component add` never trigger a toolchain download.
+        run: |
+          rustup default stable
+          rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Clippy the gated harness surface (service-loopback feature ON)
         # The REAL gate for the feature-gated code: -D warnings over all targets with the
@@ -2229,7 +2442,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Rust (preinstalled stable)
+        # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
+        # ships a rustup stable toolchain; the SHA-pinned action's `rustup
+        # toolchain install stable` re-downloads the whole toolchain whenever
+        # the image lags the newest release. Use the preinstalled one —
+        # `rustup default`/`component add` never trigger a toolchain download.
+        run: |
+          rustup default stable
+          rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Fetch inference test suites (pinned)
         run: ./scripts/fetch-inference-suites.sh
@@ -2625,7 +2846,7 @@ jobs:
         # [OPUS-4.8] sq-tool-pin: taiki-e/install-action picks the tool from its @<tool> ref;
         # SHA-pinning (our code-scanning=0 policy) drops that ref, so an explicit `with: tool:`
         # is MANDATORY — without it install-action installs NOTHING and `cargo llvm-cov` ENOENTs.
-        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # cargo-llvm-cov
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # cargo-llvm-cov
         with:
           tool: cargo-llvm-cov
       - name: Compute coverage cone (shadow mode, sq-6vshe.8) [SONNET-4.6]
@@ -2773,7 +2994,7 @@ jobs:
         # [OPUS-4.8] sq-tool-pin: explicit `with: tool:` is MANDATORY when SHA-pinning
         # install-action (the @<tool> ref is dropped by the pin). Both tools are needed:
         # llvm-cov for instrumentation, nextest for the partitioning.
-        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # cargo-llvm-cov
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # cargo-llvm-cov
         with:
           tool: cargo-llvm-cov,nextest
       - name: Fetch W3C fixtures (engine tests need them)
@@ -2820,7 +3041,7 @@ jobs:
         with:
           key: coverage-engine-run-1
       - name: Install cargo-llvm-cov + nextest
-        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # cargo-llvm-cov
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # cargo-llvm-cov
         with:
           tool: cargo-llvm-cov,nextest
       - name: Build instrumented engine objects (for `report`, no test run)
@@ -3030,7 +3251,7 @@ jobs:
         # [OPUS-4.8] sq-tool-pin: explicit `with: tool:` is MANDATORY when SHA-pinning
         # install-action — the @<tool> ref is dropped by the SHA pin, so without this the
         # tool is silently NOT installed and `cargo llvm-cov` ENOENTs (see per-commit job).
-        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # cargo-llvm-cov
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # cargo-llvm-cov
         with:
           tool: cargo-llvm-cov
       - name: Test-presence gate
@@ -3065,13 +3286,13 @@ jobs:
     # it is schedule + workflow_dispatch only, behind the same nightly-gate freshness check,
     # and is NEVER on the per-PR required `ci-summary` path (that would blow the PR budget).
     #
-    # ADVISORY (non-gating) FOR NOW — the job NAME contains the whole word "advisory", so the
-    # ci-summary aggregator (.github/workflows/ci-summary.yml `\b(advisory|informational)\b`)
-    # excludes it from the gating set: even a `failure` here cannot block a merge. This is
+    # ADVISORY (non-gating) FOR NOW — this job is DECLARED in .github/advisory-registry.json,
+    # which is what makes the ci-summary aggregator exclude it from the gating set (#3773: the
+    # "advisory" name token alone no longer does): even a `failure` here cannot block a merge. This is
     # the deliberate bootstrap idiom (mirroring how `geiger` started, and how the coverage
     # ratchet seeded its floor before gating): we seed bench/mutants-baseline.json across the
-    # workspace over the first few nightly runs, then PROMOTE to gating by renaming the job
-    # (drop "advisory") + flipping the step to fail on a regression, once broadly seeded.
+    # workspace over the first few nightly runs, then PROMOTE to gating by DELETING the registry
+    # entry + flipping the step to fail on a regression, once broadly seeded.
     # Until then `continue-on-error: true` keeps the run green while it seeds.
     #
     # SEEDED SO FAR (honest): the crates listed in bench/mutants-baseline.json carry a real
@@ -3168,6 +3389,8 @@ jobs:
             timeout_minutes: 360
           - crate: sparq-substrate
             features: numeric,join,compare,rows
+          - crate: sparq-sim
+            features: multi-hop,explain,sketch
           # [OPUS-4.8] sq-qcnn.14: sparq-canon QUIRK — the `rdf12-triple-terms` feature
           # gates rdf12.rs (the NON-STANDARD RDF-1.2 triple-term profile). Without it,
           # cargo-mutants mutates rdf12.rs but the tests never compile that module, so all
@@ -3253,10 +3476,18 @@ jobs:
         # cargo-mutants builds the workspace many times (one rebuild per mutant); reclaim
         # space first like coverage-nightly. Best-effort, no-ops on absent paths.
         run: ./scripts/ci-free-disk.sh
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Rust (preinstalled stable)
+        # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
+        # ships a rustup stable toolchain; the SHA-pinned action's `rustup
+        # toolchain install stable` re-downloads the whole toolchain whenever
+        # the image lags the newest release. Use the preinstalled one —
+        # `rustup default`/`component add` never trigger a toolchain download.
+        run: |
+          rustup default stable
+          rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # cargo-mutants
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # cargo-mutants
         with:
           tool: cargo-mutants@25.3.1
       - name: Run cargo-mutants for this crate + ratchet against the baseline
@@ -3378,10 +3609,18 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Rust (preinstalled stable)
+        # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
+        # ships a rustup stable toolchain; the SHA-pinned action's `rustup
+        # toolchain install stable` re-downloads the whole toolchain whenever
+        # the image lags the newest release. Use the preinstalled one —
+        # `rustup default`/`component add` never trigger a toolchain download.
+        run: |
+          rustup default stable
+          rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install cargo-geiger
-        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
         with:
           tool: cargo-geiger
         continue-on-error: true

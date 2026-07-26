@@ -71,7 +71,12 @@ def plan_dispatch(ready_issues, routing_doc):
     for it in ready_issues:
         labels = labels_of(it)
         role = _role_of(labels)
-        package = sorted(packages_of(labels))[0]
+        # Package semantics mirror the registry's plan_package byte-for-byte (issue #3691):
+        # exactly one unique area -> that area; zero or multiple -> the serializing GLOBAL
+        # partition. The old first-of-sorted pick disagreed with the registry cross-check on
+        # multi-area issues, perma-deferring them at dispatch.
+        pkgs = packages_of(labels)
+        package = next(iter(pkgs)) if len(pkgs) == 1 else _ready.GLOBAL
         model_chain, agent, escalate = resolve(labels, routing_doc)
         if role is None:
             # No declared role → the resolver returned [defaults]; do NOT guess an agent/role.
@@ -154,7 +159,7 @@ def _self_test():
     chk("impl -> single row", len(p_impl), 1)
     row = p_impl[0]
     chk("impl row", (row["role"], row["model_chain"][0], row["agent"], row["escalate"]),
-        ("impl", "fable", "sparq-rust-impl", False))
+        ("impl", "sol", "sparq-rust-impl", False))
     chk("impl package", row["package"], "sparq-core")
     chk("impl priority", row["priority"], 1)
 
@@ -162,7 +167,7 @@ def _self_test():
     sec = compute_ready([iss(2, R + ["priority:P0", "role:impl", "area:sparq-zk"])])
     p_sec = plan_dispatch(sec, doc)
     row = p_sec[0]
-    chk("zk -> opus", row["model_chain"], ["opus"])
+    chk("zk -> opus5-led", row["model_chain"], ["opus5", "opus"])
     chk("zk -> reviewer/escalate", (row["agent"], row["escalate"]), ("sparq-reviewer", True))
     chk("zk role stays declared", row["role"], "impl")
 
@@ -172,6 +177,16 @@ def _self_test():
     row = p_docs[0]
     chk("docs -> haiku", row["model_chain"][0], "haiku")
     chk("docs -> sparq-docs", row["agent"], "sparq-docs")
+
+    # --- Fixture: a ci/infra issue → frontier-only chain (standing rule 2026-07-17) --------------
+    # No sub-frontier model (sonnet/haiku) in the plan row's chain: the registry claim step can
+    # only serve a frontier account or DEFER the item to the next tick — degradation to a cheaper
+    # authoring tier is impossible by construction (see routing-validate's frontier-floor check).
+    ci = compute_ready([iss(8, R + ["priority:P1", "role:ci", "area:ci"])])
+    row = plan_dispatch(ci, doc)[0]
+    chk("ci -> frontier-only row", (row["role"], row["model_chain"], row["agent"], row["escalate"]),
+        ("ci", ["sol", "opus5", "fable"], "sparq-ci-infra", False))
+    chk("ci row has no sub-frontier tier", sorted(set(row["model_chain"]) & {"sonnet", "haiku"}), [])
 
     # --- Fixture: package-conflict pair → only the higher-priority one is planned ----------------
     pair = compute_ready([
@@ -193,6 +208,15 @@ def _self_test():
     p_norole = plan_dispatch([iss(7, ["priority:P1", "area:sparq-core"])], doc)
     row = p_norole[0]
     chk("no-role -> flagged", (row["role"], row["agent"], row["model_chain"]), (None, None, []))
+
+        # --- #3691 package-semantics fixtures (mirror registry plan_package) --------------------------
+    one = plan_dispatch([iss(90, R + ["priority:P2", "role:impl", "area:sparq-core"])], doc)
+    chk("#3691 exactly-one area maps to that area", one[0]["package"], "sparq-core")
+    multi = plan_dispatch([iss(91, R + ["priority:P2", "role:perf", "area:bench", "area:sparq-serve"])], doc)
+    chk("#3691 multi-area maps to the GLOBAL serializing partition (first-of-sorted pick => red)",
+        multi[0]["package"], _ready.GLOBAL)
+    zero = plan_dispatch([iss(92, R + ["priority:P2", "role:docs"])], doc)
+    chk("#3691 zero-area maps to GLOBAL", zero[0]["package"], _ready.GLOBAL)
 
     print("dispatch-plan self-test", "PASSED" if ok else "FAILED")
     return 0 if ok else 1

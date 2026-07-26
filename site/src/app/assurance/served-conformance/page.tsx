@@ -29,7 +29,7 @@ export const metadata: Metadata = {
     "What sparq-server's served HTTP /sparql surface passes of the SPARQL 1.1 Protocol and the Service-Description + Graph-Store-Protocol — machine-readable per-assertion outcomes, published per release.",
 };
 
-const REPO = "https://github.com/jeswr/sparq";
+const REPO = "https://github.com/sparq-org/sparq";
 const RELEASES = `${REPO}/releases`;
 const REPORT_SRC = `${REPO}/blob/main/site/src/data/served-conformance.generated.json`;
 

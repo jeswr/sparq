@@ -32,6 +32,21 @@
   features: "jsonld"
   test: true
 
+# [SONNET-4.6] #3547: exercise the native Turtle parser's inline differential,
+# malformed-input parity, and loader tests on every feature-matrix run.
+- name: "sparq-core (native-ttl)"
+  crate: "sparq-core"
+  features: "native-ttl"
+  test: true
+
+# [SONNET-4.6] #3547: exercise the opt-in RFC-3987 IRI validation path. These
+# tests live in inline cfg(test) modules, so the structural C1 guard cannot infer
+# their need for a dedicated feature executor.
+- name: "sparq-core (iri-fast)"
+  crate: "sparq-core"
+  features: "iri-fast"
+  test: true
+
 # [OPUS-4.8] sq-wihld (survey §A1): opt-in per-block Bloom filters on the high-NDV
 # leading column of a block-compressed permutation. OFF by default (lean core); this
 # leg runs the bloom equivalence + block-skip tests (compress::tests::bloom_*).

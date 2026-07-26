@@ -41,6 +41,17 @@ default = []
 # workspace feature unification).
 dispatch = ["dep:sparq-reason", "dep:sparq-reason-el"]
 
+# [FABLE-5] sq-fj8lj: graduate the QL dispatch branch — OFF by default, implies `dispatch`.
+# Pulls sparq-reason-ql with its `ql-consistency` feature (sq-p6yb7: DL-Lite_R consistency by
+# violation-query composition) so dispatch branch 3 can return DEFINITIVE verdicts instead of
+# the always-`Unknown(QlConsistencyPending)` arm. The verdict's soundness rests ENTIRELY on
+# the QL crate's OWN extraction accounting over the raw input triples (`Inconsistent` sound at
+# any capture level by monotonicity; `Consistent` only when `fully_captured()` and
+# `consistency_uncaptured == 0`) — the L2 profile test only ROUTES, it never justifies a
+# verdict, so L2-grammar-vs-QL-capture drift cannot manufacture one (check.rs §"QL branch
+# soundness"). Without this feature the QL arm abstains exactly as before.
+dispatch_ql = ["dispatch", "dep:sparq-reason-ql", "sparq-reason-ql/ql-consistency"]
+
 # [GPT-5.6] sq-zfwzq: OPT-IN transitive roles (the "S" extension) -- OFF by default. Extends
 # the fragment to ALCH + transitive roles (still NO inverses / cardinality / nominals, which
 # stay fail-closed per the design-record §5 deferral ledger): L1 recognises
@@ -62,6 +73,8 @@ rustc-hash.workspace = true
 # crates.io.
 sparq-reason = { path = "../sparq-reason", version = "0.1.0", optional = true }
 sparq-reason-el = { path = "../sparq-reason-el", version = "0.1.0", optional = true }
+# [FABLE-5] sq-fj8lj: optional DL-Lite_R consistency checker, pulled ONLY by `dispatch_ql`.
+sparq-reason-ql = { path = "../sparq-reason-ql", version = "0.1.0", optional = true }
 
 # [GPT-5.6] sq-7ru8y: Criterion is dev-only and drives the self-relative tableau
 # microbenchmark; it does not enter the shipped opt-in reasoner crate.

@@ -37,7 +37,7 @@ export const metadata: Metadata = {
     "The honest status ledger for sparq's RDF-native GenAI-retrieval composition: ANN-in-SPARQL, filtered ANN, embedding provenance, NL→SPARQL, and graph-derived citations — what is implemented today (crate + feature) vs designed-only (bead id).",
 };
 
-const REPO = "https://github.com/jeswr/sparq";
+const REPO = "https://github.com/sparq-org/sparq";
 
 /** An external link to a repo artifact, with the small up-right glyph. */
 function Artifact({ href, label }: { href: string; label: string }) {

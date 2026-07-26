@@ -33,6 +33,15 @@ SEC_KEYWORDS = ("zk", "mpc", "reasoner", "crypto", "auth", "e2ee")
 # substrings: a substring set would false-match (e.g. "gui" in "guide") and UI keywords must NOT
 # enter routing match_labels, which the arm-side security classifier unions into its keyword set.
 UI_SURFACE_LABELS = ("area:site", "area:gui", "surface:frontend", "dashboard")
+# [FABLE-5] STANDING RULE — frontier-tier CI/infrastructure authorship (maintainer decision
+# 2026-07-17, same pattern as the UI→codex rule above / PR #3416): infra-surface labels derive
+# role:ci so infra work (.github/workflows, gate aggregators, orchestration/ + dispatch scripts)
+# reaches the FRONTIER-ONLY ci chain in orchestration/routing.toml (fable/terra — sonnet/haiku no
+# longer author infra). EXACT labels, not substrings ("ci" as a substring would match nearly every
+# label), and deliberately NOT routing match_labels (the arm-side security classifier unions those
+# keywords — infra keywords there would human-arm every infra PR). Security keywords still win.
+INFRA_SURFACE_LABELS = ("area:ci", "area:ci-fragments", "area:orchestration", "area:workflows",
+                        "area:release")
 _PRIO = re.compile(r"^priority:P([0-4])$")
 
 
@@ -57,6 +66,11 @@ def _role(labels, issue_type):
     # after kind (so kind:docs about the site stays docs) and after an explicit role:* label.
     if any(lb in UI_SURFACE_LABELS for lb in labels):
         return "site"
+    # [FABLE-5] infra-surface labels derive role:ci (the frontier-only fable/terra chain) before
+    # the generic type map — same precedence slot as the UI rule: after security (soundness wins),
+    # after an explicit role:*, after kind (so kind:docs about the CI stays docs).
+    if any(lb in INFRA_SURFACE_LABELS for lb in labels):
+        return "ci"
     return ROLE_BY_TYPE.get(issue_type)
 
 
@@ -141,6 +155,15 @@ def _self_test():
         triage(["priority:P2", "role:impl", "area:site"], "feature")["role"], "impl")
     chk("site docs stay docs", triage(["priority:P3", "kind:docs", "area:site"], "task")["role"], "docs")
     chk("ui+sec -> soundness", triage(["priority:P1", "area:site", "area:sparq-zk"], "feature")["role"], "soundness")
+    # [FABLE-5] frontier-tier infra authorship: an infra-surface label derives role:ci (the
+    # frontier-only fable/terra chain) even when the issue type would derive impl; kind (docs)
+    # and security keywords still win (soundness), matching the UI-rule precedence.
+    chk("infra surface -> ci", triage(["priority:P1", "area:ci"], "feature")["role"], "ci")
+    chk("orchestration surface -> ci",
+        triage(["priority:P2", "area:orchestration"], "task")["role"], "ci")
+    chk("infra docs stay docs", triage(["priority:P3", "kind:docs", "area:ci"], "task")["role"], "docs")
+    chk("infra+sec -> soundness",
+        triage(["priority:P1", "area:ci", "area:sparq-zk"], "feature")["role"], "soundness")
     # [FABLE-5] no-area guard: a complete priority+role issue with NO area:* is NOT promoted to ready
     # (it would reserve the serializing __global__ partition); it parks needs:area instead.
     r = triage(["priority:P1", "role:impl"], "feature")

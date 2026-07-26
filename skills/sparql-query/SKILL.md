@@ -159,6 +159,14 @@ N worst-by-wall-time analyzed plans (`record` / `push` / `slowest` / `to_json`) 
 view. Honest boundaries: only BGP nodes carry an estimate (the only operators the planner sizes);
 q-error is `None` when either side is 0; `nanos` are always 0 on wasm32.
 
+Persistent planner statistics *(opt-in `persistent-stats`, OFF by default)* are rebuilt explicitly
+with `stats::analyze(&graph, saved_store_dir)`. This atomically writes a deterministic `stats.bin`
+beside the saved/mmap store containing per-predicate cardinalities and equi-depth subject/object
+value histograms. Load it without scanning indexes using `StatsCatalog::load(dir)`, then install it
+around queries with `with_stats_catalog(&Arc::new(catalog), || query(&graph, sparql))`. The catalog
+changes join estimates/order only; query results are unchanged. `AnalyzeMetrics` exposes stable
+triple/predicate/bucket/byte counts for operational checks.
+
 ## Common recipes
 
 **Aggregates, GROUP BY / HAVING, subqueries** — standard SPARQL 1.1; no special API:

@@ -54,7 +54,7 @@ pub mod transport;
 #[cfg_attr(docsrs, doc(cfg(feature = "solid")))]
 pub mod solid;
 
-pub use server::{McpServer, ServerConfig, PROTOCOL_VERSION};
+pub use server::{McpServer, ServerConfig, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS};
 pub use tools::ToolSpec;
 
 /// The pod-backed MCP server + its configuration (feature `solid`). See `solid`.

@@ -510,6 +510,80 @@ mod tests {
         );
     }
 
+    // [SONNET-4.6] Issue #3714 — mutation tripwire for the dependency-free RFC
+    // 3986 implementation. oxiri remains test-only so the crate's zero-mandatory-
+    // dependency design is preserved.
+    #[test]
+    fn resolve_iri_matches_oxiri_on_shared_corpus() {
+        let cases = [
+            // RFC 3986 §5.4 normal examples.
+            ("http://a/b/c/d;p?q", "g:h"),
+            ("http://a/b/c/d;p?q", "g"),
+            ("http://a/b/c/d;p?q", "./g"),
+            ("http://a/b/c/d;p?q", "g/"),
+            ("http://a/b/c/d;p?q", "/g"),
+            ("http://a/b/c/d;p?q", "//g"),
+            ("http://a/b/c/d;p?q", "?y"),
+            ("http://a/b/c/d;p?q", "g?y"),
+            ("http://a/b/c/d;p?q", "#s"),
+            ("http://a/b/c/d;p?q", "g#s"),
+            ("http://a/b/c/d;p?q", "g?y#s"),
+            ("http://a/b/c/d;p?q", ";x"),
+            ("http://a/b/c/d;p?q", "g;x"),
+            ("http://a/b/c/d;p?q", "g;x?y#s"),
+            ("http://a/b/c/d;p?q", ""),
+            ("http://a/b/c/d;p?q", "."),
+            ("http://a/b/c/d;p?q", "./"),
+            ("http://a/b/c/d;p?q", ".."),
+            ("http://a/b/c/d;p?q", "../"),
+            ("http://a/b/c/d;p?q", "../g"),
+            ("http://a/b/c/d;p?q", "../.."),
+            ("http://a/b/c/d;p?q", "../../"),
+            ("http://a/b/c/d;p?q", "../../g"),
+            // RFC 3986 §5.4.2 abnormal examples.
+            ("http://a/b/c/d;p?q", "../../../g"),
+            ("http://a/b/c/d;p?q", "../../../../g"),
+            ("http://a/b/c/d;p?q", "/./g"),
+            ("http://a/b/c/d;p?q", "/../g"),
+            ("http://a/b/c/d;p?q", "g."),
+            ("http://a/b/c/d;p?q", ".g"),
+            ("http://a/b/c/d;p?q", "g.."),
+            ("http://a/b/c/d;p?q", "..g"),
+            ("http://a/b/c/d;p?q", "./../g"),
+            ("http://a/b/c/d;p?q", "./g/."),
+            ("http://a/b/c/d;p?q", "g/./h"),
+            ("http://a/b/c/d;p?q", "g/../h"),
+            ("http://a/b/c/d;p?q", "g;x=1/./y"),
+            ("http://a/b/c/d;p?q", "g;x=1/../y"),
+            ("http://a/b/c/d;p?q", "g?y/./x"),
+            ("http://a/b/c/d;p?q", "g?y/../x"),
+            ("http://a/b/c/d;p?q", "g#s/./x"),
+            ("http://a/b/c/d;p?q", "g#s/../x"),
+            ("http://a/b/c/d;p?q", "http:g"),
+            // Existing resolver cases and JSON-LD @base/document-relative shapes.
+            ("http://a/b", "https://c/d?x#y"),
+            ("https://example.com/doc", "#node"),
+            ("https://example.com/a/context.jsonld", "../vocab/term"),
+            ("https://example.com/a/", "child"),
+            ("https://example.com", "relative"),
+            ("https://example.com/a?old=1", "?new=2"),
+            ("https://example.com/a?old=1", "#fragment"),
+            ("urn:example:base", "next"),
+        ];
+
+        for (base, reference) in cases {
+            let oxiri_base = oxiri::Iri::parse(base.to_string()).unwrap();
+            let Ok(expected) = oxiri_base.resolve(reference) else {
+                continue;
+            };
+            assert_eq!(
+                resolve_iri(base, reference),
+                expected.into_inner(),
+                "base={base:?}, reference={reference:?}"
+            );
+        }
+    }
+
     // -----------------------------------------------------------------------
     // relativize_iri — round-trip correctness matrix
     // [SONNET-4.6] (sq-90mu3) Fix for §7.1 step 6 base-relative compaction.
