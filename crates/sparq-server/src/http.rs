@@ -6798,20 +6798,54 @@ fn truncation_reason(e: &str) -> &'static str {
 /// writes a trailers frame for such a client, so this also decides how a mid-stream truncation
 /// is signalled: a trailer for a client that asked for one, an aborted chunked framing (no
 /// terminating zero-length chunk) for one that did not.
+///
+/// A `q=0` weight on the token means "not acceptable" (RFC 9110 §12.4.2), so `TE: trailers;q=0`
+/// is a client DECLINING trailers and yields `false`. The RFC 9110 grammar does not admit a
+/// weight on `trailers` at all, so such a parameter is already off-spec; anything unparseable
+/// as a positive qvalue is therefore resolved conservatively to `false` — malformed input can
+/// only pick the loud aborted-framing signal, never the quiet normal-completion trailer path.
 fn client_accepts_trailers(headers: &HeaderMap) -> bool {
     headers.get_all(header::TE).iter().any(|value| {
         value.to_str().is_ok_and(|raw| {
             raw.split(',').any(|token| {
-                // Strip any `;q=` weight before comparing the transfer coding name.
-                token
-                    .split(';')
+                let mut parts = token.split(';');
+                if !parts
                     .next()
                     .unwrap_or("")
                     .trim()
                     .eq_ignore_ascii_case("trailers")
+                {
+                    return false;
+                }
+                // Every parameter must leave the token acceptable: a `q` parameter counts only
+                // when it parses as a strictly positive qvalue; other parameters are ignored.
+                parts.all(|param| match param.split_once('=') {
+                    Some((name, weight)) => {
+                        !name.trim().eq_ignore_ascii_case("q") || qvalue_is_positive(weight.trim())
+                    }
+                    // A bare `q` carries no weight and is malformed — decline conservatively.
+                    None => !param.trim().eq_ignore_ascii_case("q"),
+                })
             })
         })
     })
+}
+
+/// [SONNET-4.6] `true` when `raw` is a well-formed, strictly positive RFC 9110 §12.4.2 qvalue
+/// (`( "0" [ "." 0*3DIGIT ] ) / ( "1" [ "." 0*3"0" ] )`). `0`, `0.0`, `0.000` — and anything
+/// that is not a valid qvalue at all — are `false`, so a caller reading this as "acceptable"
+/// fails closed on malformed input.
+fn qvalue_is_positive(raw: &str) -> bool {
+    let (int, frac) = raw.split_once('.').unwrap_or((raw, ""));
+    if frac.len() > 3 || !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    match int {
+        // `1` is only well-formed with an all-zero fraction; `1.5` is malformed, not "positive".
+        "1" => frac.bytes().all(|b| b == b'0'),
+        "0" => frac.bytes().any(|b| b != b'0'),
+        _ => false,
+    }
 }
 
 /// [SONNET-4.6] (sq-7d3dj.26) Where a [`StreamingJsonBody`] is in its lifecycle.
@@ -7355,8 +7389,9 @@ mod truncation_safety_tests {
         assert_eq!(out.text(), format!("{}{}", HEAD, middle));
     }
 
-    /// `TE` parsing: the transfer coding is matched case-insensitively, in a list, and with a
-    /// `q` weight stripped; anything else means "no trailers".
+    /// `TE` parsing: the transfer coding is matched case-insensitively, in a list, and honours
+    /// a `q` weight — `q=0` is a client DECLINING trailers, not negotiating them. Anything else
+    /// means "no trailers".
     #[test]
     fn te_trailers_negotiation_is_parsed() {
         let with = |value: &str| {
@@ -7368,9 +7403,29 @@ mod truncation_safety_tests {
         assert!(with("gzip, trailers"));
         assert!(with("Trailers"));
         assert!(with("trailers;q=0.5"));
+        assert!(with("trailers;q=1"));
+        assert!(with("trailers;q=1.000"));
+        // An unrelated parameter must not be mistaken for a weight.
+        assert!(with("trailers;ext=0"));
         assert!(!with("gzip"));
         assert!(!with(""));
         assert!(!client_accepts_trailers(&HeaderMap::new()));
+
+        // `q=0` means "not acceptable" — in every spelling, spacing and list position.
+        assert!(!with("trailers;q=0"));
+        assert!(!with("trailers;q=0.0"));
+        assert!(!with("trailers;q=0.000"));
+        assert!(!with("trailers; q=0"));
+        assert!(!with("trailers ; Q = 0 "));
+        assert!(!with("gzip, trailers;q=0"));
+        assert!(!with("trailers;q=0, gzip"));
+
+        // Malformed weights fail closed rather than opting into the trailer path.
+        assert!(!with("trailers;q="));
+        assert!(!with("trailers;q"));
+        assert!(!with("trailers;q=abc"));
+        assert!(!with("trailers;q=1.5"));
+        assert!(!with("trailers;q=0.0000"));
     }
 }
 
