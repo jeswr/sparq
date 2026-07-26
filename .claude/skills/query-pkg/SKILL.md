@@ -242,6 +242,27 @@ cargo run -p sparq-kb --features close --bin pkg-query -- --close owl-rl \
             SELECT (COUNT(*) AS ?n) WHERE { ?b dcterms:identifier "sq-8thu" . ?b pkg:blockedBy ?d }'
 ```
 
+## CITE — Findings with rendered [source] citations (`--citations`, `sq-2489d.11`)
+
+Run the citation mode with the same default-OFF `query` feature:
+
+```bash
+cargo run -p sparq-kb --features query --bin pkg-query -- --citations
+```
+
+This always runs the unparameterised `finding-provenance` canned query and renders each
+Finding's `prov:wasDerivedFrom` source as a `[source: label]` citation. Rendered citation
+text is written to stdout. The executed-SPARQL banner and the MEASURED metrics — total
+citations, fabricated count, and citation-resolution rate — are written to stderr,
+mirroring the existing `N row(s).` convention.
+
+Use `--sparql-only` to print the SPARQL without running it. `--extra-graph` and `--close`
+compose with citation mode as usual. The mode takes no argument: `--query`, `--sparql`,
+`--arg`, and `--json` are each incompatible and rejected with a non-zero exit. The
+NL-tool `--json` envelope carries no citation fields.
+
+CLI gate: `crates/sparq-kb/tests/pkg_query_cli.rs`.
+
 ## The natural-language tool (agent flavor) — `sq-ve5dy`
 
 Instead of writing the SPARQL yourself, you can delegate the whole round-trip to a
@@ -393,4 +414,5 @@ Run: `cargo test -p sparq-kb --features literature,literature-live --test core_c
   `crates/sparq-kb/src/query/citations.rs` — `render_citations(&graph, &rows)` renders
   `prov:wasDerivedFrom` sources from `FINDING_PROVENANCE` rows as `[source: label]`
   citations; returns `CitationReport` with `CitationMetrics` (resolution-rate + fabricated-count).
-  Gate: `crates/sparq-kb/tests/citations.rs`.
+  CLI mode: `pkg-query --citations`. Gates: `crates/sparq-kb/tests/citations.rs` and
+  `crates/sparq-kb/tests/pkg_query_cli.rs`.
