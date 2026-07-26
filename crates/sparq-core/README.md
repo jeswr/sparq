@@ -54,6 +54,10 @@ assert_eq!(count, 1);
   with optional block compression and near-zero resident heap. The opt-in `block-bloom` feature
   adds per-block Bloom filters on high-NDV columns to skip blocks on equality-bound point lookups
   (result-equivalent, never serialised).
+- **Numeric fast path** — a per-term cache makes numeric FILTER / ORDER BY / MIN-MAX an O(1)
+  array index. It is dense on purpose; the opt-in `sparse-numerics` feature trades that index
+  for a map (smaller on string-heavy data, slower to probe) and is **measured not worth
+  defaulting on** — see [`research/numerics-sparsify-measured.md`](../../research/numerics-sparsify-measured.md).
 - **Named graphs & RDF 1.2** — full quad storage and
   [triple terms](https://www.w3.org/TR/rdf12-concepts/).
 - **Thread-safe sharing** — `Graph` is `Send + Sync`, so one store serves many server threads;
