@@ -155,7 +155,14 @@ pub mod auth_compare;
 // Read the module docs' "What the MAC-check does NOT cover" before making any
 // tamper-detection claim: `auth_mul` ADOPTS a value tamper on its second operand and
 // `mac_check` only covers values that are opened, so "any tamper aborts" is NOT the
-// delivered property. See the module docs.
+// delivered property. [SONNET-4.6] Stronger than a caveat — it is EXPLOITABLE: the
+// range proof's zero-test mask sits in that adopted slot, so zeroing it switches the
+// range proof off and the path returns a WRONG VERDICT instead of aborting (witness
+// `a_zeroed_zero_test_mask_defeats_the_range_proof_and_flips_the_verdict`). The
+// delivered tier is therefore honest-majority TAMPER-EVIDENT-with-abort on the opened
+// values, NOT AXIS-1 `Malicious`; do not deploy it as the integrity tier until
+// `MacSession` gains multiplication-gate verification binding BOTH operands. See the
+// module docs.
 pub mod auth_disclose;
 // [OPUS-4.8] sq-sxm: the (security model × N × query class) benchmark MATRIX
 // harness + its deterministic communication/round/multiplication counter — the
@@ -342,8 +349,10 @@ pub use compare::{
 // [OPUS-4.8] sq-ka8m: the malicious-secure (honest-majority, with-abort) comparison
 // surface — IT-MAC-carried decompose+compare chain, verdict MAC-checked before open.
 pub use auth_compare::{malicious_greater_than, malicious_threshold, open_auth_verdict};
-// [OPUS-4.8] sq-6fv7: the malicious-secure disclose path over an EXISTING sum — the
+// [OPUS-4.8] sq-6fv7: the IT-MAC-hardened disclose path over an EXISTING sum — the
 // three decomposition opens (a², c=sum+r, verdict) routed through the MAC-check.
+// [SONNET-4.6] The name predates the measured tier: this is tamper-EVIDENT, not
+// malicious-secure (see the `auth_disclose` module docs' integrity residual).
 pub use auth_disclose::malicious_disclose_threshold_verdict;
 pub use field::Fp;
 pub use holder::{Holder, HolderResult};
