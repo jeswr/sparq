@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # [FABLE-5] (sq-hmd7l.20) RSP4J/YASPER gather — the REAL-engine leg of the bounded
 # count-matched-replay protocol (research/comparative-benchmarking-everything.md
-# sec 5.2). GATHER-TIME ONLY: needs java (11+), a maven binary, and network for the
-# first build; RSP4J is NOT a committed dependency and this script never runs in CI.
+# sec 5.2). GATHER-TIME ONLY: needs a JDK 16+ (Rsp4jReplayRunner.java uses `record`), a
+# maven binary, and network for the first build; RSP4J is NOT a committed dependency and
+# this script never runs in CI.
 #
 # Pipeline:
 #   1. clone + build RSP4J at the PINNED commit (jars land in ~/.m2, Apache-2.0),
@@ -50,7 +51,9 @@ CP="$(cat "$WORK/cp.txt")"
 for m in api yasper operatorapi io; do
   CP="$CP:$JARS/$m/$RSP4J_VERSION/$m-$RSP4J_VERSION.jar"
 done
-javac -cp "$CP" -d "$WORK" "$HERE/rsp4j/Rsp4jReplayRunner.java"
+# -encoding UTF-8 is REQUIRED, not cosmetic: the runner's comments contain non-ASCII, so
+# javac fails outright (not warns) on a box whose default charset is US-ASCII (sq-rpdae).
+javac -encoding UTF-8 -cp "$CP" -d "$WORK" "$HERE/rsp4j/Rsp4jReplayRunner.java"
 
 # ---- 3. drive YASPER with the pinned replay ------------------------------------------
 java -cp "$WORK:$CP" Rsp4jReplayRunner \

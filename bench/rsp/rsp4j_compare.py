@@ -311,19 +311,26 @@ def cmd_count_match(args):
 
     # INVARIANT (sq-hmd7l.20): no throughput row without per-window count agreement,
     # and the time-model caveat is machine-attached to every emitted comparison row.
+    # Engine-specific protocol caveats (sq-rpdae): a count-match can be TRUE yet not be
+    # evidence of equivalent window semantics — csparql2's Esper sliding win:time agrees
+    # on this replay's counts only because no triple sits in the misaligned window edge.
+    # Such a caveat travels in the envelope AND on every row, never in prose alone.
+    protocol_caveats = list(args.protocol_caveat or [])
+
     rows = []
     if all_matched:
         for t in timing:
-            rows.append(
-                {
-                    "engine": meta.get("engine", args.engine),
-                    "metric": t["metric"],
-                    "value": t["value"],
-                    "unit": t["unit"],
-                    "time_model_caveat": True,
-                    "time_model_caveat_text": TIME_MODEL_CAVEAT,
-                }
-            )
+            row = {
+                "engine": meta.get("engine", args.engine),
+                "metric": t["metric"],
+                "value": t["value"],
+                "unit": t["unit"],
+                "time_model_caveat": True,
+                "time_model_caveat_text": TIME_MODEL_CAVEAT,
+            }
+            if protocol_caveats:
+                row["protocol_caveats"] = protocol_caveats
+            rows.append(row)
 
     envelope = {
         "gather": "rsp-bounded-count-matched-replay (sq-hmd7l.20)",
@@ -364,6 +371,7 @@ def cmd_count_match(args):
             "excluded": len(excluded),
         },
         "verdict": verdict,
+        "protocol_caveats": protocol_caveats,
         "rows": rows,
         "rows_note": "rows is EMPTY unless every non-excluded window count-matched the "
         "oracle; every row carries the machine-attached time-model caveat.",
@@ -440,6 +448,13 @@ def main(argv=None):
     cm.add_argument("--engine", default="rsp4j-yasper")
     cm.add_argument("--time-scale", type=int, default=1000)
     cm.add_argument("--exclude", action="append", metavar="wK:reason")
+    cm.add_argument(
+        "--protocol-caveat",
+        action="append",
+        metavar="TEXT",
+        help="engine-specific caveat qualifying what a count-match does NOT prove; "
+        "attached to the envelope AND to every emitted row (repeatable)",
+    )
     cm.add_argument("--no-missing-as-zero", action="store_true")
     cm.add_argument("--canonical", action="store_true")
     cm.add_argument("--canonical-note", default=None)
