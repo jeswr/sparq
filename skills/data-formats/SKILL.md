@@ -697,9 +697,12 @@ cargo build -p sparq-cli --features serialize-rdf
     WatDiv. A shape-dependent trade cannot be a blanket default, so V2 stays opt-in; re-opening it
     means a per-permutation format selector, not more benchmarking of the blanket flip. Both
     directions are pinned by `v2_size_delta_is_shape_dependent_not_a_uniform_win`, and
-    `v2_stream_is_byte_identical_when_no_reset_d1` bounds V2's extra decode work to `reset_d1` rows
-    (one zigzag un-map + one `wrapping_add`). The `spqcprm2` cargo feature (which implies `mmap`)
-    exposes the emit config gate:
+    `v2_stream_is_byte_identical_when_no_reset_d1` pins the *encoding* property that the two
+    encoders differ only in the `reset_d1` payload — an emitted-bytes claim, NOT a decode-cost
+    bound: a V2 perm always decodes through the separate `decode_block_v2_at`, which captures the
+    block's frame origin whether or not the block holds a `reset_d1` row, and V2's decode cost has
+    not been benchmarked (the size result alone settles the flip). The `spqcprm2` cargo feature
+    (which implies `mmap`) exposes the emit config gate:
     `compress::with_emit_format(EmitFormat::V2, || …)` on a thread, or `SPARQ_EMIT_FORMAT=v2` for a
     process, routes the store's `save_compressed`, the streaming `CompressedPermWriter`, AND the
     in-RAM compressed profile (`TripleStore::from_triples_compressed` / `Graph::into_compressed`,

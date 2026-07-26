@@ -330,11 +330,16 @@ pub enum Format {
 // that — the regression is arithmetic on the emitted bytes, not measurement noise — so the
 // decision is taken now rather than left parked on a box that would not change the answer.
 //
-// Query cost is NOT the blocker either, and is bounded in the same deterministic way: a block
-// containing no `reset_d1` row encodes BYTE-IDENTICALLY under both formats (asserted by
-// `v2_stream_is_byte_identical_when_no_reset_d1`), so V2's whole extra decode cost is confined
-// to `reset_d1` rows, where `decode_block_v2_at` does one zigzag un-map plus one `wrapping_add`
-// against the block-invariant frame origin — no extra branch, allocation, or memory traffic.
+// The size regression above is on its own sufficient to block the flip, so DECODE cost was not
+// what the decision turned on — and it is NOT claimed to be measured here. What IS pinned is an
+// ENCODING property: a block containing no `reset_d1` row encodes BYTE-IDENTICALLY under both
+// formats (asserted by `v2_stream_is_byte_identical_when_no_reset_d1`), i.e. the two encoders
+// differ only in the `reset_d1` payload. That is a statement about emitted bytes, NOT about
+// runtime: a V2 perm still decodes through the separate `decode_block_v2_at` (dispatched per
+// block in `decode_block_at`, and capturing the frame origin once per block) whatever its rows
+// look like, so equal bytes do not imply equal decode work. Quantifying V2's decode overhead
+// would need a decode benchmark that covers that dispatch and per-block work; nobody has run
+// one, and the flip does not depend on it.
 //
 // WHAT WOULD RE-OPEN THIS: not more benchmarking of the blanket flip, but a different design —
 // a PER-PERMUTATION (or per-block) format choice that emits V2 only where it measures smaller,
@@ -2305,14 +2310,16 @@ mod tests {
         );
     }
 
-    /// [OPUS-5] sq-sh7be — the QUERY-COST NEUTRALITY anchor. `encode_block_v2` is documented as
+    /// [OPUS-5] sq-sh7be — the ENCODER-DIVERGENCE anchor. `encode_block_v2` is documented as
     /// byte-for-byte identical to `encode_block` except at `reset_d1` rows; this asserts that
     /// documented claim directly on a block stream that contains NO `reset_d1` row (one subject,
     /// one predicate, strictly increasing objects — every row takes the `d0 == 0 && d1 == 0`
-    /// arm). Identical bytes mean an identical decode, so V2's extra decode work is CONFINED to
-    /// `reset_d1` rows — one zigzag un-map plus one `wrapping_add` against the block-invariant
-    /// frame origin — and cannot leak into any other row shape. That bound is what makes the
-    /// query-cost side of the flip decision arguable from the code rather than from a benchmark.
+    /// arm), and checks the converse is non-vacuous on a `reset_d1`-bearing stream.
+    ///
+    /// Scope, deliberately: this observes EMITTED BYTES only. It does NOT bound decode cost — a
+    /// V2 perm is still dispatched to `decode_block_v2_at`, which captures the frame origin once
+    /// per block whether or not the block holds a `reset_d1` row, so byte equality does not imply
+    /// equal decode work. Any runtime claim about V2 needs a decode benchmark, not this test.
     #[cfg(feature = "spqcprm2")]
     #[test]
     fn v2_stream_is_byte_identical_when_no_reset_d1() {
