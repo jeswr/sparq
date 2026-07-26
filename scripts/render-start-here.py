@@ -25,7 +25,7 @@ FAIL-CLOSED RULES (the reason this script is longer than it looks)
      failure, so the unknown path is biased all the way to keep.
   2. A per-ref failure still publishes (keeping is loss-free) but the process exits NON-ZERO so the
      workflow reds and a human sees the degradation. The exit status is STICKY: a later success can
-     never clear an earlier failure (this repo has been bitten three times by exit-zero swallowing
+     never clear an earlier failure (this repo has been bitten repeatedly by exit-zero swallowing
      an earned failure).
   3. An AGGREGATE failure (a label count or the held-PR list) ABORTS the whole render without
      touching the issue: those numbers are rendered as prose with no per-item marker to hang an
@@ -104,7 +104,7 @@ class Status:
     """Sticky exit status: severity only ever escalates.
 
     A later successful step must never downgrade an earlier earned failure — this repo has shipped
-    that bug three times (a later transient discarding a hard failure). `code` is therefore a
+    that bug repeatedly (a later transient discarding a hard failure). `code` is therefore a
     monotone maximum and there is deliberately no way to lower it.
     """
 

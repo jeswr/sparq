@@ -424,7 +424,7 @@ class TestFailClosed(unittest.TestCase):
 
 
 class TestStickyStatus(unittest.TestCase):
-    """A later transient must never discard an earlier earned failure (three prior outages)."""
+    """A later transient must never discard an earlier earned failure (a recurring outage class)."""
 
     def test_status_escalates_and_never_downgrades(self):
         status = rsh.Status()
@@ -433,7 +433,7 @@ class TestStickyStatus(unittest.TestCase):
         self.assertEqual(status.code, rsh.EXIT_DEGRADED)
 
     def test_a_later_lower_severity_report_cannot_clear_an_earlier_failure(self):
-        # The exact shape of the three prior outages: a LATER transient (reported at a lower
+        # The exact shape of every prior outage in the class: a LATER transient (reported at a lower
         # severity) overwriting an EARLIER earned hard failure. `degrade` must be a monotone
         # maximum, not an assignment.
         status = rsh.Status()
