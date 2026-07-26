@@ -281,6 +281,18 @@ class TestQuietDirectionFailSafes(unittest.TestCase):
         self.assertFalse(rec["raise_alarm"])
         self.assertEqual(rec["status"], "DELIBERATELY-INERT")
 
+    def test_a_lane_that_STARTS_skipping_after_failing_goes_quiet(self):
+        """The newest-run test must dominate: a guard turned on after a bad run
+        is a deliberate off switch, so the older failures must not still raise.
+        Distinguishes the newest-run check from the all-runs-skipped check."""
+        rec = cll.classify_lane(
+            DAILY, "active",
+            runs(("skipped", ago(1)), ("failure", ago(25)), ("failure", ago(49)),
+                 ("failure", ago(73))),
+            NOW)
+        self.assertFalse(rec["raise_alarm"])
+        self.assertEqual(rec["status"], "DELIBERATELY-INERT")
+
 
 # --------------------------------------------------------------------------- #
 class TestScopeDiscovery(unittest.TestCase):
@@ -359,9 +371,11 @@ class TestScopeDiscovery(unittest.TestCase):
 class TestLiveRepositoryScope(unittest.TestCase):
     """The scan applied to the REAL .github/workflows tree."""
 
-    def setUp(self):
-        self.lanes = cll.discover_cron_only_lanes(WORKFLOWS_DIR, FV_MANIFEST)
-        self.names = {x["workflow"] for x in self.lanes}
+    @classmethod
+    def setUpClass(cls):
+        # Parsing ~70 workflow files is the slow part; do it once for the class.
+        cls.lanes = cll.discover_cron_only_lanes(WORKFLOWS_DIR, FV_MANIFEST)
+        cls.names = {x["workflow"] for x in cls.lanes}
 
     def test_the_live_scan_finds_at_least_one_lane(self):
         # A scan that finds nothing is a broken scan, not a clean repo.
@@ -530,20 +544,34 @@ class TestFailLoud(_EndToEnd):
             cll.main(["--workflows-dir", str(self.wf), "--repo", "",
                       "--now", "2026-07-26T12:00:00Z", "--dry-run"]), 2)
 
-    def test_pagination_short_of_total_count_is_fail_loud(self):
-        calls = {"n": 0}
-
-        def fake_json(path: str):
-            calls["n"] += 1
-            return {"total_count": 50, "workflow_runs": []}
-
+    def test_pagination_returning_nothing_against_a_nonzero_total_is_fail_loud(self):
         real = cll._gh_json
         try:
-            cll._gh_json = fake_json
+            cll._gh_json = lambda path: {"total_count": 50, "workflow_runs": []}
             with self.assertRaises(cll.AlarmError):
                 cll.fetch_scheduled_runs("o/r", "z.yml")
         finally:
             cll._gh_json = real
+
+    def test_pagination_short_of_total_count_is_fail_loud(self):
+        """A page cap silently truncating a listing has caused wrong conclusions
+        here before: a SHORT result against a larger total_count must red, not
+        quietly become the answer."""
+        pages = {1: [{"conclusion": "success", "created_at": "2026-07-0"
+                                                             f"{d}T00:00:00Z"}
+                     for d in range(1, 10)]}
+
+        real = cll._gh_json
+        try:
+            cll._gh_json = lambda path: {
+                "total_count": 50,
+                "workflow_runs": pages.get(
+                    int(re.search(r"[?&]page=(\d+)", path).group(1)), [])}
+            with self.assertRaises(cll.AlarmError) as ctx:
+                cll.fetch_scheduled_runs("o/r", "z.yml")
+        finally:
+            cll._gh_json = real
+        self.assertIn("total_count=50", str(ctx.exception))
 
     def test_a_runs_response_without_total_count_is_fail_loud(self):
         real = cll._gh_json

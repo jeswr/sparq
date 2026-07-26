@@ -106,6 +106,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import functools
 import json
 import os
 import subprocess
@@ -249,6 +250,18 @@ def cron_fire_times(exprs: list[str], start: dt.datetime,
     return sorted(fires)
 
 
+@functools.lru_cache(maxsize=256)
+def _period_cached(exprs: tuple[str, ...], day: dt.datetime) -> float | None:
+    try:
+        fires = cron_fire_times(list(exprs), day)
+    except CronError:
+        return None
+    if len(fires) < 2:
+        return None
+    gaps = [(b - a).total_seconds() / 3600.0 for a, b in zip(fires, fires[1:])]
+    return max(gaps)
+
+
 def derive_period_hours(exprs: list[str], now: dt.datetime) -> float | None:
     """Largest gap (hours) between consecutive fires; None when indeterminate.
 
@@ -258,14 +271,10 @@ def derive_period_hours(exprs: list[str], now: dt.datetime) -> float | None:
     """
     if not exprs:
         return None
-    try:
-        fires = cron_fire_times(exprs, now)
-    except CronError:
-        return None
-    if len(fires) < 2:
-        return None
-    gaps = [(b - a).total_seconds() / 3600.0 for a, b in zip(fires, fires[1:])]
-    return max(gaps)
+    # The window is day-aligned inside cron_fire_times, so the cache key can be
+    # too: every call on the same day with the same crons is the same answer.
+    day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return _period_cached(tuple(exprs), day)
 
 
 # --------------------------------------------------------------------------- #
