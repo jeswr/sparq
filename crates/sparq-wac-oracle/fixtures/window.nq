@@ -1,0 +1,14 @@
+# [SONNET-4.6] sq-x1ayt — the time-windowed conditional-grant pod. A minimal ACP pod
+# whose `win8/.acr` grants alice everything on the members (an UNWINDOWED anchor grant,
+# so the corpus can pin that a grant with no window ignores `Session::now`). The
+# windowed grant itself is NOT expressible in ACP — it is minted over this pod by the
+# ODRL bridge from `window-policy.ttl` (see src/window_corpus.rs).
+<https://pod.ex/win8/d0.ttl#it> <https://ex.dev/ns#title> "win8 doc" <https://pod.ex/win8/d0.ttl> .
+<https://pod.ex/win8/.acr> <http://www.w3.org/ns/solid/acp#resource> <https://pod.ex/win8/> <https://pod.ex/win8/.acr> .
+<https://pod.ex/win8/.acr> <http://www.w3.org/ns/solid/acp#memberAccessControl> <https://pod.ex/win8/.acr#ctl-own> <https://pod.ex/win8/.acr> .
+<https://pod.ex/win8/.acr#ctl-own> <http://www.w3.org/ns/solid/acp#apply> <https://pod.ex/win8/.acr#pol-own> <https://pod.ex/win8/.acr> .
+<https://pod.ex/win8/.acr#pol-own> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/win8/.acr> .
+<https://pod.ex/win8/.acr#pol-own> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Write> <https://pod.ex/win8/.acr> .
+<https://pod.ex/win8/.acr#pol-own> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Control> <https://pod.ex/win8/.acr> .
+<https://pod.ex/win8/.acr#pol-own> <http://www.w3.org/ns/solid/acp#allOf> <https://pod.ex/win8/.acr#m-own> <https://pod.ex/win8/.acr> .
+<https://pod.ex/win8/.acr#m-own> <http://www.w3.org/ns/solid/acp#agent> <https://alice.ex/card#me> <https://pod.ex/win8/.acr> .
