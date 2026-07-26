@@ -506,31 +506,37 @@ impl DirectChecker {
         // [GPT-5.6] sq-zfwzq: declarations have no Direct-Semantics import. Seed the
         // conclusion extraction with declarations for premise-confirmed roles so a bare
         // conclusion role assertion is classifiable without weakening L1 globally.
-        let mut conclusion_for_extraction = conclusion.to_vec();
-        let mut premise_roles = FxHashSet::default();
+        // [SONNET-4.6] Role declarations are needed only by the transitive-role extension.
         #[cfg(feature = "dl_transitive")]
-        if prem
-            .axioms()
-            .iter()
-            .any(|axiom| matches!(axiom, Axiom::TransitiveObjectProperty { .. }))
-        {
-            collect_role_ids(&prem, &mut premise_roles);
-        }
-        let conclusion_predicates: FxHashSet<Id> =
-            conclusion.iter().map(|triple| triple[1]).collect();
-        if !premise_roles.is_empty() {
-            let rdf_type = dict.intern(&OTerm::NamedNode(NamedNode::new_unchecked(
-                "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
-            )));
-            let object_property = dict.intern(&OTerm::NamedNode(NamedNode::new_unchecked(
-                "http://www.w3.org/2002/07/owl#ObjectProperty",
-            )));
-            for role in premise_roles {
-                if conclusion_predicates.contains(&role) {
-                    conclusion_for_extraction.push([role, rdf_type, object_property]);
+        let conclusion_for_extraction = {
+            let mut conclusion_for_extraction = conclusion.to_vec();
+            let mut premise_roles = FxHashSet::default();
+            if prem
+                .axioms()
+                .iter()
+                .any(|axiom| matches!(axiom, Axiom::TransitiveObjectProperty { .. }))
+            {
+                collect_role_ids(&prem, &mut premise_roles);
+            }
+            let conclusion_predicates: FxHashSet<Id> =
+                conclusion.iter().map(|triple| triple[1]).collect();
+            if !premise_roles.is_empty() {
+                let rdf_type = dict.intern(&OTerm::NamedNode(NamedNode::new_unchecked(
+                    "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+                )));
+                let object_property = dict.intern(&OTerm::NamedNode(NamedNode::new_unchecked(
+                    "http://www.w3.org/2002/07/owl#ObjectProperty",
+                )));
+                for role in premise_roles {
+                    if conclusion_predicates.contains(&role) {
+                        conclusion_for_extraction.push([role, rdf_type, object_property]);
+                    }
                 }
             }
-        }
+            conclusion_for_extraction
+        };
+        #[cfg(not(feature = "dl_transitive"))]
+        let conclusion_for_extraction = conclusion.to_vec();
         let concl = match extract(dict, &conclusion_for_extraction) {
             Ok(onto) => onto,
             Err(e) => return unknown_extraction(format!("conclusion: {}", e)),
@@ -628,6 +634,7 @@ enum AxiomVerdict {
 
 /// Collect every named object property whose role kind is established by a fully-extracted
 /// premise model. Used only to add semantically inert declarations to conclusion extraction.
+#[cfg(feature = "dl_transitive")]
 fn collect_role_ids(onto: &Ontology, into: &mut FxHashSet<Id>) {
     for axiom in onto.axioms() {
         match axiom {
@@ -662,6 +669,7 @@ fn collect_role_ids(onto: &Ontology, into: &mut FxHashSet<Id>) {
     }
 }
 
+#[cfg(feature = "dl_transitive")]
 fn collect_role_ids_in_ce(class: &ClassExpression, into: &mut FxHashSet<Id>) {
     match class {
         ClassExpression::ObjectIntersectionOf(members)
