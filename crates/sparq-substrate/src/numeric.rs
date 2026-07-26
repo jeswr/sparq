@@ -21,7 +21,10 @@
 //! EXACT lexical path — `Dec::parse_lexical` (scale-preserving) for `xsd:decimal` and
 //! `parse_xsd_f32` / `parse_xsd_f64` (which handle the XSD `INF` / `-INF` / `NaN` /
 //! exponent spellings) for `xsd:float` / `xsd:double` — so classification is bit-identical
-//! to what the engine did before the move.
+//! to what the engine did before the move. [SONNET-4.6] The `xsd:float` value conversion
+//! now deliberately rounds the lexical directly to `f32`; unlike the pre-move
+//! `f64`-then-narrow path, this avoids double rounding while retaining the same lexical
+//! acceptance set as `xsd:double`.
 //!
 //! # Zero-overhead intent
 //!
@@ -785,7 +788,9 @@ pub fn parse_xsd_f64(v: &str) -> Option<f64> {
     sparq_core::parse_xsd_f64(v)
 }
 
-/// Parse an xsd:float lexical directly at `f32` precision.
+/// [SONNET-4.6] Parse an xsd:float lexical directly at `f32` precision, avoiding the
+/// pre-move `f64`-then-narrow double-rounding path while retaining the XSD double lexical
+/// acceptance set.
 #[inline]
 pub fn parse_xsd_f32(v: &str) -> Option<f32> {
     match v {
@@ -1064,6 +1069,22 @@ mod tests {
         assert_eq!(parse_xsd_f32("INF"), Some(f32::INFINITY));
         assert_eq!(parse_xsd_f32("-INF"), Some(f32::NEG_INFINITY));
         assert!(parse_xsd_f32("nan").is_none());
+
+        // [SONNET-4.6] Anti-drift regression for sq-9781x: f32 and f64 deliberately
+        // produce values at different precisions, but their lexical acceptance sets must
+        // remain identical so the numeric cache and evaluator cannot diverge again.
+        for lexical in [
+            "NaN", "INF", "+INF", "-INF", "6", "+1", "1.5E2", "-0.0", "1.", ".5", "inf",
+            "+inf", "-inf", "infinity", "-infinity", "Infinity", "nan", "NAN", "", "abc",
+            "1_000", "0x1p4", " 1", "1 ", "1e", ".", "+",
+        ] {
+            assert_eq!(
+                parse_xsd_f32(lexical).is_some(),
+                parse_xsd_f64(lexical).is_some(),
+                "sq-9781x: xsd:float and xsd:double lexical acceptance drifted for {:?}",
+                lexical
+            );
+        }
     }
 
     #[test]
