@@ -437,8 +437,11 @@ class TestRetriageCronSeam(unittest.TestCase):
 
     def test_the_cron_self_tests_before_it_writes(self):
         run = self._run_blocks()
-        self.assertLess(run.index("retriage.py --self-test"),
-                        run.index("--apply"),
+        # Assert PRESENCE before ORDER: `str.index` on a missing needle raises, which would make
+        # a deleted --apply an ERROR (a crash-kill) instead of a clean assertion failure.
+        self.assertIn("retriage.py --self-test", run)
+        self.assertIn("--apply", run)
+        self.assertLess(run.index("retriage.py --self-test"), run.index("--apply"),
                         "the fixtures must run BEFORE the sweep writes labels")
 
     def test_the_sweep_is_scheduled(self):
@@ -450,6 +453,21 @@ class TestRetriageCronSeam(unittest.TestCase):
         perms = self.doc.get("permissions") or {}
         self.assertEqual(perms.get("issues"), "write",
                          "retriage writes labels; without issues:write every promotion 403s")
+
+    def test_the_workflows_this_class_guards_are_path_triggers(self):
+        # [OPUS-5] Otherwise this whole class is VACUOUS on the one edit it exists to catch:
+        # routing-self-tests.yml is `paths:`-filtered, so a PR touching ONLY retriage.yml would
+        # never run it and deleting --apply would sail through green. Exactly 2 — the
+        # pull_request filter AND the push filter.
+        source = (REPO_ROOT / ".github" / "workflows"
+                  / "routing-self-tests.yml").read_text(encoding="utf-8")
+        paths_section = source[:source.index("permissions:")]
+        for workflow in (".github/workflows/retriage.yml",
+                         ".github/workflows/docs-quality.yml"):
+            self.assertEqual(paths_section.count(f'"{workflow}"'), 2,
+                             f"{workflow} must re-run this gate on BOTH pull_request and push, "
+                             "or the seam assertions above never execute on the PR that breaks "
+                             "them")
 
     def test_triage_and_retriage_fixtures_run_on_every_pr(self):
         # The pair is self-tested in docs-quality.yml so a PR that changes promotion behaviour
@@ -554,7 +572,9 @@ class TestRetriageReachesNeverTriagedIssues(unittest.TestCase):
     def test_the_plan_is_idempotent(self):
         rows = [{"number": 9, "author": "jeswr",
                  "labels": ["priority:P2", "role:impl", "area:sparq-core"]}]
-        trusted = (lambda who: who == "jeswr")
+        def trusted(who):
+            return who == "jeswr"
+
         first = retriage.plan_retriage(rows, trusted)
         applied = [{**rows[0],
                     "labels": sorted((set(rows[0]["labels"]) | set(first[0][1])) - set(first[0][2]))}]

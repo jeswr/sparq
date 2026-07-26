@@ -249,6 +249,12 @@ def _fetch_candidates(repo):
 
     One unlabelled snapshot also subsumes both old queries, so the number-dedupe the two-query
     form needed is gone with them.
+
+    Mutation note, recorded so a reviewer does not mistake it for an untested guard: deleting the
+    `_needs_triage` filter below SURVIVES the suite, and correctly so — it is a bound on the
+    queue size, not a guard. `plan_retriage` re-applies the same predicate, so the resulting plan
+    is identical either way. The behaviour that IS load-bearing here (the unlabelled fetch) is
+    killed by "statusless issues reach the candidate queue at the FETCH layer".
     """
     return [{"number": it.get("number"), "labels": it.get("labels") or [],
              "author": ((it.get("user") or {}).get("login") or "")}

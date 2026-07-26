@@ -57,6 +57,12 @@ on:
       - "scripts/triage.py"
       - "scripts/retriage.py"
       - ".github/workflows/triage-issue.yml"
+      # [OPUS-5] the retriage CRON itself: TestRetriageCronSeam asserts this workflow
+      # still passes --apply, is unconditional and keeps issues:write. Without the
+      # trigger, the one edit that guard exists to catch would not run it.
+      - ".github/workflows/retriage.yml"
+      # ...and the workflow that self-tests triage.py + retriage.py on every PR.
+      - ".github/workflows/docs-quality.yml"
       - ".github/workflows/routing-self-tests.yml"
       # [OPUS-5] reg#677 — PR `area:` attribution. The scheduler partitions by
       # `area:<name>`; an unlabelled PR takes the serializing `__global__` partition
@@ -108,6 +114,12 @@ on:
       - "scripts/triage.py"
       - "scripts/retriage.py"
       - ".github/workflows/triage-issue.yml"
+      # [OPUS-5] the retriage CRON itself: TestRetriageCronSeam asserts this workflow
+      # still passes --apply, is unconditional and keeps issues:write. Without the
+      # trigger, the one edit that guard exists to catch would not run it.
+      - ".github/workflows/retriage.yml"
+      # ...and the workflow that self-tests triage.py + retriage.py on every PR.
+      - ".github/workflows/docs-quality.yml"
       - ".github/workflows/routing-self-tests.yml"
       # [OPUS-5] reg#677 — PR `area:` attribution. The scheduler partitions by
       # `area:<name>`; an unlabelled PR takes the serializing `__global__` partition
