@@ -408,6 +408,162 @@ class TestWorkspaceDerivedRoots(unittest.TestCase):
         self.assertEqual(json.loads(out)["resolved"], dict(fixture))
 
 
+class TestDeclaredSubPartitions(unittest.TestCase):
+    """sparq#4334 Phase 1: the measured split of an over-broad NON-crate bucket.
+
+    Three obligations, one test each, plus the integrity of the table itself:
+      GAIN    — two declared siblings of one bucket run in parallel;
+      SAFETY  — a declared sibling still conflicts with its parent bucket;
+      UNKNOWN — an undeclared or invented key under that bucket fails SAFE onto the whole bucket.
+    """
+
+    ROOTS = ready.workspace_roots()
+
+    def test_gain_two_declared_siblings_dispatch_in_the_same_tick(self):
+        self.assertFalse(ready.keys_conflict("bench-declarations", "bench-zk-compose"))
+        board = [iss(1, READY + ["priority:P1", "area:bench-declarations"]),
+                 iss(2, READY + ["priority:P1", "area:bench-zk-compose"]),
+                 iss(3, READY + ["priority:P1", "area:bench-suites"])]
+        self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet)), [1, 2, 3],
+                         "the whole point of the split: three bench workers, no shared file")
+
+    def test_the_gain_comes_from_the_table_and_nothing_else(self):
+        # Non-vacuity: with the declaration removed the SAME pair must go back to conflicting.
+        # Without this, `test_gain_...` would pass just as happily on a key space that never had
+        # a parent to collapse onto.
+        saved = dict(ready.SUBPARTITIONS)
+        try:
+            ready.SUBPARTITIONS.clear()
+            self.assertEqual(ready.partition_path("bench-declarations", self.ROOTS), ("bench",))
+            self.assertTrue(
+                ready.keys_conflict("bench-declarations", "bench-zk-compose", self.ROOTS),
+                "undeclared, both keys collapse onto bench and MUST serialise")
+        finally:
+            ready.SUBPARTITIONS.clear()
+            ready.SUBPARTITIONS.update(saved)
+        self.assertFalse(
+            ready.keys_conflict("bench-declarations", "bench-zk-compose", self.ROOTS))
+
+    def test_safety_a_declared_sibling_conflicts_with_its_parent_bucket(self):
+        for key in ready.SUBPARTITIONS:
+            parent = ready.SUBPARTITIONS[key][0]
+            with self.subTest(key=key):
+                self.assertTrue(ready.keys_conflict(parent, key))
+                self.assertTrue(ready.keys_conflict(key, parent))
+        board = [pr(70, ["area:bench"]),
+                 iss(20, READY + ["priority:P1", "area:bench-declarations"]),
+                 iss(21, READY + ["priority:P1", "area:bench-suites"])]
+        self.assertEqual(ready.compute_ready(board, conflict_log=quiet), [],
+                         "an open PR holding the whole bucket must block every sibling")
+
+    def test_unknown_key_under_a_split_bucket_fails_safe_onto_the_bucket(self):
+        for invented in ("bench-zzz", "bench-declarations-v2", "bench-suites-extra",
+                         "bench-brand-new-suite"):
+            with self.subTest(key=invented):
+                self.assertEqual(ready.partition_path(invented), ("bench",))
+                for declared in ready.SUBPARTITIONS:
+                    self.assertTrue(ready.keys_conflict(invented, declared),
+                                    f"{invented} must over-reserve against {declared}")
+        board = [pr(70, ["area:bench-declarations"]),
+                 iss(20, READY + ["priority:P1", "area:bench-zzz"])]
+        self.assertEqual(ready.compute_ready(board, conflict_log=quiet), [],
+                         "an invented bench key must fail SAFE into the whole bucket's lock")
+
+    def test_sub_keys_that_exist_but_are_not_declared_stay_collapsed(self):
+        # These `area:` labels are live in the repo today. Not being in the table is what keeps
+        # them coarse; the measurement rejected each of them (see the table's provenance block).
+        for key, parent in (("bench-canonical", "bench"), ("bench-wasm-compare", "bench"),
+                            ("ci-fragments", "ci"), ("site-papers", "site"),
+                            ("site-specs", "site"), ("zk-xpath", "zk"),
+                            ("deploy-demo", "deploy")):
+            with self.subTest(key=key):
+                self.assertEqual(ready.partition_path(key), (parent,))
+                self.assertTrue(ready.keys_conflict(key, parent))
+
+    def test_every_declared_key_is_hyphen_contained_by_a_real_workspace_root(self):
+        roots = ready.workspace_roots()
+        for key, (parent, _paths) in ready.SUBPARTITIONS.items():
+            with self.subTest(key=key):
+                self.assertTrue(key.startswith(parent + "-"),
+                                "a sub-key must be a hyphen-descendant of its parent or the "
+                                "containment predicate cannot relate them")
+                self.assertIn(parent, roots, "the parent must be a real directory in the tree")
+                self.assertNotIn(key, roots,
+                                 "a sub-key that is ALSO a directory would shadow a real "
+                                 "partition (the sparq-engine-serialize trap, one level down)")
+                self.assertEqual(ready.partition_path(key), (parent, key[len(parent) + 1:]))
+
+    def test_every_declared_path_still_exists_in_the_tree(self):
+        # The staleness class that made `zk` unsplittable: `zk/xpath` and `zk/ieee754` were the
+        # measured boundary and then moved upstream in #1602, leaving a key describing nothing.
+        # A declaration whose directory has gone is a boundary nobody is measuring any more.
+        for key, (parent, paths) in ready.SUBPARTITIONS.items():
+            for path in paths:
+                with self.subTest(key=key, path=path):
+                    self.assertTrue(path.startswith(parent + "/"))
+                    self.assertTrue(path.endswith("/"), "a region prefix must be a directory")
+                    self.assertTrue((REPO_ROOT / path).is_dir(),
+                                    f"{path} is declared as a partition but is not in the tree")
+
+    def test_declared_regions_of_one_parent_are_disjoint_and_have_one_residual(self):
+        by_parent: dict[str, list[tuple[str, tuple[str, ...]]]] = {}
+        for key, (parent, paths) in ready.SUBPARTITIONS.items():
+            by_parent.setdefault(parent, []).append((key, paths))
+        for parent, entries in by_parent.items():
+            with self.subTest(parent=parent):
+                residuals = [k for k, paths in entries if not paths]
+                self.assertEqual(len(residuals), 1,
+                                 "exactly one residual sibling per split bucket: with none the "
+                                 "carve-outs free nothing, with two the map is ambiguous")
+                prefixes = [p for _k, paths in entries for p in paths]
+                for i, a in enumerate(prefixes):
+                    for b in prefixes[i + 1:]:
+                        self.assertFalse(a.startswith(b) or b.startswith(a),
+                                         f"overlapping declared regions {a} / {b}")
+
+    def test_span_rule_routes_multi_region_work_to_the_containing_parent(self):
+        # The measurement that admitted these boundaries assumed exactly this rule.
+        self.assertEqual(
+            ready.subpartition_for_paths(["bench/feature-off-declarations/4242.json"]),
+            "bench-declarations")
+        self.assertEqual(ready.subpartition_for_paths(["bench/zk-compose/results.json"]),
+                         "bench-zk-compose")
+        self.assertEqual(ready.subpartition_for_paths(["bench/CATALOG.md"]), "bench-suites")
+        self.assertEqual(
+            ready.subpartition_for_paths(["bench/feature-off-declarations/4242.json",
+                                          "bench/CATALOG.md"]),
+            "bench", "spanning a carve-out and the residual must take the parent")
+        self.assertEqual(
+            ready.subpartition_for_paths(["bench/feature-off-declarations/1.json",
+                                          "bench/zk-compose/results.json"]),
+            "bench", "spanning two carve-outs must take the parent")
+
+    def test_span_rule_declines_to_speak_outside_a_declared_bucket(self):
+        for paths in (["crates/sparq-core/src/lib.rs"],
+                      ["bench/CATALOG.md", "crates/sparq-core/src/lib.rs"],
+                      [".github/workflows/ci.yml"],
+                      []):
+            with self.subTest(paths=paths):
+                self.assertIsNone(ready.subpartition_for_paths(paths))
+
+    def test_an_unreadable_tree_collapses_declared_sub_partitions_upward(self):
+        # Same fail-safe direction as the roots scan: no tree, no extra depth.
+        self.assertEqual(ready.partition_path("bench-declarations", set()), ("bench",))
+        self.assertTrue(ready.keys_conflict("bench-declarations", "bench-zk-compose", set()))
+
+    def test_dump_partitions_exports_the_table_for_the_registry_parity_fixture(self):
+        out = subprocess.run(
+            [sys.executable, str(SCRIPTS / "ready-issues.py"), "--dump-partitions",
+             "bench-declarations", "bench-zzz", "bench"],
+            capture_output=True, text=True, check=True).stdout
+        dumped = json.loads(out)
+        self.assertEqual(sorted(dumped["subpartitions"]), sorted(ready.SUBPARTITIONS))
+        self.assertEqual(dumped["subpartitions"]["bench-declarations"]["parent"], "bench")
+        self.assertEqual(dumped["resolved"]["bench-declarations"], ["bench", "declarations"])
+        self.assertEqual(dumped["resolved"]["bench-zzz"], ["bench"])
+        self.assertEqual(dumped["resolved"]["bench"], ["bench"])
+
+
 class TestConflictAttribution(unittest.TestCase):
     """A conflict line must name the RAW held label and the COARSEST holder, deterministically."""
 
