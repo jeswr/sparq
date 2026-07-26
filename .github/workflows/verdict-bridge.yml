@@ -1,0 +1,107 @@
+# [OPUS-5] Maintainer observation 2026-07-26: "there seem to be a number of green, ready
+# PRs that are not in the merge queue". MEASURED cause: the review lane writes a
+# line-anchored `VERDICT: pass` COMMENT (and the standing review brief forbids review
+# agents from touching labels), while the whole arming chain — auto-arm.py,
+# rearm-sweeper.py, batch-merge.py — admits on the `review:pass` LABEL. NOTHING in this
+# repository ever ADDED that label (merge-queue-feedback.yml and the fix lane only REMOVE
+# it), so the comment -> label hop existed only inside an out-of-repo orchestrator
+# session. This workflow is that hop, made durable. registry#700 records the same
+# write-path-vs-read-predicate mismatch class.
+#
+# NOT A GATE. Schedule / workflow_dispatch only; it never runs on a PR head and never
+# executes candidate-PR code. It grants NO new arming authority: it writes LABELS only.
+# The arm itself is still performed by auto-arm.py with its own expectedHeadOid CAS and
+# its own security-label exclusions, so every existing fail-closed guard still applies.
+#
+# HEAD BINDING (load-bearing): scripts/verdict-bridge.py honours a verdict only when the
+# comment's LAST non-blank line is exactly `VERDICT: pass`/`VERDICT: fail`, the body
+# cites the CURRENT head as a standalone FULL 40-hex SHA, and the author_association is
+# OWNER/MEMBER/COLLABORATOR. Among head-bound verdicts the LATEST by (immutable)
+# created_at wins, so a retraction posted after a pass defeats it. Arming on a stale
+# verdict is worse than the bug this closes — every missing input reads as "no verdict".
+name: verdict-bridge
+
+on:
+  schedule:
+    # Three minutes ahead of auto-arm's 4,14,24,... cron so a promotion lands in time
+    # for the very next arming sweep. Explicit minutes (no */N) keep it auditable.
+    - cron: "1,11,21,31,41,51 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Report the decisions without writing any label"
+        type: boolean
+        default: false
+
+# pull-requests: write edits PR labels; issues: write reifies the informational
+# review:unreviewed label. No contents: write — this workflow never pushes.
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: verdict-bridge
+  cancel-in-progress: false
+
+jobs:
+  bridge:
+    name: bridge verdict comments to review labels
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Secrets are unreadable from a step `if:` — mirror the id into env so the mint
+      # step can be skipped fail-soft when the App is not configured.
+      ORCHESTRATOR_APP_ID: ${{ secrets.ORCHESTRATOR_APP_ID }}
+    steps:
+      # A GITHUB_TOKEN label write does NOT fire the `pull_request: labeled` event that
+      # auto-arm.yml listens on (the recursion guard), so the promotion would wait for
+      # auto-arm's own cron. The orchestrator App token — the identity rearm-sweeper.yml
+      # and batch-merge.yml already use — makes the arm fire immediately.
+      - name: Mint the sparq-orchestrator App token (labels must fire the arm event)
+        id: app-token
+        if: env.ORCHESTRATOR_APP_ID != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.ORCHESTRATOR_APP_ID }}
+          private-key: ${{ secrets.ORCHESTRATOR_APP_PRIVATE_KEY }}
+
+      # Always execute the trusted default-branch policy, including on manual dispatch.
+      - name: Checkout verdict-bridge policy
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          # gh_retry.py is verdict-bridge.py's transient-retry dependency; the self-test
+          # below imports it, so a missing path fails BEFORE the live run.
+          sparse-checkout: |
+            scripts/verdict-bridge.py
+            scripts/gh_retry.py
+          sparse-checkout-cone-mode: false
+
+      - name: Self-test policy
+        run: |
+          python3 scripts/gh_retry.py --self-test
+          python3 scripts/verdict-bridge.py --self-test
+
+      # `--force` makes this idempotent: create on first run, no-op-update afterwards.
+      # Without the label reified, every `flag` decision would fail its label edit.
+      - name: Reify the informational review:unreviewed label
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+        run: >-
+          gh label create "review:unreviewed" --repo "${{ github.repository }}" --force
+          --color "ededed"
+          --description "Green + mergeable but no head-bound VERDICT — needs a review (informational; blocks nothing)"
+
+      - name: Bridge verdict comments to review labels
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}
+        run: >-
+          python3 scripts/verdict-bridge.py
+          --repo "$REPO"
+          --default-branch "$DEFAULT_BRANCH"
+          $DRY_RUN
