@@ -424,12 +424,45 @@ class FakeGitHub:
     # -- writes --
     def write(self, argv: list[str]) -> str:
         self.writes.append(list(argv))
+        self._apply_label_edit(argv)
         return ""
+
+    def _apply_label_edit(self, argv: list[str]) -> None:
+        """Mutate the served node so a SECOND read sees the FIRST write.
+
+        A fake whose state never changes cannot distinguish an idempotent write path
+        from one that double-writes: every run would re-read the original labels and
+        re-decide the same way. Double-fire idempotence is unprovable without this.
+        """
+        if argv[:2] != ["pr", "edit"]:
+            return
+        number = int(argv[2])
+        for node in self.nodes:
+            if node.get("number") != number:
+                continue
+            names = [n["name"] for n in node["labels"]["nodes"]]
+            if "--add-label" in argv:
+                add = argv[argv.index("--add-label") + 1]
+                if add not in names:
+                    names.append(add)
+            if "--remove-label" in argv:
+                drop = argv[argv.index("--remove-label") + 1]
+                names = [n for n in names if n != drop]
+            node["labels"] = dict(node["labels"], nodes=[{"name": n} for n in names])
+
+    def labels_of(self, number: int) -> set:
+        for node in self.nodes:
+            if node.get("number") == number:
+                return {n["name"] for n in node["labels"]["nodes"]}
+        raise AssertionError(f"no such node: {number}")
 
     # -- reads --
     def read(self, argv: list[str]) -> str:
         self.reads.append(" ".join(argv))
         if argv[:2] == ["api", "graphql"]:
+            query = next((a for a in argv if a.startswith("query=")), "")
+            if "pullRequest(number:" in query:
+                return json.dumps(self._pr_one(argv))
             return json.dumps(self._pr_page(argv))
         path = argv[1]
         if "/check-runs" in path:
@@ -437,6 +470,11 @@ class FakeGitHub:
         if "/comments" in path:
             return json.dumps(self._comment_page(path))
         raise AssertionError(f"unexpected read: {argv}")
+
+    def _pr_one(self, argv: list[str]) -> dict:
+        number = int(next(a for a in argv if a.startswith("number=")).split("=", 1)[1])
+        node = next((n for n in self.nodes if n.get("number") == number), None)
+        return {"data": {"repository": {"pullRequest": node}}}
 
     def _pr_page(self, argv: list[str]) -> dict:
         cursor = next(

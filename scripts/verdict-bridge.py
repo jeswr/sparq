@@ -179,6 +179,29 @@ def hold_labels(labels: Iterable[str]) -> list[str]:
     )
 
 
+def parse_pr_argument(raw: str | None) -> int | None:
+    """The parse boundary for the PR number an EVENT payload supplies.
+
+    ``None`` means "the payload named no PR" (a plain issue comment, a check-suite with
+    an empty ``pull_requests`` array) — a benign no-op.  Anything present but not a
+    positive decimal integer RAISES: the value is interpolated from webhook-carried data,
+    and quietly coercing it to "no PR" would turn a malformed payload into a silent
+    full-repository sweep started by whoever sent it.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None
+    # ASCII-only: str.isdigit() also accepts Arabic-Indic and other Unicode digit
+    # forms, which int() then happily parses into a DIFFERENT number than the one a
+    # reader of the log sees.
+    if not (text.isascii() and text.isdigit()):
+        raise ValueError(f"--pr must be a decimal pull-request number, got {raw!r}")
+    number = int(text)
+    if number <= 0:
+        raise ValueError(f"--pr must be positive, got {number}")
+    return number
+
+
 def trailing_verdict(body: str | None) -> str | None:
     """``"pass"`` / ``"fail"`` / ``AMBIGUOUS`` for the LAST non-blank line, else None.
 
@@ -363,22 +386,45 @@ def run_gh_read(argv: list[str]) -> str:
         raise GhError(str(error)) from error
 
 
-PR_LIST_QUERY = """query($owner:String!,$name:String!,$cursor:String){
-  repository(owner:$owner,name:$name){
-    pullRequests(states:OPEN,first:50,after:$cursor){
-      pageInfo{hasNextPage endCursor}
-      totalCount
-      nodes{
+# The node selection is shared by the SWEEP query and the SINGLE-PR query on purpose:
+# the event path must read EXACTLY the fields the cron path reads, or it becomes a
+# different (and possibly laxer) policy wearing the same name.  Pinned by
+# scripts/tests/test_verdict_bridge.py::TestScopedRunAuthority.
+PR_NODE_FIELDS = """
         number state isDraft baseRefName headRefOid mergeable
         labels(first:100){nodes{name} pageInfo{hasNextPage}}
         commits(last:1){nodes{commit{checkSuites(first:0){totalCount}}}}
         reviews(last:30){nodes{
           databaseId body authorAssociation submittedAt author{login}
         }}
-      }
+"""
+
+PR_LIST_QUERY = (
+    """query($owner:String!,$name:String!,$cursor:String){
+  repository(owner:$owner,name:$name){
+    pullRequests(states:OPEN,first:50,after:$cursor){
+      pageInfo{hasNextPage endCursor}
+      totalCount
+      nodes{"""
+    + PR_NODE_FIELDS
+    + """}
     }
   }
 }"""
+)
+
+# Single-PR read for the EVENT path.  A comment / review / CI-conclusion webhook names
+# exactly one PR, so re-sweeping all ~100 open PRs (MEASURED 8m30s, run 30221614764)
+# would make the event slower than the cron it is meant to pre-empt.
+PR_ONE_QUERY = (
+    """query($owner:String!,$name:String!,$number:Int!){
+  repository(owner:$owner,name:$name){
+    pullRequest(number:$number){"""
+    + PR_NODE_FIELDS
+    + """}
+  }
+}"""
+)
 
 
 class VerdictBridge:
@@ -392,9 +438,12 @@ class VerdictBridge:
         log: Callable[[str], None] = print,
         dry_run: bool = False,
         max_writes: int = 25,
+        only_pr: int | None = None,
     ) -> None:
         if "/" not in repo or repo.count("/") != 1 or not all(repo.split("/")):
             raise ValueError("repo must be OWNER/REPOSITORY")
+        if only_pr is not None and only_pr <= 0:
+            raise ValueError("--pr must be a positive pull-request number")
         self.repo = repo
         self.owner, self.name = repo.split("/", 1)
         self.default_branch = default_branch
@@ -403,6 +452,7 @@ class VerdictBridge:
         self.log = log
         self.dry_run = dry_run
         self.max_writes = max_writes
+        self.only_pr = only_pr
 
     # -- reads --------------------------------------------------------------
 
@@ -447,6 +497,38 @@ class VerdictBridge:
         if total is not None and len(nodes) != total:
             raise GhError(f"paged {len(nodes)} PRs but totalCount was {total}")
         return nodes
+
+    def fetch_one(self, number: int) -> list[dict]:
+        """The ONE PR an event names, in the SAME node shape ``list_open`` returns.
+
+        Returns ``[]`` — never raises — when the PR has vanished (deleted, transferred)
+        or the connection is null, because an event about a PR that no longer exists is
+        nothing to do.  Every OTHER failure still raises, so a broken read can never be
+        mistaken for "no work".
+        """
+        payload = json.loads(
+            self.gh_read(
+                [
+                    "api",
+                    "graphql",
+                    "-f",
+                    f"query={PR_ONE_QUERY}",
+                    "-F",
+                    f"owner={self.owner}",
+                    "-F",
+                    f"name={self.name}",
+                    "-F",
+                    f"number={int(number)}",
+                ]
+            )
+        )
+        if payload.get("errors"):
+            raise GhError(f"GraphQL returned errors: {payload['errors']}")
+        repository = (payload.get("data") or {}).get("repository")
+        if repository is None:
+            raise GhError("GraphQL response carried no repository")
+        node = repository.get("pullRequest")
+        return [node] if isinstance(node, dict) and node else []
 
     def check_runs(self, sha: str) -> list[dict]:
         """Every check-run for ``sha``, EXPLICITLY paged and de-duplicated by id.
@@ -595,11 +677,51 @@ class VerdictBridge:
             ),
         )
 
+    def reconfirm(
+        self, pr: PullRequest, decision: Decision
+    ) -> tuple[PullRequest, Decision]:
+        """Re-read the ONE PR immediately before writing and re-decide.
+
+        WHY THIS EXISTS (the event/cron double-fire).  The cron sweep reads every open
+        PR first and then writes; MEASURED on run 30221614764 that read-to-write gap is
+        up to 8m30s for 103 PRs.  Now that a comment / review / CI webhook ALSO starts a
+        run, a stale sweep decision can land on top of a fresher event decision and
+        resurrect a label the event just removed.  ``concurrency:`` cannot prevent this:
+        the two runs are in DIFFERENT groups, and a concurrency group cancels, it does
+        not lock.  Convergence therefore has to come from the write path.
+
+        Re-reading collapses the staleness window to one round trip and gives the write
+        a genuine compare-and-set on (head SHA, labels, newest verdict): if ANY of them
+        moved, the recomputed decision differs and the write is abandoned for this cycle.
+
+        The ``gate`` conclusion is deliberately CARRIED FORWARD rather than re-read: it
+        costs up to 7 paginated pages per PR, and ``decide()`` consults it only through
+        ``is_green_and_ready``, which guards the purely informational ``flag`` action.
+        No arming-relevant decision (promote / retract / unflag) depends on it — pinned
+        by ``test_arming_relevant_decisions_never_depend_on_the_gate_read``.
+        """
+        nodes = self.fetch_one(pr.number)
+        if not nodes:
+            return pr, Decision("none", "vanished before the write")
+        node = nodes[0]
+        if str(node.get("baseRefName") or "") != self.default_branch:
+            return pr, Decision("none", "base branch moved before the write")
+        fresh = self.parse_node(node, pr.gate_conclusion)
+        evidence = self.comments(fresh.number) + self.review_withholdings(node)
+        return fresh, decide(fresh, evidence)
+
     def run(self) -> int:
         errors = 0
         writes = 0
-        nodes = self.list_open()
-        self.log(f"[{PROGRAM}] {len(nodes)} open PR(s); dry_run={self.dry_run}")
+        if self.only_pr is not None:
+            nodes = self.fetch_one(self.only_pr)
+            self.log(
+                f"[{PROGRAM}] scoped to PR #{self.only_pr}: "
+                f"{len(nodes)} node(s); dry_run={self.dry_run}"
+            )
+        else:
+            nodes = self.list_open()
+            self.log(f"[{PROGRAM}] {len(nodes)} open PR(s); dry_run={self.dry_run}")
         for node in nodes:
             number = node.get("number")
             try:
@@ -627,13 +749,26 @@ class VerdictBridge:
             if writes >= self.max_writes:
                 self.log(f"[{PROGRAM}] PR #{pr.number}: SKIP per-run write cap reached")
                 continue
+            # Compare-and-set against a FRESH read; see reconfirm()'s docstring.
+            try:
+                fresh, confirmed = self.reconfirm(pr, decision)
+            except (GhError, json.JSONDecodeError, KeyError, ValueError) as error:
+                self.log(f"[{PROGRAM}] PR #{pr.number}: SKIP reconfirm-failed ({error})")
+                errors += 1
+                continue
+            if confirmed.action != decision.action:
+                self.log(
+                    f"[{PROGRAM}] PR #{pr.number}: SKIP superseded — "
+                    f"{decision.action} -> {confirmed.action} ({confirmed.reason})"
+                )
+                continue
             add, remove = {
                 "promote": (REVIEW_ATTESTATION, UNREVIEWED_LABEL),
                 "retract": ("", REVIEW_ATTESTATION),
                 "flag": (UNREVIEWED_LABEL, ""),
                 "unflag": ("", UNREVIEWED_LABEL),
             }[decision.action]
-            if decision.action == "promote" and UNREVIEWED_LABEL not in pr.labels:
+            if decision.action == "promote" and UNREVIEWED_LABEL not in fresh.labels:
                 remove = ""
             try:
                 self.edit_labels(pr.number, add=add, remove=remove)
@@ -645,14 +780,29 @@ class VerdictBridge:
         return errors
 
 
-def run_bridge(bridge: VerdictBridge, log: Callable[[str], None] = print) -> int:
-    """Exhausted TRANSIENT reads end the cycle as ::warning + 0 — the cron covers it.
+def run_bridge(
+    bridge: VerdictBridge, log: Callable[[str], None] = print, mode: str = "sweep"
+) -> int:
+    """Exhausted TRANSIENT reads end a SWEEP cycle as ::warning + 0 — the cron covers it.
 
-    Any NON-transient failure still propagates and reds the run.
+    In EVENT mode the run answers for one specific webhook.  MEASURED on this repo, the
+    scheduled backstop does NOT fire on its nominal cadence: over the 24h to
+    2026-07-26T22:10Z the ``1,11,21,...`` cron families actually fired 11-16% of their
+    scheduled ticks (inter-run gaps of 53-75 minutes against a 10-minute cron).  Treating
+    a dropped event as "the cron will get it" therefore silently costs up to an hour, so
+    an event run that could not complete its reads exits NON-ZERO: visibly red, and
+    re-runnable.  Any NON-transient failure propagates and reds the run in both modes.
     """
     try:
         errors = bridge.run()
     except gh_retry.GhTransientExhausted as error:
+        if mode == "event":
+            log(
+                f"::error title={PROGRAM} event run failed on transient GitHub API "
+                f"failures::{error} — bounded retries exhausted. This run answered for a "
+                "single webhook and has no per-PR backstop on a useful timescale."
+            )
+            return 1
         log(
             f"::warning title={PROGRAM} skipped a cycle on transient GitHub API "
             f"failures::{error} — bounded retries exhausted; the cron backstop covers "
@@ -819,6 +969,20 @@ def self_test() -> None:
     assert decide(pr_fixture(labels={UNREVIEWED_LABEL}), [failing]).action == "unflag"
     assert decide(pr_fixture(labels={UNREVIEWED_LABEL}), []).action == "none"
 
+    # SCOPING (the event path). The number an event payload names is parsed strictly;
+    # anything present but non-numeric must RAISE, never degrade to a full sweep.
+    assert parse_pr_argument("") is None
+    assert parse_pr_argument(None) is None
+    assert parse_pr_argument("  ") is None
+    assert parse_pr_argument("4324") == 4324
+    for bad in ("0", "-1", "12x", "4324; rm -rf /", "1e3", "٤٣", "null"):
+        try:
+            parse_pr_argument(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"parse_pr_argument accepted {bad!r}")
+
     # The informational label must never be a hold (it would deadlock the arm lane).
     assert UNREVIEWED_LABEL not in HOLD_LABELS
     assert not hold_labels({UNREVIEWED_LABEL})
@@ -859,6 +1023,18 @@ def main() -> int:
     parser.add_argument("--default-branch", default="main")
     parser.add_argument("--dry-run", action="store_true", help="report, write nothing")
     parser.add_argument("--max-writes", type=int, default=25)
+    parser.add_argument(
+        "--pr",
+        default="",
+        help="restrict the run to ONE pull request (the event path); empty = full sweep",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("sweep", "event"),
+        default="sweep",
+        help="event: a webhook run with no useful cron backstop — fail LOUD on exhausted "
+        "transients. sweep: the scheduled reconciliation pass — fail soft.",
+    )
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
 
@@ -867,6 +1043,13 @@ def main() -> int:
         return 0
     if not args.repo:
         parser.error("--repo is required unless --self-test is used")
+    only_pr = parse_pr_argument(args.pr)
+    if only_pr is None and args.mode == "event":
+        # An event trigger whose payload carried no PR number (an issue comment, a
+        # check-suite with an empty pull_requests array).  Falling through to a FULL
+        # SWEEP here would let any commenter on any issue start a ~9-minute all-PR run.
+        print(f"[{PROGRAM}] event mode with no PR number in the payload — nothing to do")
+        return 0
     return run_bridge(
         VerdictBridge(
             args.repo,
@@ -874,7 +1057,9 @@ def main() -> int:
             gh_read=run_gh_read,
             dry_run=args.dry_run,
             max_writes=args.max_writes,
-        )
+            only_pr=only_pr,
+        ),
+        mode=args.mode,
     )
 
 
