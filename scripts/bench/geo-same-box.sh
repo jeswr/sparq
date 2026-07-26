@@ -15,6 +15,8 @@
 # WORKLOADS (shared corpus: the FIXED ~100k-point CRS84 corpus, bench/geo/gen.sh,
 # seed 20260615 — the same substrate the per-commit bench/geo gate asserts):
 #   within10km / within50km   great-circle radius counts around POINT(0 51)
+#   within10km_indexed        Jena-only index-accelerated rendering of
+#                             within10km over a feature-modelled corpus variant
 #   nearest_k10 / nearest_k100 k-nearest (rendered for SPARQL peers as
 #                              ORDER BY geof:distance ... LIMIT k — the
 #                              standard-visible form; see queries-jena/*.rq)
@@ -111,8 +113,11 @@ FUSEKI_READY_S="${FUSEKI_READY_S:-300}"
 BENCH_GEO="${BENCH_GEO:-$ROOT/target/release/examples/bench_geo}"
 ADAPTER="$ROOT/scripts/bench-adapters/http_sparql_adapter.py"
 QUERIES="$ROOT/bench/geo/queries-jena"
-# The 5 query-replayable workloads (geo_compliance_pass is sparq-only, see header).
-WORKLOADS="within10km within50km nearest_k10 nearest_k100 geof_within"
+# The fixed-corpus workloads plus a Jena-only indexed rendering whose oracle is
+# sparq's unchanged within10km row. [SONNET-4.6] (sq-enfy3)
+BASE_WORKLOADS="within10km within50km nearest_k10 nearest_k100 geof_within"
+INDEX_WORKLOADS="within10km_indexed"
+WORKLOADS="$BASE_WORKLOADS $INDEX_WORKLOADS"
 # ---- the Geographica real-world family (OPT-IN) [FABLE-5] sq-hmd7l.29 ----
 GEO_GEOGRAPHICA="${GEO_GEOGRAPHICA:-0}"
 GG_TIMEOUT_S="${GG_TIMEOUT_S:-$TIMEOUT_S}"
@@ -207,8 +212,10 @@ fi
 # The FIXED ~100k-point corpus (cached, deterministic). expected.tsv is pinned to
 # this scale, so the corpus size is intentionally NOT tunable here.
 CORPUS="$(BENCH_GEO="$BENCH_GEO" "$ROOT/bench/geo/gen.sh" 100000)"
+FEATURE_CORPUS="$(BENCH_GEO="$BENCH_GEO" "$ROOT/bench/geo/gen.sh" 100000 feature)"
 NPOINTS="$(wc -l < "$CORPUS")"
 log "corpus=$CORPUS (~$NPOINTS triples)"
+log "feature-corpus=$FEATURE_CORPUS (Jena indexed-radius variant)"
 
 GIT_COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
@@ -241,6 +248,7 @@ JENA_STATUS="not-run"
 JENA_VER=""
 JENA_JAR_SHA=""
 JENA_READY_S="n/a"
+JENA_INDEX_READY_S="n/a"
 ENDPOINT="http://127.0.0.1:$FUSEKI_PORT/ds"
 if want jena-geosparql; then
   if SKIP_REASON="$(ensure_jena_jar)"; then
@@ -260,7 +268,7 @@ if want jena-geosparql; then
     else
       log "jena-geosparql ready in ${JENA_READY_S}s (load + spatial index; advisory)"
       : > "$TMP/jena-geosparql.tsv"
-      for wl in $WORKLOADS; do
+      for wl in $BASE_WORKLOADS; do
         log "jena-geosparql: $wl x$ITERS (cap ${TIMEOUT_S}s)"
         if timeout "$TIMEOUT_S" python3 "$ADAPTER" --endpoint "$ENDPOINT" \
             --query-file "$QUERIES/$wl.rq" --engine jena-geosparql \
@@ -309,6 +317,39 @@ PYEOF
           printf '%s\tERROR\ttimeout-or-error\n' "$wl" >> "$TMP/jena-geosparql.tsv"
         fi
       done
+      # The fixed corpus deliberately remains unchanged. Restart Jena over the
+      # feature-modelled variant so spatial:withinCircle exercises its spatial
+      # index, then append the Jena-only result to the same TSV. [SONNET-4.6]
+      stop_fuseki
+      log "restarting $ENDPOINT with feature-modelled corpus for indexed radius"
+      if ! JENA_INDEX_READY_S="$(start_fuseki "$FEATURE_CORPUS" "$FUSEKI_PORT" "$TMP/fuseki-index.log")"; then
+        JENA_INDEX_READY_S="n/a"
+        log "jena-geosparql: indexed-radius server not ready; recording ERROR"
+        printf '%s\tERROR\tserver-not-ready\n' "$INDEX_WORKLOADS" >> "$TMP/jena-geosparql.tsv"
+      else
+        for wl in $INDEX_WORKLOADS; do
+          log "jena-geosparql: $wl x$ITERS (cap ${TIMEOUT_S}s)"
+          if timeout "$TIMEOUT_S" python3 "$ADAPTER" --endpoint "$ENDPOINT" \
+              --query-file "$QUERIES/$wl.rq" --engine jena-geosparql \
+              --iters "$ITERS" --json > "$TMP/$wl.raw" 2> "$TMP/$wl.json"; then
+            if PARSED="$(python3 - "$TMP/$wl.json" <<'PYEOF'
+import json, sys
+line = open(sys.argv[1]).read().strip().splitlines()[-1]
+d = json.loads(line)
+c = d["count_value"] if d.get("count_value") is not None else d["count"]
+print("%s\t%s" % (c, d["query_us"]))
+PYEOF
+            )"; then
+              printf '%s\t%s\n' "$wl" "$PARSED" >> "$TMP/jena-geosparql.tsv"
+            else
+              printf '%s\tERROR\tsidecar-parse-error\n' "$wl" >> "$TMP/jena-geosparql.tsv"
+            fi
+          else
+            log "jena-geosparql: $wl FAILED/timeout"
+            printf '%s\tERROR\ttimeout-or-error\n' "$wl" >> "$TMP/jena-geosparql.tsv"
+          fi
+        done
+      fi
       JENA_STATUS="ok"
     fi
   fi
@@ -319,10 +360,12 @@ fi
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT="$OUT_DIR/geo-points100k-${TS}.json"
 CANONICAL="$CANONICAL" GEO_SMOKE="$GEO_SMOKE" GIT_COMMIT="$GIT_COMMIT" \
-CORPUS="$CORPUS" NPOINTS="$NPOINTS" ITERS="$ITERS" TIMEOUT_S="$TIMEOUT_S" \
+CORPUS="$CORPUS" FEATURE_CORPUS="$FEATURE_CORPUS" NPOINTS="$NPOINTS" \
+ITERS="$ITERS" TIMEOUT_S="$TIMEOUT_S" \
 ONLY="$ONLY" WORKLOADS="$WORKLOADS" TMP="$TMP" OUT="$OUT" \
 SPARQ_STATUS="$SPARQ_STATUS" JENA_STATUS="$JENA_STATUS" JENA_VER="$JENA_VER" \
 JENA_JAR_SHA="$JENA_JAR_SHA" JENA_READY_S="$JENA_READY_S" \
+JENA_INDEX_READY_S="$JENA_INDEX_READY_S" \
 python3 - <<'PYEOF'
 import json, os, platform
 
@@ -372,6 +415,9 @@ if "jena-geosparql" in only:
             "recorded mode ASYMMETRY vs sparq's in-process index surface)"
         ),
         "load_ready_s_advisory": os.environ.get("JENA_READY_S", "n/a"),
+        "indexed_variant_load_ready_s_advisory": os.environ.get(
+            "JENA_INDEX_READY_S", "n/a"
+        ),
     }
 
 data = {e: read_tsv(e) for e in engines_meta}
@@ -398,7 +444,8 @@ sparq_rows = data.get("sparq", {})
 cross = {}
 timings = {}
 for w in workloads:
-    s = sparq_rows.get(w, {}).get("count", "n/a")
+    oracle_workload = "within10km" if w == "within10km_indexed" else w
+    s = sparq_rows.get(oracle_workload, {}).get("count", "n/a")
     j = data.get("jena-geosparql", {}).get(w, {}).get("count", "n/a")
     count_agree = s == j and s not in ("n/a", "ERROR")
     sparq_ids = read_ids("sparq", w) if w.startswith("nearest_k") else None
@@ -413,7 +460,12 @@ for w in workloads:
         else None
     )
     agree = count_agree and (ids_agree is not False)
-    cross[w] = {"sparq": s, "jena-geosparql": j, "agree": agree}
+    cross[w] = {
+        "sparq": s,
+        "jena-geosparql": j,
+        "agree": agree,
+        "sparq_oracle_workload": oracle_workload,
+    }
     if w.startswith("nearest_k"):
         cross[w].update({
             "oracle": "entity-id-set",
@@ -423,7 +475,7 @@ for w in workloads:
             "entity_ids_agree": ids_agree,
         })
     row = {}
-    if "sparq" in engines_meta:
+    if "sparq" in engines_meta and w != "within10km_indexed":
         row["sparq_us"] = sparq_rows.get(w, {}).get("us", "n/a")
     if "jena-geosparql" in engines_meta:
         ju = data["jena-geosparql"].get(w, {}).get("us", "n/a")
@@ -462,8 +514,15 @@ envelope = {
     "smoke": smoke,
     "git_commit": os.environ["GIT_COMMIT"],
     "suite": "geo",
-    "scale": "fixed CRS84 point corpus, %s triples (%s)"
-    % (os.environ["NPOINTS"], os.environ["CORPUS"]),
+    "scale": (
+        "fixed CRS84 point corpus, %s triples (%s); Jena indexed-radius "
+        "variant preserves the points with feature->geometry modelling (%s)"
+        % (
+            os.environ["NPOINTS"],
+            os.environ["CORPUS"],
+            os.environ["FEATURE_CORPUS"],
+        )
+    ),
     "iters": int(os.environ["ITERS"]),
     "timeout_s_per_workload": int(os.environ["TIMEOUT_S"]),
     "queries": "bench/geo/queries-jena/<workload>.rq (pinned per-engine renderings)",
