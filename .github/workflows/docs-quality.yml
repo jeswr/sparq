@@ -390,6 +390,25 @@ jobs:
         run: bash scripts/tests/test_beir_gather_sentinel.sh
       - name: Self-test console envelope extractor (exact names + CRLF + allowlist)
         run: bash scripts/tests/test_extract_console_envelopes.sh
+      # [OPUS-5] sq-ffaa9: the THIRD (durable S3) results channel for canonical bench
+      # boxes — the x86_64 Nitro serial console returns garbled/truncated text and SSH
+      # dies on a saturated box, so a canonical gather could end up unretrievable. The
+      # channel is OFF unless SPARQ_BENCH_S3_BUCKET is exported, which is exactly why it
+      # needs machine-enforcement here: nothing in CI exercises the enabled path, so a
+      # regression would only surface when an expensive gather silently loses its
+      # results. The harness is hermetic (PATH-shadowed `aws` stub — no AWS, no network,
+      # no credentials) and pins the load-bearing invariants: off-by-default leaves every
+      # launcher byte-identical in behaviour; a missing instance profile degrades instead
+      # of failing run-instances; the user-data line stays dollar-free (the launchers
+      # render user-data through UNQUOTED heredocs); and the WRITE-ONLY instance policy
+      # stays coupled to the uploader's cp-only verbs (a `sync`, or a policy widened with
+      # Get/List/Delete, must red this).
+      - name: shellcheck the durable S3 results channel + its self-test
+        run: shellcheck scripts/bench/bench-s3-results.sh scripts/bench/s3-results-uploader.sh scripts/tests/test_bench_s3_results.sh
+      - name: Self-test bench S3 results channel (pure predicates, no AWS)
+        run: bash scripts/bench/bench-s3-results.sh --self-test
+      - name: Self-test bench S3 results channel (off-by-default + write-only grant, end-to-end)
+        run: bash scripts/tests/test_bench_s3_results.sh
       # [OPUS-4.8] sq-neq8: hermetic self-test of the coverage-ratchet gate's PURE logic
       # (max-remeasure aggregation sq-x4jy + floor-monotonicity sq-neq8) so a regression in
       # the gate ITSELF is caught here, before the gate is trusted to guard real coverage.

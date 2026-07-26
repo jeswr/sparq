@@ -49,6 +49,14 @@ RESULTS_LOCAL="${RESULTS_LOCAL:-$HOME/sparq-bench-results/canonical-$(date -u +%
 
 PROD_INSTANCE="i-090531b4ede8f2d3f"; DEV_INSTANCE="i-00f76802f345b6b77"
 
+# [OPUS-5] sq-ffaa9 — THIRD, termination-independent results channel (S3). On this
+# x86_64 c6i (Nitro) class the serial console returns garbled/truncated text and SSH
+# dies on a saturated box, so a run can end up wholly unretrievable. STRICTLY ADDITIVE:
+# with SPARQ_BENCH_S3_BUCKET unset (the default) this is a no-op and the launcher
+# behaves exactly as before. See scripts/bench/bench-s3-results.sh.
+# shellcheck source=scripts/bench/bench-s3-results.sh
+. "$SCRIPT_DIR/bench-s3-results.sh"
+
 log() { printf '[canonical-materialize %s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 die() { printf '[canonical-materialize] ERROR: %s\n' "$*" >&2; exit 1; }
 
@@ -99,6 +107,12 @@ aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$SG_ID" 
 
 TAGSPEC='ResourceType=instance,Tags=[{Key=Name,Value=sparq-bench},{Key=Project,Value=sparq-bench},{Key=purpose,Value=sparq-bench}]'
 
+BENCH_S3_RUN_ID="${BENCH_S3_RUN_ID:-materialize-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+BENCH_S3_IAM_ARGS="$(bench_s3_iam_args)"
+BENCH_S3_UPLOAD_LINE="$(bench_s3_userdata_line "$BENCH_S3_RUN_ID" \
+  /root/sparq/bench/gather-out,/var/log/gather.log,/root/GATHER_STEP)"
+if [ -n "$BENCH_S3_IAM_ARGS" ]; then log "durable S3 results channel ON: $(bench_s3_uri "$BENCH_S3_RUN_ID")"; fi
+
 # Thin user-data: watchdog + clone the branch + run the COMMITTED instance script
 # (the heavy gather logic — deps, pinned VLog/Nemo builds — lives in-repo, reviewable).
 USERDATA=$(cat <<UD
@@ -117,6 +131,10 @@ git clone -q "$REPO" sparq
 cd sparq
 git fetch -q origin "$BRANCH" && git checkout -q "$BRANCH"
 echo "[user-data] checked out \$(git rev-parse --short HEAD)" | tee /dev/console
+
+# sq-ffaa9 durable results channel — started BEFORE the gather so a box that dies
+# mid-run still ships its logs. Renders to the literal "true" when the channel is off.
+$BENCH_S3_UPLOAD_LINE
 
 # BACKGROUND the multi-hour gather (nohup + setsid) so cloud-final RETURNS promptly and
 # scripts_user succeeds — running the gather in the foreground of scripts_user wedged
@@ -141,9 +159,11 @@ UD_RAW=$(wc -c < "$WORK/userdata.sh")
 log "user-data raw=${UD_RAW}B (limit 16384B)"
 [ "$UD_RAW" -le 16384 ] || die "user-data ${UD_RAW}B exceeds 16384B — trim it"
 LAUNCH_ERR="$WORK/launch.err"
+# shellcheck disable=SC2086  # $BENCH_S3_IAM_ARGS is intentionally word-split (empty => omitted)
 INSTANCE_ID=$(aws ec2 run-instances --region "$REGION" --image-id "$AMI" --instance-type "$ITYPE" \
   --instance-initiated-shutdown-behavior terminate \
   --key-name "$KEY_NAME" --security-group-ids "$SG_ID" \
+  $BENCH_S3_IAM_ARGS \
   --subnet-id "$SUBNET" --associate-public-ip-address \
   --block-device-mappings "[{\"DeviceName\":\"/dev/sda1\",\"Ebs\":{\"VolumeSize\":${EBS_GB},\"VolumeType\":\"gp3\",\"DeleteOnTermination\":true}}]" \
   --tag-specifications "$TAGSPEC" \
@@ -203,6 +223,9 @@ if grep -qa 'ENVELOPE-BEGIN' "$RESULTS_LOCAL/console.txt" 2>/dev/null; then
 fi
 
 log "final result pull"
+# sq-ffaa9: the durable copy FIRST — it is the only channel that survives a box which
+# already self-terminated or whose sshd died.
+bench_s3_fetch "$BENCH_S3_RUN_ID" "$RESULTS_LOCAL/s3"
 ssh $SSHO "ubuntu@$IP" "sudo tar -C /root/sparq/bench -cf - gather-out 2>/dev/null" 2>/dev/null | tar -C "$RESULTS_LOCAL" -xf - 2>/dev/null || true
 ssh $SSHO "ubuntu@$IP" "sudo cat /root/GATHER_STEP 2>/dev/null" > "$RESULTS_LOCAL/GATHER_STEP.txt" 2>/dev/null || true
 ssh $SSHO "ubuntu@$IP" "sudo tail -800 /var/log/gather.log 2>/dev/null" > "$RESULTS_LOCAL/gather.log.tail" 2>/dev/null || true

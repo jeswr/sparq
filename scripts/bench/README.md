@@ -176,3 +176,60 @@ cross-checked before any timing is trusted). The committed harness
 - `ingest-canonical-competitors.mjs` — envelopes → the dashboard's
   `same_box_comparisons` (asserts cross-gather count stability; carries the
   keep-alive-vs-fresh `connection` note + `values_ttfb`/`values_fresh` columns).
+
+## bench-s3-results.sh + s3-results-uploader.sh — durable results channel (sq-ffaa9)
+
+A **third, termination-independent** way to get results off a canonical bench box.
+The two pre-existing channels can both fail on the same run, and on the x86_64
+`c6i` (Nitro) class they routinely do:
+
+- `aws ec2 get-console-output` — the Nitro serial console does not reliably expose
+  userspace `/dev/console` writes, the ring buffer wraps under a chatty build, and
+  it is wiped on terminate. Recovered text comes back truncated, garbled or empty.
+- SSH/scp pull — dies exactly when a heavy gather saturates the box, and is gone
+  the moment the watchdog self-terminates it.
+
+When both fail the run is **unretrievable** and the compute spend is wasted. With
+this channel the box streams envelopes + logs to S3 as it runs, and the launcher
+reads them back **after** the instance is gone.
+
+**Off by default.** Nothing changes until `SPARQ_BENCH_S3_BUCKET` is exported: the
+`--iam-instance-profile` argument is empty, the user-data uploader line renders to
+the literal `true`, and `multi-axis-box.sh` / `canonical-{beir,competitor,materialize}-bench.sh`
+behave byte-for-byte as before.
+
+**One-time maintainer step (needs IAM + S3 admin rights).** Preview it with no AWS
+call at all, then apply:
+
+```sh
+scripts/bench/bench-s3-results.sh plan            # policy JSON + the exact API calls
+AWS_PROFILE=<admin> scripts/bench/bench-s3-results.sh provision
+AWS_PROFILE=pss     scripts/bench/bench-s3-results.sh check
+export SPARQ_BENCH_S3_BUCKET=sparq-bench-results-<account-id>
+```
+
+`provision` is idempotent. It also prints the **`iam:PassRole` policy the launcher
+principal separately needs** — attaching an instance profile requires it, and
+without it `run-instances` fails `AccessDenied`.
+
+**The instance role is write-only, deliberately:** `s3:PutObject` +
+`s3:AbortMultipartUpload` scoped to `arn:aws:s3:::<bucket>/*`, with no
+`GetObject`/`ListBucket`/`DeleteObject` and no bucket-level action. A compromised
+bench box can append its own objects and nothing else. The uploader is written
+against exactly that grant — it uses `aws s3 cp`, never `aws s3 sync` (which needs
+`ListBucket`+`GetObject` to diff and would fail closed).
+`scripts/tests/test_bench_s3_results.sh` pins that coupling, plus the
+off-by-default behaviour and the dollar-free user-data line the launchers'
+unquoted heredocs require.
+
+Results land under `s3://<bucket>/<run-id>/` alongside a `_provenance.txt`
+(instance id/type, arch, commit) and, on a clean finish, `_UPLOAD_COMPLETE.txt` —
+so a partial upload is distinguishable from a completed one. `bench_s3_fetch`
+pulls them into `RESULTS_LOCAL/s3/`, and the launchers call it **before** the SSH
+tar so a dead sshd cannot skip it.
+
+**Degradation is always toward launching, never toward blocking:** a missing or
+unreadable instance profile logs a warning and launches without the channel rather
+than failing an expensive run over an IAM read grant. The uploader is a best-effort
+side-car — it does not run under `set -e` and always exits 0, so a telemetry
+failure can never abort a gather.

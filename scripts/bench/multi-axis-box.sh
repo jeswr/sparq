@@ -97,6 +97,17 @@ readonly PROD_INSTANCE="i-090531b4ede8f2d3f"
 readonly DEV_INSTANCE="i-00f76802f345b6b77"
 TAGSPEC='ResourceType=instance,Tags=[{Key=Name,Value=sparq-bench},{Key=Project,Value=sparq-bench},{Key=purpose,Value=sparq-bench}]'
 
+BENCH_S3_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# [OPUS-5] sq-ffaa9 — THIRD, termination-independent results channel (S3). This box is
+# x86_64 c6i (Nitro): the serial console returns garbled/truncated text (which is why
+# DWELL_S exists at all) and SSH dies on a saturated box, so a run can end up wholly
+# unretrievable. STRICTLY ADDITIVE: with SPARQ_BENCH_S3_BUCKET unset (the default) this
+# is a no-op and the launcher behaves exactly as before. The `--instance` mode never
+# touches it — the upload side-car is started from the launcher-generated user-data,
+# alongside the self-termination logic. See scripts/bench/bench-s3-results.sh.
+# shellcheck source=scripts/bench/bench-s3-results.sh
+. "$BENCH_S3_HERE/bench-s3-results.sh"
+
 log() { printf '[multi-axis-box %s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 die() { printf '[multi-axis-box] ERROR: %s\n' "$*" >&2; exit 1; }
 
@@ -384,6 +395,18 @@ run_launch() {
     --description "sparq multi-axis bin-packed bench box (ephemeral)" --vpc-id "$VPC" --query 'GroupId' --output text)
   aws ec2 authorize-security-group-ingress --region "$REGION" --group-id "$SG_ID" --protocol tcp --port 22 --cidr "${MYIP}/32" >/dev/null
 
+  # BENCH_S3_RUN_ID is deliberately NOT `local`. Declaring `local X` with no value
+  # shadows an inherited global/exported X with an UNSET local, so the
+  # `${BENCH_S3_RUN_ID:-…}` below would read the unset local and silently ignore an
+  # operator-supplied `BENCH_S3_RUN_ID=… …/multi-axis-box.sh --launch` override that the
+  # other three (non-function-scoped) launchers honour. Verified on bash 5.2.
+  local BENCH_S3_IAM_ARGS BENCH_S3_UPLOAD_LINE
+  BENCH_S3_RUN_ID="${BENCH_S3_RUN_ID:-multi-axis-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+  BENCH_S3_IAM_ARGS="$(bench_s3_iam_args)"
+  BENCH_S3_UPLOAD_LINE="$(bench_s3_userdata_line "$BENCH_S3_RUN_ID" \
+    /root/axis-results,/root/multi-axis-console.log,/var/log/gather.log,/root/GATHER_STEP)"
+  if [ -n "$BENCH_S3_IAM_ARGS" ]; then log "durable S3 results channel ON: $(bench_s3_uri "$BENCH_S3_RUN_ID")"; fi
+
   # Thin user-data: watchdog FIRST, deps, clone, then the COMMITTED --instance mode
   # of THIS script; self-termination (dwell + shutdown) lives HERE, not in --instance.
   local USERDATA
@@ -425,6 +448,11 @@ cd sparq
 git fetch -q origin "$BRANCH" && git checkout -q "$BRANCH"
 step "checked out \$(git rev-parse --short HEAD)"
 
+# sq-ffaa9 durable results channel — started BEFORE the axes so a box that dies mid-run
+# still ships its logs, and it exits on /root/GATHER_DONE (well inside the dwell below).
+# Renders to the literal "true" when the channel is off.
+$BENCH_S3_UPLOAD_LINE
+
 AXES="$AXES" AXIS_TIMEOUT_S=$AXIS_TIMEOUT_S TIMEOUT_S=$TIMEOUT_S DISK_FLOOR_GB=$DISK_FLOOR_GB \
 CONSOLE_CAP_B=$CONSOLE_CAP_B PARSE_GEN_N=$PARSE_GEN_N CANONICAL=1 $EXTRA_INSTANCE_ENV \
   bash scripts/bench/multi-axis-box.sh --instance || step "WARN: instance run rc=\$?"
@@ -444,9 +472,11 @@ UD
 
   log "launching $ITYPE (${EBS_GB}GB gp3, $((WATCHDOG_S / 3600))h watchdog)"
   local LAUNCH_ERR="$WORK/launch.err"
+  # shellcheck disable=SC2086  # $BENCH_S3_IAM_ARGS is intentionally word-split (empty => omitted)
   INSTANCE_ID=$(aws ec2 run-instances --region "$REGION" --image-id "$AMI" --instance-type "$ITYPE" \
     --instance-initiated-shutdown-behavior terminate \
     --key-name "$KEY_NAME" --security-group-ids "$SG_ID" \
+    $BENCH_S3_IAM_ARGS \
     --subnet-id "$SUBNET" --associate-public-ip-address \
     --block-device-mappings "[{\"DeviceName\":\"/dev/sda1\",\"Ebs\":{\"VolumeSize\":${EBS_GB},\"VolumeType\":\"gp3\",\"DeleteOnTermination\":true}}]" \
     --tag-specifications "$TAGSPEC" \
@@ -493,6 +523,10 @@ UD
   done
 
   log "final result pull"
+  # sq-ffaa9: the durable copy FIRST — it is the only channel that survives a box which
+  # already self-terminated (this launcher's DWELL_S + shutdown makes that the NORMAL
+  # ending) or whose sshd died.
+  bench_s3_fetch "$BENCH_S3_RUN_ID" "$RESULTS_LOCAL/s3"
   # shellcheck disable=SC2086
   ssh $SSHO "ubuntu@$IP" "sudo tar -C /root -cf - axis-results 2>/dev/null" 2>/dev/null | tar -C "$RESULTS_LOCAL" -xf - 2>/dev/null || true
   # shellcheck disable=SC2086
