@@ -5,13 +5,25 @@
 // wall-clock numbers, which carry an extra obligation deterministic values do not: a timing is
 // meaningless without the machine, the corpus, the aggregate and the commit it was taken on.
 //
-// THE INVARIANT: there is deliberately NO raw-value accessor in this file. The only way a
-// timing can reach the page is `headline_timing(key)`, which always renders the provenance
-// alongside the number. So a paper cannot show a measured number stripped of its context, and
-// cannot show one at all unless it came from an envelope that self-declared
-// `"canonical": true` and passed the count check in `site/scripts/sync-canonical-timing.mjs`.
-// Work-box timings are NON-CANONICAL: they live in `benchmarks.generated.json` as
-// `environment: indicative` and have no path into this file.
+// THE INVARIANT: the only way a timing reaches the page is `headline_timing(key)` or
+// `timing_provenance(key)`, both of which always render the provenance alongside the number.
+// So a paper cannot show a measured number stripped of its context, and cannot show one at all
+// unless it came from an envelope that self-declared `"canonical": true` and passed the count
+// check in `site/scripts/sync-canonical-timing.mjs`. Work-box timings are NON-CANONICAL: they
+// live in `benchmarks.generated.json` as `environment: indicative` and have no path into here.
+//
+// HOW THE INVARIANT IS ENFORCED — read this before adding a binding. Typst has no private
+// module bindings: EVERY top-level `#let` in this file is importable, so the `_`-prefix on
+// `_timing_data` / `_trec` / `_envelope` is a CONVENTION and cannot by itself stop a paper
+// writing `#import "_lib/timing.typ": _trec` and publishing `_trec(key).value`. The real,
+// mechanical enforcement is the build-time SOURCE GATE `runTimingSourceGate()` in
+// `site/scripts/build-papers.mjs`, which fails the build when a paper source imports anything
+// from this file other than the provenance-rendering entry points, imports it as a whole
+// module, or reads the generated JSON directly. `site/test/paper-timing.test.mjs` tests that
+// gate against a negative fixture that tries exactly those bypasses.
+//
+// `timing_keys()` is deliberately the ONLY other export: it returns record KEYS, never values,
+// so the self-check fixture can pick a key to exercise without ever holding a raw number.
 //
 // DATA SOURCE: `site/src/data/paper-timing.generated.json`, read from the Typst project root
 // (`--root site/`) rather than injected via `--input`. Both the PDF and the in-site HTML
@@ -30,13 +42,16 @@
 //   sparq answers SP2Bench q01 in #headline_timing("timing.sp2b.sparq.q01").
 //   #timing_provenance("timing.sp2b.sparq.q01")   // the full block-level provenance
 
-#let timing_data = json("/src/data/paper-timing.generated.json")
+#let _timing_data = json("/src/data/paper-timing.generated.json")
+
+// The derived record keys, sorted. Keys only — a caller cannot reach a value through this.
+#let timing_keys() = _timing_data.records.keys().sorted()
 
 // Raw record lookup — panics loudly on an unknown key so a typo (or a record that dropped out
 // of the derivation because its envelope stopped qualifying) fails the build instead of
 // silently rendering nothing.
 #let _trec(key) = {
-  let r = timing_data.records.at(key, default: none)
+  let r = _timing_data.records.at(key, default: none)
   if r == none {
     panic(
       "paper-factory: unknown canonical-timing key '" + key + "'. This file is DERIVED — " +
@@ -56,7 +71,7 @@
 }
 
 #let _envelope(r) = {
-  let e = timing_data.envelopes.at(r.envelope, default: none)
+  let e = _timing_data.envelopes.at(r.envelope, default: none)
   if e == none {
     panic(
       "paper-factory: canonical-timing record cites envelope '" + r.envelope +

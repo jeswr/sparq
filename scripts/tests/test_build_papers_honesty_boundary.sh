@@ -50,8 +50,11 @@ VERIFIER="${ROOT}/scripts/verify-paper-evidence.py"
 # imports — which would make the should-FAIL cases below pass for the WRONG reason and silently
 # void this whole harness.
 TIMING_SYNC="${ROOT}/site/scripts/sync-canonical-timing.mjs"
+# ...and the publication-boundary source gate, which the builder also imports (it asserts no
+# paper source reaches a measured timing except through the provenance-rendering accessors).
+TIMING_GATE="${ROOT}/site/scripts/timing-source-gate.mjs"
 
-for f in "$BUILDER" "$PERF_GATE" "$PRIV_GATE" "$SHARED" "$VERIFIER" "$TIMING_SYNC"; do
+for f in "$BUILDER" "$PERF_GATE" "$PRIV_GATE" "$SHARED" "$VERIFIER" "$TIMING_SYNC" "$TIMING_GATE"; do
   [ -f "$f" ] || { echo "FATAL: required file not found: $f"; exit 2; }
 done
 command -v node >/dev/null 2>&1 || { echo "FATAL: node not found"; exit 2; }
@@ -80,6 +83,7 @@ cp "$SHARED"     "${REPO}/scripts/honesty-phrases.json"
 cp "$VERIFIER"   "${REPO}/scripts/verify-paper-evidence.py"
 # [OPUS-5] sq-gum8.16: the builder imports this module and re-derives the measured-timing file.
 cp "$TIMING_SYNC" "${REPO}/site/scripts/sync-canonical-timing.mjs"
+cp "$TIMING_GATE" "${REPO}/site/scripts/timing-source-gate.mjs"
 # ...and, when typst IS available, compiles the timing-lib self-check fixture. Mirror both so
 # this harness behaves identically with and without typst on PATH. (It also means the
 # zero-record branch of the fixture gets exercised: this throwaway repo derives no timings.)

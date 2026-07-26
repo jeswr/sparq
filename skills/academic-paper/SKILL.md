@@ -184,13 +184,23 @@ corpus, queries and commit the cited envelope measured.
    - **`"canonical": true` or nothing.** The envelope must self-declare it (the dedicated
      quiet-EC2 protocol). Work-box timings have no path in.
    - **COUNT BEFORE TIME.** A row is admitted only if that engine's own result count matches the
-     suite's committed `expected-rows` (or, absent one, every engine agreed) — so a
-     fast-but-WRONG comparator can never have its timing published. Refusals are recorded with
-     their reason in the generated file rather than silently dropped.
-   - **Provenance is unavoidable.** `site/papers/_lib/timing.typ` has **no raw-value accessor**:
-     `headline_timing(key)` always renders aggregate + host class + git commit beside the number,
-     and `timing_provenance(key)` gives the full block form (corpus, rows, gather date,
-     envelope path). A unit test pins the absence of a bare-value accessor.
+     suite's committed `bench/<suite>/expected-rows.tsv`, which the derivation loads
+     **independently of the envelope** — an envelope's own `count_crosscheck.expected` is a
+     self-assertion and cannot bless its own counts. Absent a committed row, agreement is
+     **re-derived** from the per-engine counts (≥2 engines, all equal to the published row); the
+     envelope's `all_agree` flag is not trusted on its own. So a fast-but-WRONG comparator can
+     never have its timing published. Refusals are recorded with their reason in the generated
+     file rather than silently dropped.
+   - **Provenance is unavoidable.** `headline_timing(key)` always renders aggregate + host class
+     + git commit beside the number, and `timing_provenance(key)` gives the full block form
+     (corpus, rows, gather date, envelope path). Typst cannot enforce this on its own — it has
+     no private module bindings, so the lib's parsed dataset and internal lookup would be
+     importable — so the boundary is enforced mechanically by
+     `build-papers.mjs::runTimingSourceGate()` (`site/scripts/timing-source-gate.mjs`): a paper
+     source may import only `headline_timing` / `timing_provenance` / `timing_keys` from the
+     lib, never the whole module, and may not read the generated JSON directly. Unit tests run
+     negative fixtures (raw-data import, internal accessor, wildcard, direct `json()`) through
+     that gate and require each to fail.
 
    Deliberately **not** provided: any ratio / speed-up helper. A cross-engine ratio is a *claim*
    needing prose framing (which corpus, which queries, what was excluded), so it belongs in the

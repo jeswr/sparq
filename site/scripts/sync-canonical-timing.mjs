@@ -16,14 +16,22 @@
 //      stay excluded; `benchmarks.generated.json` remains `environment: indicative` and may
 //      never back a headline).
 //   3. Every admitted record carries the envelope's provenance (host class, cpu, git commit,
-//      gather date, dataset/scale, aggregate) and `site/papers/_lib/timing.typ` has NO raw
-//      accessor — `headline_timing()` always renders the provenance alongside the number.
+//      gather date, dataset/scale, aggregate), and a paper can only reach it through
+//      `site/papers/_lib/timing.typ`'s `headline_timing()` / `timing_provenance()`, which
+//      always render that provenance alongside the number. Typst cannot enforce that on its
+//      own (it has no private module bindings), so the boundary is a build gate:
+//      `site/scripts/timing-source-gate.mjs`.
 //   4. COUNT BEFORE TIME. The envelopes themselves state the rule ("this is why COUNT is
 //      checked before trusting any timing"): a row is admitted only if that engine's own
-//      result count matches `bench/<suite>/expected-rows.tsv` (`count_crosscheck.expected`),
-//      or — when no expected count is committed — only if every engine agreed. So a
-//      fast-but-WRONG comparator (e.g. an engine returning 0 rows on SP2Bench q08) can never
-//      be published as a timing.
+//      result count matches the suite's COMMITTED `bench/<suite>/expected-rows.tsv`, which is
+//      loaded here INDEPENDENTLY of the envelope — an envelope's own
+//      `count_crosscheck.expected` is a self-assertion, so trusting it would let an envelope
+//      carrying a wrong-but-internally-consistent expected value admit its own bad rows.
+//      When the committed file has no row for that query, the fallback does NOT trust the
+//      envelope's `all_agree` flag either: agreement is RE-DERIVED from the per-engine
+//      crosscheck counts (at least two engines must have produced a count, all of them equal
+//      to the TSV row). So a fast-but-WRONG comparator (e.g. an engine returning 0 rows on
+//      SP2Bench q08) can never be published as a timing.
 //
 // HONEST SCOPE — read before extending:
 //   - Only ONE envelope family is derived today: the same-box per-query SPARQL comparison,
@@ -156,25 +164,87 @@ function admitEnvelope(env, relPath) {
   };
 }
 
+// ---- the COMMITTED expected-rows oracle ----------------------------------------------------
+// `bench/<suite>/expected-rows.tsv` is the repo's per-commit correctness oracle, committed and
+// reviewed independently of any measurement run. It — not the envelope's self-declared
+// `count_crosscheck.expected` — is the authority for COUNT BEFORE TIME.
+//
+// Format: `<query>\t<rows>` with `#` comments; extra columns (LUBM spells a third `regime`
+// column) are ignored. A query listed twice with DIFFERENT counts is genuinely ambiguous, so it
+// is recorded as AMBIGUOUS and refuses every row for that query rather than picking one.
+const AMBIGUOUS = Symbol("ambiguous expected-rows entry");
+
+function loadExpectedRows(repoRoot, suite) {
+  const rel = join("bench", suite, "expected-rows.tsv");
+  const abs = join(repoRoot, rel);
+  if (!existsSync(abs)) return { path: rel, rows: null };
+  const rows = new Map();
+  for (const raw of readFileSync(abs, "utf8").split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const [query, expected] = line.split("\t");
+    if (!query || expected === undefined) continue;
+    const count = expected.trim();
+    if (!/^\d+$/.test(count)) continue;
+    const held = rows.get(query);
+    rows.set(query, held !== undefined && held !== count ? AMBIGUOUS : count);
+  }
+  return { path: rel, rows };
+}
+
 // ---- COUNT BEFORE TIME --------------------------------------------------------------------
 // A per-(engine, query) admission check: publish a timing only for a row whose result count is
 // verified correct. Returns null when admitted, else the reason it was refused.
-function refuseOnCount(crosscheck, engine, query, count) {
+//
+// `expected` is the INDEPENDENTLY loaded committed oracle for this envelope's suite (see
+// loadExpectedRows); `engines` is the envelope's own engine list, used to re-derive agreement
+// from the per-engine counts instead of trusting the envelope's `all_agree` flag.
+function refuseOnCount(crosscheck, engine, query, count, engines, expected) {
   const cc = crosscheck?.[query];
   if (!cc || typeof cc !== "object") {
     return "no count_crosscheck entry (an unverified count may not back a published timing)";
   }
-  if (cc.expected !== undefined && cc.expected !== null) {
-    if (String(cc.expected) !== count) {
-      return `count ${count} != expected ${cc.expected}`;
+  const declared = cc.expected === undefined || cc.expected === null ? null : String(cc.expected);
+
+  // (a) The committed oracle covers this query — it decides, and the envelope may not contradict
+  //     it (a disagreement means one of the two is wrong, so neither may back a timing).
+  const committed = expected.rows ? expected.rows.get(query) : undefined;
+  if (committed === AMBIGUOUS) {
+    return `${expected.path} lists '${query}' more than once with different counts`;
+  }
+  if (committed !== undefined) {
+    if (committed !== count) {
+      return `count ${count} != expected ${committed}`;
+    }
+    if (declared !== null && declared !== committed) {
+      return `envelope asserts expected ${declared} but ${expected.path} says ${committed}`;
     }
     if (String(cc[engine] ?? "") !== count) {
       return `count_crosscheck disagrees with the TSV row (${JSON.stringify(cc[engine] ?? null)} vs ${count})`;
     }
     return null;
   }
-  if (cc.all_agree !== true) {
-    return "no expected-rows count is committed and the engines did not all agree";
+
+  // (b) No committed count for this query: fall back to engine agreement, RE-DERIVED from the
+  //     per-engine counts. `all_agree` is the envelope's own summary of that data and is not
+  //     trusted on its own.
+  const participating = engines.filter((e) => /^\d+$/.test(String(cc[e] ?? "")));
+  const where = expected.rows
+    ? `${expected.path} has no row for '${query}'`
+    : `${expected.path} is not committed`;
+  if (String(cc[engine] ?? "") !== count) {
+    return `${where} and count_crosscheck disagrees with the TSV row ` +
+      `(${JSON.stringify(cc[engine] ?? null)} vs ${count})`;
+  }
+  if (declared !== null && declared !== count) {
+    return `${where} and the envelope's own expected ${declared} != count ${count}`;
+  }
+  const disagreeing = participating.filter((e) => String(cc[e]) !== count);
+  if (disagreeing.length) {
+    return `${where} and the engines did not all agree (${disagreeing.join(", ")} != ${count})`;
+  }
+  if (participating.length < 2) {
+    return `${where} and only ${engine} produced a count, so nothing cross-checked it`;
   }
   return null;
 }
@@ -189,6 +259,8 @@ export function deriveCanonicalTiming({ repoRoot = REPO_ROOT } = {}) {
   const suiteScale = new Map();
   // key -> the winning envelope's sort tuple, for the latest-wins resolution below.
   const winner = new Map();
+  // suite -> the committed expected-rows oracle, loaded once (the COUNT BEFORE TIME authority).
+  const expectedBySuite = new Map();
 
   for (const abs of findEnvelopes(join(repoRoot, "bench", "canonical-competitor-results"))) {
     const relPath = relative(repoRoot, abs);
@@ -224,6 +296,12 @@ export function deriveCanonicalTiming({ repoRoot = REPO_ROOT } = {}) {
       );
     }
 
+    if (!expectedBySuite.has(meta.suite)) {
+      expectedBySuite.set(meta.suite, loadExpectedRows(repoRoot, meta.suite));
+    }
+    const expected = expectedBySuite.get(meta.suite);
+    meta.expectedRows = expected.rows ? expected.path : null;
+
     const engines = Object.keys(env)
       .filter((k) => k.endsWith("_tsv"))
       .map((k) => k.slice(0, -4))
@@ -244,7 +322,7 @@ export function deriveCanonicalTiming({ repoRoot = REPO_ROOT } = {}) {
         if (!/^\d+$/.test(count)) continue; // ERROR / timeout row — never fabricated, never used
         const us = Number(best);
         if (!Number.isFinite(us) || us <= 0) continue; // the engine-name column of an ERROR row
-        const refusal = refuseOnCount(env.count_crosscheck, engine, query, count);
+        const refusal = refuseOnCount(env.count_crosscheck, engine, query, count, engines, expected);
         if (refusal) {
           refusedRows.push(`${engine}/${query}: ${refusal}`);
           continue;
@@ -308,9 +386,11 @@ export function deriveCanonicalTiming({ repoRoot = REPO_ROOT } = {}) {
       "regenerate with `npm run sync-canonical-timing`. Every record is environment=" +
       "'canonical-timing' — a MEASURED wall-clock value from an envelope that self-declares " +
       "`\"canonical\": true` (the dedicated quiet-EC2 protocol), whose result count is verified " +
-      "against the suite's committed expected-rows. Work-box timings are NON-CANONICAL and " +
-      "cannot enter this file. Papers may render these ONLY through headline_timing() in " +
-      "site/papers/_lib/timing.typ, which always prints the provenance alongside the number. " +
+      "against the suite's committed bench/<suite>/expected-rows.tsv (loaded independently of " +
+      "the envelope, which cannot bless its own counts). Work-box timings are NON-CANONICAL and " +
+      "cannot enter this file. Papers may render these ONLY through headline_timing() / " +
+      "timing_provenance() in site/papers/_lib/timing.typ, which always print the provenance " +
+      "alongside the number — enforced at build time by site/scripts/timing-source-gate.mjs. " +
       "`skipped` is the honest record of which envelopes were left out and why.",
     schemaVersion: SCHEMA_VERSION,
     generatedBy: "site/scripts/sync-canonical-timing.mjs",

@@ -7,13 +7,16 @@
 // imports it yet (the first consumer is a separate bead).
 //
 // It exercises the accessors on a key picked from the derived data itself rather than a
-// hard-coded one, so it keeps working as canonical envelopes come and go.
+// hard-coded one, so it keeps working as canonical envelopes come and go. It picks that key via
+// `timing_keys()` — which yields KEYS ONLY — so even this fixture never holds a raw timing
+// value; the raw dataset is not exported at all (see timing.typ "HOW THE INVARIANT IS
+// ENFORCED"), and the build's source gate forbids importing anything else from the lib.
 
-#import "timing.typ": headline_timing, timing_provenance, timing_data
+#import "timing.typ": headline_timing, timing_provenance, timing_keys
 
 = timing.typ self-check
 
-#let keys = timing_data.records.keys().sorted()
+#let keys = timing_keys()
 
 #if keys.len() == 0 [
   No canonical-timing records are derived right now. That is a legitimate state (no committed

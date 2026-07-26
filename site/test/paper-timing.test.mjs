@@ -17,6 +17,7 @@ import {
   serializeCanonicalTiming,
   TIMING_OUT_PATH,
 } from "../scripts/sync-canonical-timing.mjs";
+import { auditTimingSources, ALLOWED_TIMING_IMPORTS } from "../scripts/timing-source-gate.mjs";
 
 const SITE = dirname(fileURLToPath(import.meta.url)).replace(/\/test$/, "");
 
@@ -46,15 +47,37 @@ function envelope({ canonical, suite = "demo", counts, tsv }) {
 }
 
 // Writes envelopes into a throwaway repo root so the derivation can be exercised on crafted
-// inputs without touching the real bench/ tree.
-function deriveFromFixture(envelopes) {
+// inputs without touching the real bench/ tree. `expectedRows` seeds the COMMITTED oracle
+// (`bench/<suite>/expected-rows.tsv`) that COUNT BEFORE TIME actually consults — it is the
+// authority, deliberately independent of anything the envelope asserts about itself.
+function deriveFromFixture(envelopes, expectedRows = {}) {
   const root = mkdtempSync(join(tmpdir(), "sparq-timing-fixture-"));
   const dir = join(root, "bench", "canonical-competitor-results", "fixture");
   mkdirSync(dir, { recursive: true });
   for (const [name, env] of Object.entries(envelopes)) {
     writeFileSync(join(dir, `${name}.json`), JSON.stringify(env, null, 2), "utf8");
   }
+  for (const [suite, rows] of Object.entries(expectedRows)) {
+    mkdirSync(join(root, "bench", suite), { recursive: true });
+    writeFileSync(
+      join(root, "bench", suite, "expected-rows.tsv"),
+      "# fixture expected-rows\n" +
+        Object.entries(rows).map(([q, n]) => `${q}\t${n}`).join("\n") + "\n",
+      "utf8",
+    );
+  }
   return deriveCanonicalTiming({ repoRoot: root });
+}
+
+// A throwaway `papers/` tree for the publication-boundary source gate, so a negative fixture
+// (a paper trying to publish a bare value) can be run through the real gate.
+function auditFixturePapers(sources) {
+  const dir = mkdtempSync(join(tmpdir(), "sparq-timing-papers-"));
+  mkdirSync(join(dir, "_lib"), { recursive: true });
+  for (const [name, text] of Object.entries(sources)) {
+    writeFileSync(join(dir, name), text, "utf8");
+  }
+  return auditTimingSources(dir);
 }
 
 test("the committed paper-timing.generated.json matches a fresh derivation (drift guard)", () => {
@@ -116,7 +139,7 @@ test("COUNT BEFORE TIME: a wrong-count engine's timing is refused, a correct one
       },
       tsv: { sparq_tsv: "q08\t358\t153318.0\n", other_tsv: "q08\t0\t1.0\n" },
     }),
-  });
+  }, { demo: { q08: "358" } });
   assert.ok(d.records["timing.demo.sparq.q08"], "the engine with the correct count is published");
   assert.equal(
     d.records["timing.demo.other.q08"],
@@ -186,7 +209,7 @@ test("latest-wins is per record, so a narrow re-run supersedes only the queries 
   const older = envelope({ canonical: true, counts, tsv: { sparq_tsv: "q01\t1\t10.0\nq02\t2\t20.0\n" } });
   const newer = envelope({ canonical: true, counts, tsv: { sparq_tsv: "q01\t1\t5.0\n" } });
   newer.env = { ...newer.env, gathered_at_utc: "2026-02-02T00:00:00Z" };
-  const d = deriveFromFixture({ a_older: older, b_newer: newer });
+  const d = deriveFromFixture({ a_older: older, b_newer: newer }, { demo: { q01: "1", q02: "2" } });
   assert.equal(d.records["timing.demo.sparq.q01"].value, 5.0, "the later envelope wins its own query");
   assert.equal(d.records["timing.demo.sparq.q02"].value, 20.0, "the earlier envelope still supplies q02");
   assert.equal(Object.keys(d.envelopes).length, 2, "both envelopes are cited, each by the records it won");
@@ -205,19 +228,183 @@ test("two envelopes claiming one suite with different datasets is a hard error",
   );
 });
 
-test("timing.typ exposes NO raw-value accessor (provenance is unavoidable)", () => {
-  const src = readFileSync(join(SITE, "papers", "_lib", "timing.typ"), "utf8");
-  // The only key-taking accessors are the internal lookup and the two provenance-forced ones.
-  const accessors = [...src.matchAll(/^#let\s+([a-z_]+)\(key\)\s*=/gm)].map((m) => m[1]);
-  assert.deepEqual(
-    accessors.sort(),
-    ["_trec", "headline_timing", "timing_provenance"],
-    "a new key-taking accessor in timing.typ must not be able to return a bare value — a " +
-      "measured number may only render with its provenance",
+// ---- COUNT BEFORE TIME: the committed expected-rows file is the AUTHORITY -------------------
+// The envelope's own `count_crosscheck` is a self-assertion. These are the mutation tests for
+// that: each one keeps the envelope internally consistent and only breaks its agreement with
+// the committed oracle (or removes the oracle), and each must refuse.
+
+test("an envelope whose asserted `expected` contradicts the committed expected-rows is refused", () => {
+  // Internally consistent — every engine reports 9, the envelope declares expected 9, all_agree
+  // — but bench/demo/expected-rows.tsv says the right answer is 358. Trusting the envelope here
+  // is exactly the hole: a bad run could bless its own wrong counts.
+  const d = deriveFromFixture({
+    e: envelope({
+      canonical: true,
+      counts: { q08: { sparq: "9", other: "9", all_agree: true, expected: "9", matches_expected: true } },
+      tsv: { sparq_tsv: "q08\t9\t42.0\n", other_tsv: "q08\t9\t99.0\n" },
+    }),
+  }, { demo: { q08: "358" } });
+  assert.equal(Object.keys(d.records).length, 0, "the committed expected-rows file decides, not the envelope");
+  assert.ok(
+    d.skipped.some((s) => /count 9 != expected 358/.test(s.reason)),
+    `the refusal must name the committed count; got ${JSON.stringify(d.skipped)}`,
   );
+});
+
+test("an envelope asserting a DIFFERENT expected than the committed file is refused even when its rows match", () => {
+  // The TSV rows agree with the committed oracle, but the envelope declares a different
+  // `expected`. One of the two is wrong about what this query means, so neither may back a
+  // timing until a human reconciles them.
+  const d = deriveFromFixture({
+    e: envelope({
+      canonical: true,
+      counts: { q01: { sparq: "1", other: "1", all_agree: true, expected: "7" } },
+      tsv: { sparq_tsv: "q01\t1\t42.0\n", other_tsv: "q01\t1\t99.0\n" },
+    }),
+  }, { demo: { q01: "1" } });
+  assert.equal(Object.keys(d.records).length, 0);
+  assert.ok(
+    d.skipped.some((s) => /envelope asserts expected 7 but bench\/demo\/expected-rows\.tsv says 1/.test(s.reason)),
+    `the contradiction must be named; got ${JSON.stringify(d.skipped)}`,
+  );
+});
+
+test("all_agree=true cannot admit a row whose crosscheck count differs from the TSV row", () => {
+  // No committed oracle for this suite, so the fallback applies — and the envelope's `all_agree`
+  // flag is a summary that disagrees with its own per-engine data. Agreement is RE-DERIVED, so
+  // the flag cannot launder the inconsistency.
+  const d = deriveFromFixture({
+    e: envelope({
+      canonical: true,
+      counts: { q01: { sparq: "1", other: "1", all_agree: true } },
+      tsv: { sparq_tsv: "q01\t5\t42.0\n", other_tsv: "q01\t1\t99.0\n" },
+    }),
+  });
+  assert.equal(
+    d.records["timing.demo.sparq.q01"],
+    undefined,
+    "a TSV row that disagrees with its own crosscheck entry must not be published",
+  );
+  assert.ok(
+    d.skipped.concat(Object.values(d.envelopes).flatMap((e) => e.refusedRows ?? []))
+      .some((r) => /count_crosscheck disagrees with the TSV row/.test(r.reason ?? r)),
+  );
+  // ...and the honest engine in the same envelope is unaffected.
+  assert.ok(d.records["timing.demo.other.q01"], "the consistent row still publishes");
+});
+
+test("all_agree=true cannot admit a row the other engines actually contradict", () => {
+  const d = deriveFromFixture({
+    e: envelope({
+      canonical: true,
+      counts: { q01: { sparq: "1", other: "2", all_agree: true } },
+      tsv: { sparq_tsv: "q01\t1\t42.0\n", other_tsv: "q01\t2\t99.0\n" },
+    }),
+  });
+  assert.equal(Object.keys(d.records).length, 0, "a lying all_agree flag must not launder a disagreement");
+  assert.ok(d.skipped.some((s) => /did not all agree/.test(s.reason)));
+});
+
+test("with no committed expected-rows and only one engine, nothing cross-checked the count", () => {
+  const d = deriveFromFixture({
+    e: envelope({
+      canonical: true,
+      counts: { q01: { sparq: "1", all_agree: true } },
+      tsv: { sparq_tsv: "q01\t1\t42.0\n" },
+    }),
+  });
+  assert.equal(Object.keys(d.records).length, 0);
+  assert.ok(d.skipped.some((s) => /nothing cross-checked it/.test(s.reason)));
+});
+
+test("the committed expected-rows file is what the real derivation consulted", () => {
+  // Non-vacuity for the whole authority path: the real records must cite a real committed
+  // oracle, and that file must actually carry the count the record published.
+  const d = deriveCanonicalTiming();
+  const envs = Object.values(d.envelopes);
+  assert.ok(envs.length > 0);
+  for (const e of envs) {
+    assert.match(
+      e.expectedRows ?? "",
+      /^bench\/[^/]+\/expected-rows\.tsv$/,
+      `envelope ${e.path}: the committed count oracle must be named`,
+    );
+  }
+  const sample = d.records["timing.sp2b.sparq.q08"];
+  assert.ok(sample, "sp2b q08 is the load-bearing example");
+  const tsv = readFileSync(join(SITE, "..", "bench", "sp2b", "expected-rows.tsv"), "utf8");
+  assert.ok(
+    tsv.split("\n").some((l) => l.trim() === `q08\t${sample.rows}`),
+    "the published row count must appear verbatim in the committed expected-rows file",
+  );
+});
+
+// ---- the publication boundary: no path to a bare value -------------------------------------
+
+test("timing.typ exports only provenance-rendering entry points (no raw data binding)", () => {
+  const src = readFileSync(join(SITE, "papers", "_lib", "timing.typ"), "utf8");
+  // EVERY top-level `#let` is importable in Typst, so enumerate them all — data bindings,
+  // zero-arg helpers and differently-shaped functions included — not just `(key)` accessors.
+  const bindings = [...src.matchAll(/^#let\s+([A-Za-z_][A-Za-z0-9_]*)/gm)].map((m) => m[1]);
+  const exported = bindings.filter((b) => !b.startsWith("_"));
+  assert.deepEqual(
+    exported.sort(),
+    [...ALLOWED_TIMING_IMPORTS].sort(),
+    "a non-underscore binding in timing.typ is part of its published surface — it must be one " +
+      "the source gate allows, and it must not be able to hand back a bare timing value",
+  );
+  // No exported binding may be a bare data binding (the `timing_data` escape hatch).
+  for (const name of exported) {
+    assert.match(
+      src,
+      new RegExp(`^#let\\s+${name}\\(`, "m"),
+      `${name} must be a function, not an exported data structure`,
+    );
+  }
   // `headline_timing` must actually emit provenance, not just be named as though it does.
   const body = src.slice(src.indexOf("#let headline_timing(key) ="));
   assert.match(body, /aggregate/, "headline_timing must render the aggregate");
   assert.match(body, /hostClass/, "headline_timing must render the host class");
   assert.match(body, /gitCommit/, "headline_timing must render the git commit");
+});
+
+test("the source gate rejects every known way to publish a bare timing value", () => {
+  // Each fixture is a paper that renders a measured number WITHOUT its provenance — the exact
+  // escape hatches a narrow "no bare accessor declared" assertion cannot see.
+  const bypasses = {
+    "raw-data-import.typ":
+      '#import "_lib/timing.typ": headline_timing, _timing_data\n' +
+      '#_timing_data.records.at("timing.sp2b.sparq.q01").value\n',
+    "internal-accessor.typ":
+      '#import "_lib/timing.typ": _trec\n#str(_trec("timing.sp2b.sparq.q01").value)\n',
+    "wildcard-import.typ": '#import "_lib/timing.typ": *\n',
+    "module-import.typ":
+      '#import "_lib/timing.typ"\n#str(timing.records.at("timing.sp2b.sparq.q01").value)\n',
+    "direct-json.typ":
+      '#let d = json("/src/data/paper-timing.generated.json")\n' +
+      '#str(d.records.at("timing.sp2b.sparq.q01").value)\n',
+  };
+  for (const [name, text] of Object.entries(bypasses)) {
+    const { problems } = auditFixturePapers({ [name]: text });
+    assert.ok(problems.length > 0, `the gate must reject ${name}`);
+    assert.ok(problems.every((p) => p.startsWith(name)), `the finding must name the offending file`);
+  }
+  // ...while the sanctioned usage passes, so the gate is a boundary and not a blanket ban.
+  const ok = auditFixturePapers({
+    "good.typ":
+      '#import "_lib/timing.typ": headline_timing, timing_provenance\n' +
+      'q01 runs in #headline_timing("timing.sp2b.sparq.q01").\n',
+  });
+  assert.deepEqual(ok.problems, [], "the provenance-rendering accessors must remain usable");
+});
+
+test("the real paper tree passes the publication-boundary source gate", () => {
+  const { scanned, problems } = auditTimingSources(join(SITE, "papers"));
+  assert.deepEqual(problems, [], "a registered paper source bypasses forced timing provenance");
+  assert.ok(scanned.length > 0, "the gate must actually have scanned the paper sources");
+  // The lib and its own self-check are the implementation of the boundary, not consumers.
+  assert.ok(
+    !scanned.some((f) => /timing(-selfcheck)?\.typ$/.test(f)),
+    "timing.typ / timing-selfcheck.typ are exempt; every other paper source is scanned",
+  );
 });

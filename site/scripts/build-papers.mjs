@@ -27,6 +27,7 @@ import {
   serializeCanonicalTiming,
   TIMING_OUT_PATH,
 } from "./sync-canonical-timing.mjs";
+import { auditTimingSources } from "./timing-source-gate.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SITE = resolve(__dirname, "..");
@@ -288,6 +289,33 @@ function runCanonicalTimingGate() {
   );
 }
 
+// ---- the measured-timing PUBLICATION-BOUNDARY source gate ---------------------------------
+// [OPUS-5] sq-gum8.16 — runCanonicalTimingGate() above proves the DATA is exactly what the
+// committed envelopes imply. This proves the RENDERING PATH: that no paper source reaches a
+// measured value except through the two provenance-rendering accessors.
+//
+// It is a separate gate because Typst cannot enforce it — the lib's parsed dataset and its
+// internal record lookup are importable like any other top-level binding, and a paper can also
+// `json()` the generated file itself. See site/scripts/timing-source-gate.mjs for the rules.
+// FAIL-CLOSED: any bypass aborts the build before an artifact is written.
+function runTimingSourceGate() {
+  const { scanned, problems } = auditTimingSources(PAPERS_DIR);
+  if (problems.length) {
+    console.error(
+      "\n[paper-factory] MEASURED-TIMING SOURCE GATE FAILED:\n  - " +
+        problems.join("\n  - ") +
+        "\n\n  A measured wall-clock number may only reach a page via headline_timing(key) or\n" +
+        "  timing_provenance(key), which always render the machine, aggregate and commit\n" +
+        "  beside it. Route the number through an accessor instead of the raw data.\n",
+    );
+    process.exit(1);
+  }
+  console.log(
+    `[paper-factory] measured-timing source gate passed: ${scanned.length} paper source(s) ` +
+      "reach timings only through the provenance-rendering accessors.",
+  );
+}
+
 // ---- the timing-lib compile self-check ----------------------------------------------------
 // [OPUS-5] sq-gum8.16 — `papers/_lib/timing.typ` is infrastructure that no paper imports yet
 // (the first consumer is a separate bead). Without this, a syntax error in the lib or a shape
@@ -370,6 +398,10 @@ function main() {
   // [OPUS-5] sq-gum8.16 (paper factory F4): the derived MEASURED-timing class. Also a pure
   // source check (re-derive + byte-compare), so it runs before any compile/placeholder too.
   runCanonicalTimingGate();
+
+  // [OPUS-5] sq-gum8.16: ...and the matching PUBLICATION-BOUNDARY check — no paper source may
+  // reach a measured value except through the provenance-rendering accessors.
+  runTimingSourceGate();
 
   const typst = resolveTypst();
   const papers = readRegistry();
