@@ -16,7 +16,10 @@
 #     (a hand edit is overwritten by the next refresh).
 #   * Every entry needs `ref` (or an explicit `untracked = true`), `bucket`, `ask`, `short`.
 #   * `ref` is the LIVE-STATE KEY only; it is never the source of the rendered prose (the 🔴 asks
-#     carry their own inline links). Cross-repo refs are allowed — "owner/repo#N".
+#     carry their own inline links). Cross-repo refs are allowed — "owner/repo#N" — but the refresh
+#     job runs on the repo-scoped GITHUB_TOKEN, so a ref in a PRIVATE repo reads as "state unknown":
+#     the entry is kept and marked (fail-closed), never dropped, and the job reds. Keep cross-repo
+#     refs public (jeswr/agent-account-registry is).
 #   * `ask` is free markdown on ONE logical line: the renderer collapses whitespace and re-wraps,
 #     so wrap it here for readability however you like. No blank lines inside a value.
 #   * `short` is the label used when the entry is dropped ("Removed as resolved").

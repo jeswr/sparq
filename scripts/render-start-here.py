@@ -753,11 +753,16 @@ def current_body(repo: str, issue: int, runner=None) -> str:
 
 
 def publish(repo: str, issue: int, body: str, runner=None) -> None:
+    # `--body-file` rather than `--body`: the body carries newlines, backticks and emoji, and an
+    # argv round-trip through a shell is where those get mangled.
     runner = runner or _gh
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as fh:
         fh.write(body)
         path = fh.name
-    runner(["issue", "edit", str(issue), "--repo", repo, "--body-file", path])
+    try:
+        runner(["issue", "edit", str(issue), "--repo", repo, "--body-file", path])
+    finally:
+        Path(path).unlink(missing_ok=True)
 
 
 def main(argv: list[str] | None = None) -> int:
