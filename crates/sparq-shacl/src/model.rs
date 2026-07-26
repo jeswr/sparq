@@ -389,6 +389,11 @@ pub struct Shape {
     /// only components built from a single reifiable constraint triple
     /// (`(shapeNode, P, O)`) can carry a real override. See [`ComponentMeta`].
     pub(crate) component_meta: Vec<ComponentMeta>,
+    /// [SONNET-4.6] (sq-7os4t) Overrides on the qualified minimum/maximum count
+    /// statements. These are parallel to `components`, but kept separate because
+    /// one `Component::Qualified` can emit results caused by either statement.
+    pub(crate) qualified_min_meta: Vec<ComponentMeta>,
+    pub(crate) qualified_max_meta: Vec<ComponentMeta>,
     /// Severity IRI (default sh:Violation).
     pub severity: String,
     /// sh:message literals, copied into results.
@@ -817,6 +822,12 @@ impl ShapesModel {
             // reified-annotation override. (`validate_shape` is also padded
             // defensively, so a drift here can never silently drop a component.)
             self.shapes[sid].component_meta.push(ComponentMeta::default());
+            self.shapes[sid]
+                .qualified_min_meta
+                .push(ComponentMeta::default());
+            self.shapes[sid]
+                .qualified_max_meta
+                .push(ComponentMeta::default());
         }
     }
 
@@ -893,6 +904,8 @@ impl ShapesModel {
             targets: Vec::new(),
             components: Vec::new(),
             component_meta: Vec::new(),
+            qualified_min_meta: Vec::new(),
+            qualified_max_meta: Vec::new(),
             severity: sh("Violation"),
             messages: Vec::new(),
             deactivated: false,
@@ -926,6 +939,8 @@ impl ShapesModel {
     /// scan.
     fn attach_component_meta(&self, g: &GraphView, node: &Term, shape: &mut Shape) {
         shape.component_meta = vec![ComponentMeta::default(); shape.components.len()];
+        shape.qualified_min_meta = vec![ComponentMeta::default(); shape.components.len()];
+        shape.qualified_max_meta = vec![ComponentMeta::default(); shape.components.len()];
         // Short-circuit: nothing reifies a statement of this shape ⇒ no overrides.
         // (`rdf:reifies` objects are triple-terms; we only need the cheap presence
         // check that SOME reifier names this shape node as the triple subject.)
@@ -933,6 +948,16 @@ impl ShapesModel {
             return;
         }
         for (i, comp) in shape.components.iter().enumerate() {
+            if matches!(comp, Component::Qualified { .. }) {
+                for (pred, metas) in [
+                    ("qualifiedMinCount", &mut shape.qualified_min_meta),
+                    ("qualifiedMaxCount", &mut shape.qualified_max_meta),
+                ] {
+                    if let Some(obj) = g.object(node, &sh(pred)) {
+                        metas[i] = reified_meta(g, node, &sh(pred), &obj);
+                    }
+                }
+            }
             let Some((pred, obj)) = self.component_source_triple(comp) else {
                 continue;
             };
@@ -1030,6 +1055,8 @@ impl ShapesModel {
             targets: Vec::new(),
             components: Vec::new(),
             component_meta: Vec::new(),
+            qualified_min_meta: Vec::new(),
+            qualified_max_meta: Vec::new(),
             severity: match g.object(node, &sh("severity")) {
                 Some(Term::NamedNode(n)) => n.as_str().to_string(),
                 _ => sh("Violation"),
