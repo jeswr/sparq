@@ -489,13 +489,33 @@ impl Num {
     /// and by `MIN`/`MAX` — XPath `op:numeric-less-than` / `op:numeric-equal` semantics.
     ///
     /// Unlike [`cmp_total`](Self::cmp_total), this comparison is **partial**: `NaN`
-    /// produces `None` (a SPARQL type error), and `+0.0` equals `-0.0`. Same-tier pairs
-    /// (`Int`/`Dec`) compare by exact value via [`Dec::cmp`]; mixed or inexact pairs fall
-    /// back to `f64::partial_cmp` (XPath promotion — a float/double operand promotes the
-    /// pair to `f64`, which is correct for the relational operators but can collapse
-    /// distinct exact values at the 2^53 boundary; that is an accepted consequence of the
-    /// XPath spec, not a bug). Returns `None` when either operand is `NaN`, matching the
-    /// engine's `values_equal`/`value_compare_strict` path (SPARQL type error on NaN).
+    /// produces `None` (a SPARQL type error), and `+0.0` equals `-0.0`. Returns `None` when
+    /// either operand is `NaN`, matching the engine's `values_equal`/`value_compare_strict`
+    /// path (SPARQL type error on NaN).
+    ///
+    /// # Which tier a mixed pair is compared in
+    ///
+    /// XPath promotes the operands of a comparison to the **LEAST common type** in the
+    /// hierarchy `xs:integer -> xs:decimal -> xs:float -> xs:double` (F&O *Operator
+    /// Mapping*: if one operand is `xs:double` the other becomes double; OTHERWISE if one
+    /// is `xs:float` the other becomes **float**). So:
+    ///
+    /// - both `Int`/`Dec` — exact value via [`Dec::cmp`], no floating promotion at all;
+    /// - either operand `Double` — promote the pair to `f64`;
+    /// - otherwise an operand is `Float` — promote the pair to **`f32`**, through
+    ///   [`Num::f32`](Self::f32) so the promotion is a SINGLE correctly-rounded conversion.
+    ///
+    /// [OPUS-5] This last case used to fall through to `f64` like everything else, and the
+    /// doc here asserted that was correct. It is not: `xs:double` is only the common type
+    /// when an operand really IS a double. The error is invisible below 2^53 and appears
+    /// above it — `Num::Int(4611686293305294849)` versus the `f32` `0x5E80_0001` (the
+    /// correctly-rounded promotion of that very integer, = 2^62 + 2^39) compared `Less`
+    /// where XPath requires `Equal`. Pinned by
+    /// `tests::cmp_relational_integer_and_decimal_vs_float_compare_in_the_float_tier`.
+    ///
+    /// Within the `f64` tier the 2^53 collapse for a large `Int` operand IS spec-correct
+    /// (integer -> double is a single correctly-rounded conversion), so that is an accepted
+    /// consequence of XPath, not a bug.
     ///
     /// # When to use `cmp_total` vs `cmp_relational`
     ///
@@ -513,7 +533,15 @@ impl Num {
                 return Some(ord);
             }
         }
-        // Mixed or inexact: f64 promotion.  NaN → None (SPARQL type error).
+        // FLOAT tier: no operand is a Double, but one is a Float, so XPath's least common
+        // type is `xs:float` — promote BOTH through `Num::f32` (a single correctly-rounded
+        // conversion) and decide there. Comparing this pair as `f64` is a different, wrong
+        // answer above 2^53. [OPUS-5] issue #3796
+        if self.rank().max(o.rank()) == 2 {
+            return self.f32().partial_cmp(&o.f32());
+        }
+        // DOUBLE tier (or an exact pair whose `Dec::cmp` overflowed): f64 promotion.
+        // NaN → None (SPARQL type error).
         self.f64().partial_cmp(&o.f64())
     }
 
@@ -1777,6 +1805,55 @@ mod tests {
         assert_eq!(int_lo.cmp_relational(dbl), Some(Equal));
         // ±0.0 are equal (f64 comparison)
         assert_eq!(Num::Double(-0.0).cmp_relational(Num::Double(0.0)), Some(Equal));
+    }
+
+    /// XPath promotes a mixed numeric pair to the LEAST common type, NOT always to
+    /// `xs:double`. The hierarchy is `xs:integer -> xs:decimal -> xs:float -> xs:double`
+    /// (F&O "Operator Mapping": if one operand is `xs:double` the other becomes double;
+    /// OTHERWISE if one is `xs:float` the other becomes FLOAT). So integer/decimal versus
+    /// `xs:float` must be decided in the FLOAT tier — comparing it as `f64` is wrong, and
+    /// wrong in a way that is invisible below 2^53.
+    ///
+    /// `cmp_relational` used to fall through to `f64` unconditionally for every mixed pair.
+    /// The sibling test above only ever exercises integer-versus-DOUBLE, where `f64` is
+    /// genuinely the right tier, so it could not see this.
+    ///
+    /// Fixture: the `f32` nearest `4611686293305294849` is exactly `0x5E80_0001`
+    /// (= 2^62 + 2^39), so under correct float-tier promotion the two are EQUAL, while the
+    /// f64 route makes the integer strictly Less. [OPUS-5] issue #3796
+    #[test]
+    fn cmp_relational_integer_and_decimal_vs_float_compare_in_the_float_tier() {
+        use Ordering::*;
+        const N: i64 = 4_611_686_293_305_294_849;
+        let n = Num::Int(N);
+        let f = Num::Float(f32::from_bits(0x5E80_0001));
+        assert_eq!(n.f32().to_bits(), 0x5E80_0001, "promotion fixture drifted");
+
+        // THE case: least common type is xs:float, so these are equal.
+        assert_eq!(n.cmp_relational(f), Some(Equal), "integer vs float must promote to f32");
+        assert_eq!(f.cmp_relational(n), Some(Equal), "and must be symmetric");
+
+        // Pin the wrong answer the f64 route produces, so the fixture cannot silently
+        // stop witnessing the defect.
+        assert_eq!(n.f64().partial_cmp(&f.f64()), Some(Less), "f64 route is the bug");
+
+        // Ordering against the ADJACENT floats must still be strict, so an
+        // everything-is-Equal implementation cannot pass.
+        assert_eq!(n.cmp_relational(Num::Float(f32::from_bits(0x5E80_0000))), Some(Greater));
+        assert_eq!(n.cmp_relational(Num::Float(f32::from_bits(0x5E80_0002))), Some(Less));
+
+        // xsd:decimal versus xsd:float takes the same tier (decimal -> float).
+        let d = Num::Dec(Dec { mant: 46_116_862_933_052_948_490, scale: 1 });
+        assert_eq!(d.cmp_relational(f), Some(Equal), "decimal vs float must promote to f32");
+
+        // A DOUBLE operand genuinely does promote the pair to f64 — unchanged behaviour.
+        let dbl = Num::Double(f32::from_bits(0x5E80_0001) as f64);
+        assert_eq!(n.cmp_relational(dbl), Some(Less), "double operand still uses the f64 tier");
+
+        // Float-tier NaN is still a type error, and same-tier float ordering is intact.
+        assert_eq!(n.cmp_relational(Num::Float(f32::NAN)), None);
+        assert_eq!(Num::Float(1.5).cmp_relational(Num::Int(2)), Some(Less));
+        assert_eq!(Num::Float(-0.0).cmp_relational(Num::Int(0)), Some(Equal));
     }
 
     // [SONNET-4.6] sq-qcnn.40 — targeted tests killing the surviving mutants identified

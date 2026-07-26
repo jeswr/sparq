@@ -65,25 +65,37 @@ to the shared `sparq_core::parse_xsd_f64` spelling rules, so which lexicals are 
 is unchanged). Regression tests assert `f32::to_bits()`, not a formatted decimal — the two
 candidates are ADJACENT floats that print identically. [OPUS-5] issue #3796.
 
-> **BOUNDARY — this fixes the ARITHMETIC tier only; `=`/`<` on an `xsd:float` still do not
-> see the `f32` value.** The scope above is `Num::f32`/`Dec::f32`/`binop`/`parse_xsd_f32`.
-> The engine's numeric-value CACHE — `sparq_core::cached_numeric_f64` and the engine's
-> `numeric_cache_f64`, which drive the relational seam, the sargable `=`/`<` fast path,
-> `JKey::Num` value-joins and the `ORDER BY` numeric rank — still values an `xsd:float`
-> literal as `parse_xsd_f64(lexical)`, i.e. the f64 nearest the LEXICAL rather than the f64
-> image of its (correctly-rounded) `f32` value. So the engine is internally inconsistent
-> between its arithmetic and its comparison tiers. Measured through `sparq_engine::query`:
+**Which tier a mixed comparison uses.** XPath promotes the operands of a comparison to the
+**LEAST common type** in `xs:integer -> xs:decimal -> xs:float -> xs:double`, NOT always to
+`xs:double`: `xs:double` is the common type only when an operand really IS a double.
+`Num::cmp_relational` is therefore rank-aware — both `Int`/`Dec` compare exactly via
+`Dec::cmp`; a `Double` operand promotes the pair to `f64`; otherwise a `Float` operand
+promotes the pair to **`f32`** through `Num::f32`. [OPUS-5] #3796
+
+> **CORRECTION — this section previously said the opposite, and was wrong.** It asserted
+> that `cmp_relational` comparing any mixed pair in the `f64` tier is CORRECT and "must not
+> be fixed". That is only true when an operand is an `xs:double`. For integer/decimal versus
+> `xs:float` the least common type is **float**, and comparing in `f64` gives a different,
+> wrong answer above 2^53: `Num::Int(4611686293305294849)` versus the `f32` `0x5E80_0001`
+> (which is the correctly-rounded promotion of that very integer, = 2^62 + 2^39) returned
+> `Less` where XPath requires `Equal`. Fixed, and pinned by
+> `cmp_relational_integer_and_decimal_vs_float_compare_in_the_float_tier`. Do not
+> re-introduce the unconditional `f64` fallback.
+
+> **REMAINING BOUNDARY — the engine's `=`/`<` on an `xsd:float` still do not see the `f32`
+> value.** This is a DIFFERENT defect from the one above, in a different crate, and it is
+> still open. `sparq-engine` does not call `cmp_relational` at all; its `=`/`<` ride the
+> numeric-value CACHE — `sparq_core::cached_numeric_f64` and the engine's
+> `numeric_cache_f64`, which drive the sargable `=`/`<` fast path, `JKey::Num` value-joins
+> and the `ORDER BY` numeric rank — and that still values an `xsd:float` literal as
+> `parse_xsd_f64(lexical)`, i.e. the f64 nearest the LEXICAL rather than the f64 image of
+> its correctly-rounded `f32`. Measured through `sparq_engine::query`:
 > `"4611686293305294849"^^xsd:float = "4611686568183201792"^^xsd:double` is `false` (XPath
-> requires `true` — that `f32` is exactly 2^62+2^39) and the same `<` is `true`, yet
-> `+ "0.0"^^xsd:float` yields `4.6116866E18`. This is NOT a regression from #3796 — the
-> comparison path never consumed the `f32` value — and it is NOT fixed here: the cache f64
-> is shared bit-identically with the spilled on-disk dict cache and `LocalVocab::intern`,
-> so correcting it is a separate change that must be validated against the W3C conformance
-> ratchet. Tracked as issue #3825; #3796 stays OPEN for it. [OPUS-5]
->
-> `Num::cmp_relational` using the f64 tier is CORRECT and must not be "fixed" — XPath
-> promotes `float` → `double` for that comparison. The defect is the cached VALUE, not the
-> tier it is compared in.
+> requires `true`) and the same `<` is `true`, yet `+ "0.0"^^xsd:float` yields
+> `4.6116866E18`. NOT a regression from #3796 — that path never consumed the `f32` value.
+> Not fixed here because the cache f64 is shared bit-identically with the spilled on-disk
+> dict cache and `LocalVocab::intern`, so correcting it must be validated against the W3C
+> conformance ratchet. Tracked as issue #3825; #3796 stays OPEN for it. [OPUS-5]
 
 ```toml
 [dependencies]
