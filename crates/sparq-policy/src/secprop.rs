@@ -43,9 +43,11 @@
 //! `odrl:` combinator is load-bearing: under `odrl:or` a presentation establishing
 //! *either* branch suffices, and under `odrl:xone` establishing more than one is a
 //! failure. A flat list would read as a conjunction and would overstate the
-//! requirement. Branches whose leftOperand is not a `secx:` one are kept as
-//! [`DischargeExpr::Other`] rather than pruned — dropping them from an `or` would
-//! likewise turn an alternative into a mandate.
+//! requirement. Branches whose leftOperand is not a `secx:` one are kept — whole,
+//! `(leftOperand, operator, rightOperand)` triple intact — as [`DischargeExpr::Other`]
+//! rather than pruned: dropping them from an `or` would likewise turn an alternative
+//! into a mandate, and keeping only their leftOperand would leave two different
+//! alternatives over one leftOperand indistinguishable and undecidable.
 //!
 //! The **wire half** of that envelope — a VC 2.0 Verifiable Presentation carrying a
 //! Data-Integrity proof under a `sparql-zk`-style cryptosuite — is **deliberately NOT
@@ -290,15 +292,19 @@ pub enum DischargeExpr {
     Atomic(DischargeObligation),
     /// A leaf constraint whose leftOperand is **not** a `secx:` one (core ODRL, or an
     /// unrelated custom profile): decided from the ordinary request context, never by
-    /// a proof. Carries the [`crate::Constraint::left`] IRI so a host can see *why* a
-    /// branch is satisfiable without a presentation.
+    /// a proof.
+    ///
+    /// It carries the **whole** [`crate::Constraint`] — the full
+    /// `(leftOperand, operator, rightOperand)` triple — not just the leftOperand: two
+    /// branches over the same leftOperand (`recipient eq Bob` vs `recipient eq Carol`,
+    /// or `eq` vs `neq`) are *different* alternatives, and a host that saw only the
+    /// leftOperand could neither tell them apart nor decide which of them holds. That
+    /// matters most under [`ExactlyOne`](Self::ExactlyOne), where the count of holding
+    /// branches — not merely which dimensions appear — is the verdict.
     ///
     /// These are kept rather than pruned: deleting a non-proof operand from an
     /// [`Any`](Self::Any) would silently turn an alternative into a mandate.
-    Other {
-        /// The non-`secx:` leftOperand IRI.
-        left_operand: String,
-    },
+    Other(Constraint),
     /// `odrl:and` — every operand must hold. Also the implicit combinator over a
     /// rule's own top-level [`crate::Rule::constraints`] plus its
     /// [`crate::Rule::logical_constraints`], which ODRL conjoins.
@@ -328,7 +334,7 @@ impl DischargeExpr {
     fn collect_obligations<'a>(&'a self, out: &mut Vec<&'a DischargeObligation>) {
         match self {
             DischargeExpr::Atomic(o) => out.push(o),
-            DischargeExpr::Other { .. } => {}
+            DischargeExpr::Other(_) => {}
             DischargeExpr::All(ops) | DischargeExpr::Any(ops) | DischargeExpr::ExactlyOne(ops) => {
                 for op in ops {
                     op.collect_obligations(out);
@@ -341,7 +347,7 @@ impl DischargeExpr {
     fn has_obligation(&self) -> bool {
         match self {
             DischargeExpr::Atomic(_) => true,
-            DischargeExpr::Other { .. } => false,
+            DischargeExpr::Other(_) => false,
             DischargeExpr::All(ops) | DischargeExpr::Any(ops) | DischargeExpr::ExactlyOne(ops) => {
                 ops.iter().any(DischargeExpr::has_obligation)
             }
@@ -474,10 +480,10 @@ fn logical_expr(rule_id: &str, deontic: Deontic, lc: &LogicalConstraint) -> Disc
 fn leaf_expr(rule_id: &str, deontic: Deontic, c: &Constraint) -> DischargeExpr {
     let Some(dimension) = over_dimension(&c.left) else {
         // A core ODRL (or unrelated custom) leftOperand — not a proof obligation, but
-        // still a branch of the requirement, so it must not be dropped.
-        return DischargeExpr::Other {
-            left_operand: c.left.clone(),
-        };
+        // still a branch of the requirement, so it must not be dropped. The whole
+        // triple is carried: the operator and right operand are what let a host decide
+        // the branch (and tell two branches over one leftOperand apart).
+        return DischargeExpr::Other(c.clone());
     };
     DischargeExpr::Atomic(DischargeObligation {
         rule: rule_id.to_owned(),
@@ -623,9 +629,12 @@ mod tests {
         assert_eq!(operands.len(), 2);
         assert_eq!(
             operands[1],
-            DischargeExpr::Other {
-                left_operand: crate::ODRL_PURPOSE.into()
-            },
+            DischargeExpr::Other(Constraint {
+                left: crate::ODRL_PURPOSE.into(),
+                operator: Operator::Eq,
+                right: Value::Iri("https://w3id.org/dpv#ResearchAndDevelopment".into()),
+            }),
+            "the non-proof branch keeps its whole (left, operator, right) triple",
         );
 
         let obligations = requirement.obligations();
@@ -796,9 +805,148 @@ mod tests {
         assert_eq!(alternatives.len(), 2, "the non-proof alternative survives");
         assert_eq!(
             alternatives[1],
-            DischargeExpr::Other {
-                left_operand: crate::ODRL_RECIPIENT.into()
-            },
+            DischargeExpr::Other(Constraint {
+                left: crate::ODRL_RECIPIENT.into(),
+                operator: Operator::Eq,
+                right: Value::Iri("https://bob.example/profile#me".into()),
+            }),
+            "the alternative survives WHOLE — `recipient` alone would not say which \
+             recipient satisfies it",
+        );
+    }
+
+    /// An `odrl:recipient` constraint operand, for the alternative-discrimination
+    /// tests below.
+    fn recipient(operator: Operator, who: &str) -> ConstraintNode {
+        ConstraintNode::Atomic(Constraint {
+            left: crate::ODRL_RECIPIENT.into(),
+            operator,
+            right: Value::Iri(who.into()),
+        })
+    }
+
+    const BOB: &str = "https://bob.example/profile#me";
+    const CAROL: &str = "https://carol.example/profile#me";
+
+    /// A test-local **host** decision procedure over the returned tree ALONE — it
+    /// never consults the original [`Policy`]. `established` is the set of `secx:`
+    /// leftOperands a presentation proves; `context` is the ordinary request context
+    /// the non-proof branches are decided from.
+    ///
+    /// This is exactly the reading [`discharge_requirements`] promises a host can
+    /// perform without going back to the policy, so it is the invariant under test:
+    /// if a leaf did not carry enough of its constraint, this function could not be
+    /// written.
+    fn holds(expr: &DischargeExpr, context: &[(&str, Value)], established: &[&str]) -> bool {
+        match expr {
+            DischargeExpr::Atomic(o) => established.contains(&o.left_operand.as_str()),
+            DischargeExpr::Other(c) => context
+                .iter()
+                .find(|(left, _)| *left == c.left)
+                .is_some_and(|(_, supplied)| match c.operator {
+                    Operator::Eq => *supplied == c.right,
+                    Operator::Neq => *supplied != c.right,
+                    other => unimplemented!("the test host decides eq/neq only, got {:?}", other),
+                }),
+            DischargeExpr::All(ops) => ops.iter().all(|o| holds(o, context, established)),
+            DischargeExpr::Any(ops) => ops.iter().any(|o| holds(o, context, established)),
+            DischargeExpr::ExactlyOne(ops) => {
+                ops.iter().filter(|o| holds(o, context, established)).count() == 1
+            }
+        }
+    }
+
+    /// LOAD-BEARING: two non-`secx:` branches over the SAME leftOperand differing only
+    /// in OPERATOR are different alternatives, and the returned tree must both
+    /// distinguish and decide them. Under `xone` the *count* of holding branches is the
+    /// verdict, so a leaf carrying only the leftOperand would make the two collapse into
+    /// one indistinguishable node and mis-evaluate the rule.
+    #[test]
+    fn xone_over_branches_sharing_a_left_operand_is_decidable_from_the_tree_alone() {
+        let requirement = single_requirement(&policy_with_logical(LogicalConstraint {
+            id: "urn:lc:1".into(),
+            operator: crate::LogicalOperator::Xone,
+            operands: vec![
+                ConstraintNode::Atomic(secprop_constraint(REQUIRES_SOUNDNESS, "Statistical")),
+                recipient(Operator::Eq, BOB),
+                recipient(Operator::Neq, BOB),
+            ],
+        }));
+
+        let DischargeExpr::All(outer) = &requirement else {
+            panic!("expected the rule conjunction, got {:?}", requirement);
+        };
+        let DischargeExpr::ExactlyOne(alternatives) = &outer[0] else {
+            panic!("expected an `xone`, got {:?}", outer[0]);
+        };
+        assert_ne!(
+            alternatives[1], alternatives[2],
+            "`recipient eq Bob` and `recipient neq Bob` are opposite alternatives and \
+             must not collapse into the same node",
+        );
+
+        // Decided from the tree alone — the `Policy` is never consulted again.
+        let to_bob = [(crate::ODRL_RECIPIENT, Value::Iri(BOB.into()))];
+        let to_carol = [(crate::ODRL_RECIPIENT, Value::Iri(CAROL.into()))];
+        assert!(
+            holds(&requirement, &to_bob, &[]),
+            "exactly one branch (`eq Bob`) holds for a request to Bob",
+        );
+        assert!(
+            holds(&requirement, &to_carol, &[]),
+            "exactly one branch (`neq Bob`) holds for a request to Carol",
+        );
+        // …and `xone` really is exactly-one: a presentation establishing the `secx:`
+        // branch as well makes TWO branches hold, which BREAKS the rule.
+        assert!(
+            !holds(&requirement, &to_bob, &[REQUIRES_SOUNDNESS]),
+            "two holding branches must fail an `xone`",
+        );
+    }
+
+    /// LOAD-BEARING: two non-`secx:` branches over the same leftOperand differing only
+    /// in RIGHT OPERAND are likewise distinct alternatives — a host that saw only
+    /// `odrl:recipient` twice could not tell whether Bob or Carol satisfies the `or`,
+    /// and would have to re-read the `Policy` the API says it need not.
+    #[test]
+    fn or_alternatives_differing_only_in_right_operand_stay_distinguishable() {
+        let requirement = single_requirement(&policy_with_logical(LogicalConstraint {
+            id: "urn:lc:1".into(),
+            operator: crate::LogicalOperator::Or,
+            operands: vec![
+                ConstraintNode::Atomic(secprop_constraint(REQUIRES_HIDING, "PerfectHiding")),
+                recipient(Operator::Eq, BOB),
+                recipient(Operator::Eq, CAROL),
+            ],
+        }));
+
+        let DischargeExpr::All(outer) = &requirement else {
+            panic!("expected the rule conjunction, got {:?}", requirement);
+        };
+        let DischargeExpr::Any(alternatives) = &outer[0] else {
+            panic!("expected an `or`, got {:?}", outer[0]);
+        };
+        assert_ne!(
+            alternatives[1], alternatives[2],
+            "the Bob and Carol alternatives must be distinguishable",
+        );
+
+        let to_bob = [(crate::ODRL_RECIPIENT, Value::Iri(BOB.into()))];
+        let to_dave = [(
+            crate::ODRL_RECIPIENT,
+            Value::Iri("https://dave.example/profile#me".into()),
+        )];
+        assert!(
+            holds(&requirement, &to_bob, &[]),
+            "the Bob alternative discharges the `or` with no presentation at all",
+        );
+        assert!(
+            !holds(&requirement, &to_dave, &[]),
+            "neither recipient alternative holds for Dave, and no proof was presented",
+        );
+        assert!(
+            holds(&requirement, &to_dave, &[REQUIRES_HIDING]),
+            "…but the `secx:` alternative still discharges it for Dave",
         );
     }
 
@@ -840,7 +988,7 @@ mod tests {
         };
         assert_eq!(conjuncts.len(), 2);
         assert!(matches!(conjuncts[0], DischargeExpr::Atomic(_)));
-        assert!(matches!(conjuncts[1], DischargeExpr::Other { .. }));
+        assert!(matches!(conjuncts[1], DischargeExpr::Other(_)));
         // Alternative 2 is a bare obligation — establishing it alone suffices.
         assert!(matches!(alternatives[1], DischargeExpr::Atomic(_)));
 

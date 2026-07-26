@@ -262,13 +262,13 @@ for r in discharge_requirements(&policy) {
         DischargeExpr::ExactlyOne(alts) => { /* establishing TWO of `alts` FAILS */ }
         DischargeExpr::All(conjuncts) => { /* every one must hold */ }
         DischargeExpr::Atomic(o) => { let _ = (o.dimension, &o.required); }
-        DischargeExpr::Other { left_operand } => { /* non-proof branch */ }
+        DischargeExpr::Other(c) => { let _ = (&c.left, c.operator, &c.right); }
     }
 }
 ```
 
 - **The `odrl:` combinator is preserved, and is load-bearing.** The result is a `DischargeExpr` **tree per rule**, not a flat list: under `odrl:or` establishing *either* branch suffices, and under `odrl:xone` establishing more than one is a *failure*. `DischargeExpr::obligations()` gives a flat inventory of the leaves, but it is explicitly **NON-decisional** — `and`, `or` and `xone` over the same leaves flatten identically, so reading it as the requirement overstates what a presentation must prove.
-- **Non-`secx:` branches survive as `DischargeExpr::Other`** rather than being pruned: dropping a core-ODRL operand out of an `odrl:or` would turn an alternative into a mandate.
+- **Non-`secx:` branches survive WHOLE as `DischargeExpr::Other(Constraint)`** rather than being pruned or thinned: dropping a core-ODRL operand out of an `odrl:or` would turn an alternative into a mandate, and keeping only its `leftOperand` would leave `recipient eq Bob` and `recipient eq Carol` indistinguishable. The full `(leftOperand, operator, rightOperand)` triple is carried, so the branch is decidable from the tree alone — which is what makes `odrl:xone` readable, since there the *count* of holding branches, not the set of dimensions mentioned, is the verdict.
 - **`Deontic` is load-bearing.** An obligation on a *prohibition* is not a bar to clear: a prohibition fires when its whole constraint expression holds, and deny-overrides. A host must not read the two the same way — and one leaf alone does not fire a multi-constraint prohibition.
 - **Duty constraints are excluded** — the single-node base case checks a `Duty` by *action* discharge and never evaluates the duty's own constraints, so listing them would misdescribe what `evaluate` will check.
 - **It reports; it does not discharge.** Extraction verifies nothing, orders no levels (the `secx:atLeast` partial order and the admissibility reduction live in `sparq-trust`, `sq-ufsi9`), and leaves the stateless `evaluate` path unchanged — a `secx:` constraint with no supplied evidence stays fail-closed unsatisfied.
