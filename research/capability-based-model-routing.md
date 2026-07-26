@@ -145,9 +145,15 @@ into a grab-bag.
 
 **`min_rank`** — four values, because the tree makes exactly four distinct cuts:
 
-- `mechanical` — `[[route]] role = "docs"` leads with `haiku`. The mechanical-verify agent is
-  `model: haiku`; the PKG natural-language tool is `model: haiku`.
-- `standard` — the default impl lane; `sparq-rust-impl` is `model: sonnet`.
+- `mechanical` — the mechanical-verify agent is `model: haiku`; the PKG natural-language tool is
+  `model: haiku`. **Corrected 2026-07-26 (see §3.5):** this cut originally also cited
+  `[[route]] role = "docs"` as haiku-led. That is no longer true — `463ae09cf` (#4211) moved the
+  docs route to `model_chain = ["sol", "terra", "opus5"]`, so `mechanical` now rests on the
+  `.claude/agents` pins alone.
+- `standard` — the default impl lane; `sparq-rust-impl` is `model: sonnet`. (Still true at
+  `origin/main`; PR #4331, unmerged as of this writing, would make the impl *chain* `["opus5"]`
+  while leaving that frontmatter pin at `sonnet` — the two-surfaces-disagree problem this record
+  is about.)
 - `frontier` — `[[route]] role = "ci"` is deliberately frontier-only, and `routing-validate.py`
   enforces it structurally: `SUB_FRONTIER = ("sonnet", "haiku")` → *"role:ci chain contains
   sub-frontier model"*. The maintainer's standing rule (2026-07-17, restated in the registry's
@@ -157,9 +163,15 @@ into a grab-bag.
 
 Why `adversarial` is a **separate rank** and not just "frontier plus a predicate": the two happen to
 coincide today, and collapsing them would be defensible if `adversarial_safe` were the only
-difference. It is kept separate because `escalate = true` (never degrade, escalate to a human) is
-attached to that rank and to no other, and because the rank floor is what the escalation ladder walks
-(§7). Keeping four ranks costs nothing and keeps the ladder expressible.
+difference. It is kept separate because the rank floor is what the escalation ladder walks (§7).
+Keeping four ranks costs nothing and keeps the ladder expressible.
+
+**Corrected 2026-07-26 (see §3.5):** this paragraph originally also justified the split by claiming
+`escalate = true` is *"attached to that rank and to no other"*. That was already false when written.
+At `origin/main` the flag appears on four routes — the security `match_labels` override
+(`orchestration/routing.toml:108`), `role = "research"` (`:213`), `role = "review"` (`:234`) and
+`role = "soundness"` (`:240`) — and `role:research` is not an adversarial lane. The split does not
+need that claim, so it has been dropped rather than repaired.
 
 **`code_authorship`** — this is the one predicate that is provably **orthogonal to rank**, which is
 why it cannot be folded in. `terra` and `sonnet` are `docs_only`, enforced structurally in three
@@ -240,6 +252,34 @@ labels nothing enforces.
 (a) there is a **live routing decision** on which at least two catalog models differ; (b) the decision
 **cannot** be expressed with the existing five; and (c) there is a **probe or a runtime observation**
 that can verify the property (§6). Without (c) it is a label, and §6 explains why labels rot.
+
+### 3.5 Update, 2026-07-26 — what moved under this record after it was written
+
+This record's grounding commit was `b5548a0d4`. Three tree-facts moved the same day; the corrections
+are inlined above, and the direction of travel is worth recording because it bears on §5.
+
+1. **`escalate = true` now carries two incompatible failure policies.** On the security route its
+   in-tree comment is *"consumed by dispatch: on chain-exhaustion, label needs:user"*
+   (`orchestration/routing.toml:108`). PR #4331 attaches the same flag to `role:impl` with the
+   explicitly opposite contract — capacity starvation routes to a self-lifting machine park and
+   **never** `needs:user`. One boolean, two meanings, discriminated only by which route it sits on.
+   This is the concrete case for §3's `on_unsatisfiable` being an explicit enumerated field rather
+   than a boolean whose name describes one of three outcomes.
+2. **Q1 (§11) has an answer in the tree.** The docs route moved off haiku/sonnet onto `sol`
+   (`463ae09cf`, #4211). The docs decision is a **quality** floor, not the cost floor §3.4 assumed
+   when it rejected `docs_writing_quality`. §3.4's rejection should be re-derived, not assumed.
+3. **The thesis acquired a dated worked example.** #4331 reports that the `area:gui` carve-out
+   (#4211) fires only when the resolved chain *already contains the string* `sol`, so a single-rung
+   `["opus5"]` impl chain silently disarms it — and, in that PR's own words, *"it has no symptom"*,
+   because both resolvers agree on the wrong answer and the cross-resolver agreement harness reports
+   nothing. A rule keyed on a model **name** went inert when the model list changed. That is
+   precisely the coupling §1 argues against.
+
+Honesty note in the other direction: registry PR #742 records that `parse_preferences` **refuses** a
+`[[chain_preference]]` block containing an unknown field, so a sparq table declaring a field the
+registry does not yet know is a total dispatch outage, not a degraded carve-out. That is a real
+instance of the cross-repo lockstep cost §10 already concedes, and it raises — not lowers — the bar
+on §9's migration ordering.
 
 ## 4. Where the boundary sits, precisely
 
