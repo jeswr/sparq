@@ -227,17 +227,26 @@ async fn h3_response_matrix_matches_h1_and_websocket_falls_back() -> TestResult 
 
     let (http, tcp_base) = tcp_client(tcp_addr, cfg!(feature = "http2"))?;
     let readiness_url = format!("{tcp_base}/health");
-    let mut ready = false;
+    // [SONNET-4.6] A completed request alone is not a sufficient startup
+    // barrier: the connection can still be truncated while reading its body.
+    let mut consecutive_ready = 0;
     for _ in 0..100 {
         match http.get(&readiness_url).send().await {
-            Ok(_) => {
-                ready = true;
-                break;
+            Ok(response) => {
+                if response.bytes().await.is_ok() {
+                    consecutive_ready += 1;
+                    if consecutive_ready == 3 {
+                        break;
+                    }
+                } else {
+                    consecutive_ready = 0;
+                }
             }
-            Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
+            Err(_) => consecutive_ready = 0,
         }
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    if !ready {
+    if consecutive_ready < 3 {
         let _ = server.0.kill();
         let mut stderr = String::new();
         if let Some(mut pipe) = server.0.stderr.take() {
