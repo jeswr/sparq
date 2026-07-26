@@ -80,7 +80,44 @@ use sha2::{Digest, Sha512};
 /// the verifier byte layout WITHOUT depending on the heavy `sparq-zk-compose` /
 /// arkworks `Fr` type — a commitment / encoding word is supplied already in its
 /// canonical 32-byte BE form (the same word `field_to_be_bytes_32` emits).
+///
+/// **Canonicality is a PRECONDITION and is ENFORCED.** The type is a raw byte
+/// alias for dependency reasons only; it is not a "any 32 bytes" channel. Every
+/// caller-supplied word (the challenge, `commitments`, `pattern_const_enc`, and
+/// each row slot) is checked against the BN254 scalar-field modulus `p` before
+/// any byte is emitted, and a word `>= p` is refused fail-closed by
+/// `SourceSegment::check_shape` / [`reconstruct_federated_public_inputs`].
 pub type Word = [u8; 32];
+
+/// The BN254 scalar-field modulus `p` as a 32-byte big-endian word:
+/// `0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001`
+/// (= 21888242871839275222246405745257275088548364400416034343698204186575808495617).
+/// This is `sparq_zk::field::Fr` = `ark_bn254::Fr`, i.e. Noir's `Field` for the
+/// default BN254 backend. Mirrored as a literal for the same reason the layout
+/// is mirrored: `sparq-mpc` is deliberately dependency-light and does not pull
+/// the arkworks estate (see the module-level "Cross-crate layout obligation").
+const FIELD_MODULUS_BE: Word = [
+    0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58, 0x5d,
+    0x28, 0x33, 0xe8, 0x48, 0x79, 0xb9, 0x70, 0x91, 0x43, 0xe1, 0xf5, 0x93, 0xf0, 0x00, 0x00, 0x01,
+];
+
+/// Whether `w` is the CANONICAL big-endian encoding of a field element, i.e.
+/// its 32-byte BE value is `< p`. (Comparing `[u8; 32]` lexicographically IS
+/// unsigned big-endian integer comparison at this fixed width.)
+///
+/// Why this matters at the composition boundary: the authoritative
+/// `sparq-zk-compose::verifier::reconstruct_public_inputs` emits every
+/// non-integer word as `field_to_be_bytes_32` of a field element it PARSED
+/// (`FieldHex::to_field`, which reduces mod `p`), so an authoritative word is
+/// always reduced. This crate takes raw `Word`s from the caller, so without
+/// this gate a caller could hand in bytes the authoritative verifier could
+/// never reconstruct — the segment would not be byte-identical to any
+/// single-source layout, contradicting the invariant this module exists to
+/// uphold. Words this module builds itself via [`uint_word`] are small integers
+/// and therefore trivially canonical.
+fn is_canonical(w: &Word) -> bool {
+    *w < FIELD_MODULUS_BE
+}
 
 /// A `u32` / `u64` / `bool` / op-code encoded as a **right-aligned** 32-byte BE
 /// word — matching the verifier's `push_uint` (`bool -> {0,1}`, integer in the
@@ -130,7 +167,14 @@ pub struct SourceSegment {
     /// wrong `r` yields a wrong-length vector that cannot byte-match the proof of
     /// the real member (this is the audit-#11 relabel guard, per source).
     pub declared_rows: usize,
-    /// The disclosed row count (`u32`), bound as one word.
+    /// The disclosed row count (`u32`), bound as one word. MUST equal
+    /// [`rows`](Self::rows)`.len()` (and hence be `<=`
+    /// [`declared_rows`](Self::declared_rows)): `rows` carries the REAL rows
+    /// only, so `row_count` is exactly how many of the emitted `r` triples are
+    /// active. A larger `row_count` would declare zero-padding rows active —
+    /// the authoritative verifier's consumers read `min(row_count, rows.len())`
+    /// over a vector already padded to `r` — so a mismatch is refused
+    /// fail-closed rather than silently reinterpreted.
     pub row_count: u32,
     /// `attribution[k]` (audit #8): one `{0,1}` word per committed graph marking
     /// whether that graph contributed a row. Length MUST equal `commitments.len()`
@@ -152,10 +196,18 @@ impl SourceSegment {
         32 * (1 + self.k() + PATTERN_SLOTS + PATTERN_SLOTS + PATTERN_SLOTS * self.declared_rows + 1 + self.k())
     }
 
-    /// Validate the segment's shape against the single-source layout invariants
-    /// BEFORE emitting any bytes (fail-closed): `attribution` is exactly `k`
-    /// bits (audit #8 shape — the verifier's stage-1b `AttributionMalformed`
-    /// gate, per source), and no more than `r` real rows are supplied.
+    /// Validate the segment's shape AND its field encodings against the
+    /// single-source layout invariants BEFORE emitting any byte (fail-closed):
+    ///
+    /// - `attribution` is exactly `k` bits (audit #8 shape — the verifier's
+    ///   stage-1b `AttributionMalformed` gate, per source);
+    /// - `row_count <= r` and no more than `r` real rows are supplied (neither
+    ///   may overflow the padded layout);
+    /// - `row_count == rows.len()`, so the disclosed count never declares a
+    ///   zero-padding row active (see [`row_count`](Self::row_count));
+    /// - every caller-supplied word is a canonical field encoding
+    ///   ([`is_canonical`]), so the segment is bytes the authoritative verifier
+    ///   could actually reconstruct.
     fn check_shape(&self) -> Result<(), MpcError> {
         if self.attribution.len() != self.k() {
             return Err(MpcError::Protocol(format!(
@@ -165,12 +217,49 @@ impl SourceSegment {
                 self.k()
             )));
         }
+        if self.row_count as usize > self.declared_rows {
+            return Err(MpcError::Protocol(format!(
+                "federated layout: holder {} declares row_count {} > declared r {} (would mark padding rows active)",
+                self.holder, self.row_count, self.declared_rows
+            )));
+        }
         if self.rows.len() > self.declared_rows {
             return Err(MpcError::Protocol(format!(
                 "federated layout: holder {} has {} rows > declared r {} (would overflow the padded layout)",
                 self.holder,
                 self.rows.len(),
                 self.declared_rows
+            )));
+        }
+        if self.row_count as usize != self.rows.len() {
+            return Err(MpcError::Protocol(format!(
+                "federated layout: holder {} declares row_count {} != {} supplied rows (the padded remainder must not be declared active)",
+                self.holder,
+                self.row_count,
+                self.rows.len()
+            )));
+        }
+        for (i, c) in self.commitments.iter().enumerate() {
+            self.check_canonical(c, "commitments", i)?;
+        }
+        for (i, e) in self.pattern_const_enc.iter().enumerate() {
+            self.check_canonical(e, "pattern_const_enc", i)?;
+        }
+        for (j, row) in self.rows.iter().enumerate() {
+            for slot in row {
+                self.check_canonical(slot, "rows", j)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Reject a non-canonical caller-supplied word (see [`is_canonical`]).
+    /// Allocates the diagnostic only on the failing path.
+    fn check_canonical(&self, w: &Word, what: &str, idx: usize) -> Result<(), MpcError> {
+        if !is_canonical(w) {
+            return Err(MpcError::Protocol(format!(
+                "federated layout: holder {} {what}[{idx}] is not a canonical field word (>= the BN254 scalar-field modulus, so no single-source layout could contain it)",
+                self.holder
             )));
         }
         Ok(())
@@ -307,8 +396,9 @@ impl FreshnessBinding {
     ///
     /// Fails closed with the same `Protocol` errors as
     /// [`reconstruct_federated_public_inputs`] (empty federation, duplicate holder,
-    /// or a segment whose shape violates the single-source invariants): the signed
-    /// message is never derived from a malformed or ambiguous federation.
+    /// a non-canonical field word, or a segment whose shape violates the
+    /// single-source invariants): the signed message is never derived from a
+    /// malformed or ambiguous federation.
     ///
     /// Everything before the variable-length `federated_public_inputs` is either
     /// fixed-width (the domain tag is a fixed constant, `challenge` is 32 bytes),
@@ -356,8 +446,9 @@ impl FreshnessBinding {
 /// and fails the byte compare. This function binds the order it is given — it
 /// does NOT sort — so the choice is explicit and auditable rather than an
 /// implicit surprise. It also rejects an empty federation (there is nothing to
-/// attest), a **duplicate holder** (one segment per holder), and any segment
-/// whose shape violates the single-source invariants.
+/// attest), a **duplicate holder** (one segment per holder), a non-canonical
+/// challenge word, and any segment whose shape or field encodings violate the
+/// single-source invariants (`SourceSegment::check_shape`).
 ///
 /// **Holder identity is NOT in this vector.** Each segment is byte-identical to
 /// that source's single-source layout (which carries no holder id), so the
@@ -373,6 +464,16 @@ pub fn reconstruct_federated_public_inputs(
     if sources.is_empty() {
         return Err(MpcError::Protocol(
             "federated public-input layout needs >= 1 source (empty federation attests nothing)"
+                .into(),
+        ));
+    }
+    // The shared challenge N is field 0 of EVERY segment, so a non-canonical N
+    // would poison every source's bytes at once. Checked here, once, before any
+    // segment is encoded (the per-segment words are checked in `check_shape`).
+    if !is_canonical(binding.challenge()) {
+        return Err(MpcError::Protocol(
+            "federated public-input layout: the verifier challenge N is not a canonical field word \
+             (>= the BN254 scalar-field modulus, so no single-source layout could contain it)"
                 .into(),
         ));
     }
@@ -404,8 +505,15 @@ mod tests {
     //! (so a replay under a fresh nonce cannot reuse an old signature).
     use super::*;
 
+    /// A distinct CANONICAL field word: byte `b` repeated, with the top byte
+    /// zeroed so the 32-byte BE value is `< 2^248 < p` whatever `b` is. A raw
+    /// `[0xAA; 32]` is NOT a canonical field encoding (it exceeds the BN254
+    /// scalar-field modulus) and is refused, so fixtures must model real field
+    /// elements — see `non_canonical_word_fails_closed`.
     fn word(b: u8) -> Word {
-        [b; 32]
+        let mut w = [b; 32];
+        w[0] = 0;
+        w
     }
 
     fn seg(holder: &str, commit: u8, attribution: Vec<bool>, r: usize) -> SourceSegment {
@@ -520,6 +628,112 @@ mod tests {
         bad.rows.push([word(0x06), word(0x07), word(0x08)]); // 2 rows, r = 1
         let err = reconstruct_federated_public_inputs(&binding, &[bad]).unwrap_err();
         assert!(matches!(err, MpcError::Protocol(_)));
+    }
+
+    /// `row_count` must equal the supplied rows: a segment claiming MORE active
+    /// rows than it supplies would emit zero padding while declaring those
+    /// padded rows active. The authoritative verifier's consumers read
+    /// `min(row_count, rows.len())` over a vector already padded to `r`, so
+    /// accepting this would be an acceptance/interpretation mismatch at exactly
+    /// the composition boundary — refused fail-closed instead.
+    #[test]
+    fn row_count_must_equal_supplied_rows() {
+        let binding = FreshnessBinding::new(word(0x11), vec![]);
+        // 1 real row supplied, r = 2, but row_count claims both rows are active.
+        let mut bad = seg("alice", 0xAA, vec![true], 2);
+        bad.row_count = 2;
+        let err = reconstruct_federated_public_inputs(&binding, &[bad.clone()]).unwrap_err();
+        match err {
+            MpcError::Protocol(m) => assert!(m.contains("row_count"), "got: {m}"),
+            other => panic!("expected Protocol, got {other:?}"),
+        }
+        // The under-claiming direction is refused too: `rows` carries the real
+        // rows only, so a supplied row must never be silently inactive.
+        bad.row_count = 0;
+        assert!(reconstruct_federated_public_inputs(&binding, &[bad]).is_err());
+    }
+
+    /// `row_count` may not exceed the declared `r` either — that would mark
+    /// rows the layout never emits as active.
+    #[test]
+    fn row_count_exceeding_declared_r_fails_closed() {
+        let binding = FreshnessBinding::new(word(0x11), vec![]);
+        let mut bad = seg("alice", 0xAA, vec![true], 1);
+        bad.row_count = 2; // r = 1
+        let err = reconstruct_federated_public_inputs(&binding, &[bad]).unwrap_err();
+        match err {
+            MpcError::Protocol(m) => assert!(m.contains("declared r"), "got: {m}"),
+            other => panic!("expected Protocol, got {other:?}"),
+        }
+    }
+
+    /// Every caller-supplied word must be a CANONICAL field encoding. A raw
+    /// 32-byte value `>= p` is bytes the authoritative verifier could never
+    /// emit (it serialises parsed, reduced field elements), so accepting one
+    /// would break the byte-identity invariant this module claims — refused at
+    /// each of the three caller-supplied word sites.
+    #[test]
+    fn non_canonical_word_fails_closed() {
+        let binding = FreshnessBinding::new(word(0x11), vec![]);
+        let expect_refused = |bad: SourceSegment, site: &str| {
+            let err = reconstruct_federated_public_inputs(&binding, &[bad]).unwrap_err();
+            match err {
+                MpcError::Protocol(m) => {
+                    assert!(m.contains("canonical") && m.contains(site), "got: {m}");
+                }
+                other => panic!("expected Protocol, got {other:?}"),
+            }
+        };
+
+        // The modulus itself is the first non-canonical value.
+        let mut bad = seg("alice", 0xAA, vec![true], 1);
+        bad.commitments = vec![FIELD_MODULUS_BE];
+        expect_refused(bad, "commitments");
+
+        // An all-ones word (a plausible "any 32 bytes" input) is far above p.
+        let mut bad = seg("alice", 0xAA, vec![true], 1);
+        bad.pattern_const_enc[0] = [0xFF; 32];
+        expect_refused(bad, "pattern_const_enc");
+
+        let mut bad = seg("alice", 0xAA, vec![true], 1);
+        bad.rows[0][2] = FIELD_MODULUS_BE;
+        expect_refused(bad, "rows");
+
+        // Positive control: p - 1 is the LARGEST canonical word and is accepted.
+        let mut ok = seg("alice", 0xAA, vec![true], 1);
+        let mut p_minus_1 = FIELD_MODULUS_BE;
+        p_minus_1[31] -= 1;
+        ok.commitments = vec![p_minus_1];
+        assert!(reconstruct_federated_public_inputs(&binding, &[ok]).is_ok());
+    }
+
+    /// The shared challenge N is field 0 of every segment, so a non-canonical N
+    /// is refused before any segment is encoded.
+    #[test]
+    fn non_canonical_challenge_fails_closed() {
+        let binding = FreshnessBinding::new(FIELD_MODULUS_BE, vec![]);
+        let s = seg("alice", 0xAA, vec![true], 1);
+        let err = reconstruct_federated_public_inputs(&binding, std::slice::from_ref(&s))
+            .unwrap_err();
+        match err {
+            MpcError::Protocol(m) => assert!(m.contains("challenge N"), "got: {m}"),
+            other => panic!("expected Protocol, got {other:?}"),
+        }
+        // ...and the signed message, which reconstructs internally, fails with it.
+        assert!(binding.out_of_circuit_message(std::slice::from_ref(&s)).is_err());
+    }
+
+    /// `is_canonical` is exactly "BE value < p" at the boundary.
+    #[test]
+    fn is_canonical_is_the_field_range() {
+        assert!(is_canonical(&[0u8; 32]));
+        let mut p_minus_1 = FIELD_MODULUS_BE;
+        p_minus_1[31] -= 1;
+        assert!(is_canonical(&p_minus_1), "p - 1 is the largest canonical word");
+        assert!(!is_canonical(&FIELD_MODULUS_BE), "p itself is not canonical");
+        assert!(!is_canonical(&[0xFF; 32]));
+        // The test fixtures' words must all be canonical.
+        assert!(is_canonical(&word(0xAA)) && is_canonical(&word(0xFF)));
     }
 
     /// The freshness transcript binds the verifier's fresh nonce N: a proof
