@@ -139,6 +139,38 @@ pub(crate) mod budget {
             rows.saturating_mul(self.byte_width).saturating_add(self.extra_bytes)
         }
 
+        /// WHY the limits are hit at `rows`, or `None` when they are not — the pure (no
+        /// thread-local) counterpart of [`exhausted`]'s reason, for rayon closures where
+        /// the installing thread's sticky flag is out of reach. The reasons are the SAME
+        /// strings [`exhausted`] records, so a worker can raise EXACTLY the error
+        /// [`check`] would rather than inventing one (or guessing a result). [SONNET-4.6]
+        /// (sq-qk6ac)
+        #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+        #[inline]
+        pub(crate) fn why(&self, rows: usize) -> Option<&'static str> {
+            if !self.on {
+                return None;
+            }
+            if rows > self.max_rows {
+                return Some("max-rows");
+            }
+            if self.bytes(rows) > self.max_bytes {
+                return Some("max-bytes");
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if self.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return Some("timeout");
+            }
+            if let Some(cancel) = self.cancel {
+                // SAFETY: `CancelPtr`'s invariant and the lifetime-bound `Guard`
+                // keep the `AtomicBool` alive for this scoped snapshot load.
+                if unsafe { cancel.0.as_ref() }.load(Ordering::Relaxed) {
+                    return Some("cancelled");
+                }
+            }
+            None
+        }
+
         /// Pure (no thread-local) exhaustion test for rayon closures, where the
         /// installing thread's sticky flag is out of reach: a worker that sees
         /// `hit` stops producing, and the caller's next on-thread check fires
@@ -148,27 +180,7 @@ pub(crate) mod budget {
         #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
         #[inline]
         pub(crate) fn hit(&self, rows: usize) -> bool {
-            if !self.on {
-                return false;
-            }
-            if rows > self.max_rows {
-                return true;
-            }
-            if self.bytes(rows) > self.max_bytes {
-                return true;
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            if self.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-                return true;
-            }
-            if let Some(cancel) = self.cancel {
-                // SAFETY: `CancelPtr`'s invariant and the lifetime-bound `Guard`
-                // keep the `AtomicBool` alive for this scoped snapshot load.
-                if unsafe { cancel.0.as_ref() }.load(Ordering::Relaxed) {
-                    return true;
-                }
-            }
-            false
+            self.why(rows).is_some()
         }
     }
 
@@ -460,6 +472,99 @@ pub(crate) mod budget {
             .unwrap_or(usize::MAX)
             .saturating_add(1);
         cap.min(a.max_rows.saturating_add(1)).min(by_bytes).min(1 << 20)
+    }
+
+    /// [SONNET-4.6] (sq-qk6ac) Direct tests for `Limits::why` — the pure gate the
+    /// rayon-parallel loops poll. Its contract has two load-bearing halves: it agrees
+    /// with `Limits::hit`, and its reason string is EXACTLY the one `check` would raise,
+    /// so a worker that abandons its share of the work reports the same error the
+    /// installing thread would (never a fabricated one, and never a guessed result).
+    #[cfg(test)]
+    mod snapshot_reason_tests {
+        use super::*;
+        use std::sync::Arc;
+
+        /// Asserts that under `budget` the snapshot reports `want` at `rows`, that `hit`
+        /// agrees, and that the reason is the very string `check` puts in its error.
+        fn assert_reason(budget: &QueryBudget, rows: usize, want: &'static str) {
+            let _guard = install(budget);
+            let snap = snapshot();
+            assert_eq!(snap.why(rows), Some(want), "wrong snapshot reason for {}", want);
+            assert!(snap.hit(rows), "hit must agree with why for {}", want);
+            assert_eq!(
+                check(rows),
+                Err(format!("query budget exceeded ({})", want)),
+                "the worker-visible reason must match the on-thread error for {}",
+                want
+            );
+        }
+
+        /// `why` and `hit` are one decision, and an unbudgeted snapshot never trips.
+        #[test]
+        fn unbudgeted_snapshot_has_no_reason() {
+            let budget = QueryBudget::unlimited();
+            let _guard = install(&budget);
+            let snap = snapshot();
+            assert_eq!(snap.why(0), None, "an unlimited budget must report no reason");
+            assert_eq!(snap.why(usize::MAX), None, "no row cap ⇒ no reason at any row count");
+            assert!(!snap.hit(usize::MAX), "hit must agree with why");
+        }
+
+        /// Each limit reports ITS OWN reason, and the string matches `check`'s message.
+        #[test]
+        fn each_limit_reports_the_reason_check_would_raise() {
+            let rows_capped = QueryBudget { max_rows: Some(4), ..QueryBudget::unlimited() };
+            assert_reason(&rows_capped, 5, "max-rows");
+            let bytes_capped =
+                QueryBudget { max_bytes: Some(BYTES_PER_ID), ..QueryBudget::unlimited() };
+            assert_reason(&bytes_capped, 2, "max-bytes");
+            let cancelled = QueryBudget::cancelled_by(Arc::new(AtomicBool::new(true)));
+            assert_reason(&cancelled, 0, "cancelled");
+        }
+
+        /// The wall-clock arm (native only: `Instant` does not exist in a wasm budget).
+        #[test]
+        #[cfg(not(target_arch = "wasm32"))]
+        fn an_elapsed_deadline_reports_timeout() {
+            let budget = QueryBudget {
+                deadline: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)),
+                ..QueryBudget::unlimited()
+            };
+            assert_reason(&budget, 0, "timeout");
+        }
+
+        /// The reason a limit does NOT report: an under-limit row count leaves the
+        /// snapshot clean, so the gate cannot abandon work a budget still admits.
+        #[test]
+        fn a_limit_not_yet_crossed_reports_nothing() {
+            let budget = QueryBudget { max_rows: Some(4), ..QueryBudget::unlimited() };
+            let _guard = install(&budget);
+            let snap = snapshot();
+            assert_eq!(snap.why(4), None, "a row count AT the cap is still admitted");
+            assert_eq!(snap.why(5), Some("max-rows"), "one past the cap trips");
+        }
+
+        /// The crux the parallel verdict loop depends on: a WORKER thread has no budget
+        /// installed, so its thread-local poll is blind — only the captured snapshot can
+        /// see the cancellation, and it names the same reason as the installing thread.
+        #[test]
+        fn snapshot_is_the_only_signal_a_worker_thread_can_see() {
+            let flag = Arc::new(AtomicBool::new(true));
+            let budget = QueryBudget::cancelled_by(Arc::clone(&flag));
+            let _guard = install(&budget);
+            let snap = snapshot();
+
+            let (worker_poll, worker_reason) = std::thread::scope(|s| {
+                s.spawn(|| (check(0), snap.why(0))).join().expect("worker must not panic")
+            });
+            assert_eq!(worker_poll, Ok(()), "the thread-local budget is invisible to a worker");
+            assert_eq!(
+                worker_reason,
+                Some("cancelled"),
+                "the captured snapshot must carry the cancellation across threads"
+            );
+            assert_eq!(check(0), Err("query budget exceeded (cancelled)".to_owned()));
+        }
     }
 
     #[cfg(test)]
@@ -8840,18 +8945,38 @@ fn try_theta_antijoin(
         // serial loop's early-`break`-on-budget survivor prefix. The EXISTS residual re-
         // enters the thread-local function / view / spatial state, so each worker installs
         // the snapshot exactly like the FILTER / BIND parallel paths.
+        //
+        // [SONNET-4.6] (sq-qk6ac) An exhausted budget must block the VERDICT loop, not
+        // just the output build: one verdict is a whole probe of `B` (a bucket scan plus
+        // 3-valued expression evaluation — a WHOLE-`B` scan for a literal-keyed row), so a
+        // timed-out / cancelled query used to grind every remaining left row only for the
+        // build below to discard the lot on its FIRST `budget::exhausted` check. A rayon
+        // worker cannot see the installing thread's sticky flag, so it re-checks a
+        // captured `Limits` snapshot (the parallel hash-join / JSON-serialize pattern) and,
+        // when hit, returns the CANONICAL budget error — `collect` into `Result`
+        // short-circuits, so the queued probes are abandoned. Raising the error rather
+        // than guessing a placeholder verdict also means a skipped row can never escape as
+        // a silently truncated result, and it is behaviour-identical on the observable
+        // path: today the build truncates to nothing and the caller's operator-exit
+        // `budget::check` raises this same message, just after the wasted work.
         #[cfg(feature = "parallel")]
-        let verdicts: Vec<bool> = if left_b.rows.len() >= PAR_THRESHOLD {
+        if left_b.rows.len() >= PAR_THRESHOLD {
             use rayon::prelude::*;
+            let limits = budget::snapshot();
             let fns = functions::snapshot();
             let vw = view::snapshot();
             let spx = spatial::snapshot();
             #[cfg(not(target_arch = "wasm32"))]
             let qn = query_now::snapshot(); // sq-98w7z.1: keep NOW() pinned on workers
-            left_b
+            let verdicts: Vec<bool> = left_b
                 .rows
                 .par_iter()
                 .map(|lrow| {
+                    // One non-tripping `Instant` read per row under a deadline budget, and
+                    // a single `on` test when no budget is installed.
+                    if let Some(why) = limits.why(0) {
+                        return Err(format!("query budget exceeded ({})", why));
+                    }
                     let _fns = functions::worker_install(&fns);
                     let _vw = view::worker_install(&vw);
                     let _spx = spatial::worker_install(&spx);
@@ -8859,22 +8984,35 @@ fn try_theta_antijoin(
                     let _qn = query_now::worker_install(qn);
                     eliminated(lrow)
                 })
-                .collect::<Result<Vec<bool>, String>>()?
-        } else {
-            left_b.rows.iter().map(&eliminated).collect::<Result<Vec<bool>, String>>()?
-        };
-        #[cfg(not(feature = "parallel"))]
-        let verdicts: Vec<bool> =
-            left_b.rows.iter().map(&eliminated).collect::<Result<Vec<bool>, String>>()?;
+                .collect::<Result<Vec<bool>, String>>()?;
 
-        // Serial ordered build + budget truncation: identical to the serial probe loop's
-        // `if !matched { push } ; break on budget` — the survivor prefix and its order are
-        // reproduced exactly whether the verdicts were computed serially or in parallel.
-        for (lrow, &elim) in left_b.rows.iter().zip(&verdicts) {
+            // Serial ordered build + budget truncation: identical to the serial probe
+            // loop's `if !matched { push } ; break on budget` — the survivor prefix and
+            // its order are reproduced exactly whether the verdicts were computed
+            // serially or in parallel.
+            for (lrow, &elim) in left_b.rows.iter().zip(&verdicts) {
+                if budget::exhausted(result_rows.len()) {
+                    break;
+                }
+                if !elim {
+                    let mut combined: Row = lrow.clone();
+                    combined.extend(std::iter::repeat_n(NO_ID, n_right_only));
+                    result_rows.push(combined);
+                }
+            }
+            theta_antijoin::record(total_child_rows, order.len());
+            return Ok(Some(Bindings::unsorted(out_vars, result_rows)));
+        }
+
+        // Serial probe loop: the verdict is computed INSIDE the cooperative build loop, so
+        // an exhausted budget stops probing at exactly the row it stops emitting — the
+        // loop the parallel branch above is documented to reproduce. [SONNET-4.6]
+        // (sq-qk6ac)
+        for lrow in &left_b.rows {
             if budget::exhausted(result_rows.len()) {
                 break;
             }
-            if !elim {
+            if !eliminated(lrow)? {
                 let mut combined: Row = lrow.clone();
                 combined.extend(std::iter::repeat_n(NO_ID, n_right_only));
                 result_rows.push(combined);

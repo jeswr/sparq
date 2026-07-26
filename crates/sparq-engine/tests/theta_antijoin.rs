@@ -765,6 +765,96 @@ fn q06_measure_250k() {
     assert_eq!(off.rows.len(), on.rows.len(), "q06 row count must be identical on vs off");
 }
 
+// ── budget cooperativeness (sq-qk6ac) ─────────────────────────────────────────
+//
+// [SONNET-4.6] The anti-join's per-left-row VERDICT is a whole probe of `B`, so an
+// exhausted budget must stop the verdict loop, not merely truncate the output build
+// afterwards. The serial strategy therefore computes each verdict INSIDE the
+// cooperative build loop (and the parallel fan-out re-checks a captured `Limits`
+// snapshot per row, raising the canonical budget error so its queued probes are
+// abandoned). These tests pin the OBSERVABLE half of that change: an ARMED but
+// unexhausted budget must not perturb the answer, on BOTH strategies.
+
+/// Runs `q` unbudgeted and under `budget`, returning both multisets.
+fn budgeted_vs_unbudgeted(
+    g: &Graph,
+    q: &str,
+    budget: &sparq_engine::QueryBudget,
+) -> (Table, Table) {
+    theta_antijoin_testing::set_enabled(true);
+    let plain = multiset(g, q);
+    let r = sparq_engine::query_with_budget(g, &format!("{PFX}{q}"), budget)
+        .expect("budgeted query must not trip an unexhausted budget");
+    let mut budgeted: Table = r
+        .rows
+        .iter()
+        .map(|row| row.iter().map(|c| c.as_ref().map(|t| t.to_string())).collect())
+        .collect();
+    budgeted.sort();
+    (plain, budgeted)
+}
+
+/// A budget generous enough never to trip: the fused serial verdict loop must return
+/// exactly the unbudgeted answer on the SIP-seed strategy (≤ 64 correlations).
+#[test]
+fn armed_but_unexhausted_budget_does_not_perturb_the_sip_strategy() {
+    let g = q06_dataset();
+    let budget = sparq_engine::QueryBudget {
+        deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(600)),
+        max_rows: Some(1_000_000),
+        ..sparq_engine::QueryBudget::unlimited()
+    };
+    let q = format!("SELECT ?yr ?name ?document WHERE {{\n{Q06_BODY}\n}}");
+    let (plain, budgeted) = budgeted_vs_unbudgeted(&g, &q, &budget);
+    assert_eq!(plain, budgeted, "an armed budget changed the SIP-seed anti-join answer");
+    assert_eq!(budgeted.len(), 5, "one surviving (earliest) document per author");
+}
+
+/// Same, on the HASH strategy (> 64 distinct correlations) — the branch whose verdict
+/// loop the budget gate guards.
+#[test]
+fn armed_but_unexhausted_budget_does_not_perturb_the_hash_strategy() {
+    let mut ttl = String::from("ex:Article rdfs:subClassOf foaf:Document .\n");
+    for a in 0..200usize {
+        ttl.push_str(&format!("ex:a{} foaf:name \"A{}\" .\n", a, a));
+        for i in 0..3usize {
+            let yr = 2000 + i;
+            ttl.push_str(&format!(
+                "ex:d{}_{} rdf:type ex:Article . ex:d{}_{} dcterms:issued \"{}\"^^xsd:integer . ex:d{}_{} dc:creator ex:a{} .\n",
+                a, i, a, i, yr, a, i, a
+            ));
+        }
+    }
+    let g = load(&ttl);
+    let budget = sparq_engine::QueryBudget {
+        deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(600)),
+        ..sparq_engine::QueryBudget::unlimited()
+    };
+    let q = format!("SELECT ?document ?yr ?name WHERE {{\n{Q06_BODY}\n}}");
+    let (plain, budgeted) = budgeted_vs_unbudgeted(&g, &q, &budget);
+    assert_eq!(plain, budgeted, "an armed budget changed the hash anti-join answer");
+    assert_eq!(budgeted.len(), 200, "one surviving earliest document per author");
+    // Anti-vacuity: the fixture really is on the HASH strategy (> 64 correlations).
+    let (fired, bindings) = fired_stats(&g, &q);
+    assert!(fired && bindings > 64, "expected the hash strategy (>64 correlations): {}", bindings);
+}
+
+/// A budget already exhausted when the anti-join's left side lands must surface the
+/// CANONICAL reason, never a silently truncated (partial) answer.
+#[test]
+fn a_cancelled_query_over_the_antijoin_reports_the_canonical_reason() {
+    let g = q06_dataset();
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let budget = sparq_engine::QueryBudget::cancelled_by(flag);
+    theta_antijoin_testing::set_enabled(true);
+    let q = format!("{PFX}SELECT ?yr ?name ?document WHERE {{\n{Q06_BODY}\n}}");
+    assert_eq!(
+        sparq_engine::query_with_budget(&g, &q, &budget).map(|r| r.rows.len()),
+        Err("query budget exceeded (cancelled)".to_owned()),
+        "a cancelled anti-join must error, never return a truncated result set"
+    );
+}
+
 #[test]
 fn public_toggle_and_stats() {
     // Direct unit coverage of the public `theta_antijoin_testing` surface (one direct
