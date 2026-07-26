@@ -39,13 +39,14 @@ pub(crate) fn is_absolute_iri(s: &str) -> bool {
 /// Each component is checked against its own character class (`ipchar` / `iquery` /
 /// `ifragment` / `iuserinfo` / `ireg-name`, with `iunreserved` covering the `ucschar`
 /// ranges), and every `%` must introduce exactly two `HEXDIG` — so `http://example.com/%ZZ`
-/// is rejected, unlike a character blacklist. Deliberate residual laxity, both beyond what
-/// §5.1.2 needs: a bracketed `IP-literal` host is checked for *shape* (`HEXDIG` / `:` / `.`,
-/// or an `IPvFuture` `v…`) rather than parsed as a numeric address, and a `port` is not
-/// required to fit any integer width.
+/// is rejected, unlike a character blacklist. A bracketed `IP-literal` host is parsed
+/// against the full RFC 3986 `IPv6address` / `IPvFuture` grammar, so `http://[:::]/x` is
+/// rejected. Deliberate residual laxity, beyond what §5.1.2 needs: a `port` is not required
+/// to fit any integer width.
 ///
 /// [SONNET-4.6] (PR #4041 review round 1) replaces the original scheme-plus-blacklist
-/// form, which accepted invalid percent-encoding and ignored component boundaries.
+/// form, which accepted invalid percent-encoding and ignored component boundaries; round 2
+/// replaces the shape-only `IP-literal` check with a real address parser.
 pub(crate) fn is_well_formed_absolute_iri(s: &str) -> bool {
     // scheme ":" — the only part of the grammar `is_absolute_iri` covers.
     let Some(colon) = s.find(':') else {
@@ -126,7 +127,9 @@ fn is_valid_iauthority(s: &str) -> bool {
             return false;
         };
         let literal = &after_bracket[..end];
-        let literal_ok = match literal.strip_prefix('v') {
+        // ABNF literals are case-insensitive (RFC 5234 §2.3), so `v` / `V` both introduce
+        // an IPvFuture. No IPv6address can start with either, so the prefix disambiguates.
+        let literal_ok = match literal.strip_prefix(['v', 'V']) {
             // IPvFuture = "v" 1*HEXDIG "." 1*( unreserved / sub-delims / ":" )
             Some(future) => match future.split_once('.') {
                 Some((ver, tail)) => {
@@ -139,13 +142,7 @@ fn is_valid_iauthority(s: &str) -> bool {
                 }
                 None => false,
             },
-            // IPv6address (shape only — see the caller's doc comment).
-            None => {
-                !literal.is_empty()
-                    && literal
-                        .chars()
-                        .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
-            }
+            None => is_ipv6_address(literal),
         };
         return literal_ok && is_valid_port_suffix(&after_bracket[end + 1..]);
     }
@@ -157,6 +154,67 @@ fn is_valid_iauthority(s: &str) -> bool {
     };
     is_valid_component(name, |c| is_iunreserved(c) || is_sub_delim(c))
         && is_valid_port_suffix(port_suffix)
+}
+
+/// RFC 3986 `IPv6address` — all nine alternatives, folded into the equivalent rule: the
+/// address is a `:`-separated list of `h16` groups, optionally split once by `::` (which
+/// stands for one or more omitted zero groups), whose final group may instead be an
+/// `IPv4address` (`ls32`) counting as two groups. Eight groups without `::`, at most seven
+/// with it.
+fn is_ipv6_address(s: &str) -> bool {
+    let (head, tail, compressed) = match s.split_once("::") {
+        // A second `::` would be ambiguous, so at most one may appear.
+        Some((_, t)) if t.contains("::") => return false,
+        Some((h, t)) => (h, t, true),
+        None => (s, "", false),
+    };
+    let mut groups = 0usize;
+    for (part, is_tail) in [(head, false), (tail, true)] {
+        if part.is_empty() {
+            continue;
+        }
+        let mut segments = part.split(':').peekable();
+        while let Some(seg) = segments.next() {
+            // `ls32`'s IPv4address form can only be the final group of the whole address.
+            if segments.peek().is_none() && (is_tail || !compressed) && seg.contains('.') {
+                if !is_ipv4_address(seg) {
+                    return false;
+                }
+                groups += 2;
+            } else {
+                // h16 = 1*4HEXDIG
+                if seg.is_empty() || seg.len() > 4 || !seg.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return false;
+                }
+                groups += 1;
+            }
+        }
+    }
+    if compressed {
+        groups <= 7
+    } else {
+        groups == 8
+    }
+}
+
+/// RFC 3986 `IPv4address = dec-octet 3( "." dec-octet )`, where `dec-octet` is `0`–`255`
+/// written without a leading zero.
+fn is_ipv4_address(s: &str) -> bool {
+    let mut octets = 0usize;
+    for octet in s.split('.') {
+        octets += 1;
+        let b = octet.as_bytes();
+        if b.is_empty() || b.len() > 3 || !b.iter().all(u8::is_ascii_digit) {
+            return false;
+        }
+        if b.len() > 1 && b[0] == b'0' {
+            return false;
+        }
+        if octet.parse::<u32>().is_ok_and(|v| v > 255) {
+            return false;
+        }
+    }
+    octets == 4
 }
 
 /// True iff `s` is either empty or `":" *DIGIT` (RFC 3986 `port`).
@@ -676,6 +734,9 @@ mod tests {
         "http://user:pw@example.com:8080/p",
         "http://example.com:8080/p",
         "http://[::1]:8080/p",
+        "http://[2001:db8::1]/p",
+        "http://[2001:db8:0:0:0:0:0:1]/p",
+        "http://[::ffff:192.168.0.1]/p",
         "http://[v7.host]/p",
         "file:///etc/hosts",
         "http://example.com",
@@ -703,6 +764,14 @@ mod tests {
         ("http://example.com/a#f%2", "truncated pct-encoded in ifragment"),
         ("http://[zzz]/p", "IP-literal shape"),
         ("http://[::1/p", "unterminated IP-literal"),
+        ("http://[:::]/p", "`:::` is not an IPv6address"),
+        ("http://[1:2:3:4:5:6:7:8:9]/p", "nine h16 groups"),
+        ("http://[1:2:3:4:5:6:7]/p", "seven h16 groups without `::`"),
+        ("http://[12345::]/p", "h16 is at most 4 HEXDIG"),
+        ("http://[1::2::3]/p", "`::` may appear only once"),
+        ("http://[::1.2.3.256]/p", "dec-octet must be <= 255"),
+        ("http://[1.2.3.4::1]/p", "ls32 may only be the final group"),
+        ("http://[v.host]/p", "IPvFuture needs 1*HEXDIG"),
         ("http://example.com/a\u{e000}b", "iprivate is iquery-only"),
         ("example.com/no-scheme", "no scheme"),
         ("_:dt", "a blank node identifier is not an IRI"),
@@ -729,6 +798,48 @@ mod tests {
                 why,
                 iri
             );
+        }
+    }
+
+    /// [SONNET-4.6] (PR #4041 review round 2) The `IP-literal` host used to be accepted on
+    /// character shape alone, so `[:::]` passed. Direct coverage of the address grammar.
+    #[test]
+    fn ipv6_address_grammar() {
+        for ok in [
+            "::",
+            "::1",
+            "1::",
+            "2001:db8::1",
+            "2001:db8:0:0:0:0:0:1",
+            "::ffff:192.168.0.1",
+            "1:2:3:4:5:6:1.2.3.4",
+        ] {
+            assert!(is_ipv6_address(ok), "expected IPv6address: {:?}", ok);
+        }
+        for bad in [
+            ":::",
+            "",
+            ":1:2:3:4:5:6:7:8",
+            "1:2:3:4:5:6:7",
+            "1:2:3:4:5:6:7:8:9",
+            "12345::",
+            "1::2::3",
+            "::1.2.3.256",
+            "::1.2.3",
+            "1.2.3.4::1",
+            "::gggg",
+        ] {
+            assert!(!is_ipv6_address(bad), "expected not an IPv6address: {:?}", bad);
+        }
+    }
+
+    #[test]
+    fn ipv4_address_grammar() {
+        for ok in ["0.0.0.0", "192.168.0.1", "255.255.255.255"] {
+            assert!(is_ipv4_address(ok), "expected IPv4address: {:?}", ok);
+        }
+        for bad in ["1.2.3", "1.2.3.4.5", "1.2.3.256", "01.2.3.4", "1.2.3.", "a.b.c.d"] {
+            assert!(!is_ipv4_address(bad), "expected not an IPv4address: {:?}", bad);
         }
     }
 

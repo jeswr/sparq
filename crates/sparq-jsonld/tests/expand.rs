@@ -740,6 +740,27 @@ fn valid_percent_encoded_datatype_iri_still_expands() {
     );
 }
 
+/// Same step, through the `IP-literal` host grammar: a bracketed host must be a real
+/// RFC 3986 `IPv6address`, not merely a run of `HEXDIG` / `:` / `.`. [SONNET-4.6]
+/// (PR #4041 review round 2) regression test.
+#[test]
+fn invalid_ip_literal_in_datatype_iri_is_an_invalid_typed_value() {
+    assert_error(
+        r#"{"http://ex/p": {"@value": "bar", "@type": "http://[:::]/datatype"}}"#,
+        JsonLdErrorCode::InvalidTypedValue,
+    );
+}
+
+/// The VALID IPv6 datatype next door still expands — the grammar must reject malformed
+/// addresses, not bracketed hosts as such.
+#[test]
+fn valid_ip_literal_datatype_iri_still_expands() {
+    assert_expands(
+        r#"{"http://ex/p": {"@value": "bar", "@type": "http://[2001:db8::1]/datatype"}}"#,
+        r#"[{"http://ex/p": [{"@value": "bar", "@type": "http://[2001:db8::1]/datatype"}]}]"#,
+    );
+}
+
 /// The well-formed datatype next door still expands — the validation must reject the
 /// illegal character, not the shape.
 #[test]
