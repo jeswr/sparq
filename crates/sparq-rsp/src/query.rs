@@ -171,12 +171,17 @@ impl ContinuousQuery {
     }
 
     /// [SONNET-4.6] sq-xqu: sets the per-window-evaluation resource budget
-    /// (builder style). The budget is applied to EVERY window evaluation:
-    /// `max_rows` / `max_bytes` bound each window's working set, and the
-    /// `cancel` flag aborts co-operatively at the executor's next poll. A
-    /// `deadline` inside `budget` stays an ABSOLUTE instant (it does not
-    /// reset per window — once it passes, every later window fails); for a
-    /// relative per-window wall-clock bound use
+    /// (builder style). The budget is applied to EVERY window evaluation, and
+    /// every limit in it is COOPERATIVE: `max_rows`, `max_bytes` and the
+    /// `cancel` flag are observed at the executor's coarse polling sites, so
+    /// they take effect at the NEXT poll rather than instantly — an evaluation
+    /// that reaches no polling site (answered straight from the index, or
+    /// finished before the first poll) runs to completion unchecked.
+    /// `max_bytes` caps the executor-accounted ESTIMATED evaluation working
+    /// set, not total process memory nor the memory of the materialised
+    /// windows themselves. A `deadline` inside `budget` stays an ABSOLUTE
+    /// instant (it does not reset per window — once it passes, every later
+    /// window fails); for a deadline REFRESHED at each window evaluation use
     /// [`with_window_timeout`](Self::with_window_timeout). A tripped budget
     /// surfaces as the evaluation error of the `push`/`flush` that closed
     /// the window (`"query budget exceeded (…)"`), so — like any evaluation
