@@ -599,8 +599,18 @@ mod kani_proofs {
     /// (c) Symbolic cover (SUPPLEMENTARY ONLY) — restates reachability of a genuine
     ///     escalation over a symbolic index. An UNSATISFIABLE cover does NOT fail the
     ///     `cargo kani` verdict, so it reports drift; legs (a) and (b) are the gate.
+    ///
+    /// UNWIND BOUND: the widest loop in this harness's cone is CBMC's builtin `memcmp`,
+    /// which backs `&str` equality — leg (b)'s `entry.name == WITNESS_NAME` compares the
+    /// 26-byte [`WITNESS_NAME`] against every same-length corpus name, so that loop runs
+    /// 26 iterations and needs a bound of 27 (the `CORPUS` walk needs 11, the
+    /// `is_acl_shaped_ascii_noalloc` segment scan 11). Under-bounding is LOUD, not
+    /// silent: at 20 this harness FAILED with `memcmp.unwind.0 "unwinding assertion
+    /// loop 0"` and every other check went UNDETERMINED. Keep this the SMALLEST bound
+    /// the loops need (repo discipline); if a longer corpus name is added, raise it to
+    /// `len + 1`.
     #[kani::proof]
-    #[kani::unwind(20)]
+    #[kani::unwind(27)]
     fn domain_corpus_exhibits_a_surviving_escalation() {
         // (a) Exact-image: at least one genuine escalation is present AND adversarial.
         // (b) is threaded through the same walk so the bound pays for one loop, not two.
