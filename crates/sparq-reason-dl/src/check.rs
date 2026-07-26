@@ -98,12 +98,16 @@
 //!
 //! Note the structural consequence of the in-order dispatch: a graph reaches this branch
 //! only when it is in-QL but NOT in-RL and NOT in-EL, which (over the L1 axiom kinds)
-//! forces an `ObjectComplementOf` somewhere — a shape the QL crate today counts as
-//! uncaptured. So in practice this branch currently graduates `Inconsistent` verdicts
-//! (disjointness violations are decided at any capture level) while `Consistent` stays
-//! `Unknown(QlCaptureGap)` until the QL crate's capture broadens; that is the honest
-//! fail-closed reading, not a defect. Without the feature the branch abstains with
-//! [`UnknownReason::QlConsistencyPending`] exactly as before.
+//! forces an `ObjectComplementOf` somewhere. The QL crate now captures the QL-legal
+//! superclass form of that shape — `A rdfs:subClassOf [ owl:complementOf B ]`, i.e. the
+//! DL-Lite_R negative inclusion `A ⊑ ¬B` (sparq issue #2513) — so a graph routed here whose
+//! complements are all in that position can graduate `Consistent` as well as `Inconsistent`
+//! (disjointness violations were already decided at any capture level). The remaining
+//! complement positions the QL crate still counts uncaptured — a NAMED-subject
+//! `A owl:complementOf B` (the biconditional `A ≡ ¬B`, strictly stronger than a negative
+//! inclusion) and a complement nested inside another class expression — keep landing in
+//! `Unknown(QlCaptureGap)`; that is the honest fail-closed reading, not a defect. Without the
+//! feature the branch abstains with [`UnknownReason::QlConsistencyPending`] exactly as before.
 //!
 //! # Entailment by refutation (design record §4)
 //!
