@@ -1130,6 +1130,22 @@ class TestSeedFidelity(unittest.TestCase):
         for number in (1848, 992, 1917, 1084, 1791, 1155, 1973):
             self.assertIn(f"sparq-org/sparq#{number}", refs)
 
+    def test_the_external_audit_ask_stays_structurally_undroppable(self):
+        """The one entry a live ref would silently DELETE, pinned in the SHIPPED file.
+
+        `test_untracked_entry_is_never_dropped` pins the renderer MECHANISM; nothing pinned the
+        curated declaration. Found by mutation: giving the sq-qhy4 entry
+        `ref = "sparq-org/sparq#3274"` (the assurance-promotion issue, which sq-qhy4 GATES but is
+        not equal to) survived the whole suite — and the day #3274 closes, the P0 "no production
+        ZK claim without an external cryptographer" ask leaves the maintainer's front door on its
+        own. sq-qhy4 has no GitHub issue of its own, so `untracked` is the only correct encoding
+        and it may only be removed by a human editing the TOML.
+        """
+        audit = [e for e in rsh.load_config(CONFIG).bucket("blocked") if "sq-qhy4" in e.short]
+        self.assertEqual(len(audit), 1, "the external cryptographer ZK audit ask has gone missing")
+        self.assertTrue(audit[0].untracked, "sq-qhy4 must not be droppable by any live ref")
+        self.assertEqual(audit[0].refs, [])
+
     def test_the_curated_gated_pr_asks_never_hard_code_a_state(self):
         # The State column is LIVE. A hand-written "CONFLICTING"/"MERGEABLE" in the curated copy is
         # exactly the decay this issue is about.
@@ -1137,6 +1153,38 @@ class TestSeedFidelity(unittest.TestCase):
         for e in config.bucket("gated-pr"):
             for token in ("CONFLICTING", "MERGEABLE", "BLOCKED"):
                 self.assertNotIn(token, e.ask + e.what, f"{e.short}: state belongs to live data")
+
+
+class TestTheCuratedFileIsInsideTheHonestyGates(unittest.TestCase):
+    """The TOML is PUBLISHED prose. It has to be covered by the gates that police prose.
+
+    `check-no-perf-numbers.py`'s SCAN_GLOBS is `*.md` / `*.typ`, so before #4145 the one file
+    whose content is copied verbatim into an issue body sat entirely outside the
+    no-hard-coded-performance-numbers gate. Zero findings today is not the same as covered.
+    """
+
+    PERF_GATE = REPO_ROOT / "scripts" / "check-no-perf-numbers.py"
+
+    def _default_scan_list(self) -> str:
+        # Ask the gate itself which files it scans, rather than re-deriving its globs here: the
+        # question is what the SHIPPED gate covers, and a re-derivation would agree with a
+        # broken gate. `--advisory` always exits 0; the listing is what matters.
+        proc = subprocess.run(
+            [sys.executable, str(self.PERF_GATE), "--advisory", "--list-scanned"],
+            cwd=REPO_ROOT, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
+        return proc.stdout
+
+    def test_the_front_door_toml_is_inside_the_perf_number_gate(self):
+        self.assertIn("orchestration/start-here.toml", self._default_scan_list().splitlines())
+
+    def test_the_shipped_toml_carries_no_hard_coded_performance_number(self):
+        proc = subprocess.run(
+            [sys.executable, str(self.PERF_GATE), "--enforce", str(CONFIG.relative_to(REPO_ROOT))],
+            cwd=REPO_ROOT, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout[-3000:] + proc.stderr[-2000:])
 
 
 class TestRefreshWorkflowWiring(unittest.TestCase):
