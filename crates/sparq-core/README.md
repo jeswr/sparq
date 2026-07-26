@@ -58,7 +58,9 @@ assert_eq!(count, 1);
   Elias-Fano and Partitioned-Elias-Fano codecs whose `next_geq(target)` answers a successor
   query *directly on the compressed data*, without the whole-block decode the varint block codec
   needs. It is a measurement-gated spike: not routed into the store, not called by any join, and
-  carrying its own A/B harness against the incumbent codec. Pure `std`, no new dependency.
+  carrying its own **native-only** A/B harness against the incumbent codec (it times with
+  `std::time::Instant`, so the `wasm32` half of the comparison is unresolved). Pure `std`, no new
+  dependency.
 - **Named graphs & RDF 1.2** — full quad storage and
   [triple terms](https://www.w3.org/TR/rdf12-concepts/).
 - **Thread-safe sharing** — `Graph` is `Send + Sync`, so one store serves many server threads;

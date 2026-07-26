@@ -19,8 +19,13 @@
 //! incumbent block codec on cache-resident streaming scans, where its select/rank is
 //! pointer-chasing while the varint path is a linear byte walk. ZSTD/varint blocks stay the
 //! default. The A/B — seek latency, scan throughput, bytes moved, heap, on several column
-//! shapes, native AND `wasm32` — is `measure_ef_vs_block_varint` below (`#[ignore]`d; run it
-//! explicitly). **No performance number is asserted here or in any doc.**
+//! shapes — is `measure_ef_vs_block_varint` below (`#[ignore]`d; run it explicitly). It is
+//! **NATIVE-ONLY**: it and its varint baseline are `#[cfg(not(target_arch = "wasm32"))]`,
+//! because they time with [`std::time::Instant`], which is unavailable on
+//! `wasm32-unknown-unknown`. **`wasm32` measurement is therefore UNRESOLVED** — it needs a
+//! `performance.now()`-based harness under a wasm test runner, which this prototype does not
+//! ship, and it must be answered before any adoption decision that claims a wasm win.
+//! **No performance number is asserted here or in any doc.**
 //!
 //! # What is implemented
 //!
@@ -33,9 +38,10 @@
 //!   DP-optimal partitioning of Ottaviano/Venturini (SIGIR'14) — it captures PEF's locality
 //!   win without the optimisation pass, which is the right first prototype for an A/B.
 //!
-//! Both are pure `std` (no new dependency, no SIMD intrinsics), so the WASM build behaves the
-//! same as native — which is the point: EF's win is meant to come from moving fewer bytes, not
-//! from wide lanes.
+//! Both are pure `std` (no new dependency, no SIMD intrinsics), so the same code compiles for
+//! `wasm32` as for native — which is the point: EF's win is meant to come from moving fewer
+//! bytes, not from wide lanes. That is a property of the *source*, not a measured claim: no
+//! harness here compares the two codecs' behaviour on `wasm32` (see the status note above).
 //!
 //! # Applicability to a permutation column
 //!
@@ -771,9 +777,13 @@ mod tests {
     /// Partitioned-EF versus the incumbent decode-then-search varint block codec, on four
     /// column shapes, reporting seek latency, scan throughput, bytes resident and bits/value.
     ///
+    /// NATIVE-ONLY: it times with [`std::time::Instant`], which `wasm32-unknown-unknown` does
+    /// not provide, so this harness (and its `VarintBlocks` baseline) is compiled out there
+    /// and the `wasm32` half of the A/B remains UNRESOLVED — see the module status note.
+    ///
     /// Every number it prints is a NON-canonical work-box measurement and asserts nothing; the
-    /// adoption verdict belongs in the bead note after a run on the canonical host, native AND
-    /// `wasm32`. Run it with:
+    /// adoption verdict belongs in the bead note after a run on the canonical native host. Run
+    /// it with:
     /// `cargo test -p sparq-core --features elias-fano --lib measure_ef -- --ignored --nocapture`
     #[cfg(not(target_arch = "wasm32"))]
     #[test]

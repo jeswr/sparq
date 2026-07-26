@@ -50,8 +50,10 @@ block-bloom = []
 # THIS IS A MEASUREMENT-GATED PROTOTYPE. It is deliberately NOT routed as a `PermData` variant
 # and no join calls it: the survey's own honest risk is that EF's pointer-chasing select/rank
 # LOSES to a linear varint walk on cache-resident streaming scans, so adoption is conditional on
-# the A/B (seek latency, scan throughput, bytes moved, heap; native AND wasm32) in
-# `eliasfano::tests::measure_ef_vs_block_varint`. OFF by default so the shipped store keeps the
+# the A/B (seek latency, scan throughput, bytes moved, heap) in
+# `eliasfano::tests::measure_ef_vs_block_varint` — which is NATIVE-ONLY (it times with
+# `std::time::Instant`, absent on wasm32), so the wasm32 half of the comparison is UNRESOLVED and
+# must be answered before adoption. OFF by default so the shipped store keeps the
 # incumbent codec bit-exactly and the lean default / wasm bundle links none of it. Pure `std` —
 # NO new dependency.
 elias-fano = []
