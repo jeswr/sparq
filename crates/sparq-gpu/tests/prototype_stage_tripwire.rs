@@ -47,6 +47,42 @@ fn strip_comments(manifest: &str) -> String {
         .join("\n")
 }
 
+/// Does this line carry a cargo **rename**, i.e. a `package = "sparq-gpu"` key? Under
+/// any dependency table cargo lets the dependency key be arbitrary and puts the real
+/// package identity in `package`:
+///
+/// ```toml
+/// [dependencies]
+/// gpu_backend = { package = "sparq-gpu", path = "../sparq-gpu" }
+/// gpu_backend.package = "sparq-gpu"          # dotted-key form
+///
+/// [dependencies.gpu_backend]                  # table form
+/// package = "sparq-gpu"
+/// ```
+///
+/// None of those mention `sparq-gpu` as a *key*, so the name scan below cannot see them
+/// — yet every one of them makes the kernels reachable.
+///
+/// The scan stays textual on purpose: a proper TOML parse would mean pulling a `toml`
+/// crate into a workspace whose lockfile has none, and this trip-wire must not grow the
+/// dependency graph it exists to police.
+fn mentions_sparq_gpu_rename(line: &str) -> bool {
+    line.match_indices("package").any(|(at, _)| {
+        // The key must *start* here, so `rename-package = "sparq-gpu"` is not a rename.
+        // A leading `.` is allowed: `gpu_backend.package = …` is cargo's dotted-key form.
+        let starts_key = line[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '-');
+        let value = line[at + "package".len()..].trim_start();
+        starts_key
+            && value.strip_prefix('=').is_some_and(|value| {
+                let value = value.trim_start();
+                value.starts_with("\"sparq-gpu\"") || value.starts_with("'sparq-gpu'")
+            })
+    })
+}
+
 /// Does this manifest declare a dependency **on** `sparq-gpu`, in any of the spellings
 /// cargo accepts? Note the workspace-root `members = [… "crates/sparq-gpu" …]` listing
 /// is membership, not a dependency, and must NOT match.
@@ -57,6 +93,8 @@ fn declares_sparq_gpu_dependency(manifest: &str) -> bool {
             .is_some_and(|rest| rest.starts_with([' ', '=', '.']))
             // `[dependencies.sparq-gpu]`, `[target.'cfg(…)'.dev-dependencies.sparq-gpu]`
             || (line.starts_with('[') && line.ends_with(".sparq-gpu]"))
+            // `gpu_backend = { package = "sparq-gpu", … }` and friends
+            || mentions_sparq_gpu_rename(line)
     })
 }
 
@@ -129,6 +167,12 @@ fn dependency_detector_catches_every_spelling() {
         "[dev-dependencies]\nsparq-gpu = \"0.1\"\n",
         "[dependencies.sparq-gpu]\npath = \"../sparq-gpu\"\n",
         "[target.'cfg(not(target_arch = \"wasm32\"))'.dependencies.sparq-gpu]\nversion = \"0.1\"\n",
+        // Renamed dependencies: the key says nothing, `package` carries the identity.
+        "[dependencies]\ngpu_backend = { package = \"sparq-gpu\", path = \"../sparq-gpu\" }\n",
+        "[dependencies]\ngpu_backend.package = \"sparq-gpu\"\ngpu_backend.path = \"../sparq-gpu\"\n",
+        "[dependencies.gpu_backend]\npackage = \"sparq-gpu\"\npath = \"../sparq-gpu\"\n",
+        "[dev-dependencies]\ngpu = { package = 'sparq-gpu', version = '0.1' }\n",
+        "[target.'cfg(unix)'.dependencies]\ngpu = { version = \"0.1\", package = \"sparq-gpu\" }\n",
     ] {
         assert!(
             declares_sparq_gpu_dependency(manifest),
@@ -144,6 +188,10 @@ fn dependency_detector_catches_every_spelling() {
         "# nothing depends on sparq-gpu\n[dependencies]\nwgpu = \"30\"\n",
         "[dependencies]\nsparq-gpu-helper = \"0.1\"\n",
         "[package]\nname = \"sparq-gpu\"\n",
+        // A rename *of another package* is not a dependency on this one.
+        "[dependencies]\ngpu = { package = \"wgpu\", path = \"../sparq-gpu-helper\" }\n",
+        // A key merely ending in `package` is not cargo's `package` key.
+        "[package.metadata.deb]\nrename-package = \"sparq-gpu\"\n",
     ] {
         assert!(
             !declares_sparq_gpu_dependency(manifest),
