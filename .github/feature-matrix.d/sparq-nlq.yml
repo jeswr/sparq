@@ -56,3 +56,4 @@
   crate: "sparq-nlq"
   features: "query-policy"
   test: true
+  tier: "check"

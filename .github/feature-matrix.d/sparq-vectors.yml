@@ -67,6 +67,7 @@
   crate: "sparq-vectors"
   features: "compose"
   test: true
+  tier: "check"
 
 # [OPUS-4.8] sq-0wo9e.6 (epic sq-0wo9e, structure-aware-vectorisation P5): the
 # NEURO-SYMBOLIC propose(neural)-then-verify(deductive) grounding pipeline. The whole
@@ -87,6 +88,7 @@
   crate: "sparq-vectors"
   features: "neuro-symbolic"
   test: true
+  tier: "check"
 
 # [FABLE-5] sq-lhcot.1: the .spqv v3 embedding-provenance WRITE path + the mandatory
 # compatibility REJECTION. The whole write-side v3 record (provenance block + reserved KERN

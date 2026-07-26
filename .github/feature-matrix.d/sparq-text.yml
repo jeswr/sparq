@@ -11,3 +11,4 @@
   crate: "sparq-text"
   features: "highlight"
   test: true
+  tier: "check"

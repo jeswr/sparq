@@ -20,3 +20,4 @@
   crate: "sparq-rsp"
   features: "window-origin"
   test: true
+  tier: "check"

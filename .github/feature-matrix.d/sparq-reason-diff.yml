@@ -11,3 +11,4 @@
   crate: "sparq-reason-diff"
   features: "rl-oracle"
   test: true
+  tier: "check"
