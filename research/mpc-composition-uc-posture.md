@@ -70,10 +70,10 @@ example) composes six stages, each already existing in isolation:
 | # | Stage | Code | What it computes | Reveals mid-protocol? |
 |---|-------|------|------------------|-----------------------|
 | 1 | **Holder local eval** | `holder::Holder::evaluate_local` | each party evaluates a query fragment over its OWN graph via `sparq-engine`; raw graphs never leave | no (local only) |
-| 2 | **Share** | `MpcBackend::share_private_input` (Shamir, `shamir.rs`) | secret-share each private value (e.g. salary) `t`-of-`n`, `t=⌊(n−1)/2⌋` | no |
+| 2 | **Share** | `MpcBackend::share_private_input` (Shamir, `shamir.rs`) | secret-share each private value (e.g. salary) as a **degree-`t` Shamir** sharing over `n` parties, `t=⌊(n−1)/2⌋` — any `t` shares reveal nothing about the secret, `t+1` valid shares reconstruct it | no |
 | 3 | **Join** | `join::DisclosedKeyJoin` (clear IRIs) / `join::HiddenValueJoin` (`secure_equal`) | equi-join; hidden-value variant opens `m=(a−b)·r` per pair | **YES — the danger open (§3)** |
 | 4 | **Secure aggregate** | `MpcBackend::run_secure` (`shamir.rs`, zero-round local add) | cumulative SUM over hidden shares | no (linear, local) |
-| 5 | **Reconstruct** | threshold open of the DISCLOSED result only | open the final aggregate / verdict bit | yes — the *intended* output open |
+| 5 | **Reconstruct** | open of the DISCLOSED result only, from `t+1` valid degree-`t` shares | open the final aggregate / verdict bit | yes — the *intended* output open |
 | 6 | **Proof** | `proof::ProofStatement` / `CollaborativeProof` | attach a ZK/collaborative proof of correct evaluation | **stub — `NotYetImplemented` (§4)** |
 
 Load-bearing facts (all `origin/main`): the crate is an **in-process multi-party simulation** (every
@@ -147,10 +147,10 @@ results, **not** established realizations.
 | Stage | Ideal functionality `F` | Standalone result | Composition obligation (residual) |
 |-------|-------------------------|-------------------|-----------------------------------|
 | 1 Holder eval | `F_local`: emit a fragment result over the party's own graph | trivial (local computation, no interaction) | outputs feeding stage 2/3 must be exactly what `F_local` defines — no side-channel from engine timing (out of model) |
-| 2 Share | `F_share`: distribute a `t`-of-`n` sharing | Shamir secrecy: any `t` shares are independent of the secret (Shamir'79); a distributed dealing protocol + view simulation is future work | randomness must be a CSPRNG (`rng.rs`, `SecureRng::from_os`) — a deterministic PRNG breaks privacy; `insecure-test-rng` off by default |
+| 2 Share | `F_share`: distribute a degree-`t` Shamir sharing over `n` parties (`t=⌊(n−1)/2⌋`) | Shamir secrecy: any `t` shares are independent of the secret, while `t+1` valid shares reconstruct it (Shamir'79); a distributed dealing protocol + view simulation is future work | randomness must be a CSPRNG (`rng.rs`, `SecureRng::from_os`) — a deterministic PRNG breaks privacy; `insecure-test-rng` off by default |
 | 3 Join | `F_join`: output the join, **leaking the match bit per pair** (L2) | masked-opening lemma: the honest opened `m` is simulatable from the match bit (§3); realization of `F_join` pending a distributed protocol + simulator | **the leak MUST be in `F_join`** — the downstream aggregate composes against a functionality that *already leaked the match structure*; a `LeakageProfile` should surface it |
 | 4 Aggregate | `F_sum`: threshold sum, open nothing | linear ops are local & perfectly private (no interaction) | none new (zero-round); but any *chained* multiplication (degree reduction) adds an open → re-enters §3's obligation |
-| 5 Reconstruct | `F_open`: open the DISCLOSED result only | threshold open is the intended output | the reconstructed value must be a *function of the ideal outputs*, not of intermediate shares |
+| 5 Reconstruct | `F_open`: open the DISCLOSED result only | opening from `t+1` valid degree-`t` shares is the intended output | the reconstructed value must be a *function of the ideal outputs*, not of intermediate shares |
 | 6 Proof | `F_prove`: prove correct evaluation, leak nothing about honest witnesses | **UNBUILT + coZK-gated (§4)** | **validate the extended witness before proving** (2025/1026) — the unfilled composition obligation |
 
 The pattern: **every mid-protocol open transfers a leakage obligation to the ideal functionality that
