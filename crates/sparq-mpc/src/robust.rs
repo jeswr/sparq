@@ -823,9 +823,15 @@ mod tests {
 
     #[test]
     fn trim_trailing_zeros_drops_only_high_zeros() {
-        assert_eq!(trim_trailing_zeros(vec![fp(1), fp(2), fp(0), fp(0)]), vec![fp(1), fp(2)]);
+        assert_eq!(
+            trim_trailing_zeros(vec![fp(1), fp(2), fp(0), fp(0)]),
+            vec![fp(1), fp(2)]
+        );
         // Interior zeros are preserved — only TRAILING zeros are dropped.
-        assert_eq!(trim_trailing_zeros(vec![fp(1), fp(0), fp(3)]), vec![fp(1), fp(0), fp(3)]);
+        assert_eq!(
+            trim_trailing_zeros(vec![fp(1), fp(0), fp(3)]),
+            vec![fp(1), fp(0), fp(3)]
+        );
         // An all-zero polynomial collapses to the empty vec.
         assert_eq!(trim_trailing_zeros(vec![fp(0), fp(0)]), Vec::<Fp>::new());
         assert_eq!(trim_trailing_zeros(vec![fp(0)]), Vec::<Fp>::new());
@@ -851,7 +857,11 @@ mod tests {
         // (x+2)(x+3) = x^2 + 5x + 6, divided by (x+2), is exactly (x+3) rem 0.
         let (q, r) = poly_divmod(&[fp(6), fp(5), fp(1)], &[fp(2), fp(1)]).unwrap();
         assert_eq!(q, vec![fp(3), fp(1)], "quotient must be x+3");
-        assert_eq!(r, Vec::<Fp>::new(), "remainder must vanish (exact division)");
+        assert_eq!(
+            r,
+            Vec::<Fp>::new(),
+            "remainder must vanish (exact division)"
+        );
     }
 
     #[test]
@@ -882,7 +892,10 @@ mod tests {
         let q = [fp(10), fp(4), fp(7)];
         let shares: Vec<Share> = [1u64, 2, 3]
             .iter()
-            .map(|&x| Share { x, y: eval_poly(&q, fp(x)) })
+            .map(|&x| Share {
+                x,
+                y: eval_poly(&q, fp(x)),
+            })
             .collect();
         // The full polynomial is recovered coefficient-for-coefficient.
         assert_eq!(lagrange_at_zero_poly(&shares).unwrap(), q.to_vec());
@@ -898,10 +911,7 @@ mod tests {
     #[test]
     fn solve_linear_system_unique_inconsistent_and_underdetermined() {
         // Unique: 2x + 3y = 8 ; x + 2y = 5  ⇒  x = 1, y = 2.
-        let unique = vec![
-            vec![fp(2), fp(3), fp(8)],
-            vec![fp(1), fp(2), fp(5)],
-        ];
+        let unique = vec![vec![fp(2), fp(3), fp(8)], vec![fp(1), fp(2), fp(5)]];
         assert_eq!(solve_linear_system(unique, 2), Some(vec![fp(1), fp(2)]));
 
         // Inconsistent: x = 1 and x = 2 has no solution.
@@ -967,7 +977,10 @@ mod tests {
         let q = [fp(10), fp(4), fp(7)];
         let mut shares: Vec<Share> = [1u64, 2, 3, 4]
             .iter()
-            .map(|&x| Share { x, y: eval_poly(&q, fp(x)) })
+            .map(|&x| Share {
+                x,
+                y: eval_poly(&q, fp(x)),
+            })
             .collect();
         assert!(disagreeing_points(&shares, &q).is_empty(), "clean → none");
         shares[1].y = shares[1].y.add(fp(1)); // off-curve by 1
@@ -984,7 +997,10 @@ mod tests {
         let q = [fp(5), fp(3)];
         let mut shares: Vec<Share> = [1u64, 2, 3, 4]
             .iter()
-            .map(|&x| Share { x, y: eval_poly(&q, fp(x)) })
+            .map(|&x| Share {
+                x,
+                y: eval_poly(&q, fp(x)),
+            })
             .collect();
         shares[2].y = shares[2].y.add(fp(99)); // one off-curve share
         let recovered = berlekamp_welch(&shares, 1, 1).expect("e=1 must decode");

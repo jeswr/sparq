@@ -828,7 +828,11 @@ mod tests {
         for next in &shared[1..] {
             manual = auth_add(&manual, next).unwrap();
         }
-        assert_eq!(open(manual.value_shares(), t), sum, "auth_sum == manual fold");
+        assert_eq!(
+            open(manual.value_shares(), t),
+            sum,
+            "auth_sum == manual fold"
+        );
     }
 
     /// `auth_sum` rejects an empty aggregate (like `run_secure`): there is no
