@@ -693,10 +693,11 @@ fn gen_term(
 
 /// [SONNET-4.6] (sq-u1z86) Resolve one row's graph targets for a set of graph maps. Each entry
 /// is an N-Triples `<iri>` form, or the EMPTY string standing for the default graph (what
-/// `rr:defaultGraph` names). `Ok(Some(set))` with an EMPTY set means "no graph maps here" — the
-/// caller unions the subject-map and predicate-object-map sets and falls back to the default
-/// graph only if the union is still empty. `Ok(None)` means every graph map on this position
-/// generated NULL, so the statement is not generated at all (R2RML NULL semantics).
+/// `rr:defaultGraph` names). `Ok(Some(set))` with an EMPTY set means "no graph maps at this
+/// position at all". `Ok(None)` means graph maps ARE present here but every one of them
+/// generated NULL, so this position contributes no graph term (R2RML NULL semantics). The two
+/// cases are distinct and [`graph_union`] — not this function — decides what the difference
+/// means for a given statement.
 fn gen_graphs(
     specs: &[TermSpec],
     row: &[String],
@@ -743,19 +744,30 @@ fn write_stmt(out: &mut String, s_nt: &str, p_nt: &str, o_nt: &str, graphs: &[St
     }
 }
 
-/// The union of a subject-map and a predicate-object-map graph set, defaulted to the default
-/// graph when both are empty (R2RML §11 step 8).
-fn graph_union(subject: &[String], pom: &[String]) -> Vec<String> {
-    let mut gs: Vec<String> = subject.to_vec();
-    for g in pom {
+/// The graph set of one statement: the union of the subject-map graph terms and the
+/// predicate-object-map graph terms (R2RML §11 step 8), where `None` on either side is
+/// [`gen_graphs`]'s "graph maps present here, but all of them generated NULL".
+///
+/// NULL is PER-POSITION: it removes only that position's contribution, so a NULL subject graph
+/// map can never discard a graph the predicate-object map generated, nor the other way round.
+/// `None` is returned — the statement is not generated at all — only when the union is empty
+/// *and* at least one position carried a graph map, i.e. every graph map that applies to this
+/// statement generated NULL. The default graph is reached only when NEITHER position carries a
+/// graph map.
+fn graph_union(subject: Option<&[String]>, pom: Option<&[String]>) -> Option<Vec<String>> {
+    let mut gs: Vec<String> = subject.unwrap_or_default().to_vec();
+    for g in pom.unwrap_or_default() {
         if !gs.contains(g) {
             gs.push(g.clone());
         }
     }
-    if gs.is_empty() {
-        gs.push(String::new());
+    if !gs.is_empty() {
+        return Some(gs);
     }
-    gs
+    if subject.is_none() || pom.is_none() {
+        return None; // a graph map applied and generated NULL: drop rather than default.
+    }
+    Some(vec![String::new()])
 }
 
 /// Emit the N-Triples (or, with graph maps, N-Quads) lines one CSV row generates under a
@@ -776,29 +788,30 @@ fn emit_row(map: &CompiledMap, row: &[String], row_num: u64, out: &mut String) -
         return Err(format!("subject map generated a literal on row {row_num}"));
     }
     let s_nt = nt_term(&subj);
-    let Some(subject_graphs) = gen_graphs(&map.subject_graphs, row, row_num, base)? else {
-        return Ok(()); // every subject graph map was NULL: the row generates nothing.
-    };
-    // The `rr:class` and provenance triples live in the subject map's graphs alone.
-    let s_graphs = graph_union(&subject_graphs, &[]);
-    for cls in &map.classes {
-        write_stmt(out, &s_nt, &format!("<{RDF_TYPE}>"), &format!("<{cls}>"), &s_graphs);
-    }
-    if let Some(table) = &map.provenance {
-        write_stmt(
-            out,
-            &s_nt,
-            &format!("<{TABULAR_NS}row>"),
-            &format!("\"{row_num}\"^^<{XSD_INTEGER}>"),
-            &s_graphs,
-        );
-        write_stmt(
-            out,
-            &s_nt,
-            &format!("<{TABULAR_NS}table>"),
-            &format!("\"{}\"", escape_literal(table)),
-            &s_graphs,
-        );
+    let subject_graphs = gen_graphs(&map.subject_graphs, row, row_num, base)?;
+    // The `rr:class` and provenance statements live in the subject map's graphs alone, so they
+    // are dropped when those all generated NULL — but the row's predicate-object maps carry
+    // their own graph maps and are still evaluated below.
+    if let Some(s_graphs) = graph_union(subject_graphs.as_deref(), Some(&[])) {
+        for cls in &map.classes {
+            write_stmt(out, &s_nt, &format!("<{RDF_TYPE}>"), &format!("<{cls}>"), &s_graphs);
+        }
+        if let Some(table) = &map.provenance {
+            write_stmt(
+                out,
+                &s_nt,
+                &format!("<{TABULAR_NS}row>"),
+                &format!("\"{row_num}\"^^<{XSD_INTEGER}>"),
+                &s_graphs,
+            );
+            write_stmt(
+                out,
+                &s_nt,
+                &format!("<{TABULAR_NS}table>"),
+                &format!("\"{}\"", escape_literal(table)),
+                &s_graphs,
+            );
+        }
     }
     for pom in &map.poms {
         let mut preds: Vec<String> = Vec::with_capacity(pom.predicates.len());
@@ -814,10 +827,10 @@ fn emit_row(map: &CompiledMap, row: &[String], row_num: u64, out: &mut String) -
         if preds.is_empty() {
             continue;
         }
-        let Some(pom_graphs) = gen_graphs(&pom.graphs, row, row_num, base)? else {
-            continue; // every graph map on this predicate-object map was NULL.
+        let pom_graphs = gen_graphs(&pom.graphs, row, row_num, base)?;
+        let Some(graphs) = graph_union(subject_graphs.as_deref(), pom_graphs.as_deref()) else {
+            continue; // every graph map that applies to these statements generated NULL.
         };
-        let graphs = graph_union(&subject_graphs, &pom_graphs);
         for o in &pom.objects {
             // One term map yields at most one object; a referencing object map yields one per
             // joined parent subject.
@@ -2431,6 +2444,57 @@ mod tests {
                 "<http://example.com/r/1> <http://example.com/a> \"x\" <http://example.com/gp> .",
                 "<http://example.com/r/1> <http://example.com/a> \"x\" <http://example.com/gs> .",
                 "<http://example.com/r/1> <http://example.com/b> \"y\" <http://example.com/gs> .",
+            ]
+        );
+    }
+
+    /// A NULL graph map is PER-POSITION: a subject graph map that generates NULL must not
+    /// discard a graph the predicate-object map generated for itself. Only the statements whose
+    /// every applicable graph map is NULL (here the `rr:class` triple and the graph-map-less
+    /// `ex:b` map) are dropped.
+    #[test]
+    fn r2rml_null_subject_graph_keeps_pom_generated_graph() {
+        let mapping = format!(
+            "{PREAMBLE}\
+             ex:TM rr:logicalTable [ rr:tableName \"t\" ] ;\n\
+               rr:subjectMap [ rr:template \"http://example.com/r/{{id}}\" ; rr:class ex:Row ;\n\
+                 rr:graphMap [ rr:template \"http://example.com/g/{{g}}\" ] ] ;\n\
+               rr:predicateObjectMap [ rr:predicate ex:a ; rr:objectMap [ rr:column \"a\" ] ; rr:graph ex:gp ] ;\n\
+               rr:predicateObjectMap [ rr:predicate ex:b ; rr:objectMap [ rr:column \"b\" ] ] .\n"
+        );
+        // Row 1's graph cell is NULL; row 2 shows the same mapping's non-NULL behaviour.
+        let got = r2rml_nt(&mapping, &[("t", "id,a,b,g\n1,x,y,\n2,x,y,A\n")]).unwrap();
+        assert_eq!(
+            got,
+            vec![
+                "<http://example.com/r/1> <http://example.com/a> \"x\" <http://example.com/gp> .",
+                "<http://example.com/r/2> <http://example.com/a> \"x\" <http://example.com/g/A> .",
+                "<http://example.com/r/2> <http://example.com/a> \"x\" <http://example.com/gp> .",
+                "<http://example.com/r/2> <http://example.com/b> \"y\" <http://example.com/g/A> .",
+                "<http://example.com/r/2> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/Row> <http://example.com/g/A> .",
+            ]
+        );
+    }
+
+    /// The mirror image: a predicate-object-map graph map that generates NULL must not discard
+    /// the graph the SUBJECT map generated — the statement still lands in `ex:gs`.
+    #[test]
+    fn r2rml_null_pom_graph_keeps_subject_generated_graph() {
+        let mapping = format!(
+            "{PREAMBLE}\
+             ex:TM rr:logicalTable [ rr:tableName \"t\" ] ;\n\
+               rr:subjectMap [ rr:template \"http://example.com/r/{{id}}\" ; rr:graph ex:gs ] ;\n\
+               rr:predicateObjectMap [ rr:predicate ex:a ; rr:objectMap [ rr:column \"a\" ] ;\n\
+                 rr:graphMap [ rr:template \"http://example.com/g/{{g}}\" ] ] .\n"
+        );
+        // Row 1's graph cell is NULL; row 2 shows the same mapping's non-NULL behaviour.
+        let got = r2rml_nt(&mapping, &[("t", "id,a,g\n1,x,\n2,x,A\n")]).unwrap();
+        assert_eq!(
+            got,
+            vec![
+                "<http://example.com/r/1> <http://example.com/a> \"x\" <http://example.com/gs> .",
+                "<http://example.com/r/2> <http://example.com/a> \"x\" <http://example.com/g/A> .",
+                "<http://example.com/r/2> <http://example.com/a> \"x\" <http://example.com/gs> .",
             ]
         );
     }
