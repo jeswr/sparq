@@ -56,5 +56,13 @@ strings, benchmark numbers, paper dates) carries a `data-vr-mask` attribute in t
 component and is masked at capture, so baselines survive content churn. When a new
 dynamic region appears, add `data-vr-mask` to it — never loosen the comparator.
 
+A mask hides a region's **pixels**, not its **geometry**: Playwright paints it over the
+element's LIVE bounding box, so a masked region that RESIZES with its data still moves the
+pixels around it and the baseline drifts anyway. Where the data can change the region's size
+(a digit more, a singular/plural label, a longer version string), give it a data-independent
+box too — `src/lib/metric-badge.ts` is the worked example: it reserves the widest label the
+pill can ever render as an invisible ghost and centres the live label over it. `tabular-nums`
+is NOT sufficient; it equalises digit advance widths only, not total label widths.
+
 The lane is **advisory** (§6.3) and must earn gating separately: 50 consecutive green
 runs spanning ≥10 distinct PRs or two weeks, whichever is longer.
