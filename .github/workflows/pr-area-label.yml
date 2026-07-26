@@ -1,0 +1,91 @@
+# pr-area-label — derive a PR's `area:` conflict-partition labels from its changed paths.
+# [OPUS-5] 🤖 SPARQ agent. Registry issue jeswr/agent-account-registry#677.
+#
+# WHY THIS EXISTS (measured 2026-07-26 14:45Z, reg#677): the fleet scheduler partitions
+# work by `area:<name>`. An in-flight PR RESERVES its areas; a ready issue defers while
+# any of its areas is reserved; and a PR with NO `area:` label maps to the SERIALIZING
+# `__global__` partition, so ONE unlabelled PR defers EVERY issue whatever crate it names.
+# 84 of 87 open PRs carried no `area:` label because nothing in the pipeline ever applied
+# one. Live layer chain that tick: candidates 12 -> frontier 3 -> lease 3 ->
+# max_concurrent 8 -> account pool 28, so min = 3 — 28 account slots idle while 3 workers
+# ran, and raising max_concurrent/package_width measured net +0 workers (reg#689). This
+# workflow closes the layer that actually binds.
+#
+# WHY NOT actions/labeler: it cannot express the three properties this needs — (a) the
+# label must ALREADY EXIST (labeler's add-label call silently CREATES an unknown label,
+# which is how a typo becomes permanent repo state), (b) a >max_areas fan-out must fall
+# BACK to `__global__` rather than acquiring many labels, and (c) the same code must drive
+# the one-pass backfill of the existing open PRs. The policy lives in reviewable TOML
+# (ci/area-labels.toml), not inline YAML.
+#
+# TRUSTED-CODE POSTURE. The job holds `pull-requests: write`, so it must NOT execute code
+# from the pull request. `actions/checkout` is therefore pinned to the repository's
+# DEFAULT BRANCH, not to the PR head or merge ref: the deriver and its policy table are
+# always the reviewed on-main versions. A PR that edits either is validated by the
+# hermetic self-tests (scripts/tests/test_pr_area_labels.py, run by routing-self-tests.yml)
+# and takes effect once merged. Pinned by
+# test_pr_area_labels.py::TestWorkflowSeam::test_checkout_uses_default_branch_not_pr_head.
+#
+# FORK PRs. `pull_request` (deliberately NOT `pull_request_target`) hands a fork PR a
+# READ-ONLY token, so no label write can succeed. That path is handled EXPLICITLY inside
+# the deriver: the `--head-repo` argument below carries the PR's head repo, and when it is
+# not this repository the run prints a `::notice` and exits 0 instead of failing on a
+# confusing 403.
+#
+# NO `if:` ANYWHERE, BY DESIGN. Every skip decision (fork PR, no pull-request context on
+# the merge_group ref) is made in Python, where a mutation dies against a named test.
+# Measured in this project: 18/18 Python mutants died while EVERY surviving mutant lived
+# in a workflow `if:` / step / call-site. The structural seam tests assert that this
+# workflow has no job-level or step-level `if:` at all, so re-introducing one — including
+# `if: false` — turns a named test red.
+#
+# GATING POSTURE: gating. The job name carries no advisory/informational token and has no
+# .github/advisory-registry.json entry, so ci-summary auto-discovers it as a required
+# sibling. It cannot break already-open PRs: `pull_request` runs the workflow file from
+# the PR's own merge ref, so a PR that predates this file produces no check-run at all,
+# and a missing leg is not a failing leg.
+name: pr-area-label
+
+on:
+  # Every PR event that can change the changed-path set or make a draft reviewable.
+  # NO `paths:` filter, deliberately: every PR must be attributed, and a path filter
+  # would silently re-open the starvation hole for whatever it excluded.
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+  # The queue ref exposes the same gating check name (repo convention, cf.
+  # routing-self-tests.yml). There is no pull request in a merge_group payload, so the
+  # deriver receives `--pr 0` and no-ops — see the Python no-pull-request-context path.
+  merge_group:
+
+# Least privilege. `pull-requests: write` is the ONLY write scope, and it is the exact
+# scope the "add labels to a pull request" call needs. `contents: read` is required by
+# actions/checkout to read the deriver + ci/area-labels.toml; it grants no write.
+# NO `issues: write`, no `contents: write`, no secrets are referenced anywhere.
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pr-area-label-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  label:
+    name: derive area labels
+    runs-on: ubuntu-latest
+    steps:
+      # Checked out at the DEFAULT BRANCH on purpose — see TRUSTED-CODE POSTURE above.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Derive and apply area labels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 scripts/pr-area-labels.py \
+            --repo "${{ github.repository }}" \
+            --pr "${{ github.event.pull_request.number || 0 }}" \
+            --head-repo "${{ github.event.pull_request.head.repo.full_name || '' }}" \
+            --apply
