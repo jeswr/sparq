@@ -1338,6 +1338,7 @@ mod tests {
     #[test]
     fn render_roundtrip_accounting_closed_detects_drops() {
         let mut report = RenderRoundTripReport {
+            arm: RoundTripArm::Direct,
             documents: 3,
             round_tripped: 1,
             extraction_refused: 1,
