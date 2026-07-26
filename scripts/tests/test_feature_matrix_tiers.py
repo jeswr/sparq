@@ -791,12 +791,24 @@ class TestCfgExtraction(unittest.TestCase):
             ['all(test, feature = "window-origin")'],
         )
 
+    def test_escaped_cr_does_not_mask_following_live_cfg(self):
+        content = (
+            'let sep = "\\r";\n'
+            '#[cfg(not(feature = "quoted-triples"))]\n'
+            'fn materialize_default() {}\n'
+        )
+        self.assertEqual(
+            det._extract_cfg_expressions(content),
+            ['not(feature = "quoted-triples")'],
+        )
+
     def test_regression_cfgs_from_rsp_and_reason_sources(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _make_crate(
                 tmp,
                 src_files={
                     "lib.rs": (
+                        '// RSP source prose with an unmatched " quote\n'
                         '#[cfg(all(test, feature = "window-origin"))]\n'
                         'mod window_origin_tests {}\n'
                         '#[cfg(all(test, not(feature = "window-origin")))]\n'

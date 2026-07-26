@@ -324,7 +324,7 @@ _CFG_START_RE = re.compile(r"#!?\[cfg(?:_attr)?\s*\(")
 # quote cannot consume subsequent live cfg attributes.
 _STRLIT_MASK_RE = re.compile(r'b?"[^"\\\r\n]*(?:\\.[^"\\\r\n]*)*"')
 _RAW_STRLIT_MASK_RE = re.compile(
-    r'(?<![A-Za-z0-9_])(?:br|r)(?P<hashes>#{0,255})"[\s\S]*?"(?P=hashes)'
+    r'(?<![A-Za-z0-9_"\\\'])(?:br|r)(?P<hashes>#{0,255})"[\s\S]*?"(?P=hashes)'
 )
 
 
@@ -335,14 +335,17 @@ def _sanitize_for_cfg_scan(content: str) -> str:
     1. Blank whole-line comments (``//`` including ``///``/``//!`` docs).
        This prevents quotes and cfg-like text in comments from affecting the
        literal scanner.
-    2. Mask regular and raw string literal contents with underscores.  This prevents
-       ``#[cfg(feature = \\"name\\")])`` embedded inside a Rust string
-       literal from being mistakenly extracted as a live cfg attribute.
+    2. Mask single-line regular string literals and single- or multiline raw
+       string literals with underscores. This prevents
+       ``#[cfg(feature = \\"name\\")])`` embedded inside those Rust strings
+       from being mistakenly extracted as a live cfg attribute.
        The masking is ONE-WAY (no restore needed): real cfg attributes
        outside string literals retain their feature names; bogus patterns
        inside string literals get their names replaced with underscores,
        so ``_mentions_feature(node, F)`` returns False for them.
-       Newline characters are retained in multiline raw strings.
+       Newline characters are retained in multiline raw strings. Multiline
+       regular strings are deliberately left live, which can only fail closed
+       by retaining a full test leg. Block comments are not currently masked.
     """
     # Pass 1: blank whole-line comments, PRESERVING LENGTH and line structure.
     lines = content.splitlines(keepends=True)
