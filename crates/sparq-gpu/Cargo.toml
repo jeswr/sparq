@@ -38,3 +38,9 @@ bytemuck = { version = "1", features = ["derive"] }
 # CPU parallel baselines in examples/gpu_bench.rs only — the library itself does not
 # need a thread pool.
 rayon = { workspace = true }
+# tests/prototype_stage_tripwire.rs only: it asks `cargo metadata --no-deps` (cargo's own
+# TOML parse) which workspace members depend on this crate, instead of pattern-matching
+# manifest text, and builds a fixture workspace on disk to prove the detector fires. Both
+# are dev-only and already in the workspace lockfile, so the shipped graph is unchanged.
+serde_json = "1"
+tempfile = "3"

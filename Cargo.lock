@@ -5090,6 +5090,8 @@ dependencies = [
  "bytemuck",
  "pollster",
  "rayon",
+ "serde_json",
+ "tempfile",
  "wgpu",
 ]
 
