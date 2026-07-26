@@ -590,9 +590,19 @@ jobs:
   # `deploy/aws` pin (`ghcr.io/sparq-org/sparq-server:latest`) with a developer/test build. Now the
   # two trigger paths emit disjoint, unambiguous tag sets:
   #   * `v*` tag push (canonical release): `{{version}}`, `{{major}}.{{minor}}`, and `latest`.
-  #   * `workflow_dispatch` (developer/test): ONLY the resolved `inputs.tag` verbatim (e.g.
-  #     `v0.1.0-dev`). No `latest`, no moving `{{major}}.{{minor}}` — a dev build can never
-  #     claim a tag a deployment follows, and is still pullable by its exact dispatch tag.
+  #   * `workflow_dispatch` (developer/test): ONLY `dev-<inputs.tag>` (e.g. `dev-v0.1.0-dev`).
+  #     No `latest`, no moving `{{major}}.{{minor}}` — a dev build can never claim a tag a
+  #     deployment follows, and is still pullable by its exact namespaced dispatch tag.
+  #
+  # [OPUS-5] the `dev-` prefix is what makes that disjointness hold for ANY input, not just a
+  # well-behaved one. `inputs.tag` is a `required: true` free-form string: gating on the trigger
+  # alone still let a dispatch with `tag: latest` (or `v1.2.3`, or a moving `1.2`) resolve
+  # `type=raw,value=${{ needs.setup.outputs.version }}` straight onto the canonical tag it names
+  # and overwrite the released image. Prefixing unconditionally makes the collision STRUCTURAL,
+  # not a matter of developer discipline: every canonical tag is either the literal `latest` or
+  # starts with a digit (metadata-action strips the leading `v` from `{{version}}`), so no
+  # `dev-`-prefixed tag can ever be one. This is enforced over adversarial inputs by
+  # `scripts/tests/test_release_container_multiarch.py`.
   # The dispatch path deliberately uses `type=raw` (not `type=semver`) so a non-semver `inputs.tag`
   # still yields a tag: metadata-action *warns and skips* an unparseable semver, which would leave
   # `tags:` empty and make the push meaningless.
@@ -639,7 +649,7 @@ jobs:
             type=semver,pattern={{version}},value=${{ needs.setup.outputs.version }},enable=${{ github.event_name != 'workflow_dispatch' }}
             type=semver,pattern={{major}}.{{minor}},value=${{ needs.setup.outputs.version }},enable=${{ github.event_name != 'workflow_dispatch' }}
             type=raw,value=latest,enable=${{ github.event_name != 'workflow_dispatch' }}
-            type=raw,value=${{ needs.setup.outputs.version }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=raw,value=dev-${{ needs.setup.outputs.version }},enable=${{ github.event_name == 'workflow_dispatch' }}
       # [OPUS-4.8] sq-n6rv: SMOKE BEFORE PUSH. Build the image locally first, `docker run`
       # it, and prove it serves /health + a query — so a container that exits immediately on
       # boot (the sq-n6rv regression) can never reach ghcr.io. The build is cached to GHA, so

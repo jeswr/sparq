@@ -13,6 +13,14 @@
 # version-threaded from the `setup` job and the canonical/dispatch tag sets to be disjoint;
 # `test_ungated_latest_tag_fails_contract` proves that assertion is non-vacuous.
 #
+# [OPUS-5] the structural assertions above are necessary but NOT sufficient: `inputs.tag` is a
+# free-form required string, so gating the dispatch tag on the trigger still let `tag: latest`
+# (or `v1.2.3`, or a moving `1.2`) resolve onto the canonical tag it names and overwrite the
+# released image. `resolve_pushed_tags` therefore MODELS metadata-action's resolution and
+# `assert_dispatch_tags_never_canonical` drives it with adversarial inputs, proving the dispatch
+# path cannot emit a deployment-followed tag whatever the developer types.
+# `test_unnamespaced_dispatch_tag_fails_contract` proves THAT assertion is non-vacuous.
+#
 # Run: python3 scripts/tests/test_release_container_multiarch.py
 
 from __future__ import annotations
@@ -26,12 +34,118 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 
+VERSION_EXPR = "${{ needs.setup.outputs.version }}"
+METADATA_STEP = "Image metadata (tags + OCI labels from the resolved release version)"
+
+# A tag a deployment can follow: the literal `latest`, or a semver-shaped tag. Every canonical
+# tag the release path publishes has one of these shapes, and `deploy/paas`, `deploy/aws`,
+# `deploy/gcp`, `deploy/azure` + `deploy/helm` all pin `:latest` or a pinned `X.Y.Z`.
+CANONICAL_SHAPE = re.compile(r"(?:latest|\d+\.\d+(?:\.\d+)?(?:[-+].*)?)\Z")
+
+# Inputs a developer could plausibly type into the `tag` dispatch input — including the ones that
+# NAME a canonical tag outright. Each must resolve to a non-canonical image tag.
+ADVERSARIAL_DISPATCH_TAGS = (
+    "latest",  # names the moving tag every deploy config pins
+    "v1.2.3",  # a stable semver release tag
+    "1.2.3",  # ... without the `v` prefix metadata-action strips anyway
+    "v1.2",  # a moving major.minor tag
+    "1.2",
+    "v0.1.0",  # the version `deploy/paas` documents as a pinnable release
+    "stable",
+    "v0.1.0-dev",  # the well-behaved input the dispatch input description recommends
+)
+
 
 def _step_named(steps: list[dict], name: str) -> tuple[int, dict]:
     """Return one named workflow step and fail if the contract is absent or ambiguous."""
     matches = [(index, step) for index, step in enumerate(steps) if step.get("name") == name]
     assert len(matches) == 1, f"expected exactly one {name!r} step, found {len(matches)}"
     return matches[0]
+
+
+def _evaluate_enable(expression: str, event_name: str) -> bool:
+    """Evaluate a tag's `enable=` guard for a given trigger.
+
+    Deliberately narrow: only the two `github.event_name` comparisons the workflow uses are
+    understood, and anything else raises. A gate this model cannot evaluate must go RED rather
+    than be silently treated as enabled/disabled — that would make the tests below vacuous.
+    """
+    match = re.fullmatch(
+        r"\$\{\{\s*github\.event_name\s*(==|!=)\s*'([^']*)'\s*\}\}", expression.strip()
+    )
+    assert match, f"unsupported enable expression {expression!r}"
+    operator, literal = match.group(1), match.group(2)
+    return event_name == literal if operator == "==" else event_name != literal
+
+
+def _semver_tags(value: str, pattern: str) -> tuple[str, ...]:
+    """Model `type=semver` resolution: strip a leading `v`, then apply the pattern.
+
+    metadata-action warns and SKIPS a value it cannot parse as semver, so an unparseable value
+    contributes no tag. For a pre-release the real action also suppresses `{{major}}.{{minor}}`;
+    this model emits it anyway, which is conservative — it can only ever credit the canonical
+    path with MORE tags, making the disjointness assertions stricter, never weaker.
+    """
+    parsed = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?", value)
+    if not parsed:
+        return ()
+    if pattern == "{{version}}":
+        return (value[1:] if value.startswith("v") else value,)
+    if pattern == "{{major}}.{{minor}}":
+        return (f"{parsed.group(1)}.{parsed.group(2)}",)
+    raise AssertionError(f"unsupported semver pattern {pattern!r}")
+
+
+def resolve_pushed_tags(workflow_text: str, event_name: str, version: str) -> set[str]:
+    """Resolve the concrete image tags the docker job would push for a trigger + version.
+
+    A MODEL of `docker/metadata-action`, not the action itself — it exists so the tests can ask
+    the question that matters ("what does a hostile `inputs.tag` actually publish?") instead of
+    only pattern-matching the tag list's source text.
+    """
+    workflow = yaml.safe_load(workflow_text)
+    _, metadata = _step_named(workflow["jobs"]["docker"]["steps"], METADATA_STEP)
+    resolved: set[str] = set()
+    for line in filter(None, (line.strip() for line in metadata["with"]["tags"].splitlines())):
+        directives = dict(part.split("=", 1) for part in line.split(","))
+        if "enable" in directives and not _evaluate_enable(directives["enable"], event_name):
+            continue
+        value = directives.get("value", "").replace(VERSION_EXPR, version)
+        kind = directives["type"]
+        if kind == "raw":
+            resolved.add(value)
+        elif kind == "semver":
+            resolved.update(_semver_tags(value, directives["pattern"]))
+        else:
+            raise AssertionError(f"unsupported tag type {kind!r}")
+    return resolved
+
+
+def assert_dispatch_tags_never_canonical(workflow_text: str) -> None:
+    """No `workflow_dispatch` input may publish a tag a deployment follows.
+
+    The trigger gate alone cannot provide this: `inputs.tag` is unconstrained, so the property
+    has to hold for adversarial input, not just for the `-dev` suffix the input description asks
+    for. The canonical set is taken from a real `v1.2.3` release push so the disjointness claim
+    in the job header is checked against the tags that path actually publishes.
+    """
+    canonical = resolve_pushed_tags(workflow_text, "push", "v1.2.3")
+    assert canonical == {"1.2.3", "1.2", "latest"}, f"unexpected canonical tag set: {canonical}"
+
+    for dispatch_tag in ADVERSARIAL_DISPATCH_TAGS:
+        pushed = resolve_pushed_tags(workflow_text, "workflow_dispatch", dispatch_tag)
+        # A dispatch must still publish something — a fix that silences the collision by pushing
+        # nothing would break the developer/test path this trigger exists to serve.
+        assert pushed, f"dispatch with tag={dispatch_tag!r} published no image tag at all"
+        collisions = pushed & canonical
+        assert not collisions, (
+            f"dispatch with tag={dispatch_tag!r} overwrites canonical tag(s) {sorted(collisions)}"
+        )
+        followed = {tag for tag in pushed if CANONICAL_SHAPE.fullmatch(tag)}
+        assert not followed, (
+            f"dispatch with tag={dispatch_tag!r} published deployment-followed tag(s) "
+            f"{sorted(followed)}; dispatch tags must be namespaced out of the canonical space"
+        )
 
 
 def assert_release_container_contract(workflow_text: str) -> None:
@@ -59,23 +173,22 @@ def assert_release_container_contract(workflow_text: str) -> None:
     ), "QEMU action must be pinned to a full commit SHA"
     assert qemu.get("with", {}).get("platforms") == "arm64"
 
-    _, metadata = _step_named(
-        steps, "Image metadata (tags + OCI labels from the resolved release version)"
-    )
+    _, metadata = _step_named(steps, METADATA_STEP)
     tags = set(filter(None, metadata["with"]["tags"].splitlines()))
     # [OPUS-5] sq-w1dxx: every tag is threaded from the `setup` job's resolved version (`value=`)
     # and gated on the trigger (`enable=`), so the two paths emit disjoint tag sets: a `v*` tag
     # push publishes semver + major.minor + `latest`; a developer/test dispatch publishes ONLY its
-    # own raw version tag — never `latest` (which `deploy/paas` + `deploy/aws` pin) and never a
-    # moving major.minor.
-    version = "${{ needs.setup.outputs.version }}"
+    # own `dev-`-namespaced version tag — never `latest` (which `deploy/paas` + `deploy/aws` pin)
+    # and never a moving major.minor. The `dev-` prefix is what holds that apart for an
+    # unconstrained `inputs.tag`; `assert_dispatch_tags_never_canonical` checks the consequence.
+    version = VERSION_EXPR
     not_dispatch = "enable=${{ github.event_name != 'workflow_dispatch' }}"
     is_dispatch = "enable=${{ github.event_name == 'workflow_dispatch' }}"
     assert tags == {
         f"type=semver,pattern={{{{version}}}},value={version},{not_dispatch}",
         f"type=semver,pattern={{{{major}}}}.{{{{minor}}}},value={version},{not_dispatch}",
         f"type=raw,value=latest,{not_dispatch}",
-        f"type=raw,value={version},{is_dispatch}",
+        f"type=raw,value=dev-{version},{is_dispatch}",
     }, "release image tags must stay version-threaded, with `latest` gated off dispatch"
 
     _, smoke = _step_named(steps, "Build image for smoke test (load locally)")
@@ -116,6 +229,39 @@ class ReleaseContainerMultiarch(unittest.TestCase):
         self.assertNotEqual(mutated, original, "mutation fixture did not alter the workflow")
         with self.assertRaises(AssertionError):
             assert_release_container_contract(mutated)
+
+    def test_live_dispatch_tags_never_collide_with_canonical_tags(self):
+        """[OPUS-5] a hostile/careless `inputs.tag` must not reach a deployment-followed tag."""
+        assert_dispatch_tags_never_canonical(WORKFLOW.read_text(encoding="utf-8"))
+
+    def test_dispatch_still_publishes_a_pullable_namespaced_tag(self):
+        """The dev path stays useful: the recommended input yields exactly one namespaced tag."""
+        pushed = resolve_pushed_tags(
+            WORKFLOW.read_text(encoding="utf-8"), "workflow_dispatch", "v0.1.0-dev"
+        )
+        self.assertEqual(pushed, {"dev-v0.1.0-dev"})
+
+    def test_unnamespaced_dispatch_tag_fails_contract(self):
+        """[OPUS-5] dropping the `dev-` namespace must go red — the pre-fix collision returns."""
+        original = WORKFLOW.read_text(encoding="utf-8")
+        mutated = original.replace(
+            f"type=raw,value=dev-{VERSION_EXPR},", f"type=raw,value={VERSION_EXPR},", 1
+        )
+        self.assertNotEqual(mutated, original, "mutation fixture did not alter the workflow")
+        with self.assertRaises(AssertionError):
+            assert_dispatch_tags_never_canonical(mutated)
+
+    def test_unevaluatable_enable_guard_fails_contract(self):
+        """A tag gate this model cannot evaluate must go red, never silently pass."""
+        original = WORKFLOW.read_text(encoding="utf-8")
+        mutated = original.replace(
+            "enable=${{ github.event_name != 'workflow_dispatch' }}",
+            "enable=${{ github.actor != 'nobody' }}",
+            1,
+        )
+        self.assertNotEqual(mutated, original, "mutation fixture did not alter the workflow")
+        with self.assertRaises(AssertionError):
+            assert_dispatch_tags_never_canonical(mutated)
 
     def test_ungated_latest_tag_fails_contract(self):
         """[OPUS-5] sq-w1dxx: reinstating the pre-fix tag list must go red."""
