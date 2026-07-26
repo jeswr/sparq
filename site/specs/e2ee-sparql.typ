@@ -404,11 +404,30 @@ readers and therefore make co-access correlation easier for the server, not hard
 The fields above are only interoperable if their encoding is fixed, so this section fixes it.
 A conforming client #strong[MUST] serialise and parse an encrypted resource exactly as
 specified here. Throughout this document: all integers are #strong[unsigned and big-endian];
-`u8`, `u16`, `u32`, and `u64` denote 1-, 2-, 4-, and 8-octet integers; all IRIs and content
-types are encoded as UTF-8 in Unicode Normalization Form C; and `base64url` means the
-URL-and-filename-safe alphabet of #cite("RFC4648") §5 #strong[without] padding — a client
-#strong[MUST] reject a base64url value carrying `=` padding or a non-alphabet octet, rather
-than accepting it leniently.
+`u8`, `u16`, `u32`, and `u64` denote 1-, 2-, 4-, and 8-octet integers; content types are
+encoded as UTF-8 in Unicode Normalization Form C, while every IRI follows the term-identifier
+rule immediately below; and `base64url` means the URL-and-filename-safe alphabet of
+#cite("RFC4648") §5 #strong[without] padding — a client #strong[MUST] reject a base64url value
+carrying `=` padding or a non-alphabet octet, rather than accepting it leniently.
+
+#strong[Canonical encoding of RDF term identifiers.] Wherever this document feeds an IRI into
+associated data, a MAC input, or a sealed field — `resource_id` (§4.2.5, §4.4.1), and
+`graph_id`, `subject_id`, `predicate_id`, and `datatype_iri` (§5.1, §5.5.1) — that IRI is
+encoded as the #strong[UTF-8 encoding of its exact Unicode code-point sequence], and a client
+#strong[MUST NOT] transform it in any way beforehand. Specifically, a client #strong[MUST NOT]
+apply Unicode normalisation in any form (NFC, NFD, or otherwise), #strong[MUST NOT] add,
+remove, or case-change percent-encoding, and #strong[MUST NOT] apply scheme or host case
+folding, default-port elision, dot-segment removal, or any other IRI-equivalence rewrite. The
+reason is that in RDF an IRI's identity #emph[is] its spelling: `http://example.org/%7Ea` and
+`http://example.org/~a` are different IRIs and therefore different RDF terms, so a client that
+canonicalised either one would compute octets no other client reproduces, and would produce
+ciphertext that is undecryptable after interchange. This rule is the single rule for all of
+these fields; it overrides the UTF-8-in-NFC convention stated above, which applies to content
+types only. Every such identifier is an #strong[absolute] IRI — resolved against its base
+before use, never carried in relative form — and is carried behind a `u16` length prefix, so
+its UTF-8 encoding #strong[MUST] be at most 65535 octets: a client whose identifier would
+exceed that #strong[MUST] refuse the operation rather than truncate, and a parser
+#strong[MUST] refuse any length prefix that disagrees with the octets that follow it.
 
 ```text
 EncryptedResource:
@@ -442,10 +461,11 @@ AAD = "sparq-e2ee/v1/envelope" || 0x00
    || version_counter          (u64; the value 0 when flags bit 0 is clear)
 ```
 
-`resource_id` is the resource's absolute IRI, percent-encoding and case preserved exactly as
-the client requested it. It is #emph[not] carried in the header: the client already knows
-which resource it asked for, and binding the identity it #emph[expected] is precisely what
-detects the relocation attack of §4.2.4.
+`resource_id` is the resource's absolute IRI, encoded by the term-identifier rule above:
+percent-encoding, case, and every other aspect of its spelling preserved exactly as they appear
+in that absolute IRI, with no normalisation. It is #emph[not] carried in the header: the client
+already knows which resource it asked for, and binding the identity it #emph[expected] is
+precisely what detects the relocation attack of §4.2.4.
 
 #strong[Bounds and failure behaviour.] A client #strong[MUST] enforce, before allocating on a
 length field, that `ciphertext_len` is at least the suite's tag length and no greater than an
@@ -698,8 +718,9 @@ Because the original datatype and language tag are metadata about the value, a c
 literal: leaving `xsd:date` visible on an encrypted object narrows the plaintext considerably.
 
 The literal envelope follows the conventions of §4.2.5 — big-endian unsigned integers, UTF-8
-in NFC, length-prefixed variable fields — and differs from the resource envelope in that it
-selects a key family (§5.2) rather than a per-resource DEK, and seals the term's own metadata:
+text under that section's term-identifier rule for IRIs, length-prefixed variable fields — and
+differs from the resource envelope in that it selects a key family (§5.2) rather than a
+per-resource DEK, and seals the term's own metadata:
 
 ```text
 LiteralEnvelope:
@@ -727,10 +748,31 @@ AAD = "sparq-e2ee/v1/literal" || 0x00
    || u16 length of predicate_id || predicate_id
 ```
 
+`graph_id`, `subject_id`, and `predicate_id` are the absolute IRIs naming the triple's graph,
+subject, and predicate, each encoded by the term-identifier rule of §4.2.5 — the UTF-8 octets
+of the IRI's exact code-point sequence, with no Unicode normalisation, no percent-encoding
+change, no IRI-equivalence rewrite, and at most 65535 octets behind its `u16` prefix. Length
+prefixes remove the boundary ambiguity between the three; this rule is what makes each one's
+octets reproducible, and both are required for two independent clients to compute the same
+associated data. The #strong[default graph] is represented by a `graph_id` of
+#strong[zero length], which is unambiguous because an absolute IRI is never empty; a client
+#strong[MUST NOT] substitute a sentinel IRI for it, and #strong[MUST] refuse a triple whose
+`subject_id` or `predicate_id` encodes to zero octets. Inside `SealedValue`, `datatype_iri`
+and `lexical_form` are likewise the term's exact octets, so that decrypting returns the same
+RDF term that was sealed rather than a normalised neighbour of it.
+
 A protected triple's subject #strong[MUST] be an IRI, or a blank node the client has
 skolemised to a stable IRI before sealing. This is a real constraint, not a formality:
 blank-node labels are not preserved across serialisations, so binding an unskolemised label
 would make a value undecryptable after any round trip through a server that relabels.
+
+A conforming implementation #strong[MUST] publish cross-implementation test vectors for the
+literal envelope covering, at minimum: a default-graph triple and a named-graph triple that are
+otherwise identical (distinct associated data, and neither openable under the other's); two
+subject IRIs differing only in percent-encoding spelling, such as `http://example.org/%7Ea` and
+`http://example.org/~a` (distinct associated data); two predicate IRIs whose NFC and NFD
+spellings differ (distinct associated data); and a graph IRI containing the octets of a length
+prefix.
 
 == Key families
 
@@ -837,12 +879,22 @@ different timezone offsets may denote the same instant.
 
 A tag is computed over a term, not a value. This document therefore defines the relation
 narrowly and says so plainly: two tags computed under the same key are equal #strong[if and
-only if] the two plaintext literals are the #strong[same RDF term] — identical datatype IRI,
-identical language tag, and identical lexical form after the normalisation below. Concretely:
+only if] the two plaintext literals are the #strong[same RDF term] — identical lexical form,
+identical datatype IRI, and language tags equal under RDF's case-insensitive comparison.
+Concretely:
 
-- Lexical forms, datatype IRIs, and language tags are compared as the octets fed to the MAC,
-  which are UTF-8 in Unicode Normalization Form C; language tags are lowercased first (they
-  are case-insensitive), and nothing else is case-folded.
+- Lexical forms and datatype IRIs are fed to the MAC as the #strong[UTF-8 octets of their exact
+  code-point sequences], under the term-identifier rule of §4.2.5, with #strong[no Unicode
+  normalisation of any kind]. This is not a stylistic preference. An RDF literal's lexical form
+  is a Unicode string whose code points participate in term identity, so a composed and a
+  decomposed spelling of the same character are #emph[distinct] RDF terms, as are two datatype
+  IRIs that differ only in normalisation or percent-encoding. Normalising before the MAC would
+  give two distinct terms one tag, and a server-side same-term rewrite would then return a
+  #strong[false-positive join] — the silent-wrong-answer failure of §5.3 in a third form, and
+  the reason this document specifies no normalisation here rather than NFC.
+- The #emph[only] transformation applied is that language tags are lowercased before the MAC,
+  because RDF itself compares language tags case-insensitively; that rule is RDF's, not this
+  document's. Nothing else is case-folded, and nothing else is transformed.
 - #strong[No value canonicalisation is performed]: numeric lexical variants, `xsd:dateTime`
   timezone offsets, and `xsd:boolean` `"1"` versus `"true"` are #emph[not] reconciled.
   Ill-typed and invalid lexical forms are tagged as the literals they are, with no validation.
@@ -875,14 +927,20 @@ tag key reused across predicates would let the operator test whether a value und
 `schema:name` equals a value under a health predicate, correlating across contexts that the
 key-family design (§5.2) exists to keep separate. Length prefixes prevent the corresponding
 encoding attack, in which a crafted lexical form imitates the boundary between two fields so
-that two distinct terms produce one MAC input.
+that two distinct terms produce one MAC input. `predicate_id` is encoded by the
+term-identifier rule of §4.2.5, identically to §5.1's, so that a value's tag and its associated
+data agree on the predicate's octets.
 
 A conforming implementation #strong[MUST] publish conformance test vectors for its tag
 derivation covering, at minimum: two term-equal literals (equal tags); two value-equal but
 term-distinct literals such as `"1"^^xsd:integer` and `"01"^^xsd:integer` (#emph[unequal]
-tags); the same lexical form under two different datatypes; the same lexical form under two
-different language tags; the same term under two different predicates in one key family
-(unequal tags); and a lexical form containing the octets of the field delimiters.
+tags); two lexical forms that are composed (NFC) and decomposed (NFD) spellings of the same
+character, which are distinct RDF terms (#emph[unequal] tags); the same lexical form under two
+datatype IRIs differing only by Unicode normalisation or percent-encoding spelling
+(#emph[unequal] tags); the same lexical form under two different datatypes; the same lexical
+form under two different language tags, and the same lexical form under two language tags
+differing only in case (#emph[equal] tags); the same term under two different predicates in one
+key family (unequal tags); and a lexical form containing the octets of the field delimiters.
 
 == Mandatory leakage disclosure
 
