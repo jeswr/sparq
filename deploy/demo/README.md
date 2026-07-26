@@ -37,23 +37,33 @@ services:
 PROJECT_ID="$(gcloud config get-value project)"
 PROJECT_NUMBER="$(gcloud projects describe "${PROJECT_ID}" --format='value(projectNumber)')"
 REGION="us-central1"
+SPARQ_LWS_DIGEST="<64-character sha256 digest>"
+CSS_DIGEST="<64-character sha256 digest>"
 gcloud services enable run.googleapis.com --project="${PROJECT_ID}"
+gcloud iam service-accounts create sparq-demo-sa \
+  --display-name="SPARQ public demo runtime" --project="${PROJECT_ID}"
 
-mkdir -p .rendered-demo
-sed -e "s/PROJECT_NUMBER/${PROJECT_NUMBER}/g" -e "s/REGION/${REGION}/g" \
-  deploy/demo/css-idp.yaml >.rendered-demo/css-idp.yaml
-sed -e "s/PROJECT_NUMBER/${PROJECT_NUMBER}/g" -e "s/REGION/${REGION}/g" \
-  deploy/demo/sparq-lws-demo.yaml >.rendered-demo/sparq-lws-demo.yaml
+render_dir="$(mktemp -d)"
+trap 'rm -rf "${render_dir}"' EXIT
+sed -e "s/PROJECT_ID/${PROJECT_ID}/g" -e "s/PROJECT_NUMBER/${PROJECT_NUMBER}/g" \
+  -e "s/REGION/${REGION}/g" -e "s/CSS_DIGEST/${CSS_DIGEST}/g" \
+  deploy/demo/css-idp.yaml >"${render_dir}/css-idp.yaml"
+sed -e "s/PROJECT_ID/${PROJECT_ID}/g" -e "s/PROJECT_NUMBER/${PROJECT_NUMBER}/g" \
+  -e "s/REGION/${REGION}/g" -e "s/SPARQ_LWS_DIGEST/${SPARQ_LWS_DIGEST}/g" \
+  deploy/demo/sparq-lws-demo.yaml >"${render_dir}/sparq-lws-demo.yaml"
 
-gcloud run services replace .rendered-demo/css-idp.yaml \
+bash deploy/demo/check.sh \
+  "${render_dir}/sparq-lws-demo.yaml" "${render_dir}/css-idp.yaml"
+
+gcloud run services replace "${render_dir}/css-idp.yaml" \
   --region="${REGION}" --project="${PROJECT_ID}"
-gcloud run services replace .rendered-demo/sparq-lws-demo.yaml \
+gcloud run services replace "${render_dir}/sparq-lws-demo.yaml" \
   --region="${REGION}" --project="${PROJECT_ID}"
 ```
 
-The committed image tags are readable placeholders. Before deployment, resolve and replace
-each image with an immutable `@sha256:<digest>` reference (for example with `docker buildx
-imagetools inspect`) so an upstream tag change cannot silently alter the demo.
+Resolve both digest variables before deployment (for example with `docker buildx imagetools
+inspect`). The render step replaces the committed placeholders with immutable image digests,
+so an upstream tag change cannot silently alter the demo.
 
 Both services intentionally use request-based billing, `minScale: 0`, `maxScale: 1`, and a
 TCP startup probe. Do not copy the warm-instance and custom-health-probe posture from
@@ -63,7 +73,10 @@ Create a Google Cloud budget and alert for the demo project before making the se
 public. Scaling limits cap compute concurrency but do not cap spend, and budget alerts
 notify rather than automatically disabling billing.
 
-Run the structural check before deployment:
+The dedicated runtime service account intentionally has no project roles because neither
+demo service needs access to Google Cloud APIs.
+
+Run the structural check without arguments to validate the committed templates:
 
 ```bash
 bash deploy/demo/check.sh

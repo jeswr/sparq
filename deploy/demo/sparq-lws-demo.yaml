@@ -15,12 +15,12 @@ spec:
         # Request-based billing: CPU is allocated only while requests are handled.
         run.googleapis.com/cpu-throttling: "true"
     spec:
+      serviceAccountName: sparq-demo-sa@PROJECT_ID.iam.gserviceaccount.com
       containerConcurrency: 40
       timeoutSeconds: 30
       containers:
         - name: sparq-lws-demo
-          # Replace the tag with an immutable sha256 digest before deployment.
-          image: ghcr.io/sparq-org/sparq-lws-core:latest
+          image: ghcr.io/sparq-org/sparq-lws-core@sha256:SPARQ_LWS_DIGEST
           ports:
             - name: http1
               containerPort: 3000

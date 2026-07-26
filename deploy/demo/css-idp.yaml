@@ -15,12 +15,12 @@ spec:
         # Request-based billing: CPU is allocated only while requests are handled.
         run.googleapis.com/cpu-throttling: "true"
     spec:
+      serviceAccountName: sparq-demo-sa@PROJECT_ID.iam.gserviceaccount.com
       containerConcurrency: 40
       timeoutSeconds: 300
       containers:
         - name: css-idp
-          # Replace the tag with an immutable sha256 digest before deployment.
-          image: docker.io/solidproject/community-server:latest
+          image: docker.io/solidproject/community-server@sha256:CSS_DIGEST
           args:
             - "-b"
             - "https://css-idp-PROJECT_NUMBER.REGION.run.app"
@@ -31,10 +31,10 @@ spec:
             limits:
               cpu: "1"
               memory: 1Gi
-          # Cloud Run's default TCP-style startup check; no production HTTP/liveness probes.
+          # CSS resolves a large dependency graph during cold start.
           startupProbe:
             tcpSocket:
               port: 3000
             periodSeconds: 10
-            failureThreshold: 3
-            timeoutSeconds: 1
+            failureThreshold: 12
+            timeoutSeconds: 3
