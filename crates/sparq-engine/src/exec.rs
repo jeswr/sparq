@@ -5880,12 +5880,11 @@ fn match_geof_distance(args: &[Expression]) -> Option<(Variable, String, String)
 ///
 /// * `geof:distance(?g, point, unit) OP radius` with `OP ∈ {<, <=}` (the bound on the
 ///   non-constant side) → a distance-within window;
-/// * a Simple Features relation between one geometry variable and one constant
-///   geometry used directly as the FILTER, whenever intersection is necessary for
-///   the relation → a bbox/window scan.
+/// * `geof:sfWithin`, `geof:sfIntersects`, or `geof:sfContains` between one geometry
+///   variable and one constant geometry, in either operand order → a bbox/window scan.
 ///
-/// Other topological relations and distance with `>`/`>=` (an unbounded EXTERIOR,
-/// no finite window) stay post-hoc — see the report.
+/// `sfOverlaps`, `sfTouches`, `sfCrosses`, `sfEquals`, `sfDisjoint`, and distance with
+/// `>`/`>=` (an unbounded EXTERIOR, no finite window) stay post-hoc — see the report.
 fn recognise_spatial(e: &Expression) -> Option<SpatialPushdown> {
     use spargebra::algebra::Function;
     // distance(...) OP radius — match the comparison, then the distance call inside.
@@ -5931,16 +5930,30 @@ fn recognise_spatial(e: &Expression) -> Option<SpatialPushdown> {
                     });
                 }
             }
-            // [SONNET-4.6] (sq-8cp8t) The symmetric intersects orientation and the
-            // two variable-CONTAINS-region spellings are SUPERSET-only. In
-            // particular `sfWithin(REGION, ?g)` / `sfContains(?g, REGION)` must
+            // [FABLE-5] (sq-lk3aw.4) `geof:sfContains(REGION, ?g)` is the converse
+            // of `sfWithin(?g, REGION)`, so an exact within-region certificate may
+            // answer it when that optional optimisation is enabled.
+            #[cfg(feature = "spatial-exact-pushdown")]
+            if iri == GEOF_SF_CONTAINS && cargs.len() == 2 {
+                if let (Some(arg), Expression::Variable(v)) = (wkt_const(&cargs[0]), &cargs[1]) {
+                    return Some(SpatialPushdown {
+                        geo_var: v.clone(),
+                        kind: SpatialKind::BboxIntersects {
+                            arg_wkt: arg.to_string(),
+                            within_region: true,
+                        },
+                    });
+                }
+            }
+            // [SONNET-4.6] (sq-8cp8t) These converse orientations are SUPERSET-only.
+            // In particular `sfWithin(REGION, ?g)` / `sfContains(?g, REGION)` must
             // not set `within_region`: they describe the variable containing the
             // constant, which an exact within-region certificate cannot decide.
             if cargs.len() == 2 {
                 let constant_first =
-                    iri == GEOF_SF_INTERSECTS || iri == GEOF_SF_WITHIN;
-                let variable_first =
-                    iri == GEOF_SF_INTERSECTS || iri == GEOF_SF_CONTAINS;
+                    iri == GEOF_SF_INTERSECTS || iri == GEOF_SF_WITHIN || iri == GEOF_SF_CONTAINS;
+                // Variable-first sfWithin/sfIntersects returned from the block above.
+                let variable_first = iri == GEOF_SF_CONTAINS;
                 if constant_first {
                     if let (Some(arg), Expression::Variable(v)) =
                         (wkt_const(&cargs[0]), &cargs[1])
@@ -5968,24 +5981,6 @@ fn recognise_spatial(e: &Expression) -> Option<SpatialPushdown> {
                             },
                         });
                     }
-                }
-            }
-            // [FABLE-5] (sq-lk3aw.4) `geof:sfContains(REGION, ?g)` — the constant-region-
-            // FIRST operand order. Simple Features defines `contains(a, b) ⇔ within(b, a)`,
-            // so this is the SAME within-region pushdown as `sfWithin(?g, REGION)` with the
-            // operands swapped: `within(?g, REGION) ⟹ intersects(?g, REGION) ⟹ their AABBs
-            // intersect`, hence the bbox candidate superset is valid for it too. Previously
-            // this orientation was never recognised and never pushed down at all.
-            #[cfg(feature = "spatial-exact-pushdown")]
-            if iri == GEOF_SF_CONTAINS && cargs.len() == 2 {
-                if let (Some(arg), Expression::Variable(v)) = (wkt_const(&cargs[0]), &cargs[1]) {
-                    return Some(SpatialPushdown {
-                        geo_var: v.clone(),
-                        kind: SpatialKind::BboxIntersects {
-                            arg_wkt: arg.to_string(),
-                            within_region: true,
-                        },
-                    });
                 }
             }
             None
