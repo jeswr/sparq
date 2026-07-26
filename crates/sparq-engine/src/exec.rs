@@ -5811,7 +5811,6 @@ pub(crate) fn split_sargable(graph: &Graph, patterns: &[TriplePattern], filters:
 const GEOF_DISTANCE: &str = "http://www.opengis.net/def/function/geosparql/distance";
 const GEOF_SF_WITHIN: &str = "http://www.opengis.net/def/function/geosparql/sfWithin";
 const GEOF_SF_INTERSECTS: &str = "http://www.opengis.net/def/function/geosparql/sfIntersects";
-#[cfg(feature = "spatial-exact-pushdown")]
 const GEOF_SF_CONTAINS: &str = "http://www.opengis.net/def/function/geosparql/sfContains";
 
 /// A recognised pushable spatial FILTER: the geometry variable to restrict, plus an
@@ -5881,11 +5880,12 @@ fn match_geof_distance(args: &[Expression]) -> Option<(Variable, String, String)
 ///
 /// * `geof:distance(?g, point, unit) OP radius` with `OP ∈ {<, <=}` (the bound on the
 ///   non-constant side) → a distance-within window;
-/// * `geof:sfWithin(?g, box)` / `geof:sfIntersects(?g, box)` used directly as the FILTER
-///   → a bbox/window scan.
+/// * a Simple Features relation between one geometry variable and one constant
+///   geometry used directly as the FILTER, whenever intersection is necessary for
+///   the relation → a bbox/window scan.
 ///
-/// `geof:sfContains/Overlaps/Touches/Crosses/Equals/Disjoint` and distance with `>`/`>=`
-/// (an unbounded EXTERIOR, no finite window) stay post-hoc — see the report.
+/// Other topological relations and distance with `>`/`>=` (an unbounded EXTERIOR,
+/// no finite window) stay post-hoc — see the report.
 fn recognise_spatial(e: &Expression) -> Option<SpatialPushdown> {
     use spargebra::algebra::Function;
     // distance(...) OP radius — match the comparison, then the distance call inside.
@@ -5914,7 +5914,9 @@ fn recognise_spatial(e: &Expression) -> Option<SpatialPushdown> {
         Expression::LessOrEqual(l, r) => distance_cmp(l, r, true), // distance(...) <= r
         Expression::Greater(l, r) => distance_cmp(r, l, false), // r > distance(...)
         Expression::GreaterOrEqual(l, r) => distance_cmp(r, l, true), // r >= distance(...)
-        // geof:sfWithin(?g, box) / geof:sfIntersects(?g, box) as the whole FILTER.
+        // Simple Features relation as the whole FILTER. Every orientation below
+        // necessarily intersects the constant region, so its bbox scan is a
+        // candidate SUPERSET and the residual FILTER remains authoritative.
         Expression::FunctionCall(Function::Custom(nn), cargs) => {
             let iri = nn.as_str();
             if (iri == GEOF_SF_WITHIN || iri == GEOF_SF_INTERSECTS) && cargs.len() == 2 {
@@ -5927,6 +5929,45 @@ fn recognise_spatial(e: &Expression) -> Option<SpatialPushdown> {
                             within_region: iri == GEOF_SF_WITHIN,
                         },
                     });
+                }
+            }
+            // [SONNET-4.6] (sq-8cp8t) The symmetric intersects orientation and the
+            // two variable-CONTAINS-region spellings are SUPERSET-only. In
+            // particular `sfWithin(REGION, ?g)` / `sfContains(?g, REGION)` must
+            // not set `within_region`: they describe the variable containing the
+            // constant, which an exact within-region certificate cannot decide.
+            if cargs.len() == 2 {
+                let constant_first =
+                    iri == GEOF_SF_INTERSECTS || iri == GEOF_SF_WITHIN;
+                let variable_first =
+                    iri == GEOF_SF_INTERSECTS || iri == GEOF_SF_CONTAINS;
+                if constant_first {
+                    if let (Some(arg), Expression::Variable(v)) =
+                        (wkt_const(&cargs[0]), &cargs[1])
+                    {
+                        return Some(SpatialPushdown {
+                            geo_var: v.clone(),
+                            kind: SpatialKind::BboxIntersects {
+                                arg_wkt: arg.to_string(),
+                                #[cfg(feature = "spatial-exact-pushdown")]
+                                within_region: false,
+                            },
+                        });
+                    }
+                }
+                if variable_first {
+                    if let (Expression::Variable(v), Some(arg)) =
+                        (&cargs[0], wkt_const(&cargs[1]))
+                    {
+                        return Some(SpatialPushdown {
+                            geo_var: v.clone(),
+                            kind: SpatialKind::BboxIntersects {
+                                arg_wkt: arg.to_string(),
+                                #[cfg(feature = "spatial-exact-pushdown")]
+                                within_region: false,
+                            },
+                        });
+                    }
                 }
             }
             // [FABLE-5] (sq-lk3aw.4) `geof:sfContains(REGION, ?g)` — the constant-region-
