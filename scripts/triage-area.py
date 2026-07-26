@@ -500,8 +500,19 @@ def self_test():
               ["sparq-reason-dl"])
     f += _chk("el lane", c("EL abox+cdomain DataPropertyAssertion point-range rescue"),
               ["sparq-reason-el"])
-    f += _chk("difftest", c("sq-qcnn.5: diff-test: wire canonical binding-MULTISET check"),
-              ["sparq-difftest"])
+    # The diff-test DAG splits across TWO crates and the split is not the obvious one,
+    # so pin BOTH branches of the split — a single case cannot catch a rule that
+    # collapses the family onto one crate. Node A (the engine-independent normaliser)
+    # is crates/sparq-difftest; the harness it feeds (check_ordered lives at
+    # crates/sparq-bench/src/fuzz.rs) is crates/sparq-bench. A bead that WIRES the
+    # normaliser into the harness therefore moves both.
+    f += _chk("difftest normaliser+harness",
+              c("sq-qcnn.5: diff-test: wire canonical binding-MULTISET check"),
+              ["sparq-difftest", "sparq-bench"])
+    # ...but a harness-only diff-test bead must NOT drag the normaliser crate in.
+    f += _chk("difftest harness only",
+              c("sq-qcnn.7: diff-test: add an oracle adapter to the generator"),
+              ["sparq-bench"])
 
     # T2 fallback still works (a conventional title scope prefix).
     f += _chk("t2 title scope", c("bug(sparq-solid): fail-closed ACP"), ["sparq-solid"])
