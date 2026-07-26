@@ -43,6 +43,33 @@ fn parse_failure_hints_at_the_misspelled_keyword_without_applying_it() {
 }
 
 #[test]
+fn a_comparison_operator_does_not_hide_a_later_misspelling() {
+    // `<` is less-than as well as an IRI opener: a query shaped like this one used to skip
+    // from the operator to end of input, losing the FLTR hint entirely.
+    for query in [
+        "SELECT ?s WHERE { ?s ?p ?o FILTER(?o < 1) FLTR(?o) }",
+        "SELECT ?s WHERE { ?s ?p ?o FILTER(?a < 1 && ?b > 2) FLTR(?o) }",
+    ] {
+        let error = terse_to_sparql(query).expect_err("a misspelled keyword must fail loudly");
+
+        match error {
+            TerseError::CanaryFailed { suggestions, .. } => {
+                let hint = suggestions
+                    .iter()
+                    .find(|s| s.token == "FLTR")
+                    .unwrap_or_else(|| panic!("expected a FLTR hint for {query:?}, got {suggestions:?}"));
+                assert!(
+                    hint.suggestions.contains(&"FILTER".to_string()),
+                    "expected FILTER among {:?}",
+                    hint.suggestions
+                );
+            }
+            other => panic!("expected CanaryFailed, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn a_parse_failure_with_no_near_keyword_carries_no_hint() {
     // Unbalanced but correctly spelled: nothing to suggest, so the error stays terse.
     let error = terse_to_sparql("SELECT ?s WHERE { ?s ?p").expect_err("invalid SPARQL must fail");

@@ -195,14 +195,10 @@ fn scan_bare_words(src: &str, f: &mut dyn FnMut(&str)) {
     while i < n {
         let c = bytes[i];
         match c {
-            b'<' => {
-                // An IRI ref <...> (a newline cancels it, matching SPARQL's IRIREF lexing).
-                let mut j = i + 1;
-                while j < n && bytes[j] != b'>' && bytes[j] != b'\n' {
-                    j += 1;
-                }
-                i = if j < n { j + 1 } else { n };
-            }
+            // `<` opens an IRI ref only when a well-formed IRIREF body follows; otherwise it
+            // is the less-than (or `<=`) comparison operator and the rest of the query is
+            // ordinary keyword position.
+            b'<' => i = iriref_end(bytes, i).unwrap_or(i + 1),
             b'#' => {
                 let mut j = i + 1;
                 while j < n && bytes[j] != b'\n' {
@@ -250,6 +246,29 @@ fn scan_bare_words(src: &str, f: &mut dyn FnMut(&str)) {
 /// `true` if `b` can appear inside an identifier-shaped SPARQL token.
 fn is_word_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// If the `<` at `start` opens an IRI ref, the index just past its closing `>`; `None` if it
+/// does not, in which case the `<` is the less-than comparison operator (`?o < 1`, `?o <= 1`).
+///
+/// Distinguishing the two matters because this scan runs on queries that have *already failed
+/// to parse*: treating every `<` as an IRI would skip from a comparison operator to the next
+/// `>` — or, with none, to end of input — silently swallowing the very bare words the scan
+/// exists to report. The test is the SPARQL grammar's own IRIREF production,
+/// `'<' ([^<>"{}|^\`\\] - [#x00-#x20])* '>'`: a body character that the production excludes
+/// (notably the space in `?o < 1`) means this was never an IRI ref.
+fn iriref_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut j = start + 1;
+    while j < bytes.len() {
+        match bytes[j] {
+            b'>' => return Some(j + 1),
+            b'<' | b'"' | b'{' | b'}' | b'|' | b'^' | b'`' | b'\\' => return None,
+            b if b <= 0x20 => return None,
+            _ => j += 1,
+        }
+    }
+    // Unterminated: no closing `>` before end of input, so not an IRI ref.
+    None
 }
 
 #[cfg(test)]
@@ -320,6 +339,39 @@ mod tests {
             typo, typo
         );
         assert!(keyword_suggestions(&q).is_empty(), "got {:?}", keyword_suggestions(&q));
+    }
+
+    #[test]
+    fn comparison_operators_do_not_swallow_the_rest_of_the_query() {
+        // `<` is less-than as well as an IRI opener. Skipping to the next `>` — or, with
+        // none, to end of input — would hide every bare word after the operator.
+        for q in [
+            "SELECT ?s WHERE { ?s ?p ?o FILTER(?o < 1) FLTR(?o) }",
+            // Both operators present: the span between them must stay keyword position.
+            "SELECT ?s WHERE { ?s ?p ?o FILTER(?a < 1 && ?b > 2) FLTR(?o) }",
+            // The typo sits *between* the two operators, where an IRI skip would eat it.
+            "SELECT ?s WHERE { ?s ?p ?o FILTER(?a < 1) FLTR(?o) FILTER(?b > 2) }",
+            // `<=` likewise, and a newline-free single line so no other rule rescues it.
+            "SELECT ?s WHERE { ?s ?p ?o FILTER(?o <= 1) FLTR(?o) }",
+        ] {
+            let hints = keyword_suggestions(q);
+            let hint = hints
+                .iter()
+                .find(|h| h.token == "FLTR")
+                .unwrap_or_else(|| panic!("FLTR must survive a comparison in {q:?}, got {hints:?}"));
+            assert!(hint.suggestions.contains(&"FILTER".to_string()), "got {hint:?}");
+        }
+    }
+
+    #[test]
+    fn a_real_iri_is_still_skipped_next_to_a_comparison() {
+        // The other half of the contract: distinguishing the operator must not stop genuine
+        // IRIs — whose body the SPARQL grammar forbids spaces in — from being ignored.
+        let q = "SELECT ?s WHERE { ?s <http://ex/FLTR> ?o FILTER(?o < 1) }";
+        assert!(keyword_suggestions(q).is_empty(), "got {:?}", keyword_suggestions(q));
+        // An unterminated `<` is not an IRI either, so the words after it stay visible.
+        let hints = keyword_suggestions("SELECT ?s WHERE { ?s ?p ?o } FLTR <http://ex/unclosed");
+        assert!(hints.iter().any(|h| h.token == "FLTR"), "got {hints:?}");
     }
 
     #[test]
