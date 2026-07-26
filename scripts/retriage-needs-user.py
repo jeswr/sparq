@@ -38,6 +38,7 @@ import argparse
 import json
 import subprocess
 import sys
+import time
 
 REPO = "sparq-org/sparq"
 LABEL = "needs:user"
@@ -169,6 +170,11 @@ def main(argv=None):
     ap.add_argument("--dry-run", action="store_true", default=True)
     ap.add_argument("--apply", dest="dry_run", action="store_false")
     ap.add_argument("--only", type=int, nargs="*", help="restrict to these issue numbers")
+    # Two content-creating REST calls per demoted issue (edit + comment). ~100 issues is ~200
+    # mutations, well past GitHub's secondary rate limit for a burst; a 403 mid-run would leave
+    # the population half-demoted, which is the worst of both states.
+    ap.add_argument("--pause", type=float, default=1.5,
+                    help="seconds between MUTATED issues (secondary-rate-limit pacing)")
     args = ap.parse_args(argv)
 
     issues = fetch_needs_user(args.repo)
@@ -179,8 +185,10 @@ def main(argv=None):
         action, remove, add, reason = classify(issue)
         counts[action] = counts.get(action, 0) + 1
         print(f"{action:20s} #{issue['n']:<5d} {issue['t'][:78]}\n{'':20s}   -> {reason}")
-        changed += apply_one(issue, action, remove, add, reason,
-                             repo=args.repo, dry_run=args.dry_run)
+        if apply_one(issue, action, remove, add, reason,
+                     repo=args.repo, dry_run=args.dry_run):
+            changed += 1
+            time.sleep(args.pause)
     print(f"\npopulation {len(issues)}; " +
           "; ".join(f"{k}={v}" for k, v in sorted(counts.items())) +
           f"; applied={changed}{' (DRY RUN)' if args.dry_run else ''}")
