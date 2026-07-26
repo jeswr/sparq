@@ -402,8 +402,14 @@ jobs:
 
       # Build the UNSIGNED desktop bundle. `cargo tauri build` runs from gui/src-tauri, merges the
       # CI overlay (`-c tauri.ci.conf.json`) so the `beforeBuildCommand` hook is skipped (frontend
-      # already exported to gui/app/out above), compiles the native Rust shell embedding gui/app/out
-      # (`frontendDist`), and bundles installers for the host platform into
+      # already exported to gui/app/out above), and enables the native capabilities promised by
+      # the desktop release: HDT import, SERVICE federation, ODRL policy previews, and
+      # SHACL-derived forms.
+      # [SONNET-4.6] sq-b1hdb — keep these explicit because the crate defaults intentionally remain
+      # lean; omitting them silently compiles the rebuild-hint stubs into shipped installers.
+      # Keep this feature list in sync with gui.yml's "release feature union" clippy lane.
+      # The command compiles the native Rust shell embedding gui/app/out (`frontendDist`) and
+      # bundles installers for the host platform into
       # gui/src-tauri/target/release/bundle/<format>/. `--ci` disables interactive prompts;
       # no signing env vars are set, so the bundles are produced UNSIGNED (see the job header
       # — signing is needs:user sq-v286.8). [SONNET-4.6] sq-3w29b: release bundles explicitly
@@ -417,11 +423,11 @@ jobs:
       #     gui/app/out) is REPRODUCED locally on this work box (x64-linux): it produces
       #     gui/app/out/index.html with ROOT-RELATIVE assets, the path `frontendDist` reads.
       #   * The empty-`beforeBuildCommand` skip is confirmed from tauri-cli source (run_hook).
-      #   * The native capability feature set (`hdt,federation,odrl`) is clippied and tested in
-      #     debug mode on Linux by gui.yml's ADVISORY (non-gating) tauri-build job. HDT is
+      #   * The native capability feature set (`hdt,federation,odrl,forms`) is clippied and
+      #     tested in debug mode by gui.yml's ADVISORY (non-gating) tauri-build job. HDT is
       #     compile-covered in that feature-on state; the combined-state tests exercise the
-      #     federation and ODRL paths. `custom-protocol` is exercised only by jobs that first
-      #     export gui/app/out for compile-time embedding.
+      #     federation, ODRL, and forms paths. `custom-protocol` is exercised only by jobs that
+      #     first export gui/app/out for compile-time embedding.
       #   * Linux rows (ubuntu-latest, ubuntu-24.04-arm): gui.yml covers the GUI crate + webkit
       #     dependencies in advisory debug builds. The release profile (LTO, one codegen unit)
       #     and the .deb/.AppImage bundle step are first exercised here.
@@ -432,7 +438,38 @@ jobs:
       #     on the matrix) so the release ships the working bundles + attestation; sq-gl3cf tracks it.
       - name: Build Tauri desktop bundle (unsigned)
         working-directory: gui/src-tauri
-        run: cargo tauri build --ci --verbose -c tauri.ci.conf.json --features hdt,federation,odrl
+        run: cargo tauri build --ci --verbose -c tauri.ci.conf.json --features hdt,federation,odrl,forms
+
+      # All optional native capabilities above have lean-build stubs with a developer-facing
+      # rebuild hint (engine.rs, federation.rs, odrl.rs, and forms.rs). A successful bundle build
+      # is insufficient evidence that the features were linked, so reject any release binary
+      # that still contains the shared stub wording.
+      - name: Verify native capabilities are compiled into the release binary
+        shell: bash
+        working-directory: gui/src-tauri
+        run: |
+          set -euo pipefail
+          ext=""
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            ext=".exe"
+          fi
+          binary=""
+          for candidate in "target/release/sparq${ext}" "target/release/sparq-gui${ext}"; do
+            if [[ -f "$candidate" ]]; then
+              binary="$candidate"
+              break
+            fi
+          done
+          if [[ -z "$binary" ]]; then
+            echo "ERROR: no release binary found under target/release" >&2
+            ls -la target/release >&2 || true
+            exit 1
+          fi
+          echo "Checking native capabilities in $binary"
+          if grep -aEq "rebuild (the )?desktop app with" "$binary"; then
+            echo "ERROR: release binary contains a native-capability rebuild stub" >&2
+            exit 1
+          fi
 
       # Collect every produced installer into a flat staging dir under a STABLE, PREDICTABLE
       # per-OS name (the scheme the /download page hardcodes — see the documented names in the
