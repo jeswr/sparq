@@ -91,8 +91,9 @@ match sparq_fedplan_mpc::ratify_envelope(&envelope, &privacy, Some(budget)) {
   the design record's §3 names as the highest-leverage pre-MPC cost win. The way past the
   declined value-overlap non-rule is not a cleverer reading of `SourceDescriptor` but a
   **different input**: a source may publish a `SourceQuotientSummary` — its graph under the
-  **authority quotient** (IRIs collapse to `scheme://authority`, **literal values are never
-  recorded**) — and declare it a *complete over-approximation*. The pass then evaluates the
+  **authority quotient** (authority-bearing IRIs collapse to `scheme://authority`, an
+  authority-less one — `urn:…`, relative — is kept **verbatim**, and **literal values are
+  never recorded**) — and declare it a *complete over-approximation*. The pass then evaluates the
   BGP at the quotient level **once per source-combination** and drops those whose evaluation
   is empty, which **provably** produce no concrete answer. That kills combinations whose
   patterns are individually non-empty but *jointly* unsatisfiable (e.g. two sources holding
@@ -127,9 +128,11 @@ selection and the (public, source-published) quotient summaries to decide which 
 are infeasible, revealing nothing beyond what those inputs already imply. Publishing a
 `SourceQuotientSummary` **is itself a disclosure** the source opts into: it reveals which
 **authorities** its subjects/objects come from, per predicate. It does *not* reveal literal
-values (collapsed to one class), individual IRIs (collapsed to their authority), or
-cardinalities (the summary is a set); a source that considers even the authority-level shape
-sensitive publishes nothing and is simply never pruned. Phase 3
+values (collapsed to one class) or cardinalities (the summary is a set), and an
+**authority-bearing** IRI only as its authority — but an IRI with **no** extractable authority
+(`urn:…`, relative) *is* its own quotient class, so it **is disclosed verbatim**. A source keyed
+on sensitive `urn:`/relative IRIs, or one guarding even the authority-level
+shape, publishes nothing and is simply never pruned. Phase 3
 reads `may_disclose` per operand to decide the route. Per constraint C-B (§2.2) the
 descriptor is the source's declaration — Phase 4's `ratify_envelope` has each holder
 **re-enforce** it fail-closed and the verifier ratify the leakage envelope, so a lying

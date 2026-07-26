@@ -62,8 +62,18 @@
 //! A quotient summary is **published metadata**, the same kind of plan-time public input as a
 //! VoID descriptor — and publishing one **is a disclosure**: it reveals which *authorities* the
 //! source's subjects/objects come from, per predicate. It does **not** reveal literal values
-//! (collapsed to one class), individual IRIs (collapsed to their authority), or cardinalities
-//! (the summary is a *set*). A source that considers even the authority-level shape sensitive
+//! (collapsed to one class) or cardinalities (the summary is a *set*), and an
+//! **authority-bearing** IRI is disclosed only as its authority.
+//!
+//! **But an IRI with no extractable authority is disclosed VERBATIM.** `urn:isbn:123`, a
+//! relative IRI, an empty-authority IRI — all quotient to [`QuotientTerm::OpaqueIri`] of the
+//! whole IRI (see the definition above), so declaring one puts that exact IRI in the published
+//! summary. A source whose graph is keyed on `urn:`/relative IRIs it considers sensitive must
+//! treat publishing a summary as publishing those identifiers, and simply publish nothing (it
+//! is then never pruned). This is the finest class the quotient has; it is not a leak *past*
+//! the quotient, it is what the quotient is for such terms.
+//!
+//! A source that considers even the authority-level shape sensitive
 //! simply publishes nothing and is never pruned. This module performs **NO** MPC, runs **NO**
 //! secret-sharing, and makes **NO** soundness/privacy/security claim; the MPC estate
 //! (`sparq-mpc`) is research-grade, **honest-majority semi-honest only**, and is **NOT**
@@ -88,6 +98,10 @@ pub enum QuotientTerm {
     /// An IRI with **no** extractable authority (`urn:isbn:…`, a relative IRI), quotiented to
     /// itself. Finer than [`QuotientTerm::Authority`], but still a deterministic function of the
     /// term — which is all the soundness argument needs.
+    ///
+    /// **Disclosure:** because the class *is* the IRI, a published summary containing one
+    /// reveals that individual IRI verbatim — unlike an authority-bearing IRI, which is
+    /// disclosed only as its authority. See the module docs' threat-model section.
     OpaqueIri(String),
     /// **Any** literal. Literals collapse to a single class: a summary never records a literal's
     /// value, so no literal can leak through one.
@@ -318,6 +332,43 @@ mod tests {
         );
         // Two distinct urns stay distinct.
         assert_ne!(quotient_iri("urn:a"), quotient_iri("urn:b"));
+    }
+
+    #[test]
+    fn an_authorityless_iri_is_disclosed_verbatim_in_a_summary() {
+        // Pins the threat-model wording: the summary's non-disclosure of INDIVIDUAL IRIs holds
+        // only for authority-bearing ones. A `urn:`/relative IRI IS the class, so publishing a
+        // summary publishes that identifier. Recorded as a test so the docs cannot drift back to
+        // the unqualified "individual IRIs are collapsed to their authority" claim.
+        let s = SourceQuotientSummary::builder(SourceId::new("http://a/"))
+            .triple(
+                SummaryTerm::iri("urn:isbn:0-486-27557-4"),
+                "http://ex/title",
+                SummaryTerm::iri("http://ex.org/secret-page"),
+            )
+            .build();
+        let t = s.triples().iter().next().expect("one triple");
+        // Subject: no authority ⇒ the whole IRI is in the published summary.
+        assert_eq!(
+            t.subject,
+            QuotientTerm::OpaqueIri("urn:isbn:0-486-27557-4".to_string())
+        );
+        let rendered = format!("{:?}", s);
+        assert!(
+            rendered.contains("urn:isbn:0-486-27557-4"),
+            "an authority-less IRI is disclosed verbatim: {}",
+            rendered
+        );
+        // Object: authority-bearing ⇒ only the authority is disclosed, the path is not.
+        assert_eq!(
+            t.object,
+            QuotientTerm::Authority("http://ex.org".to_string())
+        );
+        assert!(
+            !rendered.contains("secret-page"),
+            "an authority-bearing IRI discloses only its authority: {}",
+            rendered
+        );
     }
 
     #[test]
