@@ -16,15 +16,21 @@
 //! timing row is printed for a query, the RAW PerfectRef UCQ (`rewrite`) and the MINIMISED
 //! production UCQ (`rewrite_production`) are BOTH executed over the same data and their
 //! result SETS must agree — containment minimisation must never change answers. In gather
-//! mode without `--abox` the data is a deterministic PER-QUERY WITNESS ABox: the frozen
-//! canonical instance of every CQ disjunct of the original query, the raw UCQ, and the
-//! minimised UCQ (variables/blank nodes frozen to fresh per-disjunct IRIs; IRI and literal
-//! constants kept as-is). Every disjunct matches at least its own frozen instance via the
-//! identity homomorphism — including query-only predicates absent from the TBox and
-//! multi-atom shared-variable joins — and because frozen terms are disjoint across
-//! disjuncts, a minimisation that drops a NON-subsumed disjunct changes the result set
-//! (the classical canonical-database containment argument for UCQs). Witness mode is
-//! FAIL-CLOSED on modifiers: a query whose original/raw/minimised tree carries a
+//! mode without `--abox` the data is a set of deterministic PER-DISJUNCT WITNESS databases:
+//! the frozen canonical instance of every CQ disjunct of the original query, the raw UCQ,
+//! and the minimised UCQ (variables/blank nodes frozen to fresh per-disjunct IRIs; IRI and
+//! literal constants kept as-is), each disjunct's instance held in its OWN isolated database.
+//! Raw and minimised are evaluated over EACH database separately and must agree on each. Every
+//! disjunct matches at least its own frozen instance via the identity homomorphism — including
+//! query-only predicates absent from the TBox and multi-atom shared-variable joins — so on a
+//! given disjunct D's isolated instance the retained UCQ reproduces D's frozen head ONLY via a
+//! homomorphism into D's own instance, i.e. only when D was genuinely subsumed: a minimisation
+//! that drops a NON-subsumed disjunct fails agreement on that disjunct's database (the classical
+//! per-CQ canonical-database containment argument for UCQs). ISOLATION is load-bearing: unioning
+//! the instances into one graph would SHARE the retained IRI/literal constants and let a retained
+//! disjunct bridge a fact from a dropped disjunct's instance with a fact from a third instance
+//! through a shared constant, reproducing the dropped head and masking the unsound drop. Witness
+//! mode is FAIL-CLOSED on modifiers: a query whose original/raw/minimised tree carries a
 //! re-applied FILTER or VALUES (the B3/B4 pass-through) gets NO witness — the modifier
 //! could reject every frozen binding, leaving BOTH UCQs empty and the gate vacuously
 //! agreed — and is reported per-row as `needs-abox` with NO timing row; such queries are
@@ -325,21 +331,22 @@ fn query_pattern(q: &Query) -> &GraphPattern {
     }
 }
 
-/// Synthesise the deterministic PER-QUERY WITNESS ABox for one equivalence check: the
-/// union of the FROZEN CANONICAL INSTANCES of every CQ disjunct of every given query
-/// (original, raw UCQ, minimised UCQ). Freezing maps each variable / blank node to a
-/// fresh per-disjunct witness IRI and keeps IRI/literal constants as-is, so every
-/// disjunct — query-only predicates and multi-atom shared-variable joins included —
-/// matches at least its own instance (the identity homomorphism). Frozen terms are
-/// disjoint across disjuncts, so a kept disjunct produces a dropped disjunct D's frozen
-/// head tuple only via a homomorphism into D's instance, i.e. only when D was genuinely
-/// subsumed: a minimisation that drops a non-subsumed disjunct changes the result set
-/// (the canonical-database containment argument). FAIL-CLOSED: `Err` (naming the
-/// modifier) if any query carries a FILTER or VALUES modifier, whose semantics freezing
-/// ignores — the caller must fall back to `--abox` real data rather than accept a
-/// possibly-vacuous agreement. Regression-tested below.
-fn witness_abox(queries: &[&Query]) -> Result<Graph, &'static str> {
-    let mut nt = String::new();
+/// The FROZEN CANONICAL N-TRIPLES of every CQ disjunct of every given query (original, raw
+/// UCQ, minimised UCQ), as ONE String PER DISJUNCT — the callers load each string into its
+/// OWN isolated database. Freezing maps each variable / blank node to a fresh per-disjunct
+/// witness IRI and keeps IRI/literal constants as-is, so every disjunct — query-only
+/// predicates and multi-atom shared-variable joins included — matches at least its own
+/// instance (the identity homomorphism). FAIL-CLOSED: `Err` (naming the modifier) if any
+/// query carries a FILTER or VALUES modifier, whose semantics freezing ignores.
+///
+/// Emitting per disjunct (rather than one unioned document) is the constant-bridge fix: the
+/// retained IRI/literal constants are shared across disjuncts, so a single unioned graph
+/// lets a retained disjunct bridge a fact from a dropped disjunct D's instance with a fact
+/// from a third disjunct's instance through a shared constant and reproduce D's frozen head
+/// even when D is NOT contained in the retained UCQ — masking the unsound drop. Evaluating
+/// each disjunct's instance in ISOLATION removes the bridge (see [`witness_aboxes`]).
+fn witness_nt_per_disjunct(queries: &[&Query]) -> Result<Vec<String>, &'static str> {
+    let mut per_disjunct = Vec::new();
     for (qi, q) in queries.iter().enumerate() {
         let bgps = collect_bgps(query_pattern(q))?;
         for (di, bgp) in bgps.iter().enumerate() {
@@ -348,6 +355,7 @@ fn witness_abox(queries: &[&Query]) -> Result<Graph, &'static str> {
             let frozen = |kind: &str, name: &str| {
                 format!("<{}q{}d{}{}{}>", WITNESS, qi, di, kind, name)
             };
+            let mut nt = String::new();
             for tp in bgp.iter() {
                 let s = match &tp.subject {
                     TermPattern::NamedNode(n) => format!("<{}>", n.as_str()),
@@ -368,9 +376,36 @@ fn witness_abox(queries: &[&Query]) -> Result<Graph, &'static str> {
                 };
                 nt.push_str(&format!("{} {} {} .\n", s, p, o));
             }
+            per_disjunct.push(nt);
         }
     }
-    Ok(Graph::load_str(&nt, "ntriples").expect("witness ABox must load"))
+    Ok(per_disjunct)
+}
+
+/// Synthesise the deterministic PER-DISJUNCT WITNESS databases for one equivalence check:
+/// the FROZEN CANONICAL INSTANCE of every CQ disjunct of every given query (original, raw
+/// UCQ, minimised UCQ), each held in its OWN ISOLATED [`Graph`]. Evaluating raw and minimised
+/// over EACH database and requiring agreement on each is the classical per-CQ canonical-
+/// database containment argument: a kept disjunct produces a dropped disjunct D's frozen head
+/// tuple over D's own database only via a homomorphism into D's instance, i.e. only when D was
+/// genuinely subsumed, so a minimisation that drops a non-subsumed disjunct fails agreement on
+/// that disjunct's database.
+///
+/// ISOLATION is load-bearing. A SINGLE unioned graph would share the retained IRI/literal
+/// constants across disjuncts, letting a retained disjunct bridge D's instance to a third
+/// disjunct's instance through a shared constant and reproduce D's head even when D is NOT
+/// contained in the retained UCQ — the vacuous agreement that masks the unsound drop (pinned
+/// by `isolated_witness_detects_constant_bridge_masking`). One database per disjunct removes
+/// the bridge.
+///
+/// FAIL-CLOSED: `Err` (naming the modifier) if any query carries a FILTER or VALUES modifier,
+/// whose semantics freezing ignores — the caller must fall back to `--abox` real data rather
+/// than accept a possibly-vacuous agreement. Regression-tested below.
+fn witness_aboxes(queries: &[&Query]) -> Result<Vec<Graph>, &'static str> {
+    Ok(witness_nt_per_disjunct(queries)?
+        .iter()
+        .map(|nt| Graph::load_str(nt, "ntriples").expect("witness ABox must load"))
+        .collect())
 }
 
 fn run_gather(suite: &str, tbox_path: &str, queries_dir: &str, abox_path: Option<&str>) {
@@ -403,8 +438,9 @@ fn run_gather(suite: &str, tbox_path: &str, queries_dir: &str, abox_path: Option
         query_files.len(),
         data_label,
         abox_path.unwrap_or(
-            "per-query frozen canonical instances of the original/raw/minimised UCQ disjuncts; \
-             FILTER/VALUES queries fail closed to needs-abox (no timing row)"
+            "per-disjunct ISOLATED frozen canonical instances of the original/raw/minimised UCQ \
+             disjuncts (evaluated separately so shared IRI/literal constants cannot bridge \
+             across instances); FILTER/VALUES queries fail closed to needs-abox (no timing row)"
         )
     );
     println!("# regime: *_rewrite_ms = rewriter-phase only (in-process rewrite/rewrite_production);");
@@ -452,19 +488,20 @@ fn run_gather(suite: &str, tbox_path: &str, queries_dir: &str, abox_path: Option
         let min_ms = ms(t_min);
 
         // UCQ-equivalence sanity check BEFORE the timing row (the sq-hmd7l.9 invariant).
-        // Without --abox the data is the PER-QUERY witness: the frozen canonical instances
-        // of every disjunct of the original, raw, and minimised queries, so the differential
-        // is per-disjunct non-vacuous even for predicates that never occur in the TBox.
-        // FAIL-CLOSED: a FILTER/VALUES modifier anywhere in the original/raw/minimised
-        // tree refuses witness mode (the modifier could reject every frozen binding and
-        // make the agreement vacuous) — the query gets a needs-abox row and NO timings.
-        let witness;
-        let data: &Graph = match &real_abox {
-            Some(g) => g,
-            None => match witness_abox(&[&query, &raw.query, &minimised.query]) {
-                Ok(g) => {
-                    witness = g;
-                    &witness
+        // Without --abox the data is the PER-DISJUNCT witness: one ISOLATED frozen canonical
+        // instance per disjunct of the original, raw, and minimised queries. Raw and minimised
+        // must agree over EACH database separately — isolation stops shared IRI/literal
+        // constants from bridging a dropped disjunct's instance to another's (which would mask
+        // an unsound drop). FAIL-CLOSED: a FILTER/VALUES modifier anywhere in the
+        // original/raw/minimised tree refuses witness mode (the modifier could reject every
+        // frozen binding and make the agreement vacuous) — needs-abox row and NO timings.
+        let witness_dbs;
+        let data: Vec<&Graph> = match &real_abox {
+            Some(g) => vec![g],
+            None => match witness_aboxes(&[&query, &raw.query, &minimised.query]) {
+                Ok(gs) => {
+                    witness_dbs = gs;
+                    witness_dbs.iter().collect()
                 }
                 Err(modifier) => {
                     needs_abox += 1;
@@ -476,17 +513,28 @@ fn run_gather(suite: &str, tbox_path: &str, queries_dir: &str, abox_path: Option
                 }
             },
         };
-        let answers = assert_ucq_equivalence(data, &raw.query, &minimised.query, id);
+        // Agreement is required on EVERY database; `answers` totals the agreed rows across them
+        // (a single iteration over the one real ABox with --abox, unchanged).
+        let answers: usize = data
+            .iter()
+            .map(|g| assert_ucq_equivalence(g, &raw.query, &minimised.query, id))
+            .sum();
 
         // End-to-end leg (rewrite + execute), labelled; execution-only measured separately.
+        // Both legs run over every database, so witness-mode timing covers all disjunct
+        // instances (a single iteration over the one real ABox with --abox, unchanged).
         let t_exec = Instant::now();
-        let _ = sparq_engine::count(data, &minimised.query.to_string())
-            .unwrap_or_else(|e| panic!("{}: minimised UCQ execution failed: {}", id, e));
+        for g in &data {
+            let _ = sparq_engine::count(g, &minimised.query.to_string())
+                .unwrap_or_else(|e| panic!("{}: minimised UCQ execution failed: {}", id, e));
+        }
         let exec_ms = ms(t_exec);
         let t_e2e = Instant::now();
         let e2e = rewrite_production(&query, &tbox).expect("second rewrite must succeed");
-        let _ = sparq_engine::count(data, &e2e.query.to_string())
-            .unwrap_or_else(|e| panic!("{}: e2e execution failed: {}", id, e));
+        for g in &data {
+            let _ = sparq_engine::count(g, &e2e.query.to_string())
+                .unwrap_or_else(|e| panic!("{}: e2e execution failed: {}", id, e));
+        }
         let e2e_ms = ms(t_e2e);
 
         in_scope += 1;
@@ -540,8 +588,10 @@ fn main() {
 // =========================================================================================
 // Witness-gate regression tests (run by `cargo test -p sparq-reason-ql --features
 // experimental` — the [[example]] entry sets `test = true`). They pin the vacuity the old
-// TBox-vocabulary witness had for query-only predicates + multi-atom joins, and prove the
-// frozen-instance witness both populates every disjunct and DETECTS a wrongly-dropped one.
+// TBox-vocabulary witness had for query-only predicates + multi-atom joins, prove the
+// frozen-instance witness both populates every disjunct and DETECTS a wrongly-dropped one,
+// and pin that PER-DISJUNCT ISOLATION detects a constant-bridge masking that a single unioned
+// witness graph agrees on vacuously.
 // =========================================================================================
 #[cfg(test)]
 mod tests {
@@ -581,6 +631,19 @@ mod tests {
     /// disjunct is dropped, keeping only `chairOf(x,d) ∧ partOf(d,u)`.
     const JOIN_WRONG_MIN_UCQ: &str = "SELECT DISTINCT ?x WHERE { \
         { ?x :chairOf ?d } { ?d :partOf ?u } }";
+
+    /// The CONSTANT-BRIDGE masking fixture (review round 6). A UCQ whose disjuncts share the
+    /// IRI constant `:c`: dropped D `{?x :p :c}`, retained E `{?x :p :c . :c :q ?z}`, retained
+    /// F `{:c :q ?x}`. D is NOT contained in E ∪ F — an `x` with `x :p :c` but no outgoing
+    /// `:c :q _` is a D answer only — so dropping D is UNSOUND.
+    const BRIDGE_RAW_UCQ: &str = "SELECT DISTINCT ?x WHERE { \
+        { ?x :p :c } UNION { ?x :p :c . :c :q ?z } UNION { :c :q ?x } }";
+    /// A deliberately WRONG minimisation of [`BRIDGE_RAW_UCQ`]: the non-subsumed D `{?x :p :c}`
+    /// disjunct is dropped. Over a SINGLE unioned witness graph the shared `:c` lets E borrow a
+    /// `:c :q _` fact from another disjunct's instance and reproduce D's frozen `?x` via D's own
+    /// `?x :p :c` fact, so raw and this wrongly-minimised UCQ agree VACUOUSLY.
+    const BRIDGE_WRONG_MIN_UCQ: &str = "SELECT DISTINCT ?x WHERE { \
+        { ?x :p :c . :c :q ?z } UNION { :c :q ?x } }";
 
     /// True iff the pattern tree contains a `Join` node (the shape the regression exercises).
     fn query_has_join(p: &GraphPattern) -> bool {
@@ -623,25 +686,25 @@ mod tests {
 
     /// The frozen-instance witness populates the join disjunct (query-only predicates,
     /// shared-variable structure) AND the literal-object disjunct, and the equivalence gate
-    /// DETECTS the dropped non-subsumed disjunct as a result-set mismatch.
+    /// DETECTS the dropped non-subsumed disjunct as a result-set mismatch on some disjunct's
+    /// own isolated database.
     #[test]
     fn frozen_instance_witness_detects_wrongly_dropped_join_disjunct() {
         let raw = parse_query(RAW_UCQ);
         let wrong = parse_query(WRONG_MIN_UCQ);
-        let data = witness_abox(&[&raw, &wrong]).expect("modifier-free UCQs must synthesise");
-        let (_, raw_rows) = eval_rows(&data, &raw);
-        let (_, wrong_rows) = eval_rows(&data, &wrong);
+        let dbs = witness_aboxes(&[&raw, &wrong]).expect("modifier-free UCQs must synthesise");
         assert!(
-            !raw_rows.is_empty(),
+            dbs.iter().any(|g| !eval_rows(g, &raw).1.is_empty()),
             "every raw disjunct must match its own frozen instance"
         );
         assert!(
-            !wrong_rows.is_empty(),
+            dbs.iter().any(|g| !eval_rows(g, &wrong).1.is_empty()),
             "the literal-object disjunct must match its own frozen instance"
         );
-        assert_ne!(
-            raw_rows, wrong_rows,
-            "dropping a non-subsumed disjunct must surface as a result-set mismatch"
+        assert!(
+            dbs.iter().any(|g| eval_rows(g, &raw).1 != eval_rows(g, &wrong).1),
+            "dropping a non-subsumed disjunct must surface as a result-set mismatch on some \
+             disjunct's isolated instance"
         );
     }
 
@@ -651,8 +714,11 @@ mod tests {
     fn frozen_instance_witness_agrees_for_equivalent_ucqs() {
         let raw = parse_query(RAW_UCQ);
         let equiv = parse_query(EQUIV_UCQ);
-        let data = witness_abox(&[&raw, &equiv]).expect("modifier-free UCQs must synthesise");
-        let answers = assert_ucq_equivalence(&data, &raw, &equiv, "equivalent-ucqs");
+        let dbs = witness_aboxes(&[&raw, &equiv]).expect("modifier-free UCQs must synthesise");
+        let answers: usize = dbs
+            .iter()
+            .map(|g| assert_ucq_equivalence(g, &raw, &equiv, "equivalent-ucqs"))
+            .sum();
         assert!(answers > 0, "the agreement must be over a non-empty row set");
     }
 
@@ -665,15 +731,17 @@ mod tests {
     /// agreement witness mode now refuses.
     #[test]
     fn modifier_blind_witness_is_vacuous_under_filter() {
-        let data = witness_abox(&[&parse_query(RAW_UCQ), &parse_query(WRONG_MIN_UCQ)])
+        let dbs = witness_aboxes(&[&parse_query(RAW_UCQ), &parse_query(WRONG_MIN_UCQ)])
             .expect("modifier-free skeletons must synthesise");
-        let (_, raw_rows) = eval_rows(&data, &parse_query(FILTERED_RAW_UCQ));
-        let (_, wrong_rows) = eval_rows(&data, &parse_query(FILTERED_WRONG_MIN_UCQ));
-        assert!(
-            raw_rows.is_empty() && wrong_rows.is_empty(),
-            "the FILTER rejects every frozen binding: raw and wrongly-minimised UCQs are \
-             both empty, so an equivalence check over this witness would pass vacuously"
-        );
+        for g in &dbs {
+            let (_, raw_rows) = eval_rows(g, &parse_query(FILTERED_RAW_UCQ));
+            let (_, wrong_rows) = eval_rows(g, &parse_query(FILTERED_WRONG_MIN_UCQ));
+            assert!(
+                raw_rows.is_empty() && wrong_rows.is_empty(),
+                "the FILTER rejects every frozen binding: raw and wrongly-minimised UCQs are \
+                 both empty, so an equivalence check over this witness would pass vacuously"
+            );
+        }
     }
 
     /// The revised path REFUSES witness mode for FILTER- and VALUES-carrying queries
@@ -681,17 +749,17 @@ mod tests {
     /// emits a `needs-abox` row with NO timings instead of a vacuously-gated timing row.
     #[test]
     fn witness_mode_refuses_filter_and_values_queries() {
-        let err = witness_abox(&[&parse_query(FILTERED_RAW_UCQ)])
+        let err = witness_aboxes(&[&parse_query(FILTERED_RAW_UCQ)])
             .map(|_| ())
             .expect_err("a FILTER anywhere in the tree must refuse witness synthesis");
         assert_eq!(err, "FILTER");
-        let err = witness_abox(&[&parse_query(VALUES_RAW_UCQ)])
+        let err = witness_aboxes(&[&parse_query(VALUES_RAW_UCQ)])
             .map(|_| ())
             .expect_err("a VALUES block anywhere in the tree must refuse witness synthesis");
         assert_eq!(err, "VALUES");
         // The refusal covers the whole query LIST: one modifier-carrying query poisons
         // the witness even when the others are plain UCQs.
-        let err = witness_abox(&[&parse_query(RAW_UCQ), &parse_query(FILTERED_WRONG_MIN_UCQ)])
+        let err = witness_aboxes(&[&parse_query(RAW_UCQ), &parse_query(FILTERED_WRONG_MIN_UCQ)])
             .map(|_| ())
             .expect_err("a single modifier-carrying query in the list must refuse synthesis");
         assert_eq!(err, "FILTER");
@@ -711,16 +779,53 @@ mod tests {
             "fixture must exercise the Join path (nested groups should parse as Join)"
         );
         let wrong = parse_query(JOIN_WRONG_MIN_UCQ);
-        let data = witness_abox(&[&raw, &wrong]).expect("modifier-free UCQs must synthesise");
-        let (_, raw_rows) = eval_rows(&data, &raw);
-        let (_, wrong_rows) = eval_rows(&data, &wrong);
+        let dbs = witness_aboxes(&[&raw, &wrong]).expect("modifier-free UCQs must synthesise");
         assert!(
-            !raw_rows.is_empty(),
+            dbs.iter().any(|g| !eval_rows(g, &raw).1.is_empty()),
             "the shared-variable join disjunct must match its own frozen instance"
         );
-        assert_ne!(
-            raw_rows, wrong_rows,
-            "dropping the non-subsumed join disjunct must surface as a result-set mismatch"
+        assert!(
+            dbs.iter().any(|g| eval_rows(g, &raw).1 != eval_rows(g, &wrong).1),
+            "dropping the non-subsumed join disjunct must surface as a result-set mismatch on \
+             some disjunct's isolated instance"
+        );
+    }
+
+    /// The constant-bridge regression: a UCQ whose disjuncts share the IRI constant `:c`
+    /// (D/E/F, see [`BRIDGE_RAW_UCQ`]). A SINGLE unioned witness graph MASKS the unsound drop
+    /// of D — the shared `:c` bridges D's instance to another disjunct's instance so raw and
+    /// the wrongly-minimised UCQ agree vacuously — whereas PER-DISJUNCT ISOLATED databases
+    /// remove the bridge and DETECT the drop on D's own instance. Pins that isolation, not the
+    /// single unioned graph, is what makes the equivalence gate sound.
+    #[test]
+    fn isolated_witness_detects_constant_bridge_masking() {
+        let raw = parse_query(BRIDGE_RAW_UCQ);
+        let wrong = parse_query(BRIDGE_WRONG_MIN_UCQ);
+        let per_disjunct = witness_nt_per_disjunct(&[&raw, &wrong])
+            .expect("modifier-free UCQs must synthesise");
+
+        // Pre-fix construction: unioning the per-disjunct instances into ONE graph shares the
+        // `:c` constant across instances and masks the drop — raw and wrong agree vacuously.
+        let union = Graph::load_str(&per_disjunct.concat(), "ntriples")
+            .expect("unioned witness graph must load");
+        assert_eq!(
+            eval_rows(&union, &raw).1,
+            eval_rows(&union, &wrong).1,
+            "the unioned witness masks the unsound drop: the shared `:c` bridges the instances \
+             so raw and the wrongly-minimised UCQ agree — the defect this regression pins"
+        );
+
+        // Fixed construction: one ISOLATED database per disjunct removes the bridge, so raw and
+        // wrong disagree on D `{?x :p :c}`'s own instance (E/F cannot reproduce D's frozen ?x
+        // there — that instance carries no `:c :q _` fact for E/F to join through).
+        let dbs: Vec<Graph> = per_disjunct
+            .iter()
+            .map(|nt| Graph::load_str(nt, "ntriples").expect("isolated database must load"))
+            .collect();
+        assert!(
+            dbs.iter().any(|g| eval_rows(g, &raw).1 != eval_rows(g, &wrong).1),
+            "per-disjunct isolation must detect the wrongly dropped disjunct D as a result-set \
+             mismatch on its own canonical instance"
         );
     }
 

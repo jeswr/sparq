@@ -65,13 +65,20 @@ No timing row exists without a passed result-set agreement check:
 - **In-engine (always):** `ql_npd_requiem_bench` executes the raw PerfectRef UCQ and the
   minimised production UCQ over the same data and requires result-**set** equality
   (minimisation must never change answers); a disagreement aborts the run. Without real
-  data the check runs over a deterministic **per-query witness ABox**: the frozen
-  canonical instances of every CQ disjunct of the original, raw, and minimised queries
-  (variables/blank nodes frozen to fresh per-disjunct IRIs; IRI/literal constants kept).
-  Every disjunct — query-only predicates and multi-atom joins included — matches at least
-  its own instance, and because frozen terms are disjoint across disjuncts, dropping a
-  non-subsumed disjunct changes the result set (the canonical-database containment
-  argument; regression-tested in the example). Witness mode is FAIL-CLOSED on modifiers:
+  data the check runs over a set of deterministic **per-disjunct witness databases**: the
+  frozen canonical instance of every CQ disjunct of the original, raw, and minimised queries
+  (variables/blank nodes frozen to fresh per-disjunct IRIs; IRI/literal constants kept),
+  each disjunct's instance held in its **own isolated database**, with raw and minimised
+  required to agree over each. Every disjunct — query-only predicates and multi-atom joins
+  included — matches at least its own instance, so on disjunct D's own database the retained
+  UCQ reproduces D's frozen head only via a homomorphism into D's instance, i.e. only when D
+  was genuinely subsumed; dropping a non-subsumed disjunct fails agreement on that disjunct's
+  database (the per-CQ canonical-database containment argument; regression-tested in the
+  example). **Isolation is load-bearing**: unioning the instances into one graph would share
+  the retained IRI/literal constants and let a retained disjunct bridge a fact from a dropped
+  disjunct's instance with a fact from a third instance through a shared constant, reproducing
+  the dropped head and masking the unsound drop (the constant-bridge regression pins this).
+  Witness mode is FAIL-CLOSED on modifiers:
   a query whose original/raw/minimised tree carries a re-applied FILTER/VALUES (the
   B3/B4 pass-through) is reported per-row as `needs-abox` with NO timing row — the
   modifier could reject every frozen binding and make the agreement vacuous — so such
