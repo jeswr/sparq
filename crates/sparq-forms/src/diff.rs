@@ -11,6 +11,11 @@ pub struct FieldValueDiff {
     pub path: String,
     /// The RDF term added or removed at that path.
     pub value: TermRef,
+    /// The subject the change applies to when it is NOT the focus node: the
+    /// **IRI reifier** of an RDF 1.2 annotation sub-field. Absent (the common
+    /// case) means the focus node. [OPUS-5] sq-lsp7k.1.5
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub subject: Option<TermRef>,
 }
 
 /// The editable term-level difference between two descriptions of one focus node.
@@ -27,19 +32,29 @@ impl FormDiff {
     ///
     /// A mismatched focus node produces an empty diff. Only fields editable in
     /// both descriptions are compared; a newly introduced editable field may
-    /// contribute additions. Inverse, read-only, and complex-path fields are ignored.
+    /// contribute additions. Inverse, read-only, computed, and complex-path
+    /// fields are ignored.
+    ///
+    /// [OPUS-5] sq-lsp7k.1.5 RDF 1.2 **annotation** sub-fields participate too,
+    /// matched per (IRI reifier, predicate): editing a reifier's
+    /// provenance/time/confidence metadata produces changes carrying that
+    /// reifier as [`FieldValueDiff::subject`]. Blank-node reifiers derive
+    /// read-only, so they never reach here.
     pub fn between(before: &FormDescription, after: &FormDescription) -> Self {
         if before.focus != after.focus {
             return Self::default();
         }
 
         let mut diff = Self::default();
-        for after_field in fields(after).filter(|field| eligible(field)) {
+        for (subject, after_field) in fields(after).filter(|(_, field)| eligible(field)) {
             let Some(predicate) = bare_predicate(&after_field.path) else {
                 continue;
             };
             let before_field = fields(before)
-                .find(|field| eligible(field) && bare_predicate(&field.path) == Some(predicate));
+                .find(|(s, field)| {
+                    *s == subject && eligible(field) && bare_predicate(&field.path) == Some(predicate)
+                })
+                .map(|(_, field)| field);
 
             for value in &after_field.values {
                 let was_present = before_field
@@ -48,6 +63,7 @@ impl FormDiff {
                     diff.added.push(FieldValueDiff {
                         path: after_field.path.clone(),
                         value: value.term.clone(),
+                        subject: subject.cloned(),
                     });
                 }
             }
@@ -58,6 +74,7 @@ impl FormDiff {
                         diff.removed.push(FieldValueDiff {
                             path: after_field.path.clone(),
                             value: value.term.clone(),
+                            subject: subject.cloned(),
                         });
                     }
                 }
@@ -77,11 +94,17 @@ pub fn to_sparql_update(before: &FormDescription, after: &FormDescription) -> St
         return String::new();
     }
 
-    let subject = term_to_ntriples(&after.focus);
+    let focus = term_to_ntriples(&after.focus);
     let triples = |changes: &[FieldValueDiff]| {
         changes
             .iter()
             .map(|change| {
+                // An annotation change is written against its IRI reifier, not
+                // the focus node. [OPUS-5] sq-lsp7k.1.5
+                let subject = match &change.subject {
+                    Some(reifier) => term_to_ntriples(reifier),
+                    None => focus.clone(),
+                };
                 format!(
                     "  {subject} {} {} .\n",
                     change.path,
@@ -98,8 +121,29 @@ pub fn to_sparql_update(before: &FormDescription, after: &FormDescription) -> St
     )
 }
 
-fn fields(form: &FormDescription) -> impl Iterator<Item = &FormField> {
-    form.groups.iter().flat_map(|group| group.fields.iter())
+/// Every writable field paired with the subject it belongs to: `None` for the
+/// focus node's own fields, `Some(reifier)` for an RDF 1.2 annotation
+/// sub-field. Only **IRI** reifiers are yielded — a blank-node reifier cannot
+/// be named in a SPARQL Update `DELETE` template, so its annotations are never
+/// written back. [OPUS-5] sq-lsp7k.1.5
+fn fields(form: &FormDescription) -> impl Iterator<Item = (Option<&TermRef>, &FormField)> {
+    form.groups.iter().flat_map(|group| {
+        group.fields.iter().flat_map(|field| {
+            std::iter::once((None, field)).chain(
+                field
+                    .values
+                    .iter()
+                    .flat_map(|value| &value.annotations)
+                    .filter(|annotation| annotation.reifier.kind == "iri")
+                    .flat_map(|annotation| {
+                        annotation
+                            .fields
+                            .iter()
+                            .map(move |sub| (Some(&annotation.reifier), sub))
+                    }),
+            )
+        })
+    })
 }
 
 fn eligible(field: &FormField) -> bool {
@@ -111,22 +155,38 @@ fn bare_predicate(path: &str) -> Option<&str> {
     (!iri.is_empty() && !iri.contains(['<', '>', ' ', '\t', '\r', '\n'])).then_some(iri)
 }
 
-fn term_to_ntriples(term: &TermRef) -> String {
+pub(crate) fn term_to_ntriples(term: &TermRef) -> String {
     match term.kind.as_str() {
         "iri" => format!("<{}>", escape_iri(&term.value)),
         "bnode" => format!("_:{}", term.value),
         "literal" => {
             let literal = format!("\"{}\"", escape_literal(&term.value));
             if let Some(language) = &term.language {
-                format!("{literal}@{language}")
+                // RDF 1.2: a directional language-tagged string is written
+                // `"…"@lang--dir`. Dropping the direction would silently
+                // rewrite the term. [OPUS-5] sq-lsp7k.1.5
+                match &term.direction {
+                    Some(direction) => format!("{literal}@{language}--{direction}"),
+                    None => format!("{literal}@{language}"),
+                }
             } else if let Some(datatype) = &term.datatype {
                 format!("{literal}^^<{}>", escape_iri(datatype))
             } else {
                 literal
             }
         }
-        // RDF 1.2 triple terms are already stored as N-Triples text.
-        _ => term.value.clone(),
+        // RDF 1.2 triple terms: re-render from the structured components when
+        // present (so renamed blank-node labels and escaping stay consistent),
+        // else fall back to the carried N-Triples text. [OPUS-5] sq-lsp7k.1.5
+        _ => match &term.triple {
+            Some(t) => format!(
+                "<<( {} {} {} )>>",
+                term_to_ntriples(&t.subject),
+                term_to_ntriples(&t.predicate),
+                term_to_ntriples(&t.object)
+            ),
+            None => term.value.clone(),
+        },
     }
 }
 

@@ -108,7 +108,10 @@ PER_COMMIT_CRATES=(
   # subprocess artifact) — they are floor-0 + presence-gated in the JSONs instead.
   sparq-fedclient sparq-fedplan sparq-prov
   # [FABLE-5] sq-lsp7k.1.1: sparq-forms — opt-in headless SHACL-to-form derivation.
-  # No cargo features (whole surface default-compiled), so no measure() case arm.
+  # [OPUS-5] sq-lsp7k.1.5: it now has ONE opt-in feature, `computed` (SHACL-AF
+  # `sh:values` node-expression evaluation, whole-file-gated tests in
+  # tests/computed_fields.rs), so it MUST be measured WITH it — the `case` in
+  # measure() below names it, or that surface is compiled out and unmeasured.
   sparq-forms
   # [OPUS-4.8] sq-bif.7: the OPT-IN ODRL usage-control policy crate, untracked by BOTH
   # gates. The STATELESS evaluator (parse/eval/compare/hierarchy) is default-on, but the
@@ -565,6 +568,14 @@ measure() {
     sparq-engine-service)
       cargo_args+=(--features service)
       features+=("service") ;;
+    # [OPUS-5] sq-lsp7k.1.5 (forms F5): `computed` compiles the SHACL-AF
+    # `sh:values` evaluation seam and unlocks tests/computed_fields.rs (whole-file
+    # `#![cfg(feature = "computed")]`). Without it that surface is cfg'd out and the
+    # ratchet would silently stop covering it. The rest of the crate is
+    # default-compiled, so this is purely additive.
+    sparq-forms)
+      cargo_args+=(--features computed)
+      features+=("computed") ;;
   esac
 
   local start end rc=0 json="$WORK/$crate.json"

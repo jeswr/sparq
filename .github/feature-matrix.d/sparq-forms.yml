@@ -1,0 +1,26 @@
+# Feature-matrix fragment for `sparq-forms`.
+#
+# One self-contained leg mapping per opt-in feature(group). Assembled into the
+# feature-matrix `opt-in-features` strategy by scripts/assemble-feature-matrix.py.
+# Adding a leg for THIS crate edits only THIS file, so concurrent opt-in-feature
+# PRs for DIFFERENT crates never textually conflict (bead sq-ibrze).
+#
+# CONTRACT (gate-critical): each leg's emitted check-run NAME is `opt-in <name>`,
+# discovered as a REQUIRED check by the ci-summary `gate` aggregator BY NAME. Keep
+# `name` free of the whole words "advisory"/"informational" or the leg stops gating.
+# Fields: name (required -> check-run name), crate (required), features (required,
+# non-empty comma list), test (bool — run `cargo test` for the leg).
+
+# [OPUS-5] sq-lsp7k.1.5 (forms F5): COMPUTED fields — evaluating a property
+# shape's SHACL-AF `sh:values` node expression (`derive::computed_values`, which
+# turns on `sparq-shacl/shacl-af`) and its acceptance tests
+# (tests/computed_fields.rs, whole-file `#![cfg(feature = "computed")]`) are
+# entirely feature-gated, so without this leg they would run in NO gating CI.
+# clippy --all-targets -D warnings with `computed` ON plus the crate's tests
+# (which also re-run the DEFAULT-state suites — the flag-and-empty contract in
+# tests/rdf12_roles.rs must hold in BOTH feature states). Zero new dependencies:
+# `shacl-af` reuses the sparq-engine SPARQL machinery sparq-shacl already has.
+- name: "sparq-forms (computed)"
+  crate: "sparq-forms"
+  features: "computed"
+  test: true

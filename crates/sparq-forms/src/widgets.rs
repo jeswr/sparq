@@ -17,10 +17,10 @@
 //!
 //! | Editor | Score |
 //! |---|---|
-//! | `dash:TextFieldEditor` | 10 — literal value (or permitted datatype) that is neither `rdf:langString` nor `xsd:boolean`; 2 *(sparq)* — empty untyped field with no IRI/enum/nested signal (generic fallback) |
-//! | `dash:TextFieldWithLangEditor` | 11 — `rdf:langString` value, or both `rdf:langString` and `xsd:string` permitted; 5 — `rdf:langString` permitted and not `dash:singleLine false` |
+//! | `dash:TextFieldEditor` | 10 — literal value (or permitted datatype) that is neither a language-tagged string (`rdf:langString` / `rdf:dirLangString`) nor `xsd:boolean`; 2 *(sparq)* — empty untyped field with no IRI/enum/nested signal (generic fallback) |
+//! | `dash:TextFieldWithLangEditor` | 11 — language-tagged-string value, or both a language-tagged string and `xsd:string` permitted; 5 — language-tagged string permitted and not `dash:singleLine false` |
 //! | `dash:TextAreaEditor` | 0 — `dash:singleLine true`; 20 — `xsd:string` (value or permitted) with `dash:singleLine false`; 5 — `xsd:string` value; 2 — `xsd:string` permitted; manual — custom datatype |
-//! | `dash:TextAreaWithLangEditor` | 0 — `dash:singleLine true`; 15 — `rdf:langString` value with `dash:singleLine false`; 5 — `rdf:langString` value or permitted |
+//! | `dash:TextAreaWithLangEditor` | 0 — `dash:singleLine true`; 15 — language-tagged-string value with `dash:singleLine false`; 5 — language-tagged-string value or permitted |
 //! | `dash:BooleanSelectEditor` | 10 — `xsd:boolean` value or `sh:datatype xsd:boolean`; manual — literal-shaped field without a datatype |
 //! | `dash:DatePickerEditor` | 10 — `xsd:date` value; 5 — `sh:datatype xsd:date` |
 //! | `dash:DateTimePickerEditor` | 10 — `xsd:dateTime` value; 5 — `sh:datatype xsd:dateTime` |
@@ -43,7 +43,7 @@
 //! | `dash:ValueTableViewer` | manual — always |
 //! | `dash:DetailsViewer` | 15 *(sparq)* — `sh:node` present and value not a literal (DASH: manual); manual — IRIs and blank nodes; 0 — literals |
 //! | `dash:URIViewer` | 1 — IRI value |
-//! | `dash:LangStringViewer` | 10 — `rdf:langString` literal |
+//! | `dash:LangStringViewer` | 10 — language-tagged-string literal |
 //! | `dash:BlankNodeViewer` | 1 — blank-node value |
 //!
 //! Ties break on the lexicographically smaller widget IRI so derivation is
@@ -62,6 +62,11 @@ const XSD_DATE: &str = "http://www.w3.org/2001/XMLSchema#date";
 const XSD_DATETIME: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
 const XSD_ANYURI: &str = "http://www.w3.org/2001/XMLSchema#anyURI";
 const RDF_LANGSTRING: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
+/// RDF 1.2 directional language-tagged strings. A lang widget edits the same
+/// (text, language tag) pair plus a base direction, so every `rdf:langString`
+/// rule below applies to `rdf:dirLangString` identically — and the plain
+/// non-lang text widgets must decline it just as firmly. [OPUS-5] sq-lsp7k.1.5
+const RDF_DIRLANGSTRING: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#dirLangString";
 const RDF_HTML: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#HTML";
 const SH_IRI: &str = "http://www.w3.org/ns/shacl#IRI";
 const XSD_NS: &str = "http://www.w3.org/2001/XMLSchema#";
@@ -252,6 +257,22 @@ fn permits(ctx: &WidgetContext, dt: &str) -> bool {
     ctx.constraints.datatype.iter().any(|d| d == dt)
 }
 
+/// A language-tagged-string datatype: `rdf:langString` or its RDF 1.2
+/// directional sibling `rdf:dirLangString`. [OPUS-5] sq-lsp7k.1.5
+fn is_lang_datatype(dt: &str) -> bool {
+    dt == RDF_LANGSTRING || dt == RDF_DIRLANGSTRING
+}
+
+/// The sample value is a language-tagged string (either datatype).
+fn value_is_lang(ctx: &WidgetContext) -> bool {
+    value_datatype(ctx).as_deref().is_some_and(is_lang_datatype)
+}
+
+/// `sh:datatype` permits a language-tagged string (either datatype).
+fn permits_lang(ctx: &WidgetContext) -> bool {
+    ctx.constraints.datatype.iter().any(|d| is_lang_datatype(d))
+}
+
 /// The field is shaped as an IRI field: `sh:class`, or `sh:nodeKind sh:IRI`.
 fn iri_shaped(ctx: &WidgetContext) -> bool {
     !ctx.constraints.class.is_empty() || ctx.constraints.node_kind.iter().any(|k| k == SH_IRI)
@@ -268,7 +289,7 @@ fn text_field(ctx: &WidgetContext) -> Suitability {
     if let Some(v) = ctx.value {
         return match v {
             Term::Literal(l)
-                if l.datatype().as_str() != RDF_LANGSTRING
+                if !is_lang_datatype(l.datatype().as_str())
                     && l.datatype().as_str() != XSD_BOOLEAN =>
             {
                 Suitability::Score(10)
@@ -280,7 +301,7 @@ fn text_field(ctx: &WidgetContext) -> Suitability {
         .constraints
         .datatype
         .iter()
-        .any(|d| d != RDF_LANGSTRING && d != XSD_BOOLEAN && d != RDF_HTML)
+        .any(|d| !is_lang_datatype(d) && d != XSD_BOOLEAN && d != RDF_HTML)
     {
         return Suitability::Score(10);
     }
@@ -298,12 +319,11 @@ fn text_field(ctx: &WidgetContext) -> Suitability {
 }
 
 fn text_field_with_lang(ctx: &WidgetContext) -> Suitability {
-    if value_datatype(ctx).as_deref() == Some(RDF_LANGSTRING)
-        || (ctx.value.is_none() && permits(ctx, RDF_LANGSTRING) && permits(ctx, XSD_STRING))
+    if value_is_lang(ctx) || (ctx.value.is_none() && permits_lang(ctx) && permits(ctx, XSD_STRING))
     {
         return Suitability::Score(11);
     }
-    if permits(ctx, RDF_LANGSTRING) && single_line(ctx) != Some(false) {
+    if permits_lang(ctx) && single_line(ctx) != Some(false) {
         return Suitability::Score(5);
     }
     Suitability::Unsuitable
@@ -340,11 +360,11 @@ fn text_area_with_lang(ctx: &WidgetContext) -> Suitability {
     if single_line(ctx) == Some(true) {
         return Suitability::Unsuitable;
     }
-    let lang_value = value_datatype(ctx).as_deref() == Some(RDF_LANGSTRING);
+    let lang_value = value_is_lang(ctx);
     if lang_value && single_line(ctx) == Some(false) {
         return Suitability::Score(15);
     }
-    if lang_value || permits(ctx, RDF_LANGSTRING) {
+    if lang_value || permits_lang(ctx) {
         return Suitability::Score(5);
     }
     Suitability::Unsuitable
@@ -536,7 +556,7 @@ fn uri_viewer(ctx: &WidgetContext) -> Suitability {
 }
 
 fn lang_string_viewer(ctx: &WidgetContext) -> Suitability {
-    if value_datatype(ctx).as_deref() == Some(RDF_LANGSTRING) {
+    if value_is_lang(ctx) {
         return Suitability::Score(10);
     }
     Suitability::Unsuitable
@@ -573,6 +593,15 @@ mod tests {
     }
     fn lang(v: &str) -> Term {
         Term::from(Literal::new_language_tagged_literal_unchecked(v, "en"))
+    }
+    /// An RDF 1.2 directional language-tagged string (`rdf:dirLangString`).
+    /// [OPUS-5] sq-lsp7k.1.5
+    fn dir_lang(v: &str) -> Term {
+        Term::from(Literal::new_directional_language_tagged_literal_unchecked(
+            v,
+            "ar",
+            oxrdf::BaseDirection::Rtl,
+        ))
     }
     fn score(
         reg: &WidgetRegistry,
@@ -627,6 +656,36 @@ mod tests {
         lang_only.single_line = Some(false);
         assert_eq!(score(&r, true, "TextFieldWithLangEditor", None, &lang_only), Suitability::Unsuitable);
         assert_eq!(score(&r, true, "TextFieldWithLangEditor", Some(&lit("x")), &c()), Suitability::Unsuitable);
+    }
+
+    /// [OPUS-5] sq-lsp7k.1.5 RDF 1.2 `rdf:dirLangString` scores IDENTICALLY to
+    /// `rdf:langString` across the lang widgets — a lang widget edits the same
+    /// (text, tag) pair plus a direction — and the plain text widgets decline it.
+    #[test]
+    fn dir_lang_string_scores_like_lang_string() {
+        let r = WidgetRegistry::dash();
+        for (editor, name, expected) in [
+            (true, "TextFieldWithLangEditor", Suitability::Score(11)),
+            (true, "TextAreaWithLangEditor", Suitability::Score(5)),
+            (false, "LangStringViewer", Suitability::Score(10)),
+            (true, "TextFieldEditor", Suitability::Unsuitable),
+        ] {
+            assert_eq!(
+                score(&r, editor, name, Some(&dir_lang("x")), &c()),
+                expected,
+                "{name} on an rdf:dirLangString value"
+            );
+            assert_eq!(
+                score(&r, editor, name, Some(&lang("x")), &c()),
+                expected,
+                "{name} on an rdf:langString value (the parity baseline)"
+            );
+        }
+        // …and as a permitted DATATYPE on an empty field, likewise.
+        let mut dir_only = c();
+        dir_only.datatype = vec![RDF_DIRLANGSTRING.into()];
+        assert_eq!(score(&r, true, "TextFieldWithLangEditor", None, &dir_only), Suitability::Score(5));
+        assert_eq!(score(&r, true, "TextFieldEditor", None, &dir_only), Suitability::Unsuitable);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 ---
 name: shacl-forms
-description: "Derive a DASH-compatible, renderer-agnostic form description from SHACL shapes with the opt-in sparq-forms crate: (data graph, shapes graph, focus node, view|edit mode) -> serde-JSON FormDescription — applicable-shape switcher, property-group/field layout (sh:name/sh:description/sh:order/sh:group, sh:inversePath incoming references, sh:deactivated, implicit read-only Other group), DASH widget auto-selection via the documented 0-100 scoring registry (TextField/TextArea/BooleanSelect/Date+DateTimePicker/EnumSelect/InstancesSelect/URIEditor/RichText/SubClass/DetailsEditor and the viewers) with dash:editor/dash:viewer overrides, required/multi cardinality typing, dash:hidden/dash:readOnly/sh:defaultValue presentation flags, per-field constraints and opt-in live SHACL validation hints, and nested sh:node sub-forms. Use when an agent or GUI needs a shape-directed data-entry/edit/view form for a focus node (headless: no GUI deps, builds for wasm32)."
+description: "Derive a DASH-compatible, renderer-agnostic form description from SHACL shapes with the opt-in sparq-forms crate: (data graph, shapes graph, focus node, view|edit mode) -> serde-JSON FormDescription — applicable-shape switcher, property-group/field layout (sh:name/sh:description/sh:order/sh:group, sh:inversePath incoming references, sh:deactivated, implicit read-only Other group), DASH widget auto-selection via the documented 0-100 scoring registry (TextField/TextArea/BooleanSelect/Date+DateTimePicker/EnumSelect/InstancesSelect/URIEditor/RichText/SubClass/DetailsEditor and the viewers) with dash:editor/dash:viewer overrides, required/multi cardinality typing, dash:hidden/dash:readOnly/sh:defaultValue/dash:propertyRole presentation flags and roles, per-field constraints and opt-in live SHACL validation hints, nested sh:node sub-forms, RDF 1.2 triple-term annotation sub-fields (rdf:reifies provenance metadata, editable for IRI reifiers) with rdf:dirLangString base direction, dash:abstract instantiation exclusion, and opt-in (feature `computed`) SHACL-AF sh:values computed read-only fields. Use when an agent or GUI needs a shape-directed data-entry/edit/view form for a focus node (headless: no GUI deps, builds for wasm32)."
 license: MIT
 metadata:
   version: "0.1.0"
@@ -67,12 +67,45 @@ What the description carries (all serde `Serialize + Deserialize`):
   add/remove affordance signal).
 - **`constraints`** — per-field counts/datatypes/classes/nodeKind/`sh:in`/
   pattern/length/range/`sh:or` for renderer-side guidance.
-- **`hidden` / `editable` / `default_value`** — `dash:hidden true` flags a
-  field the renderer should omit (it still derives, with values and
-  constraints), `dash:readOnly true` forces `editable: false` even in edit
-  mode, and `sh:defaultValue` is carried verbatim as the seed term a renderer
-  pre-fills when a field has no values. All additive: omitted from the JSON
-  when the property shape does not declare them.
+- **`hidden` / `editable` / `default_value` / `property_role`** —
+  `dash:hidden true` flags a field the renderer should omit (it still derives,
+  with values and constraints), `dash:readOnly true` forces `editable: false`
+  even in edit mode, `sh:defaultValue` is carried verbatim as the seed term a
+  renderer pre-fills when a field has no values, and `dash:propertyRole` is
+  carried as its DASH role IRI — a `dash:LabelRole` field's first literal value
+  becomes the form's top-level `label` for the focus node (absent when no
+  label-role field carries one, so the renderer keeps its own fallback). All
+  additive: omitted from the JSON when the property shape does not declare them.
+- **`values[].annotations`** — RDF 1.2 reification. A value's reifiers
+  (`R rdf:reifies <<( focus path value )>>` — what Turtle's `{| … |}`
+  annotation syntax mints) render as annotation sub-fields carrying the
+  reifier's own provenance/time/confidence properties, alongside the reified
+  `statement` structurally. An **IRI** reifier's annotations are editable in
+  edit mode and diff back with that reifier as the change's `subject`; a
+  **blank-node** reifier renders read-only (SPARQL Update forbids blank nodes
+  in a `DELETE` template), as do the annotations of any read-only or off-shape
+  statement. Only a single (possibly inverse) predicate path denotes one
+  statement, so sequence/alternative-path fields carry none, and annotations of
+  annotations are not derived. A value that IS a triple term exposes its
+  components via `term.triple`.
+- **base direction** — a directional language-tagged string
+  (`rdf:dirLangString`) carries `direction` (`"ltr"` / `"rtl"`) next to
+  `language`, drives the same `dash:TextFieldWithLangEditor` /
+  `dash:TextAreaWithLangEditor` / `dash:LangStringViewer` widgets as
+  `rdf:langString`, and round-trips through `to_sparql_update` as
+  `"…"@lang--dir`.
+- **`computed`** — a property shape declaring a SHACL-AF `sh:values` node
+  expression derives as a COMPUTED field: always read-only, never part of a
+  `FormDiff`. With the crate's opt-in `computed` feature the expression is
+  evaluated on demand (it re-parses the shapes graph per call, so it is not
+  amortised across focus nodes); WITHOUT the feature the field is still flagged
+  with an EMPTY value set, so a default build never shows asserted data in
+  place of computed values.
+- **`shapes[].abstract`** — `dash:abstract true` (on the node shape or one of
+  its class targets) marks a shape an instantiation picker ("create a new …")
+  must not offer. It stays in the switcher so existing data can still be viewed
+  against it, but sorts after every concrete choice, so it never becomes the
+  default selected shape while a concrete shape applies.
 - **`validation`** — with `derive_form_validated(data, shapes, model, focus,
   opts, registry)`, SHACL results for the focus node are attached to the
   matching declared, editable field by property path. Each `ValidationHint`
@@ -92,18 +125,22 @@ Scope: derivation, opt-in live validation hints, plus pure edit-to-UPDATE
 building. An MCP agent can call the derivation as the `describe_form` tool
 (sparq-mcp feature `shacl`, `FormDescription` JSON verbatim — see
 [`agent-tools`](../agent-tools/SKILL.md)). [FABLE-5] sq-lsp7k.1.6. Applying the
-request, validate-before-commit guards, draft graphs, DASH suggestions,
-`dash:propertyRole`, and the GUI renderer are follow-on beads
-(sq-lsp7k.1.2/.1.4/.1.5); `sparq-shacl` (see
+request, validate-before-commit guards, draft graphs, DASH suggestions, and the
+GUI renderer are follow-on beads (sq-lsp7k.1.2/.1.4); `sparq-shacl` (see
 [`shacl-validation`](../shacl-validation/SKILL.md)) already validates the same
 graphs.
 
-_(status: Verified against sparq-forms 0.1.0 at authoring time [FABLE-5]
-(sq-lsp7k.1.1, 2026-07-11): 40 unit/integration tests incl. per-score widget
-tests + 3 golden-file fixtures (groups/order, enum + nested sh:node,
-inverse + multi-shape). Caveats: (1) widget scores follow datashapes.org/forms
-with documented (sparq) auto-selection extensions where DASH is manual-only —
-InstancesSelect on sh:class, SubClass on dash:rootClass, Details on sh:node.
-(2) sh:targetSubjectsOf/ObjectsOf and SHACL 1.2 sh:targetWhere/SPARQL targets
-do not drive form applicability. (3) `values` for SPARQL-computed sh:values
-shapes are not evaluated (F5). (4) rdf:langString base direction untouched.)_
+_(status: Verified against sparq-forms 0.1.0 [OPUS-5] (sq-lsp7k.1.5,
+2026-07-26): 75 unit/integration tests (70 in the default feature state), incl.
+per-score widget tests, 3 golden-file fixtures (groups/order, enum + nested
+sh:node, inverse + multi-shape), and the F5 RDF 1.2 / roles / computed-field
+suites. Caveats: (1) widget scores follow datashapes.org/forms with documented
+(sparq) auto-selection extensions where DASH is manual-only — InstancesSelect on
+sh:class, SubClass on dash:rootClass, Details on sh:node. (2)
+sh:targetSubjectsOf/ObjectsOf and SHACL 1.2 sh:targetWhere/SPARQL targets do not
+drive form applicability. (3) computed fields evaluate the SHACL-AF
+node-expression algebra only — a SPARQL-valued `sh:values [ sh:select … ]`
+derives flagged-but-empty, since sparq-shacl exposes no public seam for that
+form. (4) annotation write-back covers IRI reifiers only; a blank-node reifier
+renders read-only. (5) the GUI widgets for annotation editing and computed
+fields are not part of this crate.)_

@@ -23,11 +23,24 @@ readme = "README.md"
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
+[features]
+default = []
+# [OPUS-5] sq-lsp7k.1.5 (forms F5): evaluate SHACL-AF `sh:values` node
+# expressions, so a property shape carrying one derives as a COMPUTED read-only
+# field with real values. OPT-IN because it turns `sparq-shacl/shacl-af` on (the
+# node-expression algebra). The base derivation path still FLAGS such a field
+# (`computed: true`, `editable: false`) with an EMPTY value set, so a default
+# build carries zero node-expression code and never shows asserted data in place
+# of computed values. No new dependencies: `shacl-af` reuses the `sparq-engine`
+# SPARQL machinery `sparq-shacl` already depends on.
+computed = ["sparq-shacl/shacl-af"]
+
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io.
 sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = false }
 # The SHACL shapes model (ShapesModel/Shape/Component/Path) + GraphView. Base features
-# only: forms derivation needs no SHACL-AF rules and no SCS parser.
+# only: forms derivation needs no SCS parser, and SHACL-AF rules only when this
+# crate's opt-in `computed` feature turns them on for `sh:values` evaluation.
 sparq-shacl = { path = "../sparq-shacl", version = "0.1.0", default-features = false }
 oxrdf.workspace = true
 serde = { version = "1", features = ["derive"] }

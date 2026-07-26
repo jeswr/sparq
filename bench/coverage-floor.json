@@ -52,7 +52,7 @@
     },
     "sparq-forms": {
       "floor": 93,
-      "note": "[GPT-5.6] sq-ncrhx: opt-in headless SHACL-to-form derivation crate. The crate defines no Cargo features, so its whole surface is measured in the default feature state. Measured line% 95.39 (1345/1410) via COVERAGE_CRATES=sparq-forms scripts/coverage.sh; floor = floor(measured) - 2 margin = 93. Conservative work-box seed; CI's --check-robust is the ratchet of record."
+      "note": "[GPT-5.6] sq-ncrhx: opt-in headless SHACL-to-form derivation crate. Measured line% 95.39 (1345/1410) via COVERAGE_CRATES=sparq-forms scripts/coverage.sh; floor = floor(measured) - 2 margin = 93. Conservative work-box seed; CI's --check-robust is the ratchet of record. [OPUS-5] sq-lsp7k.1.5: the crate now has ONE opt-in feature, `computed` (SHACL-AF sh:values evaluation), so measure() names --features computed — the floor is unchanged (the added surface ships with its own acceptance tests) and CI re-seeds it."
     },
     "sparq-geo": {
       "floor": 90,

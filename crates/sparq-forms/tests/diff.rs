@@ -36,6 +36,7 @@ fn value(term: Term) -> FormValue {
     FormValue {
         term: TermRef::from_term(&term),
         nested: None,
+        annotations: Vec::new(),
     }
 }
 

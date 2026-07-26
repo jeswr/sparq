@@ -25,20 +25,39 @@ pub enum Mode {
     Edit,
 }
 
+/// The three components of an RDF 1.2 triple term, structured so a renderer can
+/// draw a quoted statement (and its annotations) without re-parsing N-Triples
+/// text. [OPUS-5] sq-lsp7k.1.5
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TripleRef {
+    pub subject: TermRef,
+    pub predicate: TermRef,
+    pub object: TermRef,
+}
+
 /// A reference to an RDF term, structured for JSON consumers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TermRef {
-    /// `"iri"`, `"bnode"`, `"literal"` or `"triple"` (RDF 1.2 triple term,
-    /// carried as its N-Triples text until F5 models annotations structurally).
+    /// `"iri"`, `"bnode"`, `"literal"` or `"triple"` (RDF 1.2 triple term).
     pub kind: String,
-    /// IRI string, blank-node label, literal lexical form, or triple-term text.
+    /// IRI string, blank-node label, literal lexical form, or triple-term
+    /// N-Triples text (`triple` carries the same term structurally).
     pub value: String,
     /// Literal datatype IRI (omitted for plain `xsd:string`).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub datatype: Option<String>,
-    /// Literal language tag (`rdf:langString`).
+    /// Literal language tag (`rdf:langString` / `rdf:dirLangString`).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub language: Option<String>,
+    /// RDF 1.2 base direction of an `rdf:dirLangString` literal — `"ltr"` or
+    /// `"rtl"`. A lang widget needs BOTH this and `language` to render (and
+    /// round-trip) the value. [OPUS-5] sq-lsp7k.1.5
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub direction: Option<String>,
+    /// The structured components of an RDF 1.2 triple term (when `kind` is
+    /// `"triple"`). [OPUS-5] sq-lsp7k.1.5
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub triple: Option<Box<TripleRef>>,
 }
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
@@ -52,12 +71,16 @@ impl TermRef {
                 value: n.as_str().to_string(),
                 datatype: None,
                 language: None,
+                direction: None,
+                triple: None,
             },
             Term::BlankNode(b) => TermRef {
                 kind: "bnode".into(),
                 value: b.as_str().to_string(),
                 datatype: None,
                 language: None,
+                direction: None,
+                triple: None,
             },
             Term::Literal(l) => TermRef {
                 kind: "literal".into(),
@@ -67,16 +90,34 @@ impl TermRef {
                     dt => Some(dt.to_string()),
                 },
                 language: l.language().map(str::to_string),
+                // RDF 1.2: an `rdf:dirLangString` carries a base direction
+                // ALONGSIDE its language tag. [OPUS-5] sq-lsp7k.1.5
+                direction: l.direction().map(|d| d.to_string()),
+                triple: None,
             },
-            // RDF 1.2 triple terms (and anything else oxrdf grows): N-Triples text.
+            // RDF 1.2 triple terms (and anything else oxrdf grows): N-Triples
+            // text, plus — for a triple term — its structured components.
             other => TermRef {
                 kind: "triple".into(),
                 value: other.to_string(),
                 datatype: None,
                 language: None,
+                direction: None,
+                triple: triple_components(other).map(Box::new),
             },
         }
     }
+}
+
+/// The structured components of an RDF 1.2 triple term (`None` for any other
+/// term kind). [OPUS-5] sq-lsp7k.1.5
+fn triple_components(t: &Term) -> Option<TripleRef> {
+    let Term::Triple(t) = t else { return None };
+    Some(TripleRef {
+        subject: TermRef::from_term(&Term::from(t.subject.clone())),
+        predicate: TermRef::from_term(&Term::from(t.predicate.clone())),
+        object: TermRef::from_term(&t.object),
+    })
 }
 
 /// How a node shape came to apply to the focus node (the switcher rationale).
@@ -104,6 +145,14 @@ pub struct ShapeChoice {
     pub label: Option<String>,
     /// Why the shape applies.
     pub via: ShapeVia,
+    /// `dash:abstract true` on the shape node or on one of its class targets:
+    /// the shape describes a class that must NOT be offered in an
+    /// **instantiation picker** ("create a new …"). It stays in the switcher —
+    /// an existing node may still be viewed/edited against it — but sorts after
+    /// every concrete choice, so the default selected shape is concrete
+    /// whenever one applies. [OPUS-5] sq-lsp7k.1.5
+    #[serde(rename = "abstract", skip_serializing_if = "std::ops::Not::not", default)]
+    pub is_abstract: bool,
 }
 
 /// The kind of a form group (renderers may style them differently).
@@ -216,6 +265,27 @@ pub struct Constraints {
     pub or: Vec<Constraints>,
 }
 
+/// [OPUS-5] sq-lsp7k.1.5 One RDF 1.2 **reifier** of an asserted statement — the
+/// `R` of `R rdf:reifies <<( s p o )>>` — with the reifier's own properties as
+/// annotation sub-fields (provenance, time, confidence, …).
+///
+/// This is the RDF 1.2 annotation-syntax shape: `:s :p :o {| :source :x |}`
+/// asserts `:s :p :o` AND mints a reifier carrying `:source :x`. The asserted
+/// statement stays the [`FormValue`]; the metadata hangs off it here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Annotation {
+    /// The reifier node.
+    pub reifier: TermRef,
+    /// The reified statement, structurally (the `<<( s p o )>>` triple term).
+    pub statement: TripleRef,
+    /// The reifier's own properties, one field per predicate (`rdf:reifies`
+    /// itself excluded). Editable only in [`Mode::Edit`] AND only for an **IRI**
+    /// reifier: a blank-node reifier has no stable name to write back through
+    /// (SPARQL Update forbids blank nodes in a `DELETE` template), so it renders
+    /// read-only.
+    pub fields: Vec<FormField>,
+}
+
 /// One value of a field.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FormValue {
@@ -225,6 +295,12 @@ pub struct FormValue {
     /// [`crate::FormOptions::max_depth`].
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub nested: Option<Box<FormDescription>>,
+    /// RDF 1.2 annotations of the statement this value belongs to — the
+    /// reifiers of `<<( focus path value )>>` and their properties. Empty
+    /// unless the data graph carries `rdf:reifies` triples over this
+    /// statement. [OPUS-5] sq-lsp7k.1.5
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub annotations: Vec<Annotation>,
 }
 
 /// [GPT-5.6] One SHACL validation result attached to its declared form field.
@@ -282,6 +358,22 @@ pub struct FormField {
     /// [FABLE-5] sq-lsp7k.1.5
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub default_value: Option<TermRef>,
+    /// `dash:propertyRole` on the property shape (a DASH role IRI such as
+    /// `dash:LabelRole` / `dash:KeyInfoRole` / `dash:DescriptionRole`). A
+    /// `dash:LabelRole` field supplies [`FormDescription::label`].
+    /// [OPUS-5] sq-lsp7k.1.5
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub property_role: Option<String>,
+    /// The property shape declares an `sh:values` node expression: the values
+    /// are **computed**, not asserted, so the field is always read-only
+    /// (`editable: false`) and never contributes to a [`crate::FormDiff`].
+    ///
+    /// The flag is set in every build; the values are only evaluated with the
+    /// crate's opt-in `computed` feature on (without it a computed field
+    /// derives with an EMPTY `values` vector rather than silently showing
+    /// asserted data the shape does not describe). [OPUS-5] sq-lsp7k.1.5
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub computed: bool,
     pub widget: WidgetChoice,
     pub values: Vec<FormValue>,
     pub constraints: Constraints,
@@ -295,9 +387,15 @@ pub struct FormField {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FormDescription {
     pub focus: TermRef,
+    /// The focus node's display label: the first value of the field whose
+    /// property shape declares `dash:propertyRole dash:LabelRole`. Absent when
+    /// no label-role field carries a value — a renderer then falls back to its
+    /// own convention (the IRI local name, say). [OPUS-5] sq-lsp7k.1.5
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub label: Option<String>,
     pub mode: Mode,
-    /// Opaque role passed through from [`crate::FormOptions`] (dash:propertyRole
-    /// filtering is F5, sq-lsp7k.1.5).
+    /// Opaque application role passed through from [`crate::FormOptions`] (see
+    /// [`FormField::property_role`] for the shape-declared DASH role).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub role: Option<String>,
     /// All applicable node shapes — the renderer's shape switcher.
@@ -323,7 +421,9 @@ mod tests {
                 kind: "iri".into(),
                 value: "http://example.org/a".into(),
                 datatype: None,
-                language: None
+                language: None,
+                direction: None,
+                triple: None,
             }
         );
         let b = Term::from(BlankNode::new_unchecked("b7"));
@@ -349,6 +449,50 @@ mod tests {
             r.datatype.as_deref(),
             Some("http://www.w3.org/1999/02/22-rdf-syntax-ns#langString")
         );
+        assert!(r.direction.is_none(), "a plain langString has no direction");
+    }
+
+    /// [OPUS-5] sq-lsp7k.1.5 RDF 1.2: a directional language-tagged string keeps
+    /// its language tag AND surfaces its base direction (a plain `rdf:langString`
+    /// leaves `direction` absent, above).
+    #[test]
+    fn term_ref_carries_rdf12_base_direction() {
+        let rtl = Term::from(Literal::new_directional_language_tagged_literal_unchecked(
+            "مرحبا",
+            "ar",
+            oxrdf::BaseDirection::Rtl,
+        ));
+        let r = TermRef::from_term(&rtl);
+        assert_eq!(r.language.as_deref(), Some("ar"));
+        assert_eq!(r.direction.as_deref(), Some("rtl"));
+        assert_eq!(
+            r.datatype.as_deref(),
+            Some("http://www.w3.org/1999/02/22-rdf-syntax-ns#dirLangString")
+        );
+        let ltr = Term::from(Literal::new_directional_language_tagged_literal_unchecked(
+            "hello",
+            "en",
+            oxrdf::BaseDirection::Ltr,
+        ));
+        assert_eq!(TermRef::from_term(&ltr).direction.as_deref(), Some("ltr"));
+    }
+
+    /// [OPUS-5] sq-lsp7k.1.5 An RDF 1.2 triple term keeps its N-Triples text
+    /// (the write path renders it verbatim) and gains structured components.
+    #[test]
+    fn term_ref_structures_rdf12_triple_terms() {
+        let quoted = Term::Triple(Box::new(oxrdf::Triple::new(
+            NamedNode::new_unchecked("http://example.org/alice"),
+            NamedNode::new_unchecked("http://example.org/age"),
+            Literal::new_simple_literal("30"),
+        )));
+        let r = TermRef::from_term(&quoted);
+        assert_eq!(r.kind, "triple");
+        assert!(r.value.contains("http://example.org/alice"));
+        let t = r.triple.expect("triple terms carry structured components");
+        assert_eq!(t.subject.value, "http://example.org/alice");
+        assert_eq!(t.predicate.value, "http://example.org/age");
+        assert_eq!((t.object.kind.as_str(), t.object.value.as_str()), ("literal", "30"));
     }
 
     #[test]

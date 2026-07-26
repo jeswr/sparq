@@ -10,8 +10,8 @@ pub mod diff;
 pub mod widgets;
 
 pub use description::{
-    Constraints, FormDescription, FormField, FormGroup, FormValue, GroupKind, Mode, ShapeChoice,
-    ShapeVia, TermRef, ValidationHint, WidgetChoice,
+    Annotation, Constraints, FormDescription, FormField, FormGroup, FormValue, GroupKind, Mode,
+    ShapeChoice, ShapeVia, TermRef, TripleRef, ValidationHint, WidgetChoice,
 };
 pub use diff::{to_sparql_update, FieldValueDiff, FormDiff};
 pub use widgets::{Resolution, Scorer, Suitability, WidgetContext, WidgetRegistry, DASH};
@@ -26,8 +26,10 @@ use sparq_shacl::ShapesModel;
 pub struct FormOptions {
     /// View (read-only) or edit (the default) — see [`Mode`].
     pub mode: Mode,
-    /// Opaque role echoed into the description (`dash:propertyRole` filtering
-    /// lands with F5, sq-lsp7k.1.5).
+    /// Opaque application role echoed into the description — the renderer's own
+    /// notion of "who is looking" (it does NOT filter fields). Each field's
+    /// declared `dash:propertyRole` is carried separately in
+    /// [`FormField::property_role`]. [OPUS-5] sq-lsp7k.1.5
     pub role: Option<String>,
     /// Explicit node-shape choice: derive against THIS shape (it need not
     /// target the focus node) instead of the first applicable one.

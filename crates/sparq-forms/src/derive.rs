@@ -2,8 +2,8 @@
 //! [`FormDescription`]. [FABLE-5] sq-lsp7k.1.1
 
 use crate::description::{
-    Constraints, FormDescription, FormField, FormGroup, FormValue, GroupKind, Mode, ShapeChoice,
-    ShapeVia, TermRef, WidgetChoice,
+    Annotation, Constraints, FormDescription, FormField, FormGroup, FormValue, GroupKind, Mode,
+    ShapeChoice, ShapeVia, TermRef, WidgetChoice,
 };
 use crate::widgets::{WidgetContext, WidgetRegistry};
 use crate::FormOptions;
@@ -18,6 +18,8 @@ const DASH: &str = "http://datashapes.org/dash#";
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const RDFS_LABEL: &str = "http://www.w3.org/2000/01/rdf-schema#label";
 const RDFS_COMMENT: &str = "http://www.w3.org/2000/01/rdf-schema#comment";
+/// RDF 1.2 reification: `R rdf:reifies <<( s p o )>>`. [OPUS-5] sq-lsp7k.1.5
+const RDF_REIFIES: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
 
 fn sh(local: &str) -> String {
     format!("{SH}{local}")
@@ -37,7 +39,7 @@ pub(crate) fn applicable(
     model: &ShapesModel,
     focus: &Term,
 ) -> Vec<ShapeChoice> {
-    let mut out: Vec<(u8, String, ShapeChoice)> = Vec::new();
+    let mut out: Vec<(bool, u8, String, ShapeChoice)> = Vec::new();
     for shape in &model.shapes {
         // Only node shapes enter the switcher; property shapes are fields.
         if shape.path.is_some() || shape.deactivated {
@@ -76,17 +78,40 @@ pub(crate) fn applicable(
                 ShapeVia::ApplicableToClass => 2,
                 ShapeVia::Explicit => 0, // unreachable here (inserted by derive)
             };
+            let is_abstract = shape_is_abstract(shapes, shape);
             let choice = ShapeChoice {
                 shape: TermRef::from_term(&shape.node),
                 label: shape_label(shapes, &shape.node),
                 via,
+                is_abstract,
             };
-            out.push((rank, shape.node.to_string(), choice));
+            out.push((is_abstract, rank, shape.node.to_string(), choice));
         }
     }
-    // Deterministic switcher order: rationale rank, then the node's text.
-    out.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-    out.into_iter().map(|(_, _, c)| c).collect()
+    // Deterministic switcher order: CONCRETE shapes first (a `dash:abstract`
+    // class is never what you instantiate, so it must not become the default
+    // selected shape while a concrete choice applies — [OPUS-5] sq-lsp7k.1.5),
+    // then rationale rank, then the node's text.
+    out.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+    out.into_iter().map(|(_, _, _, c)| c).collect()
+}
+
+/// `dash:abstract true` on the node shape itself or on any of its class
+/// targets — DASH puts the flag on the CLASS ("cannot be instantiated"), and a
+/// SHACL shape is frequently the class itself (`sh:ShapeClass` / implicit
+/// targets). [OPUS-5] sq-lsp7k.1.5
+fn shape_is_abstract(shapes: &GraphView, shape: &Shape) -> bool {
+    if bool_object(shapes, &shape.node, &dash("abstract")) {
+        return true;
+    }
+    shape.targets.iter().any(|t| match t {
+        Target::Class(c) | Target::ImplicitClass(c) => bool_object(shapes, c, &dash("abstract")),
+        _ => false,
+    })
 }
 
 pub(crate) fn derive(
@@ -122,21 +147,37 @@ fn normalize_form(form: &mut FormDescription, names: &mut std::collections::Hash
         if let Some(n) = &mut g.group {
             normalize_ref(n, names);
         }
-        for f in &mut g.fields {
-            if let Some(n) = &mut f.property_shape {
-                normalize_ref(n, names);
+        normalize_fields(&mut g.fields, names);
+    }
+}
+
+fn normalize_fields(
+    fields: &mut [FormField],
+    names: &mut std::collections::HashMap<String, String>,
+) {
+    for f in fields {
+        if let Some(n) = &mut f.property_shape {
+            normalize_ref(n, names);
+        }
+        normalize_constraints(&mut f.constraints, names);
+        // sh:defaultValue may (degenerately) be a blank node — keep the
+        // deterministic-label contract. [FABLE] sq-lsp7k.1.5
+        if let Some(dv) = &mut f.default_value {
+            normalize_ref(dv, names);
+        }
+        for v in &mut f.values {
+            normalize_ref(&mut v.term, names);
+            if let Some(nested) = &mut v.nested {
+                normalize_form(nested, names);
             }
-            normalize_constraints(&mut f.constraints, names);
-            // sh:defaultValue may (degenerately) be a blank node — keep the
-            // deterministic-label contract. [FABLE] sq-lsp7k.1.5
-            if let Some(dv) = &mut f.default_value {
-                normalize_ref(dv, names);
-            }
-            for v in &mut f.values {
-                normalize_ref(&mut v.term, names);
-                if let Some(nested) = &mut v.nested {
-                    normalize_form(nested, names);
-                }
+            // RDF 1.2 annotations: the reifier is COMMONLY a blank node (the
+            // `{| … |}` annotation syntax mints one), as are the reified
+            // statement's own components. [OPUS-5] sq-lsp7k.1.5
+            for a in &mut v.annotations {
+                normalize_ref(&mut a.reifier, names);
+                normalize_ref(&mut a.statement.subject, names);
+                normalize_ref(&mut a.statement.object, names);
+                normalize_fields(&mut a.fields, names);
             }
         }
     }
@@ -174,6 +215,16 @@ fn normalize_ref(r: &mut TermRef, names: &mut std::collections::HashMap<String, 
     if r.kind == "bnode" {
         let next = format!("b{}", names.len());
         r.value = names.entry(r.value.clone()).or_insert(next).clone();
+        return;
+    }
+    // An RDF 1.2 triple term's N-Triples text embeds its components' labels, so
+    // re-render it once they have been renamed. [OPUS-5] sq-lsp7k.1.5
+    if r.triple.is_some() {
+        if let Some(t) = r.triple.as_mut() {
+            normalize_ref(&mut t.subject, names);
+            normalize_ref(&mut t.object, names);
+        }
+        r.value = crate::diff::term_to_ntriples(r);
     }
 }
 
@@ -200,6 +251,7 @@ fn derive_inner(
                         shape: TermRef::from_term(node),
                         label: shape_label(shapes, node),
                         via: ShapeVia::Explicit,
+                        is_abstract: idx.is_some_and(|i| shape_is_abstract(shapes, &model.shapes[i])),
                     },
                 );
             }
@@ -278,7 +330,15 @@ fn derive_inner(
     groups.extend(declared_groups.into_iter().map(|(_, g)| g));
 
     // ---- the implicit read-only "Other properties" group (off-shape triples) ----
-    let other_fields = other_fields(data, shapes, focus, registry, &covered_predicates);
+    let other_fields = predicate_fields(
+        data,
+        shapes,
+        focus,
+        registry,
+        &covered_predicates,
+        false, // off-shape triples are ALWAYS read-only (so are their annotations)
+        true,  // …but they still SHOW their RDF 1.2 annotations
+    );
     if !other_fields.is_empty() {
         groups.push(FormGroup {
             kind: GroupKind::Other,
@@ -291,6 +351,10 @@ fn derive_inner(
 
     FormDescription {
         focus: TermRef::from_term(focus),
+        // [OPUS-5] sq-lsp7k.1.5 `dash:propertyRole dash:LabelRole` drives the
+        // node's display label — computed AFTER group assembly so the winner is
+        // the first label-role field in RENDER order (sh:order, then label).
+        label: label_role_value(&groups),
         mode: opts.mode,
         role: opts.role.clone(),
         shape: selected_idx.map(|i| TermRef::from_term(&model.shapes[i].node)),
@@ -314,7 +378,15 @@ fn build_field(
     visiting: &mut Visiting,
 ) -> FormField {
     let constraints = constraints_of(shapes, model, prop, 2);
-    let raw_values = path.values(data, focus);
+    // [OPUS-5] sq-lsp7k.1.5 SHACL-AF `sh:values`: the value nodes are COMPUTED
+    // by a node expression rather than reached by traversing `sh:path`, so a
+    // computed field never shows (or writes) asserted data.
+    let values_expr = shapes.object(&prop.node, &sh("values"));
+    let computed = values_expr.is_some();
+    let raw_values = match &values_expr {
+        Some(expr) => computed_values(data, shapes, expr, focus),
+        None => path.values(data, focus),
+    };
 
     // ---- widget resolution: explicit dash:editor / dash:viewer beat scoring ----
     let sample = raw_values.first();
@@ -345,7 +417,21 @@ fn build_field(
         viewer_alternatives: alternatives(&viewer_res, &explicit_viewer),
     };
 
+    // ---- dash presentation flags (additive; absent statements leave the ----
+    // ---- description exactly as before). [FABLE] sq-lsp7k.1.5           ----
+    let hidden = bool_object(shapes, &prop.node, &dash("hidden"));
+    let read_only = bool_object(shapes, &prop.node, &dash("readOnly"));
+    let default_value = shapes
+        .object(&prop.node, &sh("defaultValue"))
+        .map(|t| TermRef::from_term(&t));
+    // dash:readOnly true forces read-only even in edit mode. [FABLE]
+    // A computed (`sh:values`) field is read-only by construction: its values
+    // are derived, so there is nothing to write back. [OPUS-5]
+    let editable = opts.mode == Mode::Edit && !read_only && !computed;
+
     // ---- values (+ nested sub-forms for sh:node / DetailsEditor recursion) ----
+    // Computed values are not asserted statements, so nothing can reify them.
+    let annotate = !computed && has_reification(data);
     let node_shape_idx = prop.components.iter().find_map(|c| match c {
         Component::Node(i) => Some(*i),
         _ => None,
@@ -383,17 +469,15 @@ fn build_field(
             FormValue {
                 term: TermRef::from_term(v),
                 nested,
+                // [OPUS-5] sq-lsp7k.1.5
+                annotations: if annotate {
+                    annotations_of(data, shapes, registry, focus, path, v, editable)
+                } else {
+                    Vec::new()
+                },
             }
         })
         .collect();
-
-    // ---- dash presentation flags (additive; absent statements leave the ----
-    // ---- description exactly as before). [FABLE] sq-lsp7k.1.5           ----
-    let hidden = bool_object(shapes, &prop.node, &dash("hidden"));
-    let read_only = bool_object(shapes, &prop.node, &dash("readOnly"));
-    let default_value = shapes
-        .object(&prop.node, &sh("defaultValue"))
-        .map(|t| TermRef::from_term(&t));
 
     let label = field_label(shapes, prop, path);
     FormField {
@@ -407,10 +491,11 @@ fn build_field(
         order: order_of(shapes, &prop.node),
         required: constraints.min_count.is_some_and(|c| c >= 1),
         multi: constraints.max_count != Some(1),
-        // dash:readOnly true forces read-only even in edit mode. [FABLE]
-        editable: opts.mode == Mode::Edit && !read_only,
+        editable,
         hidden,
         default_value,
+        property_role: iri_object(shapes, &prop.node, &dash("propertyRole")),
+        computed,
         widget,
         values,
         constraints,
@@ -418,18 +503,27 @@ fn build_field(
     }
 }
 
-/// Read-only fields for focus-node predicates no declared field covers.
-fn other_fields(
+/// One flat field per predicate of `subject`, skipping `covered` predicates.
+///
+/// Shared by the implicit read-only "Other properties" group (focus-node
+/// triples no declared field covers) and by RDF 1.2 annotation sub-fields (a
+/// reifier's own properties). `annotate` looks up each statement's reifiers;
+/// annotation fields pass `false` (annotations of annotations are not
+/// derived). [OPUS-5] sq-lsp7k.1.5
+fn predicate_fields(
     data: &GraphView,
     shapes: &GraphView,
-    focus: &Term,
+    subject: &Term,
     registry: &WidgetRegistry,
     covered: &HashSet<String>,
+    editable: bool,
+    annotate: bool,
 ) -> Vec<FormField> {
+    let annotate = annotate && has_reification(data);
     let mut predicates: Vec<String> = Vec::new();
     let mut values_of: std::collections::HashMap<String, Vec<Term>> =
         std::collections::HashMap::new();
-    for (p, o) in data.predicate_objects(focus) {
+    for (p, o) in data.predicate_objects(subject) {
         let Term::NamedNode(p) = &p else { continue };
         let p = p.as_str().to_string();
         if covered.contains(&p) {
@@ -468,9 +562,13 @@ fn other_fields(
                 order: None,
                 required: false,
                 multi: true,
-                editable: false, // off-shape triples are ALWAYS read-only
+                // Off-shape triples are ALWAYS read-only; an annotation field on
+                // an IRI reifier is editable in edit mode. [OPUS-5]
+                editable,
                 hidden: false,      // presentation flags live on property shapes
                 default_value: None, // [FABLE] sq-lsp7k.1.5
+                property_role: None, // roles are declared on property shapes
+                computed: false,
                 widget: WidgetChoice {
                     editor: None,
                     viewer: viewer_res.selected.clone(),
@@ -484,6 +582,13 @@ fn other_fields(
                     .map(|v| FormValue {
                         term: TermRef::from_term(v),
                         nested: None,
+                        annotations: if annotate {
+                            annotations_for_statement(
+                                data, shapes, registry, subject, &p, v, editable,
+                            )
+                        } else {
+                            Vec::new()
+                        },
                     })
                     .collect(),
                 constraints,
@@ -491,6 +596,129 @@ fn other_fields(
             }
         })
         .collect()
+}
+
+// ---- RDF 1.2 annotations ([OPUS-5] sq-lsp7k.1.5) ----------------------------
+
+/// The annotations of the statement a (focus, path, value) triple denotes.
+///
+/// Only a single (possibly inverse) predicate path denotes ONE statement; a
+/// sequence/alternative/repeat path names no single triple to reify, so those
+/// fields carry no annotations.
+fn annotations_of(
+    data: &GraphView,
+    shapes: &GraphView,
+    registry: &WidgetRegistry,
+    focus: &Term,
+    path: &Path,
+    value: &Term,
+    statement_editable: bool,
+) -> Vec<Annotation> {
+    let (subject, predicate, object) = match path {
+        Path::Predicate(p) => (focus, p, value),
+        Path::Inverse(inner) => match inner.as_ref() {
+            // An inverse field's statement runs value --p--> focus.
+            Path::Predicate(p) => (value, p, focus),
+            _ => return Vec::new(),
+        },
+        _ => return Vec::new(),
+    };
+    annotations_for_statement(
+        data,
+        shapes,
+        registry,
+        subject,
+        predicate,
+        object,
+        statement_editable,
+    )
+}
+
+/// The reifiers of `<<( subject predicate object )>>` in the data graph, each
+/// with the reifier's own properties as annotation sub-fields.
+///
+/// `statement_editable` is the ceiling: metadata about a statement the form
+/// cannot edit (view mode, `dash:readOnly`, an off-shape "Other properties"
+/// triple) is itself read-only.
+fn annotations_for_statement(
+    data: &GraphView,
+    shapes: &GraphView,
+    registry: &WidgetRegistry,
+    subject: &Term,
+    predicate: &str,
+    object: &Term,
+    statement_editable: bool,
+) -> Vec<Annotation> {
+    let Some(statement) = triple_term(subject, predicate, object) else {
+        return Vec::new();
+    };
+    let Some(components) = TermRef::from_term(&statement).triple else {
+        return Vec::new();
+    };
+    // `rdf:reifies` itself is the link, not annotation metadata.
+    let covered: HashSet<String> = HashSet::from([RDF_REIFIES.to_string()]);
+    let mut out: Vec<(String, Annotation)> = data
+        .subjects(RDF_REIFIES, &statement)
+        .into_iter()
+        .map(|reifier| {
+            // A blank-node reifier has no stable name to write back through
+            // (SPARQL Update forbids blank nodes in a DELETE template), so its
+            // annotation fields stay read-only even in edit mode.
+            let editable = statement_editable && matches!(reifier, Term::NamedNode(_));
+            let fields =
+                predicate_fields(data, shapes, &reifier, registry, &covered, editable, false);
+            (
+                reifier.to_string(),
+                Annotation {
+                    reifier: TermRef::from_term(&reifier),
+                    statement: (*components).clone(),
+                    fields,
+                },
+            )
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0)); // deterministic annotation order
+    out.into_iter().map(|(_, a)| a).collect()
+}
+
+/// Whether the data graph carries ANY RDF 1.2 reification: `rdf:reifies` absent
+/// from the dictionary means no statement in it can be annotated. One cheap probe
+/// per field keeps the annotation lookup off the per-value path of the (vastly
+/// more common) un-annotated graph. [OPUS-5] sq-lsp7k.1.5
+fn has_reification(data: &GraphView) -> bool {
+    data.graph()
+        .id_of(&Term::from(oxrdf::NamedNode::new_unchecked(RDF_REIFIES)))
+        .is_some()
+}
+
+/// `<<( subject predicate object )>>` — `None` when the subject is not a
+/// named/blank node or the predicate is not a valid IRI (neither can occur in
+/// a well-formed statement, so neither can be reified).
+fn triple_term(subject: &Term, predicate: &str, object: &Term) -> Option<Term> {
+    let s = match subject {
+        Term::NamedNode(n) => oxrdf::NamedOrBlankNode::NamedNode(n.clone()),
+        Term::BlankNode(b) => oxrdf::NamedOrBlankNode::BlankNode(b.clone()),
+        _ => return None,
+    };
+    let p = oxrdf::NamedNode::new(predicate).ok()?;
+    Some(Term::Triple(Box::new(oxrdf::Triple::new(
+        s,
+        p,
+        object.clone(),
+    ))))
+}
+
+/// The display label the `dash:LabelRole` field supplies: the first LITERAL
+/// value of the first label-role field in render order. [OPUS-5] sq-lsp7k.1.5
+fn label_role_value(groups: &[FormGroup]) -> Option<String> {
+    let label_role = dash("LabelRole");
+    groups
+        .iter()
+        .flat_map(|g| &g.fields)
+        .filter(|f| f.property_role.as_deref() == Some(label_role.as_str()))
+        .flat_map(|f| &f.values)
+        .find(|v| v.term.kind == "literal")
+        .map(|v| v.term.value.clone())
 }
 
 /// Flattens a property shape's components into renderer-facing [`Constraints`].
@@ -548,6 +776,32 @@ fn constraints_of(
         }
     }
     c
+}
+
+// ---- computed fields (SHACL-AF `sh:values`) ([OPUS-5] sq-lsp7k.1.5) ---------
+
+/// Evaluates the `sh:values` node expression `expr` against `focus`.
+///
+/// With the `computed` feature ON this is `sparq_shacl::eval_node_expression`
+/// (the SHACL-AF node-expression algebra: focus / constant / path-with-
+/// `sh:nodes` / filter shape / intersection / union / the function operators).
+/// It re-parses the shapes graph per call — computed fields are evaluated ON
+/// DEMAND, not amortised across focus nodes.
+///
+/// An expression form the algebra does not support yields no values (the same
+/// lenient "skip" the validator applies), never asserted data.
+#[cfg(feature = "computed")]
+fn computed_values(data: &GraphView, shapes: &GraphView, expr: &Term, focus: &Term) -> Vec<Term> {
+    sparq_shacl::eval_node_expression(data.graph(), shapes.graph(), expr, focus).unwrap_or_default()
+}
+
+/// Without the opt-in `computed` feature a computed field derives with an EMPTY
+/// value set: the field is still flagged `computed` + read-only, so a renderer
+/// reports "not evaluated" rather than showing asserted data the shape does not
+/// describe.
+#[cfg(not(feature = "computed"))]
+fn computed_values(_data: &GraphView, _shapes: &GraphView, _expr: &Term, _focus: &Term) -> Vec<Term> {
+    Vec::new()
 }
 
 // ---- small lookups ----------------------------------------------------------

@@ -61,10 +61,30 @@ assert_eq!(field.widget.editor.as_deref(),
 - **Constraints carried per field** — counts, datatypes, classes, node kinds,
   `sh:in` enumerations, pattern/length/range bounds, `sh:or` unions — the
   widget-scoring inputs.
-- **Presentation flags** — `dash:hidden` (field derives but a renderer omits
-  it), `dash:readOnly` (forces `editable: false` even in edit mode), and
-  `sh:defaultValue` (verbatim seed term to pre-fill an empty field); all three
-  are additive JSON keys, omitted when the property shape does not declare them.
+- **Presentation flags & roles** — `dash:hidden` (field derives but a renderer
+  omits it), `dash:readOnly` (forces `editable: false` even in edit mode),
+  `sh:defaultValue` (verbatim seed term to pre-fill an empty field), and
+  `dash:propertyRole` (carried per field; a `dash:LabelRole` field supplies the
+  form's `label` for the focus node). All additive JSON keys, omitted when the
+  property shape does not declare them.
+- **RDF 1.2 annotations** — a value's reifiers (`R rdf:reifies <<( s p o )>>`,
+  what the Turtle `{| … |}` annotation syntax mints) render as annotation
+  sub-fields carrying the reifier's own provenance/time/confidence properties,
+  and triple terms expose their components structurally. An **IRI** reifier's
+  annotations are editable and diff back against the reifier as subject; a
+  blank-node reifier renders read-only (SPARQL Update forbids blank nodes in a
+  `DELETE` template). Directional language-tagged strings
+  (`rdf:dirLangString`) carry their base direction and drive the same lang
+  widgets as `rdf:langString`.
+- **Computed fields (opt-in `computed`)** — a property shape declaring a
+  SHACL-AF `sh:values` node expression derives as a read-only computed field
+  evaluated on demand. Without the feature the field is still flagged
+  `computed` with an EMPTY value set, so a default build never mistakes
+  asserted data for computed values.
+- **Instantiation guard** — `dash:abstract` (on a node shape or its target
+  class) flags a shape a "create new …" picker must not offer; it stays in the
+  switcher for viewing but never becomes the default selected shape while a
+  concrete shape applies.
 - **Opt-in live validation** — `derive_form_validated(data, shapes, model,
   focus, opts, registry)` runs the base SHACL validator and adds each
   focus-node property violation to the matching editable field's `validation`
@@ -72,7 +92,8 @@ assert_eq!(field.widget.editor.as_deref(),
 - **Pure edit diff** — `FormDiff::between(&before, &after)` reports added and
   removed RDF terms, while `to_sparql_update` renders them as one SPARQL 1.1
   `DELETE`/`INSERT` request. It intentionally excludes read-only, inverse,
-  computed, and non-bare-property-path fields.
+  computed, and non-bare-property-path fields; an annotation change carries its
+  IRI reifier as the change's `subject`.
 - **Headless & opt-in** — consumes `sparq-shacl`'s shapes model; no GUI deps;
   builds for `wasm32-unknown-unknown`; nothing in the default workspace
   depends on it, so the engine core stays lean.
@@ -84,8 +105,8 @@ assert_eq!(field.widget.editor.as_deref(),
   deviations are marked *(sparq)* in the `widgets` module docs).
 - `sparq-shacl` — the shapes model + validation engine this crate consumes.
 - Roadmap: F2 GUI renderer (sq-lsp7k.1.2), DASH suggestions (sq-lsp7k.1.4),
-  F5 RDF 1.2 / computed fields (sq-lsp7k.1.5),
-  F6 sparq-mcp agent tools (sq-lsp7k.1.6).
+  F6 sparq-mcp agent tools (sq-lsp7k.1.6). The GUI widgets for annotation
+  editing and computed fields are follow-on work in `gui/app`.
 
 ## License
 
