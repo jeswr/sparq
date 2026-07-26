@@ -2286,6 +2286,64 @@ mod tests {
         );
     }
 
+    // [SONNET-4.6] sq-y4ll5: direct production-path coverage for prp-ifp and the
+    // OWL-RL guard against the excluded ReflexiveObjectProperty feature.
+    #[test]
+    fn sameas_and_inverse_functional() {
+        // ex:hasSSN a InverseFunctionalProperty ; a hasSSN s ; b hasSSN s
+        // ⊢ a sameAs b. Then eq-rep carries a's marker edge to b.
+        let mut dict = Dict::new();
+        let (ssn, a, b, value, mark) = (
+            ex(&mut dict, "hasSSN"),
+            ex(&mut dict, "a"),
+            ex(&mut dict, "b"),
+            ex(&mut dict, "value"),
+            ex(&mut dict, "marker"),
+        );
+        let ty = dict.intern_iri(rdf::TYPE.as_str());
+        let inv_func = owl(&mut dict, "InverseFunctionalProperty");
+        let p = ex(&mut dict, "p");
+        let mut triples =
+            vec![[ssn, ty, inv_func], [a, ssn, value], [b, ssn, value], [a, p, mark]];
+        materialize_owl_rl(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(
+            has(
+                &dict,
+                &set,
+                "http://ex/a",
+                &format!("{}sameAs", OWL),
+                "http://ex/b"
+            ),
+            "prp-ifp ⊢ sameAs"
+        );
+        assert!(
+            has(&dict, &set, "http://ex/b", "http://ex/p", "http://ex/marker"),
+            "eq-rep substitution after prp-ifp"
+        );
+    }
+
+    #[test]
+    fn reflexive_property_does_not_materialize_self_edges() {
+        // ReflexiveObjectProperty is excluded from OWL 2 RL. Merely declaring :p
+        // owl:ReflexiveProperty must therefore not invent :x :p :x for graph terms.
+        let mut dict = Dict::new();
+        let (p, x, y) = (ex(&mut dict, "p"), ex(&mut dict, "x"), ex(&mut dict, "y"));
+        let ty = dict.intern_iri(rdf::TYPE.as_str());
+        let reflexive = owl(&mut dict, "ReflexiveProperty");
+        let mut triples = vec![[p, ty, reflexive], [x, p, y]];
+        materialize_owl_rl(&mut dict, &mut triples);
+        let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        assert!(
+            !set.contains(&[x, p, x]),
+            "OWL-RL must not derive a reflexive edge for :x"
+        );
+        assert!(
+            !set.contains(&[y, p, y]),
+            "OWL-RL must not derive a reflexive edge for :y"
+        );
+    }
+
     fn rdf(dict: &mut Dict, frag: &str) -> Id {
         dict.intern_iri(&format!(
             "http://www.w3.org/1999/02/22-rdf-syntax-ns#{frag}"
