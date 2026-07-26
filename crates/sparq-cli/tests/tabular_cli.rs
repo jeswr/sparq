@@ -6,12 +6,14 @@
 //! and runs only under it: `cargo test -p sparq-cli --features tabular`.
 //!
 //! The R2RML fixture suite under `tests/fixtures/r2rml/<case>/` is data-driven: each case
-//! holds a `mapping.ttl`, its CSV logical table(s), and the exact `expected.nt` output
-//! (compared as a sorted, deduplicated triple SET — R2RML output is a graph). Cases named
-//! `tc….` are CSV-adaptations of the corresponding W3C R2RML test cases (SQL logical
-//! tables replaced by CSV files, as the mapping headers document); the rest pin the same
-//! constructs the W3C suite exercises (NULLs, percent-encoding, constants, blank nodes,
-//! language tags, multiple tables).
+//! holds a `mapping.ttl`, its CSV logical table(s), and the exact expected output — an
+//! `expected.nt` triple set, or (for a mapping that uses `rr:graphMap`/`rr:graph`) an
+//! `expected.nq` QUAD set. Both are compared sorted + deduplicated, since R2RML output is a
+//! graph/dataset, not a sequence. Cases named `tc….` are CSV-adaptations of the corresponding
+//! W3C R2RML test cases (SQL logical tables replaced by CSV files, as the mapping headers
+//! document); the rest pin the same constructs the W3C suite exercises (NULLs,
+//! percent-encoding, constants, blank nodes, language tags, multiple tables, joins, named
+//! graphs).
 
 #![cfg(feature = "tabular")]
 
@@ -188,7 +190,8 @@ fn direct_out_gz_roundtrip() {
 // ---------------------------------------------------------------------------
 
 /// Data-driven R2RML suite: every `tests/fixtures/r2rml/<case>/` runs through the binary
-/// (`--mapping … --out …`) and must produce EXACTLY the `expected.nt` triple set.
+/// (`--mapping … --out …`) and must produce EXACTLY the expected statement set — `expected.nq`
+/// when the case emits named graphs, otherwise `expected.nt`.
 #[test]
 fn r2rml_fixture_suite() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/r2rml");
@@ -199,11 +202,20 @@ fn r2rml_fixture_suite() {
         .filter(|p| p.is_dir())
         .collect();
     cases.sort();
-    assert!(cases.len() >= 9, "expected the full fixture suite, found {}", cases.len());
+    assert!(cases.len() >= 11, "expected the full fixture suite, found {}", cases.len());
     for case in cases {
         let name = case.file_name().unwrap().to_str().unwrap().to_owned();
         let mapping = case.join("mapping.ttl");
-        let expected = std::fs::read_to_string(case.join("expected.nt")).expect("expected.nt");
+        // A case is a QUAD case iff it ships an expected.nq; exactly one of the two must exist.
+        let nq = case.join("expected.nq");
+        let expected = match std::fs::read_to_string(&nq) {
+            Ok(s) => {
+                assert!(!case.join("expected.nt").exists(), "case {name} has both expected.nt and expected.nq");
+                s
+            }
+            Err(_) => std::fs::read_to_string(case.join("expected.nt"))
+                .unwrap_or_else(|e| panic!("case {name}: no expected.nt / expected.nq ({e})")),
+        };
         let mut csvs: Vec<PathBuf> = std::fs::read_dir(&case)
             .unwrap()
             .map(|e| e.unwrap().path())
@@ -255,6 +267,112 @@ fn r2rml_explicit_table_binding() {
     assert_eq!(code, 0, "stderr: {err}");
     let got = triple_set(&std::fs::read_to_string(&out_nt).unwrap());
     assert_eq!(got.len(), 1, "{got:?}");
+}
+
+// ---------------------------------------------------------------------------
+// [SONNET-4.6] (sq-u1z86) Joins, named graphs, row provenance
+// ---------------------------------------------------------------------------
+
+/// A join is queryable in the same shot: the child's `ex:worksIn` object IS the parent triples
+/// map's subject, so a two-hop BGP resolves an employee to their department NAME.
+#[test]
+fn r2rml_join_one_shot_query() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/r2rml/join-parent-triples-map");
+    let (code, out, err) = run3(&[
+        "tabular",
+        s(&root.join("dept.csv")),
+        s(&root.join("emp.csv")),
+        "--mapping",
+        s(&root.join("mapping.ttl")),
+        "--query",
+        "SELECT ?d WHERE { <http://example.com/emp/1> <http://example.com/worksIn> ?dept . ?dept <http://example.com/name> ?d }",
+        "--format",
+        "tsv",
+    ]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(out.contains("\"Engineering\""), "{out}");
+}
+
+/// A NULL join key never joins, so employee 3 (empty `dept` cell) gets no `ex:worksIn` triple
+/// — the join is a filter, not an outer join that invents a term.
+#[test]
+fn r2rml_join_null_key_emits_nothing() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/r2rml/join-parent-triples-map");
+    let (code, out, err) = run3(&[
+        "tabular",
+        s(&root.join("dept.csv")),
+        s(&root.join("emp.csv")),
+        "--mapping",
+        s(&root.join("mapping.ttl")),
+        "--query",
+        "SELECT (COUNT(*) AS ?n) WHERE { <http://example.com/emp/3> <http://example.com/worksIn> ?d }",
+        "--format",
+        "tsv",
+    ]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(out.contains('0'), "{out}");
+}
+
+/// With graph maps the in-process load takes the DATASET path, so `GRAPH ?g { … }` sees the
+/// named graphs instead of everything folding into the default graph.
+#[test]
+fn r2rml_graph_map_is_queryable_as_a_dataset() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/r2rml/graph-map");
+    let (code, out, err) = run3(&[
+        "tabular",
+        s(&root.join("record.csv")),
+        "--mapping",
+        s(&root.join("mapping.ttl")),
+        "--query",
+        "SELECT ?g WHERE { GRAPH ?g { <http://example.com/rec/1> <http://example.com/secret> ?v } } ORDER BY ?g",
+        "--format",
+        "tsv",
+    ]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(err.contains("quads"), "the summary must say quads, not triples: {err}");
+    assert!(out.contains("http://example.com/g/acme"), "{out}");
+    assert!(out.contains("http://example.com/vault"), "{out}");
+    // The other tenant's graph must NOT hold rec/1's secret.
+    assert!(!out.contains("globex"), "{out}");
+}
+
+/// `--provenance` stamps each generated row subject with its 1-based row number and logical
+/// table, under sparq's own vocabulary rather than `--base`.
+#[test]
+fn provenance_triples_in_both_modes() {
+    let dir = scratch("provenance");
+    let csv = write(&dir, "people.csv", "name\nalice\nbob\n");
+    let out_nt = dir.join("direct.nt");
+    let (code, _, err) =
+        run3(&["tabular", s(&csv), "--class", "none", "--provenance", "--out", s(&out_nt)]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(
+        triple_set(&std::fs::read_to_string(&out_nt).unwrap()),
+        triple_set(
+            r#"<http://example.com/people/row/1> <http://example.com/people#name> "alice" .
+<http://example.com/people/row/1> <https://sparq.dev/ns/tabular#row> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<http://example.com/people/row/1> <https://sparq.dev/ns/tabular#table> "people" .
+<http://example.com/people/row/2> <http://example.com/people#name> "bob" .
+<http://example.com/people/row/2> <https://sparq.dev/ns/tabular#row> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<http://example.com/people/row/2> <https://sparq.dev/ns/tabular#table> "people" ."#
+        )
+    );
+
+    // R2RML has no row concept of its own, which is exactly where --provenance earns its keep.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/r2rml/tc0001a-template-class");
+    let (code, out, err) = run3(&[
+        "tabular",
+        s(&root.join("student.csv")),
+        "--mapping",
+        s(&root.join("mapping.ttl")),
+        "--provenance",
+        "--query",
+        "SELECT ?r ?t WHERE { ?s <https://sparq.dev/ns/tabular#row> ?r ; <https://sparq.dev/ns/tabular#table> ?t }",
+        "--format",
+        "tsv",
+    ]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(out.contains('1') && out.contains("\"student\""), "{out}");
 }
 
 // ---------------------------------------------------------------------------

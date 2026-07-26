@@ -1,0 +1,10 @@
+<http://example.com/rec/1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/Record> <http://example.com/g/acme> .
+<http://example.com/rec/1> <http://example.com/secret> "s1" <http://example.com/g/acme> .
+<http://example.com/rec/1> <http://example.com/secret> "s1" <http://example.com/vault> .
+<http://example.com/rec/1> <http://example.com/public> "p1" <http://example.com/g/acme> .
+<http://example.com/rec/1> <http://example.com/public> "p1" .
+<http://example.com/rec/2> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/Record> <http://example.com/g/globex> .
+<http://example.com/rec/2> <http://example.com/secret> "s2" <http://example.com/g/globex> .
+<http://example.com/rec/2> <http://example.com/secret> "s2" <http://example.com/vault> .
+<http://example.com/rec/2> <http://example.com/public> "p2" <http://example.com/g/globex> .
+<http://example.com/rec/2> <http://example.com/public> "p2" .

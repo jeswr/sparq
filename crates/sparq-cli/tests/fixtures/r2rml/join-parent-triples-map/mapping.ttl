@@ -1,0 +1,23 @@
+# [SONNET-4.6] (sq-u1z86) A referencing object map: rr:parentTriplesMap + rr:joinCondition
+# across two CSV logical tables. The CSV-adapted shape of the W3C R2RML join test cases (the
+# SQL logical tables are CSV files bound by file stem). Employee 3's dept cell is NULL, so it
+# never joins; dept OPS has no employees, so the join is not required to be total either way.
+@prefix rr: <http://www.w3.org/ns/r2rml#> .
+@prefix ex: <http://example.com/> .
+
+<#Dept> a rr:TriplesMap ;
+  rr:logicalTable [ rr:tableName "dept" ] ;
+  rr:subjectMap [ rr:template "http://example.com/dept/{code}" ; rr:class ex:Department ] ;
+  rr:predicateObjectMap [ rr:predicate ex:name ; rr:objectMap [ rr:column "name" ] ] .
+
+<#Emp> a rr:TriplesMap ;
+  rr:logicalTable [ rr:tableName "emp" ] ;
+  rr:subjectMap [ rr:template "http://example.com/emp/{id}" ; rr:class ex:Employee ] ;
+  rr:predicateObjectMap [ rr:predicate ex:label ; rr:objectMap [ rr:column "name" ] ] ;
+  rr:predicateObjectMap [
+    rr:predicate ex:worksIn ;
+    rr:objectMap [
+      rr:parentTriplesMap <#Dept> ;
+      rr:joinCondition [ rr:child "dept" ; rr:parent "code" ]
+    ]
+  ] .

@@ -112,6 +112,10 @@ topk-lazy-strkey = ["sparq-engine/topk-lazy-strkey"]
 # chunks into the existing parallel ingest (`Graph::load_reader_parallel`) — so `.csv.gz` /
 # `.csv.zst` / `.csv.bz2` inputs reuse `open_reader`'s transparent decompression. Enable with
 # `cargo build -p sparq-cli --features tabular`.
+# [SONNET-4.6] (sq-u1z86) Extended in place — still ZERO new dependencies — with R2RML
+# cross-CSV joins (`rr:parentTriplesMap`/`rr:joinCondition`), named-graph output
+# (`rr:graphMap`/`rr:graph`, which emits N-Quads and loads via `Graph::load_dataset`), and the
+# `--provenance` row/table provenance triples.
 tabular = []
 # [GPT-5.6] (sq-lsp7k.28) `diff <file-a> <file-b> [--exact]` compares the two RDF
 # triple sets and emits a deterministic N-Triples patch. OFF by default: without this

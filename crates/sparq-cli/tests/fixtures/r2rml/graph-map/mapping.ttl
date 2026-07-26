@@ -1,0 +1,17 @@
+# [SONNET-4.6] (sq-u1z86) Named-graph output: rr:graphMap on the subject map routes the row's
+# class triple and every predicate-object map into a per-row graph; a second rr:graph on one
+# predicate-object map UNIONS with it, so `ex:secret` lands in two graphs. `rr:defaultGraph`
+# names the default graph, and it too UNIONS with the subject map's graph — so `ex:public`
+# appears BOTH as a plain default-graph triple and in the per-row graph. Output is N-QUADS.
+@prefix rr: <http://www.w3.org/ns/r2rml#> .
+@prefix ex: <http://example.com/> .
+
+<#Rows> a rr:TriplesMap ;
+  rr:logicalTable [ rr:tableName "record" ] ;
+  rr:subjectMap [
+    rr:template "http://example.com/rec/{id}" ;
+    rr:class ex:Record ;
+    rr:graphMap [ rr:template "http://example.com/g/{tenant}" ]
+  ] ;
+  rr:predicateObjectMap [ rr:predicate ex:secret ; rr:objectMap [ rr:column "secret" ] ; rr:graph ex:vault ] ;
+  rr:predicateObjectMap [ rr:predicate ex:public ; rr:objectMap [ rr:column "public" ] ; rr:graph rr:defaultGraph ] .
