@@ -194,6 +194,29 @@ class TestInstructionTextIsNotAPass(unittest.TestCase):
     def test_a_genuine_trailing_verdict_line_does_parse(self):
         self.assertEqual(alarm.verdict_polarity(f"{SHA_A}\n\nVERDICT: pass\n\n"), "pass")
 
+    # FOUND BY MUTATION: dropping the `^` anchor from VERDICT_LINE_RE (leaving the `$`)
+    # survived the whole suite. Every existing negative case put text AFTER the literal,
+    # so nothing covered text BEFORE it. That gap matters more here than almost anywhere:
+    # every comment in this repo opens with the `> 🤖 SPARQ agent` blockquote convention,
+    # so QUOTING another agent's verdict — `> VERDICT: pass` — is the natural shape of a
+    # false positive, and the unanchored regex scores it as a real pass.
+    def test_a_BLOCKQUOTED_verdict_is_not_a_verdict(self):
+        self.assertIsNone(alarm.verdict_polarity("> VERDICT: pass"))
+
+    def test_a_verdict_with_ANY_prefix_text_is_not_a_verdict(self):
+        for line in ("Final answer: VERDICT: pass", "- VERDICT: pass", "1. VERDICT: fail",
+                     "not a VERDICT: pass", "* VERDICT: pass"):
+            with self.subTest(line=line):
+                self.assertIsNone(alarm.verdict_polarity(line))
+
+    def test_quoting_someone_elses_verdict_leaves_the_pr_unreviewed(self):
+        quoted = [comment(f"Copying the earlier review of {SHA_A}:\n\n> VERDICT: pass")]
+        self.assertEqual(alarm.classify_pr(pr(), quoted, REPO), "blind-spot")
+
+    def test_leading_whitespace_is_still_tolerated(self):
+        # The guard must reject PREFIX TEXT, not indentation — the line is stripped first.
+        self.assertEqual(alarm.verdict_polarity("   VERDICT: pass"), "pass")
+
 
 class TestRegistryLaneReachability(unittest.TestCase):
     """The reachability predicate is the claim this whole alarm rests on: it must be the
