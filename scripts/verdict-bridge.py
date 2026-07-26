@@ -547,7 +547,14 @@ PR_LIST_QUERY = """query($owner:String!,$name:String!,$cursor:String){
         number state isDraft baseRefName headRefOid mergeable
         author{login}
         labels(first:100){nodes{name} pageInfo{hasNextPage}}
-        commits(last:250){
+        # 100 is GitHub's DOCUMENTED per-connection maximum.  A larger `last:` is
+        # currently accepted (probed: `last:250` returns without an error), but resting a
+        # security guard on undocumented leniency is how it breaks silently later — and
+        # if the server ever capped instead of erroring, the guard would read a PARTIAL
+        # contributor set.  `totalCount` makes truncation observable either way, and
+        # `contributors_complete=False` then refuses every grant.  Measured ceiling on
+        # the live population: 10 commits.
+        commits(last:100){
           totalCount
           nodes{commit{
             message

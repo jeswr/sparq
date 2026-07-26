@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -1298,6 +1299,23 @@ class TestAuthorXorReviewer(unittest.TestCase):
                 self.assertIsNone(vb.VERDICT_RE.search(shape), shape)
                 self.assertIsNone(vb.VERDICT_SHAPE_RE.search(shape), shape)
                 self.assertIsNone(vb.trailing_verdict(shape), shape)
+
+    def test_the_commits_page_is_pinned_to_the_documented_maximum(self):
+        """Narrowing this silently WEDGES the lane instead of opening a hole.
+
+        With a page smaller than the PR's commit count, `totalCount` exceeds the nodes
+        read, `contributors_complete` goes False and EVERY grant is refused — fail-closed,
+        but a total arming stall. Measured as a mutation survivor (M37, `last:1`) before
+        this test existed. 100 is GitHub's documented per-connection maximum, so it is
+        also the ceiling.
+        """
+        found = re.search(r"commits\(last:(\d+)\)", vb.PR_LIST_QUERY)
+        self.assertIsNotNone(found, "the commits connection lost its page size")
+        self.assertEqual(
+            int(found.group(1)),
+            100,
+            "100 is both the documented GitHub maximum and 10x the live commit ceiling",
+        )
 
     def test_parse_node_populates_the_contributor_set_from_the_live_shape(self):
         b = bridge(FakeGitHub([]))
