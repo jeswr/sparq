@@ -47,8 +47,8 @@ design is strictly downstream of that, and should not be built until that headro
 
 ### Correction to the brief's premise
 
-The brief framed the free-runner envelope as "~16 GB" and treated the constraint question as
-"where do we get more boxes". Two corrections:
+The brief's own diagnosis was largely right, and its "~16 GB free-runner envelope" figure is
+accurate. One addition and one genuine gap:
 
 - The brief said the binding constraint is worker yield (~20 %), behind it batch fill and a
   self-imposed dispatch concurrency group, "none of them capacity". I agree, and add the
