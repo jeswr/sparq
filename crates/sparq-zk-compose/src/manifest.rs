@@ -911,10 +911,20 @@ pub enum ProofInputs {
     /// `datatype_const = blake3(datatype IRI)` is PUBLIC (it folds the datatype so
     /// a cross-datatype value collision cannot occur).
     ///
+    /// The `xsd:boolean` VALUE LANE SHARES THIS VARIANT (sq-5xdlk): the boolean
+    /// hooks `{0 = false, 1 = true}` lie inside this member's `u64` comparison
+    /// domain, so no new Noir member exists — the boolean lane simply carries
+    /// `datatype_const = `[`boolean_datatype_const`]`()` and `bound ∈ {0, 1}`, and
+    /// the lanes are separated by that public constant alone (it is folded into
+    /// `value_component`, so an integer leaf's honest witness cannot satisfy a
+    /// boolean member call, and vice versa). Build one with
+    /// [`crate::build::build_filter_value_dl_boolean`].
+    ///
     /// DOCUMENTED RISK: this carries the INV-VL downgrade (value↔lexical agreement
     /// is trusted-issuer-honesty, not machine-enforced; #769 accepted, CR-G8 /
     /// sq-qhy4). NOT externally audited; no soundness / privacy claim.
     // [OPUS-4.8] sq-xojl: dual-leaf value-lane FILTER inputs. Opt-in, NOT-yet-sound.
+    // [OPUS-5] sq-5xdlk: + the xsd:boolean lane, by datatype_const alone.
     #[cfg(feature = "dual-leaf")]
     #[serde(rename = "filter_value_dl")]
     FilterValueDl {
@@ -922,10 +932,14 @@ pub enum ProofInputs {
         /// The hidden column's DUAL-LEAF term encoding (the scan-proof anchor).
         operand_enc: FieldHex,
         op: FilterOp,
-        /// The FILTER's constant operand (a non-negative integer).
+        /// The FILTER's constant operand — a non-negative integer, or (on the
+        /// `xsd:boolean` lane, sq-5xdlk) the boolean hook `0` = `false` / `1` =
+        /// `true`.
         bound: u64,
         /// `blake3(datatype IRI)` as a field — the public `DATATYPE_CONST` folded
-        /// into `value_component`.
+        /// into `value_component`. This is what SELECTS the datatype lane:
+        /// `blake3(xsd:integer)` for the integer lane,
+        /// [`boolean_datatype_const`]`()` for the boolean one.
         datatype_const: FieldHex,
         /// The disclosed verdict.
         expected: bool,
@@ -1117,6 +1131,44 @@ impl ProofInputs {
             ProofInputs::PathReach { id, .. } => id,
         }
     }
+}
+
+/// The PUBLIC `datatype_const` of the DUAL-LEAF `xsd:boolean` value lane
+/// (sq-5xdlk) — `blake3_field(xsd:boolean IRI)`, exactly the constant
+/// `sparq_zk::dual_leaf_boolean::encode_boolean` (the host half, sq-hh7a4) folds
+/// into the committed leaf's `value_component`.
+///
+/// # The boolean lane adds NO new Noir member
+///
+/// It REUSES [`CircuitId::FilterValueDl`] (`filter_value_dl_int`): that member's
+/// `datatype_const` is already a PUBLIC input, and its `u64` comparison domain
+/// covers the boolean value hooks `{0 = false, 1 = true}` — so the XSD boolean
+/// order `false < true` (and hence the degenerate `LT`/`LE`/`GT`/`GE` results
+/// alongside `EQ`/`NE`) falls out of the integer comparison unchanged. The lane
+/// is therefore pure WIRING: host and verifier pick THIS constant instead of
+/// `blake3(xsd:integer)`.
+///
+/// # Lane separation is the public `datatype_const`, and only that
+///
+/// `datatype_const` is folded into `value_component = h3(VALUE_HOOK,
+/// DATATYPE_CONST, LANG_NONE)`, and `blake3(xsd:boolean) != blake3(xsd:integer)`.
+/// So the honest witness for a committed `"1"^^xsd:integer` leaf recomputes a
+/// DIFFERENT leaf under this constant and fails the member's
+/// `assert_eq(leaf, operand_enc)` binding — and symmetrically for a boolean leaf
+/// under the integer constant. That is a BINDING argument resting on Poseidon2
+/// preimage resistance (a prover free to search preimages is out of scope of this
+/// statement), NOT an audited soundness claim.
+///
+/// DOCUMENTED RISK: the boolean lane inherits the value lane's INV-VL downgrade
+/// — value↔lexical agreement is TRUSTED-ISSUER-HONESTY, not machine-enforced
+/// (#769 accepted; gap CR-G8 / sq-qhy4). The ZK estate is internally re-audited
+/// but NOT externally audited; nothing here is a soundness or privacy guarantee.
+// [OPUS-5] sq-5xdlk: boolean value-lane wiring. Opt-in (`dual-leaf`), NOT-yet-sound.
+#[cfg(feature = "dual-leaf")]
+pub fn boolean_datatype_const() -> FieldHex {
+    FieldHex(field_to_hex(&sparq_zk::dual_leaf::datatype_const(
+        sparq_zk::dual_leaf_boolean::XSD_BOOLEAN,
+    )))
 }
 
 /// One composed sub-proof: the circuit member, its public inputs, and the
