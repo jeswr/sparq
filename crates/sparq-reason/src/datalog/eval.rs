@@ -384,12 +384,17 @@ fn aggregate_table(dict: &mut Dict, agg: &AggAtom, store: &FactStore) -> Vec<Row
 /// that is why they are stratified — but they must still be a FUNCTION of the completed
 /// lower strata. So the fold order is pinned:
 ///
-/// * `SUM`/`AVG` add in ascending [`Num::cmp_total`] order, ties broken by dictionary
-///   [`Id`], so the result depends only on the group's multiset of value terms;
+/// * `SUM`/`AVG` add in ascending [`Num::cmp_total`] order, ties broken by RDF-term
+///   CONTENT (`cmp_term_content`), so the result depends only on the group's multiset
+///   of value terms;
 /// * `MIN`/`MAX` are order-independent by construction: `cmp_total` is a total order, and
 ///   a tie between two DISTINCT terms of equal value (`"1"^^xsd:integer` vs
-///   `"1.0"^^xsd:double`, or `+0.0` vs `-0.0`) is resolved to the smaller `Id` for both
-///   functions.
+///   `"1.0"^^xsd:double`, or `+0.0` vs `-0.0`) is resolved by that same content order for
+///   both functions.
+///
+/// The tie-break is deliberately NOT the dictionary [`Id`]: an id is assigned by
+/// interning order, which is not itself a function of the completed lower strata — see
+/// `cmp_term_content`.
 ///
 /// ## `NaN` and `-0.0`
 ///
@@ -398,9 +403,10 @@ fn aggregate_table(dict: &mut Dict, agg: &AggAtom, store: &FactStore) -> Vec<Row
 /// deliberately NOT a row-level failure here, unlike `FILTER` — which uses the
 /// *relational* comparison, where `NaN` is an XPath type error. `SUM`/`AVG` propagate
 /// `NaN` per IEEE-754. `+0.0` and `-0.0` compare EQUAL under `cmp_total`, so the sign of
-/// the term `MIN`/`MAX` returns for such a group is decided by the `Id` tie-break: it is
-/// deterministic, but it is not determined by the values alone. `SUM`/`AVG` follow
-/// IEEE-754 (`+0.0 + -0.0` is `+0.0`).
+/// the term `MIN`/`MAX` returns for such a group is decided by the content tie-break
+/// (`-0.0` sorts before `0.0` lexically): it is not determined by the values alone, but it
+/// IS determined by the group's terms. `SUM`/`AVG` follow IEEE-754 (`+0.0 + -0.0` is
+/// `+0.0`).
 // `pub(super)` so the acceptance suite can pin the fold-order rule directly, with the
 // group handed to it in adversarial permutations (the join/hash order is not steerable
 // from the program text). [SONNET-4.6]
@@ -416,7 +422,7 @@ pub(super) fn fold_numeric_group(
             .copied()
             .reduce(|a, b| {
                 let keep_a = match a.1.cmp_total(b.1) {
-                    Ordering::Equal => a.0 <= b.0,
+                    Ordering::Equal => cmp_term_content(dict, a.0, b.0) != Ordering::Greater,
                     Ordering::Less => func == AggFunc::Min,
                     Ordering::Greater => func == AggFunc::Max,
                 };
@@ -429,7 +435,10 @@ pub(super) fn fold_numeric_group(
             .map(|(id, _)| id),
         AggFunc::Sum | AggFunc::Avg => {
             let count = values.len() as i64;
-            values.sort_by(|a, b| a.1.cmp_total(b.1).then_with(|| a.0.cmp(&b.0)));
+            values.sort_by(|a, b| {
+                a.1.cmp_total(b.1)
+                    .then_with(|| cmp_term_content(dict, a.0, b.0))
+            });
             values
                 .iter()
                 .map(|(_, n)| *n)
@@ -447,6 +456,38 @@ pub(super) fn fold_numeric_group(
                     ))
                 })
         }
+    }
+}
+
+/// A total order on two term ids by RDF-term CONTENT — the tie-break
+/// [`fold_numeric_group`] applies to two terms of equal numeric value.
+///
+/// It is deliberately NOT the dictionary [`Id`] order. An `Id` is assigned by INTERNING
+/// order, which is not a function of the completed lower strata: an earlier stratum's
+/// aggregate mints its computed literals while iterating a hash map, so two evaluations
+/// of the same program over the same facts (semi-naive vs forced-full, or a different
+/// insertion order) can intern two equal-valued terms with opposite ids — as can two
+/// separately loaded copies of logically equal input. An id tie-break would then let
+/// `MIN`/`MAX` emit a DIFFERENT input term, and `SUM`/`AVG` add equal-valued operands in
+/// a different (promotion-sensitive, so not value-preserving) order, for the same logical
+/// facts. Ordering the literal's `(datatype, lexical form, language)` instead depends on
+/// nothing but the terms themselves.
+///
+/// Every id reaching here is a numeric literal — the caller drops rows whose value term
+/// is not one — so the non-literal arm is unreachable; it falls back to the id purely to
+/// keep the order total.
+fn cmp_term_content(dict: &Dict, a: Id, b: Id) -> Ordering {
+    if a == b {
+        return Ordering::Equal;
+    }
+    match (dict.term(a), dict.term(b)) {
+        (oxrdf::Term::Literal(x), oxrdf::Term::Literal(y)) => x
+            .datatype()
+            .as_str()
+            .cmp(y.datatype().as_str())
+            .then_with(|| x.value().cmp(y.value()))
+            .then_with(|| x.language().cmp(&y.language())),
+        _ => a.cmp(&b),
     }
 }
 
