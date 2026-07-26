@@ -53,9 +53,8 @@ For a typed view (super-classes, subsumption test, unsatisfiable classes) use
   EL profile's `ObjectHasSelf` (`∃r.Self`, local reflexivity): `X ⊑ ∃r.Self ⇒ (X,X) ∈ R(r)`,
   `∃r.Self ⊑ D` threads via the self-concept atom + CR1, and a SAME-NOMINAL self-link `({a},{a})
   ∈ R(r)` (an asserted/derived `a r a`) reads off as `∃r.Self ∈ S({a})` (CRs3 — sound: a nominal
-  is a singleton). With `rbox`, `∃r.Self` propagates to `∃s.Self` for `r ⊑* s`. A general
-  `(X,X)` link from `X ⊑ ∃r.X` never triggers either (load-bearing);
-  a malformed shape stays a counted skip. Under `abox` self-loops realise as `a r a` (WG -001/-002).
+  is a singleton). With `rbox`, `∃r.Self` propagates to `∃s.Self` for `r ⊑* s`. Generic `(X,X)`
+  links never trigger either; malformed shapes remain counted skips. Under `abox`, self-loops realise as `a r a` (WG -001/-002).
 - **RBox role automaton + lattice readoff** *(opt-in `rbox` feature, Phases E2/E3)* — `rdfs:subPropertyOf`
   inclusions (**CR10**), `owl:propertyChainAxiom` + `owl:TransitiveProperty` compositions (**CR11**), incl. the
   SNOMED-critical right-identity `r ∘ s ⊑ s`; and a **role-lattice readoff**: `classify_graph` also emits the
