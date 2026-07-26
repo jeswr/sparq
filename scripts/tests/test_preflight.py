@@ -313,6 +313,129 @@ class NonMechanicalObligationsAreStated(unittest.TestCase):
         self.assertIn("READ YOUR OWN PROSE AGAINST YOUR OWN DIFF", pf.NON_MECHANICAL)
 
 
+WORKER_BRIEFS = (
+    "sparq-rust-impl.md",
+    "sparq-rust-feature.md",
+    "sparq-ci-infra.md",
+    "sparq-docs.md",
+    "sparq-site.md",
+    "sparq-perf-engineer.md",
+)
+
+
+class WorkerBriefsCarryThePresubmitBlock(unittest.TestCase):
+    """One brief silently losing a clause is a known, repeated failure here.
+
+    A worker reads only its OWN brief, so an obligation that lives in five of six
+    is absent for the sixth. These tests red the moment a brief drops the block or
+    the copies drift apart.
+    """
+
+    def _briefs(self) -> dict[str, str]:
+        return {
+            n: (REPO_ROOT / ".claude" / "agents" / n).read_text()
+            for n in WORKER_BRIEFS
+        }
+
+    def test_every_worker_brief_names_the_preflight_runner(self) -> None:
+        missing = [n for n, t in self._briefs().items() if "scripts/preflight.py" not in t]
+        self.assertEqual(missing, [], f"worker briefs missing the preflight step: {missing}")
+
+    def test_every_worker_brief_carries_the_mutation_obligation(self) -> None:
+        missing = [n for n, t in self._briefs().items() if "MUTATE YOUR HEADLINE GUARD" not in t]
+        self.assertEqual(missing, [], f"briefs missing the mutation obligation: {missing}")
+
+    def test_every_worker_brief_carries_the_claim_vs_code_obligation(self) -> None:
+        missing = [
+            n for n, t in self._briefs().items()
+            if "READ YOUR OWN PROSE AGAINST YOUR OWN DIFF" not in t
+        ]
+        self.assertEqual(missing, [], f"briefs missing the claim-vs-code obligation: {missing}")
+
+    def test_the_block_is_byte_identical_across_briefs(self) -> None:
+        # Divergent copies are how a "shared contract" quietly stops being shared.
+        marker = "## Before you open the PR (HARD — identical in every worker brief)"
+        blocks = {}
+        for n, t in self._briefs().items():
+            self.assertIn(marker, t, f"{n} lost the block header")
+            body = t.split(marker, 1)[1]
+            # the block ends at the next top-level heading, or EOF
+            end = body.find("\n## ")
+            blocks[n] = body[:end] if end != -1 else body.rstrip() + "\n"
+        distinct = set(b.rstrip() for b in blocks.values())
+        self.assertEqual(
+            len(distinct), 1,
+            "the pre-submit block has diverged across worker briefs:\n"
+            + "\n".join(f"  {n}: {len(b)} chars" for n, b in blocks.items()),
+        )
+
+
+class TheYamlSeamIsGating(unittest.TestCase):
+    """The wiring, not just the logic.
+
+    Measured on this repo: in an 18-mutant run every UNCAUGHT mutant lived at the
+    workflow `if:`/step/call-site, not in the Python. A checker wired into an
+    advisory job, guarded by an `if:`, or carrying `continue-on-error` is a checker
+    that does not check. These tests red on each of those.
+    """
+
+    WORKFLOW = ".github/workflows/docs-quality.yml"
+    STEP_RUNS = (
+        "python3 scripts/preflight.py --self-test",
+        "python3 scripts/tests/test_preflight.py",
+    )
+
+    def _job_hosting(self, run_cmd: str):
+        import yaml
+
+        doc = yaml.safe_load((REPO_ROOT / self.WORKFLOW).read_text())
+        for jid, job in doc["jobs"].items():
+            for step in job.get("steps", []):
+                if run_cmd in str(step.get("run", "")):
+                    return jid, job, step
+        return None, None, None
+
+    def test_both_preflight_legs_are_wired_into_the_workflow(self) -> None:
+        for cmd in self.STEP_RUNS:
+            jid, _job, _step = self._job_hosting(cmd)
+            self.assertIsNotNone(jid, f"no step in {self.WORKFLOW} runs: {cmd}")
+
+    def test_the_hosting_job_name_carries_no_advisory_token(self) -> None:
+        # ci-summary EXCLUDES any check-run whose name matches
+        # \b(advisory|informational|non-blocking)\b. Renaming the job to include one
+        # of those tokens silently un-gates every leg in it.
+        import re as _re
+
+        for cmd in self.STEP_RUNS:
+            jid, job, _step = self._job_hosting(cmd)
+            assert job is not None
+            name = str(job.get("name") or jid)
+            self.assertIsNone(
+                _re.search(r"\b(advisory|informational|non-blocking)\b", name, _re.I),
+                f"{cmd} is hosted by job {name!r}, which ci-summary would EXCLUDE",
+            )
+
+    def test_neither_leg_can_swallow_its_own_failure(self) -> None:
+        # continue-on-error at EITHER the job or the step level turns a red leg
+        # green. This is the exact shape of the exit-zero swallowing defect the
+        # verdict corpus reports 11 times.
+        for cmd in self.STEP_RUNS:
+            jid, job, step = self._job_hosting(cmd)
+            assert job is not None and step is not None
+            self.assertNotEqual(job.get("continue-on-error"), True,
+                                f"job {jid} hosting {cmd} is continue-on-error")
+            self.assertNotEqual(step.get("continue-on-error"), True,
+                                f"the step running {cmd} is continue-on-error")
+
+    def test_neither_leg_is_conditionally_skipped(self) -> None:
+        # An `if:` on the step is the cheapest way to make a gate vacuous.
+        for cmd in self.STEP_RUNS:
+            _jid, _job, step = self._job_hosting(cmd)
+            assert step is not None
+            self.assertIsNone(step.get("if"),
+                              f"the step running {cmd} is guarded by an if:")
+
+
 class SelfTestIsWired(unittest.TestCase):
     def test_self_test_passes(self) -> None:
         proc = subprocess.run(

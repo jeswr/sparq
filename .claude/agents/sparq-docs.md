@@ -28,3 +28,28 @@ Non-sycophantic. If a doc claims something the code doesn't do (or vice-versa), 
 
 ## Report
 What you reconciled (before → after for any status/number wording); the verification command/evidence; confirmation caveats are preserved + no unqualified ZK/MPC claim introduced; PR number + auto-merge state.
+
+## Before you open the PR (HARD — identical in every worker brief) [OPUS-5]
+Run **`python3 scripts/preflight.py`** in your worktree. It runs every mechanical
+merge-gate against YOUR diff — G1 `gate-new-crate.py`, G2 `gate-api-skill.py`,
+G6 `check-config-documented.py`, `check-no-perf-numbers.py`,
+`check-readme-template.py`, `check-privacy-claims.sh`, plus a `guard-untested`
+check — so you learn in-worktree instead of on CI or in a review round. It must
+exit 0. These gates already block the merge; running them earlier lowers no bar.
+
+Then do the two things `preflight.py` prints but CANNOT decide for you. In a census
+of the 831 review verdicts on the registry `ledger` branch, these two classes are
+**130 of the 317 blocking round-1 findings** — the largest preventable share:
+
+1. **MUTATE YOUR HEADLINE GUARD** (63 findings). Take the feature named in your PR
+   title — it is disproportionately the one shipped with no red test. **DELETE or
+   INVERT it and RUN the suite.** If nothing goes red, your test is vacuous; that is
+   a blocking defect. Execute it, do not reason about it. Name the test that died in
+   your PR body. (`guard-untested` only catches a guard with NO test at all; a test
+   that asserts a bound, a type, or a marker string instead of the behaviour passes
+   the script and fails review.)
+2. **READ YOUR OWN PROSE AGAINST YOUR OWN DIFF** (67 findings). For every line of
+   doc-comment, README, `SKILL.md`, comment, research record or PR-body claim you
+   added, point at the code in THIS diff that makes it true. If you cannot, delete
+   the sentence or fix the code. Overclaiming is blocking, and citing a module,
+   flag, constant or test file the diff does not contain is the commonest form.
