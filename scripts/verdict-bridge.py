@@ -1041,6 +1041,40 @@ def self_test() -> None:
     )
     assert decide(pr_fixture(), [old_pass, review_fail, newest_review_pass]).action != "promote"
 
+    # AUTHOR XOR REVIEWER.  A verdict from the PR's own contributor set may WITHHOLD but
+    # never GRANT.  The control arm is load-bearing: with the guard deleted BOTH arms
+    # promote and the second assertion fires, so this is non-vacuous for the same-login
+    # case that is the whole reason the guard exists.
+    contrib = pr_fixture(contributors=frozenset({"jeswr", "claude"}))
+    self_pass = comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr")
+    indep_pass = comment(f"{HEAD}\n\nVERDICT: pass", user="reviewer")
+    assert decide(contrib, [indep_pass]).action == "promote", "control arm must promote"
+    refused = decide(contrib, [self_pass])
+    assert refused.action != "promote", refused
+    assert refused.self_review and "SELF-REVIEW" in refused.reason, refused
+    # ... and the bot-suffix spelling difference does not launder it.
+    app_contrib = pr_fixture(contributors=frozenset({"sparq-orchestrator"}))
+    app_self = comment(f"{HEAD}\n\nVERDICT: pass", user="sparq-orchestrator[bot]")
+    assert decide(app_contrib, [app_self]).action != "promote"
+    # ... a contributor's FAIL still retracts (withhold-only, never a DoS on retraction).
+    own_fail = comment(f"{HEAD}\n\nVERDICT: fail", user="jeswr")
+    held = pr_fixture(
+        labels={REVIEW_ATTESTATION}, contributors=frozenset({"jeswr", "claude"})
+    )
+    assert decide(held, [own_fail]).action == "retract"
+    # ... an unreadable contributor set refuses every grant, but not a retraction.
+    torn = pr_fixture(contributors_complete=False)
+    assert decide(torn, [indep_pass]).action != "promote"
+    assert (
+        decide(
+            pr_fixture(labels={REVIEW_ATTESTATION}, contributors_complete=False),
+            [comment(f"{HEAD}\n\nVERDICT: fail", user="reviewer")],
+        ).action
+        == "retract"
+    )
+    # ... and a clean PR does not report a phantom self-review.
+    assert not decide(contrib, [indep_pass]).self_review
+
     print(f"{PROGRAM} self-test: PASS")
 
 
