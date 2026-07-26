@@ -326,11 +326,15 @@ function aggregateExpression(aggregate: BuilderAggregate): string {
 }
 
 /**
- * Disjoint-set roots over the nodes joined by non-negated edges (NOT EXISTS never joins). Nodes
- * a scoped group owns (`scopedOwner`) are not counted: they live inside that group rather than
- * standing alone in the top-level body, so they are never a disconnected group of their own.
+ * Disjoint-set roots over the nodes joined by non-negated edges (NOT EXISTS never joins). Nodes a
+ * scoped group owns (a non-null `container` entry) are not counted: they live inside that group
+ * rather than standing alone in the top-level body, so they are never a disconnected group of
+ * their own.
  */
-function connectedComponents(model: BuilderModel, scopedOwner: Map<string, BuilderEdge>): number {
+function connectedComponents(
+  model: BuilderModel,
+  container: Map<string, BuilderEdge | null>,
+): number {
   const parent = new Map<string, string>();
   const find = (id: string): string => {
     let root = id;
@@ -349,7 +353,7 @@ function connectedComponents(model: BuilderModel, scopedOwner: Map<string, Build
   }
   const roots = new Set<string>();
   for (const node of model.nodes) {
-    if (!scopedOwner.has(node.id)) roots.add(find(node.id));
+    if (!container.get(node.id)) roots.add(find(node.id));
   }
   return roots.size;
 }
@@ -400,21 +404,80 @@ export function buildSparql(model: BuilderModel): BuiltQuery {
     }
   }
 
-  // Which relationship group OWNS a walked-to node. A target reached SOLELY through one OPTIONAL
-  // or excluded edge belongs INSIDE that edge's group: emitted at the top level, its class triple
+  // The relationships that actually serialise. One that names no predicate, or that dangles off a
+  // deleted node, emits nothing — so it also constrains nothing and can own nothing.
+  const emitting: BuilderEdge[] = [];
+  for (const edge of model.edges) {
+    const from = nodeById.get(edge.from);
+    const to = nodeById.get(edge.to);
+    if (!from || !to) {
+      warn("A relationship references a node that is no longer on the canvas — it was skipped.");
+      continue;
+    }
+    if (![edge.predicate, ...edge.alternates].some((p) => p.trim() !== "")) {
+      warn(`The relationship ${nodeVar(from)} → ${nodeVar(to)} has no predicate — it was skipped.`);
+      continue;
+    }
+    emitting.push(edge);
+  }
+
+  // Which group each node's own patterns (class triple + attributes) belong to — `null` is the
+  // top-level body, an edge is that relationship's OPTIONAL / FILTER NOT EXISTS block. A node
+  // reached only THROUGH such a group belongs INSIDE it: emitted at the top level its class triple
   // and attributes would bind it independently of the group, which turns OPTIONAL into a cross
   // product and FILTER NOT EXISTS into a per-pair test rather than "has no such relationship".
-  const scopedOwner = new Map<string, BuilderEdge>();
-  for (const edge of model.edges) {
-    if (!edge.optional && !edge.negated) continue;
-    if (!nodeById.has(edge.from) || !nodeById.has(edge.to)) continue;
-    // An edge that emits nothing (no predicate) can own nothing — the constraints would vanish.
-    if (![edge.predicate, ...edge.alternates].some((p) => p.trim() !== "")) continue;
-    // Anything the user constrained elsewhere too stays where they drew it. (A self-loop has the
-    // node incident twice, so it never qualifies.)
-    if ((incident.get(edge.to) ?? []).length !== 1) continue;
-    scopedOwner.set(edge.to, edge);
+  //
+  // Ownership follows MANDATORY REACHABILITY, not incident-edge count: merely having a second
+  // incident edge does not free a node, because that edge may itself hang off the same optional
+  // group (a chained walk) or be another optional one (two OPTIONALs sharing a target). A node
+  // escapes to the top level only when a genuinely top-level mandatory pattern binds it.
+  const walkedTo = new Set(emitting.map((edge) => edge.to));
+  const container = new Map<string, BuilderEdge | null>();
+  /** The relationship that first REACHED a node — the pattern its own patterns must follow. */
+  const boundBy = new Map<string, BuilderEdge>();
+  // The diagram's starting points: nothing walks to them, so nothing can scope them.
+  for (const node of model.nodes) if (!walkedTo.has(node.id)) container.set(node.id, null);
+  // Then place each remaining node where the first relationship REACHING it puts it, mandatory
+  // hops first so a mandatory binding always wins over an optional one whatever order they were
+  // drawn in. A mandatory hop keeps its source's group; an OPTIONAL/excluded hop opens its own.
+  const reaches = (edge: BuilderEdge) => container.has(edge.from) && !container.has(edge.to);
+  for (;;) {
+    const next =
+      emitting.find((edge) => !edge.optional && !edge.negated && reaches(edge)) ??
+      emitting.find(reaches);
+    if (!next) break;
+    const scoped = next.optional || next.negated;
+    container.set(next.to, scoped ? next : (container.get(next.from) ?? null));
+    boundBy.set(next.to, next);
   }
+  // A cycle every member of which is walked to is reached by nothing — it stays at the top level.
+  for (const node of model.nodes) if (!container.has(node.id)) container.set(node.id, null);
+
+  // The emission tree. A relationship out of a top-level node is a top-level pattern; one out of a
+  // scoped node hangs off whatever bound that node, so it lands inside the same group — that is
+  // what keeps a chained OPTIONAL nested instead of escaping. Within a group a node's patterns
+  // follow the relationship that bound it, never precede it (an OPTIONAL attribute emitted before
+  // its subject was bound would left-join against the wrong left-hand side).
+  const scopedNodes = new Map<string, BuilderNode[]>();
+  for (const node of model.nodes) {
+    const binder = container.get(node.id) ? boundBy.get(node.id) : undefined;
+    if (binder) scopedNodes.set(binder.id, [...(scopedNodes.get(binder.id) ?? []), node]);
+  }
+  const nestedEdges = new Map<string, BuilderEdge[]>();
+  const topLevelEdges: BuilderEdge[] = [];
+  for (const edge of emitting) {
+    const parent = container.get(edge.from) ? boundBy.get(edge.from) : undefined;
+    if (!parent) topLevelEdges.push(edge);
+    else nestedEdges.set(parent.id, [...(nestedEdges.get(parent.id) ?? []), edge]);
+  }
+
+  /** True when `nodeId` sits inside a FILTER NOT EXISTS, however deeply nested. */
+  const insideNotExists = (nodeId: string): boolean => {
+    for (let owner = container.get(nodeId); owner; owner = container.get(owner.from)) {
+      if (owner.negated) return true;
+    }
+    return false;
+  };
 
   const classLine = (node: BuilderNode): string[] =>
     node.classIri ? [triple(nodeVar(node), "a", ctx.w.write(node.classIri))] : [];
@@ -436,24 +499,16 @@ export function buildSparql(model: BuilderModel): BuiltQuery {
     return out;
   };
 
-  // 1. Class constraints (except those owned by a scoped relationship group).
-  for (const node of model.nodes) {
-    if (!scopedOwner.has(node.id)) body.push(...classLine(node));
-  }
-
-  // 2. Relationships — each scoped group carrying the complete pattern for the node it owns.
-  for (const edge of model.edges) {
-    const from = nodeById.get(edge.from);
-    const to = nodeById.get(edge.to);
-    if (!from || !to) {
-      warn("A relationship references a node that is no longer on the canvas — it was skipped.");
-      continue;
-    }
+  /**
+   * One relationship, with everything it owns nested inside it: the patterns of the nodes it
+   * bound, then the relationships walked on from those nodes (which is what keeps a chained
+   * OPTIONAL inside the OPTIONAL that reaches its subject rather than escaping to the top level).
+   */
+  const relationship = (edge: BuilderEdge): string[] => {
+    // Only `emitting` edges reach here, and those were filtered on both endpoints existing.
+    const from = nodeById.get(edge.from) as BuilderNode;
+    const to = nodeById.get(edge.to) as BuilderNode;
     const predicates = [edge.predicate, ...edge.alternates].filter((p) => p.trim() !== "");
-    if (predicates.length === 0) {
-      warn(`The relationship ${nodeVar(from)} → ${nodeVar(to)} has no predicate — it was skipped.`);
-      continue;
-    }
     let core: string[];
     if (predicates.length === 1) {
       core = [triple(nodeVar(from), ctx.w.write(predicates[0]), nodeVar(to))];
@@ -462,42 +517,52 @@ export function buildSparql(model: BuilderModel): BuiltQuery {
         .map((p) => `{ ${triple(nodeVar(from), ctx.w.write(p), nodeVar(to))} }`)
         .flatMap((block, i) => (i === 0 ? [block] : ["UNION", block]));
     }
-    const walked = scopedOwner.get(edge.to) === edge ? nodeById.get(edge.to) : undefined;
-    if (walked) core.push(...classLine(walked), ...attributePatterns(walked));
+    for (const bound of scopedNodes.get(edge.id) ?? []) {
+      core.push(...classLine(bound), ...attributePatterns(bound));
+    }
+    for (const nested of nestedEdges.get(edge.id) ?? []) core.push(...relationship(nested));
     if (edge.negated) {
       if (edge.optional) {
         warn(
           `${nodeVar(from)} → ${nodeVar(to)} is both OPTIONAL and excluded — exclusion wins (FILTER NOT EXISTS).`,
         );
       }
-      body.push(...wrapBlock("FILTER NOT EXISTS", core));
-    } else if (edge.optional) {
-      body.push(...wrapBlock("OPTIONAL", core));
-    } else {
-      body.push(...core);
+      return wrapBlock("FILTER NOT EXISTS", core);
     }
+    if (edge.optional) return wrapBlock("OPTIONAL", core);
+    return core;
+  };
+
+  // 1. Class constraints (except those owned by a scoped relationship group).
+  for (const node of model.nodes) {
+    if (!container.get(node.id)) body.push(...classLine(node));
   }
+
+  // 2. Relationships — each scoped group carrying the complete pattern for everything it owns.
+  for (const edge of topLevelEdges) body.push(...relationship(edge));
 
   // 3. Attributes (and their filters) of every node a scoped group does not own.
   for (const node of model.nodes) {
-    if (!scopedOwner.has(node.id)) body.push(...attributePatterns(node));
+    if (!container.get(node.id)) body.push(...attributePatterns(node));
   }
 
   // 4. Honesty warnings about the SHAPE of the pattern.
   for (const node of model.nodes) {
     const edges = incident.get(node.id) ?? [];
     const bare = !node.classIri && node.attributes.length === 0;
-    // A node scoped inside FILTER NOT EXISTS cannot escape it, whether or not it is otherwise bare.
-    const insideNotExists = scopedOwner.get(node.id)?.negated === true;
     if (bare && edges.length === 0) {
       warn(`${nodeVar(node)} is unconstrained — it matches every term in the store.`);
-    } else if (node.projected && (insideNotExists || (bare && edges.every((e) => e.negated)))) {
+    } else if (
+      node.projected &&
+      // A node scoped inside FILTER NOT EXISTS cannot escape it, bare or not.
+      (insideNotExists(node.id) || (bare && edges.every((e) => e.negated)))
+    ) {
       warn(
         `${nodeVar(node)} only appears inside FILTER NOT EXISTS — it cannot be bound in the result.`,
       );
     }
   }
-  const components = connectedComponents(model, scopedOwner);
+  const components = connectedComponents(model, container);
   if (model.nodes.length > 1 && components > 1) {
     warn(`The canvas has ${components} disconnected groups — the result is their cross product.`);
   }

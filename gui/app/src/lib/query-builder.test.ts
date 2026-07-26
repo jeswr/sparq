@@ -199,6 +199,151 @@ LIMIT 100`,
   assert.deepEqual(built.warnings, []);
 });
 
+test("a chained OPTIONAL walk nests — no link in the chain escapes to the top level", () => {
+  const start = addNode(emptyModel(), { classIri: `${EX}Person` });
+  const org = addRelationship(start.model, start.nodeId, `${EX}worksAt`, {
+    targetClass: `${EX}Organisation`,
+  });
+  const city = addRelationship(org.model, org.nodeId, `${EX}locatedIn`, {
+    targetClass: `${EX}City`,
+  });
+  const model: BuilderModel = {
+    ...city.model,
+    edges: city.model.edges.map((edge) => ({ ...edge, optional: true })),
+  };
+  const built = buildSparql(model);
+
+  // ?organisation has two incident edges but is still reached ONLY through the first OPTIONAL —
+  // hoisting its type triple would cross-product every person with every organisation, and the
+  // second OPTIONAL would left-join on an already-bound ?organisation instead of walking on.
+  assert.equal(
+    built.sparql,
+    `SELECT ?person ?organisation ?city
+WHERE {
+  ?person a <http://example.org/Person> .
+  OPTIONAL {
+    ?person <http://example.org/worksAt> ?organisation .
+    ?organisation a <http://example.org/Organisation> .
+    OPTIONAL {
+      ?organisation <http://example.org/locatedIn> ?city .
+      ?city a <http://example.org/City> .
+    }
+  }
+}
+LIMIT 100`,
+  );
+  assert.deepEqual(built.warnings, []);
+});
+
+test("a mandatory hop off an OPTIONAL target stays inside that OPTIONAL, after what binds it", () => {
+  const start = addNode(emptyModel(), { classIri: `${EX}Person` });
+  const org = addRelationship(start.model, start.nodeId, `${EX}worksAt`, {
+    targetClass: `${EX}Organisation`,
+  });
+  const city = addRelationship(org.model, org.nodeId, `${EX}locatedIn`, {
+    targetClass: `${EX}City`,
+  });
+  const withPopulation = addAttribute(city.model, city.nodeId, `${EX}population`);
+  const model: BuilderModel = {
+    ...withPopulation.model,
+    nodes: withPopulation.model.nodes.map((node) =>
+      node.id === city.nodeId
+        ? { ...node, attributes: node.attributes.map((a) => ({ ...a, optional: true })) }
+        : node,
+    ),
+    // Only the FIRST hop is optional; the second is a mandatory constraint on ?organisation.
+    edges: withPopulation.model.edges.map((edge) =>
+      edge.id === org.edgeId ? { ...edge, optional: true } : edge,
+    ),
+  };
+  const built = buildSparql(model);
+
+  // ?city is bound by a mandatory pattern, but one that only exists inside the OPTIONAL — so it
+  // is scoped there too, and its own patterns FOLLOW the hop that binds it (an OPTIONAL attribute
+  // emitted first would left-join against the wrong left-hand side).
+  assert.equal(
+    built.sparql,
+    `SELECT ?person ?organisation ?city ?population
+WHERE {
+  ?person a <http://example.org/Person> .
+  OPTIONAL {
+    ?person <http://example.org/worksAt> ?organisation .
+    ?organisation a <http://example.org/Organisation> .
+    ?organisation <http://example.org/locatedIn> ?city .
+    ?city a <http://example.org/City> .
+    OPTIONAL { ?city <http://example.org/population> ?population . }
+  }
+}
+LIMIT 100`,
+  );
+  assert.deepEqual(built.warnings, []);
+});
+
+test("two OPTIONALs sharing a typed target scope it once — the type never escapes", () => {
+  const person = addNode(emptyModel(), { classIri: `${EX}Person` });
+  const company = addNode(person.model, { classIri: `${EX}Company` });
+  const org = addNode(company.model, { classIri: `${EX}Organisation` });
+  const works = connectNodes(org.model, person.nodeId, org.nodeId, `${EX}worksAt`);
+  const partner = connectNodes(works.model, company.nodeId, org.nodeId, `${EX}partnerOf`);
+  const model: BuilderModel = {
+    ...partner.model,
+    edges: partner.model.edges.map((edge) => ({ ...edge, optional: true })),
+  };
+  const built = buildSparql(model);
+
+  // Two incident edges, but NEITHER binds ?organisation at the top level, so its type belongs to
+  // the first group that reaches it rather than to the top-level body.
+  assert.equal(
+    built.sparql,
+    `SELECT ?person ?company ?organisation
+WHERE {
+  ?person a <http://example.org/Person> .
+  ?company a <http://example.org/Company> .
+  OPTIONAL {
+    ?person <http://example.org/worksAt> ?organisation .
+    ?organisation a <http://example.org/Organisation> .
+  }
+  OPTIONAL { ?company <http://example.org/partnerOf> ?organisation . }
+}
+LIMIT 100`,
+  );
+  assert.deepEqual(built.warnings, []);
+});
+
+test("an OPTIONAL and an exclusion sharing a typed target keep the type out of the top level", () => {
+  const person = addNode(emptyModel(), { classIri: `${EX}Person` });
+  const company = addNode(person.model, { classIri: `${EX}Company` });
+  const org = addNode(company.model, { classIri: `${EX}Organisation` });
+  const works = connectNodes(org.model, person.nodeId, org.nodeId, `${EX}worksAt`);
+  const partner = connectNodes(works.model, company.nodeId, org.nodeId, `${EX}partnerOf`);
+  const model: BuilderModel = {
+    ...partner.model,
+    edges: partner.model.edges.map((edge) =>
+      edge.id === works.edgeId ? { ...edge, optional: true } : { ...edge, negated: true },
+    ),
+  };
+  const built = buildSparql(model);
+
+  assert.equal(
+    built.sparql,
+    `SELECT ?person ?company ?organisation
+WHERE {
+  ?person a <http://example.org/Person> .
+  ?company a <http://example.org/Company> .
+  OPTIONAL {
+    ?person <http://example.org/worksAt> ?organisation .
+    ?organisation a <http://example.org/Organisation> .
+  }
+  FILTER NOT EXISTS { ?company <http://example.org/partnerOf> ?organisation . }
+}
+LIMIT 100`,
+  );
+  // ?company joins nothing (NOT EXISTS never joins) — that cross product is real, and reported.
+  assert.deepEqual(built.warnings, [
+    "The canvas has 2 disconnected groups — the result is their cross product.",
+  ]);
+});
+
 test("a projected variable that only appears inside NOT EXISTS is flagged as unbindable", () => {
   const start = addNode(emptyModel(), { classIri: `${EX}Person` });
   const excluded = addRelationship(start.model, start.nodeId, `${EX}blocks`);
