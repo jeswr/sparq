@@ -438,6 +438,18 @@ jobs:
         run: |
           python3 scripts/triage.py --self-test
           python3 scripts/retriage.py --self-test
+      # [OPUS-5] #1135: scripts/triage-area.py is the third member of that triage
+      # family — it CLEARS the `needs:area` park triage.py sets. It runs by hand
+      # (no cron), so without a PR-time gate a rule-table edit would only be
+      # discovered by mislabeling live issues, and a wrong `area:` routes a worker
+      # at the wrong crate. Both suites are hermetic (stdlib only, no gh/network):
+      # the script's own rule self-test, plus the independent safety tests
+      # (fail-closed / no unpark-without-an-area / no invented label / the three
+      # rule orderings that were measured wrong on the live backlog).
+      - name: Self-test triage-area.py (needs:area classifier — fail-closed + no-drift)
+        run: |
+          python3 scripts/triage-area.py --self-test
+          python3 scripts/tests/test_triage_area.py
       # [FABLE-5] #3759 / registry#563 item 4: the transient-tolerant gh READ retry
       # helper (scripts/gh_retry.py — bounded, transient-5xx-only, fail-closed
       # read-allow-list so mutations/arm calls can never be wrapped) and the two arm
