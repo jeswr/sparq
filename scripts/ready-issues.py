@@ -436,6 +436,37 @@ def _fetch(repo, ceiling=10000):
     return issues
 
 
+def dispatchable_view(issues, linked=()):
+    """The rows the ORCHESTRATOR feeds to compute_ready — the single source of the local preview.
+
+    [OPUS-5] Mirrors dispatch.yml's `ready_input` comprehension exactly:
+
+        ready_input = [row for row in readiness_input
+                       if "status:in-progress" in row["labels"]
+                       or "status:in-progress-review" in row["labels"]
+                       or (row["number"] not in linked and trusted(...))]
+
+    The `or` matters and a plain `number not in linked` is WRONG for the dominant live shape.
+    A `status:in-progress-review` issue is normally covered by its OWN worker PR, so it is
+    always in `linked`; dropping it frees the crate it is actively occupying and the next tick
+    dispatches a SECOND worker onto it. dispatch.yml keeps those rows deliberately — "In-progress
+    rows are KEPT as inputs: compute_ready never selects them (they are busy), but they must
+    still RESERVE their package in its taken-seeding". Executed counterexample, in-review #100 on
+    sparq-core covered by its own PR plus attested #200 on sparq-core: the `not in linked` rule
+    yields [200], the orchestrator yields [].
+
+    Residual, deliberate divergence: dispatch.yml ALSO requires `trusted(issue, bots)`, which
+    needs the issue AUTHOR and the registry's per-repo trusted-bot list. The local snapshot
+    carries neither, so the local preview is an UPPER BOUND on the orchestrator frontier — it
+    may show a row the registry will drop as untrusted. `trust:untrusted` (the label the triage
+    pipeline applies) is still excluded here via GATE_LABELS. Parity is claimed on the
+    linked/in-flight axis only.
+    """
+    linked = set(linked)
+    return [it for it in issues
+            if it.get("number") not in linked or labels_of(it) & IN_FLIGHT_STATUS]
+
+
 def diagnose(issues, linked=()):
     """Re-runnable VISIBILITY taxonomy: why the open backlog is not on the frontier.
 
@@ -448,12 +479,12 @@ def diagnose(issues, linked=()):
         if str(it.get("state", "OPEN")).upper() != "OPEN" or "pull_request" in it:
             continue
         open_issues.append(it)
-        if it.get("number") in linked:
+        if it.get("number") in linked and not (labels_of(it) & IN_FLIGHT_STATUS):
             reason = "covered by an open linked PR"
         else:
             reason = exclusion_reason(labels_of(it), it.get("open_blockers", 0)) or "ENUMERABLE"
         counts[reason] = counts.get(reason, 0) + 1
-    visible = [it for it in issues if it.get("number") not in linked]
+    visible = dispatchable_view(issues, linked)
     return (counts, roleless_ready(open_issues),
             ready_candidates(visible), compute_ready(visible, conflict_log=lambda _m: None))
 
@@ -469,7 +500,7 @@ def main():
         return _self_test()
     issues = _fetch(args.repo)
     linked = linked_issue_numbers(_fetch_pulls(args.repo), args.repo)
-    visible = [it for it in issues if it.get("number") not in linked]
+    visible = dispatchable_view(issues, linked)
     if args.diagnose:
         counts, roleless, cands, frontier = diagnose(issues, linked)
         total = sum(counts.values())

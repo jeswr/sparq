@@ -13,15 +13,22 @@
 #   2. status:in-progress-review — absent from BUSY_STATUS and from the reserve branch, so such
 #      an issue was neither excluded nor reserving: a double-dispatch on both halves.
 #   3. LOCAL/ORCHESTRATOR PARITY — dispatch.yml builds its readiness input from ISSUES ONLY and
-#      suppresses issues covered by a linked open PR. The local CLI must preview THAT frontier;
-#      when it did not, the two disagreed 0-vs-6 on the same live snapshot.
+#      suppresses issues covered by a linked open PR EXCEPT the in-flight ones, which it keeps
+#      so they still reserve their package. The local CLI must preview THAT frontier; when it
+#      did not, the two disagreed 0-vs-6 on the same live snapshot. Review round 2 found the
+#      first fix still wrong for the dominant live shape (it dropped EVERY linked row, freeing
+#      the crate an in-review issue is actively occupying) and the parity claim guarded only by
+#      a source-substring assertion, so the regression survived mutation. The parity tests below
+#      therefore run the REAL main()/--diagnose, stubbing only the two network calls.
 #
 # Plus the YAML seam: routing-self-tests.yml listed scripts/ready-issues.py in its `paths:` filter
 # but never INVOKED its --self-test, so all of that script's assertions were dead in this repo's
 # CI and only ran later inside the registry's dispatch tick (where a failure breaks EVERY target).
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import re
 import sys
 import unittest
@@ -205,24 +212,104 @@ class TestRolelessInvisibility(unittest.TestCase):
             [iss(50, ["status:ready", "priority:P1", "area:a"])]), [50])
 
 
+def worker_pr(number, issue_number):
+    """A pipeline-owned worker PR whose head branch links `issue_number` (dispatch.yml's rule)."""
+    return {"number": number, "state": "OPEN", "labels": [], "pull_request": {}, "draft": False,
+            "head": {"ref": f"sparq-agent/issue-{issue_number}-fix",
+                     "repo": {"full_name": "sparq-org/sparq"}},
+            "body": "", "author_association": "NONE"}
+
+
 class TestLocalOrchestratorParity(unittest.TestCase):
-    """The divergence that mattered: the local CLI must preview the dispatched frontier."""
+    """The divergence that mattered: the local CLI must preview the dispatched frontier.
+
+    [OPUS-5] The parity claim used to rest on a SOURCE-SUBSTRING assertion plus two test-local
+    reimplementations of both sides — so `compute_ready(visible)` -> `compute_ready(issues)` in
+    the real main() restored the whole bug with the suite green. Every assertion below now runs
+    the REAL main()/--diagnose over a stubbed snapshot, stubbing ONLY the two network calls, and
+    compares its printed frontier against a mirror of dispatch.yml's comprehension.
+    """
 
     @staticmethod
-    def _orchestrator(issues_and_prs, linked=()):
-        """dispatch.yml's shape: ISSUES ONLY, linked-PR-covered issues filtered first."""
+    def _orchestrator(issues_and_prs, pulls=()):
+        """Mirror of dispatch.yml `ready_input`: ISSUES ONLY; a linked row survives iff in-flight.
+
+        Copied shape (agent-account-registry .github/workflows/dispatch.yml):
+            ready_input = [row for row in readiness_input
+                           if "status:in-progress" in row["labels"]
+                           or "status:in-progress-review" in row["labels"]
+                           or (row["number"] not in linked and trusted(...))]
+        The `trusted(...)` conjunct is registry-side (needs the issue author + the per-repo
+        trusted-bot list) and is out of scope for the local preview; see dispatchable_view's
+        docstring for that documented residual divergence.
+        """
+        linked = ready.linked_issue_numbers(list(pulls), "sparq-org/sparq")
         rows = [it for it in issues_and_prs if "pull_request" not in it]
         rows = [it for it in rows
-                if it["number"] not in set(linked)
+                if it["number"] not in linked
                 or {"status:in-progress", "status:in-progress-review"} & set(it["labels"])]
         return numbers(ready.compute_ready(rows, conflict_log=quiet))
 
     @staticmethod
-    def _local(issues_and_prs, linked=()):
-        """The local CLI's shape: the full snapshot minus linked-PR-covered issues."""
-        visible = [it for it in issues_and_prs if it["number"] not in set(linked)]
-        return numbers(ready.compute_ready(visible, conflict_log=quiet))
+    def _run_cli(issues_and_prs, pulls=(), argv=()):
+        """Execute the REAL main() end-to-end; only `_fetch`/`_fetch_pulls` are stubbed."""
+        real_fetch, real_pulls, real_argv = ready._fetch, ready._fetch_pulls, sys.argv
+        ready._fetch = lambda repo, ceiling=10000: [dict(it) for it in issues_and_prs]
+        ready._fetch_pulls = lambda repo: [dict(p) for p in pulls]
+        sys.argv = ["ready-issues.py", *argv]
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = ready.main()
+        finally:
+            ready._fetch, ready._fetch_pulls, sys.argv = real_fetch, real_pulls, real_argv
+        assert rc == 0, f"main() exited {rc}"
+        return out.getvalue()
 
+    @classmethod
+    def _local(cls, issues_and_prs, pulls=()):
+        """The frontier the REAL CLI prints, parsed from its `P<n>  #<num>  [...]` rows."""
+        return [int(n) for n in re.findall(
+            r"^P\d+\s+#\s*(\d+)\s", cls._run_cli(issues_and_prs, pulls), re.M)]
+
+    # -- the executed counterexample -------------------------------------------------------
+    # in-review #100 on sparq-core, covered by its OWN worker PR, + attested #200 on sparq-core.
+    COUNTEREXAMPLE_PULLS = (worker_pr(101, 100),)
+    COUNTEREXAMPLE_BOARD = (
+        iss(100, READY + ["priority:P1", "area:sparq-core", "status:in-progress-review"]),
+        iss(200, READY + ["priority:P1", "area:sparq-core"]),
+    )
+
+    def test_in_flight_issue_covered_by_its_own_pr_still_reserves_its_crate(self):
+        # THE regression. Dropping every linked row frees sparq-core while #100 is actively
+        # being worked, and the next tick dispatches a SECOND worker onto the same crate.
+        board, pulls = list(self.COUNTEREXAMPLE_BOARD), list(self.COUNTEREXAMPLE_PULLS)
+        self.assertEqual(self._orchestrator(board, pulls), [],
+                         "sanity: the orchestrator keeps #100 as an occupant, so #200 conflicts")
+        self.assertEqual(self._local(board, pulls), [],
+                         "local CLI dispatched #200 onto a crate the orchestrator sees as busy")
+
+    def test_cli_frontier_equals_orchestrator_frontier_on_the_counterexample(self):
+        board, pulls = list(self.COUNTEREXAMPLE_BOARD), list(self.COUNTEREXAMPLE_PULLS)
+        self.assertEqual(self._local(board, pulls), self._orchestrator(board, pulls))
+
+    def test_diagnose_frontier_equals_orchestrator_frontier_on_the_counterexample(self):
+        # --diagnose reads its own `visible`; it regressed independently of the default path.
+        out = self._run_cli(list(self.COUNTEREXAMPLE_BOARD), list(self.COUNTEREXAMPLE_PULLS),
+                            argv=("--diagnose",))
+        self.assertIn("concurrency frontier (compute_ready): 0", out)
+        self.assertIn("drainable backlog (ready_candidates): 1", out)
+
+    def test_diagnose_does_not_call_an_in_flight_row_merely_pr_covered(self):
+        # The bucket must agree with the view: a row dispatchable_view KEEPS is reported as
+        # busy, not as suppressed. Otherwise the taxonomy explains a drop that never happened.
+        counts, _roleless, _cands, frontier = ready.diagnose(
+            list(self.COUNTEREXAMPLE_BOARD), linked={100})
+        self.assertEqual(counts.get("busy: status:in-progress-review"), 1)
+        self.assertIsNone(counts.get("covered by an open linked PR"))
+        self.assertEqual(numbers(frontier), [])
+
+    # -- the previously-covered shapes, now through the real CLI ---------------------------
     def test_unlabelled_prs_do_not_make_the_two_views_disagree(self):
         # The exact live shape: many area-less open PRs + attested issues on distinct crates.
         board = [pr(3803, []), pr(3799, []), pr(3798, [])] + [
@@ -231,18 +318,20 @@ class TestLocalOrchestratorParity(unittest.TestCase):
         self.assertEqual(self._local(board), [3694, 3756, 3757])
 
     def test_linked_pr_suppression_matches_on_both_sides(self):
+        # A linked row with NO in-flight status is still suppressed on both sides.
         board = [iss(60, READY + ["priority:P1", "area:sparq-core"]),
                  iss(61, READY + ["priority:P1", "area:sparq-hdt"])]
-        self.assertEqual(self._local(board, linked={60}),
-                         self._orchestrator(board, linked={60}))
-        self.assertEqual(self._local(board, linked={60}), [61])
+        pulls = [worker_pr(62, 60)]
+        self.assertEqual(self._local(board, pulls), self._orchestrator(board, pulls))
+        self.assertEqual(self._local(board, pulls), [61])
 
     def test_local_cli_applies_linked_pr_suppression_at_all(self):
-        # Without this the local view over-reports work the orchestrator will never dispatch.
-        source = (SCRIPTS / "ready-issues.py").read_text(encoding="utf-8")
-        main = source[source.index("def main("):]
-        self.assertIn("linked_issue_numbers", main,
-                      "main() must suppress issues covered by an open linked PR, as dispatch does")
+        # Behavioural, not a substring: deleting the linked_issue_numbers call in main() must
+        # let #60 back onto the frontier ahead of the crate it is already covered on.
+        board = [iss(60, READY + ["priority:P0", "area:sparq-core"]),
+                 iss(61, READY + ["priority:P1", "area:sparq-hdt"])]
+        self.assertEqual(self._local(board, [worker_pr(62, 60)]), [61],
+                         "main() must suppress issues covered by an open linked PR, as dispatch does")
 
 
 class TestLinkedIssueDetection(unittest.TestCase):
