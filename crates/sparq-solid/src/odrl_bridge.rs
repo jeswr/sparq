@@ -2398,7 +2398,16 @@ const REQUEST_IRI: &str = "urn:odrl-req";
 ///    objects, or several distinct logical combinators, on one node
 ///    (`unambiguous_operands`). This is the driver half of the stratum-A0 fail-OPEN
 ///    fix and applies to BOTH rule kinds. [OPUS-5];
-/// 4. every PROHIBITION must name `odrl:action`/`odrl:target`/`odrl:assignee`
+/// 4. no rule (permission or prohibition) may carry MORE THAN ONE distinct
+///    `odrl:action`/`odrl:target`/`odrl:assignee` object — the strata bind each
+///    attribute as a triple pattern and so match a request that agrees with ANY
+///    asserted value, whereas the Rust reference evaluator selects exactly ONE
+///    (the first) per attribute (`first_str`). A second action/target/assignee
+///    could therefore make an N3 grant fire (or a prohibition match) for a value
+///    the Rust path never selected — widening. Refuse rather than decide the
+///    rule from a subset of its attribute values (the rule-attribute analogue of
+///    the constraint-node `unambiguous_operands` guard). [OPUS-4.8];
+/// 5. every PROHIBITION must name `odrl:action`/`odrl:target`/`odrl:assignee`
 ///    (the strata match prohibitions structurally on all three; the Rust
 ///    evaluator treats a missing attribute as matching ANY request) and every
 ///    prohibition constraint — atomic, or each `odrl:or`/`odrl:and` member —
@@ -2467,6 +2476,26 @@ fn validate_policy_for_n3(triples: &[[Term; 3]]) -> Result<(), String> {
             continue;
         }
         let rule = &t[2];
+        // [OPUS-4.8] Reject a MULTI-VALUED rule attribute on EITHER rule kind. The N3
+        // strata bind odrl:action/target/assignee as triple patterns, so a rule asserting
+        // several distinct values matches a request agreeing with ANY of them, while the
+        // Rust reference evaluator selects exactly ONE (`first_str`). A second value could
+        // fire an N3 grant (or a prohibition match) the Rust path never selects — widening.
+        // Refuse the whole call (fail-closed) rather than decide the rule from a subset of
+        // its attribute values — the rule-attribute analogue of `unambiguous_operands`.
+        for attr in ["action", "target", "assignee"] {
+            let pred = format!("{}{}", ODRL_NS, attr);
+            if distinct_objects(triples, rule, std::slice::from_ref(&pred)).len() > 1 {
+                return Err(format!(
+                    "rule with more than one distinct odrl:{} object is outside the N3 \
+                     strata's scope (they bind the attribute as a triple pattern and match \
+                     ANY asserted value, while the Rust evaluator selects exactly one) — a \
+                     second value could widen an N3 grant or prohibition match; refusing \
+                     (fail-closed)",
+                    attr
+                ));
+            }
+        }
         if is_prohib {
             for attr in ["action", "target", "assignee"] {
                 let pred = format!("{}{}", ODRL_NS, attr);

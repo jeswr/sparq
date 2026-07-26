@@ -218,6 +218,101 @@ fn defect2_conflict_invalid_tracks_rust_admissibility_both_ways() {
     assert!(out.granted, "the unconflicted policy still grants on the N3 path");
 }
 
+// ── Multi-valued rule attributes (action/target/assignee) ────────────────────
+//
+// The Rust reference evaluator selects exactly ONE object per rule attribute
+// (`first_str` — the first bound value), whereas the N3 strata bind
+// odrl:action/target/assignee as triple patterns and so match a request that agrees
+// with ANY asserted value. A rule asserting two assignees/targets/actions could
+// therefore fire an N3 grant (or a prohibition match) for a value the Rust path never
+// selected — widening. `validate_policy_for_n3` refuses such a rule outright.
+
+/// A permission naming TWO assignees. The Rust path selects one; the N3 grant stratum
+/// would grant BOTH — the widening this guard closes.
+const POL_TWO_ASSIGNEE_PERM: &str = r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/two-assignee> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:t/1> ;
+    odrl:assignee <urn:alice> , <urn:bob> ] ."#;
+
+#[test]
+fn multi_valued_assignee_permission_is_refused_by_n3() {
+    // The Rust reference path selects exactly ONE assignee, so exactly one of the two
+    // parties is granted — demonstrating the single-value selection the N3 pattern match
+    // does not share.
+    let alice = rust_outcome(POL_TWO_ASSIGNEE_PERM, &req("read", "urn:alice", None)).granted;
+    let bob = rust_outcome(POL_TWO_ASSIGNEE_PERM, &req("read", "urn:bob", None)).granted;
+    assert!(
+        alice ^ bob,
+        "the Rust reference path selects exactly one assignee (alice={alice}, bob={bob})"
+    );
+
+    // Whichever party the Rust path did NOT select is the grant the N3 path must not
+    // widen into. The driver refuses the multi-valued rule outright, materializing nothing
+    // for EITHER party — the graph is left unchanged.
+    for party in ["urn:alice", "urn:bob"] {
+        let mut graph = Graph::new();
+        let out = materialize_odrl_n3(&mut graph, POL_TWO_ASSIGNEE_PERM, &req("read", party, None));
+        assert!(
+            out.is_err(),
+            "N3 path must refuse a multi-assignee permission (party {party}), got {:?}",
+            out
+        );
+        assert!(graph.named.is_empty(), "nothing may be materialized on a refusal");
+    }
+}
+
+#[test]
+fn multi_valued_target_permission_is_refused_by_n3() {
+    const POL: &str = r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/two-target> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:assignee <urn:alice> ;
+    odrl:target <urn:t/1> , <urn:t/2> ] ."#;
+    let mut graph = Graph::new();
+    let out = materialize_odrl_n3(&mut graph, POL, &req("read", "urn:alice", None));
+    assert!(out.is_err(), "N3 path must refuse a multi-target permission, got {:?}", out);
+    assert!(graph.named.is_empty(), "nothing may be materialized on a refusal");
+}
+
+#[test]
+fn multi_valued_action_permission_is_refused_by_n3() {
+    const POL: &str = r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/two-action> a odrl:Set ; odrl:permission [
+    odrl:target <urn:t/1> ; odrl:assignee <urn:alice> ;
+    odrl:action odrl:read , odrl:write ] ."#;
+    let mut graph = Graph::new();
+    let out = materialize_odrl_n3(&mut graph, POL, &req("write", "urn:alice", None));
+    assert!(out.is_err(), "N3 path must refuse a multi-action permission, got {:?}", out);
+    assert!(graph.named.is_empty(), "nothing may be materialized on a refusal");
+}
+
+#[test]
+fn multi_valued_assignee_prohibition_is_refused_by_n3() {
+    // A prohibition with two assignees: refused for the same reason (and the deny side is
+    // where a subset reading is most dangerous — a dropped deny widens access).
+    const POL: &str = r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/two-assignee-proh> a odrl:Set ; odrl:prohibition [
+    odrl:action odrl:read ; odrl:target <urn:t/1> ;
+    odrl:assignee <urn:alice> , <urn:bob> ] ."#;
+    let mut graph = Graph::new();
+    let out = materialize_odrl_n3(&mut graph, POL, &req("read", "urn:alice", None));
+    assert!(out.is_err(), "N3 path must refuse a multi-assignee prohibition, got {:?}", out);
+    assert!(graph.named.is_empty(), "nothing may be materialized on a refusal");
+}
+
+/// The guard must suppress ONLY multi-valued attributes: a single-valued permission
+/// still materializes its grant on the N3 path (else the tests above would pass on a
+/// path that refuses everything).
+#[test]
+fn single_valued_rule_attributes_still_grant_on_n3() {
+    const POL: &str = r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/single> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:t/1> ; odrl:assignee <urn:alice> ] ."#;
+    let mut graph = Graph::new();
+    let out = materialize_odrl_n3(&mut graph, POL, &req("read", "urn:alice", None))
+        .expect("N3 admits a single-valued permission");
+    assert!(out.granted, "a single-valued permission still grants on the N3 path");
+}
+
 // ── The RULES layer on its own ───────────────────────────────────────────────
 //
 // The driver refuses an ambiguous constraint node before reasoning, so the tests above
