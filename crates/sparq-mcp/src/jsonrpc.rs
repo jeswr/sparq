@@ -85,3 +85,8 @@ pub const METHOD_NOT_FOUND: i64 = -32601;
 pub const INVALID_PARAMS: i64 = -32602;
 /// The standard JSON-RPC error code for an internal server error.
 pub const INTERNAL_ERROR: i64 = -32603;
+/// MCP's implementation-defined error code for "the requested resource does not exist",
+/// returned by `resources/read` and `resources/subscribe`. The pod server reuses it for
+/// the existence-non-disclosure case too, so an unreadable resource is reported exactly
+/// like a nonexistent one. [SONNET-4.6] sq-cmjmr
+pub const RESOURCE_NOT_FOUND: i64 = -32002;

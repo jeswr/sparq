@@ -222,13 +222,23 @@ fn staleness_guard_aborts_on_a_stale_store() {
     .unwrap();
     let ctx = ResolveCtx::lexical(&g_b).with_vector_store(&store);
 
+    let mut embed_calls = 0;
     let err = terse_to_sparql_with(
         "SELECT ?f WHERE { ?f <http://example.org/about> V(\"fuzzy phrase\") }",
         &ctx,
-        |_p| Some(vec![1.0, 0.0, 0.0, 0.0]),
+        |_p| {
+            embed_calls += 1;
+            Some(vec![1.0, 0.0, 0.0, 0.0])
+        },
     )
     .expect_err("a stale store must abort the V() resolution");
     assert!(matches!(err, TerseError::StaleStore { .. }), "got {err:?}");
+    // The staleness guard runs BEFORE the embedder: a store that cannot serve the fallback
+    // must not cost a model/network round-trip (nor disclose the phrase to it).
+    assert_eq!(
+        embed_calls, 0,
+        "a stale store cannot serve the fallback => the embedder must not be consulted"
+    );
 }
 
 #[test]
@@ -250,9 +260,64 @@ fn lexical_beats_vector_when_both_could_fire() {
     .unwrap();
     assert_eq!(exp.resolutions[0].method, Method::Lexical);
     assert_eq!(exp.resolutions[0].iri, "http://example.org/cardEst");
-    // The embedder is consulted (it is eager in terse_to_sparql_with), but the lexical
-    // result is what binds: the method is Lexical and the IRI is the exact-label match.
-    assert!(embed_calls <= 1, "the splice path embeds at most once per phrase");
+    // Embedding free text is a model/network cost the caller owns (design §9 Q5); a phrase
+    // the deterministic lexical linker already binds must not pay it at all.
+    assert_eq!(
+        embed_calls, 0,
+        "lexical-first: the embedder must NOT be consulted when lexical linking succeeds"
+    );
+}
+
+#[test]
+fn embedder_is_not_consulted_without_a_vector_store() {
+    // Lexical-only context (no store): even a phrase that misses lexically has no vector
+    // fallback to feed, so the embedder must never be called — the loud Unresolved failure
+    // costs no model round-trip.
+    let g = graph();
+    let ctx = ResolveCtx::lexical(&g);
+    let mut embed_calls = 0;
+    let err = terse_to_sparql_with(
+        "SELECT ?f WHERE { ?f <http://example.org/about> V(\"nothing like this exists\") }",
+        &ctx,
+        |_p| {
+            embed_calls += 1;
+            Some(vec![1.0, 0.0, 0.0, 0.0])
+        },
+    )
+    .expect_err("an unresolvable phrase must loud-fail");
+    assert!(matches!(err, TerseError::Unresolved { .. }), "got {err:?}");
+    assert_eq!(
+        embed_calls, 0,
+        "no store attached => no vector fallback => no embedder call"
+    );
+}
+
+#[test]
+fn embedder_is_consulted_exactly_once_when_the_vector_fallback_fires() {
+    // The complement: a phrase lexical linking misses, with a store attached, DOES pay the
+    // embedder — exactly once — and binds via the vector path. The gate is opened up so the
+    // assertion isolates the embedder-call contract, not the (separately tested) §6.3 gate.
+    let g = graph();
+    let store = build_store(&g);
+    let gate = ResolveGate {
+        min_score: -1.0,
+        min_confidence: 0.0,
+    };
+    let ctx = ResolveCtx::lexical(&g)
+        .with_vector_store(&store)
+        .with_gate(gate);
+    let mut embed_calls = 0;
+    let exp = terse_to_sparql_with(
+        "SELECT ?f WHERE { ?f <http://example.org/about> V(\"zzz no lexical match zzz\") }",
+        &ctx,
+        |_p| {
+            embed_calls += 1;
+            Some(vec![1.0, 0.0, 0.0, 0.0])
+        },
+    )
+    .expect("the vector fallback must bind this phrase");
+    assert_eq!(exp.resolutions[0].method, Method::Vector);
+    assert_eq!(embed_calls, 1, "the fallback embeds the phrase exactly once");
 }
 
 #[test]

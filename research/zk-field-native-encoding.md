@@ -796,9 +796,11 @@ table until the §13.6 offset widening lands.
      (indeterminate inside the ±14:00 window). Both live under the same
      `xsd:dateTime` `DATATYPE_CONST`; if bare lexicals were mapped into the same
      scalar domain, the circuit would compare indeterminate pairs determinately —
-     wrong against XSD semantics, and inconsistent with the engine's own residual
-     partial order (sq-2k5py: mixed-timezone indeterminate pairs deliberately fall
-     back to lexical ordering). The engine and the ZK lane must not disagree.
+     wrong against XSD semantics, and inconsistent with the engine's RELATIONAL
+     comparison, which keeps that partial order as a type error. (sq-2k5py made
+     only the ORDER BY / MIN-MAX **total order** decide those pairs — by instant,
+     then timezone presence, a documented extension — and deliberately left the
+     relational semantics alone.) The engine and the ZK lane must not disagree.
    - An implicit-timezone rule (SPARQL/XPath evaluation context) is
      context-dependent — the same lexical would hook differently per context, which
      is not injective-on-value and makes the §6 co-binding ill-defined.

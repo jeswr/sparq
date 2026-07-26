@@ -1353,7 +1353,7 @@ jobs:
           while true; do
             echo "::group::W3C SPARQL conformance — attempt $attempt/$MAX_ATTEMPTS"
             rc=0
-            cargo run --release -p sparq-conformance --bin sparq-conformance || rc=$?
+            cargo run --profile release-fast -p sparq-conformance --bin sparq-conformance || rc=$?
             echo "::endgroup::"
             if [ "$rc" -eq 0 ]; then
               echo "W3C SPARQL conformance suites completed on attempt $attempt"
@@ -1376,14 +1376,14 @@ jobs:
         # self-skip without the pinned w3c/rdf-tests clone this job just fetched —
         # this is where they run against the real data.
         run: |
-          cargo test --release -p sparq-conformance \
+          cargo test --profile release-fast -p sparq-conformance \
             --test rdf_line_syntax_ratchet --test parser_differential -- --nocapture
       - name: Consolidated conformance scoreboard (all suites + floors)
         # [OPUS-4.8] sq-ncvq.16: surface the ONE central index of every conformance
         # ratchet across crates (SPARQL + inference + SHACL + GeoSPARQL) at the top
         # of the primary conformance job's summary, then the detailed SPARQL report.
         run: |
-          cargo run --release -p sparq-conformance --bin sparq-conformance-scoreboard
+          cargo run --profile release-fast -p sparq-conformance --bin sparq-conformance-scoreboard
           cat conformance-scoreboard.md >> "$GITHUB_STEP_SUMMARY"
       - name: Summarize
         run: cat conformance-report.md >> "$GITHUB_STEP_SUMMARY"
@@ -1687,7 +1687,7 @@ jobs:
         # + floors across crates) into this job's step summary, so the GeoSPARQL job
         # surfaces where it sits in the whole conformance picture.
         run: |
-          cargo run --release -p sparq-conformance --bin sparq-conformance-scoreboard
+          cargo run --profile release-fast -p sparq-conformance --bin sparq-conformance-scoreboard
           cat conformance-scoreboard.md >> "$GITHUB_STEP_SUMMARY"
       - name: Upload scoreboard
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -1790,7 +1790,7 @@ jobs:
         # floors across crates) into this job's step summary, so the Solid job
         # surfaces where it sits in the whole conformance picture.
         run: |
-          cargo run --release -p sparq-conformance --bin sparq-conformance-scoreboard
+          cargo run --profile release-fast -p sparq-conformance --bin sparq-conformance-scoreboard
           cat conformance-scoreboard.md >> "$GITHUB_STEP_SUMMARY"
       - name: Upload scoreboard
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -1894,7 +1894,7 @@ jobs:
         # into this job's step summary, so the ODRL job surfaces where it sits in the
         # whole conformance picture.
         run: |
-          cargo run --release -p sparq-conformance --bin sparq-conformance-scoreboard
+          cargo run --profile release-fast -p sparq-conformance --bin sparq-conformance-scoreboard
           cat conformance-scoreboard.md >> "$GITHUB_STEP_SUMMARY"
       - name: Upload scoreboard
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -1995,7 +1995,7 @@ jobs:
         # including this EXTENSION row) into this job's step summary, so it surfaces
         # where the text oracle sits in the whole picture.
         run: |
-          cargo run --release -p sparq-conformance --bin sparq-conformance-scoreboard
+          cargo run --profile release-fast -p sparq-conformance --bin sparq-conformance-scoreboard
           cat conformance-scoreboard.md >> "$GITHUB_STEP_SUMMARY"
       - name: Upload scoreboard
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -2100,7 +2100,7 @@ jobs:
         # including this EXTENSION row) into this job's step summary, so it surfaces
         # where the RSP oracle sits in the whole picture.
         run: |
-          cargo run --release -p sparq-conformance --bin sparq-conformance-scoreboard
+          cargo run --profile release-fast -p sparq-conformance --bin sparq-conformance-scoreboard
           cat conformance-scoreboard.md >> "$GITHUB_STEP_SUMMARY"
       - name: Upload scoreboard
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -2250,7 +2250,7 @@ jobs:
         # into this job's step summary, so the JSON-LD job surfaces where it sits in
         # the whole conformance picture.
         run: |
-          cargo run --release -p sparq-conformance --bin sparq-conformance-scoreboard
+          cargo run --profile release-fast -p sparq-conformance --bin sparq-conformance-scoreboard
           cat conformance-scoreboard.md >> "$GITHUB_STEP_SUMMARY"
       - name: Upload scoreboard
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -2471,7 +2471,7 @@ jobs:
           while true; do
             echo "::group::Inference conformance — attempt $attempt/$MAX_ATTEMPTS"
             rc=0
-            cargo run --release -p sparq-conformance --bin sparq-inference-conformance || rc=$?
+            cargo run --profile release-fast -p sparq-conformance --bin sparq-inference-conformance || rc=$?
             echo "::endgroup::"
             if [ "$rc" -eq 0 ]; then
               echo "Inference conformance suites completed on attempt $attempt"
@@ -2672,20 +2672,20 @@ jobs:
         # consts. HONESTLY sparq-EXTENSION ratchets over the SCOPED FRAGMENT the
         # layered checker implements — NOT full OWL 2 DL, never summed into a
         # conformance number. `--nocapture` so the ratchet lines reach stdout.
-        # [SONNET-4.6] sq-25q5q: run this lane `--release`. The sparq-reason-dl L4
+        # [SONNET-4.6] sq-25q5q: run this lane optimized. The sparq-reason-dl L4
         # tableau does a per-rule-application O(nodes×labels) rescan (a pre-existing
         # property found during sq-pbz04.4.5), so the DEBUG test-RUNTIME dominated the
         # whole inference-conformance job (~9 min of an ~11 min job in CI history vs
-        # seconds for every sibling lane). `--release` collapses that runtime; the one-
+        # seconds for every sibling lane). Optimized codegen collapses that runtime; the one-
         # time optimized compile of sparq-reason-dl + the dl_suite harness is amortized
         # by the Swatinem release cache (the `Run inference suites` step above already
-        # warms the release profile via `cargo run --release`). COVERAGE IS UNCHANGED:
+        # warms the release-fast profile via `cargo run --profile release-fast`). COVERAGE IS UNCHANGED:
         # same test target, same `dl-direct` feature, same EXACT `==` pins (68 profile /
         # 184 direct) asserted in-runner and re-grepped from source — only the codegen
         # optimization level changes, never the assertions or the fail-closed behavior.
         run: |
           set -uo pipefail
-          cargo test --release -p sparq-conformance --features dl-direct --test dl_suite -- --nocapture \
+          cargo test --profile release-fast -p sparq-conformance --features dl-direct --test dl_suite -- --nocapture \
             | tee dl-direct-conformance.out
           rc=${PIPESTATUS[0]}
           [ "$rc" -eq 0 ] || { echo "::error::OWL 2 Direct-Semantics arm test failed (exit $rc)"; exit "$rc"; }
@@ -3317,6 +3317,12 @@ jobs:
     #      across a fail-fast:false matrix so each completes in its own budget. The next FULL
     #      nightly seeds the ~20 remaining crates (per-crate artifacts above → --seed → commit,
     #      reviewed). Promotion (sq-qcnn.27) waits on that seeded baseline existing.
+    #      [SONNET-4.6] sq-has2g: seeding a SUB-SHARDED crate additionally needed a
+    #      scripts/mutants-gate.py fix — n shards of one crate all report the same package, and
+    #      measured_rows() was last-write-wins, so --seed over the n artifacts would have
+    #      committed a ceiling ~1/n of the true surviving count. It now SUMS them (the shards
+    #      partition the mutant set) and records `shards: n`. This is why sparq-reason is still
+    #      unseeded despite being sharded since sq-qcnn.28 — seed it from all 3 artifacts at once.
     #   2. TWO SEEDED CEILINGS ARE STALE. The sparq-canon/sparq-parse ceilings (9 / 14) were
     #      seeded when those crates were small; the current nightly measures ~98 / ~32 surviving
     #      mutants, so `--check` against real outcomes FAILS them today. That is a genuine
@@ -3335,17 +3341,34 @@ jobs:
     # measured. Sharded, each crate gets its OWN per-crate budget in parallel; a slow crate can
     # no longer starve or truncate the rest.
     # [SONNET-4.6] sq-qcnn.28: per-crate timeout via matrix.timeout_minutes (defaults 120min).
-    # Heavy crates (engine, solid, zk-compose, vectors, server, mpc) override to 360min via
-    # include entries. sparq-reason is sub-sharded 3×(--shard k/3) so each shard fits in 120min
+    # Heavy crates (solid, zk-compose, vectors, server, mpc) override to 360min via include
+    # entries. sparq-reason is sub-sharded 3×(--shard k/3) so each shard fits in 120min
     # instead of one ~6h monolith.
+    # [SONNET-4.6] sq-has2g: sparq-engine is sub-sharded 24×(--shard k/24) at 360min each — it
+    # has the largest generated mutant set in the workspace and a high per-mutant test cost, and
+    # the single 360min job it used to be never finished, which is why it is still unseeded. See
+    # the sparq-engine SUB-SHARDS include block for the sizing rationale.
     timeout-minutes: ${{ fromJSON(matrix.timeout_minutes || '120') }}
     continue-on-error: true # advisory while the baseline seeds; remove when promoted to gating
     strategy:
       # fail-fast MUST be false: one crate's failure/timeout must NOT cancel the sibling
       # shards (that would re-create the "only the first few crates measured" bug). max-parallel
-      # bounds concurrent runners so the nightly does not inflate CI cost unboundedly — 26
-      # crates once a day, at most 8 runners at a time; wall-clock is non-critical for a nightly
-      # and the staggered waves warm the shared rust-cache for later waves.
+      # bounds concurrent runners so the nightly does not inflate CI cost unboundedly — 51 jobs
+      # (24 whole-crate + 3 sparq-reason shards + 24 sparq-engine shards) once a day, at most 8
+      # runners at a time; wall-clock is non-critical for a nightly and the staggered waves warm
+      # the shared rust-cache for later waves.
+      # [SONNET-4.6] sq-has2g COST NOTE, stated plainly: sub-sharding sparq-engine 1->24 is a
+      # real increase in nightly runner cost — a whole-crate engine sweep is many runner-hours of
+      # SERIAL work, and that work has to happen SOMEWHERE to measure the crate at all. Today's
+      # single job simply burns its entire budget every night and produces nothing usable, which
+      # is strictly worse. Sharding does not create the cost; it makes the run finish, and the
+      # 360min cap bills only the time actually used.
+      # The lever for REDUCING it is shrinking the per-mutant test cost (cargo-mutants -j, or
+      # nextest, or scoping each mutant's test set) — not fewer shards. A `--timeout` shortcut
+      # is NOT acceptable: mutants-gate.py counts Timeout as CAUGHT, so capping per-mutant
+      # runtime would silently reclassify real survivors as kills and understate the ceiling.
+      # If that cost is judged too high, the honest response is to make the sweep cheaper or to
+      # run it less often than nightly — not to keep a job that cannot finish.
       fail-fast: false
       max-parallel: 8
       matrix:
@@ -3356,7 +3379,8 @@ jobs:
           - sparq-prov
           - sparq-algos
           - sparq-core
-          - sparq-engine
+          # sparq-engine is NOT listed here — it is sub-sharded into 24 include entries below
+          # (--shard 1/24 … 24/24). [SONNET-4.6] sq-has2g
           # sparq-reason is NOT listed here — it is sub-sharded into 3 include entries below
           # (--shard 1/3, 2/3, 3/3) so 3230 mutants fit in 3×120min instead of one ~6h job.
           # [SONNET-4.6] sq-qcnn.28
@@ -3433,8 +3457,9 @@ jobs:
           # sparq-vectors all cancelled at the old 120min ceiling. Raise to 360min.
           # sparq-server + sparq-mpc were killed by runner shutdown at 108min/57min; 360min
           # gives them enough headroom and eliminates the race with the job-level timeout.
-          - crate: sparq-engine
-            timeout_minutes: 360
+          # [SONNET-4.6] sq-has2g: sparq-engine no longer has an entry HERE — raising it to
+          # 360min was not enough (it still never finished), so it moved to the SUB-SHARDS
+          # block below, where each of its shards carries the 360min override.
           - crate: sparq-solid
             timeout_minutes: 360
           - crate: sparq-zk-compose
@@ -3458,6 +3483,122 @@ jobs:
             shard: "2/3"
           - crate: sparq-reason
             shard: "3/3"
+          # [SONNET-4.6] sq-has2g: sparq-engine SUB-SHARDS — seed the LARGEST crate.
+          # sparq-engine has been in this matrix (one job, 360min) since sq-qcnn.28 and is
+          # STILL absent from bench/mutants-baseline.json: the single job has never finished
+          # inside its budget, so it has never produced a COMPLETE outcomes.json to seed from.
+          #
+          # SIZING RATIONALE — deliberately QUALITATIVE. Local/session-box timings are not
+          # canonical and would stale as the crate, the toolchain and the runner image change,
+          # so no measured seconds/hours are recorded here. Reproduce the inputs yourself:
+          # `cargo mutants -p <crate> --list | wc -l` for the mutant set, and any completed
+          # nightly shard's own outcomes.json for the per-mutant cost.
+          #   • sparq-engine has the LARGEST generated mutant set in the workspace.
+          #   • cargo-mutants runs mutants SERIALLY — `--jobs` defaults to 1 and this lane does
+          #     not pass -j — so shard wall-clock is (mutants / shards) x the per-mutant test
+          #     cost, plus one build/baseline per shard. (The sq-qcnn.28 sparq-reason note above
+          #     assumes "2 concurrent workers"; that is not what the tool does by default, which
+          #     is likely why sparq-reason is ALSO still unseeded. Tracked separately.)
+          #   • a SURVIVING mutant costs several times a caught one (a survivor runs the suite
+          #     to completion; a kill exits as soon as a test fails), so the per-mutant mean
+          #     depends on the crate's caught ratio — which is UNKNOWN for sparq-engine until a
+          #     full sweep lands, and must therefore be assumed pessimistic.
+          # 24 is an OPERATIONAL INITIAL VALUE, not a measurement: it is the split that keeps a
+          # shard inside the 360min cap under that pessimistic assumption. A shard that overruns
+          # is cancelled and yields nothing — the exact failure that has kept this crate
+          # unseeded — while 360min is a CAP, not a reservation, so a shard that finishes early
+          # bills only what it used. Over-sharding therefore costs just the per-shard build
+          # overhead; under-sharding costs the entire run.
+          # RE-TUNE from the first nightly that completes — that run's own timings are the
+          # evidence of record: raise the split if shards still cancel, lower it to reclaim the
+          # per-shard build overhead if they finish far under the cap.
+          #
+          # Engine is unseeded, so --check reports "UNSEEDED" per shard (exit 0).
+          # SEEDING (sq-has2g): pass ALL 24 mutants-outcomes-nightly-sparq-engine-shard-*
+          # artifacts to ONE `scripts/mutants-gate.py --seed` — the shards partition the mutant
+          # set, so the whole-crate figure is their SUM and --seed aggregates them (recording
+          # `shards: 24`). Seeding from a subset would commit a ceiling a fraction of the truth,
+          # so --seed ENFORCES the set rather than trusting the operator: it reads each
+          # artifact's `-shard-k-n` identity out of its path and REFUSES a missing, repeated
+          # (the same slice downloaded twice) or mixed-denominator shard set. --seed ALSO
+          # refuses any shard whose outcomes.json is truncated against its mutants.json, so a
+          # cancelled shard cannot silently shorten the count — that check is independent, since
+          # each shard of a 23-of-24 subset is individually complete against its own plan — and
+          # refuses outright when a shard ships no readable mutants.json at all, so an artifact
+          # with NO completeness evidence can never pass for a whole run
+          # (--allow-unverified-completeness is the explicit, deliberate override).
+          - crate: sparq-engine
+            shard: "1/24"
+            timeout_minutes: 360
+          - crate: sparq-engine
+            shard: "2/24"
+            timeout_minutes: 360
+          - crate: sparq-engine
+            shard: "3/24"
+            timeout_minutes: 360
+          - crate: sparq-engine
+            shard: "4/24"
+            timeout_minutes: 360
+          - crate: sparq-engine
+            shard: "5/24"
+            timeout_minutes: 360
+          - crate: sparq-engine
+            shard: "6/24"
+            timeout_minutes: 360
+          - crate: sparq-engine
+            shard: "7/24"
+            timeout_minutes: 360
+          - crate: sparq-engine
+            shard: "8/24"
+            timeout_minutes: 360
+          - crate: sparq-engine
+            shard: "9/24"
+            timeout_minutes: 360
+          - crate: sparq-engine
+            shard: "10/24"
+            timeout_minutes: 360
+          - crate: sparq-engine
+            shard: "11/24"
+            timeout_minutes: 360
+          - crate: sparq-engine
+            shard: "12/24"
+            timeout_minutes: 360
+          - crate: sparq-engine
+            shard: "13/24"
+            timeout_minutes: 360
+          - crate: sparq-engine
+            shard: "14/24"
+            timeout_minutes: 360
+          - crate: sparq-engine
+            shard: "15/24"
+            timeout_minutes: 360
+          - crate: sparq-engine
+            shard: "16/24"
+            timeout_minutes: 360
+          - crate: sparq-engine
+            shard: "17/24"
+            timeout_minutes: 360
+          - crate: sparq-engine
+            shard: "18/24"
+            timeout_minutes: 360
+          - crate: sparq-engine
+            shard: "19/24"
+            timeout_minutes: 360
+          - crate: sparq-engine
+            shard: "20/24"
+            timeout_minutes: 360
+          - crate: sparq-engine
+            shard: "21/24"
+            timeout_minutes: 360
+          - crate: sparq-engine
+            shard: "22/24"
+            timeout_minutes: 360
+          - crate: sparq-engine
+            shard: "23/24"
+            timeout_minutes: 360
+          - crate: sparq-engine
+            shard: "24/24"
+            timeout_minutes: 360
     concurrency:
       # [OPUS-4.8] sq-qcnn.11: per-crate + per-ref concurrency key ("its own concurrency keys")
       # with cancel-in-progress:false so an overlapping run (e.g. a manual workflow_dispatch
@@ -3553,8 +3694,20 @@ jobs:
           # on the outcomes.json, then commit bench/mutants-baseline.json (reviewed).
           # [SONNET-4.6] sq-qcnn.28: per-shard artifact suffix injected via GITHUB_OUTPUT
           # (artifact_suffix is empty for non-sharded crates, "-shard-1-3" etc for sparq-reason).
+          # [SONNET-4.6] sq-has2g: ALSO upload mutants.json — the full PLANNED mutant list for
+          # this run (shard-aware). cargo-mutants writes outcomes.json incrementally, so a job
+          # killed at its timeout leaves a well-formed but PARTIAL artifact that looks exactly
+          # like a complete run of a smaller crate; scripts/mutants-gate.py compares the two
+          # and REFUSES to --seed a ceiling from a truncated run. Truncation is the most likely
+          # way a dishonest ceiling gets committed for the heavy crates, so --seed also FAILS
+          # CLOSED when this file is absent or unreadable: it cannot then establish completeness
+          # either way, and an artifact with no evidence must not seed a ceiling. Keep both files
+          # in mutants.out/ so the seeding command can point at the downloaded directory
+          # unchanged.
           name: mutants-outcomes-nightly-${{ matrix.crate }}${{ steps.run_mutants.outputs.artifact_suffix }}
-          path: target/mutants/${{ matrix.crate }}${{ steps.run_mutants.outputs.artifact_suffix }}/mutants.out/outcomes.json
+          path: |
+            target/mutants/${{ matrix.crate }}${{ steps.run_mutants.outputs.artifact_suffix }}/mutants.out/outcomes.json
+            target/mutants/${{ matrix.crate }}${{ steps.run_mutants.outputs.artifact_suffix }}/mutants.out/mutants.json
 
   unsafe-register:
     # [OPUS-4.8] sq-toze.6 / cert gap GX-5: GATING `unsafe`-count RATCHET. This is the

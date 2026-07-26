@@ -2,7 +2,7 @@
 
 # Parsing / ingest optimization plan — HDT decode+parse and Turtle→N-Triples parity
 
-Scope: task #13 (HDT decompress+parse, incl. compressed HDT) and task #14 (Turtle parse → match N-Triples throughput). All file refs are to `/home/ubuntu/sparq`. Grounded in `research/custom-parsers-baseline.md`, `research/fast-ingestion.md`, `research/wikidata-ingestion-benchmark.md`, `crates/sparq-hdt/{TODO.md,README.md}`. Empirical-honesty rule applies: no claimed win without a before/after measurement on a quiet box.
+Scope: task #13 (HDT decompress+parse, incl. compressed HDT) and task #14 (Turtle parse → match N-Triples throughput). All file refs are to `/home/ubuntu/sparq`. Grounded in `research/custom-parsers-baseline.md`, `research/fast-ingestion.md`, `research/wikidata-ingestion-benchmark.md`, `crates/sparq-hdt/README.md` (plus the crate's then-current `TODO.md`, deleted in the 2026-06-13 hygiene cleanup — its deferred-item rationale now lives in beads and `crates/sparq-hdt/UPSTREAM.md`). Empirical-honesty rule applies: no claimed win without a before/after measurement on a quiet box.
 
 ## 0. Goals (and the honest framing of each)
 

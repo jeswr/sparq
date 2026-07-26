@@ -47,6 +47,14 @@ members = [
     "filter_f64_d3",
     "filter_f64_d4",
     "revoke_unset_d10",
+    # [OPUS-5] sq-kndw (deferred remainder of sq-6qe): the FULLY-HIDDEN revocation
+    # member -- hides the status-list IRI + version on top of the index/bit that
+    # revoke_unset_d10 already hides, by proving accepted-set membership of the
+    # (list, version, status_list_root) triple against the relying party's committed
+    # policy root (research/zk-statuslist-hide-iri-version.md sec 3 sub-option A).
+    # D=10 status-list depth, A=4 accepted-set depth. Opt-in; NOT externally
+    # audited (sq-qhy4) -- the verifier remains NOT-yet-sound.
+    "revoke_hidden_ref_d10_a4",
     "hidden_issuer_d4",
     "holder_pok",
     # [OPUS-4.8] sq-3c00: hidden-holder-SET anonymity tier (Merkle holder-set

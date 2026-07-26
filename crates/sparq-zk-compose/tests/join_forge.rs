@@ -76,9 +76,10 @@ fn fixture_snapshot() -> StatusListSnapshot {
 }
 fn fixture_revocation() -> RevocationStatus {
     RevocationStatus {
-        status_list: STATUS_LIST.to_string(),
+        ref_commitment: None,
+        status_list: Some(STATUS_LIST.to_string()),
         index: Some(STATUS_INDEX),
-        version: STATUS_VERSION,
+        version: Some(STATUS_VERSION),
         index_commitment: None,
     }
 }
@@ -98,8 +99,9 @@ fn attest_full(commitment: Fr, salt: Fr, sk: &SecretKey) -> CommitmentAttestatio
         cryptosuite: SignatureScheme::Poseidon2SchnorrV1.cryptosuite_iri().to_string(),
         salt: Some(FieldHex::from_field(&salt)),
         status: Some(AttestedStatusRef {
+            ref_commitment: None,
             index: Some(STATUS_INDEX),
-            version: STATUS_VERSION,
+            version: Some(STATUS_VERSION),
             index_commitment: None,
         }),
         holder: None,
@@ -203,6 +205,7 @@ fn join_manifest() -> ProofManifest {
     let join = join_eq_inputs(commit_a, commit_b, SLOT_A, SLOT_B);
     let sk = test_issuer_sk(1);
     ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: JOIN_QUERY.into(),
         issuers: vec![],

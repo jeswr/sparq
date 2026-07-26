@@ -243,6 +243,31 @@ pub fn smallest_path_reach_id(k: u32, max_graph: u32, min_depth: u32) -> Option<
         .map(|d| CircuitId::PathReach { d, k, n })
 }
 
+/// [OPUS-5] sq-kndw: the compiled `revoke_hidden_ref_d{depth}_a{set_depth}`
+/// FULLY-HIDDEN revocation members, as `(status-list depth, accepted-set depth)`.
+/// This is the SINGLE SOURCE of the family list —
+/// [`derive_revoke_hidden_ref_id`] validates a pair against it EXACTLY (no
+/// wrong-bucket fallback), mirroring the path/filter families' EXACT-match
+/// discipline (sq-wto). One member `zk/compose/` compiles today: `(10, 4)`.
+// [OPUS-5] sq-kndw: compiled fully-hidden revocation members.
+pub const REVOKE_HIDDEN_REF_MEMBERS: &[(u32, u32)] = &[(10, 4)];
+
+/// Derive the `revoke_hidden_ref_d{depth}_a{set_depth}` member id (sq-kndw).
+/// EXACT membership against [`REVOKE_HIDDEN_REF_MEMBERS`]: the pair must be a
+/// COMPILED member, else `None` — fail-closed, so a relying party that configures
+/// a `(hidden_index_depth, accepted_set_depth)` combination with no compiled
+/// circuit gets a clean refusal rather than a proof attempt against a member that
+/// does not exist. Prover and verifier both call this, so a proof only ever fits
+/// the member its public inputs name.
+// [OPUS-5] sq-kndw: derive the fully-hidden revocation member id (EXACT match).
+pub fn derive_revoke_hidden_ref_id(depth: u32, set_depth: u32) -> Option<CircuitId> {
+    if REVOKE_HIDDEN_REF_MEMBERS.contains(&(depth, set_depth)) {
+        Some(CircuitId::RevokeHiddenRef { depth, set_depth })
+    } else {
+        None
+    }
+}
+
 /// A constant or variable slot of a BGP triple pattern.
 #[derive(Debug, Clone)]
 pub enum Slot {
@@ -419,6 +444,93 @@ pub fn build_filter_int(
         ProofInputs::FilterInt { id, operand_enc, op, bound, expected },
         digit_bytes,
     ))
+}
+
+/// The BOOLEAN-lane verdict for `value <op> bound` over the XSD boolean order
+/// `false < true` (sq-5xdlk) — the host mirror of the `filter_value_dl_int`
+/// member's `integer_verdict` applied to the boolean value hooks
+/// `{0 = false, 1 = true}` (`zk/compose/compose_core/src/filter_value.nr`).
+///
+/// `EQ`/`NE` are the ordinary boolean equality; `LT`/`LE`/`GT`/`GE` are the
+/// DEGENERATE orderings XPath's `op:boolean-less-than` / `op:boolean-greater-than`
+/// define, i.e. exactly `false < true` — they are meaningful, not errors, which is
+/// why the integer member serves this lane unchanged.
+// [OPUS-5] sq-5xdlk: boolean value-lane verdict oracle. Opt-in (`dual-leaf`).
+#[cfg(feature = "dual-leaf")]
+pub fn boolean_verdict(value: bool, op: FilterOp, bound: bool) -> bool {
+    match op {
+        FilterOp::Lt => !value && bound,
+        FilterOp::Le => !value || bound,
+        FilterOp::Gt => value && !bound,
+        FilterOp::Ge => value || !bound,
+        FilterOp::Eq => value == bound,
+        FilterOp::Ne => value != bound,
+    }
+}
+
+/// A built DUAL-LEAF `xsd:boolean` value-lane FILTER (sq-5xdlk): the public
+/// [`ProofInputs`] plus the member's two PRIVATE field witnesses.
+///
+/// The witnesses are the dual-leaf components `sparq_zk::dual_leaf_boolean::
+/// encode_boolean` produced for the committed literal, so `inputs.operand_enc`
+/// is by construction the leaf those witnesses rebind to in-circuit.
+// [OPUS-5] sq-5xdlk: boolean value-lane host wiring. Opt-in, NOT-yet-sound.
+#[cfg(feature = "dual-leaf")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuiltFilterValueDlBoolean {
+    /// Public inputs for the shared [`CircuitId::FilterValueDl`] member, carrying
+    /// the BOOLEAN `datatype_const` and `bound ∈ {0, 1}`.
+    pub inputs: ProofInputs,
+    /// PRIVATE: the boolean `VALUE_HOOK` (`0` = false, `1` = true) as a field.
+    pub value_hook: FieldHex,
+    /// PRIVATE: the OFF-circuit blake3 lexical hash, carried as a free witness.
+    pub lexical_component: FieldHex,
+}
+
+/// Build a DUAL-LEAF `xsd:boolean` value-lane FILTER over the committed literal
+/// `literal` under operator `op` against the constant `bound` (sq-5xdlk — the
+/// circuit half of the boolean lane whose host encoder is sq-hh7a4).
+///
+/// NO new Noir member is involved: this targets the EXISTING
+/// [`CircuitId::FilterValueDl`] (`filter_value_dl_int`) with
+/// `datatype_const = `[`crate::manifest::boolean_datatype_const`]`()` and the
+/// boolean hooks `{0, 1}` inside its `u64` domain (see that function's docs for
+/// why the lanes cannot cross).
+///
+/// The disclosed verdict is COMPUTED here ([`boolean_verdict`]) rather than taken
+/// from the caller, so an honest host cannot accidentally disclose a verdict the
+/// member will refuse to prove; a test constructing the LYING case builds the
+/// [`ProofInputs::FilterValueDl`] variant directly with a flipped `expected`.
+///
+/// Returns the encoder's `Err` unchanged when `literal` is not a canonical
+/// `xsd:boolean` (`"true"`/`"false"`): the §6 fail-closed co-binding rejects the
+/// non-canonical XSD-legal spellings `"1"`/`"0"` and every non-boolean datatype,
+/// so a desynced leaf is never built here.
+///
+/// DOCUMENTED RISK: inherits the value lane's INV-VL downgrade (#769 accepted,
+/// CR-G8 / sq-qhy4). NOT externally audited; no soundness / privacy claim.
+// [OPUS-5] sq-5xdlk: boolean value-lane host wiring. Opt-in, NOT-yet-sound.
+#[cfg(feature = "dual-leaf")]
+pub fn build_filter_value_dl_boolean(
+    literal: &oxrdf::Literal,
+    op: FilterOp,
+    bound: bool,
+) -> Result<BuiltFilterValueDlBoolean, sparq_zk::dual_leaf::DualLeafError> {
+    let components = sparq_zk::dual_leaf_boolean::encode_boolean(literal)?;
+    // The encoder maps ONLY the canonical lexicals, so the hook is exactly {0, 1}.
+    let value = components.value_hook != Fr::from(0u64);
+    Ok(BuiltFilterValueDlBoolean {
+        inputs: ProofInputs::FilterValueDl {
+            id: CircuitId::FilterValueDl,
+            operand_enc: hexf(&components.leaf()),
+            op,
+            bound: u64::from(bound),
+            datatype_const: crate::manifest::boolean_datatype_const(),
+            expected: boolean_verdict(value, op, bound),
+        },
+        value_hook: hexf(&components.value_hook),
+        lexical_component: hexf(&components.lexical_component),
+    })
 }
 
 /// Encode an xsd:integer literal `value` to its term encoding under `salt`

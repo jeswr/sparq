@@ -236,6 +236,12 @@ function buildEntry(gathers) {
       values,
       count_match: rowCountMatch(cc),
     };
+    if (cc.sparq_oracle_workload && cc.sparq_oracle_workload !== q) {
+      row.sparq_oracle_workload = cc.sparq_oracle_workload;
+    }
+    if (cc.corpus_variant) {
+      row.corpus_variant = cc.corpus_variant;
+    }
     if (anyExtended) {
       // HTTP-profile extras: values = keep-alive full-request best (primary, above);
       // TTFB + fresh-connect twins carried alongside, same best-of-gathers rule.

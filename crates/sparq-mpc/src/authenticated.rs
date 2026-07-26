@@ -1,8 +1,10 @@
 // [OPUS-4.8] sq-km34.1: IT-MAC authenticated secret sharing — the FOUNDATION for
 // honest-majority malicious-with-abort MPC. Layered over the existing degree-t
-// Shamir sharing (`crate::shamir`). Foundation only: MAC-carrying multiplication
-// (sq-km34.2), the batched MAC-check (sq-km34.4), and the registry wiring
-// (sq-km34.7) are SEPARATE beads and are NOT implemented here.
+// Shamir sharing (`crate::shamir`). This module is the CARRIER (the `[[x]]` pair
+// + the free linear ops); the MAC-carrying multiplication (sq-km34.3,
+// `MacSession::auth_mul`) and the batched MAC-check (sq-km34.4,
+// `MacSession::mac_check`) live in `crate::shamir`, and the registry wiring
+// (sq-km34.7) is a SEPARATE bead that has NOT landed.
 //! Authenticated (IT-MAC) secret sharing over the honest-majority Shamir backend
 //! — the foundation of malicious-with-abort security.
 //!
@@ -49,29 +51,43 @@
 //!   linear op to BOTH `[x]` and `[α·x]`, with the public-constant MAC term using
 //!   the shared `[α]`. Zero communication rounds — the honest-majority sweet spot.
 //!
-//! It does **NOT** deliver (those are later beads, do not implement here):
+//! It does **NOT** itself deliver (they live elsewhere, or have not landed):
 //!
-//! - MAC-carrying **multiplication** + authenticated degree-reduce — **sq-km34.2**
-//!   (design §2.4). Multiplication is where authentication needs real work
-//!   (`α·(x·y) ≠ (α·x)·(α·y)`); this foundation only covers the FREE linear ops.
+//! - MAC-carrying **multiplication** + authenticated degree-reduce — **sq-km34.3**
+//!   (design §2.4 route (a)). Multiplication is where authentication needs real
+//!   work (`α·(x·y) ≠ (α·x)·(α·y)`); this module only covers the FREE linear ops.
+//!   It HAS landed, in `crate::shamir` as
+//!   [`MacSession::auth_mul`](crate::shamir::MacSession::auth_mul): the value
+//!   product and the MAC `[α·z] = reduce([α·x]·[y])` are two INDEPENDENT
+//!   mult-then-reduce rounds, which is what MAC-covers the `degree_reduce`
+//!   re-sharing (design "Hole 2").
 //! - The **batched MAC-check** at open time — **sq-km34.4** (design §2.5). Without
-//!   it, an authenticated share is not yet tamper-*evident*; this bead builds the
-//!   carrier, not the check. **So this is the foundation for malicious-with-abort
-//!   security, but NOT yet malicious until sq-km34.2+ land.**
+//!   it an authenticated share is not tamper-*evident*; this module builds the
+//!   carrier, not the check. It HAS landed, in `crate::shamir` as
+//!   [`MacSession::mac_check`](crate::shamir::MacSession::mac_check).
 //! - **Registry / per-operator** reporting (`new_malicious`,
-//!   `authenticated_abort` descriptor) — **sq-km34.7** (design §4). This module
-//!   does NOT touch [`crate::backend`]; the security tier reported to a federation
-//!   is unchanged until the check is wired in.
+//!   `authenticated_abort` descriptor) — **sq-km34.7** (design §4), which has NOT
+//!   landed. This module does NOT touch [`crate::backend`], and the security tier
+//!   [`crate::backend`] reports to a federation is still the semi-honest one: a
+//!   caller only gets the authenticated guarantee by explicitly running the
+//!   `MacSession` path and calling `mac_check` before it acts on an opened value.
 //!
 //! ## Security tier (stated, not over-claimed)
 //!
 //! This foundation is the carrier for **honest-majority, malicious-with-abort**
 //! security (design §3, "the achieved tier"). On its own it changes NO advertised
 //! guarantee: it adds the MAC sharing alongside the value sharing and keeps the
-//! linear ops free and correct. The malicious-security PROPERTY only materialises
-//! once the multiplication (sq-km34.2) carries the MAC and the batched check
-//! (sq-km34.4) fires on a mismatch. Until then the parties are still trusted to
-//! follow the protocol (semi-honest), exactly as today.
+//! linear ops free and correct. The malicious-security PROPERTY materialises only
+//! on a path where the multiplication carries the MAC
+//! ([`MacSession::auth_mul`](crate::shamir::MacSession::auth_mul), sq-km34.3) AND
+//! the batched check
+//! ([`MacSession::mac_check`](crate::shamir::MacSession::mac_check), sq-km34.4)
+//! fires before any opened value is acted on. Both have landed, so that path
+//! EXISTS — but it is opt-in: on any path that does not run it (the plain
+//! [`ShamirBackend`](crate::shamir::ShamirBackend) aggregate, the semi-honest
+//! join/compare surfaces) the parties are still trusted to follow the protocol,
+//! and the backend's advertised tier is unchanged pending sq-km34.7. Nothing here
+//! is externally audited (sq-qhy4); MPC remains research-grade.
 //!
 //! ## Why `α` is NEVER reconstructed (a structural, not documentary, guarantee)
 //!
@@ -346,19 +362,22 @@ impl AuthenticatedShare {
     /// accessor is a back door round the "α is never reconstructed" guarantee: a
     /// caller could mint `authenticated_share(1)` (so `α·x = α·1 = α`), open its MAC
     /// via the public `reconstruct`, and recover `α` directly. Keeping this
-    /// crate-private means the ONLY in-crate consumers are the MAC-check machinery
-    /// (km34.2/.4, not yet built) — there is no public surface that returns the MAC
-    /// shares, so the `x = 1` extraction is closed. (`value_shares()` stays public:
-    /// it opens `[x]`, the value, never `α`.) `[OPUS-4.8]`
+    /// crate-private means the ONLY in-crate consumers are the MAC-carrying
+    /// multiplication ([`MacSession::auth_mul`](crate::shamir::MacSession::auth_mul),
+    /// sq-km34.3, which reads `[α·x]` to build `[α·z] = reduce([α·x]·[y])`) and the
+    /// batched MAC-check
+    /// ([`MacSession::mac_check`](crate::shamir::MacSession::mac_check), sq-km34.4,
+    /// which only ever consumes it inside the random linear combination) — there is
+    /// no public surface that returns the MAC shares, so the `x = 1` extraction is
+    /// closed. (`value_shares()` stays public: it opens `[x]`, the value, never
+    /// `α`.) `[OPUS-4.8]`
     //
-    // `allow(dead_code)`: the only non-test in-crate consumers are the batched
-    // MAC-check machinery (sq-km34.2/.4), which is NOT built yet — so in a plain
-    // (non-test) library build this `pub(crate)` accessor has no caller. It is
-    // exercised by this module's tests today and is the API the MAC-check will use;
-    // keeping it `pub(crate)` (not `pub`) is the security fix, so we suppress the
-    // dead-code lint rather than widen visibility. Remove the allow once km34.2/.4
-    // land. `[OPUS-4.8]`
-    #[allow(dead_code)]
+    // [OPUS-4.8] sq-km34.3: the `allow(dead_code)` that used to sit here is GONE.
+    // Its justification was "the MAC-check machinery is NOT built yet, so this has
+    // no non-test caller" — no longer true: `auth_mul` and `mac_check` both call
+    // this in a plain (non-test) library build. The lint now genuinely guards the
+    // accessor, so a future refactor that orphans it gets flagged instead of
+    // silently suppressed.
     pub(crate) fn mac_shares(&self) -> &[Share] {
         &self.mac
     }
@@ -828,7 +847,11 @@ mod tests {
         for next in &shared[1..] {
             manual = auth_add(&manual, next).unwrap();
         }
-        assert_eq!(open(manual.value_shares(), t), sum, "auth_sum == manual fold");
+        assert_eq!(
+            open(manual.value_shares(), t),
+            sum,
+            "auth_sum == manual fold"
+        );
     }
 
     /// `auth_sum` rejects an empty aggregate (like `run_secure`): there is no

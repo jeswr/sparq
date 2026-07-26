@@ -1,7 +1,12 @@
 // [GPT-5.6] sq-6xasp.3: wasm host adapter over the real LWS router.
 // [SONNET-4.6] sq-250si: wasm panic hook + host trap-recovery boundary.
-#![forbid(unsafe_code)]
+// [SONNET-4.6] sq-wubkf: bounded linear-memory accounting behind the `memory` module. The crate
+// root is `deny(unsafe_code)` rather than `forbid` for exactly one reason — a `#[global_allocator]`
+// requires `unsafe impl GlobalAlloc`, which has no safe substitute. `memory` carries the only
+// `#[allow(unsafe_code)]` in the crate; every other module still fails to compile on `unsafe`.
+#![deny(unsafe_code)]
 #![deny(rust_2018_idioms)]
+#![warn(clippy::undocumented_unsafe_blocks)]
 //! WebAssembly request entry for the in-memory Solid/LDP server core.
 //!
 //! Building this dedicated crate is the opt-in boundary. On wasm32, `SolidServer` owns the real axum
@@ -20,10 +25,24 @@
 //! The Node host (`@jeswr/solid-server`) catches the resulting `WebAssembly.RuntimeError` and
 //! recreates the `SolidServer` before the next request, so a single trap does not permanently
 //! brick the process. See `packages/solid-server/src/index.js`.
+//!
+//! # Linear-memory ceiling
+//!
+//! Allocation failure at the linear-memory ceiling reaches that same trap, but — unlike a panic —
+//! it is predictable from the pod's own live-byte total. [`memory`] installs a `System`-delegating
+//! global allocator that tracks live bytes, and `handleRequest` refuses a request whose projected
+//! peak would cross the configured ceiling with a clean HTTP 507 before the router ever runs. See
+//! the [`memory`] module documentation for what that does and does not cover.
+
+// The `#[allow]` also has to cover the `#[global_allocator]` registration, whose expansion emits
+// `unsafe` allocator shims — hence the whole module, not a single item, is the exemption.
+#[allow(unsafe_code)]
+pub mod memory;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
     use axum::body::{to_bytes, Body, Bytes};
+    use axum::response::{IntoResponse, Response};
     use http::header::{HeaderName, HeaderValue};
     use http::{Method, Request, Uri};
     use oxrdf::{NamedNode, Triple};
@@ -31,9 +50,11 @@ mod wasm {
     use sparq_lws_core::ldp::content::{serialize_triples, RdfFormat};
     use sparq_lws_core::ldp::handler::LdpState;
     use sparq_lws_core::store::{CompositeStore, InMemoryBlobStore, InMemorySparqClient, Store};
-    use sparq_lws_core::{build_router, AppState};
+    use sparq_lws_core::{build_router, AppState, ServerError};
     use tower::ServiceExt;
     use wasm_bindgen::prelude::*;
+
+    use crate::memory;
 
     type MemoryStore = CompositeStore<InMemorySparqClient, InMemoryBlobStore>;
 
@@ -49,6 +70,39 @@ mod wasm {
     #[wasm_bindgen(start)]
     pub fn lws_init() {
         console_error_panic_hook::set_once();
+    }
+
+    /// Bytes currently held by live allocations inside the module's linear memory.
+    // [SONNET-4.6] sq-wubkf: `f64` rather than `u64` so the host reads a plain JS number; byte
+    // totals stay far inside the 2^53 exactly-representable range.
+    #[wasm_bindgen(js_name = lwsMemoryLiveBytes)]
+    pub fn lws_memory_live_bytes() -> f64 {
+        memory::live_bytes() as f64
+    }
+
+    /// The largest live-byte total observed since the module was loaded.
+    #[wasm_bindgen(js_name = lwsMemoryPeakBytes)]
+    pub fn lws_memory_peak_bytes() -> f64 {
+        memory::peak_bytes() as f64
+    }
+
+    /// The linear-memory ceiling above which a request is refused with 507; `0` means unbounded.
+    #[wasm_bindgen(js_name = lwsMemoryCeilingBytes)]
+    pub fn lws_memory_ceiling_bytes() -> f64 {
+        memory::ceiling_bytes() as f64
+    }
+
+    /// Replace the linear-memory ceiling. Pass `0` to disable the bound.
+    ///
+    /// A host that runs several pods in one module should lower this so one pod cannot consume the
+    /// whole linear memory. Rejects a negative or non-finite argument rather than silently
+    /// unbounding.
+    #[wasm_bindgen(js_name = lwsSetMemoryCeilingBytes)]
+    pub fn lws_set_memory_ceiling_bytes(bytes: f64) -> Result<(), JsError> {
+        let ceiling = memory::ceiling_from_js(bytes)
+            .ok_or_else(|| JsError::new("memory ceiling must be a finite, non-negative number"))?;
+        memory::set_ceiling_bytes(ceiling);
+        Ok(())
     }
 
     /// A response returned across the wasm boundary.
@@ -118,6 +172,10 @@ mod wasm {
         /// `headers` is a flat `[name, value, ...]` array and must contain an even number of strings.
         /// `authenticated_webid` is trusted only because the JavaScript host is responsible for OIDC;
         /// omit it for an anonymous request. The returned Promise needs no Tokio reactor.
+        ///
+        /// A request whose projected peak footprint would cross the linear-memory ceiling is
+        /// refused with HTTP 507 before the router runs, so sustained memory pressure produces an
+        /// HTTP answer instead of an `unreachable` trap. See [`crate::memory`].
         #[wasm_bindgen(js_name = handleRequest)]
         pub async fn handle_request(
             &self,
@@ -127,6 +185,11 @@ mod wasm {
             body: Vec<u8>,
             authenticated_webid: Option<String>,
         ) -> Result<LwsResponse, JsError> {
+            if !memory::admits_request(body.len() as u64) {
+                // Reuse the core's own 507 so an admission refusal is byte-identical to the
+                // store-quota refusal the host already handles.
+                return into_lws_response(ServerError::InsufficientStorage.into_response()).await;
+            }
             let request = build_request(method, path, headers, body, authenticated_webid)
                 .map_err(|error| JsError::new(&error))?;
             let response = self
@@ -135,19 +198,22 @@ mod wasm {
                 .oneshot(request)
                 .await
                 .map_err(|error| JsError::new(&error.to_string()))?;
-
-            let status = response.status().as_u16();
-            let headers = flatten_headers(response.headers())?;
-            let body = to_bytes(response.into_body(), usize::MAX)
-                .await
-                .map_err(|error| JsError::new(&error.to_string()))?
-                .to_vec();
-            Ok(LwsResponse {
-                status,
-                headers,
-                body,
-            })
+            into_lws_response(response).await
         }
+    }
+
+    async fn into_lws_response(response: Response) -> Result<LwsResponse, JsError> {
+        let status = response.status().as_u16();
+        let headers = flatten_headers(response.headers())?;
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .map_err(|error| JsError::new(&error.to_string()))?
+            .to_vec();
+        Ok(LwsResponse {
+            status,
+            headers,
+            body,
+        })
     }
 
     fn build_request(
