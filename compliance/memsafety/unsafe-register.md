@@ -46,12 +46,15 @@ register distinguishes two trust classes of `unsafe`:
 
 ## Register
 
-**87 `unsafe` sites** across 8 crates (the other crates contain no first-party `unsafe`).
+**91 `unsafe` sites** across 9 crates (the other crates contain no first-party `unsafe`).
 Counts and the file:line list are produced by `scripts/unsafe-gate.py --list` and
-must equal `bench/unsafe-snapshot.json`. One crate is a special NON-SHIPPING case:
+must equal `bench/unsafe-snapshot.json`. Two crates are special allocator cases:
 **`sparq-lws-core`** (sq-gg0qq.2) ships a `forbid(unsafe_code)` lib + bin
 with its 8 sites confined to two **example benchmark harnesses'** counting allocators, which
-a custom `#[global_allocator]` unavoidably requires (see each crate's subsection below).
+a custom `#[global_allocator]` unavoidably requires; **`sparq-lws-wasm`** (sq-wubkf) is the one
+crate whose 4 allocator sites are **SHIPPING** — a `#[global_allocator]` is the only way to bound
+wasm32 linear memory, so that crate's root is `deny(unsafe_code)` with a single
+`#[allow(unsafe_code)]` module rather than `forbid` (see each crate's subsection below).
 
 Recurring invariant shorthands used below:
 - **POD-bytes** — `[u32;3]` / `u32` / `u64` / `f64` are plain-old-data with no invalid
@@ -261,12 +264,47 @@ the examples run on the standard toolchain.
 | `examples/support/mod.rs:83` | `unsafe fn dealloc` | `ptr` came from this allocator with this `layout` | `System.dealloc(ptr, layout)` unchanged; holds because every `alloc`/`realloc` also forwarded to `System`. |
 | `examples/support/mod.rs:86` | `unsafe fn realloc` | caller's `ptr`/`layout`/`new_size` contract forwarded | `System.realloc(ptr, layout, new_size)` unchanged; `new_size` is only read into the byte counter. |
 
+### `sparq-lws-wasm` — 4 sites (the SHIPPING bounded `#[global_allocator]`) [SONNET-4.6]
+
+(sq-wubkf.) The only **shipping** `#[global_allocator]` sites in the register. On `wasm32` the
+whole Solid pod lives in one linear memory; when growth fails, the allocation-error handler aborts,
+which under the release profile's `panic=abort` lowers to an `unreachable` trap that poisons the
+instance and answers the request with nothing. `memory::BoundedAlloc` keeps a running live-byte
+total so `handleRequest` can refuse a request whose projected peak crosses a configured ceiling
+with a clean HTTP 507 *before* the router runs. A `#[global_allocator]` unavoidably requires
+`unsafe` (the `GlobalAlloc` trait is `unsafe` by definition, and there is no safe substitute for a
+process-wide live-byte counter), so this crate alone relaxes its root from `forbid(unsafe_code)` to
+`deny(unsafe_code)` plus a single `#[allow(unsafe_code)] pub mod memory;` — every other module in
+the crate still fails to compile on `unsafe`.
+
+**Not** a B5 (untrusted-input) surface, and the same forward-to-`System` class as the
+`sparq-engine` / `sparq-lws-core` counting allocators above: every method delegates verbatim to
+`System` with the identical arguments, so `System` discharges all of `GlobalAlloc`'s obligations.
+The wrapper only reads `Layout::size()`/`new_size` and bumps `Relaxed` atomics; no pointer `System`
+returns is ever dereferenced, retained, or aliased, and it **never refuses an allocation** (a null
+return from `GlobalAlloc::alloc` routes into `handle_alloc_error` → abort, i.e. exactly the trap
+this module removes — the bound is enforced at the request boundary instead, the only layer where a
+refusal can be an HTTP status). `alloc_zeroed` is deliberately left as the trait default, which
+routes through `BoundedAlloc::alloc` and is therefore accounted without a fourth forwarding method.
+Bounded by **review + the trivial forward-to-`System` argument**, the crate-root
+`clippy::undocumented_unsafe_blocks` (the `unsafe impl` carries a `// SAFETY:` comment), and the
+host-side unit tests in `src/memory.rs` that cover the accounting and ceiling arithmetic on the
+standard toolchain. Miri does not model a `#[global_allocator]` that calls `System`.
+
+| File:line | Kind | Invariant relied on | Why sound / how bounded |
+|---|---|---|---|
+| `src/memory.rs:135` | `unsafe impl GlobalAlloc for BoundedAlloc` | forward-to-`System` | every method delegates verbatim to `System` with the same args; the wrapper adds only `Relaxed` live/peak counter updates and never alters the returned pointer or the requested layout. |
+| `src/memory.rs:136` | `unsafe fn alloc` | caller's `layout` contract forwarded | `System.alloc(layout)` unchanged; only the returned pointer's nullness is inspected before recording `layout.size()`, so a failed allocation is not counted as live. |
+| `src/memory.rs:144` | `unsafe fn dealloc` | `ptr` came from this allocator with this `layout` | `System.dealloc(ptr, layout)` unchanged; holds because every `alloc`/`realloc` also forwarded to `System`. The counter decrement is balanced by construction — the allocator is installed before the first allocation, so no pointer predates it. |
+| `src/memory.rs:149` | `unsafe fn realloc` | caller's `ptr`/`layout`/`new_size` contract forwarded | `System.realloc(ptr, layout, new_size)` unchanged; only the returned pointer's nullness is inspected before recording the `layout.size()` → `new_size` delta, so a failed realloc leaves the old size counted (which it still is). |
+
 ## NEEDS-REVIEW
 
-**None.** Every one of the 87 sites now carries a literal `// SAFETY:` comment
+**None.** Every one of the 91 sites now carries a literal `// SAFETY:` comment
 immediately preceding the `unsafe` block/impl, mechanically enforced by
 `clippy::undocumented_unsafe_blocks` (MS-G2 closed, sq-8wbn, [OPUS-4.8]) — set
-at crate root on unsafe-bearing libraries and file-local on the `sparq-engine`
+at crate root on unsafe-bearing libraries (including `sparq-lws-wasm`, sq-wubkf)
+and file-local on the `sparq-engine`
 integration test and the `sparq-lws-core` example files that carry counting
 allocators. The 6 sites that
 previously relied on an adjacent block comment — the two `unsafe impl Send`/`Sync for

@@ -198,6 +198,22 @@ downstream: `SolidServer`, `createPodDispatcher`, and the `http.js` helpers (`MA
 `flattenRequestHeaders`, `readRequestBody`, `copyWasmResponse`, `writeNodeResponse`) from the
 package root, and the raw wasm glue via the `./wasm` subpath export.
 
+[SONNET-4.6] **Bounded linear memory → HTTP 507 (sq-wubkf).** The whole pod lives in one wasm32
+linear memory, so an allocation that cannot grow it aborts into an `unreachable` trap and the
+triggering request gets no HTTP answer. `sparq-lws-wasm` installs a `System`-delegating
+`#[global_allocator]` that tracks **live** heap bytes, and `handleRequest` refuses a request whose
+projected peak (`live + 4 × body + 1 MiB` headroom) would cross a ceiling — default 3 GiB — with a
+507 whose status and `insufficient storage` body are byte-identical to the store-quota 507 above,
+before the router runs. Because the accounting is of live bytes rather than of pages ever grown,
+deleting resources releases the pressure and the pod resumes accepting writes. Read and tune it
+from the host with `lwsMemoryLiveBytes()`, `lwsMemoryPeakBytes()`, `lwsMemoryCeilingBytes()`, and
+`lwsSetMemoryCeilingBytes(bytes)` (`0` disables the bound; a negative or non-finite argument throws
+rather than silently unbounding) — lower the ceiling when one module hosts several pods. This
+covers *sustained* pressure only: a single request whose own transient peak overshoots the
+remaining headroom still traps, and is still handled by trap recovery below. The allocator never
+refuses an allocation — a null return from `GlobalAlloc::alloc` aborts, which is the very trap
+being removed, so the bound is enforced at the request boundary instead.
+
 [SONNET-4.6] **Trap recovery (sq-250si).** The wasm artifact uses `panic=abort` (release profile):
 a Rust panic or allocation failure at the wasm32 linear-memory ceiling lowers to an `unreachable`
 trap that the host sees as `WebAssembly.RuntimeError`. Before the abort fires, a `console_error_panic_hook`
