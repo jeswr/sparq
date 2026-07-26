@@ -1783,8 +1783,10 @@ identities and resource IRIs by design (see the privacy-boundary note above).
   `from` not retained is `410` (widen retention with `time-travel`). **Same-lineage only** — the
   chain must be the writer history of that base (the diff relies on lineage-stable blank-node
   labels). At-rest encryption out of scope, same as the base.
-- **Time-travel memory cost is real.** Each retained generation is a *full* `Graph` today
-  (~780 MB/generation at 1M triples); size `--time-travel-generations` accordingly.
+- **Time-travel memory cost is real.** Each retained generation is a *full* `Graph` today;
+  each generation retains an independent copy of the store in memory. Size `--time-travel-generations`
+  conservatively — retain only as many generations as your deployment's memory budget allows. See
+  [`research/concurrent-serving.md`](../../research/concurrent-serving.md) for architecture details.
 - **Error bodies.** Every error is structured JSON `{"error": "..."}` with
   `Content-Type: application/json` (the `405` keeps its `Allow` header). POST query
   requires `Content-Type: application/sparql-query` or `application/x-www-form-urlencoded`

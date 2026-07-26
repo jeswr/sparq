@@ -689,9 +689,8 @@ in `bench/compose/RESULTS.md` and `bench/compose/k4/` (work-box, NON-CANONICAL).
   exact, but the trailing `→ range, e.g. sample` come from the predicate's *global*
   profile. `schema_summary_for` is struct-level scoping (filters already-mined
   profiles by IRI) — it does NOT re-scan, so it won't chase a seed entity's instances.
-- **Cost.** Introspection is `O(|G| + |dict|)` (sorted scans, no GROUP BY); measured
-  ~0.1 s build on 1.78M triples. LLM-excluded `ask` latency is the engine's query
-  time (p50 ~10 ms at olympics scale) — the LLM round trip dominates wall clock.
+- **Cost.** Introspection is `O(|G| + |dict|)` (sorted scans, no GROUP BY). LLM-excluded
+  `ask` latency is the engine's query time — the LLM round trip typically dominates wall clock.
 - **Graph scoping (sq-quuu).** `Introspection::build(&graph)` describes the **store of
   the `Graph` it is handed** — the **default graph** for the top-level `&graph`, or a
   **single named graph** when you pass that graph's sub-`Graph`. A schema card / VoID is
