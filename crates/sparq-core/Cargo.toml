@@ -42,6 +42,19 @@ mmap = ["dep:memmap2"]
 # blocks decoded. The filter is in-RAM only and never serialised, so the on-disk SPQCPRM1
 # format is unchanged. See `compress::block_bloom`.
 block-bloom = []
+# [SONNET-4.6] sq-96hp1 (survey §A2 / research/data-structures.md §B1): OPT-IN Elias-Fano and
+# Partitioned-Elias-Fano column codecs (`eliasfano` module) supporting **compressed seek** —
+# `next_geq(target)` answered directly on the compressed data, which the incumbent
+# delta+varint block codec cannot do (it must decode a whole block to seek).
+#
+# THIS IS A MEASUREMENT-GATED PROTOTYPE. It is deliberately NOT routed as a `PermData` variant
+# and no join calls it: the survey's own honest risk is that EF's pointer-chasing select/rank
+# LOSES to a linear varint walk on cache-resident streaming scans, so adoption is conditional on
+# the A/B (seek latency, scan throughput, bytes moved, heap; native AND wasm32) in
+# `eliasfano::tests::measure_ef_vs_block_varint`. OFF by default so the shipped store keeps the
+# incumbent codec bit-exactly and the lean default / wasm bundle links none of it. Pure `std` —
+# NO new dependency.
+elias-fano = []
 # [FABLE-5] sq-7d3dj.32.2.6 / sq-7d3dj.32.2.7: SPQCPRM2 frame-of-reference col2-reset
 # encoding. The SPQCPRM1 block stream writes a col2 that resets after a middle-column
 # change (`reset_d1`) as an ABSOLUTE varint; sq-7d3dj.32.2.4 attribution found that bucket
