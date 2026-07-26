@@ -40,7 +40,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import re
 import sys
 from typing import Any
@@ -408,7 +407,40 @@ def dqv_metric_for(type_terms: list[str]) -> str | None:
 # The `kb:` local names the minted IRI may carry through VERBATIM: a plain PN_LOCAL
 # alphabet, which (see `_measurement_stem`) is what keeps case one disjoint from case two.
 _PLAIN_LOCAL = re.compile(r"[A-Za-z0-9_-]+")
-_NON_PLAIN = re.compile(r"[^A-Za-z0-9_]")
+# The marker case two carries. `_escape_term` never emits `-`, so ANY `-` in an escaped
+# term is impossible, and case one rejects locals containing `--` — hence a leading `--`
+# is a mark only case two can bear.
+_ESCAPED_MARK = "--"
+
+
+def _escape_term(term: str) -> str:
+    """A REVERSIBLE, Turtle-safe encoding of an arbitrary term (inverse: `_unescape_term`).
+
+    Every UTF-8 byte that is not an ASCII alphanumeric renders as `_<hh>`, so `_` never
+    stands for itself and the decoder can always tell an escape from a literal character.
+    The image is therefore `[A-Za-z0-9_]*` — PN_LOCAL-safe, and free of `-`.
+    """
+    out = []
+    for byte in term.encode("utf-8"):
+        char = chr(byte)
+        out.append(char if char.isascii() and char.isalnum() else f"_{byte:02x}")
+    return "".join(out)
+
+
+def _unescape_term(escaped: str) -> str:
+    """The inverse of `_escape_term`. Shipped (not test-only) because it is the WITNESS
+    that the encoding is injective: a map with a left inverse cannot collide, which is
+    what a truncated digest could only ever make improbable, never impossible."""
+    out = bytearray()
+    i = 0
+    while i < len(escaped):
+        if escaped[i] == "_":
+            out.append(int(escaped[i + 1 : i + 3], 16))
+            i += 3
+        else:
+            out.append(ord(escaped[i]))
+            i += 1
+    return out.decode("utf-8")
 
 
 def _measurement_stem(subject: str) -> str:
@@ -423,17 +455,24 @@ def _measurement_stem(subject: str) -> str:
 
     Two disjoint cases keep the common form readable AND the whole map injective:
       * a `kb:` subject whose local name is already a plain PN_LOCAL-safe name renders as
-        that local name unchanged (the shipped `kb:meas-<local>-<suffix>` form);
-      * ANY other subject renders `<slug>--<digest>`, where the slug maps every character
-        outside `[A-Za-z0-9_]` to `_` (so it is Turtle-safe and, containing no `-`, makes
-        `--` a marker that case one can never produce) and the SHA-256 digest is taken
-        over the complete subject term, restoring the injectivity the slug loses.
+        that local name unchanged (the shipped `kb:meas-<local>-<suffix>` form), and is
+        recovered by prepending `kb:`;
+      * ANY other subject renders `--<escaped>`, with `_escape_term`'s reversible
+        encoding of the complete subject term, recovered by `_unescape_term`.
+    Each case is individually invertible and the two images are disjoint (case two always
+    starts with `--`, which case one's guard excludes), so the whole map is invertible —
+    genuinely injective, rather than merely collision-resistant as a truncated digest of
+    a lossy slug would be.
     """
     prefix, sep, local = subject.partition(":")
-    if sep and prefix == "kb" and _PLAIN_LOCAL.fullmatch(local) and "--" not in local:
+    if (
+        sep
+        and prefix == "kb"
+        and _PLAIN_LOCAL.fullmatch(local)
+        and _ESCAPED_MARK not in local
+    ):
         return local
-    digest = hashlib.sha256(subject.encode("utf-8")).hexdigest()[:12]
-    return f"{_NON_PLAIN.sub('_', subject)}--{digest}"
+    return f"{_ESCAPED_MARK}{_escape_term(subject)}"
 
 
 def measurement_iri(subject: str, metric: str) -> str:

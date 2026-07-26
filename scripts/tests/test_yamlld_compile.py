@@ -286,15 +286,60 @@ class TestCompileEnd2End(unittest.TestCase):
         )
 
     def test_measurement_stem_is_injective_and_turtle_safe(self):
-        # the stem is deterministic (re-running mints the same node), disjoint between
-        # the verbatim `kb:` case and the digest case, and only ever emits characters a
-        # Turtle PN_LOCAL admits unescaped.
-        subjects = ["kb:item", "pkg:item", "ex:item", "item", "kb:a/b", "kb:a--b", "kb:"]
+        # the stem is deterministic (re-running mints the same node) and only ever emits
+        # characters a Turtle PN_LOCAL admits unescaped. Injectivity is asserted as the
+        # property it actually is — INVERTIBILITY — rather than by spot-checking a few
+        # examples: a truncated digest passes any finite sample of examples yet still
+        # collides in principle, whereas exhibiting a left inverse rules collisions out.
+        subjects = [
+            "kb:item",
+            "pkg:item",
+            "ex:item",
+            "item",
+            "kb:a/b",
+            "kb:a--b",
+            "kb:",
+            # the adversarial shapes: a `kb:` local that LOOKS like an escaped term, and
+            # two distinct subjects whose lossy `[^A-Za-z0-9_] -> _` slug is identical.
+            "kb:kb_3aitem",
+            "kb:a/b?c",
+            "kb:a?b/c",
+            "<http://example.org/a>",
+            "<http://example.org/b>",
+            "kb:naïve-café",
+        ]
         stems = [yc._measurement_stem(s) for s in subjects]
-        self.assertEqual(len(set(stems)), len(subjects), f"stems collide: {stems}")
         self.assertEqual(stems, [yc._measurement_stem(s) for s in subjects])
-        for stem in stems:
+        for subject, stem in zip(subjects, stems):
             self.assertRegex(stem, r"^[A-Za-z0-9_-]+$")
+            # the left inverse: case two is marked by a leading `--`, which case one's
+            # guard can never produce, so the case is recoverable from the stem alone.
+            if stem.startswith("--"):
+                recovered = yc._unescape_term(stem[2:])
+            else:
+                recovered = f"kb:{stem}"
+            self.assertEqual(recovered, subject, f"{stem} does not invert to {subject}")
+        # invertibility implies it, but assert the consequence the graph depends on too.
+        self.assertEqual(len(set(stems)), len(subjects), f"stems collide: {stems}")
+
+    def test_escape_term_round_trips_and_stays_turtle_safe(self):
+        # `_escape_term` is the half of the stem that carries arbitrary terms, so it must
+        # round-trip EVERY term and emit no `-` (which is what leaves `--` free to mark
+        # case two). Covers ASCII, the escape character itself, unicode, and empty.
+        for term in [
+            "",
+            "_",
+            "-",
+            "kb:item",
+            "a--b",
+            "<http://example.org/x#y>",
+            'lit "q" \\ n',
+            "naïve café ☃",
+            "_5f",  # an already-escaped-looking literal must not decode as its escape
+        ]:
+            escaped = yc._escape_term(term)
+            self.assertRegex(escaped, r"^[A-Za-z0-9_]*$", f"{term} -> {escaped}")
+            self.assertEqual(yc._unescape_term(escaped), term)
 
     def test_no_measurement_without_confidence_or_a_measured_type(self):
         # A subject with no pkg:confidence, and a confidence-bearing subject that is
