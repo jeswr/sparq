@@ -1,0 +1,6 @@
+{
+  "pr": 4098,
+  "bead": "sq-7d3dj.30.15",
+  "date": "2026-07-26",
+  "reason": "[SONNET-4.6] PR #4098 intentionally changes ALWAYS-COMPILED sparq-engine explain code in `exec.rs` and `explain.rs`: when the existing default-OFF `dp-planner` feature is enabled and its planner is active, text and trace explanations now disclose that DPccp may execute the BGP while the displayed tree is a greedy replay. Although both new branches are guarded by `#[cfg(feature = \"dp-planner\")]` and compile out of sparq-wasm's feature-OFF build, inserting those guarded blocks into always-compiled source can move panic-location metadata and LLVM emission order, so byte-for-byte artifact identity is not guaranteed. This is not a default-feature leak: sparq-engine keeps `dp-planner` OFF by default, sparq-wasm does not enable it, no dependency was added, and the new explanation strings and planner calls are absent when the feature is disabled. The PR also enables `dp-planner` and `antijoin-static-decline` only in sparq-server's binary default feature set; sparq-wasm does not depend on sparq-server. The accepted bundle size remains governed separately by the wasm bundle ratchet."
+}
