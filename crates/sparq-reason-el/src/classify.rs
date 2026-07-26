@@ -14,6 +14,7 @@
 //   CRs1   ∃r.Self ∈ S(X)                  ⇒  (X,X) ∈ R(r)                       [sq-pbz04.2.6]
 //   CRs2   (X,X) ∈ R(r),  ∃r.Self ⊑ D ∈ T  ⇒  D ∈ S(X)   (self-concept atom + CR1; see below)
 //   CRs3   (X,X) ∈ R(r),  X a NOMINAL {a}  ⇒  ∃r.Self ∈ S(X)                     [sq-8zqwb]
+//   CRs4   ∃r.Self ∈ S(X), r ⊑* s            ⇒  ∃s.Self ∈ S(X)                  [sq-l2o9e]
 //
 // [OPUS-4.8] sq-pbz04.2.6 — the two EL++ self-restriction (`owl:hasSelf` / `ObjectHasSelf`)
 // completion rules. `∃r.Self` (the LOCAL reflexivity concept `{x | (x,x) ∈ r}`) is extracted as
@@ -259,7 +260,9 @@ fn saturate_inner(
             if has_self {
                 if let Some(r) = names.self_role(d) {
                     #[cfg(feature = "rbox")]
-                    add_link_rbox(&mut sat, r, x, x, &ix, names, role_box, &mut queue);
+                    add_self_link_rbox(
+                        &mut sat, r, x, &ix, names, role_box, &mut queue,
+                    );
                     #[cfg(not(feature = "rbox"))]
                     add_link(&mut sat, r, x, x, &ix, names, &mut queue);
                 }
@@ -535,6 +538,32 @@ fn add_link_rbox(
     }
 }
 
+/// [SONNET-4.6] sq-l2o9e: adds the reflexive link justified by `X ⊑ ∃r.Self` and preserves
+/// that stronger local-reflexivity provenance while CR10 lifts it through `r ⊑* s`.
+///
+/// A generic `(X, X) ∈ R(s)` cannot imply `X ⊑ ∃s.Self`: it may only witness that every member
+/// of `X` has some `s`-successor in `X`. Here the seed is specifically justified by the
+/// self-concept, so every super-role is locally reflexive on `X`; enqueueing the corresponding
+/// minted self-concepts lets ordinary CR1 fire axioms such as `∃s.Self ⊑ D`.
+#[cfg(feature = "rbox")]
+#[allow(clippy::too_many_arguments)]
+fn add_self_link_rbox(
+    sat: &mut Saturation,
+    r: Role,
+    x: Concept,
+    ix: &AxiomIndex,
+    names: &Names,
+    role_box: &RoleBox,
+    queue: &mut Vec<(Concept, Concept)>,
+) {
+    for &sup in role_box.super_roles(r) {
+        if let Some(self_concept) = names.self_concept_of(sup) {
+            add(&mut sat.s[x as usize], x, self_concept, queue);
+        }
+    }
+    add_link_rbox(sat, r, x, x, ix, names, role_box, queue);
+}
+
 /// The classification result: for each NAMED class, the set of NAMED super-classes it is
 /// subsumed by (excluding itself, ⊤, and fresh normalization names), plus the unsatisfiable
 /// (`⊑ ⊥`) named classes.
@@ -765,6 +794,10 @@ fn saturate_par_inner(
             for chunk in derived {
                 stats.derived_members += chunk.members.len() as u64;
                 stats.derived_links += chunk.links.len() as u64;
+                #[cfg(feature = "rbox")]
+                {
+                    stats.derived_links += chunk.self_links.len() as u64;
+                }
                 for (x, e) in chunk.members {
                     add(&mut sat.s[x as usize], x, e, &mut queue);
                 }
@@ -773,6 +806,12 @@ fn saturate_par_inner(
                     add_link_rbox(&mut sat, r, x, f, &ix, names, role_box, &mut queue);
                     #[cfg(not(feature = "rbox"))]
                     add_link(&mut sat, r, x, f, &ix, names, &mut queue);
+                }
+                #[cfg(feature = "rbox")]
+                for (r, x) in chunk.self_links {
+                    add_self_link_rbox(
+                        &mut sat, r, x, &ix, names, role_box, &mut queue,
+                    );
                 }
             }
             stats.apply_nanos += elapsed_nanos(t_apply);
@@ -801,6 +840,9 @@ struct Derived {
     members: Vec<(Concept, Concept)>,
     /// Link conclusions `(x, f) ∈ R(r)` (from CR3 and CRs1).
     links: Vec<(Role, Concept, Concept)>,
+    /// Reflexive links whose provenance is specifically `X ⊑ ∃r.Self`.
+    #[cfg(feature = "rbox")]
+    self_links: Vec<(Role, Concept)>,
 }
 
 /// Partitions `frontier` across at most `threads` scoped workers and returns each chunk's
@@ -882,6 +924,9 @@ fn derive_chunk(
         // exactly as in the sequential engine.)
         if has_self {
             if let Some(r) = names.self_role(d) {
+                #[cfg(feature = "rbox")]
+                out.self_links.push((r, x));
+                #[cfg(not(feature = "rbox"))]
                 out.links.push((r, x, x));
             }
         }
