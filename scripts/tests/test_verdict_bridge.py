@@ -1022,14 +1022,40 @@ class TestAuthorXorReviewer(unittest.TestCase):
     # -- the guard is WITHHOLD-ONLY: it must not become a denial-of-service ------------
 
     def test_a_self_FAIL_still_retracts_an_existing_attestation(self):
-        """Refusing a contributor's own retraction would be fail-OPEN, not fail-closed."""
+        """Refusing a contributor's own retraction would be fail-OPEN, not fail-closed.
+
+        The REASON is asserted, not just the action. Both the fail path and the
+        self-only-withdrawal path retract, so `action == "retract"` alone passes even
+        when the guard has been mutated to swallow the fail — measured: that mutant (M14)
+        SURVIVED until this assertion named which path produced the retraction.
+        """
         own_fail = comment(f"{HEAD}\n\nVERDICT: fail", user="jeswr")
-        self.assertEqual(
-            decision(
-                self.contributor_pr(labels={vb.REVIEW_ATTESTATION}), [own_fail]
-            ),
-            "retract",
+        got = vb.decide(self.contributor_pr(labels={vb.REVIEW_ATTESTATION}), [own_fail])
+        self.assertEqual(got.action, "retract", got)
+        self.assertIn("head-bound fail by jeswr", got.reason)
+        self.assertFalse(got.self_review, "a FAIL is not a suppressed self-pass")
+
+    def test_a_contributors_FAIL_stays_COUNTABLE_and_never_becomes_a_self_pass(self):
+        """The guard is one-directional. Routing a contributor's fail into `self_passes`
+        would silently disarm every retraction they can make."""
+        own_fail = comment(f"{HEAD}\n\nVERDICT: fail", user="jeswr")
+        own_ambiguous = comment(f"{HEAD}\n\nVERDICT: FAIL", user="jeswr", cid=2)
+        countable, self_passes = vb.classify_verdicts(
+            [own_fail, own_ambiguous], HEAD, self.contributor_pr()
         )
+        self.assertEqual(
+            sorted(v.value for v in countable), sorted(["fail", vb.AMBIGUOUS])
+        )
+        self.assertEqual(self_passes, [], "only a PASS may ever be suppressed")
+
+    def test_self_passes_only_ever_holds_passes(self):
+        mixed = [
+            comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr", cid=1),
+            comment(f"{HEAD}\n\nVERDICT: fail", user="jeswr", cid=2),
+            comment(f"{HEAD}\n\nVERDICT: pass", user="reviewer", cid=3),
+        ]
+        _, self_passes = vb.classify_verdicts(mixed, HEAD, self.contributor_pr())
+        self.assertEqual([(v.author, v.value) for v in self_passes], [("jeswr", "pass")])
 
     def test_a_self_pass_cannot_override_an_independent_FAIL(self):
         indep_fail = comment(
@@ -1103,6 +1129,58 @@ class TestAuthorXorReviewer(unittest.TestCase):
         self.assertEqual(
             fake.writes,
             [["pr", "edit", "4200", "--repo", REPO, "--add-label", vb.UNREVIEWED_LABEL]],
+        )
+
+    def test_an_attestation_resting_only_on_a_self_review_is_WITHDRAWN(self):
+        """Remediates the promotion that already landed, not just the next one.
+
+        MEASURED: verdict-bridge run 30223748218 labelled sparq#4331 `review:pass` at
+        2026-07-26T22:53:30Z from a `VERDICT: pass` its own author posted at 22:11:41Z.
+        A self-review is POSITIVE evidence, so this is not a retract-on-absence.
+        """
+        own = comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr")
+        got = vb.decide(
+            self.contributor_pr(labels={vb.REVIEW_ATTESTATION, "area:ci"}), [own]
+        )
+        self.assertEqual(got.action, "retract", got)
+        self.assertTrue(got.self_review, got)
+
+    def test_the_withdrawal_reaches_the_write_path(self):
+        fake = FakeGitHub(
+            [
+                node(
+                    4331,
+                    author="jeswr",
+                    commits=commits_connection(("jeswr",)),
+                    labels=(vb.REVIEW_ATTESTATION,),
+                )
+            ],
+            comments={4331: [vb.comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr")]},
+        )
+        bridge(fake).run()
+        self.assertEqual(
+            fake.writes,
+            [["pr", "edit", "4331", "--repo", REPO, "--remove-label", vb.REVIEW_ATTESTATION]],
+        )
+
+    def test_an_attestation_with_NO_comment_behind_it_is_still_never_retracted(self):
+        """The boundary of the rule above: absence must still not retract, or the bridge
+        starts fighting every label an orchestrator applied by hand."""
+        self.assertEqual(
+            decision(self.contributor_pr(labels={vb.REVIEW_ATTESTATION}), []), "none"
+        )
+        stale = comment(f"reviewed {OTHER}\n\nVERDICT: pass", user="jeswr")
+        self.assertEqual(
+            decision(self.contributor_pr(labels={vb.REVIEW_ATTESTATION}), [stale]), "none"
+        )
+
+    def test_an_independent_pass_alongside_a_self_pass_keeps_the_attestation(self):
+        indep = comment(f"{HEAD}\n\nVERDICT: pass", user="reviewer", cid=1)
+        own = comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr", cid=2)
+        self.assertEqual(
+            decision(self.contributor_pr(labels={vb.REVIEW_ATTESTATION}), [indep, own]),
+            "none",
+            "a real review stands; only a self-ONLY attestation is withdrawn",
         )
 
     def test_a_clean_pr_reports_no_self_review(self):
@@ -1183,9 +1261,43 @@ class TestAuthorXorReviewer(unittest.TestCase):
         self.assertEqual(vb.normalize_login(None), "")
 
     def test_the_pr_list_query_actually_requests_the_authorship_fields(self):
-        """A guard fed a field the query never asks for is silently always-empty."""
-        for field_name in ("author{login}", "commits(", "totalCount", "authors(", "committer"):
-            self.assertIn(field_name, vb.PR_LIST_QUERY, field_name)
+        """A guard fed a field the query never asks for is silently always-empty.
+
+        Deliberately NOT a substring search. `author{login}` and `totalCount` each occur
+        TWICE in this query — once where the guard needs them and once inside the
+        `reviews` / `pullRequests` connections. A bare `assertIn` passes with the
+        PR-level field deleted; measured as a real mutation SURVIVOR (M20) before this
+        assertion was tightened. Assert the PR-node line itself, and assert the commits
+        fields inside the commits block.
+        """
+        lines = [line.strip() for line in vb.PR_LIST_QUERY.splitlines()]
+        self.assertIn(
+            "author{login}",
+            lines,
+            "the PR-node-level author field is gone; the `reviews` one does not feed the guard",
+        )
+        start = vb.PR_LIST_QUERY.find("commits(last:")
+        self.assertGreater(start, 0, "the commits connection is gone")
+        block = vb.PR_LIST_QUERY[start : start + 260]
+        for field_name in ("totalCount", "authors(", "committer", "message"):
+            self.assertIn(field_name, block, f"{field_name} missing from the commits block")
+
+    def test_the_verdict_regexes_are_anchored_AND_matched_from_the_start(self):
+        """Belt and braces, because either one alone is silently sufficient.
+
+        `re.match` already anchors, so deleting the `^` is an EQUIVALENT mutation today —
+        it only becomes live the moment someone swaps `.match` for `.search`. Pin the
+        pattern text so the anchor cannot be "cleaned up" as redundant, and pin the
+        behaviour so a `.search` refactor reds. In this repo EVERY comment opens with
+        `> 🤖 SPARQ agent`, so a blockquoted line is the natural false-positive shape.
+        """
+        self.assertTrue(vb.VERDICT_RE.pattern.startswith("^"), vb.VERDICT_RE.pattern)
+        self.assertTrue(vb.VERDICT_SHAPE_RE.pattern.startswith("^"), vb.VERDICT_SHAPE_RE.pattern)
+        for shape in ("> VERDICT: pass", ">VERDICT: pass", "> **VERDICT: pass**", "  > VERDICT: FAIL"):
+            with self.subTest(shape=shape):
+                self.assertIsNone(vb.VERDICT_RE.search(shape), shape)
+                self.assertIsNone(vb.VERDICT_SHAPE_RE.search(shape), shape)
+                self.assertIsNone(vb.trailing_verdict(shape), shape)
 
     def test_parse_node_populates_the_contributor_set_from_the_live_shape(self):
         b = bridge(FakeGitHub([]))

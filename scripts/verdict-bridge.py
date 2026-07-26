@@ -447,6 +447,18 @@ def decide(pr: PullRequest, comments: Sequence[dict]) -> Decision:
     flagged = UNREVIEWED_LABEL in pr.labels
 
     if verdict is None:
+        # A self-review is POSITIVE evidence, not absence.  The "never retract on
+        # absence" rule below exists so a hand-applied label with no comment behind it is
+        # not fought — but here there IS a comment behind it and it is the PR's own
+        # contributor attesting their own work.  MEASURED: verdict-bridge run
+        # 30223748218 put review:pass on sparq#4331 at 2026-07-26T22:53:30Z on the
+        # strength of exactly such a comment.  Preventing the next promotion without
+        # withdrawing the one that landed would leave the live exposure in place.
+        if has_attestation and self_passes:
+            return out(
+                "retract",
+                f"{REVIEW_ATTESTATION} rests only on a self-review — withdrawing it",
+            )
         # NEVER retract on absence: an orchestrator-applied label has no comment behind
         # it, and removing it would fight the human lane and un-arm a real review.
         if flagged:
@@ -1074,6 +1086,14 @@ def self_test() -> None:
     )
     # ... and a clean PR does not report a phantom self-review.
     assert not decide(contrib, [indep_pass]).self_review
+    # ... an attestation resting ONLY on a self-review is WITHDRAWN (positive evidence),
+    #     while absence of any verdict still never retracts.
+    self_only = pr_fixture(
+        labels={REVIEW_ATTESTATION}, contributors=frozenset({"jeswr", "claude"})
+    )
+    assert decide(self_only, [self_pass]).action == "retract"
+    assert decide(self_only, []).action == "none"
+    assert decide(self_only, [indep_pass, self_pass]).action == "none"
 
     print(f"{PROGRAM} self-test: PASS")
 
