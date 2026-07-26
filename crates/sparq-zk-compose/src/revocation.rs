@@ -45,28 +45,35 @@
 //! unchanged — only the host-side construction is cheaper. Cross-checked against
 //! the dense oracle in the unit tests.
 //!
-//! # The sq-6qe ACCEPTED-SET anchor (host-side only — the leak is NOT yet closed)
-//! [OPUS-5] sq-6qe: [`AcceptedStatusEntry`] / [`accepted_set_leaf`] /
-//! [`accepted_set_root`] / [`accepted_set_witness`] are the host mirror of the
-//! sub-option-A accepted-set commitment in
-//! `research/zk-statuslist-hide-iri-version.md` §3 — the relying party commits
-//! every `(list, version, status_list_root)` triple it currently trusts to ONE
-//! Merkle root, so a future fully-hidden circuit can prove "some accepted
-//! `(list, version)` has my hidden index unset" without the verifier learning
-//! WHICH list/version. This module ships the ANCHOR DERIVATION and the prover's
-//! membership path ONLY. There is no compiled `revoke_hidden_ref_*` member, no
-//! manifest mode, and no verifier gate that consumes it, so **the status-list IRI
-//! and version are still disclosed in the clear on the committed-index path** —
-//! sq-6qe remains OPEN. Nothing here is externally audited (sq-qhy4).
+//! # The sq-6qe / sq-kndw ACCEPTED-SET anchor + FULLY-HIDDEN witness
+//! [OPUS-5] [`AcceptedStatusEntry`] / [`accepted_set_leaf`] / [`accepted_set_root`]
+//! / [`accepted_set_witness`] are the host mirror of the sub-option-A accepted-set
+//! commitment in `research/zk-statuslist-hide-iri-version.md` §3 — the relying
+//! party commits every `(list, version, status_list_root)` triple it currently
+//! trusts to ONE Merkle root, so the fully-hidden circuit can prove "some accepted
+//! `(list, version)` has my hidden index unset" without the verifier learning WHICH
+//! list/version. [`HiddenRefWitness`] / [`hidden_ref_witness`] assemble the
+//! prover's private witness for that circuit (the accepted-set slot + path + the
+//! privately-bound `status_list_root`, plus the status-list half), and
+//! [`revoke_hidden_ref_prover_toml`] renders its `Prover.toml`.
+//!
+//! sq-kndw closed the loop: the member `revoke_hidden_ref_d10_a4` is COMPILED, the
+//! manifest carries a fully-hidden [`crate::manifest::RevocationStatus`] mode, and
+//! `crate::verifier::bind_fully_hidden_revocation` consumes the anchor — so on that
+//! mode the status-list IRI and version are NOT disclosed. The committed-index path
+//! below is unchanged and still discloses both. Nothing here is externally audited
+//! (sq-qhy4).
 //!
 //! # Residual scope (honest)
 //! Only the `revoke_unset_d10` circuit member is currently COMPILED, so although
 //! the host builder now scales, an end-to-end hidden-revocation PROOF is still
 //! bounded by the compiled member's depth (compiling a larger member —
 //! `revoke_unset_d17` etc. — is mechanical: the relation is depth-generic; tracked
-//! as follow-up). And the status-list IRI + version are still disclosed in the
-//! clear on the committed-index path (sq-6qe, above). See the crate verifier docs
-//! (`bind_hidden_revocation`).
+//! as follow-up). The same holds for the fully-hidden member, of which only the
+//! `(D=10, A=4)` bucket is compiled. And the status-list IRI + version are still
+//! disclosed in the clear on the COMMITTED-INDEX path (use the fully-hidden mode to
+//! hide them). See the crate verifier docs (`bind_hidden_revocation` /
+//! `bind_fully_hidden_revocation`).
 
 use crate::manifest::StatusListSnapshot;
 use sparq_zk::field::{field_to_hex, Fr};
@@ -461,6 +468,135 @@ pub fn accepted_set_witness(
         index,
         accepted_padding_leaf(),
     )
+}
+
+/// [OPUS-5] sq-kndw: the PROVER's complete private witness for the fully-hidden
+/// revocation member `revoke_hidden_ref_d{depth}_a{set_depth}` — the accepted-set
+/// half (which slot the credential's `(list, version)` occupies, its path, and the
+/// `status_list_root` the leaf binds) plus the status-list half (the leaf bit and
+/// its path), assembled so the two trees are provably consistent BEFORE proving.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HiddenRefWitness {
+    /// The depth-`depth` status-list Merkle root for the credential's `(list,
+    /// version)`. PRIVATE in-circuit: it is bound by the accepted-set leaf, not
+    /// disclosed, which is exactly what lets the IRI + version stay hidden.
+    pub status_list_root: Fr,
+    /// The credential's 0-based slot in the CANONICAL accepted-set leaf order.
+    /// PRIVATE (the verifier never needs it).
+    pub set_index: u64,
+    /// The accepted-set authentication path, bottom-up, length `set_depth`.
+    pub set_siblings: Vec<Fr>,
+    /// The status-list half: the leaf bit at the holder's index and its
+    /// authentication path (see [`MerkleWitness`]).
+    pub merkle: MerkleWitness,
+}
+
+/// [OPUS-5] sq-kndw: build the [`HiddenRefWitness`] for `index` in `snapshot`,
+/// against the relying party's accepted-set `entries` (which MUST be the canonical,
+/// freshness-curated order the anchor was derived from —
+/// `RevocationPolicy::accepted_entries`).
+///
+/// Fails closed (`None`) when:
+/// - `snapshot`'s `(status_list, version)` is NOT a curated accepted-set member
+///   (e.g. its version is outside the relying party's freshness window) — there is
+///   then no membership path to prove and no proof should be attempted;
+/// - the entry's recorded `status_list_root` disagrees with the root recomputed
+///   from `snapshot` at `depth` — the prover and the relying party are looking at
+///   different bitstrings, and proving would silently produce an unverifiable
+///   proof;
+/// - `index` is out of range for the depth-`depth` tree, or either depth overflows.
+///
+/// The consistency check is the load-bearing one: because the accepted-set leaf
+/// binds `(list_id, version, status_list_root)` ATOMICALLY, a witness whose root
+/// does not match the entry cannot fold to the anchor, and catching that here
+/// turns a confusing `bb verify` failure into an explicit refusal.
+pub fn hidden_ref_witness(
+    entries: &[AcceptedStatusEntry],
+    set_depth: u32,
+    snapshot: &StatusListSnapshot,
+    depth: u32,
+    index: u64,
+) -> Option<HiddenRefWitness> {
+    let status_list_root = merkle_root(snapshot, depth)?;
+    let set_index = entries
+        .iter()
+        .position(|e| e.status_list == snapshot.status_list && e.version == snapshot.version)?;
+    if entries[set_index].status_list_root != status_list_root {
+        return None;
+    }
+    let set_siblings = accepted_set_witness(entries, set_depth, set_index as u64)?;
+    let merkle = merkle_witness(snapshot, depth, index)?;
+    Some(HiddenRefWitness {
+        status_list_root,
+        set_index: set_index as u64,
+        set_siblings,
+        merkle,
+    })
+}
+
+/// [OPUS-5] sq-kndw: render the `Prover.toml` body for the
+/// `revoke_hidden_ref_d{depth}_a{set_depth}` member. Order MUST match
+/// `revoke_hidden_ref_d{depth}_a{set_depth}/src/main.nr`:
+///
+/// PUBLIC:  `challenge`, `ref_commitment`, `index_commitment`,
+///          `accepted_set_root`, `min_version`
+/// PRIVATE: `list_id`, `version`, `ref_blinding`, `status_list_root`, `set_index`,
+///          `set_siblings`, `index`, `bit`, `blinding`, `siblings`
+///
+/// `ref_commitment` MUST equal [`sparq_zk::sig::status_ref_commitment`]`(list_id,
+/// version, ref_blinding)` and `index_commitment`
+/// [`sparq_zk::sig::status_index_commitment`]`(index, blinding)` — the two
+/// ISSUER-SIGNED values. The circuit recomputes both from the private witness, so a
+/// mismatch here is unprovable rather than silently accepted.
+///
+/// `version` / `min_version` / `index` / `set_index` are integer-typed in the
+/// circuit and are rendered as DECIMAL strings, the form `nargo` parses for
+/// integer inputs; the field elements are rendered as `0x`-hex.
+///
+/// ⚠️ `ref_blinding` and `blinding` MUST be freshly sampled PER PRESENTATION (and
+/// the issuer must re-sign the resulting commitments). Reusing them makes the two
+/// public commitments a stable cross-presentation correlation handle and voids the
+/// privacy guarantee — see [`crate::manifest::FullyHiddenRevocation`].
+#[allow(clippy::too_many_arguments)]
+pub fn revoke_hidden_ref_prover_toml(
+    challenge: &Fr,
+    ref_commitment: &Fr,
+    index_commitment: &Fr,
+    accepted_set_root: &Fr,
+    min_version: u64,
+    list_id: &Fr,
+    version: u64,
+    ref_blinding: &Fr,
+    index: u64,
+    blinding: &Fr,
+    witness: &HiddenRefWitness,
+) -> String {
+    let list = |v: &[Fr]| {
+        let parts: Vec<String> = v.iter().map(|s| format!("\"{}\"", field_to_hex(s))).collect();
+        format!("[{}]", parts.join(", "))
+    };
+    let mut s = String::new();
+    // -- public, in main() declaration order --
+    s.push_str(&format!("challenge = \"{}\"\n", field_to_hex(challenge)));
+    s.push_str(&format!("ref_commitment = \"{}\"\n", field_to_hex(ref_commitment)));
+    s.push_str(&format!("index_commitment = \"{}\"\n", field_to_hex(index_commitment)));
+    s.push_str(&format!("accepted_set_root = \"{}\"\n", field_to_hex(accepted_set_root)));
+    s.push_str(&format!("min_version = \"{min_version}\"\n"));
+    // -- private --
+    s.push_str(&format!("list_id = \"{}\"\n", field_to_hex(list_id)));
+    s.push_str(&format!("version = \"{version}\"\n"));
+    s.push_str(&format!("ref_blinding = \"{}\"\n", field_to_hex(ref_blinding)));
+    s.push_str(&format!(
+        "status_list_root = \"{}\"\n",
+        field_to_hex(&witness.status_list_root)
+    ));
+    s.push_str(&format!("set_index = \"{}\"\n", witness.set_index));
+    s.push_str(&format!("set_siblings = {}\n", list(&witness.set_siblings)));
+    s.push_str(&format!("index = \"{index}\"\n"));
+    s.push_str(&format!("bit = \"{}\"\n", field_to_hex(&witness.merkle.bit)));
+    s.push_str(&format!("blinding = \"{}\"\n", field_to_hex(blinding)));
+    s.push_str(&format!("siblings = {}\n", list(&witness.merkle.siblings)));
+    s
 }
 
 #[cfg(test)]

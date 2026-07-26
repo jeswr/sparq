@@ -243,6 +243,31 @@ pub fn smallest_path_reach_id(k: u32, max_graph: u32, min_depth: u32) -> Option<
         .map(|d| CircuitId::PathReach { d, k, n })
 }
 
+/// [OPUS-5] sq-kndw: the compiled `revoke_hidden_ref_d{depth}_a{set_depth}`
+/// FULLY-HIDDEN revocation members, as `(status-list depth, accepted-set depth)`.
+/// This is the SINGLE SOURCE of the family list —
+/// [`derive_revoke_hidden_ref_id`] validates a pair against it EXACTLY (no
+/// wrong-bucket fallback), mirroring the path/filter families' EXACT-match
+/// discipline (sq-wto). One member `zk/compose/` compiles today: `(10, 4)`.
+// [OPUS-5] sq-kndw: compiled fully-hidden revocation members.
+pub const REVOKE_HIDDEN_REF_MEMBERS: &[(u32, u32)] = &[(10, 4)];
+
+/// Derive the `revoke_hidden_ref_d{depth}_a{set_depth}` member id (sq-kndw).
+/// EXACT membership against [`REVOKE_HIDDEN_REF_MEMBERS`]: the pair must be a
+/// COMPILED member, else `None` — fail-closed, so a relying party that configures
+/// a `(hidden_index_depth, accepted_set_depth)` combination with no compiled
+/// circuit gets a clean refusal rather than a proof attempt against a member that
+/// does not exist. Prover and verifier both call this, so a proof only ever fits
+/// the member its public inputs name.
+// [OPUS-5] sq-kndw: derive the fully-hidden revocation member id (EXACT match).
+pub fn derive_revoke_hidden_ref_id(depth: u32, set_depth: u32) -> Option<CircuitId> {
+    if REVOKE_HIDDEN_REF_MEMBERS.contains(&(depth, set_depth)) {
+        Some(CircuitId::RevokeHiddenRef { depth, set_depth })
+    } else {
+        None
+    }
+}
+
 /// A constant or variable slot of a BGP triple pattern.
 #[derive(Debug, Clone)]
 pub enum Slot {

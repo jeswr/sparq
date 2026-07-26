@@ -45,8 +45,8 @@ pub mod verifier;
 
 pub use manifest::{
     AttestedStatusRef, BindingEdge, BindingMode, CircuitId, EntailmentRegime, FieldHex, FilterOp,
-    HiddenIndexRevocation, HolderPokProof, HolderSetProof, ProofInputs, ProofManifest,
-    RevocationStatus, StatusListSnapshot, SubProof,
+    FullyHiddenRevocation, HiddenIndexRevocation, HolderPokProof, HolderSetProof, ProofInputs,
+    ProofManifest, RevocationStatus, StatusListSnapshot, SubProof,
 };
 // [OPUS-4.8] sq-1s2.3 (FL1 follow-up): browser-shippable captured-manifest packaging.
 pub use capture::{
@@ -72,14 +72,16 @@ pub use verifier::{dispatch_fragment, verify_fragment_manifest, FragmentDispatch
 pub use verifier::EntailmentPolicy;
 // [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation host helpers.
 pub use revocation::{merkle_root, merkle_witness, revoke_prover_toml, MerkleWitness};
-// [OPUS-5] sq-6qe: the ACCEPTED-SET commitment host helpers — the relying party's
-// `(list, version, status_list_root)` trust anchor behind one Merkle root, so a
-// FUTURE fully-hidden revocation member can hide which list/version a presentation
-// pertains to. Anchor + prover path ONLY: no circuit member, manifest mode, or
-// verifier gate consumes it yet, so the IRI + version are STILL disclosed on the
-// committed-index path (sq-6qe remains OPEN). Not externally audited (sq-qhy4).
+// [OPUS-5] sq-6qe / sq-kndw: the ACCEPTED-SET commitment host helpers — the relying
+// party's `(list, version, status_list_root)` trust anchor behind one Merkle root —
+// plus the FULLY-HIDDEN revocation prover path (witness builder + Prover.toml
+// renderer) for the compiled `revoke_hidden_ref_d10_a4` member. On that mode the
+// status-list IRI and version are NOT disclosed; the committed-index path still
+// discloses both. Opt-in via `RevocationPolicy::{with_hidden_index_depth,
+// with_accepted_set_depth}`. Not externally audited (sq-qhy4).
 pub use revocation::{
-    accepted_set_leaf, accepted_set_root, accepted_set_witness, AcceptedStatusEntry,
+    accepted_set_leaf, accepted_set_root, accepted_set_witness, hidden_ref_witness,
+    revoke_hidden_ref_prover_toml, AcceptedStatusEntry, HiddenRefWitness,
 };
 // [OPUS-4.8] sq-z9l: hidden-issuer-attestation host helpers (in-circuit
 // Schnorr-over-BabyJubJub + hidden-key set membership).
