@@ -55,7 +55,7 @@ Verdicts: **OPEN** (as #1346 describes it) · **PARTLY** · **CLOSED** (no longe
 | P0-1 | Frozen, semver-stable public API | **PARTLY** | Policy + tier-1 surface + in-code markers exist; ratification and an enforcement gate do not. |
 | P0-2 | Consumable, conformance-complete releases | **OPEN** | `[patch.crates-io]` does not propagate to published crates; a git pin is still mandatory for a conformant parser. |
 | P1-1 | Named-graph isolation on the served surface (DEVIATION-1) | **CLOSED** | The SPARQL and GSP paths are per-graph isolated and regression-tested over HTTP. |
-| P1-2 | AC-SPARQL Query service + conformance scenarios | **PARTLY** | Endpoint + 15/15 in-class scenarios built and gated; result unpublished, 6 scenarios delegated out of class. |
+| P1-2 | AC-SPARQL Query service + conformance scenarios | **PARTLY** | Endpoint built and gated; 15 executable query-semantics cases pass, covering 10 of the draft's 16 scenarios; result unpublished, the other 6 scenarios delegated out of class. |
 | P1-3 | The `sparq-server → sparq-solid` `/authz` architecture call | **CLOSED (built)** | All three endpoints ship behind the `solid-authz` feature; the dependency direction is settled. |
 | P2-1 | Backup-delta / PITR design + DR runbook | **PARTLY** | Design is *not* open — delta/PITR is implemented and tested. The runbook is genuinely missing. |
 | P2-2 | Shared durable backend / replication | **OPEN** | ADR is `PROPOSED — awaiting sign-off`; no replication, log-shipping or object-store code exists. |
@@ -92,7 +92,8 @@ is a triple payload, so graph names inside a TriG/N-Quads body are not authorita
 **Action for the consumer, not for sparq:** the deviation note in
 `crates/sparq-lws-core/src/store/http.rs:22-34` is now stale on two counts (it says HTTP does not
 isolate named graphs, and that GSP write verbs return `501`). Both are false on this tree. That
-comment lives outside this issue's routed scope; it is captured as a follow-up.
+comment lives outside this issue's routed scope, and **it has no task record yet** — this record is
+the only place it is currently written down (§5, item 12).
 
 ### 1.2 — P1-2 AC-SPARQL is built; what is missing is publication
 
@@ -111,11 +112,15 @@ The spec semantics live at the library seam in `sparq-solid` and are real:
   `update_as` is the separate write-gated path.
 
 Conformance: `crates/sparq-solid/tests/conformance/solid-sparql-query/manifest.json` vendors the
-editor's draft with **15 in-class cases**, all asserted passing behind a hard floor in
-`crates/sparq-solid/tests/conformance_solid_sparql_query.rs`. The issue's "16 scenarios" is the
-draft's total; the manifest records **6 of them (1, 9, 10, 14, 15, 16) as explicitly out of class**
-— protocol-binding equivalence, JSON-LD flattening, service description, Update refusal and caching
-are HTTP-server or parser properties, not query-engine ones, and each carries a written reason.
+editor's draft as **15 executable query-semantics cases**, all asserted passing behind a hard floor
+in `crates/sparq-solid/tests/conformance_solid_sparql_query.rs`. **Cases are not scenarios**: the
+draft numbers **16 scenarios**, the 15 cases cover **10 of them (2–8 and 11–13)** — several
+scenarios carry more than one case, and one case discharges three at once — and the manifest records
+the remaining **6 (1, 9, 10, 14, 15, 16) as explicitly out of class**: protocol-binding equivalence,
+JSON-LD flattening, no-raw-preservation, service description, Update refusal and caching are
+HTTP-server or parser properties, not query-engine ones, and each carries a written reason.
+So the in-class scenario coverage is complete *for the query-semantics conformance class*, which is
+a narrower claim than conformance to the draft as a whole.
 
 Two honest caveats worth carrying into any consumer-facing claim:
 
@@ -275,9 +280,12 @@ than a follow-up to it.
    equivalence needs a test and is a new work item. If no, record that so the behavioural-only
    coverage is not later mistaken for more than it is.
 
-## 5 — Phased plan (future beads)
+## 5 — Phased plan (proposed sequencing — not yet tracked work)
 
-Ordered. Each is a separate unit of work; none is started by this document.
+Ordered. Each is a separate unit of work. **None of these has a task record**: this is a *proposed*
+decomposition for the maintainer to accept or reject, not a backlog that exists somewhere. Nothing
+here is started, and nothing here should be cited as captured work until the corresponding tracking
+records are created — which is a deliberate follow-on to accepting this record, not part of it.
 
 1. **Per-PR `cargo-semver-checks` gate over the tier-1 surface** defined in `docs/api-stability.md`.
    Blocks (2). *(ci-infra)*
@@ -303,9 +311,12 @@ Ordered. Each is a separate unit of work; none is started by this document.
 10. **`/authz` wire-contract freeze**, sequenced with the TS `prod-solid-server` migration, not
     before. Depends on (8). *(governance)*
 11. **Horizontal-scaling ADR sign-off or explicit deferral.** Gated on Q4. *(research/governance)*
+12. **Correct the stale DEVIATIONS note** in `crates/sparq-lws-core/src/store/http.rs:22-34` (§1.1):
+    it still says HTTP does not isolate named graphs and that GSP write verbs return `501`, both of
+    which are false on this tree. Independent and cheap. *(sparq-lws-core)*
 
-Items 1–7 are the recommended milestone. Items 8–11 are gated on maintainer decisions or on the
-downstream migration and should not block it.
+Items 1–7 and 12 are the recommended milestone. Items 8–11 are gated on maintainer decisions or on
+the downstream migration and should not block it.
 
 ## 6 — Corrections to #1346's premise, collected
 
@@ -313,8 +324,9 @@ For the record, so the consumer-side checklist can be updated rather than re-lit
 
 - **DEVIATION-1 is closed.** The served SPARQL and GSP paths isolate named graphs and are
   regression-tested over HTTP. The remaining fold is GSP-correct body handling.
-- **AC-SPARQL is not "unbuilt as a served endpoint".** It is built, feature-gated, and passes 15/15
-  in-class conformance cases; 6 of the draft's 16 scenarios are recorded as out of class with
+- **AC-SPARQL is not "unbuilt as a served endpoint".** It is built, feature-gated, and passes all
+  15 executable query-semantics conformance cases, which cover the 10 in-class scenarios (2–8,
+  11–13); the draft's other 6 scenarios (1, 9, 10, 14, 15, 16) are recorded as out of class with
   reasons.
 - **The `/authz` architecture call is not pending.** It was made by implementation.
 - **Backup-delta / PITR design decisions are not open.** They are implemented and tested. Only the
