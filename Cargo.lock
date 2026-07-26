@@ -5692,6 +5692,7 @@ name = "sparq-wac-oracle"
 version = "0.1.0"
 dependencies = [
  "sparq-core",
+ "sparq-policy",
  "sparq-solid",
 ]
 
