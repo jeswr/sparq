@@ -1069,20 +1069,25 @@ impl MacSession<'_> {
     /// opened (the verdict bit, the intermediate opens of a chain — every value whose
     /// integrity the verdict depends on):
     ///
-    /// 1. Derive the public challenge coefficients `χ_1..χ_k ∈ F_p` by **Fiat–Shamir
-    ///    over the ALREADY-FIXED share vectors** (`mac_check_challenges`, crate-private
-    ///    — the coin is an implementation detail, not a public surface). CRITICAL
-    ///    ORDER: the challenges are a deterministic function of the `[[y_j]]` that are
-    ///    being checked, so "drawn after the shares are fixed" is a *structural* fact
-    ///    rather than a call-ordering convention — a deviating party cannot adapt its
-    ///    tampering to the challenge, because changing the tamper changes `χ`.
+    /// 1. Derive the challenge coefficients `χ_1..χ_k ∈ F_p` by **Fiat–Shamir over the
+    ///    ALREADY-FIXED share vectors** (`mac_check_challenges`, crate-private — the
+    ///    coin is an implementation detail, not a public surface). CRITICAL ORDER: the
+    ///    challenges are a deterministic function of the `[[y_j]]` being checked, so
+    ///    "drawn after the shares are fixed" is a *structural* fact rather than a
+    ///    call-ordering convention. **Scope:** the transcript is the full share vectors,
+    ///    which only the trusted-dealer simulation has — this is NOT a coin `n` real
+    ///    parties could jointly derive; see `mac_check_challenges` for the trust model
+    ///    and for the grinding bound that binding the coin to the shares implies.
     /// 2. Open the values `y_j` and form the public `y = Σ_j χ_j·y_j`.
     /// 3. Each (simulated) party locally forms its share of
     ///    `[σ] = Σ_j χ_j·[m_{y_j}] − y·[α]` (all LINEAR → free), then open `σ`.
     /// 4. **Accept iff `σ == 0`.** For honest values `σ = Σχ_j(α·y_j) − (Σχ_jy_j)α = 0`;
     ///    any tamper that changed a `y_j` without a consistent matching change to its
     ///    MAC (impossible without `α`) makes `σ ≠ 0` with probability `≥ 1 − 1/p ≈
-    ///    1 − 2^{−61}`. On `σ ≠ 0` this returns [`MpcError::MacCheckFailed`] (ABORT).
+    ///    1 − 2^{−61}` — against a deviation fixed BEFORE `χ` is known; an adversary
+    ///    that can re-choose its deviation and re-derive the coin faces the `≈ 2^61`
+    ///    grinding bound documented on `mac_check_challenges` instead. On `σ ≠ 0` this
+    ///    returns [`MpcError::MacCheckFailed`] (ABORT).
     ///
     /// **One `σ` open per BATCH, not per value** — this is the amortisation the design
     /// (§5, "Output: one batched MAC-check") banks on: an all-pairs hidden join's
@@ -1113,8 +1118,10 @@ impl MacSession<'_> {
         }
         let t = self.dealer.threshold();
         let n = self.dealer.parties();
-        // 1. Public challenge coefficients χ_j, bound by Fiat–Shamir to the shares
-        //    being checked (so they are unavoidably derived AFTER those are fixed).
+        // 1. Challenge coefficients χ_j, bound by Fiat–Shamir to the shares being
+        //    checked (so they are unavoidably derived AFTER those are fixed). The
+        //    transcript is simulator-private state — see `mac_check_challenges` for why
+        //    that is NOT a distributed public coin.
         let chis = mac_check_challenges(n, t, values);
 
         // 2./3. Build [σ] = Σ_j χ_j·[m_{y_j}] − (Σ_j χ_j·y_j)·[α] as a free local
@@ -1208,40 +1215,63 @@ impl MacSession<'_> {
     }
 }
 
-/// Domain-separation tag for the §2.5 batched MAC-check public coin. Versioned and
+/// Domain-separation tag for the §2.5 batched MAC-check challenge. Versioned and
 /// fixed: changing it changes every derived challenge (which is harmless — the coin is
 /// re-derived from scratch on each check — but it must never collide with another
 /// hash use in the crate, e.g. [`crate::term_encode::DOMAIN_TAG`]).
 pub(crate) const MAC_CHECK_DOMAIN_TAG: &[u8] = b"sparq-mpc/mac-check-challenge/v1\0";
 
-/// [OPUS-4.8] sq-km34.4 — the **public coin** for the §2.5 batched MAC-check: the
-/// challenge coefficients `χ_1..χ_k ∈ F_p`, derived by Fiat–Shamir from a
-/// domain-separated transcript of the share vectors being checked.
+/// [OPUS-4.8] sq-km34.4 — the challenge coefficients `χ_1..χ_k ∈ F_p` for the §2.5
+/// batched MAC-check, derived by Fiat–Shamir from a domain-separated transcript of the
+/// share vectors being checked.
 ///
-/// ## Why Fiat–Shamir rather than a dealer RNG draw
+/// ## SCOPE: a SIMULATED coin under the trusted dealer, not a distributed public coin
 ///
-/// The design (§2.5 step 2) requires the `χ_j` to be a **public coin derived AFTER the
-/// shares are fixed**, so a deviating party cannot adapt its tampering to the
-/// challenge. Drawing them from the dealer's private masking CSPRNG satisfies that only
-/// by call ORDERING, and — more importantly — is not something `n` parties could ever
-/// AGREE on without a trusted dealer, since the stream is one party's secret state.
-/// Hashing the (already-fixed) `[[y_j]]` transcript makes both properties structural:
-/// the coin is a deterministic function of exactly the shares under check, so it cannot
-/// precede them, and every party derives the SAME `χ` from public transcript data. In
-/// the in-process simulation the transcript is the full share vectors; in a real
-/// deployment it is the standard commit-then-challenge step (each party broadcasts a
-/// binding commitment to its already-fixed shares, then `χ = H(commitments)`), for
-/// which this is the faithful stand-in.
+/// The design (§2.5 step 2) wants the `χ_j` to be a public coin derived AFTER the shares
+/// are fixed, so a deviating party cannot adapt its tampering to the challenge. Hashing
+/// the (already-fixed) `[[y_j]]` delivers the *after* half **structurally**: the coin is a
+/// deterministic function of exactly the shares under check, so it cannot precede them and
+/// any tamper re-randomises it — where a draw from the dealer's private masking CSPRNG
+/// achieved that only by call ORDERING. That is the whole of what this function buys.
 ///
-/// ## Why grinding does not degrade the soundness bound
+/// It does **not** deliver the *public* half, and no such claim is made here. The
+/// transcript is the COMPLETE value and MAC share vectors, which exist in one place only
+/// because [`ShamirDealer`] is an in-process simulation of all `n` parties. In a real
+/// deployment party `i` holds its own `(x_i, y_i)` and nothing else: the full vectors are
+/// dealer-private state, not public transcript data, and broadcasting them would
+/// reconstruct the opened values and expose MAC-sharing material. So this coin is **not
+/// something `n` real parties could jointly derive, and it does not remove the trusted
+/// dealer** — the trusted-dealer simulation is precisely the trust model it is scoped to,
+/// and the tests below exercise it with one [`MacSession`] holding every share.
 ///
-/// A Fiat–Shamir coin is normally weakened by grinding (retry until the hash is
-/// favourable). It is not here: to know whether a candidate `χ` yields `σ = 0` the
-/// adversary must evaluate `σ = Σ_j χ_j·(δ_{m,j} − α·δ_{y,j})`, which needs the SECRET
-/// `α`. It cannot test its guesses offline, so each protocol run is a single blind
-/// attempt and the bound stays `≥ 1 − 1/p ≈ 1 − 2^{−61}` — the same statistical
-/// parameter as an ideal coin. (Nothing here is externally audited — sq-qhy4; the MPC
-/// estate is research-grade and semi-honest outside this authenticated path.)
+/// Making the coin genuinely public needs a protocol this crate does not implement: each
+/// party broadcasts a binding commitment to its own fixed shares (or the parties run a
+/// commit-then-reveal coin toss), then `χ = H(commitments)`, with specified broadcast,
+/// verification and abort behaviour. That is a DIFFERENT transcript carrying its own
+/// soundness argument — not a re-labelling of this one.
+///
+/// ## Grinding: what the bound actually is
+///
+/// For deviations `δ_{y,j}` / `δ_{m,j}` on the value and MAC sharings the check quantity
+/// is `σ = Σ_j χ_j·(δ_{m,j} − α·δ_{y,j})`. It is **not** true that testing a candidate
+/// `χ` always requires the secret `α`: for the value-only deviation class (`δ_m = 0` —
+/// the Hole-2 tamper, and exactly what `tamper_value` injects in the tests below) this
+/// collapses to `σ = −α·Σ_j χ_j·δ_{y,j}`, so `σ = 0` iff `Σ_j χ_j·δ_{y,j} = 0`. That is a
+/// condition on the `χ` and the attacker's OWN `δ`, testable with no knowledge of `α`.
+///
+/// So `≥ 1 − 1/p ≈ 1 − 2^{−61}` is the bound against a deviation fixed BEFORE `χ` is
+/// known. Binding `χ` to the shares makes the coin and the deviation co-determined, so an
+/// adversary free to re-choose `δ` and re-evaluate `H` is grinding: each trial costs one
+/// hash plus `k` multiplications and cancels with probability `≈ 1/p`, i.e. `≈ p ≈ 2^61`
+/// expected trials. In this 61-bit field that is a COMPUTATIONAL bound, not the
+/// information-theoretic one §2.5 states, and `2^61` is not a comfortable margin.
+///
+/// It does not bite as used here — the simulation has no party that could grind; test
+/// deviations are injected non-adaptively. But it is a live constraint on the distributed
+/// protocol sketched above, which must make each party's contribution BINDING before `χ`
+/// is derived (what commit-then-challenge is for) rather than inherit this transcript.
+/// Nothing here is externally audited — sq-qhy4; the MPC estate is research-grade and
+/// semi-honest outside this authenticated path.
 ///
 /// The `χ_j` are uniform over ALL of `F_p`, zero included: a `χ_j = 0` drops value `j`
 /// from that check, which is exactly the `1/p` term already inside the soundness bound
@@ -2470,8 +2500,9 @@ mod tests {
     //       σ-open counter, not by prose;
     //   (b) a tamper anywhere in that batch ABORTS, and aborts *before* any opened
     //       value reaches the caller.
-    // Plus the public-coin property the design calls for: the challenges are bound by
-    // Fiat–Shamir to the already-fixed shares.
+    // Plus the binding property: the challenges are derived by Fiat–Shamir from the
+    // already-fixed shares. (These are centralized-simulation tests — one MacSession
+    // holds every share — so they say nothing about a distributed public coin.)
 
     /// Build the `|L|·|R|` authenticated masked products an all-pairs hidden-value join
     /// opens — `[[m_ij]] = [[l_i − r_j]] · [[mask_ij]]`, whose opened `m_ij` is `0`
@@ -2599,10 +2630,12 @@ mod tests {
         }
     }
 
-    /// The public coin is **Fiat–Shamir over the fixed shares**: deterministic given the
-    /// batch (so every party derives the same `χ` without a trusted dealer), and
-    /// re-randomised by any tamper (so the challenge cannot precede, or be adapted to,
-    /// the shares it authenticates).
+    /// The challenge is **Fiat–Shamir over the fixed shares**: deterministic given the
+    /// batch, and re-randomised by any tamper (so the challenge cannot precede the shares
+    /// it authenticates). That BINDING is all this pins — it is derived from the whole
+    /// share vectors, which only the trusted-dealer simulation holds, so it deliberately
+    /// asserts NOTHING about `n` real parties agreeing on `χ`; that would need the
+    /// commit-then-challenge protocol `mac_check_challenges` scopes out.
     #[test]
     fn mac_check_challenges_are_bound_to_the_fixed_shares() {
         let backend = ShamirBackend::new_seeded(5, 0xC0DE).unwrap();
