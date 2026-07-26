@@ -186,13 +186,18 @@ impl ContinuousQuery {
         self
     }
 
-    /// [SONNET-4.6] sq-xqu: bounds the wall-clock time of EACH window
+    /// [SONNET-4.6] sq-xqu: installs a REFRESHED deadline for EACH window
     /// evaluation (builder style): at every window evaluation start the
     /// effective budget's deadline becomes the EARLIER of the budget's own
     /// absolute deadline (if any) and `now + timeout`, so one pathological
     /// window aborts with `"query budget exceeded (timeout)"` instead of
     /// stalling the embedder's push loop — and a refreshed window deadline
-    /// never grants time past the absolute one. A `timeout` so large
+    /// never grants time past the absolute one. Like the other limits the
+    /// deadline is observed CO-OPERATIVELY, at the executor's next polling
+    /// site, so it is not a strict cap on an evaluation's wall-clock
+    /// duration: an evaluation that reaches no polling site (answered from
+    /// the index, or finished before the first poll) is never checked. A
+    /// `timeout` so large
     /// that `now + timeout` is unrepresentable can never trip and is treated
     /// as unlimited (the budget's own absolute deadline, if any, still
     /// applies). Native only — the engine's wall-clock deadline does not
@@ -362,8 +367,8 @@ impl ContinuousConstruct {
         self
     }
 
-    /// [SONNET-4.6] sq-xqu: bounds the wall-clock time of EACH window
-    /// evaluation (deadline tightened to at most `now + timeout` per window).
+    /// [SONNET-4.6] sq-xqu: installs a refreshed deadline for EACH window
+    /// evaluation (tightened to at most `now + timeout` per window).
     /// Semantics as
     /// [`ContinuousQuery::with_window_timeout`](crate::ContinuousQuery::with_window_timeout);
     /// native only.
@@ -476,8 +481,8 @@ impl ContinuousAsk {
         self
     }
 
-    /// [SONNET-4.6] sq-xqu: bounds the wall-clock time of EACH window
-    /// evaluation (deadline tightened to at most `now + timeout` per window).
+    /// [SONNET-4.6] sq-xqu: installs a refreshed deadline for EACH window
+    /// evaluation (tightened to at most `now + timeout` per window).
     /// Semantics as
     /// [`ContinuousQuery::with_window_timeout`](crate::ContinuousQuery::with_window_timeout);
     /// native only.
