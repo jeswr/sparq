@@ -177,7 +177,7 @@ fn expand_element(
                 active_context
             };
             // step 4.3: value expansion.
-            Ok(expand_value(ac, active_property.unwrap(), element))
+            Ok(Some(expand_value(ac, active_property.unwrap(), element)))
         }
     }
 }
@@ -815,13 +815,11 @@ fn expand_property_value(
                             if let Json::Obj(m) = &mut item {
                                 // 13.8.3.7.3–4: "an array consisting of re-expanded index
                                 // FOLLOWED BY the existing values" (W3C expand/pi07, pi09).
-                                if let Some(reexpanded) = reexpanded {
-                                    prepend_value(m, &prop, reexpanded);
-                                    // 13.8.3.7.5: a value object MUST NOT gain an extra property
-                                    // (W3C expand/pi05).
-                                    if obj_get(m, "@value").is_some() {
-                                        return Err(JsonLdError::new(E::InvalidValueObject));
-                                    }
+                                prepend_value(m, &prop, reexpanded);
+                                // 13.8.3.7.5: a value object MUST NOT gain an extra property
+                                // (W3C expand/pi05).
+                                if obj_get(m, "@value").is_some() {
+                                    return Err(JsonLdError::new(E::InvalidValueObject));
                                 }
                             }
                         }
@@ -873,26 +871,25 @@ fn expand_property_value(
 
 /// **Value Expansion** (JSON-LD 1.1 API §5.3.2): expands a scalar `value` for `active_property`
 /// into a value object (or a node reference under an `@id` / `@vocab` type coercion).
-fn expand_value(
-    active_context: &ActiveContext,
-    active_property: &str,
-    value: &Json,
-) -> Option<Json> {
+fn expand_value(active_context: &ActiveContext, active_property: &str, value: &Json) -> Json {
     let td = active_context.term_definition(active_property);
     let type_mapping = td.and_then(|t| t.type_mapping());
 
     // @id / @vocab coercion of a string value → a node reference (§5.3.2 steps 1–2): "return
     // a new map containing a single entry where the key is @id and the value is the result of
-    // IRI expanding value". A null IRI expansion drops the value rather than manufacturing an
-    // empty node reference for callers to retain.
+    // IRI expanding value". When IRI Expansion returns `None` (a keyword-shaped token, or a
+    // `@vocab` term bound to null; see `context::iri`) the spec-literal result is therefore
+    // `{"@id": null}`. The entry is KEPT with a JSON null, never emitted as an empty-string
+    // `@id` or an empty `{}`. This matches the suite's `@id`-keyword precedent
+    // (W3C expand/0122-out retains `"@id": null`).
     if let Json::Str(s) = value {
         if type_mapping == Some("@id") {
-            let id = active_context.expand_iri(s, true, false)?;
-            return Some(Json::Obj(vec![("@id".to_string(), Json::Str(id))]));
+            let id = active_context.expand_iri(s, true, false).map_or_else(json_null, Json::Str);
+            return Json::Obj(vec![("@id".to_string(), id)]);
         }
         if type_mapping == Some("@vocab") {
-            let id = active_context.expand_iri(s, true, true)?;
-            return Some(Json::Obj(vec![("@id".to_string(), Json::Str(id))]));
+            let id = active_context.expand_iri(s, true, true).map_or_else(json_null, Json::Str);
+            return Json::Obj(vec![("@id".to_string(), id)]);
         }
     }
 
@@ -923,7 +920,7 @@ fn expand_value(
             }
         }
     }
-    Some(Json::Obj(result))
+    Json::Obj(result)
 }
 
 /// Value/list/set/node cleanup (JSON-LD 1.1 API §5.1.2 steps 15–20). Returns `None` when the
@@ -1432,37 +1429,37 @@ mod tests {
     }
 
     #[test]
-    fn expand_value_id_coercion_null_expansion_is_dropped() {
+    fn expand_value_id_coercion_null_expansion_yields_null_id() {
         let ac = coercion_context();
         // A resolvable absolute IRI under `@id` coercion → a `{"@id": <iri>}` node reference.
         assert_eq!(
             expand_value(&ac, "id_term", &Json::Str("http://ex/target".into())),
-            Some(Json::Obj(vec![(
+            Json::Obj(vec![(
                 "@id".to_string(),
                 Json::Str("http://ex/target".into()),
-            )])),
+            )]),
         );
         assert_eq!(
             expand_value(&ac, "id_term", &Json::Str("@notakeyword".into())),
-            None,
-            "a null IRI expansion must drop the coerced value",
+            Json::Obj(vec![("@id".to_string(), json_null())]),
+            "a null IRI expansion must remain an explicit null @id",
         );
     }
 
     #[test]
-    fn expand_value_vocab_coercion_null_expansion_is_dropped() {
+    fn expand_value_vocab_coercion_null_expansion_yields_null_id() {
         let ac = coercion_context();
         // A plain term under `@vocab` coercion resolves against `@vocab`.
         assert_eq!(
             expand_value(&ac, "vocab_term", &Json::Str("thing".into())),
-            Some(Json::Obj(vec![(
+            Json::Obj(vec![(
                 "@id".to_string(),
                 Json::Str("http://ex/v#thing".into()),
-            )])),
+            )]),
         );
         assert_eq!(
             expand_value(&ac, "vocab_term", &Json::Str("@notakeyword".into())),
-            None,
+            Json::Obj(vec![("@id".to_string(), json_null())]),
         );
     }
 }

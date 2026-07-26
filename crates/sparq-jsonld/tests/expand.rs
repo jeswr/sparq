@@ -466,26 +466,58 @@ fn type_map_key_precedes_existing_types() {
 }
 
 #[test]
-fn id_coercion_keyword_shaped_value_is_dropped() {
+fn id_coercion_keyword_shaped_scalar_and_arrays_retain_null_id() {
+    // [SONNET-4.6] PR #4132 review: §5.3.2 returns the @id map even when IRI Expansion is null.
     assert_expands(
         r#"{"@context": {"p": {"@id": "http://ex/p", "@type": "@id"}}, "p": "@kw"}"#,
-        r#"[]"#,
+        r#"[{"http://ex/p": [{"@id": null}]}]"#,
+    );
+    assert_expands(
+        r#"{"@context": {"p": {"@id": "http://ex/p", "@type": "@id"}}, "p": ["@kw"]}"#,
+        r#"[{"http://ex/p": [{"@id": null}]}]"#,
+    );
+    assert_expands(
+        r#"{"@context": {"p": {"@id": "http://ex/p", "@type": "@id"}}, "p": ["@kw", "http://ex/ok"]}"#,
+        r#"[{"http://ex/p": [{"@id": null}, {"@id": "http://ex/ok"}]}]"#,
     );
 }
 
 #[test]
-fn property_index_null_re_expansion_is_dropped() {
+fn nulled_term_under_id_and_vocab_coercion_is_pinned() {
+    // A null term mapping is consulted only by vocabulary-relative IRI Expansion (§5.2 step 5).
     assert_expands(
         r#"{
             "@context": {
-                "@vocab": "http://ex/",
-                "items": {"@container": "@index", "@index": "kind"},
-                "kind": {"@type": "@vocab"}
+                "nt": null,
+                "id": {"@id": "http://ex/id", "@type": "@id"},
+                "vocab": {"@id": "http://ex/vocab", "@type": "@vocab"}
             },
-            "items": {"@kw": "kept"}
+            "id": "nt",
+            "vocab": "nt"
         }"#,
-        r#"[{"http://ex/items": [{"@value": "kept"}]}]"#,
+        r#"[{
+            "http://ex/id": [{"@id": "nt"}],
+            "http://ex/vocab": [{"@id": null}]
+        }]"#,
     );
+}
+
+#[test]
+fn property_index_null_re_expansion_on_value_object_errors() {
+    for index in ["@kw", "real"] {
+        let input = format!(
+            r#"{{
+                "@context": {{
+                    "@vocab": "http://ex/",
+                    "items": {{"@container": "@index", "@index": "kind"}},
+                    "kind": {{"@type": "@vocab"}}
+                }},
+                "items": {{"{}": "kept"}}
+            }}"#,
+            index,
+        );
+        assert_error(&input, JsonLdErrorCode::InvalidValueObject);
+    }
 }
 
 // ---------------------------------------------------------------------------------------
