@@ -126,7 +126,10 @@ jobs:
           nargo --version
 
       - name: Toolchain versions (record for the run log)
-        run: echo "nargo: $(nargo --version | head -1)"
+        # Block scalar: a plain (unquoted) YAML scalar may not contain `": "`, so the
+        # inline form of this `echo` is a workflow-level YAML parse error.
+        run: |
+          echo "nargo: $(nargo --version | head -1)"
 
       # THE LOAD-BEARING STEP. Compiles the generated oracle file against the pinned
       # noir_XPath release and runs every differential test, then re-runs with one expected
