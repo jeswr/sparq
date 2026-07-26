@@ -145,8 +145,8 @@ Formally, the access decision is a two-stage reasoning pipeline:
                  ▼
    ┌──────────────────────────────────┐
    │  ADMISSION stratum  (NEW)         │   gate: trust statement + verified issuer
-   │  "is this fact from a source I    │          signature + freshness/revocation
-   │   trust for this statement-type?" │
+   │  "is this fact from a source I    │          signature + Rust-side freshness
+   │   trust for this statement-type?" │          + input-stratified revocation
    └──────────────────────────────────┘
                  │  admitted facts (issuer-tagged)
                  ▼
@@ -461,14 +461,18 @@ consequences the design must honour — and one architectural gap the prior draf
   request fact.
 - Admission rules must be **stratified ahead of** derivation: all *static* admission decisions
   for a predicate complete before any derivation rule reads it, so scoped-NAF stays sound.
-- **Freshness/revocation are NOT in the reasoner; the §2.1 diagram is reworded accordingly.**
+- **Freshness is not in the reasoner; revocation may only enter as an input-stratified
+  guard; the §2.1 diagram is reworded accordingly.**
   Time is a **per-request Rust check** (`authindex.rs`), not an in-reasoner predicate, and the
-  shipped reasoner permits negation-as-failure **only over input-only predicates** and
-  **rejects NAF over *derived* predicates** (`sparq-reason` incremental path). So any
-  `not-revoked` guard must be **input-stratified** (NAF over an *input-only* `revoked`
-  predicate seeded before derivation) — otherwise admission is **unsound**. The §2.1 admission
-  box's "freshness/revocation" line is a **Rust-side per-request side-condition + an
-  input-stratified guard**, not in-reasoner negation over derived facts (`sq-tu4e`).
+  incremental counting profile permits negation-as-failure **only over input-only predicates**
+  and **rejects NAF over *derived* predicates** (`incremental.rs`, `n3_compile`). The full
+  evaluator can negate a derived predicate only through the explicit
+  `reason_n3_stratified` contract: the predicate must reach its complete fixpoint in an
+  earlier stratum. So a v1 `not-revoked` guard must be **input-stratified** (NAF over an
+  *input-only* `revoked` predicate seeded before admission); treating a revocation predicate
+  that admission rules can also derive as input-only is **unsound**. The §2.1 admission box is
+  therefore a **Rust-side per-request freshness side-condition + an input-stratified
+  revocation guard**, not same-stratum negation over derived facts (`sq-tu4e`).
 - **Seeding-caveat citation, corrected.** The "two-unbound-atom seeding blow-up" war story
   belongs to the **incremental counting path** (`sparq-reason` incremental seeding), **not**
   the full evaluator. **solid uses the full `reason_n3`**, which supports `math:greaterThan`
@@ -518,18 +522,26 @@ holder binding must **not** admit the fact.
 
 Two trusted issuers may attest contradictory values (`age 25` vs `age 17`). The derivation
 stratum inherits ACP's normative **deny-overrides** for the *access* decision, but the
-*admission* of contradictory *facts* needs its own rule. v1 recommendation: admit both
-issuer-tagged facts and let the derivation be *conservative* (if any trusted attestation fails
-the predicate, and policy is "all trusted sources must agree", deny). **Honest caveat — this
-may be UNREACHABLE in the shipped engine.** With both contradictory facts admitted, the naïve
-reading fires the `> 18` grant off the `age 25` fact (the `age 17` fact does not block it). A
-*conservative deny-on-disagreement* rule needs **negation over a DERIVED predicate** ("deny if
-there *exists* a trusted attestation that fails the predicate"), which **collides** with the
-shipped reasoner's input-only-negation discipline (NAF is permitted only over *input-only*
-predicates, rejected over *derived* ones). So deny-on-disagreement **may not be a monotone
-stratified-NAF rule in the shipped engine** and could require an engine extension — this is
-**not** flagged as settled (`sq-tu4e`). The general trust-conflict semantics (preference order
-over sources, threshold/k-of-n) is a designed-only extension, also flagged in §7.
+*admission* of contradictory *facts* needs its own rule. v1 admits both issuer-tagged facts.
+
+**Expressibility boundary (resolved).** Conservative **deny when a disagreement exists is
+expressible today without NAF or an engine extension**: a positive rule joins two admitted,
+issuer-tagged facts for the same subject and predicate, checks distinct values (and, where the
+policy requires it, distinct issuers), and derives a positive conflict/prohibition fact. The
+existing deny-overrides access-decision stratum then defeats any grant derived from `age 25`
+when `age 17` also produces that conflict witness. This rule is monotone: adding an
+attestation can add a conflict, never retract one.
+
+A superficially similar encoding — **grant only if no derived conflict exists** — does require
+NAF over a derived predicate. It is not accepted by the incremental counting profile
+(`incremental.rs` rejects a guard predicate derived by any rule), but it is expressible by
+the full evaluator's explicit `reason_n3_stratified` API when conflict reaches a fixpoint in
+an earlier stratum and the later stratum negates it. It is **not sound in one `reason_n3`
+fixpoint**, whose no-retraction semantics cannot withdraw a grant after a conflict appears.
+v1 therefore uses the positive-conflict + deny-overrides form; an engine extension is needed
+only for dynamic/general conflict policies that cannot be compiled to positive witnesses and
+the existing fixed strata (for example preference order or threshold/k-of-n policy
+evaluation). Those general semantics remain designed-only (§7). [SONNET-4.6] `sq-tu4e`.
 
 ## 4. Capability delegation for human AND AI agents
 
@@ -1228,12 +1240,12 @@ prior draft phrased as settled are open problems.
   conditional-grant machinery). See §3.3 for the full rationale and the soundness test. Residue:
   post-materialise *revocation* is still a re-materialise event (external-state change, not a
   request fact) — only the two pure-`Session` conditions are deferred.
-- **B′ — Freshness/revocation are NOT in the reasoner.** Time is a per-request Rust check
-  (`authindex.rs`); the shipped reasoner permits NAF **only over input-only predicates** and
-  rejects NAF over **derived** predicates. Any `not-revoked` guard must be **input-stratified**
-  or admission is **unsound**. The §2.1 diagram's "freshness/revocation" line is reworded as a
-  Rust-side per-request side-condition + an input-stratified guard, **not** in-reasoner negation
-  over derived facts (`sq-tu4e`).
+- **B′ — Freshness is not in the reasoner; revocation is input-stratified.** Time is a
+  per-request Rust check (`authindex.rs`). The incremental counting profile permits NAF only
+  over input-only predicates; the full evaluator permits derived-predicate NAF only through
+  `reason_n3_stratified`, after the predicate is complete in an earlier stratum. The v1
+  `not-revoked` guard is therefore NAF over an input-only `revoked` predicate seeded before
+  admission; same-stratum derived revocation would be **unsound** (`sq-tu4e`).
 - **Re-opening the §2.4 boundary is the principal soundness risk.** §3.3 holds *only* if
   admission verifies **real signatures** (never self-asserted trust triples) and enforces
   statement-type scoping; a bug there is privilege-escalation, not a cosmetic defect.
@@ -1254,10 +1266,12 @@ prior draft phrased as settled are open problems.
   *unanalysed* termination risk is **recursive / unbound-join admission rules over external-graph
   extents in the full evaluator** — P8 (`sq-pfae` P8) must bound *that* path (`sq-tu4e`). No
   formal complexity bound is proven here.
-- **F — Conflicting-fact deny-on-disagreement may be UNREACHABLE.** Conservative
-  deny-on-disagreement needs **negation over a DERIVED predicate**, colliding with the engine's
-  input-only-negation discipline; it may **not** be a monotone stratified-NAF rule in the
-  shipped engine and could require an engine extension (`sq-tu4e`). Conflict resolution beyond
+- **F — Conflicting-fact deny-on-disagreement is reachable.** A positive join over two
+  disagreeing issuer-tagged facts derives a conflict/prohibition witness, and existing
+  deny-overrides defeats the competing grant without NAF. Only the alternative “grant iff no
+  derived conflict exists” encoding needs derived-predicate NAF: it requires the shipped
+  `reason_n3_stratified` driver and is unsound in a single no-retraction fixpoint. v1 uses the
+  positive-witness form; conflict resolution beyond
   deny-overrides + conservative-admission is designed-only.
 - **Revocation/freshness is full-re-run, not incremental.** Stale-grant ("new enemy") risk is
   bounded by re-materialisation, not by retraction; incremental/temporal maintenance is not
@@ -1329,9 +1343,10 @@ The genuine **design gaps** (not mere caveats) surfaced above are tracked as bea
   binds the intersection to the *current* delegator grant (item N). It does NOT claim full
   non-replayability — the delegator's key is still operator-asserted. Residual open: deep-chain
   incremental revocation + DID-resolver key binding (`sq-pfae.3`).
-- `sq-tu4e` — conflicting-issuer-fact deny-on-disagreement may be unreachable under input-only
-  stratified NAF; freshness/revocation/issuer-key are not in-reasoner; seeding mis-citation
-  corrected.
+- `sq-tu4e` — **RESOLVED:** conflicting-issuer-fact deny-on-disagreement is a monotone positive
+  conflict witness followed by deny-overrides; only the alternative no-derived-conflict grant
+  needs the full evaluator's explicit stratified driver. Freshness stays Rust-side, revocation
+  is input-stratified, issuer-key remains gated on P2, and the seeding citation is corrected.
 - `sq-wvne` — ZKAPs-grade unlinkable presentation needs a 3-part ZK composite (hidden-issuer +
   ZK holder-PoP + nullifier); clear-WebID holder binding is in tension with anonymity.
 
@@ -1343,9 +1358,10 @@ own prior draft's overclaims. The *primary* load-bearing claims a reviewer shoul
 **concessions of §7.1–7.4**, audited for *adequacy* — i.e. is each gap conceded honestly and
 fully, or does residual overclaim survive? Those concessions are specific and falsifiable, and
 are framed as **open problems, not settled claims** (with the exception of
-admission-vs-materialise-once `sq-xc4y`, now RESOLVED by the static/dynamic split, §3.3 A′):
-delegation invocation-binding (`sq-l5og`), conflict / deny-on-disagreement reachability and the
-in-reasoner-NAF / freshness / issuer-key limits (`sq-tu4e`), and the ZK-presentation composite +
+admission-vs-materialise-once `sq-xc4y`, now RESOLVED by the static/dynamic split, §3.3 A′, and
+conflict / deny-on-disagreement reachability `sq-tu4e`, resolved in §3.5):
+delegation invocation-binding (`sq-l5og`), the remaining freshness / issuer-key limits from
+`sq-tu4e`, and the ZK-presentation composite +
 §3.4-holder-binding architecture blocker (`sq-wvne`). The document makes **no claim** to
 cryptographic losslessness, to a *proven* minimal set, or to ZKAPs-grade unlinkability; the only
 two *constructive* completeness claims it stakes are the two below (de-dup losslessness scoped to
