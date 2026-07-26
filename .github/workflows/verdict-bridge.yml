@@ -8,7 +8,12 @@
 # session. This workflow is that hop, made durable. registry#700 records the same
 # write-path-vs-read-predicate mismatch class.
 #
-# NOT A GATE. It never runs on a PR head and never executes candidate-PR code. It grants
+# NOT A GATE, and the event triggers do not change that. `ci-summary / gate` decides by
+# POLLING check-runs on the PR HEAD commit; for `issue_comment`, `pull_request_review`
+# and `workflow_run`, GitHub sets GITHUB_SHA to the DEFAULT BRANCH head, not the PR head,
+# so this workflow's check-run never lands on a ref the aggregator inspects. That is the
+# same property batch-merge.yml and pr-backlog.yml already rely on for their `workflow_run`
+# legs. It never runs on a PR head and never executes candidate-PR code. It grants
 # NO new arming authority: it writes LABELS only. The arm itself is still performed by
 # auto-arm.py with its own expectedHeadOid CAS and its own security-label exclusions, so
 # every existing fail-closed guard still applies.
