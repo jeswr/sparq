@@ -320,49 +320,97 @@ def _feature_adjacent_to_test_attr(content: str, feature: str) -> bool:
 # Pattern to find the start of cfg / cfg_attr attributes (inner and outer form).
 _CFG_START_RE = re.compile(r"#!?\[cfg(?:_attr)?\s*\(")
 
-# [SONNET-4.6] String literal masking keeps physical lines intact so a decoy
-# quote cannot consume subsequent live cfg attributes.
-_STRLIT_MASK_RE = re.compile(r'b?"[^"\\\r\n]*(?:\\.[^"\\\r\n]*)*"')
-_RAW_STRLIT_MASK_RE = re.compile(
-    r'(?<![A-Za-z0-9_"\\\'])(?:br|r)(?P<hashes>#{0,255})"[\s\S]*?"(?P=hashes)'
-)
-
-
 def _sanitize_for_cfg_scan(content: str) -> str:
     """Prepare Rust source content for safe cfg-expression extraction.
 
-    Two passes:
-    1. Blank whole-line comments (``//`` including ``///``/``//!`` docs).
-       This prevents quotes and cfg-like text in comments from affecting the
-       literal scanner.
-    2. Mask single-line regular string literals and single- or multiline raw
-       string literals with underscores. This prevents
-       ``#[cfg(feature = \\"name\\")])`` embedded inside those Rust strings
-       from being mistakenly extracted as a live cfg attribute.
-       The masking is ONE-WAY (no restore needed): real cfg attributes
-       outside string literals retain their feature names; bogus patterns
-       inside string literals get their names replaced with underscores,
-       so ``_mentions_feature(node, F)`` returns False for them.
-       Newline characters are retained in multiline raw strings. Multiline
-       regular strings are deliberately left live, which can only fail closed
-       by retaining a full test leg. Block comments are not currently masked.
+    A left-to-right lexical scan masks comments, character literals, and
+    ordinary/raw string literals while preserving length and CR/LF. Real cfg
+    attributes remain unchanged; cfg-like text in non-code spans is blanked.
     """
-    # Pass 1: blank whole-line comments, PRESERVING LENGTH and line structure.
-    lines = content.splitlines(keepends=True)
-    uncommented = "".join(
-        "".join(" " if c not in ("\n", "\r") else c for c in line)
-        if line.lstrip().startswith("//")
-        else line
-        for line in lines
-    )
+    safe = list(content)
 
-    # Pass 2: mask string literal contents while retaining CR/LF.
-    def _mask(m: "re.Match") -> str:
-        s = m.group()
-        return "".join(c if c in ("\n", "\r") else "_" for c in s)
+    def mask(start: int, end: int) -> None:
+        for pos in range(start, end):
+            if safe[pos] not in ("\n", "\r"):
+                safe[pos] = "_"
 
-    masked = _RAW_STRLIT_MASK_RE.sub(_mask, uncommented)
-    return _STRLIT_MASK_RE.sub(_mask, masked)
+    def quoted_end(start: int, quote: str) -> Optional[int]:
+        pos = start + 1
+        while pos < len(content):
+            if content[pos] == "\\":
+                pos += 2
+            elif content[pos] == quote:
+                return pos + 1
+            else:
+                pos += 1
+        return None
+
+    i = 0
+    while i < len(content):
+        if content.startswith("//", i):
+            end = content.find("\n", i + 2)
+            end = len(content) if end < 0 else end
+            mask(i, end)
+            i = end
+            continue
+
+        if content.startswith("/*", i):
+            depth = 1
+            end = i + 2
+            while end < len(content) and depth:
+                if content.startswith("/*", end):
+                    depth += 1
+                    end += 2
+                elif content.startswith("*/", end):
+                    depth -= 1
+                    end += 2
+                else:
+                    end += 1
+            mask(i, end)
+            i = end
+            continue
+
+        raw_start = i
+        if content.startswith(("br", "cr"), i):
+            hash_start = i + 2
+        elif content.startswith("r", i):
+            hash_start = i + 1
+        else:
+            hash_start = -1
+        if hash_start >= 0:
+            quote = hash_start
+            while quote < len(content) and content[quote] == "#":
+                quote += 1
+            hash_count = quote - hash_start
+            if hash_count <= 255 and quote < len(content) and content[quote] == '"':
+                terminator = '"' + ("#" * hash_count)
+                end = content.find(terminator, quote + 1)
+                end = len(content) if end < 0 else end + len(terminator)
+                mask(raw_start, end)
+                i = end
+                continue
+
+        quote = i + 1 if content[i:i + 1] in ("b", "c") else i
+        if quote < len(content) and content[quote] == '"':
+            end = quoted_end(quote, '"')
+            end = len(content) if end is None else end
+            mask(i, end)
+            i = end
+            continue
+
+        if content[i] == "'":
+            end = quoted_end(i, "'")
+            body = content[i + 1 : end - 1] if end is not None else ""
+            if end is not None and "\n" not in body and "\r" not in body and (
+                len(body) == 1 or body.startswith("\\")
+            ):
+                mask(i, end)
+                i = end
+                continue
+
+        i += 1
+
+    return "".join(safe)
 
 
 def _extract_cfg_expressions(content: str) -> List[str]:

@@ -372,7 +372,7 @@ Counts, not percentages, against the §1 engine-PR baseline (58 legs ran,
   core/fedplan/reason legs were already selection-filtered there) —
   roughly **28–30 of the 130 leg runner-minutes** move into a check-tier job
   costing an estimated 3–6 min (clippy-profile, shared target dir; measured at
-  implementation, not promised). Leg count 58 → 51 + 1–2 check shards.
+  implementation, not promised). Leg count 58 → 52 + 1–2 check shards.
 - **What this is NOT:** the epic's hoped-for "~50 legs → a dozen". That premise
   assumed most legs were compile-rot protection; the evidence (§2.1) shows 62/71
   carry real feature-gated test suites that nothing else runs. Their bill is
@@ -393,11 +393,12 @@ intentionally sensitive. The measured before/after count is therefore
 **0 → 0 check-tier legs**.
 
 The detector mutation demonstration remains pinned in
-`TestMutationCheck`: the fail-open mutant classifies an unreadable or missing
-source tree non-sensitive, while the production fail-closed path classifies the
-same input sensitive. The tier-enforcement tests additionally make a sensitive
-`tier: check` leg fail invariant (1), demonstrating that adding a feature-gated
-test under a demoted feature turns the ratchet red.
+`TestMutationFailOpen::test_mutation_check_divergence`: the fail-open mutant
+classifies an unreadable or missing source tree non-sensitive, while the
+production fail-closed path classifies the same input sensitive. The
+tier-enforcement tests additionally make a sensitive `tier: check` leg fail
+invariant (1), demonstrating that adding a feature-gated test under a demoted
+feature turns the ratchet red.
 
 ## 10. Graduation
 

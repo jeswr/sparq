@@ -731,9 +731,17 @@ class TestCfgExtraction(unittest.TestCase):
     """Tests for extracting cfg expressions from Rust source content."""
 
     def test_extract_single_cfg(self):
-        content = '#[cfg(feature = "feature-ending-in-r")]\nfn f() {}\n'
+        content = (
+            '#[cfg(feature = "vector-r")]\n'
+            'fn a() {}\n'
+            '#[cfg(not(feature = "quoted-triples"))]\n'
+            'fn g() {}\n'
+        )
         exprs = det._extract_cfg_expressions(content)
-        self.assertEqual(exprs, ['feature = "feature-ending-in-r"'])
+        self.assertEqual(
+            exprs,
+            ['feature = "vector-r"', 'not(feature = "quoted-triples")'],
+        )
 
     def test_extract_inner_cfg(self):
         content = '#![cfg(feature = "foo")]\nfn f() {}\n'
@@ -801,6 +809,26 @@ class TestCfgExtraction(unittest.TestCase):
             det._extract_cfg_expressions(content),
             ['not(feature = "quoted-triples")'],
         )
+
+    def test_ordinary_literal_trailing_r_does_not_open_raw_string(self):
+        for literal in ('"mode r"', '"w/r"'):
+            with self.subTest(literal=literal):
+                content = (
+                    'let mode = {};\n'.format(literal)
+                    + '#[cfg(not(feature = "quoted-triples"))]\n'
+                    + 'fn g() {}\n'
+                )
+                self.assertEqual(
+                    det._extract_cfg_expressions(content),
+                    ['not(feature = "quoted-triples")'],
+                )
+
+    def test_nested_block_comment_cfg_is_masked(self):
+        content = (
+            '/* outer /* #[cfg(feature = "decoy")] */ comment */\n'
+            '#[cfg(feature = "live")]\n'
+        )
+        self.assertEqual(det._extract_cfg_expressions(content), ['feature = "live"'])
 
     def test_regression_cfgs_from_rsp_and_reason_sources(self):
         with tempfile.TemporaryDirectory() as tmp:
