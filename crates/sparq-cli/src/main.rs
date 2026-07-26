@@ -341,21 +341,103 @@ fn subject_to_term(s: &oxrdf::NamedOrBlankNode) -> oxrdf::Term {
     }
 }
 
-/// `save <data> <format> <dir> [compressed]` — build the store and persist its indexes
-/// to disk; `compressed` writes the block-compressed permutation format (auto-detected
-/// by `query-mmap`/`bench-mmap`).
+// ===== [SONNET-4.6] sq-kmve2 — the SPQCPRM2 V2 emit FLAG =====
+//
+// `save … compressed --format-v2` and `recompress … --v2` select the `SPQCPRM2` on-disk block
+// stream for THIS invocation, so asking for V2 no longer means exporting `SPARQ_EMIT_FORMAT=v2`
+// into the process environment (which leaks into every child process and is easy to leave set).
+// The flag maps onto `compress::with_emit_format` — the PER-THREAD override, which takes
+// precedence over the env var and is read on the writing thread that `save_compressed` encodes
+// on. Passing no flag leaves the env-var path exactly as it was.
+//
+// FAIL-CLOSED in three places, because silently writing the OTHER on-disk format is the one
+// outcome worse than an error: `--format-v2` without the `compressed` positional is rejected
+// (raw perms carry no block-stream version); a binary built WITHOUT the opt-in `spqcprm2`
+// feature rejects the flag instead of quietly emitting `SPQCPRM1`; and an unrecognised
+// `--flag` on either subcommand is rejected rather than ignored. All three run BEFORE the dataset
+// is loaded/opened, so a bad invocation fails in milliseconds rather than after a long ingest.
+
+/// Usage line for `save` (also the too-few-arguments error).
+const SAVE_USAGE: &str = "sparq-cli save <data-file> <format> <dir> [compressed] [--format-v2]";
+/// Usage line for `recompress`.
+const RECOMPRESS_USAGE: &str = "sparq-cli recompress <src-dir> <dst-dir> [--v2]   (dirs must differ)";
+
+/// [SONNET-4.6] (sq-kmve2) Splits `args` into positionals and the V2-emit flag. `--format-v2`
+/// (the `save` spelling) and `--v2` (the `recompress` spelling) are accepted interchangeably;
+/// any OTHER `--`-prefixed argument is a hard usage error, so a typo'd flag can never be
+/// silently dropped and leave the caller believing it wrote V2.
+fn take_emit_v2(args: &[String], usage: &str) -> (Vec<String>, bool) {
+    let mut positional = Vec::with_capacity(args.len());
+    let mut v2 = false;
+    for a in args {
+        match a.as_str() {
+            "--format-v2" | "--v2" => v2 = true,
+            other if other.starts_with("--") => {
+                eprintln!("unknown flag {}\nusage: {}", other, usage);
+                std::process::exit(2);
+            }
+            _ => positional.push(a.clone()),
+        }
+    }
+    (positional, v2)
+}
+
+/// [SONNET-4.6] (sq-kmve2) V2 emission is compiled in — nothing to reject.
+#[cfg(feature = "spqcprm2")]
+fn check_emit_v2(_v2: bool) {}
+
+/// [SONNET-4.6] (sq-kmve2) This binary cannot emit `SPQCPRM2` (the `spqcprm2` feature is off),
+/// so the flag is a loud error rather than a silent `SPQCPRM1` write.
+#[cfg(not(feature = "spqcprm2"))]
+fn check_emit_v2(v2: bool) {
+    if v2 {
+        eprintln!(
+            "error: --format-v2/--v2 needs a build with the opt-in `spqcprm2` cargo feature; this binary emits SPQCPRM1 only.\n       rebuild with: cargo build --release -p sparq-cli --features spqcprm2"
+        );
+        std::process::exit(2);
+    }
+}
+
+/// [SONNET-4.6] (sq-kmve2) Runs `f` (a compressed save) with this thread's emit format forced to
+/// `SPQCPRM2` when `v2`; otherwise runs it untouched, so the default path stays bit-identical.
+#[cfg(feature = "spqcprm2")]
+fn with_emit_v2<R>(v2: bool, f: impl FnOnce() -> R) -> R {
+    if v2 { sparq_core::compress::with_emit_format(sparq_core::compress::EmitFormat::V2, f) } else { f() }
+}
+
+/// [SONNET-4.6] (sq-kmve2) Feature-OFF twin: `check_emit_v2` has already exited on `v2`, so this
+/// only ever runs the closure unchanged.
+#[cfg(not(feature = "spqcprm2"))]
+fn with_emit_v2<R>(_v2: bool, f: impl FnOnce() -> R) -> R {
+    f()
+}
+
+/// `save <data> <format> <dir> [compressed] [--format-v2]` — build the store and persist its
+/// indexes to disk; `compressed` writes the block-compressed permutation format (auto-detected
+/// by `query-mmap`/`bench-mmap`), and `--format-v2` writes it as `SPQCPRM2` instead of
+/// `SPQCPRM1` (opt-in `spqcprm2` builds only; see the emit-flag notes above).
 fn cmd_save(args: &[String]) {
+    let (args, v2) = take_emit_v2(args, SAVE_USAGE);
     let (path, format, dir) = match (args.get(2), args.get(3), args.get(4)) {
         (Some(p), Some(f), Some(d)) => (p.as_str(), f.as_str(), d.as_str()),
         _ => {
-            eprintln!("usage: sparq-cli save <data-file> <format> <dir> [compressed]");
+            eprintln!("usage: {}", SAVE_USAGE);
             std::process::exit(2);
         }
     };
     let compressed = args.get(5).map(String::as_str) == Some("compressed");
+    if v2 && !compressed {
+        eprintln!("error: --format-v2 selects the SPQCPRM2 *compressed*-permutation format; add the `compressed` positional\nusage: {}", SAVE_USAGE);
+        std::process::exit(2);
+    }
+    check_emit_v2(v2);
     let g = load(path, format);
     let t = Instant::now();
-    let res = if compressed { g.save_compressed(std::path::Path::new(dir)) } else { g.save(std::path::Path::new(dir)) };
+    let res = if compressed {
+        with_emit_v2(v2, || g.save_compressed(std::path::Path::new(dir)))
+    } else {
+        g.save(std::path::Path::new(dir))
+    };
     res.unwrap_or_else(|e| {
         eprintln!("save error: {e}");
         std::process::exit(1);
@@ -363,32 +445,46 @@ fn cmd_save(args: &[String]) {
     eprintln!(
         "saved {} triples to {dir}{} in {:.3}s",
         g.len(),
-        if compressed { " (compressed perms)" } else { "" },
+        match (compressed, v2) {
+            (true, true) => " (compressed perms, SPQCPRM2)",
+            (true, false) => " (compressed perms)",
+            _ => "",
+        },
         t.elapsed().as_secs_f64()
     );
 }
 
-/// `recompress <src-dir> <dst-dir>` — re-persist a saved dataset with block-compressed
+/// `recompress <src-dir> <dst-dir> [--v2]` — re-persist a saved dataset with block-compressed
 /// permutation indexes (the dictionary/numerics are rewritten unchanged). Lets a raw
 /// (e.g. external-memory `build`) directory be compacted without re-parsing the source.
+/// `--v2` writes `SPQCPRM2` instead of `SPQCPRM1` (opt-in `spqcprm2` builds only).
 fn cmd_recompress(args: &[String]) {
+    let (args, v2) = take_emit_v2(args, RECOMPRESS_USAGE);
     let (src, dst) = match (args.get(2), args.get(3)) {
         (Some(s), Some(d)) if s != d => (s.as_str(), d.as_str()),
         _ => {
-            eprintln!("usage: sparq-cli recompress <src-dir> <dst-dir>   (dirs must differ)");
+            eprintln!("usage: {}", RECOMPRESS_USAGE);
             std::process::exit(2);
         }
     };
+    check_emit_v2(v2);
     let g = sparq_core::Graph::open(std::path::Path::new(src)).unwrap_or_else(|e| {
         eprintln!("open error: {e}");
         std::process::exit(1);
     });
     let t = Instant::now();
-    g.save_compressed(std::path::Path::new(dst)).unwrap_or_else(|e| {
+    with_emit_v2(v2, || g.save_compressed(std::path::Path::new(dst))).unwrap_or_else(|e| {
         eprintln!("save error: {e}");
         std::process::exit(1);
     });
-    eprintln!("recompressed {} triples {src} -> {dst} in {:.3}s", g.len(), t.elapsed().as_secs_f64());
+    // Only claim a format when the FLAG chose it: an `SPARQ_EMIT_FORMAT=v2` process writes V2
+    // without the flag, so an unconditional "(SPQCPRM1)" here would be a false report.
+    eprintln!(
+        "recompressed {} triples {src} -> {dst}{} in {:.3}s",
+        g.len(),
+        if v2 { " (SPQCPRM2)" } else { "" },
+        t.elapsed().as_secs_f64()
+    );
 }
 
 /// [OPUS-4.8] (sq-x32t) `compact <persist-dir>` — WAL COMPACTION / VACUUM for ERASURE-

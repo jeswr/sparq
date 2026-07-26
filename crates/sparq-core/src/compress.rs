@@ -503,13 +503,16 @@ impl CompressedPerm {
         }
     }
 
-    /// [FABLE-5] sq-7d3dj.32.2.7 — encodes a sorted permutation in the block-stream [`Format`]
+    /// [FABLE-5] sq-7d3dj.32.2.7 — encodes a sorted permutation in the block-stream `Format`
     /// the build's `emit_format` config gate selects: `SPQCPRM1` by default (bit-for-bit
     /// [`encode`](Self::encode)), or `SPQCPRM2` when a `spqcprm2` build has opted in. This is the
-    /// single entry point the store's compressed save path uses, so the emit policy is honoured
-    /// in exactly one place. With the `spqcprm2` feature OFF, `emit_format()` is a const `V1` and
-    /// this is `encode` with no branch.
-    #[cfg(feature = "mmap")]
+    /// single entry point BOTH compressed encode paths use — the on-disk save path and the
+    /// in-RAM compressed profile (`TripleStore::from_triples_compressed`, sq-559dp) — so the
+    /// emit policy is honoured in exactly one place. With the `spqcprm2` feature OFF (which
+    /// includes every `mmap`-off wasm build, since `spqcprm2` implies `mmap`) the gate compiles
+    /// out entirely and this is an inlined `encode` with no branch, so the default in-RAM block
+    /// stream stays byte-identical.
+    #[inline]
     pub fn encode_emit(rows: &[[Id; 3]]) -> Self {
         #[cfg(feature = "spqcprm2")]
         if emit_format() == Format::V2 {
@@ -716,6 +719,14 @@ impl CompressedPerm {
         #[cfg(not(feature = "block-bloom"))]
         let bloom = 0;
         self.dir.capacity() * std::mem::size_of::<([Id; 3], u32)>() + stream + bloom
+    }
+
+    /// [FABLE-5] sq-559dp — TEST-ONLY: the block-stream format this perm's `blocks` carry, so
+    /// the store-level emit-gate differentials (`store::tests`) can assert WHICH encoder ran
+    /// without making the private `format` field part of the public API.
+    #[cfg(all(test, feature = "spqcprm2"))]
+    pub(crate) fn format(&self) -> Format {
+        self.format
     }
 
     /// Decodes the block starting at byte `off` into `out` (appending).

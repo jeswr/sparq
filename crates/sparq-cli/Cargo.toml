@@ -34,9 +34,11 @@ mmap = ["sparq-core/mmap"]
 # runtime via SPARQ_DICT_SPILL — default behavior is unchanged when the vars are unset).
 dict-spill = ["sparq-core/dict-spill"]
 mimalloc = ["dep:mimalloc"]
-# [FABLE-5] sq-7d3dj.32.2.7: forwards sparq-core's `spqcprm2` so `save ... compressed` (and
-# `recompress`) honour `SPARQ_EMIT_FORMAT=v2` to write the SPQCPRM2 frame-of-reference on-disk
-# format. OFF by default (the default CLI emits SPQCPRM1 bit-for-bit); enabling it is how the
+# [FABLE-5] sq-7d3dj.32.2.7: forwards sparq-core's `spqcprm2` so `save ... compressed --format-v2`
+# (and `recompress ... --v2`, or `SPARQ_EMIT_FORMAT=v2`) write the SPQCPRM2 frame-of-reference
+# on-disk format — [SONNET-4.6] sq-kmve2 added the flags; without the feature they are a hard
+# exit-2 error, never a silent SPQCPRM1 write.
+# OFF by default (the default CLI emits SPQCPRM1 bit-for-bit); enabling it is how the
 # real-data B/triple comparison writes both formats from the same corpus.
 spqcprm2 = ["sparq-core/spqcprm2"]
 # [OPUS-4.8] (sq-oy1f.4, epic sq-oy1f) `jsonld` — JSON-LD ingest + re-serialisation, DEFAULT ON

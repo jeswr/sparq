@@ -112,7 +112,9 @@ pub fn terse_to_sparql(src: &str) -> Result<Expansion, TerseError> {
 /// agent can audit each bind (design §6.2). A close runner-up is surfaced as a warning.
 ///
 /// `embed` is an optional embedder for the vector FALLBACK: it is called *only* for a phrase
-/// that fails lexical linking, to produce the query vector the vector search needs. Pass a
+/// that fails lexical linking **and** only when the fallback can actually run — a vector store
+/// is attached and passes the §6.5 staleness guard — to produce the query vector the vector
+/// search needs. A stale store is [`TerseError::StaleStore`] with no embedder call. Pass a
 /// closure that returns `None` (or use [`terse_to_sparql`] for canonical-only input) to stay
 /// on the no-model, lexical-only path; the design (§6/§9 Q5) keeps the embedding model the
 /// caller's explicit, opt-in dependency rather than forcing one into this crate.
@@ -153,10 +155,11 @@ pub fn terse_to_sparql_with(
     for span in &spans {
         // Copy the source up to this V(...) verbatim.
         out.push_str(&src[cursor..span.start]);
-        // Resolve: lexical-first; the embedder is consulted only for the vector fallback,
-        // and only when lexical returns nothing (the ctx decides — we pre-embed lazily).
-        let query_vec = embed(&span.phrase);
-        let res = ctx.resolve(&span.phrase, query_vec.as_deref())?;
+        // Resolve: lexical-first. The embedder is handed to the ctx as a THUNK, so it is
+        // invoked only when lexical returns nothing and a usable (non-stale) vector store is
+        // attached — a lexically-bound phrase, or one whose fallback cannot run at all, never
+        // pays the model/network cost (design §6.4/§6.5/§9 Q5).
+        let res = ctx.resolve_lazy(&span.phrase, |p| embed(p))?;
         // Splice the canonical <iri> in place of the V(...) construct.
         out.push('<');
         out.push_str(&res.iri);

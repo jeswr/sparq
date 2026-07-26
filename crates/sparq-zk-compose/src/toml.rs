@@ -134,6 +134,43 @@ pub fn filter_value_dl_prover_toml(
     s
 }
 
+/// Render the `Prover.toml` body for a DUAL-LEAF `xsd:boolean` value-lane FILTER
+/// proof (sq-5xdlk). It targets the SAME compiled member as the integer lane —
+/// `filter_value_dl_int` — because there is NO boolean Noir relation: the boolean
+/// hooks `{0 = false, 1 = true}` are inside that member's `u64` domain and the
+/// datatype lane is selected purely by the PUBLIC `datatype_const`.
+///
+/// This renderer therefore differs from [`filter_value_dl_prover_toml`] only in
+/// that it PINS `datatype_const` to [`crate::manifest::boolean_datatype_const`]`()`
+/// (the caller cannot pass the integer constant by mistake) and takes `bound` as a
+/// `bool`, mapped to the hook `{0, 1}`. The emitted field order is byte-identical
+/// to the integer lane's, as it must be — it is the same `main`.
+///
+/// DOCUMENTED RISK: inherits the value lane's INV-VL downgrade (#769 accepted,
+/// CR-G8 / sq-qhy4). NOT externally audited; no soundness / privacy claim.
+// [OPUS-5] sq-5xdlk: boolean value-lane Prover.toml. Opt-in, NOT-yet-sound.
+#[cfg(feature = "dual-leaf")]
+pub fn filter_value_dl_boolean_prover_toml(
+    challenge: &FieldHex,
+    operand_enc: &FieldHex,
+    op: u32,
+    bound: bool,
+    expected: bool,
+    value_hook: &FieldHex,
+    lexical_component: &FieldHex,
+) -> String {
+    filter_value_dl_prover_toml(
+        challenge,
+        operand_enc,
+        op,
+        u64::from(bound),
+        &crate::manifest::boolean_datatype_const(),
+        expected,
+        value_hook,
+        lexical_component,
+    )
+}
+
 /// Render the `Prover.toml` body for a DUAL-LEAF `xsd:double` value-lane FILTER
 /// proof (`filter_value_dl_f64`, [OPUS-4.8] sq-2ezsx). Order MUST match
 /// `zk/compose/filter_value_dl_f64/src/main.nr`: challenge, operand_enc, op,

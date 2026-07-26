@@ -202,10 +202,32 @@ property. The out-of-crate-input audit (bead 2) treats a sibling read as covered
 iff the reader is listed in a matching `readers` entry, and the map-validity test
 extends to `readers` names. Residual 3 (`sparq-conformance`'s
 `scoreboard_floors.rs` reading sibling **test sources** at a statically
-unresolvable runtime path) is *not* coverable by `readers` — it stays
-acknowledged, backstopped by the nightly full run, and is tracked for a shared
-floors-crate refactor in its own bead (sq-z1xv8), which conflicts with the
-"no shared test edits" constraint here and so needs its own design pass.
+unresolvable runtime path) was *not* coverable by `readers` — the union matches a
+literal/glob pattern, and a path assembled at runtime collapses to the workspace
+root — so it stayed acknowledged, backstopped by the nightly full run (§6.1),
+pending its own design pass.
+
+**Residual 3 closed by input-relocation** — sq-z1xv8 [SONNET-4.6]. The read
+existed only because a floor enforced in one crate's runner had to reach
+`sparq-conformance`'s central `scoreboard::SUITES` without a dep edge, so the
+number was spelled twice and reconciled by reading the other crate's test source.
+The eleven such floors (W3C SHACL core + SHACL-SPARQL, both OGC GeoSPARQL lanes,
+Solid WAC/ACP decision parity + the two differential oracles, the SolidLab ODRL
+suite, the sparq-text BM25 oracle, the sparq-rsp expressivity oracle) moved into a
+new leaf crate, `sparq-conformance-floors`: zero dependencies, `publish = false`,
+constants only. Each enforcing crate takes it as a **dev-dependency** (shipping
+graph untouched) and `sparq-conformance` as a plain dependency, so both sides read
+ONE compile-time `const` — the same cannot-drift shape the six JSON-LD lanes
+already had via `sparq_conformance::floors` — and the guard reads no foreign source
+at all. This is genuine relocation, not a coverage waiver: the dep edges put every
+enforcing crate in the floors crate's reverse-dependency closure, so a floor change
+cannot selection-skip the lane that enforces it. The surviving textual reads are
+rooted at `CARGO_MANIFEST_DIR` and a unit test
+(`textual_guard_reads_only_crate_local_sources`) fails if a row ever names a path
+outside the crate, so the hole cannot silently reopen. `KNOWN_RESIDUALS` in
+`scripts/ci_audit_inputs.py` is now **empty** — every out-of-crate input in the
+workspace is covered by a trigger, a map attribution, a dep closure or a `readers`
+union.
 
 ### 4.3 Fail-closed mechanics
 
@@ -420,12 +442,8 @@ ruleset change was needed. What landed:
   the quoted-needle guard) + wiring inspection (enforce-default, ci-full override,
   label-toggle triggers, the nightly backstop job).
 
-**Deferred** (proceed-and-document): the §6.1 *selection-bug alarm* — auto-filing
-a P1 bead/issue that names the offending nightly job + the suspect PRs landed
-since the last green nightly — is a distinct, more involved correlation feature
-(it must cross-reference the per-PR selection summaries). The backstop itself
-(the full nightly run that reds the gate on any regression) is live now; the
-auto-alarm is tracked as a follow-up bead.
+**Shipped** (sq-va7at, PR #1526): the §6.1 *selection-bug alarm* now correlates
+failed nightly jobs with suspect landed PRs and auto-files a deduplicated issue.
 
 ## 7. Firm positions (decision record)
 

@@ -57,6 +57,7 @@ function parseArgs(argv) {
     else if (k === '--canonical') a.canonical = argv[++i] === '1';
     else if (k === '--git-commit') a.gitCommit = argv[++i];
     else if (k === '--sparq-features') a.sparqFeatures = argv[++i];
+    else if (k === '--peer-bundle') a.peerBundle = argv[++i];
     else if (k === '--allow-missing-peer') a.allowMissingPeer = true;
     else { process.stderr.write(`harness: unknown arg ${k}\n`); process.exit(2); }
   }
@@ -65,7 +66,8 @@ function parseArgs(argv) {
       'usage: node harness.mjs --pkg <wasm-pack out dir> --data abox.ttl ' +
       '--shapes-dir DIR [--shapes-dir DIR2] --expected expected.tsv ' +
       '[--modules-dir DIR] [--iters N] [--out envelope.json] [--canonical 0|1] ' +
-      '[--git-commit SHA] [--sparq-features CSV] [--allow-missing-peer]\n');
+      '[--git-commit SHA] [--sparq-features CSV] [--peer-bundle bundle.json] ' +
+      '[--allow-missing-peer]\n');
     process.exit(2);
   }
   return a;
@@ -328,6 +330,33 @@ async function main() {
     }
   }
 
+  // [SONNET-4.6] sq-c6c2s: the PEER half of the byte column — bundle.mjs's
+  // esbuild-minified, tree-shaken browser bundle (run.sh stage 2b), folded in
+  // here so one envelope carries the whole comparison. Absent bundle => absent
+  // sub-column with the reason recorded, never a fabricated 0.
+  let peerBundle = { status: 'absent (run.sh stage 2b not run — see NO_BUNDLE / bundle.mjs)' };
+  if (args.peerBundle) {
+    try {
+      const b = JSON.parse(readFileSync(args.peerBundle, 'utf-8'));
+      peerBundle = {
+        source: args.peerBundle,
+        machine_independent: true,
+        reproducible: false,
+        reproducibility_note:
+          'Bytes only (no wall clock), but NOT reproducible and NOT canonical: the peer stack ' +
+          'and esbuild are installed unpinned (no committed lockfile), so a later gather can ' +
+          'emit different bytes. `package_versions` is provenance for the run below. See ' +
+          'bundle.mjs.',
+        peer: b.peer_minified_bundle,
+        sparq: b.sparq,
+        ratio: b.ratio,
+        wasm_opt_trim_probe: b.wasm_opt_trim_probe,
+      };
+    } catch (e) {
+      peerBundle = { status: `absent (could not read ${args.peerBundle}: ${e})` };
+    }
+  }
+
   if (args.out) {
     const envelope = {
       gather: 'shacl-wasm-same-runtime-comparison',
@@ -364,6 +393,7 @@ async function main() {
           : 'DETERMINISTIC per toolchain: the wasm-pack --release nodejs-target artifact (default features — no shacl-af). gzip-9 = the wire size a gzip-serving host ships.',
         wasm_pack: process.env.WASM_PACK_VERSION || 'unknown',
         artifacts: bundle,
+        peer_minified_bundle: peerBundle,
       },
       env: {
         host: os.hostname(),

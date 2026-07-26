@@ -1,0 +1,66 @@
+# [SONNET-4.6] sq-zgbso.2 — ODRL stateless core: stratum C.
+# Input: the serialized closure of stratum B (includes A + B derived facts).
+#
+# NAF in this stratum is over stratum B's COMPLETE andSubUnsat / anyRuleConstrUnsat
+# (and INPUT predicates):
+#   - odrlx:lcSat for odrl:and — derived if no sub-constraint is andSubUnsat
+#   - odrlx:prohibMatches + auth:deny* for CONSTRAINED prohibitions — the mirror of
+#     stratum D's grant rules 2/3: a prohibition whose atomic constraints are all
+#     satisfied (no anyRuleConstrUnsat) and whose logical constraint, if any, is
+#     lcSat, carves the request out and emits its deny.
+#
+# Grant emission is stratum D: the grant rules negate prohibMatches, which is only
+# COMPLETE once this stratum has derived it for constrained prohibitions. Deriving
+# constrained prohibMatches here (not in B) keeps its NAF over anyRuleConstrUnsat
+# stratified; deriving grants in D (not here) keeps their NAF over prohibMatches
+# stratified. lcSat is used POSITIVELY within this stratum (no NAF on it) — no cycle.
+
+@prefix odrl:  <http://www.w3.org/ns/odrl/2/> .
+@prefix auth:  <https://sparq.dev/ns/auth#> .
+@prefix odrlx: <https://sparq.dev/ns/odrlx#> .
+@prefix log:   <http://www.w3.org/2000/10/swap/log#> .
+
+# ── odrl:and logical constraint satisfied ────────────────────────────────────
+# Derived when NO sub-constraint is in andSubUnsat (all must be in atomicSat from A).
+# Requires at least one sub-constraint (the odrl:and ?c pattern guards this).
+# NAF is over stratum B's andSubUnsat, which is complete before this stratum.
+# [OPUS-5] Also negates stratum A0's `odrlx:shape odrlx:Ambiguous`: a node carrying a
+# SECOND combinator (`odrl:or`/`odrl:xone` alongside this `odrl:and`) has no single
+# reading, and stratum A's or-rule would satisfy it from one member alone — neither
+# rule fires for a mixed node (fail-closed).
+{ ?lc odrl:and ?c .
+  ?req a odrl:Request .
+  ?S log:notIncludes { ?lc odrlx:andSubUnsat ?req } .
+  ?S0 log:notIncludes { ?lc odrlx:shape odrlx:Ambiguous } . }
+=> { ?lc odrlx:lcSat ?req } .
+
+# ── constrained prohibition, ONLY atomic constraints (all satisfied) ─────────
+# Mirror of stratum D's grant rule 2. Fires when the prohibition has at least one
+# atomic constraint (?c odrl:leftOperand ?lo), no logical constraint (S2-S4), and
+# every atomic constraint satisfied (no anyRuleConstrUnsat from B). NAF is over:
+#   - stratum B's anyRuleConstrUnsat (complete before this stratum)
+#   - INPUT predicates odrl:or/and/xone (no LC present)
+{ ?pol odrl:prohibition ?proh .
+  ?proh odrl:action ?act ; odrl:target ?tgt ; odrl:assignee ?party .
+  ?proh odrl:constraint ?c . ?c odrl:leftOperand ?lo .
+  ?act odrlx:denyMode ?denyMode .
+  ?req a odrl:Request ; odrl:action ?act ; odrl:target ?tgt ; odrl:assignee ?party .
+  ?S1 log:notIncludes { ?proh odrlx:anyRuleConstrUnsat ?req } .
+  ?S2 log:notIncludes { ?proh odrl:constraint ?lc . ?lc odrl:or ?x } .
+  ?S3 log:notIncludes { ?proh odrl:constraint ?lc . ?lc odrl:and ?x } .
+  ?S4 log:notIncludes { ?proh odrl:constraint ?lc . ?lc odrl:xone ?x } . }
+=> { ?proh odrlx:prohibMatches ?req . ?party ?denyMode ?tgt . } .
+
+# ── constrained prohibition with a satisfied logical constraint ──────────────
+# Mirror of stratum D's grant rule 3. lcSat comes from stratum A (odrl:or) or from
+# THIS stratum (odrl:and) — used positively, no NAF on the derived fact. NAF over
+# stratum B's anyRuleConstrUnsat enforces any ADDITIONAL atomic constraints on the
+# same prohibition (all must be satisfied — same AND semantics as the Rust
+# evaluator's rule_matches).
+{ ?pol odrl:prohibition ?proh .
+  ?proh odrl:action ?act ; odrl:target ?tgt ; odrl:assignee ?party ; odrl:constraint ?lc .
+  ?lc odrlx:lcSat ?req .
+  ?act odrlx:denyMode ?denyMode .
+  ?req a odrl:Request ; odrl:action ?act ; odrl:target ?tgt ; odrl:assignee ?party .
+  ?S1 log:notIncludes { ?proh odrlx:anyRuleConstrUnsat ?req } . }
+=> { ?proh odrlx:prohibMatches ?req . ?party ?denyMode ?tgt . } .

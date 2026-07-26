@@ -1851,15 +1851,15 @@ status      = "harness-ready"
 id          = "reason-ql-npd"
 name        = "OWL 2 QL rewriting comparison vs Ontop (NPD + Requiem suites)"
 category    = "inference"
-measures    = "PerfectRef rewrite time + UCQ size (disjunct count) for the Norwegian Petroleum Directorate (NPD) TBox and Requiem benchmark queries vs Ontop's rewriter; UCQ size oracle before timing"
-invoke      = "TBD — implementing bead sq-hmd7l.9"
-source      = "TBD — bench/reason-ql-npd/; scripts/bench-adapters/ (Ontop adapter)"
-dataset     = "TBD — NPD TBox + Requiem query suite (sha256-pinned); Ontop mapping stubs"
+measures    = "PerfectRef rewrite wall time + output UCQ size (minimised disjunct count) per query on the NPD benchmark ontology/queries and the Requiem test-suite ontologies (datalog queries translated to SPARQL at gather time) vs Ontop. Regime LABELLED per column: sparq rewrite columns are rewriter-phase; the Ontop CLI column is end-to-end only (its rewriter is not CLI-isolable) and compares only against sparq's e2e column over the same materialized data. UCQ-equivalence (raw-vs-minimised result-set agreement) enforced before any timing row"
+invoke      = "ONLY=sparq bash scripts/bench/reason-ql-same-box.sh --smoke   # hermetic acceptance (embedded closed-form fixtures). Full gather: bash scripts/bench/reason-ql-same-box.sh (needs network + JRE; NPD_JDBC_PROPERTIES enables the Ontop NPD end-to-end column)"
+source      = "scripts/bench/reason-ql-same-box.sh (harness incl. the Requiem datalog->SPARQL translator + envelope); crates/sparq-reason-ql/examples/ql_npd_requiem_bench.rs (sparq leg + smoke; witness-ABox equivalence gate)"
+dataset     = "NPD benchmark (github.com/ontop/npd-benchmark: QL ontology + SPARQL queries; PostgreSQL instance for the Ontop column) + Requiem test-suite ontologies/queries (A/S/U/V/P5/UX). gather-only /tmp, NOT committed; TBox sha256 recorded per envelope"
 quiet_box_sensitive = true
-pinning     = "TBD — NPD + Requiem sha256 + Ontop pinned version at gather time"
-records_to  = "TBD — bench/competitor-results/ontop-reason-ql-<UTC>.json (git-ignored); research/gap-reason-ql-2026-07.md"
-featured    = false  # registry stub; implementing bead sq-hmd7l.9
-status      = "planning"
+pinning     = "tbox_sha256 recorded per gather envelope; ONTOP_VERSION (default 5.3.0) + JENA_VERSION (default 5.4.0) pinned in the harness; the committed smoke fixtures pin closed-form minimised-UCQ sizes + certain-answer COUNTS (not timings)"
+records_to  = "bench/competitor-results/ (git-ignored envelopes: reason-ql-<suite>-<UTC>.json); research/gap-reason-ql-2026-07.md"
+featured    = false  # opt-in experimental rewriter; non-canonical until a quiet-box gather
+status      = "harness-ready"
 
 # [SONNET-4.6] sq-hmd7l.10 — OWL DL tableau harness + HermiT/Openllet columns
 # [FABLE-5] sq-hmd7l.10 — harness implemented: sparq-side ORE example + same-box wrapper.

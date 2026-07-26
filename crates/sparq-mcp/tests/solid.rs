@@ -586,3 +586,378 @@ fn pod_initialize_negotiates_the_protocol_version() {
     );
     assert_eq!(resp["result"]["protocolVersion"], sparq_mcp::PROTOCOL_VERSION);
 }
+
+// ───────── Class N: the resources surface + notifications (draft §8/§10) ─────────
+// [SONNET-4.6] sq-cmjmr. Load-bearing invariants, each red under the matching mutation:
+// - the `resources` capability is declared WITH `subscribe: true`;
+// - `resources/list` shows exactly the documents this session may read;
+// - `resources/subscribe` is authorized and non-disclosing (probe-proof);
+// - a state change on a subscribed topic yields a CONTENT-FREE notification;
+// - authorization is re-checked at EVERY delivery, and a revoked session goes SILENT
+//   (no notification at all — least of all a "your access was revoked" one).
+
+/// The `uri`s of `resources/list` for this session.
+fn resource_uris(server: &mut SolidMcpServer) -> Vec<String> {
+    let resp = rpc(server, r#"{"jsonrpc":"2.0","id":7,"method":"resources/list"}"#);
+    resp["result"]["resources"]
+        .as_array()
+        .expect("resources array")
+        .iter()
+        .map(|r| r["uri"].as_str().expect("uri").to_string())
+        .collect()
+}
+
+/// Send one `resources/*` request with a `uri` param, returning the whole response.
+fn resources_rpc(server: &mut SolidMcpServer, method: &str, uri: &str) -> Value {
+    let req = json!({"jsonrpc": "2.0", "id": 8, "method": method, "params": {"uri": uri}});
+    rpc(server, &req.to_string())
+}
+
+/// Drain the queued notifications as parsed JSON.
+fn drain(server: &mut SolidMcpServer) -> Vec<Value> {
+    server.take_notifications().iter().map(|m| parse(m)).collect()
+}
+
+#[test]
+fn initialize_declares_the_resources_capability_with_subscribe() {
+    let mut s = server_for(ALICE, false);
+    let resp = rpc(&mut s, r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#);
+    let caps = &resp["result"]["capabilities"];
+    assert!(caps["tools"].is_object(), "the tools capability is still declared");
+    assert_eq!(caps["resources"]["subscribe"], true, "Class N requires subscribe:true");
+    // No overclaim: this server never pushes an unsolicited list-changed notification.
+    assert_eq!(caps["resources"]["listChanged"], false);
+}
+
+#[test]
+fn resources_list_exposes_only_the_documents_this_session_may_read() {
+    let mut alice = server_for(ALICE, false);
+    let uris = resource_uris(&mut alice);
+    assert!(uris.contains(&"https://pod.ex/notes/n1".to_string()));
+    assert!(uris.contains(&"https://pod.ex/notes/unlisted".to_string()));
+    assert!(
+        !uris.iter().any(|u| u.contains("secret/s1")),
+        "a document alice cannot read must be ABSENT, not an error: {uris:?}"
+    );
+    // The reserved graph space is server machinery, not pod content.
+    assert!(!uris.iter().any(|u| u.starts_with("urn:sparq:")), "{uris:?}");
+    assert!(uris.windows(2).all(|w| w[0] <= w[1]), "listing is deterministic: {uris:?}");
+
+    // The complement: bob sees the secret subtree and none of alice's documents.
+    let mut bob = server_for(BOB, false);
+    let bob_uris = resource_uris(&mut bob);
+    assert!(bob_uris.contains(&"https://pod.ex/secret/s1".to_string()));
+    assert!(!bob_uris.iter().any(|u| u.contains("notes/")), "{bob_uris:?}");
+}
+
+#[test]
+fn resources_read_serves_the_same_bytes_as_resource_get_and_non_discloses() {
+    let mut s = server_for(ALICE, false);
+    let resp = resources_rpc(&mut s, "resources/read", "https://pod.ex/notes/n1");
+    let contents = &resp["result"]["contents"][0];
+    assert_eq!(contents["uri"], "https://pod.ex/notes/n1");
+    assert_eq!(contents["mimeType"], "application/n-triples");
+    let via_resource = contents["text"].as_str().expect("text").to_string();
+    let (tool_text, _) = tool(&mut s, "resource_get", json!({"url": "https://pod.ex/notes/n1"}));
+    let via_tool: Value = serde_json::from_str(&tool_text).expect("JSON");
+    assert_eq!(
+        via_resource,
+        via_tool["content"].as_str().expect("content"),
+        "the resource and tool read surfaces cannot disagree"
+    );
+
+    // §9.3 carries over: unreadable and nonexistent are the SAME error.
+    let denied = resources_rpc(&mut s, "resources/read", "https://pod.ex/secret/s1");
+    let absent = resources_rpc(&mut s, "resources/read", "https://pod.ex/secret/nope");
+    assert_eq!(denied["error"]["code"], absent["error"]["code"]);
+    assert_eq!(
+        denied["error"]["message"].as_str().unwrap().replace("s1", "X"),
+        absent["error"]["message"].as_str().unwrap().replace("nope", "X")
+    );
+}
+
+#[test]
+fn subscribe_is_authorized_at_subscribe_time_and_cannot_probe_for_resources() {
+    let mut s = server_for(ALICE, false);
+    let ok = resources_rpc(&mut s, "resources/subscribe", "https://pod.ex/notes/n1");
+    assert!(ok["error"].is_null(), "an authorized subscribe succeeds: {ok}");
+    assert_eq!(s.subscribed_topics(), vec!["https://pod.ex/notes/n1".to_string()]);
+
+    // An EXISTING document alice may not read, and one that does not exist, must be
+    // indistinguishable — otherwise subscribe becomes an existence oracle.
+    let denied = resources_rpc(&mut s, "resources/subscribe", "https://pod.ex/secret/s1");
+    let absent = resources_rpc(&mut s, "resources/subscribe", "https://pod.ex/secret/nope");
+    assert_eq!(denied["error"]["code"], absent["error"]["code"]);
+    assert_eq!(
+        denied["error"]["message"].as_str().unwrap().replace("s1", "X"),
+        absent["error"]["message"].as_str().unwrap().replace("nope", "X")
+    );
+    assert_eq!(
+        s.subscribed_topics(),
+        vec!["https://pod.ex/notes/n1".to_string()],
+        "a refused subscribe registers nothing"
+    );
+
+    // Unsubscribe is idempotent and uniform: an unknown topic gets the same empty result.
+    let known = resources_rpc(&mut s, "resources/unsubscribe", "https://pod.ex/notes/n1");
+    let unknown = resources_rpc(&mut s, "resources/unsubscribe", "https://pod.ex/secret/s1");
+    assert_eq!(known["result"], unknown["result"]);
+    assert!(s.subscribed_topics().is_empty());
+}
+
+#[test]
+fn a_change_to_a_subscribed_topic_emits_one_content_free_notification() {
+    let mut s = server_for(ALICE, true);
+    resources_rpc(&mut s, "resources/subscribe", "https://pod.ex/notes/n1");
+    assert!(drain(&mut s).is_empty(), "subscribing alone emits nothing");
+
+    let (_, is_err) = tool(
+        &mut s,
+        "resource_put",
+        json!({
+            "url": "https://pod.ex/notes/n1",
+            "content": "<https://pod.ex/notes/n1#it> <https://ex.dev/ns#title> \"rewritten\" .",
+            "content_type": "application/n-triples"
+        }),
+    );
+    assert!(!is_err, "alice may write notes/n1");
+
+    let notes = drain(&mut s);
+    assert_eq!(notes.len(), 1, "one change, one notification: {notes:?}");
+    assert_eq!(notes[0]["jsonrpc"], "2.0");
+    assert_eq!(notes[0]["method"], "notifications/resources/updated");
+    assert!(notes[0]["id"].is_null(), "a notification carries no id");
+    assert_eq!(notes[0]["params"]["uri"], "https://pod.ex/notes/n1");
+    assert_eq!(notes[0]["params"]["activity"], "Update");
+    // CONTENT-FREE (draft §10): topic + activity type, and nothing else. A leak of the
+    // changed triples would flip this red.
+    let params = notes[0]["params"].as_object().expect("params");
+    assert_eq!(params.len(), 2, "payload must stay content-free: {params:?}");
+    assert!(!notes[0].to_string().contains("rewritten"));
+
+    assert!(drain(&mut s).is_empty(), "draining is destructive");
+
+    // An UNSUBSCRIBED topic never produces a notification, however loud the change.
+    resources_rpc(&mut s, "resources/unsubscribe", "https://pod.ex/notes/n1");
+    tool(
+        &mut s,
+        "resource_put",
+        json!({
+            "url": "https://pod.ex/notes/n1",
+            "content": "<https://pod.ex/notes/n1#it> <https://ex.dev/ns#title> \"again\" .",
+            "content_type": "application/n-triples"
+        }),
+    );
+    assert!(drain(&mut s).is_empty(), "no subscription, no notification");
+}
+
+#[test]
+fn membership_and_lifecycle_changes_carry_their_activitystreams_verb() {
+    let mut s = server_for(ALICE, true);
+    for topic in ["https://pod.ex/notes/", "https://pod.ex/notes/n1"] {
+        let resp = resources_rpc(&mut s, "resources/subscribe", topic);
+        assert!(resp["error"].is_null(), "{resp}");
+    }
+
+    // Creating a member grows the container's stored ldp:contains ⇒ Add on the container.
+    tool(
+        &mut s,
+        "resource_put",
+        json!({
+            "url": "https://pod.ex/notes/n2",
+            "content": "<https://pod.ex/notes/n2#it> <https://ex.dev/ns#title> \"two\" .",
+            "content_type": "application/n-triples"
+        }),
+    );
+    let notes = drain(&mut s);
+    assert_eq!(notes.len(), 1, "only subscribed topics notify: {notes:?}");
+    assert_eq!(notes[0]["params"]["uri"], "https://pod.ex/notes/");
+    assert_eq!(notes[0]["params"]["activity"], "Add");
+
+    // Deleting a subscribed document ⇒ Delete on it, Remove on its container.
+    let (_, is_err) = tool(&mut s, "resource_delete", json!({"url": "https://pod.ex/notes/n1"}));
+    assert!(!is_err);
+    let mut verbs: Vec<(String, String)> = drain(&mut s)
+        .iter()
+        .map(|n| {
+            (
+                n["params"]["uri"].as_str().unwrap().to_string(),
+                n["params"]["activity"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    verbs.sort();
+    assert_eq!(
+        verbs,
+        vec![
+            ("https://pod.ex/notes/".to_string(), "Remove".to_string()),
+            ("https://pod.ex/notes/n1".to_string(), "Delete".to_string()),
+        ]
+    );
+
+    // Re-creating it ⇒ Create (the subscription survived the delete).
+    tool(
+        &mut s,
+        "resource_put",
+        json!({
+            "url": "https://pod.ex/notes/n1",
+            "content": "<https://pod.ex/notes/n1#it> <https://ex.dev/ns#title> \"back\" .",
+            "content_type": "application/n-triples"
+        }),
+    );
+    let verbs: Vec<String> = drain(&mut s)
+        .iter()
+        .map(|n| format!("{} {}", n["params"]["uri"], n["params"]["activity"]))
+        .collect();
+    assert!(
+        verbs.contains(&"\"https://pod.ex/notes/n1\" \"Create\"".to_string()),
+        "{verbs:?}"
+    );
+}
+
+#[test]
+fn a_failed_mutation_emits_nothing() {
+    let mut s = server_for(ALICE, true);
+    resources_rpc(&mut s, "resources/subscribe", "https://pod.ex/notes/n1");
+    let (_, is_err) = tool(
+        &mut s,
+        "resource_put",
+        json!({
+            "url": "https://pod.ex/notes/n1",
+            "content": "this is not RDF at all",
+            "content_type": "text/turtle"
+        }),
+    );
+    assert!(is_err, "a malformed body is rejected");
+    assert!(drain(&mut s).is_empty(), "nothing changed ⇒ nothing is signalled");
+}
+
+#[test]
+fn delivery_re_checks_read_access_and_a_revoked_session_goes_silent() {
+    // §10: authorization is checked at subscribe time AND again at every delivery. When
+    // alice's own read access to the topic is revoked mid-session, deliveries stop —
+    // with NO revocation notification, which would itself disclose the change.
+    let mut s = server_for(ALICE, true);
+    let resp = resources_rpc(&mut s, "resources/subscribe", "https://pod.ex/notes/");
+    assert!(resp["error"].is_null(), "{resp}");
+
+    // Positive control: while readable, a change to the topic IS delivered.
+    let (_, is_err) = tool(
+        &mut s,
+        "update",
+        json!({"sparql": "INSERT DATA { GRAPH <https://pod.ex/notes/> \
+                          { <https://pod.ex/notes/#c> <https://ex.dev/ns#note> \"one\" } }"}),
+    );
+    assert!(!is_err, "alice may write the notes container");
+    let notes = drain(&mut s);
+    assert_eq!(notes.len(), 1, "the control delivery must happen: {notes:?}");
+    assert_eq!(notes[0]["params"]["activity"], "Update");
+
+    // Revoke alice's READ on notes/ while keeping Write (so she can still change it).
+    let acl = r#"
+<https://pod.ex/notes/.acl#w> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> .
+<https://pod.ex/notes/.acl#w> <http://www.w3.org/ns/auth/acl#accessTo> <https://pod.ex/notes/> .
+<https://pod.ex/notes/.acl#w> <http://www.w3.org/ns/auth/acl#default> <https://pod.ex/notes/> .
+<https://pod.ex/notes/.acl#w> <http://www.w3.org/ns/auth/acl#agent> <https://alice.ex/card#me> .
+<https://pod.ex/notes/.acl#w> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Write> .
+"#;
+    let (text, is_err) = tool(
+        &mut s,
+        "resource_put",
+        json!({
+            "url": "https://pod.ex/notes/.acl",
+            "content": acl,
+            "content_type": "application/n-triples"
+        }),
+    );
+    assert!(!is_err, "alice holds Control on the root by default: {text}");
+    let (probe, denied) = tool(&mut s, "resource_get", json!({"url": "https://pod.ex/notes/"}));
+    assert!(denied, "read access really is gone now: {probe}");
+    assert!(drain(&mut s).is_empty(), "the ACL swap itself changed no subscribed topic");
+
+    // The topic changes again — and this time the session hears NOTHING.
+    let (_, is_err) = tool(
+        &mut s,
+        "update",
+        json!({"sparql": "INSERT DATA { GRAPH <https://pod.ex/notes/> \
+                          { <https://pod.ex/notes/#c> <https://ex.dev/ns#note> \"two\" } }"}),
+    );
+    assert!(!is_err, "write access survived the revocation");
+    assert!(
+        drain(&mut s).is_empty(),
+        "a session that may no longer read the topic gets NOTHING — not even a \
+         revocation notice, which would itself disclose the change"
+    );
+    assert_eq!(
+        s.subscribed_topics(),
+        vec!["https://pod.ex/notes/".to_string()],
+        "the subscription survives revocation; it is silenced, not torn down"
+    );
+}
+
+#[test]
+fn a_delete_cannot_bypass_a_resource_specific_read_revocation() {
+    // §10 again, on the ONE transition whose delivery check cannot use the topic's own
+    // policy: a `Delete` is authorized at the nearest surviving ancestor, because the
+    // deleted resource has no policy left. That fallback must not RE-GRANT read that a
+    // resource-specific ACL had taken away — otherwise deleting the child announces its
+    // deletion to a session that could no longer read it.
+    let mut s = server_for(ALICE, true);
+    let resp = resources_rpc(&mut s, "resources/subscribe", "https://pod.ex/notes/n1");
+    assert!(resp["error"].is_null(), "{resp}");
+
+    // A CHILD-specific ACL revokes alice's Read on notes/n1 and keeps Write. The PARENT
+    // container keeps its inherited Read — that asymmetry is what the anchor fallback
+    // would otherwise launder into a delivery.
+    let acl = r#"
+<https://pod.ex/notes/n1.acl#w> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> .
+<https://pod.ex/notes/n1.acl#w> <http://www.w3.org/ns/auth/acl#accessTo> <https://pod.ex/notes/n1> .
+<https://pod.ex/notes/n1.acl#w> <http://www.w3.org/ns/auth/acl#agent> <https://alice.ex/card#me> .
+<https://pod.ex/notes/n1.acl#w> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Write> .
+"#;
+    let (text, is_err) = tool(
+        &mut s,
+        "resource_put",
+        json!({
+            "url": "https://pod.ex/notes/n1.acl",
+            "content": acl,
+            "content_type": "application/n-triples"
+        }),
+    );
+    assert!(!is_err, "alice holds Control on notes/n1 by default: {text}");
+    let (probe, denied) = tool(&mut s, "resource_get", json!({"url": "https://pod.ex/notes/n1"}));
+    assert!(denied, "read on the CHILD really is revoked: {probe}");
+    let (parent, parent_err) =
+        tool(&mut s, "resource_get", json!({"url": "https://pod.ex/notes/"}));
+    assert!(!parent_err, "the PARENT stays readable — the anchor is not fail-closed: {parent}");
+    assert!(drain(&mut s).is_empty(), "the ACL swap itself changed no subscribed topic");
+
+    // Delete the child through the SPARQL path, which needs Write only — so the deletion
+    // is reachable by a session that may no longer READ what it deletes.
+    let (text, is_err) =
+        tool(&mut s, "update", json!({"sparql": "DROP GRAPH <https://pod.ex/notes/n1>"}));
+    assert!(!is_err, "write access survived the revocation: {text}");
+    let denied_read = tool(&mut s, "resource_get", json!({"url": "https://pod.ex/notes/n1"})).1;
+    assert!(denied_read, "the topic really is gone");
+    assert!(
+        drain(&mut s).is_empty(),
+        "the deletion of a resource this session may no longer read must NOT be \
+         announced via its parent container's read grant"
+    );
+    assert_eq!(
+        s.subscribed_topics(),
+        vec!["https://pod.ex/notes/n1".to_string()],
+        "the subscription survives; it is silenced, not torn down"
+    );
+}
+
+#[test]
+fn resources_requests_reject_a_missing_uri_parameter() {
+    let mut s = server_for(ALICE, false);
+    for method in ["resources/read", "resources/subscribe", "resources/unsubscribe"] {
+        let req = json!({"jsonrpc": "2.0", "id": 3, "method": method, "params": {}});
+        let resp = rpc(&mut s, &req.to_string());
+        assert_eq!(resp["error"]["code"], -32602, "{method} must be invalid-params");
+        assert!(resp["error"]["message"].as_str().unwrap().contains(method));
+    }
+}

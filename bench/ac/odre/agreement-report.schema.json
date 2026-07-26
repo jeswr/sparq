@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sparq.dev/schema/acbench/odre/agreement-report/1",
+  "title": "ODRE decision-agreement report (bead sq-i6du2.8)",
+  "description": "The ledger produced by bench/ac/odre/run.sh. A report is COMPLETE when every corpus case appears exactly once with a verdict, every disagreement carries a divergence classification drawn from the ledger, and every agreement figure is either computed from run output or null. agreement.py validates a produced report against this schema before the gate runs, so an incomplete report fails the lane rather than being published.",
+  "type": "object",
+  "required": [
+    "schema",
+    "lane",
+    "bead",
+    "status",
+    "systems",
+    "corpus",
+    "headline_encoding",
+    "harness_interventions",
+    "coverage",
+    "encodings",
+    "non_vacuity",
+    "ledger_matches",
+    "cases",
+    "divergences",
+    "unclassified",
+    "claims"
+  ],
+  "properties": {
+    "schema": { "const": "sparq.acbench.odre.agreement/1" },
+    "lane": { "type": "string" },
+    "bead": { "type": "string" },
+    "status": {
+      "description": "complete = ODRE ran and every case has a real verdict. skipped-no-odre = the pinned ODRE implementation was not importable; the report is still complete in shape, every case is SKIPPED, and no agreement figure is stated.",
+      "enum": ["complete", "skipped-no-odre"]
+    },
+    "systems": {
+      "type": "object",
+      "required": ["sparq", "odre"],
+      "properties": {
+        "sparq": {
+          "type": "object",
+          "required": ["path", "role"],
+          "properties": {
+            "path": { "type": "string" },
+            "role": { "type": "string" }
+          }
+        },
+        "odre": {
+          "type": "object",
+          "required": ["package", "version", "status", "paper"],
+          "properties": {
+            "package": { "type": "string" },
+            "version": { "type": ["string", "null"] },
+            "status": { "enum": ["present", "absent"] },
+            "paper": { "type": "string" },
+            "reason": { "type": ["string", "null"] }
+          }
+        }
+      }
+    },
+    "corpus": {
+      "type": "object",
+      "required": ["generator", "use_cases", "case_count", "eval_instant", "params"],
+      "properties": {
+        "generator": { "type": "string" },
+        "use_cases": { "type": "array", "items": { "type": "string" } },
+        "case_count": { "type": "integer" },
+        "eval_instant": { "type": "string" },
+        "params": { "type": "object" }
+      }
+    },
+    "headline_encoding": { "enum": ["standard", "odre-native", "projected"] },
+    "harness_interventions": {
+      "description": "Every deviation from feeding both systems identical bytes, with the reason it was necessary. An empty list would itself be a claim.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "what", "why", "applies_to"],
+        "properties": {
+          "id": { "type": "string" },
+          "what": { "type": "string" },
+          "why": { "type": "string" },
+          "applies_to": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "coverage": {
+      "description": "Per ODRL construct: how many corpus cases use it, what ODRE DECLARES about it, and what this run OBSERVED. Declared and observed are separate columns on purpose.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["construct", "cases", "odre_declared", "observed"],
+        "properties": {
+          "construct": { "type": "string" },
+          "cases": { "type": "integer" },
+          "odre_declared": { "type": "string" },
+          "observed": { "type": "object" }
+        }
+      }
+    },
+    "encodings": {
+      "description": "Per-encoding tallies. agreement_rate is null unless it was computed from a real ODRE run over a non-empty comparable set.",
+      "type": "object"
+    },
+    "non_vacuity": {
+      "description": "Per encoding, over the COMPARED cases only: how many policies ODRE was given with at least one rule / at least one constraint, and how its decisions split allow-vs-deny. An agreement rate whose comparable set never gave ODRE a constraint to evaluate, or never drew a deny out of it, is weak evidence and this block is what makes that visible.",
+      "type": "object"
+    },
+    "ledger_matches": {
+      "description": "Per known-divergences.json entry: its class, the evidence it DECLARES, and how many divergences in this run matched it. An entry declared `source-read` with zero matches remains an unconfirmed prediction.",
+      "type": "object"
+    },
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "use_case", "constructs", "sparq_decision", "verdicts"],
+        "properties": {
+          "id": { "type": "string" },
+          "use_case": { "type": "string" },
+          "constructs": { "type": "array", "items": { "type": "string" } },
+          "sparq_decision": { "enum": ["allow", "deny"] },
+          "sparq_deny_reason_kinds": { "type": "array", "items": { "type": "string" } },
+          "verdicts": {
+            "description": "One entry per encoding. verdict is the comparison outcome; divergence is present iff verdict == disagree or odre-error.",
+            "type": "object"
+          }
+        }
+      }
+    },
+    "divergences": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["case", "encoding", "class", "ledger_id", "evidence"],
+        "properties": {
+          "case": { "type": "string" },
+          "encoding": { "type": "string" },
+          "class": { "enum": ["mapping-gap", "semantics-gap", "implementation-bug"] },
+          "ledger_id": { "type": "string" },
+          "evidence": { "enum": ["source-read", "observed"] },
+          "sparq_decision": { "type": "string" },
+          "odre_decision": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "unclassified": {
+      "description": "Divergences no ledger entry explains. A non-empty list FAILS the run (exit 3) — this is the invariant the bead names.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["case", "encoding", "why"],
+        "properties": {
+          "case": { "type": "string" },
+          "encoding": { "type": "string" },
+          "why": { "type": "string" },
+          "sparq_decision": { "type": "string" },
+          "odre_decision": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "claims": {
+      "description": "The exact claims this report supports, stated in prose so no reader has to infer them from the numbers.",
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}

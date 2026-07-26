@@ -204,10 +204,10 @@ pub fn malicious_greater_than(backend: &ShamirBackend, a: Fp, b: Fp) -> Result<b
     // chain folded its MAC into `verdict`; the verdict's MAC is α·verdict iff no gate
     // was tampered. The batched check opens a leakage-free σ and aborts on σ != 0,
     // BEFORE the verdict is acted on (the coZK-2025/1026 confidentiality discipline).
-    session.mac_check(std::slice::from_ref(&verdict))?;
-
-    // Open ONLY the (MAC-verified) verdict bit.
-    open_auth_verdict(backend, &verdict)
+    // `mac_check_and_open` hands back the verdict it just authenticated, so the bit we
+    // act on is the very bit the check covered — and it is opened exactly once.
+    let opened = session.mac_check_and_open(std::slice::from_ref(&verdict))?;
+    verdict_bit(opened[0])
 }
 
 /// **Malicious-secure secure greater-than against a PUBLIC threshold** — the £100k
@@ -232,8 +232,8 @@ pub fn malicious_threshold(
 
     let a_bits = share_auth_bits(&mut session, secret);
     let verdict = auth_greater_than_public_bits(&mut session, &a_bits, threshold.value(), &key)?;
-    session.mac_check(std::slice::from_ref(&verdict))?;
-    open_auth_verdict(backend, &verdict)
+    let opened = session.mac_check_and_open(std::slice::from_ref(&verdict))?;
+    verdict_bit(opened[0])
 }
 
 /// MSB-first comparison of authenticated secret bits `a_bits` against a PUBLIC value
@@ -281,7 +281,15 @@ pub fn open_auth_verdict(
     backend: &ShamirBackend,
     verdict: &AuthenticatedShare,
 ) -> Result<bool, MpcError> {
-    let bit = backend.reconstruct(verdict.value_shares())?;
+    verdict_bit(backend.reconstruct(verdict.value_shares())?)
+}
+
+/// Coerce an ALREADY-OPENED verdict field element to a boolean, refusing anything that
+/// is not `0` or `1` rather than silently rounding it. Split out of
+/// [`open_auth_verdict`] so the MAC-checked paths can reuse it on the value handed back
+/// by [`MacSession::mac_check_and_open`] — they must not re-open the sharing, or the
+/// bit they act on would be bound to the checked bit only by convention. `[OPUS-4.8]`
+fn verdict_bit(bit: Fp) -> Result<bool, MpcError> {
     if bit == Fp::zero() {
         Ok(false)
     } else if bit == Fp::one() {
@@ -652,6 +660,72 @@ mod tests {
                 session.mac_check(std::slice::from_ref(&z)).is_ok(),
                 "UNSOUND [z]·[α] MAC carry is FOOLED by the in-reduce tamper (σ = 0) — \
                  this divergence from the sound route is what the test must exhibit"
+            );
+        }
+    }
+
+    /// [SONNET-4.6] **The COORDINATED Hole-2 deviation — a deviating party re-shares
+    /// wrongly in BOTH degree-reduces of the same `auth_mul`, and is still caught.**
+    ///
+    /// [`mac_carry_soundness_distinguished_by_in_reduce_tamper`] deviates only in the
+    /// VALUE reduce, so by itself it does not exercise the other two cases the design's
+    /// adversary model admits (§2.4: up to `t` corruptions, deviating in both rounds,
+    /// choosing the deviations jointly). This test walks all three:
+    ///
+    /// - `(δ_v ≠ 0, δ_m = 0)` — value reduce only → `σ = −α·δ_v ≠ 0`;
+    /// - `(δ_v = 0, δ_m ≠ 0)` — MAC reduce only → `σ = δ_m ≠ 0`;
+    /// - `(δ_v ≠ 0, δ_m ≠ 0)` — BOTH, coordinated → `σ = δ_m − α·δ_v`, which the
+    ///   adversary can only zero by picking `δ_m = α·δ_v`, i.e. by guessing the secret
+    ///   `α` its `≤ t` shares are independent of (probability `1/p ≈ 2^-61`).
+    ///
+    /// Every case must `MacCheckFailed`-abort. This is what makes the design record's
+    /// "MAC-covered in both rounds, including under coordinated deviation" claim
+    /// non-vacuous rather than an assertion about the single-round case only.
+    #[test]
+    fn coordinated_tamper_in_both_reduces_is_caught() {
+        // n = 5, t = 2 → the minimal honest-majority count, where the degree-2t product
+        // has ZERO RS redundancy and the MAC is the sole detector.
+        let backend = ShamirBackend::new_seeded(5, 0xC0_0D).unwrap();
+        assert_eq!(backend.parties(), 2 * backend.threshold() + 1);
+
+        let x_val = Fp::new(6);
+        let y_val = Fp::new(7);
+        let reshare_party = 0usize;
+
+        // (δ_v, δ_m): value-only, MAC-only, and both-coordinated.
+        for (value_delta, mac_delta) in [
+            (Fp::new(123), Fp::zero()),
+            (Fp::zero(), Fp::new(456)),
+            (Fp::new(123), Fp::new(456)),
+        ] {
+            let mut dealer = backend.dealer();
+            let mut session = dealer.new_mac_session();
+            let x = session.authenticated_share(x_val);
+            let y = session.authenticated_share(y_val);
+            let z = session
+                .auth_mul_with_both_reduces_tampered_for_test(
+                    &x,
+                    &y,
+                    reshare_party,
+                    value_delta,
+                    mac_delta,
+                )
+                .unwrap();
+
+            // Both sharings stay internally CONSISTENT degree-t codewords — the robust
+            // open succeeds and RS flags nothing. The catch is the MAC, not redundancy.
+            backend
+                .reconstruct(z.value_shares())
+                .expect("an in-reduce deviation leaves a consistent degree-t sharing");
+
+            assert!(
+                matches!(
+                    session.mac_check(std::slice::from_ref(&z)),
+                    Err(MpcError::MacCheckFailed { .. })
+                ),
+                "coordinated in-reduce deviation (delta_v = {:?}, delta_m = {:?}) must abort",
+                value_delta,
+                mac_delta
             );
         }
     }
