@@ -78,15 +78,15 @@ let n: Option<Num> = as_numeric(&lit);  // exact xsd:decimal (no f64 rounding)
   the spec leaves cross-kind order undefined), value order only WITHIN a kind — numerics by
   exact rational value (`NaN` totalised FIRST, before `-INF`; an f64 tie rechecked exactly via
   `exact_cmp`, incl. the MIXED int/decimal-vs-float/double tie — `Num::cmp_total` under
-  `numeric`), dateTimes by timeline, else lexically — and the recursive component-wise
+  `numeric`), dateTimes by timeline, else lexically — plus the recursive component-wise
   triple-term order. Generic over a tiny `CompareTerm` trait (`term_class`/`literal_kind`/
   `value_str`/`as_f64`/`exact_cmp`/`strict_cmp`/`triple_parts`) the consumer implements for its
   term type — a **monomorphisation seam**, never a `dyn` object. Pure-`std`. The order laws
   (reflexivity, within-class totality, antisymmetry-consistency, transitivity — per kind AND
   across mixed kinds, all NaN INCLUDED incl. the 2^53 collapse) are machine-checked by Kani
   over a model impl — `cargo kani -p sparq-substrate --features compare` (sq-sqtk2.4 + sq-wjl8i).
-  Boundaries: the proofs cover the shared ALGORITHM over the bounded model, not the engine's
-  `Value` impl; the indeterminate mixed-timezone dateTime window falls back lexically.
+  Boundaries: they cover the shared ALGORITHM over the bounded model, not the engine's `Value`
+  impl, and assume `strict_cmp`'s sq-2k5py TOTALITY contract within the dateTime/date kinds.
 - **`overhead`** — the **zero-overhead DELTA harness** (the substrate half of the
   sparq-engine-systems paper §8): `overhead::OverheadReport::run` measures each shared kernel
   against a hand-SPECIALISED pre-extraction equivalent (SAME algorithm + data structure,

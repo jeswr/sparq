@@ -7,7 +7,12 @@
 //! Non-vacuous by construction: the fixture packs the pairs each comparator arm alone
 //! decides — numeric-vs-lexical divergences (`9` < `10` by value, `"10"` < `"9"`
 //! lexically), a cross-timezone `xsd:dateTime` pair whose TIMELINE order is the reverse
-//! of its lexical order (pins `strict_cmp`), a beyond-2^53 integer pair sharing one f64
+//! of its lexical order (pins `strict_cmp`) PLUS the sq-2k5py witness shape — two zoned
+//! dateTimes at the SAME instant in opposite offsets (`ex:t1`/`ex:t3`, timeline-Equal) and
+//! a tz-less one (`ex:t4`) that is lexically BETWEEN them and XPath-INDETERMINATE against
+//! both, so the two sides can only agree if BOTH extend the timeline order to a total one
+//! (`Timeline::cmp_tl_total`) instead of falling back lexically —
+//! a beyond-2^53 integer pair sharing one f64
 //! PLUS the double carrying their collapse image (pins the sq-wjl8i exact mixed-tier
 //! tie on BOTH engine paths: the numeric sort-cell recheck and `compare_values`), a
 //! decimal/double exact-equal pair, `NaN` / `INF` / `-INF` (pins the NaN-first
@@ -75,6 +80,8 @@ ex:bob ex:ok "true"^^xsd:boolean .
 ex:bob ex:no "false"^^xsd:boolean .
 ex:bob ex:t1 "2024-03-15T14:00:00+01:00"^^xsd:dateTime .
 ex:bob ex:t2 "2024-03-15T13:30:00Z"^^xsd:dateTime .
+ex:bob ex:t3 "2024-03-15T12:00:00-01:00"^^xsd:dateTime .
+ex:bob ex:t4 "2024-03-15T13:00:00"^^xsd:dateTime .
 ex:bob ex:d "2024-03-14"^^xsd:date .
 ex:bob ex:y "2020"^^xsd:gYear .
 ex:bob ex:y2 "2021"^^xsd:gYear .
