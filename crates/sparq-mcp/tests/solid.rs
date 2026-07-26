@@ -896,6 +896,62 @@ fn delivery_re_checks_read_access_and_a_revoked_session_goes_silent() {
 }
 
 #[test]
+fn a_delete_cannot_bypass_a_resource_specific_read_revocation() {
+    // §10 again, on the ONE transition whose delivery check cannot use the topic's own
+    // policy: a `Delete` is authorized at the nearest surviving ancestor, because the
+    // deleted resource has no policy left. That fallback must not RE-GRANT read that a
+    // resource-specific ACL had taken away — otherwise deleting the child announces its
+    // deletion to a session that could no longer read it.
+    let mut s = server_for(ALICE, true);
+    let resp = resources_rpc(&mut s, "resources/subscribe", "https://pod.ex/notes/n1");
+    assert!(resp["error"].is_null(), "{resp}");
+
+    // A CHILD-specific ACL revokes alice's Read on notes/n1 and keeps Write. The PARENT
+    // container keeps its inherited Read — that asymmetry is what the anchor fallback
+    // would otherwise launder into a delivery.
+    let acl = r#"
+<https://pod.ex/notes/n1.acl#w> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> .
+<https://pod.ex/notes/n1.acl#w> <http://www.w3.org/ns/auth/acl#accessTo> <https://pod.ex/notes/n1> .
+<https://pod.ex/notes/n1.acl#w> <http://www.w3.org/ns/auth/acl#agent> <https://alice.ex/card#me> .
+<https://pod.ex/notes/n1.acl#w> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Write> .
+"#;
+    let (text, is_err) = tool(
+        &mut s,
+        "resource_put",
+        json!({
+            "url": "https://pod.ex/notes/n1.acl",
+            "content": acl,
+            "content_type": "application/n-triples"
+        }),
+    );
+    assert!(!is_err, "alice holds Control on notes/n1 by default: {text}");
+    let (probe, denied) = tool(&mut s, "resource_get", json!({"url": "https://pod.ex/notes/n1"}));
+    assert!(denied, "read on the CHILD really is revoked: {probe}");
+    let (parent, parent_err) =
+        tool(&mut s, "resource_get", json!({"url": "https://pod.ex/notes/"}));
+    assert!(!parent_err, "the PARENT stays readable — the anchor is not fail-closed: {parent}");
+    assert!(drain(&mut s).is_empty(), "the ACL swap itself changed no subscribed topic");
+
+    // Delete the child through the SPARQL path, which needs Write only — so the deletion
+    // is reachable by a session that may no longer READ what it deletes.
+    let (text, is_err) =
+        tool(&mut s, "update", json!({"sparql": "DROP GRAPH <https://pod.ex/notes/n1>"}));
+    assert!(!is_err, "write access survived the revocation: {text}");
+    let denied_read = tool(&mut s, "resource_get", json!({"url": "https://pod.ex/notes/n1"})).1;
+    assert!(denied_read, "the topic really is gone");
+    assert!(
+        drain(&mut s).is_empty(),
+        "the deletion of a resource this session may no longer read must NOT be \
+         announced via its parent container's read grant"
+    );
+    assert_eq!(
+        s.subscribed_topics(),
+        vec!["https://pod.ex/notes/n1".to_string()],
+        "the subscription survives; it is silenced, not torn down"
+    );
+}
+
+#[test]
 fn resources_requests_reject_a_missing_uri_parameter() {
     let mut s = server_for(ALICE, false);
     for method in ["resources/read", "resources/subscribe", "resources/unsubscribe"] {

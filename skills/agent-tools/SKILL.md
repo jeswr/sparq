@@ -113,7 +113,10 @@ deliveries stop **silently** — no notification at all, least of all a "your ac
 revoked" one, which would itself disclose that a resource it may no longer read had
 changed. The subscription survives, so restoring access resumes deliveries. The
 delivery check runs at the target's authorization anchor, so a `Delete` (whose resource
-no longer has a policy of its own) is authorized by the container that governs its IRI.
+no longer has a policy of its own) is authorized by the container that governs its IRI —
+and additionally requires that the topic itself was readable immediately BEFORE the
+deletion, so the ancestor fallback cannot re-grant read that a resource-specific ACL had
+revoked.
 
 Emission is **pull-based**, matching the transport-agnostic dispatch core: a mutating
 tool call queues what it changed and the embedder drains it with

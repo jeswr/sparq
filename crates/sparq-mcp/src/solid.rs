@@ -87,7 +87,7 @@
 //! - Time-windowed conditional grants fail closed unless [`SolidServerConfig::now`]
 //!   supplies a request clock.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use oxrdf::{NamedNode, Term};
@@ -100,7 +100,7 @@ use crate::jsonrpc::{
     Request, Response, RpcError, INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND,
     RESOURCE_NOT_FOUND,
 };
-use crate::notifications::{classify, Subscriptions, TopicDigest};
+use crate::notifications::{classify, ActivityType, Subscriptions, TopicDigest};
 use crate::server::{arg_str, serialize, tool_text_result};
 use crate::tools::ToolSpec;
 
@@ -596,8 +596,15 @@ impl SolidMcpServer {
         // [SONNET-4.6] sq-cmjmr: snapshot every subscribed topic BEFORE a mutating tool
         // runs, so the change it causes is detected uniformly — including the SPARQL
         // `update` tool, which does not report which documents it touched. Costs nothing
-        // when nothing is subscribed.
-        let before = if mutating { self.digest_subscribed() } else { BTreeMap::new() };
+        // when nothing is subscribed. The read-authorization snapshot is taken at the same
+        // instant: a topic the mutation DELETES no longer has a policy afterwards, so its
+        // pre-mutation readability is the only honest record of whether this session was
+        // still allowed to learn about it (see `queue_topic_changes`).
+        let (before, readable_before) = if mutating {
+            (self.digest_subscribed(), self.readable_subscribed())
+        } else {
+            (BTreeMap::new(), BTreeSet::new())
+        };
 
         let result = match name {
             "query" => self.tool_query(&args),
@@ -615,7 +622,7 @@ impl SolidMcpServer {
         if mutating {
             // A tool that failed (or that rolled back) leaves every digest equal, so this
             // emits nothing — no bespoke per-tool success plumbing needed.
-            self.queue_topic_changes(&before);
+            self.queue_topic_changes(&before, &readable_before);
         }
 
         match result {
@@ -750,6 +757,23 @@ impl SolidMcpServer {
         digests
     }
 
+    /// The subscribed topics this session may read RIGHT NOW, checked against each topic
+    /// ITSELF (never an ancestor). Snapshotted alongside [`Self::digest_subscribed`] so a
+    /// `Delete` delivery can be held to the topic's own pre-deletion policy — the policy
+    /// that vanishes with the resource. [SONNET-4.6] sq-cmjmr
+    fn readable_subscribed(&self) -> BTreeSet<String> {
+        let mut readable = BTreeSet::new();
+        if self.subs.is_empty() {
+            return readable;
+        }
+        for topic in self.subs.topics() {
+            if self.allowed(&topic, Mode::Read) {
+                readable.insert(topic);
+            }
+        }
+        readable
+    }
+
     /// Compare the current topic digests against `before` and queue one notification per
     /// changed topic — after RE-CHECKING read access against the post-mutation
     /// authorization view.
@@ -766,7 +790,20 @@ impl SolidMcpServer {
     /// check against it would fail closed and make deletion permanently unnotifiable.
     /// The anchor — the nearest existing ancestor container, the same rule that
     /// authorizes creating and deleting that IRI — is the policy that governs it.
-    fn queue_topic_changes(&mut self, before: &BTreeMap<String, TopicDigest>) {
+    ///
+    /// The ancestor fallback must not RE-GRANT what a resource-specific policy took away.
+    /// A session whose read access to the topic itself had been revoked (by an ACL on the
+    /// topic) can typically still read the parent container, so anchoring a `Delete` at
+    /// the parent alone would deliver — disclosing the deletion of a resource the session
+    /// was no longer allowed to read. So a `Delete` needs BOTH: the topic was readable
+    /// immediately BEFORE the mutation (`readable_before`, from
+    /// [`Self::readable_subscribed`] — the topic's own vanished policy), AND the surviving
+    /// governing policy at the anchor still permits disclosure.
+    fn queue_topic_changes(
+        &mut self,
+        before: &BTreeMap<String, TopicDigest>,
+        readable_before: &BTreeSet<String>,
+    ) {
         if self.subs.is_empty() {
             return;
         }
@@ -775,6 +812,11 @@ impl SolidMcpServer {
             let Some(activity) = classify(before.get(&topic), after.get(&topic)) else {
                 continue;
             };
+            // A deleted topic's OWN pre-deletion policy still has to have allowed the
+            // read: the anchor stands in for a missing policy, never for a revoked one.
+            if activity == ActivityType::Delete && !readable_before.contains(&topic) {
+                continue;
+            }
             // DELIVERY-TIME authorization — the second of the two checks (draft §10).
             if !self.allowed(&self.auth_anchor(&topic), Mode::Read) {
                 continue;
