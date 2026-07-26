@@ -24,9 +24,14 @@
 # Derived when NO sub-constraint is in andSubUnsat (all must be in atomicSat from A).
 # Requires at least one sub-constraint (the odrl:and ?c pattern guards this).
 # NAF is over stratum B's andSubUnsat, which is complete before this stratum.
+# [OPUS-5] Also negates stratum A0's `odrlx:shape odrlx:Ambiguous`: a node carrying a
+# SECOND combinator (`odrl:or`/`odrl:xone` alongside this `odrl:and`) has no single
+# reading, and stratum A's or-rule would satisfy it from one member alone — neither
+# rule fires for a mixed node (fail-closed).
 { ?lc odrl:and ?c .
   ?req a odrl:Request .
-  ?S log:notIncludes { ?lc odrlx:andSubUnsat ?req } . }
+  ?S log:notIncludes { ?lc odrlx:andSubUnsat ?req } .
+  ?S0 log:notIncludes { ?lc odrlx:shape odrlx:Ambiguous } . }
 => { ?lc odrlx:lcSat ?req } .
 
 # ── constrained prohibition, ONLY atomic constraints (all satisfied) ─────────
