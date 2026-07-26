@@ -475,8 +475,10 @@ consequences the design must honour — and one architectural gap the prior draf
   revocation guard**, not same-stratum negation over derived facts (`sq-tu4e`).
 - **Seeding-caveat citation, corrected.** The "two-unbound-atom seeding blow-up" war story
   belongs to the **incremental counting path** (`sparq-reason` incremental seeding), **not**
-  the full evaluator. **solid uses the full `reason_n3`**, which supports `math:greaterThan`
-  (n3 module). So the real, *unanalysed* termination risk for the path that actually runs is
+  the full evaluator. **solid uses the full evaluator through both `reason_n3` and
+  `reason_n3_stratified`**; the latter already drives its three-stratum ACP materialisation,
+  and the N3 module supports `math:greaterThan`. So the real, *unanalysed* termination risk
+  for the paths that actually run is
   **recursive / unbound-join admission rules over external-graph extents in the full
   evaluator** — P8 must bound *that* path, not the incremental one (`sq-tu4e`).
 - Revocation/expiry is *non-monotone* (a previously-admitted fact is withdrawn). Because the
@@ -526,11 +528,17 @@ stratum inherits ACP's normative **deny-overrides** for the *access* decision, b
 
 **Expressibility boundary (resolved).** Conservative **deny when a disagreement exists is
 expressible today without NAF or an engine extension**: a positive rule joins two admitted,
-issuer-tagged facts for the same subject and predicate, checks distinct values (and, where the
-policy requires it, distinct issuers), and derives a positive conflict/prohibition fact. The
-existing deny-overrides access-decision stratum then defeats any grant derived from `age 25`
-when `age 17` also produces that conflict witness. This rule is monotone: adding an
-attestation can add a conflict, never retract one.
+issuer-tagged facts for the same subject and predicate, checks distinct values via
+`log:notEqualTo` (exact term comparison, which can over-report value-equal but term-distinct
+literals such as `"25"^^xsd:integer` and `"25.0"^^xsd:decimal`, in the fail-closed direction)
+or `math:notEqualTo` when the attested value is known to be numeric, and, where the policy
+requires it, checks distinct issuers. It then derives a positive conflict witness. A second
+positive rule must join that witness against the policy structure and derive the prohibition
+for each specific `(principal, target, mode)` grant that consumed the disputed attribute.
+Deny-overrides is Rust-side post-materialisation set subtraction over those access tuples
+(`authindex.rs`), not subtraction over attribute-level conflict facts. It therefore defeats
+the routed grant derived from `age 25` when `age 17` also produces that conflict witness. This
+rule is monotone: adding an attestation can add a conflict, never retract one.
 
 A superficially similar encoding — **grant only if no derived conflict exists** — does require
 NAF over a derived predicate. It is not accepted by the incremental counting profile
@@ -538,6 +546,9 @@ NAF over a derived predicate. It is not accepted by the incremental counting pro
 the full evaluator's explicit `reason_n3_stratified` API when conflict reaches a fixpoint in
 an earlier stratum and the later stratum negates it. It is **not sound in one `reason_n3`
 fixpoint**, whose no-retraction semantics cannot withdraw a grant after a conflict appears.
+The solid ACP materialiser already uses a three-stratum `reason_n3_stratified` pipeline
+(`crates/sparq-solid/src/materialize.rs`), so such a conflict stratum could be added to that
+existing path rather than requiring a new driver.
 v1 therefore uses the positive-conflict + deny-overrides form; an engine extension is needed
 only for dynamic/general conflict policies that cannot be compiled to positive witnesses and
 the existing fixed strata (for example preference order or threshold/k-of-n policy
@@ -1070,14 +1081,17 @@ PoC must respect** (do not silently "solve" them — wire them as the documented
 `admit_static` decides the session-independent class once and defers holder/freshness to a
 per-request conditional grant, §3.3 A′ — never frozen into the materialise-once view);
 `sq-tu4e` (no in-reasoner NAF over
-derived facts → `revoked` is an **input-only** seeded predicate; no deny-on-disagreement rule);
+derived facts → `revoked` is an **input-only** seeded predicate; deny-on-disagreement →
+**RESOLVED** in §3.5 as a positive conflict witness routed to an access-tuple prohibition plus
+deny-overrides — implement it, do not omit it);
 `sq-l5og` / `sq-wvne` are **out of PoC scope** (no delegation, no ZK/privacy).
 
 **Acceptance (the adversarial forgery tests, mirroring `acp_forged_*_in_acr_document_does_not_grant`).**
 Positive: the age-25 credential grants `auth:read`. Negative (each must **deny**): (i) a graph
 with a tampered/absent signature; (ii) a source trusted for `schema:age` presenting an
 out-of-scope `acl:agent`/`solidx:creator` triple; (iii) a stale credential past
-`trust:freshWithin`; (iv) a third-party credential whose `credentialSubject != Session.agent`.
+`trust:freshWithin`; (iv) a third-party credential whose `credentialSubject != Session.agent`;
+(v) two trusted issuers attesting contradictory values for an attribute consumed by a grant.
 These are the §7.3-E tests that **do not yet exist** and whose absence currently leaves
 statement-type-scoping / no-laundering / key-binding as *design intent, not verified property*
 (`sq-pfae.4`).
@@ -1262,7 +1276,9 @@ prior draft phrased as settled are open problems.
   `sig.rs` disclosure caveat (`sq-tu4e`).
 - **C′ — Seeding-caveat citation corrected; the real termination risk is unanalysed.** The
   "two-unbound-atom seeding blow-up" belongs to the **incremental counting path**, not the path
-  solid runs: **solid uses full `reason_n3`** (supports `math:greaterThan`). The real,
+  solid runs: **solid uses the full evaluator through both `reason_n3` and
+  `reason_n3_stratified`** (the latter already drives its three-stratum ACP materialisation).
+  The real,
   *unanalysed* termination risk is **recursive / unbound-join admission rules over external-graph
   extents in the full evaluator** — P8 (`sq-pfae` P8) must bound *that* path (`sq-tu4e`). No
   formal complexity bound is proven here.
@@ -1343,10 +1359,14 @@ The genuine **design gaps** (not mere caveats) surfaced above are tracked as bea
   binds the intersection to the *current* delegator grant (item N). It does NOT claim full
   non-replayability — the delegator's key is still operator-asserted. Residual open: deep-chain
   incremental revocation + DID-resolver key binding (`sq-pfae.3`).
-- `sq-tu4e` — **RESOLVED:** conflicting-issuer-fact deny-on-disagreement is a monotone positive
-  conflict witness followed by deny-overrides; only the alternative no-derived-conflict grant
-  needs the full evaluator's explicit stratified driver. Freshness stays Rust-side, revocation
-  is input-stratified, issuer-key remains gated on P2, and the seeding citation is corrected.
+- `sq-tu4e` — **PARTIALLY RESOLVED (conflict reachability only):**
+  conflicting-issuer-fact deny-on-disagreement is a monotone positive conflict witness routed
+  to an access-tuple prohibition and followed by deny-overrides; only the alternative
+  no-derived-conflict grant needs the full evaluator's explicit stratified driver. **Still
+  open under this bead:** issuer-key binding (the LIVE forgery vector gated on
+  P2/`sq-pfae.3`) and the unanalysed recursive-admission termination risk (§7.1 C′/D′).
+  Freshness stays Rust-side, revocation is input-stratified, and the seeding citation is
+  corrected.
 - `sq-wvne` — ZKAPs-grade unlinkable presentation needs a 3-part ZK composite (hidden-issuer +
   ZK holder-PoP + nullifier); clear-WebID holder binding is in tension with anonymity.
 
