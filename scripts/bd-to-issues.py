@@ -867,11 +867,19 @@ def _self_test():
             paths_region.count(f'"{script}"'), 2)
         chk(f"{script} --self-test is actually INVOKED, not merely path-filtered",
             f"python3 {script} --self-test" in steps_region, True)
-    # ci-summary auto-discovers a sibling as GATING iff its name contains neither "advisory"
-    # nor "informational" — a rename would silently demote this to a non-blocking check.
-    job_name = re.search(r"^    name: (.+)$", wf_src, re.M).group(1).lower()
-    chk("the job name keeps this workflow gate-discoverable",
-        ("advisory" in job_name, "informational" in job_name), (False, False))
+    # [OPUS-5] GATING STATUS, guarded against the rule that is ACTUALLY live. ci-summary's
+    # discovery changed on 2026-07-25 (#3773): a check is non-gating iff it is EXPLICITLY
+    # DECLARED in .github/advisory-registry.json, keyed on workflow file + job id. The old
+    # `\b(advisory|informational)\b` NAME rule is gone — it had silently neutralised four real
+    # gates — so a rename can no longer demote anything, and asserting on the job NAME would
+    # guard a rule that no longer exists. The real demotion path is a registry entry, so that
+    # is what is asserted: this job must not be declared advisory.
+    registry = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                           "..", ".github", "advisory-registry.json"),
+                              encoding="utf-8"))
+    declared = {(e.get("workflow"), e.get("job_id")) for e in registry.get("jobs", {}).values()}
+    chk("the routing gate is NOT declared advisory (a declaration is what demotes it now)",
+        ("routing-self-tests.yml", "validate") in declared, False)
     # merge_group cannot carry a paths filter; without the trigger the queue ref never exposes
     # this gating check and the merge queue would merge past it.
     chk("merge_group trigger present (the queue ref must expose the gate)",
