@@ -139,10 +139,16 @@ shown here.
 
 An #dfn[encrypted resource] is a server-stored octet stream consisting of a cleartext envelope
 header and an AEAD ciphertext (§4.2). A #dfn[data-encryption key] (DEK) is the symmetric key
-under which a resource's plaintext is sealed. A #dfn[key-encryption key] (KEK) is the key
-under which a DEK is wrapped for one recipient. A #dfn[recipient] is a WebID whose public key
-a DEK has been wrapped to. A #dfn[key envelope] is the set of wrapped DEKs published alongside
-an encrypted resource (§4.4). A #dfn[leakage tier] is the classification of §3. A
+under which a resource's plaintext is sealed. A #dfn[recipient] is a WebID, and its
+#dfn[recipient key pair] is the #emph[asymmetric] long-term key pair — the public half
+published under that WebID's profile document (§4.4) — that a DEK is encapsulated to. A
+#dfn[key-encryption key] (KEK) is the #emph[symmetric] key that actually encrypts a DEK; under
+the construction of §4.4.1 a KEK is never stored, but is derived afresh for each wrap by the
+key-encapsulation and key-derivation steps applied to the recipient's public key. The two are
+distinct objects, and this document #strong[does not] use "KEK" for either half of a
+recipient's key pair: writing "the recipient's KEK" would conflate asymmetric key agreement
+with the symmetric key it produces. A #dfn[key envelope] is the set of wrapped DEKs published
+alongside an encrypted resource (§4.4). A #dfn[leakage tier] is the classification of §3. A
 #dfn[disclosure statement] is the machine- and human-readable leakage declaration a
 conforming implementation publishes (§3.3).
 
@@ -188,10 +194,14 @@ left to prose. Every profile in this document declares a tier; every future exte
   [#strong[T2]], [Search pattern (query-token repetition), access pattern (which entries
     matched), and volume, as in searchable/structured encryption.], [Not specified here; §7.1
      records the deferral and the criteria for revisiting it.],
-  [#strong[T3]], [Resource-level access pattern (which ciphertexts are fetched, when,
-    together), ciphertext sizes subject to the padding discipline, and update timing.],
-    [Profile CS's default tier.],
-  [#strong[T4]], [Aggregate volume and timing only: total bytes synced and when.],
+  [#strong[T3]], [Everything in T4, plus a #emph[query-correlated] resource-level access
+    pattern: which ciphertexts a client fetches, when, and which it fetches together, in
+    response to querying.], [Profile CS's default tier.],
+  [#strong[T4]], [The per-resource metadata that storage itself entails, with the query
+    correlation removed: resource identities, container cardinality, per-resource ciphertext
+    sizes bucketed by the padding ladder, and creation and update timing — but #emph[not]
+    which resources any particular query touched. T4 is #strong[not] "aggregate only": the
+    server still distinguishes resources and observes each one's update pattern (§4.6, §6.2).],
     [Profile CS's tier under full-replica sync with padding (§4.7).],
 )
 
@@ -265,38 +275,83 @@ encodes — the leaky part is always the part the server was asked to search.
 == The encrypted-resource envelope
 
 An encrypted resource #strong[MUST] consist of a cleartext envelope header followed by an
-AEAD ciphertext. The header #strong[MUST] carry:
+AEAD ciphertext, serialised exactly as §4.2.5 specifies. The header carries only framing and
+key-selection metadata; every value that describes the plaintext is sealed. The cleartext
+header #strong[MUST] carry:
 
 #table(
   columns: 3,
   align: (left, left, left),
-  table.header[Field][Requirement][Purpose],
+  table.header[Cleartext header field][Requirement][Purpose],
   [Format version], [MUST], [Permits later revisions to be distinguished; an unknown version
     MUST cause the client to refuse the resource, never to guess.],
-  [AEAD algorithm identifier], [MUST], [Names the sealing algorithm from the registry of
-    §4.2.1. An unregistered identifier MUST be refused.],
+  [AEAD suite identifier], [MUST], [Names the sealing algorithm from the registry of §4.2.1.
+    An unregistered identifier MUST be refused.],
   [DEK identifier], [MUST], [Selects which wrapped DEK in the key envelope (§4.4) applies.
     An opaque identifier; it MUST NOT encode the plaintext's content or type.],
   [Nonce], [MUST], [The AEAD nonce, generated as required by §4.2.2.],
-  [Padded plaintext length], [MUST], [The true plaintext length, sealed as part of the
-    plaintext (not the header), so the padding of §4.2.3 can be stripped after decryption.],
+  [Ciphertext length], [MUST], [Framing only: the octet length of the AEAD ciphertext
+    following the header, authentication tag included. Because it measures the #emph[padded]
+    plaintext, it discloses the padding bucket of §4.2.3 and nothing finer. It is carried
+    explicitly so that an envelope can be embedded in a larger encoding (§5.1).],
+  [Resource version counter], [SHOULD, per §4.2.4], [The rollback-detection counter. It is
+    cleartext because a client needs it to reconstruct the associated data, and it is
+    authenticated by being bound into that associated data.],
+)
+
+Two values that describe the plaintext are #strong[sealed inside the ciphertext] instead of
+being carried in the header. They are authenticated by the AEAD and are recoverable only after
+a successful decryption:
+
+#table(
+  columns: 3,
+  align: (left, left, left),
+  table.header[Sealed plaintext field][Requirement][Purpose],
+  [True plaintext length], [MUST be sealed, MUST NOT be in the cleartext header], [The
+    #emph[unpadded] octet length of the RDF plaintext, so the padding of §4.2.3 can be
+    stripped after decryption. This is a different quantity, in a different place, from the
+    cleartext ciphertext length above; §4.2.5 gives each its own name and encoding.],
   [Content type of the plaintext], [MUST be sealed, MUST NOT be in the cleartext header],
     [The RDF serialisation of the plaintext is metadata about the plaintext; carrying it in
      the clear leaks the resource's nature for no benefit.],
 )
 
-The cleartext header #strong[MUST NOT] carry the resource's RDF content type, its triple or
-byte count before padding, its vocabulary, or any label derived from its contents.
+The cleartext header #strong[MUST NOT] carry the resource's RDF content type, its true
+(unpadded) byte count, its triple count, its vocabulary, or any label derived from its
+contents.
 
 === Algorithm registry
 
-A conforming client #strong[MUST] implement `XChaCha20-Poly1305` #cite("RFC8439") and
-#strong[SHOULD] implement `AES-256-GCM` #cite("GCM"). A client #strong[MUST NOT] seal with any
-algorithm that is not an AEAD: confidentiality without integrity is inadequate here, because a
-storage server that can flip ciphertext bits undetected can corrupt query answers at will
-(§6.5). Registry governance — how an algorithm identifier is added or deprecated — follows the
-process of this specification series and is not defined in this document; it is tracked by
-bead sq-tag1q.5 and revisited in §9.
+Every AEAD suite has a registered two-octet identifier — the value the header's AEAD suite
+identifier field carries (§4.2.5) — and fixed parameter sizes. Version 1 of this format
+registers exactly two:
+
+#table(
+  columns: 5,
+  align: (left, left, left, left, left),
+  table.header[Suite][AEAD][Key][Nonce][Tag],
+  [`0x0001`], [`XChaCha20-Poly1305` #cite("XCHACHA")], [32 octets], [24 octets], [16 octets],
+  [`0x0002`], [`AES-256-GCM` #cite("GCM")], [32 octets], [12 octets], [16 octets],
+)
+
+A conforming client #strong[MUST] implement suite `0x0001` and #strong[SHOULD] implement suite
+`0x0002`. Any other identifier is unregistered and #strong[MUST] be refused.
+
+#strong[On the normative reference for suite `0x0001`.] #cite("RFC8439") specifies ChaCha20,
+Poly1305, and the ChaCha20-Poly1305 AEAD with a 96-bit nonce. It does #strong[not] specify
+XChaCha20-Poly1305, nor the HChaCha20 step that extends the nonce to 192 bits. The normative
+definition of suite `0x0001` — the HChaCha20 subkey derivation, the 192-bit nonce
+construction, and the resulting AEAD — is therefore #cite("XCHACHA"), which builds on the
+primitives of #cite("RFC8439") but is a distinct construction. An implementation
+#strong[MUST NOT] treat the two as interchangeable: they take different nonce sizes and derive
+different keys, so a resource sealed under one cannot be opened under the other, and a client
+that substitutes RFC 8439 ChaCha20-Poly1305 for suite `0x0001` is not conformant.
+
+A client #strong[MUST NOT] seal with any algorithm that is not an AEAD: confidentiality
+without integrity is inadequate here, because a storage server that can flip ciphertext bits
+undetected can corrupt query answers at will (§6.5). Registry governance — how an algorithm
+identifier is added or deprecated — follows the process of this specification series and is
+not defined in this document; it is tracked by bead sq-tag1q.5 and revisited in §9.
 
 === Nonce and key generation
 
@@ -305,8 +360,12 @@ number generator. A nonce #strong[MUST NOT] be reused with the same DEK: nonce r
 either registered algorithm is catastrophic, forfeiting confidentiality of the affected
 plaintexts and, for `AES-256-GCM`, the authentication key. Because a Profile CS deployment is
 inherently multi-device and multi-writer, a client #strong[MUST NOT] rely on a counter it
-believes to be globally monotonic; it #strong[MUST] either generate the nonce at random with
-`XChaCha20-Poly1305`'s extended nonce, or derive a fresh DEK per sealing operation.
+believes to be globally monotonic; it #strong[MUST] either generate the nonce at random under
+suite `0x0001`, whose 24-octet nonce makes random generation safe at any realistic message
+count, or derive a fresh DEK per sealing operation. Random nonce generation under suite
+`0x0002` is #strong[NOT] safe at scale: 12 octets is too short to rely on collision
+improbability across a multi-writer deployment, so a client sealing under `0x0002`
+#strong[MUST] derive a fresh DEK per sealing operation.
 
 === Padding
 
@@ -340,6 +399,65 @@ convenient integrity handle, but it #strong[MUST NOT] be treated as a substitute
 binding above, and implementers should note that content-addressed names are stable across
 readers and therefore make co-access correlation easier for the server, not harder.
 
+=== Canonical wire format
+
+The fields above are only interoperable if their encoding is fixed, so this section fixes it.
+A conforming client #strong[MUST] serialise and parse an encrypted resource exactly as
+specified here. Throughout this document: all integers are #strong[unsigned and big-endian];
+`u8`, `u16`, `u32`, and `u64` denote 1-, 2-, 4-, and 8-octet integers; all IRIs and content
+types are encoded as UTF-8 in Unicode Normalization Form C; and `base64url` means the
+URL-and-filename-safe alphabet of #cite("RFC4648") §5 #strong[without] padding — a client
+#strong[MUST] reject a base64url value carrying `=` padding or a non-alphabet octet, rather
+than accepting it leniently.
+
+```text
+EncryptedResource:
+  magic            8   octets  = ASCII "SPARQE2E"
+  version          u8           = 0x01
+  suite_id         u16          AEAD suite from the §4.2.1 registry
+  flags            u8           bit 0 = version_counter present; bits 1-7 MUST be 0
+  dek_id           16  octets   opaque, uniformly random (§4.2, §4.4)
+  nonce            N   octets   N = the suite's nonce length (24 or 12)
+  version_counter  u64          present iff flags bit 0 is set
+  ciphertext_len   u64          octet length of `ciphertext`, tag included
+  ciphertext       ciphertext_len octets
+
+SealedPlaintext (the AEAD plaintext, recovered only after a successful open):
+  plaintext_len    u64          TRUE, UNPADDED length of `rdf_bytes`
+  content_type_len u16
+  content_type     content_type_len octets   e.g. "text/turtle"
+  rdf_bytes        plaintext_len octets
+  padding          zero octets to the §4.2.3 ladder bucket
+```
+
+The associated data required by §4.2.4 is constructed canonically, so that two independent
+implementations compute the same octets. Every variable-length component is length-prefixed,
+which makes the encoding unambiguous — without the prefixes a resource IRI could be chosen to
+impersonate the boundary between two fields:
+
+```text
+AAD = "sparq-e2ee/v1/envelope" || 0x00
+   || version || suite_id || flags || dek_id
+   || u16 length of resource_id || resource_id
+   || version_counter          (u64; the value 0 when flags bit 0 is clear)
+```
+
+`resource_id` is the resource's absolute IRI, percent-encoding and case preserved exactly as
+the client requested it. It is #emph[not] carried in the header: the client already knows
+which resource it asked for, and binding the identity it #emph[expected] is precisely what
+detects the relocation attack of §4.2.4.
+
+#strong[Bounds and failure behaviour.] A client #strong[MUST] enforce, before allocating on a
+length field, that `ciphertext_len` is at least the suite's tag length and no greater than an
+implementation-declared maximum, that `content_type_len` is at most 255, and that
+`plaintext_len` plus the framing fields does not exceed the recovered plaintext. A client
+#strong[MUST] refuse — with no plaintext, and no partial output — any resource whose `magic`
+does not match, whose `version` is unrecognised, whose `suite_id` is unregistered, whose
+`flags` set a reserved bit, whose lengths are inconsistent, or whose AEAD open fails. These
+conditions #strong[MUST NOT] be distinguished from one another in anything the storage server
+can observe: a client that reports "bad padding" differently from "bad tag" hands the server
+a decryption oracle.
+
 == Key hierarchy
 
 A conforming client #strong[MUST] use a two-level hierarchy:
@@ -347,8 +465,10 @@ A conforming client #strong[MUST] use a two-level hierarchy:
 + A #strong[DEK] seals a resource's plaintext. A DEK #strong[MUST] be generated per resource,
   and #strong[MUST NOT] be reused across resources; sharing one DEK across a container turns
   every future grant into an all-or-nothing grant over that container's history.
-+ A #strong[KEK] wraps DEKs for one recipient. A DEK is shared by wrapping it to the
-  recipient's public key; the plaintext is never re-encrypted to share it.
++ A #strong[KEK] encrypts a DEK for one recipient. A DEK is shared by encapsulating to the
+  recipient's #emph[public key], which derives a fresh KEK that wraps the DEK (§4.4.1); the
+  plaintext is never re-encrypted to share it. The recipient's key pair is long-term; the KEK
+  it yields is per-wrap and is never stored by either party.
 
 A client #strong[MUST NOT] derive a DEK deterministically from the plaintext (convergent
 encryption). Convergent encryption makes equal plaintexts produce equal ciphertexts across
@@ -381,6 +501,66 @@ recipient. Its recipient set is the #emph[real] read-authorisation boundary.
 A client #strong[MUST] surface any divergence between the ACL and the key envelope to the
 data owner, rather than silently reconciling it in either direction.
 
+=== Key wrapping and the key-envelope format
+
+"Wrapped to a public key" is not an algorithm, so this section names one. A conforming client
+#strong[MUST] wrap DEKs using #dfn[HPKE] #cite("RFC9180") in base mode (`mode_base`),
+single-shot `Seal`. HPKE is referenced rather than reinvented because it is exactly the
+authenticated key-encapsulation, key-derivation, and AEAD composition this step needs, with
+the domain separation already specified. Version 1 registers one HPKE suite:
+
+#table(
+  columns: 5,
+  align: (left, left, left, left, left),
+  table.header[Wrap suite][KEM][KDF][AEAD][Encapsulated key],
+  [`0x0001`], [DHKEM(X25519, HKDF-SHA256) (`0x0020`)], [HKDF-SHA256 (`0x0001`)],
+    [ChaCha20-Poly1305 (`0x0003`)], [32 octets],
+)
+
+The KEM encapsulation derives the shared secret; HPKE's key schedule derives from it the
+per-wrap #strong[KEK] that seals the DEK. The recipient's key pair is the asymmetric input;
+the KEK is the symmetric output. Neither party stores the KEK.
+
+```text
+KeyEnvelope:
+  magic            8   octets  = ASCII "SPARQE2K"
+  version          u8           = 0x01
+  dek_id           16  octets   the resource header's dek_id (§4.2.5)
+  recipient_count  u16          MUST be >= 1
+  recipients       recipient_count × RecipientEntry, sorted ascending by recipient_kid
+
+RecipientEntry:
+  recipient_kid    32  octets   SHA-256 over the recipient's HPKE public key encoding
+  wrap_suite_id    u16          from the registry above
+  enc_len          u16          length of `enc`
+  enc              enc_len octets    the HPKE encapsulated key
+  wrapped_len      u16
+  wrapped_dek      wrapped_len octets   HPKE ciphertext of the DEK, tag included
+```
+
+`recipient_kid` is a #emph[key] identifier, not a WebID: it identifies which key pair an entry
+was encapsulated to, so a recipient holding several keys — or rotating one (§4.5) — can select
+its entry without trial decryption. Entries are sorted by `recipient_kid` so the serialisation
+is canonical and the entry order cannot itself become a side channel. Deriving the identifier
+by digest, rather than carrying the WebID, keeps the recipient #emph[set] from being readable
+off the envelope by the storage operator; implementers should note this hides identities only
+against an operator that cannot guess the candidate WebIDs, and §6.2 does not claim otherwise.
+
+The HPKE `info` and `aad` parameters #strong[MUST] be:
+
+```text
+info = "sparq-e2ee/v1/wrap" || 0x00
+    || u8 wrap format version (0x01) || wrap_suite_id || dek_id
+    || u16 length of resource_id || resource_id
+aad  = recipient_kid
+```
+
+Binding `dek_id` and `resource_id` into `info` is what stops a storage operator from moving a
+recipient entry between key envelopes: an entry wrapped for resource A does not open under
+resource B's `info`. A client #strong[MUST] treat any HPKE `Open` failure, unknown
+`wrap_suite_id`, unknown `version`, or malformed length as a refusal of that entry, and
+#strong[MUST NOT] fall back to another entry's key material or to an unauthenticated path.
+
 == Sharing, rotation, and revocation
 
 #strong[Sharing] a resource with a recipient means wrapping its DEK to that recipient's
@@ -389,7 +569,8 @@ require re-encrypting the resource.
 
 #strong[Rotation.] A client #strong[SHOULD] support rotating a resource's DEK (re-sealing the
 plaintext under a fresh DEK and re-wrapping to the current recipient set) and #strong[MUST]
-support rotating a recipient's KEK (re-wrapping the recipient's DEKs to a fresh public key).
+support rotating a recipient's #emph[key pair] (re-wrapping that recipient's DEKs to a fresh
+public key, and publishing the new key under its WebID per §4.4).
 
 #strong[Revocation] is the honest hard case, and this document specifies it plainly rather
 than optimistically. Removing a recipient from a key envelope prevents that recipient from
@@ -445,8 +626,10 @@ Three mitigations exist, in #strong[increasing] leakage order. An implementation
 
 + #strong[Full-replica sync] — fetch everything the client is authorised for, on a schedule
   independent of queries. This is the #strong[T4] mode: because fetching is uncorrelated with
-  querying, resource-level access-pattern leakage collapses to aggregate volume and timing.
-  This is the #strong[RECOMMENDED] default where corpus size permits.
+  querying, the resource-level access pattern stops carrying a query signal. It does not stop
+  existing — the server still sees which resources exist, how many, their bucketed ciphertext
+  sizes, and when each one changes (§4.6, §6.2) — so this mitigation removes the correlation,
+  not the metadata. This is the #strong[RECOMMENDED] default where corpus size permits.
 + #strong[Selective fetch] — fetch only the resources a query might need. This is the
   #strong[T3] default: the server observes which ciphertexts are fetched together and when.
 + #strong[Cleartext partitioning metadata] — attach coarse cleartext tags (a topic, a graph
@@ -498,9 +681,10 @@ Under Profile SE, literal #strong[objects] are sealed and everything else stays 
 Concretely, a conforming client:
 
 - #strong[MUST] encrypt literal objects it is configured to protect, replacing each with a
-  literal whose datatype IRI is the encrypted-literal datatype and whose lexical form is the
-  base64url encoding of an envelope structurally identical to §4.2's (version, algorithm, DEK
-  identifier, nonce, ciphertext);
+  literal whose datatype IRI is the #dfn[encrypted-literal datatype]
+  `https://sparq.dev/ns/e2ee#encryptedLiteral` — registered by this document, and the only
+  datatype IRI that carries the semantics of §5.3 — and whose lexical form is the base64url
+  encoding (#cite("RFC4648") §5, no padding, per §4.2.5) of a #strong[literal envelope];
 - #strong[MUST NOT] encrypt subjects, predicates, graph names, or IRI- and blank-node-valued
   objects — under this profile those are cleartext by definition, and an implementation that
   encrypted some of them would be claiming a protection this profile does not provide;
@@ -512,6 +696,41 @@ Concretely, a conforming client:
 Because the original datatype and language tag are metadata about the value, a client
 #strong[MUST] seal them inside the envelope rather than preserving them on the encrypted
 literal: leaving `xsd:date` visible on an encrypted object narrows the plaintext considerably.
+
+The literal envelope follows the conventions of §4.2.5 — big-endian unsigned integers, UTF-8
+in NFC, length-prefixed variable fields — and differs from the resource envelope in that it
+selects a key family (§5.2) rather than a per-resource DEK, and seals the term's own metadata:
+
+```text
+LiteralEnvelope:
+  magic            8   octets  = ASCII "SPARQE2L"
+  version          u8           = 0x01
+  suite_id         u16          from the §4.2.1 registry
+  key_family_id    16  octets   selects the key family of §5.2
+  nonce            N   octets   N = the suite's nonce length
+  ciphertext_len   u32
+  ciphertext       ciphertext_len octets
+
+SealedValue (the AEAD plaintext):
+  term_kind        u8           0x01 = literal; other values reserved
+  datatype_len     u16
+  datatype_iri     datatype_len octets   the ORIGINAL datatype IRI
+  lang_len         u8
+  lang             lang_len octets       BCP 47, lowercased; empty when absent
+  lexical_len      u32
+  lexical_form     lexical_len octets
+
+AAD = "sparq-e2ee/v1/literal" || 0x00
+   || version || suite_id || key_family_id
+   || u16 length of graph_id     || graph_id      (empty for the default graph)
+   || u16 length of subject_id   || subject_id
+   || u16 length of predicate_id || predicate_id
+```
+
+A protected triple's subject #strong[MUST] be an IRI, or a blank node the client has
+skolemised to a stable IRI before sealing. This is a real constraint, not a formality:
+blank-node labels are not preserved across serialisations, so binding an unskolemised label
+would make a value undecryptable after any round trip through a server that relabels.
 
 == Key families
 
@@ -575,9 +794,11 @@ operator past a value-level operator it cannot evaluate.
 
 Server-side value equality can be restored by attaching a #dfn[deterministic equality tag] to
 each encrypted value: a keyed pseudorandom function (an HMAC under a client-held per-predicate
-tag key) over the plaintext value, published as a cleartext companion. Equal plaintexts then
-produce equal tags, so the server can perform equality joins on values and evaluate
-`FILTER(?x = constant)` after the client rewrites the constant to its tag.
+tag key) over the plaintext term, canonically encoded as §5.5.1 specifies, published as a
+cleartext companion. Equal plaintexts then produce equal tags, so the server can perform
+equality joins on values and evaluate `FILTER(?x = constant)` after the client rewrites the
+constant to its tag — subject to the exact equality relation §5.5.1 defines, which is
+narrower than SPARQL value equality.
 
 This is a #strong[distinct leakage increment], and this document treats it as such:
 
@@ -604,6 +825,64 @@ This is a #strong[distinct leakage increment], and this document treats it as su
 
 Order-revealing tags — anything that would restore range `FILTER` or `ORDER BY` server-side —
 are #strong[MUST NOT] under this document. §7.2 records the evidence.
+
+=== The equality relation a tag decides
+
+"Equal plaintexts produce equal tags" is only well defined once "equal" is. RDF and SPARQL
+offer several candidate relations, and they disagree: `"1"^^xsd:integer` and
+`"01"^^xsd:integer` are the #emph[same value] but #emph[different terms]; `"1"^^xsd:integer`
+and `"1.0"^^xsd:decimal` are equal under SPARQL value equality and unequal as terms;
+`"NaN"^^xsd:double` is not value-equal even to itself; two `xsd:dateTime` literals with
+different timezone offsets may denote the same instant.
+
+A tag is computed over a term, not a value. This document therefore defines the relation
+narrowly and says so plainly: two tags computed under the same key are equal #strong[if and
+only if] the two plaintext literals are the #strong[same RDF term] — identical datatype IRI,
+identical language tag, and identical lexical form after the normalisation below. Concretely:
+
+- Lexical forms, datatype IRIs, and language tags are compared as the octets fed to the MAC,
+  which are UTF-8 in Unicode Normalization Form C; language tags are lowercased first (they
+  are case-insensitive), and nothing else is case-folded.
+- #strong[No value canonicalisation is performed]: numeric lexical variants, `xsd:dateTime`
+  timezone offsets, and `xsd:boolean` `"1"` versus `"true"` are #emph[not] reconciled.
+  Ill-typed and invalid lexical forms are tagged as the literals they are, with no validation.
+- Consequently a tag join is #strong[strictly weaker] than SPARQL value equality: it can miss
+  solutions that `FILTER(?x = ?y)` would return. A rewriter #strong[MUST NOT] present a
+  server-side tag join or tag-rewritten `FILTER` as value equality, and #strong[MUST] either
+  restrict the rewrite to same-term equality or complete the comparison on the client (§5.4).
+  This is the silent-wrong-answer hazard of §5.3 in its second form, and the same rule
+  applies: it is better to refuse the rewrite than to return a quietly incomplete answer.
+
+The tag is `HMAC-SHA-256` #cite("RFC2104") under the per-family tag key, over a canonical,
+length-delimited input, published as the base64url encoding (§4.2.5) of the full 32-octet
+output. Tags #strong[MUST NOT] be truncated: a truncated tag raises the collision probability,
+and a tag collision is a #emph[wrong join result], not merely a lost one.
+
+```text
+TagInput = "sparq-e2ee/v1/eqtag" || 0x00
+        || u8 tag format version (0x01)
+        || u8 term_kind (0x01 = literal)
+        || u16 length of key_family_id || key_family_id
+        || u16 length of predicate_id  || predicate_id
+        || u16 length of datatype_iri  || datatype_iri
+        || u8  length of lang          || lang
+        || u32 length of lexical_form  || lexical_form
+```
+
+The leading label, format version, `key_family_id`, and `predicate_id` provide #strong[domain
+separation]. They are not decoration: without the predicate and family in the MAC input, one
+tag key reused across predicates would let the operator test whether a value under
+`schema:name` equals a value under a health predicate, correlating across contexts that the
+key-family design (§5.2) exists to keep separate. Length prefixes prevent the corresponding
+encoding attack, in which a crafted lexical form imitates the boundary between two fields so
+that two distinct terms produce one MAC input.
+
+A conforming implementation #strong[MUST] publish conformance test vectors for its tag
+derivation covering, at minimum: two term-equal literals (equal tags); two value-equal but
+term-distinct literals such as `"1"^^xsd:integer` and `"01"^^xsd:integer` (#emph[unequal]
+tags); the same lexical form under two different datatypes; the same lexical form under two
+different language tags; the same term under two different predicates in one key family
+(unequal tags); and a lexical form containing the octets of the field delimiters.
 
 == Mandatory leakage disclosure
 
@@ -659,9 +938,10 @@ thing in this document, because there is no third thing that is specifiable toda
     [Structural part is #strong[sent to the server]],
   [Answers], [Never leave the client], [Never leave the client], [Structural bindings
     disclosed; sealed values returned as ciphertext],
-  [Resource-level access pattern], [Disclosed (which ciphertexts, when, together)],
-    [Collapses to aggregate volume and timing], [Not the relevant channel — the server sees
-     the query directly],
+  [Resource-level access pattern], [Disclosed, and correlated with queries (which ciphertexts,
+    when, together)], [Disclosed but #strong[not] query-correlated: resource identities,
+    cardinality, bucketed sizes, and per-resource update timing all remain visible],
+    [Not the relevant channel — the server sees the query directly],
   [Sizes], [Bucketed by the padding ladder (§4.2.3)], [Bucketed], [Value-ciphertext lengths
     disclosed unless padded],
   [Container structure], [Cardinality and timing disclosed (§4.6)], [Cardinality and timing
@@ -698,10 +978,10 @@ Profile CS does not have this exposure: under it, structure is inside the cipher
   [One resource DEK], [That resource's plaintext, in every version sealed under that DEK.],
     [Per-resource DEKs (§4.3) bound this to one resource. Rotation (§4.5) protects subsequent
      versions only.],
-  [A recipient's private KEK], [Every DEK ever wrapped to that recipient, hence every resource
+  [A recipient's private key], [Every DEK ever wrapped to that recipient, hence every resource
     ever shared with them, including versions from before the compromise if the ciphertexts
-    are retained.], [None retroactively. This is the dominant risk in the profile; KEK
-     rotation protects future wraps only.],
+    are retained.], [None retroactively. This is the dominant risk in the profile; rotating
+     the recipient's key pair (§4.5) protects future wraps only.],
   [A Profile SE predicate key family], [Every value under those predicates, across every
     resource in the family's scope.], [Narrower families reduce blast radius at the cost of
      more keys.],
@@ -716,7 +996,8 @@ Profile CS does not have this exposure: under it, structure is inside the cipher
 )
 
 Two properties this document does #strong[not] provide, stated so no one assumes them:
-#strong[forward secrecy] (a compromised KEK exposes past shares) and #strong[post-compromise
+#strong[forward secrecy] (a compromised recipient private key exposes past shares) and
+#strong[post-compromise
 security] (recovery after compromise without re-keying out of band). Both would require a
 ratcheting group key agreement; see §9.
 
@@ -747,8 +1028,11 @@ Encryption bounds what the server can #emph[read]. It does not make the server t
 Beyond the tier tables: request timing correlates with user activity; a distinctive fetch
 sequence after a login is a behavioural fingerprint; and co-access of the same resources by
 two WebIDs discloses a relationship between them even when nothing about the content is
-disclosed. Full-replica sync on a schedule (§4.7) is the mitigation that addresses all three
-at once, which is why it is RECOMMENDED. Padding (§4.2.3) addresses sizes only.
+disclosed. Full-replica sync on a schedule (§4.7) addresses the first two, by decoupling fetch
+timing and fetch order from user activity, which is why it is RECOMMENDED. It does #strong[not]
+address the third: two WebIDs authorised for the same resource both replicate it, so co-access
+— and the relationship it discloses — survives full-replica sync. Padding (§4.2.3) addresses
+sizes only, and only to the granularity of the ladder's buckets.
 
 == No claim of server-side SPARQL over encrypted data
 
@@ -874,6 +1158,12 @@ Both are recorded here as directions, not as mechanisms this document defines.
 - #strong[Envelope algorithm-registry governance] (§4.2.1) — how identifiers are added,
   deprecated, and retired. Tracked under bead sq-tag1q.5 and the specification-series process
   bead sq-rvgr2.
+- #strong[The normative reference for `XChaCha20-Poly1305`] (§4.2.1) — the construction is
+  specified only by an #emph[expired] Internet-Draft #cite("XCHACHA"), because no stable RFC
+  defines it. This is a known weakness in the reference chain of a MUST-implement suite: the
+  reference should be re-pointed if the CFRG publishes a stable document, and until then
+  implementers should treat #cite("XCHACHA") as the sole interoperability authority for suite
+  `0x0001`. Tracked under bead sq-tag1q.5.
 - #strong[Recipient key discovery in Solid] — precisely where a WebID's encryption keys live
   and how key discovery interacts with pod session handling; to be coordinated with the
   external Solid specification programme (bead sq-tag1q.8).
@@ -901,7 +1191,20 @@ Both are recorded here as directions, not as mechanisms this document defines.
   ("RFC8174", [Leiba, B. #emph[Ambiguity of Uppercase vs Lowercase in RFC 2119 Key Words].
     RFC 8174, IETF, May 2017.]),
   ("RFC8439", [Nir, Y., Langley, A. #emph[ChaCha20 and Poly1305 for IETF Protocols].
-    RFC 8439, IETF, June 2018.]),
+    RFC 8439, IETF, June 2018. Defines ChaCha20-Poly1305 with a 96-bit nonce; it does
+    #strong[not] define XChaCha20-Poly1305 — see #cite("XCHACHA").]),
+  ("XCHACHA", [Arciszewski, S. #emph[XChaCha: eXtended-nonce ChaCha and]
+    `AEAD_XChaCha20_Poly1305`. draft-irtf-cfrg-xchacha-03, IRTF CFRG, January 2020. The
+    normative definition of the
+    HChaCha20 subkey derivation and the 192-bit-nonce AEAD registered as suite `0x0001` in
+    §4.2.1. An expired Internet-Draft, cited because no stable RFC defines this
+    construction; §9 tracks re-pointing this reference if one is published.]),
+  ("RFC9180", [Barnes, R., Bhargavan, K., Lipp, B., Wood, C. A. #emph[Hybrid Public Key
+    Encryption]. RFC 9180, IRTF CFRG, February 2022.]),
+  ("RFC4648", [Josefsson, S. #emph[The Base16, Base32, and Base64 Data Encodings]. RFC 4648,
+    IETF, October 2006.]),
+  ("RFC2104", [Krawczyk, H., Bellare, M., Canetti, R. #emph[HMAC: Keyed-Hashing for Message
+    Authentication]. RFC 2104, IETF, February 1997.]),
   ("GCM", [Dworkin, M. #emph[Recommendation for Block Cipher Modes of Operation:
     Galois/Counter Mode (GCM) and GMAC]. NIST Special Publication 800-38D, 2007.]),
   ("SPARQL11", [Harris, S., Seaborne, A. #emph[SPARQL 1.1 Query Language]. W3C
