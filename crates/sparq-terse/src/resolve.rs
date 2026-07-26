@@ -183,13 +183,31 @@ mod ctx {
             phrase: &str,
             query_vec: Option<&[f32]>,
         ) -> Result<Resolution, TerseError> {
-            // ---- §6.4: lexical-first. ----
+            self.resolve_lazy(phrase, |_| query_vec.map(<[f32]>::to_vec))
+        }
+
+        /// [`Self::resolve`] with the query vector produced *on demand*: `embed` is invoked
+        /// only if the lexical path returns nothing AND a [`VectorStore`] is attached, i.e.
+        /// only when the vector fallback can actually fire. Embedding free text is a model /
+        /// network cost the design keeps the caller's explicit opt-in (§6/§9 Q5), so a phrase
+        /// the deterministic lexical linker already binds must never pay it — this is the
+        /// entry point [`crate::terse_to_sparql_with`] uses so its per-phrase embedder
+        /// contract ("called only for a phrase that fails lexical linking") holds.
+        pub(crate) fn resolve_lazy(
+            &self,
+            phrase: &str,
+            embed: impl FnOnce(&str) -> Option<Vec<f32>>,
+        ) -> Result<Resolution, TerseError> {
+            // ---- §6.4: lexical-first — no model, no network, no embedder call. ----
             if let Some(res) = self.resolve_lexical(phrase) {
                 return self.gate_resolution(phrase, res);
             }
-            // ---- §6.4: vector fallback (only if a store + embedded query are supplied). ----
-            if let (Some(store), Some(qv)) = (self.store, query_vec) {
-                return self.resolve_vector(phrase, store, qv);
+            // ---- §6.4: vector fallback. Only NOW is the embedder worth its cost, and only
+            // when a store is attached to search. ----
+            if let Some(store) = self.store {
+                if let Some(qv) = embed(phrase) {
+                    return self.resolve_vector(phrase, store, &qv);
+                }
             }
             // Nothing matched lexically and no usable vector fallback: loud failure.
             Err(TerseError::Unresolved {

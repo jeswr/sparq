@@ -153,10 +153,10 @@ pub fn terse_to_sparql_with(
     for span in &spans {
         // Copy the source up to this V(...) verbatim.
         out.push_str(&src[cursor..span.start]);
-        // Resolve: lexical-first; the embedder is consulted only for the vector fallback,
-        // and only when lexical returns nothing (the ctx decides — we pre-embed lazily).
-        let query_vec = embed(&span.phrase);
-        let res = ctx.resolve(&span.phrase, query_vec.as_deref())?;
+        // Resolve: lexical-first. The embedder is handed to the ctx as a THUNK, so it is
+        // invoked only when lexical returns nothing and a vector store is attached — a
+        // lexically-bound phrase never pays the model/network cost (design §6.4/§9 Q5).
+        let res = ctx.resolve_lazy(&span.phrase, |p| embed(p))?;
         // Splice the canonical <iri> in place of the V(...) construct.
         out.push('<');
         out.push_str(&res.iri);
