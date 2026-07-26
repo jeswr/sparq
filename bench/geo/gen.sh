@@ -48,7 +48,7 @@ if [ ! -s "$OUT" ]; then
 fi
 
 if [ "$MODEL" = feature ]; then
-  if [ ! -s "$FEATURE_OUT" ]; then
+  if [ ! -s "$FEATURE_OUT" ] || [ "$OUT" -nt "$FEATURE_OUT" ]; then
     if ! awk '
       BEGIN { OFS = " " }
       {
