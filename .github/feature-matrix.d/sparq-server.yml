@@ -244,3 +244,20 @@
   crate: "sparq-server"
   features: "query-registry"
   test: true
+
+# [FABLE-5] sq-37f1a (issue #2718): the COMBINED `odrl-authz,solid-authz-trust` state — the
+# feature INTERACTION the two single-feature legs above never exercise. Cargo feature
+# unification makes `odrl-authz` turn on `sparq-solid/odrl-bridge`, which changes the
+# `PodStore` post-materialize path (`reconcile_bridged_after_static` → `BridgeLedger::refresh`)
+# that EVERY trust-path decide then runs through — exactly where the sq-37f1a regression hid
+# (an empty static WAC closure lost its `<urn:sparq:auth>` "materialized" marker, flipping a
+# definitive 403 deny into a retryable 503; each single leg stayed green). This leg compiles
+# both features together, runs `clippy --all-targets -D warnings` with them ON, and runs the
+# crate's tests — the full gated `tests/solid_authz_trust.rs` suite against the odrl-bridge
+# store path (including the injection-gate 403 pin) plus the both-features-only guard test
+# `decide_refuses_trust_block_combined_with_odrl` (sq-3mu76), which NO single-feature leg can
+# ever compile. Workspace crates only — no new external dependency.
+- name: "sparq-server (odrl-authz + solid-authz-trust combined)"
+  crate: "sparq-server"
+  features: "odrl-authz,solid-authz-trust"
+  test: true

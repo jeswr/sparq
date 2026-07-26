@@ -1,0 +1,18 @@
+# [FABLE-5] sq-hmd7l.10 — vendored ORE-style CLASS-SATISFIABILITY task
+# (expected: ontology CONSISTENT, class :MadCow UNSATISFIABLE).
+# Hand-authored, hand-verified — the classic "mad cow" pattern from DL tutorials/ORE
+# satisfiability tasks: MadCow ⊑ Vegetarian ⊓ ∃eats.Meat while Vegetarian ⊑ ∀eats.¬Meat,
+# so any MadCow instance needs an eats-successor that is both Meat and ¬Meat (clash on
+# every branch). The ontology ITSELF stays consistent (MadCow may simply be empty:
+# daisy ∈ Vegetarian has no eats-successor).
+@prefix : <http://sparq.dev/bench/ore-smoke/madcow#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+:Vegetarian rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :eats ;
+                              owl:allValuesFrom [ owl:complementOf :Meat ] ] .
+:MadCow rdfs:subClassOf :Vegetarian .
+:MadCow rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :eats ;
+                          owl:someValuesFrom :Meat ] .
+
+:daisy a :Vegetarian .

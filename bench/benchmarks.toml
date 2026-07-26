@@ -1851,30 +1851,31 @@ status      = "harness-ready"
 id          = "reason-ql-npd"
 name        = "OWL 2 QL rewriting comparison vs Ontop (NPD + Requiem suites)"
 category    = "inference"
-measures    = "PerfectRef rewrite time + UCQ size (disjunct count) for the Norwegian Petroleum Directorate (NPD) TBox and Requiem benchmark queries vs Ontop's rewriter; UCQ size oracle before timing"
-invoke      = "TBD — implementing bead sq-hmd7l.9"
-source      = "TBD — bench/reason-ql-npd/; scripts/bench-adapters/ (Ontop adapter)"
-dataset     = "TBD — NPD TBox + Requiem query suite (sha256-pinned); Ontop mapping stubs"
+measures    = "PerfectRef rewrite wall time + output UCQ size (minimised disjunct count) per query on the NPD benchmark ontology/queries and the Requiem test-suite ontologies (datalog queries translated to SPARQL at gather time) vs Ontop. Regime LABELLED per column: sparq rewrite columns are rewriter-phase; the Ontop CLI column is end-to-end only (its rewriter is not CLI-isolable) and compares only against sparq's e2e column over the same materialized data. UCQ-equivalence (raw-vs-minimised result-set agreement) enforced before any timing row"
+invoke      = "ONLY=sparq bash scripts/bench/reason-ql-same-box.sh --smoke   # hermetic acceptance (embedded closed-form fixtures). Full gather: bash scripts/bench/reason-ql-same-box.sh (needs network + JRE; NPD_JDBC_PROPERTIES enables the Ontop NPD end-to-end column)"
+source      = "scripts/bench/reason-ql-same-box.sh (harness incl. the Requiem datalog->SPARQL translator + envelope); crates/sparq-reason-ql/examples/ql_npd_requiem_bench.rs (sparq leg + smoke; witness-ABox equivalence gate)"
+dataset     = "NPD benchmark (github.com/ontop/npd-benchmark: QL ontology + SPARQL queries; PostgreSQL instance for the Ontop column) + Requiem test-suite ontologies/queries (A/S/U/V/P5/UX). gather-only /tmp, NOT committed; TBox sha256 recorded per envelope"
 quiet_box_sensitive = true
-pinning     = "TBD — NPD + Requiem sha256 + Ontop pinned version at gather time"
-records_to  = "TBD — bench/competitor-results/ontop-reason-ql-<UTC>.json (git-ignored); research/gap-reason-ql-2026-07.md"
-featured    = false  # registry stub; implementing bead sq-hmd7l.9
-status      = "planning"
+pinning     = "tbox_sha256 recorded per gather envelope; ONTOP_VERSION (default 5.3.0) + JENA_VERSION (default 5.4.0) pinned in the harness; the committed smoke fixtures pin closed-form minimised-UCQ sizes + certain-answer COUNTS (not timings)"
+records_to  = "bench/competitor-results/ (git-ignored envelopes: reason-ql-<suite>-<UTC>.json); research/gap-reason-ql-2026-07.md"
+featured    = false  # opt-in experimental rewriter; non-canonical until a quiet-box gather
+status      = "harness-ready"
 
 # [SONNET-4.6] sq-hmd7l.10 — OWL DL tableau harness + HermiT/Openllet columns
+# [FABLE-5] sq-hmd7l.10 — harness implemented: sparq-side ORE example + same-box wrapper.
 [[benchmark]]
 id          = "reason-dl-ore"
 name        = "OWL DL tableau harness (ORE corpora) + HermiT / Openllet columns"
 category    = "inference"
-measures    = "OWL DL classification / consistency wall time + classification verdict on the ORE (OWL Reasoner Evaluation) corpora vs HermiT / Openllet; classification verdict oracle before timing"
-invoke      = "TBD — implementing bead sq-hmd7l.10"
-source      = "TBD — bench/reason-dl-ore/; scripts/bench-adapters/ (Openllet adapter)"
-dataset     = "TBD — ORE ontology corpus (sha256-pinned; available from the ORE dataset repository)"
+measures    = "OWL DL CONSISTENCY verdict + END-TO-END consistency wall time (one comparable boundary: a full CLI process per engine per ontology, process start → exit, wrapper-clocked — engine startup and ontology load/parse inside EVERY engine's timing; sparq's internal extract/check phases recorded as breakdown only, asserted <= process wall) on ORE (OWL Reasoner Evaluation) corpus ontologies vs HermiT / Openllet, plus EL/QL/RL profile-membership rows; verdict oracle BEFORE timing (no timing row without verdict agreement; a disagreement is a correctness finding — timings nulled + bug bead). HONEST SCOPE: sparq-reason-dl is a scoped ALCH tableau, not full OWL 2 DL — out-of-fragment ontologies record an unknown(out-of-fragment) abstention, never a verdict or timing"
+invoke      = "bash scripts/bench/reason-dl-same-box.sh --smoke   # hermetic exit-0 acceptance path (vendored ORE-style fixtures, pinned verdicts). Full mode: ORE_CORPUS_DIR=/path/to/ore-owl-files [ONLY=\"sparq openllet\"] bash scripts/bench/reason-dl-same-box.sh. Non-canonical on the work box; canonical run is a future quiet-box wave"
+source      = "crates/sparq-reason-dl/examples/ore_bench.rs (+ examples/data/ore_smoke_*.ttl vendored fixtures); scripts/bench/reason-dl-same-box.sh (HermiT `-k` + openllet-cli `consistency` CLI adapters, gather-only jars)"
+dataset     = "vendored hand-authored ORE-style smoke subset (committed, pinned verdicts); real ORE 2014/2015 corpora are gather-only downloads via ORE_CORPUS_DIR (sha256 recorded per ontology in each envelope at gather time)"
 quiet_box_sensitive = true
-pinning     = "TBD — ORE corpus sha256 + Openllet jar pinned version at gather time"
-records_to  = "TBD — bench/competitor-results/openllet-reason-dl-<UTC>.json (git-ignored); research/gap-reason-dl-2026-07.md"
-featured    = false  # registry stub; implementing bead sq-hmd7l.10
-status      = "planning"
+pinning     = "smoke verdicts + EL/QL/RL memberships pinned as assertions in examples/ore_bench.rs; ORE corpus file sha256 + HermiT/Openllet jar versions recorded in the envelope at gather time (prefer Openllet, Apache-2.0, for publishable numbers — HermiT is LGPL-3.0)"
+records_to  = "OUT_DIR envelopes, default /tmp/reason-dl-same-box-results/reason-dl-<ont>-<UTC>.json (git-ignored); research/gap-reason-dl-2026-07.md (methodology; NON-canonical)"
+featured    = false  # harness implemented (sq-hmd7l.10); canonical quiet-box numbers still pending
+status      = "implemented"
 
 # [SONNET-4.6] sq-hmd7l.7 — materialization same-box comparison vs Jena / VLog / Nemo
 # [FABLE-5] sq-hmd7l.30/.31 — VLog + Nemo columns wired with VALIDATED OWL-RL/RDFS encodings.
@@ -1907,20 +1908,24 @@ records_to  = "Phase 1: stdout only (no file). Phase 2: bench/competitor-results
 featured    = false  # quality comparison at matched model/budget, not a throughput dashboard card; HONESTY: sparq-kge is in-store KGE over dict-encoded ids, not a standalone KGE training library
 status      = "implemented"  # Phase 1 (published-only) implemented; Phase 2 is sq-hmd7l.37
 
-# [SONNET-4.6] sq-hmd7l.24 — RIF NOT-COMPARABLE verdict + conformance runner
+# [SONNET-4.6] sq-hmd7l.24 — RIF NOT-COMPARABLE verdict + conformance runner.
+# [FABLE-5] sq-hmd7l.24 implemented: CONFORMANCE-ONLY axis (no runnable open-source RIF
+# peer exists — fuxi dead, Jena dropped RIF, RIFle unmaintained, RDFox consumes datalog
+# not RIF; research/gap-rif-2026-07.md codifies the verdict). NO wall-clock is emitted;
+# perf of RIF-translated rules is the materialization axis (sq-hmd7l.7).
 [[benchmark]]
 id          = "rif-conformance"
 name        = "RIF conformance — W3C RIF suite pass-rate runner (NOT-COMPARABLE verdict)"
 category    = "conformance"
-measures    = "W3C RIF Core + BLD test-suite pass-rate (pass/fail counts; NOT a throughput measure); backs the 'only maintained open-source RIF consumer' claim; failures listed, never rounded up"
-invoke      = "TBD — implementing bead sq-hmd7l.24"
-source      = "TBD — bench/rif-conformance/; W3C RIF test suite fetched at gather time"
-dataset     = "TBD — W3C RIF Core + BLD test suite (sha256-pinned or commit-pinned)"
+measures    = "W3C RIF test-suite pass-rate with per-dialect breakdown (pass/fail/skip counts + the named skip taxonomy — the denominator's honesty; NOT a throughput measure); backs the 'only maintained open-source RIF consumer' claim; failures listed one by one, never rounded up. --smoke HARD self-asserts EXACT per-case verdicts (pinned SKIPs included) vs bench/rif/expected.tsv on the vendored sparq-AUTHORED subset (exit 1 on drift)"
+invoke      = "bash bench/rif/run.sh --smoke   # self-asserting vendored subset\nscripts/fetch-inference-suites.sh && bash bench/rif/run.sh   # full per-dialect pass-rate over the fetched W3C archive (graceful skip, exit 0, when absent)"
+source      = "bench/rif/{run.sh,expected.tsv,suite/,README.md}; crates/sparq-reason/examples/rif_conformance.rs (--features rif-xml; oracle is a condensed restatement of crates/sparq-conformance/tests/rif_wg_core_suite.rs, cross-run for tally parity); research/gap-rif-2026-07.md"
+dataset     = "smoke: vendored sparq-AUTHORED cases in bench/rif/suite (W3C archive taxonomy; the real W3C RIF files carry NO redistribution license — even a subset is a prohibited derivative, see scripts/fetch-inference-suites.sh). full: the FETCHED W3C archive under tests/w3c/rif-core/ (gitignored; Core_v1.22 today, further dialect archives surface as their own breakdown rows when fetched)"
 quiet_box_sensitive = false  # pass-rate is deterministic (correctness, not wall-clock)
-pinning     = "TBD — W3C RIF test-suite commit sha256"
-records_to  = "TBD — bench/rif-conformance/results.tsv (pass/fail counts); NOT a perf number"
-featured    = false  # registry stub; implementing bead sq-hmd7l.24. NOT-COMPARABLE perf verdict
-status      = "planning"
+pinning     = "smoke: bench/rif/expected.tsv (exact per-case verdicts) + the committed suite/ fixtures. full: the Core_v1.22.zip sha256 pinned in scripts/fetch-inference-suites.sh. The rise-only pass-count RATCHET is RIF_WG_CORE_FLOOR in crates/sparq-conformance/tests/rif_wg_core_suite.rs (this runner emits the rate, the lane owns the floor)"
+records_to  = "stdout (self-asserting smoke); full mode tees to bench/rif/results.tsv (gitignored — pass/fail counts, NOT a perf number, never committed to markdown)"
+featured    = false  # NOT-COMPARABLE perf verdict: conformance-only arm, no head-to-head capability claim
+status      = "ok"
 
 # [FABLE-5] sq-lsp7k.1.1 — sparq-forms derivation micro-bench: the cost of one
 # shape→FormDescription derivation (shape selection + field enumeration + DASH

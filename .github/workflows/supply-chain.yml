@@ -32,10 +32,14 @@ on:
     # [FABLE-5] Draft-tier CI: + ready_for_review so the un-draft moment re-runs
     # this gate-feeding lane (docs/branch-protection.md §Draft-tier CI).
     types: [opened, synchronize, reopened, ready_for_review]
-  # [OPUS-4.8] Merge queue: supply-chain (cargo-deny etc.) surfaces a check on PRs, so
-  # it must also run on the queue's merge_group ref or the required ci-summary would
-  # wait for a sibling that never appears there and time out.
-  merge_group:
+  # [FABLE-5] (2026-07-18 maintainer directive, merge-queue subset) merge_group
+  # REMOVED: cargo-deny/vet/SBOM already ran + gated on the PR head, re-run on every
+  # push-to-main above (post-merge detection), and dependency-monitoring.yml's weekly
+  # cron re-audits the unchanged graph for advisories disclosed between PRs. The
+  # polling `ci-summary / gate` never waits on a check that was never scheduled
+  # (bench.yml sq-6vshe.6 rationale; the old "would wait ... and time out" comment
+  # was stale pre-polling doctrine). The Decide-rust_changed merge_group branch
+  # below is now dead code on a live fail-safe path — kept for a cheap revert.
   workflow_dispatch:
 
 permissions:
@@ -176,7 +180,7 @@ jobs:
       # The generator derives transient member locks from the committed root lock without
       # dependency resolution, and fails unless the shared-client runtime view attests both
       # lazy codec dependencies.
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
       - name: Generate JS SBOM (runtime + full tree)
@@ -216,10 +220,17 @@ jobs:
       # merge-queue cost this audit removes is the cargo-deny + cargo-vet check step-groups
       # (already rust_changed-gated below); the SBOM generation is a pure function of
       # Cargo.lock and its unconditional regeneration is a deliberate design choice.
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Rust (preinstalled stable)
+        # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
+        # ships a rustup stable toolchain; the SHA-pinned action's `rustup
+        # toolchain install stable` re-downloads the whole toolchain whenever
+        # the image lags the newest release. Use the preinstalled one —
+        # `rustup default`/`component add` never trigger a toolchain download.
+        run: |
+          rustup default stable
+          rustup show active-toolchain
       - name: Install cargo-deny + cargo-vet + cargo-cyclonedx
-        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
         with:
           tool: cargo-deny,cargo-vet@0.10.2,cargo-cyclonedx
 

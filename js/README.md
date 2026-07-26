@@ -24,9 +24,11 @@ browser. (The wasm bundle bytes are tracked per-commit on the perf dashboard,
   `CREATE`/`ADD`/`COPY`/`MOVE`), applied in place through the engine's delta
   overlay — O(batch), no index rebuild — plus quad-level `applyDelta` /
   `addQuads` / `removeQuads`.
-- Streaming results: `queryBindingsStream()` yields one solution at a time
-  (`for…of` or `for await…of`) from ~64 KiB wasm-boundary chunks — no giant
-  JSON blob, no giant array; `queryJsonChunks()` exposes the raw chunks.
+- RDF/JS Query streaming: `await queryBindings()` returns a Query-spec
+  `ResultStream<Bindings>` with `data` / `end` / `error` events and pull
+  backpressure (`read()`, plus `pause()` / `resume()`). The lower-level
+  `queryBindingsStream()` generator and `queryJsonChunks()` expose the same
+  ~64 KiB cursor path directly — no giant JSON blob or result array.
 - Compressed ingest: `fromCompressed()` decodes `.nt.zst` (including
   multi-frame zstd from sparq's `CompressedSink`) via pure-JS `fzstd`, and
   `.gz` via the platform.
@@ -97,12 +99,18 @@ const store = await SparqStore.fromString(`
   ex:bob   ex:name "Bob"@en .
 `, 'turtle'); // or 'ntriples' | 'nquads' | 'trig'
 
-// SELECT → RDF/JS bindings
-for (const row of store.queryBindings(
+// SELECT → RDF/JS ResultStream<Bindings>
+const bindings = await store.queryBindings(
   'PREFIX ex: <http://ex/> SELECT ?s ?name WHERE { ?s ex:name ?name }',
-)) {
+);
+bindings.on('data', (row) => {
   console.log(row.get('s').value, '→', row.get('name').value);
-}
+});
+bindings.on('end', () => console.log('done'));
+bindings.on('error', console.error);
+
+// Synchronous materialisation remains available through query():
+const rows = store.query('SELECT ?s WHERE { ?s ?p ?o }'); // Bindings[]
 
 // ASK → boolean
 store.queryBoolean('PREFIX ex: <http://ex/> ASK { ex:alice ex:knows ex:bob }'); // true
@@ -136,7 +144,7 @@ for (const binding of store.querySolutions('SELECT ?s WHERE { ?s ?p ?o } LIMIT 1
 // Raw SPARQL 1.1 JSON results, skipping JS-side term materialisation
 const json = JSON.parse(store.queryJson('SELECT * WHERE { ?s ?p ?o } LIMIT 10'));
 
-// Stream large results one solution at a time (no whole-result JSON/array):
+// Lower-level cursor generator (also no whole-result JSON/array):
 for await (const row of store.queryBindingsStream('SELECT ?s ?o WHERE { ?s ?p ?o }')) {
   console.log(row.get('s').value);
 }
@@ -148,7 +156,7 @@ store.applyDelta(insertQuads, deleteQuads); // deletes applied first, then inser
 
 // Named graphs: load as a DATASET (N-Quads / TriG / fromQuads keep their graphs)
 const ds = await SparqStore.fromString(nquads, 'nquads', { dataset: true });
-ds.queryBindings('SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o } }');
+const namedRows = ds.query('SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o } }');
 ds.update('INSERT DATA { GRAPH <http://ex/g> { <http://ex/s> <http://ex/p> "o" } }');
 ds.match(null, null, null, DF.namedNode('http://ex/g')); // graph-aware lookup
 
