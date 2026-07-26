@@ -413,7 +413,24 @@ class TestGatedPrTable(unittest.TestCase):
 class TestNeverInvents(unittest.TestCase):
     """The renderer may DROP, ANNOTATE and ORDER. It may not author an ask."""
 
-    def test_every_rendered_blocked_item_comes_from_the_toml(self):
+    @staticmethod
+    def _blocked_items(body: str) -> list[str]:
+        """Reassemble each 🔴 item from its wrapped lines, whitespace-normalised.
+
+        Deliberately NOT a first-line-prefix check: comparing only the first rendered line lets
+        anything appended to the tail of an ask through, which is exactly the "invents an ask"
+        failure this test is named after.
+        """
+        section = body.split("## 🔴 Only you can unblock", 1)[1].split("\n## ", 1)[0]
+        items: list[str] = []
+        for line in section.splitlines():
+            if re.match(r"^\d+\. ", line):
+                items.append(line.split(". ", 1)[1])
+            elif items and line.startswith("   "):
+                items[-1] += " " + line.strip()
+        return [" ".join(i.split()) for i in items]
+
+    def test_every_rendered_blocked_item_is_verbatim_from_the_toml(self):
         config = rsh.load_config(CONFIG)
         states = {
             ref: rsh.RefState(ref=ref, state="open", is_pr=True, mergeable="MERGEABLE",
@@ -423,15 +440,26 @@ class TestNeverInvents(unittest.TestCase):
         }
         body = rsh.render(config, states, COUNTS, date="2026-07-26").body
         curated = {" ".join(e.ask.split()) for e in config.entries}
-        for line in body.splitlines():
-            m = re.match(r"^\d+\. (.*)$", line)
-            if not m:
-                continue
-            item = m.group(1)
-            self.assertTrue(
-                any(ask.startswith(item) or item.startswith(ask[:60]) for ask in curated),
-                f"rendered 🔴 item is not traceable to the TOML: {item[:80]}",
-            )
+        items = self._blocked_items(body)
+        self.assertEqual(len(items), len(config.bucket("blocked")))
+        for item in items:
+            # EXACT equality: with every ref open and mergeable, no annotation applies, so any
+            # difference at all is the renderer authoring copy.
+            self.assertIn(item, curated, f"rendered 🔴 item is not verbatim TOML: {item[:90]}")
+
+    def test_the_only_additions_are_the_declared_annotations(self):
+        # And when an annotation DOES apply, it must be exactly one of the two declared ones.
+        config = rsh.load_config(CONFIG)
+        states = {
+            ref: rsh.RefState(ref=ref, error="HTTP 502")
+            for e in config.entries
+            for ref in e.refs
+        }
+        body = rsh.render(config, states, COUNTS, date="2026-07-26").body
+        curated = {" ".join(e.ask.split()) for e in config.entries}
+        for item in self._blocked_items(body):
+            stripped = item.replace(f" {rsh.UNKNOWN_MARK}.", "")
+            self.assertIn(stripped, curated, f"unexpected addition: {item[-90:]}")
 
     def test_every_table_ask_cell_is_a_curated_ask_or_the_rebase_annotation(self):
         config = rsh.load_config(CONFIG)
