@@ -759,20 +759,48 @@ class TestWorkflowWiring(unittest.TestCase):
                       "this suite is never RUN — its assertions are dead in CI")
 
     def test_invocation_is_not_neutralised_by_a_trailing_true(self):
-        """MUTANT: append `|| true` to the invocation => RED. Exit-zero swallowing has bitten this
-        repo three times in one day; a guard whose failure is discarded is not a guard."""
-        runs = "\n".join(s["run"] for s in self._run_steps())
-        for line in runs.splitlines():
-            if "test_no_deprecated_models.py" in line:
+        """MUTANT: append `|| true` to ANY invocation in this workflow => RED.
+
+        [OPUS-5] WIDENED, found by mutation. This test previously matched only the line invoking
+        THIS suite, so `python3 scripts/route-resolve.py --self-test || true` — which silently
+        discards the entire routing-resolver contract, including the `area:gui` carve-out and the
+        role:impl chain — SURVIVED. Exit-zero swallowing has bitten this repo repeatedly; the
+        assertion has to cover every gating invocation in the job, not just this file's own."""
+        checked = 0
+        for step in self._run_steps():
+            for line in step["run"].splitlines():
+                stripped = line.strip()
+                if not stripped.startswith("python3 "):
+                    continue
+                checked += 1
                 self.assertNotRegex(
-                    line.strip(), r"(\|\|\s*true|;\s*true|\|\|\s*:)\s*$",
-                    "the guard's exit status is discarded")
+                    stripped, r"(\|\|\s*true|;\s*true|\|\|\s*:)\s*$",
+                    f"the exit status of `{stripped}` is discarded")
+        self.assertGreater(checked, 5,
+                           "no invocations were inspected — the run blocks were not parsed")
+
+    def test_the_routing_contract_scripts_are_actually_invoked(self):
+        """[OPUS-5] A guard nobody runs cannot go red. The routing change of registry #738 lives in
+        `orchestration/routing.toml` + `scripts/route-resolve.py`, and its assertions live in those
+        scripts' own `--self-test`s — so this gate must invoke each of them.
+
+        MUTANT: delete any of these invocation lines (or the whole step) => RED."""
+        runs = "\n".join(s["run"] for s in self._run_steps())
+        for invocation in ("python3 scripts/routing-validate.py --self-test",
+                           "python3 scripts/route-resolve.py --self-test",
+                           "python3 scripts/dispatch-plan.py --self-test",
+                           "python3 scripts/tests/test_no_deprecated_models.py"):
+            self.assertIn(invocation, runs, f"`{invocation}` is never RUN in this gate")
+        self.assertRegex(runs, r"(?m)^\s*python3 scripts/routing-validate\.py\s*$",
+                         "the validator must also run against the LIVE routing.toml, not only "
+                         "against its own fixtures")
 
     def test_run_block_uses_pipefail(self):
-        """Without `set -euo pipefail` a failing early command does not fail the step."""
+        """Without `set -euo pipefail` a failing early command does not fail the step. Applied to
+        EVERY run step in the gating job, not only the one invoking this suite."""
         for step in self._run_steps():
-            if "test_no_deprecated_models.py" in step["run"]:
-                self.assertIn("set -euo pipefail", step["run"])
+            self.assertIn("set -euo pipefail", step["run"],
+                          f"run step {step.get('name', '<unnamed>')!r} lacks pipefail")
 
     def test_this_file_is_a_path_trigger_on_both_triggers(self):
         """MUTANT: drop the paths entry => this suite stops running on its own PRs => RED.

@@ -118,6 +118,12 @@ def gui_carve_out(labels, chain, role=None):
         if not {GUI_CARVE_OUT_LEAD, "opus5"} <= set(chain):
             return chain
         return [GUI_CARVE_OUT_LEAD] + [m for m in chain if m != GUI_CARVE_OUT_LEAD]
+    # HONESTY NOTE, found by mutating this very line: `role is None` is NOT the binding guard —
+    # `None not in GUI_CARVE_OUT_INJECT_ROLES` is already true for every well-formed allow-list, so
+    # deleting the `role is None` half leaves behaviour identical and no test can see it. It is kept
+    # because it states the intent at the point of decision, but the MEMBERSHIP test is what carries
+    # the property, and that is what the assertions pin. (Same shape as the note in the registry's
+    # no_change_routing.excluded_tiers.)
     if role is None or role not in GUI_CARVE_OUT_INJECT_ROLES:
         return chain
     if "opus5" not in chain:
