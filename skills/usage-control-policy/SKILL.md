@@ -249,20 +249,27 @@ let _ = PROFILE_IRI; // https://sparq.dev/ns/odrl-secprop-profile#
 
 ### Proof-discharge obligations — the ODRL half of the ZK↔ODRL envelope (same feature) — [SONNET-4.6] sq-yh427
 
-`discharge_obligations(&Policy)` answers *"before I can decide this request, what would a presented proof have to establish?"* — it projects a parsed policy to the `secx:requires…` constraints it carries, each resolved to its dimension, operator and required level, in rule order (permissions before prohibitions), nested `odrl:LogicalConstraint` leaves included. An empty result means the policy asks for no security property, so no presentation is needed.
+`discharge_requirements(&Policy)` answers *"before I can decide this request, what would a presented proof have to establish?"* — it projects a parsed policy to the `secx:requires…` constraints it carries, each resolved to its dimension, operator and required level, in rule order (permissions before prohibitions). Rules that mention no `secx:` property are omitted, so an empty result means no presentation is needed.
 
 ```rust,ignore
 // cargo: sparq-policy with --features secprop-leftoperands
-use sparq_policy::secprop::{discharge_obligations, Deontic};
+use sparq_policy::secprop::{discharge_requirements, Deontic, DischargeExpr};
 
-for o in discharge_obligations(&policy) {
-    // o.rule / o.deontic / o.left_operand / o.dimension / o.operator / o.required
-    // Deontic::Prohibition => establishing this property makes the prohibition FIRE.
-    let _ = (&o.rule, o.deontic == Deontic::Permission, o.dimension, &o.required);
+for r in discharge_requirements(&policy) {
+    // r.rule / r.deontic / r.requirement — WALK the tree; the combinator decides.
+    match &r.requirement {
+        DischargeExpr::Any(alts) => { /* establishing ANY ONE of `alts` suffices */ }
+        DischargeExpr::ExactlyOne(alts) => { /* establishing TWO of `alts` FAILS */ }
+        DischargeExpr::All(conjuncts) => { /* every one must hold */ }
+        DischargeExpr::Atomic(o) => { let _ = (o.dimension, &o.required); }
+        DischargeExpr::Other { left_operand } => { /* non-proof branch */ }
+    }
 }
 ```
 
-- **`Deontic` is load-bearing.** An obligation on a *prohibition* is not a bar to clear: a prohibition fires when its constraints hold, and deny-overrides. A host must not read the two the same way.
+- **The `odrl:` combinator is preserved, and is load-bearing.** The result is a `DischargeExpr` **tree per rule**, not a flat list: under `odrl:or` establishing *either* branch suffices, and under `odrl:xone` establishing more than one is a *failure*. `DischargeExpr::obligations()` gives a flat inventory of the leaves, but it is explicitly **NON-decisional** — `and`, `or` and `xone` over the same leaves flatten identically, so reading it as the requirement overstates what a presentation must prove.
+- **Non-`secx:` branches survive as `DischargeExpr::Other`** rather than being pruned: dropping a core-ODRL operand out of an `odrl:or` would turn an alternative into a mandate.
+- **`Deontic` is load-bearing.** An obligation on a *prohibition* is not a bar to clear: a prohibition fires when its whole constraint expression holds, and deny-overrides. A host must not read the two the same way — and one leaf alone does not fire a multi-constraint prohibition.
 - **Duty constraints are excluded** — the single-node base case checks a `Duty` by *action* discharge and never evaluates the duty's own constraints, so listing them would misdescribe what `evaluate` will check.
 - **It reports; it does not discharge.** Extraction verifies nothing, orders no levels (the `secx:atLeast` partial order and the admissibility reduction live in `sparq-trust`, `sq-ufsi9`), and leaves the stateless `evaluate` path unchanged — a `secx:` constraint with no supplied evidence stays fail-closed unsatisfied.
 - **The wire half of the envelope is deferred, deliberately.** A VC 2.0 Verifiable Presentation carrying a Data-Integrity proof under a `sparql-zk`-style cryptosuite is **not** implemented: no such cryptosuite exists in this workspace (`sparq-vc` implements `eddsa-rdfc-2022` only), its identifier and claim shape are still under cross-agent design with the Solid-server sibling (`#890`(b)), and sparq's ZK estate has **no** external accredited-cryptographer sign-off (`sq-qhy4`). <!-- privacy-claims-allow: NEGATIVE — records that the ZK presentation envelope is unimplemented and the estate unaudited; sq-qhy4 -->

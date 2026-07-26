@@ -33,11 +33,19 @@
 //!
 //! ## The ODRL half of the ZK↔ODRL constraint-discharge envelope (sq-yh427)
 //!
-//! [`discharge_obligations`] projects a parsed [`crate::Policy`] to the list of
+//! [`discharge_requirements`] projects a parsed [`crate::Policy`] to the
 //! `secx:requires…` constraints it carries — *what a presented proof would have to
 //! establish*, over which dimension, at which level, and on which deontic rule. That
 //! is the **ODRL-side interface** the ZK↔ODRL envelope plugs into: a host reads it to
 //! know which properties to demand of a presentation before it can decide.
+//!
+//! It returns a [`DischargeExpr`] **tree per rule**, not a flat list, because the
+//! `odrl:` combinator is load-bearing: under `odrl:or` a presentation establishing
+//! *either* branch suffices, and under `odrl:xone` establishing more than one is a
+//! failure. A flat list would read as a conjunction and would overstate the
+//! requirement. Branches whose leftOperand is not a `secx:` one are kept as
+//! [`DischargeExpr::Other`] rather than pruned — dropping them from an `or` would
+//! likewise turn an alternative into a mandate.
 //!
 //! The **wire half** of that envelope — a VC 2.0 Verifiable Presentation carrying a
 //! Data-Integrity proof under a `sparql-zk`-style cryptosuite — is **deliberately NOT
@@ -76,7 +84,9 @@
 //! `research/security-properties-ontology-design.md` §4.3.1 + §9). 🤖 SPARQ agent —
 //! security-properties ontology. Flag for re-review when Fable returns.
 
-use crate::model::{Constraint, ConstraintNode, LogicalConstraint, Operator, Policy, Rule, Value};
+use crate::model::{
+    Constraint, ConstraintNode, LogicalConstraint, LogicalOperator, Operator, Policy, Rule, Value,
+};
 
 /// The `secx:` namespace base — the vendored ZKP-SPARQL `sec-prop:` extension
 /// namespace these leftOperands and dimensions live under (a real `w3id.org`
@@ -230,13 +240,15 @@ pub fn over_dimension(left_operand: &str) -> Option<&'static str> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Deontic {
     /// The obligation sits on an `odrl:permission`: the permission grants only while
-    /// **every** one of its constraints holds, so this is a property a presentation
-    /// must establish for access to be granted.
+    /// the rule's whole constraint expression holds, so establishing this property is
+    /// (part of) what earns access.
     Permission,
     /// The obligation sits on an `odrl:prohibition`: a prohibition **fires** (and
-    /// deny-overrides the decision — see [`crate::evaluate`]) when its constraints
-    /// hold. Establishing this property therefore *withholds* access; a host must not
-    /// treat it as something to satisfy.
+    /// deny-overrides the decision — see [`crate::evaluate`]) when its whole
+    /// constraint expression holds. Establishing this property therefore moves toward
+    /// *withholding* access; a host must not treat it as something to satisfy. Note it
+    /// takes the enclosing [`DischargeExpr`] holding, not this leaf alone, to make a
+    /// multi-constraint prohibition fire.
     Prohibition,
 }
 
@@ -263,13 +275,102 @@ pub struct DischargeObligation {
     pub required: Value,
 }
 
-/// Every security-property proof-discharge obligation a policy carries, in rule order
-/// (permissions before prohibitions), nested compound constraints included.
+/// What one policy rule requires of a presentation, with the `odrl:` combinator
+/// structure that decides *which combinations* of the leaves actually matter kept
+/// intact.
 ///
-/// A host uses this to answer *"before I can decide this request, what would a
-/// presented proof have to establish?"* — the ODRL half of the ZK↔ODRL
-/// constraint-discharge envelope (`sq-yh427`). An empty result means the policy asks
-/// for no security property, so no presentation is needed.
+/// The combinator is load-bearing and must not be flattened away: under [`Any`](Self::Any)
+/// a presentation establishing **either** branch suffices, and under
+/// [`ExactlyOne`](Self::ExactlyOne) establishing more than one is a *failure*. A host
+/// can therefore read the alternatives straight off this tree without going back to
+/// the original [`crate::Policy`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DischargeExpr {
+    /// A leaf `secx:requires…` constraint — a property a proof can establish.
+    Atomic(DischargeObligation),
+    /// A leaf constraint whose leftOperand is **not** a `secx:` one (core ODRL, or an
+    /// unrelated custom profile): decided from the ordinary request context, never by
+    /// a proof. Carries the [`crate::Constraint::left`] IRI so a host can see *why* a
+    /// branch is satisfiable without a presentation.
+    ///
+    /// These are kept rather than pruned: deleting a non-proof operand from an
+    /// [`Any`](Self::Any) would silently turn an alternative into a mandate.
+    Other {
+        /// The non-`secx:` leftOperand IRI.
+        left_operand: String,
+    },
+    /// `odrl:and` — every operand must hold. Also the implicit combinator over a
+    /// rule's own top-level [`crate::Rule::constraints`] plus its
+    /// [`crate::Rule::logical_constraints`], which ODRL conjoins.
+    All(Vec<DischargeExpr>),
+    /// `odrl:or` — at least one operand must hold.
+    Any(Vec<DischargeExpr>),
+    /// `odrl:xone` — **exactly** one operand must hold; establishing a second one
+    /// breaks the rule rather than reinforcing it.
+    ExactlyOne(Vec<DischargeExpr>),
+}
+
+impl DischargeExpr {
+    /// A flat inventory of every [`DischargeObligation`] leaf in this tree, in
+    /// document order.
+    ///
+    /// **NON-DECISIONAL.** This is "which security properties does this rule mention
+    /// at all", useful for capability negotiation or logging. It is emphatically *not*
+    /// "which properties a presentation must establish": the flattening discards the
+    /// [`Any`](Self::Any)/[`ExactlyOne`](Self::ExactlyOne) structure, so reading it as
+    /// a conjunction overstates the requirement. Walk the tree for that.
+    pub fn obligations(&self) -> Vec<&DischargeObligation> {
+        let mut out = Vec::new();
+        self.collect_obligations(&mut out);
+        out
+    }
+
+    fn collect_obligations<'a>(&'a self, out: &mut Vec<&'a DischargeObligation>) {
+        match self {
+            DischargeExpr::Atomic(o) => out.push(o),
+            DischargeExpr::Other { .. } => {}
+            DischargeExpr::All(ops) | DischargeExpr::Any(ops) | DischargeExpr::ExactlyOne(ops) => {
+                for op in ops {
+                    op.collect_obligations(out);
+                }
+            }
+        }
+    }
+
+    /// Whether this subtree mentions any `secx:` property at all.
+    fn has_obligation(&self) -> bool {
+        match self {
+            DischargeExpr::Atomic(_) => true,
+            DischargeExpr::Other { .. } => false,
+            DischargeExpr::All(ops) | DischargeExpr::Any(ops) | DischargeExpr::ExactlyOne(ops) => {
+                ops.iter().any(DischargeExpr::has_obligation)
+            }
+        }
+    }
+}
+
+/// One policy rule's security-property discharge requirement — see [`DischargeExpr`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleDischarge {
+    /// The [`crate::Rule::id`] the requirement came from (for justification). Every
+    /// [`DischargeExpr::Atomic`] leaf below repeats it, so a flattened inventory stays
+    /// self-describing.
+    pub rule: String,
+    /// Whether that rule is a permission or a prohibition — see [`Deontic`].
+    pub deontic: Deontic,
+    /// The requirement tree, combinator structure intact.
+    pub requirement: DischargeExpr,
+}
+
+/// What a presentation would have to establish for each rule of a policy that asks for
+/// any security property, in rule order (permissions before prohibitions).
+///
+/// This is the ODRL half of the ZK↔ODRL constraint-discharge envelope (`sq-yh427`): a
+/// host reads it to answer *"before I can decide this request, what would a presented
+/// proof have to establish?"*. Each entry keeps its `odrl:and`/`or`/`xone` structure,
+/// so the valid **alternatives** are readable without consulting the original
+/// [`crate::Policy`] — see [`DischargeExpr`]. Rules mentioning no `secx:` property are
+/// omitted, so an empty result means no presentation is needed at all.
 ///
 /// **Scope, stated honestly.** Extraction is pure projection: it verifies nothing,
 /// orders no levels, and changes no evaluation semantics. It also **excludes duty
@@ -279,7 +380,7 @@ pub struct DischargeObligation {
 ///
 /// ```
 /// # // cargo: sparq-policy with --features secprop-leftoperands
-/// use sparq_policy::secprop::{discharge_obligations, Deontic, REQUIRES_ASSURANCE};
+/// use sparq_policy::secprop::{discharge_requirements, Deontic, DischargeExpr, REQUIRES_ASSURANCE};
 /// use sparq_policy::{Action, Constraint, Operator, Policy, Rule, Value, ODRL_NS};
 ///
 /// let policy = Policy {
@@ -302,71 +403,90 @@ pub struct DischargeObligation {
 ///     conflict: None,
 /// };
 ///
-/// let obligations = discharge_obligations(&policy);
-/// assert_eq!(obligations.len(), 1);
-/// assert_eq!(obligations[0].deontic, Deontic::Permission);
+/// let requirements = discharge_requirements(&policy);
+/// assert_eq!(requirements.len(), 1);
+/// assert_eq!(requirements[0].deontic, Deontic::Permission);
+/// // A rule's own constraints are conjoined: every one of them must hold.
+/// assert!(matches!(requirements[0].requirement, DischargeExpr::All(_)));
+/// let leaves = requirements[0].requirement.obligations();
 /// assert_eq!(
-///     obligations[0].dimension,
+///     leaves[0].dimension,
 ///     "https://w3id.org/zkp-sparql/sec-prop#AssuranceLevel"
 /// );
 /// ```
-pub fn discharge_obligations(policy: &Policy) -> Vec<DischargeObligation> {
+pub fn discharge_requirements(policy: &Policy) -> Vec<RuleDischarge> {
     let mut out = Vec::new();
-    for rule in &policy.permissions {
-        collect_rule(rule, Deontic::Permission, &mut out);
-    }
-    for rule in &policy.prohibitions {
-        collect_rule(rule, Deontic::Prohibition, &mut out);
+    for (rules, deontic) in [
+        (&policy.permissions, Deontic::Permission),
+        (&policy.prohibitions, Deontic::Prohibition),
+    ] {
+        for rule in rules {
+            let requirement = rule_expr(rule, deontic);
+            if requirement.has_obligation() {
+                out.push(RuleDischarge {
+                    rule: rule.id.clone(),
+                    deontic,
+                    requirement,
+                });
+            }
+        }
     }
     out
 }
 
-/// Collect a rule's atomic constraints, then its compound ones.
-fn collect_rule(rule: &Rule, deontic: Deontic, out: &mut Vec<DischargeObligation>) {
-    for c in &rule.constraints {
-        push_if_secprop(&rule.id, deontic, c, out);
-    }
-    for lc in &rule.logical_constraints {
-        collect_logical(&rule.id, deontic, lc, out);
+/// A rule's own constraints and its compound constraints, conjoined — ODRL requires
+/// all of them of a rule.
+fn rule_expr(rule: &Rule, deontic: Deontic) -> DischargeExpr {
+    let mut operands: Vec<DischargeExpr> = rule
+        .constraints
+        .iter()
+        .map(|c| leaf_expr(&rule.id, deontic, c))
+        .collect();
+    operands.extend(
+        rule.logical_constraints
+            .iter()
+            .map(|lc| logical_expr(&rule.id, deontic, lc)),
+    );
+    DischargeExpr::All(operands)
+}
+
+/// Mirror an `odrl:LogicalConstraint` tree into a [`DischargeExpr`], preserving the
+/// combinator: it is exactly what tells a host whether the operands are all required
+/// (`and`), alternatives (`or`), or mutually exclusive (`xone`).
+fn logical_expr(rule_id: &str, deontic: Deontic, lc: &LogicalConstraint) -> DischargeExpr {
+    let operands = lc
+        .operands
+        .iter()
+        .map(|operand| match operand {
+            ConstraintNode::Atomic(c) => leaf_expr(rule_id, deontic, c),
+            ConstraintNode::Compound(inner) => logical_expr(rule_id, deontic, inner),
+        })
+        .collect();
+    match lc.operator {
+        LogicalOperator::And => DischargeExpr::All(operands),
+        LogicalOperator::Or => DischargeExpr::Any(operands),
+        LogicalOperator::Xone => DischargeExpr::ExactlyOne(operands),
     }
 }
 
-/// Walk an `odrl:LogicalConstraint` tree, collecting its atomic leaves. A compound
-/// constraint's combinator (`and`/`or`/`xone`) does not change *what a proof would
-/// have to establish* — only how the leaves fold into the rule's verdict — so every
-/// leaf is reported and the combinator is left to [`crate::evaluate`].
-fn collect_logical(
-    rule_id: &str,
-    deontic: Deontic,
-    lc: &LogicalConstraint,
-    out: &mut Vec<DischargeObligation>,
-) {
-    for operand in &lc.operands {
-        match operand {
-            ConstraintNode::Atomic(c) => push_if_secprop(rule_id, deontic, c, out),
-            ConstraintNode::Compound(inner) => collect_logical(rule_id, deontic, inner, out),
-        }
-    }
-}
-
-/// Record `c` as an obligation iff its leftOperand is one this profile declares.
-fn push_if_secprop(
-    rule_id: &str,
-    deontic: Deontic,
-    c: &Constraint,
-    out: &mut Vec<DischargeObligation>,
-) {
+/// A single constraint as a leaf: an obligation iff its leftOperand is one this
+/// profile declares, otherwise an opaque non-proof branch.
+fn leaf_expr(rule_id: &str, deontic: Deontic, c: &Constraint) -> DischargeExpr {
     let Some(dimension) = over_dimension(&c.left) else {
-        return; // a core ODRL (or unrelated custom) leftOperand — not a proof obligation
+        // A core ODRL (or unrelated custom) leftOperand — not a proof obligation, but
+        // still a branch of the requirement, so it must not be dropped.
+        return DischargeExpr::Other {
+            left_operand: c.left.clone(),
+        };
     };
-    out.push(DischargeObligation {
+    DischargeExpr::Atomic(DischargeObligation {
         rule: rule_id.to_owned(),
         deontic,
         left_operand: c.left.clone(),
         dimension,
         operator: c.operator,
         required: c.right.clone(),
-    });
+    })
 }
 
 #[cfg(test)]
@@ -451,9 +571,30 @@ mod tests {
         }
     }
 
+    /// A rule whose only constraint set is `constraints` yields one entry; wrap the
+    /// combinator-shape assertions.
+    fn single_requirement(policy: &Policy) -> DischargeExpr {
+        let mut reqs = discharge_requirements(policy);
+        assert_eq!(reqs.len(), 1, "expected exactly one rule requirement");
+        reqs.remove(0).requirement
+    }
+
+    /// A one-rule policy whose single compound constraint is `lc`.
+    fn policy_with_logical(lc: LogicalConstraint) -> Policy {
+        let mut rule = rule_with("urn:rule:1", vec![]);
+        rule.logical_constraints = vec![lc];
+        Policy {
+            iri: None,
+            permissions: vec![rule],
+            prohibitions: vec![],
+            conflict: None,
+        }
+    }
+
     /// A `secx:requires…` constraint is extracted with its dimension, operator and
-    /// required level; a core ODRL constraint alongside it is NOT (it is not a
-    /// property a proof discharges).
+    /// required level; a core ODRL constraint alongside it becomes an opaque
+    /// [`DischargeExpr::Other`] branch (not a property a proof discharges, but still
+    /// part of the requirement).
     #[test]
     fn extracts_secprop_constraints_and_ignores_core_left_operands() {
         let policy = Policy {
@@ -473,9 +614,23 @@ mod tests {
             conflict: None,
         };
 
-        let obligations = discharge_obligations(&policy);
+        let requirement = single_requirement(&policy);
+        // A rule conjoins its own constraints, and the core leftOperand survives as a
+        // non-proof branch.
+        let DischargeExpr::All(ref operands) = requirement else {
+            panic!("a rule's constraints are conjoined, got {:?}", requirement);
+        };
+        assert_eq!(operands.len(), 2);
+        assert_eq!(
+            operands[1],
+            DischargeExpr::Other {
+                left_operand: crate::ODRL_PURPOSE.into()
+            },
+        );
+
+        let obligations = requirement.obligations();
         assert_eq!(obligations.len(), 1, "only the secx: constraint is an obligation");
-        let o = &obligations[0];
+        let o = obligations[0];
         assert_eq!(o.rule, "urn:rule:1");
         assert_eq!(o.deontic, Deontic::Permission);
         assert_eq!(o.left_operand, REQUIRES_ASSURANCE);
@@ -488,23 +643,34 @@ mod tests {
         );
     }
 
-    /// A policy with no `secx:` constraint yields no obligations — the host needs no
-    /// presentation at all (and an empty policy likewise).
+    /// A policy with no `secx:` constraint yields no requirements — the host needs no
+    /// presentation at all (and an empty policy likewise). A rule carrying only core
+    /// ODRL constraints is omitted rather than reported as an all-`Other` tree.
     #[test]
     fn no_secprop_constraints_yields_no_obligations() {
-        assert!(discharge_obligations(&Policy::default()).is_empty());
+        assert!(discharge_requirements(&Policy::default()).is_empty());
         let policy = Policy {
             iri: None,
-            permissions: vec![rule_with("urn:rule:1", vec![])],
+            permissions: vec![
+                rule_with("urn:rule:1", vec![]),
+                rule_with(
+                    "urn:rule:2",
+                    vec![Constraint {
+                        left: crate::ODRL_PURPOSE.into(),
+                        operator: Operator::Eq,
+                        right: Value::Iri("https://w3id.org/dpv#ResearchAndDevelopment".into()),
+                    }],
+                ),
+            ],
             prohibitions: vec![],
             conflict: None,
         };
-        assert!(discharge_obligations(&policy).is_empty());
+        assert!(discharge_requirements(&policy).is_empty());
     }
 
     /// LOAD-BEARING: an obligation on a PROHIBITION is reported as such. Establishing
-    /// it makes the prohibition fire (deny-overrides), so a host must never read it as
-    /// "a property to satisfy".
+    /// it moves the prohibition toward firing (deny-overrides), so a host must never
+    /// read it as "a property to satisfy".
     #[test]
     fn prohibition_obligations_carry_the_prohibition_deontic() {
         let policy = Policy {
@@ -520,19 +686,124 @@ mod tests {
             conflict: None,
         };
 
-        let obligations = discharge_obligations(&policy);
-        assert_eq!(obligations.len(), 2);
+        let requirements = discharge_requirements(&policy);
+        assert_eq!(requirements.len(), 2);
         // Permissions are reported before prohibitions.
-        assert_eq!(obligations[0].deontic, Deontic::Permission);
-        assert_eq!(obligations[0].rule, "urn:perm:1");
-        assert_eq!(obligations[1].deontic, Deontic::Prohibition);
-        assert_eq!(obligations[1].rule, "urn:proh:1");
-        assert_eq!(obligations[1].dimension, DIM_SINGLE_USE);
+        assert_eq!(requirements[0].deontic, Deontic::Permission);
+        assert_eq!(requirements[0].rule, "urn:perm:1");
+        assert_eq!(requirements[1].deontic, Deontic::Prohibition);
+        assert_eq!(requirements[1].rule, "urn:proh:1");
+        // The leaves repeat the rule's deontic, so a flattened inventory stays honest.
+        let proh = requirements[1].requirement.obligations();
+        assert_eq!(proh.len(), 1);
+        assert_eq!(proh[0].deontic, Deontic::Prohibition);
+        assert_eq!(proh[0].dimension, DIM_SINGLE_USE);
     }
 
-    /// Constraints nested inside `odrl:LogicalConstraint` compounds (including a
-    /// compound nested in a compound) are collected too — a preference written as an
-    /// `or` of `and`s must not silently drop its obligations.
+    /// LOAD-BEARING: `and`, `or` and `xone` over the SAME two leaves produce
+    /// DISTINGUISHABLE structures, so a host can read the valid evidence alternatives
+    /// off the result without consulting the original `Policy`. Flattening them to one
+    /// list would make an `or` alternative look like a mandate and would lose `xone`'s
+    /// exactly-one semantics entirely.
+    #[test]
+    fn and_or_and_xone_produce_distinguishable_requirements() {
+        let leaves = || {
+            vec![
+                ConstraintNode::Atomic(secprop_constraint(REQUIRES_HIDING, "PerfectHiding")),
+                ConstraintNode::Atomic(secprop_constraint(REQUIRES_SOUNDNESS, "Statistical")),
+            ]
+        };
+        let expected_leaves = vec![
+            DischargeExpr::Atomic(DischargeObligation {
+                rule: "urn:rule:1".into(),
+                deontic: Deontic::Permission,
+                left_operand: REQUIRES_HIDING.into(),
+                dimension: DIM_HIDING,
+                operator: Operator::Gteq,
+                required: Value::Iri(format!("{}PerfectHiding", SECX_NS)),
+            }),
+            DischargeExpr::Atomic(DischargeObligation {
+                rule: "urn:rule:1".into(),
+                deontic: Deontic::Permission,
+                left_operand: REQUIRES_SOUNDNESS.into(),
+                dimension: DIM_SOUNDNESS,
+                operator: Operator::Gteq,
+                required: Value::Iri(format!("{}Statistical", SECX_NS)),
+            }),
+        ];
+
+        let of = |op: crate::LogicalOperator| {
+            single_requirement(&policy_with_logical(LogicalConstraint {
+                id: "urn:lc:1".into(),
+                operator: op,
+                operands: leaves(),
+            }))
+        };
+        let and = of(crate::LogicalOperator::And);
+        let or = of(crate::LogicalOperator::Or);
+        let xone = of(crate::LogicalOperator::Xone);
+
+        // The rule's own (empty) constraint list conjoins with its one compound.
+        assert_eq!(
+            and,
+            DischargeExpr::All(vec![DischargeExpr::All(expected_leaves.clone())]),
+        );
+        assert_eq!(
+            or,
+            DischargeExpr::All(vec![DischargeExpr::Any(expected_leaves.clone())]),
+        );
+        assert_eq!(
+            xone,
+            DischargeExpr::All(vec![DischargeExpr::ExactlyOne(expected_leaves)]),
+        );
+        assert_ne!(and, or, "an `or` of alternatives is not an `and` of mandates");
+        assert_ne!(or, xone, "exactly-one is not at-least-one");
+
+        // …while the NON-decisional flat inventory is identical for all three — which
+        // is exactly why it must not be read as the requirement.
+        let dims = |e: &DischargeExpr| -> Vec<&'static str> {
+            e.obligations().iter().map(|o| o.dimension).collect()
+        };
+        assert_eq!(dims(&and), vec![DIM_HIDING, DIM_SOUNDNESS]);
+        assert_eq!(dims(&and), dims(&or));
+        assert_eq!(dims(&and), dims(&xone));
+    }
+
+    /// A non-`secx:` operand of an `or` is KEPT as [`DischargeExpr::Other`]: pruning it
+    /// would leave `Any([Atomic])`, telling the host the proof is the only way through
+    /// when the recipient branch also satisfies the rule.
+    #[test]
+    fn non_secprop_alternatives_are_kept_not_pruned() {
+        let requirement = single_requirement(&policy_with_logical(LogicalConstraint {
+            id: "urn:lc:1".into(),
+            operator: crate::LogicalOperator::Or,
+            operands: vec![
+                ConstraintNode::Atomic(secprop_constraint(REQUIRES_SOUNDNESS, "Statistical")),
+                ConstraintNode::Atomic(Constraint {
+                    left: crate::ODRL_RECIPIENT.into(),
+                    operator: Operator::Eq,
+                    right: Value::Iri("https://bob.example/profile#me".into()),
+                }),
+            ],
+        }));
+
+        let DischargeExpr::All(outer) = &requirement else {
+            panic!("expected the rule conjunction, got {:?}", requirement);
+        };
+        let DischargeExpr::Any(alternatives) = &outer[0] else {
+            panic!("expected an `or`, got {:?}", outer[0]);
+        };
+        assert_eq!(alternatives.len(), 2, "the non-proof alternative survives");
+        assert_eq!(
+            alternatives[1],
+            DischargeExpr::Other {
+                left_operand: crate::ODRL_RECIPIENT.into()
+            },
+        );
+    }
+
+    /// Compounds nested in compounds are mirrored to the same depth, so an `or` of
+    /// `and`s reads back as an `or` of `and`s.
     #[test]
     fn collects_obligations_nested_in_logical_constraints() {
         let inner = LogicalConstraint {
@@ -555,24 +826,33 @@ mod tests {
                 ConstraintNode::Atomic(secprop_constraint(REQUIRES_SOUNDNESS, "Statistical")),
             ],
         };
-        let mut rule = rule_with("urn:rule:1", vec![]);
-        rule.logical_constraints = vec![outer];
 
-        let policy = Policy {
-            iri: None,
-            permissions: vec![rule],
-            prohibitions: vec![],
-            conflict: None,
+        let requirement = single_requirement(&policy_with_logical(outer));
+        let DischargeExpr::All(top) = &requirement else {
+            panic!("expected the rule conjunction, got {:?}", requirement);
         };
+        let DischargeExpr::Any(alternatives) = &top[0] else {
+            panic!("expected an `or`, got {:?}", top[0]);
+        };
+        // Alternative 1 is the nested `and` — BOTH its operands, proof and non-proof.
+        let DischargeExpr::All(conjuncts) = &alternatives[0] else {
+            panic!("expected the nested `and`, got {:?}", alternatives[0]);
+        };
+        assert_eq!(conjuncts.len(), 2);
+        assert!(matches!(conjuncts[0], DischargeExpr::Atomic(_)));
+        assert!(matches!(conjuncts[1], DischargeExpr::Other { .. }));
+        // Alternative 2 is a bare obligation — establishing it alone suffices.
+        assert!(matches!(alternatives[1], DischargeExpr::Atomic(_)));
 
-        let dims: Vec<&str> = discharge_obligations(&policy)
+        let dims: Vec<&str> = requirement
+            .obligations()
             .iter()
             .map(|o| o.dimension)
             .collect();
         assert_eq!(
             dims,
             vec![DIM_HIDING, DIM_SOUNDNESS],
-            "both nested secx: leaves are reported, the core recipient leaf is not",
+            "both nested secx: leaves are in the inventory, the core recipient leaf is not",
         );
     }
 
@@ -594,7 +874,7 @@ mod tests {
             conflict: None,
         };
         assert!(
-            discharge_obligations(&policy).is_empty(),
+            discharge_requirements(&policy).is_empty(),
             "a duty constraint is not an obligation the evaluator ever checks",
         );
     }
