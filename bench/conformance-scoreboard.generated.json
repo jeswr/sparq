@@ -189,7 +189,7 @@
       "is_extension": false,
       "label": "W3C JSON-LD 1.1 compact",
       "note": "native document-level Compaction Algorithm (sparq-jsonld), compared against the W3C EXPECTED compacted document (json_ld_equal — the normative document oracle)",
-      "ratchet_floor": 228,
+      "ratchet_floor": 244,
       "runner": {
         "crate": "sparq-conformance",
         "feature": "jsonld-suite",
@@ -221,7 +221,7 @@
       "is_extension": false,
       "label": "W3C JSON-LD 1.1 expand",
       "note": "native sparq_jsonld::expand() + json_ld_equal semantic-equivalence comparator (sq-kk1mq; NOT structural identity — ~18/240 passes are reordered, strict-ordered count 222; re-baseline from 247 under RDF-equivalence oracle sq-oy1f); options forwarded (base, expandContext, processingMode)",
-      "ratchet_floor": 276,
+      "ratchet_floor": 379,
       "runner": {
         "crate": "sparq-conformance",
         "feature": "jsonld-suite",
@@ -560,7 +560,7 @@
   ],
   "title": "sparq conformance scoreboard",
   "totals": {
-    "conformance_floor_total": 5315,
+    "conformance_floor_total": 5434,
     "conformance_suites": 25,
     "extension_assertion_total": 19663,
     "extension_suites": 11

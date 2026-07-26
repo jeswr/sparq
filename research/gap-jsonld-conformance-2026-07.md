@@ -40,16 +40,32 @@ the BEHIND verdicts are preserved honestly. Conformance pass-rates are
 correctness counts, not performance figures — no latency/throughput numbers
 appear in this record.
 
-## 2. Measured scoreboard (runner output, 2026-07-17, pins above)
+## 2. Measured scoreboard (runner output, 2026-07-26, pins above)
 
 | operation | pass | fail | skip | total | rate (strict, skips count against) | rate over RUN tests |
 |---|---|---|---|---|---|---|
-| expand  | 276 | 0 | 109 | 385 | 71.6% | 276/276 = 100% |
-| compact | 228 | 0 | 18  | 246 | 92.6% | 228/228 = 100% |
-| flatten | 53  | 0 | 5   | 58  | 91.3% | 53/53 = 100% |
-| frame   | 92  | 0 | 0   | 92  | 100.0% | 92/92 (negatives RUN) |
-| fromRdf | 52  | 0 | 1   | 53  | 98.1% | 52/52 (negatives RUN) |
+| expand  | 379 | 0 | 6  | 385 | 98.4% | 379/379 = 100% (negatives RUN) |
+| compact | 244 | 0 | 2  | 246 | 99.1% | 244/244 = 100% (negatives RUN) |
+| flatten | 53  | 0 | 5  | 58  | 91.3% | 53/53 = 100% |
+| frame   | 92  | 0 | 0  | 92  | 100.0% | 92/92 (negatives RUN) |
+| fromRdf | 52  | 0 | 1  | 53  | 98.1% | 52/52 (negatives RUN) |
 | toRdf   | — | — | — | — | NOT IMPLEMENTED natively | see §4 |
+
+> **Update — bead `sq-gzsky` (2026-07-26).** The 2026-07-17 snapshot read
+> expand 276/0/109 (71.6%) and compact 228/0/18 (92.6%); the whole difference was
+> the DEFERRED NegativeEvaluationTest lanes (§6, then sq-oy1f.31), not wrong
+> answers. Those lanes now RUN in both this runner and the `sparq-conformance`
+> ratchet, driven exactly like `frame` (sq-oy1f.29): a negative passes **iff** the
+> operation errors with EXACTLY the manifest's `expectErrorCode`, so a
+> raised-but-WRONG code FAILS. 95 of expand's 103 and 15 of compact's 16 RUNNABLE
+> negatives passed unchanged; SEVEN spec-faithful fixes in `sparq-jsonld` flipped
+> the remaining nine (`@value`+`@type`+`@direction`; datatype-IRI validation incl. blank
+> nodes; `@included` null coercion; the term round-trip check's spurious keyword
+> exemption; 1.0-mode `@container`-must-be-a-string; and IRI Compaction's missing
+> `IRI confused with prefix` guard, §7.1 step 5 tail, which also exposed a missing
+> "IRI-expand the index key first" leg in property-valued `@index` containers).
+> Floors raised in lock-step: `floors::expand` 276 → **379**, `floors::compact`
+> 228 → **244**. Still **0 outright fails**.
 
 There are **0 outright fails** at the pin: every sub-100% strict rate is a
 **skip bucket**, itemised below. (The 2026-07-12 snapshot had 1 fail — compact
@@ -64,12 +80,21 @@ dependency-free.
 
 Skip-bucket composition (from the pinned manifests, no estimates):
 
-- **expand: 109 skips = exactly the 109 NegativeEvaluationTests.** The
-  expander raises spec error codes but error-code COMPLETENESS is unverified,
-  so the negative lane is deferred (bead sq-oy1f.31) and honestly skipped —
-  never counted as passes. This bucket is the entire expand gap.
-- **compact: 18 skips = 17 NegativeEvaluationTests** (same deferral) **+ the
-  one `specVersion: json-ld-1.0` positive (`#t0038`)**. sq-uzdw7 decision:
+- **expand: 6 skips = the 1.0-ONLY negatives** (`#t0115`, `#t0116`, `#ter02`,
+  `#ter03`, `#ter24`, `#ter32`). All carry `option.specVersion: json-ld-1.0`,
+  which the suite's own `vocab.jsonld` defines as "the JSON-LD version to which
+  the test applies". Raising for them would be WRONG, not merely unimplemented —
+  every one is behaviour 1.1 deliberately CHANGED: `list of lists` and `recursive
+  context inclusion` are codes 1.1 RETIRED (absent from the 1.1 error registry
+  that the closed `JsonLdErrorCode` enum models — 1.1 allows lists of lists and
+  reports a cyclic context as `context overflow`), and a relative `@vocab` is
+  explicitly PERMITTED in 1.1. The exact set is pinned by the ratchet lane's
+  `expand_1_0_negative_skips_are_pinned`, so a suite-pin bump that adds one fails
+  loudly. NARROW: the `option.processingMode: json-ld-1.0` cases of the 1.1 suite
+  (e.g. `#tes01`) a 1.1 processor MUST honour are RUN, and pass.
+- **compact: 2 skips = the one 1.0-only NEGATIVE (`#te001`, `compaction to list
+  of lists` — another retired 1.1 code) + the one `specVersion: json-ld-1.0`
+  positive (`#t0038`)**. sq-uzdw7 decision:
   `#t0038`'s 1.0-era expectation (compact-IRI creation through an expanded
   term definition) directly contradicts what `#tp001` pins for 1.0 processing
   mode under the 1.1 REC — both cannot pass, jsonld.js/pyld make the same
@@ -95,17 +120,18 @@ loosely comparable only).
 
 | operation | sparq (strict) | best published peers | verdict |
 |---|---|---|---|
-| expand  | 71.6% | jsonld-cpp / JSON-LD.ex 100.0, Titanium 98.1, jsonld.js 97.3 | **BEHIND** (driver: deferred negative lane, sq-oy1f.31) |
-| compact | 92.6% | JSON-LD.ex 99.6, Titanium 98.0, jsonld.js 97.5 | **BEHIND**, narrowed from .22's stale 75.6 (floor has risen 186→228); residual = 17 negatives + the `#t0038` 1.0-only skip |
+| expand  | 98.4% | jsonld-cpp / JSON-LD.ex 100.0, Titanium 98.1, jsonld.js 97.3 | **PARITY-to-AHEAD at sparq's pin** (sq-gzsky ran the negative lane, 71.6 → 98.4; residual = the 6 1.0-only negatives). Denominator 385 vs report 376 — loosely comparable only. |
+| compact | 99.1% | JSON-LD.ex 99.6, Titanium 98.0, jsonld.js 97.5 | **PARITY** (sq-gzsky 92.6 → 99.1; .22's 75.6 was doubly stale); residual = `#te001` + `#t0038`, both 1.0-only |
 | flatten | 91.3% | listed peers 100.0 | **BEHIND** (small; 5 skips) |
 | frame   | 100.0% | jsonld.js 97.8, Titanium 96.7 | **AHEAD at sparq's pin** (.22's 66.3 is stale — floor rose 61→92; denominator 92 vs report 91, loosely comparable) |
 | fromRdf | 98.1% | Titanium / Sophia 98.1 (of 52) | **PARITY** (.22 cited the then-floor 51; current measured 52/53) |
 | toRdf (native) | not implemented | jsonld-cpp 99.8, JSON-LD.ex 99.6 | **BEHIND** natively; engine-path toRdf is a separate 413/467 = 88.4% ratchet (§4) |
 
-The epic-level verdict stays **BEHIND** — honestly driven by (a) the deferred
-negative-test lanes (expand/compact/flatten) and (b) native toRdf not existing
-yet — but the .22 snapshot materially understated the current estate on
-compact and frame. (The former driver (c), compact `#t0038`, is resolved: an
+The epic-level verdict is now driven by ONE remaining item: **(b) native toRdf
+does not exist yet** (§4). Driver (a) — the deferred negative-test lanes — is
+resolved for `expand` and `compact` (bead sq-gzsky, 2026-07-26); `flatten` keeps
+one deferred negative in its 5-skip bucket. The .22 snapshot materially
+understated the estate on compact and frame, and is now stale on expand too. (The former driver (c), compact `#t0038`, is resolved: an
 honest 1.0 skip per sq-uzdw7, still counted against the strict rate.)
 
 ## 4. toRdf honesty note
@@ -133,9 +159,10 @@ sq-hmd7l.15/.43) or the cross-engine table script (sq-hmd7l.22).
 
 ## 6. Gap-closure levers (beads, not TODOs)
 
-- **sq-oy1f.31** — negative-test lanes (error-code completeness) for
-  expand/compact/flatten: worth up to +109 / +17 / +1 strict-rate points and
-  is the whole remaining expand gap.
+- **sq-oy1f.31** — negative-test lanes (error-code completeness). **DONE for
+  expand and compact** (bead sq-gzsky, 2026-07-26: +103 / +16 pass, floors
+  276 → 379 and 228 → 244). The remaining slice is `flatten`'s ONE deferred
+  negative, still inside its 5-skip bucket.
 - **sq-oy1f.30** — native toRdf (Deserialization to RDF); once landed, the
   runner grows a real toRdf row.
 - **sq-uzdw7** — RESOLVED (2026-07-17): compact `#t0038` ("Index map

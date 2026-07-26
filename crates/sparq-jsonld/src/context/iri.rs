@@ -26,6 +26,26 @@ pub(crate) fn is_absolute_iri(s: &str) -> bool {
     }
 }
 
+/// [OPUS-5] sq-gzsky — True iff `s` is a WELL-FORMED absolute IRI: [`is_absolute_iri`]
+/// (a valid scheme) *and* free of the characters RFC 3987 excludes from an IRI —
+/// SPACE, `"`, `<`, `>`, `\`, `^`, `` ` ``, `{`, `|`, `}` and the C0/C1 control ranges.
+///
+/// [`is_absolute_iri`] only inspects the scheme, which is the right (cheap) predicate
+/// where the value has already been produced by IRI expansion. This stricter form is for
+/// the places the spec says a processor MUST *validate* an authored IRI — notably a value
+/// object's `@type` datatype (§5.1.2 step 15.5, W3C expand/#t0123: `"http://example.com/baz
+/// z"` must raise `invalid typed value`).
+pub(crate) fn is_well_formed_absolute_iri(s: &str) -> bool {
+    is_absolute_iri(s)
+        && !s.chars().any(|c| {
+            c.is_control()
+                || matches!(
+                    c,
+                    ' ' | '"' | '<' | '>' | '\\' | '^' | '`' | '{' | '|' | '}' | '\u{7f}'
+                )
+        })
+}
+
 /// True iff `s` is a syntactically valid URI scheme: `ALPHA *( ALPHA / DIGIT / "+" / "-" /
 /// "." )` (RFC 3986 §3.1).
 fn is_valid_scheme(s: &str) -> bool {

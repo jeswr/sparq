@@ -26,7 +26,9 @@ use std::collections::BTreeMap;
 
 use super::{has_keyword_form, is_keyword, ActiveContext, Direction, Override, TermDefinition};
 use super::iri::relativize_iri;
+use crate::error::{JsonLdError, JsonLdErrorCode};
 use crate::json::Json;
+use crate::options::ProcessingMode;
 
 // ---------------------------------------------------------------------------
 // §4.3 Inverse Context Creation
@@ -319,14 +321,19 @@ fn compute_default_language(ctx: &ActiveContext) -> String {
 /// 3. Vocab-relative suffix — strip the `@vocab` prefix when the suffix is
 ///    unambiguous (step 4).
 /// 4. Compact IRI — `prefix:suffix` via `@prefix`-flagged terms (step 5).
-/// 5. Base-relative path when `vocab` is false (step 6).
-/// 6. Return `iri` unchanged (step 7).
+/// 5. The `IRI confused with prefix` guard (step 5 tail).
+/// 6. Base-relative path when `vocab` is false (step 6).
+/// 7. Return `iri` unchanged (step 7).
 ///
 /// `value` is the JSON value being compacted for (a node-object or value
 /// object); it governs which containers and type/language keys are preferred.
 /// Pass `None` when compacting a bare IRI (e.g. a `@type` value).
 /// `vocab` indicates vocab-relative compaction; `reverse` marks a
 /// `@reverse` property.
+///
+/// [OPUS-5] sq-gzsky — FALLIBLE since the step-5-tail guard landed: every step
+/// before it returns `Ok`, so only an IRI that survives term selection, the
+/// `@vocab` suffix and compact-IRI construction can raise.
 ///
 /// [SONNET-4.6] (sq-90mu3)
 pub fn compact_iri(
@@ -336,10 +343,11 @@ pub fn compact_iri(
     value: Option<&Json>,
     vocab: bool,
     reverse: bool,
-) -> String {
+    mode: ProcessingMode,
+) -> Result<String, JsonLdError> {
     // §7.1 step 1: empty / null — return as-is.
     if iri.is_empty() {
-        return iri.to_string();
+        return Ok(iri.to_string());
     }
 
     // §7.1 step 2: keyword or keyword alias.
@@ -354,10 +362,10 @@ pub fn compact_iri(
         if !aliases.is_empty() {
             // Shortest, then lexicographic least — pick the winner.
             aliases.sort_by(|a, b| a.len().cmp(&b.len()).then(a.cmp(b)));
-            return aliases[0].to_string();
+            return Ok(aliases[0].to_string());
         }
         // No alias — return the keyword itself.
-        return iri.to_string();
+        return Ok(iri.to_string());
     }
 
     // §7.1 step 3 (spec "IRI Compaction" step 2): vocab=true AND iri appears in the
@@ -570,7 +578,7 @@ pub fn compact_iri(
         if let ("@id" | "@reverse", Some(id_iri)) = (type_language_value.as_str(), id_entry) {
             // Prefer @vocab-coercing terms when the nested @id round-trips through a
             // term; otherwise prefer @id-coercing terms.
-            let compacted_id = compact_iri(ctx, inverse, id_iri, None, true, false);
+            let compacted_id = compact_iri(ctx, inverse, id_iri, None, true, false, mode)?;
             let round_trips = ctx
                 .term_definitions
                 .get(&compacted_id)
@@ -609,7 +617,7 @@ pub fn compact_iri(
         let cs: Vec<&str> = containers.iter().map(String::as_str).collect();
         let pvs: Vec<&str> = preferred_values.iter().map(String::as_str).collect();
         if let Some(term) = select_term(inverse, iri, &cs, type_language, &pvs) {
-            return term;
+            return Ok(term);
         }
     }
 
@@ -627,7 +635,7 @@ pub fn compact_iri(
                     .map(|d| d.iri.as_deref() != Some(iri))
                     .unwrap_or(false);
                 if !conflict {
-                    return suffix.to_string();
+                    return Ok(suffix.to_string());
                 }
             }
         }
@@ -699,7 +707,39 @@ pub fn compact_iri(
         // does not itself appear in the inverse context (which would mean it
         // was already resolved to a term above).
         if !vocab || !inverse.inner.contains_key(&compact) {
-            return compact;
+            return Ok(compact);
+        }
+    }
+
+    // [OPUS-5] sq-gzsky — §7.1 step 5 tail: "To ensure that the IRI var is not confused
+    // with a compact IRI, if the IRI scheme of var matches any term in active context
+    // with prefix flag set to true, and var has no IRI authority (preceded by
+    // double-forward-slash `//`), an `IRI confused with prefix` error has been detected."
+    //
+    // Reached only when every earlier step declined, so a `tag:`-scheme IRI in a context
+    // that ALSO defines `tag` as a prefix cannot be emitted verbatim — a re-expanding
+    // consumer would read it as the compact IRI `tag:…` and resolve it to a different
+    // IRI. W3C compact/#te002 pins this.
+    //
+    // 1.1-ONLY, like the sibling round-trip check in `create_term_definition`: the step
+    // (and the code) is an addition of the 1.1 algorithm, absent from JSON-LD 1.0, whose
+    // compaction deliberately emitted such a term. W3C framing/#t0010 ("property CURIE
+    // conflict") pins the 1.0 behaviour with `specVersion: json-ld-1.0`, and jsonld.js
+    // gates the same guard on processing mode.
+    if mode != ProcessingMode::JsonLd10 {
+        if let Some(scheme) = iri.split(':').next() {
+            let authority = iri[scheme.len()..].starts_with("://");
+            if !authority
+                && ctx
+                    .term_definitions
+                    .get(scheme)
+                    .is_some_and(|def| def.prefix)
+            {
+                return Err(JsonLdError::with_detail(
+                    JsonLdErrorCode::IriConfusedWithPrefix,
+                    format!("'{}' (scheme '{}' is a prefix term)", iri, scheme),
+                ));
+            }
         }
     }
 
@@ -717,15 +757,15 @@ pub fn compact_iri(
                 // ("@" + ALPHA) would be misread as a keyword where an IRI is
                 // expected — disambiguate with a "./" prefix (W3C compact/0111).
                 if has_keyword_form(&relative) {
-                    return format!("./{}", relative);
+                    return Ok(format!("./{}", relative));
                 }
-                return relative;
+                return Ok(relative);
             }
         }
     }
 
     // §7.1 step 7: nothing worked — return the IRI unchanged.
-    iri.to_string()
+    Ok(iri.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -743,6 +783,30 @@ mod tests {
 
     fn json(s: &str) -> Json {
         Json::parse(s).expect("valid JSON")
+    }
+
+    /// [OPUS-5] sq-gzsky — `compact_iri` became fallible (the §7.1 step-5-tail
+    /// `IRI confused with prefix` guard). Every test below asserts the SUCCESS path, so
+    /// this shim (which shadows the glob-imported `super::compact_iri`) unwraps for them;
+    /// the error path has its own test, `compact_iri_confused_with_prefix_w3c_e002`.
+    fn compact_iri(
+        ctx: &ActiveContext,
+        inverse: &InverseContext,
+        iri: &str,
+        value: Option<&Json>,
+        vocab: bool,
+        reverse: bool,
+    ) -> String {
+        super::compact_iri(
+            ctx,
+            inverse,
+            iri,
+            value,
+            vocab,
+            reverse,
+            ProcessingMode::JsonLd11,
+        )
+        .expect("compact_iri should succeed for this fixture")
     }
 
     fn ctx_of(src: &str) -> ActiveContext {
@@ -1011,6 +1075,67 @@ mod tests {
             false,
         );
         assert_eq!(dc_result, "dc11:title");
+    }
+
+    /// [OPUS-5] sq-gzsky — §7.1 step 5 tail: an IRI that survives term selection, the
+    /// `@vocab` suffix AND compact-IRI construction, whose SCHEME is a `@prefix`-flagged
+    /// term and which carries no `//` authority, is an `IRI confused with prefix` error —
+    /// emitting it verbatim would produce a document a re-expanding consumer resolves to a
+    /// DIFFERENT IRI. W3C compact/#te002.
+    #[test]
+    fn compact_iri_confused_with_prefix_w3c_e002() {
+        let ac = ctx_of(r#"{"tag": "http://example.org/ns/tag/"}"#);
+        let inv = ac.inverse_context();
+        let err = super::compact_iri(
+            &ac,
+            &inv,
+            "tag:champin.net,2019:prop",
+            None,
+            true,
+            false,
+            ProcessingMode::JsonLd11,
+        )
+        .expect_err("a tag:-scheme IRI must not be emitted beside a `tag` prefix term");
+        assert_eq!(err.code(), JsonLdErrorCode::IriConfusedWithPrefix);
+    }
+
+    /// …and the SAME input is fine in JSON-LD 1.0 processing mode: the guard is a 1.1
+    /// addition (W3C framing/#t0010 pins the 1.0 behaviour with `specVersion:
+    /// json-ld-1.0`), so it must be mode-gated, not universal.
+    #[test]
+    fn compact_iri_confused_with_prefix_is_1_1_only() {
+        let ac = ctx_of(r#"{"tag": "http://example.org/ns/tag/"}"#);
+        let inv = ac.inverse_context();
+        let got = super::compact_iri(
+            &ac,
+            &inv,
+            "tag:champin.net,2019:prop",
+            None,
+            true,
+            false,
+            ProcessingMode::JsonLd10,
+        )
+        .expect("1.0 mode has no such guard");
+        assert_eq!(got, "tag:champin.net,2019:prop");
+    }
+
+    /// The guard must NOT fire on an ordinary `http://…` IRI even when a term happens to
+    /// be named `http`: the spec exempts an IRI with a `//` authority.
+    #[test]
+    fn compact_iri_authority_form_is_not_confused_with_a_prefix() {
+        let ac = ctx_of(r#"{"http": "http://example.org/scheme-named-term/"}"#);
+        let inv = ac.inverse_context();
+        let got = super::compact_iri(
+            &ac,
+            &inv,
+            "http://unrelated.example/thing",
+            None,
+            true,
+            false,
+            ProcessingMode::JsonLd11,
+        )
+        .expect("an authority-form IRI is never confusable with a compact IRI");
+        assert_eq!(got, "http://unrelated.example/thing");
     }
 
     /// Vocab-relative suffix: when `@vocab` is a prefix of the IRI and the

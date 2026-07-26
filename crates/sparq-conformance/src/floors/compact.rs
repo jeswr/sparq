@@ -31,7 +31,46 @@
 ///   STRICT order-sensitive JSON equality (strict-ordered count = 228 — no pass
 ///   relies on the comparator's outside-`@list` array order-insensitivity).
 ///
-/// ## The 18 honest SKIPs (0 fails at the pin)
+/// ## [OPUS-5] sq-gzsky — the NEGATIVE lane lands: 228 → 244
+///
+/// The 17 skipped NegativeEvaluationTests are now RUN, exactly like the `expand`
+/// (sq-gzsky) and `frame` (sq-oy1f.29) lanes: a case passes **iff** `compact()`
+/// errors with EXACTLY the manifest's `expectErrorCode`, so a raised-but-WRONG code
+/// FAILS. MEASURED **244 pass / 0 fail / 2 skip** of 246 (99.1% strict) at the pin —
+/// up from 92.6%, closing the peer gap (JSON-LD.ex 99.6, Titanium 98.0, jsonld.js
+/// 97.5) that bead sq-hmd7l.22 recorded.
+///
+/// 15 of the 16 runnable negatives passed unchanged (including all ten
+/// `processingMode: json-ld-1.0` cases, which a 1.1 processor MUST honour and which
+/// RUN). One needed a real fix, plus one it exposed:
+///
+/// * **`IRI confused with prefix`** — IRI Compaction §7.1 step 5 tail ("if the IRI
+///   scheme of var matches any term in active context with prefix flag set to true,
+///   and var has no IRI authority") was entirely absent, so `compact_iri` emitted a
+///   `tag:`-scheme IRI verbatim into a context that also defines `tag` as a prefix —
+///   a document a re-expanding consumer resolves to a DIFFERENT IRI. Implementing it
+///   made `compact_iri` fallible. Fixes `#te002`. 1.1-ONLY, like the sibling
+///   `create_term_definition` round-trip check: framing `#t0010` pins the 1.0
+///   behaviour with `specVersion: json-ld-1.0` (so `floors::frame` is unaffected).
+/// * **Property-valued `@index` container key** (exposed by the above, §8 step
+///   12.8.9.6.1) — the index mapping is stored VERBATIM as authored (§4.2.2 step 22),
+///   i.e. normally a TERM or COMPACT IRI, and was being fed straight into IRI
+///   Compaction without the spec's "after first IRI expanding it" leg. It is now
+///   resolved by expanding the index key and taking the entry of the compacted item
+///   that expands to the same IRI. `#t0112` and `#t0114` keep passing, now for the
+///   right reason.
+///
+/// ## The 2 honest SKIPs (0 fails at the pin)
+///
+/// * `#te001` — the ONE 1.0-only NEGATIVE (`option.specVersion: json-ld-1.0`),
+///   expecting `compaction to list of lists`: a code JSON-LD 1.1 RETIRED (absent from
+///   the 1.1 error registry, so the closed `JsonLdErrorCode` enum cannot express it)
+///   because 1.1 ALLOWS lists of lists. Raising would be WRONG, not unimplemented.
+///   Scope pinned by the runner's `compact_1_0_negative_skips_are_pinned`, which also
+///   asserts the `processingMode: json-ld-1.0` negatives still RUN.
+/// * `#t0038` — the ONE 1.0-only POSITIVE, unchanged (see below).
+///
+/// ## The `#t0038` decision (unchanged)
 ///
 /// * `#t0038` (`specVersion: json-ld-1.0`, the ONLY 1.0-only positive at the
 ///   pin) expects 1.0-era compact-IRI creation through an EXPANDED (map-valued)
@@ -49,8 +88,4 @@
 ///   `processingMode: json-ld-1.0` cases of the 1.1 suite still RUN, and any
 ///   FUTURE 1.0-only positive added at a suite-pin bump RUNS (and fails the
 ///   scope test) rather than being silently skipped.
-/// * 17 SKIPs = the NegativeEvaluationTests: compaction raises `invalid @nest
-///   value`, but error-code completeness across context processing, expansion,
-///   and compaction is unverified; the negative ratchet lanes are bead
-///   sq-oy1f.31. SKIP (honest), never a counted pass.
-pub const FLOOR: usize = 228;
+pub const FLOOR: usize = 244;

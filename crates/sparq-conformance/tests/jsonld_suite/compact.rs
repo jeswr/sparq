@@ -32,6 +32,12 @@ use std::path::Path;
 ///    order insignificant; array order significant only inside explicit `@list` values;
 ///    numbers compared as in the expand lane).
 ///
+/// ## [OPUS-5] sq-gzsky — NegativeEvaluationTests are RUN, not skipped
+///
+/// Driven exactly like the `expand` and `frame` lanes: the case passes **iff**
+/// `compact()` errors with EXACTLY the manifest's `expectErrorCode`. A raised-but-WRONG
+/// code is a FAILURE, never a pass.
+///
 /// ## Honest oracle caveat
 ///
 /// `json_ld_equal` treats arrays outside an explicit `"@list"` key as SETS. In a
@@ -44,10 +50,14 @@ use std::path::Path;
 /// ## Honest SKIP buckets (recorded, not passed, not failed)
 ///
 /// * `requires` optional-feature cases — out of the gated surface.
-/// * NegativeEvaluationTests — compaction raises `invalid @nest value`, but error-code
-///   completeness across context processing/expansion/compaction is unverified; the
-///   negative lanes are bead sq-oy1f.31. SKIP (honest), never a counted pass.
-/// * `#t0038` — the ONE narrowly-pinned 1.0-only skip; see
+/// * **`option.specVersion: json-ld-1.0` NEGATIVES** — at the pin exactly `#te001`,
+///   which expects `compaction to list of lists`, a code JSON-LD 1.1 RETIRED (1.1
+///   ALLOWS lists of lists, and the code is absent from the 1.1 error registry the
+///   closed `JsonLdErrorCode` enum models). See [`is_one_zero_only_negative`]; scope
+///   pinned by [`compact_1_0_negative_skips_are_pinned`]. NARROW: the ten
+///   `processingMode: json-ld-1.0` negatives RUN.
+/// * A NegativeEvaluationTest with no `expectErrorCode` — nothing to assert.
+/// * `#t0038` — the ONE narrowly-pinned 1.0-only POSITIVE skip; see
 ///   [`is_pinned_1_0_only_skip`] for the justification and
 ///   [`t0038_skip_is_narrowly_scoped`] for the test enforcing its scope. NOT a
 ///   blanket `specVersion: json-ld-1.0` skip: `option.processingMode: json-ld-1.0`
@@ -73,20 +83,24 @@ pub fn run_compact(root: &Path) -> Score {
             s.skip();
             continue;
         }
-        if e.is_negative {
+        // [OPUS-5] sq-gzsky — NegativeEvaluationTests are now RUN (see the module doc);
+        // the two honest buckets are a 1.0-only negative (`specVersion`, NOT
+        // `processingMode` — see `is_one_zero_only_negative`) and one with no
+        // `expectErrorCode` to assert against.
+        if e.is_negative && (is_one_zero_only_negative(e) || e.expect_error_code.is_none()) {
             s.skip();
             continue;
         }
-        // The ONE narrowly-pinned 1.0-only skip (#t0038) — see
+        // The ONE narrowly-pinned 1.0-only POSITIVE skip (#t0038) — see
         // `is_pinned_1_0_only_skip`; scope enforced by `t0038_skip_is_narrowly_scoped`.
         if is_pinned_1_0_only_skip(e) {
             s.skip();
             continue;
         }
-        let Some(expect_rel) = &e.expect else {
+        if !e.is_negative && e.expect.is_none() {
             s.skip();
             continue;
-        };
+        }
         let Some(ctx_rel) = &e.context else {
             s.skip();
             continue;
@@ -145,14 +159,34 @@ pub fn run_compact(root: &Path) -> Score {
         }
 
         // 4. The native document-level Compaction Algorithm.
-        let compacted =
-            match sparq_jsonld::compact::compact(&input_json, &ctx_json, &opts, &loader) {
-                Ok(j) => j,
-                Err(why) => {
-                    s.fail(&e.id, format!("compact() error: {}", why));
-                    continue;
-                }
-            };
+        let result = sparq_jsonld::compact::compact(&input_json, &ctx_json, &opts, &loader);
+
+        // [OPUS-5] sq-gzsky — the NEGATIVE lane: the case passes iff compact() errors
+        // with EXACTLY the manifest's `expectErrorCode`. A raised-but-wrong code is a
+        // FAILURE, not a pass (honesty over score).
+        if e.is_negative {
+            let want_code = e.expect_error_code.as_deref().unwrap_or("");
+            match &result {
+                Err(err) if err.code().as_str() == want_code => s.pass(),
+                Err(err) => s.fail(
+                    &e.id,
+                    format!("wrong error code: got '{}', want '{}'", err.code(), want_code),
+                ),
+                Ok(_) => s.fail(
+                    &e.id,
+                    format!("negative test compacted without error (want '{}')", want_code),
+                ),
+            }
+            continue;
+        }
+
+        let compacted = match result {
+            Ok(j) => j,
+            Err(why) => {
+                s.fail(&e.id, format!("compact() error: {}", why));
+                continue;
+            }
+        };
 
         // 5. Compare against the suite's NORMATIVE expected document.
         let got: Value = match sparq_json_to_serde(&compacted) {
@@ -162,7 +196,8 @@ pub fn run_compact(root: &Path) -> Score {
                 continue;
             }
         };
-        let expect_path = root.join(expect_rel);
+        // (Positive cases without an `expect` member were skipped above.)
+        let expect_path = root.join(e.expect.as_deref().unwrap_or_default());
         let exp_text = match std::fs::read_to_string(&expect_path) {
             Ok(t) => t,
             Err(why) => {
@@ -285,4 +320,65 @@ fn t0038_skip_is_narrowly_scoped() {
         ["#t0038"],
         "a new specVersion=json-ld-1.0 positive appeared — decide it explicitly"
     );
+}
+
+/// [OPUS-5] sq-gzsky — True iff `e` is a NegativeEvaluationTest that applies ONLY to
+/// the 2014 JSON-LD **1.0** REC (the same predicate and rationale as the `expand`
+/// lane's `is_one_zero_only_negative`): `option.specVersion == "json-ld-1.0"`, which
+/// the pinned suite's `vocab.jsonld` defines as "the JSON-LD version to which the
+/// test applies".
+///
+/// Deliberately NOT `option.processingMode`: the ten `processingMode: json-ld-1.0`
+/// negatives (`#tep05`, `#tep07`, `#tep10`–`#tep15`, …) are 1.1-suite tests of 1.0
+/// PROCESSING MODE that a 1.1 processor MUST honour, and they RUN here.
+///
+/// At the pin the predicate matches exactly `#te001`, which expects `compaction to
+/// list of lists` — a code 1.1 RETIRED (it is absent from the 1.1 error registry, so
+/// the closed `JsonLdErrorCode` enum cannot even express it) because 1.1 ALLOWS
+/// lists of lists. Scope pinned by [`compact_1_0_negative_skips_are_pinned`].
+fn is_one_zero_only_negative(e: &Entry) -> bool {
+    e.is_negative && e.spec_version.as_deref() == Some("json-ld-1.0")
+}
+
+/// Regression pin for the scope of the 1.0-only NEGATIVE skip (sq-gzsky): exactly
+/// `#te001`, and the `processingMode: json-ld-1.0` negatives — which a 1.1 processor
+/// MUST reject — are NOT among them. A suite-pin bump that adds a 1.0-only negative
+/// fails HERE instead of being silently absorbed.
+#[test]
+fn compact_1_0_negative_skips_are_pinned() {
+    let root = suite_root();
+    if !root.exists() {
+        eprintln!(
+            "SKIP: W3C JSON-LD suite not present at {} — run scripts/fetch-jsonld-tests.sh",
+            root.display()
+        );
+        return;
+    }
+    let entries = read_manifest(&root, "compact").expect("read compact manifest");
+
+    let skipped: Vec<&str> = entries
+        .iter()
+        .filter(|e| is_one_zero_only_negative(e))
+        .map(|e| e.id.as_str())
+        .collect();
+    assert_eq!(
+        skipped,
+        ["#te001"],
+        "the 1.0-only compact negative skip set changed — a suite-pin bump must be \
+         decided explicitly, never silently absorbed"
+    );
+
+    for id in ["#tep05", "#tep07", "#tep12", "#tep13", "#tep14", "#tep15"] {
+        let e = entries
+            .iter()
+            .find(|e| e.id == id)
+            .unwrap_or_else(|| panic!("{} missing from the pinned compact manifest", id));
+        assert!(
+            !is_one_zero_only_negative(e)
+                && e.processing_mode.as_deref() == Some("json-ld-1.0")
+                && e.expect_error_code.is_some(),
+            "{} (processingMode: json-ld-1.0) must RUN, not skip",
+            id
+        );
+    }
 }

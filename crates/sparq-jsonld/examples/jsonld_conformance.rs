@@ -83,7 +83,7 @@ use sparq_jsonld::frame::{frame as jsonld_frame, FrameOptions};
 use sparq_jsonld::from_rdf::{from_rdf, FromRdfOptions, RdfQuad, RdfTerm};
 use sparq_jsonld::{
     compact::compact as jsonld_compact, expand as jsonld_expand, flatten as jsonld_flatten,
-    FsLoader, Json, JsonLdOptions, NoopLoader, ProcessingMode, RdfDirection,
+    FsLoader, Json, JsonLdError, JsonLdOptions, NoopLoader, ProcessingMode, RdfDirection,
 };
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -106,8 +106,8 @@ const SMOKE_N: usize = 30;
 // Documented MIRRORS of `sparq_conformance::floors::<lane>::FLOOR` at suite pin
 // 8654ac2 (see the module docs for why the const cannot be imported here). The
 // assertion is `>=`, so an upstream ratchet RISE never breaks this runner.
-const EXPAND_FLOOR: usize = 276; // mirrors floors::expand::FLOOR
-const COMPACT_FLOOR: usize = 228; // mirrors floors::compact::FLOOR
+const EXPAND_FLOOR: usize = 379; // mirrors floors::expand::FLOOR
+const COMPACT_FLOOR: usize = 244; // mirrors floors::compact::FLOOR
 const FLATTEN_FLOOR: usize = 53; // mirrors floors::flatten::FLOOR
 const FRAME_FLOOR: usize = 92; // mirrors floors::frame::FLOOR
 /// fromRdf floor for THIS runner's document-level-only oracle (calibrated at
@@ -573,21 +573,61 @@ fn unescape(raw: &str, line: usize) -> Result<String, String> {
 
 // ── Per-operation lane runners (ported oracles; see the module docs) ─────────
 
-/// `expand`: native `sparq_jsonld::expand()` vs the normative expected doc.
-/// SKIPs (honest, per the ratchet lane): `requires` optional features,
-/// NegativeEvaluationTests (error-code lane deferred), remote inputs, no-expect.
+/// [OPUS-5] sq-gzsky — a NegativeEvaluationTest that applies ONLY to the 2014
+/// JSON-LD **1.0** REC (`option.specVersion: json-ld-1.0`, which the pinned suite's
+/// `vocab.jsonld` defines as "the JSON-LD version to which the test applies"), and so
+/// is formally inapplicable to sparq, a 1.1 processor. NOT `option.processingMode`:
+/// `processingMode: json-ld-1.0` is a 1.1 API option a 1.1 processor MUST honour, and
+/// those cases RUN.
+///
+/// At the pin this is `expand/#t0115`, `#t0116` (relative `@vocab`, which 1.1
+/// PERMITS), `expand/#ter02`, `#ter03` (`recursive context inclusion`) and
+/// `expand/#ter24`, `#ter32` (`list of lists`) plus `compact/#te001` (`compaction to
+/// list of lists`) — the last three codes are absent from the 1.1 error registry, so
+/// the closed `JsonLdErrorCode` enum cannot even express them. MIRRORS the ratchet
+/// lane's per-lane `is_one_zero_only_negative`, whose `*_1_0_negative_skips_are_pinned`
+/// tests hold the exact id sets.
+fn is_one_zero_only_negative(e: &Entry) -> bool {
+    e.is_negative && e.spec_version.as_deref() == Some("json-ld-1.0")
+}
+
+/// [OPUS-5] sq-gzsky — score a NegativeEvaluationTest: PASS iff the operation
+/// errored with EXACTLY the manifest's `expectErrorCode`. A raised-but-WRONG code is
+/// a FAILURE, never a pass (honesty over score).
+fn score_negative<T>(s: &mut Score, e: &Entry, outcome: &Result<T, JsonLdError>, op: &str) {
+    let want = e.expect_error_code.as_deref().unwrap_or("");
+    match outcome {
+        Err(err) if err.code().as_str() == want => s.pass(),
+        Err(err) => s.fail(
+            &e.id,
+            format!("expected error {want:?}, got {:?}", err.code().as_str()),
+        ),
+        Ok(_) => s.fail(&e.id, format!("expected error {want:?}, got {op}() success")),
+    }
+}
+
+/// `expand`: native `sparq_jsonld::expand()` vs the normative expected doc, and —
+/// [OPUS-5] sq-gzsky, mirroring the ratchet lane — NegativeEvaluationTests RUN
+/// against their `expectErrorCode` (a raised-but-wrong code FAILS).
+/// SKIPs (honest, per the ratchet lane): `requires` optional features, the
+/// 1.0-only negatives ([`is_one_zero_only_negative`]), a negative with no
+/// `expectErrorCode`, remote inputs, a positive with no `expect`.
 fn run_expand(root: &Path, entries: &[Entry]) -> Score {
     let mut s = Score::default();
     let loader = FsLoader::new().map_prefix(SUITE_BASE, root);
     for e in entries {
-        if e.requires.is_some() || e.is_negative || is_remote(&e.input) {
+        if e.requires.is_some() || is_remote(&e.input) {
             s.skip();
             continue;
         }
-        let Some(expect_rel) = &e.expect else {
+        if e.is_negative && (is_one_zero_only_negative(e) || e.expect_error_code.is_none()) {
             s.skip();
             continue;
-        };
+        }
+        if !e.is_negative && e.expect.is_none() {
+            s.skip();
+            continue;
+        }
         let input = match read_json(root, &e.input) {
             Ok(j) => j,
             Err(why) => {
@@ -607,7 +647,13 @@ fn run_expand(root: &Path, entries: &[Entry]) -> Score {
                 }
             }
         }
-        match jsonld_expand(&input, &opts, &loader) {
+        let outcome = jsonld_expand(&input, &opts, &loader);
+        if e.is_negative {
+            score_negative(&mut s, e, &outcome, "expand");
+            continue;
+        }
+        let expect_rel = e.expect.as_deref().expect("positive cases keep an expect member");
+        match outcome {
             Ok(got) => compare_expected(&mut s, root, e, expect_rel, &got, "expand"),
             Err(why) => s.fail(&e.id, format!("expand() error: {why}")),
         }
@@ -629,17 +675,24 @@ fn run_compact(root: &Path, entries: &[Entry]) -> Score {
     let loader = FsLoader::new().map_prefix(SUITE_BASE, root);
     for e in entries {
         if e.requires.is_some()
-            || e.is_negative
             || is_remote(&e.input)
             || (e.id == "#t0038" && e.spec_version.as_deref() == Some("json-ld-1.0"))
         {
             s.skip();
             continue;
         }
-        let (Some(expect_rel), Some(ctx_rel)) = (&e.expect, &e.context) else {
+        if e.is_negative && (is_one_zero_only_negative(e) || e.expect_error_code.is_none()) {
+            s.skip();
+            continue;
+        }
+        let Some(ctx_rel) = &e.context else {
             s.skip();
             continue;
         };
+        if !e.is_negative && e.expect.is_none() {
+            s.skip();
+            continue;
+        }
         let (input, ctx) = match (read_json(root, &e.input), read_json(root, ctx_rel)) {
             (Ok(i), Ok(c)) => (i, c),
             (Err(why), _) | (_, Err(why)) => {
@@ -656,7 +709,13 @@ fn run_compact(root: &Path, entries: &[Entry]) -> Score {
         if let Some(cr) = e.compact_to_relative {
             opts.compact_to_relative = cr;
         }
-        match jsonld_compact(&input, &ctx, &opts, &loader) {
+        let outcome = jsonld_compact(&input, &ctx, &opts, &loader);
+        if e.is_negative {
+            score_negative(&mut s, e, &outcome, "compact");
+            continue;
+        }
+        let expect_rel = e.expect.as_deref().expect("positive cases keep an expect member");
+        match outcome {
             Ok(got) => compare_expected(&mut s, root, e, expect_rel, &got, "compact"),
             Err(why) => s.fail(&e.id, format!("compact() error: {why}")),
         }

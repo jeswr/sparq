@@ -670,3 +670,163 @@ fn free_floating_value_objects_under_graph_are_dropped() {
         r#"[]"#,
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// [OPUS-5] sq-gzsky — the W3C `expand` NEGATIVE lane. Each of these was a silently
+// SUCCEEDING expansion before the lane was gated on the exact `expectErrorCode`; the
+// W3C manifest id that pins each one is named in the test.
+// ---------------------------------------------------------------------------------------
+
+/// §5.1.2 step 15.1: a value object "must not contain an `@type` entry if it contains
+/// either `@language` or `@direction`". Only the `@language` half used to be checked
+/// (W3C expand/#tdi09).
+#[test]
+fn value_object_type_with_direction_is_invalid() {
+    assert_error(
+        r#"{"http://ex/p": {"@value": "v", "@type": "http://ex/t", "@direction": "rtl"}}"#,
+        JsonLdErrorCode::InvalidValueObject,
+    );
+}
+
+/// The `@language` half of the same rule keeps raising — the fix must not have replaced
+/// one arm with the other.
+#[test]
+fn value_object_type_with_language_is_still_invalid() {
+    assert_error(
+        r#"{"http://ex/p": {"@value": "v", "@type": "http://ex/t", "@language": "en"}}"#,
+        JsonLdErrorCode::InvalidValueObject,
+    );
+}
+
+/// §5.1.2 step 15.5 is "its value is not an IRI": a BLANK NODE identifier is not an IRI,
+/// so it cannot be a datatype (W3C expand/#ter40).
+#[test]
+fn blank_node_datatype_is_an_invalid_typed_value() {
+    assert_error(
+        r#"{"http://ex/p": {"@value": "bar", "@type": "_:dt"}}"#,
+        JsonLdErrorCode::InvalidTypedValue,
+    );
+}
+
+/// Same step: a scheme alone is not enough — a datatype carrying an IRI-illegal character
+/// (here a SPACE) must be rejected. "Processors MUST validate datatype IRIs"
+/// (W3C expand/#t0123).
+#[test]
+fn malformed_datatype_iri_is_an_invalid_typed_value() {
+    assert_error(
+        r#"{"http://ex/p": {"@value": "bar", "@type": "http://example.com/baz z"}}"#,
+        JsonLdErrorCode::InvalidTypedValue,
+    );
+}
+
+/// The well-formed datatype next door still expands — the validation must reject the
+/// illegal character, not the shape.
+#[test]
+fn well_formed_datatype_iri_still_expands() {
+    assert_expands(
+        r#"{"http://ex/p": {"@value": "bar", "@type": "http://example.com/bazz"}}"#,
+        r#"[{"http://ex/p": [{"@value": "bar", "@type": "http://example.com/bazz"}]}]"#,
+    );
+}
+
+/// §5.1.2 step 13.4.8 arrays the recursive `@included` result, so a value that expands to
+/// `null` (a free-floating scalar under a NULL active property) becomes `[null]` — and
+/// `null` is not a node object (W3C expand/#tin07).
+#[test]
+fn included_string_is_an_invalid_included_value() {
+    assert_error(
+        r#"{"@context": {"@version": 1.1, "@vocab": "http://ex/"}, "@included": "string"}"#,
+        JsonLdErrorCode::InvalidIncludedValue,
+    );
+}
+
+/// Same rule for a value object (W3C expand/#tin08).
+#[test]
+fn included_value_object_is_an_invalid_included_value() {
+    assert_error(
+        r#"{"@context": {"@version": 1.1, "@vocab": "http://ex/"}, "@included": {"@value": "v"}}"#,
+        JsonLdErrorCode::InvalidIncludedValue,
+    );
+}
+
+/// Same rule for a list object (W3C expand/#tin09).
+#[test]
+fn included_list_object_is_an_invalid_included_value() {
+    assert_error(
+        r#"{"@context": {"@version": 1.1, "@vocab": "http://ex/"}, "@included": {"@list": ["v"]}}"#,
+        JsonLdErrorCode::InvalidIncludedValue,
+    );
+}
+
+/// A LEGAL `@included` block (a node object) still expands — the null coercion must not
+/// have turned the whole entry into an error.
+#[test]
+fn included_node_object_still_expands() {
+    assert_expands(
+        r#"{"@context": {"@version": 1.1, "@vocab": "http://ex/"},
+            "@id": "http://ex/s", "@included": [{"@id": "http://ex/i", "p": "v"}]}"#,
+        r#"[{"@id": "http://ex/s",
+             "@included": [{"@id": "http://ex/i", "http://ex/p": [{"@value": "v"}]}]}]"#,
+    );
+}
+
+/// §4.2.2 step 14.3.3's round-trip check has NO keyword exemption: an IRI-shaped term
+/// whose `@id` is the keyword `@type` does not round-trip (expanding the term yields the
+/// IRI, not `@type`), so JSON-LD 1.1 rejects it (W3C expand/#ter43).
+#[test]
+fn iri_term_aliasing_a_keyword_is_an_invalid_iri_mapping() {
+    assert_error(
+        r#"{"@context": {
+             "http://www.w3.org/1999/02/22-rdf-syntax-ns#type": {"@id": "@type", "@type": "@id"}
+           },
+           "@id": "http://ex/a",
+           "http://www.w3.org/1999/02/22-rdf-syntax-ns#type": "http://ex/b"}"#,
+        JsonLdErrorCode::InvalidIriMapping,
+    );
+}
+
+/// …and its JSON-LD-**1.0** twin (W3C expand/#t0026, the SAME document) still expands:
+/// the whole round-trip check is 1.1-only, so removing the keyword exemption must not
+/// have leaked into 1.0 processing mode.
+#[test]
+fn iri_term_aliasing_a_keyword_is_legal_in_1_0_mode() {
+    let mut opts = JsonLdOptions::default();
+    opts.processing_mode = sparq_jsonld::ProcessingMode::JsonLd10;
+    let input = json(
+        r#"{"@context": {
+              "http://www.w3.org/1999/02/22-rdf-syntax-ns#type": {"@id": "@type", "@type": "@id"}
+            },
+            "@id": "http://ex/a",
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#type": "http://ex/b"}"#,
+    );
+    let got = expand(&input, &opts, &NoopLoader).expect("1.0 mode must accept the alias");
+    assert_eq!(
+        canon(&got),
+        canon(&json(r#"[{"@id": "http://ex/a", "@type": ["http://ex/b"]}]"#)),
+    );
+}
+
+/// §4.2.2 step 21.2: in `json-ld-1.0` processing mode a container value that "is
+/// otherwise not a string" is an `invalid container mapping` — so the single-element
+/// ARRAY form, legal from 1.1, is illegal there (W3C expand/#tes01).
+#[test]
+fn array_container_is_invalid_in_1_0_processing_mode() {
+    let mut opts = JsonLdOptions::default();
+    opts.processing_mode = sparq_jsonld::ProcessingMode::JsonLd10;
+    let input = json(
+        r#"{"@context": {"term": {"@id": "http://ex/term", "@container": ["@set"]}},
+            "@id": "http://ex/test", "term": "foo"}"#,
+    );
+    let err = expand(&input, &opts, &NoopLoader).expect_err("1.0 mode rejects an array container");
+    assert_eq!(err.code(), JsonLdErrorCode::InvalidContainerMapping);
+}
+
+/// The same context is legal in 1.1 — the 1.0 guard must be mode-scoped, not universal.
+#[test]
+fn array_container_is_legal_in_1_1_processing_mode() {
+    assert_expands(
+        r#"{"@context": {"term": {"@id": "http://ex/term", "@container": ["@set"]}},
+            "@id": "http://ex/test", "term": "foo"}"#,
+        r#"[{"@id": "http://ex/test", "http://ex/term": [{"@value": "foo"}]}]"#,
+    );
+}

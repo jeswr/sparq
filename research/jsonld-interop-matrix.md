@@ -50,9 +50,9 @@ an unqualified conformance claim.
 | --- | ---: | --- |
 | toRdf | **413 / 467** | oxjsonld RDF dataset comparison; native strict/differential path remains open as `sq-oy1f.30` |
 | fromRdf | **52 / 53** | native document comparison plus lossless RDF round-trip and negative error checks; `sq-oy1f.28`, [#1923](https://github.com/sparq-org/sparq/pull/1923) |
-| expand | **276 / 385** | native document-level comparison; `sq-oy1f.25`, [#1380](https://github.com/sparq-org/sparq/pull/1380), with later correctness ratchets |
+| expand | **379 / 385** | native document-level comparison INCLUDING the NegativeEvaluationTests (exact `expectErrorCode`); `sq-oy1f.25`, [#1380](https://github.com/sparq-org/sparq/pull/1380), with later correctness ratchets and the negative lane in `sq-gzsky` |
 | flatten | **53 / 58** | native document-level comparison; `sq-oy1f.26`, [#1811](https://github.com/sparq-org/sparq/pull/1811) |
-| compact | **228 / 246** | native normative document comparison; `sq-oy1f.27`, [#1934](https://github.com/sparq-org/sparq/pull/1934) |
+| compact | **244 / 246** | native normative document comparison INCLUDING the NegativeEvaluationTests (exact `expectErrorCode`); `sq-oy1f.27`, [#1934](https://github.com/sparq-org/sparq/pull/1934), negative lane in `sq-gzsky` |
 | frame | **92 / 92** | native normative document comparison, including negative cases; `sq-oy1f.29`, [#1995](https://github.com/sparq-org/sparq/pull/1995) |
 
 The authoritative numbers live in

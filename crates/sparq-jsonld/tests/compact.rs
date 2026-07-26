@@ -776,3 +776,93 @@ fn compact_to_relative_false_keeps_absolute_ids() {
         r#"{"@context":{"ex":"http://example.org/"},"@id":"http://ex/dir/doc#frag","http://ex/p":1}"#
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// [OPUS-5] sq-gzsky — IRI Compaction §7.1 step 5 tail (`IRI confused with prefix`) and the
+// property-valued `@index` container key it exposed (§8 step 12.8.9.6.1).
+// ---------------------------------------------------------------------------------------
+
+/// Compacting `tag:champin.net,2019:prop` against a context that also defines `tag` as a
+/// prefix would emit a string a re-expanding consumer resolves to
+/// `http://example.org/ns/tag/champin.net,2019:prop` — a DIFFERENT IRI. The spec makes
+/// that an error rather than a silently lossy document (W3C compact/#te002).
+#[test]
+fn absolute_iri_confused_with_a_prefix_term_is_rejected() {
+    let err = run_err(
+        r#"[{"tag:champin.net,2019:prop": [{"@value": "hello world"}]}]"#,
+        r#"{"tag": "http://example.org/ns/tag/"}"#,
+    );
+    assert_eq!(err.code(), JsonLdErrorCode::IriConfusedWithPrefix);
+}
+
+/// The guard is scheme-scoped: the SAME context compacts an unrelated IRI fine.
+#[test]
+fn unrelated_scheme_still_compacts_beside_a_prefix_term() {
+    let got = run_default(
+        r#"[{"http://example.org/ns/tag/prop": [{"@value": "hello world"}]}]"#,
+        r#"{"tag": "http://example.org/ns/tag/"}"#,
+    );
+    assert_eq!(
+        got,
+        r#"{"@context":{"tag":"http://example.org/ns/tag/"},"tag:prop":"hello world"}"#
+    );
+}
+
+/// §8 step 12.8.9.6.1 — a property-valued `@index` container whose index mapping is a
+/// COMPACT IRI (`ex:name`). The index mapping is stored verbatim as authored, so the
+/// container key must be resolved by IRI-EXPANDING it first (W3C compact/#t0112).
+#[test]
+fn property_valued_index_container_keyed_by_a_compact_iri_index() {
+    let got = run_default(
+        r#"{"http://example.org/ns/prop": [
+             {"@id": "http://example.org/ns/bar", "http://example.org/ns/name": "bar"},
+             {"@id": "http://example.org/ns/foo", "http://example.org/ns/name": "foo"}
+           ]}"#,
+        r#"{"ex": "http://example.org/ns/",
+            "prop": {"@id": "ex:prop", "@container": "@index", "@index": "ex:name"}}"#,
+    );
+    assert_eq!(
+        got,
+        r#"{"@context":{"ex":"http://example.org/ns/","prop":{"@id":"ex:prop","@container":"@index","@index":"ex:name"}},"prop":{"bar":{"@id":"ex:bar"},"foo":{"@id":"ex:foo"}}}"#
+    );
+}
+
+/// The same step with the index mapping authored as a plain TERM (`predicate`) that
+/// carries `@type: @vocab`. Re-deriving the container key through a VALUE-LESS Term
+/// Selection would miss it (preferred values are `@id`/`@none`/`@any`, never `@vocab`)
+/// and the index property would be left on the item (W3C compact/#t0114).
+#[test]
+fn property_valued_index_container_keyed_by_a_vocab_typed_term() {
+    let got = run_default(
+        r#"[{"@id": "https://example.org/item/1",
+             "@reverse": {"http://www.w3.org/1999/02/22-rdf-syntax-ns#subject": [{
+               "https://example.net/ns#addedIn": [{"@id": "https://example.org/v1"}],
+               "http://www.w3.org/1999/02/22-rdf-syntax-ns#object": [
+                 {"@id": "https://example.net/ns#A"}],
+               "http://www.w3.org/1999/02/22-rdf-syntax-ns#predicate": [
+                 {"@id": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"}]
+             }]}}]"#,
+        r#"{"@version": 1.1,
+            "@base": "https://example.org/",
+            "@vocab": "https://example.net/ns#",
+            "rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+            "statement": {"@reverse": "rdf:subject", "@container": "@index",
+                          "@index": "predicate"},
+            "predicate": {"@id": "rdf:predicate", "@type": "@vocab"},
+            "term": {"@id": "rdf:object", "@type": "@vocab"},
+            "addedIn": {"@type": "@id"}}"#,
+    );
+    // The index property (`predicate`) is LIFTED to the map key `rdf:type` and removed
+    // from the item — the shape the missing expansion leg would otherwise break.
+    let want = concat!(
+        r#"{"@context":{"@version":1.1,"@base":"https://example.org/","#,
+        r#""@vocab":"https://example.net/ns#","#,
+        r#""rdf":"http://www.w3.org/1999/02/22-rdf-syntax-ns#","#,
+        r#""statement":{"@reverse":"rdf:subject","@container":"@index","@index":"predicate"},"#,
+        r#""predicate":{"@id":"rdf:predicate","@type":"@vocab"},"#,
+        r#""term":{"@id":"rdf:object","@type":"@vocab"},"#,
+        r#""addedIn":{"@type":"@id"}},"#,
+        r#""@id":"item/1","statement":{"rdf:type":{"addedIn":"v1","term":"A"}}}"#,
+    );
+    assert_eq!(got, want);
+}

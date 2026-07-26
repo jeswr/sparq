@@ -233,15 +233,18 @@ sparq drives the official `w3c/json-ld-api` and the separate `w3c/json-ld-framin
 suites through six ratcheted lanes. Each floor is a **MEASURED minimum pass count at the
 pinned suite revision**, may only rise, and **is not a blanket "conformant" claim** —
 below-floor cases are honest, documented divergences, and the denominators include those
-failures plus intentional skips (negatives, JSON-LD-1.0-only, non-inline/remote context):
+failures plus intentional skips (JSON-LD-1.0-only cases, non-inline/remote context).
+NegativeEvaluationTests are RUN on the `expand`, `compact`, `frame` and `fromRdf` lanes —
+a case passes only if the operation raises EXACTLY the manifest's `expectErrorCode`, so a
+raised-but-wrong code is a failure, never a pass (bead `sq-gzsky`):
 
 | Lane    | Measured floor | Oracle |
 | ------- | -------------: | ------ |
 | toRdf   | 413 / 467      | oxjsonld RDF-dataset comparison |
 | fromRdf | 52 / 53        | native document comparison + RDF round-trip |
-| expand  | 276 / 385      | native document-level comparison |
+| expand  | 379 / 385      | native document-level comparison (incl. negatives) |
 | flatten | 53 / 58        | native document-level comparison |
-| compact | 228 / 246      | native normative document comparison |
+| compact | 244 / 246      | native normative document comparison (incl. negatives) |
 | frame   | 92 / 92        | native normative document comparison (incl. negatives) |
 
 The authoritative constants live in

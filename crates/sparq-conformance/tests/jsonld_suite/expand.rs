@@ -35,13 +35,35 @@ use std::path::Path;
 ///    order significant only inside `@list`; integers compared exactly,
 ///    non-integral numbers compared as f64 so `1` ≡ `1.0`).
 ///
+/// ## [OPUS-5] sq-gzsky — NegativeEvaluationTests are RUN, not skipped
+///
+/// The 109 negatives used to be the ENTIRE `expand` gap (276/385 = 71.6% strict,
+/// against peers at 97–100%). They are now driven exactly like the `frame` lane's
+/// (sq-oy1f.29): the case passes **iff** `expand()` errors with EXACTLY the
+/// manifest's `expectErrorCode`. A raised-but-WRONG code is a FAILURE, never a
+/// pass — which is the whole reason `JsonLdErrorCode` is a closed enum carrying the
+/// verbatim spec strings (`error.rs` module doc).
+///
 /// ## Honest SKIP buckets (recorded, not passed, not failed)
 ///
 /// * `requires` optional-feature cases (same as all other lanes).
-/// * NegativeEvaluationTests — expander error-code completeness is unverified;
-///   deferred to a child bead of sq-oy1f.  SKIP (honest), never a counted pass.
+/// * **`option.specVersion: json-ld-1.0` NEGATIVES** — the suite's `vocab.jsonld`
+///   defines `specVersion` as "the JSON-LD version to which the test applies", so
+///   these assert what a **1.0** processor must reject. sparq is a 1.1 processor
+///   and several of them are cases 1.1 deliberately made LEGAL, so raising would be
+///   wrong: `#ter24`/`#ter32` want `list of lists` and `#ter02`/`#ter03` want
+///   `recursive context inclusion` — two codes 1.1 RETIRED (they are absent from
+///   the 1.1 error registry; 1.1 reports cyclic contexts as `context overflow`),
+///   and `#t0115`/`#t0116` want `invalid vocab mapping` for a relative `@vocab`,
+///   which 1.1 explicitly permits. SKIP is the honest outcome, never a pass.
+///   The exact skipped set is pinned by `expand_1_0_negative_skips_are_pinned` so a
+///   suite-pin bump that adds one fails loudly instead of silently absorbing it.
+///   Note this is NARROW: it does not touch `option.processingMode: json-ld-1.0`
+///   cases of the 1.1 suite (e.g. `#tes01`), which a 1.1 processor MUST honour and
+///   which this lane RUNS.
+/// * A NegativeEvaluationTest with no `expectErrorCode` — nothing to assert.
 /// * Remote `input` URL — no network.
-/// * No `expect` file — nothing to compare.
+/// * No `expect` file on a positive — nothing to compare.
 pub fn run_expand_native(root: &Path) -> Score {
     let mut s = Score::default();
     let entries = match read_manifest(root, "expand") {
@@ -61,16 +83,18 @@ pub fn run_expand_native(root: &Path) -> Score {
             s.skip();
             continue;
         }
-        // NegativeEvaluationTests: expander raises some errors but error-code
-        // completeness is unverified — SKIP honestly (deferred).
-        if e.is_negative {
+        // [OPUS-5] sq-gzsky — NegativeEvaluationTests are now RUN (see the module
+        // doc), except the two honest buckets: a 1.0-only negative (`specVersion`,
+        // NOT `processingMode` — see `is_one_zero_only_negative`) and one with no
+        // `expectErrorCode` to assert against.
+        if e.is_negative && (is_one_zero_only_negative(e) || e.expect_error_code.is_none()) {
             s.skip();
             continue;
         }
-        let Some(expect_rel) = &e.expect else {
+        if !e.is_negative && e.expect.is_none() {
             s.skip();
             continue;
-        };
+        }
         // Remote input (no network) — guard.
         if e.input.starts_with("http://") || e.input.starts_with("https://") {
             s.skip();
@@ -128,7 +152,29 @@ pub fn run_expand_native(root: &Path) -> Score {
 
         // 3. Call the native expand() algorithm. The FsLoader resolves any `@context` /
         // `@import` relative-URL references to local fixture files (sq-oy1f.45).
-        let expanded = match jsonld_expand(&input_json, &opts, &loader) {
+        let result = jsonld_expand(&input_json, &opts, &loader);
+
+        // [OPUS-5] sq-gzsky — the NEGATIVE lane: the case passes iff expand()
+        // errors with EXACTLY the manifest's `expectErrorCode`. A raised-but-wrong
+        // code is a FAILURE, not a pass (honesty over score) — that is the whole
+        // point of modelling the registry as a closed enum.
+        if e.is_negative {
+            let want_code = e.expect_error_code.as_deref().unwrap_or("");
+            match &result {
+                Err(err) if err.code().as_str() == want_code => s.pass(),
+                Err(err) => s.fail(
+                    &e.id,
+                    format!("wrong error code: got '{}', want '{}'", err.code(), want_code),
+                ),
+                Ok(_) => s.fail(
+                    &e.id,
+                    format!("negative test expanded without error (want '{}')", want_code),
+                ),
+            }
+            continue;
+        }
+
+        let expanded = match result {
             Ok(j) => j,
             Err(why) => {
                 s.fail(&e.id, format!("expand() error: {}", why));
@@ -145,8 +191,9 @@ pub fn run_expand_native(root: &Path) -> Score {
             }
         };
 
-        // 5. Read and parse the expected document.
-        let expect_path = root.join(expect_rel);
+        // 5. Read and parse the expected document. (Positive cases without an
+        // `expect` member were skipped above, so this is always present here.)
+        let expect_path = root.join(e.expect.as_deref().unwrap_or_default());
         let exp_text = match std::fs::read_to_string(&expect_path) {
             Ok(t) => t,
             Err(why) => {
@@ -190,4 +237,76 @@ pub fn run_expand_native(root: &Path) -> Score {
         }
     }
     s
+}
+
+/// [OPUS-5] sq-gzsky — True iff `e` is a NegativeEvaluationTest that applies ONLY to
+/// the 2014 JSON-LD **1.0** REC, and so is formally inapplicable to sparq (a 1.1
+/// processor). Scope pinned by [`expand_1_0_negative_skips_are_pinned`].
+///
+/// The predicate is `option.specVersion == "json-ld-1.0"`, which the pinned suite's
+/// own `vocab.jsonld` defines as "the JSON-LD version to which the test applies".
+/// It is deliberately NOT `option.processingMode`: `processingMode: json-ld-1.0` is
+/// a JSON-LD **1.1** API option that a 1.1 processor MUST honour, and those cases
+/// (e.g. `#tes01`) RUN in this lane.
+///
+/// Why raising on these would be WRONG, not merely unimplemented — every one of the
+/// six is behaviour 1.1 deliberately changed:
+///
+/// * `#ter24`, `#ter32` expect `list of lists`, and `#ter02`, `#ter03` expect
+///   `recursive context inclusion`. Neither string is in the JSON-LD 1.1 error
+///   registry (`JsonLdErrorCode` is a closed enum over that registry, so neither is
+///   even expressible): 1.1 ALLOWS lists of lists, and reports a cyclic context as
+///   `context overflow` instead.
+/// * `#t0115`, `#t0116` expect `invalid vocab mapping` for a relative `@vocab`,
+///   which 1.1 explicitly permits (§4.1.2 resolves it against the base/vocab).
+///
+/// This is a broader shape than the compact lane's single pinned `#t0038` because
+/// `specVersion: json-ld-1.0` NEGATIVES are a whole class here, not one case — but
+/// it carries the same anti-silence guarantee: the exact matched id set is asserted
+/// below, so a suite-pin bump that adds one fails loudly and forces a decision.
+fn is_one_zero_only_negative(e: &Entry) -> bool {
+    e.is_negative && e.spec_version.as_deref() == Some("json-ld-1.0")
+}
+
+/// Regression pin for the scope of the 1.0-only NEGATIVE skip (sq-gzsky): the
+/// predicate matches EXACTLY the six cases justified in
+/// [`is_one_zero_only_negative`], and the `processingMode: json-ld-1.0` negative
+/// `#tes01` — which a 1.1 processor MUST reject — is NOT among them.
+#[test]
+fn expand_1_0_negative_skips_are_pinned() {
+    let root = suite_root();
+    if !root.exists() {
+        eprintln!(
+            "SKIP: W3C JSON-LD suite not present at {} — run scripts/fetch-jsonld-tests.sh",
+            root.display()
+        );
+        return;
+    }
+    let entries = read_manifest(&root, "expand").expect("read expand manifest");
+
+    let skipped: Vec<&str> = entries
+        .iter()
+        .filter(|e| is_one_zero_only_negative(e))
+        .map(|e| e.id.as_str())
+        .collect();
+    assert_eq!(
+        skipped,
+        ["#t0115", "#t0116", "#ter02", "#ter03", "#ter24", "#ter32"],
+        "the 1.0-only expand negative skip set changed — a suite-pin bump must be \
+         decided explicitly (is the new case really inapplicable to a 1.1 processor?), \
+         never silently absorbed"
+    );
+
+    // #tes01 is `processingMode: json-ld-1.0` with `specVersion: json-ld-1.1` — a
+    // 1.1-suite test of 1.0 PROCESSING MODE. It must RUN (and pass) here.
+    let es01 = entries
+        .iter()
+        .find(|e| e.id == "#tes01")
+        .expect("#tes01 missing from the pinned expand manifest");
+    assert!(
+        !is_one_zero_only_negative(es01)
+            && es01.processing_mode.as_deref() == Some("json-ld-1.0")
+            && es01.expect_error_code.is_some(),
+        "#tes01 (processingMode: json-ld-1.0) must RUN, not skip"
+    );
 }

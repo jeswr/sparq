@@ -146,6 +146,14 @@ per-syntax-suite EARL row of its own beyond that. Peers DO publish rich EARL her
 
 ### 3.5 W3C JSON-LD 1.1
 
+> **STALE SNAPSHOT (2026-07-10) — do not re-quote the sparq cells in this section.**
+> Every JSON-LD floor below has since RISEN: fromRdf 51 → 52 (sq-oy1f.28), compact
+> 186 → 228 (sq-oy1f.27) → **244** and expand 276 → **379** (sq-gzsky), frame 61 → **92**
+> (sq-oy1f.29). The live measured scoreboard is
+> `research/gap-jsonld-conformance-2026-07.md` §2; the authoritative consts are
+> `crates/sparq-conformance/src/floors/<lane>.rs`. The peer cells and their provenance
+> are unchanged and still current as quoted.
+
 sparq floors (of the 2026-06 pinned manifests, denominators in parens): toRdf
 **413**/467, fromRdf **51**/53, expand **276**/385, compact **186**/246, flatten
 **53**/58, frame **61**/92. The official JSON-LD 1.1 EARL report (10-Apr-2025) reports
@@ -266,6 +274,13 @@ is a first-class outcome, not a hidden sparq win.
   the honest recorded divergences (remote-context, writer-shape). This is the one
   clearly-BEHIND family with a same-family comparison. **BEHIND → immediate fix bead
   per the §5.3 rule.**
+  > **RESOLVED — bead `sq-gzsky` (2026-07-26).** The §3.5 sparq cells above are a
+  > 2026-07-10 snapshot and are now stale-LOW on all three lanes; do not re-quote
+  > them. `frame` had already reached 92/92 = 100% (floor rose 61 → 92 under
+  > sq-oy1f.29), and sq-gzsky raised `expand` 276 → **379**/385 = 98.4% and `compact`
+  > 228 → **244**/246 = 99.1% by running the NegativeEvaluationTest lanes against
+  > their exact `expectErrorCode`. Live measured scoreboard + the honest residual
+  > skip buckets: `research/gap-jsonld-conformance-2026-07.md` §2.
 - **GeoSPARQL benchmark run (P3).** To turn the GeoSPARQL row from NOT-COMPARABLE into
   a real comparison, run sparq-geo through the 206-query Jovanovik benchmark
   (`github.com/OpenLinkSoftware/GeoSPARQLBenchmark`) and record the requirements-weighted

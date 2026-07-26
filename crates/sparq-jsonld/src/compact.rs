@@ -101,7 +101,7 @@ pub fn compact_expanded(
     };
     let active =
         ActiveContext::new(base).process(&ctx_value, options.base.as_deref(), loader, options)?;
-    let ctx = Ctx::new(active);
+    let ctx = Ctx::new(active, options.processing_mode);
     let env = Env { loader, options };
 
     // The Compaction Algorithm proper, with a null active property.
@@ -112,7 +112,7 @@ pub fn compact_expanded(
         Json::Arr(items) if items.is_empty() => Json::obj(),
         Json::Arr(items) => {
             let mut obj = Json::obj();
-            obj.set(&ctx.ciri("@graph", None, true, false), Json::Arr(items));
+            obj.set(&ctx.ciri("@graph", None, true, false)?, Json::Arr(items));
             obj
         }
         other => other,
@@ -144,17 +144,26 @@ struct Env<'a> {
 struct Ctx {
     active: ActiveContext,
     inverse: InverseContext,
+    /// [OPUS-5] sq-gzsky — carried so IRI Compaction can gate the 1.1-only
+    /// `IRI confused with prefix` guard (§7.1 step 5 tail) on the processing mode.
+    mode: ProcessingMode,
 }
 
 impl Ctx {
-    fn new(active: ActiveContext) -> Ctx {
+    fn new(active: ActiveContext, mode: ProcessingMode) -> Ctx {
         let inverse = active.inverse_context();
-        Ctx { active, inverse }
+        Ctx { active, inverse, mode }
     }
 
     /// IRI Compaction against this context (see `context::inverse`'s `compact_iri`).
-    fn ciri(&self, iri: &str, value: Option<&Json>, vocab: bool, reverse: bool) -> String {
-        compact_iri(&self.active, &self.inverse, iri, value, vocab, reverse)
+    fn ciri(
+        &self,
+        iri: &str,
+        value: Option<&Json>,
+        vocab: bool,
+        reverse: bool,
+    ) -> Result<String, JsonLdError> {
+        compact_iri(&self.active, &self.inverse, iri, value, vocab, reverse, self.mode)
     }
 }
 
@@ -216,7 +225,7 @@ fn compact_element(
     if let Some(prev) = &ctx.active.previous_context {
         let single_id = members.len() == 1 && members[0].0 == "@id";
         if element.get("@value").is_none() && !single_id {
-            owned = Some(Ctx::new((**prev).clone()));
+            owned = Some(Ctx::new((**prev).clone(), ctx.mode));
         }
     }
 
@@ -244,7 +253,7 @@ fn compact_element(
             }
         };
         if let Some(next) = next {
-            owned = Some(Ctx::new(next));
+            owned = Some(Ctx::new(next, ctx.mode));
         }
     }
     let cur: &Ctx = owned.as_ref().unwrap_or(ctx);
@@ -252,7 +261,7 @@ fn compact_element(
     // step 6: value objects / node references — Value Compaction. Return the result when
     // it is a scalar, or unconditionally for a @json-typed term (its payload is raw JSON).
     if element.get("@value").is_some() || element.get("@id").is_some() {
-        if let Some(v) = value_compact(cur, active_property, element) {
+        if let Some(v) = value_compact(cur, active_property, element)? {
             let json_mapped = active_property
                 .and_then(|p| cur.active.term_definition(p))
                 .and_then(|d| d.type_mapping())
@@ -284,7 +293,7 @@ fn compact_element(
         let mut compacted_types: Vec<String> = type_strings(types)
             .into_iter()
             .map(|t| type_scoped.ciri(t, None, true, false))
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
         compacted_types.sort();
         for term in &compacted_types {
             if let Some(def) = type_scoped.active.term_definition(term) {
@@ -300,7 +309,7 @@ fn compact_element(
                             env.options,
                         )?
                     };
-                    owned_t = Some(Ctx::new(next));
+                    owned_t = Some(Ctx::new(next, cur.mode));
                 }
             }
         }
@@ -320,21 +329,21 @@ fn compact_element(
             // step 12.1: @id — compact the IRI (document-relative) under the alias.
             "@id" => {
                 let compacted = match expanded_value {
-                    Json::Str(s) => Json::Str(cur.ciri(s, None, false, false)),
+                    Json::Str(s) => Json::Str(cur.ciri(s, None, false, false)?),
                     // Frame-expanded documents may carry @id arrays; compact each
                     // (the framing bead consumes this — plain expansion always yields
                     // a single string).
                     Json::Arr(ids) => Json::Arr(
                         ids.iter()
                             .map(|id| match id {
-                                Json::Str(s) => Json::Str(cur.ciri(s, None, false, false)),
-                                other => other.clone(),
+                                Json::Str(s) => Ok(Json::Str(cur.ciri(s, None, false, false)?)),
+                                other => Ok(other.clone()),
                             })
-                            .collect(),
+                            .collect::<Result<Vec<_>, JsonLdError>>()?,
                     ),
                     other => other.clone(),
                 };
-                let alias = cur.ciri("@id", None, true, false);
+                let alias = cur.ciri("@id", None, true, false)?;
                 result.set(&alias, compacted);
                 continue;
             }
@@ -342,18 +351,20 @@ fn compact_element(
             // array-ness follows the alias's @set container (1.1) or compactArrays.
             "@type" => {
                 let compacted = match expanded_value {
-                    Json::Str(s) => Json::Str(type_scoped.ciri(s, None, true, false)),
+                    Json::Str(s) => Json::Str(type_scoped.ciri(s, None, true, false)?),
                     Json::Arr(ts) => Json::Arr(
                         ts.iter()
                             .map(|t| match t {
-                                Json::Str(s) => Json::Str(type_scoped.ciri(s, None, true, false)),
-                                other => other.clone(),
+                                Json::Str(s) => {
+                                    Ok(Json::Str(type_scoped.ciri(s, None, true, false)?))
+                                }
+                                other => Ok(other.clone()),
                             })
-                            .collect(),
+                            .collect::<Result<Vec<_>, JsonLdError>>()?,
                     ),
                     other => other.clone(),
                 };
-                let alias = cur.ciri("@type", None, true, false);
+                let alias = cur.ciri("@type", None, true, false)?;
                 let as_array = (env.options.processing_mode == ProcessingMode::JsonLd11
                     && term_container(&cur.active, Some(&alias))
                         .iter()
@@ -385,7 +396,7 @@ fn compact_element(
                         }
                     }
                     if !remaining.is_empty() {
-                        let alias = cur.ciri("@reverse", None, true, false);
+                        let alias = cur.ciri("@reverse", None, true, false)?;
                         result.set(&alias, Json::Obj(remaining));
                     }
                 }
@@ -411,7 +422,7 @@ fn compact_element(
             // step 12.6: @direction / @index / @language / @value pass through verbatim
             // under their aliases.
             "@direction" | "@index" | "@language" | "@value" => {
-                let alias = cur.ciri(key, None, true, false);
+                let alias = cur.ciri(key, None, true, false)?;
                 result.set(&alias, expanded_value.clone());
                 continue;
             }
@@ -420,7 +431,7 @@ fn compact_element(
 
         // step 12.7: an empty-array value survives as an empty array under its term.
         if matches!(expanded_value, Json::Arr(a) if a.is_empty()) {
-            let iap = cur.ciri(key, Some(expanded_value), true, inside_reverse);
+            let iap = cur.ciri(key, Some(expanded_value), true, inside_reverse)?;
             let nest = nest_target(&mut result, cur, &iap)?;
             add_value(nest, &iap, Json::Arr(Vec::new()), true);
             continue;
@@ -434,7 +445,7 @@ fn compact_element(
         };
         for item in items {
             // 12.8.1: the item's own term selection (container/type/language aware).
-            let iap = cur.ciri(key, Some(item), true, inside_reverse);
+            let iap = cur.ciri(key, Some(item), true, inside_reverse)?;
             let container = term_container(&cur.active, Some(&iap)).to_vec();
             // 12.8.4: array-ness for this term.
             let as_array = container.iter().any(|c| c == "@set")
@@ -468,9 +479,9 @@ fn compact_element(
                 }
                 // Re-wrap as a list object under the @list alias (+ verbatim @index).
                 let mut wrapper = Json::obj();
-                wrapper.set(&cur.ciri("@list", None, true, false), compacted_item);
+                wrapper.set(&cur.ciri("@list", None, true, false)?, compacted_item);
                 if let Some(idx) = item.get("@index") {
-                    wrapper.set(&cur.ciri("@index", None, true, false), idx.clone());
+                    wrapper.set(&cur.ciri("@index", None, true, false)?, idx.clone());
                 }
                 let nest = nest_target(&mut result, cur, &iap)?;
                 add_value(nest, &iap, wrapper, as_array);
@@ -531,8 +542,8 @@ fn compact_graph_item(
     if has_graph && has_id {
         // 12.8.7.1: an @graph+@id map keyed by the (document-relative) graph name.
         let map_key = match item.get("@id").and_then(Json::as_str) {
-            Some(id) => cur.ciri(id, None, false, false),
-            None => cur.ciri("@none", None, true, false),
+            Some(id) => cur.ciri(id, None, false, false)?,
+            None => cur.ciri("@none", None, true, false)?,
         };
         let nest = nest_target(result, cur, iap)?;
         let map_obj = get_or_create_map(nest, iap);
@@ -547,8 +558,11 @@ fn compact_graph_item(
         let map_key = item
             .get("@index")
             .and_then(Json::as_str)
-            .map(str::to_string)
-            .unwrap_or_else(|| cur.ciri("@none", None, true, false));
+            .map(str::to_string);
+        let map_key = match map_key {
+            Some(k) => k,
+            None => cur.ciri("@none", None, true, false)?,
+        };
         let nest = nest_target(result, cur, iap)?;
         let map_obj = get_or_create_map(nest, iap);
         add_value(map_obj, &map_key, compacted_item, as_array);
@@ -559,7 +573,7 @@ fn compact_graph_item(
         // they are not read back as distinct named graphs.
         if matches!(&compacted_item, Json::Arr(a) if a.len() > 1) {
             let mut wrapper = Json::obj();
-            wrapper.set(&cur.ciri("@included", None, true, false), compacted_item);
+            wrapper.set(&cur.ciri("@included", None, true, false)?, compacted_item);
             compacted_item = wrapper;
         }
         let nest = nest_target(result, cur, iap)?;
@@ -569,15 +583,15 @@ fn compact_graph_item(
 
     // 12.8.7.4: no matching @graph container — re-wrap as an explicit graph object.
     let mut wrapper = Json::obj();
-    wrapper.set(&cur.ciri("@graph", None, true, false), compacted_item);
+    wrapper.set(&cur.ciri("@graph", None, true, false)?, compacted_item);
     if let Some(id) = item.get("@id").and_then(Json::as_str) {
         wrapper.set(
-            &cur.ciri("@id", None, true, false),
-            Json::Str(cur.ciri(id, None, false, false)),
+            &cur.ciri("@id", None, true, false)?,
+            Json::Str(cur.ciri(id, None, false, false)?),
         );
     }
     if let Some(idx) = item.get("@index") {
-        wrapper.set(&cur.ciri("@index", None, true, false), idx.clone());
+        wrapper.set(&cur.ciri("@index", None, true, false)?, idx.clone());
     }
     let nest = nest_target(result, cur, iap)?;
     add_value(nest, iap, wrapper, as_array);
@@ -598,7 +612,7 @@ fn add_to_container_map(
     env: &Env,
 ) -> Result<(), JsonLdError> {
     // 12.8.9.2: the container key (the alias of the container keyword).
-    let mut container_key = cur.ciri(kind, None, true, false);
+    let mut container_key = cur.ciri(kind, None, true, false)?;
     // 12.8.9.3: a property-valued index uses the term's index mapping instead of @index.
     let index_key = cur
         .active
@@ -624,7 +638,40 @@ fn add_to_container_map(
     } else if kind == "@index" {
         // 12.8.9.6: property-valued index maps — the key is the first value of the
         // (compacted) index property; remaining values stay on the property.
-        container_key = cur.ciri(&index_key, None, true, false);
+        // [OPUS-5] sq-gzsky — §8 step 12.8.9.6.1 is "Reinitialize container key by IRI
+        // compacting index key AFTER FIRST IRI EXPANDING IT". The index mapping is stored
+        // VERBATIM as authored (§4.2.2 step 22 sets it to `index`, never to its expansion),
+        // so it is normally a TERM or COMPACT IRI (`ex:name` in W3C compact/#t0112,
+        // `predicate` in #t0114) — not an IRI. Compacting it without expanding first was
+        // therefore feeding a non-IRI into IRI Compaction; it happened to round-trip to the
+        // same string, but the §7.1 step-5-tail `IRI confused with prefix` guard rightly
+        // rejects an `ex:`-scheme non-IRI.
+        //
+        // What this key is FOR is locating the index property inside `compacted_item`, so
+        // resolve it that way: expand the index key to its property IRI, then take the
+        // entry of `compacted_item` that expands to the same IRI. That is exact whichever
+        // compacted form the property walk chose, and it avoids re-deriving it through a
+        // VALUE-LESS Term Selection — which cannot recover a `@type: @vocab` term such as
+        // #t0114's `predicate` (with `value` null the preferred values are `@id`/`@none`/
+        // `@any`, so the walk would fall back to `rdf:predicate` and miss the entry).
+        let expanded_index_key = cur
+            .active
+            .expand_iri(&index_key, false, true)
+            .unwrap_or_else(|| index_key.clone());
+        let present = match &compacted_item {
+            Json::Obj(members) => members
+                .iter()
+                .map(|(k, _)| k)
+                .find(|k| {
+                    cur.active.expand_iri(k, false, true).as_deref() == Some(&expanded_index_key)
+                })
+                .cloned(),
+            _ => None,
+        };
+        container_key = match present {
+            Some(k) => k,
+            None => cur.ciri(&expanded_index_key, None, true, false)?,
+        };
         if let Some(taken) = take_entry(&mut compacted_item, &container_key) {
             let mut vals = match taken {
                 Json::Arr(a) => a,
@@ -685,7 +732,10 @@ fn add_to_container_map(
     }
 
     // 12.8.9.9: an absent key files under (a possibly aliased) @none.
-    let map_key = map_key.unwrap_or_else(|| cur.ciri("@none", None, true, false));
+    let map_key = match map_key {
+        Some(k) => k,
+        None => cur.ciri("@none", None, true, false)?,
+    };
     let nest = nest_target(result, cur, iap)?;
     let map_obj = get_or_create_map(nest, iap);
     add_value(map_obj, &map_key, compacted_item, as_array);
@@ -701,7 +751,11 @@ fn add_to_container_map(
 /// (type-mapping match, `@id`/`@vocab` coercion, language + direction matching,
 /// non-string literal, or a `@json` payload), or `None` when compaction is disabled and
 /// the caller must fall through to the general (map-shaped) path.
-fn value_compact(cur: &Ctx, active_property: Option<&str>, value: &Json) -> Option<Json> {
+fn value_compact(
+    cur: &Ctx,
+    active_property: Option<&str>,
+    value: &Json,
+) -> Result<Option<Json>, JsonLdError> {
     let def = active_property.and_then(|p| cur.active.term_definition(p));
     let container: &[String] = def.map(|d| d.container()).unwrap_or(&[]);
     let type_mapping = def.and_then(|d| d.type_mapping());
@@ -724,7 +778,7 @@ fn value_compact(cur: &Ctx, active_property: Option<&str>, value: &Json) -> Opti
 
     let keys: Vec<&str> = match value {
         Json::Obj(m) => m.iter().map(|(k, _)| k.as_str()).collect(),
-        _ => return None,
+        _ => return Ok(None),
     };
     let tval = value.get("@type").and_then(Json::as_str);
 
@@ -733,12 +787,16 @@ fn value_compact(cur: &Ctx, active_property: Option<&str>, value: &Json) -> Opti
     if value.get("@id").is_some() && keys.iter().all(|k| matches!(*k, "@id" | "@index")) {
         if let Some(id) = value.get("@id").and_then(Json::as_str) {
             match type_mapping {
-                Some("@id") => return Some(Json::Str(cur.ciri(id, None, false, false))),
-                Some("@vocab") => return Some(Json::Str(cur.ciri(id, None, true, false))),
+                Some("@id") => {
+                    return Ok(Some(Json::Str(cur.ciri(id, None, false, false)?)))
+                }
+                Some("@vocab") => {
+                    return Ok(Some(Json::Str(cur.ciri(id, None, true, false)?)))
+                }
                 _ => {}
             }
         }
-        return None;
+        return Ok(None);
     }
     // step 7: a matching @type drops to the bare @value (this is also the @json path)
     // — GUARDED by `index_ok`: the REC's literal text has no @index condition here,
@@ -748,17 +806,17 @@ fn value_compact(cur: &Ctx, active_property: Option<&str>, value: &Json) -> Opti
     // jsonld.js guards identically (`preserveIndex`); with the guard the value
     // falls through to the general map path, which keeps @type + @index verbatim.
     if tval.is_some() && tval == type_mapping && index_ok {
-        return value.get("@value").cloned();
+        return Ok(value.get("@value").cloned());
     }
     // step 8: compaction disabled — @none type mapping, or a non-matching @type.
     if type_mapping == Some("@none") || (tval.is_some() && tval != type_mapping) {
-        return None;
+        return Ok(None);
     }
     // step 9: non-string literals compact whenever the @index (if any) is re-expressed
     // by an @index container.
     if let Some(v) = value.get("@value") {
         if !matches!(v, Json::Str(_)) {
-            return if index_ok { Some(v.clone()) } else { None };
+            return Ok(if index_ok { Some(v.clone()) } else { None });
         }
         // step 10: string literals compact when language AND direction match the
         // property's effective mappings (case-insensitively; absence matches null).
@@ -775,10 +833,10 @@ fn value_compact(cur: &Ctx, active_property: Option<&str>, value: &Json) -> Opti
             _ => false,
         };
         if lang_matches && dir_matches && index_ok {
-            return Some(v.clone());
+            return Ok(Some(v.clone()));
         }
     }
-    None
+    Ok(None)
 }
 
 // ---------------------------------------------------------------------------

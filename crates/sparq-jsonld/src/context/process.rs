@@ -491,15 +491,17 @@ pub(crate) fn create_term_definition(
             // in 1.1 to disallow inconsistent compact-IRI redefinitions.  In JSON-LD 1.0
             // mode the check is skipped (W3C expand/0026 maps rdf:type→@type and
             // expand/0071 remaps v:term→v:somethingElse — both VALID in 1.0).
-            // The check is also skipped when the IRI mapping is a keyword (e.g. `@type`):
-            // keywords are not IRIs, so the round-trip "expand term = IRI mapping" predicate
-            // cannot hold and the check would always fire spuriously.
+            // [OPUS-5] sq-gzsky — there is NO keyword exemption: §4.2.2 step 14.3.3 states
+            // the round-trip unconditionally, and exempting keyword IRI mappings made an
+            // IRI-shaped term aliasing a keyword (`"…rdf-syntax-ns#type": {"@id": "@type"}`)
+            // silently legal in 1.1, where W3C expand/#ter43 pins it as `invalid IRI
+            // mapping`. Its 1.0-mode twin expand/#t0026 (same document) keeps passing
+            // because the whole check remains 1.1-only.
             // [FABLE-5] (sq-oy1f.27) The round-trip check applies to a term containing
             // a colon "anywhere but as the first or last character" (§4.2.2 step
             // 14.3.3) — a term ENDING in a colon (the `"prefix:"` declaration form,
             // W3C compact/p003-p004) is a regular term, not a compact-IRI form.
             if env.mode != ProcessingMode::JsonLd10
-                && !is_keyword(&expanded)
                 && (term.find(':').is_some_and(|i| i > 0 && i < term.len() - 1)
                     || term.contains('/'))
             {
@@ -663,6 +665,15 @@ fn finish_definition(
     if let Some(c) = value.get("@container") {
         let members = normalize_container(c).ok_or_else(|| JsonLdError::new(E::InvalidContainerMapping))?;
         if !valid_container(&members, env.mode) {
+            return Err(JsonLdError::new(E::InvalidContainerMapping));
+        }
+        // [OPUS-5] sq-gzsky — §4.2.2 step 21.2: in `json-ld-1.0` processing mode a
+        // container value that "is @graph, @id, or @type, or is otherwise NOT A STRING"
+        // is an `invalid container mapping`. `valid_container` only sees the normalized
+        // member list, so the single-element ARRAY form (`@container: ["@set"]`, legal
+        // only from 1.1) reached it as the string form and was accepted. W3C
+        // expand/#tes01 pins the rejection.
+        if env.mode == ProcessingMode::JsonLd10 && !matches!(c, Json::Str(_)) {
             return Err(JsonLdError::new(E::InvalidContainerMapping));
         }
         def.container = members;

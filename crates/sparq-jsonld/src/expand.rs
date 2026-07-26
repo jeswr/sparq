@@ -22,7 +22,7 @@
 //!
 //! Spec: <https://www.w3.org/TR/json-ld11-api/#expansion-algorithm>.
 
-use crate::context::iri::{is_absolute_iri, is_blank_node};
+use crate::context::iri::is_well_formed_absolute_iri;
 use crate::context::{is_keyword, ActiveContext, Direction, Override};
 use crate::error::{JsonLdError, JsonLdErrorCode as E};
 use crate::json::Json;
@@ -557,7 +557,17 @@ fn expand_keyword(
                 frame_expansion,
                 false,
             )?;
-            let items = as_array(expanded.unwrap_or_else(|| Json::Arr(Vec::new())));
+            // §5.1.2 step 13.4.8: the recursive result is coerced to an array and EVERY
+            // element must be a node object. [OPUS-5] sq-gzsky — a recursion that returns
+            // `null` (a dropped free-floating scalar / value object / list object, since
+            // `@included` recurses with a NULL active property) arrays to `[null]`, and
+            // `null` is not a node object — so it raises, rather than being read as the
+            // empty array. Fixes W3C expand/#tin07 (string), #tin08 (value object) and
+            // #tin09 (list object), which all expanded silently before.
+            let Some(expanded) = expanded else {
+                return Err(JsonLdError::new(E::InvalidIncludedValue));
+            };
+            let items = as_array(expanded);
             for item in &items {
                 if !is_node_object(item) {
                     return Err(JsonLdError::new(E::InvalidIncludedValue));
@@ -955,7 +965,11 @@ fn cleanup(
         if members.iter().any(|(k, _)| !ALLOWED.contains(&k.as_str())) {
             return Err(JsonLdError::new(E::InvalidValueObject));
         }
-        if has(&members, "@type") && has(&members, "@language") {
+        // §5.1.2 step 15.1: "It must not contain an `@type` entry if it contains either
+        // `@language` or `@direction` entries." [OPUS-5] sq-gzsky — `@direction` was
+        // missing from this pair check, so `{@value, @type, @direction}` expanded
+        // silently (W3C expand/#tdi09).
+        if has(&members, "@type") && (has(&members, "@language") || has(&members, "@direction")) {
             return Err(JsonLdError::new(E::InvalidValueObject));
         }
         // A value object's `@type` is a SINGLE value in the JSON-LD data model
@@ -1000,9 +1014,14 @@ fn cleanup(
             if let Some(t) = obj_get(&members, "@type") {
                 // [FABLE-5] sq-oy1f.29 — a frame value pattern's @type alternative may
                 // also be the wildcard `{}` or `@json`.
+                // [OPUS-5] sq-gzsky — §5.1.2 step 15.5 is "its value is not an IRI":
+                // a datatype must be a WELL-FORMED absolute IRI. A blank node identifier
+                // is not an IRI (W3C expand/#ter40, `_:dt`), and a scheme alone is not
+                // enough — the suite requires processors to reject IRI-illegal characters
+                // (W3C expand/#t0123, `"http://example.com/baz z"`).
                 let type_ok = |e: &Json| match e {
                     Json::Str(s) => {
-                        is_absolute_iri(s) || is_blank_node(s) || (frame_expansion && s == "@json")
+                        is_well_formed_absolute_iri(s) || (frame_expansion && s == "@json")
                     }
                     Json::Obj(m) => frame_expansion && m.is_empty(),
                     _ => false,

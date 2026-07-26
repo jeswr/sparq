@@ -69,7 +69,12 @@ container maps, `@nest`, `@reverse`, `@included`, `@json`, keyword aliases (bead
   — §4.3: maps every IRI to the best term per (container, type/language), tie-broken
   shortest-first then lexicographic.
 - **IRI Compaction** (`compact_iri`) — §7.1: keyword aliases, term lookup via inverse
-  context, vocab-relative suffix, `prefix:suffix` compact IRIs, base-relative paths.
+  context, vocab-relative suffix, `prefix:suffix` compact IRIs, the `IRI confused with
+  prefix` guard, base-relative paths. It takes the `ProcessingMode` and returns
+  `Result<String, JsonLdError>` (bead `sq-gzsky`): the step-5-tail guard rejects an IRI
+  whose scheme is a `@prefix`-flagged term and that carries no `//` authority, because a
+  re-expanding consumer would read it as a compact IRI denoting a *different* IRI. Like
+  the sibling term round-trip check, the guard is JSON-LD-1.1-only.
 - **Term Selection** (internal to `context::inverse`) — §7.2: the container ×
   preferred-value walk, consumed by `compact_iri` and by the document Compaction
   Algorithm (bead `sq-oy1f.27`, since landed — see below).

@@ -52,6 +52,7 @@
 /// * NegativeEvaluationTests — sparq's expander raises some spec errors but
 ///   error-code completeness is unverified; deferred to a child bead of sq-oy1f.
 ///   SKIP (honest), never a counted pass.
+///   **SUPERSEDED by sq-gzsky (below): the negative lane now RUNS.**
 /// * Remote `input` URLs — no network (SKIP).
 /// * No `expect` file — nothing to compare (SKIP).
 ///
@@ -124,4 +125,51 @@
 ///   `create_term_definition` (§4.2.2 step 14.3.3) is now gated on JSON-LD 1.1
 ///   mode and skipped when the expanded value is itself a keyword (e.g. `@type`),
 ///   matching the spec's 1.1-only semantics. Fixes t0026 and t0071.
-pub const FLOOR: usize = 276;
+///
+/// ## [OPUS-5] sq-gzsky — the NEGATIVE lane lands: 276 → 379
+///
+/// The 109 skipped NegativeEvaluationTests WERE the whole `expand` gap: at 276/385
+/// the lane read 71.6% strict against published peers at 97–100%, and every point of
+/// that shortfall was the deferred negative lane (sq-oy1f.31), not a wrong answer.
+/// The runner now drives them exactly like the `frame` lane (sq-oy1f.29) — a case
+/// passes **iff** `expand()` errors with EXACTLY the manifest's `expectErrorCode`, so
+/// a raised-but-WRONG code FAILS. MEASURED **379 pass / 0 fail / 6 skip** of 385
+/// (98.4% strict) at the pinned revision.
+///
+/// 95 of the 103 RUNNABLE negatives passed unchanged — the expander already raised the
+/// right codes. FIVE spec-faithful fixes in `sparq-jsonld` flipped the remaining EIGHT:
+///
+/// * **`@value` + `@type` + `@direction`** — §5.1.2 step 15.1 forbids `@type`
+///   alongside `@language` OR `@direction`; only the `@language` half was checked.
+///   Fixes `#tdi09` (`invalid value object`).
+/// * **Datatype IRI validation** — step 15.5 ("its value is not an IRI") now uses a
+///   WELL-FORMED absolute-IRI predicate: a blank node identifier is not an IRI
+///   (`#ter40`, `_:dt`) and neither is a string carrying IRI-illegal characters
+///   (`#t0123`, `"http://example.com/baz z"`). Both `invalid typed value`.
+/// * **`@included` null coercion** — step 13.4.8 arrays the recursive result, so a
+///   dropped free-floating scalar / value object / list object becomes `[null]`, and
+///   `null` is not a node object. Fixes `#tin07`, `#tin08`, `#tin09`
+///   (`invalid @included value`).
+/// * **Round-trip check, keyword exemption removed** — §4.2.2 step 14.3.3 has no
+///   keyword exemption; exempting one made an IRI-shaped term aliasing `@type` legal
+///   in 1.1. Fixes `#ter43` (`invalid IRI mapping`) while its 1.0-mode twin `#t0026`
+///   keeps passing (the whole check stays 1.1-only).
+/// * **1.0-mode `@container` must be a string** — §4.2.2 step 21.2 rejects a
+///   container value that "is otherwise not a string" in `json-ld-1.0` processing
+///   mode, so the single-element ARRAY form is illegal there. Fixes `#tes01`
+///   (`invalid container mapping`) — note this is a `processingMode: json-ld-1.0`
+///   case of the 1.1 suite, which a 1.1 processor MUST honour, and it RUNS.
+///
+/// ## The 6 remaining SKIPs are 1.0-ONLY negatives (honest, never a pass)
+///
+/// `#t0115`, `#t0116`, `#ter02`, `#ter03`, `#ter24`, `#ter32` all carry
+/// `option.specVersion: json-ld-1.0`, which the suite's own `vocab.jsonld` defines as
+/// "the JSON-LD version to which the test applies". Raising for them would be WRONG,
+/// not merely unimplemented — each is behaviour 1.1 deliberately changed: `list of
+/// lists` and `recursive context inclusion` are codes 1.1 RETIRED (absent from the
+/// 1.1 error registry — the closed `JsonLdErrorCode` enum cannot express them; 1.1
+/// allows lists of lists and reports a cyclic context as `context overflow`), and
+/// relative `@vocab` (`invalid vocab mapping`) is explicitly PERMITTED in 1.1. The
+/// exact set is pinned by the runner's `expand_1_0_negative_skips_are_pinned`, so a
+/// suite-pin bump that adds one fails loudly instead of silently widening the bucket.
+pub const FLOOR: usize = 379;
