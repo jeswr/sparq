@@ -81,6 +81,8 @@ import type { ToolOverride } from "@/data/tools";
 // EXPLAIN ANALYZE / re-run a recent query) to the Cmd-K spine while it is mounted.
 import { useRegisterPaletteCommands } from "@/components/workbench/command-palette";
 import { useWorkbench } from "@/components/workbench/workbench-context";
+// [SONNET-4.6] sq-ixc3.24 — the visual query builder hands its generated SPARQL to this editor.
+import { subscribeQueryHandoff } from "@/lib/query-handoff";
 import {
   pushRecentQuery,
   previewQuery,
@@ -662,6 +664,9 @@ export function QueryWorkbench() {
   // The id of the workspace whose editor text is currently loaded — guards the write-back from
   // firing (and clobbering the saved query) before the restore has hydrated the editor.
   const loadedWsRef = React.useRef<string | null>(null);
+  // [SONNET-4.6] sq-ixc3.24 — true once a query handed over by the visual query builder has been
+  // loaded into the editor, so a late workspace restore does not clobber it on first hydrate.
+  const handoffRef = React.useRef(false);
   const [outcome, setOutcome] = React.useState<QueryOutcome | null>(null);
   const [view, setView] = React.useState<ResultView>("table");
   const [running, setRunning] = React.useState(false);
@@ -696,9 +701,26 @@ export function QueryWorkbench() {
   React.useEffect(() => {
     if (!workspace) return;
     if (loadedWsRef.current === workspace.id) return;
+    const firstHydrate = loadedWsRef.current === null;
     loadedWsRef.current = workspace.id;
+    // [SONNET-4.6] sq-ixc3.24 — a query the user just pushed over from the builder outranks the
+    // restored text on the FIRST hydrate; a later workspace SWITCH still loads that workspace's
+    // saved query, as before.
+    if (firstHydrate && handoffRef.current) return;
     setQuery(workspace.editor.query);
   }, [workspace]);
+
+  // [SONNET-4.6] sq-ixc3.24 — receive a query built on the visual query builder's canvas. The
+  // latch in lib/query-handoff.ts means a handoff requested while this tab was closed is applied
+  // when it mounts, exactly once — the editor stays a plain, editable SPARQL surface.
+  React.useEffect(
+    () =>
+      subscribeQueryHandoff((sparql) => {
+        handoffRef.current = true;
+        setQuery(sparql);
+      }),
+    [],
+  );
 
   // [OPUS-4.8] sq-lcd6e — write the editor text back to the workspace (debounced) so it persists.
   // Guarded on `loadedWsRef` so the initial DEFAULT_QUERY never overwrites a saved query before

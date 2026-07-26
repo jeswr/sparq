@@ -160,6 +160,43 @@ than silently returning un-reasoned results. **N3** rule reasoning is
 deferred (it needs a rules-authoring surface + a store that can hold rule/formula terms, which the
 in-tab ground-triple store cannot represent) — tracked as a follow-up.
 
+## Visual query builder (diagram → SPARQL) — `sq-ixc3.24`
+
+The **Build query** tool is a node/edge **canvas** that emits **standard SPARQL 1.1** into the
+Query tool's editor — the Gruff "draw the pattern, get the query" affordance plus Stardog
+Explorer's model-driven half (walk relationship paths, attribute filters, AND-NOT, GROUP BY).
+
+* **Shape-aware pickers.** The predicate offers come from REAL introspection of the live store —
+  **characteristic sets** (`?s a ?class ; ?p ?o`, grouped, with a sampled object so a
+  relationship is distinguishable from an attribute) — merged with **SHACL property shapes** when
+  a shapes graph is loaded (`sh:targetClass` / `sh:path` / `sh:class` / `sh:datatype` /
+  `sh:minCount` / `sh:name`). Every offer shows its **provenance** — `shape`, `data` (with the
+  observed use count) or `shape + data` — and a shape-declared `sh:class` types the node you walk
+  to, which drives the next step's suggestions. With an empty store and no shapes there are **no**
+  suggestions and the picker says so; nothing is invented. The snapshot is taken once when the
+  engine is ready; a later store change is flagged stale rather than silently re-introspected.
+* **Pattern, not just a tree.** A relationship either **walks** to a new node or **connects** to a
+  node already on the canvas, so a diagram can close a cycle. Per-edge OPTIONAL and *exclude*
+  (`FILTER NOT EXISTS` — the AND-NOT affordance) sit on the edge; attribute filters
+  (`=`/`≠`/`<`/`≤`/`>`/`≥`/contains/starts/ends/regex, as literal, number or IRI) sit on the node.
+  A filter on an OPTIONAL attribute is emitted **inside** the OPTIONAL block ("if present, it must
+  match"). The aggregate panel emits `GROUP BY` with aliased `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`/
+  `SAMPLE`/`GROUP_CONCAT`.
+* **Two-way, honestly.** The generated SPARQL is always visible and always editable. Hand-editing
+  it flips the pane to *hand-edited* and stops regeneration until you press **Regenerate** — the
+  builder does **not** parse text back into the diagram (v1 does not do that, and faking it would
+  be the dishonest option).
+* **It runs nothing.** *Open in Query* hands the text to the Query tool's editor
+  (`lib/query-handoff.ts`, latched so a handoff survives the Query tab being closed); the user
+  reads, edits and runs it there. No private dialect, no rewriting behind the user's back.
+* **Warnings, not silent fixes.** A cartesian product across disconnected groups, an
+  unconstrained node, a projected variable that only appears inside `FILTER NOT EXISTS`, an
+  aggregate over an unbound variable and an empty projection each surface as a note next to the
+  query.
+
+The model, the serializer and the suggestion index are pure (`src/lib/query-builder.ts`) and unit
+tested (`src/lib/query-builder.test.ts`, `npm run test:unit`).
+
 ## Shared TS client
 
 The frontend consumes the framework-agnostic `@sparq/client`

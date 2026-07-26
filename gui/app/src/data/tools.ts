@@ -14,6 +14,7 @@
 
 import type { LucideIcon } from "lucide-react";
 import {
+  Boxes,
   Database,
   Network as GraphIcon,
   ShieldCheck,
@@ -114,6 +115,19 @@ export const TOOLS: ToolDef[] = [
       "Explore EXPLAIN / EXPLAIN ANALYZE as an operator tree — est vs actual rows, q-error heat, per-operator time — and monitor/kill in-flight queries.",
     tier: "live",
     icon: Gauge,
+    built: true,
+    group: "working",
+  },
+  {
+    id: "query-builder",
+    label: "Build query",
+    // [SONNET-4.6] sq-ixc3.24 (#2700) — the visual query builder: draw a node/edge pattern and
+    // get honest SPARQL in the Query tool's editor. Pickers are driven by real introspection
+    // (characteristic sets) and by SHACL shapes when a shapes graph is in the store.
+    blurb:
+      "Draw a node/edge pattern with shape-aware predicate pickers; emits standard SPARQL into the Query editor.",
+    tier: "live",
+    icon: Boxes,
     built: true,
     group: "working",
   },

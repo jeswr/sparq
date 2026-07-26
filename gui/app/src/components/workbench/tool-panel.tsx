@@ -27,6 +27,7 @@ import { STREAMING_TOOL_OVERRIDE } from "@/components/workbench/streaming-tool.m
 import { SERVER_TOOL_OVERRIDE } from "@/components/workbench/server-tool.meta";
 import { ODRL_TOOL_OVERRIDE } from "@/components/workbench/odrl-tool.meta";
 import { PLAN_TOOL_OVERRIDE } from "@/components/workbench/plan-explorer.meta";
+import { QUERY_BUILDER_TOOL_OVERRIDE } from "@/components/workbench/query-builder-tool.meta";
 import { ToolStub } from "@/components/workbench/tool-stub";
 import { applyToolOverride, toolById, type ToolDef, type ToolOverride } from "@/data/tools";
 
@@ -77,6 +78,11 @@ const OdrlTool = lazyPanel(() =>
 const PlanExplorer = lazyPanel(() =>
   import("@/components/workbench/plan-explorer").then((m) => ({ default: m.PlanExplorer })),
 );
+const QueryBuilderTool = lazyPanel(() =>
+  import("@/components/workbench/query-builder-tool").then((m) => ({
+    default: m.QueryBuilderTool,
+  })),
+);
 
 interface ToolPanelEntry {
   Component: ComponentType;
@@ -94,6 +100,9 @@ const TOOL_PANELS: Record<string, ToolPanelEntry> = {
   // (native engine on desktop, allowlist-gated fail-closed; honestly native-only in the browser).
   // STATIC import: the default tab paints on first render, never behind a chunk fetch.
   query: { Component: QueryWorkbench, override: QUERY_TOOL_OVERRIDE },
+  // [SONNET-4.6] sq-ixc3.24 — the visual query builder: a diagram-to-SPARQL canvas whose output
+  // is handed to the Query tool's editor (lib/query-handoff.ts), never run behind the user's back.
+  "query-builder": { Component: QueryBuilderTool, override: QUERY_BUILDER_TOOL_OVERRIDE },
   shacl: { Component: ShaclTool },
   // [GPT-5.6] sq-lsp7k.1.2 — invocation-only chunk shared by desktop and hosted web.
   forms: { Component: FormsTool },
