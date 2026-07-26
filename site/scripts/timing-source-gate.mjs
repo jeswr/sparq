@@ -9,15 +9,27 @@
 //
 // So the invariant is enforced HERE, mechanically, over the paper sources the factory is about
 // to compile: a paper may import ONLY the provenance-rendering entry points from the timing
-// lib, may not import it as a whole module, may not touch its internals, and may not read the
-// generated timing JSON directly. Anything else FAILS THE BUILD (build-papers.mjs) — the
-// fail-closed direction, because the alternative is publishing a number stripped of the
-// machine, corpus, aggregate and commit that make it meaningful.
+// lib, may not import it as a whole module, may not touch its internals, and may not load data
+// from disk at all. Anything else FAILS THE BUILD (build-papers.mjs) — the fail-closed
+// direction, because the alternative is publishing a number stripped of the machine, corpus,
+// aggregate and commit that make it meaningful.
+//
+// WHY THE RULE IS ON THE CONSTRUCT, NOT THE PATH: denylisting the string `paper-timing
+// .generated` is bypassed by any expression that never spells it — `json("/src/data/paper-" +
+// "timing.generated.json")` names no internal binding and imports no timing module, yet loads
+// the same dataset. So the boundary is drawn at Typst's data-loading builtins themselves
+// (`json`/`read`/`csv`/…) and at non-literal `#import` paths: a paper source may not contain
+// one, full stop, which makes the path expression irrelevant. The two evidence-library
+// implementations that must load data are allowed exactly one pinned expression each
+// (`EXEMPT` / `AUDITED_LOADER_LINES`), so the exemption cannot widen unnoticed.
 //
 // HONEST SCOPE: this is a SOURCE-TEXT check over `site/papers/**/*.typ`. It bounds the paper
-// surface the factory compiles; it is not a Typst-level capability system, and it says nothing
-// about whether a rendered number is FRAMED honestly (that stays the Stage-5 claims↔evidence
-// review in `skills/academic-paper/SKILL.md`).
+// surface the factory compiles; it is not a Typst-level capability system. It reads the raw
+// text, so a loader name hidden inside a string literal handed to `#eval` is still matched, but
+// a name assembled from fragments at runtime is beyond a lexical gate — the structural backstop
+// for that is that such a paper still cannot reach a value without naming a loader somewhere.
+// It also says nothing about whether a rendered number is FRAMED honestly (that stays the
+// Stage-5 claims↔evidence review in `skills/academic-paper/SKILL.md`).
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -33,6 +45,32 @@ export const ALLOWED_TIMING_IMPORTS = new Set([
 // The lib itself and its compile self-check are the implementation of the boundary, not
 // consumers of it, so they are the only files exempt from the scan.
 const EXEMPT = new Set(["_lib/timing.typ", "_lib/timing-selfcheck.typ"]);
+
+// Typst's data-loading builtins. Naming one in a paper source is a route to a raw value that
+// never passes through a provenance-rendering accessor, whatever path expression it is given.
+const DATA_LOADERS = ["json", "csv", "yaml", "toml", "xml", "cbor", "read"];
+const LOADER_LIST = DATA_LOADERS.join("|");
+// A call: `json(…)`, `read (…)`. The lookbehind keeps field accesses (`x.read(…)`) and longer
+// identifiers out; a loader reached that way still needs a bare loader call for its bytes.
+const LOADER_CALL = new RegExp(`(?<![A-Za-z0-9_.])(${LOADER_LIST})\\s*\\(`, "g");
+// The same construct, renamed: `#let j = json` … `#j("/src/data/…")`. The call form no longer
+// sees it once the binding is aliased, so the binding position is matched too.
+const LOADER_ALIAS = new RegExp(
+  `#let\\s+[A-Za-z_][A-Za-z0-9_]*\\s*=\\s*(${LOADER_LIST})\\b\\s*(?!\\()`,
+  "g",
+);
+// The evidence libraries genuinely have to load data — that is what they are. Each is allowed
+// the ONE audited expression it needs, pinned as a whole line, so any other loader call in them
+// (a constructed path included) still fails and the exemption cannot grow silently.
+const AUDITED_LOADER_LINES = new Map([
+  ["_lib/bench.typ", [/^#let evidence = json\(bytes\(sys\.inputs\.data\)\)$/]],
+]);
+
+// `#import`/`#include` with a path that is not a plain string literal — the constructed-path
+// bypass applied to module loading, which `TIMING_IMPORT` below (a literal-path matcher) would
+// otherwise not see.
+const ANY_IMPORT = /#(import|include)\s+([^\n]*)/g;
+const LITERAL_IMPORT_PATH = /^"[^"]*"\s*(?::|$)/;
 
 const GENERATED_TIMING_FILE = /paper-timing\.generated/;
 // `#import "…/timing.typ"` / `#include "…"`, capturing the optional `: a, b` binding list.
@@ -60,6 +98,13 @@ function importedNames(list) {
     .filter(Boolean);
 }
 
+// The whole source line a match sits on, trimmed — the unit `AUDITED_LOADER_LINES` pins.
+function lineAt(src, index) {
+  const start = src.lastIndexOf("\n", index) + 1;
+  const end = src.indexOf("\n", index);
+  return src.slice(start, end === -1 ? src.length : end).trim();
+}
+
 /**
  * Audit every paper source under `papersDir` for a bypass of the forced-provenance boundary.
  * Returns `{ scanned, problems }`; `problems` is empty iff the boundary holds.
@@ -81,6 +126,31 @@ export function auditTimingSources(papersDir) {
         `${rel}: names an internal binding of _lib/timing.typ (_timing_data / _trec / ...). ` +
           "Those return raw records; use headline_timing(key) or timing_provenance(key).",
       );
+    }
+    // No data loading in a paper source, whatever path expression it is handed. (Same path
+    // normalisation as the EXEMPT filter, so the audited allowance keys hold on Windows too.)
+    const audited = AUDITED_LOADER_LINES.get(rel.split(/[\\/]/).join("/")) ?? [];
+    for (const re of [LOADER_CALL, LOADER_ALIAS]) {
+      for (const m of src.matchAll(re)) {
+        const line = lineAt(src, m.index);
+        if (audited.some((ok) => ok.test(line))) continue;
+        problems.push(
+          `${rel}: uses the data loader '${m[1]}' (\`${line}\`). A paper source may not load ` +
+            "data from disk at all — a constructed or aliased path reaches the derived timing " +
+            "file just as a literal one does. Render measured numbers via headline_timing(key) " +
+            "/ timing_provenance(key).",
+        );
+      }
+    }
+    // ...and an import path must be a literal, so the check below can actually see it.
+    for (const m of src.matchAll(ANY_IMPORT)) {
+      const [, form, arg] = m;
+      if (!LITERAL_IMPORT_PATH.test(arg.trim())) {
+        problems.push(
+          `${rel}: \`#${form}\` with a non-literal path (\`${arg.trim()}\`). A computed module ` +
+            "path defeats the timing-import rules; write the path as a plain string literal.",
+        );
+      }
     }
     for (const m of src.matchAll(TIMING_IMPORT)) {
       const [, form, path, list] = m;

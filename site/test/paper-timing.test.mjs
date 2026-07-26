@@ -383,6 +383,19 @@ test("the source gate rejects every known way to publish a bare timing value", (
     "direct-json.typ":
       '#let d = json("/src/data/paper-timing.generated.json")\n' +
       '#str(d.records.at("timing.sp2b.sparq.q01").value)\n',
+    // The path is CONSTRUCTED, so it spells neither the generated file name nor any internal
+    // binding — the bypass a substring denylist cannot see. The rule is on the loader itself.
+    "concatenated-path.typ":
+      '#let d = json("/src/data/paper-" + "timing.generated.json")\n' +
+      '#str(d.records.at("timing.sp2b.sparq.q01").value)\n',
+    // ...same construct, renamed, so the call form no longer names a loader either.
+    "aliased-loader.typ":
+      '#let grab = json\n#let d = grab("/src/data/paper-" + "timing.generated.json")\n' +
+      '#str(d.records.at("timing.sp2b.sparq.q01").value)\n',
+    // ...and reached as raw text rather than parsed data.
+    "raw-read.typ": '#let s = read("/src/data/paper-" + "timing.generated.json")\n#s.len()\n',
+    // A computed module path defeats the literal-path import rules, so it is refused outright.
+    "computed-import.typ": '#import "_lib/timing" + ".typ": headline_timing\n',
   };
   for (const [name, text] of Object.entries(bypasses)) {
     const { problems } = auditFixturePapers({ [name]: text });
@@ -396,6 +409,23 @@ test("the source gate rejects every known way to publish a bare timing value", (
       'q01 runs in #headline_timing("timing.sp2b.sparq.q01").\n',
   });
   assert.deepEqual(ok.problems, [], "the provenance-rendering accessors must remain usable");
+});
+
+test("the evidence library's data-loading exemption is pinned to its audited expression", () => {
+  // `_lib/bench.typ` must load the deterministic evidence payload, so it is allowed exactly the
+  // one audited line — and nothing else. A blanket per-file exemption would just relocate the
+  // constructed-path bypass into the library.
+  const audited = '#let evidence = json(bytes(sys.inputs.data))\n';
+  assert.deepEqual(
+    auditFixturePapers({ "_lib/bench.typ": audited }).problems,
+    [],
+    "the audited evidence loader must keep working",
+  );
+  const { problems } = auditFixturePapers({
+    "_lib/bench.typ": audited + '#let t = json("/src/data/paper-" + "timing.generated.json")\n',
+  });
+  assert.equal(problems.length, 1, `the extra loader must be the only finding; got ${problems}`);
+  assert.match(problems[0], /^_lib\/bench\.typ: uses the data loader 'json'/);
 });
 
 test("the real paper tree passes the publication-boundary source gate", () => {

@@ -198,9 +198,13 @@ corpus, queries and commit the cited envelope measured.
      importable — so the boundary is enforced mechanically by
      `build-papers.mjs::runTimingSourceGate()` (`site/scripts/timing-source-gate.mjs`): a paper
      source may import only `headline_timing` / `timing_provenance` / `timing_keys` from the
-     lib, never the whole module, and may not read the generated JSON directly. Unit tests run
-     negative fixtures (raw-data import, internal accessor, wildcard, direct `json()`) through
-     that gate and require each to fail.
+     lib, never the whole module, and may not load data from disk *at all* — the rule is on
+     Typst's loader builtins (`json`/`read`/`csv`/…) and on non-literal `#import` paths, not on
+     the file name, because `json("/src/data/paper-" + "timing.generated.json")` spells neither.
+     The two evidence libraries that must load data get one pinned, audited expression each.
+     Unit tests run negative fixtures (raw-data import, internal accessor, wildcard, direct
+     `json()`, concatenated path, aliased loader, raw `read()`, computed `#import`) through that
+     gate and require each to fail.
 
    Deliberately **not** provided: any ratio / speed-up helper. A cross-engine ratio is a *claim*
    needing prose framing (which corpus, which queries, what was excluded), so it belongs in the
