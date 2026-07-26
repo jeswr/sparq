@@ -118,6 +118,20 @@ export const SPECS: Spec[] = [
     blurb:
       "A greenfield, implementation-ready proposal for named-graph-aware replicated RDF datasets: dotted add-wins observed-remove state, mandatory origin skolemisation, evaluate-at-origin SPARQL Update compilation, a canonical out-of-band delta journal, precisely scoped dataset convergence, and separate replica, delta-relay, and origin-evaluator conformance classes.",
   },
+  // [OPUS-5] sq-tag1q.5 — the E2EE-queryable draft, gated on research/e2ee-queryable-options.md
+  // (sq-tag1q.3): it specifies ONLY the two profiles that survey found specifiable today.
+  {
+    slug: "e2ee-sparql",
+    source: "e2ee-sparql.typ",
+    title:
+      "E2EE-Queryable Solid/RDF: Encryption Profiles that Preserve SPARQL Query",
+    shortName: "e2ee-sparql",
+    status: "unofficial",
+    date: "2026-07-26",
+    editors: "Jesse Wright · the sparq project",
+    blurb:
+      "End-to-end encryption for Solid/RDF that keeps SPARQL usable, in exactly two profiles: Profile CS (mandatory) — AEAD-sealed resources, a dumb blob server, WebID-bound recipient keys, and full SPARQL 1.1 evaluated client-side over locally decrypted data; and Profile SE (optional) — encrypted literal values over cleartext, server-queryable structure, conformant only with a mandatory leakage disclosure. Leakage is a normative vocabulary (tiers T0–T4) that every profile must declare. The draft states plainly in its body that general server-side SPARQL over E2EE data without leakage does not exist; searchable, order-revealing, and homomorphic encryption are recorded as considered and excluded, with the evidence. The ZK/MPC composition is an informative annex only — those crates are not externally audited (open gate sq-qhy4).",
+  },
 ];
 
 export function specBySlug(slug: string): Spec | undefined {
