@@ -4843,10 +4843,18 @@ fn bind_entailment(
 
     // RDFS schema-vocabulary encodings (salt-independent IRIs). If any fails to
     // encode the whole check fails closed (it cannot happen for these constants).
-    let (Some(rdf_type), Some(rdfs_subclassof), Some(rdfs_subpropertyof)) = (
+    let (
+        Some(rdf_type),
+        Some(rdfs_subclassof),
+        Some(rdfs_subpropertyof),
+        Some(rdfs_domain),
+        Some(rdfs_range),
+    ) = (
         encode_iri_hex("http://www.w3.org/1999/02/22-rdf-syntax-ns#type"),
         encode_iri_hex("http://www.w3.org/2000/01/rdf-schema#subClassOf"),
         encode_iri_hex("http://www.w3.org/2000/01/rdf-schema#subPropertyOf"),
+        encode_iri_hex("http://www.w3.org/2000/01/rdf-schema#domain"),
+        encode_iri_hex("http://www.w3.org/2000/01/rdf-schema#range"),
     ) else {
         return Err(CheckError::MalformedDerivationStep { step: 0 });
     };
@@ -4857,7 +4865,13 @@ fn bind_entailment(
     for (si, step) in steps.iter().enumerate() {
         // 4a. Well-formed rule instance AND the regime admits the rule.
         if !regime_admits(regime, step.rule)
-            || !step.is_well_formed(&rdf_type, &rdfs_subclassof, &rdfs_subpropertyof)
+            || !step.is_well_formed(
+                &rdf_type,
+                &rdfs_subclassof,
+                &rdfs_subpropertyof,
+                &rdfs_domain,
+                &rdfs_range,
+            )
         {
             return Err(CheckError::MalformedDerivationStep { step: si });
         }
