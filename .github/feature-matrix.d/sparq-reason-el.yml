@@ -100,3 +100,31 @@
   crate: "sparq-reason-el"
   features: "par,rbox,cdomain"
   test: true
+
+# [SONNET-4.6] sq-clsv6 (Phase E5): sparq-reason-el's `incremental` feature — incremental
+# classification under TBox edits (`IncrementalClassifier`, the delta-seeded resume of a live
+# CR1–CR6 saturation). Same gap as the legs above: tests/incremental.rs uses
+# `sparq_reason_el::IncrementalClassifier`, which only EXISTS under this feature, and the whole
+# incremental.rs module + `classify::resaturate` + the extract.rs delta helpers are
+# `#[cfg(feature = "incremental")]` — so the default build (and ci.yml's `--workspace
+# --all-targets` archive, which passes NO `--features`) compiles them EMPTY and runs ZERO of them.
+# This leg is the ONLY thing that runs the acceptance oracle: the ELK-derived edited-TBox closure
+# fixtures plus the randomized add / add-and-retract / triple-at-a-time streams that pin every
+# post-edit hierarchy equal to a full re-classification. No new dep (`incremental = []`, reuses
+# sparq-core + rustc-hash + oxrdf).
+- name: "sparq-reason-el (incremental — E5 classification under TBox edits)"
+  crate: "sparq-reason-el"
+  features: "incremental"
+  test: true
+
+# [SONNET-4.6] sq-clsv6: the COMBINED incremental leg — `incremental` composed with `rbox`
+# (CR10/CR11) and `cdomain` (CR7–CR9). Its OWN leg per rule (b) of feature-matrix.yml's guard:
+# `incremental`+`rbox` swaps the resume onto the role-box-rebuilding arm (a `not(feature = "rbox")`
+# split from the plain leg above) AND turns on the rbox_non_regular report-parity assertion, while
+# `incremental`+`cdomain` is the ONLY configuration that exercises the concrete-domain fast-path
+# EXCLUSION (`FullReason::ConcreteDomain` + the literal-`hasValue`/`rdf:first` whitelist arms),
+# which compile out entirely on the plain `incremental` leg.
+- name: "sparq-reason-el (incremental+rbox+cdomain — E5 edits, full rule set)"
+  crate: "sparq-reason-el"
+  features: "incremental,rbox,cdomain"
+  test: true
