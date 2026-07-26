@@ -35,6 +35,61 @@ NOT_A_ROUTING_TARGET = {"haiku", "sonnet"}
 # docs chain and must not appear anywhere else.
 DOCS_ONLY = {"terra"}
 
+# [OPUS-5] THE `area:gui` CARVE-OUT — THE BINDING MECHANISM (review of PR #4211).
+#
+# MAINTAINER DIRECTIVE 2026-07-26: "Opus5 should be prioritised over sol on all tasks for which they
+# are both possible implementors; except for GUI work where sol should remain prioritised", boundary
+# settled the same day as "Let's just go with area:gui work".
+#
+# The first attempt expressed this as a `role:gui` ROUTE and had scripts/triage.py derive that role
+# from `area:gui`. Review proved it could never fire, for two independent reasons:
+#   (1) `role:gui` did not exist as a repo label, and `gh issue edit --add-label` does NOT create a
+#       missing label — it fails. Both writers discarded that failure while the sibling
+#       `status:ready` write succeeded, so GUI issues promoted role-LESS and fell to [defaults].
+#   (2) Even with the label, `_role()` returns an EXPLICIT `role:*` before it ever consults the
+#       surface labels, and all 35 open `area:gui` issues already carried one (33 role:impl,
+#       1 role:perf, 1 role:research). `bd-to-issues.role_for()` never emits `role:gui` either.
+# Net effect measured on the live backlog: GUI work moved from sol-first to opus5-first — the
+# directive's ONLY exception was INVERTED for 100% of it.
+#
+# So the carve-out is now applied HERE, at the layer that actually decides, keyed on the label the
+# issues ALREADY carry. It needs no new label, no relabelling of the backlog, and no write that can
+# fail: `resolve()` reads live labels at plan time.
+#
+# It is a CHAIN-ORDER rule, not a route: it re-orders the chain of whatever route the issue resolves
+# to and leaves the ROLE and the AGENT untouched. That is exactly what the directive asks for (it
+# speaks only about model priority), and it is why a `role:impl` GUI issue keeps `sparq-rust-impl`
+# — the desktop GUI is Rust/Tauri, not the Next.js site — instead of being rerouted.
+#
+# EXACT LABEL, never a substring: `"gui" in lb` would false-match `area:guide`/`area:guidance`. And
+# deliberately NOT a routing `match_labels` rule: the review lane's arm-side security classifier
+# UNIONS every `match_labels` keyword, so "gui" there would human-arm every GUI PR.
+#
+# THE SELECTOR IS `area:gui` AND NOTHING ELSE. `area:site`, `area:site-specs`, `area:site-papers`,
+# `surface:frontend`, `dashboard` are NOT GUI — they take the opus5-first default. Widening this set
+# over a site* label is the likely future mistake and is asserted against.
+GUI_CARVE_OUT_LABELS = frozenset({"area:gui"})
+GUI_CARVE_OUT_LEAD = "sol"
+
+
+def gui_carve_out(labels, chain):
+    """Return `chain` with sol moved to the front IFF this is GUI work and both models are already
+    possible implementors of it.
+
+    "for which they are BOTH possible implementors" is the directive's own qualifier, and it is
+    encoded literally: a chain that does not already contain BOTH `sol` and `opus5` is returned
+    UNCHANGED. That is what stops the carve-out from injecting sol into `role:research`
+    (`["opus5"]`, deliberately anthropic-side + escalating) or from silently rewriting a
+    single-provider chain into a cross-provider one.
+
+    Idempotent: applying it to an already-sol-first chain is a no-op.
+    """
+    if not (set(labels) & GUI_CARVE_OUT_LABELS):
+        return chain
+    if not {GUI_CARVE_OUT_LEAD, "opus5"} <= set(chain):
+        return chain
+    return [GUI_CARVE_OUT_LEAD] + [m for m in chain if m != GUI_CARVE_OUT_LEAD]
+
 
 def _chains(doc):
     """Yield (where, chain) for every routing position in the table: defaults + every route."""
@@ -119,11 +174,14 @@ def resolve(labels, doc):
         kws = r.get("match_labels")
         if kws:  # security-label rule: any keyword is a substring of any label
             if any(k in lb for lb in labels for k in kws):
-                return r["model_chain"], r["agent"], bool(r.get("escalate"))
+                # A SECURITY surface is returned UNMODIFIED — the GUI preference must never
+                # re-order a soundness chain. area:gui + area:sparq-zk is a ZK issue first.
+                return list(r["model_chain"]), r["agent"], bool(r.get("escalate"))
         elif "role" in r and role is not None and r["role"] == role:
-            return r["model_chain"], r["agent"], bool(r.get("escalate"))
+            return (gui_carve_out(labels, list(r["model_chain"])), r["agent"],
+                    bool(r.get("escalate")))
     d = doc.get("defaults", {})
-    return d.get("model_chain", []), d.get("agent"), False
+    return gui_carve_out(labels, list(d.get("model_chain", []))), d.get("agent"), False
 
 
 def _self_test():
@@ -205,6 +263,53 @@ def _self_test():
     chk("research -> opus5 only", resolve(["role:research"], doc)[0], ["opus5"])
     # review role -> opus5 + escalate
     chk("review -> opus5/escalate", resolve(["role:review"], doc)[1:], ("sparq-reviewer", True))
+
+    # ---------------------------------------------------------------------------------------------
+    # [OPUS-5] THE CARVE-OUT, END TO END: LABELS -> MODEL CHAIN (review of PR #4211).
+    # Everything above this block asserts on the routing TABLE. The defect the review found lived
+    # one layer BELOW that: the table said the right thing, and no real issue could reach it. These
+    # assertions start from the labels a live issue actually carries and end at the chain the
+    # dispatcher will walk, which is the only place the directive is either honoured or inverted.
+    # ---------------------------------------------------------------------------------------------
+    # THE decisive case: 33 of the 35 open area:gui issues carry an explicit role:impl. Before this
+    # mechanism they resolved role:impl -> ["opus5", "sol"], i.e. opus5-FIRST — the exact inversion.
+    chk("area:gui + an explicit role:impl -> SOL-first (the 33-issue case)",
+        resolve(["area:gui", "role:impl", "priority:P2"], doc)[0], ["sol", "opus5"])
+    chk("area:gui + role:impl keeps its implementor agent (carve-out re-orders, never re-routes)",
+        resolve(["area:gui", "role:impl"], doc)[1], "sparq-rust-impl")
+    chk("area:gui with NO role at all -> defaults, SOL-first",
+        resolve(["area:gui", "priority:P2"], doc)[0], ["sol", "opus5"])
+    for _role in ("impl", "site", "ci", "perf", "gui"):
+        mc = resolve(["area:gui", f"role:{_role}"], doc)[0]
+        chk(f"area:gui + role:{_role} -> sol-first", mc[0], "sol")
+        chk(f"area:gui + role:{_role} keeps opus5 reachable (preference, not exclusion)",
+            "opus5" in mc, True)
+    # site* is NOT GUI — the exclusion the review confirmed already works; assert it end to end too.
+    for _area in ("area:site", "area:site-specs", "area:site-papers", "area:sitemap"):
+        chk(f"{_area} + role:impl -> OPUS5-first (site is outside the carve-out)",
+            resolve([_area, "role:impl"], doc)[0], ["opus5", "sol"])
+    chk("role:site + area:site -> opus5-first end to end",
+        resolve(["role:site", "area:site"], doc)[0], ["opus5", "sol"])
+    chk("surface:frontend is not in the carve-out",
+        resolve(["surface:frontend", "role:site"], doc)[0][0], "opus5")
+    # EXACT label: a substring selector would sweep area:guide into the sol carve-out.
+    chk("area:guide does NOT false-match the carve-out",
+        resolve(["area:guide", "role:impl"], doc)[0], ["opus5", "sol"])
+    # Security still wins, and its chain is returned UNTOUCHED by the preference rule.
+    chk("area:gui + a security surface -> soundness lane, unmodified",
+        resolve(["area:gui", "area:sparq-zk", "role:impl"], doc),
+        (["opus5"], "sparq-reviewer", True))
+    # "for which they are BOTH possible implementors": a chain without sol is left alone, so the
+    # carve-out cannot quietly turn research (anthropic-side + escalate) into a cross-provider route.
+    chk("area:gui + role:research is NOT rewritten (sol is not an implementor there)",
+        resolve(["area:gui", "role:research"], doc)[:1] + resolve(["area:gui", "role:research"], doc)[2:],
+        (["opus5"], True))
+    chk("area:gui + role:docs keeps the docs chain and the docs agent",
+        resolve(["area:gui", "role:docs"], doc)[:2], (["sol", "terra", "opus5"], "sparq-docs"))
+    # The selector itself, so a future widening has to edit an asserted constant.
+    chk("the carve-out selector is EXACTLY {area:gui}", sorted(GUI_CARVE_OUT_LABELS), ["area:gui"])
+    # Idempotence: applying the rule to an already-sol-first chain must not duplicate the lead.
+    chk("carve-out is idempotent", gui_carve_out({"area:gui"}, ["sol", "opus5"]), ["sol", "opus5"])
 
     # ---------------------------------------------------------------------------------------------
     # [OPUS-5] THE DEPRECATION IS AN INVARIANT, NOT A ONE-TIME EDIT (maintainer 2026-07-26).
