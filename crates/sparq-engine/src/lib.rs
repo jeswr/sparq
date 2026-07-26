@@ -25,6 +25,8 @@ mod cs_gate;
 mod dataset;
 mod exec;
 mod explain;
+#[cfg(feature = "persistent-stats")]
+pub mod stats;
 // [OPUS-4.8] (sq-u4lgr, #902) Structured EXPLAIN: typed `PlanNode` plan tree + JSON +
 // per-operator q-error + bounded slow-query ring. NON-DEFAULT `explain-json` feature —
 // when off, zero of this code compiles and the default native + wasm builds are

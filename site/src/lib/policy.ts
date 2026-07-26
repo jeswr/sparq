@@ -16,34 +16,33 @@
 //     dedicated sparq-policy wasm bundle (a separate portability spike); until that
 //     ships, this is the honest walkthrough tier.
 //
-//   * WHAT THE CITED TEST PINS vs WHAT IS REPRODUCED — read this before trusting a
-//     verdict. Every verdict below is the `sparq_policy::evaluate` OUTCOME (allow / deny)
-//     for that (policy, request) shape, and the NAMED test cited per-variant in `test`
-//     (`crates/sparq-policy/tests/odrl_eval.rs`) asserts THAT OUTCOME: it exercises the
-//     same policy shape and the same request and asserts allow/deny (a few also assert
-//     the matched-rule count, or that a duty caveat is present). Those tests do NOT
-//     assert the exact rule-IRI ids or the verbatim explanation strings shown here — so
-//     `test` is a provenance handle for the OUTCOME, not proof of the exact string. The
-//     evaluator is pure and deterministic (policy in, decision out — no network, no
-//     randomness), and the suite is ratcheted against the MIT-licensed SolidLab ODRL
-//     Test Suite (67/68 through the real `evaluate` path).
+//   * WHAT THE CITED TEST PINS vs WHAT THE SITE GATE PINS — every verdict below is the
+//     `sparq_policy::evaluate` Decision for that exact (policy, request) pair. The named
+//     test cited per variant (`crates/sparq-policy/tests/odrl_eval.rs`) remains a readable
+//     provenance handle for the ODRL behaviour. In addition, `site/test/policy.test.mjs`
+//     sends this module's exact Turtle and request values through the real native Rust
+//     evaluator and compares allow, rule ids, and explanations verbatim. The evaluator
+//     is pure and deterministic (policy in, decision out — no network, no randomness),
+//     and the suite is ratcheted against the MIT-licensed SolidLab ODRL Test Suite
+//     (67/68 through the real `evaluate` path).
 //
-//   * The rule-IRI ids and the `matched`/`unmet` strings are REPRODUCED from the
-//     evaluator's deterministic output FORMAT (`crates/sparq-policy/src/eval.rs`), NOT
-//     copied from a test assertion: a granting permission's rule id on ALLOW; the
+//   * The rule-IRI ids and the `matched`/`unmet` strings are captured from the
+//     evaluator's deterministic output (`crates/sparq-policy/src/eval.rs`): a granting
+//     permission's bare rule IRI on ALLOW; the
 //     overriding prohibition id (+ "prohibition <id> matches the request") or the
 //     `rule <id> constraint (<left> <Op> <right>) unsatisfied` / "permission <id>
 //     requires undischarged duty <iri>" caveat on DENY. The crate tests use BLANK-NODE
-//     rules (which get generated ids); the NAMED IRIs here are a readability rename — the
-//     output SHAPE is otherwise identical. Do NOT hand-edit a verdict: its outcome must
-//     trace to the cited test and its strings to the eval.rs output format.
-//     `site/test/policy.test.mjs` pins the internal consistency (allow ⇔ a matched rule
+//     rules (which get generated ids); the site scenarios intentionally use named IRIs
+//     so the displayed identifiers are also the evaluator's exact identifiers. Do NOT
+//     hand-edit a verdict: the native fixture comparison will reject drift.
+//     `site/test/policy.test.mjs` passes every exact Turtle/request pair through a native
+//     test harness backed by `sparq_policy::evaluate` and compares the returned Decision
+//     verbatim. It also pins the internal consistency (allow ⇔ a matched rule
 //     and no unmet caveat) AND that every caveat matches one of eval.rs's documented
 //     output shapes AND that every constraint caveat's (rule, left, operator, right)
 //     anchors to the scenario's OWN Turtle constraint — eval.rs prints the POLICY's
 //     operands verbatim, never the request's supplied value — so a fabricated string or
-//     an operand substitution fails the unit gate. The gate still cannot re-run the Rust
-//     evaluator, so it is anchoring + shape, not full evaluator equivalence.
+//     an operand substitution fails the unit gate.
 //
 //   * SCOPE — single-node only. The federated-disclosure / ODRL→MPC composition (per-node
 //     ODRL driving the disclosed-vs-hidden split; a Duty → ZK proof obligation) is
@@ -138,7 +137,7 @@ export const SCENARIOS: PolicyScenario[] = [
         action: "read",
         target: "urn:asset/x",
         context: [{ left: "dateTime", value: "2026-06-16T09:00:00Z" }],
-        decision: { allow: true, matched: ["<urn:rule/read-until-2026>"], unmet: [] },
+        decision: { allow: true, matched: ["urn:rule/read-until-2026"], unmet: [] },
         test: T("datetime_window_gates"),
       },
       {
@@ -152,7 +151,7 @@ export const SCENARIOS: PolicyScenario[] = [
           allow: false,
           matched: [],
           unmet: [
-            'rule <urn:rule/read-until-2026> constraint (http://www.w3.org/ns/odrl/2/dateTime Lteq "2026-12-31T23:59:59Z") unsatisfied',
+            'rule urn:rule/read-until-2026 constraint (http://www.w3.org/ns/odrl/2/dateTime Lteq "2026-12-31T23:59:59Z") unsatisfied',
           ],
         },
         test: T("datetime_window_gates"),
@@ -167,7 +166,7 @@ export const SCENARIOS: PolicyScenario[] = [
           allow: false,
           matched: [],
           unmet: [
-            'rule <urn:rule/read-until-2026> constraint (http://www.w3.org/ns/odrl/2/dateTime Lteq "2026-12-31T23:59:59Z") unsatisfied',
+            'rule urn:rule/read-until-2026 constraint (http://www.w3.org/ns/odrl/2/dateTime Lteq "2026-12-31T23:59:59Z") unsatisfied',
           ],
         },
         test: T("datetime_window_gates"),
@@ -199,7 +198,7 @@ export const SCENARIOS: PolicyScenario[] = [
         action: "read",
         target: "urn:asset/x",
         party: alice,
-        decision: { allow: true, matched: ["<urn:rule/anyone-read>"], unmet: [] },
+        decision: { allow: true, matched: ["urn:rule/anyone-read"], unmet: [] },
         test: T("prohibition_overrides_permission"),
       },
       {
@@ -211,8 +210,8 @@ export const SCENARIOS: PolicyScenario[] = [
         party: mallory,
         decision: {
           allow: false,
-          matched: ["<urn:rule/deny-mallory>"],
-          unmet: ["prohibition <urn:rule/deny-mallory> matches the request"],
+          matched: ["urn:rule/deny-mallory"],
+          unmet: ["prohibition urn:rule/deny-mallory matches the request"],
         },
         test: T("prohibition_overrides_permission"),
       },
@@ -243,7 +242,7 @@ export const SCENARIOS: PolicyScenario[] = [
         target: "urn:asset/x",
         party: alice,
         context: [{ left: "purpose", value: "urn:purpose/research" }],
-        decision: { allow: true, matched: ["<urn:rule/use-research>"], unmet: [] },
+        decision: { allow: true, matched: ["urn:rule/use-research"], unmet: [] },
         test: T("purpose_match_grants"),
       },
       {
@@ -261,7 +260,7 @@ export const SCENARIOS: PolicyScenario[] = [
             // The evaluator formats the POLICY constraint's right operand (`c.right`,
             // eval.rs), not the request's supplied value — so a purpose-mismatch deny
             // still names the policy's bound <urn:purpose/research>.
-            "rule <urn:rule/use-research> constraint (http://www.w3.org/ns/odrl/2/purpose Eq <urn:purpose/research>) unsatisfied",
+            "rule urn:rule/use-research constraint (http://www.w3.org/ns/odrl/2/purpose Eq <urn:purpose/research>) unsatisfied",
           ],
         },
         test: T("purpose_mismatch_denies"),
@@ -277,7 +276,7 @@ export const SCENARIOS: PolicyScenario[] = [
           allow: false,
           matched: [],
           unmet: [
-            "rule <urn:rule/use-research> constraint (http://www.w3.org/ns/odrl/2/purpose Eq <urn:purpose/research>) unsatisfied",
+            "rule urn:rule/use-research constraint (http://www.w3.org/ns/odrl/2/purpose Eq <urn:purpose/research>) unsatisfied",
           ],
         },
         test: T("missing_purpose_fails_closed"),
@@ -307,7 +306,7 @@ export const SCENARIOS: PolicyScenario[] = [
         action: "distribute",
         target: "urn:asset/x",
         context: [{ left: "recipient", value: "nodeB" }],
-        decision: { allow: true, matched: ["<urn:rule/distribute-nodes>"], unmet: [] },
+        decision: { allow: true, matched: ["urn:rule/distribute-nodes"], unmet: [] },
         test: T("recipient_is_part_of_set"),
       },
       {
@@ -321,7 +320,7 @@ export const SCENARIOS: PolicyScenario[] = [
           allow: false,
           matched: [],
           unmet: [
-            'rule <urn:rule/distribute-nodes> constraint (http://www.w3.org/ns/odrl/2/recipient IsPartOf "nodeB|nodeC") unsatisfied',
+            'rule urn:rule/distribute-nodes constraint (http://www.w3.org/ns/odrl/2/recipient IsPartOf "nodeB|nodeC") unsatisfied',
           ],
         },
         test: T("recipient_is_part_of_set"),
@@ -352,7 +351,7 @@ export const SCENARIOS: PolicyScenario[] = [
           allow: false,
           matched: [],
           unmet: [
-            "permission <urn:rule/read-if-anonymized> requires undischarged duty http://www.w3.org/ns/odrl/2/anonymize",
+            "permission urn:rule/read-if-anonymized requires undischarged duty http://www.w3.org/ns/odrl/2/anonymize",
           ],
         },
         test: T("duty_must_be_discharged"),
@@ -364,7 +363,7 @@ export const SCENARIOS: PolicyScenario[] = [
         action: "read",
         target: "urn:asset/x",
         discharged: ["odrl:anonymize"],
-        decision: { allow: true, matched: ["<urn:rule/read-if-anonymized>"], unmet: [] },
+        decision: { allow: true, matched: ["urn:rule/read-if-anonymized"], unmet: [] },
         test: T("duty_must_be_discharged"),
       },
     ],

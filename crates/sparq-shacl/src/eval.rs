@@ -2853,9 +2853,21 @@ fn cmp_literals(a: &Literal, b: &Literal) -> Option<Ordering> {
         let (ta, tza) = timestamp(a.value(), da)?;
         let (tb, tzb) = timestamp(b.value(), db)?;
         if tza != tzb {
-            // XSD order between a timezoned and an untimezoned value is
-            // INDETERMINATE (within the ±14h window) — not comparable.
-            return None;
+            // XSD's ±14h rule (XSD 1.1 pt.2 §3.3.7): an untimezoned value may
+            // lie in any timezone from -14:00 to +14:00, so it denotes a 28h
+            // window of instants around its as-if-UTC timestamp. Order against
+            // a timezoned instant is DETERMINATE only when the whole window
+            // falls strictly on one side; otherwise the pair is incomparable.
+            const TZ_WINDOW_SECS: f64 = 14.0 * 3600.0;
+            let (u, z) = if tza { (tb, ta) } else { (ta, tb) };
+            let ord = if u + TZ_WINDOW_SECS < z {
+                Ordering::Less
+            } else if u - TZ_WINDOW_SECS > z {
+                Ordering::Greater
+            } else {
+                return None;
+            };
+            return Some(if tza { ord.reverse() } else { ord });
         }
         return ta.partial_cmp(&tb);
     }
@@ -2907,8 +2919,9 @@ fn parse_bool(v: &str) -> Option<bool> {
 }
 
 /// Seconds-since-epoch of an XSD date/time lexical value plus whether it
-/// carries an explicit timezone (an untimezoned value is normalised AS IF UTC,
-/// but only values agreeing on timezone presence are mutually comparable).
+/// carries an explicit timezone (an untimezoned value is normalised AS IF UTC;
+/// against a timezoned value it is ordered via the ±14h determinate window —
+/// see `cmp_literals`).
 fn timestamp(value: &str, dt: &str) -> Option<(f64, bool)> {
     let local = dt.strip_prefix(XSD)?;
     let v = value.trim();
@@ -3282,7 +3295,9 @@ mod tests {
             ),
             Ordering::Equal
         );
-        // Timezone presence must agree for the values to be comparable.
+        // Mixed timezone presence: XSD's ±14h rule. An untimezoned value may
+        // lie in any timezone from -14:00 to +14:00, so pairs closer than 14h
+        // are INDETERMINATE (None); pairs farther apart are determinate.
         let lit = |v: &str| {
             Literal::new_typed_literal(v, oxrdf::NamedNode::new(xsd("dateTime")).unwrap())
         };
@@ -3291,7 +3306,33 @@ mod tests {
                 &lit("2002-10-10T12:00:00-05:00"),
                 &lit("2002-10-10T12:00:00")
             ),
-            None
+            None,
+            "inside the ±14h window -> indeterminate"
+        );
+        assert_eq!(
+            cmp_literals(&lit("2000-01-12T12:00:00"), &lit("2000-01-14T12:00:00Z")),
+            Some(Ordering::Less),
+            "whole window below the instant -> determinate <"
+        );
+        assert_eq!(
+            cmp_literals(&lit("2000-01-14T12:00:00Z"), &lit("2000-01-12T12:00:00")),
+            Some(Ordering::Greater),
+            "same pair, flipped operands"
+        );
+        assert_eq!(
+            cmp_literals(&lit("2000-01-16T12:00:00"), &lit("2000-01-14T12:00:00Z")),
+            Some(Ordering::Greater),
+            "whole window above the instant -> determinate >"
+        );
+        assert_eq!(
+            cmp_literals(&lit("2000-01-01T00:00:00"), &lit("2000-01-01T14:00:00Z")),
+            None,
+            "exactly 14h apart: the -14:00 reading coincides -> indeterminate"
+        );
+        assert_eq!(
+            cmp_literals(&lit("2000-01-01T00:00:00"), &lit("2000-01-01T14:00:01Z")),
+            Some(Ordering::Less),
+            "one second past the window edge -> determinate <"
         );
     }
 }

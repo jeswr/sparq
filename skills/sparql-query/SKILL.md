@@ -56,6 +56,8 @@ graphs (so `GRAPH <g> {…}` / `GRAPH ?g {…}` work), use `Graph::load_dataset(
 All entry points take `&Graph` + `&str` and return `Result<_, String>` (parse + eval errors are
 `String`). The result types:
 
+- `sparq_core::strdist::edit_distance(&str, &str) -> usize` computes character-based
+  Levenshtein distance for vocabulary and dictionary suggestion ranking.
 - `pub struct QueryResult { pub vars: Vec<oxrdf::Variable>, pub rows: Vec<Vec<Option<oxrdf::Term>>> }`
   — `len()` / `is_empty()` count solution rows. The layout is **columnar** (the `vars` header is
   stored once, not per cell); index a cell as `result.rows[row][col]` where `col` is the position of
@@ -158,6 +160,14 @@ worse in either direction). `PlanNode::to_json()` emits a hand-written JSON proj
 N worst-by-wall-time analyzed plans (`record` / `push` / `slowest` / `to_json`) for an ops slow-query
 view. Honest boundaries: only BGP nodes carry an estimate (the only operators the planner sizes);
 q-error is `None` when either side is 0; `nanos` are always 0 on wasm32.
+
+Persistent planner statistics *(opt-in `persistent-stats`, OFF by default)* are rebuilt explicitly
+with `stats::analyze(&graph, saved_store_dir)`. This atomically writes a deterministic `stats.bin`
+beside the saved/mmap store containing per-predicate cardinalities and equi-depth subject/object
+value histograms. Load it without scanning indexes using `StatsCatalog::load(dir)`, then install it
+around queries with `with_stats_catalog(&Arc::new(catalog), || query(&graph, sparql))`. The catalog
+changes join estimates/order only; query results are unchanged. `AnalyzeMetrics` exposes stable
+triple/predicate/bucket/byte counts for operational checks.
 
 ## Common recipes
 

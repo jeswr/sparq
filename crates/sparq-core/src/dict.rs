@@ -2092,6 +2092,192 @@ impl Dict {
         remap
     }
 
+    /// [GPT-5.6] (sq-eiv) Consumes this dictionary and builds a dense dictionary containing
+    /// only the real ids for which `retain` returns `true`. Returns the rebuilt dictionary
+    /// and an old-to-new remap where `remap[(old_id - 1) as usize]` is `NO_ID` for a dropped
+    /// term. Inline integers are not dictionary records, are not passed to `retain`, and keep
+    /// their value-carrying id when remapping payloads.
+    ///
+    /// RDF 1.2 triple terms make the filter dependency-aware: retaining a triple term also
+    /// retains its subject, predicate, object, and any recursively nested triple-term
+    /// components. Their remap entries are therefore populated even when `retain` returned
+    /// `false` for those component ids.
+    ///
+    /// The rebuild never materialises an `oxrdf::Term` and never re-interns survivors. It moves
+    /// the compact `Stored` payloads out of an arena dictionary (preserving their string
+    /// allocations), or copies compact records directly from a blob, mmap, or frozen base, then
+    /// rewrites only metadata and triple-component ids before building the lookup table once.
+    /// Prefix and datatype tables are filtered too, so dead metadata does not accumulate.
+    pub fn rebuild_filtered(mut self, mut retain: impl FnMut(Id) -> bool) -> (Dict, Vec<Id>) {
+        let old_len = self.len();
+
+        // First select the caller-visible survivors. The closure runs exactly once for each
+        // real dictionary id; dependency expansion below never calls it a second time.
+        let mut retained = vec![false; old_len];
+        let mut pending = Vec::new();
+        for (slot, retained_slot) in retained.iter_mut().enumerate() {
+            let id = slot as Id + 1;
+            if retain(id) {
+                *retained_slot = true;
+                pending.push(id);
+            }
+        }
+
+        // A structural triple record cannot outlive its components. Walk a small explicit
+        // worklist rather than reconstructing Terms (and rather than assuming only one nesting
+        // level). Valid dictionaries always reference earlier ids, but the visited bit also
+        // makes this total for a cyclic record forged by an in-crate producer.
+        while let Some(id) = pending.pop() {
+            let StoredRef::Triple(ids) = self.record(id) else {
+                continue;
+            };
+            for child in ids {
+                if is_inline(child) || child == NO_ID {
+                    continue;
+                }
+                let child_slot = (child - 1) as usize;
+                if child_slot < retained.len() && !retained[child_slot] {
+                    retained[child_slot] = true;
+                    pending.push(child);
+                }
+            }
+        }
+
+        // Dense ids preserve old-id order. That keeps every well-formed triple's children before
+        // the triple itself and makes rewriting structural component ids a direct table lookup.
+        let mut next_id: Id = 1;
+        let remap: Vec<Id> = retained
+            .iter()
+            .map(|&keep| {
+                if keep {
+                    let id = next_id;
+                    next_id += 1;
+                    id
+                } else {
+                    NO_ID
+                }
+            })
+            .collect();
+        let retained_len = (next_id - 1) as usize;
+
+        // Identify metadata referenced by survivors before consuming any arena fields.
+        let mut used_prefixes = vec![false; self.prefixes.len()];
+        let mut used_datatypes = vec![false; self.datatypes.len()];
+        for (slot, &keep) in retained.iter().enumerate() {
+            if !keep {
+                continue;
+            }
+            match self.record(slot as Id + 1) {
+                StoredRef::Iri { prefix, .. } => used_prefixes[prefix as usize] = true,
+                StoredRef::Lit { datatype, .. } => used_datatypes[datatype as usize] = true,
+                StoredRef::Blank(_) | StoredRef::Triple(_) => {}
+            }
+        }
+
+        // Arena mode can move each Box<str> survivor unchanged. Compact/frozen modes expose
+        // borrowed StoredRef records, so copy those compact fields directly exactly once.
+        let mut terms = Vec::with_capacity(retained_len);
+        if self.base == 0 {
+            for (slot, stored) in std::mem::take(&mut self.terms).into_iter().enumerate() {
+                if retained[slot] {
+                    terms.push(stored);
+                }
+            }
+        } else {
+            for (slot, &keep) in retained.iter().enumerate() {
+                if !keep {
+                    continue;
+                }
+                terms.push(match self.record(slot as Id + 1) {
+                    StoredRef::Iri { prefix, suffix } => Stored::Iri {
+                        prefix,
+                        suffix: suffix.into(),
+                    },
+                    StoredRef::Lit {
+                        value,
+                        datatype,
+                        lang,
+                    } => Stored::Lit {
+                        value: value.into(),
+                        datatype,
+                        lang: lang.map(Into::into),
+                    },
+                    StoredRef::Blank(label) => Stored::Blank(label.into()),
+                    StoredRef::Triple(ids) => Stored::Triple(ids),
+                });
+            }
+        }
+
+        // Move only live metadata, preserving its old-id order, and build the small reverse maps.
+        self.prefix_ids = FxHashMap::default();
+        let mut prefix_remap = vec![u32::MAX; self.prefixes.len()];
+        let mut prefixes = Vec::with_capacity(used_prefixes.iter().filter(|&&used| used).count());
+        let mut prefix_ids: FxHashMap<Box<str>, u32> = FxHashMap::default();
+        for (old, prefix) in std::mem::take(&mut self.prefixes).into_iter().enumerate() {
+            if used_prefixes[old] {
+                let new = prefixes.len() as u32;
+                prefix_remap[old] = new;
+                prefix_ids.insert(prefix.clone(), new);
+                prefixes.push(prefix);
+            }
+        }
+
+        self.datatype_ids = FxHashMap::default();
+        let mut datatype_remap = vec![u32::MAX; self.datatypes.len()];
+        let mut datatypes = Vec::with_capacity(used_datatypes.iter().filter(|&&used| used).count());
+        let mut datatype_ids: FxHashMap<Box<str>, u32> = FxHashMap::default();
+        for (old, datatype) in std::mem::take(&mut self.datatypes).into_iter().enumerate() {
+            if used_datatypes[old] {
+                let new = datatypes.len() as u32;
+                datatype_remap[old] = new;
+                datatype_ids.insert(datatype.as_str().into(), new);
+                datatypes.push(datatype);
+            }
+        }
+
+        let map_component = |old: Id| {
+            if is_inline(old) {
+                old
+            } else {
+                old.checked_sub(1)
+                    .and_then(|slot| remap.get(slot as usize).copied())
+                    .unwrap_or(NO_ID)
+            }
+        };
+        for stored in &mut terms {
+            match stored {
+                Stored::Iri { prefix, .. } => *prefix = prefix_remap[*prefix as usize],
+                Stored::Lit { datatype, .. } => {
+                    *datatype = datatype_remap[*datatype as usize];
+                }
+                Stored::Blank(_) => {}
+                Stored::Triple(ids) => {
+                    for id in ids {
+                        *id = map_component(*id);
+                    }
+                }
+            }
+        }
+
+        let mut rebuilt = Dict {
+            prefixes,
+            prefix_ids,
+            datatypes,
+            datatype_ids,
+            terms,
+            table: HashTable::new(),
+            blob: None,
+            #[cfg(feature = "mmap")]
+            mapped: None,
+            base: 0,
+            frozen: None,
+        };
+        // Release the old table/blob/mapping before allocating the rebuilt lookup table.
+        drop(self);
+        rebuilt.build_table();
+        (rebuilt, remap)
+    }
+
     /// (Re)builds the content-hash lookup table from the term arena — for dictionaries
     /// assembled WITHOUT incremental table inserts (`ShardedDict::into_merged`), so the
     /// result supports `lookup`/`intern` like any serially-built dict. The per-term
@@ -3736,6 +3922,110 @@ mod tests {
             NamedNode::new_unchecked(p),
             o,
         )))
+    }
+
+    #[test]
+    fn filtered_rebuild_moves_arena_records_and_filters_metadata() {
+        let mut d = Dict::new();
+        let kept_iri = Term::NamedNode(NamedNode::new_unchecked("http://keep.example/a"));
+        let dead_iri = Term::NamedNode(NamedNode::new_unchecked("http://dead.example/b"));
+        let kept_lit = Term::Literal(Literal::new_typed_literal("1.5", xsd::DECIMAL));
+        let dead_lit = Term::Literal(Literal::new_typed_literal(
+            "gone",
+            NamedNode::new_unchecked("http://dead.example/type"),
+        ));
+        let kept_blank = Term::BlankNode(oxrdf::BlankNode::new_unchecked("kept"));
+        let kept_iri_id = d.intern(&kept_iri);
+        let dead_iri_id = d.intern(&dead_iri);
+        let kept_lit_id = d.intern(&kept_lit);
+        let dead_lit_id = d.intern(&dead_lit);
+        let kept_blank_id = d.intern(&kept_blank);
+        let old_len = d.len();
+
+        // Raw payload pointers prove the arena path MOVES the compact Boxes instead of
+        // reconstructing Terms (which would allocate new suffix/value strings).
+        let kept_suffix_ptr = match d.record(kept_iri_id) {
+            StoredRef::Iri { suffix, .. } => suffix.as_ptr(),
+            _ => panic!("kept IRI did not have an IRI record"),
+        };
+        let kept_value_ptr = match d.record(kept_lit_id) {
+            StoredRef::Lit { value, .. } => value.as_ptr(),
+            _ => panic!("kept literal did not have a literal record"),
+        };
+
+        let (rebuilt, remap) =
+            d.rebuild_filtered(|id| id == kept_iri_id || id == kept_lit_id || id == kept_blank_id);
+
+        assert_eq!(remap.len(), old_len);
+        assert_eq!(remap[(kept_iri_id - 1) as usize], 1);
+        assert_eq!(remap[(dead_iri_id - 1) as usize], NO_ID);
+        assert_eq!(remap[(kept_lit_id - 1) as usize], 2);
+        assert_eq!(remap[(dead_lit_id - 1) as usize], NO_ID);
+        assert_eq!(remap[(kept_blank_id - 1) as usize], 3);
+        assert_eq!(rebuilt.len(), 3);
+        assert_eq!(rebuilt.lookup(&kept_iri), 1);
+        assert_eq!(rebuilt.lookup(&kept_lit), 2);
+        assert_eq!(rebuilt.lookup(&kept_blank), 3);
+        assert_eq!(rebuilt.lookup(&dead_iri), NO_ID);
+        assert_eq!(rebuilt.lookup(&dead_lit), NO_ID);
+
+        // Metadata belonging only to dead records must be reclaimed as well.
+        assert_eq!(rebuilt.prefixes.len(), 1);
+        assert_eq!(rebuilt.prefix_ids.len(), 1);
+        assert_eq!(rebuilt.datatypes.len(), 1);
+        assert_eq!(rebuilt.datatype_ids.len(), 1);
+        match rebuilt.record(1) {
+            StoredRef::Iri { suffix, .. } => {
+                assert!(std::ptr::eq(suffix.as_ptr(), kept_suffix_ptr));
+            }
+            _ => panic!("rebuilt IRI did not have an IRI record"),
+        }
+        match rebuilt.record(2) {
+            StoredRef::Lit { value, .. } => {
+                assert!(std::ptr::eq(value.as_ptr(), kept_value_ptr));
+            }
+            _ => panic!("rebuilt literal did not have a literal record"),
+        }
+    }
+
+    #[test]
+    fn filtered_rebuild_from_blob_retains_nested_triple_dependencies() {
+        let mut d = Dict::new();
+        let inner = triple(
+            "http://ex/a",
+            "http://ex/b",
+            Term::Literal(Literal::new_simple_literal("v")),
+        );
+        let outer = triple("http://ex/x", "http://ex/p", inner.clone());
+        let outer_id = d.intern(&outer);
+        let inner_id = d.lookup(&inner);
+        let dead = Term::NamedNode(NamedNode::new_unchecked("http://dead.example/gone"));
+        let dead_id = d.intern(&dead);
+        let old_len = d.len();
+
+        // Select ONLY the outer triple. Its leaves and nested triple are implicit survivors.
+        let (rebuilt, remap) = d.into_blob().rebuild_filtered(|id| id == outer_id);
+        let new_outer = remap[(outer_id - 1) as usize];
+        let new_inner = remap[(inner_id - 1) as usize];
+        assert_ne!(new_outer, NO_ID);
+        assert_ne!(
+            new_inner, NO_ID,
+            "nested triple dependency must be retained"
+        );
+        assert_eq!(remap[(dead_id - 1) as usize], NO_ID);
+        assert_eq!(
+            rebuilt.len(),
+            old_len - 1,
+            "only the unrelated dead term is dropped"
+        );
+        assert!(
+            rebuilt.len() > 1,
+            "the one selected triple must retain its dependencies"
+        );
+        assert_eq!(rebuilt.term(new_outer), outer);
+        assert_eq!(rebuilt.term(new_inner), inner);
+        assert_eq!(rebuilt.lookup(&outer), new_outer);
+        assert_eq!(rebuilt.lookup(&dead), NO_ID);
     }
 
     #[test]

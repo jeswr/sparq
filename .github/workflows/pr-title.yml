@@ -25,7 +25,8 @@
 #
 # GATING POSTURE — ADVISORY (deliberate, NOT a hard gate yet). [OPUS-4.8]
 # The check NAME below contains the whole word "advisory", so ci-summary.yml's
-# `\b(advisory|informational)\b` rule EXCLUDES it from the required gating set — a
+# .github/advisory-registry.json declaration EXCLUDES it from the required gating set (#3773:
+# the name token alone no longer does) — a
 # non-conventional title reports a red ✗ here as a SIGNAL but CANNOT block the merge.
 # WHY advisory and not hard: a hard gate would have to be true of every in-flight PR
 # title the moment it lands, and at authoring time open PR #207 ("design: sparq logo

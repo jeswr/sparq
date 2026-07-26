@@ -1,10 +1,10 @@
-//! The materializer pipeline: facts (loader) + N3 rules (rules/*.n3) → `reason_n3`
+//! The materializer pipeline: facts (loader) + N3 rules (rules/*.n3) → N3 reasoning
 //! strata → the auth-view named graph `<urn:sparq:auth>` swapped into the dataset.
 //!
 //! Stratification (design doc §3.5): the engine's `log:notIncludes` never retracts, so
 //! each negated predicate must be COMPLETE before its stratum runs. WAC negates only
-//! input facts → 1 call. ACP: accepts (A) → rejections (B) → grants (C) → 3 calls,
-//! each seeded with the previous closure.
+//! input facts → 1 call. ACP runs accepts (A) → rejections (B) → grants (C) through
+//! the stratified driver, which carries each completed closure forward in memory.
 
 use crate::loader::{assemble_input, strip_reserved_graphs, System};
 use crate::{AccessProvenance, AUTH_GRAPH, AUTH_NS};
@@ -12,8 +12,7 @@ use oxrdf::{NamedNode, Term};
 use rustc_hash::FxHashSet;
 use sparq_core::dict::Dict;
 use sparq_core::Graph;
-use sparq_reason::reason_n3;
-use std::fmt::Write as _;
+use sparq_reason::{reason_n3, reason_n3_stratified};
 // `std::time::Instant` is unusable on `wasm32-unknown-unknown` — `Instant::now()`
 // panics there (no monotonic clock). The wall-clock plumbing for `stats.millis` is
 // purely informational, so it is `cfg`-gated off and reported as `0.0` on wasm32
@@ -56,6 +55,7 @@ pub struct MaterializeStats {
     /// Triples in the produced auth view.
     pub auth_triples: usize,
     /// Closure size after each reasoning stratum (1 entry for WAC, 3 for ACP).
+    /// ACP sizes are term-level counts taken before RDF list expansion and interning.
     pub strata_facts: Vec<usize>,
     /// Wall-clock total.
     pub millis: f64,
@@ -122,9 +122,9 @@ pub fn materialize_wac(graph: &mut Graph) -> Result<MaterializeStats, String> {
 ///
 /// The free-function form of [`crate::PodStore::materialize_acp`]. Same contract as
 /// [`materialize_wac`], but the input graphs are the `.acr` ones and the rules run
-/// as three stratified `reason_n3` calls (`rules/acp-a.n3` accepts →
-/// `rules/acp-b.n3` rejections → `rules/acp-c.n3` grants), each seeded with the
-/// previous closure — the engine's negation-as-failure never retracts, so each
+/// as one `reason_n3_stratified` run (`rules/acp-a.n3` accepts →
+/// `rules/acp-b.n3` rejections → `rules/acp-c.n3` grants), carrying each closure
+/// forward in memory — the engine's negation-as-failure never retracts, so each
 /// negated predicate must be complete before its stratum runs (design doc §3.5).
 ///
 /// # Errors
@@ -161,7 +161,7 @@ pub fn materialize_acp(graph: &mut Graph) -> Result<MaterializeStats, String> {
 /// matchers ([OPUS-4.8] sq-3jtd.5).
 ///
 /// The free-function form of [`crate::PodStore::materialize_acp_with`]. Identical to
-/// [`materialize_acp`] (three stratified `reason_n3` calls) except the loader also
+/// [`materialize_acp`] (one three-stratum `reason_n3_stratified` run) except the loader also
 /// synthesizes `<r> solidx:creator|owner <webid>` facts from `provenance` — the trusted
 /// channel for "who created/owns `<r>`". These facts are **never** read from the resource
 /// graphs (design doc §2.4): a writer cannot self-grant via a forged `solidx:creator`
@@ -183,24 +183,15 @@ pub fn materialize_acp_with(
     let t0 = Instant::now();
     strip_reserved_graphs(graph);
     let input = assemble_input(graph, System::Acp, provenance)?;
-    let mut strata_facts = Vec::new();
-
+    let accepts = format!("{input}\n{COMMON_RULES}\n{ACP_A}");
     let mut dict = Dict::new();
-    let c1 = reason_n3(&mut dict, &format!("{input}\n{COMMON_RULES}\n{ACP_A}"))?;
-    strata_facts.push(c1.len());
-    let f1 = closure_to_n3(&dict, &c1);
+    // [SONNET-4.6] Keep closure terms in memory between strata. Besides avoiding a
+    // serialize/parse cycle, this preserves formula-valued facts and delegates blank
+    // scope isolation to the reasoner's stratified driver.
+    let closure = reason_n3_stratified(&mut dict, &[&accepts, ACP_B, ACP_C])?;
 
-    let mut d2 = Dict::new();
-    let c2 = reason_n3(&mut d2, &format!("{f1}\n{ACP_B}"))?;
-    strata_facts.push(c2.len());
-    let f2 = closure_to_n3(&d2, &c2);
-
-    let mut d3 = Dict::new();
-    let c3 = reason_n3(&mut d3, &format!("{f2}\n{ACP_C}"))?;
-    strata_facts.push(c3.len());
-
-    let mut stats = install_auth_view(graph, &d3, &c3);
-    stats.strata_facts = strata_facts;
+    let mut stats = install_auth_view(graph, &dict, &closure.facts);
+    stats.strata_facts = closure.strata_facts;
     stats.millis = elapsed_millis(
         #[cfg(not(target_arch = "wasm32"))]
         t0,
@@ -220,21 +211,6 @@ fn elapsed_millis(t0: Instant) -> f64 {
 #[cfg(target_arch = "wasm32")]
 fn elapsed_millis() -> f64 {
     0.0
-}
-
-/// Re-serialize a stratum's ground closure as facts for the next stratum.
-fn closure_to_n3(dict: &Dict, closure: &[[sparq_core::dict::Id; 3]]) -> String {
-    let mut out = String::with_capacity(closure.len() * 64);
-    for t in closure {
-        let _ = writeln!(
-            out,
-            "{} {} {} .",
-            dict.term(t[0]),
-            dict.term(t[1]),
-            dict.term(t[2])
-        );
-    }
-    out
 }
 
 /// Whether a closure triple belongs in the auth view: `auth:*` predicates, `rdf:type`

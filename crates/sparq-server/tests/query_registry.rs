@@ -289,27 +289,31 @@ async fn explain_deregistered_after_completion() {
 /// registry while the `spawn_blocking` worker is executing.
 ///
 /// Non-vacuous: removing the `register(sparql)` call from the EXPLAIN branch in
-/// `run_query_pinned` makes this test fail — `running_query_count()` stays 0 throughout
-/// and the `assert_eq!(1)` fires.
+/// `run_query_pinned` makes this test fail — `running_query_count()` stays 0 on EVERY
+/// attempt and the final `assert_eq!(1)` fires.  The retry loop does not weaken that
+/// mutation proof: the property is existential (the entry must be OBSERVABLE while the
+/// engine executes), so one observed registration proves the wiring, while a removed
+/// `register()` call can never be observed no matter how many attempts run.
 ///
-/// Uses `AppState::running_query_count()` (test-only accessor, compiled only with
-/// `#[cfg(all(test, feature = "query-registry"))]`) to observe the live registry count
-/// from a shared `AppState` clone while the EXPLAIN's `spawn_blocking` worker runs.
-/// The trick: `AppState` holds the `Arc<QueryRegistry>` so any clone sees the same
-/// backing store; we keep a clone BEFORE handing ownership to `router()`.
+/// Flake-hardening (#3510): the original version raced a DETACHED poller task with a
+/// fixed budget of 200 `yield_now()` iterations against the HTTP round-trip.  Two
+/// wall-clock assumptions made that flaky on a loaded runner: (a) 200 yields cost
+/// microseconds and can burn out before the request even reaches the server, and
+/// (b) the count==1 window can close between two polls, because the RAII guard drops
+/// on a blocking-pool thread that runs concurrently with the poller.  This version
+/// removes both: the registry count is sampled between polls of the IN-FLIGHT response
+/// future (`select!`), so sampling lasts exactly as long as the request with no
+/// iteration budget to exhaust, and the fire-and-observe attempt is retried so a single
+/// lost cross-thread race cannot fail the test on its own.
+///
+/// Uses `AppState::running_query_count()` (feature-gated accessor) to observe the live
+/// registry count from a shared `AppState` clone while the EXPLAIN's `spawn_blocking`
+/// worker runs.  The trick: `AppState` holds the `Arc<QueryRegistry>` so any clone sees
+/// the same backing store; we keep a clone BEFORE handing ownership to `router()`.
 #[tokio::test]
 async fn explain_registered_while_in_flight_via_state_accessor() {
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    };
-
-    // Shared counter: the background task writes the peak observed count.
-    let peak_count = Arc::new(AtomicUsize::new(0));
-    let peak_clone = Arc::clone(&peak_count);
-
-    // Build the AppState — keep a clone of the Arc so we share the registry.
-    // We also keep a clone of the AppState itself (it is `Clone`, backed by Arcs).
+    // Build the AppState — keep a clone of the state (it is `Clone`, backed by Arcs)
+    // so we share the registry with the router.
     let graph = sparq_core::Graph::load_str("", "turtle").unwrap();
     let state = sparq_server::AppState::with_config(graph, sparq_server::ServerConfig::default());
     let state_clone = state.clone();
@@ -321,42 +325,45 @@ async fn explain_registered_while_in_flight_via_state_accessor() {
         axum::serve(listener, app).await.unwrap();
     });
     let base = format!("http://{addr}");
-
-    // Background task: poll `running_query_count()` until it rises above 0 or the
-    // EXPLAIN completes.  Records the peak count so the main task can assert it.
-    let poller = tokio::spawn(async move {
-        for _ in 0..200 {
-            let n = state_clone.running_query_count();
-            if n > 0 {
-                peak_clone.store(n, Ordering::Release);
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    });
+    let http = client();
 
     // Fire EXPLAIN ANALYZE (executes the engine; keeps the spawn_blocking alive longer
-    // than plan-only).
-    let explain_resp = client()
-        .get(format!(
-            "{base}/sparql?query=SELECT+*+WHERE+%7B+%3Fs+%3Fp+%3Fo+%7D&explain=analyze"
-        ))
-        .send()
-        .await
-        .unwrap();
-    // Await the poller too.
-    poller.await.unwrap();
+    // than plan-only) and sample the registry count while the response is in flight.
+    // Requests are strictly sequential, so the observable count is only ever 0 or 1.
+    let mut peak_count = 0usize;
+    for _attempt in 0..50 {
+        let mut req = std::pin::pin!(
+            http.get(format!(
+                "{base}/sparql?query=SELECT+*+WHERE+%7B+%3Fs+%3Fp+%3Fo+%7D&explain=analyze"
+            ))
+            .send()
+        );
+        let explain_resp = loop {
+            tokio::select! {
+                biased;
+                resp = &mut req => break resp.unwrap(),
+                // yield_now parks this task at the back of the run queue, so the server
+                // tasks (accept + the handler, which registers BEFORE spawn_blocking)
+                // get to run between two samples.
+                _ = tokio::task::yield_now() => {
+                    peak_count = peak_count.max(state_clone.running_query_count());
+                }
+            }
+        };
+        assert!(
+            explain_resp.status().is_success(),
+            "EXPLAIN ANALYZE must succeed; got: {}",
+            explain_resp.status()
+        );
+        if peak_count > 0 {
+            break;
+        }
+    }
 
-    assert!(
-        explain_resp.status().is_success(),
-        "EXPLAIN ANALYZE must succeed; got: {}",
-        explain_resp.status()
-    );
     assert_eq!(
-        peak_count.load(Ordering::Acquire),
-        1,
+        peak_count, 1,
         "EXPLAIN ANALYZE must register exactly one entry in the running-query registry while \
-         the engine executes (peak_count was 0 — likely the register() call was removed from \
-         the EXPLAIN branch in run_query_pinned)"
+         the engine executes (peak_count stayed 0 across every attempt — likely the register() \
+         call was removed from the EXPLAIN branch in run_query_pinned)"
     );
 }

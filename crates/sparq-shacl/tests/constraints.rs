@@ -159,8 +159,9 @@ fn range_string_ordering() {
 
 #[test]
 fn range_datetime_ordering_and_incomparability() {
-    // sh:maxInclusive a timezoned dateTime. A value with the SAME tz-presence
-    // compares; a tz-less value is INCOMPARABLE (not satisfied -> violation).
+    // sh:maxInclusive a timezoned dateTime. A tz-less value compares via
+    // XSD's ±14h rule: determinate when its 28h instant window falls wholly
+    // on one side of the bound, INCOMPARABLE inside the window (-> violation).
     let shapes = r#"
         ex:S a sh:NodeShape ; sh:targetNode ex:n ;
           sh:property [ sh:path ex:d ;
@@ -172,12 +173,19 @@ fn range_datetime_ordering_and_incomparability() {
         shapes,
     );
     assert!(ok.conforms, "{}", ok.to_text());
-    // A timezone-less value is incomparable with the timezoned bound ->
+    // A tz-less value months below the bound is determinately less -> conforms.
+    let ok = run(r#"ex:n ex:d "2024-01-01T00:00:00"^^xsd:dateTime ."#, shapes);
+    assert!(
+        ok.conforms,
+        "tz-less value below the ±14h window is determinately < the bound: {}",
+        ok.to_text()
+    );
+    // A tz-less value inside the bound's ±14h window is incomparable ->
     // constraint not satisfied -> violation.
-    let bad = run(r#"ex:n ex:d "2024-01-01T00:00:00"^^xsd:dateTime ."#, shapes);
+    let bad = run(r#"ex:n ex:d "2024-06-01T00:00:00"^^xsd:dateTime ."#, shapes);
     assert!(
         !bad.conforms,
-        "tz-less vs tz'd dateTime must be incomparable"
+        "tz-less vs tz'd dateTime inside ±14h must be incomparable"
     );
     assert_eq!(count_component(&bad, "MaxInclusiveConstraintComponent"), 1);
 }

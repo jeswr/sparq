@@ -446,6 +446,42 @@ pub fn auth_add_constant(
     AuthenticatedShare::new(value, mac)
 }
 
+/// [OPUS-4.8] sq-km34.2 — the **authenticated cumulative-SUM aggregate** (design
+/// §2.3): the MAC-carrying analogue of the backend's plain
+/// [`run_secure`](crate::backend::MpcBackend::run_secure) fold.
+/// Folds a slice of authenticated sharings with [`auth_add`], so it returns
+/// `([Σx], [α·Σx])` — the sum's value sharing paired with its correct MAC.
+///
+/// This is the reusable form of the flatmate cumulative-salary use case: the SUM
+/// is a pure linear function, so under Shamir it is **zero communication rounds**,
+/// and because [`auth_add`] carries the MAC on BOTH components (`α·(x+y) = α·x +
+/// α·y`) the MAC relation is preserved for FREE — the "malicious comes free in
+/// honest majority" property for linear circuits (design §2.3) — for
+/// same-session, honestly formed inputs. No new interaction over the
+/// unauthenticated aggregate; only the MAC sharing is additionally maintained.
+///
+/// **This helper only propagates MAC shares — it never invokes the batched
+/// `mac_check` (§2.5) itself.** Tamper detection requires the CALLER to include
+/// the result in a successful `mac_check` before opening or otherwise relying on
+/// it. And as everywhere on this chain, the malicious-with-abort security claim
+/// is research-grade: internally re-audited, but EXTERNAL accredited-cryptographer
+/// sign-off is PENDING `sq-qhy4`.
+///
+/// All addends must be authenticated under the SAME session key `α` and shared on
+/// the identical party-point set (as [`auth_add`] requires). An empty input is a
+/// protocol error — like `run_secure`, there is no meaningful sum of zero addends
+/// to disclose, and we never invent one. `[OPUS-4.8]`
+pub fn auth_sum(shares: &[AuthenticatedShare]) -> Result<AuthenticatedShare, MpcError> {
+    let (first, rest) = shares.split_first().ok_or_else(|| {
+        MpcError::Protocol("auth_sum: no authenticated inputs to aggregate".into())
+    })?;
+    let mut acc = first.clone();
+    for next in rest {
+        acc = auth_add(&acc, next)?;
+    }
+    Ok(acc)
+}
+
 #[cfg(test)]
 mod tests {
     //! sq-km34.1 acceptance tests (design §2.1–2.2). The three load-bearing ones,
@@ -773,11 +809,9 @@ mod tests {
             .map(|&s| session.authenticated_share(Fp::new(s)))
             .collect();
 
-        // Zero-round local accumulation (the SUM aggregate).
-        let mut acc = shared[0].clone();
-        for next in &shared[1..] {
-            acc = auth_add(&acc, next).unwrap();
-        }
+        // Zero-round local accumulation (the SUM aggregate) via the reusable
+        // authenticated aggregate — the MAC-carrying analogue of `run_secure`.
+        let acc = auth_sum(&shared).unwrap();
 
         let sum = open(acc.value_shares(), t);
         assert_eq!(
@@ -787,6 +821,26 @@ mod tests {
         );
         let sum_mac = open(acc.mac_shares(), t);
         assert_eq!(sum_mac, alpha.mul(sum), "aggregate MAC stays α·sum");
+
+        // Parity: the reusable `auth_sum` matches an explicit `auth_add` fold —
+        // it IS the fold, just packaged (non-vacuous check on the helper).
+        let mut manual = shared[0].clone();
+        for next in &shared[1..] {
+            manual = auth_add(&manual, next).unwrap();
+        }
+        assert_eq!(
+            open(manual.value_shares(), t),
+            sum,
+            "auth_sum == manual fold"
+        );
+    }
+
+    /// `auth_sum` rejects an empty aggregate (like `run_secure`): there is no
+    /// meaningful sum of zero addends to disclose, so it is a protocol error, not
+    /// a silent zero. `[OPUS-4.8]`
+    #[test]
+    fn auth_sum_rejects_empty_input() {
+        assert!(matches!(auth_sum(&[]), Err(MpcError::Protocol(_))));
     }
 
     /// Mismatched party sets are a protocol error, not a silent wrong answer (the

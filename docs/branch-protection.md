@@ -25,30 +25,49 @@ without a second concurrent author to race against). The required check is:
 
 | Required check (job name) | Workflow | What it gates |
 |---|---|---|
-| **`ci-summary / gate`** | [`.github/workflows/ci-summary.yml`](../.github/workflows/ci-summary.yml) | **The single gate.** Polls every *other* check-run on the PR head commit and passes iff none failed (`success`/`skipped`/`neutral` are non-failing). |
+| **`ci-summary / gate`** | [`.github/workflows/ci-summary.yml`](../.github/workflows/ci-summary.yml) | **The single gate.** Polls Actions workflow-runs plus external check-runs on the PR head commit and passes iff the newest run/attempt of every gating workflow succeeds (`success`/`skipped`/`neutral` are non-failing). |
 
 > **Select only `ci-summary / gate`** in the ruleset's "Require status checks that must
 > pass" list. Do **not** add the individual job names below — `ci-summary` already
 > aggregates them. This is deliberate: `needs:` cannot span workflows, so requiring each
 > job by name was brittle (every rename / added gate broke the rule and silently weakened
 > the gate). The aggregator adapts automatically — add or rename jobs freely and the gate
-> still covers them, because it discovers the live set of check-runs at run time. See the
-> header of `ci-summary.yml` for the full semantics (stability window + self-exclusion).
+> still covers them, because it discovers the live workflow/check set at run time. See the
+> header of `ci-summary.yml` for the full semantics (newest-run resolution, bounded
+> cancelled-run re-dispatch, stability window, and self-exclusion).
 
 ### What `ci-summary` aggregates (informational — do NOT add these individually)
 
-The gate covers **every** check-run on the head commit. As of this writing those are the
-jobs below; this table is a map for reviewers, **not** a list of required checks.
+The gate covers **every newest Actions workflow run** and every external check-run on the
+head commit. As of this writing those expose the jobs below; this table is a map for
+reviewers, **not** a list of required checks.
 
-> **Advisory/informational checks are non-gating by NAME (sq-wjth).** `ci-summary`
-> excludes any check whose name contains the word `advisory` or `informational`
-> (case-insensitive) from the gating set — its conclusion, even `failure`, never blocks
-> a merge. So a job that should GATE must **not** put either word in its display name
-> (e.g. the lint gate is named `fmt + clippy (gate)`, *not*
-> `… (informational)`), and a new advisory/visibility-only job **should** carry one of
-> those words so the aggregator treats it as non-gating automatically. Note "advisories"
-> (plural, as in `cargo-deny (advisories + …)`) does **not** match `advisory`, so that
-> supply-chain check still gates correctly.
+> **Advisory checks are non-gating only when DECLARED (#3773).** `ci-summary` excludes a
+> check from the gating set **iff its name is a key in
+> [`.github/advisory-registry.json`](../.github/advisory-registry.json)** — its conclusion,
+> even `failure`, then never blocks a merge. **Everything else GATES**, whatever it is
+> called: a new job needs no naming ceremony to gate, and a visibility-only job must be
+> declared (with an `owner_bead`, `promotion_criteria`, `registered`, `workflow` and
+> `job_id`) or it will gate. `scripts/check-advisory-registry.py` enforces the registry's
+> integrity: C2 (a job whose *name* carries an `advisory`/`informational` token must be
+> declared or lose the token), C3 (a gate-classified python/shell/node/npm command inside a
+> declared job needs an explicit `gate_script_waiver`), C4 (each declaration binds to
+> `workflow` + `job_id` and must equal that job's **current** name — so a rename cannot
+> silently flip gating status; the renamed job gates, fail-closed).
+>
+> Two entry-shape rules the aggregator itself enforces, so an under-specified entry can
+> never buy an exclusion the integrity checker would have rejected: **all five fields are
+> required by `ci-summary` too** (an entry missing `workflow`/`job_id` declares nothing and
+> the check keeps gating), and a key must carry **literal text outside any `${{ … }}`
+> expression** — an expression-only key such as `${{ matrix.label }}` would match every
+> check-run name, `gate` included, so it is refused. Frame the expression instead:
+> `GUI build + clippy (${{ matrix.label }}, advisory)`.
+>
+> Until 2026-07-25 the aggregator instead inferred advisory status from the display name
+> matching `\b(advisory|informational)\b` (sq-wjth). That was removed in #3773: it silently
+> neutralised four real gates, because any job whose name happened to contain those words
+> was dropped from the gating set wholesale. The name token is now diagnostic only, and the
+> gate summary prints a loud note for any token-carrying check that has no declaration.
 
 From the **CI** workflow (`.github/workflows/ci.yml`):
 
@@ -93,7 +112,7 @@ From the binding/packaging workflows (when those surfaces are exercised):
 > maintainer-directed).** On a `pull_request` the `bench.yml` `run + track benchmarks` job runs the
 > FAST DETERMINISTIC form only (`ci-bench.sh --deterministic-only`): the byte-count / memory-layout
 > ratchet (store/dict/wasm bytes — a pure function of the code, immune to shared-runner noise) IS
-> aggregated by the gate (its name has no advisory token) and hard-fails the gate on a real
+> aggregated by the gate (it carries no advisory-registry declaration) and hard-fails the gate on a real
 > regression. `bench.yml` no longer triggers on `merge_group` at all — the deterministic ratchet
 > already ran on the PR head, re-runs on push-to-main, and the merged-tree wasm-feature-OFF invariant
 > is independently guarded on `merge_group` by `vectorized-feature-off.yml`'s `artifact-exact-equality`
@@ -101,10 +120,24 @@ From the binding/packaging workflows (when those surfaces are exercised):
 > it (the required set is the single `gate` context, not this job by name). The NOISY wall-clock timing
 > suites (query latencies + the well-known sp2b/dbpsb/watdiv/bsbm/lubm + cargo-only latency suites)
 > were dragging the merge queue and flapping the gate on shared runners, so they are RELOCATED to the
-> nightly EC2 lane (`bench-ec2.yml` `nightly-full-bench`, cron, quiet dedicated spot instance) which
-> publishes the full at-scale series to the `benchmark-data` branch the Pages dashboard reads — the
-> perf-tracking is moved, not lost. The weekly heavy EC2 campaign (`bench-ec2.yml` `ec2-bench`) and
-> release/dist workflows remain non-gating (release/dist fire only on tags). The **Scorecard** workflow
+> EC2 full-suite lane (`bench-ec2.yml` `nightly-full-bench`, quiet dedicated spot instance) which
+> publishes the full at-scale series to the `benchmark-data` branch the Pages dashboard reads.
+>
+> **[OPUS-5] #3784 — `bench-ec2.yml` is MANUAL DISPATCH ONLY, and the at-scale trend is on hold.**
+> Both of that workflow's crons are RETIRED. It authenticates through an AWS OIDC role
+> (`vars.AWS_BENCH_ROLE_ARN`) that the orchestration design deliberately descoped, so every scheduled
+> tick failed in `Configure AWS credentials (OIDC)` *before any benchmark ran* — and because the check
+> name carries no advisory token and no `.github/advisory-registry.json` declaration, that failure
+> **GATED** (see §ADVISORY MUST BE DECLARED in `scripts/ci_summary_gate.py`), which is why `main` could
+> not go green. The lane was RETIRED rather than declared advisory: muting a permanently-broken gate to
+> green a dashboard is exactly what the declared-not-inferred rule exists to prevent. Consequences to
+> read honestly: the at-scale timing series is **not** being collected on a cadence (the earlier
+> "perf-tracking is moved, not lost" claim no longer holds), and maintainer-run EC2 benchmarking is
+> unaffected — both campaigns stay dispatchable via the `lane` input, and every EC2 bench script stays
+> in the tree. Reviving the cadence means re-provisioning the role AND re-adding a `schedule:` block in
+> the same change. A cron-less workflow posts no check-runs on a `main` head SHA, so neither EC2
+> campaign can gate anything today; release/dist workflows likewise remain non-gating (they fire only
+> on tags). The **Scorecard** workflow
 > (`scorecard.yml`) re-scores posture on push to `main` and feeds the public OpenSSF
 > dashboard/badge (its SARIF upload to GitHub code-scanning is disabled and the job has
 > no `security-events: write` — see the Scorecard note later in this document); with
@@ -204,7 +237,7 @@ no check-run there either — not a byte-identical copy of the PR check-set.)
 | `artifact-exact-equality` (wasm feature-OFF byte identity) | `vectorized-feature-off.yml` | kept iff `sparq-wasm` is in the affected closure (in-step `ci_select.py` verdict; ci-full label / selector error / full mode ⇒ run) |
 
 **The integrity invariant — a draft-tier gate result must NEVER admit a PR to the
-merge queue.** The load-bearing mechanism is rule 1 (structural); rules 2–6 are
+merge queue.** The load-bearing mechanism is rule 1 (structural); rules 2–8 are
 belts (all in `scripts/ci_summary_gate.py`, unit-tested in
 `scripts/tests/test_ci_summary_gate.py`; the name/trigger wiring pinned by
 `scripts/tests/test_ci_select_wiring.py`):
@@ -231,8 +264,8 @@ belts (all in `scripts/ci_summary_gate.py`, unit-tested in
    only) `gate` check-run for that head.
 3. **The gate knows its tier.** Each `ci-summary` run derives its tier from its own
    trigger payload (`PR_DRAFT`), and the reusable `ci-select` job's check-run **name
-   carries a `", draft-tier"` marker** on draft-assembled runs (name-as-contract,
-   like the advisory rule).
+   carries a `", draft-tier"` marker** on draft-assembled runs (name-as-contract —
+   the one such contract left, now that #3773 removed the advisory NAME rule).
 4. **A full-tier gate refuses a draft-tier leg set — per INSTANCE.** `ci.yml`,
    `bench.yml`, `feature-matrix.yml` and `fuzz.yml` all call the same reusable
    `ci-select` job, so a head SHA carries up to **four** draft-marked selects
@@ -250,12 +283,55 @@ belts (all in `scripts/ci_summary_gate.py`, unit-tested in
    (`pull-requests: read`); if the PR was un-drafted meanwhile it concludes
    FAILURE with the same stale-draft-tier message, and an unreadable state
    fail-closes to FAILURE (a draft PR cannot merge anyway).
-6. **Superseded-cancellation forgiveness.** The ready_for_review re-run's per-PR
-   concurrency groups cancel the in-flight draft-tier runs, leaving
-   `cancelled` check-runs on the same SHA; the gate excuses a cancelled/stale
-   check-run **only** when a later run of the same (tier-normalized) name exists —
-   a genuine `failure`/`timed_out` is never forgiven, and a cancellation with no
-   successor still REDs.
+6. **Newest workflow run wins (#3505).** [GPT-5.6] The ready_for_review re-run's
+   per-PR concurrency groups cancel the in-flight draft-tier runs, leaving terminal
+   checks on the same SHA. The gate resolves them by `workflow_id`: only the newest
+   run (by creation/run id) and its newest `run_attempt` is authoritative. Every
+   older run is a non-event even if its conclusion was `cancelled` or `failure`; a
+   genuine failure in the newest run/attempt still REDs. A newest cancelled run is
+   re-dispatched once (`actions: write`); if the retry is cancelled or never
+   advances, the gate REDs loudly with `superseded-legs, re-run required`.
+   Attempt-scoped job listing supplies the completed leg inventory and prevents
+   an old attempt that reused the run id from leaking into the verdict; the
+   workflow-run conclusion supplies the verdict when an entire job evaporates.
+7. **A run that assembled NO LEGS is not evidence (#3781).** [OPUS-5] A
+   `labeled`/`unlabeled` `pull_request` event whose label is not
+   `ci-full`/`bench-full`/`fuzz-full` is a guarded no-op for every `ci-select`
+   caller: the #2546 label-trigger guard skips every root job of `ci.yml`,
+   `bench.yml`, `feature-matrix.yml` and `fuzz.yml`, so the run's ONLY non-skipped
+   job is the deliberately-unconditional `select` pre-job. `ci-select.yml`
+   therefore names that job **`…, no-leg`**, never `…, draft-tier`, and the gate
+   treats the whole run as **non-authoritative**: it is excluded from newest-run
+   candidacy (rule 6) and every check-run it produced is a non-event, so the
+   PREVIOUS real run of that workflow stays authoritative. Two things this fixes,
+   both measured on 2026-07-25 (#3472/#3468/#3681):
+   * **the deadlock.** The review pipeline re-drafts a freshly-readied worker PR
+     ~13 min after the ready and flips `review:needs` in the same breath. Before
+     this rule, each of the resulting no-op runs' selects came out draft-marked
+     (the PR was a draft again), so the head acquired four draft-marked instances
+     whose full-tier successor could never exist — only a NON-draft payload
+     produces one. Rule 4 then held for all 155 polls and refused a leg set with
+     **zero failing legs**, three times in one drain pass.
+   * **evidence erasure.** Newest-run resolution is per-workflow, so a vacuous
+     all-`skipped` run used to *become* authoritative — discarding a real run that
+     was still in flight (#3472's real CI matrix ran until 07:34:08, six minutes
+     after the flip runs completed) or even a real `failure`. Ignoring the run is
+     therefore strictly MORE fail-closed than the behaviour it replaces.
+   Conservative by construction: on a `ci-full`/`bench-full`/`fuzz-full` flip at
+   least one caller does real work, so no `no-leg` claim is made and the previous
+   behaviour stands. `scripts/tests/test_ci_select_wiring.py::TestNoLegMarkerWiring`
+   EVALUATES the marker expression against synthetic payloads and proves, by
+   `needs:`-graph reachability, that every caller job really is inert on such a
+   flip — the claim, not just the string.
+8. **An unsatisfiable hold REDs immediately, with the diagnosis (#3781).**
+   [OPUS-5] Rule 4's hold is a WAIT for the `ready_for_review` full-tier re-runs.
+   When every sibling has CONCLUDED, a draft-marked select still lacks a successor,
+   and the PR reads as CURRENTLY A DRAFT, that wait is unsatisfiable on arrival, so
+   the gate fails fast naming exactly that instead of burning the remaining budget
+   (measured: 155 polls / ~37 min per occurrence). It is the same refusal rule 4
+   reaches at budget exhaustion — never a new pass — and it stands down whenever the
+   set is still settling, the PR reads non-draft, or the draft state is unreadable
+   (then the pre-#3781 budget-exhaustion path renders the verdict unchanged).
 
 **Why the queue can never latch a draft-tier result.** Rule 1 is structural: the
 queue and branch protection admit a PR only on a successful check-run of the
@@ -263,7 +339,7 @@ exact context `gate`, and no draft-tier run ever emits one. This matters more
 than it may look, because the `merge_group` run deliberately omits two lanes
 (`bench.yml`'s deterministic byte ratchet and the heavy recall shards,
 sq-6vshe.6) on the premise that their full form already ran on the PR head —
-a premise a draft-built head would otherwise break. Rules 2–6 alone would NOT
+a premise a draft-built head would otherwise break. Rules 2–8 alone would NOT
 close that: a concluded draft-tier `gate` success would remain the *latest* run
 of the required context from the un-draft moment until the ready_for_review
 `ci-summary` run registers its check-run (seconds of event latency; indefinitely
@@ -374,10 +450,16 @@ The merge queue on `main` drains individually-armed worker PRs up to its per-win
 heads carrying `review:pass` with an active auto-merge arm by `app/sparq-orchestrator`)
 are waiting at once, the scheduled/event-driven batcher
 ([`scripts/batch-merge.py`](../scripts/batch-merge.py), run by
-[`.github/workflows/batch-merge.yml`](../.github/workflows/batch-merge.yml)) folds the
-overflow — everything beyond the 8 lowest-numbered PRs, at least 2 constituents — into one
-`sparq-omnibus/<utcstamp>` integration PR (fresh off `main`, sequential `--no-ff` merges;
-a conflicting constituent is skipped and stays individually armed) and arms it so a single
+[`.github/workflows/batch-merge.yml`](../.github/workflows/batch-merge.yml), every
+15 minutes) folds the overflow — everything beyond the 8 lowest-numbered PRs — into one
+`sparq-omnibus/<class>-<utcstamp>` integration PR **per change-class** (issue #3433:
+`slim` = constituents whose diffs are docs-/orchestration-only per `ci_select`'s audited
+allowlist, so a slim batch rides the slim merge-group lane set and never waits on a
+full-matrix run; `engine` = everything else, fail-closed; at least 2 and at most 15
+constituents per omnibus — batch-15 per 15-minute run tracks the 60-merges/hour target
+and keeps a v2 culprit bisect at log2(15) ≈ 4 runs; one omnibus per class in flight).
+Each omnibus is fresh off `main`, built with sequential `--no-ff` merges (a conflicting
+constituent is skipped and stays individually armed) and armed so a single
 queue slot lands the whole batch; the omnibus body carries `Closes #` refs for every
 constituent's issue, and once it merges the batcher closes each contained constituent PR.
 The `sparq-omnibus/` prefix (and the absence of any `review:*` label) keeps these PRs out

@@ -93,14 +93,17 @@ fn geographic_inputs_pass_through_and_polygons_keep_their_shape() {
 
 #[test]
 fn unsupported_crs_errors_are_explicit() {
-    // EPSG code without a curated definition.
-    let g = parse_wkt_literal("<http://www.opengis.net/def/crs/EPSG/0/2056> POINT(0 0)").unwrap();
-    assert!(matches!(to_crs84(&g), Err(GeoError::Unsupported(m)) if m.contains("EPSG:2056")));
+    // EPSG code without a definition in ANY feature state (99999 is not an
+    // assigned EPSG CRS code, and is beyond the embedded registry's range).
+    let g = parse_wkt_literal("<http://www.opengis.net/def/crs/EPSG/0/99999> POINT(0 0)").unwrap();
+    assert!(matches!(to_crs84(&g), Err(GeoError::Unsupported(m)) if m.contains("EPSG:99999")));
     // Non-EPSG CRS IRI.
     let g = parse_wkt_literal("<http://example.org/my-crs> POINT(0 0)").unwrap();
     assert!(matches!(to_crs84(&g), Err(GeoError::Unsupported(_))));
-    // Table introspection.
+    // Table introspection. EPSG:2056 (Swiss LV95) is NOT curated — it is
+    // covered only by the opt-in `epsg_full` registry fallback.
     assert!(proj4_definition(27700).is_some());
+    #[cfg(not(feature = "epsg_full"))]
     assert!(proj4_definition(2056).is_none());
     assert_eq!(
         epsg_code(&Crs::Other(
@@ -108,6 +111,9 @@ fn unsupported_crs_errors_are_explicit() {
         )),
         Some(27700)
     );
+    #[cfg(feature = "epsg_full")]
+    assert!(proj4_definition(2056).is_some());
+    assert!(proj4_definition(99999).is_none());
     assert_eq!(epsg_code(&Crs::Other("http://example.org/x".into())), None);
 }
 
@@ -207,6 +213,117 @@ fn lex_roundtrip_drops_the_geographic_crs_prefix_after_normalisation() {
     let out = to_crs84_lex(&format!("<{EPSG}/4258> POINT(52.37 4.9)")).unwrap();
     assert!(out.starts_with("POINT(4.9"), "got {out}");
     assert!(!out.contains('<'), "got {out}");
+}
+
+// ---- Full EPSG registry fallback (the opt-in `epsg_full` feature, sq-248) --
+
+/// Non-curated codes resolved through the embedded registry, verified against
+/// independent reference coordinates; plus the honesty filters (grid-shift,
+/// datum-less, and unproven-axis-order definitions stay refused) and
+/// curated-table precedence.
+#[cfg(feature = "epsg_full")]
+mod epsg_full {
+    use super::EPSG;
+    use sparq_geo::reproject::{geographic_axis_order, proj4_definition, to_crs84, AxisOrder};
+    use sparq_geo::{parse_wkt_literal, Crs, GeoError};
+
+    fn point(code: u32, x: f64, y: f64) -> (f64, f64) {
+        let g =
+            parse_wkt_literal(&format!("<{EPSG}/{code}> POINT({x} {y})")).unwrap();
+        let out = to_crs84(&g).unwrap();
+        assert_eq!(out.crs, Crs::Crs84);
+        let geo_types::Geometry::Point(p) = out.geometry else { panic!("point in, point out") };
+        (p.x(), p.y())
+    }
+
+    #[test]
+    fn swiss_lv95_resolves_via_the_registry_to_the_bern_origin() {
+        // EPSG:2056 (CH1903+ / LV95) is NOT in the curated table. Its LV95
+        // origin E 2600000, N 1200000 is the old Bern observatory — published
+        // WGS84 position ~46.951083°N, 7.438632°E (swisstopo). The registry
+        // definition's 3-param Helmert lands within a few metres.
+        let (lon, lat) = point(2056, 2_600_000.0, 1_200_000.0);
+        assert!((lon - 7.438632).abs() < 1e-3, "lon {lon}");
+        assert!((lat - 46.951083).abs() < 1e-3, "lat {lat}");
+    }
+
+    #[test]
+    fn northing_easting_projected_registry_definitions_stay_refused() {
+        // proj4rs consumes (easting, northing) and PROJ.4 strings carry no
+        // EPSG axis metadata, so a projected registry entry is accepted only
+        // when its WKT proves that order. EPSG:2180 (ETRS89 / Poland CS92)
+        // and EPSG:3044 (ETRS89 / UTM zone 32N (N-E)) are officially
+        // NORTHING/EASTING per the EPSG registry — feeding their wktLiteral
+        // coordinates to proj4rs verbatim would silently transpose them (for
+        // 3044, the independent witness is curated EPSG:25832: the SAME
+        // projection with easting/northing axes, so a 3044 literal read
+        // verbatim would land thousands of km away) — both stay refused.
+        assert!(proj4_definition(2180).is_none());
+        assert!(proj4_definition(3044).is_none());
+        let g = parse_wkt_literal(&format!("<{EPSG}/3044> POINT(5432790 514940)")).unwrap();
+        assert!(matches!(to_crs84(&g), Err(GeoError::Unsupported(m)) if m.contains("EPSG:3044")));
+        // West/south-axis grids (South African LO, `+axis=wsu`) are refused
+        // too: their WKT declares AXIS west/south, not easting/northing.
+        assert!(proj4_definition(2048).is_none());
+    }
+
+    #[test]
+    fn registry_geographic_codes_get_the_epsg_lat_long_axis_order() {
+        // EPSG:4301 (Tokyo datum, geographic 2D) is not curated; the registry
+        // fallback marks it lat/long and its explicit +towgs84 shift is a few
+        // hundred metres — so Osaka written (lat 34.7, lon 135.5) must come
+        // back as CRS84 (lon ~135.5, lat ~34.7) to within ~0.01°.
+        assert_eq!(geographic_axis_order(4301), Some(AxisOrder::LatLong));
+        let (lon, lat) = point(4301, 34.7, 135.5);
+        assert!((lon - 135.5).abs() < 0.01, "lon {lon}");
+        assert!((lat - 34.7).abs() < 0.01, "lat {lat}");
+        // Projected registry codes stay non-geographic.
+        assert_eq!(geographic_axis_order(2056), None);
+    }
+
+    #[test]
+    fn explicit_lon_lat_registry_geographic_codes_are_honoured() {
+        // EPSG:8902 (RGWF96 (lon-lat)) is one of the rare EPSG geographic
+        // CRSs defined LONGITUDE-first — its registry WKT declares
+        // AXIS[…,EAST],AXIS[…,NORTH] explicitly, so the fallback must NOT
+        // apply the default lat/long convention. Wallis-and-Futuna written
+        // (lon -178.12, lat -14.31) comes back unchanged (GRS80, null shift).
+        assert_eq!(geographic_axis_order(8902), Some(AxisOrder::LongLat));
+        let (lon, lat) = point(8902, -178.12, -14.31);
+        assert!((lon - -178.12).abs() < 1e-6, "lon {lon}");
+        assert!((lat - -14.31).abs() < 1e-6, "lat {lat}");
+    }
+
+    #[test]
+    fn curated_definitions_win_over_the_registry() {
+        // The registry's EPSG:27700 uses `+datum=OSGB36`; the curated table
+        // spells the verified 7-param Helmert out. The curated string must
+        // survive with the fallback compiled in.
+        let def = proj4_definition(27700).unwrap();
+        assert!(def.contains("+towgs84=446.448"), "got {def}");
+        assert!(!def.contains("+datum=OSGB36"), "got {def}");
+    }
+
+    #[test]
+    fn grid_shift_and_datum_less_registry_definitions_stay_refused() {
+        // EPSG:27200 (NZGD49 / New Zealand Map Grid): the registry definition
+        // needs +nadgrids=nzgd2kgrid0005.gsb, which we do not ship.
+        assert!(proj4_definition(27200).is_none());
+        // EPSG:2000 (Anguilla 1957 / British West Indies Grid): Clarke 1880
+        // ellipsoid with NO datum information — proj4 would silently skip the
+        // datum shift, so it is refused rather than wrong.
+        assert!(proj4_definition(2000).is_none());
+        let g = parse_wkt_literal(&format!("<{EPSG}/27200> POINT(0 0)")).unwrap();
+        assert!(matches!(to_crs84(&g), Err(GeoError::Unsupported(m)) if m.contains("EPSG:27200")));
+    }
+
+    #[test]
+    fn codes_beyond_the_registry_range_error_cleanly() {
+        // EPSG codes above u16::MAX (e.g. ESRI-range 102100) are outside the
+        // embedded registry — explicit Unsupported, no panic.
+        assert!(proj4_definition(102_100).is_none());
+        assert_eq!(geographic_axis_order(102_100), None);
+    }
 }
 
 #[test]
