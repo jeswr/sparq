@@ -164,8 +164,9 @@ def summarise(doc):
 
 
 def completeness(outcomes_path, completed):
-    """[SONNET-4.6] sq-has2g: TRUNCATION DETECTION -> (planned, completed), planned=None
-    when it cannot be determined.
+    """[SONNET-4.6] sq-has2g: TRUNCATION DETECTION -> (planned, completed, unverifiable_reason).
+    planned is None when completeness CANNOT be established, and the third element then says
+    WHY (it is None whenever planned was determined).
 
     cargo-mutants writes mutants.out/outcomes.json INCREMENTALLY, and its rollup counts
     (`total_mutants`/`missed`/`caught`/…) describe only what has finished so far. So a run
@@ -177,21 +178,28 @@ def completeness(outcomes_path, completed):
 
     mutants.out/mutants.json is the FULL planned list for the run (already written up-front,
     and shard-aware — it holds only this `--shard k/n` slice), so comparing its length to
-    the number of finished outcomes detects the truncation. It is only advisory here: when
-    the file is absent (older artifacts, or an upload that took outcomes.json alone) we
-    return None and fall back to the previous behaviour rather than guessing.
+    the number of finished outcomes detects the truncation.
+
+    [SONNET-4.6] sq-has2g review-2: when that list is missing, unreadable or the wrong shape
+    the answer is NOT "assume complete". A truncated run whose sidecar simply never reached the
+    artifact is indistinguishable from a whole one, so planned=None means NO EVIDENCE EITHER
+    WAY, and the reason is returned so seed() can fail CLOSED on it (see seed()); --check, which
+    can only ever under-report, keeps treating it as informational.
     """
     planned_path = os.path.join(os.path.dirname(os.path.abspath(outcomes_path)),
                                 "mutants.json")
     if not os.path.exists(planned_path):
-        return None, completed
+        return None, completed, "no mutants.json beside outcomes.json"
     try:
         planned = load(planned_path)
-    except (ValueError, OSError):
-        return None, completed
+    except ValueError:
+        return None, completed, "mutants.json is not valid JSON"
+    except OSError as exc:
+        return None, completed, f"mutants.json could not be read ({exc})"
     if not isinstance(planned, list):
-        return None, completed
-    return len(planned), completed
+        return None, completed, (f"mutants.json is a {type(planned).__name__}, not the expected "
+                                 f"list of planned mutants")
+    return len(planned), completed, None
 
 
 def measured_rows(outcome_paths):
@@ -209,6 +217,10 @@ def measured_rows(outcome_paths):
     the honest whole-crate measurement is the per-category SUM, so accumulate. `shards`
     records how many outcomes files contributed, which lets --check flag a PARTIAL
     measurement instead of silently under-reporting.
+
+    `truncated` / `unverified` record, per contributing file, that it finished FEWER mutants
+    than it planned / that its planned-mutant list could not be read at all — the two ways a
+    run's outcomes may not be the whole story. seed() refuses on either (see seed()).
 
     `shard_ids` records each contributing file's (k, n) identity (None when unsharded) so
     seed() can REQUIRE a complete, disjoint set rather than trusting the file count; a file
@@ -233,7 +245,7 @@ def measured_rows(outcome_paths):
         surviving, caught, unviable, timeout, total = summarise(doc)
         acc = rows.setdefault(crate, {
             "surviving": 0, "caught": 0, "timeout": 0, "unviable": 0, "shards": 0,
-            "truncated": [], "shard_ids": [], "repeated_shards": [],
+            "truncated": [], "unverified": [], "shard_ids": [], "repeated_shards": [],
         })
         sid = shard_of(p)
         if sid is not None and sid in acc["shard_ids"]:
@@ -244,8 +256,10 @@ def measured_rows(outcome_paths):
             acc["repeated_shards"].append(sid)
             continue
         acc["shard_ids"].append(sid)
-        planned, done = completeness(p, surviving + caught + timeout + unviable)
-        if planned is not None and done < planned:
+        planned, done, unverifiable = completeness(p, surviving + caught + timeout + unviable)
+        if unverifiable is not None:
+            acc["unverified"].append((run_label(real, sid), unverifiable))
+        elif done < planned:
             acc["truncated"].append((run_label(real, sid), done, planned))
         acc["surviving"] += surviving
         acc["caught"] += caught
@@ -260,6 +274,8 @@ def measured_rows(outcome_paths):
             print(f"  agg  {crate:<20} summed {acc['shards']} shard outcome file(s)")
         for name, done, planned in acc["truncated"]:
             print(f"  TRUNC {crate:<19} {name}: only {done}/{planned} mutants completed")
+        for name, why in acc["unverified"]:
+            print(f"  UNVER {crate:<19} {name}: completeness NOT established — {why}")
     return rows
 
 
@@ -300,6 +316,13 @@ def _comment_block():
         "mixed-denominator shard (as it refuses a truncated run) unless "
         "--allow-partial-shards is passed. --check on a partial shard set is tolerated (it "
         "can only under-report, never spuriously fail) and prints a PARTIAL marker.",
+        "[SONNET-4.6] sq-has2g COMPLETENESS FAILS CLOSED: --seed refuses any run that finished "
+        "fewer mutants than its mutants.out/mutants.json planned (a job killed at its timeout "
+        "leaves a well-formed but PARTIAL outcomes.json), AND refuses any run where that "
+        "planned list is missing/unreadable/not a list — absent evidence is not evidence of a "
+        "whole run. The escape hatches (--allow-truncated, --allow-unverified-completeness) "
+        "are deliberate and are never appropriate for a ceiling that will later gate. --check "
+        "is unaffected: an under-measured run can only under-report, never spuriously fail.",
     ]
 
 
@@ -366,7 +389,7 @@ def shard_set_errors(row):
 
 
 def seed(outcome_paths, baseline_path, allow_higher, allow_truncated=False,
-         allow_partial_shards=False):
+         allow_partial_shards=False, allow_unverified=False):
     measured = measured_rows(outcome_paths)
     # [SONNET-4.6] sq-has2g: REFUSE to seed from a truncated run. cargo-mutants writes
     # outcomes.json incrementally, so a job killed at its timeout yields a well-formed but
@@ -385,6 +408,27 @@ def seed(outcome_paths, baseline_path, allow_higher, allow_truncated=False,
                       f"surviving count is NOT the whole-crate figure")
         print(f"\nrefusing to seed from {sum(len(v) for v in truncated.values())} truncated "
               f"run(s): re-run to completion, or pass --allow-truncated if you have "
+              f"independently established the numbers are whole")
+        refused = True
+    # [SONNET-4.6] sq-has2g review-2: REFUSE a run whose completeness cannot be ESTABLISHED at
+    # all. `planned=None` (no mutants.json, unreadable, or not the planned LIST) is the ABSENCE
+    # of evidence, not evidence of a whole run — a job killed at its timeout whose sidecar never
+    # made it into the artifact produces exactly this, so accepting it would leave the
+    # dishonest-ceiling hole the truncation check above exists to close. Fail CLOSED, the same
+    # way. --allow-unverified-completeness is the deliberate, loudly-named escape hatch for
+    # legacy artifacts that predate the sidecar upload, and it is never appropriate for a
+    # ceiling that will later gate. --check is deliberately NOT affected: an under-measured
+    # --check can only under-report, never spuriously fail, so it stays backward-compatible and
+    # merely prints the UNVER line from measured_rows().
+    unverified = {c: r["unverified"] for c, r in measured.items() if r["unverified"]}
+    if unverified and not allow_unverified:
+        for crate, items in sorted(unverified.items()):
+            for name, why in items:
+                print(f"::error::{crate}: {name} has no usable planned-mutant list ({why}), so "
+                      f"it cannot be distinguished from a run cut short by the job timeout")
+        print(f"\nrefusing to seed from {sum(len(v) for v in unverified.values())} run(s) whose "
+              f"completeness cannot be established: re-run so mutants.json is uploaded beside "
+              f"outcomes.json, or pass --allow-unverified-completeness if you have "
               f"independently established the numbers are whole")
         refused = True
     # [SONNET-4.6] sq-has2g: REFUSE an INCOMPLETE / OVERLAPPING shard set, for the same reason
@@ -522,11 +566,17 @@ def main():
                     help="permit --seed from an INCOMPLETE/overlapping `--shard k/n` set "
                          "(missing, repeated or mixed-denominator shards); normally refused "
                          "because the sum is then below the whole-crate surviving count")
+    ap.add_argument("--allow-unverified-completeness", action="store_true",
+                    help="permit --seed from a run whose completeness CANNOT be established "
+                         "— no mutants.json beside outcomes.json, or it is unreadable/not the "
+                         "planned list (e.g. a legacy artifact predating the sidecar upload); "
+                         "normally refused, because such a run is indistinguishable from one "
+                         "cut short by the job timeout")
     a = ap.parse_args()
     baseline = os.path.abspath(a.baseline)
     if a.seed:
         sys.exit(seed(a.outcomes, baseline, a.allow_higher, a.allow_truncated,
-                      a.allow_partial_shards))
+                      a.allow_partial_shards, a.allow_unverified_completeness))
     sys.exit(check(a.outcomes, baseline, a.require_all))
 
 
@@ -565,6 +615,12 @@ def self_test():
             d = os.path.join(td, f"run{_n[0]}", crate); os.makedirs(d, exist_ok=True)
             p = os.path.join(d, "outcomes.json")
             with open(p, "w") as f: json.dump(doc(**kw), f)
+            # [SONNET-4.6] sq-has2g review-2: --seed FAILS CLOSED without a readable
+            # planned-mutant list, so every fixture expected to SEED ships one matching its
+            # outcomes exactly (planned == completed => a COMPLETE run). The truncated and
+            # unverifiable fixtures below write/omit their own deliberately.
+            with open(os.path.join(d, "mutants.json"), "w") as f:
+                json.dump([{"package": crate}] * sum(kw.values()), f)
             return p
         base = os.path.join(td, "baseline.json")
         pa = write("sparq-canon", missed=5, caught=30)
@@ -607,10 +663,15 @@ def self_test():
     # the old last-write-wins behaviour seeded a ceiling ~1/n of the true surviving count.
     with tempfile.TemporaryDirectory() as td:
         _m = [0]
-        def shard(crate, k=None, n=None, missed=0, caught=0, timeout=0, unviable=0):
+        def shard(crate, k=None, n=None, missed=0, caught=0, timeout=0, unviable=0,
+                  sidecar=True):
             """Write one run's outcomes.json in cargo-mutants' real shape: a Baseline entry
             plus one Mutant-scenario entry per mutant, each stamping the package so crate_of()
             resolves every shard of a crate to the same key.
+
+            sidecar=True also writes the mutants.json planned list matching those outcomes
+            exactly (a COMPLETE run) — --seed refuses a run without one. sidecar=False models
+            an artifact that shipped outcomes.json alone.
 
             The directory reproduces the nightly lane's REAL naming — `<crate>-shard-<k>-<n>`
             for a `--shard k/n` slice (that suffix is the identity shard_of() reads), or an
@@ -628,6 +689,9 @@ def self_test():
                 outcomes += [{"scenario": {"Mutant": {"package": crate}},
                               "summary": summary}] * count
             with open(p, "w") as f: json.dump({"outcomes": outcomes}, f)
+            if sidecar:
+                with open(os.path.join(d, "mutants.json"), "w") as f:
+                    json.dump([{"package": crate}] * (missed + caught + timeout + unviable), f)
             return p
 
         # the shard identity is read from the path, NOT inferred from the file count
@@ -760,11 +824,41 @@ def self_test():
         assert seed([ok1, ok2], base5, allow_higher=False) == 0, "complete+untruncated seeds"
         assert load(base5)["crates"]["sparq-engine"]["measured_surviving"] == 3
 
-        # absent mutants.json (older artifact) -> undetectable, fall back to seeding
-        t3 = shard("sparq-engine", missed=1, caught=1)
-        assert completeness(t3, 2) == (None, 2)
+        # --- UNVERIFIABLE COMPLETENESS: no usable mutants.json -> --seed FAILS CLOSED ----
+        # [SONNET-4.6] sq-has2g review-2: `planned=None` is the ABSENCE of evidence, not
+        # evidence of a whole run — a job killed at its timeout whose sidecar never reached the
+        # artifact produces exactly this shape. Seeding it would leave the dishonest-ceiling
+        # hole the truncation check exists to close, so all three shapes REFUSE: the sidecar
+        # missing, unreadable, and present-but-not-the-planned-list.
+        def unverifiable(body=None):
+            """A run whose mutants.json is absent (body=None) or written verbatim (a string)."""
+            p = shard("sparq-engine", missed=1, caught=1, sidecar=False)
+            if body is not None:
+                with open(os.path.join(os.path.dirname(p), "mutants.json"), "w") as f:
+                    f.write(body)
+            planned, done, why = completeness(p, 2)
+            assert (planned, done) == (None, 2) and why, (planned, done, why)
+            assert measured_rows([p])["sparq-engine"]["unverified"], "must be flagged"
+            return p
+
+        u_missing = unverifiable()
+        u_corrupt = unverifiable("{not json")
+        u_shape = unverifiable(json.dumps({"total_mutants": 400}))  # a dict, not the LIST
+        seed_refused([u_missing], "a run with no planned-mutant list must not seed")
+        seed_refused([u_corrupt], "an unreadable planned-mutant list must not seed")
+        seed_refused([u_shape], "a wrong-shape planned-mutant list must not seed")
+        # ...and the refusal is the COMPLETENESS one, not some other check firing by accident
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc_u = seed([u_missing], os.path.join(td, "never.json"), allow_higher=False)
+        assert rc_u == 1 and "completeness cannot be established" in buf.getvalue(), buf.getvalue()
+
+        # the escape hatch is deliberate and explicitly named, for legacy artifacts only
         base6 = os.path.join(td, "baseline6.json")
-        assert seed([t3], base6, allow_higher=False) == 0
+        assert seed([u_missing], base6, allow_higher=False, allow_unverified=True) == 0
+        assert load(base6)["crates"]["sparq-engine"]["ceiling"] == 1 + MARGIN
+        # --check stays backward-compatible: it can only under-report, never spuriously fail
+        assert check([u_missing], base6, require_all=False) == 0
 
         # crate_of() strips the CI lane's -shard-k-n dir suffix when the doc carries no
         # package (all-unviable edge case), so shards still collapse to one key.

@@ -3345,10 +3345,9 @@ jobs:
     # entries. sparq-reason is sub-sharded 3×(--shard k/3) so each shard fits in 120min
     # instead of one ~6h monolith.
     # [SONNET-4.6] sq-has2g: sparq-engine is sub-sharded 24×(--shard k/24) at 360min each — it
-    # is the largest crate on both mutant count (4680, measured) and per-mutant cost (~24s for
-    # a kill, ~125s for a survivor, measured), and the single 360min job it used to be never
-    # finished, which is why it is still unseeded. See the sparq-engine SUB-SHARDS include
-    # block for the full measurement + sizing derivation.
+    # has the largest generated mutant set in the workspace and a high per-mutant test cost, and
+    # the single 360min job it used to be never finished, which is why it is still unseeded. See
+    # the sparq-engine SUB-SHARDS include block for the sizing rationale.
     timeout-minutes: ${{ fromJSON(matrix.timeout_minutes || '120') }}
     continue-on-error: true # advisory while the baseline seeds; remove when promoted to gating
     strategy:
@@ -3359,11 +3358,11 @@ jobs:
       # runners at a time; wall-clock is non-critical for a nightly and the staggered waves warm
       # the shared rust-cache for later waves.
       # [SONNET-4.6] sq-has2g COST NOTE, stated plainly: sub-sharding sparq-engine 1->24 is a
-      # real increase in nightly runner cost. Measured, the whole-crate engine sweep is roughly
-      # 45-120 runner-HOURS (4680 mutants x a 35-91s mean, run serially), and that work has to
-      # happen SOMEWHERE to measure the crate at all — today's single job simply burns 6h every
-      # night and produces nothing usable, which is strictly worse. Sharding does not create the
-      # cost; it makes the run finish and the 360min cap bills only the time actually used.
+      # real increase in nightly runner cost — a whole-crate engine sweep is many runner-hours of
+      # SERIAL work, and that work has to happen SOMEWHERE to measure the crate at all. Today's
+      # single job simply burns its entire budget every night and produces nothing usable, which
+      # is strictly worse. Sharding does not create the cost; it makes the run finish, and the
+      # 360min cap bills only the time actually used.
       # The lever for REDUCING it is shrinking the per-mutant test cost (cargo-mutants -j, or
       # nextest, or scoping each mutant's test set) — not fewer shards. A `--timeout` shortcut
       # is NOT acceptable: mutants-gate.py counts Timeout as CAUGHT, so capping per-mutant
@@ -3380,8 +3379,8 @@ jobs:
           - sparq-prov
           - sparq-algos
           - sparq-core
-          # sparq-engine is NOT listed here — it is sub-sharded into 8 include entries below.
-          # [SONNET-4.6] sq-has2g
+          # sparq-engine is NOT listed here — it is sub-sharded into 24 include entries below
+          # (--shard 1/24 … 24/24). [SONNET-4.6] sq-has2g
           # sparq-reason is NOT listed here — it is sub-sharded into 3 include entries below
           # (--shard 1/3, 2/3, 3/3) so 3230 mutants fit in 3×120min instead of one ~6h job.
           # [SONNET-4.6] sq-qcnn.28
@@ -3460,7 +3459,7 @@ jobs:
           # gives them enough headroom and eliminates the race with the job-level timeout.
           # [SONNET-4.6] sq-has2g: sparq-engine no longer has an entry HERE — raising it to
           # 360min was not enough (it still never finished), so it moved to the SUB-SHARDS
-          # block below, where each of its 8 shards carries the 360min override.
+          # block below, where each of its shards carries the 360min override.
           - crate: sparq-solid
             timeout_minutes: 360
           - crate: sparq-zk-compose
@@ -3489,34 +3488,30 @@ jobs:
           # STILL absent from bench/mutants-baseline.json: the single job has never finished
           # inside its budget, so it has never produced a COMPLETE outcomes.json to seed from.
           #
-          # MEASURED, not estimated (this tree, 4-CPU box == a standard ubuntu-latest runner):
-          #   • mutant COUNT, `cargo mutants -p <crate> --list | wc -l`:
-          #     sparq-engine 4680, sparq-reason 3753, sparq-shacl 1890.
-          #   • per-mutant COST, from a real `cargo mutants -p sparq-engine --shard 1/468`
-          #     run's outcomes.json (n=5 completed): MissedMutant 118/120/121/128s (mean 122s
-          #     — a survivor must run the suite to completion), CaughtMutant 24s (fails early
-          #     and exits). Survivors cost ~5x a kill, so the crate mean is a function of its
-          #     caught ratio: ~35s at 90% caught, ~91s at the survivor-heavy ratio this slice
-          #     happened to hit. CAVEAT: shard 1/468 is a tiny non-random slice (all exec.rs),
-          #     so treat 4-of-5-survived as a sampling artifact, NOT a measured engine caught
-          #     rate — the real ratio is unknown until a full sweep lands.
-          #   • cargo-mutants runs mutants SERIALLY — `--jobs` defaults to 1 and this lane
-          #     does not pass -j. (The sq-qcnn.28 sparq-reason note below assumes "2
-          #     concurrent workers"; that is not what the tool does by default, which is
-          #     likely why sparq-reason is ALSO still unseeded. Tracked separately.)
-          #
-          # SIZING: shard wall-clock = (4680 / shards) x mean + ~10min build/baseline overhead.
-          #   shards=8  -> 351min at 35s but 897min at 91s  (fits only the optimistic case)
-          #   shards=16 -> 181..454min                       (over the cap at 91s)
-          #   shards=24 -> 124..306min                       (inside the 360min cap ACROSS
-          #                                                   the whole measured range)
-          # 24 it is: sized so the shard still lands inside the cap at the PESSIMISTIC mean,
-          # because a shard that overruns is cancelled and yields nothing — the exact failure
-          # that has kept this crate unseeded. The 360min is a CAP, not a reservation: a shard
-          # that finishes in 124min bills 124min, so over-sharding costs only the per-shard
-          # build overhead, while under-sharding costs the entire run.
-          # Re-tune from the first nightly that completes (raise if shards still cancel, lower
-          # to reclaim the per-shard build overhead if they finish far under).
+          # SIZING RATIONALE — deliberately QUALITATIVE. Local/session-box timings are not
+          # canonical and would stale as the crate, the toolchain and the runner image change,
+          # so no measured seconds/hours are recorded here. Reproduce the inputs yourself:
+          # `cargo mutants -p <crate> --list | wc -l` for the mutant set, and any completed
+          # nightly shard's own outcomes.json for the per-mutant cost.
+          #   • sparq-engine has the LARGEST generated mutant set in the workspace.
+          #   • cargo-mutants runs mutants SERIALLY — `--jobs` defaults to 1 and this lane does
+          #     not pass -j — so shard wall-clock is (mutants / shards) x the per-mutant test
+          #     cost, plus one build/baseline per shard. (The sq-qcnn.28 sparq-reason note above
+          #     assumes "2 concurrent workers"; that is not what the tool does by default, which
+          #     is likely why sparq-reason is ALSO still unseeded. Tracked separately.)
+          #   • a SURVIVING mutant costs several times a caught one (a survivor runs the suite
+          #     to completion; a kill exits as soon as a test fails), so the per-mutant mean
+          #     depends on the crate's caught ratio — which is UNKNOWN for sparq-engine until a
+          #     full sweep lands, and must therefore be assumed pessimistic.
+          # 24 is an OPERATIONAL INITIAL VALUE, not a measurement: it is the split that keeps a
+          # shard inside the 360min cap under that pessimistic assumption. A shard that overruns
+          # is cancelled and yields nothing — the exact failure that has kept this crate
+          # unseeded — while 360min is a CAP, not a reservation, so a shard that finishes early
+          # bills only what it used. Over-sharding therefore costs just the per-shard build
+          # overhead; under-sharding costs the entire run.
+          # RE-TUNE from the first nightly that completes — that run's own timings are the
+          # evidence of record: raise the split if shards still cancel, lower it to reclaim the
+          # per-shard build overhead if they finish far under the cap.
           #
           # Engine is unseeded, so --check reports "UNSEEDED" per shard (exit 0).
           # SEEDING (sq-has2g): pass ALL 24 mutants-outcomes-nightly-sparq-engine-shard-*
@@ -3528,7 +3523,10 @@ jobs:
           # (the same slice downloaded twice) or mixed-denominator shard set. --seed ALSO
           # refuses any shard whose outcomes.json is truncated against its mutants.json, so a
           # cancelled shard cannot silently shorten the count — that check is independent, since
-          # each shard of a 23-of-24 subset is individually complete against its own plan.
+          # each shard of a 23-of-24 subset is individually complete against its own plan — and
+          # refuses outright when a shard ships no readable mutants.json at all, so an artifact
+          # with NO completeness evidence can never pass for a whole run
+          # (--allow-unverified-completeness is the explicit, deliberate override).
           - crate: sparq-engine
             shard: "1/24"
             timeout_minutes: 360
@@ -3700,10 +3698,12 @@ jobs:
           # this run (shard-aware). cargo-mutants writes outcomes.json incrementally, so a job
           # killed at its timeout leaves a well-formed but PARTIAL artifact that looks exactly
           # like a complete run of a smaller crate; scripts/mutants-gate.py compares the two
-          # and REFUSES to --seed a ceiling from a truncated run. Without this file that check
-          # cannot fire, and truncation is the most likely way a dishonest ceiling gets
-          # committed for the heavy crates. Keep both files in mutants.out/ so the seeding
-          # command can point at the downloaded directory unchanged.
+          # and REFUSES to --seed a ceiling from a truncated run. Truncation is the most likely
+          # way a dishonest ceiling gets committed for the heavy crates, so --seed also FAILS
+          # CLOSED when this file is absent or unreadable: it cannot then establish completeness
+          # either way, and an artifact with no evidence must not seed a ceiling. Keep both files
+          # in mutants.out/ so the seeding command can point at the downloaded directory
+          # unchanged.
           name: mutants-outcomes-nightly-${{ matrix.crate }}${{ steps.run_mutants.outputs.artifact_suffix }}
           path: |
             target/mutants/${{ matrix.crate }}${{ steps.run_mutants.outputs.artifact_suffix }}/mutants.out/outcomes.json
