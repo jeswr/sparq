@@ -36,6 +36,12 @@ fn client() -> reqwest::Client {
 }
 
 const JOIN_QUERY: &str = "PREFIX ex: <http://ex/> SELECT ?a ?b ?age WHERE { ?a ex:knows ?b . ?b ex:age ?age }";
+#[cfg(feature = "dp-planner")]
+const DP_ELIGIBLE_QUERY: &str = "PREFIX ex: <http://ex/> SELECT * WHERE {
+    ?a ex:knows ?b .
+    ?b ex:age ?age .
+    ?b ex:name ?name .
+}";
 
 // ---------------------------------------------------------------------------
 // EXPLAIN
@@ -75,6 +81,22 @@ async fn accept_header_requests_explain() {
     let body = resp.text().await.unwrap();
     assert!(body.contains("EXPLAIN (SELECT)"), "{body}");
     assert!(body.contains("BGP [binary join plan: greedy GOO ordering]"), "{body}");
+}
+
+#[cfg(feature = "dp-planner")]
+#[tokio::test]
+async fn dp_eligible_text_explain_discloses_greedy_replay() {
+    let base = spawn().await;
+    let resp = client()
+        .get(format!("{base}/sparql"))
+        .query(&[("query", DP_ELIGIBLE_QUERY), ("explain", "true")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("DPccp may execute this BGP"), "{body}");
+    assert!(body.contains("greedy replay, not an execution record"), "{body}");
 }
 
 #[tokio::test]
@@ -150,6 +172,23 @@ async fn accept_json_ct_returns_structured_plan_dry_run() {
     assert!(body.contains("\"actual\":null"), "{body}");
     assert!(body.contains("\"qError\":null"), "{body}");
     assert!(!body.contains("\"bindings\""), "{body}");
+}
+
+#[cfg(all(feature = "explain-json", feature = "dp-planner"))]
+#[tokio::test]
+async fn dp_eligible_json_explain_discloses_greedy_replay() {
+    let base = spawn().await;
+    let resp = client()
+        .get(format!("{base}/sparql"))
+        .query(&[("query", DP_ELIGIBLE_QUERY)])
+        .header("accept", EXPLAIN_JSON_CT)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("DPccp may execute"), "{body}");
+    assert!(body.contains("greedy replay, not an execution record"), "{body}");
 }
 
 #[cfg(feature = "explain-json")]

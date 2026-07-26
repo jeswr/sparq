@@ -321,6 +321,14 @@ fn render_conjunctive(graph: &Graph, p: &GraphPattern, out: &mut String, d: usiz
         indent(d),
         patterns.len()
     );
+    #[cfg(feature = "dp-planner")]
+    if patterns.len() >= 3 && crate::dp::active().is_some() {
+        let _ = writeln!(
+            out,
+            "{}NOTE: DPccp may execute this BGP; the order below is a greedy replay, not an execution record.",
+            indent(d + 1)
+        );
+    }
 
     let mut cs_ctx = exec::CsCtx::new(&prepared);
     let seed = exec::goo_seed(&prepared);

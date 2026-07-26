@@ -1,8 +1,11 @@
-//! [SONNET-4.6] (sq-7d3dj.30.15) Tripwire that the server's default feature set
-//! forwards the engine's DPccp join-order planner.
+//! [SONNET-4.6] (sq-7d3dj.30.15) Compile-time tripwire for the server's
+//! `dp-planner` forwarding edge.
 //!
-//! This test is gated on the server's forwarding feature so deliberate lean builds
-//! remain valid. The per-crate default test lane compiles and runs it.
+//! This file is gated on the server feature so deliberate lean builds remain valid.
+//! Removing `dp-planner` from `default` therefore silently skips it; it does not prove
+//! default-set membership. The per-crate default lanes, which do not pass
+//! `--no-default-features`, are where the forwarding witness is authoritative. A
+//! whole-workspace build may also unify the engine feature through another crate.
 #![cfg(feature = "dp-planner")]
 
 fn result_bag(graph: &sparq_core::Graph, query: &str) -> Vec<String> {
@@ -16,10 +19,11 @@ fn result_bag(graph: &sparq_core::Graph, query: &str) -> Vec<String> {
     rows
 }
 
-/// Compile-time forwarding witness plus a real query-path equivalence check.
+/// Compile-time forwarding witness plus a smoke-level query sanity check.
 ///
 /// `without_dp_planner` only exists when `sparq-engine/dp-planner` is enabled,
-/// so a broken forwarding edge fails this test at compile time.
+/// so a broken forwarding edge fails this test at compile time. The query comparison
+/// checks result equivalence but does not prove that DPccp accepted this particular BGP.
 #[test]
 fn dp_planner_is_forwarded_and_default_query_is_result_equivalent() {
     let graph = sparq_core::Graph::load_str(

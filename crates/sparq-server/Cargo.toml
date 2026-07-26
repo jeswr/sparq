@@ -48,9 +48,10 @@ required-features = ["server"]
 # `jsonld` it is a BINARY-crate default only — sparq-engine's LIBRARY default stays OFF, and
 # `--no-default-features --features server,jsonld` drops it for an explicit planner/rewrite-dark
 # build.
-# [SONNET-4.6] (sq-7d3dj.30.15) `dp-planner` follows the same binary-default pattern: HTTP
-# measurements now use the DPccp join ordering already used by the CLI/canonical benchmarks.
-default = ["server", "jsonld", "dp-planner", "algebra-rewrite", "explain-json"]
+# [SONNET-4.6] (sq-7d3dj.30.15) The planner features follow the same binary-default pattern:
+# HTTP measurements use the DPccp join ordering and static anti-join decline already used by
+# the CLI/canonical benchmarks.
+default = ["server", "jsonld", "dp-planner", "algebra-rewrite", "antijoin-static-decline", "explain-json"]
 # [FABLE-5] (sq-ixc3.19) `explain-json` (default ON): the STRUCTURED explain response —
 # `Accept: application/x-sparq-explain+json` on `/sparql` answers with sparq-engine's typed
 # plan tree (`explain_json::PlanNode`, sq-u4lgr/#902) as camelCase JSON
@@ -75,9 +76,14 @@ explain-json = ["sparq-engine/explain-json"]
 # only changes which sparq-engine the QUERY path compiles against.
 algebra-rewrite = ["sparq-engine/algebra-rewrite"]
 # [SONNET-4.6] (sq-7d3dj.30.15) Default-on forwarding feature for sparq-engine's opt-in
-# DPccp join-order planner. This adds no dependency and leaves sparq-engine's library default
-# lean; `--no-default-features --features server,jsonld` retains the greedy planner.
+# DPccp join-order planner. Planning is bounded but does not poll QueryBudget cancellation;
+# operators accepting adversarial queries can use `--no-default-features --features
+# server,jsonld` to retain the lower-cost greedy planner. This adds no dependency and leaves
+# sparq-engine's library default lean.
 dp-planner = ["sparq-engine/dp-planner"]
+# [SONNET-4.6] (PR #4098 review) Match the CLI's static, result-equivalent early decline
+# for anti-join shapes that cannot use the theta anti-join path. Zero new dependencies.
+antijoin-static-decline = ["sparq-engine/antijoin-static-decline"]
 # [OPUS-4.8] (sq-vpx4) Compiles internal TEST SEAMS — currently the durable-write
 # failure-injection hook on the `--persist` seal path, exposed via
 # `AppState::with_config_inject_durable_failure` for the graceful-degradation

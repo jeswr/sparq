@@ -62,7 +62,7 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
 - **HTTP/3 transport** ([GPT-5.6] sq-oprna.3/.4) — `--features http3` + `--http3 --tls-cert cert.pem --tls-key key.pem` adds encrypted QUIC/UDP on the same router and advertises its live port with `Alt-Svc`; combine `http2,http3` to use the PEM pair for both TLS TCP and QUIC. Detail in the SKILL.
 - **Default-on JSON-LD** ([OPUS-4.8] sq-oy1f.4) — `jsonld` is in the **default** set: `application/ld+json`
   joins q-value RDF conneg both directions (`--no-default-features --features server` → 406 read / 415 write).
-- **Default-on measured-plan parity** — `dp-planner` ([SONNET-4.6] sq-7d3dj.30.15) forwards DPccp join ordering, and `algebra-rewrite` ([FABLE-5] sq-7d3dj.30.13) enables result-equivalent `FILTER(?v = <iri>)` folding + `!bound` anti-join, so HTTP uses the same plans as the CLI/canonical benchmarks. Drop both via `--no-default-features --features server,jsonld`.
+- **Default-on measured-plan parity** — `dp-planner` ([SONNET-4.6] sq-7d3dj.30.15), `algebra-rewrite` ([FABLE-5] sq-7d3dj.30.13), and `antijoin-static-decline` align HTTP join ordering and rewrite/anti-join evaluation ordering with the CLI and canonical benchmark binaries. Drop them via `--no-default-features --features server,jsonld`; this is also the lower-planning-cost hardening option for deployments accepting adversarial queries.
 
 ## Security posture (essentials — full detail in the SKILL)
 

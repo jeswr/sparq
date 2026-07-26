@@ -486,8 +486,9 @@ curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/ld+json' \
 > **Default-on algebra rewrite (`algebra-rewrite` feature — [FABLE-5] sq-7d3dj.30.13).** The
 > server's default set also lights sparq-engine's pre-execution algebra rewrite pass (#1735): a
 > result-equivalent `FILTER(?v = <iri>)` IRI-constant folding + `FILTER(!bound)` anti-join applied
-> at parse time, so the shipped server executes the same plans the CLI and the canonical benchmarks
-> measure. IRI constants only (a literal equality is never rewritten — the `sq-lr2ii` avoidance
+> at parse time. The default-on `antijoin-static-decline` feature also matches the CLI's
+> result-equivalent early decline for anti-join shapes that cannot use the theta path. IRI
+> constants only (a literal equality is never rewritten — the `sq-lr2ii` avoidance
 > contract); zero new dependencies. Drop it with `--no-default-features --features server,jsonld`
 > for an explicitly rewrite-dark build; the sparq-engine LIBRARY default remains OFF for lean
 > library consumers.
@@ -496,8 +497,12 @@ curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/ld+json' \
 
 > **Default-on DP join planner (`dp-planner` feature — [SONNET-4.6] sq-7d3dj.30.15).** The
 > shipped server forwards sparq-engine's DPccp join-order planner, matching the CLI and
-> canonical benchmark binary. Drop it with `--no-default-features --features server,jsonld`
-> for an explicit greedy-planner build; sparq-engine's library default remains OFF.
+> canonical benchmark binary. DPccp's enumeration is bounded, but it does not poll the query
+> deadline/cancellation budget; deployments accepting adversarial queries can use
+> `--no-default-features --features server,jsonld` for the lower-cost greedy planner.
+> sparq-engine's library default remains OFF. Until DP-aware explain rendering lands, EXPLAIN
+> labels a DP-eligible BGP as a greedy replay and explicitly warns that the displayed tree is
+> not an execution record.
 
 **2. EXPLAIN a query plan (no execution) or analyze (execute + per-operator trace).**
 `text/plain` response. Use `explain` / `explain=plan` (or `Accept: text/x-sparq-explain`)

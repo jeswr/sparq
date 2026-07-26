@@ -4641,7 +4641,16 @@ fn trace_label(p: &GraphPattern) -> String {
         let mut filters = Vec::new();
         flatten_conjunction(p, &mut patterns, &mut filters);
         let plan = if bgp_uses_binary(&patterns) { "binary GOO" } else { "worst-case-optimal (LFTJ)" };
-        return format!("BGP [{plan}] ({} patterns, {} filters)", patterns.len(), filters.len());
+        let label = format!("BGP [{plan}] ({} patterns, {} filters)", patterns.len(), filters.len());
+        #[cfg(feature = "dp-planner")]
+        let label = {
+            let mut label = label;
+            if patterns.len() >= 3 && crate::dp::active().is_some() {
+                label.push_str(" [DPccp may execute; displayed tree is a greedy replay, not an execution record]");
+            }
+            label
+        };
+        return label;
     }
     match p {
         GraphPattern::Bgp { patterns } => format!("BGP ({} patterns)", patterns.len()),
