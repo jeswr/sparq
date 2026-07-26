@@ -188,11 +188,13 @@ Why it stays sound:
   `formal-alarm.yml` / selection-alarm liveness monitors. A break that only a queued
   *combination* of PRs could produce is therefore detected on `main`, then recovered by
   **revert / fix-forward**.
-- **There is no bisection.** `batch-merge.yml` explicitly states bisection is a v1
-  unimplemented item; the recovery mechanism is revert/fix-forward plus the age-bound
-  liveness backstop, not automated bisection of a failed batch. (Workflow comments that
-  previously called batch-merge "the bisection recovery net" were corrected in PR #3511
-  finding 6b to say post-merge detection + revert/fix-forward.)
+- **There is no POST-MERGE bisection.** `batch-merge.yml` *does* bisect — but only
+  **pre-merge**, to isolate which constituent of a failed *omnibus* is at fault (see
+  §Omnibus batching). Once a break has landed on `main`, the recovery mechanism is
+  revert/fix-forward plus the age-bound liveness backstop; nothing bisects `main`'s
+  history automatically. (Workflow comments that previously called batch-merge "the
+  bisection recovery net" were corrected in PR #3511 finding 6b to say post-merge
+  detection + revert/fix-forward — that correction still holds for `main`.)
 
 The residual risk this accepts: a defect that manifests only in a *specific queued
 combination* of PRs (not on any single PR head) reaches `main` and is caught post-merge
@@ -446,18 +448,22 @@ keep an accurate map.
 ### Omnibus batching (merge-queue overflow)
 
 The merge queue on `main` drains individually-armed worker PRs up to its per-window cap
-(`max_entries_to_merge: 8`). When **more than 8** reviewed worker PRs (open `sparq-agent/*`
+(`max_entries_to_merge: 8`). Whenever **2 or more** reviewed worker PRs (open `sparq-agent/*`
 heads carrying `review:pass` with an active auto-merge arm by `app/sparq-orchestrator`)
 are waiting at once, the scheduled/event-driven batcher
 ([`scripts/batch-merge.py`](../scripts/batch-merge.py), run by
 [`.github/workflows/batch-merge.yml`](../.github/workflows/batch-merge.yml), every
-15 minutes) folds the overflow — everything beyond the 8 lowest-numbered PRs — into one
+15 minutes) folds **all** of them — there is no reserved queue window, because an omnibus
+occupies one queue entry however many constituents it carries and batching the window too
+removes 8 separate head-CI runs per cycle — into one
 `sparq-omnibus/<class>-<utcstamp>` integration PR **per change-class** (issue #3433:
 `slim` = constituents whose diffs are docs-/orchestration-only per `ci_select`'s audited
 allowlist, so a slim batch rides the slim merge-group lane set and never waits on a
 full-matrix run; `engine` = everything else, fail-closed; at least 2 and at most 15
 constituents per omnibus — batch-15 per 15-minute run tracks the 60-merges/hour target
-and keeps a v2 culprit bisect at log2(15) ≈ 4 runs; one omnibus per class in flight).
+and keeps a culprit bisect at log2(15) ≈ 4 runs, with the excess left individually armed
+for the next run; one omnibus **tree** per class in flight, and a legacy classless
+omnibus blocks every class).
 Each omnibus is fresh off `main`, built with sequential `--no-ff` merges (a conflicting
 constituent is skipped and stays individually armed) and armed so a single
 queue slot lands the whole batch; the omnibus body carries `Closes #` refs for every
@@ -470,14 +476,30 @@ a `GITHUB_TOKEN`-created PR gets its workflow events suppressed, so the required
 `ci-summary / gate` would never report on its head and the merge queue would never admit
 it (admission requires the required checks to pass *before* entry). Without those secrets
 the batcher fail-softs to hygiene-only mode (no new omnibus is created). Failure handling
-is liveness-bounded: an omnibus whose head `gate` concluded in failure or that conflicts
-with `main` is closed and its branch deleted; a young mergeable omnibus whose auto-merge
-arm was dropped (merge groups drop the arm on a failed group) is re-armed idempotently;
-and an omnibus still unmerged past the age bound (`MAX_OMNIBUS_AGE_HOURS` in the script —
-the backstop for merge-group failures, which report on the queue's synthetic ref, not the
-PR head) is closed so it can never suppress future batching. In every failure case the
-constituents remain individually armed, so the failure mode is "no worse than unbatched"
-(bisection is a tracked v2). The same workflow's `ring` job fires on every push to `main`
+is liveness-bounded and **ordered most-exculpatory first**, because a broken batch must
+never implicate an innocent constituent:
+
+- an omnibus **conflicting** with `main` (main moved under it) is closed and rebuilt fresh
+  off current `main` — checked *before* any gate verdict, and never a constituent fault;
+- only a **strict concluded head-`gate` failure on a definitively-`MERGEABLE` head**
+  recursively **bisects** the omnibus (halve-and-land, to `DEPTH_CAP`) until a single
+  constituent is isolated; that culprit is commented, converted to **draft** and disarmed
+  — the registry's `stranded` posture, which escalates to a human — and is never closed.
+  Children inherit their parent's change-class. Ambiguous causality (a still-code-bearing
+  ineligible sibling) or a constituent branch that **drifted** off the head OID the
+  omnibus pinned yields a fresh singleton **re-test** child instead of a conviction;
+- an **infra-shaped** ending — `gate` cancelled / timed out, or the age bound
+  (`MAX_OMNIBUS_AGE_HOURS`, the backstop for merge-group failures, which report on the
+  queue's synthetic ref rather than the PR head) — closes the omnibus **without**
+  bisection and without a same-run rebuild; a new root then waits out
+  `ROOT_COOLDOWN_HOURS` (read back from GitHub's closed-PR record, since the batcher is
+  stateless) so a sustained outage cannot flood the queue with rebuilt roots;
+- a young mergeable omnibus whose auto-merge arm was dropped (merge groups drop the arm on
+  a failed group) is re-armed idempotently; and a possibly-**truncated** open-PR listing is
+  fail-safe — no bisection, no stale-branch deletion and no new root on incomplete data.
+
+In every failure case except the isolated culprit the constituents remain individually
+armed, so the failure mode is "no worse than unbatched". The same workflow's `ring` job fires on every push to `main`
 and, when the `REGISTRY_RING_TOKEN` secret is configured, pokes the
 `jeswr/agent-account-registry` dispatcher so freed capacity is picked up immediately
 (fail-soft: without the secret it skips with a notice and the registry cron is the

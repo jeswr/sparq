@@ -27,8 +27,9 @@
 #     fuzz-target compile with no new signal. The SAFETY NET for the queue is the
 #     POST-MERGE `push`-to-`main` replay + the nightly randomized soak: a break that
 #     only a queued combination could produce is caught on `main` and recovered by
-#     REVERT / FIX-FORWARD — there is NO merge-group replay and NO bisection
-#     (batch-merge.yml states bisection is a v1 unimplemented item). The polling
+#     REVERT / FIX-FORWARD — there is NO merge-group replay and NO POST-MERGE bisection
+#     (batch-merge.yml's recursive bisection isolates a culprit among the PRE-merge
+#     constituents of a failed omnibus only). The polling
 #     `ci-summary / gate` never waits on a check that was never scheduled.
 #   - push to main : RANDOMIZED per-target run (`MAIN_SECS`, default 120s each) for
 #     deeper coverage on the integration branch, where a few extra minutes are
@@ -92,15 +93,15 @@ on:
   # [FABLE-5] (2026-07-18 maintainer directive, merge-queue subset) merge_group
   # REMOVED: the deterministic corpus-replay already ran + gated on the PR head
   # (select-scoped), the push-to-main run above re-replays POST-MERGE (a break on
-  # main is recovered by revert / fix-forward — batch-merge.yml does NOT bisect;
-  # bisection is an explicit v1 unimplemented item there), and the daily schedule
+  # main is recovered by revert / fix-forward — batch-merge.yml bisects only the
+  # PRE-merge constituents of a failed omnibus, never main itself), and the daily schedule
   # runs the real randomized soak. Even the queue's smoke tier paid a full nightly-
   # toolchain + fuzz-target compile per enqueue for a replay that is a pure function
   # of code already gated on the PR. The polling `ci-summary / gate` never waits on a
   # check that was never scheduled (bench.yml sq-6vshe.6 rationale; the old "would
   # wait" comment was stale pre-polling doctrine). [FABLE-5] PR #3511 review finding
   # 6b: honesty fix — the earlier "batch-merge/bisection is the recovery net" wording
-  # implied a bisection mechanism batch-merge.yml states it does not have.
+  # implied a MAIN-recovery mechanism batch-merge.yml does not have.
   workflow_dispatch:
   # Daily heavy tier. 04:23 UTC (offset from ci.yml's 03:17 coverage cron so the two
   # heavy nightly lanes do not contend for the same runner window).

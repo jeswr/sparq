@@ -1,20 +1,34 @@
-# Omnibus merge-queue overflow batcher (scheduled / event-driven; NON-gating).
+# Omnibus merge-queue batcher, v2 (scheduled / event-driven; NON-gating).
 #
-# WHAT: when MORE than the merge queue's window (8) of reviewed, orchestrator-armed
-# sparq-agent/* worker PRs are waiting, the pure policy in scripts/batch-merge.py batches
-# the overflow into ONE sparq-omnibus/<class>-<utcstamp> integration PR PER CHANGE-CLASS
-# (issue #3433: `slim` = docs-/orchestration-only constituents per ci_select's audited
-# allowlist, so the batch rides the slim merge-group lane set of #3428 and never waits on
-# a full-matrix run; `engine` = everything else; at most 15 constituents per omnibus —
-# batch-15 per 15-minute run tracks the 60-merges/hour target and keeps a v2 culprit
-# bisect at log2(15) ~= 4 runs). Each omnibus is fresh off main, built with no-ff
-# merges; conflicting constituents are skipped and stay individually armed; the batcher
-# arms the PR — the merge queue picks the strategy. It also closes constituents of MERGED omnibus PRs
-# whose branches now add nothing vs main, closes a FAILED / conflicting / OVER-AGE
-# omnibus (the age bound is the liveness backstop for merge-group failures, which are
-# invisible on the PR head; v1: no bisection — constituents stay individually armed),
-# re-arms a young omnibus whose auto-merge arm was dropped by a failed merge group, and
-# deletes stale sparq-omnibus/* branches. NO model calls; the policy is self-tested
+# WHAT: the pure policy in scripts/batch-merge.py batches ALL reviewed,
+# orchestrator-armed sparq-agent/* worker PRs (2 or more; no reserved queue window — one
+# omnibus is ONE merge-queue entry however many constituents it carries, so batching the
+# window too removes 8 separate head-CI runs per cycle) into ONE
+# sparq-omnibus/<class>-<utcstamp> integration PR PER CHANGE-CLASS (issue #3433: `slim` =
+# docs-/orchestration-only constituents per ci_select's audited allowlist, so the batch
+# rides the slim merge-group lane set of #3428 and never waits on a full-matrix run;
+# `engine` = everything else, fail-closed; at most 15 constituents per omnibus —
+# batch-15 per 15-minute run tracks the 60-merges/hour target and keeps a culprit bisect
+# at log2(15) ~= 4 runs, with the excess left individually armed for the next run).
+# Each omnibus is fresh off main, built with no-ff merges; conflicting
+# constituents are skipped and stay individually armed; the batcher arms it — the merge
+# queue picks the strategy. It also closes constituents of MERGED omnibus PRs whose branches
+# now add nothing vs main, re-arms a young omnibus whose auto-merge arm was dropped by
+# a failed merge group, and deletes stale sparq-omnibus/* branches. Failure triage is
+# ordered, most-exculpatory first: a CONFLICTING omnibus (main moved under it) v1-closes
+# and is rebuilt fresh off main — a conflict never implicates constituents; ONLY a
+# strict concluded head-`gate` FAILURE recursively BISECTS the omnibus (halve-and-land,
+# to DEPTH_CAP) until the culprit is isolated, commented, drafted and disarmed (the
+# registry's `stranded` handoff); an infra-shaped ending (gate cancelled / timed_out,
+# or the MAX_OMNIBUS_AGE_HOURS liveness bound for head-invisible failures) v1-closes
+# WITHOUT bisection, and new-ROOT creation then waits out a durable
+# generation/cooldown backstop (ROOT_COOLDOWN_HOURS, read from GitHub's closed-PR
+# record) so a persistent outage can never flood the queue with rebuilt roots. Bisection
+# children inherit their parent's change-class, and one omnibus TREE PER CLASS is in
+# flight at a time (a legacy classless omnibus blocks every class).
+# Constituents stay individually armed through every path — nothing is ever lost. A
+# possibly-truncated open-PR listing is fail-safe: no bisection, no stale-branch
+# deletion, no new root on incomplete data. NO model calls; the policy is self-tested
 # (gh + git stubbed) before it runs.
 #
 # NOT A GATE. This runs on `schedule` / `workflow_dispatch` / `workflow_run` / `push`,
@@ -91,6 +105,12 @@ jobs:
         with:
           app-id: ${{ secrets.ORCHESTRATOR_APP_ID }}
           private-key: ${{ secrets.ORCHESTRATOR_APP_PRIVATE_KEY }}
+          # Least privilege — mirror the workflow's GITHUB_TOKEN permissions block
+          # exactly: contents (push/delete sparq-omnibus/* branches, checkout) and
+          # pull-requests (open/close/comment/arm/draft). Without these lines the
+          # minted token carries EVERY permission the App installation has.
+          permission-contents: write
+          permission-pull-requests: write
 
       - name: Checkout (full history — the policy builds real merge commits and pushes)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
