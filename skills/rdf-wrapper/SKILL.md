@@ -83,10 +83,11 @@ sparq-wrapper = { version = "0.1", features = [
 
 The async events, async node, async store, graph-scope events, and JSON
 features currently expose reserved, empty modules; enabling them adds no API.
-The other proposal features are implemented except `proposed-distinct`, which
-currently reserves only the feature name. See the
+Every other proposal feature is implemented. `proposed-distinct` is exposed as
+inherent `Dataset` methods in the crate root rather than through a `proposed::`
+module. See the
 [per-feature proposal status pages](references/README.md) for the
-implemented and reserved module inventory. <!-- [SONNET-4.6] sq-1rg2q.1 -->
+implemented and reserved feature inventory. <!-- [SONNET-4.6] sq-1rg2q.1 -->
 
 `proposed-graph-scope` adds a read-many/write-one `GraphScope` based on
 rdfjs/wrapper draft PR #95. Its reads are the deduplicated projection of
