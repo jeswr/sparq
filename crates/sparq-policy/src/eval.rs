@@ -1,7 +1,8 @@
 //! The ODRL evaluator: `(Policy, Request) -> Decision`.
 //!
-//! Semantics (the single-node base case — the ODRL Formal-Semantics CG
-//! *closed-world* default, restricted to one node's data):
+//! Semantics (the single-node base case — evaluated *closed-world*, as the ODRL
+//! Formal-Semantics CG report's open/closed input defaults, restricted to one
+//! node's data):
 //!
 //! 1. A [`Rule`] *matches* a [`Request`] when its action permits the requested
 //!    action, its `target` and `assignee` (if specified) agree with the request,
@@ -9,7 +10,12 @@
 //! 2. A [`Permission`] grants access iff it matches **and** all of its
 //!    [`Duty`]s are discharged (reported in the request context).
 //! 3. A [`Prohibition`] that matches **overrides** any permission (it "carves
-//!    out" a forbidden sub-set — ODRL Formal Semantics §conflict).
+//!    out" a forbidden sub-set). This is ODRL IM 2.2's selectable
+//!    `odrl:conflict odrl:prohibit` strategy, hard-wired — NOT a spec default:
+//!    the IM 2.2 default for an unset `odrl:conflict` is `invalid`, and the
+//!    Formal Semantics CG report's conflict machinery is explicitly pending, so
+//!    no conflict default can be attributed to it. See the crate README's ODRL
+//!    conformance note for the deliberate divergence.
 //! 4. **Fail-closed default:** no matching+discharged permission, OR any matching
 //!    prohibition, ⇒ DENY. An empty/malformed policy denies everything.
 //!

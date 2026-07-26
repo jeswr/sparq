@@ -62,8 +62,13 @@ makes "an ODRL gate in front of a query" feasible rather than hand-wavy:
 - **W3C ODRL Formal Semantics (CG)** — defines evaluation as: inputs = `{Policy, State-of-the-World,
   Evaluation Request, open/closed behavior}`; output = a **Compliance/Evaluation Report** of per-rule
   activation states (Permission: active + permit/deny; Prohibition: activated/violated; Obligation:
-  fulfilled/violated/not-set; Constraint: satisfied/unsatisfied). Conflict default = **closed system**
-  (unlicensed → denied); prohibitions "carve out" sub-sets of broader permissions.
+  fulfilled/violated/not-set; Constraint: satisfied/unsatisfied). The *open/closed* input defaults to
+  a **closed system** (unlicensed → denied); prohibitions "carve out" sub-sets of broader permissions.
+  **Correction (2026-07, re-verified against the sources for PR #1330):** that closed-system default is
+  the open/closed-world behaviour, **not** a conflict-resolution default — the CG report (a draft, not a
+  Recommendation) marks its conflict machinery explicitly *pending*, so no conflict default can be
+  attributed to it. Permission-vs-prohibition conflict is governed by ODRL IM 2.2's `odrl:conflict`,
+  whose default when unset is `invalid`.
   [ODRL Formal Semantics — w3.org](https://w3c.github.io/odrl/formal-semantics/).
 - **Evaluation and Comparison Semantics for ODRL** (arXiv 2025) — a clean **query-answering
   semantics**: the state of the world is a relation of *events*, an ODRL rule is a boolean query over
