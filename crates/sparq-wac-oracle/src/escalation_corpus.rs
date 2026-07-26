@@ -27,12 +27,14 @@
 //!
 //! # Anti-vacuity (the sq-og8u8 domain-coverage discipline)
 //!
-//! The corpus ships a **cover witness**: at least one entry is a *genuine* escalation
+//! The corpus ships a **pinned witness**: at least one entry is a *genuine* escalation
 //! attempt — its raw form evades a naive exact-case `ends_with(".acl")` guard yet decodes
-//! to an `.acl` document — and a `#[cfg(kani)]` proof pins that this interesting input is
-//! present, adversarial, and reachable under the harness bounds (per
+//! to an `.acl` document — and a `#[cfg(kani)]` proof pins by ASSERTION that this
+//! interesting input is present and adversarial (per
 //! `research/mechanized-proof-program.md` §5.1–5.2), so the suite cannot silently
-//! assume-prune the escalations it exists to test.
+//! assume-prune the escalations it exists to test. That proof's `kani::cover!` is a
+//! supplementary reachability *report* — an unsatisfied cover does not fail the
+//! verification verdict — so the assertions, not the cover, are what gate.
 
 use crate::{Mode, PodStore, Session, ALICE, BOB, CAROL, WAC_NQUADS};
 use sparq_core::Graph;
@@ -524,10 +526,23 @@ mod tests {
 // ─── DOMAIN-COVERAGE SELF-CHECK (sq-og8u8 anti-vacuity, research §5.1) ────────────────
 //
 // A `#[cfg(kani)]` proof pinning that the corpus genuinely contains a surviving
-// escalation. The exact-image asserts over the static `CORPUS` use no symbolic loop that
-// could itself be pruned; the `kani::cover!` proves a symbolic index REACHES a genuine
-// escalation under the bound, so a future re-scope that empties the interesting inputs
-// (the sq-sqtk2.1 failure mode) goes RED instead of passing vacuously.
+// escalation. What GATES is the ASSERTIONS, never the cover:
+//
+//   * the exact-image loop over the static `CORPUS` uses no symbolic loop that could
+//     itself be pruned, and asserts a genuine escalation is PRESENT (`found`), and
+//   * a CONCRETE named witness pins one specific genuine escalation by identity and
+//     exact adversarial shape,
+//
+// so a future re-scope that empties — or quietly rewrites — the interesting inputs (the
+// sq-sqtk2.1 failure mode) turns the harness RED instead of passing vacuously.
+//
+// The `kani::cover!` over a symbolic index is a SUPPLEMENTARY REACHABILITY REPORT ONLY.
+// A plain cover that becomes UNSATISFIABLE does NOT fail the `cargo kani` verdict — the
+// summary counts failed checks, not unsatisfied covers (the Kani docs' own example
+// reports `0 of 1 cover properties satisfied` alongside `VERIFICATION:- SUCCESSFUL`) —
+// so no anti-vacuity leg may rest on it. An unsatisfied cover in the nightly report is a
+// drift SIGNAL that the symbolic domain was re-scoped, not a gate. (Same defect class as
+// the PR #3436 review finding on `crates/sparq-substrate/src/join.rs`.)
 #[cfg(kani)]
 mod kani_proofs {
     use super::*;
@@ -564,14 +579,39 @@ mod kani_proofs {
             && bytes[end - 1].to_ascii_lowercase() == b'l'
     }
 
+    /// The corpus entry the concrete-witness leg pins BY IDENTITY. Deleting it, renaming
+    /// it, or softening its adversarial shape turns the proof RED — which is the point:
+    /// re-scoping the interesting inputs must be a deliberate, reviewed act.
+    const WITNESS_NAME: &str = "resource-acl-percent-upper";
+
+    /// Domain-coverage self-check (proof-program §5.1, MANDATORY — the sq-sqtk2.1
+    /// assume(false)-pruning guard).
+    ///
+    /// (a) Exact-image pinning (MERGE-BLOCKING) — plain asserts over the static `CORPUS`
+    ///     with no symbolic loop, so this leg cannot itself be pruned: every flagged
+    ///     evader really does evade the naive guard, still decodes to an `.acl` control
+    ///     document, and expects a fail-closed decision; and at least one such entry
+    ///     exists.
+    /// (b) Concrete witness (MERGE-BLOCKING) — one NAMED genuine escalation
+    ///     ([`WITNESS_NAME`]) is present with its exact raw/effective/governed shape, so
+    ///     the survival claim is pinned to a specific interesting input rather than to a
+    ///     count that a re-scope could satisfy with a benign entry.
+    /// (c) Symbolic cover (SUPPLEMENTARY ONLY) — restates reachability of a genuine
+    ///     escalation over a symbolic index. An UNSATISFIABLE cover does NOT fail the
+    ///     `cargo kani` verdict, so it reports drift; legs (a) and (b) are the gate.
     #[kani::proof]
     #[kani::unwind(20)]
     fn domain_corpus_exhibits_a_surviving_escalation() {
-        // Exact-image: at least one genuine escalation is present AND adversarial.
+        // (a) Exact-image: at least one genuine escalation is present AND adversarial.
+        // (b) is threaded through the same walk so the bound pays for one loop, not two.
         let mut found = false;
+        let mut witness_idx = CORPUS.len();
         let mut i = 0;
         while i < CORPUS.len() {
             let entry = &CORPUS[i];
+            if entry.name == WITNESS_NAME {
+                witness_idx = i;
+            }
             if entry.raw_evades_naive_check {
                 assert!(
                     !naive_acl_guard(entry.raw_child),
@@ -599,7 +639,38 @@ mod kani_proofs {
             "the corpus MUST contain >=1 genuine escalation attempt (else it is vacuous)"
         );
 
-        // Witness survival: a symbolic index reaches a genuine escalation under `unwind`.
+        // (b) CONCRETE WITNESS (merge-blocking): the pinned genuine escalation survives
+        // this harness with its exact adversarial shape. Asserts — unlike covers — do
+        // fail the `cargo kani` verdict, so THIS is what gates the survival claim.
+        assert!(
+            witness_idx < CORPUS.len(),
+            "the pinned anti-vacuity witness must still be in the corpus"
+        );
+        if witness_idx < CORPUS.len() {
+            let witness = &CORPUS[witness_idx];
+            assert!(
+                witness.raw_child == "d0.ttl%2Eacl"
+                    && witness.effective_child == "d0.ttl.acl"
+                    && witness.governed_stem == "d0.ttl",
+                "the pinned witness must keep its exact percent-encoded-dot shape"
+            );
+            assert!(
+                witness.raw_evades_naive_check && !naive_acl_guard(witness.raw_child),
+                "the pinned witness must still evade the naive exact-suffix guard"
+            );
+            assert!(
+                is_acl_shaped_ascii_noalloc(witness.effective_child),
+                "the pinned witness must still decode to an .acl control document"
+            );
+            assert!(
+                !witness.expect_allow,
+                "the pinned witness must still expect a fail-closed (deny) decision"
+            );
+        }
+
+        // (c) SUPPLEMENTARY reachability report — NOT a gate: an UNSATISFIABLE cover does
+        // not fail the verdict, so this only signals that the symbolic index domain was
+        // re-scoped. The gate is legs (a) and (b) above.
         let idx: usize = kani::any();
         kani::assume(idx < CORPUS.len());
         kani::cover!(
