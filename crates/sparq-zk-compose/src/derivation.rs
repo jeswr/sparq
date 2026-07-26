@@ -22,15 +22,26 @@
 //! ASSERTED (disclosed by a scan sub-proof). This makes the regime claim
 //! non-vacuous and auditable.
 //!
-//! What is DEFERRED (documented, not silently assumed): a ZERO-KNOWLEDGE proof
-//! that each antecedent triple is in the committed graph's closure — i.e. an
-//! in-circuit inference proof. v1 ties antecedents to DISCLOSED scan rows (the
-//! asserted base) by encoding-equality, so a derivation over disclosed triples is
-//! soundly re-checkable; antecedents that are themselves only claimed (not
-//! disclosed and not chained to disclosed triples) are NOT accepted. So the
-//! capability is sound for the disclosed-base fragment and fail-closed otherwise.
-//! The full in-circuit RDFS/OWL-RL closure proof is the inference-circuit
-//! deliverable (plan §S2.5), tracked separately.
+//! What THIS host re-check DEFERS (documented, not silently assumed): a
+//! ZERO-KNOWLEDGE proof that each antecedent triple is in the committed graph's
+//! closure. This module ties antecedents to DISCLOSED scan rows (the asserted
+//! base) by encoding-equality, so a derivation over disclosed triples is soundly
+//! re-checkable; antecedents that are themselves only claimed (not disclosed and
+//! not chained to disclosed triples) are NOT accepted. So the HOST capability is
+//! sound for the disclosed-base fragment and fail-closed otherwise.
+//!
+//! The IN-CIRCUIT single-step upgrade now EXISTS as a research-grade Noir
+//! relation — `zk/compose/compose_core::entail::entail_step_check` (sq-g91d): it
+//! proves a derived triple follows by ONE RDFS rule application from antecedents
+//! that are members of the COMMITTED graph, WITHOUT disclosing the antecedents,
+//! bound to the SAME per-graph commitments the scan sub-proofs carry — the
+//! privacy upgrade this disclosed-base re-check cannot give. It is single-step /
+//! disclosed-base-membership scope (multi-hop fixpoint SATURATION is a separate,
+//! UNBUILT deliverable) and NOT-yet-sound (sq-qhy4, not externally audited). The
+//! compiled `entail_rdfs_k{K}_n{N}` bin member (with its gate-count baseline) and
+//! the verifier-side manifest/dispatch/public-input wiring that would let this
+//! host path CONSUME an in-circuit derivation are follow-up beads; until they
+//! land, this host re-check remains disclosed-base only.
 
 use serde::{Deserialize, Serialize};
 
