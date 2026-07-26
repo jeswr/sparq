@@ -2,14 +2,26 @@
 #
 # WHAT: runs the sparq-bench UPDATE differential fuzzer
 # (crates/sparq-bench/src/update_fuzz.rs) as a standing nightly lane. It generates
-# seeded GROUND-TERM update sequences (INSERT DATA / DELETE DATA / DELETE-INSERT-
-# WHERE incl. WITH/USING/variable graph names / CLEAR / DROP / CREATE / COPY / MOVE
-# / ADD; no blank nodes, no LOAD) and applies each sequence, one request at a time,
-# to THREE implementations — sparq's rebuild path (`sparq_engine::update`), sparq's
-# delta-overlay path (`update_in_place`), and in-process Oxigraph 0.5 — asserting
-# after EVERY step that (a) the canonical dataset (sorted N-Quads; ground terms, so
-# no isomorphism to adjudicate) and (b) the full binding sets of two probe SELECTs
-# are identical. A divergence is therefore localized to the exact offending step.
+# seeded update sequences (INSERT DATA / DELETE DATA / DELETE-INSERT-WHERE incl.
+# WITH/USING/variable graph names / CLEAR / DROP / CREATE / COPY / MOVE / ADD /
+# LOAD) and applies each sequence, one request at a time, to THREE implementations
+# — sparq's rebuild path (`sparq_engine::update`), sparq's delta-overlay path
+# (`update_in_place`), and in-process Oxigraph 0.5 — asserting after EVERY step
+# that (a) the canonical dataset, (b) the full binding sets of two probe SELECTs,
+# and (c) sparq's literal lexical-form preservation all hold. A divergence is
+# therefore localized to the exact offending step.
+#
+# [SONNET-4.6] sq-hodke extended the generator past the v1 ground-term subset with
+# non-canonical numeric lexicals, blank nodes, LOAD, and RDF 1.2 triple terms. Two
+# consequences for this lane:
+#   * the dataset compare is no longer plain sorted N-Quads — blank-node-bearing
+#     quads are adjudicated up to RDF ISOMORPHISM (RDFC-1.0 via sparq-canon), with
+#     the bnode-free quads still compared exactly and their cardinality checked
+#     separately;
+#   * Oxigraph cannot dereference `LOAD` at all (no `http-client` feature, and no
+#     `file://` support in any configuration), so for each LOAD step it is given
+#     the equivalent INSERT DATA of the generated document. See the module docs for
+#     the honest scope of that substitution.
 #
 # WHY ITS OWN FILE: differential.yml (query differential, sq-0iqzw) and fuzz.yml are
 # owned by other open beads (sq-qcnn.5/.10); this lane deliberately lives in a file
@@ -35,9 +47,16 @@
 # is still self-sufficient.
 #
 # ADJUDICATED DIVERGENCES: the comparator consults bench/differential-divergences.json
-# for classes whose id starts with `update-`. None exist today, so every divergence
-# FAILS (strict); a listed update class without a detector in update_fuzz.rs also
-# stays strict, with a loud warning — never a silent skip.
+# for classes whose id starts with `update-`. Exactly one exists
+# (`update-numeric-lexical-value-normalization`, sq-hodke: Oxigraph's store round-trips
+# typed numeric literals through their VALUE space and so loses a non-canonical
+# `xsd:integer` lexical form, which is part of RDF literal term identity). It is a
+# RETRY, not a skip — the compare runs strict first and is re-run under a value-
+# normalizing projection only on failure, absorbing the step only if that projection
+# makes the datasets equal; the summary line reports `adjudicated_steps=N`, and the one
+# property the retry gives up is pinned strictly on the sparq side by the harness's
+# lexical-preservation oracle. Any class in that file without a detector in
+# update_fuzz.rs stays strict, with a loud warning — never a silent skip.
 #
 # TRIGGER — NIGHTLY/HEAVY tier ONLY (schedule + workflow_dispatch), like
 # differential.yml / shacl-diff-fuzz.yml: this workflow never produces a check-run

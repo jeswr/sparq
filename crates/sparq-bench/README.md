@@ -11,7 +11,8 @@ Why it exists: it serves a correctness role as well as a speed one — the
 cross-check against an independent implementation is a cheap, continuous
 oracle that catches engine regressions, while the timings feed the benchmarks
 dashboard. Two differential fuzzers live here: `fuzz` (queries; nightly
-`differential.yml`) and `update-fuzz` (ground-term SPARQL UPDATE sequences
+`differential.yml`) and `update-fuzz` (SPARQL UPDATE sequences — including blank
+nodes, RDF 1.2 triple terms, `LOAD`, and non-canonical numeric lexicals —
 through both sparq update paths vs Oxigraph, canonical per-step store + probe
 compare; nightly `differential-update.yml`).
 

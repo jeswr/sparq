@@ -115,6 +115,11 @@ impl DivergenceAllowlist {
             match class["id"].as_str() {
                 Some("cross-family-eq-type-error") => out.cross_family_eq_type_error = true,
                 Some("bnode-iri-inequality") => out.bnode_iri_inequality = true,
+                // `update-*` classes belong to the UPDATE differential
+                // (update_fuzz.rs::UpdateAllowlist), which owns their detectors and
+                // enforces the same fail-strict-without-a-detector rule. They are not
+                // "unknown" here, just not this harness's — so no warning. [SONNET-4.6]
+                Some(id) if id.starts_with("update-") => {}
                 Some(other) => eprintln!(
                     "warning: divergence allowlist {source} lists unknown class id \
                      {other:?} — no detector for it; that class stays STRICT"
@@ -1628,12 +1633,16 @@ ex:n4 ex:val "s2" .
         assert!(a.cross_family_eq_type_error, "sq-eibog class must be listed");
         assert!(a.bnode_iri_inequality, "sq-ai2wa class must be listed");
         // …and the file lists NOTHING this comparator lacks a detector for (an
-        // undetectable entry would be a claimed-but-unenforced allowlisting).
+        // undetectable entry would be a claimed-but-unenforced allowlisting). The
+        // `update-*` classes are the UPDATE differential's; update_fuzz.rs's
+        // `committed_allowlist_enables_exactly_the_update_classes` holds them to the
+        // identical rule. [SONNET-4.6]
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         for c in v["classes"].as_array().expect("classes array") {
             let id = c["id"].as_str().expect("string id");
             assert!(
-                ["cross-family-eq-type-error", "bnode-iri-inequality"].contains(&id),
+                ["cross-family-eq-type-error", "bnode-iri-inequality"].contains(&id)
+                    || id.starts_with("update-"),
                 "class {id:?} in the committed file has no detector in fuzz.rs"
             );
             assert!(
