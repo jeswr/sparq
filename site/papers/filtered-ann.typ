@@ -90,9 +90,11 @@ which already evaluate joins in the host engine, the delta is narrower and archi
 one shared key space (no metadata mirroring, no id translation at the boundary) and an
 enforced answer contract. That contract is scoped precisely. The SPARQL-level filtered path
 described here is _answer-exact_: both of its physical strategies rank the complete
-mask-admitted pool, so the filtered top-$k$ is byte-identical to post-filtering the
-unfiltered result, unconditionally and by construction, and this is pinned as a
-machine-checked invariant across single-pattern, transitive, and cyclic constraint shapes.
+mask-admitted pool, so the filtered top-$k$ is identical to post-filtering the unfiltered
+result, unconditionally and by construction. Two machine-checked invariants pin that
+argument at different layers: end-to-end equality of the ordered result ids across
+single-pattern, transitive, and cyclic constraint shapes, and — at the layer that chooses
+between the strategies — equality of the two branches' hits, scores included.
 The engine also carries an _approximate_ filtered traversal, used for the recall
 measurement reported here but not wired into the SPARQL surface; for that path we claim no
 pre≡post equivalence at all. We are explicit about what this paper is and is not: the ANN
@@ -147,8 +149,9 @@ over its existing permutation indexes @rdf3x — and projects the admissible ids
 `IdMask` that the ANN traversal consumes directly. The filter _is_ a query: there is no
 mirrored metadata and no id translation at the boundary, the filter language is the BGP
 join language itself (including transitive and cyclic sub-patterns; @method), and the
-narrow-never-widen property is enforced as a deterministic, machine-checked invariant across
-every constraint shape and both physical execution strategies.
+narrow-never-widen property is enforced as deterministic, machine-checked invariants —
+end-to-end across every constraint shape, and, at the layer that chooses between them,
+across both physical execution strategies.
 
 === Contributions and non-contributions <contributions>
 
@@ -165,15 +168,17 @@ We claim the following, each forward-referencing its evidence:
   SPARQL surface is a magic-predicate family (`vec:nearest` and `vec:search`); @surface
   gives the end-to-end pipeline on a worked query.
 - *C2 — An enforced answer-safety envelope* (@safety). Pre-filtering narrows the candidate
-  set and never changes the answer: the filtered top-$k$ is byte-identical to
-  post-filtering the unfiltered result by the same constraint, asserted as deterministic
-  equivalence invariants over single-pattern, transitive, and cyclic constraint shapes. The
+  set and never changes the answer: the filtered top-$k$ is identical to post-filtering the
+  unfiltered result by the same constraint, asserted end-to-end as equality of the ordered
+  result ids over single-pattern, transitive, and cyclic constraint shapes — each fixture
+  exercising the pre-filter plan its mask selectivity elects under the default cost model —
+  with strategy-agnosticism asserted separately, and with scores, at the cost layer. The
   property is scoped precisely to the path that carries it: the SPARQL-level filtered path
   is answer-_exact_ (both physical strategies rank the complete admitted pool), so the
   equivalence holds by construction and unconditionally there. The crate's _approximate_
   filtered traversal is a separate path, not reached from the SPARQL surface, and we claim
-  no equivalence for it (@safety). C2's value is that it is _enforced end-to-end_ —
-  including across the physical pre/post decision of C3 — not that it is deep
+  no equivalence for it (@safety). C2's value is that it is _enforced_ — end-to-end from the
+  SPARQL surface, and across the physical pre/post decision of C3 — not that it is deep
   (@safety-scope): as @related notes, narrowing-without-falsification is the defining property
   of a semi-join, and we present it as an enforcement result rather than a discovery.
 - *C3 — A deterministic pre/post-filter decision rule with a confined failure mode*
@@ -244,7 +249,8 @@ BGP with standard SPARQL semantics and the admissible set is materialised in the
 term-dictionary id space, which is _identically_ the vector table's key space — no
 attribute columns co-located with the index, nothing mirrored, no id translation at the
 boundary; (ii) an answer contract that is _enforced_ (build-failing deterministic
-equivalence assertions across constraint shapes and both physical plans) rather than argued
+equivalence assertions across constraint shapes end-to-end, and across both physical plans
+at the layer that selects between them) rather than argued
 from a traversal property or measured; and (iii) a deliberately minimal one-constant
 strategy rule whose mis-selection is proven answer-invariant (@cost). Whether the
 shared-id-space design yields a measurable memory or freshness advantage over these systems
@@ -550,10 +556,15 @@ mathematically deep. Answer-safety deserves space for its _enforcement surface_,
 depth. In deployed filtered-ANN systems the analogous property spans several moving parts —
 the mirrored metadata's freshness, the traversal's pruning heuristics, the pre/post
 strategy switch — and typically holds empirically rather than by contract. Here it is
-pinned as a set of deterministic, machine-checked equivalences (byte-identical results,
-fixed fixtures, fixed seeds) across every constraint shape the compiler accepts —
-single-pattern, transitive, and cyclic — _and across both physical plans_ of the decision
-rule below, so a regression in any layer fails the build rather than skewing an experiment.
+pinned as a set of deterministic, machine-checked equivalences (fixed fixtures, fixed
+seeds) at two layers: end-to-end from the SPARQL surface, across every constraint shape the
+compiler accepts — single-pattern, transitive, and cyclic, each compared as the ordered list
+of result ids — _and_, on the decision rule below, across _both physical plans_, forced in
+turn on one fixture and compared with their scores. The two are separate assertions rather
+than a cross-product: the constraint-shape fixtures run whichever plan their mask
+selectivity elects (at their 50% selectivity, the pre-filter branch), and it is the cost
+layer that establishes the plan choice is not observable in the answer. A regression in
+either layer fails the build rather than skewing an experiment.
 The evidence table is in @evaluation; its scope (unconditional on the SPARQL-level filtered
 path; nothing claimed for the approximate traversal) is stated in the proposition above.
 The property itself is not ours to claim as novel: narrowing a search by the exact
@@ -582,7 +593,8 @@ we name the second so that the two constants are not mistaken for one.
 This is a heuristic over an estimate, and we make no claim that the constant is optimal on
 any hardware — that is exactly the kind of claim this paper refuses to make without the
 canonical runner. The property we _do_ claim is architectural: both branches return the
-identical top-$k$ (asserted, same fixtures as above), so the decision rule's failure mode
+identical top-$k$ — asserted at this layer by forcing each strategy in turn on one fixture
+and comparing the returned hits and scores — so the decision rule's failure mode
 is confined to throughput. A mis-estimated crossover can make a query slower; it cannot
 make it wrong. This separation — correctness pinned by invariant, performance left to
 honest measurement — is the design stance of the whole integration.
@@ -632,10 +644,13 @@ commit.
   ),
   caption: [
     Enforced answer-safety across constraint shapes. Each cell is a deterministic
-    equivalence proven by assertion over a fixed fixture — the filtered top-$k$ is
-    byte-identical to post-filtering the unfiltered result by the same constraint, and a
-    subset of it. Scope: these fixtures exercise the SPARQL-level filtered path, which is
-    answer-exact, so the equivalence is unconditional there (@safety); no equivalence is
+    equivalence proven by assertion over a fixed fixture — the filtered top-$k$, as an
+    ordered list of result ids, equals post-filtering the unfiltered result by the same
+    constraint, and is a subset of it. Scope: these fixtures exercise the SPARQL-level
+    filtered path, which is answer-exact, so the equivalence is unconditional there
+    (@safety); each runs the plan its mask selectivity elects under the default cost model
+    (here the pre-filter branch), the plan choice itself being pinned as unobservable by the
+    separate cost-layer assertion of @cost; and no equivalence is
     claimed, or tested, for the approximate traversal of @tab-recall. A cell cannot silently
     render empty: a canonical record that ceased to be true fails the build, which is the
     property @safety-scope claims. Per @safety-scope, read this as an _enforcement_ result
@@ -785,9 +800,14 @@ written so that either outcome is reportable.
 
 == Artifact availability <artifact>
 
-The engine is open source, and every claim in this paper is a build-time citation of a
-committed record rather than a transcribed number, so the artifact and the paper cannot
-drift apart. The three answer-safety invariants of @tab-safety are the assertions in
+The engine is open source, and every value this paper reports in a headline table — the
+measured floors and constants, and the boolean answer-safety records those tables render —
+is a build-time citation of a committed evidence record rather than a transcribed number,
+so those values cannot drift from the tests that produced them without failing the build.
+That guarantee is scoped to exactly them: the paper's prose, architectural, and novelty
+claims — including the scoping of the answer contract in @safety — are ordinary prose,
+checked by review rather than bound to the ledger, and can drift as any paper's can. The
+three answer-safety invariants of @tab-safety are the assertions in
 `filtered_bgp.rs`, `filtered_bgp_transitive.rs`, and `filtered_bgp_cyclic.rs`; the recall
 floors of @tab-recall are asserted in `recall.rs` and `filtered.rs`; the decision constant
 of @eval-cost is pinned by `cost_model.rs` against the model in `cost.rs` — all under
