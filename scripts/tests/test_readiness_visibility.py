@@ -29,6 +29,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import json
 import re
 import sys
 import unittest
@@ -430,12 +431,22 @@ class TestRoutingSelfTestWorkflowWiring(unittest.TestCase):
             self.assertEqual(paths_section.count(f'"{script}"'), 2,
                              f"{script} must be a path trigger on BOTH pull_request and push")
 
-    def test_job_name_stays_gate_discoverable(self):
-        # ci-summary auto-discovers a sibling as GATING iff its name says neither
-        # "advisory" nor "informational"; a rename would silently demote this gate.
-        name = re.search(r"^    name: (.+)$", self.SOURCE, re.M).group(1).lower()
-        self.assertNotIn("advisory", name)
-        self.assertNotIn("informational", name)
+    def test_gate_is_not_declared_advisory(self):
+        # [OPUS-5] Guards the rule that is LIVE. ci-summary's discovery changed on
+        # 2026-07-25 (#3773): a check is non-gating iff it is EXPLICITLY DECLARED in
+        # .github/advisory-registry.json, keyed on workflow file + job id. The old
+        # `\b(advisory|informational)\b` NAME rule is gone — it had silently neutralised
+        # four real gates, two of them documented in-repo as HARD — so a rename can no
+        # longer demote anything (declarations bind to job identity and
+        # check-advisory-registry.py C4 reds on a rename). Asserting on the job NAME would
+        # therefore guard a rule that no longer exists; the real demotion path is a
+        # registry entry, so that is what is asserted.
+        registry = json.loads(
+            (REPO_ROOT / ".github" / "advisory-registry.json").read_text(encoding="utf-8"))
+        declared = {(e.get("workflow"), e.get("job_id"))
+                    for e in registry.get("jobs", {}).values()}
+        self.assertNotIn(("routing-self-tests.yml", "validate"), declared,
+                         "declaring this job advisory stops ci-summary gating on it")
 
     def test_merge_group_trigger_present(self):
         # merge_group cannot use a paths filter; without the trigger the queue ref
