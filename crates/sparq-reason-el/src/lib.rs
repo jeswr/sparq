@@ -118,6 +118,11 @@ pub struct Report {
     pub emitted_subsumptions: usize,
     /// Named classes found unsatisfiable (`⊑ owl:Nothing`).
     pub unsatisfiable_classes: usize,
+    /// [SONNET-4.6] sq-26zuf: whether the saturation derived
+    /// `owl:Thing rdfs:subClassOf owl:Nothing` (`⊤ ⊑ ⊥`). This global clash is separate from
+    /// [`unsatisfiable_classes`](Self::unsatisfiable_classes), which counts only named classes
+    /// and therefore excludes `owl:Thing`.
+    pub thing_unsatisfiable: bool,
     /// [OPUS-4.8] sq-pbz04.2.5 (`abox`): ABox assertions the realiser DEFERRED as counted skips
     /// — a `DataPropertyAssertion` (literal object; the `cdomain` point-range rescue is a
     /// sequenced follow-up) or a `ClassAssertion` whose class expression is outside the EL
@@ -347,6 +352,7 @@ pub(crate) fn hierarchy_from(
         .filter_map(|&c| names.dict_of(c))
         .collect();
     report.unsatisfiable_classes = unsatisfiable.len();
+    report.thing_unsatisfiable = cls.thing_unsatisfiable;
     ClassHierarchy {
         subsumers,
         unsatisfiable,
