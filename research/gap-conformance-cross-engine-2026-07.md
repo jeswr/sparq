@@ -15,9 +15,10 @@ and a decade of suite churn; today's engines (Oxigraph, QLever, Comunica) publis
 BINARY "compliant"/known-failure-list posture, not a count. So most SPARQL/RDF-syntax
 rows are **NOT-COMPARABLE** — an honest verdict, not a sparq win. The families where a
 genuine, same-suite comparison exists are **SolidLab ODRL** (sparq matches the
-reference evaluator's own 67/68 EXACTLY) and, with the requirements-weighted caveat,
-**OGC GeoSPARQL** (a published third-party benchmark). JSON-LD and SHACL have a rich
-published EARL, but at a slightly different suite revision than sparq's pin.
+reference evaluator's own 67/68 EXACTLY) and, with the requirements-weighted and
+re-implemented-comparator caveats, **OGC GeoSPARQL** (a published third-party
+benchmark). JSON-LD and SHACL have a rich published EARL, but at a slightly different
+suite revision than sparq's pin.
 
 ## 1. Method and honesty rules
 
@@ -200,7 +201,10 @@ Benchmark" (ISPRS IJGI 10(7):487, 2021; arXiv:2102.06139), whose "compliance %" 
 unit from a test-count pass-rate, and it tests GeoSPARQL **1.0**. sparq's own 197
 hand-curated DE-9IM/WKT/GML assertions are on a different axis and stay reported
 separately; **sparq has now also been run through the benchmark itself** (sq-ql2iy), so
-the row below is a same-artifact, same-scoring comparison rather than an estimate.
+the row below is a same-artifact comparison on the same requirements weighting rather
+than an estimate. It is NOT a claim of a bit-identical comparator: the runner
+re-implements the benchmark's answer comparison, and the bound on that is quantified
+under *Comparator equivalence* below.
 
 | System | GeoSPARQL compliance (requirements-weighted, of 30 reqs / 206 queries) | Source |
 |---|---|---|
@@ -214,20 +218,40 @@ the row below is a same-artifact, same-scoring comparison rather than an estimat
 
 **How the sparq row was produced** (`bench/geo/gsb.sh` → `gsb_compliance`). The upstream
 artifact is GPL-2.0, so it is fetched gather-only under a pinned sha256 and never
-vendored; the runner reproduces the benchmark's own scoring table and its own answer
-comparator (ordered rows, `geo:wktLiteral` whitespace/case-folded, `geo:gmlLiteral`
+vendored; the runner reproduces the benchmark's own scoring table and RE-IMPLEMENTS its
+answer comparator (ordered rows, `geo:wktLiteral` whitespace/case-folded, `geo:gmlLiteral`
 put through a bounded XML normaliser — documented in `canonical_xml`, and deliberately
 NOT claimed to be XML C14N — any `-alternative-N.srx` accepted). All 206 queries
 evaluated in every configuration; none errored.
 
-**Caveat — the recorded numbers (the sparq row above and the configuration matrix below)
-predate a comparator fix and are a LOWER BOUND on the `gmlLiteral` requirements** (PR
-#3990 review round 1). They were measured with an answer
+**Provenance — re-derived with the corrected comparator (2026-07-26).** An earlier
+recording of this section (PR #3990, before review round 1) was measured with an answer
 comparator that dropped XML entity references while parsing `.srx`, so every *escaped*
 expected GML answer was mangled before comparison and could not match; the GML normaliser
-was also lossy (empty elements, escaping, malformed input). Both are fixed, but re-running
-the benchmark needs the gather-only download, so the table has NOT yet been re-derived —
-treat the sparq row as provisional until it is.
+was also lossy (empty elements, escaping, malformed input). Both were fixed in round 1,
+and **all four configurations have since been re-run end-to-end** against the pinned
+corpus (`bench/geo/gsb.sh`; the fetched tarball's sha256 matched the pin in its header).
+The sparq row, the configuration matrix, and the per-requirement breakdown below are the
+output of that corrected run — and are unchanged from the pre-fix recording, because the
+requirements the fixes touch (R18/R19, the only ones whose expected answers carry GML)
+did not change verdict. The numbers are no longer provisional.
+
+**Comparator equivalence is BOUNDED, not established.** The runner re-implements the
+benchmark's answer comparison instead of invoking the upstream harness: the corpus is a
+gather-only GPL-2.0 download, so no differential run against the upstream canonicaliser
+can be made from this tree. The `geo:wktLiteral` and plain-term path follows the upstream
+normalisations; the `geo:gmlLiteral` path uses `canonical_xml`, which is explicitly not
+XML C14N (notably it does not fold the namespace axis). That approximation can only move
+decisions on the **23 of 206 queries whose expected answers carry a `geo:gmlLiteral`** —
+1 in R18 (which passes) and 22 in R19 (which scores zero in every configuration) — so its
+influence is confined to **2 of the 30 requirements, i.e. at most ±3.33 points** of the
+72.22%; the other 28 requirements never reach that code path. That bound is small against
+the 10.5-point gap to the leader, so the BEHIND verdict is safe — but it is LARGER than
+the 2.47-point margin over GraphDB (69.75%), so **the 2nd-of-9 placing specifically is not
+robust**: it rests on R18's single GML answer comparing equal. Until a differential check
+against the upstream harness exists, read "same scoring" as *same artifact + same
+requirements weighting*, NOT as a verified-identical comparator, and treat the placing as
+2nd-or-3rd.
 
 The row above is sparq's **best** configuration, and it is also the SHIPPED-DEFAULT query
 entry point (`geosparql_rewrite` is opt-in and off by default). Both configuration axes
@@ -322,7 +346,7 @@ is a first-class outcome, not a hidden sparq win.
 | RDF-syntax (Turtle/NT/NQ/TriG) | **NOT-COMPARABLE** | peers publish 100% at a 291/68/85/335-test RDF-1.1-era suite; sparq runs rdf-turtle (313) at a later pin inside the inference lane — different denominators + sparq publishes no per-syntax EARL row. No regression implied; just not the same measurement. |
 | JSON-LD 1.1 (all 6 lanes) | **BEHIND** (behind most published processors) | at loosely-comparable denominators, mature JSON-LD processors (Titanium, JSON-LD.ex, jsonld-cpp, jsonld.js) sit at 97–100% on expand/compact/toRdf/flatten/frame; sparq is 66–96%. sparq's JSON-LD is a native round-trip implementation with honest recorded gaps (remote-context/writer-shape), not a full JSON-LD processor — genuine gap rows below. |
 | SHACL core | **PARITY** (with the 100% reference impls) | sparq 98/98 core == the full core partition of the W3C matrix; TopBraid/dotNetRDF are 121/121 over core+SPARQL, pySHACL 119/121. On the CORE partition sparq is at the ceiling; the gap is SHACL-SPARQL breadth (sparq asserts node+property 5 + component 3), not core. |
-| OGC GeoSPARQL | **BEHIND** (2nd of 9 on the published table) | sq-ql2iy ran sparq through the SAME 206-query benchmark with the SAME requirements-weighted scoring: **72.22%**, ahead of GraphDB 9.3.3 (69.75%) and every other peer, but 10.5 points behind the GeoSPARQL-Fuseki 3.17 leader (82.75%). Directly comparable, and behind the leader — gap rows in §3.7 and fix beads in §5. |
+| OGC GeoSPARQL | **BEHIND** (2nd–3rd of 9 on the published table) | sq-ql2iy ran sparq through the SAME 206-query benchmark under the SAME requirements weighting: **72.22%** (re-derived 2026-07-26 with the corrected comparator, §3.7), ahead of GraphDB 9.3.3 (69.75%) and every other peer, but 10.5 points behind the GeoSPARQL-Fuseki 3.17 leader (82.75%). The answer comparator is a re-implementation, not the upstream one, and its GML path is bounded (§3.7). The BEHIND-the-leader verdict is robust to that bound (the worst case stays 7 points behind Fuseki); the **2nd-of-9 placing is NOT** — the margin over GraphDB is 2.47 points, less than the 3.33 that R18 alone is worth, so 2nd place rests on R18's GML answer comparing equal under a comparator not differentially checked against upstream. Rank sparq 2nd-or-3rd until it is. Gap rows in §3.7 and fix beads in §5. |
 | RIF Core | **NOT-COMPARABLE** (leaning AHEAD of the 2010 record) | sparq's 3 W3C-Core passes + 73-assertion expressivity extension exceed the 2010 record's best (Oracle 24% of 42 Core), but the 2010 suite is v1.21 and only 3 systems ever submitted — too thin + too stale to rank meaningfully. |
 | SolidLab ODRL | **PARITY** (exact match with the reference evaluator) | 67/68 on the identical suite with the identical oracle — the one strictly comparable, strictly matched row. |
 | Solid WAC/ACP | **NOT-COMPARABLE** | sparq is library-level; peers are whole-server wire-level and their CTH counts are deliberately withheld. Different subject entirely. |
@@ -337,8 +361,14 @@ is a first-class outcome, not a hidden sparq win.
   per the §5.3 rule.**
 - **GeoSPARQL benchmark run — DONE (sq-ql2iy).** sparq-geo now runs the 206-query
   Jovanovik benchmark (`bench/geo/gsb.sh` + `crates/sparq-geo/examples/gsb_compliance.rs`),
-  scoring **72.22%** against Fuseki 82.75% et al. The row in §3.7 is a same-artifact
-  comparison and the verdict moved NOT-COMPARABLE → BEHIND.
+  scoring **72.22%** against Fuseki 82.75% et al., re-derived 2026-07-26 with the corrected
+  answer comparator. The row in §3.7 is a same-artifact comparison and the verdict moved
+  NOT-COMPARABLE → BEHIND.
+- **GeoSPARQL comparator differential check (P3).** The runner re-implements the
+  benchmark's answer comparison; its bounded GML normaliser is not differentially checked
+  against the upstream harness (§3.7). The exposure is 2 of 30 requirements, but that
+  exceeds the margin over GraphDB, so it is what keeps the 2nd-of-9 placing at
+  2nd-or-3rd. A check would need the upstream GPL-2.0 harness run out-of-tree.
 - **GeoSPARQL query-rewrite semantics (P1).** The largest scoring gap and the only one
   that is a REGRESSION rather than a missing feature: R28–R30 (24 of the 63 wrong answers,
   10% of the total score) score zero with the rewrite on AND off, and turning the opt-in
