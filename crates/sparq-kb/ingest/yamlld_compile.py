@@ -40,6 +40,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
 import sys
 from typing import Any
@@ -404,11 +405,43 @@ def dqv_metric_for(type_terms: list[str]) -> str | None:
     return None
 
 
+# The `kb:` local names the minted IRI may carry through VERBATIM: a plain PN_LOCAL
+# alphabet, which (see `_measurement_stem`) is what keeps case one disjoint from case two.
+_PLAIN_LOCAL = re.compile(r"[A-Za-z0-9_-]+")
+_NON_PLAIN = re.compile(r"[^A-Za-z0-9_]")
+
+
+def _measurement_stem(subject: str) -> str:
+    """An INJECTIVE, Turtle-safe rendering of the COMPLETE subject term, for use inside
+    a minted measurement IRI's local name.
+
+    Rendering only the local part (`subject.split(":")[1]`) is NOT injective: `kb:item`
+    and `ex:item` would both stem `item`, so — if both are confidence-bearing — their two
+    measurements merge into ONE resource carrying two `dqv:computedOn` and two, possibly
+    conflicting, `dqv:value` triples. Silent graph corruption, and reachable, since the
+    compiler accepts CURIEs under any prefix.
+
+    Two disjoint cases keep the common form readable AND the whole map injective:
+      * a `kb:` subject whose local name is already a plain PN_LOCAL-safe name renders as
+        that local name unchanged (the shipped `kb:meas-<local>-<suffix>` form);
+      * ANY other subject renders `<slug>--<digest>`, where the slug maps every character
+        outside `[A-Za-z0-9_]` to `_` (so it is Turtle-safe and, containing no `-`, makes
+        `--` a marker that case one can never produce) and the SHA-256 digest is taken
+        over the complete subject term, restoring the injectivity the slug loses.
+    """
+    prefix, sep, local = subject.partition(":")
+    if sep and prefix == "kb" and _PLAIN_LOCAL.fullmatch(local) and "--" not in local:
+        return local
+    digest = hashlib.sha256(subject.encode("utf-8")).hexdigest()[:12]
+    return f"{_NON_PLAIN.sub('_', subject)}--{digest}"
+
+
 def measurement_iri(subject: str, metric: str) -> str:
     """The measurement IRI for `(subject, metric)` — deterministic, so re-running either
-    ingest path mints the same node rather than a fresh one."""
-    local = subject.split(":", 1)[1] if ":" in subject else subject
-    return f"kb:meas-{local}-{_METRIC_SUFFIX[metric]}"
+    ingest path mints the same node rather than a fresh one, and injective in BOTH
+    arguments, so two distinct subjects never share a measurement (the two metric
+    suffixes are not suffixes of each other, so the metric cannot alias either)."""
+    return f"kb:meas-{_measurement_stem(subject)}-{_METRIC_SUFFIX[metric]}"
 
 
 def dqv_measurement_block(subject: str, metric: str, value: str) -> list[str]:

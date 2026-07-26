@@ -238,6 +238,64 @@ class TestCompileEnd2End(unittest.TestCase):
         self.assertIn("dqv:isMeasurementOf pkg:SourceReliabilityMeasurement ;", ttl)
         self.assertIn("dqv:value 0.8 .", ttl)
 
+    def test_measurement_iris_do_not_collide_across_prefixes(self):
+        # Regression: minting from only the local part made `kb:item` and `pkg:item`
+        # (or `ex:item`, or any other prefix the compiler accepts) share ONE measurement
+        # IRI, merging two subjects' measurements into a single resource with two
+        # dqv:computedOn and two conflicting dqv:value triples. The stem is now minted
+        # from the COMPLETE subject term, so the two are distinct.
+        src = (
+            '"@context":\n'
+            '  confidence: { "@id": "pkg:confidence", "@type": "xsd:decimal" }\n'
+            'sources:\n'
+            '  - "@id": kb:item\n'
+            '    "@type": pkg:Source\n'
+            '    confidence: 0.8\n'
+            '  - "@id": pkg:item\n'
+            '    "@type": pkg:Source\n'
+            '    confidence: 0.4\n'
+        )
+        ttl = yc.compile_yaml_ld(src, echo=False)
+        kb_iri = yc.measurement_iri("kb:item", yc.METRIC_SOURCE_RELIABILITY)
+        other_iri = yc.measurement_iri("pkg:item", yc.METRIC_SOURCE_RELIABILITY)
+        self.assertNotEqual(kb_iri, other_iri)
+        # the `kb:` form stays the readable shipped shape; the other is disambiguated.
+        self.assertEqual(kb_iri, "kb:meas-item-reliability")
+        # exactly one computedOn/value/metric tuple per measurement, and each measurement
+        # is declared exactly once.
+        for iri, subject, value in (
+            (kb_iri, "kb:item", "0.8"),
+            (other_iri, "pkg:item", "0.4"),
+        ):
+            block = ttl.split(f"\n{iri} a dqv:QualityMeasurement ;\n")
+            self.assertEqual(len(block), 2, f"{iri} must be declared exactly once")
+            body = block[1].split(" .\n")[0]
+            self.assertEqual(
+                body.count("dqv:computedOn"), 1, f"{iri} must measure ONE subject"
+            )
+            self.assertIn(f"dqv:computedOn {subject} ;", body)
+            self.assertEqual(body.count("dqv:value"), 1, f"{iri} must carry ONE value")
+            self.assertIn(f"dqv:value {value}", body)
+            self.assertEqual(body.count("dqv:isMeasurementOf"), 1)
+            self.assertIn(
+                f"dqv:isMeasurementOf {yc.METRIC_SOURCE_RELIABILITY} ;", body
+            )
+        # the two metrics of the SAME subject also stay distinct.
+        self.assertNotEqual(
+            yc.measurement_iri("kb:item", yc.METRIC_CONFIDENCE), kb_iri
+        )
+
+    def test_measurement_stem_is_injective_and_turtle_safe(self):
+        # the stem is deterministic (re-running mints the same node), disjoint between
+        # the verbatim `kb:` case and the digest case, and only ever emits characters a
+        # Turtle PN_LOCAL admits unescaped.
+        subjects = ["kb:item", "pkg:item", "ex:item", "item", "kb:a/b", "kb:a--b", "kb:"]
+        stems = [yc._measurement_stem(s) for s in subjects]
+        self.assertEqual(len(set(stems)), len(subjects), f"stems collide: {stems}")
+        self.assertEqual(stems, [yc._measurement_stem(s) for s in subjects])
+        for stem in stems:
+            self.assertRegex(stem, r"^[A-Za-z0-9_-]+$")
+
     def test_no_measurement_without_confidence_or_a_measured_type(self):
         # A subject with no pkg:confidence, and a confidence-bearing subject that is
         # neither a Finding nor a Source, carry NO measurement — the projection is
