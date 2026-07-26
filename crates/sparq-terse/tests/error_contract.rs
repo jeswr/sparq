@@ -2,6 +2,59 @@
 
 use sparq_terse::{terse_to_sparql, TerseError, LEGEND_VERSION};
 
+// [SONNET-4.6] sq-h7zlx — Phase 4: the did-you-mean diagnostic is a HINT on parse failure,
+// never a rewrite (design §3.2).
+
+#[test]
+fn parse_failure_hints_at_the_misspelled_keyword_without_applying_it() {
+    let query = "SELECT ?s WHERE { ?s ?p ?o FLTR(?o > 1) }";
+    let error = terse_to_sparql(query).expect_err("a misspelled keyword must still fail loudly");
+
+    match error {
+        TerseError::CanaryFailed {
+            sparql,
+            suggestions,
+            ..
+        } => {
+            // The emission is untouched — the suggestion was NOT applied.
+            assert_eq!(sparql, query);
+            assert!(!sparql.contains("FILTER"), "the hint must never be applied");
+            let hint = suggestions
+                .iter()
+                .find(|s| s.token == "FLTR")
+                .unwrap_or_else(|| panic!("expected a FLTR hint, got {suggestions:?}"));
+            assert!(
+                hint.suggestions.contains(&"FILTER".to_string()),
+                "expected FILTER among {:?}",
+                hint.suggestions
+            );
+            // And it reaches the agent through the rendered error.
+            let rendered = TerseError::CanaryFailed {
+                sparql,
+                parse_error: "unbalanced".to_string(),
+                suggestions,
+            }
+            .to_string();
+            assert!(rendered.contains("did you mean FILTER"), "got {rendered}");
+            assert!(rendered.contains("(not applied)"), "got {rendered}");
+        }
+        other => panic!("expected CanaryFailed, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_parse_failure_with_no_near_keyword_carries_no_hint() {
+    // Unbalanced but correctly spelled: nothing to suggest, so the error stays terse.
+    let error = terse_to_sparql("SELECT ?s WHERE { ?s ?p").expect_err("invalid SPARQL must fail");
+
+    match error {
+        TerseError::CanaryFailed { suggestions, .. } => {
+            assert!(suggestions.is_empty(), "expected no hint, got {suggestions:?}");
+        }
+        other => panic!("expected CanaryFailed, got {other:?}"),
+    }
+}
+
 #[test]
 fn unknown_keyword_exposes_versioned_suggestions() {
     let query = "SELECT ?f WHERE { ?f K:derived ?s }";

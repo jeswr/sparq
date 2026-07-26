@@ -196,9 +196,13 @@ pub(crate) fn canary(canonical_sparql: &str) -> Result<(), TerseError> {
     if SparqlParser::new().parse_update(canonical_sparql).is_ok() {
         return Ok(());
     }
+    // Parse FAILURE only (design §3.2, Phase 4): attach the non-rewriting did-you-mean hints
+    // for bare words that look like misspelled keywords. The emission is untouched and the
+    // error is still returned — a suggestion, never an auto-correction.
     Err(TerseError::CanaryFailed {
         sparql: canonical_sparql.to_string(),
         parse_error: query_err,
+        suggestions: crate::diagnose::keyword_suggestions(canonical_sparql),
     })
 }
 
@@ -591,7 +595,7 @@ fn skip_ws(bytes: &[u8], mut i: usize) -> usize {
 
 /// At `bytes[start]` being a quote, skips a SPARQL string literal (single- or
 /// triple-quoted, honouring backslash escapes), returning the index just past it.
-fn skip_string(bytes: &[u8], start: usize) -> usize {
+pub(crate) fn skip_string(bytes: &[u8], start: usize) -> usize {
     let n = bytes.len();
     let quote = bytes[start];
     // Triple-quoted?

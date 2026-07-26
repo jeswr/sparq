@@ -28,6 +28,11 @@ pub enum TerseError {
         sparql: String,
         /// The underlying `spargebra` parse error.
         parse_error: String,
+        /// Did-you-mean hints for bare words that look like misspelled SPARQL keywords
+        /// (design §3.2, Phase 4). Computed **only** on this failure path and **never**
+        /// applied — the parse still fails, the agent just gets a pointer at what to fix.
+        /// Empty when nothing in the query is close to a keyword.
+        suggestions: Vec<crate::diagnose::KeywordSuggestion>,
     },
     /// A `V("phrase")` could not be resolved confidently and so was **not** bound (design
     /// §6.3, confidence-gated): the score was below the floor, or the top candidate and its
@@ -81,11 +86,26 @@ impl fmt::Display for TerseError {
             TerseError::FeatureRequired { phrase, why } => {
                 write!(f, "cannot resolve V(\"{}\"): {}", phrase, why)
             }
-            TerseError::CanaryFailed { sparql, parse_error } => write!(
-                f,
-                "silent-rewrite canary failed: emitted SPARQL does not parse ({}): {}",
-                parse_error, sparql
-            ),
+            TerseError::CanaryFailed { sparql, parse_error, suggestions } => {
+                write!(
+                    f,
+                    "silent-rewrite canary failed: emitted SPARQL does not parse ({}): {}",
+                    parse_error, sparql
+                )?;
+                // Diagnostics, not lenient parsing: the hint is spelled out as NOT applied
+                // so neither an agent nor a human reads it as a rewrite (design §3.2).
+                for hint in suggestions {
+                    write!(f, "; unknown token `{}` — did you mean ", hint.token)?;
+                    for (i, s) in hint.suggestions.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{}", s)?;
+                    }
+                    write!(f, "? (not applied)")?;
+                }
+                Ok(())
+            }
             TerseError::Unresolved { phrase, why, candidates } => {
                 write!(f, "V(\"{}\") not bound ({}); candidates: [", phrase, why)?;
                 for (i, (iri, score)) in candidates.iter().enumerate() {

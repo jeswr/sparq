@@ -73,6 +73,11 @@ for r in &exp.resolutions {
   real `PREFIX K:` (`TerseError::KeywordPrefixCollision`) are HARD errors, never a guess.
   Publish the legend once behind the prompt-cache breakpoint with `legend_card()` (the
   token win is a *caching* property — design §1.6).
+- **Did-you-mean diagnostics, never lenient parsing** (design §3.2 — the only sliver of
+  lever 2). On a *parse failure only*, `TerseError::CanaryFailed` carries
+  `KeywordSuggestion`s for bare words near a SPARQL keyword — `FLTR` → "did you mean
+  FILTER? (not applied)". The query still fails, so the agent keeps its loud, recoverable
+  feedback loop; `keyword_suggestions()` exposes the same read-only scan.
 - **`V("phrase")` lexical-first concept resolution** (`vectors` feature, design §3.3).
   The deterministic, no-model `sparq-nlq` lexical linker is the PRIMARY path; the
   staleness-guarded `sparq-vectors` search is a FALLBACK for genuinely fuzzy phrases.
