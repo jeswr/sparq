@@ -3,11 +3,14 @@
 
 [OPUS-4.8] FO-KM benchmark (epic sq-mztg8). SPARQ agent. NOT a perf measurement — a
 DISCRIMINATION check: it confirms each task's FO-arm query returns a non-empty answer
-matching the claimed gold — the `gold_count` for a COUNT/row task, the per-part count for
-a multi-part task, the per-CATEGORY values for a dict-of-ints `gold_keys` (cc03/cc05) —
-while the no-FO arm returns 0 / cannot, so the task set genuinely differentiates the arms.
-Every gold shape is dispatched explicitly and an unknown shape FAILS, so a task can never
-pass merely by returning some non-empty result. Run from the repo root:
+matching the claimed gold — the `gold_count` for a COUNT/row task, PLUS the gold ENTITY
+VALUES when a row-returning task's `gold_keys` names entities (th01/th04/cc01/cc04/th06),
+the per-part count for a multi-part task, the per-CATEGORY values for a dict-of-ints
+`gold_keys` (cc03/cc05) — while the no-FO arm returns 0 / cannot, so the task set genuinely
+differentiates the arms. Every gold shape is dispatched explicitly and an unknown shape
+FAILS, so a task can never pass merely by returning some non-empty result — nor, for an
+entity-list task, merely by returning the right NUMBER of wrong entities. Run from the
+repo root:
 
     python3 bench/fo-km/validate_tasks.py
 
@@ -60,6 +63,16 @@ def is_int(cell):
     """True iff a printed cell is an integer literal (COUNT output)."""
     body = cell.lstrip("-")
     return bool(body) and body.isdigit()
+
+
+def preview(names, limit=5):
+    """Bounded, deterministic sample of a name set for a failure message.
+
+    th01/th06 carry 91/71 gold entities, so a wholly-wrong answer would otherwise print
+    hundreds of lines; the count is always exact, only the listing is trimmed.
+    """
+    head = ", ".join(names[:limit])
+    return head if len(names) <= limit else f"{head}, ... (+{len(names) - limit} more)"
 
 
 def norm(label):
@@ -137,6 +150,50 @@ def is_category_gold(gold_keys):
             and all(isinstance(v, int) for v in gold_keys.values()))
 
 
+def is_entity_list_gold(gold_keys, sparql):
+    """True iff a list-shaped `gold_keys` is a real ENTITY LIST checkable against the rows.
+
+    A list gold is used TWO ways in tasks.jsonl, and only one of them names entities:
+      * ENTITY LIST (th01/th04/cc01/cc04/th06) — the local names the row-returning SELECT
+        must project; these can and must be compared value-by-value.
+      * SENTINEL (th02's `task-sq`, er02's `top-1349`, th07's `cross-class-state-union`, ...)
+        — a one-off descriptive tag standing in for a task whose real gold is the scalar
+        `gold_count`, because the query AGGREGATES and so returns no entities to compare.
+    The QUERY decides which: only a non-aggregate SELECT returns entities, so a `COUNT(` in
+    the query means the entity comparison does not apply and the `gold_count` check is the
+    whole gold check for that task.
+    """
+    return isinstance(gold_keys, list) and bool(gold_keys) and "COUNT(" not in sparql.upper()
+
+
+def check_entity_gold(tid, arm, data, gold_keys):
+    """Compare the ENTITIES a row-returning FO arm projected against a list-shaped gold.
+
+    `gold_keys` was probed through the same renderer the arms print with (pkg_query.rs's
+    print_table shortens an IRI to its last '#'/'/' segment), so the FIRST column of each
+    row compares directly against the gold list. Row COUNT alone proved nothing here: any
+    same-cardinality answer used to pass th01/th04/cc01/cc04/th06 even when EVERY returned
+    entity was wrong.
+
+    The comparison is on the DISTINCT first-column set rather than the row multiset because
+    cc04 projects `?f ?topic` PAIRS — 18 rows over 15 distinct findings. Row cardinality
+    stays pinned independently by the `gold_count` check. Returns failure strings.
+    """
+    want = set(gold_keys)
+    got = {cells(row)[0] for row in data if row.strip()}
+    failures = []
+    missing, unexpected = sorted(want - got), sorted(got - want)
+    if missing:
+        failures.append(
+            f"{tid}/{arm}: {len(missing)} gold entity/entities MISSING from the FO arm's "
+            f"answer: {preview(missing)}")
+    if unexpected:
+        failures.append(
+            f"{tid}/{arm}: {len(unexpected)} returned entity/entities absent from "
+            f"gold_keys: {preview(unexpected)}")
+    return failures
+
+
 def main():
     tasks = [json.loads(l) for l in open("bench/fo-km/tasks.jsonl")]
     failures = []
@@ -163,11 +220,15 @@ def main():
                 if answered == 0:
                     failures.append(f"{tid}/{arm}/{part}: FO arm returned EMPTY (expected non-empty)")
                 # For a single-list-gold scalar/row task, every FO arm with a query must
-                # return EXACTLY gold_count (the FO answer is the same row-set regardless of FO).
+                # return EXACTLY gold_count (the FO answer is the same row-set regardless of FO)
+                # AND, when the gold names entities, exactly THOSE entities: a row count alone
+                # let any same-cardinality set of wrong entities pass.
                 elif isinstance(t["gold_keys"], list) and not isinstance(q, dict):
                     if answered != gold_count:
                         failures.append(
                             f"{tid}/{arm}: FO arm returned {answered}, expected gold_count {gold_count}")
+                    if is_entity_list_gold(t["gold_keys"], sub):
+                        failures.extend(check_entity_gold(tid, arm, data, t["gold_keys"]))
                 # A MULTI-PART task (dict-shaped `select`, e.g. th03's truth_bearers /
                 # info_bearers split) carries a dict-shaped gold_count keyed the same way.
                 # These were previously NOT count-checked at all, which is how a stale gold

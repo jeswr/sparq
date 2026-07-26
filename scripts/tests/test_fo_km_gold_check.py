@@ -151,6 +151,99 @@ class TestCategoryGoldCc05(unittest.TestCase):
         self.assertEqual(len(failures), len(self.gold), failures)
 
 
+class TestEntityListGold(unittest.TestCase):
+    """The list-shaped gold: the returned ENTITIES must be the gold entities, not merely
+    the right NUMBER of rows."""
+
+    def setUp(self):
+        self.gold = task("th04")["gold_keys"]  # 5 Technique local names
+
+    def rows(self, keys):
+        return table(["x"], [[k] for k in keys])[1]
+
+    def test_exact_gold_passes(self):
+        self.assertEqual(
+            vt.check_entity_gold("th04", "gufo", self.rows(self.gold), self.gold), [])
+
+    def test_same_count_wrong_entity_fails(self):
+        """The hole this closes: cardinality preserved, one entity swapped for a wrong one."""
+        wrong = ["surface-not-a-real-thing"] + self.gold[1:]
+        failures = vt.check_entity_gold("th04", "gufo", self.rows(wrong), self.gold)
+        self.assertTrue(any("MISSING" in f and self.gold[0] in f for f in failures), failures)
+        self.assertTrue(
+            any("absent from gold_keys" in f and "surface-not-a-real-thing" in f
+                for f in failures), failures)
+
+    def test_entirely_wrong_answer_of_the_right_size_fails(self):
+        wrong = [f"e{i}" for i in range(len(self.gold))]
+        failures = vt.check_entity_gold("th04", "gufo", self.rows(wrong), self.gold)
+        self.assertEqual(len(failures), 2, failures)
+        self.assertTrue(any(f"{len(self.gold)} gold entity" in f for f in failures), failures)
+
+    def test_missing_entity_is_reported(self):
+        failures = vt.check_entity_gold("th04", "gufo", self.rows(self.gold[:-1]), self.gold)
+        self.assertTrue(any(self.gold[-1] in f for f in failures), failures)
+
+    def test_extra_entity_is_reported(self):
+        failures = vt.check_entity_gold(
+            "th04", "gufo", self.rows(self.gold + ["surface-extra"]), self.gold)
+        self.assertTrue(any("surface-extra" in f for f in failures), failures)
+
+    def test_pair_shaped_rows_compare_on_the_first_column(self):
+        """cc04 projects `?f ?topic`: more ROWS than distinct findings, and the second
+        column is a topic that is deliberately not in gold_keys."""
+        gold = task("cc04")["gold_keys"]
+        rows = [[f, "topic-x"] for f in gold] + [[gold[0], "topic-y"], [gold[1], "topic-z"]]
+        _, data = table(["f", "topic"], rows)
+        self.assertEqual(len(data), len(gold) + 2)
+        self.assertEqual(vt.check_entity_gold("cc04", "gufo", data, gold), [])
+
+    def test_large_failure_listing_is_bounded_but_counted(self):
+        """th01 carries 91 gold entities — a wholly-wrong answer must not print 182 lines."""
+        gold = task("th01")["gold_keys"]
+        failures = vt.check_entity_gold(
+            "th01", "gufo", self.rows([f"e{i}" for i in gold]), gold)
+        self.assertEqual(len(failures), 2, failures)
+        self.assertTrue(any(f"{len(gold)} gold entity" in f for f in failures), failures)
+        self.assertTrue(any("more)" in f for f in failures), failures)
+
+
+class TestEntityListGoldPredicate(unittest.TestCase):
+    """Which list golds name entities (checkable) vs which are scalar SENTINELS."""
+
+    ROW_SELECT = "SELECT DISTINCT ?x WHERE { ?x a fo:Object } ORDER BY ?x"
+
+    def test_row_select_with_a_list_is_an_entity_gold(self):
+        self.assertTrue(vt.is_entity_list_gold(["a", "b"], self.ROW_SELECT))
+
+    def test_aggregate_query_is_not(self):
+        self.assertFalse(vt.is_entity_list_gold(
+            ["top-1349"], "SELECT (COUNT(DISTINCT ?x) AS ?n) WHERE { ?x a fo:Individual }"))
+
+    def test_empty_and_non_list_are_not(self):
+        self.assertFalse(vt.is_entity_list_gold([], self.ROW_SELECT))
+        self.assertFalse(vt.is_entity_list_gold({"event": 1}, self.ROW_SELECT))
+
+    def test_shipped_fixture_routes_exactly_the_entity_list_tasks_here(self):
+        """Pins the dispatch against tasks.jsonl: the five row-returning entity-list tasks
+        are value-checked, and every SENTINEL gold sits behind an aggregate query."""
+        checked = set()
+        for t in tasks():
+            for q in t["select"].values():
+                if isinstance(q, str) and vt.is_entity_list_gold(t["gold_keys"], q):
+                    checked.add(t["id"])
+        self.assertEqual(checked, {"th01", "th04", "cc01", "cc04", "th06"})
+
+    def test_sentinel_golds_have_no_entity_to_check(self):
+        """er02's `top-1349` and friends are descriptive tags, not local names — their
+        real gold is `gold_count`, so the entity check must not be applied to them."""
+        for tid in ("th02", "er01", "er02", "er03", "th05", "er04", "th07", "cc02"):
+            t = task(tid)
+            for q in t["select"].values():
+                if isinstance(q, str):
+                    self.assertFalse(vt.is_entity_list_gold(t["gold_keys"], q), tid)
+
+
 class TestUnparseableTableIsAFailure(unittest.TestCase):
     """An unreadable table must FAIL loudly, never pass as 'nothing to check'."""
 
@@ -204,11 +297,23 @@ class TestShapePredicate(unittest.TestCase):
 # --- end-to-end: drive main() with a canned result table ---------------------------
 
 
+def entity_rows(keys: list[str], n: int) -> tuple[str, list[str]]:
+    """`n` rows whose first column ranges over exactly the distinct entities `keys`.
+
+    cc04 projects `?f ?topic` PAIRS — 18 rows over 15 distinct findings — so when the gold
+    row count exceeds the entity count the surplus rows REPEAT gold entities rather than
+    inventing new ones, which is what the real arm returns.
+    """
+    rows = [keys[i % len(keys)] for i in range(max(n, len(keys)))]
+    return table(["x"], [[k] for k in rows])
+
+
 def fake_run_factory(overrides: dict | None = None):
     """A `run()` stand-in: answers each query from tasks.jsonl's own gold.
 
-    `overrides` maps a task id to a {category: wrong_value} patch, so a test can inject a
-    deliberately wrong query result and assert the validator rejects it.
+    `overrides` maps a task id to a deliberately WRONG result so a test can assert the
+    validator rejects it — either a {category: wrong_value} patch for a dict-of-ints gold
+    (cc03/cc05), or a replacement list of entity local names for an entity-list gold.
     """
     overrides = overrides or {}
     index = {}  # query string -> (task, part)
@@ -224,14 +329,23 @@ def fake_run_factory(overrides: dict | None = None):
             return "x", []  # the no-FO arm cannot answer — that is the discrimination
         t, part = index[sparql]
         gold_keys, gold_count = t["gold_keys"], t["gold_count"]
+        override = overrides.get(t["id"])
         if vt.is_category_gold(gold_keys):
-            gold = dict(gold_keys, **overrides.get(t["id"], {}))
+            gold = dict(gold_keys, **(override or {}))
             return grouped(gold) if "GROUP BY" in sparql else wide(gold)
         n = gold_count[part] if isinstance(gold_count, dict) else gold_count
         if "GROUP BY" in sparql:
             return table(["cat", "n"], [[f"c{i}", "1"] for i in range(n)])
         if "COUNT(" in sparql.upper():
             return table(["n"], [[str(n)]])
+        # A row-returning SELECT: return the task's OWN gold entities, so the end-to-end
+        # pass is evidence the entity check accepts a correct answer rather than evidence
+        # that arbitrary `e0, e1, ...` rows slip through it.
+        keys = gold_keys[part] if isinstance(gold_keys, dict) else gold_keys
+        if isinstance(override, list):
+            keys = override
+        if vt.is_entity_list_gold(keys, sparql):
+            return entity_rows(keys, n)
         return table(["x"], [[f"e{i}"] for i in range(n)])
 
     return _run
@@ -276,6 +390,37 @@ class TestEndToEndDispatch(unittest.TestCase):
         self.assertEqual(exit_ctx.exception.code, 1)
         self.assertIn("cc05", out.getvalue())
         self.assertIn("'document'", out.getvalue())
+
+    def test_wrong_entity_at_the_right_row_count_fails_validation(self):
+        """MUTATION: swap ONE returned entity for a wrong one, preserving the row count.
+
+        The `gold_count` check therefore stays green — only the entity comparison can
+        catch this, so the assertion that no count failure was reported is what makes the
+        test non-vacuous for the invariant.
+        """
+        gold = task("th04")["gold_keys"]
+        mutated = ["surface-not-a-real-thing"] + gold[1:]
+        self.assertEqual(len(mutated), task("th04")["gold_count"])
+        with driven({"th04": mutated}) as out:
+            with self.assertRaises(SystemExit) as exit_ctx:
+                vt.main()
+        report = out.getvalue()
+        self.assertEqual(exit_ctx.exception.code, 1)
+        self.assertIn("th04", report)
+        self.assertIn(gold[0], report)
+        self.assertIn("surface-not-a-real-thing", report)
+        self.assertNotIn("expected gold_count", report)
+
+    def test_wrong_entity_in_the_pair_shaped_cc04_fails_validation(self):
+        """cc04's rows are (finding, topic) PAIRS, so its entity check reads the first
+        column only — a wrong finding must still be caught."""
+        gold = task("cc04")["gold_keys"]
+        with driven({"cc04": ["find-not-a-real-finding"] + gold[1:]}) as out:
+            with self.assertRaises(SystemExit) as exit_ctx:
+                vt.main()
+        self.assertEqual(exit_ctx.exception.code, 1)
+        self.assertIn("find-not-a-real-finding", out.getvalue())
+        self.assertIn(gold[0], out.getvalue())
 
 
 if __name__ == "__main__":
