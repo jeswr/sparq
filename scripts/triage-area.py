@@ -187,10 +187,13 @@ RULES = [
      ["sparq-core", "sparq-conformance"], "crates/sparq-core/src/nt.rs + the syntax ratchet floors"),
     ("core-durable", "title", r"shared durable backend",
      ["sparq-core"], "the store/persistence layer"),
+    # The trace is engine-side but the only sink today is sparq-server's
+    # per-request one (crates/sparq-server/src/http.rs), so both crates move.
+    ("access-audit", "title", r"access-audit: engine-internal",
+     ["sparq-engine", "sparq-server"], "engine-side trace wired to the server sink"),
     ("engine-topic", "title",
      r"dpccp|dp::plan|join order|cardinality estimator|anti-join|order by|"
-     r"explain_json|sp2bench complex-shape|q08/q12b|select-json path|"
-     r"access-audit: engine-internal",
+     r"explain_json|sp2bench complex-shape|q08/q12b|select-json path",
      ["sparq-engine"], "crates/sparq-engine planner/executor"),
     ("substrate-num", "title", r"num::lexical",
      ["sparq-substrate"], "Num lives in crates/sparq-substrate"),
@@ -198,8 +201,19 @@ RULES = [
      ["sparq-canon"], "RDFC-1.0 canonicalization in crates/sparq-canon"),
 
     # -- other crate families ----------------------------------------------------
-    ("difftest", "title", r"^sq-\w+(\.\w+)*: diff-test:",
-     ["sparq-difftest"], "crates/sparq-difftest"),
+    # The sq-qcnn diff-test DAG spans two crates and the split is not the obvious
+    # one. crates/sparq-difftest is node A ONLY — the value normaliser, which by
+    # design has NO sparq dependency. The differential HARNESS it feeds (fuzz.rs,
+    # the oracle adapters, check_ordered, the generator) lives in crates/sparq-bench.
+    # A whole-family `area:sparq-difftest` therefore points every one of these
+    # beads at a crate most of them never edit; caught by the post-apply sample
+    # re-derivation, which found check_ordered/fuzz.rs:307 in sparq-bench.
+    ("difftest-normaliser", "title",
+     r"^sq-\w+(\.\w+)*: diff-test:.*(isomorphism|multiset)",
+     ["sparq-difftest", "sparq-bench"],
+     "extends the independent normaliser AND wires it into the harness"),
+    ("difftest-harness", "title", r"^sq-\w+(\.\w+)*: diff-test:",
+     ["sparq-bench"], "the differential harness (fuzz.rs / oracle adapters)"),
     ("mpc-seam-plan", "title", r"mpc seam phase 6",
      ["sparq-fedplan-mpc"], "source-selection/combination lives in sparq-fedplan-mpc"),
     ("mpc-seam", "title", r"mpc seam phase",
