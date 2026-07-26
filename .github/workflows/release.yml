@@ -37,8 +37,10 @@ on:
     inputs:
       tag:
         description: >-
-          Release tag the built assets attach to (e.g. v0.1.0-dev). A developer/test dispatch
-          SHOULD use a -dev / pre-release suffix so it is never mistaken for a canonical release.
+          Release tag the built assets attach to (e.g. v0.1.0-dev). MUST be a vX.Y.Z release tag —
+          the publish-cadence guard (#2552) refuses anything else, because it cannot tell which tag
+          to exclude from the interval sources. A developer/test dispatch SHOULD use a -dev /
+          pre-release suffix so it is never mistaken for a canonical release.
           This is the single source of asset naming + the GitHub Release tag on the dispatch path.
         required: true
         type: string
@@ -72,6 +74,55 @@ jobs:
       - name: Resolve version
         id: v
         run: echo "version=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+      # [OPUS-5] issue #2552 — THE CADENCE GUARD ON THE TAG-PUSH PATH. LOAD-BEARING.
+      #
+      # Maintainer, verbatim: "We need to make sure that we do not create many many
+      # releases so please put a policy in place to ensure we do not do more than 1
+      # release a day." The policy is ONE constant — `MIN_RELEASE_INTERVAL` (24h) in
+      # scripts/release-interval-guard.py — enforced at BOTH points a release can start:
+      #   * release-plz.yml's `release-plz-release` job (the Release-PR path), and
+      #   * HERE, the `v*` tag push, which is the runbook's canonical instruction
+      #     ("nothing publishes until you push a `v*` tag") and was previously UNCADENCED:
+      #     a hand-pushed tag fires this workflow directly, never touching release-plz.
+      #
+      # WHY IN `setup` AND NOT ITS OWN JOB: every other job here depends on `setup`
+      # (directly, or through it), so a refusal stops the archives, the SBOM/VEX, the
+      # GitHub Release and the ghcr image. A separate `needs:` job would instead SKIP its
+      # dependents on the dispatch path, which silently produces a release with no assets.
+      #
+      # WHY `--released-tag`: on a tag push, `v<workspace version>` is already in the tag
+      # list, so the guard's "already tagged => `release-plz release` is a no-op" branch
+      # would short-circuit to ALLOW and this step would be VACUOUS. `--released-tag`
+      # excludes the tag being cut and suppresses that branch, so the interval is measured
+      # against the PREVIOUS release. The `fetch-depth: 0` checkout below is a
+      # PRECONDITION — on a shallow checkout the tag list is not authoritative and the
+      # guard refuses rather than guessing.
+      #
+      # WHY UNCONDITIONAL — including `workflow_dispatch`. A dispatch build looks like a
+      # developer/test path (pre-release, `dev-`-prefixed image tags), but the Release it
+      # creates fires `release: published`, and publish.yml's `npm` job runs on ANY
+      # `release` event. So a dispatch reaches a registry too: exempting it would leave the
+      # loophole this guard exists to close. The escape hatch the guard's no-override
+      # design reserves is a maintainer publishing BY HAND, outside CI — not dispatching a
+      # workflow that publishes for them. Consequence, by design: `inputs.tag` must be a
+      # `vX.Y.Z` release tag (a `-dev` suffix is fine); anything else refuses, because the
+      # guard cannot tell which tag to exclude from the cadence sources.
+      #
+      # DO NOT add an `if:`, do not add `continue-on-error`, do not swap `--enforce` for
+      # `--dry-run`, and do not append `|| true`.
+      # scripts/tests/test_release_publish_guard.py parses THIS FILE structurally and
+      # fails on each of those mutations.
+      - name: Checkout (full history — the `v*` tag list must be authoritative)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Publish-cadence guard (fail-closed minimum release interval, #2552)
+        env:
+          # Via env, never string-interpolated into the shell: a tag name is attacker-
+          # controlled text and `run:` interpolation would splice it into the command.
+          RELEASED_TAG: ${{ steps.v.outputs.version }}
+        run: python3 scripts/release-interval-guard.py --enforce --repo-root . --released-tag "${RELEASED_TAG}"
 
   # ---- 1. build + package per hardware tier ----
   # [OPUS-4.8] sq-v286.2: invoke the shared reusable matrix in `archive` mode. The 10-tier
@@ -674,6 +725,8 @@ jobs:
             **Served-surface SPARQL 1.1 Protocol conformance.** This release attaches a machine-readable conformance report (`served-conformance-${{ needs.setup.outputs.version }}.json`) recording what the *served HTTP surface* (`sparq-server`'s `/sparql`) passes at this exact commit — the SPARQL 1.1 Protocol lane (GET/POST query+update, the QUERY method, dataset overrides, SRJ/SRX/CSV/TSV negotiation, status codes) and the Service-Description + Graph-Store-Protocol lane, with per-assertion pass/divergence/fail outcomes, per-suite counts + ratchet floors, and provenance (commit, date, CI run). Counts are conformance facts; documented divergences are reported separately and are never summed into the pass count. It is generated fail-closed (a vacuous, failing, or below-floor run blocks the release). See the [served-surface conformance page](https://github.com/${{ github.repository }}/blob/${{ needs.setup.outputs.version }}/site/src/app/assurance/served-conformance/page.tsx) for the rendered view.
 
             **Desktop GUI bundles (UNSIGNED).** This release also includes cross-platform [sparq GUI](https://github.com/${{ github.repository }}/tree/${{ needs.setup.outputs.version }}/gui) desktop installers (`sparq-gui_${{ needs.setup.outputs.version }}_*`): macOS `.dmg`, Windows `.msi` + NSIS `.exe`, and Linux `.deb` + `.AppImage`. **These bundles are NOT code-signed or notarized.** On macOS, Gatekeeper will quarantine them; on Windows, SmartScreen will warn — see [/download](https://github.com/${{ github.repository }}/tree/${{ needs.setup.outputs.version }}/gui) for the install bypass instructions (Gatekeeper/SmartScreen). OS-level code-signing (Apple Developer ID notarization + Windows Authenticode) requires maintainer-held credentials and is tracked separately — until then, treat the GUI bundles as developer/test installs. The SLSA attestation below proves *who built* each bundle (build provenance); it is not a substitute for OS code-signing. (No `win-arm64` GUI installer yet — the Tauri bundler cannot cross-bundle it from the x64 Windows runner; no mobile app bundles yet.)
+
+            **Experimental — read before you rely on this.** sparq is a pre-1.0 research engine and the API is unstable. The zero-knowledge (`sparq-zk`) and multi-party-computation (`sparq-mpc`) surfaces are **research scaffolds shipped for experimentation only**: no external accredited cryptographer has reviewed them, the MPC protocols are honest-majority semi-honest only, and this release makes **no** soundness, security or privacy claim for either. Do not present their output as a production-grade guarantee. See [SECURITY.md](https://github.com/${{ github.repository }}/blob/${{ needs.setup.outputs.version }}/SECURITY.md) for the full scope and caveats. <!-- privacy-claims-allow: NEGATIVE caveat — states the ABSENCE of any soundness/privacy claim and that external audit is pending; issue #2552 -->
 
             **Supply chain:** each release carries a CycloneDX SBOM per binary (`*-${{ needs.setup.outputs.version }}.sbom.cdx.json`, including the GUI shell `sparq-gui-${{ needs.setup.outputs.version }}.sbom.cdx.json`), runtime + full-build CycloneDX SBOMs for the published npm/WASM client (`sparq-js-*`) and shared browser client (`sparq-js-client-*`), and a VEX (`sparq-${{ needs.setup.outputs.version }}.vex.cdx.json`) stating the exploitability of every advisory the dependency policy ignores. All artifacts (archives, GUI bundles, SBOMs, VEX) are SLSA build-provenance attested — verify with `gh attestation verify <file> --repo ${{ github.repository }}`.
           fail_on_unmatched_files: true

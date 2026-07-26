@@ -67,6 +67,34 @@ that changed — the **import** name stays `sparq` (`import sparq`), and no crat
 name is affected. Done in `crates/sparq-py/pyproject.toml` (`[project] name = "sparq-rdf"` +
 `[tool.maturin] module-name = "sparq"`); see the Python wheels section below.
 
+## 0b. v0.1.0 ships ahead of the external ZK review (issue #2552)
+
+**Decision (maintainer, issue #2552, 2026-07-26): v0.1.0 goes out without waiting for the
+external accredited-cryptographer review of the ZK estate (bead `sq-qhy4`), carrying
+experimental warnings instead.** Recorded here because it is a release-scope decision and
+nothing in CI encodes it: there is no audit gate in `release.yml`, `release-plz.yml`,
+`release-plz.toml` or either release guard, and there never was — the review is a P0 task,
+not a release blocker.
+
+What the release ships instead of the review, and what must stay true of every future
+release while `sq-qhy4` is open:
+
+- The GitHub Release body carries an **Experimental** paragraph naming `sparq-zk` and
+  `sparq-mpc` as research scaffolds, stating that no external accredited cryptographer has
+  reviewed them and that the release makes no soundness/security/privacy claim for either,
+  and linking `SECURITY.md`. It is pinned by
+  `scripts/tests/test_release_publish_guard.py::TestReleaseCarriesTheExperimentalZkCaveat`
+  — the release notes are the one surface a downloader who never opens the repo still
+  reads, so it is a test, not a convention.
+- `SECURITY.md` (§ *Scope and a critical caveat*), `README.md`, `crates/sparq-zk/README.md`,
+  `crates/sparq-mpc/README.md`, `skills/zk-query-proofs/SKILL.md` and `skills/mpc/SKILL.md`
+  already carry the matching "research scaffold / not externally audited / semi-honest
+  only" language, and `scripts/check-privacy-claims.sh` gates against any unqualified
+  soundness or privacy claim creeping back in.
+
+The one thing this decision does **not** license: presenting a ZK "verified" result or an
+MPC run as a production-grade guarantee anywhere. That stays false until `sq-qhy4` closes.
+
 ## 1. Version bump
 
 The version lives in **one place**: `[workspace.package] version` in the root `Cargo.toml`
@@ -97,6 +125,12 @@ git push jeswr vX.Y.Z
 
 Pushing the tag triggers `.github/workflows/release.yml`:
 
+0. **publish-cadence guard** — the `setup` job runs
+   `scripts/release-interval-guard.py --enforce --released-tag vX.Y.Z` before anything is
+   built. If the previous release was less than 24h ago the job fails and **every** job
+   below it is blocked (they all depend on `setup`). See §8d — this is the tag-push half
+   of the at-most-one-release-per-day policy. The tag stays pushed; delete it
+   (`git push --delete <remote> vX.Y.Z`) and re-push once the window has passed.
 1. **package** — builds `sparq-cli` for every hardware tier (same matrix as `dist.yml`:
    arm64/x64 darwin, x86-64 baseline/v2/v3/v4 + arm64 Linux, x64/arm64 Windows) and packages
    each as `sparq-cli-vX.Y.Z-<tier>.tar.gz` (`.zip` on Windows) containing the binary,
@@ -360,10 +394,16 @@ tag-cutting). This is the "config-flip" the design record (§6 item 4) calls "th
 > put a provenance link on the crates.io page (no upstream scheme exists, unlike npm/PyPI). The
 > "do not describe a crates.io publish as signed" caveat in §4 is unchanged.
 
-### 8d. Publish-rate protections (issue #1135) — what stops a runaway release
+### 8d. Publish-rate protections (issues #1135, #2552) — what stops a runaway release
 
-**A crates.io version can never be unpublished.** Three protections stand between an
-automated pipeline and the registry. All three are already in place; none of them is what
+**The policy: at most one release per day.** `MIN_RELEASE_INTERVAL` in
+`scripts/release-interval-guard.py` is the single constant that states it (24h), and it is
+enforced at **both** points a release can start — the Release-PR path (`release-plz.yml`)
+and the `v*` tag push (`release.yml`). There is no override flag: releasing inside the
+window is done by hand, deliberately.
+
+**A crates.io version can never be unpublished.** Four protections stand between an
+automated pipeline and the registry. All four are already in place; none of them is what
 you flip.
 
 1. **The Release PR can never be armed.** `scripts/release_pr_guard.py` is the single
@@ -391,7 +431,30 @@ you flip.
    tag list, unparseable date, unreachable crates.io, a future-dated last release. A
    definitive crates.io 404 is the only accepted "never published" answer. There is no
    override flag: publishing inside the window is done by hand, consciously.
-3. **Version-group coverage.** The same guard refuses when a crate cargo *would* publish is
+3. **The same interval, on the tag-push path** (issue #2552). Protection 2 only covers
+   releases that go through the Release PR. §3's canonical instruction — push a `vX.Y.Z`
+   tag — fires `release.yml` **directly**, which was previously uncadenced: a hand-pushed
+   tag (or a script pushing one) could cut a release minutes after the last. The guard now
+   also runs in `release.yml`'s `setup` job, the job every other job there depends on, so a
+   refusal stops the archives, the SBOM/VEX, the GitHub Release and the ghcr image.
+
+   It runs there with `--released-tag vX.Y.Z`, and that flag is load-bearing: on a tag push
+   `v<workspace version>` is already in the tag list, so without it the guard takes its
+   "already tagged, nothing to release" branch and allows unconditionally. `--released-tag`
+   excludes the tag being cut and suppresses that branch, so the interval is measured
+   against the *previous* release. It refuses if handed anything that is not a `vX.Y.Z`
+   tag.
+
+   It is **unconditional** — `workflow_dispatch` builds are guarded too. They look like a
+   developer/test path (pre-release, `dev-`-prefixed image tags), but the Release they
+   create fires `release: published`, and `publish.yml`'s `npm` job runs on *any* `release`
+   event, so a dispatch reaches a registry as well. Two consequences: `inputs.tag` on a
+   dispatch **must** be a `vX.Y.Z` tag (a `-dev` suffix is fine), and the unbounded way to
+   exercise the pipeline is a local build, not a dispatch.
+   `scripts/tests/test_release_publish_guard.py` pins the step's `run:`, that it carries
+   no `if:` and no `continue-on-error`, the `fetch-depth: 0` checkout it depends on, and
+   that no job in `release.yml` escapes `setup`.
+4. **Version-group coverage.** The same guard refuses when a crate cargo *would* publish is
    absent from `release-plz.toml`'s `version_group` — release-plz would version it
    independently of the locked workspace version and publish it anyway, so what ships would
    not be what the config describes. While `publish = false` this is a loud warning; it
