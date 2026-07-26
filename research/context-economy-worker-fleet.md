@@ -152,8 +152,14 @@ implementation run that is ~100–400k Opus input tokens of pure overhead per wo
 (estimate) — which would dwarf everything else in this record. **RESOLVED 2026-07-17:
 the §5 pilot E canary found the hook does NOT fire in fresh-HOME headless runs with the
 committed settings — but only via a fragile config interaction; see the pilot E RESULT
-in §5.** The fix is trivial either way (command-hook prefilter on the
-arming pattern, or a worker-mode settings override in the container). The `SessionStart`
+in §5.** *Update (#2458):* the "command-hook prefilter" fix sketched earlier here is
+**not implementable** — verified against the shipped Claude Code binary (v2.1.177):
+hook matchers match tool names only (no command-content syntax), agent hooks have no
+prefilter field, a sibling command hook cannot suppress an agent hook, and settings
+layers merge hooks additively (an overlay cannot remove a project hook). The one
+supported lever is the `disableAllHooks` setting; the committed worker-mode override
+`scripts/worker-claude-settings.json` sets it, for the harness to select via
+`claude -p --settings scripts/worker-claude-settings.json`. The `SessionStart`
 bd hook provably no-ops in-container (`bd` not installed; script exits 0).
 
 ## 2. Technique survey (what the field actually supports)
@@ -246,9 +252,10 @@ falsified approaches, and cache key / invalidation.
   settings; firing behavior in fresh-HOME `claude -p` **unverified**.
 - **Vs the falsifications**: not a prompt technique at all — overhead removal; no new
   tooling enters the loop.
-- **Cache key/invalidation**: n/a. Fix = scope the matcher via a cheap command-hook
-  prefilter (only escalate on the arming pattern) or ship a worker-mode settings
-  override in the container image.
+- **Cache key/invalidation**: n/a. Fix (#2458): matcher/prefilter scoping is
+  unsupported by the harness (see §1.5 update) — the shipped fix is the worker-mode
+  settings override `scripts/worker-claude-settings.json` (`disableAllHooks: true`),
+  which the worker launch selects via `--settings`.
 
 ### R2 — Worker-tier AGENTS.md (≤32 KiB worker-relevant core) + fix codex truncation
 
@@ -448,9 +455,11 @@ probes (worker-shaped: isolated `$HOME` + copied credential, cwd at a checkout r
 3. When the agent hook did fire in probes, its `model: "opus"` pin was **not honored**
    (the hook agent ran on a haiku snapshot id) — the worst-case Opus overhead estimate
    in §1.5 may overstate the price even in the firing configuration.
-Action: the matcher fix (command-hook prefilter on the `gh pr merge --auto` arming
-pattern, or a worker-mode settings override) is still the right hardening so the
-outcome stops depending on an undocumented interaction; tracked as a sparq-side
+Action: harden so the outcome stops depending on an undocumented interaction. Per the
+#2458 verification (see §1.5), the command-hook prefilter is **not implementable** on
+the shipped binary; the supported lever is a worker-mode settings override that sets
+`disableAllHooks` — shipped as `scripts/worker-claude-settings.json`, selected via
+`claude -p --settings scripts/worker-claude-settings.json`. Tracked as a sparq-side
 follow-up issue (dedupe marker: audit-2026-07-17).
 
 **Sequencing**: P0 → E → A → {B, D in parallel, separate accounts} → C. Every pilot's
