@@ -370,10 +370,31 @@ below-parallel-threshold results; XML/CSV/TSV stay buffered. **Error mid-stream 
 contract):** the status is chosen from the *first* chunk, so a failure detected before any byte
 (parse error, or a row/byte cap / deadline the engine confirms before the header) still returns
 the correct `400` / `413` / `503`. But once the header has been flushed for a genuinely
-multi-chunk result, the HTTP status is committed: a later cap/deadline trip is surfaced by
-**truncating the chunked body** (the stream ends without its terminating zero-length chunk, so
-the client sees a broken/incomplete response) — a streamed `200` cannot retroactively become a
-`413`/`503`.
+multi-chunk result, the HTTP status is committed: a later cap/deadline trip can only **truncate**
+the body — a streamed `200` cannot retroactively become a `413`/`503`.
+
+<!-- [SONNET-4.6] sq-7d3dj.26 -->
+**Truncation safety (the invariant).** *A client MUST NOT be able to mistake a truncated stream
+for a complete result.* Two mechanisms enforce it, the second strictly on top of the first:
+
+1. **The document is never closed on a truncation.** A complete `sparql-results+json` body ends
+   with `]}}`. The server WITHHOLDS the document-closing chunk until the engine confirms it
+   produced the whole result, and DROPS it on any mid-stream abort — so a truncated body is not
+   valid JSON and any conformant parser errors instead of silently accepting a short result.
+   This is the floor guarantee and it needs no client opt-in.
+2. **The reason is reported out of band.** A client that sends `TE: trailers` gets a `Trailer`
+   response header plus, after the last data chunk, either `X-Sparq-Complete: true` or
+   `X-Sparq-Truncated: <reason>` where the reason is `deadline` | `max-rows` | `max-bytes` |
+   `cancelled` | `panic` | `error` — the same classification the pre-first-byte path maps to
+   `503`/`413`. A client that did NOT negotiate trailers instead sees the chunked stream abort
+   **without its terminating zero-length chunk** (a transport error), since hyper would drop a
+   trailers frame for it anyway.
+
+A worker that dies mid-result (an engine panic) is treated as a truncation, not a completion:
+the completeness claim is only ever made when the engine itself returned success. **A
+well-formed, correctly-terminated SHORT `200` is a forbidden outcome** — `--max-results` remains
+an honest refusal, never a silent truncation, and hitting it mid-stream drops the closing `]}}`
+rather than emitting a clean short document.
 
 <!-- [OPUS-4.8] sq-7d3dj.34.1 -->
 **Single parse per request (HTTP floor).** The read path parses each request query with

@@ -6442,7 +6442,12 @@ async fn run_query_pinned(
             // algebra already parsed in `prepare` via the engine's `*_prepared` entry points —
             // no second parse per request.
             if !is_ask && fmt == Format::Json {
-                return stream_select_json(gen, prepared.query, budget, head_only, allow, qr_guard, &config)
+                // [SONNET-4.6] (sq-7d3dj.26) Whether THIS client negotiated HTTP trailers
+                // decides how a mid-stream truncation is signalled (trailer vs. an aborted
+                // chunked framing) — see `StreamingJsonBody`. Resolved here, while the
+                // request headers are still in scope.
+                let trailers_ok = client_accepts_trailers(headers);
+                return stream_select_json(gen, prepared.query, budget, head_only, allow, qr_guard, trailers_ok, &config)
                     .await;
             }
             let pquery = prepared.query;
@@ -6745,6 +6750,258 @@ fn render_select(
 /// `blocking_send`) rather than letting a large serialised result pile up in server memory.
 const STREAM_CHANNEL_CAP: usize = 4;
 
+/// [SONNET-4.6] (sq-7d3dj.26) Trailer field asserting the streamed body is the COMPLETE result.
+/// Sent (value `true`) only after the engine has confirmed it produced every chunk.
+const TRAILER_COMPLETE: &str = "x-sparq-complete";
+
+/// [SONNET-4.6] (sq-7d3dj.26) Trailer field reporting a TRUNCATED streamed body; the value is
+/// the reason from [`truncation_reason`].
+const TRAILER_TRUNCATED: &str = "x-sparq-truncated";
+
+/// [SONNET-4.6] (sq-7d3dj.26) One item on the engine-worker → HTTP-body channel.
+///
+/// [`StreamItem::Done`] is a load-bearing EXPLICIT end-of-stream marker, not a convenience:
+/// without it a worker that dies mid-result (a panic in the engine or the serialiser) is
+/// indistinguishable — from the body's side — from a worker that finished, and the body would
+/// then advertise a truncated result as complete. Channel-closed-without-a-marker therefore
+/// MEANS truncated.
+enum StreamItem {
+    /// One serialised SPARQL-results-JSON chunk, in order.
+    Chunk(Bytes),
+    /// The engine returned `Ok` — every chunk of the complete result has been handed over.
+    Done,
+    /// The engine returned `Err` (budget row/byte cap, deadline, cancellation) — the chunks
+    /// already handed over are a PREFIX of a result that will never be finished.
+    Failed(String),
+}
+
+/// [SONNET-4.6] (sq-7d3dj.26) Maps the engine's abort message onto the stable
+/// `X-Sparq-Truncated` reason vocabulary. Mirrors the classification
+/// [`engine_error_response`] applies when the same abort lands BEFORE the first byte, so a
+/// client sees the same cause named either side of the status commit.
+fn truncation_reason(e: &str) -> &'static str {
+    if e.contains("query budget exceeded (timeout)") {
+        "deadline"
+    } else if e.contains("query budget exceeded (max-rows)") {
+        "max-rows"
+    } else if e.contains("query budget exceeded (max-bytes)") {
+        "max-bytes"
+    } else if e.contains("query budget exceeded (cancelled)") {
+        "cancelled"
+    } else {
+        "error"
+    }
+}
+
+/// [SONNET-4.6] (sq-7d3dj.26) `true` when the request's `TE` header lists `trailers`
+/// (RFC 9110 §10.1.4) — i.e. the client declared it can receive trailer fields. hyper only
+/// writes a trailers frame for such a client, so this also decides how a mid-stream truncation
+/// is signalled: a trailer for a client that asked for one, an aborted chunked framing (no
+/// terminating zero-length chunk) for one that did not.
+fn client_accepts_trailers(headers: &HeaderMap) -> bool {
+    headers.get_all(header::TE).iter().any(|value| {
+        value.to_str().is_ok_and(|raw| {
+            raw.split(',').any(|token| {
+                // Strip any `;q=` weight before comparing the transfer coding name.
+                token
+                    .split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .eq_ignore_ascii_case("trailers")
+            })
+        })
+    })
+}
+
+/// [SONNET-4.6] (sq-7d3dj.26) Where a [`StreamingJsonBody`] is in its lifecycle.
+#[derive(Clone, Copy)]
+enum BodyState {
+    /// Still forwarding chunks from the engine worker.
+    Streaming,
+    /// The outcome is known; the next poll emits the trailers frame. `None` = complete,
+    /// `Some(reason)` = truncated for that reason.
+    Trailers(Option<&'static str>),
+    /// Nothing further to emit.
+    Finished,
+}
+
+/// [SONNET-4.6] (sq-7d3dj.26) **Truncation-safe** streamed SPARQL-results-JSON body.
+///
+/// Once the first byte of a `200 OK` body is on the wire the status is committed, so a
+/// mid-stream abort (deadline, `--max-results` / `--max-query-rows` row cap, `--max-query-bytes`
+/// byte cap, a `DELETE /queries/{id}` cancellation, or an engine panic) can only TRUNCATE the
+/// body — it can never retract into a 413/503. The load-bearing invariant
+/// (`research/wave-d-pull-streaming-response-body.md` §6) is therefore:
+///
+/// > A client MUST NOT be able to mistake a truncated stream for a complete result.
+///
+/// Two mechanisms enforce it; the second sits strictly ON TOP of the first and never
+/// substitutes for it:
+///
+/// 1. **Unterminated JSON — the floor, correct-by-construction.** A complete
+///    `sparql-results+json` document ends with the closing `]}}`, and those bytes only ever
+///    arrive in the engine's FINAL chunk. This body therefore WITHHOLDS any chunk that closes
+///    the document until the worker has confirmed completion ([`StreamItem::Done`]); on a
+///    truncation the withheld chunk is DROPPED and never written, so the received body is not
+///    valid JSON and any conformant parser errors instead of silently accepting a short result
+///    (the QLever/Virtuoso baseline). This is not theoretical: the engine's streaming
+///    single-pattern scan appends `]}}` when its cooperative budget check breaks the loop, and
+///    only its caller then turns the sticky flag into an `Err` — so without the hold-back the
+///    wire would carry a well-formed, correctly-terminated SHORT `200`, exactly the outcome the
+///    design forbids.
+/// 2. **A signal the client cannot miss.** If the client negotiated trailers (`TE: trailers`)
+///    the body closes normally and emits `X-Sparq-Truncated: <reason>` (`deadline` | `max-rows`
+///    | `max-bytes` | `cancelled` | `panic` | `error`), or `X-Sparq-Complete: true` on the happy
+///    path. If it did not — hyper would drop a trailers frame anyway — the body instead FAILS
+///    the frame, which aborts the chunked stream without its terminating zero-length chunk, so
+///    the client sees a transport error. Either way the truncation is loud.
+///
+/// The hold-back costs no latency on the happy path: only the document-closing chunk is ever
+/// withheld, and it is released the moment the worker reports completion.
+struct StreamingJsonBody {
+    /// Items received but not yet processed: the two chunks buffered before the status was
+    /// committed, plus at most one push-back from the hold-back below.
+    queued: std::collections::VecDeque<StreamItem>,
+    /// The engine channel; `None` once a terminal outcome has been observed.
+    rx: Option<tokio::sync::mpsc::Receiver<StreamItem>>,
+    /// The withheld document-closing chunk (mechanism 1).
+    held: Option<Bytes>,
+    /// The client negotiated `TE: trailers`.
+    trailers_ok: bool,
+    state: BodyState,
+}
+
+impl StreamingJsonBody {
+    /// `true` when `chunk` carries the bytes that CLOSE the SPARQL-results document.
+    ///
+    /// Only the engine's final chunk can end this way: every intermediate flush boundary lands
+    /// immediately after a solution object, whose last bytes are `"}` / `}}` — a `]` can never
+    /// precede them, because the `]` that closes `results.bindings` is written exactly once,
+    /// together with the two closing braces, at the end of the document.
+    fn closes_document(chunk: &Bytes) -> bool {
+        chunk.ends_with(b"]}}")
+    }
+
+    /// Records a truncation: DROPS the withheld closing bytes (so the body can never be parsed
+    /// as a complete result) and picks the out-of-band signal. Returns `Some(err)` when the
+    /// caller must fail the frame — no trailer was negotiated, so the aborted framing IS the
+    /// signal — and `None` when the pending trailer will carry the reason instead.
+    fn truncate(&mut self, reason: &'static str) -> Option<std::io::Error> {
+        self.held = None;
+        self.rx = None;
+        self.queued.clear();
+        if self.trailers_ok {
+            self.state = BodyState::Trailers(Some(reason));
+            None
+        } else {
+            self.state = BodyState::Finished;
+            Some(std::io::Error::other(format!(
+                "streamed SPARQL result truncated ({}); the body is deliberately unterminated",
+                reason
+            )))
+        }
+    }
+}
+
+impl http_body::Body for StreamingJsonBody {
+    type Data = Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Bytes>, Self::Error>>> {
+        use std::task::Poll;
+        let this = self.get_mut();
+        loop {
+            // Copy the state out first: every arm below mutates `this`.
+            let state = this.state;
+            match state {
+                BodyState::Finished => return Poll::Ready(None),
+                BodyState::Trailers(reason) => {
+                    this.state = BodyState::Finished;
+                    // Without `TE: trailers` hyper drops the frame: the truncation path has
+                    // already failed the body instead, and a complete body needs no signal.
+                    if !this.trailers_ok {
+                        return Poll::Ready(None);
+                    }
+                    let (name, value) = match reason {
+                        None => (TRAILER_COMPLETE, "true"),
+                        Some(r) => (TRAILER_TRUNCATED, r),
+                    };
+                    let mut trailers = HeaderMap::new();
+                    trailers.insert(
+                        header::HeaderName::from_static(name),
+                        header::HeaderValue::from_static(value),
+                    );
+                    return Poll::Ready(Some(Ok(http_body::Frame::trailers(trailers))));
+                }
+                BodyState::Streaming => {
+                    let next = match this.queued.pop_front() {
+                        Some(item) => Some(item),
+                        None => {
+                            // Resolve the channel poll into an owned value BEFORE touching
+                            // `this` again, so the receiver borrow is over by then.
+                            let polled = match this.rx.as_mut() {
+                                None => {
+                                    this.state = BodyState::Finished;
+                                    return Poll::Ready(None);
+                                }
+                                Some(rx) => rx.poll_recv(cx),
+                            };
+                            match polled {
+                                Poll::Pending => return Poll::Pending,
+                                Poll::Ready(item) => item,
+                            }
+                        }
+                    };
+                    // The worker vanished without a terminal marker — a panic in the engine
+                    // or the serialiser. Truncated, never "complete".
+                    let Some(item) = next else {
+                        match this.truncate("panic") {
+                            Some(e) => return Poll::Ready(Some(Err(e))),
+                            None => continue,
+                        }
+                    };
+                    match item {
+                        StreamItem::Chunk(bytes) => {
+                            if Self::closes_document(&bytes) {
+                                // Mechanism 1: withhold the closing bytes until the worker
+                                // confirms the result is complete.
+                                if let Some(previous) = this.held.replace(bytes) {
+                                    return Poll::Ready(Some(Ok(http_body::Frame::data(previous))));
+                                }
+                                continue;
+                            }
+                            if let Some(previous) = this.held.take() {
+                                // Defensive: a chunk followed the one we took for the last, so
+                                // it was not the last after all — release it and re-queue this.
+                                this.queued.push_front(StreamItem::Chunk(bytes));
+                                return Poll::Ready(Some(Ok(http_body::Frame::data(previous))));
+                            }
+                            return Poll::Ready(Some(Ok(http_body::Frame::data(bytes))));
+                        }
+                        StreamItem::Done => {
+                            this.rx = None;
+                            this.state = BodyState::Trailers(None);
+                            if let Some(closing) = this.held.take() {
+                                // Complete: the closing bytes are safe to put on the wire.
+                                return Poll::Ready(Some(Ok(http_body::Frame::data(closing))));
+                            }
+                            continue;
+                        }
+                        StreamItem::Failed(e) => match this.truncate(truncation_reason(&e)) {
+                            Some(err) => return Poll::Ready(Some(Err(err))),
+                            None => continue,
+                        },
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// [OPUS-4.8] (sq-7d3dj.34.2) Streams a SELECT result as SPARQL-results JSON.
 ///
 /// The engine runs on a `spawn_blocking` worker and hands each ~64 KiB chunk
@@ -6762,10 +7019,13 @@ const STREAM_CHANNEL_CAP: usize = 4;
 /// last row).
 ///
 /// **Error mid-stream.** Once the header has been flushed the status is committed and cannot
-/// change; a later budget / deadline trip is surfaced as a body error, which aborts the
-/// chunked stream WITHOUT its terminating zero-length chunk, so the client observes a
-/// truncated / broken response. This is the honest default (documented in the crate docs +
-/// the `http-server` SKILL): a streamed body cannot retroactively become a 413/503.
+/// change; a later budget / deadline trip can only TRUNCATE the body. [`StreamingJsonBody`]
+/// owns that contract — the document-closing `]}}` is withheld until the engine confirms
+/// completion, so a truncated body is never valid JSON, and the reason is reported either as
+/// an `X-Sparq-Truncated` trailer or (for a client that did not negotiate trailers) as an
+/// aborted chunked framing. This is the honest default (documented in the crate docs + the
+/// `http-server` SKILL): a streamed body cannot retroactively become a 413/503, but it can
+/// never be mistaken for a complete result either.
 async fn stream_select_json(
     gen: PinnedGen,
     // [OPUS-4.8] (sq-7d3dj.34.1) The query PARSED ONCE in `prepare` — the engine runs it via
@@ -6778,24 +7038,32 @@ async fn stream_select_json(
     // signature compiles in both feature states without a conditional type. Moved into the worker
     // so the row is present for the full streaming evaluation; dropped when the worker exits.
     qr_guard: Option<Box<dyn std::any::Any + Send>>,
+    // [SONNET-4.6] (sq-7d3dj.26) The client sent `TE: trailers` (see `client_accepts_trailers`).
+    trailers_ok: bool,
     config: &ServerConfig,
 ) -> Response {
     let ct = Format::Json.select_content_type();
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<Bytes, String>>(STREAM_CHANNEL_CAP);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamItem>(STREAM_CHANNEL_CAP);
     tokio::task::spawn_blocking(move || {
         // Hold the registry guard alive for the entire streaming evaluation.
         let _guard = qr_guard;
         with_engine_scope_allow(&allow, || {
             let graph = gen.snapshot();
-            let mut sink = |chunk: String| match tx.blocking_send(Ok(Bytes::from(chunk.into_bytes()))) {
+            let mut sink = |chunk: String| match tx.blocking_send(StreamItem::Chunk(Bytes::from(chunk.into_bytes()))) {
                 Ok(()) => std::ops::ControlFlow::Continue(()),
                 // The receiver was dropped — the client disconnected (or a HEAD request
                 // stopped reading). Abandon the rest of the work.
                 Err(_) => std::ops::ControlFlow::Break(()),
             };
-            if let Err(e) = sparq_engine::query_json_stream_prepared_with_budget(graph, &query, &budget, &mut sink) {
-                let _ = tx.blocking_send(Err(e));
-            }
+            let outcome = sparq_engine::query_json_stream_prepared_with_budget(graph, &query, &budget, &mut sink);
+            // [SONNET-4.6] (sq-7d3dj.26) ALWAYS post a terminal marker: the body side treats
+            // "channel closed without one" as a truncation (a panicking worker), so the
+            // completion claim can only ever come from the engine actually returning `Ok`.
+            // A send failure here just means the client already went away.
+            let _ = tx.blocking_send(match outcome {
+                Ok(()) => StreamItem::Done,
+                Err(e) => StreamItem::Failed(e),
+            });
             // `gen` (the generation pin) is held until the worker returns, so every snapshot
             // borrow above is valid for the whole streamed evaluation.
         });
@@ -6804,16 +7072,20 @@ async fn stream_select_json(
     // Await the first item under the same wall-clock cap the buffered path uses, so a
     // pre-first-byte failure still maps to the right status.
     let first = match recv_first_chunk(&mut rx, config).await {
-        Ok(Some(Ok(bytes))) => bytes,
-        Ok(Some(Err(e))) => return engine_error_response(&e, config, true),
-        Ok(None) => return execution_error("query produced no result stream"),
+        Ok(Some(StreamItem::Chunk(bytes))) => bytes,
+        Ok(Some(StreamItem::Failed(e))) => return engine_error_response(&e, config, true),
+        // The engine reported completion without emitting anything, or the worker died before
+        // the first chunk. Nothing is committed, so this is still an honest 500.
+        Ok(Some(StreamItem::Done)) | Ok(None) => {
+            return execution_error("query produced no result stream")
+        }
         Err(()) => return timeout_response(config),
     };
 
     // Peek the second item: a single-chunk result is returned buffered (Content-Length);
     // a multi-chunk result streams.
     match rx.recv().await {
-        None => {
+        Some(StreamItem::Done) => {
             let len = first.len();
             let body = if head_only {
                 axum::body::Body::empty()
@@ -6832,10 +7104,15 @@ async fn stream_select_json(
         // document, or a cooperative deadline trip. Because we buffer the first chunk before
         // committing a status, NOTHING has been flushed to the socket yet, so we still return
         // the correct refusal (413 / 503), exactly like the buffered path — never a truncated
-        // 200. (A cap tripped on a genuinely multi-chunk result — first two items both `Ok` —
-        // cannot be un-committed and is truncated mid-stream; see below.)
-        Some(Err(e)) => engine_error_response(&e, config, true),
-        Some(Ok(second)) => {
+        // 200. (A cap tripped on a genuinely multi-chunk result — both peeked items are
+        // chunks — cannot be un-committed and is truncated mid-stream; see below.)
+        Some(StreamItem::Failed(e)) => engine_error_response(&e, config, true),
+        // [SONNET-4.6] (sq-7d3dj.26) The worker vanished without a terminal marker (a panic in
+        // the engine or the serialiser) having produced exactly one chunk. Nothing has been
+        // flushed to the socket, so the status is NOT yet committed: answer with the honest
+        // 500 rather than a truncated 200.
+        None => execution_error("streaming query worker ended before completing the result"),
+        Some(StreamItem::Chunk(second)) => {
             if head_only {
                 // HEAD: status + headers only. Dropping the receiver stops the worker.
                 drop(rx);
@@ -6846,28 +7123,35 @@ async fn stream_select_json(
                     .unwrap();
             }
             // Stream first + second + the remaining channel items under chunked
-            // transfer-encoding. A channel `Err` (a post-header budget/deadline trip) is
-            // mapped to a body error → the chunked stream aborts without its terminating
-            // zero-length chunk (truncated response; the 200 status is already committed).
-            let mut prefix: std::collections::VecDeque<Result<Bytes, String>> =
+            // transfer-encoding, through the truncation-safe body: a post-header budget /
+            // deadline trip (or a dead worker) drops the document-closing bytes and reports
+            // the reason, so the 200 — already committed — can never be read as complete.
+            let mut queued: std::collections::VecDeque<StreamItem> =
                 std::collections::VecDeque::with_capacity(2);
-            prefix.push_back(Ok(first));
-            prefix.push_back(Ok(second));
-            let body = axum::body::Body::from_stream(futures_util::stream::unfold(
-                (prefix, rx),
-                |(mut prefix, mut rx)| async move {
-                    let item = match prefix.pop_front() {
-                        Some(it) => Some(it),
-                        None => rx.recv().await,
-                    };
-                    item.map(|it| (it.map_err(std::io::Error::other), (prefix, rx)))
-                },
-            ));
-            Response::builder()
+            queued.push_back(StreamItem::Chunk(first));
+            queued.push_back(StreamItem::Chunk(second));
+            let body = axum::body::Body::new(StreamingJsonBody {
+                queued,
+                rx: Some(rx),
+                held: None,
+                trailers_ok,
+                state: BodyState::Streaming,
+            });
+            let builder = Response::builder()
                 .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, ct)
-                .body(body)
-                .unwrap()
+                .header(header::CONTENT_TYPE, ct);
+            // RFC 9110 §6.6.1: announce the trailer fields that may follow the body, so a
+            // client knows to look for the completeness verdict. Only for a client that
+            // negotiated them — hyper drops the frame otherwise.
+            let builder = if trailers_ok {
+                builder.header(
+                    header::TRAILER,
+                    format!("{}, {}", TRAILER_COMPLETE, TRAILER_TRUNCATED),
+                )
+            } else {
+                builder
+            };
+            builder.body(body).unwrap()
         }
     }
 }
@@ -6876,15 +7160,217 @@ async fn stream_select_json(
 /// under the read wall-clock cap (`query_timeout + TIMEOUT_GRACE`), mirroring
 /// [`await_worker`]. `Err(())` means the cap elapsed before the worker produced anything.
 async fn recv_first_chunk(
-    rx: &mut tokio::sync::mpsc::Receiver<Result<Bytes, String>>,
+    rx: &mut tokio::sync::mpsc::Receiver<StreamItem>,
     config: &ServerConfig,
-) -> Result<Option<Result<Bytes, String>>, ()> {
+) -> Result<Option<StreamItem>, ()> {
     match config.query_timeout {
         Some(t) => match tokio::time::timeout(t + TIMEOUT_GRACE, rx.recv()).await {
             Ok(item) => Ok(item),
             Err(_elapsed) => Err(()),
         },
         None => Ok(rx.recv().await),
+    }
+}
+
+#[cfg(test)]
+mod truncation_safety_tests {
+    //! [SONNET-4.6] (sq-7d3dj.26) The mid-stream truncation-safety invariant for the
+    //! pull-streaming SELECT body: *a client MUST NOT be able to mistake a truncated stream
+    //! for a complete result*. These pin [`StreamingJsonBody`]'s side of it directly (the
+    //! end-to-end HTTP assertion, over the real engine + budget, is
+    //! `tests/stream_truncation.rs`).
+    use super::*;
+    use http_body::Body as _;
+
+    /// A head chunk and a document-CLOSING chunk, together a complete two-chunk document.
+    const HEAD: &str = "{\"head\":{\"vars\":[\"s\"]},\"results\":{\"bindings\":[{\"s\":{\"type\":\"uri\",\"value\":\"http://ex/a\"}}";
+    const TAIL: &str = ",{\"s\":{\"type\":\"uri\",\"value\":\"http://ex/b\"}}]}}";
+
+    /// What draining a body to its end produced.
+    struct Drained {
+        body: Vec<u8>,
+        trailers: Option<HeaderMap>,
+        /// The body FAILED a frame — hyper aborts the chunked stream without its terminating
+        /// zero-length chunk, so the client sees a transport error.
+        failed: bool,
+    }
+
+    impl Drained {
+        fn text(&self) -> String {
+            String::from_utf8(self.body.clone()).unwrap()
+        }
+        fn trailer(&self, name: &str) -> Option<String> {
+            self.trailers
+                .as_ref()?
+                .get(name)
+                .map(|v| v.to_str().unwrap().to_owned())
+        }
+    }
+
+    /// Feeds `items` through a real bounded channel (closed after the last one) into a
+    /// `StreamingJsonBody`, then drains every frame.
+    async fn drain(items: Vec<StreamItem>, trailers_ok: bool) -> Drained {
+        let (tx, rx) = tokio::sync::mpsc::channel(items.len().max(1));
+        for item in items {
+            tx.try_send(item).unwrap();
+        }
+        drop(tx); // channel closes after the queued items
+        let mut body = StreamingJsonBody {
+            queued: std::collections::VecDeque::new(),
+            rx: Some(rx),
+            held: None,
+            trailers_ok,
+            state: BodyState::Streaming,
+        };
+        let mut out = Drained { body: Vec::new(), trailers: None, failed: false };
+        loop {
+            let frame =
+                std::future::poll_fn(|cx| std::pin::Pin::new(&mut body).poll_frame(cx)).await;
+            match frame {
+                None => return out,
+                Some(Err(_)) => {
+                    out.failed = true;
+                    return out;
+                }
+                Some(Ok(frame)) => match frame.into_data() {
+                    Ok(data) => out.body.extend_from_slice(&data),
+                    Err(frame) => out.trailers = frame.into_trailers().ok(),
+                },
+            }
+        }
+    }
+
+    fn chunk(s: &str) -> StreamItem {
+        StreamItem::Chunk(Bytes::from(s.as_bytes().to_vec()))
+    }
+
+    /// The happy path: every chunk INCLUDING the document-closing one reaches the client, the
+    /// body is valid `sparql-results+json`, and the trailer asserts completeness.
+    #[tokio::test]
+    async fn a_complete_stream_delivers_the_closing_bytes_and_claims_completeness() {
+        let out = drain(vec![chunk(HEAD), chunk(TAIL), StreamItem::Done], true).await;
+        assert!(!out.failed, "a complete stream must not fail a frame");
+        assert_eq!(out.text(), format!("{}{}", HEAD, TAIL));
+        assert!(out.text().ends_with("]}}"), "the document must be closed");
+        serde_json::from_slice::<serde_json::Value>(&out.body)
+            .expect("a complete stream must parse as JSON");
+        assert_eq!(out.trailer(TRAILER_COMPLETE).as_deref(), Some("true"));
+        assert_eq!(out.trailer(TRAILER_TRUNCATED), None);
+    }
+
+    /// THE LOAD-BEARING CASE. The engine's streaming scan appends `]}}` when its cooperative
+    /// row cap breaks the loop, and only THEN reports the abort — so the closing chunk and the
+    /// failure both arrive. The body must drop the closing chunk: the client receives an
+    /// UNPARSEABLE prefix plus an explicit truncation reason, never a clean short 200.
+    #[tokio::test]
+    async fn a_mid_stream_row_cap_abort_never_closes_the_document() {
+        let out = drain(
+            vec![
+                chunk(HEAD),
+                chunk(TAIL),
+                StreamItem::Failed("query budget exceeded (max-rows)".into()),
+            ],
+            true,
+        )
+        .await;
+        assert_eq!(out.text(), HEAD, "the document-closing chunk must be withheld");
+        assert!(!out.text().ends_with("]}}"), "a truncated body must NOT be closed");
+        serde_json::from_slice::<serde_json::Value>(&out.body)
+            .expect_err("a truncated body MUST fail to parse as JSON");
+        assert_eq!(out.trailer(TRAILER_TRUNCATED).as_deref(), Some("max-rows"));
+        assert_eq!(out.trailer(TRAILER_COMPLETE), None);
+    }
+
+    /// Same abort, but the client never sent `TE: trailers` — hyper would drop a trailers
+    /// frame, so the signal is the FAILED frame (an aborted chunked framing) instead. The
+    /// document still must not be closed.
+    #[tokio::test]
+    async fn without_negotiated_trailers_a_truncation_fails_the_framing() {
+        let out = drain(
+            vec![
+                chunk(HEAD),
+                chunk(TAIL),
+                StreamItem::Failed("query budget exceeded (timeout)".into()),
+            ],
+            false,
+        )
+        .await;
+        assert!(out.failed, "the aborted framing IS the signal without a trailer");
+        assert_eq!(out.text(), HEAD);
+        assert!(out.trailers.is_none());
+        serde_json::from_slice::<serde_json::Value>(&out.body)
+            .expect_err("a truncated body MUST fail to parse as JSON");
+    }
+
+    /// A worker that DIES mid-result (an engine / serialiser panic) closes the channel without
+    /// any terminal marker. That must read as a truncation, never as completion — this is the
+    /// case the explicit `Done` marker exists for.
+    #[tokio::test]
+    async fn a_worker_that_dies_without_a_marker_is_truncated_not_complete() {
+        let out = drain(vec![chunk(HEAD)], true).await;
+        assert_eq!(out.text(), HEAD);
+        assert_eq!(out.trailer(TRAILER_TRUNCATED).as_deref(), Some("panic"));
+        assert_eq!(out.trailer(TRAILER_COMPLETE), None);
+        serde_json::from_slice::<serde_json::Value>(&out.body)
+            .expect_err("a truncated body MUST fail to parse as JSON");
+    }
+
+    /// Each abort class the streamed path can hit is named distinctly, matching the status
+    /// `engine_error_response` would have returned had the abort landed pre-first-byte.
+    #[tokio::test]
+    async fn every_abort_class_gets_its_own_reason() {
+        for (error, reason) in [
+            ("query budget exceeded (timeout)", "deadline"),
+            ("query budget exceeded (max-rows)", "max-rows"),
+            ("query budget exceeded (max-bytes)", "max-bytes"),
+            ("query budget exceeded (cancelled)", "cancelled"),
+            ("some other execution failure", "error"),
+        ] {
+            assert_eq!(truncation_reason(error), reason, "reason for: {}", error);
+            let out = drain(
+                vec![chunk(HEAD), chunk(TAIL), StreamItem::Failed(error.into())],
+                true,
+            )
+            .await;
+            assert_eq!(out.trailer(TRAILER_TRUNCATED).as_deref(), Some(reason));
+            assert_eq!(out.text(), HEAD, "closing chunk withheld for: {}", error);
+        }
+    }
+
+    /// Only the document-closing chunk is ever withheld, so the hold-back costs no latency on
+    /// the chunks before it: a three-chunk stream delivers the first two immediately.
+    #[tokio::test]
+    async fn only_the_closing_chunk_is_withheld() {
+        let middle = ",{\"s\":{\"type\":\"uri\",\"value\":\"http://ex/m\"}}";
+        let out = drain(
+            vec![
+                chunk(HEAD),
+                chunk(middle),
+                chunk(TAIL),
+                StreamItem::Failed("query budget exceeded (max-rows)".into()),
+            ],
+            true,
+        )
+        .await;
+        assert_eq!(out.text(), format!("{}{}", HEAD, middle));
+    }
+
+    /// `TE` parsing: the transfer coding is matched case-insensitively, in a list, and with a
+    /// `q` weight stripped; anything else means "no trailers".
+    #[test]
+    fn te_trailers_negotiation_is_parsed() {
+        let with = |value: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::TE, header::HeaderValue::from_str(value).unwrap());
+            client_accepts_trailers(&headers)
+        };
+        assert!(with("trailers"));
+        assert!(with("gzip, trailers"));
+        assert!(with("Trailers"));
+        assert!(with("trailers;q=0.5"));
+        assert!(!with("gzip"));
+        assert!(!with(""));
+        assert!(!client_accepts_trailers(&HeaderMap::new()));
     }
 }
 
