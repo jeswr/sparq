@@ -13,12 +13,16 @@
 
 ## 0. Read this section before any other
 
-**Runner capacity is not currently a constraint, and the free-tier VM providers in the brief
-would give us less capacity than we already have for free.** Both conclusions are measured or
-cited below, and together they invert the premise the design was commissioned on. The
-maintainer's own framing — *"in the hopes that we do get to"* — is the correct one: this is
-contingency design, and the recommendation is to **not build the overflow substrate now**, but
-to install a cheap tripwire that tells us when (and whether) it would ever pay.
+**Runner capacity is not currently a constraint, and the free-tier VM providers named in the
+request would give us less capacity than we already have for free.** Both conclusions are
+measured or cited below.
+
+To be precise about what that does and does not overturn: the maintainer's framing — *"in the
+hopes that we do get to"* a worker-bound throughput — is exactly right, and this record does not
+dispute it. What the findings overturn is the **implicit assumption that always-free cloud VMs
+are where the extra capacity would come from.** They are not; the capacity is already sitting
+unused inside our GitHub account. So the recommendation is to **not build the overflow substrate
+now**, and instead install a cheap tripwire that says when — and whether — it would ever pay.
 
 Three findings drive everything else:
 
