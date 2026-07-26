@@ -29,6 +29,12 @@
 #      printed over a profile whose credentials cannot PutObject — the silent
 #      unretrievable run this whole module exists to prevent. So provision must FAIL,
 #      check must withhold READY, and the launcher must omit the profile instead.
+#   8. THE TRUST RELATIONSHIP IS CONVERGED AND CHECKED — the same failure one level down:
+#      create-role is skipped for an EXISTING same-named role, so one carrying a foreign or
+#      absent trust principal would be attached, pass every existence/membership check and
+#      be reported READY while EC2 cannot assume it and the box gets NO credentials.
+#      Provision must repair it (update-assume-role-policy) and check must withhold READY
+#      until it is repaired.
 #
 # Run:  bash scripts/tests/test_bench_s3_results.sh   (exit 0 = all pass, 1 = a failure)
 #
@@ -74,6 +80,17 @@ CALLS="$SANDBOX/aws-calls.log"
 #                    swallowed as "already attached".
 # Under `fresh` the profile carries the role only once add-role has actually been
 # recorded, so the provision path's post-attach verification is real rather than stubbed.
+#
+# ALSO orthogonal, AWS_STUB_ROLE_TRUST decides the trust document an EXISTING role reports
+# (`iam get-role --query Role.AssumeRolePolicyDocument`):
+#   unset/good  a correct ec2.amazonaws.com + sts:AssumeRole trust
+#   wrong       a same-named role trusting a DIFFERENT service — attachable, reports
+#               healthy, and yet EC2 cannot assume it, so the box gets no credentials
+#   none        a trust document with no statement at all
+#   encoded     the good document still URL-encoded, as the IAM API returns it on the wire
+# A `wrong`/`none` role becomes good once `iam update-assume-role-policy` has been recorded
+# in the SAME call log — that is what makes provision's trust convergence observable rather
+# than stubbed, and lets one log show check flipping to READY only AFTER the repair.
 # --------------------------------------------------------------------------- #
 cat > "$BIN/aws" <<'STUB'
 #!/usr/bin/env bash
@@ -84,6 +101,17 @@ stub_profile_roles() {
   case "${AWS_STUB_MODE:-all-ok}" in
     fresh) seen "iam add-role-to-instance-profile" && printf '%s\n' "${AWS_STUB_PROFILE_ROLE-sparq-bench-results}" ;;
     *)     printf '%s\n' "${AWS_STUB_PROFILE_ROLE-sparq-bench-results}" ;;
+  esac
+}
+# The trust document get-role reports for an existing role. `provision` repairs it.
+stub_role_trust() {
+  local kind="${AWS_STUB_ROLE_TRUST:-good}"
+  seen "iam update-assume-role-policy" && kind=good
+  case "$kind" in
+    wrong)   printf '%s\n' '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}' ;;
+    none)    printf '%s\n' '{"Version":"2012-10-17","Statement":[]}' ;;
+    encoded) printf '%s\n' '"%7B%22Version%22%3A%222012-10-17%22%2C%22Statement%22%3A%5B%7B%22Effect%22%3A%22Allow%22%2C%22Principal%22%3A%7B%22Service%22%3A%22ec2.amazonaws.com%22%7D%2C%22Action%22%3A%22sts%3AAssumeRole%22%7D%5D%7D"' ;;
+    *)       printf '%s\n' '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}' ;;
   esac
 }
 case "${AWS_STUB_MODE:-all-ok}" in
@@ -106,6 +134,8 @@ case "$1 $2" in
   "sts get-caller-identity") echo "111122223333" ;;
   "iam get-instance-profile")
     case "$*" in *"InstanceProfile.Roles"*) stub_profile_roles ;; esac ;;
+  "iam get-role")
+    case "$*" in *"Role.AssumeRolePolicyDocument"*) stub_role_trust ;; esac ;;
 esac
 exit 0
 STUB
@@ -262,6 +292,25 @@ else
 fi
 if grep -q 'ERROR' "$SANDBOX/prov-wrong.out"; then ok "provision reports the attach failure loudly"; else bad "provision failed silently"; fi
 
+# 7d. An EXISTING same-named role whose trust document does not admit EC2 must be REPAIRED,
+# not inherited. create-role is skipped for a role that already exists, so without an
+# explicit update-assume-role-policy such a role attaches cleanly, passes every existence
+# and membership check, is reported READY and is handed to every launcher — while EC2
+# cannot assume it, the instance receives NO role credentials, and every upload fails.
+reset_calls
+AWS_STUB_MODE=all-ok AWS_STUB_ROLE_TRUST=wrong SPARQ_BENCH_S3_BUCKET=bkt bash "$LIB" provision >/dev/null 2>&1
+want "provision succeeds over an existing role with a drifted trust policy" "0" "$?"
+if grep -q -- 'iam update-assume-role-policy' "$CALLS"
+then ok "provision converges the existing role's trust policy"
+else bad "provision never called update-assume-role-policy — a drifted trust principal survives"; fi
+if grep -q 'update-assume-role-policy.*ec2\.amazonaws\.com.*sts:AssumeRole' "$CALLS"
+then ok "provision writes the EC2 sts:AssumeRole trust document"
+else bad "provision's trust convergence did not pass the EC2 trust document"; fi
+# Same call log, so the stub now reports the REPAIRED trust: check must flip to READY only
+# after the repair, which is what makes the pre-repair failures below non-vacuous.
+AWS_STUB_MODE=all-ok AWS_STUB_ROLE_TRUST=wrong SPARQ_BENCH_S3_BUCKET=bkt bash "$LIB" check >/dev/null 2>&1
+want "check is READY once provision has repaired the trust policy" "0" "$?"
+
 # --------------------------------------------------------------------------- #
 # 8. check: reports NOT-ready when a resource is missing OR mis-wired.
 # --------------------------------------------------------------------------- #
@@ -277,6 +326,29 @@ want "check is NOT ready when the profile carries the wrong role" "1" "$?"
 if grep -q 'READY' "$SANDBOX/check-wrong.out"; then bad "check reported READY for a profile that cannot upload"; else ok "check withholds READY when the profile lacks the role"; fi
 AWS_STUB_MODE=all-ok AWS_STUB_PROFILE_ROLE= SPARQ_BENCH_S3_BUCKET=bkt bash "$LIB" check >/dev/null 2>&1
 want "check is NOT ready when the profile carries no role at all" "1" "$?"
+
+# ... and READY must also mean EC2 can actually ASSUME the role. A role that exists but
+# trusts another service (or nothing) is attachable and looks healthy, yet leaves the box
+# with no credentials — get-role succeeding is not evidence the channel works.
+# reset_calls first: a stale update-assume-role-policy from 7d would make the stub report
+# the repaired document and score these vacuously.
+for kind in wrong none; do
+  reset_calls
+  AWS_STUB_MODE=all-ok AWS_STUB_ROLE_TRUST=$kind SPARQ_BENCH_S3_BUCKET=bkt \
+    bash "$LIB" check >"$SANDBOX/check-trust.out" 2>&1
+  want "check is NOT ready when the role's trust policy is '$kind'" "1" "$?"
+  if grep -q 'READY' "$SANDBOX/check-trust.out"
+  then bad "check reported READY for a role EC2 cannot assume (trust '$kind')"
+  else ok "check withholds READY for a role EC2 cannot assume (trust '$kind')"; fi
+  if grep -q 'sts:AssumeRole' "$SANDBOX/check-trust.out"
+  then ok "check names the broken trust relationship in its diagnosis (trust '$kind')"
+  else bad "check does not say WHY it is not ready (trust '$kind')"; fi
+done
+# The IAM API returns AssumeRolePolicyDocument URL-encoded; a decode failure must not be
+# mistaken for a broken trust policy and block a perfectly good channel.
+reset_calls
+AWS_STUB_MODE=all-ok AWS_STUB_ROLE_TRUST=encoded SPARQ_BENCH_S3_BUCKET=bkt bash "$LIB" check >/dev/null 2>&1
+want "check reads a URL-encoded trust document as valid" "0" "$?"
 
 # --------------------------------------------------------------------------- #
 # 9. fetch: right URI, and never fatal to the caller.

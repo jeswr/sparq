@@ -211,8 +211,15 @@ export SPARQ_BENCH_S3_BUCKET=sparq-bench-results-<account-id>
 `provision` is idempotent, and verifies that the instance profile really does carry
 the upload role before reporting success — an `add-role-to-instance-profile` failure
 is benign when the role is already attached but fatal when the profile holds a
-different one, so it is checked rather than assumed. `check` likewise reports READY
-only on actual role attachment, not on the profile merely existing. It also prints
+different one, so it is checked rather than assumed. It is also the **sole
+convergence authority for the role's trust policy**: `create-role` is skipped when a
+same-named role already exists, so provision issues `update-assume-role-policy` on
+that existing role rather than inheriting whatever trust document it came with. A
+role trusting the wrong service (or nothing) is attachable and looks healthy in
+every existence check, yet EC2 cannot assume it — the box boots with no role
+credentials and every upload fails. `check` reports READY only on actual role
+attachment **and** on a trust policy that lets `ec2.amazonaws.com` call
+`sts:AssumeRole`, never on the profile or role merely existing. It also prints
 the **`iam:PassRole` policy the launcher principal separately needs** — attaching an instance profile requires it, and
 without it `run-instances` fails `AccessDenied`.
 

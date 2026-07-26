@@ -24,6 +24,7 @@
 #                                                     # + policy JSON. Makes NO aws call.
 #   AWS_PROFILE=… …/bench-s3-results.sh provision     # idempotent create (ADMIN creds)
 #   AWS_PROFILE=… …/bench-s3-results.sh check         # verify bucket + role + that the
+#                                                     # role's trust admits EC2 + that the
 #                                                     # profile CARRIES that role
 #   AWS_PROFILE=… …/bench-s3-results.sh fetch <run-id> <dest-dir>
 #   AWS_PROFILE=… …/bench-s3-results.sh teardown      # remove what provision created
@@ -115,6 +116,11 @@ bench_s3_profile_has_role() {
 # STARTS because of a missing IAM read grant is worse, and the operator gets a loud
 # warning either way. Attaching a profile KNOWN not to carry the role would be the worst
 # of the three: the launch looks provisioned and the uploads fail on the box.
+#
+# SCOPE: this verifies role MEMBERSHIP only, not the role's trust document — the launcher
+# principal is granted iam:GetInstanceProfile but deliberately not iam:GetRole. A role EC2
+# cannot assume is caught by `check`, which provision converges; run it before a canonical
+# gather rather than relying on launch time to notice.
 bench_s3_iam_args() {
   bench_s3_enabled || return 0
   if ! bench_s3_profile_has_role; then
@@ -187,6 +193,75 @@ bench_s3_passrole_policy() {
 JSON
 }
 
+# rc 0 iff <document> lets the EC2 service assume the role; rc 1 otherwise.
+#
+# Existence of the role is NOT the useful predicate either. `provision` skips create-role
+# for a role that already exists, so a SAME-NAMED role made for something else — or one
+# whose trust document drifted by hand — can be attached to the instance profile, satisfy
+# every existence and membership check, and be reported READY, while EC2 cannot assume it
+# at all: the box boots with NO role credentials and every upload fails. That is the same
+# silent unretrievable run this module exists to prevent, so the trust relationship is
+# converged by `provision` and checked by `check` rather than assumed by both.
+#
+# Shape-tolerant, because `get-role` output varies: `Statement` may be an object or a list,
+# `Action` and `Principal.Service` a string or a list, and the document arrives either
+# already decoded (awscli normally decodes it) or still URL-encoded as the IAM API returns
+# it on the wire.
+#
+# HONEST SCOPE: this is a DRIFT DETECTOR, not an IAM policy evaluator. It looks for an
+# Allow of sts:AssumeRole to ec2.amazonaws.com; it does not interpret Deny statements or
+# Conditions, so a document can satisfy it and still be refused by IAM at assume time.
+# bench_s3_trust_allows_ec2 <document>
+bench_s3_trust_allows_ec2() {
+  if command -v python3 >/dev/null 2>&1; then
+    BENCH_S3_TRUST_DOC="$1" python3 -c '
+import json, os, sys
+from urllib.parse import unquote
+
+raw = os.environ["BENCH_S3_TRUST_DOC"].strip()
+try:
+    doc = json.loads(raw)
+except ValueError:
+    doc = None
+if isinstance(doc, str) or doc is None:
+    # Still URL-encoded: bare, or wrapped in a JSON string by --output json.
+    doc = json.loads(unquote(doc if isinstance(doc, str) else raw))
+if not isinstance(doc, dict):
+    sys.exit(1)
+
+def listify(value):
+    return value if isinstance(value, list) else [value]
+
+for stmt in listify(doc.get("Statement") or []):
+    if not isinstance(stmt, dict) or stmt.get("Effect") != "Allow":
+        continue
+    actions = [str(a).lower() for a in listify(stmt.get("Action") or [])]
+    if not any(a in ("sts:assumerole", "sts:*", "*") for a in actions):
+        continue
+    principal = stmt.get("Principal")
+    principal = principal if isinstance(principal, dict) else {}
+    services = [str(s).lower() for s in listify(principal.get("Service") or [])]
+    if "ec2.amazonaws.com" in services:
+        sys.exit(0)
+sys.exit(1)
+' 2>/dev/null
+    return
+  fi
+  # No python3: fall back to a substring test. `ec2.amazonaws.com` survives URL-encoding
+  # verbatim (only the punctuation around it is escaped), so this needs no decoding, and it
+  # still catches the drift that actually happens — a trust document that does not name the
+  # EC2 service principal AT ALL. It cannot tell a mis-shaped document from a good one.
+  case "$1" in *ec2.amazonaws.com*) return 0 ;; *) return 1 ;; esac
+}
+
+# The role's EFFECTIVE trust document, as awscli renders it. rc mirrors `get-role`, so a
+# missing role (or no iam:GetRole grant) is distinguishable from a readable-but-wrong one.
+# bench_s3_role_trust_doc [role]
+bench_s3_role_trust_doc() {
+  aws iam get-role --role-name "${1:-$SPARQ_BENCH_S3_ROLE}" \
+    --query 'Role.AssumeRolePolicyDocument' --output json 2>/dev/null
+}
+
 bench_s3_lifecycle() {
   cat <<JSON
 {"Rules":[{"ID":"sparq-bench-results-expiry","Status":"Enabled","Filter":{"Prefix":""},"Expiration":{"Days":${SPARQ_BENCH_S3_RETENTION_DAYS}},"AbortIncompleteMultipartUpload":{"DaysAfterInitiation":1}}]}
@@ -213,6 +288,8 @@ Objects 'provision' creates (idempotently), in order:
   2. s3api put-public-access-block  (all four blocks ON)
   3. s3api put-bucket-lifecycle-configuration  (expire after ${SPARQ_BENCH_S3_RETENTION_DAYS}d)
   4. iam create-role $SPARQ_BENCH_S3_ROLE          (trust: ec2.amazonaws.com)
+     — or, when the role already exists, iam update-assume-role-policy with the SAME
+       trust document, so a drifted/foreign trust principal is repaired, not inherited
   5. iam put-role-policy  sparq-bench-results-write (WRITE-ONLY, object-scoped)
   6. iam create-instance-profile $SPARQ_BENCH_INSTANCE_PROFILE
   7. iam add-role-to-instance-profile
@@ -257,9 +334,16 @@ cmd_provision() {
     --lifecycle-configuration "$(bench_s3_lifecycle)" >/dev/null
   bench_s3_log "bucket ready (public access blocked, ${SPARQ_BENCH_S3_RETENTION_DAYS}d expiry)"
 
-  # 4-5. role + write-only policy.
+  # 4-5. role + trust relationship + write-only policy.
   if aws iam get-role --role-name "$SPARQ_BENCH_S3_ROLE" >/dev/null 2>&1; then
-    bench_s3_log "role $SPARQ_BENCH_S3_ROLE already exists — updating its policy in place"
+    bench_s3_log "role $SPARQ_BENCH_S3_ROLE already exists — converging its trust + permission policies in place"
+    # CONVERGE, do not merely reuse. An existing same-named role can carry an absent or
+    # wrong trust principal (created for another service, or drifted by hand); it would
+    # still attach to the profile and pass every membership check while EC2 could not
+    # assume it, so the box would come up with no credentials and upload nothing. Provision
+    # is the sole convergence authority for the trust document — `check` only reports on it.
+    aws iam update-assume-role-policy --role-name "$SPARQ_BENCH_S3_ROLE" \
+      --policy-document "$(bench_s3_trust_policy)" >/dev/null
   else
     aws iam create-role --role-name "$SPARQ_BENCH_S3_ROLE" \
       --description "sparq canonical bench boxes: write-only results upload (sq-ffaa9)" \
@@ -329,10 +413,23 @@ cmd_check() {
   else
     bench_s3_log "FAIL bucket $SPARQ_BENCH_S3_BUCKET not reachable"; rc=1
   fi
-  if aws iam get-role --role-name "$SPARQ_BENCH_S3_ROLE" >/dev/null 2>&1; then
-    bench_s3_log "OK   role $SPARQ_BENCH_S3_ROLE exists"
+  # The role EXISTING is not the guarantee either: it must be assumable BY EC2, or the box
+  # launches with the profile attached and receives no credentials at all.
+  local trust trust_rc=0
+  if ! trust=$(bench_s3_role_trust_doc); then
+    bench_s3_log "FAIL role $SPARQ_BENCH_S3_ROLE missing (or not readable with these credentials)"; rc=1
+  elif [ -z "$trust" ] || [ "$trust" = "null" ]; then
+    bench_s3_log "FAIL role $SPARQ_BENCH_S3_ROLE exists but its trust policy could not be read — withholding READY rather than assuming it is correct"; rc=1
   else
-    bench_s3_log "FAIL role $SPARQ_BENCH_S3_ROLE missing"; rc=1
+    bench_s3_trust_allows_ec2 "$trust" || trust_rc=$?
+    if [ "$trust_rc" = 0 ]; then
+      bench_s3_log "OK   role $SPARQ_BENCH_S3_ROLE exists and its trust policy lets ec2.amazonaws.com call sts:AssumeRole"
+    else
+      bench_s3_log "FAIL role $SPARQ_BENCH_S3_ROLE exists but its trust policy does NOT let ec2.amazonaws.com call sts:AssumeRole:"
+      bench_s3_log "FAIL   a box launched with $SPARQ_BENCH_INSTANCE_PROFILE would receive NO role credentials and every upload would fail."
+      bench_s3_log "FAIL   re-run 'provision' with admin credentials — it converges the trust policy — then check again."
+      rc=1
+    fi
   fi
   # The profile EXISTING is not the guarantee launchers need — it must carry the upload
   # role, or the box boots with credentials that cannot PutObject and the run is lost.
@@ -386,6 +483,17 @@ cmd_self_test() {
     *) printf 'ok   policy is write-only (no Get/List/Delete)\n' ;;
   esac
 
+  # Trust predicate: the drift it must catch is an EXISTING role that is attachable and
+  # reports healthy, but that EC2 cannot assume — so the box gets no credentials.
+  if bench_s3_trust_allows_ec2 "$(bench_s3_trust_policy)"; then printf 'ok   own trust policy admits the EC2 service principal\n'; else printf 'FAIL own trust policy rejected by the trust predicate\n'; fails=$((fails + 1)); fi
+  if bench_s3_trust_allows_ec2 '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+  then printf 'FAIL trust predicate accepts a non-EC2 service principal\n'; fails=$((fails + 1)); else printf 'ok   trust predicate rejects a non-EC2 service principal\n'; fi
+  if bench_s3_trust_allows_ec2 '{"Version":"2012-10-17","Statement":[]}'
+  then printf 'FAIL trust predicate accepts a trust policy with no statement\n'; fails=$((fails + 1)); else printf 'ok   trust predicate rejects an empty trust policy\n'; fi
+  # `get-role` may hand the document back still URL-encoded, as the IAM API returns it.
+  if bench_s3_trust_allows_ec2 '"%7B%22Version%22%3A%222012-10-17%22%2C%22Statement%22%3A%5B%7B%22Effect%22%3A%22Allow%22%2C%22Principal%22%3A%7B%22Service%22%3A%22ec2.amazonaws.com%22%7D%2C%22Action%22%3A%22sts%3AAssumeRole%22%7D%5D%7D"'
+  then printf 'ok   trust predicate decodes a URL-encoded trust document\n'; else printf 'FAIL trust predicate cannot read a URL-encoded trust document\n'; fails=$((fails + 1)); fi
+
   if command -v python3 >/dev/null 2>&1; then
     local doc
     for doc in "$(bench_s3_trust_policy)" "$(bench_s3_write_policy b)" "$(bench_s3_passrole_policy 1234)" "$(bench_s3_lifecycle)"; do
@@ -411,7 +519,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     teardown)    cmd_teardown ;;
     fetch)       [ "$#" -ge 3 ] || { bench_s3_log "usage: $0 fetch <run-id> <dest-dir>"; exit 2; }; bench_s3_fetch "$2" "$3" ;;
     --self-test) cmd_self_test ;;
-    -h|--help|"") sed -n '2,60p' "$0"; exit 0 ;;
+    -h|--help|"") sed -n '2,61p' "$0"; exit 0 ;;
     *)           bench_s3_log "unknown subcommand: $1 (try plan|provision|check|fetch|teardown|--self-test)"; exit 2 ;;
   esac
 fi
