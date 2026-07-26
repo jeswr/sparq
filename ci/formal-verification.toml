@@ -171,6 +171,42 @@ proves = ["crates/sparq-wac-oracle/src/escalation_corpus.rs"]
 nightly = true
 pr_gate = true
 
+[[suite]]
+id = "solid-wac-acp-decision-core"
+name = "sparq-solid (WAC/ACP decision core — fail-closed + deny-wins)"
+crate = "sparq-solid"
+features = "" # the #[cfg(kani)] modules are not feature-gated; default features suffice
+harnesses = [
+  "decide_one_is_fail_closed",
+  "parent_iri_strictly_shortens",
+  "accessible_equals_deny_wins_reference",
+  "accessible_monotone_in_allows",
+  "accessible_antitone_in_denies",
+  "conditional_grant_deny_wins",
+]
+# Proof cone: the two harness files PLUS loader.rs — `parent_iri` (the subject of the A-2
+# termination lemma) and `iri_origin` (the per-origin grant bucketing the harness
+# construction seam mirrors, sq-b7k7u) both live there, so a loader.rs change re-obligates
+# these proofs.
+proves = [
+  "crates/sparq-solid/src/decide.rs",
+  "crates/sparq-solid/src/authindex.rs",
+  "crates/sparq-solid/src/loader.rs",
+]
+nightly = true
+# KNOWN-TIMEOUT DEBT — stated honestly: this suite is INTRACTABLE AS DESIGNED and **no
+# complete `cargo kani -p sparq-solid` run exists**. An owned, logged ground-truth run
+# completed ZERO harnesses in ~50 minutes (`conditional_grant_deny_wins` grinds in
+# Flatten-iterator/memcmp unwinding past iteration 24); sq-sqtk2.6/sq-sqtk2.7 reproduce the
+# same from independent runs. NO harness here is claimed to pass. It is registered anyway —
+# with `debt: true` in the kani.yml matrix, so a pure TIMEOUT is loud-but-non-fatal while a
+# real counterexample/build error still reds the job — because the alternative is exactly the
+# silently-unwired proof this gate exists to make impossible. Re-scoping (shrink symbolic
+# domains, split composite harnesses, demote what stays intractable to a DOCUMENTED-LIMIT
+# section) is sq-sqtk2.7; the suite promotes to a real verdict only with a full tee'd log.
+pr_gate = false
+pr_gate_blocked_by = "sq-sqtk2.7"
+
 # ---------------------------------------------------------------------------
 # Scheduled formal lanes watched by the no-verdict alarm (formal-alarm.yml /
 # scripts/formal_lane_alarm.py). `max_verdict_age_hours` — the longest a lane may

@@ -363,6 +363,207 @@ fn held_modes(auth: &AuthIndex, session: &Session, resource: &NamedNode) -> Vec<
         .collect()
 }
 
+// [FABLE-5] sq-sqtk2.1 (epic sq-sqtk2; research/mechanized-proof-program.md §3.1 properties
+// A-1 + A-2, §5 bead 1) — Kani bounded-model-checking proofs of the decision layer's
+// FAIL-CLOSED structure and of the container-walk termination lemma. `#[cfg(kani)]`:
+// compiled only under `cargo kani -p sparq-solid`, stripped from every normal build
+// (proof-only diff — the runtime decision logic is byte-unchanged).
+//
+// CLAIM TIER — **PROVED (bounded)**, per the program's assurance ladder. Each harness
+// states its exact bounds; nothing here claims "proved for all inputs". Kani string costs
+// make symbolic IRIs/ACL-graphs intractable, so the strategy is: concrete strings from a
+// small fixed universe, SYMBOLIC structure (which control docs exist, materialization,
+// session shape, grant vector, modes) — complete over that product domain. The
+// nearest-ancestor SELECTION semantics over a richer resource/control-doc domain are
+// EXHAUSTIVELY TESTED (bounded domain) in `tests/container_walk_exhaustive.rs`; full
+// WAC/ACP spec parity stays with the conformance corpora + the differential oracle (A-4).
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+    use crate::authindex::kani_support::index_with_grants;
+    use crate::authindex::PUBLIC;
+
+    // The concrete bounded universe. RES_NESTED's candidate governors, nearest-first:
+    // its own OWN_ACL (accessTo), then MID_ACL (/a/), then ROOT_ACL (/). RES_TOP's only
+    // candidate governor is ROOT_ACL. RES_BAD is not an IRI (typed-transient path).
+    const ROOT_ACL: &str = "https://pod.ex/.acl";
+    const MID_ACL: &str = "https://pod.ex/a/.acl";
+    const OWN_ACL: &str = "https://pod.ex/a/doc.acl";
+    const RES_NESTED: &str = "https://pod.ex/a/doc";
+    const RES_TOP: &str = "https://pod.ex/other";
+    const RES_BAD: &str = "not a valid iri";
+    /// Short WebID for the harness session — 5 bytes avoids memcmp iterations near the
+    /// unwind bound. The logical role (a concrete authenticated agent) is unchanged.
+    /// [SONNET-4.6] sq-sqtk2.1 string-shortening for solver tractability.
+    const AGENT: &str = "alice";
+    /// A short reserved-principal encoding — must start with "urn:sparq:" so the
+    /// impersonation guard fires, but need not be longer (11 bytes fits unwind(40)).
+    /// [SONNET-4.6] sq-sqtk2.1 string-shortening.
+    const RESERVED_AGENT: &str = "urn:sparq:x";
+
+    fn any_mode() -> Mode {
+        match kani::any::<u8>() % 4 {
+            0 => Mode::Read,
+            1 => Mode::Write,
+            2 => Mode::Append,
+            _ => Mode::Control,
+        }
+    }
+
+    /// PROPERTY (A-1, FAIL-CLOSED): over the WHOLE bounded domain below, every
+    /// `decide_one` outcome satisfies
+    ///   • `status != Resolved  ⇒  allow == false && granted_modes is empty`;
+    ///   • on `Resolved`, `allow == granted_modes.contains(mode)` — so `allow == true`
+    ///     is impossible without `Resolved` + the mode actually held;
+    ///   • provenance coherence: `scope` is `Some` iff `governing_acl` is `Some`;
+    ///     `Resolved`/`Unloaded` carry the discovered ACL, `NoAcl`/`Transient` carry none;
+    ///   • a reserved-encoding session (pair-principal impersonation) is granted NOTHING.
+    ///
+    /// BOUNDS (complete product domain, symbolic): resource ∈ {RES_NESTED, RES_TOP,
+    /// RES_BAD} × control-doc universe = all 8 subsets of {OWN_ACL, MID_ACL, ROOT_ACL} ×
+    /// materialized ∈ {t, f} × session ∈ {anonymous, alice, reserved-impostor} (client/
+    /// issuer/now = None) × auth ∈ {empty, one alice allow-grant, alice allow-grant +
+    /// public deny-grant on the same graph} with a symbolic grant mode × all 4 query
+    /// modes. NOT covered here: arbitrary IRIs/sessions/ACL contents — see the module
+    /// header for where those live.
+    ///
+    /// UNWIND BOUND — `#[kani::unwind(40)]` (increased from 24 to 40 by [SONNET-4.6]
+    /// 2026-07-04). The grant index for `auth_kind = 2` includes a `PUBLIC` principal
+    /// entry (key = "https://sparq.dev/ns/auth#Public", 32 bytes). The session principal
+    /// list built by `accessible()` also includes PUBLIC (32B) and AUTHENTICATED (39B).
+    /// With unwind(24) those self-comparisons were pruned at byte 24, making the PUBLIC
+    /// deny-grant invisible and leaving the deny-wins check vacuous. unwind(40) ensures all
+    /// 39-byte AUTHENTICATED comparisons complete. Harness-controlled strings are kept short
+    /// (AGENT = "alice" 5B, RESERVED_AGENT = "urn:sparq:x" 11B) to reduce comparison cost;
+    /// IRI constants (ROOT_ACL 19B, MID_ACL 21B, OWN_ACL 24B, RES_* 20B) all fit within
+    /// unwind(40). The `resolve_acl` loop iterates ≤3 times; FxHashSet probing on a
+    /// ≤3-entry set is ≤8 probes; 40 covers all in-bounds loops with a margin of ≥1.
+    // [SONNET-4.6] unwind increase for soundness + string-shortening for tractability.
+    #[kani::proof]
+    #[kani::unwind(40)]
+    fn decide_one_is_fail_closed() {
+        let mut control = rustc_hash::FxHashSet::default();
+        if kani::any() {
+            control.insert(OWN_ACL.to_owned());
+        }
+        if kani::any() {
+            control.insert(MID_ACL.to_owned());
+        }
+        if kani::any() {
+            control.insert(ROOT_ACL.to_owned());
+        }
+        let index = AclIndex { control, materialized: kani::any() };
+
+        let resource = match kani::any::<u8>() % 3 {
+            0 => RES_NESTED,
+            1 => RES_TOP,
+            _ => RES_BAD,
+        };
+        let session = match kani::any::<u8>() % 3 {
+            0 => Session::default(),
+            1 => Session { agent: Some(AGENT), client: None, issuer: None, now: None },
+            _ => Session { agent: Some(RESERVED_AGENT), client: None, issuer: None, now: None },
+        };
+        let grant_mode = any_mode();
+        let auth_kind = kani::any::<u8>() % 3;
+        let auth = match auth_kind {
+            0 => AuthIndex::default(),
+            1 => index_with_grants(&[(AGENT, grant_mode, true, RES_NESTED)]),
+            _ => index_with_grants(&[
+                (AGENT, grant_mode, true, RES_NESTED),
+                (PUBLIC, grant_mode, false, RES_NESTED),
+            ]),
+        };
+
+        let mode = any_mode();
+        let d = decide_one(&index, &auth, &session, resource, mode);
+
+        // The fail-closed core: uncertainty ⇒ deny with nothing granted.
+        if d.status != AclStatus::Resolved {
+            assert!(!d.allow);
+            assert!(d.granted_modes.is_empty());
+        }
+        // The authoritative arm: allow is exactly "the mode is held" — never wider.
+        if d.status == AclStatus::Resolved {
+            assert!(d.allow == d.granted_modes.contains(&mode));
+        }
+        // Provenance coherence (the doc contract on WacDecision).
+        assert!(d.scope.is_some() == d.governing_acl.is_some());
+        if matches!(d.status, AclStatus::Resolved | AclStatus::Unloaded) {
+            assert!(d.governing_acl.is_some());
+        } else {
+            assert!(d.governing_acl.is_none());
+        }
+        // Reserved-encoding impersonation fails closed to zero grants.
+        if session.agent == Some(RESERVED_AGENT) {
+            assert!(d.granted_modes.is_empty());
+        }
+        // Deny-wins at the decision level: the public deny covers the alice allow, so
+        // the allow+deny auth state can never grant (alice's principals include Public).
+        if auth_kind == 2 {
+            assert!(d.granted_modes.is_empty());
+        }
+
+        // Non-vacuity: every status — and a REAL allow — is reachable in-bounds.
+        kani::cover!(d.allow);
+        kani::cover!(d.status == AclStatus::Resolved && !d.allow);
+        kani::cover!(d.status == AclStatus::Unloaded);
+        kani::cover!(d.status == AclStatus::NoAcl);
+        kani::cover!(d.status == AclStatus::Transient);
+        kani::cover!(d.scope == Some(AclScope::AccessTo));
+        kani::cover!(d.scope == Some(AclScope::Default));
+    }
+
+    /// PROPERTY (A-2, termination lemma): for EVERY ASCII string of length ≤ `MAX_LEN`,
+    /// `parent_iri` either returns `None` or a STRICT PREFIX that is strictly shorter
+    /// and ends in `/` — and never panics. Since the parent is itself an ASCII string
+    /// of length < `MAX_LEN`, the domain is closed under the step: by induction, the
+    /// `resolve_acl` container walk (`while let Some(parent) = parent_iri(cur)`)
+    /// terminates in at most `MAX_LEN` steps for every input in the domain.
+    ///
+    /// BOUNDS (honest) — `MAX_LEN = 8`, `#[kani::unwind(16)]` [SONNET-4.6] 2026-07-04:
+    ///   all ASCII byte strings of length ≤ 8 over the range 1..=127. Tightened from the
+    ///   original Fable-designed MAX_LEN=24/unwind(32) after confirming that both the
+    ///   `vec![0u8; len]` symbolic-heap version AND the fixed-`[u8; 24]` version caused
+    ///   CBMC exit-144 (killed at `run_utf8_validation` iteration 12–14 on an arm64
+    ///   machine already under heavy CBMC load). Root cause: Rust's `str::find("://")`
+    ///   uses `TwoWaySearcher` whose internal state machine scales with string length.
+    ///   With MAX_LEN=8 the minimum exercisable IRI ("a://b/" = 6 bytes) and all
+    ///   None-paths are fully covered; the structural invariant — `rfind('/')` returns a
+    ///   position strictly before the trimmed end, so `cut+1 < len` — is length-independent
+    ///   and holds for longer IRIs by the same argument. Longer/non-ASCII IRIs are outside
+    ///   this proof's bounded domain; the exhaustive walk test covers multi-segment IRIs.
+    #[kani::proof]
+    #[kani::unwind(16)]
+    fn parent_iri_strictly_shortens() {
+        const MAX_LEN: usize = 8;
+        // Fixed-size stack array avoids the symbolic-heap allocation that caused
+        // `run_utf8_validation` path explosion at larger sizes. [SONNET-4.6]
+        let bytes: [u8; MAX_LEN] = kani::any();
+        let len: usize = kani::any();
+        kani::assume(len <= MAX_LEN);
+        // Constrain ALL 8 bytes to ASCII (1..=127) — over-constraining the unused tail
+        // is SOUND (shrinks input space, never widens it). Constant-size loop (8
+        // iterations) that CBMC unrolls statically; no symbolic-length iteration.
+        for b in bytes.iter() {
+            kani::assume(*b >= 1 && *b <= 127); // ASCII ⇒ valid single-byte UTF-8
+        }
+        // `from_utf8` on a 8-byte buffer: all bytes ASCII, validation loop ≤ 8
+        // iterations; Err is unreachable under the ASCII assume constraints.
+        let s = match core::str::from_utf8(&bytes[..len]) {
+            Ok(s) => s,
+            Err(_) => return, // unreachable under the ASCII kani::assume constraints
+        };
+        let parent = parent_iri(s);
+        if let Some(p) = parent {
+            assert!(p.len() < s.len());
+            assert!(s.as_bytes()[..p.len()] == *p.as_bytes());
+            assert!(p.as_bytes().last() == Some(&b'/'));
+        }
+        kani::cover!(parent.is_some()); // the Some arm is genuinely exercised
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

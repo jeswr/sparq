@@ -169,3 +169,12 @@ sparq-zk = { path = "../sparq-zk" }
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }
 wasm-bindgen-test = "0.3"
+
+# [FABLE-5] sq-sqtk2.1 (epic sq-sqtk2, research/mechanized-proof-program.md §3.1) — register
+# the `kani` cfg so the `#[cfg(kani)]` bounded-proof harnesses in `decide.rs`/`authindex.rs`
+# do not trip `-D warnings` (unexpected_cfgs) on the NORMAL build. `cargo kani` sets this cfg
+# itself when it model-checks; under a plain `cargo build`/`clippy`/`test` the cfg is simply
+# off and the harnesses are stripped, so registering it here is the only change the normal
+# build sees (the sq-hkud / sq-ueuk idiom in sparq-vectors / sparq-core).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }

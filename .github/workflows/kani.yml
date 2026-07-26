@@ -264,6 +264,29 @@ jobs:
             features: ""
             harnesses: >-
               domain_corpus_exhibits_a_surviving_escalation
+          # [OPUS-5] sq-sqtk2.1: the WAC/ACP decision-core harnesses (fail-closed decision
+          # structure, container-walk termination, deny-wins set algebra). KNOWN-TIMEOUT DEBT
+          # of the STRONGEST kind — unlike the two validator suites above, NO harness here has
+          # ever completed in ANY run: an owned, logged ground-truth run finished ZERO of the
+          # six in ~50 minutes (conditional_grant_deny_wins grinds in Flatten-iterator/memcmp
+          # unwinding past iteration 24), independently reproduced by sq-sqtk2.6/sq-sqtk2.7.
+          # `debt: true` keeps a pure TIMEOUT loud-but-non-fatal (::warning:: + step summary)
+          # while a real counterexample or build error STILL reds the job — so a genuine
+          # regression is caught, and the debt is diff-visible instead of these six proofs
+          # sitting in source wired to no lane at all (the exact rot the fv-manifest gate
+          # exists to prevent). Re-scoping to a real verdict is sq-sqtk2.7; NOTHING in this
+          # suite is claimed to pass.
+          - name: "sparq-solid (WAC/ACP decision core — fail-closed + deny-wins)"
+            crate: sparq-solid
+            features: ""
+            debt: true
+            harnesses: >-
+              decide_one_is_fail_closed
+              parent_iri_strictly_shortens
+              accessible_equals_deny_wins_reference
+              accessible_monotone_in_allows
+              accessible_antitone_in_denies
+              conditional_grant_deny_wins
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # Kani pins its own internal toolchain via `cargo kani setup`, but it still needs a host
