@@ -406,18 +406,35 @@ class TestWorkflowWiring(unittest.TestCase):
         # Invert-the-`if:` is the classic vacuity mutant; the job simply has none to invert.
         self.assertNotIn("if", self.job)
 
-    def test_the_script_is_actually_invoked(self):
-        # Break the call site (rename/typo the script path) => red here.
-        runs = " ".join(str(step.get("run", "")) for step in self.steps)
-        self.assertIn("scripts/review_lane_alarm.py", runs)
+    def _step_indices(self):
+        """(self-test index, live index) or None for either when absent. Deliberately NOT
+        `next(...)`: a bare next() raises StopIteration on a broken call site, which is a
+        CRASH-kill — it reds, but it reports a traceback instead of naming the defect. A
+        mutation run caught exactly that here."""
+        commands = [str(step.get("run", "")) for step in self.steps]
+        selftest = next(
+            (i for i, c in enumerate(commands) if "review_lane_alarm.py --self-test" in c), None)
+        live = next(
+            (i for i, c in enumerate(commands)
+             if "review_lane_alarm.py" in c and "--self-test" not in c), None)
+        return selftest, live
+
+    def test_the_LIVE_step_actually_invokes_the_script(self):
+        # A whole-workflow substring check is VACUOUS here: the self-test step also names
+        # the script, so typoing ONLY the live call site would satisfy it. Assert against
+        # the live step specifically.
+        _, live = self._step_indices()
+        self.assertIsNotNone(live, "no step invokes the alarm outside --self-test mode")
+        self.assertIn("scripts/review_lane_alarm.py", str(self.steps[live]["run"]))
+
+    def test_the_self_test_step_actually_invokes_the_script(self):
+        selftest, _ = self._step_indices()
+        self.assertIsNotNone(selftest, "no step runs the alarm's --self-test")
 
     def test_the_self_test_runs_before_the_live_step(self):
-        commands = [str(step.get("run", "")) for step in self.steps]
-        selftest = next(i for i, c in enumerate(commands) if "--self-test" in c)
-        live = next(
-            i for i, c in enumerate(commands)
-            if "review_lane_alarm.py" in c and "--self-test" not in c
-        )
+        selftest, live = self._step_indices()
+        self.assertIsNotNone(selftest)
+        self.assertIsNotNone(live)
         self.assertLess(selftest, live, "a detector proves itself before it is trusted")
 
     def test_the_self_test_step_is_unconditional(self):
