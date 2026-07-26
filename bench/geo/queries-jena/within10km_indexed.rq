@@ -2,9 +2,11 @@
 # workload. This query runs only against the feature-modelled corpus variant
 # from bench/geo/gen.sh; the fixed direct geo:asWKT corpus and its oracle stay
 # unchanged. Jena's property function uses latitude-longitude argument order
-# and kilometres, and returns the owning feature through its spatial index.
+# and metres, and returns the owning feature through its spatial index. The
+# explicit -1 limit requests all matches rather than relying on the default.
 # Oracle: COUNT must equal expected.tsv `within10km` before timing is trusted.
 PREFIX spatial: <http://jena.apache.org/spatial#>
+PREFIX uom:     <http://www.opengis.net/def/uom/OGC/1.0/>
 SELECT (COUNT(?e) AS ?n) WHERE {
-  ?e spatial:withinCircle (51 0 10 "km") .
+  ?e spatial:withinCircle (51 0 10000 uom:metre -1) .
 }

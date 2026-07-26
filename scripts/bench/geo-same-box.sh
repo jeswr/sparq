@@ -162,19 +162,23 @@ ensure_jena_jar() {
 }
 
 # Start jena-fuseki-geosparql over <corpus.nt> on <port>, logging to <logfile>;
-# wait for SPARQL readiness (cap FUSEKI_READY_S). Sets FUSEKI_PID (the EXIT trap
-# reaps it); prints the ready-seconds on stdout, or returns 1 on failure.
-start_fuseki() { # <corpus.nt> <port> <logfile>
-  local t0 deadline
+# wait for SPARQL readiness (cap FUSEKI_READY_S). The PID is published through
+# a file because callers capture stdout in a command substitution (a subshell);
+# prints the ready-seconds on stdout, or returns 1 on failure.
+start_fuseki() { # <corpus.nt> <port> <logfile> [readiness-ask]
+  local t0 deadline ready
+  local readiness_ask="${4:-ASK {}}"
   # Format is inferred from the .nt extension; -rf = read file, -p = port.
   java -jar "$FUSEKI_GEO_JAR" -rf "$1" -p "$2" > "$3" 2>&1 &
   FUSEKI_PID=$!
+  printf '%s\n' "$FUSEKI_PID" > "$TMP/fuseki.pid"
   t0="$(date +%s)"
   deadline=$((t0 + FUSEKI_READY_S))
   while [ "$(date +%s)" -lt "$deadline" ]; do
     if ! kill -0 "$FUSEKI_PID" 2>/dev/null; then break; fi
-    if python3 "$ADAPTER" --endpoint "http://127.0.0.1:$2/ds" --query 'ASK {}' \
-        --engine ready >/dev/null 2>&1; then
+    if ready="$(python3 "$ADAPTER" --endpoint "http://127.0.0.1:$2/ds" \
+        --query "$readiness_ask" --engine ready 2>/dev/null)" \
+        && [ "$(printf '%s\n' "$ready" | cut -f2)" = 1 ]; then
       echo "$(($(date +%s) - t0))"
       return 0
     fi
@@ -186,11 +190,25 @@ start_fuseki() { # <corpus.nt> <port> <logfile>
 # Stop the current fuseki instance (idempotent; used between families so two
 # JVMs never compete for the box during timing).
 stop_fuseki() {
-  if [ -n "$FUSEKI_PID" ]; then
+  if [ -s "$TMP/fuseki.pid" ]; then
+    FUSEKI_PID="$(cat "$TMP/fuseki.pid")"
     kill "$FUSEKI_PID" 2>/dev/null || true
     wait "$FUSEKI_PID" 2>/dev/null || true
+    rm -f "$TMP/fuseki.pid"
     FUSEKI_PID=""
   fi
+}
+
+wait_fuseki_stopped() { # <port>
+  local deadline=$(( $(date +%s) + 30 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if ! python3 "$ADAPTER" --endpoint "http://127.0.0.1:$1/ds" \
+        --query 'ASK {}' --engine stopped >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
 }
 
 mkdir -p "$OUT_DIR"
@@ -198,7 +216,7 @@ TMP="$(mktemp -d /tmp/geo-same-box.XXXXXX)"
 FUSEKI_PID=""
 # shellcheck disable=SC2317 # invoked via trap
 cleanup() {
-  [ -n "$FUSEKI_PID" ] && kill "$FUSEKI_PID" 2>/dev/null && wait "$FUSEKI_PID" 2>/dev/null
+  stop_fuseki
   rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -214,8 +232,9 @@ fi
 CORPUS="$(BENCH_GEO="$BENCH_GEO" "$ROOT/bench/geo/gen.sh" 100000)"
 FEATURE_CORPUS="$(BENCH_GEO="$BENCH_GEO" "$ROOT/bench/geo/gen.sh" 100000 feature)"
 NPOINTS="$(wc -l < "$CORPUS")"
+FEATURE_TRIPLES="$(wc -l < "$FEATURE_CORPUS")"
 log "corpus=$CORPUS (~$NPOINTS triples)"
-log "feature-corpus=$FEATURE_CORPUS (Jena indexed-radius variant)"
+log "feature-corpus=$FEATURE_CORPUS ($FEATURE_TRIPLES triples; Jena indexed-radius variant)"
 
 GIT_COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
@@ -321,15 +340,29 @@ PYEOF
       # feature-modelled variant so spatial:withinCircle exercises its spatial
       # index, then append the Jena-only result to the same TSV. [SONNET-4.6]
       stop_fuseki
-      log "restarting $ENDPOINT with feature-modelled corpus for indexed radius"
-      if ! JENA_INDEX_READY_S="$(start_fuseki "$FEATURE_CORPUS" "$FUSEKI_PORT" "$TMP/fuseki-index.log")"; then
+      INDEX_PORT=$((FUSEKI_PORT + 2))
+      INDEX_ENDPOINT="http://127.0.0.1:$INDEX_PORT/ds"
+      FEATURE_READY_ASK='ASK { ?f <http://www.opengis.net/ont/geosparql#hasGeometry> ?g }'
+      log "restarting $INDEX_ENDPOINT with feature-modelled corpus for indexed radius"
+      if ! wait_fuseki_stopped "$FUSEKI_PORT"; then
         JENA_INDEX_READY_S="n/a"
+        JENA_STATUS="partial: base server did not stop; indexed variant not run"
+        log "jena-geosparql: base server did not stop; recording indexed ERROR"
+        for wl in $INDEX_WORKLOADS; do
+          printf '%s\tERROR\tbase-server-still-running\n' "$wl"
+        done >> "$TMP/jena-geosparql.tsv"
+      elif ! JENA_INDEX_READY_S="$(start_fuseki "$FEATURE_CORPUS" "$INDEX_PORT" \
+          "$TMP/fuseki-index.log" "$FEATURE_READY_ASK")"; then
+        JENA_INDEX_READY_S="n/a"
+        JENA_STATUS="partial: indexed-variant server not ready"
         log "jena-geosparql: indexed-radius server not ready; recording ERROR"
-        printf '%s\tERROR\tserver-not-ready\n' "$INDEX_WORKLOADS" >> "$TMP/jena-geosparql.tsv"
+        for wl in $INDEX_WORKLOADS; do
+          printf '%s\tERROR\tserver-not-ready\n' "$wl"
+        done >> "$TMP/jena-geosparql.tsv"
       else
         for wl in $INDEX_WORKLOADS; do
           log "jena-geosparql: $wl x$ITERS (cap ${TIMEOUT_S}s)"
-          if timeout "$TIMEOUT_S" python3 "$ADAPTER" --endpoint "$ENDPOINT" \
+          if timeout "$TIMEOUT_S" python3 "$ADAPTER" --endpoint "$INDEX_ENDPOINT" \
               --query-file "$QUERIES/$wl.rq" --engine jena-geosparql \
               --iters "$ITERS" --json > "$TMP/$wl.raw" 2> "$TMP/$wl.json"; then
             if PARSED="$(python3 - "$TMP/$wl.json" <<'PYEOF'
@@ -350,7 +383,7 @@ PYEOF
           fi
         done
       fi
-      JENA_STATUS="ok"
+      [ "$JENA_STATUS" = "pending" ] && JENA_STATUS="ok"
     fi
   fi
   [ "$JENA_STATUS" = "ok" ] || log "jena-geosparql: $JENA_STATUS"
@@ -361,6 +394,7 @@ TS="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT="$OUT_DIR/geo-points100k-${TS}.json"
 CANONICAL="$CANONICAL" GEO_SMOKE="$GEO_SMOKE" GIT_COMMIT="$GIT_COMMIT" \
 CORPUS="$CORPUS" FEATURE_CORPUS="$FEATURE_CORPUS" NPOINTS="$NPOINTS" \
+FEATURE_TRIPLES="$FEATURE_TRIPLES" \
 ITERS="$ITERS" TIMEOUT_S="$TIMEOUT_S" \
 ONLY="$ONLY" WORKLOADS="$WORKLOADS" TMP="$TMP" OUT="$OUT" \
 SPARQ_STATUS="$SPARQ_STATUS" JENA_STATUS="$JENA_STATUS" JENA_VER="$JENA_VER" \
@@ -516,10 +550,12 @@ envelope = {
     "suite": "geo",
     "scale": (
         "fixed CRS84 point corpus, %s triples (%s); Jena indexed-radius "
-        "variant preserves the points with feature->geometry modelling (%s)"
+        "variant has %s triples and preserves the points with "
+        "feature->geometry modelling (%s)"
         % (
             os.environ["NPOINTS"],
             os.environ["CORPUS"],
+            os.environ["FEATURE_TRIPLES"],
             os.environ["FEATURE_CORPUS"],
         )
     ),

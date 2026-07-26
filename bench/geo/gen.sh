@@ -59,6 +59,12 @@ if [ "$MODEL" = feature ]; then
         print
       }
     ' "$OUT" > "$FEATURE_OUT.tmp"
+    EXPECTED_LINES=$((2 * $(wc -l < "$OUT")))
+    if [ "$(wc -l < "$FEATURE_OUT.tmp")" -ne "$EXPECTED_LINES" ]; then
+      echo "feature transform produced unexpected line count" >&2
+      rm -f "$FEATURE_OUT.tmp"
+      exit 1
+    fi
     mv "$FEATURE_OUT.tmp" "$FEATURE_OUT"
   fi
   echo "$FEATURE_OUT"
