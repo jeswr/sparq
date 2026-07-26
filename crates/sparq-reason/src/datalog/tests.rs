@@ -805,6 +805,165 @@ fn avg_of_integers_is_decimal() {
     assert_eq!(got, [[g, avg, one_half]].into_iter().collect());
 }
 
+// ---------------------------------------------------------------------------
+// [SONNET-4.6] sq-r2nor — the DECIDED float/double semantics for the numeric
+// aggregates: the whole XSD numeric tower is in scope (no fail-closed reject),
+// SUM/AVG promote per XPath, and the fold order + NaN/-0.0 rule are pinned so the
+// closure stays a function of the completed lower strata.
+// ---------------------------------------------------------------------------
+
+const XSD_DOUBLE: &str = "http://www.w3.org/2001/XMLSchema#double";
+
+fn dbl(d: &mut Dict, lex: &str) -> Id {
+    d.intern_lit(lex, XSD_DOUBLE, None)
+}
+
+/// A `(term id, numeric value)` group in the shape `fold_numeric_group` consumes.
+fn group(d: &mut Dict, ids: &[Id]) -> Vec<(Id, sparq_substrate::numeric::Num)> {
+    ids.iter()
+        .map(|&id| {
+            (
+                id,
+                super::numeric_value(d, id).expect("test fixture is numeric"),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn sum_and_avg_promote_a_double_operand() {
+    let mut d = Dict::new();
+    let (g, value, total, avg) = (
+        iri(&mut d, "g"),
+        iri(&mut d, "value"),
+        iri(&mut d, "total"),
+        iri(&mut d, "avg"),
+    );
+    let (one, half) = (int(&mut d, 1), dbl(&mut d, "0.5"));
+    let facts = vec![[g, value, one], [g, value, half]];
+    let got = derived(
+        &mut d,
+        &facts,
+        &format!(
+            "{P}[?g, ex:total, ?s] :- AGGREGATE([?g, ex:value, ?v] ON ?g BIND SUM(?v) AS ?s) .\n\
+             [?g, ex:avg, ?a] :- AGGREGATE([?g, ex:value, ?v] ON ?g BIND AVG(?v) AS ?a) ."
+        ),
+    );
+    // XPath promotion: an xsd:double operand makes both results xsd:double, in the
+    // canonical mantissa-E-exponent lexical.
+    let (sum_out, avg_out) = (dbl(&mut d, "1.5E0"), dbl(&mut d, "7.5E-1"));
+    assert_eq!(
+        got,
+        [[g, total, sum_out], [g, avg, avg_out]]
+            .into_iter()
+            .collect()
+    );
+}
+
+#[test]
+fn min_max_totalise_nan_below_negative_infinity() {
+    let mut d = Dict::new();
+    let (g, value, min_p, max_p) = (
+        iri(&mut d, "g"),
+        iri(&mut d, "value"),
+        iri(&mut d, "min"),
+        iri(&mut d, "max"),
+    );
+    let (nan, ninf, one) = (
+        dbl(&mut d, "NaN"),
+        dbl(&mut d, "-INF"),
+        dbl(&mut d, "1.0E0"),
+    );
+    let facts = vec![[g, value, one], [g, value, nan], [g, value, ninf]];
+    let got = derived(
+        &mut d,
+        &facts,
+        &format!(
+            "{P}[?g, ex:min, ?v] :- AGGREGATE([?g, ex:value, ?x] ON ?g BIND MIN(?x) AS ?v) .\n\
+             [?g, ex:max, ?v] :- AGGREGATE([?g, ex:value, ?x] ON ?g BIND MAX(?x) AS ?v) ."
+        ),
+    );
+    // NaN is NOT a row-level failure for MIN/MAX (unlike FILTER, which uses the
+    // relational comparison): the total order puts it below -INF.
+    assert_eq!(
+        got,
+        [[g, min_p, nan], [g, max_p, one]].into_iter().collect()
+    );
+}
+
+#[test]
+fn float_sum_fold_is_independent_of_group_order() {
+    let mut d = Dict::new();
+    // Classic non-associative catastrophic-cancellation set: an unsorted left-to-right
+    // fold gives 2, 3 or 4 depending on where the big pair lands, so a hash-order fold
+    // would make the derived SUM depend on the derivation order.
+    let ids = [
+        dbl(&mut d, "1.0E16"),
+        dbl(&mut d, "1.0E0"),
+        dbl(&mut d, "-1.0E16"),
+        dbl(&mut d, "2.0E0"),
+    ];
+    let mut base = group(&mut d, &ids);
+    let want = eval::fold_numeric_group(&mut d, super::AggFunc::Sum, &mut base)
+        .expect("a non-empty group folds");
+    for rot in 1..ids.len() {
+        let mut rotated: Vec<Id> = ids[rot..].to_vec();
+        rotated.extend_from_slice(&ids[..rot]);
+        let mut values = group(&mut d, &rotated);
+        assert_eq!(
+            eval::fold_numeric_group(&mut d, super::AggFunc::Sum, &mut values),
+            Some(want),
+            "rotation by {} changed the SUM",
+            rot
+        );
+    }
+    let mut reversed = group(&mut d, &[ids[3], ids[2], ids[1], ids[0]]);
+    assert_eq!(
+        eval::fold_numeric_group(&mut d, super::AggFunc::Sum, &mut reversed),
+        Some(want)
+    );
+    // The pinned order is ascending value: -1e16, 1, 2, 1e16.
+    assert_eq!(want, dbl(&mut d, "2.0E0"));
+}
+
+#[test]
+fn min_max_break_a_signed_zero_tie_deterministically() {
+    let mut d = Dict::new();
+    // +0.0 and -0.0 are EQUAL under the total order, so the emitted term is decided by
+    // the dictionary-id tie-break — the same one for MIN and for MAX, either way round.
+    let (pos, neg) = (dbl(&mut d, "0.0E0"), dbl(&mut d, "-0.0E0"));
+    let smaller = pos.min(neg);
+    for order in [[pos, neg], [neg, pos]] {
+        for func in [super::AggFunc::Min, super::AggFunc::Max] {
+            let mut values = group(&mut d, &order);
+            assert_eq!(
+                eval::fold_numeric_group(&mut d, func, &mut values),
+                Some(smaller),
+                "{:?} over {:?} is not order-independent",
+                func,
+                order
+            );
+        }
+    }
+}
+
+#[test]
+fn min_max_break_a_cross_tier_value_tie_deterministically() {
+    let mut d = Dict::new();
+    // "1"^^xsd:integer and "1.0E0"^^xsd:double are distinct TERMS of equal VALUE.
+    let (exact, inexact) = (int(&mut d, 1), dbl(&mut d, "1.0E0"));
+    let smaller = exact.min(inexact);
+    for order in [[exact, inexact], [inexact, exact]] {
+        for func in [super::AggFunc::Min, super::AggFunc::Max] {
+            let mut values = group(&mut d, &order);
+            assert_eq!(
+                eval::fold_numeric_group(&mut d, func, &mut values),
+                Some(smaller)
+            );
+        }
+    }
+}
+
 #[test]
 fn empty_group_yields_no_row_for_sum() {
     let mut d = Dict::new();
