@@ -688,6 +688,30 @@ no network); the Python close-script carries a `--self-test`.
   fail-safe) is pinned by `scripts/tests/test_reconcile_merged_beads.sh`. The maintenance loop
   runs it (dry-run) each tick (step 0); the orchestrator reviews + applies the closes separately.
 
+- **`scripts/render-start-here.py [--dry-run | --self-test | --if-ref owner/repo#N]`** (#4145) —
+  renders the **maintainer front door**, issue
+  [#1135](https://github.com/sparq-org/sparq/issues/1135), from
+  **`orchestration/start-here.toml`** (the curated 🔴/🟡 copy — one `[[entry]]` per ask, with
+  `ref` / `bucket` / `ask` / `short`) **plus live GitHub state**. It exists because #1135 said
+  "auto-maintained" and never was: on 2026-07-26 it was 13 days stale and **seven of its entries
+  were already resolved** while still being shown to the maintainer as work needing them.
+  **The rule: the renderer may only DROP, ANNOTATE and ORDER what the TOML says — it never invents
+  an ask, so a new 🔴/🟡 item arrives as a PR to that file, and a hand edit of the issue is
+  overwritten by the next refresh.** It **drops any entry whose issue/PR is closed or merged**
+  (listing them under *Removed as resolved*), renders the maintainer-gated **PR table from live
+  `mergeable`/`mergeStateStatus`** so a PR that has rotted to `CONFLICTING` reads "needs rebase"
+  instead of "say arm it", and renders the `needs:user`/`needs:area`/`needs:ec2` populations and
+  the held-PR list from the **LIST API** (the search index lags label writes, so it under-reports).
+  **Fail-closed:** an entry is dropped only on positive evidence of resolution — an unreadable ref
+  is KEPT and marked *state unknown* while the process exits non-zero (sticky), and an **aggregate**
+  failure (a label count, the held-PR list) **aborts without publishing**. The issue is edited only
+  when the rendered text **differs** (no notification churn); 🟢 truncates before the
+  65 536-char body limit, 🔴 never does. `.github/workflows/refresh-start-here.yml` runs it on a
+  cron plus `issues`/`pull_request` **closed** (with `--if-ref` as the API-budget guard) and
+  `workflow_dispatch`; `routing-self-tests` runs `--self-test` +
+  `scripts/tests/test_start_here_render.py` so a broken renderer or a malformed TOML fails on ITS
+  PR.
+
 See `research/orchestration-automation-design.md` §1.3 (the five judgment behaviours that
 must stay with the orchestrator), §6 (failure modes + the guardrail behind each), and §5
 (the full phased stand-up plan with per-phase rollback).
