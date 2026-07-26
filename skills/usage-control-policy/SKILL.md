@@ -293,6 +293,16 @@ assert!(!store.accessible(&Session { agent: Some("https://alice.ex/card#me"), cl
 
 **Action → mode** (the ODRL *request* action; conservative — narrowest mode only): `read`/`display`/`present`/`print`/`play` → `acl:Read`; `append` → `acl:Append`; `modify`/`delete`/`write` → `acl:Write`; **anything else (incl. the `odrl:use` umbrella) is unmapped → no grant**. `use` is left unmapped because it subsumes a whole subtree of actions (mapping it would have to pick the widest mode) — request `odrl:read` explicitly; a `use` permission still grants that concrete request (provided the request action is in the `use` subtree — not `sell`/`give`/`transfer`).
 
+**SPARQL-query action contract ([SONNET-4.6] sq-lrtc3.2): use `odrl:read`.** sparq does not mint a
+profile-specific SPARQL-query action IRI: executing a query observes graph content and maps exactly
+to `Mode::Read`, while a private action would add interoperability cost without a distinct
+enforcement capability. An `odrl:use` **request** does not transitively become query access and
+materializes no grant, so `query_as` sees nothing from it. The hierarchy still applies while
+evaluating a policy (`odrl:use` permission can cover a concrete `odrl:read` request), but the bridge
+maps the concrete request action rather than guessing which descendant of the broad `use` umbrella
+was intended. Always construct query requests with the concrete read action:
+`Request::new("http://www.w3.org/ns/odrl/2/read")`.
+
 **Fail-closed:** a grant is materialized only on a *definite Permit* AND a *mappable action* AND a *concrete party (WebID) + target graph*. A Deny, unsatisfied constraint, undischarged duty, unmapped action, or partyless/targetless request materializes **nothing**.
 
 **Interactive surface** — [FABLE-5] sq-ixc3.15: the desktop GUI's **Policies (ODRL) tool** (`gui/`, opt-in `odrl` cargo feature on `gui/src-tauri`) drives exactly this one-shot bridge path end-to-end: author/validate a policy, evaluate a request, and preview the same SPARQL query per requester through `query_json_as` next to the ungated rows (`gui/src-tauri/src/odrl.rs`).
