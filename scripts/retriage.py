@@ -84,6 +84,56 @@ def _gh(args):
     return subprocess.run(["gh", *args], capture_output=True, text=True, check=False)
 
 
+# [OPUS-5] The closed set of labels the static pass can emit. `ensure_labels` will create these and
+# NOTHING else, so a typo in triage.py can never mint an arbitrary repo label.
+_EMITTABLE_LABEL = ("role:", "status:", "needs:", "priority:")
+# Per-run memo. A live sweep promotes hundreds of issues but emits only a handful of DISTINCT
+# labels, so without this the ensure would cost ~3 API calls per issue for no new information.
+_ENSURED = set()
+
+
+def _ensure_labels(repo, labels):
+    """Idempotently create every emittable label BEFORE the edit. Best-effort by design: creating an
+    existing label reports an error, and the ADD below is the hard gate that actually decides."""
+    for lb in sorted(labels):
+        if lb.startswith(_EMITTABLE_LABEL) and (repo, lb) not in _ENSURED:
+            _ENSURED.add((repo, lb))
+            _gh(["label", "create", lb, "-R", repo, "--color", "ededed",
+                 "--description", "orchestration routing label (auto-created by retriage)"])
+
+
+def apply_labels(repo, number, add, remove):
+    """Apply an issue's whole label delta ATOMICALLY. Returns True iff it was written.
+
+    [OPUS-5] FAIL-CLOSED (review of PR #4211). This used to be one `_gh(["issue","edit",…,
+    "--add-label", lb])` PER label with the return code never read (`_gh` is `check=False`).
+    `gh issue edit --add-label` does NOT create a missing label — it fails — so a missing ROUTING
+    label (a `role:*`) silently no-opped while the sibling `status:ready` write in the same loop
+    SUCCEEDED. The issue was promoted as if it carried the role it does not, and route-resolve,
+    finding no `role:` label, fell through to `[defaults]`. Fail-open on the dispatch path: it is
+    what turned a missing `role:gui` label into a silently inverted routing preference.
+
+    So: ensure the labels exist, then send the whole delta as ONE `gh issue edit` — all-or-nothing,
+    so a failure can no longer leave `status:ready` set without the role it was paired with — and
+    READ the return code, surfacing the failure to the caller instead of discarding it.
+    """
+    if not add and not remove:      # nothing to write (an empty `gh issue edit` errors out)
+        return True
+    _ensure_labels(repo, add)
+    args = ["issue", "edit", str(number), "-R", repo]
+    for lb in add:
+        args += ["--add-label", lb]
+    for lb in remove:
+        args += ["--remove-label", lb]
+    r = _gh(args)
+    if r.returncode != 0:
+        print(f"#{number}: label write FAILED (rc={r.returncode}) — the issue is left UNPROMOTED "
+              f"rather than status:ready without its role: {(r.stderr or '').strip()[:300]}",
+              file=sys.stderr)
+        return False
+    return True
+
+
 def _trusted_factory(repo):
     cache = {}
 
@@ -339,6 +389,78 @@ def _self_test():
     finally:
         globals()["_gh"] = real_gh
 
+    # -------------------------------------------------------------------------------------------
+    # [OPUS-5] THE WRITE PATH IS FAIL-CLOSED (review of PR #4211).
+    # The defect was not in the PLAN, it was in APPLYING it: one `gh issue edit --add-label` per
+    # label, return code unread. A missing `role:*` label fails that call while the SIBLING
+    # `status:ready` call in the same loop succeeds — the issue promotes with no role and
+    # route-resolve falls through to [defaults]. These assertions are behavioural: they drive
+    # apply_labels() against a stub gh and inspect the calls it actually made.
+    # -------------------------------------------------------------------------------------------
+    writes = []
+
+    class _WResp:
+        def __init__(self, returncode=0, stderr=""):
+            self.stdout, self.returncode, self.stderr = "", returncode, stderr
+
+    def _write_gh(args, fail_on_edit=False):
+        writes.append(list(args))
+        if args[0:2] == ["issue", "edit"] and fail_on_edit:
+            return _WResp(1, "'role:gui' not found\nfailed to update 1 issue")
+        return _WResp()
+
+    real_gh = globals()["_gh"]
+    try:
+        globals()["_gh"] = lambda a: _write_gh(a, fail_on_edit=False)
+        okw = apply_labels("o/r", 42, ["role:gui", "status:ready"], ["status:untriaged"])
+        edits = [c for c in writes if c[0:2] == ["issue", "edit"]]
+        chk("a successful delta is written", okw, True)
+        # ALL-OR-NOTHING: one call carrying the WHOLE delta. Two calls is the defect — the second
+        # one lands even when the first has failed.
+        chk("the whole label delta goes in ONE edit call, not one call per label", len(edits), 1)
+        chk("the role label and status:ready are written by the SAME call",
+            ("role:gui" in edits[0] and "status:ready" in edits[0]), True)
+        chk("the removal is in that same call", "status:untriaged" in edits[0], True)
+        # ensure_labels runs FIRST, so a label the repo lacks is created rather than silently
+        # dropping the routing signal (the `role:gui` case exactly).
+        creates = [c for c in writes if c[0:2] == ["label", "create"]]
+        chk("every emittable add-label is ensured to exist before the edit",
+            sorted(c[2] for c in creates), ["role:gui", "status:ready"])
+        chk("the ensure runs BEFORE the edit", writes.index(edits[0]) > len(creates) - 1, True)
+
+        # THE DECISIVE ONE: when the write fails, the caller must LEARN it. Before this fix the
+        # rc was never read and the cron exited 0 with the issue half-labelled.
+        writes.clear()
+        globals()["_gh"] = lambda a: _write_gh(a, fail_on_edit=True)
+        chk("a FAILED label write is reported, not discarded",
+            apply_labels("o/r", 42, ["role:gui", "status:ready"], []), False)
+        chk("a failed write does not retry-promote with a second call",
+            len([c for c in writes if c[0:2] == ["issue", "edit"]]), 1)
+
+        # Nothing to write -> no gh call at all (an empty `gh issue edit` errors out).
+        writes.clear()
+        globals()["_gh"] = lambda a: _write_gh(a, fail_on_edit=True)
+        chk("an empty delta issues no edit", (apply_labels("o/r", 42, [], []), writes), (True, []))
+
+        # The auto-create is restricted to the closed set triage.py emits: a typo cannot mint an
+        # arbitrary repo label.
+        writes.clear()
+        globals()["_gh"] = lambda a: _write_gh(a, fail_on_edit=False)
+        apply_labels("o/r", 42, ["area:sparq-core", "role:impl"], [])
+        chk("only role:/status:/needs:/priority: labels are auto-created",
+            sorted(c[2] for c in writes if c[0:2] == ["label", "create"]), ["role:impl"])
+        # The ensure is memoised per run: a sweep promoting hundreds of issues emits only a
+        # handful of DISTINCT labels, so re-creating them per issue is pure API cost.
+        writes.clear()
+        apply_labels("o/r", 43, ["role:impl", "needs:area"], [])
+        chk("an already-ensured label is not re-created for the next issue "
+            "(role:impl was ensured above; only the new needs:area is created)",
+            [c[2] for c in writes if c[0:2] == ["label", "create"]], ["needs:area"])
+        chk("...but the edit itself still happens for that issue",
+            len([c for c in writes if c[0:2] == ["issue", "edit"]]), 1)
+    finally:
+        globals()["_gh"] = real_gh
+
     print("retriage self-test", "PASSED" if ok else "FAILED")
     return 0 if ok else 1
 
@@ -352,14 +474,18 @@ def main():
     if args.self_test:
         return _self_test()
     actions = plan_retriage(_fetch_candidates(args.repo), _trusted_factory(args.repo))
+    failed = []
     for number, add, remove in actions:
         print(f"#{number}: +{','.join(add) or '-'} -{','.join(remove) or '-'}")
-        if args.apply:
-            for lb in add:
-                _gh(["issue", "edit", str(number), "-R", args.repo, "--add-label", lb])
-            for lb in remove:
-                _gh(["issue", "edit", str(number), "-R", args.repo, "--remove-label", lb])
+        if args.apply and not apply_labels(args.repo, number, add, remove):
+            failed.append(number)
     print(f"retriage: {len(actions)} issue(s) {'promoted' if args.apply else 'promotable (dry-run)'}")
+    if failed:
+        # [OPUS-5] Do NOT exit 0 on a discarded write. A swallowed label failure is invisible in a
+        # cron and leaves the frontier quietly wrong; the run must go red so it is noticed.
+        print(f"retriage: {len(failed)} issue(s) FAILED to apply and are NOT promoted: "
+              f"{failed[:10]}", file=sys.stderr)
+        return 1
     return 0
 
 

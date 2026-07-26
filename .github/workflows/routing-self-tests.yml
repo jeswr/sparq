@@ -41,6 +41,22 @@ on:
       # in-progress-review and local/orchestrator-parity contracts, and pins this
       # workflow's own run block to the scripts it must invoke.
       - "scripts/tests/test_readiness_visibility.py"
+      # [OPUS-5] the model-DEPRECATION guard (maintainer directive 2026-07-26: fable + opus-4.8
+      # retired in favour of opus5; docs writing off haiku/sonnet onto sol). It is cross-surface
+      # — a model is selected in FOUR places, not just the routing table — so each guarded
+      # surface is its own trigger. Without these entries a PR could reintroduce a retired model
+      # in settings.json or a workflow JS dispatch site without ever running this gate.
+      - "scripts/tests/test_no_deprecated_models.py"
+      - ".claude/settings.json"
+      - ".claude/workflows/fable-architect-drain.js"
+      # [OPUS-5] the LABELS -> MODEL CHAIN surfaces (review of PR #4211). The `area:gui` carve-out
+      # is decided in route-resolve.py from labels written by these two files, so the end-to-end
+      # suite must re-run when either the role derivation or the label WRITE path changes. The
+      # write path is load-bearing: a discarded --add-label failure that still sets status:ready
+      # is what silently inverted the carve-out.
+      - "scripts/triage.py"
+      - "scripts/retriage.py"
+      - ".github/workflows/triage-issue.yml"
       - ".github/workflows/routing-self-tests.yml"
       # [OPUS-5] reg#677 — PR `area:` attribution. The scheduler partitions by
       # `area:<name>`; an unlabelled PR takes the serializing `__global__` partition
@@ -76,6 +92,22 @@ on:
       # in-progress-review and local/orchestrator-parity contracts, and pins this
       # workflow's own run block to the scripts it must invoke.
       - "scripts/tests/test_readiness_visibility.py"
+      # [OPUS-5] the model-DEPRECATION guard (maintainer directive 2026-07-26: fable + opus-4.8
+      # retired in favour of opus5; docs writing off haiku/sonnet onto sol). It is cross-surface
+      # — a model is selected in FOUR places, not just the routing table — so each guarded
+      # surface is its own trigger. Without these entries a PR could reintroduce a retired model
+      # in settings.json or a workflow JS dispatch site without ever running this gate.
+      - "scripts/tests/test_no_deprecated_models.py"
+      - ".claude/settings.json"
+      - ".claude/workflows/fable-architect-drain.js"
+      # [OPUS-5] the LABELS -> MODEL CHAIN surfaces (review of PR #4211). The `area:gui` carve-out
+      # is decided in route-resolve.py from labels written by these two files, so the end-to-end
+      # suite must re-run when either the role derivation or the label WRITE path changes. The
+      # write path is load-bearing: a discarded --add-label failure that still sets status:ready
+      # is what silently inverted the carve-out.
+      - "scripts/triage.py"
+      - "scripts/retriage.py"
+      - ".github/workflows/triage-issue.yml"
       - ".github/workflows/routing-self-tests.yml"
       # [OPUS-5] reg#677 — PR `area:` attribution. The scheduler partitions by
       # `area:<name>`; an unlabelled PR takes the serializing `__global__` partition
@@ -114,6 +146,11 @@ jobs:
           python3 scripts/dispatch-plan.py --self-test
           python3 scripts/batch-merge.py --self-test
           python3 scripts/tests/test_readiness_visibility.py
+          # [OPUS-5] a deprecated model must not reappear in ANY routing position — the routing
+          # table, a .claude/settings.json agent hook, a workflow JS dispatch site, or agent
+          # frontmatter. This suite also pins its OWN wiring in this workflow structurally
+          # (parsed YAML, not substrings), so `if: false` on the job or the step reds it.
+          python3 scripts/tests/test_no_deprecated_models.py
           # [OPUS-5] reg#677: the PR `area:` deriver + its YAML seam. The suite is
           # invoked HERE and that invocation is itself pinned by
           # test_pr_area_labels.py::TestSelfTestIsActuallyInvoked — a suite nobody
