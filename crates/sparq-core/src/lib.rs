@@ -27,6 +27,7 @@ mod ttl;
 #[cfg(feature = "shared")]
 pub mod shared;
 pub mod store;
+pub mod strdist;
 pub mod temporal;
 
 use dict::{Dict, Id};
@@ -197,8 +198,19 @@ enum NumData {
 impl NumData {
     /// The cached numeric value of a 1-based dictionary id, or `None` if it is not a
     /// (cached) numeric literal. The engine's O(1) numeric fast path.
-    #[inline]
+    // [FABLE-5] Keep the dominant dense-cache probe small enough that LTO reliably places it
+    // inside numeric gather loops; the larger storage-variant dispatch stays outlined.
+    #[inline(always)]
     fn lookup(&self, id: Id) -> Option<f64> {
+        if let NumData::Owned(values) = self {
+            let value = *values.get((id - 1) as usize)?;
+            return (!value.is_nan()).then_some(value);
+        }
+        self.lookup_non_owned(id)
+    }
+
+    #[inline(never)]
+    fn lookup_non_owned(&self, id: Id) -> Option<f64> {
         match self {
             NumData::Sparse(m) => m.get(&id).copied(),
             #[cfg(feature = "mmap")]
@@ -208,14 +220,7 @@ impl NumData {
                 // Beyond the mmap'd dense cache: a term appended after open.
                 None => extra.get(&id).copied(),
             },
-            NumData::Owned(v) => {
-                let v = *v.get((id - 1) as usize)?;
-                if v.is_nan() {
-                    None
-                } else {
-                    Some(v)
-                }
-            }
+            NumData::Owned(_) => unreachable!("Owned handled by lookup"),
             NumData::Forked { base, extra } => {
                 base.lookup(id).or_else(|| extra.get(&id).copied())
             }
@@ -10839,6 +10844,25 @@ mod tests {
         assert_eq!(by_val("nan"), None, "'nan'^^xsd:double must NOT hit the cache");
         // The genuine XSD spelling still hits with the infinity value.
         assert_eq!(by_val("INF"), Some(f64::INFINITY), "'INF'^^xsd:double still hits");
+    }
+
+    // [SONNET-4.6] Exercise the outlined storage dispatch directly so the coverage
+    // ratchet sees every non-mmap cache shape, not only the dominant owned fast path.
+    #[test]
+    fn numeric_cache_lookup_covers_outlined_storage_variants() {
+        let mut sparse_values = rustc_hash::FxHashMap::default();
+        sparse_values.insert(2, 2.5);
+        let sparse = NumData::Sparse(sparse_values);
+        assert_eq!(sparse.lookup(2), Some(2.5));
+        assert_eq!(sparse.lookup(1), None);
+
+        let base = std::sync::Arc::new(NumData::Owned(vec![1.5, f64::NAN]));
+        let mut extra = rustc_hash::FxHashMap::default();
+        extra.insert(3, 3.5);
+        let forked = NumData::Forked { base, extra };
+        assert_eq!(forked.lookup(1), Some(1.5));
+        assert_eq!(forked.lookup(2), None);
+        assert_eq!(forked.lookup(3), Some(3.5));
     }
 
     /// [OPUS-4.8] (sq-x32t) Recursively reads every regular file under `dir` and returns true iff

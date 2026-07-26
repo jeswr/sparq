@@ -134,10 +134,12 @@ deferred and NOT claimed** — and that deferral should be stated loudly.
 
 ### 3.2 What ships today (the honest starting point — row P4, not row A1)
 
-`crates/sparq-zk-compose/src/derivation.rs` (226 lines) ships `DerivationStep` +
-`EntailmentRule` for two RDFS rules — `rdfs9` (subClassOf-into-type transitivity)
-and `rdfs7` (subPropertyOf) — each with a **fixed antecedent/consequent shape**
-re-checked by `DerivationStep::is_well_formed` (`derivation.rs:48-170`).
+`crates/sparq-zk-compose/src/derivation.rs` ships `DerivationStep` +
+`EntailmentRule` for the six fixed-shape RDFS rules of the v1 scope (§3.5) —
+`rdfs9` (subClassOf-into-type transitivity), `rdfs7` (subPropertyOf), and (added
+under `sq-rsd3v.2`) `rdfs2` (domain), `rdfs3` (range), `rdfs5` (subPropertyOf
+transitivity), `rdfs11` (subClassOf transitivity) — each with a **fixed
+antecedent/consequent shape** re-checked by `DerivationStep::is_well_formed`.
 `verifier.rs:4401` `bind_entailment` enforces the manifest's `entailmentRegime`
 **end-to-end and fail-closed**:
 
@@ -176,6 +178,19 @@ has a HIDDEN committed-graph membership proof."* Concretely, a **new in-circuit
 
 A derivation DAG proves SOUNDNESS but **not** completeness, and **not** that
 leaves are themselves true unless each leaf is anchored — hence (3) is mandatory.
+
+**Status (`sq-rsd3v.2`):** the in-circuit RELATION landed as
+`zk/compose/compose_core/src/derivation.nr` (`derivation_check<K,N,M>`) —
+per-node rule variable-sharing equalities (1), premise-chaining by
+encoding-equality for internal DAG nodes (2), and DAG-leaf anchoring via the
+`scan.nr` whole-graph-in-circuit membership accumulator against `commitments[g]`
+(3), with a forge-and-verify Noir test (an ungrounded/forged antecedent fails
+closed). It is **research-grade, NOT externally audited (`sq-qhy4`), and NOT yet
+`bb`-compiled** in this tree — **no cost claim is made** (the per-node `~10²`
+figure remains a judgement to be confirmed by `bb gates`). Still to land: the
+off-circuit **zk-trace mapper** (`sparq-reason explain` `ProofTree` → witness
+slot indices), a compiled **bin-package monomorphisation**, and the verifier
+dispatch that binds a `derivation_check` proof into `verify_manifest`.
 
 **The C(G)-membership story and its cost (the SOUNDNESS-lens correction — read
 carefully).** Step (3) must NOT be misread as "reuse the hidden-issuer / holder-set

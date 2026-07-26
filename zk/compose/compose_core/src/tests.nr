@@ -10,6 +10,7 @@
 //! pipeline ports -- the bit-compatibility requirement for commitment
 //! recomputation in-circuit.
 
+use crate::derivation::{derivation_check, RULE_LEAF, RULE_RDFS9};
 use crate::filter_float::filter_f64_check;
 use crate::filter_int::{filter_int_check, OP_EQ, OP_GE, OP_GT, OP_LE, OP_LT, OP_NE};
 use crate::filter_signed::{filter_decimal_check, filter_signed_int_check};
@@ -2239,5 +2240,147 @@ fn entail_k2_rejects_attribution_overstating_noncontributing_graph() {
         [[E_X, E_TYPE, E_C1], [E_C1, E_SUBCLASS, E_C2]],
         counts,
         enc,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// derivation_check -- accept + forge-and-verify (sq-rsd3v.2, #2614). Tiny
+// (K=1, N=4, M=4) monomorphisation. Schema encodings are arbitrary distinct
+// nonzero constants (the relation only cares about equality structure).
+// ---------------------------------------------------------------------------
+
+global D_TYPE: Field = 31; // rdf:type
+global D_SUBCLASS: Field = 32; // rdfs:subClassOf
+global D_SUBPROP: Field = 33; // rdfs:subPropertyOf
+global D_DOMAIN: Field = 34; // rdfs:domain
+global D_RANGE: Field = 35; // rdfs:range
+global D_X: Field = 101; // an instance
+global D_C1: Field = 201; // a class
+global D_C2: Field = 202; // a superclass
+global D_GHOST: Field = 777; // a fabricated class NOT in the committed graph
+
+fn d_schema() -> [Field; 5] {
+    [D_TYPE, D_SUBCLASS, D_SUBPROP, D_DOMAIN, D_RANGE]
+}
+
+// The committed base graph: { (X type C1), (C1 subClassOf C2) } in an N=4
+// bucket. Returns (enc, counts, commitments). The rdfs9 firing over these two
+// facts entails (X type C2) -- WITHOUT disclosing the two base facts.
+fn d_graph() -> ([[[Field; 3]; 4]; 1], [u32; 1], [Field; 1]) {
+    let enc: [[[Field; 3]; 4]; 1] = [[
+        [D_X, D_TYPE, D_C1],
+        [D_C1, D_SUBCLASS, D_C2],
+        [0, 0, 0],
+        [0, 0, 0],
+    ]];
+    let counts: [u32; 1] = [2];
+    let mut leaves: [Field; 4] = [0; 4];
+    for i in 0..4 {
+        leaves[i] = h3(enc[0][i][0], enc[0][i][1], enc[0][i][2]);
+    }
+    let commitments: [Field; 1] = [commit_fold(leaves, 2)];
+    (enc, counts, commitments)
+}
+
+// ACCEPT: the honest DAG -- two anchored leaves feeding one rdfs9 firing whose
+// conclusion is the disclosed derived row (X type C2). The base facts are
+// HIDDEN (private `enc`/`prem`/`concl`); only `root` is public.
+#[test]
+fn derivation_accepts_grounded_rdfs9() {
+    let (enc, counts, commitments) = d_graph();
+    let rule: [u32; 4] = [RULE_LEAF, RULE_LEAF, RULE_RDFS9, RULE_LEAF];
+    let concl: [[Field; 3]; 4] = [
+        [D_X, D_TYPE, D_C1], // leaf, anchored to the graph
+        [D_C1, D_SUBCLASS, D_C2], // leaf, anchored to the graph
+        [D_X, D_TYPE, D_C2], // rdfs9 firing (the derived row)
+        [0, 0, 0], // inactive padding
+    ];
+    let prem: [[[Field; 3]; 2]; 4] = [
+        [[0, 0, 0], [0, 0, 0]],
+        [[0, 0, 0], [0, 0, 0]],
+        [[D_X, D_TYPE, D_C1], [D_C1, D_SUBCLASS, D_C2]], // chain to nodes 0,1
+        [[0, 0, 0], [0, 0, 0]],
+    ];
+    derivation_check::<1, 4, 4>(
+        commitments, d_schema(), [D_X, D_TYPE, D_C2], counts, enc, 3, rule, prem, concl,
+    );
+}
+
+// FORGE-AND-VERIFY (the core soundness regression): an rdfs9 firing whose
+// antecedents are about a FABRICATED class C_GHOST that is neither in the
+// committed graph nor derived by any earlier node. The rule SHAPE is satisfied
+// (so shape alone cannot catch it), but the premises are ungrounded -- there is
+// no anchored leaf and no earlier conclusion for them -- so the proof MUST fail
+// closed. This is the "ungrounded/forged antecedent must fail-closed" property.
+#[test(should_fail_with = "derivation premise not grounded")]
+fn derivation_rejects_ungrounded_antecedent() {
+    let (enc, counts, commitments) = d_graph();
+    // node0: a genuine anchored leaf; node1: the forged rdfs9 over C_GHOST.
+    let rule: [u32; 4] = [RULE_LEAF, RULE_RDFS9, RULE_LEAF, RULE_LEAF];
+    let concl: [[Field; 3]; 4] = [
+        [D_C1, D_SUBCLASS, D_C2], // leaf, anchored (real)
+        [D_X, D_TYPE, D_C2], // forged rdfs9 conclusion (still claims X type C2)
+        [0, 0, 0],
+        [0, 0, 0],
+    ];
+    let prem: [[[Field; 3]; 2]; 4] = [
+        [[0, 0, 0], [0, 0, 0]],
+        // shape-valid rdfs9 over a GHOST class: (X type GHOST),(GHOST sCO C2).
+        // Neither premise is an earlier conclusion nor a committed fact.
+        [[D_X, D_TYPE, D_GHOST], [D_GHOST, D_SUBCLASS, D_C2]],
+        [[0, 0, 0], [0, 0, 0]],
+        [[0, 0, 0], [0, 0, 0]],
+    ];
+    derivation_check::<1, 4, 4>(
+        commitments, d_schema(), [D_X, D_TYPE, D_C2], counts, enc, 2, rule, prem, concl,
+    );
+}
+
+// FORGE variant: a LEAF claiming a base fact that is NOT in the committed graph
+// (a fabricated antecedent smuggled in as an "asserted" leaf) must fail the
+// membership anchor -- the privacy upgrade's soundness anchor (design step 3).
+#[test(should_fail_with = "derivation leaf not present in committed graph")]
+fn derivation_rejects_leaf_absent_from_graph() {
+    let (enc, counts, commitments) = d_graph();
+    let rule: [u32; 4] = [RULE_LEAF, RULE_LEAF, RULE_RDFS9, RULE_LEAF];
+    let concl: [[Field; 3]; 4] = [
+        [D_X, D_TYPE, D_GHOST], // leaf claiming a fact NOT in the graph
+        [D_GHOST, D_SUBCLASS, D_C2], // leaf claiming a fact NOT in the graph
+        [D_X, D_TYPE, D_C2],
+        [0, 0, 0],
+    ];
+    let prem: [[[Field; 3]; 2]; 4] = [
+        [[0, 0, 0], [0, 0, 0]],
+        [[0, 0, 0], [0, 0, 0]],
+        [[D_X, D_TYPE, D_GHOST], [D_GHOST, D_SUBCLASS, D_C2]],
+        [[0, 0, 0], [0, 0, 0]],
+    ];
+    derivation_check::<1, 4, 4>(
+        commitments, d_schema(), [D_X, D_TYPE, D_C2], counts, enc, 3, rule, prem, concl,
+    );
+}
+
+// REJECT: the disclosed derived row must bind to the DAG's terminal conclusion.
+// A prover who proves a valid derivation of (X type C2) cannot present it as a
+// proof of a DIFFERENT row.
+#[test(should_fail_with = "derivation root not bound to the disclosed derived row")]
+fn derivation_rejects_root_mismatch() {
+    let (enc, counts, commitments) = d_graph();
+    let rule: [u32; 4] = [RULE_LEAF, RULE_LEAF, RULE_RDFS9, RULE_LEAF];
+    let concl: [[Field; 3]; 4] = [
+        [D_X, D_TYPE, D_C1],
+        [D_C1, D_SUBCLASS, D_C2],
+        [D_X, D_TYPE, D_C2],
+        [0, 0, 0],
+    ];
+    let prem: [[[Field; 3]; 2]; 4] = [
+        [[0, 0, 0], [0, 0, 0]],
+        [[0, 0, 0], [0, 0, 0]],
+        [[D_X, D_TYPE, D_C1], [D_C1, D_SUBCLASS, D_C2]],
+        [[0, 0, 0], [0, 0, 0]],
+    ];
+    // The proof derives (X type C2) but claims the row (X type C1).
+    derivation_check::<1, 4, 4>(
+        commitments, d_schema(), [D_X, D_TYPE, D_C1], counts, enc, 3, rule, prem, concl,
     );
 }

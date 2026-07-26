@@ -69,6 +69,17 @@ SHACL bundle is a **separate, lazy-loaded** artifact (never on the landing
 page; `next/dynamic` on `/surface/shacl` only), built `-Oz`, `shacl-af` off by
 default.
 
+> **[SONNET-4.6] sq-c6c2s update.** The measurement seam for that comparable
+> number now exists — `bench/shacl-wasm/bundle.mjs` (`run.sh --bundle-only`)
+> builds the esbuild-minified, tree-shaken peer bundle and reports gzip-9 wire
+> bytes beside the wasm artifact. **No ratio is recorded here yet: the gather
+> has not been run.** The harness was authored and exercised in a checkout with
+> no npm, no `wasm-pack`, and no `wasm32-unknown-unknown` target, so the peer
+> and sparq artifacts could not both be built; the peer-bundle code path was
+> validated against stand-in packages only. The ratio lands in this record when
+> a box with the toolchain runs the stage. Until then the "no byte-ratio claim"
+> above still stands.
+
 ## ADVISORY — same-runtime latency, first read (NON-canonical, shared work box)
 
 One-shot end-to-end (parse data + shapes + validate + reduce), best-of-3,
@@ -87,6 +98,29 @@ Caveats before any dominance claim: the corpus is deliberately tiny (the gate
 substrate, not a load test), the box is shared, and the peer's e2e is
 parser-bound. A scale-tier browser corpus + quiet-box gather is where a citable
 number would come from (sq-hmd7l.39/40 wasm-compare wave; SHACL can join it).
+
+## Size-trim levers (sq-c6c2s)
+
+**[SONNET-4.6] Status: inventoried and made measurable; NOT yet measured.** The
+bead asks to evaluate further trim "if sparq is BEHIND materially". Since a
+wasm engine bundle versus a JS library is a payload gap by construction, the
+levers were inventoried up front and wired into the harness so the decision is
+made on bytes rather than on prose. Each is a `bench/shacl-wasm/run.sh` knob;
+none of them has been exercised here (no wasm toolchain in this checkout), and
+**nothing has been re-pinned on the strength of an unmeasured lever**.
+
+| lever | how to price it | prior |
+|---|---|---|
+| **`release-wasm` cargo profile** | `TRIM_SWEEP=1` — builds a second artifact under it and reports both | The most promising. This suite (and the crate README quickstart) build with plain `--release`, while **every other sparq wasm bundle** — `js/package.json` `build:wasm{,:lean}`, `build:reason-wasm`, `build:rsp-wasm`, `build:text-wasm` — ships under `--profile release-wasm`, which strips symbols and builds the cold `oxttl`/`oxiri`/`spargebra` parse crates at `opt-level = "z"`. This bundle definitely carries `oxttl`, so the profile is plausible free headroom. |
+| **binaryen headroom beyond the packaged `-Oz`** | `WASM_OPT_PROBE=1` — re-runs `wasm-opt -all -Oz --converge --strip-debug --strip-producers --vacuum` over the shipped artifact and reports the delta | Expected small: the crate already sets `wasm-opt = ["-Oz"]` in `[package.metadata.wasm-pack.profile.release]`. A delta near zero is the *useful* answer — it says the remaining trim has to come from the Rust side. |
+| **feature trim** | `FEATURES=` (already the default) | Nothing left to take: `shacl-af` and `stateful` are both off by default, which is exactly why the deterministic bundle-bytes record is the default-features artifact. |
+| **`sh:pattern` regex automata** | not wired — would need a feature-gated `regex` in `sparq-shacl` | The crate README already names the regex automata as the bundle-size consideration, so this is the largest single suspected term. It is a **cross-crate API change**, deliberately out of scope for a bench bead; captured as follow-up rather than attempted. |
+
+The honest framing for whatever the numbers turn out to be: the peer is SHACL
+Core only, so any byte gap prices sparq's **SHACL-SPARQL capability** (and the
+SPARQL engine behind it) as much as it prices implementation efficiency. The
+shipped mitigation remains the architecture, not the byte count — this bundle
+is separate and lazy-loaded, so the landing page never pays for it at all.
 
 ## Surface gap noted (sparq)
 
@@ -109,7 +143,10 @@ Follow-up bead filed (below) rather than widening this bundle now.
 
 - **sq-c6c2s** — minified browser-bundle byte comparison (esbuild-built
   rdf-validate-shacl bundle vs the wasm artifact) + evaluate further size-trim
-  for `sparq-shacl-wasm`.
+  for `sparq-shacl-wasm`. **HARNESS DELIVERED, GATHER PENDING**:
+  `bench/shacl-wasm/bundle.mjs` + `run.sh --bundle-only` / `TRIM_SWEEP=1` /
+  `WASM_OPT_PROBE=1`; levers inventoried under *Size-trim levers* above. The
+  byte ratio is filled in once a box with npm + `wasm-pack` runs the stage.
 - **sq-01xlp** — evaluate a pre-parsed/stateful `Validator` variant (or bless
   the lean bundle's `Store.validate` as the stateful path) for scale-tier
   repeat validation. **RESOLVED**: decision (b), the opt-in `stateful`

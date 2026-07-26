@@ -406,7 +406,10 @@ jobs:
       # (`frontendDist`), and bundles installers for the host platform into
       # gui/src-tauri/target/release/bundle/<format>/. `--ci` disables interactive prompts;
       # no signing env vars are set, so the bundles are produced UNSIGNED (see the job header
-      # — signing is needs:user sq-v286.8). `--verbose` aids first-CI-run diagnosis.
+      # — signing is needs:user sq-v286.8). [SONNET-4.6] sq-3w29b: release bundles explicitly
+      # enable the native HDT importer, federated SERVICE client, and ODRL policy tool. These
+      # native capabilities stay off for lean development builds; Forms remains opt-in until a
+      # release explicitly selects its larger SHACL model stack. `--verbose` aids diagnosis.
       #
       # PROVEN vs DOCUMENTED-UNTESTED (honest status — this workflow is tag-triggered, so it
       # does NOT run on this PR; validate on the first real `v*` tag):
@@ -414,8 +417,14 @@ jobs:
       #     gui/app/out) is REPRODUCED locally on this work box (x64-linux): it produces
       #     gui/app/out/index.html with ROOT-RELATIVE assets, the path `frontendDist` reads.
       #   * The empty-`beforeBuildCommand` skip is confirmed from tauri-cli source (run_hook).
-      #   * Linux rows (ubuntu-latest, ubuntu-24.04-arm): the GUI crate build + webkit deps are
-      #     already proven green in gui.yml; the .deb/.AppImage bundle step is the new surface.
+      #   * The native capability feature set (`hdt,federation,odrl`) is clippied and tested in
+      #     debug mode on Linux by gui.yml's ADVISORY (non-gating) tauri-build job. HDT is
+      #     compile-covered in that feature-on state; the combined-state tests exercise the
+      #     federation and ODRL paths. `custom-protocol` is exercised only by jobs that first
+      #     export gui/app/out for compile-time embedding.
+      #   * Linux rows (ubuntu-latest, ubuntu-24.04-arm): gui.yml covers the GUI crate + webkit
+      #     dependencies in advisory debug builds. The release profile (LTO, one codegen unit)
+      #     and the .deb/.AppImage bundle step are first exercised here.
       #   * macOS rows: WKWebView ships with the OS; the .dmg/.app bundle is documented-untested.
       #   * Windows row: WebView2 ships with the OS; the prepare-hook ENOENT root cause is fixed,
       #     and the .msi/NSIS .exe bundle step itself is still documented-untested. If a platform
@@ -423,7 +432,7 @@ jobs:
       #     on the matrix) so the release ships the working bundles + attestation; sq-gl3cf tracks it.
       - name: Build Tauri desktop bundle (unsigned)
         working-directory: gui/src-tauri
-        run: cargo tauri build --ci --verbose -c tauri.ci.conf.json
+        run: cargo tauri build --ci --verbose -c tauri.ci.conf.json --features hdt,federation,odrl
 
       # Collect every produced installer into a flat staging dir under a STABLE, PREDICTABLE
       # per-OS name (the scheme the /download page hardcodes — see the documented names in the
@@ -582,9 +591,35 @@ jobs:
   # including dispatch-driven developer/test releases; a maintainer who does not want container
   # publishing can delete this job (or add `if: false`) without affecting the binaries/release
   # jobs above.
+  #
+  # [OPUS-5] sq-w1dxx: the image tags are version-THREADED from `setup`, not derived from the git
+  # ref. `docker/metadata-action`'s `type=semver` reads `github.ref` by default, which on a
+  # `workflow_dispatch` is the BRANCH — so a dispatch used to produce NO semver tag and push only
+  # the moving `:latest`, silently overwriting the canonical released image that `deploy/paas` and
+  # `deploy/aws` pin (`ghcr.io/sparq-org/sparq-server:latest`) with a developer/test build. Now the
+  # two trigger paths emit disjoint, unambiguous tag sets:
+  #   * `v*` tag push (canonical release): `{{version}}`, `{{major}}.{{minor}}`, and `latest`.
+  #   * `workflow_dispatch` (developer/test): ONLY `dev-<inputs.tag>` (e.g. `dev-v0.1.0-dev`).
+  #     No `latest`, no moving `{{major}}.{{minor}}` — a dev build can never claim a tag a
+  #     deployment follows, and is still pullable by its exact namespaced dispatch tag.
+  #
+  # [OPUS-5] the `dev-` prefix is what makes that disjointness hold for ANY input, not just a
+  # well-behaved one. `inputs.tag` is a `required: true` free-form string: gating on the trigger
+  # alone still let a dispatch with `tag: latest` (or `v1.2.3`, or a moving `1.2`) resolve
+  # `type=raw,value=${{ needs.setup.outputs.version }}` straight onto the canonical tag it names
+  # and overwrite the released image. Prefixing unconditionally makes the collision STRUCTURAL,
+  # not a matter of developer discipline: every canonical tag is either the literal `latest` or
+  # starts with a digit (metadata-action strips the leading `v` from `{{version}}`), so no
+  # `dev-`-prefixed tag can ever be one. This is enforced over adversarial inputs by
+  # `scripts/tests/test_release_container_multiarch.py`.
+  # The dispatch path deliberately uses `type=raw` (not `type=semver`) so a non-semver `inputs.tag`
+  # still yields a tag: metadata-action *warns and skips* an unparseable semver, which would leave
+  # `tags:` empty and make the push meaningless.
   docker:
     name: build + push container (ghcr.io)
     runs-on: ubuntu-latest
+    # [OPUS-5] sq-w1dxx: the resolved version is the single source of the image tags on both paths.
+    needs: setup
     permissions:
       contents: read
       packages: write # push to ghcr.io with GITHUB_TOKEN
@@ -611,15 +646,19 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Image metadata (tags + OCI labels from the git tag)
+      - name: Image metadata (tags + OCI labels from the resolved release version)
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/${{ github.repository_owner }}/sparq-server
+          # [OPUS-5] sq-w1dxx: `value=` overrides metadata-action's default git-ref parsing with the
+          # `setup` job's resolved version; the `enable=` guards keep the canonical (tag push) and
+          # developer (dispatch) tag sets mutually exclusive — see the job header.
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
+            type=semver,pattern={{version}},value=${{ needs.setup.outputs.version }},enable=${{ github.event_name != 'workflow_dispatch' }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.setup.outputs.version }},enable=${{ github.event_name != 'workflow_dispatch' }}
+            type=raw,value=latest,enable=${{ github.event_name != 'workflow_dispatch' }}
+            type=raw,value=dev-${{ needs.setup.outputs.version }},enable=${{ github.event_name == 'workflow_dispatch' }}
       # [OPUS-4.8] sq-n6rv: SMOKE BEFORE PUSH. Build the image locally first, `docker run`
       # it, and prove it serves /health + a query — so a container that exits immediately on
       # boot (the sq-n6rv regression) can never reach ghcr.io. The build is cached to GHA, so

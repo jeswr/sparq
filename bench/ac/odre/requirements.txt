@@ -1,0 +1,23 @@
+# Pinned ODRE reference implementation for the decision-agreement lane (sq-i6du2.8).
+#
+# `pyodre` is the Python implementation of ODRE — Open Digital Rights Enforcement
+# (Cimmino, Cano-Benito, Garcia-Castro, arXiv:2409.17602), published from
+# https://github.com/ODRE-Framework/odre-python.
+#
+# GATHER-TIME dependency only (bench/CATALOG.md): installed by `run.sh --setup`, never
+# vendored and never committed. Every other invocation of the lane is offline.
+#
+# NAME CHECK, because the obvious guess is wrong: the PyPI distribution named `odre` is an
+# UNRELATED project (a Bottle authentication extension). The ODRE enforcement framework is
+# `pyodre`. Do not "fix" this to `odre`.
+#
+# The hashes below are the PyPI artifacts for this exact version; `--require-hashes` is
+# deliberately NOT enabled, because it would demand a pinned hash for the full transitive
+# closure (rdflib, jinja2, requests and their dependencies), which this lane does not
+# pin — the resolver picks those. What was installed is recorded in the agreement report
+# (`systems.odre.version`) so a run is auditable after the fact.
+#   pyodre-1.0.6-py3-none-any.whl  sha256:d20c37afef57b0a818afd07bed3cba9fdd9db48179f80298c175e4a0cee8e6f4
+#   pyodre-1.0.6.tar.gz            sha256:16b7f929546b2a90449fbc547a426bf2e02ad2ad7f02681daade31031a64993b
+#
+# Declared dependencies of pyodre 1.0.6: rdflib>=7.0.0, jinja2>=3.1.2, requests>=2.32.3.
+pyodre==1.0.6

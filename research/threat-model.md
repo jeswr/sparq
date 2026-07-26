@@ -32,7 +32,7 @@ actually verifies.
 | `sparq-zk`, `sparq-zk-compose` | The ZK estate has its **own** adversarial threat model. **Verdict: v1 verifier soundness is BROKEN** (a prover can forge arbitrary accepted results). | `research/zk-soundness-audit.md` (12 confirmed issues, 6 critical) |
 | `sparq-mpc` | `publish = false` research scaffold; crypto primitive not yet chosen — not ready for a production threat model. | Bead **sq-jskw** (DEFER until a primitive is chosen) |
 | `sparq-gpu` | `publish = false`; measure-first PCIe-break-even prototype. | Bead **sq-vrye** (DEFER until it exits the prototype stage) |
-| `sparq-nlq` | LLM→SPARQL; young API, prompt-injection + query-budget surface not stabilized. | Bead **sq-j1wv** (DEFER until the API stabilizes) |
+| `sparq-nlq` | LLM→SPARQL; hands untrusted text to a model and executes the result, so it has its **own** model (prompt/data injection, exfiltration, token budget). | [`research/nlq-threat-model.md`](nlq-threat-model.md) — bead **sq-j1wv**, deferral LIFTED by the GPT-5.6 strategy review |
 
 Capability crates not load-bearing for the core production path (`sparq-geo`,
 `sparq-text`, `sparq-vectors`, `sparq-rsp`, `sparq-hdt`, `sparq-solid`) are not
@@ -478,8 +478,13 @@ Ordered by severity. Every gap maps to a bead (existing or new).
 - **ZK estate** (`sparq-zk*`): see `research/zk-soundness-audit.md` — **v1
   verifier soundness is BROKEN**; do not present it as proving anything to a
   relying party.
-- **Research scaffolds** (`sparq-mpc` / `sparq-gpu` / `sparq-nlq`): deferred,
-  beads **sq-jskw** / **sq-vrye** / **sq-j1wv**.
+- **Research scaffolds** (`sparq-mpc` / `sparq-gpu`): deferred, beads **sq-jskw** /
+  **sq-vrye**.
+- **`sparq-nlq`** (NL→SPARQL): no longer deferred — see
+  `research/nlq-threat-model.md` (bead **sq-j1wv**), which models prompt/data
+  injection, `SERVICE` exfiltration, and the token budget. Injection itself is
+  contained on *consequences*, not prevented; read that document's posture summary
+  before quoting it.
 - This model is parented under the production-readiness program (bead **sq-bqjv**:
   SBOM, supply-chain, threat model).
 

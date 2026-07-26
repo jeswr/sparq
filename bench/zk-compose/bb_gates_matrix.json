@@ -271,7 +271,7 @@
       }
     },
     "hidden_issuer_d4": {
-      "circuit_size": 16946,
+      "circuit_size": 24452,
       "lane": "string",
       "configs": {
         "string-canonical": {
@@ -432,6 +432,22 @@
     },
     "path_reach_d8_k1_n16": {
       "circuit_size": 6180,
+      "lane": "string",
+      "configs": {
+        "string-canonical": {
+          "legal": true
+        },
+        "dual-leaf": {
+          "legal": true
+        },
+        "value-only": {
+          "legal": false,
+          "reason": "IllegalPair"
+        }
+      }
+    },
+    "revoke_hidden_ref_d10_a4": {
+      "circuit_size": 4308,
       "lane": "string",
       "configs": {
         "string-canonical": {
@@ -617,10 +633,10 @@
     }
   },
   "summary": {
-    "circuits": 35,
+    "circuits": 36,
     "methods": 3,
-    "configs": 105,
-    "legal_configs": 70,
-    "illegal_configs": 35
+    "configs": 108,
+    "legal_configs": 72,
+    "illegal_configs": 36
   }
 }

@@ -39,22 +39,22 @@ weighted_jaccard(&sig_a, &sig_b);        // for callers that cache signatures
 - **IDF-weighted Jaccard** — `w(e) = 1 + ln(|G| / freq(pred))`, frequencies from the
   store's existing planner stats, so sharing a rare predicate counts for more than
   sharing `rdf:type`.
-- **Index-driven `most_similar(a, k)`** — candidate generation through the indexes, **not
-  a full scan**: each signature element's co-owners are one contiguous index range.
-  Candidates accumulate a shared-element weight (intersection upper bound); the top
-  `max(4k, 64)` are re-scored exactly. Generation skips hub elements matched by more than
-  `F = max_pair_frequency` triples (the lowest-IDF, least informative); re-scoring is
-  always exact. Set the cap to `usize::MAX` for exact-but-slower generation.
+- **Index-driven `most_similar(a, k)`** — candidate generation through contiguous index
+  ranges (**not a full scan**); top `max(4k, 64)` re-scored exactly. Hub elements
+  (`max_pair_frequency`) skipped during generation only; set `usize::MAX` for exact.
 - **Opt-in MinHash/LSH sketch index** — the default-off `sketch` feature +
-  `Sim::sketch_index(SketchConfig)`: prebuilt per-entity sketches + LSH buckets replace
-  per-query range scans on dense graphs (design doc §6). Returned scores are re-scored
-  **exactly**; only candidate recall is probabilistic (tune `num_hashes` / `bands`).
+  `Sim::sketch_index(SketchConfig)`: prebuilt sketches + LSH buckets replace per-query
+  range scans on dense graphs (§6). Scores stay **exact**; only recall is probabilistic.
 - **Two signature modes** — `PredicateNeighbor` (default): similar = **shares concrete
   context** (same team, same games), the mode candidate generation is built around.
   `Predicates`: similar = **used the same way** (predicate profile / role similarity).
 - **Neighbor-sparse profile fallback** (`SimConfig::profile_fallback`, default on) — for
   classes where every entity names a unique neighbor, fill starved result slots with
   role-profile matches ranked below exact neighbor matches.
+- **T-box-aware signatures** (`tbox` + `SimConfig::tbox_aware`) — `rdfs:subClassOf` /
+  `rdfs:subPropertyOf` closure; inferred elements at `0.5×` IDF weight; no new deps.
+- **Lexical fallback tier** (`lexical` + `SimConfig::lexical_fallback`) — sorted IRI
+  local-name trigram-Jaccard tertiary fallback; ranks below structural; no new deps.
 - **Hybrid search with text vectors** — structural similarity knows how entities are
   *connected*, not what their labels *mean*. The opt-in [`sparq-vectors`](../sparq-vectors)
   crate covers the text side and ships dependency-free fusion helpers (no cross-dependency):
@@ -101,11 +101,11 @@ cargo run -p sparq-sim --example olympics_eval --release
 # (STDOUT unchanged; latency advisory/non-canonical)
 ```
 
-**The two AUCs.** Pairwise AUC asks "do two random same-class entities score higher than
-two cross-class ones?". In `PredicateNeighbor` mode most same-class pairs share *no*
-concrete neighbor and tie at 0 — by design: that mode measures shared context. Role
-similarity is the `Predicates` mode's job (near-perfect separation); the crate's ranking
-task — `most_similar` retrieving same-class entities — is measured by precision@10.
+**The two AUCs.** Pairwise AUC asks whether two random same-class entities outscore two
+cross-class ones. In `PredicateNeighbor` mode most same-class pairs share no concrete
+neighbor and tie at 0 — that mode measures shared context, not class membership; role
+separation is the `Predicates` mode's job. The ranking task (`most_similar`) is measured
+by precision@10.
 
 ## 📚 Learn more
 

@@ -39,5 +39,10 @@ pub mod path;
 // `bind_entailment`). Single-step / disclosed-base scope; NOT-yet-sound
 // (sq-qhy4). Compiled bin member + verifier wiring are follow-ups.
 pub mod entail;
+// [OPUS-4.8] sq-rsd3v.2 (#2614): in-circuit RDFS derivation relation (ZK over
+// HIDDEN antecedents -- design row A1). Research-grade, NOT externally audited
+// (sq-qhy4); the in-circuit relation only -- the off-circuit ProofTree->slot
+// witness mapper + a compiled bin-package monomorphisation are follow-ups.
+pub mod derivation;
 
 mod tests;

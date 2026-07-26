@@ -7,7 +7,8 @@ Context Processing, Expansion, Flattening, Compaction, Framing, and RDF
 [JSON-LD 1.1]: https://www.w3.org/TR/json-ld11/
 
 > [GPT-5.6] Build-out status reconciled in `sq-ci15w`; implementation provenance remains
-> recorded on the individual algorithms.
+> recorded on the individual algorithms. [OPUS-5] (`sq-ghdfw`) Re-verified against the
+> tree: `to_rdf` and `api` are the only remaining stubs.
 > Epic `sq-oy1f` (design record `research/jsonld-1.1-design.md`).
 
 ## 🚀 Quickstart
@@ -71,7 +72,7 @@ container maps, `@nest`, `@reverse`, `@included`, `@json`, keyword aliases (bead
   context, vocab-relative suffix, `prefix:suffix` compact IRIs, base-relative paths.
 - **Term Selection** (internal to `context::inverse`) — §7.2: the container ×
   preferred-value walk, consumed by `compact_iri` and by the document Compaction
-  Algorithm (bead `sq-oy1f.27`, not yet landed).
+  Algorithm (bead `sq-oy1f.27`, since landed — see below).
 
 Bead `sq-oy1f.26` adds **Node Map Generation** (`generate_node_map`, §7.2) with a
 deterministic `_:bN` blank-node issuer, and the document-level **Flattening Algorithm**

@@ -104,8 +104,9 @@ Notes on a few that need care:
   `-O2` not `-O3`) and runs 14 sub-second queries on a fixed 250k-triple corpus, emitting
   `sp2b_<query>_<mode>_us` (trend-only) plus a HARD expected-rows correctness diff. Three
   intentionally-pathological queries (q05a/q06/q12a, tens of seconds at 250k) sit in
-  `queries-heavy/` for the EC2/nightly tier; the **full 5M-100M scale** belongs to
-  `bench-ec2.yml`/nightly (`bench/sp2b/gen.sh <triples>` at a larger `-t`).
+  `queries-heavy/` for the EC2 tier; the **full 5M-100M scale** belongs to
+  `bench-ec2.yml` (`bench/sp2b/gen.sh <triples>` at a larger `-t`) — which is
+  **manual dispatch only**, see the CI-tracking bullet below.
 - **`dbpsb` (DBPSB/FEASIBLE) is tiered + fetch-and-cache (real DBpedia)** — see
   [`bench/dbpsb/README.md`](./dbpsb/README.md). Per-commit, `fetch.sh` downloads ONE
   sha256-pinned DBpedia Databus slice (CC-BY-SA; `mappingbased-objects_lang=en` 2019.09.01,
@@ -183,6 +184,13 @@ Notes on a few that need care:
   every emitted row** (the caveat travels in the envelope, not just prose). Windows
   that cannot be count-matched are **excluded and the exclusion reported**. Implemented
   by `sq-hmd7l.20`; RSP4J/YASPER registered in `bench/competitors.json` (id: `rsp4j-yasper`).
+  The **sustained-throughput axis is still NOT-MEASURED**: `sq-hmd7l.20` count-matched only the
+  19-event oracle replay, too small for a rate claim. `sq-3f5ay` added the matched-workload
+  harness — a sparq-side replay-FILE runner (the `replay_runner` example), a sha-pinned SCALED
+  replay generated from `bench/rsp/replay/scaled.manifest.json`, and
+  `SCALED=1 bench/rsp/gather-rsp4j.sh` driving BOTH engines from that one file — but the gather
+  run that would publish the side-by-side has not been performed. No sustained `triples_per_s`
+  comparison row is on the dashboard until it is; see `research/gap-rsp-2026-07.md`.
   Competitor honesty: **Solr/ES are NOT SPARQL competitors and stay off the dashboard**; the
   surface peer is Fuseki + `jena-text` (`http-sparql`), the kernel ref is Lucene/Anserini (labelled
   *sub-component, not an RDF benchmark*).
@@ -304,9 +312,13 @@ Notes on a few that need care:
   and `STATUS.md`. Do not launch without the budget + gate checks.
 - **CI tracking**: `bench.yml` runs `ci-bench` on every push to main (free
   runners, trend + large-regression alert, no hard-fail); `bench-ec2.yml` runs
-  the heavier version weekly on spot (NOT live until `AWS_BENCH_ROLE_ARN` is set
-  — fails harmlessly at OIDC, no cost). Both push to the orphan **`benchmark-data`**
-  branch via github-action-benchmark.
+  the heavier version on spot. **`bench-ec2.yml` is MANUAL DISPATCH ONLY** — its
+  crons were retired in [#3784](https://github.com/sparq-org/sparq/issues/3784)
+  because the AWS OIDC role it assumes was descoped, so every scheduled tick
+  failed at the credentials step *before any benchmark ran* and gated `main`. Its
+  EC2 series is therefore collected only when a maintainer dispatches the workflow
+  with `AWS_BENCH_ROLE_ARN` provisioned. Both push to the orphan
+  **`benchmark-data`** branch via github-action-benchmark.
 - **`competitor-gather` is the versioned external-engine comparison** — see the
   registry [`competitors.json`](./competitors.json) (Oxigraph embedded Rust dep /
   QLever Docker image / eye N3 binary: pinned version, install+run recipe, and the
