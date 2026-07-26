@@ -1,4 +1,7 @@
 //! Small string-distance utilities shared by vocabulary suggestion paths.
+//!
+//! This helper was promoted from crate-private copies to a shared public API so
+//! dictionary-suggestion implementations across the workspace cannot drift.
 
 /// Returns the Levenshtein edit distance between the characters of `a` and `b`.
 ///
@@ -31,6 +34,12 @@ pub fn edit_distance(a: &str, b: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::edit_distance;
+    use proptest::prelude::*;
+
+    fn short_string() -> impl Strategy<Value = String> {
+        prop::collection::vec(any::<char>(), 0..=8)
+            .prop_map(|characters| characters.into_iter().collect())
+    }
 
     #[test]
     fn edit_distance_basics() {
@@ -40,5 +49,26 @@ mod tests {
         assert_eq!(edit_distance("", "abc"), 3);
         assert_eq!(edit_distance("kitten", "sitting"), 3);
         assert_eq!(edit_distance("é", "e"), 1);
+    }
+
+    proptest! {
+        #[test]
+        fn edit_distance_is_symmetric(a in short_string(), b in short_string()) {
+            prop_assert_eq!(edit_distance(&a, &b), edit_distance(&b, &a));
+        }
+
+        #[test]
+        fn edit_distance_satisfies_triangle_inequality(
+            a in short_string(),
+            b in short_string(),
+            c in short_string(),
+        ) {
+            let direct = edit_distance(&a, &c);
+            let via_b = edit_distance(&a, &b) + edit_distance(&b, &c);
+            prop_assert!(
+                direct <= via_b,
+                "d(a,c)={direct} > d(a,b)+d(b,c)={via_b}"
+            );
+        }
     }
 }

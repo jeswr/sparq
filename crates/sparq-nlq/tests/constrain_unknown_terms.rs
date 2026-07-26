@@ -1,6 +1,5 @@
-//! Determinism and metric-law coverage for dictionary-grounded query repair.
+//! Determinism and ranking coverage for dictionary-grounded query repair.
 
-use proptest::prelude::*;
 use spargebra::{Query, SparqlParser};
 use sparq_core::strdist::edit_distance;
 use sparq_core::Graph;
@@ -29,11 +28,6 @@ fn parse(query: &str) -> Query {
         .expect("test query parses")
 }
 
-fn short_string() -> impl Strategy<Value = String> {
-    prop::collection::vec(any::<char>(), 0..=8)
-        .prop_map(|characters| characters.into_iter().collect())
-}
-
 #[test]
 fn unknown_terms_are_deterministic_for_multiple_unknown_iris() {
     let graph = graph();
@@ -54,24 +48,6 @@ fn unknown_terms_are_deterministic_for_multiple_unknown_iris() {
     assert_eq!(first[1].role, TermRole::Predicate);
     assert_eq!(first[2].iri, format!("{DBO}Movi"));
     assert_eq!(first[2].role, TermRole::Class);
-}
-
-proptest! {
-    #[test]
-    fn edit_distance_is_symmetric(a in short_string(), b in short_string()) {
-        prop_assert_eq!(edit_distance(&a, &b), edit_distance(&b, &a));
-    }
-
-    #[test]
-    fn edit_distance_satisfies_triangle_inequality(
-        a in short_string(),
-        b in short_string(),
-        c in short_string(),
-    ) {
-        let direct = edit_distance(&a, &c);
-        let via_b = edit_distance(&a, &b) + edit_distance(&b, &c);
-        prop_assert!(direct <= via_b, "d(a,c)={direct} > d(a,b)+d(b,c)={via_b}");
-    }
 }
 
 #[test]
