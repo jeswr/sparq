@@ -119,3 +119,11 @@ required-features = ["hasse"]
 [[example]]
 name = "snomed_go_scale_bench"
 required-features = ["rbox", "hasse"]
+
+# [SONNET-4.6] sq-q0o82 (E4 follow-up): the parallel-saturation phase-attribution bench — the
+# first in-repo consumer of `classify_graph_par`'s thread-count knob, and the MEASUREMENT the
+# parallel-apply refinement is gated on. `required-features = ["par"]` keeps the default
+# `--all-targets` build (which passes no features) from compiling it against the gated API.
+[[example]]
+name = "par_phase_bench"
+required-features = ["par"]

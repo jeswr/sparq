@@ -39,6 +39,10 @@ mod rbox;
 pub use abox::{realize, realize_graph, AboxReport, Realization};
 #[cfg(feature = "hasse")]
 pub use hasse::{classify_hasse_graph, DirectHierarchy};
+// [SONNET-4.6] sq-q0o82 (E4 follow-up): the compute/apply attribution the parallel-apply
+// refinement decision is measured on — see `classify_graph_par_stats`.
+#[cfg(feature = "par")]
+pub use classify::ParPhaseStats;
 
 const RDFS_SUB_CLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
 const OWL_NOTHING: &str = "http://www.w3.org/2002/07/owl#Nothing";
@@ -274,7 +278,7 @@ impl Classifier {
     ) -> ClassHierarchy {
         // Same TBox-only extraction contract as `classify` above.
         let ex = extract::extract(dict, triples, extract::ExtractOpts::default());
-        let sat = saturate_extracted_par(&ex, threads);
+        let (sat, _stats) = saturate_extracted_par(&ex, threads);
         let cls = classify::classify(&sat, &ex.names);
         hierarchy_from(cls, &ex.names, ex.report)
     }
@@ -299,12 +303,13 @@ pub(crate) fn saturate_extracted(ex: &extract::Extracted) -> classify::Saturatio
 /// [FABLE-5] sq-wy3i6 (E4): the parallel twin of [`saturate_extracted`] — same `rbox`
 /// branching, but the fixpoint runs on the bounded scoped-worker pool. Kept structurally
 /// parallel to `saturate_extracted` so the two entry families cannot drift on the role-box
-/// wiring.
+/// wiring. Returns the [`ParPhaseStats`] compute/apply attribution alongside the fixpoint
+/// (sq-q0o82) — callers that do not want it drop the second element.
 #[cfg(feature = "par")]
 pub(crate) fn saturate_extracted_par(
     ex: &extract::Extracted,
     threads: std::num::NonZeroUsize,
-) -> classify::Saturation {
+) -> (classify::Saturation, ParPhaseStats) {
     #[cfg(feature = "rbox")]
     {
         let role_box = rbox::RoleBox::build(&ex.role_axioms, ex.names.role_count());
@@ -389,9 +394,29 @@ pub fn classify_graph_par(
     triples: &mut Vec<[Id; 3]>,
     threads: std::num::NonZeroUsize,
 ) -> Report {
+    classify_graph_par_stats(dict, triples, threads).0
+}
+
+/// [SONNET-4.6] sq-q0o82 (E4 follow-up, `par`): [`classify_graph_par`] plus the
+/// [`ParPhaseStats`] attribution of the saturation's PARALLEL compute phase against its
+/// SEQUENTIAL apply phase. The graph mutation, the emitted triples and the [`Report`] are
+/// byte-identical to [`classify_graph_par`] (which is this function discarding the stats) —
+/// the instrumentation only reads two clocks per bulk-synchronous round.
+///
+/// This is the measurement seam for the open "should the apply phase be parallelised too?"
+/// question: parallelising `add_link`'s CR4/CR5 (and the `rbox` CR10/CR11) closure would put
+/// the identical-closure invariant at risk, so it is worth doing ONLY where
+/// [`ParPhaseStats::apply_fraction`] on a real ontology says apply dominates. Native targets
+/// only (see [`Classifier::classify_par`]).
+#[cfg(feature = "par")]
+pub fn classify_graph_par_stats(
+    dict: &mut Dict,
+    triples: &mut Vec<[Id; 3]>,
+    threads: std::num::NonZeroUsize,
+) -> (Report, ParPhaseStats) {
     let ex = extract::extract(dict, triples, extract::ExtractOpts::default());
-    let sat = saturate_extracted_par(&ex, threads);
-    materialize_lattice(dict, triples, &ex, &sat)
+    let (sat, stats) = saturate_extracted_par(&ex, threads);
+    (materialize_lattice(dict, triples, &ex, &sat), stats)
 }
 
 /// The shared `classify_graph` / `classify_graph_par` tail: project the saturation onto named
