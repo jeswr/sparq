@@ -87,8 +87,13 @@ class TestUnlabelledOccupantAttribution(unittest.TestCase):
 
     def test_unlabelled_pr_leaves_every_unrelated_crate_dispatchable(self):
         # The blast radius, not just one row: with the bug, ALL of these vanished at once.
+        # [OPUS-5] sparq#4336: the keys were synthetic `area:crate-21/22/23`. Those share the head
+        # segment `crate`, and containment-aware conflict() now (correctly) treats a shared head
+        # as one partition, so the fixture no longer modelled "three UNRELATED crates" at all.
+        # Switched to three real, disjoint workspace crates — the assertion is unchanged in force.
         board = [pr(70, [])] + [
-            iss(n, READY + ["priority:P1", f"area:crate-{n}"]) for n in (21, 22, 23)]
+            iss(n, READY + ["priority:P1", f"area:{a}"])
+            for n, a in ((21, "sparq-core"), (22, "sparq-hdt"), (23, "sparq-geo"))]
         self.assertEqual(
             numbers(ready.compute_ready(board, conflict_log=quiet)), [21, 22, 23])
 
@@ -313,8 +318,11 @@ class TestLocalOrchestratorParity(unittest.TestCase):
     # -- the previously-covered shapes, now through the real CLI ---------------------------
     def test_unlabelled_prs_do_not_make_the_two_views_disagree(self):
         # The exact live shape: many area-less open PRs + attested issues on distinct crates.
+        # [OPUS-5] sparq#4336: real disjoint crates, for the reason recorded on
+        # test_unlabelled_pr_leaves_every_unrelated_crate_dispatchable.
         board = [pr(3803, []), pr(3799, []), pr(3798, [])] + [
-            iss(n, READY + ["priority:P3", f"area:crate-{n}"]) for n in (3694, 3756, 3757)]
+            iss(n, READY + ["priority:P3", f"area:{a}"])
+            for n, a in ((3694, "sparq-core"), (3756, "sparq-hdt"), (3757, "sparq-geo"))]
         self.assertEqual(self._local(board), self._orchestrator(board))
         self.assertEqual(self._local(board), [3694, 3756, 3757])
 
