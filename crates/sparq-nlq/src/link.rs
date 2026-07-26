@@ -254,6 +254,13 @@ pub struct EntityLinker<'g> {
     /// [`with_values`](Self::with_values) was called, so the default linker pays neither
     /// the scan nor the memory. [SONNET-4.6] sq-na0q
     values: BTreeMap<String, Vec<ValueEntry>>,
+    /// Whether the **exact dictionary tier** (`sq-na0q`) is on — set ONLY by
+    /// [`with_values`](Self::with_values). It gates BOTH of the tier's probes: the literal
+    /// value lookup and the verbatim-IRI [`Graph::id_of`] probe. A separate flag rather
+    /// than `!values.is_empty()`, because the IRI probe needs no value index at all (a
+    /// store holding no indexable literal still has an empty `values`), and because the
+    /// crate's public docs promise the whole tier is opt-in. [SONNET-4.6]
+    exact_dict: bool,
     /// How many similar siblings to attach per linked entity.
     expand_k: usize,
     /// Max entities / relations to return (keeps the prompt section bounded).
@@ -275,23 +282,29 @@ impl<'g> EntityLinker<'g> {
             norm_labels,
             predicates,
             values: BTreeMap::new(),
+            exact_dict: false,
             expand_k,
             max_links,
         }
     }
 
-    /// Adds the **exact literal-value index** (`sq-na0q`), turning on the lexical/exact
-    /// dictionary tier: from here on [`link`](Self::link) also resolves a mention that is
-    /// verbatim the lexical form of a literal the store holds to that literal, datatype
-    /// and language tag intact.
+    /// Turns on the **exact dictionary tier** (`sq-na0q`) — both of its probes:
+    ///
+    /// * **literal values** — a mention that is verbatim the lexical form of a literal the
+    ///   store holds resolves to that literal, datatype and language tag intact (this is
+    ///   the index built here).
+    /// * **verbatim IRIs** — an IRI written out in the question is probed straight against
+    ///   the dictionary with [`sparq_core::Graph::id_of`] and, when present, bound exactly.
     ///
     /// Costs one object-sorted scan of the graph at build time (the same order of work as
     /// the predicate index) and holds a bounded number of short literals — hence
-    /// opt-in rather than always-on. Without it, [`Linking::values`] is always empty and
-    /// the rendered prompt section is unchanged.
+    /// opt-in rather than always-on. Without it, [`Linking::values`] is always empty, no
+    /// IRI is probed, and the rendered prompt section is byte-identical to what the
+    /// pre-`sq-na0q` linker produced.
     #[must_use]
     pub fn with_values(mut self) -> Self {
         self.values = build_value_index(self.graph);
+        self.exact_dict = true;
         self
     }
 
@@ -356,12 +369,19 @@ impl<'g> EntityLinker<'g> {
         if let Some(e) = exact_phrase {
             entities = vec![e];
         }
-        // ---- Verbatim-IRI dictionary probe (sq-na0q). ----
-        // An IRI written out in the question is the strongest possible entity signal —
-        // it needs no label at all, so it also reaches entities the label index cannot
-        // see. Probed straight against the dictionary, so an IRI the store does NOT hold
-        // is (correctly) not linked. These lead; lexical matches follow, deduped by IRI.
-        let iri_hits = self.exact_iri_entities(question);
+        // ---- Verbatim-IRI dictionary probe (sq-na0q) — the exact-dictionary tier, so
+        // gated on `with_values` exactly like the literal-value probe. An IRI written out
+        // in the question is the strongest possible entity signal — it needs no label at
+        // all, so it also reaches entities the label index cannot see. Probed straight
+        // against the dictionary, so an IRI the store does NOT hold is (correctly) not
+        // linked. These lead; lexical matches follow, deduped by IRI. Off by default keeps
+        // the prompt — and any fixture recorded against the pre-tier linker — unchanged
+        // for a caller who opted into entity linking only.
+        let iri_hits = if self.exact_dict {
+            self.exact_iri_entities(question)
+        } else {
+            Vec::new()
+        };
         if !iri_hits.is_empty() {
             let mut merged = iri_hits;
             let lead: Vec<String> = merged.iter().map(|e| e.iri.as_str().to_string()).collect();
@@ -432,7 +452,7 @@ impl<'g> EntityLinker<'g> {
     /// precise than a label join, so repeating the string would only spend prompt budget
     /// and nudge it toward the weaker pattern.
     fn link_values(&self, mentions: &[String], entities: &[LinkedEntity]) -> Vec<LinkedValue> {
-        if self.values.is_empty() {
+        if !self.exact_dict || self.values.is_empty() {
             return Vec::new();
         }
         let mut out: Vec<LinkedValue> = Vec::new();
@@ -1260,18 +1280,67 @@ mod tests {
         );
     }
 
-    #[test]
-    fn unlabelled_entity_still_links_by_verbatim_iri() {
-        // The label index cannot see this entity at all; the dictionary probe can.
-        let g = Graph::load_str(
+    /// A store whose only entity carries no label at all — invisible to the label index,
+    /// reachable only by the dictionary probe.
+    fn unlabelled_graph() -> Graph {
+        Graph::load_str(
             "<http://example.org/bare> <http://example.org/p> <http://example.org/o> .",
             "ntriples",
         )
-        .expect("graph parses");
-        let l = EntityLinker::build(&g, 0, 8).link("What is http://example.org/bare ?");
+        .expect("graph parses")
+    }
+
+    #[test]
+    fn unlabelled_entity_still_links_by_verbatim_iri() {
+        // The label index cannot see this entity at all; the dictionary probe can.
+        let g = unlabelled_graph();
+        let l = EntityLinker::build(&g, 0, 8)
+            .with_values()
+            .link("What is http://example.org/bare ?");
         let e = l.entities.first().expect("unlabelled entity links");
         assert_eq!(e.iri.as_str(), "http://example.org/bare");
         assert_eq!(e.label, "bare", "falls back to the local name");
+    }
+
+    #[test]
+    fn verbatim_iri_does_not_link_unless_the_exact_tier_is_on() {
+        // The verbatim-IRI probe is part of the opt-in exact dictionary tier (sq-na0q), so
+        // a linker built WITHOUT `with_values` must leave it off — a caller who enabled
+        // only entity linking keeps the pre-tier prompt (and their recorded fixtures).
+        let g = unlabelled_graph();
+        let l = EntityLinker::build(&g, 0, 8).link("What is http://example.org/bare ?");
+        assert!(
+            l.entities.is_empty(),
+            "the dictionary probe must stay off by default, got {:?}",
+            l.entities.iter().map(|e| e.iri.as_str()).collect::<Vec<_>>()
+        );
+        assert!(l.is_empty(), "and nothing else links either");
+    }
+
+    #[test]
+    fn exact_tier_off_leaves_a_labelled_entitys_iri_block_untouched() {
+        // A labelled entity mentioned BOTH by label and by verbatim IRI: with the tier off
+        // the linking is exactly what the pre-sq-na0q linker produced (the label hit only),
+        // and turning the tier on is what adds the IRI-probed lead. Byte-level fixture
+        // stability for the default configuration.
+        let g = value_graph();
+        let q = "Describe Pulp Fiction <http://example.org/pulpFiction>.";
+        let off = EntityLinker::build(&g, 0, 8).link(q);
+        assert!(
+            off.entities
+                .iter()
+                .all(|e| e.mention != "http://example.org/pulpFiction"),
+            "no entity may be linked by the IRI mention while the tier is off, got {:?}",
+            off.entities
+                .iter()
+                .map(|e| e.mention.as_str())
+                .collect::<Vec<_>>()
+        );
+        let on = EntityLinker::build(&g, 0, 8).with_values().link(q);
+        assert_eq!(
+            on.entities[0].mention, "http://example.org/pulpFiction",
+            "with the tier on the IRI probe leads"
+        );
     }
 
     #[test]
