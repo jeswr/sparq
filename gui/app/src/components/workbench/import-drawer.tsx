@@ -58,7 +58,7 @@ import {
   urlLabel,
 } from "@/lib/rdf-format";
 import { hasNativeLoader, pickRdfFile } from "@/lib/tauri-ipc";
-import { hasDraggedFiles } from "@/lib/file-ingest";
+import { hasDraggedFiles, pickTextFiles } from "@/lib/file-ingest";
 import type { IngestedFile, RejectedFile, IngestResult } from "@/lib/file-ingest";
 // [SONNET-4.6] sq-1y04h — decompression shim; codec chunks loaded lazily on demand.
 import { fetchRdfDocument, maybeDecompressFile } from "@/lib/file-decompress";
@@ -707,11 +707,19 @@ function WebFilePane({
   }, [busy, onIngest]);
 
   const handleBrowse = React.useCallback(async () => {
-    // pickTextFiles opens a file picker; we then re-read the File objects as binary so
-    // compressed archives are handled. We can't get File objects back from pickTextFiles,
-    // so instead we open our own hidden input programmatically (same pattern as pickViaInput).
-    if (inputRef.current) inputRef.current.click();
-  }, []);
+    // [SONNET-4.6] sq-3uzlf — retain the File System Access API path where available while
+    // supplying the same binary/decompression-aware reader used by input and drop ingestion.
+    const result = await pickTextFiles({
+      accept: WEB_RDF_ACCEPT,
+      multiple: true,
+      description: "RDF datasets",
+      readFile: async (file) => {
+        const decoded = await maybeDecompressFile(file);
+        return decoded.text;
+      },
+    });
+    onIngest(result);
+  }, [onIngest]);
 
   return (
     <div className="space-y-3">
@@ -726,8 +734,7 @@ function WebFilePane({
         </span>
       </p>
 
-      {/* Stable file input: Playwright setInputFiles() target + accessible fallback.
-          Also the backing input for the "Browse files…" button below (handleBrowse → click). */}
+      {/* Stable file input: Playwright setInputFiles() target + accessible fallback. */}
       <input
         ref={inputRef}
         type="file"

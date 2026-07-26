@@ -53,6 +53,11 @@ export interface IngestOptions {
    * When `false`, the first acceptable file wins and the rest are rejected with a reason.
    */
   multiple?: boolean;
+  /**
+   * Optional consumer-specific file reader. The default reads `File.text()`; binary-aware
+   * consumers can provide a reader that decompresses the file before returning its text.
+   */
+  readFile?: (file: File) => Promise<string>;
 }
 
 /** Options for {@link pickTextFiles}. */
@@ -89,8 +94,8 @@ function rejectedReasonUnsupported(accept: string[]): string {
 
 /**
  * Read a list of `File` objects into an {@link IngestResult}: extension filter first, the
- * single-file cap second, then `File.text()` — a per-file read failure becomes a rejection,
- * never an exception and never a silent drop.
+ * single-file cap second, then the configured reader (`File.text()` by default) — a per-file
+ * read failure becomes a rejection, never an exception and never a silent drop.
  */
 async function readFiles(files: File[], opts: IngestOptions): Promise<IngestResult> {
   const accepted: IngestedFile[] = [];
@@ -105,7 +110,7 @@ async function readFiles(files: File[], opts: IngestOptions): Promise<IngestResu
       continue;
     }
     try {
-      const text = await file.text();
+      const text = opts.readFile ? await opts.readFile(file) : await file.text();
       accepted.push({ name: file.name, text, bytes: file.size });
     } catch (err) {
       // e.g. a directory masquerading as a File, or a file deleted between pick and read.

@@ -134,7 +134,7 @@ in the wasm bundle) instead of pretending.
 
 The **file ingest library** is a shared zero-server multi-file upload harness for the RDF import (sq-eydh9), SHACL shapes (sq-txrui), and N3 rules (sq-glo5r) surfaces. It operates on a single `IngestResult` contract: every file is `accepted[]` (name, text, bytes) or `rejected[]` (name, reason) — **no silent drops**. 
 
-**Entry points** — `pickTextFiles(opts)` opens a file picker using File System Access `showOpenFilePicker` where available, falling back to `<input type="file" multiple>` for browser parity (the floor); `readDroppedFiles(dataTransfer, opts)` extracts files from a drop event (must be called synchronously from the drop handler). Both work in the static `/app` export with no server and no Tauri global.
+**Entry points** — `pickTextFiles(opts)` opens a file picker using File System Access `showOpenFilePicker` where available, falling back to `<input type="file" multiple>` for browser parity (the floor); consumers that need binary handling can supply `opts.readFile` (the Import drawer uses it for compressed RDF). `readDroppedFiles(dataTransfer, opts)` extracts files from a drop event (must be called synchronously from the drop handler). Both work in the static `/app` export with no server and no Tauri global.
 
 **UI layer** — `<Dropzone>` (standalone dashed panel + keyboard-accessible button), `<DropTarget>` (wraps children as a drop surface with a hover overlay), and `useFileDrop` (raw drag/drop wiring for custom affordances). All three consume the same `IngestResult` contract, so callers surface accepted and rejected files identically.
 
