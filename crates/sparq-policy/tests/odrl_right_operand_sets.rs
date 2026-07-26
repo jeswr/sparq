@@ -14,9 +14,11 @@
 //! * a member that carries a set-encoding separator (`|`/whitespace/`,`) cannot
 //!   be encoded faithfully — the whole constraint fails closed rather than
 //!   splitting into unintended members (a fail-OPEN hazard);
-//! * a MALFORMED collection (broken/dangling tail, cycle, forked cell) REFUSES the
-//!   whole parse on BOTH rule kinds rather than contributing its valid prefix
-//!   (sq-srjuc — honouring a prefix drops authored members and widens decisions).
+//! * a MALFORMED collection (broken/dangling tail, cycle, forked cell, or a
+//!   member-less head asserting `rdf:rest` with no `rdf:first`) REFUSES the whole
+//!   parse on BOTH rule kinds rather than contributing its valid prefix — or, for
+//!   the member-less head, being read as an ordinary unmatchable value (sq-srjuc —
+//!   both drop authored members and widen decisions).
 
 use sparq_policy::{evaluate, parse_policy_str, Operator, Policy, Request, Value};
 
@@ -373,6 +375,53 @@ _:l2 rdf:first <urn:purpose/b> .
     assert!(
         err.contains("MALFORMED collection rightOperand"),
         "a malformed rightOperand list gating a PROHIBITION must refuse the parse, got: {err}"
+    );
+}
+
+/// A HEAD-position REST-ONLY cell (`rdf:rest` with no `rdf:first`) is invisible to
+/// the `rdf:first`-keyed cons-cell table, so before sq-srjuc it bypassed collection
+/// validation entirely and folded as one ordinary value — the unmatchable blank node
+/// `_:l1`. On a PROHIBITION that is the widening direction: the carve-out's
+/// `isPartOf` constraint can never be satisfied, the prohibition never fires, and the
+/// sibling permission GRANTS. Refused instead, like every other malformed shape.
+#[test]
+fn rest_only_head_right_operand_on_prohibition_refuses_the_parse() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+<urn:pol/p> a odrl:Set ;
+  odrl:permission  [ odrl:action odrl:read ; odrl:target <urn:asset/x> ] ;
+  odrl:prohibition [ odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:isPartOf ;
+                      odrl:rightOperand _:l1 ] ] .
+_:l1 rdf:rest _:l2 .
+_:l2 rdf:first <urn:purpose/a> ; rdf:rest rdf:nil .
+"#;
+    let err = parse_policy_str(ttl, "turtle").unwrap_err();
+    assert!(
+        err.contains("MALFORMED collection rightOperand"),
+        "a member-less rest-only rightOperand head gating a PROHIBITION must refuse the \
+         parse (else the prohibition is disabled and the sibling permission grants), got: {err}"
+    );
+}
+
+/// The permission direction of the same shape, so the refusal is not prohibition-only:
+/// a rest-only head under `isNoneOf` would exclude nothing at all.
+#[test]
+fn rest_only_head_right_operand_on_permission_refuses_the_parse() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+<urn:pol/p> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:isNoneOf ;
+                      odrl:rightOperand _:l1 ] ] .
+_:l1 rdf:rest rdf:nil .
+"#;
+    let err = parse_policy_str(ttl, "turtle").unwrap_err();
+    assert!(
+        err.contains("MALFORMED collection rightOperand"),
+        "a member-less rest-only rightOperand head must refuse the parse, got: {err}"
     );
 }
 
