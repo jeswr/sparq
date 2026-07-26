@@ -80,8 +80,15 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
       - name: Derive and apply area labels
+        # Every `github.*` value reaches the shell through `env:`, never interpolated
+        # into the `run:` body — the standard expression-injection precaution. The
+        # mapping below is pinned by EQUALITY in the seam test, so swapping a field
+        # (e.g. `github.event.number` for the pull-request number) cannot ship.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number || 0 }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name || '' }}
         run: |
           set -euo pipefail
           # BOOTSTRAP / REVERT GUARD. The checkout above is the DEFAULT BRANCH, so on the
@@ -99,7 +106,7 @@ jobs:
             exit 0
           fi
           python3 scripts/pr-area-labels.py \
-            --repo "${{ github.repository }}" \
-            --pr "${{ github.event.pull_request.number || 0 }}" \
-            --head-repo "${{ github.event.pull_request.head.repo.full_name || '' }}" \
+            --repo "$TARGET_REPO" \
+            --pr "$PR_NUMBER" \
+            --head-repo "$PR_HEAD_REPO" \
             --apply

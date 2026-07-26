@@ -552,21 +552,37 @@ class TestWorkflowSeam(unittest.TestCase):
 
     # --- the call site -------------------------------------------------------------
     def test_the_labelling_step_exists_and_passes_exactly_the_documented_arguments(self):
-        """Catches a DELETED step and a WRONG INPUT. Each argument is asserted as a
-        whole token pair, so `--pr ${{ github.event.number }}` (a different, sometimes
-        absent field) reds, and so does dropping `--apply` (which would make the live
-        workflow a silent no-op that still reports success)."""
+        """Catches a DELETED step and a WRONG INPUT. Each argument is asserted as a whole
+        token pair, and dropping `--apply` (which would make the live workflow a silent
+        no-op that still reports success) reds too."""
         runs = [s["run"] for s in self.steps if "run" in s]
         self.assertEqual(len(runs), 1, "expected exactly one run step")
         run = " ".join(runs[0].split())          # normalise line continuations
         self.assertIn("python3 scripts/pr-area-labels.py", run)
-        for arg in ('--repo "${{ github.repository }}"',
-                    '--pr "${{ github.event.pull_request.number || 0 }}"',
-                    '--head-repo "${{ github.event.pull_request.head.repo.full_name || \'\' }}"',
-                    "--apply"):
+        for arg in ('--repo "$TARGET_REPO"', '--pr "$PR_NUMBER"',
+                    '--head-repo "$PR_HEAD_REPO"', "--apply"):
             self.assertIn(arg, run, f"missing/altered call-site argument: {arg}")
         self.assertNotIn("--dry-run", run)
         self.assertNotIn("--backfill", run)
+
+    def test_the_env_mapping_binds_exactly_the_right_github_fields(self):
+        """The WRONG-INPUT seam, pinned by EQUALITY. Every `github.*` value reaches the
+        shell through `env:` (no expression interpolation in the `run:` body), so swapping
+        a field — `github.event.number` for the PR number, `head.sha` for the head repo —
+        changes this mapping and reds. A substring check would not: the old spelling can
+        remain in a comment."""
+        step = next(s for s in self.steps if "run" in s)
+        self.assertEqual(step["env"], {
+            "GH_TOKEN": "${{ secrets.GITHUB_TOKEN }}",
+            "TARGET_REPO": "${{ github.repository }}",
+            "PR_NUMBER": "${{ github.event.pull_request.number || 0 }}",
+            "PR_HEAD_REPO": "${{ github.event.pull_request.head.repo.full_name || '' }}",
+        })
+        # ... and no EXECUTABLE line of the run body interpolates an expression
+        # (comment lines may still name one for documentation).
+        code = "\n".join(ln for ln in step["run"].splitlines()
+                         if not ln.lstrip().startswith("#"))
+        self.assertNotIn("${{", code, "expression interpolated into an executable line")
 
     def test_the_run_block_guards_the_bootstrap_case(self):
         """The checkout is the DEFAULT BRANCH, so the deriver is absent on the PR that
