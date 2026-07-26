@@ -147,7 +147,15 @@ pub mod auth_compare;
 // authenticated (`MacSession::authenticate_existing`), the mask bits come from an
 // AUTHENTICATED square protocol, the masked open and the verdict are MAC-checked
 // BEFORE they are acted on, so a tamper on any of the three aborts fail-closed at
-// the minimal n=2t+1. Honest-majority, malicious-with-abort. See the module docs.
+// the minimal n=2t+1. Honest-majority, malicious-with-abort.
+// [OPUS-4.8] sq-km34.6: the production path is now the AUTHENTICATED RABBIT chain —
+// every product/reduce in the solved-bits / LTBits / ripple-add / ripple-sub wrap
+// recovery is a `MacSession::auth_mul`, lifting the malicious magnitude from the
+// masked-open 2^20 to the full 2^60 (parity with the semi-honest `compare` path).
+// Read the module docs' "What the MAC-check does NOT cover" before making any
+// tamper-detection claim: `auth_mul` ADOPTS a value tamper on its second operand and
+// `mac_check` only covers values that are opened, so "any tamper aborts" is NOT the
+// delivered property. See the module docs.
 pub mod auth_disclose;
 // [OPUS-4.8] sq-sxm: the (security model × N × query class) benchmark MATRIX
 // harness + its deterministic communication/round/multiplication counter — the

@@ -1328,9 +1328,10 @@ pub fn open_verdict(backend: &ShamirBackend, verdict: &[Share]) -> Result<bool, 
 /// `sum + r < p` (no wrap), which — with `p = 2^61−1` and a `2^{−40}` gap — left only
 /// [`DECOMP_VALUE_BITS`] = 20 bits for the value. The Rabbit path RECOVERS the wrap
 /// instead of avoiding it, so it carries no slack and supports the **full**
-/// [`RABBIT_VALUE_BITS`] = 60 magnitude (`2^60`) — a 40-bit lift. The malicious twin
-/// [`crate::auth_disclose`] still uses the lower-magnitude masked-open path; its
-/// Rabbit upgrade is tracked separately.
+/// [`RABBIT_VALUE_BITS`] = 60 magnitude (`2^60`) — a 40-bit lift. [OPUS-4.8] sq-km34.6:
+/// the malicious twin [`crate::auth_disclose`] has since been lifted to the SAME Rabbit
+/// construction (with every gate an authenticated multiplication), so both tiers now
+/// support `2^60` and an operator no longer chooses between integrity and value range.
 ///
 /// ## Security tier — honest-majority, semi-honest (NOT malicious)
 ///
