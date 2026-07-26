@@ -115,18 +115,34 @@ def _fetch_label(repo, label, ceiling=FETCH_CEILING):
     """Every OPEN issue carrying `label`, via REAL cursor pagination.
 
     [OPUS-5] This was `gh issue list --limit 500`, which SILENTLY TRUNCATES: the CLI stops at
-    the limit and reports nothing. MEASURED live on sparq-org/sparq 2026-07-26 — 719 open
-    `status:untriaged` issues, `--limit 500` returned exactly 500 and dropped 219 (#2360..#2750),
-    newest-first, so the oldest parked issues were the permanent casualties. Retriage is a WORK
-    QUEUE sweep, so a truncated fetch is not a slow drain: those issues are never candidates on
-    any tick, at any point in the future, with no signal. `gh api --paginate` follows Link
-    headers to exhaustion; the explicit ceiling still fails closed on a runaway snapshot (same
-    shape as scripts/ready-issues.py `_fetch`).
+    the limit and reports nothing. Retriage is a WORK QUEUE sweep, so a truncated fetch is not a
+    slow drain: the dropped issues are never candidates on any tick, at any point in the future,
+    with no signal. `gh api --paginate` follows Link headers to exhaustion; the explicit ceiling
+    still fails closed on a runaway snapshot (same shape as scripts/ready-issues.py `_fetch`).
+
+    The defect is DEPTH-CONDITIONAL, and the measurements below are POINT-IN-TIME, not a fixed
+    gain. It bites only while the label's open count exceeds the limit; under it, the truncated
+    and paginated fetches are identical. Two live snapshots on sparq-org/sparq, 2026-07-26:
+
+      queue 719  ->  truncated fetch returned 500, dropping 219 (#2360..#2750) newest-first;
+                     275 vs 367 promotable, i.e. 92 promotions lost on that tick
+      queue 380  ->  below the limit; both fetches return the same rows, 8 vs 8, no difference
+
+    So this is a LATENT fault that re-arms the moment the backlog crosses the limit again — and
+    it does so silently, which is exactly why it is fixed rather than tuned. Do not quote the 92
+    as a standing improvement.
 
     Field note: the REST payload names the author `user.login`, NOT the `author.login` that
-    `gh issue list --json author` emits. Getting that wrong makes every author read as "" and
-    `_trusted_factory` then rejects EVERY issue — a silent total stall, not a visible error.
-    `_self_test` pins it.
+    `gh issue list --json author` emits (measured: 0 of 719 live open `status:untriaged` issue
+    objects carry an `author` key; all 719 carry `user`). Getting that wrong makes every author
+    read as "" and `_trusted_factory` then rejects EVERY issue — a silent total stall, not a
+    visible error. Dropping `labels` fails the same silent way via `_needs_triage`.
+
+    `_self_test` pins BOTH, and pins them end-to-end through `plan_retriage` — asserting the row
+    SHAPE is not enough. Review round 2: the fixture originally carried `user` AND `author` set
+    to the same login, so it satisfied the right and the wrong reading equally and the
+    `author.login` mutant survived with the pinning assertion itself printing `ok`. The fixture
+    now carries ONLY the keys the real payload has.
     """
     r = _gh(["api", "--paginate", "--slurp",
              f"repos/{repo}/issues?state=open&labels={urllib.parse.quote(label)}&per_page=100"])
@@ -238,9 +254,16 @@ def _self_test():
 
     total = 620                     # > 500, so a --limit 500 fetch must lose the oldest 120
     def _row(n, name):
+        # [OPUS-5] `user` ONLY — deliberately NO `author` key, mirroring the real REST payload
+        # (measured: 0 of 719 live open status:untriaged issue objects carry `author`; all 719
+        # carry `user`). Carrying both made the fixture satisfy the RIGHT and the WRONG reading
+        # equally, so `author.login` was indistinguishable from `user.login` and the mutant
+        # survived with this very assertion printing `ok`. In production that mutant resolves
+        # every author to "", _trusted_factory then rejects the whole queue, and retriage
+        # silently promotes NOTHING — a total stall of the drain this fetch exists to unblock.
         return {"number": n, "labels": [{"name": name}, {"name": "priority:P2"},
                                         {"name": "role:impl"}, {"name": "area:sparq-core"}],
-                "user": {"login": "jeswr"}, "author": {"login": "jeswr"}}
+                "user": {"login": "jeswr"}}
 
     corpus = {"status:untriaged": [_row(n, "status:untriaged") for n in range(1, total + 1)],
               # #7 and #8 carry BOTH labels, so the second query re-returns them: the dedupe
@@ -287,6 +310,18 @@ def _self_test():
         # and _trusted_factory then rejects the entire queue — a silent total stall.
         chk("author login is read from the REST `user` field",
             {c["author"] for c in cands}, {"jeswr"})
+        chk("labels are carried through the fetch",
+            sorted(lb["name"] for lb in cands[0]["labels"]),
+            ["area:sparq-core", "priority:P2", "role:impl", "status:untriaged"])
+        # [OPUS-5] END-TO-END. Every field the fetch emits is only meaningful because
+        # plan_retriage consumes it, and each one fails the SAME silent way: drop `labels` and
+        # _needs_triage is False, drop `author` and the trust gate rejects everything — either
+        # way retriage promotes NOTHING and prints no error. Asserting the row SHAPE cannot see
+        # that; asserting the resulting ACTIONS can. This pins number + labels + author at once.
+        actions_e2e = plan_retriage(cands, lambda login: login == "jeswr")
+        chk("fetched rows actually drive promotions (not a silently empty sweep)",
+            (len(actions_e2e), actions_e2e[0] if actions_e2e else None),
+            (total, (1, ["status:ready"], ["status:untriaged"])))
         chk("the fetch uses cursor pagination, not a fixed page limit",
             all(c[0] == "api" and "--paginate" in c for c in seen_cmds), True)
         # fail-closed ceiling: a runaway snapshot must raise, never silently half-report

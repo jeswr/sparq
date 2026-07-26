@@ -773,6 +773,16 @@ def _self_test():
     chk("non-bead marker payload does not scan", MARKER_RE.search("<!-- bd-id:not-a-bead -->"), None)
     chk("dotted subtask ids still scan",
         MARKER_RE.search("<!-- bd-id:sq-7d3dj.32.2.3 -->").group(1), "sq-7d3dj.32.2.3")
+    # [OPUS-5] _body was UNTESTED: reading a wrong/absent key (e.g. bead["body"] instead of
+    # bead["description"]) silently ships every migrated issue with an EMPTY description —
+    # content loss across a ~900-issue bulk run, with no error and a still-valid marker. The
+    # fixture carries ONLY `description`, so a wrong-key read cannot pass by coincidence.
+    body_out = _body({"description": "  the real bead prose  "}, "sq-body")
+    chk("migrated body carries the bead description", "the real bead prose" in body_out, True)
+    chk("migrated body is marker-addressable and self-identified",
+        (MARKER_RE.search(body_out).group(1), body_out.startswith(SELF_ID)), ("sq-body", True))
+    chk("a description-less bead still yields a valid marker body",
+        MARKER_RE.search(_body({}, "sq-empty")).group(1), "sq-empty")
 
     # --- migration-owned provenance (audit 2026-07-25) -------------------------------------------
     # The 2026-07-17 bulk run predates MIGRATION_LABEL: ~750 marker-only issues. Without a third
