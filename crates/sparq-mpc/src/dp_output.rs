@@ -349,9 +349,27 @@ pub struct PrivacyBudget {
     delta_spent: f64,
 }
 
-/// Absolute tolerance for the float budget comparison, so accumulated rounding does
-/// not spuriously reject a charge that exactly meets the budget.
-const BUDGET_EPS_TOL: f64 = 1e-12;
+/// Tolerance for the float budget comparison, so accumulated rounding does not
+/// spuriously reject a charge that exactly meets the budget. It is **relative to the
+/// axis's own configured total** (`tol = total * BUDGET_REL_TOL`), never absolute.
+///
+/// [SONNET-4.6] Review round 4: an ABSOLUTE `1e-12` slack is immaterial for `ε`
+/// (order `0.1`–`10`) but material for `δ`, a cryptographic failure probability that
+/// is routinely `1e-9` or smaller — it let a `delta_total = 0.0` budget (documented
+/// to refuse every non-trivial query) accept a valid [`DpParams`] with
+/// `δ ≤ 1e-12`, and let ANY budget be overspent by an absolute `1e-12` on `δ`.
+/// Deriving each axis's slack from that axis's own total keeps the two
+/// accommodations separate, collapses the slack to exactly `0` for a zero budget,
+/// and bounds any overspend to a relative `1e-12` of what was configured — so the
+/// fail-closed basic-composition invariant holds at every scale.
+const BUDGET_REL_TOL: f64 = 1e-12;
+
+/// `spent + charge > total`, allowing only a rounding tolerance PROPORTIONAL to
+/// `total` (see [`BUDGET_REL_TOL`]). `total` is constructor-validated `>= 0`, so the
+/// tolerance is never negative and a `total` of `0.0` admits no spend at all.
+fn axis_exceeds(spent: f64, charge: f64, total: f64) -> bool {
+    spent + charge > total + total * BUDGET_REL_TOL
+}
 
 impl PrivacyBudget {
     /// Build a fresh budget with `epsilon_total` / `delta_total` privacy to spend.
@@ -397,9 +415,13 @@ impl PrivacyBudget {
     }
 
     /// Would charging `params` exceed this budget? (Pure check, no state change.)
+    ///
+    /// Each axis is compared against a rounding tolerance derived from ITS OWN total
+    /// (a relative `1e-12`, never an absolute one), so the `δ` accounting carries no
+    /// absolute slack and a zero total refuses every positive charge.
     pub fn would_exceed(&self, params: &DpParams) -> bool {
-        self.epsilon_spent + params.epsilon > self.epsilon_total + BUDGET_EPS_TOL
-            || self.delta_spent + params.delta > self.delta_total + BUDGET_EPS_TOL
+        axis_exceeds(self.epsilon_spent, params.epsilon, self.epsilon_total)
+            || axis_exceeds(self.delta_spent, params.delta, self.delta_total)
     }
 
     /// Charge `params` against the budget via sequential composition. Fails closed
@@ -1104,6 +1126,38 @@ mod tests {
         b.charge(&p).unwrap();
         let err = b.charge(&p).unwrap_err();
         assert!(matches!(err, MpcError::Protocol(m) if m.contains("privacy budget exhausted")));
+    }
+
+    /// [SONNET-4.6] Review round 4: a `delta_total = 0.0` budget is documented to
+    /// refuse every non-trivial query. Under the old ABSOLUTE `1e-12` tolerance a
+    /// constructible `δ = 1e-13` charge slipped through (`0 + 1e-13 > 0 + 1e-12` is
+    /// false) and released data against a zero failure-probability budget.
+    #[test]
+    fn zero_delta_budget_refuses_sub_tolerance_delta() {
+        let mut b = PrivacyBudget::new(1.0, 0.0).unwrap();
+        // Constructible: shift ~31 << MAX_DP_SHIFT, truncation mass ~0 <= delta/2.
+        let p = DpParams::new(1.0, 1e-13, 1).unwrap();
+        assert!(b.would_exceed(&p), "a zero delta budget affords no delta");
+        let err = b.charge(&p).unwrap_err();
+        assert!(matches!(err, MpcError::Protocol(m) if m.contains("privacy budget exhausted")));
+        assert_eq!(b.spent_delta(), 0.0, "refused charge must not spend");
+        assert_eq!(b.spent_epsilon(), 0.0, "refused charge must not spend");
+    }
+
+    /// Near-boundary composition on a tiny delta budget: the total affords exactly
+    /// one charge, and the second is refused without mutating the spend. Under the
+    /// old absolute tolerance the budget authorized `1e-12` of delta beyond the
+    /// total — 10x this whole budget.
+    #[test]
+    fn small_delta_budget_composes_to_its_boundary_then_refuses() {
+        let mut b = PrivacyBudget::new(10.0, 1e-13).unwrap();
+        let p = DpParams::new(1.0, 1e-13, 1).unwrap();
+        b.charge(&p).unwrap();
+        assert_eq!(b.spent_delta(), 1e-13);
+        assert_eq!(b.remaining_delta(), 0.0);
+        let err = b.charge(&p).unwrap_err();
+        assert!(matches!(err, MpcError::Protocol(m) if m.contains("privacy budget exhausted")));
+        assert_eq!(b.spent_delta(), 1e-13, "refused charge must not spend");
     }
 
     /// An over-budget release is refused BEFORE any crypto/reveal and does not spend.
