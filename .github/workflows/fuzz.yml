@@ -197,9 +197,17 @@ jobs:
     # default <toolchain>` that `dtolnay/rust-toolchain` performs (precedence 5). The
     # `cargo +nightly-2026-06-11 fuzz …` calls below are precedence 1 and were already
     # immune; this env var (precedence 2) restores the pre-pin behaviour for the rest of
-    # the job. It matters most for `cargo fuzz`, which re-invokes cargo itself for the
-    # `fuzz/` sub-workspace: that nested invocation would otherwise resolve the ROOT pin
-    # (rustup searches upward from the cwd) and lose the nightly the lane declares. Note
+    # the job. [OPUS-5] CORRECTION, measured on rustup 1.29.0: this env var is NOT what
+    # protects the nested cargo that `cargo fuzz` spawns for the `fuzz/` sub-workspace.
+    # rustup EXPORTS the resolved toolchain to child processes — `cargo +nightly-2026-06-11
+    # <subcmd>` hands the child `RUSTUP_TOOLCHAIN=nightly-2026-06-11-<host>` (and
+    # `RUSTUP_TOOLCHAIN_SOURCE=cli`), which is precedence 2 and so still outranks the root
+    # file even when the nested cargo runs from `fuzz/`. Verified directly: with a root pin
+    # in place, a `cargo +nightly-2026-06-11` subcommand invoked from a sub-directory saw
+    # the nightly, while the same subcommand invoked as a PLAIN `cargo` saw the pin. So the
+    # nested call was already safe; what this env var actually buys is the invocations that
+    # carry NO `+toolchain` at all — `cargo install cargo-fuzz` and the `rustc -vV` that
+    # Swatinem/rust-cache keys its cache on, which would otherwise re-key onto the pin. Note
     # this env is scoped to THIS job only — the `differential-smoke` job below is a
     # deliberate stable lane and correctly inherits the pin. Keep in sync with the
     # `toolchain:` input below.

@@ -80,9 +80,13 @@
 #   3. a `rustup override set` directory override
 #   4. THIS FILE
 #   5. `rustup default`
-# So this file BEATS every `rustup default stable` in the workflow tree (those
-# ~40 lines are now no-ops for toolchain selection; they still usefully add
-# components), and is in turn BEATEN by `+toolchain` and `RUSTUP_TOOLCHAIN`.
+# So this file BEATS every `rustup default stable` in the workflow tree — all 40
+# of those lines are now COMPLETE no-ops, and is in turn BEATEN by `+toolchain`
+# and `RUSTUP_TOOLCHAIN`.
+# [OPUS-5] They add no components either: `rustup default stable` only selects.
+# Measured: of the 40 `run:` blocks containing `rustup default stable`, 7 also
+# contain a separate `rustup component add` — it is THAT command (which applies
+# to the active, i.e. pinned, toolchain) that adds anything, not the `default`.
 # The lanes that deliberately need a different compiler — the MSRV floor check
 # and the nightly Miri/ASan/fuzz/Kani lanes — assert themselves through those
 # two higher-precedence mechanisms, so they keep the compiler they declare.
@@ -130,9 +134,18 @@
 # the newest that exists.
 channel = "1.97.1"
 
-# `minimal` = rustc + cargo + rust-std only; every component this repo actually
-# needs is listed explicitly below rather than pulled in by the `default`
+# `minimal` = rustc + cargo + rust-std only; every component the PINNED-STABLE
+# lanes need is listed explicitly below rather than pulled in by the `default`
 # profile (which would also fetch rust-docs).
+#
+# [OPUS-5] Deliberately NOT the set of every component the repo uses. Three
+# more are needed elsewhere and are correctly NOT listed here:
+#   * `llvm-tools-preview` — the four ci.yml coverage jobs, added to the ACTIVE
+#     (pinned) toolchain by an explicit `rustup component add` step in each.
+#   * `miri`, `rust-src` — miri.yml / asan.yml / fuzz.yml, installed by their
+#     own `dtolnay/rust-toolchain` step onto the NIGHTLY those lanes escape to.
+# Listing any of them here would make every job that activates the pin fetch a
+# component it does not use.
 profile = "minimal"
 
 # clippy  — the `-D warnings` gate in ci.yml's `lint` job and in the registry's
