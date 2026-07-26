@@ -88,10 +88,22 @@ export default function BenchmarksOverviewPage() {
                 <CardHeader>
                   <div className="flex items-center justify-between gap-2">
                     <CardTitle className="text-base">{f.title}</CardTitle>
+                    {/* [SONNET-4.6] sq-hfd82 — data-vr-mask: the per-family metric COUNT is
+                        derived from the committed benchmarks snapshot, which the benchmark
+                        workflow refreshes continuously (the metric total grew by more than half
+                        again within three days of the last baseline re-mint). sq-mcsbp masked the
+                        provenance strip above for exactly this reason but left these badges
+                        unmasked, so benchmarks-index.png went stale again within days — the
+                        fastest-recurring cause of the nightly visual red. Mask it ("mask, don't
+                        chase"); the card grid layout is what the snapshot actually guards.
+                        `tabular-nums` keeps the badge — and therefore the masked box — width-
+                        stable as the digits change, so no unmasked sliver appears beside it. */}
                     {count === 0 ? (
-                      <Badge variant="muted">soon</Badge>
+                      <Badge variant="muted" data-vr-mask>
+                        soon
+                      </Badge>
                     ) : (
-                      <Badge variant="muted">
+                      <Badge variant="muted" className="tabular-nums" data-vr-mask>
                         {count} metric{count === 1 ? "" : "s"}
                       </Badge>
                     )}
