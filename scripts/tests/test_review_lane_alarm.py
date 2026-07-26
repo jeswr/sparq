@@ -271,6 +271,64 @@ class TestNonAlarmingStates(unittest.TestCase):
         )
 
 
+class TestExitCodeCarriesTheVerdict(unittest.TestCase):
+    """FOUND BY MUTATION: rewriting `return 1` to `return 0` in run() survived the whole
+    suite. Nothing asserted that a detected blind spot actually REDS the run — the alarm
+    would have printed its findings into a green log forever, which is the exact
+    exit-zero-swallowing class this repository has been bitten by three times in a day.
+
+    These tests pin the exit code as the alarm's real output. `--dry-run` keeps them
+    hermetic (no gh writes); `--prs-file` supplies the population."""
+
+    def _run(self, pulls, comments=None, *, max_age="24"):
+        import json
+        import tempfile
+        payload = {"pulls": pulls, "comments": comments or {}}
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump(payload, fh)
+            path = fh.name
+        return alarm.main([
+            "--repo", REPO, "--prs-file", path, "--now", "2026-07-26T00:00:00Z",
+            "--max-age-hours", max_age, "--dry-run",
+        ])
+
+    def test_an_aged_blind_spot_pr_REDS_the_run(self):
+        self.assertEqual(self._run([pr(number=42, created="2026-07-01T00:00:00Z")]), 1)
+
+    def test_a_clean_population_exits_zero(self):
+        self.assertEqual(
+            self._run([pr(number=5, ref="sparq-agent/issue-5-1-1",
+                          login="sparq-orchestrator[bot]")]),
+            0,
+        )
+
+    def test_a_reviewed_pr_exits_zero(self):
+        good = [comment(f"reviewed {SHA_A}\n\nVERDICT: pass")]
+        self.assertEqual(
+            self._run([pr(number=7, created="2026-07-01T00:00:00Z")], {"7": good}), 0)
+
+    def test_a_SELF_reviewed_pr_still_REDS_the_run(self):
+        selfrev = [comment(f"reviewed {SHA_A}\n\nVERDICT: pass", login="jeswr")]
+        self.assertEqual(
+            self._run([pr(number=8, created="2026-07-01T00:00:00Z")], {"8": selfrev}), 1)
+
+    def test_a_STALE_headed_verdict_still_REDS_the_run(self):
+        stale = [comment(f"reviewed {SHA_B}\n\nVERDICT: pass")]
+        self.assertEqual(
+            self._run([pr(number=9, created="2026-07-01T00:00:00Z")], {"9": stale}), 1)
+
+    def test_an_empty_population_exits_zero(self):
+        self.assertEqual(self._run([]), 0)
+
+    def test_the_three_exit_codes_are_distinct(self):
+        # 0 = clean, 1 = blind spot found, 2 = the detector itself is broken. Collapsing
+        # any pair would make a broken detector indistinguishable from a healthy repo.
+        clean = self._run([])
+        alarmed = self._run([pr(number=1, created="2026-07-01T00:00:00Z")])
+        broken = alarm.main(["--repo", "not-a-slug", "--dry-run"])
+        self.assertEqual((clean, alarmed, broken), (0, 1, 2))
+
+
 class TestFailLoud(unittest.TestCase):
     """A broken detector must never look like a quiet green."""
 
