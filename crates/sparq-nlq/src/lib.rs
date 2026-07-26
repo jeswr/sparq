@@ -27,6 +27,10 @@ pub mod endpoint;
 
 pub mod constrain;
 pub mod eval;
+// [SONNET-4.6] sq-j1wv: prompt/data-injection + budget hardening. NOT feature-gated — a
+// security control that ships off is not a control, it adds no dependency, and every
+// transform is a no-op on benign text (so no recorded fixture moves).
+pub mod guard;
 pub mod link;
 
 /// Read-only versus mutating classification for parsed SPARQL algebra.
@@ -270,6 +274,14 @@ pub struct NlqConfig {
     /// [`link_entities`](Self::link_entities), flipping it needs no re-record. [OPUS-4.8]
     #[cfg(feature = "citations")]
     pub qualify: Option<qualify::QualifyConfig>,
+    /// **Injection + budget hardening** ([`guard`], `sq-j1wv`). Caps the question
+    /// length before any LLM call, bounds the untrusted text echoed into a repair
+    /// prompt, and refuses to execute a generated query that federates (`SERVICE`).
+    /// On by default and fixture-compatible: every transform is a no-op on benign
+    /// text, so an unchanged prompt stays byte-identical. See
+    /// `research/nlq-threat-model.md` for what this does and does **not** contain.
+    /// [SONNET-4.6]
+    pub guard: guard::GuardConfig,
 }
 
 impl Default for NlqConfig {
@@ -309,6 +321,9 @@ impl Default for NlqConfig {
             // want hedged/abstaining answers over a provenance-bearing graph. [OPUS-4.8]
             #[cfg(feature = "citations")]
             qualify: None,
+            // Hardening ON by default (sq-j1wv): benign input is untouched, so the
+            // hardened posture costs nothing to keep. [SONNET-4.6]
+            guard: guard::GuardConfig::default(),
         }
     }
 }
@@ -333,6 +348,10 @@ pub enum TurnOutcome {
     /// triples). Carries the ungrounded terms; the repair message lists them with
     /// nearest-namespace suggestions. [OPUS-4.8]
     UngroundedTerms(Vec<constrain::UnknownTerm>),
+    /// Hardening (`sq-j1wv`): the query parsed but used a construct the loop refuses to
+    /// execute — today, `SERVICE` federation. Carries what was refused; the repair
+    /// message names each one. The query was **not** executed. [SONNET-4.6]
+    Forbidden(Vec<guard::Forbidden>),
 }
 
 /// One generate→validate(→execute) round, kept verbatim for auditability — the
@@ -450,8 +469,14 @@ impl<'g> Nlq<'g> {
     }
 
     pub fn with_config(graph: &'g Graph, llm: Box<dyn Llm>, config: NlqConfig) -> Self {
-        let schema_summary =
-            Introspection::build(graph).to_text_summary(config.summary_budget_chars);
+        // The summary is DATA-derived (it renders sampled values from the graph), so it
+        // is untrusted text spliced into the prompt: neutralize fences and stray control
+        // characters, keeping the deck's line structure. No-op on ordinary data.
+        // [SONNET-4.6] sq-j1wv
+        let schema_summary = guard::sanitize_block(
+            &Introspection::build(graph).to_text_summary(config.summary_budget_chars),
+        )
+        .into_owned();
         let linker = config
             .link_entities
             .then(|| link::EntityLinker::build(graph, config.link_expand_k, config.max_links));
@@ -471,7 +496,13 @@ impl<'g> Nlq<'g> {
     /// the **ungrounded baseline** prompt (`research/genai-design.md` §4 — the same
     /// LLM with no schema deck). The two prompts are distinct strings, so a fixture
     /// recorded for one does not collide with the other under [`ReplayLlm`].
+    ///
+    /// The question is sanitized ([`guard::flatten_untrusted`]) before it is spliced in,
+    /// so it cannot open a code fence or forge a prompt line; benign questions are
+    /// unchanged, so a recorded fixture keeps replaying. [SONNET-4.6] sq-j1wv
     pub fn prompt_for(&self, question: &str) -> String {
+        let question = guard::flatten_untrusted(question);
+        let question = question.as_ref();
         let mut p = String::new();
         if self.config.ground {
             p.push_str(
@@ -526,7 +557,18 @@ impl<'g> Nlq<'g> {
 
     /// The repair prompt: the failed query and the error, stacked onto the full
     /// grounding prompt (the trait is stateless — every call must carry everything).
+    ///
+    /// Both echoed strings are untrusted — the query is the model's own output, the
+    /// error is derived from it — so each is fence-neutralized and capped at
+    /// [`guard::GuardConfig::max_echo_chars`] (truncation is marked, never silent).
+    /// The failed query keeps its newlines: it is meant to be read back as SPARQL.
+    /// [SONNET-4.6] sq-j1wv
     pub fn repair_prompt_for(&self, question: &str, failed_sparql: &str, error: &str) -> String {
+        let max_echo = self.config.guard.max_echo_chars;
+        let failed_sparql = guard::neutralize_fences(failed_sparql);
+        let failed_sparql = guard::truncate_untrusted(&failed_sparql, max_echo);
+        let error = guard::sanitize_block(error);
+        let error = guard::truncate_untrusted(&error, max_echo);
         format!(
             "{}\n\nYour previous query failed. Here is what you wrote:\n```sparql\n{}\n```\n\n\
              Error: {}\n\nFix the query. Output exactly one ```sparql code block and nothing else.",
@@ -553,7 +595,21 @@ impl<'g> Nlq<'g> {
 
     /// Runs the loop: ground → generate → validate → execute, with up to
     /// `max_repair_rounds` repair rounds on parse or execution failure.
+    ///
+    /// The question is checked against [`guard::GuardConfig`] **first**: an over-long
+    /// question is rejected with an empty transcript, before a single token is spent.
+    /// [SONNET-4.6] sq-j1wv
     pub fn ask(&self, question: &str) -> Result<Answer, NlqError> {
+        let question = match guard::check_question(question, &self.config.guard) {
+            Ok(q) => q,
+            Err(e) => {
+                return Err(NlqError {
+                    message: format!("question rejected: {e}"),
+                    transcript: Vec::new(),
+                })
+            }
+        };
+        let question = question.as_ref();
         let mut transcript: Vec<Turn> = Vec::new();
         let mut prompt = self.prompt_for(question);
         // Initial round + repair rounds.
@@ -585,16 +641,27 @@ impl<'g> Nlq<'g> {
                             (Some(q), Some((msg.clone(), TurnOutcome::ParseError(msg))))
                         }
                         Ok(parsed) => {
+                            // Hardening (`sq-j1wv`): whatever the model was asked — or
+                            // talked into — writing, refuse the constructs whose
+                            // CONSEQUENCES the loop will not accept (outbound SERVICE
+                            // federation) before the engine ever sees the query.
+                            // Mutation needs no check: `parse_query` cannot yield one.
+                            // [SONNET-4.6]
+                            let forbidden =
+                                guard::forbidden_constructs(&parsed, &self.config.guard);
                             // N2 dictionary constraint (`sq-9yjp`): a query whose
                             // predicate/class IRIs are not in the live dictionary
                             // cannot match — turn it into a targeted repair signal
                             // BEFORE spending an execution on a guaranteed-empty query.
-                            let unknowns = if self.config.check_dictionary {
+                            let unknowns = if forbidden.is_empty() && self.config.check_dictionary {
                                 constrain::unknown_terms(self.graph, &parsed)
                             } else {
                                 Vec::new()
                             };
-                            if !unknowns.is_empty() {
+                            if !forbidden.is_empty() {
+                                let msg = guard::forbidden_repair_message(&forbidden);
+                                (Some(q), Some((msg, TurnOutcome::Forbidden(forbidden))))
+                            } else if !unknowns.is_empty() {
                                 let msg = constrain::dictionary_repair_message(&unknowns);
                                 (Some(q), Some((msg, TurnOutcome::UngroundedTerms(unknowns))))
                             } else {

@@ -111,11 +111,15 @@ impl Linking {
         );
         for e in &self.entities {
             let kind = if e.exact { "exact" } else { "contains" };
+            // The mention and the label are UNTRUSTED text: the label is a literal
+            // whoever wrote the triple chose, so it is the crate's indirect
+            // (data-)injection vector into the prompt. Each is rendered on one line,
+            // so flatten it — a no-op for ordinary labels. [SONNET-4.6] sq-j1wv
             s.push_str(&format!(
                 "- entity \"{}\" ({kind}) -> <{}>  (label: {})\n",
-                e.mention,
+                crate::guard::flatten_untrusted(&e.mention),
                 e.iri.as_str(),
-                e.label
+                crate::guard::flatten_untrusted(&e.label)
             ));
             if !e.similar.is_empty() {
                 let sims: Vec<String> = e
@@ -129,7 +133,7 @@ impl Linking {
         for r in &self.relations {
             s.push_str(&format!(
                 "- relation \"{}\" -> <{}>  ({} triples)\n",
-                r.mention,
+                crate::guard::flatten_untrusted(&r.mention),
                 r.iri.as_str(),
                 r.triples
             ));
