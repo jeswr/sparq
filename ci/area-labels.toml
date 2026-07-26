@@ -94,6 +94,15 @@
 # in practice a workspace-wide refactor. Raising it trades scheduler safety for
 # throughput; lowering it trades throughput for safety.
 max_areas = 4
+# Patterns whose root does not exist on disk TODAY. Declared here so the map-validity
+# test can stay STRICT for every other row (a dead row is a silent hole that looks like
+# coverage). Two legitimate kinds: a FETCHED/GENERATED tree, and a file an in-flight PR
+# adds. Keep this list short and justified — it is the one place a typo can hide.
+anticipated_roots = [
+  "tests/**",             # W3C/RDF conformance corpora, FETCHED by scripts/fetch-*.sh (gitignored)
+  "rust-toolchain.toml",  # toolchain pin; added by an in-flight PR, mapped ahead of it
+  "rust-toolchain",       # the legacy filename form of the same pin
+]
 
 [lanes]
 # The `area:` names that are NOT workspace crates. Every one of these is an
@@ -156,10 +165,6 @@ pattern = ".gitignore"
 area = "ci"
 
 [[map]]
-pattern = ".gitattributes"
-area = "ci"
-
-[[map]]
 pattern = "rustfmt.toml"
 area = "ci"
 
@@ -169,6 +174,46 @@ area = "ci"
 
 [[map]]
 pattern = "advisory.markdownlint-cli2.jsonc"
+area = "ci"
+
+[[map]]
+pattern = ".markdownlint-cli2.jsonc"
+area = "ci"
+
+# Prose/lint/scan/test-runner tool configs. Each redefines what a CI leg checks, so the
+# lane on which two concurrent editors collide is `ci`.
+[[map]]
+pattern = ".vale.ini"
+area = "ci"
+
+[[map]]
+pattern = ".vale/**"
+area = "ci"
+
+[[map]]
+pattern = ".hadolint.yaml"
+area = "ci"
+
+[[map]]
+pattern = ".trivyignore"
+area = "ci"
+
+[[map]]
+pattern = ".roborev.toml"
+area = "ci"
+
+[[map]]
+pattern = ".config/**"
+area = "ci"
+
+[[map]]
+pattern = ".claude-plugin/**"
+area = "ci"
+
+# A stray committed `du` dump. Mapped only so it cannot silently send a PR to
+# `__global__`; it should be deleted from the tree, not curated here.
+[[map]]
+pattern = ".du.txt"
 area = "ci"
 
 # ---------------------------------------------------------------------------
@@ -215,6 +260,11 @@ area = "site"
 
 [[map]]
 pattern = "assets/**"
+area = "site"
+
+# The published security.txt — served by the site.
+[[map]]
+pattern = ".well-known/**"
 area = "site"
 
 [[map]]
@@ -280,6 +330,10 @@ area = "release"
 
 [[map]]
 pattern = "Dockerfile"
+area = "release"
+
+[[map]]
+pattern = ".dockerignore"
 area = "release"
 
 [[map]]

@@ -42,6 +42,14 @@ on:
       # workflow's own run block to the scripts it must invoke.
       - "scripts/tests/test_readiness_visibility.py"
       - ".github/workflows/routing-self-tests.yml"
+      # [OPUS-5] reg#677 — PR `area:` attribution. The scheduler partitions by
+      # `area:<name>`; an unlabelled PR takes the serializing `__global__` partition
+      # and defers EVERY issue, so a drift in the deriver, its declared table, or the
+      # labelling workflow must fail on ITS OWN PR, not at the next dispatch tick.
+      - "scripts/pr-area-labels.py"
+      - "ci/area-labels.toml"
+      - "scripts/tests/test_pr_area_labels.py"
+      - ".github/workflows/pr-area-label.yml"
   merge_group:
   push:
     branches: [main]
@@ -69,6 +77,14 @@ on:
       # workflow's own run block to the scripts it must invoke.
       - "scripts/tests/test_readiness_visibility.py"
       - ".github/workflows/routing-self-tests.yml"
+      # [OPUS-5] reg#677 — PR `area:` attribution. The scheduler partitions by
+      # `area:<name>`; an unlabelled PR takes the serializing `__global__` partition
+      # and defers EVERY issue, so a drift in the deriver, its declared table, or the
+      # labelling workflow must fail on ITS OWN PR, not at the next dispatch tick.
+      - "scripts/pr-area-labels.py"
+      - "ci/area-labels.toml"
+      - "scripts/tests/test_pr_area_labels.py"
+      - ".github/workflows/pr-area-label.yml"
 
 permissions:
   contents: read
@@ -98,6 +114,12 @@ jobs:
           python3 scripts/dispatch-plan.py --self-test
           python3 scripts/batch-merge.py --self-test
           python3 scripts/tests/test_readiness_visibility.py
+          # [OPUS-5] reg#677: the PR `area:` deriver + its YAML seam. The suite is
+          # invoked HERE and that invocation is itself pinned by
+          # test_pr_area_labels.py::TestSelfTestIsActuallyInvoked — a suite nobody
+          # runs cannot go red.
+          python3 scripts/pr-area-labels.py --self-test
+          python3 scripts/tests/test_pr_area_labels.py
 
       # [OPUS-5] The bd->issues migration pair, previously ungated on a PR (see the `paths:`
       # note above). Both are hermetic: stdlib only, every subprocess boundary stubbed, no
