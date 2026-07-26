@@ -30,17 +30,36 @@ use sparq_jsonld::{expand, flatten, Json, JsonLdOptions, NoopLoader};
 // Oracle
 // ---------------------------------------------------------------------------
 
-/// Native JSON-LD document-level equality over the crate's `Json` AST: object key
-/// order insignificant, array order significant only inside a `@list` value,
-/// everything else exact (scalars compared as their `Json::Raw` / `Json::Str`
-/// tokens). Same semantics as `tests/flatten.rs` and the conformance crate's
-/// `json_ld_equal`, restated here because Rust integration tests are separate
-/// binaries with no shared module.
-fn json_ld_equal(a: &Json, b: &Json) -> bool {
-    json_ld_equal_inner(a, b, false)
+/// How the array immediately under comparison must be compared — the JSON-LD
+/// data model gives arrays three different meanings depending on where they sit.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Arrays {
+    /// The default: a property's value array is an unordered SET of values.
+    Unordered,
+    /// The array under a `@list` key: its order is significant, but its elements
+    /// are ordinary JSON-LD values again (so nested arrays revert to `Unordered`).
+    ListOrdered,
+    /// Inside a `@json` literal's `@value` payload: plain JSON, so array order is
+    /// significant RECURSIVELY (object member order stays insignificant).
+    JsonExact,
 }
 
-fn json_ld_equal_inner(a: &Json, b: &Json, in_list: bool) -> bool {
+/// Native JSON-LD document-level equality over the crate's `Json` AST: object key
+/// order insignificant, array order significant inside a `@list` value and
+/// (recursively) inside a `@json` literal payload, everything else exact (scalars
+/// compared as their `Json::Raw` / `Json::Str` tokens). Same semantics as
+/// `tests/flatten.rs` and the conformance crate's `json_ld_equal`, restated here
+/// because Rust integration tests are separate binaries with no shared module.
+///
+/// The `@json` carve-out is load-bearing for this module's claim to pin `@json`
+/// payload SHAPE: a `@json` value is opaque JSON, where `[1,2]` and `[2,1]` are
+/// different documents, so comparing the payload with set semantics would let a
+/// payload-reordering compaction bug pass `json_literal_round_trips`.
+fn json_ld_equal(a: &Json, b: &Json) -> bool {
+    json_ld_equal_inner(a, b, Arrays::Unordered)
+}
+
+fn json_ld_equal_inner(a: &Json, b: &Json, arrays: Arrays) -> bool {
     match (a, b) {
         (Json::Str(x), Json::Str(y)) => x == y,
         (Json::Raw(x), Json::Raw(y)) => x == y,
@@ -48,33 +67,64 @@ fn json_ld_equal_inner(a: &Json, b: &Json, in_list: bool) -> bool {
             if xs.len() != ys.len() {
                 return false;
             }
-            if in_list {
-                xs.iter()
+            match arrays {
+                Arrays::Unordered => array_equal_unordered(xs, ys),
+                // A `@list`'s elements are JSON-LD values: back to set semantics.
+                Arrays::ListOrdered => xs
+                    .iter()
                     .zip(ys.iter())
-                    .all(|(x, y)| json_ld_equal_inner(x, y, false))
-            } else {
-                array_equal_unordered(xs, ys)
+                    .all(|(x, y)| json_ld_equal_inner(x, y, Arrays::Unordered)),
+                // Inside a `@json` payload the exactness propagates all the way down.
+                Arrays::JsonExact => xs
+                    .iter()
+                    .zip(ys.iter())
+                    .all(|(x, y)| json_ld_equal_inner(x, y, Arrays::JsonExact)),
             }
         }
         (Json::Obj(xa), Json::Obj(ya)) => {
             if xa.len() != ya.len() {
                 return false;
             }
+            let json_literal = arrays != Arrays::JsonExact && is_json_literal(xa);
             xa.iter().all(|(k, va)| {
+                let child = if arrays == Arrays::JsonExact {
+                    // An opaque payload: `@list` / `@type` are ordinary member names here.
+                    Arrays::JsonExact
+                } else if json_literal && k == "@value" {
+                    Arrays::JsonExact
+                } else if k == "@list" {
+                    Arrays::ListOrdered
+                } else {
+                    Arrays::Unordered
+                };
                 ya.iter()
                     .find(|(k2, _)| k2 == k)
-                    .is_some_and(|(_, vb)| json_ld_equal_inner(va, vb, k == "@list"))
+                    .is_some_and(|(_, vb)| json_ld_equal_inner(va, vb, child))
             })
         }
         _ => false,
     }
 }
 
+/// Is this object an expanded `@json` value object (`{"@value":…,"@type":"@json"}`)?
+/// `expand` emits the `@type` as a bare string; a kept single-element array is
+/// accepted too so the check does not depend on that normalisation.
+fn is_json_literal(members: &[(String, Json)]) -> bool {
+    members.iter().any(|(k, v)| {
+        k == "@type"
+            && match v {
+                Json::Str(s) => s == "@json",
+                Json::Arr(a) => matches!(a.as_slice(), [Json::Str(s)] if s == "@json"),
+                _ => false,
+            }
+    })
+}
+
 fn array_equal_unordered(xs: &[Json], ys: &[Json]) -> bool {
     let mut used = vec![false; ys.len()];
     'outer: for x in xs {
         for (j, y) in ys.iter().enumerate() {
-            if !used[j] && json_ld_equal_inner(x, y, false) {
+            if !used[j] && json_ld_equal_inner(x, y, Arrays::Unordered) {
                 used[j] = true;
                 continue 'outer;
             }
@@ -243,6 +293,54 @@ fn json_literal_round_trips() {
         }"#,
         r#"{"ex":"http://example.com/","payload":{"@id":"http://example.com/payload","@type":"@json"}}"#,
     );
+}
+
+#[test]
+fn json_payload_array_order_is_significant() {
+    // Witness that `json_literal_round_trips` above is NOT vacuous for the shape
+    // half of its claim. A `@json` payload is opaque JSON, where `[1,2]` and
+    // `[2,1]` are different documents — but everything else in the expanded form
+    // is compared with SET semantics, so without the `@json` carve-out the oracle
+    // would accept a compaction bug that reordered the payload.
+    let literal = |payload: &str| {
+        Json::parse(&format!(
+            r#"{{"@id":"http://example.com/a",
+                 "http://example.com/payload":[{{"@value":{},"@type":"@json"}}]}}"#,
+            payload
+        ))
+        .expect("valid expanded JSON")
+    };
+
+    assert!(
+        !json_ld_equal(&literal("[1,2]"), &literal("[2,1]")),
+        "@json payload array order must be significant"
+    );
+    // …recursively, not just at the payload's top level.
+    assert!(
+        !json_ld_equal(&literal(r#"{"k":[1,2]}"#), &literal(r#"{"k":[2,1]}"#)),
+        "@json payload array order must be significant at any depth"
+    );
+    // Equal payloads still compare equal, and object member order inside the
+    // payload stays insignificant (JSON objects are unordered maps).
+    assert!(json_ld_equal(&literal("[1,2]"), &literal("[1,2]")));
+    assert!(json_ld_equal(
+        &literal(r#"{"a":1,"b":[1,2]}"#),
+        &literal(r#"{"b":[1,2],"a":1}"#)
+    ));
+
+    // The carve-out must not leak: an ordinary (non-`@json`) property value array
+    // is still an unordered set.
+    let plain = |values: &str| {
+        Json::parse(&format!(
+            r#"{{"@id":"http://example.com/a","http://example.com/p":{}}}"#,
+            values
+        ))
+        .expect("valid expanded JSON")
+    };
+    assert!(json_ld_equal(
+        &plain(r#"[{"@value":"x"},{"@value":"y"}]"#),
+        &plain(r#"[{"@value":"y"},{"@value":"x"}]"#)
+    ));
 }
 
 // ---------------------------------------------------------------------------
