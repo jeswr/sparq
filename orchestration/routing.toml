@@ -151,11 +151,20 @@ agent = "sparq-site"
 # This route PRESERVES the existing UI -> codex/sol original-builder steer (task #331) for the
 # desktop GUI; it is a carve-out from a new default, not a reversal of anything.
 #
+# WHERE THE CARVE-OUT ACTUALLY BINDS. This route alone is NOT sufficient and must not be mistaken
+# for the mechanism: role routes are reached only via a `role:` LABEL, `role:gui` did not exist as a
+# repo label until 2026-07-26, and `triage._role()` returns an EXPLICIT `role:*` before it consults
+# any surface label — so all 35 open `area:gui` issues (33 role:impl, 1 role:perf, 1 role:research)
+# resolved `role:impl` and took the opus5-first default, INVERTING the directive for the whole GUI
+# backlog. The binding rule therefore lives in scripts/route-resolve.py `gui_carve_out()`: it reads
+# the `area:gui` label the issues ALREADY carry, at plan time, and re-orders whatever chain they
+# resolve to. This route is the declarative statement of the same preference for an issue that does
+# carry `role:gui`; the two are asserted to agree.
+#
 # It is a ROLE route, not `match_labels`, for the same reason the site route is: the review lane's
 # arm-side security classifier UNIONS every match_labels keyword, so putting "gui" there would
 # human-arm every GUI PR. scripts/triage.py derives role:gui from `area:gui` alone (it used to
-# fold area:gui into role:site, which is exactly why a separate role is needed to express the
-# carve-out at all).
+# fold area:gui into role:site).
 #
 # PREFERENCE, NOT EXCLUSION: opus5 remains the fallback, so GUI work stays dispatchable during a
 # sol/OpenAI outage. The chain is cross-provider and therefore cannot be starved by one provider.

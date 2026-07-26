@@ -41,6 +41,13 @@ UI_SURFACE_LABELS = ("area:site", "surface:frontend", "dashboard")
 # carve-out. Splitting the label out is what lets orchestration/routing.toml give role:gui a
 # sol-first chain while role:site takes the opus5-first default like everything else.
 # EXACT label, never a substring: a substring test would match "guide"/"guidance".
+#
+# THIS IS NOT WHERE THE CARVE-OUT BINDS. This rule fires only for an issue with NO explicit role —
+# the explicit-role branch in _role() returns first — and 35 of 35 open area:gui issues already
+# carry one (33 role:impl, 1 role:perf, 1 role:research), so on its own it reached NONE of the live
+# backlog and GUI work silently took the opus5-first default. The binding rule is
+# scripts/route-resolve.py `gui_carve_out()`, which reads `area:gui` directly at plan time
+# regardless of role. Keep the two label sets in sync — `test_both_gui_selectors_agree`.
 GUI_SURFACE_LABELS = ("area:gui",)
 # [FABLE-5] STANDING RULE — frontier-tier CI/infrastructure authorship (maintainer decision
 # 2026-07-17, same pattern as the UI→codex rule above / PR #3416): infra-surface labels derive
