@@ -673,8 +673,12 @@ impl ParPhaseStats {
     /// Amdahl-bound and an apply-phase refinement is worth its determinism risk; a small
     /// fraction means it is not. Returns `0.0` when neither phase was measured (an empty
     /// ontology derives nothing, so both timers stay at zero).
+    ///
+    /// The fields are public, so both timers may hold `u64::MAX`; the denominator is summed
+    /// in `u128` so the result stays in range instead of panicking (debug) or wrapping to a
+    /// division by zero (release).
     pub fn apply_fraction(&self) -> f64 {
-        let total = self.compute_nanos + self.apply_nanos;
+        let total = u128::from(self.compute_nanos) + u128::from(self.apply_nanos);
         if total == 0 {
             return 0.0;
         }

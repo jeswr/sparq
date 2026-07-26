@@ -484,6 +484,40 @@ fn apply_fraction_is_the_sequential_share_of_measured_time() {
 }
 
 #[test]
+fn apply_fraction_stays_in_range_when_the_timers_saturate_u64() {
+    // The timer fields are public, so `compute_nanos + apply_nanos` can exceed `u64::MAX`.
+    // The denominator must not overflow: that would panic in debug and wrap to a
+    // divide-by-zero (infinity/NaN) in release, making the documented `0.0..=1.0` contract
+    // build-profile-dependent.
+    let compute_heavy = ParPhaseStats {
+        compute_nanos: u64::MAX,
+        apply_nanos: 1,
+        ..ParPhaseStats::default()
+    };
+    let f = compute_heavy.apply_fraction();
+    assert!(f.is_finite(), "{:?} -> {}", compute_heavy, f);
+    assert!((0.0..=1.0).contains(&f), "{:?} -> {}", compute_heavy, f);
+    // 1 / 2^64, exactly representable in f64.
+    assert_eq!(f, 1.0 / 18_446_744_073_709_551_616.0);
+
+    let both_saturated = ParPhaseStats {
+        compute_nanos: u64::MAX,
+        apply_nanos: u64::MAX,
+        ..ParPhaseStats::default()
+    };
+    assert_eq!(both_saturated.apply_fraction(), 0.5);
+
+    let apply_heavy = ParPhaseStats {
+        compute_nanos: 1,
+        apply_nanos: u64::MAX,
+        ..ParPhaseStats::default()
+    };
+    let f = apply_heavy.apply_fraction();
+    assert!(f.is_finite(), "{:?} -> {}", apply_heavy, f);
+    assert!((0.0..=1.0).contains(&f), "{:?} -> {}", apply_heavy, f);
+}
+
+#[test]
 fn empty_graph_par_phase_stats_derives_nothing() {
     let (mut dict, mut triples) = (Dict::new(), Vec::<[Id; 3]>::new());
     let (report, stats) = classify_graph_par_stats(&mut dict, &mut triples, nz(4));
