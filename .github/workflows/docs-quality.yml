@@ -450,6 +450,23 @@ jobs:
           python3 scripts/gh_retry.py --self-test
           python3 scripts/auto-arm.py --self-test
           python3 scripts/rearm-sweeper.py --self-test
+      # [OPUS-5] issue #1135 — the crates.io PUBLISHING protections, gated here because
+      # the release path itself (release-plz.yml) runs ONLY on push:main and therefore
+      # never registers on this PR's `gate`: a defect in it would otherwise surface for
+      # the first time at release time, when the mistake is irreversible.
+      #   * release_pr_guard.py    — the branch/author/title Release-PR exclusion that
+      #                              auto-arm.py, rearm-sweeper.py, check-pr-arm-base.py,
+      #                              batch-merge.py and pr-backlog.py all consult.
+      #   * release-interval-guard — the fail-closed minimum-release-interval belt.
+      #   * test_release_publish_guard.py — parses .github/workflows/release-plz.yml
+      #     STRUCTURALLY (not by substring) so `if: false`, a deleted step, a reordered
+      #     step or a re-pointed `--dry-run` input each red this gate. Measured in this
+      #     repo: every uncaught mutant has lived at the YAML seam, not in the Python.
+      - name: Self-test crates.io publishing protections (#1135)
+        run: |
+          python3 scripts/release_pr_guard.py --self-test
+          python3 scripts/release-interval-guard.py --self-test
+          python3 scripts/tests/test_release_publish_guard.py
       # [OPUS-4.8] sq-ur7o: every SHA-pinned `taiki-e/install-action` step MUST carry an
       # explicit `with: tool:`. install-action picks the tool from its @<tool> git ref; the
       # code-scanning=0 SHA-pin policy DROPS that selector, so without `with: tool:` the
