@@ -31,6 +31,10 @@ mod classify;
 mod extract;
 #[cfg(feature = "hasse")]
 mod hasse;
+// [SONNET-4.6] sq-clsv6: incremental classification under TBox edits — only under
+// `incremental`, so the stateless build carries zero edit-tracking state or code.
+#[cfg(feature = "incremental")]
+mod incremental;
 mod normal;
 #[cfg(feature = "rbox")]
 mod rbox;
@@ -39,6 +43,11 @@ mod rbox;
 pub use abox::{realize, realize_graph, AboxReport, Realization};
 #[cfg(feature = "hasse")]
 pub use hasse::{classify_hasse_graph, DirectHierarchy};
+// [SONNET-4.6] sq-clsv6 (Phase E5): the stateful edit-tracking classifier. Read
+// `IncrementalClassifier`'s docs for what "incremental" does and does NOT cover here (additions
+// are folded in; a retraction takes an honest full-re-classification fallback).
+#[cfg(feature = "incremental")]
+pub use incremental::{EditDisposition, FullReason, IncrementalClassifier, IncrementalReport};
 // [SONNET-4.6] sq-q0o82 (E4 follow-up): the compute/apply attribution the parallel-apply
 // refinement decision is measured on — see `classify_graph_par_stats`.
 #[cfg(feature = "par")]

@@ -203,9 +203,6 @@ fn saturate_inner(
 ) -> Saturation {
     let ix = AxiomIndex::build(axioms);
     let n = names.concept_count();
-    // [OPUS-4.8] sq-pbz04.2.6: O(1) fast-path guard — on a hasSelf-free ontology CRs1 is skipped
-    // entirely, so classification is byte-identical (behaviour AND cost) to the pre-CR-Self path.
-    let has_self = names.has_self_restrictions();
     let mut sat = Saturation {
         s: vec![FxHashSet::default(); n],
         r_pred: FxHashMap::default(),
@@ -215,7 +212,26 @@ fn saturate_inner(
     // Worklist of (concept X, newly-added subsumer D) pairs: each represents "D just entered
     // S(X)". init seeds S(C) = {C, ⊤} for every concept and queues both memberships.
     let mut queue: Vec<(Concept, Concept)> = Vec::new();
-    for c in 0..n as Concept {
+    seed_init_rows(&mut sat, 0, n, &mut queue);
+
+    #[cfg(feature = "rbox")]
+    drain(&mut sat, &ix, names, role_box, &mut queue);
+    #[cfg(not(feature = "rbox"))]
+    drain(&mut sat, &ix, names, &mut queue);
+    sat
+}
+
+/// Seeds `init` — `S(C) := {C, ⊤}` — for the concept rows `from..to`, queueing both memberships
+/// so the worklist processes them. Split out of [`saturate_inner`] ([SONNET-4.6] sq-clsv6) so the
+/// incremental path can seed only the rows a TBox edit newly minted, with IDENTICAL seeding
+/// semantics for old and new rows.
+fn seed_init_rows(
+    sat: &mut Saturation,
+    from: usize,
+    to: usize,
+    queue: &mut Vec<(Concept, Concept)>,
+) {
+    for c in from as Concept..to as Concept {
         if sat.s[c as usize].insert(c) {
             queue.push((c, c));
         }
@@ -223,20 +239,42 @@ fn saturate_inner(
             queue.push((c, TOP));
         }
     }
+}
 
+/// The CR1–CR5 (+ CRs1, + CR10/CR11 under `rbox`) worklist drain alternated with the CR6
+/// nominal pass, run to a fixpoint over whatever `sat` / `queue` it is handed. Extracted from
+/// [`saturate_inner`] VERBATIM ([SONNET-4.6] sq-clsv6) so the from-scratch and incremental
+/// entries execute the SAME rule code — the reason the two agree by construction rather than by
+/// a maintained parallel implementation.
+///
+/// Contract the caller must uphold (the queue-item invariant every rule argument rests on): a
+/// pair `(X, D)` is in `queue` only if `D` has ALREADY been inserted into `S(X)`, and every
+/// membership whose rules have not yet been fired against `ix` IS in `queue`. Given that, the
+/// drain leaves `sat` closed under all rules — see the incremental soundness/completeness note
+/// in `incremental.rs`.
+fn drain(
+    sat: &mut Saturation,
+    ix: &AxiomIndex,
+    names: &Names,
+    #[cfg(feature = "rbox")] role_box: &RoleBox,
+    queue: &mut Vec<(Concept, Concept)>,
+) {
+    // [OPUS-4.8] sq-pbz04.2.6: O(1) fast-path guard — on a hasSelf-free ontology CRs1 is skipped
+    // entirely, so classification is byte-identical (behaviour AND cost) to the pre-CR-Self path.
+    let has_self = names.has_self_restrictions();
     loop {
         while let Some((x, d)) = queue.pop() {
             // CR1: every `D ⊑ E` axiom adds E to S(X).
             if let Some(es) = ix.sub.get(&d) {
                 for &e in es {
-                    add(&mut sat.s[x as usize], x, e, &mut queue);
+                    add(&mut sat.s[x as usize], x, e, queue);
                 }
             }
             // CR2: every `D ⊓ C2 ⊑ E` axiom fires if C2 also already ∈ S(X).
             if let Some(parts) = ix.and_by_conjunct.get(&d) {
                 for &(other, e) in parts {
                     if sat.s[x as usize].contains(&other) {
-                        add(&mut sat.s[x as usize], x, e, &mut queue);
+                        add(&mut sat.s[x as usize], x, e, queue);
                     }
                 }
             }
@@ -245,9 +283,9 @@ fn saturate_inner(
             if let Some(links) = ix.exists.get(&d) {
                 for &(r, f) in links {
                     #[cfg(feature = "rbox")]
-                    add_link_rbox(&mut sat, r, x, f, &ix, names, role_box, &mut queue);
+                    add_link_rbox(sat, r, x, f, ix, names, role_box, queue);
                     #[cfg(not(feature = "rbox"))]
-                    add_link(&mut sat, r, x, f, &ix, names, &mut queue);
+                    add_link(sat, r, x, f, ix, names, queue);
                 }
             }
             // CRs1 (sq-pbz04.2.6): the self-restriction concept `∃r.Self` just entered S(X) —
@@ -261,10 +299,10 @@ fn saturate_inner(
                 if let Some(r) = names.self_role(d) {
                     #[cfg(feature = "rbox")]
                     add_self_link_rbox(
-                        &mut sat, r, x, &ix, names, role_box, &mut queue,
+                        sat, r, x, ix, names, role_box, queue,
                     );
                     #[cfg(not(feature = "rbox"))]
-                    add_link(&mut sat, r, x, x, &ix, names, &mut queue);
+                    add_link(sat, r, x, x, ix, names, queue);
                 }
             }
             // CR4 / CR5 with the new membership `D ∈ S(X)` as the trigger, where X is the
@@ -291,16 +329,112 @@ fn saturate_inner(
                 }
             }
             for (p, e) in derived {
-                add(&mut sat.s[p as usize], p, e, &mut queue);
+                add(&mut sat.s[p as usize], p, e, queue);
             }
         }
         // CR6 (safe nominals): merges may enqueue new memberships, which can in turn create
         // new links / reachability — re-run the worklist, then re-check, until neither moves.
-        if !cr6_pass(&mut sat, names, &mut queue) {
+        if !cr6_pass(sat, names, queue) {
             break;
         }
     }
-    sat
+}
+
+/// [SONNET-4.6] sq-clsv6 (Phase E5, `incremental`): RESUMES an already-saturated [`Saturation`]
+/// after a MONOTONE TBox extension — `axioms` is the full post-edit axiom set and `added` the
+/// newly-extracted delta (so `axioms` is a superset of the pre-edit axiom set). Returns the
+/// number of retained memberships re-queued as the delta frontier (the incremental work measure).
+///
+/// The caller MUST have established that the edit is monotone (nothing retracted, no existing
+/// axiom's meaning changed) — `crate::incremental` owns that decision and falls back to a full
+/// re-classification otherwise. Under `rbox` the caller must also pass a `role_box` rebuilt from
+/// the SAME (unchanged) told role axioms at the post-edit role count.
+///
+/// # Why the result is the same least fixpoint a from-scratch run computes
+///
+/// Write `L` for the least fixpoint of the completion rules over `axioms` (what [`saturate`]
+/// would compute) and `S0` for the retained pre-edit state.
+///
+/// * **`S0` is contained in `L` (nothing retained is wrong).** Every retained membership/link was
+///   derived by these same monotone rules from a SUBSET of `axioms` — monotonicity of the edit is
+///   exactly this premise — so it is derivable from `axioms` too, hence in `L`.
+/// * **The resumed run ends closed under every rule.** The drain's invariant is "every membership
+///   whose rules have not yet fired against the CURRENT axiom index is queued". The seeding below
+///   re-establishes it: (a) rows minted by the edit get the full `init` seed; (b) for every axiom
+///   in `added`, every retained membership matching one of its TRIGGER keys is re-queued, so each
+///   new axiom is re-tried against the whole retained state; (c) axioms that are NOT new already
+///   fired against every retained membership before the edit, and fire again for anything
+///   inserted after it. Link-triggered CR4/CR5 (and the `rbox` CR10/CR11 closure) run inside
+///   `add_link` for every link the drain inserts, and no pre-existing link can need a new axiom
+///   without being reached: `ExistsSub(r, c, e)`'s membership-triggered arm is seeded by (b) via
+///   the key `c`, which visits every successor `Y` with `c` in `S(Y)` and from there every
+///   predecessor link already in `r_pred`.
+/// * **Therefore the result is `L`.** It is a fixpoint containing the `init` seeds, so it contains
+///   `L`; and it is built from `S0` (contained in `L`) by sound rule applications over `axioms`,
+///   so it is contained in `L`.
+///
+/// Cost: one scan of the retained closure to locate the trigger contexts, then rule work only for
+/// the seeded frontier and its cascade — instead of re-firing every rule for every membership as
+/// a full re-saturation does. Internal FRESH normalization names are NOT reused across edits (the
+/// delta mints its own), so the concept index grows with edit history; the NAMED-class projection
+/// is unaffected (a fresh name never carries a dict id), which is why `tests/incremental.rs` can
+/// pin the projected hierarchy equal to a from-scratch run.
+#[cfg(feature = "incremental")]
+pub fn resaturate(
+    sat: &mut Saturation,
+    axioms: &[Normal],
+    added: &[Normal],
+    names: &Names,
+    #[cfg(feature = "rbox")] role_box: &RoleBox,
+) -> usize {
+    let ix = AxiomIndex::build(axioms);
+    let retained_rows = sat.s.len();
+    let n = names.concept_count();
+    debug_assert!(n >= retained_rows, "the name table only ever grows");
+
+    let mut queue: Vec<(Concept, Concept)> = Vec::new();
+    // (a) rows the edit minted: the ordinary `init` seed, identical to a from-scratch run.
+    sat.s.resize(n, FxHashSet::default());
+    seed_init_rows(sat, retained_rows, n, &mut queue);
+
+    // (b) the delta frontier: every RETAINED membership that is a trigger key of a NEW axiom. A
+    // key that is itself a newly-minted concept needs no seeding — no retained S-set can contain
+    // it, and the membership that puts it there is queued when it is inserted.
+    let mut keys: FxHashSet<Concept> = FxHashSet::default();
+    for &ax in added {
+        match ax {
+            Normal::Sub(c, _) => {
+                keys.insert(c);
+            }
+            Normal::AndSub(c1, c2, _) => {
+                keys.insert(c1);
+                keys.insert(c2);
+            }
+            Normal::SubExists(c, _, _) => {
+                keys.insert(c);
+            }
+            Normal::ExistsSub(_, c, _) => {
+                keys.insert(c);
+            }
+        }
+    }
+    let mut seeded = 0usize;
+    if !keys.is_empty() {
+        for (x, members) in sat.s.iter().enumerate().take(retained_rows) {
+            for &m in members {
+                if keys.contains(&m) {
+                    queue.push((x as Concept, m));
+                    seeded += 1;
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "rbox")]
+    drain(sat, &ix, names, role_box, &mut queue);
+    #[cfg(not(feature = "rbox"))]
+    drain(sat, &ix, names, &mut queue);
+    seeded
 }
 
 /// [FABLE-5] sq-pbz04.2.1 — CR6, the safe-nominal completion rule (Baader–Brandt–Lutz,
