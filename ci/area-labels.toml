@@ -103,10 +103,14 @@ max_areas = 4
 # test can stay STRICT for every other row (a dead row is a silent hole that looks like
 # coverage). Two legitimate kinds: a FETCHED/GENERATED tree, and a file an in-flight PR
 # adds. Keep this list short and justified — it is the one place a typo can hide.
+# An entry is DROPPED once its path lands (the strict dead-row check then covers the
+# row automatically, so nothing is lost). That housekeeping is reported as DRIFT rather
+# than gated: in a continuously-merging repo a path landing on `main` must not red an
+# unrelated PR's `Routing contract self-tests` — it has no runtime consequence, whereas
+# `test_every_tracked_file_in_the_repo_resolves` does and stays a hard gate.
 anticipated_roots = [
   "tests/**",             # W3C/RDF conformance corpora, FETCHED by scripts/fetch-*.sh (gitignored)
-  "rust-toolchain.toml",  # toolchain pin; added by an in-flight PR, mapped ahead of it
-  "rust-toolchain",       # the legacy filename form of the same pin
+  "rust-toolchain",       # the legacy filename form of the toolchain pin (never landed)
 ]
 
 [lanes]
@@ -443,6 +447,10 @@ pattern = "skills/data-formats/**"
 area = "sparq-core"
 
 [[map]]
+pattern = "skills/e2ee-ng/**"
+area = "sparq-e2ee-ng"
+
+[[map]]
 pattern = "skills/federated-planning/**"
 area = "sparq-fedplan"
 
@@ -523,6 +531,10 @@ pattern = "skills/shacl-validation/**"
 area = "sparq-shacl"
 
 [[map]]
+pattern = "skills/solid-lws-server/**"
+area = "sparq-lws-core"
+
+[[map]]
 pattern = "skills/sparql-query/**"
 area = "sparq-engine"
 
@@ -563,8 +575,11 @@ area = "sparq-zk"
 # and take `__global__`, which is the starvation this file exists to remove. `docs` is
 # the deliberately conservative choice: it over-serializes against other prose work
 # rather than guessing a crate. Rows above win, and
-# test_every_skill_surface_has_a_map_row keeps pressure to add the specific row once the
-# surface lands on the default branch.
+# test_every_skill_surface_has_a_map_row REPORTS (does not gate on) a surface with no
+# specific row, so adding one stays visible without a new skill on `main` reding an
+# unrelated PR. It is safe to demote precisely BECAUSE of this catch-all: attribution
+# stays total either way, and a missing row costs only a coarser (`docs`) lane, never
+# a wrong crate.
 [[map]]
 pattern = "skills/**"
 area = "docs"

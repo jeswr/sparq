@@ -61,6 +61,26 @@ def _load(name: str, path: Path):
 M = _load("pr_area_labels", DERIVER)
 
 
+def _tracked_paths():
+    """Every git-tracked repo-relative path, or None when git is unavailable."""
+    import subprocess
+    proc = subprocess.run(["git", "-C", str(REPO_ROOT), "ls-files", "-z"],
+                          capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        return None
+    return [p for p in proc.stdout.split("\0") if p]
+
+
+def _unattributed_tracked(policy, known):
+    """The tracked paths that attribute to NOTHING under `policy`. Shared by the hard
+    totality gate and by its non-vacuity guard, so the guard exercises the SAME code the
+    gate runs — a neutered computation reds both."""
+    tracked = _tracked_paths()
+    if tracked is None:
+        return []
+    return sorted({p for p in tracked if M.attribute(p, policy) not in known})
+
+
 def _yaml(path: Path) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
@@ -168,17 +188,18 @@ class TestPolicyTable(unittest.TestCase):
                 missing.append(pattern)
         self.assertEqual(missing, [], f"[[map]] patterns whose root does not exist: {missing}")
 
-    def test_anticipated_roots_are_declared_rows_and_really_absent(self):
-        """Keeps the escape hatch honest: an entry must correspond to a real row, and must
-        be REMOVED once the path lands (otherwise it hides a future typo forever)."""
+    def test_anticipated_roots_are_declared_rows(self):
+        """Keeps the escape hatch honest: an entry must correspond to a real row, so it
+        cannot exempt a pattern that no row uses.
+
+        The companion "remove it once the path lands" rule is reported as DRIFT
+        (`test_table_drift_report_is_advisory_not_gating`), not gated — see that test.
+        Dropping a landed entry loses nothing: `test_every_map_row_pattern_root_exists_on_disk`
+        would pass for that row anyway once the root exists."""
         anticipated = list(self.raw["policy"].get("anticipated_roots") or [])
         patterns = {p for p, _ in self.policy.rows}
         self.assertEqual([a for a in anticipated if a not in patterns], [],
                          "anticipated_roots entry with no matching [[map]] row")
-        landed = [a for a in anticipated
-                  if (REPO_ROOT / (a[:-3] if a.endswith("/**") else a)).exists()]
-        self.assertEqual(landed, [], f"anticipated_roots entries that now EXIST — remove "
-                                     f"them so the strict check covers them: {landed}")
 
     def test_every_crates_subdirectory_is_a_workspace_member(self):
         """The implicit `crates/<name>` rule is only TOTAL if every directory under
@@ -188,12 +209,74 @@ class TestPolicyTable(unittest.TestCase):
                          "crates/ subdirectories that are not workspace members would "
                          "fall back to __global__")
 
-    def test_every_skill_surface_has_a_map_row(self):
-        """A new skill surface with no row silently sends its PRs to `__global__`."""
+    def test_skill_surfaces_without_a_specific_row_still_resolve(self):
+        """The DEMOTED half of the old `test_every_skill_surface_has_a_map_row`.
+
+        Requiring a per-surface `[[map]]` row was a GATING assertion about the whole live
+        tree in a continuously-merging repo: every new `skills/` surface landing on `main`
+        turned this suite red on every unrelated open PR. Measured on `80710d9c`:
+        `skills/e2ee-ng` (#3464) and `skills/solid-lws-server` (#4181) did exactly that,
+        hours after a green check.
+
+        It is safe to demote because a surface with no row costs only a COARSER lane
+        (`docs`, via the `skills/**` catch-all), never a WRONG crate — the direction that
+        would put two workers on one crate. Attribution stays total either way.
+
+        What is NOT demoted: those surfaces must still ATTRIBUTE, from their REAL tracked
+        files (not a synthetic probe). Delete the `skills/**` catch-all row and this goes
+        red — that deletion is the change that would really send those PRs to
+        `__global__`. Surfaces lacking a specific row are printed as drift."""
         patterns = {p for p, _ in self.policy.rows}
-        missing = sorted(d.name for d in SKILLS.iterdir()
-                         if d.is_dir() and f"skills/{d.name}/**" not in patterns)
-        self.assertEqual(missing, [], f"skills/ surfaces with no [[map]] row: {missing}")
+        known = self.members | self.policy.non_crate
+        drift, unattributed = [], []
+        for d in sorted(p for p in SKILLS.iterdir() if p.is_dir()):
+            if f"skills/{d.name}/**" not in patterns:
+                drift.append(d.name)
+            for f in d.rglob("*"):
+                if f.is_file():
+                    rel = f.relative_to(REPO_ROOT).as_posix()
+                    if M.attribute(rel, self.policy) not in known:
+                        unattributed.append(rel)
+        self.assertEqual(sorted(unattributed)[:20], [],
+                         "skills/ path(s) with NO area attribution — the `skills/**` "
+                         "catch-all is gone and these PRs fall to __global__")
+        if drift:
+            print(f"\n  [drift, advisory] skills/ surfaces with no specific [[map]] row "
+                  f"(they take the `docs` catch-all): {drift}")
+
+    def test_landed_anticipated_roots_are_reported_as_drift_but_still_attribute(self):
+        """Same demotion, same reasoning, for `[policy] anticipated_roots`. An entry whose
+        path has LANDED should be removed — but that is housekeeping with no runtime
+        consequence (`test_every_map_row_pattern_root_exists_on_disk` covers the row the
+        moment its root exists), so it must not red an unrelated PR. Measured on
+        `80710d9c`: `rust-toolchain.toml` landing via #3803 did exactly that.
+
+        Strict half kept: a landed path must still attribute."""
+        anticipated = list(self.raw["policy"].get("anticipated_roots") or [])
+        known = self.members | self.policy.non_crate
+        landed = [a for a in anticipated
+                  if (REPO_ROOT / (a[:-3] if a.endswith("/**") else a)).exists()]
+        for a in landed:
+            probe = a[:-3] + "/probe" if a.endswith("/**") else a
+            self.assertIn(M.attribute(probe, self.policy), known,
+                          f"anticipated_roots entry {a!r} has landed and does NOT attribute")
+        if landed:
+            print(f"\n  [drift, advisory] anticipated_roots entries that now EXIST "
+                  f"(drop them; the strict dead-row check covers those rows): {landed}")
+
+    def test_the_totality_check_detects_an_unmapped_path(self):
+        """NON-VACUITY guard for the hard ratchet below. Two ratchets were just demoted to
+        advisory; this pins that the one that stayed a GATE really discriminates. Drop the
+        `[[map]]` row that claims `.github/**` and the totality computation must report
+        those paths — if it reports nothing, `test_every_tracked_file_in_the_repo_resolves`
+        is vacuous and the whole demotion is unsafe."""
+        known = self.members | self.policy.non_crate
+        pruned = M.Policy(self.policy.max_areas,
+                          [(p, a) for p, a in self.policy.rows if p != ".github/**"],
+                          self.policy.non_crate, self.members)
+        self.assertNotEqual(_unattributed_tracked(pruned, known), [],
+                            "removing the `.github/**` row left every tracked path "
+                            "resolvable — the totality check cannot fail")
 
     def test_every_tracked_file_in_the_repo_resolves(self):
         """TOTALITY over the REAL tree — every git-tracked path must attribute to some
@@ -202,16 +285,12 @@ class TestPolicyTable(unittest.TestCase):
         starvation for every PR that touches it. A synthetic `dir/probe.txt` probe would
         NOT discriminate (it can pass while the directory's real layout is unmapped, and
         fail on directories that hold only one known file), so this walks git's index."""
-        import subprocess
-        proc = subprocess.run(["git", "-C", str(REPO_ROOT), "ls-files", "-z"],
-                              capture_output=True, text=True, check=False)
-        if proc.returncode != 0:
+        tracked = _tracked_paths()
+        if tracked is None:
             self.skipTest("git ls-files unavailable")
-        tracked = [p for p in proc.stdout.split("\0") if p]
         self.assertGreater(len(tracked), 1000, "suspiciously small tracked-file set")
         known = self.members | self.policy.non_crate
-        unresolved = sorted({p for p in tracked
-                             if M.attribute(p, self.policy) not in known})
+        unresolved = _unattributed_tracked(self.policy, known)
         self.assertEqual(unresolved, [], f"{len(unresolved)} tracked path(s) with no area "
                                          f"attribution (each sends its PR to __global__): "
                                          f"{unresolved[:20]}")
