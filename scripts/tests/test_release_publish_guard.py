@@ -261,21 +261,61 @@ class TestEveryArmingPathConsultsTheGuard(unittest.TestCase):
     }
 
     def test_each_arming_path_imports_and_calls_the_guard(self) -> None:
+        # AST, not substring. MEASURED: the first draft of this test asserted
+        # `"release_pr_guard.arm_block_reason" in text` and a mutant that reverted
+        # scripts/batch-merge.py's predicate to the old author-AND-title conjunction
+        # SURVIVED — the phrase still appeared, in the function's DOCSTRING. A prose
+        # mention is not a call site.
+        import ast
+
         for filename, symbol in sorted(self.PATHS.items()):
             with self.subTest(script=filename):
-                text = (SCRIPTS / filename).read_text(encoding="utf-8")
-                self.assertIn(
-                    "release_pr_guard",
-                    text,
-                    f"scripts/{filename} no longer references release_pr_guard — an "
-                    "arming/merging path lost its #1135 Release-PR exclusion.",
+                tree = ast.parse((SCRIPTS / filename).read_text(encoding="utf-8"))
+                calls = [
+                    node
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == symbol
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "release_pr_guard"
+                ]
+                self.assertTrue(
+                    calls,
+                    f"scripts/{filename} contains no CALL to "
+                    f"release_pr_guard.{symbol} — an arming/merging path lost its "
+                    "#1135 Release-PR exclusion. (A comment, docstring or import "
+                    "mentioning the guard does not exclude anything.)",
                 )
-                self.assertIn(
-                    f"release_pr_guard.{symbol}",
-                    text,
-                    f"scripts/{filename} imports release_pr_guard but never calls "
-                    f"{symbol} — the import alone excludes nothing.",
+    def test_batch_merge_and_pr_backlog_catch_a_branch_only_release_pr(self) -> None:
+        """BEHAVIOURAL, not structural: the case the OLD conjunction missed.
+
+        `author == github-actions AND title startswith "chore: release"` returns False for
+        a Release PR whose title was edited or whose author identity changed, even though
+        its head branch is unmistakable. Both scripts must now catch it on the branch
+        alone. This is the assertion that killed the surviving mutant.
+        """
+        batch = _load("batch_merge_under_test", "batch-merge.py")
+        backlog = _load("pr_backlog_under_test", "pr-backlog.py")
+        branch_only = {
+            "head_ref": "release-plz-main",
+            "author_login": "app/some-other-bot",
+            "title": "Bump workspace version to 0.2.0",
+        }
+        ordinary = {
+            "head_ref": "sparq-agent/issue-3801-x",
+            "author_login": "app/sparq-orchestrator",
+            "title": "fix(engine): a change",
+        }
+        for name, module in (("batch-merge", batch), ("pr-backlog", backlog)):
+            with self.subTest(script=name):
+                self.assertTrue(
+                    module.is_release_plz(branch_only),
+                    f"{name}.is_release_plz missed a Release PR identifiable by its head "
+                    "branch alone — the old author-AND-title conjunction is back.",
                 )
+                # The discriminating half: it must not swallow ordinary worker PRs.
+                self.assertFalse(module.is_release_plz(ordinary), name)
 
     def test_the_predicate_cannot_be_influenced_by_labels(self) -> None:
         # The whole point of #1135's keying decision: a label can be added by anything
