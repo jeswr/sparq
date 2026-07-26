@@ -402,8 +402,12 @@ jobs:
 
       # Build the UNSIGNED desktop bundle. `cargo tauri build` runs from gui/src-tauri, merges the
       # CI overlay (`-c tauri.ci.conf.json`) so the `beforeBuildCommand` hook is skipped (frontend
-      # already exported to gui/app/out above), compiles the native Rust shell embedding gui/app/out
-      # (`frontendDist`), and bundles installers for the host platform into
+      # already exported to gui/app/out above), and enables the native capabilities promised by
+      # the desktop release: HDT import, SERVICE federation, and ODRL policy previews.
+      # [SONNET-4.6] sq-b1hdb — keep these explicit because the crate defaults intentionally remain
+      # lean; omitting them silently compiles the rebuild-hint stubs into shipped installers.
+      # The command compiles the native Rust shell embedding gui/app/out (`frontendDist`) and
+      # bundles installers for the host platform into
       # gui/src-tauri/target/release/bundle/<format>/. `--ci` disables interactive prompts;
       # no signing env vars are set, so the bundles are produced UNSIGNED (see the job header
       # — signing is needs:user sq-v286.8). `--verbose` aids first-CI-run diagnosis.
@@ -423,7 +427,7 @@ jobs:
       #     on the matrix) so the release ships the working bundles + attestation; sq-gl3cf tracks it.
       - name: Build Tauri desktop bundle (unsigned)
         working-directory: gui/src-tauri
-        run: cargo tauri build --ci --verbose -c tauri.ci.conf.json
+        run: cargo tauri build --ci --verbose -c tauri.ci.conf.json --features hdt,federation,odrl
 
       # Collect every produced installer into a flat staging dir under a STABLE, PREDICTABLE
       # per-OS name (the scheme the /download page hardcodes — see the documented names in the
