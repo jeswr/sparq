@@ -56,6 +56,8 @@ graphs (so `GRAPH <g> {…}` / `GRAPH ?g {…}` work), use `Graph::load_dataset(
 All entry points take `&Graph` + `&str` and return `Result<_, String>` (parse + eval errors are
 `String`). The result types:
 
+- `sparq_core::strdist::edit_distance(&str, &str) -> usize` computes character-based
+  Levenshtein distance for vocabulary and dictionary suggestion ranking.
 - `pub struct QueryResult { pub vars: Vec<oxrdf::Variable>, pub rows: Vec<Vec<Option<oxrdf::Term>>> }`
   — `len()` / `is_empty()` count solution rows. The layout is **columnar** (the `vars` header is
   stored once, not per cell); index a cell as `result.rows[row][col]` where `col` is the position of
