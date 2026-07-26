@@ -299,6 +299,23 @@ def _self_test():
     chk("area:gui + a security surface -> soundness lane, unmodified",
         resolve(["area:gui", "area:sparq-zk", "role:impl"], doc),
         (["opus5"], "sparq-reviewer", True))
+    # ...AND WITH A CROSS-PROVIDER SOUNDNESS CHAIN. The review of this PR observed that the
+    # security exemption had no red test: against the shipped `["opus5"]` chain the both-
+    # implementors condition declines for an unrelated reason, so applying the carve-out to the
+    # security return was an UNDETECTABLE mutation. Asserted now, on a fixture whose soundness
+    # chain is cross-provider, rather than after some future edit makes the real one so.
+    import copy as _cp
+    _xsec = _cp.deepcopy(doc)
+    for _r in _xsec.get("route", []):
+        if _r.get("match_labels"):
+            _r["model_chain"] = ["opus5", "sol"]
+            break
+    chk("a CROSS-PROVIDER security route is STILL returned unmodified under area:gui (the "
+        "exemption is the ROUTE CLASS, not an accident of that chain being single-model)",
+        resolve(["area:gui", "area:sparq-zk", "role:impl"], _xsec)[0], ["opus5", "sol"])
+    chk("...while the same table still applies the carve-out on the role branch (so the check "
+        "above is an exemption, not a dead fixture)",
+        resolve(["area:gui", "role:impl"], _xsec)[0], ["sol", "opus5"])
     # "for which they are BOTH possible implementors": a chain without sol is left alone, so the
     # carve-out cannot quietly turn research (anthropic-side + escalate) into a cross-provider route.
     chk("area:gui + role:research is NOT rewritten (sol is not an implementor there)",
@@ -310,6 +327,58 @@ def _self_test():
     chk("the carve-out selector is EXACTLY {area:gui}", sorted(GUI_CARVE_OUT_LABELS), ["area:gui"])
     # Idempotence: applying the rule to an already-sol-first chain must not duplicate the lead.
     chk("carve-out is idempotent", gui_carve_out({"area:gui"}, ["sol", "opus5"]), ["sol", "opus5"])
+
+    # ---------------------------------------------------------------------------------------------
+    # [OPUS-5] THE CARVE-OUT MUST BE DECLARED IN THE TABLE, NOT ONLY IN THIS FILE.
+    #
+    # This resolver is only the PLAN half. CLAIM (registry `dispatch-claim._route_matches`)
+    # re-derives the same route with REGISTRY-owned `policy-resolve.py` from THIS TABLE fetched at
+    # the protected default tip, and demands EXACT equality — so a rule that lives only in this
+    # module makes every issue it selects raise DispatchError, defer `route-policy-failed`, and,
+    # because the comparison is a pure function of labels and the table, defer again on every
+    # subsequent tick FOREVER. Measured on this branch before the declaration existed: 34 of the
+    # 35 open `area:gui` issues diverged (33 role:impl + 1 role:perf).
+    #
+    # The registry's shared `chain_preference` mechanism reads the `[[chain_preference]]` block
+    # from this file. These assertions pin the two representations to each other, in BOTH
+    # directions, so neither can be edited alone:
+    #   * deleting or narrowing the TOML block         -> red (CLAIM would stop applying the rule)
+    #   * widening/renaming the Python constants       -> red (PLAN would apply a different rule)
+    # ---------------------------------------------------------------------------------------------
+    declared = doc.get("chain_preference", [])
+    chk("the live table DECLARES exactly one chain preference (CLAIM reads this, not the Python)",
+        len(declared), 1)
+    decl = declared[0] if declared else {}
+    chk("the declared selector equals GUI_CARVE_OUT_LABELS",
+        sorted(decl.get("labels", [])), sorted(GUI_CARVE_OUT_LABELS))
+    chk("the declared lead equals GUI_CARVE_OUT_LEAD", decl.get("lead"), GUI_CARVE_OUT_LEAD)
+    chk("the declared `requires` is the both-implementors condition this module applies",
+        sorted(decl.get("requires", [])), sorted({GUI_CARVE_OUT_LEAD, "opus5"}))
+    chk("the declared lead is inside `requires` (so the rule can only RE-ORDER a chain, never "
+        "INJECT a model into one that deliberately excludes it)",
+        decl.get("lead") in decl.get("requires", []), True)
+    chk("the declaration names no field the registry mechanism does not implement",
+        sorted(decl.keys()), ["labels", "lead", "requires"])
+    chk("every model the declaration names is in the live [models] catalog",
+        sorted({decl.get("lead"), *decl.get("requires", [])} - set(doc.get("models", {}))), [])
+    # BEHAVIOURAL EQUIVALENCE, not just field equality: run this module's rule and the declared
+    # rule's semantics over the same rows and require identical chains. A declaration that agreed
+    # field-by-field but was applied to a different set of routes would still split PLAN from CLAIM.
+    def _declared_rule(labels, chain):
+        if not (set(labels) & set(decl.get("labels", []))):
+            return list(chain)
+        if not set(decl.get("requires", [])) <= set(chain):
+            return list(chain)
+        lead = decl.get("lead")
+        return [lead] + [m for m in chain if m != lead]
+
+    for _labels in (["area:gui", "role:impl"], ["area:gui", "role:perf"], ["area:gui"],
+                    ["area:gui", "role:research"], ["area:gui", "role:docs"],
+                    ["area:site", "role:impl"], ["area:guide", "role:impl"],
+                    ["area:sparq-core", "role:impl"], ["surface:frontend", "role:site"]):
+        for _chain in (["opus5", "sol"], ["opus5"], ["sol", "terra", "opus5"], ["sol", "opus5"]):
+            chk(f"declared rule == this module's rule for {_labels} over {_chain}",
+                _declared_rule(_labels, _chain), gui_carve_out(set(_labels), list(_chain)))
 
     # ---------------------------------------------------------------------------------------------
     # [OPUS-5] THE DEPRECATION IS AN INVARIANT, NOT A ONE-TIME EDIT (maintainer 2026-07-26).

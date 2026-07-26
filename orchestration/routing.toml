@@ -238,3 +238,48 @@ role = "soundness"
 model_chain = ["opus5"]
 agent = "sparq-reviewer"
 escalate = true
+
+# ---------------------------------------------------------------------------------------------------
+# [OPUS-5] CHAIN-ORDER PREFERENCES — THE CARVE-OUT, DECLARED WHERE **BOTH** RESOLVERS CAN READ IT.
+#
+# The route above is not enough on its own, and the reason is that the dispatch decision is made
+# TWICE, in two repositories:
+#
+#   PLAN   the registry's dispatch.yml clones THIS repo and runs THIS repo's scripts/dispatch-plan.py
+#          -> scripts/route-resolve.py -> gui_carve_out().
+#   CLAIM  registry `dispatch-claim.py` re-derives the same route with REGISTRY-owned
+#          scripts/policy-resolve.py, reading THIS FILE from the protected default-branch tip, and
+#          `_route_matches` then demands EXACT equality of model_chain / agent / escalate.
+#
+# So a chain-order rule expressed ONLY in this repo's Python is not a preference that half-applies:
+# CLAIM re-derives a different chain, raises DispatchError, and the item is counted
+# `route-policy-failed` and skipped. That comparison is a pure function of the issue's labels and
+# this table, so it produces the identical skip on every subsequent tick — the affected issues
+# stop dispatching ENTIRELY, and the only symptom is a defer counter. Measured against this
+# branch's own resolver before this block existed: 34 of the 35 open `area:gui` issues (33
+# `role:impl` + 1 `role:perf`) diverged.
+#
+# CLAIM cannot import this repo's resolver — running target-authored CODE in the privileged claim
+# step is the escalation registry #119 closed. But it already trusts this file, fetched from the
+# PROTECTED tip; it is where `model_chain` itself comes from. So the rule crosses the repository
+# boundary through that same channel, as DATA. The registry's scripts/chain_preference.py is the
+# shared MECHANISM both resolvers import; this block is the RULE.
+#
+# CONTRACT (identical on both sides, and asserted equal to route-resolve.py's GUI_CARVE_OUT_*
+# constants by `route-resolve --self-test`, so the two representations cannot drift):
+#   labels    EXACT issue labels — ANY one of them selects. Never a substring: `"gui" in label`
+#             would sweep `area:guide` / `area:guidance` into the carve-out.
+#   lead      moved to the FRONT of the resolved chain. Every other rung keeps its relative order,
+#             so this is PREFERENCE, NOT EXCLUSION and the chain still terminates cross-provider.
+#   requires  the rule fires ONLY when the chain ALREADY contains all of these — the directive's
+#             own "tasks for which they are BOTH possible implementors" qualifier. `lead` must be
+#             one of them, which is what makes RE-ORDER the only possible effect: the preference
+#             can never INJECT sol into `role:research` (["opus5"], deliberately anthropic-side and
+#             escalating) and turn a visible stall into a silent cross-provider hop.
+#
+# A SECURITY-override route is exempt on both sides: `area:gui` + `area:sparq-zk` is a ZK issue
+# first, and an implementor preference must never re-order a soundness chain.
+[[chain_preference]]
+labels   = ["area:gui"]
+lead     = "sol"
+requires = ["sol", "opus5"]
