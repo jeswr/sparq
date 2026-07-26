@@ -236,6 +236,39 @@ fn every_envelope_malformation_fails_closed() {
     }
 }
 
+/// An oversized name-specific string is refused on its length, before the
+/// alphabet is decoded at all. base58btc decoding is quadratic in the body
+/// length, so a guard that only rejected the eventual malformed multihash would
+/// already have done the work an ingestion-time attacker was buying. The
+/// assertion is on the length rejection specifically: an oversized body errors
+/// either way, and only the *reason* distinguishes early refusal from late.
+#[test]
+fn an_oversized_name_is_refused_on_length_not_after_decoding() {
+    let r = record();
+    // Every character is valid in the declared alphabet, so nothing but the
+    // length bound can stop either of these.
+    let hostile = [
+        format!("urn:concept:z{}", "Q".repeat(50_000)),
+        format!("urn:concept:f{}", "ab".repeat(50_000)),
+    ];
+    for urn in &hostile {
+        let err = ConceptUrn::parse(urn).unwrap_err();
+        assert!(
+            matches!(&err, ConceptError::Multibase(m) if m.contains("rejected before decoding")),
+            "oversized name was not refused on length: {:?}",
+            err
+        );
+        assert!(verify_concept_urn(urn, &r).is_err());
+    }
+    // The longest legitimate name — a SHA-512 multihash written in base16, the
+    // widest digest in the least dense alphabet — is unaffected.
+    let widest = format!("urn:concept:f1340{}", "ab".repeat(64));
+    assert!(!matches!(
+        ConceptUrn::parse(&widest),
+        Err(ConceptError::Multibase(_))
+    ));
+}
+
 #[test]
 fn an_unsupported_hash_code_is_a_rejection_not_a_pass() {
     // sha1 (0x11), structurally well-formed at its declared 20 bytes.

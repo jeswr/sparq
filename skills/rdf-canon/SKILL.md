@@ -249,7 +249,10 @@ Supported envelope: multibase `f`/`F` (base16), `b`/`B` (base32, unpadded), `z`
 `sha2-512` (`0x13`), `sha2-384` (`0x20`) at their full, untruncated lengths.
 
 **Fail-closed, exhaustively.** Not a `urn:concept:` URN; an unknown multibase
-prefix; a character outside the declared alphabet or non-canonical padding bits;
+prefix; a name-specific string longer than any well-formed multihash encodes to
+(refused on length *before* the body is decoded, so a hostile name cannot buy
+decoder work — base58btc decoding is quadratic in the body length);
+a character outside the declared alphabet or non-canonical padding bits;
 a truncated, non-minimal, or trailing-byte multihash; a declared length that
 disagrees with the digest present or with the code's natural size; a hash code
 this build cannot recompute; an empty record; an RDF 1.2 triple term; a digest

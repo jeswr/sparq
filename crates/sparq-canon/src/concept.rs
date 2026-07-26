@@ -67,7 +67,10 @@
 //! # Fail-closed contract
 //!
 //! Every one of the following is an `Err` with nothing accepted: a string that
-//! is not a `urn:concept:` URN; an unknown multibase prefix; a character
+//! is not a `urn:concept:` URN; an unknown multibase prefix; a name-specific
+//! string longer than any well-formed multihash could encode to — checked
+//! *before* the body is decoded at all, so a hostile name cannot buy decoder
+//! work (`MAX_MULTIBASE_BODY_LEN`, in this module's source); a character
 //! outside the declared alphabet or non-canonical padding; a malformed,
 //! non-minimal, or trailing-byte multihash; a declared length that disagrees
 //! with the digest that follows it or with the natural output size of the
@@ -98,6 +101,33 @@ use crate::{digest_quads_with, CanonError};
 /// RFC 8141 makes the scheme and the namespace identifier case-insensitive,
 /// while the name-specific string (the multibase text) is case-sensitive.
 const URN_PREFIX: &str = "urn:concept:";
+
+/// The largest multihash this build will decode: a code varint and a length
+/// varint at the multiformats 9-byte cap (`read_uvarint`) plus a 64-byte
+/// SHA-512 digest, the widest digest [`ConceptHash`] can recompute. Every
+/// multihash a *supported* code can carry is far smaller (`sha2-512` is
+/// `0x13 || 64 || 64 bytes` = 66 bytes); the headroom is for the unsupported
+/// codes [`ConceptUrn::parse`] still accepts structurally before
+/// [`verify_concept`] refuses them.
+const MAX_MULTIHASH_BYTES: usize = 9 + 9 + 64;
+
+/// The longest multibase body (the text *after* the prefix) any alphabet in
+/// this build will look at, and the cheap fail-closed bound on decoder work.
+///
+/// base16 is the least dense alphabet here at exactly two characters per byte,
+/// so two characters per `MAX_MULTIHASH_BYTES` bounds every alphabet at once —
+/// 164, against 132 for the longest name a supported code can produce (SHA-512
+/// written in base16).
+///
+/// The bound matters because base58btc has no byte-aligned digit boundary: its
+/// decoder carries a big-integer multiply across the whole output for every
+/// character (and grows that output with `insert(0, …)`), so it is quadratic in
+/// the body length. Checking the length *first* holds a remotely supplied
+/// `urn:concept:` name — the expected threat surface, since this parser guards
+/// received records before they are indexed — to a bounded, tiny amount of work
+/// whatever it contains. Rejecting only once the decoded bytes turn out not to
+/// be a well-formed multihash would come after the cost, not instead of it.
+const MAX_MULTIBASE_BODY_LEN: usize = 2 * MAX_MULTIHASH_BYTES;
 
 /// A [multibase] alphabet this build can decode and encode.
 ///
@@ -151,7 +181,21 @@ impl Multibase {
     }
 
     /// Decodes the body of a multibase string (the text *after* the prefix).
+    ///
+    /// The length is bounded *before* decoding — see `MAX_MULTIBASE_BODY_LEN`
+    /// for why that ordering is the security-relevant part.
     fn decode(self, body: &str) -> Result<Vec<u8>, ConceptError> {
+        // Byte length, not character count: it is an O(1) upper bound on the
+        // character count, and any body with a non-ASCII character is outside
+        // every alphabet here and rejected regardless.
+        if body.len() > MAX_MULTIBASE_BODY_LEN {
+            return Err(ConceptError::Multibase(format!(
+                "body is {} bytes, longer than the {}-byte maximum any well-formed multihash \
+                 encodes to; rejected before decoding",
+                body.len(),
+                MAX_MULTIBASE_BODY_LEN
+            )));
+        }
         match self {
             Multibase::Base16Lower => base16_decode(body, false),
             Multibase::Base16Upper => base16_decode(body, true),
@@ -247,8 +291,10 @@ pub enum ConceptError {
     NotConceptUrn,
     /// The multibase prefix character is not one this build implements.
     UnknownMultibase(char),
-    /// The multibase body is not valid text in its declared alphabet
-    /// (bad character, or non-canonical trailing bits).
+    /// The multibase body is longer than any well-formed multihash encodes to
+    /// (rejected before it is decoded — see the [module docs](self)), or is not
+    /// valid text in its declared alphabet (bad character, or non-canonical
+    /// trailing bits).
     Multibase(String),
     /// The decoded bytes are not a well-formed multihash (truncated, a
     /// non-minimal varint, a declared length that disagrees with the digest
@@ -852,6 +898,43 @@ mod tests {
         assert!(Multibase::Base58Btc.decode("0OIl").is_err());
         assert!(Multibase::Base64Url.decode("Zm9v+mFy").is_err()); // '+' is base64, not url
         assert!(Multibase::Base32Lower.decode("mzxw6ytbo\u{00e9}").is_err()); // non-ascii
+    }
+
+    /// A hostile name must be refused on its LENGTH, before any alphabet is
+    /// decoded: base58btc's decoder is quadratic in the body length, so
+    /// rejecting only once the multihash turns out malformed would already have
+    /// paid the cost. Asserting the specific length message (not merely
+    /// `is_err`) is what makes this red if the check is removed — an oversized
+    /// body still errors eventually, just far too late.
+    #[test]
+    fn multibase_rejects_an_oversized_body_before_decoding() {
+        let long = "z".repeat(MAX_MULTIBASE_BODY_LEN + 1);
+        for b in [
+            Multibase::Base58Btc,
+            Multibase::Base16Lower,
+            Multibase::Base32Lower,
+            Multibase::Base64Url,
+        ] {
+            let err = b.decode(&long).unwrap_err();
+            assert!(
+                matches!(&err, ConceptError::Multibase(m) if m.contains("rejected before decoding")),
+                "{:?} did not reject an oversized body on length: {:?}",
+                b,
+                err
+            );
+        }
+        // Same for a body that is entirely valid base58btc characters and long
+        // enough that decoding it would be the expensive path.
+        let urn = format!("{}z{}", URN_PREFIX, "Q".repeat(4096));
+        assert!(matches!(
+            ConceptUrn::parse(&urn),
+            Err(ConceptError::Multibase(_))
+        ));
+        // The bound leaves every real name room: SHA-512 in base16, the widest
+        // digest in the least dense alphabet, is the worst case and still parses.
+        let widest = concept_urn(&record(), ConceptHash::Sha512, Multibase::Base16Upper).unwrap();
+        assert!(widest.len() - URN_PREFIX.len() - 1 <= MAX_MULTIBASE_BODY_LEN);
+        ConceptUrn::parse(&widest).unwrap();
     }
 
     #[test]
