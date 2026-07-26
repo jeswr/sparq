@@ -319,6 +319,11 @@ jobs:
       - name: readme-template (template) — crate-README cap + sections (sq-9jw5) — GATING
         run: python3 scripts/check-readme-template.py --enforce
 
+      - name: Demo deployment manifests
+        run: |
+          bash deploy/demo/check.sh
+          bash deploy/demo/check-self-test.sh
+
       # ---- former job: ci-scripts (CI-helper self-tests + workflow lints) ----
       # [OPUS-4.8] sq-6uc7: HARD self-tests for the shared CI disk-reclaim script
       # (scripts/ci-free-disk.sh). #462 folded `/usr/local/share/boost` + the env-named
