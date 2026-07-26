@@ -762,11 +762,11 @@ jobs:
         run: python3 scripts/tests/test_arm_capability_wiring.py
       # [OPUS-5] sq-w1dxx: release.yml's container contract was pinned by a test that NOTHING
       # ran, so every assertion in it was decorative. Wire it in beside its sibling
-      # workflow-contract tests: it pins the multi-arch push + the smoke/Trivy pre-push gates
-      # (sq-fvzi6, sq-n6rv, sq-p9xq) AND the trigger-gated ghcr tag sets — a `workflow_dispatch`
-      # dev-build must never push `:latest` (the tag deploy/paas + deploy/aws pin) and must carry
-      # a clean version-threaded tag. Needs PyYAML — installed once in the shared setup above.
-      - name: Release container contract (multi-arch push + trigger-gated ghcr tags)
+      # [GPT-5] workflow-contract tests: pin the multi-arch push + smoke/Trivy pre-push gates
+      # for both native deployment servers (sq-fqrv4), plus sparq-server's trigger-gated GHCR
+      # tags — a workflow_dispatch dev build must never push a deployment-followed tag.
+      # Needs PyYAML, installed once in the shared setup above.
+      - name: Release container contracts (both multi-arch images + safe ghcr tags)
         run: python3 scripts/tests/test_release_container_multiarch.py
       # [GPT-5] #3770 — structural backstop for the recurring failure-swallow shape:
       # once a sweep records a hard failure, a later transient exception must never
