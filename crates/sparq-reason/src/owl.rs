@@ -2307,12 +2307,13 @@ mod tests {
             vec![[ssn, ty, inv_func], [a, ssn, value], [b, ssn, value], [a, p, mark]];
         materialize_owl_rl(&mut dict, &mut triples);
         let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+        let same_as = [OWL, "sameAs"].concat();
         assert!(
             has(
                 &dict,
                 &set,
                 "http://ex/a",
-                &format!("{}sameAs", OWL),
+                &same_as,
                 "http://ex/b"
             ),
             "prp-ifp ⊢ sameAs"
