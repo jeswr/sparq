@@ -49,6 +49,10 @@ fn a_comparison_operator_does_not_hide_a_later_misspelling() {
     for query in [
         "SELECT ?s WHERE { ?s ?p ?o FILTER(?o < 1) FLTR(?o) }",
         "SELECT ?s WHERE { ?s ?p ?o FILTER(?a < 1 && ?b > 2) FLTR(?o) }",
+        // Compact: SPARQL punctuation delimits these tokens without whitespace, so every
+        // byte from `<` to `>` is IRIREF-legal and only the lexical position tells them
+        // apart. A comparison sits on each side of the misspelling.
+        "SELECT ?s WHERE { ?s ?p ?o FILTER(?a<1&&FLTR(?o)&&?b>2) }",
     ] {
         let error = terse_to_sparql(query).expect_err("a misspelled keyword must fail loudly");
 
@@ -66,6 +70,28 @@ fn a_comparison_operator_does_not_hide_a_later_misspelling() {
             }
             other => panic!("expected CanaryFailed, got {other:?}"),
         }
+    }
+}
+
+#[test]
+fn a_genuine_iri_is_still_ignored_beside_a_compact_comparison() {
+    // The other half of the contract: reading a compact `?a<1` as a comparison must not
+    // start reporting the words inside real IRI refs. `SELCT` sits in an IRI (data, never a
+    // hint); `FLTR` sits in keyword position between two compact comparisons.
+    let query = "SELECT ?s WHERE { ?s <http://ex/SELCT> ?o FILTER(?a<1&&FLTR(?o)&&?b>2) }";
+    let error = terse_to_sparql(query).expect_err("a misspelled keyword must fail loudly");
+
+    match error {
+        TerseError::CanaryFailed { suggestions, .. } => {
+            let tokens: Vec<&str> = suggestions.iter().map(|s| s.token.as_str()).collect();
+            assert_eq!(tokens, ["FLTR"], "expected only the FLTR hint, got {suggestions:?}");
+            assert!(
+                suggestions[0].suggestions.contains(&"FILTER".to_string()),
+                "expected FILTER among {:?}",
+                suggestions[0].suggestions
+            );
+        }
+        other => panic!("expected CanaryFailed, got {other:?}"),
     }
 }
 

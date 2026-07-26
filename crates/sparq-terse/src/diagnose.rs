@@ -192,55 +192,113 @@ fn scan_bare_words(src: &str, f: &mut dyn FnMut(&str)) {
     let bytes = src.as_bytes();
     let n = bytes.len();
     let mut i = 0usize;
+    // The enclosing brackets, innermost last — the lexical context that decides what a `<`
+    // means (see [`opens_iriref`]). Only `(`/`{` are tracked; brackets inside a string, IRI
+    // or comment are never seen because those spans are skipped whole.
+    let mut brackets: Vec<u8> = Vec::new();
+    // The last byte of the preceding token. Whitespace and comments separate tokens without
+    // being one, so they leave it alone.
+    let mut prev = 0u8;
     while i < n {
         let c = bytes[i];
-        match c {
-            // `<` opens an IRI ref only when a well-formed IRIREF body follows; otherwise it
-            // is the less-than (or `<=`) comparison operator and the rest of the query is
-            // ordinary keyword position.
-            b'<' => i = iriref_end(bytes, i).unwrap_or(i + 1),
+        let mut token = true;
+        let next = match c {
+            // `<` opens an IRI ref only in term position with a well-formed IRIREF body;
+            // in expression position after an operand it is the less-than (`<`, `<=`)
+            // comparison operator, and what follows is ordinary keyword position.
+            b'<' if opens_iriref(&brackets, prev) => iriref_end(bytes, i).unwrap_or(i + 1),
             b'#' => {
+                token = false;
                 let mut j = i + 1;
                 while j < n && bytes[j] != b'\n' {
                     j += 1;
                 }
-                i = j;
+                j
             }
-            b'"' | b'\'' => i = crate::transpile::skip_string(bytes, i),
+            b'"' | b'\'' => crate::transpile::skip_string(bytes, i),
             // A variable (?x / $x) or a language tag (@en, @prefix): the name after the
             // sigil is not a keyword position.
             b'?' | b'$' | b'@' => {
-                i += 1;
-                while i < n && (is_word_byte(bytes[i]) || bytes[i] == b'-') {
-                    i += 1;
+                let mut j = i + 1;
+                while j < n && (is_word_byte(bytes[j]) || bytes[j] == b'-') {
+                    j += 1;
                 }
+                j
+            }
+            b'(' | b'{' => {
+                brackets.push(c);
+                i + 1
+            }
+            b')' | b'}' => {
+                brackets.pop();
+                i + 1
             }
             _ if c.is_ascii_digit() => {
-                while i < n && (is_word_byte(bytes[i]) || bytes[i] == b'.') {
-                    i += 1;
+                let mut j = i;
+                while j < n && (is_word_byte(bytes[j]) || bytes[j] == b'.') {
+                    j += 1;
                 }
+                j
             }
             _ if c.is_ascii_alphabetic() || c == b'_' => {
                 let start = i;
-                while i < n && is_word_byte(bytes[i]) {
-                    i += 1;
+                let mut j = i;
+                while j < n && is_word_byte(bytes[j]) {
+                    j += 1;
                 }
-                if i < n && bytes[i] == b':' {
+                if j < n && bytes[j] == b':' {
                     // A prefixed name (`ex:thing`) or blank-node label (`_:b`): skip the
                     // colon and the local part; neither half is a keyword position.
-                    i += 1;
-                    while i < n && (is_word_byte(bytes[i]) || bytes[i] == b'-') {
-                        i += 1;
+                    j += 1;
+                    while j < n && (is_word_byte(bytes[j]) || bytes[j] == b'-') {
+                        j += 1;
                     }
-                    continue;
-                }
-                if let Ok(word) = std::str::from_utf8(&bytes[start..i]) {
+                } else if let Ok(word) = std::str::from_utf8(&bytes[start..j]) {
                     f(word);
                 }
+                j
             }
-            _ => i += 1,
+            _ => i + 1,
+        };
+        if token && !c.is_ascii_whitespace() {
+            prev = bytes[next - 1];
         }
+        i = next;
     }
+}
+
+/// Whether the `<` that follows the token ending in `prev`, inside `brackets`, opens an
+/// IRIREF rather than being the less-than operator.
+///
+/// The body test in [`iriref_end`] alone cannot decide this: SPARQL punctuation delimits
+/// tokens without whitespace, so a compact expression like `?a<1&&FLTR(?o)&&?b>2` contains
+/// no character the IRIREF production excludes — treating it as an IRI would swallow the
+/// very bare words the scan exists to report. The *position* does decide it, from two
+/// grammar facts:
+///
+/// 1. Less-than is only ever reachable through an `Expression`, and every production that
+///    admits one (`Constraint`, `BrackettedExpression`, an argument list, `BIND`, `HAVING`)
+///    is parenthesised — so a `<` whose innermost enclosing bracket is `{` (a graph pattern,
+///    e.g. `FILTER(EXISTS { ?s <http://ex/p> ?o })`) or nothing at all (`BASE`/`FROM`) is a
+///    term, never an operator.
+/// 2. Inside those parentheses a binary operator must follow an operand, whereas an IRIREF
+///    argument follows an opener or a separator (`(`, `,`, `=`, `^^`, …). So the operator
+///    reading needs *both* an expression context and a preceding operand.
+///
+/// The two tests are conjunctive — a `<` opens an IRI ref only if the position allows it
+/// *and* the body is well formed — so failing either reads the `<` as an operator. That is
+/// the conservative direction for a diagnostic: at worst the scan walks into an IRI body and
+/// offers a spurious hint, rather than silently hiding a real typo.
+fn opens_iriref(brackets: &[u8], prev: u8) -> bool {
+    !(brackets.last() == Some(&b'(') && ends_operand(prev))
+}
+
+/// `true` if a token ending in byte `b` can end an expression operand — a variable or
+/// number (alphanumeric or `_`), a bracketed sub-expression or call (`)`), or a string
+/// literal (`"`, `'`). Notably `>` is excluded: in `FILTER(?a > <http://ex/p>)` the `>` is
+/// itself an operator, so the IRI after it is still term position.
+fn ends_operand(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b')' || b == b'"' || b == b'\''
 }
 
 /// `true` if `b` can appear inside an identifier-shaped SPARQL token.
@@ -248,8 +306,10 @@ fn is_word_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
-/// If the `<` at `start` opens an IRI ref, the index just past its closing `>`; `None` if it
-/// does not, in which case the `<` is the less-than comparison operator (`?o < 1`, `?o <= 1`).
+/// The *body* half of the IRIREF test (the positional half is [`opens_iriref`], which gates
+/// this call): given a `<` at `start` already in term position, the index just past its
+/// closing `>`, or `None` if the span between them is not a well-formed IRIREF body — in
+/// which case the `<` is the less-than comparison operator (`?o < 1`, `?o <= 1`).
 ///
 /// Distinguishing the two matters because this scan runs on queries that have *already failed
 /// to parse*: treating every `<` as an IRI would skip from a comparison operator to the next
@@ -364,11 +424,42 @@ mod tests {
     }
 
     #[test]
+    fn compact_comparisons_do_not_swallow_the_rest_of_the_query() {
+        // SPARQL punctuation delimits tokens without whitespace, so a comparison can be
+        // written with no space at all — and then every byte between `<` and the later `>`
+        // is IRIREF-legal. Only the *position* of the `<` tells the two apart.
+        for q in [
+            "SELECT ?s WHERE { ?s ?p ?o FILTER(?a<1&&FLTR(?o)&&?b>2) }",
+            "SELECT ?s WHERE { ?s ?p ?o FILTER(?a<1) FLTR(?o) FILTER(?b>2) }",
+            "SELECT ?s WHERE { ?s ?p ?o FILTER(?a<=1&&FLTR(?o)) }",
+            "SELECT ?s WHERE { ?s ?p ?o FILTER(COUNT(?a)<1&&FLTR(?o)&&?b>2) }",
+        ] {
+            let hints = keyword_suggestions(q);
+            let hint = hints
+                .iter()
+                .find(|h| h.token == "FLTR")
+                .unwrap_or_else(|| panic!("FLTR must survive a comparison in {q:?}, got {hints:?}"));
+            assert!(hint.suggestions.contains(&"FILTER".to_string()), "got {hint:?}");
+        }
+    }
+
+    #[test]
     fn a_real_iri_is_still_skipped_next_to_a_comparison() {
         // The other half of the contract: distinguishing the operator must not stop genuine
         // IRIs — whose body the SPARQL grammar forbids spaces in — from being ignored.
-        let q = "SELECT ?s WHERE { ?s <http://ex/FLTR> ?o FILTER(?o < 1) }";
-        assert!(keyword_suggestions(q).is_empty(), "got {:?}", keyword_suggestions(q));
+        for q in [
+            "SELECT ?s WHERE { ?s <http://ex/FLTR> ?o FILTER(?o < 1) }",
+            // Inside a FILTER's parentheses, where the positional test is at its riskiest:
+            // after an opener, after a separator, after an operator, and as a datatype.
+            "SELECT ?s WHERE { ?s ?p ?o FILTER(?o = <http://ex/FLTR>) }",
+            "SELECT ?s WHERE { ?s ?p ?o FILTER(?o IN (<http://ex/FLTR>, <http://ex/SELCT>)) }",
+            "SELECT ?s WHERE { ?s ?p ?o FILTER(<http://ex/FLTR>(?o)) }",
+            "SELECT ?s WHERE { ?s ?p ?o FILTER(?o > \"1\"^^<http://ex/FLTR>) }",
+            // A graph pattern nested inside those parentheses is term position again.
+            "SELECT ?s WHERE { ?s ?p ?o FILTER(EXISTS { ?s <http://ex/FLTR> ?o }) }",
+        ] {
+            assert!(keyword_suggestions(q).is_empty(), "{q:?} got {:?}", keyword_suggestions(q));
+        }
         // An unterminated `<` is not an IRI either, so the words after it stay visible.
         let hints = keyword_suggestions("SELECT ?s WHERE { ?s ?p ?o } FLTR <http://ex/unclosed");
         assert!(hints.iter().any(|h| h.token == "FLTR"), "got {hints:?}");
