@@ -296,9 +296,10 @@ mod dispatch_ql {
     use super::*;
 
     // The complement + super-∃ shape (the routing witness) is NOT fully captured by the QL
-    // crate's DL-Lite_R extraction (a subClassOf-complement RHS is skipped; complementOf is
-    // structurally uncaptured), so with no violation found the branch abstains fail-closed
-    // with the QL crate's own gap accounting — never a guessed Consistent.
+    // crate's DL-Lite_R extraction — the QUALIFIED `someValuesFrom :B` on the RHS is outside
+    // DL-Lite_R and lands in `skipped` (the subClassOf-complement half IS captured since #2513,
+    // as a negative inclusion) — so with no violation found the branch abstains fail-closed with
+    // the QL crate's own gap accounting, never a guessed Consistent.
     #[test]
     fn ql_capture_gap_abstains_fail_closed() {
         let (verdict, branch) = check(
@@ -312,8 +313,7 @@ mod dispatch_ql {
     }
 
     // A violated captured disjointness graduates to a DEFINITIVE Inconsistent: sound at any
-    // capture level (monotonicity), even though the same graph's complement axiom blocks a
-    // Consistent claim. This was Unknown(QlConsistencyPending) before sq-fj8lj.
+    // capture level (monotonicity). This was Unknown(QlConsistencyPending) before sq-fj8lj.
     #[test]
     fn ql_disjointness_violation_is_inconsistent() {
         let (verdict, branch) = check(
@@ -325,9 +325,13 @@ mod dispatch_ql {
         );
         assert_eq!(branch, Branch::QlConsistency);
         assert_eq!(verdict, ConsistencyVerdict::Inconsistent);
-        // MUTATION WITNESS: drop the second :i typing and the violation disappears — the
-        // remaining complement axiom keeps the verdict an honest capture-gap abstention,
-        // pinning that Inconsistent above was carried by the violation query.
+        // MUTATION WITNESS: drop the second :i typing and the violation disappears. Since #2513
+        // the QL crate captures `:C ⊑ ¬:D` (the subClassOf-complement RHS is a DL-Lite_R negative
+        // inclusion), so every axiom of this graph is captured and the branch graduates a
+        // DEFINITIVE Consistent — the model interpreting only `:E` as `{:i}` satisfies all three
+        // axioms. Two graphs one triple apart, decided opposite ways: the Inconsistent above is
+        // carried by the violation query, not by the fixture. (Before #2513 the same graph could
+        // only reach Unknown(QlCaptureGap), the branch's documented Consistent-side blind spot.)
         let (verdict, branch) = check(
             ":C rdfs:subClassOf [ owl:complementOf :D ] . \
              :A rdfs:subClassOf [ owl:onProperty :r ; owl:someValuesFrom owl:Thing ] . \
@@ -335,14 +339,7 @@ mod dispatch_ql {
              :i rdf:type :E .",
         );
         assert_eq!(branch, Branch::QlConsistency);
-        assert!(
-            matches!(
-                verdict,
-                ConsistencyVerdict::Unknown(UnknownReason::QlCaptureGap(_))
-            ),
-            "expected Unknown(QlCaptureGap(_)), got {:?}",
-            verdict
-        );
+        assert_eq!(verdict, ConsistencyVerdict::Consistent);
     }
 }
 
