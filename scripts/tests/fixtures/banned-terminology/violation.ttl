@@ -1,0 +1,7 @@
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix trustx: <https://sparq.dev/ns/trust#> .
+
+# Reproduces the PR #3451 shape: the banned term inside a PUBLISHED vocabulary
+# annotation. Expensive to walk back once released.
+trustx:question a rdfs:Resource ;
+  rdfs:comment "Verifying the query is owned by whoever authenticates the trust envelope."@en .
