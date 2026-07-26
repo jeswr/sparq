@@ -17,7 +17,13 @@ them. It is the companion ontology to the **ISWC 2025** ZKP-SPARQL paper.
 | `sig-impl:` | `https://w3id.org/zkp-sparql/sig-impl#` | Four signature implementations (BBS+, SD-JWT-VC, ed25519, ECDSA), each carrying reified `sig-impl:Assertion` verdicts (`yes`/`no`/`partial`) about the properties it achieves/fails. |
 | `sec-req:` | `https://w3id.org/zkp-sparql/sec-req#` | Three regulatory frameworks (eIDAS 2.0, NIST PQC migration, UK DVS) that pull on `sec-prop:` properties, with dated obligations. |
 | `prov-ext:` | `https://w3id.org/zkp-sparql/prov-ext#` | Minimal `bibo:`/`dcterms:`/`prov:` provenance extension (one coined term, `prov-ext:bibtexKey`) backing the `prov:wasDerivedFrom` citation chains. |
-| `sigimpl-ext.ttl` | `https://w3id.org/zkp-sparql/sig-impl#` | sparq-authored extension adding the ML-DSA implementation, its lattice family, and three property assertions. |
+
+The sparq-authored extension graphs reuse those stable namespaces:
+
+| Extension file | Namespace extended | Authorising work |
+|----------------|--------------------|------------------|
+| `secprop-ext.ttl` | `https://w3id.org/zkp-sparql/sec-prop#` | bead `sq-5oru9`, issue #1001 |
+| `sigimpl-ext.ttl` | `https://w3id.org/zkp-sparql/sig-impl#` | issue #2832 |
 
 ## Origin
 
@@ -112,7 +118,9 @@ edit.)
 
 The ML-DSA terms in `sigimpl-ext.ttl` were added by sparq on **2026-07-26**
 (issue #2832). They extend the existing `sig-impl:` namespace without changing
-or attributing new claims to the vendored ontology or its paper authors.
+the vendored ontology. Their sparq authorship and separation from the paper
+authors' graph are recorded both by the source-file boundary and by the
+`owl:Ontology` marker at `https://w3id.org/zkp-sparql/sig-impl-ext`.
 
 The consequence is that some upstream comments describe the **origin repository**
 rather than this copy. This record supersedes them; the known cases are:
