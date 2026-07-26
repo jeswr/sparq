@@ -1,0 +1,5 @@
+{
+  "pr": 4097,
+  "date": "2026-07-26",
+  "reason": "[SONNET-4.6] #4097 intentionally changes always-compiled sparq-substrate numeric code used by sparq-engine: xsd:float lexicals and mixed Float arithmetic now convert integer/decimal operands directly to f32 instead of rounding through f64 first. Because the default feature-OFF sparq-wasm bundle consumes sparq-engine with sparq-substrate's numeric feature enabled, this correctness fix is expected to move its generated wasm bytes. This is not leakage from the default-OFF vectorized feature; the separate wasm bundle-size ratchet continues to govern the accepted size."
+}

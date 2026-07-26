@@ -57,8 +57,8 @@ let n: Option<Num> = as_numeric(&lit);  // exact xsd:decimal (no f64 rounding)
   the arithmetic ops (`binop`/`neg`/`abs`/`ceil`/`floor`/`round`), the two serialisation
   surfaces (`canonical_lexical` — finite float/double in XSD scientific form; `lexical` — the
   plain form the W3C expected-result files use), and the shared lexical helpers
-  (`split_decimal`, `parse_xsd_f32`/`parse_xsd_f64`, `fmt_xsd_double`; the parsers delegate to
-  `sparq_core::parse_xsd_f64` — one shared body with the core numeric cache, sq-9781x).
+  (`split_decimal`, `parse_xsd_f32`/`parse_xsd_f64`, `fmt_xsd_double`; `parse_xsd_f64` delegates
+  to core, while `parse_xsd_f32` shares its XSD acceptance set but rounds directly to `f32`).
   `Num::cmp_relational` is the XPath relational compare (`<`/`>` FILTER; NaN → `None`), vs
   `cmp_total` (NaN totalised for `ORDER BY`). [OPUS-4.8] sq-v5evr
 - **`join`** — the four id-tuple join kernels over `&[Row]` slices: `merge_join` (sorted),
