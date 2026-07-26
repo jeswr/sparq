@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -949,6 +950,163 @@ def cron_minutes(doc: dict) -> set[int]:
     return out
 
 
+# --------------------------------------------------- GitHub-expression evaluator
+#
+# The measured lesson on this repository is that every uncaught mutant in an 18-mutant run
+# lived at the YAML seam — a workflow `if:`, a step, a call site — not in the Python. A
+# substring assertion over an `if:` is exactly the vacuous shape that lets an INVERTED
+# clause survive. So the job condition is PARSED and EVALUATED here against synthetic
+# webhook payloads, and the admit/skip matrix is asserted. Inverting `!=` to `==`,
+# deleting a clause, or dropping the schedule admission all change that matrix.
+#
+# Supported subset (all this workflow uses): || && == != ( ) null 'literal'
+# and dotted context paths with [n] indexing.
+
+_TOKEN = re.compile(
+    r"\s*(\(|\)|\|\||&&|==|!=|'[^']*'|[A-Za-z_][A-Za-z0-9_.\[\]]*)"
+)
+
+
+def _tokenize(expression: str) -> list[str]:
+    out, pos = [], 0
+    while pos < len(expression):
+        m = _TOKEN.match(expression, pos)
+        if not m:
+            if expression[pos].isspace():
+                pos += 1
+                continue
+            raise AssertionError(f"unlexable at {pos}: {expression[pos:pos + 30]!r}")
+        out.append(m.group(1))
+        pos = m.end()
+    return out
+
+
+class _ExprParser:
+    """Recursive descent over the tokenized expression. || binds loosest, then &&."""
+
+    def __init__(self, tokens: list[str], context: dict):
+        self.tokens, self.pos, self.context = tokens, 0, context
+
+    def peek(self):
+        return self.tokens[self.pos] if self.pos < len(self.tokens) else None
+
+    def take(self):
+        tok = self.peek()
+        self.pos += 1
+        return tok
+
+    def parse(self):
+        value = self.or_expr()
+        assert self.peek() is None, f"trailing tokens from {self.pos}: {self.tokens}"
+        return value
+
+    def or_expr(self):
+        value = self.and_expr()
+        while self.peek() == "||":
+            self.take()
+            right = self.and_expr()
+            value = value if _truthy(value) else right
+        return value
+
+    def and_expr(self):
+        value = self.cmp_expr()
+        while self.peek() == "&&":
+            self.take()
+            right = self.cmp_expr()
+            value = right if _truthy(value) else value
+        return value
+
+    def cmp_expr(self):
+        left = self.primary()
+        if self.peek() in ("==", "!="):
+            op = self.take()
+            right = self.primary()
+            return (left == right) if op == "==" else (left != right)
+        return left
+
+    def primary(self):
+        tok = self.take()
+        if tok == "(":
+            value = self.or_expr()
+            assert self.take() == ")", "unbalanced parentheses"
+            return value
+        if tok.startswith("'"):
+            return tok[1:-1]
+        if tok == "null":
+            return None
+        if tok in ("true", "false"):
+            return tok == "true"
+        return _lookup(self.context, tok)
+
+
+def _truthy(value) -> bool:
+    return bool(value) and value != ""
+
+
+def _lookup(context: dict, path: str):
+    """`github.event.workflow_run.pull_requests[0].number` against a dict tree."""
+    node = context
+    for part in path.split("."):
+        while part.endswith("]"):
+            part, _, index = part[:-1].partition("[")
+            if part:
+                node = node.get(part) if isinstance(node, dict) else None
+                part = ""
+            if not isinstance(node, list) or int(index) >= len(node):
+                return None
+            node = node[int(index)]
+        if part:
+            node = node.get(part) if isinstance(node, dict) else None
+        if node is None:
+            return None
+    return node
+
+
+def evaluate_if(expression: str, context: dict) -> bool:
+    return _truthy(_ExprParser(_tokenize(expression), context).parse())
+
+
+def payload(event_name: str, **event) -> dict:
+    return {"github": {"event_name": event_name, "event": event}}
+
+
+class TestExpressionEvaluatorItself(unittest.TestCase):
+    """A broken evaluator would make TestJobConditionAdmission pass vacuously."""
+
+    def test_boolean_precedence_and_short_circuit(self):
+        ctx = payload("issue_comment", issue={"pull_request": {"url": "u"}})
+        self.assertTrue(evaluate_if("github.event_name == 'issue_comment'", ctx))
+        self.assertFalse(evaluate_if("github.event_name == 'schedule'", ctx))
+        self.assertTrue(evaluate_if("github.event.issue.pull_request != null", ctx))
+        self.assertFalse(evaluate_if("github.event.missing.thing != null", ctx))
+        # && binds tighter than ||
+        self.assertTrue(
+            evaluate_if(
+                "github.event_name == 'schedule' "
+                "|| github.event_name == 'issue_comment' "
+                "&& github.event.issue.pull_request != null",
+                ctx,
+            )
+        )
+        self.assertFalse(
+            evaluate_if(
+                "(github.event_name == 'schedule' "
+                "|| github.event_name == 'issue_comment') "
+                "&& github.event.issue.pull_request == null",
+                ctx,
+            )
+        )
+
+    def test_array_indexing_resolves_and_fails_soft_when_absent(self):
+        with_pr = payload("workflow_run", workflow_run={"pull_requests": [{"number": 7}]})
+        without = payload("workflow_run", workflow_run={"pull_requests": []})
+        path = "github.event.workflow_run.pull_requests[0].number"
+        self.assertEqual(_lookup(with_pr, path), 7)
+        self.assertIsNone(_lookup(without, path))
+        self.assertTrue(evaluate_if(f"{path} != null", with_pr))
+        self.assertFalse(evaluate_if(f"{path} != null", without))
+
+
 class TestWorkflowWiring(unittest.TestCase):
     """STRUCTURAL inspection: `if: false`, a deleted step, or a wrong input must red."""
 
@@ -968,8 +1126,19 @@ class TestWorkflowWiring(unittest.TestCase):
         return matches[0]
 
     def test_the_job_is_not_disabled_by_a_job_level_condition(self):
-        """An `if: false` on the job silently turns the whole bridge off."""
-        self.assertNotIn("if", self.job, "the bridge job must be unconditional")
+        """An `if: false` on the job silently turns the whole bridge off.
+
+        The condition is no longer absent (the event triggers need a payload guard), so
+        the property asserted is the one that matters: it may never be a constant, and
+        the SCHEDULED backstop must be admitted unconditionally. The full admit/skip
+        matrix is evaluated in TestJobConditionAdmission.
+        """
+        self.assertIn("if", self.job, "the event payload guard must be present")
+        self.assertNotIn(
+            str(self.job["if"]).strip().lower(),
+            ("false", "true"),
+            "a constant job condition is either a kill switch or an unguarded event path",
+        )
         self.assertNotIn("continue-on-error", self.job)
 
     def test_no_step_is_disabled_or_swallowed(self):
@@ -1048,12 +1217,120 @@ class TestWorkflowWiring(unittest.TestCase):
             "the policy must come from the trusted default branch, never a PR head",
         )
 
-    def test_it_never_triggers_on_a_pull_request_head(self):
+    def test_it_never_triggers_on_a_candidate_controlled_ref(self):
+        """The forbidden set is exactly the triggers that resolve the WORKFLOW FILE from
+        the PR's own ref (so a candidate branch could rewrite this policy and have it run
+        with write permissions), plus `pull_request_target`, which additionally hands a
+        privileged token to a run about untrusted head code.
+
+        `issue_comment`, `pull_request_review` and `workflow_run` are NOT in this set:
+        GitHub resolves all three from the DEFAULT BRANCH, and the checkout step below is
+        separately pinned to the default branch, so no candidate code or candidate
+        workflow definition can execute here.
+        """
         on = triggers(self.doc)
-        for forbidden in ("pull_request", "pull_request_target", "push", "merge_group", "workflow_run"):
-            self.assertNotIn(forbidden, on, f"{forbidden} would run this on candidate code")
+        for forbidden in ("pull_request", "pull_request_target", "push", "merge_group"):
+            self.assertNotIn(
+                forbidden, on, f"{forbidden} resolves the workflow file from candidate ref"
+            )
         self.assertIn("schedule", on)
         self.assertIn("workflow_dispatch", on)
+
+    def test_the_cron_backstop_survives_the_event_conversion(self):
+        """CONSTRAINT: the event trigger is ADDITIVE. Deleting the cron converts a
+        latency bug into a lost-work bug — a webhook GitHub never delivers, or a run its
+        concurrency group cancelled, would then never be reconciled at all."""
+        schedule = triggers(self.doc).get("schedule")
+        self.assertTrue(schedule, "the reconciliation cron must not be removed")
+        self.assertEqual(
+            sorted(cron_minutes(self.doc)),
+            [1, 11, 21, 31, 41, 51],
+            "the backstop cadence must not be silently widened",
+        )
+
+    def test_every_event_trigger_is_wired_to_a_state_change_the_policy_reads(self):
+        on = triggers(self.doc)
+        self.assertEqual(
+            sorted(on["issue_comment"]["types"]),
+            ["created", "edited"],
+            "an EDITED comment can add or retract a verdict just as a new one can",
+        )
+        self.assertEqual(
+            sorted(on["pull_request_review"]["types"]),
+            ["dismissed", "edited", "submitted"],
+        )
+        self.assertEqual(on["workflow_run"]["workflows"], ["ci-summary"])
+        self.assertEqual(on["workflow_run"]["types"], ["completed"])
+
+    def test_the_gate_producing_workflow_named_in_workflow_run_actually_exists(self):
+        """`workflows: [ci-summary]` matches by workflow NAME, not filename. A rename
+        upstream would silently make the green/flag event path dead — and every other
+        assertion in this class would still pass."""
+        named = triggers(self.doc)["workflow_run"]["workflows"]
+        ci_summary = load_workflow(REPO_ROOT / ".github" / "workflows" / "ci-summary.yml")
+        self.assertIn(
+            ci_summary["name"], named, "the referenced workflow name no longer exists"
+        )
+        gate_jobs = [
+            job for job in ci_summary["jobs"].values()
+            if str(job.get("name", "")).startswith("gate")
+        ]
+        self.assertTrue(
+            gate_jobs, "ci-summary no longer publishes the `gate` check this path waits on"
+        )
+
+    def test_the_run_step_scopes_the_event_to_one_pr_and_sets_the_mode(self):
+        """Without --pr, every issue comment in the repository would start the ~9-minute
+        all-PR sweep (MEASURED 8m30s over 103 open PRs, run 30221614764) — strictly worse
+        than the cron this replaces."""
+        step = self.step_by_run_needle(LIVE_RUN_NEEDLE)
+        self.assertIn('--pr "$BRIDGE_PR"', step["run"])
+        self.assertIn('--mode "$BRIDGE_MODE"', step["run"])
+        bridge_pr = " ".join(str(step["env"]["BRIDGE_PR"]).split())
+        for source in (
+            "github.event.issue.number",
+            "github.event.pull_request.number",
+            "github.event.workflow_run.pull_requests[0].number",
+        ):
+            self.assertIn(source, bridge_pr, f"{source} would never scope its event")
+        self.assertTrue(bridge_pr.startswith("${{") and bridge_pr.endswith("}}"))
+
+    def test_the_mode_expression_makes_exactly_the_cron_paths_fail_soft(self):
+        """Inverting this makes a dropped EVENT silently disappear (the measured real
+        cron cadence is 53-75 minutes, so 'the cron will get it' is not true), or makes
+        every transient blip red a routine sweep."""
+        step = self.step_by_run_needle(LIVE_RUN_NEEDLE)
+        expression = " ".join(str(step["env"]["BRIDGE_MODE"]).split())
+        inner = expression[len("${{"):-len("}}")]
+        for event_name, expected in (
+            ("schedule", "sweep"),
+            ("workflow_dispatch", "sweep"),
+            ("issue_comment", "event"),
+            ("pull_request_review", "event"),
+            ("workflow_run", "event"),
+        ):
+            with self.subTest(event=event_name):
+                self.assertEqual(
+                    _ExprParser(_tokenize(inner), payload(event_name)).parse(), expected
+                )
+
+    def test_no_untrusted_payload_text_is_interpolated_into_a_shell(self):
+        """The trust rail. A comment body / title / branch name reaching a `run:` is the
+        classic script-injection sink; only the integer PR number may cross."""
+        forbidden = (
+            "github.event.comment.body",
+            "github.event.issue.title",
+            "github.event.issue.body",
+            "github.event.review.body",
+            "github.event.pull_request.title",
+            "github.event.pull_request.head.ref",
+            "github.event.workflow_run.head_branch",
+        )
+        blob = json.dumps(self.doc)
+        for sink in forbidden:
+            with self.subTest(sink=sink):
+                self.assertNotIn(sink, blob)
+
 
     def test_it_has_no_contents_write_authority(self):
         perms = self.doc["permissions"]
@@ -1087,11 +1364,118 @@ class TestWorkflowWiring(unittest.TestCase):
                 self.assertEqual(len(ref), 40, f"{uses} is not SHA-pinned")
                 int(ref, 16)
 
-    def test_concurrency_serialises_the_sweep(self):
-        concurrency = self.doc["concurrency"]
-        self.assertEqual(concurrency["group"], "verdict-bridge")
-        self.assertFalse(concurrency["cancel-in-progress"])
 
+class TestJobConditionAdmission(unittest.TestCase):
+    """EVALUATE the job `if:` against synthetic payloads — the admit/skip matrix.
+
+    Every row here reds on a different single-line mutation of the condition.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.condition = load_workflow(WORKFLOW)["jobs"]["bridge"]["if"]
+
+    def admits(self, ctx) -> bool:
+        return evaluate_if(self.condition, ctx)
+
+    def test_the_scheduled_backstop_is_admitted_unconditionally(self):
+        self.assertTrue(self.admits(payload("schedule")))
+        self.assertTrue(self.admits(payload("workflow_dispatch")))
+
+    def test_a_comment_on_a_PULL_REQUEST_is_admitted(self):
+        self.assertTrue(
+            self.admits(
+                payload(
+                    "issue_comment",
+                    issue={"number": 4324, "pull_request": {"url": "https://x"}},
+                )
+            )
+        )
+
+    def test_a_comment_on_a_PLAIN_ISSUE_is_refused(self):
+        """Otherwise any commenter on any of the ~1300 open issues could start a
+        full-repository sweep."""
+        self.assertFalse(
+            self.admits(payload("issue_comment", issue={"number": 1111}))
+        )
+
+    def test_a_pull_request_review_is_admitted(self):
+        self.assertTrue(
+            self.admits(payload("pull_request_review", pull_request={"number": 4324}))
+        )
+
+    def test_a_ci_summary_run_WITH_an_associated_pr_is_admitted(self):
+        self.assertTrue(
+            self.admits(
+                payload("workflow_run", workflow_run={"pull_requests": [{"number": 4324}]})
+            )
+        )
+
+    def test_a_ci_summary_run_with_NO_associated_pr_is_refused(self):
+        """merge_group refs and fork heads report an empty pull_requests array. The cron
+        reconciles them; an unscoped sweep per merge-queue batch would not."""
+        for runs in ([], [{}]):
+            with self.subTest(pull_requests=runs):
+                self.assertFalse(
+                    self.admits(payload("workflow_run", workflow_run={"pull_requests": runs}))
+                )
+
+    def test_an_unknown_event_is_refused(self):
+        """Adding a trigger without extending this condition must not fall through to an
+        unscoped sweep."""
+        for event_name in ("pull_request", "push", "issues", "check_suite"):
+            with self.subTest(event=event_name):
+                self.assertFalse(self.admits(payload(event_name)))
+
+
+class TestConcurrencyGrouping(unittest.TestCase):
+    """The group EXPRESSION, evaluated — not grepped."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.doc = load_workflow(WORKFLOW)
+        raw = " ".join(str(cls.doc["concurrency"]["group"]).split())
+        cls.prefix, _, rest = raw.partition("${{")
+        cls.inner = rest[: rest.rindex("}}")]
+
+    def group_for(self, ctx) -> str:
+        return self.prefix + str(_ExprParser(_tokenize(self.inner), ctx).parse())
+
+    def test_events_about_DIFFERENT_prs_never_share_a_group(self):
+        """A single shared group would serialise every PR's event behind every other's —
+        reintroducing exactly the queueing the conversion removes."""
+        a = self.group_for(payload("issue_comment", issue={"number": 4324}))
+        b = self.group_for(payload("issue_comment", issue={"number": 4325}))
+        self.assertNotEqual(a, b)
+
+    def test_events_about_the_SAME_pr_share_a_group_across_channels(self):
+        comment = self.group_for(payload("issue_comment", issue={"number": 4324}))
+        review = self.group_for(
+            payload("pull_request_review", pull_request={"number": 4324})
+        )
+        ci = self.group_for(
+            payload("workflow_run", workflow_run={"pull_requests": [{"number": 4324}]})
+        )
+        self.assertEqual({comment, review, ci}, {comment})
+
+    def test_schedule_and_dispatch_share_the_single_sweep_group(self):
+        self.assertEqual(
+            self.group_for(payload("schedule")),
+            self.group_for(payload("workflow_dispatch")),
+            "two concurrent whole-repo sweeps would double every write decision",
+        )
+
+    def test_the_sweep_group_is_DISJOINT_from_every_per_pr_group(self):
+        """Documented honestly rather than wished away: concurrency CANNOT prevent an
+        event run and the sweep from racing on one PR. That is why the write path
+        re-reads (reconfirm) — see TestDoubleFireIdempotence."""
+        self.assertNotEqual(
+            self.group_for(payload("schedule")),
+            self.group_for(payload("issue_comment", issue={"number": 4324})),
+        )
+
+    def test_no_group_cancels_in_progress(self):
+        self.assertFalse(self.doc["concurrency"]["cancel-in-progress"])
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
