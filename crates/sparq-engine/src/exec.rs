@@ -8436,9 +8436,27 @@ fn bind_join(
     }
 
     // Group result rows by the join value so each distinct value is looked up once.
-    let mut groups: FxHashMap<Id, Vec<usize>> = FxHashMap::default();
-    for (ri, row) in result.rows.iter().enumerate() {
-        groups.entry(row[rk]).or_default().push(ri);
+    //
+    // Sort-based run grouping (sq-7d3dj.7): sort ONE index permutation on the join column
+    // and walk its contiguous equal-value runs, instead of the `FxHashMap<Id, Vec<usize>>`
+    // that allocated a fresh `Vec` per distinct join value — the cost that dominated
+    // high-NDV bind joins, where most groups are singletons. That is one allocation for
+    // the whole join, and each run is already a `&[usize]` slice, so `bind_combine` takes
+    // it without a per-group copy. The runs also come out in ASCENDING id order, so the
+    // per-value bound scans probe the chosen permutation index forwards instead of
+    // jumping around it.
+    let nrows = result.rows.len();
+    let mut order: Vec<usize> = (0..nrows).collect();
+    // The result side is frequently ALREADY sorted on the join variable (a sorted seed
+    // scan, or an upstream merge join that kept `sorted_by`); then the identity
+    // permutation is already run-grouped and the sort is skipped outright. This shortcut
+    // cannot affect the output bag even if `sorted_by` were stale: a mis-ordered column
+    // only SPLITS one join value across several runs, and each run still scans its own
+    // value and combines only its own rows — the same (result-row, match) pairs, just
+    // rescanned. (The zk trace dedups matched triples, so a split is invisible there too.)
+    let presorted = result.sorted_by.as_ref().is_some_and(|sv| result.vars.get(rk) == Some(sv));
+    if !presorted {
+        order.sort_unstable_by_key(|&ri| result.rows[ri][rk]);
     }
 
     let mut out_rows: Vec<Row> = Vec::new();
@@ -8447,11 +8465,19 @@ fn bind_join(
     // the input set merges with any full scans of the same pattern).
     #[cfg(feature = "zk")]
     let mut zk_matched: Vec<[Id; 3]> = Vec::new();
-    for (val, ris) in groups {
+    let mut start = 0usize;
+    while start < nrows {
         // Coarse budget check once per distinct join value.
         if budget::exhausted(out_rows.len()) {
             break;
         }
+        let val = result.rows[order[start]][rk];
+        let mut end = start + 1;
+        while end < nrows && result.rows[order[end]][rk] == val {
+            end += 1;
+        }
+        let ris = &order[start..end];
+        start = end;
         let mut bound = *id_pat;
         bound[pp] = Some(val);
         let scan = graph.store.scan(&bound);
@@ -8470,7 +8496,7 @@ fn bind_join(
             // The per-(result-row, match) combine is the shared substrate's `bind_combine`
             // (sq-hknqs): the scan + filter pushdown above stay engine-private (they own the
             // store + `ScanCmp`); only the id-tuple combine is shared.
-            sjoin::bind_combine(&result.rows, &ris, &new_vals, &mut out_rows);
+            sjoin::bind_combine(&result.rows, ris, &new_vals, &mut out_rows);
         }
     }
     #[cfg(feature = "zk")]
@@ -8478,6 +8504,102 @@ fn bind_join(
         crate::zk::record_scan_ids(graph, id_pat, pos_vars, &zk_matched, true);
     }
     Bindings::unsorted(out_vars, out_rows)
+}
+
+/// Direct unit tests for [`bind_join`]'s sort-based run grouping (sq-7d3dj.7). They pin
+/// the two things the rewrite could break: the output BAG (multiplicities included, so a
+/// dropped or duplicated group is caught) and the fact that grouping actually happened —
+/// the output's join column is non-decreasing, which the previous `FxHashMap` iteration
+/// order did not give. [SONNET-4.6]
+#[cfg(test)]
+mod bind_join_run_grouping {
+    use super::*;
+    use oxrdf::NamedNode;
+
+    /// `ex:n2` carries TWO ages, so one run must fan out to two matches.
+    const TTL: &str = "@prefix ex: <http://ex/> .\n\
+        ex:n1 ex:age 10 .\n\
+        ex:n2 ex:age 20 .\n\
+        ex:n2 ex:age 21 .\n\
+        ex:n3 ex:age 30 .\n";
+
+    fn id(g: &Graph, iri: &str) -> Id {
+        g.dict.lookup(&Term::NamedNode(NamedNode::new(iri).unwrap()))
+    }
+
+    /// Runs `bind_join` of `result` (one column `?k`, subject position) with
+    /// `?k ex:age ?v`, returning the output `(k, v)` pairs in emission order.
+    fn run(g: &Graph, rows: Vec<Row>, sorted_by: Option<Variable>) -> Vec<(Id, Id)> {
+        let k = Variable::new("k").unwrap();
+        let v = Variable::new("v").unwrap();
+        let result = Bindings { vars: vec![k.clone()], rows, sorted_by };
+        let id_pat: IdPattern = [None, Some(id(g, "http://ex/age")), None];
+        let pos_vars = [Some(k), None, Some(v)];
+        let out = bind_join(g, result, &id_pat, &pos_vars, 0, 0, None);
+        assert_eq!(out.vars.len(), 2, "join var + the new object var");
+        out.rows.iter().map(|r| (r[0], r[1])).collect()
+    }
+
+    /// The expected bag: every result row paired with every `ex:age` object of its subject.
+    fn expected(g: &Graph, subjects: &[Id]) -> Vec<(Id, Id)> {
+        let ages: Vec<(Id, Id)> = ["http://ex/n1", "http://ex/n2", "http://ex/n2", "http://ex/n3"]
+            .iter()
+            .zip(["10", "20", "21", "30"])
+            .map(|(s, a)| {
+                (id(g, s), g.dict.lookup_lit(a, "http://www.w3.org/2001/XMLSchema#integer", None))
+            })
+            .collect();
+        let mut out: Vec<(Id, Id)> =
+            subjects.iter().flat_map(|&s| ages.iter().filter(move |(a, _)| *a == s).copied()).collect();
+        out.sort_unstable();
+        out
+    }
+
+    #[test]
+    fn scrambled_result_groups_into_ascending_runs() {
+        let g = Graph::load_str(TTL, "turtle").unwrap();
+        // Scrambled join values, with `n1` DUPLICATED: the duplicate must be emitted twice
+        // (one group, two result rows) — this is the multiplicity a bag join owes.
+        let subjects = [id(&g, "http://ex/n3"), id(&g, "http://ex/n1"), id(&g, "http://ex/n2"), id(&g, "http://ex/n1")];
+        let rows: Vec<Row> = subjects.iter().map(|&s| Row::from_slice(&[s])).collect();
+        let got = run(&g, rows, None);
+
+        assert_eq!(got.len(), 5, "n1 twice, n2 twice (two ages), n3 once: {:?}", got);
+        let mut sorted = got.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, expected(&g, &subjects), "output bag must match the per-row expansion");
+
+        // Grouping evidence: each distinct join value is contiguous and the runs ascend.
+        assert!(got.windows(2).all(|w| w[0].0 <= w[1].0), "join column must be non-decreasing: {:?}", got);
+    }
+
+    #[test]
+    fn presorted_result_takes_the_no_sort_path_with_the_same_bag() {
+        let g = Graph::load_str(TTL, "turtle").unwrap();
+        // Already ascending on `?k` and declared so: the sort is skipped, and the answer
+        // must be identical to the scrambled-input case above.
+        let mut subjects = [id(&g, "http://ex/n3"), id(&g, "http://ex/n1"), id(&g, "http://ex/n2"), id(&g, "http://ex/n1")];
+        subjects.sort_unstable();
+        let rows: Vec<Row> = subjects.iter().map(|&s| Row::from_slice(&[s])).collect();
+        let got = run(&g, rows, Some(Variable::new("k").unwrap()));
+
+        let mut sorted = got.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, expected(&g, &subjects));
+        assert!(got.windows(2).all(|w| w[0].0 <= w[1].0), "{:?}", got);
+    }
+
+    /// A stale `sorted_by` may only SPLIT a value across runs — never change the bag.
+    #[test]
+    fn stale_sorted_by_splits_runs_without_changing_the_bag() {
+        let g = Graph::load_str(TTL, "turtle").unwrap();
+        let subjects = [id(&g, "http://ex/n2"), id(&g, "http://ex/n1"), id(&g, "http://ex/n2")];
+        let rows: Vec<Row> = subjects.iter().map(|&s| Row::from_slice(&[s])).collect();
+        // Claims sortedness the rows do NOT have, so `n2` is scanned as two separate runs.
+        let mut got = run(&g, rows, Some(Variable::new("k").unwrap()));
+        got.sort_unstable();
+        assert_eq!(got, expected(&g, &subjects));
+    }
 }
 
 fn cross_product(left: Bindings, right: Bindings) -> Bindings {
