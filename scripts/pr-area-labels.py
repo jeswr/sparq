@@ -83,12 +83,12 @@ class Policy:
 
 
 def load_members(manifest=WORKSPACE_MANIFEST):
-    """The workspace crate directory names — the domain of the implicit `crates/<name>` rule.
+    """The workspace crate directory names, read from the root manifest (hermetic — no
+    `cargo metadata`, no toolchain).
 
-    Read from the root manifest rather than `cargo metadata` so this stays hermetic and
-    needs no toolchain. A `crates/<x>/...` path whose `<x>` is not a member is
-    UNRESOLVED (fail closed), which is what stops `crates/README.md` or a stale
-    directory from inventing an area.
+    NOT a gate on attribution: see `attribute` for why a PR that ADDS a crate must still
+    resolve. Membership is used for the hermetic table-validity assertions and for the
+    `::warning` about declared areas that have no label.
     """
     data = tomllib.loads(Path(manifest).read_text(encoding="utf-8"))
     members = ((data.get("workspace") or {}).get("members") or [])
@@ -160,16 +160,25 @@ def attribute(path, policy):
     """The single area a changed path implicates, or None when nothing claims it.
 
     Resolution order is normative (ci/area-labels.toml): the implicit
-    `crates/<member>/...` rule first, then the first matching `[[map]]` row.
+    `crates/<name>/...` rule first, then the first matching `[[map]]` row.
     """
     if not isinstance(path, str) or not path:
         return None
     path = path[2:] if path.startswith("./") else path
     parts = path.split("/")
-    if len(parts) >= 2 and parts[0] == CRATES_DIR:
-        # A `crates/` path is claimed ONLY by a live workspace member. Anything else
-        # (a stale dir, `crates/README.md`) is unresolved => fail closed.
-        return parts[1] if parts[1] in policy.members else None
+    if parts[0] == CRATES_DIR:
+        # A CRATE DIRECTORY is `crates/<name>/<something>` — at least three segments.
+        # A file sitting directly in `crates/` (two segments, e.g. `crates/README.md`)
+        # is NOT a crate and resolves to nothing => fail closed.
+        if len(parts) < 3:
+            return None
+        # Deliberately NOT gated on workspace membership. The workflow evaluates a PR
+        # against the DEFAULT BRANCH's manifest (a `pull-requests: write` job must not
+        # run PR-authored code), so a PR that ADDS a crate would be permanently
+        # unresolvable — and those are exactly the PRs that collide with nothing and
+        # most deserve a narrow partition. The guard against inventing an area is the
+        # caller's live-`area:`-label check, which a non-crate name cannot pass.
+        return parts[1]
     for pattern, area in policy.rows:
         if matches(pattern, path):
             return area
@@ -395,8 +404,10 @@ def main(argv=None, runner=None, out=None):
     mode = "APPLIED" if args.apply else "DRY RUN (nothing written)"
     print(f"-- {mode}: {len(prs)} PR(s); {changed} relabelled; "
           f"{kept} left on {GLOBAL} (fail-closed)", file=out)
-    # Report, in the workflow log, which areas were dropped for want of a label.
-    missing = sorted(policy.declared_areas() - known - policy.members)
+    # Report, in the workflow log, which areas were dropped for want of a label — the
+    # declared [[map]] areas AND every workspace member, since a crate with no
+    # `area:` label silently sends every PR that touches it back to __global__.
+    missing = sorted((policy.declared_areas() | policy.members) - known)
     if missing:
         print(f"::warning title=pr-area-label missing labels::declared in "
               f"ci/area-labels.toml but no such label exists: "
@@ -427,8 +438,10 @@ def _self_test():
     assert areas(["no/such/dir/x.txt"]) == (frozenset(), "unresolved")
     assert areas(["crates/sparq-core/src/lib.rs", "no/such/dir/x.txt"]) == (
         frozenset(), "unresolved")
-    # A non-member directory under crates/ is not an area.
+    # An unknown crate directory has no label, so it is unresolved; a file sitting
+    # directly in crates/ is not a crate at all.
     assert areas(["crates/not-a-crate/src/lib.rs"]) == (frozenset(), "unresolved")
+    assert attribute("crates/README.md", policy) is None
     # Genuinely workspace-spanning work stays global.
     wide = [f"crates/{c}/src/lib.rs" for c in sorted(policy.members)[:policy.max_areas + 1]]
     assert areas(wide) == (frozenset(), "cross-cutting")

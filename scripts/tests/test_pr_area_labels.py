@@ -312,19 +312,30 @@ class TestDerivation(unittest.TestCase):
         areas, reason = self.d(["crates/sparq-core/src/lib.rs", "no/such/top/level/x.txt"])
         self.assertEqual((areas, reason), (frozenset(), "unresolved"))
 
-    def test_non_member_directory_under_crates_is_unresolved(self):
+    def test_unknown_crate_directory_without_a_live_label_is_unresolved(self):
         self.assertEqual(self.d(["crates/not-a-crate/src/lib.rs"]),
                          (frozenset(), "unresolved"))
 
-    def test_member_check_is_what_rejects_a_non_member_crate_directory(self):
-        """DISCRIMINATING: the test above passes even without the member check, because
-        the live-label check then rejects the bogus name — two guards, one fixture. Here
-        the bogus name IS a live label, so ONLY the member check can reject it."""
-        self.assertIsNone(M.attribute("crates/not-a-crate/src/lib.rs", self.policy))
+    def test_a_file_directly_under_crates_is_not_a_crate_area(self):
+        """DISCRIMINATING: `crates/README.md` must not become `area:README.md`. The
+        live-label check would also reject that name, so assert on `attribute` directly —
+        otherwise this fixture passes with the segment guard deleted."""
+        self.assertIsNone(M.attribute("crates/README.md", self.policy))
+        self.assertIsNone(M.attribute("crates", self.policy))
+
+    def test_a_pr_that_ADDS_a_crate_resolves_once_its_label_exists(self):
+        """The workflow reads the DEFAULT BRANCH's manifest, so a crate a PR is adding is
+        not yet a workspace member. Such a PR collides with nothing and must still get a
+        narrow partition — gated only on a human having created the `area:` label. Two
+        live examples in the backfill were exactly this shape (#3464, #3581)."""
+        new = "sparq-brand-new"
+        self.assertNotIn(new, self.policy.members)
         self.assertEqual(
-            M.derive_areas(["crates/not-a-crate/src/lib.rs"], self.policy,
-                           self.known | {"not-a-crate"}),
-            (frozenset(), "unresolved"))
+            M.derive_areas([f"crates/{new}/src/lib.rs"], self.policy, self.known | {new}),
+            (frozenset({new}), "resolved"))
+        # ... and without the label it is still fail-closed.
+        self.assertEqual(M.derive_areas([f"crates/{new}/src/lib.rs"], self.policy, self.known),
+                         (frozenset(), "unresolved"))
 
     def test_empty_change_set_stays_global(self):
         self.assertEqual(self.d([]), (frozenset(), "no-paths"))

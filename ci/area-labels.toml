@@ -57,10 +57,15 @@
 # ===========================================================================
 # RESOLUTION ORDER (normative)
 # ===========================================================================
-#   1. `crates/<name>/...`  ->  area `<name>`, when `<name>` is a live workspace
-#      member (read from the root Cargo.toml `[workspace] members`). This rule is
-#      IMPLICIT — it is code, not a row below, so a new crate needs no edit here.
-#      A `crates/` path whose `<name>` is not a member is UNRESOLVED (fail closed).
+#   1. `crates/<name>/<something>`  ->  area `<name>`. IMPLICIT — it is code, not a row
+#      below, so a new crate needs no edit here. Deliberately NOT gated on workspace
+#      membership: the workflow evaluates a PR against the DEFAULT BRANCH's manifest (a
+#      `pull-requests: write` job must not execute PR-authored code), so a PR that ADDS
+#      a crate would otherwise be unresolvable forever — and those PRs collide with
+#      nothing, so they are the ones that most deserve a narrow partition. The guard
+#      against inventing an area is the live-`area:`-label check, which no non-crate
+#      name can pass. A file sitting DIRECTLY in `crates/` (two segments, e.g.
+#      `crates/README.md`) is not a crate and is UNRESOLVED (fail closed).
 #   2. the first matching `[[map]]` row below, in file order.
 #   3. otherwise UNRESOLVED -> the whole PR falls back to `__global__`.
 #
@@ -76,7 +81,7 @@
 # ===========================================================================
 # MAINTENANCE
 # ===========================================================================
-# * Adding a crate: nothing to do here (rule 1 is implicit) — but the repo must
+# * Adding a crate: nothing to do here (rule 1 is implicit) — but the repo MUST
 #   have an `area:<crate>` label, or the deriver drops it and the PR stays
 #   `__global__` with a `::warning`. It NEVER auto-creates a label: the workflow
 #   holds `pull-requests: write` only, and the "add labels" REST call silently
