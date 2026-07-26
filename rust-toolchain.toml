@@ -139,10 +139,15 @@ profile = "minimal"
 #           crate-scoped fix gate. This is the component the whole file is for.
 # rustfmt — `cargo fmt --all --check` (currently informational in `lint`).
 #
-# The ~40 `rustup component add rustfmt clippy` lines in the workflows remain
-# correct — with this file active they add to the pinned toolchain — but they
-# are now redundant, because rustup installs these when it materialises the
-# pin.
+# The 11 `rustup component add` lines in the workflows remain correct — with
+# this file active they add to the pinned toolchain — but the 7 that add only
+# `clippy`/`rustfmt clippy` are now redundant, because rustup installs those
+# when it materialises the pin. The other 4 add `llvm-tools-preview`, which is
+# NOT listed here and so is still required (see the coverage jobs in ci.yml).
+# [OPUS-5] Counted, not estimated: `grep -c 'rustup component add'` over
+# .github/workflows = 11 (6 x `clippy`, 1 x `rustfmt clippy`, 4 x
+# `llvm-tools-preview`). The "~40" figure this comment previously carried was
+# the `rustup default stable` count copied to the wrong line.
 components = ["clippy", "rustfmt"]
 
 # REQUIRED, not cosmetic. Roughly nineteen jobs across ci.yml, js.yml,
