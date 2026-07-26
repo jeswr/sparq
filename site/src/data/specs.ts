@@ -118,6 +118,19 @@ export const SPECS: Spec[] = [
     blurb:
       "A greenfield, implementation-ready proposal for named-graph-aware replicated RDF datasets: dotted add-wins observed-remove state, mandatory origin skolemisation, evaluate-at-origin SPARQL Update compilation, a canonical out-of-band delta journal, precisely scoped dataset convergence, and separate replica, delta-relay, and origin-evaluator conformance classes.",
   },
+  // [OPUS-5] sq-tag1q.2 — the OPTIONAL vector-store add-on to the Solid-SPARQL spec.
+  {
+    slug: "solid-vector-api",
+    source: "solid-vector-api.typ",
+    title:
+      "Solid Vector Search: An Optional Vector-Store Extension to Access-Controlled SPARQL Query over a Solid Pod",
+    shortName: "solid-vector-api",
+    status: "unofficial",
+    date: "2026-07-26",
+    editors: "Jesse Wright · the sparq project",
+    blurb:
+      "An OPTIONAL add-on to the Access-Controlled SPARQL Query over a Solid Pod specification: vector indexes as ordinary pod resources managed through the Solid Protocol (never the query endpoint), an ingestion contract that keeps the embedding model outside the server, and the vec: query surface reused without extension. The core is the authorization analysis — entries bound to one source resource, eligibility decided by GET-equivalence before ranking, every returned term required to occur in the live authorized dataset, and the returned set required to be a function of the authorized dataset alone, which is shown to exclude the shared approximate index. A plain Solid-SPARQL server remains fully conformant without any of it.",
+  },
 ];
 
 export function specBySlug(slug: string): Spec | undefined {
