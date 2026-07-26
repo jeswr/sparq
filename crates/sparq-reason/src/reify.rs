@@ -89,8 +89,10 @@
 //!   suppressed, [`ReifyMode::DestructureOnly`] (the STRICT-OPACITY mode, second
 //!   increment) runs reif-dtr alone: inference then never mints a triple term at
 //!   all, so no quotation — variant or otherwise — can ever be introduced by
-//!   reasoning. Drive it via [`crate::materialize_owl_rl_reify`];
-//!   [`crate::materialize_owl_rl`] keeps the full bridge.
+//!   reasoning. Drive it via [`crate::materialize_owl_rl_reify`] (batch) or
+//!   [`crate::MaterializedOwlGraph::with_reify_mode`] (incremental);
+//!   [`crate::materialize_owl_rl`] / [`crate::MaterializedOwlGraph::new`] keep the
+//!   full bridge.
 //! * Only the OUTER quotation is destructured — a component that is itself a
 //!   triple term stays one opaque id.
 //! * Reasoning over reifier ANNOTATIONS (`{| … |}` blocks) needs no new machinery:
@@ -107,9 +109,16 @@
 //! to its documented Fallback mode (re-materialize per mutation) rather than
 //! teaching the counting modes these rules. See the first-increment PR body (#2135)
 //! for the follow-up list. The second increment ([FABLE-5] sq-afun3) added the
-//! strict-opacity [`ReifyMode`] surface; the strict mode is batch-only —
-//! `MaterializedOwlGraph`'s Fallback re-materialization always runs the full
-//! bridge.
+//! strict-opacity [`ReifyMode`] surface (batch only). The third increment
+//! ([OPUS-5] sq-afun3) plumbed that mode through the incremental handle:
+//! [`crate::MaterializedOwlGraph::with_reify_mode`] fixes the mode at construction
+//! and every Fallback re-materialization — the initial one and every mutation's —
+//! runs it, so the type's closure-equals-from-scratch invariant now holds against
+//! the MATCHING batch oracle ([`crate::materialize_owl_rl_reify`] in the same mode)
+//! and strict opacity is reachable incrementally. Still open (unchanged): the
+//! counting modes model neither bridge rule, so reify-vocabulary bases stay in
+//! Fallback in BOTH modes, and the reify step is still the naive per-round scan
+//! rather than a semi-naive delta.
 
 use crate::owl::RDF;
 use rustc_hash::{FxHashMap, FxHashSet};
