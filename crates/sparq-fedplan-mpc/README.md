@@ -84,8 +84,8 @@ match sparq_fedplan_mpc::ratify_envelope(&envelope, &privacy, Some(budget)) {
   components, and a combination-dead audit trail. A value-overlap prune *from the
   `SourceDescriptor`* is **deliberately declined** — not recall-safely expressible from it
   (single-IRI `may_hold_authority`, no authority-set enumerator) — so a future contributor
-  does not build an unsound prune. A length mismatch is fail-closed
-  (`SeamError::DescriptorMismatch`, phase `SourceCombination`).
+  does not build an unsound prune. A selection misaligned with the BGP (pattern count/order, or
+  a candidate's source index/id) is fail-closed (`SeamError::DescriptorMismatch`/`SourceCombination`).
 - **`prune_source_combinations_with_summaries` + `SourceQuotientSummary`** (Phase 6 Rule C2,
   sq-xkrt) — the FedUP-style (WWW'24) **provenance over quotient summaries** prune, the lever
   the design record's §3 names as the highest-leverage pre-MPC cost win. The way past the

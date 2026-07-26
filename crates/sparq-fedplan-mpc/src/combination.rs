@@ -377,11 +377,11 @@ impl PrunedCombinations {
 /// the BGP join structure. The Phase-2 per-pattern lists are carried through **unchanged**; the
 /// verdict is advisory and auditable.
 ///
-/// `sources` is taken for API symmetry and to read the BGP's join structure, but Rule C1 does
-/// **not** re-read descriptor capabilities — it operates over the already-recall-safe Phase-2
-/// emptiness, so it never introduces an independent (possibly unsound) capability prune. The
-/// declined value-overlap non-rule (see the module docs) is *why* no descriptor capability is
-/// re-tested here.
+/// `sources` is read only to *validate* the selection's shape (that each candidate's source index
+/// addresses the slice and agrees with the id it carries); Rule C1 does **not** re-read descriptor
+/// capabilities — it operates over the already-recall-safe Phase-2 emptiness, so it never
+/// introduces an independent (possibly unsound) capability prune. The declined value-overlap
+/// non-rule (see the module docs) is *why* no descriptor capability is re-tested here.
 ///
 /// **Recall-safe by construction:** candidates are marked dead **only** when the conjunction is
 /// *proved* unsatisfiable (some pattern empty ⇒ no answers exist). When every pattern is
@@ -391,9 +391,11 @@ impl PrunedCombinations {
 /// # Errors
 ///
 /// Returns [`SeamError::DescriptorMismatch`] (phase [`SeamPhase::SourceCombination`]) if the
-/// Phase-2 selection's pattern count does not match the BGP's — the pass refuses to guess the
-/// alignment rather than silently mis-attribute a pattern (fail-closed, the same posture as
-/// Phase 2). It never panics and performs **no** MPC.
+/// Phase-2 selection is not aligned with the BGP — a pattern count that differs, an entry at
+/// position `i` naming a pattern other than `i` (out of range, duplicated or reordered), or a
+/// candidate whose source index is outside `sources` or disagrees with the id it carries. The pass
+/// refuses to guess the alignment rather than silently mis-attribute a pattern (fail-closed, the
+/// same posture as Phase 2). It never panics and performs **no** MPC.
 ///
 /// This function makes **no** soundness/privacy claim — see the module docs and the crate
 /// `README.md`. [OPUS-4.8] sq-pwr.3.
@@ -402,12 +404,6 @@ pub fn prune_source_combinations(
     sources: &[SourceDescriptor],
     selected: &SelectedPrivateSources,
 ) -> Result<PrunedCombinations, SeamError> {
-    // `sources` is read only for the (future) symmetry the signature promises and to keep the
-    // call shape identical to Phase 2/3; Rule C1 is driven by the Phase-2 output. Touch it so a
-    // length mismatch with the selection is still a clean, fail-closed signal rather than a
-    // silent assumption.
-    let _ = sources;
-
     // Fail-closed on a selection/BGP shape mismatch — never guess which pattern is which.
     if selected.per_pattern.len() != bgp.patterns.len() {
         return Err(SeamError::DescriptorMismatch {
@@ -416,6 +412,48 @@ pub fn prune_source_combinations(
             detail:
                 "Phase-2 selection pattern count does not match the BGP (cannot align combinations)",
         });
+    }
+    // A matching length alone does NOT pin the alignment, and both [`SelectedPrivateSources`] and
+    // [`PrivatePatternSources`] are publicly constructible, so a mis-aligned selection is a
+    // reachable state rather than an internal invariant: a duplicated index (`[0, 0]` over a
+    // two-pattern BGP) would evaluate one conjunct twice and silently omit another, and a
+    // reordered one would attribute [`SourceCombination::assignment`] entries — documented as
+    // BGP-pattern order — to the wrong pattern. Require entry `i` to BE pattern `i`, which
+    // subsumes the range check, and validate each candidate against `sources` (the slice
+    // `PrivateCandidate::source` indexes and `SourceCombination::assignment` hands downstream,
+    // and whose id Rule C2 keys its summary lookup on).
+    for (i, ps) in selected.per_pattern.iter().enumerate() {
+        if ps.pattern >= bgp.patterns.len() {
+            return Err(SeamError::DescriptorMismatch {
+                phase: SeamPhase::SourceCombination,
+                source_id: String::new(),
+                detail: "Phase-2 selection names a pattern index outside the BGP",
+            });
+        }
+        if ps.pattern != i {
+            return Err(SeamError::DescriptorMismatch {
+                phase: SeamPhase::SourceCombination,
+                source_id: String::new(),
+                detail: "Phase-2 selection is not in BGP pattern order (cannot align combinations)",
+            });
+        }
+        for cand in &ps.candidates {
+            let Some(descriptor) = sources.get(cand.source) else {
+                return Err(SeamError::DescriptorMismatch {
+                    phase: SeamPhase::SourceCombination,
+                    source_id: cand.source_id.0.clone(),
+                    detail: "Phase-2 selection names a source index outside the descriptor slice",
+                });
+            };
+            if descriptor.id() != &cand.source_id {
+                return Err(SeamError::DescriptorMismatch {
+                    phase: SeamPhase::SourceCombination,
+                    source_id: cand.source_id.0.clone(),
+                    detail:
+                        "Phase-2 candidate's source id does not match the descriptor at its index",
+                });
+            }
+        }
     }
 
     // 1. The empty conjuncts (ascending). An empty pattern is a PROVED-empty relation (upstream
@@ -496,8 +534,8 @@ pub fn prune_source_combinations(
 /// # Errors
 ///
 /// [`SeamError::DescriptorMismatch`] (phase [`SeamPhase::SourceCombination`]) when the Phase-2
-/// selection does not line up with the BGP (as [`prune_source_combinations`]), when a pattern
-/// index in the selection is out of the BGP's range, or when two [`SourceQuotientSummary`]s
+/// selection does not line up with the BGP — pattern count, pattern order/range, or a candidate's
+/// source index/id, exactly as [`prune_source_combinations`] — or when two [`SourceQuotientSummary`]s
 /// declare the same [`SourceId`] (an ambiguous summary — the pass refuses to guess which binds).
 /// It never panics and performs **no** MPC.
 ///
@@ -548,14 +586,10 @@ pub fn prune_source_combinations_with_summaries(
     // 1. The per-(pattern, candidate) quotient relation: the bindings that candidate's summary
     //    admits for that pattern, or `Unconstrained` when the source published no complete one.
     let mut relations: Vec<Vec<Relation>> = Vec::with_capacity(selected.per_pattern.len());
-    for ps in &selected.per_pattern {
-        let Some(pattern) = bgp.patterns.get(ps.pattern) else {
-            return Err(SeamError::DescriptorMismatch {
-                phase: SeamPhase::SourceCombination,
-                source_id: String::new(),
-                detail: "Phase-2 selection names a pattern index outside the BGP",
-            });
-        };
+    for (i, ps) in selected.per_pattern.iter().enumerate() {
+        // Rule C1 validated the alignment above (entry `i` IS pattern `i`, in range), so this
+        // index is sound and the relation vector is genuinely in BGP-pattern order.
+        let pattern = &bgp.patterns[i];
         relations.push(
             ps.candidates
                 .iter()
@@ -567,24 +601,30 @@ pub fn prune_source_combinations_with_summaries(
         );
     }
 
-    // 2. The combination space, bounded. Saturating so an overflow is reported honestly rather
-    //    than wrapping to a small number and silently enumerating the wrong thing.
-    let combinations = relations
+    // 2. The combination space, bounded. `checked_mul` so an overflowing product DECLINES rather
+    //    than wrapping to a small number (silently enumerating the wrong thing) or saturating to
+    //    `usize::MAX` (which a `max_combinations == usize::MAX` budget would then wave through,
+    //    letting the enumeration below run unbounded). An overflow is reported as `usize::MAX`.
+    let checked = relations
         .iter()
-        .fold(1usize, |acc, rel| acc.saturating_mul(rel.len()));
-    if combinations > budget.max_combinations {
+        .try_fold(1usize, |acc, rel| acc.checked_mul(rel.len()));
+    let Some(combinations) = checked.filter(|n| *n <= budget.max_combinations) else {
         out.summary_prune =
             SummaryPruneOutcome::Declined(SummaryDeclineReason::TooManyCombinations {
-                combinations,
+                combinations: checked.unwrap_or(usize::MAX),
                 budget: budget.max_combinations,
             });
         return Ok(out);
-    }
+    };
 
     // 3. Enumerate (deterministically, candidate-index ascending) and keep the live ones.
     let mut choices: Vec<Vec<usize>> = vec![Vec::new()];
     for rel in &relations {
-        let mut next = Vec::with_capacity(choices.len() * rel.len());
+        // No relation is empty on this path (an empty candidate list would have made Rule C1
+        // declare the BGP dead above), so every prefix product is bounded by the checked
+        // `combinations` total and this capacity cannot overflow; `saturating_mul` keeps that a
+        // fact of the arithmetic rather than an assumption.
+        let mut next = Vec::with_capacity(choices.len().saturating_mul(rel.len()));
         for prefix in &choices {
             for c in 0..rel.len() {
                 let mut extended = prefix.clone();
@@ -1950,6 +1990,217 @@ mod tests {
             }
         ));
         assert!(format!("{}", err).contains("outside the BGP"));
+    }
+
+    // A hand-built per-pattern entry: `pattern`, with one candidate per `(source index, id)`.
+    // Used by the alignment regressions, which need selections the Phase-2 pass would never
+    // produce but a caller can build (both types are publicly constructible). [SONNET-4.6]
+    fn pattern_sources(pattern: usize, candidates: &[(usize, &str)]) -> PrivatePatternSources {
+        PrivatePatternSources {
+            pattern,
+            candidates: candidates
+                .iter()
+                .map(|(source, id)| PrivateCandidate {
+                    source: *source,
+                    source_id: SourceId::new(*id),
+                    estimated_cardinality: 1.0,
+                })
+                .collect(),
+        }
+    }
+
+    /// A selection that names the SAME pattern twice has the BGP's length, so the count check
+    /// alone waves it through — and it would then evaluate pattern 0 twice and silently omit
+    /// pattern 1. Fail-closed on BOTH entry points. [SONNET-4.6]
+    #[test]
+    fn duplicate_pattern_index_is_a_descriptor_mismatch() {
+        let bgp = flat_join_bgp();
+        let sources = vec![
+            source("http://a/", &[MEMBER_OF_FLAT]),
+            source("http://b/", &[HAS_ADDRESS]),
+        ];
+        let duplicated = SelectedPrivateSources {
+            per_pattern: vec![
+                pattern_sources(0, &[(0, "http://a/")]),
+                pattern_sources(0, &[(0, "http://a/")]),
+            ],
+            pruned: Vec::new(),
+        };
+
+        let err = prune_source_combinations(&bgp, &sources, &duplicated).unwrap_err();
+        assert!(matches!(
+            err,
+            SeamError::DescriptorMismatch {
+                phase: SeamPhase::SourceCombination,
+                ..
+            }
+        ));
+        assert!(format!("{}", err).contains("BGP pattern order"));
+
+        let summaries = vec![membership_summary("http://a/", "http://flats-a.example")];
+        let err = prune_source_combinations_with_summaries(
+            &bgp,
+            &sources,
+            &duplicated,
+            &summaries,
+            CombinationBudget::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            SeamError::DescriptorMismatch {
+                phase: SeamPhase::SourceCombination,
+                ..
+            }
+        ));
+    }
+
+    /// A REORDERED selection is refused rather than silently producing a
+    /// `SourceCombination::assignment` in selection-vector order — the field is documented as BGP
+    /// pattern order, and the in-order control below pins that it really is. [SONNET-4.6]
+    #[test]
+    fn reordered_pattern_indices_are_refused_and_assignments_stay_in_bgp_order() {
+        let bgp = flat_join_bgp();
+        let sources = vec![
+            source("http://a/", &[MEMBER_OF_FLAT]), // 0 — pattern 0's holder
+            source("http://b/", &[HAS_ADDRESS]),    // 1 — pattern 1's holder
+        ];
+        let summaries = vec![
+            membership_summary("http://a/", "http://flats-a.example"),
+            address_summary("http://b/", "http://flats-a.example"), // joinable
+        ];
+
+        // Control: the genuine (in-order) selection is accepted, and the one live combination
+        // reads pattern 0 → source 0, pattern 1 → source 1 — BGP-pattern order.
+        let selected = select_private_sources(&bgp, &sources, &[]).unwrap();
+        assert_eq!(selected.per_pattern[0].pattern, 0);
+        let out = prune_source_combinations_with_summaries(
+            &bgp,
+            &sources,
+            &selected,
+            &summaries,
+            CombinationBudget::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            out.live_combinations,
+            vec![SourceCombination {
+                assignment: vec![0, 1]
+            }]
+        );
+
+        // The same two entries, swapped: refused, not re-attributed.
+        let reordered = SelectedPrivateSources {
+            per_pattern: vec![
+                pattern_sources(1, &[(1, "http://b/")]),
+                pattern_sources(0, &[(0, "http://a/")]),
+            ],
+            pruned: Vec::new(),
+        };
+        let err = prune_source_combinations_with_summaries(
+            &bgp,
+            &sources,
+            &reordered,
+            &summaries,
+            CombinationBudget::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            SeamError::DescriptorMismatch {
+                phase: SeamPhase::SourceCombination,
+                ..
+            }
+        ));
+        assert!(format!("{}", err).contains("BGP pattern order"));
+    }
+
+    /// A candidate whose source index does not address the descriptor slice — or whose carried id
+    /// disagrees with the descriptor at that index — is fail-closed: `assignment` hands those
+    /// indices downstream and Rule C2 keys its summary lookup on the id. [SONNET-4.6]
+    #[test]
+    fn candidate_source_index_or_id_disagreeing_with_the_descriptors_is_a_descriptor_mismatch() {
+        let bgp = flat_join_bgp();
+        let sources = vec![
+            source("http://a/", &[MEMBER_OF_FLAT]),
+            source("http://b/", &[HAS_ADDRESS]),
+        ];
+
+        // Source index 9 is outside the two-descriptor slice.
+        let out_of_range = SelectedPrivateSources {
+            per_pattern: vec![
+                pattern_sources(0, &[(0, "http://a/")]),
+                pattern_sources(1, &[(9, "http://b/")]),
+            ],
+            pruned: Vec::new(),
+        };
+        let err = prune_source_combinations(&bgp, &sources, &out_of_range).unwrap_err();
+        assert!(format!("{}", err).contains("outside the descriptor slice"));
+
+        // Index 1 exists, but it is source B — not the id the candidate claims.
+        let wrong_id = SelectedPrivateSources {
+            per_pattern: vec![
+                pattern_sources(0, &[(0, "http://a/")]),
+                pattern_sources(1, &[(1, "http://a/")]),
+            ],
+            pruned: Vec::new(),
+        };
+        let err = prune_source_combinations(&bgp, &sources, &wrong_id).unwrap_err();
+        assert!(matches!(
+            err,
+            SeamError::DescriptorMismatch {
+                phase: SeamPhase::SourceCombination,
+                ..
+            }
+        ));
+        assert!(format!("{}", err).contains("does not match the descriptor"));
+    }
+
+    /// The combination count is `checked_mul`ed, so a product that OVERFLOWS `usize` DECLINES even
+    /// under a `usize::MAX` budget. A saturating count would compare `usize::MAX > usize::MAX ==
+    /// false`, wave the overflow through, and let the enumeration allocate unbounded. Declining
+    /// prunes nothing (recall-safe). [SONNET-4.6]
+    #[test]
+    fn overflowing_combination_count_declines_under_an_unbounded_budget() {
+        // 64 patterns, each held by BOTH sources ⇒ 2^64 combinations, one past `usize::MAX`.
+        let preds: Vec<String> = (0..64).map(|i| format!("http://ex/p{}", i)).collect();
+        let pred_refs: Vec<&str> = preds.iter().map(String::as_str).collect();
+        let bgp = Bgp::new(
+            preds
+                .iter()
+                .map(|p| TriplePattern::new(var("s"), iri(p), var("o")))
+                .collect(),
+        );
+        let sources = vec![
+            source("http://a/", &pred_refs),
+            source("http://b/", &pred_refs),
+        ];
+        let selected = select_private_sources(&bgp, &sources, &[]).unwrap();
+        assert!(
+            selected.per_pattern.iter().all(|p| p.candidates.len() == 2),
+            "precondition: every pattern keeps both holders"
+        );
+
+        let summaries = vec![membership_summary("http://a/", "http://flats-a.example")];
+        let out = prune_source_combinations_with_summaries(
+            &bgp,
+            &sources,
+            &selected,
+            &summaries,
+            CombinationBudget::new(usize::MAX, usize::MAX),
+        )
+        .unwrap();
+
+        assert_eq!(
+            out.summary_prune,
+            SummaryPruneOutcome::Declined(SummaryDeclineReason::TooManyCombinations {
+                combinations: usize::MAX,
+                budget: usize::MAX,
+            })
+        );
+        assert!(out.pruned.is_empty(), "a decline prunes nothing");
+        assert!(out.live_combinations.is_empty());
+        assert!(out.bgp_satisfiable);
     }
 
     /// The provenance pass is deterministic: identical inputs ⇒ identical output, twice
