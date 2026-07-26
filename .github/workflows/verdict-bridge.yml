@@ -15,10 +15,15 @@
 #
 # HEAD BINDING (load-bearing): scripts/verdict-bridge.py honours a verdict only when the
 # comment's LAST non-blank line is exactly `VERDICT: pass`/`VERDICT: fail`, the body
-# cites the CURRENT head as a standalone FULL 40-hex SHA, and the author_association is
-# OWNER/MEMBER/COLLABORATOR. Among head-bound verdicts the LATEST by (immutable)
-# created_at wins, so a retraction posted after a pass defeats it. Arming on a stale
-# verdict is worse than the bug this closes — every missing input reads as "no verdict".
+# CONTAINS the CURRENT head as a standalone FULL 40-hex SHA (an OCCURRENCE test — it only
+# pairs a comment with a head; the trusted author's trailing VERDICT line is what makes it
+# a verdict), and the author_association is OWNER/MEMBER/COLLABORATOR. Among head-bound
+# verdicts the LATEST by (immutable) created_at wins, so a retraction posted after a pass
+# defeats it. Arming on a stale verdict is worse than the bug this closes, so a
+# verdict-SHAPED final line that does not parse strictly (`VERDICT: FAIL`, `VERDICT: fail
+# (retracting my pass)`) is AMBIGUOUS, not absent: it never promotes and it REMOVES an
+# existing review:pass. Discarding it would leave the superseded pass standing — strict
+# alone is fail-closed, strict-and-discard is fail-OPEN in composition.
 name: verdict-bridge
 
 on:

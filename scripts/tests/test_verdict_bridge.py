@@ -655,12 +655,27 @@ class TestGateResolution(unittest.TestCase):
                 self.assertEqual(bridge(fake).gate_conclusion(HEAD), "failure")
 
     def test_an_incomplete_newest_run_reads_as_NO_gate_not_as_the_older_result(self):
+        """Only `status: completed` may be believed. A queued or in-progress re-run can
+        still carry the PREVIOUS attempt's `conclusion` field; reading it would report a
+        superseded green as the live result — the cancelled-twin failure this repo has
+        already been bitten by (sparq #3677)."""
         old = check_run("gate", conclusion="success", rid=1, started="2026-01-01T00:00:00Z")
-        rerun = check_run(
-            "gate", conclusion=None, status="in_progress", rid=2, started="2026-01-01T09:00:00Z"
-        )
-        fake = FakeGitHub([node(4200)], runs={HEAD: [old, rerun]})
-        self.assertIsNone(bridge(fake).gate_conclusion(HEAD))
+        for status, leftover in (
+            ("in_progress", None),
+            ("in_progress", "success"),
+            ("queued", "success"),
+            ("waiting", "failure"),
+        ):
+            with self.subTest(status=status, conclusion=leftover):
+                rerun = check_run(
+                    "gate",
+                    conclusion=leftover,
+                    status=status,
+                    rid=2,
+                    started="2026-01-01T09:00:00Z",
+                )
+                fake = FakeGitHub([node(4200)], runs={HEAD: [old, rerun]})
+                self.assertIsNone(bridge(fake).gate_conclusion(HEAD))
 
     def test_a_red_gate_still_never_flags_but_a_verdict_is_still_honoured(self):
         red = [check_run("gate", conclusion="failure")]
