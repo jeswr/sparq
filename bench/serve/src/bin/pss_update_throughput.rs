@@ -350,11 +350,12 @@ fn results_json(sum: &Summary, windows: &[WindowRow]) -> String {
 /// HONESTY — this is a SINGLE synchronous client (one in-flight update at a time), which is
 /// exactly the interactive PSS shape: each LDP request blocks on its own commit. So the
 /// **binding metric is p99 commit latency** (it must sit inside the LDP request budget); the
-/// per-client *throughput* is bounded by `1/group-commit-window` (≈ 333/s at the 3 ms default)
-/// NO MATTER how fast the writer is, because one client never fills a batch window. Aggregate
-/// write throughput rises with CONCURRENT clients filling the window — that ceiling is
-/// `writer_spike` (group-commit throughput at `max_batch` 1/16/256), not this binary. Do NOT
-/// read the single-client `updates/s` here as the writer's capacity.
+/// per-client *throughput* is `1/group-commit-window`-bounded only when adaptive commit is
+/// disabled. With the default adaptive group-commit path, a serial client commits in engine
+/// time and is therefore engine-bound. [SONNET-4.6] Aggregate write throughput rises with
+/// CONCURRENT clients filling the window — that ceiling is `writer_spike` (group-commit
+/// throughput at `max_batch` 1/16/256), not this binary. Do NOT read the single-client
+/// `updates/s` here as the writer's concurrent capacity.
 fn crud_stream(state: &AppState, updates: usize, resources: usize, windows: &mut Vec<WindowRow>) -> Run {
     let pod = 0usize;
     let mut lat_us = Vec::with_capacity(updates);
