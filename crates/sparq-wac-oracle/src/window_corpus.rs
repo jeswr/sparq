@@ -19,11 +19,16 @@
 //!
 //! - **Inside** the window the recipient is allowed; **before** and **after** it is denied,
 //!   with no re-materialization in between — the same store decides all three.
+//! - Both bounds are **inclusive**: a request at exactly `auth:notBefore` and one at
+//!   exactly `auth:notAfter` are both allowed. The endpoints are their own rows, so an
+//!   off-by-one that made either bound exclusive fails the corpus — pinning the boundary
+//!   at the protocol-visible decision surface, not only in `sparq-solid`'s own unit tests.
 //! - A windowed grant evaluated with **no clock** (`now == None`) is **fail-closed**: no
 //!   clock evidence means the request cannot be proven inside the window.
 //! - The window is recipient-scoped — a non-recipient is denied even inside it.
 //! - A grant with **no** window ignores `now` entirely (alice's unwindowed ACP grant
-//!   decides identically with and without a clock).
+//!   decides identically inside the window, after it has closed, and with no clock —
+//!   the after-close row is what pins that the window is *grant*-scoped, not global).
 
 use crate::{
     resolved_default, run_vectors, Expected, Mode, OracleReport, PodStore, Vector, ALICE, BOB,
@@ -58,7 +63,7 @@ const AFTER: &str = "2027-01-01T00:00:00Z";
 /// Decision rows over [`WINDOW_NQUADS`] + [`WINDOW_POLICY_TTL`]. Every row shares one
 /// store, so the before/inside/after verdicts differ ONLY by the request clock — that is
 /// the live-clock re-check, not a re-materialization.
-pub static WINDOW_VECTORS: [Vector; 8] = [
+pub static WINDOW_VECTORS: [Vector; 11] = [
     // carol INSIDE the window: the bridged conditional grant applies.
     v(
         "window-carol-inside",
@@ -67,6 +72,24 @@ pub static WINDOW_VECTORS: [Vector; 8] = [
         resolved_default(true, READ),
     )
     .at(INSIDE),
+    // the bounds are INCLUSIVE (odrl:dateTime gteq/lteq): a request at exactly the open
+    // instant and one at exactly the close instant are both still admitted. Verified to
+    // go red (and the strictly-inside/before/after rows to stay green) when either
+    // comparison in `window_admits` drops its `Equal` arm.
+    v(
+        "window-carol-at-open-inclusive",
+        Some(CAROL),
+        R,
+        resolved_default(true, READ),
+    )
+    .at(WINDOW_NOT_BEFORE),
+    v(
+        "window-carol-at-close-inclusive",
+        Some(CAROL),
+        R,
+        resolved_default(true, READ),
+    )
+    .at(WINDOW_NOT_AFTER),
     // …and the SAME store denies her before it opens and after it closes.
     v(
         "window-carol-before-open",
@@ -112,7 +135,18 @@ pub static WINDOW_VECTORS: [Vector; 8] = [
         resolved_default(true, RWC),
     )
     .at(INSIDE),
-    // …after it has closed, and with no clock at all.
+    // …at the very instant carol's window has lapsed. Today the clock is read at exactly
+    // one site (the conditional grant's head), which alice's plain ACP allow never
+    // reaches, so this row is a REGRESSION guard rather than a live mutation witness: it
+    // pins that expiry stays scoped to the grant carrying it, never global to the store…
+    v(
+        "window-alice-unwindowed-after-close",
+        Some(ALICE),
+        R,
+        resolved_default(true, RWC),
+    )
+    .at(AFTER),
+    // …and with no clock at all.
     v(
         "window-alice-unwindowed-no-clock",
         Some(ALICE),
@@ -185,6 +219,15 @@ mod tests {
     use super::*;
     use crate::AclStatus;
 
+    /// The row with this `name` — index-free, so growing or reordering
+    /// [`WINDOW_VECTORS`] can never silently re-point a test at a different row.
+    fn row(name: &str) -> Vector {
+        *WINDOW_VECTORS
+            .iter()
+            .find(|row| row.name == name)
+            .unwrap_or_else(|| panic!("no window row named {}", name))
+    }
+
     #[test]
     fn window_vectors_all_pass() {
         let report = run_window_vectors().expect("window corpus builds");
@@ -200,8 +243,8 @@ mod tests {
         let graph = Graph::load_dataset(WINDOW_NQUADS, "nquads").expect("pod loads");
         let mut acp_only = PodStore::new(graph);
         acp_only.materialize_acp().expect("acp materializes");
-        let inside = WINDOW_VECTORS[0];
-        assert!(inside.expect.allow, "precondition: row 0 is the inside-allow row");
+        let inside = row("window-carol-inside");
+        assert!(inside.expect.allow, "precondition: the inside row expects allow");
         let bare = acp_only.decide(&inside.session(), inside.resource, inside.mode);
         assert!(!bare.allow, "no bridged grant -> carol denied even inside the window");
         assert_eq!(bare.status, AclStatus::Resolved, "the ACP view still governs");
@@ -218,7 +261,7 @@ mod tests {
             .iter()
             .filter(|row| row.agent == Some(CAROL))
             .collect();
-        assert_eq!(carol.len(), 4);
+        assert_eq!(carol.len(), 6);
         for row in &carol {
             assert_eq!(row.resource, WINDOW_RESOURCE);
             assert_eq!(row.mode, Mode::Read);
@@ -226,14 +269,57 @@ mod tests {
             assert_eq!(row.issuer, None);
         }
         let clocks: Vec<Option<&str>> = carol.iter().map(|row| row.now).collect();
-        assert_eq!(clocks, vec![Some(INSIDE), Some(BEFORE), Some(AFTER), None]);
+        assert_eq!(
+            clocks,
+            vec![
+                Some(INSIDE),
+                Some(WINDOW_NOT_BEFORE),
+                Some(WINDOW_NOT_AFTER),
+                Some(BEFORE),
+                Some(AFTER),
+                None,
+            ]
+        );
+        // The INCLUSIVE-bounds claim in this module's docs is load-bearing, so the two
+        // boundary instants must stay in the corpus as ALLOW rows — deleting either would
+        // silently drop this corpus's only coverage distinguishing an inclusive bound
+        // from an exclusive one.
+        for endpoint in [WINDOW_NOT_BEFORE, WINDOW_NOT_AFTER] {
+            let at_endpoint = carol
+                .iter()
+                .find(|row| row.now == Some(endpoint))
+                .unwrap_or_else(|| panic!("no carol row at the boundary instant {}", endpoint));
+            assert!(
+                at_endpoint.expect.allow,
+                "the window bounds are inclusive, so {} must be an allow row",
+                endpoint
+            );
+        }
+    }
+
+    #[test]
+    fn the_unwindowed_alice_rows_span_the_lapsed_window_and_no_clock() {
+        // The "a grant with no window ignores `now`" claim is only pinned if alice is
+        // asserted AFTER carol's window has closed as well as with no clock at all —
+        // with only the INSIDE + no-clock rows, a future change that let a window expire
+        // grants other than the one carrying it would still pass the corpus.
+        let alice: Vec<&Vector> = WINDOW_VECTORS
+            .iter()
+            .filter(|row| row.agent == Some(ALICE))
+            .collect();
+        let clocks: Vec<Option<&str>> = alice.iter().map(|row| row.now).collect();
+        assert_eq!(clocks, vec![Some(INSIDE), Some(AFTER), None]);
+        for row in &alice {
+            assert!(row.expect.allow, "unwindowed grant: {} must allow", row.name);
+            assert_eq!(row.expect.granted_modes, RWC);
+        }
     }
 
     #[test]
     fn runner_flags_a_flipped_window_expectation() {
         // Mutation witness: claim carol is allowed AFTER the window closed -> red.
         let store = build_window_store().expect("window store builds");
-        let mut wrong = WINDOW_VECTORS[2];
+        let mut wrong = row("window-carol-after-close");
         assert!(!wrong.expect.allow, "precondition: the after-close row expects deny");
         wrong.expect = resolved_default(true, READ);
         let report = run_vectors(&store, &[wrong]);
