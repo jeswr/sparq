@@ -2341,6 +2341,20 @@ fn derive_id(inputs: &ProofInputs) -> Option<CircuitId> {
             CircuitId::FilterValueDlDecimal => Some(CircuitId::FilterValueDlDecimal),
             _ => None,
         },
+        // [OPUS-5] sq-wz99x: the DUAL-LEAF dateTime/date value-lane FILTER. Also
+        // DIGIT-COUNT-FREE, and additionally LANE-FREE: ONE member serves BOTH the
+        // `xsd:dateTime` and `xsd:date` classes, because the lane (and the
+        // sub-second scale `FS`) lives in the PUBLIC `datatype_const`, not the
+        // member id. So the derive only confirms the declared id is that single
+        // member; WHICH lane a proof is for is pinned by the public-input
+        // reconstruction below — `datatype_const` is a public input, so a lane swap
+        // changes the reconstructed vector and cannot byte-match the proof. The
+        // fail-closed `(method × circuit)` legality is `crate::dispatch` (sq-cfmv).
+        #[cfg(feature = "dual-leaf")]
+        ProofInputs::FilterValueDlDateTime { .. } => match inputs.circuit_id() {
+            CircuitId::FilterValueDlDateTime => Some(CircuitId::FilterValueDlDateTime),
+            _ => None,
+        },
         // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): hidden cross-credential JOIN. The
         // two graph sizes are PRIVATE (the witnessed graph contents are not public
         // inputs — only the commitments are), so — exactly as scan trusts the
@@ -7558,6 +7572,33 @@ fn reconstruct_public_inputs(
             push_uint(&mut out, u64::from(op.code()));
             push_uint(&mut out, u64::from(*bound_neg));
             push_uint(&mut out, *bound_scaled);
+            push_field(&mut out, datatype_const, proof, "datatype_const")?;
+            push_uint(&mut out, u64::from(*expected));
+        }
+        // [OPUS-5] sq-wz99x: filter_value_dl_datetime (DUAL-LEAF dateTime/date
+        // value lane) public inputs, in `main` declaration order: challenge (pushed
+        // above), operand_enc, op, bound_neg (bool -> {0,1}), bound_scaled_epoch
+        // (the FILTER constant instant as |T| in milliseconds on the XSD
+        // timeOnTimeline), datatype_const (SELECTS the dateTime or date lane AND
+        // folds the scale FS), expected. Cross-reference
+        // `zk/compose/filter_value_dl_datetime/src/main.nr`. The layout is the
+        // decimal member's with `bound_scaled` renamed — ONE member, and here ONE
+        // reconstruction, serves both lanes, because the lane is carried by the
+        // `datatype_const` public input (so a lane swap changes THIS vector).
+        #[cfg(feature = "dual-leaf")]
+        ProofInputs::FilterValueDlDateTime {
+            operand_enc,
+            op,
+            bound_neg,
+            bound_scaled_epoch,
+            datatype_const,
+            expected,
+            ..
+        } => {
+            push_field(&mut out, operand_enc, proof, "operand_enc")?;
+            push_uint(&mut out, u64::from(op.code()));
+            push_uint(&mut out, u64::from(*bound_neg));
+            push_uint(&mut out, *bound_scaled_epoch);
             push_field(&mut out, datatype_const, proof, "datatype_const")?;
             push_uint(&mut out, u64::from(*expected));
         }
