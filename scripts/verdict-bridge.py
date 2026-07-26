@@ -670,7 +670,7 @@ def self_test() -> None:
         "VERDICT: fail (retracting my pass)",
         "**VERDICT: Fail**",
         "VERDICT - pass",
-        "verdict: paas",
+        "verdict: unclear",
     ):
         assert trailing_verdict(shaped) == AMBIGUOUS, shaped
     stale_pass = comment(

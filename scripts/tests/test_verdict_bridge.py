@@ -97,7 +97,7 @@ class TestVerdictParsing(unittest.TestCase):
             "VERDICT: fail (retracting my pass)",
             "**VERDICT: Fail**",
             "VERDICT - fail",
-            "verdict: fial",
+            "verdict: unclear",
             "VERDICT:",
         ):
             with self.subTest(line=line):
