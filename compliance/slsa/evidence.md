@@ -112,7 +112,7 @@ permissions: { contents: read, packages: write, id-token: write, attestations: w
 - **Cargo.lock checked in:** `git ls-files Cargo.lock` → tracked; every release/dist/Docker
   build uses `--locked`.
 - **SHA-pinned base images:** `Dockerfile` — `FROM rust:1.88-slim-bookworm@sha256:38bc5a86…`
-  (builder) and `FROM gcr.io/distroless/cc-debian12:nonroot@sha256:b0ae8e98…` (runtime).
+  (builder) and `FROM gcr.io/distroless/cc-debian12:nonroot@sha256:fccdbb0a…` (runtime).
 - **SHA-pinned actions:** every `uses:` across `.github/workflows/*.yml` is a full commit SHA
   with a `# vX.Y.Z` Dependabot-tracked trailer (release/supply-chain/scorecard quoted above).
 - **Verify:** `grep -rn "uses: .*@[a-f0-9]\{40\}" .github/workflows/` shows SHA pins; a bare

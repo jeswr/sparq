@@ -32,7 +32,7 @@ not that it is CVE-free or CIS-Benchmark-linted. → GX-12 (bead **sq-toze.31**)
 ```sh
 grep -nE '^FROM ' Dockerfile
 #  Dockerfile:51:  FROM rust:1.88-slim-bookworm@sha256:38bc5a86...d89 AS builder
-#  Dockerfile:76:  FROM gcr.io/distroless/cc-debian12:nonroot@sha256:b0ae8e98...985
+#  Dockerfile:78:  FROM gcr.io/distroless/cc-debian12:nonroot@sha256:fccdbb0a...96e
 ```
 
 Both `FROM`s pin a **digest** (`@sha256:…`), not a floating tag → D-4.2/D-4.7. The runtime base is
