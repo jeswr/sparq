@@ -6,10 +6,10 @@
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
 </p>
 
-**Opt-in OWL 2 EL classifier** for the [sparq](../../README.md) RDF engine — a
-consequence-based reasoner that computes the **complete `rdfs:subClassOf` subsumption
-lattice** of an EL ontology, the one thing OWL 2 RL (`sparq-reason`) is **sound but silently
-incomplete** for.
+**Opt-in OWL 2 EL classifier** for the [sparq](../../README.md) RDF engine — a consequence-based
+reasoner that computes the `rdfs:subClassOf` subsumption lattice of an EL ontology, **complete for
+the fragment it recognises** in the enabled feature set and under a regular RBox (nominals: safe
+usage only — see **Scope**), where OWL 2 RL (`sparq-reason`) is **sound but silently incomplete**.
 
 RL never materializes the existential successor and has no rule concluding MEMBERSHIP in a class
 expression, so `--reason owl` over a biomedical EL ontology (GO, ChEBI, SNOMED-style) silently
@@ -26,7 +26,7 @@ use sparq_reason_el::classify_graph;
 
 const TTL: &str = "<http://ex/a> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://ex/b> .";
 
-// Materialize the COMPLETE subsumption lattice as rdfs:subClassOf triples, in place.
+// Materialize the recognised-fragment subsumption lattice as rdfs:subClassOf triples, in place.
 let (mut dict, mut triples) = Graph::parse_to_triples(TTL, "turtle")?;
 let report = classify_graph(&mut dict, &mut triples); // emits derived subsumptions
 let g = Graph::from_parts(dict, triples);             // then query as usual

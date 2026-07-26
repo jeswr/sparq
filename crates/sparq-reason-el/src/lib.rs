@@ -2,7 +2,7 @@
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-evb1: crate has zero `unsafe`.
 
 //! See the crate README (rendered above) for the capability overview. The load-bearing
-//! entry points are [`classify_graph`] (emit the complete subsumption lattice into a
+//! entry points are [`classify_graph`] (emit the recognised-fragment subsumption lattice into a
 //! `(Dict, triples)` pair) and [`Classifier`] (the typed [`ClassHierarchy`] API). The
 //! algorithm lives in private modules: `normal` (Baader–Brandt–Lutz normalization),
 //! `classify` (CR1–CR6 saturation), `extract` (RDF → EL+⊥ axioms), under the
