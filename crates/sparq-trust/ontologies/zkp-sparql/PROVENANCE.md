@@ -14,7 +14,7 @@ them. It is the companion ontology to the **ISWC 2025** ZKP-SPARQL paper.
 | Sub-vocabulary | Namespace | Scope |
 |----------------|-----------|-------|
 | `sec-prop:` | `https://w3id.org/zkp-sparql/sec-prop#` | The eight security properties from paper §7.7 (unlinkability, source-credential disclosure, PQ forgery, PQ snooping, signature-type leakage, proof-size leakage, circuit audit, validity-period leakage). |
-| `sig-impl:` | `https://w3id.org/zkp-sparql/sig-impl#` | Four signature implementations (BBS+, SD-JWT-VC, ed25519, ECDSA), each carrying reified `sig-impl:Assertion` verdicts (`yes`/`no`/`partial`) about the properties it achieves/fails. |
+| `sig-impl:` | `https://w3id.org/zkp-sparql/sig-impl#` | Five signature implementations (BBS+, SD-JWT-VC, ed25519, ECDSA, ML-DSA), each carrying reified `sig-impl:Assertion` verdicts (`yes`/`no`/`partial`) about the properties it achieves/fails. |
 | `sec-req:` | `https://w3id.org/zkp-sparql/sec-req#` | Three regulatory frameworks (eIDAS 2.0, NIST PQC migration, UK DVS) that pull on `sec-prop:` properties, with dated obligations. |
 | `prov-ext:` | `https://w3id.org/zkp-sparql/prov-ext#` | Minimal `bibo:`/`dcterms:`/`prov:` provenance extension (one coined term, `prov-ext:bibtexKey`) backing the `prov:wasDerivedFrom` citation chains. |
 
