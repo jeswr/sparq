@@ -486,9 +486,23 @@ fn xml_content_well_formed(lex: &str) -> bool {
 /// subset of Rust's, so reject the forms Rust accepts but XSD does not. Shared by
 /// [`parse_xsd_float`] and [`parse_xsd_float_single`] so the two widths cannot disagree on
 /// which lexicals are well-formed. [OPUS-5] issue #3796
+///
+/// This is an ALLOWLIST of the byte classes XSD `floatRep`/`doubleRep` can contain, and it is
+/// byte-for-byte the gate `sparq_core::parse_xsd_f64` applies. It replaced a BLOCKLIST
+/// (`!(contains(['x','X']) || ends_with(['f','F','d','D']) || contains("inf"))`) which was
+/// case-sensitive and only caught the lowercase `inf` prefix, so this crate — the one that
+/// SCORES conformance — accepted six Rust-`FromStr`-only spellings the XSD lexical spaces
+/// forbid, in the direction that INFLATES the score: `Infinity`, `INFINITY`, `+Infinity`,
+/// `-Infinity`, `nan`, `NAN` all parsed to a value (measured, issue #3808). The engine's own
+/// parser was already strict, so the scorer was more lenient than the thing it scores.
+/// `tests::xsd_float_acceptance_rejects_non_xsd_spellings` pins the rejections directly AND
+/// differentially against `sparq_core::parse_xsd_f64` so the two seams cannot drift apart.
+/// Every valid `floatRep` lexical is spelled from these bytes, so nothing well-formed is lost.
+/// [OPUS-5] issue #3808
 #[inline]
 fn xsd_float_body_wellformed(lex: &str) -> bool {
-    !(lex.contains(['x', 'X']) || lex.ends_with(['f', 'F', 'd', 'D']) || lex.contains("inf"))
+    lex.bytes()
+        .all(|c| c.is_ascii_digit() || matches!(c, b'+' | b'-' | b'.' | b'e' | b'E'))
 }
 
 fn parse_xsd_float(lex: &str) -> Option<f64> {
@@ -838,23 +852,86 @@ mod tests {
         );
     }
 
-    /// Acceptance (which lexicals are well-formed) must be IDENTICAL at both widths — the
-    /// single-precision parser shares `xsd_float_body_wellformed` with the f64 one.
+    /// The XSD float/double lexical spaces admit ONLY `INF`/`+INF`/`-INF`/`NaN` plus a
+    /// digits/sign/point/exponent body — every other spelling Rust's `FromStr` happens to
+    /// accept must be REJECTED by this crate, which SCORES conformance.
+    ///
+    /// This test used to assert only that the f32 and f64 parsers AGREE. That is a fail-OPEN
+    /// shape: both share `xsd_float_body_wellformed`, so they agree trivially even when the
+    /// predicate is wrong, and replacing its whole body with `true` left the test GREEN. It
+    /// did not agree with reality either — the blocklist it was written against really did
+    /// accept `Infinity`/`INFINITY`/`nan`/`NAN` (issue #3808), which the old fixture list
+    /// mislabelled as "spellings XSD rejects". So assert the REJECTIONS directly, at both
+    /// widths, and pin the seam differentially against the engine's own strict parser.
+    /// [OPUS-5] issue #3808
     #[test]
-    fn parse_xsd_float_single_accepts_exactly_what_the_f64_parser_accepts() {
+    fn xsd_float_acceptance_rejects_non_xsd_spellings() {
+        // Rust-`FromStr`-only spellings outside XSD `floatRep`/`doubleRep`. Every one of
+        // `Infinity`/`INFINITY`/`+Infinity`/`-Infinity`/`nan`/`NAN` PARSED to a value before
+        // the #3808 fix; `inf`/`infinity`/`0x1p3`/`1.0f`/`2.0d` were already rejected, and
+        // are kept so a future rewrite cannot lose them.
         for lex in [
-            "INF", "+INF", "-INF", "NaN", "0", "-0", "1", "1.0E3", "-2.5", "1e-7",
-            // Rust-FromStr-only spellings XSD rejects, plus junk
-            "inf", "Infinity", "nan", "0x1p3", "1.0f", "2.0d", "", "abc",
+            "inf", "+inf", "-inf", "infinity", "Inf", "iNf", "Infinity", "INFINITY",
+            "+Infinity", "-Infinity", "nan", "NAN", "nAn", "0x1p3", "0X1P3", "1.0f", "2.0d",
+            "1_000", "1.5 ", " 1.5", "abc", "",
         ] {
             assert_eq!(
-                parse_xsd_float_single(lex).is_some(),
-                parse_xsd_float(lex).is_some(),
-                "float/double lexical acceptance disagrees on {:?}",
+                parse_xsd_float(lex),
+                None,
+                "f64 parser accepted the non-XSD lexical {:?}",
+                lex
+            );
+            assert_eq!(
+                parse_xsd_float_single(lex).map(f32::to_bits),
+                None,
+                "f32 parser accepted the non-XSD lexical {:?}",
                 lex
             );
         }
+
+        // The XSD-legal spellings must still be ACCEPTED — a predicate that rejects
+        // everything would pass the loop above, so pin the other direction too.
+        for lex in [
+            "INF", "+INF", "-INF", "0", "-0", "+0", "1", "1.", ".5", "1.0E3", "-2.5", "1e-7",
+            "+1.5E+3", "12345678901234567890",
+        ] {
+            assert!(
+                parse_xsd_float(lex).is_some(),
+                "f64 parser rejected the XSD-legal lexical {:?}",
+                lex
+            );
+            assert!(
+                parse_xsd_float_single(lex).is_some(),
+                "f32 parser rejected the XSD-legal lexical {:?}",
+                lex
+            );
+        }
+        // `NaN` is legal but never `is_some()`-comparable by value; assert it separately.
+        assert!(parse_xsd_float("NaN").expect("NaN").is_nan());
         assert!(parse_xsd_float_single("NaN").expect("NaN").is_nan());
+
+        // ANTI-DRIFT: this crate's acceptance must equal the engine's own strict parser's
+        // over the whole matrix. Before #3808 the scorer was strictly MORE lenient than the
+        // engine it scores — exactly the direction that inflates a conformance number.
+        for lex in [
+            "inf", "infinity", "Infinity", "INFINITY", "+Infinity", "-Infinity", "nan", "NAN",
+            "0x1p3", "1.0f", "2.0d", "1_000", "abc", "", "INF", "+INF", "-INF", "NaN", "0",
+            "-0", "1", "1.", ".5", "1.0E3", "-2.5", "1e-7", "+1.5E+3", "12345678901234567890",
+        ] {
+            assert_eq!(
+                parse_xsd_float(lex).is_some(),
+                sparq_core::parse_xsd_f64(lex).is_some(),
+                "conformance scorer and engine parser disagree on {:?}",
+                lex
+            );
+            assert_eq!(
+                parse_xsd_float_single(lex).is_some(),
+                sparq_core::parse_xsd_f64(lex).is_some(),
+                "conformance scorer (f32) and engine parser disagree on {:?}",
+                lex
+            );
+        }
+
         assert_eq!(parse_xsd_float_single("-INF"), Some(f32::NEG_INFINITY));
         assert_eq!(
             parse_xsd_float_single("-0.0").map(f32::to_bits),
