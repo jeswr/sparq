@@ -794,6 +794,39 @@ pub enum CircuitId {
     // (`dual-leaf`), research-grade, NOT externally audited.
     #[cfg(feature = "dual-leaf")]
     FilterValueDlDecimal,
+    /// `filter_value_dl_datetime` — DUAL-LEAF value-lane FILTER over a committed
+    /// `xsd:dateTime` OR `xsd:date` ([OPUS-5] sq-wz99x, the dateTime/date sibling
+    /// of [`Self::FilterValueDl`]; `research/zk-field-native-encoding.md` §13.5).
+    /// Structurally [`Self::FilterValueDlDecimal`] with a different value handle:
+    /// the `VALUE_HOOK` is the SIGNED SCALED EPOCH (milliseconds from
+    /// `1970-01-01T00:00:00Z` on the XSD proleptic-Gregorian `timeOnTimeline`, at
+    /// the lane-fixed sub-second scale `FS = 3`), so it reuses the member's
+    /// UNCHANGED signed fixed-point verdict with NO in-circuit blake3.
+    ///
+    /// ONE compiled member serves BOTH datatype classes. `xsd:date` is its own
+    /// lane only by its PUBLIC `datatype_const`
+    /// (`sparq_zk::dual_leaf_datetime::{datetime_datatype_const,
+    /// date_datatype_const}` — `blake3(IRI ‖ "@epochscale=3")`), which is folded
+    /// into `value_component`; a date's hook is the scaled epoch of its STARTING
+    /// instant and is therefore numerically EQUAL to the dateTime hook of that same
+    /// instant, so the lane constant is the only thing keeping the two apart (an
+    /// honest date witness rebinds to a different leaf under the dateTime constant
+    /// and fails the member's leaf assert). That is a BINDING argument resting on
+    /// Poseidon2 preimage resistance, NOT an audited soundness claim.
+    ///
+    /// The hookable DOMAIN (strict XSD-canonical `Z`-timezoned lexicals only) is
+    /// the host's §13.4 fail-closed predicate, not an in-circuit check — the same
+    /// division of labour the decimal member uses for its canonical fraction width.
+    /// LEGAL ONLY against `DualLeafV1` / `ValueOnlyV1` — fail-closed via
+    /// `crate::dispatch`.
+    ///
+    /// DOCUMENTED RISK: carries the INV-VL downgrade, and the whole §13 rule set is
+    /// itself an OPEN external-audit obligation (CR-G8 / sq-qhy4). NOT externally
+    /// audited; no soundness / privacy claim.
+    // [OPUS-5] sq-wz99x: dual-leaf value-lane dateTime/date FILTER member. Opt-in
+    // (`dual-leaf`), research-grade, NOT externally audited.
+    #[cfg(feature = "dual-leaf")]
+    FilterValueDlDateTime,
     /// `revoke_unset_d{depth}` — hidden-index status-list inclusion + bit-unset
     /// proof over a depth-`depth` Poseidon2 Merkle tree (sq-3e5 / sq-h2v). The
     /// proof's PUBLIC inputs are `challenge` + the status-list Merkle `root`; the
@@ -954,6 +987,11 @@ impl CircuitId {
             CircuitId::FilterValueDlF64 => "filter_value_dl_f64".to_string(),
             #[cfg(feature = "dual-leaf")]
             CircuitId::FilterValueDlDecimal => "filter_value_dl_decimal".to_string(),
+            // [OPUS-5] sq-wz99x: the dateTime/date datatype-class sibling. ONE
+            // package for BOTH lanes — the lane lives in the public
+            // `datatype_const`, not the member name.
+            #[cfg(feature = "dual-leaf")]
+            CircuitId::FilterValueDlDateTime => "filter_value_dl_datetime".to_string(),
             CircuitId::RevokeUnset { depth } => format!("revoke_unset_d{depth}"),
             // [OPUS-5] sq-kndw: the (status-list depth, accepted-set depth) pair
             // names the compiled fully-hidden member, e.g. revoke_hidden_ref_d10_a4.
@@ -1208,6 +1246,47 @@ pub enum ProofInputs {
         /// The disclosed verdict.
         expected: bool,
     },
+    /// filter_value_dl_datetime: DUAL-LEAF value-lane FILTER over a committed
+    /// `xsd:dateTime` OR `xsd:date` ([OPUS-5] sq-wz99x). These fields are EXACTLY
+    /// the `pub` parameters of the `filter_value_dl_datetime` member `main`
+    /// (`zk/compose/filter_value_dl_datetime/src/main.nr`), in declaration order
+    /// AFTER the prepended `challenge`:
+    ///
+    /// ```text
+    /// [challenge, operand_enc, op, bound_neg, bound_scaled_epoch, datatype_const, expected]
+    /// ```
+    ///
+    /// `operand_enc` is the DUAL-LEAF `Enc` over the SIGNED SCALED EPOCH; the
+    /// `VALUE_HOOK` (sign + scaled epoch) and `lexical_component` are PRIVATE; the
+    /// FILTER's constant instant is carried sign-split + host-converted as
+    /// `(bound_neg, bound_scaled_epoch = |T_bound|` in milliseconds`)`, and
+    /// `datatype_const = blake3(<xsd:dateTime|xsd:date IRI> ‖ "@epochscale=3")` is
+    /// PUBLIC — it SELECTS the lane and folds the sub-second scale `FS` (the B4
+    /// bind). The dateTime and date lanes share this ONE member and are separated
+    /// by that constant alone. DOCUMENTED RISK: INV-VL downgrade, and the §13 rule
+    /// set is an OPEN external-audit obligation (CR-G8 / sq-qhy4); NOT externally
+    /// audited.
+    // [OPUS-5] sq-wz99x: dual-leaf dateTime/date value-lane FILTER inputs. Opt-in.
+    #[cfg(feature = "dual-leaf")]
+    #[serde(rename = "filter_value_dl_datetime")]
+    FilterValueDlDateTime {
+        id: CircuitId,
+        /// The hidden column's DUAL-LEAF dateTime/date term encoding (the scan-proof
+        /// anchor).
+        operand_enc: FieldHex,
+        op: FilterOp,
+        /// Sign of the FILTER's constant instant (`true` = pre-epoch).
+        bound_neg: bool,
+        /// `|T_bound|` in milliseconds — the FILTER constant on the same scaled-epoch
+        /// timeline as the value handle.
+        bound_scaled_epoch: u64,
+        /// `blake3(<datatype IRI> ‖ "@epochscale=3")` as a field — SELECTS the
+        /// dateTime lane ([`datetime_datatype_const`]) or the date lane
+        /// ([`date_datatype_const`]) and folds the scale.
+        datatype_const: FieldHex,
+        /// The disclosed verdict.
+        expected: bool,
+    },
     /// `join_eq_na{n_a}_nb{n_b}`: hidden cross-credential JOIN
     /// (sq-bwwl / sq-fi03, `research/zk-hidden-join-design.md` §2.2/§3.2). These
     /// fields are EXACTLY the `pub` parameters of the `join_eq` member `main`, in
@@ -1322,6 +1401,9 @@ impl ProofInputs {
             ProofInputs::FilterValueDlF64 { id, .. } => id,
             #[cfg(feature = "dual-leaf")]
             ProofInputs::FilterValueDlDecimal { id, .. } => id,
+            // [OPUS-5] sq-wz99x: dual-leaf dateTime/date value-lane FILTER.
+            #[cfg(feature = "dual-leaf")]
+            ProofInputs::FilterValueDlDateTime { id, .. } => id,
             // [OPUS-4.8] sq-bwwl / sq-fi03 (step 3): hidden cross-credential JOIN.
             ProofInputs::JoinEq { id, .. } => id,
             // [OPUS-4.8] sq-3kd2g.6: bounded-depth path reachability.
@@ -1367,6 +1449,63 @@ pub fn boolean_datatype_const() -> FieldHex {
     FieldHex(field_to_hex(&sparq_zk::dual_leaf::datatype_const(
         sparq_zk::dual_leaf_boolean::XSD_BOOLEAN,
     )))
+}
+
+/// The PUBLIC `datatype_const` of the DUAL-LEAF `xsd:dateTime` value lane
+/// (sq-wz99x) — `blake3_field("<xsd:dateTime IRI>@epochscale=3")`, exactly the
+/// constant `sparq_zk::dual_leaf_datetime::encode_datetime` (the host half,
+/// sq-we9vs) folds into the committed leaf's `value_component`. It carries the
+/// lane-fixed sub-second scale `FS`, so a hook at one scale can never collide a
+/// hook at another (the B4 bind, the `@scale=` construction of the decimal lane).
+///
+/// Pair it with [`CircuitId::FilterValueDlDateTime`] /
+/// [`ProofInputs::FilterValueDlDateTime`]; build one with
+/// [`crate::build::build_filter_value_dl_datetime`].
+///
+/// DOCUMENTED RISK: inherits the value lane's INV-VL downgrade (#769 accepted,
+/// CR-G8 / sq-qhy4), and the §13 rule set is itself an OPEN external-audit
+/// obligation. NOT externally audited; no soundness / privacy claim.
+// [OPUS-5] sq-wz99x: dateTime lane constant. Opt-in (`dual-leaf`), NOT-yet-sound.
+#[cfg(feature = "dual-leaf")]
+pub fn datetime_datatype_const() -> FieldHex {
+    FieldHex(field_to_hex(
+        &sparq_zk::dual_leaf_datetime::datetime_datatype_const(),
+    ))
+}
+
+/// The PUBLIC `datatype_const` of the DUAL-LEAF `xsd:date` value lane (sq-wz99x)
+/// — `blake3_field("<xsd:date IRI>@epochscale=3")`, the constant
+/// `sparq_zk::dual_leaf_datetime::encode_date` folds into the committed leaf.
+///
+/// # The date lane adds NO second Noir member
+///
+/// It shares [`CircuitId::FilterValueDlDateTime`] with the dateTime lane: that
+/// member's `datatype_const` is a PUBLIC input, and a date's `VALUE_HOOK` is the
+/// scaled epoch of the date's STARTING instant (midnight UTC — XSD orders dates by
+/// their starting moment), which lives in the SAME signed-`u64` domain the member
+/// already compares. So the lane is pure WIRING: host and verifier pick THIS
+/// constant instead of [`datetime_datatype_const`]`()`.
+///
+/// # Lane separation is the public `datatype_const`, and only that
+///
+/// A date's hook is NUMERICALLY EQUAL to the dateTime hook of the same starting
+/// instant (`"1970-01-02Z"` and `"1970-01-02T00:00:00Z"` both hook `86_400_000`),
+/// so the constant is the ONLY thing keeping the two terms apart. Because it is
+/// folded into `value_component = h3(VALUE_HOOK, DATATYPE_CONST, LANG_NONE)` and
+/// the two constants differ, an honest date witness recomputes a DIFFERENT leaf
+/// under the dateTime constant and fails the member's
+/// `assert_eq(leaf, operand_enc)` binding — and symmetrically. That is a BINDING
+/// argument resting on Poseidon2 preimage resistance, NOT an audited soundness
+/// claim.
+///
+/// DOCUMENTED RISK: as [`datetime_datatype_const`] (CR-G8 / sq-qhy4). NOT
+/// externally audited; no soundness / privacy claim.
+// [OPUS-5] sq-wz99x: date lane constant. Opt-in (`dual-leaf`), NOT-yet-sound.
+#[cfg(feature = "dual-leaf")]
+pub fn date_datatype_const() -> FieldHex {
+    FieldHex(field_to_hex(
+        &sparq_zk::dual_leaf_datetime::date_datatype_const(),
+    ))
 }
 
 /// One composed sub-proof: the circuit member, its public inputs, and the
