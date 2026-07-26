@@ -19,7 +19,7 @@ current fail-closed refusal of the whole bucket stays correct and is unchanged b
 
 ## 0. What #4284 asked
 
-#3752 landed the axis-order gate but deliberately did not act on the no-AXIS bucket. The
+Issue #3752 landed the axis-order gate but deliberately did not act on the no-AXIS bucket. The
 premise recorded there was an **inference about an upstream exporter's behaviour**: the WKT1
 export "appears to omit AXIS nodes exactly when the official EPSG order is not
 easting/northing". Acting on it means emitting silently-transposed coordinates for 1249 codes
@@ -28,7 +28,7 @@ coordinate-system axis table — before any swap is trusted.
 
 ## 1. Correction to the premise: the upstream is PostGIS, not crs-csv
 
-#4284 (and the module docs) attributed the data to "crs-csv". That is wrong.
+Issue #4284 (and the module docs) attributed the data to "crs-csv". That is wrong.
 `crs-definitions` 0.5.0 generates `src/defs.rs` from **PostGIS `spatial_ref_sys`** —
 `scripts/regenerate.py` spins up `postgis/postgis:16-3.4` and dumps
 
