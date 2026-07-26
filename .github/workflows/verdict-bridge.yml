@@ -140,14 +140,36 @@ jobs:
     # be conditional), and admit an event ONLY when its payload names a pull request.
     # An issue comment on a plain issue, or a ci-summary run with no associated PR, would
     # otherwise start a full ~9-minute repository sweep on someone else's say-so.
+    #
+    # VOLUME. MEASURED over the 24h to 2026-07-26T22:30Z: 1286 comments on PRs and 8524
+    # lifetime ci-summary runs. Admitting all of them would add >1300 jobs/day, and this
+    # repo has a documented congestion-collapse mode where over-dispatching saturates the
+    # runners and manufactures FALSE gate failures — a "fix" that makes throughput worse.
+    # Two filters below, both provably NARROWING and both cron-backstopped:
+    #
+    #   contains(comment.body, 'VERDICT') — every comment the policy can act on has a
+    #   last non-blank line matching verdict-bridge.py's VERDICT_SHAPE_RE, which requires
+    #   the literal case-insensitive token `VERDICT`. A comment WITHOUT it decides
+    #   nothing: `decide()` never retracts on the ABSENCE of a verdict. So the filter is
+    #   a strict superset of the evidence set, pinned by
+    #   test_the_comment_body_filter_is_a_SUPERSET_of_the_evidence_the_policy_reads.
+    #   The body is used only inside this `if:`, which GitHub evaluates itself — it never
+    #   reaches a shell (see test_no_untrusted_payload_text_is_interpolated_into_a_shell).
+    #
+    #   workflow_run.conclusion == 'success' — the gate conclusion is consulted by exactly
+    #   one decision, `flag`, and only via is_green_and_ready. A non-success conclusion can
+    #   therefore only ever make a PR LESS flaggable, and the bridge never unflags on a red
+    #   gate (unflag requires a verdict, which arrives on the comment/review path). Pinned
+    #   by test_only_a_SUCCESSFUL_gate_can_change_a_decision_the_ci_event_uniquely_enables.
+    #
     # Pinned by scripts/tests/test_verdict_bridge.py::TestJobConditionAdmission, which
     # EVALUATES this expression against synthetic payloads rather than grepping it.
     if: >-
       github.event_name == 'schedule'
       || github.event_name == 'workflow_dispatch'
-      || (github.event_name == 'issue_comment' && github.event.issue.pull_request != null)
+      || (github.event_name == 'issue_comment' && github.event.issue.pull_request != null && contains(github.event.comment.body, 'VERDICT'))
       || (github.event_name == 'pull_request_review' && github.event.pull_request.number != null)
-      || (github.event_name == 'workflow_run' && github.event.workflow_run.pull_requests[0].number != null)
+      || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.pull_requests[0].number != null)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:

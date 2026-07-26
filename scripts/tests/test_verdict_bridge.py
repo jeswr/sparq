@@ -1339,7 +1339,7 @@ def cron_minutes(doc: dict) -> set[int]:
 # and dotted context paths with [n] indexing.
 
 _TOKEN = re.compile(
-    r"\s*(\(|\)|\|\||&&|==|!=|'[^']*'|[A-Za-z_][A-Za-z0-9_.\[\]]*)"
+    r"\s*(\(|\)|,|\|\||&&|==|!=|'[^']*'|[A-Za-z_][A-Za-z0-9_.\[\]]*)"
 )
 
 
@@ -1406,6 +1406,15 @@ class _ExprParser:
             value = self.or_expr()
             assert self.take() == ")", "unbalanced parentheses"
             return value
+        if tok == "contains" and self.peek() == "(":
+            self.take()
+            haystack = self.or_expr()
+            assert self.take() == ",", "contains() takes two arguments"
+            needle = self.or_expr()
+            assert self.take() == ")", "unbalanced parentheses"
+            # GitHub's contains() is CASE-INSENSITIVE for strings — load-bearing here,
+            # because verdict-bridge.py's VERDICT_SHAPE_RE is re.IGNORECASE.
+            return str(needle).lower() in str(haystack or "").lower()
         if tok.startswith("'"):
             return tok[1:-1]
         if tok == "null":
@@ -1470,6 +1479,22 @@ class TestExpressionEvaluatorItself(unittest.TestCase):
                 "|| github.event_name == 'issue_comment') "
                 "&& github.event.issue.pull_request == null",
                 ctx,
+            )
+        )
+
+    def test_contains_is_case_insensitive_and_absent_safe(self):
+        ctx = payload("issue_comment", comment={"body": "reviewed\n\nverdict: fail"})
+        self.assertTrue(evaluate_if("contains(github.event.comment.body, 'VERDICT')", ctx))
+        self.assertFalse(
+            evaluate_if(
+                "contains(github.event.comment.body, 'VERDICT')",
+                payload("issue_comment", comment={"body": "lgtm"}),
+            )
+        )
+        self.assertFalse(
+            evaluate_if(
+                "contains(github.event.comment.body, 'VERDICT')",
+                payload("issue_comment", comment={}),
             )
         )
 
@@ -1690,22 +1715,101 @@ class TestWorkflowWiring(unittest.TestCase):
                     _ExprParser(_tokenize(inner), payload(event_name)).parse(), expected
                 )
 
+    UNTRUSTED_PAYLOAD_PATHS = (
+        "github.event.comment.body",
+        "github.event.issue.title",
+        "github.event.issue.body",
+        "github.event.review.body",
+        "github.event.pull_request.title",
+        "github.event.pull_request.head.ref",
+        "github.event.workflow_run.head_branch",
+    )
+
     def test_no_untrusted_payload_text_is_interpolated_into_a_shell(self):
-        """The trust rail. A comment body / title / branch name reaching a `run:` is the
-        classic script-injection sink; only the integer PR number may cross."""
-        forbidden = (
-            "github.event.comment.body",
-            "github.event.issue.title",
-            "github.event.issue.body",
-            "github.event.review.body",
-            "github.event.pull_request.title",
-            "github.event.pull_request.head.ref",
-            "github.event.workflow_run.head_branch",
+        """The trust rail. A comment body / title / branch name reaching a `run:`, a step
+        `env:` or a step `with:` is the classic script-injection sink; only the integer PR
+        number may cross into the execution environment.
+
+        A job-level `if:` is deliberately NOT a sink — GitHub evaluates it itself and the
+        value never reaches bash. The comment-body volume filter lives there, and only
+        there; test_the_comment_body_is_read_ONLY_by_the_job_condition pins that.
+        """
+        sinks = json.dumps(
+            [
+                {k: step.get(k) for k in ("run", "env", "with")}
+                for step in self.steps
+            ]
+            + [self.job.get("env"), self.doc.get("env"), self.doc.get("concurrency")]
         )
+        for path in self.UNTRUSTED_PAYLOAD_PATHS:
+            with self.subTest(sink=path):
+                self.assertNotIn(path, sinks)
+
+    def test_the_comment_body_is_read_ONLY_by_the_job_condition(self):
         blob = json.dumps(self.doc)
-        for sink in forbidden:
-            with self.subTest(sink=sink):
-                self.assertNotIn(sink, blob)
+        occurrences = blob.count("github.event.comment.body")
+        self.assertEqual(
+            occurrences,
+            str(self.job["if"]).count("github.event.comment.body"),
+            "the comment body appears somewhere other than the job `if:`",
+        )
+        self.assertLessEqual(occurrences, 1)
+
+    def test_the_comment_body_filter_is_a_SUPERSET_of_the_evidence_the_policy_reads(self):
+        """The volume filter must not be able to drop a comment the policy would act on.
+
+        Driven off the LIVE ``VERDICT_SHAPE_RE`` / ``trailing_verdict``: for any body,
+        if the policy reads a verdict out of it, the workflow condition must admit it.
+        """
+        condition = str(self.job["if"])
+        bodies = [
+            f"{'a' * 40}\n\nVERDICT: pass",
+            f"{'a' * 40}\n\nVERDICT: fail",
+            f"{'a' * 40}\n\n**VERDICT: Fail**",
+            f"{'a' * 40}\n\nverdict: unclear",
+            "VERDICT: FAIL",
+            "VERDICT - pass",
+            "VERDICT:",
+            "lgtm, merging",              # no verdict -> policy decides nothing
+            "> VERDICT: pass",            # a MENTION -> policy decides nothing
+            "",
+        ]
+        for body in bodies:
+            with self.subTest(body=body[:32]):
+                policy_acts = vb.trailing_verdict(body) is not None
+                admitted = evaluate_if(
+                    condition,
+                    payload(
+                        "issue_comment",
+                        issue={"number": 4324, "pull_request": {"url": "u"}},
+                        comment={"body": body},
+                    ),
+                )
+                if policy_acts:
+                    self.assertTrue(
+                        admitted, "the filter dropped a comment the policy reads"
+                    )
+
+    def test_only_a_SUCCESSFUL_gate_can_change_a_decision_the_ci_event_uniquely_enables(self):
+        """Justifies `workflow_run.conclusion == 'success'`.
+
+        The gate conclusion reaches `decide()` only through `is_green_and_ready`, which
+        guards `flag`. So over the population the CI event uniquely covers — a PR with NO
+        head-bound verdict, where no comment or review event will fire — a non-success
+        conclusion can only ever produce `none`. Dropping those events loses nothing, and
+        the cron still reconciles.
+        """
+        reader = bridge(FakeGitHub([node(4200)]))
+        for gate in ("failure", "cancelled", "timed_out", "action_required", None):
+            with self.subTest(conclusion=gate):
+                self.assertEqual(
+                    vb.decide(reader.parse_node(node(4200), gate), []).action,
+                    "none",
+                    "a non-success gate produced an actionable decision after all",
+                )
+        self.assertEqual(
+            vb.decide(reader.parse_node(node(4200), "success"), []).action, "flag"
+        )
 
     def test_it_has_no_contents_write_authority(self):
         perms = self.doc["permissions"]
@@ -1757,43 +1861,55 @@ class TestJobConditionAdmission(unittest.TestCase):
         self.assertTrue(self.admits(payload("schedule")))
         self.assertTrue(self.admits(payload("workflow_dispatch")))
 
-    def test_a_comment_on_a_PULL_REQUEST_is_admitted(self):
-        self.assertTrue(
-            self.admits(
-                payload(
-                    "issue_comment",
-                    issue={"number": 4324, "pull_request": {"url": "https://x"}},
-                )
-            )
-        )
+    def comment_event(self, body, *, is_pr=True):
+        issue = {"number": 4324}
+        if is_pr:
+            issue["pull_request"] = {"url": "https://x"}
+        return payload("issue_comment", issue=issue, comment={"body": body})
+
+    def test_a_VERDICT_comment_on_a_PULL_REQUEST_is_admitted(self):
+        self.assertTrue(self.admits(self.comment_event("reviewed\n\nVERDICT: pass")))
 
     def test_a_comment_on_a_PLAIN_ISSUE_is_refused(self):
         """Otherwise any commenter on any of the ~1300 open issues could start a
         full-repository sweep."""
-        self.assertFalse(
-            self.admits(payload("issue_comment", issue={"number": 1111}))
-        )
+        self.assertFalse(self.admits(self.comment_event("VERDICT: pass", is_pr=False)))
+
+    def test_ordinary_PR_chatter_is_refused(self):
+        """MEASURED 1286 comments on PRs in 24h. Admitting all of them would add >1300
+        jobs/day into a repo with a known congestion-collapse mode. The filter is a
+        provable superset of the evidence set — see
+        TestWorkflowWiring::test_the_comment_body_filter_is_a_SUPERSET_of_...
+        """
+        for body in ("lgtm", "rebased onto main", "", "ping @jeswr"):
+            with self.subTest(body=body):
+                self.assertFalse(self.admits(self.comment_event(body)))
 
     def test_a_pull_request_review_is_admitted(self):
         self.assertTrue(
             self.admits(payload("pull_request_review", pull_request={"number": 4324}))
         )
 
-    def test_a_ci_summary_run_WITH_an_associated_pr_is_admitted(self):
-        self.assertTrue(
-            self.admits(
-                payload("workflow_run", workflow_run={"pull_requests": [{"number": 4324}]})
-            )
+    def ci_event(self, conclusion="success", pulls=({"number": 4324},)):
+        return payload(
+            "workflow_run",
+            workflow_run={"conclusion": conclusion, "pull_requests": list(pulls)},
         )
+
+    def test_a_SUCCESSFUL_ci_summary_run_WITH_an_associated_pr_is_admitted(self):
+        self.assertTrue(self.admits(self.ci_event()))
 
     def test_a_ci_summary_run_with_NO_associated_pr_is_refused(self):
         """merge_group refs and fork heads report an empty pull_requests array. The cron
         reconciles them; an unscoped sweep per merge-queue batch would not."""
         for runs in ([], [{}]):
             with self.subTest(pull_requests=runs):
-                self.assertFalse(
-                    self.admits(payload("workflow_run", workflow_run={"pull_requests": runs}))
-                )
+                self.assertFalse(self.admits(self.ci_event(pulls=runs)))
+
+    def test_a_non_successful_ci_summary_run_is_refused(self):
+        for conclusion in ("failure", "cancelled", "skipped", "timed_out", None):
+            with self.subTest(conclusion=conclusion):
+                self.assertFalse(self.admits(self.ci_event(conclusion=conclusion)))
 
     def test_an_unknown_event_is_refused(self):
         """Adding a trigger without extending this condition must not fall through to an
