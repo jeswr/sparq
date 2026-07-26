@@ -167,12 +167,43 @@ def test_cli_end_to_end():
         check("cli.corrupted.no_timing_rows", e["rows"], [])
 
 
+# --- 6. protocol caveats are machine-attached, not prose (sq-rpdae) ----------
+def test_protocol_caveat():
+    with tempfile.TemporaryDirectory() as td:
+        comp = os.path.join(td, "competitor.tsv")
+        env = os.path.join(td, "envelope.json")
+        r = run_cli(["ref-counts", "--replay", REPLAY_SRBENCH, "--scenario", "srbench_join",
+                     "--raw-reports"])
+        with open(comp, "w") as f:
+            f.write(r.stdout)
+            f.write("timing\trsp_replay_push_triples_per_s\t12345\ttriples_per_s\n")
+        caveat = "window alignment differs: agreement is replay-contingent, not semantic"
+        r = run_cli(["count-match", "--scenario", "srbench_join", "--competitor", comp,
+                     "--replay", REPLAY_SRBENCH, "--out", env, "--protocol-caveat", caveat])
+        check("caveat.exit", r.returncode, 0)
+        e = json.load(open(env))
+        check("caveat.in_envelope", e["protocol_caveats"], [caveat])
+        # the load-bearing half: it rides on every emitted row, so a consumer reading
+        # only `rows` cannot lose it
+        check("caveat.on_every_row",
+              all(r_.get("protocol_caveats") == [caveat] for r_ in e["rows"]), True)
+        check("caveat.rows_present", len(e["rows"]) >= 1, True)
+        # absent by default => no empty key noise on the existing envelopes
+        r = run_cli(["count-match", "--scenario", "srbench_join", "--competitor", comp,
+                     "--replay", REPLAY_SRBENCH, "--out", env])
+        e = json.load(open(env))
+        check("caveat.default_empty", e["protocol_caveats"], [])
+        check("caveat.absent_from_rows",
+              any("protocol_caveats" in r_ for r_ in e["rows"]), False)
+
+
 def main():
     test_parse_replay()
     test_ref_counts_match_oracle()
     test_map_reports()
     test_gate()
     test_cli_end_to_end()
+    test_protocol_caveat()
     print("\n%d passed, %d failed" % (PASS, FAIL))
     return 1 if FAIL else 0
 
