@@ -293,10 +293,10 @@ standard toolchain. Miri does not model a `#[global_allocator]` that calls `Syst
 
 | File:line | Kind | Invariant relied on | Why sound / how bounded |
 |---|---|---|---|
-| `src/memory.rs:135` | `unsafe impl GlobalAlloc for BoundedAlloc` | forward-to-`System` | every method delegates verbatim to `System` with the same args; the wrapper adds only `Relaxed` live/peak counter updates and never alters the returned pointer or the requested layout. |
-| `src/memory.rs:136` | `unsafe fn alloc` | caller's `layout` contract forwarded | `System.alloc(layout)` unchanged; only the returned pointer's nullness is inspected before recording `layout.size()`, so a failed allocation is not counted as live. |
-| `src/memory.rs:144` | `unsafe fn dealloc` | `ptr` came from this allocator with this `layout` | `System.dealloc(ptr, layout)` unchanged; holds because every `alloc`/`realloc` also forwarded to `System`. The counter decrement is balanced by construction — the allocator is installed before the first allocation, so no pointer predates it. |
-| `src/memory.rs:149` | `unsafe fn realloc` | caller's `ptr`/`layout`/`new_size` contract forwarded | `System.realloc(ptr, layout, new_size)` unchanged; only the returned pointer's nullness is inspected before recording the `layout.size()` → `new_size` delta, so a failed realloc leaves the old size counted (which it still is). |
+| `src/memory.rs:144` | `unsafe impl GlobalAlloc for BoundedAlloc` | forward-to-`System` | every method delegates verbatim to `System` with the same args; the wrapper adds only `Relaxed` live/peak counter updates and never alters the returned pointer or the requested layout. |
+| `src/memory.rs:145` | `unsafe fn alloc` | caller's `layout` contract forwarded | `System.alloc(layout)` unchanged; only the returned pointer's nullness is inspected before recording `layout.size()`, so a failed allocation is not counted as live. |
+| `src/memory.rs:153` | `unsafe fn dealloc` | `ptr` came from this allocator with this `layout` | `System.dealloc(ptr, layout)` unchanged; holds because every `alloc`/`realloc` also forwarded to `System`. The counter decrement is balanced by construction — the allocator is installed before the first allocation, so no pointer predates it. |
+| `src/memory.rs:158` | `unsafe fn realloc` | caller's `ptr`/`layout`/`new_size` contract forwarded | `System.realloc(ptr, layout, new_size)` unchanged; only the returned pointer's nullness is inspected before recording the `layout.size()` → `new_size` delta, so a failed realloc leaves the old size counted (which it still is). |
 
 ## NEEDS-REVIEW
 
