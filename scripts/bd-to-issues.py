@@ -742,7 +742,14 @@ def _self_test():
     # the decoy threat model's attacker is unprivileged, so the author check is what closes the hole.
     legit = {"number": 42, "title": "sq-legit: do the thing",
              "body": "x\n<!-- bd-id:sq-legit -->\n", "author": {"login": "maintainer"}}
-    decoy = {"number": 43, "title": "please look at this",
+    # [OPUS-5] The decoy MUST satisfy the title contract. Review round 2 measured that the old
+    # title ("please look at this") also violated the title check, so `chk("unprivileged decoy
+    # author is NOT owned")` short-circuited there and NEVER reached `login in writers` — deleting
+    # the author check outright left the whole self-test green. A decoy that copies a marker to
+    # capture a bead id would obviously copy the title format too; the author check is the ONLY
+    # thing standing between an unprivileged forger and a hijacked migration mapping, so it is
+    # the one that has to be isolated here.
+    decoy = {"number": 43, "title": "sq-victim: do the thing",
              "body": "<!-- bd-id:sq-victim -->", "author": {"login": "randomuser"}}
     wrongtitle = {"number": 44, "title": "unrelated title",
                   "body": "<!-- bd-id:sq-titleless -->", "author": {"login": "maintainer"}}
@@ -750,8 +757,55 @@ def _self_test():
                  "body": "matches `<!-- bd-id:… -->`", "author": {"login": "maintainer"}}
     owned = migration_owned([legit, decoy, wrongtitle, prose_iss], {"maintainer"})
     chk("write-author + title contract is migration-owned", owned, {"sq-legit"})
-    chk("unprivileged decoy author is NOT owned", "sq-victim" in owned, False)
+    # ISOLATES the author check: the decoy now satisfies title + unique-marker, so the ONLY
+    # remaining reason it is not owned is that its author lacks write permission.
+    chk("title-contract-satisfying decoy from an unprivileged author is NOT owned",
+        "sq-victim" in owned, False)
     chk("write author WITHOUT the title contract is NOT owned", "sq-titleless" in owned, False)
+
+    # --- _writer_logins: the LOAD-BEARING half of the trust boundary (review round 2) ------------
+    # migration_owned only consumes the `writers` set; the code that BUILDS it was untested, so
+    # "every login is a writer" and "any [bot] is trusted" were both free mutations. Stub the
+    # subprocess boundary (`_run`) so the permission contract is asserted without network.
+    class _Resp:
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    perms = {"maintainer": "admin", "triager": "write", "curator": "maintain",
+             "randomuser": "read", "watcher": ""}
+    api_calls = []
+
+    def _stub_run(args, check=True):
+        api_calls.append(args)
+        assert args[0:2] == ["gh", "api"], args
+        login = args[2].split("/")[-2]
+        return _Resp(perms.get(login, "") + "\n")
+
+    real_run = globals()["_run"]
+    globals()["_run"] = _stub_run
+    try:
+        got = _writer_logins("o/r", ["maintainer", "triager", "curator", "randomuser", "watcher"])
+        chk("only admin/maintain/write logins are writers", got,
+            {"maintainer", "triager", "curator"})
+        chk("a read-only collaborator is NOT a writer", "randomuser" in got, False)
+        chk("an empty/absent permission is NOT a writer (fail closed)", "watcher" in got, False)
+        # `[bot]` logins never hit the collaborators API — an App is not a collaborator — so the
+        # allowlist is the ONLY gate. Trusting the suffix would let anyone who can create a
+        # `*[bot]`-suffixed account author a decoy the migration then treats as its own.
+        n_before = len(api_calls)
+        bots = _writer_logins("o/r", ["sparq-orchestrator[bot]", "attacker[bot]"])
+        chk("only the migration's own App bot is trusted", bots, {"sparq-orchestrator[bot]"})
+        chk("an unlisted [bot] login is NOT a writer", "attacker[bot]" in bots, False)
+        chk("bot logins are decided by the allowlist, not by the permissions API",
+            len(api_calls) - n_before, 0)
+        # the cache must not launder an untrusted login into a trusted one
+        shared = {}
+        _writer_logins("o/r", ["randomuser"], cache=shared)
+        chk("a cached negative stays negative", _writer_logins("o/r", ["randomuser"],
+                                                              cache=shared), set())
+        chk("the cache records the verdict, not the raw permission", shared, {"randomuser": False})
+    finally:
+        globals()["_run"] = real_run
     dup = [dict(legit), dict(legit, number=46)]
     chk("two issues sharing a bd-id are never owned (fail closed)",
         migration_owned(dup, {"maintainer"}), set())
