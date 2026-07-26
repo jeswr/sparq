@@ -554,6 +554,51 @@ jobs:
         run: shellcheck scripts/check-release-aliases.sh scripts/tests/test_check_release_aliases.sh
       - name: Self-test check-release-aliases.sh (golden contract + partial-extraction teeth)
         run: bash scripts/tests/test_check_release_aliases.sh
+      # [OPUS-5] #2531 / maintainer report on PR #4361: the MODEL-ATTRIBUTION honesty gate.
+      # AGENTS.md contract item 5 requires every agent to stamp the model that ACTUALLY
+      # authored a change — an inline `[MODEL]` marker PLUS a `Co-Authored-By: Claude MODEL`
+      # trailer — and rule 11 forbids an agent brief from hard-coding a specific model. Both
+      # were prose-only, and both drifted: `.claude/agents/sparq-rust-impl.md` still tells
+      # every worker routed to that ROLE "you are Sonnet … tag your code with `[SONNET-4.6]`"
+      # regardless of which MODEL the harness actually routed to, so Opus 5 workers have been
+      # stamping `[SONNET-4.6]` on code Sonnet never wrote (PR #4361 added 22 such markers).
+      # The marker is the "re-review the weak model's work" signal, so a false one both hides
+      # real weak-model work and slanders good work — the same duplicated-source-of-truth
+      # failure `check-no-perf-numbers.py` exists to prevent.
+      #   --check-briefs is the ROOT-CAUSE lint (R1: no concrete Co-Authored-By in a brief;
+      #     R2: no self-attribution directive naming a literal marker). It fires on exactly
+      #     one line across all 20 briefs today, and that line is content-fingerprint
+      #     allowlisted because `.claude/agents/*.md` is a PROTECTED surface (rule 11 /
+      #     sq-4fj0r) that no agent may edit — it is needs:user on #2531. The allowlist
+      #     RATCHETS: a stale entry fails, so the exemption cannot outlive the defect.
+      #   The test script additionally drives the --check-commits backstop (every marker a
+      #     commit ADDS must match that commit's own trailer) and asserts the seam below.
+      # Deterministic, stdlib-only, no network — mirrors the other scripts/check-*.py lints.
+      - name: Self-test check-model-attribution.py (brief lint + commit gate, both directions)
+        run: python3 scripts/check-model-attribution.py --self-test
+      - name: "Enforce agent briefs do not hard-code model attribution (#2531) — GATING"
+        run: python3 scripts/check-model-attribution.py --check-briefs
+      - name: shellcheck the model-attribution test + run it (incl. the YAML-seam assertions)
+        run: |
+          shellcheck scripts/tests/test_model_attribution.sh
+          bash scripts/tests/test_model_attribution.sh
+      # The PR-level backstop, ADVISORY for now. It catches the symptom wherever it comes
+      # from — a stale brief, a new harness, or an agent copying the markers already in the
+      # file it is editing (measured to be the dominant mechanism: agents routed to briefs
+      # that ARE model-aware still emit `[SONNET-4.6]` when the surrounding file is full of it).
+      # Not yet HARD because a census on 2026-07-26 found 37 of 119 open PRs adding a false
+      # `[SONNET-4.6]`; hard-gating today wedges the merge train on work whose only fault is
+      # mimicry. Advisory-first mirrors the E2E lanes' documented promotion path
+      # (.github/E2E-GATING-POLICY.md). Promotion to HARD is tracked on #2531 and needs two
+      # things first: the protected-surface brief fix, and the residue cleanup.
+      # `--advisory` is a declared MODE of the script, deliberately not a `|| true` in this
+      # workflow — the seam test asserts that distinction so "advisory" can never quietly
+      # become "swallowed".
+      - name: "Model markers added by this PR match their commit trailers (ADVISORY — #2531)"
+        run: |
+          git fetch --quiet --depth=200 origin "${GITHUB_BASE_REF:-main}" || true
+          python3 scripts/check-model-attribution.py --advisory \
+            --check-commits "origin/${GITHUB_BASE_REF:-main}..HEAD"
       # [OPUS-4.8] sq-mkza: end-to-end proof that BOTH honesty gates now cover the
       # paper-factory `.typ` sources (site/papers/**/*.typ) — the highest-stakes
       # OUTWARD surface. Before sq-mkza a hard-coded perf ratio or an unqualified
