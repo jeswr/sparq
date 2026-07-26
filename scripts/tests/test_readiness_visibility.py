@@ -35,6 +35,8 @@ import sys
 import unittest
 from pathlib import Path
 
+import yaml
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = REPO_ROOT / "scripts"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "routing-self-tests.yml"
@@ -52,6 +54,10 @@ def _load(name: str, filename: str):
 
 ready = _load("ready_issues_under_test", "ready-issues.py")
 plan = _load("dispatch_plan_under_test", "dispatch-plan.py")
+triage = _load("triage_under_test", "triage.py")
+# retriage.py imports `triage` by name from its own directory, so SCRIPTS must be importable.
+sys.path.insert(0, str(SCRIPTS))
+retriage = _load("retriage_under_test", "retriage.py")
 
 READY = ["status:ready", "role:impl"]
 
@@ -382,6 +388,178 @@ class TestDiagnoseTaxonomy(unittest.TestCase):
         self.assertEqual(roleless, [])
         self.assertEqual([c[1] for c in cands], [1])
         self.assertEqual(numbers(frontier), [1])
+
+
+class TestRetriageCronSeam(unittest.TestCase):
+    """The YAML seam that makes the retriage sweep a WRITE and not a report.
+
+    [OPUS-5] Until the fetch-reach fix, retriage promoted 0 issues live, so every property of
+    this workflow was unobservable — nothing downstream changed whether it ran, ran dry, or did
+    not run at all. Now that it promotes (74 on the live snapshot), each of these is load-bearing
+    and none of them was pinned by any test:
+
+      * dropping `--apply` turns the cron into a permanent silent dry-run;
+      * `if: false` (or a deleted step/job) stops the sweep with the schedule still green;
+      * removing `issues: write` makes every label write fail one-by-one at runtime.
+
+    Parsed structurally rather than by substring precisely because `if: false` on the job or the
+    step is invisible to a substring search — the measured shape of every uncaught mutant in this
+    repo's workflow-mutation runs.
+    """
+
+    RETRIAGE = REPO_ROOT / ".github" / "workflows" / "retriage.yml"
+    DOCS_QUALITY = REPO_ROOT / ".github" / "workflows" / "docs-quality.yml"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.doc = yaml.safe_load(cls.RETRIAGE.read_text(encoding="utf-8"))
+
+    def _steps(self):
+        jobs = self.doc["jobs"]
+        self.assertIn("retriage", jobs, "the retriage job must exist")
+        job = jobs["retriage"]
+        self.assertNotIn("if", job, "the retriage job must not be conditionally disabled")
+        return job["steps"]
+
+    def _run_blocks(self):
+        blocks = []
+        for step in self._steps():
+            self.assertNotIn("if", step, f"retriage step {step.get('name')!r} is conditional")
+            if "run" in step:
+                blocks.append(step["run"])
+        return "\n".join(blocks)
+
+    def test_the_cron_actually_applies_its_plan(self):
+        # MUTANT: drop `--apply` => the sweep prints a plan forever and promotes nothing.
+        self.assertRegex(self._run_blocks(), r"retriage\.py\b[^\n]*--apply",
+                         "retriage.yml must run retriage.py with --apply, or the cron is a "
+                         "permanent dry-run and no issue is ever promoted")
+
+    def test_the_cron_self_tests_before_it_writes(self):
+        run = self._run_blocks()
+        self.assertLess(run.index("retriage.py --self-test"),
+                        run.index("--apply"),
+                        "the fixtures must run BEFORE the sweep writes labels")
+
+    def test_the_sweep_is_scheduled(self):
+        on = self.doc.get("on") or self.doc.get(True)      # YAML 1.1 parses bare `on:` as True
+        self.assertTrue((on or {}).get("schedule"), "retriage must stay on a schedule")
+
+    def test_the_job_can_write_labels(self):
+        # MUTANT: drop `issues: write` => every promotion fails at runtime, one 403 per issue.
+        perms = self.doc.get("permissions") or {}
+        self.assertEqual(perms.get("issues"), "write",
+                         "retriage writes labels; without issues:write every promotion 403s")
+
+    def test_triage_and_retriage_fixtures_run_on_every_pr(self):
+        # The pair is self-tested in docs-quality.yml so a PR that changes promotion behaviour
+        # reds THERE rather than silently at the next cron fire (#3419). Deleting either
+        # invocation must red this.
+        source = self.DOCS_QUALITY.read_text(encoding="utf-8")
+        for script in ("scripts/triage.py", "scripts/retriage.py"):
+            self.assertIn(f"python3 {script} --self-test", source,
+                          f"{script} --self-test is never RUN on a PR — its assertions are dead")
+
+
+class TestTriageGateAgreesWithReadinessEngine(unittest.TestCase):
+    """`triage.py` and `ready-issues.py` must mean the same thing by "gated".
+
+    [OPUS-5] triage() gated `status:ready` on the single literal `needs:user`, while
+    `ready.is_gated` treats the whole `needs:*` namespace as a hard dispatch gate. So triage
+    attested `status:ready` on `needs:ec2` / `needs:docker` / `needs:zk` issues and the readiness
+    engine was the ONLY thing keeping them off the frontier — a single-point defence for work
+    gated on real external preconditions. Measured live 2026-07-26: 21 open issues carried both
+    a `status:ready` attestation and a real gate.
+    """
+
+    def test_every_gate_the_engine_refuses_also_blocks_attestation(self):
+        for gate in ("needs:ec2", "needs:docker", "needs:zk", "needs:upstream",
+                     "needs:maintainer", "needs:external-subject", "needs:user"):
+            labels = {"priority:P1", "role:impl", "area:sparq-core", gate}
+            self.assertTrue(ready.is_gated(labels),
+                            f"sanity: the readiness engine must treat {gate} as a gate")
+            self.assertFalse(triage.triage(labels, "feature")["ready"],
+                             f"triage attested status:ready on a {gate}-gated issue; the "
+                             "readiness engine is then the only thing keeping it off the "
+                             "frontier")
+
+    def test_an_unknown_future_gate_blocks_by_default(self):
+        # Namespace rule, not an allow-list: a gate invented tomorrow must not need a code change.
+        labels = {"priority:P1", "role:impl", "area:sparq-core", "needs:something-new"}
+        self.assertTrue(ready.is_gated(labels))
+        self.assertFalse(triage.triage(labels, "feature")["ready"])
+
+    def test_the_self_clearing_area_park_is_not_a_permanent_block(self):
+        # needs:area is triage's OWN park. If it counted as blocking, `ready` would be False
+        # forever and the remove that lifts it — which only runs in the ready branch — could
+        # never fire, so an issue that later gains an area would be stuck for good.
+        result = triage.triage(
+            {"priority:P1", "role:impl", "area:sparq-core", "needs:area", "status:untriaged"},
+            "feature")
+        self.assertTrue(result["ready"], "an area landed; the park must lift")
+        self.assertIn("needs:area", result["remove"])
+
+    def test_a_gated_issue_is_not_double_parked_with_needs_area(self):
+        result = triage.triage({"priority:P1", "role:impl", "needs:ec2"}, "task")
+        self.assertNotIn("needs:area", result["add"])
+
+
+class TestRetriageReachesNeverTriagedIssues(unittest.TestCase):
+    """An issue the event triager never ran on carries NO `status:*` label — so a LABEL query
+    cannot find it, and that is exactly how retriage built its queue.
+
+    [OPUS-5] Measured live on sparq-org/sparq 2026-07-26: 242 open statusless issues, 238 of them
+    without the `flow-on` label that #2474's workaround keyed on. `retriage --repo sparq-org/sparq`
+    printed "0 issue(s) promotable"; with the snapshot fetch it plans 74.
+    """
+
+    def test_the_statusless_class_needs_triage_regardless_of_flow_on(self):
+        self.assertTrue(retriage._needs_triage({"priority:P2", "role:impl", "area:sparq-core"}))
+        self.assertTrue(retriage._needs_triage(set()), "a zero-label issue was never triaged")
+        self.assertTrue(retriage._needs_triage({"status:untriaged"}))
+
+    def test_already_routed_and_parked_work_stays_out_of_the_queue(self):
+        # Widening to "no status label" must not drag in-flight or human-parked work back in.
+        for status in ("status:ready", "status:deferred", "status:blocked", "status:parked",
+                       "status:in-progress", "status:in-progress-review"):
+            self.assertFalse(retriage._needs_triage({status}),
+                             f"{status} is already routed; retriage must not churn it")
+
+    def test_reaching_an_issue_is_not_promoting_it(self):
+        # Every gate that refuses a status:untriaged issue must equally refuse a statusless one.
+        trusted = {"jeswr"}
+        refused = [
+            {"number": 1, "author": "jeswr",
+             "labels": ["priority:P1", "role:impl", "area:sparq-zk", "needs:ec2"]},
+            {"number": 2, "author": "jeswr",
+             "labels": ["kind:epic", "priority:P1", "role:impl", "area:sparq-core"]},
+            {"number": 3, "author": "jeswr",
+             "labels": ["trust:untrusted", "priority:P1", "role:impl", "area:sparq-core"]},
+            {"number": 4, "author": "jeswr", "labels": ["priority:P1", "role:impl"]},
+            {"number": 5, "author": "rando",
+             "labels": ["priority:P1", "role:impl", "area:sparq-core"]},
+            {"number": 6, "author": "github-actions[bot]",
+             "labels": ["priority:P1", "role:impl", "area:sparq-core"]},
+            {"number": 7, "author": "jeswr", "labels": []},
+        ]
+        self.assertEqual(retriage.plan_retriage(refused, lambda who: who in trusted), [],
+                         "widening the fetch must not widen what is promoted")
+
+    def test_a_complete_statusless_issue_does_promote(self):
+        rows = [{"number": 9, "author": "jeswr",
+                 "labels": ["priority:P2", "role:impl", "area:sparq-core"]}]
+        self.assertEqual(retriage.plan_retriage(rows, lambda who: who == "jeswr"),
+                         [(9, ["status:ready"], [])])
+
+    def test_the_plan_is_idempotent(self):
+        rows = [{"number": 9, "author": "jeswr",
+                 "labels": ["priority:P2", "role:impl", "area:sparq-core"]}]
+        trusted = (lambda who: who == "jeswr")
+        first = retriage.plan_retriage(rows, trusted)
+        applied = [{**rows[0],
+                    "labels": sorted((set(rows[0]["labels"]) | set(first[0][1])) - set(first[0][2]))}]
+        self.assertEqual(retriage.plan_retriage(applied, trusted), [],
+                         "a second cron fire must not re-edit an already-promoted issue")
 
 
 class TestRoutingSelfTestWorkflowWiring(unittest.TestCase):
