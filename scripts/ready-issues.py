@@ -365,9 +365,113 @@ def partition_path(key, roots=None):
     return _resolve(key, roots)
 
 
+# ---------------------------------------------------------------------------
+# DECLARED SUB-PARTITIONS (sparq#4334 Phase 1) — the only keys allowed a depth-2 path.
+#
+# [OPUS-5] Why this table exists. `research/crate-region-parallelism.md` §3 measured that the
+# NON-crate area buckets carry ~10x the serialisation pressure of the crate buckets at roughly a
+# quarter of the real conflict rate (53 009 co-24h pairs at 13.7% vs 4943 at 56.4%), and §1
+# attributed 58.3% of live conflict-deferrals to a non-crate area. Those buckets are blocking work
+# that mostly would not have collided.
+#
+# Why it is TINY. Splitting a bucket is the UNDER-serialising direction, and under-serialisation is
+# the corrupting one: a wrong-narrow reservation puts two fire-and-forget workers on one file, and
+# the worst case is a semantic conflict that compiles, passes, and is together broken — which git
+# cannot see. So every candidate boundary was screened on merged-PR history (2168 PRs, ~43 days,
+# from `git log --name-only`) and admitted ONLY if the co-24h pairs it would newly let run in
+# parallel measured ZERO file overlap under BOTH labelling models — spanning work labelled with the
+# parent (the rule `subpartition_for_paths` implements) AND spanning work mislabelled to its
+# dominant sub-bucket. Of every depth-1/depth-2 sub-path of bench, ci, site, gui, docs, js and zk
+# with >= 8 PRs of history, exactly the two below passed. The measured runners-up are recorded so
+# nobody re-litigates them from intuition:
+#
+#   boundary                          admits (cons/pess)   colliding   verdict
+#   bench/feature-off-declarations/       680 /  749         0 / 0     DECLARED
+#   bench/zk-compose/                     591 /  591         0 / 0     DECLARED
+#   .github/feature-matrix.d/            1358 / 1429         0 / 20    dropped (1.40%)
+#   .github/workflows/                   1354 / 1730         0 / 66    dropped (3.81%)
+#   site/papers/ (+src/data/papers.ts)    123 /  281         0 /  5    dropped (1.78%)
+#   bench/dashboard/                      368 /  437         0 / 40    dropped (8.66%)
+#   gui/src-tauri/                          7 /   17         0 /  3    dropped (16.7%)
+#   bench, every subdirectory at once    1574 / 3112         0 / 212   dropped (6.81%)
+#
+# `.github/` stays coarse deliberately even though it is the single largest lever: its residual
+# risk is non-zero and its blast radius is the gate every other PR depends on. `zk` is NOT split
+# because the tree the history measured no longer exists — `zk/xpath` and `zk/ieee754` moved
+# upstream in #1602, and 0 of the 862 PRs merged since have touched an xpath path.
+#
+# Adding an entry is a MEASUREMENT, not a naming exercise. Re-run the screen; a boundary that does
+# not measure zero admitted collisions does not belong here.
+SUBPARTITIONS = {
+    # key -> (parent root, path prefixes that DEFINE the region; () marks the residual sibling)
+    #
+    # One declaration file per PR, created and never re-touched: 47 files across 47 PRs, and the
+    # co-24h pairs this frees share not one file. See the memory note `cfg-gated feature-OFF wasm
+    # drift` for why the directory is per-PR in the first place.
+    "bench-declarations": ("bench", ("bench/feature-off-declarations/",)),
+    # A self-contained circuit-benchmark tree: 27 PRs, 27 of them touching nothing else in bench/.
+    "bench-zk-compose": ("bench", ("bench/zk-compose/",)),
+    # The RESIDUAL sibling — every bench/ path no more specific declaration claims (the catalogue,
+    # the baselines, and the ~55 per-suite result trees). It has to be a NAMED key: plain
+    # `area:bench` is the PARENT, and a parent contains its children, so without this name the
+    # carve-outs above would still conflict with all ordinary bench work and free nothing.
+    "bench-suites": ("bench", ()),
+}
+
+
+def _declared_key_for_path(path, root):
+    """The most specific declared sub-key of `root` claiming `path`, else `root`'s residual."""
+    best, best_len = None, -1
+    residual = None
+    for key, (parent, prefixes) in SUBPARTITIONS.items():
+        if parent != root:
+            continue
+        if not prefixes:
+            residual = key
+            continue
+        for prefix in prefixes:
+            if path.startswith(prefix) and len(prefix) > best_len:
+                best, best_len = key, len(prefix)
+    return best if best is not None else residual
+
+
+def subpartition_for_paths(paths):
+    """The COARSEST declared key that covers every path in `paths` — the span rule, executable.
+
+    This is the operational half of the table above, and the half the ZERO-collision measurement
+    assumed: work confined to one declared region takes that region's key; work that SPANS regions
+    takes the PARENT, which contains them all and therefore over-reserves. Returns None when the
+    paths are not wholly inside exactly one declared parent — there is then nothing this table can
+    say, and the caller keeps whatever key it already had.
+
+    Deliberately a pure function of an explicit file list, never of issue prose:
+    `research/crate-region-parallelism.md` §4 rejects prose-derived file prediction because it
+    cannot bound its own error rate. Use this to CHECK a label against a finished diff, never to
+    invent one from a description.
+    """
+    paths = list(paths)
+    roots = {parent for parent, _ in SUBPARTITIONS.values()}
+    touched = {r for p in paths for r in roots if p.startswith(r + "/")}
+    if len(touched) != 1:
+        return None                       # nothing declared, or spans several buckets
+    root = next(iter(touched))
+    if any(not p.startswith(root + "/") for p in paths):
+        return None                       # also touches work outside the bucket
+    keys = {_declared_key_for_path(p, root) for p in paths}
+    if len(keys) == 1 and None not in keys:
+        return next(iter(keys))
+    return root                           # spans sub-regions -> the containing parent
+
+
 def _resolve(key, roots):
     if not key or key == GLOBAL:
         return ()
+    sub = SUBPARTITIONS.get(key)
+    # A declared sub-partition earns its extra depth only while the TREE still confirms its
+    # parent. If the scan came back empty (unreadable checkout) the generic rule below takes over
+    # and the key collapses upward — over-reserving, never the reverse.
+    if sub is not None and sub[0] in roots and key.startswith(sub[0] + _SEP):
+        return (sub[0], key[len(sub[0]) + 1:])
     for ancestor in _ancestors(key):
         if ancestor in roots:
             return (ancestor,)
@@ -476,6 +580,8 @@ def partition_dump(keys):
     empty set — fully reserving, today's behaviour — exactly as the in-process path does.
     """
     return {"roots": sorted(workspace_roots()),
+            "subpartitions": {k: {"parent": v[0], "paths": list(v[1])}
+                              for k, v in SUBPARTITIONS.items()},
             "non_reserving": sorted(non_reserving_partitions()),
             "resolved": {k: list(partition_path(k)) for k in keys},
             "reserves": {k: reserves_partition(k) for k in keys}}
@@ -1374,6 +1480,48 @@ def _self_test():
           native_channel_alarm([raw_issue(50, []), raw_issue(51, [], summary=summary(0))]), [])
     check("a PR-only snapshot never raises the dark alarm",
           native_channel_alarm([raw_issue(52, [], pr=True)]), [])
+    # [OPUS-5] sparq#4334 Phase 1 DECLARED SUB-PARTITION fixtures. Same three obligations as the
+    # containment fixtures above, one level down: the GAIN, the SAFETY, and the UNKNOWN key.
+    check("declared sub-partition earns a depth-2 path",
+          partition_path("bench-declarations"), ("bench", "declarations"))
+    check("GAIN: two declared siblings do not conflict",
+          keys_conflict("bench-declarations", "bench-zk-compose"), False)
+    check("SAFETY: a declared sub-partition conflicts with its parent bucket",
+          keys_conflict("bench", "bench-declarations")
+          and keys_conflict("bench-declarations", "bench"), True)
+    check("UNKNOWN: an undeclared bench-* key fails safe onto the whole bucket",
+          (partition_path("bench-zzz"), keys_conflict("bench-zzz", "bench-declarations")),
+          (("bench",), True))
+    check("undeclared EXISTING sub-keys stay collapsed on their parent",
+          [partition_path(k) for k in ("bench-canonical", "bench-wasm-compare", "ci-fragments",
+                                       "site-papers", "zk-xpath")],
+          [("bench",), ("bench",), ("ci",), ("site",), ("zk",)])
+    check("declared siblings both enter the frontier in one tick",
+          [i["number"] for i in compute_ready(
+              [iss(84, R + ["priority:P1", "area:bench-declarations"]),
+               iss(85, R + ["priority:P1", "area:bench-zk-compose"]),
+               iss(86, R + ["priority:P1", "area:bench-suites"])], conflict_log=quiet)],
+          [84, 85, 86])
+    check("an open PR on the parent bucket blocks every declared sibling",
+          compute_ready([pr(87, ["area:bench"]),
+                         iss(88, R + ["priority:P1", "area:bench-declarations"]),
+                         iss(89, R + ["priority:P1", "area:bench-suites"])],
+                        conflict_log=quiet), [])
+    check("span rule: work confined to one region takes that region's key",
+          subpartition_for_paths(["bench/feature-off-declarations/4242.json"]),
+          "bench-declarations")
+    check("span rule: work spanning two regions takes the PARENT",
+          subpartition_for_paths(["bench/feature-off-declarations/4242.json",
+                                  "bench/benchmarks.toml"]), "bench")
+    check("span rule: undeclared bench paths take the residual sibling",
+          subpartition_for_paths(["bench/CATALOG.md", "bench/dashboard/dashboard.js"]),
+          "bench-suites")
+    check("span rule: says nothing about paths outside a declared bucket",
+          [subpartition_for_paths(["crates/sparq-core/src/lib.rs"]),
+           subpartition_for_paths(["bench/CATALOG.md", "crates/sparq-core/src/lib.rs"])],
+          [None, None])
+    check("an unreadable tree collapses declared sub-partitions upward",
+          partition_path("bench-declarations", roots=set()), ("bench",))
     check("valid_priority single", valid_priority({"priority:P0"}), 0)
     check("valid_priority ambiguous", valid_priority({"priority:P1", "priority:P2"}), None)
     check("valid_priority out-of-range", valid_priority({"priority:P7"}), None)
