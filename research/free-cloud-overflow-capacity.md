@@ -100,6 +100,21 @@ Two facts about the current estate matter and are easy to miss:
 >
 > — <https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/manage-access>
 
+The longer form is more explicit still, and draws the exact contrast this design turns on:
+
+> "**GitHub**-hosted runners execute code within ephemeral and clean isolated virtual machines,
+> meaning there is no way to persistently compromise this environment… **Self-hosted** runners
+> for GitHub do not have guarantees around running in ephemeral clean virtual machines, and can
+> be persistently compromised by untrusted code in a workflow. As a result, self-hosted runners
+> should almost **never be used for public repositories** on GitHub, because any user can open
+> pull requests against the repository and compromise the environment."
+>
+> — <https://docs.github.com/en/actions/reference/security/secure-use>
+
+**There is no supported way to make a self-hosted runner safe on a public repository.** The only
+place GitHub's documentation acknowledges the case at all is a runner-group setting where the
+default is private-repos-only and public access is an override you deliberately enable.
+
 Both sparq and the registry are public. Taken at face value this rules out the obvious design.
 But the recommendation bundles two separable risks, and separating them is what makes a safe
 subset possible:
@@ -120,6 +135,21 @@ Always-free tiers do not sell that property. Oracle Always Free is *a fixed allo
 running* — 2 OCPU / 12 GB, one or two instances, in your home region. It is a pet, not cattle.
 Reusing one box across worker jobs reintroduces exactly risk (i), against the highest-value
 credentials in the estate (a GitHub App private key and `PROVENANCE_SALT`).
+
+Two refinements matter, because the obvious workaround does not work. GitHub states that
+destroying the machine after each job is **not** sufficient on its own:
+
+> "Some customers might attempt to partially mitigate these risks by implementing systems that
+> automatically destroy the self-hosted runner after each job execution. However, this approach
+> might not be as effective as intended, as **there is no way to guarantee that a self-hosted
+> runner only runs one job**. Some jobs will use secrets as command-line arguments which can be
+> seen by another job running on the same runner, such as `ps x -w`."
+
+The single-job guarantee comes from **registering** the runner as ephemeral (`--ephemeral` or a
+JIT config), not from tearing down the host afterwards — "GitHub only assigns one job to a
+runner" holds only for ephemeral *registration*. And even then GitHub adds: "Re-using hardware to
+host JIT runners can risk exposing information from the environment." A single always-free box
+reused across jobs is precisely re-used hardware.
 
 Worse, the free tier's own lifecycle policy is actively hostile to CI use. Oracle's documented
 idle-reclamation criteria reclaim an instance whose 7-day 95th-percentile CPU, network **and**
@@ -162,15 +192,31 @@ box never registers with GitHub, never receives a `GITHUB_TOKEN`, and is never n
 The security properties that follow are structural rather than procedural, which is why this is
 the right choice:
 
-- **A fork PR cannot reach an overflow box, because no workflow can request one.** `runs-on:`
-  stays `ubuntu-latest` everywhere. There is no runner label for a malicious PR to target and no
-  registered runner for it to land on. Risk (i) and (ii) are both eliminated by construction.
+- **A fork PR cannot reach an overflow box, because no runner exists and it cannot mint the
+  credential to make one.** This needs stating precisely, because the naive version of the
+  argument is wrong. It is *not* that "no workflow names an overflow label": for a
+  `pull_request` event **the workflow file that runs is the pull request's own copy**, so a fork
+  PR can freely edit `runs-on:` to target any label it likes. That is exactly how the
+  public-repo runner compromises in §2.5 worked. The protection is therefore the stronger,
+  structural one: **there is no registered runner for any label to resolve to**, and obtaining
+  overflow capacity requires assuming a cloud role, which needs `id-token: write` — a permission
+  **a fork `pull_request` never receives**, along with no repo secrets. A fork PR can ask for an
+  overflow box all it likes and get nothing. Risk (i) and (ii) are eliminated by construction,
+  not by configuration.
 - **No credential lives on the overflow box.** The cloud credential stays in the controller job
   on a GitHub-hosted runner, and should be OIDC-federated and short-lived (the pattern already
-  designed in `ci-ec2-design.md`), never a long-lived key on the executor.
-- **Provisioning is gated by the trigger, not by a runner group.** Runner-group restrictions are
-  a repository-level access control; the docs do not offer workflow-level restriction as a
-  reliable control, so leaning on it would be a weaker guarantee than simply having no runner.
+  designed in `ci-ec2-design.md`), never a long-lived key on the executor. Two available
+  hardening levers are worth folding in, because they bind the role to *exactly* the trusted
+  controller: the OIDC `runner_environment` claim (`github-hosted` | `self-hosted`) and
+  `workflow_ref`. AWS IAM only evaluates `sub` and `aud`, so these must be folded into `sub` via
+  `include_claim_keys` to be enforceable. A trust policy should also **never** admit the
+  `…:pull_request` `sub` form for a role that can spend money. On the launched box, disable IMDS
+  (or set hop-limit 1) so nothing can reach instance credentials.
+- **Provisioning is gated by the trigger, not by a runner group** — and on this plan a runner
+  group could not do the job anyway. Restricting a runner group to *selected workflows* is
+  **GitHub Enterprise Cloud / GHES only**, and repository-level runners are not in a group at all,
+  so they carry **no group policy whatsoever**. Leaning on runner groups would be a weaker
+  guarantee than having no runner, and on a personal-account repo it is not even available.
 - **A wrong or compromised result cannot merge anything.** The executor's verdict is
   pre-merge confidence only; `ci-summary` on GitHub-hosted runners remains the authoritative
   gate, exactly as `ec2-build-farm-design.md` §3 already scopes it.
@@ -186,6 +232,50 @@ registries it needs; **no** inbound except SSH from the controller's address, on
 per-run keypair; no route to any maintainer-owned network. It is safe because it holds nothing
 worth stealing and can reach nothing worth attacking — the same reasoning that makes the
 existing benchmark boxes acceptable.
+
+### 2.5 This threat is realised, repeatedly, and the recipe is always the same
+
+The verdict above is not theoretical caution. Every documented public-repo self-hosted-runner
+compromise in 2023–2024 followed **the same three conditions**, and sparq would satisfy two of
+them the moment it registered a runner:
+
+1. the default fork-PR approval setting (approval required only for *first-time* contributors);
+2. a **non-ephemeral** runner;
+3. contributor status, which is trivially earned.
+
+Condition 3 is the part that defeats intuition. In the PyTorch compromise the researchers wrote:
+*"We needed to be a contributor… Instead, we found a typo in a markdown file and submitted a
+fix."* The Microsoft DeepSpeed entry point was "an extra 'the' in `SECURITY.md`". A merged typo is
+enough. Outcomes included persistence on the runner, theft of `GITHUB_TOKEN` from the
+`.git/config` that `actions/checkout` leaves on disk, escalation to organisation-wide PATs, and
+write access to production release artifacts. Chia Network's own published post-mortem — the only
+victim-side account — concluded they had to treat **code-signing** material as exfiltrated.
+
+Three details are directly load-bearing for this design, and each is easy to get wrong:
+
+- **Approval gating is not a security control for self-hosted runners — GitHub says so.** Its
+  docs warn that a malicious user "could meet this requirement by getting a simple typo or other
+  innocuous change accepted", and that the approval policies are intended to limit compute abuse
+  "when using GitHub-hosted runners"; for self-hosted, "potentially malicious user-controlled
+  workflow code will execute automatically if the user is allowed to bypass approval". So
+  "we would just require approval" is **not** an answer, and it would in any case reintroduce a
+  human gate into an autonomous fleet.
+- **PyTorch declined the approval fix.** It is often retold as having adopted it; the primary
+  source says they "opted to implement a layer of controls" instead. The remediations that *were*
+  adopted elsewhere — TensorFlow's is the clearest — were "require approval for **all** fork PRs"
+  plus "**`GITHUB_TOKEN` read-only for workflows running on self-hosted runners**", and Chia's and
+  DeepSpeed's were structural moves to ephemeral runners.
+- **A rogue self-hosted runner is now a malware primitive.** The Shai-Hulud 2.0 npm worm
+  (Nov 2025) registered its *own* self-hosted runner and used a deliberately injectable workflow
+  as its command-and-control channel — chosen partly because all its traffic goes to
+  `github.com`, so egress allowlisting does not see it. That is worth knowing defensively
+  regardless of this design: an unexpected POST to the runner-registration API is a signal.
+
+Note what is *not* in this list. The `tj-actions/changed-files`, Ultralytics, and Angular
+compromises — and ArtiPACKED — involved **no self-hosted runners** at all; they were
+`pull_request_target` misuse, unpinned action tags, cache poisoning, and artifact hygiene. They
+are out of scope here, but they reinforce the same principle from another direction: the
+dangerous thing is untrusted code reaching a privileged context.
 
 ## 3. Provider comparison
 
@@ -280,6 +370,22 @@ GitHub-Actions-shaped work** — far safer and enormously cheaper operationally 
 self-managed Oracle box, at the cost of trusting one more vendor with build-time code execution.
 They are, however, a *supply-chain* trust decision (a third party executes our build), so they
 warrant the maintainer's explicit sign-off before adoption, not an agent's.
+
+Two discriminators to apply when choosing one, because the category is not uniform:
+
+- **Insist on per-job teardown of a *virtualised* unit, not a container.** Per-job VM or microVM
+  destruction (Firecracker/EC2-backed) is the only bar any vendor is willing to call
+  public-repo-safe. Kubernetes-based `actions-runner-controller` destroys a **pod**, not a VM,
+  and never claims otherwise — and its container-job modes require a **privileged** DinD
+  container, where root in the container is root on the host. ARC is the wrong shape for
+  untrusted code.
+- **Prefer a vendor that needs no standing credential in our cloud.** The good end of the range
+  authenticates via a GitHub App and runs the VM in *their* cloud, so a hostile fork PR gets a
+  throwaway box with no path to our accounts. The bad end asks for long-lived
+  administrator-grade cloud access keys pasted into a vendor dashboard, which is a strictly worse
+  posture than what we have today. One vendor also markets per-job teardown as guaranteeing
+  "absolute security", which is an overclaim — teardown does not address network position or
+  cache poisoning. Treat vendor security pages as marketing, and check the credential model.
 
 ## 4. Recommendation
 
@@ -507,6 +613,21 @@ build — which is the maintainer's to make.
 - Several provider pages were unreachable during research (Oracle's hosting-and-delivery-policies
   PDF 404'd; the Oracle CSA PDFs were not text-extractable; Cloudflare's billing page 404'd).
   Rows depending on them are marked COMMUNITY or left blank.
+- **Two things a Phase-2 decision must test rather than assume.** (a) Whether pinning a
+  runner-group workflow restriction to `…@refs/heads/main` actually denies a fork run, whose ref
+  is `refs/pull/N/merge` — undocumented, and it is the one clean Enterprise-tier control, so it
+  should be tested before anyone relies on it. (b) Whether `aws ec2 get-console-output` truncates
+  the envelope stream the existing benchmark result-collection depends on: the 64 KB limit widely
+  quoted for it **is not in current AWS documentation**, so it is folklore either way.
+- **A pre-existing drift worth fixing independently of this design:**
+  `research/ci-ec2-design.md` still specifies `jeswr/sparq` in both its `if:` guard and the OIDC
+  trust-policy `sub`, while the remote is `sparq-org/sparq`. If the live IAM trust policy was
+  built from that doc it would fail to assume; if it was widened to compensate, it is
+  over-permissive. Filed separately rather than fixed here (this record is doc-only).
+- **Ephemeral runners are reported to be flaky even when they work** — "lost communication with
+  the server" on successful completion is a commonly reported failure mode. Any ephemeral design
+  should budget for spurious failures, which is a further argument for keeping overflow out of
+  the gating path (§5.4).
 - **No provider account was created and nothing was provisioned** in producing this record. All
   provider figures are from documentation, not from observed provisioning — and given that
   Oracle's central failure mode is *provisioning*, a Phase-2 decision should include one manual
