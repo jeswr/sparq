@@ -749,11 +749,52 @@ class TestPagedReads(unittest.TestCase):
             b.gate_conclusion(HEAD), "success", "the gate run lives beyond page 1"
         )
 
-    def test_a_short_check_run_page_that_contradicts_total_count_raises(self):
+    def test_a_TRUNCATED_check_run_read_raises(self):
+        """Fewer runs than total_count means the `gate` may be in the part never read."""
         fake = FakeGitHub([node(4200)], runs={HEAD: [check_run()]})
-        fake._runs[HEAD] = [check_run()]
         original = fake._check_runs
         fake._check_runs = lambda path: dict(original(path), total_count=99)  # type: ignore[assignment]
+        with self.assertRaises(vb.GhError):
+            bridge(fake).check_runs(HEAD)
+
+    def test_check_runs_CREATED_mid_pagination_do_not_red_the_sweep(self):
+        """MEASURED on sparq#4074: `paged 479 check-runs, total_count=473` — runs were
+        being created between page reads. Reading MORE than total_count is benign; a
+        two-sided equality check skipped the PR and red the workflow every cycle. Only
+        TRUNCATION (fewer) is dangerous. Growth also repeats entries across page
+        boundaries, so the read de-duplicates by run id."""
+        runs = [check_run(f"job-{i}", rid=i) for i in range(150)]
+        runs.append(check_run("gate", rid=999, started="2026-01-01T05:00:00Z"))
+        fake = FakeGitHub([node(4200)], runs={HEAD: runs}, run_page=100)
+        original = fake._check_runs
+        # total_count as first read, BEFORE the last 51 runs existed.
+        fake._check_runs = lambda path: dict(original(path), total_count=100)  # type: ignore[assignment]
+        b = bridge(fake)
+        got = b.check_runs(HEAD)
+        self.assertEqual(len(got), 151, "growth must not truncate the read")
+        self.assertEqual(
+            len({r["id"] for r in got}), len(got), "pages that overlap must de-duplicate"
+        )
+        self.assertEqual(b.gate_conclusion(HEAD), "success")
+
+    def test_a_duplicated_check_run_across_pages_is_counted_once(self):
+        """A window that shifts under pagination repeats entries; the server counts them
+        once, so double-counting them would mask a real truncation."""
+        dupe = check_run("gate", rid=7)
+        fake = FakeGitHub([node(4200)], runs={HEAD: [dupe, dict(dupe)]})
+        original = fake._check_runs
+        fake._check_runs = lambda path: dict(original(path), total_count=1)  # type: ignore[assignment]
+        self.assertEqual(len(bridge(fake).check_runs(HEAD)), 1)
+
+    def test_the_check_run_read_is_page_bounded(self):
+        """A pathological or looping response must FAIL the read, never spin forever.
+
+        The fixture serves MAX+5 full pages then stops, so the assertion reds cleanly
+        when the bound is removed instead of hanging the suite — a test that hangs on a
+        mutant is a test that times CI out rather than reporting a defect."""
+        pages = vb.MAX_CHECK_RUN_PAGES + 5
+        runs = [check_run(f"j-{i}", rid=i) for i in range(pages * 100)]
+        fake = FakeGitHub([node(4200)], runs={HEAD: runs}, run_page=100)
         with self.assertRaises(vb.GhError):
             bridge(fake).check_runs(HEAD)
 

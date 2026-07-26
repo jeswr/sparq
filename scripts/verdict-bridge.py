@@ -133,6 +133,10 @@ FULL_SHA_RE = re.compile(r"(?<![0-9a-fA-F])([0-9a-fA-F]{40})(?![0-9a-fA-F])")
 # pass, and it defeats an earlier pass — see the module docstring.
 AMBIGUOUS = "ambiguous"
 
+# Heads here reach ~1181 check-runs (12 pages).  A bound keeps a pathological or looping
+# response from spinning the sweep forever; exceeding it FAILS the read, never admits it.
+MAX_CHECK_RUN_PAGES = 60
+
 
 class GhError(RuntimeError):
     """A GitHub CLI command failed."""
@@ -445,12 +449,22 @@ class VerdictBridge:
         return nodes
 
     def check_runs(self, sha: str) -> list[dict]:
-        """Every check-run for ``sha``, EXPLICITLY paged.
+        """Every check-run for ``sha``, EXPLICITLY paged and de-duplicated by id.
 
         PRs here carry hundreds of check-runs; an unpaginated read silently truncates
         and can hide the `gate` run entirely, which reads as "no gate" -> not green.
+
+        The cross-check against ``total_count`` is ONE-SIDED, and that asymmetry is
+        load-bearing.  A live sweep measured ``paged 479 check-runs, total_count=473`` on
+        sparq#4074: runs were being CREATED between page reads, so the list GREW under
+        pagination.  Reading MORE than the first page's ``total_count`` is benign — the
+        risk this guard exists for is TRUNCATION, which reads FEWER.  A two-sided
+        equality check turned a routine mid-sweep re-run into a skipped PR plus a red
+        workflow every cycle.  Growth also repeats entries across page boundaries, hence
+        the de-duplication by run id.
         """
         runs: list[dict] = []
+        seen: set = set()
         total: int | None = None
         page = 1
         while True:
@@ -465,12 +479,22 @@ class VerdictBridge:
             )
             total = payload.get("total_count") if total is None else total
             batch = payload.get("check_runs") or []
-            runs.extend(batch)
-            if not batch or (total is not None and len(runs) >= total):
+            for run in batch:
+                if isinstance(run, dict) and run.get("id") not in seen:
+                    seen.add(run.get("id"))
+                    runs.append(run)
+            # Terminate on a SHORT page, never on `len(runs) >= total_count`: a
+            # total_count read before a re-run started is an UNDERCOUNT, and stopping on
+            # it would truncate exactly when the list is growing — hiding the newest
+            # `gate` run, which is the one that matters.
+            if len(batch) < 100:
                 break
             page += 1
-        if total is not None and len(runs) != total:
-            raise GhError(f"{sha}: paged {len(runs)} check-runs, total_count={total}")
+            if page > MAX_CHECK_RUN_PAGES:
+                raise GhError(f"{sha}: check-runs exceeded {MAX_CHECK_RUN_PAGES} pages")
+        if total is not None and len(runs) < total:
+            # TRUNCATION — the `gate` run may be in the part we never read.  Fail closed.
+            raise GhError(f"{sha}: paged only {len(runs)} check-runs, total_count={total}")
         return runs
 
     def gate_conclusion(self, sha: str) -> str | None:
