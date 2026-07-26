@@ -2941,3 +2941,339 @@ fn bridged_only_retraction_returns_to_unloaded() {
          static baseline was ever captured for"
     );
 }
+
+// ===========================================================================
+// [SONNET-4.6] sq-luc02 — RULE-LEVEL provenance in `<urn:sparq:auth-bridged>`.
+//
+// Before this, the provenance mirror answered only "bridged or static?". "WHICH
+// ODRL rule granted this right?" was answerable in-process (`Decision::matched_rules`,
+// the refresh ledger) but not by SPARQL. These tests pin the RDF shape that makes it a
+// plain query, and the anti-forgery properties that shape must not weaken.
+// ===========================================================================
+
+const RDF_SUBJ: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#subject";
+const AUTH_READ: &str = "https://sparq.dev/ns/auth#read";
+const BRIDGED_FROM_RULE: &str = "https://sparq.dev/ns/auth#bridgedFromRule";
+const BRIDGED_FROM_POLICY: &str = "https://sparq.dev/ns/auth#bridgedFromPolicy";
+
+/// alice MAY read n1, under a rule with an EXPLICIT IRI (so the attribution is a node,
+/// not the blank-node label an anonymous rule carries).
+fn named_rule_read_policy() -> sparq_policy::Policy {
+    parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/named> a odrl:Set ; odrl:permission <urn:pol/named#p1> .
+<urn:pol/named#p1> odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:assignee <https://alice.ex/card#me> .
+"#,
+        "turtle",
+    )
+    .expect("policy parses")
+}
+
+/// alice is PROHIBITED from modifying n1, under a rule with an explicit IRI.
+fn named_rule_deny_policy() -> sparq_policy::Policy {
+    parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/named-deny> a odrl:Set ; odrl:prohibition <urn:pol/named-deny#x1> .
+<urn:pol/named-deny#x1> odrl:action odrl:modify ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:assignee <https://alice.ex/card#me> .
+"#,
+        "turtle",
+    )
+    .expect("policy parses")
+}
+
+/// One result cell in N-Triples form (an unbound cell renders empty).
+fn cell<T: std::fmt::Display>(t: &Option<T>) -> String {
+    t.as_ref().map(|x| x.to_string()).unwrap_or_default()
+}
+
+/// Every `(?s, ?p, ?o)` row of a named graph, as printable strings.
+fn graph_rows(g: &Graph, name: &str) -> Vec<(String, String, String)> {
+    let q = format!("SELECT ?s ?p ?o WHERE {{ GRAPH <{}> {{ ?s ?p ?o }} }}", name);
+    sparq_engine::query(g, &q)
+        .expect("query runs")
+        .rows
+        .iter()
+        .map(|r| (cell(&r[0]), cell(&r[1]), cell(&r[2])))
+        .collect()
+}
+
+/// The audit answer the bead is about: which ODRL rule(s) granted `agent` the `right`
+/// on `target`, asked as a plain SPARQL query over the provenance graph.
+fn granting_rules(g: &Graph, agent: &str, right: &str, target: &str) -> Vec<String> {
+    let q = format!(
+        "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> \
+         SELECT ?rule WHERE {{ GRAPH <urn:sparq:auth-bridged> {{ \
+           ?prov rdf:subject <{}> ; rdf:predicate <{}> ; rdf:object <{}> ; \
+                 <{}> ?rule }} }}",
+        agent, right, target, BRIDGED_FROM_RULE
+    );
+    let mut out: Vec<String> = sparq_engine::query(g, &q)
+        .expect("audit query runs")
+        .rows
+        .iter()
+        .map(|r| cell(&r[0]))
+        .collect();
+    out.sort();
+    out
+}
+
+// 1. THE BEAD: a bridged grant is attributed to the ODRL rule that granted it, and the
+//    attribution is reachable by SPARQL alone (no bridge API, no in-process report).
+#[test]
+fn bridged_grant_names_its_originating_rule_in_sparql() {
+    let mut g = pod();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(materialize_permission(&mut g, &named_rule_read_policy(), &req).granted);
+
+    assert_eq!(
+        granting_rules(&g, ALICE, AUTH_READ, N1),
+        vec!["<urn:pol/named#p1>".to_owned()],
+        "the audit query answers WHICH rule granted alice's read"
+    );
+    // …and the policy the rule came from is attributed too.
+    let rows = graph_rows(&g, "urn:sparq:auth-bridged");
+    assert!(
+        rows.iter().any(|(_, p, o)| p == &format!("<{}>", BRIDGED_FROM_POLICY)
+            && o == "<urn:pol/named>"),
+        "the originating policy IRI is materialized: {rows:?}"
+    );
+}
+
+// 2. The verbatim mirror is PRESERVED: the pre-existing bridged-vs-static audit query
+//    (the §4.6 paper example — join auth against auth-bridged on the same triple) must
+//    still return the grant, so annotations are additive, never a replacement.
+#[test]
+fn rule_provenance_preserves_the_verbatim_mirror() {
+    let mut g = pod();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(materialize_permission(&mut g, &named_rule_read_policy(), &req).granted);
+
+    let q = format!(
+        "SELECT ?right ?target WHERE {{ \
+           GRAPH <urn:sparq:auth>         {{ <{}> ?right ?target }} \
+           GRAPH <urn:sparq:auth-bridged> {{ <{}> ?right ?target }} }}",
+        ALICE, ALICE
+    );
+    assert_eq!(
+        sparq_engine::query(&g, &q).expect("join runs").rows.len(),
+        1,
+        "the bridged-vs-static join still isolates exactly the one bridged grant"
+    );
+}
+
+// 3. The ENFORCEMENT view stays clean: annotations are provenance-graph-only, so
+//    `<urn:sparq:auth>` carries the grant triple and nothing else. An annotation that
+//    leaked into the enforcement input could be read as (or obscure) a grant.
+#[test]
+fn rule_provenance_never_enters_the_enforcement_view() {
+    let mut g = pod();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(materialize_permission(&mut g, &named_rule_read_policy(), &req).granted);
+
+    let auth = graph_rows(&g, "urn:sparq:auth");
+    assert_eq!(
+        auth,
+        vec![(format!("<{}>", ALICE), format!("<{}>", AUTH_READ), format!("<{}>", N1))],
+        "the enforcement view is exactly the grant — no provenance leaked in"
+    );
+}
+
+// 4. The DENY side is attributed too: a materialized carve-out names the prohibition
+//    that carved it out.
+#[test]
+fn bridged_deny_names_its_originating_prohibition() {
+    let mut g = pod();
+    let req = Request::new(odrl("modify")).on(N1).by(ALICE);
+    assert!(materialize_prohibition(&mut g, &named_rule_deny_policy(), &req).prohibited);
+
+    assert_eq!(
+        granting_rules(&g, ALICE, "https://sparq.dev/ns/auth#denyWrite", N1),
+        vec!["<urn:pol/named-deny#x1>".to_owned()],
+        "the audit query answers WHICH prohibition denied alice's write"
+    );
+}
+
+// 5. A CONDITIONAL grant is its own provenance node: the attribution is stated directly
+//    on the `urn:sparq:odrl-cond?…` IRI rather than through a second reification node.
+#[test]
+fn conditional_grant_carries_the_rule_on_its_own_node() {
+    let pol = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/cond> a odrl:Set ; odrl:permission <urn:pol/cond#p1> .
+<urn:pol/cond#p1> odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ;
+                      odrl:operator odrl:eq ;
+                      odrl:rightOperand <https://carol.ex/card#me> ] .
+"#,
+        "turtle",
+    )
+    .expect("policy parses");
+    let mut g = pod();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(materialize_permission_conditional(&mut g, &pol, &req).granted);
+
+    let rows = graph_rows(&g, "urn:sparq:auth-bridged");
+    let attributed: Vec<&(String, String, String)> = rows
+        .iter()
+        .filter(|(_, p, _)| p == &format!("<{}>", BRIDGED_FROM_RULE))
+        .collect();
+    assert_eq!(attributed.len(), 1, "one attribution for the one grant head: {rows:?}");
+    assert!(
+        attributed[0].0.starts_with("<urn:sparq:odrl-cond?"),
+        "stated on the conditional grant's own node, not a reification node: {attributed:?}"
+    );
+    assert_eq!(attributed[0].2, "<urn:pol/cond#p1>", "…naming the originating rule");
+    // No reification anchor was minted for the head triples (the grant node IS the anchor).
+    assert!(
+        !rows.iter().any(|(s, _, _)| s.starts_with("<urn:sparq:odrl-prov?")),
+        "a node-bearing grant does not also get a reification anchor: {rows:?}"
+    );
+}
+
+// 6. ANTI-FORGERY: a policy naming its rule inside the RESERVED `urn:sparq:` space
+//    cannot mint a reserved NODE inside the reserved provenance graph — the identifier
+//    is materialized as a plain LITERAL instead. (The graph itself is already
+//    unforgeable: `strip_reserved_graphs` drops any loaded `urn:sparq:*` graph.)
+#[test]
+fn reserved_space_rule_iri_is_materialized_as_a_literal() {
+    let pol = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:sparq:pair?agent=x> a odrl:Set ; odrl:permission <urn:sparq:odrl-cond?forged=1> .
+<urn:sparq:odrl-cond?forged=1> odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:assignee <https://alice.ex/card#me> .
+"#,
+        "turtle",
+    )
+    .expect("policy parses");
+    let mut g = pod();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(materialize_permission(&mut g, &pol, &req).granted);
+
+    let rows = graph_rows(&g, "urn:sparq:auth-bridged");
+    for (_, p, o) in &rows {
+        if p == &format!("<{}>", BRIDGED_FROM_RULE) || p == &format!("<{}>", BRIDGED_FROM_POLICY) {
+            assert!(
+                o.starts_with('"'),
+                "a reserved-space policy identifier stays a LITERAL, never a node: {o}"
+            );
+        }
+    }
+    // Nothing in the provenance graph is a reserved NODE except the anchors this crate
+    // minted itself (`urn:sparq:odrl-prov?…`).
+    assert!(
+        rows.iter().all(|(s, _, _)| !s.starts_with("<urn:sparq:")
+            || s.starts_with("<urn:sparq:odrl-prov?")),
+        "no policy-supplied reserved node was minted: {rows:?}"
+    );
+}
+
+// 7. A BLANK-NODE rule (the common anonymous `odrl:permission [ … ]` shape) has no IRI,
+//    so its label is materialized as a literal rather than an invalid node — the
+//    attribution is still answerable, just not dereferenceable.
+#[test]
+fn anonymous_rule_is_attributed_as_a_literal_label() {
+    let mut g = pod();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    // `read_policy()` uses the anonymous `odrl:permission [ … ]` form.
+    assert!(materialize_permission(&mut g, &read_policy(), &req).granted);
+
+    let rules = granting_rules(&g, ALICE, AUTH_READ, N1);
+    assert_eq!(rules.len(), 1, "the anonymous rule is still attributed: {rules:?}");
+    assert!(
+        rules[0].starts_with('"') && rules[0].contains("_:"),
+        "a blank-node rule label is a literal, not a malformed IRI: {rules:?}"
+    );
+}
+
+// 8. IDEMPOTENT: re-materializing the same grant re-mints the SAME anchor, so the
+//    provenance graph does not grow on every refresh.
+#[test]
+fn rule_provenance_is_idempotent_across_rematerialization() {
+    let mut g = pod();
+    let pol = named_rule_read_policy();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(materialize_permission(&mut g, &pol, &req).granted);
+    let first = graph_rows(&g, "urn:sparq:auth-bridged");
+    assert!(materialize_permission(&mut g, &pol, &req).granted);
+    let second = graph_rows(&g, "urn:sparq:auth-bridged");
+    assert_eq!(first.len(), second.len(), "re-materializing duplicates nothing");
+}
+
+// 9. RETRACTION clears the annotations too: a withdrawn grant must not leave a dangling
+//    "rule R granted this" record for a right that no longer exists.
+#[test]
+fn retraction_clears_rule_provenance() {
+    let mut store = PodStore::new(pod());
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_permission(&named_rule_read_policy(), &req).granted);
+    assert!(!graph_rows(&store.graph, "urn:sparq:auth-bridged").is_empty());
+
+    let (matched, retracted) =
+        store.refresh_odrl_grant(&empty_policy(), &req, BridgeKind::Permission);
+    assert!(matched);
+    assert_eq!(retracted, 1);
+    assert!(
+        graph_rows(&store.graph, "urn:sparq:auth-bridged").is_empty(),
+        "no residual rule attribution survives retraction"
+    );
+}
+
+// 10. The reification anchor relates back to EXACTLY the auth triple it describes, so
+//     an audit query cannot mis-attribute one grant's rule to another. Two rules on two
+//     different modes must stay separately attributable.
+#[test]
+fn two_rules_stay_separately_attributable() {
+    let pol = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/two> a odrl:Set ;
+    odrl:permission <urn:pol/two#read> ;
+    odrl:prohibition <urn:pol/two#write> .
+<urn:pol/two#read> odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:assignee <https://alice.ex/card#me> .
+<urn:pol/two#write> odrl:action odrl:modify ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:assignee <https://alice.ex/card#me> .
+"#,
+        "turtle",
+    )
+    .expect("policy parses");
+    let mut g = pod();
+    assert!(
+        materialize_policy(&mut g, &pol, &Request::new(odrl("read")).on(N1).by(ALICE)).granted
+    );
+    assert!(
+        materialize_policy(&mut g, &pol, &Request::new(odrl("modify")).on(N1).by(ALICE))
+            .prohibited
+    );
+
+    assert_eq!(
+        granting_rules(&g, ALICE, AUTH_READ, N1),
+        vec!["<urn:pol/two#read>".to_owned()],
+        "the read grant names only the permission"
+    );
+    assert_eq!(
+        granting_rules(&g, ALICE, "https://sparq.dev/ns/auth#denyWrite", N1),
+        vec!["<urn:pol/two#write>".to_owned()],
+        "the write deny names only the prohibition"
+    );
+    // Sanity: the anchors are distinct nodes.
+    let anchors: Vec<String> = graph_rows(&g, "urn:sparq:auth-bridged")
+        .into_iter()
+        .filter(|(_, p, _)| p == &format!("<{}>", RDF_SUBJ))
+        .map(|(s, _, _)| s)
+        .collect();
+    assert_eq!(anchors.len(), 2, "one anchor per attributed auth triple: {anchors:?}");
+    assert_ne!(anchors[0], anchors[1], "distinct grants get distinct anchors");
+}

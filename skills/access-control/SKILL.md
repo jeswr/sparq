@@ -350,7 +350,11 @@ Materialize the authorization view from the access-control documents, then enfor
   lapsed time window, a re-evaluation that now Denies) while preserving static WAC/ACP grants
   and still-valid bridged grants. Bridged triples are tracked in a ledger and mirrored into a
   provenance graph `<urn:sparq:auth-bridged>` (`AUTH_BRIDGED_GRAPH`) so they are structurally
-  distinguishable from static grants; refresh rebuilds the view as `static_baseline ∪
+  distinguishable from static grants — and, since [SONNET-4.6] sq-luc02, annotated there with
+  `auth:bridgedFromRule` / `auth:bridgedFromPolicy` (on a minted `urn:sparq:odrl-prov?…`
+  reification node, or directly on a conditional grant's own node) so **which ODRL rule granted
+  this right** is answerable by SPARQL; the annotations never enter `<urn:sparq:auth>`, so they
+  cannot affect a decision. Refresh rebuilds the view as `static_baseline ∪
   replay(valid bridged entries)`. **Fail-closed**: any ambiguous re-eval of an *allow grant*
   retracts (access never left stale); a static grant is never re-evaluated or dropped. A
   wholesale static re-materialization (`materialize_wac`/`materialize_acp`) auto-reconciles —

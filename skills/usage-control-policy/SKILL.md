@@ -375,6 +375,21 @@ The dual of the conditional grant: a matched ODRL **prohibition** whose recipien
 The `materialize_odrl_*` calls only ever **append**. When the underlying ODRL policy changes — a permission is **withdrawn**, a **time window lapses**, or a re-evaluation now **Denies** — the previously-materialized grant would otherwise stay in the auth view, so access that should be gone persists (the sq-h3uk/#280 correctness gap). And a wholesale static WAC/ACP re-materialization rebuilds `<urn:sparq:auth>` and would drop every bridged grant. Both are reconciled by a **bridge ledger** + a refresh entry point.
 
 - **Provenance.** Every auth triple the bridge writes into `<urn:sparq:auth>` is mirrored verbatim into a separate reserved graph `<urn:sparq:auth-bridged>` (`AUTH_BRIDGED_GRAPH`). A triple is **bridged** iff it appears there, **static** otherwise — so bridged and static grants are structurally distinguishable without inspecting predicate shape, and the enforcement reader (`AuthIndex`) is unchanged (it still reads `<urn:sparq:auth>`). The provenance graph is in the reserved `urn:sparq:` space, so a loaded dataset cannot forge it.
+- **RULE-LEVEL provenance — [SONNET-4.6] sq-luc02.** The mirror also records **which ODRL rule** compiled each triple, so "which rule granted this right?" is a plain SPARQL query rather than an in-process `Decision::matched_rules` / ledger inspection. Both anchors state `auth:bridgedFromRule` and — when the policy carries an IRI — `auth:bridgedFromPolicy`:
+  - a **plain** auth triple has no node of its own, so the attribution hangs off a minted RDF *reification* node: `<urn:sparq:odrl-prov?s=…&p=…&o=…&rule=…> a rdf:Statement ; rdf:subject <party> ; rdf:predicate auth:read ; rdf:object <graph> ; auth:bridgedFromRule <rule> .`
+  - a **conditional grant** already IS a per-grant node, so the attribution is stated directly on its `urn:sparq:odrl-cond?…` IRI.
+
+  The annotations are **provenance-graph only** — never written into `<urn:sparq:auth>` — so nothing here can affect a decision, and they are cleared/replayed with the mirror on refresh. Anti-forgery is preserved: the graph is unforgeable (reserved space, stripped from any loaded dataset), the anchor IRI percent-encodes every component, and a policy-supplied identifier that is a blank-node label or itself in the reserved space is materialized as a plain **literal**, so a crafted policy can never mint a `urn:sparq:` node inside the reserved graph. **Not attributed:** the N3 path (`materialize_odrl_n3`) — its rule set derives `auth:*` triples without carrying the originating rule through the closure, and it emits the verbatim mirror only.
+
+  ```sparql
+  PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+  PREFIX auth: <https://sparq.dev/ns/auth#>
+  SELECT ?right ?target ?rule WHERE {
+    GRAPH <urn:sparq:auth-bridged> {
+      ?prov rdf:subject <https://alice.example/card#me> ;
+            rdf:predicate ?right ; rdf:object ?target ;
+            auth:bridgedFromRule ?rule } }
+  ```
 - **Refresh / retract.** `PodStore::refresh_odrl_grant(&new_policy, &new_request, kind)` updates the tracked grant slot `(kind, target, party)` with the new policy / request context, then rebuilds the view as `static_baseline ∪ replay(still-valid bridged entries)`: it resets `<urn:sparq:auth>` to the static baseline captured at the last `materialize_wac`/`materialize_acp`, clears the provenance graph, and re-evaluates every tracked `(policy, request)` through its original bridge entry point. An entry that no longer holds emits nothing → it is **retracted** (access gone). `refresh_odrl_grants()` (no args) replays everything as-tracked (used to reconcile after a static re-materialization, which is automatic).
 - **Fail-closed (security-sensitive — access retraction).** A withdrawn / lapsed / now-Denied / now-prohibited / ambiguous re-evaluation of an **allow grant** loses access; the underlying evaluator is fail-closed, so on any doubt the grant is retracted, never left stale. A **static** WAC/ACP grant is never in the ledger, never re-evaluated, and always in the captured baseline (captured as the `install_auth_view` output verbatim, not by subtracting provenance — so a static grant byte-identical to a bridged one still survives) — refresh can neither widen nor drop it.
 

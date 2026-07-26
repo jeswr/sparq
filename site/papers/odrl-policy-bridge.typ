@@ -31,6 +31,14 @@
 //  divergence is the UNSET default (`prohibit`, not the IM default `invalid`) — kept
 //  deliberately per the Option-1 decision on issue #1375 and documented in the sparq-policy
 //  crate README conformance note.
+// REVISION 2.2 [SONNET-4.6] sq-luc02 — RULE-LEVEL provenance LANDED. §4.6's honest boundary
+//  ("per-RULE provenance is not yet materialised as RDF, in-process only") and Limitation #5 no
+//  longer say "tracked future work": each mirrored auth triple now carries
+//  `auth:bridgedFromRule` / `auth:bridgedFromPolicy` inside `<urn:sparq:auth-bridged>`, so
+//  "which ODRL rule granted this right?" is a plain SPARQL query. The RESIDUAL limitation is
+//  narrower and is what #5 now states: the independent N3 path stays unattributed (its rule set
+//  does not carry the originating rule through the closure), and attribution is rule-granularity,
+//  not a derivation trace.
 // Single-source Typst. Numbers come ONLY from #headline(...) / #ev(...) (paper-evidence.json),
 // never hard-coded. Compiles to BOTH a PDF (the download) and semantic HTML (the in-site page).
 // EMPIRICAL-HONESTY (sq-gum8): no wall-clock claim (work-box timings are non-canonical and are
@@ -454,15 +462,23 @@ assertion. Take a policy under which alice may read a note but must not modify i
 @prefix odrl: <http://www.w3.org/ns/odrl/2/> .
 
 <urn:policy/ex> a odrl:Set ;
-  odrl:permission [
-    odrl:action   odrl:read ;
-    odrl:target   <https://pod.example/notes/n1> ;
-    odrl:assignee <https://alice.example/card#me> ] ;
-  odrl:prohibition [
-    odrl:action   odrl:modify ;
-    odrl:target   <https://pod.example/notes/n1> ;
-    odrl:assignee <https://alice.example/card#me> ] .
+  odrl:permission  <urn:policy/ex#p1> ;
+  odrl:prohibition <urn:policy/ex#x1> .
+
+<urn:policy/ex#p1>
+  odrl:action   odrl:read ;
+  odrl:target   <https://pod.example/notes/n1> ;
+  odrl:assignee <https://alice.example/card#me> .
+
+<urn:policy/ex#x1>
+  odrl:action   odrl:modify ;
+  odrl:target   <https://pod.example/notes/n1> ;
+  odrl:assignee <https://alice.example/card#me> .
 ```
+
+The rules are given IRIs rather than written as the more idiomatic anonymous nodes because
+the provenance below attributes each compiled triple to the rule that produced it; a rule
+with no IRI is still attributed, but only by its blank-node label.
 
 Presented with alice's `odrl:read` and `odrl:modify` requests, the bridge evaluates each
 fail-closed and compiles the two definite outcomes into the view: the Permission becomes a
@@ -474,16 +490,27 @@ lands in the enforcement graph and is mirrored verbatim into the provenance grap
 
 ```trig
 @prefix auth: <https://sparq.dev/ns/auth#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 
 # the enforcement view — read by the unchanged decision procedure
 <urn:sparq:auth> {
   <https://alice.example/card#me> auth:read      <https://pod.example/notes/n1> .
   <https://alice.example/card#me> auth:denyWrite <https://pod.example/notes/n1> .
 }
-# the provenance mirror — membership here marks a triple as bridged, not static
+# the provenance mirror — membership here marks a triple as bridged, not static,
+# and each mirrored triple is attributed to the rule that compiled it
 <urn:sparq:auth-bridged> {
   <https://alice.example/card#me> auth:read      <https://pod.example/notes/n1> .
   <https://alice.example/card#me> auth:denyWrite <https://pod.example/notes/n1> .
+
+  <urn:sparq:odrl-prov?s=...&p=...&o=...&rule=...> a rdf:Statement ;
+    rdf:subject   <https://alice.example/card#me> ;
+    rdf:predicate auth:read ;
+    rdf:object    <https://pod.example/notes/n1> ;
+    auth:bridgedFromRule   <urn:policy/ex#p1> ;
+    auth:bridgedFromPolicy <urn:policy/ex> .
+  # …and the mirror-image reification for the denyWrite triple, attributed to
+  # <urn:policy/ex#x1>.
 }
 ```
 
@@ -515,12 +542,31 @@ and returns exactly the two bridged decisions:
   ],
 )
 
-One honest boundary, surfaced by writing this example down: the provenance mirror
-distinguishes _bridged from static_, not _which rule_ produced a triple. Per-rule attribution
-exists at materialisation time (the evaluator reports the matched rules) and in the bridge's
-refresh ledger, but it is not currently materialised as RDF — so "which ODRL rule granted
-this right?" is answerable in-process but not yet by SPARQL alone. We record this as a
-limitation (§6) and tracked future work, not a delivered feature.
+Writing this example down originally surfaced an honest boundary — the mirror distinguished
+_bridged from static_, but not _which rule_ produced a triple — and that boundary has since
+been closed for the Rust materialisation paths. Each mirrored triple now carries the
+originating rule (and, where the policy has an IRI, the policy) as RDF, so the finer audit
+question is a query of the same shape:
+
+```sparql
+PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX auth: <https://sparq.dev/ns/auth#>
+SELECT ?right ?target ?rule WHERE {
+  GRAPH <urn:sparq:auth-bridged> {
+    ?prov rdf:subject <https://alice.example/card#me> ;
+          rdf:predicate ?right ; rdf:object ?target ; auth:bridgedFromRule ?rule } }
+```
+
+The attribution is written into the provenance graph only, never into the enforcement view,
+so it cannot participate in a decision; and because the annotation is minted in the reserved
+namespace inside a reserved graph — which the loader strips from any dataset it reads — the
+anti-forgery property of the mirror is unchanged. A policy-supplied identifier that is a
+blank node, or that is itself in the reserved namespace, is materialised as a literal rather
+than a node, so no policy can mint a reserved node inside that graph. What remains
+unattributed is the independent N3 materialisation path, whose rule set derives the
+authorization triples without carrying the originating ODRL rule through the closure; we
+keep that as the residual limitation (§6) rather than attribute one path's triples to the
+other path's decision.
 
 == Evaluation <eval>
 
@@ -696,10 +742,11 @@ refresh. The eager-grant/asymmetric-deny rule bounds the damage direction (stale
 persist access it should have dropped only until refresh; it can never un-deny), but the
 window is real.
 
-Fifth, provenance is bridged-versus-static only: the provenance mirror marks _that_ a triple
-was compiled from ODRL, not _which rule_ compiled it (§4.6). Per-rule attribution lives in
-the in-process decision report and the refresh ledger, not in the RDF, so rule-level audit is
-not yet a SPARQL query. Materialising rule-level provenance is tracked future work.
+Fifth, rule-level provenance is materialised for the Rust materialisation paths but not for
+all of them: the independent N3 path derives its authorization triples without carrying the
+originating ODRL rule through the closure, so its mirror is the bridged-versus-static marker
+alone (§4.6). Attribution is also rule-granularity, not a derivation trace: it names the rule
+that produced a triple, not which constraints were evaluated or on what evidence.
 
 Sixth, this is a library-level, single-node surface: no HTTP wire conformance, no
 multi-server deployment, no users, and no claim that the view scales to adversarial policy

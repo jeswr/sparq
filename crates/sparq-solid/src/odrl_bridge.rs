@@ -379,9 +379,12 @@ pub fn materialize_permission(
         ]);
     };
 
-    // 4. Materialize `party auth:<mode> target` into the auth view.
+    // 4. Materialize `party auth:<mode> target` into the auth view, attributed to the
+    //    rule the evaluator says granted it ([SONNET-4.6] sq-luc02 — the decision's
+    //    `matched_rules` is the granting permission on an ALLOW).
     let pred = format!("{AUTH_NS}{}", mode_predicate(mode));
-    let triple = append_grant(graph, party, &pred, target);
+    let prov = RuleProvenance::of(policy, decision.matched_rules);
+    let triple = append_grant(graph, party, &pred, target, &prov);
 
     BridgeOutcome {
         granted: true,
@@ -464,11 +467,13 @@ pub fn materialize_prohibition(
     // 1. Does a prohibition CARVE THIS REQUEST OUT? (Same match test the evaluator's
     //    conflict step uses — not `!decision.allow`, which over-fires on a plain
     //    no-permission deny.)
-    if matched_prohibition(policy, request).is_none() {
+    let Some(carving_rule) = matched_prohibition(policy, request) else {
         return BridgeOutcome::denied(vec![
             "no ODRL prohibition matches the request; no deny materialized".to_owned(),
         ]);
-    }
+    };
+    // [SONNET-4.6] sq-luc02: the carve-out is attributed to the prohibition that matched.
+    let prov = RuleProvenance::rule(policy, &carving_rule.id);
 
     // 2. Action → Mode. An unmapped action (incl. the `use` umbrella) → no deny.
     //    Fail-closed: we do NOT widen the deny to a default mode, but we also must
@@ -497,7 +502,7 @@ pub fn materialize_prohibition(
 
     // 4. Materialize `party auth:deny<Mode> target` into the auth view.
     let pred = format!("{AUTH_NS}{}", deny_predicate(mode));
-    let triple = append_grant(graph, party, &pred, target);
+    let triple = append_grant(graph, party, &pred, target, &prov);
 
     BridgeOutcome {
         prohibited: true,
@@ -558,15 +563,26 @@ pub fn materialize_policy(graph: &mut Graph, policy: &Policy, request: &Request)
 /// Append a single `subject predicate object` triple to the `<urn:sparq:auth>`
 /// named graph, preserving the triples already there (the WAC/ACP grants), and
 /// **mirror it into the bridged-provenance graph** ([`AUTH_BRIDGED_GRAPH`]) so the
-/// triple is structurally marked as bridged (vs static) — see [`mirror_bridged`].
+/// triple is structurally marked as bridged (vs static) — see
+/// [`append_bridged_triples`]. `prov` names the ODRL rule(s) the triple was compiled
+/// from; it is materialized alongside the mirror as an RDF reification node
+/// ([`reified_provenance`], [SONNET-4.6] sq-luc02) so *which rule granted this right*
+/// is answerable by SPARQL and not only in-process.
 /// Returns the emitted triple so the caller can record it in its bridge ledger
 /// ([OPUS-4.8] sq-dpk4). Idempotent: an identical grant is not duplicated.
-fn append_grant(graph: &mut Graph, subject: &str, predicate: &str, object: &str) -> [Term; 3] {
+fn append_grant(
+    graph: &mut Graph,
+    subject: &str,
+    predicate: &str,
+    object: &str,
+    prov: &RuleProvenance,
+) -> [Term; 3] {
     let s = Term::NamedNode(NamedNode::new_unchecked(subject));
     let p = Term::NamedNode(NamedNode::new_unchecked(predicate));
     let o = Term::NamedNode(NamedNode::new_unchecked(object));
     let triple = [s, p, o];
-    append_bridged_triples(graph, std::slice::from_ref(&triple));
+    let annotations = reified_provenance(&triple, prov);
+    append_bridged_triples(graph, std::slice::from_ref(&triple), &annotations);
     triple
 }
 
@@ -575,9 +591,24 @@ fn append_grant(graph: &mut Graph, subject: &str, predicate: &str, object: &str)
 /// and skipping duplicates (idempotent). Mirroring into the provenance graph is what
 /// lets a later refresh/static-re-materialization tell bridged triples apart from
 /// static WAC/ACP grants without ever inspecting predicate shape. [OPUS-4.8] sq-dpk4.
-fn append_bridged_triples(graph: &mut Graph, new_triples: &[[Term; 3]]) {
+///
+/// `annotations` (the rule-level provenance, [SONNET-4.6] sq-luc02) goes into the
+/// provenance graph **only**. It is deliberately kept OUT of `<urn:sparq:auth>`: that
+/// view is the enforcement input ([`crate::AuthIndex`]) and must carry grants alone,
+/// never audit metadata — so no annotation can ever widen or narrow access.
+fn append_bridged_triples(
+    graph: &mut Graph,
+    new_triples: &[[Term; 3]],
+    annotations: &[[Term; 3]],
+) {
     extend_named_graph(graph, AUTH_GRAPH, new_triples);
-    extend_named_graph(graph, AUTH_BRIDGED_GRAPH, new_triples);
+    if annotations.is_empty() {
+        extend_named_graph(graph, AUTH_BRIDGED_GRAPH, new_triples);
+    } else {
+        let mut mirrored: Vec<[Term; 3]> = new_triples.to_vec();
+        mirrored.extend_from_slice(annotations);
+        extend_named_graph(graph, AUTH_BRIDGED_GRAPH, &mirrored);
+    }
 }
 
 /// Re-intern `name`'s existing triples plus `additions` (deduplicated) into a fresh
@@ -654,6 +685,162 @@ fn named_graph_triples(graph: &Graph, name: &str) -> Vec<[Term; 3]> {
         Some((_, sub)) => crate::loader::graph_triples(sub),
         None => Vec::new(),
     }
+}
+
+// ============================================================================
+// [SONNET-4.6] sq-luc02 — RULE-LEVEL provenance in `<urn:sparq:auth-bridged>`.
+//
+// THE GAP this closes: the provenance mirror marked a triple bridged-vs-static ONLY.
+// "Which ODRL rule granted this right?" was answerable in-process (`Decision::
+// matched_rules`, the refresh ledger) but NOT by SPARQL. Each mirrored auth triple now
+// also carries the originating rule (and policy) identifier, so rule-level audit is a
+// plain query over the store rather than a bridge API call.
+//
+// TWO ANCHORS, ONE VOCABULARY. Both state `auth:bridgedFromRule` and — when the policy
+// carries an IRI — `auth:bridgedFromPolicy`:
+//
+//   - A PLAIN auth triple (`<party> auth:read <g>`) has no node of its own, so the
+//     attribution hangs off a minted RDF *reification* node:
+//
+//       <urn:sparq:odrl-prov?s=…&p=…&o=…&rule=…> a rdf:Statement ;
+//           rdf:subject <party> ; rdf:predicate auth:read ; rdf:object <g> ;
+//           auth:bridgedFromRule <rule> ; auth:bridgedFromPolicy <policy> .
+//
+//   - A CONDITIONAL grant already IS a per-grant node (`urn:sparq:odrl-cond?…`), so the
+//     attribution is stated directly on it — no second node describing the same thing.
+//
+// ANTI-FORGERY is preserved on both sides. The annotations live ONLY in the reserved
+// `<urn:sparq:auth-bridged>` graph, which `crate::loader::strip_reserved_graphs` drops
+// from every loaded dataset, so an outside dataset cannot forge them; the minted anchor
+// IRI percent-encodes each component (`encode_for_uri`), so no policy-supplied string
+// can smuggle the `&client=` pair delimiter into it; and a policy-supplied identifier
+// that is itself in the reserved space (or carries that delimiter, or is a blank-node
+// label / a non-IRI programmatic id) is written as a plain LITERAL, so a crafted policy
+// can never mint a `urn:sparq:` NODE inside the reserved graph. None of this reaches
+// the enforcement view, so none of it can affect a decision.
+// ============================================================================
+
+/// `rdf:Statement` — the class of the minted plain-triple anchor.
+const RDF_STATEMENT: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#Statement";
+/// The RDF reification properties relating the anchor back to the auth triple.
+const RDF_SUBJECT: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#subject";
+const RDF_PREDICATE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#predicate";
+const RDF_OBJECT: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#object";
+
+/// The `auth:` local name attributing a bridged triple to the ODRL rule that produced it.
+const BRIDGED_FROM_RULE: &str = "bridgedFromRule";
+/// The `auth:` local name attributing a bridged triple to its ODRL policy. Emitted only
+/// when the policy carries an IRI (an anonymous `odrl:Set` has none).
+const BRIDGED_FROM_POLICY: &str = "bridgedFromPolicy";
+
+/// Which ODRL rule(s) — and which policy — the auth triples of one bridge call are
+/// attributed to. [SONNET-4.6] sq-luc02.
+///
+/// An EMPTY `rules` means "no attribution available" and materializes no annotation at
+/// all, leaving the mirror exactly the pre-sq-luc02 verbatim copy. That is the honest
+/// degradation for a path that genuinely does not know the rule — notably the N3 oracle
+/// ([`materialize_odrl_n3`]), whose rule set derives `auth:*` triples without carrying
+/// the originating rule node through the closure. A guessed attribution (e.g. asking the
+/// Rust evaluator which rule *it* would have matched) would be worse than none: it would
+/// attribute an N3-derived triple to a decision the N3 path never made.
+#[derive(Debug, Clone, Default)]
+struct RuleProvenance {
+    /// The [`Rule::id`]s the emitted triples are attributed to, deduplicated.
+    rules: Vec<String>,
+    /// The policy IRI those rules came from ([`Policy::iri`]), when it has one.
+    policy: Option<String>,
+}
+
+impl RuleProvenance {
+    /// Attribute to `rule_ids` of `policy`, dropping empties and duplicates while
+    /// preserving order.
+    fn of<I: IntoIterator<Item = String>>(policy: &Policy, rule_ids: I) -> RuleProvenance {
+        let mut rules: Vec<String> = Vec::new();
+        for id in rule_ids {
+            if !id.is_empty() && !rules.contains(&id) {
+                rules.push(id);
+            }
+        }
+        RuleProvenance { rules, policy: policy.iri.clone() }
+    }
+
+    /// Attribute to the single rule `rule_id` of `policy`.
+    fn rule(policy: &Policy, rule_id: &str) -> RuleProvenance {
+        RuleProvenance::of(policy, [rule_id.to_owned()])
+    }
+}
+
+/// A policy-supplied identifier (rule id / policy IRI) as an RDF term: a NODE only when
+/// it is a valid absolute IRI OUTSIDE the reserved `urn:sparq:` space and free of the
+/// pair delimiter; otherwise a plain LITERAL. So a blank-node rule label (`_:b0`), a
+/// programmatic id, or a crafted reserved-space IRI stays a literal and can never mint a
+/// reserved NODE inside the provenance graph. [SONNET-4.6] sq-luc02.
+fn provenance_term(id: &str) -> Term {
+    if crate::loader::session_value_allowed(id) {
+        if let Ok(n) = NamedNode::new(id) {
+            return Term::NamedNode(n);
+        }
+    }
+    Term::Literal(Literal::new_simple_literal(id))
+}
+
+/// The `auth:bridgedFrom*` triples stating `prov` on `anchor` (a minted reification node
+/// or a conditional grant's own node). Empty when `prov` carries no attribution.
+fn attribution_triples(anchor: &Term, prov: &RuleProvenance) -> Vec<[Term; 3]> {
+    if prov.rules.is_empty() {
+        return Vec::new();
+    }
+    let rule_p =
+        Term::NamedNode(NamedNode::new_unchecked(format!("{AUTH_NS}{BRIDGED_FROM_RULE}")));
+    let mut out: Vec<[Term; 3]> = prov
+        .rules
+        .iter()
+        .map(|r| [anchor.clone(), rule_p.clone(), provenance_term(r)])
+        .collect();
+    if let Some(policy_iri) = &prov.policy {
+        let policy_p =
+            Term::NamedNode(NamedNode::new_unchecked(format!("{AUTH_NS}{BRIDGED_FROM_POLICY}")));
+        out.push([anchor.clone(), policy_p, provenance_term(policy_iri)]);
+    }
+    out
+}
+
+/// The reification-node annotation for one plain auth `triple` — one anchor per
+/// attributed rule, so two rules producing the same grant stay separately attributable.
+/// Empty when `prov` carries no attribution.
+///
+/// The anchor IRI is DETERMINISTIC in `(triple, rule)`, so re-materializing the same
+/// grant re-mints the same node and the provenance graph stays idempotent under the
+/// dedupe in [`extend_named_graph`].
+fn reified_provenance(triple: &[Term; 3], prov: &RuleProvenance) -> Vec<[Term; 3]> {
+    if prov.rules.is_empty() {
+        return Vec::new();
+    }
+    let type_p = Term::NamedNode(NamedNode::new_unchecked(RDF_TYPE));
+    let statement_o = Term::NamedNode(NamedNode::new_unchecked(RDF_STATEMENT));
+    let subject_p = Term::NamedNode(NamedNode::new_unchecked(RDF_SUBJECT));
+    let predicate_p = Term::NamedNode(NamedNode::new_unchecked(RDF_PREDICATE));
+    let object_p = Term::NamedNode(NamedNode::new_unchecked(RDF_OBJECT));
+
+    let mut out: Vec<[Term; 3]> = Vec::new();
+    for rule in &prov.rules {
+        let anchor = Term::NamedNode(NamedNode::new_unchecked(format!(
+            "urn:sparq:odrl-prov?s={}&p={}&o={}&rule={}",
+            sparq_reason::n3::encode_for_uri(&triple[0].to_string()),
+            sparq_reason::n3::encode_for_uri(&triple[1].to_string()),
+            sparq_reason::n3::encode_for_uri(&triple[2].to_string()),
+            sparq_reason::n3::encode_for_uri(rule),
+        )));
+        out.push([anchor.clone(), type_p.clone(), statement_o.clone()]);
+        out.push([anchor.clone(), subject_p.clone(), triple[0].clone()]);
+        out.push([anchor.clone(), predicate_p.clone(), triple[1].clone()]);
+        out.push([anchor.clone(), object_p.clone(), triple[2].clone()]);
+        out.extend(attribution_triples(
+            &anchor,
+            &RuleProvenance { rules: vec![rule.clone()], policy: prov.policy.clone() },
+        ));
+    }
+    out
 }
 
 // ============================================================================
@@ -1044,7 +1231,14 @@ pub fn materialize_permission_conditional(
                     continue;
                 }
                 let (first, emitted) = append_conditional_grants(
-                    graph, &agents, &excepts, &window, mode, target, GrantEffect::Allow,
+                    graph,
+                    &agents,
+                    &excepts,
+                    &window,
+                    mode,
+                    target,
+                    GrantEffect::Allow,
+                    &RuleProvenance::rule(policy, &rule.id),
                 );
                 return BridgeOutcome {
                     granted: true,
@@ -1180,7 +1374,14 @@ pub fn materialize_prohibition_conditional(
                     continue;
                 }
                 let (first, emitted) = append_conditional_grants(
-                    graph, &agents, &excepts, &TimeWindow::default(), mode, target, GrantEffect::Deny,
+                    graph,
+                    &agents,
+                    &excepts,
+                    &TimeWindow::default(),
+                    mode,
+                    target,
+                    GrantEffect::Deny,
+                    &RuleProvenance::rule(policy, &rule.id),
                 );
                 return BridgeOutcome {
                     prohibited: true,
@@ -1329,6 +1530,12 @@ impl GrantEffect {
 /// adds the graph to the `denied` set, which is subtracted from `allowed`
 /// (deny-overrides). The deny's grant IRI carries an `&effect=deny` key so it never
 /// collides with an allow grant for the same `(agent, mode, graph, excepts)`.
+///
+/// `prov` attributes the emitted heads to the ODRL rule they were compiled from
+/// ([SONNET-4.6] sq-luc02). A conditional grant already IS a per-grant node, so the
+/// attribution is stated directly on the grant IRI rather than through a second
+/// reification node — the provenance-graph-only rule still holds (see
+/// [`append_bridged_triples`]).
 fn append_conditional_grants(
     graph: &mut Graph,
     agents: &[String],
@@ -1337,8 +1544,10 @@ fn append_conditional_grants(
     mode: Mode,
     target: &str,
     effect: GrantEffect,
+    prov: &RuleProvenance,
 ) -> ((String, String, String), Vec<[Term; 3]>) {
     let mut emitted: Vec<[Term; 3]> = Vec::new();
+    let mut annotations: Vec<[Term; 3]> = Vec::new();
 
     let type_p = NamedNode::new_unchecked(RDF_TYPE);
     let cond_class = NamedNode::new_unchecked(format!("{AUTH_NS}ConditionalGrant"));
@@ -1451,6 +1660,12 @@ fn append_conditional_grants(
                 emitted.push(t);
             }
         }
+        // [SONNET-4.6] sq-luc02: the grant node is its own provenance anchor.
+        for a in attribution_triples(&g, prov) {
+            if !annotations.contains(&a) {
+                annotations.push(a);
+            }
+        }
         if first.is_none() {
             first = Some((
                 agent.clone(),
@@ -1460,7 +1675,7 @@ fn append_conditional_grants(
         }
     }
 
-    append_bridged_triples(graph, &emitted);
+    append_bridged_triples(graph, &emitted, &annotations);
     (first.expect("at least one agent head emitted"), emitted)
 }
 
@@ -1814,8 +2029,27 @@ fn refresh_prohibition(graph: &mut Graph, policy: &Policy, request: &Request) ->
         // Still applies → re-emit through the normal match path.
         ProhibitionStatus::Applies => materialize_prohibition(graph, policy, request),
         // Unprovable → KEEP the deny by re-emitting it directly (fail-closed).
-        ProhibitionStatus::Ambiguous => reemit_deny(graph, request),
+        ProhibitionStatus::Ambiguous => {
+            let prov = RuleProvenance::of(policy, naming_prohibition_ids(policy, request));
+            reemit_deny(graph, request, &prov)
+        }
     }
+}
+
+/// The ids of every prohibition that STRUCTURALLY names `request` (its action/target
+/// agree), used to attribute a deny KEPT on an *ambiguous* refresh. The carve-out cannot
+/// be proven gone, and `prohibition_status` does not say WHICH rule is unprovable, so the
+/// re-emitted deny is attributed to every rule that could still be carving the request
+/// out — honest over-attribution rather than a guessed single rule. [SONNET-4.6] sq-luc02.
+fn naming_prohibition_ids(policy: &Policy, request: &Request) -> Vec<String> {
+    let Some(mode) = action_to_mode(&request.action) else { return Vec::new() };
+    let Some(target) = request.target.as_deref() else { return Vec::new() };
+    policy
+        .prohibitions
+        .iter()
+        .filter(|rule| rule_action_target_match(rule, request, mode, target))
+        .map(|rule| rule.id.clone())
+        .collect()
 }
 
 /// Re-evaluate a tracked **Policy** (both sides) on refresh: the allow side keeps the
@@ -1854,7 +2088,7 @@ fn refresh_policy(graph: &mut Graph, policy: &Policy, request: &Request) -> Brid
 /// reconstructed; that emits nothing (and so retracts) — but such an entry could never
 /// have been materialized in the first place (those are the exact fail-closed gates in
 /// [`materialize_prohibition`]), so this branch is unreachable for a tracked deny.
-fn reemit_deny(graph: &mut Graph, request: &Request) -> BridgeOutcome {
+fn reemit_deny(graph: &mut Graph, request: &Request, prov: &RuleProvenance) -> BridgeOutcome {
     let Some(mode) = action_to_mode(&request.action) else {
         return BridgeOutcome::denied(vec![
             "ambiguous prohibition re-eval but action no longer maps; deny not re-emitted"
@@ -1868,7 +2102,7 @@ fn reemit_deny(graph: &mut Graph, request: &Request) -> BridgeOutcome {
         ]);
     };
     let pred = format!("{AUTH_NS}{}", deny_predicate(mode));
-    let triple = append_grant(graph, party, &pred, target);
+    let triple = append_grant(graph, party, &pred, target, prov);
     BridgeOutcome {
         prohibited: true,
         mode: Some(mode),
@@ -1907,7 +2141,10 @@ fn reemit_deny(graph: &mut Graph, request: &Request) -> BridgeOutcome {
 // ============================================================================
 #[cfg(feature = "count-enforcement")]
 pub(crate) mod count {
-    use super::{action_to_mode, append_grant, refuse_unimplementable_conflict, BridgeOutcome, AUTH_NS};
+    use super::{
+        action_to_mode, append_grant, refuse_unimplementable_conflict, BridgeOutcome,
+        RuleProvenance, AUTH_NS,
+    };
     use sparq_core::Graph;
     use sparq_policy::{
         count_status, evaluate, evaluate_and_exercise, CountStatus, Policy, Request,
@@ -1995,9 +2232,11 @@ pub(crate) mod count {
         };
 
         // 3. Materialize `party auth:<mode> target` (one-shot allow shape; the count was
-        //    consumed in step 1, and is re-checked read-only on refresh).
+        //    consumed in step 1, and is re-checked read-only on refresh), attributed to
+        //    the rule the atomic exercise says granted it ([SONNET-4.6] sq-luc02).
         let pred = format!("{AUTH_NS}{}", mode_predicate(mode));
-        let triple = append_grant(graph, party, &pred, target);
+        let prov = RuleProvenance::of(policy, exercise.matched_rules.clone());
+        let triple = append_grant(graph, party, &pred, target, &prov);
         BridgeOutcome {
             granted: true,
             mode: Some(mode),
@@ -2064,7 +2303,7 @@ pub(crate) mod count {
         match count_status(rule, request, store) {
             // Budget remains, or the rule has no count limit → re-emit the allow grant.
             CountStatus::Satisfied { .. } | CountStatus::NotConstrained => {
-                reemit_grant(graph, request)
+                reemit_grant(graph, request, &RuleProvenance::rule(policy, &rule.id))
             }
             // Exhausted, or unprovable (store outage / malformed) → retract (fail-closed).
             CountStatus::DefinitelyUnsatisfied { consumed, limit } => BridgeOutcome::denied(vec![
@@ -2083,7 +2322,11 @@ pub(crate) mod count {
     /// Re-emit the `principal auth:<mode> target` allow for `request` (the same triple
     /// [`materialize_permission_counted`] emitted), used on a still-valid count refresh.
     /// The triple is fully determined by the request (party + action→mode + target).
-    fn reemit_grant(graph: &mut Graph, request: &Request) -> BridgeOutcome {
+    fn reemit_grant(
+        graph: &mut Graph,
+        request: &Request,
+        prov: &RuleProvenance,
+    ) -> BridgeOutcome {
         let Some(mode) = action_to_mode(&request.action) else {
             return BridgeOutcome::denied(vec![
                 "counted grant action no longer maps on refresh; not re-emitted".to_owned(),
@@ -2096,7 +2339,7 @@ pub(crate) mod count {
             ]);
         };
         let pred = format!("{AUTH_NS}{}", mode_predicate(mode));
-        let triple = append_grant(graph, party, &pred, target);
+        let triple = append_grant(graph, party, &pred, target, prov);
         BridgeOutcome {
             granted: true,
             mode: Some(mode),
@@ -2311,7 +2554,12 @@ pub fn materialize_odrl_n3(
     }
 
     if !new_triples.is_empty() {
-        append_bridged_triples(graph, &new_triples);
+        // [SONNET-4.6] sq-luc02: NO rule-level attribution on this path. The N3 rule set
+        // derives `auth:*` triples without carrying the originating ODRL rule node
+        // through the closure, and asking the Rust evaluator instead would attribute an
+        // N3-derived triple to a decision the N3 path never made. The mirror stays the
+        // verbatim bridged-vs-static marker until the strata thread the rule through.
+        append_bridged_triples(graph, &new_triples, &[]);
     }
 
     let emitted = new_triples;
