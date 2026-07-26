@@ -901,6 +901,310 @@ class TestGateResolution(unittest.TestCase):
         self.assertEqual(fake.writes, [], "a red PR is not the invisible population")
 
 
+class TestScopedRunAuthority(unittest.TestCase):
+    """The EVENT path must not be a laxer route to the same label than the CRON path.
+
+    The two paths differ in exactly one thing — WHICH PRs enter the loop. Everything that
+    confers authority (the node field selection, ``decide``, provenance, head binding,
+    holds, the dispatch table, the base-branch filter, the fail-closed label read) is
+    shared. These tests assert that by DIFFERENTIAL EXECUTION rather than by inspection:
+    the same fixture is run both ways and the emitted writes must be byte-identical.
+    """
+
+    # Every interesting shape the policy distinguishes, exercised through both paths.
+    CASES = {
+        "promote": (dict(), PASS_COMMENT),
+        "flag": (dict(), []),
+        "retract-on-fail": (dict(labels=[vb.REVIEW_ATTESTATION]), FAIL_COMMENT),
+        "unflag": (dict(labels=[vb.UNREVIEWED_LABEL]), FAIL_COMMENT),
+        "hold-needs-user": (dict(labels=["needs:user"]), PASS_COMMENT),
+        "hold-zk": (dict(labels=["area:sparq-zk"]), PASS_COMMENT),
+        "draft": (dict(isDraft=True), PASS_COMMENT),
+        "conflicting": (dict(mergeable="CONFLICTING"), []),
+        "stacked-base": (dict(baseRefName="feature/stack"), PASS_COMMENT),
+        "labels-overflow": (dict(labels_overflow=True), PASS_COMMENT),
+        "untrusted-pass": (
+            dict(),
+            [vb.comment(f"{HEAD}\n\nVERDICT: pass", association="NONE")],
+        ),
+        "stale-head-pass": (dict(), [vb.comment(f"{OTHER}\n\nVERDICT: pass")]),
+        "ambiguous-retraction": (
+            dict(labels=[vb.REVIEW_ATTESTATION]),
+            [
+                vb.comment(f"{HEAD}\n\nVERDICT: pass", created_at="2026-01-01T00:00:00Z", cid=1),
+                vb.comment(f"{HEAD}\n\nVERDICT: FAIL", created_at="2026-02-01T00:00:00Z", cid=2),
+            ],
+        ),
+    }
+
+    def both_paths(self, overrides, comments):
+        sweep_fake = FakeGitHub([node(4200, **overrides)], comments={4200: list(comments)})
+        sweep = bridge(sweep_fake)
+        sweep_rc = sweep.run()
+        event_fake = FakeGitHub([node(4200, **overrides)], comments={4200: list(comments)})
+        event = bridge(event_fake, only_pr=4200)
+        event_rc = event.run()
+        return (sweep_fake, sweep_rc), (event_fake, event_rc)
+
+    def test_the_event_path_emits_the_IDENTICAL_writes_as_the_cron_path(self):
+        for name, (overrides, comments) in self.CASES.items():
+            with self.subTest(case=name):
+                (sweep, sweep_rc), (event, event_rc) = self.both_paths(overrides, comments)
+                self.assertEqual(
+                    event.writes, sweep.writes, f"{name}: event path diverged from cron"
+                )
+                self.assertEqual(event_rc, sweep_rc, f"{name}: exit code diverged")
+
+    def test_the_event_path_can_never_write_the_attestation_where_the_cron_would_not(self):
+        """The one-directional statement of the same property: for EVERY fixture, the set
+        of PRs the event path attests is a SUBSET of the set the cron path attests."""
+        for name, (overrides, comments) in self.CASES.items():
+            with self.subTest(case=name):
+                (sweep, _), (event, _) = self.both_paths(overrides, comments)
+                attests = lambda fake: any(  # noqa: E731
+                    vb.REVIEW_ATTESTATION in w and "--add-label" in w for w in fake.writes
+                )
+                if attests(event):
+                    self.assertTrue(
+                        attests(sweep),
+                        f"{name}: the event path attested a PR the cron path refused",
+                    )
+
+    def test_both_paths_request_the_SAME_node_fields(self):
+        """A field present only in the sweep query would make the event path decide on
+        LESS information — e.g. dropping the labels connection reads every hold as
+        absent, and every held PR would be attested through the event path alone."""
+        self.assertIn(vb.PR_NODE_FIELDS, vb.PR_LIST_QUERY)
+        self.assertIn(vb.PR_NODE_FIELDS, vb.PR_ONE_QUERY)
+        for field in ("labels(", "reviews(", "headRefOid", "baseRefName", "mergeable",
+                      "isDraft", "state", "authorAssociation", "submittedAt"):
+            with self.subTest(field=field):
+                self.assertIn(field, vb.PR_NODE_FIELDS)
+
+    def test_a_scoped_run_reads_ONLY_the_named_pr(self):
+        """The whole point: an event must not trigger the ~9-minute all-PR sweep."""
+        fake = FakeGitHub(
+            [node(n) for n in (4200, 4201, 4202)],
+            comments={n: PASS_COMMENT for n in (4200, 4201, 4202)},
+        )
+        bridge(fake, only_pr=4201).run()
+        self.assertEqual([w[2] for w in fake.writes], ["4201"])
+        self.assertFalse(
+            any("pullRequests(states:OPEN" in r for r in fake.reads),
+            "a scoped run must never issue the whole-repo listing query",
+        )
+
+    def test_an_event_naming_a_vanished_pr_is_a_clean_no_op(self):
+        fake = FakeGitHub([node(4200)], comments={4200: PASS_COMMENT})
+        b = bridge(fake, only_pr=999999)
+        self.assertEqual(b.run(), 0)
+        self.assertEqual(fake.writes, [])
+
+    def test_a_broken_single_pr_read_RAISES_rather_than_reading_as_no_work(self):
+        """Fail-closed at the new read. Returning [] on an error would make every API
+        blip look like 'this PR needs nothing'."""
+        fake = FakeGitHub([node(4200)])
+        b = bridge(fake, only_pr=4200)
+        for broken in (
+            {"errors": [{"message": "boom"}]},   # GraphQL reported an error
+            {"data": {}},                        # no repository connection at all
+            {"data": {"repository": None}},      # null repository (permission loss)
+        ):
+            with self.subTest(payload=broken):
+                b.gh_read = lambda argv, _p=broken: json.dumps(_p)
+                with self.assertRaises(vb.GhError):
+                    b.fetch_one(4200)
+
+    def test_a_non_positive_or_non_numeric_pr_scope_is_refused(self):
+        for bad in (0, -1):
+            with self.subTest(pr=bad):
+                with self.assertRaises(ValueError):
+                    vb.VerdictBridge(REPO, "main", only_pr=bad)
+
+    def test_the_pr_argument_parser_never_degrades_garbage_to_a_full_sweep(self):
+        """`--pr` carries webhook-supplied data. Coercing an unparseable value to None
+        (= sweep) would let a malformed payload start a repository-wide run."""
+        self.assertIsNone(vb.parse_pr_argument(""))
+        self.assertIsNone(vb.parse_pr_argument(None))
+        self.assertEqual(vb.parse_pr_argument(" 4324 "), 4324)
+        for bad in ("0", "-3", "12x", "4324 && curl evil", "1e3", "٤٣", "null", "*"):
+            with self.subTest(value=bad):
+                with self.assertRaises(ValueError):
+                    vb.parse_pr_argument(bad)
+
+    def test_arming_relevant_decisions_never_depend_on_the_gate_read(self):
+        """Load-bearing for reconfirm(), which carries the gate conclusion forward rather
+        than paying up to 7 paginated pages again. If promote/retract/unflag ever started
+        consulting the gate, that carry-forward would become a stale input on the ARMING
+        path — this test is what makes the shortcut sound."""
+        for name, (overrides, comments) in (
+            ("promote", (dict(), PASS_COMMENT)),
+            ("retract", (dict(labels=[vb.REVIEW_ATTESTATION]), FAIL_COMMENT)),
+            ("unflag", (dict(labels=[vb.UNREVIEWED_LABEL]), FAIL_COMMENT)),
+        ):
+            with self.subTest(action=name):
+                reader = bridge(FakeGitHub([node(4200, **overrides)]))
+                actions = {
+                    vb.decide(
+                        reader.parse_node(node(4200, **overrides), gate), comments
+                    ).action
+                    for gate in ("success", "failure", "cancelled", None)
+                }
+                self.assertEqual(
+                    actions, {name}, f"{name} changed with the gate conclusion: {actions}"
+                )
+
+
+class TestDoubleFireIdempotence(unittest.TestCase):
+    """CONSTRAINT: event and cron now race. Running twice on one head must converge.
+
+    These are EXECUTIONS, not assertions about the design. The fake mutates its label
+    state on write (FakeGitHub._apply_label_edit), so a second run genuinely observes what
+    the first one did.
+    """
+
+    def test_two_sequential_runs_over_one_head_write_exactly_once(self):
+        for name, (overrides, comments) in (
+            ("promote", (dict(), PASS_COMMENT)),
+            ("flag", (dict(), [])),
+            ("retract", (dict(labels=[vb.REVIEW_ATTESTATION]), FAIL_COMMENT)),
+            ("unflag", (dict(labels=[vb.UNREVIEWED_LABEL]), FAIL_COMMENT)),
+        ):
+            with self.subTest(action=name):
+                fake = FakeGitHub([node(4200, **overrides)], comments={4200: comments})
+                bridge(fake).run()
+                first = len(fake.writes)
+                self.assertEqual(first, 1, fake.writes)
+                bridge(fake).run()
+                self.assertEqual(
+                    len(fake.writes), 1, f"{name} re-wrote on the second run: {fake.writes}"
+                )
+
+    def test_the_event_run_and_the_cron_run_over_one_head_converge(self):
+        """The literal double-fire: the SAME state, one scoped run and one sweep."""
+        fake = FakeGitHub([node(4200)], comments={4200: PASS_COMMENT})
+        bridge(fake, only_pr=4200).run()
+        bridge(fake).run()
+        self.assertEqual(len(fake.writes), 1, fake.writes)
+        self.assertEqual(fake.labels_of(4200), {vb.REVIEW_ATTESTATION})
+
+    def test_a_STALE_sweep_decision_cannot_resurrect_a_label_an_event_just_removed(self):
+        """THE race the conversion creates, executed.
+
+        Interleaving: the sweep reads at T0 (verdict = pass) and is still working through
+        its other ~100 PRs when a reviewer posts a retraction at T1. The event run reads,
+        decides retract, and writes. The sweep then reaches PR #4200 with its T0 snapshot
+        and would write `review:pass` — arming a PR whose review was just withdrawn.
+
+        reconfirm() re-reads immediately before the write, sees the retraction, and
+        abandons. Delete that call and this test reds with review:pass on the PR.
+        """
+        fake = FakeGitHub([node(4200)], comments={4200: list(PASS_COMMENT)})
+        sweep = bridge(fake)
+
+        # T0: the sweep takes its snapshot and decides, but has not written yet.
+        stale_nodes = sweep.list_open()
+        stale_pr = sweep.parse_node(stale_nodes[0], "success")
+        stale_decision = vb.decide(stale_pr, sweep.comments(4200))
+        self.assertEqual(stale_decision.action, "promote")
+
+        # T1: a retraction lands and the EVENT run processes it.
+        fake._comments[4200] = list(PASS_COMMENT) + [
+            vb.comment(
+                f"{HEAD}\n\nVERDICT: fail", created_at="2099-01-01T00:00:00Z", cid=99
+            )
+        ]
+        bridge(fake, only_pr=4200).run()
+        self.assertEqual(fake.labels_of(4200), set(), "the event run must not attest")
+
+        # T2: the sweep finally reaches this PR carrying its stale `promote`.
+        fresh, confirmed = sweep.reconfirm(stale_pr, stale_decision)
+        self.assertNotEqual(
+            confirmed.action,
+            stale_decision.action,
+            "a stale promote must be superseded by the retraction",
+        )
+        sweep.run()
+        self.assertNotIn(
+            vb.REVIEW_ATTESTATION,
+            fake.labels_of(4200),
+            "a stale sweep resurrected a retracted attestation",
+        )
+        del fresh
+
+    def test_a_HEAD_CHANGE_between_read_and_write_abandons_the_write(self):
+        """A force-push invalidates every head-bound verdict. The pre-write re-read is a
+        genuine compare-and-set on the head SHA."""
+        fake = FakeGitHub([node(4200)], comments={4200: PASS_COMMENT})
+        b = bridge(fake)
+        stale_pr = b.parse_node(node(4200), "success")
+        # The PR is force-pushed to a new head after the snapshot was taken.
+        fake.nodes[0]["headRefOid"] = "c" * 40
+        _fresh, confirmed = b.reconfirm(stale_pr, vb.Decision("promote", "stale"))
+        self.assertNotEqual(confirmed.action, "promote")
+        b.run()
+        self.assertNotIn(vb.REVIEW_ATTESTATION, fake.labels_of(4200))
+
+    def test_reconfirm_refuses_when_the_pr_vanished_or_its_base_moved(self):
+        fake = FakeGitHub([node(4200)], comments={4200: PASS_COMMENT})
+        b = bridge(fake)
+        pull = b.parse_node(node(4200), "success")
+        fake.nodes = []
+        self.assertEqual(b.reconfirm(pull, vb.Decision("promote", ""))[1].action, "none")
+        fake.nodes = [node(4200, baseRefName="feature/stack")]
+        self.assertEqual(b.reconfirm(pull, vb.Decision("promote", ""))[1].action, "none")
+
+    def test_a_write_still_happens_when_nothing_changed_under_the_run(self):
+        """The guard must not be a blanket refusal — that would be a silent kill switch
+        indistinguishable from 'the bridge is safe now'."""
+        fake = FakeGitHub([node(4200)], comments={4200: PASS_COMMENT})
+        self.assertEqual(bridge(fake).run(), 0)
+        self.assertEqual(len(fake.writes), 1, fake.writes)
+        self.assertEqual(fake.labels_of(4200), {vb.REVIEW_ATTESTATION})
+
+    def test_a_reconfirm_read_failure_is_an_ERROR_and_writes_nothing(self):
+        fake = FakeGitHub([node(4200)], comments={4200: PASS_COMMENT})
+        b = bridge(fake)
+        real = fake.read
+
+        def flaky(argv):
+            if "pullRequest(number:" in " ".join(argv):
+                raise vb.GhError("502 on the reconfirm read")
+            return real(argv)
+
+        fake.read = flaky
+        b.gh_read = flaky
+        self.assertEqual(b.run(), 1, "an unverifiable write must be reported")
+        self.assertEqual(fake.writes, [], "never write on an unconfirmed decision")
+
+
+class TestEventModeFailureSemantics(unittest.TestCase):
+    """A dropped EVENT has no useful backstop: the cron's MEASURED real cadence on this
+    repository is 53-75 minutes (11.1% of scheduled ticks fired in the 24h to
+    2026-07-26T22:10Z), not the nominal 10."""
+
+    class Transient:
+        def run(self):
+            raise vb.gh_retry.GhTransientExhausted("502 x5")
+
+    def test_event_mode_reds_on_exhausted_transients(self):
+        logs: list[str] = []
+        self.assertEqual(
+            vb.run_bridge(self.Transient(), log=logs.append, mode="event"), 1
+        )
+        self.assertTrue(any("::error" in line for line in logs), logs)
+
+    def test_sweep_mode_still_fails_soft(self):
+        logs: list[str] = []
+        self.assertEqual(
+            vb.run_bridge(self.Transient(), log=logs.append, mode="sweep"), 0
+        )
+        self.assertTrue(any("::warning" in line for line in logs), logs)
+
+    def test_sweep_is_the_default_mode(self):
+        self.assertEqual(vb.run_bridge(self.Transient(), log=lambda _: None), 0)
+
+
 class TestCrossPolicyConsistency(unittest.TestCase):
     """The bridge must be safe against the LIVE arming policies, not a copy of them."""
 
@@ -1330,7 +1634,6 @@ class TestWorkflowWiring(unittest.TestCase):
         for sink in forbidden:
             with self.subTest(sink=sink):
                 self.assertNotIn(sink, blob)
-
 
     def test_it_has_no_contents_write_authority(self):
         perms = self.doc["permissions"]
