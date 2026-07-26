@@ -133,8 +133,10 @@ pub struct Report {
     /// and therefore excludes `owl:Thing`.
     pub thing_unsatisfiable: bool,
     /// [OPUS-4.8] sq-pbz04.2.5 (`abox`): ABox assertions the realiser DEFERRED as counted skips
-    /// — a `DataPropertyAssertion` (literal object; the `cdomain` point-range rescue is a
-    /// sequenced follow-up) or a `ClassAssertion` whose class expression is outside the EL
+    /// — a `DataPropertyAssertion` whose literal has no minted point range (EVERY literal object
+    /// without `cdomain`; [SONNET-4.6] sq-vkq9u rescues the exact-numeric ones as `{a} ⊑ ∃q.{v}`
+    /// when `abox` and `cdomain` are composed, leaving the string / lang-tagged / float-tier /
+    /// ill-formed cases deferred) or a `ClassAssertion` whose class expression is outside the EL
     /// fragment. Set only by [`realize`] / [`realize_graph`]; the TBox `Classifier::classify` /
     /// `classify_graph` leave it `0`. A non-zero count is the honest "n instance facts not
     /// internalized" signal (fail-closed — never a guessed typing).
