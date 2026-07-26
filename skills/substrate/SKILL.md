@@ -79,7 +79,7 @@ candidates are ADJACENT floats that print identically. [OPUS-5] issue #3796.
 > comparison path never consumed the `f32` value — and it is NOT fixed here: the cache f64
 > is shared bit-identically with the spilled on-disk dict cache and `LocalVocab::intern`,
 > so correcting it is a separate change that must be validated against the W3C conformance
-> ratchet. Tracked separately; #3796 stays OPEN for it. [OPUS-5]
+> ratchet. Tracked as issue #3825; #3796 stays OPEN for it. [OPUS-5]
 >
 > `Num::cmp_relational` using the f64 tier is CORRECT and must not be "fixed" — XPath
 > promotes `float` → `double` for that comparison. The defect is the cached VALUE, not the
