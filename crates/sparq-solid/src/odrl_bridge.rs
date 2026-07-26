@@ -1232,13 +1232,15 @@ pub fn materialize_permission_conditional(
                 }
                 let (first, emitted) = append_conditional_grants(
                     graph,
-                    &agents,
-                    &excepts,
-                    &window,
-                    mode,
-                    target,
-                    GrantEffect::Allow,
-                    &RuleProvenance::rule(policy, &rule.id),
+                    ConditionalGrant {
+                        agents: &agents,
+                        excepts: &excepts,
+                        window: &window,
+                        mode,
+                        target,
+                        effect: GrantEffect::Allow,
+                        prov: &RuleProvenance::rule(policy, &rule.id),
+                    },
                 );
                 return BridgeOutcome {
                     granted: true,
@@ -1375,13 +1377,15 @@ pub fn materialize_prohibition_conditional(
                 }
                 let (first, emitted) = append_conditional_grants(
                     graph,
-                    &agents,
-                    &excepts,
-                    &TimeWindow::default(),
-                    mode,
-                    target,
-                    GrantEffect::Deny,
-                    &RuleProvenance::rule(policy, &rule.id),
+                    ConditionalGrant {
+                        agents: &agents,
+                        excepts: &excepts,
+                        window: &TimeWindow::default(),
+                        mode,
+                        target,
+                        effect: GrantEffect::Deny,
+                        prov: &RuleProvenance::rule(policy, &rule.id),
+                    },
                 );
                 return BridgeOutcome {
                     prohibited: true,
@@ -1508,6 +1512,32 @@ impl GrantEffect {
     }
 }
 
+/// The conditional grant [`append_conditional_grants`] is asked to materialize: WHO it
+/// heads (`agents`, less the carved-out `excepts`), WHEN it applies (`window`), WHAT it
+/// conveys (`mode` on `target`) with which deontic force (`effect`), and the ODRL rule
+/// it was compiled from (`prov`). See that function for the per-field semantics.
+///
+/// These travel as one value rather than positionally because they *are* one thing —
+/// the grant's shape — and the emitter otherwise takes eight arguments, which is both
+/// past clippy's `too_many_arguments` floor and past the point where a reader can tell
+/// the two `&[String]` lists apart at a call site. [SONNET-4.6]
+struct ConditionalGrant<'a> {
+    /// The principals the grant heads are emitted for (one head per agent).
+    agents: &'a [String],
+    /// The principals carved OUT of those heads via ACP `noneOf` exception matchers.
+    excepts: &'a [String],
+    /// The live-clock validity window re-checked per request by the session layer.
+    window: &'a TimeWindow,
+    /// The access mode the grant conveys.
+    mode: Mode,
+    /// The graph IRI the grant is scoped to.
+    target: &'a str,
+    /// Allow (a conditional grant) or Deny (its deny-overrides dual).
+    effect: GrantEffect,
+    /// The ODRL rule the heads are attributed to in the provenance graph.
+    prov: &'a RuleProvenance,
+}
+
 /// Append `auth:ConditionalGrant` triples (allow OR deny — see `effect`) for each agent
 /// head onto BOTH the `<urn:sparq:auth>` view and the bridged-provenance graph,
 /// preserving existing triples. Returns the `(agent, auth:effect, graph)` audit anchor
@@ -1538,14 +1568,9 @@ impl GrantEffect {
 /// [`append_bridged_triples`]).
 fn append_conditional_grants(
     graph: &mut Graph,
-    agents: &[String],
-    excepts: &[String],
-    window: &TimeWindow,
-    mode: Mode,
-    target: &str,
-    effect: GrantEffect,
-    prov: &RuleProvenance,
+    spec: ConditionalGrant<'_>,
 ) -> ((String, String, String), Vec<[Term; 3]>) {
+    let ConditionalGrant { agents, excepts, window, mode, target, effect, prov } = spec;
     let mut emitted: Vec<[Term; 3]> = Vec::new();
     let mut annotations: Vec<[Term; 3]> = Vec::new();
 
