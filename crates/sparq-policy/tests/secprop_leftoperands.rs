@@ -11,8 +11,8 @@
 #![cfg(feature = "secprop-leftoperands")]
 
 use sparq_policy::secprop::{
-    is_secprop_left_operand, over_dimension, PROFILE_IRI, REQUIRES_ASSURANCE,
-    REQUIRES_UNLINKABILITY_SCOPE, SECPROP_LEFT_OPERANDS,
+    discharge_obligations, is_secprop_left_operand, over_dimension, Deontic, PROFILE_IRI,
+    REQUIRES_ASSURANCE, REQUIRES_UNLINKABILITY_SCOPE, SECPROP_LEFT_OPERANDS,
 };
 use sparq_policy::{
     evaluate, parse_policy_str, Action, Constraint, Operator, Policy, Request, Rule, Value, ODRL_NS,
@@ -159,4 +159,67 @@ fn worked_preference_parses_and_left_operands_are_recognised() {
             c.left,
         );
     }
+}
+
+/// The ODRL half of the ZK↔ODRL constraint-discharge envelope (sq-yh427), end to end:
+/// a user privacy preference written in Turtle parses, and `discharge_obligations`
+/// reports exactly what a presented proof would have to establish — dimension,
+/// operator and required level per rule.
+///
+/// It reports; it does not verify, order levels, or claim any method has any property.
+#[test]
+fn worked_preference_yields_the_proof_discharge_obligations() {
+    let ttl = r#"
+@prefix odrl:     <http://www.w3.org/ns/odrl/2/> .
+@prefix secx:     <https://w3id.org/zkp-sparql/sec-prop#> .
+@prefix sparqorl: <https://sparq.dev/ns/odrl-secprop-profile#> .
+
+<urn:pref:alice-privacy> a odrl:Policy ;
+  odrl:profile sparqorl: ;
+  odrl:permission [
+    odrl:action odrl:read ;
+    odrl:constraint
+      [ odrl:leftOperand  secx:requiresUnlinkabilityScope ;
+        odrl:operator      odrl:gteq ;
+        odrl:rightOperand  secx:CrossPresentation ] ,
+      [ odrl:leftOperand  secx:requiresAssurance ;
+        odrl:operator      odrl:gteq ;
+        odrl:rightOperand  secx:Proven ] ] .
+"#;
+    let policy = parse_policy_str(ttl, "turtle").expect("worked preference must parse");
+
+    let obligations = discharge_obligations(&policy);
+    assert_eq!(obligations.len(), 2, "both secx: constraints are obligations");
+    for o in &obligations {
+        assert_eq!(o.deontic, Deontic::Permission);
+        assert_eq!(o.operator, Operator::Gteq);
+        assert_eq!(
+            Some(o.dimension),
+            over_dimension(&o.left_operand),
+            "each obligation resolves to its leftOperand's declared dimension",
+        );
+    }
+    let mut dims: Vec<&str> = obligations.iter().map(|o| o.dimension).collect();
+    dims.sort_unstable();
+    assert_eq!(
+        dims,
+        vec![
+            "https://w3id.org/zkp-sparql/sec-prop#AssuranceLevel",
+            "https://w3id.org/zkp-sparql/sec-prop#UnlinkabilityScope",
+        ],
+    );
+    assert!(
+        obligations
+            .iter()
+            .any(|o| o.required == Value::Iri("https://w3id.org/zkp-sparql/sec-prop#Proven".into())),
+        "the required level is carried through so a host can ask for it",
+    );
+
+    // LOAD-BEARING: extraction is read-only. Evidence-free evaluation of the same
+    // policy is still fail-closed DENY — reporting an obligation never discharges it.
+    let req = Request::new(format!("{ODRL_NS}read"));
+    assert!(
+        !evaluate(&policy, &req).allow,
+        "extracting obligations must not change the fail-closed evaluate path",
+    );
 }

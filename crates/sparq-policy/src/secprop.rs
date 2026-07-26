@@ -31,6 +31,28 @@
 //! `sparq-mpc` is semi-honest-only. This module only lets a policy *name the bar*; it
 //! makes no privacy/soundness claim.
 //!
+//! ## The ODRL half of the ZK↔ODRL constraint-discharge envelope (sq-yh427)
+//!
+//! [`discharge_obligations`] projects a parsed [`crate::Policy`] to the list of
+//! `secx:requires…` constraints it carries — *what a presented proof would have to
+//! establish*, over which dimension, at which level, and on which deontic rule. That
+//! is the **ODRL-side interface** the ZK↔ODRL envelope plugs into: a host reads it to
+//! know which properties to demand of a presentation before it can decide.
+//!
+//! The **wire half** of that envelope — a VC 2.0 Verifiable Presentation carrying a
+//! Data-Integrity proof under a `sparql-zk`-style cryptosuite — is **deliberately NOT
+//! implemented here**: no such cryptosuite exists in this workspace (`sparq-vc`
+//! implements `eddsa-rdfc-2022` only), its identifier and claim shape are still under
+//! cross-agent design with the Solid-server sibling, and sparq's ZK estate has **no**
+//! external accredited-cryptographer sign-off (`sq-qhy4`). Extraction makes **no**
+//! security claim and performs **no** verification.
+//!
+//! Nor does this module *discharge* anything. It does not order levels (the
+//! `secx:atLeast` partial order + the admissibility reduction live in
+//! `sparq-trust`'s `admissibility` module, `sq-ufsi9`) and it does not change the
+//! stateless [`crate::evaluate`] path: a `secx:` constraint the request supplies no
+//! evidence for remains fail-closed unsatisfied, exactly as before.
+//!
 //! ## Desugaring (design §4.5)
 //!
 //! Each `secx:requiresX` leftOperand is convenience **sugar** for the single generic
@@ -53,6 +75,8 @@
 //! [OPUS-4.8] sq-uor3g (epic sq-0dksu, Phase 4; design record
 //! `research/security-properties-ontology-design.md` §4.3.1 + §9). 🤖 SPARQ agent —
 //! security-properties ontology. Flag for re-review when Fable returns.
+
+use crate::model::{Constraint, ConstraintNode, LogicalConstraint, Operator, Policy, Rule, Value};
 
 /// The `secx:` namespace base — the vendored ZKP-SPARQL `sec-prop:` extension
 /// namespace these leftOperands and dimensions live under (a real `w3id.org`
@@ -201,6 +225,150 @@ pub fn over_dimension(left_operand: &str) -> Option<&'static str> {
         .map(|(_, dim)| *dim)
 }
 
+/// The deontic force of the rule a [`DischargeObligation`] was extracted from — which
+/// way discharging it moves the decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Deontic {
+    /// The obligation sits on an `odrl:permission`: the permission grants only while
+    /// **every** one of its constraints holds, so this is a property a presentation
+    /// must establish for access to be granted.
+    Permission,
+    /// The obligation sits on an `odrl:prohibition`: a prohibition **fires** (and
+    /// deny-overrides the decision — see [`crate::evaluate`]) when its constraints
+    /// hold. Establishing this property therefore *withholds* access; a host must not
+    /// treat it as something to satisfy.
+    Prohibition,
+}
+
+/// One security-property **proof-discharge obligation**: a single `secx:requires…`
+/// constraint found on a policy rule, resolved to the dimension it ranges over.
+///
+/// This is a faithful re-projection of already-parsed [`crate::Constraint`] data — it
+/// asserts nothing about any proof, method, or cryptosuite (see the module docs).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DischargeObligation {
+    /// The [`crate::Rule::id`] of the rule carrying the constraint (for justification).
+    pub rule: String,
+    /// Whether that rule is a permission or a prohibition — see [`Deontic`].
+    pub deontic: Deontic,
+    /// The `secx:requires…` [`crate::Constraint::left`] IRI.
+    pub left_operand: String,
+    /// The `secx:` dimension the leftOperand ranges over — its
+    /// [`over_dimension`] (`secx:overDimension`).
+    pub dimension: &'static str,
+    /// The constraint's [`crate::Operator`] (`odrl:gteq` for the usual "at least this
+    /// level" preference).
+    pub operator: Operator,
+    /// The constraint's right operand — the required level.
+    pub required: Value,
+}
+
+/// Every security-property proof-discharge obligation a policy carries, in rule order
+/// (permissions before prohibitions), nested compound constraints included.
+///
+/// A host uses this to answer *"before I can decide this request, what would a
+/// presented proof have to establish?"* — the ODRL half of the ZK↔ODRL
+/// constraint-discharge envelope (`sq-yh427`). An empty result means the policy asks
+/// for no security property, so no presentation is needed.
+///
+/// **Scope, stated honestly.** Extraction is pure projection: it verifies nothing,
+/// orders no levels, and changes no evaluation semantics. It also **excludes duty
+/// constraints** — the single-node base case checks a [`crate::Duty`] by *action*
+/// discharge and never evaluates the duty's own constraints (see [`crate::Duty`]), so
+/// reporting them as obligations the evaluator will check would misdescribe it.
+///
+/// ```
+/// # // cargo: sparq-policy with --features secprop-leftoperands
+/// use sparq_policy::secprop::{discharge_obligations, Deontic, REQUIRES_ASSURANCE};
+/// use sparq_policy::{Action, Constraint, Operator, Policy, Rule, Value, ODRL_NS};
+///
+/// let policy = Policy {
+///     iri: None,
+///     permissions: vec![Rule {
+///         id: "urn:rule:1".into(),
+///         action: Action(format!("{}read", ODRL_NS)),
+///         target: None,
+///         assignee: None,
+///         assigner: None,
+///         constraints: vec![Constraint {
+///             left: REQUIRES_ASSURANCE.into(),
+///             operator: Operator::Gteq,
+///             right: Value::Iri("https://w3id.org/zkp-sparql/sec-prop#Proven".into()),
+///         }],
+///         logical_constraints: vec![],
+///         duties: vec![],
+///     }],
+///     prohibitions: vec![],
+///     conflict: None,
+/// };
+///
+/// let obligations = discharge_obligations(&policy);
+/// assert_eq!(obligations.len(), 1);
+/// assert_eq!(obligations[0].deontic, Deontic::Permission);
+/// assert_eq!(
+///     obligations[0].dimension,
+///     "https://w3id.org/zkp-sparql/sec-prop#AssuranceLevel"
+/// );
+/// ```
+pub fn discharge_obligations(policy: &Policy) -> Vec<DischargeObligation> {
+    let mut out = Vec::new();
+    for rule in &policy.permissions {
+        collect_rule(rule, Deontic::Permission, &mut out);
+    }
+    for rule in &policy.prohibitions {
+        collect_rule(rule, Deontic::Prohibition, &mut out);
+    }
+    out
+}
+
+/// Collect a rule's atomic constraints, then its compound ones.
+fn collect_rule(rule: &Rule, deontic: Deontic, out: &mut Vec<DischargeObligation>) {
+    for c in &rule.constraints {
+        push_if_secprop(&rule.id, deontic, c, out);
+    }
+    for lc in &rule.logical_constraints {
+        collect_logical(&rule.id, deontic, lc, out);
+    }
+}
+
+/// Walk an `odrl:LogicalConstraint` tree, collecting its atomic leaves. A compound
+/// constraint's combinator (`and`/`or`/`xone`) does not change *what a proof would
+/// have to establish* — only how the leaves fold into the rule's verdict — so every
+/// leaf is reported and the combinator is left to [`crate::evaluate`].
+fn collect_logical(
+    rule_id: &str,
+    deontic: Deontic,
+    lc: &LogicalConstraint,
+    out: &mut Vec<DischargeObligation>,
+) {
+    for operand in &lc.operands {
+        match operand {
+            ConstraintNode::Atomic(c) => push_if_secprop(rule_id, deontic, c, out),
+            ConstraintNode::Compound(inner) => collect_logical(rule_id, deontic, inner, out),
+        }
+    }
+}
+
+/// Record `c` as an obligation iff its leftOperand is one this profile declares.
+fn push_if_secprop(
+    rule_id: &str,
+    deontic: Deontic,
+    c: &Constraint,
+    out: &mut Vec<DischargeObligation>,
+) {
+    let Some(dimension) = over_dimension(&c.left) else {
+        return; // a core ODRL (or unrelated custom) leftOperand — not a proof obligation
+    };
+    out.push(DischargeObligation {
+        rule: rule_id.to_owned(),
+        deontic,
+        left_operand: c.left.clone(),
+        dimension,
+        operator: c.operator,
+        required: c.right.clone(),
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,6 +425,178 @@ mod tests {
             "https://example.org/notAProfileTerm"
         ));
         assert_eq!(over_dimension(crate::ODRL_PURPOSE), None);
+    }
+
+    // ── discharge-obligation extraction (sq-yh427, the ODRL half) ────────────
+
+    /// A permission rule carrying `constraints`, for the extraction tests.
+    fn rule_with(id: &str, constraints: Vec<Constraint>) -> Rule {
+        Rule {
+            id: id.into(),
+            action: crate::Action(format!("{}read", crate::ODRL_NS)),
+            target: None,
+            assignee: None,
+            assigner: None,
+            constraints,
+            logical_constraints: vec![],
+            duties: vec![],
+        }
+    }
+
+    fn secprop_constraint(left: &str, level: &str) -> Constraint {
+        Constraint {
+            left: left.into(),
+            operator: Operator::Gteq,
+            right: Value::Iri(format!("{}{}", SECX_NS, level)),
+        }
+    }
+
+    /// A `secx:requires…` constraint is extracted with its dimension, operator and
+    /// required level; a core ODRL constraint alongside it is NOT (it is not a
+    /// property a proof discharges).
+    #[test]
+    fn extracts_secprop_constraints_and_ignores_core_left_operands() {
+        let policy = Policy {
+            iri: None,
+            permissions: vec![rule_with(
+                "urn:rule:1",
+                vec![
+                    secprop_constraint(REQUIRES_ASSURANCE, "Proven"),
+                    Constraint {
+                        left: crate::ODRL_PURPOSE.into(),
+                        operator: Operator::Eq,
+                        right: Value::Iri("https://w3id.org/dpv#ResearchAndDevelopment".into()),
+                    },
+                ],
+            )],
+            prohibitions: vec![],
+            conflict: None,
+        };
+
+        let obligations = discharge_obligations(&policy);
+        assert_eq!(obligations.len(), 1, "only the secx: constraint is an obligation");
+        let o = &obligations[0];
+        assert_eq!(o.rule, "urn:rule:1");
+        assert_eq!(o.deontic, Deontic::Permission);
+        assert_eq!(o.left_operand, REQUIRES_ASSURANCE);
+        assert_eq!(o.dimension, DIM_ASSURANCE_LEVEL);
+        assert_eq!(o.operator, Operator::Gteq);
+        assert_eq!(
+            o.required,
+            Value::Iri(format!("{}Proven", SECX_NS)),
+            "the required level is carried verbatim",
+        );
+    }
+
+    /// A policy with no `secx:` constraint yields no obligations — the host needs no
+    /// presentation at all (and an empty policy likewise).
+    #[test]
+    fn no_secprop_constraints_yields_no_obligations() {
+        assert!(discharge_obligations(&Policy::default()).is_empty());
+        let policy = Policy {
+            iri: None,
+            permissions: vec![rule_with("urn:rule:1", vec![])],
+            prohibitions: vec![],
+            conflict: None,
+        };
+        assert!(discharge_obligations(&policy).is_empty());
+    }
+
+    /// LOAD-BEARING: an obligation on a PROHIBITION is reported as such. Establishing
+    /// it makes the prohibition fire (deny-overrides), so a host must never read it as
+    /// "a property to satisfy".
+    #[test]
+    fn prohibition_obligations_carry_the_prohibition_deontic() {
+        let policy = Policy {
+            iri: None,
+            permissions: vec![rule_with(
+                "urn:perm:1",
+                vec![secprop_constraint(REQUIRES_ZERO_KNOWLEDGE, "PerfectZK")],
+            )],
+            prohibitions: vec![rule_with(
+                "urn:proh:1",
+                vec![secprop_constraint(REQUIRES_SINGLE_USE, "Nullifier")],
+            )],
+            conflict: None,
+        };
+
+        let obligations = discharge_obligations(&policy);
+        assert_eq!(obligations.len(), 2);
+        // Permissions are reported before prohibitions.
+        assert_eq!(obligations[0].deontic, Deontic::Permission);
+        assert_eq!(obligations[0].rule, "urn:perm:1");
+        assert_eq!(obligations[1].deontic, Deontic::Prohibition);
+        assert_eq!(obligations[1].rule, "urn:proh:1");
+        assert_eq!(obligations[1].dimension, DIM_SINGLE_USE);
+    }
+
+    /// Constraints nested inside `odrl:LogicalConstraint` compounds (including a
+    /// compound nested in a compound) are collected too — a preference written as an
+    /// `or` of `and`s must not silently drop its obligations.
+    #[test]
+    fn collects_obligations_nested_in_logical_constraints() {
+        let inner = LogicalConstraint {
+            id: "urn:lc:inner".into(),
+            operator: crate::LogicalOperator::And,
+            operands: vec![
+                ConstraintNode::Atomic(secprop_constraint(REQUIRES_HIDING, "PerfectHiding")),
+                ConstraintNode::Atomic(Constraint {
+                    left: crate::ODRL_RECIPIENT.into(),
+                    operator: Operator::Eq,
+                    right: Value::Iri("https://bob.example/profile#me".into()),
+                }),
+            ],
+        };
+        let outer = LogicalConstraint {
+            id: "urn:lc:outer".into(),
+            operator: crate::LogicalOperator::Or,
+            operands: vec![
+                ConstraintNode::Compound(inner),
+                ConstraintNode::Atomic(secprop_constraint(REQUIRES_SOUNDNESS, "Statistical")),
+            ],
+        };
+        let mut rule = rule_with("urn:rule:1", vec![]);
+        rule.logical_constraints = vec![outer];
+
+        let policy = Policy {
+            iri: None,
+            permissions: vec![rule],
+            prohibitions: vec![],
+            conflict: None,
+        };
+
+        let dims: Vec<&str> = discharge_obligations(&policy)
+            .iter()
+            .map(|o| o.dimension)
+            .collect();
+        assert_eq!(
+            dims,
+            vec![DIM_HIDING, DIM_SOUNDNESS],
+            "both nested secx: leaves are reported, the core recipient leaf is not",
+        );
+    }
+
+    /// Duty constraints are deliberately NOT reported: the base-case evaluator checks a
+    /// duty by ACTION discharge and never evaluates the duty's own constraints, so
+    /// reporting them would misdescribe what the evaluator will check.
+    #[test]
+    fn duty_constraints_are_not_reported_as_obligations() {
+        let mut rule = rule_with("urn:rule:1", vec![]);
+        rule.duties = vec![crate::Duty {
+            id: "urn:duty:1".into(),
+            action: crate::Action(format!("{}anonymize", crate::ODRL_NS)),
+            constraints: vec![secprop_constraint(REQUIRES_ANONYMITY, "Anonymous")],
+        }];
+        let policy = Policy {
+            iri: None,
+            permissions: vec![rule],
+            prohibitions: vec![],
+            conflict: None,
+        };
+        assert!(
+            discharge_obligations(&policy).is_empty(),
+            "a duty constraint is not an obligation the evaluator ever checks",
+        );
     }
 
     /// Every Rust leftOperand is declared in the profile TTL as a `secx:LocalName`
