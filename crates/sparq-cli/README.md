@@ -45,6 +45,10 @@ cargo run --release -p sparq-cli -- query data.ttl turtle 'SELECT * WHERE { ?s ?
   runs the **full W3C JSON-LD 1.1 Compaction** against a caller `@context` passed with
   `--context <ctx.jsonld>` (richer than the prefix-only `jsonld-compacted`). The writer matrix is
   the `serialize-rdf` feature, pulled into the **default build by the default-on `jsonld` feature**.
+  <!-- [FABLE-5] sq-0kq6k --> With the opt-in **`streaming-serialization`** feature, the `turtle`
+  and `trig` out-formats write straight to stdout through the engine's streaming writers instead
+  of building the whole rendered document as one `String` first — byte-identical output, smaller
+  peak memory, and a broken pipe (`dump … | head`) exits quietly instead of panicking.
 - **`to-hdt <file> <in-fmt> <out.hdt[.gz|.zst|.bz2]>`** *(opt-in `hdt-write` feature, which
   implies `hdt`; [FABLE-5] sq-8ju74)* — export a loaded document (any ingestible format, HDT
   itself included) as a standard-layout **HDT v1.0 archive** via `sparq-hdt`'s direct in-memory
