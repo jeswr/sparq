@@ -1,15 +1,19 @@
 //! **Opt-in live conformance probe for the `driver` presets** (bead `sq-gum8.10`).
 //! [OPUS-5]
 //!
-//! This is the step that turns a preset's `PresetEvidence::UpstreamDocs` into
-//! `LiveInstance`: it points a preset at a running instance and checks that the URL
-//! shape, transmission method, and content negotiation the preset asserts actually
-//! produce a parseable SPARQL-Results-JSON response.
+//! This is the step that turns *one concrete configuration's*
+//! `PresetEvidence::UpstreamDocs` into `LiveInstance`: it points a preset at the running
+//! instance named by an environment variable, checks that the URL shape, transmission
+//! method, and content negotiation the preset asserts actually produce a parseable
+//! SPARQL-Results-JSON response, and only then calls `EndpointConfig::confirmed_live` on
+//! the config that just answered. The promotion is in-process and per-run — it says
+//! nothing about any other deployment, and nothing is written back into the presets.
 //!
 //! **CI never runs it.** The whole file compiles away without the `protocol-drivers`
 //! feature, every test is `#[ignore]`d, and each one skips itself unless its endpoint
 //! environment variable is set — so `cargo test --all-features` on a network-free
-//! runner stays green and silent.
+//! runner stays green and silent. A skipped test is *not* a probe: it reports "not
+//! checked", never "confirmed".
 //!
 //! On a campaign box with the engines up:
 //!
@@ -35,25 +39,35 @@
 #![cfg(feature = "protocol-drivers")]
 
 use sparq_difftest::QueryResults;
-use sparq_metamorph::driver::{EndpointConfig, HttpSparqlEngine};
+use sparq_metamorph::driver::{EndpointConfig, HttpSparqlEngine, PresetEvidence};
 use sparq_metamorph::SparqlEngine;
 
 /// The probe query: legal in every SPARQL 1.1 engine, cheap, and correct over an empty
 /// store (zero solutions is a pass — we are checking the transport, not the data).
 const PROBE: &str = "SELECT * WHERE { ?s ?p ?o } LIMIT 1";
 
-/// Run `PROBE` through `config` and assert the response parsed as SELECT results.
-fn probe(config: EndpointConfig) {
+/// Run `PROBE` through `config`, assert the response parsed as SELECT results, and
+/// return the same configuration promoted to `PresetEvidence::LiveInstance` — the
+/// promotion is earned by the exchange this function just completed, so it happens here
+/// and nowhere else.
+fn probe(config: EndpointConfig) -> EndpointConfig {
     println!(
         "probing {} at {} ({:?}, {:?}, extra={:?})",
         config.name, config.query_url, config.method, config.evidence, config.extra_params
     );
+    assert_ne!(
+        config.evidence,
+        PresetEvidence::LiveInstance,
+        "{}: a freshly built config claims live evidence before anything was sent",
+        config.name
+    );
     let name = config.name.clone();
-    let engine = HttpSparqlEngine::new(config);
+    let engine = HttpSparqlEngine::new(config.clone());
     match engine.select(PROBE) {
         Ok(QueryResults::Solutions { solutions, .. }) => {
             let rows = solutions.len();
             println!("  ok: {name} preset reached the endpoint, {rows} row(s)");
+            config.confirmed_live()
         }
         Ok(QueryResults::Boolean(_)) => panic!(
             "{name}: SELECT probe returned a boolean — the endpoint is not answering \
@@ -91,7 +105,8 @@ fn blazegraph_preset_reaches_a_live_endpoint() {
     };
     let namespace = std::env::var("SPARQ_METAMORPH_BLAZEGRAPH_NAMESPACE")
         .unwrap_or_else(|_| "kb".to_string());
-    probe(EndpointConfig::blazegraph(&base, &namespace));
+    let confirmed = probe(EndpointConfig::blazegraph(&base, &namespace));
+    assert_eq!(confirmed.evidence, PresetEvidence::LiveInstance);
 }
 
 #[test]
@@ -104,7 +119,8 @@ fn graphdb_preset_reaches_a_live_endpoint() {
         "SPARQ_METAMORPH_GRAPHDB",
         "SPARQ_METAMORPH_GRAPHDB_REPOSITORY",
     );
-    probe(EndpointConfig::graphdb(&base, &repository));
+    let confirmed = probe(EndpointConfig::graphdb(&base, &repository));
+    assert_eq!(confirmed.evidence, PresetEvidence::LiveInstance);
 }
 
 #[test]
@@ -113,7 +129,8 @@ fn qlever_preset_reaches_a_live_endpoint() {
     let Some(base) = endpoint("SPARQ_METAMORPH_QLEVER") else {
         return;
     };
-    probe(EndpointConfig::qlever(&base));
+    let confirmed = probe(EndpointConfig::qlever(&base));
+    assert_eq!(confirmed.evidence, PresetEvidence::LiveInstance);
 }
 
 #[test]
@@ -122,7 +139,8 @@ fn millenniumdb_preset_reaches_a_live_endpoint() {
     let Some(base) = endpoint("SPARQ_METAMORPH_MILLENNIUMDB") else {
         return;
     };
-    probe(EndpointConfig::millenniumdb(&base));
+    let confirmed = probe(EndpointConfig::millenniumdb(&base));
+    assert_eq!(confirmed.evidence, PresetEvidence::LiveInstance);
 }
 
 #[test]
@@ -132,7 +150,8 @@ fn fuseki_preset_reaches_a_live_endpoint() {
         return;
     };
     let dataset = required_with("SPARQ_METAMORPH_FUSEKI", "SPARQ_METAMORPH_FUSEKI_DATASET");
-    probe(EndpointConfig::fuseki(&base, &dataset));
+    let confirmed = probe(EndpointConfig::fuseki(&base, &dataset));
+    assert_eq!(confirmed.evidence, PresetEvidence::LiveInstance);
 }
 
 #[test]
@@ -141,7 +160,8 @@ fn oxigraph_preset_reaches_a_live_endpoint() {
     let Some(base) = endpoint("SPARQ_METAMORPH_OXIGRAPH") else {
         return;
     };
-    probe(EndpointConfig::oxigraph(&base));
+    let confirmed = probe(EndpointConfig::oxigraph(&base));
+    assert_eq!(confirmed.evidence, PresetEvidence::LiveInstance);
 }
 
 #[test]
@@ -150,5 +170,6 @@ fn virtuoso_preset_reaches_a_live_endpoint() {
     let Some(base) = endpoint("SPARQ_METAMORPH_VIRTUOSO") else {
         return;
     };
-    probe(EndpointConfig::virtuoso(&base));
+    let confirmed = probe(EndpointConfig::virtuoso(&base));
+    assert_eq!(confirmed.evidence, PresetEvidence::LiveInstance);
 }

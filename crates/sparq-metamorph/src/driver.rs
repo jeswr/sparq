@@ -19,20 +19,23 @@
 //!   answer ([`EndpointConfig::virtuoso`]'s `format=`, [`EndpointConfig::graphdb`]'s
 //!   `infer=false`).
 //! * [`PresetEvidence`] — per-config provenance, because an unvalidated preset is a
-//!   *silent* misconfiguration source in a campaign. Each preset records whether its
-//!   conventions were confirmed against a running instance or encoded from upstream
-//!   documentation; `tests/preset_live_conformance.rs` is the opt-in, off-CI probe that
-//!   promotes one to [`PresetEvidence::LiveInstance`].
+//!   *silent* misconfiguration source in a campaign. **Every preset constructor returns
+//!   [`PresetEvidence::UpstreamDocs`]**: a preset encodes a documented convention, and
+//!   building one contacts nothing, so it cannot know whether the URL it was handed
+//!   answers. [`PresetEvidence::LiveInstance`] is recorded only by
+//!   [`EndpointConfig::confirmed_live`], on the one configuration that just completed an
+//!   exchange; `tests/preset_live_conformance.rs` is the opt-in, off-CI probe that does
+//!   that promotion.
 //!
-//! | Preset | URL shape | Method | Quirk | Evidence |
-//! | --- | --- | --- | --- | --- |
-//! | [`fuseki`](EndpointConfig::fuseki) | `{base}/{dataset}/query` | form POST | — | docs |
-//! | [`oxigraph`](EndpointConfig::oxigraph) | `{base}/query` | form POST | — | docs |
-//! | [`virtuoso`](EndpointConfig::virtuoso) | `{base}/sparql` | form POST | `format=` | docs |
-//! | [`blazegraph`](EndpointConfig::blazegraph) | `{base}/namespace/{ns}/sparql` | form POST | namespace path | live |
-//! | [`graphdb`](EndpointConfig::graphdb) | `{base}/repositories/{repo}` | form POST | `infer=false` | docs |
-//! | [`qlever`](EndpointConfig::qlever) | `{base}` (server root) | GET | no path suffix | docs |
-//! | [`millenniumdb`](EndpointConfig::millenniumdb) | `{base}/sparql` | raw-body POST | `application/sparql-query` | docs |
+//! | Preset | URL shape | Method | Quirk |
+//! | --- | --- | --- | --- |
+//! | [`fuseki`](EndpointConfig::fuseki) | `{base}/{dataset}/query` | form POST | — |
+//! | [`oxigraph`](EndpointConfig::oxigraph) | `{base}/query` | form POST | — |
+//! | [`virtuoso`](EndpointConfig::virtuoso) | `{base}/sparql` | form POST | `format=` |
+//! | [`blazegraph`](EndpointConfig::blazegraph) | `{base}/namespace/{ns}/sparql` | form POST | namespace path |
+//! | [`graphdb`](EndpointConfig::graphdb) | `{base}/repositories/{repo}` | form POST | `infer=false` |
+//! | [`qlever`](EndpointConfig::qlever) | `{base}` (server root) | GET | no path suffix |
+//! | [`millenniumdb`](EndpointConfig::millenniumdb) | `{base}/sparql` | raw-body POST | `application/sparql-query` |
 //!
 //! [OPUS-5] The Blazegraph / GraphDB / QLever / MillenniumDB presets, their quirk
 //! layers, and [`PresetEvidence`] are bead `sq-gum8.10`.
@@ -60,27 +63,34 @@ pub enum QueryMethod {
     Get,
 }
 
-/// What backs a preset's URL shape, transmission method, and negotiation choices.
+/// What backs **this configuration's** URL shape, transmission method, and negotiation
+/// choices — a claim about the endpoint this config actually names, not about the
+/// preset convention in the abstract.
 ///
-/// Recorded per config so a campaign run can tell a preset that was confirmed against a
-/// running instance from one encoded only from upstream documentation. A wrong URL or
-/// quirk convention is a *silent* misconfiguration source: a bad path usually surfaces
-/// loudly as [`FailureKind::HttpStatus`], but a subtly wrong parameter — a `format=` the
-/// engine ignores, an inference flag left at a non-comparable default — instead yields
-/// results that differ from every other engine for reasons that are not an engine bug.
-/// A [`crate::ledger`] entry raised through an `UpstreamDocs` preset should have its
-/// endpoint configuration ruled out before it is filed upstream.
+/// A wrong URL or quirk convention is a *silent* misconfiguration source: a bad path
+/// usually surfaces loudly as [`FailureKind::HttpStatus`], but a subtly wrong parameter
+/// — a `format=` the engine ignores, an inference flag left at a non-comparable default
+/// — instead yields results that differ from every other engine for reasons that are not
+/// an engine bug. So a [`crate::ledger`] entry raised through anything other than
+/// [`PresetEvidence::LiveInstance`] should have its endpoint configuration ruled out
+/// before it is filed upstream.
+///
+/// Constructing a config opens no socket, so **no constructor in this module ever
+/// returns `LiveInstance`** — only [`EndpointConfig::confirmed_live`] does, after a
+/// caller has completed an exchange with that very config.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PresetEvidence {
     /// Not a preset — the caller supplied the URL and method
-    /// ([`EndpointConfig::generic`]).
+    /// ([`EndpointConfig::generic`]), and nothing here vouches for either.
     CallerSupplied,
-    /// Confirmed by an actual request/response exchange with a running instance. The
-    /// preset's own documentation names the deployment that was probed.
+    /// This configuration answered an actual request/response exchange. Recorded
+    /// **only** by [`EndpointConfig::confirmed_live`]; a config that merely uses a
+    /// preset whose convention was once checked elsewhere is `UpstreamDocs`, not this.
     LiveInstance,
-    /// Encoded from the engine's upstream documentation or source. **No live
-    /// confirmation is recorded in this repository** — run the ignored
-    /// `preset_live_conformance` integration test against an instance to check one.
+    /// The conventions come from the engine's upstream documentation or source, applied
+    /// to a URL this crate has not contacted. The state every preset constructor
+    /// returns — run the ignored `preset_live_conformance` integration test to promote a
+    /// concrete config to [`PresetEvidence::LiveInstance`].
     UpstreamDocs,
 }
 
@@ -183,18 +193,22 @@ impl EndpointConfig {
     /// API's Accept-overriding `format=` parameter is deliberately **not** set — one
     /// less quirk to keep in sync.
     ///
-    /// Evidence: [`PresetEvidence::LiveInstance`]. Confirmed against the Wikidata Query
+    /// Evidence: [`PresetEvidence::UpstreamDocs`], like every preset — the returned
+    /// config names a `base_url`/`namespace` this crate has not contacted. The
+    /// *convention* above was additionally checked once against the Wikidata Query
     /// Service, a public Blazegraph deployment, at
     /// `https://query.wikidata.org/bigdata/namespace/wdq/sparql` — `ASK {}` over
     /// form-encoded POST, GET, and raw `application/sparql-query` POST each returned
     /// HTTP 200 with `Content-Type: application/sparql-results+json` when `Accept`
-    /// asked for it, and `application/sparql-results+xml` when it did not.
+    /// asked for it, and `application/sparql-results+xml` when it did not. That says
+    /// nothing about *your* deployment; use [`EndpointConfig::confirmed_live`] after a
+    /// successful exchange to record evidence for a concrete config.
     pub fn blazegraph(base_url: &str, namespace: &str) -> Self {
         let base = base_url.trim_end_matches('/');
         EndpointConfig::preset(
             "blazegraph",
             format!("{base}/namespace/{namespace}/sparql"),
-            PresetEvidence::LiveInstance,
+            PresetEvidence::UpstreamDocs,
         )
     }
 
@@ -266,6 +280,19 @@ impl EndpointConfig {
         );
         config.method = QueryMethod::PostSparqlQuery;
         config
+    }
+
+    /// Record that **this** configuration completed a real request/response exchange:
+    /// sets [`evidence`](EndpointConfig::evidence) to [`PresetEvidence::LiveInstance`].
+    ///
+    /// The only way that variant is ever produced. Call it *after* a successful,
+    /// parseable protocol exchange with the endpoint this config names — that is what
+    /// `tests/preset_live_conformance.rs` does — never on the strength of a preset whose
+    /// convention was checked against some other deployment.
+    #[must_use]
+    pub fn confirmed_live(mut self) -> Self {
+        self.evidence = PresetEvidence::LiveInstance;
+        self
     }
 }
 
@@ -615,22 +642,48 @@ mod tests {
             EndpointConfig::millenniumdb("http://h:1234"),
         ];
         for config in &presets {
-            assert_ne!(
+            // Documentation-derived, and never `LiveInstance`: building a config
+            // contacts nothing, so no constructor may claim this endpoint answered.
+            assert_eq!(
                 config.evidence,
-                PresetEvidence::CallerSupplied,
+                PresetEvidence::UpstreamDocs,
                 "preset {} did not declare its evidence",
                 config.name
             );
         }
-        // Only Blazegraph is recorded as confirmed against a running instance; the rest
-        // are documentation-derived until `preset_live_conformance` says otherwise.
-        assert_eq!(
-            EndpointConfig::blazegraph("http://h:9999/blazegraph", "kb").evidence,
-            PresetEvidence::LiveInstance
-        );
         assert_eq!(
             EndpointConfig::generic("g", "http://h/sparql").evidence,
             PresetEvidence::CallerSupplied
+        );
+    }
+
+    /// `LiveInstance` is a claim about one concrete config, so it is reachable only
+    /// through the explicit promotion a caller makes after an actual exchange.
+    #[test]
+    fn confirmed_live_promotes_only_the_configuration_it_is_called_on() {
+        let documented = EndpointConfig::blazegraph("http://h:9999/blazegraph", "kb");
+        assert_eq!(documented.evidence, PresetEvidence::UpstreamDocs);
+
+        let probed = documented.clone().confirmed_live();
+        assert_eq!(probed.evidence, PresetEvidence::LiveInstance);
+        // Promotion touches evidence and nothing else.
+        assert_eq!(
+            probed,
+            EndpointConfig {
+                evidence: PresetEvidence::LiveInstance,
+                ..documented.clone()
+            }
+        );
+        // A sibling config built from the same preset is untouched by that promotion.
+        assert_eq!(
+            EndpointConfig::blazegraph("http://other:9999/blazegraph", "kb").evidence,
+            PresetEvidence::UpstreamDocs
+        );
+        assert_eq!(
+            EndpointConfig::generic("g", "http://h/sparql")
+                .confirmed_live()
+                .evidence,
+            PresetEvidence::LiveInstance
         );
     }
 
