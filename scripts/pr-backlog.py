@@ -59,6 +59,25 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
+import os
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# [OPUS-5] #1135: the shared Release-PR predicate (branch/author/title, never a label).
+# NOT fail-soft: the stub treats every PR as a release PR, so a missing module makes this
+# script groom nothing rather than groom the Release PR.
+try:
+    import release_pr_guard
+except ImportError:  # pragma: no cover - see scripts/tests/test_release_publish_guard.py
+
+    class release_pr_guard:  # type: ignore[no-redef]
+        @staticmethod
+        def arm_block_reason(**_kwargs) -> str:
+            return (
+                "release-pr-guard: scripts/release_pr_guard.py is not importable — "
+                "treating every PR as untouchable (fail-closed, #1135)"
+            )
+
+
 PROG = "pr-backlog"
 
 # A PR with no update in more than this many days is "stale".
@@ -89,10 +108,20 @@ def is_dependabot(pr: dict) -> bool:
 
 
 def is_release_plz(pr: dict) -> bool:
-    # release-plz opens a PR as github-actions with a `chore: release ...` title.
+    """[OPUS-5] #1135: one shared predicate for every arming/merging/grooming path.
+
+    WAS: `author == github-actions AND title startswith "chore: release"` — a conjunction
+    that misses the Release PR whenever EITHER signal shifts. release_pr_guard keys on
+    branch OR author OR title and fails CLOSED on an unknown head branch. Widening is the
+    safe direction: this script's only response to a match is to leave the PR untouched.
+    """
     return (
-        author_handle(pr.get("author_login", "")) == GITHUB_ACTIONS_LOGIN
-        and pr.get("title", "").lower().startswith("chore: release")
+        release_pr_guard.arm_block_reason(
+            head_ref=pr.get("head_ref"),
+            author_login=pr.get("author_login"),
+            title=pr.get("title"),
+        )
+        is not None
     )
 
 

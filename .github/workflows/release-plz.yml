@@ -225,6 +225,32 @@ jobs:
         run: |
           rustup default stable
           rustup show active-toolchain
+      # [OPUS-5] issue #1135 — THE PUBLISH-CADENCE GUARD. THIS STEP IS LOAD-BEARING.
+      #
+      # The maintainer's ask, verbatim: "can I make sure that there are protections in
+      # place to prevent publishing too regularly, I don't want to spam the registry."
+      # scripts/release_pr_guard.py stops the Release PR being ARMED; this is the belt to
+      # that braces — enforced in the release path itself, so even a mistaken merge (by a
+      # human, by a future automation, by a path nobody enumerated) cannot cut a release
+      # more often than MIN_RELEASE_INTERVAL (24h; the constant carries its justification).
+      #
+      # It runs BEFORE the release-plz step below, which creates the `v<version>` tag and —
+      # once release-plz.toml sets `publish = true` — runs `cargo publish`. A non-zero exit
+      # here stops the job before either happens. A crates.io version can NEVER be
+      # unpublished, so the guard REFUSES on every indeterminacy (shallow checkout,
+      # unreadable tag list, unparseable date, unreachable crates.io, future-dated last
+      # release, publishable crate outside the version_group).
+      #
+      # DO NOT add an `if:` to this step, do not set `continue-on-error`, do not move it
+      # after the release-plz step, and do not swap `--enforce` for `--dry-run`.
+      # scripts/tests/test_release_publish_guard.py parses THIS FILE structurally and
+      # fails on each of those mutations — a text/substring assertion would not catch
+      # `if: false`, which is exactly where vacuity has lived in this repo before.
+      #
+      # The `fetch-depth: 0` checkout above is a PRECONDITION: on a shallow checkout the
+      # tag list is not authoritative and the guard refuses rather than guessing.
+      - name: Publish-cadence guard (fail-closed minimum release interval, #1135)
+        run: python3 scripts/release-interval-guard.py --enforce --repo-root .
       # [OPUS-4.8] sq-v286.11 — crates.io TRUSTED-PUBLISHING FLIP (continued). When flipping
       # `publish = true`, release-plz runs `cargo publish` BEFORE tagging and needs a crates.io
       # credential in CARGO_REGISTRY_TOKEN. crates.io Trusted Publishing (GA 2025-07, RFC 3691)
