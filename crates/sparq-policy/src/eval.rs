@@ -413,7 +413,12 @@ impl Decision {
 /// swept corpus, plus exact decision equality inside a narrow equivalence scope
 /// (unconstrained rules, canonical-UTC `odrl:dateTime` `lteq`/`gteq`, `odrl:recipient`
 /// `eq`/`neq`, single-operand `odrl:and`/`odrl:or`). Everything outside that scope has no
-/// N3 counterpart and the N3 driver refuses it.
+/// N3 counterpart, and the driver fails closed on it in a rule-kind-sensitive way: an
+/// unsupported construct on a *permission* merely produces no grant (`Ok`, no allow
+/// triple), while on a *prohibition* — which this function might satisfy, so ignoring it
+/// would lose a denial — it refuses the whole policy with `Err`. Duties, ambiguous or
+/// multi-valued rule/constraint shapes, and non-canonical `xsd:dateTime` forms are
+/// refused whatever the rule kind. `materialize_odrl_n3`'s rustdoc states the exact split.
 ///
 /// So a change to the decision algebra below is not local: narrowing what this function
 /// allows, or widening what it denies, can break an inclusion the N3 rules cannot satisfy

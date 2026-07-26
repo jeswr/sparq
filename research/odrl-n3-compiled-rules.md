@@ -39,8 +39,16 @@ should be read:
 2. **`.2` shipped a narrower ODRL surface than §3 scoped.** §3 predicted the stateless core
    including `xone` would be expressible. What landed covers unconstrained rules,
    canonical-UTC `odrl:dateTime` `lteq`/`gteq`, `odrl:recipient` `eq`/`neq`, and
-   single-operand `odrl:and`/`odrl:or`; `xone`, `purpose`, `spatial` and stateless `count`
-   have no rules and the driver refuses those policies. That narrowing was a review
+   single-operand `odrl:and`/`odrl:or`. `xone`, `purpose`, `spatial` and stateless `count`
+   have no rules and sit outside that equivalence scope; the driver fails closed on them
+   in a **rule-kind-sensitive** way rather than uniformly refusing. On a *permission* an
+   out-of-scope construct yields no grant (`Ok`, no allow triple emitted). On a
+   *prohibition* it refuses the whole policy with `Err`, because the Rust oracle may
+   satisfy such a constraint and omitting it would lose a Rust denial. A separate set of
+   shapes is refused whatever the rule kind — duties/obligations, non-canonical
+   `xsd:dateTime` lexical forms, ambiguous or multi-valued rule and constraint nodes,
+   reserved/engine-owned IRIs, and inadmissible `odrl:conflict` strategies. That
+   narrowing was a review
    response to two fail-open defects (a multi-operand constraint node marked satisfied by
    one satisfiable operand; the conflict-refusal guard never being called), both of which
    granted access the Rust oracle denied. The oracle contract this created is now recorded
