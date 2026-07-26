@@ -93,7 +93,7 @@ For a typed view (super-classes, subsumption test, unsatisfiable classes) use
 - **Parallel saturation** *(opt-in `par` feature, Phase E4)* — `Classifier::classify_par` /
   `classify_graph_par` run the SAME rules as deterministic bulk-synchronous rounds on a bounded
   `std::thread::scope` pool; the closure is **identical to single-threaded at every thread count**
-  (differential + determinism-stress + W3C-EL-corpus CI oracles). Default build stays wasm-safe.
+  (differential + determinism-stress + W3C-EL-corpus CI oracles). Only the COMPUTE phase is parallel; `classify_graph_par_stats` returns the compute/apply attribution (`ParPhaseStats`). Default build stays wasm-safe.
 - **Honest fragment reporting** — class axioms outside the active fragment are counted in
   `Report::skipped_axioms`, never silently misapplied. Without `cdomain` that includes ALL
   concrete-domain shapes; with it, only the unsupported remainder above.
