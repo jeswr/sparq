@@ -115,9 +115,10 @@ fn fixture_snapshot(revoked: bool) -> StatusListSnapshot {
 }
 fn fixture_revocation() -> RevocationStatus {
     RevocationStatus {
-        status_list: STATUS_LIST.to_string(),
+        ref_commitment: None,
+        status_list: Some(STATUS_LIST.to_string()),
         index: Some(STATUS_INDEX),
-        version: STATUS_VERSION,
+        version: Some(STATUS_VERSION),
         index_commitment: None,
     }
 }
@@ -140,8 +141,9 @@ fn attest_full(commitment: Fr, salt: Fr, sk: &SecretKey) -> CommitmentAttestatio
         cryptosuite: SignatureScheme::Poseidon2SchnorrV1.cryptosuite_iri().to_string(),
         salt: Some(FieldHex::from_field(&salt)),
         status: Some(AttestedStatusRef {
+            ref_commitment: None,
             index: Some(STATUS_INDEX),
-            version: STATUS_VERSION,
+            version: Some(STATUS_VERSION),
             index_commitment: None,
         }),
         holder: None, // [OPUS-4.8] sq-h8rg (HolderPoP T2): non-holder-bound (bearer)
@@ -185,6 +187,7 @@ fn honest_scan_only_manifest() -> (ProofManifest, Fr, Fr) {
     };
     let scan = build_scan(std::slice::from_ref(&commit), &pattern).expect("scan builds");
     let m = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
         issuers: vec![],
@@ -391,6 +394,7 @@ fn scan_plus_filter_manifest(
     let (scan_inputs, commitment, salt) = age_scan_inputs();
     let sk = test_issuer_sk(1);
     ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: query.into(),
         issuers: vec![],
@@ -570,6 +574,7 @@ fn finding_08_attribution_collapse_rejected() {
     };
     let scan = build_scan(&[c0.clone(), c1.clone()], &pattern).expect("k=2 scan builds");
     let m = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/p> ?o }".into(),
         issuers: vec![],
@@ -635,6 +640,7 @@ fn finding_09_salt_reused_rejected() {
     };
     let scan = build_scan(&[c0.clone(), c1.clone()], &pattern).expect("k=2 scan builds");
     let m = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/p> ?o }".into(),
         issuers: vec![],
@@ -867,6 +873,7 @@ fn composed_manifest(
     let salt = fixture_salt();
     let commit = commit_triples(&credential_graph(), salt).unwrap();
     ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
         issuers: vec![],
@@ -1051,6 +1058,7 @@ fn finding_11_n_relabel_bb_rejected() {
         *id = CircuitId::Scan { k: 2, n: 16, r: 8 };
     }
     let m = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/p0> ?o }".into(),
         issuers: vec![],

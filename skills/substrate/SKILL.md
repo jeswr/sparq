@@ -52,6 +52,53 @@ Pulls `oxrdf` only when enabled. Two ordering methods on `Num`:
 - `Num::cmp_relational` — SPARQL `<`/`>` / D-entailment / RIF numeric equality; NaN → `None`
   (type error). [OPUS-4.8] sq-v5evr.
 
+**`xs:float` promotion rounds ONCE.** `Num::f32` (and `Dec::f32` under it) is the single
+shared helper the float tier of `binop` — and the `overhead` kernel's inline replica of it —
+promote through, so the two cannot drift apart. Integer → `f32` and decimal-lexical → `f32`
+are each a SINGLE correctly-rounded conversion; routing through `f64` first and narrowing
+rounds TWICE, which is not what XPath/XSD numeric promotion requires. Verified by exact
+rational arithmetic: the `i64` value `4611686293305294849` has correctly-rounded `f32` bits
+`0x5E800001`, but `as f64 as f32` gives `0x5E800000` — so `SUM(?int, "0.0"^^xsd:float)` and
+`AVG` over a mixed integer/float column returned a float one ULP off for magnitudes above
+2^53. `parse_xsd_f32` likewise parses `&str -> f32` DIRECTLY (its ACCEPTANCE still delegates
+to the shared `sparq_core::parse_xsd_f64` spelling rules, so which lexicals are well-formed
+is unchanged). Regression tests assert `f32::to_bits()`, not a formatted decimal — the two
+candidates are ADJACENT floats that print identically. [OPUS-5] issue #3796.
+
+**Which tier a mixed comparison uses.** XPath promotes the operands of a comparison to the
+**LEAST common type** in `xs:integer -> xs:decimal -> xs:float -> xs:double`, NOT always to
+`xs:double`: `xs:double` is the common type only when an operand really IS a double.
+`Num::cmp_relational` is therefore rank-aware — both `Int`/`Dec` compare exactly via
+`Dec::cmp`; a `Double` operand promotes the pair to `f64`; otherwise a `Float` operand
+promotes the pair to **`f32`** through `Num::f32`. [OPUS-5] #3796
+
+> **CORRECTION — this section previously said the opposite, and was wrong.** It asserted
+> that `cmp_relational` comparing any mixed pair in the `f64` tier is CORRECT and "must not
+> be fixed". That is only true when an operand is an `xs:double`. For integer/decimal versus
+> `xs:float` the least common type is **float**, and comparing in `f64` gives a different,
+> wrong answer above 2^53: `Num::Int(4611686293305294849)` versus the `f32` `0x5E80_0001`
+> (which is the correctly-rounded promotion of that very integer, = 2^62 + 2^39) returned
+> `Less` where XPath requires `Equal`. Fixed, and pinned by
+> `cmp_relational_integer_and_decimal_vs_float_compare_in_the_float_tier`. Do not
+> re-introduce the unconditional `f64` fallback.
+
+A second, unrelated `xsd:float` defect is still open in a different crate:
+
+> **REMAINING BOUNDARY — the engine's `=`/`<` on an `xsd:float` still do not see the `f32`
+> value.** This is a DIFFERENT defect from the one above, in a different crate, and it is
+> still open. `sparq-engine` does not call `cmp_relational` at all; its `=`/`<` ride the
+> numeric-value CACHE — `sparq_core::cached_numeric_f64` and the engine's
+> `numeric_cache_f64`, which drive the sargable `=`/`<` fast path, `JKey::Num` value-joins
+> and the `ORDER BY` numeric rank — and that still values an `xsd:float` literal as
+> `parse_xsd_f64(lexical)`, i.e. the f64 nearest the LEXICAL rather than the f64 image of
+> its correctly-rounded `f32`. Measured through `sparq_engine::query`:
+> `"4611686293305294849"^^xsd:float = "4611686568183201792"^^xsd:double` is `false` (XPath
+> requires `true`) and the same `<` is `true`, yet `+ "0.0"^^xsd:float` yields
+> `4.6116866E18`. NOT a regression from #3796 — that path never consumed the `f32` value.
+> Not fixed here because the cache f64 is shared bit-identically with the spilled on-disk
+> dict cache and `LocalVocab::intern`, so correcting it must be validated against the W3C
+> conformance ratchet. Tracked as issue #3825; #3796 stays OPEN for it. [OPUS-5]
+
 ```toml
 [dependencies]
 sparq-substrate = { version = "0.1.0", features = ["numeric"] }
@@ -174,9 +221,11 @@ go red on regression. Run `cargo kani -p sparq-substrate --features compare` (Ka
 the `kani` cfg; the normal build strips the module). Honest boundaries: this proves the
 shared ALGORITHM over the bounded model, NOT the engine's `Value` impl
 (`sparq-engine/src/exec.rs` — covered by unit tests, the sparq-reason engine-parity suite and
-W3C conformance; next-wave in `research/mechanized-proof-program.md` §6); within the dateTime
-kind the indeterminate mixed-timezone window still falls back lexically (residual seam,
-beaded); and `exact_cmp` impls bounded by the i128 tower keep collapsed ties for lexicals
+W3C conformance; next-wave in `research/mechanized-proof-program.md` §6); the harnesses model a
+CONTRACT-CONFORMING `strict_cmp`, i.e. one TOTAL within the dateTime/date kinds (sq-2k5py made
+that a documented trait obligation, satisfied by `Timeline::cmp_tl_total` — the partial
+relational comparison's lexical fallback is the intransitive shape, pinned by the `witness4_*`
+unit test rather than by Kani); and `exact_cmp` impls bounded by the i128 tower keep collapsed ties for lexicals
 beyond ~38 significant digits (beaded).
 
 ### `overhead` — `#[cfg(feature = "overhead")]` — the zero-overhead DELTA harness

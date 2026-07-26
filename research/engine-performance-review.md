@@ -263,6 +263,32 @@ a documented local `--no-default-features` check loop instead.
 
 **Expected impact:** small constant CPU off the test-profile critical path; near-zero risk.
 
+**Audit outcome (sq-6vshe.13).** Mechanism (a) as stated above is **refuted**, and (b) found
+nothing trimmable. Recorded so the item is not re-opened on the same premise:
+
+- **(a) `serde_derive` does not enter via `serde_json`.** `serde_json` depends on the `serde`
+  facade with the `derive` feature *off*; the proc-macro is activated instead by ten crates'
+  **non-dev** `serde = { features = ["derive"] }` edges (`sparq-nlq`, `-forms`, `-lws-core`,
+  `-mcp`, `-zk-compose`, `-metamorph`, `-introspect`, `-shacl`, plus optional edges in
+  `-fedclient`/`-kb`). Because features unify across a workspace resolution, `serde_derive`
+  compiles in *any* workspace build regardless of how `serde_json` dev-deps are scoped — so
+  scoping them buys no proc-macro time, only `serde_json`+`itoa`+`zmij` codegen units.
+- **Scoping is already tight.** All thirteen crates carrying a `serde_json` dev-dep genuinely
+  use it from a dev target, so there is nothing to delete on usage grounds. The one real
+  finding was a *redundant* declaration: `sparq-lws-core` listed `serde_json` in both
+  `[dependencies]` (unconditional, non-optional) and `[dev-dependencies]`; the dev entry was
+  removed. `sparq-engine` and `sparq-vectors` also carry both, but there the non-dev edge is
+  `optional = true`, so their dev entries are load-bearing and stay.
+- **(b) `zerocopy` is not in the lean default graph and is not trimmable from our manifests.**
+  No sparq crate depends on it directly. It enters only transitively via `ppv-lite86`
+  (← `rand_chacha` ← `proptest`/`rand`), `ahash` (← `hashbrown 0.14` inside `hdt`/`parquet`,
+  and the arkworks stack under `sparq-zk`), and `half` (← `ciborium` ← `criterion`, and
+  `arrow`/`parquet`/`naga`). `sparq-core`'s own `hashbrown 0.17` hashes with `foldhash`, not
+  `ahash`, so the lean core/engine build never reaches `zerocopy`. `zerocopy-derive` is turned
+  on by those third-party manifests' own feature selections, which we cannot override without
+  dropping `proptest`/`criterion` — not on the table. **No action.**
+- **(c)** Position on `regex`/`digest` defaults is unchanged: do not flip.
+
 ---
 
 ## 3. Coverage-lane speed (beyond sq-p0hcd's shard, sq-piapk's engine shard, fmx4u.6's empty-set skip)

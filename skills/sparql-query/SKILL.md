@@ -56,6 +56,8 @@ graphs (so `GRAPH <g> {…}` / `GRAPH ?g {…}` work), use `Graph::load_dataset(
 All entry points take `&Graph` + `&str` and return `Result<_, String>` (parse + eval errors are
 `String`). The result types:
 
+- `sparq_core::strdist::edit_distance(&str, &str) -> usize` computes character-based
+  Levenshtein distance for vocabulary and dictionary suggestion ranking.
 - `pub struct QueryResult { pub vars: Vec<oxrdf::Variable>, pub rows: Vec<Vec<Option<oxrdf::Term>>> }`
   — `len()` / `is_empty()` count solution rows. The layout is **columnar** (the `vars` header is
   stored once, not per cell); index a cell as `result.rows[row][col]` where `col` is the position of
@@ -159,6 +161,14 @@ N worst-by-wall-time analyzed plans (`record` / `push` / `slowest` / `to_json`) 
 view. Honest boundaries: only BGP nodes carry an estimate (the only operators the planner sizes);
 q-error is `None` when either side is 0; `nanos` are always 0 on wasm32.
 
+Persistent planner statistics *(opt-in `persistent-stats`, OFF by default)* are rebuilt explicitly
+with `stats::analyze(&graph, saved_store_dir)`. This atomically writes a deterministic `stats.bin`
+beside the saved/mmap store containing per-predicate cardinalities and equi-depth subject/object
+value histograms. Load it without scanning indexes using `StatsCatalog::load(dir)`, then install it
+around queries with `with_stats_catalog(&Arc::new(catalog), || query(&graph, sparql))`. The catalog
+changes join estimates/order only; query results are unchanged. `AnalyzeMetrics` exposes stable
+triple/predicate/bucket/byte counts for operational checks.
+
 ## Common recipes
 
 **Aggregates, GROUP BY / HAVING, subqueries** — standard SPARQL 1.1; no special API:
@@ -198,19 +208,26 @@ paths up to that bound. Set `cyclic: true` to request only non-empty paths retur
 ```rust
 // Cargo.toml: sparq-engine = { version = "0.1", features = ["paths"] }
 use oxrdf::{NamedNode, Term};
-use sparq_engine::{enumerate_paths, PathMode, PathSpec, Via};
+use sparq_engine::{enumerate_paths, Endpoint, PathMode, PathSpec, Via};
 
 let paths = enumerate_paths(&g, &PathSpec {
     mode: PathMode::Shortest,
     cyclic: false,
-    start: Some(Term::NamedNode(NamedNode::new("http://ex/alice")?)),
-    end: Some(Term::NamedNode(NamedNode::new("http://ex/bob")?)),
+    start: Some(Endpoint::Node(Term::NamedNode(NamedNode::new("http://ex/alice")?))),
+    end: Some(Endpoint::Node(Term::NamedNode(NamedNode::new("http://ex/bob")?))),
     via: Via::Predicate(NamedNode::new("http://ex/knows")?),
     max_length: None,
 })?;
 assert!(paths.iter().all(|path| path.nodes.len() == path.edges.len() + 1));
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
+
+Each endpoint is `None` (unrestricted), `Endpoint::Node` (one fixed node), or `Endpoint::Pattern`
+— a SPARQL group graph pattern plus the pattern variable whose bindings are the candidate nodes.
+The pattern is evaluated once into a deterministic candidate set; solutions leaving that variable
+unbound, or binding a term absent from the graph, contribute no candidate. In the dedicated syntax
+the endpoint variable declared just before `=` is the one the pattern must bind, so write
+`START ?s = { ?s a ex:Person }`; a pattern that never binds it is a loud error.
 
 `PathSpec::via` also accepts `Via::Pattern`, whose SPARQL group graph pattern must bind the
 reserved `?from` and `?to` endpoint variables. The pattern is evaluated once to materialize the

@@ -45,6 +45,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RULES = REPO_ROOT / "scripts" / "flow-on-rules.toml"
+BENCH_REGISTRY = REPO_ROOT / "bench" / "benchmarks.toml"
 
 # Labels every flow-on issue carries (in addition to a rule's own labels and the
 # routing labels computed by routing_labels() below).
@@ -57,6 +58,7 @@ SKILL_PATHS = ("skills/",)
 
 # The reactive docs rule that the pub-API-diff gate below applies to.
 DOCS_RULE_ID = "changed-public-feature-docs"
+BENCH_DASHBOARD_RULE_ID = "new-bench-dashboard-row"
 
 
 # Sibling scripts are loaded by path (the scripts dir is not an importable package).
@@ -251,6 +253,32 @@ def _any_glob_match(globs: list[str], paths: list[str]) -> bool:
     return False
 
 
+def _bench_suite_needs_dashboard_follow_on(suite: str) -> bool:
+    """Return whether a registered suite lacks an unfeatured disposition."""
+    try:
+        registry = BENCH_REGISTRY.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    # [GPT-5.6] Match the same registry reference fields as merge gate G3. An
+    # unregistered research harness may live under bench/, but it has no metric
+    # feed and therefore must not mint a dead dashboard-card follow-on.
+    blocks = re.split(r"(?m)^\s*\[\[benchmark\]\]\s*$", registry)[1:]
+    needle = re.compile(rf"\bbench/{re.escape(suite)}/")
+    for block in blocks:
+        refs = " ".join(
+            re.findall(
+                r"^\s*(?:source|invoke|dataset|records_to)\s*=\s*(.*)$",
+                block,
+                re.MULTILINE,
+            )
+        )
+        if needle.search(refs):
+            return not re.search(
+                r"^\s*featured\s*=\s*false\b", block, re.MULTILINE
+            )
+    return False
+
+
 def rule_matches(
     rule: Rule,
     changed: list[str],
@@ -275,6 +303,11 @@ def rule_matches(
         return False
     if rule.when_title is not None and not re.search(rule.when_title, title, re.IGNORECASE):
         return False
+
+    if rule.id == BENCH_DASHBOARD_RULE_ID:
+        suite = _first_segment_after("bench/", added)
+        if not suite or not _bench_suite_needs_dashboard_follow_on(suite):
+            return False
 
     # [OPUS-4.8] Special handling for the changed-public-feature docs rule
     # (bead sq-l0a0). The when_paths glob is only a cheap pre-filter; on top of it

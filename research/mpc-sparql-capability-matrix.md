@@ -163,8 +163,12 @@ cells on the loopback tier; the shaped LAN/WAN multiplier awaits the privileged/
   443`). ORQ-style O(n log n) sort-merge is **OPEN** (bead **sq-ujz8**).
 - **No collaborative ZK proof; no in-circuit signature.** `proof.rs` is honest
   `NotYetImplemented` stubs.
-- **Single-dealer randomness simulation.** A real federation needs PRSS / dealer-less VSS
-  (bead **sq-yyro OPEN**); `dealer()` is a stand-in.
+- **Single-dealer randomness simulation.** A real federation needs PRSS / dealer-less VSS;
+  `dealer()` is a stand-in. **Design + code seam landed** (bead **sq-yyro**:
+  `research/mpc-distributed-randomness-design.md` + the `randomness` module —
+  `DistributedRandomness` / `RandomnessModel`, current dealer reports
+  `TrustedDealerSim`, `deployable() == false`); the PRSS/coin-toss/VSS **impl** is
+  follow-on beads behind the seam (still OPEN).
 
 ### 1.3 The two-regime split (load-bearing; from architecture convention #4)
 
@@ -539,12 +543,19 @@ track an ε budget) — NOT information-theoretic.
   attaches it to *any* operator's output without touching the operator (parent M4 doc §2).
   The full in-circuit unlinkable version ("the join nobody has built", sq-bwwl) is the only
   thing that makes the source-set membership hidden — two research steps out, audit-gated.
-- **Composability / UC.** Honest majority enjoys UC without setup (Canetti) — an argument FOR
-  the default. The danger operator is **equality** (and any operator that opens a value
+- **Composability / UC.** Honest-majority protocols can achieve UC without a CRS/PKI trust
+  root — but only GIVEN the theorems' communication-model resources (ideal authenticated/private
+  channels, broadcast where required, the UC session/scheduling model; Canetti FOCS'01) — an
+  argument FOR the default as a design target; applying this to today's in-process code is
+  aspirational. The danger operator is **equality** (and any operator that opens a value
   mid-computation): `secure_equal` OPENS a masked product mid-pipeline; naive sequential
   composition does not justify this, and per coZK eprint 2025/1026 proving/computing on an
-  inconsistent witness can LEAK honest inputs. A UC/composition design record is itself a gap
-  (see §7).
+  inconsistent witness can LEAK honest inputs. The composition/UC posture is recorded in
+  [`mpc-composition-uc-posture.md`](./mpc-composition-uc-posture.md) (sq-wj4k) — it characterizes
+  the honest masked opening as revealing only the match bit (a distribution lemma), requires the
+  bit-leaking `F_join` leak to be carried downstream in any future composition proof, and leaves
+  the realization/composition justification conditional on a distributed protocol and a
+  full-view simulator (not established by the lemma alone).
 - **Robustness vs network.** Round-per-depth Shamir (sparq's family) degrades on WAN; the
   comparison/sort operators (O(log p) / O(log²n) rounds) are the WAN pain points. The
   constant-round answer (Rabbit/DGK for comparison; BMR garbled for deep Boolean) is a
@@ -655,7 +666,11 @@ LANDED on `main`** — see the per-item ✅ DONE notes.
    adversarial catch-tests, the bench AXIS-1 lift) is decomposed into **`sq-km34.2–.9` (OPEN)**.
 6. **Distributed randomness (PRSS / dealer-less VSS).** Replace the single-dealer simulation so
    masks/correlated randomness are jointly generated — prerequisite for any real federation and
-   for P4/P5 correlated randomness. Bead **sq-yyro (OPEN)** ✅ tracked.
+   for P4/P5 correlated randomness. **Design + seam DONE** (bead **sq-yyro**:
+   `research/mpc-distributed-randomness-design.md` + the `randomness` module seam —
+   PRSS-vs-coin-toss decision, dealer-less VSS, the `r = 0` threat; current dealer labelled
+   `RandomnessModel::TrustedDealerSim`). The PRSS/coin-toss/VSS **implementation** is follow-on
+   beads behind the `DistributedRandomness` trait (OPEN).
 7. **Network transport + round/byte instrumentation (tier-1 modelled, tier-2/3 real).** Make
    the round-count/comm cost — the dominant real-world cost — observable; prerequisite for ANY
    per-config performance verdict. **DONE (CLOSED):** tier-1 modelled counters

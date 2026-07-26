@@ -8,7 +8,7 @@ name: Python bindings
 # THESE GATE (not informational). Both jobs (`maturin build + pytest` and the opt-in
 # `maturin build (arrow) + pytest`) carry NO `advisory`/`informational` token, so the
 # `ci-summary / gate` aggregator (.github/workflows/ci-summary.yml — it excludes only
-# names matching the whole word `\b(advisory|informational)\b`) treats them as HARD
+# only the check names DECLARED in .github/advisory-registry.json — #3773) treats them as HARD
 # required gates whenever they RUN on a PR.
 #
 # WHY a `pull_request` trigger ([OPUS-4.8] sq-5jjei, gh-910): python.yml USED to trigger
@@ -75,7 +75,7 @@ jobs:
           rustup show active-toolchain
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: Install maturin + pytest
@@ -119,7 +119,7 @@ jobs:
           rustup show active-toolchain
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: Install maturin + pytest

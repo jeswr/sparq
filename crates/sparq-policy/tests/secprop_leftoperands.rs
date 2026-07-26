@@ -11,8 +11,8 @@
 #![cfg(feature = "secprop-leftoperands")]
 
 use sparq_policy::secprop::{
-    is_secprop_left_operand, over_dimension, PROFILE_IRI, REQUIRES_ASSURANCE,
-    REQUIRES_UNLINKABILITY_SCOPE, SECPROP_LEFT_OPERANDS,
+    discharge_requirements, is_secprop_left_operand, over_dimension, Deontic, DischargeExpr,
+    PROFILE_IRI, REQUIRES_ASSURANCE, REQUIRES_UNLINKABILITY_SCOPE, SECPROP_LEFT_OPERANDS,
 };
 use sparq_policy::{
     evaluate, parse_policy_str, Action, Constraint, Operator, Policy, Request, Rule, Value, ODRL_NS,
@@ -159,4 +159,134 @@ fn worked_preference_parses_and_left_operands_are_recognised() {
             c.left,
         );
     }
+}
+
+/// The ODRL half of the ZK↔ODRL constraint-discharge envelope (sq-yh427), end to end:
+/// a user privacy preference written in Turtle parses, and `discharge_requirements`
+/// reports exactly what a presented proof would have to establish — dimension,
+/// operator and required level per rule, with the `odrl:` combinator structure intact.
+///
+/// It reports; it does not verify, order levels, or claim any method has any property.
+#[test]
+fn worked_preference_yields_the_proof_discharge_obligations() {
+    let ttl = r#"
+@prefix odrl:     <http://www.w3.org/ns/odrl/2/> .
+@prefix secx:     <https://w3id.org/zkp-sparql/sec-prop#> .
+@prefix sparqorl: <https://sparq.dev/ns/odrl-secprop-profile#> .
+
+<urn:pref:alice-privacy> a odrl:Policy ;
+  odrl:profile sparqorl: ;
+  odrl:permission [
+    odrl:action odrl:read ;
+    odrl:constraint
+      [ odrl:leftOperand  secx:requiresUnlinkabilityScope ;
+        odrl:operator      odrl:gteq ;
+        odrl:rightOperand  secx:CrossPresentation ] ,
+      [ odrl:leftOperand  secx:requiresAssurance ;
+        odrl:operator      odrl:gteq ;
+        odrl:rightOperand  secx:Proven ] ] .
+"#;
+    let policy = parse_policy_str(ttl, "turtle").expect("worked preference must parse");
+
+    let requirements = discharge_requirements(&policy);
+    assert_eq!(requirements.len(), 1, "one rule asks for security properties");
+    assert_eq!(requirements[0].deontic, Deontic::Permission);
+    // A rule's own constraints are conjoined — BOTH must hold, and the tree says so.
+    let DischargeExpr::All(ref conjuncts) = requirements[0].requirement else {
+        panic!("expected a conjunction, got {:?}", requirements[0].requirement);
+    };
+    assert_eq!(conjuncts.len(), 2);
+
+    let obligations = requirements[0].requirement.obligations();
+    assert_eq!(obligations.len(), 2, "both secx: constraints are obligations");
+    for o in &obligations {
+        assert_eq!(o.deontic, Deontic::Permission);
+        assert_eq!(o.operator, Operator::Gteq);
+        assert_eq!(
+            Some(o.dimension),
+            over_dimension(&o.left_operand),
+            "each obligation resolves to its leftOperand's declared dimension",
+        );
+    }
+    let mut dims: Vec<&str> = obligations.iter().map(|o| o.dimension).collect();
+    dims.sort_unstable();
+    assert_eq!(
+        dims,
+        vec![
+            "https://w3id.org/zkp-sparql/sec-prop#AssuranceLevel",
+            "https://w3id.org/zkp-sparql/sec-prop#UnlinkabilityScope",
+        ],
+    );
+    assert!(
+        obligations
+            .iter()
+            .any(|o| o.required == Value::Iri("https://w3id.org/zkp-sparql/sec-prop#Proven".into())),
+        "the required level is carried through so a host can ask for it",
+    );
+
+    // LOAD-BEARING: extraction is read-only. Evidence-free evaluation of the same
+    // policy is still fail-closed DENY — reporting an obligation never discharges it.
+    let req = Request::new(format!("{ODRL_NS}read"));
+    assert!(
+        !evaluate(&policy, &req).allow,
+        "extracting obligations must not change the fail-closed evaluate path",
+    );
+}
+
+/// LOAD-BEARING, end to end: a preference written with `odrl:or` reads back as
+/// ALTERNATIVES. A host can see from the requirement alone that establishing EITHER
+/// `secx:Proven` assurance OR `secx:CrossPresentation` unlinkability suffices — it
+/// never has to go back to the parsed `Policy` to learn that.
+#[test]
+fn an_or_preference_reads_back_as_alternatives_not_as_a_mandate() {
+    let ttl = r#"
+@prefix odrl:     <http://www.w3.org/ns/odrl/2/> .
+@prefix secx:     <https://w3id.org/zkp-sparql/sec-prop#> .
+@prefix sparqorl: <https://sparq.dev/ns/odrl-secprop-profile#> .
+
+<urn:pref:alice-either> a odrl:Policy ;
+  odrl:profile sparqorl: ;
+  odrl:permission [
+    odrl:action odrl:read ;
+    odrl:constraint [ odrl:or
+      ( [ odrl:leftOperand  secx:requiresAssurance ;
+          odrl:operator      odrl:gteq ;
+          odrl:rightOperand  secx:Proven ]
+        [ odrl:leftOperand  secx:requiresUnlinkabilityScope ;
+          odrl:operator      odrl:gteq ;
+          odrl:rightOperand  secx:CrossPresentation ] ) ] ] .
+"#;
+    let policy = parse_policy_str(ttl, "turtle").expect("`or` preference must parse");
+
+    let requirements = discharge_requirements(&policy);
+    assert_eq!(requirements.len(), 1);
+    let DischargeExpr::All(ref conjuncts) = requirements[0].requirement else {
+        panic!("expected the rule conjunction, got {:?}", requirements[0].requirement);
+    };
+    let DischargeExpr::Any(ref alternatives) = conjuncts[0] else {
+        panic!("`odrl:or` must survive as alternatives, got {:?}", conjuncts[0]);
+    };
+    assert_eq!(alternatives.len(), 2, "two independent ways to discharge");
+    let mut alt_dims: Vec<&str> = alternatives
+        .iter()
+        .map(|a| match a {
+            DischargeExpr::Atomic(o) => o.dimension,
+            other => panic!("expected an atomic alternative, got {:?}", other),
+        })
+        .collect();
+    alt_dims.sort_unstable();
+    assert_eq!(
+        alt_dims,
+        vec![
+            "https://w3id.org/zkp-sparql/sec-prop#AssuranceLevel",
+            "https://w3id.org/zkp-sparql/sec-prop#UnlinkabilityScope",
+        ],
+    );
+    // The same two dimensions as the conjunctive worked preference above — which is
+    // precisely why the flat inventory cannot be the requirement.
+    assert_ne!(
+        requirements[0].requirement,
+        DischargeExpr::All(vec![DischargeExpr::All(alternatives.clone())]),
+        "an `or` must not be equal to the `and` over the same leaves",
+    );
 }

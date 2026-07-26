@@ -143,6 +143,21 @@ pub fn build_external<R: std::io::Read + Send>(reader: R, format: &str, dir: &Pa
 pub fn new() -> Graph                 // also: Graph::default()
 ```
 
+`sparq_core::Dict` — compact FILTERED rebuild on the `(Dict, triples)` seam:
+
+```rust
+// [GPT-5.6] sq-eiv — consume the Dict, keep only the real ids `retain` accepts, and get
+// back a dense rebuilt Dict plus an old→new remap (`remap[(old_id - 1) as usize]`; NO_ID
+// = dropped) for rewriting triple ids before `from_parts`. Inline integer ids are not
+// dictionary records: never passed to `retain`, unchanged under remapping. Dependency-aware
+// for RDF 1.2 triple terms — retaining a triple term implicitly retains its s/p/o and any
+// recursively nested components (their remap entries are populated even if `retain` said
+// false). Never materialises an `oxrdf::Term` and never re-interns survivors (arena
+// payloads MOVE; blob/mmap/frozen records copy compactly); dead prefix/datatype metadata
+// is filtered too, so it does not accumulate across rebuilds.
+pub fn rebuild_filtered(self, retain: impl FnMut(Id) -> bool) -> (Dict, Vec<Id>)
+```
+
 `sparq_core::Graph` — single-triple mutation from `oxrdf` terms (the ergonomic one-triple
 case over `apply_delta`; each position takes anything that converts into a `Term`:
 `NamedNode` / `Literal` / `BlankNode` / a `Term`). Set-valued (re-insert / absent-remove is a
@@ -677,12 +692,19 @@ cargo build -p sparq-cli --features serialize-rdf
     clearly-positive real-data B/triple measurement — the col2-clustered synthetic win did NOT hold
     on WatDiv). The `spqcprm2` cargo feature (which implies `mmap`) exposes the emit config gate:
     `compress::with_emit_format(EmitFormat::V2, || …)` on a thread, or `SPARQ_EMIT_FORMAT=v2` for a
-    process, routes the store's `save_compressed` and the streaming `CompressedPermWriter` through
-    the V2 encoder. `CompressedPerm::encode_v2` builds a `V2` perm directly; `encode_emit` honours
+    process, routes the store's `save_compressed`, the streaming `CompressedPermWriter`, AND the
+    in-RAM compressed profile (`TripleStore::from_triples_compressed` / `Graph::into_compressed`,
+    i.e. `SPARQ_STORE_PROFILE=compressed` — [FABLE-5] sq-559dp) through the V2 encoder. On the CLI
+    that same choice is a per-invocation FLAG — `sparq-cli save …
+    compressed --format-v2` / `sparq-cli recompress … --v2` ([SONNET-4.6] sq-kmve2) — which maps
+    onto the per-thread override (so it beats the env var) and is a hard exit-2 error on a build
+    without `spqcprm2`, never a silent V1 write. `CompressedPerm::encode_v2` builds a `V2` perm directly; `encode_emit` honours
     the gate in one place. With the feature OFF, `emit_format()` is a `const V1`, so the default
     build cannot emit V2 and every shipped index stays `SPQCPRM1` bit-for-bit.
-  - **Public API (`sparq_core::compress`).** With `mmap`: `enum Format`, `const FILE_MAGIC_V2`,
-    `fn CompressedPerm::encode_emit`. With `spqcprm2`: `enum EmitFormat`, `fn with_emit_format`,
+  - **Public API (`sparq_core::compress`).** Always: `fn CompressedPerm::encode_emit` (a plain
+    inlined `encode` when the gate is compiled out, so the `mmap`-off wasm in-RAM stream is
+    byte-identical). With `mmap`: `enum Format`, `const FILE_MAGIC_V2`.
+    With `spqcprm2`: `enum EmitFormat`, `fn with_emit_format`,
     `fn CompressedPerm::encode_v2`, `fn CompressedPermWriter::create_with`.
 - **JSON-LD W3C conformance is RATCHETED (honest baseline, not 100%).** A ratcheted W3C
   JSON-LD 1.1 conformance gate (sq-oy1f.2 + sq-3uos5 + sq-oy1f.19 + sq-oy1f) drives the official

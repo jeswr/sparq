@@ -30,6 +30,7 @@ import json
 import os
 import subprocess
 import sys
+import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import triage  # noqa: E402  (same-directory static-triage module)
@@ -100,23 +101,73 @@ def _trusted_factory(repo):
     return trusted
 
 
+FETCH_CEILING = 10000
+
+
+def _flatten_pages(pages):
+    """Flatten `gh api --paginate --slurp` output, dropping PRs (the issues endpoint returns
+    both) and any non-list/non-dict junk."""
+    return [i for page in pages if isinstance(page, list) for i in page
+            if isinstance(i, dict) and "pull_request" not in i]
+
+
+def _fetch_label(repo, label, ceiling=FETCH_CEILING):
+    """Every OPEN issue carrying `label`, via REAL cursor pagination.
+
+    [OPUS-5] This was `gh issue list --limit 500`, which SILENTLY TRUNCATES: the CLI stops at
+    the limit and reports nothing. Retriage is a WORK QUEUE sweep, so a truncated fetch is not a
+    slow drain: the dropped issues are never candidates on any tick, at any point in the future,
+    with no signal. `gh api --paginate` follows Link headers to exhaustion; the explicit ceiling
+    still fails closed on a runaway snapshot (same shape as scripts/ready-issues.py `_fetch`).
+
+    The defect is DEPTH-CONDITIONAL, and the measurements below are POINT-IN-TIME, not a fixed
+    gain. It bites only while the label's open count exceeds the limit; under it, the truncated
+    and paginated fetches are identical. Two live snapshots on sparq-org/sparq, 2026-07-26:
+
+      queue 719  ->  truncated fetch returned 500, dropping 219 (#2360..#2750) newest-first;
+                     275 vs 367 promotable, i.e. 92 promotions lost on that tick
+      queue 380  ->  below the limit; both fetches return the same rows, 8 vs 8, no difference
+
+    So this is a LATENT fault that re-arms the moment the backlog crosses the limit again — and
+    it does so silently, which is exactly why it is fixed rather than tuned. Do not quote the 92
+    as a standing improvement.
+
+    Field note: the REST payload names the author `user.login`, NOT the `author.login` that
+    `gh issue list --json author` emits (measured: 0 of 719 live open `status:untriaged` issue
+    objects carry an `author` key; all 719 carry `user`). Getting that wrong makes every author
+    read as "" and `_trusted_factory` then rejects EVERY issue — a silent total stall, not a
+    visible error. Dropping `labels` fails the same silent way via `_needs_triage`.
+
+    `_self_test` pins BOTH, and pins them end-to-end through `plan_retriage` — asserting the row
+    SHAPE is not enough. Review round 2: the fixture originally carried `user` AND `author` set
+    to the same login, so it satisfied the right and the wrong reading equally and the
+    `author.login` mutant survived with the pinning assertion itself printing `ok`. The fixture
+    now carries ONLY the keys the real payload has.
+    """
+    r = _gh(["api", "--paginate", "--slurp",
+             f"repos/{repo}/issues?state=open&labels={urllib.parse.quote(label)}&per_page=100"])
+    if r.returncode != 0:
+        raise SystemExit(f"retriage: could not list {label} issues")
+    rows = _flatten_pages(json.loads(r.stdout or "[]"))
+    if len(rows) >= ceiling:
+        raise SystemExit(f"retriage: fetched {len(rows)} '{label}' issues >= ceiling {ceiling} — "
+                         "snapshot looks runaway (fail-closed). Raise the ceiling deliberately.")
+    return rows
+
+
 def _fetch_candidates(repo):
     # Two label queries: parked status:untriaged issues, plus (#2474) flow-on issues —
     # plan_retriage's _needs_triage then keeps only the label-less-status flow-on subset,
     # so an already-routed flow-on issue is never churned. Deduped by issue number.
     issues, seen = [], set()
     for label in ("status:untriaged", FLOW_ON_LABEL):
-        r = _gh(["issue", "list", "-R", repo, "--state", "open", "--label", label,
-                 "--limit", "500", "--json", "number,labels,author"])
-        if r.returncode != 0:
-            raise SystemExit(f"retriage: could not list {label} issues")
-        for it in json.loads(r.stdout or "[]"):
+        for it in _fetch_label(repo, label):
             num = it.get("number")
             if num in seen:
                 continue
             seen.add(num)
             issues.append({"number": num, "labels": it.get("labels") or [],
-                           "author": ((it.get("author") or {}).get("login") or "")})
+                           "author": ((it.get("user") or {}).get("login") or "")})
     return issues
 
 
@@ -168,17 +219,19 @@ def _self_test():
             author=FLOW_ON_MINTER),
     ]
     actions = {n: (a, r) for n, a, r in plan_retriage(fixture, trusted)}
+    # [FABLE-5] (#3419) .get defaults: a fixture dropped by a triage.py behavior change (how
+    # the #2898 no-area parking drift surfaced) must print a clean FAIL line, not a KeyError.
+    a1, a2, a9, a10 = (actions.get(n, ([], [])) for n in (1, 2, 9, 10))
     chk("promoted set", sorted(actions), [1, 2, 9, 10])
-    chk("label-added priority promotes", actions[1],
-        (["status:ready"], ["status:untriaged"]))
-    chk("default P3 applied", "priority:P3" in actions[2][0], True)
-    chk("default promotion readies", ("status:ready" in actions[2][0],
-                                      "status:untriaged" in actions[2][1]), (True, True))
-    chk("role derived for default case", any(x.startswith("role:") for x in actions[2][0]), True)
-    chk("bot author promoted", actions[9][0][0].startswith(("priority", "role", "status")), True)
+    chk("label-added priority promotes", a1, (["status:ready"], ["status:untriaged"]))
+    chk("default P3 applied", "priority:P3" in a2[0], True)
+    chk("default promotion readies", ("status:ready" in a2[0],
+                                      "status:untriaged" in a2[1]), (True, True))
+    chk("role derived for default case", any(x.startswith("role:") for x in a2[0]), True)
+    chk("bot author promoted", bool(a9[0]) and a9[0][0].startswith(("priority", "role", "status")), True)
     chk("flow-on statusless backlog promoted (#2474)",
-        ("status:ready" in actions[10][0], "priority:P3" in actions[10][0],
-         any(x.startswith("role:") for x in actions[10][0])), (True, True, True))
+        ("status:ready" in a10[0], "priority:P3" in a10[0],
+         any(x.startswith("role:") for x in a10[0])), (True, True, True))
     chk("github-actions[bot] not blanket-trusted", 11 in actions, False)
     chk("already-routed flow-on untouched", 12 in actions, False)
     chk("ambiguous priority untouched", 3 in actions, False)
@@ -186,6 +239,106 @@ def _self_test():
     chk("quarantine skipped", 5 in actions, False)
     chk("untrusted author skipped", 6 in actions, False)
     chk("needs:user untouched", 7 in actions, False)
+
+    # --- candidate FETCH must not silently truncate the work queue (review of #3823) ------------
+    # `gh issue list --limit 500` stops at the limit and reports nothing. MEASURED live
+    # 2026-07-26: 719 open status:untriaged issues, 500 returned, 219 dropped (#2360..#2750)
+    # newest-first. Retriage is a work-queue sweep, so those never become candidates on ANY
+    # future tick. The stub below emulates BOTH CLI shapes faithfully — `gh api --paginate`
+    # exhausts the Link chain, `gh issue list --limit N` truncates newest-first — so reverting
+    # to the limited call is EXECUTABLE here and fails on the missing rows rather than on an
+    # unrecognised command. That is what makes this a behavioural guard and not a spelling test.
+    class _Resp:
+        def __init__(self, stdout, returncode=0):
+            self.stdout, self.returncode = stdout, returncode
+
+    total = 620                     # > 500, so a --limit 500 fetch must lose the oldest 120
+    def _row(n, name):
+        # [OPUS-5] `user` ONLY — deliberately NO `author` key, mirroring the real REST payload
+        # (measured: 0 of 719 live open status:untriaged issue objects carry `author`; all 719
+        # carry `user`). Carrying both made the fixture satisfy the RIGHT and the WRONG reading
+        # equally, so `author.login` was indistinguishable from `user.login` and the mutant
+        # survived with this very assertion printing `ok`. In production that mutant resolves
+        # every author to "", _trusted_factory then rejects the whole queue, and retriage
+        # silently promotes NOTHING — a total stall of the drain this fetch exists to unblock.
+        return {"number": n, "labels": [{"name": name}, {"name": "priority:P2"},
+                                        {"name": "role:impl"}, {"name": "area:sparq-core"}],
+                "user": {"login": "jeswr"}}
+
+    corpus = {"status:untriaged": [_row(n, "status:untriaged") for n in range(1, total + 1)],
+              # #7 and #8 carry BOTH labels, so the second query re-returns them: the dedupe
+              # is the only thing keeping them out of the candidate list twice.
+              FLOW_ON_LABEL: [_row(n, FLOW_ON_LABEL) for n in (7, 8)]}
+    seen_cmds = []
+
+    def _stub_gh(args):
+        """Faithful emulator of BOTH gh shapes, so either implementation is EXECUTABLE here.
+
+        `gh api --paginate` follows the Link chain to exhaustion; WITHOUT --paginate gh returns
+        only the first page. `gh issue list --limit N` truncates newest-first. Modelling the
+        truncation both ways is what lets a reverted fetch fail on missing ROWS rather than on
+        an unrecognised command line.
+        """
+        seen_cmds.append(list(args))
+        if args[0] == "api":
+            label = urllib.parse.unquote(args[-1].split("labels=")[1].split("&")[0])
+            rows = corpus.get(label, [])
+            pages = [rows[i:i + 100] for i in range(0, len(rows), 100)] or [[]]
+            return _Resp(json.dumps(pages if "--paginate" in args else pages[:1]))
+        if args[0:2] == ["issue", "list"]:
+            label = args[args.index("--label") + 1]
+            rows = corpus.get(label, [])
+            limit = int(args[args.index("--limit") + 1]) if "--limit" in args else len(rows)
+            return _Resp(json.dumps(sorted(rows, key=lambda r: -r["number"])[:limit]))
+        raise AssertionError(f"unexpected gh invocation: {args}")
+
+    real_gh = globals()["_gh"]
+    globals()["_gh"] = _stub_gh
+    try:
+        cands = _fetch_candidates("o/r")
+        nums = sorted(c["number"] for c in cands)
+        chk("every labelled issue is fetched, not just the first page", len(nums), total)
+        chk("the OLDEST issues survive the fetch (the truncation casualties)",
+            nums[:3], [1, 2, 3])
+        chk("no issue is dropped or duplicated", (nums[0], nums[-1], len(set(nums))),
+            (1, total, total))
+        # #7/#8 carry both query labels; without the dedupe they enter the queue twice and
+        # plan_retriage emits two label-edit actions for the same issue.
+        chk("an issue matching BOTH label queries appears exactly once",
+            [nums.count(n) for n in (7, 8)], [1, 1])
+        # REST names the author `user.login`; reading `author.login` yields "" for every issue
+        # and _trusted_factory then rejects the entire queue — a silent total stall.
+        chk("author login is read from the REST `user` field",
+            {c["author"] for c in cands}, {"jeswr"})
+        chk("labels are carried through the fetch",
+            sorted(lb["name"] for lb in cands[0]["labels"]),
+            ["area:sparq-core", "priority:P2", "role:impl", "status:untriaged"])
+        # [OPUS-5] END-TO-END. Every field the fetch emits is only meaningful because
+        # plan_retriage consumes it, and each one fails the SAME silent way: drop `labels` and
+        # _needs_triage is False, drop `author` and the trust gate rejects everything — either
+        # way retriage promotes NOTHING and prints no error. Asserting the row SHAPE cannot see
+        # that; asserting the resulting ACTIONS can. This pins number + labels + author at once.
+        actions_e2e = plan_retriage(cands, lambda login: login == "jeswr")
+        chk("fetched rows actually drive promotions (not a silently empty sweep)",
+            (len(actions_e2e), actions_e2e[0] if actions_e2e else None),
+            (total, (1, ["status:ready"], ["status:untriaged"])))
+        chk("the fetch uses cursor pagination, not a fixed page limit",
+            all(c[0] == "api" and "--paginate" in c for c in seen_cmds), True)
+        # fail-closed ceiling: a runaway snapshot must raise, never silently half-report
+        try:
+            _fetch_label("o/r", "status:untriaged", ceiling=10)
+            chk("runaway snapshot fails closed", "no raise", "SystemExit")
+        except SystemExit:
+            chk("runaway snapshot fails closed", "SystemExit", "SystemExit")
+        # PR rows come back from the issues endpoint and must not enter the triage queue
+        corpus["status:untriaged"].append(
+            {"number": 9001, "labels": [{"name": "status:untriaged"}],
+             "user": {"login": "jeswr"}, "pull_request": {"url": "x"}})
+        chk("pull requests are not retriage candidates",
+            9001 in {c["number"] for c in _fetch_candidates("o/r")}, False)
+    finally:
+        globals()["_gh"] = real_gh
+
     print("retriage self-test", "PASSED" if ok else "FAILED")
     return 0 if ok else 1
 

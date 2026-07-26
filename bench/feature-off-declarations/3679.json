@@ -1,0 +1,5 @@
+{
+  "pr": 3679,
+  "date": "2026-07-21",
+  "reason": "[SONNET-4.6] #3644: intentional feature-OFF wasm change from specializing the always-compiled sparq-substrate hash-join probe path. The scalar one-id key comparison and fixed-size radix-table selection are used by sparq-engine and therefore reach sparq-wasm's default bundle; this is a deliberate hot-path optimization, not leakage from the default-OFF vectorized feature. Bundle size remains governed separately by the wasm_bundle_bytes ratchet."
+}

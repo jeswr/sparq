@@ -56,36 +56,64 @@ numeric-FILTER datatype + operator (the complex filters: integer, signed integer
 decimal, double), boolean / string / dateTime FILTER, OPTIONAL, UNION, **property
 paths including `+` / `*` / `?` / `/` / `|` / `^`**, aggregates / GROUP BY,
 subqueries, BIND, VALUES, MINUS / negation, and the hidden-credential primitives
-(revocation, issuer attestation, holder possession).
+(revocation, issuer attestation, holder possession). The point of the map is the
+**gaps** — it is a coverage map and an optimisation-target list, not a win list.
 
 **Honesty is load-bearing.** Each query records its coverage status:
 
-- `covered` — compiles to a real circuit member; its `circuit_size` is **joined
-  from** `crates/sparq-zk-compose/tests/gate_count_snapshot.json` (the
-  regression-gated source of truth), never hand-typed, so it can never drift.
-- `partial (…)` — composed verifier-side or desugared to a covered primitive
-  (e.g. UNION, OPTIONAL, alternative paths); `circuit_size: null`.
-- `NO ZK CIRCUIT YET (gap)` — the feature has **no circuit today** (general
-  property-path traversal `+`/`*`/`?`, aggregates, BIND expression eval, string
-  predicates, dateTime compare, negation, boolean FILTER). These carry
+- `covered` — compiles to a real circuit member that proves the feature **as
+  stated**; its `circuit_size` is **joined from**
+  `crates/sparq-zk-compose/tests/gate_count_snapshot.json` (the regression-gated
+  source of truth), never hand-typed, so it can never drift.
+- `partial (verifier-side / desugars …)` — no dedicated member: composed
+  verifier-side or desugared into a covered primitive (UNION, alternative paths,
+  subquery, VALUES); `circuit_size: null`, because the cost belongs to the
+  underlying scan/join member.
+- `partial (BOUNDED in-circuit statement …)` — a **real** member proving a
+  **strictly weaker** statement than the SPARQL feature: the `path_reach` family
+  for `p+` / `p*` proves *there exists a chain of ≤ D committed triples*, with `D`
+  a **public** input. Existence only — never "no longer path exists", never
+  completeness. These carry a real joined `circuit_size` but are **not**
+  `covered`.
+- `NO ZK CIRCUIT YET (gap)` — the feature has **no circuit today** (zero-or-one
+  paths `?`, BIND expression eval, string predicates, dateTime compare). Carries
   `circuit_size: null`. **A gate number is NEVER fabricated for a gap.**
+- `NO ZK CIRCUIT YET (gap — EXCLUDED BY DESIGN …)` — not "unbuilt" but "not
+  admissible": OPTIONAL, aggregation and negation are non-monotone / closed-world
+  (`research/zksparql-fragment-extension.md` §3.2), so no circuit size would make
+  them sound. Also null.
 
-High-gate covered members are auto-flagged: `HIGH_GATE_blake3_binding` marks the
-numeric-FILTER family (the value-hook reduction target of §2.6 — the blake3
-token-binding the encoding overhaul removes), and `HIGH_GATE_lattice` marks a
-scan/join member that is large because of the (k,n,r)/(na,nb) lattice corner.
+Flags: `HIGH_GATE_blake3_binding` marks the numeric-FILTER family (the value-hook
+reduction target of §2.6 — the blake3 token-binding the encoding overhaul
+removes), `HIGH_GATE_lattice` marks a scan/join member that is large because of
+the (k,n,r)/(na,nb) lattice corner, and `BOUNDED_DEPTH_EXISTENCE_ONLY` marks the
+bounded rows above. Where the value hook has **landed** (integer / decimal /
+double), the row carries `value_lane_member` + a joined
+`value_lane_circuit_size` — a **measurement**; only a lane with no compiled
+value-lane member (signed integer) still carries the self-labelled
+`projected_after` ESTIMATE, and the guard test fails if a projection is ever left
+sitting next to a measurement.
+
+Nothing in the catalog is a soundness or privacy claim: the ZK estate is
+internally re-audited but **NOT externally audited** (`sq-qhy4`) and the
+composition verifier is NOT-yet-sound. "Covered" means *a member exists and
+dispatch binds it*, never *proved secure*.
 
 ### Regenerate
 
 ```sh
 bench/zk-compose/scripts/sparql_catalog.py > bench/zk-compose/sparql_feature_catalog.json
+bench/zk-compose/scripts/sparql_catalog.py --check   # committed copy is up to date?
 ```
 
 The generator needs **no** `nargo`/`bb` (it reads the committed snapshot), so it
-is deterministic. The committed JSON is gated by
+is deterministic. `--check` fails unless the committed JSON is **byte-identical**
+to a fresh generation *and* self-consistent with the snapshot, so regeneration is
+provably idempotent. The committed JSON is gated by
 `crates/sparq-zk-compose/tests/sparql_catalog.rs`, which fails if a covered query
-names a member absent from the snapshot, if a covered `circuit_size` disagrees
-with the snapshot, or if a gap carries a non-null gate number. After an
+names a member absent from the snapshot, if any joined number (headline, per
+member, floor, or value lane) disagrees with the snapshot, or if a gap carries a
+non-null gate number anywhere on the row. After an
 **intentional** circuit change, re-run `scripts/gate_counts.sh` (re-baseline the
 snapshot) and then re-run the catalog generator to re-join the new numbers.
 

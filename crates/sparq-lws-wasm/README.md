@@ -59,6 +59,13 @@ console.log(response.status);
 - [SONNET-4.6] A `console_error_panic_hook` is installed at module init so any
   Rust panic emits a diagnostic to `console.error` before the wasm `unreachable`
   trap propagates to the host as `WebAssembly.RuntimeError`.
+- [SONNET-4.6] A bounded `#[global_allocator]` tracks live linear-memory bytes, and
+  `handleRequest` refuses a request whose projected peak would cross the ceiling with
+  a clean HTTP 507 instead of trapping at the linear-memory wall. `lwsMemoryLiveBytes`,
+  `lwsMemoryPeakBytes`, `lwsMemoryCeilingBytes`, and `lwsSetMemoryCeilingBytes` expose
+  the counters and the knob. The total is of live bytes rather than pages ever grown, so
+  bytes returned to the allocator restore headroom — but that an LDP `DELETE` frees enough
+  to re-admit a refused request is not yet demonstrated end to end.
 - No Tokio reactor, native listener, filesystem, TLS, OIDC verifier, PoP,
   notifications, or network backend is linked into the wasm artifact.
 
@@ -73,7 +80,10 @@ console.log(response.status);
   development only; OIDC verification remains outside this wasm crate.
 - [SONNET-4.6] The Node host catches `WebAssembly.RuntimeError` and recycles the
   `SolidServer` instance before the next request (sq-250si). A single wasm trap no
-  longer bricks the process; the triggering request receives HTTP 503.
+  longer bricks the process; the triggering request receives HTTP 503. The bounded
+  allocator (sq-wubkf) removes the *sustained*-pressure form of that trap ahead of
+  time; a single request whose own transient peak overshoots the remaining headroom
+  still traps and still relies on trap recovery.
 
 ## License
 

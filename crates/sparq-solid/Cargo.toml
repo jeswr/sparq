@@ -117,6 +117,13 @@ legacy-union-default-graph = []
 # upstream manifest.json. serde_json is a DEV-only dependency — it does not enter the
 # runtime or published graph (the default sparq-solid build stays dependency-light).
 [dev-dependencies]
+# [SONNET-4.6] sq-z1xv8 — the shared ratchet-floor constants. DEV-ONLY (zero-dep,
+# `publish = false`): the conformance ratchet floor this crate's test runner enforces is
+# the SAME `const` sparq-conformance's central scoreboard reports, so the two cannot
+# drift, and the dep edge puts this crate in the floors crate's reverse-dependency
+# closure (which is what makes CI test-selection sound for the floor — it replaces the
+# guard test's old runtime read of this file's source).
+sparq-conformance-floors = { path = "../sparq-conformance-floors" }
 serde_json = "1"
 
 # [OPUS-4.8] sq-zgbso.1 MEASURED SPIKE (issue #1582, design record

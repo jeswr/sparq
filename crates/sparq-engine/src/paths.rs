@@ -1,7 +1,7 @@
 //! Full-path enumeration over an RDF predicate or materialized graph pattern.
 
 use oxrdf::vocab::xsd;
-use oxrdf::{Literal, NamedNode, Term};
+use oxrdf::{Literal, NamedNode, Term, Variable};
 use spargebra::algebra::GraphPattern;
 use spargebra::{Query, SparqlParser};
 use sparq_core::{dict::Id, store::Perm, Graph};
@@ -29,6 +29,25 @@ pub enum Via {
     Pattern(String),
 }
 
+/// Selects the candidate nodes at one end of a path.
+///
+/// [SONNET-4.6] `sq-lsp7k.3`: endpoint patterns are materialized once into a
+/// deterministic id set, then drive the same enumerator as a fixed node.
+#[derive(Clone, Debug)]
+pub enum Endpoint {
+    /// Exactly one fixed node.
+    Node(Term),
+    /// Every node the group graph pattern binds to `variable`. Solutions leaving
+    /// `variable` unbound, or binding a term absent from the graph, contribute
+    /// no candidate.
+    Pattern {
+        /// Group graph pattern body, without the enclosing braces.
+        source: String,
+        /// The pattern variable whose bindings are the candidate nodes.
+        variable: Variable,
+    },
+}
+
 /// Parameters for path enumeration over an edge relation.
 #[derive(Clone, Debug)]
 pub struct PathSpec {
@@ -36,10 +55,10 @@ pub struct PathSpec {
     pub mode: PathMode,
     /// If true, return only non-empty paths whose first and last nodes are equal.
     pub cyclic: bool,
-    /// Optional fixed starting node; otherwise every edge subject is considered.
-    pub start: Option<Term>,
-    /// Optional fixed ending node; otherwise every edge object is considered.
-    pub end: Option<Term>,
+    /// Optional starting-node restriction; otherwise every edge subject is considered.
+    pub start: Option<Endpoint>,
+    /// Optional ending-node restriction; otherwise every edge object is considered.
+    pub end: Option<Endpoint>,
     /// Predicate or graph pattern defining the directed edge relation.
     pub via: Via,
     /// Maximum edge count. Required for [`PathMode::All`].
@@ -77,8 +96,8 @@ pub fn enumerate_paths(graph: &Graph, spec: &PathSpec) -> Result<Vec<PathSolutio
         next.dedup();
     }
 
-    let starts = selected_ids(graph, spec.start.as_ref(), adjacency.keys().copied());
-    let ends = selected_ids(graph, spec.end.as_ref(), sinks.iter().copied());
+    let starts = endpoint_ids(graph, spec.start.as_ref(), adjacency.keys().copied())?;
+    let ends = endpoint_ids(graph, spec.end.as_ref(), sinks.iter().copied())?;
     let mut paths = Vec::new();
     if spec.cyclic {
         for start in starts {
@@ -191,11 +210,63 @@ fn edge_relation(graph: &Graph, via: &Via) -> Result<(Vec<(Id, Id)>, Term), Stri
     }
 }
 
-fn selected_ids(graph: &Graph, fixed: Option<&Term>, all: impl Iterator<Item = Id>) -> Vec<Id> {
-    match fixed {
-        Some(term) => graph.id_of(term).into_iter().collect(),
-        None => all.collect(),
+fn endpoint_ids(
+    graph: &Graph,
+    endpoint: Option<&Endpoint>,
+    all: impl Iterator<Item = Id>,
+) -> Result<Vec<Id>, String> {
+    match endpoint {
+        None => Ok(all.collect()),
+        Some(Endpoint::Node(term)) => Ok(graph.id_of(term).into_iter().collect()),
+        Some(Endpoint::Pattern { source, variable }) => {
+            endpoint_pattern_ids(graph, source, variable)
+        }
     }
+}
+
+/// Materializes an endpoint pattern into the sorted, deduplicated id set it selects.
+fn endpoint_pattern_ids(
+    graph: &Graph,
+    source: &str,
+    variable: &Variable,
+) -> Result<Vec<Id>, String> {
+    let name = variable.as_str();
+    let select = format!("SELECT ?{} WHERE {{ {} }}", name, source);
+    let parsed = SparqlParser::new()
+        .parse_query(&select)
+        .map_err(|error| format!("invalid PATHS endpoint pattern: {}", error))?;
+    let Query::Select {
+        pattern: GraphPattern::Project { inner, .. },
+        ..
+    } = parsed
+    else {
+        return Err("invalid SELECT projection for PATHS endpoint pattern".to_owned());
+    };
+    let mut binds = false;
+    inner.on_in_scope_variable(|in_scope| {
+        if in_scope.as_str() == name {
+            binds = true;
+        }
+    });
+    if !binds {
+        return Err(format!("PATHS endpoint pattern must bind ?{}", name));
+    }
+    let result = crate::query(graph, &select)?;
+    let column = result
+        .vars
+        .iter()
+        .position(|var| var.as_str() == name)
+        .ok_or_else(|| format!("PATHS endpoint pattern must bind ?{}", name))?;
+    let mut ids = BTreeSet::new();
+    for row in result.rows {
+        let Some(term) = row[column].as_ref() else {
+            continue;
+        };
+        if let Some(id) = graph.id_of(term) {
+            ids.insert(id);
+        }
+    }
+    Ok(ids.into_iter().collect())
 }
 
 fn enumerate_pair(

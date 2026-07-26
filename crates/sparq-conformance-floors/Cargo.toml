@@ -1,0 +1,26 @@
+# [SONNET-4.6] sq-z1xv8 — the SHARED ratchet-floor crate.
+#
+# DEV-ONLY constant crate: `publish = false`, ZERO dependencies. It exists so a
+# conformance ratchet floor that is enforced in one crate's test runner and
+# REPORTED in `sparq-conformance`'s central scoreboard is ONE compile-time
+# `const` instead of two hand-copied numbers kept in step by reading the other
+# crate's test SOURCE at runtime (the sq-m4bxc "residual 3" CI test-selection
+# hole — see crates/sparq-conformance-floors/README.md).
+#
+# It is a LEAF: it depends on nothing, so the runner crates take it as a
+# `[dev-dependencies]` edge (their shipping dependency graph is untouched) and
+# `sparq-conformance` as a plain dependency (its `scoreboard::SUITES` is in
+# `src/`). Those edges are what make the CI selector sound: a change here lands
+# in the reverse-dependency closure of every crate that enforces one of these
+# floors, so none of their test lanes can be selection-skipped.
+[package]
+name = "sparq-conformance-floors"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Shared conformance/extension ratchet-floor constants (dev-only, zero-dependency)."
+readme = "README.md"
+
+[dependencies]

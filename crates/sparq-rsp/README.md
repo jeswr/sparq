@@ -65,6 +65,15 @@ q.flush(|result| { /* end-of-stream: close everything up to max ts */ })?;
   `REGISTER [STREAM|RSTREAM|ISTREAM|DSTREAM] … FROM NAMED WINDOW <w> ON <s> RANGE … STEP …`, and
   `ContinuousMultiQuery` joins across 2 or more named windows on one synchronized
   event-time clock with full RSTREAM/ISTREAM/DSTREAM support.
+- **Per-query evaluation budgets** — `.with_budget(QueryBudget)` (re-exported from
+  `sparq_engine`) applies the engine's COOPERATIVE limits (`max_rows` / `max_bytes` /
+  `cancel`) to EVERY window evaluation, and `.with_window_timeout(Duration)` (native-only)
+  installs a refreshed relative deadline (`now + timeout`) at each evaluation start. All of
+  them are observed at the executor's coarse polling sites, so they take effect at the NEXT
+  poll rather than instantly — a shape answered straight from the index, or one that
+  finishes before the first poll, runs to completion unchecked. `max_bytes` caps the
+  executor-accounted ESTIMATED working set of one evaluation, not total process memory nor
+  the memory of the materialised windows themselves. <!-- [SONNET-4.6] sq-xqu -->
 - **Pluggable materialisation (`EvalMode`)** — `PersistentDict` (default, compacted
   dictionary), `Rebuild` (v1 baseline), `Delta` (one live graph, per-slide delta), and
   `Snapshot` (one live graph + a cheap O(overlay) immutable point-in-time snapshot per

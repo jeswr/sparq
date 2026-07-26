@@ -123,9 +123,10 @@ use std::collections::BTreeSet;
 use oxrdf::{NamedNode, Term};
 use sparq_core::dict::{Dict, Id};
 use sparq_core::Graph;
-use sparq_engine::PreparedQuery;
+use sparq_engine::{PreparedQuery, QueryBudget};
 use spargebra::Query;
 
+use crate::budget::BudgetSpec;
 // [SONNET-4.6] sq-2n1q3.3: import diff_rows for ISTREAM/DSTREAM support.
 use crate::query::{diff_rows, R2S, WindowResult};
 use crate::rspql::{RspqlQuery, WindowDecl};
@@ -189,6 +190,9 @@ pub struct ContinuousMultiQuery {
     /// [SONNET-4.6] sq-2n1q3.3: previous tick's FULL join result rows — the
     /// ISTREAM/DSTREAM diff base. Empty and unused when `r2s == RStream`.
     prev_rows: Vec<Vec<Option<Term>>>,
+    /// [SONNET-4.6] sq-xqu: the per-tick-evaluation resource budget
+    /// (unlimited by default).
+    budget: BudgetSpec,
 }
 
 impl ContinuousMultiQuery {
@@ -252,7 +256,31 @@ impl ContinuousMultiQuery {
             // first tick fires (the first window diffs against the empty multiset,
             // so it emits everything for ISTREAM and nothing for DSTREAM).
             prev_rows: Vec::new(),
+            budget: BudgetSpec::default(),
         })
+    }
+
+    /// [SONNET-4.6] sq-xqu: sets the per-tick-evaluation resource budget
+    /// (builder style). The budget is applied to EVERY synchronized
+    /// evaluation tick (the multi-window analogue of one window evaluation).
+    /// Semantics as
+    /// [`ContinuousQuery::with_budget`](crate::ContinuousQuery::with_budget):
+    /// a tripped budget is the evaluation error of the `push`/`flush` that
+    /// triggered the tick.
+    pub fn with_budget(mut self, budget: QueryBudget) -> Self {
+        self.budget.base = budget;
+        self
+    }
+
+    /// [SONNET-4.6] sq-xqu: installs a refreshed deadline for EACH
+    /// evaluation tick (tightened to at most `now + timeout` per tick).
+    /// Semantics as
+    /// [`ContinuousQuery::with_window_timeout`](crate::ContinuousQuery::with_window_timeout);
+    /// native only.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_window_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.budget.per_window_timeout = Some(timeout);
+        self
     }
 
     /// The registered RSP-QL source text.
@@ -376,7 +404,13 @@ impl ContinuousMultiQuery {
         on_result: &mut impl FnMut(WindowResult),
     ) -> Result<(), String> {
         let graph = self.materialize_named();
-        let result = sparq_engine::query_prepared(&graph, &self.prepared)?;
+        // [SONNET-4.6] sq-xqu: one effective budget per tick evaluation (the
+        // per-window timeout's deadline is measured from NOW).
+        let result = sparq_engine::query_prepared_with_budget(
+            &graph,
+            &self.prepared,
+            &self.budget.window_budget(),
+        )?;
         // [SONNET-4.6] sq-2n1q3.3: apply the R2S operator.
         // RSTREAM: emit the full join result.
         // ISTREAM/DSTREAM: diff the full result against the previous tick's

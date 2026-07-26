@@ -7615,6 +7615,10 @@ pub(crate) fn goo_pick(
 /// other terminal is bound (so the column is effectively keyed).
 fn pattern_var_ndv(graph: &Graph, id_pat: &IdPattern, pos: usize, est: usize) -> f64 {
     let est = (est as f64).max(1.0);
+    #[cfg(feature = "persistent-stats")]
+    if let Some(ndv) = id_pat[1].and_then(|pid| crate::stats::predicate_ndv(pid, pos)) {
+        return (ndv as f64).clamp(1.0, est);
+    }
     let stat = id_pat[1].and_then(|pid| graph.store.pred_stat(pid));
     match (pos, stat) {
         // subject var, predicate bound, object unbound -> distinct subjects of P
@@ -9920,8 +9924,9 @@ fn minmax_values(vals: Vec<Value>, keep: Ordering) -> Value {
 /// non-temporal member aborts the fast path entirely.
 ///
 /// Tie semantics replicate `minmax_values` exactly: the comparator is
-/// `compare_values(..).unwrap_or(Equal)` — same-family temporals by timeline, the
-/// indeterminate/cross-family pairs by lexical form — with MIN keeping the FIRST of
+/// `compare_values(..).unwrap_or(Equal)` — which for two temporals IS
+/// `Temporal::cmp_t_total` (kind-first, then the timeline order extended over the
+/// indeterminate mixed-timezone window) — with MIN keeping the FIRST of
 /// equal members (`Iterator::min_by`) and MAX the LAST (`Iterator::max_by`); DISTINCT
 /// drops later duplicate terms first (same term ⇔ same id for graph terms), which can
 /// change which of two equal-VALUED but distinct terms MAX returns, exactly as the
@@ -9937,12 +9942,6 @@ fn minmax_temporal(
 ) -> Option<Value> {
     let Expression::Variable(v) = expr else { return None };
     let col = b.col(v)?;
-    let lex = |id: Id| -> &str {
-        match graph.dict.term_parts(id) {
-            dict::TermParts::Lit { value, .. } => value,
-            _ => "", // unreachable: cached temporal ids are literal dictionary ids
-        }
-    };
     let mut seen: FxHashSet<Id> = FxHashSet::default();
     let mut best: Option<(Temporal, Id)> = None;
     for &ri in members {
@@ -9960,19 +9959,13 @@ fn minmax_temporal(
         best = Some(match best {
             None => (t, id),
             Some((bt, bid)) => {
-                // [FABLE-5] sq-wjl8i: KIND-FIRST, mirroring `compare_values` — a
-                // cross-kind (dateTime vs date) pair ranks by `LiteralKind`
-                // (DateTime < Date), never lexically; the timeline order (with the
-                // lexical fallback for the indeterminate window) applies within a kind.
-                let ord = if t.kind != bt.kind {
-                    if t.kind == sparq_core::temporal::TemporalKind::DateTime {
-                        Ordering::Less
-                    } else {
-                        Ordering::Greater
-                    }
-                } else {
-                    Temporal::cmp_t(t, bt).unwrap_or_else(|| lex(id).cmp(lex(bid)))
-                };
+                // [FABLE-5] sq-wjl8i KIND-FIRST + [SONNET-4.6] sq-2k5py, both now in the
+                // shared `Temporal::cmp_t_total`, so this fold cannot drift from
+                // `compare_values`: a cross-kind (dateTime vs date) pair ranks by
+                // `LiteralKind` (DateTime < Date), never lexically, and within a kind the
+                // timeline order is TOTAL (instant, then timezone presence) — the former
+                // lexical fallback for the indeterminate window was intransitive.
+                let ord = Temporal::cmp_t_total(t, bt);
                 let replace = if is_min { ord == Ordering::Less } else { ord != Ordering::Less };
                 if replace {
                     (t, id)
@@ -10136,31 +10129,23 @@ fn sort_cell_val(v: Value) -> SortCell {
 }
 
 /// Compares two ORDER BY key cells under the lenient total order, reproducing
-/// `compare_values` exactly: same-family temporals by timeline; the indeterminate /
-/// cross-family temporal pairs fall back to the lexical-form comparison (both cells are
-/// literals — class 3 — and non-numeric, so `compare_values` would reach its
-/// `value_str` fallback); a temporal against any other key materialises the term
-/// lazily (rare: only mixed-type columns) and defers to `compare_values` itself.
+/// `compare_values` exactly: two temporals by `Temporal::cmp_t_total` (kind-first, then
+/// the timeline order extended over the indeterminate mixed-timezone window — the same
+/// definition `compare_values` reaches through `CompareTerm::strict_cmp`); a temporal
+/// against any other key materialises the term lazily (rare: only mixed-type columns)
+/// and defers to `compare_values` itself.
 #[inline]
 fn cmp_sort_cells(graph: &Graph, local: &LocalVocab, a: &SortCell, c: &SortCell) -> Ordering {
     match (a, c) {
-        (SortCell::Temp { t: ta, id: ia }, SortCell::Temp { t: tb, id: ib }) => {
-            // [FABLE-5] sq-wjl8i: KIND-FIRST, mirroring `compare_values` — a dateTime
-            // never value-compares against a date (`LiteralKind::DateTime < Date`); the
-            // timeline comparison (then the lexical fallback for the indeterminate
-            // mixed-timezone window) applies only within one temporal kind. Ill-formed
+        (SortCell::Temp { t: ta, .. }, SortCell::Temp { t: tb, .. }) => {
+            // [FABLE-5] sq-wjl8i KIND-FIRST + [SONNET-4.6] sq-2k5py: both now live in the
+            // shared `Temporal::cmp_t_total` — a dateTime never value-compares against a
+            // date (`LiteralKind::DateTime < Date`), and within one kind the timeline order
+            // is TOTAL (instant, then timezone presence). The former lexical fallback for
+            // the indeterminate window is gone: it mixed timeline-decided and
+            // lexical-decided pairs inside one kind, which is intransitive. Ill-formed
             // temporals never enter the cache, so both cells here are well-formed.
-            if ta.kind != tb.kind {
-                return if ta.kind == sparq_core::temporal::TemporalKind::DateTime {
-                    Ordering::Less
-                } else {
-                    Ordering::Greater
-                };
-            }
-            match Temporal::cmp_t(*ta, *tb) {
-                Some(o) => o,
-                None => cmp_sort_cells_lex(graph, *ia, *ib),
-            }
+            Temporal::cmp_t_total(*ta, *tb)
         }
         // Two numeric graph terms: f64 fast compare, with the EXACT tie recheck below.
         (SortCell::Num { f: fa, id: ia }, SortCell::Num { f: fb, id: ib }) => {
@@ -10352,19 +10337,9 @@ fn cmp_exact_lex_f64(lex: &str, f: f64) -> Ordering {
     }
 }
 
-/// The lexical-form fallback for temporal sort cells `compare_values` cannot decide by
-/// value (cross-family or the mixed-timezone window) — out of line: the hot comparator
-/// stays branch + `partial_cmp`.
-#[cold]
-fn cmp_sort_cells_lex(graph: &Graph, a: Id, b: Id) -> Ordering {
-    let lex = |id: Id| -> &str {
-        match graph.dict.term_parts(id) {
-            dict::TermParts::Lit { value, .. } => value,
-            _ => "", // unreachable: cached temporal ids are literal dictionary ids
-        }
-    };
-    lex(a).cmp(lex(b))
-}
+// [SONNET-4.6] sq-2k5py: the lexical-form fallback for temporal sort cells (`cmp_sort_cells_lex`)
+// is GONE — `Temporal::cmp_t_total` decides every temporal pair by value now, and a lexical
+// fallback inside one temporal kind is exactly the intransitivity this bead removed.
 
 /// Materialises a temporal sort cell's term for the (rare) mixed-type-column
 /// comparison against a non-temporal key.
@@ -10377,7 +10352,7 @@ fn sort_cell_term(graph: &Graph, local: &LocalVocab, id: Id) -> Value {
 /// id, borrowed straight from the record store (no allocation). Only called on ids `cell_of`
 /// already proved are plain `xsd:string` literals (`Dict::plain_string_value` returned `Some`),
 /// so the non-plain-string arm is unreachable; it returns the empty slice as a safe
-/// placeholder rather than panic (mirroring `cmp_sort_cells_lex`).
+/// placeholder rather than panic.
 #[cfg(feature = "topk-lazy-strkey")]
 #[inline]
 fn str_id_value(graph: &Graph, id: Id) -> &str {
@@ -12587,6 +12562,19 @@ fn value_compare_strict(x: &Value, y: &Value) -> Option<Ordering> {
     }
 }
 
+/// The TOTAL-order verdict for a same-family temporal pair `value_compare_strict` left
+/// indeterminate (the mixed-timezone ±14h window) — `None` for every other pair, which
+/// keeps the caller's own fallback. Reached ONLY from the `CompareTerm` total order, never
+/// from a relational operator. [SONNET-4.6] sq-2k5py
+#[cold]
+fn temporal_total_cmp(x: &Value, y: &Value) -> Option<Ordering> {
+    match (lit_kind(x), lit_kind(y)) {
+        (LitKind::DateTime(Some(a)), LitKind::DateTime(Some(b)))
+        | (LitKind::Date(Some(a)), LitKind::Date(Some(b))) => Some(Timeline::cmp_tl_total(a, b)),
+        _ => None,
+    }
+}
+
 fn as_bool_val(v: &Value) -> Option<bool> {
     match v {
         Value::Bool(b) => Some(*b),
@@ -12767,7 +12755,13 @@ impl CompareTerm for Value {
     #[inline]
     fn strict_cmp(&self, other: &Self) -> Option<Ordering> {
         // dateTime/date by timeline, same-tag / same-other-XSD lexically — when comparable.
-        value_compare_strict(self, other)
+        // [SONNET-4.6] sq-2k5py: `value_compare_strict` is the RELATIONAL comparison, so it
+        // leaves the mixed-timezone window indeterminate; for the TOTAL order that `None`
+        // would drop the pair to `compare_terms`' lexical fallback INSIDE the DateTime kind,
+        // which is intransitive (`Timeline::cmp_tl_total`'s witness). Only on that `None` —
+        // so the decided path costs nothing — re-decide a same-family temporal pair under
+        // the total-order extension. Relational `<`/`>`/`=` keep the type error.
+        value_compare_strict(self, other).or_else(|| temporal_total_cmp(self, other))
     }
     #[inline]
     fn triple_parts(&self) -> Option<[Self; 3]> {
