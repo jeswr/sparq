@@ -58,7 +58,7 @@ import {
   urlLabel,
 } from "@/lib/rdf-format";
 import { hasNativeLoader, pickRdfFile } from "@/lib/tauri-ipc";
-import { hasDraggedFiles, pickTextFiles } from "@/lib/file-ingest";
+import { hasDraggedFiles, matchesAccept, pickTextFiles } from "@/lib/file-ingest";
 import type { IngestedFile, RejectedFile, IngestResult } from "@/lib/file-ingest";
 // [SONNET-4.6] sq-1y04h — decompression shim; codec chunks loaded lazily on demand.
 import { fetchRdfDocument, maybeDecompressFile } from "@/lib/file-decompress";
@@ -101,7 +101,8 @@ type FileItemStatus =
 // Native-only HDT is NOT included — there is no JS/WASM decoder bead for it.
 
 const WEB_RDF_ACCEPT = [
-  ".ttl", ".nt", ".nq", ".trig", ".jsonld", ".json",
+  ".ttl", ".turtle", ".nt", ".ntriples", ".nq", ".nquads", ".trig",
+  ".jsonld", ".json-ld", ".json",
   ".gz", ".gzip", ".tgz", ".zip", ".zst", ".zstd", ".bz2", ".bzip2",
 ];
 
@@ -593,17 +594,27 @@ function DrawerTab({
  * call paths in the web-upload pane; the `file-ingest.ts` text-only paths are unchanged and
  * continue to serve SHACL shapes / N3 rules (no compression needed there).
  */
+const decompressReader = async (file: File): Promise<string> =>
+  (await maybeDecompressFile(file)).text;
+
 async function readFilesWithDecompress(files: File[]): Promise<IngestResult> {
   const accepted: IngestedFile[] = [];
   const rejected: RejectedFile[] = [];
   for (const file of files) {
+    if (!matchesAccept(file.name, WEB_RDF_ACCEPT)) {
+      rejected.push({
+        name: file.name,
+        reason: `unsupported file type — expected ${WEB_RDF_ACCEPT.join(" / ")}`,
+      });
+      continue;
+    }
     try {
-      const decoded = await maybeDecompressFile(file);
-      accepted.push({ name: file.name, text: decoded.text, bytes: file.size });
+      const text = await decompressReader(file);
+      accepted.push({ name: file.name, text, bytes: file.size });
     } catch (err) {
       rejected.push({
         name: file.name,
-        reason: err instanceof Error ? err.message : String(err),
+        reason: `could not be read: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
   }
@@ -713,11 +724,9 @@ function WebFilePane({
       accept: WEB_RDF_ACCEPT,
       multiple: true,
       description: "RDF datasets",
-      readFile: async (file) => {
-        const decoded = await maybeDecompressFile(file);
-        return decoded.text;
-      },
+      readFile: decompressReader,
     });
+    if (result.accepted.length === 0 && result.rejected.length === 0) return;
     onIngest(result);
   }, [onIngest]);
 
