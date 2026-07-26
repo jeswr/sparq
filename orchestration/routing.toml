@@ -157,10 +157,18 @@ role = "perf"
 model_chain = ["sol", "opus5"]
 agent = "sparq-perf-engineer"
 
+# [OPUS-5] research was ["opus5", "fable", "opus"] until 2026-07-26. Deprecating the two tail
+# rungs left a ONE-RUNG chain with no `escalate`, i.e. no exit at all: on an opus5 capacity outage
+# the item could only defer, and defer again, forever — a silent permanent stall with no human
+# ever notified. Deprecating a fallback therefore has to come with an exit, so research now
+# escalates like the other single-rung (review/soundness/security) chains: chain exhaustion parks
+# the issue to needs:user. Deliberately NOT solved by adding `sol`: research authorship stays on
+# the anthropic side, and a cross-provider rung would have hidden the stall rather than surfaced it.
 [[route]]
 role = "research"
 model_chain = ["opus5"]
 agent = "sparq-researcher"
+escalate = true
 
 # DOCS WRITING -> SOL (maintainer directive 2026-07-26: "deprecate sonnet and haiku for docs
 # writing in favor of gpt 5.6 sol"). haiku and sonnet LED this chain until 2026-07-26 and are now

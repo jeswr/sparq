@@ -175,15 +175,20 @@ def _self_test():
     sec = compute_ready([iss(2, R + ["priority:P0", "role:impl", "area:sparq-zk"])])
     p_sec = plan_dispatch(sec, doc)
     row = p_sec[0]
-    chk("zk -> opus5-led", row["model_chain"], ["opus5", "opus"])
+    chk("zk -> opus5 only", row["model_chain"], ["opus5"])
     chk("zk -> reviewer/escalate", (row["agent"], row["escalate"]), ("sparq-reviewer", True))
     chk("zk role stays declared", row["role"], "impl")
 
-    # --- Fixture: a docs issue → its route (haiku-led) -------------------------------------------
+    # --- Fixture: a docs issue → its route (SOL-led since 2026-07-26) ----------------------------
+    # [OPUS-5] maintainer directive: docs WRITING moved off the cheap anthropic tiers (haiku/
+    # sonnet) onto gpt-5.6 sol. The second assertion is the one that goes red if either tier is
+    # put back into the docs chain.
     docs = compute_ready([iss(3, R + ["priority:P2", "role:docs", "area:sparq-docs"])])
     p_docs = plan_dispatch(docs, doc)
     row = p_docs[0]
-    chk("docs -> haiku", row["model_chain"][0], "haiku")
+    chk("docs -> sol", row["model_chain"][0], "sol")
+    chk("docs row has no cheap anthropic tier",
+        sorted(set(row["model_chain"]) & {"sonnet", "haiku"}), [])
     chk("docs -> sparq-docs", row["agent"], "sparq-docs")
 
     # --- Fixture: a ci/infra issue → frontier-only chain (standing rule 2026-07-17) --------------
@@ -193,7 +198,7 @@ def _self_test():
     ci = compute_ready([iss(8, R + ["priority:P1", "role:ci", "area:ci"])])
     row = plan_dispatch(ci, doc)[0]
     chk("ci -> frontier-only row", (row["role"], row["model_chain"], row["agent"], row["escalate"]),
-        ("ci", ["sol", "opus5", "fable"], "sparq-ci-infra", False))
+        ("ci", ["sol", "opus5"], "sparq-ci-infra", False))
     chk("ci row has no sub-frontier tier", sorted(set(row["model_chain"]) & {"sonnet", "haiku"}), [])
 
     # --- Fixture: package-conflict pair → only the higher-priority one is planned ----------------
@@ -225,6 +230,15 @@ def _self_test():
         multi[0]["package"], _ready.GLOBAL)
     zero = plan_dispatch([iss(92, R + ["priority:P2", "role:docs"])], doc)
     chk("#3691 zero-area maps to GLOBAL", zero[0]["package"], _ready.GLOBAL)
+
+    # --- [OPUS-5] DEPRECATION SWEEP over every row this self-test planned ------------------------
+    # The per-fixture assertions above pin the chains we happened to sample. This sweeps ALL of
+    # them, so a deprecated alias reintroduced into a route the fixtures do not cover still fails.
+    _dep = {"fable", "opus"}
+    _all_rows = [r for plan in (p_impl, p_sec, p_docs, plan_dispatch(ci, doc), p_pair)
+                 for r in plan]
+    chk("no planned row names a deprecated alias",
+        sorted({m for r in _all_rows for m in r["model_chain"]} & _dep), [])
 
     print("dispatch-plan self-test", "PASSED" if ok else "FAILED")
     return 0 if ok else 1
