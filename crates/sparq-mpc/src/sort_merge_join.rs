@@ -113,9 +113,12 @@
 //!
 //! [`SortMergeCost`] reports what a real deployment would pay, derived from `n`
 //! (never a hard-coded number, AGENTS.md): the sort's `O(n log² n)` compare-exchanges
-//! (each a secure comparison + a conditional swap), the `O(n)` segmented-scan
-//! multiplications, the oblivious shuffle's switch count/depth, and the padded
-//! reveal opens. The in-process simulation's wall-clock is NOT an MPC latency.
+//! (each a secure comparison + a conditional swap), the segmented scan's secure
+//! multiplications — counted EXACTLY from the dealer's multiplication counter, so
+//! each of the `n − 1` adjacency equalities contributes its full bit-decomposition
+//! circuit, not one multiplication per call — the oblivious shuffle's switch
+//! count/depth, and the padded reveal opens. The in-process simulation's wall-clock
+//! is NOT an MPC latency.
 
 use crate::compare::{
     check_party_count, secure_equal_to_bit_shared, secure_greater_than_shared,
@@ -151,8 +154,18 @@ pub struct SortMergeCost {
     pub sort_compare_exchanges: usize,
     /// Sort network depth in comparator layers (≈ communication rounds).
     pub sort_depth_rounds: usize,
-    /// Secure multiplications spent in the segmented merge scan (adjacency
-    /// equalities + the forward/backward OR passes + the per-row selector).
+    /// Secure multiplications (interactive [`ShamirDealer::degree_reduce`] rounds)
+    /// spent in the segmented merge scan: the adjacency equalities + the
+    /// forward/backward OR passes + the per-row selector. [OPUS-5] COUNTED from the
+    /// dealer's multiplication counter, not hand-tallied — each adjacency equality
+    /// contributes its FULL circuit (two Rabbit bit-decompositions with their
+    /// in-protocol range proofs, the per-bit equalities, and the balanced AND-tree
+    /// — orders of magnitude more than one multiplication per call, and the exact
+    /// count varies slightly per call with the public bits of the masked Rabbit
+    /// open). Masked-product opens inside the Rabbit machinery (the solved-bits
+    /// square protocol, the zero-tests) reconstruct a degree-`2t` product directly
+    /// instead of re-sharing it: they are opens, not secure multiplications, and
+    /// are not counted here.
     pub scan_mults: usize,
     /// Degree-`t` opens performed at the padded reveal (one selector per revealed
     /// slot, plus the payload id of each kept row).
@@ -314,7 +327,12 @@ fn sort_merge_semi_anti_faulted(
     //         adjacent, so a group is a maximal run of equal keys; we broadcast
     //         "the run contains an R row" to every member with a forward + backward
     //         OR pass gated by the adjacent-equal bit. ---
-    let mut scan_mults = 0usize;
+    // [OPUS-5] scan_mults is a DELTA of the dealer's secure-multiplication counter,
+    // not a hand-kept tally: each adjacency equality below is a full bit-decomposed
+    // circuit (two Rabbit decompositions + range proofs + per-bit equalities + the
+    // AND-tree), so tallying it as one multiplication per call — as this code once
+    // did — understates the modelled cost by orders of magnitude.
+    let scan_mults_before = dealer.mult_count();
     // Adjacent-key equalities eq[k] = [key_k == key_{k+1}] (secret), for k in 0..n-1.
     let mut eq: Vec<Vec<Share>> = Vec::with_capacity(n.saturating_sub(1));
     for k in 0..n.saturating_sub(1) {
@@ -325,7 +343,6 @@ fn sort_merge_semi_anti_faulted(
             e = dealer.share(Fp::zero());
         }
         eq.push(e);
-        scan_mults += 1; // equal_to_bit_from_bits multiplications, modelled per call
     }
     // is_r[k] = 1 - is_l[k] (local).
     let is_r: Vec<Vec<Share>> = rows
@@ -340,7 +357,6 @@ fn sort_merge_semi_anti_faulted(
         for k in (0..n - 1).rev() {
             let carried = secure_mul(&mut dealer, &eq[k], &b_r[k + 1])?;
             b_r[k] = secure_or(&mut dealer, &is_r[k], &carried)?;
-            scan_mults += 2;
         }
     }
     // Forward: f_r[k] = is_r[k] OR (eq[k-1] AND f_r[k-1]) — "R at or before k in run".
@@ -350,7 +366,6 @@ fn sort_merge_semi_anti_faulted(
         for k in 1..n {
             let carried = secure_mul(&mut dealer, &eq[k - 1], &f_r[k - 1])?;
             f_r[k] = secure_or(&mut dealer, &is_r[k], &carried)?;
-            scan_mults += 2;
         }
     }
 
@@ -360,7 +375,6 @@ fn sort_merge_semi_anti_faulted(
     for k in 0..n {
         // any_r[k] = b_r[k] OR f_r[k].
         let any_r_full = secure_or(&mut dealer, &b_r[k], &f_r[k])?;
-        scan_mults += 1;
         let any_r = if fault == ProdFault::ScanDirection {
             // Drop the backward pass: an L row positioned before its matching R in the
             // sorted run no longer sees that R.
@@ -383,8 +397,10 @@ fn sort_merge_semi_anti_faulted(
             &rows[k].is_l
         };
         selectors.push(secure_mul(&mut dealer, gate, &cond)?);
-        scan_mults += 1;
     }
+    // The scan (adjacency equalities + OR passes + selectors) ends here; the shuffle
+    // below reports its own cost, so snapshot the counter delta now.
+    let scan_mults = dealer.mult_count() - scan_mults_before;
 
     // --- (4) Oblivious reveal: pack (selector, pid) per position, oblivious-shuffle
     //         so the revealed order hides the sorted-key order, open the selector
@@ -1262,6 +1278,76 @@ mod tests {
         assert!(
             matches!(&err, MpcError::Protocol(m) if m.contains("2t+1")),
             "singleton column on a deficient backend must fail closed, got {err:?}"
+        );
+    }
+
+    // ---- cost model: scan_mults reports the REAL multiplication count -------------
+
+    /// [OPUS-5] Review round 4 (PR #3585). `scan_mults` claims to report the secure
+    /// multiplications the segmented scan spends, but the scan used to tally each
+    /// adjacency equality as ONE multiplication — while `secure_equal_to_bit_shared`
+    /// alone performs `RABBIT_VALUE_BITS` per-bit equalities + a balanced AND-tree,
+    /// on top of two Rabbit bit-decompositions with their range proofs: well over a
+    /// hundred multiplications per call. `scan_mults` is now a delta of the dealer's
+    /// `degree_reduce` counter, so it counts what actually ran.
+    ///
+    /// The exact per-equality count varies slightly per call (the Rabbit LTBits
+    /// chain spends one extra multiplication per zero bit of the random masked open
+    /// `c`), so the derived pin is a FLOOR from the circuit's data-independent
+    /// parts — which the old one-per-call tally cannot reach on any input.
+    #[test]
+    fn scan_mults_counts_the_full_adjacency_equality_circuit() {
+        use crate::compare::RABBIT_VALUE_BITS;
+        let backend = ShamirBackend::new_seeded(3, 4244).unwrap();
+
+        // Independently measure ONE equality through the same counter the operator
+        // reads: at least the equality fold alone (RABBIT_VALUE_BITS per-bit
+        // equalities + RABBIT_VALUE_BITS − 1 AND-tree multiplications).
+        let eq_floor = 2 * RABBIT_VALUE_BITS - 1;
+        let mut dealer = backend.dealer();
+        let a = dealer.share(Fp::new(5));
+        let b = dealer.share(Fp::new(9));
+        let before = dealer.mult_count();
+        secure_equal_to_bit_shared(&mut dealer, &backend, &a, &b).unwrap();
+        let one_eq = dealer.mult_count() - before;
+        assert!(
+            one_eq >= eq_floor,
+            "one secure_equal_to_bit_shared performed {one_eq} counted secure \
+             multiplications, below the equality-fold floor {eq_floor}"
+        );
+
+        // A small union: |L| = 2, |R| = 2 → n = 4, so n − 1 = 3 adjacency
+        // equalities. Scan structure: (n − 1) equality circuits, 2 multiplications
+        // per backward-pass step and per forward-pass step (n − 1 each: the eq·carry
+        // AND + the OR), and 2 per row for the selector (the b∨f OR + the is_l·cond
+        // AND).
+        let left = vec![(Fp::new(1), vec![lit("a")]), (Fp::new(2), vec![lit("b")])];
+        let right = [Fp::new(2), Fp::new(7)];
+        let (_, cost) = sort_merge_semi_anti(
+            &backend,
+            &left,
+            &right,
+            vec![var("x")],
+            SortMergeJoinKind::Semi,
+        )
+        .unwrap();
+        let n = cost.union_size;
+        assert_eq!(n, 4);
+        let derived_floor = (n - 1) * eq_floor + 4 * (n - 1) + 2 * n;
+        assert!(
+            cost.scan_mults >= derived_floor,
+            "scan_mults = {} but the scan performs at least {derived_floor} secure \
+             multiplications for a union of {n} — an equality is being undercounted",
+            cost.scan_mults
+        );
+        // The exact value the old accounting reported for this input — each equality
+        // counted as one multiplication — must be impossible now.
+        let one_per_equality_tally = (n - 1) + 4 * (n - 1) + 2 * n;
+        assert!(
+            cost.scan_mults > one_per_equality_tally,
+            "scan_mults = {} matches the one-multiplication-per-equality undercount \
+             ({one_per_equality_tally})",
+            cost.scan_mults
         );
     }
 }

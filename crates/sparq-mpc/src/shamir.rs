@@ -296,6 +296,7 @@ impl ShamirBackend {
             n: self.n,
             t: self.t,
             rng,
+            mults: 0,
         }
     }
 
@@ -326,6 +327,9 @@ pub struct ShamirDealer {
     n: usize,
     t: usize,
     rng: Box<dyn MpcRng>,
+    /// Monotone count of successful [`Self::degree_reduce`] rounds — see
+    /// [`Self::mult_count`].
+    mults: usize,
 }
 
 impl std::fmt::Debug for ShamirDealer {
@@ -347,6 +351,21 @@ impl ShamirDealer {
     /// The privacy threshold `t` (mirrors the backend's).
     pub fn threshold(&self) -> usize {
         self.t
+    }
+
+    /// Number of secure multiplications this dealer has performed so far — a
+    /// monotone count of successful [`Self::degree_reduce`] rounds, the BGW
+    /// re-sharing round every chained secret-shared product pays. [OPUS-5]
+    ///
+    /// Cost reporters take DELTAS of this counter (e.g. `SortMergeCost::scan_mults`
+    /// in `sort_merge_join`) so a modelled cost counts what the protocol actually
+    /// executed instead of a hand-kept tally that drifts when a primitive's
+    /// internal circuit changes. Masked-product OPENS — paths that reconstruct a
+    /// degree-`2t` product directly (the square-protocol bit dealing, the
+    /// zero-tests) rather than re-sharing it — are opens, not degree reductions,
+    /// and are deliberately not counted here.
+    pub(crate) fn mult_count(&self) -> usize {
+        self.mults
     }
 
     /// Draw one uniform field element from the masking RNG (advances state).
@@ -560,6 +579,7 @@ impl ShamirDealer {
                 out.y = out.y.add(lambda.mul(sub_share.y));
             }
         }
+        self.mults += 1; // one completed secure multiplication (see mult_count)
         Ok(reduced)
     }
 
@@ -1774,6 +1794,36 @@ mod tests {
             let got = b.reconstruct(&abc_t).unwrap();
             assert_eq!(got, expected, "a·b·c chain failed for ({av}, {bv}, {cv})");
         }
+    }
+
+    /// [OPUS-5] The dealer's secure-multiplication counter: 0 on a fresh dealer,
+    /// +1 per SUCCESSFUL degree_reduce, unchanged by a failed (fail-closed) one
+    /// and by non-multiplication work (share / draw). Cost reporters take deltas
+    /// of it, so its exactness is load-bearing for the modelled cost honesty.
+    #[test]
+    fn mult_count_tracks_successful_degree_reductions_exactly() {
+        let b = ShamirBackend::new_seeded(5, 0xC0_0A7).unwrap();
+        let mut dealer = b.dealer();
+        assert_eq!(dealer.mult_count(), 0, "fresh dealer must start at zero");
+
+        // Non-multiplication work does not count.
+        let sa = dealer.share(Fp::new(3));
+        let sb = dealer.share(Fp::new(4));
+        let _ = dealer.draw_fp();
+        assert_eq!(dealer.mult_count(), 0, "share/draw are not multiplications");
+
+        // Each successful reduction counts exactly once.
+        let prod_2t = mul_shares_raw(&sa, &sb).unwrap();
+        let reduced = dealer.degree_reduce(&prod_2t).unwrap();
+        assert_eq!(dealer.mult_count(), 1);
+        let prod2_2t = mul_shares_raw(&reduced, &sa).unwrap();
+        dealer.degree_reduce(&prod2_2t).unwrap();
+        assert_eq!(dealer.mult_count(), 2);
+
+        // A failed (fail-closed) reduction performs no multiplication.
+        let too_few = &prod_2t[..prod_2t.len() - 1];
+        dealer.degree_reduce(too_few).unwrap_err();
+        assert_eq!(dealer.mult_count(), 2, "a refused reduction must not count");
     }
 
     #[test]
