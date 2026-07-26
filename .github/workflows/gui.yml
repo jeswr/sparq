@@ -546,14 +546,19 @@ jobs:
       - name: Test (ODRL policy tool, native lane)
         run: cargo test --features odrl
 
-      # [SONNET-4.6] sq-3w29b — compile and test the exact feature set shipped by the desktop
-      # release. `custom-protocol` is included explicitly here because `cargo tauri build`
-      # injects it alongside the user-supplied native capability features.
+      # [SONNET-4.6] sq-3w29b — compile the native capability features shipped by the desktop
+      # release. `custom-protocol` is intentionally omitted here: unlike the bundle job, this
+      # job does not export gui/app/out for Tauri to embed at compile time. Keep this extra,
+      # relatively heavy feature permutation to the Linux rows used by the release ledger.
       - name: Clippy (desktop release features, -D warnings)
-        run: cargo clippy --all-targets --features hdt,federation,odrl,custom-protocol -- -D warnings
+        if: runner.os == 'Linux'
+        run: cargo clippy --all-targets --features hdt,federation,odrl -- -D warnings
 
-      - name: Test (desktop release features, native lane)
-        run: cargo test --features hdt,federation,odrl,custom-protocol
+      # HDT's feature-on path is compile-covered above; the tests executed in this combined
+      # state exercise the federation and ODRL paths.
+      - name: Test (federation + ODRL under desktop features, native lane)
+        if: runner.os == 'Linux'
+        run: cargo test --features hdt,federation,odrl
 
   # [SONNET-4.6] sq-ymr2e.6 — SHRUNK tauri-driver smoke: max-3-assertion real-IPC test.
   #
