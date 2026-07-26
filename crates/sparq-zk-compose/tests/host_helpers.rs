@@ -609,6 +609,7 @@ fn proof_manifest_json_round_trips_and_defaults_type() {
     // A minimal manifest with a HolderPop binding (exercises the binding serde +
     // the default-cryptosuite field) and a committed-index revocation reference.
     let manifest = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".to_string(),
         query: "SELECT * WHERE { ?s ?p ?o }".to_string(),
         issuers: vec!["did:key:zABC".to_string()],
@@ -622,9 +623,10 @@ fn proof_manifest_json_round_trips_and_defaults_type() {
             challenge: fh("0x2a"),
         },
         revocation: Some(RevocationStatus {
-            status_list: "http://ex/list".to_string(),
+            ref_commitment: None,
+            status_list: Some("http://ex/list".to_string()),
             index: Some(3),
-            version: 7,
+            version: Some(7),
             index_commitment: None,
         }),
         status_snapshots: vec![StatusListSnapshot {
@@ -687,8 +689,9 @@ fn attested_status_ref_committed_index_serde_omits_clear_index() {
     // sq-ayv committed-index path: index = None, index_commitment = Some. The
     // `skip_serializing_if` keeps the clear `index` out of the JSON entirely.
     let r = AttestedStatusRef {
+        ref_commitment: None,
         index: None,
-        version: 4,
+        version: Some(4),
         index_commitment: Some(fh("0xc0mm")),
     };
     let json = serde_json::to_string(&r).unwrap();
@@ -703,8 +706,9 @@ fn attested_status_ref_committed_index_serde_omits_clear_index() {
     // clear-index path: index = Some, index_commitment omitted.
     let clear = AttestedStatusRef {
         index: Some(2),
-        version: 1,
+        version: Some(1),
         index_commitment: None,
+        ref_commitment: None,
     };
     let cjson = serde_json::to_string(&clear).unwrap();
     assert!(cjson.contains("\"index\":2"));
@@ -712,6 +716,50 @@ fn attested_status_ref_committed_index_serde_omits_clear_index() {
     assert_eq!(
         serde_json::from_str::<AttestedStatusRef>(&cjson).unwrap(),
         clear
+    );
+}
+
+/// [OPUS-5] sq-kndw: the FULLY-HIDDEN reference serializes to the two commitments
+/// ONLY — no list IRI, no clear index, no version — on BOTH the attested and the
+/// disclosed side, and round-trips. This is the schema half of the mode's
+/// disclosure floor.
+#[test]
+fn fully_hidden_status_ref_serde_omits_iri_index_and_version() {
+    let rc = sparq_zk::field::Fr::from(0x1234u64);
+    let ic = sparq_zk::field::Fr::from(0x5678u64);
+
+    let att = AttestedStatusRef::fully_hidden(&rc, &ic);
+    let ajson = serde_json::to_string(&att).unwrap();
+    for absent in ["\"index\"", "\"version\"", "\"status_list\""] {
+        assert!(!ajson.contains(absent), "{absent} must be absent: {ajson}");
+    }
+    assert!(ajson.contains("ref_commitment") && ajson.contains("index_commitment"));
+    assert_eq!(serde_json::from_str::<AttestedStatusRef>(&ajson).unwrap(), att);
+
+    let rev = RevocationStatus::fully_hidden(&rc, &ic);
+    let rjson = serde_json::to_string(&rev).unwrap();
+    for absent in ["\"index\"", "\"version\"", "\"status_list\""] {
+        assert!(!absent.is_empty() && !rjson.contains(absent), "{absent} must be absent: {rjson}");
+    }
+    assert_eq!(serde_json::from_str::<RevocationStatus>(&rjson).unwrap(), rev);
+
+    // The three constructors are mutually distinguishable by mode, so the
+    // verifier's chokepoint can never confuse them.
+    let clear = RevocationStatus::clear("http://ex/s", 3, 1);
+    let committed = RevocationStatus::committed("http://ex/s", &ic, 1);
+    assert!(clear.ref_commitment.is_none() && clear.index.is_some() && clear.version.is_some());
+    assert!(
+        committed.ref_commitment.is_none()
+            && committed.index.is_none()
+            && committed.index_commitment.is_some()
+            && committed.status_list.is_some()
+    );
+    assert!(
+        rev.status_list.is_none()
+            && rev.index.is_none()
+            && rev.version.is_none()
+            && rev.ref_commitment.is_some()
+            && rev.index_commitment.is_some()
     );
 }
 

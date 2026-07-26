@@ -890,11 +890,10 @@ fn expand_value(active_context: &ActiveContext, active_property: &str, value: &J
     // @id / @vocab coercion of a string value → a node reference (§5.3.2 steps 1–2): "return
     // a new map containing a single entry where the key is @id and the value is the result of
     // IRI expanding value". When IRI Expansion returns `None` (a keyword-shaped token, or a
-    // `@vocab` term bound to null) the spec-literal result is therefore `{"@id": null}` — the
-    // entry is KEPT with a JSON null, never emitted as an empty-string `@id` and never as an
-    // empty `{}`. This matches the suite's `@id`-keyword precedent (expand/0122-out retains
-    // `"@id": null`, its manifest noting the result "will not be valid JSON-LD") and the
-    // reference processors.
+    // `@vocab` term bound to null; see `context::iri`) the spec-literal result is therefore
+    // `{"@id": null}`. The entry is KEPT with a JSON null, never emitted as an empty-string
+    // `@id` or an empty `{}`. This matches the suite's `@id`-keyword precedent
+    // (W3C expand/0122-out retains `"@id": null`).
     if let Json::Str(s) = value {
         if type_mapping == Some("@id") {
             let id = active_context
@@ -1492,24 +1491,13 @@ mod tests {
             expand_value(&ac, "id_term", &Json::Str("http://ex/target".into())),
             Json::Obj(vec![(
                 "@id".to_string(),
-                Json::Str("http://ex/target".into())
+                Json::Str("http://ex/target".into()),
             )]),
         );
-        // A keyword-shaped token IRI-expands to null under `@id` coercion (document-relative,
-        // no vocab). §5.3.2 step 1 is literal: the result is `{"@id": null}` — the `@id`
-        // entry is KEPT with a JSON null (the W3C expand/0122 precedent), never an
-        // empty-string `@id` (the original `unwrap_or_default()` bug) and never an empty
-        // `{}` (the follow-up Copilot review).
-        let expanded = expand_value(&ac, "id_term", &Json::Str("@notakeyword".into()));
         assert_eq!(
-            expanded,
+            expand_value(&ac, "id_term", &Json::Str("@notakeyword".into())),
             Json::Obj(vec![("@id".to_string(), json_null())]),
-            "a null IRI expansion must yield the spec-literal {{\"@id\": null}}",
-        );
-        assert!(
-            !matches!(&expanded, Json::Obj(m) if m.iter().any(|(k, v)| k == "@id"
-                && matches!(v, Json::Str(s) if s.is_empty()))),
-            "must never produce an empty-string @id",
+            "a null IRI expansion must remain an explicit null @id",
         );
     }
 
@@ -1521,11 +1509,9 @@ mod tests {
             expand_value(&ac, "vocab_term", &Json::Str("thing".into())),
             Json::Obj(vec![(
                 "@id".to_string(),
-                Json::Str("http://ex/v#thing".into())
+                Json::Str("http://ex/v#thing".into()),
             )]),
         );
-        // A keyword-shaped token still expands to null under `@vocab` coercion → the
-        // spec-literal `{"@id": null}` (§5.3.2 step 2).
         assert_eq!(
             expand_value(&ac, "vocab_term", &Json::Str("@notakeyword".into())),
             Json::Obj(vec![("@id".to_string(), json_null())]),

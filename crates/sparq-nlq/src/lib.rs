@@ -242,6 +242,22 @@ pub struct NlqConfig {
     /// Cap on linked entities (and, separately, relations) rendered into the prompt, so
     /// the linking section stays bounded. Only read when linking is on.
     pub max_links: usize,
+    /// **Exact literal-value linking** ([`link::EntityLinker::with_values`], `sq-na0q`):
+    /// resolve a question span that is verbatim the lexical form of a literal this store
+    /// holds to that literal — **datatype and language tag intact** (`"1994"^^xsd:gYear`,
+    /// `"France"@en`) — and surface it, with the predicates it objects, in the prompt.
+    /// The schema card names classes and predicates but never the *values*, so without
+    /// this a `FILTER`/value-bound query can only guess a lexical form, and a guessed form
+    /// matches no triple. The same tier also binds any IRI written out in the question
+    /// directly against the dictionary ([`sparq_core::Graph::id_of`]).
+    ///
+    /// OFF by default (like [`link_entities`](Self::link_entities)) because it adds a
+    /// prompt block — re-record [`ReplayLlm`] fixtures before flipping it. It is an
+    /// *extension of* the linking section, so it is only read when
+    /// [`link_entities`](Self::link_entities) is also `true`; enabling it costs one
+    /// object-sorted scan at construction and a bounded index of short literals.
+    /// [SONNET-4.6]
+    pub link_values: bool,
     /// N2 **dictionary-grounded constraint** ([`constrain`], `sq-9yjp`). When `true`,
     /// a query that parses is additionally checked against the **live dictionary**
     /// *before* execution: every predicate / `rdf:type` class IRI must be a term the
@@ -316,6 +332,9 @@ impl Default for NlqConfig {
             link_entities: false,
             link_expand_k: 3,
             max_links: 8,
+            // Value linking off by default for the same reason as entity linking: it adds
+            // a prompt block, so a recorded fixture must be re-recorded. [SONNET-4.6] sq-na0q
+            link_values: false,
             check_dictionary: false,
             // Qualification off by default: additive + fixture-compatible, opt in when you
             // want hedged/abstaining answers over a provenance-bearing graph. [OPUS-4.8]
@@ -477,9 +496,16 @@ impl<'g> Nlq<'g> {
             &Introspection::build(graph).to_text_summary(config.summary_budget_chars),
         )
         .into_owned();
-        let linker = config
-            .link_entities
-            .then(|| link::EntityLinker::build(graph, config.link_expand_k, config.max_links));
+        let linker = config.link_entities.then(|| {
+            let linker = link::EntityLinker::build(graph, config.link_expand_k, config.max_links);
+            // The exact literal-value tier is a second, opt-in index over the same linker
+            // (sq-na0q) — built here so `ask` pays only string lookups.
+            if config.link_values {
+                linker.with_values()
+            } else {
+                linker
+            }
+        });
         Self {
             graph,
             schema_summary,
@@ -1059,6 +1085,57 @@ mod tests {
         assert!(
             p.contains("http://example.org/director"),
             "linked relation missing"
+        );
+    }
+
+    /// `linkable_graph` plus the literal values a schema card can never carry.
+    fn valued_graph() -> Graph {
+        let ttl = r#"
+            @prefix ex: <http://example.org/> .
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            ex:pulp a ex:Film ; rdfs:label "Pulp Fiction" ; ex:year "1994"^^xsd:gYear .
+            ex:inception a ex:Film ; rdfs:label "Inception" ; ex:year "2010"^^xsd:gYear .
+        "#;
+        Graph::load_str(ttl, "turtle").expect("graph parses")
+    }
+
+    #[test]
+    fn value_linking_off_by_default_even_with_entity_linking_on() {
+        let g = valued_graph();
+        let cfg = NlqConfig {
+            link_entities: true,
+            ..NlqConfig::default()
+        };
+        let nlq = Nlq::with_config(&g, Box::new(FnLlm(|_| Err("unused".into()))), cfg);
+        let p = nlq.prompt_for("Which films are from 1994?");
+        assert!(!p.contains("# Values from the question"));
+    }
+
+    #[test]
+    fn value_linking_on_injects_the_exact_literal_into_the_prompt() {
+        // sq-na0q: without this the model can only guess a lexical form for 1994, and a
+        // guessed form matches no triple — the reason value-bound questions fail even
+        // with a perfect schema card.
+        let g = valued_graph();
+        let cfg = NlqConfig {
+            link_entities: true,
+            link_values: true,
+            ..NlqConfig::default()
+        };
+        let nlq = Nlq::with_config(&g, Box::new(FnLlm(|_| Err("unused".into()))), cfg);
+        let p = nlq.prompt_for("Which films are from 1994?");
+        assert!(
+            p.contains("# Values from the question found in THIS dataset"),
+            "value block missing from the prompt"
+        );
+        assert!(
+            p.contains("\"1994\"^^<http://www.w3.org/2001/XMLSchema#gYear>"),
+            "the datatyped literal must reach the prompt verbatim, got:\n{p}"
+        );
+        assert!(
+            p.contains("<http://example.org/year>"),
+            "the predicate the value objects must reach the prompt"
         );
     }
 

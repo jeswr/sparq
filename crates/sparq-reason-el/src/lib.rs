@@ -31,6 +31,10 @@ mod classify;
 mod extract;
 #[cfg(feature = "hasse")]
 mod hasse;
+// [SONNET-4.6] sq-clsv6: incremental classification under TBox edits — only under
+// `incremental`, so the stateless build carries zero edit-tracking state or code.
+#[cfg(feature = "incremental")]
+mod incremental;
 mod normal;
 #[cfg(feature = "rbox")]
 mod rbox;
@@ -39,6 +43,11 @@ mod rbox;
 pub use abox::{realize, realize_graph, AboxReport, Realization};
 #[cfg(feature = "hasse")]
 pub use hasse::{classify_hasse_graph, DirectHierarchy};
+// [SONNET-4.6] sq-clsv6 (Phase E5): the stateful edit-tracking classifier. Read
+// `IncrementalClassifier`'s docs for what "incremental" does and does NOT cover here (additions
+// are folded in; a retraction takes an honest full-re-classification fallback).
+#[cfg(feature = "incremental")]
+pub use incremental::{EditDisposition, FullReason, IncrementalClassifier, IncrementalReport};
 // [SONNET-4.6] sq-q0o82 (E4 follow-up): the compute/apply attribution the parallel-apply
 // refinement decision is measured on — see `classify_graph_par_stats`.
 #[cfg(feature = "par")]
@@ -118,6 +127,11 @@ pub struct Report {
     pub emitted_subsumptions: usize,
     /// Named classes found unsatisfiable (`⊑ owl:Nothing`).
     pub unsatisfiable_classes: usize,
+    /// [SONNET-4.6] sq-26zuf: whether the saturation derived
+    /// `owl:Thing rdfs:subClassOf owl:Nothing` (`⊤ ⊑ ⊥`). This global clash is separate from
+    /// [`unsatisfiable_classes`](Self::unsatisfiable_classes), which counts only named classes
+    /// and therefore excludes `owl:Thing`.
+    pub thing_unsatisfiable: bool,
     /// [OPUS-4.8] sq-pbz04.2.5 (`abox`): ABox assertions the realiser DEFERRED as counted skips
     /// — a `DataPropertyAssertion` (literal object; the `cdomain` point-range rescue is a
     /// sequenced follow-up) or a `ClassAssertion` whose class expression is outside the EL
@@ -347,6 +361,7 @@ pub(crate) fn hierarchy_from(
         .filter_map(|&c| names.dict_of(c))
         .collect();
     report.unsatisfiable_classes = unsatisfiable.len();
+    report.thing_unsatisfiable = cls.thing_unsatisfiable;
     ClassHierarchy {
         subsumers,
         unsatisfiable,

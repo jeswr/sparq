@@ -380,6 +380,13 @@ fn check_error_display_covers_holder_pop_and_entailment_reasons() {
         },
         &["1", "0"],
     );
+    // sq-rsd3v.6: the message must name owl:sameAs and the bead, so an operator
+    // reading a rejection knows the refusal is deliberate (equality reasoning
+    // needs the separate canonicalisation member) rather than a shape bug.
+    assert_display_carries(
+        &CheckError::EqualityReasoningUnsupported { step: 3 },
+        &["3", "owl:sameAs", "sq-rsd3v.6"],
+    );
 }
 
 #[test]

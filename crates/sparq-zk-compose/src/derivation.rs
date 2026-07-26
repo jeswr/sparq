@@ -22,15 +22,26 @@
 //! ASSERTED (disclosed by a scan sub-proof). This makes the regime claim
 //! non-vacuous and auditable.
 //!
-//! What is DEFERRED (documented, not silently assumed): a ZERO-KNOWLEDGE proof
-//! that each antecedent triple is in the committed graph's closure — i.e. an
-//! in-circuit inference proof. v1 ties antecedents to DISCLOSED scan rows (the
-//! asserted base) by encoding-equality, so a derivation over disclosed triples is
-//! soundly re-checkable; antecedents that are themselves only claimed (not
-//! disclosed and not chained to disclosed triples) are NOT accepted. So the
-//! capability is sound for the disclosed-base fragment and fail-closed otherwise.
-//! The full in-circuit RDFS/OWL-RL closure proof is the inference-circuit
-//! deliverable (plan §S2.5), tracked separately.
+//! What THIS host re-check DEFERS (documented, not silently assumed): a
+//! ZERO-KNOWLEDGE proof that each antecedent triple is in the committed graph's
+//! closure. This module ties antecedents to DISCLOSED scan rows (the asserted
+//! base) by encoding-equality, so a derivation over disclosed triples is soundly
+//! re-checkable; antecedents that are themselves only claimed (not disclosed and
+//! not chained to disclosed triples) are NOT accepted. So the HOST capability is
+//! sound for the disclosed-base fragment and fail-closed otherwise.
+//!
+//! The IN-CIRCUIT single-step upgrade now EXISTS as a research-grade Noir
+//! relation — `zk/compose/compose_core::entail::entail_step_check` (sq-g91d): it
+//! proves a derived triple follows by ONE RDFS rule application from antecedents
+//! that are members of the COMMITTED graph, WITHOUT disclosing the antecedents,
+//! bound to the SAME per-graph commitments the scan sub-proofs carry — the
+//! privacy upgrade this disclosed-base re-check cannot give. It is single-step /
+//! disclosed-base-membership scope (multi-hop fixpoint SATURATION is a separate,
+//! UNBUILT deliverable) and NOT-yet-sound (sq-qhy4, not externally audited). The
+//! compiled `entail_rdfs_k{K}_n{N}` bin member (with its gate-count baseline) and
+//! the verifier-side manifest/dispatch/public-input wiring that would let this
+//! host path CONSUME an in-circuit derivation are follow-up beads; until they
+//! land, this host re-check remains disclosed-base only.
 
 use serde::{Deserialize, Serialize};
 
@@ -41,8 +52,10 @@ use crate::manifest::{EntailmentRegime, FieldHex};
 /// subset expressible over disclosed/committed triple encodings — the phased
 /// RULE SCOPE of `research/zk-inference-and-credentials.md §3.5`); the enum is
 /// the extension point for the full rule set. `owl:sameAs` is gated SEPARATELY
-/// (`sq-rsd3v.7`) — encoding-equality re-checks are UNSOUND under equality
-/// reasoning — and must never ride this fixed-shape path.
+/// (`sq-rsd3v.6`, the [`crate::sameas`] canonicalisation path) — encoding-equality
+/// re-checks are UNSOUND under equality reasoning — and must never ride this
+/// fixed-shape path; [`DerivationStep::mentions_equality_predicate`] enforces
+/// that fail-closed.
 ///
 /// Each rule's antecedent/consequent SHAPE is fixed and re-checked by
 /// [`DerivationStep::is_well_formed`]; the rule is identified in the manifest by
@@ -246,6 +259,52 @@ impl DerivationStep {
             }
         }
     }
+
+    /// Whether this step INTRODUCES or CONSUMES an `owl:sameAs` fact — i.e.
+    /// whether the `owl:sameAs` encoding stands in the PREDICATE slot of any
+    /// antecedent or of the derived triple.
+    ///
+    /// # Why the fixed-shape path must refuse these (sq-rsd3v.6)
+    /// The rules above are re-checked by term-encoding equality, and an
+    /// encoding equality is a term IDENTITY. Under equality reasoning that
+    /// proxy is wrong: `owl:sameAs` quotients the term universe, so term
+    /// identity is strictly FINER than entailment, and an equality-flavoured
+    /// step re-checked this way would either fire vacuously or — if the
+    /// equality test were relaxed to admit claimed `sameAs` links — TRUST
+    /// equalities instead of proving them. Equality reasoning needs the
+    /// in-circuit union-find canonicalisation of [`crate::sameas`], whose
+    /// soundness argument rests on canonical representatives, not raw
+    /// encodings.
+    ///
+    /// The shapes that would otherwise slip through are real, not theoretical:
+    /// `rdfs7` with `p1 = owl:sameAs` CONSUMES an equality
+    /// (`(sameAs subPropertyOf q), (x sameAs y) ⊢ (x q y)`), and `rdfs7` with
+    /// `p2 = owl:sameAs` INTRODUCES one (`(q subPropertyOf sameAs), (x q y)
+    /// ⊢ (x sameAs y)`). Both are legitimate *RDFS* entailments, so refusing
+    /// them costs only provability — the conservative, fail-closed direction —
+    /// while making it impossible for `owl:sameAs` to ride this path silently.
+    ///
+    /// Only the PREDICATE slot is tested: a step may still mention the
+    /// `owl:sameAs` IRI as a subject or object (schema talk *about* the
+    /// property, e.g. `(owl:sameAs rdfs:subPropertyOf ?q)`), because that alone
+    /// neither asserts nor uses an equality — the equality fact can only enter
+    /// or be consumed through a predicate slot, which is exactly what this
+    /// covers.
+    ///
+    /// Encodings are compared NORMALIZED (the `crate::verifier` hex
+    /// normalization the grounding check uses). `is_well_formed` can compare
+    /// raw, because it only ever tests a prover encoding against a
+    /// verifier-computed canonical one and a spelling mismatch there REJECTS;
+    /// here a spelling mismatch would ACCEPT, so the safe direction is the
+    /// opposite one and normalization is load-bearing.
+    // [OPUS-5] sq-rsd3v.6 (#3265): keep owl:sameAs off the fixed-shape path.
+    pub fn mentions_equality_predicate(&self, owl_sameas: &FieldHex) -> bool {
+        let same = crate::verifier::normalize_hex(&owl_sameas.0);
+        self.antecedents
+            .iter()
+            .chain(std::iter::once(&self.derived))
+            .any(|t| crate::verifier::normalize_hex(&t[1].0) == same)
+    }
 }
 
 #[cfg(test)]
@@ -442,6 +501,85 @@ mod tests {
             derived: [fh("0xc1"), fh(SC), fh("0xc3")],
         };
         assert!(!wf(&step));
+    }
+
+    // The `owl:sameAs` encoding the verifier recomputes (an arbitrary distinct
+    // constant here — the guard only cares about equality structure).
+    const SAME: &str = "0x06";
+
+    #[test]
+    fn equality_predicate_guard_catches_a_consumed_sameas() {
+        // rdfs7 with p1 = owl:sameAs CONSUMES an equality:
+        //   (sameAs subPropertyOf q), (x sameAs y) ⊢ (x q y)
+        // The shape is a legitimate RDFS instance, so `is_well_formed` accepts
+        // it — only the equality guard refuses it.
+        let step = DerivationStep {
+            rule: EntailmentRule::Rdfs7SubProperty,
+            antecedents: vec![
+                [fh(SAME), fh(SP), fh("0xq")],
+                [fh("0xaa"), fh(SAME), fh("0xbb")],
+            ],
+            derived: [fh("0xaa"), fh("0xq"), fh("0xbb")],
+        };
+        assert!(wf(&step), "the forge is shape-valid — the guard must be what stops it");
+        assert!(step.mentions_equality_predicate(&fh(SAME)));
+    }
+
+    #[test]
+    fn equality_predicate_guard_catches_an_introduced_sameas() {
+        // rdfs7 with p2 = owl:sameAs INTRODUCES one:
+        //   (q subPropertyOf sameAs), (x q y) ⊢ (x sameAs y)
+        let step = DerivationStep {
+            rule: EntailmentRule::Rdfs7SubProperty,
+            antecedents: vec![
+                [fh("0xq"), fh(SP), fh(SAME)],
+                [fh("0xaa"), fh("0xq"), fh("0xbb")],
+            ],
+            derived: [fh("0xaa"), fh(SAME), fh("0xbb")],
+        };
+        assert!(wf(&step));
+        assert!(step.mentions_equality_predicate(&fh(SAME)));
+    }
+
+    #[test]
+    fn equality_predicate_guard_normalizes_the_encoding() {
+        // A prover-chosen spelling must not slip the guard: here the encoding
+        // is unprefixed and upper-case, but it is the SAME term.
+        let step = DerivationStep {
+            rule: EntailmentRule::Rdfs7SubProperty,
+            antecedents: vec![
+                [fh("0xq"), fh(SP), fh("06")],
+                [fh("0xaa"), fh("0xq"), fh("0xbb")],
+            ],
+            derived: [fh("0xaa"), fh("06"), fh("0xbb")],
+        };
+        assert!(step.mentions_equality_predicate(&fh(SAME)));
+    }
+
+    #[test]
+    fn equality_predicate_guard_leaves_ordinary_rdfs_steps_alone() {
+        // The guard is precise: an ordinary rdfs9 step, and a step that merely
+        // mentions owl:sameAs as a TERM (schema talk about the property, not an
+        // equality assertion), both stay admissible.
+        let ordinary = DerivationStep {
+            rule: EntailmentRule::Rdfs9SubClassType,
+            antecedents: vec![
+                [fh("0xaa"), fh(T), fh("0xc1")],
+                [fh("0xc1"), fh(SC), fh("0xc2")],
+            ],
+            derived: [fh("0xaa"), fh(T), fh("0xc2")],
+        };
+        assert!(!ordinary.mentions_equality_predicate(&fh(SAME)));
+
+        let mentions_as_term = DerivationStep {
+            rule: EntailmentRule::Rdfs11SubClassTrans,
+            antecedents: vec![
+                [fh(SAME), fh(SC), fh("0xc2")],
+                [fh("0xc2"), fh(SC), fh("0xc3")],
+            ],
+            derived: [fh(SAME), fh(SC), fh("0xc3")],
+        };
+        assert!(!mentions_as_term.mentions_equality_predicate(&fh(SAME)));
     }
 
     #[test]

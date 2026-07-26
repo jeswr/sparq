@@ -103,7 +103,11 @@
 //! 3. **Plain `SELECT *` at the partition level**: no `DISTINCT`/`REDUCED` (breaks
 //!    multiset additivity), no `ORDER BY`/`LIMIT`/`OFFSET` (partitioning does not
 //!    commute with slicing), no aggregates. The *pattern* `P` may still contain
-//!    `OPTIONAL`, `UNION`, subqueries, etc.
+//!    `OPTIONAL`, `UNION`, subqueries, etc. `DISTINCT` and aggregates are not
+//!    *untestable* — they need a **different** recombination law, each derived in its
+//!    own module: [`crate::distinct`] (set union instead of multiset union) and
+//!    [`crate::aggregate`] (numeric recombination plus an error-status law). `LIMIT`
+//!    /`OFFSET` remain out of scope for every variant. [OPUS-5] sq-gum8.12
 //! 4. **Top-level filter placement**: the branch filter is appended at the top level of
 //!    the group, where a constraint applies to the whole group regardless of position
 //!    (§17.2). The construction never pushes the filter into `OPTIONAL`/subquery scope
@@ -137,18 +141,31 @@ pub struct TlpQueries {
     pub branch_error: String,
 }
 
+/// The three branch `FILTER` clauses — true, false, reified-error — in that order.
+///
+/// Single source of the partitioning construction: every TLP variant
+/// (`tlp_queries`, `crate::distinct`, `crate::aggregate`) appends exactly these
+/// clauses, so the case analysis in the module docs above covers all of them and the
+/// variants cannot drift apart. [OPUS-5] sq-gum8.12
+pub(crate) fn branch_filters(predicate: &str) -> [String; 3] {
+    [
+        format!("FILTER( {predicate} )"),
+        format!("FILTER( !( {predicate} ) )"),
+        format!("FILTER( COALESCE( IF( {predicate} , false, false), true) )"),
+    ]
+}
+
 /// Build the four TLP queries for group graph pattern body `pattern` and filter
 /// expression `predicate` (both SPARQL text; IRIs must be absolute — no prologue is
 /// emitted). See the module docs for the derivation and the scope preconditions the
 /// caller must respect.
 pub fn tlp_queries(pattern: &str, predicate: &str) -> TlpQueries {
+    let [keep_true, keep_false, keep_error] = branch_filters(predicate);
     TlpQueries {
         base: format!("SELECT * WHERE {{ {pattern} }}"),
-        branch_true: format!("SELECT * WHERE {{ {pattern} FILTER( {predicate} ) }}"),
-        branch_false: format!("SELECT * WHERE {{ {pattern} FILTER( !( {predicate} ) ) }}"),
-        branch_error: format!(
-            "SELECT * WHERE {{ {pattern} FILTER( COALESCE( IF( {predicate} , false, false), true) ) }}"
-        ),
+        branch_true: format!("SELECT * WHERE {{ {pattern} {keep_true} }}"),
+        branch_false: format!("SELECT * WHERE {{ {pattern} {keep_false} }}"),
+        branch_error: format!("SELECT * WHERE {{ {pattern} {keep_error} }}"),
     }
 }
 

@@ -371,7 +371,10 @@ impl MaterializedGraph {
 //   restrictions/cardinality/hasKey/oneOf/intersection/union — run in **fallback mode**:
 //   every mutation re-materializes via `materialize_owl_rl` (correct, just not incremental).
 //   On realistic ABox-update workloads these features live in the (static) TBox, so the mode
-//   is decided once at load; the hot path is the counting mode.
+//   is decided once at load; the hot path is the counting mode. With the `quoted-triples`
+//   feature the re-materialization runs `materialize_owl_rl_reify` in the graph's
+//   construction-time `ReifyMode` instead (`Bridge` for `new`, i.e. exactly
+//   `materialize_owl_rl`) — sq-afun3 third increment.
 // * Deltas mentioning the occurrence-guarded vocabulary (`owl:Thing`/`owl:Nothing`, the XSD
 //   numeric-tower datatypes) rebuild, because the batch engine's `pre_monotone` facts are
 //   occurrence-dependent.
@@ -576,6 +579,14 @@ pub struct MaterializedOwlGraph {
     virtual_facts: FxHashSet<[Id; 3]>,
     // ---- fallback mode ----
     fallback_closure: FxHashSet<[Id; 3]>,
+    /// [Kern] `quoted-triples` (third increment, sq-afun3): which reify bridge rules the
+    /// Fallback re-materialization runs — [`crate::ReifyMode::Bridge`] (the
+    /// [`MaterializedOwlGraph::new`] default, matching [`crate::materialize_owl_rl`]) or the
+    /// STRICT-OPACITY [`crate::ReifyMode::DestructureOnly`] from
+    /// [`MaterializedOwlGraph::with_reify_mode`]. The reify vocabulary always routes a base
+    /// to Fallback, so this single site is where the mode is observable.
+    #[cfg(feature = "quoted-triples")]
+    reify_mode: crate::reify::ReifyMode,
     // ---- rebuild triggers ----
     tbox_preds: FxHashSet<Id>,
     axiom_types: FxHashSet<Id>,
@@ -590,7 +601,52 @@ impl MaterializedOwlGraph {
     /// Build the graph from `base_triples` and fully materialize the OWL 2 RL closure (same
     /// result as [`crate::materialize_owl_rl`]), recording whatever supporting state the
     /// detected [`OwlMode`] needs for incremental updates.
+    ///
+    /// With the `quoted-triples` feature this runs the FULL reify bridge (reif-dtr +
+    /// reif-ctr), exactly like [`crate::materialize_owl_rl`]; the feature-gated
+    /// `with_reify_mode` is the strict-opacity variant.
     pub fn new(dict: &mut Dict, base_triples: &[[Id; 3]]) -> Self {
+        let mut g = Self::seed(dict, base_triples);
+        g.rematerialize(dict);
+        g.rebuilds = 0; // the initial materialization is not a fallback
+        g
+    }
+
+    /// Kern `quoted-triples` (third increment, sq-afun3): build the graph with the reify
+    /// bridge driven in an explicit [`ReifyMode`](crate::ReifyMode) — the incremental
+    /// counterpart of [`crate::materialize_owl_rl_reify`], which
+    /// [`MaterializedOwlGraph::new`] previously left unreachable (the Fallback
+    /// re-materialization always ran the full bridge, so strict opacity was batch-only).
+    ///
+    /// `ReifyMode::Bridge` is exactly [`MaterializedOwlGraph::new`].
+    /// [`ReifyMode::DestructureOnly`](crate::ReifyMode::DestructureOnly) is STRICT OPACITY:
+    /// every re-materialization — the initial one and every mutation's — runs reif-dtr alone,
+    /// so the graph's closure never contains an inference-minted triple term, and the
+    /// invariant this type promises still holds against the matching batch oracle
+    /// (`materialize_owl_rl_reify(dict, base, mode)` from scratch). The mode is a property of
+    /// the graph, not of a mutation: it cannot change after construction, so the
+    /// closure-equals-from-scratch property is stable across the whole edit sequence.
+    ///
+    /// Mode DETECTION is unchanged — a base (or a mutation) mentioning the reification
+    /// vocabulary routes to [`OwlMode::Fallback`] in both reify modes, since the counting
+    /// modes model neither bridge rule.
+    #[cfg(feature = "quoted-triples")]
+    pub fn with_reify_mode(
+        dict: &mut Dict,
+        base_triples: &[[Id; 3]],
+        reify_mode: crate::reify::ReifyMode,
+    ) -> Self {
+        let mut g = Self::seed(dict, base_triples);
+        g.reify_mode = reify_mode;
+        g.rematerialize(dict);
+        g.rebuilds = 0; // the initial materialization is not a fallback
+        g
+    }
+
+    /// The un-materialized graph: interned vocabulary, the base, and empty incremental state.
+    /// Split out of [`MaterializedOwlGraph::new`] so every constructor shares one struct
+    /// literal and differs only in the state it sets before the first `rematerialize`.
+    fn seed(dict: &mut Dict, base_triples: &[[Id; 3]]) -> Self {
         let v = Vocab::intern(dict);
         let ow = OwlIds::intern(dict);
         let tbox_preds: FxHashSet<Id> = [
@@ -625,7 +681,7 @@ impl MaterializedOwlGraph {
         ]
         .into_iter()
         .collect();
-        let mut g = MaterializedOwlGraph {
+        MaterializedOwlGraph {
             v,
             ow,
             base: base_triples.iter().copied().collect(),
@@ -644,15 +700,14 @@ impl MaterializedOwlGraph {
             e0: FxHashMap::default(),
             virtual_facts: FxHashSet::default(),
             fallback_closure: FxHashSet::default(),
+            #[cfg(feature = "quoted-triples")]
+            reify_mode: crate::reify::ReifyMode::default(),
             tbox_preds,
             axiom_types,
             rebuilds: 0,
             #[cfg(feature = "explain")]
             explain: OwlExplain::default(),
-        };
-        g.rematerialize(dict);
-        g.rebuilds = 0; // the initial materialization is not a fallback
-        g
+        }
     }
 
     /// Does mutating `t` require a full rebuild (TBox / axiom typing / occurrence-guarded id)?
@@ -801,6 +856,14 @@ impl MaterializedOwlGraph {
         if fallback {
             self.mode = OwlMode::Fallback;
             let mut all: Vec<[Id; 3]> = self.base.iter().copied().collect();
+            // [Kern] `quoted-triples` (sq-afun3): drive the graph's configured reify mode, so
+            // a `with_reify_mode(…, DestructureOnly)` graph is strict on EVERY
+            // re-materialization (the mode is immutable after construction). `Bridge` — the
+            // `new` default — is exactly `materialize_owl_rl`, so the default path is
+            // byte-identical to before this plumbing existed.
+            #[cfg(feature = "quoted-triples")]
+            crate::materialize_owl_rl_reify(dict, &mut all, self.reify_mode);
+            #[cfg(not(feature = "quoted-triples"))]
             crate::materialize_owl_rl(dict, &mut all);
             self.fallback_closure = all.into_iter().collect();
             return;
@@ -1282,7 +1345,8 @@ impl MaterializedOwlGraph {
     }
 
     /// The full materialized closure (base ∪ derived), deduplicated and sorted — identical as
-    /// a set to running [`crate::materialize_owl_rl`] from scratch on the current base.
+    /// a set to running [`crate::materialize_owl_rl`] from scratch on the current base (or,
+    /// for a `with_reify_mode` graph, `materialize_owl_rl_reify` in that same mode).
     pub fn closure(&self) -> Vec<[Id; 3]> {
         let mut set: FxHashSet<[Id; 3]> = if self.mode == OwlMode::Fallback {
             self.fallback_closure.clone()
@@ -1335,6 +1399,14 @@ impl MaterializedOwlGraph {
     /// The active maintenance regime (telemetry; re-decided at every rebuild).
     pub fn mode(&self) -> OwlMode {
         self.mode
+    }
+
+    /// Kern `quoted-triples` (sq-afun3): the reify bridge mode this graph maintains —
+    /// fixed at construction ([`crate::ReifyMode::Bridge`] for
+    /// [`MaterializedOwlGraph::new`]), never re-decided by a rebuild.
+    #[cfg(feature = "quoted-triples")]
+    pub fn reify_mode(&self) -> crate::reify::ReifyMode {
+        self.reify_mode
     }
 
     /// How many times a mutation fell back to full re-materialization (TBox mutations,

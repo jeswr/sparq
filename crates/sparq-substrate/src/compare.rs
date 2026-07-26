@@ -1001,9 +1001,12 @@ mod kani_proofs {
         });
     }
 
-    /// TRANSITIVITY: double literals (NaN-free — with NaN the comparator is partial, see the
-    /// witness). Includes the `±0.0` equal-but-lexically-distinct pair: a mutation that let
-    /// numeric ties fall through to the string form would go red here.
+    /// TRANSITIVITY: double literals over the `DBLS` table, which is NaN-free because `NaN`
+    /// is the separate `M::Nan` variant — NOT because NaN is undecided: since the sq-wjl8i
+    /// totalisation NaN takes a fixed first-among-numerics position, and transitivity WITH
+    /// NaN is proved by `transitivity_mixed_literal_kinds_incl_nan`. Includes the `±0.0`
+    /// equal-but-lexically-distinct pair: a mutation that let numeric ties fall through to
+    /// the string form would go red here.
     #[kani::proof]
     #[kani::unwind(4)]
     fn transitivity_double_literals() {

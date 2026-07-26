@@ -55,12 +55,12 @@ let n: Option<Num> = as_numeric(&lit);  // exact xsd:decimal (no f64 rounding)
   promotion ranks), `as_numeric` (classifies an `oxrdf::Literal` while keeping the **exact**
   integer / fixed-point `Dec` — a high-precision decimal is not silently flattened to `f64`),
   the arithmetic ops (`binop`/`neg`/`abs`/`ceil`/`floor`/`round`), the two serialisation
-  surfaces (`canonical_lexical` — finite float/double in XSD scientific form; `lexical` — the
-  plain form the W3C expected-result files use), and the shared lexical helpers
-  (`split_decimal`, `parse_xsd_f32`/`parse_xsd_f64`, `fmt_xsd_double`; the parsers delegate to
-  `sparq_core::parse_xsd_f64` — one shared body with the core numeric cache, sq-9781x).
-  `Num::cmp_relational` is the XPath relational compare (`<`/`>` FILTER; NaN → `None`), vs
-  `cmp_total` (NaN totalised for `ORDER BY`). [OPUS-4.8] sq-v5evr
+  surfaces (`canonical_lexical` — XSD scientific form; `lexical` — the plain form the W3C
+  expected-result files use), and the shared lexical helpers (`split_decimal`,
+  `parse_xsd_f32`/`parse_xsd_f64`, `fmt_xsd_double`; acceptance is one shared body with the
+  core numeric cache, sq-9781x). `Num::f32`/`Dec::f32` are the `xs:float` promotion — ONE
+  correctly-rounded conversion, never f64-then-narrow (#3796). `Num::cmp_relational` is the
+  XPath relational compare (`<`/`>`; NaN → `None`), vs `cmp_total` (`ORDER BY`). sq-v5evr
 - **`join`** — the four id-tuple join kernels over `&[Row]` slices: `merge_join` (sorted),
   `build_table` / `build_partitioned` / `probe_emit` / `probe_gather_indices` / `hash_probe_serial`
   (hash, `JoinTable` type alias backed by `hashbrown::HashMap<Key, Posting, FxBuildHasher>`,

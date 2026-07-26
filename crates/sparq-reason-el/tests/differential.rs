@@ -290,6 +290,33 @@ fn explicit_owl_nothing_superclass_makes_class_unsatisfiable() {
         1,
         "exactly A is unsatisfiable"
     );
+    assert!(
+        !h.report().thing_unsatisfiable,
+        "an empty named class does not make owl:Thing unsatisfiable"
+    );
+}
+
+// [SONNET-4.6] sq-26zuf: ⊤ is deliberately absent from the named-class projection, but a
+// global ⊤ ⊑ ⊥ clash must remain visible to callers through the classification report.
+#[test]
+fn thing_subclass_of_nothing_is_reported() {
+    let ttl = format!("{PRE} owl:Thing rdfs:subClassOf owl:Nothing .");
+    let (dict, triples) = Graph::parse_to_triples(&ttl, "turtle").expect("parse");
+    let h = Classifier::classify(&dict, &triples);
+
+    assert!(
+        h.unsatisfiable_classes().is_empty(),
+        "owl:Thing is not a named-class result"
+    );
+    assert!(
+        h.report().thing_unsatisfiable,
+        "the global top clash must be surfaced"
+    );
+    assert_eq!(
+        h.report().skipped_axioms,
+        0,
+        "the EL axiom must be applied"
+    );
 }
 
 #[test]

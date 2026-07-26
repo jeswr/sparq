@@ -23,6 +23,11 @@
       "reason": "literature-live opens a real network connection to the Anthropic API. Live-network tests are never run in CI by contract (the eval harness uses recorded fixtures). Excluded by the same policy as nlq/live and embeddings (see feature-matrix.yml SCOPE comment)."
     },
     {
+      "crate": "sparq-metamorph",
+      "features": ["protocol-drivers"],
+      "reason": "tests/preset_live_conformance.rs is an opt-in probe that drives the driver presets against EXTERNAL SPARQL engines (Blazegraph, GraphDB, QLever, MillenniumDB, Fuseki, Oxigraph, Virtuoso) named by SPARQ_METAMORPH_* environment variables. Every test is #[ignore]d and additionally self-skips when its endpoint variable is unset, so no CI executor can ever make one run — the same live-network-off-in-CI contract as sparq-kb/literature-live, nlq/live and vectors/embeddings (see feature-matrix.yml SCOPE comment). This is NOT a coverage gap to be closed with a leg: bit-rot protection already exists, because ci.yml's workspace-wide `cargo clippy --workspace --all-targets --all-features -- -D warnings` compiles and lints the file. The pure request-building layer the presets configure is unit-tested without sockets in src/driver.rs."
+    },
+    {
       "crate": "sparq-reason-dl",
       "features": ["dispatch"],
       "reason": "sparq-reason-dl is not yet wired into any CI executor: it is absent from PER_COMMIT_CRATES in coverage.sh and has no feature-matrix fragment. The dispatch feature drives the L4 fragment-dispatch checker (sq-pbz04.4.4). Tracked gap: add a sparq-reason-dl fragment with a dispatch leg."
