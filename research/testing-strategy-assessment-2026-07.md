@@ -125,7 +125,8 @@ velocity; conformance + differential + property layers are the honest guarantee 
 
 The **anti-vacuity program is load-bearing and must bind every new harness**: every future
 Kani bead in §9 inherits `research/mechanized-proof-program.md` §5.1–§5.2 verbatim (mandatory
-domain-coverage self-check: exact-image/domain pinning + `kani::cover!` witness survival or
+domain-coverage self-check: exact-image/domain pinning + an `assert!`-carried witness-survival
+leg — never a plain `kani::cover!`, which only reports and does not fail the verdict — or
 the sanctioned SPLIT form) — a mutation spot-check alone does not catch an
 `assume(false)`-pruned domain (the sq-sqtk2.1 vacuity hole).
 

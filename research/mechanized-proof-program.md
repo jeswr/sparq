@@ -259,23 +259,46 @@ adversarial. Two complementary shapes, use whichever the suite needs (usually bo
   `domain_exhibits_the_2p53_collapse` and `domain_cf_numeric_is_collapse_free_with_signed_zero_pair`
   in `sparq-substrate/src/compare.rs` (PR #1477), documented there under
   "DOMAIN-COVERAGE SELF-CHECKS".
-- **Witness survival** — a `kani::cover!` (Kani's SAT-reachability primitive) asserting that a
-  MAXIMAL / most-interesting input is reachable under the suite's own `unwind` bound. If a bound
-  tightening `assume(false)`-prunes that input (the sq-sqtk2.1 mode), the cover becomes
-  UNREACHABLE and goes **red** — the direct, mechanical guard against silent pruning. For a
-  no-panic *totality* harness the analogous check is that the ACCEPT / deep-validation path is
-  reachable within the bound (a concrete accepted input, or a `cover!(result.is_ok())`), so the
-  proof is non-vacuous on the code that does the work, not only the early-reject branches.
+- **Witness survival** — a pin that the MAXIMAL / most-interesting input genuinely survives the
+  suite's own `unwind` bound, so a bound tightening that `assume(false)`-prunes it (the
+  sq-sqtk2.1 mode) is caught. **This leg MUST be carried by an `assert!`, never by a plain
+  `kani::cover!`.** A `kani::cover!` is a SAT-*reachability report*: an unsatisfied cover does
+  **not** fail the `cargo kani` verdict — the summary counts failed checks, and Kani's own
+  documented example prints `0 of 1 cover properties satisfied` alongside
+  `VERIFICATION:- SUCCESSFUL`. A cover therefore signals drift in the nightly report; it does
+  not gate, and no anti-vacuity leg may rest on it. Sanctioned gating forms, cheapest first:
+  a CONCRETE named witness pinned by `assert!` over the domain constants (identity **and**
+  adversarial shape, so a re-scope that rewrites the witness is red too); a compile-time `const`
+  binding of the domain claim inside the `#[cfg(kani)]` module (red at kani-build time); or, for
+  a no-panic *totality* harness, a concrete accepted input pinned by `assert!` in the harness or
+  by a plain `#[test]` (the SPLIT form below) so the proof is non-vacuous on the code that does
+  the work, not only the early-reject branches. Keeping a supplementary `cover!` alongside the
+  assertion is fine and useful — label it as a report, not as the gate. *Exemplar:*
+  `domain_corpus_exhibits_a_surviving_escalation` in `sparq-wac-oracle/src/escalation_corpus.rs`
+  (#3833), whose three legs are documented as exact-image (gate) / concrete witness (gate) /
+  symbolic cover (report). <!-- [SONNET-4.6] #3833 review round 2: this bullet previously
+  claimed an unreachable cover "goes red". It does not — the rule above is the corrected one. -->
 
 **Applied to the merged suites (sq-og8u8 audit).**
 
 | Suite | Structure | Self-check shipped |
 |-------|-----------|--------------------|
 | `sparq-substrate/src/compare.rs` (#1477/#1502) | model `M`, per-kind `unwind`; strings compared are the short `STRS` (≤2 chars) only — after the sq-wjl8i kind-first fix, cross-kind pairs rank by enum and same-kind numerics by f64/exact, so the long `INT_STRS`/`DBL_STRS` forms are never byte-compared and cannot be unwind-pruned | **exemplar** — `domain_exhibits_the_2p53_collapse`, `domain_cf_numeric_is_collapse_free_with_signed_zero_pair`, `domain_x2_doubles_are_exact` (no change needed) |
-| `sparq-engine/src/reduce.rs` (#1476) | bounded slice generator (`len ≤ MAX_SLICE = 8`, `unwind(12)`) | `domain_reducer_slice_is_adversarial_and_survives_the_bound` — adversarial value/id domain + `cover!` that the full-length varied slice survives `unwind(12)` |
-| `sparq-core/src/dict.rs` (#1480 id harnesses) | `assume`-restricted, complete-domain, no loop | `domain_id_partition_regions_are_all_nonempty` — four-region non-emptiness + `cover!`s that the round-trip assume-domain reaches its `INLINE_MAX` boundary and zero |
+| `sparq-engine/src/reduce.rs` (#1476) | bounded slice generator (`len ≤ MAX_SLICE = 8`, `unwind(12)`) | `domain_reducer_slice_is_adversarial_and_survives_the_bound` — adversarial value/id domain (asserts, GATING) + `cover!` that the full-length varied slice survives `unwind(12)` (**report only** — see the note below) |
+| `sparq-core/src/dict.rs` (#1480 id harnesses) | `assume`-restricted, complete-domain, no loop | `domain_id_partition_regions_are_all_nonempty` — four-region non-emptiness (asserts, GATING) + `cover!`s that the round-trip assume-domain reaches its `INLINE_MAX` boundary and zero (**report only** — see the note below) |
 | `sparq-core/src/dict.rs` (mmap validators, sq-ueuk) | bounded symbolic byte buffer, `unwind(28)` | `domain_dict_validator_accepts_the_empty_dict` — accept path reachable in-domain; deep-record accept path pinned by the existing `validate_dict_bytes_seam_accepts_valid_and_rejects_corruption` unit test |
 | `sparq-vectors/src/store.rs` | bounded symbolic byte buffer, `unwind(40)` | SPLIT form (see below): compile-time `MAX_LEN >= HEADER_LEN` binding in `kani_proofs` + the `domain_bounded_buffer_contains_an_accepted_store` unit test (a concrete minimal well-formed `.spqv` validates `Ok` on every `cargo test`) |
+
+**Audit correction (#3833, 2026-07-26) — the `cover!` legs above do not gate.** The two rows
+marked *report only* pin their domain's *adversarial* half by `assert!` (which does gate) but
+carried their *survival* half on a plain `kani::cover!`, under the since-corrected belief that
+an unreachable cover fails the run. It does not. Those two suites therefore have **no gating
+survival leg** today: if a future bound tightening prunes the full-length reducer slice or the
+`INLINE_MAX` boundary id, the nightly report would show an unsatisfied cover but the harness
+would still pass. Upgrading each to an `assert!`-carried concrete witness (per the corrected
+§5.1 bullet) is tracked as follow-up work; the exact-image/`assert!` legs they already ship
+remain valid and unaffected. `sparq-substrate/src/compare.rs`, the mmap-validator row and the
+store row are unaffected — none of them rests on a cover.
 
 **The store suite needed the SPLIT form — and surfaced an honesty correction.** A
 `#[kani::proof]` accept-path pin for `open_from_bytes` does not terminate practically under
@@ -309,8 +332,11 @@ them:
    harness go RED (documented in the PR body). A harness that cannot fail launders confidence.
 4. **Domain-coverage self-check (MANDATORY — §5.1).** Ship at least one `#[kani::proof]`
    self-check proving the suite's interesting inputs (a) are genuinely adversarial (exact-image
-   / domain pinning over the constants) and (b) survive the bounds (`kani::cover!` witness
-   survival, or a concrete accepted input for a totality harness). Keep it CHEAP — the smallest
+   / domain pinning over the constants) and (b) survive the bounds. **Both legs must be carried
+   by `assert!`** — a concrete named witness pinned by identity and adversarial shape, or a
+   concrete accepted input for a totality harness. A plain `kani::cover!` is a supplementary
+   reachability REPORT and does NOT fail the verdict when unsatisfied (§5.1), so it may
+   accompany the assertions but must never be the (b) leg. Keep it CHEAP — the smallest
    `unwind` its loops need — so it does not inflate the nightly lane. If the harness form is
    cost-prohibitive under the current Kani (measure it; > a few minutes is prohibitive), use
    the sanctioned SPLIT form (§5.1, the store case): a compile-time `const` binding of the
