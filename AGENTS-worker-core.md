@@ -23,7 +23,8 @@ Usage instructions for each public surface are packaged as Agent Skills under [`
 ## Working on this repo (contributor agents)
 
 - Build: `cargo build --workspace`. Test: `cargo test --workspace`.
-- Lint is enforcing (CI gates on it): `cargo clippy --workspace --exclude sparq-py --all-targets -- -D warnings` and `cargo fmt --check` must pass. Run clippy over the **full workspace**, not a single crate.
+- Lint is enforcing (CI gates on it): `cargo clippy --workspace --exclude sparq-py --all-targets -- -D warnings` must pass. Run clippy over the **full workspace**, not a single crate.
+- `cargo fmt --all --check` is **informational, not a gate** — the deferred one-time workspace reformat means it fails on files your change did not touch. Format only what you touched; never run `cargo fmt --all`. (The formatter version itself is pinned by `rust-toolchain.toml`.)
 - The core crates (`sparq-core`, `sparq-engine`) must stay dependency-free of the opt-in capability crates, and the wasm build must not regress — both are enforced in CI.
 - **New capabilities are opt-in by default** (a dedicated crate and/or a cargo feature that is OFF by default), so `sparq-core`/`sparq-engine` stay lean and the lean wasm bundle never grows.
 - Conformance: the W3C SPARQL, inference, W3C SHACL, OGC GeoSPARQL and Solid WAC + ACP suites must stay green and are each **ratcheted** (the committed floor only goes up).
