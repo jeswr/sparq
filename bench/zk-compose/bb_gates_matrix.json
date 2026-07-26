@@ -271,7 +271,7 @@
       }
     },
     "hidden_issuer_d4": {
-      "circuit_size": 16946,
+      "circuit_size": 24452,
       "lane": "string",
       "configs": {
         "string-canonical": {

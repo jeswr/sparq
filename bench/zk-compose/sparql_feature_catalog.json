@@ -19,7 +19,8 @@
       "Q06_filter_double_gt",
       "Q12_join_shared_var_hidden",
       "Q13_path_sequence",
-      "Q14_path_inverse"
+      "Q14_path_inverse",
+      "Q25_issuer_attestation_hidden"
     ]
   },
   "queries": {
@@ -371,11 +372,11 @@
       "zk_members": [
         "hidden_issuer_d4"
       ],
-      "circuit_size": 16946,
+      "circuit_size": 24452,
       "status": "covered",
-      "flag": null,
+      "flag": "HIGH_GATE_lattice",
       "circuit_size_per_member": {
-        "hidden_issuer_d4": 16946
+        "hidden_issuer_d4": 24452
       },
       "reduction_target": "scalar-mul projective coords (research/zk-age-gatecount-reduction.md \u00a73.3; bead sq-hb75)",
       "note": "Hidden-issuer Schnorr verification; the scalar-mul is the dominant cost (reduction target)."

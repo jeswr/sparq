@@ -693,7 +693,10 @@ cargo build -p sparq-cli --features serialize-rdf
     on WatDiv). The `spqcprm2` cargo feature (which implies `mmap`) exposes the emit config gate:
     `compress::with_emit_format(EmitFormat::V2, || …)` on a thread, or `SPARQ_EMIT_FORMAT=v2` for a
     process, routes the store's `save_compressed` and the streaming `CompressedPermWriter` through
-    the V2 encoder. `CompressedPerm::encode_v2` builds a `V2` perm directly; `encode_emit` honours
+    the V2 encoder. On the CLI that same choice is a per-invocation FLAG — `sparq-cli save …
+    compressed --format-v2` / `sparq-cli recompress … --v2` ([SONNET-4.6] sq-kmve2) — which maps
+    onto the per-thread override (so it beats the env var) and is a hard exit-2 error on a build
+    without `spqcprm2`, never a silent V1 write. `CompressedPerm::encode_v2` builds a `V2` perm directly; `encode_emit` honours
     the gate in one place. With the feature OFF, `emit_format()` is a `const V1`, so the default
     build cannot emit V2 and every shipped index stays `SPQCPRM1` bit-for-bit.
   - **Public API (`sparq_core::compress`).** With `mmap`: `enum Format`, `const FILE_MAGIC_V2`,
