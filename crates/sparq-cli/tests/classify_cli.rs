@@ -167,12 +167,62 @@ fn out_of_fragment_axioms_are_reported() {
     assert!(stderr.contains("OUTSIDE the recognised EL fragment"), "stderr: {stderr}");
 }
 
-/// `classify` with no arguments is a loud usage error, not a silent no-op.
+/// An axiom that is INSIDE the OWL 2 EL profile but outside what THIS binary recognises — a
+/// faceted concrete-domain restriction (`owl:onDatatype` + `owl:withRestrictions`), legal EL,
+/// needing `sparq-reason-el/cdomain` which the CLI's `reason-el` feature does NOT enable — is the
+/// case that makes an unqualified "complete OWL 2 EL lattice" claim FALSE. So it must be a
+/// counted, reported skip whose note names the gap, and the result must never be presented as
+/// unconditionally complete. (The CLI's feature set is what fixes this: the `reason-el`
+/// feature-matrix leg resolves sparq-cli's graph alone, so `cdomain` cannot unify on.)
+#[test]
+fn in_profile_concrete_domain_axiom_is_a_reported_skip() {
+    let dir = scratch("cdomain-skip");
+    let ttl = write(
+        &dir,
+        "faceted.ttl",
+        r#"
+@prefix :     <http://ex/> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+:Adult rdfs:subClassOf
+  [ owl:onProperty :age ;
+    owl:someValuesFrom
+      [ owl:onDatatype xsd:integer ;
+        owl:withRestrictions ( [ xsd:minInclusive 18 ] ) ] ] .
+:G rdfs:subClassOf :H .
+"#,
+    );
+    let (code, stdout, stderr) = run3(&["classify", s(&ttl), "turtle"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    // The EL part still classifies — the skip is scoped to the concrete-domain axiom, not fatal.
+    assert!(stdout.contains("classified [EL]"), "stdout: {stdout}");
+    assert!(stderr.contains("OUTSIDE the recognised EL fragment"), "the skip must be reported: {stderr}");
+    // …and the note must say WHY it is in-profile-but-skipped, else a reader concludes their
+    // ontology was out of EL rather than that this build cannot decide concrete domains.
+    assert!(
+        stderr.contains("cdomain"),
+        "the note must name the in-profile concrete-domain gap, not lump it with non-EL constructs: {stderr}"
+    );
+    // Nothing the command prints about THIS result may call it complete.
+    assert!(
+        !stdout.to_ascii_lowercase().contains("complete"),
+        "a run with skipped in-profile axioms must not be described as complete: {stdout}"
+    );
+}
+
+/// `classify` with no arguments is a loud usage error, not a silent no-op — and the usage text
+/// SCOPES its completeness claim (the claim above is only true for the recognised fragment).
 #[test]
 fn classify_without_args_loud_fails() {
     let (code, _, stderr) = run3(&["classify"]);
     assert_eq!(code, 2, "stderr: {stderr}");
     assert!(stderr.contains("usage: sparq-cli classify"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("RECOGNISED EL fragment") && stderr.contains("NOT for the whole OWL 2 EL"),
+        "the usage text must scope its completeness claim: {stderr}"
+    );
 }
 
 /// An unknown `--reason` profile still loud-fails, and its message now advertises `el`.

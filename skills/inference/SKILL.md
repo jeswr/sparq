@@ -46,14 +46,30 @@ cargo run --release -p sparq-cli -- query data.ttl turtle 'SELECT ...' --reason 
 
 `--reason owl` (OWL 2 RL) is **sound but INCOMPLETE for class classification** — it silently omits
 subsumptions that need existential/conjunction reasoning, so its `rdfs:subClassOf` hierarchy over an
-EL ontology (GO / ChEBI / SNOMED-style) is a *subset* of the entailed one. For the **complete**
-lattice use the separate OWL 2 EL classifier, exposed on the CLI by the opt-in `reason-el` feature
-(details in *OWL 2 EL classification* below):
+EL ontology (GO / ChEBI / SNOMED-style) is a *subset* of the entailed one. For a much closer lattice
+use the separate OWL 2 EL classifier, exposed on the CLI by the opt-in `reason-el` feature (details
+in *OWL 2 EL classification* below):
 
 ```bash
 cargo run --release -p sparq-cli --features reason-el -- classify onto.ttl turtle lattice.nt
 cargo run --release -p sparq-cli --features reason-el -- query onto.ttl turtle 'SELECT ...' --reason el
 ```
+
+**Know the scope before you rely on it.** That lattice is complete for the fragment the classifier
+**recognises**, and only under the OWL 2 **regularity** restriction on the RBox — it is *not* a
+complete-for-all-of-OWL-2-EL promise. Three material limits, all *reported on stderr* (a non-zero
+skip count means the answer really is incomplete, so read it):
+- **Concrete domains are in the EL profile but not in this build.** `reason-el` enables
+  `sparq-reason-el/rbox`, not `cdomain`, so `owl:onDatatype` / `owl:withRestrictions` and literal
+  `hasValue` / `oneOf` axioms are **skipped, not applied**. Add `cdomain` to the dependency (a
+  library build) if your ontology uses faceted datatypes.
+- **Nominals** (`owl:oneOf` / `owl:hasValue`) are complete for typical *safe* usage only, not for
+  every EL++ nominal interplay.
+- **A non-regular told RBox** (a role-dependency cycle through a property chain) is flagged: every
+  derived subsumption stays sound, but the completeness argument no longer holds.
+
+Constructs **outside OWL 2 EL entirely** (union / complement / `allValuesFrom` / cardinality /
+multi-individual `oneOf`) are likewise counted and reported — those need ALC / Horn-SHIQ, not EL.
 
 ## Key APIs
 
@@ -314,7 +330,7 @@ The loaders desugar every RDF 1.2 quotation form (`<< :s :p :o >>`, `:s :p :o ~ 
 
 ## OWL 2 EL classification (`sparq-reason-el`, separate opt-in crate)
 
-OWL 2 RL is **sound but silently incomplete for class classification**: it never materializes the existential successor, and it has no rule concluding MEMBERSHIP in a class expression (`scm-int` only decomposes an intersection), so `--reason owl` over an EL ontology (GO/ChEBI/SNOMED-style) returns a `rdfs:subClassOf` hierarchy that **silently omits** entailed subsumptions — e.g. `A ⊑ D` from `A ⊑ ∃r.B ⊓ X`, `B ⊑ C`, `(∃r.C ⊓ X) ⊑ D`, which EL derives (CR3+CR1+CR4+CR2) and RL cannot reach (Krötzsch, ISWC 2012; the witness is pinned end-to-end by `crates/sparq-cli/tests/classify_cli.rs::owl_rl_misses_what_el_derives`). Be precise about the boundary: the plainer `A ⊑ ∃r.B`, `B ⊑ C`, `∃r.C ⊑ D` shape is NOT a witness against sparq's RL, because the RL/RDF rule `scm-svf1` relates the two TOLD restriction nodes (`∃r.B ⊑ ∃r.C`) and `scm-sco` chains it — RL gets that one right. **`sparq-reason-el`** closes that gap — a consequence-based classifier that normalizes the TBox (Baader–Brandt–Lutz forms) and saturates `S(C)`/`R(r)` under completion rules **CR1–CR5** to compute the **complete** subsumption lattice, then emits it into the **same** `(Dict, Vec<[Id;3]>)` seam as the RL `scm-*` rules (queryable by plain BGP eval).
+OWL 2 RL is **sound but silently incomplete for class classification**: it never materializes the existential successor, and it has no rule concluding MEMBERSHIP in a class expression (`scm-int` only decomposes an intersection), so `--reason owl` over an EL ontology (GO/ChEBI/SNOMED-style) returns a `rdfs:subClassOf` hierarchy that **silently omits** entailed subsumptions — e.g. `A ⊑ D` from `A ⊑ ∃r.B ⊓ X`, `B ⊑ C`, `(∃r.C ⊓ X) ⊑ D`, which EL derives (CR3+CR1+CR4+CR2) and RL cannot reach (Krötzsch, ISWC 2012; the witness is pinned end-to-end by `crates/sparq-cli/tests/classify_cli.rs::owl_rl_misses_what_el_derives`). Be precise about the boundary: the plainer `A ⊑ ∃r.B`, `B ⊑ C`, `∃r.C ⊑ D` shape is NOT a witness against sparq's RL, because the RL/RDF rule `scm-svf1` relates the two TOLD restriction nodes (`∃r.B ⊑ ∃r.C`) and `scm-sco` chains it — RL gets that one right. **`sparq-reason-el`** closes that gap — a consequence-based classifier that normalizes the TBox (Baader–Brandt–Lutz forms) and saturates `S(C)`/`R(r)` under completion rules **CR1–CR5** to compute the subsumption lattice — **complete for the fragment it recognises** in the enabled feature set, under a regular RBox (see *Scope* and *Deferred EL fragment* below; the CLI's feature set is narrower still) — then emits it into the **same** `(Dict, Vec<[Id;3]>)` seam as the RL `scm-*` rules (queryable by plain BGP eval).
 
 ```rust,ignore
 // Cargo.toml:  sparq-reason-el = "0.1"     // a SEPARATE crate; depending on it is the opt-in
@@ -339,7 +355,10 @@ carries no EL code, `classify` is absent, and `--reason el` exits 2 with a rebui
 silently falling back to the incomplete RL profile. It pulls `sparq-reason-el` with **`rbox` ON**, so
 the CLI applies role inclusions / property chains / transitive roles (CR10/CR11) — RBox skips are
 *not* counted in `Report::skipped_axioms`, so a no-`rbox` CLI surface would be quietly incomplete on
-SNOMED/GO-shaped input.
+SNOMED/GO-shaped input. It does **not** pull `cdomain`, `hasse`, `abox` or `par`: on the CLI, an
+in-profile concrete-domain axiom is therefore a **counted, reported skip**, so `classify` /
+`--reason el` is complete for the *recognised* fragment under a regular RBox, not for every OWL 2 EL
+ontology (the scope summary near the top of this skill lists all three limits).
 
 ```bash
 # `classify <data-file> <format> [out.nt]` — the classification summary on stdout; with out.nt,
@@ -374,7 +393,7 @@ keeps the "RL cannot reach this" claim above true against sparq's own RL impleme
 - **Deferred EL fragment (honest incompleteness, surfaced — NOT silently wrong):** without `cdomain`, ALL concrete-domain shapes (`owl:onDataRange`/`owl:withRestrictions`/`owl:onDatatype`/`owl:datatypeComplementOf` + literal `hasValue`/`oneOf`) land in `Report::skipped_axioms`; with it, the unsupported remainder above still does. Distinct from constructs **outside EL entirely** (unionOf / complementOf / allValuesFrom / cardinality / a **multi-individual** `owl:oneOf` — the profile's `ObjectOneOf` admits exactly one individual, more is a disjunction — all skipped, but those need ALC / Horn-SHIQ, not a deferred EL slice; `owl:hasSelf` is NO LONGER here — it is in-fragment via CR-Self, bead `sq-pbz04.2.6`) and from RBox (a *gated* capability via `rbox`, not permanently deferred). Parallel saturation is the opt-in `par` feature (E4, bead `sq-wy3i6` — identical closure at every thread count). `classify_graph` (full closure) and `classify_hasse_graph` (reduced) are both available — pick by whether you want every derived subsumption or just the immediate-parent taxonomy.
 - **End-to-end scaling check.** `cargo run -p sparq-reason-el --features rbox,hasse --example snomed_go_scale_bench --release [SCALE]` runs a SNOMED/GO-shaped slice (is-a forest + transitive part-of + SNOMED right-identity role chain + existential restrictions) at 1×/2× and asserts a **relative** (dimensionless) property: closed-form derived counts hold at both scales (conformance) AND the work proxy doubles at most ~2× — confirming normalise + RBox + Hasse compose with **no hidden quadratic**. No hard-coded ms (work-box timings are non-canonical); `tests/snomed_go_scale.rs` is the CI-gated counterpart (runs under the `rbox`/`hasse` legs).
 - **W3C OWL 2 EL suite — a pinned EXTENSION ratchet (bead `sq-pbz04.2.4`/`sq-pbz04.2.9`, opt-in `sparq-conformance/el-suite`).** The W3C OWL WG export (`tests/w3c/owl2/all.rdf`), filtered to `test:EL` ∧ `test:RDF-BASED` (Approved, inline RDF/XML premise, no `owl:imports`), is run through the **REAL** classifier: each premise is classified with `classify_graph` (materializing the complete `rdfs:subClassOf` lattice IN PLACE, with **`rbox`** + **`cdomain`** also on — the CI lane exercises the full shipped feature set) and each declared check decided — **consistency** (no unsatisfiable named class), **inconsistency** (some unsatisfiable named class), **positive-entailment** (the lattice ENTAILS the conclusion via the bnode-homomorphism `entail::entails` after output-vocabulary completions: datatype axiomatic-set + mutual-subsumption → `owl:equivalentClass` augmentation — a semantic identity that graduated WebOnt-equivalentClass-003, sq-pbz04.2.9), **negative-entailment** (non-conclusion NOT entailed). `EL_SUITE_FLOOR` is the **MEASURED PASS count** — a **`sparq extension`** row in the central scoreboard (`scoreboard::SUITES`), tallied **separately** and **NOT** a full-OWL-2-EL-conformance claim: tests needing **ABox inconsistency** (individual assertions), or a conclusion in `owl:sameAs`/`rdfs:subPropertyOf`/`owl:equivalentProperty`/`owl:TransitiveProperty`/`owl:unionOf` axiom form (output-vocabulary gaps distinct from inference gaps) are **audited PERMANENT divergences** (reported separately, **never summed into the floor**). `EL_SUITE_FLOOR` is read textually by `tests/scoreboard_floors.rs`, so the mirrored scoreboard value cannot drift; `--nocapture` prints an `OWL 2 EL ratchet pass N of M (floor F)` line the CI job `inference-conformance` re-greps.
-- **Use EL, not `--reason owl`, when you need a complete class hierarchy over an EL ontology.** RL is not an approximation you can tune up with more rules — EL needs a different algorithm. From the CLI that is `classify` / `--reason el` (opt-in `reason-el` feature, above).
+- **Use EL, not `--reason owl`, when you need the class hierarchy of an EL ontology.** RL is not an approximation you can tune up with more rules — EL needs a different algorithm. From the CLI that is `classify` / `--reason el` (opt-in `reason-el` feature, above), complete for the recognised fragment under a regular RBox; check its stderr skip count before treating the lattice as the full entailed one.
 
 ## OWL 2 QL query rewriting (`sparq-reason-ql`, EXPERIMENTAL, separate opt-in crate)
 

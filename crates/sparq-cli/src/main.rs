@@ -24,8 +24,11 @@ fn main() {
         Some("query") => cmd_query(&args),
         Some("reason") => cmd_reason(&args),
         // [SONNET-4.6] (sq-2ch27) `classify` runs the OWL 2 EL consequence-based classifier
-        // (sparq-reason-el) over an ontology and reports the COMPLETE subsumption lattice —
-        // the class hierarchy `reason … owl` is sound but silently incomplete for. Gated
+        // (sparq-reason-el) over an ontology and reports the subsumption lattice — complete for
+        // the fragment the classifier RECOGNISES, under a regular RBox; NOT for the whole OWL 2
+        // EL profile (this build omits `cdomain`, so in-profile concrete-domain axioms are
+        // counted skips, and nominal completeness is claimed only for safe usage). Even that
+        // fragment is a hierarchy `reason … owl` is sound but silently incomplete for. Gated
         // behind the opt-in `reason-el` feature: the default CLI build carries no EL code, so
         // the subcommand is only present when built with `--features reason-el`.
         #[cfg(feature = "reason-el")]
@@ -851,8 +854,10 @@ fn load_with_reasoning(path: &str, format: &str, profile: &str) -> sparq_core::G
     load_reasoned(path, format, prof)
 }
 
-/// [SONNET-4.6] (sq-2ch27) Parse `path`, materialize the COMPLETE OWL 2 EL subsumption
-/// lattice in place (`classify_graph`), then build the graph — the same
+/// [SONNET-4.6] (sq-2ch27) Parse `path`, materialize the OWL 2 EL subsumption lattice in
+/// place (`classify_graph`) — complete for the fragment the classifier recognises, under a
+/// regular RBox, NOT for the whole profile (see [`el_honesty_notes`]) — then build the graph
+/// with the same
 /// `parse_to_triples` → `from_parts` seam the RL/RDFS path uses, so the emitted
 /// `rdfs:subClassOf` (and, with `rbox`, `rdfs:subPropertyOf`) triples are queryable by
 /// plain BGP eval. Reports the expansion and the honest incompleteness signals on stderr.
@@ -890,7 +895,7 @@ fn load_el(path: &str, format: &str) -> sparq_core::Graph {
 fn el_honesty_notes(report: &sparq_reason_el::Report) {
     if report.skipped_axioms > 0 {
         eprintln!(
-            "note: {} class axiom(s) used constructs OUTSIDE the recognised EL fragment (union / complement / allValuesFrom / cardinality / multi-individual oneOf / concrete domains) and were NOT applied — the lattice may be incomplete for them",
+            "note: {} class axiom(s) used constructs OUTSIDE the recognised EL fragment and were NOT applied — the lattice is NOT complete for them. Either outside OWL 2 EL entirely (union / complement / allValuesFrom / cardinality / multi-individual oneOf), or IN the EL profile but not built into this binary: concrete domains (owl:onDatatype / owl:withRestrictions, literal hasValue / oneOf) need `sparq-reason-el/cdomain`, which the CLI's `reason-el` feature does not enable",
             report.skipped_axioms
         );
     }
@@ -973,10 +978,19 @@ fn cmd_reason(args: &[String]) {
 }
 
 /// [SONNET-4.6] (sq-2ch27, Phase E6) `classify <data-file> <format> [out.nt]` — run the OWL 2 EL
-/// consequence-based classifier (`sparq-reason-el`) over the ontology and report the COMPLETE
-/// named-class subsumption lattice: how many classes were classified, how many subsumptions were
-/// derived, which classes are unsatisfiable, and what fell outside the recognised fragment. With
+/// consequence-based classifier (`sparq-reason-el`) over the ontology and report the named-class
+/// subsumption lattice: how many classes were classified, how many subsumptions were derived,
+/// which classes are unsatisfiable, and what fell outside the recognised fragment. With
 /// `out.nt`, ALSO materializes the lattice into the graph and writes it as N-Triples.
+///
+/// SCOPE OF "complete" (honesty, not a caveat-shaped disclaimer): the lattice is complete for the
+/// fragment the classifier RECOGNISES, assuming a REGULAR RBox — not for every ontology in the
+/// OWL 2 EL profile. This build enables `sparq-reason-el/rbox` but NOT `cdomain`, so in-profile
+/// concrete-domain axioms (`owl:onDatatype`/`owl:withRestrictions`, literal `hasValue`/`oneOf`)
+/// are NOT applied and land in `Report::skipped_axioms`; nominal (`owl:oneOf`/`owl:hasValue`)
+/// completeness is claimed for safe usage only, not every EL++ nominal interplay; and a
+/// non-regular told RBox voids the completeness argument. Every such case is reported by
+/// [`el_honesty_notes`] — a skip count is a REAL incompleteness signal, not decoration.
 ///
 /// This is the class-hierarchy answer `reason … owl` cannot give: OWL 2 RL is sound but silently
 /// INCOMPLETE for classification — it never materializes the existential successor and has no rule
@@ -992,8 +1006,10 @@ fn cmd_classify(args: &[String]) {
         _ => {
             eprintln!(
                 "usage: sparq-cli classify <data-file> <format> [out.nt]\n  \
-                 Classifies the OWL 2 EL TBox and reports the COMPLETE rdfs:subClassOf lattice\n  \
-                 (the hierarchy `reason <file> <format> owl` is sound but INCOMPLETE for).\n  \
+                 Classifies the OWL 2 EL TBox and reports the rdfs:subClassOf lattice — complete\n  \
+                 for the RECOGNISED EL fragment under a regular RBox, NOT for the whole OWL 2 EL\n  \
+                 profile (concrete-domain axioms are skipped and reported; see the stderr notes).\n  \
+                 Even that fragment is a hierarchy `reason <file> <format> owl` is INCOMPLETE for.\n  \
                  With out.nt, materializes the lattice into the graph and writes it as N-Triples."
             );
             std::process::exit(2);

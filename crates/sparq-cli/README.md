@@ -61,9 +61,11 @@ cargo run --release -p sparq-cli -- query data.ttl turtle 'SELECT * WHERE { ?s ?
 - **`--reason <rdfs|owl-rl|n3>`** — opt-in forward-chaining materialization before query.
 - **`classify <file> <fmt> [out.nt]` / `--reason el`** *(opt-in `reason-el` feature; [SONNET-4.6]
   sq-2ch27)* — run the **OWL 2 EL** consequence-based classifier (`sparq-reason-el`, CR1–CR6 + the
-  `rbox` role automaton) and report the **complete** subsumption lattice: derived
-  `rdfs:subClassOf` / `rdfs:subPropertyOf` counts, the named unsatisfiable classes, and — on
-  stderr, never silently — the axioms outside the recognised EL fragment. `--reason el` classifies
+  `rbox` role automaton) and report the subsumption lattice — **complete for the recognised EL
+  fragment** under a regular RBox, **not** for the whole OWL 2 EL profile (`cdomain` is not enabled,
+  so in-profile concrete-domain axioms are skipped; nominal completeness is claimed for safe usage
+  only): derived `rdfs:subClassOf` / `rdfs:subPropertyOf` counts, the named unsatisfiable classes,
+  and — on stderr, never silently — every skipped axiom. `--reason el` classifies
   into the graph so `reason` / `query` see the derived edges. OWL 2 RL (`--reason owl`) is sound but
   **incomplete for class classification**, so this is a different algorithm, not a tuned-up RL. Off
   by default: without the feature `classify` is absent and `--reason el` exits 2 with a rebuild hint
