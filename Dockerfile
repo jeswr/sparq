@@ -70,10 +70,11 @@ RUN cargo install --locked cargo-auditable
 RUN cargo auditable build --release --locked -p sparq-server ${CARGO_FLAGS}
 
 # -------- runtime --------
-# [OPUS-4.8] SHA-pinned (Scorecard PinnedDependencies). Tag kept on its own comment line
-# above the FROM (an inline trailing `# tag` breaks FROM's arg parser — see builder above).
+# [GPT-5.6] SHA-pinned to the multi-platform OCI index (Scorecard PinnedDependencies), so
+# Buildx can select the amd64 or arm64 runtime. Tag kept on its own comment line above the
+# FROM (an inline trailing `# tag` breaks FROM's arg parser — see builder above).
 # Tag: gcr.io/distroless/cc-debian12:nonroot
-FROM gcr.io/distroless/cc-debian12:nonroot@sha256:b0ae8e989418b458e0f25489bc3be523718938a2b70864cc0f6a00af1ddbd985
+FROM gcr.io/distroless/cc-debian12:nonroot@sha256:fccdbb0a547c14e23fcf4ce8ad62ca5d43b4faae8d22cd292f490fef9946c96e
 
 LABEL org.opencontainers.image.title="sparq-server" \
       org.opencontainers.image.description="W3C SPARQL 1.1 Protocol server for the sparq RDF triplestore (dictionary-encoded, six permutation indexes, parallel execution)" \
