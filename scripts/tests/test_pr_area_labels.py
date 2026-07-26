@@ -255,6 +255,22 @@ class TestDerivation(unittest.TestCase):
         # row: a wrong narrow label is worse than a stalled frontier.
         self.assertEqual(M.attribute("crates/sparq-core/README.md", self.policy), "sparq-core")
 
+    def test_crate_prefix_wins_even_when_a_map_row_also_matches(self):
+        """DISCRIMINATING form of the precedence guard.
+
+        With the live table no `[[map]]` row can match a `crates/...` path, so simply
+        re-ordering the two rules is an EQUIVALENT mutant against real data — it passes
+        the test above for the wrong reason and only bites later, when someone adds a
+        `crates/**`-shaped row. So construct a policy where both rules match and assert
+        the crate still wins."""
+        overlapping = M.Policy(max_areas=4, rows=[("crates/**", "workspace")],
+                               non_crate=["workspace"], members=self.policy.members)
+        self.assertEqual(M.attribute("crates/sparq-core/src/lib.rs", overlapping),
+                         "sparq-core")
+        # ... and a NON-member path under crates/ does not fall through to that row
+        # either: `crates/` is the member rule's exclusive territory, fail closed.
+        self.assertIsNone(M.attribute("crates/README.md", overlapping))
+
     def test_glob_star_does_not_cross_a_slash(self):
         self.assertEqual(M.attribute("README.md", self.policy), "docs")
         self.assertEqual(M.attribute("skills/inference/SKILL.md", self.policy), "sparq-reason")
@@ -266,6 +282,23 @@ class TestDerivation(unittest.TestCase):
                 for c in sorted(self.policy.members)[:self.policy.max_areas + 1]]
         areas, reason = self.d(wide)
         self.assertEqual((areas, reason), (frozenset(), "cross-cutting"))
+
+    def test_declared_max_areas_is_the_reviewed_value(self):
+        """The cap is a SCHEDULER-SAFETY knob, so it is pinned ABSOLUTELY here.
+
+        Every other cross-cutting test derives its fixture from `policy.max_areas`, which
+        means raising the declared value moves those fixtures with it and nothing goes
+        red — the cap could be set to 60 (i.e. "nothing is ever cross-cutting") silently.
+        Changing the policy is allowed; changing it without updating this line is not."""
+        self.assertEqual(self.policy.max_areas, 4)
+
+    def test_a_five_crate_pr_stays_global_at_the_declared_cap(self):
+        """The absolute-fixture companion to the test above: five NAMED crates, no
+        dependence on `policy.max_areas`."""
+        five = ["crates/sparq-core/src/lib.rs", "crates/sparq-engine/src/lib.rs",
+                "crates/sparq-cli/src/main.rs", "crates/sparq-server/src/main.rs",
+                "crates/sparq-shacl/src/lib.rs"]
+        self.assertEqual(self.d(five), (frozenset(), "cross-cutting"))
 
     def test_max_areas_boundary_is_still_narrow(self):
         """Discriminates the cap from an off-by-one: exactly max_areas must RESOLVE."""
@@ -282,6 +315,16 @@ class TestDerivation(unittest.TestCase):
     def test_non_member_directory_under_crates_is_unresolved(self):
         self.assertEqual(self.d(["crates/not-a-crate/src/lib.rs"]),
                          (frozenset(), "unresolved"))
+
+    def test_member_check_is_what_rejects_a_non_member_crate_directory(self):
+        """DISCRIMINATING: the test above passes even without the member check, because
+        the live-label check then rejects the bogus name — two guards, one fixture. Here
+        the bogus name IS a live label, so ONLY the member check can reject it."""
+        self.assertIsNone(M.attribute("crates/not-a-crate/src/lib.rs", self.policy))
+        self.assertEqual(
+            M.derive_areas(["crates/not-a-crate/src/lib.rs"], self.policy,
+                           self.known | {"not-a-crate"}),
+            (frozenset(), "unresolved"))
 
     def test_empty_change_set_stays_global(self):
         self.assertEqual(self.d([]), (frozenset(), "no-paths"))
