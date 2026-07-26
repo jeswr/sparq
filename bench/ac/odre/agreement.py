@@ -19,6 +19,10 @@ Concretely:
   carry-forward, and no "assumed agreement".
 * Every disagreement must match an entry in `known-divergences.json`. One that does not
   is reported under `unclassified` and the process exits 3.
+* A run is scored only against the PINNED ODRE release, over the WHOLE corpus. A
+  different installed version, or a decision file that does not cover every corpus case
+  under every declared encoding exactly once, is an input error (exit 2) — not a batch of
+  skips inside an otherwise `complete` report.
 * Cases using a construct ODRE's own capability table declares unsupported are counted as
   OUT-OF-SCOPE-FOR-SYSTEM and excluded from the comparable set — reported, never dropped.
 * No statement is made about either system being right. A divergence class explains WHERE
@@ -26,7 +30,8 @@ Concretely:
 
 stdlib-only. Exit codes:
   0  report written; complete or honestly skipped, with every divergence classified
-  2  usage / input error
+  2  usage / input error — including an unpinned ODRE version and an incomplete decision
+     file (see `input_errors`)
   3  UNCLASSIFIED DIVERGENCE — the gate the bead's acceptance test names
   5  the produced report is not schema-complete (a harness bug; never published)
 """
@@ -35,6 +40,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCHEMA_PATH = os.path.join(HERE, "agreement-report.schema.json")
@@ -156,6 +162,103 @@ def _is_type(instance, t):
     return True
 
 
+# --------------------------------------------------------------- input gate
+
+
+def input_errors(corpus, decisions, ledger, capabilities):
+    """Everything that must hold BEFORE an agreement figure may be computed at all.
+
+    These are input errors, not results: each one means the run is not the run the report
+    would claim it is, so the lane refuses rather than publishing a `complete` report with
+    a footnote.
+
+    1. **The ledger and the capability table pin the same release.** Classifying against a
+       mismatched pair explains divergences with rules transcribed from a different
+       implementation.
+    2. **The ODRE that ran IS that pinned release.** `odre_adapter.py` runs whatever
+       `pyodre` `ODRE_PYTHON` can import, and records `unknown` if even the version is
+       unreadable — but the classifier then excuses divergences using source-read entries
+       attributed to the pinned version specifically, and the report names that version as
+       the system under comparison. Scoring anything else would attribute to a release
+       behaviour nobody read out of it.
+    3. **The decision file covers the corpus exactly**: every case once, no duplicate id,
+       no id the corpus does not contain, and every declared encoding present for each.
+       Without this a truncated or corrupt `odre-decisions.json` degrades silently — the
+       absent results become `skipped` verdicts, drop out of the comparable set, and the
+       surviving cases still produce a `complete` report with a confident agreement rate
+       over whatever fraction of the corpus happened to survive.
+
+    Returns a list of human-readable errors; empty means the inputs are usable.
+    """
+    errors = []
+
+    if ledger["pinned_odre_version"] != capabilities["pinned_version"]:
+        errors.append(
+            "the divergence ledger pins ODRE %s but the capability table pins %s — "
+            "refusing to classify against a mismatched pair."
+            % (ledger["pinned_odre_version"], capabilities["pinned_version"])
+        )
+
+    odre_meta = decisions["odre"]
+    pinned = ledger["pinned_odre_version"]
+    if odre_meta["status"] == "present" and odre_meta.get("version") != pinned:
+        errors.append(
+            "ODRE reports version %r, but this lane's capability table and divergence "
+            "ledger are transcribed from %s and its divergence excuses are sourced from "
+            "%s's source. Install the pinned release (bench/ac/odre/run.sh --setup), or "
+            "re-pin deliberately: bump requirements.txt, odre-capabilities.json and "
+            "known-divergences.json together, re-transcribed against the new release."
+            % (odre_meta.get("version"), pinned, pinned)
+        )
+
+    corpus_ids = [c["id"] for c in corpus["cases"]]
+    decided_ids = [c["id"] for c in decisions["cases"]]
+    duplicates = sorted({i for i in decided_ids if decided_ids.count(i) > 1})
+    if duplicates:
+        errors.append(
+            "the ODRE decision file records %d case id(s) more than once (%s%s) — one "
+            "result would silently shadow the other."
+            % (len(duplicates), ", ".join(duplicates[:5]), " …" if len(duplicates) > 5 else "")
+        )
+    absent = sorted(set(corpus_ids) - set(decided_ids))
+    if absent:
+        errors.append(
+            "%d corpus case(s) have NO ODRE result (%s%s) — the decision file does not "
+            "cover the corpus it is scored against."
+            % (len(absent), ", ".join(absent[:5]), " …" if len(absent) > 5 else "")
+        )
+    unexpected = sorted(set(decided_ids) - set(corpus_ids))
+    if unexpected:
+        errors.append(
+            "%d ODRE result(s) name a case the corpus does not contain (%s%s) — the two "
+            "files are not from the same run."
+            % (len(unexpected), ", ".join(unexpected[:5]), " …" if len(unexpected) > 5 else "")
+        )
+
+    expected_encodings = set(decisions["encodings"])
+    incomplete = []
+    for case in decisions["cases"]:
+        got = set(case.get("encodings") or {})
+        if got != expected_encodings:
+            incomplete.append(
+                "%s (missing %s%s)"
+                % (
+                    case["id"],
+                    ", ".join(sorted(expected_encodings - got)) or "-",
+                    ""
+                    if got <= expected_encodings
+                    else "; undeclared %s" % ", ".join(sorted(got - expected_encodings)),
+                )
+            )
+    if incomplete:
+        errors.append(
+            "%d case(s) do not carry a result for every declared encoding (%s%s)."
+            % (len(incomplete), "; ".join(incomplete[:5]), " …" if len(incomplete) > 5 else "")
+        )
+
+    return errors
+
+
 # --------------------------------------------------------------- classification
 
 
@@ -258,6 +361,11 @@ def build_report(corpus, decisions, ledger, capabilities):
         verdicts = {}
 
         for enc in encodings:
+            # `missing` is unreachable from the CLI: `input_errors` refuses a decision
+            # file that does not cover every case under every encoding, precisely so an
+            # absent result cannot become a `skipped` verdict inside a `complete` report.
+            # Kept as the rendering for a direct build_report call, never as a fallback
+            # the gate relies on.
             result = odre_case["encodings"].get(
                 enc,
                 {"status": "missing", "decision": None, "actions": [], "error": "no ODRE result for this case/encoding"},
@@ -535,19 +643,96 @@ def summarize(report, stream=sys.stderr):
 # --------------------------------------------------------------- self-test
 
 
+def _st_lane_inputs(ledger):
+    """A minimal but COMPLETE (corpus, decisions) pair: two cases, two encodings, agreeing.
+
+    The baseline the input-gate scenarios below mutate. Deliberately a PASSING pair, so
+    each mutation isolates exactly one defect.
+    """
+    ids = ["st-0001", "st-0002"]
+    encodings = ["standard", "projected"]
+    corpus = {
+        "producer": "self-test",
+        "sparq_decision_path": "self-test",
+        "eval_instant": "2026-07-06T00:00:00Z",
+        "params": {},
+        "cases": [
+            {
+                "id": cid,
+                "use_case": "self-test",
+                "constructs": ["rule:permission"],
+                "sparq": {"decision": "allow", "deny_reason_kinds": []},
+            }
+            for cid in ids
+        ],
+    }
+    decisions = {
+        "odre": {
+            "package": "pyodre",
+            "version": ledger["pinned_odre_version"],
+            "status": "present",
+            "paper": "arXiv:2409.17602",
+            "reason": None,
+        },
+        "encodings": encodings,
+        "headline_encoding": "projected",
+        "cases": [
+            {
+                "id": cid,
+                "encodings": {
+                    enc: {
+                        "status": "ok",
+                        "decision": "allow",
+                        "actions": [],
+                        "interventions": [],
+                        "error": None,
+                    }
+                    for enc in encodings
+                },
+            }
+            for cid in ids
+        ],
+    }
+    return corpus, decisions
+
+
+def _st_run_lane(ledger, mutate):
+    """Drive the REAL `main` over a temp input pair; `(exit_code, report_was_written)`.
+
+    End-to-end on purpose: what has to be proven is that the LANE refuses, not merely
+    that a predicate returned a string.
+    """
+    corpus, decisions = _st_lane_inputs(ledger)
+    mutate(corpus, decisions)
+    with tempfile.TemporaryDirectory() as tmp:
+        cases_path = os.path.join(tmp, "cases.json")
+        odre_path = os.path.join(tmp, "odre-decisions.json")
+        out_path = os.path.join(tmp, "agreement-report.json")
+        for path, obj in ((cases_path, corpus), (odre_path, decisions)):
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(obj, f)
+        code = main(["--cases", cases_path, "--odre", odre_path, "--out", out_path])
+        return code, os.path.exists(out_path)
+
+
 def self_test():
     """Prove the gate is non-vacuous: an unexplained divergence must FAIL.
 
     The anti-vacuity discipline the workload engine uses for its by-construction oracle
-    (design record §2.3: 'the oracle's oracle'). Three synthetic scenarios are driven
-    through the real classifier and the real gate:
+    (design record §2.3: 'the oracle's oracle'). Synthetic scenarios are driven through
+    the real classifier and the real gate:
 
       1. agreement            -> no divergence, gate passes
       2. explained divergence -> classified from the ledger, gate passes
       3. unexplained one      -> unclassified, gate FAILS with exit 3
+      4. ODRE absent          -> schema-complete report, and NO agreement rate
+      5. unattributable deny  -> must not inherit a ledger entry's excuse
+      6. input gate           -> a truncated, duplicated or unpinned-version decision
+                                 file must fail the LANE (exit 2, nothing published)
+                                 rather than degrade into skips in a `complete` report
 
-    If scenario 3 ever passes, this lane's headline invariant is broken and the self-test
-    fails loudly instead of the lane quietly reporting green.
+    If scenario 3 or 6 ever passes, this lane's headline invariant is broken and the
+    self-test fails loudly instead of the lane quietly reporting green.
     """
     ledger = load_json(LEDGER_PATH)
     capabilities = load_json(CAPABILITIES_PATH)
@@ -685,6 +870,49 @@ def self_test():
     if report["encodings"]["standard"]["agreement_rate"] is not None:
         failures.append("scenario 4 stated an agreement rate with no ODRE run — honesty invariant broken")
 
+    # 6. the INPUT gate: an ODRE run that did not cover the corpus, or that was not the
+    #    pinned release, must stop the lane before any figure is computed. The intact pair
+    #    is the positive control — without it a gate that rejected everything would look
+    #    identical to one that rejects the right things.
+    def drop_case(_corpus, decisions):
+        del decisions["cases"][1]
+
+    def drop_encoding(_corpus, decisions):
+        del decisions["cases"][0]["encodings"]["projected"]
+
+    def duplicate_case(_corpus, decisions):
+        decisions["cases"].append(dict(decisions["cases"][0]))
+
+    def unexpected_case(_corpus, decisions):
+        extra = dict(decisions["cases"][0], id="st-9999")
+        decisions["cases"].append(extra)
+
+    def wrong_version(_corpus, decisions):
+        decisions["odre"]["version"] = "0.0.0-not-the-pinned-release"
+
+    def unknown_version(_corpus, decisions):
+        decisions["odre"]["version"] = "unknown"
+
+    for name, mutate, expected in (
+        ("intact inputs", lambda c, d: None, EXIT_OK),
+        ("a corpus case with no ODRE result", drop_case, EXIT_USAGE),
+        ("a missing encoding result", drop_encoding, EXIT_USAGE),
+        ("a duplicated case id", duplicate_case, EXIT_USAGE),
+        ("a case id the corpus does not contain", unexpected_case, EXIT_USAGE),
+        ("an ODRE version that is not the pin", wrong_version, EXIT_USAGE),
+        ("an unreadable ODRE version", unknown_version, EXIT_USAGE),
+    ):
+        code, written = _st_run_lane(ledger, mutate)
+        if code != expected:
+            failures.append(
+                "scenario 6 (%s): the lane exited %d, expected %d" % (name, code, expected)
+            )
+        if expected != EXIT_OK and written:
+            failures.append(
+                "scenario 6 (%s): the lane published a report anyway — an incomplete or "
+                "unpinned run must produce no report at all" % name
+            )
+
     if failures:
         print("[agreement] SELF-TEST FAILED:", file=sys.stderr)
         for f in failures:
@@ -734,11 +962,14 @@ def main(argv=None):
     capabilities = load_json(CAPABILITIES_PATH)
     schema = load_json(SCHEMA_PATH)
 
-    if ledger["pinned_odre_version"] != capabilities["pinned_version"]:
+    bad_inputs = input_errors(corpus, decisions, ledger, capabilities)
+    if bad_inputs:
+        print("[agreement] ERROR: the inputs cannot be scored:", file=sys.stderr)
+        for e in bad_inputs:
+            print("  - %s" % e, file=sys.stderr)
         print(
-            "[agreement] ERROR: the divergence ledger pins ODRE %s but the capability table "
-            "pins %s — refusing to classify against a mismatched pair."
-            % (ledger["pinned_odre_version"], capabilities["pinned_version"]),
+            "[agreement] no report written: an agreement figure over these inputs would "
+            "not be the figure it claims to be.",
             file=sys.stderr,
         )
         return EXIT_USAGE

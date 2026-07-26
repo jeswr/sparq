@@ -50,9 +50,16 @@ two systems must match a sourced entry in `known-divergences.json`, classified a
 - **semantics-gap** — a documented, defensible difference in reading ODRL;
 - **implementation-bug** — an implementation not doing what its own docs say.
 
-`run.sh` runs `agreement.py --self-test` on every invocation: three synthetic scenarios
-drive the real classifier and gate, and the unexplained one **must** come back red. A gate
-that cannot fail would make the lane's green meaningless.
+It also **fails (exit 2) before computing anything** when the inputs are not the run they
+would claim to be: an installed `pyodre` that is not the pinned version (the ledger's
+divergence excuses are transcribed from that release specifically), or an
+`odre-decisions.json` that does not cover every corpus case under every encoding exactly
+once. Those are input errors, not a batch of skips inside a `complete` report.
+
+`run.sh` runs `agreement.py --self-test` on every invocation: synthetic scenarios drive
+the real classifier, the real gate and the real input checks, and the unexplained
+divergence, the truncated decision file and the unpinned-version run **must** all come back
+red. A gate that cannot fail would make the lane's green meaningless.
 
 ## Honesty contract
 
