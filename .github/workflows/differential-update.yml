@@ -117,14 +117,14 @@ jobs:
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # Both shards build the identical sparq-bench release binary — share one
+          # Both shards build the identical sparq-bench release-fast binary — share one
           # cache key (and the same key as the query-differential lane, which
           # builds the same binary).
           shared-key: differential-nightly
       # Build once, distinctly, so a compile error is reported separately from a
       # differential mismatch.
       - name: Build the differential fuzzer
-        run: cargo build -p sparq-bench --release
+        run: cargo build -p sparq-bench --profile release-fast
       - name: Compute the seed window
         id: window
         env:
@@ -169,7 +169,7 @@ jobs:
           # Tee the log: on a divergence it contains the full deterministic repro
           # (MISMATCH seed=N lines + the FIRST FAILING CASE block with the replay
           # command and the whole update sequence). pipefail keeps the exit code.
-          ./target/release/sparq-bench update-fuzz --seed-start "$START" --seed-count "$COUNT" 2>&1 \
+          ./target/release-fast/sparq-bench update-fuzz --seed-start "$START" --seed-count "$COUNT" 2>&1 \
             | tee "$RUNNER_TEMP/update-fuzz-log.txt"
       # ── failure path: preserve the repro + auto-file the finding ────────────────
       - name: Auto-file the finding (GitHub issue + P1 bug bead, deduped)

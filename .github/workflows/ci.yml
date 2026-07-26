@@ -1353,7 +1353,7 @@ jobs:
           while true; do
             echo "::group::W3C SPARQL conformance — attempt $attempt/$MAX_ATTEMPTS"
             rc=0
-            cargo run --release -p sparq-conformance --bin sparq-conformance || rc=$?
+            cargo run --profile release-fast -p sparq-conformance --bin sparq-conformance || rc=$?
             echo "::endgroup::"
             if [ "$rc" -eq 0 ]; then
               echo "W3C SPARQL conformance suites completed on attempt $attempt"
@@ -1376,14 +1376,14 @@ jobs:
         # self-skip without the pinned w3c/rdf-tests clone this job just fetched —
         # this is where they run against the real data.
         run: |
-          cargo test --release -p sparq-conformance \
+          cargo test --profile release-fast -p sparq-conformance \
             --test rdf_line_syntax_ratchet --test parser_differential -- --nocapture
       - name: Consolidated conformance scoreboard (all suites + floors)
         # [OPUS-4.8] sq-ncvq.16: surface the ONE central index of every conformance
         # ratchet across crates (SPARQL + inference + SHACL + GeoSPARQL) at the top
         # of the primary conformance job's summary, then the detailed SPARQL report.
         run: |
-          cargo run --release -p sparq-conformance --bin sparq-conformance-scoreboard
+          cargo run --profile release-fast -p sparq-conformance --bin sparq-conformance-scoreboard
           cat conformance-scoreboard.md >> "$GITHUB_STEP_SUMMARY"
       - name: Summarize
         run: cat conformance-report.md >> "$GITHUB_STEP_SUMMARY"
@@ -1687,7 +1687,7 @@ jobs:
         # + floors across crates) into this job's step summary, so the GeoSPARQL job
         # surfaces where it sits in the whole conformance picture.
         run: |
-          cargo run --release -p sparq-conformance --bin sparq-conformance-scoreboard
+          cargo run --profile release-fast -p sparq-conformance --bin sparq-conformance-scoreboard
           cat conformance-scoreboard.md >> "$GITHUB_STEP_SUMMARY"
       - name: Upload scoreboard
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -1790,7 +1790,7 @@ jobs:
         # floors across crates) into this job's step summary, so the Solid job
         # surfaces where it sits in the whole conformance picture.
         run: |
-          cargo run --release -p sparq-conformance --bin sparq-conformance-scoreboard
+          cargo run --profile release-fast -p sparq-conformance --bin sparq-conformance-scoreboard
           cat conformance-scoreboard.md >> "$GITHUB_STEP_SUMMARY"
       - name: Upload scoreboard
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -1894,7 +1894,7 @@ jobs:
         # into this job's step summary, so the ODRL job surfaces where it sits in the
         # whole conformance picture.
         run: |
-          cargo run --release -p sparq-conformance --bin sparq-conformance-scoreboard
+          cargo run --profile release-fast -p sparq-conformance --bin sparq-conformance-scoreboard
           cat conformance-scoreboard.md >> "$GITHUB_STEP_SUMMARY"
       - name: Upload scoreboard
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -1995,7 +1995,7 @@ jobs:
         # including this EXTENSION row) into this job's step summary, so it surfaces
         # where the text oracle sits in the whole picture.
         run: |
-          cargo run --release -p sparq-conformance --bin sparq-conformance-scoreboard
+          cargo run --profile release-fast -p sparq-conformance --bin sparq-conformance-scoreboard
           cat conformance-scoreboard.md >> "$GITHUB_STEP_SUMMARY"
       - name: Upload scoreboard
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -2100,7 +2100,7 @@ jobs:
         # including this EXTENSION row) into this job's step summary, so it surfaces
         # where the RSP oracle sits in the whole picture.
         run: |
-          cargo run --release -p sparq-conformance --bin sparq-conformance-scoreboard
+          cargo run --profile release-fast -p sparq-conformance --bin sparq-conformance-scoreboard
           cat conformance-scoreboard.md >> "$GITHUB_STEP_SUMMARY"
       - name: Upload scoreboard
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -2250,7 +2250,7 @@ jobs:
         # into this job's step summary, so the JSON-LD job surfaces where it sits in
         # the whole conformance picture.
         run: |
-          cargo run --release -p sparq-conformance --bin sparq-conformance-scoreboard
+          cargo run --profile release-fast -p sparq-conformance --bin sparq-conformance-scoreboard
           cat conformance-scoreboard.md >> "$GITHUB_STEP_SUMMARY"
       - name: Upload scoreboard
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -2471,7 +2471,7 @@ jobs:
           while true; do
             echo "::group::Inference conformance — attempt $attempt/$MAX_ATTEMPTS"
             rc=0
-            cargo run --release -p sparq-conformance --bin sparq-inference-conformance || rc=$?
+            cargo run --profile release-fast -p sparq-conformance --bin sparq-inference-conformance || rc=$?
             echo "::endgroup::"
             if [ "$rc" -eq 0 ]; then
               echo "Inference conformance suites completed on attempt $attempt"
@@ -2672,20 +2672,20 @@ jobs:
         # consts. HONESTLY sparq-EXTENSION ratchets over the SCOPED FRAGMENT the
         # layered checker implements — NOT full OWL 2 DL, never summed into a
         # conformance number. `--nocapture` so the ratchet lines reach stdout.
-        # [SONNET-4.6] sq-25q5q: run this lane `--release`. The sparq-reason-dl L4
+        # [SONNET-4.6] sq-25q5q: run this lane optimized. The sparq-reason-dl L4
         # tableau does a per-rule-application O(nodes×labels) rescan (a pre-existing
         # property found during sq-pbz04.4.5), so the DEBUG test-RUNTIME dominated the
         # whole inference-conformance job (~9 min of an ~11 min job in CI history vs
-        # seconds for every sibling lane). `--release` collapses that runtime; the one-
+        # seconds for every sibling lane). Optimized codegen collapses that runtime; the one-
         # time optimized compile of sparq-reason-dl + the dl_suite harness is amortized
         # by the Swatinem release cache (the `Run inference suites` step above already
-        # warms the release profile via `cargo run --release`). COVERAGE IS UNCHANGED:
+        # warms the release-fast profile via `cargo run --profile release-fast`). COVERAGE IS UNCHANGED:
         # same test target, same `dl-direct` feature, same EXACT `==` pins (68 profile /
         # 184 direct) asserted in-runner and re-grepped from source — only the codegen
         # optimization level changes, never the assertions or the fail-closed behavior.
         run: |
           set -uo pipefail
-          cargo test --release -p sparq-conformance --features dl-direct --test dl_suite -- --nocapture \
+          cargo test --profile release-fast -p sparq-conformance --features dl-direct --test dl_suite -- --nocapture \
             | tee dl-direct-conformance.out
           rc=${PIPESTATUS[0]}
           [ "$rc" -eq 0 ] || { echo "::error::OWL 2 Direct-Semantics arm test failed (exit $rc)"; exit "$rc"; }

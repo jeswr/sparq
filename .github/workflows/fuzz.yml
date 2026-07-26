@@ -480,16 +480,16 @@ jobs:
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           # Share the nightly differential lane's cache key: both build the exact
-          # same sparq-bench release binary, and differential.yml's main-scoped
+          # same sparq-bench release-fast binary, and differential.yml's main-scoped
           # nightly save keeps this warm for every PR.
           shared-key: differential-nightly
       # Build distinctly so a compile error is reported separately from a mismatch.
       - name: Build the differential fuzzer
-        run: cargo build -p sparq-bench --release
+        run: cargo build -p sparq-bench --profile release-fast
       - name: Run the fixed differential regression windows
         run: |
           set -euo pipefail
-          b=./target/release/sparq-bench
+          b=./target/release-fast/sparq-bench
           # Canonical broad smoke (all categories, deterministic seeds).
           "$b" fuzz 0 2000 all
           # sq-lr2ii known-catch windows (category-dense; 'all' misses this class).
