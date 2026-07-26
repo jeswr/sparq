@@ -36,6 +36,11 @@ if (packed) {
   const has = (re) => entries.some((p) => re.test(p));
   if (!has(/^dist\/index\.js$/)) fail('packed tarball is missing dist/index.js (the main entrypoint)');
   if (!has(/^dist\/index\.d\.ts$/)) fail('packed tarball is missing dist/index.d.ts (the type entrypoint)');
+  // [OPUS-5] sq-xqchl.3 — the classic-`<script>` entrypoint, produced by `build:iife`. It is
+  // easy to drop from the `build` chain without any ESM consumer noticing, so pin it here.
+  if (!has(/^dist\/eyereasoner-compat\.iife\.js$/)) {
+    fail('packed tarball is missing dist/eyereasoner-compat.iife.js (the classic <script> bundle)');
+  }
   if (!has(/^wasm\/.*_bg\.wasm$/)) fail('packed tarball is missing the wasm engine (wasm/*_bg.wasm)');
   if (!has(/^wasm\/sparq_reason_wasm\.js$/)) fail('packed tarball is missing the wasm-bindgen glue');
 }
