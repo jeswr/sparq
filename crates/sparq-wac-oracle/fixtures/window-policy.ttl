@@ -1,0 +1,21 @@
+# [SONNET-4.6] sq-x1ayt — the ODRL policy whose bridged grant carries a LIVE-CLOCK
+# validity window. `odrl:recipient eq carol` maps to the grant's agent head; the two
+# `odrl:dateTime` bounds map faithfully to `auth:notBefore` (gteq, inclusive) and
+# `auth:notAfter` (lteq, inclusive), which the session layer re-checks against
+# `Session::now` PER REQUEST rather than freezing at materialization time.
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+<urn:sparq:wac-oracle/window> a odrl:Set ;
+    odrl:permission [
+        odrl:action odrl:read ;
+        odrl:target <https://pod.ex/win8/d0.ttl> ;
+        odrl:constraint [ odrl:leftOperand odrl:recipient ;
+                          odrl:operator odrl:eq ;
+                          odrl:rightOperand <https://carol.ex/card#me> ] ;
+        odrl:constraint [ odrl:leftOperand odrl:dateTime ;
+                          odrl:operator odrl:gteq ;
+                          odrl:rightOperand "2026-06-01T00:00:00Z"^^xsd:dateTime ] ;
+        odrl:constraint [ odrl:leftOperand odrl:dateTime ;
+                          odrl:operator odrl:lteq ;
+                          odrl:rightOperand "2026-12-31T00:00:00Z"^^xsd:dateTime ] ] .
