@@ -32,7 +32,16 @@ SEC_KEYWORDS = ("zk", "mpc", "reasoner", "crypto", "auth", "e2ee")
 # role:site chain in orchestration/routing.toml leads with terra/codex). EXACT labels, not
 # substrings: a substring set would false-match (e.g. "gui" in "guide") and UI keywords must NOT
 # enter routing match_labels, which the arm-side security classifier unions into its keyword set.
-UI_SURFACE_LABELS = ("area:site", "area:gui", "surface:frontend", "dashboard")
+UI_SURFACE_LABELS = ("area:site", "surface:frontend", "dashboard")
+# [OPUS-5] `area:gui` gets its OWN role (maintainer directive 2026-07-26). The routing default
+# flipped to opus5-first over sol, "except for GUI work where sol should remain prioritised", and
+# the maintainer settled the boundary as "just go with area:gui work". area:gui used to sit in
+# UI_SURFACE_LABELS above and therefore derived role:site — which made the carve-out inexpressible,
+# because role:site also covers area:site / surface:frontend / dashboard, and those are NOT in the
+# carve-out. Splitting the label out is what lets orchestration/routing.toml give role:gui a
+# sol-first chain while role:site takes the opus5-first default like everything else.
+# EXACT label, never a substring: a substring test would match "guide"/"guidance".
+GUI_SURFACE_LABELS = ("area:gui",)
 # [FABLE-5] STANDING RULE — frontier-tier CI/infrastructure authorship (maintainer decision
 # 2026-07-17, same pattern as the UI→codex rule above / PR #3416): infra-surface labels derive
 # role:ci so infra work (.github/workflows, gate aggregators, orchestration/ + dispatch scripts)
@@ -62,8 +71,14 @@ def _role(labels, issue_type):
     for lb in labels:
         if lb.startswith("kind:") and lb[5:] in ROLE_BY_KIND:
             return ROLE_BY_KIND[lb[5:]]
-    # [FABLE-5] UI-surface labels derive role:site (codex-led chain) before the generic type map,
-    # after kind (so kind:docs about the site stays docs) and after an explicit role:* label.
+    # [OPUS-5] area:gui derives role:gui — the sol-first carve-out — and is tested BEFORE the
+    # generic UI rule below, which would otherwise swallow it into role:site again. Same
+    # precedence slot otherwise (after security, an explicit role:*, and kind).
+    if any(lb in GUI_SURFACE_LABELS for lb in labels):
+        return "gui"
+    # [FABLE-5] UI-surface labels derive role:site (now the opus5-first default chain) before the
+    # generic type map, after kind (so kind:docs about the site stays docs) and after an explicit
+    # role:* label. NOTE: area:gui is deliberately NOT here — see GUI_SURFACE_LABELS.
     if any(lb in UI_SURFACE_LABELS for lb in labels):
         return "site"
     # [FABLE-5] infra-surface labels derive role:ci (the frontier-only fable/terra chain) before
@@ -153,7 +168,21 @@ def _self_test():
     # [FABLE-5] UI-surface ownership: a UI-surface label derives role:site (the codex/GPT-5.6-led
     # chain) even when the issue type would derive impl; kind (docs) and security still win.
     chk("ui surface -> site", triage(["priority:P2", "area:site"], "feature")["role"], "site")
-    chk("gui surface -> site", triage(["priority:P2", "area:gui"], "task")["role"], "site")
+    # [OPUS-5] the area:gui carve-out (maintainer 2026-07-26): area:gui gets its OWN role so the
+    # routing table can keep it sol-first while everything else prefers opus5.
+    chk("gui surface -> gui (NOT site)", triage(["priority:P2", "area:gui"], "task")["role"], "gui")
+    # THE DISCRIMINATION THAT MATTERS: "GUI" informally reads as covering the site surfaces, so a
+    # future editor could easily widen the carve-out back over them. NO site* area may derive
+    # role:gui — that is the exact property, asserted independently of which non-gui role each
+    # one happens to take (area:site -> site; the narrower area:site-specs / area:site-papers are
+    # not exact UI_SURFACE_LABELS and fall through to the type map, which is fine: every one of
+    # those roles is on the opus5-first default).
+    for _area in ("area:site", "area:site-specs", "area:site-papers", "area:sitemap"):
+        chk(f"{_area} does NOT derive role:gui (not swept into the sol carve-out)",
+            triage(["priority:P2", _area], "task")["role"] == "gui", False)
+    chk("surface:frontend stays role:site", triage(["priority:P2", "surface:frontend"], "task")["role"], "site")
+    chk("a 'guide' label does NOT false-match the gui carve-out",
+        triage(["priority:P2", "area:guide"], "task")["role"], "impl")
     chk("explicit impl on ui surface stays impl",
         triage(["priority:P2", "role:impl", "area:site"], "feature")["role"], "impl")
     chk("site docs stay docs", triage(["priority:P3", "kind:docs", "area:site"], "task")["role"], "docs")

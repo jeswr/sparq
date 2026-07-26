@@ -92,7 +92,7 @@ provider_model = "gpt-5.6-luna"        # Second tier of the unified fix ladder o
 credential_format = "codex-auth-json"
 
 [defaults]
-model_chain = ["sol", "opus5"]
+model_chain = ["opus5", "sol"]
 agent = "sparq-rust-impl"
 
 # ---------------------------------------------------------------------------------------------------
@@ -108,15 +108,25 @@ agent = "sparq-reviewer"
 escalate = true                        # consumed by dispatch: on chain-exhaustion, label needs:user
 
 # ---------------------------------------------------------------------------------------------------
-# ROLE ROUTES. Implementation chains LEAD WITH SOL (maintainer directive 2026-07-18: credit
-# abundance; capability order luna < opus5 < sol since 2026-07-26, fable/opus deprecated out of the
-# order entirely). Opus 5 IS the anthropic side — it has no tail fallback — so an OpenAI outage
-# falls to opus5 and an opus5 outage DEFERS the item at the registry claim step (retried next tick)
-# rather than degrading tier. Cross-provider review flips automatically: sol-authored
-# implementation receives Anthropic review, and vice versa.
+# ROLE ROUTES. Implementation chains LEAD WITH OPUS 5 (maintainer directive 2026-07-26: "Opus5
+# should be prioritised over sol on all tasks for which they are both possible implementors;
+# except for GUI work where sol should remain prioritised").
+#
+# WHY THIS CHANGED, because the mechanism matters more than the edit: these chains led with SOL
+# under the 2026-07-18 "credit abundance" directive, taken during a period of high sol
+# availability. Nothing about sol's dominance was adaptive — the registry's account selector walks
+# `model_chain` IN ORDER and claims the first available account (select-and-claim.choose_account),
+# so a sol-first literal simply won every route, every tick, regardless of how availability had
+# since shifted. Measured 2026-07-26: 11 of the 12 most recent orchestrator PRs were
+# openai/sol-implemented. The stale steer was the chain ORDER itself, not a heuristic, so the fix
+# is the order.
+#
+# Cross-provider review flips automatically: opus5-authored implementation receives codex review,
+# and vice versa — so leading with opus5 also moves the review load onto sol, which is where the
+# spare credit actually is.
 [[route]]
 role = "impl"
-model_chain = ["sol", "opus5"]
+model_chain = ["opus5", "sol"]
 agent = "sparq-rust-impl"
 
 # [FABLE-5] UI/front-end ownership (maintainer decision 2026-07-17): GPT-5.6 codex (openai; alias
@@ -128,6 +138,29 @@ agent = "sparq-rust-impl"
 # unions ALL match_labels keywords, so UI keywords there would human-arm every UI PR.
 [[route]]
 role = "site"
+model_chain = ["opus5", "sol"]
+agent = "sparq-site"
+
+# [OPUS-5] THE `area:gui` CARVE-OUT (maintainer directive 2026-07-26): "Opus5 should be prioritised
+# over sol on all tasks for which they are both possible implementors; except for GUI work where
+# sol should remain prioritised". Boundary settled by the maintainer the same day: "Let's just go
+# with area:gui work" — so the carve-out is `area:gui` and NOTHING ELSE. The site* surfaces
+# (area:site, area:site-specs, area:site-papers, …) are NOT GUI: they fall under the opus5-first
+# default above, even though "GUI" reads informally as if it covered them.
+#
+# This route PRESERVES the existing UI -> codex/sol original-builder steer (task #331) for the
+# desktop GUI; it is a carve-out from a new default, not a reversal of anything.
+#
+# It is a ROLE route, not `match_labels`, for the same reason the site route is: the review lane's
+# arm-side security classifier UNIONS every match_labels keyword, so putting "gui" there would
+# human-arm every GUI PR. scripts/triage.py derives role:gui from `area:gui` alone (it used to
+# fold area:gui into role:site, which is exactly why a separate role is needed to express the
+# carve-out at all).
+#
+# PREFERENCE, NOT EXCLUSION: opus5 remains the fallback, so GUI work stays dispatchable during a
+# sol/OpenAI outage. The chain is cross-provider and therefore cannot be starved by one provider.
+[[route]]
+role = "gui"
 model_chain = ["sol", "opus5"]
 agent = "sparq-site"
 
@@ -149,12 +182,12 @@ agent = "sparq-site"
 # escalation) — where role:ci and a security surface overlap, the security lane is correct.
 [[route]]
 role = "ci"
-model_chain = ["sol", "opus5"]
+model_chain = ["opus5", "sol"]
 agent = "sparq-ci-infra"
 
 [[route]]
 role = "perf"
-model_chain = ["sol", "opus5"]
+model_chain = ["opus5", "sol"]
 agent = "sparq-perf-engineer"
 
 # [OPUS-5] research was ["opus5", "fable", "opus"] until 2026-07-26. Deprecating the two tail

@@ -136,6 +136,95 @@ class TestRoutingTable(unittest.TestCase):
                 f"exhaustion it can only defer forever with no human exit")
 
 
+class TestProviderPreference(unittest.TestCase):
+    """[OPUS-5] Opus 5 is preferred over sol EXCEPT on `area:gui` (maintainer 2026-07-26).
+
+    WHY THIS IS A GUARD AND NOT JUST AN EDIT: sol did not win ~every implementation route through
+    any adaptive heuristic. The registry's allocator walks `model_chain` IN ORDER and claims the
+    first available account, so the sol-first literal — set during a 2026-07-18 high-availability
+    window — simply won every route on every tick, and kept winning long after availability
+    shifted. Measured 2026-07-26: 11 of the 12 most recent orchestrator PRs were sol-implemented.
+    A preference expressed purely as chain ORDER decays exactly this way, so the order is pinned.
+    """
+
+    # The routes where opus5 and sol are BOTH viable implementors. role:docs is excluded: the
+    # separate 2026-07-26 docs-writing directive puts sol first there deliberately.
+    OPUS5_FIRST_ROLES = ("impl", "site", "ci", "perf")
+    GUI_ROLE = "gui"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.doc = _routing_doc()
+        cls.routes = {r["role"]: r for r in cls.doc["route"] if r.get("role")}
+
+    def test_default_prefers_opus5_over_sol(self):
+        """MUTANT: reorder any of these chains back to sol-first => RED."""
+        for role in self.OPUS5_FIRST_ROLES:
+            chain = self.routes[role]["model_chain"]
+            self.assertEqual(chain[0], "opus5",
+                             f"role:{role} must prefer opus5 over sol (maintainer 2026-07-26)")
+            self.assertLess(chain.index("opus5"), chain.index("sol"),
+                            f"role:{role}: opus5 must outrank sol")
+
+    def test_defaults_chain_prefers_opus5(self):
+        self.assertEqual(self.doc["defaults"]["model_chain"][0], "opus5")
+
+    def test_preference_is_not_exclusion(self):
+        """sol must stay REACHABLE on non-GUI work. MUTANT: drop sol from a chain => RED."""
+        for role in self.OPUS5_FIRST_ROLES:
+            self.assertIn("sol", self.routes[role]["model_chain"],
+                          f"role:{role}: sol must remain a fallback, not be excluded")
+
+    def test_gui_carve_out_keeps_sol_first(self):
+        """MUTANT: delete the role:gui route, or flip it to opus5-first => RED."""
+        self.assertIn(self.GUI_ROLE, self.routes,
+                      "the area:gui carve-out route is missing entirely")
+        chain = self.routes[self.GUI_ROLE]["model_chain"]
+        self.assertEqual(chain[0], "sol",
+                         "GUI work keeps sol first (original-builder steer, task #331)")
+
+    def test_gui_carve_out_is_preference_not_exclusion(self):
+        """GUI must stay dispatchable during a sol/OpenAI outage."""
+        self.assertIn("opus5", self.routes[self.GUI_ROLE]["model_chain"])
+
+    def test_every_preference_chain_terminates_cross_provider(self):
+        """Both directions must terminate: a chain naming only ONE provider can be starved by that
+        provider's outage with no other rung to fall to."""
+        for role in self.OPUS5_FIRST_ROLES + (self.GUI_ROLE,):
+            chain = self.routes[role]["model_chain"]
+            providers = {self.doc["models"][m]["provider"] for m in chain}
+            self.assertEqual(providers, {"anthropic", "openai"},
+                             f"role:{role} chain {chain} is single-provider — it can be starved")
+
+    def test_carve_out_selector_is_exactly_area_gui(self):
+        """THE ONE THAT MATTERS MOST. "GUI" informally reads as covering the site surfaces, so the
+        likely future mistake is widening the sol carve-out back over `site*`. The carve-out is
+        `area:gui` and nothing else (maintainer: "Let's just go with area:gui work").
+
+        MUTANT: add "area:site" (or any site* label) to triage's GUI_SURFACE_LABELS => RED.
+        """
+        triage_src = (REPO_ROOT / "scripts" / "triage.py").read_text(encoding="utf-8")
+        m = re.search(r"(?m)^GUI_SURFACE_LABELS = \(([^)]*)\)", triage_src)
+        self.assertIsNotNone(m, "GUI_SURFACE_LABELS not found or reshaped")
+        labels = [x.strip().strip("\"'") for x in m.group(1).split(",") if x.strip()]
+        self.assertEqual(labels, ["area:gui"],
+                         "the sol carve-out selector must be EXACTLY area:gui — no site* label, "
+                         "no surface:frontend, no dashboard")
+
+    def test_site_surfaces_are_not_in_the_carve_out(self):
+        """The same property from the other side: the generic UI label set (which routes to the
+        opus5-first role:site) must not contain area:gui, and the gui set must not contain any
+        site* label. MUTANT: move area:gui back into UI_SURFACE_LABELS => RED."""
+        triage_src = (REPO_ROOT / "scripts" / "triage.py").read_text(encoding="utf-8")
+        ui = re.search(r"(?m)^UI_SURFACE_LABELS = \(([^)]*)\)", triage_src)
+        self.assertIsNotNone(ui, "UI_SURFACE_LABELS not found or reshaped")
+        ui_labels = [x.strip().strip("\"'") for x in ui.group(1).split(",") if x.strip()]
+        self.assertNotIn("area:gui", ui_labels,
+                         "area:gui must derive role:gui, not role:site — otherwise the carve-out "
+                         "is inexpressible and GUI silently takes the opus5-first default")
+        self.assertIn("area:site", ui_labels, "role:site must still cover area:site")
+
+
 class TestSettingsHooks(unittest.TestCase):
     """Surface 2 — .claude/settings.json agent hooks. The bare-alias regression lived HERE."""
 

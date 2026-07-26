@@ -167,7 +167,7 @@ def _self_test():
     chk("impl -> single row", len(p_impl), 1)
     row = p_impl[0]
     chk("impl row", (row["role"], row["model_chain"][0], row["agent"], row["escalate"]),
-        ("impl", "sol", "sparq-rust-impl", False))
+        ("impl", "opus5", "sparq-rust-impl", False))
     chk("impl package", row["package"], "sparq-core")
     chk("impl priority", row["priority"], 1)
 
@@ -198,7 +198,7 @@ def _self_test():
     ci = compute_ready([iss(8, R + ["priority:P1", "role:ci", "area:ci"])])
     row = plan_dispatch(ci, doc)[0]
     chk("ci -> frontier-only row", (row["role"], row["model_chain"], row["agent"], row["escalate"]),
-        ("ci", ["sol", "opus5"], "sparq-ci-infra", False))
+        ("ci", ["opus5", "sol"], "sparq-ci-infra", False))
     chk("ci row has no sub-frontier tier", sorted(set(row["model_chain"]) & {"sonnet", "haiku"}), [])
 
     # --- Fixture: package-conflict pair → only the higher-priority one is planned ----------------

@@ -157,25 +157,51 @@ def _self_test():
     chk("impl+zk -> opus5/escalate", (mc, ag, esc), (["opus5"], "sparq-reviewer", True))
     # plain impl -> sol-led chain (maintainer directive 2026-07-18)
     mc, ag, esc = resolve(["role:impl", "area:sparq-core"], doc)
-    chk("impl -> sol-led", (mc, ag, esc), (["sol", "opus5"], "sparq-rust-impl", False))
+    chk("impl -> opus5-led", (mc, ag, esc), (["opus5", "sol"], "sparq-rust-impl", False))
     # [OPUS-5] docs -> SOL-led (maintainer 2026-07-26: docs writing off haiku/sonnet onto gpt-5.6
     # sol). terra is sol's same-provider fallback; opus5 the cross-provider tail.
     chk("docs -> sol-led", resolve(["role:docs", "area:x"], doc)[0], ["sol", "terra", "opus5"])
     chk("docs chain has no cheap anthropic tier",
         sorted(set(resolve(["role:docs", "area:x"], doc)[0]) & NOT_A_ROUTING_TARGET), [])
     # [FABLE-5] UI ownership: site -> sol-led (GPT-5.6 codex, the original dashboard builder)
-    chk("site -> sol-led (GPT owns UI; terra is docs-only)",
-        resolve(["role:site", "area:site"], doc)[0], ["sol", "opus5"])
+    # [OPUS-5] site is NOT the gui carve-out — it takes the opus5-first default (2026-07-26).
+    chk("site -> opus5-led (site is outside the area:gui carve-out)",
+        resolve(["role:site", "area:site"], doc)[0], ["opus5", "sol"])
     # [FABLE-5] frontier-tier infra authorship (standing rule 2026-07-17): ci -> sol-first, opus5
     # the SOLE anthropic tier since 2026-07-26. FRONTIER-ONLY chain — no sub-frontier model
     # (sonnet/haiku) anywhere in it, so exhaustion DEFERS at the registry claim step (retried next
     # tick) instead of degrading tier.
     mc, ag, esc = resolve(["role:ci", "area:ci"], doc)
-    chk("ci -> frontier-only sol-first", (mc, ag, esc), (["sol", "opus5"], "sparq-ci-infra", False))
+    chk("ci -> frontier-only opus5-first", (mc, ag, esc), (["opus5", "sol"], "sparq-ci-infra", False))
     chk("ci chain has no sub-frontier tier", sorted(set(mc) & {"sonnet", "haiku"}), [])
     # no role -> defaults (sol-led, 2026-07-18)
-    chk("no role -> defaults", resolve(["area:sparq-core"], doc)[0][0], "sol")
-    chk("perf -> sol-led", resolve(["role:perf", "area:sparq-engine"], doc)[0], ["sol", "opus5"])
+    chk("no role -> defaults", resolve(["area:sparq-core"], doc)[0][0], "opus5")
+    chk("perf -> opus5-led", resolve(["role:perf", "area:sparq-engine"], doc)[0], ["opus5", "sol"])
+
+    # ---------------------------------------------------------------------------------------------
+    # [OPUS-5] OPUS-5-FIRST DEFAULT + THE `area:gui` CARVE-OUT (maintainer 2026-07-26).
+    # ---------------------------------------------------------------------------------------------
+    # Every route where opus5 AND sol are both viable implementors must lead with opus5...
+    for _role in ("impl", "site", "ci", "perf"):
+        mc = resolve([f"role:{_role}"], doc)[0]
+        chk(f"role:{_role} prefers opus5 over sol", mc[0], "opus5")
+        chk(f"role:{_role} keeps sol reachable as a fallback (preference, not exclusion)",
+            "sol" in mc, True)
+    chk("defaults prefer opus5 over sol", resolve(["area:sparq-core"], doc)[0][0], "opus5")
+    # ...EXCEPT role:gui, which keeps the sol lead (original-builder steer, task #331).
+    gui = resolve(["role:gui", "area:gui"], doc)[0]
+    chk("role:gui KEEPS sol first (the carve-out)", gui[0], "sol")
+    chk("role:gui keeps opus5 reachable (GUI stays dispatchable in a sol outage)",
+        "opus5" in gui, True)
+    chk("role:gui routes to the site agent", resolve(["role:gui"], doc)[1], "sparq-site")
+    # The carve-out is EXACTLY role:gui. role:site must NOT be swept into it — "GUI" reads
+    # informally as covering the site surfaces, which is the likely future widening mistake.
+    chk("role:site is NOT in the sol carve-out", resolve(["role:site"], doc)[0][0], "opus5")
+    # Both directions terminate: neither class can become undispatchable.
+    for _role in ("impl", "site", "ci", "perf", "gui"):
+        mc = resolve([f"role:{_role}"], doc)[0]
+        chk(f"role:{_role} chain is cross-provider (cannot be starved by one provider)",
+            sorted({doc["models"][m]["provider"] for m in mc}), ["anthropic", "openai"])
     chk("research -> opus5 only", resolve(["role:research"], doc)[0], ["opus5"])
     # review role -> opus5 + escalate
     chk("review -> opus5/escalate", resolve(["role:review"], doc)[1:], ("sparq-reviewer", True))
