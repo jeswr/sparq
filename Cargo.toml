@@ -90,6 +90,14 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 
+# [SONNET-4.6] sq-6vshe.10 — optimized correctness/smoke lanes do not need the
+# shipping profile's serial codegen and fat-LTO link tail. This profile is never
+# valid for benchmarks, perf ratchets, published measurements, or shipped artifacts.
+[profile.release-fast]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+
 # Python extension wheels (T21): release optimisation but UNWINDING panics, so a Rust
 # panic inside the `sparq` Python module surfaces as `pyo3_runtime.PanicException`
 # instead of `panic = "abort"` killing the whole interpreter. Used by
