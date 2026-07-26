@@ -48,6 +48,21 @@ RELEASE_PLZ_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release-plz.yml"
 GUARD_SCRIPT_REL = "scripts/release-interval-guard.py"
 RELEASE_JOB_ID = "release-plz-release"
 
+# The guard step's `run:` is pinned EXACTLY, not by substring. Four mutants applied to
+# this step survived a substring/identity reading (reported on PR #4192):
+#   run: … --enforce --repo-root . || true      -> `"--enforce" in run` still passes
+#   run: exit 0; … --enforce --repo-root .      -> ditto
+#   continue-on-error: 'true'                   -> `!= True` still passes (it is a str)
+#   continue-on-error: ${{ true }}              -> ditto, and Actions evaluates it TRUE
+# Equality plus absence closes both readings. If this command is ever legitimately
+# changed, update this constant in the same commit — deliberately.
+EXPECTED_GUARD_RUN = "python3 scripts/release-interval-guard.py --enforce --repo-root ."
+
+# Shell constructs that can discard the guard's non-zero exit status, or run something
+# before it that exits first. `runs-on: ubuntu-*` executes `run:` under `bash -e`, so a
+# bare newline cannot swallow a failure — but `||`, `;`, `&` and a pipe all can.
+_EXIT_STATUS_SWALLOWING = ("||", ";", "&", "|")
+
 
 def _load(name: str, filename: str):
     """Import a scripts/*.py module by path (the directory is not a package)."""
@@ -112,8 +127,13 @@ class TestReleaseWorkflowStructure(unittest.TestCase):
       * delete the guard step               -> test_guard_step_exists
       * `if: false` on the guard step       -> test_guard_step_is_unconditional
       * `continue-on-error: true`           -> test_guard_step_is_not_continue_on_error
+      * `continue-on-error: 'true'`         -> test_guard_step_is_not_continue_on_error
+      * `continue-on-error: ${{ true }}`    -> test_guard_step_is_not_continue_on_error
       * move it after release-plz/action    -> test_guard_runs_before_release_plz
       * `--dry-run` instead of `--enforce`  -> test_guard_step_enforces
+      * `… --enforce --repo-root . || true` -> test_guard_step_enforces AND
+                                               test_guard_step_cannot_swallow_its_exit_status
+      * `exit 0; … --enforce --repo-root .` -> both of the same two
     """
 
     def setUp(self) -> None:
@@ -136,12 +156,36 @@ class TestReleaseWorkflowStructure(unittest.TestCase):
 
     def test_guard_step_is_not_continue_on_error(self) -> None:
         step = self.steps[_guard_step_index(self.steps)]
-        self.assertNotEqual(
-            step.get("continue-on-error"),
-            True,
-            "`continue-on-error: true` on the guard step turns its refusal into an "
-            "advisory warning and the release proceeds anyway.",
+        # ABSENCE, not `!= True`. `continue-on-error: 'true'` and
+        # `continue-on-error: ${{ true }}` both load as STRINGS, so an identity or
+        # `is True` check passes while GitHub Actions evaluates them as true and the
+        # release proceeds past a refusal. A `${{ … }}` expression cannot be evaluated
+        # statically at all, so anything other than absence is refused here: the only
+        # value that is provably not truthy at run time is no value.
+        self.assertNotIn(
+            "continue-on-error",
+            step,
+            "the #1135 publish-cadence guard step carries `continue-on-error: "
+            f"{step.get('continue-on-error')!r}`. Any value — `true`, the string "
+            "`'true'`, or a `${{ … }}` expression — turns its refusal into an advisory "
+            "warning and the release publishes anyway. This step must carry no "
+            "`continue-on-error` key at all.",
         )
+
+    def test_guard_step_cannot_swallow_its_exit_status(self) -> None:
+        # `… --enforce --repo-root . || true` and `exit 0; … --enforce …` both satisfy
+        # a `"--enforce" in run` assertion while discarding the refusal. Independent of
+        # the equality check below, so relaxing that one does not silently reopen this.
+        run = str(self.steps[_guard_step_index(self.steps)]["run"])
+        for token in _EXIT_STATUS_SWALLOWING:
+            self.assertNotIn(
+                token,
+                run,
+                f"the guard step's `run:` contains {token!r} ({run!r}). A shell "
+                "operator can discard the guard's non-zero exit status (`|| true`) or "
+                "short-circuit it (`exit 0;`), leaving the step present and the "
+                "publish unguarded. Keep it a single bare command.",
+            )
 
     def test_guard_runs_before_release_plz(self) -> None:
         guard = _guard_step_index(self.steps)
@@ -155,17 +199,18 @@ class TestReleaseWorkflowStructure(unittest.TestCase):
 
     def test_guard_step_enforces(self) -> None:
         run = str(self.steps[_guard_step_index(self.steps)]["run"])
-        self.assertIn(
-            "--enforce",
-            run,
-            "the guard step must invoke --enforce; --dry-run always exits 0 and would "
-            "make the step decorative.",
-        )
-        self.assertNotIn(
-            "--dry-run",
-            run,
-            "the guard step invokes --dry-run, which never fails and therefore never "
-            "blocks a release.",
+        # EQUALITY, not containment. A containment assertion is satisfied by
+        # `python3 … --enforce --repo-root . || true`, which swallows the refusal, and
+        # by `exit 0; python3 … --enforce …`, which never reaches it. Pinning the whole
+        # command is the only reading that admits exactly one program.
+        self.assertEqual(
+            run.strip(),
+            EXPECTED_GUARD_RUN,
+            "the #1135 publish-cadence guard step's `run:` is not the exact expected "
+            f"command.\n  expected: {EXPECTED_GUARD_RUN!r}\n  found:    {run!r}\n"
+            "--dry-run always exits 0; a trailing `|| true` discards the refusal; a "
+            "leading `exit 0;` skips it. If this command changed on purpose, update "
+            "EXPECTED_GUARD_RUN in the same commit.",
         )
 
     def test_release_job_checks_out_full_history(self) -> None:
@@ -428,6 +473,107 @@ class TestReleasePrGuardEndToEndThroughTheHook(unittest.TestCase):
         )
 
 
+class TestSettingsJsonWrapperDoesNotInvertTheGuard(unittest.TestCase):
+    """The hook WRAPPER in .claude/settings.json must not invert the script (#4192, f3).
+
+    `scripts/check-pr-arm-base.py` deliberately fails CLOSED on the release axis. Its
+    wiring used to undo that: the shell wrapper was
+
+        if [ -r "$guard" ] && guard_output=$(python3 "$guard"); then …
+        else <permissionDecision: allow>
+
+    so whenever the guard could not RUN at all — deleted, unreadable, crashing, or
+    `CLAUDE_PROJECT_DIR` unset — the wrapper emitted **allow**. Measured on PR #4192's
+    head: all three of those cases returned `allow` for `gh pr merge 900 --auto --squash`.
+    An agent in a checkout where the guard is missing could therefore arm the Release PR,
+    which is the one thing this hook exists to prevent.
+
+    These tests execute the wrapper string out of settings.json as a real subprocess.
+    Reverting the `elif` back to a blanket `allow` reds
+    `test_an_unrunnable_guard_DENIES_an_arm`.
+    """
+
+    SETTINGS = REPO_ROOT / ".claude" / "settings.json"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        settings = json.loads(cls.SETTINGS.read_text(encoding="utf-8"))
+        commands = [
+            hook["command"]
+            for entry in settings.get("hooks", {}).get("PreToolUse", [])
+            for hook in entry.get("hooks", [])
+            if hook.get("type") == "command"
+            and "check-pr-arm-base.py" in str(hook.get("command", ""))
+        ]
+        assert len(commands) == 1, (
+            "expected exactly one PreToolUse command hook wrapping "
+            f"scripts/check-pr-arm-base.py in {cls.SETTINGS}, found {len(commands)} — "
+            "the arm guard was unwired from the harness"
+        )
+        cls.wrapper = commands[0]
+
+    def _decision(self, command: str, project_dir: str | None) -> str:
+        env = os.environ.copy()
+        if project_dir is None:
+            env.pop("CLAUDE_PROJECT_DIR", None)
+        else:
+            env["CLAUDE_PROJECT_DIR"] = project_dir
+        proc = subprocess.run(
+            ["bash", "-c", self.wrapper],
+            input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        payload = json.loads(proc.stdout)
+        return payload["hookSpecificOutput"]["permissionDecision"]
+
+    def test_an_unrunnable_guard_DENIES_an_arm(self) -> None:
+        arm_commands = (
+            "gh pr merge 900 --auto --squash",
+            "gh pr merge 900 --squash",  # the MORE dangerous, un-armed direct merge
+            "bash -c 'gh pr merge 900 --auto'",
+        )
+        with tempfile.TemporaryDirectory(prefix="sparq-1135-wrapper-") as tmp:
+            (Path(tmp) / "scripts").mkdir()
+            for command in arm_commands:
+                with self.subTest(case="guard absent", command=command):
+                    self.assertEqual(self._decision(command, tmp), "deny")
+                with self.subTest(case="CLAUDE_PROJECT_DIR unset", command=command):
+                    self.assertEqual(self._decision(command, None), "deny")
+
+            # Guard present but non-functional: exits non-zero without emitting JSON.
+            crashing = Path(tmp) / "scripts" / "check-pr-arm-base.py"
+            crashing.write_text("import sys\nsys.exit(3)\n", encoding="utf-8")
+            for command in arm_commands:
+                with self.subTest(case="guard crashes", command=command):
+                    self.assertEqual(self._decision(command, tmp), "deny")
+
+            # Guard runs but emits nothing: an empty decision is not a decision.
+            crashing.write_text("print('')\n", encoding="utf-8")
+            with self.subTest(case="guard emits nothing"):
+                self.assertEqual(
+                    self._decision("gh pr merge 900 --auto", tmp), "deny"
+                )
+
+    def test_an_unrunnable_guard_still_ALLOWS_a_non_merge_command(self) -> None:
+        # The discriminating half. This hook matches EVERY Bash tool call, so a blanket
+        # deny-on-failure would brick the fleet — and "deny" above would prove nothing.
+        with tempfile.TemporaryDirectory(prefix="sparq-1135-wrapper-ok-") as tmp:
+            (Path(tmp) / "scripts").mkdir()
+            for command in ("cargo test -p sparq-core", "ls -la", "git status"):
+                with self.subTest(command=command):
+                    self.assertEqual(self._decision(command, tmp), "allow")
+
+    def test_the_live_guard_is_still_delegated_to(self) -> None:
+        # With the real checkout the wrapper must run the SCRIPT, not its fallback: a
+        # non-merge command is allowed by the script itself, and the reason string is the
+        # script's, not the wrapper's.
+        self.assertEqual(self._decision("echo hello", str(REPO_ROOT)), "allow")
+
+
 # ================================================================ THE CADENCE GUARD
 class TestMinimumIntervalIsEnforced(unittest.TestCase):
     NOW = dt.datetime(2026, 7, 26, 12, 0, tzinfo=dt.timezone.utc)
@@ -615,6 +761,115 @@ class TestGuardOnARealGitRepository(unittest.TestCase):
             )
             self.assertEqual(code, 0, "\n".join(log))
             self.assertTrue(any("ALLOW" in line for line in log), log)
+
+    def test_run_ACTUALLY_fetches_crates_io_when_the_version_is_untagged(self) -> None:
+        """The CALL SITE, not the pure function (PR #4192 review, finding 2).
+
+        `test_crates_io_can_only_TIGHTEN_the_verdict` passes `crates_io_at` into
+        `decide()` as a parameter, so it cannot notice `run()` ceasing to fetch. Two
+        realistic edits survived it — someone deleting the ~26 registry requests to make
+        the release job faster or less flaky:
+
+            run(): crates_io_at = None            (never fetch)
+            run(): fetch, then discard the result
+
+        This fixture is the MAINTAINER'S HAND-BOOTSTRAP WINDOW (docs/release.md checklist
+        step 3): crates are published by hand, leaf-first, and **no tag is cut**. With no
+        `v*` tag, crates.io is the ONLY release signal in existence, so a `run()` that
+        skips or discards it has no interval bound at exactly the moment the interval
+        matters most — it would fall through to the "FIRST release, no cadence can have
+        been violated" branch and allow.
+        """
+        now = dt.datetime.now(dt.timezone.utc)
+        urls: list[str] = []
+
+        def fetch_recent(url: str):
+            urls.append(url)
+            return (
+                {
+                    "versions": [
+                        {"created_at": (now - dt.timedelta(hours=2)).isoformat()}
+                    ]
+                },
+                None,
+            )
+
+        with tempfile.TemporaryDirectory(prefix="sparq-1135-callsite-") as tmp:
+            # tag_at=None: NO `v*` tag at all — the bootstrap window.
+            root = _make_test_repo(Path(tmp), tag_at=None)
+            log: list[str] = []
+            code = interval_guard.run(
+                root, dry_run=False, now=now, fetch=fetch_recent, log=log.append
+            )
+            self.assertTrue(
+                urls,
+                "run() never called `fetch` even though no `v0.2.0` tag exists. During "
+                "the hand-bootstrap window crates.io is the only release signal, so an "
+                "unfetched registry means an UNBOUNDED publish cadence.\n"
+                + "\n".join(log),
+            )
+            self.assertEqual(
+                code,
+                1,
+                "run() did not refuse despite crates.io reporting a publication 2h ago "
+                "and the minimum interval being 24h — the fetched timestamp is being "
+                "discarded before it reaches decide().\n" + "\n".join(log),
+            )
+            self.assertTrue(
+                any("crates.io" in line for line in log),
+                "the refusal does not attribute itself to crates.io\n" + "\n".join(log),
+            )
+
+    def test_run_permits_when_crates_io_reports_an_OLD_publication(self) -> None:
+        # The discriminating counterpart to the test above: identical wiring, identical
+        # absence of tags, only the crates.io timestamp differs. Without this, "refused"
+        # above would prove nothing — the guard could simply refuse whenever it fetches.
+        now = dt.datetime.now(dt.timezone.utc)
+        urls: list[str] = []
+
+        def fetch_old(url: str):
+            urls.append(url)
+            return (
+                {"versions": [{"created_at": (now - dt.timedelta(days=40)).isoformat()}]},
+                None,
+            )
+
+        with tempfile.TemporaryDirectory(prefix="sparq-1135-callsite-ok-") as tmp:
+            root = _make_test_repo(Path(tmp), tag_at=None)
+            log: list[str] = []
+            code = interval_guard.run(
+                root, dry_run=False, now=now, fetch=fetch_old, log=log.append
+            )
+            self.assertTrue(urls, "\n".join(log))
+            self.assertEqual(code, 0, "\n".join(log))
+            self.assertTrue(any("ALLOW" in line for line in log), log)
+
+    def test_run_does_not_fetch_crates_io_on_an_already_tagged_no_op_push(self) -> None:
+        # The deliberate short-circuit, pinned so it stays deliberate: when
+        # `v<workspace version>` is already tagged, `release-plz release` is a no-op and
+        # the ~26 registry requests are skipped. If someone later "fixes" the fetch by
+        # making it unconditional, this reds and they must decide on purpose.
+        now = dt.datetime.now(dt.timezone.utc)
+        urls: list[str] = []
+
+        def fetch(url: str):
+            urls.append(url)
+            return (None, None)
+
+        with tempfile.TemporaryDirectory(prefix="sparq-1135-noop-") as tmp:
+            root = _make_test_repo(Path(tmp), tag_at=now - dt.timedelta(days=5))
+            # Retag as the CURRENT workspace version so the push is a no-op.
+            subprocess.run(
+                ["git", "-C", str(root), "tag", "v0.2.0"],
+                check=True,
+                capture_output=True,
+            )
+            log: list[str] = []
+            code = interval_guard.run(
+                root, dry_run=False, now=now, fetch=fetch, log=log.append
+            )
+            self.assertEqual(code, 0, "\n".join(log))
+            self.assertEqual(urls, [], "\n".join(log))
 
     def test_version_group_drift_refuses_when_publish_is_enabled(self) -> None:
         now = dt.datetime.now(dt.timezone.utc)

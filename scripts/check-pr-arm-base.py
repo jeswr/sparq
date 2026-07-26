@@ -47,6 +47,29 @@
 #     the deny forfeits an arm that would have failed anyway. The operator retries, or a
 #     maintainer merges by hand.
 #
+# WHAT THIS HOOK DOES **NOT** COVER — stated so the coverage is not over-read (PR #4192):
+# `is_arm_command` matches `gh pr merge` + `--auto`, so this hook sees exactly the
+# `--auto` phrasings. Executed against a fake `gh`, these reach the tool unblocked:
+#   * `gh pr merge <n> --squash` (no `--auto`) and `--admin` — a DIRECT merge, which is
+#     the more dangerous operation; the deliberate scope choice is that this hook governs
+#     ARMING, and the self-test pins it,
+#   * `gh api graphql … enablePullRequestAutoMerge(…)` — the shape scripts/auto-arm.py
+#     itself uses — and `gh api -X PUT repos/:o/:r/pulls/<n>/merge`,
+#   * backslash line-continuation between `gh` and `pr merge`, and shell-variable
+#     indirection (`M="pr merge"; gh $M <n> --auto`).
+# What actually bounds all of those is the BELT, not this hook:
+# scripts/release-interval-guard.py runs inside release-plz.yml itself, so however the
+# Release PR is merged, no release can be cut inside MIN_RELEASE_INTERVAL.
+#
+# THE WRAPPER MUST NOT INVERT THIS. `.claude/settings.json` invokes this script from a
+# shell one-liner. That wrapper used to emit `allow` whenever the script could not RUN
+# (missing/unreadable/crashing, or `CLAUDE_PROJECT_DIR` unset), inverting the fail-closed
+# disposition above at the exact moment there is no guard. It now DENIES an unrunnable
+# guard for any `gh pr merge` and allows everything else (this hook matches every Bash
+# call, so a blanket deny would brick the fleet).
+# scripts/tests/test_release_publish_guard.py::TestSettingsJsonWrapperDoesNotInvertTheGuard
+# executes the wrapper string out of settings.json and reds if it reverts to `allow`.
+#
 # Usage:
 #   check-pr-arm-base.py                 # read hook JSON on stdin, emit decision JSON
 #   check-pr-arm-base.py --trunk main    # override the trunk branch name (default main)
@@ -588,9 +611,19 @@ def self_test() -> int:
                         print(f"    stderr: {proc.stderr.strip()}")
                     failures += 1
 
-        # A missing project script must produce an explicit allow with exit zero. A
-        # non-zero PreToolUse hook exit is fail-closed in Claude Code and caused the
-        # live all-Bash deadlock this regression test protects against.
+        # AN UNRUNNABLE GUARD. Two obligations pull in opposite directions and BOTH are
+        # pinned here, against the REAL settings.json wrapper:
+        #
+        #  (a) EXIT ZERO WITH AN EXPLICIT DECISION, always. A non-zero PreToolUse hook
+        #      exit is fail-closed in Claude Code across the whole `Bash` matcher and
+        #      caused a live all-Bash deadlock; that is what the exit-0 half protects.
+        #  (b) DENY THE ARM. [OPUS-5] PR #4192 review: the wrapper used to answer `allow`
+        #      here, which inverted this script's deliberate fail-closed release axis at
+        #      the exact moment there is no guard at all — an agent in a checkout where
+        #      the script is missing could arm the Release PR. It now denies.
+        #
+        # The non-arm row is what keeps (b) from re-creating (a): this hook matches EVERY
+        # Bash tool call, so the deny must be scoped to `gh pr merge` and nothing else.
         unavailable_projects = [
             ("missing guard script", fixture_root / "missing-project"),
             ("unreadable guard script", fixture_root / "unreadable-project"),
@@ -601,39 +634,46 @@ def self_test() -> int:
         unreadable_guard = unreadable_scripts / "check-pr-arm-base.py"
         unreadable_guard.write_text("raise SystemExit(1)\n", encoding="utf-8")
         unreadable_guard.chmod(0o000)
-        unavailable_payload = json.dumps(
-            {"tool_input": {"command": "gh pr merge 1023 --auto"}}
-        )
+        unavailable_commands = [
+            # armed, and the more dangerous UNarmed direct merge
+            ("arm", "gh pr merge 1023 --auto", "deny"),
+            ("direct merge", "gh pr merge 1023 --squash", "deny"),
+            # the discriminating row: ordinary work must not be bricked
+            ("ordinary command", "printf harmless", "allow"),
+        ]
         for unavailable_label, project_dir in unavailable_projects:
             unavailable_env = fixture_env.copy()
             unavailable_env["CLAUDE_PROJECT_DIR"] = str(project_dir)
-            unavailable_proc = subprocess.run(
-                ["bash", "-c", hook_command],
-                cwd=off_root_cwd,
-                env=unavailable_env,
-                input=unavailable_payload,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            try:
-                unavailable_output = json.loads(unavailable_proc.stdout)
-                unavailable_decision = unavailable_output["hookSpecificOutput"][
-                    "permissionDecision"
-                ]
-            except (KeyError, TypeError, json.JSONDecodeError):
-                unavailable_decision = None
-            unavailable_ok = (
-                unavailable_proc.returncode == 0 and unavailable_decision == "allow"
-            )
-            print(
-                f"  [{'PASS' if unavailable_ok else 'FAIL'}] {unavailable_label}, "
-                f"off-root cwd: {unavailable_decision} (want allow + exit 0)"
-            )
-            if not unavailable_ok:
-                if unavailable_proc.stderr:
-                    print(f"    stderr: {unavailable_proc.stderr.strip()}")
-                failures += 1
+            for command_label, command, expected in unavailable_commands:
+                unavailable_proc = subprocess.run(
+                    ["bash", "-c", hook_command],
+                    cwd=off_root_cwd,
+                    env=unavailable_env,
+                    input=json.dumps({"tool_input": {"command": command}}),
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                try:
+                    unavailable_output = json.loads(unavailable_proc.stdout)
+                    unavailable_decision = unavailable_output["hookSpecificOutput"][
+                        "permissionDecision"
+                    ]
+                except (KeyError, TypeError, json.JSONDecodeError):
+                    unavailable_decision = None
+                unavailable_ok = (
+                    unavailable_proc.returncode == 0
+                    and unavailable_decision == expected
+                )
+                print(
+                    f"  [{'PASS' if unavailable_ok else 'FAIL'}] {unavailable_label} + "
+                    f"{command_label}, off-root cwd: {unavailable_decision} "
+                    f"(want {expected} + exit 0)"
+                )
+                if not unavailable_ok:
+                    if unavailable_proc.stderr:
+                        print(f"    stderr: {unavailable_proc.stderr.strip()}")
+                    failures += 1
 
     if failures:
         print(f"\nself-test: {failures} case(s) FAILED")
