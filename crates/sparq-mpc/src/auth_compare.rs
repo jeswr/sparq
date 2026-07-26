@@ -204,10 +204,10 @@ pub fn malicious_greater_than(backend: &ShamirBackend, a: Fp, b: Fp) -> Result<b
     // chain folded its MAC into `verdict`; the verdict's MAC is α·verdict iff no gate
     // was tampered. The batched check opens a leakage-free σ and aborts on σ != 0,
     // BEFORE the verdict is acted on (the coZK-2025/1026 confidentiality discipline).
-    session.mac_check(std::slice::from_ref(&verdict))?;
-
-    // Open ONLY the (MAC-verified) verdict bit.
-    open_auth_verdict(backend, &verdict)
+    // `mac_check_and_open` hands back the verdict it just authenticated, so the bit we
+    // act on is the very bit the check covered — and it is opened exactly once.
+    let opened = session.mac_check_and_open(std::slice::from_ref(&verdict))?;
+    verdict_bit(opened[0])
 }
 
 /// **Malicious-secure secure greater-than against a PUBLIC threshold** — the £100k
@@ -232,8 +232,8 @@ pub fn malicious_threshold(
 
     let a_bits = share_auth_bits(&mut session, secret);
     let verdict = auth_greater_than_public_bits(&mut session, &a_bits, threshold.value(), &key)?;
-    session.mac_check(std::slice::from_ref(&verdict))?;
-    open_auth_verdict(backend, &verdict)
+    let opened = session.mac_check_and_open(std::slice::from_ref(&verdict))?;
+    verdict_bit(opened[0])
 }
 
 /// MSB-first comparison of authenticated secret bits `a_bits` against a PUBLIC value
@@ -281,7 +281,15 @@ pub fn open_auth_verdict(
     backend: &ShamirBackend,
     verdict: &AuthenticatedShare,
 ) -> Result<bool, MpcError> {
-    let bit = backend.reconstruct(verdict.value_shares())?;
+    verdict_bit(backend.reconstruct(verdict.value_shares())?)
+}
+
+/// Coerce an ALREADY-OPENED verdict field element to a boolean, refusing anything that
+/// is not `0` or `1` rather than silently rounding it. Split out of
+/// [`open_auth_verdict`] so the MAC-checked paths can reuse it on the value handed back
+/// by [`MacSession::mac_check_and_open`] — they must not re-open the sharing, or the
+/// bit they act on would be bound to the checked bit only by convention. `[OPUS-4.8]`
+fn verdict_bit(bit: Fp) -> Result<bool, MpcError> {
     if bit == Fp::zero() {
         Ok(false)
     } else if bit == Fp::one() {

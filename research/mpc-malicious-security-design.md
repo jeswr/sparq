@@ -326,8 +326,35 @@ adapted to Shamir-over-`F_p`:
    per pair: the masked product `m`). Each has an authenticated sharing `[[y_j]] = ([y_j],
    [m_{y_j}])` with `m_{y_j} = α·y_j`.
 2. Draw public random challenge coefficients `χ_1..χ_k ∈ F_p` (Fiat–Shamir / a jointly-tossed
-   coin; in the sim, from the session RNG — but derived *after* shares are fixed, so a party
-   cannot adapt to it).
+   coin), derived *after* shares are fixed, so a party cannot adapt to it. **As implemented
+   (sq-km34.4):** Fiat–Shamir — a domain-separated SHA-512 transcript over `(n, t, k)` and both
+   halves `([y_j], [α·y_j])` of every authenticated sharing under check, expanded to one `χ_j`
+   per value and folded into `F_p`. That makes "after the shares are fixed" *structural*: the
+   coin is a function of exactly those shares, so it cannot precede them and re-randomises under
+   any tamper — where a draw from the dealer's private RNG gave that by call ordering only.
+
+   **What is NOT implemented (scope, honesty).** The transcript is the *complete* share
+   vectors, which exist in one place only because the backend is an in-process simulation of
+   all `n` parties; a real party holds only its own share, and broadcasting the vectors would
+   reconstruct the opened values and leak MAC-sharing material. So the implemented coin is
+   **not jointly derivable by the protocol parties and does not remove the trusted dealer** —
+   it is scoped to the trusted-dealer simulation, and the tests (one `MacSession` holding every
+   share) are correspondingly silent on the distributed property. A genuinely public coin needs
+   the step this crate does not yet have: each party broadcasts a *binding commitment* to its
+   own fixed shares (or the parties run commit-then-reveal coin tossing), then
+   `χ = H(commitments)`, with specified broadcast, verification and abort behaviour — a
+   different transcript needing its own soundness argument.
+
+   **Grinding (correction).** An earlier revision of this section claimed testing a candidate
+   `χ` requires the secret `α`. That is false in general: with the MACs left unchanged
+   (`δ_m = 0`) the deficit is `σ = −α·Σ_j χ_j·δ_{y,j}`, so `σ = 0` iff `Σ_j χ_j·δ_{y,j} = 0` —
+   a relation between the hash-derived `χ` and the attacker's own deviations, checkable without
+   `α`. The `≥ 1 − 1/p` bound below therefore holds against a deviation fixed *before* `χ` is
+   known; an adversary that can vary the transcript and re-derive the coin grinds at `≈ 1/p`
+   per trial, i.e. `≈ p ≈ 2^61` expected work. In a 61-bit field that is a **computational**
+   bound, not the information-theoretic one step 5 states. The distributed protocol above must
+   therefore bind each contribution before `χ` is derived; until it exists with a written
+   argument over a stated adversary model, the ideal-public-coin claim is not made here.
 3. Open the values `y_j` (the actual results). Compute the public linear combination
    `y = Σ_j χ_j·y_j`.
 4. Each party locally forms its share of `[σ] = Σ_j χ_j·[m_{y_j}] − y·[α]` (all linear → free,
@@ -337,7 +364,9 @@ adapted to Shamir-over-`F_p`:
    consistent matching change to `m_{y_j}` (it cannot, not knowing `α`), so `σ ≠ 0` with
    probability `≥ 1 − 1/p ≈ 1 − 2^-61` over the random `χ`. (The single-MAC soundness is `1/p`;
    the random-linear-combination batching keeps it `≈ 1/p`, the field-size statistical
-   parameter.)
+   parameter.) This is the ideal-coin bound, and it is stated against a deviation fixed before
+   `χ` is known — see step 2's grinding note for what the Fiat–Shamir instantiation actually
+   gives.
 6. **`σ ≠ 0` ⇒ ABORT** (`MpcError::Tampered` / a new `MpcError::MacCheckFailed`). No value is
    trusted; the protocol returns an error rather than a wrong/leaky answer.
 
