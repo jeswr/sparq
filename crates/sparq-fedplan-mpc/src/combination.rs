@@ -29,10 +29,11 @@
 //!   first place that can prove those candidates are dead **for a full-BGP answer** and
 //!   collapse the combination space to zero.
 //!
-//! * **The declined non-rule — value-overlap / bound-IRI propagation.** A tempting idea is to
-//!   propagate a bound IRI constant across a shared join variable and prune a source whose
-//!   value space cannot reach it. This is **not** recall-safely expressible from the public
-//!   [`SourceDescriptor`] API, and declining it is a *correctness* decision, not an omission:
+//! * **The declined non-rule — value-overlap / bound-IRI propagation *from the
+//!   [`SourceDescriptor`] summary*.** A tempting idea is to propagate a bound IRI constant
+//!   across a shared join variable and prune a source whose value space cannot reach it. This is
+//!   **not** recall-safely expressible from the public [`SourceDescriptor`] API, and declining it
+//!   is a *correctness* decision, not an omission:
 //!   (a) a constant in an object/subject *position* is already tested per-source by the
 //!   upstream authority prune ([`SourceDescriptor::may_hold_authority`], `select_sources`
 //!   Rule 2) — there is nothing left for a combination pass to add for a bound position; and
@@ -44,34 +45,62 @@
 //!   value-overlap prune at the combination level. Recorded here so a future contributor does
 //!   not reach into the private authority set to build an unsound prune.
 //!
+//! * **Rule C2 — quotient-summary provenance (sq-xkrt).** The way *out* of that declined
+//!   non-rule is not a cleverer reading of [`SourceDescriptor`] but FedUP's actual lever: a
+//!   **different input**. When a source publishes a [`SourceQuotientSummary`] and declares it a
+//!   complete over-approximation of its graph, the BGP can be *evaluated at plan time* over the
+//!   quotient, per source-combination, and a combination whose quotient-level evaluation is
+//!   empty **provably** yields no concrete answer (the soundness argument lives in
+//!   [`crate::quotient`]). That is the genuine result-aware prune: it can kill a combination
+//!   whose patterns are individually non-empty but *jointly* unsatisfiable — e.g. two sources
+//!   that each hold the join predicate but over disjoint authorities. It is opt-in per source
+//!   (no summary, or an incomplete one ⇒ that source constrains nothing and is never pruned),
+//!   bounded by an explicit [`CombinationBudget`] (an over-budget enumeration **declines** and
+//!   prunes nothing), and it is reached only through
+//!   [`prune_source_combinations_with_summaries`] — plain [`prune_source_combinations`] is
+//!   unchanged, Rule C1 only.
+//!
 //! # Recall-safety (the load-bearing property, mirroring the upstream invariant)
 //!
 //! > **A (pattern, source) candidate is marked combination-dead only when no full-BGP answer
 //! > can use it; on any uncertainty it is kept.**
 //!
-//! The pass marks candidates dead **only** when some pattern is empty, i.e. when the
-//! conjunction is *proved* unsatisfiable (an empty conjunct ⇒ no answers exist ⇒ marking every
-//! candidate dead loses nothing). When every pattern is non-empty it drops **nothing** — there
-//! is no further recall-safe combination prune available from the public summary. It reads no
-//! descriptor capability of its own and adds no independent prune that could be unsound; it
-//! merely **propagates** an already-recall-safe emptiness verdict across the conjunction.
+//! Under Rule C1 the pass marks candidates dead **only** when some pattern is empty, i.e. when
+//! the conjunction is *proved* unsatisfiable (an empty conjunct ⇒ no answers exist ⇒ marking
+//! every candidate dead loses nothing). When every pattern is non-empty it drops **nothing** —
+//! there is no further recall-safe combination prune available from the [`SourceDescriptor`]
+//! summary alone. It reads no descriptor capability of its own and adds no independent prune
+//! that could be unsound; it merely **propagates** an already-recall-safe emptiness verdict
+//! across the conjunction.
+//!
+//! Rule C2 keeps the same invariant against a *stronger* input: a candidate is dead only when
+//! **every** source-combination containing it evaluates to the empty relation over the quotient
+//! summaries — and a source that published no complete summary is treated as matching anything,
+//! so it is never the reason a combination dies. Every way the enumeration can fail to be
+//! decisive (a predicate-variable domain clash, an over-budget combination space, an over-wide
+//! intermediate join) **declines** and prunes nothing, so uncertainty always resolves to *keep*.
 //!
 //! # Honesty / threat model (no claim beyond selection plumbing)
 //!
 //! This is **plumbing — result-aware source-combination routing, not a cryptographic
 //! guarantee.** It performs **NO** MPC, runs **NO** secret-sharing, opens nothing, verifies
-//! nothing, and reads only the (public) Phase-2 selection it is handed. It makes **NO**
-//! soundness/privacy/security claim. The MPC estate (`sparq-mpc`) is research-grade,
-//! **honest-majority semi-honest only**, and is **NOT** externally audited — the
-//! accredited-cryptographer sign-off (sq-qhy4) and the coZK re-audit (sq-9hrn) are pending.
-//! This pass does not change that posture by one inch. The only thing it "reveals" is which
-//! combinations are infeasible, derived entirely from the caller's own descriptors. See the
-//! crate `README.md` and `research/mpc-untrusted-planner-routing-design.md`.
+//! nothing, and reads only the (public) Phase-2 selection and the (public, source-published)
+//! quotient summaries it is handed. It makes **NO** soundness/privacy/security claim. The MPC
+//! estate (`sparq-mpc`) is research-grade, **honest-majority semi-honest only**, and is **NOT**
+//! externally audited — the accredited-cryptographer sign-off (sq-qhy4) and the coZK re-audit
+//! (sq-9hrn) are pending. This pass does not change that posture by one inch. The only thing it
+//! "reveals" is which combinations are infeasible, derived entirely from the caller's own
+//! descriptors; the *publication* of a quotient summary is itself a disclosure the source opts
+//! into, enumerated honestly in [`crate::quotient`]. See the crate `README.md` and
+//! `research/mpc-untrusted-planner-routing-design.md`.
 //!
-//! [OPUS-4.8] sq-pwr.3.
+//! [OPUS-4.8] sq-pwr.3 (Rule C1) / sq-xkrt (Rule C2).
 
-use sparq_fedplan::{Bgp, SourceDescriptor, SourceId};
+use std::collections::{BTreeMap, BTreeSet};
 
+use sparq_fedplan::{Bgp, SourceDescriptor, SourceId, Term, TriplePattern};
+
+use crate::quotient::{quotient_iri, QuotientTerm, SourceQuotientSummary};
 use crate::seam::{SeamError, SeamPhase};
 use crate::selection::{PrivatePatternSources, SelectedPrivateSources};
 
@@ -90,6 +119,12 @@ pub enum CombinationPruneReason {
         /// for determinism).
         witness: usize,
     },
+    /// **Rule C2** — every source-combination that would use this candidate evaluates to the
+    /// empty relation over the participating sources' quotient summaries, so no full-BGP answer
+    /// can route through it. Only produced by
+    /// [`prune_source_combinations_with_summaries`]; see [`crate::quotient`] for why an empty
+    /// quotient-level evaluation proves the absence of a concrete answer.
+    EmptyProvenance,
 }
 
 impl CombinationPruneReason {
@@ -100,8 +135,138 @@ impl CombinationPruneReason {
                 "full BGP unsatisfiable: conjunct (pattern {}) has no contributing source",
                 witness
             ),
+            CombinationPruneReason::EmptyProvenance => {
+                "empty quotient-summary provenance: no live source-combination uses this candidate"
+                    .to_string()
+            }
         }
     }
+}
+
+/// One **live source-combination** surviving the Rule-C2 provenance prune: an assignment of one
+/// source to each BGP pattern whose quotient-level evaluation is non-empty.
+///
+/// This is the FedUP-shaped deliverable — the (much smaller) set of combinations the seam still
+/// has to consider routing toward MPC. It is an over-approximation: a live combination is *not*
+/// promised to produce an answer, only not provably barred from one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceCombination {
+    /// One **source index** (the same index [`crate::PrivateCandidate::source`] carries) per BGP
+    /// pattern, in pattern order.
+    pub assignment: Vec<usize>,
+}
+
+/// The bound on the Rule-C2 provenance enumeration. The combination space is the *product* of the
+/// per-pattern candidate counts, so it is worst-case exponential in the BGP size; this budget
+/// keeps plan time bounded, and exceeding it **declines** the prune (recall-safe: nothing is
+/// dropped) rather than truncating the search (which would be recall-*unsafe*, because a
+/// truncated search cannot prove a combination dead).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CombinationBudget {
+    /// Maximum number of source-combinations to evaluate. Exceeded ⇒
+    /// [`SummaryDeclineReason::TooManyCombinations`].
+    pub max_combinations: usize,
+    /// Maximum number of intermediate quotient-level bindings held while joining ONE
+    /// combination. Exceeded ⇒ [`SummaryDeclineReason::JoinTooWide`].
+    pub max_intermediate_bindings: usize,
+}
+
+impl CombinationBudget {
+    /// A budget with explicit limits. Both must be non-zero to be useful; zero simply declines
+    /// everything (still recall-safe — it prunes nothing).
+    pub fn new(max_combinations: usize, max_intermediate_bindings: usize) -> CombinationBudget {
+        CombinationBudget {
+            max_combinations,
+            max_intermediate_bindings,
+        }
+    }
+}
+
+impl Default for CombinationBudget {
+    /// A deliberately modest default: federated BGPs that reach the MPC seam are small, and the
+    /// point of the pass is to *save* work, not to spend an unbounded amount proving a prune.
+    fn default() -> CombinationBudget {
+        CombinationBudget::new(4096, 4096)
+    }
+}
+
+/// Why the Rule-C2 provenance pass **declined** to prune. Every variant means "nothing was
+/// pruned" — declining is the recall-safe outcome, never a silent partial result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SummaryDeclineReason {
+    /// A variable occurs in a **predicate** position in one pattern and in a subject/object
+    /// position in another. Predicates are kept concrete in a summary while subjects/objects are
+    /// quotiented, so such a variable has no well-defined quotient image and a join on it could
+    /// compare two different domains — which would prune unsoundly. See [`crate::quotient`].
+    PredicateVariableDomainClash {
+        /// The offending variable's name (the lexicographically smallest, for determinism).
+        var: String,
+    },
+    /// The product of the per-pattern candidate counts exceeds
+    /// [`CombinationBudget::max_combinations`].
+    TooManyCombinations {
+        /// The combination count (saturating: `usize::MAX` means the product overflowed).
+        combinations: usize,
+        /// The budget that was exceeded.
+        budget: usize,
+    },
+    /// Joining one combination's quotient relations exceeded
+    /// [`CombinationBudget::max_intermediate_bindings`].
+    JoinTooWide {
+        /// The budget that was exceeded.
+        budget: usize,
+    },
+}
+
+impl SummaryDeclineReason {
+    /// A short human label for the reason (for diagnostics / the audit trail).
+    pub fn label(&self) -> String {
+        match self {
+            SummaryDeclineReason::PredicateVariableDomainClash { var } => format!(
+                "declined: variable ?{} is used in both a predicate and a subject/object position",
+                var
+            ),
+            SummaryDeclineReason::TooManyCombinations {
+                combinations,
+                budget,
+            } => format!(
+                "declined: {} source-combinations exceed the budget of {}",
+                combinations, budget
+            ),
+            SummaryDeclineReason::JoinTooWide { budget } => format!(
+                "declined: a combination's quotient join exceeded {} intermediate bindings",
+                budget
+            ),
+        }
+    }
+}
+
+/// What the Rule-C2 quotient-summary provenance pass did — surfaced so a relying party can tell
+/// "nothing was prunable" from "the pass never ran", rather than reading an empty audit trail as
+/// a verdict.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SummaryPruneOutcome {
+    /// The pass was not attempted: no **complete** quotient summary was supplied for any source.
+    /// The default — and what plain [`prune_source_combinations`] always reports.
+    #[default]
+    NotAttempted,
+    /// Rule C1 already proved the BGP unsatisfiable (some conjunct is empty), so every
+    /// combination is dead and there is nothing left for the provenance pass to prune.
+    BgpAlreadyDead,
+    /// The pass ran but **declined** — nothing was pruned. See the reason.
+    Declined(SummaryDeclineReason),
+    /// The pass ran to completion.
+    Applied {
+        /// How many source-combinations were evaluated.
+        combinations_considered: usize,
+        /// How many of them survived (their quotient-level evaluation was non-empty). Zero means
+        /// the whole BGP was proved answer-free by the summaries — `bgp_satisfiable` is then
+        /// `false` even though no conjunct was empty.
+        combinations_live: usize,
+    },
 }
 
 /// One (pattern, source) candidate that survived Phase 2 but is dead for a full-BGP answer at
@@ -131,7 +296,10 @@ pub struct BgpComponent {
     pub patterns: Vec<usize>,
     /// Whether every member pattern is non-empty after Phase 2. `false` iff some member pattern
     /// has no surviving source (this component's sub-answer is empty). NOTE: a single empty
-    /// component still makes the **whole** BGP unsatisfiable — see [`PrunedCombinations`].
+    /// component still makes the **whole** BGP unsatisfiable — see [`PrunedCombinations`]. This
+    /// is a **Rule-C1 (Phase-2 emptiness) flag only**: a component can read `satisfiable == true`
+    /// while the Rule-C2 provenance pass has proved every source-combination dead, so read
+    /// [`PrunedCombinations::bgp_satisfiable`] for the overall verdict.
     pub satisfiable: bool,
 }
 
@@ -151,9 +319,11 @@ pub struct PrunedCombinations {
     /// The Phase-2 per-pattern candidate sets, carried through **verbatim** (the prune is
     /// advisory — the dead candidates are enumerated in `pruned`, not removed here).
     pub per_pattern: Vec<PrivatePatternSources>,
-    /// Whether **any** full-BGP source-combination can produce an answer. `false` iff some
-    /// pattern is empty after Phase 2 (an empty conjunct ⇒ the whole conjunction is empty,
-    /// regardless of the BGP's connectivity).
+    /// Whether **any** full-BGP source-combination can produce an answer. `false` when some
+    /// pattern is empty after Phase 2 (Rule C1: an empty conjunct ⇒ the whole conjunction is
+    /// empty, regardless of the BGP's connectivity) — or, under Rule C2, when every
+    /// source-combination's quotient-level evaluation was empty (`summary_prune` is
+    /// [`SummaryPruneOutcome::Applied`] with `combinations_live == 0`).
     pub bgp_satisfiable: bool,
     /// The empty-pattern witness indices (ascending) that prove unsatisfiability; empty when
     /// `bgp_satisfiable`.
@@ -162,9 +332,19 @@ pub struct PrunedCombinations {
     /// deterministic). Structural metadata for the auditor — the Rule-C1 verdict is the simple
     /// "any empty conjunct" theorem, not a per-component decision.
     pub components: Vec<BgpComponent>,
-    /// The combination-dead candidates with reasons, ascending by `(pattern, source)`. Empty
-    /// when `bgp_satisfiable` (nothing is dropped on the live path).
+    /// The combination-dead candidates with reasons, ascending by `(pattern, source)`. Under
+    /// Rule C1 alone this is empty whenever `bgp_satisfiable` (nothing is dropped on the live
+    /// path); under Rule C2 it also carries the [`CombinationPruneReason::EmptyProvenance`]
+    /// candidates, which CAN be non-empty on an otherwise-satisfiable BGP.
     pub pruned: Vec<PrunedCombination>,
+    /// What the Rule-C2 quotient-summary provenance pass did.
+    /// [`SummaryPruneOutcome::NotAttempted`] for plain [`prune_source_combinations`].
+    pub summary_prune: SummaryPruneOutcome,
+    /// The source-combinations that survived the Rule-C2 provenance prune — the reduced set the
+    /// seam still has to consider routing toward MPC. Populated **only** when `summary_prune` is
+    /// [`SummaryPruneOutcome::Applied`] (the combination space is exponential, so it is not
+    /// enumerated on the paths that prove nothing about it).
+    pub live_combinations: Vec<SourceCombination>,
 }
 
 impl PrunedCombinations {
@@ -279,7 +459,339 @@ pub fn prune_source_combinations(
         empty_patterns,
         components,
         pruned,
+        // Rule C1 alone never runs the provenance pass.
+        summary_prune: SummaryPruneOutcome::NotAttempted,
+        live_combinations: Vec::new(),
     })
+}
+
+/// **Phase 6, Rule C2** — [`prune_source_combinations`] *plus* the FedUP-style **quotient-summary
+/// provenance** prune (design record §3 / §8 Phase 6; bead sq-xkrt).
+///
+/// Runs Rule C1 first, then — when the BGP is still satisfiable and at least one source published
+/// a **complete** [`SourceQuotientSummary`] — evaluates the BGP at the quotient level once per
+/// source-combination. A combination whose evaluation is empty **provably** produces no concrete
+/// answer (the over-approximation argument in [`crate::quotient`]), so it is dropped from
+/// [`PrunedCombinations::live_combinations`]; a candidate that no live combination uses is
+/// recorded [`CombinationPruneReason::EmptyProvenance`] in the audit trail. If **no** combination
+/// survives, `bgp_satisfiable` becomes `false` — the seam can skip the MPC path entirely.
+///
+/// This is the prune the first Phase-6 slice could not express: it kills a combination whose
+/// patterns are individually non-empty but *jointly* unsatisfiable (e.g. two sources that each
+/// hold the join predicate, over disjoint authorities) — the source-combination blow-up the
+/// design record flags as the highest-leverage pre-MPC cost win.
+///
+/// **Recall-safe by construction**, in three layers:
+/// 1. a source that published **no** summary, or one it did not declare complete, is treated as
+///    matching anything — it is never the reason a combination dies;
+/// 2. a quotient summary over-approximates its source's graph, so an empty quotient-level
+///    evaluation is a *proof* that no concrete answer exists for that combination; and
+/// 3. every way the enumeration could be indecisive **declines** and prunes nothing — a
+///    predicate/term variable-domain clash, an over-budget combination space, or an over-wide
+///    intermediate join, each reported in [`PrunedCombinations::summary_prune`].
+///
+/// The per-pattern candidate lists are still carried through **unchanged**: the verdict stays
+/// advisory and auditable. Deterministic throughout.
+///
+/// # Errors
+///
+/// [`SeamError::DescriptorMismatch`] (phase [`SeamPhase::SourceCombination`]) when the Phase-2
+/// selection does not line up with the BGP (as [`prune_source_combinations`]), when a pattern
+/// index in the selection is out of the BGP's range, or when two [`SourceQuotientSummary`]s
+/// declare the same [`SourceId`] (an ambiguous summary — the pass refuses to guess which binds).
+/// It never panics and performs **no** MPC.
+///
+/// This function makes **no** soundness/privacy claim — see the module docs and the crate
+/// `README.md`. [OPUS-4.8] sq-xkrt.
+pub fn prune_source_combinations_with_summaries(
+    bgp: &Bgp,
+    sources: &[SourceDescriptor],
+    selected: &SelectedPrivateSources,
+    summaries: &[SourceQuotientSummary],
+    budget: CombinationBudget,
+) -> Result<PrunedCombinations, SeamError> {
+    let mut out = prune_source_combinations(bgp, sources, selected)?;
+
+    // Index the summaries by source id. A duplicate id is an ambiguous declaration: refuse rather
+    // than silently letting one win (the same fail-closed posture as the Phase-2 descriptor map).
+    let mut by_id: BTreeMap<&SourceId, &SourceQuotientSummary> = BTreeMap::new();
+    for s in summaries {
+        if by_id.insert(s.id(), s).is_some() {
+            return Err(SeamError::DescriptorMismatch {
+                phase: SeamPhase::SourceCombination,
+                source_id: s.id().0.clone(),
+                detail: "duplicate SourceQuotientSummary for this source id (ambiguous summary)",
+            });
+        }
+    }
+    // ONLY a complete summary may constrain anything — an incomplete one is not an
+    // over-approximation, so nothing can be proved from it (recall-safe).
+    by_id.retain(|_, s| s.is_complete());
+    if by_id.is_empty() {
+        out.summary_prune = SummaryPruneOutcome::NotAttempted;
+        return Ok(out);
+    }
+    // Rule C1 already collapsed the whole combination space; there is nothing left to prove.
+    if !out.bgp_satisfiable {
+        out.summary_prune = SummaryPruneOutcome::BgpAlreadyDead;
+        return Ok(out);
+    }
+    // A variable spanning the predicate and the subject/object domains has no well-defined
+    // quotient image — joining on it could prune unsoundly, so decline.
+    if let Some(var) = predicate_variable_domain_clash(bgp) {
+        out.summary_prune = SummaryPruneOutcome::Declined(
+            SummaryDeclineReason::PredicateVariableDomainClash { var },
+        );
+        return Ok(out);
+    }
+
+    // 1. The per-(pattern, candidate) quotient relation: the bindings that candidate's summary
+    //    admits for that pattern, or `Unconstrained` when the source published no complete one.
+    let mut relations: Vec<Vec<Relation>> = Vec::with_capacity(selected.per_pattern.len());
+    for ps in &selected.per_pattern {
+        let Some(pattern) = bgp.patterns.get(ps.pattern) else {
+            return Err(SeamError::DescriptorMismatch {
+                phase: SeamPhase::SourceCombination,
+                source_id: String::new(),
+                detail: "Phase-2 selection names a pattern index outside the BGP",
+            });
+        };
+        relations.push(
+            ps.candidates
+                .iter()
+                .map(|cand| match by_id.get(&cand.source_id) {
+                    Some(summary) => Relation::Rows(match_pattern(pattern, summary)),
+                    None => Relation::Unconstrained,
+                })
+                .collect(),
+        );
+    }
+
+    // 2. The combination space, bounded. Saturating so an overflow is reported honestly rather
+    //    than wrapping to a small number and silently enumerating the wrong thing.
+    let combinations = relations
+        .iter()
+        .fold(1usize, |acc, rel| acc.saturating_mul(rel.len()));
+    if combinations > budget.max_combinations {
+        out.summary_prune =
+            SummaryPruneOutcome::Declined(SummaryDeclineReason::TooManyCombinations {
+                combinations,
+                budget: budget.max_combinations,
+            });
+        return Ok(out);
+    }
+
+    // 3. Enumerate (deterministically, candidate-index ascending) and keep the live ones.
+    let mut choices: Vec<Vec<usize>> = vec![Vec::new()];
+    for rel in &relations {
+        let mut next = Vec::with_capacity(choices.len() * rel.len());
+        for prefix in &choices {
+            for c in 0..rel.len() {
+                let mut extended = prefix.clone();
+                extended.push(c);
+                next.push(extended);
+            }
+        }
+        choices = next;
+    }
+    let mut live: Vec<Vec<usize>> = Vec::new();
+    for choice in &choices {
+        match combination_is_live(&relations, choice, budget.max_intermediate_bindings) {
+            Ok(true) => live.push(choice.clone()),
+            Ok(false) => {}
+            Err(reason) => {
+                out.summary_prune = SummaryPruneOutcome::Declined(reason);
+                return Ok(out);
+            }
+        }
+    }
+
+    // 4. A candidate used by NO live combination is combination-dead. (Rule C1 pruned nothing on
+    //    this path — the BGP was satisfiable — so this is the whole audit trail.)
+    let used: BTreeSet<(usize, usize)> = live
+        .iter()
+        .flat_map(|choice| choice.iter().copied().enumerate())
+        .collect();
+    let mut pruned: Vec<PrunedCombination> = Vec::new();
+    for (i, ps) in selected.per_pattern.iter().enumerate() {
+        for (c, cand) in ps.candidates.iter().enumerate() {
+            if !used.contains(&(i, c)) {
+                pruned.push(PrunedCombination {
+                    pattern: ps.pattern,
+                    source: cand.source,
+                    source_id: cand.source_id.clone(),
+                    reason: CombinationPruneReason::EmptyProvenance,
+                });
+            }
+        }
+    }
+    pruned.sort_by_key(|p| (p.pattern, p.source));
+    out.pruned = pruned;
+
+    // 5. No surviving combination ⇒ the summaries proved the BGP answer-free, even though every
+    //    conjunct is individually non-empty (so `empty_patterns` stays empty — the witness here
+    //    is the provenance audit trail, not a conjunct).
+    out.bgp_satisfiable = !live.is_empty();
+    out.summary_prune = SummaryPruneOutcome::Applied {
+        combinations_considered: combinations,
+        combinations_live: live.len(),
+    };
+    out.live_combinations = live
+        .into_iter()
+        .map(|choice| SourceCombination {
+            assignment: choice
+                .iter()
+                .enumerate()
+                .map(|(i, &c)| selected.per_pattern[i].candidates[c].source)
+                .collect(),
+        })
+        .collect();
+
+    Ok(out)
+}
+
+/// One quotient-level binding: variable name → the class it is bound to. `BTreeMap` so bindings
+/// are ordered/deduplicable and the pass is deterministic.
+type Binding = BTreeMap<String, QValue>;
+
+/// What a variable can be bound to at the quotient level. Subjects/objects bind a
+/// [`QuotientTerm`]; a variable in predicate position binds the CONCRETE predicate IRI (predicates
+/// are not quotiented). The two domains never mix, because a variable that would span them makes
+/// the pass decline — see [`SummaryDeclineReason::PredicateVariableDomainClash`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum QValue {
+    Term(QuotientTerm),
+    Predicate(String),
+}
+
+/// A candidate's quotient relation for one pattern.
+#[derive(Debug, Clone)]
+enum Relation {
+    /// The source published no complete summary: it constrains nothing and matches anything.
+    Unconstrained,
+    /// The quotient bindings the source's summary admits for this pattern (possibly none, which
+    /// kills every combination using it).
+    Rows(Vec<Binding>),
+}
+
+/// The lexicographically smallest variable used in BOTH a predicate position and a
+/// subject/object position anywhere in `bgp`, if any.
+fn predicate_variable_domain_clash(bgp: &Bgp) -> Option<String> {
+    let mut predicate_vars: BTreeSet<&str> = BTreeSet::new();
+    let mut term_vars: BTreeSet<&str> = BTreeSet::new();
+    for p in &bgp.patterns {
+        if let Some(v) = p.predicate.as_var() {
+            predicate_vars.insert(v.0.as_str());
+        }
+        for t in [&p.subject, &p.object] {
+            if let Some(v) = t.as_var() {
+                term_vars.insert(v.0.as_str());
+            }
+        }
+    }
+    predicate_vars
+        .intersection(&term_vars)
+        .next()
+        .map(|v| (*v).to_string())
+}
+
+/// The quotient bindings `summary` admits for `pattern` — the quotient-level evaluation of one
+/// triple pattern against one source. Deduplicated and ordered (deterministic).
+fn match_pattern(pattern: &TriplePattern, summary: &SourceQuotientSummary) -> Vec<Binding> {
+    let mut rows: BTreeSet<Binding> = BTreeSet::new();
+    for triple in summary.triples() {
+        let mut binding = Binding::new();
+        let matched = bind_position(
+            &pattern.subject,
+            &QValue::Term(triple.subject.clone()),
+            &mut binding,
+        ) && bind_position(
+            &pattern.predicate,
+            &QValue::Predicate(triple.predicate.clone()),
+            &mut binding,
+        ) && bind_position(
+            &pattern.object,
+            &QValue::Term(triple.object.clone()),
+            &mut binding,
+        );
+        if matched {
+            rows.insert(binding);
+        }
+    }
+    rows.into_iter().collect()
+}
+
+/// Match ONE pattern position against a quotient value, extending `binding`. A repeated variable
+/// within the pattern (`?x p ?x`) must bind consistently, so an already-bound variable matches
+/// only its existing value.
+fn bind_position(position: &Term, value: &QValue, binding: &mut Binding) -> bool {
+    match position {
+        Term::Var(v) => match binding.get(&v.0) {
+            Some(existing) => existing == value,
+            None => {
+                binding.insert(v.0.clone(), value.clone());
+                true
+            }
+        },
+        // A bound IRI matches its own quotient class in a subject/object position, and the
+        // concrete IRI in a predicate position (predicates are never quotiented).
+        Term::Iri(iri) => match value {
+            QValue::Term(q) => *q == quotient_iri(iri),
+            QValue::Predicate(p) => p == iri,
+        },
+        // Every literal collapses to one class, so a bound literal matches any summarised literal
+        // (an over-approximation — recall-safe) and never a predicate.
+        Term::Literal(_) => matches!(value, QValue::Term(QuotientTerm::Literal)),
+    }
+}
+
+/// Whether ONE source-combination's quotient-level evaluation is non-empty: the conjunctive join
+/// of the chosen candidates' relations, `Unconstrained` relations imposing nothing.
+fn combination_is_live(
+    relations: &[Vec<Relation>],
+    choice: &[usize],
+    max_intermediate: usize,
+) -> Result<bool, SummaryDeclineReason> {
+    let mut acc: Vec<Binding> = vec![Binding::new()];
+    for (pattern, &candidate) in choice.iter().enumerate() {
+        let rows = match &relations[pattern][candidate] {
+            Relation::Unconstrained => continue,
+            Relation::Rows(rows) => rows,
+        };
+        let mut next: Vec<Binding> = Vec::new();
+        for left in &acc {
+            for right in rows {
+                if let Some(merged) = merge_bindings(left, right) {
+                    if next.len() >= max_intermediate {
+                        return Err(SummaryDeclineReason::JoinTooWide {
+                            budget: max_intermediate,
+                        });
+                    }
+                    next.push(merged);
+                }
+            }
+        }
+        if next.is_empty() {
+            return Ok(false);
+        }
+        acc = next;
+    }
+    Ok(true)
+}
+
+/// Merge two compatible bindings (agreeing on every shared variable), or `None` if they conflict.
+fn merge_bindings(left: &Binding, right: &Binding) -> Option<Binding> {
+    let mut merged = left.clone();
+    for (var, value) in right {
+        match merged.get(var) {
+            Some(existing) if existing != value => return None,
+            Some(_) => {}
+            None => {
+                merged.insert(var.clone(), value.clone());
+            }
+        }
+    }
+    Some(merged)
 }
 
 /// The connected components of `bgp`'s join graph (two patterns linked iff they share a
@@ -314,7 +826,6 @@ fn connected_components(bgp: &Bgp, empty_patterns: &[usize]) -> Vec<BgpComponent
     }
 
     // Group indices by root, in ascending member order.
-    use std::collections::BTreeMap;
     let mut by_root: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for i in 0..n {
         let r = find(&mut parent, i);
@@ -797,6 +1308,705 @@ mod tests {
             label.contains("pattern 7"),
             "label names the witness pattern: {label}"
         );
+    }
+
+    // ── Rule C2: quotient-summary provenance (sq-xkrt) ──────────────────────────────────
+
+    use crate::quotient::SummaryTerm;
+
+    const MEMBER_OF_FLAT: &str = "http://ex/memberOfFlat";
+    const HAS_ADDRESS: &str = "http://ex/hasAddress";
+
+    /// `?p memberOfFlat ?flat . ?flat hasAddress ?addr` — the join-on-`?flat` shape the
+    /// disjoint-authority tests use.
+    fn flat_join_bgp() -> Bgp {
+        Bgp::new(vec![
+            TriplePattern::new(var("p"), iri(MEMBER_OF_FLAT), var("flat")),
+            TriplePattern::new(var("flat"), iri(HAS_ADDRESS), var("addr")),
+        ])
+    }
+
+    /// A complete summary for a `memberOfFlat` holder whose flats live under `flat_authority`.
+    fn membership_summary(id: &str, flat_authority: &str) -> SourceQuotientSummary {
+        SourceQuotientSummary::builder(SourceId::new(id))
+            .triple(
+                SummaryTerm::iri("http://people.example/alice"),
+                MEMBER_OF_FLAT,
+                SummaryTerm::iri(format!("{}/1", flat_authority)),
+            )
+            .complete()
+            .build()
+    }
+
+    /// A complete summary for a `hasAddress` holder keyed on flats under `flat_authority`.
+    fn address_summary(id: &str, flat_authority: &str) -> SourceQuotientSummary {
+        SourceQuotientSummary::builder(SourceId::new(id))
+            .triple(
+                SummaryTerm::iri(format!("{}/1", flat_authority)),
+                HAS_ADDRESS,
+                SummaryTerm::Literal,
+            )
+            .complete()
+            .build()
+    }
+
+    /// **The load-bearing Rule-C2 win.** Two sources both hold the join predicate and both survive
+    /// Phase 2, so Rule C1 alone prunes NOTHING — but their quotient summaries key the join
+    /// variable on *disjoint authorities*, so one of the two source-combinations provably yields no
+    /// answer. The provenance pass kills it; the same call WITHOUT summaries does not. That
+    /// contrast is the whole point of the phase, so both halves are asserted here.
+    #[test]
+    fn disjoint_join_authorities_prune_a_combination_rule_c1_cannot_see() {
+        let bgp = flat_join_bgp();
+        let sources = vec![
+            source("http://a/", &[MEMBER_OF_FLAT]), // 0 — flats under flats-a
+            source("http://b/", &[HAS_ADDRESS]), // 1 — addresses for flats-b (disjoint)
+            source("http://c/", &[HAS_ADDRESS]), // 2 — addresses for flats-a (joinable)
+        ];
+        let selected = select_private_sources(&bgp, &sources, &[]).unwrap();
+        // Precondition: pattern 1 really did keep BOTH address holders.
+        assert_eq!(selected.per_pattern[1].candidates.len(), 2);
+
+        // Baseline — Rule C1 alone: satisfiable, nothing pruned, provenance never attempted.
+        let c1 = prune_source_combinations(&bgp, &sources, &selected).unwrap();
+        assert!(c1.bgp_satisfiable);
+        assert!(c1.pruned.is_empty());
+        assert_eq!(c1.summary_prune, SummaryPruneOutcome::NotAttempted);
+        assert!(c1.live_combinations.is_empty());
+
+        // Rule C2 — with the summaries, the (A, B) combination is proved dead.
+        let summaries = vec![
+            membership_summary("http://a/", "http://flats-a.example"),
+            address_summary("http://b/", "http://flats-b.example"),
+            address_summary("http://c/", "http://flats-a.example"),
+        ];
+        let out = prune_source_combinations_with_summaries(
+            &bgp,
+            &sources,
+            &selected,
+            &summaries,
+            CombinationBudget::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            out.summary_prune,
+            SummaryPruneOutcome::Applied {
+                combinations_considered: 2,
+                combinations_live: 1,
+            }
+        );
+        // Exactly one live combination: pattern 0 → source 0 (A), pattern 1 → source 2 (C).
+        assert_eq!(
+            out.live_combinations,
+            vec![SourceCombination {
+                assignment: vec![0, 2]
+            }]
+        );
+        // B is combination-dead for pattern 1, with the provenance reason.
+        assert_eq!(out.pruned.len(), 1);
+        assert_eq!(out.pruned[0].pattern, 1);
+        assert_eq!(out.pruned[0].source, 1);
+        assert_eq!(out.pruned[0].source_id, SourceId::new("http://b/"));
+        assert_eq!(out.pruned[0].reason, CombinationPruneReason::EmptyProvenance);
+        // An answer is still possible overall, and the selection is carried through unchanged.
+        assert!(out.bgp_satisfiable);
+        assert_eq!(out.per_pattern, selected.per_pattern);
+    }
+
+    /// When EVERY combination's quotient evaluation is empty, the BGP is proved answer-free even
+    /// though no conjunct is empty — `bgp_satisfiable` flips to false with NO empty-pattern
+    /// witness, and the seam can skip the MPC path entirely.
+    #[test]
+    fn every_combination_dead_makes_the_bgp_unsatisfiable_without_an_empty_conjunct() {
+        let bgp = flat_join_bgp();
+        let sources = vec![
+            source("http://a/", &[MEMBER_OF_FLAT]),
+            source("http://b/", &[HAS_ADDRESS]),
+        ];
+        let selected = select_private_sources(&bgp, &sources, &[]).unwrap();
+        let summaries = vec![
+            membership_summary("http://a/", "http://flats-a.example"),
+            address_summary("http://b/", "http://flats-b.example"),
+        ];
+        let out = prune_source_combinations_with_summaries(
+            &bgp,
+            &sources,
+            &selected,
+            &summaries,
+            CombinationBudget::default(),
+        )
+        .unwrap();
+
+        assert!(!out.bgp_satisfiable);
+        assert!(out.is_bgp_dead());
+        assert!(
+            out.empty_patterns.is_empty(),
+            "no conjunct is empty — the witness is the provenance, not a pattern"
+        );
+        assert!(out.live_combinations.is_empty());
+        assert_eq!(
+            out.summary_prune,
+            SummaryPruneOutcome::Applied {
+                combinations_considered: 1,
+                combinations_live: 0,
+            }
+        );
+        // Both surviving Phase-2 candidates are recorded dead, ascending by (pattern, source).
+        assert_eq!(out.pruned.len(), 2);
+        assert_eq!((out.pruned[0].pattern, out.pruned[0].source), (0, 0));
+        assert_eq!((out.pruned[1].pattern, out.pruned[1].source), (1, 1));
+        assert!(out.surviving_combination_patterns().is_empty());
+    }
+
+    /// Recall-safety layer 1: a source that published NO summary constrains nothing, so it is
+    /// never the reason a combination dies. Same disjoint-authority setup as the headline test,
+    /// but B publishes nothing — B must survive.
+    #[test]
+    fn a_source_without_a_summary_is_never_pruned() {
+        let bgp = flat_join_bgp();
+        let sources = vec![
+            source("http://a/", &[MEMBER_OF_FLAT]),
+            source("http://b/", &[HAS_ADDRESS]),
+        ];
+        let selected = select_private_sources(&bgp, &sources, &[]).unwrap();
+        // Only A publishes a summary; B is unconstrained.
+        let summaries = vec![membership_summary("http://a/", "http://flats-a.example")];
+        let out = prune_source_combinations_with_summaries(
+            &bgp,
+            &sources,
+            &selected,
+            &summaries,
+            CombinationBudget::default(),
+        )
+        .unwrap();
+
+        assert!(out.bgp_satisfiable);
+        assert!(
+            out.pruned.is_empty(),
+            "a source with no summary must never be pruned"
+        );
+        assert_eq!(
+            out.live_combinations,
+            vec![SourceCombination {
+                assignment: vec![0, 1]
+            }]
+        );
+    }
+
+    /// Recall-safety layer 1 (second half): a summary the source did NOT declare complete is not
+    /// an over-approximation, so nothing can be proved from it — the pass reports `NotAttempted`
+    /// and prunes nothing, even though the declared triples would otherwise kill the combination.
+    #[test]
+    fn an_incomplete_summary_proves_nothing_and_prunes_nothing() {
+        let bgp = flat_join_bgp();
+        let sources = vec![
+            source("http://a/", &[MEMBER_OF_FLAT]),
+            source("http://b/", &[HAS_ADDRESS]),
+        ];
+        let selected = select_private_sources(&bgp, &sources, &[]).unwrap();
+        // Byte-identical to the "all dead" fixture EXCEPT the missing `.complete()` calls.
+        let summaries = vec![
+            SourceQuotientSummary::builder(SourceId::new("http://a/"))
+                .triple(
+                    SummaryTerm::iri("http://people.example/alice"),
+                    MEMBER_OF_FLAT,
+                    SummaryTerm::iri("http://flats-a.example/1"),
+                )
+                .build(),
+            SourceQuotientSummary::builder(SourceId::new("http://b/"))
+                .triple(
+                    SummaryTerm::iri("http://flats-b.example/1"),
+                    HAS_ADDRESS,
+                    SummaryTerm::Literal,
+                )
+                .build(),
+        ];
+        let out = prune_source_combinations_with_summaries(
+            &bgp,
+            &sources,
+            &selected,
+            &summaries,
+            CombinationBudget::default(),
+        )
+        .unwrap();
+
+        assert_eq!(out.summary_prune, SummaryPruneOutcome::NotAttempted);
+        assert!(out.bgp_satisfiable);
+        assert!(out.pruned.is_empty());
+        assert!(out.live_combinations.is_empty());
+    }
+
+    /// Positive control (the four-flatmates shape, summarised): every source's summary agrees on
+    /// the join authority, so every combination is live and NOTHING is pruned. A regression that
+    /// over-pruned would fire here.
+    #[test]
+    fn four_flatmates_with_agreeing_summaries_prunes_nothing() {
+        let bgp = flat_join_bgp();
+        let sources = vec![
+            source("http://a/", &[MEMBER_OF_FLAT]),
+            source("http://a2/", &[MEMBER_OF_FLAT]),
+            source("http://b/", &[HAS_ADDRESS]),
+            source("http://c/", &[HAS_ADDRESS]),
+        ];
+        let selected = select_private_sources(&bgp, &sources, &[]).unwrap();
+        let summaries = vec![
+            membership_summary("http://a/", "http://flats.example"),
+            membership_summary("http://a2/", "http://flats.example"),
+            address_summary("http://b/", "http://flats.example"),
+            address_summary("http://c/", "http://flats.example"),
+        ];
+        let out = prune_source_combinations_with_summaries(
+            &bgp,
+            &sources,
+            &selected,
+            &summaries,
+            CombinationBudget::default(),
+        )
+        .unwrap();
+
+        assert!(out.bgp_satisfiable);
+        assert!(out.pruned.is_empty());
+        assert_eq!(
+            out.summary_prune,
+            SummaryPruneOutcome::Applied {
+                combinations_considered: 4,
+                combinations_live: 4,
+            }
+        );
+        // All 2×2 combinations survive, enumerated deterministically.
+        assert_eq!(
+            out.live_combinations,
+            vec![
+                SourceCombination {
+                    assignment: vec![0, 2]
+                },
+                SourceCombination {
+                    assignment: vec![0, 3]
+                },
+                SourceCombination {
+                    assignment: vec![1, 2]
+                },
+                SourceCombination {
+                    assignment: vec![1, 3]
+                },
+            ]
+        );
+    }
+
+    /// A variable repeated WITHIN one pattern (`?x knows ?x`) must bind consistently: a source
+    /// whose summary only records cross-authority `knows` cannot match it, so the combination is
+    /// dead. A regression that let the second occurrence overwrite the first would call it live.
+    #[test]
+    fn a_variable_repeated_in_one_pattern_must_bind_consistently() {
+        const KNOWS: &str = "http://ex/knows";
+        let bgp = Bgp::new(vec![TriplePattern::new(var("x"), iri(KNOWS), var("x"))]);
+        let sources = vec![source("http://a/", &[KNOWS])];
+        let selected = select_private_sources(&bgp, &sources, &[]).unwrap();
+
+        // Cross-authority `knows` only ⇒ `?x` cannot take one class in both positions ⇒ dead.
+        let cross = vec![SourceQuotientSummary::builder(SourceId::new("http://a/"))
+            .triple(
+                SummaryTerm::iri("http://l.example/1"),
+                KNOWS,
+                SummaryTerm::iri("http://r.example/1"),
+            )
+            .complete()
+            .build()];
+        let dead = prune_source_combinations_with_summaries(
+            &bgp,
+            &sources,
+            &selected,
+            &cross,
+            CombinationBudget::default(),
+        )
+        .unwrap();
+        assert!(!dead.bgp_satisfiable);
+        assert_eq!(dead.pruned.len(), 1);
+
+        // Add a same-authority `knows` and the combination becomes live again.
+        let same = vec![SourceQuotientSummary::builder(SourceId::new("http://a/"))
+            .triple(
+                SummaryTerm::iri("http://l.example/1"),
+                KNOWS,
+                SummaryTerm::iri("http://r.example/1"),
+            )
+            .triple(
+                SummaryTerm::iri("http://l.example/1"),
+                KNOWS,
+                SummaryTerm::iri("http://l.example/2"),
+            )
+            .complete()
+            .build()];
+        let live = prune_source_combinations_with_summaries(
+            &bgp,
+            &sources,
+            &selected,
+            &same,
+            CombinationBudget::default(),
+        )
+        .unwrap();
+        assert!(live.bgp_satisfiable);
+        assert!(live.pruned.is_empty());
+    }
+
+    /// A bound LITERAL in the pattern matches the single literal class (an over-approximation —
+    /// summaries never record a literal's value), while a bound IRI in the same position does not.
+    #[test]
+    fn a_bound_literal_matches_the_literal_class_and_an_iri_does_not() {
+        const NAME_P: &str = "http://ex/name";
+        // INCOMPLETE authorities, so the upstream authority prune does not empty the bound-IRI
+        // pattern before the provenance pass gets to it (we are testing OUR matcher, not that one).
+        let sources = vec![source_incomplete("http://a/", &[NAME_P])];
+        let summaries = vec![SourceQuotientSummary::builder(SourceId::new("http://a/"))
+            .triple(
+                SummaryTerm::iri("http://people.example/alice"),
+                NAME_P,
+                SummaryTerm::Literal,
+            )
+            .complete()
+            .build()];
+
+        // Object is a bound literal ⇒ matches the summarised literal ⇒ live.
+        let lit_bgp = Bgp::new(vec![TriplePattern::new(
+            var("s"),
+            iri(NAME_P),
+            Term::Literal("Alice".to_string()),
+        )]);
+        let lit_sel = select_private_sources(&lit_bgp, &sources, &[]).unwrap();
+        let lit = prune_source_combinations_with_summaries(
+            &lit_bgp,
+            &sources,
+            &lit_sel,
+            &summaries,
+            CombinationBudget::default(),
+        )
+        .unwrap();
+        assert!(lit.bgp_satisfiable, "a bound literal matches the literal class");
+
+        // Object is a bound IRI ⇒ the summary holds only a literal there ⇒ dead.
+        let iri_bgp = Bgp::new(vec![TriplePattern::new(
+            var("s"),
+            iri(NAME_P),
+            iri("http://people.example/alice"),
+        )]);
+        let iri_sel = select_private_sources(&iri_bgp, &sources, &[]).unwrap();
+        assert!(!iri_sel.per_pattern[0].is_empty(), "Phase 2 keeps the source");
+        let bound = prune_source_combinations_with_summaries(
+            &iri_bgp,
+            &sources,
+            &iri_sel,
+            &summaries,
+            CombinationBudget::default(),
+        )
+        .unwrap();
+        assert!(!bound.bgp_satisfiable, "an IRI cannot match the literal class");
+    }
+
+    /// Decline 1 — a variable used in BOTH a predicate position and a subject position has no
+    /// well-defined quotient image (predicates stay concrete, terms are quotiented), so joining on
+    /// it could prune unsoundly. The pass declines and prunes nothing.
+    #[test]
+    fn a_predicate_term_variable_clash_declines_and_prunes_nothing() {
+        // `?s ?p ?o . ?p name ?n` — `?p` is a predicate in pattern 0 and a subject in pattern 1.
+        const NAME_P: &str = "http://ex/name";
+        let bgp = Bgp::new(vec![
+            TriplePattern::new(var("s"), var("p"), var("o")),
+            TriplePattern::new(var("p"), iri(NAME_P), var("n")),
+        ]);
+        let sources = vec![source("http://a/", &[NAME_P])];
+        let selected = select_private_sources(&bgp, &sources, &[]).unwrap();
+        assert!(!selected.per_pattern[0].is_empty() && !selected.per_pattern[1].is_empty());
+
+        let summaries = vec![SourceQuotientSummary::builder(SourceId::new("http://a/"))
+            .triple(
+                SummaryTerm::iri("http://people.example/alice"),
+                NAME_P,
+                SummaryTerm::Literal,
+            )
+            .complete()
+            .build()];
+        let out = prune_source_combinations_with_summaries(
+            &bgp,
+            &sources,
+            &selected,
+            &summaries,
+            CombinationBudget::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            out.summary_prune,
+            SummaryPruneOutcome::Declined(SummaryDeclineReason::PredicateVariableDomainClash {
+                var: "p".to_string()
+            })
+        );
+        assert!(out.pruned.is_empty(), "declining must prune nothing");
+        assert!(out.bgp_satisfiable);
+        assert!(out.live_combinations.is_empty());
+    }
+
+    /// Decline 2 — an over-budget combination space declines rather than truncating the search
+    /// (a truncated search cannot PROVE a combination dead, so truncating would be recall-unsafe).
+    #[test]
+    fn an_over_budget_combination_space_declines_and_prunes_nothing() {
+        let bgp = flat_join_bgp();
+        let sources = vec![
+            source("http://a/", &[MEMBER_OF_FLAT]),
+            source("http://b/", &[HAS_ADDRESS]),
+            source("http://c/", &[HAS_ADDRESS]),
+        ];
+        let selected = select_private_sources(&bgp, &sources, &[]).unwrap();
+        let summaries = vec![
+            membership_summary("http://a/", "http://flats-a.example"),
+            address_summary("http://b/", "http://flats-b.example"),
+            address_summary("http://c/", "http://flats-a.example"),
+        ];
+        // 1 × 2 = 2 combinations, budget 1.
+        let out = prune_source_combinations_with_summaries(
+            &bgp,
+            &sources,
+            &selected,
+            &summaries,
+            CombinationBudget::new(1, 4096),
+        )
+        .unwrap();
+
+        assert_eq!(
+            out.summary_prune,
+            SummaryPruneOutcome::Declined(SummaryDeclineReason::TooManyCombinations {
+                combinations: 2,
+                budget: 1,
+            })
+        );
+        assert!(out.pruned.is_empty());
+        assert!(out.live_combinations.is_empty());
+    }
+
+    /// Decline 3 — an over-wide intermediate join declines too. The same inputs under the default
+    /// budget DO prune, so this pins the budget as the cause rather than the data.
+    #[test]
+    fn an_over_wide_join_declines_and_prunes_nothing() {
+        let bgp = flat_join_bgp();
+        let sources = vec![
+            source("http://a/", &[MEMBER_OF_FLAT]),
+            source("http://b/", &[HAS_ADDRESS]),
+        ];
+        let selected = select_private_sources(&bgp, &sources, &[]).unwrap();
+        // A's summary admits TWO distinct `?flat` classes; B's addresses reach neither.
+        let summaries = vec![
+            SourceQuotientSummary::builder(SourceId::new("http://a/"))
+                .triple(
+                    SummaryTerm::iri("http://people.example/alice"),
+                    MEMBER_OF_FLAT,
+                    SummaryTerm::iri("http://flats-a.example/1"),
+                )
+                .triple(
+                    SummaryTerm::iri("http://people.example/alice"),
+                    MEMBER_OF_FLAT,
+                    SummaryTerm::iri("http://flats-x.example/1"),
+                )
+                .complete()
+                .build(),
+            address_summary("http://b/", "http://flats-b.example"),
+        ];
+
+        // Budget of 1 intermediate binding: pattern 0 alone yields 2 ⇒ decline.
+        let declined = prune_source_combinations_with_summaries(
+            &bgp,
+            &sources,
+            &selected,
+            &summaries,
+            CombinationBudget::new(4096, 1),
+        )
+        .unwrap();
+        assert_eq!(
+            declined.summary_prune,
+            SummaryPruneOutcome::Declined(SummaryDeclineReason::JoinTooWide { budget: 1 })
+        );
+        assert!(declined.pruned.is_empty());
+
+        // Same data under the default budget: the combination really is dead.
+        let applied = prune_source_combinations_with_summaries(
+            &bgp,
+            &sources,
+            &selected,
+            &summaries,
+            CombinationBudget::default(),
+        )
+        .unwrap();
+        assert!(!applied.bgp_satisfiable);
+        assert_eq!(applied.pruned.len(), 2);
+    }
+
+    /// Rule C1 fires first: when a conjunct is already empty the whole combination space is
+    /// collapsed, and the provenance pass reports that it had nothing left to do (rather than
+    /// silently claiming an `Applied` verdict over a dead BGP).
+    #[test]
+    fn rule_c1_short_circuits_the_provenance_pass() {
+        let bgp = Bgp::new(vec![
+            TriplePattern::new(var("p"), iri(MEMBER_OF_FLAT), var("flat")),
+            TriplePattern::new(var("flat"), iri(ABSENT), var("z")),
+        ]);
+        let sources = vec![source("http://a/", &[MEMBER_OF_FLAT])];
+        let selected = select_private_sources(&bgp, &sources, &[]).unwrap();
+        let summaries = vec![membership_summary("http://a/", "http://flats-a.example")];
+        let out = prune_source_combinations_with_summaries(
+            &bgp,
+            &sources,
+            &selected,
+            &summaries,
+            CombinationBudget::default(),
+        )
+        .unwrap();
+
+        assert_eq!(out.summary_prune, SummaryPruneOutcome::BgpAlreadyDead);
+        assert!(!out.bgp_satisfiable);
+        assert_eq!(out.empty_patterns, vec![1]);
+        // The Rule-C1 audit trail is intact (the unsatisfiable-conjunct reason, not provenance).
+        assert_eq!(out.pruned.len(), 1);
+        assert_eq!(
+            out.pruned[0].reason,
+            CombinationPruneReason::UnsatisfiableBgp { witness: 1 }
+        );
+    }
+
+    /// Two summaries for one source id is an ambiguous declaration: fail-closed, never guess.
+    #[test]
+    fn duplicate_summary_for_one_source_is_a_descriptor_mismatch() {
+        let bgp = flat_join_bgp();
+        let sources = vec![
+            source("http://a/", &[MEMBER_OF_FLAT]),
+            source("http://b/", &[HAS_ADDRESS]),
+        ];
+        let selected = select_private_sources(&bgp, &sources, &[]).unwrap();
+        let summaries = vec![
+            membership_summary("http://a/", "http://flats-a.example"),
+            membership_summary("http://a/", "http://flats-b.example"),
+        ];
+        let err = prune_source_combinations_with_summaries(
+            &bgp,
+            &sources,
+            &selected,
+            &summaries,
+            CombinationBudget::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            SeamError::DescriptorMismatch {
+                phase: SeamPhase::SourceCombination,
+                ..
+            }
+        ));
+        assert!(format!("{}", err).contains("http://a/"));
+    }
+
+    /// A selection naming a pattern index outside the BGP is fail-closed too — the provenance pass
+    /// refuses to guess which pattern a candidate set belongs to.
+    #[test]
+    fn selection_pattern_index_outside_the_bgp_is_a_descriptor_mismatch() {
+        let bgp = flat_join_bgp();
+        let sources = vec![
+            source("http://a/", &[MEMBER_OF_FLAT]),
+            source("http://b/", &[HAS_ADDRESS]),
+        ];
+        // Same LENGTH as the BGP (so the Rule-C1 shape check passes) but pattern 7 does not exist.
+        let mismatched = SelectedPrivateSources {
+            per_pattern: vec![
+                PrivatePatternSources {
+                    pattern: 0,
+                    candidates: vec![PrivateCandidate {
+                        source: 0,
+                        source_id: SourceId::new("http://a/"),
+                        estimated_cardinality: 1.0,
+                    }],
+                },
+                PrivatePatternSources {
+                    pattern: 7,
+                    candidates: vec![PrivateCandidate {
+                        source: 1,
+                        source_id: SourceId::new("http://b/"),
+                        estimated_cardinality: 1.0,
+                    }],
+                },
+            ],
+            pruned: Vec::new(),
+        };
+        let summaries = vec![membership_summary("http://a/", "http://flats-a.example")];
+        let err = prune_source_combinations_with_summaries(
+            &bgp,
+            &sources,
+            &mismatched,
+            &summaries,
+            CombinationBudget::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            SeamError::DescriptorMismatch {
+                phase: SeamPhase::SourceCombination,
+                ..
+            }
+        ));
+        assert!(format!("{}", err).contains("outside the BGP"));
+    }
+
+    /// The provenance pass is deterministic: identical inputs ⇒ identical output, twice
+    /// (including the live-combination enumeration order).
+    #[test]
+    fn provenance_prune_is_deterministic() {
+        let bgp = flat_join_bgp();
+        let sources = vec![
+            source("http://a/", &[MEMBER_OF_FLAT]),
+            source("http://b/", &[HAS_ADDRESS]),
+            source("http://c/", &[HAS_ADDRESS]),
+        ];
+        let selected = select_private_sources(&bgp, &sources, &[]).unwrap();
+        let summaries = vec![
+            membership_summary("http://a/", "http://flats-a.example"),
+            address_summary("http://b/", "http://flats-b.example"),
+            address_summary("http://c/", "http://flats-a.example"),
+        ];
+        let a = prune_source_combinations_with_summaries(
+            &bgp,
+            &sources,
+            &selected,
+            &summaries,
+            CombinationBudget::default(),
+        )
+        .unwrap();
+        let b = prune_source_combinations_with_summaries(
+            &bgp,
+            &sources,
+            &selected,
+            &summaries,
+            CombinationBudget::default(),
+        )
+        .unwrap();
+        assert_eq!(a, b);
+    }
+
+    /// The audit-trail labels for the new reason and each decline reason name their cause (a
+    /// regression that blanked one would lose the diagnostic a relying party reads).
+    #[test]
+    fn provenance_labels_name_their_cause() {
+        let reason = CombinationPruneReason::EmptyProvenance.label();
+        assert!(reason.contains("provenance"), "names the cause: {reason}");
+
+        let clash = SummaryDeclineReason::PredicateVariableDomainClash {
+            var: "p".to_string(),
+        }
+        .label();
+        assert!(clash.contains("?p"), "names the variable: {clash}");
+        let budget = SummaryDeclineReason::TooManyCombinations {
+            combinations: 9,
+            budget: 4,
+        }
+        .label();
+        assert!(budget.contains('9') && budget.contains('4'), "{budget}");
+        let wide = SummaryDeclineReason::JoinTooWide { budget: 3 }.label();
+        assert!(wide.contains('3'), "{wide}");
     }
 
     /// A selection whose pattern count does not match the BGP is a fail-closed

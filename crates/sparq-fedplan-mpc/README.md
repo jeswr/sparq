@@ -1,4 +1,4 @@
-<!-- [OPUS-4.8] sq-2q1x / sq-fix4 / sq-i1wh2 / sq-pwr.2 / sq-pwr.3: internal README for a publish=false crate; full design lives in research/mpc-untrusted-planner-routing-design.md. -->
+<!-- [OPUS-4.8] sq-2q1x / sq-fix4 / sq-i1wh2 / sq-pwr.2 / sq-pwr.3 / sq-xkrt: internal README for a publish=false crate; full design lives in research/mpc-untrusted-planner-routing-design.md. -->
 # sparq-fedplan-mpc
 
 The opt-in seam between cost-based federated source selection (`sparq-fedplan`) and
@@ -18,10 +18,16 @@ declared leakage envelope (Phase 4):
 // behind `--features fedplan-mpc`
 let selected = sparq_fedplan_mpc::select_private_sources(&bgp, &descriptors, &privacy)?;
 // Phase 6 — result-aware combination prune: is any full-BGP combination feasible?
+// Rule C1 only (no summaries needed):
 let combos = sparq_fedplan_mpc::prune_source_combinations(&bgp, &descriptors, &selected)?;
+// …or Rule C1 + the FedUP-style quotient-summary provenance prune, when sources published one:
+let combos = sparq_fedplan_mpc::prune_source_combinations_with_summaries(
+    &bgp, &descriptors, &selected, &summaries, CombinationBudget::default(),
+)?;
 if combos.is_bgp_dead() {
-    // an empty conjunct makes the whole BGP unsatisfiable — skip the MPC path entirely
+    // no source-combination can answer — skip the MPC path entirely
 }
+// combos.live_combinations — the reduced set still worth routing toward MPC
 let routing = sparq_fedplan_mpc::route_operators(
     &selected, &privacy, &operators, RoutingPolicy::Default,
 )?;
@@ -65,21 +71,40 @@ match sparq_fedplan_mpc::ratify_envelope(&envelope, &privacy, Some(budget)) {
   private predicates (constraint C-B — the most-private holder wins), AND the **verifier**
   rejects an over-leaking envelope (distinct disclosed operands exceeding its budget),
   returning a `RatificationOutcome` naming *which* ratification failed and *why*.
-- **`prune_source_combinations`** (Phase 6, sq-pwr.3) — the FedUP-style **result-aware
+- **`prune_source_combinations`** (Phase 6 Rule C1, sq-pwr.3) — the **result-aware
   source-combination prune** over the Phase-2 selection. A federated query executes a
   *conjunction* of patterns, and the seam's secure-join cost grows with the number of
   source *combinations* (one source per pattern) it considers; this pass surfaces which
   combinations **provably contribute no answer** so the seam routes fewer toward MPC. The
-  one recall-safe, summary-expressible rule is **unsatisfiable-conjunct collapse**: if any
-  pattern's Phase-2 candidate list is empty, that conjunct is proved-empty, so the whole
-  conjunction is unsatisfiable and **every** combination is dead (`∅ ⋈ R = ∅`). It carries
-  the Phase-2 selection through **unchanged** (advisory + auditable), reporting
-  `bgp_satisfiable`, the empty-pattern witnesses, the BGP join components, and a
-  combination-dead audit trail. The value-overlap / bound-IRI-propagation prune is
-  **deliberately declined** — not recall-safely expressible from the public summary
+  rule expressible from the `SourceDescriptor` summary alone is **unsatisfiable-conjunct
+  collapse**: if any pattern's Phase-2 candidate list is empty, that conjunct is
+  proved-empty, so the whole conjunction is unsatisfiable and **every** combination is dead
+  (`∅ ⋈ R = ∅`). It carries the Phase-2 selection through **unchanged** (advisory +
+  auditable), reporting `bgp_satisfiable`, the empty-pattern witnesses, the BGP join
+  components, and a combination-dead audit trail. A value-overlap prune *from the
+  `SourceDescriptor`* is **deliberately declined** — not recall-safely expressible from it
   (single-IRI `may_hold_authority`, no authority-set enumerator) — so a future contributor
   does not build an unsound prune. A length mismatch is fail-closed
   (`SeamError::DescriptorMismatch`, phase `SourceCombination`).
+- **`prune_source_combinations_with_summaries` + `SourceQuotientSummary`** (Phase 6 Rule C2,
+  sq-xkrt) — the FedUP-style (WWW'24) **provenance over quotient summaries** prune, the lever
+  the design record's §3 names as the highest-leverage pre-MPC cost win. The way past the
+  declined value-overlap non-rule is not a cleverer reading of `SourceDescriptor` but a
+  **different input**: a source may publish a `SourceQuotientSummary` — its graph under the
+  **authority quotient** (IRIs collapse to `scheme://authority`, **literal values are never
+  recorded**) — and declare it a *complete over-approximation*. The pass then evaluates the
+  BGP at the quotient level **once per source-combination** and drops those whose evaluation
+  is empty, which **provably** produce no concrete answer. That kills combinations whose
+  patterns are individually non-empty but *jointly* unsatisfiable (e.g. two sources holding
+  the join predicate over disjoint authorities) — exactly what Rule C1 cannot see. It reports
+  `live_combinations` (the reduced set to route), a `SummaryPruneOutcome`, and
+  `EmptyProvenance` audit entries; if **no** combination survives, `bgp_satisfiable` goes
+  false with no empty conjunct. **Recall-safe in three layers**: a source with no complete
+  summary constrains nothing and is never the reason a combination dies; the
+  over-approximation makes an empty evaluation a *proof*; and every indecisive case (a
+  variable spanning the predicate and subject/object domains, an over-budget combination
+  space via `CombinationBudget`, an over-wide join) **declines** and prunes nothing. Duplicate
+  summaries for one source id are refused (`SeamError::DescriptorMismatch`).
 
 > **Internal crate — not published** (`publish = false`). **No soundness or privacy
 > claim.** Phases 2–4 + 6 are **plumbing — source-selection + result-aware combination
@@ -98,8 +123,13 @@ match sparq_fedplan_mpc::ratify_envelope(&envelope, &privacy, Some(budget)) {
 
 **Threat-model / leakage note (honest).** Phase 2 reads each source's *own* declared
 `SourcePrivacyDescriptor` to decide participation; Phase 6 reads only the (public) Phase-2
-selection to decide which combinations are infeasible (revealing nothing beyond what the
-caller's own descriptors already imply, and making **no** value-overlap inference); Phase 3
+selection and the (public, source-published) quotient summaries to decide which combinations
+are infeasible, revealing nothing beyond what those inputs already imply. Publishing a
+`SourceQuotientSummary` **is itself a disclosure** the source opts into: it reveals which
+**authorities** its subjects/objects come from, per predicate. It does *not* reveal literal
+values (collapsed to one class), individual IRIs (collapsed to their authority), or
+cardinalities (the summary is a set); a source that considers even the authority-level shape
+sensitive publishes nothing and is simply never pruned. Phase 3
 reads `may_disclose` per operand to decide the route. Per constraint C-B (§2.2) the
 descriptor is the source's declaration — Phase 4's `ratify_envelope` has each holder
 **re-enforce** it fail-closed and the verifier ratify the leakage envelope, so a lying
