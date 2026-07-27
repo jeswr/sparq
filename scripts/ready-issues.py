@@ -278,10 +278,18 @@ def _reserving_packages(labels):
 
     [OPUS-5] The deliberate asymmetry with `packages_of`. Fail-closed on a candidate costs one
     dispatch; fail-closed on an occupant costs the ENTIRE fleet, because an unattributable
-    occupant would serialize every package at once with no way for the pipeline to clear it
-    (nothing in the pipeline applies `area:` labels to PRs). An occupant we cannot attribute
-    therefore reserves nothing and is instead handled by the linked-issue suppression the
-    registry planner applies (`Closes #N` / `sparq-agent/issue-N-*` heads).
+    occupant would serialize every package at once. An occupant we cannot attribute therefore
+    reserves nothing and is instead handled by the linked-issue suppression the registry planner
+    applies (`Closes #N` / `sparq-agent/issue-N-*` heads) and, since reg#677, by folding it into
+    its source issue's unit — see `unit_reservations`.
+
+    [OPUS-5 2026-07-27] The original justification said "nothing in the pipeline applies `area:`
+    labels to PRs". That is NO LONGER TRUE — `scripts/pr-area-labels.py` (pr-area-label.yml) now
+    derives them from changed paths, and 109 of 123 open PRs carry one. The RULE is unchanged and
+    still right: the deriver is itself fail-closed (it emits no label on unresolved or
+    cross-cutting paths), so 9 open PRs still declare nothing, and making those 9 seize
+    `__global__` would reproduce the measured whole-fleet stall. Only the stated reason needed
+    correcting; leaving a false premise in place is how a correct rule gets "fixed" back.
     """
     return declared_packages(labels)
 
