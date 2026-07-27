@@ -1,6 +1,27 @@
 {
  "_doc": "Advisory-job registry. [OPUS-5] sparq-org/sparq#3773 made this file LOAD-BEARING: it is the ONLY thing that can make a check-run non-gating. scripts/ci_summary_gate.py excludes a check-run from the `gate` verdict IFF its name is a key here (whole-name, case-insensitive; a ${{ ... }} expression in a key matches its runtime expansion); everything else GATES, whatever it is called. Before #3773 the gate INFERRED advisory status from the job name matching \\b(advisory|informational)\\b, which silently neutralised four real gates. Every entry needs {owner_bead, promotion_criteria, registered, workflow, job_id}: workflow+job_id is the STABLE IDENTITY the declaration binds to, and check-advisory-registry.py C4 fails if that job's current YAML name is not exactly the key — so renaming a job can never silently flip whether it gates (the renamed job GATES, fail-closed, and C4 REDs until the declaration is updated). A job that intentionally runs a gate-classified command (python/shell/node/npm — C3, now language-agnostic) must also carry gate_script_waiver. C2 keeps requiring that any job whose NAME carries an advisory/informational token be declared here or lose the misleading token. Maintained by scripts/check-advisory-registry.py. PROMOTING a lane = deleting its entry.",
  "jobs": {
+  "review-lane blind-spot alarm": {
+   "workflow": "review-alarm.yml",
+   "job_id": "alarm",
+   "owner_bead": "sq-huwr8",
+   "promotion_criteria": "NEVER promotable — promoting it would INVERT its purpose. This is a DETECTOR: it REDs when it finds PRs that no review producer can reach, and it REDs fail-loud when the detector itself breaks. Neither condition is a property of the commit being gated, so gating on it would block every merge on an unrelated repo-wide backlog — the exact pressure that gets an alarm muted, which is the one outcome that destroys the signal. Registered because the lane was SILENTLY GATING: its header claimed it 'can never enter the ci-summary / gate poll set' on the premise that it creates no check-run on a PR head or merge-group ref, but ci-summary.yml ALSO runs on push to main (timeout-minutes: 80) and this workflow's scheduled run puts its check-run on exactly that head SHA. MEASURED 2026-07-27: ci_summary_gate.py render_verdict() over the real 477-check-run set for main head cb0c6739c listed `review-lane blind-spot alarm: failure` as a GATING failure. Delete this entry only if the workflow is removed.",
+   "registered": "2026-07-27"
+  },
+  "formal-lane no-verdict alarm": {
+   "workflow": "formal-alarm.yml",
+   "job_id": "alarm",
+   "owner_bead": "sq-63ups",
+   "promotion_criteria": "NEVER promotable, same reason as `review-lane blind-spot alarm` — a detector that REDs when a nightly formal lane stopped producing verdicts is reporting on the LANE's health, not on the commit under test, so it must never gate a merge. Same silent-gating defect (sq-huwr8): scheduled on main, so its check-run lands on the same head SHA the push-triggered ci-summary gate polls. Delete this entry only if the workflow is removed.",
+   "registered": "2026-07-27"
+  },
+  "nightly selection-bug alarm": {
+   "workflow": "selection-alarm.yml",
+   "job_id": "alarm",
+   "owner_bead": "sq-va7at",
+   "promotion_criteria": "NEVER promotable, same reason as `review-lane blind-spot alarm` — the lane is declared fail-OPEN by design (research/change-based-test-selection.md §6.1) and correlates a past nightly failure against selection skips, which is not a property of the commit being gated. Same silent-gating defect (sq-huwr8): it fires via workflow_run on CI-on-main completions, so its check-run lands on a main head SHA that a push-triggered ci-summary gate polls (OBSERVED on cb0c6739c, conclusion skipped). Delete this entry only if the workflow is removed.",
+   "registered": "2026-07-27"
+  },
   "changed-code mutation review (advisory)": {
    "workflow": "mutants-diff.yml",
    "job_id": "mutants-diff",
