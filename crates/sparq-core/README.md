@@ -52,8 +52,9 @@ assert_eq!(count, 1);
   a whole batch with `apply_delta` — in place, with an optional write-ahead log.
 - **Out-of-core store** — query datasets larger than RAM from a memory-mapped on-disk store,
   with optional block compression and near-zero resident heap. The opt-in `block-bloom` feature
-  adds per-block Bloom filters on high-NDV columns to skip blocks on equality-bound point lookups
-  (result-equivalent, never serialised).
+  adds per-block Bloom filters on high-NDV columns to skip the block decode on equality-bound
+  point lookups for an id that is ABSENT from the permutation (result-equivalent, never
+  serialised; present-id lookups are already zone-map-pruned and are unchanged).
 - **Compressed-seek column codecs (prototype)** — the opt-in `elias-fano` feature adds
   Elias-Fano and Partitioned-Elias-Fano codecs whose `next_geq(target)` answers a successor
   query *directly on the compressed data*, without the whole-block decode the varint block codec

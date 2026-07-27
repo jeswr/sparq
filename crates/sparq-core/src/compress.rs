@@ -121,11 +121,24 @@ impl Blocks {
 /// [OPUS-4.8] sq-wihld (survey §A1) — OPT-IN per-block Bloom filters on the leading
 /// (column-0) ids of a block-compressed permutation. The directory's first-triple already
 /// gives an implicit min/max zone map that prunes RANGE scans, but for an EQUALITY-BOUND
-/// leading column (a point/prefix lookup, `lo[0] == hi[0]`) whose id falls inside several
-/// overlapping blocks' `[min,max]` spans — the common case on a high-NDV subject/object
-/// column — nothing skips a block that cannot contain the id. A tiny per-block Bloom bitset
-/// fixes exactly that gap: probe the block's filter and skip its `decode_block_at` when the
-/// id is provably absent.
+/// leading column (a point/prefix lookup, `lo[0] == hi[0]`) the zone map still leaves one
+/// candidate block that must be decoded to discover it holds no matching row. A tiny per-block
+/// Bloom bitset closes exactly that gap: probe the block's filter and skip its
+/// `decode_block_at` when the id is provably absent.
+///
+/// WHERE THE WIN ACTUALLY IS ([SONNET-4.6] sq-v8ixk, measured — see
+/// `tests::measure_bloom_skip_and_sizing` / `tests::measure_bloom_selective_scan_latency`).
+/// This module originally justified itself by an id falling inside SEVERAL overlapping blocks'
+/// `[min,max]` spans. Measurement REFUTES that for the high-NDV columns the density gate
+/// admits: precisely because the column is high-NDV, a PRESENT id's rows are contiguous and the
+/// zone map already narrows the candidate window to about one block, so the filter has almost
+/// nothing left to skip and a present-id point lookup is neither faster nor slower. (An id
+/// spanning many blocks is a LOW-NDV column — exactly what the density gate declines.) What the
+/// filter does earn, and earns largely, is the ABSENT equality-bound id — a subject/object bound
+/// by an earlier pattern that has no rows in this permutation — where it drops the single
+/// candidate block without decoding it at all. That is the shape to reach for this feature for.
+/// No number is asserted here or in any doc: run the harness (its skip/FP/sizing half is
+/// host-independent; the latency half is canonical only on the perf host, bead sq-0g6g).
 ///
 /// CORRECTNESS (load-bearing): zero false NEGATIVES by construction — a leading id that is
 /// present in a block always probes as "maybe present", so no matching row is ever skipped.
@@ -146,12 +159,27 @@ mod block_bloom {
     /// WASM-trivial bitset. The directory already costs ~0.13 B/triple, so this roughly
     /// triples the resident directory of a Bloom-enabled column — paid only on the high-NDV
     /// columns the density gate admits.
-    const BITS: usize = 256;
+    /// (`pub(super)` only so the sq-v8ixk measurement harness in this file's `tests` module
+    /// can print and sweep around the SHIPPED value instead of re-declaring it and drifting.)
+    pub(super) const BITS: usize = 256;
     /// Machine words (u64) per block filter.
     const WORDS: usize = BITS / 64;
     /// Hash probes per id. Two independent probes (double hashing off one 64-bit hash) is
     /// the sweet spot for ~128 keys in 256 bits; more probes would over-fill the bitset.
-    const HASHES: u32 = 2;
+    /// `pub(super)` for the same measurement-harness reason as [`BITS`].
+    ///
+    /// [SONNET-4.6] sq-v8ixk — DELIBERATELY LEFT AT 2. The sizing sweep in
+    /// `tests::measure_bloom_skip_and_sizing` finds `HASHES = 1` markedly BETTER on DENSE ids
+    /// (which is what the dictionary assigns) — better than the textbook Bloom formula predicts,
+    /// at half the probe work — but the sweep's scattered-id CONTROL column shows that advantage
+    /// is an artefact of FNV-1a's low bits behaving near-injectively on small consecutive ids,
+    /// not of Bloom math: with the ids scattered across the 32-bit space the measured rates track
+    /// theory and `HASHES = 2` wins as expected. Flipping to 1 would therefore trade a
+    /// distribution-INDEPENDENT choice for one silently contingent on an id-density property
+    /// nothing in this crate guarantees. It stays a candidate retune pending confirmation against
+    /// a REAL Wikidata permutation on the canonical perf host (bead sq-0g6g); re-run the sweep
+    /// there before changing this line.
+    pub(super) const HASHES: u32 = 2;
 
     /// FNV-1a 64-bit hash of a leading-column id, the seed for double hashing. Deterministic
     /// and endian-stable (we hash the little-endian id bytes), so a filter built on one host
@@ -259,7 +287,8 @@ mod block_bloom {
     /// the filter to keep the directory lean. Chosen conservatively (a full BLOCK of distinct
     /// ids is 128; this admits columns where at least an eighth of a block's rows start a new
     /// leading id).
-    const MIN_AVG_DISTINCT_PER_BLOCK: f64 = (BLOCK / 8) as f64;
+    /// `pub(super)` for the same measurement-harness reason as [`BITS`].
+    pub(super) const MIN_AVG_DISTINCT_PER_BLOCK: f64 = (BLOCK / 8) as f64;
 }
 
 /// A block-compressed, random-accessible sorted permutation.
@@ -1753,6 +1782,473 @@ mod tests {
             assert_eq!(c.decode_all(), rows, "decode_all mismatch at n={n}");
             assert_eq!(c.len(), rows.len(), "len mismatch at n={n}");
         }
+    }
+
+    // ===== [SONNET-4.6] sq-v8ixk — the `block-bloom` MEASUREMENT harness =====
+    //
+    // sq-wihld (PR #1252) landed the opt-in filter asserting NO performance number, because the
+    // work box is not the canonical perf host. This harness is the instrument sq-0g6g runs, and
+    // it also settles the HOST-INDEPENDENT half of the question anywhere it runs: the block-skip
+    // rate, the false-positive rate and the filter's bytes are pure functions of the column's
+    // distribution and the (BITS, HASHES) sizing — identical on any machine, for a given input.
+    // Only the end-to-end latency table is host-sensitive, and it prints its own NON-canonical
+    // label. No number produced here is asserted in any doc.
+    //
+    // The harness deliberately reports PRESENT-key and ABSENT-key point lookups separately: a
+    // sorted column puts all rows for one leading id contiguously, so the zone map's candidate
+    // window for a PRESENT id is (the blocks holding it) plus at most ONE leading block, whereas
+    // for an ABSENT id the window is a single block the filter can drop entirely. Those two
+    // shapes have completely different skip ceilings and averaging them would hide the answer.
+
+    /// [SONNET-4.6] sq-v8ixk — a WatDiv-shaped skewed permutation column: `n_triples` triples
+    /// over `n_terms` terms with a small predicate vocabulary and Zipf-ish subjects/objects
+    /// (frequent terms take small ids), sorted + deduplicated into `order` — i.e. exactly the
+    /// rows `from_triples_compressed` hands [`CompressedPerm::encode`] for that permutation.
+    /// Deterministic (xorshift, fixed seed) so every host measures the identical column.
+    ///
+    /// `scatter` is the CONTROL for the sizing sweep's hash-quality question: with it off, term
+    /// ids are DENSE (`1..=n_terms`) exactly as the dictionary assigns them; with it on, each id
+    /// is multiplied by a large odd constant so the same number of distinct ids is spread across
+    /// the whole 32-bit space. NDV, block count and clustering are unchanged — only the ids' low
+    /// bits, which is what an FNV-1a-derived probe index reads. If a (bits, hashes) choice wins
+    /// on dense ids but loses on scattered ones, its advantage was a hash artefact, not Bloom
+    /// math, and must not be baked into the shipped constants.
+    ///
+    /// HONEST SCOPE: this is a synthetic stand-in with real-RDF *shape* (skew, small predicate
+    /// vocabulary, high-NDV subject/object columns), NOT a Wikidata column. Substituting a real
+    /// Wikidata permutation is the remaining gap on the canonical run.
+    #[cfg(feature = "block-bloom")]
+    fn bloom_perm_column(
+        n_triples: usize,
+        n_terms: u32,
+        order: [usize; 3],
+        seed: u64,
+        scatter: bool,
+    ) -> Vec<[Id; 3]> {
+        let mut state = seed | 1;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        // Zipf-ish: squaring a uniform in [0,1) concentrates mass on small ids.
+        let mut skewed = move |n: u32| -> Id {
+            let u = (next() >> 11) as f64 / (1u64 << 53) as f64;
+            1 + ((u * u) * n.saturating_sub(1) as f64) as Id
+        };
+        // A bijection on `Id` (odd multiplier ⇒ invertible mod 2^32), so scattering changes
+        // WHICH ids are used, never how many distinct ones there are.
+        let map = |id: Id| if scatter { id.wrapping_mul(2_654_435_761) } else { id };
+        let mut v = Vec::with_capacity(n_triples);
+        for _ in 0..n_triples {
+            let s = map(skewed(n_terms));
+            let p = 1 + (skewed(n_terms) % 85);
+            let o = map(skewed(n_terms));
+            let t = [s, p, o];
+            v.push([t[order[0]], t[order[1]], t[order[2]]]);
+        }
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// [SONNET-4.6] sq-v8ixk — a PARAMETRIC re-implementation of the shipped per-block filter,
+    /// so the sizing sweep can vary bits/hashes without touching the shipped constants. At
+    /// `(BITS, HASHES)` it must answer IDENTICALLY to the real [`block_bloom::BlockBloomDir`] —
+    /// pinned by `bloom_model_matches_shipped_filter`, without which the sweep would be fiction.
+    #[cfg(feature = "block-bloom")]
+    struct ModelBloom {
+        bits: usize,
+        hashes: u32,
+        words_per_block: usize,
+        words: Vec<u64>,
+    }
+
+    #[cfg(feature = "block-bloom")]
+    impl ModelBloom {
+        /// FNV-1a over the little-endian id bytes — the same seed hash the shipped filter uses.
+        fn hash_id(id: Id) -> u64 {
+            let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+            for b in id.to_le_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            h
+        }
+
+        /// `bits` must be a multiple of 64 (whole u64 words per block), as the shipped layout is.
+        fn build(blocks: &[&[[Id; 3]]], bits: usize, hashes: u32) -> Self {
+            assert_eq!(bits % 64, 0, "model filter needs whole u64 words per block");
+            let words_per_block = bits / 64;
+            let mut words = vec![0u64; blocks.len() * words_per_block];
+            for (b, chunk) in blocks.iter().enumerate() {
+                let mut prev: Option<Id> = None;
+                for r in chunk.iter() {
+                    if prev != Some(r[0]) {
+                        let h = Self::hash_id(r[0]);
+                        let (h1, h2) = (h as usize, ((h >> 32) | 1) as usize);
+                        let base = b * words_per_block;
+                        for k in 0..hashes as usize {
+                            let bit = (h1.wrapping_add(k.wrapping_mul(h2))) % bits;
+                            words[base + bit / 64] |= 1u64 << (bit % 64);
+                        }
+                        prev = Some(r[0]);
+                    }
+                }
+            }
+            ModelBloom { bits, hashes, words_per_block, words }
+        }
+
+        fn maybe_contains(&self, b: usize, id: Id) -> bool {
+            let h = Self::hash_id(id);
+            let (h1, h2) = (h as usize, ((h >> 32) | 1) as usize);
+            let base = b * self.words_per_block;
+            for k in 0..self.hashes as usize {
+                let bit = (h1.wrapping_add(k.wrapping_mul(h2))) % self.bits;
+                if self.words[base + bit / 64] & (1u64 << (bit % 64)) == 0 {
+                    return false;
+                }
+            }
+            true
+        }
+
+        fn heap_bytes(&self) -> usize {
+            self.words.len() * std::mem::size_of::<u64>()
+        }
+    }
+
+    /// [SONNET-4.6] sq-v8ixk — the two probe sets a point-lookup measurement needs, capped at
+    /// `cap` each: `(present, absent)` leading ids. PRESENT ids are sampled evenly across the
+    /// column (a bound subject/object that exists); ABSENT ids are the immediate neighbours of
+    /// present ids that are themselves not present (a bound id filtered out by an earlier
+    /// pattern, or simply not in this permutation) — deriving them from the present ids rather
+    /// than sweeping the id space keeps this O(n) whether the ids are dense or scattered.
+    #[cfg(feature = "block-bloom")]
+    fn bloom_probe_sets(rows: &[[Id; 3]], cap: usize) -> (Vec<Id>, Vec<Id>) {
+        let mut present: Vec<Id> = rows.iter().map(|r| r[0]).collect();
+        present.dedup();
+        let present_set: std::collections::HashSet<Id> = present.iter().copied().collect();
+        let sample: Vec<Id> = present.iter().copied().step_by(present.len() / cap + 1).collect();
+        let absent: Vec<Id> = present
+            .iter()
+            .flat_map(|&k| [k.wrapping_add(1), k.wrapping_sub(1)])
+            .filter(|k| *k != 0 && !present_set.contains(k))
+            .take(cap)
+            .collect();
+        (sample, absent)
+    }
+
+    /// [SONNET-4.6] sq-v8ixk — the zone map's candidate window for an equality-bound leading id:
+    /// `(first, last)` block indices the `range` loop would visit, derived from the per-block
+    /// first-keys exactly as [`CompressedPerm::range`] derives them from `dir`.
+    #[cfg(feature = "block-bloom")]
+    fn bloom_candidate_window(firsts: &[[Id; 3]], key: Id) -> (usize, usize) {
+        let lo = [key, Id::MIN, Id::MIN];
+        let hi = [key, Id::MAX, Id::MAX];
+        let first = firsts.partition_point(|k| *k <= lo).saturating_sub(1);
+        let last = firsts.partition_point(|k| *k <= hi).saturating_sub(1).max(first);
+        (first, last)
+    }
+
+    /// [SONNET-4.6] sq-v8ixk — `range` with the Bloom probe REMOVED: the feature-OFF loop,
+    /// verbatim. The latency table's baseline arm, and (asserted at every probe) output-identical
+    /// to `range`, so the two arms are timed on genuinely equal work.
+    #[cfg(feature = "block-bloom")]
+    fn range_without_bloom(c: &CompressedPerm, lo: [Id; 3], hi: [Id; 3]) -> Vec<[Id; 3]> {
+        if c.dir.is_empty() || lo > hi {
+            return Vec::new();
+        }
+        let first = c.dir.partition_point(|&(k, _)| k <= lo).saturating_sub(1);
+        let last = c.dir.partition_point(|&(k, _)| k <= hi).saturating_sub(1).max(first);
+        let mut decoded = Vec::with_capacity((last - first + 1) * BLOCK);
+        for b in first..=last {
+            c.decode_block_at(c.dir[b].1 as usize, &mut decoded);
+        }
+        let s = decoded.partition_point(|r| *r < lo);
+        let e = decoded.partition_point(|r| *r <= hi);
+        decoded.drain(..s);
+        decoded.truncate(e - s);
+        decoded
+    }
+
+    /// [SONNET-4.6] sq-v8ixk — SELF-CHECK (runs in the normal suite, not `#[ignore]`d): the
+    /// parametric [`ModelBloom`] at the SHIPPED `(BITS, HASHES)` must answer identically to the
+    /// real filter for every (block, probe) pair — present ids and absent ids alike. Without
+    /// this the sizing sweep would be measuring a model that does not describe what ships.
+    #[cfg(feature = "block-bloom")]
+    #[test]
+    fn bloom_model_matches_shipped_filter() {
+        let rows = bloom_perm_column(20_000, 40_000, [0, 1, 2], 0x5EED, false);
+        let chunks: Vec<&[[Id; 3]]> = rows.chunks(BLOCK).collect();
+        assert!(chunks.len() > 4, "need several blocks to compare per-block filters");
+        let shipped = block_bloom::BlockBloomDir::build(&chunks)
+            .expect("high-NDV column should pass the density gate");
+        let model = ModelBloom::build(&chunks, block_bloom::BITS, block_bloom::HASHES);
+        assert_eq!(shipped.heap_bytes(), model.heap_bytes(), "model/shipped filter size differ");
+
+        let max_id = rows.last().unwrap()[0];
+        for b in 0..chunks.len() {
+            for key in 1..=max_id + 8 {
+                assert_eq!(
+                    shipped.maybe_contains(b, key),
+                    model.maybe_contains(b, key),
+                    "model disagrees with shipped filter at block {} key {}",
+                    b,
+                    key
+                );
+            }
+        }
+    }
+
+    /// [SONNET-4.6] sq-v8ixk — SELF-CHECK: the latency baseline [`range_without_bloom`] is the
+    /// feature-OFF oracle, so it must agree with `range` on every shape the harness times.
+    /// Pins the baseline arm honest independently of whether the measurement is ever run.
+    #[cfg(feature = "block-bloom")]
+    #[test]
+    fn bloom_latency_baseline_matches_range() {
+        let rows = bloom_perm_column(20_000, 40_000, [0, 1, 2], 0xBEEF, false);
+        let c = CompressedPerm::encode(&rows);
+        let max_id = rows.last().unwrap()[0];
+        for key in (1..=max_id + 8).step_by(3) {
+            let lo = [key, Id::MIN, Id::MIN];
+            let hi = [key, Id::MAX, Id::MAX];
+            assert_eq!(c.range(lo, hi), range_without_bloom(&c, lo, hi), "baseline differs at {}", key);
+        }
+    }
+
+    /// [SONNET-4.6] sq-v8ixk — MEASUREMENT (i), (iii), (iv): per-column block-skip rate for
+    /// present- and absent-key equality-bound point lookups, the filter's false-positive rate
+    /// against its 256-bit/2-hash sizing, the density gate's admit/decline decision, and the
+    /// filter's build time + resident bytes against the directory it rides beside. Closes with
+    /// a (bits × hashes) sizing sweep so any retune of `BITS`/`HASHES` is evidence-led.
+    ///
+    /// Everything except the build-time column is host-INDEPENDENT (a pure function of the
+    /// column and the sizing). Run with
+    /// `cargo test -p sparq-core --features block-bloom --lib measure_bloom -- --ignored --nocapture`.
+    #[cfg(feature = "block-bloom")]
+    #[test]
+    #[ignore = "spike measurement: run explicitly with --ignored --nocapture"]
+    fn measure_bloom_skip_and_sizing() {
+        const N: usize = 2_000_000;
+        const TERMS: u32 = 1_000_000;
+        // SPO/OSP are the high-NDV subject/object-leading columns the feature targets; POS is
+        // the low-NDV predicate-leading column the density gate is supposed to DECLINE.
+        // `SPO/scattered` is the hash-quality control (see `bloom_perm_column`): same NDV and
+        // block count as `SPO`, different low id bits.
+        let columns: [(&str, [usize; 3], bool); 4] = [
+            ("SPO", [0, 1, 2], false),
+            ("OSP", [2, 0, 1], false),
+            ("POS", [1, 2, 0], false),
+            ("SPO/scattered-ids", [0, 1, 2], true),
+        ];
+
+        println!("\n===== sq-v8ixk block-bloom skip/FP/sizing (build time NON-canonical work-box) =====");
+        println!(
+            "  shipped sizing: BITS={} HASHES={} density gate MIN_AVG_DISTINCT_PER_BLOCK={} (BLOCK={})",
+            block_bloom::BITS,
+            block_bloom::HASHES,
+            block_bloom::MIN_AVG_DISTINCT_PER_BLOCK,
+            BLOCK
+        );
+
+        for (name, order, scatter) in columns {
+            let rows = bloom_perm_column(N, TERMS, order, 0x5EED, scatter);
+            let chunks: Vec<&[[Id; 3]]> = rows.chunks(BLOCK).collect();
+            let firsts: Vec<[Id; 3]> = chunks.iter().map(|c| c[0]).collect();
+
+            // Density: distinct leading ids per block (what the gate thresholds on).
+            let distinct: usize = chunks
+                .iter()
+                .map(|c| {
+                    let mut prev = None;
+                    c.iter().filter(|r| { let n = prev != Some(r[0]); prev = Some(r[0]); n }).count()
+                })
+                .sum();
+            let avg_distinct = distinct as f64 / chunks.len() as f64;
+
+            let t = std::time::Instant::now();
+            let built = block_bloom::BlockBloomDir::build(&chunks);
+            let build_time = t.elapsed();
+
+            println!(
+                "\n--- column {} : {} rows, {} blocks, avg distinct leading ids/block {:.1} ---",
+                name,
+                rows.len(),
+                chunks.len(),
+                avg_distinct
+            );
+            println!(
+                "  density gate: {} (threshold {:.1})",
+                if built.is_some() { "ADMIT" } else { "DECLINE" },
+                block_bloom::MIN_AVG_DISTINCT_PER_BLOCK
+            );
+            let Some(shipped) = built else {
+                println!("  (no filter built — nothing further to measure on this column)");
+                continue;
+            };
+            let dir_bytes = chunks.len() * 16;
+            println!(
+                "  build time {:?} (work box) | filter {} B = {:.3} B/triple | directory {} B = {:.3} B/triple",
+                build_time,
+                shipped.heap_bytes(),
+                shipped.heap_bytes() as f64 / rows.len() as f64,
+                dir_bytes,
+                dir_bytes as f64 / rows.len() as f64
+            );
+
+            // Probe sets: PRESENT leading ids (a bound subject/object that exists) and ABSENT
+            // ones inside the same id domain (a bound id filtered out by an earlier pattern, or
+            // simply not in this permutation) — the two shapes have different skip ceilings.
+            let (sample, absent) = bloom_probe_sets(&rows, 20_000);
+
+            for (label, probes) in [("present", &sample), ("absent", &absent)] {
+                let (mut cand, mut skipped, mut fp, mut truly_absent_blocks) = (0usize, 0usize, 0usize, 0usize);
+                for &key in probes.iter() {
+                    let (first, last) = bloom_candidate_window(&firsts, key);
+                    for b in first..=last {
+                        cand += 1;
+                        let holds = chunks[b].binary_search_by(|r| r[0].cmp(&key)).is_ok();
+                        let maybe = shipped.maybe_contains(b, key);
+                        assert!(holds <= maybe, "FALSE NEGATIVE at block {} key {}", b, key);
+                        if !maybe {
+                            skipped += 1;
+                        }
+                        if !holds {
+                            truly_absent_blocks += 1;
+                            if maybe {
+                                fp += 1;
+                            }
+                        }
+                    }
+                }
+                let pct = |a: usize, b: usize| if b == 0 { 0.0 } else { 100.0 * a as f64 / b as f64 };
+                println!(
+                    "  {:<8} probes={:<7} candidate blocks/probe={:.2}  SKIP RATE={:.2}% ({}/{})  \
+                     FP rate={:.2}% ({}/{} skippable)",
+                    label,
+                    probes.len(),
+                    cand as f64 / probes.len().max(1) as f64,
+                    pct(skipped, cand),
+                    skipped,
+                    cand,
+                    pct(fp, truly_absent_blocks),
+                    fp,
+                    truly_absent_blocks
+                );
+            }
+
+            // (iii) SIZING SWEEP — false-positive rate and bytes at other (bits, hashes). The
+            // theoretical FP for n distinct keys in m bits with k probes is (1-e^(-kn/m))^k;
+            // measured is what this column actually does.
+            println!("  sizing sweep (measured FP on absent-key candidate blocks):");
+            println!(
+                "  {:>6} {:>7} {:>12} {:>12} {:>14}",
+                "bits", "hashes", "B/triple", "FP measured", "FP theoretical"
+            );
+            for bits in [128usize, 256, 512, 1024] {
+                for hashes in [1u32, 2, 3, 4] {
+                    let m = ModelBloom::build(&chunks, bits, hashes);
+                    let (mut fp, mut n_absent) = (0usize, 0usize);
+                    for &key in &absent {
+                        let (first, last) = bloom_candidate_window(&firsts, key);
+                        for b in first..=last {
+                            if chunks[b].binary_search_by(|r| r[0].cmp(&key)).is_ok() {
+                                continue;
+                            }
+                            n_absent += 1;
+                            if m.maybe_contains(b, key) {
+                                fp += 1;
+                            }
+                        }
+                    }
+                    let theory = (1.0 - (-(hashes as f64) * avg_distinct / bits as f64).exp())
+                        .powi(hashes as i32);
+                    println!(
+                        "  {:>6} {:>7} {:>12.3} {:>11.2}% {:>13.2}%",
+                        bits,
+                        hashes,
+                        m.heap_bytes() as f64 / rows.len() as f64,
+                        if n_absent == 0 { 0.0 } else { 100.0 * fp as f64 / n_absent as f64 },
+                        100.0 * theory
+                    );
+                }
+            }
+        }
+        println!("\n===== end sq-v8ixk skip/FP/sizing — verdict adjudicated in the bead note =====\n");
+    }
+
+    /// [SONNET-4.6] sq-v8ixk — MEASUREMENT (ii): end-to-end `range` latency for selective
+    /// equality-bound point lookups with the Bloom probe ON versus the feature-OFF loop
+    /// ([`range_without_bloom`]), split by present- vs absent-key probes, plus the blocks each
+    /// arm actually decodes. NATIVE-ONLY ([`std::time::Instant`] is absent on `wasm32`).
+    ///
+    /// EVERY latency figure this prints is a NON-canonical work-box number and must not be
+    /// asserted anywhere; the canonical figures come from re-running this on sq-0g6g.
+    #[cfg(all(feature = "block-bloom", not(target_arch = "wasm32")))]
+    #[test]
+    #[ignore = "spike measurement: run explicitly with --ignored --nocapture"]
+    fn measure_bloom_selective_scan_latency() {
+        use std::time::Instant;
+        const N: usize = 2_000_000;
+        const TERMS: u32 = 1_000_000;
+        let columns: [(&str, [usize; 3], bool); 3] =
+            [("SPO", [0, 1, 2], false), ("OSP", [2, 0, 1], false), ("SPO/scattered-ids", [0, 1, 2], true)];
+
+        println!("\n===== sq-v8ixk block-bloom selective-scan latency (NON-canonical work-box) =====");
+        for (name, order, scatter) in columns {
+            let rows = bloom_perm_column(N, TERMS, order, 0x5EED, scatter);
+            let c = CompressedPerm::encode(&rows);
+            if !c.has_bloom() {
+                println!("--- column {}: density gate declined; no ON arm to time ---", name);
+                continue;
+            }
+            let (hit, miss) = bloom_probe_sets(&rows, 50_000);
+
+            println!("--- column {} : {} rows, {} blocks ---", name, rows.len(), c.dir.len());
+            for (label, probes) in [("present", &hit), ("absent", &miss)] {
+                // Equivalence first: the two arms must return the same rows, so the timing
+                // below compares equal work rather than a shortcut.
+                let (mut blocks_on, mut blocks_off) = (0usize, 0usize);
+                for &key in probes.iter() {
+                    let (lo, hi) = ([key, Id::MIN, Id::MIN], [key, Id::MAX, Id::MAX]);
+                    assert_eq!(c.range(lo, hi), range_without_bloom(&c, lo, hi), "arm mismatch at {}", key);
+                    let (cand, skip) = c.bloom_skip_stats(key);
+                    blocks_off += cand;
+                    blocks_on += cand - skip;
+                }
+
+                let mut sink = 0usize;
+                let t = Instant::now();
+                for &key in probes.iter() {
+                    sink += c.range([key, Id::MIN, Id::MIN], [key, Id::MAX, Id::MAX]).len();
+                }
+                let on = t.elapsed();
+                let t = Instant::now();
+                for &key in probes.iter() {
+                    sink += range_without_bloom(&c, [key, Id::MIN, Id::MIN], [key, Id::MAX, Id::MAX]).len();
+                }
+                let off = t.elapsed();
+                // Non-vacuity: both arms must have had real candidate blocks to work on. `sink`
+                // (rows returned) is only expected to be positive on the PRESENT arm — an
+                // absent-key lookup correctly returns nothing, which is that arm's entire point.
+                assert!(blocks_off > 0, "{} arm visited no candidate blocks — vacuous", label);
+                assert!(label != "present" || sink > 0, "present probes returned no rows — vacuous");
+
+                let per = |d: std::time::Duration| d.as_nanos() as f64 / probes.len().max(1) as f64;
+                println!(
+                    "  {:<8} probes={:<7} blocks decoded ON={} OFF={}  ns/lookup ON={:.0} OFF={:.0}  delta={:+.1}%",
+                    label,
+                    probes.len(),
+                    blocks_on,
+                    blocks_off,
+                    per(on),
+                    per(off),
+                    100.0 * (per(on) - per(off)) / per(off)
+                );
+            }
+        }
+        println!("\n===== end sq-v8ixk latency — NON-canonical; canonical run belongs on sq-0g6g =====\n");
     }
 
     /// [FABLE-5] sq-7d3dj.32.2.7 — builds a `V2` [`CompressedPerm`] from `rows` using ONLY the
