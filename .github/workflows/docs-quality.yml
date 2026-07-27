@@ -589,11 +589,18 @@ jobs:
       # its own instead of living as an untestable heredoc inside the test it belongs to.
       - name: "Self-test check-workflow-seam.py (swallow / skip / deleted-step mutants)"
         run: python3 scripts/check-workflow-seam.py --self-test
+      # --exclude is LOAD-BEARING, not tidiness: without it this step's own
+      # `--needle check-model-attribution.py` argument counts as a fifth gate
+      # invocation, so deleting a REAL call site would leave 4 and still pass the
+      # --min-invocations floor. (Measured: the first CI run of this step reported
+      # "5 invocation(s)". The local run reported 4 because it was invoked by hand
+      # WITH --exclude — the flag was missing only here, in the YAML.) B1e asserts
+      # both flags are present so this cannot silently rot back.
       - name: "The model-attribution gate is soundly WIRED into this workflow — GATING"
         run: |
           python3 scripts/check-workflow-seam.py --workflow .github/workflows/docs-quality.yml \
             --needle check-model-attribution.py --needle test_model_attribution.sh \
-            --min-invocations 4
+            --exclude check-workflow-seam.py --min-invocations 4
       # The PR-level backstop, ADVISORY for now. It catches the symptom wherever it comes
       # from — a stale brief, a new harness, or an agent copying the markers already in the
       # file it is editing (measured to be the dominant mechanism: agents routed to briefs

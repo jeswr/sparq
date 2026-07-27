@@ -231,11 +231,25 @@ else
   fi
 
   # B1e — the seam checker itself must be wired, or B2/B3 below are checking a
-  # workflow nobody runs the checker against in CI.
-  if grep -q -- 'check-workflow-seam\.py --workflow' "$WORKFLOW"; then
+  # workflow nobody runs the checker against in CI. The ARGUMENTS are asserted
+  # too, because a wired-but-mis-argued invocation is the same vacuity one level
+  # up: without --exclude, this step's own `--needle check-model-attribution.py`
+  # counts as an extra gate invocation and the --min-invocations floor stops
+  # detecting a deleted call site. That happened — the flag was present in the
+  # hand-run command and missing in the YAML, and only the real CI run's
+  # "5 invocation(s)" showed it.
+  seam_call="$(sed -n '/check-workflow-seam\.py --workflow/,/^      - /p' "$WORKFLOW" | tr '\n' ' ')"
+  if [ -n "$seam_call" ]; then
     pass "B1e docs-quality.yml runs check-workflow-seam.py against itself"
   else
     fail "B1e the seam checker is not wired into docs-quality.yml"
+  fi
+  if [ -n "$seam_call" ] \
+     && [[ "$seam_call" == *"--exclude check-workflow-seam.py"* ]] \
+     && [[ "$seam_call" == *"--min-invocations 4"* ]]; then
+    pass "B1f ...with --exclude (so it does not count itself) and the 4-call floor"
+  else
+    fail "B1f the seam invocation is missing --exclude and/or --min-invocations 4"
   fi
 
   # B2 — the invocations must not be neutered. A step that is conditionally
