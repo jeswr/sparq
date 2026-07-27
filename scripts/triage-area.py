@@ -220,7 +220,9 @@ RULES = [
     # the oracle adapters, check_ordered, the generator) lives in crates/sparq-bench.
     # A whole-family `area:sparq-difftest` therefore points every one of these
     # beads at a crate most of them never edit; caught by the post-apply sample
-    # re-derivation, which found check_ordered/fuzz.rs:307 in sparq-bench.
+    # re-derivation, which found check_ordered in sparq-bench (crates/sparq-bench/
+    # src/fuzz.rs:861 — the earlier :307 / :668 line cites were both wrong, though
+    # the crate attribution they were used for was right).
     ("difftest-normaliser", "title",
      r"^sq-\w+(\.\w+)*: diff-test:.*(isomorphism|multiset)",
      ["sparq-difftest", "sparq-bench"],
