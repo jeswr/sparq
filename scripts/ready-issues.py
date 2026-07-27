@@ -396,7 +396,86 @@ def roleless_ready(issues):
     return sorted(numbers)
 
 
-def compute_ready(issues, in_progress_packages=None, conflict_log=None):
+def _own_reservation(row):
+    """What ONE snapshot row reserves BY ITSELF, under the existing per-half occupancy rules.
+
+    Extracted verbatim from `compute_ready`'s occupancy loop so `unit_reservations` can union
+    member reservations WITHOUT restating (and so drifting from) the rule. Every active open PR is
+    in flight, drafts included; an open issue occupies only while `status:in-progress*`; the shared
+    parked predicate vetoes both. A row that reserves nothing returns the empty set.
+    """
+    if str(row.get("state", "OPEN")).upper() != "OPEN" or not occupies_area(row):
+        return set()
+    labels = labels_of(row)
+    if "pull_request" in row or labels & IN_FLIGHT_STATUS:
+        return _reserving_packages(labels)
+    return set()
+
+
+def unit_reservations(issues, source_links=None):
+    """Occupancy as ONE reservation per UNIT OF WORK — a PR together with the issues it closes.
+
+    [OPUS-5] A worker PR and its source issue are the SAME unit of work, and each was reserving
+    independently: MEASURED on the live sparq snapshot (2026-07-27, 1473 open issues / 123 open
+    PRs) 65 occupying PRs plus 46 in-flight issues produced 158 reservations over 49 distinct
+    partition keys — 20 of those reservations duplicates of a key the unit's other half already
+    held. `source_links` (a PR-number -> source-issue-number map from `source_issue_links`) folds
+    each pair into one reservation of the UNION, attributed to the PR.
+
+    Two things this deliberately is NOT, both refuted by measurement rather than by argument:
+
+    * It is NOT a frontier lever. `conflict()` tests membership in the SET of held keys, so a
+      second occupant on an already-held key is a no-op. Deduplicating 158 -> 138 reservations
+      leaves the held set at 49 keys and the live frontier unmoved (3 -> 3). Anything that DOES
+      widen the frontier here widens it by RELEASING a key, and releasing is the corrupting
+      direction — see the next point.
+    * It is NOT permission to drop the issue half. MEASURED over the 94 open PRs with at least one
+      open linked source issue: 31 pairs have PR ⊋ issue, 18 identical, 6 have a source issue with
+      NO `area:` at all — but 13 have PR ⊊ issue and 26 are INCOMPARABLE (each side declares a key
+      the other lacks). So in 39/94 = 41% of pairs the PR's file-derived key set is NOT a superset
+      and dropping the issue's reservation would free a key the unit really occupies. The union is
+      the only rule that is safe in both directions.
+
+    MONOTONE BY CONSTRUCTION: a unit reserves `⋃ _own_reservation(member)`, so its reservation is a
+    superset of every member's own — the dedup can never under-serialise relative to today, whoever
+    the members are. Registry CLAIM's extra `areas |= issue_areas or {GLOBAL_PACKAGE}` fail-closed
+    step is NOT adopted here: applied to this population it drives the live frontier to 0 (measured),
+    which is the same whole-fleet seizure `_reserving_packages` documents and exists to prevent.
+
+    `source_links=None` (the default, and what the registry's `dispatch.yml` passes today) yields
+    exactly the legacy per-row reservations, in the legacy order — see
+    `test_unit_reservations_without_links_is_identical_to_the_legacy_loop`.
+    """
+    links = source_links or {}
+    by_number = {}
+    for row in issues:
+        by_number.setdefault(row.get("number"), row)
+
+    def sources_of(pr_number):
+        for number in sorted(links.get(pr_number) or ()):
+            row = by_number.get(number)
+            if row is not None and "pull_request" not in row:
+                yield number, row
+
+    consumed = {number for row in issues if "pull_request" in row
+                for number, _ in sources_of(row.get("number"))}
+    out = []
+    for row in issues:                      # input order preserved: attribution is order-sensitive
+        number = row.get("number")
+        if "pull_request" not in row:
+            if number in consumed:          # already reserved as part of its PR's unit
+                continue
+            areas = _own_reservation(row)
+        else:
+            areas = set(_own_reservation(row))
+            for _number, source in sources_of(number):
+                areas |= _own_reservation(source)
+        if areas:
+            out.append((areas, row))
+    return out
+
+
+def compute_ready(issues, in_progress_packages=None, conflict_log=None, source_links=None):
     """Conflict-free, priority-ordered, FAIL-CLOSED CONCURRENCY FRONTIER.
 
     This is the one-per-package concurrency WIDTH, not the size of the drainable backlog — use
@@ -404,6 +483,11 @@ def compute_ready(issues, in_progress_packages=None, conflict_log=None):
 
     `conflict_log`, when supplied, receives one attribution line per conflict-excluded candidate;
     the live default writes those diagnostics to stderr without polluting the frontier rows.
+
+    `source_links`, when supplied, makes a PR and the issues it closes reserve ONCE, as the union
+    of both halves — see `unit_reservations`. Omitted, occupancy is byte-identical to the legacy
+    per-row loop, so the registry's existing `compute_ready(ready_input)` call is unaffected and
+    the two repositories may merge in either order.
     """
     blockers = {}
 
@@ -431,12 +515,9 @@ def compute_ready(issues, in_progress_packages=None, conflict_log=None):
         reserve({pkg}, None)
     # [GPT-5.6] Every active open PR is in flight (drafts included); open issues occupy only while
     # status:in-progress. The shared parked predicate is applied before either can reserve areas.
-    for it in issues:
-        if str(it.get("state", "OPEN")).upper() != "OPEN" or not occupies_area(it):
-            continue
-        L = labels_of(it)
-        if "pull_request" in it or L & IN_FLIGHT_STATUS:
-            reserve(_reserving_packages(L), it)
+    # [OPUS-5] ...and a PR plus the issues it closes are ONE unit reserving the union ONCE.
+    for areas, artifact in unit_reservations(issues, source_links):
+        reserve(areas, artifact)
     cands = ready_candidates(issues)
     cands.sort(key=lambda c: (c[0], c[1]))   # priority then number (deterministic)
     ready = []
@@ -672,27 +753,46 @@ _CLOSES = re.compile(r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#([1-9]
 TRUSTED_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 
 
-def linked_issue_numbers(pulls, repo):
-    """Issues already covered by an open PR — the suppression the REGISTRY planner applies.
+def source_issue_links(pulls, repo):
+    """PR number -> the set of issue numbers that PR is the WORKING ARTIFACT for.
 
-    [OPUS-5] Mirrors dispatch.yml's `linked_issue_numbers` so the local CLI previews the same
-    frontier the orchestrator dispatches. A fork PR must never suppress an issue: only a
-    same-repo `sparq-agent/issue-N-*` head is pipeline-owned provenance (a fork's head branch
-    text is attacker-controlled), and a closing keyword in a body counts only from a trusted
-    author association.
+    [OPUS-5] The pairing behind `unit_reservations`, and the single definition of PR->issue
+    linkage in this file: `linked_issue_numbers` is now its union, so the suppression set and the
+    occupancy pairing can never disagree about what "covered by an open PR" means. Two rules that
+    each re-derive linkage is exactly the mint-vs-adopt drift that lets one layer free a key the
+    other still holds.
+
+    A fork PR must never link an issue: only a same-repo `sparq-agent/issue-N-*` head is
+    pipeline-owned provenance (a fork's head branch text is attacker-controlled), and a closing
+    keyword in a body counts only from a trusted author association. PRs with no linkage are
+    absent from the map rather than present-and-empty, so `unit_reservations` treats them as
+    single-member units.
     """
-    linked = set()
+    links = {}
     for pull in pulls:
         head = pull.get("head") or {}
         ref = head.get("ref") or ""
         body = pull.get("body") or ""
         same_repo = ((head.get("repo") or {}).get("full_name") == repo)
         app_pr = same_repo and _LINK_HEAD.match(ref) is not None
+        found = set()
         if app_pr:
-            linked.update(int(n) for n in _LINK_HEAD.findall(ref))
+            found.update(int(n) for n in _LINK_HEAD.findall(ref))
         if app_pr or str(pull.get("author_association", "")).upper() in TRUSTED_ASSOCIATIONS:
-            linked.update(int(n) for n in _CLOSES.findall(body))
-    return linked
+            found.update(int(n) for n in _CLOSES.findall(body))
+        if found:
+            links.setdefault(pull.get("number"), set()).update(found)
+    return links
+
+
+def linked_issue_numbers(pulls, repo):
+    """Issues already covered by an open PR — the suppression the REGISTRY planner applies.
+
+    [OPUS-5] Mirrors dispatch.yml's `linked_issue_numbers` so the local CLI previews the same
+    frontier the orchestrator dispatches. Derived from `source_issue_links` so the suppression
+    set is, by construction, exactly the set of issues that are somebody's unit-of-work member.
+    """
+    return set().union(set(), *source_issue_links(pulls, repo).values())
 
 
 def _fetch_pulls(repo):
@@ -796,7 +896,34 @@ def dispatchable_view(issues, linked=()):
             if it.get("number") not in linked or labels_of(it) & IN_FLIGHT_STATUS]
 
 
-def diagnose(issues, linked=()):
+def occupancy_parity(issues, source_links=None):
+    """The PR-HALF-STRIPPED occupancy divergence, as a re-runnable measurement.
+
+    [OPUS-5] `dispatchable_view` claims local/orchestrator parity on the linked/in-flight axis, and
+    on the CANDIDATE axis it holds. On the OCCUPANCY axis it does not: the registry's dispatch.yml
+    builds its readiness input as `[issue for issue in snapshot("issues") if "pull_request" not in
+    issue]`, so PLAN never sees a PR row and reserves the ISSUE half of every unit only. MEASURED on
+    the live snapshot (2026-07-27): the local CLI holds 49 partition keys and emits a frontier of 3;
+    the orchestrator holds 37 and emits 9 — and 7 of those 9 rows land in a key an open PR already
+    holds. They are not double-dispatched (registry CLAIM re-derives busy areas from the pulls
+    snapshot and drops them), but they are dropped AFTER `compute_ready` committed the frontier, so
+    each one burned a partition with no backfill — the registry's own issue #113 shape.
+
+    Returns (pr_aware_keys, issue_only_keys, unheld) where `unheld` is the set of keys the
+    issue-only view fails to hold. Pure, so `--diagnose` and the test suite read the same number.
+    """
+    def keys(rows, links):
+        held = set()
+        for areas, _artifact in unit_reservations(rows, links):
+            held |= areas
+        return held
+    issue_only = [row for row in issues if "pull_request" not in row]
+    pr_aware = keys(issues, source_links)
+    stripped = keys(issue_only, source_links)
+    return pr_aware, stripped, pr_aware - stripped
+
+
+def diagnose(issues, linked=(), source_links=None):
     """Re-runnable VISIBILITY taxonomy: why the open backlog is not on the frontier.
 
     Returns (counts, roleless, candidates, frontier). Every open issue lands in exactly one
@@ -814,8 +941,8 @@ def diagnose(issues, linked=()):
             reason = exclusion_reason(labels_of(it), it.get("open_blockers", 0)) or "ENUMERABLE"
         counts[reason] = counts.get(reason, 0) + 1
     visible = dispatchable_view(issues, linked)
-    return (counts, roleless_ready(open_issues),
-            ready_candidates(visible), compute_ready(visible, conflict_log=lambda _m: None))
+    return (counts, roleless_ready(open_issues), ready_candidates(visible),
+            compute_ready(visible, conflict_log=lambda _m: None, source_links=source_links))
 
 
 def main():
@@ -840,21 +967,32 @@ def main():
         print()
         return 0
     issues = _fetch(args.repo)
-    linked = linked_issue_numbers(_fetch_pulls(args.repo), args.repo)
+    source_links = source_issue_links(_fetch_pulls(args.repo), args.repo)
+    linked = set().union(set(), *source_links.values())
     visible = dispatchable_view(issues, linked)
     if args.diagnose:
-        counts, roleless, cands, frontier = diagnose(issues, linked)
+        counts, roleless, cands, frontier = diagnose(issues, linked, source_links)
         total = sum(counts.values())
         print(f"open issues: {total}")
         for reason, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
             print(f"  {n:5d}  {100 * n / total:5.1f}%  {reason}")
         print(f"\ndrainable backlog (ready_candidates): {len(cands)}")
         print(f"concurrency frontier (compute_ready): {len(frontier)}")
+        units = unit_reservations(visible, source_links)
+        print(f"unit occupancy: {len(units)} unit(s), "
+              f"{sum(len(a) for a, _ in units)} reservation(s) over "
+              f"{len(set().union(set(), *[a for a, _ in units]))} partition key(s)")
+        _pr_aware, issue_only, unheld = occupancy_parity(visible, source_links)
+        if unheld:
+            print(f"\n::warning:: ORCHESTRATOR OCCUPANCY GAP: dispatch.yml strips PR rows from its "
+                  f"readiness input, so PLAN holds {len(issue_only)} of {len(_pr_aware)} partition "
+                  f"key(s). {len(unheld)} key(s) held here by an open PR are FREE there: "
+                  f"{', '.join(sorted(unheld)[:20])}")
         if roleless:
             print(f"\n::warning:: {len(roleless)} attested issue(s) carry NO role:* label and are "
                   f"INVISIBLE to dispatch: {', '.join('#%d' % n for n in roleless[:20])}")
         return 0
-    for it in compute_ready(visible):
+    for it in compute_ready(visible, source_links=source_links):
         L = labels_of(it)
         print(f"P{valid_priority(L)}  #{it['number']:5}  {sorted(packages_of(L))}")
     return 0
