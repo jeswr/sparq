@@ -15,7 +15,7 @@ use crate::filter_float::filter_f64_check;
 use crate::filter_int::{filter_int_check, OP_EQ, OP_GE, OP_GT, OP_LE, OP_LT, OP_NE};
 use crate::filter_signed::{filter_decimal_check, filter_signed_int_check};
 use crate::hashes::{commit_fold, h2, h3, TYPE_CODE_LITERAL};
-use crate::join::{JOIN_DOMAIN, join_eq_check, join_value_commitment};
+use crate::join::{JOIN_DOMAIN, join_eq_check, join_eq_r_check, join_value_commitment};
 use crate::path::path_reach_check;
 use crate::revoke::{revoke_unset_check, revoke_unset_check_committed, SIG_DOMAIN_STATUS_IDX_COMMIT};
 use crate::sameas::{canon_of, sameas_entails_row};
@@ -1463,6 +1463,226 @@ fn join_eq_mixed_slots_multi_row_accepts() {
         a1,
         row_b,
         JB,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// [OPUS-5] sq-uii0: join_eq_r_check -- the CARDINALITY-HIDING v2 tier.
+// Same universe as J1-J8, but R lanes over ONE pair of graph re-commitments.
+// Covers: the two-distinct-pair accept, the PADDING accept (the mechanism that
+// hides N), and one reject per adversarial class -- including the per-lane
+// commitment binding, which is the new attack surface R lanes introduce.
+// ---------------------------------------------------------------------------
+
+// A second join key, so a two-lane join can carry two DIFFERENT join values
+// (bag semantics: `?p = alice` and `?p = bob` in the same result set).
+global JK2: Field = 0xfed321;
+global JB2: Field = 0xb22d; // the second lane's independent blinder
+
+// Graph A = { (S1, P, JK), (S2, P, JK2) }; graph B = { (JK, P2, O1), (JK2, P2, O2) }.
+// Join column: A slot 2 (object) x B slot 0 (subject). Two genuine pairs.
+fn two_pair_universe() -> ([[Field; 3]; 4], [[Field; 3]; 4], Field, Field) {
+    let a0 = [101, 7, JK];
+    let a1 = [102, 7, JK2];
+    let b0 = [JK, 8, 201];
+    let b1 = [JK2, 8, 202];
+    let enc_a = [a0, a1, [0, 0, 0], [0, 0, 0]];
+    let enc_b = [b0, b1, [0, 0, 0], [0, 0, 0]];
+    let commit_a = commit_fold([h3(a0[0], a0[1], a0[2]), h3(a1[0], a1[1], a1[2]), 0, 0], 2);
+    let commit_b = commit_fold([h3(b0[0], b0[1], b0[2]), h3(b1[0], b1[1], b1[2]), 0, 0], 2);
+    (enc_a, enc_b, commit_a, commit_b)
+}
+
+// (JR1) ACCEPT: R=2 lanes carrying TWO GENUINE, DISTINCT joined pairs, each
+// bound to its OWN hiding commitment over its OWN join value. The two graph
+// re-commitments are paid ONCE for both lanes -- the amortisation the tier
+// exists for.
+#[test]
+fn join_eq_r_two_distinct_pairs_accept() {
+    let (enc_a, enc_b, commit_a, commit_b) = two_pair_universe();
+    let jcs = [join_value_commitment(JK, JB), join_value_commitment(JK2, JB2)];
+    join_eq_r_check::<4, 4, 2>(
+        commit_a,
+        commit_b,
+        jcs,
+        2,
+        0,
+        enc_a,
+        2,
+        enc_b,
+        2,
+        [enc_a[0], enc_a[1]],
+        [enc_b[0], enc_b[1]],
+        [JB, JB2],
+    );
+}
+
+// (JR2) ACCEPT -- THE PADDING DISCIPLINE, i.e. the mechanism that hides N.
+// The prover holds only ONE genuine pair (N=1) but presents R=2 lanes by
+// REPEATING that genuine pair under a FRESH second blinder. Every lane is a TRUE
+// join (nothing false is proved), and because `join_value_commitment` is hiding
+// with independent blinders the two public commitments DIFFER -- so the padded
+// lane is not distinguishable, at the public interface, from JR1's genuinely
+// distinct second lane. That is exactly why the verifier learns only N in [1,R].
+#[test]
+fn join_eq_r_repeated_pair_pads_and_accepts() {
+    let (enc_a, enc_b, commit_a, commit_b) = two_pair_universe();
+    // Both lanes are the SAME genuine pair (a0 x b0, join value JK), but the
+    // blinders differ.
+    let jc0 = join_value_commitment(JK, JB);
+    let jc1 = join_value_commitment(JK, JB2);
+    // The padding is only hiding if the two public commitments differ.
+    assert(jc0 != jc1, "independent blinders must yield distinct public commitments");
+    join_eq_r_check::<4, 4, 2>(
+        commit_a,
+        commit_b,
+        [jc0, jc1],
+        2,
+        0,
+        enc_a,
+        2,
+        enc_b,
+        2,
+        [enc_a[0], enc_a[0]],
+        [enc_b[0], enc_b[0]],
+        [JB, JB2],
+    );
+}
+
+// (JR3 / A1) REJECT a forged equality in a NON-FIRST lane: lane 0 is a genuine
+// pair, lane 1 claims a join between rows whose bound slots hold DIFFERENT
+// terms. Every lane is constrained -- a prover cannot smuggle a lie into the
+// padding.
+#[test(should_fail_with = "join slots are not equal")]
+fn join_eq_r_forged_lane_rejected() {
+    let (enc_a, enc_b, commit_a, commit_b) = two_pair_universe();
+    let jcs = [join_value_commitment(JK, JB), join_value_commitment(JK, JB2)];
+    join_eq_r_check::<4, 4, 2>(
+        commit_a,
+        commit_b,
+        jcs,
+        2,
+        0,
+        enc_a,
+        2,
+        enc_b,
+        2,
+        // lane 1 pairs A's JK row with B's JK2 row -- JK != JK2.
+        [enc_a[0], enc_a[0]],
+        [enc_b[0], enc_b[1]],
+        [JB, JB2],
+    );
+}
+
+// (JR4 / A2) REJECT a forged graph commitment. The re-commit is paid once for
+// ALL lanes, so amortising it must not weaken it: a fabricated graph-A
+// commitment still fails before any lane is reached.
+#[test(should_fail_with = "graph-A commitment mismatch")]
+fn join_eq_r_forged_graph_rejected() {
+    let (enc_a, enc_b, _commit_a, commit_b) = two_pair_universe();
+    let jcs = [join_value_commitment(JK, JB), join_value_commitment(JK2, JB2)];
+    join_eq_r_check::<4, 4, 2>(
+        commit_one([999, 999, 999]),
+        commit_b,
+        jcs,
+        2,
+        0,
+        enc_a,
+        2,
+        enc_b,
+        2,
+        [enc_a[0], enc_a[1]],
+        [enc_b[0], enc_b[1]],
+        [JB, JB2],
+    );
+}
+
+// (JR5 / A2) REJECT a lane whose row is NOT present in the committed graph. The
+// phantom row shares JK in the join slot (so the equality WOULD pass), but it is
+// not a row of graph A -- padding must be REAL content, never fabricated.
+#[test(should_fail_with = "join row A not present in committed graph A")]
+fn join_eq_r_phantom_padding_row_rejected() {
+    let (enc_a, enc_b, commit_a, commit_b) = two_pair_universe();
+    let jcs = [join_value_commitment(JK, JB), join_value_commitment(JK, JB2)];
+    join_eq_r_check::<4, 4, 2>(
+        commit_a,
+        commit_b,
+        jcs,
+        2,
+        0,
+        enc_a,
+        2,
+        enc_b,
+        2,
+        // lane 1's A-row is fabricated (shares JK in slot 2, but is not in G_a).
+        [enc_a[0], [555, 555, JK]],
+        [enc_b[0], enc_b[0]],
+        [JB, JB2],
+    );
+}
+
+// (JR6) REJECT a CROSS-LANE commitment swap -- the equivocation guard the R
+// tier newly needs. Both lanes are genuine joins, but the public commitments are
+// swapped, so lane 0's commitment binds lane 1's value. Each lane binds its OWN
+// value under its OWN blinder; a permuted commitment vector has no witness.
+#[test(should_fail_with = "join commitment does not bind the proven join value")]
+fn join_eq_r_swapped_lane_commitments_rejected() {
+    let (enc_a, enc_b, commit_a, commit_b) = two_pair_universe();
+    // Correct vector would be [c(JK,JB), c(JK2,JB2)]; present it SWAPPED.
+    let jcs = [join_value_commitment(JK2, JB2), join_value_commitment(JK, JB)];
+    join_eq_r_check::<4, 4, 2>(
+        commit_a,
+        commit_b,
+        jcs,
+        2,
+        0,
+        enc_a,
+        2,
+        enc_b,
+        2,
+        [enc_a[0], enc_a[1]],
+        [enc_b[0], enc_b[1]],
+        [JB, JB2],
+    );
+}
+
+// (JR7) The R=1 lane case proves EXACTLY the v1 single-pair statement -- the
+// tier is a generalisation, not a different relation. Same witnesses as J1.
+#[test]
+fn join_eq_r_single_lane_matches_v1_statement() {
+    let row_a = [101, 7, JK];
+    let row_b = [JK, 8, 202];
+    let enc_a = [row_a, [0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    let enc_b = [row_b, [0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    let jc = join_value_commitment(JK, JB);
+    // v1 accepts these witnesses (J1); so does the R=1 monomorphisation.
+    join_eq_check::<4, 4>(
+        commit_one(row_a),
+        commit_one(row_b),
+        jc,
+        2,
+        0,
+        enc_a,
+        1,
+        enc_b,
+        1,
+        row_a,
+        row_b,
+        JB,
+    );
+    join_eq_r_check::<4, 4, 1>(
+        commit_one(row_a),
+        commit_one(row_b),
+        [jc],
+        2,
+        0,
+        enc_a,
+        1,
+        enc_b,
+        1,
+        [row_a],
+        [row_b],
+        [JB],
     );
 }
 

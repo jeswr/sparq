@@ -117,6 +117,20 @@ FAMILIES: list[dict] = [
         "layer": "query",
         "role": "Hidden equality join between two committed sides of bucket sizes na, nb.",
     },
+    # [OPUS-5] sq-uii0: the CARDINALITY-HIDING tier of the hidden join. Declared
+    # AFTER `join_eq` but it cannot be shadowed by it — the `join_eq` pattern is
+    # `\Z`-anchored on `join_eq_na…`, so a `join_eq_r…` member matches only here.
+    {
+        "key": "join_eq_r",
+        "pattern": r"join_eq_r(?P<r>\d+)_na(?P<na>\d+)_nb(?P<nb>\d+)",
+        "params": ["r", "na", "nb"],
+        "layer": "query",
+        "role": "Hidden equality join proving r joined lanes over ONE pair of graph "
+        "re-commitments, between two committed sides of bucket sizes na, nb. The lanes "
+        "are NOT constrained distinct — a prover holding fewer genuine pairs pads by "
+        "repeating one under a fresh blinder — so this narrows the disclosed join "
+        "cardinality to a range of 1..r; it never attests that r distinct pairs exist.",
+    },
     {
         "key": "path_reach",
         "pattern": r"path_reach_d(?P<d>\d+)_k(?P<k>\d+)_n(?P<n>\d+)",

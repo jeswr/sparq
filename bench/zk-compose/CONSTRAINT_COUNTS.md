@@ -69,6 +69,21 @@ Scaling — pairs differing in exactly one parameter:
 | `nb` | 16 (7,025) | 64 (12,885) | na=16 | +5,860 | 1.8342 |
 | `nb` | 16 (12,885) | 64 (18,681) | na=64 | +5,796 | 1.4498 |
 
+### `join_eq_r`
+
+Hidden equality join proving r joined lanes over ONE pair of graph re-commitments, between two committed sides of bucket sizes na, nb. The lanes are NOT constrained distinct — a prover holding fewer genuine pairs pads by repeating one under a fresh blinder — so this narrows the disclosed join cardinality to a range of 1..r; it never attests that r distinct pairs exist.
+
+| member | parameters | `circuit_size` |
+| --- | --- | --- |
+| `join_eq_r2_na16_nb16` | r=2, na=16, nb=16 | 7,523 |
+| `join_eq_r4_na16_nb16` | r=4, na=16, nb=16 | 8,519 |
+
+Scaling — pairs differing in exactly one parameter:
+
+| parameter | from | to | held fixed | Δ gates | ratio |
+| --- | --- | --- | --- | --- | --- |
+| `r` | 2 (7,523) | 4 (8,519) | na=16, nb=16 | +996 | 1.1324 |
+
 ### `path_reach`
 
 BOUNDED-EXISTENCE property path: there exists a chain of at most d committed triples (d is a PUBLIC input). Strictly weaker than the SPARQL path operator — never completeness, never a 'no path exists' claim.
@@ -269,4 +284,4 @@ bench/zk-compose/scripts/constraint_pack.py --write
 bench/zk-compose/scripts/constraint_pack.py --check
 ```
 
-Coverage: 37 of 37 snapshot members across 14 families, 33 single-parameter scaling pairs, 3 invariance facts. The generator **fails** on a snapshot member it cannot classify, so a new circuit family cannot silently drop out of this evaluation.
+Coverage: 39 of 39 snapshot members across 15 families, 34 single-parameter scaling pairs, 3 invariance facts. The generator **fails** on a snapshot member it cannot classify, so a new circuit family cannot silently drop out of this evaluation.

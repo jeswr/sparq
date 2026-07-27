@@ -623,17 +623,49 @@ soundness-of-claims violation, not just an estimate.
   commitment fold, plus epsilon. It is **far cheaper than `hidden_issuer_d{D}`**,
   whose two ~251-bit Baby-JubJub scalar-muls dominate (`issuer.nr:267-273`); there
   are **no scalar-muls, no foreign-field emulation, no pairings** in `join_eq`.
-- **Optimisation lever (measure first).** The re-commit is the only heavy part. If
-  it dominates, Alt-A (§2.6 — scan exposes per-row hiding commitments, `join_eq`
-  becomes a tiny open-and-compare with NO re-commit) collapses the join cost to ~2
-  Poseidon2 permutations, at the price of a scan-layout change. **Whether Alt-A is
-  worth it is a `bb gates` question**, not an intuition one (the `noir-optimisation`
-  skill and `bench/SPIKES.md` record intuition misfiring on this codebase — PR #37).
-- **Cardinality-hiding tier (`join_eq_rN`).** Proving R pairs in one member
-  amortises the per-graph re-commit across R joins (the fold is paid once per
-  graph regardless of R) and hides exact N up to R — likely the *better* shape for
-  N>1 joins, but its gate count must be measured before recommending it as
-  default.
+- **Optimisation lever — MEASURED (`sq-uii0`), and the "~2 permutations" prior was
+  WRONG.** The re-commit *does* dominate: probe circuits compiled off-tree on the
+  pinned toolchain (`nargo 1.0.0-beta.21` / `bb 5.0.0-nightly.20260324`) put the two
+  `commit_fold` re-commitments at roughly **half** of `join_eq_na16_nb16`, so Alt-A
+  (§2.6) is directionally justified. **But it cannot collapse the member to "~2
+  Poseidon2 permutations."** A probe carrying the `join_eq` ABI and *no relation at
+  all* still measures ~two fifths of the whole member: that is the fixed
+  ACIR/integer-lookup-table floor the **first integer-typed input** incurs — the
+  same effect `sq-kndw` documented on the revocation member — and the join's public
+  `slot_a`/`slot_b` are `u32` **by design** (§4.4), so the floor is not removable
+  while the slot binding stays public. Removing the re-commit entirely therefore
+  buys a **~2×** member, not the ~47× the prior implies. The exact figures + the
+  probe attribution live in the regression-gated snapshot
+  (`crates/sparq-zk-compose/tests/gate_count_snapshot.json`, `_comment_sq_uii0`) and
+  `bench/zk-compose/gate_counts_latest.json` — cited, never re-typed here. **This is
+  the `noir-optimisation` failure mode the section already warned about, caught on
+  its own prior** (cf. `bench/SPIKES.md` / PR #37). Alt-A remains a *breaking* scan
+  public-input-layout change (audit-#1 reconstruction, the empirical `bb` anchors,
+  every `scan_k…` member), so a ~2× on one member is a weak trade — it stays
+  DEFERRED, now on evidence rather than on intuition.
+- **Cardinality-hiding tier (`join_eq_rN`) — MEASURED and LANDED (`sq-uii0`).**
+  `compose_core::join::join_eq_r_check` proves `R` lanes over **one** pair of graph
+  re-commitments; the compiled members are `join_eq_r2_na16_nb16` and
+  `join_eq_r4_na16_nb16`. The amortisation is real and *linear with a small
+  constant*: the per-lane marginal is a **fixed, measured increment** — the same
+  step from R=2 to R=4 as from the v1 single-pair member (which measures exactly
+  the R=1 point, though no `join_eq_r1_…` package is compiled) to R=2 — and that
+  step is under a **fourteenth** of a whole single-pair member. So R pairs in one
+  member beat R separate `join_eq` sub-proofs by a factor that grows with R, from
+  R=2 upward. Figures: the snapshot `_comment_sq_uii0` (generated data), not
+  restated here.
+  **Padding discipline (what actually hides N).** A prover holding `N < R` genuine
+  pairs fills the remaining lanes by **repeating a genuine pair under a fresh
+  per-lane blinder**. Every lane stays a TRUE join — nothing false is ever proved —
+  and because the per-lane commitment is hiding with independent blinders, a
+  repeated lane is indistinguishable at the public interface from a distinct one.
+  So the verifier learns `N ∈ [1, R]` instead of the exact `N`.
+  **What it does NOT prove (no overclaim).** The lanes are **not** constrained
+  distinct, so the member never attests that the join cardinality *is* `R`; it
+  proves "there exist `R` (not necessarily distinct) genuine joined pairs". It does
+  not prove completeness (still the scan's obligation). And `R` is **public** — it
+  is the member identity — so this **bounds** the R2 leak, it does not erase it, and
+  a prover with `N > R` must drop pairs or take a larger bucket.
 - **Feasibility verdict: HIGH.** Every primitive (`commit_fold`, `h3`, `h2`,
   present-in-graph sweep, equality) is **already in-tree and compiled** in
   `scan.nr`. `join_eq` is assembled entirely from reused, already-benchmarked
@@ -709,16 +741,36 @@ listed with their step.
 8. **[optional v2] Cardinality-hiding `join_eq_rN`** (§2.5/§5) and **Alt-A
    scan-layout per-row commitments** (§2.6) — filed only if `bb gates` shows the
    re-commit dominates or cardinality leakage (R2) is a deployment blocker.
-   → **bead step 7 (optional, P3)**
+   → **bead step 7 (optional, P3)** — `sq-uii0`. **Measured, then split** (§5):
+   - `join_eq_rN` **LANDED as the circuit tier**: the `join_eq_r_check` relation +
+     the `join_eq_r2_na16_nb16` / `join_eq_r4_na16_nb16` members + their
+     regression-gated `bb gates` baselines + the Noir accept/reject suite
+     (`tests.nr` JR1–JR7, incl. the padding accept and the cross-lane
+     commitment-swap reject). **Host wiring is a follow-up** — a
+     `CircuitId::JoinEqR`/`ProofInputs::JoinEqR` schema and the `bind_joins`
+     extension that resolves an R-lane `JoinEdge` — exactly the "circuit member
+     first, verifier composability next" split `filter_f64` / `filter_value_dl_*` /
+     `path_reach_*` already use. Until that lands the member is not reachable from
+     a manifest, and a `JoinEdge` pointing at anything that is not a v1
+     `ProofInputs::JoinEq` is rejected fail-closed (`JoinEdgeKindMismatch`).
+   - **Alt-A stays DEFERRED**, now on measured evidence rather than intuition: the
+     re-commit does dominate, but a fixed integer-lookup-table floor caps the win at
+     ~2× on one member, against a breaking scan public-input-layout change that
+     re-touches the audit-#1 reconstruction, the empirical `bb` anchors and every
+     `scan_k…` member (§5).
 
 ---
 
 ## 8. Open questions / honest limitations recap
 
-- **R1/R2 are intrinsic.** A hidden-key join still reveals *that* a join exists and
-  (by default) its cardinality. Hiding cardinality needs the fixed-R member (§2.5,
-  step 7) and pays for padding. *That* a join was performed is unavoidable while
-  answering the query.
+- **R1 is intrinsic; R2 is now BOUNDED, not removed.** A hidden-key join still
+  reveals *that* a join exists (R1 — unavoidable while answering the query). For
+  R2, the fixed-R member (§2.5/§5, step 7 / `sq-uii0`) has landed as a circuit
+  tier: it narrows the disclosure from the exact cardinality `N` to `N ∈ [1, R]`,
+  paid for by padding every unused lane with a repeated genuine pair under a fresh
+  blinder. The bucket `R` itself stays public (it is the member identity), so this
+  is a bound, not erasure — and because the lanes are deliberately not constrained
+  distinct, the member must never be described as attesting a cardinality of `R`.
 - **The join SLOT is disclosed** (§4.4), because the query already reveals it. Only
   the join VALUE is hidden. A use-case needing a hidden *column position* is out of
   scope (and arguably contradicts presenting a query the verifier reads).

@@ -27,6 +27,7 @@
       "families": [
         "scan",
         "join_eq",
+        "join_eq_r",
         "path_reach",
         "filter_int",
         "filter_signed_int",
@@ -35,7 +36,7 @@
         "filter_f64_raw",
         "filter_value_dl"
       ],
-      "members": 32
+      "members": 34
     },
     "credential": {
       "families": [
@@ -415,6 +416,55 @@
           "ratio": 1.4498,
           "held_fixed": {
             "na": 64
+          }
+        }
+      ],
+      "invariances": []
+    },
+    "join_eq_r": {
+      "layer": "query",
+      "role": "Hidden equality join proving r joined lanes over ONE pair of graph re-commitments, between two committed sides of bucket sizes na, nb. The lanes are NOT constrained distinct \u2014 a prover holding fewer genuine pairs pads by repeating one under a fresh blinder \u2014 so this narrows the disclosed join cardinality to a range of 1..r; it never attests that r distinct pairs exist.",
+      "parameters": [
+        "r",
+        "na",
+        "nb"
+      ],
+      "members": [
+        {
+          "member": "join_eq_r2_na16_nb16",
+          "params": {
+            "r": 2,
+            "na": 16,
+            "nb": 16
+          },
+          "circuit_size": 7523
+        },
+        {
+          "member": "join_eq_r4_na16_nb16",
+          "params": {
+            "r": 4,
+            "na": 16,
+            "nb": 16
+          },
+          "circuit_size": 8519
+        }
+      ],
+      "min_circuit_size": 7523,
+      "max_circuit_size": 8519,
+      "scaling": [
+        {
+          "parameter": "r",
+          "from_member": "join_eq_r2_na16_nb16",
+          "from_value": 2,
+          "from_circuit_size": 7523,
+          "to_member": "join_eq_r4_na16_nb16",
+          "to_value": 4,
+          "to_circuit_size": 8519,
+          "delta_gates": 996,
+          "ratio": 1.1324,
+          "held_fixed": {
+            "na": 16,
+            "nb": 16
           }
         }
       ],
@@ -1100,10 +1150,10 @@
     ]
   },
   "summary": {
-    "families": 14,
-    "members": 37,
-    "snapshot_members": 37,
-    "scaling_pairs": 33,
+    "families": 15,
+    "members": 39,
+    "snapshot_members": 39,
+    "scaling_pairs": 34,
     "invariance_facts": 3
   }
 }

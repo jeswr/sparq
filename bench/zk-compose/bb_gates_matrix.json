@@ -398,6 +398,38 @@
         }
       }
     },
+    "join_eq_r2_na16_nb16": {
+      "circuit_size": 7523,
+      "lane": "string",
+      "configs": {
+        "string-canonical": {
+          "legal": true
+        },
+        "dual-leaf": {
+          "legal": true
+        },
+        "value-only": {
+          "legal": false,
+          "reason": "IllegalPair"
+        }
+      }
+    },
+    "join_eq_r4_na16_nb16": {
+      "circuit_size": 8519,
+      "lane": "string",
+      "configs": {
+        "string-canonical": {
+          "legal": true
+        },
+        "dual-leaf": {
+          "legal": true
+        },
+        "value-only": {
+          "legal": false,
+          "reason": "IllegalPair"
+        }
+      }
+    },
     "path_reach_d2_k1_n16": {
       "circuit_size": 5156,
       "lane": "string",
@@ -654,10 +686,10 @@
     }
   },
   "summary": {
-    "circuits": 37,
+    "circuits": 39,
     "methods": 3,
-    "configs": 111,
-    "legal_configs": 74,
-    "illegal_configs": 37
+    "configs": 117,
+    "legal_configs": 78,
+    "illegal_configs": 39
   }
 }

@@ -67,6 +67,15 @@
 //! foreign-field, no pairings -- far cheaper than `hidden_issuer_d{D}`. The
 //! actual `bb gates` figure is regression-gated under bead `sq-mj2z` (NOT
 //! asserted here -- repo policy forbids unmeasured numbers).
+//!
+//! # The CARDINALITY-HIDING tier (`join_eq_r_check`, bead `sq-uii0`)
+//! [`join_eq_check`] proves ONE pair per sub-proof, so a join of `N` matched
+//! pairs discloses `N` (design S1.4 R2). [`join_eq_r_check`] proves `R` lanes
+//! over ONE pair of graph re-commitments -- amortising the dominant cost AND
+//! narrowing the disclosure to `N in [1, R]`, by padding unused lanes with a
+//! REPEATED genuine pair under a fresh blinder. It proves `R`
+//! NOT-NECESSARILY-DISTINCT genuine pairs, so it never attests a cardinality;
+//! see its own docs for the full "what this does not prove" list.
 
 use crate::hashes::{commit_fold, h3};
 
@@ -99,6 +108,26 @@ fn select_slot(row: [Field; 3], slot: u32) -> Field {
         out = row[2];
     }
     out
+}
+
+/// Re-commit a witnessed graph `(enc, count)` -- step 1 of the relation,
+/// identical to `scan.nr` step 1 (leaf = `h3(s, p, o)`, `commit_fold` over the
+/// first `count` leaves). The caller asserts the result equals the PUBLIC
+/// `commit`, which is THE load-bearing binding: the prover must reproduce the
+/// exact `C(G)` the scan proof published (and the issuer signed), so it cannot
+/// feed the join a graph other than the attested one (anti-row-swap, design
+/// S2.3 / A2).
+///
+/// Shared verbatim by [`join_eq_check`] (one pair) and [`join_eq_r_check`] (the
+/// R-lane cardinality-hiding tier) -- Noir monomorphises + inlines, so factoring
+/// it out is ACIR-identical (pinned by the UNCHANGED `join_eq_na*` gate-count
+/// baselines).
+fn recommit_graph<let N: u32>(enc: [[Field; 3]; N], count: u32) -> Field {
+    let mut leaves: [Field; N] = [0; N];
+    for i in 0..N {
+        leaves[i] = h3(enc[i][0], enc[i][1], enc[i][2]);
+    }
+    commit_fold(leaves, count)
 }
 
 /// `row` occurs in some active slot of the graph `(enc, count)` -- the
@@ -145,18 +174,45 @@ pub fn join_eq_check<let N_A: u32, let N_B: u32>(
     // 1. Re-commit both graphs to their PUBLIC commitments (binds the witnessed
     //    contents to the SAME C(G) the scan proofs expose -- anti-row-swap, A2).
     //    Identical to scan.nr step 1: leaf = h3(s,p,o), fold over first `count`.
-    let mut leaves_a: [Field; N_A] = [0; N_A];
-    for i in 0..N_A {
-        leaves_a[i] = h3(enc_a[i][0], enc_a[i][1], enc_a[i][2]);
-    }
-    assert_eq(commit_fold(leaves_a, counts_a), commit_a, "graph-A commitment mismatch");
+    assert_eq(recommit_graph(enc_a, counts_a), commit_a, "graph-A commitment mismatch");
+    assert_eq(recommit_graph(enc_b, counts_b), commit_b, "graph-B commitment mismatch");
 
-    let mut leaves_b: [Field; N_B] = [0; N_B];
-    for i in 0..N_B {
-        leaves_b[i] = h3(enc_b[i][0], enc_b[i][1], enc_b[i][2]);
-    }
-    assert_eq(commit_fold(leaves_b, counts_b), commit_b, "graph-B commitment mismatch");
+    // 2-5. The per-pair relation (presence, slot selection, equality, hiding
+    //      commitment) -- shared verbatim with the R-lane tier below.
+    join_pair_check(
+        join_commitment,
+        slot_a,
+        slot_b,
+        enc_a,
+        counts_a,
+        enc_b,
+        counts_b,
+        row_a,
+        row_b,
+        blinding,
+    );
+}
 
+/// Steps 2-5 of the relation for ONE joined pair, over graphs whose contents
+/// have ALREADY been re-committed to their public commitments by the caller
+/// (step 1). Factored out so [`join_eq_check`] (one pair) and
+/// [`join_eq_r_check`] (R lanes) prove the SAME per-pair statement by
+/// construction -- there is no second copy of the equality to drift.
+///
+/// The assert messages are the v1 literals verbatim: the forge-and-verify suite
+/// (`crates/sparq-zk-compose/tests/join_forge.rs`, `tests.nr` J1-J5) pins them.
+fn join_pair_check<let N_A: u32, let N_B: u32>(
+    join_commitment: Field,
+    slot_a: u32,
+    slot_b: u32,
+    enc_a: [[Field; 3]; N_A],
+    counts_a: u32,
+    enc_b: [[Field; 3]; N_B],
+    counts_b: u32,
+    row_a: [Field; 3],
+    row_b: [Field; 3],
+    blinding: Field,
+) {
     // 2. row_a / row_b are genuinely present rows of their committed graphs.
     //    Because step 1 re-commits the SAME contents, presence here is presence
     //    in the attested credential -- a row not in G_a has no witness.
@@ -186,4 +242,98 @@ pub fn join_eq_check<let N_A: u32, let N_B: u32>(
         join_value_commitment(a_val, blinding),
         "join commitment does not bind the proven join value",
     );
+}
+
+/// The CARDINALITY-HIDING tier of the hidden cross-credential JOIN (bead
+/// `sq-uii0`, the optional v2 of `sq-bwwl`; design record
+/// `research/zk-hidden-join-design.md` S2.5 / S5 / S8, step 7).
+///
+/// # What it is
+/// `join_eq_r_check` proves `R` joined pairs in ONE member instead of one
+/// sub-proof per pair. The two graph re-commitments (step 1, the dominant cost)
+/// are paid ONCE for all `R` lanes; each lane pays only its two present-in-graph
+/// sweeps, one equality, and one hiding commitment. Each lane `r` carries its
+/// OWN row pair, its OWN blinder, and its OWN public `join_commitments[r]` --
+/// a bag-semantics join produces pairs with DIFFERENT join values (`?p = alice`
+/// and `?p = bob`), so one commitment per lane is required, not one shared one.
+///
+/// # The residual-leakage improvement (design S1.4 R2), stated exactly
+/// v1 leaks the join CARDINALITY: `N` matched pairs means `N` visible `join_eq`
+/// sub-proofs. This tier PADS to the compile-time `R`. A prover holding `N < R`
+/// genuine pairs fills the remaining lanes by REPEATING a genuine pair with a
+/// FRESH blinder per lane. Every lane is therefore a TRUE join (nothing false is
+/// ever proved -- the padding is real content, not a dummy), and because
+/// `join_value_commitment` is hiding and the blinders are independent, a repeated
+/// lane is indistinguishable from a distinct one. So the verifier learns
+/// `N in [1, R]` instead of the exact `N`.
+///
+/// # What this member does NOT prove (no overclaim -- design S1.4 / S8)
+/// - It does NOT prove the pairs are DISTINCT, and therefore does NOT prove the
+///   join cardinality IS `R`. The proven statement is exactly: "there exist `R`
+///   (not necessarily distinct) pairs, each a genuine joined pair of the two
+///   attested graphs at the query-bound slots". Never describe a `join_eq_r{R}`
+///   proof as attesting `R` results.
+/// - It does NOT prove COMPLETENESS (that no further pair exists) -- completeness
+///   is the scan member's obligation, unchanged.
+/// - `R` itself is PUBLIC: it is the compiled member's identity (the bucket names
+///   the package and hence the VK). So the verifier still learns the UPPER BOUND
+///   `R`, and a prover with `N > R` genuine pairs must either drop pairs or use a
+///   larger bucket. Hiding cardinality is bounded padding, not erasure -- exactly
+///   the cost/leakage trade-off design S2.5 flags.
+/// - R1 is unchanged and intrinsic: `R >= 1` lanes force `N >= 1`, so the
+///   verifier still learns THAT a join exists.
+///
+/// # Soundness posture
+/// Same as v1: every lane re-derives from the SAME two PUBLIC graph commitments
+/// (anti-A2) and proves its equality in-circuit (anti-A1). The composition
+/// verifier remains NOT-yet-sound pending external audit (`sq-qhy4`); this member
+/// asserts no soundness or ZK-privacy property as achieved.
+///
+/// # Public vs private
+/// - PUBLIC:  `commit_a`, `commit_b`, `join_commitments[R]`, `slot_a`, `slot_b`
+///            (plus the member's `challenge`, bound by the caller's `main`).
+/// - PRIVATE: `enc_a`/`counts_a`, `enc_b`/`counts_b`, `rows_a`/`rows_b`,
+///            `blindings`. No join VALUE appears in any public input.
+// [OPUS-5] sq-uii0: cardinality-hiding join_eq_rN tier (optional v2 of sq-bwwl).
+pub fn join_eq_r_check<let N_A: u32, let N_B: u32, let R: u32>(
+    commit_a: Field,
+    commit_b: Field,
+    join_commitments: [Field; R],
+    slot_a: u32,
+    slot_b: u32,
+    enc_a: [[Field; 3]; N_A],
+    counts_a: u32,
+    enc_b: [[Field; 3]; N_B],
+    counts_b: u32,
+    rows_a: [[Field; 3]; R],
+    rows_b: [[Field; 3]; R],
+    blindings: [Field; R],
+) {
+    assert(counts_a <= N_A, "graph-A size exceeds circuit bucket");
+    assert(counts_b <= N_B, "graph-B size exceeds circuit bucket");
+
+    // 1. The AMORTISED half: re-commit each graph ONCE, for all R lanes. This is
+    //    the whole point of the tier -- the fold is O(N) per graph regardless of
+    //    R, so R pairs cost one fold pair instead of R of them.
+    assert_eq(recommit_graph(enc_a, counts_a), commit_a, "graph-A commitment mismatch");
+    assert_eq(recommit_graph(enc_b, counts_b), commit_b, "graph-B commitment mismatch");
+
+    // 2-5, per lane. Deliberately NO distinctness constraint across lanes and NO
+    // per-lane "active" flag: repeating a genuine pair under a fresh blinder is
+    // exactly the padding that hides N, and an `active` flag would either be
+    // public (re-leaking N) or let a prover disable lanes at will.
+    for r in 0..R {
+        join_pair_check(
+            join_commitments[r],
+            slot_a,
+            slot_b,
+            enc_a,
+            counts_a,
+            enc_b,
+            counts_b,
+            rows_a[r],
+            rows_b[r],
+            blindings[r],
+        );
+    }
 }

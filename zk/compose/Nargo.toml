@@ -77,6 +77,19 @@ members = [
     "join_eq_na16_nb64",
     "join_eq_na64_nb16",
     "join_eq_na64_nb64",
+    # [OPUS-5] sq-uii0: the CARDINALITY-HIDING v2 tier of the hidden join
+    # (research/zk-hidden-join-design.md S2.5 / S5, follow-up step 7 of sq-bwwl).
+    # One member proves R joined lanes over ONE pair of graph re-commitments, so
+    # a prover with N < R genuine pairs pads by REPEATING a genuine pair under a
+    # FRESH per-lane blinder -- every lane stays a TRUE join, and the verifier
+    # learns only N in [1, R] instead of the exact N (residual leakage R2). R is
+    # PUBLIC (it is the member identity), so this BOUNDS the leak, it does not
+    # erase it; and the member does NOT prove the lanes are distinct, so it never
+    # attests a cardinality. NOT a soundness change: the verifier remains
+    # NOT-yet-sound (sq-qhy4). Host wiring (CircuitId/ProofInputs/bind_joins for
+    # the R tier) is a follow-up, like the filter_f64 / path_reach precedent.
+    "join_eq_r2_na16_nb16",
+    "join_eq_r4_na16_nb16",
     # [FABLE-5] sq-3kd2g.2 (#1591): bounded-depth path-reachability members
     # (property paths p+/p* under the bounded EXISTENCE-ONLY statement of
     # research/zksparql-fragment-extension.md sec 4). The compile-time depth D
