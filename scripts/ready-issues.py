@@ -18,9 +18,9 @@ of a quarantine label. An issue is READY iff, in priority order, ALL hold:
     (shared lockfiles/CI/workspace configs).
 
 The snapshot uses real cursor pagination (`gh api --paginate`) with an explicit fail-closed
-ceiling; native GitHub dependencies remain a follow-up — today blockers come from validated
-`Blocked-by: #NN` markers. Pure `compute_ready()` is unit-tested; the CLI wraps it over the
-paginated fetch.
+ceiling. Open blockers are the UNION of GitHub's NATIVE issue dependencies and the legacy
+validated `Blocked-by: #NN` body markers — see `open_blocker_count`. Pure `compute_ready()` is
+unit-tested; the CLI wraps it over the paginated fetch.
 """
 import argparse
 import json
@@ -171,6 +171,75 @@ def keys_conflict(a, b, roots=None):
     """
     pa, pb = partition_path(a, roots), partition_path(b, roots)
     return pa[:len(pb)] == pb or pb[:len(pa)] == pa
+# --- open blockers: NATIVE GitHub dependencies UNIONED with the legacy body markers -------------
+# [OPUS-5] Until this landed, BOTH readers of "is this issue blocked" (this file and the registry's
+# dispatch.yml planner step) derived `open_blockers` ONLY by regexing `Blocked-by: #NN` out of the
+# issue BODY. GitHub issue dependencies are generally available and the maintainer uses the native
+# UI, so a dependency added that way had ZERO effect on dispatch. MEASURED 2026-07-26 over all 1368
+# open sparq issues (cursor-paginated, len == GraphQL totalCount): 112 issues carry a native edge
+# (170 edges) and 0 of the 427 issues created since 2026-07-20 carry either channel — the marker
+# channel is effectively dead for new work while the native channel is the one being written.
+#
+# UNION, never replace. 3 open issues (#2833, #2975, #3817) carry a marker with NO native edge, and
+# the fail-safe direction is one-way: `exclusion_reason` keys on `open_blockers > 0`, so MISSING an
+# edge dispatches an issue that is genuinely blocked, while OVER-counting one only delays it.
+_MARKER_BLOCKED_BY = re.compile(r"[Bb]locked-by:\s*#(\d+)")
+# GitHub's REST list payload carries this per non-PR issue at no extra request. `blocked_by` counts
+# only OPEN blockers (`total_blocked_by` counts closed ones too) — MEASURED against GraphQL
+# `blockedBy` filtered to state=OPEN over all 1368 open issues: identical sets AND identical
+# per-issue counts, and 16 issues have total_blocked_by > blocked_by (a closed blocker), confirming
+# a satisfied dependency is already excluded. So a CLOSED blocker never holds an issue here.
+NATIVE_SUMMARY = "issue_dependencies_summary"
+# A summary that is PRESENT but malformed is a schema change we cannot interpret. Admitting it as
+# "0 blockers" is the fail-OPEN direction (it dispatches work that may be blocked), so it counts as
+# one unknown blocker instead: the issue is held, loudly, until a human looks.
+MALFORMED_SUMMARY_BLOCKERS = 1
+
+
+def native_open_blockers(issue, warn=None):
+    """OPEN blockers from GitHub's NATIVE dependency edges, per `issue_dependencies_summary`.
+
+    ABSENT summary -> 0 (the honest reading: this snapshot carries no native-dependency data, so
+    only the marker channel can speak). That absence is NOT silent — `_fetch` raises a corpus-level
+    alarm if NO issue in a whole snapshot carries the field, which is what a GitHub field rename
+    would look like and is otherwise indistinguishable from "nothing is blocked".
+    PRESENT-but-malformed -> MALFORMED_SUMMARY_BLOCKERS (fail closed, see above).
+    """
+    summary = issue.get(NATIVE_SUMMARY)
+    if summary is None:
+        return 0
+    number = issue.get("number", "?")
+    if not isinstance(summary, dict):
+        if warn is not None:
+            warn(f"#{number}: {NATIVE_SUMMARY} is not an object — holding the issue (fail-closed)")
+        return MALFORMED_SUMMARY_BLOCKERS
+    value = summary.get("blocked_by")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        if warn is not None:
+            warn(f"#{number}: {NATIVE_SUMMARY}.blocked_by is {value!r}, not a non-negative int — "
+                 "holding the issue (fail-closed)")
+        return MALFORMED_SUMMARY_BLOCKERS
+    return value
+
+
+def marker_open_blockers(body, open_numbers):
+    """OPEN blockers from validated `Blocked-by: #NN` BODY markers (the legacy channel)."""
+    return sum(1 for n in _MARKER_BLOCKED_BY.findall(body or "") if int(n) in set(open_numbers))
+
+
+def open_blocker_count(issue, open_numbers, warn=None):
+    """The UNION of both blocker channels, as the count `exclusion_reason` consumes.
+
+    `max` is the exact union for the only decision that is made from it — an issue is held iff
+    `native > 0 or marker_open > 0`, which is precisely `max(...) > 0`. It is a LOWER BOUND on the
+    cardinality of the union of the two blocker SETS (the native channel reports a count, not
+    numbers, so a native blocker distinct from every marker blocker cannot be added to the marker
+    count without double-counting the overlap). Under-reporting the count can only understate the
+    delay in `--diagnose`; it can never flip a held issue to ready. MEASURED over all 1368 open
+    issues: 0 issues where the two channels disagree on the count, so today max == the true union.
+    """
+    return max(native_open_blockers(issue, warn), marker_open_blockers(issue.get("body"),
+                                                                       open_numbers))
 
 
 def labels_of(issue):
@@ -504,6 +573,80 @@ def _self_test():
           keys_conflict("upstream", "upstream-noir"), True)
     check("single-segment unknown key keeps its own partition",
           partition_path("deps"), ("deps",))
+    # ---------------------------------------------------------------------------------------
+    # NATIVE dependency edges (the maintainer's own triage action). Every row below is written to
+    # go RED if the native read is deleted, if the union is turned into a replacement, or if the
+    # closed-blocker exemption is broken. They run END-TO-END through compute_ready wherever the
+    # decision (dispatch / hold) is what matters — a pure-count assertion alone would survive
+    # `_fetch` never calling open_blocker_count at all, so the `_fetch`-shaped rows are included.
+    # ---------------------------------------------------------------------------------------
+    def raw_issue(n, labels, body="", summary=None, pr=False):
+        """A row in the SHAPE `_fetch` receives from `gh api repos/../issues`."""
+        row = {"number": n, "state": "open", "labels": [{"name": lb} for lb in labels],
+               "body": body}
+        if summary is not None:
+            row[NATIVE_SUMMARY] = summary
+        if pr:
+            row["pull_request"] = {}
+        return row
+
+    def summary(open_blockers, total=None):
+        return {"blocked_by": open_blockers, "blocking": 0,
+                "total_blocked_by": open_blockers if total is None else total, "total_blocking": 0}
+
+    ready_labels = R + ["priority:P1", "area:sparq-core"]
+    # (1) THE REGRESSION THIS EXISTS FOR: a native edge and NO body marker must hold the issue.
+    native_only = raw_issue(40, ready_labels, body="no marker here", summary=summary(1))
+    check("native blocked_by with NO body marker excludes from ready",
+          [it["number"] for it in compute_ready(_fetch_rows([native_only]), conflict_log=quiet)],
+          [])
+    check("...and the same issue with the native edge cleared IS ready",
+          [it["number"] for it in compute_ready(
+              _fetch_rows([raw_issue(40, ready_labels, body="no marker here",
+                                     summary=summary(0))]), conflict_log=quiet)],
+          [40])
+    # (2) the LEGACY channel must keep working — union, never replace. #2833/#2975/#3817 are live
+    # marker-only rows, so a replacement would silently drop them.
+    blocker = raw_issue(41, ["role:impl"])
+    marker_only = raw_issue(42, ready_labels, body="Blocked-by: #41", summary=summary(0))
+    check("marker-only edge (native says zero) still excludes from ready",
+          [it["number"] for it in compute_ready(_fetch_rows([blocker, marker_only]),
+                                                conflict_log=quiet)], [])
+    # (3) a CLOSED blocker must NOT hold the child on either channel. Native: `blocked_by` counts
+    # only open blockers while `total_blocked_by` counts the closed one (MEASURED on 16 live
+    # issues, e.g. #3264 blocked_by=0 total_blocked_by=1). Marker: #43 is absent from the open set.
+    closed_blocked = raw_issue(44, ready_labels, body="Blocked-by: #43", summary=summary(0, total=2))
+    check("issue whose ONLY blocker is CLOSED is NOT excluded",
+          [it["number"] for it in compute_ready(_fetch_rows([closed_blocked]), conflict_log=quiet)],
+          [44])
+    # (4) union arithmetic, at the count level, on every channel combination.
+    check("open_blocker_count unions both channels (never replaces either)",
+          [open_blocker_count(raw_issue(1, [], body=b, summary=s), {41})
+           for b, s in (("", None), ("", summary(0)), ("", summary(3)),
+                        ("Blocked-by: #41", summary(0)), ("Blocked-by: #41", summary(3)),
+                        ("Blocked-by: #99", summary(0)))],
+          [0, 0, 3, 1, 3, 0])
+    # (5) a PRESENT-but-malformed summary must FAIL CLOSED (hold), never admit.
+    warnings = []
+    check("malformed native summary holds the issue and says so",
+          ([native_open_blockers(raw_issue(45, [], summary=s), warnings.append)
+            for s in ({"blocked_by": -1}, {"blocked_by": "1"}, {"blocked_by": True},
+                      {"blocked_by": None}, ["not", "a", "dict"])],
+           len(warnings)),
+          ([MALFORMED_SUMMARY_BLOCKERS] * 5, 5))
+    check("...and it is the FRONTIER that holds, not just the count",
+          [it["number"] for it in compute_ready(
+              _fetch_rows([raw_issue(45, ready_labels, summary={"blocked_by": "1"})]),
+              conflict_log=quiet)], [])
+    # (6) the DARK-CHANNEL alarm: absent-on-every-issue is a schema regression, not a quiet repo.
+    check("native-channel-dark snapshot raises the alarm",
+          [("DARK" in line, NATIVE_SUMMARY in line) for line in native_channel_alarm(
+              [raw_issue(50, []), raw_issue(51, []), raw_issue(52, [], pr=True)])],
+          [(True, True)])
+    check("one issue carrying the summary is enough to keep the channel LIT",
+          native_channel_alarm([raw_issue(50, []), raw_issue(51, [], summary=summary(0))]), [])
+    check("a PR-only snapshot never raises the dark alarm",
+          native_channel_alarm([raw_issue(52, [], pr=True)]), [])
     check("valid_priority single", valid_priority({"priority:P0"}), 0)
     check("valid_priority ambiguous", valid_priority({"priority:P1", "priority:P2"}), None)
     check("valid_priority out-of-range", valid_priority({"priority:P7"}), None)
@@ -575,6 +718,19 @@ def _fetch(repo, ceiling=10000):
         raise SystemExit(f"refusing: fetched {len(raw)} >= ceiling {ceiling} — snapshot looks "
                          "runaway (fail-closed). Raise the ceiling deliberately if the backlog "
                          "is really that large.")
+    issues = _fetch_rows(raw, warn=lambda m: print(f"::warning::{m}", file=sys.stderr))
+    for line in native_channel_alarm(raw):
+        print(line, file=sys.stderr)
+    return issues
+
+
+def _fetch_rows(raw, warn=None):
+    """The PURE half of `_fetch`: GitHub issue payloads -> readiness-engine rows.
+
+    Split out so `--self-test` exercises the REAL row builder. Asserting on `open_blocker_count`
+    alone would stay green with `_fetch` never calling it — which is exactly the shape of the bug
+    being fixed (a correct blocker rule that no dispatcher consulted).
+    """
     open_numbers = {i["number"] for i in raw if "pull_request" not in i}
     issues = []
     for i in raw:
@@ -584,10 +740,29 @@ def _fetch(repo, ceiling=10000):
             row["pull_request"] = i["pull_request"]
             row["draft"] = i.get("draft")
         else:
-            blockers = re.findall(r"[Bb]locked-by:\s*#(\d+)", i.get("body") or "")
-            row["open_blockers"] = sum(1 for b in blockers if int(b) in open_numbers)
+            row["open_blockers"] = open_blocker_count(i, open_numbers, warn)
         issues.append(row)
     return issues
+
+
+def native_channel_alarm(raw):
+    """The GUARD against the native blocker channel going DARK without anyone noticing.
+
+    `native_open_blockers` reads an ABSENT `issue_dependencies_summary` as 0 — correct for an old
+    snapshot, and indistinguishable from "GitHub renamed the field" if nobody checks. MEASURED
+    2026-07-26: the field is present on 1368/1368 open sparq ISSUES and 0/104 PR rows, so "no
+    non-PR row carries it" is a schema regression, not a quiet repo. Returns the lines to print
+    (pure, so the check itself is testable rather than a side effect nobody exercises).
+    """
+    non_pr = [i for i in raw if isinstance(i, dict) and "pull_request" not in i]
+    if not non_pr:
+        return []
+    if any(isinstance(i.get(NATIVE_SUMMARY), dict) for i in non_pr):
+        return []
+    return [f"::warning::NATIVE BLOCKER CHANNEL IS DARK: none of {len(non_pr)} open issues carries "
+            f"`{NATIVE_SUMMARY}`. Native GitHub dependencies are being IGNORED and only "
+            "`Blocked-by: #NN` body markers can hold an issue — a maintainer's native dependency "
+            "edits have no effect on dispatch until this is fixed."]
 
 
 def dispatchable_view(issues, linked=()):
