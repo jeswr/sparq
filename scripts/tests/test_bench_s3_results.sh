@@ -188,7 +188,7 @@ RC=$?
 want "profile carrying the WRONG role => empty iam_args" "" "$OUT"
 want "profile carrying the WRONG role => rc 0 (launch not blocked)" "0" "$RC"
 reset_calls
-OUT=$(AWS_STUB_MODE=all-ok AWS_STUB_PROFILE_ROLE= \
+OUT=$(AWS_STUB_MODE=all-ok AWS_STUB_PROFILE_ROLE='' \
   SPARQ_BENCH_S3_BUCKET=bkt SPARQ_BENCH_INSTANCE_PROFILE=prof bash -c ". '$LIB'; bench_s3_iam_args" 2>/dev/null)
 want "profile carrying NO role => empty iam_args" "" "$OUT"
 
@@ -324,7 +324,7 @@ AWS_STUB_MODE=all-ok AWS_STUB_PROFILE_ROLE=someone-elses-role SPARQ_BENCH_S3_BUC
   bash "$LIB" check >"$SANDBOX/check-wrong.out" 2>&1
 want "check is NOT ready when the profile carries the wrong role" "1" "$?"
 if grep -q 'READY' "$SANDBOX/check-wrong.out"; then bad "check reported READY for a profile that cannot upload"; else ok "check withholds READY when the profile lacks the role"; fi
-AWS_STUB_MODE=all-ok AWS_STUB_PROFILE_ROLE= SPARQ_BENCH_S3_BUCKET=bkt bash "$LIB" check >/dev/null 2>&1
+AWS_STUB_MODE=all-ok AWS_STUB_PROFILE_ROLE='' SPARQ_BENCH_S3_BUCKET=bkt bash "$LIB" check >/dev/null 2>&1
 want "check is NOT ready when the profile carries no role at all" "1" "$?"
 
 # ... and READY must also mean EC2 can actually ASSUME the role. A role that exists but

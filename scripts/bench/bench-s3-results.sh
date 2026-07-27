@@ -94,6 +94,9 @@ bench_s3_uri() { printf 's3://%s/%s' "$SPARQ_BENCH_S3_BUCKET" "$1"; }
 # Needs only iam:GetInstanceProfile — the same grant `bench_s3_passrole_policy` already
 # hands the launcher principal; --query is evaluated client-side.
 # bench_s3_profile_has_role [profile] [role]
+# shellcheck disable=SC2120 # both args are documented OPTIONAL overrides of the module's
+# env defaults (this file is SOURCED by the launchers); every in-tree call takes the
+# defaults, which is the intended shape — not a forgotten argument.
 bench_s3_profile_has_role() {
   local profile="${1:-$SPARQ_BENCH_INSTANCE_PROFILE}" role="${2:-$SPARQ_BENCH_S3_ROLE}" roles
   roles=$(aws iam get-instance-profile --instance-profile-name "$profile" \
@@ -257,6 +260,8 @@ sys.exit(1)
 # The role's EFFECTIVE trust document, as awscli renders it. rc mirrors `get-role`, so a
 # missing role (or no iam:GetRole grant) is distinguishable from a readable-but-wrong one.
 # bench_s3_role_trust_doc [role]
+# shellcheck disable=SC2120 # `role` is a documented OPTIONAL override of the module's env
+# default; in-tree callers take the default. See bench_s3_profile_has_role above.
 bench_s3_role_trust_doc() {
   aws iam get-role --role-name "${1:-$SPARQ_BENCH_S3_ROLE}" \
     --query 'Role.AssumeRolePolicyDocument' --output json 2>/dev/null
