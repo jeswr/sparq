@@ -63,6 +63,8 @@ Stdlib-only, no network. ``--self-test`` runs hermetic both-direction teeth.
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import re
 import subprocess
 import sys
@@ -305,29 +307,58 @@ def added_lines(repo: Path, sha: str) -> list[tuple[str, str]]:
     return result
 
 
-def check_commits(repo: Path, rev_range: str) -> list[str]:
-    """Every marker a commit ADDS must name that commit's own declared model.
+def is_graft_boundary(repo: Path, sha: str) -> bool:
+    """Is ``sha`` a SHALLOW-CLONE GRAFT BOUNDARY (parents omitted from the clone)?
 
-    Fail-closed on an undeclared commit that stamps a marker: if you are
-    stamping provenance you must also declare it, otherwise the stamp is
-    unverifiable and this gate would fail open exactly where it matters.
+    This is the single most important predicate in the commit gate, because
+    ``git show`` on a graft boundary emits **the entire tree as additions** —
+    the gate then attributes every pre-existing marker in the repository to one
+    commit and drowns any real finding in baseline noise. Measured on this PR's
+    own head (docs-quality run 89851383239): **15,123 findings**, all attributed
+    to ``refs/pull/4385/merge``, spanning files the PR never touched.
+
+    Grafting is applied at the revision-WALK layer, not the object layer, so the
+    commit object still records its real parents while the walker reports none.
+    That asymmetry is the exact discriminator, and it distinguishes a graft from
+    a legitimate ROOT commit (where "the whole tree is an addition" is TRUE and
+    must still be scanned):
+
+    ============================  ==================  ==================
+    commit                        ``log --format=%P``  ``cat-file`` parents
+    ============================  ==================  ==================
+    shallow graft boundary        (empty)             present   -> GRAFT
+    true root commit              (empty)             (empty)   -> scan it
+    ordinary commit               present             present   -> scan it
+    ============================  ==================  ==================
+
+    Reading ``.git/shallow`` would also work but is worktree- and layout-
+    sensitive; this is pure plumbing and needs no path guessing.
+    """
+    walked = _git(["log", "-1", "--format=%P", sha], cwd=repo).strip()
+    if walked:
+        return False
+    try:
+        raw = _git(["cat-file", "commit", sha], cwd=repo)
+    except subprocess.CalledProcessError:
+        return False
+    for line in raw.splitlines():
+        if not line.strip():
+            break  # end of the header block; the message starts here
+        if line.startswith("parent "):
+            return True
+    return False
+
+
+def scan_commits(repo: Path, shas: list[str], tip: str) -> tuple[list[str], list[str]]:
+    """Core of the commit gate: ``(violations, unscannable)`` over ``shas``.
+
+    ``unscannable`` is NOT cosmetic. A commit whose diff we cannot compute is a
+    HOLE in the backstop, and a backstop that reports "OK" over a hole is worse
+    than no backstop — that is the precise failure this function exists to make
+    impossible to report as a pass. Callers must surface it.
     """
     violations: list[str] = []
-    # Prefer the merge-base over the raw two-dot range. On a shallow CI clone
-    # the base ref may not be an ancestor of HEAD, in which case `A..HEAD`
-    # silently expands to most of history — 48 MB of `git show` output on the
-    # first run here. Narrowing to the merge-base keeps the scan proportional to
-    # the PR, and a shallow clone that cannot compute one degrades to the plain
-    # range rather than erroring.
-    if ".." in rev_range and "..." not in rev_range:
-        base, _, tip = rev_range.partition("..")
-        try:
-            merge_base = _git(["merge-base", base, tip or "HEAD"], cwd=repo).strip()
-            if merge_base:
-                rev_range = f"{merge_base}..{tip or 'HEAD'}"
-        except subprocess.CalledProcessError:
-            pass
-    shas = _git(["rev-list", "--no-merges", rev_range], cwd=repo).split()
+    unscannable: list[str] = []
     exempt_cache: dict[tuple[str, str], bool] = {}
 
     # Exemption is read at the range TIP, not per-commit. "Does this file
@@ -335,7 +366,6 @@ def check_commits(repo: Path, rev_range: str) -> list[str]:
     # intermediate commit — so adding the directive in a later commit of the
     # same PR correctly covers the earlier ones, and a reviewer sees one
     # consistent answer per file instead of a per-commit patchwork.
-    tip = rev_range.split("..")[-1] or "HEAD"
 
     def file_is_exempt(_sha: str, path: str) -> bool:
         key = (tip, path)
@@ -348,6 +378,15 @@ def check_commits(repo: Path, rev_range: str) -> list[str]:
         return exempt_cache[key]
 
     for sha in shas:
+        if is_graft_boundary(repo, sha):
+            unscannable.append(
+                f"{sha[:8]}: SHALLOW-GRAFT BOUNDARY — its parents are not in this "
+                f"clone, so `git show` would report the ENTIRE TREE as additions. "
+                f"NOT scanned (a whole-tree scan is noise, not a signal). Deepen "
+                f"the fetch so this commit has a parent, or scan a range whose "
+                f"commits are fully present."
+            )
+            continue
         message = _git(["show", "-s", "--format=%B", sha], cwd=repo)
         declared = commit_declared_model(message)
         for path, line in added_lines(repo, sha):
@@ -370,7 +409,159 @@ def check_commits(repo: Path, rev_range: str) -> list[str]:
                         f"authored the change (AGENTS.md contract item 5); a brief "
                         f"telling you otherwise is the bug (#2531)."
                     )
-    return violations
+    return violations, unscannable
+
+
+def check_commits(repo: Path, rev_range: str) -> tuple[list[str], list[str]]:
+    """Every marker a commit ADDS must name that commit's own declared model.
+
+    Fail-closed on an undeclared commit that stamps a marker: if you are
+    stamping provenance you must also declare it, otherwise the stamp is
+    unverifiable and this gate would fail open exactly where it matters.
+
+    This is the LOCAL/manual entry point (a rev range you name yourself). CI
+    uses :func:`check_commits_pr` instead — see the warning there about why a
+    rev range against ``HEAD`` cannot work under ``actions/checkout``.
+    """
+    # Prefer the merge-base over the raw two-dot range. On a normal clone whose
+    # base ref is not an ancestor of HEAD, `A..HEAD` silently expands to most of
+    # history — 48 MB of `git show` output on the first run here. Narrowing to
+    # the merge-base keeps the scan proportional to the branch.
+    #
+    # This narrowing is USELESS on a shallow merge-ref checkout: merge-base
+    # cannot see past a graft (it exits 1 with no output), which is precisely
+    # why the CI path no longer relies on it. The graft guard in `scan_commits`
+    # is what makes that case safe.
+    if ".." in rev_range and "..." not in rev_range:
+        base, _, tip_rev = rev_range.partition("..")
+        try:
+            merge_base = _git(["merge-base", base, tip_rev or "HEAD"], cwd=repo).strip()
+            if merge_base:
+                rev_range = f"{merge_base}..{tip_rev or 'HEAD'}"
+        except subprocess.CalledProcessError:
+            pass
+    shas = _git(["rev-list", "--no-merges", rev_range], cwd=repo).split()
+    tip = rev_range.split("..")[-1] or "HEAD"
+    return scan_commits(repo, shas, tip)
+
+
+# --------------------------------------------------------------------------
+# Mode: --check-commits-pr  (the CI path)
+#
+# WHY THIS EXISTS AND `--check-commits origin/main..HEAD` DOES NOT WORK IN CI
+# --------------------------------------------------------------------------
+# `actions/checkout` (default `fetch-depth: 1`) checks out `refs/pull/N/merge`
+# and records it in `.git/shallow`. That commit therefore has NO parents as far
+# as any revision walk is concerned. Three consequences, all measured on this
+# PR's own head (docs-quality run 89851383239, and reproduced end-to-end by
+# `test_model_attribution.sh` on a synthetic CI-shaped repo):
+#
+#   1. A later `git fetch --depth=200 origin main` does NOT deepen it. The merge
+#      ref is unreachable from `main`, so nothing about the graft changes.
+#   2. `git merge-base origin/main HEAD` exits 1 with no output — narrowing the
+#      range via merge-base CANNOT see past a graft. (This is the fix this PR
+#      originally claimed; it does not work, and the reviewer was right.)
+#   3. `rev-list --no-merges origin/main..HEAD` therefore yields the merge
+#      commit itself — a merge that does not look like one, because its parents
+#      are missing — and `git show` renders the WHOLE TREE as additions:
+#      15,123 findings, every one attributed to `refs/pull/4385/merge`.
+#
+# So the range must be rebuilt from the PR's OWN head ref, using the fields
+# GitHub already puts in the event payload, and the CI step must fetch that ref
+# deeply enough (`commits + 1`) that every scanned commit has a real parent.
+# --------------------------------------------------------------------------
+
+
+def github_event() -> dict:
+    """The ``pull_request`` event payload, or ``{}`` off CI / on another event."""
+    if os.environ.get("GITHUB_EVENT_NAME", "pull_request") != "pull_request":
+        return {}
+    path = os.environ.get("GITHUB_EVENT_PATH")
+    if not path:
+        return {}
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _object_exists(repo: Path, rev: str) -> bool:
+    return (
+        subprocess.run(
+            ["git", "cat-file", "-e", f"{rev}^{{commit}}"],
+            cwd=repo,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode
+        == 0
+    )
+
+
+def pr_scan_set(repo: Path, payload: dict) -> tuple[list[str], str, list[str]]:
+    """``(shas, tip, problems)`` — the PR's OWN commits, from the event payload.
+
+    Two derivations, in order of exactness, so a fallback is never silent:
+
+    * ``base.sha..head.sha`` when the base commit is present locally AND is an
+      ancestor of the head. Exact.
+    * ``rev-list --max-count=<commits> <head.sha>`` otherwise, using GitHub's
+      own commit count. Right for the linear branch shape, which is what the
+      fleet produces.
+
+    A missing head object is reported as a PROBLEM, never as an empty clean
+    scan — "we could not look" must not render as "we looked and it was fine".
+    """
+    pr = payload.get("pull_request") or {}
+    head_sha = ((pr.get("head") or {}).get("sha") or "").strip()
+    base_sha = ((pr.get("base") or {}).get("sha") or "").strip()
+    n_commits = pr.get("commits")
+
+    if not head_sha:
+        return [], "HEAD", [
+            "no `pull_request.head.sha` in the event payload — cannot identify "
+            "this PR's commits."
+        ]
+    if not _object_exists(repo, head_sha):
+        return [], head_sha, [
+            f"{head_sha[:8]}: the PR head commit is not in this clone. The CI step "
+            f"must fetch `refs/pull/<n>/head` (depth = commits + 1) before running "
+            f"this check; `actions/checkout` only provides the grafted merge ref."
+        ]
+
+    if base_sha and _object_exists(repo, base_sha) and subprocess.run(
+        ["git", "merge-base", "--is-ancestor", base_sha, head_sha],
+        cwd=repo, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+    ).returncode == 0:
+        shas = _git(
+            ["rev-list", "--no-merges", f"{base_sha}..{head_sha}"], cwd=repo
+        ).split()
+        return shas, head_sha, []
+
+    if isinstance(n_commits, int) and n_commits > 0:
+        shas = _git(
+            ["rev-list", "--no-merges", f"--max-count={n_commits}", head_sha], cwd=repo
+        ).split()
+        return shas, head_sha, []
+
+    return [], head_sha, [
+        "the event payload has neither a usable `base.sha` nor a `commits` count, "
+        "so the PR's own commit range cannot be bounded."
+    ]
+
+
+def check_commits_pr(repo: Path) -> tuple[list[str], list[str], str]:
+    """``(violations, problems, description)`` for the current PR event."""
+    payload = github_event()
+    if not payload.get("pull_request"):
+        event = os.environ.get("GITHUB_EVENT_NAME", "(none)")
+        return [], [], f"not a pull_request event ({event}) — nothing to check"
+    shas, tip, problems = pr_scan_set(repo, payload)
+    if problems:
+        return [], problems, "this PR's commits"
+    violations, unscannable = scan_commits(repo, shas, tip)
+    return violations, unscannable, f"this PR's {len(shas)} commit(s)"
 
 
 # --------------------------------------------------------------------------
@@ -605,18 +796,31 @@ def self_test() -> int:
         _git(["commit", "-qm", "seed"], cwd=repo)
         base = _git(["rev-parse", "HEAD"], cwd=repo).strip()
 
+        def cc(rng: str) -> list[str]:
+            """check_commits, asserting the range was FULLY scanned.
+
+            Every fixture below is a normal (non-shallow) clone, so an
+            unscannable commit here would mean the graft guard is misfiring and
+            silently emptying the scan — which would make every expectation
+            below pass for the wrong reason.
+            """
+            violations, unscannable = check_commits(repo, rng)
+            expect(unscannable == [], f"normal clone reported unscannable commits: {unscannable}")
+            return violations
+
+
         # HONEST: marker agrees with the trailer -> must pass.
         _write(repo, "a.rs", "// [OPUS-5] honest\n")
         _git(["add", "a.rs"], cwd=repo)
         _git(["commit", "-qm", "feat: a\n\nCo-Authored-By: Claude Opus 5 <n@a.com>"], cwd=repo)
-        expect(check_commits(repo, f"{base}..HEAD") == [], "honest commit was flagged")
+        expect(cc(f"{base}..HEAD") == [], "honest commit was flagged")
         honest = _git(["rev-parse", "HEAD"], cwd=repo).strip()
 
         # LYING: the exact reported defect — Opus 5 commit stamping [SONNET-4.6].
         _write(repo, "b.rs", "// [SONNET-4.6] mis-attributed\n")
         _git(["add", "b.rs"], cwd=repo)
         _git(["commit", "-qm", "feat: b\n\nCo-Authored-By: Claude Opus 5 <n@a.com>"], cwd=repo)
-        v = check_commits(repo, f"{honest}..HEAD")
+        v = cc(f"{honest}..HEAD")
         expect(len(v) == 1 and "SONNET-4.6" in v[0], f"mis-attributed marker not caught: {v}")
         lying = _git(["rev-parse", "HEAD"], cwd=repo).strip()
 
@@ -624,7 +828,7 @@ def self_test() -> int:
         _write(repo, "c.rs", "// [OPUS-4.8] undeclared\n")
         _git(["add", "c.rs"], cwd=repo)
         _git(["commit", "-qm", "feat: c"], cwd=repo)
-        v = check_commits(repo, f"{lying}..HEAD")
+        v = cc(f"{lying}..HEAD")
         expect(len(v) == 1 and "declares NO model" in v[0], f"undeclared stamp not caught: {v}")
         undecl = _git(["rev-parse", "HEAD"], cwd=repo).strip()
 
@@ -632,14 +836,14 @@ def self_test() -> int:
         _write(repo, "d.rs", "// [OPUS-5] subject-tagged\n")
         _git(["add", "d.rs"], cwd=repo)
         _git(["commit", "-qm", "feat: d [opus5]"], cwd=repo)
-        expect(check_commits(repo, f"{undecl}..HEAD") == [], "subject-tag declaration not honoured")
+        expect(cc(f"{undecl}..HEAD") == [], "subject-tag declaration not honoured")
         subj = _git(["rev-parse", "HEAD"], cwd=repo).strip()
 
         # REMOVING a stale marker must never fail (cleanup must stay possible).
         _write(repo, "b.rs", "// cleaned\n")
         _git(["add", "b.rs"], cwd=repo)
         _git(["commit", "-qm", "chore: drop stale marker\n\nCo-Authored-By: Claude Opus 5 <n@a.com>"], cwd=repo)
-        expect(check_commits(repo, f"{subj}..HEAD") == [], "removing a stale marker was flagged")
+        expect(cc(f"{subj}..HEAD") == [], "removing a stale marker was flagged")
         cleaned = _git(["rev-parse", "HEAD"], cwd=repo).strip()
 
         # REGRESSION (caught by this gate's own first CI run): a commit that
@@ -654,7 +858,7 @@ def self_test() -> int:
         _write(repo, "f.rs", "// [SONNET-4.6] beside a binary blob\n")
         _git(["add", "latin1.txt", "f.rs"], cwd=repo)
         _git(["commit", "-qm", "feat: f\n\nCo-Authored-By: Claude Opus 5 <n@a.com>"], cwd=repo)
-        v = check_commits(repo, f"{cleaned}..HEAD")
+        v = cc(f"{cleaned}..HEAD")
         expect(any("SONNET-4.6" in x for x in v),
                "non-UTF-8 blob broke the scan (or hid a real finding)")
         cleaned = _git(["rev-parse", "HEAD"], cwd=repo).strip()
@@ -666,7 +870,7 @@ def self_test() -> int:
                "Markers look like `[SONNET-4.6]` or `[OPUS-4.8]`.\n")
         _git(["add", "doc.md"], cwd=repo)
         _git(["commit", "-qm", "docs: explain markers\n\nCo-Authored-By: Claude Opus 5 <n@a.com>"], cwd=repo)
-        expect(check_commits(repo, f"{cleaned}..HEAD") == [],
+        expect(cc(f"{cleaned}..HEAD") == [],
                "file-level exempt directive did not suppress a pure mention")
         exempted = _git(["rev-parse", "HEAD"], cwd=repo).strip()
 
@@ -677,7 +881,7 @@ def self_test() -> int:
         _write(repo, "doc2.md", "[SONNET-4.6] sq-x: wrote this helper.\n")
         _git(["add", "doc2.md"], cwd=repo)
         _git(["commit", "-qm", "docs: no directive\n\nCo-Authored-By: Claude Opus 5 <n@a.com>"], cwd=repo)
-        expect(check_commits(repo, f"{exempted}..HEAD") != [],
+        expect(cc(f"{exempted}..HEAD") != [],
                "a file WITHOUT the exempt directive must still be checked")
         # A marker merely DISCUSSED in an inline code span is not an
         # attribution; a BARE one in the same file still is.
@@ -691,7 +895,28 @@ def self_test() -> int:
         _write(repo, "e.rs", "// [SONNET-4.6] restored verbatim  model-attribution-allow: revert of #1\n")
         _git(["add", "e.rs"], cwd=repo)
         _git(["commit", "-qm", "revert: e\n\nCo-Authored-By: Claude Opus 5 <n@a.com>"], cwd=repo)
-        expect(check_commits(repo, f"{cleaned}..HEAD") == [], "allow-marker did not exempt a commit line")
+        expect(cc(f"{cleaned}..HEAD") == [], "allow-marker did not exempt a commit line")
+
+        # ---- the SHALLOW-GRAFT teeth (the reviewer's blocking finding) ------
+        # A shallow clone of the SAME repo. Its boundary commit has parents in
+        # the object header but none to the walker — the `actions/checkout`
+        # shape in miniature. Without the guard, `git show` on that commit
+        # reports the whole tree and the gate drowns in baseline noise.
+        with tempfile.TemporaryDirectory() as sd:
+            shallow = Path(sd) / "shallow"
+            _git(["clone", "-q", "--depth=1", "--no-local",
+                  repo.as_uri(), str(shallow)])
+            boundary = _git(["rev-parse", "HEAD"], cwd=shallow).strip()
+            expect(is_graft_boundary(shallow, boundary),
+                   "graft boundary not recognised — the whole-tree scan would return")
+            expect(not is_graft_boundary(repo, base),
+                   "a true ROOT commit was misread as a graft (its tree IS all additions)")
+            expect(not is_graft_boundary(repo, honest),
+                   "an ordinary commit was misread as a graft")
+            v, u = scan_commits(shallow, [boundary], boundary)
+            expect(v == [], f"a grafted commit produced FINDINGS instead of a hole: {len(v)}")
+            expect(len(u) == 1 and "SHALLOW-GRAFT" in u[0],
+                   f"a grafted commit was not reported as unscannable: {u}")
 
     if failures:
         print("SELF-TEST FAILED:")
@@ -708,6 +933,16 @@ def main() -> int:
     ap.add_argument("--check-briefs", action="store_true", help="lint .claude/agents/*.md for hard-coded attribution")
     ap.add_argument("--print-fingerprints", action="store_true", help="print allowlist fingerprints for current brief violations")
     ap.add_argument("--check-commits", metavar="RANGE", help="added markers must match each commit's own trailer")
+    ap.add_argument(
+        "--check-commits-pr",
+        action="store_true",
+        help=(
+            "the CI form of --check-commits: derive the commit set from the "
+            "github.event.pull_request payload (head.sha / base.sha / commits) "
+            "instead of a rev range against HEAD, which under actions/checkout "
+            "is a shallow-grafted merge ref whose diff is the whole tree"
+        ),
+    )
     ap.add_argument("--blame", nargs="*", metavar="PATH", help="report claimed-vs-git-derived model per marker")
     ap.add_argument("--model", help="with --blame: only markers claiming this model (e.g. SONNET-4.6)")
     ap.add_argument("--only-mismatched", action="store_true", help="with --blame: hide MATCH rows")
@@ -747,9 +982,16 @@ def main() -> int:
         else:
             print("check-model-attribution: agent briefs are model-aware — OK")
 
-    if args.check_commits:
+    if args.check_commits or args.check_commits_pr:
+        where = args.check_commits or "this PR's commits"
+        skipped = ""
         try:
-            violations = check_commits(root, args.check_commits)
+            if args.check_commits_pr:
+                violations, problems, where = check_commits_pr(root)
+                if where.startswith("not a pull_request event"):
+                    skipped = where
+            else:
+                violations, problems = check_commits(root, args.check_commits)
         except Exception as exc:  # noqa: BLE001 — see below
             # An ADVISORY check must never fail the build, including on its own
             # internal error: the whole point of the advisory phase is that it
@@ -759,15 +1001,28 @@ def main() -> int:
                 print(f"ADVISORY: model-attribution scan could not complete ({exc!r}) — not blocking.")
                 return rc
             raise
-        if violations:
-            print(f"Mis-attributed model markers added in {args.check_commits}:")
-            for v in violations:
-                print(f"  {v}")
-            print(
-                "\nEach marker you ADD must name the model that actually authored the line —\n"
-                "the same model as the commit's Co-Authored-By trailer. If you are restoring\n"
-                "historical content verbatim, add 'model-attribution-allow: <why>' to the line."
-            )
+        if skipped:
+            print(f"check-model-attribution: {skipped}.")
+        elif violations or problems:
+            if violations:
+                print(f"Mis-attributed model markers added in {where}:")
+                for v in violations:
+                    print(f"  {v}")
+                print(
+                    "\nEach marker you ADD must name the model that actually authored the line —\n"
+                    "the same model as the commit's Co-Authored-By trailer. If you are restoring\n"
+                    "historical content verbatim, add 'model-attribution-allow: <why>' to the line."
+                )
+            if problems:
+                # NOT a pass, and deliberately not spelled like one. A commit we
+                # could not diff is a HOLE in the backstop; reporting "OK" over a
+                # hole is the inert-guard failure this whole mode exists to avoid.
+                print(
+                    f"check-model-attribution: INCOMPLETE — {len(problems)} commit(s) in "
+                    f"{where} could not be scanned, so this run PROVES NOTHING about them:"
+                )
+                for p in problems:
+                    print(f"  {p}")
             if args.advisory:
                 print(
                     "\nADVISORY (#2531): reported, not blocking. This becomes a HARD gate once "
@@ -777,7 +1032,7 @@ def main() -> int:
             else:
                 rc = 1
         else:
-            print(f"check-model-attribution: markers added in {args.check_commits} match their commits — OK")
+            print(f"check-model-attribution: markers added in {where} match their commits — OK")
 
     if args.blame is not None:
         rows, tally = blame_markers(root, args.blame, args.model, args.only_mismatched)
@@ -786,7 +1041,7 @@ def main() -> int:
         total = sum(tally.values())
         print(f"\n{total} marker(s): " + ", ".join(f"{k}={v}" for k, v in sorted(tally.items())))
 
-    if not (args.check_briefs or args.check_commits or args.blame is not None):
+    if not (args.check_briefs or args.check_commits or args.check_commits_pr or args.blame is not None):
         ap.print_help()
         return 2
     return rc
