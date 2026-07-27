@@ -654,11 +654,6 @@ the ask is first-hand rather than the §4.1 paraphrase. It also contains a typo 
 `v3 = add v1, u32 1` for `add v2, …` — and is framed as an investigation
 ("I'm fairly certain (check this)"), leaving two questions the record answers:
 
-Unlike §10.5–§10.7 the **issue body was fetched** (#7161, OPEN, zero comments), so
-the ask is first-hand rather than the §4.1 paraphrase. It also contains a typo —
-`v3 = add v1, u32 1` for `add v2, …` — and is framed as an investigation
-("I'm fairly certain (check this)"), leaving two questions the record answers:
-
 | finding | consequence |
 |---|---|
 | the overflow check is not an SSA instruction — it is one `range_constrain_var` emitted at ACIR-gen from `unchecked: false` (`acir/mod.rs:797-821`) | the issue's premise is confirmed: the two-link chain does emit two range checks, and flipping the first op to `unchecked` deletes one |

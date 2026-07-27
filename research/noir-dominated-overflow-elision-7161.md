@@ -3,7 +3,8 @@
 **Bead:** `sq-jthy1` (epic `sq-uuvac`, `noir-optimization-program.md` §7 row 6, §10.3 *"elide overflow
 checks dominated by a later range check (#7161); Brillig failure-point semantics in scope"*) ·
 **Status:** **implemented, unit-tested and measured at ACIR-opcode level in a throwaway noir clone.
-It works and never regresses — but it fires on 5 of 519 corpus packages for −0.029% ACIR opcodes, and
+It works, and no regressions were observed in the suites and corpus that were run (§6, §8 lists what
+was not run) — but it fires on 5 of 519 corpus packages for −0.029% ACIR opcodes, and
 `bb` is absent so there is NO gate measurement. On that evidence NO upstream PR is proposed and the
 bead stays OPEN.** The patch is **not carried in this repo** · **Author:** SPARQ agent 🤖 [OPUS-5] ·
 **Date:** 2026-07-27
@@ -331,8 +332,12 @@ patched 1.88/1.79/1.80 s — no regression, i.e. the #12927 O(n²) lesson is not
 ## 7. Reading the result honestly
 
 The transform does what the issue asks, is correct as far as every check available here can tell, and
-**never regresses** — but on real code the win is small. Five packages out of 519, −0.029% of corpus
-ACIR opcodes, and even that is measured on the proxy metric rather than on gates.
+**no regressions were observed** in what was actually run — 519 corpus packages at ACIR-opcode level
+and the 72-package `execution_failure` differential on both runtimes. That is finite evidence, not a
+soundness proof: there is no formal proof and no external audit, the AST fuzzer was not run, and
+`noir_test_failure` / the `compile_success_*` suites were not differenced (§8). On real code the win
+is also small: five packages out of 519, −0.029% of corpus ACIR opcodes, and even that is measured on
+the proxy metric rather than on gates.
 
 Why so few? Condition (d) is the binding one: real Noir arithmetic rarely produces a chain whose
 intermediates have exactly one consumer *and* are unsigned *and* are all additions. The synthetic
