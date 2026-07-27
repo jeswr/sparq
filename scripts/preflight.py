@@ -436,13 +436,17 @@ def rust_cfg_test_spans(masked: str) -> list[tuple[int, int]]:
 # Round-3 blocking finding. A bodyless `mod X;` under a test cfg is the SECOND
 # most common way this repo writes Rust unit tests, and the resolver could not
 # see it at all: the declaring attribute is in the PARENT file, so `X.rs` itself
-# contains no `#[cfg(test)]` and contributed zero test text. Measured: 13 such
-# files in the tree, 13 of 13 invisible, which is what made
+# contains no `#[cfg(test)]` and contributed zero test text. Measured: 14 such
+# files in the tree, 14 of 14 invisible, which is what made
 # `sparq-mpc::check_bounded_path` — called by 14 `#[test]` fns in
 # `hidden_path/planner/tests.rs` — read as "named by no test".
 #
 # `TEST_PATH_HINTS` could not fix this: it matches the DIRECTORY `/tests/`, and
 # these files are `planner/tests.rs`, `adversarial_tests.rs`, `ttl/tests.rs` …
+# (The review counted 13; the 14th is `sparq-engine/src/cs_gate.rs`, declared under
+# `all(test, feature = "cs-planner")` rather than a bare `#[cfg(test)]` — which is
+# why the seed shares `_cfg_test_attr_ends` with the span scan instead of matching
+# the literal attribute text.)
 # Adding a fifth path substring would have been the third patch to the same
 # defect CLASS (test text that exists but is not attributed to the guard). So
 # this resolves the declaration the way rustc does instead: `mod X;` in `p.rs`

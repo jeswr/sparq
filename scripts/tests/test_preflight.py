@@ -427,7 +427,9 @@ class SeparateFileTestModules(unittest.TestCase):
     of its own and contributed ZERO test text. `TEST_PATH_HINTS` did not cover it
     either: it matches the DIRECTORY `/tests/`, and these files are
     `planner/tests.rs`, `adversarial_tests.rs`, `ttl/tests.rs`. Measured on the
-    real tree: 13 such files, 13 of 13 invisible — which is why
+    real tree: 14 such files (13 under a bare `#[cfg(test)]`, plus
+    `sparq-engine/src/cs_gate.rs` under `all(test, feature = "cs-planner")`),
+    14 of 14 invisible — which is why
     `sparq-mpc::check_bounded_path`, called by 14 `#[test]` fns in
     `hidden_path/planner/tests.rs`, was reported as named by no test.
 
