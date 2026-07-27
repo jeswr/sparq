@@ -176,8 +176,15 @@ permissions: { contents: read, packages: write, id-token: write, attestations: w
     `sparq`, workflow `publish.yml`, env `pypi`) — a PyPI-account act that cannot be a tracked repo
     file. Until then the upload step fails to mint a token by design (no static API token is stored).
     Do NOT claim PyPI provenance is *emitted* until that registration is confirmed live.
-- **No Build L3** evidence exists: provenance is generated in the build job, not by an
-  isolated trusted builder (GX-11). Do not interpret the L2 attestations as L3.
+- **No Build L3** evidence exists **yet**, and the L2 attestations must not be read as L3. The
+  *mechanism* now exists for the release archives — `release.yml#provenance` calls the isolated
+  `slsa-github-generator` trusted builder in its own job (sq-toze.25) — but `release.yml` is
+  tag/dispatch-triggered, so **no run has produced a `sparq-cli-<version>.intoto.jsonl` and nobody
+  has verified one**. Wiring is not evidence: this line stays "no L3 evidence" until a `v*` tag
+  emits a bundle that `slsa-verifier verify-artifact <archive> --provenance-path
+  sparq-cli-<version>.intoto.jsonl --source-uri github.com/jeswr/sparq` accepts. Every other
+  artifact (container, GUI bundles, SBOM/VEX, conformance report, `dist.yml` binaries) is still
+  attested in-band and is L2 by construction (GX-11, narrowed).
 - **Reproducible build — characterised, not yet bit-for-bit** (GX-8 / sq-toze.9):
   [`reproducible-build.md`](./reproducible-build.md) records a measured double-build of
   `sparq-cli` (`--release --locked`, same tier flags) → **identical size, byte-identical apart
