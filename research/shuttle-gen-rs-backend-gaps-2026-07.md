@@ -86,7 +86,8 @@ Three corrections to the earlier framing follow from that run:
    grammars.
 2. **The front end is already ready.** The grammar surface parses both halves: the `@g` slot on
    an emit clause becomes the `g` field of the emit AST node, and the module header parses
-   `emits <shape>` with an optional ` bag`. Nothing new is needed to *express* quad emission.
+   `emits <shape>` with an optional trailing `bag` keyword. Nothing new is needed to *express*
+   quad emission.
 3. **The declared emission shape is inert.** Neither backend ever reads `headers.emits` — a grep
    for header reads in both `src/` trees returns only `start`, `profile`, `target` and
    `spec-ref`. A grammar may declare `emits quads` today and still get a triple-shaped artifact
