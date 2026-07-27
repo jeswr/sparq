@@ -926,8 +926,16 @@ def occupancy_parity(issues, source_links=None):
 def diagnose(issues, linked=(), source_links=None):
     """Re-runnable VISIBILITY taxonomy: why the open backlog is not on the frontier.
 
-    Returns (counts, roleless, candidates, frontier). Every open issue lands in exactly one
+    Returns (counts, roleless, candidates, frontier, units). Every open issue lands in exactly one
     bucket, so the buckets sum to the open-issue count and no class can hide.
+
+    [OPUS-5] `units` is `unit_reservations(visible, source_links)` — the OCCUPANCY accounting, which
+    is the only thing `source_links` can change here. The held KEY SET is provably invariant under
+    folding (a unit reserves the union of exactly the members' own reservations, so the union over
+    all units equals the union over all members), hence `frontier` is identical with and without
+    `source_links` and cannot witness the fold. Returning `units` is what makes the parameter
+    observable at this layer — without it the argument would be an equivalent mutant, green under
+    deletion, which is precisely how a call site rots.
     """
     linked = set(linked)
     counts, open_issues = {}, []
@@ -941,8 +949,13 @@ def diagnose(issues, linked=(), source_links=None):
             reason = exclusion_reason(labels_of(it), it.get("open_blockers", 0)) or "ENUMERABLE"
         counts[reason] = counts.get(reason, 0) + 1
     visible = dispatchable_view(issues, linked)
+    # `source_links` is deliberately NOT passed to compute_ready here: this call discards the
+    # conflict log, and the frontier is PROVABLY invariant under folding (see the docstring and
+    # `test_the_held_key_set_is_invariant_under_folding`). Passing it would be an argument no test
+    # could ever kill — an equivalent mutant, green under deletion, i.e. a call site that rots.
     return (counts, roleless_ready(open_issues), ready_candidates(visible),
-            compute_ready(visible, conflict_log=lambda _m: None, source_links=source_links))
+            compute_ready(visible, conflict_log=lambda _m: None),
+            unit_reservations(visible, source_links))
 
 
 def main():
@@ -971,14 +984,13 @@ def main():
     linked = set().union(set(), *source_links.values())
     visible = dispatchable_view(issues, linked)
     if args.diagnose:
-        counts, roleless, cands, frontier = diagnose(issues, linked, source_links)
+        counts, roleless, cands, frontier, units = diagnose(issues, linked, source_links)
         total = sum(counts.values())
         print(f"open issues: {total}")
         for reason, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
             print(f"  {n:5d}  {100 * n / total:5.1f}%  {reason}")
         print(f"\ndrainable backlog (ready_candidates): {len(cands)}")
         print(f"concurrency frontier (compute_ready): {len(frontier)}")
-        units = unit_reservations(visible, source_links)
         print(f"unit occupancy: {len(units)} unit(s), "
               f"{sum(len(a) for a, _ in units)} reservation(s) over "
               f"{len(set().union(set(), *[a for a, _ in units]))} partition key(s)")

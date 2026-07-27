@@ -502,8 +502,14 @@ class TestLocalOrchestratorParity(unittest.TestCase):
         return numbers(ready.compute_ready(rows, conflict_log=quiet))
 
     @staticmethod
-    def _run_cli(issues_and_prs, pulls=(), argv=()):
-        """Execute the REAL main() end-to-end; only `_fetch`/`_fetch_pulls` are stubbed."""
+    def _run_cli_streams(issues_and_prs, pulls=(), argv=()):
+        """Execute the REAL main() end-to-end; only `_fetch`/`_fetch_pulls` are stubbed.
+
+        Returns (stdout, stderr). STDERR is not incidental: `compute_ready`'s default
+        `conflict_log` writes the per-conflict ATTRIBUTION line there, and attribution is the one
+        observable the PR/issue unit fold changes on main()'s default path — see
+        `TestUnitReservation.test_the_default_CLI_path_attributes_a_conflict_to_the_PR`.
+        """
         real_fetch, real_pulls, real_argv = ready._fetch, ready._fetch_pulls, sys.argv
         ready._fetch = lambda repo, ceiling=10000: [dict(it) for it in issues_and_prs]
         ready._fetch_pulls = lambda repo: [dict(p) for p in pulls]
@@ -515,7 +521,11 @@ class TestLocalOrchestratorParity(unittest.TestCase):
         finally:
             ready._fetch, ready._fetch_pulls, sys.argv = real_fetch, real_pulls, real_argv
         assert rc == 0, f"main() exited {rc}"
-        return out.getvalue()
+        return out.getvalue(), err.getvalue()
+
+    @classmethod
+    def _run_cli(cls, issues_and_prs, pulls=(), argv=()):
+        return cls._run_cli_streams(issues_and_prs, pulls, argv)[0]
 
     @classmethod
     def _local(cls, issues_and_prs, pulls=()):
@@ -554,7 +564,7 @@ class TestLocalOrchestratorParity(unittest.TestCase):
     def test_diagnose_does_not_call_an_in_flight_row_merely_pr_covered(self):
         # The bucket must agree with the view: a row dispatchable_view KEEPS is reported as
         # busy, not as suppressed. Otherwise the taxonomy explains a drop that never happened.
-        counts, _roleless, _cands, frontier = ready.diagnose(
+        counts, _roleless, _cands, frontier, _units = ready.diagnose(
             list(self.COUNTEREXAMPLE_BOARD), linked={100})
         self.assertEqual(counts.get("busy: status:in-progress-review"), 1)
         self.assertIsNone(counts.get("covered by an open linked PR"))
@@ -725,9 +735,20 @@ class TestUnitReservation(unittest.TestCase):
                                                          "area:sparq-core"]),
                  pr(301, ["area:sparq-hdt"]), iss(300, ["status:in-progress-review",
                                                         "area:sparq-hdt"])]
-        units = ready.unit_reservations(board, {101: {100}, 301: {300}})
+        links = {101: {100}, 301: {300}}
+        units = ready.unit_reservations(board, links)
         self.assertEqual(self.by_pr(units), {101: ["sparq-core"], 301: ["sparq-hdt"]},
                          "two genuinely distinct units must remain two occupants")
+        # ...and EVERY unit must reach `reserve()`, not just the first. Truncating the occupancy
+        # loop (`unit_reservations(...)[:1]`) is a six-character edit that frees every unit after
+        # the first, so assert the SECOND unit's crate is held too.
+        contenders = [iss(200, READY + ["priority:P1", "area:sparq-core"]),
+                      iss(201, READY + ["priority:P2", "area:sparq-hdt"]),
+                      iss(202, READY + ["priority:P3", "area:sparq-geo"])]
+        self.assertEqual(
+            numbers(ready.compute_ready(board + contenders, conflict_log=quiet,
+                                        source_links=links)), [202],
+            "both units must hold their crate — a truncated occupancy loop frees the second")
 
     def test_an_issue_with_no_linked_pr_is_unaffected(self):
         lone = iss(100, ["status:in-progress-review", "area:sparq-core"])
@@ -785,20 +806,71 @@ class TestUnitReservation(unittest.TestCase):
         self.assertEqual(logs, ["conflict #200: area sparq-core held by pr#101"],
                          "omitting source_links must leave attribution exactly as it was")
 
-    # -- the CALL SITE, not just the helper ----------------------------------------------------
-    def test_the_real_CLI_folds_the_pair_into_one_unit(self):
-        # [OPUS-5] The titled leg runs in main(): `compute_ready(visible, source_links=...)`.
-        # Dropping that keyword argument at the call site leaves every helper test above green
-        # while the CLI reverts to two independent reservations, so assert on main()'s own output.
-        board = [iss(100, ["status:in-progress-review", "area:sparq-hdt"]),
-                 iss(200, READY + ["priority:P1", "area:sparq-core"])]
+    # -- the CALL SITES, not just the helper ---------------------------------------------------
+    # [OPUS-5] MEASURED, and the reason these three tests are shaped the way they are: the held
+    # KEY SET is invariant under folding, because a unit reserves the union of exactly its members'
+    # own reservations. So NO frontier assertion anywhere can witness `source_links` being dropped
+    # at a call site — a first cut of this suite asserted frontiers and left both CLI legs' mutants
+    # ALIVE. What the fold does change is (a) how many occupants there are and (b) which artifact a
+    # conflict is attributed to. Each leg is therefore pinned on the observable it actually has.
+    @staticmethod
+    def _pair_board():
+        """Live shape: in-review issue #100 on sparq-hdt + its worker PR #101 on sparq-core."""
         pulls = [dict(worker_pr(101, 100), labels=[{"name": "area:sparq-core"}])]
-        prs = [dict(p, labels=[lb["name"] for lb in p["labels"]]) for p in pulls]
-        out = TestLocalOrchestratorParity._run_cli(board + prs, pulls, argv=("--diagnose",))
+        rows = [iss(100, ["status:in-progress-review", "area:sparq-hdt"]),
+                iss(200, READY + ["priority:P1", "area:sparq-core"])]
+        rows += [dict(p, labels=[lb["name"] for lb in p["labels"]]) for p in pulls]
+        return rows, pulls
+
+    def test_the_held_key_set_is_invariant_under_folding(self):
+        # WHY no frontier assertion can guard the fold, asserted rather than asserted-about. A unit
+        # reserves the union of exactly its members' own reservations, so the union OVER UNITS
+        # equals the union OVER MEMBERS: `conflict()` reads only `blockers.keys()`, therefore the
+        # frontier is identical with and without `source_links`. This is what licenses
+        # `diagnose()` not passing it, and it is why the CLI guards pin attribution + unit count.
+        board = [pr(101, ["area:sparq-core"]),
+                 iss(100, ["status:in-progress-review", "area:sparq-hdt"]),
+                 pr(301, []), iss(300, ["status:in-progress-review", "area:sparq-geo"]),
+                 pr(401, ["area:sparq-zk"]), iss(400, ["status:in-progress-review"]),
+                 iss(200, READY + ["priority:P1", "area:sparq-core"]),
+                 iss(201, READY + ["priority:P2", "area:sparq-hdt"]),
+                 iss(202, READY + ["priority:P3", "area:sparq-mpc"])]
+        links = {101: {100}, 301: {300}, 401: {400}}
+        self.assertEqual(self.keys(ready.unit_reservations(board)),
+                         self.keys(ready.unit_reservations(board, links)),
+                         "folding must not add or remove a single held partition key")
+        self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet)),
+                         numbers(ready.compute_ready(board, conflict_log=quiet,
+                                                     source_links=links)))
+        self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet,
+                                                     source_links=links)), [202],
+                         "sanity: the board must actually exercise conflicts, not be all-free")
+
+    def test_diagnose_reports_the_pair_as_ONE_unit(self):
+        # Kills: `diagnose()` dropping `source_links=` from its compute_ready/unit_reservations.
+        board, pulls = self._pair_board()
+        _c, _r, _cands, _frontier, units = ready.diagnose(
+            board, linked={100}, source_links={101: {100}})
+        self.assertEqual([artifact["number"] for _areas, artifact in units], [101])
+        self.assertEqual(sorted(next(iter(a for a, _ in units))), ["sparq-core", "sparq-hdt"])
+
+    def test_the_diagnose_CLI_leg_prints_the_folded_unit_count(self):
+        # Kills: main() --diagnose losing the fold anywhere between diagnose() and the print.
+        board, pulls = self._pair_board()
+        out = TestLocalOrchestratorParity._run_cli(board, pulls, argv=("--diagnose",))
         self.assertIn("unit occupancy: 1 unit(s), 2 reservation(s) over 2 partition key(s)", out,
-                      "main() must pass source_links so the PR+issue pair is ONE unit")
-        self.assertIn("concurrency frontier (compute_ready): 0", out,
-                      "and the union (sparq-core from the PR) must actually hold #200 back")
+                      "the PR+issue pair must be reported as ONE unit holding TWO keys")
+
+    def test_the_default_CLI_path_attributes_a_conflict_to_the_PR(self):
+        # Kills: main()'s DEFAULT (non---diagnose) leg dropping `source_links=`. That leg's only
+        # observable is the attribution line compute_ready writes to stderr; without the fold the
+        # blocker is reported as `issue#100`, which no one can merge or close.
+        board, pulls = self._pair_board()
+        board = board + [iss(201, READY + ["priority:P1", "area:sparq-hdt"])]
+        _out, err = TestLocalOrchestratorParity._run_cli_streams(board, pulls)
+        self.assertIn("conflict #201: area sparq-hdt held by pr#101", err,
+                      "the default CLI path must fold the unit and attribute to the PR")
+        self.assertNotIn("held by issue#100", err)
 
 
 class TestOrchestratorOccupancyGap(unittest.TestCase):
@@ -893,7 +965,7 @@ class TestDiagnoseTaxonomy(unittest.TestCase):
             pr(70, []),
             iss(6, READY + ["priority:P1", "area:d"], state="CLOSED"),
         ]
-        counts, roleless, cands, frontier = ready.diagnose(board, linked={5})
+        counts, roleless, cands, frontier, _units = ready.diagnose(board, linked={5})
         self.assertEqual(sum(counts.values()), 5, "one bucket per OPEN issue, PRs/closed excluded")
         self.assertEqual(counts["ENUMERABLE"], 1)
         self.assertEqual(counts["covered by an open linked PR"], 1)
