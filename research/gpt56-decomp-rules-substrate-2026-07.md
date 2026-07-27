@@ -101,15 +101,20 @@ lowering table:
 - **RDFox Datalog `NOT`**: expressible — `log:notIncludes` over a formula
   covers single- and multi-pattern NAF (store-scoped reading is a documented
   sparq interpretation; not a missing *construct*).
-- **RDFox `AGGREGATE … ON … BIND f(?v) AS ?x`**: **candidate gap.** Standard
-  N3 has no aggregate expression construct; the only idiom is cwm's
-  list-valued `log:collectAllIn` + list arithmetic — exactly the
-  formula-/list-valued constructs a compiled/stratified subset excludes, and
-  it still gives no direct SUM/MIN/MAX/AVG. A bead (architect/Fable-tier —
-  external W3C-CG communication) verifies this against the current N3 spec +
-  builtin registry and, if confirmed, opens ONE concise w3c/N3 issue stating
-  the missing construct and that it was discovered implementing RIF/RDFox
-  rules support in an N3 front-end.
+- **RDFox `AGGREGATE … ON … BIND f(?v) AS ?x`**: **gap CONFIRMED** (sq-6tykl.3.4,
+  2026-07-27) — verified against the live Notation3 Language spec and the
+  Notation3 Builtin Functions **Final CG Report (3 June 2026)**: neither
+  contains the word "aggregate", and there is no aggregate builtin family. The
+  only idiom is the formula-/list-valued `log:collectAllIn` + list builtins —
+  exactly what a compiled/stratified subset excludes. Two refinements to the
+  original reading, both recorded in `n3-aggregate-gap-upstream.md`:
+  **grouping is NOT missing** (enclosing-body variables are the `ON` key), and
+  the reachability is uneven — SUM (`math:sum`), COUNT (`list:length`) and AVG
+  (`+ math:quotient`) work through the idiom, but **MIN/MAX have no builtin at
+  all**. Venue correction: the CG repo is now **`w3c-cg/N3`**, and upstream
+  **PR #119** already proposed `list:min/max/sum/avg/…` in 2023 and was closed
+  unmerged with zero comments. Issue drafted, **not filed** — @jeswr review
+  gate per `AGENTS.md` § *Upstream contributions*.
 
 ## 5. Reversal cost
 
