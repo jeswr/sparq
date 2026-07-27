@@ -266,7 +266,6 @@ boolean/∃/∀-shaped and RL/EL-profile subsets and leave the cardinality/inver
 out-of-fragment. The scoreboard row is labelled **"scoped fragment — NOT full OWL 2 DL"**
 and the lane never counts an abstention as a pass.
 
-
 ### 5c. The datatype-aware tableau — ALCH(D) over an admitted sub-lattice (sq-pbz04.4.19, [SONNET-4.6])
 
 **Amendment to §3 and to the Datatypes row above.** This is the design the ledger's "future
