@@ -133,10 +133,19 @@ expect_rc 1 "A6 an allowlist entry with no reason/tracking is REJECTED" \
   python3 "$GATE" --repo "$TMP/noreason" --check-briefs
 
 # --- A7: a corrupt allowlist must fail CLOSED, never mute the gate ----------
+# The fixture brief is deliberately CLEAN. It used to carry a live R2 violation
+# ("Tag your code with `[SONNET-4.6]`"), which meant `expect_rc 1` was satisfied
+# by the BRIEF and said nothing about the allowlist: making the corrupt-allowlist
+# branch `return {}, []` (fail OPEN) survived the entire suite AND --self-test.
+# A7a is the control that pins the only remaining difference to the allowlist —
+# without it, A7b is again just "something failed".
 mkdir -p "$TMP/corrupt/.claude/agents" "$TMP/corrupt/scripts"
-printf -- '- Tag your code with `[SONNET-4.6]` always.\n' >"$TMP/corrupt/.claude/agents/z.md"
+printf -- '- Markers follow the RUNNING model; derive them from the harness.\n' \
+  >"$TMP/corrupt/.claude/agents/z.md"
+expect_rc 0 "A7a CONTROL: the fixture brief alone is clean, so A7b can only be the allowlist" \
+  python3 "$GATE" --repo "$TMP/corrupt" --check-briefs
 printf 'not json {' >"$TMP/corrupt/scripts/check-model-attribution.allowlist.json"
-expect_rc 1 "A7 a corrupt allowlist fails CLOSED (does not silently mute)" \
+expect_rc 1 "A7b a corrupt allowlist fails CLOSED (does not silently mute)" \
   python3 "$GATE" --repo "$TMP/corrupt" --check-briefs
 
 # --- A8: the commit gate — the actual reported symptom ----------------------
