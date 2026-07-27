@@ -18,12 +18,31 @@ pub(crate) fn is_blank_node(s: &str) -> bool {
     s.starts_with("_:")
 }
 
-/// True iff `s` is an absolute IRI: a valid scheme followed by `:`.
+/// True iff `s` is an absolute IRI: a valid scheme followed by `:`, with no character
+/// that RFC 3987 excludes from an IRI.
 pub(crate) fn is_absolute_iri(s: &str) -> bool {
     match s.find(':') {
-        Some(colon) => is_valid_scheme(&s[..colon]),
+        Some(colon) => is_valid_scheme(&s[..colon]) && !has_non_iri_char(s),
         None => false,
     }
+}
+
+/// True iff `s` contains a character that cannot appear anywhere in an IRI: a C0/C1
+/// control, a space, or one of the RFC 3986 §2.2 "excluded" delimiters that are neither
+/// reserved nor unreserved (`<`, `>`, `"`, `{`, `}`, `|`, `\`, `^`, `` ` ``).
+///
+/// [OPUS-5] sq-gzsky — this is the "Processors MUST validate datatype IRIs" obligation
+/// behind the `invalid typed value` negative (W3C expand/0123 pins
+/// `"http://example.com/baz z"`, a scheme-valid string carrying a SPACE). Scheme validity
+/// alone accepted it. Deliberately a character-class rejection, not a full RFC 3987
+/// grammar: it is the check the reference processors apply, and over-rejecting a
+/// well-formed IRI would silently cost passes elsewhere.
+fn has_non_iri_char(s: &str) -> bool {
+    s.chars().any(|c| {
+        c.is_control()
+            || c == ' '
+            || matches!(c, '<' | '>' | '"' | '{' | '}' | '|' | '\\' | '^' | '`')
+    })
 }
 
 /// True iff `s` is a syntactically valid URI scheme: `ALPHA *( ALPHA / DIGIT / "+" / "-" /
