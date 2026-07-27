@@ -209,10 +209,15 @@ code, not measured** — and it is precisely why §0's blocking pre-check exists
 #4629, and it may already have absorbed most of the circuit-size half of the issue.
 
 **(b) An over-eager cut is partially self-healing.** A witness introduced by a speculative
-auto-`as_witness` that turns out to be used in only two `AssertZero` opcodes is merged back by
-`MergeExpressionsOptimizer`, so its cost is refunded. The refund does **not** apply when the extra
-witness is consumed by a non-`AssertZero` opcode (memory op, black-box call, brillig input) or by
-three or more opcodes — there the cut is permanent and costs a gate. That is exactly the docs'
+auto-`as_witness` that appears in exactly two `AssertZero` opcodes is merged back by
+`MergeExpressionsOptimizer`, so its cost is refunded. **The opcode accounting is easy to get off by
+one:** materialising the expression emits the `AssertZero` that *defines* the witness, and the
+elimination consumes that defining equation to substitute — so "two opcodes" is the definition plus
+**exactly one** consumer. A cut with **two or more** `AssertZero` consumers is already at three or
+more opcodes and is **not** merged back. The refund also does **not** apply when the extra witness
+is consumed by a non-`AssertZero` opcode (memory op, black-box call, brillig input) — there the cut
+is permanent and costs a gate. (Source-derived like everything else here; re-confirm the counting
+against `merge_expressions.rs:30-57` before any of these numbers is asserted upstream.) That is exactly the docs'
 *"when used incorrectly it will create less efficient circuits"*, and it gives the heuristic a
 concrete safety argument plus a concrete list of places where the argument fails.
 
@@ -234,14 +239,16 @@ so on the thread — the same kind of re-scoping the sibling record produced for
 | A | **Narrow at the non-narrowing consumers**: call `get_or_create_witness_var` on the operands of `assert_eq_var` and on brillig `Single` inputs when the expression exceeds a term threshold | `acir_context/mod.rs:508`, `brillig_call.rs:66` | smallest diff; targets exactly Q1/Q2; reuses the existing primitive; leaves every already-cut path untouched | `values_to_expressions_or_memory` is `&self` and would need to become `&mut self`; changes assertion opcode shape ⇒ SSA/ACIR snapshot churn; needs a threshold (see D) |
 | B | **Width-aware auto-cut in `add_var`**: cut when `linear_combinations.len()` exceeds `k · width` | `acir_context/mod.rs:746` | single choke point; catches Q3 (the memory/compile-time half) as well, since the accumulator never grows past the threshold | ACIR-gen has **no notion of backend width today** (`ExpressionWidth` no longer exists in the workspace; the width is the ACVM-private `DEFAULT_EXPRESSION_WIDTH`) — the threshold would have to be plumbed or duplicated; cuts unconditionally, including on values ACVM would rather keep wide; highest regression risk on well-conditioned circuits |
 | C | **CSAT-side**: make slice alignment canonical so shared prefixes always hit the cache | `csat.rs:354` | no ACIR-gen change; no new gates by construction | per §5(a) this may **already** hold — must be measured before it is designed; and it cannot address Q3 at all |
-| D | **Use SSA use-counts to place the cut**: insert `AsWitness` in SSA where a value has ≥3 uses and a large ACIR-gen cost estimate | new SSA pass | reuses the documented lever; uses information ACIR-gen does not have (the DFG knows use counts, and ≥3 uses is exactly the threshold above which ACVM will *not* merge the witness back, §5(b)) | requires an ACIR-cost model in SSA, i.e. a layering inversion, and SSA is deliberately width-agnostic; a new pass must "pay rent" (PR #11580 was closed on maintenance-cost grounds — program record §4.2) |
+| D | **Use SSA use-counts to place the cut**: insert `AsWitness` in SSA where a value has enough uses to survive the §5(b) merge-back *and* a large ACIR-gen cost estimate | new SSA pass | reuses the documented lever; uses information ACIR-gen does not have (the DFG knows use counts) | the SSA use count is **not** the quantity that governs the refund: per §5(b) a cut survives from **two eligible `AssertZero` consumers** (three opcodes counting the definition), and SSA uses do not map one-to-one onto those — a use may lower to a memory/black-box/brillig operand (never merged back at all), several uses may fold into one opcode, and CSAT slicing adds opcodes after ACIR-gen — so the threshold would be a proxy the pass cannot validate at its own layer; also requires an ACIR-cost model in SSA, i.e. a layering inversion, and SSA is deliberately width-agnostic; a new pass must "pay rent" (PR #11580 was closed on maintenance-cost grounds — program record §4.2) |
 
 **Preliminary ordering, contingent on §7:** if the measurement shows the circuit-size blowup is real
 at HEAD → **A** first (smallest, targeted, and its cost is bounded by §5(b)). If the measurement
 shows circuit size is already fine but compile time / peak memory is not → the problem is Q3, only
 **B** touches it, and the framing to take upstream is the #13046 one, not the #4629 one. **C** is a
-measurement question before it is a design. **D** is the most principled and the least likely to be
-accepted as a first contribution.
+measurement question before it is a design. **D** ranks last: its cut threshold is an SSA use-count
+proxy that §5(b) does not underwrite — the merge-back is decided by `AssertZero` opcode occupancy
+after lowering, not by DFG use count — so the proxy would have to be validated empirically before
+the design means anything, and it is also the least likely to be accepted as a first contribution.
 
 ## 7. The pending empirical half — exact protocol
 
@@ -305,9 +312,10 @@ corpus recompiled and no unexplained ACIR increase.
 >    `brillig_call.rs:66`).
 > 2. `CommonSubexpressionOptimizer` postdates this issue, and its CSAT intermediate cache is
 >    circuit-global, so prefix slices of the same accumulator across many opcodes should already
->    share intermediates — and `MergeExpressionsOptimizer` refunds any intermediate used in only two
->    `AssertZero` opcodes, which bounds the cost of an over-eager cut but also means a lot of the
->    circuit-size half may already be handled.
+>    share intermediates — and `MergeExpressionsOptimizer` refunds any intermediate that appears in
+>    exactly two `AssertZero` opcodes (the one defining it plus a single consumer), which bounds the
+>    cost of an over-eager cut on singly-consumed values but also means a lot of the circuit-size
+>    half may already be handled.
 >
 > If that is right, the part ACVM cannot help with is compile time and peak memory — every
 > `var_to_expression` clones, so building an n-term accumulator is quadratic in term copies even when
