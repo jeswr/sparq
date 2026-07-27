@@ -185,13 +185,14 @@ pub enum Grounding {
         /// so a low-provenance modality contributes less to the fused ranking. Every entry is
         /// `1.0` on a header with no recorded weights (fail-open — grounding is unchanged).
         ///
-        /// **These are BLOCK-level defaults read straight off the shared `SchemaHeader`, not
-        /// per-node values.** When the header was produced by
+        /// **Which weight you get depends on how you grounded.** [`ground`] returns the BLOCK-level
+        /// defaults read straight off the shared `SchemaHeader` — when it was produced by
         /// [`ProvenanceWeights::weight_header`](crate::provenance::ProvenanceWeights::weight_header)
         /// each entry is a graph-global mean over every subject asserting that block's feeding
-        /// predicate, so grounding a *different* node against the same header yields the *same*
-        /// weights — including for a node with no incident edge for that predicate. They say
-        /// nothing about this node's own provenance.
+        /// predicate, identical for every node grounded against that header. [`ground_weighted`]
+        /// with a [`NodeWeighting`] instead computes each entry from **this node's own incident
+        /// edges** ([`node_block_weight`](crate::provenance::ProvenanceWeights::node_block_weight)),
+        /// which is the design's per-node modality scaling.
         weights: Vec<f32>,
     },
     /// The token-budgeted NL rendering.
@@ -288,6 +289,46 @@ pub fn ground(
     introspection: Option<&Introspection>,
     store: Option<(&VectorStore, &crate::encode::SchemaHeader)>,
 ) -> Option<Grounding> {
+    ground_weighted(graph, node, modality, cfg, introspection, store, None)
+}
+
+/// **Per-node modality weighting** for [`Modality::TypedSubVector`] (design §USE-1 integration
+/// point 3): which predicate feeds each block of the [`SchemaHeader`](crate::encode::SchemaHeader),
+/// and the mined provenance to score it with. [OPUS-5] sq-w2af4.
+///
+/// `block_predicates[i]` names the predicate feeding `header.blocks()[i]`; a `None` entry — or an
+/// index past the end — leaves that block on the header's graph-global default (fail-open, e.g. a
+/// text or taxonomy lane with no single feeding predicate).
+pub struct NodeWeighting<'a> {
+    /// Provenance mined from the same graph being grounded
+    /// ([`ProvenanceWeights::mine`](crate::provenance::ProvenanceWeights::mine)).
+    pub weights: &'a crate::provenance::ProvenanceWeights,
+    /// The predicate feeding each header block, in block order.
+    pub block_predicates: &'a [Option<&'a str>],
+    /// The on/off ablation switch: [`WeightMode::Uniform`](crate::provenance::WeightMode::Uniform)
+    /// leaves every weight at `1.0`.
+    pub mode: crate::provenance::WeightMode,
+}
+
+/// [`ground`], with an optional [`NodeWeighting`] that computes the
+/// [`Grounding::TypedSubVector`] block weights from **the grounded node's own incident edges** at
+/// query time, instead of reading the shared header's graph-global defaults.
+///
+/// This is the design's §USE-1 point-3 behaviour: two nodes whose incident edges carry different
+/// provenance receive different modality multipliers, each derived only from that node's own
+/// contributions (see
+/// [`node_block_weight`](crate::provenance::ProvenanceWeights::node_block_weight)). Pass `None` for
+/// `weighting` — as [`ground`] does — to keep the persisted header defaults. Every other modality
+/// ignores `weighting`.
+pub fn ground_weighted(
+    graph: &Graph,
+    node: &oxrdf::Term,
+    modality: Modality,
+    cfg: &GroundingConfig,
+    introspection: Option<&Introspection>,
+    store: Option<(&VectorStore, &crate::encode::SchemaHeader)>,
+    weighting: Option<&NodeWeighting<'_>>,
+) -> Option<Grounding> {
     let id = graph.id_of(node)?;
     if dict::is_inline(id) {
         return None;
@@ -302,13 +343,13 @@ pub fn ground(
         Modality::NlString => nl_string(graph, node, id, cfg).map(Grounding::NlString),
         Modality::TypedSubVector => {
             let (store, header) = store?;
-            typed_sub_vector(store, header, id, &cfg.keep_blocks).map(|(values, blocks, weights)| {
-                Grounding::TypedSubVector {
+            typed_sub_vector(graph, store, header, id, &cfg.keep_blocks, weighting).map(
+                |(values, blocks, weights)| Grounding::TypedSubVector {
                     values,
                     blocks,
                     weights,
-                }
-            })
+                },
+            )
         }
         Modality::TypedValue => {
             let vals = typed_values(graph, id, cfg.reconcile_units);
@@ -748,22 +789,25 @@ fn typed_value_key(v: &TypedValue) -> String {
 // ---- typed-sub-vector modality ----------------------------------------------------------------
 
 /// Project `id`'s stored vector to only the blocks in `keep` (empty = all), concatenated in block
-/// order, plus the encoder families kept and each kept block's
-/// [`fusion_weight`](crate::encode::Block::fusion_weight) ([OPUS-5] sq-w2af4 — the block-level
-/// modality multiplier the caller hands to the fusion path, copied verbatim from the shared header
-/// and therefore identical for every `id`; `1.0` when the header records none). `None` when the
-/// store has no vector for `id`, or the kept projection is empty.
+/// order, plus the encoder families kept and each kept block's modality weight ([OPUS-5] sq-w2af4).
+/// The weight is [`node_block_weight`](crate::provenance::ProvenanceWeights::node_block_weight) —
+/// mined from **`id`'s own** incident edges — when `weighting` supplies a predicate for that block,
+/// and otherwise the header's graph-global
+/// [`fusion_weight`](crate::encode::Block::fusion_weight) default (`1.0` when the header records
+/// none). `None` when the store has no vector for `id`, or the kept projection is empty.
 fn typed_sub_vector(
+    graph: &Graph,
     store: &VectorStore,
     header: &crate::encode::SchemaHeader,
     id: Id,
     keep: &[Encoder],
+    weighting: Option<&NodeWeighting<'_>>,
 ) -> Option<(Vec<f32>, Vec<Encoder>, Vec<f32>)> {
     let full = store.get(id)?;
     let mut values: Vec<f32> = Vec::new();
     let mut blocks: Vec<Encoder> = Vec::new();
     let mut weights: Vec<f32> = Vec::new();
-    for block in header.blocks() {
+    for (i, block) in header.blocks().iter().enumerate() {
         if !keep.is_empty() && !keep.contains(&block.encoder) {
             continue;
         }
@@ -773,7 +817,16 @@ fn typed_sub_vector(
         }
         values.extend_from_slice(&full[block.offset..end]);
         blocks.push(block.encoder);
-        weights.push(block.fusion_weight());
+        // Per-node when the caller supplied a feeding predicate for this block; the header's
+        // graph-global default otherwise (a short/absent `block_predicates` fails open, never
+        // panics on a caller/layout mismatch).
+        weights.push(match weighting {
+            Some(w) => match w.block_predicates.get(i).copied().flatten() {
+                Some(pred) => w.weights.node_block_weight(graph, id, pred, w.mode),
+                None => block.fusion_weight(),
+            },
+            None => block.fusion_weight(),
+        });
     }
     if values.is_empty() {
         None
@@ -782,31 +835,29 @@ fn typed_sub_vector(
     }
 }
 
-// ---- integration point 2 (WIRING): entity-quality-weighted structural-sketch pooling -----------
+// ---- integration point 2 (WIRING): assertion-weighted structural-sketch pooling ----------------
 // [OPUS-5] sq-w2af4. sq-oy9ya landed `ProvenanceWeights::pool_weighted` but no in-tree caller ever
 // pooled anything with it. `sketch_predicate` is that caller: it is the grounding-path
 // structural-sketch pooler for a node's MULTI-VALUED object predicate.
 
-/// **Entity-quality-weighted structural sketch** of `node`'s multi-valued `predicate` (design
-/// §USE-1 integration point 2): pool the stored vectors of the node's object neighbours under that
-/// predicate, weighting each neighbour's contribution by **that neighbour entity's** provenance
-/// weight via
-/// [`ProvenanceWeights::pool_weighted`](crate::provenance::ProvenanceWeights::pool_weighted).
+/// **Assertion-weighted structural sketch** of `node`'s multi-valued `predicate` (design §USE-1
+/// integration point 2): pool the stored vectors of the node's object neighbours under that
+/// predicate, weighting each contribution by **the `(node, predicate, o)` assertion's own** `w(t)`
+/// via [`ProvenanceWeights::pool_weighted`](crate::provenance::ProvenanceWeights::pool_weighted).
 ///
-/// **What the weight actually measures (load-bearing — read this before trusting it).** The
-/// contribution of neighbour `o` is keyed on **`o`'s own entity-level** provenance
-/// (`pkg:confidence` / `pkg:assurance` / `prov:wasDerivedFrom` asserted *about `o`*), not on
-/// `node`'s. Two consequences are stated plainly rather than glossed:
-/// - It is **not** a per-*statement* weight. Provenance attached to `o` says that `o` is a
-///   low-assurance *entity*; it does **not** establish that the separate `(node, predicate, o)`
-///   assertion is doubtful. Plain RDF-1.1 carries no per-statement provenance, and this crate reads
-///   no reified / RDF-star statement mapping, so no in-tree caller can weight the assertion itself.
-/// - It is deliberately **not** keyed on `node`: every `(node, predicate, ·)` edge shares the same
-///   subject, so subject-keying would give every contribution an identical weight and reduce
-///   exactly to the uniform mean (an exact no-op).
-///
-/// So this is an **entity-quality proxy** — "a value that is itself low-assurance pulls the pooled
-/// vector less" — and that is the full extent of the claim.
+/// **What the weight actually measures (load-bearing — read this before trusting it).** Each
+/// contribution is keyed on the *triple*, so the weight is the reified statement's provenance where
+/// the graph carries it (RDF 1.2 `rdf:reifies`, or RDF 1.1 `rdf:subject`/`rdf:predicate`/
+/// `rdf:object` — see [`ProvenanceWeights::weight_of`](crate::provenance::ProvenanceWeights::weight_of))
+/// and the head's otherwise. Two consequences, stated plainly rather than glossed:
+/// - On a graph with **no statement-level provenance** every `(node, predicate, ·)` contribution
+///   falls back to the same head weight, so the pool is **exactly** the arithmetic mean — this axis
+///   is an honest no-op there rather than a substituted proxy.
+///   [`annotated_statements`](crate::provenance::ProvenanceWeights::annotated_statements) reports
+///   whether the signal exists on your graph; check it before calling a sketch provenance-driven.
+/// - It is deliberately **not** keyed on the neighbour `o`. Provenance about `o` says `o` is a
+///   low-assurance *entity*, which is a different heuristic from "this assertion is doubtful";
+///   substituting it would report the design point as implemented when it is not.
 ///
 /// Returns `Ok(None)` when the node is absent/inline, the predicate is unknown to the graph, or no
 /// neighbour has a stored vector. `Err` only if the store's vectors disagree in length (a layout
@@ -834,11 +885,11 @@ pub fn sketch_predicate(
         return Ok(None);
     };
     let scan = graph.store.scan(&[Some(id), Some(pid), None]);
-    let mut contributions: Vec<(Id, Vec<f32>)> = Vec::new();
+    let mut contributions: Vec<([Id; 3], Vec<f32>)> = Vec::new();
     for row in scan.rows.iter() {
-        let [_, _, o] = scan.to_spo(row);
-        if let Some(v) = store.get(o) {
-            contributions.push((o, v.to_vec()));
+        let spo = scan.to_spo(row);
+        if let Some(v) = store.get(spo[2]) {
+            contributions.push((spo, v.to_vec()));
         }
     }
     weights.pool_weighted(&contributions, mode)

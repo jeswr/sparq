@@ -267,13 +267,25 @@ fn pooling_ablation_runs_on_provenance_slice() {
 }
 
 /// [OPUS-5] Proof the pooling weights actually BITE: on the annotated slice the two arms score
-/// differently (the confidence-weighted sketch is a genuinely different augmentation, not a
-/// silently-ignored flag) — while a `blend` of `0.0` collapses both arms to the untouched model,
-/// so the delta is exactly zero by construction. Together these show the ablation measures the
-/// pooling axis and nothing else.
+/// differently (the weighted sketch is a genuinely different augmentation, not a silently-ignored
+/// flag) — while a `blend` of `0.0` collapses both arms to the untouched model, so the delta is
+/// exactly zero by construction. Together these show the ablation measures the pooling axis and
+/// nothing else.
+///
+/// The bite comes specifically from the slice's **statement-level** provenance: the pool is keyed
+/// by the asserting triple, so without reified statements every one of a subject's edges shares its
+/// head weight and the two arms would be identical. That precondition is asserted rather than
+/// assumed, so this test cannot quietly go vacuous.
 #[test]
 fn pooling_weights_change_the_scored_model_and_blend_zero_is_a_noop() {
     let ttl = synthetic_provenance_ttl(160, 11);
+    let mined = sparq_vectors::provenance::ProvenanceWeights::mine(
+        &sparq_core::Graph::load_str(&ttl, "turtle").unwrap(),
+    );
+    assert!(
+        mined.annotated_statements() > 0,
+        "precondition: the slice must carry per-statement provenance for this axis to bite"
+    );
     let mut cfg = EvalConfig::small(5);
     cfg.train.epochs = 40;
     let seeds = [1u64, 2];

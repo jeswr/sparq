@@ -1104,8 +1104,17 @@ impl PoolingAblation {
 /// two **structural-sketch-augmented** copies of it that differ only in the pooling mode: every
 /// entity's embedding is blended with the pool of its train-graph object-neighbours' embeddings,
 /// pooled through [`ProvenanceWeights::pool_weighted`](crate::provenance::ProvenanceWeights::pool_weighted)
-/// — a uniform mean in the OFF arm, provenance-weighted in the ON arm. The augmented models are
-/// then scored with the same filtered link-prediction protocol as every other axis.
+/// — a uniform mean in the OFF arm, `w(t)`-weighted in the ON arm. The augmented models are then
+/// scored with the same filtered link-prediction protocol as every other axis.
+///
+/// **What this axis can and cannot measure.** The pool is keyed by the *asserting triple*, so the
+/// two arms can only differ where `w(t)` differs *within* one subject's edges — i.e. where the
+/// graph carries **statement-level** provenance (a reified statement; see
+/// [`ProvenanceWeights::annotated_statements`](crate::provenance::ProvenanceWeights::annotated_statements)).
+/// On a graph with only entity-level provenance every one of a subject's edges falls back to the
+/// same head weight, the weighted pool IS the uniform mean, and every delta is **exactly zero** —
+/// the same honest no-op [`run_weight_ablation`] documents for provenance-free graphs. A zero delta
+/// here therefore means "this graph has no per-statement signal", not "weighting did not help".
 ///
 /// **No leakage**: the sketch is pooled over the *restricted train graph* only (the same graph the
 /// trainer saw), so a held-out edge can never enter an entity's sketch. The provenance is mined
@@ -1174,9 +1183,9 @@ pub fn run_pooling_ablation(
 }
 
 /// A copy of `model` whose entity embeddings are blended with each entity's
-/// **entity-quality-weighted structural sketch**: the pool of its outgoing non-schema
-/// object-neighbours' embeddings in `graph`, each contribution keyed on the **neighbour entity's**
-/// provenance (an entity-level proxy, never per-statement provenance — see
+/// **assertion-weighted structural sketch**: the pool of its outgoing non-schema object-neighbours'
+/// embeddings in `graph`, each contribution keyed on **the asserting triple** (so the weight is the
+/// reified statement's provenance where the graph carries it, the head's otherwise — see
 /// [`sketch_predicate`](crate::grounding::sketch_predicate)), pooled through
 /// [`ProvenanceWeights::pool_weighted`](crate::provenance::ProvenanceWeights::pool_weighted) under
 /// `mode`. Deterministic: each row is written independently from a contribution list built in
@@ -1190,8 +1199,8 @@ fn sketch_augmented(
     blend: f32,
 ) -> Result<TrainedModel, String> {
     let dim = model.dim;
-    // Per subject, the (neighbour id, neighbour embedding) contributions that feed its sketch.
-    let mut contributions: FxHashMap<Id, Vec<(Id, Vec<f32>)>> = FxHashMap::default();
+    // Per subject, the (asserting triple, neighbour embedding) contributions that feed its sketch.
+    let mut contributions: FxHashMap<Id, Vec<([Id; 3], Vec<f32>)>> = FxHashMap::default();
     for [s, p, o] in graph.iter_ids() {
         if splits.schema_preds.contains(&p) {
             continue;
@@ -1202,7 +1211,7 @@ fn sketch_augmented(
         contributions
             .entry(s)
             .or_default()
-            .push((o, model.entity_vec(o_row).to_vec()));
+            .push(([s, p, o], model.entity_vec(o_row).to_vec()));
     }
 
     let mut out = model.clone();
@@ -1670,6 +1679,17 @@ pub fn synthetic_relational_ttl(n_entities: usize, seed: u64) -> String {
 /// recover the cluster signal regardless), so the measurement is honest. Deterministic in `seed`,
 /// sized by `n_entities`. The vocabulary mirrors the real `pkg.ttl` predicate set so the reader
 /// exercises the REAL provenance path, not a mock.
+///
+/// [OPUS-5] sq-w2af4: the slice also carries **statement-level** provenance — a share of the noise
+/// edges are asserted by an otherwise-*good* head and their doubt is expressed on an RDF 1.2
+/// reifier (`:st rdf:reifies <<( s p o )>>` + a low `pkg:confidence`). That is the case entity-level
+/// provenance structurally cannot express, and it is what gives one subject's edges *differing*
+/// `w(t)` — without it every `(s, ·, ·)` weight is identical and the pooling axis is an exact no-op
+/// (see [`run_pooling_ablation`]). **No leakage:** the reifier's quoted triple is a TERM, never an
+/// assertion; triple terms are outside the [`TermScope::IriBlank`] pool so they enter neither the
+/// split, the ranking pool, nor training; the reifier is annotated with a LITERAL only, so it never
+/// becomes a prediction target itself; and the sketch pools only over edges present in the
+/// restricted train graph.
 pub fn synthetic_provenance_ttl(n_entities: usize, seed: u64) -> String {
     let mut state = seed ^ 0x0BAD_F00D_C0FF_EE11;
     let mut next = |m: usize| -> usize { (splitmix64(&mut state) as usize) % m.max(1) };
@@ -1725,7 +1745,8 @@ pub fn synthetic_provenance_ttl(n_entities: usize, seed: u64) -> String {
 
         // NOISE edge (minority): a random cross-cluster pair, annotated LOW assurance so the ON arm
         // down-weights it. We annotate a DISTINCT noise-head node so the clean head keeps its high
-        // assurance (a head carries one assurance basis in this slice).
+        // assurance (a head carries one assurance basis in this slice) — this is the ENTITY-level
+        // arm, which only the head fallback of `w(t)` can read.
         if next(4) == 0 {
             let t = next(n);
             if t != i {
@@ -1733,6 +1754,21 @@ pub fn synthetic_provenance_ttl(n_entities: usize, seed: u64) -> String {
                 out.push_str(&format!(
                     "ex:noise{} pkg:assurance secx:Conjectured ; pkg:confidence \"0.2\" ; prov:wasDerivedFrom ex:src-weak .\n",
                     i
+                ));
+            }
+        }
+
+        // STATEMENT-level noise (minority): the SAME, high-assurance head `ex:e{i}` asserts a
+        // cross-cluster edge that is itself dubious. The head is a fine entity, so entity-level
+        // provenance says nothing; the doubt lives on the RDF 1.2 reifier of that one statement.
+        // This is what makes `w(t)` vary WITHIN a subject's edges (see the fn doc).
+        if next(4) == 0 {
+            let t = next(n);
+            if t != i && cluster(t) != cluster(i) {
+                out.push_str(&format!("ex:e{} ex:rel ex:e{} .\n", i, t));
+                out.push_str(&format!(
+                    "ex:st{} rdf:reifies <<( ex:e{} ex:rel ex:e{} )>> ; pkg:confidence \"0.15\" .\n",
+                    i, i, t
                 ));
             }
         }

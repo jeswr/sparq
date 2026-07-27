@@ -329,8 +329,8 @@ pub use ufo_priors::{MetaType, Nature, Rigidity, UfoPriors, GUFO_NS};
 // flexible minimal-and-complete grounding selector + verbaliser. `structure` feature only.
 #[cfg(feature = "structure")]
 pub use grounding::{
-    ground, reconcile_quantity, sketch_predicate, GroundFact, Grounding, GroundingConfig, Modality,
-    OutputType, TypedValue,
+    ground, ground_weighted, reconcile_quantity, sketch_predicate, GroundFact, Grounding,
+    GroundingConfig, Modality, NodeWeighting, OutputType, TypedValue,
 };
 pub use verbalize::{
     description_predicates, embed_entities, label_predicates, verbalize, EntityTextConfig,

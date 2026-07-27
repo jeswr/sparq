@@ -220,10 +220,14 @@ fn main() {
     // ---- Phase-4 PROVENANCE-WEIGHTING: all three design-§USE-1 integration points --------------
     // [OPUS-5] sq-w2af4. The `w(t)` reader feeds three points, each with its OWN paired ablation:
     //   (1) the TRAINING axis  — `run_weight_ablation`  (sq-2489d.4): scale each positive's SGD step;
-    //   (2) the POOLING  axis  — `run_pooling_ablation` (sq-w2af4):  confidence-weighted
-    //       structural-sketch pooling of a node's neighbours, instead of the uniform mean;
+    //   (2) the POOLING  axis  — `run_pooling_ablation` (sq-w2af4):  structural-sketch pooling of
+    //       a node's neighbours weighted by each ASSERTION's w(t), instead of the uniform mean. It
+    //       can only move where the graph carries STATEMENT-level provenance (a reified statement);
+    //       with entity-level provenance alone every edge of a subject shares its head weight and
+    //       the delta is exactly zero by construction — a null SIGNAL, not a null result;
     //   (3) the FUSION   axis  — `ProvenanceWeights::weight_header` attaches the per-`Block`
-    //       multiplier that `fuse_rrf_weighted` consumes. It changes a *ranking fusion*, not a
+    //       multiplier that `fuse_rrf_weighted` consumes (and `ground_weighted` rescales it per
+    //       node from that node's own incident edges). It changes a *ranking fusion*, not a
     //       link-prediction score, so it has NO MRR delta to print here and is deliberately not
     //       faked into one; `tests/grounding.rs` proves that loop end-to-end instead.
     // Both printed deltas are INDICATIVE work-box numbers. The bar is pre-registered and the honest
