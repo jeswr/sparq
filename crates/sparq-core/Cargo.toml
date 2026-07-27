@@ -35,8 +35,12 @@ mmap = ["dep:memmap2"]
 # [OPUS-4.8] sq-wihld (survey §A1): OPT-IN per-block Bloom filters on the high-NDV
 # (subject/object) leading column of a BLOCK-COMPRESSED permutation. The directory's
 # first-triple already gives an implicit min/max zone map that prunes RANGE scans, but for
-# an EQUALITY-BOUND leading column whose id overlaps several blocks' [min,max] spans, only a
-# Bloom filter can skip the blocks that cannot contain it. OFF by default so the lean default
+# an EQUALITY-BOUND leading column the zone map still leaves a candidate block that must be
+# decoded just to find it holds no matching row; the Bloom filter drops that decode when the id
+# is provably absent. ([SONNET-4.6] sq-v8ixk measured the block-SKIP opportunity, on synthetic
+# high-NDV columns, to be on ABSENT-key lookups: a PRESENT id is already zone-map-pruned to ~one
+# block. Skip counts only — no latency result is claimed. See `compress::block_bloom`.)
+# OFF by default so the lean default
 # / wasm build pays no filter bytes; it is a pure-std bitset (NO new dependency). Zero false
 # negatives by construction, so results are identical to the feature-off path — only fewer
 # blocks decoded. The filter is in-RAM only and never serialised, so the on-disk SPQCPRM1

@@ -52,8 +52,10 @@ assert_eq!(count, 1);
   a whole batch with `apply_delta` — in place, with an optional write-ahead log.
 - **Out-of-core store** — query datasets larger than RAM from a memory-mapped on-disk store,
   with optional block compression and near-zero resident heap. The opt-in `block-bloom` feature
-  adds per-block Bloom filters on high-NDV columns to skip blocks on equality-bound point lookups
-  (result-equivalent, never serialised).
+  adds per-block Bloom filters on high-NDV columns to skip the block decode on equality-bound
+  point lookups for an id that is ABSENT from the permutation (result-equivalent, never
+  serialised; for a PRESENT id the zone map already narrows the candidate window to about one
+  block, so there is little left to skip).
 - **Numeric fast path** — a per-term cache makes numeric FILTER / ORDER BY / MIN-MAX an O(1)
   array index. It is dense on purpose; the opt-in `sparse-numerics` feature trades that index
   for a map (smaller on string-heavy data, slower to probe) and is **measured not worth

@@ -666,16 +666,25 @@ cargo build -p sparq-cli --features serialize-rdf
   per-scan decode for ~2.5× more triples per byte of RAM (browser target).
 - **`block-bloom` (opt-in, OFF by default).** A block-compressed permutation already has an
   implicit min/max zone map (the directory's first-triple) that prunes RANGE scans, but for an
-  EQUALITY-BOUND leading column (a point/prefix lookup on a constant subject/object) whose id
-  overlaps several blocks' `[min,max]` spans on a high-NDV column, only a per-block Bloom filter
-  can skip the blocks that cannot contain it. The `block-bloom` feature builds a tiny per-block
-  Bloom bitset over each block's distinct leading ids (built only for high-NDV columns past a
-  density gate; pure-std, no new dep) and probes it in `range` before decoding a block. Zero
-  false negatives by construction, so results are IDENTICAL to the feature-off path — only fewer
-  blocks decode. The filter is in-RAM/build-time only: it is NEVER written to the on-disk
-  `SPQCPRM1` format, so a perm built with the feature on persists byte-identically to one built
-  with it off, and a memory-mapped perm carries no filter. Whether the hypothesised block-skip
-  win materialises is to be confirmed on the canonical perf host (no number is asserted here).
+  EQUALITY-BOUND leading column (a point/prefix lookup on a constant subject/object) the zone map
+  still leaves a candidate block that must be decoded just to discover it holds no matching row.
+  The `block-bloom` feature builds a tiny per-block Bloom bitset over each block's distinct
+  leading ids (built only for high-NDV columns past a density gate; pure-std, no new dep) and
+  probes it in `range` before decoding a block. Zero false negatives by construction, so results
+  are IDENTICAL to the feature-off path — only fewer blocks decode. The filter is in-RAM/build-time
+  only: it is NEVER written to the on-disk `SPQCPRM1` format, so a perm built with the feature on
+  persists byte-identically to one built with it off, and a memory-mapped perm carries no filter.
+  **The measured skip opportunity is on ABSENT-key lookups.** On the SYNTHETIC high-NDV columns
+  the sq-v8ixk harness generates (`measure_bloom_*` in `compress.rs`), the original "the id
+  overlaps several blocks" rationale does not show up: because those columns are high-NDV, a
+  PRESENT id's rows are contiguous and the zone map already narrows the candidate window to about
+  one block, so there is little left for the filter to skip. The larger skip opportunity is an
+  equality-bound id that is ABSENT from the permutation — a subject/object bound by an earlier
+  pattern with no rows here — where the candidate block can be dropped undecoded. Those are
+  block-SKIP COUNTS on a synthetic distribution: host-independent, but they establish no latency
+  result and do not settle the question for real workloads. Run the harness for figures; none is
+  asserted here, and the canonical run against a real dataset on the perf host is bead `sq-0g6g`
+  (PENDING).
 - **`elias-fano` (opt-in, OFF by default) — compressed-seek codecs, PROTOTYPE, not wired in.**
   `sparq-core = { …, features = ["elias-fano"] }` exposes `sparq_core::eliasfano` with
   `EliasFano` and `PartitionedEliasFano` (plus `EliasFanoIter` and

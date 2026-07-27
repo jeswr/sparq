@@ -320,6 +320,13 @@ measurements, unless a number is cited.
 - "Redundant remainder range check in `euclidean_division_var`" — intentional;
   in-code comment says the ACVM optimizer removes it when redundant and it is
   *required* for non-power-of-two divisors (`acir_context/mod.rs:~900-910`).
+  (Confirmed by `sq-jfkwk`, §10.7, with the mechanism corrected: for a
+  power-of-two divisor the duplicate checks land on the *same* witness and the
+  ACVM `redundant_range` optimizer deduplicates them.)
+- **Row 9's own sketch — "specialize the sign-bit split because the quotient is
+  0/1"** — rejected by `sq-jfkwk` (§10.7): the constant-`rhs` bound tightening
+  already makes the quotient range check 1 bit, so the specialized path is
+  opcode-for-opcode identical to HEAD. Do not re-derive it.
 - "AND/XOR outputs unconstrained vs `redundant_range` assumption is a bug" — it
   is a documented Barretenberg backend contract (issue #1439 +
   `redundant_range.rs:172` comment). A portability question, not a missed
@@ -442,10 +449,10 @@ edge sequences them (§10.4).
 | `sq-jthy1` | opus | `ssa/opt/checked_to_unchecked.rs` | elide overflow checks dominated by a later range check (#7161); Brillig failure-point semantics in scope |
 | `sq-m3l62` | opus | `ssa/opt/flatten_cfg/value_merger.rs` | ArrayGet through IfElse (#5501); conservative use/alias analysis; precedent PR #11512 |
 | `sq-seust` | sonnet | `ssa/ir/dfg/simplify.rs` | NOT canonicalization for IfElse merging; PARK with a findings note if measured neutral (PR #11580 upkeep landmine) |
-| `sq-jfkwk` | sonnet | findings first; `acir/acir_context/mod.rs` only on a win | comparison-lowering experiment; fail-closed on the #10159 witness-sharing landmine; null result acceptable |
-| `sq-felqr` | opus | design note on noir#4629 only | quadratic ACIR growth; NO implementation before upstream buy-in |
+| `sq-jfkwk` | sonnet | findings first; `acir/acir_context/mod.rs` only on a win | comparison-lowering experiment; fail-closed on the #10159 witness-sharing landmine; null result acceptable — **NULL RESULT returned, no PR proposed; bead still open, see §10.7** |
+| `sq-felqr` | opus | design note on noir#4629 only | quadratic ACIR growth; NO implementation before upstream buy-in — **design note DELIVERED, empirical half + live-thread check PENDING; bead still open, see §10.6** |
 | `sq-b0vpc` | sonnet | `noir_stdlib/src/collections/bounded_vec.nr` | only the TomAFrench capacity-assert slice of #5027 |
-| `sq-eesz3` | sonnet | none (findings-only) | #6624 / #6313 / #4972 measurement comments upstream |
+| `sq-eesz3` | sonnet | none (findings-only) | #6624 / #6313 / #4972 measurement comments upstream — **source analysis done, empirical half + live-thread checks PENDING; bead still open, see §10.5** |
 | `sq-jj3ne` | opus | new `ssa/ir/dfg/` range-analysis module + its two consumer passes | flagship v1; dep-gated on `sq-jthy1` + `sq-rxir8` (shared consumer files) and on the #12780/#12927 coordination pre-flight |
 | `sq-uuvac.2` | haiku | none (existing PR branches only) | shepherd the four open drafts: triage feedback (escalate substantive objections to an opus bead, never rebut directly), rebase on conflict, close sibling beads on merge, refresh the baseline on a new noir pin |
 
@@ -465,3 +472,99 @@ pass (`sq-rxir8`) — hence the `bd dep` edges: `sq-jthy1` blocks `sq-jj3ne` and
 `sq-rxir8` blocks `sq-jj3ne` (NON-parallel with either). All other beads run
 in parallel worktrees with zero textual conflict, and the one-optimization-
 per-PR rule (§6) keeps upstream review independence intact.
+
+### 10.5 `sq-eesz3` (row 12, investigation on-ramps) — outcome (2026-07-27)
+
+> 🤖 **SPARQ agent** [OPUS-5]. Full record:
+> `noir-investigation-on-ramps-upstream.md` (analysed against noir `e22cd89b`).
+
+Source-level analysis of all three items is complete; the **empirical half was not
+run** — the executing environment had no Rust toolchain, `nargo` or `bb`, so there
+are no opcode or gate numbers. Two of the three questions were nevertheless largely
+settled from the compiler source, and both settled *against* the issue's framing:
+
+| item | outcome | follow-up bead |
+|---|---|---|
+| #6624 negated jmpif for ACIR | the ACIR guard is load-bearing (`flatten_cfg` merge invariant, tests pin both sides); `Not` is a linear ACIR op and flattening re-creates one anyway ⇒ direct win predicted ≈ 0 | none |
+| #6313 inverse-pair stdlib tests | the recomposition half is *predicted* free — linear Horner recomposition, **not measured**, and §4.2 can still overturn it; the decomposition half is a *constraint* (`ToRadix` is `has_side_effects`) and must not be elided ⇒ the requested test needs re-scoping from "optimizes away" to an opcode-count equality | undecided — deferred until §4.2 is measured |
+| #4972 predicated `array_get` | the index-offset scheme appears **already implemented** (PR #4971 lineage); only the non-simple-array masking multiplication remains | none |
+
+No win is demonstrated **from the source**, so no implementation bead is spawned
+for #6624 or #4972; the #6313 spawn/no-spawn call is **deferred**, not made,
+because §4.2 is the thing that decides it. `sq-eesz3` therefore stays **open and
+blocked on the empirical half** — its stated deliverable (measurement comments
+upstream) is not yet met, so the bead's exit condition is *not* applied here.
+Three upstream comments are **drafted but not posted**, pending @jeswr review per
+`AGENTS.md` § *Upstream contributions*, and each must first be re-checked against
+its live issue thread (none of the three issue bodies was read); the #4972 draft
+additionally depends on an unverified inference about the issue's lineage. The
+remaining measurement protocol is specified command-by-command in §4 of the record
+and needs a box with the noir toolchain.
+
+### 10.6 `sq-felqr` (row 10, quadratic ACIR expression growth, noir#4629) — design note (2026-07-27)
+
+> 🤖 **SPARQ agent** [OPUS-5]. Full record:
+> `noir-acir-expression-growth-4629.md` (analysed against noir `e22cd89b`,
+> workspace version `1.0.0-beta.25`).
+
+The design note is delivered; the bead stays **open**, blocked on the same
+empirical half as `sq-eesz3` (§10.5) — the box had no rustc `1.89.0` (the
+workspace pin; only `1.88.0` installed, `rustup` read-only), hence no `nargo`
+and no `bb` — and on its own stated exit condition, upstream buy-in on the
+issue thread. **No implementation was started and none is proposed**, per the
+§10.3 spec for this bead. The #4629 body and thread were **not read** (no
+outbound page fetch in that run), so the ask is still the §4.1 paraphrase.
+
+What the source analysis establishes:
+
+| finding | consequence |
+|---|---|
+| ACIR-gen's `add_var` concatenates expressions with no width bound, and *every* cut site is a consumer that needs a `Witness` rather than an `Expression` — never a size heuristic | the growth is by construction, not a bug in a pass |
+| all cut sites funnel through `get_or_create_witness_var`, which rewrites the var in place; `as_witness` is exactly that one call and nothing else | the automation mechanism already exists — the risk is entirely in *where to place the call*, not in plumbing |
+| unsigned accumulation is already cut once per iteration by the overflow `RangeCheck` | "quadratic in loops" is narrower than it sounds; the quadratic-by-construction shapes are repeated `assert_eq` on a growing accumulator, brillig-call inputs, and the compile-time/peak-memory cost of building the expression at all |
+| the ACVM `CommonSubexpressionOptimizer` postdates the issue: its CSAT intermediate cache is circuit-global, and `MergeExpressionsOptimizer` refunds any intermediate used in only two `AssertZero` opcodes | much of the circuit-size half may already be absorbed — **and an over-eager auto-cut is partially self-healing**, which is the safety argument any heuristic needs |
+
+The reframing the record recommends taking upstream (after measurement) is
+that #4629 is plausibly **two** problems: a circuit-size one that ACVM may already
+handle, and a compile-time/peak-memory one that ACVM cannot touch by
+construction and that shares a root cause with #13046. The blocking first step
+is therefore not design but **re-running the issue's own reproducer at HEAD to
+confirm the bug still reproduces**; the full protocol is §7 of the record. One
+upstream comment is **drafted, not posted**, pending @jeswr review.
+
+### 10.7 `sq-jfkwk` (row 9, comparison lowering power-of-two split) — null result (2026-07-27)
+
+> 🤖 **SPARQ agent** [OPUS-5]. Full record:
+> `noir-comparison-lowering-10159.md` (analysed against noir `e22cd89b`,
+> workspace version `1.0.0-beta.25`).
+
+The experiment was run at source level and **the sketch is rejected on the
+evidence**. No upstream PR is proposed for it and `acir/acir_context/mod.rs` was
+not touched, per the §10.3 fail-closed instruction. The bead stays **open**,
+blocked on the same empirical half as `sq-eesz3` (§10.5) and `sq-felqr` (§10.6) —
+the box had no rustc `1.89.0` (the workspace pin; only `1.88.0` installed,
+`rustup` read-only), hence no `nargo` and no `bb` — and, for the witness-sharing
+question, on reading the #10159 thread, which was not fetchable in that run.
+
+The evidence base is stronger than the sibling records' because upstream commits
+the *expected ACIR* for these lowerings as snapshot tests, so the opcode sequence
+is readable without building:
+
+| finding | consequence |
+|---|---|
+| for constant `rhs`, `euclidean_division_var` already tightens `max_q_bits` to `bit_size - rhs_bits + 1`, which for `more_than_eq_var` is exactly **1** | the "quotient range check" the sketch removes is already a 1-bit range check — i.e. it already *is* the boolean constraint the sketch would emit for `b` |
+| the hint's own output range checks and the explicit ones are identical checks on identical witnesses, deduplicated by the ACVM `redundant_range` optimizer | only one range check per output survives; the §7 "explicitly rejected" entry for the redundant remainder check is confirmed, with the mechanism corrected |
+| for a power-of-two divisor the `r < rhs` bound constraint degenerates (padding constant `0`) to the *same* range check on the *same* witness, and is deduplicated too | nothing is left to save |
+| upstream's committed `lt_u8` snapshot shows the whole comparison as: Brillig hint + `RANGE(q,1)` + `RANGE(r,8)` + one `AssertZero` | the proposed specialization is **opcode-for-opcode identical** to HEAD ⇒ it cannot win gates and can only lose them |
+| `less_than_var` returns the *expression* `1 − q`, never a witness, so `a<b`, `a>=b` and `!(a<b)` all share one hint and one pair of range checks, with the negation free | a derived mechanism for the #10159 regression ("stopped sharing a witness"), and the specific risk any future work in that function must be measured against — **hypothesis, the PR thread was not read** |
+
+One **adjacent candidate** was found and is deliberately left unimplemented:
+`bound_constraint_with_offset`'s constant-`rhs` fast path is gated on
+`try_into_u128()`, which fails at exactly `2^128`, so 128-bit truncations and
+`u128` comparisons fall to the general path and pay a redundant second 128-bit
+range check on a fresh witness (visible in the committed
+`truncate_field_to_128_bits` snapshot). It sits in a different function from the
+comparison lowering and does not engage the witness-sharing risk, but it is a
+constraint *removal* and therefore under-constraining-sensitive; it must clear the
+§10.2 acceptance protocol and the record's §7 measurement protocol before any PR.
+One upstream comment is **drafted, not posted**, pending @jeswr review.
