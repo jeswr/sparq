@@ -2214,6 +2214,26 @@ mod kani_proofs {
         }
     }
 
+    /// Retires a `Vec<Row>` WITHOUT running its element-wise drop glue.
+    ///
+    /// [`Row`] is a `SmallVec`, so `Vec<Row>`'s `drop_in_place` is a loop over up to
+    /// [`MAX_OUT`] = 9 elements — and CBMC cannot see that the length is small, so under a
+    /// single global `--unwind` bound that teardown loop, not the merge kernel, is what
+    /// sets the bound EVERY loop in the harness is expanded to (including the SmallVec
+    /// clone/grow machinery inside [`merge_join`], whose path count grows exponentially in
+    /// the bound). Forgetting the buffers removes the teardown loops entirely, which lets
+    /// the bound fall to the merge kernel's own worst case and is what brings each harness
+    /// back inside the lane's per-harness solver budget.
+    ///
+    /// Sound for this suite: an in-domain [`Row`] holds at most 3 ids, so it never spills
+    /// out of its inline `SmallVec` buffer and has no heap allocation to release; the only
+    /// leaked allocation is the `Vec`'s own spine, in a model-checking harness that exits
+    /// immediately afterwards. Kani does not check for leaks, and nothing about the
+    /// equivalence property being asserted depends on the teardown running.
+    fn forget_relation(rows: Vec<Row>) {
+        core::mem::forget(rows);
+    }
+
     /// The obviously-correct reference: scan every (left, right) pair, emit the combined
     /// row for every key-equal pair that passes the `extra_shared` agreement filter —
     /// SPARQL equi-join semantics stated directly, with no merge/ordering cleverness.
@@ -2247,7 +2267,7 @@ mod kani_proofs {
     /// key deliberately lives at column 1 (payload at 0) so the `lk`/`rk` indexing is
     /// asymmetric, and `right_only = [0]` appends the right payload to each match.
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(8)]
     fn merge_join_equals_nested_loop_reference() {
         let lrows = any_sorted_rows(0);
         let rrows = any_sorted_rows(1);
@@ -2256,13 +2276,15 @@ mod kani_proofs {
         merge_join(left, 0, right, 1, &[], &[0], &NoBudget, &mut out);
         let reference = nested_loop_join(left, 0, right, 1, &[], &[0]);
         assert_same_sequence(&out, &reference, "merge_join vs the nested-loop reference");
+        forget_relation(out);
+        forget_relation(reference);
     }
 
     /// PROVED (bounded): same equivalence with one `extra_shared` pair — the left payload
     /// (col 1) must agree with the right payload (col 0) — so the repeated-shared-variable
     /// agreement filter inside the key-group emit loop is inside the proved domain.
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(8)]
     fn merge_join_extra_shared_equals_nested_loop_reference() {
         let lrows = any_sorted_rows(0);
         let rrows = any_sorted_rows(1);
@@ -2271,6 +2293,8 @@ mod kani_proofs {
         merge_join(left, 0, right, 1, &[(1, 0)], &[0], &NoBudget, &mut out);
         let reference = nested_loop_join(left, 0, right, 1, &[(1, 0)], &[0]);
         assert_same_sequence(&out, &reference, "merge_join with extra_shared vs the reference");
+        forget_relation(out);
+        forget_relation(reference);
     }
 
     /// A concrete two-column row, for the merge-blocking concrete-witness leg.
@@ -2311,7 +2335,7 @@ mod kani_proofs {
     ///     verdict, so it cannot gate; leg (b) is the gate, and an unsatisfied cover in
     ///     the nightly report is the drift signal that the symbolic domain was re-scoped.
     #[kani::proof]
-    #[kani::unwind(12)]
+    #[kani::unwind(8)]
     fn domain_merge_join_dup_key_multimatch_survives_the_bound() {
         // (a) Exact-domain pinning over the constants.
         assert!(MAX_ROWS >= 3, "domain must admit a dup-key pair plus a second key group");
@@ -2362,5 +2386,11 @@ mod kani_proofs {
                 && sym_left[0][0] == sym_right[0][1]
                 && sym_left[2][0] != sym_left[0][0]
         );
+
+        forget_relation(left);
+        forget_relation(right);
+        forget_relation(plain);
+        forget_relation(filtered);
+        forget_relation(expected);
     }
 }
