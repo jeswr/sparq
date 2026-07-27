@@ -9,7 +9,8 @@
 //!    shells out to `rustc` to COMPILE the emitted module (under `-D warnings`)
 //!    together with a harness that runs it, and the harness proves the
 //!    `sh:closed` loader rejects a predicate outside the whitelist, alongside
-//!    the cardinality and datatype checks.
+//!    the cardinality, datatype, `sh:class` membership and XSD value-space
+//!    checks.
 //!
 //! Compiling from a test rather than trusting a string comparison is the point:
 //! a codegen bug that produces plausible-looking but unparsable Rust would pass
@@ -150,7 +151,11 @@ fn generated_code_compiles_and_the_closed_loader_rejects_an_extra_predicate() {
         "rejects-wrong-datatype",
         "rejects-non-literal-scalar",
         "rejects-literal-reference",
+        "rejects-unclassified-reference",
+        "requires-subclass-entailment",
         "accepts-exact-datatype",
+        "keeps-integers-beyond-i64",
+        "keeps-decimal-precision",
         "rejects-missing-required",
         "rejects-too-many",
         "rejects-nested-violation",
@@ -176,7 +181,10 @@ fn numbered(path: &Path) -> String {
 /// `ValueSource` over a triple list and exercises each loader guarantee.
 const HARNESS: &str = r##"mod generated;
 
-use generated::{AddressShape, LoadError, OrganizationRef, PersonRef, PersonShape, Value, ValueSource};
+use generated::{
+    AddressShape, Decimal, Integer, LoadError, OrganizationRef, PersonRef, PersonShape, Value,
+    ValueSource,
+};
 
 struct Fixture(Vec<(String, String, Value)>);
 
@@ -191,12 +199,48 @@ impl ValueSource for Fixture {
             .map(|t| t.2.clone())
             .collect()
     }
+    /// The entailment the trait specifies: `rdf:type/rdfs:subClassOf*`, walked
+    /// transitively over the fixture's own triples. Nothing else is entailed.
+    fn is_instance_of(&self, node: &str, class: &str) -> bool {
+        let named = |source: &Self, subject: &str, predicate: &str| -> Vec<String> {
+            source
+                .values(subject, predicate)
+                .into_iter()
+                .filter_map(|v| match v {
+                    Value::NamedNode(iri) => Some(iri),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut frontier = named(self, node, RDF_TYPE);
+        let mut seen: Vec<String> = Vec::new();
+        while let Some(current) = frontier.pop() {
+            if current == class {
+                return true;
+            }
+            if seen.contains(&current) {
+                continue;
+            }
+            frontier.extend(named(self, &current, SUB_CLASS_OF));
+            seen.push(current);
+        }
+        false
+    }
 }
 
 const ALICE: &str = "http://example.org/alice";
 const ADDR: &str = "http://example.org/addr1";
 const AGE: &str = "http://example.org/age";
 const CREATED_AT: &str = "http://example.org/createdAt";
+const SCORE: &str = "http://example.org/score";
+const EMPLOYER: &str = "http://example.org/employer";
+const ACME: &str = "http://example.org/acme";
+const BOB: &str = "http://example.org/bob";
+const EMPLOYEE: &str = "http://example.org/Employee";
+const ORGANIZATION: &str = "http://example.org/Organization";
+const PERSON: &str = "http://example.org/Person";
+const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+const SUB_CLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
 const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 
 /// A literal of an XSD datatype, named by its local part.
@@ -219,13 +263,23 @@ fn base() -> Vec<(&'static str, &'static str, Value)> {
         (ALICE, CREATED_AT, lit("2026-07-27T10:30:00Z", "dateTime")),
         (ALICE, "http://example.org/nickname", lit("Ali", "string")),
         (ALICE, "http://example.org/nickname", lit("Al", "string")),
-        (ALICE, "http://example.org/score", lit("1.5", "decimal")),
-        (ALICE, "http://example.org/score", lit("2", "decimal")),
-        (ALICE, "http://example.org/employer", iri("http://example.org/acme")),
-        (ALICE, "http://example.org/knows", iri("http://example.org/bob")),
+        (ALICE, SCORE, lit("1.5", "decimal")),
+        (ALICE, SCORE, lit("2", "decimal")),
+        (ALICE, EMPLOYER, iri(ACME)),
+        (ALICE, "http://example.org/knows", iri(BOB)),
         (ALICE, "http://example.org/address", iri(ADDR)),
         (ADDR, "http://example.org/city", lit("Dublin", "string")),
+        // The class memberships sh:class requires: acme directly, bob only
+        // through the subclass step.
+        (ACME, RDF_TYPE, iri(ORGANIZATION)),
+        (BOB, RDF_TYPE, iri(EMPLOYEE)),
+        (EMPLOYEE, SUB_CLASS_OF, iri(PERSON)),
     ]
+}
+
+/// The base fixture with the triples matching `drop` removed.
+fn without(drop: impl Fn(&(&'static str, &'static str, Value)) -> bool) -> Vec<(&'static str, &'static str, Value)> {
+    base().into_iter().filter(|t| !drop(t)).collect()
 }
 
 /// The base fixture with Alice's `ex:age` — an `xsd:integer` field — replaced.
@@ -292,15 +346,20 @@ fn main() {
     assert_eq!(person.iri, ALICE);
     assert_eq!(person.name, "Alice");
     assert_eq!(person.created_at, "2026-07-27T10:30:00Z");
-    assert_eq!(person.age, Some(42));
+    assert_eq!(person.age, Integer::parse("42"));
     assert_eq!(person.active, None);
     assert_eq!(person.height, None);
     assert_eq!(person.homepage, None);
     assert_eq!(person.pronouns, None);
     assert_eq!(person.nickname, vec!["Ali".to_string(), "Al".to_string()]);
-    assert_eq!(person.score, vec![1.5, 2.0]);
-    assert_eq!(person.employer, OrganizationRef("http://example.org/acme".to_string()));
-    assert_eq!(person.knows, vec![PersonRef("http://example.org/bob".to_string())]);
+    // "2" is the same decimal as "2.0", and canonicalisation says so.
+    assert_eq!(
+        person.score.iter().map(|d| d.as_str()).collect::<Vec<_>>(),
+        ["1.5", "2.0"]
+    );
+    assert_eq!(person.employer, OrganizationRef(ACME.to_string()));
+    // Bob is a Person only through ex:Employee rdfs:subClassOf ex:Person.
+    assert_eq!(person.knows, vec![PersonRef(BOB.to_string())]);
     assert_eq!(person.address.city, "Dublin");
     assert_eq!(person.address.iri, ADDR);
     check("loads-conforming");
@@ -369,13 +428,7 @@ fn main() {
     //     spells one is not a value of it.
     let literal_ref = base()
         .into_iter()
-        .map(|t| {
-            if t.1 == "http://example.org/employer" {
-                (t.0, t.1, lit("http://example.org/acme", "string"))
-            } else {
-                t
-            }
-        })
+        .map(|t| if t.1 == EMPLOYER { (t.0, t.1, lit(ACME, "string")) } else { t })
         .collect();
     match PersonShape::load(&source(literal_ref), ALICE) {
         Err(LoadError::TermType { field, expected, .. }) => {
@@ -386,12 +439,97 @@ fn main() {
     }
     check("rejects-literal-reference");
 
+    // 4f. THE sh:class OBLIGATION: being an IRI is not being an INSTANCE. An
+    //     unrelated resource — a perfectly good IRI, just not an
+    //     ex:Organization — must not load as an OrganizationRef, or the newtype
+    //     would be a label rather than a constraint.
+    let unclassified = base()
+        .into_iter()
+        .map(|t| {
+            if t.1 == EMPLOYER { (t.0, t.1, iri("http://example.org/dublin")) } else { t }
+        })
+        .collect();
+    match PersonShape::load(&source(unclassified), ALICE) {
+        Err(LoadError::ClassMembership { type_name, field, class, node }) => {
+            assert_eq!(type_name, "PersonShape");
+            assert_eq!(field, "employer");
+            assert_eq!(class, ORGANIZATION);
+            assert_eq!(node, "http://example.org/dublin");
+        }
+        other => panic!("an unrelated IRI loaded as a typed reference: {:?}", other),
+    }
+    check("rejects-unclassified-reference");
+
+    // 4g. ...and the membership test is the SPECIFIED entailment, not just a
+    //     direct rdf:type lookup: bob conforms in `base()` only because
+    //     ex:Employee rdfs:subClassOf ex:Person. Drop that one triple and the
+    //     very same IRI must stop conforming — which is what makes 4f a real
+    //     check rather than a checker that rejects everything unfamiliar.
+    match PersonShape::load(&source(without(|t| t.0 == EMPLOYEE)), ALICE) {
+        Err(LoadError::ClassMembership { field, class, node, .. }) => {
+            assert_eq!(field, "knows");
+            assert_eq!(class, PERSON);
+            assert_eq!(node, BOB);
+        }
+        other => panic!("membership ignored the subclass step: {:?}", other),
+    }
+    check("requires-subclass-entailment");
+
     // 4e. The conforming value of the very same field still loads, so the three
     //     rejections above are not a checker that rejects everything.
     let ok = PersonShape::load(&source(with_age(lit("42", "integer"))), ALICE)
         .expect("a correctly typed xsd:integer must still load");
-    assert_eq!(ok.age, Some(42));
+    assert_eq!(ok.age, Integer::parse("42"));
     check("accepts-exact-datatype");
+
+    // 4h. THE VALUE-SPACE OBLIGATION: xsd:integer is UNBOUNDED, so a value
+    //     beyond i64 is conforming and must load exactly, not be reported as an
+    //     invalid integer. Narrowing stays available, and stays explicit.
+    let huge = "99999999999999999999999999999999";
+    let loaded = PersonShape::load(&source(with_age(lit(huge, "integer"))), ALICE)
+        .expect("an xsd:integer beyond i64 is still an xsd:integer");
+    let loaded = loaded.age.expect("the field is present");
+    assert_eq!(loaded.as_str(), huge);
+    assert_eq!(loaded.to_i64(), None, "narrowing must be visibly fallible");
+    // ...and canonicalisation is by VALUE: 007, +7 and 7 are one integer.
+    assert_eq!(Integer::parse("007"), Integer::parse("7"));
+    assert_eq!(Integer::parse("+7"), Integer::parse("7"));
+    assert_eq!(Integer::parse("-0"), Integer::parse("0"));
+    assert_eq!(Integer::parse("12.0"), None);
+    check("keeps-integers-beyond-i64");
+
+    // 4i. The same for xsd:decimal, which is arbitrary PRECISION as well as
+    //     unbounded. Two values that f64 cannot tell apart must stay distinct,
+    //     and a magnitude past f64's range must not silently become INF — which
+    //     is not an xsd:decimal value at all.
+    let near = ["0.1000000000000000000000001", "0.1000000000000000000000002"];
+    let big = format!("1{}", "0".repeat(400));
+    let mut scores = without(|t| t.1 == SCORE);
+    for lexical in [near[0], near[1]] {
+        scores.push((ALICE, SCORE, lit(lexical, "decimal")));
+    }
+    let decimals = PersonShape::load(&source(scores.clone()), ALICE)
+        .expect("both decimals conform")
+        .score;
+    assert_eq!(decimals.len(), 2);
+    assert_eq!(decimals[0].as_str(), near[0]);
+    assert_ne!(decimals[0], decimals[1], "f64 rounding collapsed two values");
+    assert_eq!(decimals[0].to_f64(), decimals[1].to_f64(), "the f64s DO collide");
+
+    let mut scores = without(|t| t.1 == SCORE);
+    scores.push((ALICE, SCORE, lit(&big, "decimal")));
+    let loaded = PersonShape::load(&source(scores), ALICE)
+        .expect("a large xsd:decimal conforms")
+        .score;
+    assert_eq!(loaded[0].as_str(), format!("{}.0", big));
+    assert!(loaded[0].to_f64().is_infinite(), "the f64 view DOES overflow");
+    // Canonicalisation is by value here too.
+    assert_eq!(Decimal::parse("1.50"), Decimal::parse("1.5"));
+    assert_eq!(Decimal::parse("2"), Decimal::parse("2.0"));
+    assert_eq!(Decimal::parse("-0.0"), Decimal::parse("0.0"));
+    assert_eq!(Decimal::parse("1e3"), None, "an exponent is xsd:double, not decimal");
+    assert_eq!(Decimal::parse("INF"), None);
+    check("keeps-decimal-precision");
 
     // 5. A missing sh:minCount 1 / sh:maxCount 1 value.
     let missing = base()

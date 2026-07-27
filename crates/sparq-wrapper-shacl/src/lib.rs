@@ -24,7 +24,7 @@
 //! | `sh:maxCount 1` with `sh:minCount >= 1` | `T` |
 //! | any other cardinality | `Vec<T>`, bounds checked on load |
 //! | `sh:datatype` | a checked scalar ([`ScalarType`]) |
-//! | `sh:class` | a typed reference newtype ([`RustReference`]) |
+//! | `sh:class` | a typed reference newtype ([`RustReference`]), membership checked on load |
 //! | `sh:node` | a nested generated struct (boxed) |
 //! | `sh:closed true` | a static predicate whitelist the loader enforces |
 //!
@@ -39,6 +39,22 @@
 //! literal of exactly the declared datatype *before* its lexical form is
 //! checked, so neither an IRI nor an `xsd:string` literal spelling `42`
 //! satisfies `sh:datatype xsd:integer`.
+//!
+//! The trait's third method, `is_instance_of`, is what makes `sh:class` a
+//! constraint rather than a label: the loader asks the source whether the value
+//! node is a SHACL instance of the class (`rdf:type/rdfs:subClassOf*`) and
+//! rejects it otherwise. The source owns that entailment, so a `sh:class` field
+//! is exactly as sound as the implementation supplied.
+//!
+//! # Numbers are exact
+//!
+//! `xsd:integer` and `xsd:decimal` map to generated arbitrary-precision types
+//! (`Integer`, `Decimal`) holding canonical lexical forms, not to `i64`/`f64`.
+//! Both XSD value spaces are unbounded — `i64` would reject conforming values,
+//! and `f64` would round distinct decimals together and overflow large ones to
+//! `INF`, which is not an `xsd:decimal` value. Narrowing stays available and
+//! explicit (`Integer::to_i64`, `Decimal::to_f64`). `xsd:double` does map to
+//! `f64`, because there the two value spaces are the same one.
 //!
 //! # Example
 //!

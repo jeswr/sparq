@@ -7,10 +7,10 @@
 //! ## What the emitted module depends on
 //!
 //! Nothing. The generated source is `std`-only: it declares its own
-//! `ValueSource` trait, its own `LoadError`, and its own lexical checkers, so it
-//! compiles standalone with `rustc` and a consumer can adapt any RDF source to
-//! it (a `sparq-wrapper` focus, a `sparq-core` graph, a fixture) by
-//! implementing two methods.
+//! `ValueSource` trait, its own `LoadError`, its own exact numeric types, and
+//! its own lexical checkers, so it compiles standalone with `rustc` and a
+//! consumer can adapt any RDF source to it (a `sparq-wrapper` focus, a
+//! `sparq-core` graph, a fixture) by implementing the `ValueSource` trait.
 //!
 //! Write the output to its own file and declare it with `mod` — it opens with a
 //! module-level `#![allow(dead_code)]`, so `include!`ing it mid-file will not
@@ -31,6 +31,11 @@ pub fn emit(model: &RustModel) -> String {
         let _ = write!(
             out,
             "\n/// A typed reference to the IRI of an instance of `<{}>`.\n\
+             ///\n\
+             /// Constructing one through a generated `load` checks membership —\n\
+             /// not just that the term is an IRI — via\n\
+             /// [`ValueSource::is_instance_of`]. Constructing one directly\n\
+             /// asserts membership without checking it.\n\
              #[derive(Debug, Clone, PartialEq, Eq, Hash)]\n\
              pub struct {}(pub String);\n\
              \n\
@@ -101,8 +106,8 @@ fn emit_type(out: &mut String, ty: &RustType) {
 
     let _ = writeln!(
         out,
-        "\n    /// Loads `subject` from `source`, checking every cardinality and\n    \
-         /// datatype the shape declares.\n    \
+        "\n    /// Loads `subject` from `source`, checking every cardinality,\n    \
+         /// datatype and `sh:class` membership the shape declares.\n    \
          ///\n    \
          /// # Errors\n    \
          ///\n    \
@@ -161,6 +166,10 @@ fn field_type(field: &RustField) -> String {
 /// before it looks at any lexical form: `sh:datatype xsd:integer` constrains the
 /// term, so an IRI spelled `42` and an `xsd:string` literal `"42"` must both be
 /// rejected even though their lexical forms parse.
+///
+/// A `sh:class` arm then checks CLASS MEMBERSHIP, because that — not IRI-ness —
+/// is what `sh:class` requires of a value node. The newtype records the
+/// constraint; only the `is_instance_of` call enforces it.
 fn convert(type_name: &str, field: &RustField) -> String {
     match &field.value {
         ValueType::Scalar(scalar) => {
@@ -184,9 +193,16 @@ fn convert(type_name: &str, field: &RustField) -> String {
             )
         }
         ValueType::Reference { name, .. } => format!(
-            "match into_iri(raw) {{ Ok(iri) => {}(iri), \
+            "match into_iri(raw) {{ \
+             Ok(iri) => if source.is_instance_of(&iri, {}::CLASS) {{ {}(iri) }} else {{ \
+             return Err(LoadError::ClassMembership {{ type_name: {}, field: {}, \
+             class: {}::CLASS, node: iri }}) }}, \
              Err(found) => return Err(LoadError::TermType {{ type_name: {}, field: {}, \
              expected: \"an IRI\", found }}) }}",
+            name,
+            name,
+            quote(type_name),
+            quote(&field.name),
             name,
             quote(type_name),
             quote(&field.name),
@@ -394,6 +410,20 @@ pub trait ValueSource {
     fn predicates(&self, subject: &str) -> Vec<String>;
     /// Every object of `(subject, predicate)`, as RDF terms.
     fn values(&self, subject: &str, predicate: &str) -> Vec<Value>;
+    /// Whether `node` is a SHACL instance of `class` — the `sh:class` test.
+    ///
+    /// The required semantics are SHACL's: answer `true` exactly when the data
+    /// graph contains `node rdf:type/rdfs:subClassOf* class`, i.e. an
+    /// `rdf:type` reached directly OR through any number of `rdfs:subClassOf`
+    /// steps. Nothing else is entailed — this is not full RDFS.
+    ///
+    /// The SOURCE owns the entailment because only it knows which graph is
+    /// being read and how much of the subclass closure it has materialised; the
+    /// loader never re-derives it. That makes this method load-bearing: a
+    /// `sh:class` field is exactly as sound as the implementation here, and one
+    /// that returns `true` unconditionally turns every typed reference back
+    /// into an unchecked IRI.
+    fn is_instance_of(&self, node: &str, class: &str) -> bool;
 }
 
 /// Why a subject did not satisfy the shape its generated type came from.
@@ -440,6 +470,18 @@ pub enum LoadError {
         /// The lexical form that failed the check.
         value: String,
     },
+    /// A `sh:class` value is an IRI, but not a SHACL instance of the class the
+    /// shape declares — as `ValueSource::is_instance_of` decides.
+    ClassMembership {
+        /// The generated type being loaded.
+        type_name: &'static str,
+        /// The field being loaded.
+        field: &'static str,
+        /// The `sh:class` IRI the value must be an instance of.
+        class: &'static str,
+        /// The IRI that is not one.
+        node: String,
+    },
     /// The subject carries a predicate a `sh:closed true` shape does not allow.
     ClosedShape {
         /// The generated type being loaded.
@@ -471,6 +513,11 @@ impl fmt::Display for LoadError {
                 f,
                 "{}.{}: {:?} is not a valid <{}>",
                 type_name, field, value, datatype,
+            ),
+            Self::ClassMembership { type_name, field, class, node } => write!(
+                f,
+                "{}.{}: <{}> is not an instance of <{}>",
+                type_name, field, node, class,
             ),
             Self::ClosedShape { type_name, predicate } => write!(
                 f,
@@ -521,6 +568,147 @@ fn digits(value: &str) -> bool {
     !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit())
 }
 
+/// Splits the optional leading sign off a numeric lexical form.
+fn split_sign(lexical: &str) -> (bool, &str) {
+    match lexical.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, lexical.strip_prefix('+').unwrap_or(lexical)),
+    }
+}
+
+/// `value` without leading zeros, keeping one digit.
+fn trim_leading_zeros(value: &str) -> &str {
+    let trimmed = value.trim_start_matches('0');
+    if trimmed.is_empty() {
+        "0"
+    } else {
+        trimmed
+    }
+}
+
+/// Re-attaches a `-` unless `magnitude` is zero: XSD canonical form has exactly
+/// one spelling of zero, so `-0` and `0` must not compare unequal.
+fn with_sign(negative: bool, magnitude: String) -> String {
+    if negative && magnitude.bytes().any(|b| b.is_ascii_digit() && b != b'0') {
+        format!("-{}", magnitude)
+    } else {
+        magnitude
+    }
+}
+
+/// An `xsd:integer`: an ARBITRARY-PRECISION integer, held in the canonical
+/// lexical form of its value.
+///
+/// Deliberately not `i64`. The XSD integer value space is unbounded, so a
+/// machine integer would reject values the shape admits — a loader answering
+/// "not a valid xsd:integer" for a 30-digit literal would be wrong about the
+/// datatype, not strict about it. Narrowing is available, but only as an
+/// explicit, fallible step ([`Integer::to_i64`]).
+///
+/// Canonicalising on construction (no `+`, no leading zeros, one spelling of
+/// zero) is what makes the derived `PartialEq` VALUE equality: `007`, `+7` and
+/// `7` are one integer and compare equal.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Integer(String);
+
+impl Integer {
+    /// The value of an `xsd:integer` lexical form, or `None` when `lexical` is
+    /// not one.
+    pub fn parse(lexical: &str) -> Option<Self> {
+        let (negative, magnitude) = split_sign(lexical);
+        if !digits(magnitude) {
+            return None;
+        }
+        Some(Self(with_sign(
+            negative,
+            trim_leading_zeros(magnitude).to_string(),
+        )))
+    }
+
+    /// The canonical lexical form — the exact value, at any size.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The value as an `i64`, or `None` when it does not fit. Narrowing is the
+    /// caller's decision to make, and to handle.
+    pub fn to_i64(&self) -> Option<i64> {
+        self.0.parse().ok()
+    }
+}
+
+impl fmt::Display for Integer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// An `xsd:decimal`: an ARBITRARY-PRECISION exact decimal, held in the
+/// canonical lexical form of its value.
+///
+/// Deliberately not `f64`. The XSD decimal value space is exact and unbounded
+/// in both precision and magnitude, so binary floating point would round
+/// distinct values together and turn a large — but perfectly valid — decimal
+/// into `INF`, which is not an `xsd:decimal` value at all. Conversion is
+/// available, but only as an explicit, documented-lossy step
+/// ([`Decimal::to_f64`]).
+///
+/// Canonicalising on construction (required decimal point, one digit either
+/// side, no leading or trailing zeros beyond that, one spelling of zero) is
+/// what makes the derived `PartialEq` VALUE equality: `1.50` and `1.5` are one
+/// decimal and compare equal.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Decimal(String);
+
+impl Decimal {
+    /// The value of an `xsd:decimal` lexical form, or `None` when `lexical` is
+    /// not one — no exponent, and none of the `INF`/`NaN` spellings, which
+    /// belong to `xsd:double`.
+    pub fn parse(lexical: &str) -> Option<Self> {
+        let (negative, body) = split_sign(lexical);
+        let (integral, fraction) = match body.split_once('.') {
+            Some((integral, fraction)) => (integral, fraction),
+            None => (body, ""),
+        };
+        if integral.is_empty() && fraction.is_empty() {
+            return None;
+        }
+        if !integral.is_empty() && !digits(integral) {
+            return None;
+        }
+        if !fraction.is_empty() && !digits(fraction) {
+            return None;
+        }
+        let fraction = fraction.trim_end_matches('0');
+        Some(Self(with_sign(
+            negative,
+            format!(
+                "{}.{}",
+                trim_leading_zeros(integral),
+                if fraction.is_empty() { "0" } else { fraction },
+            ),
+        )))
+    }
+
+    /// The canonical lexical form — the exact value, at any precision.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The value as an `f64`. LOSSY: binary floating point cannot represent
+    /// every decimal exactly, and a magnitude beyond `f64`'s range becomes
+    /// infinite. [`Decimal::as_str`] is the exact value.
+    pub fn to_f64(&self) -> f64 {
+        self.0.parse().unwrap_or(f64::NAN)
+    }
+}
+
+impl fmt::Display for Decimal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 fn two_digits(value: &str, low: u32, high: u32) -> bool {
     value.len() == 2 && digits(value) && matches!(value.parse::<u32>(), Ok(n) if n >= low && n <= high)
 }
@@ -554,33 +742,14 @@ fn check_boolean(raw: &str) -> Option<bool> {
     }
 }
 
-fn check_integer(raw: &str) -> Option<i64> {
-    if !digits(raw.strip_prefix(['+', '-']).unwrap_or(raw)) {
-        return None;
-    }
-    raw.parse::<i64>().ok()
+fn check_integer(raw: &str) -> Option<Integer> {
+    Integer::parse(raw)
 }
 
 /// `xsd:decimal`: an optional sign then digits with an optional fraction — no
 /// exponent, and none of the `INF`/`NaN` spellings `f64::from_str` accepts.
-fn check_decimal(raw: &str) -> Option<f64> {
-    let body = raw.strip_prefix(['+', '-']).unwrap_or(raw);
-    let (integral, fraction) = match body.split_once('.') {
-        Some((integral, fraction)) => (integral, Some(fraction)),
-        None => (body, None),
-    };
-    if integral.is_empty() && fraction.map_or(true, str::is_empty) {
-        return None;
-    }
-    if !integral.is_empty() && !digits(integral) {
-        return None;
-    }
-    if let Some(fraction) = fraction {
-        if !fraction.is_empty() && !digits(fraction) {
-            return None;
-        }
-    }
-    raw.parse::<f64>().ok()
+fn check_decimal(raw: &str) -> Option<Decimal> {
+    Decimal::parse(raw)
 }
 
 /// `xsd:double`: `check_decimal`'s mantissa plus an optional exponent, and the
@@ -716,14 +885,51 @@ mod tests {
     #[test]
     fn cardinality_wraps_the_value_type() {
         let scalar = ValueType::Scalar(ScalarType::Integer);
-        assert_eq!(field_type(&field(scalar.clone(), Cardinality::Required)), "i64");
+        assert_eq!(
+            field_type(&field(scalar.clone(), Cardinality::Required)),
+            "Integer"
+        );
         assert_eq!(
             field_type(&field(scalar.clone(), Cardinality::Optional)),
-            "Option<i64>"
+            "Option<Integer>"
         );
         assert_eq!(
             field_type(&field(scalar, Cardinality::Many { min: 0, max: None })),
-            "Vec<i64>"
+            "Vec<Integer>"
+        );
+    }
+
+    /// The unbounded XSD value spaces do not lower to machine numbers — the
+    /// mapping this crate calls faithful would not be, if they did.
+    #[test]
+    fn unbounded_xsd_numbers_lower_to_exact_types_not_i64_or_f64() {
+        assert_eq!(ScalarType::Integer.rust_type(), "Integer");
+        assert_eq!(ScalarType::Decimal.rust_type(), "Decimal");
+        // xsd:double IS binary64, so f64 stays right for it.
+        assert_eq!(ScalarType::Double.rust_type(), "f64");
+        for exact in ["pub struct Integer(String)", "pub struct Decimal(String)"] {
+            assert!(PRELUDE.contains(exact), "prelude is missing {}", exact);
+        }
+    }
+
+    /// `sh:class` is a membership constraint, so the emitted loader must consult
+    /// the source — a newtype wrapping any IRI would enforce nothing.
+    #[test]
+    fn a_reference_field_checks_class_membership() {
+        let reference = ValueType::Reference {
+            class: "http://e.org/Org".to_string(),
+            name: "OrgRef".to_string(),
+        };
+        let source = convert("T", &field(reference, Cardinality::Required));
+        assert!(
+            source.contains("source.is_instance_of(&iri, OrgRef::CLASS)"),
+            "the reference arm does not check membership:\n{}",
+            source
+        );
+        assert!(
+            source.contains("LoadError::ClassMembership"),
+            "the reference arm has no membership failure:\n{}",
+            source
         );
     }
 

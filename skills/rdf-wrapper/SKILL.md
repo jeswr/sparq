@@ -300,4 +300,16 @@ Adapt an RDF source to the generated module by implementing its `ValueSource`
 trait over RDF **terms**, not lexical strings: `sh:datatype` constrains the
 term, so the loader requires a literal of exactly the declared datatype before
 it checks the lexical form, and an IRI spelling `42` does not satisfy
-`sh:datatype xsd:integer`.
+`sh:datatype xsd:integer`. The trait's third method, `is_instance_of`, is what
+makes `sh:class` a constraint rather than a label — the loader asks the source
+whether the value node is a SHACL instance of the class
+(`rdf:type/rdfs:subClassOf*`) and rejects it otherwise, so a `sh:class` field is
+exactly as sound as the entailment the implementation supplies.
+
+`xsd:integer` and `xsd:decimal` map to generated arbitrary-precision `Integer` /
+`Decimal` types holding canonical lexical forms, not `i64` / `f64`: both XSD
+value spaces are unbounded, so a machine number would reject conforming
+integers, round distinct decimals together, and overflow large ones to `INF` —
+not an `xsd:decimal` value at all. Narrowing stays available and explicit via
+`Integer::to_i64` (fallible) and `Decimal::to_f64` (lossy). `xsd:double` does
+map to `f64`, because there the two value spaces are the same one.

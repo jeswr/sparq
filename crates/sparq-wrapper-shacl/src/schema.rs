@@ -24,6 +24,11 @@ pub struct RustModel {
 /// `sh:class ex:Organization` lowers to a field of type `OrganizationRef`
 /// rather than a bare `String`, so a person's employer cannot be assigned a
 /// project's IRI without a cast.
+///
+/// The newtype is the static half. The dynamic half is in the generated loader,
+/// which asks the source whether the value node is a SHACL instance of `class`
+/// (`rdf:type/rdfs:subClassOf*`) and rejects it otherwise — being an IRI is not
+/// what `sh:class` requires.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RustReference {
     /// The generated Rust type name (PascalCase local name + `Ref`).
@@ -80,7 +85,8 @@ pub struct RustField {
 pub enum ValueType {
     /// `sh:datatype` — a checked scalar.
     Scalar(ScalarType),
-    /// `sh:class` — a typed reference to another resource's IRI.
+    /// `sh:class` — a typed reference to another resource's IRI, whose class
+    /// membership the generated loader checks.
     Reference {
         /// The `sh:class` IRI.
         class: String,
@@ -106,11 +112,19 @@ pub enum ScalarType {
     String,
     /// `xsd:boolean` → `bool`. Accepts `true`/`false`/`1`/`0`.
     Boolean,
-    /// `xsd:integer` → `i64`.
+    /// `xsd:integer` → the generated `Integer`: arbitrary precision, because the
+    /// XSD integer value space is unbounded and `i64` would reject values the
+    /// shape admits.
     Integer,
-    /// `xsd:decimal` → `f64`. No exponent, no `INF`/`NaN`.
+    /// `xsd:decimal` → the generated `Decimal`: arbitrary precision, because the
+    /// XSD decimal value space is exact and `f64` would round distinct values
+    /// together (and overflow large ones to `INF`, which is not a decimal at
+    /// all). No exponent, no `INF`/`NaN`.
     Decimal,
     /// `xsd:double` → `f64`. Exponent plus the `INF`/`-INF`/`NaN` spellings.
+    ///
+    /// Unlike the two above this IS faithful: the `xsd:double` value space is
+    /// the IEEE 754 binary64 one, which is exactly what `f64` holds.
     Double,
     /// `xsd:dateTime` → `String`, with its lexical form checked.
     DateTime,
@@ -148,8 +162,9 @@ impl ScalarType {
         match self {
             Self::String | Self::DateTime | Self::AnyUri => "String",
             Self::Boolean => "bool",
-            Self::Integer => "i64",
-            Self::Decimal | Self::Double => "f64",
+            Self::Integer => "Integer",
+            Self::Decimal => "Decimal",
+            Self::Double => "f64",
         }
     }
 
