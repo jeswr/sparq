@@ -957,6 +957,30 @@ class TestAuthorXorReviewer(unittest.TestCase):
         self.assertTrue(any("opener_verdicts=1" in ln for ln in b.logs), b.logs)
         self.assertTrue(any("self_reviews_refused=0" in ln for ln in b.logs), b.logs)
 
+    def test_every_opener_pass_is_also_COUNTABLE(self):
+        """The invariant that keeps the withdrawal branch unreachable for openers.
+
+        The withdrawal only runs when there is NO countable verdict. An opener pass is
+        appended to `countable` as well as `opener_passes`, so an opener-only PR always
+        has a verdict and can never reach the withdrawal. Mutating the withdrawal to key
+        on `opener_passes` is therefore an EQUIVALENT mutant (measured: M41 SURVIVED) —
+        but only while this subset invariant holds. If a future change makes an opener
+        pass non-countable, the widening becomes live and would strip review:pass off a
+        legitimate same-login agent review. Pin the invariant, not the symptom.
+        """
+        opener_only = pr(opener="jeswr", contributors=frozenset({"claude"}))
+        own = comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr", cid=7)
+        countable, self_passes, opener_passes = vb.classify_verdicts(
+            [own], HEAD, opener_only
+        )
+        self.assertEqual([v.comment_id for v in opener_passes], [7])
+        self.assertEqual(self_passes, [])
+        countable_ids = {v.comment_id for v in countable}
+        self.assertTrue(
+            {v.comment_id for v in opener_passes} <= countable_ids,
+            "an opener pass must remain COUNTABLE or the withdrawal becomes reachable",
+        )
+
     def test_the_opener_is_never_in_the_commit_contributor_set(self):
         contributors, complete = vb.commit_contributors(
             {"author": {"login": "jeswr"}, "commits": commits_connection(("claude",))}
