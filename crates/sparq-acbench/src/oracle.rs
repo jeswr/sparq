@@ -41,10 +41,11 @@ use crate::{Audience, Condition, Decision, Effect, IntentRow, Request};
 /// # The ACL-document model over the intent table
 /// The intent table is model-agnostic, so the ACL-document layout is re-derived here from
 /// exactly what [`crate::compile_wac`] emits — never by calling it:
-/// - a WAC-**expressible** row (`Effect::Allow` **and** `Condition::None`; anything else
-///   compiles to an empty policy) materializes an authorization in the ACL document of
-///   its own `resource_uri`. An inexpressible row therefore does **not** bring an ACL
-///   document into existence and so cannot shadow an ancestor either;
+/// - a WAC-**expressible** row (`Effect::Allow`, `Condition::None`, and not an unbounded
+///   `Audience::AllExcept(vec![])`; each of those three compiles to an empty policy)
+///   materializes an authorization in the ACL document of its own `resource_uri`. An
+///   inexpressible row therefore does **not** bring an ACL document into existence and so
+///   cannot shadow an ancestor either;
 /// - `Scope::Resource` → `acl:accessTo <resource_uri>`: applies to that resource only,
 ///   and only when that resource's *own* ACL document is the effective one;
 /// - `Scope::Subtree` → `acl:default <resource_uri>` **plus** `acl:accessTo <resource_uri>`:
@@ -57,6 +58,8 @@ use crate::{Audience, Condition, Decision, Effect, IntentRow, Request};
 /// # Other WAC rules (unchanged)
 /// - `Condition ≠ None` rows are UNSUPPORTED in WAC and are skipped.
 /// - `Effect::Deny` rows are UNSUPPORTED in WAC and are skipped.
+/// - `Audience::AllExcept(vec![])` (the unbounded-exclusion placeholder) is UNSUPPORTED in
+///   WAC and is skipped; a *bounded* `AllExcept` enumerates its allows and is expressible.
 /// - Fail-closed: no governing ACL document, or no matching Allow inside it →
 ///   [`Decision::Deny`].
 pub(crate) fn evaluate_wac(request: &Request, intents: &[IntentRow]) -> Decision {
@@ -104,12 +107,20 @@ pub(crate) fn evaluate_wac(request: &Request, intents: &[IntentRow]) -> Decision
 /// Is this intent row expressible in WAC — i.e. does it materialize an authorization
 /// (and therefore an ACL document) at all?
 ///
-/// Mirrors [`crate::compile_wac`]'s two early returns: a `Condition ≠ None` row and an
-/// `Effect::Deny` row both compile to an EMPTY policy, so they create no ACL document.
-/// This matters for nearest-ACL resolution: an inexpressible row must not shadow the
-/// ancestor ACL that really governs the resource.
+/// Mirrors **every** empty-policy return in [`crate::compile_wac`] — the two early returns
+/// (`Condition ≠ None`, `Effect::Deny`) *and* the unbounded `Audience::AllExcept(vec![])`
+/// return inside the audience match. All three compile to an EMPTY policy, so none of them
+/// creates an ACL document. This matters for nearest-ACL resolution: an inexpressible row
+/// must not shadow the ancestor ACL that really governs the resource.
+///
+/// Keep this list in lockstep with `compile_wac`; a missed case makes the oracle invent a
+/// shadowing ACL document the compiler never emitted.
 fn wac_expressible(intent: &IntentRow) -> bool {
-    intent.effect == Effect::Allow && intent.condition == Condition::None
+    if intent.effect != Effect::Allow || intent.condition != Condition::None {
+        return false;
+    }
+    // An empty exclusion set is the "unbounded" placeholder — inexpressible in WAC.
+    !matches!(intent.audience, Audience::AllExcept(ref excl) if excl.is_empty())
 }
 
 /// The IRI of the ACL document sited at `iri`, if any WAC-expressible row puts one there.
@@ -603,6 +614,9 @@ mod tests {
                 condition: Condition::Purpose("https://ex.dev/p".to_string()),
                 ..row(Audience::Public, Scope::Resource, doc)
             },
+            // An UNBOUNDED `AllExcept` (empty exclusion set) is the third empty-policy
+            // return in `compile_wac` — inside the audience match, not an early return.
+            row(Audience::AllExcept(vec![]), Scope::Resource, doc),
         ] {
             let intents = vec![
                 row(Audience::Agent(ALICE.to_string()), Scope::Subtree, POD),
