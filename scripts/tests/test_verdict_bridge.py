@@ -1435,17 +1435,23 @@ class TestAuthorXorReviewer(unittest.TestCase):
         assertion was tightened. Assert the PR-node line itself, and assert the commits
         fields inside the commits block.
         """
-        lines = [line.strip() for line in vb.PR_LIST_QUERY.splitlines()]
-        self.assertIn(
-            "author{login}",
-            lines,
-            "the PR-node-level author field is gone; the `reviews` one does not feed the guard",
-        )
-        start = vb.PR_LIST_QUERY.find("commits(last:")
-        self.assertGreater(start, 0, "the commits connection is gone")
-        block = vb.PR_LIST_QUERY[start : start + 260]
-        for field_name in ("totalCount", "authors(", "committer", "message"):
-            self.assertIn(field_name, block, f"{field_name} missing from the commits block")
+        for name in ("PR_LIST_QUERY", "PR_ONE_QUERY"):
+            with self.subTest(query=name):
+                query = getattr(vb, name)
+                lines = [line.strip() for line in query.splitlines()]
+                self.assertIn(
+                    "author{login}",
+                    lines,
+                    "the PR-node-level author field is gone; the `reviews` one does "
+                    "not feed the guard",
+                )
+                start = query.find("commits(last:")
+                self.assertGreater(start, 0, "the commits connection is gone")
+                block = query[start : start + 260]
+                for field_name in ("totalCount", "authors(", "committer", "message"):
+                    self.assertIn(
+                        field_name, block, f"{field_name} missing from the commits block"
+                    )
 
     def test_the_verdict_regexes_are_anchored_AND_matched_from_the_start(self):
         """Belt and braces, because either one alone is silently sufficient.
@@ -1463,6 +1469,24 @@ class TestAuthorXorReviewer(unittest.TestCase):
                 self.assertIsNone(vb.VERDICT_RE.search(shape), shape)
                 self.assertIsNone(vb.VERDICT_SHAPE_RE.search(shape), shape)
                 self.assertIsNone(vb.trailing_verdict(shape), shape)
+
+    def test_the_EVENT_DRIVEN_path_enforces_the_guard_too(self):
+        """#4386 added a single-PR fetch + reconfirm. A guard wired only into the sweep
+        would be silently always-empty there — the contributor set would come back empty
+        and every verdict would grant. Both queries share PR_NODE_FIELDS; pin the
+        behaviour, not just the string."""
+        n = node(4200, author="jeswr", commits=commits_connection(("jeswr",)))
+        fake = FakeGitHub(
+            [n], comments={4200: [vb.comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr")]}
+        )
+        b = bridge(fake)
+        parsed = b.parse_node(n, "success")
+        self.assertIn("jeswr", parsed.contributors)
+        fresh, decision_ = b.reconfirm(parsed, vb.Decision("promote", "stale"))
+        self.assertNotEqual(
+            decision_.action, "promote", "the event path must refuse a commit-author pass"
+        )
+        self.assertTrue(decision_.self_review, decision_)
 
     def test_the_commits_page_is_pinned_to_the_documented_maximum(self):
         """Narrowing this silently WEDGES the lane instead of opening a hole.
