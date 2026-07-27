@@ -324,7 +324,7 @@ let r = with_local_services(&reg, || {
   the table-function argument channel — the group decomposed into `LocalServicePattern { subject,
   predicate, object }` of `LocalServiceSlot::{Term, Var}`, where the CONSTANT slots are the
   pre-bound arguments. Decomposition is all-or-nothing: it is non-empty ONLY for a flat BGP, EMPTY
-  for any richer group (OPTIONAL/UNION/FILTER/sub-SELECT/paths/quoted triples), so a handler can
+  for any richer group (OPTIONAL/UNION/FILTER/sub-SELECT/paths/triple terms), so a handler can
   never mistake a partial view for the whole group. Such a handler works from `query()`.
 - **Response.** `LocalServiceRows { vars, rows }` (`new` / `empty` / `validate`); each row is
   `vars.len()` cells wide with `None` for UNBOUND, over a SUBSET of `req.vars()`. A duplicate header
