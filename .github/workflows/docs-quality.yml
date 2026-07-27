@@ -624,10 +624,16 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_COMMITS: ${{ github.event.pull_request.commits }}
         run: |
-          if [ -n "${PR_NUMBER}" ] && [ -n "${PR_COMMITS}" ]; then
-            git fetch --quiet --no-tags --depth="$(( PR_COMMITS + 1 ))" \
-              origin "+refs/pull/${PR_NUMBER}/head:refs/remotes/origin/pr/${PR_NUMBER}/head" || true
-          fi
+          # Both operands are validated as digits before the arithmetic: this step
+          # lives in `quick-gates`, which has no continue-on-error, so an unexpected
+          # payload shape must degrade to "INCOMPLETE" and not red the docs gate for
+          # every PR in the queue.
+          case "${PR_NUMBER}:${PR_COMMITS}" in
+            [0-9]*:[0-9]*)
+              git fetch --quiet --no-tags --depth="$(( PR_COMMITS + 1 ))" \
+                origin "+refs/pull/${PR_NUMBER}/head:refs/remotes/origin/pr/${PR_NUMBER}/head" || true
+              ;;
+          esac
           python3 scripts/check-model-attribution.py --advisory --check-commits-pr
       # [OPUS-4.8] sq-mkza: end-to-end proof that BOTH honesty gates now cover the
       # paper-factory `.typ` sources (site/papers/**/*.typ) — the highest-stakes

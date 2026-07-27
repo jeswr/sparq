@@ -219,8 +219,10 @@ else
   # B1d — the PR-level backstop must be present AND must declare itself advisory
   # through the script's own --advisory mode. If someone "promotes" it by deleting
   # --advisory, that is fine (it becomes hard). What must never happen is the
-  # invocation disappearing, or being neutered with `|| true` instead — B2 catches
-  # the latter, this catches the former.
+  # invocation disappearing, or being neutered with `|| true` instead. This
+  # catches the former; B2/B3a-b catch the latter — and B3a is specifically the
+  # backslash-continuation spelling that the earlier version of B2 did NOT catch,
+  # so "B2 catches `|| true`" is now a tested claim rather than an assumed one.
   if grep -q -- 'check-model-attribution\.py --advisory' "$WORKFLOW" \
      || grep -qE -- 'check-model-attribution\.py.*--check-commits' "$WORKFLOW"; then
     pass "B1d docs-quality.yml runs the PR-level --check-commits backstop"
@@ -241,7 +243,11 @@ else
   # shell is a vacuous gate: it reports green while checking nothing. Parsed
   # structurally (an `if:` can sit on the step OR its job) and over LOGICAL
   # shell lines (a `|| true` can sit after a backslash continuation).
-  expect_rc 0 "B2 gate steps are unconditional and do not swallow failure" \
+  # The message names the forms actually covered. The previous wording — "gate
+  # steps are unconditional and do not swallow failure" — was printed verbatim
+  # over a hard gate whose exit status WAS swallowed, which is how a reassuring
+  # summary line becomes the thing that hides the defect.
+  expect_rc 0 "B2 no gate step is skipped, continue-on-error'd, \`||\`-swallowed (incl. across a continuation), or run under a relaxed shell" \
     python3 "$SEAM" --workflow "$WORKFLOW" "${NEEDLES[@]}"
 
   # B3 — MUTATE THE SEAM ITSELF. B2 passing is worth nothing unless B2 would

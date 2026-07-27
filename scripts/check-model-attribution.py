@@ -36,6 +36,14 @@ Three independent modes, each usable on its own:
     caused it, and it treats ``[OPUS-4.8]``/``[OPUS-5]`` exactly like
     ``[SONNET-4.6]`` so the next deprecation does not re-run this incident.
 
+``--check-commits-pr``
+    The **CI form of the above**, and the only one that is correct there. Under
+    ``actions/checkout`` a rev range against ``HEAD`` scans a shallow-grafted
+    merge ref whose diff is the entire repository — see the long comment above
+    :func:`check_commits_pr`. This mode rebuilds the range from the
+    ``github.event.pull_request`` payload instead. A commit it cannot diff is
+    reported as INCOMPLETE, never as a pass.
+
 ``--check-briefs``
     The **root cause**. ``.claude/agents/*.md`` must not hard-code a concrete
     model attribution; AGENTS.md rule 11 already says so in prose, nothing
@@ -956,7 +964,10 @@ def main() -> int:
             "119 open PRs add a false [SONNET-4.6], so hard-gating today would wedge "
             "the merge train on work whose only fault is copying the surrounding "
             "file. This is an explicit, greppable mode rather than a `|| true` in "
-            "the workflow, so the seam test can tell advisory apart from swallowed."
+            "the workflow. check-workflow-seam.py enforces that distinction — it "
+            "rejects a `||` fallback on this gate's command including one written "
+            "across a backslash continuation, the spelling that defeated the "
+            "earlier line-by-line seam check."
         ),
     )
     args = ap.parse_args()
