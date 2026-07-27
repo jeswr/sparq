@@ -452,7 +452,7 @@ edge sequences them (§10.4).
 
 | Bead | Tier | Target (noir repo) | One-line scope + risk note |
 |---|---|---|---|
-| `sq-jthy1` | opus | `ssa/opt/checked_to_unchecked.rs` | elide overflow checks dominated by a later range check (#7161); Brillig failure-point semantics in scope |
+| `sq-jthy1` | opus | `ssa/opt/checked_to_unchecked.rs` | elide overflow checks dominated by a later range check (#7161); Brillig failure-point semantics in scope — **IMPLEMENTED + tested + corpus-measured: works, 0 regressions, but only −0.029% ACIR opcodes over 519 packages; gate level UNMEASURED; no PR; bead still open, see §10.9** |
 | `sq-m3l62` | opus | `ssa/opt/flatten_cfg/value_merger.rs` | ArrayGet through IfElse (#5501); conservative use/alias analysis; precedent PR #11512 |
 | `sq-seust` | sonnet | `ssa/ir/dfg/simplify.rs` | NOT canonicalization for IfElse merging; PARK with a findings note if measured neutral (PR #11580 upkeep landmine) — **MEASURED NULL RESULT (0 firings / 556 packages); PARKED per that instruction, no PR; see §10.8** |
 | `sq-jfkwk` | sonnet | findings first; `acir/acir_context/mod.rs` only on a win | comparison-lowering experiment; fail-closed on the #10159 witness-sharing landmine; null result acceptable — **NULL RESULT returned, no PR proposed; bead still open, see §10.7** |
@@ -614,3 +614,72 @@ passed, no snapshot moved) with three added tests that **fail on HEAD and pass
 patched**, and the AST-fuzzer `arbtest` targets green — but none of that
 exercises the both-inner-conditions-false case, so it is not evidence for row 4. It is **not carried in this repo** — no
 upstream PR is proposed, and none should be until a program produces the shape.
+
+### 10.9 `sq-jthy1` (row 6, dominated overflow-check elision, noir#7161) — implemented, tested and measured; win is REAL but SMALL (2026-07-27)
+
+> 🤖 **SPARQ agent** [OPUS-5]. Full record:
+> `noir-dominated-overflow-elision-7161.md` (analysed, built, unit-tested *and*
+> corpus-measured against noir `e22cd89b`, workspace version `1.0.0-beta.25`).
+
+The optimization is **implemented as a second phase inside `checked_to_unchecked`**
+(not a new `SsaPass` — §4.2's PR #11580 upkeep landmine); `cargo test -p
+noirc_evaluator` is green (**1890 passed**, one snapshot moved in the intended
+direction), clippy and fmt are clean, and unlike §10.5–§10.7 the **empirical half
+ran**: both a patched and an unpatched release `nargo` were built and a 519-package
+corpus recompiled with each.
+
+**Measured (this box, non-canonical; ACIR opcodes are the §5.1 proxy, not gates):**
+
+| measurement | result |
+|---|---|
+| corpus: noir `benchmarks` (9) + `execution_success` (509) + sparq `zk/compose` (1) | 519 packages, 0 errors, **5 changed, 0 regressions**, total **−73 of 251 925 opcodes = −0.029%** |
+| the five hits | `hint_black_box` 27→8, `compose` 120 330→120 312, `fold_complex_outputs` 100→84, `a_6_array` 431→417, `simple_bitwise` 16→10 |
+| synthetic addition chains | `x+y+z+w` 11→7; 8/32/128-term unrolled accumulators 23→11, 95→35, 383→131 |
+| `test_programs/execution_failure`, all 72 packages, `nargo execute --force` and `--force-brillig` | **byte-identical output** on both runtimes — same messages, spans, call stacks |
+| `sha512_100_bytes` compile time (3 runs each) | 1.81/1.86/1.86 s vs 1.88/1.79/1.80 s — no regression |
+
+It is **not carried in this repo** and **no upstream PR is proposed**. Two reasons,
+and the second is the substantive one: `bb` is absent so there is **no gate
+measurement** (§10.2/§5.1 make a gate-level win the entry condition), *and* at
+−0.029% of a proxy metric across 5/519 packages the change is unlikely to clear
+§4.2's maintenance-rent bar as a standalone PR. The record's recommendation is to
+measure gates on the five hits first, and otherwise to **fold this into
+`sq-rxir8` (#9463) / `sq-jj3ne` (#9429)** rather than ship it alone — a single pass
+that also handles explicit `RangeCheck` dominators, `mul` by a provably-nonzero
+operand and cross-block dominance carries its upkeep far better. The bead stays
+**open**.
+
+Unlike §10.5–§10.7 the **issue body was fetched** (#7161, OPEN, zero comments), so
+the ask is first-hand rather than the §4.1 paraphrase. It also contains a typo —
+`v3 = add v1, u32 1` for `add v2, …` — and is framed as an investigation
+("I'm fairly certain (check this)"), leaving two questions the record answers:
+
+Unlike §10.5–§10.7 the **issue body was fetched** (#7161, OPEN, zero comments), so
+the ask is first-hand rather than the §4.1 paraphrase. It also contains a typo —
+`v3 = add v1, u32 1` for `add v2, …` — and is framed as an investigation
+("I'm fairly certain (check this)"), leaving two questions the record answers:
+
+| finding | consequence |
+|---|---|
+| the overflow check is not an SSA instruction — it is one `range_constrain_var` emitted at ACIR-gen from `unchecked: false` (`acir/mod.rs:797-821`) | the issue's premise is confirmed: the two-link chain does emit two range checks, and flipping the first op to `unchecked` deletes one |
+| ACIR add is **non-reducing field arithmetic**, so an overflowing add does not wrap back into range | a chain of unsigned adds is monotone over the integers ⇒ the final check implies every intermediate one. This is an argument backed by guard tests, **not** a proof and **not** audited |
+| Brillig unsigned arithmetic **wraps** in fixed-width registers (`ssa/interpreter/mod.rs:1338-1352`) | the issue's open Brillig question resolves to *insert nothing*: gate the phase on `runtime().is_acir()`, precedent `check_u128_mul_overflow.rs:36-39`. An unchecked Brillig intermediate would wrap small and the later check would pass — a wrong answer, not a moved failure |
+| the ACIR-vs-Brillig fuzzer already treats any two `"overflow"` messages as equivalent (`ast_fuzzer/src/compare/compiled.rs:205-235`) | the "changes how certain tests fail" caveat is largely pre-absorbed upstream — and measurably so: all 72 `execution_failure` packages are byte-identical on both runtimes. On a purpose-built overflowing fixture only the highlighted **span** widens (`x + y` → `x + y + z + w`); message, line and call stack are unchanged. `noir_test_failure` was **not** run |
+| upstream already codifies the enabling invariant: `can_simplify_arithmetic_identity` (`dfg/simplify/binary.rs:323-359`) and the ACIR-only widened bound in `get_value_max_num_bits` (`dfg.rs:574-619`) | the elision does not invent an invariant, it enlarges the population of values that already carry it — the strongest de-risking evidence found |
+| **`range_constrain_var` is also a witness cut point** (`get_or_create_witness_var`, `acir_context/mod.rs:222-243`) — the same fact `noir-acir-expression-growth-4629.md` records from the other side | at ACIR level this turns out to be a *second saving*, not a cost: the intermediate `AssertZero`s merge too (11→7 opcodes on the 4-term chain). But the merged opcode is a wide **linear** `AssertZero` the backend must still arithmetise, so the opcode delta **overstates** the gate delta — which is exactly why §7.1 of the record makes `bb gates` the blocking measurement |
+| **§3.3 of this record is stale**: at HEAD the ACVM pipeline is `GeneralOptimizer` → `RangeOptimizer` → `CommonSubexpressionOptimizer` and the identifier `ExpressionWidth` no longer exists anywhere in the tree | the CSAT expression-width transformer listed as the fourth stage is **gone**, so nothing splits a wide expression before `bb` sees it. Every row that reasons about ACIR opcodes as a gate proxy (rows 6, 9, 10) is affected; captured as a follow-up to re-verify §3.3 + §5.1 against a stated pin |
+
+Four soundness side conditions are each pinned by a guard test — ACIR-only;
+`add`-only successors (a `sub` successor is not monotone); the intermediate must
+have **exactly one** use across the whole function (an escaped out-of-range value
+would corrupt `lt`/`div`/`truncate`/indexing/the ABI); and the predicate must be
+the literal `u1 1` (under a variable predicate ACIR-gen range-checks *and returns*
+`predicate · result`, so eliding changes the value, not just the constraint). A
+fifth condition keeps the chain's tracked bit bound below the modulus.
+
+Adjacent finding, captured as follow-up and **unverified**: `required_bit_size` in
+`checked_to_unchecked.rs:126-171` claims to be "almost the same" as
+`get_value_max_num_bits` but does **not** carry the ACIR unchecked-widening arm, so
+the two disagree for an `unchecked_add u1`. No reproducer was built and no bug is
+claimed; it is regardless a hard ordering constraint for this bead — the elision
+must run *after* `checked_to_unchecked`, never before.
