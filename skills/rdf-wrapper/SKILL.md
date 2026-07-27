@@ -1,6 +1,6 @@
 ---
 name: rdf-wrapper
-description: "Traverse sparq RDF graphs as native Rust objects with the opt-in sparq-wrapper crate: bind a focus Term to an owned or borrowed Store, follow outgoing/incoming NamedNode predicates with iterators, unwrap values, convert typed literals to str/i64/bool, mutate owned stores, and optionally use the unlanded distinct-result, typed-cardinality, literal-codec, typed-focus, and effective-change observation proposals. Use when Rust code should work with focus objects instead of raw triples or dictionary IDs; SHACL-to-Rust code generation is a later surface."
+description: "Traverse sparq RDF graphs as native Rust objects with the opt-in sparq-wrapper crate: bind a focus Term to an owned or borrowed Store, follow outgoing/incoming NamedNode predicates with iterators, unwrap values, convert typed literals to str/i64/bool, mutate owned stores, and optionally use the unlanded distinct-result, typed-cardinality, literal-codec, typed-focus, and effective-change observation proposals. Use when Rust code should work with focus objects instead of raw triples or dictionary IDs; SHACL-to-Rust code generation lives in the internal sparq-wrapper-shacl crate."
 ---
 
 # Use sparq-wrapper
@@ -284,5 +284,14 @@ focus returned by `NodeFactory::iri`. Match an `AnyNode` variant to recover
 those kind-specific methods, or call `into_node()` to erase the focus kind and
 return to the untyped wrapper.
 
-SHACL-to-Rust struct generation is not part of M1. Reuse `sparq-shacl`'s
-`ShapesModel` for that work; do not invent a second SHACL parser.
+SHACL-to-Rust struct generation is not part of M1; it lives in the internal
+`sparq-wrapper-shacl` crate, which reuses `sparq-shacl`'s `ShapesModel` rather
+than inventing a second SHACL parser. `lower` maps a shapes graph to a
+comparable IR and `emit` renders that IR as a `std`-only Rust module (`generate`
+runs both). The mapping: `sh:maxCount 1` gives `Option<T>` or, with
+`sh:minCount >= 1`, a required `T`; every other cardinality gives a
+bounds-checked `Vec<T>`; `sh:datatype` gives a checked scalar, `sh:class` a
+typed reference newtype, `sh:node` a nested (boxed) struct, and `sh:closed true`
+a predicate whitelist the generated loader enforces. Ill-formed or contradictory
+shapes are typed `LoweringError`s — the generator never guesses. See the crate
+rustdoc for the full table.

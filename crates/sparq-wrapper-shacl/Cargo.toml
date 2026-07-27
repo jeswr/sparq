@@ -5,9 +5,18 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish = false
-description = "Reserved SHACL integration seam for sparq-wrapper"
+description = "SHACL-shape-driven Rust object-model generation for sparq-wrapper"
 
 [features]
 default = []
 
 [dependencies]
+# The SHACL surface is reused verbatim — this crate parses no Turtle and
+# re-implements no SHACL syntax rules (sq-1rg2q.12).
+sparq-shacl = { path = "../sparq-shacl", version = "0.1.0" }
+oxrdf.workspace = true
+
+[dev-dependencies]
+# Tests parse shapes graphs with `Graph::load_str`, exactly as sparq-shacl's own
+# tests do; the library itself takes an already-parsed `ShapesModel`.
+sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = false }

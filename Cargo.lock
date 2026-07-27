@@ -5835,6 +5835,11 @@ version = "0.1.0"
 [[package]]
 name = "sparq-wrapper-shacl"
 version = "0.1.0"
+dependencies = [
+ "oxrdf 0.3.3",
+ "sparq-core",
+ "sparq-shacl",
+]
 
 [[package]]
 name = "sparq-zk"
