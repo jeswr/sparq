@@ -333,10 +333,9 @@ and the public **OpenSSF Scorecard** ([`scorecard.yml`](.github/workflows/scorec
 >
 > **There is currently no compensating SAST control.** `clippy -D warnings`, the unsafe-count
 > ratchet, `cargo-deny`/`cargo-vet` and the fuzz lanes all remain green and are genuine, but none
-> of them is a substitute for taint/crypto-misuse analysis. The 35 alerts have been triaged (see above) and none is exploitable
-> — note that being disabled does not retire a finding, so the triage was done on the merits. The durable
-> decision (re-enable advisory-only, re-enable on a schedule, or accept and document no SAST)
-> is still open in sparq-org/sparq#4620.
+> of them is a substitute for taint/crypto-misuse analysis. The durable decision (re-enable
+> advisory-only, re-enable on a schedule, or accept and document no SAST) is still open in
+> sparq-org/sparq#4620.
 
 - **Green means:** license/advisory/source policy holds, every dependency carries an audit
   attestation, and released artifacts have verifiable provenance.
