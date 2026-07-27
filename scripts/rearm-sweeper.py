@@ -1277,17 +1277,178 @@ CLASS_REASONS = {
 }
 
 
-def stuck_comment(number: int, klass: str, detail: str) -> str:
-    """The one comment body. Always states the class, so a park is never silent."""
+# ---- THE MACHINE-READABLE RECEIPT ------------------------------------------------------
+#
+# [OPUS-5] #4548 follow-through. A park whose only artefact is prose has a HUMAN-ONLY exit,
+# and a human-only exit turns a transient cause into a permanent stall: the PR sits parked
+# long after the thing that parked it went away, because nothing can read "unresolved
+# conversations remain" and check whether that is still true. Registry #766 found exactly
+# this — four PRs human-terminal purely because a human applied the label.
+#
+# So every park additionally emits ONE machine-readable receipt: the class, the head it was
+# bound to, the observation that justified it, and — the load-bearing field — the named
+# CONDITION under which the park is provably over. `unpark_satisfied` evaluates that
+# condition against a FRESH observation, and is fail-CLOSED in every direction: an
+# unrecognised condition, a version it does not know, a receipt from another PR, or an
+# incomplete read all keep the PR parked. Recovery must be PROVEN, never assumed.
+RECEIPT_VERSION = 1
+RECEIPT_OPEN = "<!-- stuck-arm-receipt:"
+RECEIPT_CLOSE = "-->"
+
+# class -> the named condition that ENDS this park. The condition is recorded IN the receipt
+# rather than re-derived from the class at un-park time, so a policy change here can never
+# silently re-interpret a receipt written by an older revision.
+UNPARK_HOLDS_CLEARED = "holds-cleared"
+UNPARK_NOT_CONFLICTING = "not-conflicting"
+UNPARK_GATE_GREEN = "gate-green"
+UNPARK_GATE_CONCLUDED = "gate-concluded"
+UNPARK_THREADS_RESOLVED = "threads-resolved"
+UNPARK_HEAD_MOVED = "head-moved"
+
+UNPARK_CONDITIONS = {
+    "held": UNPARK_HOLDS_CLEARED,
+    "conflicting": UNPARK_NOT_CONFLICTING,
+    "gate-failed": UNPARK_GATE_GREEN,
+    "gate-cancelled": UNPARK_GATE_CONCLUDED,
+    "blocked-threads": UNPARK_THREADS_RESOLVED,
+    # `stale` has no single identified cause by construction, so the only honest proof that
+    # it is over is that somebody moved the branch on.
+    "stale": UNPARK_HEAD_MOVED,
+}
+# Import-time totality. A terminal class added without a machine exit is precisely the
+# "holds need a machine exit" defect, so it must be impossible to add one by omission.
+assert set(UNPARK_CONDITIONS) == TERMINAL_CLASSES, (
+    "every terminal class needs a named un-park condition: "
+    f"missing={sorted(TERMINAL_CLASSES - set(UNPARK_CONDITIONS))} "
+    f"extra={sorted(set(UNPARK_CONDITIONS) - TERMINAL_CLASSES)}"
+)
+
+
+def stuck_receipt(pull: ArmedPull, klass: str, gate: str, now: int) -> dict:
+    """The machine-readable half of a park. Pure: same inputs, same bytes.
+
+    `head` binds the receipt to the exact commit that was observed — a receipt found on a
+    PR whose head has since moved describes a state that no longer exists, which is both the
+    `head-moved` proof and the reason every other condition is re-evaluated live rather than
+    trusted from the receipt.
+    """
+    return {
+        "v": RECEIPT_VERSION,
+        "program": PROGRAM,
+        "phase": "stuck-arm",
+        "pr": pull.number,
+        "class": klass,
+        "action": CLASS_ACTIONS[klass],
+        "head": pull.head_oid,
+        "observed_at": now,
+        "observed": {
+            "gate": gate,
+            "mergeable": pull.mergeable,
+            "merge_state": pull.merge_state,
+            "unresolved_threads": pull.unresolved_threads,
+            "holds": hold_labels(pull.labels),
+        },
+        "unpark_when": UNPARK_CONDITIONS[klass],
+    }
+
+
+def render_receipt(receipt: dict) -> str:
+    """One line, HTML-comment-wrapped so it renders as nothing and greps as everything."""
+    return (
+        f"{RECEIPT_OPEN} "
+        f"{json.dumps(receipt, sort_keys=True, separators=(',', ':'), ensure_ascii=False)} "
+        f"{RECEIPT_CLOSE}"
+    )
+
+
+def parse_stuck_receipt(body: object) -> dict | None:
+    """Recover the receipt from a comment body, or None.
+
+    Tolerant of surrounding prose (the receipt is appended to a human-readable comment) and
+    of a body carrying several — the LAST wins, because a later sweep's observation
+    supersedes an earlier one. Returns None on anything it cannot fully parse: a caller that
+    cannot read the receipt must behave as if the park were opaque, never as if it were
+    satisfied.
+    """
+    if not isinstance(body, str) or RECEIPT_OPEN not in body:
+        return None
+    start = body.rfind(RECEIPT_OPEN)
+    end = body.find(RECEIPT_CLOSE, start + len(RECEIPT_OPEN))
+    if end < 0:
+        return None
+    try:
+        parsed = json.loads(body[start + len(RECEIPT_OPEN):end].strip())
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
+
+
+def unpark_satisfied(receipt: object, pull: ArmedPull, gate: str) -> bool:
+    """Has the recorded cause of this park PROVABLY gone away?
+
+    FAIL-CLOSED on every axis. The dangerous direction here is un-parking a PR whose cause
+    still holds — that re-admits it to the merge lane where it will wedge again — so
+    anything short of positive proof returns False:
+
+      * a receipt this revision does not understand (version, shape, wrong PR number);
+      * a condition name that is not in the closed set (a receipt from a FUTURE revision
+        naming a condition this one cannot evaluate);
+      * an incomplete live read (`state_truncated`), or a gate that is not a concluded
+        observation, for any condition that depends on those.
+
+    It is deliberately NOT a method: the un-park decision is a pure function of a receipt
+    plus a fresh observation, and keeping it pure is what makes it testable without gh.
+    """
+    if not isinstance(receipt, dict):
+        return False
+    if receipt.get("v") != RECEIPT_VERSION:
+        return False
+    if receipt.get("program") != PROGRAM or receipt.get("phase") != "stuck-arm":
+        return False
+    if receipt.get("pr") != pull.number:
+        return False
+    # A truncated label or review-thread page means the fresh observation is itself partial;
+    # no condition can be PROVEN against it.
+    if pull.state_truncated:
+        return False
+    condition = receipt.get("unpark_when")
+    if condition == UNPARK_HOLDS_CLEARED:
+        return not hold_labels(pull.labels)
+    if condition == UNPARK_NOT_CONFLICTING:
+        # UNKNOWN is GitHub still computing the merge — not proof of anything.
+        return pull.mergeable == "MERGEABLE"
+    if condition == UNPARK_GATE_GREEN:
+        return gate == GATE_SUCCESS
+    if condition == UNPARK_GATE_CONCLUDED:
+        return gate in (GATE_SUCCESS, GATE_FAILURE)
+    if condition == UNPARK_THREADS_RESOLVED:
+        return pull.unresolved_threads == 0
+    if condition == UNPARK_HEAD_MOVED:
+        recorded = receipt.get("head")
+        return bool(pull.head_oid) and isinstance(recorded, str) and pull.head_oid != recorded
+    return False
+
+
+def stuck_comment(pull: ArmedPull, klass: str, gate: str, detail: str, now: int) -> str:
+    """The one comment body: prose for the human, a receipt for the machine.
+
+    Both, not either. The prose is what a maintainer reads; the receipt is what an un-park
+    path evaluates. A park with only the first has no exit that does not require a person.
+    """
     reason = CLASS_REASONS.get(klass, "it is armed but cannot merge.")
+    receipt = stuck_receipt(pull, klass, gate, now)
     return (
         f"{STUCK_MARKER}\n\n"
         f"**stuck-arm sweep — `{klass}`**\n\n"
         f"This PR was armed for auto-merge but {reason}\n\n"
         f"Observed: {detail}\n\n"
+        f"Un-parks automatically when: `{receipt['unpark_when']}`\n\n"
         f"_Posted by the `{PROGRAM}` stuck-arm phase because an armed PR that cannot merge "
         f"is otherwise invisible: it looks healthy, and it holds its `area:` partition "
-        f"against the readiness frontier._"
+        f"against the readiness frontier._\n\n"
+        f"{render_receipt(receipt)}"
     )
 
 
@@ -1485,13 +1646,13 @@ class StuckArmSweeper:
 
     # ---- the per-class exits ----------------------------------------------------------
 
-    def park(self, pull: ArmedPull, klass: str, detail: str) -> None:
-        """Disarm, label for a human, and SAY WHY. Never a silent park."""
+    def park(self, pull: ArmedPull, klass: str, gate: str, detail: str) -> None:
+        """Disarm, label for a human, and SAY WHY — in prose AND in a machine receipt."""
         self.disarm(pull.number)
         self.relabel(pull.number, ["needs:user"], [])
-        self.comment(pull.number, stuck_comment(pull.number, klass, detail))
+        self.comment(pull.number, stuck_comment(pull, klass, gate, detail, self.now()))
 
-    def route_fix(self, pull: ArmedPull, klass: str, detail: str) -> None:
+    def route_fix(self, pull: ArmedPull, klass: str, gate: str, detail: str) -> None:
         """Disarm and hand the PR to the fix lane.
 
         `review:pass` is REMOVED with the same call that adds `review:changes`: the arm was
@@ -1500,14 +1661,16 @@ class StuckArmSweeper:
         """
         self.disarm(pull.number)
         self.relabel(pull.number, ["review:changes"], ["review:pass"])
-        self.comment(pull.number, stuck_comment(pull.number, klass, detail))
+        self.comment(pull.number, stuck_comment(pull, klass, gate, detail, self.now()))
 
-    def rebase(self, pull: ArmedPull, detail: str) -> None:
+    def rebase(self, pull: ArmedPull, gate: str, detail: str) -> None:
         """Attempt GitHub's own branch update; fall back to the fix lane when it conflicts."""
         try:
             self.update_branch(pull.number, pull.head_oid)
         except GhError as error:
-            self.route_fix(pull, "conflicting", f"{detail}; branch update refused ({error})")
+            self.route_fix(
+                pull, "conflicting", gate, f"{detail}; branch update refused ({error})"
+            )
             return
         self.log(f"[{PROGRAM}] stuck-arm PR #{pull.number}: REBASE — branch update requested")
 
@@ -1524,7 +1687,9 @@ class StuckArmSweeper:
             f"cancelled gate run {run_id} ({detail})"
         )
 
-    def apply(self, pull: ArmedPull, klass: str, run_id: int | None, detail: str) -> None:
+    def apply(
+        self, pull: ArmedPull, klass: str, gate: str, run_id: int | None, detail: str
+    ) -> None:
         action = CLASS_ACTIONS[klass]
         if self.dry_run:
             self.log(
@@ -1532,11 +1697,11 @@ class StuckArmSweeper:
             )
             return
         if action == ACTION_PARK:
-            self.park(pull, klass, detail)
+            self.park(pull, klass, gate, detail)
         elif action == ACTION_ROUTE_FIX:
-            self.route_fix(pull, klass, detail)
+            self.route_fix(pull, klass, gate, detail)
         elif action == ACTION_REBASE:
-            self.rebase(pull, detail)
+            self.rebase(pull, gate, detail)
         elif action == ACTION_RETRIGGER:
             self.retrigger(pull, run_id, detail)
 
@@ -1603,7 +1768,7 @@ class StuckArmSweeper:
                 continue
             self.actions += 1
             try:
-                self.apply(pull, klass, run_id, detail)
+                self.apply(pull, klass, gate, run_id, detail)
                 self.log(
                     f"[{PROGRAM}] stuck-arm PR #{number}: {klass} -> "
                     f"{CLASS_ACTIONS[klass]} ({detail})"
@@ -2330,6 +2495,135 @@ def stuck_self_test() -> None:
         if action in (ACTION_PARK, ACTION_ROUTE_FIX):
             assert name in CLASS_REASONS, name
             assert len(CLASS_REASONS[name]) > 40, name
+
+    # ---------------------------------------------------------------------------------
+    # (6) THE MACHINE-READABLE RECEIPT. A park whose only artefact is prose has a
+    #     human-only exit; registry #766 measured four PRs terminal for exactly that
+    #     reason. Every assertion below is about the MACHINE half.
+    # ---------------------------------------------------------------------------------
+    # Every terminal class carries a named un-park condition, and every condition named is
+    # one `unpark_satisfied` can actually evaluate. Both directions: a condition constant
+    # that nothing maps to is as broken as a class with no condition.
+    assert set(UNPARK_CONDITIONS) == TERMINAL_CLASSES, UNPARK_CONDITIONS
+    known_conditions = {
+        UNPARK_HOLDS_CLEARED, UNPARK_NOT_CONFLICTING, UNPARK_GATE_GREEN,
+        UNPARK_GATE_CONCLUDED, UNPARK_THREADS_RESOLVED, UNPARK_HEAD_MOVED,
+    }
+    assert set(UNPARK_CONDITIONS.values()) == known_conditions, UNPARK_CONDITIONS
+
+    # ROUND TRIP. The receipt survives being embedded in the prose comment a human reads.
+    parked_pull = armed_pull(
+        3451, head_oid="1f" * 20, unresolved_threads=10, merge_state="BLOCKED"
+    )
+    body = stuck_comment(parked_pull, "blocked-threads", GATE_SUCCESS, "detail", clock)
+    recovered = parse_stuck_receipt(body)
+    assert recovered == stuck_receipt(parked_pull, "blocked-threads", GATE_SUCCESS, clock), (
+        recovered
+    )
+    assert recovered["unpark_when"] == UNPARK_THREADS_RESOLVED, recovered
+    assert recovered["head"] == "1f" * 20, recovered
+    assert recovered["observed"]["unresolved_threads"] == 10, recovered
+    # The receipt renders as NOTHING to a reader: it lives inside an HTML comment.
+    assert body.rstrip().endswith(RECEIPT_CLOSE), body[-80:]
+    assert RECEIPT_OPEN in body, body
+
+    # THE PARK PATH ACTUALLY EMITS IT. Asserted on the posted argv, not on the helper —
+    # a receipt function nothing calls is the vacuous version of this whole section.
+    fake, messages, errors, sweeper = sweep(
+        {30: live_pr(30, updated=old, armed=old, threads=(False,), head="1f" * 20)},
+        [check_run("gate", "success")], now_=clock,
+    )
+    assert sweeper.counts == {"blocked-threads": 1}, sweeper.counts
+    posted = parse_stuck_receipt(fake.mutations("pr", "comment")[0][-1])
+    assert posted is not None, fake.mutations("pr", "comment")
+    assert posted["pr"] == 30 and posted["class"] == "blocked-threads", posted
+    assert posted["unpark_when"] == UNPARK_THREADS_RESOLVED, posted
+    assert posted["head"] == "1f" * 20, posted
+    # ...and so does the ROUTE-FIX path, which is a park in every respect that matters here.
+    fake, messages, errors, sweeper = sweep(
+        {31: live_pr(31, labels=("review:pass",), updated=old, armed=old)},
+        [check_run("gate", "failure")], now_=clock,
+    )
+    routed = parse_stuck_receipt(fake.mutations("pr", "comment")[0][-1])
+    assert routed is not None and routed["class"] == "gate-failed", routed
+    assert routed["unpark_when"] == UNPARK_GATE_GREEN, routed
+
+    # THE CONDITION IS FALSE AT PARK TIME. If it were already satisfied by the very state
+    # that caused the park, the receipt would name an exit that is not an exit.
+    for klass, pull_ in (
+        ("blocked-threads", armed_pull(1, unresolved_threads=3)),
+        ("gate-failed", armed_pull(1)),
+        ("conflicting", armed_pull(1, mergeable="CONFLICTING")),
+        ("held", armed_pull(1, labels=frozenset({"needs:user"}))),
+        ("stale", armed_pull(1, head_oid="ab" * 20)),
+    ):
+        gate_at_park = GATE_FAILURE if klass == "gate-failed" else GATE_SUCCESS
+        rec = stuck_receipt(pull_, klass, gate_at_park, clock)
+        assert not unpark_satisfied(rec, pull_, gate_at_park), (klass, rec)
+
+    # ...AND TRUE ONLY ON REAL RECOVERY. One recovered observation per condition.
+    recoveries = (
+        ("blocked-threads", armed_pull(1, unresolved_threads=3),
+         armed_pull(1, unresolved_threads=0), GATE_SUCCESS),
+        ("gate-failed", armed_pull(1), armed_pull(1), GATE_SUCCESS),
+        ("conflicting", armed_pull(1, mergeable="CONFLICTING"),
+         armed_pull(1, mergeable="MERGEABLE"), GATE_SUCCESS),
+        ("held", armed_pull(1, labels=frozenset({"needs:user"})),
+         armed_pull(1, labels=frozenset({"review:pass"})), GATE_SUCCESS),
+        ("stale", armed_pull(1, head_oid="ab" * 20),
+         armed_pull(1, head_oid="cd" * 20), GATE_SUCCESS),
+    )
+    for klass, before, after, gate_after in recoveries:
+        gate_at_park = GATE_FAILURE if klass == "gate-failed" else GATE_SUCCESS
+        rec = stuck_receipt(before, klass, gate_at_park, clock)
+        assert unpark_satisfied(rec, after, gate_after), (klass, rec)
+
+    # FAIL-CLOSED, one axis at a time. Each of these is a state in which un-parking would
+    # re-admit a PR whose cause still holds, so each must stay parked.
+    healthy = armed_pull(1, unresolved_threads=0)
+    good = stuck_receipt(armed_pull(1, unresolved_threads=4), "blocked-threads",
+                         GATE_SUCCESS, clock)
+    assert unpark_satisfied(good, healthy, GATE_SUCCESS), good      # the control
+    for label, mutated_receipt, observed_pull in (
+        ("version from another revision", {**good, "v": RECEIPT_VERSION + 1}, healthy),
+        ("receipt from another program", {**good, "program": "groom"}, healthy),
+        ("receipt from another phase", {**good, "phase": "rearm"}, healthy),
+        ("receipt copied from another PR", {**good, "pr": 999}, healthy),
+        ("condition this revision cannot evaluate",
+         {**good, "unpark_when": "vibes-improved"}, healthy),
+        ("condition field absent", {k: v for k, v in good.items() if k != "unpark_when"},
+         healthy),
+        ("not a receipt at all", "gate looks fine now", healthy),
+        ("truncated live read", good, armed_pull(1, unresolved_threads=0,
+                                                 state_truncated=True)),
+    ):
+        assert not unpark_satisfied(mutated_receipt, observed_pull, GATE_SUCCESS), label
+    # A gate that was never read cannot prove a gate-green recovery.
+    red = stuck_receipt(armed_pull(1), "gate-failed", GATE_FAILURE, clock)
+    for gate_now in (GATE_UNKNOWN, GATE_MISSING, GATE_PENDING, GATE_CANCELLED, GATE_FAILURE):
+        assert not unpark_satisfied(red, armed_pull(1), gate_now), gate_now
+    assert unpark_satisfied(red, armed_pull(1), GATE_SUCCESS)
+    # mergeable=UNKNOWN is GitHub still computing — never proof the conflict is gone.
+    dirty = stuck_receipt(armed_pull(1, mergeable="CONFLICTING"), "conflicting",
+                          GATE_SUCCESS, clock)
+    assert not unpark_satisfied(dirty, armed_pull(1, mergeable="UNKNOWN"), GATE_SUCCESS)
+    # head-moved needs a head to compare against, and an unreadable one proves nothing.
+    moved = stuck_receipt(armed_pull(1, head_oid="ab" * 20), "stale", GATE_SUCCESS, clock)
+    assert not unpark_satisfied(moved, armed_pull(1, head_oid=""), GATE_SUCCESS)
+    assert not unpark_satisfied({**moved, "head": None}, armed_pull(1, head_oid="cd" * 20),
+                                GATE_SUCCESS)
+
+    # PARSING. Malformed input yields None (opaque), never a dict that reads as satisfied.
+    for bad in (None, 42, "", "no receipt here", f"{RECEIPT_OPEN} not json {RECEIPT_CLOSE}",
+                f"{RECEIPT_OPEN} {{\"v\":1}} no-terminator", f"{RECEIPT_OPEN} [1,2] {RECEIPT_CLOSE}"):
+        assert parse_stuck_receipt(bad) is None, bad
+    # Several receipts on one body: the LAST (most recent observation) wins.
+    first = render_receipt(stuck_receipt(armed_pull(7), "stale", GATE_SUCCESS, clock))
+    second = render_receipt(
+        stuck_receipt(armed_pull(7, unresolved_threads=2), "blocked-threads",
+                      GATE_SUCCESS, clock + 1)
+    )
+    assert parse_stuck_receipt(f"{first}\n\n{second}")["class"] == "blocked-threads"
 
     print("rearm-sweeper stuck-arm self-test: PASS")
 
