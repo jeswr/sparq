@@ -398,6 +398,47 @@ pub fn with_functions<T>(fns: &FunctionRegistry, f: impl FnOnce() -> T) -> T {
     f()
 }
 
+// ---- Local rows-returning SERVICE handlers (sq-lsp7k.2.2) --------------------
+//
+// The ROWS-returning twin of `FunctionRegistry` (which is scalar: terms in, ONE term
+// out). A registered IRI is intercepted at `SERVICE <iri> { … }` BEFORE the HTTP
+// transport, so a handled SERVICE performs no network I/O and the egress allowlist has
+// nothing to police; an unregistered IRI falls through to the unchanged `service` path
+// where the default-deny SSRF filter still applies in full. NON-DEFAULT
+// `service-local` feature: when off, none of this compiles, the executor's SERVICE
+// dispatch is byte-identical to before, and no new dependency enters the graph
+// (oxrdf + spargebra are already direct deps). [OPUS-5]
+#[cfg(feature = "service-local")]
+pub mod service_local;
+#[cfg(feature = "service-local")]
+pub use service_local::{
+    LocalServiceFn, LocalServicePattern, LocalServiceRegistry, LocalServiceRequest,
+    LocalServiceRows, LocalServiceSlot,
+};
+
+/// Runs `f` with `reg` installed as the active local SERVICE-handler registry: every
+/// `SERVICE <iri> { … }` whose IRI is registered is answered IN PROCESS by the handler
+/// instead of being forwarded over HTTP. See the [`service_local`] module docs for the
+/// egress/SSRF argument and the v1 scope-outs.
+///
+/// The registry is visible to every query the closure runs on this thread (installed
+/// thread-locally and propagated into the engine's rayon workers, so a `SERVICE` nested
+/// under a `FILTER EXISTS` still sees it) and uninstalled when the closure returns.
+/// Composes with [`with_functions`] / [`with_spatial_index`] in either nesting order.
+///
+/// ```ignore
+/// let mut reg = LocalServiceRegistry::new();
+/// reg.register("urn:sparq:local:evens", |_req| {
+///     Ok(LocalServiceRows::new(vec![Variable::new("n")?], rows))
+/// });
+/// with_local_services(&reg, || query(&graph, "SELECT * WHERE { SERVICE <urn:sparq:local:evens> { ?n } }"))
+/// ```
+#[cfg(feature = "service-local")]
+pub fn with_local_services<T>(reg: &LocalServiceRegistry, f: impl FnOnce() -> T) -> T {
+    let _guard = exec::local_services::install(reg);
+    f()
+}
+
 // ---- Custom aggregate registry + window functions (sq-5qz9) -----------------
 //
 // NON-DEFAULT `window-functions` feature. Two distinct, OPT-IN extension surfaces;
