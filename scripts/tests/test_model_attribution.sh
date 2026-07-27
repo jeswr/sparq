@@ -40,7 +40,8 @@ GATE="$REPO_ROOT/scripts/check-model-attribution.py"
 SEAM="$REPO_ROOT/scripts/check-workflow-seam.py"
 WORKFLOW="$REPO_ROOT/.github/workflows/docs-quality.yml"
 NEEDLES=(--needle check-model-attribution.py --needle test_model_attribution.sh
-         --exclude check-workflow-seam.py --min-invocations 4)
+         --exclude check-workflow-seam.py --min-invocations 4
+         --require-exec scripts/tests/test_model_attribution.sh)
 FAILURES=0
 
 pass() { printf '  ok   %s\n' "$1"; }
@@ -211,11 +212,20 @@ else
   else
     fail "B1b docs-quality.yml does NOT invoke check-model-attribution.py --check-briefs"
   fi
-  if grep -q -- 'test_model_attribution\.sh' "$WORKFLOW"; then
-    pass "B1c docs-quality.yml runs THIS test file"
-  else
-    fail "B1c docs-quality.yml does not run scripts/tests/test_model_attribution.sh"
-  fi
+  # B1c — resolved at COMMAND POSITION, not by filename. A filename grep is
+  # satisfied by the adjacent `shellcheck scripts/tests/test_model_attribution.sh`,
+  # so deleting the ONE line that actually RUNS this suite left the grep green,
+  # the seam checker at "4 invocation(s) … OK", and this file's own output
+  # byte-identical at 42 ok / 0 FAIL — while none of it ran in CI.
+  #
+  # Read the honest limit of this assertion: it lives INSIDE the suite it is
+  # about, so if the suite is unwired this line does not run either. The check
+  # that actually protects the repo is the SEPARATE gating seam step, asserted
+  # by B1f below; this one is the local/dev signal.
+  expect_rc 0 "B1c docs-quality.yml EXECUTES this test file (command position, not a mention)" \
+    python3 "$SEAM" --workflow "$WORKFLOW" --needle check-model-attribution.py \
+      --exclude check-workflow-seam.py --min-invocations 1 \
+      --require-exec scripts/tests/test_model_attribution.sh
   # B1d — the PR-level backstop must be present AND must declare itself advisory
   # through the script's own --advisory mode. If someone "promotes" it by deleting
   # --advisory, that is fine (it becomes hard). What must never happen is the
@@ -246,10 +256,11 @@ else
   fi
   if [ -n "$seam_call" ] \
      && [[ "$seam_call" == *"--exclude check-workflow-seam.py"* ]] \
-     && [[ "$seam_call" == *"--min-invocations 4"* ]]; then
-    pass "B1f ...with --exclude (so it does not count itself) and the 4-call floor"
+     && [[ "$seam_call" == *"--min-invocations 4"* ]] \
+     && [[ "$seam_call" == *"--require-exec scripts/tests/test_model_attribution.sh"* ]]; then
+    pass "B1f ...with --exclude, the 4-call floor, and --require-exec on THIS suite"
   else
-    fail "B1f the seam invocation is missing --exclude and/or --min-invocations 4"
+    fail "B1f the seam invocation is missing --exclude / --min-invocations 4 / --require-exec"
   fi
 
   # B2 — the invocations must not be neutered. A step that is conditionally
@@ -320,6 +331,32 @@ PY
   mutate ''
   expect_rc 1 "B3f MUTANT: DELETING the enforcing step is caught" \
     python3 "$SEAM" --workflow "$MUT" "${NEEDLES[@]}"
+
+  # B3h — THE ONE-LINE DELETION. Remove only the line that RUNS this suite,
+  # leaving the adjacent `shellcheck` mention. Every filename-based check stays
+  # green and this file's own output stays byte-identical (42 ok / 0 FAIL), so
+  # nothing but a command-position resolution can see it.
+  python3 - "$WORKFLOW" "$MUT" <<'PY'
+import sys
+src, dst = sys.argv[1:3]
+text = open(src, encoding="utf-8").read()
+line = "          bash scripts/tests/test_model_attribution.sh\n"
+if line not in text:
+    sys.exit("the suite's execution line is not where the test expects it")
+open(dst, "w", encoding="utf-8").write(text.replace(line, "", 1))
+PY
+  expect_rc 1 "B3h MUTANT: deleting the ONE line that RUNS this suite is caught" \
+    python3 "$SEAM" --workflow "$MUT" "${NEEDLES[@]}"
+  # ...and it is caught for the right reason, not by the invocation floor.
+  # (Captured to a file, not piped: `set -o pipefail` above would otherwise let
+  # the checker's intended rc=1 make the `if` condition false regardless of the
+  # grep — a test that fails for its own plumbing proves nothing.)
+  python3 "$SEAM" --workflow "$MUT" "${NEEDLES[@]}" >"$TMP/b3i.txt" 2>&1 || true
+  if grep -q 'never EXECUTED at command position' "$TMP/b3i.txt"; then
+    pass "B3i ...and the reason given is the orphaned execution, not the call-site count"
+  else
+    fail "B3i B3h red for the wrong reason (want 'never EXECUTED at command position')"
+  fi
 
   # B3g — and the checker must not be a rubber stamp in the other direction:
   # the unmutated copy passes, so B3a-f fail for their mutation and not because

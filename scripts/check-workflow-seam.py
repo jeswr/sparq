@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shlex
 import sys
 import tempfile
 from pathlib import Path
@@ -92,11 +93,73 @@ def logical_lines(script: str) -> list[str]:
     return out
 
 
+def simple_commands(script: str) -> list[list[str]]:
+    """Every simple command in a ``run:`` body, as token lists.
+
+    Splitting on the shell's command separators is what turns "the file is
+    MENTIONED somewhere in this step" into "the file is the thing being RUN".
+    Those are very different claims and only the second one means the test
+    executes — see :func:`executes_target`.
+    """
+    cmds: list[list[str]] = []
+    for line in logical_lines(script):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        for part in re.split(r"\|\||&&|[;|&]", stripped):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                toks = shlex.split(part, comments=True)
+            except ValueError:
+                # Unbalanced quotes somewhere else in the workflow: degrade to a
+                # whitespace split rather than skipping the command entirely,
+                # because skipping would fail OPEN.
+                toks = part.split()
+            if toks:
+                cmds.append(toks)
+    return cmds
+
+
+# Interpreters that RUN their first non-flag argument. `shellcheck` and friends
+# take the same argument and do not run it — which is the whole distinction the
+# previous filename grep could not make.
+INTERPRETERS = {"bash", "sh", "zsh", "dash", "ksh", "python3", "python"}
+
+
+def executes_target(script: str, target: str) -> bool:
+    """Does this ``run:`` body EXECUTE ``target`` at command position?"""
+    def same(arg: str) -> bool:
+        arg = arg.lstrip("./")
+        return arg == target or arg.endswith("/" + target) or target.endswith("/" + arg)
+
+    for toks in simple_commands(script):
+        i = 0
+        # Skip `VAR=value` prefixes and `env`, which precede the real command.
+        while i < len(toks) and (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", toks[i]) or toks[i] == "env"):
+            i += 1
+        if i >= len(toks):
+            continue
+        head, rest = toks[i], toks[i + 1:]
+        if Path(head).name in INTERPRETERS:
+            for a in rest:
+                if a.startswith("-"):
+                    continue
+                if same(a):
+                    return True
+                break  # only the FIRST non-flag argument is the script
+        elif same(head):
+            return True
+    return False
+
+
 def seam_findings(
     workflow: Path,
     needles: tuple[str, ...],
     minimum: int,
     excludes: tuple[str, ...] = (),
+    require_exec: tuple[str, ...] = (),
 ) -> tuple[list[str], int]:
     """``(findings, invocations_found)`` for one workflow file.
 
@@ -115,6 +178,7 @@ def seam_findings(
         return [f"{workflow}: not a workflow mapping"], 0
 
     found = 0
+    executed: set[str] = set()
     for job_name, job in (wf.get("jobs") or {}).items():
         if not isinstance(job, dict):
             continue
@@ -123,6 +187,9 @@ def seam_findings(
             if not isinstance(step, dict):
                 continue
             run = step.get("run") or ""
+            for target in require_exec:
+                if executes_target(run, target):
+                    executed.add(target)
             if not any(n in run for n in needles):
                 continue
             if any(x in run for x in excludes):
@@ -154,6 +221,15 @@ def seam_findings(
                         f"{where}: `||` fallback on the gate's command discards its "
                         f"exit status — `{line.strip()[:120]}`"
                     )
+    for target in require_exec:
+        if target not in executed:
+            findings.append(
+                f"{workflow.name}: {target} is REFERENCED but never EXECUTED at command "
+                f"position. Being named by `shellcheck` (or any other tool that takes it "
+                f"as an argument) is not the same as being RUN — deleting the one line "
+                f"that runs it leaves every mention in place and every assertion inside "
+                f"it silently uncovered."
+            )
     if found < minimum:
         findings.append(
             f"{workflow.name}: expected at least {minimum} invocation(s) of "
@@ -340,6 +416,70 @@ jobs:
                 f"--exclude masked a deleted call site (found={found}, findings={findings})"
             )
 
+        # --- --require-exec: MENTIONED is not EXECUTED --------------------
+        # The defect this exists for: deleting the single `bash <suite>` line
+        # leaves `shellcheck <suite>` in place, so every filename-based check
+        # still matches and every assertion inside the suite silently stops
+        # running. Both directions, because a checker that always fails would
+        # "pass" the mutant.
+        target = "scripts/tests/suite.sh"
+        wired = """
+jobs:
+  quick-gates:
+    steps:
+      - name: gate
+        run: python3 scripts/gate.py --check
+      - name: suite
+        run: |
+          shellcheck scripts/tests/suite.sh
+          bash scripts/tests/suite.sh
+"""
+        wf.write_text(wired, encoding="utf-8")
+        findings, _ = seam_findings(wf, needles, 1, (), (target,))
+        if findings:
+            failures.append(f"an EXECUTED suite was reported as an orphan: {findings}")
+
+        wf.write_text(wired.replace("          bash scripts/tests/suite.sh\n", ""), encoding="utf-8")
+        findings, _ = seam_findings(wf, needles, 1, (), (target,))
+        if not any("never EXECUTED at command position" in f for f in findings):
+            failures.append(
+                "MUTANT SURVIVED: the one-line deletion of `bash <suite>` left "
+                f"`shellcheck <suite>` behind and was not caught: {findings}"
+            )
+
+        # An interpreter that merely takes the path as a flag VALUE is not
+        # running it, and a tool that takes it as an argument never was.
+        for body, why in (
+            ("        run: shellcheck scripts/tests/suite.sh\n", "shellcheck-only"),
+            ("        run: echo scripts/tests/suite.sh\n", "echoed"),
+            ("        run: cat scripts/tests/suite.sh > /dev/null\n", "cat-ed"),
+        ):
+            wf.write_text(
+                "jobs:\n  quick-gates:\n    steps:\n      - name: gate\n"
+                "        run: python3 scripts/gate.py --check\n      - name: x\n" + body,
+                encoding="utf-8",
+            )
+            findings, _ = seam_findings(wf, needles, 1, (), (target,))
+            if not any("never EXECUTED at command position" in f for f in findings):
+                failures.append(f"a {why} reference was accepted as an execution")
+
+        # ...and the forms that ARE an execution must be accepted, or the flag
+        # is unusable and gets removed.
+        for body, why in (
+            ("        run: bash scripts/tests/suite.sh\n", "bash <path>"),
+            ("        run: ./scripts/tests/suite.sh\n", "./<path>"),
+            ("        run: bash -x scripts/tests/suite.sh\n", "bash -x <path>"),
+            ("        run: FOO=1 bash scripts/tests/suite.sh\n", "env-prefixed"),
+        ):
+            wf.write_text(
+                "jobs:\n  quick-gates:\n    steps:\n      - name: gate\n"
+                "        run: python3 scripts/gate.py --check\n      - name: x\n" + body,
+                encoding="utf-8",
+            )
+            findings, _ = seam_findings(wf, needles, 1, (), (target,))
+            if findings:
+                failures.append(f"a genuine execution ({why}) was reported as an orphan: {findings}")
+
     if failures:
         print("check-workflow-seam.py self-test FAILED:")
         for f in failures:
@@ -356,6 +496,7 @@ def main() -> int:
     ap.add_argument("--needle", action="append", default=[], help="substring identifying the gate's invocations (repeatable)")
     ap.add_argument("--min-invocations", type=int, default=1, help="fail if fewer matching steps than this exist")
     ap.add_argument("--exclude", action="append", default=[], help="ignore steps whose run body contains this (e.g. the step running THIS checker)")
+    ap.add_argument("--require-exec", action="append", default=[], help="require this script to be EXECUTED at command position, not merely mentioned (repeatable)")
     args = ap.parse_args()
 
     if args.self_test:
@@ -368,7 +509,8 @@ def main() -> int:
         return 1
 
     findings, found = seam_findings(
-        args.workflow, tuple(args.needle), args.min_invocations, tuple(args.exclude)
+        args.workflow, tuple(args.needle), args.min_invocations,
+        tuple(args.exclude), tuple(args.require_exec),
     )
     if findings:
         print(f"check-workflow-seam: {args.workflow} — the gate is not soundly wired:")

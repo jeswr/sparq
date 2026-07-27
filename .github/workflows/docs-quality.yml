@@ -589,6 +589,20 @@ jobs:
       # its own instead of living as an untestable heredoc inside the test it belongs to.
       - name: "Self-test check-workflow-seam.py (swallow / skip / deleted-step mutants)"
         run: python3 scripts/check-workflow-seam.py --self-test
+      # --require-exec is the guard that survives the suite's own removal. Deleting
+      # the ONE line `bash scripts/tests/test_model_attribution.sh` above leaves the
+      # adjacent `shellcheck` mention in place, so every filename-based check still
+      # matched and the suite still printed 42 ok / 0 FAIL — byte-identical — while
+      # running in CI not at all. That silently drops every allowlist-ratchet
+      # assertion and ALL coverage of the PR-range fix. Resolving the reference at
+      # COMMAND POSITION is what distinguishes "mentioned" from "run". This step is a
+      # SEPARATE gating step, so it still reds when the suite itself is unwired —
+      # a check that lives only inside the suite cannot catch the suite's removal.
+      # NOTE: this is the minimal, single-target fix. #4547 implements the durable,
+      # repo-wide version (`--check-test-wiring`, same command-position resolution);
+      # it is stacked on this branch and its mechanism is deliberately NOT duplicated
+      # here.
+      #
       # --exclude is LOAD-BEARING, not tidiness: without it this step's own
       # `--needle check-model-attribution.py` argument counts as a fifth gate
       # invocation, so deleting a REAL call site would leave 4 and still pass the
@@ -600,7 +614,8 @@ jobs:
         run: |
           python3 scripts/check-workflow-seam.py --workflow .github/workflows/docs-quality.yml \
             --needle check-model-attribution.py --needle test_model_attribution.sh \
-            --exclude check-workflow-seam.py --min-invocations 4
+            --exclude check-workflow-seam.py --min-invocations 4 \
+            --require-exec scripts/tests/test_model_attribution.sh
       # The PR-level backstop, ADVISORY for now. It catches the symptom wherever it comes
       # from — a stale brief, a new harness, or an agent copying the markers already in the
       # file it is editing (measured to be the dominant mechanism: agents routed to briefs
