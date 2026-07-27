@@ -68,12 +68,16 @@ so they are framework-agnostic in spirit (default: `node:test`):
   **lowercasing** + datatype defaults (`xsd:string` plain, `rdf:langString`
   lang-tagged), the quad default graph, fresh blank-node uniqueness, and
   `fromTerm`/`fromQuad` deep-copy — **including copying a foreign plain-object
-  term**. `variable` is skipped gracefully if absent. Two further blocks are
-  **feature-detected** (probed, then skipped whole if unsupported, so an older
-  implementation is not failed for a capability it never claimed):
-  **RDF-star / quoted triples** (a `Quad` in the subject/object position, the
-  `Quad#value` empty-string constant, recursive `equals`, and `fromTerm`/
-  `fromQuad` round-tripping a nested quad) and **RDF 1.2 directional
+  term**, and the `Quad#value` empty-string constant. `variable` is skipped
+  gracefully if absent. Three further blocks are **feature-detected** (probed,
+  then skipped whole if unsupported, so an older implementation is not failed
+  for a capability it never claimed): **RDF-star / quoted triples** (a `Quad` in
+  the **subject** position — the only position the data-model spec admits one —
+  plus recursive `equals` and `fromTerm`/`fromQuad` round-tripping a nested
+  quad); **quoted triples in the object position**, which the spec does *not*
+  allow (`object` is a `NamedNode`, `Literal`, `BlankNode` or `Variable`), so it
+  is probed and labelled separately as an **extension beyond the spec** and
+  never gates the normative quoted-subject tests; and **RDF 1.2 directional
   language-tagged literals** (`literal(v, { language, direction })` →
   `rdf:dirLangString`, `direction` significant for `equals`, preserved by
   `fromTerm`).

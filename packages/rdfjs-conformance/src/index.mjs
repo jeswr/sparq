@@ -122,10 +122,10 @@ function has(obj, name) {
 }
 
 /**
- * [OPUS-5] sq-iwhl8 (#1116) — True iff the factory really builds RDF-star / quoted triples,
- * i.e. accepts a `Quad` in the subject/object position and keeps it there as a nested `Quad`
- * term. Probed rather than assumed, so a DataFactory that predates RDF-star skips the block
- * instead of failing it.
+ * [OPUS-5] sq-iwhl8 (#1116) — True iff the factory really builds quoted triples in the
+ * position the data-model spec allows them, i.e. accepts a `Quad` as the SUBJECT of a quad
+ * and keeps it there as a nested `Quad` term. Probed rather than assumed, so a DataFactory
+ * that predates RDF-star skips the block instead of failing it.
  * @param {any} factory
  * @returns {boolean}
  */
@@ -133,8 +133,26 @@ function supportsQuotedTriples(factory) {
   try {
     const n = factory.namedNode('http://example.org/probe');
     const inner = factory.quad(n, n, n);
-    const outer = factory.quad(inner, n, inner);
-    return outer.subject.termType === 'Quad' && outer.object.termType === 'Quad';
+    return factory.quad(inner, n, n).subject.termType === 'Quad';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * [OPUS-5] sq-iwhl8 (#1116) — True iff the factory ALSO accepts a `Quad` in the OBJECT
+ * position. This is deliberately a separate probe from {@link supportsQuotedTriples}: the
+ * data-model spec's `object` is a `NamedNode`, `Literal`, `BlankNode` or `Variable` — it does
+ * NOT include `Quad` — so object-position quoting is an extension beyond the spec, and an
+ * implementation that rejects it must still run the normative quoted-subject tests.
+ * @param {any} factory
+ * @returns {boolean}
+ */
+function supportsQuotedTripleObjects(factory) {
+  try {
+    const n = factory.namedNode('http://example.org/probe');
+    const inner = factory.quad(n, n, n);
+    return factory.quad(n, n, inner).object.termType === 'Quad';
   } catch {
     return false;
   }
@@ -254,9 +272,11 @@ export async function runDataFactoryTests(options) {
       assert.equal(factory.quad(n, n, n).value, '');
     });
 
-    // [OPUS-5] sq-iwhl8 (#1116) — Data-model spec: `Quad_Subject` / `Quad_Object` both include `Quad`, i.e. a quoted triple
-    // (RDF-star) is a first-class term. Feature-detected: a pre-RDF-star factory skips.
-    describe('RDF-star / quoted triples (feature-detected)', () => {
+    // [OPUS-5] sq-iwhl8 (#1116) — Data-model spec, `Quad`: "subject — the subject, which is a `NamedNode`, `BlankNode`,
+    // `Variable` or `Quad`", i.e. a quoted triple (RDF-star) is a first-class term in the SUBJECT position. Note the spec's
+    // `object` is a `NamedNode`, `Literal`, `BlankNode` or `Variable` and does NOT include `Quad`; object-position quoting is
+    // covered separately as an extension below. Feature-detected: a pre-RDF-star factory skips.
+    describe('RDF-star / quoted triples in the subject position (feature-detected)', () => {
       const quoted = supportsQuotedTriples(factory);
       /** @param {string} n */
       const ns = (n) => factory.namedNode(`http://example.org/${n}`);
@@ -270,13 +290,6 @@ export async function runDataFactoryTests(options) {
         assert.equal(s.predicate.value, 'http://example.org/p');
         assert.equal(s.graph.termType, 'DefaultGraph', 'the quoted triple keeps its own graph');
         assert.equal(outer.graph.termType, 'DefaultGraph');
-      });
-
-      test('a quad may be the object of a quad', { skip: !quoted }, () => {
-        const outer = factory.quad(ns('a'), ns('claims'), /** @type {any} */ (inner()));
-        assert.equal(outer.object.termType, 'Quad');
-        const o = /** @type {Quad} */ (/** @type {any} */ (outer.object));
-        assert.equal(o.object.value, 'http://example.org/o');
       });
 
       test('equals recurses into the quoted triple', { skip: !quoted }, () => {
@@ -328,6 +341,25 @@ export async function runDataFactoryTests(options) {
           assert.equal(quadKey(copy), quadKey(original));
         },
       );
+    });
+
+    // [OPUS-5] sq-iwhl8 (#1116) — NON-NORMATIVE extension, NOT data-model conformance: the spec's `Quad` `object` is a
+    // `NamedNode`, `Literal`, `BlankNode` or `Variable` — `Quad` is listed for `subject` only. Some implementations accept a
+    // quoted triple as the object anyway; this block pins that behaviour WHERE OFFERED. Detected independently of the
+    // normative quoted-subject block above, so rejecting it never skips the spec'd subject-position tests.
+    describe('quoted triples in the object position (extension beyond the spec, feature-detected)', () => {
+      const quotedObject = supportsQuotedTripleObjects(factory);
+      /** @param {string} n */
+      const ns = (n) => factory.namedNode(`http://example.org/${n}`);
+
+      test('a quad may be the object of a quad', { skip: !quotedObject }, () => {
+        const inner = factory.quad(ns('s'), ns('p'), ns('o'));
+        const outer = factory.quad(ns('a'), ns('claims'), /** @type {any} */ (inner));
+        assert.equal(outer.object.termType, 'Quad');
+        const o = /** @type {Quad} */ (/** @type {any} */ (outer.object));
+        assert.equal(o.object.value, 'http://example.org/o');
+        assert.equal(o.graph.termType, 'DefaultGraph', 'the quoted triple keeps its own graph');
+      });
     });
 
     // [OPUS-5] sq-iwhl8 (#1116) — Data-model spec (RDF 1.2): `literal(value, { language, direction })` builds a directional
