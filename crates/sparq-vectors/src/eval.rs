@@ -1182,6 +1182,10 @@ pub fn run_pooling_ablation(
     })
 }
 
+/// One sketch contribution: the **asserting triple** (what `w(t)` is keyed on) and the neighbour
+/// embedding it pools in. Named so the per-subject contribution map stays readable.
+type SketchContribution = ([Id; 3], Vec<f32>);
+
 /// A copy of `model` whose entity embeddings are blended with each entity's
 /// **assertion-weighted structural sketch**: the pool of its outgoing non-schema object-neighbours'
 /// embeddings in `graph`, each contribution keyed on **the asserting triple** (so the weight is the
@@ -1200,7 +1204,7 @@ fn sketch_augmented(
 ) -> Result<TrainedModel, String> {
     let dim = model.dim;
     // Per subject, the (asserting triple, neighbour embedding) contributions that feed its sketch.
-    let mut contributions: FxHashMap<Id, Vec<([Id; 3], Vec<f32>)>> = FxHashMap::default();
+    let mut contributions: FxHashMap<Id, Vec<SketchContribution>> = FxHashMap::default();
     for [s, p, o] in graph.iter_ids() {
         if splits.schema_preds.contains(&p) {
             continue;

@@ -258,7 +258,7 @@ impl ProvenanceWeights {
             }
         }
         for (stmt, parts) in &reif_parts {
-            if parts.iter().any(|&i| i == NO_ID) || !pw.has_provenance(*stmt) {
+            if parts.contains(&NO_ID) || !pw.has_provenance(*stmt) {
                 continue; // an incomplete or unannotated reification is not statement provenance
             }
             pw.statement.entry(*parts).or_default().push(*stmt);
