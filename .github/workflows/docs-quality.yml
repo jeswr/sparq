@@ -585,6 +585,213 @@ jobs:
         run: shellcheck scripts/check-release-aliases.sh scripts/tests/test_check_release_aliases.sh
       - name: Self-test check-release-aliases.sh (golden contract + partial-extraction teeth)
         run: bash scripts/tests/test_check_release_aliases.sh
+      # [OPUS-5] #2531 / maintainer report on PR #4361: the MODEL-ATTRIBUTION honesty gate.
+      # AGENTS.md contract item 5 requires every agent to stamp the model that ACTUALLY
+      # authored a change — an inline `[MODEL]` marker PLUS a `Co-Authored-By: Claude MODEL`
+      # trailer — and rule 11 forbids an agent brief from hard-coding a specific model. Both
+      # were prose-only, and both drifted: `.claude/agents/sparq-rust-impl.md` still tells
+      # every worker routed to that ROLE "you are Sonnet … tag your code with `[SONNET-4.6]`"
+      # regardless of which MODEL the harness actually routed to, so Opus 5 workers have been
+      # stamping `[SONNET-4.6]` on code Sonnet never wrote (PR #4361 added 22 such markers).
+      # The marker is the "re-review the weak model's work" signal, so a false one both hides
+      # real weak-model work and slanders good work — the same duplicated-source-of-truth
+      # failure `check-no-perf-numbers.py` exists to prevent.
+      #   --check-briefs is the ROOT-CAUSE lint (R1: no concrete Co-Authored-By in a brief;
+      #     R2: no self-attribution directive naming a literal marker). It fires on exactly
+      #     one line across all 20 briefs today, and that line is content-fingerprint
+      #     allowlisted because `.claude/agents/*.md` is a PROTECTED surface (rule 11 /
+      #     sq-4fj0r) that no agent may edit — it is needs:user on #2531. The allowlist
+      #     RATCHETS: a stale entry fails, so the exemption cannot outlive the defect.
+      #   The test script additionally drives the --check-commits backstop (every marker a
+      #     commit ADDS must match that commit's own trailer) and asserts the seam below.
+      # Deterministic, stdlib-only, no network — mirrors the other scripts/check-*.py lints.
+      - name: Self-test check-model-attribution.py (brief lint + commit gate, both directions)
+        run: python3 scripts/check-model-attribution.py --self-test
+      - name: "Enforce agent briefs do not hard-code model attribution (#2531) — GATING"
+        run: python3 scripts/check-model-attribution.py --check-briefs
+      - name: shellcheck the model-attribution test + run it (incl. the YAML-seam assertions)
+        run: |
+          shellcheck scripts/tests/test_model_attribution.sh
+          bash scripts/tests/test_model_attribution.sh
+      # The seam guard itself, run BOTH ways: its own hermetic mutants (9 of them, incl. the
+      # backslash-continuation `|| true` that the earlier inline version missed), and then
+      # against this very file. Discarding an earned failure with `|| true` has caused three
+      # separate incidents in this repo in one day; the guard against it now has teeth of
+      # its own instead of living as an untestable heredoc inside the test it belongs to.
+      - name: "Self-test check-workflow-seam.py (swallow / skip / deleted-step mutants)"
+        run: python3 scripts/check-workflow-seam.py --self-test
+      # --require-exec is the guard that survives the suite's own removal. Deleting
+      # the ONE line `bash scripts/tests/test_model_attribution.sh` above leaves the
+      # adjacent `shellcheck` mention in place, so every filename-based check still
+      # matched and the suite still printed 42 ok / 0 FAIL — byte-identical — while
+      # running in CI not at all. That silently drops every allowlist-ratchet
+      # assertion and ALL coverage of the PR-range fix. Resolving the reference at
+      # COMMAND POSITION is what distinguishes "mentioned" from "run".
+      #
+      # [OPUS-5] CORRECTION (round 4). This comment previously read: "This step is a SEPARATE
+      # gating step, so it still reds when the suite itself is unwired — a check that
+      # lives only inside the suite cannot catch the suite's removal." The second half
+      # is true. The first half was stated as an unconditional property and was not
+      # one: this step was itself exempt from all five of its own neutering checks,
+      # because `--exclude check-workflow-seam.py` matched this step's own run body
+      # and was applied before the checks rather than only to the invocation count.
+      # One additive `continue-on-error: true` here — a keyword that already appears
+      # in this file — plus deleting the suite line was measured to leave docs-quality
+      # fully GREEN with the suite never running. Corrected property, and the reason
+      # it now holds:
+      #
+      #   * `--exclude` is RETIRED. Invocations are resolved at command position, so
+      #     this step's `--needle` arguments are not counted and no self-exemption is
+      #     needed. Passing the flag is now a hard argparse error (B1g/B1h).
+      #   * A step can never red its OWN neutering — continue-on-error discards
+      #     exactly the exit status that would report it. So this step is NOT the sole
+      #     protection and does not claim to be. It catches the suite being unwired;
+      #     the suite catches THIS step being neutered, because it runs the same
+      #     checker over this file from its own separate step (B2), and B5a-f pin one
+      #     red per neutering form. Two edges; the residual is a diff that disarms
+      #     both steps at once, which is a visible seven-line workflow change.
+      #
+      # NOTE: this is the minimal, single-target fix. #4547 implements the durable,
+      # repo-wide version (`--check-test-wiring`, same command-position resolution);
+      # it is stacked on this branch and its mechanism is deliberately NOT duplicated
+      # here.
+      - name: "The model-attribution gate is soundly WIRED into this workflow — GATING"
+        run: |
+          python3 scripts/check-workflow-seam.py --workflow .github/workflows/docs-quality.yml \
+            --needle check-model-attribution.py --needle test_model_attribution.sh \
+            --min-invocations 4 \
+            --require-exec scripts/tests/test_model_attribution.sh
+      # The PR-level backstop, ADVISORY for now. It catches the symptom wherever it comes
+      # from — a stale brief, a new harness, or an agent copying the markers already in the
+      # file it is editing (measured to be the dominant mechanism: agents routed to briefs
+      # that ARE model-aware still emit `[SONNET-4.6]` when the surrounding file is full of it).
+      # Not yet HARD because a census on 2026-07-26 found 37 of 119 open PRs adding a false
+      # `[SONNET-4.6]`; hard-gating today wedges the merge train on work whose only fault is
+      # mimicry. Advisory-first mirrors the E2E lanes' documented promotion path
+      # (.github/E2E-GATING-POLICY.md). Promotion to HARD is tracked on #2531 and needs two
+      # things first: the protected-surface brief fix, and the residue cleanup.
+      # `--advisory` is a declared MODE of the script, deliberately not a `|| true` in this
+      # workflow — check-workflow-seam.py (run above) rejects a `|| true` on this step's
+      # command, INCLUDING one written across a backslash continuation, so "advisory" can
+      # never quietly become "swallowed".
+      #
+      # THE RANGE. `actions/checkout` (fetch-depth: 1) gives us `refs/pull/N/merge` as a
+      # SHALLOW GRAFT: no walkable parents. The first version of this step scanned
+      # `origin/main..HEAD` and produced 15,123 findings on this PR's own head (run
+      # 89851383239) — the entire repository tree reported as additions of the merge commit,
+      # including files the PR never touched. `git fetch --depth=200 origin main` does not
+      # help (the merge ref is unreachable from main, so it is never deepened) and neither
+      # does merge-base narrowing (merge-base exits 1 on a graft). So the range is rebuilt
+      # from the PR's OWN head ref using the event payload, fetched to `commits + 1` so that
+      # every scanned commit has a real parent and therefore a real diff; the +1th commit is
+      # the base and is never scanned. If that fetch fails the script reports INCOMPLETE
+      # rather than "OK" — an inert backstop that claims to pass is the failure being fixed.
+      - name: "Model markers added by this PR match their commit trailers (ADVISORY — #2531)"
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_COMMITS: ${{ github.event.pull_request.commits }}
+        run: |
+          # Both operands are validated as digits before the arithmetic: this step
+          # lives in `quick-gates`, which has no continue-on-error, so an unexpected
+          # payload shape must degrade to "INCOMPLETE" and not red the docs gate for
+          # every PR in the queue.
+          case "${PR_NUMBER}:${PR_COMMITS}" in
+            [0-9]*:[0-9]*)
+              git fetch --quiet --no-tags --depth="$(( PR_COMMITS + 1 ))" \
+                origin "+refs/pull/${PR_NUMBER}/head:refs/remotes/origin/pr/${PR_NUMBER}/head" || true
+              ;;
+          esac
+          python3 scripts/check-model-attribution.py --advisory --check-commits-pr
+      # [OPUS-5] The seam guard above is pointed at ONE gate's steps by `--needle`, and
+      # check-sticky-failure-exits.py audits Python, not YAML — so until now every OTHER
+      # `run:` block in the repository could discard an earned failure unobserved. That is
+      # the gap #4385 flagged as out of scope. These four steps close it corpus-wide over
+      # all 67 workflows.
+      #
+      # WHY MOST `||` IS NOT A DEFECT, and why that had to be solved before widening: a
+      # naive "`||` in a gating job" rule reports 92 occurrences on the live tree. The
+      # overwhelming majority are boolean tests (`[ a ] || [ b ]`), AMPLIFIERS
+      # (`|| { echo ::error::…; exit 1; }` — the opposite of swallowing), exit-code
+      # captures that are read back (`|| rc=$?` … `if [ "$rc" -ne 0 ]`), or shell
+      # comments. A guard that reds on those is unshippable and gets deleted, which is
+      # strictly worse than no guard. The classifier reduces 92 -> 16.
+      #
+      # ADVISORY vs GATING IS READ OFF THE STRUCTURE, not a list of blessed names: a step
+      # is non-gating exactly when the repo's own merge gate already ignores it — its
+      # workflow has no pull_request/merge_group trigger (so no check-run reaches
+      # ci_summary_gate.py), or its JOB name matches the very `\b(advisory|informational)\b`
+      # predicate that ci_summary_gate.py excludes by and check-advisory-registry.py (C2)
+      # forces into .github/advisory-registry.json with an owner and promotion criteria.
+      # A step name is deliberately NOT consulted: three steps in this file have
+      # "advisory" in their titles while being hard gates (mention vs claim).
+      - name: "Self-test check-workflow-swallow.py (taxonomy + corpus mutants + command-position)"
+        run: python3 scripts/check-workflow-swallow.py --self-test
+      # HARD from day one, because neither failure can be caused by pre-existing drift:
+      #   * a STALE exemption — the allowlist is content-fingerprinted, so an entry whose
+      #     construct was edited or removed fails, and an exemption cannot outlive its
+      #     defect (same ratchet as check-model-attribution.allowlist.json);
+      #   * a scan that reached NOTHING — the floors are the corpus-level analogue of the
+      #     seam checker's --min-invocations. #4385's first real CI run shipped a step
+      #     that was wired but MIS-ARGUED, whose floor its own argument could satisfy;
+      #     these floors are asserted from this YAML by W7/W8 in the test below, and the
+      #     step prints the counts it actually reached so a real run can be checked
+      #     against a local one.
+      - name: "check-workflow-swallow allowlist ratchet + corpus floors — GATING"
+        run: |
+          python3 scripts/check-workflow-swallow.py --check-allowlist \
+            --min-workflows 60 --min-run-steps 600
+      # ADVISORY for now (a declared MODE of the script, never a `|| true` in this YAML —
+      # the seam step below rejects that, including across a backslash continuation).
+      # 15 of the 16 gating swallows are legitimate and allowlisted with reasons; the one
+      # that is not is ci.yml:coverage-engine-run (#4545), which discards the very fixture
+      # fetch it exists to guarantee. Promotion to HARD is stated in the allowlist's
+      # `_promotion` field: findings at zero, two weeks green on main, non-growing entries.
+      - name: "No gating step discards an earned failure (ADVISORY — #4545)"
+        run: |
+          python3 scripts/check-workflow-swallow.py --advisory --check-corpus \
+            --min-workflows 60 --min-run-steps 600
+      # The orphaned-suite half, and the reason it cannot be a filename grep: a test suite
+      # is usually named TWICE in a workflow — once under `shellcheck`, once under `bash`.
+      # Delete the `bash` line and a grep for the filename is still satisfied by the
+      # `shellcheck` line, so every assertion in that suite stops running with no signal
+      # and the suite still passes when anyone runs it by hand. This resolves the
+      # reference at COMMAND POSITION instead, transitively through runner scripts.
+      # ADVISORY only because two suites are orphaned today (they promote out with #4546).
+      - name: "Every scripts/tests suite is actually EXECUTED by CI (ADVISORY — #4546)"
+        run: |
+          python3 scripts/check-workflow-swallow.py --advisory --check-test-wiring \
+            --min-run-steps 40
+      # [OPUS-5] And the seam guard turned on THIS wiring: 4 call sites, none skipped,
+      # none swallowed, and — the part that was missing — the suite below is EXECUTED.
+      #
+      # `--require-exec` closes the hole a reviewer measured on this branch: deleting the
+      # single `bash scripts/tests/test_workflow_swallow.sh` line, leaving the adjacent
+      # `shellcheck` mention, left EVERY leg green (self-test, allowlist, corpus,
+      # test-wiring, seam, seam self-test) while all 34 assertions stopped running. That
+      # silently disarms W5-W10, which are the only things holding `--min-invocations 4`
+      # and the corpus floors in this YAML — so a later deletion of those would produce no
+      # signal at all. `--check-test-wiring` does report the orphan, but it runs
+      # `--advisory` and exits 0. This step is HARD, resolves the reference at command
+      # position, and lives OUTSIDE the suite, because a check inside the suite cannot
+      # catch the suite's removal (the mutant row "delete this suite from CI -> reds W10"
+      # is circular as CI evidence: once the line is gone, W10 never runs).
+      #
+      # `--exclude` is RETIRED — see the correction on the model-attribution seam step
+      # above. Invocations are resolved at command position, so this step's own `--needle`
+      # argument is not counted and no self-exemption is needed; passing the flag is now a
+      # hard argparse error. This step is itself subject to all five neutering checks,
+      # and the suite's own seam assertion (run from a separate CI step) is what catches
+      # it being neutered.
+      - name: "The workflow-swallow guard is soundly WIRED into this workflow — GATING"
+        run: |
+          python3 scripts/check-workflow-seam.py --workflow .github/workflows/docs-quality.yml \
+            --needle check-workflow-swallow.py \
+            --min-invocations 4 \
+            --require-exec scripts/tests/test_workflow_swallow.sh
+      - name: shellcheck the workflow-swallow test + run it
+        run: |
+          shellcheck scripts/tests/test_workflow_swallow.sh
+          bash scripts/tests/test_workflow_swallow.sh
       # [OPUS-4.8] sq-mkza: end-to-end proof that BOTH honesty gates now cover the
       # paper-factory `.typ` sources (site/papers/**/*.typ) — the highest-stakes
       # OUTWARD surface. Before sq-mkza a hard-coded perf ratio or an unqualified

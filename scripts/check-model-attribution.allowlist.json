@@ -1,0 +1,27 @@
+{
+  "_README": [
+    "Known, ACCEPTED violations of the model-attribution gate (scripts/check-model-attribution.py).",
+    "",
+    "Each entry is keyed by 'fingerprint': the sha256 of the offending line with whitespace",
+    "collapsed. Keying on CONTENT, not line number, is deliberate: line numbers drift with every",
+    "edit above them, and a path-only key would silently exempt a NEW violation added to the same",
+    "file. Change the line in any way and the fingerprint stops matching, so the gate re-fires.",
+    "",
+    "An entry REQUIRES a non-empty 'reason' and 'tracking' (issue/bead). Adding an entry is a",
+    "reviewed act: it records debt, it does not make the defect go away.",
+    "",
+    "Entries are for cases the repo genuinely cannot fix right now. The only such case today is a",
+    "PROTECTED-surface edit: AGENTS.md rule 11 (bead sq-4fj0r) makes .claude/agents/*.md",
+    "maintainer-only, so no agent may correct the brief that causes the defect."
+  ],
+  "entries": [
+    {
+      "path": ".claude/agents/sparq-rust-impl.md",
+      "fingerprint": "7c421922a3dad7ef0be930a5fe9255e0c08f847040087e76d4f237c615bf776b",
+      "rules": ["R1", "R2"],
+      "reason": "THE root cause of the false-`[SONNET-4.6]` incident: this brief is appended to the system prompt via --append-system-prompt-file for every worker routed to the sparq-rust-impl ROLE, independent of which MODEL the harness routes to, and it hard-codes 'you are Sonnet, not Opus'. An Opus 5 worker therefore stamps `[SONNET-4.6]` on code Sonnet never wrote (observed on PR #4361, which added 22 such markers). The one-line fix is written out verbatim in issue #2531 and in the PR that added this gate. It CANNOT be applied by an agent: .claude/agents/*.md is a PROTECTED surface under AGENTS.md rule 11 (sq-4fj0r) and agent-config self-modification is blocked by design, so this is needs:user. This entry exists so the gate can be HARD for every other brief while the one brief no agent may touch stays visible as dated debt rather than as an issue nobody reads. DELETE this entry the moment the maintainer applies the fix — the gate will then pass on its own.",
+      "tracking": "https://github.com/sparq-org/sparq/issues/2531",
+      "added": "2026-07-26"
+    }
+  ]
+}

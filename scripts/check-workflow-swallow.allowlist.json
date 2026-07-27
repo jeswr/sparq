@@ -1,0 +1,142 @@
+{
+ "_doc": "Exemptions for scripts/check-workflow-swallow.py. Each key is a CONTENT FINGERPRINT over (workflow, job, kind, whitespace-normalised construct text) — not a path plus a line number — following the allowlist design in PR #4385. Two consequences, both deliberate: (a) an exemption cannot silently drift onto a DIFFERENT construct later added to the same step, and (b) the allowlist RATCHETS — `--check-allowlist` HARD-FAILS on an entry whose fingerprint no longer appears in the corpus, so an exemption cannot outlive the thing it exempts. Editing an exempted command invalidates its exemption, which is the point: the reason was written about THAT command. Regenerate a fingerprint with `python3 scripts/check-workflow-swallow.py --census`.",
+ "_promotion": "Findings are ADVISORY on this first pass (`--advisory --check-corpus`); allowlist hygiene and the corpus floors are HARD from day one, because a stale exemption or a scan that reached nothing cannot be caused by pre-existing drift. Promotion of the FINDINGS half to gating requires: (1) the un-exempted finding count to reach zero and stay there — one is open today, ci.yml:coverage-engine-run, see #4545; (2) two weeks of green advisory output on main with no new false positive reported; (3) the `entries` list here to be non-growing over that window. Promotion of `--check-test-wiring` is nearer: it has 2 known orphans and no false positives, so it promotes as soon as those two suites are wired or deleted.",
+ "_fields": "workflow, job, kind, snippet (for humans; the fingerprint is authoritative), reason (why this specific swallow is correct), promotion (what would have to change for the exemption to be removed), registered (ISO-8601 date).",
+ "entries": {
+  "5164b779c6dfd62c": {
+   "workflow": "bead-autoclose.yml",
+   "job": "close-merged-beads",
+   "kind": "SUBSHELL-SWALLOW-UNCHECKED",
+   "snippet": "SUBJECT=\"$(git log -1 --format=%s \"$MERGE_SHA\" 2>/dev/null || true)\"",
+   "reason": "The commit subject is OPTIONAL enrichment passed to ci-close-merged-beads.py alongside the authoritative --pr and --title. An empty subject degrades the bead-id scan to the PR title, which is the primary source; it cannot cause a wrong issue to be closed. The `|| true` covers the merge SHA being absent from a shallow clone.",
+   "promotion": "Remove if ci-close-merged-beads.py ever starts treating --subject as authoritative rather than supplementary, at which point an empty value must become an error.",
+   "registered": "2026-07-27"
+  },
+  "b984f82daef8d8a9": {
+   "workflow": "bench.yml",
+   "job": "bench",
+   "kind": "SWALLOW",
+   "snippet": "git show FETCH_HEAD:dev/bench/data.js > prev-data.js ... && echo ... || echo \"benchmark-data branch has no dev/bench/data.js yet.\"",
+   "reason": "First-run bootstrap. The benchmark-data history branch legitimately does not exist on the very first run or after the branch is deleted; the absence is reported on both arms and the downstream comparison is skipped, not silently passed.",
+   "promotion": "Never — a missing history branch is a real, expected state. Remove only if the branch becomes a hard precondition created elsewhere.",
+   "registered": "2026-07-27"
+  },
+  "b59a979065be3c47": {
+   "workflow": "bench.yml",
+   "job": "bench",
+   "kind": "SWALLOW",
+   "snippet": "git rebase --abort 2>/dev/null || true",
+   "reason": "Cleanup on a path that may or may not be mid-rebase. `git rebase --abort` exits non-zero precisely when there is nothing to abort, which is the success case here.",
+   "promotion": "Never — this is the idiomatic spelling of a conditional cleanup.",
+   "registered": "2026-07-27"
+  },
+  "4396e316f7f77af8": {
+   "workflow": "bench.yml",
+   "job": "bench",
+   "kind": "SWALLOW",
+   "snippet": "python3 scripts/bench-triage.py --mode build-comparison ... || { echo \"::warning::comparison build failed (non-fatal)\"; exit 0; }",
+   "reason": "Triage FILING is advisory relative to the perf gate. The gating measurement is scripts/perf-gate.py, which runs in its own step and is not touched by this fallback; this step only builds the input for a flake-issue filer. A failure here loses an issue, not a regression signal.",
+   "promotion": "Remove if the soft-zone triage output ever becomes an input to the perf gate's verdict rather than to issue filing.",
+   "registered": "2026-07-27"
+  },
+  "9ce38c36605f3f52": {
+   "workflow": "bench.yml",
+   "job": "bench",
+   "kind": "SWALLOW",
+   "snippet": "python3 scripts/bench-triage.py --mode soft ... || echo \"::warning::soft-zone triage filer failed (non-fatal)\"",
+   "reason": "Same lane as the entry above: this is the filer itself. The hard perf floor is enforced separately by perf-gate.py.",
+   "promotion": "Same condition as 4396e316f7f77af8.",
+   "registered": "2026-07-27"
+  },
+  "f16ffb42617bb551": {
+   "workflow": "ci.yml",
+   "job": "test",
+   "kind": "SWALLOW",
+   "snippet": "./scripts/ci-free-disk.sh || true",
+   "reason": "Disk housekeeping between shards. Reclaiming zero bytes is not a test failure, and letting a cleanup script red the test shard would convert a runner-image change into a false red on the required gate.",
+   "promotion": "Remove if disk exhaustion ever becomes a gating precondition with its own explicit assertion (scripts/disk-guard.sh already fills that role and is NOT swallowed).",
+   "registered": "2026-07-27"
+  },
+  "ae57c5a8372b47ea": {
+   "workflow": "ci.yml",
+   "job": "lint",
+   "kind": "CONTINUE-ON-ERROR",
+   "snippet": "continue-on-error: true  (step: rustfmt (informational))",
+   "reason": "Declared informational in the workflow's own comment and named as such. rustfmt cannot gate until the one-time `cargo fmt --all` workspace reformat lands (deferred behind the in-flight branches — see rustfmt.toml and the ci.yml header); issue #2360 recorded a workspace-wide failure on unchanged files under an ambient rustfmt.",
+   "promotion": "Remove the day the workspace reformat merges and rustfmt flips to a hard gate — the ci.yml header already commits to that.",
+   "registered": "2026-07-27"
+  },
+  "0500639de66bae0c": {
+   "workflow": "ci.yml",
+   "job": "service-federation-conformance",
+   "kind": "SWALLOW",
+   "snippet": "grep -E 'pass /' served-conformance.log || true",
+   "reason": "A display line inside the `>> \"$GITHUB_STEP_SUMMARY\"` block of the 'Emit served-surface conformance report' step; it never produces the PASS value. The lane's verdict is enforced twice, neither of them here: (1) in this same step, the `served-conformance-report` binary is FAIL-CLOSED — it exits non-zero on a zero-assertion lane, any genuine failure, or a floor regression, and `set -o pipefail` + `tee` propagate that; (2) ~30 lines earlier, in the separate 'Run SD + Graph Store Protocol lane … + enforce floor' step, by `[ -n \"$PASS\" ] && [ \"$PASS\" -ge \"$FLOOR\" ] || { echo ::error::…; exit 1; }`, which this guard classifies as an AMPLIFIER. grep exiting 1 on no match must not red a lane whose verdict is computed elsewhere. (Corrected: this reason previously said the floor was enforced 'two lines later' in the same step — right substance, wrong location.)",
+   "promotion": "Remove if the grep ever becomes the source of the PASS value rather than a display line.",
+   "registered": "2026-07-27"
+  },
+  "4705cd32e8e13439": {
+   "workflow": "ci.yml",
+   "job": "coverage-measure",
+   "kind": "SWALLOW",
+   "snippet": "python3 scripts/cone_coverage.py --mode compute-cone --base \"$BASE\" --head \"$HEAD\" --output cone.json || true",
+   "reason": "SHADOW MODE, declared in the adjacent comment (sq-6vshe.8). The cone-coverage computation is being measured against the full coverage number before it is trusted; it feeds a divergence report, not the coverage ratchet. The ratchet itself is scripts/coverage-gate.py and is not swallowed.",
+   "promotion": "Remove all three cone_coverage entries together when sq-6vshe.8 exits shadow mode and the cone becomes the coverage input.",
+   "registered": "2026-07-27"
+  },
+  "ca3ba3789b53ec0d": {
+   "workflow": "ci.yml",
+   "job": "coverage-measure",
+   "kind": "SWALLOW",
+   "snippet": "python3 scripts/cone_coverage.py --mode compute-cone --output cone.json || true",
+   "reason": "The no-base arm of the same shadow-mode pre-step as 4705cd32e8e13439.",
+   "promotion": "Same condition as 4705cd32e8e13439.",
+   "registered": "2026-07-27"
+  },
+  "4f18907e4f904e51": {
+   "workflow": "ci.yml",
+   "job": "coverage-measure",
+   "kind": "SWALLOW",
+   "snippet": "python3 scripts/cone_coverage.py --mode shadow-report --cone cone.json --coverage-summary ... || true",
+   "reason": "The shadow REPORT half of sq-6vshe.8. Its whole output is a divergence log used to decide whether the cone can be trusted; a failure to produce it cannot make a coverage regression pass, because the regression check is a different script.",
+   "promotion": "Same condition as 4705cd32e8e13439.",
+   "registered": "2026-07-27"
+  },
+  "4b2fd3ae967ebb4a": {
+   "workflow": "docs-quality.yml",
+   "job": "quick-gates",
+   "kind": "SWALLOW",
+   "snippet": "git fetch --quiet --no-tags --depth=\"$(( PR_COMMITS + 1 ))\" origin \"+refs/pull/${PR_NUMBER}/head:...\" || true",
+   "reason": "Best-effort deepening for the model-attribution backstop (PR #4385). The failure is NOT lost: check-model-attribution.py --check-commits-pr detects the missing commits and reports INCOMPLETE rather than OK, which is the property that PR was specifically fixed to have. Reddening quick-gates for every PR on a transient fetch would be the worse failure.",
+   "promotion": "Remove if the backstop ever stops distinguishing INCOMPLETE from OK, at which point the fetch failure would become invisible and must gate.",
+   "registered": "2026-07-27"
+  },
+  "13fb1db299e93f2b": {
+   "workflow": "flow-on-gates.yml",
+   "job": "quick-gates",
+   "kind": "SWALLOW",
+   "snippet": "gh pr view \"$num\" ... --json labels --jq '.labels[].name' > pr-labels.txt || : > pr-labels.txt",
+   "reason": "The fallback is explicit and fail-CLOSED: it truncates pr-labels.txt to empty, and an empty label set means no escape hatch is granted, so an API failure makes the gate stricter rather than laxer. That is the correct direction for a label-driven exemption.",
+   "promotion": "Remove if label absence ever starts GRANTING an exemption instead of withholding one — then the swallow would fail open.",
+   "registered": "2026-07-27"
+  },
+  "4e5375dc11b30791": {
+   "workflow": "formal-verification.yml",
+   "job": "kani",
+   "kind": "SWALLOW",
+   "snippet": "pkill -9 -x cbmc 2>/dev/null || true",
+   "reason": "Cleanup of a possibly-already-dead solver process after a per-harness timeout. pkill exits 1 when nothing matched, which is the normal case.",
+   "promotion": "Never — conditional process cleanup.",
+   "registered": "2026-07-27"
+  },
+  "fbde0d4ef90d1ca3": {
+   "workflow": "formal-verification.yml",
+   "job": "kani",
+   "kind": "SWALLOW",
+   "snippet": "tail -n 40 \"$log\" 2>/dev/null || true",
+   "reason": "Diagnostic log tail printed while summarising harness results. The pass/fail verdict is computed from the captured `ec` values and enforced by `if [ \"$had_fail\" -eq 1 ] || [ \"$had_timeout\" -eq 1 ]`, which this guard classifies as a BOOLEAN-TEST feeding a real failure path.",
+   "promotion": "Never — a diagnostic print.",
+   "registered": "2026-07-27"
+  }
+ }
+}
