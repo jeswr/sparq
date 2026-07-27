@@ -793,6 +793,21 @@ def self_test() -> int:
 
     expect(check_briefs(Path(td)) != [], "empty agents dir must fail rather than pass vacuously")
 
+    # A corrupt allowlist must fail CLOSED — pinned over a brief that is CLEAN,
+    # so this can only be failing on the allowlist. The shell suite's equivalent
+    # fixture used to carry a live R2 violation, which meant "the gate returned
+    # non-empty" was satisfied by the brief and the fail-open mutant
+    # (`return {}, []`) survived the whole suite AND this self-test.
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        _write(root, ".claude/agents/clean.md",
+               "- Markers follow the RUNNING model; derive them from the harness.\n")
+        expect(check_briefs(root) == [], "CONTROL: the clean brief must pass on its own")
+        _write(root, str(ALLOWLIST_PATH), "not json {")
+        v = check_briefs(root)
+        expect(any("unreadable/invalid JSON" in x for x in v),
+               f"a corrupt allowlist did not fail CLOSED over a clean brief: {v}")
+
     # ---- commit gate -------------------------------------------------------
     with tempfile.TemporaryDirectory() as td:
         repo = Path(td)
@@ -904,6 +919,40 @@ def self_test() -> int:
         _git(["add", "e.rs"], cwd=repo)
         _git(["commit", "-qm", "revert: e\n\nCo-Authored-By: Claude Opus 5 <n@a.com>"], cwd=repo)
         expect(cc(f"{cleaned}..HEAD") == [], "allow-marker did not exempt a commit line")
+
+        # ---- file_is_exempt's UNREADABLE branch must fail CLOSED ------------
+        # The exempt directive is read at the range TIP. If a commit ADDS a
+        # marker to a file that no longer exists at the tip, `git show tip:path`
+        # fails — and treating that as "exempt" would let any PR hide a false
+        # marker by deleting the file in a later commit. Pinned because the
+        # `return True` mutant survived both the suite and this self-test.
+        _write(repo, "gone.rs", "// [SONNET-4.6] added, then the file is deleted\n")
+        _git(["add", "gone.rs"], cwd=repo)
+        _git(["commit", "-qm", "feat: g\n\nCo-Authored-By: Claude Opus 5 <n@a.com>"], cwd=repo)
+        before_delete = _git(["rev-parse", "HEAD~1"], cwd=repo).strip()
+        (repo / "gone.rs").unlink()
+        _git(["add", "-A", "gone.rs"], cwd=repo)
+        _git(["commit", "-qm", "chore: delete it\n\nCo-Authored-By: Claude Opus 5 <n@a.com>"], cwd=repo)
+        # `git cat-file -e <rev>:<path>` on the BLOB — not _object_exists, which
+        # asks for a commit and would report "missing" even for a live file,
+        # making this control pass vacuously.
+        tip_has_gone = subprocess.run(
+            ["git", "cat-file", "-e", "HEAD:gone.rs"], cwd=repo,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+        ).returncode == 0
+        expect(not tip_has_gone,
+               "CONTROL: gone.rs must be UNREADABLE at the tip or this pins nothing")
+        expect(
+            subprocess.run(
+                ["git", "cat-file", "-e", f"{before_delete}:seed.txt"], cwd=repo,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+            ).returncode == 0,
+            "CONTROL: the blob probe must report PRESENT for a file that exists",
+        )
+        v = cc(f"{before_delete}..HEAD")
+        expect(any("gone.rs" in x for x in v),
+               "an unreadable-at-tip file was treated as EXEMPT — fail-open hole")
+        cleaned = _git(["rev-parse", "HEAD"], cwd=repo).strip()
 
         # ---- the SHALLOW-GRAFT teeth (the reviewer's blocking finding) ------
         # A shallow clone of the SAME repo. Its boundary commit has parents in
