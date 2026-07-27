@@ -2510,6 +2510,40 @@ def stuck_self_test() -> None:
         UNPARK_GATE_CONCLUDED, UNPARK_THREADS_RESOLVED, UNPARK_HEAD_MOVED,
     }
     assert set(UNPARK_CONDITIONS.values()) == known_conditions, UNPARK_CONDITIONS
+    # The assertion above is one belt; the IMPORT-TIME assert is the other, and it is the
+    # one that matters in production, where nothing runs this self-test. A belt nobody
+    # tests is decorative — measured: deleting the import-time assert left this whole
+    # suite green — so prove it fires by importing a copy of this module with one class's
+    # machine exit removed. Hermetic: source text + exec, no subprocess and no network.
+    with open(__file__, encoding="utf-8") as handle:
+        module_source = handle.read()
+    maimed = module_source.replace(
+        f'    "blocked-threads": UNPARK_THREADS_RESOLVED,\n', "", 1
+    )
+    assert maimed != module_source, "the totality-assert probe stopped matching its target"
+    # @dataclass resolves annotations through sys.modules[__name__], so the probe has to be
+    # a real (temporary) module rather than a bare dict namespace. Its output is SWALLOWED:
+    # re-executing the module top level also re-runs the gh_retry degraded-import fallback,
+    # and #3776's "exactly ONE ::warning per run" pin is a real invariant this probe must
+    # not perturb.
+    import io
+    import types
+    from contextlib import redirect_stderr, redirect_stdout
+
+    probe = types.ModuleType("_rearm_sweeper_totality_probe")
+    sys.modules[probe.__name__] = probe
+    try:
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            exec(compile(maimed, "<rearm-sweeper-no-machine-exit>", "exec"), probe.__dict__)
+    except AssertionError as error:
+        assert "needs a named un-park condition" in str(error), error
+    else:
+        raise AssertionError(
+            "a TERMINAL class with no un-park condition imported cleanly — the import-time "
+            "totality assert is not firing, so a park could ship with a human-only exit"
+        )
+    finally:
+        sys.modules.pop(probe.__name__, None)
 
     # ROUND TRIP. The receipt survives being embedded in the prose comment a human reads.
     parked_pull = armed_pull(
