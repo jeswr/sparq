@@ -147,9 +147,15 @@ fn generated_code_compiles_and_the_closed_loader_rejects_an_extra_predicate() {
         "rejects-extra-predicate",
         "allows-ignored-predicate",
         "rejects-bad-datatype",
+        "rejects-wrong-datatype",
+        "rejects-non-literal-scalar",
+        "rejects-literal-reference",
+        "accepts-exact-datatype",
         "rejects-missing-required",
         "rejects-too-many",
         "rejects-nested-violation",
+        "checks-date-time-boundaries",
+        "checks-any-uri-boundaries",
     ] {
         assert!(stdout.contains(check), "harness never ran {}:\n{}", check, stdout);
     }
@@ -170,15 +176,15 @@ fn numbered(path: &Path) -> String {
 /// `ValueSource` over a triple list and exercises each loader guarantee.
 const HARNESS: &str = r##"mod generated;
 
-use generated::{AddressShape, LoadError, OrganizationRef, PersonRef, PersonShape, ValueSource};
+use generated::{AddressShape, LoadError, OrganizationRef, PersonRef, PersonShape, Value, ValueSource};
 
-struct Fixture(Vec<(String, String, String)>);
+struct Fixture(Vec<(String, String, Value)>);
 
 impl ValueSource for Fixture {
     fn predicates(&self, subject: &str) -> Vec<String> {
         self.0.iter().filter(|t| t.0 == subject).map(|t| t.1.clone()).collect()
     }
-    fn values(&self, subject: &str, predicate: &str) -> Vec<String> {
+    fn values(&self, subject: &str, predicate: &str) -> Vec<Value> {
         self.0
             .iter()
             .filter(|t| t.0 == subject && t.1 == predicate)
@@ -189,28 +195,85 @@ impl ValueSource for Fixture {
 
 const ALICE: &str = "http://example.org/alice";
 const ADDR: &str = "http://example.org/addr1";
+const AGE: &str = "http://example.org/age";
+const CREATED_AT: &str = "http://example.org/createdAt";
+const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 
-fn base() -> Vec<(&'static str, &'static str, &'static str)> {
+/// A literal of an XSD datatype, named by its local part.
+fn lit(lexical: &str, local: &str) -> Value {
+    Value::Literal {
+        lexical: lexical.to_string(),
+        datatype: format!("{}{}", XSD, local),
+        language: None,
+    }
+}
+
+fn iri(value: &str) -> Value {
+    Value::NamedNode(value.to_string())
+}
+
+fn base() -> Vec<(&'static str, &'static str, Value)> {
     vec![
-        (ALICE, "http://example.org/name", "Alice"),
-        (ALICE, "http://example.org/age", "42"),
-        (ALICE, "http://example.org/createdAt", "2026-07-27T10:30:00Z"),
-        (ALICE, "http://example.org/nickname", "Ali"),
-        (ALICE, "http://example.org/nickname", "Al"),
-        (ALICE, "http://example.org/score", "1.5"),
-        (ALICE, "http://example.org/score", "2"),
-        (ALICE, "http://example.org/employer", "http://example.org/acme"),
-        (ALICE, "http://example.org/knows", "http://example.org/bob"),
-        (ALICE, "http://example.org/address", ADDR),
-        (ADDR, "http://example.org/city", "Dublin"),
+        (ALICE, "http://example.org/name", lit("Alice", "string")),
+        (ALICE, AGE, lit("42", "integer")),
+        (ALICE, CREATED_AT, lit("2026-07-27T10:30:00Z", "dateTime")),
+        (ALICE, "http://example.org/nickname", lit("Ali", "string")),
+        (ALICE, "http://example.org/nickname", lit("Al", "string")),
+        (ALICE, "http://example.org/score", lit("1.5", "decimal")),
+        (ALICE, "http://example.org/score", lit("2", "decimal")),
+        (ALICE, "http://example.org/employer", iri("http://example.org/acme")),
+        (ALICE, "http://example.org/knows", iri("http://example.org/bob")),
+        (ALICE, "http://example.org/address", iri(ADDR)),
+        (ADDR, "http://example.org/city", lit("Dublin", "string")),
     ]
 }
 
-fn source(triples: Vec<(&'static str, &'static str, &'static str)>) -> Fixture {
+/// The base fixture with Alice's `ex:age` — an `xsd:integer` field — replaced.
+fn with_age(value: Value) -> Vec<(&'static str, &'static str, Value)> {
+    base()
+        .into_iter()
+        .map(|t| if t.1 == AGE { (t.0, t.1, value.clone()) } else { t })
+        .collect()
+}
+
+/// Whether `lexical` is accepted for the `xsd:dateTime` field, distinguishing a
+/// lexical rejection from any other load failure.
+fn date_time_ok(lexical: &str) -> bool {
+    let triples = base()
+        .into_iter()
+        .map(|t| {
+            if t.1 == CREATED_AT { (t.0, t.1, lit(lexical, "dateTime")) } else { t }
+        })
+        .collect();
+    match PersonShape::load(&source(triples), ALICE) {
+        Ok(person) => {
+            assert_eq!(person.created_at, lexical);
+            true
+        }
+        Err(LoadError::Datatype { field, .. }) if field == "created_at" => false,
+        other => panic!("unexpected result for {:?}: {:?}", lexical, other),
+    }
+}
+
+/// The same, for the optional `xsd:anyURI` field.
+fn any_uri_ok(lexical: &str) -> bool {
+    let mut triples = base();
+    triples.push((ALICE, "http://example.org/homepage", lit(lexical, "anyURI")));
+    match PersonShape::load(&source(triples), ALICE) {
+        Ok(person) => {
+            assert_eq!(person.homepage.as_deref(), Some(lexical));
+            true
+        }
+        Err(LoadError::Datatype { field, .. }) if field == "homepage" => false,
+        other => panic!("unexpected result for {:?}: {:?}", lexical, other),
+    }
+}
+
+fn source(triples: Vec<(&'static str, &'static str, Value)>) -> Fixture {
     Fixture(
         triples
             .into_iter()
-            .map(|(s, p, o)| (s.to_string(), p.to_string(), o.to_string()))
+            .map(|(s, p, o)| (s.to_string(), p.to_string(), o))
             .collect(),
     )
 }
@@ -245,7 +308,7 @@ fn main() {
     // 2. THE CLOSED-SHAPE OBLIGATION: a predicate outside the whitelist is
     //    rejected, naming the offending predicate.
     let mut extra = base();
-    extra.push((ALICE, "http://example.org/secret", "leaked"));
+    extra.push((ALICE, "http://example.org/secret", lit("leaked", "string")));
     match PersonShape::load(&source(extra), ALICE) {
         Err(LoadError::ClosedShape { type_name, predicate }) => {
             assert_eq!(type_name, "PersonShape");
@@ -260,17 +323,14 @@ fn main() {
     ignored.push((
         ALICE,
         "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
-        "http://example.org/Person",
+        iri("http://example.org/Person"),
     ));
     PersonShape::load(&source(ignored), ALICE).expect("rdf:type is ignored, not forbidden");
     check("allows-ignored-predicate");
 
-    // 4. A scalar whose lexical form is not valid for its sh:datatype.
-    let bad = base()
-        .into_iter()
-        .map(|t| if t.1 == "http://example.org/age" { (t.0, t.1, "forty-two") } else { t })
-        .collect();
-    match PersonShape::load(&source(bad), ALICE) {
+    // 4. A correctly typed literal whose LEXICAL FORM is not valid for its
+    //    sh:datatype.
+    match PersonShape::load(&source(with_age(lit("forty-two", "integer"))), ALICE) {
         Err(LoadError::Datatype { field, datatype, value, .. }) => {
             assert_eq!(field, "age");
             assert_eq!(datatype, "http://www.w3.org/2001/XMLSchema#integer");
@@ -279,6 +339,59 @@ fn main() {
         other => panic!("an unchecked scalar was accepted: {:?}", other),
     }
     check("rejects-bad-datatype");
+
+    // 4b. THE TERM-LEVEL OBLIGATION: sh:datatype constrains the RDF term, not
+    //     the characters. "42"^^xsd:string parses as an integer and must STILL
+    //     be rejected on an xsd:integer field — the case a loader that saw only
+    //     lexical forms could not tell apart from the conforming value.
+    match PersonShape::load(&source(with_age(lit("42", "string"))), ALICE) {
+        Err(LoadError::TermType { field, expected, found, .. }) => {
+            assert_eq!(field, "age");
+            assert_eq!(expected, "http://www.w3.org/2001/XMLSchema#integer");
+            assert_eq!(found, lit("42", "string"));
+        }
+        other => panic!("a wrongly typed literal was accepted: {:?}", other),
+    }
+    check("rejects-wrong-datatype");
+
+    // 4c. ...and neither is an IRI that happens to spell a valid integer.
+    match PersonShape::load(&source(with_age(iri("42"))), ALICE) {
+        Err(LoadError::TermType { field, expected, found, .. }) => {
+            assert_eq!(field, "age");
+            assert_eq!(expected, "http://www.w3.org/2001/XMLSchema#integer");
+            assert_eq!(found, iri("42"));
+        }
+        other => panic!("a named node was accepted as a literal: {:?}", other),
+    }
+    check("rejects-non-literal-scalar");
+
+    // 4d. The mirror image: a sh:class reference is an IRI, so a literal that
+    //     spells one is not a value of it.
+    let literal_ref = base()
+        .into_iter()
+        .map(|t| {
+            if t.1 == "http://example.org/employer" {
+                (t.0, t.1, lit("http://example.org/acme", "string"))
+            } else {
+                t
+            }
+        })
+        .collect();
+    match PersonShape::load(&source(literal_ref), ALICE) {
+        Err(LoadError::TermType { field, expected, .. }) => {
+            assert_eq!(field, "employer");
+            assert_eq!(expected, "an IRI");
+        }
+        other => panic!("a literal was accepted as a typed reference: {:?}", other),
+    }
+    check("rejects-literal-reference");
+
+    // 4e. The conforming value of the very same field still loads, so the three
+    //     rejections above are not a checker that rejects everything.
+    let ok = PersonShape::load(&source(with_age(lit("42", "integer"))), ALICE)
+        .expect("a correctly typed xsd:integer must still load");
+    assert_eq!(ok.age, Some(42));
+    check("accepts-exact-datatype");
 
     // 5. A missing sh:minCount 1 / sh:maxCount 1 value.
     let missing = base()
@@ -296,8 +409,8 @@ fn main() {
 
     // 6. More values than sh:maxCount allows on a Vec field.
     let mut many = base();
-    many.push((ALICE, "http://example.org/score", "3"));
-    many.push((ALICE, "http://example.org/score", "4"));
+    many.push((ALICE, "http://example.org/score", lit("3", "decimal")));
+    many.push((ALICE, "http://example.org/score", lit("4", "decimal")));
     match PersonShape::load(&source(many), ALICE) {
         Err(LoadError::Cardinality { field, found, min, max, .. }) => {
             assert_eq!(field, "score");
@@ -320,5 +433,38 @@ fn main() {
         other => panic!("a nested violation did not propagate: {:?}", other),
     }
     check("rejects-nested-violation");
+
+    // 8. The XSD value space, not just the field widths: every case below is one
+    //    a checker that only bounded each field would get wrong.
+    for valid in [
+        "2024-02-29T00:00:00Z",           // a leap day in a leap year
+        "2000-02-29T00:00:00Z",           // ...and in a 400-year leap year
+        "2026-12-31T24:00:00Z",           // 24:00:00 is midnight starting the next day
+        "2026-07-27T10:30:00+14:00",      // the largest timezone offset
+        "2026-07-27T10:30:00.500-05:00",
+        "-0044-03-15T12:00:00Z",          // a BCE year
+    ] {
+        assert!(date_time_ok(valid), "rejected a valid xsd:dateTime: {}", valid);
+    }
+    for invalid in [
+        "2026-02-29T00:00:00Z",      // 2026 is not a leap year
+        "1900-02-29T00:00:00Z",      // nor is a non-400 century
+        "2026-04-31T00:00:00Z",      // April has 30 days
+        "2026-07-27T24:30:00Z",      // hour 24 admits no minutes
+        "2026-07-27T10:30:60Z",      // XSD dateTime has no leap second
+        "2026-07-27T10:30:00+14:30", // beyond the ±14:00 offset bound
+    ] {
+        assert!(!date_time_ok(invalid), "accepted an invalid xsd:dateTime: {}", invalid);
+    }
+    check("checks-date-time-boundaries");
+
+    // The empty URI reference IS in the xsd:anyURI value space.
+    for valid in ["", "http://example.org/", "urn:example:1", "#fragment"] {
+        assert!(any_uri_ok(valid), "rejected a valid xsd:anyURI: {:?}", valid);
+    }
+    for invalid in ["has a space", "angle<bracket>", "back\\slash"] {
+        assert!(!any_uri_ok(invalid), "accepted an invalid xsd:anyURI: {:?}", invalid);
+    }
+    check("checks-any-uri-boundaries");
 }
 "##;

@@ -114,7 +114,8 @@ pub enum ScalarType {
     Double,
     /// `xsd:dateTime` → `String`, with its lexical form checked.
     DateTime,
-    /// `xsd:anyURI` → `String`. Every non-empty lexical form is accepted.
+    /// `xsd:anyURI` → `String`. Any lexical form that can be escaped into an
+    /// RFC 3986 URI reference, including the empty (same-document) one.
     AnyUri,
 }
 

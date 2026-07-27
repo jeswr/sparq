@@ -19,7 +19,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use oxrdf::Term;
-use sparq_shacl::{Component, Path, ShapesModel, Target};
+use sparq_shacl::{Component, Path, Shape, ShapesModel, Target};
 
 use crate::error::LoweringError;
 use crate::schema::{
@@ -168,25 +168,40 @@ impl Ctx<'_> {
             }
         }
 
-        let mut fields: Vec<RustField> = Vec::new();
-        for child in shape.property_children.clone() {
-            fields.push(self.lower_field(child, &name)?);
+        // Ordered by predicate BEFORE anything is lowered, not after. Lowering a
+        // field ASSIGNS the generated name of any anonymous `sh:node` shape it
+        // reaches, and two property shapes may reach the SAME anonymous shape —
+        // whichever is lowered first names it, and sorting the resulting fields
+        // afterwards cannot undo that. Sorting the children first is what makes
+        // the assignment a function of the shapes, not of the serialisation.
+        let property_children = shape.property_children.clone();
+        let mut children: Vec<(String, usize)> = Vec::with_capacity(property_children.len());
+        for child in property_children {
+            children.push((field_predicate(&self.shapes.shapes[child])?, child));
         }
-        // Sorted BEFORE the collision check, so which of two colliding
-        // predicates is reported as "first" does not depend on the order the
-        // shapes graph was serialised in.
-        fields.sort_by(|a, b| a.predicate.cmp(&b.predicate));
+        children.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // Colliding field names are rejected BEFORE any lowering too, so the one
+        // case where the sort above leaves a tie — two children deriving the same
+        // Rust name — can never let them race for an anonymous type name.
         let mut by_name: BTreeMap<String, String> = BTreeMap::new();
-        for field in &fields {
-            if let Some(first) = by_name.get(&field.name) {
+        for (predicate, _) in &children {
+            let field = snake_ident(predicate)?;
+            if let Some(first) = by_name.insert(field.clone(), predicate.clone()) {
                 return Err(LoweringError::DuplicateField {
                     shape: label,
-                    field: field.name.clone(),
-                    first_predicate: first.clone(),
-                    second_predicate: field.predicate.clone(),
+                    field,
+                    first_predicate: first,
+                    second_predicate: predicate.clone(),
                 });
             }
-            by_name.insert(field.name.clone(), field.predicate.clone());
+        }
+
+        // Already in predicate order, since `lower_field` returns the predicate
+        // each child was sorted by.
+        let mut fields: Vec<RustField> = Vec::with_capacity(children.len());
+        for (_, child) in children {
+            fields.push(self.lower_field(child, &name)?);
         }
 
         let shape = &self.shapes.shapes[index];
@@ -229,21 +244,7 @@ impl Ctx<'_> {
     ) -> Result<RustField, LoweringError> {
         let shape = &self.shapes.shapes[index];
         let label = term_label(&shape.node);
-        let predicate = match &shape.path {
-            Some(Path::Predicate(p)) => p.clone(),
-            Some(other) => {
-                return Err(LoweringError::UnsupportedPath {
-                    shape: label,
-                    detail: format!("{} is not a single predicate IRI", path_kind(other)),
-                })
-            }
-            None => {
-                return Err(LoweringError::UnsupportedPath {
-                    shape: label,
-                    detail: "no sh:path".to_string(),
-                })
-            }
-        };
+        let predicate = field_predicate(shape)?;
         let name = snake_ident(&predicate)?;
 
         let mut min: Option<u64> = None;
@@ -372,6 +373,24 @@ impl Ctx<'_> {
             value,
             cardinality,
         })
+    }
+}
+
+/// A property shape's `sh:path` predicate IRI.
+///
+/// Split out of [`Ctx::lower_field`] so the parent can order its children by
+/// predicate before lowering any of them.
+fn field_predicate(shape: &Shape) -> Result<String, LoweringError> {
+    match &shape.path {
+        Some(Path::Predicate(p)) => Ok(p.clone()),
+        Some(other) => Err(LoweringError::UnsupportedPath {
+            shape: term_label(&shape.node),
+            detail: format!("{} is not a single predicate IRI", path_kind(other)),
+        }),
+        None => Err(LoweringError::UnsupportedPath {
+            shape: term_label(&shape.node),
+            detail: "no sh:path".to_string(),
+        }),
     }
 }
 

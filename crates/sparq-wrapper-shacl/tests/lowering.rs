@@ -457,6 +457,59 @@ fn colliding_derived_names_are_typed_errors() {
     );
 }
 
+/// Two properties sharing ONE anonymous `sh:node` shape: the nested type is
+/// named after whichever property reaches it first, so if the children were
+/// lowered in the order the parser exposed them, reordering the two statements
+/// would rename the generated type. Sorting the fields afterwards cannot undo a
+/// name that is already assigned, so the ordering has to happen before lowering.
+#[test]
+fn a_shared_anonymous_node_shape_is_named_independently_of_statement_order() {
+    const SHARED: &str = r#"
+        _:shared a sh:NodeShape ;
+            sh:property [ sh:path ex:city ; sh:datatype xsd:string ;
+                          sh:minCount 1 ; sh:maxCount 1 ] .
+    "#;
+    let alpha_first = model(&format!(
+        r#"ex:S a sh:NodeShape ;
+               sh:property [ sh:path ex:alpha ; sh:node _:shared ; sh:maxCount 1 ] ;
+               sh:property [ sh:path ex:zulu  ; sh:node _:shared ; sh:maxCount 1 ] .
+           {}"#,
+        SHARED
+    ))
+    .expect("well-formed");
+    let zulu_first = model(&format!(
+        r#"ex:S a sh:NodeShape ;
+               sh:property [ sh:path ex:zulu  ; sh:node _:shared ; sh:maxCount 1 ] ;
+               sh:property [ sh:path ex:alpha ; sh:node _:shared ; sh:maxCount 1 ] .
+           {}"#,
+        SHARED
+    ))
+    .expect("well-formed");
+
+    assert_eq!(
+        alpha_first, zulu_first,
+        "the shared anonymous type was named after the encounter order"
+    );
+    // Named after the alphabetically first field that reaches it, whichever
+    // statement came first in the graph.
+    assert_eq!(
+        alpha_first.types.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+        ["S", "SAlpha"]
+    );
+    assert_eq!(
+        alpha_first.types[0]
+            .fields
+            .iter()
+            .map(|f| f.value.clone())
+            .collect::<Vec<_>>(),
+        [
+            ValueType::Nested("SAlpha".to_string()),
+            ValueType::Nested("SAlpha".to_string()),
+        ],
+        "both properties must reach the same nested type"
+    );
+}
+
 #[test]
 fn constraints_that_do_not_shape_the_rust_type_are_left_to_the_validator() {
     // `sh:pattern` / `sh:minInclusive` restrict WHICH graphs load, not WHAT the

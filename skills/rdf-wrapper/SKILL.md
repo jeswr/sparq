@@ -295,3 +295,9 @@ typed reference newtype, `sh:node` a nested (boxed) struct, and `sh:closed true`
 a predicate whitelist the generated loader enforces. Ill-formed or contradictory
 shapes are typed `LoweringError`s — the generator never guesses. See the crate
 rustdoc for the full table.
+
+Adapt an RDF source to the generated module by implementing its `ValueSource`
+trait over RDF **terms**, not lexical strings: `sh:datatype` constrains the
+term, so the loader requires a literal of exactly the declared datatype before
+it checks the lexical form, and an IRI spelling `42` does not satisfy
+`sh:datatype xsd:integer`.

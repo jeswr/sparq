@@ -33,6 +33,13 @@
 //! Rust type is — `sh:pattern`, `sh:minInclusive`, `sh:or`, … — are left to the
 //! validator and do not appear in the generated model.
 //!
+//! A consumer adapts an RDF source to the generated module by implementing its
+//! `ValueSource` trait over RDF *terms*, not lexical strings. That is what lets
+//! the loader enforce `sh:datatype` as SHACL defines it — a value must be a
+//! literal of exactly the declared datatype *before* its lexical form is
+//! checked, so neither an IRI nor an `xsd:string` literal spelling `42`
+//! satisfies `sh:datatype xsd:integer`.
+//!
 //! # Example
 //!
 //! ```
