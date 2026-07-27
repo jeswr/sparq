@@ -548,15 +548,23 @@ def python_test_regions(text: str) -> str:
 
       * `scripts/export-kb-dump.py` — a `# …` comment at column 0 inside
         `run_dry_run_self_test`, which is legal Python and does not end the
-        block. Region captured: 628 chars of 11955. `run_leak_check` and its
-        siblings were therefore reported as untested by a self-test that names
-        them 4 lines later.
+        block. Region captured: 628 chars of 11955, and `run_leak_check` was
+        therefore reported as untested by a self-test that names it 4 lines past
+        the cut. (Only that one: `leak_check_file` and
+        `_rdflib_check_restricted_projection` are named nowhere in the recovered
+        region and still fire — they are part of the indirect-reachability
+        residue, not this bug.)
       * `scripts/check-spec-normative-status.py` — a triple-quoted fixture whose
         markdown content starts at column 0. Region captured: 54 chars of 656.
+        No symbol in that file fires either way; it is the same hole, found by
+        differencing the heuristic against `ast` across every `scripts/*.py`
+        rather than by a firing.
 
     Two different holes in one heuristic is the design being wrong rather than
     incomplete, so the heuristic is gone. `ast` gives the exact extent of every
-    top-level statement, and there is no third case to find.
+    top-level statement, so there is no third TRUNCATION case to find. What
+    remains approximate is which top-level names count as tests (below), not
+    where their bodies end.
 
     A file that does not parse contributes NOTHING (fail-closed): its guards get
     reported rather than silently satisfied. Every `scripts/*.py` in the tree
