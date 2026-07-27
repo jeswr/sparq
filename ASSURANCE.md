@@ -310,9 +310,21 @@ and the public **OpenSSF Scorecard** ([`scorecard.yml`](.github/workflows/scorec
 > `disabled_manually` since **2026-07-18** (a deliberate, recorded decision taken to cut merge
 > latency), its last run was 2026-07-18T14:01Z, and code scanning currently reports **35 open
 > alerts, all `critical`** — every one `rust/hard-coded-cryptographic-value`, the oldest opened
-> **2026-07-11**. They are concentrated in two files: 25 in
-> `crates/sparq-lws-core/tests/pop_dpop_sk.rs` (a test file) and 10 in
-> `crates/sparq-lws-core/src/store/sparql.rs`.
+> **2026-07-11**, in two files: `crates/sparq-lws-core/tests/pop_dpop_sk.rs` (25) and
+> `crates/sparq-lws-core/src/store/sparql.rs` (10).
+>
+> **All 35 have since been triaged (sparq-org/sparq#4615): none is exploitable.** Every one is a
+> false positive of a single query-model defect — the query models its sink by *parameter name*
+> while classifying test code by *file path*, and Rust colocates unit tests inside source files.
+> Both clusters sit inside `#[cfg(test)] mod tests` (the `sparql.rs` module spans lines 740–1370,
+> i.e. to EOF), and in most cases the flagged value is not a cryptographic nonce at all. Production
+> never hard-codes these: the marker is generated per operation and session keys are drawn from the
+> OS CSPRNG.
+>
+> **"Triaged" is not "covered."** These 35 being benign says nothing about what an enabled scanner
+> would find; SAST remains off. The durable posture is under decision in
+> sparq-org/sparq#4620, and one real (latent, unexploited) finding surfaced during triage is
+> sparq-org/sparq#4621.
 >
 > The correction is quoted rather than deleted because this document is what a reader would rely
 > on: a stated control that is switched off is worse than an acknowledged gap, since it stops
@@ -321,9 +333,9 @@ and the public **OpenSSF Scorecard** ([`scorecard.yml`](.github/workflows/scorec
 > **There is currently no compensating SAST control.** `clippy -D warnings`, the unsafe-count
 > ratchet, `cargo-deny`/`cargo-vet` and the fuzz lanes all remain green and are genuine, but none
 > of them is a substitute for taint/crypto-misuse analysis. The alerts have **not** been triaged
-> — being disabled does not retire a finding. Tracked in sparq-org/sparq#4615; the durable
+> — being disabled does not retire a finding. They have now been triaged (see above); the durable
 > decision (re-enable advisory-only, re-enable on a schedule, or accept and document no SAST)
-> is still open.
+> is still open in sparq-org/sparq#4620.
 
 - **Green means:** license/advisory/source policy holds, every dependency carries an audit
   attestation, and released artifacts have verifiable provenance.
