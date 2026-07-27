@@ -938,6 +938,14 @@ jobs:
       # Needs PyYAML, installed once in the shared setup above.
       - name: Release container contracts (both multi-arch images + safe ghcr tags)
         run: python3 scripts/tests/test_release_container_multiarch.py
+      # [OPUS-5] sq-toze.25 (GX-11): the SLSA Build L3 isolation contract for the release
+      # archives. release.yml never runs on a PR, so a "simplification" that folds the trusted
+      # builder back into an in-band attest step — or SHA-pins it, which erases the verifiable
+      # builder identity — would land unnoticed and quietly downgrade the level the compliance
+      # estate publishes. Pure stdlib (no PyYAML needed); non-vacuity proved by its own
+      # mutation table.
+      - name: SLSA Build L3 isolation contract (release archives)
+        run: python3 scripts/tests/test_release_slsa_l3_provenance.py
       # [GPT-5] #3770 — structural backstop for the recurring failure-swallow shape:
       # once a sweep records a hard failure, a later transient exception must never
       # short-circuit to exit 0. The hermetic fixture reproduces exactly that
