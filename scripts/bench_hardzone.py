@@ -889,6 +889,9 @@ def run_gate(results_path: str, prev_data_path: str, suite: str,
         Path(report_out).write_text(json.dumps(
             {"suite": suite, "hard_ratio": HARD_RATIO,
              "floor_exempt_units": FLOOR_EXEMPT_UNITS,
+             # The per-unit resolution CEILINGS, so a trail row tagged "resolution-exempt" is
+             # self-describing (the per-metric quantum that actually applied is in its `note`).
+             "resolution_quanta": RESOLUTION_QUANTA,
              "floor_exempt_hard": report["floor_exempt_hard"]},
             indent=2) + "\n", encoding="utf-8")
         log(f"report JSON ({len(report['floor_exempt_hard'])} floor-exempt hard-band row(s)) "
