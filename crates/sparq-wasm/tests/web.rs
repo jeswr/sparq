@@ -1004,3 +1004,179 @@ mod bytes_ingest {
         );
     }
 }
+
+// ---- [SONNET-4.6] sq-q4apb (#2644): the opt-in hosted-web forms bridge, in real wasm ----
+//
+// Drives the REAL exported `Store::deriveForm(data, shapes, focus, format, optionsJson)`
+// in a genuine wasm32 runtime — the surface `gui/app`'s `forms-bridge.ts` feature-detects
+// on the hosted `/app` bundle. The load-bearing assertion is the SAME one the native
+// `src/forms.rs` tests make, but through the wasm binding: the returned string must be
+// byte-identical to serialising `sparq_forms::derive_form`'s `FormDescription` directly,
+// so the bridge is provably a pass-through and never a reconstruction. Also covers the
+// `JsError` Err arm, which the native tests cannot reach (`JsError::new` panics off-wasm).
+#[cfg(feature = "forms")]
+mod forms {
+    use super::*;
+
+    // The same fixtures the native src/forms.rs tests and the desktop Tauri bridge use,
+    // so all three hosts stay pinned to one contract.
+    const FORM_DATA: &str = r#"
+        @prefix ex: <http://example.org/> .
+        ex:alice a ex:Person ; ex:name "Alice" ; ex:audit "reviewed" .
+    "#;
+
+    const FORM_SHAPES: &str = r#"
+        @prefix ex: <http://example.org/> .
+        @prefix sh: <http://www.w3.org/ns/shacl#> .
+
+        ex:PersonShape a sh:NodeShape ;
+            sh:targetClass ex:Person ;
+            sh:name "Person" ;
+            sh:property [ sh:path ex:name ; sh:name "Name" ; sh:minCount 1 ] .
+
+        ex:AuditShape a sh:NodeShape ;
+            sh:name "Audit" ;
+            sh:property [ sh:path ex:audit ; sh:name "Audit status" ] .
+    "#;
+
+    /// The FormDescription JSON serialised straight from the `sparq-forms` API — the
+    /// document the wasm binding must return verbatim.
+    fn direct_description(mode: sparq_forms::Mode, shape: Option<&str>) -> String {
+        let data = sparq_core::Graph::load_dataset(FORM_DATA, "turtle").expect("data fixture");
+        let shapes = sparq_core::Graph::load_dataset(FORM_SHAPES, "turtle").expect("shapes fixture");
+        let focus = oxrdf::Term::from(oxrdf::NamedNode::new_unchecked("http://example.org/alice"));
+        let options = sparq_forms::FormOptions {
+            mode,
+            shape: shape.map(|iri| oxrdf::Term::from(oxrdf::NamedNode::new_unchecked(iri))),
+            ..sparq_forms::FormOptions::default()
+        };
+        serde_json::to_string(&sparq_forms::derive_form(&data, &shapes, &focus, &options))
+            .expect("direct FormDescription serializes")
+    }
+
+    /// Applicable-shape derivation in BOTH modes crosses the wasm boundary byte-identical
+    /// to the direct `sparq_forms` serialization, with the mode-dependent editability
+    /// carried through.
+    #[wasm_bindgen_test]
+    fn derive_form_edit_and_view_match_direct_serialization() {
+        let store = Store::load("", "turtle").unwrap();
+        for (mode_text, mode) in [
+            ("edit", sparq_forms::Mode::Edit),
+            ("view", sparq_forms::Mode::View),
+        ] {
+            let json = store
+                .derive_form(
+                    FORM_DATA,
+                    FORM_SHAPES,
+                    "http://example.org/alice",
+                    "turtle",
+                    &format!("{{\"mode\":\"{}\"}}", mode_text),
+                )
+                .expect("applicable shape derives across the boundary");
+            assert_eq!(json, direct_description(mode, None), "{}", mode_text);
+
+            let parsed: serde_json::Value = serde_json::from_str(&json).expect("bridge JSON");
+            assert_eq!(parsed["mode"], mode_text);
+            assert_eq!(parsed["shape"]["value"], "http://example.org/PersonShape");
+            assert_eq!(parsed["groups"][0]["fields"][0]["label"], "Name");
+            assert_eq!(
+                parsed["groups"][0]["fields"][0]["editable"],
+                mode_text == "edit"
+            );
+        }
+    }
+
+    /// An explicit `shape` option pins the derivation to that node shape (which need not
+    /// target the focus node) — again byte-identical to the direct API call.
+    #[wasm_bindgen_test]
+    fn derive_form_explicit_shape_matches_direct_serialization() {
+        const AUDIT_SHAPE: &str = "http://example.org/AuditShape";
+        let store = Store::load("", "turtle").unwrap();
+        let json = store
+            .derive_form(
+                FORM_DATA,
+                FORM_SHAPES,
+                "http://example.org/alice",
+                "turtle",
+                &format!("{{\"mode\":\"edit\",\"shape\":\"{}\"}}", AUDIT_SHAPE),
+            )
+            .expect("explicit shape derives across the boundary");
+        assert_eq!(
+            json,
+            direct_description(sparq_forms::Mode::Edit, Some(AUDIT_SHAPE))
+        );
+
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("bridge JSON");
+        assert_eq!(parsed["shape"]["value"], AUDIT_SHAPE);
+        assert_eq!(parsed["shapes"][0]["via"], "explicit");
+        assert_eq!(parsed["groups"][0]["fields"][0]["label"], "Audit status");
+    }
+
+    /// The workbench actually sends N-Quads snapshots, so the same graphs in that syntax
+    /// must derive the same description (both snapshots share one `format`; the parse is
+    /// dataset-style, so named graphs survive).
+    #[wasm_bindgen_test]
+    fn derive_form_accepts_the_nquads_snapshots_the_workbench_sends() {
+        let store = Store::load("", "turtle").unwrap();
+        let data_nq = "<http://example.org/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.org/Person> .\n\
+                       <http://example.org/alice> <http://example.org/name> \"Alice\" .\n";
+        let shapes_nq = "<http://example.org/PersonShape> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/shacl#NodeShape> .\n\
+                         <http://example.org/PersonShape> <http://www.w3.org/ns/shacl#targetClass> <http://example.org/Person> .\n\
+                         <http://example.org/PersonShape> <http://www.w3.org/ns/shacl#property> _:p1 .\n\
+                         _:p1 <http://www.w3.org/ns/shacl#path> <http://example.org/name> .\n\
+                         _:p1 <http://www.w3.org/ns/shacl#name> \"Name\" .\n";
+        let json = store
+            .derive_form(
+                data_nq,
+                shapes_nq,
+                "http://example.org/alice",
+                "nquads",
+                "{\"mode\":\"edit\"}",
+            )
+            .expect("nquads snapshots derive");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("bridge JSON");
+        assert_eq!(parsed["shape"]["value"], "http://example.org/PersonShape");
+        assert_eq!(parsed["groups"][0]["fields"][0]["label"], "Name");
+    }
+
+    /// Malformed inputs surface as the `JsError` Err arm across the boundary — the
+    /// `try { … } catch` surface `forms-bridge.ts` relies on — never a trap, and never a
+    /// silently-defaulted derivation. (This arm constructs `JsError`, so only wasm can
+    /// exercise it.)
+    #[wasm_bindgen_test]
+    fn derive_form_malformed_inputs_are_err_not_trap() {
+        let store = Store::load("", "turtle").unwrap();
+        let derive = |data: &str, shapes: &str, focus: &str, options: &str| {
+            store.derive_form(data, shapes, focus, "turtle", options)
+        };
+        let alice = "http://example.org/alice";
+        assert!(
+            derive(FORM_DATA, FORM_SHAPES, alice, "not json").is_err(),
+            "unparseable options document"
+        );
+        assert!(
+            derive(FORM_DATA, FORM_SHAPES, alice, "[]").is_err(),
+            "options must be a JSON object"
+        );
+        assert!(
+            derive(FORM_DATA, FORM_SHAPES, alice, "{\"mode\":\"delete\"}").is_err(),
+            "unsupported mode"
+        );
+        assert!(
+            derive(FORM_DATA, FORM_SHAPES, alice, "{\"shape\":3}").is_err(),
+            "non-string shape option"
+        );
+        assert!(
+            derive(FORM_DATA, FORM_SHAPES, "not an iri", "{}").is_err(),
+            "unparseable focus node"
+        );
+        assert!(
+            derive("@prefix broken", FORM_SHAPES, alice, "{}").is_err(),
+            "unparseable data graph"
+        );
+        assert!(
+            derive(FORM_DATA, "@prefix broken", alice, "{}").is_err(),
+            "unparseable shapes graph"
+        );
+    }
+}
