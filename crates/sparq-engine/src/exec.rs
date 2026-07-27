@@ -5930,60 +5930,33 @@ fn recognise_spatial(e: &Expression) -> Option<SpatialPushdown> {
                     });
                 }
             }
-            // [FABLE-5] (sq-lk3aw.4) `geof:sfContains(REGION, ?g)` is the converse
-            // of `sfWithin(?g, REGION)`, so an exact within-region certificate may
-            // answer it when that optional optimisation is enabled.
+            // [SONNET-4.6] (sq-8cp8t) Select each remaining orientation once so
+            // the exact-pushdown flag cannot depend on cfg-block ordering.
             #[cfg(feature = "spatial-exact-pushdown")]
-            if iri == GEOF_SF_CONTAINS && cargs.len() == 2 {
-                if let (Some(arg), Expression::Variable(v)) = (wkt_const(&cargs[0]), &cargs[1]) {
-                    return Some(SpatialPushdown {
-                        geo_var: v.clone(),
-                        kind: SpatialKind::BboxIntersects {
-                            arg_wkt: arg.to_string(),
-                            within_region: true,
-                        },
-                    });
-                }
-            }
-            // [SONNET-4.6] (sq-8cp8t) These converse orientations are SUPERSET-only.
-            // In particular `sfWithin(REGION, ?g)` / `sfContains(?g, REGION)` must
-            // not set `within_region`: they describe the variable containing the
-            // constant, which an exact within-region certificate cannot decide.
-            if cargs.len() == 2 {
-                let constant_first =
-                    iri == GEOF_SF_INTERSECTS || iri == GEOF_SF_WITHIN || iri == GEOF_SF_CONTAINS;
-                // Variable-first sfWithin/sfIntersects returned from the block above.
-                let variable_first = iri == GEOF_SF_CONTAINS;
-                if constant_first {
-                    if let (Some(arg), Expression::Variable(v)) =
-                        (wkt_const(&cargs[0]), &cargs[1])
-                    {
-                        return Some(SpatialPushdown {
-                            geo_var: v.clone(),
-                            kind: SpatialKind::BboxIntersects {
-                                arg_wkt: arg.to_string(),
-                                #[cfg(feature = "spatial-exact-pushdown")]
-                                within_region: false,
-                            },
-                        });
-                    }
-                }
-                if variable_first {
-                    if let (Expression::Variable(v), Some(arg)) =
-                        (&cargs[0], wkt_const(&cargs[1]))
-                    {
-                        return Some(SpatialPushdown {
-                            geo_var: v.clone(),
-                            kind: SpatialKind::BboxIntersects {
-                                arg_wkt: arg.to_string(),
-                                #[cfg(feature = "spatial-exact-pushdown")]
-                                within_region: false,
-                            },
-                        });
-                    }
-                }
-            }
-            None
+            let within_region = iri == GEOF_SF_CONTAINS
+                && matches!(
+                    cargs.as_slice(),
+                    [a, Expression::Variable(_)] if wkt_const(a).is_some()
+                );
+            let (v, arg) = match (iri, cargs.as_slice()) {
+                (
+                    GEOF_SF_INTERSECTS | GEOF_SF_WITHIN | GEOF_SF_CONTAINS,
+                    [a, Expression::Variable(v)],
+                ) => (v, wkt_const(a)?),
+                (GEOF_SF_CONTAINS, [Expression::Variable(v), b]) => (v, wkt_const(b)?),
+                _ => return None,
+            };
+            Some(SpatialPushdown {
+                geo_var: v.clone(),
+                kind: SpatialKind::BboxIntersects {
+                    arg_wkt: arg.to_string(),
+                    // Only `sfContains(REGION, ?g)` is an exact within-region
+                    // orientation. Converse orientations describe the variable
+                    // containing the constant and are superset-only.
+                    #[cfg(feature = "spatial-exact-pushdown")]
+                    within_region,
+                },
+            })
         }
         _ => None,
     }

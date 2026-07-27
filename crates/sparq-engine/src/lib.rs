@@ -509,8 +509,10 @@ pub enum SpatialQuery<'a> {
     /// `inclusive` distinguishes `<=` (true) from `<` (false); the provider may
     /// ignore it and return a (still-correct) superset.
     DistanceWithin { point_wkt: &'a str, radius: f64, unit_iri: &'a str, inclusive: bool },
-    /// `geof:sfWithin(?g, box)` / `geof:sfIntersects(?g, box)` — a window/range
-    /// scan. `arg_wkt` is the constant geometry's lexical form.
+    /// A bounding-box window scan used for `geof:sfWithin`, `geof:sfIntersects`,
+    /// and `geof:sfContains` with either operand orientation. The provider must
+    /// return every indexed geometry whose bounding box intersects `arg_wkt`'s
+    /// bounding box, including geometries that strictly contain it. [SONNET-4.6]
     BboxIntersects { arg_wkt: &'a str },
 }
 

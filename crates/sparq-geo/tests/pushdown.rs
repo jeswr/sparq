@@ -27,7 +27,7 @@ const GEOF: &str = "http://www.opengis.net/def/function/geosparql/";
 fn counting_registry(counter: Arc<AtomicUsize>) -> FunctionRegistry {
     let real = geof_registry();
     let mut reg = FunctionRegistry::new();
-    for name in ["distance", "sfWithin", "sfIntersects"] {
+    for name in ["distance", "sfWithin", "sfIntersects", "sfContains"] {
         let iri = format!("{GEOF}{name}");
         let inner = real.get(&iri).expect("registered").clone();
         let c = counter.clone();
@@ -141,6 +141,42 @@ fn sf_intersects_box_same_results() {
     assert!(!rows.is_empty());
     assert_eq!(posthoc, 144);
     assert!(pushed < posthoc);
+}
+
+#[test]
+fn converse_containment_orientations_keep_larger_indexed_geometry() {
+    // [SONNET-4.6] A containment-style window scan would wrongly omit `ex:large`
+    // for both converse orientations; a true AABB-intersection scan retains it.
+    let g = Graph::load_str(
+        r#"
+        @prefix geo: <http://www.opengis.net/ont/geosparql#> .
+        @prefix ex:  <http://ex/> .
+        ex:large geo:hasGeometry ex:largeGeometry .
+        ex:largeGeometry geo:asWKT "POLYGON((-2 -2, 2 -2, 2 2, -2 2, -2 -2))"^^geo:wktLiteral .
+        ex:far geo:hasGeometry ex:farGeometry .
+        ex:farGeometry geo:asWKT "POLYGON((10 10, 12 10, 12 12, 10 12, 10 10))"^^geo:wktLiteral .
+        "#,
+        "turtle",
+    )
+    .unwrap();
+    let region = r#"POLYGON((-1 -1, 1 -1, 1 1, -1 1, -1 -1))"#;
+
+    for filter in [
+        format!(r#"geof:sfWithin("{}"^^geo:wktLiteral, ?wkt)"#, region),
+        format!(r#"geof:sfContains(?wkt, "{}"^^geo:wktLiteral)"#, region),
+    ] {
+        let q = format!(
+            "{} SELECT ?f WHERE {{ \
+               ?f geo:hasGeometry ?n . ?n geo:asWKT ?wkt . \
+               FILTER({}) \
+             }}",
+            PREFIXES, filter
+        );
+        let (rows, posthoc, pushed) = compare(&g, &q);
+        assert_eq!(rows, vec![vec!["<http://ex/large>".to_string()]]);
+        assert_eq!(posthoc, 2);
+        assert_eq!(pushed, 1, "the bbox scan must retain the containing geometry");
+    }
 }
 
 #[test]
