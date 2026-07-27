@@ -5915,7 +5915,9 @@ fn recognise_spatial(e: &Expression) -> Option<SpatialPushdown> {
         Expression::GreaterOrEqual(l, r) => distance_cmp(r, l, true), // r >= distance(...)
         // Simple Features relation as the whole FILTER. Every orientation below
         // necessarily intersects the constant region, so its bbox scan is a
-        // candidate SUPERSET and the residual FILTER remains authoritative.
+        // candidate SUPERSET. The residual FILTER remains authoritative except for
+        // the within-region orientations flagged below, which an installed provider
+        // may certify exactly (see `apply_spatial_pushdown_exact`).
         Expression::FunctionCall(Function::Custom(nn), cargs) => {
             let iri = nn.as_str();
             if (iri == GEOF_SF_WITHIN || iri == GEOF_SF_INTERSECTS) && cargs.len() == 2 {
