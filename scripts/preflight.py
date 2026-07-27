@@ -115,11 +115,16 @@ PY_GUARD_RE = re.compile(
 RUST_SRC_RE = re.compile(r"^crates/[^/]+/src/.*\.rs$")
 PY_SCRIPT_RE = re.compile(r"^scripts/[^/]*\.py$")
 
-# Where a test that "names the guard" is allowed to live.
+# Where a test that "names the guard" is allowed to live. `/fuzz/` is here on
+# MEASURED evidence: it was the ONE false positive among the 39 distinct symbols
+# this check reports on the current tree — `sparq-shacl::validate_graph` is
+# exercised by fuzz/fuzz_targets/validate_shacl.rs, which stops compiling if the
+# function is deleted, i.e. it is a test by this check's own definition.
 TEST_PATH_HINTS = (
     "/tests/",
     "scripts/tests/",
     "/benches/",
+    "/fuzz/",
 )
 TEST_NAME_RE = re.compile(r"(^|/)(test_[^/]*\.py|[^/]*_test\.py|[^/]*\.rs)$")
 
@@ -191,24 +196,249 @@ def added_symbols(added_lines: dict[str, list[str]]) -> list[tuple[str, str]]:
     return out
 
 
-SELFTEST_MARKER_RE = re.compile(r"--self-test|def\s+self_test\b")
+# ---------------------------------------------------------------------------
+# What text counts as A TEST.  [OPUS-5]
+# ---------------------------------------------------------------------------
+# BUG THIS REPLACES (found in review; the checker committed the very defect it
+# exists to prevent). The first version admitted a whole file on a FILE-LEVEL
+# marker — `#[cfg(test)]` anywhere in a Rust src file, `--self-test` anywhere in
+# a `scripts/*.py` — and then word-searched that file's ENTIRE text. A file
+# contains its own `pub fn` / `def` definition line, so **a symbol's own defining
+# file was accepted as that symbol's test**: an EMPTY `#[cfg(test)] mod tests {}`
+# made every guard in the file permanently invisible. MEASURED on this tree:
+# 48 of 191 guard-shaped surface symbols could never be reported.
+#
+# The fix is to scope the search to the file's TEST REGIONS, so the definition
+# span — and every ordinary call site in the same file — is excluded BY
+# CONSTRUCTION rather than by a subtraction that could be got wrong:
+#
+#   Rust src : the body of each `#[cfg(<pred implying test>)]` item, plus the
+#              contents of ``` fenced blocks in `///` / `//!` doc comments
+#              (a doctest is run by `cargo test` and reds if the fn is deleted).
+#   scripts/ : the body of each top-level `def *self_test*` / `def test_*` and of
+#              each top-level `class *Test*` — the repo's dominant convention
+#              (check-terminology.py, release-interval-guard.py::self_test,
+#              check-vectorized-feature-off.py::run_self_test, …).
+#   tests/ , benches/ : the whole file. It is a test file end to end.
+#
+# `#[cfg(not(test))]` and `#[cfg(any(not(feature = "x"), test))]` are NOT test
+# regions: they are compiled in ordinary builds. The predicate must IMPLY test.
+
+_RUST_RAW_STR_RE = re.compile(r"r(#*)\"")
+_RUST_CHAR_RE = re.compile(r"'(?:\\u\{[0-9a-fA-F_]+\}|\\.|[^\\'\n])'")
+_IDENT_CH = re.compile(r"\w")
+
+
+def mask_rust(text: str) -> str:
+    """Same-length copy of `text` with comment / string / char CONTENT blanked.
+
+    Offsets are preserved so a span found in the mask slices the ORIGINAL text.
+    Blanking first is what makes brace matching safe: a `"{"` in a string literal
+    or a `// {` in a comment must not open a block.
+    """
+    out = list(text)
+    i, n = 0, len(text)
+
+    def blank(a: int, b: int) -> None:
+        for k in range(a, min(b, n)):
+            if out[k] != "\n":
+                out[k] = " "
+
+    while i < n:
+        c = text[i]
+        if c == "/" and text.startswith("//", i):
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            blank(i, j)
+            i = j
+        elif c == "/" and text.startswith("/*", i):
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if text.startswith("/*", j):
+                    depth += 1
+                    j += 2
+                elif text.startswith("*/", j):
+                    depth -= 1
+                    j += 2
+                else:
+                    j += 1
+            blank(i, j)
+            i = j
+        elif c == "r" and (i == 0 or not _IDENT_CH.match(text[i - 1]) or text[i - 1] == "b"):
+            m = _RUST_RAW_STR_RE.match(text, i)
+            if not m:
+                i += 1
+                continue
+            close = '"' + m.group(1)
+            j = text.find(close, m.end())
+            j = n if j < 0 else j + len(close)
+            blank(i, j)
+            i = j
+        elif c == '"':
+            j = i + 1
+            while j < n:
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                if text[j] == '"':
+                    j += 1
+                    break
+                j += 1
+            blank(i, j)
+            i = j
+        elif c == "'":
+            m = _RUST_CHAR_RE.match(text, i)
+            if m:  # a char literal; a lifetime `'a` is left alone
+                blank(i, m.end())
+                i = m.end()
+            else:
+                i += 1
+        else:
+            i += 1
+    return "".join(out)
+
+
+def _cfg_implies_test(pred: str) -> bool:
+    """Does this `cfg(...)` predicate hold ONLY when `test` is set?
+
+    `test` -> yes. `all(A, B)` -> yes if ANY conjunct implies test.
+    `any(A, B)` -> yes only if EVERY disjunct implies test. `not(..)` -> no.
+    Anything else (a plain `feature = "x"`) -> no.
+    """
+    pred = pred.strip()
+    if pred == "test":
+        return True
+    m = re.match(r"(all|any|not)\s*\((.*)\)\s*$", pred, re.S)
+    if not m:
+        return False
+    op, inner = m.group(1), m.group(2)
+    if op == "not":
+        return False
+    parts, depth, cur = [], 0, []
+    for ch in inner:
+        if ch == "," and depth == 0:
+            parts.append("".join(cur))
+            cur = []
+            continue
+        depth += (ch == "(") - (ch == ")")
+        cur.append(ch)
+    parts.append("".join(cur))
+    parts = [p for p in parts if p.strip()]
+    if not parts:
+        return False
+    return (any if op == "all" else all)(_cfg_implies_test(p) for p in parts)
+
+
+_CFG_ATTR_RE = re.compile(r"#\s*\[\s*cfg\s*\(")
+
+
+def rust_cfg_test_spans(masked: str) -> list[tuple[int, int]]:
+    """(start, end) of every `#[cfg(<implies test>)] <item> { .. }` BODY."""
+    spans: list[tuple[int, int]] = []
+    n = len(masked)
+    for m in _CFG_ATTR_RE.finditer(masked):
+        depth, j = 1, m.end()
+        while j < n and depth:
+            depth += (masked[j] == "(") - (masked[j] == ")")
+            j += 1
+        if depth:
+            continue
+        if not _cfg_implies_test(masked[m.end(): j - 1]):
+            continue
+        k = j
+        while k < n and masked[k].isspace():
+            k += 1
+        if k >= n or masked[k] != "]":
+            continue
+        k += 1
+        while k < n:                       # walk to the item's body, or give up
+            if masked[k] == ";":           # `#[cfg(test)] use foo;` — no body
+                break
+            if masked[k] == "{":
+                depth, e = 1, k + 1
+                while e < n and depth:
+                    depth += (masked[e] == "{") - (masked[e] == "}")
+                    e += 1
+                spans.append((k, e))
+                break
+            k += 1
+    return spans
+
+
+_DOC_LINE_RE = re.compile(r"^\s*//[/!]")
+
+
+def rust_doctest_text(text: str) -> str:
+    """Contents of ``` fenced blocks inside `///` / `//!` doc comments.
+
+    A doctest is compiled and run by `cargo test`, and stops compiling when the
+    item it calls is deleted — so it genuinely pins the symbol. Prose in the doc
+    comment does NOT count; only the fenced code.
+    """
+    out, in_fence = [], False
+    for line in text.splitlines():
+        if not _DOC_LINE_RE.match(line):
+            in_fence = False
+            continue
+        body = re.sub(r"^\s*//[/!]\s?", "", line)
+        if body.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            out.append(body)
+    return "\n".join(out)
+
+
+_PY_TEST_DEF_RE = re.compile(
+    r"^(?:async\s+)?(?:def\s+(?:\w*self_test\w*|test_\w*)\s*\(|class\s+\w*[Tt]est\w*\s*[(:])"
+)
+
+
+def python_test_regions(text: str) -> str:
+    """Bodies of top-level `def *self_test*` / `def test_*` / `class *Test*`.
+
+    Column-0 anchored: the region is the header line plus every following line
+    that is blank or indented. Everything else in the script — including the
+    guard's own `def` line and every ordinary call site — is excluded.
+    """
+    lines = text.splitlines()
+    out: list[str] = []
+    i, n = 0, len(lines)
+    while i < n:
+        if _PY_TEST_DEF_RE.match(lines[i]):
+            j = i + 1
+            while j < n and (not lines[j].strip() or lines[j][:1] in " \t)"):
+                j += 1
+            out.extend(lines[i:j])
+            i = j
+        else:
+            i += 1
+    return "\n".join(out)
+
+
+def searchable_test_text(rel: str, text: str) -> str:
+    """The slice of `rel` in which naming a guard counts as testing it."""
+    if any(h in "/" + rel for h in TEST_PATH_HINTS):
+        return text                                    # a test file, end to end
+    if RUST_SRC_RE.match(rel):
+        masked = mask_rust(text)
+        parts = [text[a:b] for a, b in rust_cfg_test_spans(masked)]
+        doc = rust_doctest_text(text)
+        if doc:
+            parts.append(doc)
+        return "\n".join(parts)
+    if PY_SCRIPT_RE.match(rel):
+        return python_test_regions(text)
+    return ""
 
 
 def test_corpus(root: Path) -> list[tuple[str, str]]:
-    """(relpath, text) for every file that can host a test naming a guard.
+    """(relpath, TEST TEXT) for every file that can host a test naming a guard.
 
-    Three kinds of host, matching how this repo actually writes tests:
-      * anything under a tests/ (or benches/) directory;
-      * Rust source carrying `#[cfg(test)]` — a unit test lives inside the very
-        file that defines the guard;
-      * a `scripts/*.py` carrying an in-file `--self-test` block — the dominant
-        convention here (check-readme-template.py, check-terminology.py, …), and
-        the one whose omission produced a MEASURED false positive on
-        scripts/release-interval-guard.py::check_version_group, which is tested
-        at its own self_test() and by nothing under tests/.
-
-    An ordinary call site never counts: a src file with no test marker is not a
-    host, so `foo()` being invoked somewhere does not satisfy the guard.
+    The second element is deliberately NOT the file's whole text — see the block
+    comment above. A file with no test region contributes nothing, so an ordinary
+    call site never satisfies a guard, and neither does the guard's own
+    definition line.
     """
     corpus: list[tuple[str, str]] = []
     try:
@@ -219,9 +449,8 @@ def test_corpus(root: Path) -> list[tuple[str, str]]:
         return corpus
     for rel in tracked:
         is_test_dir = any(h in "/" + rel for h in TEST_PATH_HINTS)
-        is_rust_src = RUST_SRC_RE.match(rel) is not None
         is_py_script = PY_SCRIPT_RE.match(rel) is not None
-        if not (is_test_dir or is_rust_src or is_py_script):
+        if not (is_test_dir or RUST_SRC_RE.match(rel) or is_py_script):
             continue
         if not (is_py_script or TEST_NAME_RE.search(rel)):
             continue
@@ -229,11 +458,10 @@ def test_corpus(root: Path) -> list[tuple[str, str]]:
             text = (root / rel).read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        if is_rust_src and not is_test_dir and "#[cfg(test)]" not in text:
+        scoped = searchable_test_text(rel, text)
+        if not scoped.strip():
             continue
-        if is_py_script and not is_test_dir and not SELFTEST_MARKER_RE.search(text):
-            continue
-        corpus.append((rel, text))
+        corpus.append((rel, scoped))
     return corpus
 
 
@@ -274,6 +502,11 @@ class Delegate:
     pass_changed_files: bool = False
     pass_changed_paths: bool = False
 
+    @property
+    def script(self) -> str:
+        """The gate script itself — `argv[0]` is the interpreter (python3/bash)."""
+        return self.argv[1]
+
 
 DELEGATES = [
     Delegate("G1 new-crate-completeness", ["python3", "scripts/gate-new-crate.py"],
@@ -297,6 +530,23 @@ def run_delegates(changed: list[str], root: Path, changed_files_path: Path | Non
         if d.path_filter and not matched:
             res.skipped.append(f"{d.name} (no matching path in the diff)")
             continue
+        # [OPUS-5] FAIL CLOSED on a missing gate script. This was a `skipped`
+        # entry, so renaming or deleting any gate script silently degraded that
+        # gate to a skip and preflight still exited 0 — a gate that does not run
+        # reported as a gate that passed. "The script is gone" is a finding
+        # about the diff, never a reason to pass it.
+        if not (root / d.script).exists():
+            res.findings.append(
+                Finding(
+                    check=d.name,
+                    path=d.script,
+                    detail=f"the gate script `{d.script}` does not exist under {root} — "
+                           f"this gate DID NOT RUN",
+                    fix=f"restore `{d.script}`, or if it was renamed, update DELEGATES in "
+                        f"scripts/preflight.py to match",
+                )
+            )
+            continue
         argv = list(d.argv)
         if d.pass_changed_files and changed_files_path is not None:
             argv += ["--changed-files", str(changed_files_path)]
@@ -306,9 +556,6 @@ def run_delegates(changed: list[str], root: Path, changed_files_path: Path | Non
                 res.skipped.append(f"{d.name} (all matching paths deleted)")
                 continue
             argv += existing
-        if not (root / argv[1]).exists():
-            res.skipped.append(f"{d.name} (script absent at {argv[1]})")
-            continue
         proc = subprocess.run(argv, cwd=root, capture_output=True, text=True)
         res.ran.append(d.name)
         if proc.returncode != 0:

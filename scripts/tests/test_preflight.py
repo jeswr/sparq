@@ -13,11 +13,13 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -265,6 +267,339 @@ class EndToEndGuardUntested(unittest.TestCase):
             t.write("crates/sparq-x/src/caller.rs",
                     "pub fn go() { crate::validate_envelope(); }\n")
             self.assertEqual(len(pf.check_guard_untested(ADDED, t.root)), 1)
+
+
+class ADefiningFileIsNotItsOwnTest(unittest.TestCase):
+    """REGRESSION — the checker committed the defect it exists to prevent.
+
+    The first version admitted a whole file on a FILE-LEVEL marker (`#[cfg(test)]`
+    anywhere in a Rust src file, `--self-test` anywhere in a scripts/*.py) and then
+    word-searched that file's ENTIRE text — which contains the `pub fn` / `def`
+    definition line itself. So an empty `mod tests {}` made every guard in the file
+    permanently invisible: 48 of 191 guard-shaped surface symbols in this tree could
+    never be reported. Every test in this class RED on the pre-fix code.
+    """
+
+    def test_an_empty_cfg_test_module_does_not_satisfy_the_guard(self) -> None:
+        # THE headline case. Pre-fix: 0 findings. Post-fix: 1.
+        with tempfile.TemporaryDirectory() as td:
+            t = _Tree(td)
+            t.write("crates/sparq-x/src/lib.rs",
+                    "pub fn validate_envelope() {}\n#[cfg(test)]\nmod tests {}\n")
+            self.assertEqual(len(pf.check_guard_untested(ADDED, t.root)), 1)
+
+    def test_a_cfg_test_module_that_never_names_the_guard_does_not_satisfy_it(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            t = _Tree(td)
+            t.write("crates/sparq-x/src/lib.rs",
+                    "pub fn validate_envelope() {}\n"
+                    "#[cfg(test)]\nmod tests {\n  #[test] fn t() { assert!(true); }\n}\n")
+            self.assertEqual(len(pf.check_guard_untested(ADDED, t.root)), 1)
+
+    def test_a_call_site_beside_a_test_module_does_not_satisfy_the_guard(self) -> None:
+        # The subtler shape: the file HAS a real test module, but the only mention
+        # of this guard is production code. Excluding just the definition LINE
+        # would let this through; scoping to the test region does not.
+        with tempfile.TemporaryDirectory() as td:
+            t = _Tree(td)
+            t.write("crates/sparq-x/src/lib.rs",
+                    "pub fn validate_envelope() {}\n"
+                    "pub fn go() { validate_envelope(); }\n"
+                    "#[cfg(test)]\nmod tests {\n  #[test] fn t() { super::go(); }\n}\n")
+            self.assertEqual(len(pf.check_guard_untested(ADDED, t.root)), 1)
+
+    def test_a_python_self_test_that_never_names_the_guard_does_not_satisfy_it(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            t = _Tree(td)
+            t.write("scripts/thing.py",
+                    "def validate_lease(x):\n    return x\n"
+                    "def self_test():\n    assert True\n")
+            added = {"scripts/thing.py": ["def validate_lease(x):"]}
+            self.assertEqual(len(pf.check_guard_untested(added, t.root)), 1)
+
+    def test_a_bare_self_test_flag_string_is_not_a_test_region(self) -> None:
+        # Pre-fix, SELFTEST_MARKER_RE admitted the file on the literal
+        # `--self-test` appearing ANYWHERE — an argparse help string was enough.
+        with tempfile.TemporaryDirectory() as td:
+            t = _Tree(td)
+            t.write("scripts/thing.py",
+                    "def validate_lease(x):\n    return x\n"
+                    'ap.add_argument("--self-test", help="run the self-test")\n')
+            added = {"scripts/thing.py": ["def validate_lease(x):"]}
+            self.assertEqual(len(pf.check_guard_untested(added, t.root)), 1)
+
+    def test_cfg_not_test_is_not_a_test_region(self) -> None:
+        # `#[cfg(not(test))]` is compiled in ORDINARY builds. Accepting any cfg
+        # whose text merely contains `test` would make this a test region.
+        with tempfile.TemporaryDirectory() as td:
+            t = _Tree(td)
+            t.write("crates/sparq-x/src/lib.rs",
+                    "pub fn validate_envelope() {}\n"
+                    "#[cfg(not(test))]\nmod prod {\n  fn p() { super::validate_envelope(); }\n}\n")
+            self.assertEqual(len(pf.check_guard_untested(ADDED, t.root)), 1)
+
+    def test_cfg_any_with_a_non_test_disjunct_is_not_a_test_region(self) -> None:
+        # `any(not(feature = "x"), test)` holds in a plain build with the feature
+        # off — production code, not a test.
+        with tempfile.TemporaryDirectory() as td:
+            t = _Tree(td)
+            t.write("crates/sparq-x/src/lib.rs",
+                    "pub fn validate_envelope() {}\n"
+                    '#[cfg(any(not(feature = "odrl-bridge"), test))]\n'
+                    "mod shim {\n  fn p() { super::validate_envelope(); }\n}\n")
+            self.assertEqual(len(pf.check_guard_untested(ADDED, t.root)), 1)
+
+    def test_cfg_all_test_and_a_feature_IS_a_test_region(self) -> None:
+        # The other direction — `all(test, feature = "x")` only ever compiles under
+        # test, so it must still count. Inverting _cfg_implies_test reds this.
+        with tempfile.TemporaryDirectory() as td:
+            t = _Tree(td)
+            t.write("crates/sparq-x/src/lib.rs",
+                    "pub fn validate_envelope() {}\n"
+                    '#[cfg(all(test, feature = "service"))]\n'
+                    "mod tests {\n  #[test] fn t() { super::validate_envelope(); }\n}\n")
+            self.assertEqual(pf.check_guard_untested(ADDED, t.root), [])
+
+    def test_a_doctest_naming_the_guard_satisfies_it(self) -> None:
+        # `cargo test` runs doctests and they stop compiling if the item is
+        # deleted, so a fenced doc example is a real test.
+        with tempfile.TemporaryDirectory() as td:
+            t = _Tree(td)
+            t.write("crates/sparq-x/src/lib.rs",
+                    "/// Checks an envelope.\n"
+                    "/// ```\n"
+                    "/// assert!(sparq_x::validate_envelope());\n"
+                    "/// ```\n"
+                    "pub fn validate_envelope() -> bool { true }\n")
+            self.assertEqual(pf.check_guard_untested(ADDED, t.root), [])
+
+    def test_doc_PROSE_naming_the_guard_does_not_satisfy_it(self) -> None:
+        # Only the fenced code counts. Prose is documentation, not a test — and
+        # accepting it would let a diff test its guard by describing it.
+        with tempfile.TemporaryDirectory() as td:
+            t = _Tree(td)
+            t.write("crates/sparq-x/src/lib.rs",
+                    "/// See `validate_envelope` for the envelope rules.\n"
+                    "pub fn validate_envelope() -> bool { true }\n")
+            self.assertEqual(len(pf.check_guard_untested(ADDED, t.root)), 1)
+
+
+class RustMaskingIsLiteralSafe(unittest.TestCase):
+    """Brace matching must not be steered by braces inside strings or comments."""
+
+    def test_a_brace_in_a_string_literal_does_not_open_a_block(self) -> None:
+        # Kills: brace-matching the RAW text. `"{"` would open a block that never
+        # closes, swallowing the rest of the file back into the test region.
+        src = ('#[cfg(test)]\nmod tests {\n  const S: &str = "{";\n'
+               '  #[test] fn t() {}\n}\npub fn validate_envelope() {}\n')
+            # ^ the guard is defined AFTER the test mod on purpose
+        masked = pf.mask_rust(src)
+        spans = pf.rust_cfg_test_spans(masked)
+        self.assertEqual(len(spans), 1)
+        region = src[spans[0][0]:spans[0][1]]
+        self.assertNotIn("validate_envelope", region)
+
+    def test_a_brace_in_a_line_comment_does_not_open_a_block(self) -> None:
+        src = ("#[cfg(test)]\nmod tests {\n  // opening { brace in a comment\n"
+               "  #[test] fn t() {}\n}\npub fn validate_envelope() {}\n")
+        spans = pf.rust_cfg_test_spans(pf.mask_rust(src))
+        self.assertEqual(len(spans), 1)
+        self.assertNotIn("validate_envelope", src[spans[0][0]:spans[0][1]])
+
+    def test_mask_rust_preserves_offsets(self) -> None:
+        # Every span is sliced out of the ORIGINAL text, so the mask must be the
+        # same length or the regions come out shifted.
+        src = 'fn f() { let s = "a{b}c"; /* } */ }\n'
+        self.assertEqual(len(pf.mask_rust(src)), len(src))
+
+    def test_a_cfg_test_use_statement_opens_no_region(self) -> None:
+        # `#[cfg(test)] use foo::bar;` has no body. Walking past the `;` looking
+        # for a `{` would attach the NEXT item's body as a test region.
+        src = ("#[cfg(test)]\nuse std::fmt;\n"
+               "pub fn validate_envelope() {}\n")
+        self.assertEqual(pf.rust_cfg_test_spans(pf.mask_rust(src)), [])
+
+
+class TheDelegateRegistryIsPinned(unittest.TestCase):
+    """`DELEGATES` is the mechanism this PR exists for — shifting the repo's OWN
+    merge-gates left into the worker's worktree. It shipped with no test at all:
+    all 7 mutants of it survived a green suite. These pin the registry ITSELF.
+
+    Asserted against the imported `pf.DELEGATES` objects, not against the source
+    text of preflight.py — a word-search over file text is exactly the mistake
+    that produced the `guard-untested` corpus defect.
+    """
+
+    # (delegate name substring, the gate script it must run)
+    REQUIRED = (
+        ("G1", "scripts/gate-new-crate.py"),
+        ("G2", "scripts/gate-api-skill.py"),
+        ("G6", "scripts/check-config-documented.py"),
+        ("no-perf-numbers", "scripts/check-no-perf-numbers.py"),
+        ("readme-template", "scripts/check-readme-template.py"),
+        ("privacy-claims", "scripts/check-privacy-claims.sh"),
+    )
+
+    def _by_script(self) -> dict[str, object]:
+        return {d.script: d for d in pf.DELEGATES}
+
+    def test_every_required_repo_gate_is_delegated(self) -> None:
+        # Kills: `DELEGATES = []`, and dropping ANY single delegate (e.g. G1).
+        have = self._by_script()
+        missing = [f"{n} ({s})" for n, s in self.REQUIRED if s not in have]
+        self.assertEqual(missing, [], f"preflight no longer runs: {missing}")
+
+    def test_every_delegated_script_exists_in_the_repo(self) -> None:
+        # Kills: a typo'd or renamed path, which previously degraded to a silent
+        # `skipped` entry with a PASS exit code.
+        absent = [d.script for d in pf.DELEGATES if not (REPO_ROOT / d.script).exists()]
+        self.assertEqual(absent, [], f"delegated scripts that do not exist: {absent}")
+
+    def test_each_delegate_name_matches_its_script(self) -> None:
+        # Kills: rewiring a delegate's argv to a different (e.g. weaker) script
+        # while keeping the reassuring name — the report would still say "ran G1".
+        for name_part, script in self.REQUIRED:
+            d = self._by_script()[script]
+            self.assertIn(name_part, d.name)
+
+    def test_the_enforcing_gates_are_run_with_enforce(self) -> None:
+        # Kills: dropping `--enforce`. Both of these gates are ADVISORY without
+        # it — they print findings and exit 0, so preflight would report PASS.
+        for script in ("scripts/check-no-perf-numbers.py", "scripts/check-readme-template.py"):
+            self.assertIn("--enforce", self._by_script()[script].argv,
+                          f"{script} is delegated WITHOUT --enforce, so it cannot fail")
+
+    def test_the_diff_scoped_gates_receive_the_changed_file_list(self) -> None:
+        # Kills: clearing pass_changed_files, which would run G1/G2/G6 over the
+        # whole tree and drown the author in pre-existing findings.
+        for script in ("scripts/gate-new-crate.py", "scripts/gate-api-skill.py",
+                       "scripts/check-config-documented.py"):
+            self.assertTrue(self._by_script()[script].pass_changed_files,
+                            f"{script} is not diff-scoped")
+
+    def test_the_script_property_points_at_the_script_not_the_interpreter(self) -> None:
+        for d in pf.DELEGATES:
+            self.assertNotIn(d.script, ("python3", "bash", "sh"))
+            self.assertTrue(d.script.startswith("scripts/"), d.script)
+
+
+class _FakeGateTree:
+    """A tree with stub gate scripts whose exit code we choose."""
+
+    def __init__(self, td: str) -> None:
+        self.root = Path(td)
+        (self.root / "scripts").mkdir(parents=True, exist_ok=True)
+
+    def gate(self, rel: str, rc: int) -> None:
+        p = self.root / rel
+        p.write_text(f"import sys\nprint('stub {rel} argv=' + ' '.join(sys.argv[1:]))\n"
+                     f"sys.exit({rc})\n")
+
+    def argv_seen(self, rel: str) -> Path:
+        return self.root / (rel + ".argv")
+
+
+def _delegate(name: str, rel: str, **kw):
+    return pf.Delegate(name, ["python3", rel], **kw)
+
+
+class RunDelegatesBehaviour(unittest.TestCase):
+    """What `run_delegates` DOES — pinned end to end against real subprocesses."""
+
+    def test_a_failing_delegate_becomes_a_finding(self) -> None:
+        # THE headline behaviour. Kills: `if proc.returncode != 0:` -> `if False:`
+        # (a FAILING gate reported as PASS), and `run_delegates` returning an
+        # empty Result.
+        with tempfile.TemporaryDirectory() as td:
+            t = _FakeGateTree(td)
+            t.gate("scripts/red.py", 1)
+            with mock.patch.object(pf, "DELEGATES", [_delegate("RED gate", "scripts/red.py")]):
+                res = pf.run_delegates(["a.rs"], t.root, None)
+            self.assertEqual([f.check for f in res.findings], ["RED gate"])
+            self.assertFalse(res.ok)
+
+    def test_a_passing_delegate_produces_no_finding(self) -> None:
+        # The other direction — without this the previous test also passes when
+        # run_delegates flags everything unconditionally.
+        with tempfile.TemporaryDirectory() as td:
+            t = _FakeGateTree(td)
+            t.gate("scripts/green.py", 0)
+            with mock.patch.object(pf, "DELEGATES", [_delegate("GREEN gate", "scripts/green.py")]):
+                res = pf.run_delegates(["a.rs"], t.root, None)
+            self.assertEqual(res.findings, [])
+            self.assertEqual(res.ran, ["GREEN gate"])
+
+    def test_a_missing_gate_script_is_a_finding_not_a_skip(self) -> None:
+        # REGRESSION — this FAILED OPEN. A missing script appended to `skipped`
+        # and preflight still exited 0, so renaming any gate script silently
+        # turned that gate off. A gate that did not run is not a gate that passed.
+        with tempfile.TemporaryDirectory() as td:
+            t = _FakeGateTree(td)
+            with mock.patch.object(pf, "DELEGATES", [_delegate("GONE gate", "scripts/gone.py")]):
+                res = pf.run_delegates(["a.rs"], t.root, None)
+            self.assertEqual([f.check for f in res.findings], ["GONE gate"])
+            self.assertNotIn("GONE gate", " ".join(res.skipped))
+
+    def test_the_changed_files_path_is_passed_to_a_diff_scoped_delegate(self) -> None:
+        # Kills: never appending `--changed-files`, which un-scopes every gate.
+        with tempfile.TemporaryDirectory() as td:
+            t = _FakeGateTree(td)
+            t.gate("scripts/echo.py", 0)
+            cf = t.root / "changed.txt"
+            cf.write_text("a.rs\n")
+            d = _delegate("ECHO gate", "scripts/echo.py", pass_changed_files=True)
+            with mock.patch.object(pf, "DELEGATES", [d]):
+                with mock.patch.object(pf.subprocess, "run",
+                                       wraps=pf.subprocess.run) as spy:
+                    pf.run_delegates(["a.rs"], t.root, cf)
+            argv = spy.call_args_list[-1].args[0]
+            self.assertIn("--changed-files", argv)
+            self.assertIn(str(cf), argv)
+
+    def test_a_path_filtered_delegate_is_skipped_when_nothing_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            t = _FakeGateTree(td)
+            t.gate("scripts/md.py", 1)   # would FAIL if it ran
+            d = _delegate("MD gate", "scripts/md.py", path_filter=re.compile(r"\.md$"))
+            with mock.patch.object(pf, "DELEGATES", [d]):
+                res = pf.run_delegates(["a.rs"], t.root, None)
+            self.assertEqual(res.findings, [])
+            self.assertEqual(res.ran, [])
+
+    def test_a_path_filtered_delegate_runs_when_a_path_matches(self) -> None:
+        # The quantifier check on the previous test: the filter must not skip
+        # EVERYTHING.
+        with tempfile.TemporaryDirectory() as td:
+            t = _FakeGateTree(td)
+            t.gate("scripts/md.py", 1)
+            d = _delegate("MD gate", "scripts/md.py", path_filter=re.compile(r"\.md$"))
+            with mock.patch.object(pf, "DELEGATES", [d]):
+                res = pf.run_delegates(["README.md"], t.root, None)
+            self.assertEqual([f.check for f in res.findings], ["MD gate"])
+
+    def test_main_propagates_a_delegate_finding_to_the_exit_code(self) -> None:
+        # THE call site. Kills: `main()` discarding `sub.findings` — every gate
+        # could then fail and preflight would still print PASS and exit 0.
+        with tempfile.TemporaryDirectory() as td:
+            t = _FakeGateTree(td)
+            t.gate("scripts/red.py", 1)
+            cf = t.root / "changed.txt"
+            cf.write_text("a.rs\n")
+            with mock.patch.object(pf, "DELEGATES", [_delegate("RED gate", "scripts/red.py")]):
+                rc = pf.main(["--root", str(t.root), "--changed-files", str(cf),
+                              "--only", "delegates", "--quiet"])
+            self.assertEqual(rc, 1)
+
+    def test_main_reports_PASS_only_when_no_delegate_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            t = _FakeGateTree(td)
+            t.gate("scripts/green.py", 0)
+            cf = t.root / "changed.txt"
+            cf.write_text("a.rs\n")
+            with mock.patch.object(pf, "DELEGATES", [_delegate("GREEN", "scripts/green.py")]):
+                rc = pf.main(["--root", str(t.root), "--changed-files", str(cf),
+                              "--only", "delegates", "--quiet"])
+            self.assertEqual(rc, 0)
 
 
 class ExitCodeContract(unittest.TestCase):
