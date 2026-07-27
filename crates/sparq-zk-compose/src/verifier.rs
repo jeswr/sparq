@@ -113,7 +113,8 @@ use crate::manifest::{
     StatusListSnapshot,
 };
 // [OPUS-4.8] sq-314: derivation-step re-check for entailment-regime enforcement.
-use crate::derivation::regime_admits;
+// [OPUS-5] sq-rsd3v.7: the two UNBUILT completeness halves the refusal message names.
+use crate::derivation::{regime_admits, COMPLETENESS_UNDER_ENTAILMENT_UNBUILT};
 // [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation root derivation.
 use crate::revocation::merkle_root;
 use sparq_zk::encode::encode_term;
@@ -586,12 +587,18 @@ impl HolderBindingPolicy {
 /// in-circuit single-step relation exists (`compose_core::entail`, sq-g91d,
 /// research-grade / NOT-yet-sound sq-qhy4) but is not yet wired into this policy —
 /// see the `derivation` module docs. A relying party that requires
-/// cryptographic-strength inference keeps the `Simple`-only default.
+/// cryptographic-strength inference keeps the `Simple`-only default. Accepting a
+/// regime also says NOTHING about COMPLETENESS under that regime — the separate,
+/// UNBUILT obligation `sq-rsd3v.7`; a relying party that needs it says so with
+/// [`EntailmentPolicy::require_completeness_under_entailment`] and is REFUSED
+/// rather than handed a soundness-only accept.
 // [OPUS-4.8] sq-314: entailment-regime policy (external, fail-closed).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntailmentPolicy {
     accept_rdfs: bool,
     accept_owl: bool,
+    // [OPUS-5] sq-rsd3v.7: the relying party demands completeness-under-entailment.
+    require_completeness: bool,
 }
 
 impl Default for EntailmentPolicy {
@@ -603,7 +610,7 @@ impl Default for EntailmentPolicy {
 impl EntailmentPolicy {
     /// Accept ONLY `Simple` (no inference) — the fail-closed default.
     pub fn simple_only() -> Self {
-        EntailmentPolicy { accept_rdfs: false, accept_owl: false }
+        EntailmentPolicy { accept_rdfs: false, accept_owl: false, require_completeness: false }
     }
 
     /// Additionally accept `Rdfs` manifests (with grounded derivation steps).
@@ -618,6 +625,52 @@ impl EntailmentPolicy {
         self.accept_owl = true;
         self.accept_rdfs = true;
         self
+    }
+
+    /// Declare that this relying party requires **COMPLETENESS under entailment** —
+    /// "no entailed answer is MISSING from the disclosed result".
+    ///
+    /// That property is **UNBUILT in sparq and NOT claimed** (`sq-rsd3v.7`, design
+    /// `research/zk-inference-and-credentials.md` §3.7): it needs BOTH halves of
+    /// [`crate::derivation::COMPLETENESS_UNDER_ENTAILMENT_UNBUILT`], and the
+    /// fixpoint-saturation half exists nowhere in the estate. So setting this dial
+    /// does not enable a check — it makes the verifier REFUSE, fail-closed, every
+    /// non-`Simple` manifest with
+    /// [`CheckError::CompletenessUnderEntailmentUnavailable`]. The point is that a
+    /// relying party which needs completeness gets a MACHINE-CHECKABLE refusal
+    /// naming the gap, instead of an accept it could misread as completeness — the
+    /// soundness-of-derivation / completeness-under-entailment conflation this
+    /// crate must never allow.
+    ///
+    /// # Precisely what the refusal does and does NOT assert
+    /// It asserts only this: **no accepted proof under this policy rests on
+    /// entailment whose completeness sparq cannot check.** A `Simple` manifest is
+    /// NOT refused (there is no entailment closure for it to be complete over), but
+    /// passing one is *not* an assertion that its answer set is complete — that
+    /// rests on the `scan.nr` per-pattern sweep and the rest of the (not externally
+    /// audited, `sq-qhy4`) verifier, not on this dial. And this dial CANNOT detect
+    /// a closure materialised OFF-circuit and presented as `Simple` over the
+    /// materialised graph (design §3.6(a) trusted-materialiser mode): there the
+    /// regime field is honestly `Simple` and entailment is trusted to the
+    /// materialiser's signature, a DIFFERENT trust model the relying party must
+    /// evaluate itself.
+    ///
+    /// When the design's RE-ENTRY TRIGGER fires (a documented huge-closure case
+    /// plus a verifier demanding full completeness — §3.6(c),
+    /// `research/zkp-performance-landscape.md` §5 trigger 4), the unconditional
+    /// refusal is what gets replaced by a real check; until then it is the honest
+    /// answer.
+    // [OPUS-5] sq-rsd3v.7: enforced deferral — a demand for completeness REFUSES.
+    pub fn require_completeness_under_entailment(mut self) -> Self {
+        self.require_completeness = true;
+        self
+    }
+
+    /// Whether this relying party requires completeness under entailment
+    /// (`sq-rsd3v.7`) — always a REFUSAL for a non-`Simple` regime, since the
+    /// capability is unbuilt.
+    fn requires_completeness(&self) -> bool {
+        self.require_completeness
     }
 
     /// Whether this policy accepts `regime`.
@@ -1754,6 +1807,17 @@ pub enum CheckError {
     /// `derivation` module; until then only the disclosed base grounds a step.)
     // [OPUS-4.8] sq-314.
     UngroundedDerivationAntecedent { step: usize, antecedent: usize },
+    /// The relying party requires COMPLETENESS under entailment
+    /// ([`EntailmentPolicy::require_completeness_under_entailment`]) but the
+    /// manifest declares a non-`Simple` regime, and that property is **UNBUILT in
+    /// sparq and NOT claimed** (`sq-rsd3v.7`): both halves of
+    /// [`crate::derivation::COMPLETENESS_UNDER_ENTAILMENT_UNBUILT`] would be needed
+    /// and the fixpoint-saturation half exists nowhere in the estate. Refused
+    /// fail-closed — a soundness-of-derivation accept must never be handed to a
+    /// relying party that asked for completeness (the conflation the design's §3.7
+    /// forbids). This is a CAPABILITY refusal, not a defect in the manifest.
+    // [OPUS-5] sq-rsd3v.7: enforced deferral of completeness-under-entailment.
+    CompletenessUnderEntailmentUnavailable { regime: &'static str },
     /// A derivation step introduces or consumes an `owl:sameAs` fact
     /// (sq-rsd3v.6): the `owl:sameAs` encoding stands in a predicate slot of an
     /// antecedent or of the derived triple. The fixed-shape RDFS / OWL-RL-minus-
@@ -2181,6 +2245,11 @@ impl std::fmt::Display for CheckError {
             CheckError::UngroundedDerivationAntecedent { step, antecedent } => write!(
                 f,
                 "derivation step {step} antecedent {antecedent} is ungrounded (sq-314: it is neither an earlier step's derived triple nor a disclosed scan row — a derived triple cannot rest on an antecedent the proof does not establish)"
+            ),
+            CheckError::CompletenessUnderEntailmentUnavailable { regime } => write!(
+                f,
+                "the relying party requires completeness under entailment but regime `{regime}` cannot supply it (sq-rsd3v.7: UNBUILT and NOT claimed — it needs both an {} and a {}, and the saturation half exists nowhere in sparq; soundness of derivation is NOT completeness under entailment)",
+                COMPLETENESS_UNDER_ENTAILMENT_UNBUILT[0], COMPLETENESS_UNDER_ENTAILMENT_UNBUILT[1]
             ),
             CheckError::EqualityReasoningUnsupported { step } => write!(
                 f,
@@ -5458,6 +5527,10 @@ fn encode_iri_hex(iri: &str) -> Option<FieldHex> {
 /// `entailment_regime` a CHECKED claim rather than free metadata.
 ///
 /// Fail-closed contract:
+/// 0. if the relying party requires COMPLETENESS under entailment
+///    ([`EntailmentPolicy::require_completeness_under_entailment`]), every
+///    non-`Simple` manifest is REFUSED first — the capability is unbuilt
+///    (`sq-rsd3v.7`) — else `CompletenessUnderEntailmentUnavailable`;
 /// 1. the regime MUST be accepted by the relying party's [`EntailmentPolicy`]
 ///    (`Simple` always; `Rdfs`/`Owl` only on explicit opt-in) — else
 ///    `EntailmentRegimeNotAccepted`;
@@ -5489,6 +5562,13 @@ fn encode_iri_hex(iri: &str) -> Option<FieldHex> {
 /// yet wired into this verifier (no compiled member / manifest variant / dispatch
 /// arm), so until that follow-up lands this path stays disclosed-base only. See
 /// the `crate::derivation` module docs.
+///
+/// Everything above is SOUNDNESS of derivation ("every derived triple IS
+/// entailed"). It is NOT completeness under entailment ("no entailed answer is
+/// MISSING") — the distinct, UNBUILT obligation `sq-rsd3v.7`. Gate (0) below is
+/// the enforced deferral: a relying party that demands completeness is REFUSED
+/// before any other check, so the two obligations can never be conflated by
+/// reading an accept.
 // [OPUS-4.8] sq-314: entailment regime + derivation steps, end-to-end.
 fn bind_entailment(
     manifest: &ProofManifest,
@@ -5500,6 +5580,18 @@ fn bind_entailment(
         EntailmentRegime::Rdfs => "rdfs",
         EntailmentRegime::Owl => "owl",
     };
+    // (0) sq-rsd3v.7: the relying party demands COMPLETENESS under entailment. The
+    // capability is UNBUILT (no in-circuit closure-sweep, no fixpoint-saturation
+    // proof), so any manifest that RESTS on entailment is refused here rather than
+    // accepted on soundness-of-derivation grounds the relying party could misread
+    // as completeness. Checked FIRST so the diagnostic names the real gap (the
+    // unbuilt obligation) rather than the incidental one (regime not accepted).
+    // `Simple` is not refused: it carries no entailment for completeness to range
+    // over — see `require_completeness_under_entailment` for what that does and
+    // does NOT assert.
+    if policy.requires_completeness() && regime != EntailmentRegime::Simple {
+        return Err(CheckError::CompletenessUnderEntailmentUnavailable { regime: regime_name });
+    }
     // (1) The regime must be accepted by the relying party.
     if !policy.accepts(regime) {
         return Err(CheckError::EntailmentRegimeNotAccepted { regime: regime_name });
