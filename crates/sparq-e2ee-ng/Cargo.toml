@@ -42,7 +42,7 @@ chacha20poly1305 = "0.10"
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
 # WRAP-256 (v0 suite): X25519 ECDH for recipient wrapping of capability secret fields /
 # DEKs (sealed-box shape). Same dalek family; reuses curve25519-dalek already in-tree.
-x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
+x25519-dalek = { version = "3", default-features = false, features = ["static_secrets"] }
 # OS CSPRNG (fresh key / nonce / id material). Mirrors sparq-vc's exact pin so the
 # `rand_core::OsRng` used for dalek keygen is the same one already in the lockfile.
 rand_core = { version = "0.6", features = ["getrandom"] }
