@@ -1209,20 +1209,34 @@ def classify(pull: ArmedPull, gate: str, now: int, limits: StuckLimits) -> str:
       4.   The grace window. NOTHING terminal fires inside it — a green-but-BLOCKED PR is
            usually mid-ruleset-evaluation, and a just-pushed head can still be showing the
            previous run's conclusion.
-      5.   Holds outrank everything else, because a live arm under a hold is unsafe.
-      6.   CONFLICTING outranks a red gate: a dirty PR's gate result was computed against a
-           merge that no longer exists, so rebasing is the first step and the re-run after
-           it may well be green. Disarming on that stale red would throw away a good PR.
-      7+.  The remaining terminal readings, then the stale horizon as the backstop so that
-           nothing can sit armed and unexplained forever.
+      5.   Holds and CONFLICTING are decided BEFORE any gate reading — see below.
+      6+.  The gate readings, fail-open first, then the stale horizon as the backstop so
+           that nothing can sit armed and unexplained forever.
+
+    WHY HOLDS AND `CONFLICTING` OUTRANK THE GATE READING. "Fail open on pending" is the
+    right rule for a PR that is merely waiting, and the WRONG rule for these two, because
+    for them a pending gate is not evidence of progress:
+
+    * A `CONFLICTING` PR cannot merge on any gate result. Its gate — green, red or absent —
+      was computed against a merge that no longer exists, so no CI outcome changes the
+      remedy, and deferring to a pending or unreadable gate simply defers forever. This
+      is #4354's exact shape: `gate` concluded SUCCESS at 10:57 and the branch went dirty
+      at 11:10, so its green is an answer to a question nobody is asking any more.
+      HONESTY ABOUT THE EVIDENCE: this ordering is NOT justified by the stronger claim
+      that a dirty PR never gets CI. MEASURED 2026-07-27 over all 26 open CONFLICTING PRs
+      in this repo: 25 carry check runs on their head (60-788 of them) and six acquired
+      new runs DAYS after going dirty, so workflows plainly do dispatch onto dirty heads.
+      Exactly one (#3815) has zero check runs at all — rare, but it is the case in which a
+      CI-pending fail-open strands a PR permanently, and it costs nothing to exclude.
+    * A HELD PR is the one class where inaction is the dangerous direction: it is armed
+      under a hold, so it merges PAST that hold the instant the gate greens. A pending
+      gate makes that more urgent, not less.
+
+    Both are still inside the grace window and both still fail open on a truncated read.
     """
     if pull.has_queue_entry:
         return "queued"
     if pull.state_truncated:
-        return "gate-indeterminate"
-    if gate == GATE_PENDING:
-        return "gate-pending"
-    if gate == GATE_UNKNOWN:
         return "gate-indeterminate"
     activity = max(pull.updated_at, pull.armed_at)
     if activity <= 0:
@@ -1232,22 +1246,42 @@ def classify(pull: ArmedPull, gate: str, now: int, limits: StuckLimits) -> str:
     age = now - activity
     if age < limits.grace_seconds:
         return "ruleset-grace"
+    # [OPUS-5] The GRACE window and the STALE horizon measure DIFFERENT things, and
+    # conflating them starves the backstop. Grace asks "did something just happen?", so it
+    # is right to take the most recent event of any kind. Stale asks "how long has this arm
+    # been failing to merge?" — and `updatedAt` is bumped by every label flip, every bot
+    # comment and every review event, so a PR under routine pipeline churn would reset the
+    # horizon forever and the one class that exists to catch everything else would be the
+    # easiest of all to starve. MEASURED on #3451: armed 33h, `updatedAt` 83 minutes old.
+    # Falls back to the activity clock only when the arm timestamp is unreadable.
+    armed_age = now - (pull.armed_at or activity)
     if hold_labels(pull.labels):
         return "held"
     if pull.mergeable == "CONFLICTING":
         return "conflicting"
+    # ---- from here the gate reading decides, and it fails OPEN. -----------------------
+    # The three ways a head can show "no usable gate" are DIFFERENT states with different
+    # remedies, and collapsing them is how a sweeper disarms a healthy PR: `conflicting`
+    # (handled above — rebase, never wait), GATE_UNKNOWN from a short read (paginate and
+    # re-read; never conclude), and GATE_MISSING on a complete read of a mergeable head
+    # (the only genuine "no gate" case). MEASURED on PR #4369: total_count=486, an
+    # unpaginated read returns 30 rows and ZERO gate rows.
+    if gate == GATE_PENDING:
+        return "gate-pending"
+    if gate == GATE_UNKNOWN:
+        return "gate-indeterminate"
     if gate == GATE_FAILURE:
         return "gate-failed"
     if gate == GATE_CANCELLED:
         return "gate-cancelled"
     if gate == GATE_MISSING:
-        return "stale" if age >= limits.stale_seconds else "gate-missing"
+        return "stale" if armed_age >= limits.stale_seconds else "gate-missing"
     # The gate is green from here.
     if pull.merge_state != "BLOCKED":
         return "progressing"
     if pull.unresolved_threads > 0:
         return "blocked-threads"
-    if age >= limits.stale_seconds:
+    if armed_age >= limits.stale_seconds:
         return "stale"
     return "blocked-unexplained"
 
@@ -1747,7 +1781,9 @@ class StuckArmSweeper:
             detail = (
                 f"gate={gate} mergeable={pull.mergeable} state={pull.merge_state} "
                 f"unresolved-threads={pull.unresolved_threads} "
-                f"age={now - max(pull.updated_at, pull.armed_at)}s head={pull.head_oid[:12]}"
+                f"age={now - max(pull.updated_at, pull.armed_at)}s "
+                f"armed-age={now - (pull.armed_at or max(pull.updated_at, pull.armed_at))}s "
+                f"head={pull.head_oid[:12]}"
             )
             if klass == "gate-failed":
                 # Nothing in the arm path reads CI state — auto-arm.py arms on LABELS alone
@@ -1974,13 +2010,22 @@ def check_pages(runs, *, declared=None, per_page=100):
 
 
 def armed_pull(number=1, **kw):
+    """A classifier input. `armed_at` FOLLOWS `updated_at` unless given explicitly.
+
+    The two clocks are distinct in `classify` (grace reads the latest activity, the stale
+    horizon reads the arm), so a fixture that pinned `armed_at` to a constant while
+    `updated_at` moved would silently make every fixture ancient-armed and hide exactly the
+    starvation this default exists to let the tests express.
+    """
     base = dict(
         number=number, is_draft=False, base_ref="main", labels=frozenset(),
         mergeable="MERGEABLE", merge_state="BLOCKED", updated_at=1_000_000,
-        armed_at=1_000_000, head_oid="0" * 40, has_queue_entry=False,
+        armed_at=None, head_oid="0" * 40, has_queue_entry=False,
         unresolved_threads=0, state_truncated=False,
     )
     base.update(kw)
+    if base["armed_at"] is None:
+        base["armed_at"] = base["updated_at"]
     return ArmedPull(**base)
 
 
@@ -2169,24 +2214,97 @@ def stuck_self_test() -> None:
         assert got == expected_class, (expected_class, got, gate)
         assert got in CLASS_ACTIONS, got
 
-    # A PENDING GATE IS LEFT ALONE, whatever else is true of the PR. This is the constraint
-    # that makes the sweep safe to run: `gate` sits in_progress 20-40 min on heavy lanes.
-    for extra in (
-        {}, {"mergeable": "CONFLICTING"}, {"labels": frozenset({"needs:user"})},
-        {"unresolved_threads": 10}, {"merge_state": "BLOCKED"},
-    ):
+    # THE STALE HORIZON READS THE ARM CLOCK, NOT THE ACTIVITY CLOCK. `updatedAt` is bumped
+    # by every label flip and bot comment in this pipeline, so keying the backstop on it
+    # lets routine churn reset it forever — the one class that exists to catch everything
+    # else would be the easiest of all to starve. MEASURED on #3451: armed 33h ago,
+    # `updatedAt` 83 minutes old. Both readings are past grace; only the arm clock is stale.
+    churned = armed_pull(armed_at=ancient, updated_at=settled)
+    assert now - churned.updated_at < limits.stale_seconds, "fixture must be churn-fresh"
+    assert classify(churned, GATE_SUCCESS, now, limits) == "stale", classify(
+        churned, GATE_SUCCESS, now, limits
+    )
+    assert classify(churned, GATE_MISSING, now, limits) == "stale"
+    # ...but churn INSIDE the grace window still wins: something is actively happening.
+    assert classify(
+        armed_pull(armed_at=ancient, updated_at=fresh), GATE_SUCCESS, now, limits
+    ) == "ruleset-grace"
+    # ...and a RECENTLY-armed PR is never stale however old its other timestamps are.
+    assert classify(
+        armed_pull(armed_at=settled, updated_at=ancient), GATE_SUCCESS, now, limits
+    ) == "blocked-unexplained"
+    assert classify(
+        armed_pull(armed_at=settled, updated_at=ancient), GATE_MISSING, now, limits
+    ) == "gate-missing"
+
+    # A PENDING GATE IS LEFT ALONE ON A MERGEABLE, UNHELD HEAD. This is the constraint that
+    # makes the sweep safe to run: `gate` sits in_progress 20-40 min on heavy lanes, and
+    # wrongly disarming a healthy PR is worse than leaving a stuck one.
+    for extra in ({}, {"unresolved_threads": 10}, {"merge_state": "BLOCKED"},
+                  {"merge_state": "UNSTABLE"}, {"labels": frozenset({"review:pass"})}):
         pull = armed_pull(updated_at=ancient, armed_at=ancient, **extra)
         klass = classify(pull, GATE_PENDING, now, limits)
         assert CLASS_ACTIONS[klass] == ACTION_NONE, (extra, klass)
-    # ...and so is an indeterminate one.
+        assert CLASS_ACTIONS[classify(pull, GATE_UNKNOWN, now, limits)] == ACTION_NONE, extra
+    # A truncated LABEL/THREAD read is equally fail-open even with a decisive gate, and
+    # even for the two classes that otherwise outrank the gate reading.
     for extra in ({}, {"mergeable": "CONFLICTING"}, {"labels": frozenset({"needs:user"})}):
-        pull = armed_pull(updated_at=ancient, armed_at=ancient, **extra)
-        assert CLASS_ACTIONS[classify(pull, GATE_UNKNOWN, now, limits)] == ACTION_NONE
-    # A truncated LABEL/THREAD read is equally fail-open even with a decisive gate.
-    assert CLASS_ACTIONS[
-        classify(armed_pull(updated_at=ancient, state_truncated=True), GATE_FAILURE,
-                 now, limits)
-    ] == ACTION_NONE
+        assert CLASS_ACTIONS[
+            classify(armed_pull(updated_at=ancient, armed_at=ancient, state_truncated=True,
+                                **extra), GATE_FAILURE, now, limits)
+        ] == ACTION_NONE, extra
+
+    # THE TWO EXCEPTIONS TO FAIL-OPEN-ON-PENDING. For these, a pending or unreadable gate
+    # is not evidence of progress, so deferring to it is what creates the state with no
+    # exit. Both are asserted across EVERY gate reading, including the fail-open ones.
+    for gate_reading in (GATE_PENDING, GATE_UNKNOWN, GATE_MISSING, GATE_SUCCESS,
+                         GATE_FAILURE, GATE_CANCELLED):
+        # A dirty PR cannot merge on ANY gate result: rebase, never wait.
+        assert classify(
+            armed_pull(updated_at=settled, armed_at=settled, mergeable="CONFLICTING"),
+            gate_reading, now, limits,
+        ) == "conflicting", gate_reading
+        # An armed PR under a hold merges PAST the hold the instant the gate greens, so a
+        # pending gate makes disarming MORE urgent, not less. Hold outranks dirty too.
+        assert classify(
+            armed_pull(updated_at=settled, armed_at=settled, mergeable="CONFLICTING",
+                       labels=frozenset({"needs:user"})),
+            gate_reading, now, limits,
+        ) == "held", gate_reading
+    # ...but the grace window still protects both: something just happened, so wait a tick.
+    for extra in ({"mergeable": "CONFLICTING"}, {"labels": frozenset({"needs:user"})}):
+        assert classify(armed_pull(updated_at=fresh, armed_at=fresh, **extra),
+                        GATE_PENDING, now, limits) == "ruleset-grace", extra
+
+    # THE THREE WAYS A HEAD SHOWS "NO USABLE GATE" ARE THREE DIFFERENT CLASSES. Collapsing
+    # any pair of them is how a sweeper either disarms a healthy PR or waits forever.
+    # (a) DIRTY — CI cannot speak to a merge that does not exist. Rebase, do not wait.
+    assert classify(
+        armed_pull(updated_at=settled, armed_at=settled, mergeable="CONFLICTING"),
+        GATE_MISSING, now, limits,
+    ) == "conflicting"
+    # (b) SHORT READ — `resolve_gate` must yield UNKNOWN, never MISSING, so the classifier
+    #     defers instead of concluding. Driven through resolve_gate, not hand-fed, because
+    #     the defect being guarded lives in resolve_gate. Shape MEASURED on PR #4369:
+    #     total_count=486, an unpaginated read returns 30 rows and no `gate` row at all.
+    short_read = check_pages([check_run(f"leg {i}") for i in range(30)], declared=486)
+    assert resolve_gate(short_read, is_draft=False) == GATE_UNKNOWN
+    assert classify(
+        armed_pull(updated_at=settled, armed_at=settled),
+        resolve_gate(short_read, is_draft=False), now, limits,
+    ) == "gate-indeterminate"
+    # (c) GENUINELY ABSENT on a COMPLETE read of a MERGEABLE head — the real "no gate".
+    complete_read = check_pages([check_run(f"leg {i}") for i in range(30)])
+    assert resolve_gate(complete_read, is_draft=False) == GATE_MISSING
+    assert classify(
+        armed_pull(updated_at=settled, armed_at=settled),
+        resolve_gate(complete_read, is_draft=False), now, limits,
+    ) == "gate-missing"
+    # The three land in three DIFFERENT classes with three different actions.
+    assert len({"conflicting", "gate-indeterminate", "gate-missing"}) == 3
+    assert CLASS_ACTIONS["conflicting"] == ACTION_REBASE
+    assert CLASS_ACTIONS["gate-indeterminate"] == ACTION_NONE
+    assert CLASS_ACTIONS["gate-missing"] == ACTION_NONE
     # An unreadable activity timestamp must NOT read as "infinitely old".
     assert classify(
         armed_pull(updated_at=0, armed_at=0), GATE_SUCCESS, now, limits
