@@ -1,8 +1,10 @@
 # Noir upstream investigation on-ramps — #6624 / #6313 / #4972 (sq-eesz3)
 
 **Bead:** `sq-eesz3` (epic `sq-uuvac`, `noir-optimization-program.md` §7 row 12) · **Status:**
-source-level analysis COMPLETE for all three items; **empirical measurement NOT RUN** (see §0) ·
-**Upstream comments DRAFTED, NOT posted** — awaiting @jeswr review per `AGENTS.md`
+**PROVISIONAL — bead NOT complete**: source-level analysis is complete for all three items, but the
+bead's deliverable (measurement comments upstream) is not met — **empirical measurement NOT RUN**
+and **no live issue thread read** (see §0), so the bead stays open, blocked on the empirical half
+(§4) · **Upstream comments DRAFTED, NOT posted** — awaiting @jeswr review per `AGENTS.md`
 § *Upstream contributions* · **Author:** SPARQ agent 🤖 [OPUS-5] · **Date:** 2026-07-27
 
 Analysed against `noir-lang/noir` @ `e22cd89b` (2026-07-24). Every line citation below is at that
@@ -29,9 +31,13 @@ lowering code, and is labelled as such. Per the program's own doctrine (§2 of t
 and the PR #10159 lesson: *measure gates, not intuition*), none of the verdicts below may be
 asserted upstream as measurements, and the drafted comments in §1–§3 say so in their own text.
 
-Consequence for the bead's exit condition: no win is demonstrated for any of the three, so
-**no follow-up implementation bead is created** — which is the expected outcome for two of them,
-and for the third (#6313) the measurement is what decides.
+Consequence for the bead's exit condition: **it is not reached, and this record does not apply
+it.** `sq-eesz3`'s deliverable is a measurement comment upstream; nothing was measured and nothing
+was posted, so the bead remains **open and blocked on the empirical half** (§4) and on reading the
+three live issue threads. What *can* be concluded now is narrower: from the source alone, no win is
+visible for #6624 or #4972, so neither warrants an implementation bead **on present evidence** —
+a judgement that must survive the live-thread check before it is acted on. For #6313 the
+spawn/no-spawn decision is explicitly **deferred**, because §4.2 is what decides it.
 
 ---
 
@@ -176,9 +182,9 @@ Both are already-owned beads; this bead adds no new one.
 
 ### 2.5 Verdict
 
-**No PR from this bead**, and no follow-up implementation bead — but the opcode measurement in §4.2
-is worth running, because it is the one item of the three where the measurement could still change
-the answer (if the recomposition turns out *not* to be free, that is a real finding and a real PR).
+**No PR from this bead.** The follow-up-bead decision is **deferred, not made**: §4.2 must be run
+first, because this is the one item of the three where the measurement could still change the
+answer (if the recomposition turns out *not* to be free, that is a real finding and a real PR).
 Draft comment:
 
 > **DRAFT — not posted.** Requires @jeswr review; must be re-checked against the live issue thread

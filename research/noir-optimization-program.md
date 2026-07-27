@@ -445,7 +445,7 @@ edge sequences them (§10.4).
 | `sq-jfkwk` | sonnet | findings first; `acir/acir_context/mod.rs` only on a win | comparison-lowering experiment; fail-closed on the #10159 witness-sharing landmine; null result acceptable |
 | `sq-felqr` | opus | design note on noir#4629 only | quadratic ACIR growth; NO implementation before upstream buy-in |
 | `sq-b0vpc` | sonnet | `noir_stdlib/src/collections/bounded_vec.nr` | only the TomAFrench capacity-assert slice of #5027 |
-| `sq-eesz3` | sonnet | none (findings-only) | #6624 / #6313 / #4972 measurement comments upstream — **source analysis done, see §10.5** |
+| `sq-eesz3` | sonnet | none (findings-only) | #6624 / #6313 / #4972 measurement comments upstream — **source analysis done, empirical half + live-thread checks PENDING; bead still open, see §10.5** |
 | `sq-jj3ne` | opus | new `ssa/ir/dfg/` range-analysis module + its two consumer passes | flagship v1; dep-gated on `sq-jthy1` + `sq-rxir8` (shared consumer files) and on the #12780/#12927 coordination pre-flight |
 | `sq-uuvac.2` | haiku | none (existing PR branches only) | shepherd the four open drafts: triage feedback (escalate substantive objections to an opus bead, never rebut directly), rebase on conflict, close sibling beads on merge, refresh the baseline on a new noir pin |
 
@@ -479,13 +479,17 @@ settled from the compiler source, and both settled *against* the issue's framing
 | item | outcome | follow-up bead |
 |---|---|---|
 | #6624 negated jmpif for ACIR | the ACIR guard is load-bearing (`flatten_cfg` merge invariant, tests pin both sides); `Not` is a linear ACIR op and flattening re-creates one anyway ⇒ direct win predicted ≈ 0 | none |
-| #6313 inverse-pair stdlib tests | the recomposition half is free; the decomposition half is a *constraint* (`ToRadix` is `has_side_effects`) and must not be elided ⇒ the requested test needs re-scoping from "optimizes away" to an opcode-count equality | none yet — the §4.2 measurement decides |
+| #6313 inverse-pair stdlib tests | the recomposition half is *predicted* free — linear Horner recomposition, **not measured**, and §4.2 can still overturn it; the decomposition half is a *constraint* (`ToRadix` is `has_side_effects`) and must not be elided ⇒ the requested test needs re-scoping from "optimizes away" to an opcode-count equality | undecided — deferred until §4.2 is measured |
 | #4972 predicated `array_get` | the index-offset scheme appears **already implemented** (PR #4971 lineage); only the non-simple-array masking multiplication remains | none |
 
-No win is demonstrated, so **no implementation bead is spawned** — the expected
-outcome for a zero-risk on-ramp row. Three upstream comments are **drafted but not
-posted**, pending @jeswr review per `AGENTS.md` § *Upstream contributions*; the
-#4972 draft additionally depends on an unverified inference about the issue's
-lineage that must be checked against the live thread first. The remaining
-measurement protocol is specified command-by-command in §4 of the record and needs
-a box with the noir toolchain.
+No win is demonstrated **from the source**, so no implementation bead is spawned
+for #6624 or #4972; the #6313 spawn/no-spawn call is **deferred**, not made,
+because §4.2 is the thing that decides it. `sq-eesz3` therefore stays **open and
+blocked on the empirical half** — its stated deliverable (measurement comments
+upstream) is not yet met, so the bead's exit condition is *not* applied here.
+Three upstream comments are **drafted but not posted**, pending @jeswr review per
+`AGENTS.md` § *Upstream contributions*, and each must first be re-checked against
+its live issue thread (none of the three issue bodies was read); the #4972 draft
+additionally depends on an unverified inference about the issue's lineage. The
+remaining measurement protocol is specified command-by-command in §4 of the record
+and needs a box with the noir toolchain.
