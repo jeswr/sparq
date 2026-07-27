@@ -57,7 +57,7 @@ There is **no aggregate construct** in the grammar and **no aggregate builtin fa
 claim about *primitives*, not about expressivity: aggregates are reachable in N3, by composing the
 list-valued findall idiom the gap analysis named with the arithmetic/list builtins —
 
-```
+```n3
 ( ?v { …clause… } ?list ) log:collectAllIn ?scope .
 ```
 
@@ -133,7 +133,7 @@ is ours to justify, not N3's to answer for.
 > **The construct.** RDFox (and SPARQL, and RIF-BLD's usual extensions) have an aggregate
 > *expression* that binds a scalar computed over a group:
 >
-> ```
+> ```text
 > [?dept, :headcount, ?n] :- AGGREGATE( [?p, :worksIn, ?dept] ON ?dept BIND COUNT(?p) AS ?n ) .
 > [?dept, :payroll,   ?t] :- AGGREGATE( [?p, :worksIn, ?dept], [?p, :salary, ?s] ON ?dept BIND SUM(?s) AS ?t ) .
 > [?dept, :topSalary, ?m] :- AGGREGATE( [?p, :worksIn, ?dept], [?p, :salary, ?s] ON ?dept BIND MAX(?s) AS ?m ) .
