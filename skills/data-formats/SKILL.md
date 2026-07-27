@@ -674,14 +674,17 @@ cargo build -p sparq-cli --features serialize-rdf
   are IDENTICAL to the feature-off path — only fewer blocks decode. The filter is in-RAM/build-time
   only: it is NEVER written to the on-disk `SPQCPRM1` format, so a perm built with the feature on
   persists byte-identically to one built with it off, and a memory-mapped perm carries no filter.
-  **Reach for it on ABSENT-key lookups.** The sq-v8ixk measurement harness (`measure_bloom_*` in
-  `compress.rs`) refuted the original "the id overlaps several blocks" rationale for the columns
-  the density gate admits: because those columns are high-NDV, a PRESENT id's rows are contiguous
-  and the zone map already narrows the window to about one block, leaving the filter nothing to
-  skip. The filter earns its keep on an equality-bound id that is ABSENT from the permutation —
-  a subject/object bound by an earlier pattern with no rows here — where it drops the candidate
-  block undecoded. Run the harness for figures; none is asserted here, and the latency half is
-  canonical only on the perf host (bead `sq-0g6g`).
+  **The measured skip opportunity is on ABSENT-key lookups.** On the SYNTHETIC high-NDV columns
+  the sq-v8ixk harness generates (`measure_bloom_*` in `compress.rs`), the original "the id
+  overlaps several blocks" rationale does not show up: because those columns are high-NDV, a
+  PRESENT id's rows are contiguous and the zone map already narrows the candidate window to about
+  one block, so there is little left for the filter to skip. The larger skip opportunity is an
+  equality-bound id that is ABSENT from the permutation — a subject/object bound by an earlier
+  pattern with no rows here — where the candidate block can be dropped undecoded. Those are
+  block-SKIP COUNTS on a synthetic distribution: host-independent, but they establish no latency
+  result and do not settle the question for real workloads. Run the harness for figures; none is
+  asserted here, and the canonical run against a real dataset on the perf host is bead `sq-0g6g`
+  (PENDING).
 - **`elias-fano` (opt-in, OFF by default) — compressed-seek codecs, PROTOTYPE, not wired in.**
   `sparq-core = { …, features = ["elias-fano"] }` exposes `sparq_core::eliasfano` with
   `EliasFano` and `PartitionedEliasFano` (plus `EliasFanoIter` and

@@ -126,19 +126,24 @@ impl Blocks {
 /// Bloom bitset closes exactly that gap: probe the block's filter and skip its
 /// `decode_block_at` when the id is provably absent.
 ///
-/// WHERE THE WIN ACTUALLY IS ([SONNET-4.6] sq-v8ixk, measured — see
+/// WHERE THE MEASURED SKIP OPPORTUNITY IS ([SONNET-4.6] sq-v8ixk — see
 /// `tests::measure_bloom_skip_and_sizing` / `tests::measure_bloom_selective_scan_latency`).
 /// This module originally justified itself by an id falling inside SEVERAL overlapping blocks'
-/// `[min,max]` spans. Measurement REFUTES that for the high-NDV columns the density gate
-/// admits: precisely because the column is high-NDV, a PRESENT id's rows are contiguous and the
-/// zone map already narrows the candidate window to about one block, so the filter has almost
-/// nothing left to skip and a present-id point lookup is neither faster nor slower. (An id
-/// spanning many blocks is a LOW-NDV column — exactly what the density gate declines.) What the
-/// filter does earn, and earns largely, is the ABSENT equality-bound id — a subject/object bound
-/// by an earlier pattern that has no rows in this permutation — where it drops the single
-/// candidate block without decoding it at all. That is the shape to reach for this feature for.
-/// No number is asserted here or in any doc: run the harness (its skip/FP/sizing half is
-/// host-independent; the latency half is canonical only on the perf host, bead sq-0g6g).
+/// `[min,max]` spans. On the SYNTHETIC high-NDV columns the harness generates (WatDiv-shaped
+/// skew — NOT a real Wikidata permutation) that shape does not show up: a PRESENT id's rows are
+/// contiguous and the zone map already narrows the candidate window to about one block, so the
+/// measured skip opportunity on a present-id point lookup is small. (An id spanning many blocks
+/// is a LOW-NDV column — exactly what the density gate declines.) The larger measured skip
+/// opportunity is the ABSENT equality-bound id — a subject/object bound by an earlier pattern
+/// that has no rows in this permutation — where the filter can drop the single candidate block
+/// without decoding it at all.
+///
+/// SCOPE OF THAT CLAIM (deliberately narrow): those are candidate-window and block-SKIP COUNTS
+/// on synthetic distributions. Being pure functions of the column they are host-independent, but
+/// they do NOT establish an end-to-end latency result in either direction, and a synthetic column
+/// cannot settle the question for real workloads. No number is asserted here or in any doc, and
+/// the harness's latency half is a work-box figure only — the canonical run, against the intended
+/// real dataset on the perf host, is bead sq-0g6g and is still PENDING.
 ///
 /// CORRECTNESS (load-bearing): zero false NEGATIVES by construction — a leading id that is
 /// present in a block always probes as "maybe present", so no matching row is ever skipped.
@@ -2183,8 +2188,14 @@ mod tests {
     /// ([`range_without_bloom`]), split by present- vs absent-key probes, plus the blocks each
     /// arm actually decodes. NATIVE-ONLY ([`std::time::Instant`] is absent on `wasm32`).
     ///
-    /// EVERY latency figure this prints is a NON-canonical work-box number and must not be
-    /// asserted anywhere; the canonical figures come from re-running this on sq-0g6g.
+    /// PROTOCOL: a discarded warmup of both arms, then each arm timed twice in opposite orders
+    /// (ON,OFF then OFF,ON) with `black_box` on both the probe key and the returned rows and a
+    /// per-arm checksum asserted equal, so the timed work cannot be optimized away and the
+    /// first-timed arm carries no systematic penalty.
+    ///
+    /// EVERY latency figure this prints is a NON-canonical work-box number on a SYNTHETIC column
+    /// and must not be asserted anywhere; the canonical figures come from re-running this on the
+    /// perf host against the intended real dataset (sq-0g6g).
     #[cfg(all(feature = "block-bloom", not(target_arch = "wasm32")))]
     #[test]
     #[ignore = "spike measurement: run explicitly with --ignored --nocapture"]
@@ -2218,24 +2229,57 @@ mod tests {
                     blocks_on += cand - skip;
                 }
 
-                let mut sink = 0usize;
-                let t = Instant::now();
-                for &key in probes.iter() {
-                    sink += c.range([key, Id::MIN, Id::MIN], [key, Id::MAX, Id::MAX]).len();
-                }
-                let on = t.elapsed();
-                let t = Instant::now();
-                for &key in probes.iter() {
-                    sink += range_without_bloom(&c, [key, Id::MIN, Id::MIN], [key, Id::MAX, Id::MAX]).len();
-                }
-                let off = t.elapsed();
-                // Non-vacuity: both arms must have had real candidate blocks to work on. `sink`
-                // (rows returned) is only expected to be positive on the PRESENT arm — an
+                // Each arm keeps its OWN observable checksum, and both the probe key going in
+                // and the row vector coming out pass through `black_box`, so an optimized build
+                // cannot fold the key, elide the decode or drop the returned rows: the timed work
+                // is the work the arm claims to do. Timing a whole probe sweep per call.
+                let run_on = || {
+                    let mut sum = 0usize;
+                    let t = Instant::now();
+                    for &key in probes.iter() {
+                        let key = std::hint::black_box(key);
+                        let got = c.range([key, Id::MIN, Id::MIN], [key, Id::MAX, Id::MAX]);
+                        sum += std::hint::black_box(got).len();
+                    }
+                    (t.elapsed(), sum)
+                };
+                let run_off = || {
+                    let mut sum = 0usize;
+                    let t = Instant::now();
+                    for &key in probes.iter() {
+                        let key = std::hint::black_box(key);
+                        let got = range_without_bloom(&c, [key, Id::MIN, Id::MIN], [key, Id::MAX, Id::MAX]);
+                        sum += std::hint::black_box(got).len();
+                    }
+                    (t.elapsed(), sum)
+                };
+
+                // WARMUP (discarded): pays the cold-cache / first-touch cost once for BOTH arms,
+                // so it is not charged to whichever arm happens to be timed first.
+                let _ = std::hint::black_box(run_on());
+                let _ = std::hint::black_box(run_off());
+
+                // Then time each arm twice in OPPOSITE orders (ON,OFF then OFF,ON) and sum, so
+                // any residual ordering bias falls on both arms equally instead of on the first.
+                let (on1, sum_on1) = run_on();
+                let (off1, sum_off1) = run_off();
+                let (off2, sum_off2) = run_off();
+                let (on2, sum_on2) = run_on();
+                let (on, off) = (on1 + on2, off1 + off2);
+
+                // Non-vacuity + equal-work: both arms must have had real candidate blocks, must
+                // agree on the rows returned (a stronger, per-arm form of the equivalence assert
+                // above — it is what keeps the checksums observable), and must be stable across
+                // rounds. Rows returned are only expected to be POSITIVE on the PRESENT arm — an
                 // absent-key lookup correctly returns nothing, which is that arm's entire point.
                 assert!(blocks_off > 0, "{} arm visited no candidate blocks — vacuous", label);
-                assert!(label != "present" || sink > 0, "present probes returned no rows — vacuous");
+                assert_eq!(sum_on1, sum_off1, "{} arms disagree on rows returned", label);
+                assert_eq!((sum_on1, sum_off1), (sum_on2, sum_off2), "{} arms unstable", label);
+                assert!(label != "present" || sum_on1 > 0, "present probes returned no rows — vacuous");
 
-                let per = |d: std::time::Duration| d.as_nanos() as f64 / probes.len().max(1) as f64;
+                let rounds = 2;
+                let per =
+                    |d: std::time::Duration| d.as_nanos() as f64 / (probes.len().max(1) * rounds) as f64;
                 println!(
                     "  {:<8} probes={:<7} blocks decoded ON={} OFF={}  ns/lookup ON={:.0} OFF={:.0}  delta={:+.1}%",
                     label,
