@@ -60,6 +60,12 @@ SUBJECTS_EXPR = "${{ needs.package.outputs.hashes }}"
 PROVENANCE_ARTIFACT_EXPR = "${{ needs.provenance.outputs.provenance-download-name }}"
 HASHES_OUTPUT_VALUE = "${{ jobs.hashes.outputs.hashes }}"
 SHA256SUMS_CMD = "sha256sum -- * > SHA256SUMS"
+# The per-tier digest step runs on EVERY matrix row, and macOS has no GNU `sha256sum` — only
+# BSD `shasum`. See the assertion in `check` for why a bare `sha256sum` there fails closed at
+# release time rather than on any PR.
+DIGEST_STEP = "Record archive digests (subjects for the isolated provenance builder)"
+PORTABLE_DIGEST = "shasum -a 256"
+MAC_ROW = re.compile(r"os:\s*macos-")
 
 # A line that is a YAML key (optionally a sequence item) — the only shape we strip a trailing
 # `# comment` from, so block-scalar prose (the release body) is never truncated at a `#`.
@@ -125,6 +131,25 @@ def index_of(body: list[str], needle: str) -> int:
         if needle in line:
             return i
     return -1
+
+
+def step_block(body: list[str], name: str) -> list[str] | None:
+    """Lines of the first `- name: <name>` step, up to the next step at the same indent."""
+    start = None
+    indent = 0
+    for i, line in enumerate(body):
+        m = re.match(r"^(\s*)-\s+name:\s*(.+?)\s*$", line)
+        if m and m.group(2) == name:
+            start, indent = i + 1, len(m.group(1))
+            break
+    if start is None:
+        return None
+    out: list[str] = []
+    for line in body[start:]:
+        if re.match(rf"^\s{{0,{indent}}}-\s", line):
+            break
+        out.append(line)
+    return out
 
 
 # --------------------------------------------------------------------------------------
@@ -245,6 +270,24 @@ def check(release_text: str, matrix_text: str) -> list[str]:
                 "the digest list must not be uploaded under a `pkg-*` name — the `release` job "
                 "downloads `pattern: pkg-*` wholesale into the published release assets"
             )
+        # --- the digest step must be able to RUN on every row it is scheduled on. macOS
+        # runners ship BSD `shasum` and no GNU coreutils, so a bare `sha256sum` reds both
+        # Darwin tiers; they then upload no `archive-hashes-*` artifact, the `hashes` job that
+        # `needs: build` never runs, and the release + provenance jobs never run either. That
+        # is a release-time-only failure on a lane no PR exercises — exactly what this suite
+        # exists to catch — so require the portable branch for as long as a mac row exists.
+        digest = step_block(build, DIGEST_STEP)
+        if digest is None:
+            bad.append(
+                f"build-matrix.yml has no `{DIGEST_STEP}` step — the subjects hand-off is gone"
+            )
+        elif any(MAC_ROW.search(line) for line in build) and not any(
+            PORTABLE_DIGEST in line for line in digest
+        ):
+            bad.append(
+                "the build matrix includes macOS rows, so the archive-digest step must use a "
+                f"portable digest (`{PORTABLE_DIGEST}`) — macOS has no GNU `sha256sum`"
+            )
     return bad
 
 
@@ -306,6 +349,17 @@ MUTATIONS = {
         '          echo "subjects for the isolated provenance builder:"',
         '          cargo auditable build --release\n'
         '          echo "subjects for the isolated provenance builder:"',
+    ),
+    # M9 — "simplifying" the portable digest back to a bare GNU `sha256sum`, which is absent on
+    # both Darwin rows. Reads as noise-removal in review; fails only when a release is cut.
+    "archive digests use GNU-only sha256sum on the mac rows": _sub(
+        "matrix",
+        '          if command -v sha256sum >/dev/null 2>&1; then\n'
+        '            sha256sum -- "${archives[@]}" > "archive-hashes-${{ matrix.tier }}.txt"\n'
+        '          else\n'
+        '            shasum -a 256 -- "${archives[@]}" > "archive-hashes-${{ matrix.tier }}.txt"\n'
+        '          fi',
+        '          sha256sum -- "${archives[@]}" > "archive-hashes-${{ matrix.tier }}.txt"',
     ),
     # M8 — the release stops attaching the signed bundle at all.
     "signed provenance never attached to the release": _sub(

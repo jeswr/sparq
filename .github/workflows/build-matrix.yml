@@ -181,7 +181,13 @@ jobs:
       # this job never sees. Emitting a digest is not signing it: a compromised build step here
       # can only ever describe the bytes it actually produced, which is precisely the L3
       # property `actions/attest-build-provenance` cannot give while it shares this job.
-      # `sha256sum` basenames (cd pkg) so each subject name is the RELEASED asset name.
+      # Digest of the basenames (cd pkg) so each subject name is the RELEASED asset name.
+      # PORTABILITY: the two Darwin rows are the reason this is not a bare `sha256sum` call —
+      # macOS ships BSD `shasum` and no GNU coreutils, so `sha256sum` is simply absent there.
+      # A missing digest step does not fail loudly in isolation: those tiers upload no
+      # `archive-hashes-*` artifact, the `hashes` job that `needs: build` never runs, and the
+      # whole L3 lane fails closed at release time — on a lane no PR exercises. Both tools
+      # print the identical `<64-hex>  <name>` record the collector below validates.
       - name: Record archive digests (subjects for the isolated provenance builder)
         if: inputs.mode == 'archive'
         shell: bash
@@ -194,7 +200,11 @@ jobs:
             echo "ERROR: packaging produced no archive to attest for tier ${{ matrix.tier }}" >&2
             exit 1
           fi
-          sha256sum -- "${archives[@]}" > "archive-hashes-${{ matrix.tier }}.txt"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum -- "${archives[@]}" > "archive-hashes-${{ matrix.tier }}.txt"
+          else
+            shasum -a 256 -- "${archives[@]}" > "archive-hashes-${{ matrix.tier }}.txt"
+          fi
           cat "archive-hashes-${{ matrix.tier }}.txt"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: inputs.mode == 'archive'
