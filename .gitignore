@@ -96,3 +96,20 @@ metrics/runtime/
 # unreviewable and a supply-chain risk; install tools via the pinned CI/dev bootstrap
 # instead. Ignored so one can never be accidentally committed (PR #3453 review).
 /.local-bin/
+
+# NOTE [OPUS-5] sq-ubqqe: `*.proptest-regressions` is INTENTIONALLY not ignored.
+# Do NOT add an ignore rule for these files. They are proptest's pinned failure seeds —
+# the file's own header says "It is recommended to check this file in to source control" —
+# and re-running them before novel cases is the highest-value output of the sq-3dyje
+# property-test program. A blanket rule would break two things:
+#   1. Silently discard genuine counterexamples. proptest writes the seed next to the test
+#      source, so there is no "junk" location a scoped rule could target: all 27 property
+#      -test sources write into crates/*/tests/, alongside the seeds worth keeping.
+#   2. Re-create the sq-owci footgun. crates/sparq-engine/tests/proptest_eval and
+#      crates/sparq-sim/tests/proptest_metric seeds are already TRACKED, and neither crate
+#      sets publish = false — so ignoring them makes them tracked-AND-ignored, which is
+#      exactly the state that made release-plz's (cargo) VCS dirty-check abort Release-PR.
+#      See the inference-conformance-report.md NOTE above for that incident.
+# If a specific property test's seeds are genuinely not worth pinning, opt OUT per-test
+# instead, via `failure_persistence: None` in its proptest Config — see
+# crates/sparq-terse/tests/proptest_keyword.rs for the in-repo precedent.
