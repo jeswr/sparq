@@ -373,6 +373,17 @@ class ADefiningFileIsNotItsOwnTest(unittest.TestCase):
                     "pub fn validate_envelope() -> bool { true }\n")
             self.assertEqual(pf.check_guard_untested(ADDED, t.root), [])
 
+    def test_a_fuzz_target_naming_the_guard_satisfies_it(self) -> None:
+        # MEASURED: the one false positive among the 39 distinct symbols this
+        # check reports on the real tree. sparq-shacl::validate_graph is exercised
+        # only by fuzz/fuzz_targets/validate_shacl.rs, which stops compiling if
+        # the function is deleted. Kills: dropping "/fuzz/" from TEST_PATH_HINTS.
+        with tempfile.TemporaryDirectory() as td:
+            t = _Tree(td)
+            t.write("fuzz/fuzz_targets/f.rs",
+                    "fuzz_target!(|d: &[u8]| { let _ = sparq_x::validate_envelope(); });\n")
+            self.assertEqual(pf.check_guard_untested(ADDED, t.root), [])
+
     def test_doc_PROSE_naming_the_guard_does_not_satisfy_it(self) -> None:
         # Only the fenced code counts. Prose is documentation, not a test — and
         # accepting it would let a diff test its guard by describing it.
