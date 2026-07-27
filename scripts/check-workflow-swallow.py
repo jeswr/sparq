@@ -497,6 +497,126 @@ def scan_corpus(workflows_dir: Path) -> tuple[list[dict], list[str], int, int]:
     return records, errors, n_workflows, n_steps
 
 
+# ---------------------------------------------------------------------------
+# Orphaned-test detection: a suite deleted from CI whose own assertions still pass
+# ---------------------------------------------------------------------------
+#
+# The seam checker's `--min-invocations` protects ONE gate's call sites. The same
+# hole exists once per test suite, and it is worse there: deleting the single
+# `bash scripts/tests/test_x.sh` line from a workflow disarms every assertion in
+# that suite with zero signal — the suite still passes when anyone runs it by hand,
+# and CI simply stops running it.
+#
+# The trap is that a filename grep does NOT catch this. `scripts/tests/test_x.sh`
+# usually appears TWICE in a workflow: once under `shellcheck` and once under
+# `bash`. Delete the `bash` line and a grep for the filename is still satisfied by
+# the `shellcheck` line, so the wiring check passes over a suite that no longer
+# runs. So the reference has to be resolved at COMMAND POSITION.
+
+INTERPRETERS = frozenset({"bash", "sh", "zsh", "dash", "python", "python3", "py", "node", "deno"})
+# Wrappers that pass the rest of the line through to a real command.
+PASSTHROUGH = frozenset({"sudo", "time", "exec", "env", "nice", "xargs", "command", "timeout", "stdbuf"})
+SEGMENT_SPLIT_RE = re.compile(r"\|\||&&|[|;&\n]")
+ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def executed_paths(text: str) -> set[str]:
+    """Repo-relative script paths this text actually EXECUTES.
+
+    A path named as an ARGUMENT to a non-executing tool (``shellcheck x.sh``,
+    ``cat x.sh``, ``--exclude x.sh``) is deliberately not an execution: that
+    distinction is the whole point, because it is the one a filename grep gets wrong.
+    """
+    found: set[str] = set()
+    for logical in logical_lines(text):
+        line = strip_comment(logical)
+        for segment in SEGMENT_SPLIT_RE.split(line):
+            tokens = [t for t in segment.replace("(", " ").replace(")", " ").split() if t]
+            saw_wrapper = False
+            while tokens and (
+                ENV_ASSIGN_RE.match(tokens[0])
+                or tokens[0] in PASSTHROUGH
+                # A wrapper's own options/durations (`timeout -k 30s 900`) sit between
+                # it and the real command.
+                or (saw_wrapper and re.fullmatch(r"-\S*|\d+[smhd]?", tokens[0]))
+            ):
+                saw_wrapper = saw_wrapper or tokens[0] in PASSTHROUGH
+                tokens.pop(0)
+            if not tokens:
+                continue
+            head = tokens[0].strip("\"'")
+            if head in INTERPRETERS:
+                for tok in tokens[1:]:
+                    tok = tok.strip("\"'")
+                    if tok.startswith("-"):
+                        continue
+                    found.add(tok.lstrip("./"))
+                    break
+            elif "/" in head or head.endswith((".sh", ".py")):
+                found.add(head.lstrip("./"))
+    return found
+
+
+def test_entrypoints(root: Path) -> list[str]:
+    tests_dir = root / "scripts" / "tests"
+    if not tests_dir.is_dir():
+        return []
+    out = []
+    for p in sorted(tests_dir.iterdir()):
+        if p.is_file() and (p.suffix == ".sh" or (p.suffix == ".py" and p.name.startswith("test_"))):
+            out.append(str(p.relative_to(root)))
+    return out
+
+
+def orphaned_tests(root: Path, workflows_dir: Path) -> tuple[list[str], int, int]:
+    """``(orphans, n_tests, n_rooted)`` — suites no gating workflow step executes.
+
+    Reachability is TRANSITIVE: a suite driven by a runner script that CI executes is
+    wired. Only a suite nothing reaches is an orphan.
+    """
+    tests = test_entrypoints(root)
+    if not tests:
+        return [], 0, 0
+
+    rooted: set[str] = set()
+    for path in sorted(workflows_dir.glob("*.yml")) + sorted(workflows_dir.glob("*.yaml")):
+        try:
+            wf = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            continue
+        if not isinstance(wf, dict) or not (GATING_EVENTS & _triggers(wf)):
+            continue
+        for job in (wf.get("jobs") or {}).values():
+            if not isinstance(job, dict) or ADVISORY_RE.search(str(job.get("name", ""))):
+                continue
+            for step in job.get("steps") or []:
+                if isinstance(step, dict) and step.get("run"):
+                    rooted |= executed_paths(step["run"])
+
+    # Transitive closure through the scripts tree.
+    seen: set[str] = set()
+    queue = [r for r in rooted if r.startswith("scripts/")]
+    while queue:
+        rel = queue.pop()
+        if rel in seen:
+            continue
+        seen.add(rel)
+        f = root / rel
+        if not f.is_file():
+            continue
+        try:
+            more = executed_paths(f.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+        for m in more:
+            if m.startswith("scripts/") and m not in seen:
+                queue.append(m)
+    reachable = rooted | seen
+    return [t for t in tests if t not in reachable], len(tests), len(tests) - len(
+        [t for t in tests if t not in reachable]
+    )
+
+
 def load_allowlist(path: Path) -> tuple[dict, list[str]]:
     if not path.is_file():
         return {}, [f"{path.name}: allowlist file not found"]
@@ -552,6 +672,13 @@ def main() -> int:
         help="HARD: allowlist schema + stale-entry ratchet + corpus floors (no finding verdict)",
     )
     ap.add_argument("--check-corpus", action="store_true", help="report un-exempted findings in gating steps")
+    ap.add_argument(
+        "--check-test-wiring",
+        action="store_true",
+        help="report scripts/tests suites that NO gating workflow step executes "
+        "(a filename grep cannot do this: `shellcheck x.sh` satisfies it while `bash x.sh` is gone)",
+    )
+    ap.add_argument("--root", type=Path, default=ROOT, help="repository root (for the tests tree)")
     ap.add_argument("--advisory", action="store_true", help="report findings but exit 0 (promotion path, see --help)")
     ap.add_argument("--workflows-dir", type=Path, default=ROOT / ".github" / "workflows")
     ap.add_argument("--allowlist", type=Path, default=DEFAULT_ALLOWLIST)
@@ -571,13 +698,37 @@ def main() -> int:
 
     if args.self_test:
         return self_test()
-    if not (args.census or args.check_allowlist or args.check_corpus):
+    if not (args.census or args.check_allowlist or args.check_corpus or args.check_test_wiring):
         ap.print_help()
         return 2
 
     if not args.workflows_dir.is_dir():
         print(f"check-workflow-swallow: {args.workflows_dir} is not a directory")
         return 1
+
+    if args.check_test_wiring:
+        orphans, n_tests, n_rooted = orphaned_tests(args.root, args.workflows_dir)
+        if n_tests < args.min_run_steps:
+            print(
+                f"check-workflow-swallow: found only {n_tests} test suite(s), floor is "
+                f"{args.min_run_steps} — the tests tree is not being reached, so this proves nothing"
+            )
+            return 1
+        if orphans:
+            label = "ADVISORY" if args.advisory else "FAILED"
+            print(
+                f"check-workflow-swallow: {label} — {len(orphans)} of {n_tests} test suite(s) are "
+                f"NOT executed by any gating workflow step. Their assertions still pass when run by "
+                f"hand, so deleting the CI call site left no signal:"
+            )
+            for o in orphans:
+                print(f"  {o}")
+            return 0 if args.advisory else 1
+        print(
+            f"check-workflow-swallow: every one of {n_tests} test suite(s) is executed by a gating "
+            f"workflow step ({n_rooted} reachable) — OK"
+        )
+        return 0
 
     records, errors, n_workflows, n_steps = scan_corpus(args.workflows_dir)
     entries, allow_problems = load_allowlist(args.allowlist)
@@ -882,6 +1033,38 @@ def self_test() -> int:
         if not errors:
             failures.append("an unparseable workflow was silently skipped instead of erroring")
         (wfdir / "broken.yml").unlink()
+
+        # Command position, both directions. The `shellcheck x.sh` / `bash x.sh` pair
+        # is the exact shape a filename grep gets wrong: delete the `bash` line and
+        # the grep is still satisfied by the `shellcheck` line, over a suite CI no
+        # longer runs.
+        exec_cases: list[tuple[str, str, bool]] = [
+            ("bash runs it", "bash scripts/tests/test_x.sh", True),
+            ("shellcheck only NAMES it", "shellcheck scripts/tests/test_x.sh", False),
+            (
+                "both lines present",
+                "shellcheck scripts/tests/test_x.sh\nbash scripts/tests/test_x.sh",
+                True,
+            ),
+            (
+                "the `bash` line deleted, `shellcheck` left behind",
+                "shellcheck scripts/tests/test_x.sh\necho done",
+                False,
+            ),
+            ("direct invocation", "./scripts/tests/test_x.sh", True),
+            ("python3 runs it", "python3 scripts/tests/test_x.py --self-test", True),
+            ("cat only reads it", "cat scripts/tests/test_x.sh", False),
+            ("passed as a FLAG argument", "python3 scripts/seam.py --needle scripts/tests/test_x.sh", False),
+            ("interpreter flags are skipped", "bash -x scripts/tests/test_x.sh", True),
+            ("wrapper passthrough", "timeout 60 bash scripts/tests/test_x.sh", True),
+            ("named in a comment", "# bash scripts/tests/test_x.sh", False),
+        ]
+        for label, text, expect in exec_cases:
+            got = "scripts/tests/test_x.sh" in executed_paths(text) or "scripts/tests/test_x.py" in executed_paths(
+                text
+            )
+            if got != expect:
+                failures.append(f"executed_paths: {label}: expected executed={expect}, got {got}")
 
         # The fingerprint must move when the exempted TEXT changes, and must not
         # collide across jobs — otherwise an exemption drifts onto a new defect.
