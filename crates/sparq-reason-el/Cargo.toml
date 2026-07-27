@@ -77,6 +77,13 @@ cdomain = ["dep:sparq-substrate", "sparq-substrate/numeric"]
 # (soundness over completeness, the CR6 reachability side-condition preserved); unsupported
 # assertion shapes (data-property assertions, non-EL class expressions) stay counted skips
 # (fail-closed). No new dependency — reuses oxrdf + rustc-hash.
+#
+# [SONNET-4.6] sq-vkq9u: composed with `cdomain` this feature ALSO rescues a
+# `DataPropertyAssertion` whose literal lies in the exact numeric tier — `a q 5` becomes
+# `{a} ⊑ ∃q.{5}` over the very point range CR9 mints for `DataHasValue 5`, so CR8 threads an
+# asserted VALUE into the TBox's data-range obligations (tests/abox_cdomain.rs; the feature
+# CONJUNCTION has its own feature-matrix leg). With only ONE of the two features on, every
+# data-property assertion keeps the fail-closed counted skip described above.
 abox = []
 
 # [FABLE-5] sq-wy3i6 (Phase E4): PARALLEL saturation — `Classifier::classify_par` /

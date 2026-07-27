@@ -18,12 +18,13 @@ of a quarantine label. An issue is READY iff, in priority order, ALL hold:
     (shared lockfiles/CI/workspace configs).
 
 The snapshot uses real cursor pagination (`gh api --paginate`) with an explicit fail-closed
-ceiling; native GitHub dependencies remain a follow-up — today blockers come from validated
-`Blocked-by: #NN` markers. Pure `compute_ready()` is unit-tested; the CLI wraps it over the
-paginated fetch.
+ceiling. Open blockers are the UNION of GitHub's NATIVE issue dependencies and the legacy
+validated `Blocked-by: #NN` body markers — see `open_blocker_count`. Pure `compute_ready()` is
+unit-tested; the CLI wraps it over the paginated fetch.
 """
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -50,6 +51,195 @@ GLOBAL = "__global__"  # the cross-cutting partition (serializes against everyth
 _PRIO = re.compile(r"^priority:P([0-4])$")   # only P0..P4 are valid
 _PKG = re.compile(r"^area:(.+)$")
 _ROLE = re.compile(r"^role:.+$")
+
+# ---------------------------------------------------------------------------
+# Partition-key algebra (sparq#4336) — CONTAINMENT-aware, TOTAL.
+#
+# [OPUS-5] The under-serialisation defect this replaces: `conflict()` compared partition keys by
+# EXACT-STRING set overlap, so a key naming a region INSIDE a crate never overlapped its parent
+# crate. Five such labels already exist in production — `sparq-server-http`, `sparq-core-nt-dict`,
+# `sparq-core-store`, `sparq-engine-exec`, `sparq-conformance-floors` — so an `area:sparq-server`
+# issue and an `area:sparq-server-http` issue entered the frontier in the SAME tick, and an
+# `area:sparq-server-http` issue entered despite an open PR holding `area:sparq-server`. Two
+# workers in one crate with no lock between them. Measured base rate for that pair sharing a file:
+# 57.1% of same-crate 24h PR pairs (research/crate-region-parallelism.md §4). Textual collisions
+# surface as merge conflicts; SEMANTIC ones (both compile, both pass, together broken) are
+# invisible to git and reach the merge-group gate at the cost of a dequeue plus a batch bisect.
+#
+# Under-serialisation is the CORRUPTING direction. Over-serialisation only costs delay. So the
+# mapping below is TOTAL and biased to over-reserve: every key resolves to the coarsest partition
+# that could contain it, and a key we cannot place at all resolves to GLOBAL.
+_SEP = "-"                       # the hierarchy separator inside an `area:` key
+_PARTITION_MEMO = {}             # key -> path, for the default (workspace-derived) root set
+_WORKSPACE_ROOTS = None          # lazily scanned; None = not yet read
+
+
+def _repo_root():
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def workspace_roots(repo_root=None):
+    """The RECOGNISED partition roots, READ FROM THE REPOSITORY TREE — deliberately not a table.
+
+    A name is a recognised root iff the workspace really contains it as a partition: a crate
+    directory under `crates/`, or a top-level repository directory. The tree is the only authority
+    that can tell `sparq-engine-serialize` (a REAL sibling crate, its own partition) apart from
+    `sparq-engine-exec` (a REGION inside `sparq-engine`) — as strings the two are identical in
+    shape, and a hand-written table of which is which is exactly what goes stale. Reading the tree
+    means a crate added next month registers itself with no code change, and a region label
+    invented next month resolves to its crate with no code change.
+
+    The registry's `dispatch.yml` CLONES this repo and runs this script, so the same tree is
+    present there; `--dump-partitions` exports the resolved mapping for a parity fixture.
+    """
+    global _WORKSPACE_ROOTS
+    if repo_root is None and _WORKSPACE_ROOTS is not None:
+        return _WORKSPACE_ROOTS
+    base = repo_root if repo_root is not None else _repo_root()
+    names = set()
+    for parent in (base, os.path.join(base, "crates")):
+        try:
+            entries = os.listdir(parent)
+        except OSError:
+            continue
+        names.update(e for e in entries
+                     if not e.startswith(".") and os.path.isdir(os.path.join(parent, e)))
+    if repo_root is None:
+        _WORKSPACE_ROOTS = names
+    return names
+
+
+def _ancestors(key):
+    """Every `-`-delimited ancestor prefix of `key`, LONGEST first (`key` itself included)."""
+    segs = key.split(_SEP)
+    return [_SEP.join(segs[:i]) for i in range(len(segs), 0, -1)]
+
+
+def partition_path(key, roots=None):
+    """TOTAL map from an `area:` key to the hierarchical PARTITION PATH it reserves.
+
+    Resolution, longest-recognised-ancestor first, so the failure direction is STRUCTURAL rather
+    than dependent on anyone remembering to register a label:
+
+      1. `GLOBAL` (and any empty/degenerate key) -> `()`, the root of the hierarchy. `()` is a
+         prefix of every path, so GLOBAL conflicts with everything — the existing fail-closed
+         backstop, now expressed as containment instead of two special cases in `conflict()`.
+      2. The longest `-`-ancestor of `key` that the WORKSPACE recognises -> `(that ancestor,)`.
+         `sparq-core-store` and `sparq-core-nt-dict` both resolve to `sparq-core`, so they conflict
+         with their parent crate AND with each other (same crate, same files — a sibling hole would
+         be the identical defect one level down). `sparq-engine-serialize` IS a crate directory, so
+         it resolves to ITSELF and does NOT collapse into `sparq-engine`: genuinely unrelated
+         crates stay parallel and the frontier survives.
+      3. Otherwise the key's HEAD segment -> `(head,)`. A key whose parent the workspace does not
+         know still declares a parent in its own structure, and honouring it over-reserves. This
+         is what makes an invented `area:upstream-noir` conflict with `area:upstream` with no code
+         change, and it leaves every single-segment key (`upstream`, `cli`, `docs`, ...) exactly
+         where it is today — those name nothing narrower, so they cannot be under-serialising.
+
+    The path is currently never deeper than one element ON PURPOSE: a sub-region collapses INTO its
+    container rather than becoming a child of it. research/crate-region-parallelism.md §8 rejects
+    intra-crate region partitioning as a parallelism lever (14.5% ceiling), and a two-level path
+    would reopen the sibling hole. The prefix-based predicate below is depth-agnostic, so a future
+    measured, gated subpartition (that record's Phase 1) can add depth without touching it.
+    """
+    if roots is None:
+        memo = _PARTITION_MEMO
+        if key in memo:
+            return memo[key]
+        path = _resolve(key, workspace_roots())
+        memo[key] = path
+        return path
+    return _resolve(key, roots)
+
+
+def _resolve(key, roots):
+    if not key or key == GLOBAL:
+        return ()
+    for ancestor in _ancestors(key):
+        if ancestor in roots:
+            return (ancestor,)
+    head = key.split(_SEP)[0]
+    return (head,) if head else ()
+
+
+def keys_conflict(a, b, roots=None):
+    """Whether two `area:` keys reserve overlapping work — CONTAINMENT, not string equality.
+
+    True iff one partition path is a prefix of the other, i.e. one region contains the other.
+    Reflexive, symmetric, and NOT transitive-closed beyond containment: `sparq-core` and
+    `sparq-engine` remain independent.
+    """
+    pa, pb = partition_path(a, roots), partition_path(b, roots)
+    return pa[:len(pb)] == pb or pb[:len(pa)] == pa
+# --- open blockers: NATIVE GitHub dependencies UNIONED with the legacy body markers -------------
+# [OPUS-5] Until this landed, BOTH readers of "is this issue blocked" (this file and the registry's
+# dispatch.yml planner step) derived `open_blockers` ONLY by regexing `Blocked-by: #NN` out of the
+# issue BODY. GitHub issue dependencies are generally available and the maintainer uses the native
+# UI, so a dependency added that way had ZERO effect on dispatch. MEASURED 2026-07-26 over all 1368
+# open sparq issues (cursor-paginated, len == GraphQL totalCount): 112 issues carry a native edge
+# (170 edges) and 0 of the 427 issues created since 2026-07-20 carry either channel — the marker
+# channel is effectively dead for new work while the native channel is the one being written.
+#
+# UNION, never replace. 3 open issues (#2833, #2975, #3817) carry a marker with NO native edge, and
+# the fail-safe direction is one-way: `exclusion_reason` keys on `open_blockers > 0`, so MISSING an
+# edge dispatches an issue that is genuinely blocked, while OVER-counting one only delays it.
+_MARKER_BLOCKED_BY = re.compile(r"[Bb]locked-by:\s*#(\d+)")
+# GitHub's REST list payload carries this per non-PR issue at no extra request. `blocked_by` counts
+# only OPEN blockers (`total_blocked_by` counts closed ones too) — MEASURED against GraphQL
+# `blockedBy` filtered to state=OPEN over all 1368 open issues: identical sets AND identical
+# per-issue counts, and 16 issues have total_blocked_by > blocked_by (a closed blocker), confirming
+# a satisfied dependency is already excluded. So a CLOSED blocker never holds an issue here.
+NATIVE_SUMMARY = "issue_dependencies_summary"
+# A summary that is PRESENT but malformed is a schema change we cannot interpret. Admitting it as
+# "0 blockers" is the fail-OPEN direction (it dispatches work that may be blocked), so it counts as
+# one unknown blocker instead: the issue is held, loudly, until a human looks.
+MALFORMED_SUMMARY_BLOCKERS = 1
+
+
+def native_open_blockers(issue, warn=None):
+    """OPEN blockers from GitHub's NATIVE dependency edges, per `issue_dependencies_summary`.
+
+    ABSENT summary -> 0 (the honest reading: this snapshot carries no native-dependency data, so
+    only the marker channel can speak). That absence is NOT silent — `_fetch` raises a corpus-level
+    alarm if NO issue in a whole snapshot carries the field, which is what a GitHub field rename
+    would look like and is otherwise indistinguishable from "nothing is blocked".
+    PRESENT-but-malformed -> MALFORMED_SUMMARY_BLOCKERS (fail closed, see above).
+    """
+    summary = issue.get(NATIVE_SUMMARY)
+    if summary is None:
+        return 0
+    number = issue.get("number", "?")
+    if not isinstance(summary, dict):
+        if warn is not None:
+            warn(f"#{number}: {NATIVE_SUMMARY} is not an object — holding the issue (fail-closed)")
+        return MALFORMED_SUMMARY_BLOCKERS
+    value = summary.get("blocked_by")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        if warn is not None:
+            warn(f"#{number}: {NATIVE_SUMMARY}.blocked_by is {value!r}, not a non-negative int — "
+                 "holding the issue (fail-closed)")
+        return MALFORMED_SUMMARY_BLOCKERS
+    return value
+
+
+def marker_open_blockers(body, open_numbers):
+    """OPEN blockers from validated `Blocked-by: #NN` BODY markers (the legacy channel)."""
+    return sum(1 for n in _MARKER_BLOCKED_BY.findall(body or "") if int(n) in set(open_numbers))
+
+
+def open_blocker_count(issue, open_numbers, warn=None):
+    """The UNION of both blocker channels, as the count `exclusion_reason` consumes.
+
+    `max` is the exact union for the only decision that is made from it — an issue is held iff
+    `native > 0 or marker_open > 0`, which is precisely `max(...) > 0`. It is a LOWER BOUND on the
+    cardinality of the union of the two blocker SETS (the native channel reports a count, not
+    numbers, so a native blocker distinct from every marker blocker cannot be added to the marker
+    count without double-counting the overlap). Under-reporting the count can only understate the
+    delay in `--diagnose`; it can never flip a held issue to ready. MEASURED over all 1368 open
+    issues: 0 issues where the two channels disagree on the count, so today max == the true union.
+    """
+    return max(native_open_blockers(issue, warn), marker_open_blockers(issue.get("body"),
+                                                                       open_numbers))
 
 
 def labels_of(issue):
@@ -222,15 +412,19 @@ def compute_ready(issues, in_progress_packages=None, conflict_log=None):
             blockers.setdefault(pkg, []).append(artifact)
 
     def conflict(pkgs):
-        if GLOBAL in blockers:
-            area = GLOBAL
-        elif GLOBAL in pkgs and blockers:
-            area = sorted(blockers)[0]
-        else:
-            overlap = pkgs & blockers.keys()
-            if not overlap:
-                return None
-            area = sorted(overlap)[0]
+        """The held key that CONTAINS-or-is-contained-by one of `pkgs`, or None.
+
+        [OPUS-5] sparq#4336: was exact-string set overlap (`pkgs & blockers.keys()`) plus two
+        hand-written GLOBAL special cases. Exact-string overlap under-serialised every sub-crate
+        key against its parent crate; the GLOBAL cases are now just the `()` path being a prefix
+        of everything, so there is ONE rule instead of three. Attribution reports the RAW held
+        label (not its resolved partition) so a conflict line still names the artifact's own key;
+        the coarsest holder wins, then alphabetical, so the message stays deterministic.
+        """
+        held = [key for key in blockers if any(keys_conflict(key, p) for p in pkgs)]
+        if not held:
+            return None
+        area = min(held, key=lambda key: (len(partition_path(key)), key))
         return area, blockers[area][0]
 
     for pkg in sorted(set(in_progress_packages or ())):
@@ -350,6 +544,109 @@ def _self_test():
           [[it["number"] for it in compute_ready(
               [pr(73 + i, ["area:sparq-store", label]), waiting], conflict_log=quiet)]
            for i, label in enumerate(sorted(PARKED_AREA_LABELS))], [[20], [20], [20]])
+    # [OPUS-5] sparq#4336 CONTAINMENT fixtures. The registry's dispatch.yml runs THIS --self-test,
+    # so these are the assertions that gate the fleet's own copy of the key algebra.
+    check("sub-crate key resolves to its crate", partition_path("sparq-server-http"),
+          ("sparq-server",))
+    check("real sibling crate resolves to itself", partition_path("sparq-engine-serialize"),
+          ("sparq-engine-serialize",))
+    check("invented sub-crate key resolves to its crate", partition_path("sparq-server-zzz"),
+          ("sparq-server",))
+    check("degenerate key falls all the way to global", partition_path(""), ())
+    check("unrelated crates do not conflict",
+          keys_conflict("sparq-core", "sparq-engine"), False)
+    check("sibling regions of one crate conflict",
+          keys_conflict("sparq-core-store", "sparq-core-nt-dict"), True)
+    check("parent+child enter the frontier together? (must not)",
+          [i["number"] for i in compute_ready(
+              [iss(80, R + ["priority:P1", "area:sparq-server"]),
+               iss(81, R + ["priority:P1", "area:sparq-server-http"])], conflict_log=quiet)], [80])
+    check("child+parent, reversed order (must not)",
+          [i["number"] for i in compute_ready(
+              [iss(80, R + ["priority:P1", "area:sparq-server-http"]),
+               iss(81, R + ["priority:P1", "area:sparq-server"])], conflict_log=quiet)], [80])
+    check("open PR on the parent crate blocks a sub-crate issue",
+          compute_ready([pr(82, ["area:sparq-server"]),
+                         iss(83, R + ["priority:P1", "area:sparq-server-http"])],
+                        conflict_log=quiet), [])
+    check("unknown key under an unknown parent still over-reserves",
+          keys_conflict("upstream", "upstream-noir"), True)
+    check("single-segment unknown key keeps its own partition",
+          partition_path("deps"), ("deps",))
+    # ---------------------------------------------------------------------------------------
+    # NATIVE dependency edges (the maintainer's own triage action). Every row below is written to
+    # go RED if the native read is deleted, if the union is turned into a replacement, or if the
+    # closed-blocker exemption is broken. They run END-TO-END through compute_ready wherever the
+    # decision (dispatch / hold) is what matters — a pure-count assertion alone would survive
+    # `_fetch` never calling open_blocker_count at all, so the `_fetch`-shaped rows are included.
+    # ---------------------------------------------------------------------------------------
+    def raw_issue(n, labels, body="", summary=None, pr=False):
+        """A row in the SHAPE `_fetch` receives from `gh api repos/../issues`."""
+        row = {"number": n, "state": "open", "labels": [{"name": lb} for lb in labels],
+               "body": body}
+        if summary is not None:
+            row[NATIVE_SUMMARY] = summary
+        if pr:
+            row["pull_request"] = {}
+        return row
+
+    def summary(open_blockers, total=None):
+        return {"blocked_by": open_blockers, "blocking": 0,
+                "total_blocked_by": open_blockers if total is None else total, "total_blocking": 0}
+
+    ready_labels = R + ["priority:P1", "area:sparq-core"]
+    # (1) THE REGRESSION THIS EXISTS FOR: a native edge and NO body marker must hold the issue.
+    native_only = raw_issue(40, ready_labels, body="no marker here", summary=summary(1))
+    check("native blocked_by with NO body marker excludes from ready",
+          [it["number"] for it in compute_ready(_fetch_rows([native_only]), conflict_log=quiet)],
+          [])
+    check("...and the same issue with the native edge cleared IS ready",
+          [it["number"] for it in compute_ready(
+              _fetch_rows([raw_issue(40, ready_labels, body="no marker here",
+                                     summary=summary(0))]), conflict_log=quiet)],
+          [40])
+    # (2) the LEGACY channel must keep working — union, never replace. #2833/#2975/#3817 are live
+    # marker-only rows, so a replacement would silently drop them.
+    blocker = raw_issue(41, ["role:impl"])
+    marker_only = raw_issue(42, ready_labels, body="Blocked-by: #41", summary=summary(0))
+    check("marker-only edge (native says zero) still excludes from ready",
+          [it["number"] for it in compute_ready(_fetch_rows([blocker, marker_only]),
+                                                conflict_log=quiet)], [])
+    # (3) a CLOSED blocker must NOT hold the child on either channel. Native: `blocked_by` counts
+    # only open blockers while `total_blocked_by` counts the closed one (MEASURED on 16 live
+    # issues, e.g. #3264 blocked_by=0 total_blocked_by=1). Marker: #43 is absent from the open set.
+    closed_blocked = raw_issue(44, ready_labels, body="Blocked-by: #43", summary=summary(0, total=2))
+    check("issue whose ONLY blocker is CLOSED is NOT excluded",
+          [it["number"] for it in compute_ready(_fetch_rows([closed_blocked]), conflict_log=quiet)],
+          [44])
+    # (4) union arithmetic, at the count level, on every channel combination.
+    check("open_blocker_count unions both channels (never replaces either)",
+          [open_blocker_count(raw_issue(1, [], body=b, summary=s), {41})
+           for b, s in (("", None), ("", summary(0)), ("", summary(3)),
+                        ("Blocked-by: #41", summary(0)), ("Blocked-by: #41", summary(3)),
+                        ("Blocked-by: #99", summary(0)))],
+          [0, 0, 3, 1, 3, 0])
+    # (5) a PRESENT-but-malformed summary must FAIL CLOSED (hold), never admit.
+    warnings = []
+    check("malformed native summary holds the issue and says so",
+          ([native_open_blockers(raw_issue(45, [], summary=s), warnings.append)
+            for s in ({"blocked_by": -1}, {"blocked_by": "1"}, {"blocked_by": True},
+                      {"blocked_by": None}, ["not", "a", "dict"])],
+           len(warnings)),
+          ([MALFORMED_SUMMARY_BLOCKERS] * 5, 5))
+    check("...and it is the FRONTIER that holds, not just the count",
+          [it["number"] for it in compute_ready(
+              _fetch_rows([raw_issue(45, ready_labels, summary={"blocked_by": "1"})]),
+              conflict_log=quiet)], [])
+    # (6) the DARK-CHANNEL alarm: absent-on-every-issue is a schema regression, not a quiet repo.
+    check("native-channel-dark snapshot raises the alarm",
+          [("DARK" in line, NATIVE_SUMMARY in line) for line in native_channel_alarm(
+              [raw_issue(50, []), raw_issue(51, []), raw_issue(52, [], pr=True)])],
+          [(True, True)])
+    check("one issue carrying the summary is enough to keep the channel LIT",
+          native_channel_alarm([raw_issue(50, []), raw_issue(51, [], summary=summary(0))]), [])
+    check("a PR-only snapshot never raises the dark alarm",
+          native_channel_alarm([raw_issue(52, [], pr=True)]), [])
     check("valid_priority single", valid_priority({"priority:P0"}), 0)
     check("valid_priority ambiguous", valid_priority({"priority:P1", "priority:P2"}), None)
     check("valid_priority out-of-range", valid_priority({"priority:P7"}), None)
@@ -421,6 +718,19 @@ def _fetch(repo, ceiling=10000):
         raise SystemExit(f"refusing: fetched {len(raw)} >= ceiling {ceiling} — snapshot looks "
                          "runaway (fail-closed). Raise the ceiling deliberately if the backlog "
                          "is really that large.")
+    issues = _fetch_rows(raw, warn=lambda m: print(f"::warning::{m}", file=sys.stderr))
+    for line in native_channel_alarm(raw):
+        print(line, file=sys.stderr)
+    return issues
+
+
+def _fetch_rows(raw, warn=None):
+    """The PURE half of `_fetch`: GitHub issue payloads -> readiness-engine rows.
+
+    Split out so `--self-test` exercises the REAL row builder. Asserting on `open_blocker_count`
+    alone would stay green with `_fetch` never calling it — which is exactly the shape of the bug
+    being fixed (a correct blocker rule that no dispatcher consulted).
+    """
     open_numbers = {i["number"] for i in raw if "pull_request" not in i}
     issues = []
     for i in raw:
@@ -430,10 +740,29 @@ def _fetch(repo, ceiling=10000):
             row["pull_request"] = i["pull_request"]
             row["draft"] = i.get("draft")
         else:
-            blockers = re.findall(r"[Bb]locked-by:\s*#(\d+)", i.get("body") or "")
-            row["open_blockers"] = sum(1 for b in blockers if int(b) in open_numbers)
+            row["open_blockers"] = open_blocker_count(i, open_numbers, warn)
         issues.append(row)
     return issues
+
+
+def native_channel_alarm(raw):
+    """The GUARD against the native blocker channel going DARK without anyone noticing.
+
+    `native_open_blockers` reads an ABSENT `issue_dependencies_summary` as 0 — correct for an old
+    snapshot, and indistinguishable from "GitHub renamed the field" if nobody checks. MEASURED
+    2026-07-26: the field is present on 1368/1368 open sparq ISSUES and 0/104 PR rows, so "no
+    non-PR row carries it" is a schema regression, not a quiet repo. Returns the lines to print
+    (pure, so the check itself is testable rather than a side effect nobody exercises).
+    """
+    non_pr = [i for i in raw if isinstance(i, dict) and "pull_request" not in i]
+    if not non_pr:
+        return []
+    if any(isinstance(i.get(NATIVE_SUMMARY), dict) for i in non_pr):
+        return []
+    return [f"::warning::NATIVE BLOCKER CHANNEL IS DARK: none of {len(non_pr)} open issues carries "
+            f"`{NATIVE_SUMMARY}`. Native GitHub dependencies are being IGNORED and only "
+            "`Blocked-by: #NN` body markers can hold an issue — a maintainer's native dependency "
+            "edits have no effect on dispatch until this is fixed."]
 
 
 def dispatchable_view(issues, linked=()):
@@ -495,9 +824,21 @@ def main():
     ap.add_argument("--self-test", action="store_true")
     ap.add_argument("--diagnose", action="store_true",
                     help="print the full visibility taxonomy instead of just the frontier")
+    ap.add_argument("--dump-partitions", action="store_true",
+                    help="print the recognised partition roots (and the resolution of any KEYs) "
+                         "as JSON — the machine-readable contract the registry's dispatch.yml "
+                         "mirror must agree with; offline, no API calls")
+    ap.add_argument("keys", nargs="*", metavar="KEY",
+                    help="area: keys to resolve with --dump-partitions")
     args = ap.parse_args()
     if args.self_test:
         return _self_test()
+    if args.dump_partitions:
+        json.dump({"roots": sorted(workspace_roots()),
+                   "resolved": {k: list(partition_path(k)) for k in args.keys}},
+                  sys.stdout, indent=2, sort_keys=True)
+        print()
+        return 0
     issues = _fetch(args.repo)
     linked = linked_issue_numbers(_fetch_pulls(args.repo), args.repo)
     visible = dispatchable_view(issues, linked)

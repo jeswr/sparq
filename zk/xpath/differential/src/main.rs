@@ -1,0 +1,1068 @@
+//! [SONNET-4.6] XPath differential harness — PROOF M1 (`sq-3x7dl.14.2`).
+//!
+//! Generates a Noir test file asserting that each `noir_XPath` primitive returns
+//! EXACTLY what sparq's own trusted Rust SPARQL/XSD scalar evaluator returns, over a
+//! unicode-aware corpus. The generated file is compiled against the released
+//! `sparq-org/noir_XPath` face repo by `zk/xpath/scripts/run_differential_harness.sh`.
+//!
+//! ## The oracle
+//!
+//! `sparq_engine::query` — the same evaluator that answers a real SPARQL `BIND`. Every
+//! expected value in the generated file is READ BACK from a `BIND(<expr> AS ?out)` over a
+//! one-row graph, never hand-written. Two secondary cross-checks run over each oracle
+//! answer and HARD-FAIL generation on disagreement, so a lossy or wrong oracle answer can
+//! never be silently pinned into the circuit's test suite:
+//!
+//! * **IEEE cross-check** — every `xs:double` result is recomputed with native Rust `f64`
+//!   (the hardware IEEE-754 reference) and compared BIT-for-BIT.
+//! * **F&O cross-check** — every `fn:substring` result is recomputed with an explicit
+//!   XPath F&O §5.4.3 window reference implemented here.
+//!
+//! Where a cross-check fires, the case is NOT silently dropped or downgraded: it is
+//! recorded in [`DIVERGENCES`] and emitted as a **LIVE** assertion carrying the
+//! SPEC-correct value, labelled a SPEC-REFERENCE row rather than a sparq-differential one.
+//! The spec value is precisely what `noir_XPath` implements, so asserting it exercises the
+//! circuit instead of enshrining the engine bug — and a `noir_XPath` regression on one of
+//! these edges reds the run. A unit test here pins each such row live, and a second pins
+//! that the divergence still reproduces, so the workaround expires the day sparq-engine is
+//! fixed.
+//!
+//! ## HONEST TCB STATEMENT
+//!
+//! This harness is **VERIFICATION, not proof**. Its trusted computing base is:
+//!
+//! 1. **sparq's Rust XSD evaluator** — itself UNAUDITED; it is the repo's reference
+//!    semantics, not a proven-correct implementation. Two live divergences from XPath F&O
+//!    are already recorded in [`DIVERGENCES`].
+//! 2. **The SAMPLE** — the corpus is hand-picked edge cases, not exhaustive. A wrong
+//!    answer on an unsampled input is not caught.
+//! 3. **The Noir → ACIR → Barretenberg lowering** — entirely untrusted-but-unchecked here.
+//!    `nargo test` exercises witness generation only; nothing below ACIR is covered.
+//!
+//! No soundness or privacy claim is made or implied by a green run of this harness. The
+//! ZK estate remains research-grade and NOT externally audited (`sq-qhy4`).
+//!
+//! ## Usage
+//!
+//! ```text
+//! sparq-xpath-differential --output PATH        # generate the oracle Noir test file
+//! sparq-xpath-differential --inject-fault PATH  # same file, one expected value corrupted
+//! ```
+//!
+//! `--inject-fault` is the non-vacuity self-test: `nargo test` on that file MUST fail. If
+//! it passes, the harness is not wired to the circuit and every green run is meaningless.
+
+use sparq_core::Graph;
+use std::fmt::Write as FmtWrite;
+
+// ---------------------------------------------------------------------------
+// Oracle — sparq's own Rust SPARQL/XSD scalar evaluator
+// ---------------------------------------------------------------------------
+
+const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+
+/// The one-row dataset every probe evaluates over. `BIND` must neither add nor drop a
+/// row, so a row count other than 1 is a harness bug, not a value difference.
+fn oracle_graph() -> Graph {
+    Graph::load_str("<http://ex/s> <http://ex/p> <http://ex/o> .", "ntriples")
+        .expect("the one-row oracle graph must parse")
+}
+
+/// Evaluate `BIND(<expr> AS ?out)` and return the single row's `?out` as a term string
+/// (`None` when the expression raised an error, i.e. `?out` is unbound).
+fn oracle_term(g: &Graph, expr: &str) -> Option<String> {
+    let q = format!(
+        "PREFIX xsd: <{XSD}>\nSELECT ?out WHERE {{ ?s <http://ex/p> ?o BIND({expr} AS ?out) }}"
+    );
+    let r = sparq_engine::query(g, &q)
+        .unwrap_or_else(|e| panic!("oracle query failed for `{expr}`: {e}"));
+    assert_eq!(r.rows.len(), 1, "BIND must keep exactly one row for `{expr}`");
+    r.rows[0][0].as_ref().map(|t| t.to_string())
+}
+
+/// Strip `"lex"^^<datatype>` / `"lex"` down to the lexical form, asserting the datatype.
+/// `dt` is the XSD local name, or `""` for a plain (untyped) literal.
+fn lexical(term: &str, dt: &str, expr: &str) -> String {
+    let suffix = if dt.is_empty() { String::new() } else { format!("^^<{XSD}{dt}>") };
+    let body = term
+        .strip_suffix(&suffix)
+        .unwrap_or_else(|| panic!("oracle `{expr}` returned {term}, expected datatype xsd:{dt}"));
+    let inner = body
+        .strip_prefix('"')
+        .and_then(|b| b.strip_suffix('"'))
+        .unwrap_or_else(|| panic!("oracle `{expr}` returned a non-literal term {term}"));
+    // The term writer escapes `\` and `"`; the corpus avoids both, so a surviving
+    // backslash means the corpus grew a case this un-escaper cannot honestly decode.
+    assert!(!inner.contains('\\'), "oracle `{expr}` returned an escaped literal {term}");
+    inner.to_string()
+}
+
+fn oracle_bool(g: &Graph, expr: &str) -> bool {
+    let t = oracle_term(g, expr).unwrap_or_else(|| panic!("oracle `{expr}` errored, wanted a boolean"));
+    lexical(&t, "boolean", expr) == "true"
+}
+
+fn oracle_int(g: &Graph, expr: &str) -> i64 {
+    let t = oracle_term(g, expr).unwrap_or_else(|| panic!("oracle `{expr}` errored, wanted an integer"));
+    lexical(&t, "integer", expr).parse().unwrap_or_else(|e| panic!("oracle `{expr}`: {e}"))
+}
+
+fn oracle_plain_string(g: &Graph, expr: &str) -> String {
+    let t = oracle_term(g, expr).unwrap_or_else(|| panic!("oracle `{expr}` errored, wanted a string"));
+    lexical(&t, "", expr)
+}
+
+/// An `xs:double` oracle answer, as IEEE-754 bits.
+///
+/// CROSS-CHECK: `expect_ieee` is the same value recomputed with native Rust `f64`. A
+/// mismatch means either sparq's evaluator or its double serializer lost the value, so
+/// the case must NOT be pinned as-is — generation aborts and the caller is told to record
+/// the case in [`DIVERGENCES`] instead.
+fn oracle_double_bits(g: &Graph, expr: &str, expect_ieee: f64) -> u64 {
+    let t = oracle_term(g, expr).unwrap_or_else(|| panic!("oracle `{expr}` errored, wanted a double"));
+    let lex = lexical(&t, "double", expr);
+    let parsed: f64 = lex.parse().unwrap_or_else(|e| panic!("oracle `{expr}` lexical {lex:?}: {e}"));
+    assert_eq!(
+        parsed.to_bits(),
+        expect_ieee.to_bits(),
+        "IEEE CROSS-CHECK FAILED for `{expr}`: sparq-engine says {lex:?} \
+         (bits 0x{:016x}), native Rust f64 says {expect_ieee:?} (bits 0x{:016x}). \
+         Do not pin this case — record it in DIVERGENCES with a filed follow-up.",
+        parsed.to_bits(),
+        expect_ieee.to_bits()
+    );
+    parsed.to_bits()
+}
+
+// ---------------------------------------------------------------------------
+// Spec references used as cross-checks
+// ---------------------------------------------------------------------------
+
+/// XPath F&O §5.4.3 `fn:substring($s, $start, $length)` over CODEPOINTS.
+///
+/// The window is `round(start) <= p < round(start) + round(length)` on 1-based positions
+/// and is NOT shifted when `start < 1`: a start below 1 CONSUMES part of the length
+/// budget. `substring("12345", 0, 3)` is therefore `"12"`, not `"123"`.
+fn fo_substring(s: &str, start: i64, length: i64) -> String {
+    let end = start.saturating_add(length); // exclusive
+    s.chars()
+        .enumerate()
+        .filter_map(|(i, c)| {
+            let pos = i as i64 + 1;
+            (pos >= start && pos < end).then_some(c)
+        })
+        .collect()
+}
+
+/// XPath F&O §4.4.3 `fn:round` for `xs:double`: round to nearest, TIES TOWARD +∞
+/// (`0.5 -> 1`, `-0.5 -> -0.0`, `-1.5 -> -1`), preserving the sign of a zero result.
+fn fo_round_double(v: f64) -> f64 {
+    if v.is_nan() || v.is_infinite() || v == 0.0 {
+        return v;
+    }
+    let r = (v + 0.5).floor();
+    // A negative input rounding to zero yields NEGATIVE zero per F&O.
+    if r == 0.0 && v.is_sign_negative() {
+        -0.0
+    } else {
+        r
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Recorded oracle divergences (sparq-engine vs XPath F&O)
+// ---------------------------------------------------------------------------
+
+/// A case where sparq's evaluator — the ORACLE — is itself wrong against XPath F&O, which
+/// is what `noir_XPath` implements. Asserting the oracle's answer here would enshrine the
+/// engine bug and paint the (correct) circuit red, so these cases are emitted as LIVE
+/// assertions against the F&O value instead, labelled SPEC-REFERENCE (their expected value
+/// comes from the F&O reference in this file, not from the oracle), and the divergence is
+/// stated in the generated header. Keeping them live is what makes a `noir_XPath`
+/// regression on an edge it already fixed fail the run. Each is pinned by two unit tests
+/// below: one asserting the row is emitted live, one asserting the divergence still
+/// reproduces, so the entry expires when the engine is fixed.
+struct Divergence {
+    /// The SPARQL expression, as evaluated against the oracle.
+    expr: &'static str,
+    /// What sparq-engine returns today.
+    sparq: &'static str,
+    /// What XPath F&O requires (and `noir_XPath` implements).
+    spec: &'static str,
+    /// One line of why.
+    why: &'static str,
+}
+
+const DIVERGENCES: &[Divergence] = &[
+    Divergence {
+        expr: "SUBSTR(s, start, len) for start < 1",
+        sparq: "clamps start to 1 and then takes `len` characters",
+        spec: "the window [start, start+len) is NOT shifted, so a start below 1 consumes length",
+        why: "sparq-engine exec.rs SubStr uses `start.max(1) - 1` then `.take(len)`; F&O \
+              §5.4.3 keeps the window. e.g. SUBSTR(\"12345\", 0, 3) is \"12\", not \"123\".",
+    },
+    Divergence {
+        expr: "ROUND(xsd:double(\"-0.5\"))",
+        sparq: "+0.0 (lexical \"0\")",
+        spec: "-0.0E0 — a negative argument in [-0.5, 0) rounds to NEGATIVE zero",
+        why: "sparq-engine's ROUND loses the sign of a zero result; the double serializer \
+              itself is fine (xsd:double(\"-0.0\") does render as \"-0E0\").",
+    },
+];
+
+// ---------------------------------------------------------------------------
+// Corpus
+// ---------------------------------------------------------------------------
+
+/// One corpus string: the logical value, plus the Noir `str<CAP>` capacity it is stored
+/// in. `cap > value.len()` exercises the NUL-padding path (Noir strings are fixed-width
+/// byte buffers whose logical content ends at the first NUL).
+struct S {
+    value: &'static str,
+    cap: usize,
+}
+
+const fn s(value: &'static str, cap: usize) -> S {
+    S { value, cap }
+}
+
+/// Unicode-aware string corpus. Byte length != codepoint count for every entry after the
+/// first three — which is exactly the STRLEN edge the qt3 corpus does not cover.
+fn string_corpus() -> Vec<S> {
+    vec![
+        s("hello", 5),          // ASCII, exact capacity
+        s("", 0),               // empty
+        s("hello", 10),         // NUL-PADDED: logical length 5 in a str<10> buffer
+        s("é", 2),              // U+00E9 — 2 bytes, 1 codepoint
+        s("aé", 3),             // mixed ASCII + 2-byte
+        s("naïve", 6),          // 6 bytes, 5 codepoints
+        s("日本語", 9),          // 3-byte codepoints
+        s("𝄞", 4),              // U+1D11E — 4-byte (astral) codepoint
+        s("e\u{301}", 3),       // combining acute: 2 codepoints, 1 grapheme
+        s("ﬀ", 3),              // U+FB00 ligature — 3 bytes, 1 codepoint
+        s("日本語", 15),         // multibyte AND NUL-padded
+    ]
+}
+
+/// (haystack, needle) pairs for CONTAINS / STRSTARTS / STRENDS. UTF-8 is
+/// self-synchronizing, so byte-substring matching and codepoint-substring matching agree
+/// — these are safe to sample with multibyte content (unlike SUBSTR, see below).
+fn pair_corpus() -> Vec<(S, S)> {
+    vec![
+        (s("hello", 5), s("ell", 3)),
+        (s("hello", 5), s("hel", 3)),
+        (s("hello", 5), s("llo", 3)),
+        (s("hello", 5), s("", 0)),          // empty needle
+        (s("hello", 5), s("zzz", 3)),       // absent
+        (s("hello", 10), s("llo", 3)),      // NUL-padded haystack
+        (s("hello", 5), s("llo", 6)),       // NUL-padded needle (sq-0ylr9)
+        (s("hello", 10), s("hell", 4)),     // prefix, not suffix
+        (s("naïve", 6), s("ï", 2)),         // multibyte needle, interior
+        (s("naïve", 6), s("na", 2)),        // ASCII prefix of multibyte haystack
+        (s("naïve", 6), s("ve", 2)),        // ASCII suffix of multibyte haystack
+        (s("日本語", 9), s("本", 3)),        // 3-byte needle, interior
+        (s("日本語", 9), s("日", 3)),        // 3-byte prefix
+        (s("日本語", 9), s("語", 3)),        // 3-byte suffix
+        (s("𝄞", 4), s("𝄞", 4)),            // astral, whole
+        (s("lo", 10), s("hello", 5)),       // needle longer than logical content
+    ]
+}
+
+/// `fn:substring` cases. **ASCII ONLY, deliberately.** `noir_XPath`'s `substring` indexes
+/// BYTE positions in the logical content (documented caveat in its `string.nr`; codepoint
+/// positional substring is bead `sq-hjvte`), while SPARQL SUBSTR is codepoint-indexed.
+/// The two agree exactly on single-byte content and only there — sampling multibyte here
+/// would pin a divergence that is a KNOWN, beaded gap rather than a regression.
+///
+/// `start < 1` cases carry the F&O window semantics that `sq-3x7dl.6` fixed in the
+/// circuit; sparq-engine still shifts (see [`DIVERGENCES`]), so those rows are emitted
+/// commented-out against the spec value.
+fn substring_corpus() -> Vec<(&'static str, usize, i64, i64)> {
+    vec![
+        // (value, cap, start, length)
+        ("hello", 5, 2, 3),
+        ("hello", 5, 1, 5),
+        ("hello", 5, 1, 100), // length past the end clamps
+        ("hello", 5, 3, 0),   // zero length
+        ("hello", 5, 7, 3),   // start past the end
+        ("hello", 5, 5, 1),   // last character
+        ("hello", 10, 2, 3),  // NUL-padded buffer
+        ("12345", 5, 0, 3),   // start < 1  (F&O window: "12")
+        ("hello", 5, -2, 4),  // start < 1  (F&O window: "h")
+        ("12345", 5, -3, 5),  // start < 1  (F&O window: "1")
+        ("hello", 5, -100, 3), // window entirely before the string
+    ]
+}
+
+/// `op:numeric-divide` on two `xs:integer` operands. F&O §4.2.6 makes this the DECIMAL
+/// quotient (`7 div 2 = 3.5`); `noir_XPath` implements the documented double
+/// approximation, so the oracle is asked for the double quotient of the promoted
+/// operands. Non-exact quotients are the cases the qt3 corpus never recorded.
+const DIVIDE_CORPUS: &[(i64, i64)] =
+    &[(7, 2), (1, 3), (10, 5), (-7, 2), (7, -2), (-7, -2), (1, 7), (2, 3), (100, 7), (0, 5)];
+
+/// Mixed `xs:integer` ↔ `xs:double` comparison operands. Every integer here is OUTSIDE
+/// `[-128, 127]` — the i8 range the pre-`sq-3x7dl.5` circuit silently truncated to, which
+/// made `256 = 0.0` evaluate TRUE.
+const MIXED_CORPUS: &[(i64, &str)] = &[
+    (256, "0"),                              // the sq-3x7dl.5 witness: i8-wrap made this true
+    (256, "256"),
+    (-129, "-129"),
+    (128, "128"),
+    (384, "128"),                            // 384 wraps to 128 in i8
+    (9007199254740993, "9007199254740992"),  // 2^53 + 1 collapses onto 2^53 under promotion
+    (1000000, "999999.5"),
+    (-1000000, "0"),
+];
+
+/// `xs:double -> xs:integer` casts (`fn:round` is NOT applied — the cast truncates toward
+/// zero per F&O §17.1.1).
+const CAST_CORPUS: &[&str] = &["3.9", "-3.9", "0", "-0.5", "2.5", "9007199254740992", "-2.5"];
+
+/// `fn:round` on `xs:double`.
+const ROUND_CORPUS: &[&str] = &["2.5", "-2.5", "0.5", "1.5", "-1.5", "2.4999", "-0.5", "0", "-3"];
+
+/// Pre-1970 (and epoch-straddling) `xs:dateTime` instants. The negative epoch is the
+/// `sq-3x7dl.7` edge: a `u64` cast of the two's-complement epoch corrupts every component.
+const DATETIME_CORPUS: &[(&str, i64, u8, u8, u8, u8, u8)] = &[
+    // (lexical, year, month, day, hour, minute, second)
+    ("1969-07-20T20:17:40Z", 1969, 7, 20, 20, 17, 40),
+    ("1901-12-13T20:45:52Z", 1901, 12, 13, 20, 45, 52),
+    ("1969-12-31T23:59:59Z", 1969, 12, 31, 23, 59, 59),
+    ("1970-01-01T00:00:00Z", 1970, 1, 1, 0, 0, 0),
+    ("1970-01-01T00:00:01Z", 1970, 1, 1, 0, 0, 1),
+    ("1968-02-29T12:00:00Z", 1968, 2, 29, 12, 0, 0),
+    ("2024-06-15T08:09:10Z", 2024, 6, 15, 8, 9, 10),
+];
+
+// ---------------------------------------------------------------------------
+// Noir literal rendering
+// ---------------------------------------------------------------------------
+
+/// Render `value` as a Noir `str<cap>` literal, NUL-padding to the declared capacity.
+/// Multibyte UTF-8 is emitted verbatim (Noir string literals are byte buffers, and its
+/// own test suite pins `let s: str<2> = "é";`).
+fn noir_str(value: &str, cap: usize) -> String {
+    assert!(
+        value.len() <= cap,
+        "corpus entry {value:?} is {} bytes but declares capacity {cap}",
+        value.len()
+    );
+    assert!(
+        !value.contains('"') && !value.contains('\\') && !value.contains('\0'),
+        "corpus entry {value:?} needs escaping this renderer deliberately does not do"
+    );
+    let mut out = String::from("\"");
+    out.push_str(value);
+    for _ in value.len()..cap {
+        out.push_str("\\0");
+    }
+    out.push('"');
+    out
+}
+
+/// A SPARQL string literal for the oracle query. Same no-escaping contract as `noir_str`.
+fn sparql_str(value: &str) -> String {
+    assert!(!value.contains('"') && !value.contains('\\'));
+    format!("\"{value}\"")
+}
+
+fn hex64(bits: u64) -> String {
+    format!("0x{bits:016x} as u64")
+}
+
+/// Rewrite ONE comment line so it holds only ASCII.
+///
+/// `noirc` (1.0.0-beta.21) hard-errors with `Non-ASCII character in comment` on any
+/// multibyte byte inside `//` or `///`, while happily accepting multibyte STRING
+/// literals — which this corpus exists to exercise. So the comments are transliterated
+/// on the way out instead of the prose being written in a degraded style: typographic
+/// punctuation maps to its ASCII spelling, and anything else becomes an explicit
+/// `\u{...}` escape. For the unicode corpus rows that escape is strictly more precise
+/// than the glyph, because the assertion underneath is about CODEPOINTS.
+fn ascii_comment(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    for ch in line.chars() {
+        match ch {
+            c if c.is_ascii() => out.push(c),
+            '\u{2014}' => out.push_str("--"),        // em dash
+            '\u{2013}' => out.push('-'),             // en dash
+            '\u{2192}' => out.push_str("->"),        // rightwards arrow
+            '\u{2194}' => out.push_str("<->"),       // left right arrow
+            '\u{221e}' => out.push_str("infinity"),  // infinity
+            '\u{00a7}' => out.push_str("sec. "),     // section sign
+            '\u{2018}' | '\u{2019}' => out.push('\''),
+            '\u{201c}' | '\u{201d}' => out.push('"'),
+            other => out.push_str(&format!("\\u{{{:x}}}", other as u32)),
+        }
+    }
+    out
+}
+
+/// Post-pass over the whole generated file: transliterate every comment line, leave code
+/// (and its multibyte string literals) byte-for-byte alone, and PROVE the result satisfies
+/// noirc's rule — so a future prose edit cannot silently re-red the `nargo` lane.
+fn asciify_comments(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    for line in src.lines() {
+        let is_comment = line.trim_start().starts_with("//");
+        // Every comment this generator emits sits on its own line, which is what makes the
+        // line-based split above exact. A trailing comment (or a corpus value containing
+        // `//`) would need this pass to understand string literals — fail loudly rather
+        // than emit a file noirc will reject.
+        assert!(
+            is_comment || !line.contains("//"),
+            "generated code line carries an unsanitized trailing comment; teach \
+             asciify_comments about it: {}",
+            line
+        );
+        let rewritten = if is_comment { ascii_comment(line) } else { line.to_string() };
+        assert!(
+            !is_comment || rewritten.is_ascii(),
+            "comment line is still non-ASCII after transliteration; add the character to \
+             ascii_comment: {}",
+            rewritten
+        );
+        out.push_str(&rewritten);
+        out.push('\n');
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Generation
+// ---------------------------------------------------------------------------
+
+/// The line that `--inject-fault` corrupts, plus its corrupted form.
+struct FaultSite {
+    original: String,
+    faulty: String,
+}
+
+/// Running assertion count, so the generated file can state its own coverage and an
+/// accidentally-empty section cannot pass silently.
+#[derive(Default)]
+struct Counts {
+    /// Every LIVE assertion in the generated file, `spec_reference` rows included.
+    assertions: usize,
+    /// The subset of `assertions` whose expected value came from the F&O reference in this
+    /// file rather than from the oracle, because the oracle diverges (see [`DIVERGENCES`]).
+    spec_reference: usize,
+}
+
+fn header(out: &mut String, inject_fault: bool) {
+    writeln!(out, "// [SONNET-4.6] GENERATED by zk/xpath/differential/src/main.rs — DO NOT EDIT BY HAND.").unwrap();
+    writeln!(out, "// Regenerate: bash zk/xpath/scripts/run_differential_harness.sh --update-committed").unwrap();
+    writeln!(out, "//").unwrap();
+    writeln!(out, "// PROOF M1 (sq-3x7dl.14.2): no expected value below is hand-written. Each was READ").unwrap();
+    writeln!(out, "// BACK from sparq's own Rust SPARQL/XSD scalar evaluator (`sparq_engine::query`, a").unwrap();
+    writeln!(out, "// real BIND over a one-row graph), EXCEPT the rows explicitly labelled").unwrap();
+    writeln!(out, "// SPEC-REFERENCE, whose value comes from the generator's XPath F&O reference").unwrap();
+    writeln!(out, "// because the oracle itself diverges there (see RECORDED ORACLE DIVERGENCES).").unwrap();
+    writeln!(out, "// Doubles are additionally cross-checked BIT-for-BIT against native Rust f64, and").unwrap();
+    writeln!(out, "// fn:substring against an explicit XPath F&O 5.4.3 window reference; an UNRECORDED").unwrap();
+    writeln!(out, "// cross-check mismatch ABORTS generation.").unwrap();
+    writeln!(out, "//").unwrap();
+    writeln!(out, "// TCB, honestly: (1) the sparq Rust XSD evaluator is itself UNAUDITED — it is the").unwrap();
+    writeln!(out, "// repo's reference semantics, not a proven implementation; (2) coverage is a").unwrap();
+    writeln!(out, "// hand-picked SAMPLE, not exhaustive; (3) the Noir -> ACIR -> Barretenberg").unwrap();
+    writeln!(out, "// lowering is NOT covered — `nargo test` exercises witness generation only.").unwrap();
+    writeln!(out, "// This is VERIFICATION, not proof. No soundness or privacy claim is made or").unwrap();
+    writeln!(out, "// implied; the ZK estate stays research-grade and NOT externally audited (sq-qhy4).").unwrap();
+    writeln!(out, "//").unwrap();
+    writeln!(out, "// RECORDED ORACLE DIVERGENCES (sparq-engine vs XPath F&O, which noir_XPath").unwrap();
+    writeln!(out, "// implements). These cases are still asserted LIVE, but against the SPEC value and").unwrap();
+    writeln!(out, "// labelled SPEC-REFERENCE at the row: asserting the ORACLE's answer would enshrine").unwrap();
+    writeln!(out, "// an engine bug and red a correct circuit, whereas asserting the F&O value keeps").unwrap();
+    writeln!(out, "// the edge EXECUTABLE, so a noir_XPath regression on it fails this file. Read a").unwrap();
+    writeln!(out, "// SPEC-REFERENCE row as `noir_XPath == XPath F&O`, not as `noir_XPath == sparq`.").unwrap();
+    writeln!(out, "// Each is pinned by unit tests in the generator so the entry expires when the").unwrap();
+    writeln!(out, "// engine is fixed:").unwrap();
+    for d in DIVERGENCES {
+        writeln!(out, "//   * {}", d.expr).unwrap();
+        writeln!(out, "//       sparq-engine: {}", d.sparq).unwrap();
+        writeln!(out, "//       XPath F&O:    {}", d.spec).unwrap();
+        writeln!(out, "//       {}", d.why).unwrap();
+    }
+    writeln!(out, "//").unwrap();
+    writeln!(out, "// KNOWN SCOPE LIMIT: fn:substring cases are ASCII-only. noir_XPath's `substring`").unwrap();
+    writeln!(out, "// indexes BYTE positions in the logical content (its own documented caveat; bead").unwrap();
+    writeln!(out, "// sq-hjvte tracks codepoint-positional substring) while SPARQL SUBSTR is").unwrap();
+    writeln!(out, "// codepoint-indexed. They agree exactly on single-byte content and only there.").unwrap();
+    if inject_fault {
+        writeln!(out, "//").unwrap();
+        writeln!(out, "// !! INJECT-FAULT BUILD: one expected value has been deliberately corrupted.").unwrap();
+        writeln!(out, "// !! `nargo test` on this file MUST FAIL. A pass means the harness is vacuous.").unwrap();
+    }
+    writeln!(out).unwrap();
+    writeln!(out, "use xpath::{{").unwrap();
+    writeln!(out, "    cast_double_to_integer, compare_double_int_eq, compare_double_int_ge,").unwrap();
+    writeln!(out, "    compare_double_int_gt, compare_double_int_le, compare_double_int_lt,").unwrap();
+    writeln!(out, "    compare_int_double_eq, compare_int_double_ge, compare_int_double_gt,").unwrap();
+    writeln!(out, "    compare_int_double_le, compare_int_double_lt, contains, datetime_from_components,").unwrap();
+    writeln!(out, "    datetime_less_than, day_from_datetime, ends_with, hours_from_datetime,").unwrap();
+    writeln!(out, "    minutes_from_datetime, month_from_datetime, numeric_divide_int,").unwrap();
+    writeln!(out, "    numeric_divide_int_as_double, round_double, seconds_from_datetime, starts_with,").unwrap();
+    writeln!(out, "    string_length, substring, XsdDouble, year_from_datetime,").unwrap();
+    writeln!(out, "}};").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn gen_string_length(out: &mut String, g: &Graph, c: &mut Counts, fault: &mut Option<FaultSite>) {
+    writeln!(out, "/// fn:string-length — CODEPOINTS, not bytes, and stopping at the NUL terminator.").unwrap();
+    writeln!(out, "/// Oracle: SPARQL `STRLEN(<literal>)`.").unwrap();
+    writeln!(out, "#[test]").unwrap();
+    writeln!(out, "fn differential_oracle_string_length() {{").unwrap();
+    for (i, item) in string_corpus().iter().enumerate() {
+        let expr = format!("STRLEN({})", sparql_str(item.value));
+        let expected = oracle_int(g, &expr);
+        writeln!(out, "    // {expr} -> {expected}").unwrap();
+        writeln!(out, "    let s{i}: str<{}> = {};", item.cap, noir_str(item.value, item.cap)).unwrap();
+        let line = format!("    assert(string_length::<{}>(s{i}) == {expected});", item.cap);
+        // The first non-zero-length case is the fault target: +1 makes it provably wrong.
+        if fault.is_none() && expected > 0 {
+            *fault = Some(FaultSite {
+                original: line.clone(),
+                faulty: format!("    assert(string_length::<{}>(s{i}) == {});", item.cap, expected + 1),
+            });
+        }
+        writeln!(out, "{line}").unwrap();
+        c.assertions += 1;
+    }
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn gen_string_predicates(out: &mut String, g: &Graph, c: &mut Counts) {
+    // (Noir fn, SPARQL builtin)
+    for (nfn, builtin) in [("starts_with", "STRSTARTS"), ("ends_with", "STRENDS"), ("contains", "CONTAINS")] {
+        writeln!(out, "/// fn:{} — oracle: SPARQL `{builtin}`.", nfn.replace('_', "-")).unwrap();
+        writeln!(out, "#[test]").unwrap();
+        writeln!(out, "fn differential_oracle_{nfn}() {{").unwrap();
+        for (i, (hay, needle)) in pair_corpus().iter().enumerate() {
+            let expr = format!("{builtin}({}, {})", sparql_str(hay.value), sparql_str(needle.value));
+            let expected = oracle_bool(g, &expr);
+            writeln!(out, "    // {expr} -> {expected}").unwrap();
+            writeln!(out, "    let h{i}: str<{}> = {};", hay.cap, noir_str(hay.value, hay.cap)).unwrap();
+            writeln!(out, "    let n{i}: str<{}> = {};", needle.cap, noir_str(needle.value, needle.cap)).unwrap();
+            writeln!(
+                out,
+                "    assert({nfn}::<{}, {}>(h{i}, n{i}) == {expected});",
+                hay.cap, needle.cap
+            )
+            .unwrap();
+            c.assertions += 1;
+        }
+        writeln!(out, "}}").unwrap();
+        writeln!(out).unwrap();
+    }
+}
+
+fn gen_substring(out: &mut String, g: &Graph, c: &mut Counts) {
+    writeln!(out, "/// fn:substring — ASCII-only (see the byte-vs-codepoint scope limit above).").unwrap();
+    writeln!(out, "/// Oracle: SPARQL `SUBSTR`, cross-checked against the F&O 5.4.3 window. The `start < 1`").unwrap();
+    writeln!(out, "/// rows are SPEC-REFERENCE (see the header): sparq-engine shifts the window, so their").unwrap();
+    writeln!(out, "/// expected value is F&O's, and they assert noir_XPath against the SPEC.").unwrap();
+    writeln!(out, "#[test]").unwrap();
+    writeln!(out, "fn differential_oracle_substring() {{").unwrap();
+    for (i, &(value, cap, start, length)) in substring_corpus().iter().enumerate() {
+        assert!(value.is_ascii(), "substring corpus must stay ASCII: {value:?}");
+        let expr = format!("SUBSTR({}, {start}, {length})", sparql_str(value));
+        let sparq_answer = oracle_plain_string(g, &expr);
+        let spec_answer = fo_substring(value, start, length);
+        let diverges = sparq_answer != spec_answer;
+        // A divergence is only ever expected for the recorded start < 1 window bug.
+        assert!(
+            !diverges || start < 1,
+            "UNRECORDED oracle divergence on `{expr}`: sparq-engine {sparq_answer:?} vs \
+             F&O {spec_answer:?}. Investigate before pinning — do not widen DIVERGENCES blindly."
+        );
+        if diverges {
+            writeln!(out, "    // SPEC-REFERENCE (start < 1): sparq-engine says {sparq_answer:?}, F&O 5.4.3 says").unwrap();
+            writeln!(out, "    // {spec_answer:?}. noir_XPath is correct here (sq-3x7dl.6) and the oracle is not, so").unwrap();
+            writeln!(out, "    // the row asserts the SPEC value LIVE — it holds noir_XPath to F&O, not to sparq.").unwrap();
+            writeln!(out, "    // Drop the special-casing (not the assertion) when the engine is fixed.").unwrap();
+            // One length assertion plus one per expected byte.
+            c.spec_reference += 1 + spec_answer.len();
+        }
+        c.assertions += 1 + spec_answer.len();
+        // An empty expected result leaves the byte buffer unread; bind it to `_out` so
+        // the generated file does not trip Noir's unused-variable warning.
+        let bind = if spec_answer.is_empty() { format!("_out{i}") } else { format!("out{i}") };
+        writeln!(out, "    // {expr} -> {spec_answer:?}").unwrap();
+        writeln!(out, "    let ss{i}: str<{cap}> = {};", noir_str(value, cap)).unwrap();
+        writeln!(out, "    let ({bind}, len{i}) = substring::<{cap}, {cap}>(ss{i}, {start}, {});", length.max(0)).unwrap();
+        writeln!(out, "    assert(len{i} == {});", spec_answer.len()).unwrap();
+        for (j, byte) in spec_answer.as_bytes().iter().enumerate() {
+            writeln!(out, "    assert(out{i}[{j}] == {byte});").unwrap();
+        }
+    }
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn gen_divide(out: &mut String, g: &Graph, c: &mut Counts) {
+    writeln!(out, "/// op:numeric-divide on two xs:integer operands — the DECIMAL quotient (F&O 4.2.6),").unwrap();
+    writeln!(out, "/// implemented as the documented double approximation, and DISTINCT from").unwrap();
+    writeln!(out, "/// op:numeric-integer-divide (sq-3x7dl.4 de-aliasing). Oracle: SPARQL double").unwrap();
+    writeln!(out, "/// division of the promoted operands, bit-cross-checked against native f64.").unwrap();
+    writeln!(out, "///").unwrap();
+    writeln!(out, "/// The `numeric_divide_int` (idiv) rows are the DE-ALIASING control and are NOT").unwrap();
+    writeln!(out, "/// oracle-derived — SPARQL exposes no `idiv` builtin, so their reference is Rust's").unwrap();
+    writeln!(out, "/// integer division, which truncates toward zero exactly as F&O 4.2.5 requires.").unwrap();
+    writeln!(out, "#[test]").unwrap();
+    writeln!(out, "fn differential_oracle_numeric_divide() {{").unwrap();
+    for &(a, b) in DIVIDE_CORPUS {
+        assert_ne!(b, 0, "the circuit fail-closes on a zero divisor; that is a should_fail case, not a value case");
+        let expr = format!("xsd:double(\"{a}\") / xsd:double(\"{b}\")");
+        let bits = oracle_double_bits(g, &expr, (a as f64) / (b as f64));
+        writeln!(out, "    // {expr} -> bits {}", hex64(bits)).unwrap();
+        writeln!(out, "    assert(numeric_divide_int_as_double({a}, {b}).to_bits() == {});", hex64(bits)).unwrap();
+        c.assertions += 1;
+        // idiv MUST stay a distinct, truncating-toward-zero path.
+        writeln!(out, "    assert(numeric_divide_int({a}, {b}) == {});", a / b).unwrap();
+        c.assertions += 1;
+    }
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn gen_round(out: &mut String, g: &Graph, c: &mut Counts) {
+    writeln!(out, "/// fn:round for xs:double — ties toward +INFINITY (F&O 4.4.3), sign of zero").unwrap();
+    writeln!(out, "/// preserved. Oracle: SPARQL `ROUND`, bit-cross-checked against the F&O reference. The").unwrap();
+    writeln!(out, "/// -0.5 row is SPEC-REFERENCE (see the header): sparq-engine loses the sign of a zero").unwrap();
+    writeln!(out, "/// result, so its expected value is F&O's and it asserts noir_XPath against the SPEC.").unwrap();
+    writeln!(out, "#[test]").unwrap();
+    writeln!(out, "fn differential_oracle_round_double() {{").unwrap();
+    for lex in ROUND_CORPUS {
+        let input: f64 = lex.parse().unwrap();
+        let spec = fo_round_double(input);
+        let expr = format!("ROUND(xsd:double(\"{lex}\"))");
+        let sparq_bits = {
+            let t = oracle_term(g, &expr).unwrap_or_else(|| panic!("oracle `{expr}` errored"));
+            lexical(&t, "double", &expr).parse::<f64>().unwrap().to_bits()
+        };
+        let diverges = sparq_bits != spec.to_bits();
+        // Only the recorded negative-zero case may diverge.
+        assert!(
+            !diverges || (spec == 0.0 && spec.is_sign_negative()),
+            "UNRECORDED oracle divergence on `{expr}`: sparq-engine bits 0x{sparq_bits:016x} vs \
+             F&O bits 0x{:016x}. Investigate before pinning.",
+            spec.to_bits()
+        );
+        if diverges {
+            writeln!(out, "    // SPEC-REFERENCE: sparq-engine returns +0.0 (bits 0x{sparq_bits:016x}); F&O 4.4.3").unwrap();
+            writeln!(out, "    // requires NEGATIVE zero for an argument in [-0.5, 0). The row asserts the SPEC").unwrap();
+            writeln!(out, "    // value LIVE — it holds noir_XPath to F&O, not to sparq. Drop the special-casing").unwrap();
+            writeln!(out, "    // (not the assertion) when the engine is fixed.").unwrap();
+            c.spec_reference += 1;
+        }
+        c.assertions += 1;
+        writeln!(out, "    // {expr} -> {spec:?}").unwrap();
+        writeln!(
+            out,
+            "    assert(round_double(XsdDouble::from_bits({})).to_bits() == {});",
+            hex64(input.to_bits()),
+            hex64(spec.to_bits())
+        )
+        .unwrap();
+    }
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn gen_mixed_compare(out: &mut String, g: &Graph, c: &mut Counts) {
+    writeln!(out, "/// Mixed xs:integer <-> xs:double comparison. Every integer here is OUTSIDE the i8").unwrap();
+    writeln!(out, "/// range the pre-sq-3x7dl.5 circuit truncated to (which made `256 = 0.0` TRUE — a").unwrap();
+    writeln!(out, "/// wrong FILTER verdict an adversarial prover could satisfy). Oracle: SPARQL").unwrap();
+    writeln!(out, "/// relational operators, which promote the integer to double per XPath B.1.").unwrap();
+    writeln!(out, "#[test]").unwrap();
+    writeln!(out, "fn differential_oracle_mixed_compare() {{").unwrap();
+    for (i, &(n, d)) in MIXED_CORPUS.iter().enumerate() {
+        let dbits = {
+            let expr = format!("xsd:double(\"{d}\")");
+            oracle_double_bits(g, &expr, d.parse::<f64>().unwrap())
+        };
+        writeln!(out, "    let d{i} = XsdDouble::from_bits({});", hex64(dbits)).unwrap();
+        // int OP double, then double OP int — both operand orders.
+        for (nfn, op) in [("eq", "="), ("lt", "<"), ("gt", ">"), ("le", "<="), ("ge", ">=")] {
+            let fwd = oracle_bool(g, &format!("xsd:integer(\"{n}\") {op} xsd:double(\"{d}\")"));
+            writeln!(out, "    // {n} {op} {d} -> {fwd}").unwrap();
+            writeln!(out, "    assert(compare_int_double_{nfn}({n}, d{i}) == {fwd});").unwrap();
+            c.assertions += 1;
+
+            let rev = oracle_bool(g, &format!("xsd:double(\"{d}\") {op} xsd:integer(\"{n}\")"));
+            writeln!(out, "    // {d} {op} {n} -> {rev}").unwrap();
+            writeln!(out, "    assert(compare_double_int_{nfn}(d{i}, {n}) == {rev});").unwrap();
+            c.assertions += 1;
+        }
+    }
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn gen_cast(out: &mut String, g: &Graph, c: &mut Counts) {
+    writeln!(out, "/// xs:integer(xs:double) — TRUNCATES toward zero (F&O 17.1.1); it does NOT round.").unwrap();
+    writeln!(out, "/// Oracle: SPARQL `xsd:integer(xsd:double(...))`.").unwrap();
+    writeln!(out, "#[test]").unwrap();
+    writeln!(out, "fn differential_oracle_double_to_integer_cast() {{").unwrap();
+    for lex in CAST_CORPUS {
+        let input: f64 = lex.parse().unwrap();
+        let expr = format!("xsd:integer(xsd:double(\"{lex}\"))");
+        let expected = oracle_int(g, &expr);
+        assert_eq!(
+            expected,
+            input.trunc() as i64,
+            "IEEE CROSS-CHECK FAILED for `{expr}`: sparq-engine says {expected}, truncation says {}",
+            input.trunc()
+        );
+        writeln!(out, "    // {expr} -> {expected}").unwrap();
+        writeln!(
+            out,
+            "    assert(cast_double_to_integer(XsdDouble::from_bits({})).unwrap() == {expected});",
+            hex64(input.to_bits())
+        )
+        .unwrap();
+        c.assertions += 1;
+    }
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn gen_datetime(out: &mut String, g: &Graph, c: &mut Counts) {
+    writeln!(out, "/// Pre-1970 xs:dateTime. The epoch is a SIGNED microsecond count; the pre-sq-3x7dl.7").unwrap();
+    writeln!(out, "/// circuit cast it through u64 and corrupted every extracted component. Oracle:").unwrap();
+    writeln!(out, "/// SPARQL YEAR/MONTH/DAY/HOURS/MINUTES/SECONDS over the parsed lexical.").unwrap();
+    writeln!(out, "#[test]").unwrap();
+    writeln!(out, "fn differential_oracle_datetime_pre_1970() {{").unwrap();
+    for (i, &(lex, year, month, day, hour, minute, second)) in DATETIME_CORPUS.iter().enumerate() {
+        let dt = format!("xsd:dateTime(\"{lex}\")");
+        // The corpus components are declared, then CONFIRMED against the oracle: the
+        // circuit is fed the components and must reproduce what the evaluator extracts.
+        let checks: [(&str, &str, i64); 6] = [
+            ("YEAR", "year_from_datetime", year),
+            ("MONTH", "month_from_datetime", month as i64),
+            ("DAY", "day_from_datetime", day as i64),
+            ("HOURS", "hours_from_datetime", hour as i64),
+            ("MINUTES", "minutes_from_datetime", minute as i64),
+            ("SECONDS", "seconds_from_datetime", second as i64),
+        ];
+        writeln!(out, "    // {dt}").unwrap();
+        writeln!(
+            out,
+            "    let dt{i} = datetime_from_components({year}, {month}, {day}, {hour}, {minute}, {second}, 0);"
+        )
+        .unwrap();
+        for (builtin, nfn, declared) in checks {
+            // SECONDS is xs:decimal in SPARQL; the corpus keeps whole seconds so the
+            // integer-valued comparison below is exact.
+            let expr = format!("{builtin}({dt})");
+            let got = if builtin == "SECONDS" {
+                let t = oracle_term(g, &expr).unwrap_or_else(|| panic!("oracle `{expr}` errored"));
+                lexical(&t, "decimal", &expr).parse::<f64>().unwrap() as i64
+            } else {
+                oracle_int(g, &expr)
+            };
+            assert_eq!(got, declared, "corpus component for `{expr}` disagrees with the oracle");
+            writeln!(out, "    assert({nfn}(dt{i}) == {got});").unwrap();
+            c.assertions += 1;
+        }
+    }
+    // Signed ordering across the epoch boundary — the other half of sq-3x7dl.7.
+    writeln!(out, "    // Signed ordering across the 1970 epoch boundary.").unwrap();
+    let ordered = oracle_bool(
+        g,
+        "xsd:dateTime(\"1969-07-20T20:17:40Z\") < xsd:dateTime(\"1970-01-01T00:00:00Z\")",
+    );
+    writeln!(out, "    assert(datetime_less_than(dt0, dt3) == {ordered});").unwrap();
+    c.assertions += 1;
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+/// Build the complete Noir test file.
+fn generate_noir_file(inject_fault: bool) -> (String, Counts) {
+    let g = oracle_graph();
+    let mut out = String::with_capacity(64 * 1024);
+    let mut counts = Counts::default();
+    let mut fault: Option<FaultSite> = None;
+
+    header(&mut out, inject_fault);
+    gen_string_length(&mut out, &g, &mut counts, &mut fault);
+    gen_string_predicates(&mut out, &g, &mut counts);
+    gen_substring(&mut out, &g, &mut counts);
+    gen_divide(&mut out, &g, &mut counts);
+    gen_round(&mut out, &g, &mut counts);
+    gen_mixed_compare(&mut out, &g, &mut counts);
+    gen_cast(&mut out, &g, &mut counts);
+    gen_datetime(&mut out, &g, &mut counts);
+
+    writeln!(
+        out,
+        "// Coverage: {} live assertions, {} of them SPEC-REFERENCE rows whose expected value is\n\
+         // XPath F&O's rather than the oracle's (recorded oracle divergences; 0 commented out).",
+        counts.assertions, counts.spec_reference
+    )
+    .unwrap();
+
+    // noirc rejects non-ASCII inside comments (but not inside string literals), so the
+    // comment prose is transliterated before the file is handed to nargo. Runs BEFORE
+    // fault injection so the site match below is against the final text.
+    out = asciify_comments(&out);
+
+    if inject_fault {
+        let site = fault.expect("no fault site captured — inject-fault would be a no-op");
+        let replaced = out.replacen(&site.original, &site.faulty, 1);
+        assert_ne!(replaced, out, "fault injection matched nothing");
+        eprintln!(
+            "inject-fault: corrupted one expected value\n  was: {}\n  now: {}",
+            site.original.trim(),
+            site.faulty.trim()
+        );
+        out = replaced;
+    }
+
+    (out, counts)
+}
+
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let mut path: Option<String> = None;
+    let mut inject_fault = false;
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--output" | "-o" => {
+                i += 1;
+                path = Some(args.get(i).expect("--output needs a PATH").clone());
+            }
+            "--inject-fault" => {
+                i += 1;
+                inject_fault = true;
+                path = Some(args.get(i).expect("--inject-fault needs a PATH").clone());
+            }
+            other => {
+                eprintln!("unknown argument: {other}");
+                eprintln!("usage: sparq-xpath-differential (--output PATH | --inject-fault PATH)");
+                std::process::exit(2);
+            }
+        }
+        i += 1;
+    }
+
+    let path = path.unwrap_or_else(|| {
+        eprintln!("usage: sparq-xpath-differential (--output PATH | --inject-fault PATH)");
+        std::process::exit(2);
+    });
+
+    let (content, counts) = generate_noir_file(inject_fault);
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        std::fs::create_dir_all(parent).expect("create output directory");
+    }
+    std::fs::write(&path, &content).unwrap_or_else(|e| panic!("write {path}: {e}"));
+    eprintln!(
+        "wrote {path}: {} live assertions, {} of them SPEC-REFERENCE (recorded oracle divergences)",
+        counts.assertions, counts.spec_reference
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests — the guards that keep the harness honest
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The F&O window reference, pinned against the spec's own worked examples.
+    #[test]
+    fn fo_substring_matches_the_spec_examples() {
+        assert_eq!(fo_substring("motor car", 6, 3), " ca");
+        assert_eq!(fo_substring("metadata", 4, 3), "ada");
+        assert_eq!(fo_substring("12345", 0, 3), "12");
+        assert_eq!(fo_substring("12345", -3, 5), "1");
+        assert_eq!(fo_substring("12345", 5, -3), "");
+        assert_eq!(fo_substring("hello", -100, 3), "");
+        // Codepoint-indexed, not byte-indexed.
+        assert_eq!(fo_substring("naïve", 3, 1), "ï");
+    }
+
+    /// `fn:round` ties go toward +INFINITY and a negative argument rounding to zero keeps
+    /// its sign — the two properties the circuit's `round_double` implements.
+    #[test]
+    fn fo_round_ties_toward_positive_infinity() {
+        assert_eq!(fo_round_double(2.5), 3.0);
+        assert_eq!(fo_round_double(-2.5), -2.0);
+        assert_eq!(fo_round_double(0.5), 1.0);
+        assert_eq!(fo_round_double(-1.5), -1.0);
+        assert_eq!(fo_round_double(2.4999), 2.0);
+        assert!(fo_round_double(-0.5).is_sign_negative() && fo_round_double(-0.5) == 0.0);
+        assert!(fo_round_double(f64::NAN).is_nan());
+    }
+
+    /// The two circuit edges `noir_XPath` FIXED — the F&O window for `start < 1`
+    /// (`sq-3x7dl.6`) and negative zero out of `fn:round` — must reach the circuit as LIVE
+    /// assertions. They are the cases the oracle gets wrong, so they are asserted against
+    /// the F&O reference instead; if they were ever emitted commented out, a `noir_XPath`
+    /// regression on an edge it advertises as fixed would go completely undetected while
+    /// every other check stayed green. This test is that guard.
+    #[test]
+    fn spec_reference_edges_reach_the_circuit_as_live_assertions() {
+        let (src, counts) = generate_noir_file(false);
+
+        // No assertion may be emitted commented out, in any section.
+        let smothered: Vec<&str> =
+            src.lines().map(str::trim).filter(|l| l.starts_with("// assert(")).collect();
+        assert!(
+            smothered.is_empty(),
+            "assertions emitted COMMENTED OUT (they cannot fail, so they verify nothing): {:#?}",
+            smothered
+        );
+        assert!(counts.spec_reference > 0, "no SPEC-REFERENCE row was emitted at all");
+
+        let live: Vec<&str> =
+            src.lines().map(str::trim).filter(|l| l.starts_with("assert(")).collect();
+        let require = |want: &str| {
+            assert!(live.contains(&want), "missing LIVE assertion `{}`", want);
+        };
+
+        // substring("12345", 0, 3) == "12" — the F&O window, NOT the oracle's "123".
+        // Located by corpus content so a corpus edit cannot silently orphan this guard.
+        let i = substring_corpus()
+            .iter()
+            .position(|&(v, _, start, len)| (v, start, len) == ("12345", 0, 3))
+            .expect("the substring corpus must keep the (\"12345\", 0, 3) F&O window case");
+        require(&format!("assert(len{} == 2);", i));
+        require(&format!("assert(out{}[0] == 49);", i)); // b'1'
+        require(&format!("assert(out{}[1] == 50);", i)); // b'2'
+
+        // round_double(-0.5) == -0.0 — the F&O sign of zero, NOT the oracle's +0.0. Built
+        // with the generator's own renderers so the two cannot drift apart.
+        assert!(ROUND_CORPUS.contains(&"-0.5"), "the round corpus must keep the -0.5 case");
+        require(&format!(
+            "assert(round_double(XsdDouble::from_bits({})).to_bits() == {});",
+            hex64((-0.5f64).to_bits()),
+            hex64((-0.0f64).to_bits())
+        ));
+    }
+
+    /// SELF-EXPIRING GUARD #1. `DIVERGENCES[0]` claims sparq-engine shifts the
+    /// `fn:substring` window when `start < 1`. When that engine bug is fixed this test
+    /// goes RED — the signal to delete the entry and stop special-casing those rows (the
+    /// assertions themselves already run; they just stop needing the F&O expected value).
+    #[test]
+    fn recorded_divergence_substring_start_below_one_still_reproduces() {
+        let g = oracle_graph();
+        assert_eq!(oracle_plain_string(&g, "SUBSTR(\"12345\", 0, 3)"), "123");
+        assert_eq!(fo_substring("12345", 0, 3), "12");
+        assert_eq!(oracle_plain_string(&g, "SUBSTR(\"hello\", -2, 4)"), "hell");
+        assert_eq!(fo_substring("hello", -2, 4), "h");
+    }
+
+    /// SELF-EXPIRING GUARD #2. `DIVERGENCES[1]` claims sparq-engine's `ROUND` loses the
+    /// sign of a negative zero result. Goes RED when the engine is fixed, at which point
+    /// the row stops being SPEC-REFERENCE and becomes an ordinary oracle-derived one.
+    #[test]
+    fn recorded_divergence_round_negative_zero_still_reproduces() {
+        let g = oracle_graph();
+        let t = oracle_term(&g, "ROUND(xsd:double(\"-0.5\"))").expect("ROUND must not error");
+        let bits = lexical(&t, "double", "ROUND").parse::<f64>().unwrap().to_bits();
+        assert_eq!(bits, 0.0f64.to_bits(), "engine now returns something other than +0.0");
+        assert_eq!(fo_round_double(-0.5).to_bits(), (-0.0f64).to_bits());
+        // The serializer itself is NOT the culprit — it renders -0.0 correctly.
+        assert!(oracle_term(&g, "xsd:double(\"-0.0\")").unwrap().starts_with("\"-0E0\""));
+    }
+
+    /// Every recorded divergence must carry all four fields — an empty `why` would make
+    /// the generated header's honesty claim hollow.
+    #[test]
+    fn divergences_are_fully_documented() {
+        assert!(!DIVERGENCES.is_empty());
+        for d in DIVERGENCES {
+            assert!(!d.expr.is_empty() && !d.sparq.is_empty() && !d.spec.is_empty() && !d.why.is_empty());
+        }
+    }
+
+    /// The corpus must actually exercise the edges the bead names, otherwise a green run
+    /// proves nothing about them.
+    #[test]
+    fn corpus_covers_the_beaded_edges() {
+        // Multibyte and NUL-padding in the string corpus.
+        let corpus = string_corpus();
+        assert!(corpus.iter().any(|s| !s.value.is_ascii()), "no multibyte STRLEN case");
+        assert!(corpus.iter().any(|s| s.cap > s.value.len()), "no NUL-padded case");
+        assert!(corpus.iter().any(|s| s.value.chars().count() == 1 && s.value.len() == 4), "no astral case");
+        // start < 1 in the substring corpus (sq-3x7dl.6).
+        assert!(substring_corpus().iter().any(|&(_, _, start, _)| start < 1));
+        // A non-exact quotient (sq-3x7dl.4).
+        assert!(DIVIDE_CORPUS.iter().any(|&(a, b)| a % b != 0));
+        // Every mixed-comparison integer is out of i8 range (sq-3x7dl.5).
+        assert!(MIXED_CORPUS.iter().all(|&(n, _)| n < -128 || n > 127));
+        // A pre-1970 dateTime (sq-3x7dl.7).
+        assert!(DATETIME_CORPUS.iter().any(|&(_, y, ..)| y < 1970));
+    }
+
+    /// Generation is DETERMINISTIC: same oracle, same corpus, same bytes. The committed
+    /// golden file's drift guard depends on this.
+    #[test]
+    fn generation_is_deterministic() {
+        let (a, _) = generate_noir_file(false);
+        let (b, _) = generate_noir_file(false);
+        assert_eq!(a, b);
+    }
+
+    /// noirc hard-errors on a non-ASCII byte inside a comment, so the generated file's
+    /// comments must be pure ASCII — while the multibyte STRING literals that are the whole
+    /// point of the unicode corpus must survive untouched. Both halves are pinned here,
+    /// because a violation only shows up in the (toolchain-gated) `nargo` leg otherwise.
+    #[test]
+    fn generated_comments_are_ascii_but_literals_keep_their_multibyte() {
+        for inject_fault in [false, true] {
+            let (src, _) = generate_noir_file(inject_fault);
+            for line in src.lines() {
+                if line.trim_start().starts_with("//") {
+                    assert!(line.is_ascii(), "noirc rejects this comment: {}", line);
+                }
+            }
+            assert!(
+                src.contains("= \"\u{65e5}\u{672c}\u{8a9e}"),
+                "the multibyte corpus literal was mangled by the comment pass"
+            );
+        }
+        // The transliteration itself: prose punctuation becomes its ASCII spelling, and an
+        // arbitrary codepoint becomes an explicit escape rather than being dropped.
+        assert_eq!(ascii_comment("// a \u{2014} b \u{00a7}5.4.3"), "// a -- b sec. 5.4.3");
+        assert_eq!(ascii_comment("// STRLEN(\"\u{e9}\")"), "// STRLEN(\"\\u{e9}\")");
+    }
+
+    /// `--inject-fault` must actually change exactly one assertion, and the corrupted
+    /// line must be a live (uncommented) one — a fault hidden in a comment would make the
+    /// non-vacuity self-test pass for the wrong reason.
+    #[test]
+    fn inject_fault_corrupts_exactly_one_live_assertion() {
+        let (clean, counts) = generate_noir_file(false);
+        let (faulty, _) = generate_noir_file(true);
+        assert_ne!(clean, faulty);
+        assert!(counts.assertions > 100, "corpus shrank unexpectedly: {}", counts.assertions);
+
+        // Compare only LIVE assertions: the fault-injected header carries two extra
+        // warning lines, so a positional whole-file diff would report every line.
+        let live = |src: &str| -> Vec<String> {
+            src.lines()
+                .map(str::trim)
+                .filter(|l| l.starts_with("assert("))
+                .map(str::to_string)
+                .collect()
+        };
+        let (a, b) = (live(&clean), live(&faulty));
+        assert_eq!(a.len(), counts.assertions, "every live assertion must be countable");
+        assert_eq!(a.len(), b.len(), "fault injection must not add or drop an assertion");
+        let differing: Vec<_> = a.iter().zip(b.iter()).filter(|(x, y)| x != y).collect();
+        assert_eq!(differing.len(), 1, "fault injection must change exactly one live assertion");
+    }
+}

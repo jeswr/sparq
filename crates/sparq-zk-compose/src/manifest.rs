@@ -1856,6 +1856,59 @@ pub struct ProofManifest {
     /// ([`CommitmentAttestation::status`]) this MUST be present and match it —
     /// an omitted `revocation` for a status-bound credential is REJECTED
     /// (fail-closed; the prover cannot drop the reference to skip the check).
+    ///
+    /// # SCALAR by design — ONE reference per presentation (sq-cuvmj)
+    /// This field, [`Self::hidden_revocation`] and [`Self::fully_hidden_revocation`]
+    /// are all scalar `Option`s: a manifest carries exactly ONE status reference and
+    /// at most one liveness proof over it. `crate::verifier::resolve_status_ref`
+    /// requires EVERY scan-covering commitment's issuer-signed
+    /// [`CommitmentAttestation::status`] to resolve to this ONE reference, so a
+    /// presentation carrying two credentials with DISTINCT `(list, index, version)`
+    /// references is structurally REJECTED
+    /// (`crate::verifier::CheckError::RevocationReferenceMismatch`).
+    ///
+    /// That rejection is FAIL-CLOSED, not a false-accept: a revoked second
+    /// credential cannot be smuggled past the liveness check by pointing
+    /// `revocation` at the live one (the review's attempt-5 construction —
+    /// `research/zk-bind-composition-review.md` §Finding B). It is, however, an
+    /// over-restriction: it limits hidden cross-credential JOINs
+    /// (`crate::verifier::bind_joins`) to credentials sharing an IDENTICAL
+    /// issuer-signed status slot — in practice intra-credential multi-graph joins.
+    /// See that gate's `# Cross-credential scope constraint` section.
+    ///
+    /// # Pre-registered obligations for any future `Vec` migration (sq-cuvmj)
+    /// Promoting these fields to `Vec` to support genuine multi-credential
+    /// presentations is a SOUNDNESS-CRITICAL change: four verifier sites currently
+    /// read the single reference and would each silently cover only ONE credential.
+    /// A migration owes a PER-COMMITMENT re-derivation at every one of them —
+    /// dropping any leaves a second credential's liveness UNCHECKED:
+    ///
+    /// 1. `crate::verifier::bind_issuer_attestations` / `resolve_status_ref` — must
+    ///    resolve the reference belonging to THE COMMITMENT under inspection, and
+    ///    must still reject a commitment whose attested status matches NO reference
+    ///    (an unmatched commitment must never fall through as "no status bound").
+    /// 2. `crate::verifier::bind_revocation` — must run the authoritative-snapshot,
+    ///    freshness and `bit[index] == 0` checks once PER reference, and reject if
+    ///    any referenced credential is revoked or stale (not "some reference is
+    ///    live").
+    /// 3. `crate::verifier::bind_hidden_revocation` /
+    ///    `bind_fully_hidden_revocation` — each proof must be bound to the
+    ///    ISSUER-SIGNED `index_commitment` / `ref_commitment` of ITS OWN reference,
+    ///    and every reference in a hidden mode must have a matching proof (the
+    ///    existing fail-closed `HiddenRevocationRequired` /
+    ///    `FullyHiddenRevocationRequired` rule, applied per reference rather than
+    ///    once).
+    /// 4. `crate::verifier::scan_referenced_messages` and
+    ///    `verify_holder_attestation_signature` — both recompute an issuer-signed
+    ///    MESSAGE that folds the status digest, so each must fold the digest of the
+    ///    reference for THAT commitment; using a global/first reference would make
+    ///    the hidden-issuer and holder-binding messages unverifiable (or, worse,
+    ///    verifiable under the wrong credential's status).
+    ///
+    /// The current single-reference invariant is pinned by
+    /// `crate::verifier::tests::two_credentials_with_distinct_status_refs_are_rejected`,
+    /// which a `Vec` migration must consciously revisit. Not externally audited
+    /// (sq-qhy4).
     #[serde(default)]
     pub revocation: Option<RevocationStatus>,
     /// Disclosed status-list snapshots (audit #12): the bitstrings the verifier
@@ -1892,6 +1945,11 @@ pub struct ProofManifest {
     /// is never disclosed. The clear `RevocationStatus.index`/snapshot path remains
     /// the interim check; this field is the additive privacy layer. See
     /// `crate::verifier::bind_hidden_revocation`.
+    ///
+    /// SCALAR for the same reason [`Self::revocation`] is — one hidden-index proof
+    /// per presentation, bound to the one issuer-signed reference. The
+    /// multi-credential consequence and the obligations any `Vec` migration owes
+    /// are pre-registered on [`Self::revocation`] (sq-cuvmj).
     // [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation proof (privacy upgrade).
     #[serde(default)]
     pub hidden_revocation: Option<HiddenIndexRevocation>,
@@ -1915,6 +1973,9 @@ pub struct ProofManifest {
     /// (`with_accepted_set_depth`) — with no accepted-set anchor the relying party
     /// has no root to bind the proof to and rejects. NOT externally audited
     /// (sq-qhy4).
+    ///
+    /// SCALAR for the same reason [`Self::revocation`] is; the `Vec`-migration
+    /// obligations are pre-registered on that field (sq-cuvmj).
     // [OPUS-5] sq-kndw: fully-hidden revocation proof. Opt-in, research-grade.
     #[serde(default)]
     pub fully_hidden_revocation: Option<FullyHiddenRevocation>,
@@ -2141,7 +2202,23 @@ pub struct HiddenIssuerAttestation {
     /// exists — the original sq-z9l behaviour). A hidden-ONLY commitment (no clear
     /// attestation) MUST carry the salt here, or the verifier cannot recompute `m`
     /// and rejects the entry as unreferenced (fail-closed).
+    ///
+    /// # Why the salt is not withheld (sq-93h, assessed — do not re-litigate)
+    /// Disclosing it adds NO cross-presentation linkability, because [`Self::commitment`]
+    /// — the SAME graph's `C(G)` — is disclosed in the clear on this very entry and is
+    /// byte-bound into every scan sub-proof's bb public inputs. Given the audit-#9
+    /// ISSUANCE discipline that a salt is never reused for two distinct graphs (an
+    /// issuance-side assumption — the verifier machine-checks only the within-manifest
+    /// instance of it, `SaltReused`), the `graph -> salt` partition REFINES the
+    /// `graph -> C(G)` one, so the salt is a dominated correlator: a coalition that can
+    /// link two presentations by salt can already link them by `C(G)`. Moving `m`-reconstruction
+    /// behind an in-circuit salt-commitment (the sq-ayv index-commitment analogue) would
+    /// therefore buy zero unlinkability for a new circuit member and VK. Full analysis,
+    /// including the separate (non-linkability) guess-confirmation residual and the
+    /// trip-wire that fires if `C(G)` ever stops being disclosed:
+    /// `research/zk-hidden-path-salt-disclosure.md`.
     // [OPUS-4.8] sq-xxg: salt for hidden-only `m` reconstruction.
+    // [OPUS-5] sq-93h: assessed NO-BUILD — dominated by the clear `commitment`.
     #[serde(default)]
     pub salt: Option<FieldHex>,
     /// The bb proof blob (hex), same `len|proof|len|pi|vk` layout as a
