@@ -149,19 +149,38 @@ PY_SCRIPT_RE = re.compile(r"^scripts/[^/]*\.py$")
 #   "`/fuzz/` is here on MEASURED evidence: it was the ONE false positive among
 #    the 39 distinct symbols this check reports on the current tree"
 #
-# The `/fuzz/` half is true: `sparq-shacl::validate_graph` is exercised only by
-# fuzz/fuzz_targets/validate_shacl.rs, which stops compiling if the function is
-# deleted, i.e. it is a test by this check's own definition. "the ONE false
-# positive" was not true, and the tuple was not complete. Re-measured by deleting
-# each Python firing and running that script's own gating `--self-test`:
-# 10 of 31 red. Two more were Rust: `sparq-mpc::check_bounded_path` (14 `#[test]`
-# fns in `hidden_path/planner/tests.rs`) and `sparq-shacl::validate_with_model`
-# (two `crates/sparq-shacl/examples/*.rs`).
+# "the ONE false positive" was not true, and the tuple was not complete.
+# Re-measured by deleting each Python firing and running that script's own gating
+# `--self-test`: 10 of 31 red. Two more were Rust: `sparq-mpc::check_bounded_path`
+# (14 `#[test]` fns in `hidden_path/planner/tests.rs`) and
+# `sparq-shacl::validate_with_model` (called by two `crates/sparq-shacl/examples/*.rs`).
 #
 # Only ONE of those three mechanisms was a missing path hint (`/examples/`, added
 # here). The other two were holes in the resolver itself and are fixed as such —
 # `#[cfg(test)] mod X;` resolution below, and `python_test_regions` reading the
 # real parse tree. A fifth substring would not have reached either of them.
+#
+# AND THE `/fuzz/` HALF NAMED THE WRONG SYMBOL. `eval::validate_graph` is
+# `pub(crate)`; `fuzz/` is a separate cargo workspace and cannot reference a
+# crate-private item at all, so it CANNOT "stop compiling if the function is
+# deleted". It appears in `validate_shacl.rs` only in a header COMMENT. The hint
+# still earns its place — but through a different symbol. Counted over all 14
+# `fuzz/**.rs` and all 148 guard-shaped names, with `mask_rust` separating code
+# from prose:
+#
+#     validate        code=True    <- a real call; THIS is what /fuzz/ pins
+#     validate_graph  code=False   } named only in comment/string text
+#     guard           code=False   }
+#     required        code=False   }
+#
+# KNOWN LIMITATION, measured and not fixed here. A whole-file test host is
+# searched INCLUDING its comments and string literals, so a prose mention
+# satisfies a guard — and 3 of those 4 are exactly that. Short, common names
+# (`guard`, `required`) are the worst case: they occur in ordinary English and
+# are therefore near-permanently silenced. The fix (mask comments in whole-file
+# hosts) is strictly fail-CLOSED — it can only ADD findings — but it moves the
+# census, and shipping a precision figure I had not re-derived is the mistake
+# this round exists to correct. Filed on bead sq-sz0wh instead.
 TEST_PATH_HINTS = (
     "/tests/",
     "scripts/tests/",

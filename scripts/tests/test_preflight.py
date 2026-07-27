@@ -383,11 +383,18 @@ class ADefiningFileIsNotItsOwnTest(unittest.TestCase):
         # that script's own gating `--self-test` reds 10 of them, and an 11th —
         # `sparq-mpc::check_bounded_path` — was a Rust separate-file test module
         # this resolver could not see (now fixed; see SeparateFileTestModules).
-        # What survives is the narrower claim this test actually pins:
-        # sparq-shacl::validate_graph is exercised only by
-        # fuzz/fuzz_targets/validate_shacl.rs, which stops compiling if the
-        # function is deleted, so it WAS a measured false positive and `/fuzz/`
-        # fixes it. Kills: dropping "/fuzz/" from TEST_PATH_HINTS.
+        # It also named the WRONG SYMBOL. `eval::validate_graph` is `pub(crate)`,
+        # and `fuzz/` is a separate cargo workspace that cannot reference a
+        # crate-private item — so it can never "stop compiling if the function is
+        # deleted". It appears in validate_shacl.rs only in a header comment.
+        # What survives is what this test actually pins, and it is real: a fuzz
+        # target that CALLS a public guard is compiled by the fuzz runner and
+        # breaks when the guard is deleted. Measured over all 14 fuzz/**.rs and
+        # all 148 guard-shaped names, with mask_rust separating code from prose:
+        # `validate` matches in CODE (that is what /fuzz/ genuinely pins), while
+        # `validate_graph`, `guard` and `required` match only in comment/string
+        # text — the known whole-file-host limitation recorded in preflight.py.
+        # Kills: dropping "/fuzz/" from TEST_PATH_HINTS.
         with tempfile.TemporaryDirectory() as td:
             t = _Tree(td)
             t.write("fuzz/fuzz_targets/f.rs",
