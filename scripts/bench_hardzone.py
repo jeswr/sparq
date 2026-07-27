@@ -376,6 +376,21 @@ def ratio_lower_bound(val: float, med: float, larger_better: bool, quantum: floa
     return max(val - half, 0.0) / (med + half)
 
 
+def resolution_exempts(val: float, med: float, larger_better: bool, quantum: float,
+                       ratio: float) -> bool:
+    """True iff `ratio` reaches HARD_RATIO but the measurement's resolution cannot PROVE it.
+
+    NARROW BY CONSTRUCTION, and both conjuncts are load-bearing:
+      * `ratio >= HARD_RATIO` — the exemption may only ever apply to a row that would otherwise
+        hard-fail. Without it every seconds/milli row would be flagged exempt and flood the
+        durable trail with metrics that are not in the hard band at all.
+      * `lower_bound < HARD_RATIO` — STRICT. A row whose bound lands exactly ON the threshold is
+        proven to reach it and stays gated.
+    """
+    return (quantum > 0.0 and ratio >= HARD_RATIO
+            and ratio_lower_bound(val, med, larger_better, quantum) < HARD_RATIO)
+
+
 def evaluate(current: list[dict], hist: dict[str, list]) -> tuple[int, dict]:
     """Pure gate logic — unit-tested by --self-test. No I/O, no env access.
 
@@ -510,9 +525,7 @@ def evaluate(current: list[dict], hist: dict[str, list]) -> tuple[int, dict]:
         # would otherwise be in the hard set, and only when the row's resolution-aware LOWER
         # BOUND does not reach the threshold. "Would hard-fail on the point estimate, but the
         # measurement cannot PROVE it reaches HARD_RATIO." Watch-only, never ungated.
-        resolution_exempt = (quantum > 0.0 and ratio >= HARD_RATIO
-                             and ratio_lower_bound(val, med, larger_better,
-                                                   quantum) < HARD_RATIO)
+        resolution_exempt = resolution_exempts(val, med, larger_better, quantum, ratio)
         rows.append((name, val, med, len(pts), ratio, det, larger_better, floor_exempt,
                      resolution_exempt))
         units[name] = unit
@@ -1167,6 +1180,82 @@ def self_test() -> int:
           and abs(ratio_lower_bound(0.001, 0.0, False, 0.001) - 1.0) < 1e-12
           and abs(ratio_lower_bound(500.0, 1000.0, True, 100.0) - 1.7272727272727273) < 1e-9,
           "ratio_lower_bound: least-regressed reading in both directions, total at a zero median")
+    #     T12b — the bound is CLAMPED at 0 and never returns a negative ratio, for any quantum a
+    #     caller passes (evaluate() only ever passes a quantum that divides the values, but the
+    #     helper is public and a negative "ratio" would corrupt every comparison downstream).
+    #     MUTATION: drop the max(..., 0.0) clamps => red.
+    check(ratio_lower_bound(0.0, 1.0, False, 4.0) == 0.0
+          and ratio_lower_bound(1.0, 0.0, True, 4.0) == 0.0,
+          "ratio_lower_bound clamps at 0 — a coarse quantum never yields a negative ratio")
+    #     T13 — THE SECOND-ORDER LOOP, closed. This fix makes a perfect 0 PUBLISH, so the recall
+    #     deficit's MEDIAN can now legitimately become 0 — and the very next honest run at 1 is a
+    #     PESSIMAL-side zero crossing. Without the `milli` quantum that is fail-closed and main
+    #     REDS AGAIN for the same reason, one publication later. The integer-milli quantum
+    #     (bench/vector/README.md: the deficit is `round(...)`) is what keeps it bounded at 1.00x.
+    #     MUTATION: delete RESOLUTION_QUANTA["milli"] => red.
+    hnsw0 = history_values([{"date": i, "benches": [
+        {"name": "vectors_hnsw_recall_at10", "value": v, "unit": "milli"}]}
+        for i, v in enumerate([0.0, 0.0, 0.0, 1.0, 0.0])])
+    code, rep = evaluate([{"name": "vectors_hnsw_recall_at10", "value": 1.0, "unit": "milli"}],
+                         hnsw0)
+    check(code == 0 and not rep["invalid"] and len(rep["zero_crossing"]) == 1
+          and abs(rep["zero_crossing"][0][3] - 1.0) < 1e-9,
+          "once a perfect 0 has PUBLISHED and the median is 0, the next honest 1-milli deficit "
+          "is resolution-bounded to 1.00x — the loop does not simply move one publication later")
+    #     T14 — resolution_exempts(): BOTH conjuncts pinned.
+    #     MUTATION: dropping `ratio >= HARD_RATIO` reds the first; `<` -> `<=` reds the second.
+    check(not resolution_exempts(1.2, 1.0, False, 1.0, 1.2),
+          "resolution_exempts is False below the hard band — it never flags a row that would "
+          "not hard-fail anyway (which would flood the durable trail)")
+    check(not resolution_exempts(3.5, 1.0, False, 1.0, 3.5)
+          and resolution_exempts(3.4, 1.0, False, 1.0, 3.4),
+          "resolution_exempts is STRICT at the threshold: a bound landing exactly ON "
+          f"{HARD_RATIO:g}x is proven to reach it and stays gated")
+    #     ...and the same "below the hard band is not on the trail" property end-to-end.
+    code, rep = evaluate(_cur([("sameas_size32_closure_s", 0.001)], unit="s"), tick)
+    check(code == 0 and not rep["resolution_exempt"] and not rep["floor_exempt_hard"],
+          "an unchanged resolution-scale metric is neither resolution-exempt nor on the trail")
+    #     T15 — the CURRENT value constrains the inferred quantum, not just the history window.
+    #     A run reporting 0.0025 PROVES the emitter resolves to 1e-4, so the 1 ms allowance is no
+    #     longer justified and the move REDs. MUTATION: infer from `pts` only => red.
+    code, rep = evaluate(_cur([("sameas_size32_closure_s", 0.0025)], unit="s"), tick)
+    check(code == 1 and len(rep["hard"]) == 1 and not rep["resolution_exempt"],
+          "a current value with finer granularity than the window SHRINKS the allowance — "
+          "0.0025 vs median 0.001 proves 1e-4 resolution and hard-fails")
+    #     T16 — the markdown table names WHICH exemption applies. This column is what a
+    #     maintainer reads in GITHUB_STEP_SUMMARY, and on a green run it is the only record.
+    #     MUTATION: make _gating_label always return "hard-zone" => red.
+    code, rep = evaluate(_cur([("sameas_size32_closure_s", 0.002)], unit="s"), tick)
+    md = "\n".join(render_report(rep, markdown=True))
+    check("at measurement resolution — watch only" in md and "| hard-zone |" not in md,
+          "the markdown table's gating column names the resolution exemption")
+    check(_gating_label(True, False) == "under noise floor — watch only"
+          and _gating_label(False, True) == "at measurement resolution — watch only"
+          and _gating_label(True, True).count("watch only") == 1
+          and _gating_label(False, False) == "hard-zone",
+          "_gating_label distinguishes all four exemption combinations")
+    #     T17 — a zero-boundary/resolution event makes the run NOTABLE, so the step summary is
+    #     still written even though the run is now GREEN. This gate runs before the Store step,
+    #     so on a green run this summary is the only place the event is recorded.
+    #     MUTATION: drop the new terms from `notable` => red.
+    code, rep = evaluate(_cur([("a", 0.0), ("b", 100.0), ("c", 100.0), ("d", 100.0)]),
+                         history_values(series))
+    saved = os.environ.pop("GITHUB_STEP_SUMMARY", None)
+    try:
+        with tempfile.TemporaryDirectory(prefix="bench-hardzone-selftest-") as td17:
+            sf = Path(td17) / "summary.md"
+            os.environ["GITHUB_STEP_SUMMARY"] = str(sf)
+            with contextlib.redirect_stdout(io.StringIO()):
+                emit_report(rep)
+            written = sf.read_text(encoding="utf-8") if sf.exists() else ""
+    finally:
+        if saved is not None:
+            os.environ["GITHUB_STEP_SUMMARY"] = saved
+        else:
+            os.environ.pop("GITHUB_STEP_SUMMARY", None)
+    check(code == 0 and "reached their OPTIMUM" in written,
+          "a GREEN run whose only event is a zero-boundary improvement still writes the step "
+          "summary — the event stays visible after it stopped being fatal")
 
     # 6. Disappeared metrics: warn below the 30% threshold, hard-fail above it.
     code, rep = evaluate(_cur([("a", 10.0), ("b", 10.0), ("c", 10.0)]), history_values(series))
