@@ -1090,12 +1090,13 @@ use sparq_vectors::{ProvenanceWeights, WeightMode};
 #         header: &sparq_vectors::SchemaHeader) -> Result<(), String> {
 let pw = ProvenanceWeights::mine(graph);
 
-// (3) PRODUCER: derive each block's fusion weight FROM THE GRAPH — block i is fed by
-//     block_predicates[i]; `None` leaves that block at the fail-open 1.0.
+// (3) PRODUCER: derive each block's GRAPH-GLOBAL default fusion weight — block i is fed by
+//     block_predicates[i]; `None` leaves that block at the fail-open 1.0. The header is shared,
+//     so this is one multiplier per BLOCK, not per node.
 let weighted = pw.weight_header(
     graph, header, &[Some("http://ex/good"), None], WeightMode::Provenance)?;
 
-// (3) CONSUMER: the grounding object now carries the per-block multiplier, ready for
+// (3) CONSUMER: the grounding object now carries that per-block multiplier, ready for
 //     `fuse_rrf_weighted` / `fuse_scores` — a low-provenance modality contributes less.
 if let Some(Grounding::TypedSubVector { weights, .. }) = ground(
     graph, &node, Modality::TypedSubVector, &GroundingConfig::default(), None,
@@ -1107,20 +1108,36 @@ let sketch = sketch_predicate(graph, store, &node, "http://ex/cites", &pw, Weigh
 # let _ = sketch; Ok(()) }
 ```
 
-`sketch_predicate` weights a contribution by the **neighbour's** provenance, not the grounded
-node's: a plain RDF-1.1 graph carries no per-*statement* provenance and every edge of one node
-shares a subject, so subject-weighting would give every contribution the same weight and silently
-degenerate to the uniform mean.
+**What the weights key on (a documented approximation, not statement provenance).** `w(t)` here is
+**entity-level**: `ProvenanceWeights` mines `pkg:confidence` / `pkg:assurance` /
+`prov:wasDerivedFrom` asserted **about an entity**, and a triple's weight is the weight of whichever
+entity is passed in. Plain RDF-1.1 carries no per-*statement* provenance, so neither caller can
+weight the *assertion* itself:
 
-**Measured, and the verdict is honest.** `eval::run_pooling_ablation` (feature `kge`) is the paired
-instrument for the pooling axis — one training run per seed, both arms post-processing the *same*
-parameters, so the delta isolates the pooling weights. On the synthetic provenance slice the
-training axis (point 1) shows a positive paired MRR delta clearing 2·se, while the **pooling axis
-shows no measured lift at any blend** — indistinguishable from zero within its paired spread. Per
-the pre-registered-bar discipline that is an **ABANDON** signal for weighted pooling on that slice,
-not a defect: the wiring exists and is measurable, and the honest reading of the instrument is that
-it does not help there. Re-measure on a real, provenance-bearing KG before adopting anything.
-Runnable: `cargo run -p sparq-vectors --release --features kge --example kge_ablation`.
+- `sketch_predicate` keys each contribution on the **neighbour (object) entity** — "a value that is
+  itself low-assurance pulls the pooled vector less". It is deliberately **not** keyed on the
+  grounded node, because every edge of one node shares a subject and subject-keying would give
+  every contribution an identical weight (an exact no-op). It is therefore an *entity-quality*
+  proxy, **not** evidence that the individual `(node, predicate, object)` assertion is doubtful.
+- `weight_header` keys each block on the **graph-global** mean over every subject asserting that
+  block's feeding predicate. `SchemaHeader` is one shared, graph-wide layout header, so this is a
+  per-block **default** multiplier — *every* node grounded against that header gets the same
+  weights. Per-node incident-edge scaling (the design's full point 3) would need per-row weight
+  storage and is **not implemented**.
+
+**Measurement-gated, with no result published here.** `eval::run_pooling_ablation` (feature `kge`)
+is the paired instrument for the pooling axis — one training run per seed, both arms
+post-processing the *same* parameters, so the delta isolates the pooling weights. It returns paired
+per-seed MRR / Hits@10 deltas with their standard error; `mrr_significant_at(k)` reports whether the
+lift clears `k` standard errors of its own paired spread. Read it that way: a delta that does not
+clear the pre-registered bar is **no measured lift**, and the honest verdict for that axis on that
+slice is ABANDON, not a defect to be explained away. On a provenance-free graph both arms pool with
+identical weights and every delta is exactly zero by construction.
+
+Run it yourself rather than trusting a number quoted here — results are seed-, fixture- and
+box-dependent and are **not** canonical:
+`cargo run -p sparq-vectors --release --features kge --example kge_ablation`. Any adoption decision
+must be re-measured on a real, provenance-bearing KG.
 
 ### 15. Typed-literal encoders — order-preserving numeric / boolean / date + schema header (opt-in, feature = `structure`)
 

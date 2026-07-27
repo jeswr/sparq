@@ -13,12 +13,15 @@
 //! - the subgraph grounding contains only facts present in the graph (never an approximate signal).
 //!
 //! [OPUS-5] sq-w2af4 adds the **provenance-weighting** half of the design's §USE-1 integration
-//! points, both end-to-end through the REAL path (never a mock):
+//! points, both end-to-end through the REAL path (never a mock). Both weight on **entity-level**
+//! provenance — this crate mines provenance asserted about entities, never about statements — and
+//! the tests assert exactly that, no more:
 //! - point 3: graph provenance → `weight_header` → `SchemaHeader` → `ground` → `fuse_rrf_weighted`,
-//!   so a low-provenance modality really does carry the smaller fusion multiplier;
+//!   so a block fed by a low-provenance predicate carries the smaller fusion multiplier. The
+//!   multiplier is graph-global per block, and the test pins that it is shared across nodes;
 //! - point 2: `sketch_predicate` pools a node's multi-valued predicate over the real `.spqv` store,
-//!   weighted by each neighbour's own provenance — and reduces EXACTLY to the arithmetic mean under
-//!   the ablation-off `WeightMode::Uniform`.
+//!   weighted by each neighbour **entity's** own provenance — and reduces EXACTLY to the arithmetic
+//!   mean under the ablation-off `WeightMode::Uniform`.
 //!
 //! Gated on `structure` (the grounding module).
 #![cfg(feature = "structure")]
@@ -121,13 +124,18 @@ fn typed_sub_vector_projects_only_requested_blocks() {
     assert_eq!(weights, vec![1.0, 1.0]);
 }
 
-/// [OPUS-5] sq-w2af4 — the design-§USE-1 point-3 loop, END-TO-END through the REAL path:
-/// graph provenance → `weight_header` → the `.spqv` `SchemaHeader` → `ground` →
-/// `fuse_rrf_weighted`. A node whose blocks are fed by a LOW-provenance predicate must hand the
-/// fusion path a smaller modality multiplier than one fed by a high-provenance predicate, so the
-/// high-provenance modality wins the fused ranking.
+/// [OPUS-5] sq-w2af4 — the point-3 loop, END-TO-END through the REAL path: graph provenance →
+/// `weight_header` → the `.spqv` `SchemaHeader` → `ground` → `fuse_rrf_weighted`. A block fed by a
+/// LOW-provenance PREDICATE hands the fusion path a smaller modality multiplier than one fed by a
+/// high-provenance predicate, so the high-provenance modality wins the fused ranking.
+///
+/// The weights are **graph-global per block**, not per node: they are mined from every subject
+/// asserting the feeding predicate and live on the one shared header. This test pins that
+/// limitation explicitly (a second, differently-provenanced node gets *identical* weights) so
+/// nothing here can be misread as evidence of per-node incident-edge scaling — which is not
+/// implemented.
 #[test]
-fn typed_sub_vector_carries_provenance_derived_fusion_weights() {
+fn typed_sub_vector_carries_predicate_global_fusion_weights() {
     // `ex:good` is asserted by a Proven, fully-confident head; `ex:weak` by a Conjectured,
     // low-confidence head derived from an unreliable source.
     const PROV: &str = r#"
@@ -144,6 +152,7 @@ ex:shaky  pkg:assurance secx:Conjectured ; pkg:confidence "0.3" ;
 "#;
     let g = Graph::load_str(PROV, "turtle").unwrap();
     let solid = g.id_of(&iri("http://ex/solid")).unwrap();
+    let shaky = g.id_of(&iri("http://ex/shaky")).unwrap();
     let pw = ProvenanceWeights::mine(&g);
 
     // Two modality blocks in one row: block 0 fed by `ex:good`, block 1 fed by `ex:weak`.
@@ -163,6 +172,7 @@ ex:shaky  pkg:assurance secx:Conjectured ; pkg:confidence "0.3" ;
 
     let mut store = VectorStore::create(tmp("provweights"), 4).unwrap();
     store.put(solid, &[1.0, 2.0, 3.0, 4.0]).unwrap();
+    store.put(shaky, &[5.0, 6.0, 7.0, 8.0]).unwrap();
     store.finalize().unwrap();
 
     let Some(Grounding::TypedSubVector { weights, .. }) = ground(
@@ -181,6 +191,25 @@ ex:shaky  pkg:assurance secx:Conjectured ; pkg:confidence "0.3" ;
         "the low-provenance modality must carry the smaller fusion weight ({} < {})",
         weights[1],
         weights[0]
+    );
+
+    // The WEIGHTS ARE NOT PER-NODE. `ex:solid` has no incident `ex:weak` edge at all — block 1's
+    // multiplier above came entirely from `ex:shaky ex:weak ex:y`. Grounding `ex:shaky` (a node
+    // with the opposite provenance, and no incident `ex:good` edge) against the same header
+    // returns the SAME weights. This is the documented limitation, asserted rather than implied.
+    let Some(Grounding::TypedSubVector { weights: other, .. }) = ground(
+        &g,
+        &iri("http://ex/shaky"),
+        Modality::TypedSubVector,
+        &GroundingConfig::default(),
+        None,
+        Some((&store, &header)),
+    ) else {
+        panic!("expected a typed-sub-vector grounding");
+    };
+    assert_eq!(
+        other, weights,
+        "block weights come from the shared header, so every node sees the same ones"
     );
 
     // ...and that weight is a REAL fuse weight: the high-provenance modality wins the fusion.
@@ -219,12 +248,17 @@ ex:shaky  pkg:assurance secx:Conjectured ; pkg:confidence "0.3" ;
     assert_eq!(weights, vec![1.0, 1.0], "ablation-off leaves every block unweighted");
 }
 
-/// [OPUS-5] sq-w2af4 — the design-§USE-1 point-2 loop, END-TO-END: `sketch_predicate` pools a
-/// node's multi-valued predicate over the REAL `.spqv` store, weighting each neighbour by its own
-/// provenance. Under `Uniform` it is exactly the arithmetic mean (the ablation-off baseline);
-/// under `Provenance` the higher-quality neighbour dominates.
+/// [OPUS-5] sq-w2af4 — the point-2 loop, END-TO-END: `sketch_predicate` pools a node's
+/// multi-valued predicate over the REAL `.spqv` store, weighting each neighbour by that
+/// **neighbour entity's** own provenance. Under `Uniform` it is exactly the arithmetic mean (the
+/// ablation-off baseline); under `Provenance` the higher-quality neighbour entity dominates.
+///
+/// Scope of the claim: `ex:dubious` is a low-assurance **entity**, and that is all the fixture
+/// asserts. It is deliberately NOT a claim that the `ex:hub ex:cites ex:dubious` *statement* is
+/// doubtful — plain RDF-1.1 has no per-statement provenance and this crate reads no reified /
+/// RDF-star statement mapping, so an entity-quality proxy is the most the pooler can express.
 #[test]
-fn sketch_predicate_pools_neighbours_confidence_weighted() {
+fn sketch_predicate_pools_neighbour_entities_confidence_weighted() {
     const PROV: &str = r#"
 @prefix pkg:  <https://sparq.dev/ns/pkg#> .
 @prefix secx: <https://sparq.dev/ns/secx#> .

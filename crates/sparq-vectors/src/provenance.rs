@@ -264,17 +264,30 @@ impl ProvenanceWeights {
     // [OPUS-4.8] sq-oy9ya (design §USE-1 point 2). When a node has MULTIPLE values for a
     // multi-valued predicate (a characteristic set / structural sketch), the standard pooling is a
     // uniform mean of the value contributions. These helpers pool **confidence-weighted** instead:
-    // each contribution is weighted by the provenance weight of the SUBJECT it came from, so a fact
-    // a low-assurance/low-confidence source asserted pulls the pooled vector less. With uniform
+    // each contribution is weighted by the provenance weight of the ENTITY the caller keys it on
+    // (the head for the trainer path, the value entity for the object sketch — see `pool_weighted`),
+    // so a contribution from a low-assurance/low-confidence entity pulls the pooled vector less.
+    // This is an entity-level proxy, never per-statement provenance. With uniform
     // weights (all 1.0, i.e. a provenance-free graph) this reduces EXACTLY to the arithmetic mean —
     // a plain graph is unchanged. No accuracy claim is made; it ships behind the same on/off
     // ablation (`WeightMode`).
 
-    /// **Confidence-weighted pool** of a node's per-value contributions for one multi-valued
-    /// predicate (design §USE-1 point 2). `contributions` is the list of `(subject_id,
-    /// value_vector)` pairs that feed this node's block for the predicate — one entry per asserted
-    /// value, `subject_id` being the head whose provenance qualifies that value. The pooled vector
-    /// is `Σ w_i · v_i / Σ w_i`, with `w_i = self.weight_of([subject_i, _, _], mode)`.
+    /// **Provenance-weighted pool** of a node's per-value contributions for one multi-valued
+    /// predicate (design §USE-1 point 2). `contributions` is the list of `(key_id, value_vector)`
+    /// pairs that feed this node's block for the predicate — one entry per asserted value. The
+    /// pooled vector is `Σ w_i · v_i / Σ w_i`, with `w_i = self.weight_of([key_i, _, _], mode)`.
+    ///
+    /// **`key_id` is an ENTITY, and the weight is that entity's provenance** — this module mines
+    /// provenance asserted *about entities*, never about statements, so `pool_weighted` can only
+    /// ever apply an entity-level weight. Callers choose which entity qualifies a contribution:
+    /// the trainer path keys on the **head** (the subject the fact is about), while the
+    /// object-sketch pooler
+    /// ([`sketch_predicate`](crate::grounding::sketch_predicate)) keys on the **neighbour/value
+    /// entity**, since every edge of one node shares a subject and head-keying there would weight
+    /// every contribution identically. Neither is per-*statement* provenance: a low weight means
+    /// "this entity is low-assurance", not "this assertion is doubtful". Weighting the assertion
+    /// itself would require an explicit reified / RDF-star provenance mapping, which this module
+    /// does not read.
     ///
     /// Under [`WeightMode::Uniform`] every `w_i = 1.0`, so the result is the **plain arithmetic
     /// mean** — byte-identical to the unweighted pooler (the ablation-off baseline). Under
@@ -293,7 +306,7 @@ impl ProvenanceWeights {
         let dim = contributions[0].1.len();
         let mut acc = vec![0.0f32; dim];
         let mut wsum = 0.0f32;
-        for (subject, vec) in contributions {
+        for (key, vec) in contributions {
             if vec.len() != dim {
                 return Err(format!(
                     "pool_weighted: contribution vectors differ in length ({} vs {})",
@@ -301,7 +314,7 @@ impl ProvenanceWeights {
                     dim
                 ));
             }
-            let w = self.weight_of([*subject, NO_ID, NO_ID], mode);
+            let w = self.weight_of([*key, NO_ID, NO_ID], mode);
             wsum += w;
             for (a, x) in acc.iter_mut().zip(vec.iter()) {
                 *a += w * *x;
@@ -370,9 +383,17 @@ impl ProvenanceWeights {
     // `SchemaHeader` whose blocks carry it — which the `.spqv` SPQS-v2 sidecar then persists and
     // `Block::fusion_weight` serves to the query-time fusion path.
 
-    /// The per-block fusion weight for the block a `predicate` feeds: [`block_weight`](Self::block_weight)
-    /// aggregated over the **subjects** of that predicate's triples in `graph` (the heads whose
-    /// incident edges are what the block encodes).
+    /// The **graph-global** default fusion weight for the block a `predicate` feeds:
+    /// [`block_weight`](Self::block_weight) aggregated over **every** subject of that predicate's
+    /// triples in `graph`.
+    ///
+    /// **Scope (do not over-read this).** The result is a single scalar per *predicate*, mined
+    /// across the whole graph — it is **not** a per-node quantity and carries no information about
+    /// any individual node's incident edges. A node with no incident `predicate` edge at all still
+    /// receives this same multiplier once it is attached to the shared
+    /// [`SchemaHeader`](crate::encode::SchemaHeader) (see [`weight_header`](Self::weight_header)).
+    /// The design's §USE-1 point-3 goal of scaling *a node's* modality by *that node's*
+    /// incident-edge provenance would require per-row weight storage and is **not implemented**.
     ///
     /// `1.0` (fail-open) when the graph never mentions `predicate`, and — as everywhere in this
     /// module — always exactly `1.0` under [`WeightMode::Uniform`], so the ablation-off arm leaves
@@ -387,9 +408,17 @@ impl ProvenanceWeights {
     }
 
     /// Attach provenance-derived per-block fusion weights to `header`, returning the weighted
-    /// header (design §USE-1 point 3, end-to-end). `block_predicates[i]` names the predicate that
-    /// feeds `header.blocks()[i]`; a `None` entry leaves that block at the fail-open default
+    /// header (design §USE-1 point 3, **partially**). `block_predicates[i]` names the predicate
+    /// that feeds `header.blocks()[i]`; a `None` entry leaves that block at the fail-open default
     /// (`weight: 1.0` — e.g. a text or taxonomy lane with no single feeding predicate).
+    ///
+    /// **A `SchemaHeader` is graph-global, so these weights are too.** Each block's multiplier is
+    /// [`predicate_block_weight`](Self::predicate_block_weight) — the mean over *all* subjects
+    /// asserting that predicate anywhere in `graph`. Every node subsequently grounded against this
+    /// header therefore receives the **same** per-block weights, whatever its own incident edges
+    /// are. Treat it as a per-modality *default* ("this lane is fed by low-assurance data on this
+    /// graph"), never as per-node evidence; per-node incident-edge scaling needs per-row weight
+    /// storage that does not exist yet.
     ///
     /// The returned header is layout-identical to `header` ([`Block`](crate::encode::Block)'s
     /// `PartialEq` excludes the weight), so a weighted header is a drop-in replacement everywhere

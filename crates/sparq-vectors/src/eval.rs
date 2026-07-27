@@ -1173,9 +1173,11 @@ pub fn run_pooling_ablation(
     })
 }
 
-/// A copy of `model` whose entity embeddings are blended with each entity's **confidence-weighted
-/// structural sketch**: the pool of its outgoing non-schema object-neighbours' embeddings in
-/// `graph`, pooled through
+/// A copy of `model` whose entity embeddings are blended with each entity's
+/// **entity-quality-weighted structural sketch**: the pool of its outgoing non-schema
+/// object-neighbours' embeddings in `graph`, each contribution keyed on the **neighbour entity's**
+/// provenance (an entity-level proxy, never per-statement provenance — see
+/// [`sketch_predicate`](crate::grounding::sketch_predicate)), pooled through
 /// [`ProvenanceWeights::pool_weighted`](crate::provenance::ProvenanceWeights::pool_weighted) under
 /// `mode`. Deterministic: each row is written independently from a contribution list built in
 /// `graph.iter_ids()` order, so hash-map iteration order cannot affect the result. [OPUS-5] sq-w2af4

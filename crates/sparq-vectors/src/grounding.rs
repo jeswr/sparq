@@ -180,13 +180,18 @@ pub enum Grounding {
         blocks: Vec<Encoder>,
         /// [OPUS-5] sq-w2af4 — the per-block query-time modality multiplier
         /// ([`Block::fusion_weight`](crate::encode::Block::fusion_weight)), one entry per kept
-        /// block, in the same order as `blocks`. It is the design-§USE-1-point-3 aggregate of the
-        /// incident-edge provenance that fed the block (attached to the header by
-        /// [`ProvenanceWeights::weight_header`](crate::provenance::ProvenanceWeights::weight_header)),
-        /// and it is what the caller feeds to
+        /// block, in the same order as `blocks`. It is what the caller feeds to
         /// [`fuse_rrf_weighted`](crate::fuse_rrf_weighted) / [`fuse_scores`](crate::fuse_scores)
         /// so a low-provenance modality contributes less to the fused ranking. Every entry is
         /// `1.0` on a header with no recorded weights (fail-open — grounding is unchanged).
+        ///
+        /// **These are BLOCK-level defaults read straight off the shared `SchemaHeader`, not
+        /// per-node values.** When the header was produced by
+        /// [`ProvenanceWeights::weight_header`](crate::provenance::ProvenanceWeights::weight_header)
+        /// each entry is a graph-global mean over every subject asserting that block's feeding
+        /// predicate, so grounding a *different* node against the same header yields the *same*
+        /// weights — including for a node with no incident edge for that predicate. They say
+        /// nothing about this node's own provenance.
         weights: Vec<f32>,
     },
     /// The token-budgeted NL rendering.
@@ -744,9 +749,10 @@ fn typed_value_key(v: &TypedValue) -> String {
 
 /// Project `id`'s stored vector to only the blocks in `keep` (empty = all), concatenated in block
 /// order, plus the encoder families kept and each kept block's
-/// [`fusion_weight`](crate::encode::Block::fusion_weight) ([OPUS-5] sq-w2af4 — the design-§USE-1
-/// point-3 modality multiplier the caller hands to the fusion path; `1.0` when the header records
-/// none). `None` when the store has no vector for `id`, or the kept projection is empty.
+/// [`fusion_weight`](crate::encode::Block::fusion_weight) ([OPUS-5] sq-w2af4 — the block-level
+/// modality multiplier the caller hands to the fusion path, copied verbatim from the shared header
+/// and therefore identical for every `id`; `1.0` when the header records none). `None` when the
+/// store has no vector for `id`, or the kept projection is empty.
 fn typed_sub_vector(
     store: &VectorStore,
     header: &crate::encode::SchemaHeader,
@@ -776,23 +782,31 @@ fn typed_sub_vector(
     }
 }
 
-// ---- integration point 2 (WIRING): confidence-weighted structural-sketch pooling ---------------
+// ---- integration point 2 (WIRING): entity-quality-weighted structural-sketch pooling -----------
 // [OPUS-5] sq-w2af4. sq-oy9ya landed `ProvenanceWeights::pool_weighted` but no in-tree caller ever
 // pooled anything with it. `sketch_predicate` is that caller: it is the grounding-path
 // structural-sketch pooler for a node's MULTI-VALUED object predicate.
 
-/// **Confidence-weighted structural sketch** of `node`'s multi-valued `predicate` (design §USE-1
-/// integration point 2): pool the stored vectors of the node's object neighbours under that
-/// predicate, weighting each neighbour's contribution by its provenance `w(t)` via
+/// **Entity-quality-weighted structural sketch** of `node`'s multi-valued `predicate` (design
+/// §USE-1 integration point 2): pool the stored vectors of the node's object neighbours under that
+/// predicate, weighting each neighbour's contribution by **that neighbour entity's** provenance
+/// weight via
 /// [`ProvenanceWeights::pool_weighted`](crate::provenance::ProvenanceWeights::pool_weighted).
 ///
-/// **Which provenance qualifies a contribution (load-bearing, and deliberately documented).** The
-/// contribution of neighbour `o` is weighted by **`o`'s own** provenance, not `node`'s. A plain
-/// RDF-1.1 graph carries no per-*statement* provenance, and every `(node, predicate, ·)` edge shares
-/// the same subject — so weighting by the subject would give every contribution the identical weight
-/// and silently degenerate to the uniform mean (a no-op dressed up as a feature). Weighting by the
-/// neighbour is the honest reading of "a value a low-assurance source asserted pulls the pooled
-/// vector less", and it is the only reading under which this pooler differs from the mean at all.
+/// **What the weight actually measures (load-bearing — read this before trusting it).** The
+/// contribution of neighbour `o` is keyed on **`o`'s own entity-level** provenance
+/// (`pkg:confidence` / `pkg:assurance` / `prov:wasDerivedFrom` asserted *about `o`*), not on
+/// `node`'s. Two consequences are stated plainly rather than glossed:
+/// - It is **not** a per-*statement* weight. Provenance attached to `o` says that `o` is a
+///   low-assurance *entity*; it does **not** establish that the separate `(node, predicate, o)`
+///   assertion is doubtful. Plain RDF-1.1 carries no per-statement provenance, and this crate reads
+///   no reified / RDF-star statement mapping, so no in-tree caller can weight the assertion itself.
+/// - It is deliberately **not** keyed on `node`: every `(node, predicate, ·)` edge shares the same
+///   subject, so subject-keying would give every contribution an identical weight and reduce
+///   exactly to the uniform mean (an exact no-op).
+///
+/// So this is an **entity-quality proxy** — "a value that is itself low-assurance pulls the pooled
+/// vector less" — and that is the full extent of the claim.
 ///
 /// Returns `Ok(None)` when the node is absent/inline, the predicate is unknown to the graph, or no
 /// neighbour has a stored vector. `Err` only if the store's vectors disagree in length (a layout
