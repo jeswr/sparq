@@ -39,8 +39,11 @@ build, test, lint, and the conformance / performance ratchets:
 cargo build --workspace
 cargo test  --workspace
 cargo clippy --workspace --exclude sparq-py --all-targets -- -D warnings
-cargo fmt --check
 ```
+
+`cargo fmt --all --check` runs in CI too, but it is **informational, not part of the gate**:
+the one-time workspace reformat is still pending, so the check reports pre-existing diffs in
+files you did not touch. Format what you touched and leave the rest.
 
 See [`CONTRIBUTING.md`](https://github.com/jeswr/sparq/blob/main/CONTRIBUTING.md) for the full
 contributor workflow and the conformance ratchet details — that file is the canonical source for

@@ -53,10 +53,20 @@
 //! rdfs9/rdfs7 (shipped host-side) + rdfs2/rdfs3/rdfs5/rdfs11 -- all the same
 //! fixed variable-sharing shape, matching `EntailmentRule` in the host module
 //! (single source of truth for the shapes). `owl:sameAs` is gated SEPARATELY
-//! (`sq-rsd3v.6` -- NOT `.7`, which is the distinct completeness obligation
-//! below): encoding-equality is UNSOUND under equality reasoning and MUST NOT
-//! ride this fixed-shape path. A node with an unknown `rule` tag has no
-//! satisfying shape and is rejected.
+//! (`sq-rsd3v.6`, the `sameas` module -- NOT `.7`, which is the distinct
+//! completeness obligation below): encoding-equality is UNSOUND under
+//! equality reasoning and MUST NOT ride this fixed-shape path. A node with an
+//! unknown `rule` tag has no satisfying shape and is rejected.
+//!
+//! Note WHERE that refusal lives: this relation does NOT test for the
+//! `owl:sameAs` encoding (it has no such public input, and an rdfs7 firing over
+//! a `sameAs` fact is a legitimate RDFS instance in-circuit). The gate is
+//! HOST-side --
+//! `DerivationStep::mentions_equality_predicate` + `bind_entailment`'s
+//! `CheckError::EqualityReasoningUnsupported` -- so a manifest cannot present an
+//! equality step on this path. Do not read the absence of an in-circuit check
+//! as "the circuit permits sameAs reasoning": it permits the RDFS rule, and the
+//! equality SEMANTICS come only from `sameas.nr`'s canonicalisation.
 //!
 //! # HONEST STATUS (sq-qhy4)
 //! Research-grade, NOT externally audited. This is the in-circuit RELATION; the

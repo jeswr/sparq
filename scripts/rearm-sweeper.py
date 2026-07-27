@@ -216,6 +216,49 @@ except ImportError as _gh_retry_missing:  # pragma: no cover - see the wiring te
     )
 
 
+# --------------------------------------------------------------------------------------
+# [OPUS-5] Issue #1135 — RELEASE-PR EXCLUSION. THE GAP THIS CLOSES: this sweep's ONLY
+# exclusions were LABEL-keyed (`EXCLUDED_LABELS` + the `needs:*` namespace). Nothing was
+# keyed on the head branch or the author, so the release-plz **Release PR** carrying
+# `review:pass` and no hold label was re-armed like any other PR. Merging it cuts a `v*`
+# tag and (once `publish = true` in release-plz.toml) `cargo publish`es 17 crates to
+# crates.io — a version that can never be unpublished.
+#
+# A label-keyed exclusion is the wrong key: anything with `pull-requests: write` can add
+# or remove a label. scripts/release_pr_guard.py keys on BRANCH / AUTHOR / TITLE instead.
+#
+# UNLIKE the gh_retry degradation above, a MISSING guard module must NOT degrade to
+# "proceed": the stub below refuses EVERY re-arm.
+try:
+    import release_pr_guard
+
+    RELEASE_GUARD_DEGRADED = False
+except ImportError as _release_guard_missing:  # pragma: no cover - see the self-test
+
+    class _FailClosedReleaseGuard:
+        """Refuse EVERY re-arm when the release-PR guard could not be imported."""
+
+        _REASON = (
+            "release-pr-guard: scripts/release_pr_guard.py is NOT importable, so this "
+            "sweep cannot prove any PR is not the release-plz Release PR — refusing "
+            "every re-arm (fail-closed, #1135). REMEDY: add "
+            "scripts/release_pr_guard.py to this workflow's sparse-checkout manifest."
+        )
+
+        @staticmethod
+        def arm_block_reason(**_kwargs) -> str:
+            return _FailClosedReleaseGuard._REASON
+
+    release_pr_guard = _FailClosedReleaseGuard  # type: ignore[assignment]
+    RELEASE_GUARD_DEGRADED = True
+    print(
+        "::error title=rearm-sweeper refusing every re-arm (scripts/release_pr_guard.py "
+        f"not checked out)::{_release_guard_missing} — the release-PR exclusion (#1135) "
+        "cannot be evaluated, so NOTHING is re-armed this cycle. Add "
+        "scripts/release_pr_guard.py to the sparse-checkout manifest."
+    )
+
+
 PROGRAM = "rearm-sweeper"
 REVIEW_ATTESTATION = "review:pass"
 EXCLUDED_LABELS = frozenset(
@@ -227,7 +270,10 @@ EXCLUDED_LABELS = frozenset(
     }
 )
 DEFAULT_MAX_REARMS = 10
-PR_LIST_FIELDS = "number,state,isDraft,baseRefName,labels"
+# [OPUS-5] #1135: headRefName/author/title are the release-PR guard's ONLY inputs. Dropping
+# one makes parse_* yield None for it and arm_block_reason fail CLOSED — the guard can
+# degrade to refusing, never to admitting.
+PR_LIST_FIELDS = "number,state,isDraft,baseRefName,headRefName,labels,author,title"
 LIVE_QUERY = """query($owner:String!,$name:String!,$number:Int!){
   repository(owner:$owner,name:$name){
     pullRequest(number:$number){
@@ -235,6 +281,9 @@ LIVE_QUERY = """query($owner:String!,$name:String!,$number:Int!){
       state
       isDraft
       baseRefName
+      headRefName
+      title
+      author{login}
       labels(first:100){nodes{name} pageInfo{hasNextPage}}
       autoMergeRequest{enabledAt}
       mergeQueueEntry{id}
@@ -395,6 +444,20 @@ class PullRequest:
     has_auto_merge: bool = False
     has_queue_entry: bool = False
     labels_truncated: bool = False
+    # [OPUS-5] #1135 release-PR guard inputs. `None` means NOT REPORTED and is DISTINCT
+    # from "" — arm_block_reason fails closed on an unknown head branch, so a missing
+    # field must never be flattened into a string.
+    head_ref: str | None = None
+    author_login: str | None = None
+    title: str | None = None
+
+
+def _optional_str(raw: dict, key: str) -> str | None:
+    """raw[key] as a string, or None when the key is absent/null (see PullRequest)."""
+    if key not in raw:
+        return None
+    value = raw[key]
+    return None if value is None else str(value)
 
 
 def normalized_labels(raw: object) -> frozenset[str]:
@@ -407,6 +470,11 @@ def normalized_labels(raw: object) -> frozenset[str]:
     )
 
 
+def _author_login(raw: dict) -> str | None:
+    author = raw.get("author")
+    return _optional_str(author, "login") if isinstance(author, dict) else None
+
+
 def parse_list_pr(raw: dict) -> PullRequest:
     return PullRequest(
         number=int(raw["number"]),
@@ -414,11 +482,15 @@ def parse_list_pr(raw: dict) -> PullRequest:
         is_draft=bool(raw.get("isDraft")),
         base_ref=str(raw.get("baseRefName", "")),
         labels=normalized_labels(raw.get("labels")),
+        head_ref=_optional_str(raw, "headRefName"),
+        author_login=_author_login(raw),
+        title=_optional_str(raw, "title"),
     )
 
 
 def parse_live_pr(number: int, raw: dict | None) -> PullRequest:
     if not isinstance(raw, dict):
+        # An unreadable PR keeps head_ref=None, so #1135's guard fails CLOSED on it.
         return PullRequest(number, "UNKNOWN", False, "", frozenset())
     labels = raw.get("labels") or {}
     return PullRequest(
@@ -430,6 +502,9 @@ def parse_live_pr(number: int, raw: dict | None) -> PullRequest:
         has_auto_merge=raw.get("autoMergeRequest") is not None,
         has_queue_entry=raw.get("mergeQueueEntry") is not None,
         labels_truncated=bool((labels.get("pageInfo") or {}).get("hasNextPage")),
+        head_ref=_optional_str(raw, "headRefName"),
+        author_login=_author_login(raw),
+        title=_optional_str(raw, "title"),
     )
 
 
@@ -502,6 +577,17 @@ class RearmSweeper:
         # State is deliberately first: closed/merged PRs may report other fields as UNKNOWN.
         if pr.state != "OPEN":
             return f"not-open ({pr.state or 'UNKNOWN'})"
+        # [OPUS-5] #1135: the release-plz Release PR is NEVER re-armed. Checked BEFORE
+        # every label-derived rule and independent of them — keyed on branch/author/title,
+        # so no label combination (adding review:pass, stripping every hold) can make it
+        # re-armable. FAIL-CLOSED when the head branch is unknown.
+        release_reason = release_pr_guard.arm_block_reason(
+            head_ref=pr.head_ref,
+            author_login=pr.author_login,
+            title=pr.title,
+        )
+        if release_reason:
+            return release_reason
         if pr.is_draft:
             return "draft"
         if pr.base_ref != self.default_branch:
@@ -826,6 +912,11 @@ class RearmSweeper:
         return outcome
 
 
+# Sentinel: "the caller did not mention this key at all" (vs. an explicit None, which
+# means "the key is present and null"). #1135's fail-closed branch needs both.
+_MISSING = object()
+
+
 def fixture(
     number: int,
     *,
@@ -835,8 +926,14 @@ def fixture(
     labels: tuple[str, ...] = (REVIEW_ATTESTATION,),
     armed: bool = False,
     queued: bool = False,
+    # [OPUS-5] #1135 release-PR guard inputs. Defaults describe an ORDINARY worker PR so
+    # every pre-existing fixture still re-arms; `_MISSING` distinguishes "omit the key"
+    # (the fail-closed case) from "the key is present with this value".
+    head_ref: object = _MISSING,
+    author_login: object = _MISSING,
+    title: object = _MISSING,
 ) -> dict:
-    return {
+    raw = {
         "number": number,
         "state": state,
         "isDraft": draft,
@@ -845,6 +942,17 @@ def fixture(
         "autoMergeRequest": {"enabledAt": "2026-07-21T00:00:00Z"} if armed else None,
         "mergeQueueEntry": {"id": f"MQE_{number}"} if queued else None,
     }
+    raw["headRefName"] = (
+        f"sparq-agent/issue-{number}-worker" if head_ref is _MISSING else head_ref
+    )
+    resolved_author = (
+        "app/sparq-orchestrator" if author_login is _MISSING else author_login
+    )
+    raw["author"] = None if resolved_author is None else {"login": resolved_author}
+    raw["title"] = (
+        f"fix(engine): worker change for #{number}" if title is _MISSING else title
+    )
+    return raw
 
 
 CAPABILITY_RESPONSE = {
@@ -1004,6 +1112,63 @@ def self_test() -> None:
         "--auto",
     ], arm_calls(fake)
     assert any("ARMED" in line for line in messages), messages
+
+    # ---------------------------------------------------------------- #1135 Release PR
+    # THE GAP THIS CLOSES: this sweep's exclusions were LABEL-keyed only, so the Release
+    # PR carrying review:pass and no hold label was re-armed. Merging it tags + (once
+    # `publish = true`) publishes 17 crates to crates.io, irreversibly.
+    #
+    # Tripwire (c) directly above PROVES a `review:pass` PR IS re-armed by this harness,
+    # so "no arm call" below is a discriminating outcome and not the fixture's default.
+    release_kwargs = {
+        "head_ref": "release-plz-main",
+        "author_login": "app/github-actions",
+        "title": "chore: release v0.2.0",
+    }
+    release_pr = fixture(900, **release_kwargs)
+    fake, messages, outcome = exercise(release_pr)
+    assert not arm_calls(fake), fake.calls
+    assert any("release-pr-guard" in line for line in messages), messages
+
+    # THE EXACT ATTACK: relabelling the Release PR — adding review:pass, stripping every
+    # hold label — cannot make it re-armable, because labels are not an input to the rule.
+    for labels in ((REVIEW_ATTESTATION,), (REVIEW_ATTESTATION, "area:ci"), ()):
+        fake, messages, outcome = exercise(fixture(901, labels=labels, **release_kwargs))
+        assert not arm_calls(fake), (labels, fake.calls)
+
+    # Each signal alone suffices (branch / author / title are OR-ed, not AND-ed).
+    for label, kwargs in (
+        ("branch only", {"head_ref": "release-plz-main"}),
+        ("author only", {"author_login": "release-plz[bot]"}),
+        ("title only", {"title": "chore: release v0.2.0"}),
+    ):
+        fake, messages, outcome = exercise(fixture(902, **kwargs))
+        assert not arm_calls(fake), (label, fake.calls)
+        assert any("release-pr-guard" in line for line in messages), (label, messages)
+
+    # FAIL-CLOSED: an unknown head branch must REFUSE, never admit.
+    for label, kwargs in (
+        ("headRefName null", {"head_ref": None}),
+        ("headRefName empty", {"head_ref": ""}),
+    ):
+        fake, messages, outcome = exercise(fixture(903, **kwargs))
+        assert not arm_calls(fake), (label, fake.calls)
+        assert any("indeterminate head branch" in line for line in messages), (
+            label,
+            messages,
+        )
+
+    # The guard runs on the LIVE state too, not only the list snapshot: an ordinary PR
+    # retargeted onto the release branch between the two reads is not re-armed.
+    fake, messages, outcome = exercise(fixture(904), live_prs=(fixture(904, **release_kwargs),))
+    assert not arm_calls(fake), fake.calls
+    assert any("release-pr-guard" in line for line in messages), messages
+
+    # Both queries must actually REQUEST the guard's three inputs.
+    for field in ("headRefName", "author", "title"):
+        assert field in PR_LIST_FIELDS, (field, PR_LIST_FIELDS)
+    for field in ("headRefName", "author{login}", "title"):
+        assert field in LIVE_QUERY, (field, LIVE_QUERY)
 
     # CI state alone is never an arm verdict: live removal of review:pass must stop it.
     unattested = fixture(105, labels=())
