@@ -16,8 +16,9 @@ and [`CONTRIBUTING.md`](CONTRIBUTING.md) (the contributor-facing gate).
 **One check summarizes tree health: `ci-summary / gate`.** It is the single required
 branch-protection status on `main` ([`docs/branch-protection.md`](docs/branch-protection.md)):
 it polls **every other check-run on the same commit** — build + tests, `clippy -D warnings`,
-the conformance / coverage / unsafe-count ratchets, the opt-in feature matrix, supply-chain
-and CodeQL, and the docs-honesty gates — and passes only when none failed. So:
+the conformance / coverage / unsafe-count ratchets, the opt-in feature matrix, supply-chain,
+and the docs-honesty gates — and passes only when none failed. (**CodeQL is NOT among them** —
+it has been disabled since 2026-07-18; see §11.) So:
 
 1. Open any merged PR (or the latest commit on `main`) and look at its **checks list** —
    green `ci-summary / gate` ≈ everything below in this document that gates was green.
@@ -51,7 +52,7 @@ see [What green does *not* mean](#what-green-does-not-mean).
 | [Both-feature-state builds](#8-both-feature-state-builds) | Does every opt-in feature build, on and off? | yes |
 | [End-to-end personas](#9-end-to-end-product-journeys-playwright-personas) | Does the product work for a user? | yes |
 | [Docs honesty gates](#10-docs-honesty-gates) | Do the docs overclaim? | yes |
-| [Supply chain + SAST](#11-supply-chain--static-analysis) | Are the dependencies and the build attested? | yes |
+| [Supply chain + SAST](#11-supply-chain--static-analysis) | Are the dependencies and the build attested? | yes — **but SAST is disabled**, see §11 |
 
 ## 1. W3C conformance ratchets
 
@@ -298,10 +299,31 @@ licenses, sources — policy in [`deny.toml`](deny.toml), where any tolerated ad
 written justification), **cargo-vet** (per-dependency audit attestations — an unaudited crate
 cannot enter silently), a CycloneDX **SBOM**, and a VEX↔deny.toml drift check. Per release
 ([`release.yml`](.github/workflows/release.yml)): SBOM + VEX per artifact and **SLSA build
-provenance** attestations (verifiable with `gh attestation verify`). Continuously: **CodeQL**
-SAST ([`codeql.yml`](.github/workflows/codeql.yml), kept at zero open alerts), a daily
+provenance** attestations (verifiable with `gh attestation verify`). Continuously: a daily
 advisory watchdog ([`dependency-monitoring.yml`](.github/workflows/dependency-monitoring.yml)),
 and the public **OpenSSF Scorecard** ([`scorecard.yml`](.github/workflows/scorecard.yml)).
+
+> **CodeQL SAST is currently DISABLED — this section previously claimed otherwise.**
+>
+> It read: *"Continuously: **CodeQL** SAST ([`codeql.yml`](.github/workflows/codeql.yml), kept at
+> zero open alerts)"*. **Both halves of that were false.** The workflow has been
+> `disabled_manually` since **2026-07-18** (a deliberate, recorded decision taken to cut merge
+> latency), its last run was 2026-07-18T14:01Z, and code scanning currently reports **35 open
+> alerts, all `critical`** — every one `rust/hard-coded-cryptographic-value`, the oldest opened
+> **2026-07-11**. They are concentrated in two files: 25 in
+> `crates/sparq-lws-core/tests/pop_dpop_sk.rs` (a test file) and 10 in
+> `crates/sparq-lws-core/src/store/sparql.rs`.
+>
+> The correction is quoted rather than deleted because this document is what a reader would rely
+> on: a stated control that is switched off is worse than an acknowledged gap, since it stops
+> anyone looking.
+>
+> **There is currently no compensating SAST control.** `clippy -D warnings`, the unsafe-count
+> ratchet, `cargo-deny`/`cargo-vet` and the fuzz lanes all remain green and are genuine, but none
+> of them is a substitute for taint/crypto-misuse analysis. The alerts have **not** been triaged
+> — being disabled does not retire a finding. Tracked in sparq-org/sparq#4615; the durable
+> decision (re-enable advisory-only, re-enable on a schedule, or accept and document no SAST)
+> is still open.
 
 - **Green means:** license/advisory/source policy holds, every dependency carries an audit
   attestation, and released artifacts have verifiable provenance.
