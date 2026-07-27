@@ -568,6 +568,12 @@ pub fn ablate(
 /// behaviour, and an arm that prefers availability returns an empty list instead of an error.
 /// (The [`RerankPolicy`] fail-open/fail-closed switch applies to the *second* stage, whose
 /// failure mode is the one worth a policy: the first stage's candidates are the answer.)
+///
+/// [OPUS-4.8] (review #4519) The ids an arm returns are **untrusted**. On the `vec:hybrid` query
+/// path an id outside the graph dictionary's domain is a hard, arm-named query error, and — with
+/// `filtered-ann` — the returned ranking is then restricted to the same BGP-derived candidate mask
+/// the built-in dense arm searched under, preserving the arm's relative order. So an arm need not
+/// know the surrounding BGP: it may rank freely, and the query surface enforces admissibility.
 pub type ArmFn<'a> = Box<dyn Fn(&ArmQuery<'_>, usize) -> Result<Vec<(Id, f64)>, String> + 'a>;
 
 /// A query embedder for the natural-language `vec:hybrid` form: `(text, language) -> vector`.
@@ -580,7 +586,9 @@ pub type QueryEmbedder<'a> = Box<dyn Fn(&str, &str) -> Result<Vec<f32>, String> 
 /// reserved name [`VECTOR_ARM`], through exactly the same search path (and, with `filtered-ann`,
 /// the same BGP-derived mask) as `vec:nearest`/`vec:search`. Everything else — a lexical/BM25
 /// arm, `sparq-sim`'s structural similarity, a business ranking — is a closure, so the crate
-/// stays decoupled from every one of them.
+/// stays decoupled from every one of them. With `filtered-ann` that mask is applied to **every**
+/// arm's ranking, not just the dense one (see [`ArmFn`]): it constrains the answer, and fusion
+/// truncates to `k` before the surrounding join runs.
 ///
 /// ```
 /// use sparq_vectors::hybrid::{HybridConfig, RerankPolicy};

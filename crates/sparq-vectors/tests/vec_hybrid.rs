@@ -39,8 +39,25 @@ const TTL: &str = r#"
 <http://ex/d> <http://ex/p> "d" .
 "#;
 
+/// [OPUS-4.8] (review #4519) The same four entities, but only `c` carries the constraining
+/// `<http://ex/ok>` triple — so a surrounding BGP pattern on that predicate genuinely NARROWS the
+/// candidate set, unlike [`TTL`] where every entity satisfies `<http://ex/p>`. Only the
+/// `filtered-ann` tests below use it (without that feature there is no BGP-derived mask at all).
+#[cfg(feature = "filtered-ann")]
+const TTL_FILTERED: &str = r#"
+<http://ex/a> <http://ex/p> "a" .
+<http://ex/b> <http://ex/p> "b" .
+<http://ex/c> <http://ex/p> "c" .
+<http://ex/d> <http://ex/p> "d" .
+<http://ex/c> <http://ex/ok> "yes" .
+"#;
+
 fn fixture(tag: &str) -> (Graph, VectorStore, std::path::PathBuf) {
-    let g = Graph::load_str(TTL, "ntriples").unwrap();
+    fixture_from(tag, TTL)
+}
+
+fn fixture_from(tag: &str, ttl: &str) -> (Graph, VectorStore, std::path::PathBuf) {
+    let g = Graph::load_str(ttl, "ntriples").unwrap();
     let path = std::env::temp_dir().join(format!(
         "sparq-vec-hybrid-{}-{}.spqv",
         tag,
@@ -404,6 +421,10 @@ fn the_budget_and_algebra_entry_points_agree_with_the_query_one() {
     assert_eq!(rows(&out), want);
 }
 
+/// The hit table JOINS — nothing more. [OPUS-4.8] (review #4519) Every entity in [`TTL`] carries
+/// `<http://ex/p>`, so this constraint admits the whole store by construction and this test says
+/// nothing about FILTERED hybrid retrieval; that is what the two candidate-mask tests below pin,
+/// on [`TTL_FILTERED`].
 #[test]
 fn a_hybrid_pattern_joins_the_surrounding_bgp() {
     let (g, store, _p) = fixture("join");
@@ -421,6 +442,118 @@ fn a_hybrid_pattern_joins_the_surrounding_bgp() {
         &cfg,
     )
     .unwrap();
-    assert_eq!(r.rows.len(), 4, "every neighbour has one <http://ex/p> object");
+    let mut nodes: Vec<String> = r
+        .rows
+        .iter()
+        .map(|row| match row[0].as_ref().unwrap() {
+            Term::NamedNode(n) => n.as_str().rsplit('/').next().unwrap().to_string(),
+            other => panic!("expected an IRI, got {}", other),
+        })
+        .collect();
+    nodes.sort();
+    assert_eq!(nodes, vec!["a", "b", "c", "d"]);
     assert!(r.rows.iter().all(|row| row[1].is_some()));
+}
+
+/// [OPUS-4.8] (review #4519) An auxiliary arm's ranking must be restricted to the SAME
+/// BGP-derived candidate mask the built-in dense arm searches under.
+///
+/// The witness is the shape that loses an answer outright: the arm ranks all three
+/// NON-matching entities above the single matching one, and `k` is 1. Fused unrestricted, the
+/// top-1 is the non-matching `a` — the truncation happens before the join, so `c` is not merely
+/// reordered, it is gone, and the query returns nothing. Restricted, the arm's ranking over the
+/// admissible candidates is `[c]` and `c` comes back at rank 1.
+///
+/// The dense arm is muted (`vector_weight(0.0)`, the documented pure sparse/structural fusion) so
+/// the assertion is about the auxiliary arm alone — the dense arm already honours the mask.
+#[cfg(feature = "filtered-ann")]
+#[test]
+fn an_auxiliary_arm_honours_the_bgp_derived_candidate_mask() {
+    let (g, store, _p) = fixture_from("mask-aux", TTL_FILTERED);
+    let cfg = HybridConfig::new().vector_weight(0.0).arm(
+        "text",
+        1.0,
+        fixed_arm(vec![
+            (id(&g, "a"), 9.0),
+            (id(&g, "b"), 8.0),
+            (id(&g, "d"), 7.0),
+            (id(&g, "c"), 1.0),
+        ]),
+    );
+    let r = query_vec_hybrid(
+        &g,
+        "PREFIX vec: <http://sparq.dev/vec#>
+         SELECT ?node ?score ?rank ?prov WHERE {
+           ( ?node ?score ?rank ?prov ) vec:hybrid ( \"1,0\" 1 ) .
+           ?node <http://ex/ok> ?o .
+         }",
+        &store,
+        &cfg,
+    )
+    .unwrap();
+    let rows = rows(&r);
+    assert_eq!(
+        rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(),
+        vec!["c"],
+        "the only BGP-admissible entity must hold the constrained top-1 rather than be evicted \
+         by higher-ranked non-matching arm hits"
+    );
+    // Rank 1 of the SURVIVING table, and rank 1 within the arm's admissible ranking (not 4).
+    assert_eq!(rows[0].2, 1);
+    assert_eq!(rows[0].3, "text=1");
+}
+
+/// [OPUS-4.8] (review #4519) The same mask also fixes the RRF ranks of the hits that DO qualify:
+/// unrestricted, the three non-matching entities push `c` down to the arm's rank 4, which changes
+/// its fused score and its reported `?prov`. Restricted, `c` is the arm's rank 1.
+#[cfg(feature = "filtered-ann")]
+#[test]
+fn the_candidate_mask_corrects_the_arm_ranks_of_qualifying_hits() {
+    let (g, store, _p) = fixture_from("mask-rank", TTL_FILTERED);
+    let cfg = HybridConfig::new().arm(
+        "text",
+        1.0,
+        fixed_arm(vec![
+            (id(&g, "a"), 9.0),
+            (id(&g, "b"), 8.0),
+            (id(&g, "d"), 7.0),
+            (id(&g, "c"), 1.0),
+        ]),
+    );
+    let r = query_vec_hybrid(
+        &g,
+        "PREFIX vec: <http://sparq.dev/vec#>
+         SELECT ?node ?score ?rank ?prov WHERE {
+           ( ?node ?score ?rank ?prov ) vec:hybrid ( \"1,0\" 2 ) .
+           ?node <http://ex/ok> ?o .
+         }",
+        &store,
+        &cfg,
+    )
+    .unwrap();
+    let rows = rows(&r);
+    assert_eq!(rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), vec!["c"]);
+    assert_eq!(
+        rows[0].3, "vector=1;text=1",
+        "the text arm's rank for c is its position among the ADMISSIBLE candidates"
+    );
+}
+
+/// [OPUS-4.8] (review #4519) An arm is a caller closure, so its ids are untrusted input. An id
+/// outside the graph dictionary's domain — `0` (never a valid 1-based id) or one past the end —
+/// must be a HARD query error naming the arm, not a hit that resolves to the dictionary's
+/// out-of-range placeholder term and is then silently dropped from the inlined `VALUES` table.
+#[test]
+fn an_arm_id_outside_the_graph_dictionary_is_a_hard_query_error() {
+    let (g, store, _p) = fixture("bad-id");
+    for bad in [0u32, 1_000_000] {
+        let cfg = HybridConfig::new().arm("text", 1.0, fixed_arm(vec![(bad, 9.0)]));
+        let err = query_vec_hybrid(&g, HYBRID_Q, &store, &cfg).unwrap_err();
+        assert!(
+            err.contains("\"text\"") && err.contains("dictionary"),
+            "expected an arm-named dictionary-domain error for id {}, got {}",
+            bad,
+            err
+        );
+    }
 }

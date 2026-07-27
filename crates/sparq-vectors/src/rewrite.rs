@@ -148,7 +148,7 @@ use rustc_hash::FxHashMap;
 use spargebra::algebra::GraphPattern;
 use spargebra::term::{GroundTerm, NamedNodePattern, TermPattern, TriplePattern, Variable};
 use spargebra::Query;
-use sparq_core::dict::Id;
+use sparq_core::dict::{is_inline, Id, NO_ID};
 use sparq_core::Graph;
 use sparq_engine::{PreparedQuery, QueryBudget, QueryResult};
 
@@ -1130,7 +1130,10 @@ fn run_knn(
 ///    with `filtered-ann`, the BGP-derived candidate mask and the VG-TIE-1 boundary tie-break — so
 ///    hybrid retrieval inherits the k-NN semantics rather than reimplementing them. Each of the
 ///    caller's arms is then asked for the same number of candidates. Every arm is over-fetched
-///    (`cfg.candidates(k)`) so fusion has consensus evidence beyond the final `k`.
+///    (`cfg.candidates(k)`) so fusion has consensus evidence beyond the final `k`. Every arm's
+///    ids are then checked against the graph dictionary (`check_arm_ids`) and, with
+///    `filtered-ann`, restricted to the SAME BGP-derived mask the dense arm searched under — the
+///    mask is an admissibility constraint on the answer, not a dense-arm optimisation.
 /// 2. **Fusion.** Weighted RRF over the named arms, recording which arm ranked each hit and where
 ///    ([`fuse_arms`]).
 /// 3. **Second stage.** The optional out-of-process [`Reranker`](crate::hybrid::Reranker), under
@@ -1202,7 +1205,44 @@ fn run_hybrid(
         cfg.dense_weight(),
         dense_ranked,
     )];
-    arms.extend(cfg.run_arms(&arm_query, candidates)?);
+
+    let aux = cfg.run_arms(&arm_query, candidates)?;
+    // [OPUS-4.8] (review #4519) An auxiliary arm is a CALLER closure — an out-of-process service,
+    // a separate index — so the ids it returns are untrusted input to this query. Check them
+    // against the dictionary domain before anything downstream consumes them.
+    for arm in &aux {
+        check_arm_ids(graph, arm)?;
+    }
+    // [OPUS-4.8] (review #4519) The BGP-derived candidate mask is an ADMISSIBILITY constraint on
+    // the answer, not a dense-arm optimisation: an id the surrounding BGP cannot bind contributes
+    // no solution. Fusing auxiliary arms UNRESTRICTED would let such ids occupy the fused top-k —
+    // and the truncation to `k` happens HERE, before the join, so a qualifying lower-ranked
+    // candidate they evict is lost for good rather than merely reordered — as well as inflating
+    // the RRF ranks (and therefore the scores and `?prov` entries) of the hits that do qualify.
+    // So restrict every arm to the mask, preserving each arm's relative order: an arm's ranking
+    // becomes its ranking OVER THE ADMISSIBLE CANDIDATES, exactly what the dense arm's filtered
+    // search already returns.
+    #[cfg(feature = "filtered-ann")]
+    let aux: Vec<ArmRanking> = if aux.is_empty() {
+        // Nothing to restrict, so do not pay the constraining sub-BGP evaluation for it.
+        aux
+    } else {
+        match derive_mask(&req.node, constraint, graph)? {
+            Some(mask) => aux
+                .into_iter()
+                .map(|ArmRanking { arm, weight, ranked }| ArmRanking {
+                    arm,
+                    weight,
+                    ranked: ranked
+                        .into_iter()
+                        .filter(|(id, _)| mask.contains(*id))
+                        .collect(),
+                })
+                .collect(),
+            None => aux,
+        }
+    };
+    arms.extend(aux);
 
     let fused = fuse_arms(&arms, cfg.rrf_constant(), candidates)?;
     match cfg.second_stage() {
@@ -1215,6 +1255,33 @@ fn run_hybrid(
             Ok(fused)
         }
     }
+}
+
+/// [OPUS-4.8] (review #4519) Rejects an auxiliary arm's result whose id is not a term of `graph`'s
+/// dictionary — a valid 1-based dictionary id (`1..=dict.len()`) or an inline-integer literal id.
+///
+/// An arm is a caller closure, so its ids are untrusted: an out-of-process service answering from
+/// a stale or foreign index can return anything. Left unchecked such an id flows all the way to
+/// `graph.dict.term(id)`, which resolves an out-of-domain id to the dictionary's wrong-but-safe
+/// OUT-OF-RANGE PLACEHOLDER (a blank node) — and a blank node cannot appear in a `VALUES` row, so
+/// the hit is silently dropped from the inlined table. That is exactly the failure mode
+/// [`validate_arms`](crate::hybrid::validate_arms) already refuses for a duplicated id: a
+/// malformed arm response quietly changing the answer. Fail closed instead, naming the arm so the
+/// operator knows which service to fix.
+fn check_arm_ids(graph: &Graph, arm: &ArmRanking) -> Result<(), String> {
+    let len = graph.dict.len();
+    for &(id, _) in &arm.ranked {
+        // An inline-integer id encodes its literal value directly and is resolvable against any
+        // dictionary; every other id must index a stored term.
+        if id == NO_ID || (!is_inline(id) && id as usize > len) {
+            return Err(format!(
+                "vec:hybrid: the {:?} arm returned id {}, which is not a term in this graph's \
+                 dictionary (valid ids are 1..={}, or an inline-integer literal id)",
+                arm.arm, id, len
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Rejects a query vector whose dimension does not match the store's; `what` names the source of

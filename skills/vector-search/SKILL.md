@@ -296,6 +296,13 @@ prepare_vec_hybrid(&Graph, &str, &VectorStore, &HybridConfig) -> Result<Prepared
 rewrite_query_hybrid(Query, &Graph, &VectorStore, &HybridConfig) -> Result<Query, String>       //   plain query_vec ERRORS
 // HybridConfig (builder; the DENSE arm is built in under the reserved name VECTOR_ARM="vector" and runs the SAME path
 //   vec:search takes — filtered-ann mask + VG-TIE-1 tie-break included):
+// [OPUS-4.8] review #4519 — arm results are UNTRUSTED. An id outside the graph dictionary's domain (0, or past
+//   dict.len() and not an inline-integer id) is a HARD arm-named query error, never a hit that resolves to the
+//   dictionary's out-of-range placeholder term and is then silently dropped from the inlined VALUES table. With
+//   `filtered-ann`, EVERY arm's ranking is then restricted to the SAME BGP-derived mask the dense arm searched under
+//   (relative order preserved, so ranks compact to 1..n over the ADMISSIBLE candidates). The mask constrains the
+//   ANSWER, not just the dense arm: fusion truncates to k BEFORE the surrounding join, so an unrestricted hit in the
+//   fused top-k does not merely reorder the result — it evicts a qualifying candidate for good.
 HybridConfig::new().arm(name, weight, ArmFn).vector_weight(w /*0.0 mutes -> pure sparse fusion*/)
 //   .rrf_k(f64 /*RRF_K=60*/).over_fetch(n /*DEFAULT_OVER_FETCH=4; candidates(k)=k*n*/)
 //   .query_embedder(QueryEmbedder).reranker(&dyn Reranker, RerankPolicy::{FailOpen,FailClosed})
