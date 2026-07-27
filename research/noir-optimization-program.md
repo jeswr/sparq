@@ -443,7 +443,7 @@ edge sequences them (§10.4).
 | `sq-m3l62` | opus | `ssa/opt/flatten_cfg/value_merger.rs` | ArrayGet through IfElse (#5501); conservative use/alias analysis; precedent PR #11512 |
 | `sq-seust` | sonnet | `ssa/ir/dfg/simplify.rs` | NOT canonicalization for IfElse merging; PARK with a findings note if measured neutral (PR #11580 upkeep landmine) |
 | `sq-jfkwk` | sonnet | findings first; `acir/acir_context/mod.rs` only on a win | comparison-lowering experiment; fail-closed on the #10159 witness-sharing landmine; null result acceptable |
-| `sq-felqr` | opus | design note on noir#4629 only | quadratic ACIR growth; NO implementation before upstream buy-in |
+| `sq-felqr` | opus | design note on noir#4629 only | quadratic ACIR growth; NO implementation before upstream buy-in — **design note DELIVERED, empirical half + live-thread check PENDING; bead still open, see §10.6** |
 | `sq-b0vpc` | sonnet | `noir_stdlib/src/collections/bounded_vec.nr` | only the TomAFrench capacity-assert slice of #5027 |
 | `sq-eesz3` | sonnet | none (findings-only) | #6624 / #6313 / #4972 measurement comments upstream — **source analysis done, empirical half + live-thread checks PENDING; bead still open, see §10.5** |
 | `sq-jj3ne` | opus | new `ssa/ir/dfg/` range-analysis module + its two consumer passes | flagship v1; dep-gated on `sq-jthy1` + `sq-rxir8` (shared consumer files) and on the #12780/#12927 coordination pre-flight |
@@ -493,3 +493,34 @@ its live issue thread (none of the three issue bodies was read); the #4972 draft
 additionally depends on an unverified inference about the issue's lineage. The
 remaining measurement protocol is specified command-by-command in §4 of the record
 and needs a box with the noir toolchain.
+
+### 10.6 `sq-felqr` (row 10, quadratic ACIR expression growth, noir#4629) — design note (2026-07-27)
+
+> 🤖 **SPARQ agent** [OPUS-5]. Full record:
+> `noir-acir-expression-growth-4629.md` (analysed against noir `e22cd89b`,
+> workspace version `1.0.0-beta.25`).
+
+The design note is delivered; the bead stays **open**, blocked on the same
+empirical half as `sq-eesz3` (§10.5) — the box had no rustc `1.89.0` (the
+workspace pin; only `1.88.0` installed, `rustup` read-only), hence no `nargo`
+and no `bb` — and on its own stated exit condition, upstream buy-in on the
+issue thread. **No implementation was started and none is proposed**, per the
+§10.3 spec for this bead. The #4629 body and thread were **not read** (no
+outbound page fetch in that run), so the ask is still the §4.1 paraphrase.
+
+What the source analysis establishes:
+
+| finding | consequence |
+|---|---|
+| ACIR-gen's `add_var` concatenates expressions with no width bound, and *every* cut site is a consumer that needs a `Witness` rather than an `Expression` — never a size heuristic | the growth is by construction, not a bug in a pass |
+| all cut sites funnel through `get_or_create_witness_var`, which rewrites the var in place; `as_witness` is exactly that one call and nothing else | the automation mechanism already exists — the risk is entirely in *where to place the call*, not in plumbing |
+| unsigned accumulation is already cut once per iteration by the overflow `RangeCheck` | "quadratic in loops" is narrower than it sounds; the quadratic-by-construction shapes are repeated `assert_eq` on a growing accumulator, brillig-call inputs, and the compile-time/peak-memory cost of building the expression at all |
+| the ACVM `CommonSubexpressionOptimizer` postdates the issue: its CSAT intermediate cache is circuit-global, and `MergeExpressionsOptimizer` refunds any intermediate used in only two `AssertZero` opcodes | much of the circuit-size half may already be absorbed — **and an over-eager auto-cut is partially self-healing**, which is the safety argument any heuristic needs |
+
+The reframing the record recommends taking upstream (after measurement) is that
+#4629 is plausibly **two** problems: a circuit-size one that ACVM may already
+handle, and a compile-time/peak-memory one that ACVM cannot touch by
+construction and that shares a root cause with #13046. The blocking first step
+is therefore not design but **re-running the issue's own reproducer at HEAD to
+confirm the bug still reproduces**; the full protocol is §7 of the record. One
+upstream comment is **drafted, not posted**, pending @jeswr review.
