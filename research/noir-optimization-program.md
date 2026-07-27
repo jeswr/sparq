@@ -636,7 +636,7 @@ corpus recompiled with each.
 | the five hits | `hint_black_box` 27→8, `compose` 120 330→120 312, `fold_complex_outputs` 100→84, `a_6_array` 431→417, `simple_bitwise` 16→10 |
 | synthetic addition chains | `x+y+z+w` 11→7; 8/32/128-term unrolled accumulators 23→11, 95→35, 383→131 |
 | `test_programs/execution_failure`, all 72 packages, `nargo execute --force` and `--force-brillig` | **byte-identical output** on both runtimes — same messages, spans, call stacks |
-| `sha512_100_bytes` compile time (3 runs each) | 1.81/1.86/1.86 s vs 1.88/1.79/1.80 s — no regression |
+| `sha512_100_bytes` compile time (3 runs each, baseline vs patched) | **no regression observed** — raw seconds deliberately not recorded: a work-box wall-clock reading is non-canonical and the run sets overlap inside their own spread (record §6.4) |
 
 It is **not carried in this repo** and **no upstream PR is proposed**. Two reasons,
 and the second is the substantive one: `bb` is absent so there is **no gate

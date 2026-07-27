@@ -326,8 +326,12 @@ and the in-tree directory now holds only `differential/`, `scripts/` and `tests/
 | `a_6_array` | 431 | 417 | −14 |
 | `simple_bitwise` | 16 | 10 | −6 |
 
-Compile time on `sha512_100_bytes` (3 runs each, release `nargo`): baseline 1.81/1.86/1.86 s,
-patched 1.88/1.79/1.80 s — no regression, i.e. the #12927 O(n²) lesson is not being repeated.
+Compile time on `sha512_100_bytes` was also compared (3 runs each, release `nargo`, baseline vs
+patched). The raw seconds are **deliberately not recorded here**: a wall-clock reading taken on this
+box is non-canonical, and the two run sets overlap well inside their own spread, so the only claim
+the measurement supports is a qualitative one — **no compile-time regression was observed**, i.e. the
+#12927 O(n²) lesson is not being repeated. A quantitative compile-time claim would need a quiet box
+and the canonical harness; neither was available, and nothing here should be read as one.
 
 ## 7. Reading the result honestly
 
