@@ -2078,15 +2078,18 @@ mod tests {
 // obviously-correct naive nested-loop join produces, on every input in a small symbolic
 // domain. This is a HARNESS-ONLY addition: the runtime kernels above are byte-unchanged.
 //
-// TIER + BOUNDS (never plain "proved"): **PROVED (bounded)** — for ALL pairs of relations of
-// up to `MAX_ROWS = 3` two-column rows per side, every id in `0..=MAX_ID = 2`, each side
-// sorted (nondecreasing, duplicates allowed) on its key column, with the key on a DIFFERENT
-// column index per side (left col 0, right col 1 — so the `lk`/`rk` indexing generality is
-// in-domain), both with and without an `extra_shared` filter pair, under
-// `#[kani::unwind(12)]` (the longest concrete loop is the <= 9-element output-vector
-// comparison; 12 leaves margin for iterator adapters). Larger relations, wider rows and
-// wider id domains are OUT of the proved domain — the runtime unit tests + the engine
-// differential/conformance suites remain the tier of record there.
+// TIER + BOUNDS (never plain "proved"): **OBLIGATION STATED — NOT YET DISCHARGED.** What
+// follows is what these harnesses ASSERT, not what has been established: no harness in this
+// suite has yet returned a CBMC verdict inside the lane's per-harness budget (see SOLVER
+// BUDGET below for the measurements), so nothing here may be cited as proved. The asserted
+// property, once a verdict exists, is: for ALL pairs of relations of up to `MAX_ROWS = 3`
+// two-column rows per side, every id in `0..=MAX_ID = 2`, each side sorted (nondecreasing,
+// duplicates allowed) on its key column, with the key on a DIFFERENT column index per side
+// (left col 0, right col 1 — so the `lk`/`rk` indexing generality is in-domain), both with
+// and without an `extra_shared` filter pair, under `#[kani::unwind(8)]`. Larger relations,
+// wider rows and wider id domains are OUT of that domain — and until a verdict lands the
+// runtime unit tests + the engine differential/conformance suites are the tier of record
+// INSIDE the domain as well as outside it.
 //
 // WHY SEQUENCE (not just multiset) EQUALITY: on key-sorted inputs the merge kernel's
 // emission order — key groups in ascending key order, left-major x right-minor within a
@@ -2112,6 +2115,8 @@ mod tests {
 // by [`assert_same_sequence`] — equal lengths plus equality at ONE symbolic index — rather
 // than by `assert_eq!` on the vectors, which made the <= 9-element comparison the longest
 // loop in the harness and forced every other loop to be expanded to that same bound.
+// (Read that last sentence as intent, not as outcome: the encoding reduced the cost but did
+// NOT bring the harnesses inside the budget — see SOLVER BUDGET below.)
 //
 // None of this re-scopes the claim. A prefix of a nondecreasing array is nondecreasing, and
 // conversely every sorted `n <= MAX_ROWS` relation over `0..=MAX_ID` is a prefix of some
@@ -2120,10 +2125,44 @@ mod tests {
 // the symbolic-index check is sequence equality, not a sample of it. Bounds, ids, unwind
 // and the asserted properties are all as stated above.
 //
+// SOLVER BUDGET (why this suite is nightly-only + `debt`; owner bead sq-j3u6o). The ENCODING
+// above cut the cost materially but did NOT close the gap. Measured against this tree on a
+// 4-core / 15 GB workstation (Kani 0.67 / CBMC 6.8; work-box timings are never canonical):
+//   * as committed (3 rows per side, `unwind(8)`) — still in SYMBOLIC EXECUTION, no verdict,
+//     at 8 min and 5.4 GB resident, still climbing;
+//   * with a FURTHER experimental encoding on top (every harness-built row constructed inline
+//     via `SmallVec::from_buf_and_len` instead of `push`/`clone`, `u8` symbolic draws widened
+//     to `Id`/`usize`, loop-free in-domain checks, `unwind(6)`) — no verdict at 4 min / 2.7 GB.
+//     Deliberately NOT landed: it roughly halved the cost and still did not terminate, so
+//     shipping it would mean replacing reviewed harness code with unverified harness code;
+//   * that same encoding shrunk ALL THE WAY to 2 rows per side at `unwind(4)` — cut by the
+//     lane's own 20m per-harness ceiling (`timeout` exit 124) with NO verdict, having reached
+//     7.6 GB resident and still in symbolic execution. That is more memory than a whole
+//     GitHub runner has, for the SMALLEST variant of the suite.
+// The cost does NOT fall usefully with the domain bound, because it is dominated by CBMC's
+// model of `SmallVec`'s `clone`/`push` path — `layout_array`, `handle_alloc_error`,
+// `CollectionAllocErr`, and the inline/heap union discriminant read on every column access —
+// which [`merge_join`] runs once per EMITTED ROW and which no harness-side encoding can
+// remove, because the kernel's row type IS `SmallVec<[Id; 4]>`. (The suites in this
+// workspace that do fit — `compare.rs` over scalars, `sparq-engine`'s reducers over
+// `Vec<u32>` — never enter that machinery.) This is the risk the proof program itself
+// flagged for wave B-3 up front — research/mechanized-proof-program.md §"deferred" names
+// the join kernels' "`SmallVec`/hashing state space" as the reason B-3 is a *plausible*
+// next wave rather than a Phase-1 one; the measurements above are that risk materialising,
+// not a surprise. Since even the smallest variant exceeds a ~7 GB runner's whole memory
+// before the 20m ceiling, the change-coupled PR tier deliberately does NOT gate on this
+// suite (`pr_gate = false` in ci/formal-verification.toml) and the nightly
+// matrix entry carries `debt: true`: a pure TIMEOUT there is recorded LOUDLY but is
+// non-fatal, while a real counterexample still reds the lane. Both flags flip back the
+// instant sq-j3u6o gets these harnesses inside a budget.
+//
 // MUTATION SPOT-CHECK (verified red, then reverted, on this workstation — see the PR body):
 // flipping the `extra_shared.iter().all(..)` guard in [`merge_join`] to `.any(..)` turns
 // every no-extra-pair match into a non-emission, and `merge_join_equals_nested_loop_reference`
 // goes RED with a concrete counterexample. A harness that cannot fail launders confidence.
+// (Consistent with SOLVER BUDGET above: CBMC stops at the FIRST failing assertion path, so a
+// counterexample search can terminate long before an exhaustive clean run does. A red on the
+// mutant is therefore evidence of non-vacuity, NOT evidence that the clean proof completes.)
 //
 // DOMAIN-COVERAGE SELF-CHECK (mandatory, §5.1 of the proof program — the sq-sqtk2.1
 // assume(false)-pruning class is the threat): `domain_merge_join_dup_key_multimatch_survives_
