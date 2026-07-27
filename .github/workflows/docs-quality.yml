@@ -642,6 +642,78 @@ jobs:
               ;;
           esac
           python3 scripts/check-model-attribution.py --advisory --check-commits-pr
+      # [OPUS-5] The seam guard above is pointed at ONE gate's steps by `--needle`, and
+      # check-sticky-failure-exits.py audits Python, not YAML — so until now every OTHER
+      # `run:` block in the repository could discard an earned failure unobserved. That is
+      # the gap #4385 flagged as out of scope. These four steps close it corpus-wide over
+      # all 67 workflows.
+      #
+      # WHY MOST `||` IS NOT A DEFECT, and why that had to be solved before widening: a
+      # naive "`||` in a gating job" rule reports 92 occurrences on the live tree. The
+      # overwhelming majority are boolean tests (`[ a ] || [ b ]`), AMPLIFIERS
+      # (`|| { echo ::error::…; exit 1; }` — the opposite of swallowing), exit-code
+      # captures that are read back (`|| rc=$?` … `if [ "$rc" -ne 0 ]`), or shell
+      # comments. A guard that reds on those is unshippable and gets deleted, which is
+      # strictly worse than no guard. The classifier reduces 92 -> 16.
+      #
+      # ADVISORY vs GATING IS READ OFF THE STRUCTURE, not a list of blessed names: a step
+      # is non-gating exactly when the repo's own merge gate already ignores it — its
+      # workflow has no pull_request/merge_group trigger (so no check-run reaches
+      # ci_summary_gate.py), or its JOB name matches the very `\b(advisory|informational)\b`
+      # predicate that ci_summary_gate.py excludes by and check-advisory-registry.py (C2)
+      # forces into .github/advisory-registry.json with an owner and promotion criteria.
+      # A step name is deliberately NOT consulted: three steps in this file have
+      # "advisory" in their titles while being hard gates (mention vs claim).
+      - name: "Self-test check-workflow-swallow.py (taxonomy + corpus mutants + command-position)"
+        run: python3 scripts/check-workflow-swallow.py --self-test
+      # HARD from day one, because neither failure can be caused by pre-existing drift:
+      #   * a STALE exemption — the allowlist is content-fingerprinted, so an entry whose
+      #     construct was edited or removed fails, and an exemption cannot outlive its
+      #     defect (same ratchet as check-model-attribution.allowlist.json);
+      #   * a scan that reached NOTHING — the floors are the corpus-level analogue of the
+      #     seam checker's --min-invocations. #4385's first real CI run shipped a step
+      #     that was wired but MIS-ARGUED, whose floor its own argument could satisfy;
+      #     these floors are asserted from this YAML by W7/W8 in the test below, and the
+      #     step prints the counts it actually reached so a real run can be checked
+      #     against a local one.
+      - name: "check-workflow-swallow allowlist ratchet + corpus floors — GATING"
+        run: |
+          python3 scripts/check-workflow-swallow.py --check-allowlist \
+            --min-workflows 60 --min-run-steps 600
+      # ADVISORY for now (a declared MODE of the script, never a `|| true` in this YAML —
+      # the seam step below rejects that, including across a backslash continuation).
+      # 15 of the 16 gating swallows are legitimate and allowlisted with reasons; the one
+      # that is not is ci.yml:coverage-engine-run (#4545), which discards the very fixture
+      # fetch it exists to guarantee. Promotion to HARD is stated in the allowlist's
+      # `_promotion` field: findings at zero, two weeks green on main, non-growing entries.
+      - name: "No gating step discards an earned failure (ADVISORY — #4545)"
+        run: |
+          python3 scripts/check-workflow-swallow.py --advisory --check-corpus \
+            --min-workflows 60 --min-run-steps 600
+      # The orphaned-suite half, and the reason it cannot be a filename grep: a test suite
+      # is usually named TWICE in a workflow — once under `shellcheck`, once under `bash`.
+      # Delete the `bash` line and a grep for the filename is still satisfied by the
+      # `shellcheck` line, so every assertion in that suite stops running with no signal
+      # and the suite still passes when anyone runs it by hand. This resolves the
+      # reference at COMMAND POSITION instead, transitively through runner scripts.
+      # ADVISORY only because two suites are orphaned today (they promote out with #4546).
+      - name: "Every scripts/tests suite is actually EXECUTED by CI (ADVISORY — #4546)"
+        run: |
+          python3 scripts/check-workflow-swallow.py --advisory --check-test-wiring \
+            --min-run-steps 40
+      # And the seam guard turned on THIS wiring: 4 call sites, none skipped, none
+      # swallowed. `--exclude` is load-bearing for the same reason it is above — without
+      # it this step's own `--needle` argument counts as a fifth invocation and a deleted
+      # call site would still clear the floor.
+      - name: "The workflow-swallow guard is soundly WIRED into this workflow — GATING"
+        run: |
+          python3 scripts/check-workflow-seam.py --workflow .github/workflows/docs-quality.yml \
+            --needle check-workflow-swallow.py \
+            --exclude check-workflow-seam.py --min-invocations 4
+      - name: shellcheck the workflow-swallow test + run it
+        run: |
+          shellcheck scripts/tests/test_workflow_swallow.sh
+          bash scripts/tests/test_workflow_swallow.sh
       # [OPUS-4.8] sq-mkza: end-to-end proof that BOTH honesty gates now cover the
       # paper-factory `.typ` sources (site/papers/**/*.typ) — the highest-stakes
       # OUTWARD surface. Before sq-mkza a hard-coded perf ratio or an unqualified
