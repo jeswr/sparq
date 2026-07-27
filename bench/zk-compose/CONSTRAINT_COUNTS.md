@@ -71,7 +71,7 @@ Scaling — pairs differing in exactly one parameter:
 
 ### `join_eq_r`
 
-Hidden equality join proving r joined lanes over ONE pair of graph re-commitments, between two committed sides of bucket sizes na, nb. The lanes are NOT constrained distinct — a prover holding fewer genuine pairs pads by repeating one under a fresh blinder — so this narrows the disclosed join cardinality to a range of 1..r; it never attests that r distinct pairs exist.
+Hidden equality join proving r joined lanes over ONE pair of graph re-commitments, between two committed sides of bucket sizes na, nb. The lanes are NOT constrained distinct — a prover holding fewer genuine pairs pads by repeating one under a fresh blinder — so r fixes only the public shape (the number of lane commitments), keeping the join cardinality off the sub-proof count; it proves no bound on that cardinality and never attests that r distinct pairs exist.
 
 | member | parameters | `circuit_size` |
 | --- | --- | --- |

@@ -1470,8 +1470,10 @@ fn join_eq_mixed_slots_multi_row_accepts() {
 // [OPUS-5] sq-uii0: join_eq_r_check -- the CARDINALITY-HIDING v2 tier.
 // Same universe as J1-J8, but R lanes over ONE pair of graph re-commitments.
 // Covers: the two-distinct-pair accept, the PADDING accept (the mechanism that
-// hides N), and one reject per adversarial class -- including the per-lane
-// commitment binding, which is the new attack surface R lanes introduce.
+// keeps the proof shape independent of the join cardinality -- and, as JR2 shows,
+// the reason the member bounds that cardinality not at all), and one reject per
+// adversarial class -- including the per-lane commitment binding, which is the
+// new attack surface R lanes introduce.
 // ---------------------------------------------------------------------------
 
 // A second join key, so a two-lane join can carry two DIFFERENT join values
@@ -1517,13 +1519,16 @@ fn join_eq_r_two_distinct_pairs_accept() {
     );
 }
 
-// (JR2) ACCEPT -- THE PADDING DISCIPLINE, i.e. the mechanism that hides N.
-// The prover holds only ONE genuine pair (N=1) but presents R=2 lanes by
-// REPEATING that genuine pair under a FRESH second blinder. Every lane is a TRUE
-// join (nothing false is proved), and because `join_value_commitment` is hiding
-// with independent blinders the two public commitments DIFFER -- so the padded
-// lane is not distinguishable, at the public interface, from JR1's genuinely
-// distinct second lane. That is exactly why the verifier learns only N in [1,R].
+// (JR2) ACCEPT -- THE PADDING DISCIPLINE, i.e. the mechanism that decouples the
+// proof shape from N. The prover holds only ONE genuine pair (N=1) but presents
+// R=2 lanes by REPEATING that genuine pair under a FRESH second blinder. Every
+// lane is a TRUE join (nothing false is proved), and because
+// `join_value_commitment` is hiding with independent blinders the two public
+// commitments DIFFER -- so the padded lane is not distinguishable, at the public
+// interface, from JR1's genuinely distinct second lane. Note what this test
+// therefore also demonstrates: R lanes are satisfiable from a SINGLE genuine
+// pair, so the member proves no upper bound on the join cardinality -- R fixes
+// the public shape, it is not a proven `N <= R`.
 #[test]
 fn join_eq_r_repeated_pair_pads_and_accepts() {
     let (enc_a, enc_b, commit_a, commit_b) = two_pair_universe();

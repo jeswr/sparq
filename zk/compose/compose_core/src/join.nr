@@ -69,13 +69,16 @@
 //! asserted here -- repo policy forbids unmeasured numbers).
 //!
 //! # The CARDINALITY-HIDING tier (`join_eq_r_check`, bead `sq-uii0`)
-//! [`join_eq_check`] proves ONE pair per sub-proof, so a join of `N` matched
-//! pairs discloses `N` (design S1.4 R2). [`join_eq_r_check`] proves `R` lanes
-//! over ONE pair of graph re-commitments -- amortising the dominant cost AND
-//! narrowing the disclosure to `N in [1, R]`, by padding unused lanes with a
-//! REPEATED genuine pair under a fresh blinder. It proves `R`
-//! NOT-NECESSARILY-DISTINCT genuine pairs, so it never attests a cardinality;
-//! see its own docs for the full "what this does not prove" list.
+//! [`join_eq_check`] proves ONE pair per sub-proof, so presenting `N` matched
+//! pairs is `N` visible sub-proofs and discloses `N` (design S1.4 R2).
+//! [`join_eq_r_check`] proves `R` lanes over ONE pair of graph re-commitments --
+//! amortising the dominant cost AND decoupling the proof SHAPE from `N`, by
+//! padding unused lanes with a REPEATED genuine pair under a fresh blinder. It
+//! proves `R` NOT-NECESSARILY-DISTINCT genuine pairs, which -- as a statement
+//! ABOUT CARDINALITY -- says no more than [`join_eq_check`]'s "at least one
+//! match exists": `R` is a public SHAPE parameter, NOT a proven bound on `N`.
+//! See its own docs for what `N` denotes and the full "what this does not
+//! prove" list.
 
 use crate::hashes::{commit_fold, h3};
 
@@ -257,15 +260,27 @@ fn join_pair_check<let N_A: u32, let N_B: u32>(
 /// a bag-semantics join produces pairs with DIFFERENT join values (`?p = alice`
 /// and `?p = bob`), so one commitment per lane is required, not one shared one.
 ///
-/// # The residual-leakage improvement (design S1.4 R2), stated exactly
-/// v1 leaks the join CARDINALITY: `N` matched pairs means `N` visible `join_eq`
-/// sub-proofs. This tier PADS to the compile-time `R`. A prover holding `N < R`
-/// genuine pairs fills the remaining lanes by REPEATING a genuine pair with a
-/// FRESH blinder per lane. Every lane is therefore a TRUE join (nothing false is
-/// ever proved -- the padding is real content, not a dummy), and because
-/// `join_value_commitment` is hiding and the blinders are independent, a repeated
-/// lane is indistinguishable from a distinct one. So the verifier learns
-/// `N in [1, R]` instead of the exact `N`.
+/// # What `N` denotes, and the residual-leakage improvement (design S1.4 R2)
+/// Throughout, `N` is the TRUE number of joined pairs of the two committed
+/// graphs at the query-bound slots -- a property of the GRAPHS, never of the
+/// proof, and never something this member measures. v1 leaks it: presenting `N`
+/// pairs is `N` visible `join_eq` sub-proofs, so the SHAPE of the presentation
+/// IS `N`. This tier fixes that shape at the compile-time `R` whatever `N` is:
+/// a prover disclosing fewer than `R` pairs fills the remaining lanes by
+/// REPEATING a genuine pair with a FRESH blinder per lane. Every lane is
+/// therefore a TRUE join (nothing false is ever proved -- the padding is real
+/// content, not a dummy), and because `join_value_commitment` is hiding and the
+/// blinders are independent, a repeated lane is indistinguishable from a
+/// distinct one.
+///
+/// The improvement is exactly and only this: `N` can no longer be READ OFF the
+/// proof shape. The verifier does not thereby LEARN anything about `N` beyond
+/// `N >= 1` -- in particular it does not learn `N <= R` (see below). What stays
+/// visible is the prover's CHOICE of bucket `R`; under the natural policy "take
+/// the smallest compiled `R` >= the number of pairs to disclose", that coarsens
+/// the disclosure to the bucket lattice rather than removing it. That coarsening
+/// is a property of prover POLICY and of the compiled bucket set -- it is NOT an
+/// in-circuit constraint and a verifier cannot rely on it.
 ///
 /// # What this member does NOT prove (no overclaim -- design S1.4 / S8)
 /// - It does NOT prove the pairs are DISTINCT, and therefore does NOT prove the
@@ -273,13 +288,20 @@ fn join_pair_check<let N_A: u32, let N_B: u32>(
 ///   (not necessarily distinct) pairs, each a genuine joined pair of the two
 ///   attested graphs at the query-bound slots". Never describe a `join_eq_r{R}`
 ///   proof as attesting `R` results.
+/// - Because every lane may be the SAME pair, that statement is satisfiable as
+///   soon as ONE genuine pair exists. AS A STATEMENT ABOUT CARDINALITY it is
+///   therefore EQUIVALENT to [`join_eq_check`]'s "at least one match exists": it
+///   proves neither `N <= R` nor `N >= R` nor any other bound on `N`. `R` fixes
+///   only the member's public shape -- the number of lane commitments, and hence
+///   the package name and the VK.
 /// - It does NOT prove COMPLETENESS (that no further pair exists) -- completeness
 ///   is the scan member's obligation, unchanged.
 /// - `R` itself is PUBLIC: it is the compiled member's identity (the bucket names
-///   the package and hence the VK). So the verifier still learns the UPPER BOUND
-///   `R`, and a prover with `N > R` genuine pairs must either drop pairs or use a
-///   larger bucket. Hiding cardinality is bounded padding, not erasure -- exactly
-///   the cost/leakage trade-off design S2.5 flags.
+///   the package and hence the VK). A prover with `N > R` genuine pairs just
+///   drops pairs or takes a larger bucket -- nothing in the circuit prevents
+///   either, which is the same reason `R` is not an upper bound on `N`. Hiding
+///   cardinality here is SHAPE padding, not erasure and not a proven bound --
+///   exactly the cost/leakage trade-off design S2.5 flags.
 /// - R1 is unchanged and intrinsic: `R >= 1` lanes force `N >= 1`, so the
 ///   verifier still learns THAT a join exists.
 ///
@@ -320,8 +342,10 @@ pub fn join_eq_r_check<let N_A: u32, let N_B: u32, let R: u32>(
 
     // 2-5, per lane. Deliberately NO distinctness constraint across lanes and NO
     // per-lane "active" flag: repeating a genuine pair under a fresh blinder is
-    // exactly the padding that hides N, and an `active` flag would either be
-    // public (re-leaking N) or let a prover disable lanes at will.
+    // exactly the padding that keeps the shape independent of `N`, and an
+    // `active` flag would either be public (re-leaking `N`) or let a prover
+    // disable lanes at will. The price of that choice is stated in the docs:
+    // without distinctness the member proves no bound on `N`.
     for r in 0..R {
         join_pair_check(
             join_commitments[r],

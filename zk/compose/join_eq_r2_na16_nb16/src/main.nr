@@ -3,16 +3,20 @@
 // N_A=16, N_B=16 triple slots per graph.
 //
 // Generated shape -- the relation lives in `sparq_zk_compose_core::join`
-// (`join_eq_r_check`; see its docs for the statement, the padding discipline
-// that hides N, and the explicit list of what is NOT proved). Do not reorder
-// `main`'s parameters: the verifier recomputes the public-input vector in
-// declaration order (audit-#1 discipline).
+// (`join_eq_r_check`; see its docs for the statement, what `N` denotes, the
+// padding discipline, and the explicit list of what is NOT proved). Do not
+// reorder `main`'s parameters: the verifier recomputes the public-input vector
+// in declaration order (audit-#1 discipline).
 //
 // The join VALUES are PRIVATE; only the two graph commitments, the R HIDING
 // per-lane commitments, and the two query-bound slots are public. Relative to
-// `join_eq_na16_nb16` (one pair per sub-proof, so N sub-proofs disclose N),
-// this member discloses only `N in [1, R]` -- the residual-leakage R2 tier of
-// research/zk-hidden-join-design.md S2.5.
+// `join_eq_na16_nb16` (one pair per sub-proof, so N sub-proofs disclose the
+// number of pairs presented), this member's shape is a FIXED R lanes whatever
+// that number is -- the residual-leakage R2 tier of
+// research/zk-hidden-join-design.md S2.5. R is a public SHAPE parameter, NOT a
+// proven bound: the lanes are not constrained distinct, so as a statement about
+// cardinality the member says only what `join_eq` says -- at least one match
+// exists.
 //
 // NOT a soundness change: the composition verifier remains NOT-yet-sound
 // pending external audit (sq-qhy4). No soundness / ZK-privacy property is

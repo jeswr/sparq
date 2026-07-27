@@ -316,10 +316,13 @@ from each pairwise `assert(a_val == b_val)` plus the shared-commitment check.)
 
 - **Multiplicity (R2).** SPARQL bag semantics: a join can produce N>1 rows. Each
   matched `(row_a, row_b)` pair is one `join_eq` instance (one sub-proof) OR a
-  fixed-R `join_eq_rN` member proving R pairs at once (cheaper amortised, hides
-  exact N up to R by zero-padding). The **recommended default is one instance per
-  pair** (simplest, composes with the existing per-sub-proof verifier loop);
-  the fixed-R member is the cardinality-hiding tier (§5).
+  fixed-R `join_eq_rN` member proving R pairs at once (cheaper amortised, and its
+  fixed R-lane shape stops N being read off the sub-proof count — padding is a
+  REPEATED genuine pair under a fresh blinder, never a zero/dummy lane, and it
+  proves no bound on N; see §5 for the exact statement). The **recommended
+  default is one instance per pair** (simplest, composes with the existing
+  per-sub-proof verifier loop); the fixed-R member is the cardinality-hiding
+  tier (§5).
 - **Duplicate join values.** Two different `?p` values colliding to the *same*
   field encoding is ruled out **only up to the standard collision-resistance
   assumption**, not as a mathematical guarantee: `encode_term` is a hash-based
@@ -654,18 +657,33 @@ soundness-of-claims violation, not just an estimate.
   member beat R separate `join_eq` sub-proofs by a factor that grows with R, from
   R=2 upward. Figures: the snapshot `_comment_sq_uii0` (generated data), not
   restated here.
-  **Padding discipline (what actually hides N).** A prover holding `N < R` genuine
+  **Padding discipline, and what it does and does not buy.** Write `N` for the
+  TRUE join cardinality of the two committed graphs at the query-bound slots — a
+  property of the graphs, not of the proof. A prover disclosing fewer than `R`
   pairs fills the remaining lanes by **repeating a genuine pair under a fresh
   per-lane blinder**. Every lane stays a TRUE join — nothing false is ever proved —
   and because the per-lane commitment is hiding with independent blinders, a
   repeated lane is indistinguishable at the public interface from a distinct one.
-  So the verifier learns `N ∈ [1, R]` instead of the exact `N`.
+  The effect is that the proof SHAPE is a fixed `R` whatever `N` is, so `N` is no
+  longer read off the number of visible sub-proofs (which is exactly how v1 leaks
+  it). It is **not** that the verifier learns `N ∈ [1, R]` — see below. The
+  residual visible quantity is the prover's *choice* of bucket `R`; under the
+  natural policy "smallest compiled `R` ≥ the number of pairs to disclose", that
+  coarsens the disclosure to the bucket lattice. That coarsening is a property of
+  prover **policy** and of the compiled bucket set, not an in-circuit constraint,
+  and a verifier cannot rely on it.
   **What it does NOT prove (no overclaim).** The lanes are **not** constrained
   distinct, so the member never attests that the join cardinality *is* `R`; it
-  proves "there exist `R` (not necessarily distinct) genuine joined pairs". It does
-  not prove completeness (still the scan's obligation). And `R` is **public** — it
-  is the member identity — so this **bounds** the R2 leak, it does not erase it, and
-  a prover with `N > R` must drop pairs or take a larger bucket.
+  proves "there exist `R` (not necessarily distinct) genuine joined pairs".
+  Because every lane may be the *same* pair, that statement is satisfiable as soon
+  as **one** genuine pair exists — so **as a statement about cardinality it is
+  equivalent to v1's "at least one match exists"**, and it proves neither `N ≤ R`
+  nor `N ≥ R` nor any other bound on `N`. `R` fixes only the member's public
+  shape: the number of lane commitments, hence the package name and the VK. It
+  does not prove completeness (still the scan's obligation). And `R` is
+  **public** — it is the member identity — while a prover with `N > R` simply drops
+  pairs or takes a larger bucket, which is the same reason `R` is not an upper
+  bound on `N`.
 - **Feasibility verdict: HIGH.** Every primitive (`commit_fold`, `h3`, `h2`,
   present-in-graph sweep, equality) is **already in-tree and compiled** in
   `scan.nr`. `join_eq` is assembled entirely from reused, already-benchmarked
@@ -763,14 +781,20 @@ listed with their step.
 
 ## 8. Open questions / honest limitations recap
 
-- **R1 is intrinsic; R2 is now BOUNDED, not removed.** A hidden-key join still
-  reveals *that* a join exists (R1 — unavoidable while answering the query). For
-  R2, the fixed-R member (§2.5/§5, step 7 / `sq-uii0`) has landed as a circuit
-  tier: it narrows the disclosure from the exact cardinality `N` to `N ∈ [1, R]`,
-  paid for by padding every unused lane with a repeated genuine pair under a fresh
-  blinder. The bucket `R` itself stays public (it is the member identity), so this
-  is a bound, not erasure — and because the lanes are deliberately not constrained
-  distinct, the member must never be described as attesting a cardinality of `R`.
+- **R1 is intrinsic; R2 is now COARSENED by prover policy, not proven away.** A
+  hidden-key join still reveals *that* a join exists (R1 — unavoidable while
+  answering the query). For R2, the fixed-R member (§2.5/§5, step 7 / `sq-uii0`)
+  has landed as a circuit tier: because every unused lane is padded with a
+  repeated genuine pair under a fresh blinder, the proof shape is a fixed `R`
+  whatever the true cardinality `N` is, so `N` is no longer read off the number of
+  visible sub-proofs. What the circuit *proves* is unchanged in cardinality terms:
+  `R` not-necessarily-distinct genuine pairs is satisfiable from a single pair, so
+  it says exactly what v1 says — at least one match exists — and it establishes no
+  bound on `N`, in particular **not** `N ≤ R`. The bucket `R` stays public (it is
+  the member identity), so the residual disclosure is which bucket the prover
+  chose; under an honest smallest-sufficient-bucket policy that is `N` coarsened
+  to the bucket lattice. The member must never be described as attesting a
+  cardinality of `R`, nor as proving `N ∈ [1, R]`.
 - **The join SLOT is disclosed** (§4.4), because the query already reveals it. Only
   the join VALUE is hidden. A use-case needing a hidden *column position* is out of
   scope (and arguably contradicts presenting a query the verifier reads).
