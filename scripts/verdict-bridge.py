@@ -115,9 +115,14 @@ IDENTICAL, so this guard cannot separate them and does not claim to.
 
 Note what follows for any proposal to make agent PRs BOT-authored: that changes the
 PR-author field, not the commenter, so it does not supply the missing signal — it removes
-the last weak one and makes this guard admit every verdict unconditionally.  The
-separation has to be created on the REVIEWER side (a distinct reviewing principal, or a
-lane-written record the commenter cannot mint), not on the author side.
+the last weak one and makes this guard admit every verdict unconditionally.  MEASURED
+2026-07-27: that route is not even available — there is no App private key on the work
+box (`gh auth status` shows only the operator's OAuth token), so subagents cannot push as
+the App.  registry#759 instead adds an `orchestrator` attestation class, deliberately
+INERT behind an enable interlock at the time of writing.  Plan on this axis staying
+necessary-but-not-sufficient: the separation has to be created on the REVIEWER side (a
+distinct reviewing principal, or a lane-written record the commenter cannot mint), and
+until one exists this guard must not be weakened on the assumption that one is coming.
 
 So this guard is NECESSARY, not SUFFICIENT, and both the refused set and the
 merely-reported set are surfaced (``::warning``) rather than failing silently.
