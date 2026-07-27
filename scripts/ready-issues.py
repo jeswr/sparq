@@ -447,8 +447,9 @@ def unit_reservations(issues, source_links=None):
     MONOTONE BY CONSTRUCTION: a unit reserves `⋃ _own_reservation(member)`, so its reservation is a
     superset of every member's own — the dedup can never under-serialise relative to today, whoever
     the members are. Registry CLAIM's extra `areas |= issue_areas or {GLOBAL_PACKAGE}` fail-closed
-    step is NOT adopted here: applied to this population it drives the live frontier to 0 (measured),
-    which is the same whole-fleet seizure `_reserving_packages` documents and exists to prevent.
+    step is NOT adopted here: applied to this population it drives the live frontier to 0
+    (measured) — the same whole-fleet seizure `_reserving_packages` documents and exists to
+    prevent.
 
     `source_links=None` (the default, and what the registry's `dispatch.yml` passes today) yields
     exactly the legacy per-row reservations, in the legacy order — see
