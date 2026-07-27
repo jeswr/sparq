@@ -488,7 +488,10 @@ previous-context reversion, `@list`/`@language`/`@index`/`@id`/`@type`/`@graph` 
 reshaping, `@nest`, `@reverse` redistribution, keyword aliasing, Value Compaction, and the
 `compactArrays`/`compactToRelative`/`ordered` options — and the `compact` conformance lane now
 compares against the W3C **expected** documents (the normative oracle; floor re-pinned 186 →
-228, one documented 1.0-era fail + 17 negative skips, see `floors::compact`). Framing on this
+228, then raised to 243 by sq-gzsky RUNNING the negatives, see `floors::compact`). The
+`expand` and `compact` lanes no longer SKIP `NegativeEvaluationTest`s: a negative passes iff
+the algorithm raises EXACTLY the manifest's `expectErrorCode`, so a wrong code is a FAIL and
+error-code completeness is now gated (expand floor 276 → 381). Framing on this
 substrate, the surface wiring (the engine-serialize cutover, sq-oy1f.41), and the remaining
 conformance-lane switches land in later beads; the RDF-first writers above remain the shipped
 emit path until then.
