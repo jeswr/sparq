@@ -123,9 +123,11 @@ impl LiveReport {
 //      grant keyed (A, R), and the `GRAPH <R'>` probe of a later (A', R') request is
 //      unaffected. The lane isolates anyway, so its fail-closed property does not rest
 //      on that argument continuing to hold for a future corpus or for a bridge change
-//      that widens what a grant is keyed by. The cost is real and was measured on the
-//      work box: roughly a 2x wall-clock increase on the W2 ODRL lane — advisory time
-//      on a lane whose contract is the exit code. W4 deliberately SHARES one store (see
+//      that widens what a grant is keyed by. The cost is real — rebuilding a fresh store
+//      per request adds benchmark overhead to the W2 ODRL lane — but that is
+//      non-canonical advisory time on a lane whose contract is its exit status. No number
+//      is quoted here: work-box timings are not canonical evidence and hard-coded
+//      performance numbers do not belong in the tree. W4 deliberately SHARES one store (see
 //      `run_w4_odrl_live`): it asserts concurrent-vs-single-threaded EQUALITY and makes
 //      no oracle over-share claim.
 //   3. No translation layer. `odrl_policies_for` + `normalize_odrl_ntriples` +
@@ -390,9 +392,17 @@ fn normalize_odrl_ntriples(nquads: &[String]) -> String {
 /// Translate a use case's compiled ODRL policies into evaluable
 /// [`sparq_policy::Policy`] values.
 ///
-/// Returns the parsed policies plus the number that could NOT be parsed. A policy that
-/// fails to parse is DROPPED, which can only remove grants (an under-share), never add
-/// one — but the count is surfaced in the lane's advisory line rather than swallowed.
+/// Returns the parsed policies plus the number that could NOT be parsed.
+///
+/// **A dropped policy is NOT a safe under-share, and callers must fail closed on a
+/// non-zero count.** Deny-overrides in this pipeline is STORE-WIDE, not per-policy:
+/// `PodStore::materialize_odrl_policy` writes a matched Prohibition's deny into the
+/// shared `<urn:sparq:auth>` view and the session layer enforces `∪ allow ∖ ∪ deny`
+/// across every policy materialized into that store. So dropping a policy that carries a
+/// matching prohibition removes a deny that would otherwise have subtracted a DIFFERENT
+/// policy's allow — i.e. it can WIDEN effective access, the exact over-share the lanes
+/// exist to catch. Both ODRL lanes therefore treat `unparseable > 0` as a hard failure
+/// rather than an advisory count.
 fn odrl_policies_for(
     policies: &[sparq_acbench::CompiledPolicy],
 ) -> (Vec<sparq_policy::Policy>, usize) {
@@ -507,6 +517,19 @@ fn run_w2_odrl_live(
             ),
         };
     }
+    // HARD fail-closed: a dropped policy may carry a matching PROHIBITION, and
+    // deny-overrides is store-wide (`∪ allow ∖ ∪ deny`), so continuing without it could
+    // let another policy's allow through — see `odrl_policies_for`.
+    if unparseable > 0 {
+        return Outcome::Failed {
+            mismatch: format!(
+                "W2 live {uc}/ODRL: {unparseable} compiled ODRL policy(ies) could not be \
+                 translated — a dropped policy may carry a prohibition whose deny would \
+                 have been subtracted from the shared auth view, so the over-share check \
+                 cannot be trusted (fail-closed, issue #4415)"
+            ),
+        };
+    }
 
     let data_nquads = resource_data_nquads(intents).join("\n");
     let start = std::time::Instant::now();
@@ -569,10 +592,10 @@ fn run_w2_odrl_live(
     }
 
     let wall_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
-    if under_share_advisory > 0 || unparseable > 0 {
+    if under_share_advisory > 0 {
         println!(
             "# advisory: {uc}/ODRL W2-live under-share {under_share_advisory}/{checked}, \
-             {allowed_with_rows} bridged allow(s), {unparseable} unparseable policy(ies) \
+             {allowed_with_rows} bridged allow(s) \
              (oracle=Allow, engine=Deny — group / subtree / condition intents supply no \
              world-state evidence by design, issue #4415)"
         );
@@ -607,10 +630,21 @@ fn run_w4_odrl_live(
         return Outcome::Skipped { reason: format!("no expected decisions for W4 {uc}/ODRL") };
     }
 
-    let (policies, _) = odrl_policies_for(policy);
+    let (policies, unparseable) = odrl_policies_for(policy);
     if policies.is_empty() {
         return Outcome::Failed {
             mismatch: format!("W4 live {uc}/ODRL: no compiled ODRL policy could be translated"),
+        };
+    }
+    // Same fail-closed rule as W2: a dropped prohibition changes what the SHARED store
+    // enforces, so the concurrent readers would agree on an unsound reference.
+    if unparseable > 0 {
+        return Outcome::Failed {
+            mismatch: format!(
+                "W4 live {uc}/ODRL: {unparseable} compiled ODRL policy(ies) could not be \
+                 translated — a dropped policy may carry a prohibition whose deny would \
+                 have been subtracted from the shared auth view (fail-closed, issue #4415)"
+            ),
         };
     }
 
@@ -2109,6 +2143,69 @@ mod tests {
                 "the ODRL W2 lane must check every ODRL expected decision"
             ),
             other => panic!("personal/ODRL W2 lane must pass; got {other:?}"),
+        }
+    }
+
+    /// An intentionally malformed ODRL policy that `parse_policy_str` must reject. It is
+    /// shaped as a PROHIBITION on `resource`: the object of the `odrl:prohibition`
+    /// statement is an unterminated IRI, so the document does not parse.
+    fn unparseable_odrl_prohibition(resource: &str) -> sparq_acbench::CompiledPolicy {
+        sparq_acbench::CompiledPolicy {
+            model: AcModel::Odrl,
+            nquads: vec![
+                format!("<{}#policy-bad> <{}prohibition> <{}#proh .", resource, ODRL_NS, resource),
+                format!("<{}#proh> <{}target> <{}> .", resource, ODRL_NS, resource),
+                format!("<{}#proh> <{}action> <{}> .", resource, ODRL_NS, ACBENCH_ACL_READ),
+            ],
+            expressibility: sparq_acbench::Expressibility::Native,
+        }
+    }
+
+    /// Deny-overrides is STORE-WIDE (`∪ allow ∖ ∪ deny`), so a dropped policy is not a
+    /// safe under-share: silently discarding an unparseable PROHIBITION would leave a
+    /// different policy's allow in force and the lane would report a pass on a corpus it
+    /// did not actually enforce. Both ODRL lanes must FAIL instead.
+    #[test]
+    fn test_odrl_lanes_fail_closed_on_unparseable_prohibition() {
+        let resource = "https://pod.ex/res5";
+        let row = odrl_test_intent(
+            Audience::Agent("https://alice.ex/card#me".to_string()),
+            resource,
+        );
+        let intents = [row.clone()];
+        let allow = odrl_test_decision("https://alice.ex/card#me", resource, Decision::Allow);
+        let decisions = [allow];
+
+        // Control: the permission alone is parseable and the lane passes non-vacuously.
+        let good = [compile_odrl(&row)];
+        assert_eq!(odrl_policies_for(&good).1, 0, "the permission alone must translate");
+        assert!(
+            matches!(run_w2_odrl_live("t", &intents, &good, &decisions), Outcome::Passed { .. }),
+            "control: the allow-only corpus must pass, else this test proves nothing"
+        );
+
+        // Add a matching prohibition that does NOT parse. Dropping it would restore the
+        // control's pass while the corpus actually says deny.
+        let bad = [compile_odrl(&row), unparseable_odrl_prohibition(resource)];
+        let (policies, unparseable) = odrl_policies_for(&bad);
+        assert_eq!(unparseable, 1, "the malformed prohibition must fail to parse");
+        assert!(!policies.is_empty(), "the permission must still translate (drop-one, not all)");
+
+        match run_w2_odrl_live("t", &intents, &bad, &decisions) {
+            Outcome::Failed { mismatch } => assert!(
+                mismatch.contains("could not be translated"),
+                "W2 must fail with the fail-closed translation message; got {mismatch}"
+            ),
+            other => panic!(
+                "W2 must FAIL when a prohibition is dropped (dropping it can widen access); got {other:?}"
+            ),
+        }
+        match run_w4_odrl_live("t", &intents, &bad, &decisions, 2) {
+            Outcome::Failed { mismatch } => assert!(
+                mismatch.contains("could not be translated"),
+                "W4 must fail with the fail-closed translation message; got {mismatch}"
+            ),
+            other => panic!("W4 must FAIL on an unparseable ODRL policy; got {other:?}"),
         }
     }
 }
