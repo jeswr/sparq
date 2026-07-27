@@ -40,7 +40,7 @@ GATE="$REPO_ROOT/scripts/check-model-attribution.py"
 SEAM="$REPO_ROOT/scripts/check-workflow-seam.py"
 WORKFLOW="$REPO_ROOT/.github/workflows/docs-quality.yml"
 NEEDLES=(--needle check-model-attribution.py --needle test_model_attribution.sh
-         --exclude check-workflow-seam.py --min-invocations 4
+         --min-invocations 4
          --require-exec scripts/tests/test_model_attribution.sh)
 FAILURES=0
 
@@ -228,12 +228,13 @@ else
   # byte-identical at 42 ok / 0 FAIL — while none of it ran in CI.
   #
   # Read the honest limit of this assertion: it lives INSIDE the suite it is
-  # about, so if the suite is unwired this line does not run either. The check
-  # that actually protects the repo is the SEPARATE gating seam step, asserted
-  # by B1f below; this one is the local/dev signal.
+  # about, so if the suite is unwired this line does not run either. What
+  # catches THAT is the separate gating seam step (`--require-exec`), and what
+  # catches the seam step being neutered is B2/B5 below, which run from HERE —
+  # a different step. Neither is self-sufficient; the pair is.
   expect_rc 0 "B1c docs-quality.yml EXECUTES this test file (command position, not a mention)" \
     python3 "$SEAM" --workflow "$WORKFLOW" --needle check-model-attribution.py \
-      --exclude check-workflow-seam.py --min-invocations 1 \
+      --min-invocations 1 \
       --require-exec scripts/tests/test_model_attribution.sh
   # B1d — the PR-level backstop must be present AND must declare itself advisory
   # through the script's own --advisory mode. If someone "promotes" it by deleting
@@ -249,14 +250,13 @@ else
     fail "B1d the PR-level --check-commits backstop is not wired at all"
   fi
 
-  # B1e — the seam checker itself must be wired, or B2/B3 below are checking a
-  # workflow nobody runs the checker against in CI. The ARGUMENTS are asserted
+  # B1e — the seam checker itself must be wired, or B2/B3/B5 below are checking
+  # a workflow nobody runs the checker against in CI. The ARGUMENTS are asserted
   # too, because a wired-but-mis-argued invocation is the same vacuity one level
-  # up: without --exclude, this step's own `--needle check-model-attribution.py`
-  # counts as an extra gate invocation and the --min-invocations floor stops
-  # detecting a deleted call site. That happened — the flag was present in the
-  # hand-run command and missing in the YAML, and only the real CI run's
-  # "5 invocation(s)" showed it.
+  # up: the --min-invocations floor was once satisfied by the seam step's own
+  # `--needle` argument, so a deleted call site still cleared it. The flag was
+  # present in the hand-run command and missing in the YAML, and only the real
+  # CI run's "5 invocation(s)" showed it.
   seam_call="$(sed -n '/check-workflow-seam\.py --workflow/,/^      - /p' "$WORKFLOW" | tr '\n' ' ')"
   if [ -n "$seam_call" ]; then
     pass "B1e docs-quality.yml runs check-workflow-seam.py against itself"
@@ -264,12 +264,25 @@ else
     fail "B1e the seam checker is not wired into docs-quality.yml"
   fi
   if [ -n "$seam_call" ] \
-     && [[ "$seam_call" == *"--exclude check-workflow-seam.py"* ]] \
      && [[ "$seam_call" == *"--min-invocations 4"* ]] \
      && [[ "$seam_call" == *"--require-exec scripts/tests/test_model_attribution.sh"* ]]; then
-    pass "B1f ...with --exclude, the 4-call floor, and --require-exec on THIS suite"
+    pass "B1f ...with the 4-call floor and --require-exec on THIS suite"
   else
-    fail "B1f the seam invocation is missing --exclude / --min-invocations 4 / --require-exec"
+    fail "B1f the seam invocation is missing --min-invocations 4 / --require-exec"
+  fi
+  # B1g — the RETIRED --exclude flag stays retired. It exempted the seam step
+  # from the invocation count AND, undetected for three review rounds, from
+  # every neutering check (B5a-f below are the five forms it hid). Invocations
+  # are now resolved at command position, so no exemption is needed; this pins
+  # that re-adding the flag is a hard argparse failure (rc=2) rather than a
+  # silently accepted no-op that re-opens the hole.
+  expect_rc 2 "B1g the retired --exclude self-exemption is REJECTED, not silently accepted" \
+    python3 "$SEAM" --workflow "$WORKFLOW" --needle check-model-attribution.py \
+      --exclude check-workflow-seam.py
+  if [[ "$seam_call" == *"--exclude"* ]]; then
+    fail "B1h the seam invocation still passes the retired --exclude flag"
+  else
+    pass "B1h ...and the YAML no longer passes it"
   fi
 
   # B2 — the invocations must not be neutered. A step that is conditionally
@@ -374,8 +387,128 @@ PY
   expect_rc 0 "B3g the UNMUTATED copy passes (B3a-f red on the mutation, not the copy)" \
     python3 "$SEAM" --workflow "$MUT" "${NEEDLES[@]}"
 
-  # B4 — the seam checker's own hermetic mutants.
-  expect_rc 0 "B4 check-workflow-seam.py --self-test passes (9 mutants killed)" \
+  # B5 — MUTATE THE GATING SEAM STEP ITSELF, one case per neutering form.
+  #
+  # B3a-h mutate the step that runs the GATE. B5 mutates the step that runs the
+  # GUARD, which is a different and strictly worse hole: the seam step is what
+  # the workflow comment designates as the protection that survives the suite's
+  # removal, and for three review rounds it was exempt from all five of its own
+  # neutering checks. `--exclude check-workflow-seam.py` matched that step's own
+  # run body (it names the checker it invokes), and the exclusion was applied
+  # before the checks rather than only to the invocation count — so ONE additive
+  # `continue-on-error: true` (a keyword already present elsewhere in this same
+  # workflow) disarmed the entire gate while the step printed "4 invocation(s)
+  # … OK". Measured: all five forms below SURVIVED, with 45/45 assertions and
+  # both --self-tests green.
+  #
+  # B1e/B1f cannot cover this: they inspect the invocation's ARGUMENT TEXT,
+  # which every one of these mutations leaves untouched.
+  #
+  # Why these reds are real teeth and not a self-referential loop: a step can
+  # never red its OWN neutering — continue-on-error discards precisely the exit
+  # status that would report it. So the catch has to come from a DIFFERENT step,
+  # and it does: B2 above runs this same checker over the REAL workflow from
+  # inside this suite, which CI runs as its own step. Neutering the seam step in
+  # the real file therefore reds B2 (verified by mutating the real file, not a
+  # copy). The seam step in turn catches this suite being unwired. Two edges,
+  # each pinned; the residual is a diff that disarms both steps at once.
+  SEAM_STEP='      - name: "The model-attribution gate is soundly WIRED into this workflow — GATING"'
+  # The first command line of that step, not `run: |` — which appears nine times
+  # in this workflow. mutate_line asserts uniqueness, so an ambiguous anchor
+  # aborts the suite rather than mutating some other step.
+  # Double-quoted so the trailing YAML line-continuation backslash is a literal
+  # `\` (SC1003 — a single-quoted string cannot end in one). Nothing here
+  # expands: no `$`, no backtick.
+  SEAM_CMD="          python3 scripts/check-workflow-seam.py --workflow .github/workflows/docs-quality.yml \\"
+
+  # mutate_line <anchor> <insert-after|insert-before|replace> <payload>
+  # Targets by LINE with a uniqueness assertion and refuses to write a no-op —
+  # a whole-file str.replace() hits the wrong occurrence (a comment, a fixture)
+  # and reports a phantom survivor.
+  mutate_line() {
+    python3 - "$WORKFLOW" "$MUT" "$1" "$2" "$3" <<'PY'
+import sys
+src, dst, anchor, mode, payload = sys.argv[1:6]
+text = open(src, encoding="utf-8").read()
+lines = text.splitlines(keepends=True)
+hits = [i for i, line in enumerate(lines) if line.rstrip("\n") == anchor]
+if len(hits) != 1:
+    sys.exit(f"anchor matched {len(hits)} line(s), want exactly 1 — update the test: {anchor!r}")
+i = hits[0]
+if mode == "insert-after":
+    lines.insert(i + 1, payload + "\n")
+elif mode == "insert-before":
+    lines.insert(i, payload + "\n")
+elif mode == "replace":
+    lines[i] = payload + "\n"
+else:
+    sys.exit(f"unknown mutate mode {mode!r}")
+out = "".join(lines)
+if out == text:
+    sys.exit("mutation was a NO-OP — refusing to let the test report a phantom survivor")
+open(dst, "w", encoding="utf-8").write(out)
+PY
+  }
+
+  # expect_seam_finding <desc> <expected-diagnostic-substring>
+  # A behaviour kill: rc=1, for the STATED reason, ON the seam step. rc alone
+  # cannot distinguish "caught the mutation" from "crashed" or "caught some
+  # other step".
+  expect_seam_finding() {
+    local desc="$1" want="$2" got=0
+    python3 "$SEAM" --workflow "$MUT" "${NEEDLES[@]}" >"$TMP/b5.txt" 2>&1 || got=$?
+    if [ "$got" != 1 ]; then
+      fail "$desc (want rc=1, got rc=$got)"
+    elif ! grep -q -F -- "$want" "$TMP/b5.txt"; then
+      fail "$desc (rc=1, but not for the stated reason — want '$want')"
+    elif ! grep -q -F -- 'soundly WIRED into this workflow' "$TMP/b5.txt"; then
+      fail "$desc (red, but on a step other than the gating seam step)"
+    else
+      pass "$desc"
+    fi
+  }
+
+  mutate_line "$SEAM_STEP" insert-after '        continue-on-error: true'
+  expect_seam_finding \
+    "B5a MUTANT: continue-on-error on the GATING SEAM step is caught" \
+    'continue-on-error swallows the failure'
+
+  mutate_line "$SEAM_STEP" insert-after '        if: github.event_name == '"'"'never'"'"''
+  expect_seam_finding \
+    "B5b MUTANT: a never-true step \`if:\` on the GATING SEAM step is caught" \
+    'step carries an `if:`'
+
+  mutate_line "$SEAM_STEP" insert-after '        shell: bash -x {0}'
+  expect_seam_finding \
+    "B5c MUTANT: a non-default \`shell:\` on the GATING SEAM step is caught" \
+    'is not the default bash -eo pipefail'
+
+  mutate_line '            --require-exec scripts/tests/test_model_attribution.sh' replace \
+    '            --require-exec scripts/tests/test_model_attribution.sh || true'
+  expect_seam_finding \
+    "B5d MUTANT: \`|| true\` on the GATING SEAM step's command is caught" \
+    'discards its exit status'
+
+  mutate_line "$SEAM_CMD" insert-before '          set +e'
+  expect_seam_finding \
+    "B5e MUTANT: \`set +e\` in the GATING SEAM step's run body is caught" \
+    'relaxes the shell error mode'
+
+  mutate_line '  quick-gates:' insert-after '    if: false'
+  expect_seam_finding \
+    "B5f MUTANT: a job-level \`if:\` over the GATING SEAM step is caught" \
+    'job carries an `if:`'
+
+  # B5g — the control. Without it every row above would also "pass" against a
+  # checker that had simply started failing on the real workflow's shape.
+  cp "$WORKFLOW" "$MUT"
+  expect_rc 0 "B5g the UNMUTATED copy passes (B5a-f red on the mutation, not the copy)" \
+    python3 "$SEAM" --workflow "$MUT" "${NEEDLES[@]}"
+
+  # B4 — the seam checker's own hermetic mutants, including the five meta-step
+  # neutering forms above at unit level and the mention-vs-execution split that
+  # replaced the retired --exclude self-exemption.
+  expect_rc 0 "B4 check-workflow-seam.py --self-test passes (all hermetic mutants killed)" \
     python3 "$SEAM" --self-test
 fi
 

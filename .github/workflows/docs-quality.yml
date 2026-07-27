@@ -595,26 +595,40 @@ jobs:
       # matched and the suite still printed 42 ok / 0 FAIL — byte-identical — while
       # running in CI not at all. That silently drops every allowlist-ratchet
       # assertion and ALL coverage of the PR-range fix. Resolving the reference at
-      # COMMAND POSITION is what distinguishes "mentioned" from "run". This step is a
-      # SEPARATE gating step, so it still reds when the suite itself is unwired —
-      # a check that lives only inside the suite cannot catch the suite's removal.
+      # COMMAND POSITION is what distinguishes "mentioned" from "run".
+      #
+      # [OPUS-5] CORRECTION (round 4). This comment previously read: "This step is a SEPARATE
+      # gating step, so it still reds when the suite itself is unwired — a check that
+      # lives only inside the suite cannot catch the suite's removal." The second half
+      # is true. The first half was stated as an unconditional property and was not
+      # one: this step was itself exempt from all five of its own neutering checks,
+      # because `--exclude check-workflow-seam.py` matched this step's own run body
+      # and was applied before the checks rather than only to the invocation count.
+      # One additive `continue-on-error: true` here — a keyword that already appears
+      # in this file — plus deleting the suite line was measured to leave docs-quality
+      # fully GREEN with the suite never running. Corrected property, and the reason
+      # it now holds:
+      #
+      #   * `--exclude` is RETIRED. Invocations are resolved at command position, so
+      #     this step's `--needle` arguments are not counted and no self-exemption is
+      #     needed. Passing the flag is now a hard argparse error (B1g/B1h).
+      #   * A step can never red its OWN neutering — continue-on-error discards
+      #     exactly the exit status that would report it. So this step is NOT the sole
+      #     protection and does not claim to be. It catches the suite being unwired;
+      #     the suite catches THIS step being neutered, because it runs the same
+      #     checker over this file from its own separate step (B2), and B5a-f pin one
+      #     red per neutering form. Two edges; the residual is a diff that disarms
+      #     both steps at once, which is a visible seven-line workflow change.
+      #
       # NOTE: this is the minimal, single-target fix. #4547 implements the durable,
       # repo-wide version (`--check-test-wiring`, same command-position resolution);
       # it is stacked on this branch and its mechanism is deliberately NOT duplicated
       # here.
-      #
-      # --exclude is LOAD-BEARING, not tidiness: without it this step's own
-      # `--needle check-model-attribution.py` argument counts as a fifth gate
-      # invocation, so deleting a REAL call site would leave 4 and still pass the
-      # --min-invocations floor. (Measured: the first CI run of this step reported
-      # "5 invocation(s)". The local run reported 4 because it was invoked by hand
-      # WITH --exclude — the flag was missing only here, in the YAML.) B1e asserts
-      # both flags are present so this cannot silently rot back.
       - name: "The model-attribution gate is soundly WIRED into this workflow — GATING"
         run: |
           python3 scripts/check-workflow-seam.py --workflow .github/workflows/docs-quality.yml \
             --needle check-model-attribution.py --needle test_model_attribution.sh \
-            --exclude check-workflow-seam.py --min-invocations 4 \
+            --min-invocations 4 \
             --require-exec scripts/tests/test_model_attribution.sh
       # The PR-level backstop, ADVISORY for now. It catches the symptom wherever it comes
       # from — a stale brief, a new harness, or an agent copying the markers already in the

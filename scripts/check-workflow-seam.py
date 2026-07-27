@@ -29,6 +29,46 @@ a heredoc is also why it had no test of its own: you cannot point a mutant at a
 string embedded in the test that would have to catch it. Both problems are
 fixed by making it a script with an argument.
 
+Two populations, two mechanisms — and why there is no exclusion list
+-------------------------------------------------------------------
+This check has now found the same defect class three times: *the guard is
+unguarded*. Every instance had one root — a step's ROLE was decided by
+substring-matching a FILENAME in its ``run:`` body:
+
+1. the step that runs THIS checker names the gate in its own ``--needle``
+   argument, so it was counted as a gate invocation and the
+   ``--min-invocations`` floor stopped detecting a deleted call site;
+2. a ``grep`` for the suite's filename was satisfied by the adjacent
+   ``shellcheck <suite>`` line, so deleting the one line that RAN the suite
+   was invisible;
+3. the ``--exclude <filename>`` self-exemption introduced to patch (1) was
+   applied before the neutering checks, so it also exempted that step from
+   *all* of them — a single additive ``continue-on-error: true`` on the
+   gating seam step disarmed the whole gate while it printed ``OK``.
+
+(3) is a direct consequence of the patch for (1), which is the tell: a guard
+that must exempt itself **by filename** is structurally prone to exempting
+itself from everything. So the exclusion list is retired rather than reordered,
+and the two questions it conflated are answered separately:
+
+* **Is this step a gate INVOCATION?** — resolved at command position by
+  :func:`executes_target`, the same mechanism that fixed (2). A step that
+  merely NAMES the gate (``shellcheck <gate>``, ``cat <gate>``, or this
+  checker's own ``--needle <gate>``) is not running it, so it is not counted.
+  No exemption is needed to say so, and ``--exclude`` is gone from the CLI —
+  passing it is now an error, not a silent no-op.
+* **Must this step be un-neutered?** — asked of every step whose body MENTIONS
+  a needle. That is a strict superset of the invocations and deliberately
+  includes the meta-step that runs this checker, because neutering *that* step
+  is how the guard gets disarmed.
+
+A step cannot red its OWN neutering — ``continue-on-error`` discards precisely
+the exit status that would report it. So the seam step is not self-sufficient
+and never claims to be: it catches the suite being unwired (``--require-exec``),
+and the suite catches the seam step being neutered (it runs this checker over
+the real workflow from a different step). Both edges are real and each is
+pinned by a named red test. The residual is disarming BOTH steps in one diff.
+
 What it checks, for every ``run:`` step whose body mentions a ``--needle``
 --------------------------------------------------------------------------
 * the step is reached at all — no ``if:`` on the step and none on its job;
@@ -158,16 +198,15 @@ def seam_findings(
     workflow: Path,
     needles: tuple[str, ...],
     minimum: int,
-    excludes: tuple[str, ...] = (),
     require_exec: tuple[str, ...] = (),
 ) -> tuple[list[str], int]:
     """``(findings, invocations_found)`` for one workflow file.
 
-    ``excludes`` drops steps that merely NAME the gate without running it — in
-    practice the step that runs this very checker, whose ``--needle`` arguments
-    are the gate's own filename. Without it that step would be counted as a
-    gate invocation and would mask the deletion of a real one. Kept as an
-    explicit, greppable flag rather than an implicit self-exemption.
+    See the module docstring for why there is no ``excludes`` parameter. In
+    short: an invocation is a step that EXECUTES a needle at command position,
+    while the neutering checks apply to every step that MENTIONS one. Deciding
+    both by the same filename substring is what made three separate versions of
+    this guard exempt themselves from the thing they were guarding.
     """
     findings: list[str] = []
     try:
@@ -178,6 +217,7 @@ def seam_findings(
         return [f"{workflow}: not a workflow mapping"], 0
 
     found = 0
+    mentions = 0
     executed: set[str] = set()
     for job_name, job in (wf.get("jobs") or {}).items():
         if not isinstance(job, dict):
@@ -192,9 +232,13 @@ def seam_findings(
                     executed.add(target)
             if not any(n in run for n in needles):
                 continue
-            if any(x in run for x in excludes):
-                continue
-            found += 1
+            # MENTIONS the gate: subject to every neutering check below,
+            # including the step that runs this checker.
+            mentions += 1
+            # RUNS the gate: counted against --min-invocations. Resolved at
+            # command position, never by substring — see the module docstring.
+            if any(executes_target(run, n) for n in needles):
+                found += 1
             where = f"{job_name}/{step.get('name', '?')}"
             if step.get("if") is not None:
                 findings.append(f"{where}: step carries an `if:` ({step['if']!r}) so it can be skipped")
@@ -231,9 +275,20 @@ def seam_findings(
                 f"it silently uncovered."
             )
     if found < minimum:
+        # Name the mention/execution gap explicitly. A needle that cannot
+        # resolve at command position (e.g. one written with its arguments
+        # attached) would otherwise fail here with no clue why — fail-closed
+        # is right, fail-closed and undiagnosable is not.
+        extra = ""
+        if mentions > found:
+            extra = (
+                f"; {mentions - found} further step(s) NAME a needle without running it "
+                f"at command position — being named by `shellcheck`, `cat`, or this "
+                f"checker's own `--needle` argument is not being RUN"
+            )
         findings.append(
             f"{workflow.name}: expected at least {minimum} invocation(s) of "
-            f"{'/'.join(needles)}, found {found} — a call site was deleted"
+            f"{'/'.join(needles)}, found {found} — a call site was deleted{extra}"
         )
     return findings, found
 
@@ -359,6 +414,11 @@ jobs:
 
 def self_test() -> int:
     failures: list[str] = []
+    # Counted, never hard-coded: the summary line used to say "9 mutants
+    # killed" from `len(_MUTANTS)` alone, which would have kept saying 9 as
+    # cases were added below it. A reassuring summary that does not track what
+    # it summarises is the same defect class this script exists to catch.
+    mutants = 0
     needles = ("scripts/gate.py",)
     with tempfile.TemporaryDirectory() as td:
         wf = Path(td) / "wf.yml"
@@ -371,6 +431,7 @@ def self_test() -> int:
             failures.append(f"clean fixture: expected 1 invocation, found {found}")
 
         for name, (expect_substr, body) in _MUTANTS.items():
+            mutants += 1
             wf.write_text(body, encoding="utf-8")
             findings, _ = seam_findings(wf, needles, 1)
             if not findings:
@@ -397,23 +458,81 @@ jobs:
         if findings:
             failures.append(f"a `|| true` on a NON-gate line was wrongly flagged: {findings}")
 
-        # --exclude must not become a way to hide a deleted call site: a
-        # workflow whose ONLY mention of the gate is the excluded meta-step has
-        # zero real invocations and must red.
+        # --- THE META-STEP: not counted, but NOT exempt -------------------
+        # The step that runs this checker names the gate in its own `--needle`
+        # argument. It must not be counted as a gate invocation (or deleting a
+        # real call site still clears the floor), and it must STILL be subject
+        # to every neutering check (or one additive `continue-on-error: true`
+        # disarms the gate while the step prints "OK"). The retired
+        # `--exclude <filename>` flag got the first half right and the second
+        # half catastrophically wrong; command position gets both, with no
+        # self-exemption to misapply.
+        meta_step = "      - name: seam\n        run: python3 scripts/check-workflow-seam.py --needle scripts/gate.py\n"
+        mutants += 1
+        wf.write_text("jobs:\n  quick-gates:\n    steps:\n" + meta_step, encoding="utf-8")
+        findings, found = seam_findings(wf, needles, 1)
+        if found != 0:
+            failures.append(
+                f"the meta-step's own `--needle` argument was counted as an invocation (found={found})"
+            )
+        if not any("call site was deleted" in f for f in findings):
+            failures.append(f"a workflow with zero real call sites was not flagged: {findings}")
+        if not any("is not being RUN" in f for f in findings):
+            failures.append(f"the mention-vs-execution gap was not diagnosed: {findings}")
+
+        # The BLOCKING-3 pin, one case per neutering form. Each of these
+        # SURVIVED on the real workflow under `--exclude`, with the seam step
+        # reporting "4 invocation(s) … OK" every time.
+        real_call = "      - name: gate\n        run: python3 scripts/gate.py --check\n"
+        for why, neutered, expect_substr in (
+            ("continue-on-error", "      - name: seam\n        continue-on-error: true\n"
+             "        run: python3 scripts/check-workflow-seam.py --needle scripts/gate.py\n",
+             "continue-on-error"),
+            ("step `if:`", "      - name: seam\n        if: github.event_name == 'never'\n"
+             "        run: python3 scripts/check-workflow-seam.py --needle scripts/gate.py\n",
+             "step carries an `if:`"),
+            ("non-default `shell:`", "      - name: seam\n        shell: bash -x {0}\n"
+             "        run: python3 scripts/check-workflow-seam.py --needle scripts/gate.py\n",
+             "not the default bash"),
+            ("`set +e`", "      - name: seam\n        run: |\n          set +e\n"
+             "          python3 scripts/check-workflow-seam.py --needle scripts/gate.py\n"
+             "          echo done\n",
+             "relaxes the shell error mode"),
+            ("`|| true`", "      - name: seam\n        run: |\n"
+             "          python3 scripts/check-workflow-seam.py --needle scripts/gate.py \\\n"
+             "            || true\n",
+             "discards its exit status"),
+        ):
+            mutants += 1
+            wf.write_text(
+                "jobs:\n  quick-gates:\n    steps:\n" + real_call + neutered, encoding="utf-8"
+            )
+            findings, found = seam_findings(wf, needles, 1)
+            if found != 1:
+                failures.append(f"meta-step neutered by {why}: expected 1 invocation, found {found}")
+            if not any(expect_substr in f for f in findings):
+                failures.append(
+                    f"MUTANT SURVIVED: the meta-step neutered by {why} was not flagged: {findings}"
+                )
+
+        # The job-level `if:` form, which sits on the job rather than the step.
+        mutants += 1
         wf.write_text(
-            """
-jobs:
-  quick-gates:
-    steps:
-      - name: seam
-        run: python3 scripts/check-workflow-seam.py --needle scripts/gate.py
-""",
+            "jobs:\n  quick-gates:\n    if: false\n    steps:\n" + real_call + meta_step,
             encoding="utf-8",
         )
-        findings, found = seam_findings(wf, needles, 1, ("check-workflow-seam.py",))
-        if found != 0 or not any("call site was deleted" in f for f in findings):
+        findings, _ = seam_findings(wf, needles, 1)
+        if not any("job carries an `if:`" in f for f in findings):
+            failures.append(f"MUTANT SURVIVED: a job-level `if:` over the meta-step: {findings}")
+
+        # ...and the control, so the five rows above red for their mutation and
+        # not because a meta-step is flagged unconditionally.
+        wf.write_text("jobs:\n  quick-gates:\n    steps:\n" + real_call + meta_step, encoding="utf-8")
+        findings, found = seam_findings(wf, needles, 1)
+        if findings or found != 1:
             failures.append(
-                f"--exclude masked a deleted call site (found={found}, findings={findings})"
+                f"an UNNEUTERED meta-step alongside a real call site was flagged "
+                f"(found={found}, findings={findings})"
             )
 
         # --- --require-exec: MENTIONED is not EXECUTED --------------------
@@ -435,12 +554,13 @@ jobs:
           bash scripts/tests/suite.sh
 """
         wf.write_text(wired, encoding="utf-8")
-        findings, _ = seam_findings(wf, needles, 1, (), (target,))
+        findings, _ = seam_findings(wf, needles, 1, (target,))
         if findings:
             failures.append(f"an EXECUTED suite was reported as an orphan: {findings}")
 
+        mutants += 1
         wf.write_text(wired.replace("          bash scripts/tests/suite.sh\n", ""), encoding="utf-8")
-        findings, _ = seam_findings(wf, needles, 1, (), (target,))
+        findings, _ = seam_findings(wf, needles, 1, (target,))
         if not any("never EXECUTED at command position" in f for f in findings):
             failures.append(
                 "MUTANT SURVIVED: the one-line deletion of `bash <suite>` left "
@@ -459,7 +579,7 @@ jobs:
                 "        run: python3 scripts/gate.py --check\n      - name: x\n" + body,
                 encoding="utf-8",
             )
-            findings, _ = seam_findings(wf, needles, 1, (), (target,))
+            findings, _ = seam_findings(wf, needles, 1, (target,))
             if not any("never EXECUTED at command position" in f for f in findings):
                 failures.append(f"a {why} reference was accepted as an execution")
 
@@ -476,7 +596,7 @@ jobs:
                 "        run: python3 scripts/gate.py --check\n      - name: x\n" + body,
                 encoding="utf-8",
             )
-            findings, _ = seam_findings(wf, needles, 1, (), (target,))
+            findings, _ = seam_findings(wf, needles, 1, (target,))
             if findings:
                 failures.append(f"a genuine execution ({why}) was reported as an orphan: {findings}")
 
@@ -485,7 +605,7 @@ jobs:
         for f in failures:
             print(f"  - {f}")
         return 1
-    print(f"check-workflow-seam.py self-test: OK ({len(_MUTANTS)} mutants killed)")
+    print(f"check-workflow-seam.py self-test: OK ({mutants} mutants killed)")
     return 0
 
 
@@ -493,10 +613,16 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--self-test", action="store_true", help="run hermetic both-direction teeth")
     ap.add_argument("--workflow", type=Path, help="workflow file to check")
-    ap.add_argument("--needle", action="append", default=[], help="substring identifying the gate's invocations (repeatable)")
-    ap.add_argument("--min-invocations", type=int, default=1, help="fail if fewer matching steps than this exist")
-    ap.add_argument("--exclude", action="append", default=[], help="ignore steps whose run body contains this (e.g. the step running THIS checker)")
+    ap.add_argument("--needle", action="append", default=[], help="path of the gate; steps EXECUTING it at command position are invocations, steps merely mentioning it are still checked for neutering (repeatable)")
+    ap.add_argument("--min-invocations", type=int, default=1, help="fail if fewer EXECUTING steps than this exist")
     ap.add_argument("--require-exec", action="append", default=[], help="require this script to be EXECUTED at command position, not merely mentioned (repeatable)")
+    # `--exclude <filename>` is RETIRED, not renamed. It exempted the step that
+    # runs this checker from the invocation COUNT and — the defect — from every
+    # neutering check as well, so one additive `continue-on-error: true` on the
+    # gating seam step disarmed the gate while it printed "OK". Command-position
+    # resolution makes the exemption unnecessary. Rejecting the flag loudly is
+    # deliberate: an unrecognised argument is a hard argparse failure (rc=2), so
+    # a stale call site reds instead of silently re-opening the hole.
     args = ap.parse_args()
 
     if args.self_test:
@@ -510,7 +636,7 @@ def main() -> int:
 
     findings, found = seam_findings(
         args.workflow, tuple(args.needle), args.min_invocations,
-        tuple(args.exclude), tuple(args.require_exec),
+        tuple(args.require_exec),
     )
     if findings:
         print(f"check-workflow-seam: {args.workflow} — the gate is not soundly wired:")
