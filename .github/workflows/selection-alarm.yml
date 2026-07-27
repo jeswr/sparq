@@ -11,10 +11,17 @@
 # in CI — same rule as flow-on.yml).
 #
 # NOT A GATE (design §6.1 "fail-open"): this runs AFTER the nightly completes via
-# `workflow_run`, files issues, and blocks NO merge. Its name carries no
-# `advisory`/`informational` token, but it is not on the ci-summary gate's poll
-# set (that polls check-runs on the PR/merge-group head commit; this runs on a
-# past main nightly commit via workflow_run) so it can never affect a merge.
+# `workflow_run`, files issues, and blocks NO merge. That holds because this job
+# is DECLARED in `.github/advisory-registry.json` — since #3773 the ONLY thing
+# that can make a check-run non-gating. [OPUS-5] sq-huwr8: this header used to
+# claim the lane "is not on the ci-summary gate's poll set (that polls check-runs
+# on the PR/merge-group head commit …)". The gate ALSO polls on `push:
+# branches: [main]` (ci-summary.yml, timeout-minutes: 80), and a workflow_run
+# fired by a CI-on-main completion lands its check-run on that main head SHA —
+# OBSERVED on cb0c6739c (2026-07-27), where `nightly selection-bug alarm` was
+# present in the gate's poll set (conclusion `skipped`). A `skipped` conclusion
+# is harmless, but this lane is FAIL-LOUD and REDs on detector breakage, and a
+# red would have gated. Pinned by scripts/tests/test_alarm_lanes_non_gating.py.
 #
 # FAIL-LOUD (design invariant, opposite of ci_select's fail-CLOSED): an
 # alarm-INFRASTRUCTURE error (cannot list the failed jobs / load cargo metadata /
