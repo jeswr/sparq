@@ -28,5 +28,30 @@ Follow the **sub-agent shared contract** — `AGENTS.md` § *The sub-agent share
 - All of the **gates checklist** in `sparq-rust-feature.md` apply (W3C conformance ratchet ≥1229 pass / 0 fail + documented divergence; per-crate coverage floors with ONE DIRECT unit test per new `pub` fn; the WASM feature-off byte declaration `bench/feature-off-declarations/<PR>.json` when default-path bytes move; the feature-matrix leg + golden `scripts/tests/feature-matrix-legnames.golden.txt` so a gated test actually runs) plus the standard `clippy -D warnings` + tests GREEN in BOTH feature states + the rustdoc `--all-features` half of the `clippy (gate)` lane. Do not duplicate those here — meet them by reference.
 - **Honest before/after on the NAMED benchmark, PR body only.** Report the measured before/after on the specific benchmark the bead targets, with **NON-CANONICAL work-box labels** (this session runs on an AWS work box; those timings are not canonical). Put the numbers in the **PR body only — NEVER committed markdown** (the no-hard-coded-perf-numbers rule). The canonical number, if one is needed, comes from a quiet CI/EC2 run routed separately.
 
+## Before you open the PR (HARD — identical in every worker brief) [OPUS-5]
+Run **`python3 scripts/preflight.py`** in your worktree. It runs every mechanical
+merge-gate against YOUR diff — G1 `gate-new-crate.py`, G2 `gate-api-skill.py`,
+G6 `check-config-documented.py`, `check-no-perf-numbers.py`,
+`check-readme-template.py`, `check-privacy-claims.sh`, plus a `guard-untested`
+check — so you learn in-worktree instead of on CI or in a review round. It must
+exit 0. These gates already block the merge; running them earlier lowers no bar.
+
+Then do the two things `preflight.py` prints but CANNOT decide for you. In a census
+of the 831 review verdicts on the registry `ledger` branch, these two classes are
+**130 of the 317 blocking round-1 findings** — the largest preventable share:
+
+1. **MUTATE YOUR HEADLINE GUARD** (63 findings). Take the feature named in your PR
+   title — it is disproportionately the one shipped with no red test. **DELETE or
+   INVERT it and RUN the suite.** If nothing goes red, your test is vacuous; that is
+   a blocking defect. Execute it, do not reason about it. Name the test that died in
+   your PR body. (`guard-untested` only catches a guard with NO test at all; a test
+   that asserts a bound, a type, or a marker string instead of the behaviour passes
+   the script and fails review.)
+2. **READ YOUR OWN PROSE AGAINST YOUR OWN DIFF** (67 findings). For every line of
+   doc-comment, README, `SKILL.md`, comment, research record or PR-body claim you
+   added, point at the code in THIS diff that makes it true. If you cannot, delete
+   the sentence or fix the code. Overclaiming is blocking, and citing a module,
+   flag, constant or test file the diff does not contain is the commonest form.
+
 ## Method
 Profile → attribute → design the shape + decline → implement → prove equivalence (randomized differential both branches + red mutation check + witness-tested decline) → run the gates in-worktree → open the PR vs `main` with the honest before/after + the equivalence evidence in the body. If a variant regresses or you cannot prove equivalence for a shape, DROP that variant and say so — a rejected variant is a finding, not a failure. **Discovered work → capture as a LIST** for the orchestrator to `bd create` from the MAIN repo (`bd` is not on PATH in a worktree). **Do NOT arm** — the orchestrator routes the PR through verify→arm. Report: the profile finding + attributed cost, the shape + decline, the equivalence evidence, which variants you rejected and why, the gates run (both states), the PR number, and any deferred beads.

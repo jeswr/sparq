@@ -334,6 +334,29 @@ jobs:
       - name: readme-template (template) — crate-README cap + sections (sq-9jw5) — GATING
         run: python3 scripts/check-readme-template.py --enforce
 
+      # [OPUS-5] Pre-submit runner (scripts/preflight.py) — the checker that shifts
+      # G1/G2/G6 + no-perf-numbers + readme-template + privacy-claims LEFT into the
+      # worker's worktree, plus the `guard-untested` check. Two HARD legs, both in
+      # this already-GATING job so a regression reds ci-summary:
+      #   * --self-test pins the checker's own logic (mirrors readme-template /
+      #     coverage-gate / perf-gate above);
+      #   * the unittest suite additionally pins that EVERY worker brief still
+      #     carries the shared pre-submit block, byte-identical. A brief silently
+      #     losing a clause is a repeated failure mode here — a worker reads only
+      #     its own brief, so an obligation present in five of six is absent for
+      #     the sixth. Deleting the block from one brief reds this leg.
+      #
+      # Both `run:` values must stay BARE COMMANDS on their own line. Appending
+      # `|| true` (or `; true`, or piping) leaves every substring-matching seam
+      # test green while the leg can no longer fail — the commonest swallow shape
+      # in this repo's verdict corpus. `test_preflight.py::
+      # test_neither_leg_is_invoked_with_its_exit_code_discarded` anchors the call
+      # with `^\s*<cmd>\s*$` and reds on exactly that edit.
+      - name: Self-test the pre-submit runner (pure logic)
+        run: python3 scripts/preflight.py --self-test
+      - name: preflight — checker tests + worker-brief block consistency — GATING
+        run: python3 scripts/tests/test_preflight.py
+
       - name: Demo deployment manifests
         run: |
           bash deploy/demo/check.sh
