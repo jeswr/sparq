@@ -28,7 +28,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import re
 import sys
 import unittest
@@ -254,7 +256,8 @@ class TestNoDrift(unittest.TestCase):
         self.addCleanup(lambda: setattr(sys, "argv", real_argv))
 
         try:
-            self.assertEqual(TA.main(), 0)
+            with contextlib.redirect_stdout(io.StringIO()):  # main() prints the plan
+                self.assertEqual(TA.main(), 0)
         except ValueError as exc:
             # apply_row's own fail-closed guard caught it one layer down. That is
             # the SECOND line of defence firing; report it as this test's failure
