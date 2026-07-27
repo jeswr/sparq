@@ -18,8 +18,8 @@ Every assertion derives its expected value **from the RDF/JS spec**
 [stream](https://rdf.js.org/stream-spec/)) — never from any single
 implementation. Quads are compared with an implementation-agnostic
 N-Quads-ish key built from `.value` / `.termType` / `.language` / `.direction` /
-`.datatype.value` (recursing into quoted triples), so the suites pass `n3` and
-`@rdfjs/dataset` alike, and fail a deliberately-broken impl.
+`.datatype.value` (recursing into nested `Quad` terms), so the suites pass `n3`
+and `@rdfjs/dataset` alike, and fail a deliberately-broken impl.
 
 ## 🚀 Quickstart
 
@@ -71,13 +71,13 @@ so they are framework-agnostic in spirit (default: `node:test`):
   term**, and the `Quad#value` empty-string constant. `variable` is skipped
   gracefully if absent. Three further blocks are **feature-detected** (probed,
   then skipped whole if unsupported, so an older implementation is not failed
-  for a capability it never claimed): **RDF-star / quoted triples** (a `Quad` in
-  the **subject** position — the only position the data-model spec admits one —
-  plus recursive `equals` and `fromTerm`/`fromQuad` round-tripping a nested
-  quad); **quoted triples in the object position**, which the spec does *not*
-  allow (`object` is a `NamedNode`, `Literal`, `BlankNode` or `Variable`), so it
-  is probed and labelled separately as an **extension beyond the spec** and
-  never gates the normative quoted-subject tests; and **RDF 1.2 directional
+  for a capability it never claimed): **a nested `Quad` in the subject
+  position** — the only position the data-model spec admits one — plus recursive
+  `equals` and `fromTerm`/`fromQuad` round-tripping a nested quad; **a nested
+  `Quad` in the object position**, which the data-model spec does *not* allow
+  (`object` is a `NamedNode`, `Literal`, `BlankNode` or `Variable`), so it is
+  probed and labelled separately as an **extension beyond the spec** and never
+  gates the normative subject-position tests; and **RDF 1.2 directional
   language-tagged literals** (`literal(v, { language, direction })` →
   `rdf:dirLangString`, `direction` significant for `equals`, preserved by
   `fromTerm`).
