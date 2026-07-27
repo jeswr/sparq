@@ -352,11 +352,13 @@ from each pairwise `assert(a_val == b_val)` plus the shared-commitment check.)
   value. *Pro:* no graph re-commit in `join_eq` (cheapest join member). *Con:*
   changes the scan public-input layout → re-touches the audit-#1 reconstruction,
   the empirical bb anchors (`verifier.rs:3582-3614`), and every `scan_k…` member;
-  higher blast radius, higher re-audit cost. **DEFERRED on measured evidence, not
-  intuition** (§5, `sq-uii0`): the re-commit *does* dominate, but it does **not**
-  make joins free, so the win does not pay for the breaking layout change. The two
-  conditions that reopen the trade are recorded in §5 — until one of them holds, do
-  **not** land Alt-A as a drive-by.
+  higher blast radius, higher re-audit cost. **DEFERRED on probe measurement, not
+  intuition — but the measurement is PROVISIONAL** (§5, `sq-uii0`): off-tree probes
+  say the re-commit *does* dominate while a fixed input floor stops joins becoming
+  free, so on that reading the win does not pay for the breaking layout change. The
+  probes are not yet regression-gated (§5's evidence caveat), and the two conditions
+  that reopen the trade are recorded in §5 — until one of them holds, do **not**
+  land Alt-A as a drive-by.
 - **(Alt-B) Set-membership / circuit-PSI inside one prover.** Prove the join value
   is in the *intersection* of the two graphs' value sets via a Merkle/lookup
   argument (the `key_set_membership` gadget, `issuer.nr:221-240`). *Pro:* natural
@@ -626,43 +628,58 @@ soundness-of-claims violation, not just an estimate.
   commitment fold, plus epsilon. It is **far cheaper than `hidden_issuer_d{D}`**,
   whose two ~251-bit Baby-JubJub scalar-muls dominate (`issuer.nr:267-273`); there
   are **no scalar-muls, no foreign-field emulation, no pairings** in `join_eq`.
-- **Optimisation lever — MEASURED (`sq-uii0`); Alt-A is DEFERRED, and the "~2
-  permutations" prior was WRONG.** This bullet used to say only that "whether Alt-A
-  is worth it is a `bb gates` question, not an intuition one". The `bb gates`
+- **Optimisation lever — PROBED (`sq-uii0`), Alt-A deferred, and the "~2
+  permutations" prior looks WRONG.** This bullet used to say only that "whether
+  Alt-A is worth it is a `bb gates` question, not an intuition one". The `bb gates`
   question has now been asked, on the pinned toolchain, with every pre-existing
   member re-measuring byte-identical to its checked-in baseline on the same box (so
-  the figures are comparable, not platform-shifted). Two off-tree probe circuits
-  attribute the single-pair member:
+  the probe figures are comparable, not platform-shifted). Two off-tree probe
+  circuits attribute the single-pair member:
   - a probe carrying the whole relation **minus** the two `commit_fold`
-    re-commitments costs about **half** the member — so the re-commit really does
-    dominate, and Alt-A (§2.6 — scan exposes per-row hiding commitments, `join_eq`
-    becomes an open-and-compare with NO re-commit) is *directionally* right;
-  - a probe carrying the `join_eq` ABI and **no relation at all** still costs about
-    **two fifths** of the member. That is the fixed ACIR/integer-lookup-table floor
-    the FIRST integer-typed input incurs — the same effect `sq-kndw` documented on
-    the revocation member (`crates/sparq-zk-compose/tests/gate_count_snapshot.json`,
-    `_comment_sq_kndw`, where an *unused* integer input measured the same overhead,
-    i.e. table setup rather than the comparison).
+    re-commitments accounts for the larger share of the member — so the re-commit
+    really does dominate, and Alt-A (§2.6 — scan exposes per-row hiding
+    commitments, `join_eq` becomes an open-and-compare with NO re-commit) is
+    *directionally* right;
+  - a probe carrying the `join_eq` ABI and **no relation at all** still carries a
+    substantial share of the member. That is the fixed ACIR/integer-lookup-table
+    floor the FIRST integer-typed input incurs — the same effect `sq-kndw`
+    documented on the revocation member
+    (`crates/sparq-zk-compose/tests/gate_count_snapshot.json`, `_comment_sq_kndw`,
+    where an *unused* integer input measured the same overhead, i.e. table setup
+    rather than the comparison). That precedent is in-tree and regression-gated;
+    these `join_eq` probes are neither — see the evidence caveat below.
 
-  So Alt-A **cannot** collapse the member to "~2 Poseidon2 permutations" as this
-  section previously assumed: the join's public `slot_a`/`slot_b` are `u32` **by
-  design** (§4.4 slot binding), and that floor is not removable while the slot
-  binding stays public. Removing the re-commit entirely buys roughly a **2×**
-  member, not the ~47× the "~2 permutations" prior implies. Figures are cited, never
-  restated here — they live in the regression-gated snapshot entry `_comment_sq_uii0`
-  that lands with the `sq-uii0` circuit work. **This is exactly the
+  If the probes hold, Alt-A **cannot** collapse the member to "~2 Poseidon2
+  permutations" as this section previously assumed: the join's public
+  `slot_a`/`slot_b` are `u32` **by design** (§4.4 slot binding), and that floor is
+  not removable while the slot binding stays public. Removing the re-commit
+  entirely then buys a **small constant factor**, not the order-of-magnitude the
+  "~2 permutations" prior implies — which would make this exactly the
   `noir-optimisation` failure mode this section warned about, caught on its own
-  prior** (`bench/SPIKES.md` / PR #37 record intuition misfiring on this codebase).
+  prior (`bench/SPIKES.md` / PR #37 record intuition misfiring on this codebase).
+  No probe figure or derived ratio is restated in this record: measured values
+  belong in the regression-gated snapshot, and they are not there yet.
 
-  **Verdict: DEFERRED.** A ~2× on ONE member does not pay for Alt-A's breaking scan
-  public-input-layout change, which re-touches the audit-#1 public-input
-  reconstruction, the empirical `bb` anchors (`verifier.rs:3582-3614`) and every
-  `scan_k…` member — a full re-audit of the most soundness-critical surface in the
-  estate. **Reopen the trade only if** (a) the integer-lookup-table floor is removed
-  or amortised upstream — a Noir/`bb` change, or a redesign that drops the public
-  `u32` slot inputs — **or** (b) a deployment puts the hidden join on the critical
-  path at a scale where 2× matters. Until one of those holds, Alt-A is **not** a
-  drive-by: it is a re-audit, and it must be planned as one.
+  **EVIDENCE CAVEAT — this conclusion is PROVISIONAL, not gated.** The probe
+  circuits are off-tree and one-shot, and there is **no** `_comment_sq_uii0` entry
+  in `crates/sparq-zk-compose/tests/gate_count_snapshot.json` yet, so none of it is
+  checkable against `gate_count_regression` and this section's own rule — assert a
+  cost claim only once it is measured *and* gated — is only half-satisfied. Read
+  the deferral as the current best reading of a measurement that still owes its
+  artifact. It settles when the `sq-uii0` circuit work lands the probe methodology
+  plus a `_comment_sq_uii0` snapshot entry; if that entry disagrees with this
+  bullet, the entry wins and this bullet is rewritten.
+
+  **Verdict: DEFERRED (provisional).** A small constant-factor win on ONE member
+  does not pay for Alt-A's breaking scan public-input-layout change, which
+  re-touches the audit-#1 public-input reconstruction, the empirical `bb` anchors
+  (`verifier.rs:3582-3614`) and every `scan_k…` member — a full re-audit of the
+  most soundness-critical surface in the estate. **Reopen the trade only if** (a)
+  the integer-lookup-table floor is removed or amortised upstream — a Noir/`bb`
+  change, or a redesign that drops the public `u32` slot inputs — **or** (b) a
+  deployment puts the hidden join on the critical path at a scale where a constant
+  factor matters. Until one of those holds, Alt-A is **not** a drive-by: it is a
+  re-audit, and it must be planned as one.
 - **Cardinality-hiding tier (`join_eq_rN`).** Proving R pairs in one member
   amortises the per-graph re-commit across R joins (the fold is paid once per
   graph regardless of R) and hides exact N up to R — likely the *better* shape for
@@ -744,12 +761,14 @@ listed with their step.
    scan-layout per-row commitments** (§2.6) — filed only if `bb gates` shows the
    re-commit dominates or cardinality leakage (R2) is a deployment blocker.
    → **bead step 7 (optional, P3)**.
-   **Alt-A: measured (`sq-uii0`) → DEFERRED.** `bb gates` *did* show the re-commit
-   dominates, so the literal trigger above fires — but the same measurement shows a
-   fixed integer-lookup-table floor on the public `u32` slot inputs caps the win at
-   ~2× on one member, which does not pay for the breaking scan public-input-layout
-   change (§5). Do **not** read the fired trigger as a go-ahead: Alt-A reopens only
-   on one of the two conditions recorded in §5, and never as a drive-by.
+   **Alt-A: probed (`sq-uii0`) → DEFERRED, provisionally.** `bb gates` *did* show
+   the re-commit dominates, so the literal trigger above fires — but the same
+   probes show a fixed integer-lookup-table floor on the public `u32` slot inputs
+   caps the win at a small constant factor on one member, which does not pay for
+   the breaking scan public-input-layout change (§5). Those probes are not yet
+   regression-gated (§5's evidence caveat), so this is a provisional reading — but
+   do **not** read the fired trigger as a go-ahead either: Alt-A reopens only on
+   one of the two conditions recorded in §5, and never as a drive-by.
 
 ---
 
