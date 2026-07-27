@@ -210,10 +210,20 @@ The bead is explicitly blocked on the grading protocol and N. Concretely:
 ```bash
 python3 bench/fo-km/build_probes.py --check                 # battery matches its generator
 python3 bench/fo-km/build_probes.py --emit-prompt gufo      # the exact per-session brief
-python3 bench/fo-km/stability_analyze.py                    # grading contract, no run needed
+python3 bench/fo-km/stability_analyze.py                    # self-check, no run needed
 python3 bench/fo-km/stability_analyze.py bench/fo-km/metric3-sessions.jsonl
 ```
 
 The battery, the three arm scaffolds, the grader and all 45 raw session answers are
 committed. `stability_analyze.py` re-derives every number in this record from
 `metric3-sessions.jsonl` — no step of the grading depends on a model.
+
+The no-argument mode is an **asserted** self-check, not a description: hand-computed
+fixtures pin every quantity above against awkward inputs (a missing answer, a restated
+probe id, an out-of-vocabulary label, an abstention), it re-derives every column of the
+table above from the committed sessions, and it exits nonzero on any mismatch. The
+denominators are stated explicitly at the top of the grader — in particular **`cs_dec`
+counts only probes answered in *every* session with no abstention**, so neither
+abstaining nor staying silent can buy a cell a better decided-contradiction rate.
+`--strict` additionally refuses to report at all over a cell with a missing or unparsed
+answer.

@@ -122,9 +122,14 @@ else — Metric 1's `tasks.jsonl`, `analyze.py` and `RESULTS.md` are untouched b
 ```bash
 python3 bench/fo-km/build_probes.py --check              # the 12-probe battery
 python3 bench/fo-km/build_probes.py --emit-prompt gufo   # the exact per-session brief
-python3 bench/fo-km/stability_analyze.py                 # grading contract (self-check)
+python3 bench/fo-km/stability_analyze.py                 # self-check: assert the grader
 python3 bench/fo-km/stability_analyze.py bench/fo-km/metric3-sessions.jsonl
 ```
+
+With no session file the grader **asserts** its own contract and exits nonzero on any
+mismatch: hand-computed fixtures pin every reported quantity (including missing,
+duplicate, out-of-vocabulary and `UNDECIDABLE` answers), and every published column of
+the committed 45-session table is re-derived from `metric3-sessions.jsonl`.
 
 - `stability_probes.jsonl` — 12 forced-choice probes over a closed label set
   (`OCCURRENT`/`CONTINUANT`/`ABSTRACT`/`UNDECIDABLE`), stratified **SC** (the 4 PKG classes
