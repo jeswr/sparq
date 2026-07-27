@@ -936,11 +936,11 @@ name        = "Foundational-ontology KM-task A/B (Metric 1) over the PKG"
 category    = "inference"
 measures    = "per-arm agent KM-task accuracy (gold count/keys per task) + token cost across no-FO / gUFO / DOLCE-DUL / schema.org overlays; each FO-typed query answered under owl-rl closure of the overlay's rdfs:subClassOf axioms, the no-FO arm cannot answer (the FO-win construction). NOT a perf claim — the closure-build CPU/wall cost is non-canonical and never charged as a token cost"
 invoke      = "python3 bench/fo-km/validate_tasks.py   # proves every task discriminates (each FO arm answers expected count, no-FO returns 0; needs the `close` feature). Per-arm: cargo run -p sparq-kb --features close --bin pkg-query -- --extra-graph bench/fo-km/overlays/<arm>.ttl --close owl-rl --sparql '<FO-typed query from tasks.jsonl>'"
-source      = "bench/fo-km/{README.md,tasks.jsonl,build_tasks.py,validate_tasks.py,overlays/*.ttl}; crates/sparq-kb (pkg-query --extra-graph, load_pkg_with_extra / close::load_pkg_closed_with_extra)"
+source      = "bench/fo-km/{README.md,tasks.jsonl,build_tasks.py,validate_tasks.py,overlays/*.ttl}; crates/sparq-kb (pkg-query --extra-graph, load_pkg_with_extra / close::load_pkg_closed_with_extra). Metric 3 (ontological-commitment stability, sq-mztg8.3) is a separate harness in the same directory: bench/fo-km/{build_probes.py,stability_probes.jsonl,stability_analyze.py,metric3-sessions.jsonl} — it reuses the overlays as arm definitions and shares nothing else"
 dataset     = "the shipped PKG (crates/sparq-kb PKG_ONTOLOGY + PKG_INSTANCES) plus one minimal FO-taxonomy overlay TTL per arm (bench/fo-km/overlays/, vendored in-repo); 16 stratified FO-exercising tasks (bench/fo-km/tasks.jsonl)"
 quiet_box_sensitive = false  # result-fidelity (accuracy / gold-count match), not wall-clock; closure-build cost is non-canonical
 pinning     = "tasks.jsonl + the overlay TTLs are committed; regenerate tasks via build_tasks.py"
-records_to  = "bench/fo-km/RESULTS.md (PR #1108)"
+records_to  = "bench/fo-km/RESULTS.md (Metric 1, PR #1108); bench/fo-km/STABILITY.md (Metric 3 pilot, sq-mztg8.3 — PILOT, needs-maintainer-steer on grading protocol + N)"
 # featured = false: internal Metric-1 harness; ships the harness, not the verdict (the A/B run +
 # pre-registered kill-criteria are the orchestrator's next step). Dashboard promotion is a
 # DISPOSITION deferred to a maintainer (no perf claim; design research/foundational-ontology-km-benchmark.md §7).
