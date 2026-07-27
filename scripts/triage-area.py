@@ -440,7 +440,19 @@ def plan(issues, crates):
 def apply_row(number, add):
     """Add the area labels AND drop the park in ONE call. They must not drift: an
     issue with an area but still parked stays undispatchable, and a cleared park
-    with no area silently reserves the serializing __global__ partition."""
+    with no area silently reserves the serializing __global__ partition.
+
+    FAIL CLOSED on an empty `add`. `main()` already filters unclassified rows out
+    before it gets here, but that filter is one edit away from the apply loop and
+    a BARE UNPARK is the worst outcome this tool can produce: the issue looks
+    triaged, `retriage.py` promotes it, and it then reserves the serializing
+    `__global__` partition — which collapses the dispatch frontier to a single
+    worker. The invariant therefore lives in the ONLY function that can emit the
+    unpark, not in the caller that happens to protect it today."""
+    if not add:
+        raise ValueError(
+            f"refusing a bare unpark of #{number}: `{PARK_LABEL}` may only be "
+            "removed in the same call that adds >=1 area: label")
     args = ["issue", "edit", str(number), "--repo", REPO, "--remove-label", PARK_LABEL]
     for a in add:
         args += ["--add-label", a]
@@ -475,6 +487,18 @@ def self_test():
 
     # FAIL CLOSED is the headline behaviour: no evidence => no label.
     f += _chk("no evidence -> parked", c("do the thing", "it would be nice"), [])
+
+    # SCOPE is the other half of the anti-mislabel design, and 60 of the 70 rules
+    # rely on it: a `title`-scoped rule must NOT fire off a body mention. This is
+    # the axis `derive_areas` got wrong (one incidental word in a body labelled a
+    # zkSPARQL spec bead `area:site`). Collapsing the scope dispatch in classify()
+    # to `hay = text` is a ONE-LINE edit, and it is the shape every rule-table
+    # tweak takes, so pin it here as well as in the per-rule property test in
+    # scripts/tests/test_triage_area.py.
+    f += _chk("body-only mention does not fire a title rule",
+              c("do the thing", "we should benchmark this before deciding"), [])
+    f += _chk("body-only ieee754 does not fire the title-scoped zk rule",
+              c("do the thing", "background notes: this touches ieee754 rounding"), [])
 
     # Ordering: a .typ spec that merely NAMES zk/xpath is spec work, not zk work.
     f += _chk("spec beats zk",
