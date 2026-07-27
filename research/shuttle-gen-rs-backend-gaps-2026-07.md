@@ -129,23 +129,48 @@ shape is hard-coded rather than derived from the header.
 
 ### What the v0.1-surface implementation costs
 
-The value world is the saving grace: every runtime value in the generated Rust is the single
-closed `Term` enum, and grammar-signature types such as `subjT`/`graphT` are erased to it. So
-the `@g` expression compiles through the existing term-argument path with **no new value
-machinery** — what changes is the shape of the emitted *item* and of the sink.
+Every runtime value in the generated Rust is the single closed `Term` enum, and grammar-signature
+types such as `subjT`/`graphT` are erased to it: `ParserGen.production()`'s local `paramT` maps
+every parameter type that is not `string`/`int`/`pair` to `term`, and `termArg()` only
+distinguishes a `str` (coerced to a `NamedNode`) from an already-erased `term`. So the `@g`
+expression can reuse the existing term-argument path for **evaluation**, with no new value
+machinery — but the same erasure is why it cannot reuse it for **validation**: nothing on the v0.1
+path retains `graphT`, so an `emits quads` grammar can hand a literal or a triple term to the graph
+slot and no backend stage would notice. The v0.2 positional-typing rule (`shtl:g ⊑ GraphT`, quoted
+above) is *spec text, not an implemented safeguard*, and must not be cited as one for the v0.1
+backend work designed here. Closing the gap therefore changes three things: the shape of the
+emitted *item*, the shape of the sink, and — the part the earlier framing missed — an enforcement
+point for the RDF graph-name value space.
 
 Touch points in `packages/gen-rs`:
 
 | file | what is triple-shaped today |
 |---|---|
+| `src/runtime.inc.rs` | the `pub struct Triple` declaration itself — the public emitted-item type, and its `emits triples`-specific doc comment |
 | `src/clausec.js` | the `emit` case: the `cl.g` throw, plus the two `emit_q(s, p, o)` call sites (guarded `when` form and plain form) |
-| `src/generate.js` | `struct Machine<'i, F: FnMut(Triple)>`, `stmt_buf: Vec<Triple>`, `fn emit_q(&mut self, s, p, o)`, `pub fn parse<F: FnMut(Triple)>`, `pub fn parse_to_triples`, `pub struct PushParser<F: FnMut(Triple)>` |
+| `src/generate.js` | the verbatim splice of `runtime.inc.rs`, plus `struct Machine<'i, F: FnMut(Triple)>`, `stmt_buf: Vec<Triple>`, `fn emit_q(&mut self, s, p, o)`, `pub fn parse<F: FnMut(Triple)>`, `pub fn parse_to_triples`, `pub struct PushParser<F: FnMut(Triple)>` |
 | `src/serializer-gen.js` | `Writer::triple`, `write_triples` |
 
-(`packages/gen-js` mirrors all three, and its writer additionally rejects a non-default graph at
-runtime with "named graphs are not expressible".) One naming trap for the implementer: gen-rs's
-`semType === 'graph'` marks an **effect-only production with no synthesized value** — it has
-nothing to do with the RDF graph slot.
+`runtime.inc.rs` is where the emitted-item struct is *declared*; `generate.js` only splices it, so
+neither file alone is enough and the row belongs in any "scoped implementation plan" derived from
+this table. Two constraints on that splice:
+
+- **`Quad` is additive, not a rename.** `Term::Triple(Rc<Triple>)` is the RDF 1.2 triple-term
+  variant, so `Triple` must survive verbatim in a quad-shaped artifact; a quad grammar gains a
+  `Quad` declaration beside it, and only the `Triple` doc comment ("the graph component is
+  implicit") is conditioned on the header.
+- **Condition the include the way it is already conditioned.** `generate.js` today does one
+  header-driven transform of the runtime text — the parse-only artifact strips the print-direction
+  escape helpers — and guards it with a marker assertion that throws `parse-only runtime strip
+  failed` if the markers move. Quad emission should ride the same mechanism and copy that
+  assertion: a silently-no-op text transform is the failure mode, and for the triple path the
+  spliced bytes must stay identical (checkable against `generated/turtle12.rs` and sparq's two
+  vendored artifacts).
+
+(`packages/gen-js` mirrors all of this — including its own `src/runtime.inc.js` — and its writer
+additionally rejects a non-default graph at runtime with "named graphs are not expressible".) One
+naming trap for the implementer: gen-rs's `semType === 'graph'` marks an **effect-only production
+with no synthesized value** — it has nothing to do with the RDF graph slot.
 
 ### Proposed shape
 
@@ -153,16 +178,40 @@ nothing to do with the RDF graph slot.
    triple-shaped grammar must produce a **byte-identical** artifact to today's — that invariant
    is directly checkable against `packages/gen-rs/generated/turtle12.rs` and against sparq's two
    vendored SHACL-CS artifacts, and it is the cheapest possible regression gate for this change.
-2. **Quad-shaped grammars emit `Quad`.** `pub struct Quad { subject, predicate, object,
-   graph_name: Option<Term> }`, where `None` is the default graph. Prefer the `Option` over a
-   `Term::DefaultGraph` variant: it keeps `Term` closed, so neither the serializer nor the
-   residual printer grows a match arm that can only ever be unreachable in term position.
+2. **Quad-shaped grammars emit `Quad`, with the graph name in its own value space.**
+   `pub struct Quad { subject, predicate, object, graph_name: Option<GraphName> }`, where `None`
+   is the default graph and `pub enum GraphName { NamedNode(Rc<str>), BlankNode(Rc<str>) }` is a
+   closed two-variant type — N-Quads and TriG admit only IRIs and blank nodes as graph labels.
+   The obvious first shape, `Option<Term>`, is **wrong**: it makes
+   `Quad { .., graph_name: Some(Term::Literal(..)) }` a representable value, which is not an RDF
+   quad, and the erasure described above means no earlier stage would have rejected it — the
+   representation would be the last line of defence, and `Term` is too wide to be one.
+   Keeping the graph name out of `Term` also preserves the reason for not adding
+   a `Term::DefaultGraph` variant — `Term` stays closed, and neither the serializer nor the
+   residual printer grows a match arm that is unreachable in term position.
    The sink becomes `F: FnMut(Quad)`, with `stmt_buf: Vec<Quad>`, `emit_q(s, p, o, g)`,
    `parse_to_quads`, and `PushParser<F: FnMut(Quad)>`. Statement-granular push rollback is
    unaffected — it buffers whatever the item type is.
-3. **Compile the slot, do not special-case it.** In the clause compiler the throw becomes
-   `Some(<term argument>)` for `@g` and `None` otherwise, in both the guarded and plain emit
-   paths.
+3. **Compile the slot through the term path, but check it at both ends.** The `@g` expression
+   evaluates via the existing `termArg()`, so the throw becomes `Some(<term argument>)` and
+   absence becomes `None`, in both the guarded and plain emit paths. Because `termArg()` yields an
+   erased `Term`, that alone admits a literal, so the graph slot needs two checks, neither of which
+   exists today:
+   - **Compile time, where it is decidable.** In the clause compiler, reject a `@g` expression
+     whose *syntactic* form cannot produce a graph name — a `literal(..)` or `tt(..)` call, or a
+     string-literal constant — with an error naming the grammar position. This is a partial check
+     by construction: a `@g` that is a production call or a binding is erased to `term` and cannot
+     be decided statically without the semantic-type retention that v0.1 does not have.
+   - **Emission time, for the rest.** `emit_q` takes the graph argument through a fallible
+     `Term -> GraphName` conversion and raises a parse error with a stable code (the generated
+     parser already carries stable codes such as `UNDECLARED_PREFIX` and `MAXDEPTH`) when the term
+     is a literal or a triple term. This is what makes the value space an *invariant* rather than a
+     convention: an out-of-space term is a diagnosable error, never a constructed `Quad`.
+
+   Retaining `graphT` end-to-end — i.e. making the compile-time check total — is the v0.2
+   positional-typing job and should be scoped as its own upstream bead, not smuggled in here. Until
+   then the `GraphName` type plus the emission-time conversion is what stops the v0.1 path from
+   representing a non-quad.
 4. **Diagnose at the header, not at the backend.** `@g` in a grammar that declares `emits
    triples` should be a front-end error naming the header — a better message than today's
    backend throw, and it keeps the two backends from drifting on which grammars they accept.
@@ -172,15 +221,29 @@ nothing to do with the RDF graph slot.
    genuine design step and should be scoped as its own bead rather than smuggled into this one.
 6. **Threading `g` in a v0.1-surface grammar.** v0.1 has no inherited attributes, but productions
    take parameters (precedent: `targetClass(n: subjT)` in the vendored `shaclc12ext.shuttle`), so
-   a TriG grammar can thread the label explicitly as `triplesBlock(g: term)`. The v0.2 module
-   design replaces that with the inherited `g` attribute plus constant folding; the v0.1 shape
-   should be written so it maps onto that without a semantic change.
+   a TriG grammar can thread the label explicitly as `triplesBlock(g: term)`. Note that a threaded
+   parameter is exactly the erased case step 3's compile-time check cannot decide, so this is the
+   shape that depends on the emission-time conversion. The v0.2 module design replaces the
+   threading with the inherited `g` attribute plus constant folding, and the retained `graphT` with
+   it; the v0.1 shape should be written so it maps onto that without a semantic change.
 7. **Tests, mirroring how the two closed gaps were tested.** Add an `emits quads` synthetic
    fixture beside the existing one and assert the artifact contract on the quad path (`pub struct
-   Quad`, `pub fn parse_to_quads`, `None` graph for `@g`-free emits, std-only, no `unsafe`), plus
-   the byte-identity of the triple artifacts. Cross-backend identity (`test/conformance.sh`) needs
-   a quad oracle pair, so the honest first grammar is minimal N-Quads against the W3C N-Quads
-   suite — TriG after, once the grouped writer exists.
+   Quad`, `pub enum GraphName`, `pub fn parse_to_quads`, `None` graph for `@g`-free emits,
+   std-only, no `unsafe`), plus the byte-identity of the triple artifacts. The value-space rule of
+   step 3 needs its own **negative** tests, in *both* backends, or it is a comment rather than a
+   gate:
+   - a grammar whose `@g` is a `literal(..)` and one whose `@g` is a `tt(..)` triple term must be
+     **rejected at generation time**, with the error naming the grammar position;
+   - a grammar whose `@g` is an erased production call returning a literal must produce a
+     generated parser that **errors with the stable graph-name code** on an input that reaches it —
+     a behavioural witness, like the `@maxdepth` boundary test, not a pattern match on the
+     emitted text;
+   - the `@g`-free emit must still yield the default graph (`None`), so the checks cannot be
+     satisfied by rejecting everything.
+
+   Cross-backend identity (`test/conformance.sh`) needs a quad oracle pair, so the honest first
+   grammar is minimal N-Quads against the W3C N-Quads suite — TriG after, once the grouped writer
+   exists.
 
 ### Consequence for the sparq bead map
 
