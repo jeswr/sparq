@@ -763,6 +763,52 @@ mod shacl {
         let bad = store.validate("@prefix ex: <http://ex/> . ex:a ex:p", SHAPES, "turtle");
         assert!(bad.is_err(), "a truncated data graph must return Err");
     }
+
+    /// [SONNET-4.6] gh-2520: `validateStore(shapes, format)` validates the store's
+    /// OWN triples across the wasm/JS boundary — the stateful counterpart. (Report
+    /// equivalence with the stateless one-shot, which holds only modulo the
+    /// blank-node labels each shapes parse mints afresh, is asserted in the native
+    /// `src/shacl.rs` tests; here we pin that the export reads the stored triples.)
+    #[wasm_bindgen_test]
+    fn validate_store_reads_stored_triples() {
+        let store = Store::load(
+            r#"
+            @prefix ex: <http://example.org/> .
+            ex:bob a ex:Person ; ex:age -1 .
+        "#,
+            "turtle",
+        )
+        .unwrap();
+        let json = store
+            .validate_store(SHAPES, "turtle")
+            .expect("validateStore must return a report");
+        assert!(json.contains(r#""conforms":false"#), "{json}");
+        assert!(
+            json.contains(r#""focusNode":"<http://example.org/bob>""#),
+            "the store's own focus node: {json}"
+        );
+        assert!(
+            json.contains(r#""message":"age must be a non-negative integer""#),
+            "declared message: {json}"
+        );
+
+        // An empty store conforms vacuously — the receiver, not an argument, is
+        // what changed between the two calls.
+        let empty = Store::load("", "turtle").unwrap();
+        assert_eq!(
+            empty.validate_store(SHAPES, "turtle").unwrap(),
+            r#"{"conforms":true,"results":[]}"#
+        );
+    }
+
+    /// A malformed shapes document surfaces as the JsError Err arm (the arm that
+    /// cannot run natively), not a trap.
+    #[wasm_bindgen_test]
+    fn validate_store_shapes_parse_error_is_err() {
+        let store = Store::load("", "turtle").unwrap();
+        let bad = store.validate_store("@prefix sh: <http://ex/> . sh:a sh:p", "turtle");
+        assert!(bad.is_err(), "a truncated shapes graph must return Err");
+    }
 }
 
 // ---- [OPUS-4.8] sq-quly (#796): the opt-in SCS parse binding, in real wasm ----
