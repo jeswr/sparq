@@ -90,7 +90,13 @@ The HTTP surface (`sparq-server`) exposes the same closure behind its own opt-in
 `solid-authz-trust` feature: the request's JSON trust block may carry a
 `"certifications"` array (wire schema in `crates/sparq-server/src/solid_authz.rs`), and
 the handler runs `derive_effective_rules(..., depth_bound = 1)` ahead of admission,
-reporting `certGraphDerived` in the decision JSON.
+reporting `certGraphDerived` in the decision JSON. Both `CertScope` kinds are on the wire:
+`"scopeKind": "anyService"`, and `"scopeKind": "shape"` + `"scopeShapePredicateIri"` for a
+statement-type-scoped edge (`sq-sllu4`). A shape scope travels as a `trust:forPredicate`
+IRI, not an arbitrary shape closure, because the certifier's signature covers the scope
+triples — the server rebuilds ONE canonical desugaring (fixed blank-node labels, fixed
+triple order; see `cert_scope_predicate_shape`) so the certifier's own reconstruction hashes
+to the same signed preimage. Anything else fails the signature gate.
 
 ## The anchor rule — `trust:TrustRule` is the ceiling
 
