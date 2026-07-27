@@ -430,6 +430,25 @@ jobs:
       # self-test in differential.yml).
       - name: Self-test demoted-lane failure filer (id/dedupe/append/log-tail logic)
         run: python3 scripts/ci-file-demoted-lane-failure.py --self-test
+      # [OPUS-5] sq-jxeqz / #4559: the bench HARD-ZONE gate's pure logic
+      # (scripts/bench_hardzone.py). Its --self-test previously ran ONLY inside bench.yml's
+      # "Hard zone" step, which is guarded `github.event_name != 'schedule' && github.ref ==
+      # 'refs/heads/main'` — so the gate's own logic was NEVER exercised on a PR, and a change
+      # to it could only be discovered by reddening main AFTER merge. That is exactly how the
+      # zero-boundary defect in #4559 reached main and then persisted (15 of the last 60
+      # Benchmarks runs failed on that one step). Running it HERE, on every PR, means a
+      # regression in the regression gate reds the PR that causes it. Hermetic: no network,
+      # no git, no repo writes (same stdlib-only pattern as the lints above).
+      - name: Self-test bench hard-zone gate (zero boundary + noise floor + resolution bounds)
+        run: python3 scripts/bench_hardzone.py --self-test
+      # ...and the WIRING of that gate: the step above must exist and stay unconditional, the
+      # bench.yml lane must keep `set -euo pipefail` with no `|| true` / continue-on-error, and
+      # the hard-zone step must keep running BEFORE the Store step (the anti-laundering
+      # invariant — Store auto-pushes this run's point, so gating afterwards would publish a
+      # rejected regression into the very median that judges it). This test also asserts its
+      # OWN step is present, so the seam cannot be un-wired one level up.
+      - name: Self-test bench hard-zone WIRING (PR coverage + publish order + no swallow)
+        run: python3 scripts/tests/test_bench_hardzone_wiring.py
       # [FABLE-5] formal-lanes fix: the nightly miri.yml UB lane's verdict CLASSIFIER
       # (scripts/miri_classify_verdict.py) decides whether a shard's non-passes are known
       # per-test-cap TIMEOUTS (cost debt, sq-0s15k — non-fatal) or a GENUINE Miri UB/assertion
