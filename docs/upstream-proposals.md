@@ -1,13 +1,21 @@
-# Upstream proposals — resolution status (2026-06-11)
+# Upstream proposals — resolution status (re-checked 2026-07-27)
 
 **Section A (oxigraph PRs): RESOLVED, nothing filed — all six fixes already exist on
 oxigraph main.** The Chumsky/Logos parser rewrite (`dabda10`, 2026-05-02) subsumes
 fixes 1–4 and 6; `c29be03` (2026-05-21) fixes 5. Verified against upstream main
 `de4dc5f` (2026-06-09) with a 13-probe harness (each bug case + legal-counterpart
-guards). These fixes are **unreleased** — main's lib/spargebra still reads 0.4.6, so
-the published crate remains buggy and sparq's vendored copy stays until a >0.4.6
-release ships; re-run the conformance suite against that release, then retire
-`vendor/spargebra` and the `[patch.crates-io]` entry.
+guards). These fixes are **still unreleased as of 2026-07-27**: crates.io tops out
+at spargebra 0.4.6, oxigraph's released `v0.5.9` tag still ships `lib/spargebra` at
+version 0.4.6, and main was bumped to `0.5.0-dev` on 2026-07-19 (`a3d8311e`). The
+published crate therefore remains buggy and sparq's vendored copy stays until a
+release above 0.4.6 ships.
+
+Re-check with `python3 scripts/check-spargebra-release.py`. Retirement (bead
+`sq-98w7z.8`) is **not** a drop-and-bump: 13 manifests depend on the vendored tree,
+the next release is a semver-major `0.5.0` carrying a newer `oxrdf`, and four of the
+ten vendored patches are sparq-local with no upstream home. The full scope and the
+dated check log live in `vendor/spargebra/SPARQ-PATCHES.md` § *Upstream release
+watch*.
 
 **Section B (rdf-tests issues): not yet filed, awaiting go-ahead (tracked in beads).**
 Tracker search 2026-06-11: Issues 3+4 fall under the already-open w3c/rdf-tests#58

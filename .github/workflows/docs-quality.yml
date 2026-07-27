@@ -575,6 +575,19 @@ jobs:
       # so a silent rename back to the taken name fails CI here. Stdlib-only, no network.
       - name: Self-test check-pypi-name.py (decision table + dist-name reader)
         run: python3 scripts/check-pypi-name.py --self-test
+      # [OPUS-5] sq-98w7z.8: the upstream-release watch for the vendored spargebra
+      # (scripts/check-spargebra-release.py) answers the one question gating retirement of
+      # vendor/spargebra + the root [patch.crates-io] entry — "has oxigraph released a
+      # spargebra above 0.4.6 yet?". Its LIVE mode queries the crates.io sparse index
+      # (network), so it is a developer/bead-pickup tool and deliberately NOT a required
+      # check — a crates.io outage must never red a gate. Its version-comparison logic IS
+      # hermetic, and it is the part that can silently rot into a WRONG answer: mis-ranking
+      # a yanked or pre-release entry would report "released" and trigger a retirement that
+      # the conformance ratchet would then fail. The self-test is NON-VACUOUS — dropping
+      # either the yanked filter or the prerelease filter makes it exit 1. Stdlib-only, no
+      # network — mirrors the other scripts/check-*.py --self-test lints here.
+      - name: Self-test check-spargebra-release.py (yanked + prerelease version ranking)
+        run: python3 scripts/check-spargebra-release.py --self-test
       # [OPUS-4.8] sq-mraf: the build-BOUNDARY honesty assertion in
       # site/scripts/build-papers.mjs re-runs BOTH shared gates over the exact paper
       # sources + paper-evidence.json before any artifact is written, so the factory can

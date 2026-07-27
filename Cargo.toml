@@ -13,10 +13,18 @@ exclude = ["vendor/spargebra", "fuzz", "gui/src-tauri"]
 # CI runners without those libs. The GUI is built/linted/typechecked in its own path-scoped
 # `.github/workflows/gui.yml` lane (which installs the system deps). [OPUS-4.8]
 
-# Vendored spargebra 0.4.6 with surgical W3C-conformance parser fixes (see
-# vendor/spargebra/SPARQ-PATCHES.md and docs/upstream-proposals.md — each fix is
-# prepared as an upstream PR against oxigraph/oxigraph). Drop this patch once the
-# fixes land upstream in a released spargebra.
+# Vendored spargebra 0.4.6: six surgical W3C-conformance parser fixes (§1–§6, each
+# prepared as an upstream PR against oxigraph/oxigraph) plus four sparq-local patches
+# (§7–§10) — see vendor/spargebra/SPARQ-PATCHES.md and docs/upstream-proposals.md.
+#
+# Retirement is bead sq-98w7z.8; re-check upstream with
+# `python3 scripts/check-spargebra-release.py`. Last checked 2026-07-27: crates.io
+# still tops out at 0.4.6, so this patch stays. Dropping it is NOT a one-line change —
+# bench/* and zk/xpath/differential are separate workspaces this patch table does not
+# reach (they pin `path = ".../vendor/spargebra"` directly), the next upstream release
+# is a semver-major 0.5.0 that this `version = "0.4"` requirement will not resolve, and
+# §7–§10 have no upstream home (§8 is /sparql DoS hardening). Read the release-watch
+# section of SPARQ-PATCHES.md before starting.
 [patch.crates-io]
 spargebra = { path = "vendor/spargebra" }
 
