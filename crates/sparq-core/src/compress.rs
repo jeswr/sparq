@@ -1190,14 +1190,37 @@ mod byte_attribution {
     /// blocking exactly as [`CompressedPerm::encode`] does (`rows.chunks(BLOCK)`), and
     /// adding the resident directory cost (16 B/block: one `([Id;3], u32)` per block).
     fn attribute_perm(rows: &[[Id; 3]]) -> (FieldBytes, u64) {
+        attribute_perm_bs(rows, BLOCK)
+    }
+
+    /// [SONNET-4.6] sq-7d3dj.32.2 — as [`attribute_perm`] but at an ARBITRARY block size
+    /// `bs` (rows per block), for the block-size sweep. Legitimate because the block stream
+    /// is block-size agnostic: every block self-describes its row count with a leading
+    /// `count` varint, so `rows.chunks(bs)` + the REAL [`encode_block`] is byte-for-byte
+    /// what a `BLOCK = bs` build would emit. No encoder change is needed to measure the
+    /// trade (and none is made — this module is `#[cfg(test)]`).
+    fn attribute_perm_bs(rows: &[[Id; 3]], bs: usize) -> (FieldBytes, u64) {
         let mut fb = FieldBytes::default();
         let mut n_blocks = 0u64;
-        for chunk in rows.chunks(BLOCK) {
+        for chunk in rows.chunks(bs) {
             attribute_block(chunk, &mut fb);
             n_blocks += 1;
         }
         let dir_bytes = n_blocks * 16;
         (fb, dir_bytes)
+    }
+
+    /// The byte classes that exist ONLY because the stream is blocked: the per-block
+    /// `count` varint, the block's absolute first row, and the resident directory entry.
+    /// Every other class is a row delta whose width is set by id density, not by framing.
+    ///
+    /// This is the quantity that bounds the block-size question. Growing `bs` drives the
+    /// block count `B → 1`, so the *most* any block-size increase can ever save is this
+    /// total (strictly less, in fact: each row promoted out of `first_row_abs` still has
+    /// to be paid for as a delta). It is therefore a sound upper bound on the win, which
+    /// is what [`block_size_cannot_flatten_the_scale_growth`] asserts against.
+    fn block_overhead(fb: &FieldBytes, dir: u64) -> u64 {
+        fb.count + fb.first_row_abs + dir
     }
 
     /// A deterministic xorshift PRNG (same family as the file's `sample`), seeded so runs
@@ -1452,6 +1475,176 @@ mod byte_attribution {
             );
         }
         println!("\n===== end discriminator =====\n");
+    }
+
+    /// Sums the per-field attribution over all six permutations at block size `bs`,
+    /// returning `(fields, directory_bytes)` — the whole store's block-stream cost, which
+    /// is what the §4 B/triple figures are about.
+    fn agg_per_triple_bs(triples: &[[Id; 3]], bs: usize) -> (FieldBytes, u64) {
+        let mut agg = FieldBytes::default();
+        let mut agg_dir = 0u64;
+        for (_, order) in PERM_ORDERS {
+            let rows = perm_rows(triples, order);
+            let (fb, dir) = attribute_perm_bs(&rows, bs);
+            agg.add(&fb);
+            agg_dir += dir;
+        }
+        (agg, agg_dir)
+    }
+
+    /// Store B/triple (all six permutations, block stream + directory) at block size `bs`,
+    /// alongside the framing-only share that a block-size change can move.
+    fn store_bpt_at(triples: &[[Id; 3]], bs: usize) -> (f64, f64) {
+        let n = triples.len().max(1) as f64;
+        let (agg, dir) = agg_per_triple_bs(triples, bs);
+        ((agg.total() + dir) as f64 / n, block_overhead(&agg, dir) as f64 / n)
+    }
+
+    /// A corpus small enough for the default (non-`--ignored`) test run: 6 perms over
+    /// 200K triples is ~1.2M attributed rows, well under a second.
+    const SWEEP_N: usize = 200_000;
+
+    /// SELF-CHECK at NON-default block sizes: the sweep is only meaningful if attribution
+    /// stays byte-exact when the chunking changes, so re-run the `total() == real encoded
+    /// length` identity at each block size the sweep uses (including sizes that do not
+    /// divide the row count, so the short tail block is covered).
+    #[test]
+    fn attribution_total_exact_at_every_swept_block_size() {
+        let triples = synth_watdiv(20_000, 500_000, 0xB10C);
+        for bs in [7usize, 32, 128, 512, 4096] {
+            for (name, order) in PERM_ORDERS {
+                let rows = perm_rows(&triples, order);
+                let mut real = Vec::new();
+                for chunk in rows.chunks(bs) {
+                    encode_block(chunk, &mut real);
+                }
+                let (fb, _dir) = attribute_perm_bs(&rows, bs);
+                assert_eq!(
+                    fb.total(),
+                    real.len() as u64,
+                    "attribution total != real encoded length (bs={}, perm={})",
+                    bs,
+                    name
+                );
+            }
+        }
+    }
+
+    /// [SONNET-4.6] sq-7d3dj.32.2 — the block-size trade, ASSERTED (not merely printed).
+    ///
+    /// Bigger blocks amortise the framing cost (one directory entry + one `count` varint +
+    /// one absolute first row per block) over more rows, so store B/triple falls
+    /// monotonically with `bs`. This pins the *shape* of that curve so a future encoding
+    /// change cannot silently invert it, and — with
+    /// [`block_size_cannot_flatten_the_scale_growth`] — bounds how much is on the table.
+    ///
+    /// Deliberately NOT a proposal to raise `BLOCK`: the saving is bounded (see the sibling
+    /// test) and it is paid for in *latency* — a point probe decodes a whole block, so
+    /// doubling `bs` doubles the per-scan decode work. That trade is the query-latency
+    /// harness's to measure (`scripts/bench/compressed-query-delta.sh`, sq-7d3dj.32.2.2),
+    /// not this spike's to assert.
+    #[test]
+    fn store_bytes_per_triple_falls_monotonically_with_block_size() {
+        let triples = synth_watdiv(SWEEP_N, 500_000, 0xB10C);
+        let mut prev: Option<(usize, f64, f64)> = None;
+        for bs in [32usize, 64, 128, 256, 512, 1024] {
+            let (total, overhead) = store_bpt_at(&triples, bs);
+            if let Some((pbs, ptotal, poverhead)) = prev {
+                assert!(
+                    total < ptotal,
+                    "store B/triple did not fall from bs={} ({:.4}) to bs={} ({:.4})",
+                    pbs, ptotal, bs, total
+                );
+                assert!(
+                    overhead < poverhead,
+                    "framing overhead did not fall from bs={} ({:.4}) to bs={} ({:.4})",
+                    pbs, poverhead, bs, overhead
+                );
+            }
+            prev = Some((bs, total, overhead));
+        }
+    }
+
+    /// [SONNET-4.6] sq-7d3dj.32.2 — the VERDICT on the epic's open sub-question: *"whether
+    /// a block-size ... tweak flattens"* the compressed store's growth with scale (36.75
+    /// B/triple at 1M → 48.75 at 10M, `research/compressed-memory-profile.md` §4).
+    ///
+    /// **It cannot, and this test is the proof.** Framing cost is the ONLY thing a block
+    /// size can move, and driving `bs → ∞` (block count → 1) is a strict upper bound on
+    /// that win. So the test holds triple count fixed, moves only the term space — the
+    /// variable §4's H1/H2 are about — and asserts:
+    ///
+    /// 1. the growth reproduces (denser id space ⇒ more B/triple), so we are measuring the
+    ///    real phenomenon and not a degenerate corpus;
+    /// 2. framing cost is **scale-invariant** — it barely moves between the two regimes,
+    ///    because directory bytes are a flat 16/`bs` per row and the absolute first row
+    ///    widens by at most a byte or two per column;
+    /// 3. the entire framing budget is **smaller than the growth it would have to absorb**,
+    ///    so even deleting blocking altogether leaves the growth substantially intact.
+    ///
+    /// Conclusion: the growth lives in the row-delta classes (`reset_d0`/`reset_d1`
+    /// absolutes widening with the term space — §4's H1), which is exactly the class the
+    /// adopted `SPQCPRM2` frame-of-reference encoding (sq-7d3dj.32.2.6/.7) attacks. A
+    /// block-size change is the wrong lever, and is now measured rather than assumed.
+    #[test]
+    fn block_size_cannot_flatten_the_scale_growth() {
+        // Same triple count, ~20x term space: the id-density axis in isolation.
+        let sparse = synth_watdiv(SWEEP_N, 100_000, 0xB10C);
+        let dense = synth_watdiv(SWEEP_N, 2_000_000, 0xB10C);
+        assert_eq!(sparse.len(), dense.len(), "regimes must be equal-sized to compare B/triple");
+
+        let (total_sparse, framing_sparse) = store_bpt_at(&sparse, BLOCK);
+        let (total_dense, framing_dense) = store_bpt_at(&dense, BLOCK);
+        let growth = total_dense - total_sparse;
+
+        // (1) The phenomenon reproduces: a denser id space costs more per triple.
+        assert!(
+            growth > 1.0,
+            "expected the id-density growth to reproduce, got {:.3} -> {:.3} B/triple",
+            total_sparse, total_dense
+        );
+
+        // (2) Framing is scale-invariant: it is not what grows.
+        assert!(
+            (framing_dense - framing_sparse).abs() < 0.5,
+            "framing cost should be scale-invariant, moved {:.3} -> {:.3} B/triple",
+            framing_sparse, framing_dense
+        );
+
+        // (3) The upper bound on any block-size win is smaller than the growth itself, so
+        //     no choice of block size flattens the curve.
+        assert!(
+            framing_dense < growth,
+            "framing budget {:.3} B/triple is the MOST a block-size change can save; it \
+             must be below the {:.3} B/triple growth for the verdict to hold",
+            framing_dense, growth
+        );
+    }
+
+    /// [SONNET-4.6] sq-7d3dj.32.2 — the block-size sweep TABLE at scale. Prints store
+    /// B/triple and its framing share across block sizes at two id-density regimes. All
+    /// numbers are NON-canonical work-box measurements (never a doc/test perf number); the
+    /// asserting tests above carry the verdict. Run with
+    /// `cargo test -p sparq-core --lib byte_attribution::sweep -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "spike measurement: run explicitly with --ignored --nocapture (allocates ~hundreds of MB)"]
+    fn sweep_block_size_across_id_density() {
+        println!("\n===== sq-7d3dj.32.2 block-size sweep (NON-canonical work-box) =====");
+        for (label, n_terms) in [("1M-term", 1_000_000u64), ("5M-term", 5_000_000)] {
+            let triples = synth_watdiv(5_000_000, n_terms, 0xB10C);
+            println!(
+                "\n--- regime {} : {} distinct triples, {} terms ---",
+                label,
+                triples.len(),
+                n_terms
+            );
+            println!("{:>6} {:>12} {:>12} {:>12}", "bs", "B/triple", "framing", "deltas");
+            for bs in [32usize, 64, 128, 256, 512, 1024, 4096] {
+                let (total, framing) = store_bpt_at(&triples, bs);
+                println!("{:>6} {:>12.3} {:>12.3} {:>12.3}", bs, total, framing, total - framing);
+            }
+        }
+        println!("\n===== end sweep — framing is the only class block size can move =====\n");
     }
 }
 
