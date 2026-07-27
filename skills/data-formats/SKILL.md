@@ -676,6 +676,30 @@ cargo build -p sparq-cli --features serialize-rdf
   `SPQCPRM1` format, so a perm built with the feature on persists byte-identically to one built
   with it off, and a memory-mapped perm carries no filter. Whether the hypothesised block-skip
   win materialises is to be confirmed on the canonical perf host (no number is asserted here).
+- **`elias-fano` (opt-in, OFF by default) — compressed-seek codecs, PROTOTYPE, not wired in.**
+  `sparq-core = { …, features = ["elias-fano"] }` exposes `sparq_core::eliasfano` with
+  `EliasFano` and `PartitionedEliasFano` (plus `EliasFanoIter` and
+  `PartitionedEliasFano::DEFAULT_PARTITION`). Their `next_geq(target)` answers a successor query
+  *directly on the compressed data* — no whole-block decode, unlike the varint block codec. Pure
+  `std`, no new dependency.
+  - **Input MUST be non-decreasing.** `encode` returns `None` on a non-monotone slice (EF is
+    undefined there — that means the caller mis-segmented the column), and also `None` when the
+    high-bits vector would exceed `u32::MAX` bits. An empty slice encodes fine. A permutation
+    column is monotone only *within* one leading-prefix group, so you segment first.
+  - **Nothing in the store calls this yet.** It is a measurement-gated spike: not a `PermData`
+    variant, no join uses it, and its A/B against the incumbent codec
+    (`eliasfano::tests::measure_ef_vs_block_varint`, `#[ignore]`d) is **native-only** — it times
+    with `std::time::Instant`, so the `wasm32` half of the comparison is unresolved. Treat
+    adoption as an open question; no performance number is asserted.
+  ```rust
+  use sparq_core::eliasfano::EliasFano;
+  let ef = EliasFano::encode(&[3, 3, 9, 40, 41]).expect("non-decreasing");
+  assert_eq!(ef.get(2), Some(9));
+  assert_eq!(ef.next_geq(10), Some((3, 40))); // first (index, value) >= target
+  assert_eq!(ef.next_geq(99), None);          // every element is smaller
+  assert_eq!(ef.iter().collect::<Vec<_>>(), vec![3, 3, 9, 40, 41]);
+  assert!(EliasFano::encode(&[5, 1]).is_none()); // not non-decreasing
+  ```
 - **SPQCPRM2 frame-of-reference col2 encoding (versioned on-disk format; V2 emission opt-in).**
   A second block-stream version, `SPQCPRM2`, alongside the shipped `SPQCPRM1`. Where `SPQCPRM1`
   writes a middle-column-reset col2 id ABSOLUTE, `SPQCPRM2` writes it as a zigzag signed delta from
