@@ -737,6 +737,17 @@ jobs:
       # fail-loud exits (replay error / total blocker => non-zero).
       - name: Self-test the nightly selection-bug alarm (correlation + fail-loud — sq-va7at)
         run: python3 scripts/tests/test_ci_selection_alarm.py
+      # [OPUS-5] The review-lane BLIND-SPOT alarm (scripts/review_lane_alarm.py,
+      # .github/workflows/review-alarm.yml). Hermetic (no gh, no network). Two halves:
+      # the four verdict obligations — no-verdict is not armable, a superseded head does
+      # not count, an author cannot verdict their own PR, and the review brief's own
+      # quoted `VERDICT: pass` instruction text is not a pass — plus the YAML SEAM
+      # inspection (schedule present, self-test ordered before the live step, the call
+      # site intact, and the job's permissions carrying `issues: write` with NO
+      # `pull-requests: write`, so the detector can never acquire arming authority).
+      # The suite also pins its OWN call site here, so it cannot silently leave CI.
+      - name: Self-test the review-lane blind-spot alarm (verdict obligations + YAML seam)
+        run: python3 scripts/tests/test_review_lane_alarm.py
       # [SONNET-4.6] sq-1cb6l: the 5 remaining hermetic test suites found by the
       # #1670 audit, wired here alongside the other ci-scripts self-tests.
       #
