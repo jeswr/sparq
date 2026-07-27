@@ -75,12 +75,13 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import os
 import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -119,11 +120,31 @@ PY_GUARD_RE = re.compile(
 RUST_SRC_RE = re.compile(r"^crates/[^/]+/src/.*\.rs$")
 PY_SCRIPT_RE = re.compile(r"^scripts/[^/]*\.py$")
 
-# Where a test that "names the guard" is allowed to live. `/fuzz/` is here on
-# MEASURED evidence: it was the ONE false positive among the 39 distinct symbols
-# this check reports on the current tree — `sparq-shacl::validate_graph` is
-# exercised by fuzz/fuzz_targets/validate_shacl.rs, which stops compiling if the
-# function is deleted, i.e. it is a test by this check's own definition.
+# Where a test that "names the guard" is allowed to live, decided from the PATH
+# alone. These four are whole-file test hosts; nothing else is admitted on its
+# path.
+#
+# CORRECTION — the sentence that used to stand here was false, and it was
+# load-bearing, so it is quoted rather than quietly deleted:
+#
+#   "`/fuzz/` is here on MEASURED evidence: it was the ONE false positive among
+#    the 39 distinct symbols this check reports on the current tree"
+#
+# The `/fuzz/` half is true (`sparq-shacl::validate_graph` is exercised only by
+# fuzz/fuzz_targets/validate_shacl.rs, which stops compiling if the function is
+# deleted, i.e. it is a test by this check's own definition). "the ONE false
+# positive" was not. Deleting each of the then-32 Python firings and running that
+# script's own gating `--self-test` reds 10 of them; an 11th, Rust, was
+# `sparq-mpc::check_bounded_path`, whose 14 `#[test]` fns live in
+# `hidden_path/planner/tests.rs`. That last one was not a limit of static
+# analysis but a HOLE IN THIS RESOLVER, and it is now fixed below — see
+# `rust_cfg_test_mod_decls`. The honest current numbers, and the residue that
+# remains, are stated in the header block above.
+#
+# A path hint is the WEAKEST way to decide this and it is deliberately not
+# extended further: the two real misses this round were both fixed by modelling
+# the language's own structure (Rust `mod` resolution, Python's parser) instead
+# of adding a fifth substring.
 TEST_PATH_HINTS = (
     "/tests/",
     "scripts/tests/",
@@ -336,9 +357,14 @@ def _cfg_implies_test(pred: str) -> bool:
 _CFG_ATTR_RE = re.compile(r"#\s*\[\s*cfg\s*\(")
 
 
-def rust_cfg_test_spans(masked: str) -> list[tuple[int, int]]:
-    """(start, end) of every `#[cfg(<implies test>)] <item> { .. }` BODY."""
-    spans: list[tuple[int, int]] = []
+def _cfg_test_attr_ends(masked: str) -> list[int]:
+    """Offset just past the closing `]` of every `#[cfg(<implies test>)]`.
+
+    One place decides "is this attribute a test gate", so the two consumers below
+    — the braced-body scan and the `mod X;` declaration scan — can never drift
+    apart on the predicate.
+    """
+    ends: list[int] = []
     n = len(masked)
     for m in _CFG_ATTR_RE.finditer(masked):
         depth, j = 1, m.end()
@@ -354,7 +380,15 @@ def rust_cfg_test_spans(masked: str) -> list[tuple[int, int]]:
             k += 1
         if k >= n or masked[k] != "]":
             continue
-        k += 1
+        ends.append(k + 1)
+    return ends
+
+
+def rust_cfg_test_spans(masked: str) -> list[tuple[int, int]]:
+    """(start, end) of every `#[cfg(<implies test>)] <item> { .. }` BODY."""
+    spans: list[tuple[int, int]] = []
+    n = len(masked)
+    for k in _cfg_test_attr_ends(masked):
         while k < n:                       # walk to the item's body, or give up
             if masked[k] == ";":           # `#[cfg(test)] use foo;` — no body
                 break
@@ -367,6 +401,80 @@ def rust_cfg_test_spans(masked: str) -> list[tuple[int, int]]:
                 break
             k += 1
     return spans
+
+
+# ---------------------------------------------------------------------------
+# `#[cfg(test)] mod X;` — the test body lives in ANOTHER FILE.  [OPUS-5]
+# ---------------------------------------------------------------------------
+# Round-3 blocking finding. A bodyless `mod X;` under a test cfg is the SECOND
+# most common way this repo writes Rust unit tests, and the resolver could not
+# see it at all: the declaring attribute is in the PARENT file, so `X.rs` itself
+# contains no `#[cfg(test)]` and contributed zero test text. Measured: 13 such
+# files in the tree, 13 of 13 invisible, which is what made
+# `sparq-mpc::check_bounded_path` — called by 14 `#[test]` fns in
+# `hidden_path/planner/tests.rs` — read as "named by no test".
+#
+# `TEST_PATH_HINTS` could not fix this: it matches the DIRECTORY `/tests/`, and
+# these files are `planner/tests.rs`, `adversarial_tests.rs`, `ttl/tests.rs` …
+# Adding a fifth path substring would have been the third patch to the same
+# defect CLASS (test text that exists but is not attributed to the guard). So
+# this resolves the declaration the way rustc does instead: `mod X;` in `p.rs`
+# means `p/X.rs` or `p/X/mod.rs`, and in `lib.rs`/`main.rs`/`mod.rs` it means the
+# sibling `X.rs` or `X/mod.rs`.
+_MOD_DECL_RE = re.compile(r"\s*(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+(?P<name>\w+)\s*;")
+_ANY_MOD_DECL_RE = re.compile(
+    r"^[^\S\n]*(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+(\w+)\s*;", re.M
+)
+
+
+def rust_cfg_test_mod_decls(masked: str) -> list[str]:
+    """Names declared by `#[cfg(<implies test>)] (pub )?mod NAME;` — bodyless."""
+    names: list[str] = []
+    for k in _cfg_test_attr_ends(masked):
+        m = _MOD_DECL_RE.match(masked, k)
+        if m:
+            names.append(m.group("name"))
+    return names
+
+
+def rust_mod_decls(masked: str) -> list[str]:
+    """Every bodyless `(pub )?mod NAME;`, cfg-gated or not."""
+    return _ANY_MOD_DECL_RE.findall(masked)
+
+
+def rust_module_files(rel: str, name: str) -> list[str]:
+    """The paths rustc would look in for the body of `mod <name>;` declared in `rel`."""
+    p = PurePosixPath(rel)
+    base = p.parent if p.stem in ("lib", "main", "mod") else p.parent / p.stem
+    return [str(base / f"{name}.rs"), str(base / name / "mod.rs")]
+
+
+def rust_test_module_files(masks: dict[str, str]) -> set[str]:
+    """Rust src files whose ENTIRE text is test-only.
+
+    Seeded from `#[cfg(test)] mod X;` declarations and then closed transitively:
+    a module declared BY a test-only module is itself compiled only under test,
+    cfg attribute or not, so `X/mod.rs` declaring `mod helpers;` makes
+    `X/helpers.rs` test text too. Only paths that actually exist in `masks` (i.e.
+    tracked Rust src files) are admitted, so a `#[path = "…"]` override or a
+    module living outside `crates/*/src` simply does not resolve.
+    """
+    out: set[str] = set()
+    work: list[str] = []
+    for rel in sorted(masks):
+        for name in rust_cfg_test_mod_decls(masks[rel]):
+            for cand in rust_module_files(rel, name):
+                if cand in masks and cand not in out:
+                    out.add(cand)
+                    work.append(cand)
+    while work:
+        rel = work.pop()
+        for name in rust_mod_decls(masks[rel]):
+            for cand in rust_module_files(rel, name):
+                if cand in masks and cand not in out:
+                    out.add(cand)
+                    work.append(cand)
+    return out
 
 
 _DOC_LINE_RE = re.compile(r"^\s*//[/!]")
@@ -393,42 +501,74 @@ def rust_doctest_text(text: str) -> str:
     return "\n".join(out)
 
 
-_PY_TEST_DEF_RE = re.compile(
-    r"^(?:async\s+)?(?:def\s+(?:\w*self_test\w*|test_\w*)\s*\(|class\s+\w*[Tt]est\w*\s*[(:])"
-)
+PY_TEST_DEF_NAME_RE = re.compile(r"^(?:\w*self_test\w*|test_\w*)$")
+PY_TEST_CLASS_NAME_RE = re.compile(r"^\w*[Tt]est\w*$")
 
 
 def python_test_regions(text: str) -> str:
     """Bodies of top-level `def *self_test*` / `def test_*` / `class *Test*`.
 
-    Column-0 anchored: the region is the header line plus every following line
-    that is blank or indented. Everything else in the script — including the
-    guard's own `def` line and every ordinary call site — is excluded.
+    Read out of Python's OWN parse tree, not off an indentation heuristic.  [OPUS-5]
+
+    ROUND-3 CORRECTION. The previous version walked lines: the region was the
+    header plus every following line that was blank or began with a space, a tab
+    or `)`. That is not what a Python block is, and it silently TRUNCATED two
+    real self-tests in this tree at the first column-0 line inside the body:
+
+      * `scripts/export-kb-dump.py` — a `# …` comment at column 0 inside
+        `run_dry_run_self_test`, which is legal Python and does not end the
+        block. Region captured: 628 chars of 11955. `run_leak_check` and its
+        siblings were therefore reported as untested by a self-test that names
+        them 4 lines later.
+      * `scripts/check-spec-normative-status.py` — a triple-quoted fixture whose
+        markdown content starts at column 0. Region captured: 54 chars of 656.
+
+    Two different holes in one heuristic is the design being wrong rather than
+    incomplete, so the heuristic is gone. `ast` gives the exact extent of every
+    top-level statement, and there is no third case to find.
+
+    A file that does not parse contributes NOTHING (fail-closed): its guards get
+    reported rather than silently satisfied. Every `scripts/*.py` in the tree
+    parses today — they all run in CI — so this is a guard, not a code path the
+    tree depends on.
     """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return ""
     lines = text.splitlines()
     out: list[str] = []
-    i, n = 0, len(lines)
-    while i < n:
-        if _PY_TEST_DEF_RE.match(lines[i]):
-            j = i + 1
-            # NB: membership in a SET, not in a string — `"" in " \t)"` is True in
-            # Python, so a string test would swallow every blank line even if the
-            # `not .strip()` clause were ever reordered away.
-            while j < n and (not lines[j].strip() or lines[j][0] in {" ", "\t", ")"}):
-                j += 1
-            out.extend(lines[i:j])
-            i = j
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            keep = PY_TEST_DEF_NAME_RE.match(node.name) is not None
+        elif isinstance(node, ast.ClassDef):
+            keep = PY_TEST_CLASS_NAME_RE.match(node.name) is not None
         else:
-            i += 1
+            continue
+        if keep and node.end_lineno is not None:
+            out.extend(lines[node.lineno - 1: node.end_lineno])
     return "\n".join(out)
 
 
-def searchable_test_text(rel: str, text: str) -> str:
-    """The slice of `rel` in which naming a guard counts as testing it."""
+def searchable_test_text(
+    rel: str,
+    text: str,
+    test_module_files: frozenset[str] | set[str] = frozenset(),
+    masked: str | None = None,
+) -> str:
+    """The slice of `rel` in which naming a guard counts as testing it.
+
+    `test_module_files` is the set of Rust src files that some parent declares as
+    `#[cfg(test)] mod X;` — those are compiled ONLY under test, so like a
+    `tests/` file they count end to end. `masked` is an optional pre-computed
+    `mask_rust(text)` (the corpus builder already has one).
+    """
     if any(h in "/" + rel for h in TEST_PATH_HINTS):
         return text                                    # a test file, end to end
+    if rel in test_module_files:
+        return text                                    # ditto: `#[cfg(test)] mod X;`
     if RUST_SRC_RE.match(rel):
-        masked = mask_rust(text)
+        masked = mask_rust(text) if masked is None else masked
         parts = [text[a:b] for a, b in rust_cfg_test_spans(masked)]
         doc = rust_doctest_text(text)
         if doc:
@@ -443,8 +583,10 @@ def test_corpus(root: Path) -> list[tuple[str, str]]:
     """(relpath, TEST TEXT) for every file that can host a test naming a guard.
 
     The second element is deliberately NOT the file's whole text — see the block
-    comment above. A file with no test region contributes nothing, so an ordinary
-    call site never satisfies a guard, and neither does the guard's own
+    comment above — EXCEPT for a file that is a test target in its entirety: a
+    `tests/`/`benches/`/`fuzz/` file, or one declared by a parent as
+    `#[cfg(test)] mod X;`. A file with no test region contributes nothing, so an
+    ordinary call site never satisfies a guard, and neither does the guard's own
     definition line.
     """
     corpus: list[tuple[str, str]] = []
@@ -454,18 +596,36 @@ def test_corpus(root: Path) -> list[tuple[str, str]]:
         ).stdout.splitlines()
     except (subprocess.CalledProcessError, FileNotFoundError):
         return corpus
+    # Read + mask every Rust src file ONCE: the mask is needed both to resolve
+    # `#[cfg(test)] mod X;` declarations (which live in the PARENT file, so this
+    # cannot be decided per-file) and to scope each file's own test regions.
+    texts: dict[str, str] = {}
+    masks: dict[str, str] = {}
+    for rel in tracked:
+        if not RUST_SRC_RE.match(rel):
+            continue
+        try:
+            texts[rel] = (root / rel).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        masks[rel] = mask_rust(texts[rel])
+    mod_files = rust_test_module_files(masks)
     for rel in tracked:
         is_test_dir = any(h in "/" + rel for h in TEST_PATH_HINTS)
         is_py_script = PY_SCRIPT_RE.match(rel) is not None
-        if not (is_test_dir or RUST_SRC_RE.match(rel) or is_py_script):
+        is_rust_src = RUST_SRC_RE.match(rel) is not None
+        if not (is_test_dir or is_rust_src or is_py_script):
             continue
         if not (is_py_script or TEST_NAME_RE.search(rel)):
             continue
-        try:
-            text = (root / rel).read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        scoped = searchable_test_text(rel, text)
+        if rel in texts:
+            text = texts[rel]
+        else:
+            try:
+                text = (root / rel).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+        scoped = searchable_test_text(rel, text, mod_files, masks.get(rel))
         if not scoped.strip():
             continue
         corpus.append((rel, scoped))
@@ -795,6 +955,45 @@ def self_test() -> int:
         subprocess.run(["git", "add", "-A"], cwd=root, check=True)
         chk("e2e: an unrelated test does NOT satisfy the guard",
             len(check_guard_untested(added, root)), 1)
+
+    # --- `#[cfg(test)] mod X;` — the test body lives in ANOTHER FILE (round 3) ---
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "crates/sparq-x/src").mkdir(parents=True)
+        added = {"crates/sparq-x/src/lib.rs": ["pub fn validate_envelope() {}"]}
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+
+        (root / "crates/sparq-x/src/lib.rs").write_text(
+            "pub fn validate_envelope() {}\n#[cfg(test)]\nmod unit;\n"
+        )
+        (root / "crates/sparq-x/src/unit.rs").write_text(
+            "#[test]\nfn t() { crate::validate_envelope(); }\n"
+        )
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        chk("e2e: a separate-file `#[cfg(test)] mod X;` satisfies the guard",
+            len(check_guard_untested(added, root)), 0)
+
+        # …and the other direction: a PLAIN `mod X;` is production code.
+        (root / "crates/sparq-x/src/lib.rs").write_text(
+            "pub fn validate_envelope() {}\nmod unit;\n"
+        )
+        (root / "crates/sparq-x/src/unit.rs").write_text(
+            "pub fn go() { crate::validate_envelope(); }\n"
+        )
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        chk("e2e: a plain `mod X;` does NOT satisfy the guard",
+            len(check_guard_untested(added, root)), 1)
+
+    chk("`#[cfg(test)] mod X;` resolves, a braced `mod X { .. }` does not",
+        (rust_cfg_test_mod_decls(mask_rust("#[cfg(test)]\nmod unit;\n")),
+         rust_cfg_test_mod_decls(mask_rust("#[cfg(test)]\nmod unit { }\n"))),
+        (["unit"], []))
+    chk("a column-0 comment does not end a python test region",
+        "validate_lease" in python_test_regions(
+            "def self_test():\n    ok = True\n# col-0\n    validate_lease(ok)\n"),
+        True)
+    chk("an unparseable python script contributes no test text",
+        python_test_regions("def self_test():\n    validate_lease(1)\ndef (\n"), "")
 
     print()
     if failures:

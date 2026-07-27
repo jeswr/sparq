@@ -374,10 +374,20 @@ class ADefiningFileIsNotItsOwnTest(unittest.TestCase):
             self.assertEqual(pf.check_guard_untested(ADDED, t.root), [])
 
     def test_a_fuzz_target_naming_the_guard_satisfies_it(self) -> None:
-        # MEASURED: the one false positive among the 39 distinct symbols this
-        # check reports on the real tree. sparq-shacl::validate_graph is exercised
-        # only by fuzz/fuzz_targets/validate_shacl.rs, which stops compiling if
-        # the function is deleted. Kills: dropping "/fuzz/" from TEST_PATH_HINTS.
+        # CORRECTION (round 3). This comment used to read:
+        #
+        #   "MEASURED: the one false positive among the 39 distinct symbols this
+        #    check reports on the real tree."
+        #
+        # That was false. Deleting each of the then-32 Python firings and running
+        # that script's own gating `--self-test` reds 10 of them, and an 11th —
+        # `sparq-mpc::check_bounded_path` — was a Rust separate-file test module
+        # this resolver could not see (now fixed; see SeparateFileTestModules).
+        # What survives is the narrower claim this test actually pins:
+        # sparq-shacl::validate_graph is exercised only by
+        # fuzz/fuzz_targets/validate_shacl.rs, which stops compiling if the
+        # function is deleted, so it WAS a measured false positive and `/fuzz/`
+        # fixes it. Kills: dropping "/fuzz/" from TEST_PATH_HINTS.
         with tempfile.TemporaryDirectory() as td:
             t = _Tree(td)
             t.write("fuzz/fuzz_targets/f.rs",
@@ -393,6 +403,220 @@ class ADefiningFileIsNotItsOwnTest(unittest.TestCase):
                     "/// See `validate_envelope` for the envelope rules.\n"
                     "pub fn validate_envelope() -> bool { true }\n")
             self.assertEqual(len(pf.check_guard_untested(ADDED, t.root)), 1)
+
+
+class SeparateFileTestModules(unittest.TestCase):
+    """REGRESSION (round-3 blocking) — `#[cfg(test)] mod X;` puts the test text in
+    ANOTHER FILE, and the resolver could not see it.
+
+    The gating attribute lives in the PARENT, so `X.rs` contains no `#[cfg(test)]`
+    of its own and contributed ZERO test text. `TEST_PATH_HINTS` did not cover it
+    either: it matches the DIRECTORY `/tests/`, and these files are
+    `planner/tests.rs`, `adversarial_tests.rs`, `ttl/tests.rs`. Measured on the
+    real tree: 13 such files, 13 of 13 invisible — which is why
+    `sparq-mpc::check_bounded_path`, called by 14 `#[test]` fns in
+    `hidden_path/planner/tests.rs`, was reported as named by no test.
+
+    This is the SAME defect class as round 1 (test text that exists but is not
+    attributed to the guard), so these tests pin the class, not one instance:
+    the sibling form, the nested form, the `mod.rs` form, the transitive form,
+    and both directions of the cfg predicate.
+    """
+
+    GUARD_IN_TESTS = "#[test]\nfn t() { crate::validate_envelope(); }\n"
+
+    def test_a_sibling_cfg_test_module_file_satisfies_the_guard(self) -> None:
+        # THE headline case. Kills: rust_cfg_test_mod_decls returning [], and
+        # dropping the `rel in test_module_files` branch of searchable_test_text.
+        with tempfile.TemporaryDirectory() as td:
+            t = _Tree(td)
+            t.write("crates/sparq-x/src/lib.rs",
+                    "pub fn validate_envelope() {}\n#[cfg(test)]\nmod unit;\n")
+            t.write("crates/sparq-x/src/unit.rs", self.GUARD_IN_TESTS)
+            self.assertEqual(pf.check_guard_untested(ADDED, t.root), [])
+
+    def test_a_nested_cfg_test_module_file_satisfies_the_guard(self) -> None:
+        # The real shape on this tree: `planner.rs` declares it, the body is in
+        # `planner/tests.rs`. Kills: resolving `mod X;` against the wrong
+        # directory (the declaring file's own dir instead of its module dir).
+        with tempfile.TemporaryDirectory() as td:
+            t = _Tree(td)
+            t.write("crates/sparq-x/src/planner.rs", "#[cfg(test)]\nmod unit;\n")
+            t.write("crates/sparq-x/src/planner/unit.rs", self.GUARD_IN_TESTS)
+            self.assertEqual(pf.check_guard_untested(ADDED, t.root), [])
+
+    def test_a_cfg_test_module_resolved_through_mod_rs_satisfies_the_guard(self) -> None:
+        # Kills: resolving only `X.rs` and not `X/mod.rs`.
+        with tempfile.TemporaryDirectory() as td:
+            t = _Tree(td)
+            t.write("crates/sparq-x/src/lib.rs",
+                    "pub fn validate_envelope() {}\n#[cfg(test)]\npub mod suite;\n")
+            t.write("crates/sparq-x/src/suite/mod.rs", self.GUARD_IN_TESTS)
+            self.assertEqual(pf.check_guard_untested(ADDED, t.root), [])
+
+    def test_a_module_declared_by_a_test_only_module_is_also_test_text(self) -> None:
+        # Transitive closure: a module reached only from a test-only module is
+        # itself compiled only under test, with no cfg attribute of its own.
+        # Kills: seeding the set but never closing it.
+        with tempfile.TemporaryDirectory() as td:
+            t = _Tree(td)
+            t.write("crates/sparq-x/src/lib.rs",
+                    "pub fn validate_envelope() {}\n#[cfg(test)]\nmod unit;\n")
+            t.write("crates/sparq-x/src/unit.rs", "mod fixtures;\n")
+            t.write("crates/sparq-x/src/unit/fixtures.rs", self.GUARD_IN_TESTS)
+            self.assertEqual(pf.check_guard_untested(ADDED, t.root), [])
+
+    def test_a_plain_mod_declaration_is_not_a_test_module(self) -> None:
+        # THE anti-vacuity direction, and the one that keeps round-1 shut. An
+        # ORDINARY `mod helpers;` is production code; admitting its whole text
+        # would make every same-crate call site satisfy every guard.
+        # Kills: seeding rust_test_module_files from rust_mod_decls instead of
+        # rust_cfg_test_mod_decls.
+        with tempfile.TemporaryDirectory() as td:
+            t = _Tree(td)
+            t.write("crates/sparq-x/src/lib.rs",
+                    "pub fn validate_envelope() {}\nmod helpers;\n")
+            t.write("crates/sparq-x/src/helpers.rs",
+                    "pub fn go() { crate::validate_envelope(); }\n")
+            self.assertEqual(len(pf.check_guard_untested(ADDED, t.root)), 1)
+
+    def test_a_cfg_not_test_mod_declaration_is_not_a_test_module(self) -> None:
+        # `#[cfg(not(test))] mod shim;` compiles in ORDINARY builds. Kills:
+        # accepting any cfg attribute on a `mod X;` rather than one that IMPLIES
+        # test — the predicate must be shared with rust_cfg_test_spans.
+        with tempfile.TemporaryDirectory() as td:
+            t = _Tree(td)
+            t.write("crates/sparq-x/src/lib.rs",
+                    "pub fn validate_envelope() {}\n#[cfg(not(test))]\nmod shim;\n")
+            t.write("crates/sparq-x/src/shim.rs",
+                    "pub fn go() { crate::validate_envelope(); }\n")
+            self.assertEqual(len(pf.check_guard_untested(ADDED, t.root)), 1)
+
+    def test_a_cfg_test_mod_with_a_BODY_is_not_treated_as_a_file(self) -> None:
+        # `#[cfg(test)] mod tests { .. }` is the in-file form, already handled by
+        # rust_cfg_test_spans. It must not ALSO resolve to a sibling `tests.rs`
+        # and drag an unrelated production file in.
+        self.assertEqual(
+            pf.rust_cfg_test_mod_decls(pf.mask_rust("#[cfg(test)]\nmod tests { fn a() {} }\n")),
+            [],
+        )
+        self.assertEqual(
+            pf.rust_cfg_test_mod_decls(pf.mask_rust("#[cfg(test)]\nmod tests;\n")), ["tests"]
+        )
+
+    def test_mod_declarations_inside_comments_and_strings_do_not_resolve(self) -> None:
+        # The scan runs over the MASKED text for the same reason the span scan
+        # does — otherwise a doc example could admit an arbitrary file.
+        src = ('/// #[cfg(test)]\n/// mod fake;\n'
+               'const S: &str = "#[cfg(test)] mod alsofake;";\n')
+        self.assertEqual(pf.rust_cfg_test_mod_decls(pf.mask_rust(src)), [])
+
+    def test_module_file_resolution_matches_rustc_lookup(self) -> None:
+        # Kills: dropping the lib/main/mod special case, which would look for
+        # `src/lib/tests.rs` instead of `src/tests.rs`.
+        self.assertEqual(
+            pf.rust_module_files("crates/c/src/lib.rs", "tests"),
+            ["crates/c/src/tests.rs", "crates/c/src/tests/mod.rs"],
+        )
+        self.assertEqual(
+            pf.rust_module_files("crates/c/src/a/planner.rs", "tests"),
+            ["crates/c/src/a/planner/tests.rs", "crates/c/src/a/planner/tests/mod.rs"],
+        )
+        self.assertEqual(
+            pf.rust_module_files("crates/c/src/a/mod.rs", "tests"),
+            ["crates/c/src/a/tests.rs", "crates/c/src/a/tests/mod.rs"],
+        )
+
+
+class PythonTestRegionsComeFromTheParser(unittest.TestCase):
+    """REGRESSION (round 3) — the indentation heuristic truncated real self-tests.
+
+    `python_test_regions` used to take the header line plus every following line
+    that was blank or began with a space, tab or `)`. That is not a Python block,
+    and it silently cut two self-tests short at the first column-0 line inside the
+    body. Both shapes are in this tree today, and both produced firings for
+    symbols their own `--self-test` names:
+
+      * a `#` comment at column 0 inside a body (scripts/export-kb-dump.py);
+      * column-0 content inside a triple-quoted fixture
+        (scripts/check-spec-normative-status.py).
+
+    Two holes in one heuristic is the design being wrong, so the heuristic is
+    gone and `ast` decides the extent. These tests red on the heuristic.
+    """
+
+    GUARD = "def validate_lease(x):\n    return x\n"
+    ADDED = {"scripts/thing.py": ["def validate_lease(x):"]}
+
+    def test_a_column0_comment_does_not_end_a_python_test_region(self) -> None:
+        # RED on the line heuristic: the region stopped at the `#` line and the
+        # assert below it was never searched.
+        with tempfile.TemporaryDirectory() as td:
+            t = _Tree(td)
+            t.write("scripts/thing.py",
+                    self.GUARD
+                    + "def self_test():\n"
+                      "    ok = True\n"
+                      "# a column-0 comment inside a body is legal Python\n"
+                      "    assert validate_lease(1) == 1 and ok\n")
+            self.assertEqual(pf.check_guard_untested(self.ADDED, t.root), [])
+
+    def test_column0_text_in_a_triple_quoted_string_does_not_end_a_region(self) -> None:
+        # RED on the line heuristic: a fixture whose content starts at column 0
+        # ended the region on its second line.
+        with tempfile.TemporaryDirectory() as td:
+            t = _Tree(td)
+            t.write("scripts/thing.py",
+                    self.GUARD
+                    + 'def self_test():\n'
+                      '    fixture = """\n'
+                      '== a heading at column 0 ==\n'
+                      '"""\n'
+                      '    assert validate_lease(fixture) is fixture\n')
+            self.assertEqual(pf.check_guard_untested(self.ADDED, t.root), [])
+
+    def test_a_test_class_body_is_a_region(self) -> None:
+        # The `class *Test*` branch had no test of its own. Kills: dropping the
+        # ClassDef arm.
+        with tempfile.TemporaryDirectory() as td:
+            t = _Tree(td)
+            t.write("scripts/thing.py",
+                    self.GUARD
+                    + "class LeaseTests:\n"
+                      "    def test_it(self):\n"
+                      "        assert validate_lease(1) == 1\n")
+            self.assertEqual(pf.check_guard_untested(self.ADDED, t.root), [])
+
+    def test_a_nested_test_def_is_not_a_top_level_region(self) -> None:
+        # Kills: walking ast.walk() instead of tree.body — a `def test_x` nested
+        # inside an ordinary function is not a test the runner ever collects, and
+        # accepting it would let any helper launder a call site into a test.
+        with tempfile.TemporaryDirectory() as td:
+            t = _Tree(td)
+            t.write("scripts/thing.py",
+                    self.GUARD
+                    + "def helper():\n"
+                      "    def test_inner():\n"
+                      "        validate_lease(1)\n"
+                      "    return test_inner\n")
+            self.assertEqual(len(pf.check_guard_untested(self.ADDED, t.root)), 1)
+
+    def test_a_script_that_does_not_parse_contributes_no_test_text(self) -> None:
+        # FAIL-CLOSED. A file `ast` cannot parse is not evidence of a test.
+        # Kills: falling back to the whole file (or to the old heuristic) on
+        # SyntaxError, which would make an unparseable script satisfy every
+        # guard it mentions anywhere.
+        with tempfile.TemporaryDirectory() as td:
+            t = _Tree(td)
+            t.write("scripts/thing.py",
+                    self.GUARD
+                    + "def self_test():\n"
+                      "    assert validate_lease(1) == 1\n"
+                      "def (\n")
+            self.assertEqual(len(pf.check_guard_untested(self.ADDED, t.root)), 1)
+            self.assertEqual(
+                pf.python_test_regions((t.root / "scripts/thing.py").read_text()), ""
+            )
 
 
 class RustMaskingIsLiteralSafe(unittest.TestCase):
@@ -780,6 +1004,27 @@ class TheYamlSeamIsGating(unittest.TestCase):
             assert step is not None
             self.assertIsNone(step.get("if"),
                               f"the step running {cmd} is guarded by an if:")
+
+    def test_neither_leg_is_invoked_with_its_exit_code_discarded(self) -> None:
+        # The commonest swallow shape, and the one a SUBSTRING match cannot see:
+        # `python3 scripts/preflight.py --self-test || true` still "contains" the
+        # command, so every other test in this class stays green while the leg can
+        # no longer fail. Same for a trailing `; true`, `| tee`, or `set +e`.
+        # The repo's own precedent is test_banned_terminology.py's anchored
+        # bare-call regex; this copies that shape.
+        # Kills: appending `|| true` to either step's run.
+        import re as _re
+
+        for cmd in self.STEP_RUNS:
+            _jid, _job, step = self._job_hosting(cmd)
+            assert step is not None
+            run = str(step.get("run", ""))
+            bare = _re.compile(r"^[ \t]*" + _re.escape(cmd) + r"[ \t]*$", _re.M)
+            self.assertRegex(
+                run, bare,
+                f"{cmd} is not invoked as a bare command — its exit code can be "
+                f"discarded by whatever follows it on the line:\n{run!r}",
+            )
 
 
 class SelfTestIsWired(unittest.TestCase):
