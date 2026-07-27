@@ -314,6 +314,167 @@ PY
 fi
 
 echo
+echo "PART C — the REAL CI shape (actions/checkout's shallow merge-ref graft)"
+#
+# This whole part exists because the backstop was INERT in CI while passing
+# every test on a normal clone. `actions/checkout` at fetch-depth 1 checks out
+# `refs/pull/N/merge` and GRAFTS it: the commit's parents are recorded in the
+# object but invisible to every revision walk. `git show` then renders the
+# entire repository as additions of that one commit — 15,123 findings on PR
+# #4385's own head (docs-quality run 89851383239), every one attributed to
+# `refs/pull/4385/merge`, including files the PR never touched. A single real
+# misattribution was indistinguishable from that noise.
+#
+# A test on a normal clone CANNOT see this. So the fixture below is the CI shape
+# itself, built from git plumbing: a merge ref fetched at depth 1 into a fresh
+# repository, exactly as the runner does it.
+
+CI="$TMP/ci"
+mkdir -p "$CI"
+UPSTREAM="$CI/upstream"
+export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@e.com
+export GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@e.com
+git init -q -b main "$UPSTREAM"
+# Baseline history carrying PRE-EXISTING markers in files the PR never touches.
+# These are the 15,123: if any of them is reported, the range is wrong.
+for i in 1 2 3 4 5; do
+  mkdir -p "$UPSTREAM/dir$i"
+  printf 'legacy [SONNET-4.6] stamp\n' >"$UPSTREAM/dir$i/legacy$i.md"
+  git -C "$UPSTREAM" add -A
+  git -C "$UPSTREAM" commit -qm "main $i"
+done
+git -C "$UPSTREAM" checkout -qb pr main
+# The PR's own single commit: an Opus 5 commit stamping [SONNET-4.6] — the
+# #4361 defect shape. Exactly ONE finding is the correct answer.
+printf '// [SONNET-4.6] the ONE real finding\n' >"$UPSTREAM/newfile.rs"
+git -C "$UPSTREAM" add -A
+git -C "$UPSTREAM" commit -qm "feat: pr
+
+Co-Authored-By: Claude Opus 5 <n@a.com>"
+PR_HEAD="$(git -C "$UPSTREAM" rev-parse pr)"
+PR_BASE="$(git -C "$UPSTREAM" rev-parse pr~1)"
+# main advances after the PR branched, as it always does in this repo.
+git -C "$UPSTREAM" checkout -q main
+printf 'later\n' >"$UPSTREAM/dir1/later.txt"
+git -C "$UPSTREAM" add -A
+git -C "$UPSTREAM" commit -qm "main moves on"
+# GitHub's refs/pull/N/merge: main merged with the PR head.
+git -C "$UPSTREAM" checkout -q --detach main
+git -C "$UPSTREAM" merge -q --no-ff -m "Merge pull request #1" pr
+git -C "$UPSTREAM" update-ref refs/pull/1/merge "$(git -C "$UPSTREAM" rev-parse HEAD)"
+git -C "$UPSTREAM" update-ref refs/pull/1/head "$PR_HEAD"
+git -C "$UPSTREAM" checkout -q main
+MERGE_SHA="$(git -C "$UPSTREAM" rev-parse refs/pull/1/merge)"
+
+# --- the runner: actions/checkout@v7 defaults --------------------------------
+WS="$CI/ws"
+git init -q -b main "$WS"
+git -C "$WS" remote add origin "$UPSTREAM"
+git -C "$WS" fetch -q --no-tags --depth=1 origin "+$MERGE_SHA:refs/remotes/pull/1/merge"
+git -C "$WS" checkout -q --force -B main refs/remotes/pull/1/merge
+# ...and the step's own `git fetch --depth=200 origin main`, which is a no-op
+# for the graft because the merge ref is unreachable from main.
+git -C "$WS" fetch -q --depth=200 origin main || true
+
+if [ "$(git -C "$WS" rev-parse --is-shallow-repository)" = "true" ] \
+   && [ -z "$(git -C "$WS" log -1 --format=%P HEAD)" ]; then
+  pass "C0 fixture really is the CI shape (shallow, HEAD has no walkable parents)"
+else
+  fail "C0 fixture is NOT grafted — every assertion below would be vacuous"
+fi
+
+# C1 — the OLD invocation. It must no longer pretend to have checked anything.
+OLD_OUT="$TMP/old.txt"
+old_rc=0
+python3 "$GATE" --repo "$WS" --advisory --check-commits "origin/main..HEAD" >"$OLD_OUT" 2>&1 || old_rc=$?
+if grep -q 'INCOMPLETE' "$OLD_OUT" && ! grep -q -- '— OK' "$OLD_OUT"; then
+  pass "C1 a grafted range reports INCOMPLETE and never claims OK"
+else
+  fail "C1 a grafted range did not report INCOMPLETE (or still claimed OK)"
+fi
+if [ "$(grep -c 'legacy' "$OLD_OUT" || true)" = "0" ]; then
+  pass "C1b the whole-tree blowout is gone (zero findings in untouched files)"
+else
+  fail "C1b untouched files are STILL reported: $(grep -c 'legacy' "$OLD_OUT") line(s)"
+fi
+if [ "$old_rc" = "0" ]; then
+  pass "C1c INCOMPLETE is reported WITHOUT reddening the advisory build"
+else
+  fail "C1c the advisory step exited $old_rc on an INCOMPLETE range"
+fi
+
+# C2 — the NEW invocation, wired exactly as docs-quality.yml wires it: fetch the
+# PR's own head ref to depth commits+1, then derive the range from the event.
+git -C "$WS" fetch -q --no-tags --depth=2 origin "+refs/pull/1/head:refs/remotes/origin/pr/1/head"
+EVENT="$TMP/event.json"
+cat >"$EVENT" <<JSON
+{"pull_request":{"number":1,"commits":1,
+ "head":{"sha":"$PR_HEAD"},"base":{"sha":"$PR_BASE"}}}
+JSON
+NEW_OUT="$TMP/new.txt"
+new_rc=0
+GITHUB_EVENT_NAME=pull_request GITHUB_EVENT_PATH="$EVENT" \
+  python3 "$GATE" --repo "$WS" --advisory --check-commits-pr >"$NEW_OUT" 2>&1 || new_rc=$?
+
+if [ "$(grep -c 'adds marker' "$NEW_OUT" || true)" = "1" ]; then
+  pass "C2 the range is EXACTLY the PR's own commits (1 finding, not the tree)"
+else
+  fail "C2 expected exactly 1 finding, got $(grep -c 'adds marker' "$NEW_OUT" || true)"
+fi
+if grep -q 'newfile.rs' "$NEW_OUT" && ! grep -q 'legacy' "$NEW_OUT"; then
+  pass "C2b the finding is the PR's own line, and no untouched file is named"
+else
+  fail "C2b wrong finding set (want newfile.rs only)"
+fi
+if ! grep -q 'INCOMPLETE' "$NEW_OUT"; then
+  pass "C2c nothing was left unscannable once the PR head ref is fetched"
+else
+  fail "C2c still reporting unscannable commits after the correct fetch"
+fi
+if [ "$new_rc" = "0" ]; then
+  pass "C2d the ADVISORY step still exits 0 (findings reported, build not red)"
+else
+  fail "C2d the advisory step exited $new_rc — it must not red the build"
+fi
+expect_rc 1 "C2e WITHOUT --advisory the same findings DO fail (promotable to HARD)" \
+  env GITHUB_EVENT_NAME=pull_request GITHUB_EVENT_PATH="$EVENT" \
+  python3 "$GATE" --repo "$WS" --check-commits-pr
+
+# C3 — INVERSION. Drop the PR-head fetch and the gate must say it could not
+# look, never that it looked and found nothing. This is the property that
+# stops the backstop silently going inert again.
+WS2="$CI/ws2"
+git init -q -b main "$WS2"
+git -C "$WS2" remote add origin "$UPSTREAM"
+git -C "$WS2" fetch -q --no-tags --depth=1 origin "+$MERGE_SHA:refs/remotes/pull/1/merge"
+git -C "$WS2" checkout -q --force -B main refs/remotes/pull/1/merge
+NOFETCH_OUT="$TMP/nofetch.txt"
+nofetch_rc=0
+GITHUB_EVENT_NAME=pull_request GITHUB_EVENT_PATH="$EVENT" \
+  python3 "$GATE" --repo "$WS2" --advisory --check-commits-pr >"$NOFETCH_OUT" 2>&1 || nofetch_rc=$?
+if grep -q 'INCOMPLETE' "$NOFETCH_OUT" && ! grep -q -- '— OK' "$NOFETCH_OUT"; then
+  pass "C3 a missing PR-head fetch reports INCOMPLETE, never a false OK"
+else
+  fail "C3 a missing PR-head fetch was reported as a clean pass"
+fi
+if [ "$nofetch_rc" = "0" ]; then
+  pass "C3b ...and still does not red the advisory build"
+else
+  fail "C3b the advisory step exited $nofetch_rc with no PR-head fetch"
+fi
+
+# C4 — off a pull_request event (merge_group / push) the mode is a declared
+# no-op, and says so rather than inventing a range.
+C4_OUT="$TMP/c4.txt"
+GITHUB_EVENT_NAME=merge_group GITHUB_EVENT_PATH="$EVENT" \
+  python3 "$GATE" --repo "$WS" --advisory --check-commits-pr >"$C4_OUT" 2>&1
+if grep -q 'not a pull_request event' "$C4_OUT" && ! grep -q -- '— OK' "$C4_OUT"; then
+  pass "C4 on merge_group/push the mode declares itself inapplicable"
+else
+  fail "C4 the mode invented a result off a pull_request event"
+fi
+
+echo
 if [ "$FAILURES" -ne 0 ]; then
   echo "test_model_attribution.sh: $FAILURES FAILURE(S)"
   exit 1
