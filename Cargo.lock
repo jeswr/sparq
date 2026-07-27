@@ -3326,7 +3326,7 @@ dependencies = [
  "dashmap",
  "getrandom 0.3.4",
  "libc",
- "oxiri",
+ "oxiri 0.2.11",
  "oxrdf 0.3.3",
  "oxrdfio",
  "oxsdatatypes",
@@ -3355,13 +3355,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "54b4ed3a7192fa19f5f48f99871f2755047fabefd7f222f12a1df1773796a102"
 
 [[package]]
+name = "oxiri"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b6bd0ef560f078e41ce2ebf370cce217e7fb2c3695ffa87541151c9de94e83a"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "oxjsonld"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6e1380a504a8571763f13b8bcad629ff90d0300d47d8a519f3c6c599625840e"
 dependencies = [
  "json-event-parser",
- "oxiri",
+ "oxiri 0.2.11",
  "oxrdf 0.3.3",
  "ryu-js",
  "thiserror 2.0.18",
@@ -3374,7 +3383,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a04761319ef84de1f59782f189d072cbfc3a9a40c4e8bded8667202fbd35b02a"
 dependencies = [
  "oxilangtag",
- "oxiri",
+ "oxiri 0.2.11",
  "rand 0.8.6",
  "thiserror 2.0.18",
 ]
@@ -3387,7 +3396,7 @@ checksum = "0afd5c28e4a399c57ee2bc3accd40c7b671fdc7b6537499f14e95b265af7d7e0"
 dependencies = [
  "hex",
  "oxilangtag",
- "oxiri",
+ "oxiri 0.2.11",
  "oxsdatatypes",
  "rand 0.9.4",
  "sha2 0.10.9",
@@ -3414,7 +3423,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cd5516ae083d09bc57ec65ed5ee97701481725de6ffaa83d968ab42a96157ba1"
 dependencies = [
  "oxilangtag",
- "oxiri",
+ "oxiri 0.2.11",
  "oxrdf 0.3.3",
  "quick-xml 0.37.5",
  "thiserror 2.0.18",
@@ -3437,7 +3446,7 @@ checksum = "0d385f1776d7cace455ef6b7c54407838eff902ca897303d06eb12a26f4cf8a0"
 dependencies = [
  "memchr",
  "oxilangtag",
- "oxiri",
+ "oxiri 0.2.11",
  "oxrdf 0.2.4",
  "thiserror 2.0.18",
 ]
@@ -3450,7 +3459,7 @@ checksum = "f03fd471bd54c23d76631c0a2677aa4bb308d905f6e491ee35dcb0732b7c5c6c"
 dependencies = [
  "memchr",
  "oxilangtag",
- "oxiri",
+ "oxiri 0.2.11",
  "oxrdf 0.3.3",
  "thiserror 2.0.18",
 ]
@@ -4845,7 +4854,7 @@ dependencies = [
  "hex",
  "json-event-parser",
  "md-5 0.10.6",
- "oxiri",
+ "oxiri 0.2.11",
  "oxrdf 0.3.3",
  "oxsdatatypes",
  "rand 0.9.4",
@@ -4864,7 +4873,7 @@ name = "spargebra"
 version = "0.4.6"
 dependencies = [
  "oxilangtag",
- "oxiri",
+ "oxiri 0.2.11",
  "oxrdf 0.3.3",
  "peg 0.8.6",
  "rand 0.9.4",
@@ -5007,7 +5016,7 @@ dependencies = [
  "libc",
  "memchr",
  "memmap2",
- "oxiri",
+ "oxiri 0.3.1",
  "oxjsonld",
  "oxrdf 0.3.3",
  "oxrdfxml",
@@ -5058,7 +5067,7 @@ name = "sparq-engine"
 version = "0.1.0"
 dependencies = [
  "md-5 0.11.0",
- "oxiri",
+ "oxiri 0.3.1",
  "oxrdf 0.3.3",
  "proptest",
  "rayon",
@@ -5242,7 +5251,7 @@ dependencies = [
 name = "sparq-jsonld"
 version = "0.1.0"
 dependencies = [
- "oxiri",
+ "oxiri 0.3.1",
 ]
 
 [[package]]
