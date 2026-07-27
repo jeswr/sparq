@@ -489,7 +489,7 @@ which is what the version/changelog automation and the GUI-download release depe
 Both jobs now pick their forge token in this order, so **no workflow edit is needed** — only
 the secret:
 
-```
+```text
 App token (ORCHESTRATOR_APP_ID + ORCHESTRATOR_APP_PRIVATE_KEY)  ← preferred
   || RELEASE_PLZ_TOKEN     (fine-grained PAT: contents:write + pull_requests:write)
   || GITHUB_TOKEN          (fallback; cannot open PRs while the setting is disabled)
