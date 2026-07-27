@@ -14,6 +14,15 @@ use serde_json::Value;
 use sparq_jsonld::{FsLoader, JsonLdOptions, ProcessingMode};
 use std::path::Path;
 
+// [GPT-5] sq-ruktv — keep the order-sensitive measurement beside the gating
+// JSON-LD-semantic score. The strict score is diagnostic only: compacted
+// `@container: @list` arrays do not carry an explicit `@list` marker, so the
+// shared comparator cannot infer that their order is significant.
+pub struct CompactScores {
+    pub semantic: Score,
+    pub strict: Score,
+}
+
 /// [FABLE-5] sq-oy1f.27 — run the W3C JSON-LD `compact` category with the NATIVE
 /// DOCUMENT-LEVEL oracle.
 ///
@@ -37,9 +46,10 @@ use std::path::Path;
 /// `json_ld_equal` treats arrays outside an explicit `"@list"` key as SETS. In a
 /// *compacted* document a `@container: @list` term's array carries list order without
 /// the `@list` marker, so the comparator cannot see it — a wrongly-ordered compacted
-/// list would still pass. The strict order-sensitive pass count is measured and recorded
-/// alongside the floor (see `floors::compact`); list-order fidelity is covered by the
-/// crate-local `tests/compact.rs` unit tests, which assert exact shapes.
+/// list would still pass. The runner prints a separate advisory `TOTAL compact-strict`
+/// measurement, and the current strict order-sensitive pass count is recorded alongside
+/// the floor (see `floors::compact`); list-order fidelity is also covered by the crate-local
+/// `tests/compact.rs` unit tests, which assert exact shapes.
 ///
 /// ## Honest SKIP buckets (recorded, not passed, not failed)
 ///
@@ -56,13 +66,21 @@ use std::path::Path;
 ///   skipped.
 /// * Remote `input` URL — no network.
 /// * No `expect` / no `context` member — nothing to compare / compact against.
-pub fn run_compact(root: &Path) -> Score {
+pub fn run_compact(root: &Path) -> CompactScores {
     let mut s = Score::default();
+    let mut strict = Score::default();
     let entries = match read_manifest(root, "compact") {
         Ok(e) => e,
         Err(why) => {
             s.fail("compact-manifest", why);
-            return s;
+            strict.fail(
+                "compact-manifest",
+                "manifest unavailable for strict-order diagnostic".to_string(),
+            );
+            return CompactScores {
+                semantic: s,
+                strict,
+            };
         }
     };
     // Map the suite's base URL prefix to the local fixture directory (same as the
@@ -71,28 +89,34 @@ pub fn run_compact(root: &Path) -> Score {
     for e in &entries {
         if e.requires.is_some() {
             s.skip();
+            strict.skip();
             continue;
         }
         if e.is_negative {
             s.skip();
+            strict.skip();
             continue;
         }
         // The ONE narrowly-pinned 1.0-only skip (#t0038) — see
         // `is_pinned_1_0_only_skip`; scope enforced by `t0038_skip_is_narrowly_scoped`.
         if is_pinned_1_0_only_skip(e) {
             s.skip();
+            strict.skip();
             continue;
         }
         let Some(expect_rel) = &e.expect else {
             s.skip();
+            strict.skip();
             continue;
         };
         let Some(ctx_rel) = &e.context else {
             s.skip();
+            strict.skip();
             continue;
         };
         if e.input.starts_with("http://") || e.input.starts_with("https://") {
             s.skip();
+            strict.skip();
             continue;
         }
 
@@ -101,14 +125,18 @@ pub fn run_compact(root: &Path) -> Score {
         let in_text = match std::fs::read_to_string(&input_path) {
             Ok(t) => t,
             Err(why) => {
-                s.fail(&e.id, format!("read input: {}", why));
+                let why = format!("read input: {}", why);
+                s.fail(&e.id, why.clone());
+                strict.fail(&e.id, why);
                 continue;
             }
         };
         let input_json = match sparq_jsonld::Json::parse(&in_text) {
             Ok(j) => j,
             Err(why) => {
-                s.fail(&e.id, format!("parse input JSON: {}", why));
+                let why = format!("parse input JSON: {}", why);
+                s.fail(&e.id, why.clone());
+                strict.fail(&e.id, why);
                 continue;
             }
         };
@@ -116,14 +144,18 @@ pub fn run_compact(root: &Path) -> Score {
         let ctx_text = match std::fs::read_to_string(&ctx_path) {
             Ok(t) => t,
             Err(why) => {
-                s.fail(&e.id, format!("read context: {}", why));
+                let why = format!("read context: {}", why);
+                s.fail(&e.id, why.clone());
+                strict.fail(&e.id, why);
                 continue;
             }
         };
         let ctx_json = match sparq_jsonld::Json::parse(&ctx_text) {
             Ok(j) => j,
             Err(why) => {
-                s.fail(&e.id, format!("parse context JSON: {}", why));
+                let why = format!("parse context JSON: {}", why);
+                s.fail(&e.id, why.clone());
+                strict.fail(&e.id, why);
                 continue;
             }
         };
@@ -149,7 +181,9 @@ pub fn run_compact(root: &Path) -> Score {
             match sparq_jsonld::compact::compact(&input_json, &ctx_json, &opts, &loader) {
                 Ok(j) => j,
                 Err(why) => {
-                    s.fail(&e.id, format!("compact() error: {}", why));
+                    let why = format!("compact() error: {}", why);
+                    s.fail(&e.id, why.clone());
+                    strict.fail(&e.id, why);
                     continue;
                 }
             };
@@ -158,7 +192,9 @@ pub fn run_compact(root: &Path) -> Score {
         let got: Value = match sparq_json_to_serde(&compacted) {
             Ok(v) => v,
             Err(why) => {
-                s.fail(&e.id, format!("convert compact output: {}", why));
+                let why = format!("convert compact output: {}", why);
+                s.fail(&e.id, why.clone());
+                strict.fail(&e.id, why);
                 continue;
             }
         };
@@ -166,17 +202,29 @@ pub fn run_compact(root: &Path) -> Score {
         let exp_text = match std::fs::read_to_string(&expect_path) {
             Ok(t) => t,
             Err(why) => {
-                s.fail(&e.id, format!("read expect: {}", why));
+                let why = format!("read expect: {}", why);
+                s.fail(&e.id, why.clone());
+                strict.fail(&e.id, why);
                 continue;
             }
         };
         let want: Value = match serde_json::from_str(&exp_text) {
             Ok(v) => v,
             Err(why) => {
-                s.fail(&e.id, format!("parse expect JSON: {}", why));
+                let why = format!("parse expect JSON: {}", why);
+                s.fail(&e.id, why.clone());
+                strict.fail(&e.id, why);
                 continue;
             }
         };
+        if json_ld_equal_strict_order(&got, &want) {
+            strict.pass();
+        } else {
+            strict.fail(
+                &e.id,
+                "compacted JSON differs under strict array ordering".to_string(),
+            );
+        }
         if json_ld_equal(&got, &want) {
             s.pass();
         } else {
@@ -192,7 +240,58 @@ pub fn run_compact(root: &Path) -> Score {
             );
         }
     }
-    s
+    CompactScores {
+        semantic: s,
+        strict,
+    }
+}
+
+/// JSON-LD scalar/object equality with every array compared as a sequence.
+///
+/// Numeric comparison deliberately matches [`json_ld_equal`] (`1` equals
+/// `1.0`), isolating array order as the only difference from the gating oracle.
+fn json_ld_equal_strict_order(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Null, Value::Null) => true,
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::Number(x), Value::Number(y)) => {
+            if let (Some(xi), Some(yi)) = (x.as_i64(), y.as_i64()) {
+                xi == yi
+            } else if let (Some(xu), Some(yu)) = (x.as_u64(), y.as_u64()) {
+                xu == yu
+            } else {
+                match (x.as_f64(), y.as_f64()) {
+                    (Some(xf), Some(yf)) => xf == yf,
+                    _ => x == y,
+                }
+            }
+        }
+        (Value::String(x), Value::String(y)) => x == y,
+        (Value::Array(xs), Value::Array(ys)) => {
+            xs.len() == ys.len()
+                && xs
+                    .iter()
+                    .zip(ys)
+                    .all(|(x, y)| json_ld_equal_strict_order(x, y))
+        }
+        (Value::Object(xs), Value::Object(ys)) => {
+            xs.len() == ys.len()
+                && xs.iter().all(|(key, x)| {
+                    ys.get(key)
+                        .is_some_and(|y| json_ld_equal_strict_order(x, y))
+                })
+        }
+        _ => false,
+    }
+}
+
+#[test]
+fn strict_order_diagnostic_detects_unmarked_array_reordering() {
+    let got: Value = serde_json::from_str(r#"{"items":[1,2]}"#).unwrap();
+    let want: Value = serde_json::from_str(r#"{"items":[2,1]}"#).unwrap();
+
+    assert!(json_ld_equal(&got, &want));
+    assert!(!json_ld_equal_strict_order(&got, &want));
 }
 
 /// The single narrowly-pinned 1.0-only skip: compact `#t0038` and NOTHING else

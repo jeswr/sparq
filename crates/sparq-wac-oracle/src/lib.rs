@@ -8,6 +8,11 @@
 //! variant and an ACP `.acr` variant, derived from the `sparq_solid::fixture` seed's
 //! policy-shape subtrees) and, for each, a list of spec-declared decision rows
 //! `(session, resource, mode) → expected {allow, granted_modes, scope, status}`.
+//! A row's session spans all four dimensions — `agent`, `client`, `issuer` (ACP
+//! `acp:issuer`) and `now` — and an ACP fixture additionally declares the TRUSTED
+//! [`ProvenanceFact`] rows its `acp:CreatorAgent`/`acp:OwnerAgent` matchers resolve
+//! against. The `now` dimension has its own corpus behind the opt-in `odrl-bridge`
+//! feature (`window_corpus`), since only the ODRL bridge mints a live-clock window.
 //! The vectors are **data** — any Solid-protocol implementation (the PSS-parity
 //! suite, the future `solid-server` landing of epic `sq-gg0qq`) can assert against
 //! the same rows. [`run_vectors`] is the sparq-native runner: it evaluates each row
@@ -45,13 +50,23 @@
 // bead sq-gg0qq.5). Disjoint from the B1 vectors above.
 pub mod escalation_corpus;
 
+// [SONNET-4.6] sq-x1ayt — time-windowed conditional-grant rows (the `Session::now`
+// dimension). Behind the opt-in `odrl-bridge` feature: the live-clock window is minted
+// ONLY by sparq-solid's ODRL bridge (ACP has no time vocabulary), so the default build
+// keeps zero ODRL code and deps.
+#[cfg(feature = "odrl-bridge")]
+pub mod window_corpus;
+
 use sparq_core::Graph;
-pub use sparq_solid::{AclScope, AclStatus, Mode, PodStore, Session, WacDecision};
+pub use sparq_solid::{
+    AccessProvenance, AclScope, AclStatus, Mode, PodStore, Session, WacDecision,
+};
 use std::fmt;
 
 /// Which access-control system a [`Fixture`]'s control documents use, i.e. which
 /// `sparq-solid` materializer [`build_store`] runs (`materialize_wac` for `.acl`
-/// corpora, `materialize_acp` for `.acr` corpora).
+/// corpora, `materialize_acp_with` — fed the fixture's [`Fixture::provenance`] — for
+/// `.acr` corpora).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum System {
     /// Web Access Control (`.acl` documents, nearest-ACL inheritance).
@@ -79,9 +94,8 @@ pub struct Expected {
 }
 
 /// One decision test-vector: a `(session, resource, mode)` request plus its
-/// [`Expected`] outcome. `agent`/`client` are the caller-asserted session claim
-/// (`issuer`/`now` stay unset — neither fixture uses issuer- or time-constrained
-/// grants); [`Vector::session`] assembles the [`Session`].
+/// [`Expected`] outcome. `agent`/`client`/`issuer`/`now` are the caller-asserted
+/// session claim; [`Vector::session`] assembles the [`Session`].
 #[derive(Debug, Clone, Copy)]
 pub struct Vector {
     /// Short unique label, surfaced in [`Failure`] reports.
@@ -90,6 +104,14 @@ pub struct Vector {
     pub agent: Option<&'static str>,
     /// The session's client-identifier claim (WAC `acl:origin` / ACP `acp:client`).
     pub client: Option<&'static str>,
+    /// The session's OIDC-issuer claim (ACP `acp:issuer`); `None` = no issuer asserted,
+    /// which an issuer-constrained grant treats as fail-closed. Set it with
+    /// [`Vector::via_issuer`].
+    pub issuer: Option<&'static str>,
+    /// The request instant as an `xsd:dateTime` lexical string; `None` = no clock, which
+    /// a time-windowed conditional grant treats as fail-closed. Set it with
+    /// [`Vector::at`].
+    pub now: Option<&'static str>,
     /// The resource (named-graph IRI) being decided on.
     pub resource: &'static str,
     /// The requested access mode.
@@ -104,10 +126,40 @@ impl Vector {
         Session {
             agent: self.agent,
             client: self.client,
-            issuer: None,
-            now: None,
+            issuer: self.issuer,
+            now: self.now,
         }
     }
+
+    /// This vector with the session's OIDC-issuer claim bound (ACP `acp:issuer`).
+    pub const fn via_issuer(self, issuer: &'static str) -> Vector {
+        Vector {
+            issuer: Some(issuer),
+            ..self
+        }
+    }
+
+    /// This vector with the request clock bound (mirrors [`Session::at`]), for a
+    /// time-windowed conditional grant.
+    pub const fn at(self, now: &'static str) -> Vector {
+        Vector {
+            now: Some(now),
+            ..self
+        }
+    }
+}
+
+/// One TRUSTED per-resource creator/owner fact, the corpus's declarative form of an
+/// [`AccessProvenance`] entry — the channel `acp:CreatorAgent` / `acp:OwnerAgent`
+/// matchers resolve against. Never read from pod content (see [`AccessProvenance`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProvenanceFact {
+    /// The resource (named-graph IRI) the fact is about.
+    pub resource: &'static str,
+    /// Its creator's WebID; `None` = unknown ⇒ no `CreatorAgent` grant can fire.
+    pub creator: Option<&'static str>,
+    /// Its owner's WebID; `None` = unknown ⇒ no `OwnerAgent` grant can fire.
+    pub owner: Option<&'static str>,
 }
 
 /// One embedded fixture: a pod dataset (N-Quads) + the decision vectors that hold
@@ -120,6 +172,11 @@ pub struct Fixture {
     pub system: System,
     /// The pod dataset — content graphs + `.acl`/`.acr` control-document graphs.
     pub nquads: &'static str,
+    /// The TRUSTED creator/owner facts the pod's `acp:CreatorAgent`/`acp:OwnerAgent`
+    /// matchers resolve against ([`build_store`] feeds them to
+    /// [`PodStore::materialize_acp_with`]). Empty for a corpus with no provenance
+    /// matchers; a WAC fixture must leave it empty (WAC has no creator/owner vocabulary).
+    pub provenance: &'static [ProvenanceFact],
     /// The spec-declared decision rows.
     pub vectors: &'static [Vector],
 }
@@ -181,12 +238,17 @@ pub const CAROL: &str = "https://carol.ex/card#me";
 pub const DAVE: &str = "https://dave.ex/card#me";
 /// The client identifier used by the pair-principal grants.
 pub const APP: &str = "https://app.ex";
+/// The OIDC issuer the ACP `iss6` shape's `acp:issuer` matcher trusts.
+pub const GOOD_IDP: &str = "https://good-idp.ex";
+/// An untrusted OIDC issuer — every `iss6` row presenting it is denied.
+pub const EVIL_IDP: &str = "https://evil-idp.ex";
 
 const R: Mode = Mode::Read;
 const W: Mode = Mode::Write;
 const RWC: &[Mode] = &[Mode::Read, Mode::Write, Mode::Control];
 const RW: &[Mode] = &[Mode::Read, Mode::Write];
 const READ: &[Mode] = &[Mode::Read];
+const WRITE: &[Mode] = &[Mode::Write];
 const NONE: &[Mode] = &[];
 
 /// A `Resolved` expectation with `Default` (inherited) discovery scope.
@@ -221,6 +283,8 @@ const fn v(
         name,
         agent,
         client,
+        issuer: None,
+        now: None,
         resource,
         mode,
         expect,
@@ -472,8 +536,9 @@ static WAC_VECTORS: [Vector; 27] = [
 
 /// ACP decision rows over [`ACP_NQUADS`] — CUMULATIVE inheritance (the key WAC
 /// difference), allOf agent+client pairs, deny-overrides, noneOf conditional
-/// grants, and the fail-closed rows.
-static ACP_VECTORS: [Vector; 20] = [
+/// grants, the `acp:issuer` dimension, the `acp:CreatorAgent`/`acp:OwnerAgent`
+/// provenance matchers (resolved through [`ACP_PROVENANCE`]), and the fail-closed rows.
+static ACP_VECTORS: [Vector; 35] = [
     // priv0: owner-only via the root .acr's memberAccessControl (Default discovery scope).
     v(
         "acp-priv0-alice-read",
@@ -633,6 +698,143 @@ static ACP_VECTORS: [Vector; 20] = [
         R,
         resolved_default(true, READ),
     ),
+    // iss6: allOf {agent bob} {issuer good-idp} — the acp:issuer dimension. The grant
+    // rides a minted (agent, client, issuer) triple principal, so it fires ONLY for the
+    // exact issuer; an absent issuer claim is fail-closed, never issuer-agnostic.
+    v(
+        "acp-iss6-bob-good-idp-read",
+        Some(BOB),
+        None,
+        "https://pod.ex/iss6/d0.ttl",
+        R,
+        resolved_default(true, READ),
+    )
+    .via_issuer(GOOD_IDP),
+    v(
+        "acp-iss6-bob-evil-idp-denied",
+        Some(BOB),
+        None,
+        "https://pod.ex/iss6/d0.ttl",
+        R,
+        resolved_default(false, NONE),
+    )
+    .via_issuer(EVIL_IDP),
+    v(
+        "acp-iss6-bob-no-issuer-denied",
+        Some(BOB),
+        None,
+        "https://pod.ex/iss6/d0.ttl",
+        R,
+        resolved_default(false, NONE),
+    ),
+    v(
+        "acp-iss6-carol-good-idp-denied",
+        Some(CAROL),
+        None,
+        "https://pod.ex/iss6/d0.ttl",
+        R,
+        resolved_default(false, NONE),
+    )
+    .via_issuer(GOOD_IDP),
+    // an issuer-UNCONSTRAINED grant (alice's, from the root) ignores the dimension:
+    // presenting an untrusted issuer neither widens nor narrows it.
+    v(
+        "acp-iss6-alice-issuer-agnostic",
+        Some(ALICE),
+        None,
+        "https://pod.ex/iss6/d0.ttl",
+        R,
+        resolved_default(true, RWC),
+    )
+    .via_issuer(EVIL_IDP),
+    // prov7: acp:CreatorAgent grants Read, acp:OwnerAgent grants Write, both resolved
+    // from the TRUSTED ACP_PROVENANCE channel. d0: creator bob, owner carol. d1: creator
+    // carol, owner UNKNOWN.
+    v(
+        "acp-prov7-bob-creator-read-d0",
+        Some(BOB),
+        None,
+        "https://pod.ex/prov7/d0.ttl",
+        R,
+        resolved_default(true, READ),
+    ),
+    v(
+        "acp-prov7-bob-creator-write-d0-denied",
+        Some(BOB),
+        None,
+        "https://pod.ex/prov7/d0.ttl",
+        W,
+        resolved_default(false, READ),
+    ),
+    // resource-SCOPED: bob created d0, so he is granted nothing on d1.
+    v(
+        "acp-prov7-bob-read-d1-denied",
+        Some(BOB),
+        None,
+        "https://pod.ex/prov7/d1.ttl",
+        R,
+        resolved_default(false, NONE),
+    ),
+    v(
+        "acp-prov7-carol-owner-write-d0",
+        Some(CAROL),
+        None,
+        "https://pod.ex/prov7/d0.ttl",
+        W,
+        resolved_default(true, WRITE),
+    ),
+    // owner ≠ creator: carol owns d0 but did not create it, so she has no Read there.
+    v(
+        "acp-prov7-carol-read-d0-denied",
+        Some(CAROL),
+        None,
+        "https://pod.ex/prov7/d0.ttl",
+        R,
+        resolved_default(false, WRITE),
+    ),
+    v(
+        "acp-prov7-carol-creator-read-d1",
+        Some(CAROL),
+        None,
+        "https://pod.ex/prov7/d1.ttl",
+        R,
+        resolved_default(true, READ),
+    ),
+    // fail-closed: d1 has NO owner fact, so the OwnerAgent matcher never fires there.
+    v(
+        "acp-prov7-carol-write-d1-denied",
+        Some(CAROL),
+        None,
+        "https://pod.ex/prov7/d1.ttl",
+        W,
+        resolved_default(false, READ),
+    ),
+    v(
+        "acp-prov7-dave-read-d0-denied",
+        Some(DAVE),
+        None,
+        "https://pod.ex/prov7/d0.ttl",
+        R,
+        resolved_default(false, NONE),
+    ),
+    // anonymous has no WebID, so it can never be a creator/owner.
+    v(
+        "acp-prov7-anon-read-d0-denied",
+        None,
+        None,
+        "https://pod.ex/prov7/d0.ttl",
+        R,
+        resolved_default(false, NONE),
+    ),
+    // alice is neither creator nor owner, but keeps her cumulative root grant.
+    v(
+        "acp-prov7-alice-cumulative",
+        Some(ALICE),
+        None,
+        "https://pod.ex/prov7/d0.ttl",
+        R,
+        resolved_default(true, RWC),
+    ),
     // fail-closed: no control document anywhere up the chain.
     v(
         "acp-foreign-resource-noacl",
@@ -642,6 +844,23 @@ static ACP_VECTORS: [Vector; 20] = [
         R,
         FAIL_CLOSED_NO_ACL,
     ),
+];
+
+/// The TRUSTED creator/owner facts the [`ACP_NQUADS`] `prov7` shape's
+/// `acp:CreatorAgent`/`acp:OwnerAgent` matchers resolve against. `prov7/d1.ttl`
+/// deliberately carries NO owner: the fail-closed row asserts the `OwnerAgent` matcher
+/// never fires without one.
+pub static ACP_PROVENANCE: [ProvenanceFact; 2] = [
+    ProvenanceFact {
+        resource: "https://pod.ex/prov7/d0.ttl",
+        creator: Some(BOB),
+        owner: Some(CAROL),
+    },
+    ProvenanceFact {
+        resource: "https://pod.ex/prov7/d1.ttl",
+        creator: Some(CAROL),
+        owner: None,
+    },
 ];
 
 /// The embedded WAC pod (N-Quads).
@@ -654,12 +873,14 @@ static FIXTURES: [Fixture; 2] = [
         name: "wac",
         system: System::Wac,
         nquads: WAC_NQUADS,
+        provenance: &[],
         vectors: &WAC_VECTORS,
     },
     Fixture {
         name: "acp",
         system: System::Acp,
         nquads: ACP_NQUADS,
+        provenance: &ACP_PROVENANCE,
         vectors: &ACP_VECTORS,
     },
 ];
@@ -672,15 +893,46 @@ pub fn fixtures() -> &'static [Fixture] {
 // ─── the runner ─────────────────────────────────────────────────────────────────────
 
 /// Load a fixture's pod into a [`PodStore`] and materialize its auth view with the
-/// matching `sparq-solid` materializer.
+/// matching `sparq-solid` materializer — [`PodStore::materialize_acp_with`] for an ACP
+/// corpus, so `acp:CreatorAgent`/`acp:OwnerAgent` matchers resolve against the fixture's
+/// TRUSTED [`Fixture::provenance`] facts (an empty list is exactly `materialize_acp`,
+/// i.e. fully fail-closed).
+///
+/// # Errors
+///
+/// If the fixture's N-Quads fail to load, if materialization fails, or if a **WAC**
+/// fixture declares provenance facts — WAC has no creator/owner vocabulary, so the
+/// materializer would silently ignore them and the rows would assert nothing.
 pub fn build_store(fixture: &Fixture) -> Result<PodStore, String> {
     let graph = Graph::load_dataset(fixture.nquads, "nquads")?;
     let mut store = PodStore::new(graph);
     match fixture.system {
+        System::Wac if !fixture.provenance.is_empty() => {
+            return Err(format!(
+                "fixture {}: WAC has no creator/owner vocabulary, so provenance facts \
+                 would be silently ignored",
+                fixture.name
+            ));
+        }
         System::Wac => store.materialize_wac()?,
-        System::Acp => store.materialize_acp()?,
+        System::Acp => store.materialize_acp_with(&access_provenance(fixture.provenance))?,
     };
     Ok(store)
+}
+
+/// The corpus's declarative [`ProvenanceFact`] rows as the `sparq-solid`
+/// [`AccessProvenance`] map [`build_store`] materializes with.
+pub fn access_provenance(facts: &[ProvenanceFact]) -> AccessProvenance {
+    let mut prov = AccessProvenance::new();
+    for fact in facts {
+        if let Some(creator) = fact.creator {
+            prov.set_creator(fact.resource, creator);
+        }
+        if let Some(owner) = fact.owner {
+            prov.set_owner(fact.resource, owner);
+        }
+    }
+    prov
 }
 
 /// Evaluate every vector against `store` and return a structured [`OracleReport`].
@@ -709,11 +961,19 @@ pub fn run_vectors(store: &PodStore, vectors: &[Vector]) -> OracleReport {
     }
 
     // 2) decide_batch parity: group rows by session (order-preserving), one batch per
-    //    session, each element must equal the singleton decision.
-    type SessionKey = (Option<&'static str>, Option<&'static str>);
+    //    session, each element must equal the singleton decision. The key spans ALL FOUR
+    //    session dimensions — two rows sharing an agent/client but differing in issuer or
+    //    clock are DIFFERENT sessions, and batching them together would silently decide
+    //    them under the wrong one.
+    type SessionKey = (
+        Option<&'static str>,
+        Option<&'static str>,
+        Option<&'static str>,
+        Option<&'static str>,
+    );
     let mut groups: Vec<(SessionKey, Vec<usize>)> = Vec::new();
     for (i, vector) in vectors.iter().enumerate() {
-        let key = (vector.agent, vector.client);
+        let key = (vector.agent, vector.client, vector.issuer, vector.now);
         match groups.iter_mut().find(|(k, _)| *k == key) {
             Some((_, idxs)) => idxs.push(i),
             None => groups.push((key, vec![i])),
@@ -899,8 +1159,72 @@ mod tests {
         let session = vector.session();
         assert_eq!(session.agent, Some(ALICE));
         assert_eq!(session.client, Some(APP));
+        // `v` leaves the issuer/clock dimensions unset — an issuer-constrained or
+        // time-windowed grant treats both as fail-closed.
         assert_eq!(session.issuer, None);
         assert_eq!(session.now, None);
+    }
+
+    #[test]
+    fn via_issuer_and_at_bind_the_remaining_session_dimensions() {
+        let base = v(
+            "s",
+            Some(ALICE),
+            Some(APP),
+            "https://pod.ex/x",
+            Mode::Read,
+            FAIL_CLOSED_NO_ACL,
+        );
+        let bound = base.via_issuer(GOOD_IDP).at("2026-06-17T09:00:00Z");
+        let session = bound.session();
+        assert_eq!(session.issuer, Some(GOOD_IDP));
+        assert_eq!(session.now, Some("2026-06-17T09:00:00Z"));
+        // the other fields are carried through untouched
+        assert_eq!(session.agent, Some(ALICE));
+        assert_eq!(session.client, Some(APP));
+        assert_eq!(bound.name, base.name);
+        assert_eq!(bound.resource, base.resource);
+        // …and the base row is unchanged (both builders are by-value).
+        assert_eq!(base.issuer, None);
+        assert_eq!(base.now, None);
+    }
+
+    #[test]
+    fn access_provenance_maps_only_the_supplied_facts() {
+        let prov = access_provenance(&ACP_PROVENANCE);
+        assert_eq!(prov.creator("https://pod.ex/prov7/d0.ttl"), Some(BOB));
+        assert_eq!(prov.owner("https://pod.ex/prov7/d0.ttl"), Some(CAROL));
+        assert_eq!(prov.creator("https://pod.ex/prov7/d1.ttl"), Some(CAROL));
+        // d1 declares no owner, so the OwnerAgent matcher stays fail-closed there…
+        assert_eq!(prov.owner("https://pod.ex/prov7/d1.ttl"), None);
+        // …and an undeclared resource knows neither.
+        assert_eq!(prov.creator("https://pod.ex/prov7/d2.ttl"), None);
+        assert_eq!(prov.owner("https://pod.ex/prov7/d2.ttl"), None);
+        // an empty list is exactly the fully fail-closed map.
+        assert!(access_provenance(&[]).is_empty());
+    }
+
+    #[test]
+    fn build_store_rejects_provenance_on_a_wac_fixture() {
+        // WAC has no creator/owner vocabulary, so the materializer would silently ignore
+        // the facts — fail loudly instead of shipping rows that assert nothing.
+        let bad = Fixture {
+            name: "wac-with-provenance",
+            system: System::Wac,
+            nquads: WAC_NQUADS,
+            provenance: &ACP_PROVENANCE,
+            vectors: &[],
+        };
+        let Err(err) = build_store(&bad) else {
+            panic!("WAC + provenance must be rejected");
+        };
+        assert!(err.contains("wac-with-provenance"), "{err}");
+        // the same fixture without provenance builds fine.
+        assert!(build_store(&Fixture {
+            provenance: &[],
+            ..bad
+        })
+        .is_ok());
     }
 
     #[test]
@@ -909,6 +1233,7 @@ mod tests {
             name: "bad",
             system: System::Wac,
             nquads: "this is not nquads",
+            provenance: &[],
             vectors: &[],
         };
         assert!(build_store(&bad).is_err());

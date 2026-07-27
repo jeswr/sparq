@@ -77,6 +77,10 @@ jobs:
       - name: Self-test policy
         run: |
           python3 scripts/gh_retry.py --self-test
+          # [OPUS-5] #1135: the Release-PR exclusion this sweep consults. Its own
+          # self-test runs FIRST so a regression in the shared predicate reds the
+          # cron before any arm is attempted.
+          python3 scripts/release_pr_guard.py --self-test
           python3 scripts/rearm-sweeper.py --self-test
 
       # [OPUS-5] #3760 — FAIL LOUD ONCE, AT THE START. Before this step existed, a token

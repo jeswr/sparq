@@ -405,6 +405,16 @@ jobs:
         run: bash scripts/tests/test_beir_gather_sentinel.sh
       - name: Self-test console envelope extractor (exact names + CRLF + allowlist)
         run: bash scripts/tests/test_extract_console_envelopes.sh
+      # [SONNET-4.6] PR #3990 review: bench/geo/gsb.sh advertises a HARD sha256 pin on the
+      # GeoSPARQL Compliance Benchmark, but a CACHED extraction was accepted on file COUNTS
+      # alone — a stale or locally edited corpus would have been scored silently, making the
+      # recorded compliance number irreproducible. The cache is now gated on a recorded proof
+      # (pinned tarball digest + a content digest of the extracted tree); this hermetic
+      # self-test pins that a count-preserving edit, an absent proof, and a proof naming a
+      # different tarball digest are all rejected. No network, no corpus: it fabricates a
+      # correctly-shaped tree in a scratch dir and drives the real script with GSB_FETCH=0.
+      - name: Self-test gsb.sh cache pin (count-preserving edit never scored)
+        run: bash bench/geo/gsb.sh --self-test
       # [OPUS-4.8] sq-neq8: hermetic self-test of the coverage-ratchet gate's PURE logic
       # (max-remeasure aggregation sq-x4jy + floor-monotonicity sq-neq8) so a regression in
       # the gate ITSELF is caught here, before the gate is trusted to guard real coverage.
@@ -450,6 +460,29 @@ jobs:
           python3 scripts/gh_retry.py --self-test
           python3 scripts/auto-arm.py --self-test
           python3 scripts/rearm-sweeper.py --self-test
+      # [OPUS-5] issue #1135 — the crates.io PUBLISHING protections, gated here because
+      # the release path itself (release-plz.yml) runs ONLY on push:main and therefore
+      # never registers on this PR's `gate`: a defect in it would otherwise surface for
+      # the first time at release time, when the mistake is irreversible.
+      #   * release_pr_guard.py    — the branch/author/title Release-PR exclusion that
+      #                              auto-arm.py, rearm-sweeper.py, check-pr-arm-base.py,
+      #                              batch-merge.py and pr-backlog.py all consult.
+      #   * release-interval-guard — the fail-closed minimum-release-interval belt.
+      #   * test_release_publish_guard.py — parses .github/workflows/release-plz.yml
+      #     STRUCTURALLY (not by substring) so `if: false`, a deleted step, a reordered
+      #     step or a re-pointed `--dry-run` input each red this gate. Measured in this
+      #     repo: every uncaught mutant has lived at the YAML seam, not in the Python.
+      #     [OPUS-5] PR #4192 review: it now pins the guard step's `run:` by EQUALITY and
+      #     asserts `continue-on-error` is ABSENT — a `|| true` suffix, an `exit 0;`
+      #     prefix, `continue-on-error: 'true'` and `continue-on-error: ${{ true }}` all
+      #     survived the looser containment/identity readings. It also drives `run()`'s
+      #     crates.io CALL SITE (not just `decide()`), and executes .claude/settings.json's
+      #     hook wrapper to prove an unrunnable arm guard denies rather than allows.
+      - name: Self-test crates.io publishing protections (#1135)
+        run: |
+          python3 scripts/release_pr_guard.py --self-test
+          python3 scripts/release-interval-guard.py --self-test
+          python3 scripts/tests/test_release_publish_guard.py
       # [OPUS-4.8] sq-ur7o: every SHA-pinned `taiki-e/install-action` step MUST carry an
       # explicit `with: tool:`. install-action picks the tool from its @<tool> git ref; the
       # code-scanning=0 SHA-pin policy DROPS that selector, so without `with: tool:` the
@@ -470,8 +503,14 @@ jobs:
       # fail-OPEN-on-error — with NO network/gh dependency (the base lookup is injected). Mirrors
       # coverage-gate.py / check-install-action-tool.py --self-test (stdlib-only, no deps).
       # [GPT-5.6] #3605: it also runs the real settings command from an unrelated cwd and
-      # proves a missing guard script returns an explicit allow instead of bricking every Bash.
-      - name: Self-test stacked-PR arm guard (cwd-independent + fail-open)
+      # proves an unrunnable guard script returns an explicit decision with exit 0 instead
+      # of bricking every Bash.
+      # [OPUS-5] PR #4192 review, finding 3: that explicit decision used to be `allow` for
+      # EVERY command, which inverted the script's deliberately fail-CLOSED release axis
+      # exactly when there is no guard. The wrapper now DENIES `gh pr merge` and allows
+      # everything else; both halves are pinned in the self-test (an all-deny would
+      # re-create the #3605 all-Bash deadlock, so the allow row is load-bearing too).
+      - name: Self-test stacked-PR arm guard (cwd-independent; fail-closed on arms)
         run: python3 scripts/check-pr-arm-base.py --self-test
       # [OPUS-4.8] sq-53cq: anti-drift guard for the two-hop dashboard publish. The in-repo
       # source-of-truth bench/dashboard/* reaches the live site via bench.yml's "Seed Pages
@@ -503,6 +542,18 @@ jobs:
         run: shellcheck scripts/check-site-links.sh scripts/tests/test_check_site_links.sh
       - name: Self-test check-site-links.sh (basePath remap + broken-link teeth)
         run: bash scripts/tests/test_check_site_links.sh
+      # [SONNET-4.6] sq-vw3ax.11.3: the fail-closed release alias contract check
+      # (scripts/check-release-aliases.sh) runs on the RELEASE path (release.yml), where a
+      # silently shrunken extraction would only surface after a bad release shipped. Its
+      # hermetic self-test therefore runs HERE on every PR: it pins the golden alias contract
+      # extracted from the real /download component (so an intentional alias change must
+      # update the golden in the same PR), the release-blocking teeth, and — PR #3528 review —
+      # that every partial-extraction mutation (reformat / key rename / pattern-key drift)
+      # exits 2 instead of approving a reduced contract.
+      - name: shellcheck check-release-aliases.sh + its self-test
+        run: shellcheck scripts/check-release-aliases.sh scripts/tests/test_check_release_aliases.sh
+      - name: Self-test check-release-aliases.sh (golden contract + partial-extraction teeth)
+        run: bash scripts/tests/test_check_release_aliases.sh
       # [OPUS-4.8] sq-mkza: end-to-end proof that BOTH honesty gates now cover the
       # paper-factory `.typ` sources (site/papers/**/*.typ) — the highest-stakes
       # OUTWARD surface. Before sq-mkza a hard-coded perf ratio or an unqualified
@@ -548,6 +599,22 @@ jobs:
       # scripts/check-*.py --self-test lints above.
       - name: Self-test the paper-evidence binding verifier (drift + missing-anchor FAIL; real evidence PASS — sq-gum8.13)
         run: python3 scripts/verify-paper-evidence.py --self-test
+      # [SONNET-4.6] sq-gum8.5 (epic sq-gum8): the constraint-count evaluation pack
+      # (bench/zk-compose/constraint_counts.json + CONSTRAINT_COUNTS.md) is GENERATED — every
+      # integer is joined from the regression-gated snapshot
+      # crates/sparq-zk-compose/tests/gate_count_snapshot.json, nothing is hand-typed. Without a
+      # gate the pack's guarantees rested on a contributor remembering to re-run the generator:
+      # a re-baselined snapshot, a hand-edited artefact, or a NEW snapshot member belonging to no
+      # described family could all merge with the committed pack silently stale. `--check` is that
+      # gate — it re-generates in-memory and fails unless BOTH artefacts are byte-identical, then
+      # re-verifies the COMMITTED JSON against the snapshot (every member size, scaling delta,
+      # invariance, both lanes) and the honesty guards (no related-work figure transcribed; the
+      # metric never flipped to wall-clock/canonical). classify() fails on an unclassified member,
+      # so a new circuit family cannot silently drop out. Stdlib-only, needs NO nargo/bb, no
+      # network — and this lane carries no paths filter, so it runs whenever the snapshot, the
+      # generator, or either artefact changes.
+      - name: "constraint-pack reproducibility (bench/zk-compose, sq-gum8.5) — GATING"
+        run: python3 bench/zk-compose/scripts/constraint_pack.py --check
       # [OPUS-4.8] sq-dhss (epic sq-lhwo): the agent-efficiency Phase-1 telemetry
       # harness (scripts/agent-telemetry/) is the BLOCKING measurement baseline —
       # it parses Claude Code transcript JSONL and aggregates token/cache/$ usage
@@ -748,6 +815,23 @@ jobs:
         run: python3 scripts/check-fast-fix-ring-guard.py --self-test
       - name: "Enforce the fast-fix ring fail-closed cross-repo guard (#3475) — GATING"
         run: python3 scripts/check-fast-fix-ring-guard.py
+      # [OPUS-5] The VERDICT-comment -> review:pass bridge (scripts/verdict-bridge.py,
+      # .github/workflows/verdict-bridge.yml). It is the ONLY automated writer of the
+      # label the whole arming chain admits on, so a regression in it either strands
+      # green PRs outside the merge queue again or — far worse — attests a PR whose
+      # verdict is stale. The suite pins BOTH: the pure fail-closed predicate
+      # (line-anchored trailing verdict, FULL 40-hex head binding, trusted
+      # author_association, latest-by-immutable-created_at retraction, hold labels,
+      # never-retract-on-absence) AND the YAML seam, parsed STRUCTURALLY with PyYAML so
+      # an `if: false`, a deleted step, a wrong sparse-checkout/ref/cron input, or a
+      # privilege escalation reds here — substring assertions catch none of those.
+      # A cross-file check imports the LIVE auto-arm.py / rearm-sweeper.py so the
+      # bridge can never attest a PR those policies would refuse. Stdlib + PyYAML
+      # (installed in the shared setup above); no gh, no git, no network.
+      - name: Self-test verdict-bridge.py (fail-closed predicate — head binding + retraction)
+        run: python3 scripts/verdict-bridge.py --self-test
+      - name: Verdict-bridge policy + workflow-seam inspection (structural YAML)
+        run: python3 scripts/tests/test_verdict_bridge.py
       # [OPUS-5] sparq-org/sparq#3760 — THE ARM PATH. The re-arm sweeper spent days unable
       # to enable auto-merge at all ("Resource not accessible by integration
       # (enablePullRequestAutoMerge)") because its job declared `contents: read` while the

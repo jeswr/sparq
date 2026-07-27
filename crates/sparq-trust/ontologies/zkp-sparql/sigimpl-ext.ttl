@@ -1,0 +1,70 @@
+# sigimpl-ext.ttl — the sparq extension of the vendored `sig-impl:` ontology.
+#
+# [SONNET-4.6] Issue #2832. This file is sparq-authored and is not part of the
+# ontology vendored from origin SHA 0fe80ea7d858de9f02bd29df29f6e50cdada14a0.
+# It adds ML-DSA as a post-quantum migration target while the paper's round-1
+# signature-implementation graph remains unchanged.
+
+@prefix sig-impl: <https://w3id.org/zkp-sparql/sig-impl#> .
+@prefix sigx: <https://w3id.org/zkp-sparql/sig-impl#> . # SAME namespace; sparq extension terms
+@prefix sec-prop: <https://w3id.org/zkp-sparql/sec-prop#> .
+@prefix bibo: <http://purl.org/ontology/bibo/> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix prov: <http://www.w3.org/ns/prov#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+# [SONNET-4.6] Machine-readable provenance keeps sparq's extension authorship
+# visible after this graph is loaded alongside the byte-for-byte vendored graph.
+<https://w3id.org/zkp-sparql/sig-impl-ext> a owl:Ontology ;
+  rdfs:label "sparq sig-impl: extension — ML-DSA"@en-GB ;
+  dcterms:description "A sparq-authored extension adding ML-DSA terms to the sig-impl: namespace. It is not part of the ontology vendored from origin SHA 0fe80ea7d858de9f02bd29df29f6e50cdada14a0."@en-GB ;
+  dcterms:creator <https://github.com/jeswr/sparq> ;
+  dcterms:date "2026-07-26"^^xsd:date ;
+  owl:imports <https://w3id.org/zkp-sparql/sig-impl> .
+
+sigx:lattice
+  a sig-impl:Family ;
+  rdfs:label "Lattice-based signature family"@en-GB .
+
+sigx:MlDsa
+  a sig-impl:SignatureImplementation ;
+  rdfs:label "ML-DSA (FIPS 204 / CRYSTALS-Dilithium)"@en-GB ;
+  rdfs:comment "NIST-standardised lattice-based digital-signature scheme."@en-GB ;
+  sig-impl:family sigx:lattice ;
+  sig-impl:postQuantum true ;
+  prov:wasDerivedFrom bibo:nist-fips204-2024 ;
+  sig-impl:achieves
+    sigx:assert-mldsa-pq-forgery,
+    sigx:assert-mldsa-pq-snooping,
+    sigx:assert-mldsa-unlinkability,
+    sigx:assert-mldsa-sigtype-leakage .
+
+sigx:assert-mldsa-pq-forgery
+  a sig-impl:Assertion ;
+  sig-impl:property sec-prop:PostQuantumForgery ;
+  sig-impl:verdict sig-impl:yes ;
+  sig-impl:justification "ML-DSA is a FIPS 204 post-quantum digital-signature standard designed to resist attacks by large-scale quantum computers."@en-GB ;
+  prov:wasDerivedFrom bibo:nist-fips204-2024 .
+
+sigx:assert-mldsa-pq-snooping
+  a sig-impl:Assertion ;
+  sig-impl:property sec-prop:PostQuantumSnooping ;
+  sig-impl:verdict sig-impl:no ;
+  sig-impl:justification "A captured ML-DSA signature is already public verification material rather than encrypted confidential content, so harvest-now-decrypt-later confidentiality is out of scope for this signature entry."@en-GB ;
+  prov:wasDerivedFrom bibo:nist-ir8547-2024 .
+
+sigx:assert-mldsa-unlinkability
+  a sig-impl:Assertion ;
+  sig-impl:property sec-prop:Unlinkability ;
+  sig-impl:verdict sig-impl:no ;
+  sig-impl:justification "FIPS 204 specifies signing and verification, not presentation randomisation; presenting the issuer signature therefore provides no unlinkability mechanism."@en-GB ;
+  prov:wasDerivedFrom bibo:nist-fips204-2024 .
+
+sigx:assert-mldsa-sigtype-leakage
+  a sig-impl:Assertion ;
+  sig-impl:property sec-prop:SignatureTypeLeakage ;
+  sig-impl:verdict sig-impl:no ;
+  sig-impl:justification "ML-DSA public keys and signatures use parameter-set-specific fixed-length encodings, so their exposed representation reveals the algorithm family; the generic proof-of-knowledge adapter that partially blinds the group-based suites has no deployed lattice analogue, so no partial credit is recorded here."@en-GB ;
+  prov:wasDerivedFrom bibo:nist-fips204-2024 .

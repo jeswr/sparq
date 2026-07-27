@@ -449,16 +449,27 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 ARM_SCRIPTS = (REARM_PY, AUTO_ARM_PY)
 
 
-def run_without_gh_retry(script: Path, driver: str | None = None):
+def run_without_gh_retry(
+    script: Path, driver: str | None = None, *, with_release_guard: bool = True
+):
     """Run ``script`` from a temp dir holding ONLY it, so `import gh_retry` cannot resolve.
 
     This reproduces the runner's state exactly: sys.path[0] is the script's own directory,
     and scripts/gh_retry.py was never checked out into it.
+
+    [OPUS-5] #1135: ``with_release_guard`` (default True) ALSO copies
+    scripts/release_pr_guard.py in, isolating exactly ONE variable — the missing
+    gh_retry.py this class is about. That guard has the OPPOSITE degradation contract
+    (its absence must stop every arm, not degrade one), so leaving it out here would
+    conflate the two and make this class assert something it does not mean. The
+    release-guard-absent case has its own class: TestMissingReleaseGuardArmsNothing.
     """
     env = {k: v for k, v in __import__("os").environ.items() if k != "PYTHONPATH"}
     with tempfile.TemporaryDirectory() as tmp:
         target = Path(tmp) / script.name
         shutil.copy2(script, target)
+        if with_release_guard:
+            shutil.copy2(script.parent / "release_pr_guard.py", Path(tmp))
         if (Path(tmp) / "gh_retry.py").exists():  # pragma: no cover - paranoia
             raise AssertionError("the isolation dir must NOT contain gh_retry.py")
         if driver is None:
@@ -579,6 +590,52 @@ class TestSurvivesMissingGhRetry(unittest.TestCase):
                     f"stderr:\n{result.stderr}",
                 )
                 self.assertIn("DEGRADED-MUTATION-OK", result.stdout, result.stdout)
+
+
+class TestMissingReleaseGuardArmsNothing(unittest.TestCase):
+    """[OPUS-5] #1135: the OPPOSITE degradation contract to TestSurvivesMissingGhRetry.
+
+    A missing `gh_retry.py` costs RETRIES and must never cost the arm (#3776). A missing
+    `release_pr_guard.py` costs the ARM ITSELF and must: without it the sweep cannot prove
+    any candidate is not the release-plz Release PR, and arming that PR cuts a `v*` tag
+    and — once `publish = true` — publishes 17 crates to crates.io, irreversibly. A missed
+    sweep is covered by the next cron; an unpublishable version is covered by nothing.
+
+    These are the tests that go red if someone 'fixes' the fail-closed stub into a
+    permissive one to make TestSurvivesMissingGhRetry pass more easily.
+    """
+
+    def test_arm_sweeps_refuse_every_candidate_without_the_guard(self) -> None:
+        for script in ARM_SCRIPTS:
+            with self.subTest(script=script.name):
+                result = run_without_gh_retry(
+                    script,
+                    driver=DEGRADED_DRIVERS[script],
+                    with_release_guard=False,
+                )
+                # The driver asserts `outcome.armed == 1`, so a NON-zero exit here is the
+                # assertion that nothing was armed. Paired with
+                # TestSurvivesMissingGhRetry, which runs the SAME driver WITH the guard
+                # present and requires exit 0 — the two together prove the difference is
+                # attributable to the guard and to nothing else.
+                self.assertNotEqual(
+                    0,
+                    result.returncode,
+                    f"{script.name} ARMED a PR with release_pr_guard.py absent. The "
+                    "Release-PR exclusion could not be evaluated, so nothing may be "
+                    "armed (#1135).\nstdout:\n" + result.stdout,
+                )
+                self.assertNotIn("DEGRADED-MUTATION-OK", result.stdout, result.stdout)
+
+    def test_the_refusal_is_loud_and_actionable(self) -> None:
+        for script in ARM_SCRIPTS:
+            with self.subTest(script=script.name):
+                out = run_without_gh_retry(
+                    script, with_release_guard=False
+                ).stdout
+                self.assertIn("::error title=", out, out)
+                for needle in ("release_pr_guard.py", "sparse-checkout", "#1135"):
+                    self.assertIn(needle, out, f"{script.name}: must name {needle!r}")
 
 
 class TestDegradedHelperContract(unittest.TestCase):

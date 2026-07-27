@@ -755,9 +755,11 @@ pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize 
 /// reif-dtr recovers the classic vocabulary from as-written quotations, but reif-ctr
 /// never runs, so inference never mints a triple term (in particular the documented
 /// `owl:sameAs` bridge composition derives no variant quotation). Same in-place /
-/// return-count / idempotency contract as [`materialize_owl_rl`]. Batch-only for
-/// now: `MaterializedOwlGraph`'s Fallback re-materialization always runs the full
-/// bridge.
+/// return-count / idempotency contract as [`materialize_owl_rl`]. The incremental
+/// counterpart is `MaterializedOwlGraph::with_reify_mode`, whose Fallback
+/// re-materialization runs the mode it was constructed with (third increment); plain
+/// `MaterializedOwlGraph::new` is `ReifyMode::Bridge`, i.e. this function's
+/// [`materialize_owl_rl`] default.
 #[cfg(feature = "quoted-triples")]
 pub fn materialize_owl_rl_reify(
     dict: &mut Dict,

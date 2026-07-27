@@ -77,7 +77,7 @@ command line both are reachable behind `sparq-cli`'s opt-in `reason-el` feature:
   SAFE-NOMINAL axioms over CR6, then reads off instance typings, `owl:sameAs`, and a whole-ontology
   `inconsistent` verdict (`{a} ⊑ ⊥` or `⊤ ⊑ ⊥`) via the additive `realize` / `realize_graph` entry
   — every emitted fact holds in EVERY model. The TBox `Classifier::classify` / `classify_graph` stay
-  **byte-identical**. Unsupported assertion shapes stay counted `Report::skipped_assertions`.
+  **byte-identical**. With `cdomain` too, `a q 5` ⇒ `{a} ⊑ ∃q.{5}` (a CR9 point); unsupported assertion shapes stay counted `Report::skipped_assertions`.
 - **Keys, negative assertions & differentFrom** *(also `abox`)* — `owl:hasKey` merges two DISTINCT named individuals in the
   key class that share a value on EVERY key property (`owl:sameAs`); a PARTIAL key match cannot fire (object keys match a
   shared nominal successor, data keys a shared literal term — sound). An `owl:NegativePropertyAssertion` is a clash iff the

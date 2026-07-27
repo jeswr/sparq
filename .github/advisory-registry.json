@@ -185,7 +185,7 @@
    "workflow": "release-plz.yml",
    "job_id": "release-plz-pr",
    "owner_bead": "sq-lonae",
-   "promotion_criteria": "advisory while the repo/org setting 'Allow GitHub Actions to create and approve pull requests' is disabled (GITHUB_TOKEN cannot open the Release-PR: known 403, live run 29988505600, contained loudly via captured-output signature + side-effect-free probe). Promote when a maintainer enables that setting or configures the ORCHESTRATOR_APP_ID/_PRIVATE_KEY secrets (batch-merge.yml App-token pattern): drop the ' (advisory)' name token, remove the 403-containment step, and delete this entry",
+   "promotion_criteria": "advisory while NO privileged forge token is provisioned, so the job falls back to GITHUB_TOKEN, which cannot open the Release-PR while 'Allow GitHub Actions to create and approve pull requests' is disabled (known 403, live run 29988505600, contained loudly via captured-output signature + side-effect-free probe). [OPUS-5] sq-iwnnf / #3273 pre-wired the durable fix in-repo: the job's forge token is App token (ORCHESTRATOR_APP_ID/_PRIVATE_KEY) || RELEASE_PLZ_TOKEN || GITHUB_TOKEN, and the containment refuses to tolerate the 403 once either privileged secret exists — so provisioning one is the only remaining step and needs no further workflow edit. Promote once a privileged secret is provisioned (or that repo setting is enabled) AND a main run is observed opening/updating the Release-PR: drop the ' (advisory)' name token, remove the 403-containment step, and delete this entry",
    "registered": "2026-07-23"
   },
   "merge-queue dequeued feedback (advisory)": {

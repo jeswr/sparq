@@ -6276,6 +6276,64 @@ fn entailment_rdfs_ungrounded_antecedent_rejected() {
     }
 }
 
+/// sq-rsd3v.6: an `owl:sameAs` fact may NOT ride the fixed-shape RDFS path.
+///
+/// This is the forge the equality guard exists for, and it is deliberately
+/// SHAPE-VALID: `rdfs7` with `p1 = owl:sameAs` is a legitimate RDFS instance
+/// (`(sameAs subPropertyOf knows), (alice sameAs bob) ⊢ (alice knows bob)`) that
+/// CONSUMES an equality, and both its antecedents are genuinely disclosed by the
+/// scan — so neither `is_well_formed` nor the grounding check would stop it.
+/// Only `EqualityReasoningUnsupported` does. Equality reasoning needs the
+/// separate in-circuit canonicalisation member (`sparq_zk_compose::sameas`),
+/// which nothing dispatches yet; refusing here is the fail-closed direction.
+#[test]
+fn entailment_owl_sameas_step_rejected_from_the_fixed_shape_path() {
+    let sp = enc_iri("http://www.w3.org/2000/01/rdf-schema#subPropertyOf");
+    let same = enc_iri(sparq_zk_compose::sameas::OWL_SAME_AS);
+    let step = DerivationStep {
+        rule: EntailmentRule::Rdfs7SubProperty,
+        antecedents: vec![
+            [same.clone(), sp, enc_iri("http://ex/knows")],
+            [enc_iri("http://ex/alice"), same, enc_iri("http://ex/bob")],
+        ],
+        derived: [
+            enc_iri("http://ex/alice"),
+            enc_iri("http://ex/knows"),
+            enc_iri("http://ex/bob"),
+        ],
+    };
+    let m = entailment_manifest(EntailmentRegime::Rdfs, vec![step]);
+    match run_entailment(&m, &EntailmentPolicy::simple_only().with_rdfs()) {
+        Err(CheckError::EqualityReasoningUnsupported { step: 0 }) => {}
+        other => panic!(
+            "an owl:sameAs derivation step must be EqualityReasoningUnsupported, got {other:?}"
+        ),
+    }
+}
+
+/// sq-rsd3v.6 (the precision half): the guard must not over-fire. An ordinary
+/// `rdfs9` step that mentions NO `owl:sameAs` predicate reaches the ordinary
+/// grounding check — here it is ungrounded, which proves the equality guard let
+/// it past rather than short-circuiting every `Rdfs` manifest.
+#[test]
+fn entailment_equality_guard_leaves_ordinary_rdfs_steps_alone() {
+    let t = enc_iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
+    let sc = enc_iri("http://www.w3.org/2000/01/rdf-schema#subClassOf");
+    let step = DerivationStep {
+        rule: EntailmentRule::Rdfs9SubClassType,
+        antecedents: vec![
+            [enc_iri("http://ex/alice"), t.clone(), enc_iri("http://ex/Student")],
+            [enc_iri("http://ex/Student"), sc, enc_iri("http://ex/Person")],
+        ],
+        derived: [enc_iri("http://ex/alice"), t, enc_iri("http://ex/Person")],
+    };
+    let m = entailment_manifest(EntailmentRegime::Rdfs, vec![step]);
+    match run_entailment(&m, &EntailmentPolicy::simple_only().with_rdfs()) {
+        Err(CheckError::UngroundedDerivationAntecedent { .. }) => {}
+        other => panic!("the equality guard must not fire on an rdfs9 step, got {other:?}"),
+    }
+}
+
 /// sq-314: a `Simple` manifest with no steps PASSES the entailment gate (it then
 /// progresses to the bb loop and stops at MissingProof — proving the entailment
 /// gate ACCEPTED it rather than rejecting it).
