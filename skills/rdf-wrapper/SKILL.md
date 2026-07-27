@@ -81,13 +81,38 @@ sparq-wrapper = { version = "0.1", features = [
 ] }
 ```
 
-The async events, async node, async store, graph-scope events, and JSON
-features currently expose reserved, empty modules; enabling them adds no API.
+The async events, async node, graph-scope events, and JSON features currently
+expose reserved, empty modules; enabling them adds no API.
 Every other proposal feature is implemented. `proposed-distinct` is exposed as
 inherent `Dataset` methods in the crate root rather than through a `proposed::`
 module. See the
 [per-feature proposal status pages](references/README.md) for the
 implemented and reserved feature inventory. <!-- [SONNET-4.6] sq-1rg2q.1 -->
+
+`proposed-async-store` adds `sparq_wrapper::proposed::async_store` — the
+wrapper shape over a store whose reads are not synchronous (an HTTP endpoint, a
+Solid pod, an out-of-core on-disk index), based on rdfjs/wrapper
+[issue #10](https://github.com/rdfjs/wrapper/issues/10) and
+[draft PR #97](https://github.com/rdfjs/wrapper/pull/97). Implement
+`AsyncStoreBackend` for the backend, then use `AsyncStore` exactly like `Store`.
+
+`AsyncNode::out` / `AsyncNode::r#in` return a `NodeStream` that wraps each term
+into an `AsyncNode` as it arrives: the first node is observable before the
+backend finishes producing, and there is deliberately no `collect`. Building a
+stream polls nothing; dropping one drops the backend stream, so a cancelled
+traversal is never polled again and a partially consumed remote result set is
+abandoned rather than drained. `NodeStream::next` is cancellation-safe — the
+wrapper buffers nothing of its own.
+
+The crate depends on no async runtime and contains no executor: `TermStream` is
+`futures_core::Stream` narrowed to `Result<Term, AsyncStoreError>` over
+`std::task` alone, so any executor can drive it and a backend built on the
+async ecosystem forwards to its own stream in one line. A `!Unpin` backend
+stream should be exposed as `Pin<Box<S>>`, which implements `TermStream`.
+`add`/`has`/`delete` validate the subject position synchronously (a literal
+subject is rejected before the backend is asked to do anything) and return the
+backend future, so the call site reads `store.add(s, p, o)?.await?`.
+<!-- [SONNET-4.6] sq-1rg2q.8 -->
 
 `proposed-graph-scope` adds a read-many/write-one `GraphScope` based on
 rdfjs/wrapper draft PR #95. Its reads are the deduplicated projection of

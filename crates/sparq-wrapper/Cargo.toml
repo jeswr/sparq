@@ -22,7 +22,7 @@ default = []
 proposed-async-events = []
 # [SONNET-4.6] sq-1rg2q.1: reserved, empty until the async node proposal lands.
 proposed-async-node = []
-# [SONNET-4.6] sq-1rg2q.1: reserved, empty until the async store proposal lands.
+# [SONNET-4.6] sq-1rg2q.8: streaming async store wrapper (rdfjs/wrapper #10, #97).
 proposed-async-store = []
 proposed-cardinality = []
 proposed-codecs = []

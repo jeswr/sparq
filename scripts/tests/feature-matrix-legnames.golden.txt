@@ -161,6 +161,7 @@ opt-in sparq-vectors (spqv-provenance — v3 embedding-provenance write + fail-c
 opt-in sparq-vectors (vec-predicate, filtered-ann)
 opt-in sparq-vectors (vec-predicate, provider)
 opt-in sparq-wac-oracle (odrl-bridge)
+opt-in sparq-wrapper (proposed-async-store)
 opt-in sparq-wrapper (proposed-cardinality)
 opt-in sparq-wrapper (proposed-codecs)
 opt-in sparq-wrapper (proposed-composition)

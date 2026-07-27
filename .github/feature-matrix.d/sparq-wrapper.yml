@@ -8,6 +8,11 @@
 # Implemented proposal features are default-OFF. Their code and integration tests
 # therefore need explicit feature legs instead of relying on the workspace's
 # default-feature lane. [SONNET-4.6] sq-1rg2q
+- name: "sparq-wrapper (proposed-async-store)"
+  crate: "sparq-wrapper"
+  features: "proposed-async-store"
+  test: true
+
 - name: "sparq-wrapper (proposed-cardinality)"
   crate: "sparq-wrapper"
   features: "proposed-cardinality"
