@@ -96,3 +96,11 @@ metrics/runtime/
 # unreviewable and a supply-chain risk; install tools via the pinned CI/dev bootstrap
 # instead. Ignored so one can never be accidentally committed (PR #3453 review).
 /.local-bin/
+
+# [OPUS-5] sq-7oj3m — proptest regression seeds are INTENTIONALLY tracked. Do NOT add a
+# `*.proptest-regressions` ignore rule here: the decision (AGENTS.md § "Proptest regression
+# seeds — COMMIT the corpus, never gitignore it") is to commit them as a curated corpus,
+# per proptest's own upstream recommendation. Ignoring them would silently drop every
+# shrunk counterexample, since each run draws fresh random cases and would not re-find it.
+# The one thing that must NOT be committed is a seed generated against MUTATED code (the
+# non-vacuity mutation spot-check) — that is a pruning discipline, not an ignore rule.
