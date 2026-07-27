@@ -69,7 +69,7 @@ source of truth as they ratchet up), and a guard test
 the central board matches the constants each runner actually enforces, so it cannot silently
 drift from CI. The OWL 2 **Direct-Semantics** arm is pinned even harder:
 [`tests/dl_suite.rs`](crates/sparq-conformance/tests/dl_suite.rs) asserts **exact equality**
-(68 profile-lane passes, 184 direct consistency/entailment passes) rather than `>=`, because
+(94 profile-lane passes, 186 direct consistency/entailment passes) rather than `>=`, because
 its invariant is *"an abstention is never counted as a pass"* — a floor cannot catch that.
 
 - **See it run:** the conformance jobs in [`ci.yml`](.github/workflows/ci.yml); the scoreboard
@@ -154,7 +154,7 @@ flagged by TLP, NoREC and the differential oracle, or the tests fail
 
 ## 4. Fuzzing
 
-Hostile bytes must produce a clean `Err`, never a panic, OOM or undefined behaviour. Five
+Hostile bytes must produce a clean `Err`, never a panic, OOM or undefined behaviour. Thirteen
 libFuzzer targets under [`fuzz/fuzz_targets/`](fuzz/fuzz_targets/) cover the RDF text parsers,
 the parallel N-Triples reader, the SPARQL parser, SHACL parsing/traversal, and — load-bearing —
 the **mmap on-disk store loader** (`graph_open`), which is exactly the surface Miri cannot
@@ -231,7 +231,8 @@ execute a line but never assert on it.
 - **Green means:** no crate below floor, no floor lowered vs `main`, presence counts met; no
   crate above its mutant ceiling.
 - **Limits:** the mutation ratchet is **advisory** while its baseline seeds across the
-  workspace (it is named so `ci-summary` excludes it); a few driver-style crates carry floor 0
+  workspace (it is **declared** in [`.github/advisory-registry.json`](.github/advisory-registry.json), which is
+  the only thing that makes a check non-gating — naming alone does nothing since #3773); a few driver-style crates carry floor 0
   by design but remain presence-gated.
 
 ## 8. Both-feature-state builds
@@ -332,8 +333,8 @@ and the public **OpenSSF Scorecard** ([`scorecard.yml`](.github/workflows/scorec
 >
 > **There is currently no compensating SAST control.** `clippy -D warnings`, the unsafe-count
 > ratchet, `cargo-deny`/`cargo-vet` and the fuzz lanes all remain green and are genuine, but none
-> of them is a substitute for taint/crypto-misuse analysis. The alerts have **not** been triaged
-> — being disabled does not retire a finding. They have now been triaged (see above); the durable
+> of them is a substitute for taint/crypto-misuse analysis. The 35 alerts have been triaged (see above) and none is exploitable
+> — note that being disabled does not retire a finding, so the triage was done on the merits. The durable
 > decision (re-enable advisory-only, re-enable on a schedule, or accept and document no SAST)
 > is still open in sparq-org/sparq#4620.
 
