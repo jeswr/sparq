@@ -105,11 +105,16 @@ metrics/runtime/
 #   1. Silently discard genuine counterexamples. proptest writes the seed next to the test
 #      source, so there is no "junk" location a scoped rule could target: all 27 property
 #      -test sources write into crates/*/tests/, alongside the seeds worth keeping.
-#   2. Re-create the sq-owci footgun. crates/sparq-engine/tests/proptest_eval and
-#      crates/sparq-sim/tests/proptest_metric seeds are already TRACKED, and neither crate
-#      sets publish = false — so ignoring them makes them tracked-AND-ignored, which is
-#      exactly the state that made release-plz's (cargo) VCS dirty-check abort Release-PR.
-#      See the inference-conformance-report.md NOTE above for that incident.
+#   2. Put the two already-TRACKED seeds (crates/sparq-engine/tests/proptest_eval,
+#      crates/sparq-sim/tests/proptest_metric) into the tracked-AND-ignored state. Be precise
+#      about the hazard: an ignore rule does NOT hide edits to an already-tracked file — git
+#      still reports it modified, and cargo's per-package dirty check flags it only when it is
+#      genuinely modified, ignored or not. The real cost is that release-plz's pre-release
+#      check lists tracked-and-ignored paths as uncommitted even when untouched on a fresh
+#      checkout: that is sq-owci, which aborted Release-PR ("If these files are both committed
+#      and in .gitignore, either delete them or remove them from .gitignore") and is tolerated
+#      today only by allow_dirty = true — see the sq-owci NOTE in release-plz.toml for the
+#      verbatim failure.
 # If a specific property test's seeds are genuinely not worth pinning, opt OUT per-test
 # instead, via `failure_persistence: None` in its proptest Config — see
 # crates/sparq-terse/tests/proptest_keyword.rs for the in-repo precedent.
