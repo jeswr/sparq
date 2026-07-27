@@ -119,6 +119,30 @@ export class Store {
      */
     count(sparql: string): number;
     /**
+     * [SONNET-4.6] sq-q4apb (#2396): derives one complete `FormDescription`
+     * (SHACL-to-form, DASH widget scoring) from serialized workspace snapshots —
+     * the hosted-web half of the GUI forms bridge (desktop uses the Tauri
+     * `derive_form` command; `forms-bridge.ts` feature-detects this method).
+     *
+     * `data` / `shapes` are RDF documents in `format` (the syntaxes
+     * [`Store::load`] accepts; named graphs are preserved dataset-style).
+     * `focus` is an absolute IRI or a `_:`-prefixed blank-node label.
+     * `options_json` is the snake_case `{"mode": "edit"|"view", "shape"?: …}`
+     * object described in the module docs. Stateless one-shot: the receiver's
+     * stored triples are not consulted.
+     *
+     * Returns the derived `FormDescription` as its serde JSON string, verbatim
+     * (`JSON.parse` it on the JS side; the frontend must not reconstruct keys,
+     * groups, or widgets). Errors — an unparseable graph, focus, shape, or
+     * options document — throw a `JsError`; there is no demo-data fallback.
+     *
+     * Available only when the crate is built with the OPT-IN `forms` feature —
+     * the hosted `/app` + site bundle (js `build:wasm`) enables it; the lean
+     * default bundle does not, and there this method is simply absent (which is
+     * exactly what `forms-bridge.ts` feature-detects).
+     */
+    deriveForm(data: string, shapes: string, focus: string, format: string, options_json: string): string;
+    /**
      * [OPUS-4.8] sq-ncvq.14: query-plan introspection — `EXPLAIN`.
      *
      * Returns the engine's plan for `sparql` as a human-readable string — the
@@ -518,6 +542,7 @@ export interface InitOutput {
     readonly store_ask: (a: number, b: number, c: number) => [number, number, number];
     readonly store_askWithMaxRows: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly store_count: (a: number, b: number, c: number) => [number, number, number];
+    readonly store_deriveForm: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
     readonly store_explain: (a: number, b: number, c: number) => [number, number, number, number];
     readonly store_explainAnalyze: (a: number, b: number, c: number) => [number, number, number, number];
     readonly store_explainPlanAnalyzeJson: (a: number, b: number, c: number) => [number, number, number, number];
