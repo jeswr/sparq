@@ -3,9 +3,10 @@
 **Status:** ASSESSMENT COMPLETE — **verdict: NO-BUILD.** The remedy sq-93h proposed
 (move `m`-reconstruction to an in-circuit salt-commitment, mirroring the sq-ayv
 index-commitment cross-binding, so the salt can be withheld) is **not recommended**:
-it would hide a correlator that is *strictly dominated* by one that stays public on
-the same manifest entry, so it buys **zero** unlinkability for a new circuit member,
-a new anchored VK, and added proving cost. The bead's *question* is answered here; the
+it would hide a correlator that is *dominated* — under the audit-#9 issuance discipline
+stated as (A1) in §3 — by one that stays public on the same manifest entry, so it buys
+**zero** unlinkability for a new circuit member, a new anchored VK, and added proving
+cost. The bead's *question* is answered here; the
 bead's *proposed implementation* should not be built as specified.
 
 **Priority:** P3, as filed. Nothing in this assessment raises it.
@@ -49,25 +50,44 @@ The linkability question is *what partition of presentations can a coalition of
 verifiers compute*. Compare the two disclosed values:
 
 - `graph → C(G)` is deterministic and (by commitment binding) effectively injective.
-  So "same disclosed `C`" ⟺ "same committed graph".
-- `graph → salt` is fixed at issuance and globally unique per graph — that is exactly
-  what the audit-#9 uniqueness discipline requires, and the verifier already refuses a
-  salt reused across two distinct scan/path-referenced commitments
-  (`SaltReused`, `verifier.rs:3062-3090`). So "same disclosed salt" ⟺ "same committed
-  graph" too.
+  So "same disclosed `C`" ⟺ "same committed graph". This holds unconditionally from the
+  code: the commitment is disclosed in the clear on every path (§2).
+- `graph → salt` is a per-graph value chosen at issuance. Domination needs only ONE
+  direction of it — that a salt is never reused for two DISTINCT graphs, so that
+  "same disclosed salt" ⟹ "same committed graph".
 
-**Both values induce the identical equivalence relation.** The salt is therefore not an
-*additional* correlator: any two presentations a coalition can link by salt, it can
-already link by `C(G)` — which is not merely disclosed as JSON but byte-bound into the
-bb public inputs of every scan sub-proof, so it cannot be withheld without redesigning
-the scan member itself.
+**Assumption (A1) — salt injectivity across issuances.** No salt is ever issued for two
+distinct graphs. This is the audit-#9 issuance discipline; it is **not** globally
+machine-checked. What the verifier actually enforces is the *within-manifest* instance:
+`SaltReused` (`verifier.rs:3062-3090`) rejects a manifest in which one salt maps to two
+distinct scan/path-*referenced* commitments. It says nothing about salts across separate
+presentations or re-issuances, so (A1) is an issuance-side assumption this record states
+rather than a property the code establishes.
+
+**Under (A1), the salt partition refines the `C(G)` partition.** The salt is therefore
+not an *additional* correlator: any two presentations a coalition can link by salt, it
+can already link by `C(G)` — which is not merely disclosed as JSON but byte-bound into
+the bb public inputs of every scan sub-proof, so it cannot be withheld without
+redesigning the scan member itself.
+
+Note what is **not** claimed. The two partitions are not asserted to be *identical*:
+that would additionally need salt *stability* — the same graph re-presented or re-issued
+always carrying the same salt — which nothing here enforces either. It is also not
+needed. If a re-issuance changes the salt, the salt links strictly *fewer* pairs than
+`C(G)` does, which only strengthens domination. So the verdict rests on (A1) alone.
+
+If (A1) is ever violated — a salt shared by two distinct graphs, across presentations
+that `SaltReused` never sees together — the salt becomes a correlator `C(G)` does not
+provide (it would link two *different* graphs, plausibly by common issuance origin).
+That is a violation of the audit-#9 discipline in its own right and is the condition
+under which this verdict, like premise (D1) in §5, must be revisited.
 
 Consequence for the proposed remedy: replacing the disclosed salt with an in-circuit
 salt-commitment leaves `C(G)` public on the *same* manifest entry. The presentation
 stays exactly as linkable as before. The sq-ayv analogy does not carry: there, the
-clear `index` was the *finest* remaining handle on the credential's status slot and
-committing it genuinely removed a distinguisher; here the salt is not the finest handle
-— `C(G)` is, and it is strictly finer-or-equal.
+clear `index` was the strongest remaining handle on the credential's status slot and
+committing it genuinely removed a distinguisher; here the salt is not the strongest
+handle — `C(G)` is, and under (A1) it links at least every pair the salt does.
 
 **Therefore: do not build the salt-commitment circuit member for sq-93h.** The work that
 would actually buy cross-presentation unlinkability is hiding or re-randomising `C(G)`
@@ -100,7 +120,8 @@ claimed as fixed by anything here.
 
 ## 5. The precondition, and the trip-wire that guards it
 
-The whole verdict rests on ONE premise:
+Beyond the issuance-side assumption (A1) of §3, the verdict rests on ONE premise about
+the code:
 
 > **(D1)** `C(G)` is disclosed in the clear on every path, including hidden-only.
 
@@ -108,12 +129,22 @@ If a future tier ever hides or re-randomises the commitment, (D1) fails and the
 disclosed salt immediately becomes the *finest remaining* correlator — at which point
 sq-93h must be RE-OPENED and the in-circuit salt-commitment reconsidered on its merits.
 
-That premise is pinned by
+(D1) — and only (D1) — is pinned by
 `crates/sparq-zk-compose/src/verifier.rs::hidden_only_salt_disclosure_is_dominated_by_the_clear_commitment`,
-which asserts (a) the hidden-only salt fallback resolves, and (b) **withholding the
-salt does not change the set of commitments the presentation discloses** — the
-domination property itself. A commitment-hiding change turns (b)'s non-empty
-disclosed-commitment assertion red, which is exactly the intended signal.
+which asserts, on the real paths rather than on any test-local notion of "disclosed":
+
+1. the hidden-only salt fallback resolves (`resolve_commitment_salt`);
+2. `reconstruct_public_inputs` — whose output stage 3a byte-compares against the
+   prover's `public_inputs` — emits `C(G)` as scan public-input **word 1**, byte for
+   byte, with and without the salt; and
+3. on the serialized wire form of the salt-**withheld** manifest, the salt is gone while
+   `C(G)` survives, and the round-tripped manifest reconstructs the same public inputs.
+
+A commitment-hiding change stops emitting that cleartext word and turns (2)/(3) red,
+which is exactly the intended signal. (A1) is deliberately **not** claimed to be tested:
+it is a cross-presentation issuance property, and the verifier's `SaltReused` check —
+the only machine-checked fragment of it — is scoped to a single manifest, so no test in
+this crate can establish it.
 
 ## 6. Honesty / privacy-claims-gate note
 
@@ -123,7 +154,8 @@ accredited-cryptographer sign-off**; this record is a scoping/priority analysis 
 documented privacy deferral, research-grade, and closes no soundness gap. The register
 line for CR-G6 should keep listing per-graph salt disclosure as a known, accepted
 disclosure — the correction this record makes is only that it is **dominated by the
-commitment disclosure**, so hiding the salt alone is not the remedy.
+commitment disclosure** under §3's stated issuance assumption (A1), so hiding the salt
+alone is not the remedy.
 
 ## 7. Cross-references
 

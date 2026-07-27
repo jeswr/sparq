@@ -4440,8 +4440,10 @@ fn bind_holder_set(
 /// discloses in the clear (a scan's `commitments[g]`, byte-bound into the bb public
 /// inputs by [`reconstruct_public_inputs`]), so the salt is a DOMINATED correlator and
 /// withholding it behind an in-circuit salt-commitment would buy no unlinkability. That
-/// conclusion is conditional on `C(G)` staying public — pinned by
-/// `tests::hidden_only_salt_disclosure_is_dominated_by_the_clear_commitment` and argued
+/// conclusion is conditional on TWO things: `C(G)` staying public — pinned on the real
+/// paths by `tests::hidden_only_salt_disclosure_is_dominated_by_the_clear_commitment` —
+/// and the audit-#9 ISSUANCE discipline that no salt is reused for two distinct graphs,
+/// of which only the within-manifest instance (`SaltReused`) is machine-checked. Argued
 /// in `research/zk-hidden-path-salt-disclosure.md`.
 // [OPUS-4.8] sq-xxg: salt source for hidden-only message reconstruction.
 // [OPUS-5] sq-93h: disclosure assessed NO-BUILD; the trip-wire guards the premise.
@@ -8785,40 +8787,29 @@ mod tests {
     /// presentations linkable by salt are already linkable by `C(G)`, so hiding the salt
     /// behind an in-circuit salt-commitment would buy zero unlinkability.
     ///
-    /// That verdict rests on ONE premise — `C(G)` stays public. This test pins it:
+    /// That verdict rests on ONE premise — `C(G)` stays public. This test pins it on the
+    /// REAL paths, never on a test-local notion of "disclosed":
     /// - the hidden-only salt fallback actually resolves (red if `resolve_commitment_salt`
-    ///   loses its hidden-entry arm), and
-    /// - WITHHOLDING the salt leaves the presentation's disclosed-commitment set
-    ///   UNCHANGED and NON-EMPTY — the domination property itself.
+    ///   loses its hidden-entry arm);
+    /// - `reconstruct_public_inputs` — the function whose output the verifier
+    ///   BYTE-COMPARES against each proof's `public_inputs` — emits `C(G)` as scan
+    ///   public-input word 1, salt or no salt; and
+    /// - on the WIRE (serde round-trip of the salt-withheld manifest) `C(G)` survives
+    ///   while the salt is gone, and the round-tripped manifest still reconstructs the
+    ///   same `C(G)`-bearing public inputs.
     ///
-    /// TRIP-WIRE: a future hidden / re-randomised-commitment tier makes the disclosed
-    /// set empty and turns this red. That is the intended signal — at that point the
-    /// salt becomes the finest remaining correlator and sq-93h must be RE-OPENED, not
-    /// the assertion relaxed.
+    /// TRIP-WIRE: a future hidden / re-randomised-commitment tier stops emitting the
+    /// cleartext `C(G)` word and turns this red. That is the intended signal — at that
+    /// point the salt becomes the finest remaining correlator and sq-93h must be
+    /// RE-OPENED, not the assertion relaxed.
+    ///
+    /// SCOPE (do not over-read): this pins premise (D1) — `C(G)` disclosure — only.
+    /// Domination additionally assumes the ISSUANCE discipline that a salt is never
+    /// reused for two distinct graphs; the verifier machine-checks only the
+    /// within-manifest instance of that (`SaltReused`), so no test here can establish
+    /// it across presentations. See §3 of the research record.
     #[test]
     fn hidden_only_salt_disclosure_is_dominated_by_the_clear_commitment() {
-        /// Every commitment value this presentation hands the verifier in the CLEAR.
-        fn disclosed_commitments(m: &ProofManifest) -> std::collections::BTreeSet<String> {
-            let mut out = std::collections::BTreeSet::new();
-            for sp in &m.sub_proofs {
-                if let ProofInputs::Scan { commitments, .. } = &sp.inputs {
-                    out.extend(
-                        commitments
-                            .iter()
-                            .filter_map(|c| c.to_field())
-                            .map(|f| field_to_hex(&f)),
-                    );
-                }
-            }
-            out.extend(
-                m.hidden_issuer_attestations
-                    .iter()
-                    .filter_map(|hi| hi.commitment.to_field())
-                    .map(|f| field_to_hex(&f)),
-            );
-            out
-        }
-
         let c = Fr::from(4242u64);
         let salt = Fr::from(1357u64);
 
@@ -8861,21 +8852,61 @@ mod tests {
              otherwise the comparison below is vacuous"
         );
 
-        // (b) DOMINATION: withholding the salt does not shrink what the presentation
-        // discloses about WHICH graph this is. `C(G)` remains, so the correlator a
-        // colluding verifier pair would use is untouched.
-        let disclosed = disclosed_commitments(&with_salt);
-        assert!(
-            disclosed.contains(&field_to_hex(&c)),
-            "premise (D1): the committed graph's C(G) is disclosed in the clear even on \
-             the hidden-only path — if this fails, sq-93h must be RE-OPENED"
+        // (b) Premise (D1) on the REAL verification path: `C(G)` is not merely a JSON
+        // field, it is BYTE-BOUND into the scan sub-proof's bb public inputs — the blob
+        // stage 3a byte-compares against the prover's proof. Reconstruct it exactly as
+        // the verifier does (challenge = word 0, `commitments[k]` next).
+        let challenge = match &without_salt.binding {
+            BindingMode::Challenge { challenge } => challenge.clone(),
+            other => panic!("fixture must use the challenge binding, got {:?}", other),
+        };
+        let c_word = field_to_be_bytes_32(&c);
+        let pi = reconstruct_public_inputs(&without_salt.sub_proofs[0].inputs, &challenge, 0)
+            .expect("the scan sub-proof's public inputs must reconstruct");
+        assert_eq!(
+            pi.get(32..64),
+            Some(&c_word[..]),
+            "premise (D1): the committed graph's C(G) is emitted in the CLEAR as scan \
+             public-input word 1 even on the hidden-only path, so it cannot be withheld \
+             without redesigning the scan member — if this fails, sq-93h must be RE-OPENED"
         );
         assert_eq!(
-            disclosed,
-            disclosed_commitments(&without_salt),
-            "hiding the salt changes NOTHING about the disclosed per-graph correlator — \
-             the salt is dominated by C(G), so an in-circuit salt-commitment buys no \
-             cross-presentation unlinkability (sq-93h NO-BUILD)"
+            pi,
+            reconstruct_public_inputs(&with_salt.sub_proofs[0].inputs, &challenge, 0)
+                .expect("the scan sub-proof's public inputs must reconstruct"),
+            "withholding the salt changes NOT ONE BYTE of the scan's public inputs — the \
+             salt is not among them, C(G) is"
+        );
+
+        // (c) DOMINATION on the wire: serialize the salt-withheld presentation (what an
+        // in-circuit salt-commitment would achieve on the disclosure surface) and confirm
+        // the salt is really gone while `C(G)` — the correlator a colluding verifier pair
+        // would use — survives, and still reconstructs the same public inputs.
+        let salt_hex = field_to_hex(&salt);
+        let with_json = serde_json::to_string(&with_salt).expect("manifest serializes");
+        let without_json = serde_json::to_string(&without_salt).expect("manifest serializes");
+        assert!(
+            with_json.contains(&salt_hex),
+            "the fixture must actually disclose the salt on the wire, else the \
+             counterfactual below is vacuous"
+        );
+        assert!(
+            !without_json.contains(&salt_hex),
+            "withholding must actually remove the salt from the wire form"
+        );
+        assert!(
+            without_json.contains(&field_to_hex(&c)),
+            "premise (D1) on the wire: C(G) survives the salt being withheld — hiding the \
+             salt buys no cross-presentation unlinkability (sq-93h NO-BUILD)"
+        );
+        let round: ProofManifest =
+            serde_json::from_str(&without_json).expect("salt-withheld manifest round-trips");
+        assert_eq!(
+            reconstruct_public_inputs(&round.sub_proofs[0].inputs, &challenge, 0)
+                .expect("the round-tripped scan's public inputs must reconstruct"),
+            pi,
+            "a verifier that only ever sees the salt-withheld wire form still reconstructs \
+             the SAME C(G)-bearing public inputs"
         );
     }
 
