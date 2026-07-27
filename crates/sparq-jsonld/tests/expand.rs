@@ -803,6 +803,58 @@ fn datatype_iri_with_a_malformed_percent_escape_is_rejected() {
 }
 
 #[test]
+fn datatype_iri_with_a_structurally_invalid_authority_is_rejected() {
+    // [SONNET-4.6] (PR #4610 review round 2) §5.1.2 step 15.4 validates the datatype as an
+    // IRI, which is the RFC 3987 `IRI` production — not merely a scheme plus admitted
+    // characters. Every string below is built ENTIRELY from characters an IRI may carry, so
+    // the round-one code-point check accepted all of them; each is structurally malformed in
+    // the authority (`ihost` / `port`).
+    for datatype in [
+        "http://[",                       // unterminated IP-literal
+        "http://[::1",                    // ...likewise
+        "http://a[b]c/",                  // brackets outside an IP-literal
+        "http://example.com:bad-port",    // port = *DIGIT
+        "http://example.com:80a/",        // ...likewise
+        "http://[gggg::1]/",              // non-HEXDIG in an IPv6 group
+        "http://[1:2:3:4:5:6:7]/",        // seven groups, no `::` elision
+        "http://[::ffff:999.1.1.1]/",     // dec-octet out of range
+    ] {
+        assert_error(
+            &format!(
+                r#"{{"http://example.com/bar": {{"@value": "bar", "@type": "{datatype}"}}}}"#
+            ),
+            JsonLdErrorCode::InvalidTypedValue,
+        );
+    }
+}
+
+#[test]
+fn structurally_valid_authorities_and_authority_less_schemes_are_accepted_datatypes() {
+    // [SONNET-4.6] (PR #4610 review round 2) The complement of the negatives above: adding
+    // the structural grammar must not over-reject. Covers each `ihost` alternative
+    // (IP-literal, IPv4address, ireg-name), userinfo/port, and the authority-less schemes
+    // (`ipath-rootless`) that carry no `//` at all.
+    for datatype in [
+        "http://[::1]/dt",
+        "http://[2001:db8::1]:8080/dt",
+        "http://[::ffff:192.168.0.1]/dt",
+        "http://192.168.0.1:80/dt",
+        "http://user:pass@example.com:8080/dt",
+        "urn:uuid:6e8bc430-9c3a-11d9-9669-0800200c9a66",
+        "did:example:123#key-1",
+        "tag:example.com,2026:dt",
+    ] {
+        let doc = format!(
+            r#"{{"http://example.com/bar": {{"@value": "bar", "@type": "{datatype}"}}}}"#
+        );
+        let expected = format!(
+            r#"[{{"http://example.com/bar": [{{"@value": "bar", "@type": "{datatype}"}}]}}]"#
+        );
+        assert_expands(&doc, &expected);
+    }
+}
+
+#[test]
 fn well_formed_percent_encoded_and_unicode_datatype_iris_are_accepted() {
     // The complement of the two negatives above: datatype validation must not over-reject a
     // well-formed escape or a native RFC 3987 `ucschar` IRI — every `is_absolute_iri` call
