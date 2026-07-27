@@ -373,6 +373,33 @@ closure-sweep over the flat full graph, AND (ii) a **fixpoint-SATURATION proof**
 in sparq and is NOT claimed.** A relying party that needs "the answer set is
 complete under entailment" cannot get it from this design today.
 
+**The deferral is now ENFORCED, not prose-only** (`sq-rsd3v.7`, landed): the two
+obligations cannot be conflated by reading an accept.
+`EntailmentPolicy::require_completeness_under_entailment()`
+(`crates/sparq-zk-compose/src/verifier.rs`) is how a relying party DECLARES it needs
+"no entailed answer is missing", and the verifier's entailment gate then REFUSES —
+fail-closed, before any other entailment check, with
+`CheckError::CompletenessUnderEntailmentUnavailable` — every non-`Simple` manifest.
+The refusal message names both missing halves from the single source of truth
+`derivation::COMPLETENESS_UNDER_ENTAILMENT_UNBUILT`, so the honest scope cannot decay
+into a doc only one side remembers. Precisely what the refusal asserts: *no accepted
+proof under that policy rests on entailment whose completeness sparq cannot check* —
+nothing more. Two limits are deliberate and documented in the API:
+
+- a `Simple` manifest is NOT refused (no entailment closure for completeness to range
+  over), but passing one is **not** a completeness assertion either — that rests on
+  the `scan.nr` per-pattern sweep and the rest of the not-externally-audited verifier
+  (`sq-qhy4`);
+- an off-circuit materialised closure presented as `Simple` over the materialised
+  graph (§3.6(a) trusted-materialiser mode) is INVISIBLE to the dial: there the regime
+  field is honestly `Simple` and entailment is trusted to the materialiser's
+  signature — a different trust model the relying party must evaluate itself.
+
+When the RE-ENTRY TRIGGER of §3.6(c) fires (a documented huge-closure case PLUS a
+verifier demanding full completeness; `research/zkp-performance-landscape.md` §5
+trigger 4), the unconditional refusal is precisely what a real check replaces. Until
+then it is the honest answer, and soundness-first (`sq-rsd3v.2`/`.3`) is the path.
+
 ---
 
 ## 4. Feature 2 — query over N3-rule datasets (`sq-rsd3v.3`)

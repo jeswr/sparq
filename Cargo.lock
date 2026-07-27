@@ -5576,6 +5576,7 @@ dependencies = [
  "futures-util",
  "h3",
  "h3-quinn",
+ "http-body",
  "hyper",
  "hyper-util",
  "mimalloc",

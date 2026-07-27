@@ -74,8 +74,8 @@ For a typed view (super-classes, subsumption test, unsatisfiable classes) use
   internalizes `ClassAssertion` (`{a} ⊑ C`) and `ObjectPropertyAssertion` (`{a} ⊑ ∃p.{b}`) as
   SAFE-NOMINAL axioms over CR6, then reads off instance typings, `owl:sameAs`, and a whole-ontology
   `inconsistent` verdict (`{a} ⊑ ⊥` or `⊤ ⊑ ⊥`) via the additive `realize` / `realize_graph` entry
-  — every emitted fact holds in EVERY model. The TBox `Classifier::classify` / `classify_graph` stay
-  **byte-identical**. Unsupported assertion shapes stay counted `Report::skipped_assertions`.
+  — every emitted fact holds in EVERY model; TBox `Classifier::classify` stays **byte-identical**.
+  With `cdomain` too, `a q 5` ⇒ `{a} ⊑ ∃q.{5}` (a CR9 point); unsupported shapes stay counted skips.
 - **Keys, negative assertions & differentFrom** *(also `abox`)* — `owl:hasKey` merges two DISTINCT
   named individuals in the key class that share a value on EVERY key property (`owl:sameAs`);
   a PARTIAL key match cannot fire (object keys match a shared nominal successor, data keys a

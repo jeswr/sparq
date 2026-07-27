@@ -24,6 +24,7 @@ paginated fetch.
 """
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -50,6 +51,126 @@ GLOBAL = "__global__"  # the cross-cutting partition (serializes against everyth
 _PRIO = re.compile(r"^priority:P([0-4])$")   # only P0..P4 are valid
 _PKG = re.compile(r"^area:(.+)$")
 _ROLE = re.compile(r"^role:.+$")
+
+# ---------------------------------------------------------------------------
+# Partition-key algebra (sparq#4336) — CONTAINMENT-aware, TOTAL.
+#
+# [OPUS-5] The under-serialisation defect this replaces: `conflict()` compared partition keys by
+# EXACT-STRING set overlap, so a key naming a region INSIDE a crate never overlapped its parent
+# crate. Five such labels already exist in production — `sparq-server-http`, `sparq-core-nt-dict`,
+# `sparq-core-store`, `sparq-engine-exec`, `sparq-conformance-floors` — so an `area:sparq-server`
+# issue and an `area:sparq-server-http` issue entered the frontier in the SAME tick, and an
+# `area:sparq-server-http` issue entered despite an open PR holding `area:sparq-server`. Two
+# workers in one crate with no lock between them. Measured base rate for that pair sharing a file:
+# 57.1% of same-crate 24h PR pairs (research/crate-region-parallelism.md §4). Textual collisions
+# surface as merge conflicts; SEMANTIC ones (both compile, both pass, together broken) are
+# invisible to git and reach the merge-group gate at the cost of a dequeue plus a batch bisect.
+#
+# Under-serialisation is the CORRUPTING direction. Over-serialisation only costs delay. So the
+# mapping below is TOTAL and biased to over-reserve: every key resolves to the coarsest partition
+# that could contain it, and a key we cannot place at all resolves to GLOBAL.
+_SEP = "-"                       # the hierarchy separator inside an `area:` key
+_PARTITION_MEMO = {}             # key -> path, for the default (workspace-derived) root set
+_WORKSPACE_ROOTS = None          # lazily scanned; None = not yet read
+
+
+def _repo_root():
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def workspace_roots(repo_root=None):
+    """The RECOGNISED partition roots, READ FROM THE REPOSITORY TREE — deliberately not a table.
+
+    A name is a recognised root iff the workspace really contains it as a partition: a crate
+    directory under `crates/`, or a top-level repository directory. The tree is the only authority
+    that can tell `sparq-engine-serialize` (a REAL sibling crate, its own partition) apart from
+    `sparq-engine-exec` (a REGION inside `sparq-engine`) — as strings the two are identical in
+    shape, and a hand-written table of which is which is exactly what goes stale. Reading the tree
+    means a crate added next month registers itself with no code change, and a region label
+    invented next month resolves to its crate with no code change.
+
+    The registry's `dispatch.yml` CLONES this repo and runs this script, so the same tree is
+    present there; `--dump-partitions` exports the resolved mapping for a parity fixture.
+    """
+    global _WORKSPACE_ROOTS
+    if repo_root is None and _WORKSPACE_ROOTS is not None:
+        return _WORKSPACE_ROOTS
+    base = repo_root if repo_root is not None else _repo_root()
+    names = set()
+    for parent in (base, os.path.join(base, "crates")):
+        try:
+            entries = os.listdir(parent)
+        except OSError:
+            continue
+        names.update(e for e in entries
+                     if not e.startswith(".") and os.path.isdir(os.path.join(parent, e)))
+    if repo_root is None:
+        _WORKSPACE_ROOTS = names
+    return names
+
+
+def _ancestors(key):
+    """Every `-`-delimited ancestor prefix of `key`, LONGEST first (`key` itself included)."""
+    segs = key.split(_SEP)
+    return [_SEP.join(segs[:i]) for i in range(len(segs), 0, -1)]
+
+
+def partition_path(key, roots=None):
+    """TOTAL map from an `area:` key to the hierarchical PARTITION PATH it reserves.
+
+    Resolution, longest-recognised-ancestor first, so the failure direction is STRUCTURAL rather
+    than dependent on anyone remembering to register a label:
+
+      1. `GLOBAL` (and any empty/degenerate key) -> `()`, the root of the hierarchy. `()` is a
+         prefix of every path, so GLOBAL conflicts with everything — the existing fail-closed
+         backstop, now expressed as containment instead of two special cases in `conflict()`.
+      2. The longest `-`-ancestor of `key` that the WORKSPACE recognises -> `(that ancestor,)`.
+         `sparq-core-store` and `sparq-core-nt-dict` both resolve to `sparq-core`, so they conflict
+         with their parent crate AND with each other (same crate, same files — a sibling hole would
+         be the identical defect one level down). `sparq-engine-serialize` IS a crate directory, so
+         it resolves to ITSELF and does NOT collapse into `sparq-engine`: genuinely unrelated
+         crates stay parallel and the frontier survives.
+      3. Otherwise the key's HEAD segment -> `(head,)`. A key whose parent the workspace does not
+         know still declares a parent in its own structure, and honouring it over-reserves. This
+         is what makes an invented `area:upstream-noir` conflict with `area:upstream` with no code
+         change, and it leaves every single-segment key (`upstream`, `cli`, `docs`, ...) exactly
+         where it is today — those name nothing narrower, so they cannot be under-serialising.
+
+    The path is currently never deeper than one element ON PURPOSE: a sub-region collapses INTO its
+    container rather than becoming a child of it. research/crate-region-parallelism.md §8 rejects
+    intra-crate region partitioning as a parallelism lever (14.5% ceiling), and a two-level path
+    would reopen the sibling hole. The prefix-based predicate below is depth-agnostic, so a future
+    measured, gated subpartition (that record's Phase 1) can add depth without touching it.
+    """
+    if roots is None:
+        memo = _PARTITION_MEMO
+        if key in memo:
+            return memo[key]
+        path = _resolve(key, workspace_roots())
+        memo[key] = path
+        return path
+    return _resolve(key, roots)
+
+
+def _resolve(key, roots):
+    if not key or key == GLOBAL:
+        return ()
+    for ancestor in _ancestors(key):
+        if ancestor in roots:
+            return (ancestor,)
+    head = key.split(_SEP)[0]
+    return (head,) if head else ()
+
+
+def keys_conflict(a, b, roots=None):
+    """Whether two `area:` keys reserve overlapping work — CONTAINMENT, not string equality.
+
+    True iff one partition path is a prefix of the other, i.e. one region contains the other.
+    Reflexive, symmetric, and NOT transitive-closed beyond containment: `sparq-core` and
+    `sparq-engine` remain independent.
+    """
+    pa, pb = partition_path(a, roots), partition_path(b, roots)
+    return pa[:len(pb)] == pb or pb[:len(pa)] == pa
 
 
 def labels_of(issue):
@@ -222,15 +343,19 @@ def compute_ready(issues, in_progress_packages=None, conflict_log=None):
             blockers.setdefault(pkg, []).append(artifact)
 
     def conflict(pkgs):
-        if GLOBAL in blockers:
-            area = GLOBAL
-        elif GLOBAL in pkgs and blockers:
-            area = sorted(blockers)[0]
-        else:
-            overlap = pkgs & blockers.keys()
-            if not overlap:
-                return None
-            area = sorted(overlap)[0]
+        """The held key that CONTAINS-or-is-contained-by one of `pkgs`, or None.
+
+        [OPUS-5] sparq#4336: was exact-string set overlap (`pkgs & blockers.keys()`) plus two
+        hand-written GLOBAL special cases. Exact-string overlap under-serialised every sub-crate
+        key against its parent crate; the GLOBAL cases are now just the `()` path being a prefix
+        of everything, so there is ONE rule instead of three. Attribution reports the RAW held
+        label (not its resolved partition) so a conflict line still names the artifact's own key;
+        the coarsest holder wins, then alphabetical, so the message stays deterministic.
+        """
+        held = [key for key in blockers if any(keys_conflict(key, p) for p in pkgs)]
+        if not held:
+            return None
+        area = min(held, key=lambda key: (len(partition_path(key)), key))
         return area, blockers[area][0]
 
     for pkg in sorted(set(in_progress_packages or ())):
@@ -350,6 +475,35 @@ def _self_test():
           [[it["number"] for it in compute_ready(
               [pr(73 + i, ["area:sparq-store", label]), waiting], conflict_log=quiet)]
            for i, label in enumerate(sorted(PARKED_AREA_LABELS))], [[20], [20], [20]])
+    # [OPUS-5] sparq#4336 CONTAINMENT fixtures. The registry's dispatch.yml runs THIS --self-test,
+    # so these are the assertions that gate the fleet's own copy of the key algebra.
+    check("sub-crate key resolves to its crate", partition_path("sparq-server-http"),
+          ("sparq-server",))
+    check("real sibling crate resolves to itself", partition_path("sparq-engine-serialize"),
+          ("sparq-engine-serialize",))
+    check("invented sub-crate key resolves to its crate", partition_path("sparq-server-zzz"),
+          ("sparq-server",))
+    check("degenerate key falls all the way to global", partition_path(""), ())
+    check("unrelated crates do not conflict",
+          keys_conflict("sparq-core", "sparq-engine"), False)
+    check("sibling regions of one crate conflict",
+          keys_conflict("sparq-core-store", "sparq-core-nt-dict"), True)
+    check("parent+child enter the frontier together? (must not)",
+          [i["number"] for i in compute_ready(
+              [iss(80, R + ["priority:P1", "area:sparq-server"]),
+               iss(81, R + ["priority:P1", "area:sparq-server-http"])], conflict_log=quiet)], [80])
+    check("child+parent, reversed order (must not)",
+          [i["number"] for i in compute_ready(
+              [iss(80, R + ["priority:P1", "area:sparq-server-http"]),
+               iss(81, R + ["priority:P1", "area:sparq-server"])], conflict_log=quiet)], [80])
+    check("open PR on the parent crate blocks a sub-crate issue",
+          compute_ready([pr(82, ["area:sparq-server"]),
+                         iss(83, R + ["priority:P1", "area:sparq-server-http"])],
+                        conflict_log=quiet), [])
+    check("unknown key under an unknown parent still over-reserves",
+          keys_conflict("upstream", "upstream-noir"), True)
+    check("single-segment unknown key keeps its own partition",
+          partition_path("deps"), ("deps",))
     check("valid_priority single", valid_priority({"priority:P0"}), 0)
     check("valid_priority ambiguous", valid_priority({"priority:P1", "priority:P2"}), None)
     check("valid_priority out-of-range", valid_priority({"priority:P7"}), None)
@@ -495,9 +649,21 @@ def main():
     ap.add_argument("--self-test", action="store_true")
     ap.add_argument("--diagnose", action="store_true",
                     help="print the full visibility taxonomy instead of just the frontier")
+    ap.add_argument("--dump-partitions", action="store_true",
+                    help="print the recognised partition roots (and the resolution of any KEYs) "
+                         "as JSON — the machine-readable contract the registry's dispatch.yml "
+                         "mirror must agree with; offline, no API calls")
+    ap.add_argument("keys", nargs="*", metavar="KEY",
+                    help="area: keys to resolve with --dump-partitions")
     args = ap.parse_args()
     if args.self_test:
         return _self_test()
+    if args.dump_partitions:
+        json.dump({"roots": sorted(workspace_roots()),
+                   "resolved": {k: list(partition_path(k)) for k in args.keys}},
+                  sys.stdout, indent=2, sort_keys=True)
+        print()
+        return 0
     issues = _fetch(args.repo)
     linked = linked_issue_numbers(_fetch_pulls(args.repo), args.repo)
     visible = dispatchable_view(issues, linked)
