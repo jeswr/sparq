@@ -134,11 +134,20 @@ else
   fail "W5 no seam invocation targets check-workflow-swallow.py"
 fi
 if [ -n "$seam_call" ] \
-   && [[ "$seam_call" == *"--exclude check-workflow-seam.py"* ]] \
-   && [[ "$seam_call" == *"--min-invocations 4"* ]]; then
-  pass "W6 ...with --exclude (so its own --needle is not counted) and the 4-call floor"
+   && [[ "$seam_call" == *"--min-invocations 4"* ]] \
+   && [[ "$seam_call" == *"--require-exec scripts/tests/test_workflow_swallow.sh"* ]]; then
+  pass "W6 ...with the 4-call floor and --require-exec on THIS suite"
 else
-  fail "W6 the seam invocation is missing --exclude and/or --min-invocations 4"
+  fail "W6 the seam invocation is missing --min-invocations 4 and/or --require-exec"
+fi
+# W6b — `--exclude` is RETIRED. It exempted the seam step from the invocation count AND
+# from every neutering check, so one additive `continue-on-error: true` disarmed the gate
+# while it printed OK. Invocations are now resolved at command position; re-adding the
+# flag is a hard argparse failure rather than a silently accepted no-op.
+if [[ "$seam_call" == *"--exclude"* ]]; then
+  fail "W6b the seam invocation still passes the retired --exclude self-exemption"
+else
+  pass "W6b the retired --exclude self-exemption is not passed"
 fi
 
 # W7/W8 — the same trap at CORPUS level. Without the floors, a glob typo or a moved
@@ -156,23 +165,126 @@ fi
 
 # W9 — the advisory predicate is the repository's, not this script's private opinion.
 # If ci_summary_gate.py ever changes what it excludes, this guard must change with it or
-# it starts calling gating steps advisory.
-sig_gate="$(grep -c 'advisory|informational' "$ROOT/scripts/ci_summary_gate.py")"
-sig_reg="$(grep -c 'advisory|informational' "$ROOT/scripts/check-advisory-registry.py")"
-sig_this="$(grep -c 'advisory|informational' "$CHECKER")"
-if [ "$sig_gate" -ge 1 ] && [ "$sig_reg" -ge 1 ] && [ "$sig_this" -ge 1 ]; then
-  pass "W9 the advisory predicate is shared with ci_summary_gate.py + check-advisory-registry.py"
+# it starts exempting steps the merge gate still gates.
+#
+# CORRECTION. W9 was `grep -c 'advisory|informational' <file> >= 1` in all three files —
+# a MENTION count, while the PR body claimed it "asserts the predicate is still shared
+# with both consumers, so it cannot drift into calling a gating job advisory". A reviewer
+# disproved that by execution: widening this script's regex by `soft-fail|non-required|
+# besteffort` left 34/34 green, and replacing the pattern outright with `zzznevermatches`
+# ALSO left W9 green — the module docstring quotes the old pattern, so the grep still
+# found it. That is the same "grep satisfied by an adjacent line" shape this suite exists
+# to eliminate, reproduced on its own headline design claim.
+#
+# Now structural, and in three parts:
+#   (a) the compiled pattern SOURCE is byte-identical across all three files (AST-
+#       extracted from the assignment, so a docstring mention cannot satisfy it);
+#   (b) the predicate is not inert — it still matches `advisory` and `informational`;
+#   (c) the QUANTIFIER that matters: nothing this guard exempts may be a job the
+#       aggregator still gates. Probed over names including the exact widening words the
+#       reviewer used, applying each predicate the way its own file applies it
+#       (ci_summary_gate lowercases its input at the call site; the other two carry
+#       re.IGNORECASE — asserted structurally, not assumed).
+if python3 - "$ROOT" "$CHECKER" <<'PY'
+import ast
+import pathlib
+import re
+import sys
+
+root, checker = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+FILES = {
+    "aggregator": (root / "scripts/ci_summary_gate.py", "ADVISORY_NAME_TOKEN_RE"),
+    "registry": (root / "scripts/check-advisory-registry.py", "ADVISORY_RE"),
+    "this-guard": (checker, "ADVISORY_RE"),
+}
+problems = []
+compiled = {}
+patterns = {}
+
+for role, (path, var) in FILES.items():
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    call = None
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == var for t in node.targets):
+            continue
+        if isinstance(node.value, ast.Call):
+            call = node.value
+    if call is None:
+        problems.append(f"{role}: no `{var} = re.compile(...)` assignment found in {path.name}")
+        continue
+    if not (call.args and isinstance(call.args[0], ast.Constant) and isinstance(call.args[0].value, str)):
+        problems.append(f"{role}: {var} is not compiled from a string literal")
+        continue
+    patterns[role] = call.args[0].value
+    flags = 0
+    for arg in call.args[1:] + [kw.value for kw in call.keywords]:
+        for sub in ast.walk(arg):
+            if isinstance(sub, ast.Attribute) and sub.attr in ("IGNORECASE", "I"):
+                flags |= re.IGNORECASE
+    # How this file APPLIES the predicate: does its call site lower() the input?
+    lowers = False
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "search"
+                and isinstance(node.func.value, ast.Name) and node.func.value.id == var):
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Attribute) and sub.attr == "lower":
+                    lowers = True
+    rx = re.compile(patterns[role], flags)
+    compiled[role] = (lambda rx=rx, lowers=lowers: (lambda name: bool(rx.search(name.lower() if lowers else name))))()
+
+# (a) byte-identical pattern source
+if len(set(patterns.values())) > 1:
+    problems.append(f"the advisory pattern has DRIFTED apart: {patterns}")
+
+# (b) not inert
+if not problems:
+    for role, pred in compiled.items():
+        for must in ("advisory", "informational"):
+            if not pred(f"coverage {must} lane"):
+                problems.append(f"{role}: the advisory predicate no longer matches {must!r} — it is inert")
+
+# (c) this guard may never exempt what the aggregator still gates
+PROBES = [
+    "advisory", "informational", "ADVISORY coverage", "Informational lane",
+    "coverage shadow (soft-fail)", "non-required extras", "besteffort sweep",
+    "nightly full sweep", "quick-gates", "gate", "advisory-registry check",
+]
+if not problems:
+    for name in PROBES:
+        if compiled["this-guard"](name) and not compiled["aggregator"](name):
+            problems.append(
+                f"job name {name!r} would be EXEMPTED by this guard while the merge "
+                f"aggregator still gates it — a real gating step with a swallowed "
+                f"failure would go unreported"
+            )
+
+for p in problems:
+    print(f"  {p}", file=sys.stderr)
+sys.exit(1 if problems else 0)
+PY
+then
+  pass "W9 the advisory predicate is byte-identical to, and no wider than, the aggregator's"
 else
-  fail "W9 the advisory predicate has drifted apart from the aggregator's"
+  fail "W9 the advisory predicate has drifted from ci_summary_gate.py / check-advisory-registry.py"
 fi
 
 # W10 — this suite must itself be EXECUTED by CI, at command position. `shellcheck x.sh`
 # does not count; that is the whole distinction the orphan check exists to make.
-if python3 - "$WORKFLOW" <<'PY'
-import re, sys, pathlib
-text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-sys.exit(0 if re.search(r"(?m)^\s*bash scripts/tests/test_workflow_swallow\.sh\s*$", text) else 1)
-PY
+#
+# Two corrections. (1) It was a regex over raw YAML text; it now goes through the same
+# PyYAML-parsing, command-position resolver CI uses, so an indentation change or a
+# `run:` written as a flow scalar cannot fool it. (2) Read its honest limit: W10 lives
+# INSIDE the suite, so the mutant row "delete this suite from CI -> reds W10" is circular
+# as CI evidence — once the line is gone, W10 never runs. The DURABLE check is the
+# separate gating `--require-exec` on the seam step (asserted present by W6), which runs
+# whether or not this suite does. W10 is the local/dev signal, and C7 below is the red
+# test for the durable one.
+if python3 "$SEAM" --workflow "$WORKFLOW" \
+     --needle check-workflow-swallow.py --min-invocations 1 \
+     --require-exec scripts/tests/test_workflow_swallow.sh >/dev/null 2>&1
 then
   pass "W10 this suite is executed (not merely shellcheck'd) by docs-quality.yml"
 else
@@ -191,10 +303,13 @@ GATING_STEP='          python3 scripts/check-workflow-swallow.py --check-allowli
 
 restore_copy() { cp "$TMP/docs-quality.pristine.yml" "$COPY"; }
 
+# Byte-for-byte the invocation docs-quality.yml runs (W6 pins that), so these mutants
+# test what CI executes and not a convenient variant of it.
 seam_on_copy() {
   python3 "$SEAM" --workflow "$COPY" \
     --needle check-workflow-swallow.py \
-    --exclude check-workflow-seam.py --min-invocations 4 2>&1
+    --min-invocations 4 \
+    --require-exec scripts/tests/test_workflow_swallow.sh 2>&1
 }
 
 # C0 — UNMUTATED CONTROL. Everything below is meaningless without this line.
@@ -246,28 +361,64 @@ mutate "$COPY" '      - name: "check-workflow-swallow allowlist ratchet + corpus
 expect_finding "C5 deleting a call site is caught by the invocation floor" \
   'call site was deleted' "$(seam_on_copy)"
 
-# C6 — THE MIS-ARGUED TRAP, both directions. Without --exclude the seam step's own
-# --needle argument is counted, so the floor of 4 is met by 3 real call sites plus the
-# step's own arguments: a deleted call site passes. Assert the trap is real AND that
-# --exclude closes it.
+# C6 — THE MIS-ARGUED TRAP, and how it is now closed STRUCTURALLY rather than by a flag.
+# #4385's first real CI run printed "5 invocation(s)" where the hand-run printed 4: the
+# seam step's own `--needle check-workflow-swallow.py` argument was counted as a fifth
+# invocation, so deleting a real call site would have left 4 and still cleared the floor.
+# The first patch was `--exclude check-workflow-seam.py` — which then exempted that step
+# from all five neutering checks as well, and is now RETIRED. Invocations are resolved at
+# command position, so the meta-step's `--needle` argument is not an invocation at all.
+#
+# Both directions, on the pristine copy and on a deletion:
+#   * pristine  -> exactly 4, i.e. the guard's own arguments are NOT inflating the count
+#     (C0 asserts the same number; here it is the CONTROL for the mutation below);
+#   * deleted   -> 3, reds, and names the mention-vs-execution gap.
+# Asserted on the EXIT CODE, because both the pass and the fail line contain
+# "invocation(s)" and a substring grep would be satisfied either way.
 restore_copy
+pristine_rc=0
+pristine_out="$(seam_on_copy)" || pristine_rc=$?
 mutate "$COPY" '      - name: "check-workflow-swallow allowlist ratchet + corpus floors — GATING"
         run: |
           python3 scripts/check-workflow-swallow.py --check-allowlist \
             --min-workflows 60 --min-run-steps 600
 ' ''
-without_exclude="$(python3 "$SEAM" --workflow "$COPY" \
-                     --needle check-workflow-swallow.py --min-invocations 4 2>&1)"
-without_rc=$?
-with_exclude="$(seam_on_copy)"
-# The exit CODE is the assertion, not a substring: both the OK line and the failure line
-# contain "invocation(s)", so grepping for it would pass in either direction.
-if [ "$without_rc" -eq 0 ] \
-   && printf '%s' "$with_exclude" | grep -q 'call site was deleted'; then
-  pass "C6 a deleted call site passes WITHOUT --exclude and reds WITH it (the trap is closed)"
+deleted_rc=0
+deleted_out="$(seam_on_copy)" || deleted_rc=$?
+if [ "$pristine_rc" -eq 0 ] && printf '%s' "$pristine_out" | grep -q '4 invocation(s)' \
+   && [ "$deleted_rc" -ne 0 ] \
+   && printf '%s' "$deleted_out" | grep -q 'call site was deleted' \
+   && printf '%s' "$deleted_out" | grep -q 'is not being RUN'; then
+  pass "C6 the guard's own --needle argument is not counted, so a deleted call site reds"
 else
-  fail "C6 the --exclude trap is not demonstrated: without='$(printf '%s' "$without_exclude" | head -1)' with='$(printf '%s' "$with_exclude" | head -1)'"
+  fail "C6 the mis-argued trap is not closed: pristine(rc=$pristine_rc)='$(printf '%s' "$pristine_out" | head -1)' deleted(rc=$deleted_rc)='$(printf '%s' "$deleted_out" | head -1)'"
 fi
+
+# C7 — THE ONE-LINE DELETION OF THIS SUITE, which had no hard gate at all. Delete only
+# `bash scripts/tests/test_workflow_swallow.sh`, leaving the adjacent `shellcheck` line.
+# Measured on the previous head: EVERY leg stayed green — self-test, allowlist (GATING),
+# corpus, test-wiring, seam wiring (GATING), seam self-test — while all 34 assertions
+# below stopped running, disarming W5-W10, the only things holding --min-invocations and
+# the corpus floors in the YAML. `--check-test-wiring` did report it, but runs --advisory
+# and exits 0. The seam step's `--require-exec` is the hard gate; this is its red test.
+restore_copy
+mutate "$COPY" '          bash scripts/tests/test_workflow_swallow.sh
+' ''
+expect_finding "C7 deleting the ONE line that RUNS this suite (leaving \`shellcheck\`) is caught" \
+  'never EXECUTED at command position' "$(seam_on_copy)"
+
+# C8 — and the gating seam step is not exempt from its OWN neutering checks. Under the
+# retired `--exclude` this survived: one additive `continue-on-error: true` on the seam
+# step (a keyword already present elsewhere in this workflow) disarmed it silently, after
+# which C7's deletion goes unreported and the job stays green. A step can never red its
+# own neutering, so the catch has to come from a different step — this assertion runs
+# from the suite, which CI executes as its own step.
+restore_copy
+mutate "$COPY" '      - name: "The workflow-swallow guard is soundly WIRED into this workflow — GATING"' \
+               '      - name: "The workflow-swallow guard is soundly WIRED into this workflow — GATING"
+        continue-on-error: true'
+expect_finding "C8 continue-on-error on the GATING SEAM step itself is caught" \
+  'continue-on-error swallows' "$(seam_on_copy)"
 
 restore_copy
 

@@ -761,15 +761,33 @@ jobs:
         run: |
           python3 scripts/check-workflow-swallow.py --advisory --check-test-wiring \
             --min-run-steps 40
-      # And the seam guard turned on THIS wiring: 4 call sites, none skipped, none
-      # swallowed. `--exclude` is load-bearing for the same reason it is above — without
-      # it this step's own `--needle` argument counts as a fifth invocation and a deleted
-      # call site would still clear the floor.
+      # [OPUS-5] And the seam guard turned on THIS wiring: 4 call sites, none skipped,
+      # none swallowed, and — the part that was missing — the suite below is EXECUTED.
+      #
+      # `--require-exec` closes the hole a reviewer measured on this branch: deleting the
+      # single `bash scripts/tests/test_workflow_swallow.sh` line, leaving the adjacent
+      # `shellcheck` mention, left EVERY leg green (self-test, allowlist, corpus,
+      # test-wiring, seam, seam self-test) while all 34 assertions stopped running. That
+      # silently disarms W5-W10, which are the only things holding `--min-invocations 4`
+      # and the corpus floors in this YAML — so a later deletion of those would produce no
+      # signal at all. `--check-test-wiring` does report the orphan, but it runs
+      # `--advisory` and exits 0. This step is HARD, resolves the reference at command
+      # position, and lives OUTSIDE the suite, because a check inside the suite cannot
+      # catch the suite's removal (the mutant row "delete this suite from CI -> reds W10"
+      # is circular as CI evidence: once the line is gone, W10 never runs).
+      #
+      # `--exclude` is RETIRED — see the correction on the model-attribution seam step
+      # above. Invocations are resolved at command position, so this step's own `--needle`
+      # argument is not counted and no self-exemption is needed; passing the flag is now a
+      # hard argparse error. This step is itself subject to all five neutering checks,
+      # and the suite's own seam assertion (run from a separate CI step) is what catches
+      # it being neutered.
       - name: "The workflow-swallow guard is soundly WIRED into this workflow — GATING"
         run: |
           python3 scripts/check-workflow-seam.py --workflow .github/workflows/docs-quality.yml \
             --needle check-workflow-swallow.py \
-            --exclude check-workflow-seam.py --min-invocations 4
+            --min-invocations 4 \
+            --require-exec scripts/tests/test_workflow_swallow.sh
       - name: shellcheck the workflow-swallow test + run it
         run: |
           shellcheck scripts/tests/test_workflow_swallow.sh

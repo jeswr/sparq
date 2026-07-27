@@ -71,7 +71,7 @@
    "job": "service-federation-conformance",
    "kind": "SWALLOW",
    "snippet": "grep -E 'pass /' served-conformance.log || true",
-   "reason": "Log echo for human readability. The lane's actual floor is enforced two lines later by `[ -n \"$PASS\" ] && [ \"$PASS\" -ge \"$FLOOR\" ] || { echo ::error::…; exit 1; }`, which this guard classifies as an AMPLIFIER. grep exiting 1 on no match must not red a lane whose verdict is computed elsewhere.",
+   "reason": "A display line inside the `>> \"$GITHUB_STEP_SUMMARY\"` block of the 'Emit served-surface conformance report' step; it never produces the PASS value. The lane's verdict is enforced twice, neither of them here: (1) in this same step, the `served-conformance-report` binary is FAIL-CLOSED — it exits non-zero on a zero-assertion lane, any genuine failure, or a floor regression, and `set -o pipefail` + `tee` propagate that; (2) ~30 lines earlier, in the separate 'Run SD + Graph Store Protocol lane … + enforce floor' step, by `[ -n \"$PASS\" ] && [ \"$PASS\" -ge \"$FLOOR\" ] || { echo ::error::…; exit 1; }`, which this guard classifies as an AMPLIFIER. grep exiting 1 on no match must not red a lane whose verdict is computed elsewhere. (Corrected: this reason previously said the floor was enforced 'two lines later' in the same step — right substance, wrong location.)",
    "promotion": "Remove if the grep ever becomes the source of the PASS value rather than a display line.",
    "registered": "2026-07-27"
   },
