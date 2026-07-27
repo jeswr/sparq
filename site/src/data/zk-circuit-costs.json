@@ -259,10 +259,10 @@
       "proves": "There exists an issuer pk that (1) is a member of the committed trusted key-set (public Poseidon2 Merkle root) and (2) produced a valid Schnorr signature over the public commitment message m — revealing NEITHER pk, the signature, NOR which authority vouched. Depth-4 = up to 16 issuers.",
       "primitive": "signature-verification + set-membership (in-circuit Schnorr-over-Baby-JubJub + hidden-key Merkle membership)",
       "exercised_live": false,
-      "gate_count": 16946,
+      "gate_count": 24452,
       "prove_ms_t1": null,
       "prove_ms_tN": null,
-      "source": "snapshot=16946 (sq-z9l baseline 16932 + the sq-ru0yx M-1 challenge-reduction no-wrap bound, +14 ACIR gates). Two ~251-bit twisted-Edwards scalar muls dominate (explicit Field constraints; embedded_curve_* is Grumpkin/wrong curve). Heaviest non-scan/non-filter operator. ADDITIVE only — clear-key attestation still mandatory."
+      "source": "snapshot=24452 (sq-z9l baseline 16932 + the sq-ru0yx M-1 challenge-reduction no-wrap bound +14 ACIR gates = 16946, + the sq-l15mi prime-order-subgroup guards on pk and R, +7506). FOUR ~251-bit twisted-Edwards scalar muls now dominate — s*G and e*pk for the verification equation, plus the two [L]*P torsion-key checks the sq-l15mi soundness fix added (explicit Field constraints; embedded_curve_* is Grumpkin/wrong curve). Heaviest non-scan/non-filter operator. ADDITIVE only — clear-key attestation still mandatory."
     },
     {
       "member": "holder_pok",

@@ -139,6 +139,38 @@ pub(crate) mod budget {
             rows.saturating_mul(self.byte_width).saturating_add(self.extra_bytes)
         }
 
+        /// WHY the limits are hit at `rows`, or `None` when they are not — the pure (no
+        /// thread-local) counterpart of [`exhausted`]'s reason, for rayon closures where
+        /// the installing thread's sticky flag is out of reach. The reasons are the SAME
+        /// strings [`exhausted`] records, so a worker can raise EXACTLY the error
+        /// [`check`] would rather than inventing one (or guessing a result). [SONNET-4.6]
+        /// (sq-qk6ac)
+        #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+        #[inline]
+        pub(crate) fn why(&self, rows: usize) -> Option<&'static str> {
+            if !self.on {
+                return None;
+            }
+            if rows > self.max_rows {
+                return Some("max-rows");
+            }
+            if self.bytes(rows) > self.max_bytes {
+                return Some("max-bytes");
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if self.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return Some("timeout");
+            }
+            if let Some(cancel) = self.cancel {
+                // SAFETY: `CancelPtr`'s invariant and the lifetime-bound `Guard`
+                // keep the `AtomicBool` alive for this scoped snapshot load.
+                if unsafe { cancel.0.as_ref() }.load(Ordering::Relaxed) {
+                    return Some("cancelled");
+                }
+            }
+            None
+        }
+
         /// Pure (no thread-local) exhaustion test for rayon closures, where the
         /// installing thread's sticky flag is out of reach: a worker that sees
         /// `hit` stops producing, and the caller's next on-thread check fires
@@ -148,27 +180,7 @@ pub(crate) mod budget {
         #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
         #[inline]
         pub(crate) fn hit(&self, rows: usize) -> bool {
-            if !self.on {
-                return false;
-            }
-            if rows > self.max_rows {
-                return true;
-            }
-            if self.bytes(rows) > self.max_bytes {
-                return true;
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            if self.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-                return true;
-            }
-            if let Some(cancel) = self.cancel {
-                // SAFETY: `CancelPtr`'s invariant and the lifetime-bound `Guard`
-                // keep the `AtomicBool` alive for this scoped snapshot load.
-                if unsafe { cancel.0.as_ref() }.load(Ordering::Relaxed) {
-                    return true;
-                }
-            }
-            false
+            self.why(rows).is_some()
         }
     }
 
@@ -346,7 +358,7 @@ pub(crate) mod budget {
     /// keeping SILENT SERVICE behaviour-neutral with the pre-streaming
     /// collect-then-intern-on-success path (which charged nothing on a swallowed
     /// remote error). [OPUS-4.8] (sq-my8wd.4)
-    #[cfg(feature = "service")]
+    #[cfg(any(feature = "service", feature = "service-local"))]
     #[derive(Clone, Copy)]
     pub(crate) struct ByteSavepoint {
         extra_bytes: usize,
@@ -354,7 +366,7 @@ pub(crate) mod budget {
     }
 
     /// Capture the current byte accumulator + exhaustion flag. [OPUS-4.8] (sq-my8wd.4)
-    #[cfg(feature = "service")]
+    #[cfg(any(feature = "service", feature = "service-local"))]
     #[inline]
     pub(crate) fn byte_savepoint() -> ByteSavepoint {
         ByteSavepoint {
@@ -371,7 +383,7 @@ pub(crate) mod budget {
     /// here — so the pre-burst snapshot is exactly the current state minus this burst.
     /// A deadline that elapsed during the burst is not masked: the next `exhausted`
     /// re-derives it from the wall clock. [OPUS-4.8] (sq-my8wd.4)
-    #[cfg(feature = "service")]
+    #[cfg(any(feature = "service", feature = "service-local"))]
     #[inline]
     pub(crate) fn restore_bytes(sp: ByteSavepoint) {
         ACTIVE.with(|c| {
@@ -460,6 +472,99 @@ pub(crate) mod budget {
             .unwrap_or(usize::MAX)
             .saturating_add(1);
         cap.min(a.max_rows.saturating_add(1)).min(by_bytes).min(1 << 20)
+    }
+
+    /// [SONNET-4.6] (sq-qk6ac) Direct tests for `Limits::why` — the pure gate the
+    /// rayon-parallel loops poll. Its contract has two load-bearing halves: it agrees
+    /// with `Limits::hit`, and its reason string is EXACTLY the one `check` would raise,
+    /// so a worker that abandons its share of the work reports the same error the
+    /// installing thread would (never a fabricated one, and never a guessed result).
+    #[cfg(test)]
+    mod snapshot_reason_tests {
+        use super::*;
+        use std::sync::Arc;
+
+        /// Asserts that under `budget` the snapshot reports `want` at `rows`, that `hit`
+        /// agrees, and that the reason is the very string `check` puts in its error.
+        fn assert_reason(budget: &QueryBudget, rows: usize, want: &'static str) {
+            let _guard = install(budget);
+            let snap = snapshot();
+            assert_eq!(snap.why(rows), Some(want), "wrong snapshot reason for {}", want);
+            assert!(snap.hit(rows), "hit must agree with why for {}", want);
+            assert_eq!(
+                check(rows),
+                Err(format!("query budget exceeded ({})", want)),
+                "the worker-visible reason must match the on-thread error for {}",
+                want
+            );
+        }
+
+        /// `why` and `hit` are one decision, and an unbudgeted snapshot never trips.
+        #[test]
+        fn unbudgeted_snapshot_has_no_reason() {
+            let budget = QueryBudget::unlimited();
+            let _guard = install(&budget);
+            let snap = snapshot();
+            assert_eq!(snap.why(0), None, "an unlimited budget must report no reason");
+            assert_eq!(snap.why(usize::MAX), None, "no row cap ⇒ no reason at any row count");
+            assert!(!snap.hit(usize::MAX), "hit must agree with why");
+        }
+
+        /// Each limit reports ITS OWN reason, and the string matches `check`'s message.
+        #[test]
+        fn each_limit_reports_the_reason_check_would_raise() {
+            let rows_capped = QueryBudget { max_rows: Some(4), ..QueryBudget::unlimited() };
+            assert_reason(&rows_capped, 5, "max-rows");
+            let bytes_capped =
+                QueryBudget { max_bytes: Some(BYTES_PER_ID), ..QueryBudget::unlimited() };
+            assert_reason(&bytes_capped, 2, "max-bytes");
+            let cancelled = QueryBudget::cancelled_by(Arc::new(AtomicBool::new(true)));
+            assert_reason(&cancelled, 0, "cancelled");
+        }
+
+        /// The wall-clock arm (native only: `Instant` does not exist in a wasm budget).
+        #[test]
+        #[cfg(not(target_arch = "wasm32"))]
+        fn an_elapsed_deadline_reports_timeout() {
+            let budget = QueryBudget {
+                deadline: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)),
+                ..QueryBudget::unlimited()
+            };
+            assert_reason(&budget, 0, "timeout");
+        }
+
+        /// The reason a limit does NOT report: an under-limit row count leaves the
+        /// snapshot clean, so the gate cannot abandon work a budget still admits.
+        #[test]
+        fn a_limit_not_yet_crossed_reports_nothing() {
+            let budget = QueryBudget { max_rows: Some(4), ..QueryBudget::unlimited() };
+            let _guard = install(&budget);
+            let snap = snapshot();
+            assert_eq!(snap.why(4), None, "a row count AT the cap is still admitted");
+            assert_eq!(snap.why(5), Some("max-rows"), "one past the cap trips");
+        }
+
+        /// The crux the parallel verdict loop depends on: a WORKER thread has no budget
+        /// installed, so its thread-local poll is blind — only the captured snapshot can
+        /// see the cancellation, and it names the same reason as the installing thread.
+        #[test]
+        fn snapshot_is_the_only_signal_a_worker_thread_can_see() {
+            let flag = Arc::new(AtomicBool::new(true));
+            let budget = QueryBudget::cancelled_by(Arc::clone(&flag));
+            let _guard = install(&budget);
+            let snap = snapshot();
+
+            let (worker_poll, worker_reason) = std::thread::scope(|s| {
+                s.spawn(|| (check(0), snap.why(0))).join().expect("worker must not panic")
+            });
+            assert_eq!(worker_poll, Ok(()), "the thread-local budget is invisible to a worker");
+            assert_eq!(
+                worker_reason,
+                Some("cancelled"),
+                "the captured snapshot must carry the cancellation across threads"
+            );
+            assert_eq!(check(0), Err("query budget exceeded (cancelled)".to_owned()));
+        }
     }
 
     #[cfg(test)]
@@ -1564,6 +1669,80 @@ pub(crate) mod functions {
     }
 }
 
+// ---- Local rows-returning SERVICE handlers (sq-lsp7k.2.2) ----------------------
+//
+// Mirrors `functions` (install guard + rayon-worker snapshot/re-install) so a
+// `SERVICE <iri> { … }` nested under a `FILTER EXISTS` — which re-enters pattern
+// evaluation on a rayon worker — still sees the registry. Propagation is load-bearing,
+// not a nicety: a worker that MISSED the registry would fall through to the HTTP path
+// and try to dial the IRI instead of answering it locally. The overwhelmingly common
+// case is NO registry installed, which makes the snapshot path free. NON-DEFAULT
+// `service-local` feature: when off, this module does not compile and the default build
+// is byte-identical. [OPUS-5]
+#[cfg(feature = "service-local")]
+pub(crate) mod local_services {
+    use crate::LocalServiceRegistry;
+    use std::cell::RefCell;
+    use std::sync::Arc;
+
+    thread_local! {
+        static ACTIVE: RefCell<Option<Arc<LocalServiceRegistry>>> = const { RefCell::new(None) };
+    }
+
+    /// Uninstalls on drop by restoring the PREVIOUS registry rather than clearing —
+    /// `with_local_services` is documented as scoped RAII, so a NESTED install must
+    /// hand the outer scope its own registry back when the inner one ends (clearing
+    /// would silently unregister the outer handlers for the rest of the outer scope,
+    /// sending a formerly-local IRI down the HTTP path). Restores on unwind too.
+    /// [SONNET-4.6]
+    pub(crate) struct Guard(Option<Arc<LocalServiceRegistry>>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let prev = self.0.take();
+            ACTIVE.with(|a| *a.borrow_mut() = prev);
+        }
+    }
+
+    pub(crate) fn install(reg: &LocalServiceRegistry) -> Guard {
+        Guard(ACTIVE.with(|a| a.borrow_mut().replace(Arc::new(reg.clone()))))
+    }
+
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+    pub(crate) fn snapshot() -> Option<Arc<LocalServiceRegistry>> {
+        ACTIVE.with(|a| a.borrow().clone())
+    }
+
+    pub(crate) struct WorkerGuard(Option<Option<Arc<LocalServiceRegistry>>>);
+    impl Drop for WorkerGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = self.0.take() {
+                ACTIVE.with(|a| *a.borrow_mut() = prev);
+            }
+        }
+    }
+
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+    pub(crate) fn worker_install(snap: &Option<Arc<LocalServiceRegistry>>) -> WorkerGuard {
+        match snap {
+            None => WorkerGuard(None),
+            Some(reg) => WorkerGuard(Some(ACTIVE.with(|a| a.borrow_mut().replace(reg.clone())))),
+        }
+    }
+
+    /// The local handler registered for `iri`, if a registry is installed and
+    /// contains it.
+    pub(crate) fn lookup(iri: &str) -> Option<crate::LocalServiceFn> {
+        ACTIVE.with(|a| a.borrow().as_ref().and_then(|reg| reg.get(iri).cloned()))
+    }
+
+    /// Whether `iri` is served locally — the cheap check the SERVICE bind-join uses to
+    /// DECLINE pushing a `VALUES` block at an IRI that never reaches the network.
+    #[cfg_attr(not(feature = "service"), allow(dead_code))]
+    pub(crate) fn handles(iri: &str) -> bool {
+        ACTIVE.with(|a| a.borrow().as_ref().is_some_and(|reg| reg.contains(iri)))
+    }
+}
+
 // ---- Custom aggregate registry (sq-5qz9) ----------------------------------------
 //
 // Mirrors `functions` exactly (install guard + rayon-worker snapshot/re-install)
@@ -2083,7 +2262,7 @@ impl LocalVocab {
     }
     /// The append cursor into the local vocab, paired with [`LocalVocab::rollback_to`]
     /// to discard a speculative interning burst. [OPUS-4.8] (sq-my8wd.4)
-    #[cfg(feature = "service")]
+    #[cfg(any(feature = "service", feature = "service-local"))]
     fn savepoint(&self) -> usize {
         self.terms.len()
     }
@@ -2094,7 +2273,7 @@ impl LocalVocab {
     /// discarded id rows, keeping SILENT SERVICE behaviour-neutral with the pre-streaming
     /// path. Interns BEFORE `mark` — and re-interns that returned an existing id, which
     /// pushed nothing — are untouched. [OPUS-4.8] (sq-my8wd.4)
-    #[cfg(feature = "service")]
+    #[cfg(any(feature = "service", feature = "service-local"))]
     fn rollback_to(&mut self, mark: usize) {
         for t in self.terms.drain(mark..) {
             self.ids.remove(&t);
@@ -2501,6 +2680,14 @@ pub fn eval_select_json_chunks(graph: &Graph, pattern: &GraphPattern, flush: Opt
 /// `budget::check` as an `Err` exactly as before — but note that on the streaming path
 /// early chunks may already have been flushed when the trip is detected (the server maps a
 /// post-first-byte trip to a truncated body, since the HTTP status is already committed).
+///
+/// [SONNET-4.6] (sq-yfcu2) The budget also bounds the SERIALIZE step, not just evaluation:
+/// the general (multi-pattern) path re-checks it mid-serialize and gates the final chunk on
+/// `budget::check`, so a deadline that falls due *while the materialised set is being
+/// serialised* is reported as `Err("query budget exceeded (timeout)")` rather than answered
+/// with a complete-but-late result. That is a deliberate behaviour change for late-but-
+/// complete results — the budget is a bound on the whole request, and a caller that has
+/// stopped waiting must not be charged for a body produced after its deadline.
 pub fn eval_select_json_emit(
     graph: &Graph,
     pattern: &GraphPattern,
@@ -2552,15 +2739,35 @@ pub fn eval_select_json_emit(
     };
 
     let mut s = head;
+    // [SONNET-4.6] (sq-yfcu2) The serialize loops below are budget-checked too: the
+    // pre-serialize `budget::check` above prices the ROW / BYTE caps exactly (the rows
+    // are already materialised, so the count is known — unlike the single-pattern
+    // streaming path, which is why this path may fan out under any budget), but
+    // serialising a large materialised set is itself unbounded WORK, so a DEADLINE (or a
+    // cancellation) can fall due *during* it. Both branches therefore re-check the budget
+    // mid-serialize and gate the final chunk on `budget::check` — a late-but-complete
+    // result is reported as the budget error, never returned as if it were in time.
     #[cfg(feature = "parallel")]
     if bindings.rows.len() >= PAR_THRESHOLD {
         use rayon::prelude::*;
+        // Limit snapshot the workers re-check at each par-chunk boundary (the installing
+        // thread's sticky flag is out of reach inside rayon).
+        let limits = budget::snapshot();
         // One string per chunk (≈ per worker), not per row. Chunks stay in order → identical bytes.
         let chunk = bindings.rows.len().div_ceil(rayon::current_num_threads() * 4).max(1);
         let frags: Vec<String> = bindings
             .rows
             .par_chunks(chunk)
             .map(|rows| {
+                // Coarse deadline/cancel re-check at the chunk boundary: once the budget is
+                // past, every later chunk produces nothing, so at most the chunks already in
+                // flight (~one per worker) run to completion. The post-fan-out gate below
+                // turns that into the budget error and discards this (now partial) result —
+                // a skipped chunk never escapes as a truncated body. Under no budget this is
+                // one non-tripping read per chunk.
+                if limits.hit(0) {
+                    return String::new();
+                }
                 let mut f = String::new();
                 for (k, row) in rows.iter().enumerate() {
                     if k > 0 {
@@ -2573,21 +2780,36 @@ pub fn eval_select_json_emit(
             .collect();
         // Accumulate into `s` (which already holds the head) and hand a chunk to `emit` at
         // each flush boundary. The concatenation is byte-identical to the old `emit_chunk`
-        // Vec layout; only the chunk boundaries differ.
-        for (i, f) in frags.into_iter().enumerate() {
-            if i > 0 {
+        // Vec layout; only the chunk boundaries differ. A skipped (empty) fragment is
+        // dropped rather than separated by a comma; every non-skipped chunk holds at least
+        // one row object, so on the untripped path the `wrote` flag is exactly `i > 0`.
+        let mut wrote = false;
+        for f in frags {
+            if f.is_empty() {
+                continue;
+            }
+            if wrote {
                 s.push(',');
             }
+            wrote = true;
             s.push_str(&f);
             if flush.is_some_and(|n| s.len() >= n) && emit(std::mem::take(&mut s)).is_break() {
                 return Ok(());
             }
         }
+        // Post-serialization gate: a deadline that fell due (or a cancellation raised)
+        // while the fan-out ran is the query's answer, not this now-late result.
+        budget::check(bindings.rows.len())?;
         s.push_str("]}}");
         let _ = emit(s);
         return Ok(());
     }
     for (i, row) in bindings.rows.iter().enumerate() {
+        // Coarse re-check every 1024 serialised rows; the post-loop gate turns the early
+        // stop into the budget error, so a truncated body is never returned as success.
+        if i & 1023 == 0 && budget::exhausted(bindings.rows.len()) {
+            break;
+        }
         if i > 0 {
             s.push(',');
         }
@@ -2596,6 +2818,7 @@ pub fn eval_select_json_emit(
             return Ok(());
         }
     }
+    budget::check(bindings.rows.len())?; // post-serialization gate (sticky)
     s.push_str("]}}");
     let _ = emit(s);
     Ok(())
@@ -4820,7 +5043,27 @@ fn eval_graph_pattern_inner(graph: &Graph, local: &mut LocalVocab, p: &GraphPatt
         // compiles the HTTP stack). [OPUS-4.8]
         #[cfg(feature = "service")]
         GraphPattern::Service { name, inner, silent } => {
+            // [OPUS-5] (sq-lsp7k.2.2) A registered LOCAL handler intercepts the IRI
+            // BEFORE the transport is reached. A miss returns `None` and the HTTP path
+            // below runs unchanged (egress allowlist and all). Compiled out entirely
+            // when `service-local` is off.
+            #[cfg(feature = "service-local")]
+            if let Some(b) = try_local_service(graph, local, name, inner, *silent)? {
+                return Ok(b);
+            }
             eval_service(graph, local, name, inner, *silent)
+        }
+        // [OPUS-5] (sq-lsp7k.2.2) `service-local` WITHOUT `service`: local handlers are
+        // usable on their own — no HTTP/TLS stack is compiled, and an IRI with no
+        // handler keeps exactly the "unsupported" outcome the feature-off build gives
+        // it (under SILENT, the join identity, matching how the HTTP path degrades).
+        #[cfg(all(feature = "service-local", not(feature = "service")))]
+        GraphPattern::Service { name, inner, silent } => {
+            match try_local_service(graph, local, name, inner, *silent)? {
+                Some(b) => Ok(b),
+                None if *silent => Ok(Bindings::unsorted(Vec::new(), vec![Row::new()])),
+                None => Err(format!("unsupported graph pattern: {:?}", p)),
+            }
         }
         GraphPattern::Project { .. }
         | GraphPattern::Distinct { .. }
@@ -5009,6 +5252,151 @@ fn eval_service(
     }
 }
 
+/// Answer `SERVICE <iri> { inner }` from a LOCAL in-process handler, if one is
+/// registered for `iri`. [OPUS-5] (sq-lsp7k.2.2)
+///
+/// Returns:
+/// * `Ok(Some(rel))` — a handler served the IRI; `rel` is its rows interned against
+///   this query's dictionaries (exactly as `VALUES` and the remote SERVICE relation
+///   are), ready for the caller's ordinary join.
+/// * `Ok(None)` — no handler applies (a variable endpoint, or an IRI absent from the
+///   registry / no registry installed). The caller proceeds EXACTLY as it did before
+///   this feature existed: the `service` HTTP path, egress allowlist included.
+/// * `Err(_)` — a non-SILENT handler failure (a returned `Err`, or a violation of the
+///   [`crate::LocalServiceRows`] header/arity contract, or a returned column that is
+///   NOT in scope in the SERVICE group).
+///
+/// ## Why an out-of-scope column is rejected
+///
+/// The relation must be one the SERVICE group itself could have produced: a remote
+/// endpoint answering `SELECT * WHERE { … }` can only ever return the group's in-scope
+/// variables. A handler returning some OTHER variable would silently join against an
+/// identically-named variable of the SURROUNDING query — `VALUES ?x { 1 } SERVICE <h>
+/// { ?s ?p ?o }` with a returned `?x = 2` would drop the outer row — which is neither
+/// the SERVICE group's semantics nor the remote path's. It is a handler bug, so it is
+/// reported like any other invalid relation rather than projected away silently.
+///
+/// ## Why the intercept sits here
+///
+/// This is upstream of `eval_service`, so a handled SERVICE never constructs a
+/// transport and never consults the egress policy — there is no request to police. The
+/// registry can therefore only REMOVE outbound reach, never grant it; the SSRF
+/// default-deny filter still guards every IRI that misses.
+///
+/// SILENT is honoured identically to the remote path: the failure is swallowed and the
+/// join identity (one zero-column row) is returned so the surrounding solutions
+/// survive. As on that path, terms interned before the failure are rolled back out of
+/// the local vocab and their byte-budget charge refunded, so a swallowed failure is
+/// resource-neutral.
+#[cfg(feature = "service-local")]
+fn try_local_service(
+    graph: &Graph,
+    local: &mut LocalVocab,
+    name: &NamedNodePattern,
+    inner: &GraphPattern,
+    silent: bool,
+) -> Result<Option<Bindings>, String> {
+    // Only a CONCRETE endpoint is dispatched locally — `SERVICE ?ep { … }` keeps its
+    // existing behaviour exactly (documented scope-out, see the module docs).
+    let NamedNodePattern::NamedNode(iri) = name else {
+        return Ok(None);
+    };
+    let Some(handler) = local_services::lookup(iri.as_str()) else {
+        return Ok(None);
+    };
+
+    // The in-scope variables of the SERVICE group, first-occurrence order — the same
+    // set the bind-join computes for its VALUES head.
+    let mut vars: Vec<Variable> = Vec::new();
+    inner.on_in_scope_variable(|v| {
+        if !vars.contains(v) {
+            vars.push(v.clone());
+        }
+    });
+    // Byte-for-byte the string the HTTP transport would have sent for this SERVICE.
+    let query = format!("SELECT * WHERE {{ {} }}", inner);
+    let patterns = local_service_patterns(inner);
+    let req = crate::LocalServiceRequest {
+        service: iri.as_str(),
+        query: &query,
+        vars: &vars,
+        patterns: &patterns,
+    };
+
+    let vocab_mark = local.savepoint();
+    let byte_mark = budget::byte_savepoint();
+    let produced = handler(&req).and_then(|rows| {
+        rows.validate()
+            .and_then(|()| {
+                // The returned relation may only name columns the SERVICE group itself
+                // puts in scope (see the doc comment): anything else would join with a
+                // same-named variable OUTSIDE the group. [SONNET-4.6]
+                match rows.vars.iter().find(|v| !vars.contains(v)) {
+                    Some(v) => Err(format!(
+                        "variable ?{} is not in scope in the SERVICE group",
+                        v.as_str()
+                    )),
+                    None => Ok(()),
+                }
+            })
+            .map_err(|e| {
+                format!("local SERVICE <{}> returned an invalid relation: {}", iri.as_str(), e)
+            })?;
+        let id_rows: Vec<Row> =
+            rows.rows.iter().map(|r| intern_remote_row(graph, local, r)).collect();
+        budget::check(id_rows.len())?;
+        Ok(Bindings::unsorted(rows.vars, id_rows))
+    });
+    match produced {
+        Ok(b) => Ok(Some(b)),
+        Err(e) if silent => {
+            let _ = e;
+            local.rollback_to(vocab_mark);
+            budget::restore_bytes(byte_mark);
+            Ok(Some(Bindings::unsorted(Vec::new(), vec![Row::new()])))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Decompose a SERVICE group into the neutral triple-pattern view handed to a local
+/// handler — the table-function argument channel. ALL-OR-NOTHING on purpose: only a
+/// FLAT basic graph pattern decomposes; any richer group (OPTIONAL / UNION / FILTER /
+/// sub-SELECT / paths) yields an EMPTY vec so a handler can never mistake a partial
+/// view for the whole group and answer as though it had understood it. Such a handler
+/// works from [`crate::LocalServiceRequest::query`] instead. [OPUS-5] (sq-lsp7k.2.2)
+#[cfg(feature = "service-local")]
+fn local_service_patterns(inner: &GraphPattern) -> Vec<crate::LocalServicePattern> {
+    use crate::{LocalServicePattern, LocalServiceSlot as S};
+    let GraphPattern::Bgp { patterns } = inner else {
+        return Vec::new();
+    };
+    // An RDF 1.2 quoted-triple slot may itself contain variables, so it is neither a
+    // `Term` nor a `Variable`: decline the whole decomposition rather than flatten it.
+    let term_slot = |t: &TermPattern| match t {
+        TermPattern::NamedNode(n) => Some(S::Term(Term::from(n.clone()))),
+        TermPattern::BlankNode(b) => Some(S::Term(Term::from(b.clone()))),
+        TermPattern::Literal(l) => Some(S::Term(Term::from(l.clone()))),
+        TermPattern::Variable(v) => Some(S::Var(v.clone())),
+        TermPattern::Triple(_) => None,
+    };
+    let mut out: Vec<LocalServicePattern> = Vec::with_capacity(patterns.len());
+    for tp in patterns {
+        let (Some(subject), Some(object)) = (term_slot(&tp.subject), term_slot(&tp.object)) else {
+            return Vec::new();
+        };
+        out.push(LocalServicePattern {
+            subject,
+            predicate: match &tp.predicate {
+                NamedNodePattern::NamedNode(n) => S::Term(Term::from(n.clone())),
+                NamedNodePattern::Variable(v) => S::Var(v.clone()),
+            },
+            object,
+        });
+    }
+    out
+}
+
 /// Intern ONE remote solution row into an id-level [`Row`] against this query's
 /// dictionaries — exactly as `VALUES` does — so it joins with local BGP results: each
 /// term resolves against the graph dictionary first, else the query-local vocab.
@@ -5016,7 +5404,7 @@ fn eval_service(
 /// streaming SERVICE parser rather than materialising the remote relation first.
 /// [FABLE-5] (sq-my8wd.4; formerly the whole-relation `service_relation_to_bindings`,
 /// sq-sjkj)
-#[cfg(feature = "service")]
+#[cfg(any(feature = "service", feature = "service-local"))]
 fn intern_remote_row(graph: &Graph, local: &mut LocalVocab, row: &[Option<Term>]) -> Row {
     row.iter()
         .map(|cell| match cell {
@@ -5089,6 +5477,16 @@ fn bound_join_to_endpoint(
     inner: &GraphPattern,
     silent: bool,
 ) -> Result<Option<Bindings>, String> {
+    // [OPUS-5] (sq-lsp7k.2.2) A locally-handled IRI never reaches the network, so there
+    // is nothing to push a `VALUES` block AT. Decline, and the caller falls back to the
+    // verbatim path — where `try_local_service` answers it and the outer join happens
+    // locally. (This also covers `SERVICE ?ep` whose endpoint resolves to a handled
+    // IRI: that endpoint's sub-join declines, which abandons the whole variable-endpoint
+    // pushdown, matching the documented "concrete IRIs only" scope-out.)
+    #[cfg(feature = "service-local")]
+    if local_services::handles(endpoint) {
+        return Ok(None);
+    }
     // The remote pattern's in-scope variables; the join keys are the ones ALSO bound
     // by `left`. We must intersect with `left.vars` (textual) so the VALUES we push
     // names variables the remote pattern actually mentions.
@@ -8840,41 +9238,80 @@ fn try_theta_antijoin(
         // serial loop's early-`break`-on-budget survivor prefix. The EXISTS residual re-
         // enters the thread-local function / view / spatial state, so each worker installs
         // the snapshot exactly like the FILTER / BIND parallel paths.
+        //
+        // [SONNET-4.6] (sq-qk6ac) An exhausted budget must block the VERDICT loop, not
+        // just the output build: one verdict is a whole probe of `B` (a bucket scan plus
+        // 3-valued expression evaluation — a WHOLE-`B` scan for a literal-keyed row), so a
+        // timed-out / cancelled query used to grind every remaining left row only for the
+        // build below to discard the lot on its FIRST `budget::exhausted` check. A rayon
+        // worker cannot see the installing thread's sticky flag, so it re-checks a
+        // captured `Limits` snapshot (the parallel hash-join / JSON-serialize pattern) and,
+        // when hit, returns the CANONICAL budget error — `collect` into `Result`
+        // short-circuits, so the queued probes are abandoned. Raising the error rather
+        // than guessing a placeholder verdict also means a skipped row can never escape as
+        // a silently truncated result, and it is behaviour-identical on the observable
+        // path: today the build truncates to nothing and the caller's operator-exit
+        // `budget::check` raises this same message, just after the wasted work.
         #[cfg(feature = "parallel")]
-        let verdicts: Vec<bool> = if left_b.rows.len() >= PAR_THRESHOLD {
+        if left_b.rows.len() >= PAR_THRESHOLD {
             use rayon::prelude::*;
+            let limits = budget::snapshot();
             let fns = functions::snapshot();
             let vw = view::snapshot();
             let spx = spatial::snapshot();
+            // [OPUS-5] (sq-lsp7k.2.2) Keep LOCAL SERVICE handlers visible on the worker too:
+            // a worker that missed the registry would dial the IRI instead of answering it.
+            #[cfg(feature = "service-local")]
+            let lsv = local_services::snapshot();
             #[cfg(not(target_arch = "wasm32"))]
             let qn = query_now::snapshot(); // sq-98w7z.1: keep NOW() pinned on workers
-            left_b
+            let verdicts: Vec<bool> = left_b
                 .rows
                 .par_iter()
                 .map(|lrow| {
+                    // One non-tripping `Instant` read per row under a deadline budget, and
+                    // a single `on` test when no budget is installed.
+                    if let Some(why) = limits.why(0) {
+                        return Err(format!("query budget exceeded ({})", why));
+                    }
                     let _fns = functions::worker_install(&fns);
                     let _vw = view::worker_install(&vw);
                     let _spx = spatial::worker_install(&spx);
+                    #[cfg(feature = "service-local")]
+                    let _lsv = local_services::worker_install(&lsv);
                     #[cfg(not(target_arch = "wasm32"))]
                     let _qn = query_now::worker_install(qn);
                     eliminated(lrow)
                 })
-                .collect::<Result<Vec<bool>, String>>()?
-        } else {
-            left_b.rows.iter().map(&eliminated).collect::<Result<Vec<bool>, String>>()?
-        };
-        #[cfg(not(feature = "parallel"))]
-        let verdicts: Vec<bool> =
-            left_b.rows.iter().map(&eliminated).collect::<Result<Vec<bool>, String>>()?;
+                .collect::<Result<Vec<bool>, String>>()?;
 
-        // Serial ordered build + budget truncation: identical to the serial probe loop's
-        // `if !matched { push } ; break on budget` — the survivor prefix and its order are
-        // reproduced exactly whether the verdicts were computed serially or in parallel.
-        for (lrow, &elim) in left_b.rows.iter().zip(&verdicts) {
+            // Serial ordered build + budget truncation: identical to the serial probe
+            // loop's `if !matched { push } ; break on budget` — the survivor prefix and
+            // its order are reproduced exactly whether the verdicts were computed
+            // serially or in parallel.
+            for (lrow, &elim) in left_b.rows.iter().zip(&verdicts) {
+                if budget::exhausted(result_rows.len()) {
+                    break;
+                }
+                if !elim {
+                    let mut combined: Row = lrow.clone();
+                    combined.extend(std::iter::repeat_n(NO_ID, n_right_only));
+                    result_rows.push(combined);
+                }
+            }
+            theta_antijoin::record(total_child_rows, order.len());
+            return Ok(Some(Bindings::unsorted(out_vars, result_rows)));
+        }
+
+        // Serial probe loop: the verdict is computed INSIDE the cooperative build loop, so
+        // an exhausted budget stops probing at exactly the row it stops emitting — the
+        // loop the parallel branch above is documented to reproduce. [SONNET-4.6]
+        // (sq-qk6ac)
+        for lrow in &left_b.rows {
             if budget::exhausted(result_rows.len()) {
                 break;
             }
-            if !elim {
+            if !eliminated(lrow)? {
                 let mut combined: Row = lrow.clone();
                 combined.extend(std::iter::repeat_n(NO_ID, n_right_only));
                 result_rows.push(combined);
@@ -9399,6 +9836,10 @@ fn extend_bindings(graph: &Graph, local: &mut LocalVocab, mut b: Bindings, var: 
         let fns = functions::snapshot();
         let vw = view::snapshot();
         let spx = spatial::snapshot(); // sq-mg9: keep the spatial index visible under EXISTS re-entry.
+        // [OPUS-5] (sq-lsp7k.2.2) Keep LOCAL SERVICE handlers visible on the worker too:
+        // a worker that missed the registry would dial the IRI instead of answering it.
+        #[cfg(feature = "service-local")]
+        let lsv = local_services::snapshot();
         #[cfg(not(target_arch = "wasm32"))]
         let qn = query_now::snapshot(); // sq-98w7z.1: keep NOW() pinned on workers
         b.rows
@@ -9408,6 +9849,8 @@ fn extend_bindings(graph: &Graph, local: &mut LocalVocab, mut b: Bindings, var: 
                 let _fns = functions::worker_install(&fns);
                 let _vw = view::worker_install(&vw);
                 let _spx = spatial::worker_install(&spx);
+                #[cfg(feature = "service-local")]
+                let _lsv = local_services::worker_install(&lsv);
                 #[cfg(not(target_arch = "wasm32"))]
                 let _qn = query_now::worker_install(qn);
                 ROW_SCOPE.set((scope, i));
@@ -9585,6 +10028,10 @@ fn group_aggregate(
         let fns = functions::snapshot();
         let vw = view::snapshot();
         let spx = spatial::snapshot(); // sq-mg9: keep the spatial index visible under EXISTS re-entry.
+        // [OPUS-5] (sq-lsp7k.2.2) Keep LOCAL SERVICE handlers visible on the worker too:
+        // a worker that missed the registry would dial the IRI instead of answering it.
+        #[cfg(feature = "service-local")]
+        let lsv = local_services::snapshot();
         // [OPUS-4.8] (sq-5qz9) keep a custom-aggregate registry visible off-thread, like `fns`.
         // (`self::` because the `aggregates` *parameter* below shadows the module name.)
         #[cfg(feature = "window-functions")]
@@ -9603,6 +10050,8 @@ fn group_aggregate(
                     let _fns = functions::worker_install(&fns);
                     let _vw = view::worker_install(&vw);
                     let _spx = spatial::worker_install(&spx);
+                    #[cfg(feature = "service-local")]
+                    let _lsv = local_services::worker_install(&lsv);
                     #[cfg(feature = "window-functions")]
                     let _aggs = self::aggregates::worker_install(&aggs);
                     #[cfg(not(target_arch = "wasm32"))]
@@ -9924,8 +10373,9 @@ fn minmax_values(vals: Vec<Value>, keep: Ordering) -> Value {
 /// non-temporal member aborts the fast path entirely.
 ///
 /// Tie semantics replicate `minmax_values` exactly: the comparator is
-/// `compare_values(..).unwrap_or(Equal)` — same-family temporals by timeline, the
-/// indeterminate/cross-family pairs by lexical form — with MIN keeping the FIRST of
+/// `compare_values(..).unwrap_or(Equal)` — which for two temporals IS
+/// `Temporal::cmp_t_total` (kind-first, then the timeline order extended over the
+/// indeterminate mixed-timezone window) — with MIN keeping the FIRST of
 /// equal members (`Iterator::min_by`) and MAX the LAST (`Iterator::max_by`); DISTINCT
 /// drops later duplicate terms first (same term ⇔ same id for graph terms), which can
 /// change which of two equal-VALUED but distinct terms MAX returns, exactly as the
@@ -9941,12 +10391,6 @@ fn minmax_temporal(
 ) -> Option<Value> {
     let Expression::Variable(v) = expr else { return None };
     let col = b.col(v)?;
-    let lex = |id: Id| -> &str {
-        match graph.dict.term_parts(id) {
-            dict::TermParts::Lit { value, .. } => value,
-            _ => "", // unreachable: cached temporal ids are literal dictionary ids
-        }
-    };
     let mut seen: FxHashSet<Id> = FxHashSet::default();
     let mut best: Option<(Temporal, Id)> = None;
     for &ri in members {
@@ -9964,19 +10408,13 @@ fn minmax_temporal(
         best = Some(match best {
             None => (t, id),
             Some((bt, bid)) => {
-                // [FABLE-5] sq-wjl8i: KIND-FIRST, mirroring `compare_values` — a
-                // cross-kind (dateTime vs date) pair ranks by `LiteralKind`
-                // (DateTime < Date), never lexically; the timeline order (with the
-                // lexical fallback for the indeterminate window) applies within a kind.
-                let ord = if t.kind != bt.kind {
-                    if t.kind == sparq_core::temporal::TemporalKind::DateTime {
-                        Ordering::Less
-                    } else {
-                        Ordering::Greater
-                    }
-                } else {
-                    Temporal::cmp_t(t, bt).unwrap_or_else(|| lex(id).cmp(lex(bid)))
-                };
+                // [FABLE-5] sq-wjl8i KIND-FIRST + [SONNET-4.6] sq-2k5py, both now in the
+                // shared `Temporal::cmp_t_total`, so this fold cannot drift from
+                // `compare_values`: a cross-kind (dateTime vs date) pair ranks by
+                // `LiteralKind` (DateTime < Date), never lexically, and within a kind the
+                // timeline order is TOTAL (instant, then timezone presence) — the former
+                // lexical fallback for the indeterminate window was intransitive.
+                let ord = Temporal::cmp_t_total(t, bt);
                 let replace = if is_min { ord == Ordering::Less } else { ord != Ordering::Less };
                 if replace {
                     (t, id)
@@ -10140,31 +10578,23 @@ fn sort_cell_val(v: Value) -> SortCell {
 }
 
 /// Compares two ORDER BY key cells under the lenient total order, reproducing
-/// `compare_values` exactly: same-family temporals by timeline; the indeterminate /
-/// cross-family temporal pairs fall back to the lexical-form comparison (both cells are
-/// literals — class 3 — and non-numeric, so `compare_values` would reach its
-/// `value_str` fallback); a temporal against any other key materialises the term
-/// lazily (rare: only mixed-type columns) and defers to `compare_values` itself.
+/// `compare_values` exactly: two temporals by `Temporal::cmp_t_total` (kind-first, then
+/// the timeline order extended over the indeterminate mixed-timezone window — the same
+/// definition `compare_values` reaches through `CompareTerm::strict_cmp`); a temporal
+/// against any other key materialises the term lazily (rare: only mixed-type columns)
+/// and defers to `compare_values` itself.
 #[inline]
 fn cmp_sort_cells(graph: &Graph, local: &LocalVocab, a: &SortCell, c: &SortCell) -> Ordering {
     match (a, c) {
-        (SortCell::Temp { t: ta, id: ia }, SortCell::Temp { t: tb, id: ib }) => {
-            // [FABLE-5] sq-wjl8i: KIND-FIRST, mirroring `compare_values` — a dateTime
-            // never value-compares against a date (`LiteralKind::DateTime < Date`); the
-            // timeline comparison (then the lexical fallback for the indeterminate
-            // mixed-timezone window) applies only within one temporal kind. Ill-formed
+        (SortCell::Temp { t: ta, .. }, SortCell::Temp { t: tb, .. }) => {
+            // [FABLE-5] sq-wjl8i KIND-FIRST + [SONNET-4.6] sq-2k5py: both now live in the
+            // shared `Temporal::cmp_t_total` — a dateTime never value-compares against a
+            // date (`LiteralKind::DateTime < Date`), and within one kind the timeline order
+            // is TOTAL (instant, then timezone presence). The former lexical fallback for
+            // the indeterminate window is gone: it mixed timeline-decided and
+            // lexical-decided pairs inside one kind, which is intransitive. Ill-formed
             // temporals never enter the cache, so both cells here are well-formed.
-            if ta.kind != tb.kind {
-                return if ta.kind == sparq_core::temporal::TemporalKind::DateTime {
-                    Ordering::Less
-                } else {
-                    Ordering::Greater
-                };
-            }
-            match Temporal::cmp_t(*ta, *tb) {
-                Some(o) => o,
-                None => cmp_sort_cells_lex(graph, *ia, *ib),
-            }
+            Temporal::cmp_t_total(*ta, *tb)
         }
         // Two numeric graph terms: f64 fast compare, with the EXACT tie recheck below.
         (SortCell::Num { f: fa, id: ia }, SortCell::Num { f: fb, id: ib }) => {
@@ -10356,19 +10786,9 @@ fn cmp_exact_lex_f64(lex: &str, f: f64) -> Ordering {
     }
 }
 
-/// The lexical-form fallback for temporal sort cells `compare_values` cannot decide by
-/// value (cross-family or the mixed-timezone window) — out of line: the hot comparator
-/// stays branch + `partial_cmp`.
-#[cold]
-fn cmp_sort_cells_lex(graph: &Graph, a: Id, b: Id) -> Ordering {
-    let lex = |id: Id| -> &str {
-        match graph.dict.term_parts(id) {
-            dict::TermParts::Lit { value, .. } => value,
-            _ => "", // unreachable: cached temporal ids are literal dictionary ids
-        }
-    };
-    lex(a).cmp(lex(b))
-}
+// [SONNET-4.6] sq-2k5py: the lexical-form fallback for temporal sort cells (`cmp_sort_cells_lex`)
+// is GONE — `Temporal::cmp_t_total` decides every temporal pair by value now, and a lexical
+// fallback inside one temporal kind is exactly the intransitivity this bead removed.
 
 /// Materialises a temporal sort cell's term for the (rare) mixed-type-column
 /// comparison against a non-temporal key.
@@ -10381,7 +10801,7 @@ fn sort_cell_term(graph: &Graph, local: &LocalVocab, id: Id) -> Value {
 /// id, borrowed straight from the record store (no allocation). Only called on ids `cell_of`
 /// already proved are plain `xsd:string` literals (`Dict::plain_string_value` returned `Some`),
 /// so the non-plain-string arm is unreachable; it returns the empty slice as a safe
-/// placeholder rather than panic (mirroring `cmp_sort_cells_lex`).
+/// placeholder rather than panic.
 #[cfg(feature = "topk-lazy-strkey")]
 #[inline]
 fn str_id_value(graph: &Graph, id: Id) -> &str {
@@ -10550,6 +10970,10 @@ fn order_bindings(
                 let fns = functions::snapshot();
                 let vw = view::snapshot();
                 let spx = spatial::snapshot();
+                // [OPUS-5] (sq-lsp7k.2.2) Keep LOCAL SERVICE handlers visible on the worker too:
+                // a worker that missed the registry would dial the IRI instead of answering it.
+                #[cfg(feature = "service-local")]
+                let lsv = local_services::snapshot();
                 #[cfg(not(target_arch = "wasm32"))]
                 let qn = query_now::snapshot(); // sq-98w7z.1: keep NOW() pinned on workers
                 b.rows
@@ -10559,6 +10983,8 @@ fn order_bindings(
                         let _fns = functions::worker_install(&fns);
                         let _vw = view::worker_install(&vw);
                         let _spx = spatial::worker_install(&spx);
+                        #[cfg(feature = "service-local")]
+                        let _lsv = local_services::worker_install(&lsv);
                         #[cfg(not(target_arch = "wasm32"))]
                         let _qn = query_now::worker_install(qn);
                         Ok((key_of(row)?, i))
@@ -10624,6 +11050,10 @@ fn order_bindings(
         let fns = functions::snapshot();
         let vw = view::snapshot();
         let spx = spatial::snapshot();
+        // [OPUS-5] (sq-lsp7k.2.2) Keep LOCAL SERVICE handlers visible on the worker too:
+        // a worker that missed the registry would dial the IRI instead of answering it.
+        #[cfg(feature = "service-local")]
+        let lsv = local_services::snapshot();
         #[cfg(not(target_arch = "wasm32"))]
         let qn = query_now::snapshot(); // sq-98w7z.1: keep NOW() pinned on workers
         b.rows
@@ -10632,6 +11062,8 @@ fn order_bindings(
                 let _fns = functions::worker_install(&fns);
                 let _vw = view::worker_install(&vw);
                 let _spx = spatial::worker_install(&spx);
+                #[cfg(feature = "service-local")]
+                let _lsv = local_services::worker_install(&lsv);
                 #[cfg(not(target_arch = "wasm32"))]
                 let _qn = query_now::worker_install(qn);
                 Ok((key_of(row)?, row.clone()))
@@ -11530,6 +11962,10 @@ fn apply_filter_scalar(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr
         let fns = functions::snapshot();
         let vw = view::snapshot();
         let spx = spatial::snapshot(); // sq-mg9: keep the spatial index visible under EXISTS re-entry.
+        // [OPUS-5] (sq-lsp7k.2.2) Keep LOCAL SERVICE handlers visible on the worker too:
+        // a worker that missed the registry would dial the IRI instead of answering it.
+        #[cfg(feature = "service-local")]
+        let lsv = local_services::snapshot();
         #[cfg(not(target_arch = "wasm32"))]
         let qn = query_now::snapshot(); // sq-98w7z.1: keep NOW() pinned on workers
         b.rows
@@ -11539,6 +11975,8 @@ fn apply_filter_scalar(graph: &Graph, local: &LocalVocab, b: &mut Bindings, expr
                 let _fns = functions::worker_install(&fns);
                 let _vw = view::worker_install(&vw);
                 let _spx = spatial::worker_install(&spx);
+                #[cfg(feature = "service-local")]
+                let _lsv = local_services::worker_install(&lsv);
                 #[cfg(not(target_arch = "wasm32"))]
                 let _qn = query_now::worker_install(qn);
                 ROW_SCOPE.set((scope, i));
@@ -12591,6 +13029,19 @@ fn value_compare_strict(x: &Value, y: &Value) -> Option<Ordering> {
     }
 }
 
+/// The TOTAL-order verdict for a same-family temporal pair `value_compare_strict` left
+/// indeterminate (the mixed-timezone ±14h window) — `None` for every other pair, which
+/// keeps the caller's own fallback. Reached ONLY from the `CompareTerm` total order, never
+/// from a relational operator. [SONNET-4.6] sq-2k5py
+#[cold]
+fn temporal_total_cmp(x: &Value, y: &Value) -> Option<Ordering> {
+    match (lit_kind(x), lit_kind(y)) {
+        (LitKind::DateTime(Some(a)), LitKind::DateTime(Some(b)))
+        | (LitKind::Date(Some(a)), LitKind::Date(Some(b))) => Some(Timeline::cmp_tl_total(a, b)),
+        _ => None,
+    }
+}
+
 fn as_bool_val(v: &Value) -> Option<bool> {
     match v {
         Value::Bool(b) => Some(*b),
@@ -12771,7 +13222,13 @@ impl CompareTerm for Value {
     #[inline]
     fn strict_cmp(&self, other: &Self) -> Option<Ordering> {
         // dateTime/date by timeline, same-tag / same-other-XSD lexically — when comparable.
-        value_compare_strict(self, other)
+        // [SONNET-4.6] sq-2k5py: `value_compare_strict` is the RELATIONAL comparison, so it
+        // leaves the mixed-timezone window indeterminate; for the TOTAL order that `None`
+        // would drop the pair to `compare_terms`' lexical fallback INSIDE the DateTime kind,
+        // which is intransitive (`Timeline::cmp_tl_total`'s witness). Only on that `None` —
+        // so the decided path costs nothing — re-decide a same-family temporal pair under
+        // the total-order extension. Relational `<`/`>`/`=` keep the type error.
+        value_compare_strict(self, other).or_else(|| temporal_total_cmp(self, other))
     }
     #[inline]
     fn triple_parts(&self) -> Option<[Self; 3]> {

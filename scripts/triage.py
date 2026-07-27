@@ -32,7 +32,23 @@ SEC_KEYWORDS = ("zk", "mpc", "reasoner", "crypto", "auth", "e2ee")
 # role:site chain in orchestration/routing.toml leads with terra/codex). EXACT labels, not
 # substrings: a substring set would false-match (e.g. "gui" in "guide") and UI keywords must NOT
 # enter routing match_labels, which the arm-side security classifier unions into its keyword set.
-UI_SURFACE_LABELS = ("area:site", "area:gui", "surface:frontend", "dashboard")
+UI_SURFACE_LABELS = ("area:site", "surface:frontend", "dashboard")
+# [OPUS-5] `area:gui` gets its OWN role (maintainer directive 2026-07-26). The routing default
+# flipped to opus5-first over sol, "except for GUI work where sol should remain prioritised", and
+# the maintainer settled the boundary as "just go with area:gui work". area:gui used to sit in
+# UI_SURFACE_LABELS above and therefore derived role:site — which made the carve-out inexpressible,
+# because role:site also covers area:site / surface:frontend / dashboard, and those are NOT in the
+# carve-out. Splitting the label out is what lets orchestration/routing.toml give role:gui a
+# sol-first chain while role:site takes the opus5-first default like everything else.
+# EXACT label, never a substring: a substring test would match "guide"/"guidance".
+#
+# THIS IS NOT WHERE THE CARVE-OUT BINDS. This rule fires only for an issue with NO explicit role —
+# the explicit-role branch in _role() returns first — and 35 of 35 open area:gui issues already
+# carry one (33 role:impl, 1 role:perf, 1 role:research), so on its own it reached NONE of the live
+# backlog and GUI work silently took the opus5-first default. The binding rule is
+# scripts/route-resolve.py `gui_carve_out()`, which reads `area:gui` directly at plan time
+# regardless of role. Keep the two label sets in sync — `test_both_gui_selectors_agree`.
+GUI_SURFACE_LABELS = ("area:gui",)
 # [FABLE-5] STANDING RULE — frontier-tier CI/infrastructure authorship (maintainer decision
 # 2026-07-17, same pattern as the UI→codex rule above / PR #3416): infra-surface labels derive
 # role:ci so infra work (.github/workflows, gate aggregators, orchestration/ + dispatch scripts)
@@ -62,8 +78,14 @@ def _role(labels, issue_type):
     for lb in labels:
         if lb.startswith("kind:") and lb[5:] in ROLE_BY_KIND:
             return ROLE_BY_KIND[lb[5:]]
-    # [FABLE-5] UI-surface labels derive role:site (codex-led chain) before the generic type map,
-    # after kind (so kind:docs about the site stays docs) and after an explicit role:* label.
+    # [OPUS-5] area:gui derives role:gui — the sol-first carve-out — and is tested BEFORE the
+    # generic UI rule below, which would otherwise swallow it into role:site again. Same
+    # precedence slot otherwise (after security, an explicit role:*, and kind).
+    if any(lb in GUI_SURFACE_LABELS for lb in labels):
+        return "gui"
+    # [FABLE-5] UI-surface labels derive role:site (now the opus5-first default chain) before the
+    # generic type map, after kind (so kind:docs about the site stays docs) and after an explicit
+    # role:* label. NOTE: area:gui is deliberately NOT here — see GUI_SURFACE_LABELS.
     if any(lb in UI_SURFACE_LABELS for lb in labels):
         return "site"
     # [FABLE-5] infra-surface labels derive role:ci (the frontier-only fable/terra chain) before
@@ -90,7 +112,10 @@ def triage(labels, issue_type="task", trusted=True):
     # [FABLE-5] a no-area issue reserves the readiness engine's serializing __global__ partition, so
     # it must NEVER auto-promote to status:ready (each one collapses the whole dispatch frontier at
     # backlog scale — audit-2026-07-17). Park it needs:area (a gate ready-issues.py already respects,
-    # and maintainer-visible) so a human/LLM assigns a crate; then the retriage cron re-promotes it.
+    # and maintainer-visible) so a human/LLM assigns a crate; then the retriage cron re-promotes it
+    # — but ONLY if the sweep can see the park and trusts its author. retriage's fetch is paginated
+    # (retriage.py `_fetch_label`) precisely so "the next tick picks it up" is not conditional on
+    # the issue being one of the 500 newest; that was false for 219 of 719 parks (issue #3831).
     has_area = any(lb.startswith("area:") for lb in labels)
     # [OPUS-4.8] an epic is a tracking umbrella, never dispatchable — it must not gain status:ready
     # (the readiness engine also excludes kind:epic as the hard dispatch gate; this keeps the tracker
@@ -150,7 +175,21 @@ def _self_test():
     # [FABLE-5] UI-surface ownership: a UI-surface label derives role:site (the codex/GPT-5.6-led
     # chain) even when the issue type would derive impl; kind (docs) and security still win.
     chk("ui surface -> site", triage(["priority:P2", "area:site"], "feature")["role"], "site")
-    chk("gui surface -> site", triage(["priority:P2", "area:gui"], "task")["role"], "site")
+    # [OPUS-5] the area:gui carve-out (maintainer 2026-07-26): area:gui gets its OWN role so the
+    # routing table can keep it sol-first while everything else prefers opus5.
+    chk("gui surface -> gui (NOT site)", triage(["priority:P2", "area:gui"], "task")["role"], "gui")
+    # THE DISCRIMINATION THAT MATTERS: "GUI" informally reads as covering the site surfaces, so a
+    # future editor could easily widen the carve-out back over them. NO site* area may derive
+    # role:gui — that is the exact property, asserted independently of which non-gui role each
+    # one happens to take (area:site -> site; the narrower area:site-specs / area:site-papers are
+    # not exact UI_SURFACE_LABELS and fall through to the type map, which is fine: every one of
+    # those roles is on the opus5-first default).
+    for _area in ("area:site", "area:site-specs", "area:site-papers", "area:sitemap"):
+        chk(f"{_area} does NOT derive role:gui (not swept into the sol carve-out)",
+            triage(["priority:P2", _area], "task")["role"] == "gui", False)
+    chk("surface:frontend stays role:site", triage(["priority:P2", "surface:frontend"], "task")["role"], "site")
+    chk("a 'guide' label does NOT false-match the gui carve-out",
+        triage(["priority:P2", "area:guide"], "task")["role"], "impl")
     chk("explicit impl on ui surface stays impl",
         triage(["priority:P2", "role:impl", "area:site"], "feature")["role"], "impl")
     chk("site docs stay docs", triage(["priority:P3", "kind:docs", "area:site"], "task")["role"], "docs")

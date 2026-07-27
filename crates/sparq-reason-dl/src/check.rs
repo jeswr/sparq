@@ -98,12 +98,16 @@
 //!
 //! Note the structural consequence of the in-order dispatch: a graph reaches this branch
 //! only when it is in-QL but NOT in-RL and NOT in-EL, which (over the L1 axiom kinds)
-//! forces an `ObjectComplementOf` somewhere — a shape the QL crate today counts as
-//! uncaptured. So in practice this branch currently graduates `Inconsistent` verdicts
-//! (disjointness violations are decided at any capture level) while `Consistent` stays
-//! `Unknown(QlCaptureGap)` until the QL crate's capture broadens; that is the honest
-//! fail-closed reading, not a defect. Without the feature the branch abstains with
-//! [`UnknownReason::QlConsistencyPending`] exactly as before.
+//! forces an `ObjectComplementOf` somewhere. The QL crate now captures the QL-legal
+//! superclass form of that shape — `A rdfs:subClassOf [ owl:complementOf B ]`, i.e. the
+//! DL-Lite_R negative inclusion `A ⊑ ¬B` (sparq issue #2513) — so a graph routed here whose
+//! complements are all in that position can graduate `Consistent` as well as `Inconsistent`
+//! (disjointness violations were already decided at any capture level). The remaining
+//! complement positions the QL crate still counts uncaptured — a NAMED-subject
+//! `A owl:complementOf B` (the biconditional `A ≡ ¬B`, strictly stronger than a negative
+//! inclusion) and a complement nested inside another class expression — keep landing in
+//! `Unknown(QlCaptureGap)`; that is the honest fail-closed reading, not a defect. Without the
+//! feature the branch abstains with [`UnknownReason::QlConsistencyPending`] exactly as before.
 //!
 //! # Entailment by refutation (design record §4)
 //!
@@ -204,7 +208,10 @@ use crate::extract::extract;
 use crate::model::{Axiom, ClassExpression, ObjectPropertyExpression, Ontology};
 use crate::profile::profiles;
 use crate::tableau::{self, Budget, ExhaustedBudget};
-use oxrdf::{NamedNode, Term as OTerm};
+#[cfg(feature = "dl_transitive")]
+use oxrdf::NamedNode;
+#[cfg(any(feature = "dl_transitive", feature = "dispatch_ql"))]
+use oxrdf::Term as OTerm;
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{is_inline, Dict, Id, TermParts};
 use sparq_reason::{inconsistencies, materialize, Profile};
@@ -506,31 +513,36 @@ impl DirectChecker {
         // [GPT-5.6] sq-zfwzq: declarations have no Direct-Semantics import. Seed the
         // conclusion extraction with declarations for premise-confirmed roles so a bare
         // conclusion role assertion is classifiable without weakening L1 globally.
-        let mut conclusion_for_extraction = conclusion.to_vec();
-        let mut premise_roles = FxHashSet::default();
+        // [SONNET-4.6] Role declarations are needed only by the transitive-role extension.
+        let conclusion_for_extraction = conclusion.to_vec();
         #[cfg(feature = "dl_transitive")]
-        if prem
-            .axioms()
-            .iter()
-            .any(|axiom| matches!(axiom, Axiom::TransitiveObjectProperty { .. }))
-        {
-            collect_role_ids(&prem, &mut premise_roles);
-        }
-        let conclusion_predicates: FxHashSet<Id> =
-            conclusion.iter().map(|triple| triple[1]).collect();
-        if !premise_roles.is_empty() {
-            let rdf_type = dict.intern(&OTerm::NamedNode(NamedNode::new_unchecked(
-                "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
-            )));
-            let object_property = dict.intern(&OTerm::NamedNode(NamedNode::new_unchecked(
-                "http://www.w3.org/2002/07/owl#ObjectProperty",
-            )));
-            for role in premise_roles {
-                if conclusion_predicates.contains(&role) {
-                    conclusion_for_extraction.push([role, rdf_type, object_property]);
+        let conclusion_for_extraction = {
+            let mut conclusion_for_extraction = conclusion_for_extraction;
+            let mut premise_roles = FxHashSet::default();
+            if prem
+                .axioms()
+                .iter()
+                .any(|axiom| matches!(axiom, Axiom::TransitiveObjectProperty { .. }))
+            {
+                collect_role_ids(&prem, &mut premise_roles);
+            }
+            let conclusion_predicates: FxHashSet<Id> =
+                conclusion.iter().map(|triple| triple[1]).collect();
+            if !premise_roles.is_empty() {
+                let rdf_type = dict.intern(&OTerm::NamedNode(NamedNode::new_unchecked(
+                    "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+                )));
+                let object_property = dict.intern(&OTerm::NamedNode(NamedNode::new_unchecked(
+                    "http://www.w3.org/2002/07/owl#ObjectProperty",
+                )));
+                for role in premise_roles {
+                    if conclusion_predicates.contains(&role) {
+                        conclusion_for_extraction.push([role, rdf_type, object_property]);
+                    }
                 }
             }
-        }
+            conclusion_for_extraction
+        };
         let concl = match extract(dict, &conclusion_for_extraction) {
             Ok(onto) => onto,
             Err(e) => return unknown_extraction(format!("conclusion: {}", e)),
@@ -628,6 +640,7 @@ enum AxiomVerdict {
 
 /// Collect every named object property whose role kind is established by a fully-extracted
 /// premise model. Used only to add semantically inert declarations to conclusion extraction.
+#[cfg(feature = "dl_transitive")]
 fn collect_role_ids(onto: &Ontology, into: &mut FxHashSet<Id>) {
     for axiom in onto.axioms() {
         match axiom {
@@ -662,6 +675,7 @@ fn collect_role_ids(onto: &Ontology, into: &mut FxHashSet<Id>) {
     }
 }
 
+#[cfg(feature = "dl_transitive")]
 fn collect_role_ids_in_ce(class: &ClassExpression, into: &mut FxHashSet<Id>) {
     match class {
         ClassExpression::ObjectIntersectionOf(members)

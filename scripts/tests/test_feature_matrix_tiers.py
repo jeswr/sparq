@@ -731,9 +731,17 @@ class TestCfgExtraction(unittest.TestCase):
     """Tests for extracting cfg expressions from Rust source content."""
 
     def test_extract_single_cfg(self):
-        content = '#[cfg(feature = "foo")]\nfn f() {}\n'
+        content = (
+            '#[cfg(feature = "vector-r")]\n'
+            'fn a() {}\n'
+            '#[cfg(not(feature = "quoted-triples"))]\n'
+            'fn g() {}\n'
+        )
         exprs = det._extract_cfg_expressions(content)
-        self.assertEqual(exprs, ['feature = "foo"'])
+        self.assertEqual(
+            exprs,
+            ['feature = "vector-r"', 'not(feature = "quoted-triples")'],
+        )
 
     def test_extract_inner_cfg(self):
         content = '#![cfg(feature = "foo")]\nfn f() {}\n'
@@ -760,6 +768,90 @@ class TestCfgExtraction(unittest.TestCase):
         exprs = det._extract_cfg_expressions(content)
         self.assertEqual(len(exprs), 1)
         self.assertIn('not(any(target_arch = "wasm32", feature = "ci"))', exprs)
+
+    def test_sanitizer_preserves_lines_and_live_cfg_after_comment_quote(self):
+        # [SONNET-4.6] Regression: a quote in prose must not erase later attributes.
+        content = (
+            '// prose mentions "an unterminated literal\n'
+            '#[cfg(not(feature = "quoted-triples"))]\n'
+            'fn materialize_default() {}\n'
+        )
+        safe = det._sanitize_for_cfg_scan(content)
+        self.assertEqual(safe.count("\n"), content.count("\n"))
+        self.assertEqual(len(safe), len(content))
+        self.assertEqual(
+            det._extract_cfg_expressions(content),
+            ['not(feature = "quoted-triples")'],
+        )
+
+    def test_multiline_raw_string_decoy_preserves_live_cfg(self):
+        content = (
+            'const DOC: &str = r##"#[cfg(not(feature = "window-origin"))]\n'
+            'still a string"##;\n'
+            '#[cfg(all(test, feature = "window-origin"))]\n'
+            'mod tests {}\n'
+        )
+        safe = det._sanitize_for_cfg_scan(content)
+        self.assertEqual(safe.count("\n"), content.count("\n"))
+        self.assertEqual(len(safe), len(content))
+        self.assertEqual(
+            det._extract_cfg_expressions(content),
+            ['all(test, feature = "window-origin")'],
+        )
+
+    def test_escaped_cr_does_not_mask_following_live_cfg(self):
+        content = (
+            'let sep = "\\r";\n'
+            '#[cfg(not(feature = "quoted-triples"))]\n'
+            'fn materialize_default() {}\n'
+        )
+        self.assertEqual(
+            det._extract_cfg_expressions(content),
+            ['not(feature = "quoted-triples")'],
+        )
+
+    def test_ordinary_literal_trailing_r_does_not_open_raw_string(self):
+        for literal in ('"mode r"', '"w/r"'):
+            with self.subTest(literal=literal):
+                content = (
+                    'let mode = {};\n'.format(literal)
+                    + '#[cfg(not(feature = "quoted-triples"))]\n'
+                    + 'fn g() {}\n'
+                )
+                self.assertEqual(
+                    det._extract_cfg_expressions(content),
+                    ['not(feature = "quoted-triples")'],
+                )
+
+    def test_nested_block_comment_cfg_is_masked(self):
+        content = (
+            '/* outer /* #[cfg(feature = "decoy")] */ comment */\n'
+            '#[cfg(feature = "live")]\n'
+        )
+        self.assertEqual(det._extract_cfg_expressions(content), ['feature = "live"'])
+
+    def test_regression_cfgs_from_rsp_and_reason_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_crate(
+                tmp,
+                src_files={
+                    "lib.rs": (
+                        '// RSP source prose with an unmatched " quote\n'
+                        '#[cfg(all(test, feature = "window-origin"))]\n'
+                        'mod window_origin_tests {}\n'
+                        '#[cfg(all(test, not(feature = "window-origin")))]\n'
+                        'mod window_origin_default_tests {}\n'
+                        '#[cfg(feature = "quoted-triples")]\n'
+                        'fn reified() {}\n'
+                        '#[cfg(not(feature = "quoted-triples"))]\n'
+                        'fn materialized() {}\n'
+                    )
+                },
+            )
+            rsp = det.classify_leg(root, ["window-origin"])
+            reason = det.classify_leg(root, ["quoted-triples"])
+            self.assertTrue(rsp.sensitive)
+            self.assertTrue(reason.sensitive)
 
 
 # ---------------------------------------------------------------------------

@@ -160,6 +160,17 @@ cross-checked before any timing is trusted). The committed harness
   docker-image load hang), Virtuoso, QLever — measuring **full-request latency
   AND TTFB** in **both keep-alive and fresh-connect** regimes
   (`http_sparql_adapter.py --profile`, 6-col TSVs).
+- `canonical-beir-bench.sh` / `canonical-beir-gather-instance.sh` — the **BEIR
+  IR-quality gather pair** ([FABLE-5] sq-tvzyi), same orphan-proof launcher rails:
+  the instance side carries the heavy pip `pyserini`+`beir` provisioning (venv,
+  JDK 21) that the wave-1 bin-packed box did not, builds the sparq-text
+  `beir_text` example, and runs `scripts/gather-competitors.sh --run --only
+  lucene-anserini` per BEIR cut so sparq-text and the Lucene/Anserini kernel BM25
+  oracle are scored by the ONE shared scorer on the SAME cut + qrels
+  (Recall@100/nDCG@10 deficits). Envelopes land in `bench/competitor-results/` +
+  a `gather-meta.json` provenance record; reviewed deficits are vendored into
+  `research/gap-fts-2026-07.md` §4 deliberately (the BEIR corpus is not
+  redistributable in-repo, so this stays gather-only).
 - `emit_envelope.py` — folds per-engine TSVs + `meta.json` into one canonical
   envelope per suite (3-col and 6-col aware).
 - `ingest-canonical-competitors.mjs` — envelopes → the dashboard's

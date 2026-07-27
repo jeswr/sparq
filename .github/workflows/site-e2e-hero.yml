@@ -113,9 +113,10 @@ jobs:
       - name: Install Playwright Chromium (+ OS deps)
         run: npx playwright install --with-deps chromium
 
-      # Determinism gate: zero waitForTimeout calls in the whole e2e/ tree (HARD — must pass).
-      - name: Determinism grep gate (no waitForTimeout calls)
-        run: npm run test:e2e:grep-gate
+      # [OPUS-5] #3773 — the determinism grep gate is HARD-gated in site-e2e-foundation.yml's
+      # `determinism-gate` job (same `site/**` path filter). It used to run HERE too, inside
+      # this advisory job, where the "HARD — must pass" comment it carried was simply false;
+      # re-running it in a non-gating job gates nothing, so it is not duplicated.
 
       # Run the five P1 home hero-runner journeys. Advisory: failures surface as a visible check
       # but do not block the PR while wasm/CI flakiness is worked out.

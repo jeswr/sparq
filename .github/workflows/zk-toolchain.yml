@@ -20,6 +20,11 @@
 # ONLY the sparq-specific `forge-suite` (the verifier-soundness estate over crates/sparq-zk*,
 # which compiles zk/compose — and now transitively fetches the released sparq_ieee754 git dep).
 #
+# [SONNET-4.6] sq-3x7dl.14.2: the PROOF-M1 xpath differential oracle lives in its OWN
+# workflow, `.github/workflows/xpath-differential.yml`, NOT here. Do not re-add an xpath job
+# to this file: this lane's paths filter drives the ~60-minute `forge-suite`, so adding
+# `zk/xpath/**` would run the whole forge suite on a PR that only touched that harness.
+#
 # TRIGGER (deliberately OFF the fast per-PR critical path — the toolchain install +
 # real proving is slow):
 #   • schedule (nightly 04:23 UTC)  — the standing safety net.
@@ -313,6 +318,24 @@ jobs:
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
           fi
+
+      # [FABLE-5] sq-7pifo — run the NON-`#[ignore]`d, toolchain-gated regression gates.
+      # The sq-c5f gate-count regression test (`gate_count::gate_count_regression`) is
+      # deliberately NOT `#[ignore]`d — gate counts are cheap (compile + `bb gates`, no
+      # proving) — so it can run in the normal suite WHEN the toolchain is present. But the
+      # normal ci.yml lanes have no nargo/bb, so it self-skips there, and the ignored-suite
+      # step below runs `-- --ignored`, which SKIPS every non-ignored test. Net result before
+      # this step: `gate_count_regression` ran in NO CI lane, so its baselines went silently
+      # stale (the sq-25mgo deep-underflow fix grew filter_f64 and filter_value_dl_f64 well
+      # past the checked-in regression tolerance and nothing tripped, sq-3kd2g.2). This step runs
+      # the non-ignored tests in the `gate_count` and `sparql_catalog` binaries WITH the
+      # toolchain on PATH, so an intentional circuit change must re-baseline in the SAME PR.
+      # Cheap: compile + `bb gates` only, no proving. (`sparql_catalog` needs no toolchain but
+      # co-lives here as the snapshot-consistency guard; running it is near-free.)
+      - name: Run the non-ignored gate-count + catalog regression gates (real bb gates)
+        if: steps.changes.outputs.zk == 'true'
+        run: |
+          cargo test -p sparq-zk-compose --test gate_count --test sparql_catalog -- --test-threads=1
 
       # The load-bearing step: run EVERY `#[ignore]`d test in the ZK crates. With the
       # toolchain on PATH the forge tests do a REAL bb prove and assert every forgery is

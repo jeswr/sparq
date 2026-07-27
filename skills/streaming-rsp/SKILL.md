@@ -85,6 +85,8 @@ enum EvalMode { Rebuild, PersistentDict, Delta, Snapshot }
 ContinuousQuery::register(sparql: &str, spec: WindowSpec) -> Result<ContinuousQuery, String>
   .with_r2s(R2S) -> Self            // builder
   .with_mode(EvalMode) -> Self      // builder; call BEFORE first push (resets stream state)
+  .with_budget(QueryBudget) -> Self // per-window-evaluation caps (max_rows/max_bytes/cancel); QueryBudget re-exported from sparq_engine
+  .with_window_timeout(Duration) -> Self // native-only: each window eval's deadline = now + timeout
   .push(triple: [Term;3], ts: u64, on_result: impl FnMut(WindowResult)) -> Result<(), String>
   .flush(on_result: impl FnMut(WindowResult)) -> Result<(), String>
   .late_dropped() -> u64            // arrivals dropped because every covering window had closed
@@ -95,17 +97,18 @@ window_aggregate(window: &WindowResult, var: &str, aggregate: Agg) -> Option<f64
 
 // --- Continuous CONSTRUCT: GraphResult { start, end, triples: Vec<Triple> } (stream->stream) ---
 ContinuousConstruct::register(sparql: &str, spec: WindowSpec) -> Result<_, String>
-  .with_r2s / .with_mode / .push(.., FnMut(GraphResult)) / .flush / .late_dropped
+  .with_r2s / .with_mode / .with_budget / .with_window_timeout / .push(.., FnMut(GraphResult)) / .flush / .late_dropped
 
 // --- Continuous ASK: AskResult { start, end, value: bool } (one boolean per window) ---
 ContinuousAsk::register(sparql: &str, spec: WindowSpec) -> Result<_, String>
-  .with_mode / .push(.., FnMut(AskResult)) / .flush / .late_dropped
+  .with_mode / .with_budget / .with_window_timeout / .push(.., FnMut(AskResult)) / .flush / .late_dropped
 
 // --- RSP-QL surface syntax + multi-window joins ---
 RspqlQuery::parse(text: &str) -> Result<RspqlQuery, String>
   // fields: output_stream: Option<NamedNode>, r2s: R2S,
   //         windows: Vec<WindowDecl { window, stream, spec }>, sparql: String (WINDOW->GRAPH rewrite)
 ContinuousMultiQuery::register(rspql_text: &str) -> Result<ContinuousMultiQuery, String>
+  .with_budget(QueryBudget) / .with_window_timeout(Duration)  // per evaluation TICK (the multi-window analogue)
   .push(stream: &NamedNode, triple: [Term;3], ts: u64, on_result: impl FnMut(WindowResult)) -> Result<(), String>
   .flush(on_result: impl FnMut(WindowResult)) -> Result<(), String>
   .window_iris() -> Vec<&NamedNode>   .output_stream() -> Option<&NamedNode>   .r2s() -> R2S
@@ -218,6 +221,7 @@ event-time lateness tolerance. Either clause may be omitted.
 - **Empty windows are reported** (evaluated + delivered) when the watermark jumps a gap — DSTREAM needs to observe results disappear. Windows wholly closed before the first arrival's watermark are skipped (a stream starting at `ts=10⁹` won't replay a billion empties).
 - **Materialisation is set-semantic:** a window is an RDF *graph*, so the same triple at several timestamps within one window counts once. CONSTRUCT results are triple sets (exact set-diff for I/DSTREAM); SELECT results are multisets diffed by 64-bit `FxHasher` row hashes (a hash collision could theoretically suppress a diff — accepted as vanishingly unlikely).
 - **`register` rejects the wrong query form:** `ContinuousQuery` requires SELECT, `ContinuousConstruct` requires CONSTRUCT, `ContinuousAsk` requires ASK. Errors come back as `Err(String)` at registration. `push`/`flush` errors are engine evaluation errors.
+- **Per-registered-query budgets** ([SONNET-4.6] sq-xqu): `.with_budget(QueryBudget)` applies the engine's cooperative limits (`max_rows` / `max_bytes` / `cancel`) to EVERY window (or multi-window tick) evaluation — a best-effort ceiling on one pathological window, NOT a hard resource guarantee. `max_bytes` prices the executor-accounted ESTIMATED working set of that one evaluation, not total process memory nor the memory of the materialised windows themselves. A `deadline` inside the passed budget stays ABSOLUTE; use `.with_window_timeout(Duration)` (native-only, like `QueryBudget::deadline` itself) to install a REFRESHED per-evaluation deadline (= now + timeout at each evaluation start) rather than a strict wall-clock cap on the evaluation's duration. A tripped budget is the evaluation error of the `push`/`flush` that closed the window (`"query budget exceeded (…)"`), so remaining closed windows are dropped like any evaluation error. Enforcement is the engine's coarse cooperative polling: shapes answered straight from the index (e.g. a single-pattern ASK count) or finishing a tiny LIMIT-1 scan before the first poll complete unbounded — they do bounded work by construction.
 - **`with_mode` must precede the first push** (switching mode resets stream state). Default `EvalMode::PersistentDict` wins every measured scenario and bounds dictionary memory to the *live* window vocabulary via refcount-exact compaction. `Rebuild` bounds memory to one window. `Delta` keeps one live graph evolved by per-slide deltas (kept for huge-window / cheap-eval cases; never the benchmark winner); the consecutive-window diff itself runs on the shared eval substrate (`sparq-substrate` `join::delta::DeltaTable`, id-level, monomorphic — the previous window's build table persists across slides so it is never re-hashed). [FABLE-5] sq-2n1q3.4 `Snapshot` is `Delta` plus a cheap `O(overlay)` **immutable point-in-time** `Graph::snapshot` per closed window — a logically-independent, `Send + Sync` view the engine (or your callback) can retain or publish across windows, where `Delta`'s live `&Graph` borrow cannot. Results are identical across all four modes.
 - **RSP-QL parser scope (`RspqlQuery::parse` / `ContinuousMultiQuery`):** parses `REGISTER [STREAM|RSTREAM|ISTREAM|DSTREAM] <out> AS`, `FROM NAMED WINDOW <w> ON <s> [RANGE <dur> [STEP <dur>] [T0 <dur>] [MAXDELAY <dur>]]` (tumbling when STEP omitted), and `WINDOW <w> { … }` (rewritten to `GRAPH <w> { … }`). The `T0`/`MAXDELAY` clauses require `window-origin`; they are optional, ordered, and time-window-only. Durations are ISO-8601 (`PT10S`, `PT1M30S`, `PT2H`, `P1D`; **seconds resolution**, years/months/weeks rejected) or bare integers (logical ticks). IRIs may be `<…>` or prefixed names resolved against the body's `PREFIX`/`BASE`. **Scoped out** (use the programmatic `WindowSpec` instead): window *variables* (`WINDOW ?w`), `ROWS` count windows, session windows, and relative `NOW-PT…TO…` bounds. `ContinuousMultiQuery` requires ≥2 windows (use `ContinuousQuery` for one); 3 or more windows work — each gets its own S2R state on the shared synchronized clock. RSTREAM/ISTREAM/DSTREAM are all supported: `REGISTER ISTREAM <out> AS` emits per-tick added rows; `REGISTER DSTREAM <out> AS` emits per-tick removed rows (multiset diff against the previous tick's full join result). [SONNET-4.6] sq-2n1q3.3
 - **Term model is `oxrdf`** (`oxrdf::Term`/`NamedNode`/`Literal`); stream elements are `[Term; 3]`. Add `oxrdf` with `features = ["rdf-12"]` to match the workspace.

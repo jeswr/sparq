@@ -805,6 +805,259 @@ fn avg_of_integers_is_decimal() {
     assert_eq!(got, [[g, avg, one_half]].into_iter().collect());
 }
 
+// ---------------------------------------------------------------------------
+// [SONNET-4.6] sq-r2nor — the DECIDED float/double semantics for the numeric
+// aggregates: the whole XSD numeric tower is in scope (no fail-closed reject),
+// SUM/AVG promote per XPath, and the fold order + NaN/-0.0 rule are pinned so the
+// closure stays a function of the completed lower strata.
+// ---------------------------------------------------------------------------
+
+const XSD_DOUBLE: &str = "http://www.w3.org/2001/XMLSchema#double";
+const XSD_DECIMAL: &str = "http://www.w3.org/2001/XMLSchema#decimal";
+const XSD_FLOAT: &str = "http://www.w3.org/2001/XMLSchema#float";
+
+fn dbl(d: &mut Dict, lex: &str) -> Id {
+    d.intern_lit(lex, XSD_DOUBLE, None)
+}
+
+/// A `(term id, numeric value)` group in the shape `fold_numeric_group` consumes.
+fn group(d: &mut Dict, ids: &[Id]) -> Vec<(Id, sparq_substrate::numeric::Num)> {
+    ids.iter()
+        .map(|&id| {
+            (
+                id,
+                super::numeric_value(d, id).expect("test fixture is numeric"),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn sum_and_avg_promote_a_double_operand() {
+    let mut d = Dict::new();
+    let (g, value, total, avg) = (
+        iri(&mut d, "g"),
+        iri(&mut d, "value"),
+        iri(&mut d, "total"),
+        iri(&mut d, "avg"),
+    );
+    let (one, half) = (int(&mut d, 1), dbl(&mut d, "0.5"));
+    let facts = vec![[g, value, one], [g, value, half]];
+    let got = derived(
+        &mut d,
+        &facts,
+        &format!(
+            "{P}[?g, ex:total, ?s] :- AGGREGATE([?g, ex:value, ?v] ON ?g BIND SUM(?v) AS ?s) .\n\
+             [?g, ex:avg, ?a] :- AGGREGATE([?g, ex:value, ?v] ON ?g BIND AVG(?v) AS ?a) ."
+        ),
+    );
+    // XPath promotion: an xsd:double operand makes both results xsd:double, in the
+    // canonical mantissa-E-exponent lexical.
+    let (sum_out, avg_out) = (dbl(&mut d, "1.5E0"), dbl(&mut d, "7.5E-1"));
+    assert_eq!(
+        got,
+        [[g, total, sum_out], [g, avg, avg_out]]
+            .into_iter()
+            .collect()
+    );
+}
+
+#[test]
+fn min_max_totalise_nan_below_negative_infinity() {
+    let mut d = Dict::new();
+    let (g, value, min_p, max_p) = (
+        iri(&mut d, "g"),
+        iri(&mut d, "value"),
+        iri(&mut d, "min"),
+        iri(&mut d, "max"),
+    );
+    let (nan, ninf, one) = (
+        dbl(&mut d, "NaN"),
+        dbl(&mut d, "-INF"),
+        dbl(&mut d, "1.0E0"),
+    );
+    let facts = vec![[g, value, one], [g, value, nan], [g, value, ninf]];
+    let got = derived(
+        &mut d,
+        &facts,
+        &format!(
+            "{P}[?g, ex:min, ?v] :- AGGREGATE([?g, ex:value, ?x] ON ?g BIND MIN(?x) AS ?v) .\n\
+             [?g, ex:max, ?v] :- AGGREGATE([?g, ex:value, ?x] ON ?g BIND MAX(?x) AS ?v) ."
+        ),
+    );
+    // NaN is NOT a row-level failure for MIN/MAX (unlike FILTER, which uses the
+    // relational comparison): the total order puts it below -INF.
+    assert_eq!(
+        got,
+        [[g, min_p, nan], [g, max_p, one]].into_iter().collect()
+    );
+}
+
+#[test]
+fn float_sum_fold_is_independent_of_group_order() {
+    let mut d = Dict::new();
+    // Classic non-associative catastrophic-cancellation set: an unsorted left-to-right
+    // fold gives 2, 3 or 4 depending on where the big pair lands, so a hash-order fold
+    // would make the derived SUM depend on the derivation order.
+    let ids = [
+        dbl(&mut d, "1.0E16"),
+        dbl(&mut d, "1.0E0"),
+        dbl(&mut d, "-1.0E16"),
+        dbl(&mut d, "2.0E0"),
+    ];
+    let mut base = group(&mut d, &ids);
+    let want = eval::fold_numeric_group(&mut d, super::AggFunc::Sum, &mut base)
+        .expect("a non-empty group folds");
+    for rot in 1..ids.len() {
+        let mut rotated: Vec<Id> = ids[rot..].to_vec();
+        rotated.extend_from_slice(&ids[..rot]);
+        let mut values = group(&mut d, &rotated);
+        assert_eq!(
+            eval::fold_numeric_group(&mut d, super::AggFunc::Sum, &mut values),
+            Some(want),
+            "rotation by {} changed the SUM",
+            rot
+        );
+    }
+    let mut reversed = group(&mut d, &[ids[3], ids[2], ids[1], ids[0]]);
+    assert_eq!(
+        eval::fold_numeric_group(&mut d, super::AggFunc::Sum, &mut reversed),
+        Some(want)
+    );
+    // The pinned order is ascending value: -1e16, 1, 2, 1e16.
+    assert_eq!(want, dbl(&mut d, "2.0E0"));
+}
+
+/// Fold a two-term value tie in a FRESH dictionary that interns the pair in the given
+/// order, and return the emitted RDF TERM. Returning the term, not the id, is the point:
+/// ids are interning-order artefacts, so an assertion phrased in ids cannot see a
+/// tie-break that moved with the interning order.
+fn tie_term(first: (&str, &str), second: (&str, &str), func: super::AggFunc) -> oxrdf::Term {
+    let mut d = Dict::new();
+    let ids = [
+        d.intern_lit(first.0, first.1, None),
+        d.intern_lit(second.0, second.1, None),
+    ];
+    let mut values = group(&mut d, &ids);
+    let id = eval::fold_numeric_group(&mut d, func, &mut values).expect("a non-empty group folds");
+    d.term(id)
+}
+
+fn lit_term((lex, datatype): (&str, &str)) -> oxrdf::Term {
+    oxrdf::Term::Literal(oxrdf::Literal::new_typed_literal(
+        lex,
+        oxrdf::NamedNode::new_unchecked(datatype),
+    ))
+}
+
+#[test]
+fn min_max_break_a_signed_zero_tie_by_term_content() {
+    // +0.0 and -0.0 are EQUAL under the total order, so the emitted term is decided by
+    // the tie-break — the same one for MIN and for MAX. Interning the pair in OPPOSITE
+    // orders gives the two terms opposite dictionary ids, which is exactly the freedom a
+    // derivation-order change has; a content tie-break must ignore it.
+    let (pos, neg) = (("0.0E0", XSD_DOUBLE), ("-0.0E0", XSD_DOUBLE));
+    for func in [super::AggFunc::Min, super::AggFunc::Max] {
+        assert_eq!(
+            tie_term(pos, neg, func),
+            tie_term(neg, pos, func),
+            "{:?} moved with the interning order",
+            func
+        );
+        // "-0.0E0" sorts before "0.0E0" as a lexical form, for both functions.
+        assert_eq!(tie_term(pos, neg, func), lit_term(neg));
+    }
+}
+
+#[test]
+fn min_max_break_a_cross_tier_value_tie_by_term_content() {
+    // "1.0"^^xsd:decimal and "1.0E0"^^xsd:double are distinct TERMS of equal VALUE
+    // (neither is an inlined id, so their relative ids follow the interning order).
+    let (exact, inexact) = (("1.0", XSD_DECIMAL), ("1.0E0", XSD_DOUBLE));
+    for func in [super::AggFunc::Min, super::AggFunc::Max] {
+        assert_eq!(
+            tie_term(exact, inexact, func),
+            tie_term(inexact, exact, func),
+            "{:?} moved with the interning order",
+            func
+        );
+        // xsd:decimal orders before xsd:double as a datatype IRI.
+        assert_eq!(tie_term(exact, inexact, func), lit_term(exact));
+    }
+}
+
+#[test]
+fn sum_of_equal_valued_operands_is_id_order_independent() {
+    // A tie between EQUAL-valued operands of different tiers is not free for SUM: the
+    // fold promotes as it goes, so the tie order decides where the accumulator leaves
+    // the float tier. Here `(1 + 2^24) as f32` rounds the 1 away, while `1 + 2^24` in
+    // the double tier keeps it — so the two tie orders differ in the last unit.
+    let one = ("1.0E0", XSD_FLOAT);
+    let (as_float, as_double) = (("1.6777216E7", XSD_FLOAT), ("1.6777216E7", XSD_DOUBLE));
+    let fold = |order: [(&str, &str); 3]| {
+        let mut dict = Dict::new();
+        let ids: Vec<Id> = order
+            .iter()
+            .map(|&(lex, dt)| dict.intern_lit(lex, dt, None))
+            .collect();
+        let mut values = group(&mut dict, &ids);
+        let id = eval::fold_numeric_group(&mut dict, super::AggFunc::Sum, &mut values)
+            .expect("a non-empty group folds");
+        dict.term(id)
+    };
+    let want = fold([one, as_float, as_double]);
+    for order in [
+        [one, as_double, as_float],
+        [as_float, as_double, one],
+        [as_double, as_float, one],
+        [as_float, one, as_double],
+    ] {
+        assert_eq!(fold(order), want, "the SUM moved with the interning order");
+    }
+    // xsd:double orders before xsd:float, so the accumulator promotes at the tie and
+    // the 1 survives: 1 + 2^24 + 2^24 == 33554433, not 33554432.
+    assert_eq!(want, lit_term(("3.3554433E7", XSD_DOUBLE)));
+}
+
+/// Derived facts as RDF TERM triples, so two runs over different dictionaries can be
+/// compared (ids cannot be).
+fn derived_terms(d: &mut Dict, facts: &[[Id; 3]], src: &str) -> FxHashSet<[String; 3]> {
+    derived(d, facts, src)
+        .into_iter()
+        .map(|f| f.map(|id| d.term(id).to_string()))
+        .collect()
+}
+
+#[test]
+fn a_tie_over_minted_terms_is_independent_of_the_minting_order() {
+    // The tied operands are MINTED by an earlier stratum, so their ids come out of the
+    // aggregate's hash-map iteration order — the concrete way a derivation-order change
+    // reassigns ids. Here the same flip is forced by pre-interning one of the two: with
+    // `seed`, "0.0E0" is interned BEFORE the facts and holds the smaller id; without it,
+    // "0.0E0" is minted afterwards and holds the larger. The closure must not move.
+    let src = format!(
+        "{P}[?g, ex:total, ?s] :- AGGREGATE([?g, ex:value, ?v] ON ?g BIND SUM(?v) AS ?s) .\n\
+         [ex:world, ex:min, ?m] :- AGGREGATE([?g, ex:total, ?t] BIND MIN(?t) AS ?m) .\n\
+         [ex:world, ex:max, ?m] :- AGGREGATE([?g, ex:total, ?t] BIND MAX(?t) AS ?m) ."
+    );
+    let run = |seed: bool| {
+        let mut d = Dict::new();
+        if seed {
+            dbl(&mut d, "0.0E0");
+        }
+        let (g1, g2, value) = (iri(&mut d, "g1"), iri(&mut d, "g2"), iri(&mut d, "value"));
+        // g1 sums to +0.0 (a MINTED term); g2's one-element sum is -0.0. They are equal
+        // under the total order and distinct as terms.
+        let facts = vec![
+            [g1, value, dbl(&mut d, "1.0E0")],
+            [g1, value, dbl(&mut d, "-1.0E0")],
+            [g2, value, dbl(&mut d, "-0.0E0")],
+        ];
+        derived_terms(&mut d, &facts, &src)
+    };
+    assert_eq!(run(false), run(true));
+}
+
 #[test]
 fn empty_group_yields_no_row_for_sum() {
     let mut d = Dict::new();

@@ -80,32 +80,34 @@ async function main() {
   }
 
   const manifest = {
-    // The captured-manifest fallback for /showcase/zk-car-hire. The single bundled
-    // sub-proof is a REAL UltraHonk proof of the age-gate; the browser re-verifies it
-    // live in-tab. Other family members are composed natively, NOT bundled as proofs.
+    // The captured-manifest fallback for /showcase/zk-car-hire. The bundled sub-proof
+    // is a REAL UltraHonk proof of the age-gate; the browser re-verifies it live in-tab.
+    // Other family members are composed natively, NOT bundled as proofs here. The shape
+    // MUST mirror `sparq_zk_compose::capture::CapturedCarHireManifest` (a `subProofs`
+    // ARRAY) so the native crate seam and this script emit an identical schema.
     type: "urn:sparq:zk:ProofManifest",
     note:
       "Research-grade, NOT externally audited (bead sq-qhy4). One genuinely captured + " +
       "in-tab-verifiable sub-proof: the age-gate FILTER (age >= 25). The hidden age is " +
       "never in the public inputs. Captured by site/scripts/capture-zk-manifest.mjs.",
-    circuit: "filter_int_d2",
-    proofOptions: PROOF_OPTIONS,
     capturedAt: new Date().toISOString().slice(0, 10),
-    subProof: {
-      member: "filter_int_d2",
-      relation: "age >= 25 over a hidden integer age",
-      // proof bytes as a plain array of u8 (JSON-portable); rehydrated to Uint8Array
-      // in the browser before bb.js verifyProof.
-      proof: Array.from(proof),
-      publicInputs,
-    },
+    subProofs: [
+      {
+        member: "filter_int_d2",
+        relation: "age >= 25 over a hidden integer age",
+        // proof bytes as a plain array of u8 (JSON-portable); rehydrated to Uint8Array
+        // in the browser before bb.js verifyProof.
+        proof: Array.from(proof),
+        publicInputs,
+      },
+    ],
   };
 
   // Pretty-print the manifest, but keep the (long) proof byte array on a single line so
   // the fixture stays a few KB of readable JSON rather than 8k+ one-int-per-line rows.
   const pretty = JSON.stringify(manifest, null, 2).replace(
     /"proof": \[[\s\S]*?\]/,
-    `"proof": [${manifest.subProof.proof.join(",")}]`,
+    `"proof": [${manifest.subProofs[0].proof.join(",")}]`,
   );
   await writeFile(outPath, `${pretty}\n`, "utf8");
   console.log(

@@ -27,12 +27,16 @@ use sparq_zk_compose::build::{
 use sparq_zk_compose::driver::CircuitProver;
 use sparq_zk_compose::manifest::{
     AttestedHolderBinding, AttestedStatusRef, BindingEdge, BindingMode, CircuitId,
-    CommitmentAttestation, EntailmentRegime, FieldHex, FilterOp, HiddenIndexRevocation,
-    HiddenIssuerAttestation, ProofInputs, ProofManifest, RevocationStatus, StatusListSnapshot,
-    SubProof,
+    CommitmentAttestation, EntailmentRegime, FieldHex, FilterOp, FullyHiddenRevocation,
+    HiddenIndexRevocation, HiddenIssuerAttestation, ProofInputs, ProofManifest, RevocationStatus,
+    StatusListSnapshot, SubProof,
 };
 // [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation host helpers.
-use sparq_zk_compose::revocation::{merkle_root, merkle_witness, revoke_prover_toml};
+// [OPUS-5] sq-kndw: + the fully-hidden (IRI + version) revocation host helpers.
+use sparq_zk_compose::revocation::{
+    accepted_set_root, hidden_ref_witness, merkle_root, merkle_witness,
+    revoke_hidden_ref_prover_toml, revoke_prover_toml,
+};
 // [OPUS-4.8] sq-z9l: hidden-issuer-attestation host helpers.
 use sparq_zk_compose::issuer::{
     hidden_issuer_prover_toml, key_membership_witness, key_set_root, HiddenIssuerWitness,
@@ -105,9 +109,10 @@ fn fixture_snapshot(revoked: bool) -> StatusListSnapshot {
 /// The issuer-bound revocation reference for the fixtures.
 fn fixture_revocation() -> RevocationStatus {
     RevocationStatus {
-        status_list: FIXTURE_STATUS_LIST.to_string(),
+        ref_commitment: None,
+        status_list: Some(FIXTURE_STATUS_LIST.to_string()),
         index: Some(FIXTURE_STATUS_INDEX),
-        version: FIXTURE_STATUS_VERSION,
+        version: Some(FIXTURE_STATUS_VERSION),
         index_commitment: None,
     }
 }
@@ -204,7 +209,12 @@ fn attest_with_status(
         signature: sk.sign_commitment_with_status(&commitment, &salt, &status_ref),
         cryptosuite: SignatureScheme::Poseidon2SchnorrV1.cryptosuite_iri().to_string(),
         salt: Some(FieldHex::from_field(&salt)),
-        status: Some(AttestedStatusRef { index: Some(index), version, index_commitment: None }),
+        status: Some(AttestedStatusRef {
+            index: Some(index),
+            version: Some(version),
+            index_commitment: None,
+            ref_commitment: None,
+        }),
         holder: None, // [OPUS-4.8] sq-h8rg (HolderPoP T2): non-holder-bound (bearer)
     }
 }
@@ -273,8 +283,9 @@ fn attest_with_status_commit(
         salt: Some(FieldHex::from_field(&salt)),
         status: Some(AttestedStatusRef {
             index: None,
-            version,
+            version: Some(version),
             index_commitment: Some(FieldHex::from_field(index_commitment)),
+            ref_commitment: None,
         }),
         holder: None, // [OPUS-4.8] sq-h8rg (HolderPoP T2): non-holder-bound (bearer)
     }
@@ -284,9 +295,10 @@ fn attest_with_status_commit(
 /// a hiding `index_commitment` is disclosed instead.
 fn fixture_revocation_committed(index_commitment: &Fr) -> RevocationStatus {
     RevocationStatus {
-        status_list: FIXTURE_STATUS_LIST.to_string(),
+        ref_commitment: None,
+        status_list: Some(FIXTURE_STATUS_LIST.to_string()),
         index: None,
-        version: FIXTURE_STATUS_VERSION,
+        version: Some(FIXTURE_STATUS_VERSION),
         index_commitment: Some(FieldHex::from_field(index_commitment)),
     }
 }
@@ -377,6 +389,7 @@ fn sample_manifest() -> ProofManifest {
         build_filter_int(operand_enc, 25, FilterOp::Ge, 18, true).expect("filter builds");
 
     let mut m = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
         issuers: vec!["did:key:zSampleIssuer".into()],
@@ -713,6 +726,7 @@ fn full_manifest_prove_verify_scan() {
     let art = prover.prove_in(&id, &toml, &out, "manifest_scan").unwrap();
 
     let mut manifest = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
         issuers: vec!["did:key:zSampleIssuer".into()],
@@ -836,6 +850,7 @@ fn filter_manifest(
     challenge: FieldHex,
 ) -> ProofManifest {
     let mut m = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
         issuers: vec!["did:key:zSampleIssuer".into()],
@@ -1195,6 +1210,7 @@ fn nonce_binding_mismatch_rejected() {
     let scan = scan_inputs_for(&credential_graph(), "http://ex/age");
     let make = || {
         let mut m = ProofManifest {
+            fully_hidden_revocation: None,
             r#type: "urn:sparq:zk:ProofManifest".into(),
             query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
             issuers: vec![],
@@ -1293,6 +1309,7 @@ fn holder_pop_manifest(holder_hex: &str, pop_hex: &str, cryptosuite: &str) -> Pr
     let salt = salt_from_bytes(&[9u8; 32]);
     let scan = scan_inputs_for(&credential_graph(), "http://ex/age");
     let mut m = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
         issuers: vec![],
@@ -1506,8 +1523,9 @@ fn attest_with_holder(
             .to_string(),
         salt: Some(FieldHex::from_field(&salt)),
         status: Some(AttestedStatusRef {
+            ref_commitment: None,
             index: Some(FIXTURE_STATUS_INDEX),
-            version: FIXTURE_STATUS_VERSION,
+            version: Some(FIXTURE_STATUS_VERSION),
             index_commitment: None,
         }),
         holder: Some(
@@ -1560,6 +1578,7 @@ fn holder_bound_manifest(
     let scan = scan_inputs_for(&credential_graph(), "http://ex/age");
     let presented_hex = public_key_to_hex(&presented_holder.public_key());
     let mut m = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
         issuers: vec![],
@@ -1943,6 +1962,7 @@ fn holder_pop_valid_verifies_end_to_end() {
     let registry = HolderRegistry::from_hex_keys([holder_hex.clone()]);
 
     let mut manifest = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
         issuers: vec!["did:key:zSampleIssuer".into()],
@@ -2005,6 +2025,7 @@ fn malformed_proof_hex_rejected_not_panicked() {
     // the verifier nonce (0x2a) so we don't trip NonceBindingMismatch first.
     let make = |proof_hex: &str| {
         let mut m = ProofManifest {
+            fully_hidden_revocation: None,
             r#type: "urn:sparq:zk:ProofManifest".into(),
             query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
             issuers: vec![],
@@ -2271,6 +2292,7 @@ fn filter_reject_comparison_substitution_17_vs_18() {
         *operand_enc = scan_operand;
     }
     let m = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o FILTER(?o >= \"18\"^^<http://www.w3.org/2001/XMLSchema#integer>) }".into(),
         issuers: vec![],
@@ -2307,6 +2329,7 @@ fn filter_reject_comparison_substitution_17_vs_18() {
 fn filter_reject_filter_add_on_scan_only() {
     let scan = scan_inputs_for(&credential_graph(), "http://ex/age");
     let m = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o FILTER(?o >= \"18\"^^<http://www.w3.org/2001/XMLSchema#integer>) }".into(),
         issuers: vec![],
@@ -2340,6 +2363,7 @@ fn filter_reject_filter_add_on_scan_only() {
 fn filter_reject_constant_swap_age_as_salary() {
     let scan = scan_inputs_for(&credential_graph(), "http://ex/age");
     let m = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/salary> ?o }".into(),
         issuers: vec![],
@@ -2388,6 +2412,7 @@ fn filter_reject_operand_slot_substitution() {
         *operand_enc = salary_operand;
     }
     let m = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?p WHERE { ?p <http://ex/hasSalary> ?sal . ?p <http://ex/hasAge> ?age FILTER(?age >= \"65\"^^<http://www.w3.org/2001/XMLSchema#integer>) }".into(),
         issuers: vec![],
@@ -2437,6 +2462,7 @@ fn filter_reject_false_verdict_row() {
         *operand_enc = scan_operand;
     }
     let m = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o FILTER(?o >= \"18\"^^<http://www.w3.org/2001/XMLSchema#integer>) }".into(),
         issuers: vec![],
@@ -2473,6 +2499,7 @@ fn filter_reject_false_verdict_row() {
 fn filter_reject_unbindable_filter_fragment() {
     let scan = scan_inputs_for(&credential_graph(), "http://ex/age");
     let m = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o FILTER(?o >= \"18\") }".into(),
         issuers: vec![],
@@ -2515,6 +2542,7 @@ fn filter_binding_happy_path_structure() {
         *operand_enc = scan_operand;
     }
     let mut m = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o FILTER(?o >= \"18\"^^<http://www.w3.org/2001/XMLSchema#integer>) }".into(),
         issuers: vec![],
@@ -2583,6 +2611,7 @@ fn filter_reject_unproven_failing_row() {
         *operand_enc = rows[0][2].clone();
     }
     let m = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o FILTER(?o >= \"18\"^^<http://www.w3.org/2001/XMLSchema#integer>) }".into(),
         issuers: vec![],
@@ -2636,6 +2665,7 @@ fn filter_two_rows_both_gated_verifies() {
         *operand_enc = rows[1][2].clone();
     }
     let mut m = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o FILTER(?o >= \"15\"^^<http://www.w3.org/2001/XMLSchema#integer>) }".into(),
         issuers: vec![],
@@ -2700,6 +2730,7 @@ fn scan_only_manifest(graph: &[Triple], salt_byte: u8) -> (ProofManifest, Fr, Fr
     };
     let scan = build_scan(&[commit], &pattern).expect("scan builds");
     let m = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
         issuers: vec![],
@@ -2848,6 +2879,7 @@ fn issuer_reject_drop_triple_recommit_suppression() {
     };
     let scan = build_scan(&[trunc_commit], &pattern).expect("scan builds");
     let m = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
         issuers: vec![],
@@ -3166,6 +3198,7 @@ fn cross_graph_manifest(
     let scan_role = build_scan(&commits, &role_pat).expect("role scan builds");
 
     let mut m = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?x WHERE { ?x <http://ex/age> ?a . ?x <http://ex/role> ?r }".into(),
         issuers: vec![],
@@ -3798,9 +3831,10 @@ fn revocation_reference_mismatch_rejected() {
     // matching unset snapshot for the lied-about index, so the only fault is the
     // reference mismatch.
     m.revocation = Some(RevocationStatus {
-        status_list: FIXTURE_STATUS_LIST.to_string(),
+        ref_commitment: None,
+        status_list: Some(FIXTURE_STATUS_LIST.to_string()),
         index: Some(5),
-        version: FIXTURE_STATUS_VERSION,
+        version: Some(FIXTURE_STATUS_VERSION),
         index_commitment: None,
     });
     m.status_snapshots = vec![StatusListSnapshot {
@@ -3837,6 +3871,7 @@ fn revocation_stale_status_list_rejected() {
     let old_version = 1u64;
     let att = attest_with_status(c, salt, FIXTURE_STATUS_LIST, FIXTURE_STATUS_INDEX, old_version, &sk);
     let m = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
         issuers: vec![],
@@ -3850,9 +3885,10 @@ fn revocation_stale_status_list_rejected() {
         // Disclose the (issuer-signed) old-version reference + a non-revoked
         // snapshot at that old version.
         revocation: Some(RevocationStatus {
-            status_list: FIXTURE_STATUS_LIST.to_string(),
+            ref_commitment: None,
+            status_list: Some(FIXTURE_STATUS_LIST.to_string()),
             index: Some(FIXTURE_STATUS_INDEX),
-            version: old_version,
+            version: Some(old_version),
             index_commitment: None,
         }),
         status_snapshots: vec![StatusListSnapshot {
@@ -4035,6 +4071,7 @@ fn revocation_within_window_verifies() {
     let ver = 3u64; // issuer-signed version 3
     let att = attest_with_status(c, salt, FIXTURE_STATUS_LIST, FIXTURE_STATUS_INDEX, ver, &sk);
     let m = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
         issuers: vec![],
@@ -4046,9 +4083,10 @@ fn revocation_within_window_verifies() {
         derivation_steps: vec![],
         binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
         revocation: Some(RevocationStatus {
-            status_list: FIXTURE_STATUS_LIST.to_string(),
+            ref_commitment: None,
+            status_list: Some(FIXTURE_STATUS_LIST.to_string()),
             index: Some(FIXTURE_STATUS_INDEX),
-            version: ver,
+            version: Some(ver),
             index_commitment: None,
         }),
         status_snapshots: vec![StatusListSnapshot {
@@ -4220,6 +4258,7 @@ fn hidden_scan_manifest(prover: &CircuitProver, tag: &str) -> (ProofManifest, Fr
     let out = scratch(tag);
     let art = prover.prove_in(&id, &toml, &out, tag).unwrap();
     let mut manifest = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
         issuers: vec!["did:key:zSampleIssuer".into()],
@@ -4311,6 +4350,7 @@ fn committed_index_without_hidden_revocation_rejected() {
     let ic = fixture_index_commitment();
     let sk = test_issuer_sk(1);
     let mut m = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
         issuers: vec![],
@@ -4359,6 +4399,7 @@ fn committed_index_disclosed_commitment_mismatch_rejected() {
     assert_ne!(signed_ic, disclosed_ic);
     let sk = test_issuer_sk(1);
     let mut m = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
         issuers: vec![],
@@ -4546,6 +4587,780 @@ fn hidden_revocation_forged_root_rejected() {
 }
 
 // ===========================================================================
+// [OPUS-5] sq-kndw (#2992, the deferred remainder of sq-6qe): FULLY-HIDDEN
+// REVOCATION. The privacy upgrade over the sq-ayv committed-index path: the
+// status-list IRI and the VERSION are hidden too, so a presentation discloses
+// NOTHING holder-identifying about its revocation status -- only that SOME
+// (list, version) in the relying party's committed accepted set, at or above its
+// public epoch floor, has the issuer-committed index unset.
+//
+// The member is `revoke_hidden_ref_d10_a4`; public inputs are
+// (challenge, ref_commitment, index_commitment, accepted_set_root, min_version).
+// The verifier derives BOTH anchors from its OWN curated policy and rebuilds the
+// public-input vector from them, so the prover chooses neither.
+//
+// NOT externally audited (sq-qhy4); no soundness / privacy property is asserted.
+// ===========================================================================
+
+/// The accepted-set Merkle depth the fixtures use (matches `revoke_hidden_ref_d10_a4`).
+const FH_SET_DEPTH: u32 = 4;
+/// The per-credential ref-commitment blinding the fixtures use. In production this
+/// is OS-random and RE-SAMPLED PER PRESENTATION (with a fresh issuer signature) --
+/// a reused pair is a cross-presentation linkage handle (design sec 4).
+fn fixture_ref_blinding() -> Fr {
+    Fr::from(0x00fe_ed5e_c0de_u64)
+}
+
+/// The fixture credential's hiding (list, version) reference commitment.
+fn fixture_ref_commitment() -> Fr {
+    let list_id = sparq_zk::sig::status_list_id_to_field(FIXTURE_STATUS_LIST);
+    sparq_zk::sig::status_ref_commitment(&list_id, FIXTURE_STATUS_VERSION, &fixture_ref_blinding())
+}
+
+/// The relying party's FULLY-HIDDEN policy: the same authoritative snapshot the
+/// hidden-index fixtures use, plus the accepted-set anchor depth. `min_version` is
+/// pinned explicitly so the public epoch floor is a stable policy constant rather
+/// than a rolling window (it is a PUBLIC input of every proof).
+fn fully_hidden_policy(revoked: bool) -> RevocationPolicy {
+    RevocationPolicy::accept_version(FIXTURE_STATUS_VERSION)
+        .with_snapshot(hidden_snapshot(revoked))
+        .with_hidden_index_depth(HIDDEN_DEPTH)
+        .with_accepted_set_depth(FH_SET_DEPTH)
+        .with_min_version(FIXTURE_STATUS_VERSION)
+}
+
+/// A FULLY-HIDDEN `RevocationStatus`: no list IRI, no index, no version -- only the
+/// two hiding commitments the issuer signed.
+fn fixture_revocation_fully_hidden(ref_commitment: &Fr, index_commitment: &Fr) -> RevocationStatus {
+    RevocationStatus::fully_hidden(ref_commitment, index_commitment)
+}
+
+/// A salt- AND FULLY-COMMITTED-STATUS-bound attestation: the issuer signs
+/// `(commitment, salt, status_ref_fully_committed_digest(ref_commitment,
+/// index_commitment))` -- a digest folding NEITHER a clear list id NOR a clear
+/// version, so neither appears in any signed object or disclosed field.
+fn attest_with_status_fully_hidden(
+    commitment: Fr,
+    salt: Fr,
+    ref_commitment: &Fr,
+    index_commitment: &Fr,
+    sk: &SecretKey,
+) -> CommitmentAttestation {
+    let status_ref =
+        sparq_zk::sig::status_ref_fully_committed_digest(ref_commitment, index_commitment);
+    CommitmentAttestation {
+        commitment: FieldHex::from_field(&commitment),
+        issuer_public_key: public_key_to_hex(&sk.public_key()),
+        signature: sk.sign_commitment_with_status(&commitment, &salt, &status_ref),
+        cryptosuite: SignatureScheme::Poseidon2SchnorrV1.cryptosuite_iri().to_string(),
+        salt: Some(FieldHex::from_field(&salt)),
+        status: Some(AttestedStatusRef::fully_hidden(ref_commitment, index_commitment)),
+        holder: None,
+    }
+}
+
+/// Attach fully-hidden attestations for every scan commitment, disclosing `sk` in K.
+fn attest_all_fully_hidden(
+    m: &mut ProofManifest,
+    sk: &SecretKey,
+    salt: Fr,
+    ref_commitment: &Fr,
+    index_commitment: &Fr,
+) {
+    let pk_hex = public_key_to_hex(&sk.public_key());
+    let mut seen = std::collections::BTreeSet::new();
+    for c in scan_commitments(m) {
+        let key = sparq_zk::field::field_to_hex(&c);
+        if seen.insert(key) {
+            m.commitment_attestations.push(attest_with_status_fully_hidden(
+                c,
+                salt,
+                ref_commitment,
+                index_commitment,
+                sk,
+            ));
+        }
+    }
+    if !m.key_set.contains(&pk_hex) {
+        m.key_set.push(pk_hex);
+    }
+}
+
+/// Build a complete, attested age-scan manifest carrying a FULLY-HIDDEN reference.
+/// Mirrors `hidden_scan_manifest`, but the attestation binds the fully-committed
+/// digest and the disclosed reference withholds the IRI + version as well.
+fn fully_hidden_scan_manifest(
+    prover: &CircuitProver,
+    tag: &str,
+    challenge_hex: &str,
+) -> (ProofManifest, Fr) {
+    let salt = salt_from_bytes(&[7u8; 32]);
+    let commit = commit_triples(&credential_graph(), salt).unwrap();
+    let pattern = Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(iri("http://ex/age"))),
+        o: Slot::Var,
+    };
+    let scan = build_scan(&[commit], &pattern).unwrap();
+    let challenge = FieldHex(challenge_hex.into());
+    let (id, toml) = prover_toml_for(
+        &scan.inputs,
+        &challenge,
+        &scan.witness.counts,
+        &scan.witness.enc,
+        &[], None, None,
+    )
+    .unwrap();
+    let out = scratch(tag);
+    let art = prover.prove_in(&id, &toml, &out, tag).unwrap();
+    let rc = fixture_ref_commitment();
+    let ic = fixture_index_commitment();
+    let mut manifest = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
+        issuers: vec!["did:key:zSampleIssuer".into()],
+        key_set: vec![],
+        commitment_attestations: vec![],
+        attributions: vec![vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
+        binding: BindingMode::Challenge { challenge },
+        revocation: Some(fixture_revocation_fully_hidden(&rc, &ic)),
+        // NOTE: no status_snapshots -- a fully-hidden presentation cannot disclose
+        // one without naming (list, version), which is exactly what it hides.
+        status_snapshots: vec![],
+        sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: encode_artifacts(&art) }],
+        binding_edges: vec![],
+        join_edges: vec![],
+        hidden_revocation: None,
+        fully_hidden_revocation: None,
+        hidden_issuer_attestations: vec![],
+        holder_pok_proofs: vec![],
+        holder_set_proofs: vec![],
+    };
+    attest_all_fully_hidden(&mut manifest, &test_issuer_sk(1), salt, &rc, &ic);
+    (manifest, salt)
+}
+
+/// Prove `revoke_hidden_ref_d10_a4` for the fixture credential against `policy`'s
+/// accepted set, returning the assembled [`FullyHiddenRevocation`] manifest field.
+fn prove_fully_hidden_revocation(
+    prover: &CircuitProver,
+    policy: &RevocationPolicy,
+    snapshot: &StatusListSnapshot,
+    index: u64,
+    challenge: &Fr,
+    tag: &str,
+) -> FullyHiddenRevocation {
+    let entries = policy.accepted_entries().expect("policy derives accepted entries");
+    let witness = hidden_ref_witness(&entries, FH_SET_DEPTH, snapshot, HIDDEN_DEPTH, index)
+        .expect("the fixture (list, version) is a curated accepted-set member");
+    let rc = fixture_ref_commitment();
+    let ic = sparq_zk::sig::status_index_commitment(index, &fixture_blinding());
+    let anchor = policy.accepted_set_root().expect("policy derives the accepted-set root");
+    let list_id = sparq_zk::sig::status_list_id_to_field(&snapshot.status_list);
+    let toml = revoke_hidden_ref_prover_toml(
+        challenge,
+        &rc,
+        &ic,
+        &anchor,
+        policy.min_version(),
+        &list_id,
+        snapshot.version,
+        &fixture_ref_blinding(),
+        index,
+        &fixture_blinding(),
+        &witness,
+    );
+    let id = CircuitId::RevokeHiddenRef { depth: HIDDEN_DEPTH, set_depth: FH_SET_DEPTH };
+    let out = scratch(tag);
+    let art = prover
+        .prove_in(&id, &toml, &out, tag)
+        .expect("fully-hidden revocation prove succeeds");
+    FullyHiddenRevocation {
+        depth: HIDDEN_DEPTH,
+        set_depth: FH_SET_DEPTH,
+        ref_commitment: FieldHex::from_field(&rc),
+        index_commitment: FieldHex::from_field(&ic),
+        accepted_set_root: FieldHex::from_field(&anchor),
+        min_version: policy.min_version(),
+        proof_hex: encode_artifacts(&art),
+    }
+}
+
+/// HAPPY PATH (real bb prove + verify). A fully-hidden presentation VERIFIES, and
+/// the manifest JSON discloses NEITHER the status-list IRI, NOR the version, NOR
+/// the index, NOR any status snapshot.
+///
+/// This is also the EMPIRICAL ANCHOR for the public-input layout that
+/// `bind_fully_hidden_revocation` reconstructs by hand: five 32-byte BE field
+/// words in `main()` declaration order, with the `u64` `min_version` serialized as
+/// a field element like every other input. A field-order / arity / integer-encoding
+/// slip in the reconstruction fails here.
+#[test]
+#[ignore = "slow: full bb prove of a scan + a fully-hidden revocation proof"]
+fn full_manifest_fully_hidden_revocation() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping fully-hidden revocation e2e");
+        return;
+    }
+    let prover = CircuitProver::from_crate_root();
+    let (mut manifest, _salt) = fully_hidden_scan_manifest(&prover, "fh_scan", "0x2a");
+    let policy = fully_hidden_policy(false);
+    manifest.fully_hidden_revocation = Some(prove_fully_hidden_revocation(
+        &prover,
+        &policy,
+        &hidden_snapshot(false),
+        FIXTURE_STATUS_INDEX,
+        &Fr::from(0x2au64),
+        "fh_revoke",
+    ));
+
+    // DISCLOSURE FLOOR: the serialized manifest must not name the list, the
+    // version, or the index anywhere.
+    let json = manifest.to_json();
+    assert!(
+        !json.contains(FIXTURE_STATUS_LIST),
+        "a fully-hidden presentation must not disclose the status-list IRI:\n{json}"
+    );
+    assert!(
+        !json.contains("\"status_list\""),
+        "a fully-hidden presentation must not carry a status_list field"
+    );
+    assert!(
+        !json.contains("\"version\""),
+        "a fully-hidden presentation must not carry a version field"
+    );
+    assert!(
+        !json.contains("\"index\""),
+        "a fully-hidden presentation must not carry a clear index field"
+    );
+
+    verify_manifest(
+        &manifest,
+        &prover,
+        &scratch("fh_verify"),
+        &trusted_k(&test_issuer_sk(1)),
+        &policy,
+        &HolderRegistry::empty(),
+        &HolderBindingPolicy::allow_bearer(),
+        &EntailmentPolicy::simple_only(),
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    )
+    .expect("a well-formed fully-hidden revocation presentation verifies");
+}
+
+/// A REVOKED credential cannot even PRODUCE the proof: the in-circuit `bit == 0`
+/// assertion is unsatisfiable. The liveness fact is cryptographic, not advisory.
+#[test]
+#[ignore = "slow: full bb prove attempt of a revoked fully-hidden proof"]
+fn fully_hidden_revocation_revoked_credential_unprovable() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping revoked fully-hidden case");
+        return;
+    }
+    let prover = CircuitProver::from_crate_root();
+    let policy = fully_hidden_policy(true); // authoritative snapshot has the bit SET
+    let snapshot = hidden_snapshot(true);
+    let entries = policy.accepted_entries().expect("entries");
+    let witness = hidden_ref_witness(&entries, FH_SET_DEPTH, &snapshot, HIDDEN_DEPTH, FIXTURE_STATUS_INDEX)
+        .expect("witness");
+    let rc = fixture_ref_commitment();
+    let ic = fixture_index_commitment();
+    let anchor = policy.accepted_set_root().expect("anchor");
+    let list_id = sparq_zk::sig::status_list_id_to_field(FIXTURE_STATUS_LIST);
+    let toml = revoke_hidden_ref_prover_toml(
+        &Fr::from(0x2au64), &rc, &ic, &anchor, policy.min_version(),
+        &list_id, FIXTURE_STATUS_VERSION, &fixture_ref_blinding(),
+        FIXTURE_STATUS_INDEX, &fixture_blinding(), &witness,
+    );
+    let id = CircuitId::RevokeHiddenRef { depth: HIDDEN_DEPTH, set_depth: FH_SET_DEPTH };
+    let out = scratch("fh_revoked");
+    assert!(
+        prover.prove_in(&id, &toml, &out, "fh_revoked").is_err(),
+        "a REVOKED credential's fully-hidden proof must be unprovable (the in-circuit bit==0 assertion fails)"
+    );
+}
+
+/// FORGED ANCHOR: a prover proves membership in its OWN accepted set (one whose
+/// single entry is an all-active forged list) and declares that root. The verifier
+/// rebuilds the anchor from ITS OWN curated policy and rejects -- the liveness fact
+/// must bind to the relying party's authenticated bytes, exactly as on the
+/// committed-index path. This is the sq-kndw analogue of
+/// `hidden_revocation_forged_root_rejected`.
+#[test]
+#[ignore = "slow: full bb prove of a scan + a forged-anchor fully-hidden proof"]
+fn fully_hidden_revocation_forged_anchor_rejected() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping fully-hidden forged-anchor case");
+        return;
+    }
+    let prover = CircuitProver::from_crate_root();
+    let (mut manifest, _salt) = fully_hidden_scan_manifest(&prover, "fh_scan_forge", "0x2a");
+    // The prover's OWN policy over a FORGED all-active status list -- same (list,
+    // version), different bits, hence a different status-list root and a different
+    // accepted-set root.
+    let forged_snapshot = StatusListSnapshot {
+        status_list: FIXTURE_STATUS_LIST.to_string(),
+        version: FIXTURE_STATUS_VERSION,
+        bits: vec![0u8; 128],
+    };
+    let forged_policy = RevocationPolicy::accept_version(FIXTURE_STATUS_VERSION)
+        .with_snapshot(forged_snapshot.clone())
+        .with_hidden_index_depth(HIDDEN_DEPTH)
+        .with_accepted_set_depth(FH_SET_DEPTH)
+        .with_min_version(FIXTURE_STATUS_VERSION);
+    let honest_policy = fully_hidden_policy(false);
+    assert_ne!(
+        forged_policy.accepted_set_root().unwrap(),
+        honest_policy.accepted_set_root().unwrap(),
+        "the forged accepted set must have a different root than the authoritative one"
+    );
+    manifest.fully_hidden_revocation = Some(prove_fully_hidden_revocation(
+        &prover, &forged_policy, &forged_snapshot, FIXTURE_STATUS_INDEX,
+        &Fr::from(0x2au64), "fh_forge",
+    ));
+    match verify_manifest(
+        &manifest,
+        &prover,
+        &scratch("fh_verify_forge"),
+        &trusted_k(&test_issuer_sk(1)),
+        &honest_policy,
+        &HolderRegistry::empty(),
+        &HolderBindingPolicy::allow_bearer(),
+        &EntailmentPolicy::simple_only(),
+        &nonce_for("0x2a"),
+        &InMemorySeenNonces::new(),
+    ) {
+        Err(CheckError::FullyHiddenRevocationAnchorMismatch) => {}
+        other => panic!(
+            "a forged-anchor fully-hidden proof must be FullyHiddenRevocationAnchorMismatch, got {other:?}"
+        ),
+    }
+}
+
+/// RE-BLINDING ENFORCEMENT (design sec 4, the single most important operational
+/// requirement). Two presentations under DIFFERENT verifier nonces but the SAME
+/// (ref_commitment, index_commitment) pair -- i.e. a holder that did NOT re-blind
+/// -- are rejected on the second, against a shared single-use store. Without this
+/// the pair is a perfect cross-presentation correlation handle and the whole mode
+/// buys nothing.
+#[test]
+#[ignore = "slow: two full bb proves of a scan + fully-hidden revocation proof"]
+fn fully_hidden_revocation_linkage_reuse_rejected() {
+    if !toolchain_available() {
+        eprintln!("nargo/bb absent; skipping fully-hidden linkage-reuse case");
+        return;
+    }
+    let prover = CircuitProver::from_crate_root();
+    let policy = fully_hidden_policy(false);
+    let seen = InMemorySeenNonces::new();
+    let verify_under = |challenge_hex: &str, tag: &str| {
+        let (mut manifest, _salt) =
+            fully_hidden_scan_manifest(&prover, &format!("{tag}_scan"), challenge_hex);
+        let challenge = FieldHex(challenge_hex.into()).to_field().unwrap();
+        manifest.fully_hidden_revocation = Some(prove_fully_hidden_revocation(
+            &prover, &policy, &hidden_snapshot(false), FIXTURE_STATUS_INDEX, &challenge, tag,
+        ));
+        verify_manifest(
+            &manifest,
+            &prover,
+            &scratch(&format!("{tag}_verify")),
+            &trusted_k(&test_issuer_sk(1)),
+            &policy,
+            &HolderRegistry::empty(),
+            &HolderBindingPolicy::allow_bearer(),
+            &EntailmentPolicy::simple_only(),
+            &nonce_for(challenge_hex),
+            &seen,
+        )
+    };
+    verify_under("0x2a", "fh_link1").expect("the first presentation verifies");
+    match verify_under("0x2b", "fh_link2") {
+        Err(CheckError::FullyHiddenRevocationLinkageReplay) => {}
+        other => panic!(
+            "re-presenting the SAME (ref_commitment, index_commitment) pair under a fresh nonce must be FullyHiddenRevocationLinkageReplay (the holder must re-blind), got {other:?}"
+        ),
+    }
+}
+
+// --- structural (no bb) fully-hidden gates --------------------------------
+
+/// A minimal fully-hidden manifest with an unattested, empty scan -- enough to
+/// reach the structural revocation gates without proving.
+fn fh_structural_manifest(rev: RevocationStatus) -> ProofManifest {
+    let salt = salt_from_bytes(&[7u8; 32]);
+    let commit = commit_triples(&credential_graph(), salt).unwrap();
+    let pattern = Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(iri("http://ex/age"))),
+        o: Slot::Var,
+    };
+    let scan = build_scan(&[commit], &pattern).expect("scan builds");
+    let sk = test_issuer_sk(1);
+    let rc = fixture_ref_commitment();
+    let ic = fixture_index_commitment();
+    let mut m = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
+        issuers: vec![],
+        key_set: vec![],
+        commitment_attestations: vec![],
+        attributions: vec![vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
+        binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
+        revocation: Some(rev),
+        status_snapshots: vec![],
+        sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
+        binding_edges: vec![],
+        join_edges: vec![],
+        hidden_revocation: None,
+        fully_hidden_revocation: None,
+        hidden_issuer_attestations: vec![],
+        holder_pok_proofs: vec![],
+        holder_set_proofs: vec![],
+    };
+    attest_all_fully_hidden(&mut m, &sk, salt, &rc, &ic);
+    m
+}
+
+/// FAIL-CLOSED, never-skip-revocation: a FULLY-HIDDEN reference with a valid
+/// attestation but NO `fully_hidden_revocation` proof is REJECTED. That mode moves
+/// the entire liveness decision into the proof, so accepting without it would
+/// leave revocation unchecked.
+#[test]
+fn fully_hidden_reference_without_proof_rejected() {
+    let m = fh_structural_manifest(RevocationStatus::fully_hidden(
+        &fixture_ref_commitment(),
+        &fixture_index_commitment(),
+    ));
+    match prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)), &fully_hidden_policy(false)) {
+        Err(CheckError::FullyHiddenRevocationRequired) => {}
+        other => panic!(
+            "a fully-hidden reference without its proof must be FullyHiddenRevocationRequired, got {other:?}"
+        ),
+    }
+}
+
+/// A fully-hidden reference that ALSO discloses the clear list IRI (or version, or
+/// index) is a malformed mode: the fully-committed digest does not cover those
+/// fields, so they would be unbound prover metadata. Rejected.
+#[test]
+fn fully_hidden_reference_with_disclosed_clear_fields_rejected() {
+    let rc = fixture_ref_commitment();
+    let ic = fixture_index_commitment();
+    for (label, rev) in [
+        (
+            "list IRI disclosed",
+            RevocationStatus {
+                status_list: Some(FIXTURE_STATUS_LIST.to_string()),
+                index: None,
+                version: None,
+                index_commitment: Some(FieldHex::from_field(&ic)),
+                ref_commitment: Some(FieldHex::from_field(&rc)),
+            },
+        ),
+        (
+            "version disclosed",
+            RevocationStatus {
+                status_list: None,
+                index: None,
+                version: Some(FIXTURE_STATUS_VERSION),
+                index_commitment: Some(FieldHex::from_field(&ic)),
+                ref_commitment: Some(FieldHex::from_field(&rc)),
+            },
+        ),
+        (
+            "clear index disclosed",
+            RevocationStatus {
+                status_list: None,
+                index: Some(FIXTURE_STATUS_INDEX),
+                version: None,
+                index_commitment: Some(FieldHex::from_field(&ic)),
+                ref_commitment: Some(FieldHex::from_field(&rc)),
+            },
+        ),
+    ] {
+        let m = fh_structural_manifest(rev);
+        match prefilter_manifest_structure(
+            &m,
+            &trusted_k(&test_issuer_sk(1)),
+            &fully_hidden_policy(false),
+        ) {
+            Err(CheckError::RevocationReferenceModeInvalid { .. }) => {}
+            other => panic!(
+                "a fully-hidden reference with {label} must be RevocationReferenceModeInvalid, got {other:?}"
+            ),
+        }
+    }
+}
+
+/// DISCLOSURE FLOOR: a fully-hidden presentation that ALSO attaches a status-list
+/// snapshot is REJECTED. The snapshot names its `(status_list, version)` in the
+/// clear -- exactly what the mode hides -- so a buggy holder implementation cannot
+/// silently leak the credential's list + epoch by attaching one "for completeness".
+#[test]
+fn fully_hidden_reference_with_prover_snapshot_rejected() {
+    let mut m = fh_structural_manifest(RevocationStatus::fully_hidden(
+        &fixture_ref_commitment(),
+        &fixture_index_commitment(),
+    ));
+    m.fully_hidden_revocation = Some(FullyHiddenRevocation {
+        depth: HIDDEN_DEPTH,
+        set_depth: FH_SET_DEPTH,
+        ref_commitment: FieldHex::from_field(&fixture_ref_commitment()),
+        index_commitment: FieldHex::from_field(&fixture_index_commitment()),
+        accepted_set_root: FieldHex::from_field(
+            &fully_hidden_policy(false).accepted_set_root().unwrap(),
+        ),
+        min_version: FIXTURE_STATUS_VERSION,
+        proof_hex: String::new(),
+    });
+    m.status_snapshots = vec![hidden_snapshot(false)];
+    match prefilter_manifest_structure(
+        &m,
+        &trusted_k(&test_issuer_sk(1)),
+        &fully_hidden_policy(false),
+    ) {
+        Err(CheckError::FullyHiddenRevocationSnapshotDisclosed) => {}
+        other => panic!(
+            "a fully-hidden presentation carrying a prover snapshot must be FullyHiddenRevocationSnapshotDisclosed, got {other:?}"
+        ),
+    }
+}
+
+/// A `fully_hidden_revocation` proof attached to a NON-fully-hidden reference has
+/// no issuer-signed commitments to cross-bind to. Rejected rather than ignored.
+#[test]
+fn fully_hidden_proof_without_fully_hidden_reference_rejected() {
+    let ic = fixture_index_commitment();
+    let salt = salt_from_bytes(&[7u8; 32]);
+    let commit = commit_triples(&credential_graph(), salt).unwrap();
+    let pattern = Pattern {
+        s: Slot::Var,
+        p: Slot::Const(Term::NamedNode(iri("http://ex/age"))),
+        o: Slot::Var,
+    };
+    let scan = build_scan(&[commit], &pattern).expect("scan builds");
+    let mut m = ProofManifest {
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
+        issuers: vec![],
+        key_set: vec![],
+        commitment_attestations: vec![],
+        attributions: vec![vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
+        binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
+        revocation: Some(fixture_revocation_committed(&ic)),
+        status_snapshots: vec![],
+        sub_proofs: vec![SubProof { inputs: scan.inputs, proof_hex: String::new() }],
+        binding_edges: vec![],
+        join_edges: vec![],
+        hidden_revocation: None,
+        fully_hidden_revocation: Some(FullyHiddenRevocation {
+            depth: HIDDEN_DEPTH,
+            set_depth: FH_SET_DEPTH,
+            ref_commitment: FieldHex::from_field(&fixture_ref_commitment()),
+            index_commitment: FieldHex::from_field(&ic),
+            accepted_set_root: FieldHex::from_field(&Fr::from(0u64)),
+            min_version: FIXTURE_STATUS_VERSION,
+            proof_hex: String::new(),
+        }),
+        hidden_issuer_attestations: vec![],
+        holder_pok_proofs: vec![],
+        holder_set_proofs: vec![],
+    };
+    attest_all_committed(&mut m, &test_issuer_sk(1), salt, &ic);
+    match prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)), &fully_hidden_policy(false)) {
+        Err(CheckError::FullyHiddenRevocationUnbound) => {}
+        other => panic!(
+            "a fully-hidden proof without a fully-hidden reference must be FullyHiddenRevocationUnbound, got {other:?}"
+        ),
+    }
+}
+
+/// `derive_revoke_hidden_ref_id` is EXACT-match against the compiled family: an
+/// uncompiled `(depth, set_depth)` derives `None` (fail-closed, no wrong bucket),
+/// and the compiled one names the on-disk package.
+#[test]
+fn revoke_hidden_ref_member_family_is_exact_match() {
+    use sparq_zk_compose::build::derive_revoke_hidden_ref_id;
+    assert_eq!(
+        derive_revoke_hidden_ref_id(HIDDEN_DEPTH, FH_SET_DEPTH),
+        Some(CircuitId::RevokeHiddenRef { depth: HIDDEN_DEPTH, set_depth: FH_SET_DEPTH })
+    );
+    assert_eq!(
+        CircuitId::RevokeHiddenRef { depth: 10, set_depth: 4 }.package(),
+        "revoke_hidden_ref_d10_a4"
+    );
+    for (d, a) in [(10u32, 5u32), (9, 4), (17, 4), (0, 0)] {
+        assert_eq!(
+            derive_revoke_hidden_ref_id(d, a),
+            None,
+            "an uncompiled ({d}, {a}) member must derive None, never a wrong bucket"
+        );
+    }
+}
+
+/// The prover's `hidden_ref_witness` FOLDS to the relying party's accepted-set
+/// anchor -- the host-side half of the in-circuit membership relation. And it is
+/// FAIL-CLOSED on the three ways it can be inconsistent.
+#[test]
+fn hidden_ref_witness_folds_to_the_policy_anchor_and_fails_closed() {
+    let policy = fully_hidden_policy(false);
+    let entries = policy.accepted_entries().expect("entries");
+    let snapshot = hidden_snapshot(false);
+    let w = hidden_ref_witness(&entries, FH_SET_DEPTH, &snapshot, HIDDEN_DEPTH, FIXTURE_STATUS_INDEX)
+        .expect("the fixture (list, version) is a curated member");
+
+    // Re-fold the accepted-set path exactly as the circuit does and require the
+    // relying party's anchor.
+    let leaf = sparq_zk::sig::accepted_status_leaf(
+        &sparq_zk::sig::status_list_id_to_field(FIXTURE_STATUS_LIST),
+        FIXTURE_STATUS_VERSION,
+        &w.status_list_root,
+    );
+    let mut node = leaf;
+    let mut pos = w.set_index;
+    for sib in &w.set_siblings {
+        node = if pos & 1 == 1 {
+            sparq_zk::poseidon2::hash(&[*sib, node])
+        } else {
+            sparq_zk::poseidon2::hash(&[node, *sib])
+        };
+        pos >>= 1;
+    }
+    assert_eq!(
+        node,
+        accepted_set_root(&entries, FH_SET_DEPTH).unwrap(),
+        "the prover's membership path must fold to the relying party's accepted-set root"
+    );
+    assert_eq!(
+        node,
+        policy.accepted_set_root().unwrap(),
+        "and that root must be the policy's own derived anchor"
+    );
+
+    // FAIL-CLOSED (a): a (list, version) that is not a curated member.
+    let stranger = StatusListSnapshot {
+        status_list: "http://ex/status/other".to_string(),
+        version: FIXTURE_STATUS_VERSION,
+        bits: vec![0u8],
+    };
+    assert_eq!(
+        hidden_ref_witness(&entries, FH_SET_DEPTH, &stranger, HIDDEN_DEPTH, FIXTURE_STATUS_INDEX),
+        None,
+        "a non-member (list, version) must not yield a witness"
+    );
+    // FAIL-CLOSED (b): the prover's bitstring disagrees with the entry's root.
+    let divergent = StatusListSnapshot {
+        status_list: FIXTURE_STATUS_LIST.to_string(),
+        version: FIXTURE_STATUS_VERSION,
+        bits: vec![0u8; 128],
+    };
+    assert_eq!(
+        hidden_ref_witness(&entries, FH_SET_DEPTH, &divergent, HIDDEN_DEPTH, FIXTURE_STATUS_INDEX),
+        None,
+        "a snapshot whose root disagrees with the accepted entry must not yield a witness"
+    );
+    // FAIL-CLOSED (c): an out-of-range index.
+    assert_eq!(
+        hidden_ref_witness(&entries, FH_SET_DEPTH, &snapshot, HIDDEN_DEPTH, 1u64 << HIDDEN_DEPTH),
+        None,
+        "an out-of-range index must not yield a witness"
+    );
+}
+
+/// The `Prover.toml` renderer emits EXACTLY the member's parameter names in
+/// `main()` DECLARATION order -- the order the verifier reconstructs public inputs
+/// in. A reorder here is a silent verification break, so it is pinned.
+#[test]
+fn revoke_hidden_ref_prover_toml_shape_matches_main_declaration_order() {
+    let policy = fully_hidden_policy(false);
+    let entries = policy.accepted_entries().expect("entries");
+    let snapshot = hidden_snapshot(false);
+    let w = hidden_ref_witness(&entries, FH_SET_DEPTH, &snapshot, HIDDEN_DEPTH, FIXTURE_STATUS_INDEX)
+        .expect("witness");
+    let toml = revoke_hidden_ref_prover_toml(
+        &Fr::from(0x2au64),
+        &fixture_ref_commitment(),
+        &fixture_index_commitment(),
+        &policy.accepted_set_root().unwrap(),
+        policy.min_version(),
+        &sparq_zk::sig::status_list_id_to_field(FIXTURE_STATUS_LIST),
+        FIXTURE_STATUS_VERSION,
+        &fixture_ref_blinding(),
+        FIXTURE_STATUS_INDEX,
+        &fixture_blinding(),
+        &w,
+    );
+    let keys: Vec<&str> = toml
+        .lines()
+        .filter_map(|l| l.split('=').next())
+        .map(|k| k.trim())
+        .filter(|k| !k.is_empty())
+        .collect();
+    assert_eq!(
+        keys,
+        vec![
+            // public, in main() declaration order
+            "challenge", "ref_commitment", "index_commitment", "accepted_set_root", "min_version",
+            // private
+            "list_id", "version", "ref_blinding", "status_list_root", "set_index", "set_siblings",
+            "index", "bit", "blinding", "siblings",
+        ],
+        "Prover.toml key order must match revoke_hidden_ref_d10_a4/src/main.nr"
+    );
+    // The two integer-typed inputs are rendered as decimal strings (the form nargo
+    // parses for integer types), not 0x-hex.
+    assert!(toml.contains(&format!("min_version = \"{}\"\n", FIXTURE_STATUS_VERSION)));
+    assert!(toml.contains(&format!("version = \"{}\"\n", FIXTURE_STATUS_VERSION)));
+    // The status-list root is PRIVATE -- it must appear as a witness, never as a
+    // public input line.
+    assert!(toml.contains("status_list_root = "));
+}
+
+/// `with_min_version` is ONE floor: it drives `min_version()`, the freshness
+/// window, AND the accepted-set curation together, so the clear path, the anchor,
+/// and the circuit's public input can never disagree.
+#[test]
+fn explicit_min_version_drives_freshness_and_curation_together() {
+    let base = RevocationPolicy::up_to(10, 5)
+        .with_snapshot(StatusListSnapshot {
+            status_list: FIXTURE_STATUS_LIST.to_string(),
+            version: 6,
+            bits: vec![0u8],
+        })
+        .with_hidden_index_depth(HIDDEN_DEPTH)
+        .with_accepted_set_depth(FH_SET_DEPTH);
+    assert_eq!(base.min_version(), 5, "derived floor is now - window");
+    assert_eq!(
+        base.accepted_entries().unwrap().len(),
+        1,
+        "version 6 is inside [5, 10] so it is curated in"
+    );
+    // Raising the floor above the snapshot's version curates it OUT — and the
+    // anchor changes with it, so a proof against the old anchor cannot verify.
+    let tightened = base.clone().with_min_version(7);
+    assert_eq!(tightened.min_version(), 7);
+    assert!(
+        tightened.accepted_entries().unwrap().is_empty(),
+        "version 6 is below the explicit floor 7, so it must be curated OUT"
+    );
+    assert_ne!(
+        base.accepted_set_root(),
+        tightened.accepted_set_root(),
+        "curating an entry out must change the published anchor"
+    );
+}
+
+// ===========================================================================
 // [OPUS-4.8] sq-z9l: HIDDEN-ISSUER ATTESTATION (in-circuit Schnorr-over-
 // Baby-JubJub + hidden-key set membership). The privacy upgrade over the
 // clear-key bind_issuer_attestations: prove a scan-covering commitment was
@@ -4594,6 +5409,7 @@ fn hi_scan_manifest(prover: &CircuitProver, signer_sk: &SecretKey, tag: &str) ->
     let out = scratch(tag);
     let art = prover.prove_in(&id, &toml, &out, tag).unwrap();
     let mut manifest = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
         issuers: vec!["did:key:zSampleIssuer".into()],
@@ -4771,6 +5587,7 @@ fn hi_scan_manifest_no_clear_attestation(
     let out = scratch(tag);
     let art = prover.prove_in(&id, &toml, &out, tag).unwrap();
     let manifest = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/age> ?o }".into(),
         issuers: vec!["did:key:zSampleIssuer".into()],
@@ -5242,6 +6059,7 @@ fn filter_f64_composes_end_to_end() {
     let filter_art = prover.prove_in(&fid, &ftoml, &f_out, "f64_compose_filter").unwrap();
 
     let mut manifest = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://ex/score> ?o }".into(),
         issuers: vec!["did:key:zSampleIssuer".into()],
@@ -5348,6 +6166,7 @@ fn entailment_manifest(regime: EntailmentRegime, steps: Vec<DerivationStep>) -> 
     let scan = build_scan(&[commit], &pattern).expect("scan builds");
 
     let mut m = ProofManifest {
+        fully_hidden_revocation: None,
         r#type: "urn:sparq:zk:ProofManifest".into(),
         query: "SELECT ?s ?o WHERE { ?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> ?o }"
             .into(),
@@ -5457,6 +6276,64 @@ fn entailment_rdfs_ungrounded_antecedent_rejected() {
     }
 }
 
+/// sq-rsd3v.6: an `owl:sameAs` fact may NOT ride the fixed-shape RDFS path.
+///
+/// This is the forge the equality guard exists for, and it is deliberately
+/// SHAPE-VALID: `rdfs7` with `p1 = owl:sameAs` is a legitimate RDFS instance
+/// (`(sameAs subPropertyOf knows), (alice sameAs bob) ⊢ (alice knows bob)`) that
+/// CONSUMES an equality, and both its antecedents are genuinely disclosed by the
+/// scan — so neither `is_well_formed` nor the grounding check would stop it.
+/// Only `EqualityReasoningUnsupported` does. Equality reasoning needs the
+/// separate in-circuit canonicalisation member (`sparq_zk_compose::sameas`),
+/// which nothing dispatches yet; refusing here is the fail-closed direction.
+#[test]
+fn entailment_owl_sameas_step_rejected_from_the_fixed_shape_path() {
+    let sp = enc_iri("http://www.w3.org/2000/01/rdf-schema#subPropertyOf");
+    let same = enc_iri(sparq_zk_compose::sameas::OWL_SAME_AS);
+    let step = DerivationStep {
+        rule: EntailmentRule::Rdfs7SubProperty,
+        antecedents: vec![
+            [same.clone(), sp, enc_iri("http://ex/knows")],
+            [enc_iri("http://ex/alice"), same, enc_iri("http://ex/bob")],
+        ],
+        derived: [
+            enc_iri("http://ex/alice"),
+            enc_iri("http://ex/knows"),
+            enc_iri("http://ex/bob"),
+        ],
+    };
+    let m = entailment_manifest(EntailmentRegime::Rdfs, vec![step]);
+    match run_entailment(&m, &EntailmentPolicy::simple_only().with_rdfs()) {
+        Err(CheckError::EqualityReasoningUnsupported { step: 0 }) => {}
+        other => panic!(
+            "an owl:sameAs derivation step must be EqualityReasoningUnsupported, got {other:?}"
+        ),
+    }
+}
+
+/// sq-rsd3v.6 (the precision half): the guard must not over-fire. An ordinary
+/// `rdfs9` step that mentions NO `owl:sameAs` predicate reaches the ordinary
+/// grounding check — here it is ungrounded, which proves the equality guard let
+/// it past rather than short-circuiting every `Rdfs` manifest.
+#[test]
+fn entailment_equality_guard_leaves_ordinary_rdfs_steps_alone() {
+    let t = enc_iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
+    let sc = enc_iri("http://www.w3.org/2000/01/rdf-schema#subClassOf");
+    let step = DerivationStep {
+        rule: EntailmentRule::Rdfs9SubClassType,
+        antecedents: vec![
+            [enc_iri("http://ex/alice"), t.clone(), enc_iri("http://ex/Student")],
+            [enc_iri("http://ex/Student"), sc, enc_iri("http://ex/Person")],
+        ],
+        derived: [enc_iri("http://ex/alice"), t, enc_iri("http://ex/Person")],
+    };
+    let m = entailment_manifest(EntailmentRegime::Rdfs, vec![step]);
+    match run_entailment(&m, &EntailmentPolicy::simple_only().with_rdfs()) {
+        Err(CheckError::UngroundedDerivationAntecedent { .. }) => {}
+        other => panic!("the equality guard must not fire on an rdfs9 step, got {other:?}"),
+    }
+}
+
 /// sq-314: a `Simple` manifest with no steps PASSES the entailment gate (it then
 /// progresses to the bb loop and stops at MissingProof — proving the entailment
 /// gate ACCEPTED it rather than rejecting it).
@@ -5467,6 +6344,88 @@ fn entailment_simple_accepted_progresses_past_gate() {
         Err(CheckError::MissingProof { .. }) => {}
         other => panic!(
             "a Simple manifest must pass the entailment gate (then hit MissingProof), got {other:?}"
+        ),
+    }
+}
+
+// --- sq-rsd3v.7: completeness-under-entailment is UNBUILT — the enforced deferral -
+//
+// [OPUS-5] sq-rsd3v.7. SOUNDNESS of derivation ("every derived triple IS entailed",
+// sq-314 above + the in-circuit relation sq-rsd3v.2) and COMPLETENESS under
+// entailment ("no entailed answer is MISSING") are two obligations that must never
+// be conflated. Completeness needs BOTH an in-circuit closure-sweep over the flat
+// full graph AND a fixpoint-SATURATION proof; the saturation half exists nowhere in
+// sparq, so the property is NOT claimed. A relying party that demands it is REFUSED
+// fail-closed rather than handed a soundness-only accept it could misread.
+
+/// A well-formed rdfs9 step over this fixture's graph. Its `subClassOf` antecedent
+/// is NOT in the disclosed base (the scan discloses only the `rdf:type` row), so
+/// WITHOUT the completeness demand this manifest rejects as
+/// `UngroundedDerivationAntecedent` — which is exactly what makes the tests below
+/// non-vacuous: the completeness refusal must PRE-EMPT a different, later rejection,
+/// proving the new gate fired rather than riding an error that was coming anyway.
+fn rdfs9_step_for_fixture() -> DerivationStep {
+    let t = enc_iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
+    let sc = enc_iri("http://www.w3.org/2000/01/rdf-schema#subClassOf");
+    DerivationStep {
+        rule: EntailmentRule::Rdfs9SubClassType,
+        antecedents: vec![
+            [enc_iri("http://ex/alice"), t.clone(), enc_iri("http://ex/Student")],
+            [enc_iri("http://ex/Student"), sc, enc_iri("http://ex/Person")],
+        ],
+        derived: [enc_iri("http://ex/alice"), t, enc_iri("http://ex/Person")],
+    }
+}
+
+/// sq-rsd3v.7: a relying party that REQUIRES completeness under entailment is
+/// REFUSED on every non-`Simple` regime — `CompletenessUnderEntailmentUnavailable`,
+/// naming the regime — even when its policy accepts that regime. Non-vacuity: the
+/// SAME manifest under the SAME regime-acceptance but WITHOUT the demand rejects
+/// with a DIFFERENT error, so the refusal is attributable to the new gate.
+#[test]
+fn completeness_demand_refuses_every_inference_regime() {
+    for (regime, name, accepting) in [
+        (EntailmentRegime::Rdfs, "rdfs", EntailmentPolicy::simple_only().with_rdfs()),
+        (EntailmentRegime::Owl, "owl", EntailmentPolicy::simple_only().with_owl()),
+    ] {
+        let m = entailment_manifest(regime, vec![rdfs9_step_for_fixture()]);
+        // Baseline (no demand): rejected for an unrelated, LATER reason.
+        match run_entailment(&m, &accepting) {
+            Err(CheckError::UngroundedDerivationAntecedent { .. }) => {}
+            other => panic!(
+                "baseline for {name} must reject at the grounding check (keeps the \
+                 completeness test non-vacuous), got {other:?}"
+            ),
+        }
+        // With the demand: refused FIRST, as a capability gap.
+        match run_entailment(&m, &accepting.clone().require_completeness_under_entailment()) {
+            Err(CheckError::CompletenessUnderEntailmentUnavailable { regime: r }) => {
+                assert_eq!(r, name, "the refusal must name the manifest's regime");
+            }
+            other => panic!(
+                "a demand for completeness under `{name}` must be refused as \
+                 CompletenessUnderEntailmentUnavailable (sq-rsd3v.7 is UNBUILT), got {other:?}"
+            ),
+        }
+    }
+}
+
+/// sq-rsd3v.7: the demand does NOT brick the `Simple` path — a `Simple` manifest
+/// carries no entailment for completeness to range over, so it still passes the
+/// entailment gate (and stops later, at MissingProof). Passing it is NOT an
+/// assertion that its answer set is complete: that rests on the rest of the
+/// (NOT externally audited — sq-qhy4) verifier, and an off-circuit materialised
+/// closure presented as `Simple` is a distinct trust model this dial cannot see
+/// (design §3.6(a)).
+#[test]
+fn completeness_demand_leaves_simple_regime_verifiable() {
+    let m = entailment_manifest(EntailmentRegime::Simple, vec![]);
+    let policy = EntailmentPolicy::simple_only().require_completeness_under_entailment();
+    match run_entailment(&m, &policy) {
+        Err(CheckError::MissingProof { .. }) => {}
+        other => panic!(
+            "Simple must still pass the entailment gate under a completeness demand \
+             (then hit MissingProof), got {other:?}"
         ),
     }
 }

@@ -44,6 +44,12 @@ assert!(report.passed(), "{report}");
   subjects) and an ACP `.acr` fixture (cumulative inheritance, `allOf`
   agent+client pairs, deny-overrides, `noneOf` conditional grants), both derived
   from the `sparq_solid::fixture` seed's policy-shape subtrees.
+- **All four session dimensions** — beyond agent/client, the ACP rows cover
+  `acp:issuer` (a grant riding a minted `(agent, client, issuer)` triple
+  principal, fail-closed when no issuer is asserted) and the
+  `acp:CreatorAgent` / `acp:OwnerAgent` provenance matchers, resolved through the
+  TRUSTED `AccessProvenance` channel a `Fixture` declares as `ProvenanceFact`
+  rows — including the resource-scoping and missing-fact fail-closed cases.
 - **Fail-closed rows included** — no-ACL (`NoAcl`) and malformed-IRI (`Transient`)
   requests are part of the corpus, so a consumer cannot pass while failing open.
 - **Batch parity checked** — `decide_batch` must return element-for-element the
@@ -58,8 +64,14 @@ assert!(report.passed(), "{report}");
   non-vacuity anchor. The adversarial acceptance bar for the future POST
   chokepoint guard (`sq-gg0qq.5`); includes a genuine-escalation cover witness.
 
-No cargo features; the crate is opt-in by being a leaf `publish = false`
-workspace member that nothing depends on.
+One opt-in cargo feature, **`odrl-bridge`** (OFF by default) — the
+`window_corpus` module, whose rows turn on `Session::now` against a persisted
+`auth:notBefore`/`auth:notAfter` window (allowed inside it, denied before and
+after it, and fail-closed with no clock, all decided by *one* store without
+re-materializing). ACP has no time vocabulary, so the window is minted by
+`sparq-solid`'s ODRL bridge; the feature enables that plus the `sparq-policy`
+dependency, keeping them off the default build. Otherwise the crate is opt-in by
+being a leaf `publish = false` workspace member that nothing depends on.
 
 ## 📚 Learn more
 

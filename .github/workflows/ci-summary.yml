@@ -50,28 +50,50 @@
 # queue-depth signal needs `actions: read` (read-only) on the token. The deeper fix
 # (moving the waiter OFF the build-runner slot entirely) is a design-record follow-up.
 #
-# ADVISORY/INFORMATIONAL checks are NON-GATING (bead sq-wjth). [OPUS-4.8] A check
-# whose NAME contains the WHOLE WORD "advisory" or "informational" (case-insensitive,
-# `\b(advisory|informational)\b`) is excluded from the gating set entirely — its
-# conclusion (even `failure`) can never fail the gate. This is a rule, not a hard-
-# coded name list, so it adapts as advisory jobs are added/renamed. The word-boundary
-# match excludes the standalone words (incl. hyphen-/paren-/comma-delimited) but NOT a
-# word that merely contains them as a substring — notably "cargo-deny (advisories, …)"
-# (plural) is REQUIRED and is NOT excluded. It currently covers, by name:
-#   • "unsafe report (cargo-geiger, informational)"   (ci.yml `geiger`)
-#   • "markdownlint-advisory (whole repo)"            (docs-quality.yml)
-#   • "external-links (lychee online, advisory)"      (docs-quality.yml)
-#   • "vale (prose, advisory)"                        (docs-quality.yml)
-# ([OPUS-4.8] sq-8ic6: "readme-template (template, advisory)" was PROMOTED to the HARD
-#  gate "readme-template (template)" — no advisory token, so it now GATES — once the
-#  sq-9jw5 README-overhaul backlog cleared and sq-ixsf tightened the stub classifier.)
+# ADVISORY/INFORMATIONAL checks are NON-GATING — but ONLY WHEN DECLARED (#3773).
+# [OPUS-5] A check-run is excluded from the gating set iff its name is EXPLICITLY
+# DECLARED in `.github/advisory-registry.json`; every other check GATES, whatever it
+# is called. Its conclusion (even `failure`) can then never fail the gate.
+# THIS REPLACES the pre-2026-07-25 name rule (`\b(advisory|informational)\b` over the
+# display name), which was a correctness hole in the one check that authorises merges:
+# any job whose NAME happened to contain those words was dropped wholesale — no
+# waiver, no entry, no record. An adversarial audit (#3773) found FOUR real gates
+# neutralised that way (site determinism grep-gate, #1740 browserName tripwire,
+# gui no-sleep-gate, axe a11y ratchet), two of them documented in-repo as HARD.
+# Consequences, deliberately:
+#   • a name token is now DIAGNOSTIC ONLY — `foo (advisory)` with no registry entry
+#     GATES, and the gate summary prints a loud UNDECLARED note naming it;
+#   • each declaration is BOUND to the job's stable identity (workflow file + job id)
+#     and enforced by scripts/check-advisory-registry.py C4, so a RENAME cannot flip
+#     gating status silently: a renamed declared job GATES and C4 REDs until the
+#     declaration is deliberately updated;
+#   • a MISSING/unparseable registry is an immediate LOUD exit 1 (fail-closed) — the
+#     gate refuses to evaluate rather than guess, which is why the sparse-checkout
+#     below must include the registry file.
+# Promotion of a declared-advisory lane is therefore a two-line change (drop the
+# registry entry; optionally drop the now-meaningless name token), and it is
+# diff-visible in one file.
+# [OPUS-5] PLATFORM-MANAGED companion rule (ci_summary_gate.py
+#  PLATFORM_MANAGED_ADVISORY_NAMES / is_platform_managed_advisory). The registry
+#  declares jobs THIS repo authors, keyed on the workflow job. A GitHub-MANAGED job
+#  has no workflow file here, so it cannot be declared that way; it is excluded by an
+#  EXACT, case-insensitive, whole-name allow-list — currently just:
+#   • "Dependabot"   (GitHub's managed `Dependabot Updates` workflow, event=dynamic,
+#                     path `dynamic/dependabot/dependabot-updates`; its only job name)
+#  That check reports Dependabot's own ability to act on an UPSTREAM advisory — it REDs
+#  on `security_update_not_possible`, where no reachable version clears every advisory
+#  on the package — not this repo's code health, so it must not halt the line. Nothing
+#  is suppressed: the Dependabot ALERT stays open, Dependabot keeps retrying, and the
+#  actionable cargo dependency-vulnerability GATE (`cargo deny check advisories` inside
+#  "supply-chain gates (…)") is untouched. Unknown/new names FAIL CLOSED (still gate).
 # REQUIRED checks (gate / build+test / clippy / coverage / the conformance + perf
-# ratchets / wasm / MSRV / supply-chain / …) do NOT contain those words, so they
-# still gate normally. Rationale: an advisory job that concludes `failure` (e.g.
+# ratchets / wasm / MSRV / supply-chain / …) are not declared, so they gate normally —
+# and so does anything new, by default. Rationale for the exclusion existing at all:
+# a genuinely environment-coupled advisory job that concludes `failure` (e.g.
 # cargo-geiger erroring on the virtual workspace manifest) must never block a merge —
 # the step-level `continue-on-error`/`|| true` in those jobs is a best-effort first
-# line, and THIS name-rule is the load-bearing backstop that makes advisory failures
-# strictly non-gating regardless of how the job concludes.
+# line, and THIS declared-registry rule is the load-bearing backstop that makes
+# DECLARED advisory failures strictly non-gating regardless of how the job concludes.
 #
 # CHANGE-BASED TEST-SELECTION semantics (bead sq-fmx4u.3). [FABLE-5] The wide
 # per-crate lanes in ci.yml / feature-matrix.yml may now be SKIPPED (or, for the
@@ -249,16 +271,21 @@ jobs:
     # saturated/progressing queue.
     timeout-minutes: 80
     steps:
-      # Sparse checkout of ONLY the gate script: the gate needs no sources. (No
-      # partial-clone filter is configured — this is sparse checkout only, not a
-      # blobless clone.) Same trust model as before — on pull_request the workflow
-      # file itself already comes from the merge ref, so scripting from the same ref
-      # does not widen anything. [FABLE-5] [SONNET-4.6]
+      # Sparse checkout of ONLY the gate script + the advisory registry it reads: the
+      # gate needs no sources. (No partial-clone filter is configured — this is sparse
+      # checkout only, not a blobless clone.) Same trust model as before — on
+      # pull_request the workflow file itself already comes from the merge ref, so
+      # scripting from the same ref does not widen anything. [FABLE-5] [SONNET-4.6]
+      # [OPUS-5] #3773: `.github/advisory-registry.json` is LOAD-BEARING — it is the
+      # ONLY thing that can make a check-run non-gating, and the gate exits 1 loudly
+      # when it is absent. Pinned by scripts/tests/test_ci_summary_gate.py
+      # ::TestAdvisoryRegistryWiring so this list cannot silently drop it again.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
           sparse-checkout: |
             scripts/ci_summary_gate.py
+            .github/advisory-registry.json
           sparse-checkout-cone-mode: false
       - name: Wait for all other checks, then aggregate
         env:
