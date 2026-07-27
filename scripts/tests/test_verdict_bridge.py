@@ -368,11 +368,40 @@ def decision(pull, comments) -> str:
 REPO = "sparq-org/sparq"
 
 
+def commits_connection(logins=("claude",), *, messages=(), total=None) -> dict:
+    """A GraphQL ``commits`` connection carrying ONE commit per author login.
+
+    ``total`` defaults to the node count (a complete read). Passing a LARGER ``total``
+    models a TRUNCATED connection, which must refuse every grant.
+    """
+    nodes = [
+        {
+            "commit": {
+                "message": message,
+                "authors": {"nodes": [{"user": {"login": login}}]},
+                "committer": {"user": {"login": "web-flow"}},
+            }
+        }
+        for login, message in zip(
+            logins, list(messages) + [""] * len(logins), strict=False
+        )
+    ]
+    return {"totalCount": len(nodes) if total is None else total, "nodes": nodes}
+
+
 def node(number: int, **overrides) -> dict:
-    """A GraphQL pullRequest node as `list_open` returns it."""
+    """A GraphQL pullRequest node as `list_open` returns it.
+
+    Modelled on the REAL population (censused 2026-07-26): the PR is opened by the
+    orchestrator App and its commits are authored by `claude`, while reviewers comment
+    under a DIFFERENT login. A fixture whose author fields were absent would make every
+    grant fail closed for the wrong reason and hide real regressions.
+    """
     labels = overrides.pop("labels", ())
     reviews = overrides.pop("reviews", ())
     base = {
+        "author": {"login": overrides.pop("author", "sparq-orchestrator")},
+        "commits": overrides.pop("commits", commits_connection()),
         "reviews": {
             "nodes": [
                 {
@@ -909,6 +938,585 @@ class TestGateResolution(unittest.TestCase):
         self.assertEqual(bridge(fake).run(), 0)
         self.assertEqual(fake.writes, [], "a red PR is not the invisible population")
 
+
+class TestAuthorXorReviewer(unittest.TestCase):
+    """The self-approval guard. One named test per obligation; each reds on deletion.
+
+    NON-VACUITY IS THE POINT OF THIS CLASS. The measured population (all 119 open sparq
+    PRs, paginated and totalCount-cross-checked, 2026-07-26) is:
+
+    * 16 head-bound verdict comments from a trusted association;
+    * 11 of the 16 posted by the PR's own author, SAME LOGIN (`jeswr`/`jeswr`);
+    * only 3 of the 16 would be caught by commit authorship alone, because Claude Code
+      commits as `claude` while the reviewing session comments as `jeswr`.
+
+    So a fixture whose author and reviewer differ CANNOT exercise this guard. Every test
+    below that claims to cover self-review uses ONE login for both roles, and
+    ``test_the_same_login_case_is_not_vacuous`` proves the suite as a whole would notice
+    if the guard were removed.
+    """
+
+    def contributor_pr(self, **kw):
+        """The real shape: the PR's author is (always) in its own contributor set."""
+        kw.setdefault("contributors", frozenset({"jeswr", "claude"}))
+        return pr(**kw)
+
+    # -- OBLIGATION 0: the OPENER carve-out. Refusing on it stalls the real lane. ------
+
+    def test_a_pass_from_the_PR_OPENER_who_wrote_no_commit_still_PROMOTES(self):
+        """Regression pin for a FALSE POSITIVE this guard originally had.
+
+        sparq#4331 and #4386 are `jeswr`-opened with a `jeswr` head-bound pass, and both
+        are genuine independent cross-agent reviews (confirmed from dispatch records).
+        On the wire: `COMMIT authorship=['claude'], jeswr_committed=False`. An earlier
+        draft of this guard folded the opener into the contributor set and called both
+        self-approvals. Since 29 of 34 open non-draft PRs cannot be reached by the
+        automated review lane at all, refusing these is a total arming stall.
+        """
+        opener_only = pr(opener="jeswr", contributors=frozenset({"claude"}))
+        own = comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr")
+        self.assertEqual(decision(opener_only, [own]), "promote")
+
+    def test_the_opener_pass_is_reported_as_COUNTED_not_refused(self):
+        opener_only = pr(opener="jeswr", contributors=frozenset({"claude"}))
+        got = vb.decide(opener_only, [comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr")])
+        self.assertTrue(got.opener_verdict, got)
+        self.assertFalse(got.self_review, "counted, not refused")
+        self.assertIn("COUNTED", got.reason)
+
+    def test_the_opener_advisory_reaches_the_log_without_blocking_the_write(self):
+        fake = FakeGitHub(
+            [node(4331, author="jeswr", commits=commits_connection(("claude",)))],
+            comments={4331: [vb.comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr")]},
+        )
+        b = bridge(fake)
+        b.run()
+        self.assertEqual(
+            fake.writes,
+            [["pr", "edit", "4331", "--repo", REPO, "--add-label", vb.REVIEW_ATTESTATION]],
+            "the legitimate review must still promote",
+        )
+        self.assertTrue([ln for ln in b.logs if ln.startswith("::notice")], b.logs)
+        self.assertFalse(
+            [ln for ln in b.logs if ln.startswith("::warning")],
+            "an opener verdict is not a refusal and must not be reported as one",
+        )
+        self.assertTrue(any("opener_verdicts=1" in ln for ln in b.logs), b.logs)
+        self.assertTrue(any("self_reviews_refused=0" in ln for ln in b.logs), b.logs)
+
+    def test_every_opener_pass_is_also_COUNTABLE(self):
+        """The invariant that keeps the withdrawal branch unreachable for openers.
+
+        The withdrawal only runs when there is NO countable verdict. An opener pass is
+        appended to `countable` as well as `opener_passes`, so an opener-only PR always
+        has a verdict and can never reach the withdrawal. Mutating the withdrawal to key
+        on `opener_passes` is therefore an EQUIVALENT mutant (measured: M41 SURVIVED) —
+        but only while this subset invariant holds. If a future change makes an opener
+        pass non-countable, the widening becomes live and would strip review:pass off a
+        legitimate same-login agent review. Pin the invariant, not the symptom.
+        """
+        opener_only = pr(opener="jeswr", contributors=frozenset({"claude"}))
+        own = comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr", cid=7)
+        countable, self_passes, opener_passes = vb.classify_verdicts(
+            [own], HEAD, opener_only
+        )
+        self.assertEqual([v.comment_id for v in opener_passes], [7])
+        self.assertEqual(self_passes, [])
+        countable_ids = {v.comment_id for v in countable}
+        self.assertTrue(
+            {v.comment_id for v in opener_passes} <= countable_ids,
+            "an opener pass must remain COUNTABLE or the withdrawal becomes reachable",
+        )
+
+    def test_the_opener_is_never_in_the_commit_contributor_set(self):
+        contributors, complete = vb.commit_contributors(
+            {"author": {"login": "jeswr"}, "commits": commits_connection(("claude",))}
+        )
+        self.assertTrue(complete)
+        self.assertNotIn("jeswr", contributors)
+        self.assertIn("claude", contributors)
+
+    def test_an_opener_pass_never_causes_a_WITHDRAWAL(self):
+        """The withdrawal is scoped to commit-authorship evidence only.
+
+        Stripping review:pass off a PR whose only pass came from its opener would un-arm
+        a legitimate review — the exact damage the carve-out exists to prevent.
+        """
+        opener_held = pr(
+            opener="jeswr",
+            contributors=frozenset({"claude"}),
+            labels={vb.REVIEW_ATTESTATION},
+        )
+        own = comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr")
+        self.assertEqual(decision(opener_held, [own]), "none")
+
+    def test_a_BOT_AUTHORED_pr_does_not_make_this_guard_fire(self):
+        """DOCUMENTED LIMITATION, pinned so it is not mistaken for a bug and "fixed".
+
+        Under a scheme where agent PRs are opened by the orchestrator App on conforming
+        branches, the PR author is a bot, the commits are `claude`'s and the reviewer
+        comments as the operator. That configuration satisfies this guard REGARDLESS of
+        whether the commenter is an independent reviewer or the authoring session itself
+        — moving the author field does not create a reviewer signal. Closing that gap
+        needs a distinct reviewing principal, not a different PR author.
+        """
+        contributors, _ = vb.commit_contributors(
+            {
+                "author": {"login": "sparq-orchestrator"},
+                "commits": commits_connection(("claude",)),
+            }
+        )
+        bot_pr = pr(opener="sparq-orchestrator", contributors=contributors)
+        verdict = comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr")
+        got = vb.decide(bot_pr, [verdict])
+        self.assertEqual(got.action, "promote")
+        self.assertFalse(got.self_review)
+        self.assertFalse(
+            got.opener_verdict,
+            "not even the advisory fires — the guard is blind here, by construction",
+        )
+
+    # -- OBLIGATION 1: a verdict by the PR's own author does not promote or arm --------
+
+    def test_a_pass_from_the_prs_own_author_does_not_promote(self):
+        own = comment(f"reviewed {HEAD}\n\nVERDICT: pass", user="jeswr")
+        self.assertNotEqual(decision(self.contributor_pr(), [own]), "promote")
+
+    def test_the_same_login_case_is_not_vacuous(self):
+        """The guard must be what refuses it — not the association, head or shape checks.
+
+        Identical comment body, IDENTICAL PR fixture, ONE difference: the commenter's
+        login. If the guard is deleted BOTH arms read `promote` and this reds on the
+        second assertion; if the guard over-fires the FIRST assertion reds. Both arms are
+        load-bearing.
+        """
+        body = f"reviewed {HEAD}\n\nVERDICT: pass"
+        own = comment(body, user="jeswr")
+        independent = comment(body, user="reviewer")
+        self.assertEqual(
+            decision(self.contributor_pr(), [independent]),
+            "promote",
+            "the control arm must PASS or the test proves nothing",
+        )
+        self.assertNotEqual(decision(self.contributor_pr(), [own]), "promote")
+
+    def test_the_live_shape_that_the_bridge_promoted_is_refused(self):
+        """Regression-pin of the measured hole, at its real numbers.
+
+        sparq#4331: author `jeswr`, head-bound `VERDICT: pass` by `jeswr` at MEMBER,
+        non-draft, MERGEABLE, no review:* label. `decide()` on origin/main returned
+        `promote`.
+        """
+        live = comment(
+            f"Reviewed head {HEAD}.\n\nVERDICT: pass",
+            user="jeswr",
+            association="MEMBER",
+        )
+        got = vb.decide(
+            pr(labels={"area:ci"}, contributors=frozenset({"jeswr", "claude"})), [live]
+        )
+        self.assertNotEqual(got.action, "promote", got)
+        self.assertTrue(got.self_review, got)
+
+    def test_a_self_pass_never_reaches_the_WRITE_path_as_an_attestation(self):
+        """decide() is not the arming layer — pin the label the driver actually writes."""
+        fake = FakeGitHub(
+            [node(4200, author="jeswr", commits=commits_connection(("jeswr",)))],
+            comments={4200: [vb.comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr")]},
+        )
+        bridge(fake).run()
+        for argv in fake.writes:
+            self.assertNotIn(vb.REVIEW_ATTESTATION, argv, fake.writes)
+
+    def test_a_self_pass_cannot_be_laundered_through_a_bot_suffix(self):
+        """GraphQL says `sparq-orchestrator`; REST says `sparq-orchestrator[bot]`.
+
+        Without login normalisation an App's self-review is permanently invisible to the
+        guard — a check that reads as present and never fires.
+        """
+        contributors, complete = vb.commit_contributors(
+            {
+                "author": {"login": "someone-else"},
+                # The App COMMITTED here, spelled with the [bot] suffix by GitActor.
+                "commits": commits_connection(("sparq-orchestrator[bot]",)),
+            }
+        )
+        self.assertTrue(complete)
+        self.assertIn("sparq-orchestrator", contributors)
+        app_self = comment(f"{HEAD}\n\nVERDICT: pass", user="sparq-orchestrator[bot]")
+        self.assertNotEqual(
+            decision(pr(contributors=contributors), [app_self]), "promote"
+        )
+
+    def test_a_commit_author_who_did_not_open_the_pr_still_cannot_grant(self):
+        """The axis is the CONTRIBUTOR SET, not `pr.user.login`.
+
+        Measured: 86 of 119 open PRs are opened by the App and never commented on by it,
+        so a bare `comment.user != pr.user` comparison is unconditionally true there —
+        vacuous for the majority population. A commit author must still be refused.
+        """
+        contributors, _ = vb.commit_contributors(
+            {
+                "author": {"login": "sparq-orchestrator"},
+                "commits": commits_connection(("codex", "jeswr")),
+            }
+        )
+        self.assertIn("jeswr", contributors)
+        wrote_it = comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr")
+        self.assertNotEqual(
+            decision(pr(contributors=contributors), [wrote_it]), "promote"
+        )
+
+    def test_an_unresolved_co_author_trailer_still_counts_as_a_contributor(self):
+        contributors, _ = vb.commit_contributors(
+            {
+                "author": {"login": "sparq-orchestrator"},
+                "commits": commits_connection(
+                    ("claude",),
+                    messages=(
+                        "feat: thing\n\nCo-Authored-By: A Name "
+                        "<12345+ghost@users.noreply.github.com>",
+                    ),
+                ),
+            }
+        )
+        self.assertIn("ghost", contributors)
+        ghost = comment(f"{HEAD}\n\nVERDICT: pass", user="ghost")
+        self.assertNotEqual(decision(pr(contributors=contributors), [ghost]), "promote")
+
+    # -- the guard is WITHHOLD-ONLY: it must not become a denial-of-service ------------
+
+    def test_a_self_FAIL_still_retracts_an_existing_attestation(self):
+        """Refusing a contributor's own retraction would be fail-OPEN, not fail-closed.
+
+        The REASON is asserted, not just the action. Both the fail path and the
+        self-only-withdrawal path retract, so `action == "retract"` alone passes even
+        when the guard has been mutated to swallow the fail — measured: that mutant (M14)
+        SURVIVED until this assertion named which path produced the retraction.
+        """
+        own_fail = comment(f"{HEAD}\n\nVERDICT: fail", user="jeswr")
+        got = vb.decide(self.contributor_pr(labels={vb.REVIEW_ATTESTATION}), [own_fail])
+        self.assertEqual(got.action, "retract", got)
+        self.assertIn("head-bound fail by jeswr", got.reason)
+        self.assertFalse(got.self_review, "a FAIL is not a suppressed self-pass")
+
+    def test_a_contributors_FAIL_stays_COUNTABLE_and_never_becomes_a_self_pass(self):
+        """The guard is one-directional. Routing a contributor's fail into `self_passes`
+        would silently disarm every retraction they can make."""
+        own_fail = comment(f"{HEAD}\n\nVERDICT: fail", user="jeswr")
+        own_ambiguous = comment(f"{HEAD}\n\nVERDICT: FAIL", user="jeswr", cid=2)
+        countable, self_passes, _ = vb.classify_verdicts(
+            [own_fail, own_ambiguous], HEAD, self.contributor_pr()
+        )
+        self.assertEqual(
+            sorted(v.value for v in countable), sorted(["fail", vb.AMBIGUOUS])
+        )
+        self.assertEqual(self_passes, [], "only a PASS may ever be suppressed")
+
+    def test_self_passes_only_ever_holds_passes(self):
+        mixed = [
+            comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr", cid=1),
+            comment(f"{HEAD}\n\nVERDICT: fail", user="jeswr", cid=2),
+            comment(f"{HEAD}\n\nVERDICT: pass", user="reviewer", cid=3),
+        ]
+        _, self_passes, _ = vb.classify_verdicts(mixed, HEAD, self.contributor_pr())
+        self.assertEqual([(v.author, v.value) for v in self_passes], [("jeswr", "pass")])
+
+    def test_a_self_pass_cannot_override_an_independent_FAIL(self):
+        indep_fail = comment(
+            f"{HEAD}\n\nVERDICT: fail", user="reviewer", created_at="2026-07-26T10:00:00Z", cid=1
+        )
+        self_pass = comment(
+            f"{HEAD}\n\nVERDICT: pass", user="jeswr", created_at="2026-07-26T23:00:00Z", cid=2
+        )
+        self.assertNotEqual(
+            decision(self.contributor_pr(), [indep_fail, self_pass]), "promote"
+        )
+
+    def test_an_independent_pass_still_promotes_alongside_a_self_pass(self):
+        """Fail-closed must not mean wedged: the guard removes ONE comment, not the lane."""
+        indep = comment(f"{HEAD}\n\nVERDICT: pass", user="reviewer", cid=1)
+        self_pass = comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr", cid=2)
+        self.assertEqual(
+            decision(self.contributor_pr(), [indep, self_pass]), "promote"
+        )
+
+    # -- OBLIGATION 4: the refusal terminates VISIBLY, not silently --------------------
+
+    def test_a_refused_self_review_is_reported_not_silent(self):
+        own = comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr")
+        got = vb.decide(self.contributor_pr(), [own])
+        self.assertTrue(got.self_review, got)
+        self.assertIn("SELF-REVIEW", got.reason)
+        self.assertIn("@jeswr", got.reason)
+
+    def test_the_refusal_reaches_the_workflow_log_as_a_warning(self):
+        fake = FakeGitHub(
+            [node(4200, author="jeswr", commits=commits_connection(("jeswr",)))],
+            comments={4200: [vb.comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr")]},
+        )
+        b = bridge(fake)
+        b.run()
+        warnings = [line for line in b.logs if line.startswith("::warning")]
+        self.assertTrue(warnings, b.logs)
+        self.assertIn("self-review", warnings[0])
+        self.assertIn("#4200", warnings[0])
+        self.assertTrue(
+            any("self_reviews_refused=1" in line for line in b.logs), b.logs
+        )
+
+    def test_the_warning_fires_even_when_no_label_changes(self):
+        """The dangerous silence: a refused self-review on an already-labelled PR writes
+        NOTHING, so the log line is the ONLY evidence anything was inspected."""
+        fake = FakeGitHub(
+            [
+                node(
+                    4200,
+                    author="jeswr",
+                    commits=commits_connection(("jeswr",)),
+                    labels=("review:needs",),
+                )
+            ],
+            comments={4200: [vb.comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr")]},
+        )
+        b = bridge(fake)
+        b.run()
+        self.assertEqual(fake.writes, [], "no label change is exactly the silent case")
+        self.assertTrue([line for line in b.logs if line.startswith("::warning")], b.logs)
+
+    def test_a_refused_self_review_leaves_the_pr_visibly_unreviewed(self):
+        """The label half of the terminal state: review-lane-alarm censuses this."""
+        fake = FakeGitHub(
+            [node(4200, author="jeswr", commits=commits_connection(("jeswr",)))],
+            comments={4200: [vb.comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr")]},
+        )
+        bridge(fake).run()
+        self.assertEqual(
+            fake.writes,
+            [["pr", "edit", "4200", "--repo", REPO, "--add-label", vb.UNREVIEWED_LABEL]],
+        )
+
+    def test_an_attestation_resting_only_on_a_self_review_is_WITHDRAWN(self):
+        """Remediates the promotion that already landed, not just the next one.
+
+        MEASURED: verdict-bridge run 30223748218 labelled sparq#4331 `review:pass` at
+        2026-07-26T22:53:30Z from a `VERDICT: pass` its own author posted at 22:11:41Z.
+        A self-review is POSITIVE evidence, so this is not a retract-on-absence.
+        """
+        own = comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr")
+        got = vb.decide(
+            self.contributor_pr(labels={vb.REVIEW_ATTESTATION, "area:ci"}), [own]
+        )
+        self.assertEqual(got.action, "retract", got)
+        self.assertTrue(got.self_review, got)
+
+    def test_the_withdrawal_reaches_the_write_path(self):
+        fake = FakeGitHub(
+            [
+                node(
+                    4331,
+                    author="jeswr",
+                    commits=commits_connection(("jeswr",)),
+                    labels=(vb.REVIEW_ATTESTATION,),
+                )
+            ],
+            comments={4331: [vb.comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr")]},
+        )
+        bridge(fake).run()
+        self.assertEqual(
+            fake.writes,
+            [["pr", "edit", "4331", "--repo", REPO, "--remove-label", vb.REVIEW_ATTESTATION]],
+        )
+
+    def test_an_attestation_with_NO_comment_behind_it_is_still_never_retracted(self):
+        """The boundary of the rule above: absence must still not retract, or the bridge
+        starts fighting every label an orchestrator applied by hand."""
+        self.assertEqual(
+            decision(self.contributor_pr(labels={vb.REVIEW_ATTESTATION}), []), "none"
+        )
+        stale = comment(f"reviewed {OTHER}\n\nVERDICT: pass", user="jeswr")
+        self.assertEqual(
+            decision(self.contributor_pr(labels={vb.REVIEW_ATTESTATION}), [stale]), "none"
+        )
+
+    def test_an_independent_pass_alongside_a_self_pass_keeps_the_attestation(self):
+        indep = comment(f"{HEAD}\n\nVERDICT: pass", user="reviewer", cid=1)
+        own = comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr", cid=2)
+        self.assertEqual(
+            decision(self.contributor_pr(labels={vb.REVIEW_ATTESTATION}), [indep, own]),
+            "none",
+            "a real review stands; only a self-ONLY attestation is withdrawn",
+        )
+
+    def test_a_clean_pr_reports_no_self_review(self):
+        """The flag must not be stuck on — otherwise the warning means nothing."""
+        indep = comment(f"{HEAD}\n\nVERDICT: pass", user="reviewer")
+        self.assertFalse(vb.decide(pr(), [indep]).self_review)
+
+    # -- fail closed on an UNREADABLE contributor set ---------------------------------
+
+    def test_a_truncated_commit_list_refuses_every_grant(self):
+        contributors, complete = vb.commit_contributors(
+            {
+                "author": {"login": "sparq-orchestrator"},
+                "commits": commits_connection(("claude",), total=900),
+            }
+        )
+        self.assertFalse(complete, "900 commits cannot fit in a 1-node connection")
+        indep = comment(f"{HEAD}\n\nVERDICT: pass", user="reviewer")
+        got = vb.decide(
+            pr(contributors=contributors, contributors_complete=False), [indep]
+        )
+        self.assertNotEqual(got.action, "promote", got)
+        self.assertIn("unreadable", got.reason)
+
+    def test_a_truncated_commit_list_still_permits_a_retraction(self):
+        fail = comment(f"{HEAD}\n\nVERDICT: fail", user="reviewer")
+        self.assertEqual(
+            decision(
+                pr(labels={vb.REVIEW_ATTESTATION}, contributors_complete=False), [fail]
+            ),
+            "retract",
+        )
+
+    def test_an_unattributable_comment_cannot_grant(self):
+        anon = comment(f"{HEAD}\n\nVERDICT: pass")
+        anon["user"] = {}
+        self.assertNotEqual(decision(pr(), [anon]), "promote")
+
+    def test_a_missing_commits_connection_reads_as_INCOMPLETE(self):
+        """An absent field must not read as 'nobody contributed'."""
+        _, complete = vb.commit_contributors({"author": {"login": "jeswr"}})
+        self.assertFalse(complete)
+
+    # -- the guard composes with the axes that already existed ------------------------
+
+    def test_a_blockquoted_self_pass_is_still_not_a_verdict(self):
+        """Regression-pin of #4391's finding: every comment here opens `> 🤖 SPARQ agent`,
+        so a dropped `^` anchor makes a blockquoted pass the natural false positive."""
+        self.assertIsNone(vb.trailing_verdict("> VERDICT: pass"))
+        quoted = comment(f"{HEAD}\n\n> VERDICT: pass", user="reviewer")
+        self.assertNotEqual(decision(pr(), [quoted]), "promote")
+
+    def test_a_self_pass_bound_to_a_SUPERSEDED_head_is_not_even_seen(self):
+        stale = comment(f"reviewed {OTHER}\n\nVERDICT: pass", user="jeswr")
+        got = vb.decide(self.contributor_pr(), [stale])
+        self.assertNotEqual(got.action, "promote", got)
+        self.assertFalse(got.self_review, "a stale verdict is not a self-review refusal")
+
+    def test_classify_verdicts_partitions_rather_than_dropping(self):
+        own = comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr", cid=1)
+        indep = comment(f"{HEAD}\n\nVERDICT: fail", user="reviewer", cid=2)
+        countable, self_passes, _ = vb.classify_verdicts(
+            [own, indep], HEAD, self.contributor_pr()
+        )
+        self.assertEqual([v.author for v in countable], ["reviewer"])
+        self.assertEqual([v.author for v in self_passes], ["jeswr"])
+
+    def test_classify_without_a_pr_leaves_the_contributor_axis_off(self):
+        """The default must not silently enforce a half-configured guard."""
+        own = comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr")
+        countable, self_passes, _ = vb.classify_verdicts([own], HEAD)
+        self.assertEqual(len(countable), 1)
+        self.assertEqual(self_passes, [])
+
+    def test_normalize_login_is_case_and_bot_suffix_insensitive(self):
+        self.assertEqual(vb.normalize_login("JesWr"), "jeswr")
+        self.assertEqual(vb.normalize_login("Sparq-Orchestrator[bot]"), "sparq-orchestrator")
+        self.assertEqual(vb.normalize_login(None), "")
+
+    def test_the_pr_list_query_actually_requests_the_authorship_fields(self):
+        """A guard fed a field the query never asks for is silently always-empty.
+
+        Deliberately NOT a substring search. `author{login}` and `totalCount` each occur
+        TWICE in this query — once where the guard needs them and once inside the
+        `reviews` / `pullRequests` connections. A bare `assertIn` passes with the
+        PR-level field deleted; measured as a real mutation SURVIVOR (M20) before this
+        assertion was tightened. Assert the PR-node line itself, and assert the commits
+        fields inside the commits block.
+        """
+        for name in ("PR_LIST_QUERY", "PR_ONE_QUERY"):
+            with self.subTest(query=name):
+                query = getattr(vb, name)
+                lines = [line.strip() for line in query.splitlines()]
+                self.assertIn(
+                    "author{login}",
+                    lines,
+                    "the PR-node-level author field is gone; the `reviews` one does "
+                    "not feed the guard",
+                )
+                start = query.find("commits(last:")
+                self.assertGreater(start, 0, "the commits connection is gone")
+                block = query[start : start + 260]
+                for field_name in ("totalCount", "authors(", "committer", "message"):
+                    self.assertIn(
+                        field_name, block, f"{field_name} missing from the commits block"
+                    )
+
+    def test_the_verdict_regexes_are_anchored_AND_matched_from_the_start(self):
+        """Belt and braces, because either one alone is silently sufficient.
+
+        `re.match` already anchors, so deleting the `^` is an EQUIVALENT mutation today —
+        it only becomes live the moment someone swaps `.match` for `.search`. Pin the
+        pattern text so the anchor cannot be "cleaned up" as redundant, and pin the
+        behaviour so a `.search` refactor reds. In this repo EVERY comment opens with
+        `> 🤖 SPARQ agent`, so a blockquoted line is the natural false-positive shape.
+        """
+        self.assertTrue(vb.VERDICT_RE.pattern.startswith("^"), vb.VERDICT_RE.pattern)
+        self.assertTrue(vb.VERDICT_SHAPE_RE.pattern.startswith("^"), vb.VERDICT_SHAPE_RE.pattern)
+        for shape in ("> VERDICT: pass", ">VERDICT: pass", "> **VERDICT: pass**", "  > VERDICT: FAIL"):
+            with self.subTest(shape=shape):
+                self.assertIsNone(vb.VERDICT_RE.search(shape), shape)
+                self.assertIsNone(vb.VERDICT_SHAPE_RE.search(shape), shape)
+                self.assertIsNone(vb.trailing_verdict(shape), shape)
+
+    def test_the_EVENT_DRIVEN_path_enforces_the_guard_too(self):
+        """#4386 added a single-PR fetch + reconfirm. A guard wired only into the sweep
+        would be silently always-empty there — the contributor set would come back empty
+        and every verdict would grant. Both queries share PR_NODE_FIELDS; pin the
+        behaviour, not just the string."""
+        n = node(4200, author="jeswr", commits=commits_connection(("jeswr",)))
+        fake = FakeGitHub(
+            [n], comments={4200: [vb.comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr")]}
+        )
+        b = bridge(fake)
+        parsed = b.parse_node(n, "success")
+        self.assertIn("jeswr", parsed.contributors)
+        fresh, decision_ = b.reconfirm(parsed, vb.Decision("promote", "stale"))
+        self.assertNotEqual(
+            decision_.action, "promote", "the event path must refuse a commit-author pass"
+        )
+        self.assertTrue(decision_.self_review, decision_)
+
+    def test_the_commits_page_is_pinned_to_the_documented_maximum(self):
+        """Narrowing this silently WEDGES the lane instead of opening a hole.
+
+        With a page smaller than the PR's commit count, `totalCount` exceeds the nodes
+        read, `contributors_complete` goes False and EVERY grant is refused — fail-closed,
+        but a total arming stall. Measured as a mutation survivor (M37, `last:1`) before
+        this test existed. 100 is GitHub's documented per-connection maximum, so it is
+        also the ceiling.
+        """
+        found = re.search(r"commits\(last:(\d+)\)", vb.PR_LIST_QUERY)
+        self.assertIsNotNone(found, "the commits connection lost its page size")
+        self.assertEqual(
+            int(found.group(1)),
+            100,
+            "100 is both the documented GitHub maximum and 10x the live commit ceiling",
+        )
+
+    def test_parse_node_populates_the_contributor_set_from_the_live_shape(self):
+        b = bridge(FakeGitHub([]))
+        parsed = b.parse_node(
+            node(4200, author="jeswr", commits=commits_connection(("claude", "codex"))),
+            "success",
+        )
+        self.assertTrue(parsed.contributors_complete)
+        self.assertEqual(parsed.contributors, frozenset({"claude", "codex", "web-flow"}))
+        self.assertNotIn(
+            "jeswr", parsed.contributors, "the OPENER must not be a refusal signal"
+        )
+        self.assertEqual(parsed.opener, "jeswr", "but it must still be reported")
 
 class TestScopedRunAuthority(unittest.TestCase):
     """The EVENT path must not be a laxer route to the same label than the CRON path.

@@ -181,7 +181,8 @@ near-inverse stdlib pairs (`to_be_bytes`/`from_be_bytes`) optimize away.
 Also in-code TODOs that are genuine opportunities: simplify `to_bits`/`to_radix`
 to a range constraint when `limb_count == 1`
 (`ssa/ir/dfg/simplify/call.rs:59,79`); `IfElse` merging blocked on NOT
-instructions with distinct ValueIds (`ssa/ir/dfg/simplify.rs:343-344,361-362`);
+instructions with distinct ValueIds (`ssa/ir/dfg/simplify.rs:343-344,361-362` —
+implemented and **measured to never fire**; PARKED by `sq-seust`, §10.8);
 on-the-fly expression term merging (`acvm/src/compiler/optimizers/general.rs:16`,
 issue #10109).
 
@@ -320,6 +321,18 @@ measurements, unless a number is cited.
 - "Redundant remainder range check in `euclidean_division_var`" — intentional;
   in-code comment says the ACVM optimizer removes it when redundant and it is
   *required* for non-power-of-two divisors (`acir_context/mod.rs:~900-910`).
+  (Confirmed by `sq-jfkwk`, §10.7, with the mechanism corrected: for a
+  power-of-two divisor the duplicate checks land on the *same* witness and the
+  ACVM `redundant_range` optimizer deduplicates them.)
+- **Row 9's own sketch — "specialize the sign-bit split because the quotient is
+  0/1"** — rejected by `sq-jfkwk` (§10.7): the constant-`rhs` bound tightening
+  already makes the quotient range check 1 bit, so the specialized path is
+  opcode-for-opcode identical to HEAD. Do not re-derive it.
+- **Row 8's own TODO — "NOT-canonicalization to unlock `IfElse` merging"** —
+  implemented, unit-tested and measured by `sq-seust` (§10.8): the merge fires
+  **zero** times across 556 corpus packages, and the NOT-canonicalization half is
+  unnecessary anyway (upstream's #6886 removed the stated blocker the same day the
+  TODO was written). PARKED, no PR. Do not re-derive.
 - "AND/XOR outputs unconstrained vs `redundant_range` assumption is a bug" — it
   is a documented Barretenberg backend contract (issue #1439 +
   `redundant_range.rs:172` comment). A portability question, not a missed
@@ -441,8 +454,8 @@ edge sequences them (§10.4).
 |---|---|---|---|
 | `sq-jthy1` | opus | `ssa/opt/checked_to_unchecked.rs` | elide overflow checks dominated by a later range check (#7161); Brillig failure-point semantics in scope |
 | `sq-m3l62` | opus | `ssa/opt/flatten_cfg/value_merger.rs` | ArrayGet through IfElse (#5501); conservative use/alias analysis; precedent PR #11512 |
-| `sq-seust` | sonnet | `ssa/ir/dfg/simplify.rs` | NOT canonicalization for IfElse merging; PARK with a findings note if measured neutral (PR #11580 upkeep landmine) |
-| `sq-jfkwk` | sonnet | findings first; `acir/acir_context/mod.rs` only on a win | comparison-lowering experiment; fail-closed on the #10159 witness-sharing landmine; null result acceptable |
+| `sq-seust` | sonnet | `ssa/ir/dfg/simplify.rs` | NOT canonicalization for IfElse merging; PARK with a findings note if measured neutral (PR #11580 upkeep landmine) — **MEASURED NULL RESULT (0 firings / 556 packages); PARKED per that instruction, no PR; see §10.8** |
+| `sq-jfkwk` | sonnet | findings first; `acir/acir_context/mod.rs` only on a win | comparison-lowering experiment; fail-closed on the #10159 witness-sharing landmine; null result acceptable — **NULL RESULT returned, no PR proposed; bead still open, see §10.7** |
 | `sq-felqr` | opus | design note on noir#4629 only | quadratic ACIR growth; NO implementation before upstream buy-in — **design note DELIVERED, empirical half + live-thread check PENDING; bead still open, see §10.6** |
 | `sq-b0vpc` | sonnet | `noir_stdlib/src/collections/bounded_vec.nr` | only the TomAFrench capacity-assert slice of #5027 |
 | `sq-eesz3` | sonnet | none (findings-only) | #6624 / #6313 / #4972 measurement comments upstream — **source analysis done, empirical half + live-thread checks PENDING; bead still open, see §10.5** |
@@ -524,3 +537,80 @@ construction and that shares a root cause with #13046. The blocking first step
 is therefore not design but **re-running the issue's own reproducer at HEAD to
 confirm the bug still reproduces**; the full protocol is §7 of the record. One
 upstream comment is **drafted, not posted**, pending @jeswr review.
+
+### 10.7 `sq-jfkwk` (row 9, comparison lowering power-of-two split) — null result (2026-07-27)
+
+> 🤖 **SPARQ agent** [OPUS-5]. Full record:
+> `noir-comparison-lowering-10159.md` (analysed against noir `e22cd89b`,
+> workspace version `1.0.0-beta.25`).
+
+The experiment was run at source level and **the sketch is rejected on the
+evidence**. No upstream PR is proposed for it and `acir/acir_context/mod.rs` was
+not touched, per the §10.3 fail-closed instruction. The bead stays **open**,
+blocked on the same empirical half as `sq-eesz3` (§10.5) and `sq-felqr` (§10.6) —
+the box had no rustc `1.89.0` (the workspace pin; only `1.88.0` installed,
+`rustup` read-only), hence no `nargo` and no `bb` — and, for the witness-sharing
+question, on reading the #10159 thread, which was not fetchable in that run.
+
+The evidence base is stronger than the sibling records' because upstream commits
+the *expected ACIR* for these lowerings as snapshot tests, so the opcode sequence
+is readable without building:
+
+| finding | consequence |
+|---|---|
+| for constant `rhs`, `euclidean_division_var` already tightens `max_q_bits` to `bit_size - rhs_bits + 1`, which for `more_than_eq_var` is exactly **1** | the "quotient range check" the sketch removes is already a 1-bit range check — i.e. it already *is* the boolean constraint the sketch would emit for `b` |
+| the hint's own output range checks and the explicit ones are identical checks on identical witnesses, deduplicated by the ACVM `redundant_range` optimizer | only one range check per output survives; the §7 "explicitly rejected" entry for the redundant remainder check is confirmed, with the mechanism corrected |
+| for a power-of-two divisor the `r < rhs` bound constraint degenerates (padding constant `0`) to the *same* range check on the *same* witness, and is deduplicated too | nothing is left to save |
+| upstream's committed `lt_u8` snapshot shows the whole comparison as: Brillig hint + `RANGE(q,1)` + `RANGE(r,8)` + one `AssertZero` | the proposed specialization is **opcode-for-opcode identical** to HEAD ⇒ it cannot win gates and can only lose them |
+| `less_than_var` returns the *expression* `1 − q`, never a witness, so `a<b`, `a>=b` and `!(a<b)` all share one hint and one pair of range checks, with the negation free | a derived mechanism for the #10159 regression ("stopped sharing a witness"), and the specific risk any future work in that function must be measured against — **hypothesis, the PR thread was not read** |
+
+One **adjacent candidate** was found and is deliberately left unimplemented:
+`bound_constraint_with_offset`'s constant-`rhs` fast path is gated on
+`try_into_u128()`, which fails at exactly `2^128`, so 128-bit truncations and
+`u128` comparisons fall to the general path and pay a redundant second 128-bit
+range check on a fresh witness (visible in the committed
+`truncate_field_to_128_bits` snapshot). It sits in a different function from the
+comparison lowering and does not engage the witness-sharing risk, but it is a
+constraint *removal* and therefore under-constraining-sensitive; it must clear the
+§10.2 acceptance protocol and the record's §7 measurement protocol before any PR.
+One upstream comment is **drafted, not posted**, pending @jeswr review.
+
+### 10.8 `sq-seust` (row 8, NOT-canonicalization for `IfElse` merging) — measured null result, PARKED (2026-07-27)
+
+> 🤖 **SPARQ agent** [OPUS-5]. Full record:
+> `noir-not-canonicalization-ifelse-merging.md` (analysed *and measured* against
+> noir `e22cd89b`, workspace version `1.0.0-beta.25`).
+
+Unlike §10.5–10.7 this run **was not blocked on tooling**: rustc `1.89.0` installs
+cleanly into a writable `RUSTUP_HOME`, so the compiler was built and a release
+`nargo` measured over both corpora. That recipe is §8 of the record and **unblocks
+the empirical halves of `sq-eesz3`, `sq-felqr` and `sq-jfkwk`** (`bb` is still
+absent, so gate counts remain out of reach).
+
+The optimization was **implemented, unit-tested and measured**, then parked on the
+evidence, per the bead's own *"PARK with a findings note if measured neutral"*:
+
+| finding | consequence |
+|---|---|
+| the TODO'd collapse fires **0 times** across 556 packages (518 noir `test_programs/{benchmarks,execution_success}` + 38 sparq `zk/{compose,xpath}`), instrumented with an env-gated per-site counter | no win exists to measure at gate level; ACIR is unchanged — verified against a baseline `nargo` rebuilt from unpatched HEAD, and the shared benchmarks reproduce the §5.2 baselines exactly |
+| the sketch's hard half is **unnecessary**: all 259 firings of the two *existing* nested-merge rules matched by plain `ValueId` equality, and the structural `Not` comparison never added a match | NOT-canonicalization/CSE was never the blocker |
+| the TODO's stated blocker was removed by upstream **#6886** (jfecher, `not_instructions` memo, *"keeps ids unique which helps simplifications"*) the **same day** the TODO landed in #6875, and `simplify.rs` already folds `!!v => v` | the comment has misinformed readers for ~19 months; correcting it is a 2-line change that should ride along with a substantive PR, not go up alone (§4.2 closes typo-scale PRs) |
+| the collapse can only ever match **array/vector-typed** merges — a numeric `IfElse` is lowered to arithmetic by the same function before any outer merge can inspect it | the opportunity is narrower than the TODO suggests; the 259 existing-rule firings all came from 3 nested-array-merge fixtures |
+| the shape row 8 targets is `if c { if !c { a } else { b } } else { d }` — dead by construction — and flattening gates nested branches by the **conjunction** `c & c2`, never by `c` or `!c` | zero is the expected count, not an artefact of a thin corpus |
+
+Soundness splits by shape, and only **row 3** (the collapse that reads the
+*then*-value) rests on the *at-most-one-condition-true* invariant the shipped
+rules assume (`ssa/interpreter/mod.rs:1213-1230`). **Row 4** — the mirrored
+*else*-value collapse — does **not**: an outer selected else-branch only proves
+the matched inner condition *false*, and since *both* inner conditions may be
+false the nested merge is then the zero value, not the arm the rewrite
+substitutes (record §2 carries the counterexample). Row 4 is therefore **not
+claimed sound and not offered as reconstructable**, and the same gap sits under
+upstream's already-shipped row 2 — unchecked from here, captured as follow-up.
+The patch does rewrite only *values*, never the outer `else_condition` that
+upstream's `do_not_replace_else_condition_with_nested_if_same_then_cond`
+regression test pins. It keeps `cargo test -p noirc_evaluator` green (1887
+passed, no snapshot moved) with three added tests that **fail on HEAD and pass
+patched**, and the AST-fuzzer `arbtest` targets green — but none of that
+exercises the both-inner-conditions-false case, so it is not evidence for row 4. It is **not carried in this repo** — no
+upstream PR is proposed, and none should be until a program produces the shape.

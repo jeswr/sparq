@@ -64,6 +64,69 @@ retract or suppress a pass, never grant one.  Reading one as a pass would extend
 authority into a channel the standing review brief does not mandate, so including them
 can only ever SHRINK the promote-set.
 
+AUTHOR XOR REVIEWER (the second withhold-only axis)
+---------------------------------------------------
+Head binding pairs a verdict to a HEAD.  It says nothing about WHO wrote it, and until
+this guard existed nothing in the arming chain compared the verdict's author to the PR's
+authorship at all: a PR's own author could post ``VERDICT: pass`` on their own PR and the
+bridge would promote it to ``review:pass``, after which ``auto-arm`` arms it.  MEASURED on
+the live repository, not hypothesised — see the ``[OPUS-5]`` note below.
+
+The identity axis used is the PR's COMMIT-AUTHORSHIP set at the reviewed head:
+
+* every commit author, co-author and committer GitHub resolved to an account on the
+  commits that make up the head, plus
+* every ``Co-authored-by:`` trailer whose address is a ``…@users.noreply.github.com``
+  form, which names an account GitHub itself may have failed to resolve.
+
+WHO OPENED THE PR IS DELIBERATELY *NOT* IN THAT SET, and that exclusion is the whole
+design.  Every local agent — the one that writes the code and the one that reviews it —
+acts under the SAME operator login, so that login lands on the PR-author field of work it
+did not write.  Refusing on it rejects the normal, legitimate review path: sparq#4331 and
+#4386 were both independent cross-agent reviews (verified out of band; on the wire,
+``COMMIT authorship=['claude'], jeswr_committed=False``), and an opener-based rule called
+both self-approvals.  Since 29 of 34 open non-draft PRs are unreachable by the automated
+review lane, a hand-dispatched agent verdict is their ONLY route to a review, so refusing
+it trades a security hole for a total arming stall.  ``pr.opener`` is therefore carried
+and REPORTED (``::warning``, ``opener_verdicts=N``) but never changes a decision.
+
+Commit authorship is kept because it is the one part that is provable on the wire and is
+already repository policy: a verdict is void if its author contributed commits to the
+head being reviewed.
+
+Logins are normalised (case-folded, a trailing ``[bot]`` stripped) because GitHub reports
+the SAME App inconsistently: GraphQL ``PullRequest.author.login`` says
+``sparq-orchestrator`` while ``GitActor.user.login`` and the REST comment author both say
+``sparq-orchestrator[bot]``.  An un-normalised comparison would silently never match a bot
+self-review — a guard that reads as present and is not.
+
+A verdict from inside that set is WITHHOLD-ONLY, exactly like a review body: its ``fail``
+or AMBIGUOUS still retracts (refusing a contributor's own retraction would be fail-open,
+and nobody falsely fails their own PR), but its ``pass`` can never GRANT the attestation.
+If the contributor set cannot be read COMPLETELY, no verdict may grant at all.
+
+WHAT THIS AXIS CANNOT DISTINGUISH — stated because a guard whose limits are unwritten
+gets mistaken for a stronger one.  It proves the verdict's author wrote no commit at the
+reviewed head.  It does NOT prove the reviewer is an independent JUDGMENT: two agent
+sessions driven by the same operator share one GitHub login, and because Claude Code
+commits as ``claude`` rather than as the operator, the operator's login is outside the
+commit set whether it reviewed the work or wrote it.  On the wire those two cases are
+IDENTICAL, so this guard cannot separate them and does not claim to.
+
+Note what follows for any proposal to make agent PRs BOT-authored: that changes the
+PR-author field, not the commenter, so it does not supply the missing signal — it removes
+the last weak one and makes this guard admit every verdict unconditionally.  MEASURED
+2026-07-27: that route is not even available — there is no App private key on the work
+box (`gh auth status` shows only the operator's OAuth token), so subagents cannot push as
+the App.  registry#759 instead adds an `orchestrator` attestation class, deliberately
+INERT behind an enable interlock at the time of writing.  Plan on this axis staying
+necessary-but-not-sufficient: the separation has to be created on the REVIEWER side (a
+distinct reviewing principal, or a lane-written record the commenter cannot mint), and
+until one exists this guard must not be weakened on the assumption that one is coming.
+
+So this guard is NECESSARY, not SUFFICIENT, and both the refused set and the
+merely-reported set are surfaced (``::warning``) rather than failing silently.
+
 ACTIONS
 -------
 promote   head-bound verdict is pass, no hold label, ``review:pass`` absent -> add it.
@@ -83,6 +146,40 @@ unflag    ``review:unreviewed`` is stale (a verdict or another ``review:*`` labe
 # number of green, ready PRs that are not in the merge queue".  Measured cause: the
 # review write-path (a VERDICT comment) and the arming read-predicate (the review:pass
 # label) were joined only by a human.  registry#700 records the same mismatch class.
+#
+# [OPUS-5] 2026-07-26, AUTHOR-XOR-REVIEWER.  Census over all 119 open PRs (paginated,
+# totalCount cross-checked): 16 head-bound verdict comments from a trusted association;
+# 11 of the 16 posted by the login that also OPENED the PR; only 3 of the 16 by someone
+# who wrote a commit at that head.  PR authorship splits 33 `jeswr` / 86
+# `sparq-orchestrator`.
+#
+# The opener signal is NOT a self-approval signal here, and that correction is the reason
+# this module refuses on commit authorship ONLY.  Out-of-band dispatch records show
+# sparq#4331 and #4386 — both `jeswr`-opened with a `jeswr` head-bound pass — were
+# genuine independent cross-agent reviews.  On the wire they are indistinguishable from a
+# self-approval, because every local agent session (author AND reviewer) acts under the
+# one operator login while Claude Code commits under `claude`.  An opener-based refusal
+# would have rejected both, and with 29 of 34 open non-draft PRs unreachable by the
+# automated review lane, a hand-dispatched verdict is their only route to review.
+#
+# Three candidate axes, all measured:
+#   * `comment.user.login != pr.user.login`.  Fires on 11 of 16 but is UNCONDITIONALLY
+#     TRUE for the 86 bot-opened PRs (the App never comments), AND its 11 hits are not
+#     known to be self-approvals.  Rejected as a refusal; kept as an advisory report.
+#   * commit authorship at the head.  Fires on 3 of 16.  Narrow, but it is the only part
+#     provable on the wire and it matches existing repository policy (a verdict is void
+#     if its author contributed commits to the reviewed head).  ADOPTED as the refusal.
+#   * a registry ledger record as the grant predicate.  Measured against the `ledger`
+#     branch: 29 of 34 open non-draft PRs have NO record (all 29 `jeswr`-opened; all 5
+#     with a record bot-opened).  Requiring one is a total arming stall.  Rejected.
+#     The records also carry no reviewer provenance -- `host_envelope` is exactly
+#     {pr, repo, reviewed_sha, round} -- so they cannot attest WHO reviewed either.
+#
+# The adopted axis is necessary, NOT sufficient (see the module docstring): it cannot
+# separate two agent sessions sharing one operator login when the reviewer committed
+# nothing.  Closing that needs a distinct REVIEWER principal, or a lane-written record the
+# commenter cannot mint.  Making agent PRs bot-authored does NOT close it -- that moves the
+# author field, not the commenter, and would make this guard admit everything.
 
 from __future__ import annotations
 
@@ -122,6 +219,14 @@ HOLD_LABELS = frozenset(
 TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 
 VERDICT_RE = re.compile(r"^\s*(?:\*\*)?VERDICT:\s*(pass|fail)(?:\*\*)?\s*$")
+# `Co-authored-by: Name <1234+login@users.noreply.github.com>` / `<login@users.noreply…>`.
+# GitHub resolves most co-authors to an account on the GraphQL `authors` connection; this
+# recovers the ones it did not, which would otherwise be missing from the contributor set.
+COAUTHOR_NOREPLY_RE = re.compile(
+    r"^\s*co-authored-by:.*<(?:[0-9]+\+)?([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)"
+    r"@users\.noreply\.github\.com>\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
 # Verdict-SHAPED but not strictly parseable: "VERDICT: FAIL", "VERDICT: fail (retracting
 # my pass)", "VERDICT - pass".  Anchored at the START of the last non-blank line, so a
 # blockquoted (`> `), fenced, bulleted or back-ticked MENTION is not verdict-shaped and
@@ -162,12 +267,98 @@ class PullRequest:
     mergeable: str
     gate_conclusion: str | None
     labels: frozenset[str] = field(default_factory=frozenset)
+    # NORMALISED logins of everyone who wrote a COMMIT at this head.  A verdict from
+    # inside this set may withhold but never grant — see the docstring.
+    contributors: frozenset[str] = field(default_factory=frozenset)
+    # NORMALISED login of whoever OPENED the PR.  Advisory only: never refuses a grant.
+    opener: str = ""
+    # False when the commit list was truncated, so the set above is a LOWER BOUND and
+    # disjointness cannot be proven.  Refuses every grant; never blocks a retraction.
+    contributors_complete: bool = True
 
 
 @dataclass(frozen=True)
 class Decision:
     action: str  # promote | retract | flag | unflag | none
     reason: str
+    # True when a head-bound, trusted `VERDICT: pass` at this head was DISCARDED because
+    # its author wrote commits at that head.  Drives the ::warning that stops a refused
+    # self-approval from being a silent non-event.
+    self_review: bool = False
+    # True when a counted pass came from whoever OPENED the PR.  ADVISORY: reported so
+    # the population stays measurable, never acted on.  See `is_opener`.
+    opener_verdict: bool = False
+
+
+def normalize_login(login: object) -> str:
+    """Case-fold a GitHub login and strip a trailing ``[bot]``.
+
+    Load-bearing, not cosmetic.  GitHub reports one App under TWO spellings: GraphQL
+    ``PullRequest.author.login`` gives ``sparq-orchestrator`` while ``GitActor.user.login``
+    and the REST issue-comment author both give ``sparq-orchestrator[bot]``.  Comparing
+    the raw strings would make an App's self-review permanently invisible to this guard.
+    """
+    text = str(login or "").strip().lower()
+    if text.endswith("[bot]"):
+        text = text[: -len("[bot]")]
+    return text
+
+
+def commit_contributors(node: dict) -> tuple[frozenset[str], bool]:
+    """(normalised COMMIT-authorship logins, completeness) for one GraphQL PR node.
+
+    DELIBERATELY EXCLUDES the PR's opener.  Opening a PR is not writing its code: in this
+    repository a hand-dispatched review agent and the authoring agent BOTH act under the
+    operator's login, and the operator's login is on the PR-author field of work it did
+    not write.  Treating the opener as a contributor therefore refuses legitimate reviews
+    (measured: sparq#4331 and #4386 are independent cross-agent reviews whose reviewer
+    committed nothing — `COMMIT authorship=['claude'], jeswr_committed=False` — and both
+    were false positives of the opener rule).  ``pr.opener`` carries it for REPORTING.
+
+    Returns ``complete=False`` when the commit connection was truncated: the set is then
+    a LOWER BOUND, so a contributor could be missing from it and disjointness cannot be
+    proven.  Callers must refuse to GRANT on an incomplete set — never merely warn.
+    """
+    people: set[str] = set()
+    commits = node.get("commits") or {}
+    nodes = commits.get("nodes") or []
+    for entry in nodes:
+        commit = (entry or {}).get("commit") or {}
+        for author in ((commit.get("authors") or {}).get("nodes") or []):
+            people.add(normalize_login(((author or {}).get("user") or {}).get("login")))
+        people.add(
+            normalize_login(((commit.get("committer") or {}).get("user") or {}).get("login"))
+        )
+        for match in COAUTHOR_NOREPLY_RE.finditer(str(commit.get("message") or "")):
+            people.add(normalize_login(match.group(1)))
+    total = commits.get("totalCount")
+    complete = isinstance(total, int) and total <= len(nodes)
+    return frozenset(p for p in people if p), complete
+
+
+def is_contributor(login: object, pr: PullRequest) -> bool:
+    """True when this comment author may not GRANT: wrote code here, or unreadable set.
+
+    Fail-closed on BOTH unknowns.  An empty/absent comment author is treated as a
+    contributor because an unattributable comment cannot be shown to be independent, and
+    an incomplete contributor set makes EVERY author unprovable.
+    """
+    if not pr.contributors_complete:
+        return True
+    who = normalize_login(login)
+    return not who or who in pr.contributors
+
+
+def is_opener(login: object, pr: PullRequest) -> bool:
+    """True when this comment author merely OPENED the PR (advisory signal only).
+
+    NOT a refusal.  Opening a PR under a shared operator login says nothing about who
+    wrote the code or who reviewed it, and refusing on it stalls the normal review path
+    for the 29-of-34 open non-draft PRs the automated lane cannot reach.  Reported so the
+    population stays measurable, never acted on.
+    """
+    who = normalize_login(login)
+    return bool(who) and bool(pr.opener) and who == pr.opener
 
 
 def hold_labels(labels: Iterable[str]) -> list[str]:
@@ -239,45 +430,72 @@ def binds_head(body: str | None, head_sha: str) -> bool:
     return any(m.lower() == target for m in FULL_SHA_RE.findall(body))
 
 
-def head_bound_verdict(comments: Sequence[dict], head_sha: str) -> Verdict | None:
-    """The LATEST head-bound verdict from a trusted reviewer, or None.
+def classify_verdicts(
+    comments: Sequence[dict], head_sha: str, pr: PullRequest | None = None
+) -> tuple[list[Verdict], list[Verdict], list[Verdict]]:
+    """``(countable, self_passes, opener_passes)`` — head-bound trusted verdicts.
 
-    Ordering is by immutable ``created_at`` (then comment id) so that editing an older
-    comment can never reorder it ahead of a newer retraction.
+    ``countable`` is sorted oldest-first by immutable ``created_at`` (then comment id) so
+    that editing an older comment can never reorder it ahead of a newer retraction.
 
-    Entries carrying ``_channel == "review"`` come from a PR REVIEW body rather than an
-    issue comment.  They may only ever WITHHOLD (fail / AMBIGUOUS), never grant: reading
-    a review body as a PASS would extend arming authority into a channel the standing
-    review brief does not mandate, so the promote-set can only shrink by including them.
-    Their retractions DO count, because the composition hole is channel-independent — a
-    reviewer who withdraws a pass in a review body must not leave that pass standing.
+    TWO withhold-only axes remove a ``pass`` from ``countable`` while leaving a ``fail``
+    or AMBIGUOUS in place.  Both are one-directional on purpose: they can only ever SHRINK
+    the promote-set, and a retraction from a withheld source must still land or the guard
+    would be fail-open in composition.
+
+    * ``_channel == "review"`` — a PR REVIEW body rather than an issue comment.  Reading
+      one as a pass would extend arming authority into a channel the standing review
+      brief does not mandate.
+    * the author is in ``pr.contributors`` (or that set is unreadable) — author XOR
+      reviewer.  These land in ``self_passes`` so the caller can REPORT the refusal
+      instead of letting a suppressed self-approval vanish silently.
+
+    ``pr=None`` disables only the second axis; it exists so the head-binding, ordering and
+    association guards stay directly testable in isolation.
     """
-    found: list[Verdict] = []
+    countable: list[Verdict] = []
+    self_passes: list[Verdict] = []
+    opener_passes: list[Verdict] = []
     for comment in comments:
         if not isinstance(comment, dict):
             continue
         value = trailing_verdict(comment.get("body"))
         if value is None:
             continue
-        if value == "pass" and comment.get("_channel") == "review":
-            continue
         association = str(comment.get("author_association") or "").upper()
         if association not in TRUSTED_ASSOCIATIONS:
             continue
         if not binds_head(comment.get("body"), head_sha):
             continue
-        found.append(
-            Verdict(
-                value=value,
-                author=str((comment.get("user") or {}).get("login") or "?"),
-                created_at=str(comment.get("created_at") or ""),
-                comment_id=int(comment.get("id") or 0),
-            )
+        author = (comment.get("user") or {}).get("login")
+        found = Verdict(
+            value=value,
+            author=str(author or "?"),
+            created_at=str(comment.get("created_at") or ""),
+            comment_id=int(comment.get("id") or 0),
         )
-    if not found:
-        return None
-    found.sort(key=lambda v: (v.created_at, v.comment_id))
-    return found[-1]
+        if value == "pass":
+            if comment.get("_channel") == "review":
+                continue
+            if pr is not None and is_contributor(author, pr):
+                self_passes.append(found)
+                continue
+            if pr is not None and is_opener(author, pr):
+                # ADVISORY ONLY — still countable.  See ``is_opener``.
+                opener_passes.append(found)
+        countable.append(found)
+    countable.sort(key=lambda v: (v.created_at, v.comment_id))
+    self_passes.sort(key=lambda v: (v.created_at, v.comment_id))
+    opener_passes.sort(key=lambda v: (v.created_at, v.comment_id))
+    return countable, self_passes, opener_passes
+
+
+def head_bound_verdict(
+    comments: Sequence[dict], head_sha: str, pr: PullRequest | None = None
+) -> Verdict | None:
+    """The LATEST COUNTABLE head-bound verdict, or None."""
+    countable, _, _ = classify_verdicts(comments, head_sha, pr)
+    return countable[-1] if countable else None
 
 
 def is_green_and_ready(pr: PullRequest) -> bool:
@@ -302,23 +520,67 @@ def decide(pr: PullRequest, comments: Sequence[dict]) -> Decision:
     if not pr.base_ref:
         return Decision("none", "unknown-base")
 
-    verdict = head_bound_verdict(comments, pr.head_sha)
+    countable, self_passes, opener_passes = classify_verdicts(comments, pr.head_sha, pr)
+    verdict = countable[-1] if countable else None
+
+    def out(action: str, reason: str) -> Decision:
+        """Stamp every exit so neither a refusal nor an advisory exits silently."""
+        if self_passes:
+            who = ", ".join(sorted({f"@{v.author}" for v in self_passes}))
+            detail = (
+                "commit-authorship set unreadable"
+                if not pr.contributors_complete
+                else f"{who} wrote commits at this head"
+            )
+            reason = f"{reason}; SELF-REVIEW pass by {who} DISCARDED ({detail})"
+        if opener_passes:
+            # ADVISORY. The decision above is unchanged by this branch — on the wire an
+            # opener-authored verdict is indistinguishable from an independent agent
+            # review under the same operator login, and refusing it stalls the only
+            # review path 29 of 34 open non-draft PRs have.
+            who = ", ".join(sorted({f"@{v.author}" for v in opener_passes}))
+            reason = (
+                f"{reason}; NOTE pass by the PR opener {who} COUNTED "
+                "(opener != code author; not separable on the wire)"
+            )
+        return Decision(
+            action,
+            reason,
+            self_review=bool(self_passes),
+            opener_verdict=bool(opener_passes),
+        )
+
     has_attestation = REVIEW_ATTESTATION in pr.labels
     flagged = UNREVIEWED_LABEL in pr.labels
 
     if verdict is None:
+        # A discarded self-review is POSITIVE evidence, not absence.  The "never retract
+        # on absence" rule below exists so a hand-applied label with no comment behind it
+        # is not fought — but here there IS a comment behind it and its author wrote
+        # commits at this very head, which is already repository policy for voiding a
+        # verdict.  Preventing the next promotion without withdrawing an attestation that
+        # rests solely on such a comment would leave the exposure in place.
+        #
+        # SCOPE: `self_passes` is commit-authorship only.  A pass from the PR's OPENER
+        # never reaches here — it stays countable — so this branch cannot withdraw a
+        # label that rests on a legitimate same-login agent review.
+        if has_attestation and self_passes:
+            return out(
+                "retract",
+                f"{REVIEW_ATTESTATION} rests only on a self-review — withdrawing it",
+            )
         # NEVER retract on absence: an orchestrator-applied label has no comment behind
         # it, and removing it would fight the human lane and un-arm a real review.
         if flagged:
-            return Decision("none", "flagged, still unreviewed")
+            return out("none", "flagged, still unreviewed")
         other_review_label = any(
             label.startswith("review:") for label in pr.labels
         )
         if other_review_label or has_attestation:
-            return Decision("none", "already in a review lane")
+            return out("none", "already in a review lane")
         if is_green_and_ready(pr):
-            return Decision("flag", "green + mergeable but invisible to every lane")
-        return Decision("none", "no head-bound verdict")
+            return out("flag", "green + mergeable but invisible to every lane")
+        return out("none", "no head-bound verdict")
 
     if verdict.value == AMBIGUOUS:
         # A trusted reviewer wrote a verdict-SHAPED line at THIS head that does not
@@ -326,7 +588,7 @@ def decide(pr: PullRequest, comments: Sequence[dict]) -> Decision:
         # guessing its polarity would arm on a coin flip.  Refuse both: never promote,
         # and drop an attestation this line may well be retracting.
         if has_attestation:
-            return Decision(
+            return out(
                 "retract",
                 f"ambiguous verdict line by {verdict.author} supersedes "
                 f"{REVIEW_ATTESTATION} — polarity unreadable, refusing to arm",
@@ -336,34 +598,34 @@ def decide(pr: PullRequest, comments: Sequence[dict]) -> Decision:
             and is_green_and_ready(pr)
             and not any(label.startswith("review:") for label in pr.labels)
         ):
-            return Decision(
+            return out(
                 "flag", f"ambiguous verdict line by {verdict.author} — needs a re-review"
             )
-        return Decision(
+        return out(
             "none", f"ambiguous verdict line by {verdict.author} — polarity unreadable"
         )
 
     if flagged:
-        return Decision("unflag", f"verdict arrived ({verdict.value})")
+        return out("unflag", f"verdict arrived ({verdict.value})")
 
     if verdict.value == "fail":
         if has_attestation:
-            return Decision(
+            return out(
                 "retract",
                 f"head-bound fail by {verdict.author} supersedes {REVIEW_ATTESTATION}",
             )
-        return Decision("none", "head-bound fail, no attestation to retract")
+        return out("none", "head-bound fail, no attestation to retract")
 
     # verdict.value == "pass"
     holds = hold_labels(pr.labels)
     if holds:
-        return Decision("none", f"hold ({', '.join(holds)})")
+        return out("none", f"hold ({', '.join(holds)})")
     if has_attestation:
-        return Decision("none", "already attested")
+        return out("none", "already attested")
     if pr.is_draft:
         # auto-arm un-drafts on the label; do not attest a draft the author still owns.
-        return Decision("none", "draft")
-    return Decision(
+        return out("none", "draft")
+    return out(
         "promote", f"head-bound pass by {verdict.author} at {pr.head_sha[:12]}"
     )
 
@@ -392,8 +654,23 @@ def run_gh_read(argv: list[str]) -> str:
 # scripts/tests/test_verdict_bridge.py::TestScopedRunAuthority.
 PR_NODE_FIELDS = """
         number state isDraft baseRefName headRefOid mergeable
+        author{login}
         labels(first:100){nodes{name} pageInfo{hasNextPage}}
-        commits(last:1){nodes{commit{checkSuites(first:0){totalCount}}}}
+        # 100 is GitHub's DOCUMENTED per-connection maximum.  A larger `last:` is
+        # currently accepted (probed: `last:250` returns without an error), but resting a
+        # security guard on undocumented leniency is how it breaks silently later — and
+        # if the server ever capped instead of erroring, the guard would read a PARTIAL
+        # contributor set.  `totalCount` makes truncation observable either way, and
+        # `contributors_complete=False` then refuses every grant.  Measured ceiling on
+        # the live population: 10 commits.
+        commits(last:100){
+          totalCount
+          nodes{commit{
+            message
+            authors(first:20){nodes{user{login}}}
+            committer{user{login}}
+          }}
+        }
         reviews(last:30){nodes{
           databaseId body authorAssociation submittedAt author{login}
         }}
@@ -662,6 +939,7 @@ class VerdictBridge:
         if (labels.get("pageInfo") or {}).get("hasNextPage"):
             # Fail closed: an unseen label could be a hold.
             raise GhError(f"PR #{node.get('number')}: label set exceeds one page")
+        contributors, complete = commit_contributors(node)
         return PullRequest(
             number=int(node["number"]),
             state=str(node.get("state") or "").upper(),
@@ -675,6 +953,9 @@ class VerdictBridge:
                 for item in (labels.get("nodes") or [])
                 if isinstance(item, dict) and str(item.get("name", "")).strip()
             ),
+            contributors=contributors,
+            contributors_complete=complete,
+            opener=normalize_login((node.get("author") or {}).get("login")),
         )
 
     def reconfirm(
@@ -713,6 +994,8 @@ class VerdictBridge:
     def run(self) -> int:
         errors = 0
         writes = 0
+        self_reviews = 0
+        opener_verdicts = 0
         if self.only_pr is not None:
             nodes = self.fetch_one(self.only_pr)
             self.log(
@@ -738,6 +1021,27 @@ class VerdictBridge:
                 errors += 1
                 continue
 
+            # VISIBLE TERMINAL STATE.  Emitted BEFORE the `none` short-circuit and
+            # independently of the action, because the whole point of this guard is that
+            # a refused self-approval usually produces NO label change at all — and a
+            # refusal that writes nothing and says nothing is indistinguishable from
+            # never having looked.  ::warning surfaces it in the Actions run summary; the
+            # `flag` action puts `review:unreviewed` on the PR itself, which is what
+            # review-lane-alarm censuses as a blind spot.
+            if decision.self_review:
+                self_reviews += 1
+                self.log(
+                    f"::warning title={PROGRAM} refused a self-review::PR #{pr.number}: "
+                    f"{decision.reason}"
+                )
+            if decision.opener_verdict:
+                # ADVISORY, counted separately: this one was COUNTED, not refused.
+                # Conflating it with the refusals would misreport the guard's reach.
+                opener_verdicts += 1
+                self.log(
+                    f"::notice title={PROGRAM} counted an opener verdict::"
+                    f"PR #{pr.number}: {decision.reason}"
+                )
             if decision.action == "none":
                 continue
             self.log(
@@ -779,7 +1083,10 @@ class VerdictBridge:
             except GhError as error:
                 self.log(f"[{PROGRAM}] PR #{pr.number}: label edit failed ({error})")
                 errors += 1
-        self.log(f"[{PROGRAM}] complete: writes={writes} errors={errors}")
+        self.log(
+            f"[{PROGRAM}] complete: writes={writes} errors={errors} "
+            f"self_reviews_refused={self_reviews} opener_verdicts={opener_verdicts}"
+        )
         return errors
 
 
@@ -1016,6 +1323,66 @@ def self_test() -> None:
         _channel="review",
     )
     assert decide(pr_fixture(), [old_pass, review_fail, newest_review_pass]).action != "promote"
+
+    # AUTHOR XOR REVIEWER.  A verdict from someone who wrote COMMITS at this head may
+    # WITHHOLD but never GRANT.  The control arm is load-bearing: with the guard deleted
+    # BOTH arms promote and the second assertion fires, so this is non-vacuous for the
+    # same-login case that is the whole reason the guard exists.
+    #
+    # And the OPENER is NOT refused: `jeswr` opening a PR whose commits are `claude`'s is
+    # the normal shape of a legitimate cross-agent review here (sparq#4331, #4386).
+    opener_only = pr_fixture(opener="jeswr", contributors=frozenset({"claude"}))
+    opener_pass = comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr")
+    opened = decide(opener_only, [opener_pass])
+    assert opened.action == "promote", opened
+    assert opened.opener_verdict and not opened.self_review, opened
+    assert "COUNTED" in opened.reason, opened
+    # ... and `commit_contributors` must not smuggle the opener back in.
+    who, complete = commit_contributors(
+        {"author": {"login": "jeswr"},
+         "commits": {"totalCount": 1, "nodes": [{"commit": {
+             "message": "x",
+             "authors": {"nodes": [{"user": {"login": "claude"}}]},
+             "committer": {"user": {"login": "web-flow"}}}}]}}
+    )
+    assert complete and "jeswr" not in who, who
+    contrib = pr_fixture(contributors=frozenset({"jeswr", "claude"}))
+    self_pass = comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr")
+    indep_pass = comment(f"{HEAD}\n\nVERDICT: pass", user="reviewer")
+    assert decide(contrib, [indep_pass]).action == "promote", "control arm must promote"
+    refused = decide(contrib, [self_pass])
+    assert refused.action != "promote", refused
+    assert refused.self_review and "SELF-REVIEW" in refused.reason, refused
+    # ... and the bot-suffix spelling difference does not launder it.
+    app_contrib = pr_fixture(contributors=frozenset({"sparq-orchestrator"}))
+    app_self = comment(f"{HEAD}\n\nVERDICT: pass", user="sparq-orchestrator[bot]")
+    assert decide(app_contrib, [app_self]).action != "promote"
+    # ... a contributor's FAIL still retracts (withhold-only, never a DoS on retraction).
+    own_fail = comment(f"{HEAD}\n\nVERDICT: fail", user="jeswr")
+    held = pr_fixture(
+        labels={REVIEW_ATTESTATION}, contributors=frozenset({"jeswr", "claude"})
+    )
+    assert decide(held, [own_fail]).action == "retract"
+    # ... an unreadable contributor set refuses every grant, but not a retraction.
+    torn = pr_fixture(contributors_complete=False)
+    assert decide(torn, [indep_pass]).action != "promote"
+    assert (
+        decide(
+            pr_fixture(labels={REVIEW_ATTESTATION}, contributors_complete=False),
+            [comment(f"{HEAD}\n\nVERDICT: fail", user="reviewer")],
+        ).action
+        == "retract"
+    )
+    # ... and a clean PR does not report a phantom self-review.
+    assert not decide(contrib, [indep_pass]).self_review
+    # ... an attestation resting ONLY on a self-review is WITHDRAWN (positive evidence),
+    #     while absence of any verdict still never retracts.
+    self_only = pr_fixture(
+        labels={REVIEW_ATTESTATION}, contributors=frozenset({"jeswr", "claude"})
+    )
+    assert decide(self_only, [self_pass]).action == "retract"
+    assert decide(self_only, []).action == "none"
+    assert decide(self_only, [indep_pass, self_pass]).action == "none"
 
     print(f"{PROGRAM} self-test: PASS")
 

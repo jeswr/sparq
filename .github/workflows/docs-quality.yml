@@ -430,6 +430,25 @@ jobs:
       # self-test in differential.yml).
       - name: Self-test demoted-lane failure filer (id/dedupe/append/log-tail logic)
         run: python3 scripts/ci-file-demoted-lane-failure.py --self-test
+      # [OPUS-5] sq-jxeqz / #4559: the bench HARD-ZONE gate's pure logic
+      # (scripts/bench_hardzone.py). Its --self-test previously ran ONLY inside bench.yml's
+      # "Hard zone" step, which is guarded `github.event_name != 'schedule' && github.ref ==
+      # 'refs/heads/main'` — so the gate's own logic was NEVER exercised on a PR, and a change
+      # to it could only be discovered by reddening main AFTER merge. That is exactly how the
+      # zero-boundary defect in #4559 reached main and then persisted (15 of the last 60
+      # Benchmarks runs failed on that one step). Running it HERE, on every PR, means a
+      # regression in the regression gate reds the PR that causes it. Hermetic: no network,
+      # no git, no repo writes (same stdlib-only pattern as the lints above).
+      - name: Self-test bench hard-zone gate (zero boundary + noise floor + resolution bounds)
+        run: python3 scripts/bench_hardzone.py --self-test
+      # ...and the WIRING of that gate: the step above must exist and stay unconditional, the
+      # bench.yml lane must keep `set -euo pipefail` with no `|| true` / continue-on-error, and
+      # the hard-zone step must keep running BEFORE the Store step (the anti-laundering
+      # invariant — Store auto-pushes this run's point, so gating afterwards would publish a
+      # rejected regression into the very median that judges it). This test also asserts its
+      # OWN step is present, so the seam cannot be un-wired one level up.
+      - name: Self-test bench hard-zone WIRING (PR coverage + publish order + no swallow)
+        run: python3 scripts/tests/test_bench_hardzone_wiring.py
       # [FABLE-5] formal-lanes fix: the nightly miri.yml UB lane's verdict CLASSIFIER
       # (scripts/miri_classify_verdict.py) decides whether a shard's non-passes are known
       # per-test-cap TIMEOUTS (cost debt, sq-0s15k — non-fatal) or a GENUINE Miri UB/assertion
@@ -448,6 +467,18 @@ jobs:
         run: |
           python3 scripts/triage.py --self-test
           python3 scripts/retriage.py --self-test
+      # [OPUS-5] #1135: scripts/triage-area.py is the third member of that triage
+      # family — it CLEARS the `needs:area` park triage.py sets. It runs by hand
+      # (no cron), so without a PR-time gate a rule-table edit would only be
+      # discovered by mislabeling live issues, and a wrong `area:` routes a worker
+      # at the wrong crate. Both suites are hermetic (stdlib only, no gh/network):
+      # the script's own rule self-test, plus the independent safety tests
+      # (fail-closed / no unpark-without-an-area / no invented label / the three
+      # rule orderings that were measured wrong on the live backlog).
+      - name: Self-test triage-area.py (needs:area classifier — fail-closed + no-drift)
+        run: |
+          python3 scripts/triage-area.py --self-test
+          python3 scripts/tests/test_triage_area.py
       # [FABLE-5] #3759 / registry#563 item 4: the transient-tolerant gh READ retry
       # helper (scripts/gh_retry.py — bounded, transient-5xx-only, fail-closed
       # read-allow-list so mutations/arm calls can never be wrapped) and the two arm
@@ -926,6 +957,31 @@ jobs:
       # fail-loud exits (replay error / total blocker => non-zero).
       - name: Self-test the nightly selection-bug alarm (correlation + fail-loud — sq-va7at)
         run: python3 scripts/tests/test_ci_selection_alarm.py
+      # [OPUS-5] The review-lane BLIND-SPOT alarm (scripts/review_lane_alarm.py,
+      # .github/workflows/review-alarm.yml). Hermetic (no gh, no network). Two halves:
+      # the four verdict obligations — no-verdict is not armable, a superseded head does
+      # not count, an author cannot verdict their own PR, and the review brief's own
+      # quoted `VERDICT: pass` instruction text is not a pass — plus the YAML SEAM
+      # inspection (schedule present, self-test ordered before the live step, the call
+      # site intact, and the job's permissions carrying `issues: write` with NO
+      # `pull-requests: write`, so the detector can never acquire arming authority).
+      # The suite also pins its OWN call site here, so it cannot silently leave CI.
+      - name: Self-test the review-lane blind-spot alarm (verdict obligations + YAML seam)
+        run: python3 scripts/tests/test_review_lane_alarm.py
+      # [OPUS-5] sq-huwr8: the three DETECTOR lanes (review-alarm / formal-alarm /
+      # selection-alarm) RED by design, and each one's header used to assert it "can
+      # never enter the `ci-summary / gate` poll set" because it creates no check-run on
+      # a PR head or merge-group ref. True premise, false conclusion: ci-summary.yml also
+      # runs on `push: branches: [main]`, so a scheduled alarm's check-run lands on the
+      # very head SHA that gate polls. MEASURED on main head cb0c6739c, render_verdict()
+      # listed `review-lane blind-spot alarm: failure` as a GATING failure. What makes
+      # these lanes safe to RED is their advisory-registry declaration, nothing else.
+      # This suite drives the REAL render_verdict() so deleting a declaration REDs on the
+      # gate's own exit code, carries an UNDECLARED-lane control so the assertions cannot
+      # go vacuous, and DISCOVERS *alarm*.yml from disk so a fourth detector added with
+      # the same false header reds on arrival.
+      - name: Self-test the alarm/detector lanes are DECLARED non-gating (sq-huwr8)
+        run: python3 scripts/tests/test_alarm_lanes_non_gating.py
       # [SONNET-4.6] sq-1cb6l: the 5 remaining hermetic test suites found by the
       # #1670 audit, wired here alongside the other ci-scripts self-tests.
       #

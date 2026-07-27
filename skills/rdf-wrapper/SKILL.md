@@ -62,19 +62,32 @@ Typed accessors are strict:
 All return `Result<_, AccessError>`; do not silently coerce a mismatched RDF
 datatype.
 
-Six explicitly experimental features implement proposals that remain unlanded
-in rdfjs/wrapper:
+Eleven explicitly experimental, default-off features track proposals that
+remain unlanded in rdfjs/wrapper:
 
 ```toml
 sparq-wrapper = { version = "0.1", features = [
-  "proposed-distinct",
+  "proposed-async-events",
+  "proposed-async-node",
+  "proposed-async-store",
   "proposed-cardinality",
   "proposed-codecs",
+  "proposed-distinct",
   "proposed-graph-scope",
+  "proposed-graph-scope-events",
+  "proposed-json",
   "proposed-observe",
   "proposed-typed-focus",
 ] }
 ```
+
+The async events, async node, async store, graph-scope events, and JSON
+features currently expose reserved, empty modules; enabling them adds no API.
+Every other proposal feature is implemented. `proposed-distinct` is exposed as
+inherent `Dataset` methods in the crate root rather than through a `proposed::`
+module. See the
+[per-feature proposal status pages](references/README.md) for the
+implemented and reserved feature inventory. <!-- [SONNET-4.6] sq-1rg2q.1 -->
 
 `proposed-graph-scope` adds a read-many/write-one `GraphScope` based on
 rdfjs/wrapper draft PR #95. Its reads are the deduplicated projection of
