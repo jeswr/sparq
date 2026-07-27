@@ -25,7 +25,7 @@ copied from the package README.
 | property | value | how verified |
 |---|---|---|
 | runtime dependencies | **none** — `dependencies` and `peerDependencies` are both absent | `package.json` |
-| runtime imports | exactly one: `node:assert/strict`; `node:test` is `await import`ed lazily inside `resolveTestApi` | `src/index.mjs:23`, `:44` |
+| runtime imports | Node built-ins only: a static `import { strict as assert } from 'node:assert'`, plus a lazy `await import('node:test')` inside `resolveTestApi` when no test API is injected | `src/index.mjs:23`, `:48` |
 | public surface | `runDataFactoryTests`, `runDatasetTests`, `runStreamTests`, `runAll` (+ a default-export bag) | `src/index.mjs:128/345/645/719/732` |
 | size | 733 lines of plain ESM, 7 `describe` blocks, **49 `test(...)` registrations** (18 DataFactory / 28 Dataset / 3 Stream) | counted over `src/index.mjs` |
 | types | hand-written `src/index.d.ts` against `@rdfjs/types`, no build step | `src/index.d.ts` |
