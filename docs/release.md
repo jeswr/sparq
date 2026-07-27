@@ -144,13 +144,11 @@ Pushing the tag triggers `.github/workflows/release.yml`:
    delete the `docker` job from `release.yml` (or gate it with `if: false`) — the other
    jobs are independent of it.
 
-Note: `dist.yml` *also* fires on `v*` tags (bare per-tier binaries as workflow artifacts).
-`release.yml` deliberately duplicates its matrix rather than `workflow_call`-ing it —
-`dist.yml` has no `workflow_call` trigger and is owned by another work-thread; see the
-header comment in `release.yml`. Once both are merged, drop the `tags:` trigger from
-`dist.yml` (keep `workflow_dispatch`) to stop double-building, and keep the two matrices
-in sync until they're unified. (The retired `macos-13` runner label has been replaced with
-`macos-15-intel` in both workflows' x64-darwin tier.)
+Note: [GPT-5] `dist.yml` is manual-dispatch only; it does not run on `v*` tags. Both
+`dist.yml` and `release.yml` call the reusable `build-matrix.yml`, which is the single
+source of truth for the hardware-tier matrix and build steps. `dist.yml` selects
+`mode: binary` for bare per-tier workflow artifacts, while `release.yml` selects
+`mode: archive` for the versioned release archives described above.
 
 ## 4. crates.io publication
 
