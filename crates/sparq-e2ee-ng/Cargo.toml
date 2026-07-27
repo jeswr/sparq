@@ -34,7 +34,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 # `hmac` + `sha2` already vetted-and-present in the tree (sparq-vc / sparq-zk). SHA-256
 # also computes CommitId / cap_id over canonical bytes.
 sha2 = "0.10"
-hmac = "0.12"
+hmac = "0.13"
 # AEAD-256 (v0 suite): XChaCha20-Poly1305 — a 192-bit random nonce is safe to draw per
 # block/wrap without a stateful counter, which matches the randomized-envelope design.
 chacha20poly1305 = "0.10"
