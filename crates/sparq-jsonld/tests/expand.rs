@@ -784,6 +784,43 @@ fn datatype_iri_with_a_space_is_rejected() {
 }
 
 #[test]
+fn datatype_iri_with_a_malformed_percent_escape_is_rejected() {
+    // [SONNET-4.6] (PR #4610 review) §5.1.2 step 15.4 validates the datatype as an IRI, and
+    // `pct-encoded = "%" HEXDIG HEXDIG` — a non-hex or truncated escape is not one. The
+    // first cut of the check was a character denylist, which accepted all of these.
+    for datatype in [
+        "http://example.com/%ZZ",
+        "http://example.com/%",
+        "http://example.com/%A",
+    ] {
+        assert_error(
+            &format!(
+                r#"{{"http://example.com/bar": {{"@value": "bar", "@type": "{datatype}"}}}}"#
+            ),
+            JsonLdErrorCode::InvalidTypedValue,
+        );
+    }
+}
+
+#[test]
+fn well_formed_percent_encoded_and_unicode_datatype_iris_are_accepted() {
+    // The complement of the two negatives above: datatype validation must not over-reject a
+    // well-formed escape or a native RFC 3987 `ucschar` IRI — every `is_absolute_iri` call
+    // site in context processing shares this predicate.
+    assert_expands(
+        r#"{"http://example.com/bar": {"@value": "bar", "@type": "http://example.com/a%20b"}}"#,
+        r#"[{"http://example.com/bar":
+              [{"@value": "bar", "@type": "http://example.com/a%20b"}]}]"#,
+    );
+    assert_expands(
+        "{\"http://example.com/bar\": {\"@value\": \"bar\",
+            \"@type\": \"http://\u{4f8b}\u{3048}.jp/na\u{ef}ve\"}}",
+        "[{\"http://example.com/bar\":
+             [{\"@value\": \"bar\", \"@type\": \"http://\u{4f8b}\u{3048}.jp/na\u{ef}ve\"}]}]",
+    );
+}
+
+#[test]
 fn blank_node_datatype_is_rejected() {
     // §5.1.2 step 15.4: the value of `@type` must be an IRI, and a blank node identifier
     // is not one (W3C expand/er40). Blank-node datatypes are only meaningful under the

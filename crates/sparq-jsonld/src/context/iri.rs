@@ -18,31 +18,97 @@ pub(crate) fn is_blank_node(s: &str) -> bool {
     s.starts_with("_:")
 }
 
-/// True iff `s` is an absolute IRI: a valid scheme followed by `:`, with no character
-/// that RFC 3987 excludes from an IRI.
+/// True iff `s` is an absolute IRI: a valid scheme followed by `:`, whose remaining
+/// characters are all drawn from the RFC 3987 IRI code-point set and whose `%` escapes are
+/// all well-formed.
 pub(crate) fn is_absolute_iri(s: &str) -> bool {
     match s.find(':') {
-        Some(colon) => is_valid_scheme(&s[..colon]) && !has_non_iri_char(s),
+        Some(colon) => is_valid_scheme(&s[..colon]) && has_only_iri_chars(s),
         None => false,
     }
 }
 
-/// True iff `s` contains a character that cannot appear anywhere in an IRI: a C0/C1
-/// control, a space, or one of the RFC 3986 §2.2 "excluded" delimiters that are neither
-/// reserved nor unreserved (`<`, `>`, `"`, `{`, `}`, `|`, `\`, `^`, `` ` ``).
+/// True iff every code point of `s` is one an IRI may contain (RFC 3987 §2.2) **and** every
+/// `%` opens a well-formed `pct-encoded` triplet (`"%" HEXDIG HEXDIG`).
+///
+/// The admitted set is:
+/// * ASCII — `unreserved` / `gen-delims` / `sub-delims` / `%`, i.e. every printable ASCII
+///   character except the RFC 3986 §2.2 "excluded" delimiters (space, `<`, `>`, `"`, `{`,
+///   `}`, `|`, `\`, `^`, `` ` ``) and the C0/DEL controls.
+/// * Non-ASCII — the `ucschar` and `iprivate` ranges (see [`is_ucschar_or_iprivate`]),
+///   which excludes the C1 controls and the Unicode noncharacters.
 ///
 /// [OPUS-5] sq-gzsky — this is the "Processors MUST validate datatype IRIs" obligation
 /// behind the `invalid typed value` negative (W3C expand/0123 pins
 /// `"http://example.com/baz z"`, a scheme-valid string carrying a SPACE). Scheme validity
-/// alone accepted it. Deliberately a character-class rejection, not a full RFC 3987
-/// grammar: it is the check the reference processors apply, and over-rejecting a
-/// well-formed IRI would silently cost passes elsewhere.
-fn has_non_iri_char(s: &str) -> bool {
-    s.chars().any(|c| {
-        c.is_control()
-            || c == ' '
-            || matches!(c, '<' | '>' | '"' | '{' | '}' | '|' | '\\' | '^' | '`')
-    })
+/// alone accepted it.
+///
+/// [SONNET-4.6] (PR #4610 review) The first cut was a character *denylist* with no escape
+/// validation, so `http://example.com/%ZZ` and a trailing bare `%` still passed. This is
+/// now a complete code-point + `pct-encoded` check.
+///
+/// **Scope, stated honestly:** this validates the IRI *code-point* grammar, not the full
+/// RFC 3987 *structural* grammar — component shape (authority/host/port form, where
+/// `gen-delims` such as `[`/`]` are legal, the query-only restriction on `iprivate`) is not
+/// enforced. That is a deliberate stopping point: the reference processors validate at this
+/// level too, and over-rejecting a well-formed IRI would silently cost conformance passes
+/// through the many [`is_absolute_iri`] call sites in context processing.
+fn has_only_iri_chars(s: &str) -> bool {
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            // pct-encoded = "%" HEXDIG HEXDIG — a bare (`%`), truncated (`%A`) or
+            // non-hex (`%ZZ`) escape is not an IRI.
+            let (Some(h1), Some(h2)) = (chars.next(), chars.next()) else {
+                return false;
+            };
+            if !h1.is_ascii_hexdigit() || !h2.is_ascii_hexdigit() {
+                return false;
+            }
+        } else if c.is_ascii() {
+            if c.is_ascii_control()
+                || matches!(c, ' ' | '<' | '>' | '"' | '{' | '}' | '|' | '\\' | '^' | '`')
+            {
+                return false;
+            }
+        } else if !is_ucschar_or_iprivate(c) {
+            return false;
+        }
+    }
+    true
+}
+
+/// True iff `c` is in RFC 3987 §2.2 `ucschar` or `iprivate` — the non-ASCII code points an
+/// IRI may carry.
+///
+/// ```text
+/// ucschar  = %xA0-D7FF / %xF900-FDCF / %xFDF0-FFEF / %x10000-1FFFD / %x20000-2FFFD
+///          / %x30000-3FFFD / %x40000-4FFFD / %x50000-5FFFD / %x60000-6FFFD
+///          / %x70000-7FFFD / %x80000-8FFFD / %x90000-9FFFD / %xA0000-AFFFD
+///          / %xB0000-BFFFD / %xC0000-CFFFD / %xD0000-DFFFD / %xE1000-EFFFD
+/// iprivate = %xE000-F8FF / %xF0000-FFFFD / %x100000-10FFFD
+/// ```
+///
+/// `iprivate` is admitted anywhere rather than in the query component only — component
+/// scoping belongs to the structural grammar this check deliberately does not implement
+/// (see [`has_only_iri_chars`]). Surrogates need no handling: a Rust `char` cannot be one.
+fn is_ucschar_or_iprivate(c: char) -> bool {
+    let cp = c as u32;
+    match cp {
+        // ucschar, BMP portion; the gaps are the C1 controls (<0xA0), the surrogate and
+        // private-use blocks, and the noncharacters 0xFDD0-0xFDEF / 0xFFF0-0xFFFF.
+        0xA0..=0xD7FF | 0xF900..=0xFDCF | 0xFDF0..=0xFFEF => true,
+        // iprivate, BMP portion (the private-use area).
+        0xE000..=0xF8FF => true,
+        // ucschar, supplementary planes 1-13: each admits 0x0000-0xFFFD of its plane.
+        0x10000..=0xDFFFD => cp & 0xFFFF <= 0xFFFD,
+        // ucschar, plane 14: starts at 0xE1000, so the tag / variation-selector block
+        // 0xE0000-0xE0FFF is excluded.
+        0xE1000..=0xEFFFD => true,
+        // iprivate, supplementary planes 15-16.
+        0xF0000..=0x10FFFD => cp & 0xFFFF <= 0xFFFD,
+        _ => false,
+    }
 }
 
 /// True iff `s` is a syntactically valid URI scheme: `ALPHA *( ALPHA / DIGIT / "+" / "-" /
@@ -488,6 +554,66 @@ mod tests {
         assert!(!is_absolute_iri("_:b0"));
         assert!(is_blank_node("_:b0"));
         assert!(!is_blank_node("http://x"));
+    }
+
+    /// [SONNET-4.6] (PR #4610 review) `pct-encoded = "%" HEXDIG HEXDIG` — a malformed
+    /// escape makes the string a non-IRI, so it must not pass as a datatype IRI. The
+    /// original character-denylist check accepted all of these.
+    #[test]
+    fn malformed_percent_escapes_are_not_absolute_iris() {
+        assert!(!is_absolute_iri("http://example.com/%ZZ")); // non-hex digits
+        assert!(!is_absolute_iri("http://example.com/%")); // bare, at end
+        assert!(!is_absolute_iri("http://example.com/%A")); // truncated, at end
+        assert!(!is_absolute_iri("http://example.com/%2")); // truncated, at end
+        assert!(!is_absolute_iri("http://example.com/%A/b")); // truncated, mid-string
+        assert!(!is_absolute_iri("http://example.com/%%20")); // `%` opening `%2` + `0`
+        assert!(!is_absolute_iri("http://example.com/%2G")); // second digit non-hex
+        assert!(!is_absolute_iri("http://example.com/%G2")); // first digit non-hex
+    }
+
+    /// The complement of the above: well-formed escapes must keep passing — over-rejection
+    /// here would silently cost conformance passes at every `is_absolute_iri` call site.
+    #[test]
+    fn well_formed_percent_escapes_are_absolute_iris() {
+        assert!(is_absolute_iri("http://example.com/a%20b"));
+        assert!(is_absolute_iri("http://example.com/%C3%A9"));
+        assert!(is_absolute_iri("http://example.com/%ff%FF%aB")); // case-insensitive HEXDIG
+        assert!(is_absolute_iri("http://example.com/p?q=%2F#%2F"));
+    }
+
+    /// RFC 3987 `ucschar` / `iprivate`: a native Unicode IRI is well-formed and must not be
+    /// rejected, while the code points outside those ranges (C1 controls, noncharacters,
+    /// the plane-14 tag block) are not IRI characters.
+    #[test]
+    fn unicode_iri_code_points_follow_ucschar_and_iprivate() {
+        // Positive: ucschar in the BMP, in the CJK compatibility range, and in plane 1;
+        // plus an iprivate private-use code point.
+        assert!(is_absolute_iri("http://example.com/na\u{ef}ve"));
+        assert!(is_absolute_iri("http://\u{4f8b}\u{3048}.jp/\u{30d1}\u{30b9}"));
+        assert!(is_absolute_iri("http://example.com/\u{f900}"));
+        assert!(is_absolute_iri("http://example.com/\u{10000}"));
+        assert!(is_absolute_iri("http://example.com/\u{e000}"));
+
+        // Negative: C1 control, BMP noncharacters, and the excluded plane-14 tag block.
+        assert!(!is_absolute_iri("http://example.com/\u{80}"));
+        assert!(!is_absolute_iri("http://example.com/\u{9f}"));
+        assert!(!is_absolute_iri("http://example.com/\u{fdd0}"));
+        assert!(!is_absolute_iri("http://example.com/\u{fffe}"));
+        assert!(!is_absolute_iri("http://example.com/\u{1fffe}"));
+        assert!(!is_absolute_iri("http://example.com/\u{e0001}"));
+    }
+
+    /// The excluded-delimiter and control classes the original check already covered stay
+    /// rejected (a regression tripwire for the rewrite into an allowlist).
+    #[test]
+    fn excluded_ascii_delimiters_are_not_absolute_iris() {
+        assert!(!is_absolute_iri("http://example.com/baz z"));
+        for bad in ['<', '>', '"', '{', '}', '|', '\\', '^', '`'] {
+            let s = format!("http://example.com/{}", bad);
+            assert!(!is_absolute_iri(&s), "should reject {:?}", bad);
+        }
+        assert!(!is_absolute_iri("http://example.com/\u{7f}")); // DEL
+        assert!(!is_absolute_iri("http://example.com/a\tb"));
     }
 
     // RFC 3986 §5.4 normal-example reference-resolution vectors.

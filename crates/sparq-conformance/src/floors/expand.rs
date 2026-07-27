@@ -144,7 +144,10 @@
 ///   was checked (di09).
 /// * **datatype-IRI validation** (step 15.4) — `is_absolute_iri` accepted any
 ///   scheme-prefixed string, so `"http://example.com/baz z"` (a SPACE) passed; it now
-///   rejects the RFC 3987-excluded character class (0123).
+///   admits only the RFC 3987 `unreserved`/`gen-delims`/`sub-delims`/`ucschar`/`iprivate`
+///   code points and requires every `%` to open a well-formed `pct-encoded` triplet (0123).
+///   It validates the IRI *code-point* grammar, not the full structural grammar — see
+///   `sparq_jsonld`'s `has_only_iri_chars` for the stated scope.
 /// * **blank-node datatype** (step 15.4) — `@type: "_:dt"` is not an IRI, so it is an
 ///   `invalid typed value` outside frame expansion (er40).
 /// * **term round-trip vs a keyword** (§4.2.2 step 14.3.3) — the check was skipped when the
