@@ -2111,9 +2111,10 @@ mod tests {
                 let (mut cand, mut skipped, mut fp, mut truly_absent_blocks) = (0usize, 0usize, 0usize, 0usize);
                 for &key in probes.iter() {
                     let (first, last) = bloom_candidate_window(&firsts, key);
-                    for b in first..=last {
+                    for (off, chunk) in chunks[first..=last].iter().enumerate() {
+                        let b = first + off;
                         cand += 1;
-                        let holds = chunks[b].binary_search_by(|r| r[0].cmp(&key)).is_ok();
+                        let holds = chunk.binary_search_by(|r| r[0].cmp(&key)).is_ok();
                         let maybe = shipped.maybe_contains(b, key);
                         assert!(holds <= maybe, "FALSE NEGATIVE at block {} key {}", b, key);
                         if !maybe {
@@ -2157,8 +2158,9 @@ mod tests {
                     let (mut fp, mut n_absent) = (0usize, 0usize);
                     for &key in &absent {
                         let (first, last) = bloom_candidate_window(&firsts, key);
-                        for b in first..=last {
-                            if chunks[b].binary_search_by(|r| r[0].cmp(&key)).is_ok() {
+                        for (off, chunk) in chunks[first..=last].iter().enumerate() {
+                            let b = first + off;
+                            if chunk.binary_search_by(|r| r[0].cmp(&key)).is_ok() {
                                 continue;
                             }
                             n_absent += 1;
