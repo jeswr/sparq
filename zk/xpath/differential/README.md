@@ -90,7 +90,9 @@ bash zk/xpath/scripts/run_differential_harness.sh --update-committed  # refresh 
 The committed golden is `zk/xpath/tests/differential_oracle/src/lib.nr`; CI diffs the
 generator's output against it, so a corpus or oracle change lands as a reviewable diff.
 
-Point the run at a different `noir_XPath` with `XPATH_GIT` / `XPATH_TAG`, or at a local
-checkout with `XPATH_PATH`.
+Point the run at a different `noir_XPath` with `XPATH_GIT` / `XPATH_TAG` / `XPATH_DIRECTORY`,
+or at a local checkout with `XPATH_PATH`. Both path forms name the library PACKAGE, not the
+repo root: the face repo's root `Nargo.toml` is a `[workspace]`, so the git dep carries
+`directory = "xpath"` (default) and `XPATH_PATH` wants `<checkout>/xpath`.
 
 **License:** MIT

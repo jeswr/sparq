@@ -371,6 +371,64 @@ fn hex64(bits: u64) -> String {
     format!("0x{bits:016x} as u64")
 }
 
+/// Rewrite ONE comment line so it holds only ASCII.
+///
+/// `noirc` (1.0.0-beta.21) hard-errors with `Non-ASCII character in comment` on any
+/// multibyte byte inside `//` or `///`, while happily accepting multibyte STRING
+/// literals — which this corpus exists to exercise. So the comments are transliterated
+/// on the way out instead of the prose being written in a degraded style: typographic
+/// punctuation maps to its ASCII spelling, and anything else becomes an explicit
+/// `\u{...}` escape. For the unicode corpus rows that escape is strictly more precise
+/// than the glyph, because the assertion underneath is about CODEPOINTS.
+fn ascii_comment(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    for ch in line.chars() {
+        match ch {
+            c if c.is_ascii() => out.push(c),
+            '\u{2014}' => out.push_str("--"),        // em dash
+            '\u{2013}' => out.push('-'),             // en dash
+            '\u{2192}' => out.push_str("->"),        // rightwards arrow
+            '\u{2194}' => out.push_str("<->"),       // left right arrow
+            '\u{221e}' => out.push_str("infinity"),  // infinity
+            '\u{00a7}' => out.push_str("sec. "),     // section sign
+            '\u{2018}' | '\u{2019}' => out.push('\''),
+            '\u{201c}' | '\u{201d}' => out.push('"'),
+            other => out.push_str(&format!("\\u{{{:x}}}", other as u32)),
+        }
+    }
+    out
+}
+
+/// Post-pass over the whole generated file: transliterate every comment line, leave code
+/// (and its multibyte string literals) byte-for-byte alone, and PROVE the result satisfies
+/// noirc's rule — so a future prose edit cannot silently re-red the `nargo` lane.
+fn asciify_comments(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    for line in src.lines() {
+        let is_comment = line.trim_start().starts_with("//");
+        // Every comment this generator emits sits on its own line, which is what makes the
+        // line-based split above exact. A trailing comment (or a corpus value containing
+        // `//`) would need this pass to understand string literals — fail loudly rather
+        // than emit a file noirc will reject.
+        assert!(
+            is_comment || !line.contains("//"),
+            "generated code line carries an unsanitized trailing comment; teach \
+             asciify_comments about it: {}",
+            line
+        );
+        let rewritten = if is_comment { ascii_comment(line) } else { line.to_string() };
+        assert!(
+            !is_comment || rewritten.is_ascii(),
+            "comment line is still non-ASCII after transliteration; add the character to \
+             ascii_comment: {}",
+            rewritten
+        );
+        out.push_str(&rewritten);
+        out.push('\n');
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Generation
 // ---------------------------------------------------------------------------
@@ -747,6 +805,11 @@ fn generate_noir_file(inject_fault: bool) -> (String, Counts) {
     )
     .unwrap();
 
+    // noirc rejects non-ASCII inside comments (but not inside string literals), so the
+    // comment prose is transliterated before the file is handed to nargo. Runs BEFORE
+    // fault injection so the site match below is against the final text.
+    out = asciify_comments(&out);
+
     if inject_fault {
         let site = fault.expect("no fault site captured — inject-fault would be a no-op");
         let replaced = out.replacen(&site.original, &site.faulty, 1);
@@ -951,6 +1014,30 @@ mod tests {
         let (a, _) = generate_noir_file(false);
         let (b, _) = generate_noir_file(false);
         assert_eq!(a, b);
+    }
+
+    /// noirc hard-errors on a non-ASCII byte inside a comment, so the generated file's
+    /// comments must be pure ASCII — while the multibyte STRING literals that are the whole
+    /// point of the unicode corpus must survive untouched. Both halves are pinned here,
+    /// because a violation only shows up in the (toolchain-gated) `nargo` leg otherwise.
+    #[test]
+    fn generated_comments_are_ascii_but_literals_keep_their_multibyte() {
+        for inject_fault in [false, true] {
+            let (src, _) = generate_noir_file(inject_fault);
+            for line in src.lines() {
+                if line.trim_start().starts_with("//") {
+                    assert!(line.is_ascii(), "noirc rejects this comment: {}", line);
+                }
+            }
+            assert!(
+                src.contains("= \"\u{65e5}\u{672c}\u{8a9e}"),
+                "the multibyte corpus literal was mangled by the comment pass"
+            );
+        }
+        // The transliteration itself: prose punctuation becomes its ASCII spelling, and an
+        // arbitrary codepoint becomes an explicit escape rather than being dropped.
+        assert_eq!(ascii_comment("// a \u{2014} b \u{00a7}5.4.3"), "// a -- b sec. 5.4.3");
+        assert_eq!(ascii_comment("// STRLEN(\"\u{e9}\")"), "// STRLEN(\"\\u{e9}\")");
     }
 
     /// `--inject-fault` must actually change exactly one assertion, and the corrupted

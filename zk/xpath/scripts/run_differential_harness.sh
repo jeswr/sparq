@@ -26,6 +26,7 @@
 # The noir_XPath source is NOT in this repo — it was externalized to the
 # sparq-org/noir_XPath face repo (sq-5reoy / #1599). Override the pinned dependency with:
 #   XPATH_GIT=https://github.com/sparq-org/noir_XPath  XPATH_TAG=v0.2.0
+#   XPATH_DIRECTORY=xpath                       # the PACKAGE inside that repo's workspace
 #   XPATH_PATH=/local/checkout/xpath            # a local path dep instead of the git dep
 #
 # Requirements: cargo always; nargo unless --generate-only (see
@@ -44,6 +45,9 @@ COMMITTED_ORACLE="${XPATH_DIR}/tests/differential_oracle/src/lib.nr"
 XPATH_GIT="${XPATH_GIT:-https://github.com/sparq-org/noir_XPath}"
 XPATH_TAG="${XPATH_TAG:-v0.2.0}"
 XPATH_PATH="${XPATH_PATH:-}"
+# The PACKAGE within the face repo's Nargo WORKSPACE — required for the git form, see
+# write_nargo_toml below.
+XPATH_DIRECTORY="${XPATH_DIRECTORY:-xpath}"
 
 ORACLE_ONLY=false
 GENERATE_ONLY=false
@@ -107,6 +111,14 @@ trap cleanup EXIT
 # Write a Nargo.toml for a test package depending on noir_XPath. The dependency KEY is
 # the module alias the generated file imports (`use xpath::…`), so it stays `xpath`
 # regardless of the face repo's own package name.
+#
+# `directory` is REQUIRED for the git form: the face repo's ROOT Nargo.toml is a
+# `[workspace]` (members = xpath, xpath_unit_tests, test_packages/*), not a package, so a
+# git dep without it fails resolution with "Unexpected workspace definition found ... you
+# may need to add a `directory` field". The library package lives in `xpath/` — which is
+# also why XPATH_PATH is documented as pointing at `<checkout>/xpath`, not the checkout
+# root. (Contrast sparq-org/noir_IEEE754, whose package IS at the repo root; that dep in
+# zk/compose/compose_core/Nargo.toml correctly needs no `directory`.)
 write_nargo_toml() {
     local pkg_dir="$1"
     local pkg_name="$2"
@@ -121,7 +133,7 @@ write_nargo_toml() {
         if [ -n "${XPATH_PATH}" ]; then
             echo "xpath = { path = \"${XPATH_PATH}\" }"
         else
-            echo "xpath = { git = \"${XPATH_GIT}\", tag = \"${XPATH_TAG}\" }"
+            echo "xpath = { git = \"${XPATH_GIT}\", tag = \"${XPATH_TAG}\", directory = \"${XPATH_DIRECTORY}\" }"
         fi
     } > "${pkg_dir}/Nargo.toml"
 }
