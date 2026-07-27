@@ -598,12 +598,19 @@ evidence, per the bead's own *"PARK with a findings note if measured neutral"*:
 | the collapse can only ever match **array/vector-typed** merges — a numeric `IfElse` is lowered to arithmetic by the same function before any outer merge can inspect it | the opportunity is narrower than the TODO suggests; the 259 existing-rule firings all came from 3 nested-array-merge fixtures |
 | the shape row 8 targets is `if c { if !c { a } else { b } } else { d }` — dead by construction — and flattening gates nested branches by the **conjunction** `c & c2`, never by `c` or `!c` | zero is the expected count, not an artefact of a thin corpus |
 
-Soundness was not the obstacle: rows 3–4 of the collapse rest on exactly the
-*at-most-one-condition-true* invariant that the two shipped rules already assume
-(`ssa/interpreter/mod.rs:1213-1230`), and the patch rewrites only *values*, never
-the outer `else_condition` that upstream's
-`do_not_replace_else_condition_with_nested_if_same_then_cond` regression test
-pins. The patch keeps `cargo test -p noirc_evaluator` green (1887 passed, no
-snapshot moved) with three added tests that **fail on HEAD and pass patched**, and
-the AST-fuzzer `arbtest` targets green. It is **not carried in this repo** — no
+Soundness splits by shape, and only **row 3** (the collapse that reads the
+*then*-value) rests on the *at-most-one-condition-true* invariant the shipped
+rules assume (`ssa/interpreter/mod.rs:1213-1230`). **Row 4** — the mirrored
+*else*-value collapse — does **not**: an outer selected else-branch only proves
+the matched inner condition *false*, and since *both* inner conditions may be
+false the nested merge is then the zero value, not the arm the rewrite
+substitutes (record §2 carries the counterexample). Row 4 is therefore **not
+claimed sound and not offered as reconstructable**, and the same gap sits under
+upstream's already-shipped row 2 — unchecked from here, captured as follow-up.
+The patch does rewrite only *values*, never the outer `else_condition` that
+upstream's `do_not_replace_else_condition_with_nested_if_same_then_cond`
+regression test pins. It keeps `cargo test -p noirc_evaluator` green (1887
+passed, no snapshot moved) with three added tests that **fail on HEAD and pass
+patched**, and the AST-fuzzer `arbtest` targets green — but none of that
+exercises the both-inner-conditions-false case, so it is not evidence for row 4. It is **not carried in this repo** — no
 upstream PR is proposed, and none should be until a program produces the shape.

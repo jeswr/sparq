@@ -58,18 +58,47 @@ The bead's sketch: either CSE the `Not` instructions, or match structurally on
 - when both are false the result is the zero/uninitialized value, matching the arithmetic decomposition
   `then_condition * then_value + else_condition * else_value`.
 
-Under *at-most-one*, all four nested-merge collapses are sound, and by the same argument:
+The four nested-merge collapses do **not** all follow from *at-most-one*. The two that read the
+**then**-value (rows 1 and 3) do; the two that read the **else**-value (rows 2 and 4) need a strictly
+stronger premise, spelled out after the table:
 
 | # | shape | when it applies | result | on HEAD |
 |---|---|---|---|---|
-| 1 | inner merge in the **then**-value, `then_condition == inner_then_condition` | outer then-branch live ⇒ inner then-branch live | take `inner_then_value` | **shipped** |
-| 2 | inner merge in the **else**-value, `then_condition == inner_then_condition` | outer else-branch live ⇒ `then_condition` false ⇒ inner then-branch dead | take `inner_else_value` | **shipped** |
-| 3 | inner merge in the **then**-value, `then_condition == inner_else_condition` | outer then-branch live ⇒ inner *else*-branch live | take `inner_else_value` | **the TODO** |
-| 4 | inner merge in the **else**-value, `then_condition == inner_else_condition` | outer else-branch live ⇒ inner else-branch dead | take `inner_then_value` | **the TODO** |
+| 1 | inner merge in the **then**-value, `then_condition == inner_then_condition` | outer then-branch live ⇒ `inner_then_condition` true ⇒ inner then-branch live | take `inner_then_value` | **shipped** |
+| 2 | inner merge in the **else**-value, `then_condition == inner_then_condition` | outer else-branch live ⇒ `then_condition` false ⇒ inner then-branch dead — which does **not** make the inner else-branch live (gap below) | take `inner_else_value` | **shipped** |
+| 3 | inner merge in the **then**-value, `then_condition == inner_else_condition` | outer then-branch live ⇒ `inner_else_condition` true ⇒ inner *else*-branch live | take `inner_else_value` | **the TODO** |
+| 4 | inner merge in the **else**-value, `then_condition == inner_else_condition` | outer else-branch live ⇒ inner else-branch dead — same gap as row 2 | take `inner_then_value` | **the TODO** |
 
-Rows 3–4 introduce **no new soundness assumption** beyond the one rows 1–2 already rely on. One trap is
-already pinned by an upstream regression test: the outer merge's `else_condition` must be left alone, never
-replaced by the inner one (`flatten_cfg.rs:2531`,
+**Rows 1 and 3 are sound under *at-most-one* alone.** The outer then-branch being live makes the *matched*
+inner condition **true**, so the inner merge provably evaluates to exactly the arm the rewrite substitutes.
+
+**Rows 2 and 4 are the mirror image, and the argument does not mirror.** There the outer *else*-branch being
+live only makes the matched inner condition **false**, which kills one inner arm without electing the other —
+and per the second bullet above, *both false is legal*, in which case the inner merge is the
+zero/uninitialized value rather than either arm. Concretely for row 4: outer `then_condition = false`,
+`else_condition = true`, `inner_else_condition = then_condition = false`, and `inner_then_condition = false`
+too. The nested merge yields zero; the documented rewrite substitutes `inner_then_value`. Row 2 is symmetric
+(`inner_then_condition = then_condition = false` with `inner_else_condition` also false yields zero, not
+`inner_else_value`).
+
+What rows 2 and 4 actually need is the strictly stronger **exactly-one** premise *on the inner merge* —
+`inner_then_condition | inner_else_condition` must hold whenever the outer else-branch is live, i.e. the
+inner conditions must be complementary rather than merely disjoint. That holds for a merge whose two
+conditions are some `c` and `!c`, and it is *not* what the interpreter guarantees in general: flattening's
+conjunction-gated nested merges are precisely the counterexample class. **Row 2 is nonetheless shipped
+upstream**, so upstream is relying on some such premise — either guaranteed by construction at the sites that
+build these merges, or not established at all. This record does **not** settle which: the shipped rule was
+read in `simplify.rs`, not re-derived from `flatten_cfg`'s generation sites, and the throwaway clone the
+experiment ran in is gone, so no re-measurement was possible while writing this section. It is captured as
+follow-up work. Consequences for this record:
+
+- **Row 3 — the half that was measured and is the only half this record would ever propose — is
+  unaffected.** It reads the then-value and stands on *at-most-one* alone.
+- **Row 4 is not claimed sound**, its mirrored implementation is **not** offered as reconstructable, and it
+  must not go upstream until the stronger premise is established for the shapes it can match (§7, §9).
+
+A separate trap is already pinned by an upstream regression test: the outer merge's `else_condition` must be
+left alone, never replaced by the inner one (`flatten_cfg.rs:2531`,
 `do_not_replace_else_condition_with_nested_if_same_then_cond` — the fix for #6875's original form). The
 implementation below only ever rewrites a *value*, never a condition.
 
@@ -128,13 +157,23 @@ if let Some(Instruction::IfElse {
         });
     }
 }
-// …and the mirrored block for `else_value` (rows 2 and 4).
+// …and the mirrored block for `else_value` (rows 2 and 4) — written at the time, but see the caveat below:
+// row 4 is NOT justified by the invariant this record establishes, so that block is not offered here.
 ```
 
 Three unit tests were added to `simplify.rs`'s test module, driving `Ssa::from_str_simplifying` on
 array-typed merges: the row-3 shape, the row-4 shape, and a row-3 shape whose conditions are **two distinct
-`not v0` instructions** (the case `same_condition` exists for). **Non-vacuity was checked**: all three
-FAIL against HEAD's logic and PASS with the patch. The full suite stays green — `cargo test -p
+`not v0` instructions** (the case `same_condition` exists for). **Non-vacuity was
+checked**: all three FAIL against HEAD's logic and PASS with the patch.
+
+**Caveat on the row-4 half, added on review.** §2 shows that rows 2 and 4 need an *exactly-one* premise on the
+inner merge that *at-most-one* does not supply, and the row-4 unit test pins the collapse unconditionally —
+so that test encodes a rewrite this record cannot justify, and none of the evidence below (green suite,
+unmoved snapshots, green fuzzer targets) speaks to it: no test in the tree exercises an outer selected branch
+with **both** inner conditions false, which is the case that separates the two premises. Only the row-3
+(then-value) half is offered. The row-4 arm and its test would have to be dropped, or guarded by an actual
+complementary-conditions check, before anything went upstream — and since nothing fires either way (§6), the
+verdict in §7 is unchanged. The full suite stays green — `cargo test -p
 noirc_evaluator`: **1887 passed, 0 failed** (1884 on HEAD plus the three added here), and **no SSA/ACIR
 snapshot moved**. The AST fuzzer's quick
 property targets (`cargo test -p noir_ast_fuzzer_fuzz arbtest`, incl. `min_vs_full`, `acir_vs_brillig`,
@@ -194,13 +233,16 @@ condition helper, two rewritten match arms and three tests, whose measured effec
 has is **nothing** — precisely the shape jfecher closed **PR #11580** for (*"doesn't have enough
 optimizations to warrant the upkeep"*, program record §4.2). It also has no issue to link under the
 program record's §6 issue-first protocol. **No upstream PR is proposed. The patch is not carried in this repo**; it lives only in the
-throwaway clone, and §4 records enough to reconstruct it in minutes.
+throwaway clone, and §4 records enough to reconstruct **the row-3 (then-value) half** in minutes. The row-4
+half is deliberately not reconstructable from this record: §2 shows it is not justified by the invariant
+established here.
 
 What would change the verdict, in order of cheapness:
 
 1. **A program that produces the shape.** If a future circuit (or an upstream pass that rewrites conditions
    — e.g. a negated-`jmpif` canonicalization, cf. #6624 in §10.5) starts emitting nested opposite-condition
-   array merges, re-run §6's probe; the patch is then a two-line-behaviour change with tests ready.
+   array merges, re-run §6's probe; the row-3 half is then a one-line-behaviour change with tests ready
+   (the row-4 half additionally needs §2's exactly-one premise settled first).
 2. **A gate-level check**, if anyone wants one despite a zero firing count. Not run here (`bb` absent) and
    not worth a box: with no firing there is no difference to measure.
 3. **A comment-accuracy fix upstream.** The TODO as written misinforms the next reader — its blocker was
@@ -230,6 +272,12 @@ so gate counts remain unavailable on this box.
 
 ## 9. Honest limits
 
+- **The else-value collapses (rows 2 and 4) are not justified here, and row 2 is already upstream.** §2 gives
+  the counterexample: an outer selected branch leaves the matched inner condition false, and with the other
+  inner condition false too the nested merge is zero, not the arm the rewrite substitutes. Whether upstream's
+  shipped row 2 is safe by construction at the sites that build these merges was **not** checked — that needs
+  a re-read of `flatten_cfg`/`ValueMerger` and a test with both inner conditions false, neither of which this
+  record has. Treat the row-2/row-4 rewrites as **unjustified pending that check**, not as validated.
 - **No gate measurement** (`bb` absent). Immaterial here — nothing fires — but it means this record cannot
   be cited as gate evidence for anything else.
 - **No upstream thread was read.** #6875/#6886 intent is inferred from commits, code comments and the
