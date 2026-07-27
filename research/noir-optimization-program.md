@@ -517,8 +517,8 @@ What the source analysis establishes:
 | unsigned accumulation is already cut once per iteration by the overflow `RangeCheck` | "quadratic in loops" is narrower than it sounds; the quadratic-by-construction shapes are repeated `assert_eq` on a growing accumulator, brillig-call inputs, and the compile-time/peak-memory cost of building the expression at all |
 | the ACVM `CommonSubexpressionOptimizer` postdates the issue: its CSAT intermediate cache is circuit-global, and `MergeExpressionsOptimizer` refunds any intermediate used in only two `AssertZero` opcodes | much of the circuit-size half may already be absorbed — **and an over-eager auto-cut is partially self-healing**, which is the safety argument any heuristic needs |
 
-The reframing the record recommends taking upstream (after measurement) is that
-#4629 is plausibly **two** problems: a circuit-size one that ACVM may already
+The reframing the record recommends taking upstream (after measurement) is
+that #4629 is plausibly **two** problems: a circuit-size one that ACVM may already
 handle, and a compile-time/peak-memory one that ACVM cannot touch by
 construction and that shares a root cause with #13046. The blocking first step
 is therefore not design but **re-running the issue's own reproducer at HEAD to

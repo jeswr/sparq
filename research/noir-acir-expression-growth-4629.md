@@ -205,8 +205,8 @@ before lookup (`csat.rs:267-289`, `get_or_create_intermediate_var` `:293`). ACIR
 sorted by witness index, so `n` opcodes carrying *prefixes* of the same accumulator present the same
 leading `width - 1` terms and should hit the same cache entry, recursively — which would collapse a
 quadratic pile of prefix opcodes towards a shared `O(n)` tree of intermediates. **Predicted from the
-code, not measured** — and it is precisely why §0's blocking pre-check exists: this pass postdates
-#4629, and it may already have absorbed most of the circuit-size half of the issue.
+code, not measured** — and it is precisely why §0's blocking pre-check exists: this pass
+postdates #4629, and it may already have absorbed most of the circuit-size half of the issue.
 
 **(b) An over-eager cut is partially self-healing.** A witness introduced by a speculative
 auto-`as_witness` that appears in exactly two `AssertZero` opcodes is merged back by
