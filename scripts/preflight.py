@@ -58,9 +58,13 @@
 #   ITS PRECISION IS ~74%, NOT ~100% — stated because an earlier version of this
 #   header claimed one false positive and that was wrong (see TEST_PATH_HINTS).
 #   Re-measured by deleting each firing symbol and running its script's own gating
-#   `--self-test`: 10 of the 31 Python firings red, i.e. they ARE pinned. Every one
-#   of the 10 is the SAME shape — the self-test calls a top-level entry point which
-#   calls the guard through ordinary production code, so no test TEXT names it.
+#   `--self-test`: 10 of the 31 Python firings red, i.e. they ARE pinned. All 10 are
+#   INDIRECTLY reached — the self-test enters at the top and the guard is named only
+#   OUTSIDE any test region. Enclosing scope of every reference, counted:
+#     7  an intermediate top-level function (`verify_evidence`, `check_workflows`,
+#        `check_tree`, `resolve_newest_workflow_runs`, `enrich_prs`, `apply_labels`,
+#        `run_verify`);
+#     3  a module-level dispatch table (`"doc-anchor": verify_doc_anchor`, …).
 #   That residue is not fixed here on purpose: closing it needs a call-graph
 #   over-approximation ("anything reachable from a test region counts"), which
 #   would make a guard reached only via `main()` read as tested. That is the
