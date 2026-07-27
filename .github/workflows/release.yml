@@ -163,9 +163,10 @@ jobs:
   #
   # WHAT THIS DOES *NOT* CLAIM. The subjects are the digests the build matrix reported. A build
   # step that produced a malicious archive still gets provenance over THAT archive — L3 makes the
-  # provenance non-falsifiable, it does not make the build trustworthy. And the scope is the
-  # ARCHIVES ONLY: the ghcr image, the GUI bundles, the SBOM/VEX, the conformance report and
-  # `dist.yml`'s bare binaries remain in-band L2. GX-11 therefore NARROWS; it does not close.
+  # provenance non-falsifiable, it does not make the build trustworthy. And the scope of THIS job
+  # is the ARCHIVES ONLY — [OPUS-5] #4570 added the sibling `provenance-artifacts` job for the GUI
+  # bundles / SBOM/VEX / conformance report and `dist.yml#provenance` for the tiered binaries, but
+  # the ghcr image still attests in-band (L2). GX-11 therefore NARROWS; it does not close.
   #
   # WHY A TAG REF, NOT A SHA — the ONE documented exception to this repo's SHA-pin convention.
   # The generator derives the trusted-builder identity that ends up in the provenance (and that
@@ -254,6 +255,34 @@ jobs:
           subject-path: |
             sbom/*.sbom.cdx.json
             sbom/*.vex.cdx.json
+      # [OPUS-5] #4570 (GX-11 residual): publish the SBOM/VEX digests as data for the ISOLATED
+      # trusted builder (`provenance-artifacts` below). The in-band attestation above stays — it
+      # is what `gh attestation verify` reads — but it shares this job's execution context with
+      # the generator scripts, which is the L2 ceiling. Digests are taken over the SAME set the
+      # `sbom-vex` artifact uploads (`sbom/*.json`), so every byte that reaches the Release is a
+      # subject. `cd sbom` so each subject name is the RELEASED asset name, not a path.
+      # ubuntu-only job, so GNU `sha256sum` is always present (unlike the matrix lanes).
+      - name: Record SBOM/VEX digests (subjects for the isolated provenance builder)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd sbom
+          shopt -s nullglob
+          files=( *.json )
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "ERROR: SBOM/VEX generation produced no artifact to attest" >&2
+            exit 1
+          fi
+          sha256sum -- "${files[@]}" > subject-hashes-sbom.txt
+          cat subject-hashes-sbom.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          # `subject-hashes-*` is the collector's download pattern and is deliberately DISJOINT
+          # from both `pkg-*` (published release assets) and `archive-hashes-*` (the archives'
+          # own subjects) — the two provenance bundles must not silently attest each other's set.
+          name: subject-hashes-sbom
+          path: sbom/subject-hashes-sbom.txt
+          if-no-files-found: error
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sbom-vex
@@ -312,6 +341,27 @@ jobs:
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: conformance/served-conformance-*.json
+      # [OPUS-5] #4570 (GX-11 residual): same digest hand-off as the SBOM lane — the conformance
+      # report is a consumer-facing assurance artifact, so provenance a compromised build step
+      # could restate is exactly the wrong property for it.
+      - name: Record conformance-report digests (subjects for the isolated provenance builder)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd conformance
+          shopt -s nullglob
+          reports=( served-conformance-*.json )
+          if [ "${#reports[@]}" -eq 0 ]; then
+            echo "ERROR: the conformance run produced no report to attest" >&2
+            exit 1
+          fi
+          sha256sum -- "${reports[@]}" > subject-hashes-conformance.txt
+          cat subject-hashes-conformance.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: subject-hashes-conformance
+          path: conformance/subject-hashes-conformance.txt
+          if-no-files-found: error
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: served-conformance
@@ -660,11 +710,149 @@ jobs:
         with:
           subject-path: gui-bundles/*
 
+      # [OPUS-5] #4570 (GX-11 residual): this row's bundle digests, published as data for the
+      # ISOLATED trusted builder (`provenance-artifacts` below). Two things this step must get
+      # right, both of which fail only at release time:
+      #   * WRITE OUTSIDE gui-bundles/ — that directory is uploaded WHOLESALE as `pkg-gui-*`,
+      #     which the `release` job downloads with `pattern: pkg-*` straight into the published
+      #     assets. A digest list written next to the installers would ship as a release asset.
+      #   * PORTABLE DIGEST — this matrix has macOS rows, which have BSD `shasum` and no GNU
+      #     `sha256sum`; a bare `sha256sum` would red exactly the rows marked `soft`, so it would
+      #     not even fail loudly — it would silently drop those bundles from the subjects set.
+      - name: Record GUI bundle digests (subjects for the isolated provenance builder)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p gui-subjects
+          OUT="../gui-subjects/subject-hashes-gui-${{ matrix.label }}.txt"
+          cd gui-bundles
+          shopt -s nullglob
+          bundles=( * )
+          if [ "${#bundles[@]}" -eq 0 ]; then
+            echo "ERROR: no staged GUI bundle to attest for ${{ matrix.label }}" >&2
+            exit 1
+          fi
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum -- "${bundles[@]}" > "$OUT"
+          else
+            shasum -a 256 -- "${bundles[@]}" > "$OUT"
+          fi
+          cat "$OUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: subject-hashes-gui-${{ matrix.label }}
+          path: gui-subjects/subject-hashes-gui-${{ matrix.label }}.txt
+          if-no-files-found: error
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pkg-gui-${{ matrix.label }}
           path: gui-bundles/*
           if-no-files-found: error
+
+  # ---- 1e. collect the NON-ARCHIVE release-artifact digests into ONE `base64-subjects` blob ----
+  # [OPUS-5] #4570 (GX-11 residual). sq-toze.25 routed only the release ARCHIVES through the
+  # isolated trusted builder; the GUI bundles, the SBOM/VEX and the served-surface conformance
+  # report were left on in-band `actions/attest-build-provenance`, which signs inside the same job
+  # that produced the bytes — the L2 ceiling. This job is the digest hand-off that lets them cross
+  # the same boundary the archives already cross.
+  #
+  # WHY A SEPARATE COLLECTOR AND NOT ONE MERGED WITH `package`'s: keeping the archive lane's
+  # subjects disjoint means the slow GUI matrix (60-min timeout, `soft` rows that may fail) can
+  # never delay or fail-close the archives' provenance. Two bundles, two failure domains.
+  #
+  # It BUILDS nothing and holds NO signing identity (`contents: read`, no `id-token`) — it
+  # downloads text, validates its shape, base64-encodes it. Signing happens one job further out.
+  artifact-subjects:
+    name: collect artifact digests
+    needs: [sbom, served-conformance, gui-bundle]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      hashes: ${{ steps.combine.outputs.hashes }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          # `subject-hashes-*` only: `archive-hashes-*` belongs to the archives' own bundle and
+          # `pkg-*` are the published assets themselves.
+          pattern: subject-hashes-*
+          path: subject-hashes
+          merge-multiple: true
+      # FAIL-CLOSED, and specifically about COVERAGE, not just about well-formedness. A subjects
+      # blob that silently lost a lane would still produce a valid signature over a smaller set,
+      # and the release notes would go on claiming the lane is covered — the vacuous-artifact
+      # class the compliance register exists to prevent. So each lane is required by name.
+      # The `soft` macOS/Windows GUI rows may legitimately be absent (they are allowed to fail),
+      # but the Linux rows are BLOCKING, so at least one GUI list must always be present.
+      - name: Combine + base64-encode the subjects
+        id: combine
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd subject-hashes
+          shopt -s nullglob
+          for required in subject-hashes-sbom.txt subject-hashes-conformance.txt; do
+            if [ ! -s "$required" ]; then
+              echo "ERROR: '$required' missing or empty — a release artifact lane produced no subjects" >&2
+              exit 1
+            fi
+          done
+          gui=( subject-hashes-gui-*.txt )
+          if [ "${#gui[@]}" -eq 0 ]; then
+            echo "ERROR: no subject-hashes-gui-* list — every GUI bundle row failed to publish digests" >&2
+            exit 1
+          fi
+          cat -- subject-hashes-sbom.txt subject-hashes-conformance.txt "${gui[@]}" > all.sha256
+          while read -r digest name; do
+            if ! printf '%s' "$digest" | grep -Eq '^[0-9a-f]{64}$' || [ -z "$name" ]; then
+              echo "ERROR: malformed sha256sum record: '$digest  $name'" >&2
+              exit 1
+            fi
+          done < all.sha256
+          echo "subjects for the isolated provenance builder:"
+          cat all.sha256
+          echo "hashes=$(base64 -w0 all.sha256)" >> "$GITHUB_OUTPUT"
+
+  # ---- 1f. ISOLATED trusted-builder SLSA provenance over the non-archive release artifacts ----
+  # [OPUS-5] #4570 (GX-11 residual / SL-B3-b). Structurally identical to `provenance` above — a
+  # BARE `uses:` of the trusted reusable builder, its own OIDC identity, no step of ours inside,
+  # and exactly one input across the boundary (`base64-subjects`, threaded from the collector).
+  # See `provenance`'s header for the full rationale, including WHY A TAG REF, NOT A SHA (the
+  # builder identity `slsa-verifier` matches against is derived from the `@ref`) and WHAT THIS
+  # DOES NOT CLAIM (unforgeable provenance about the bytes the build reported — not a hardened
+  # build; the GENERIC generator attests, it does not build).
+  #
+  # A SECOND invocation rather than more subjects on the first: distinct `provenance-name`s keep
+  # the two bundles' artifact names disjoint, and a consumer verifying an archive should not have
+  # to reason about a bundle that also covers a .deb.
+  #
+  # THE ONE THING TO WATCH ON THE FIRST TAG: this is the first time the generator is invoked
+  # TWICE in one workflow run. The two jobs are only safe to coexist because the generator names
+  # its uploaded artifact from `provenance-name`, and the two names differ — the `release` job
+  # never hard-codes either, it reads each job's own `provenance-download-name` output. If a
+  # future generator version ever used a FIXED artifact name instead, the second upload would
+  # collide and this job would red (fail-closed, which is the right direction) — that is the
+  # residual to check on the first `v*` tag, not something verifiable from a PR.
+  #
+  # STILL NOT COVERED after this: the ghcr.io container image, which needs the generator's
+  # separate `generator_container_slsa3.yml` (image-digest, not file-digest, subjects) — its own
+  # migration. GX-11 narrows again; it does not close.
+  #
+  # STATUS — DOCUMENTED-UNTESTED, exactly as the archives lane: release.yml never runs on a PR,
+  # so this first executes on the next `v*` tag. Shape pinned by
+  # scripts/tests/test_release_slsa_l3_provenance.py.
+  provenance-artifacts:
+    needs: [setup, artifact-subjects]
+    permissions:
+      actions: read # read the workflow definition the provenance records as the entry point
+      id-token: write # mint the generator's OWN signing identity (never shared with a build job)
+      contents: read # not the uploader; the `release` job attaches the bundle
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: ${{ needs.artifact-subjects.outputs.hashes }}
+      upload-assets: false
+      provenance-name: sparq-artifacts-${{ needs.setup.outputs.version }}.intoto.jsonl
 
   # ---- 2. checksums + GitHub Release ----
   release:
@@ -676,7 +864,9 @@ jobs:
     # isolated trusted builder fails, no Release is cut — a release that shipped without the
     # L3 provenance while the docs claim L3 is precisely the silent overclaim the compliance
     # register exists to prevent.
-    needs: [setup, package, provenance, sbom, gui-bundle, served-conformance]
+    # [OPUS-5] #4570: `provenance-artifacts` is a hard dependency on exactly the same grounds —
+    # it covers the GUI bundles, SBOM/VEX and conformance report.
+    needs: [setup, package, provenance, provenance-artifacts, sbom, gui-bundle, served-conformance]
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the release + upload assets — the only write this pipeline needs
@@ -711,6 +901,13 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ needs.provenance.outputs.provenance-download-name }}
+          path: assets
+      # [OPUS-5] #4570 (GX-11 residual): the SECOND isolated-builder bundle — the one covering the
+      # GUI bundles, SBOM/VEX and served-surface conformance report. Same fail-closed download by
+      # the generator's own output name, so it lands in SHA256SUMS and on the Release too.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.provenance-artifacts.outputs.provenance-download-name }}
           path: assets
       # [FABLE-5] sq-vw3ax.11.3: stage version-STABLE alias assets. The /download page's direct
       # buttons target `releases/latest/download/<alias>` (static hrefs, no API dependency), but
@@ -796,7 +993,7 @@ jobs:
 
             **Supply chain:** each release carries a CycloneDX SBOM per binary (`*-${{ needs.setup.outputs.version }}.sbom.cdx.json`, including the GUI shell `sparq-gui-${{ needs.setup.outputs.version }}.sbom.cdx.json`), runtime + full-build CycloneDX SBOMs for the published npm/WASM client (`sparq-js-*`) and shared browser client (`sparq-js-client-*`), and a VEX (`sparq-${{ needs.setup.outputs.version }}.vex.cdx.json`) stating the exploitability of every advisory the dependency policy ignores. All artifacts (archives, GUI bundles, SBOMs, VEX) are SLSA build-provenance attested — verify with `gh attestation verify <file> --repo ${{ github.repository }}`. That in-band attestation is **SLSA Build L2**.
 
-            The **CLI/server archives additionally** carry `sparq-cli-${{ needs.setup.outputs.version }}.intoto.jsonl` — provenance generated by the isolated `slsa-github-generator` trusted builder, in a job no build step of ours can reach. Verify: `slsa-verifier verify-artifact <archive> --provenance-path sparq-cli-${{ needs.setup.outputs.version }}.intoto.jsonl --source-uri github.com/${{ github.repository }}`. **Read that precisely:** it means the *provenance* is unforgeable by the build (SLSA's L3 SL-B3-b property), not that the archives were built inside a trusted builder — the `cargo` build still runs in this repo's own job, and the generator attests the digests that job reported. So this is **not** a blanket "sparq is SLSA Build L3" claim. The container image, GUI bundles, SBOM/VEX and conformance report have in-band provenance only (**L2**) — the bundle above does not cover them. See `compliance/slsa/controls.md` for the audited per-artifact levels.
+            **The archives, GUI bundles, SBOMs/VEX and conformance report additionally** carry provenance generated by the isolated `slsa-github-generator` trusted builder, in a job no build step of ours can reach, split across two in-toto bundles: `sparq-cli-${{ needs.setup.outputs.version }}.intoto.jsonl` covers the CLI/server archives, and `sparq-artifacts-${{ needs.setup.outputs.version }}.intoto.jsonl` covers the GUI bundles, the SBOMs/VEX and the conformance report. Verify: `slsa-verifier verify-artifact <file> --provenance-path <the matching bundle> --source-uri github.com/${{ github.repository }}` (matching is by digest, so the version-stable alias copies — `sparq-cli-x64-linux.tar.gz` and friends — verify against the same bundle as the versioned originals they were copied from). **Read that precisely:** it means the *provenance* is unforgeable by the build (SLSA's L3 SL-B3-b property), not that the artifacts were built inside a trusted builder — the `cargo`/`tauri`/SBOM steps still run in this repo's own jobs, and the generator attests the digests those jobs reported. So this is **not** a blanket "sparq is SLSA Build L3" claim. **Not covered by either bundle:** the ghcr.io container image (in-band provenance only, **L2**, pending the generator's separate container builder), and — trivially — `SHA256SUMS` and the two `.intoto.jsonl` bundles themselves. See `compliance/slsa/controls.md` for the audited per-artifact levels.
           fail_on_unmatched_files: true
 
   # ---- 3. server container -> ghcr.io ----

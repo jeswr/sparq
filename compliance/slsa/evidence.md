@@ -177,14 +177,17 @@ permissions: { contents: read, packages: write, id-token: write, attestations: w
     file. Until then the upload step fails to mint a token by design (no static API token is stored).
     Do NOT claim PyPI provenance is *emitted* until that registration is confirmed live.
 - **No Build L3** evidence exists **yet**, and the L2 attestations must not be read as L3. The
-  *mechanism* now exists for the release archives — `release.yml#provenance` calls the isolated
-  `slsa-github-generator` trusted builder in its own job (sq-toze.25) — but `release.yml` is
-  tag/dispatch-triggered, so **no run has produced a `sparq-cli-<version>.intoto.jsonl` and nobody
-  has verified one**. Wiring is not evidence: this line stays "no L3 evidence" until a `v*` tag
-  emits a bundle that `slsa-verifier verify-artifact <archive> --provenance-path
-  sparq-cli-<version>.intoto.jsonl --source-uri github.com/jeswr/sparq` accepts. Every other
-  artifact (container, GUI bundles, SBOM/VEX, conformance report, `dist.yml` binaries) is still
-  attested in-band and is L2 by construction (GX-11, narrowed).
+  *mechanism* now exists for every artifact the `release.yml`/`dist.yml` pipelines publish except the container image — `release.yml#provenance` (archives,
+  sq-toze.25), `release.yml#provenance-artifacts` (GUI bundles, SBOM/VEX, conformance report) and
+  `dist.yml#provenance` (tiered binaries), both of the latter added by #4570 — each calling the
+  isolated `slsa-github-generator` trusted builder in its own job. But `release.yml` is
+  tag/dispatch-triggered and `dist.yml` dispatch-only, so **no run has produced a
+  `sparq-cli-<version>.intoto.jsonl` / `sparq-artifacts-<version>.intoto.jsonl` /
+  `sparq-dist.intoto.jsonl`, and nobody has verified one**. Wiring is not evidence: this line stays
+  "no L3 evidence" until a `v*` tag emits bundles that `slsa-verifier verify-artifact <file>
+  --provenance-path <bundle> --source-uri github.com/jeswr/sparq` accepts. The **ghcr container
+  image** is the one artifact with no isolated lane at all — still attested in-band and L2 by
+  construction (GX-11, narrowed twice).
 - **Reproducible build — characterised, not yet bit-for-bit** (GX-8 / sq-toze.9):
   [`reproducible-build.md`](./reproducible-build.md) records a measured double-build of
   `sparq-cli` (`--release --locked`, same tier flags) → **identical size, byte-identical apart
