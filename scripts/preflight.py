@@ -47,9 +47,13 @@
 #   G1/G2/G6, no-perf-numbers, readme-template, privacy-claims  — delegated to the
 #   existing gate scripts, scoped to YOUR diff, so they fire in-worktree instead of
 #   on CI (and instead of in a review round).
-#   guard-untested — NEW here: a guard-shaped PUBLIC symbol added by the diff with
-#   no test anywhere in the tree that so much as names it. This is the STATICALLY
-#   decidable slice of GUARD-NOT-PINNED.
+#   guard-untested — NEW here: a guard-shaped PUBLIC symbol added by the diff that
+#   is named nowhere in the TEST TEXT of the tree. "Test text" is defined precisely
+#   at `searchable_test_text` below, and it deliberately EXCLUDES the symbol's own
+#   definition and every ordinary call site — including ones in the same file as a
+#   test module. This is the STATICALLY decidable slice of GUARD-NOT-PINNED.
+#   MEASURED on the current tree: 42 of 191 guard-shaped surface symbols are named
+#   by no test text. The check is NOT wired into CI; it runs when an author runs it.
 #
 # NOT MECHANICAL, and this script does not pretend otherwise: the other slice of
 # GUARD-NOT-PINNED (a test EXISTS but cannot discriminate — it asserts a bound, a
