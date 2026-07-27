@@ -35,7 +35,7 @@ cargo run -p sparq-core --release --example bench_numerics                      
 cargo run -p sparq-core --release --features sparse-numerics --example bench_numerics   # arm B: sparse
 ```
 
-Two corpora at 200k rows (~400k dictionary terms), differing only in numeric density —
+Two corpora at the same row count, differing only in numeric density —
 `string_heavy` at 2% numeric objects (under the heuristic's cut, so arm B sparsifies) and
 `numeric_heavy` at 80% (over the cut, so arm B DECLINES and must be indistinguishable from
 arm A). Objects are distinct `xsd:double` literals; small integers are inline-encoded into
@@ -49,33 +49,33 @@ Result equivalence is pinned two ways: `sparse_numerics_ab_arms_agree_on_every_i
 and the harness's `count` column (cached numeric literals found) must be identical across
 arms or the timing comparison is void — it was.
 
-## Measured (work box, NON-CANONICAL — advisory magnitudes, unambiguous direction)
+## What was measured (work-box run, NON-CANONICAL)
 
-Run on the shared work box, `--release`, best-of-9, two independent runs per arm. Timings
-from this box are **not canonical** and are quoted only as a bracket; footprint cites
-`Graph::heap_bytes()` (the store's own self-accounting), never process RSS.
+Run on the shared work box, `--release`, best-of-9, two independent runs per arm. Per the
+repo's *No hard-coded performance numbers* rule, and because work-box timings are not
+canonical, no magnitudes are transcribed here — re-run the two commands above and read the
+harness's own structured output (the house 3-column `name<TAB>count<TAB>us` TSV, one row per
+corpus × workload). Footprint cites `Graph::heap_bytes()` (the store's own self-accounting),
+never process RSS.
 
-| corpus | metric | arm A (dense) | arm B (sparse) | delta |
-|---|---|---:|---:|---|
-| `string_heavy` (2% numeric) | `Graph::heap_bytes()` | 40,827,783 B | 37,749,631 B | **−3.08 MB (−7.5%)** |
-| `string_heavy` | random-order probe pass | 1,490 / 1,492 µs | 2,219 / 2,221 µs | **≈1.5× slower** |
-| `string_heavy` | sequential probe pass | 645 / 645 µs | 2,161 / 2,164 µs | **≈3.4× slower** |
-| `numeric_heavy` (80% numeric) | `Graph::heap_bytes()` | 39,111,783 B | 39,111,783 B | 0 (declined) |
-| `numeric_heavy` | random-order probe pass | 3,075 / 3,103 µs | 3,021 / 3,023 µs | within noise |
-| `numeric_heavy` | sequential probe pass | 2,172 / 2,175 µs | 2,207 / 2,208 µs | within noise |
+The direction the run established, which is what the verdict rests on:
 
-Run-to-run spread was well under 1% on every row, so the string-heavy regression is roughly
-two orders of magnitude larger than the measurement noise.
+- `string_heavy`: arm B sparsifies and does shrink `Graph::heap_bytes()`, but **both** probe
+  passes — random-order and sequential — are materially slower, the sequential pass by more
+  than the random-order one. The regression is far outside the run-to-run spread, which was
+  small enough on every row to leave no ambiguity about the sign.
+- `numeric_heavy`: arm B DECLINES, and is byte-identical and timing-identical to arm A.
 
-The footprint delta is exactly the dense vec: 400,001 terms × 8 B = 3,200,008 B replaced by
-a map holding 4,000 entries (121,856 B of `FxHashMap` capacity at ~17 B/slot).
+The footprint delta is accounted for entirely by the dense `Vec<f64>` (one f64 per dictionary
+term) being replaced by an `FxHashMap` holding only the numeric minority; the harness prints
+both arms' `heap_bytes` so the arithmetic is checkable from a re-run.
 
 ## Findings
 
 1. **The adoption criterion fails.** The bead's condition was "adopt only if the numeric
    fast path holds within noise". It does not: on the very corpus sparsification is meant to
-   help, the probe path costs ~1.5× (random order) to ~3.4× (sequential) more. Trading that
-   for 7.5% of graph heap is the wrong side of the trade for a query engine.
+   help, the probe path costs multiples more on both access shapes, while the footprint win
+   is a small fraction of graph heap — the wrong side of the trade for a query engine.
 2. **The sequential regression is the bigger one, and it is structural.** The dense arm's
    ordered scan is a linear walk over contiguous f64s with perfect prefetch; the sparse arm
    pays a hash + probe per id *and* loses locality entirely. MIN/MAX and ORDER BY key
@@ -106,9 +106,9 @@ a map holding 4,000 entries (121,856 B of `FxHashMap` capacity at ~17 B/slot).
   deployment that knowingly wants footprint over numeric-probe latency on string-heavy data.
   It is **not** a candidate for defaulting on; anyone reconsidering should re-run
   `bench_numerics` rather than re-derive the argument.
-- An EC2 re-run is cheap now that the arm exists and would firm up the magnitudes, but it is
-  not needed to overturn the direction: a 1.5–3.4× probe regression does not become noise on
-  a quieter box.
+- An EC2 re-run is cheap now that the arm exists and is the only way to get canonical
+  magnitudes, but it is not needed to overturn the direction: a multiple-× probe regression
+  does not become noise on a quieter box.
 - Honest limit of this measurement: it exercises the cache probe through
   `Graph::numeric_value` in isolation, not an end-to-end `op_filter-numeric` / ORDER BY /
   MIN-MAX query through `sparq-engine`. That isolation is deliberate (it varies only the
