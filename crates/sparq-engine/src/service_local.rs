@@ -93,8 +93,11 @@ impl<'a> LocalServiceRequest<'a> {
     }
 
     /// The in-scope variables of the SERVICE group, in first-occurrence order. A
-    /// handler is expected to return rows over (a subset of) these; returning a
-    /// variable that is NOT in scope is allowed but joins with nothing useful.
+    /// handler MUST return rows over a subset of these — exactly what a remote endpoint
+    /// answering the group could produce. A returned column that is NOT in scope here is
+    /// rejected as an invalid relation: it would otherwise join against an
+    /// identically-named variable of the SURROUNDING query, which is not the SERVICE
+    /// group's semantics.
     pub fn vars(&self) -> &'a [Variable] {
         self.vars
     }
@@ -123,9 +126,11 @@ impl<'a> LocalServiceRequest<'a> {
 ///
 /// `vars` names the columns; each row carries exactly `vars.len()` cells, `None` for an
 /// UNBOUND cell (the SPARQL-Results-JSON "variable absent from this binding" case). The
-/// engine validates both the arity and the uniqueness of `vars` and reports a violation
-/// the same way it reports any other SERVICE failure — a hard query error, or the join
-/// identity under `SILENT`.
+/// engine validates the arity and the uniqueness of `vars` ([`validate`](Self::validate))
+/// AND that every column is in scope in the SERVICE group
+/// ([`LocalServiceRequest::vars`]) — a scope check the executor makes, since only it
+/// knows the group. A violation is reported the same way any other SERVICE failure is —
+/// a hard query error, or the join identity under `SILENT`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LocalServiceRows {
     /// The column names, in row order.
@@ -146,9 +151,12 @@ impl LocalServiceRows {
         Self { vars, rows: Vec::new() }
     }
 
-    /// Checks the header/arity contract, returning the offending detail as an `Err`
-    /// message. Called by the executor on every handler result; exposed so a handler
-    /// (or its tests) can assert the same contract itself.
+    /// Checks the header/arity contract — unique column names, every row exactly
+    /// `vars.len()` cells wide — returning the offending detail as an `Err` message.
+    /// Called by the executor on every handler result; exposed so a handler (or its
+    /// tests) can assert the same contract itself. The executor additionally checks the
+    /// columns against the SERVICE group's in-scope variables, which this method cannot
+    /// see; see [`LocalServiceRequest::vars`].
     pub fn validate(&self) -> Result<(), String> {
         for (i, v) in self.vars.iter().enumerate() {
             if self.vars[..i].contains(v) {

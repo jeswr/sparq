@@ -227,6 +227,107 @@ fn a_duplicate_header_variable_is_reported() {
 }
 
 #[test]
+fn a_header_variable_outside_the_group_is_reported() {
+    // The relation must be one the SERVICE group itself could have produced. A column
+    // the group does not put in scope would join against the identically-named variable
+    // of the SURROUNDING query — here it would silently drop the outer `?x = 1` row.
+    let mut reg = LocalServiceRegistry::new();
+    reg.register(HANDLER, |_req| {
+        Ok(LocalServiceRows::new(
+            vec![var("o"), var("x")],
+            vec![vec![Some(lit("anything")), Some(Term::from(Literal::from(2)))]],
+        ))
+    });
+    let g = local_graph();
+    let q = format!(
+        "SELECT ?x ?o WHERE {{ VALUES ?x {{ 1 }} SERVICE <{}> {{ ?s ?p ?o }} }}",
+        HANDLER
+    );
+    let err = with_local_services(&reg, || query(&g, &q)).expect_err("?x is outside the group");
+    assert!(err.contains("invalid relation"), "{}", err);
+    assert!(err.contains("?x is not in scope"), "{}", err);
+
+    // ...and the outer solution is untouched under SILENT, where the failure degrades to
+    // the join identity exactly as a remote failure does.
+    let silent = format!(
+        "SELECT ?x WHERE {{ VALUES ?x {{ 1 }} SERVICE SILENT <{}> {{ ?s ?p ?o }} }}",
+        HANDLER
+    );
+    let res = with_local_services(&reg, || query(&g, &silent)).expect("SILENT must not fail");
+    let xs = column(&res, "x");
+    assert_eq!(xs.len(), 1, "the outer ?x = 1 row survives: {:?}", xs);
+    assert!(xs[0].starts_with("\"1\""), "and still binds 1, not the handler's 2: {}", xs[0]);
+}
+
+#[test]
+fn a_subset_of_the_groups_vars_is_accepted() {
+    // The other side of the scope check: returning FEWER columns than the group has in
+    // scope is fine — those variables are simply unbound in the handler's solutions.
+    let mut reg = LocalServiceRegistry::new();
+    reg.register(HANDLER, |_req| {
+        Ok(LocalServiceRows::new(vec![var("s")], vec![vec![Some(iri("http://ex/alice"))]]))
+    });
+    let g = local_graph();
+    let q = format!(
+        "PREFIX ex: <http://ex/>\n\
+         SELECT ?s WHERE {{ ?s a ex:Person . SERVICE <{}> {{ ?s ex:name ?name }} }}",
+        HANDLER
+    );
+    let res = with_local_services(&reg, || query(&g, &q)).expect("a subset header is valid");
+    assert_eq!(column(&res, "s"), vec!["<http://ex/alice>"]);
+}
+
+#[test]
+fn a_nested_install_restores_the_outer_registry() {
+    // `with_local_services` is scoped RAII: an inner install shadows the outer registry
+    // only for the inner closure. Clearing instead of restoring would leave the outer
+    // scope's IRI unregistered — silently unsupported, or dialled over HTTP.
+    let g = local_graph();
+    let q = format!(
+        "PREFIX ex: <http://ex/>\n\
+         SELECT ?s ?name WHERE {{ ?s a ex:Person . SERVICE <{}> {{ ?s ex:name ?name }} }}",
+        HANDLER
+    );
+    // The inner registry answers the SAME IRI with a different relation, so "which
+    // registry served this?" is observable from the answer, not just from success.
+    let mut inner = LocalServiceRegistry::new();
+    inner.register(HANDLER, |_req| {
+        Ok(LocalServiceRows::new(
+            vec![var("s"), var("name")],
+            vec![vec![Some(iri("http://ex/alice")), Some(lit("INNER"))]],
+        ))
+    });
+
+    with_local_services(&names_registry(), || {
+        assert_eq!(column(&query(&g, &q).expect("outer"), "name").len(), 2, "before");
+        let mid = with_local_services(&inner, || query(&g, &q).expect("inner"));
+        assert_eq!(column(&mid, "name"), vec!["\"INNER\""], "the inner registry shadows");
+        let after = query(&g, &q).expect("the outer registry must be restored");
+        assert_eq!(column(&after, "name").len(), 2, "after");
+    });
+
+    // ...and the OUTER install still uninstalls at ITS end.
+    query(&g, &q).expect_err("no registry is installed here");
+}
+
+#[test]
+fn a_panicking_inner_install_restores_the_outer_registry() {
+    let g = local_graph();
+    let q = format!(
+        "PREFIX ex: <http://ex/>\n\
+         SELECT ?s ?name WHERE {{ ?s a ex:Person . SERVICE <{}> {{ ?s ex:name ?name }} }}",
+        HANDLER
+    );
+    with_local_services(&names_registry(), || {
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_local_services(&LocalServiceRegistry::new(), || panic!("inner scope blew up"));
+        }));
+        assert!(unwound.is_err(), "the inner closure must have panicked");
+        assert!(query(&g, &q).is_ok(), "unwinding the inner scope must not unregister the outer");
+    });
+}
+
+#[test]
 fn the_registry_is_scoped_to_the_install() {
     let g = local_graph();
     let q = format!(

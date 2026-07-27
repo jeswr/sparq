@@ -426,6 +426,11 @@ pub use service_local::{
 /// under a `FILTER EXISTS` still sees it) and uninstalled when the closure returns.
 /// Composes with [`with_functions`] / [`with_spatial_index`] in either nesting order.
 ///
+/// Nests with ITSELF: an inner install SHADOWS the outer registry only for the inner
+/// closure, and the outer one is restored when that closure returns — including on
+/// unwind, so a panicking inner scope never leaves the outer scope's handlers
+/// unregistered.
+///
 /// ```ignore
 /// let mut reg = LocalServiceRegistry::new();
 /// reg.register("urn:sparq:local:evens", |_req| {

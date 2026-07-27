@@ -327,9 +327,11 @@ let r = with_local_services(&reg, || {
   for any richer group (OPTIONAL/UNION/FILTER/sub-SELECT/paths/quoted triples), so a handler can
   never mistake a partial view for the whole group. Such a handler works from `query()`.
 - **Response.** `LocalServiceRows { vars, rows }` (`new` / `empty` / `validate`); each row is
-  `vars.len()` cells wide with `None` for UNBOUND. A duplicate header variable or a ragged row is
-  reported as a SERVICE failure, never silently mangled. The EMPTY relation makes the surrounding
-  join empty — it is NOT the join identity.
+  `vars.len()` cells wide with `None` for UNBOUND, over a SUBSET of `req.vars()`. A duplicate header
+  variable, a ragged row, or a column NOT in scope in the SERVICE group is reported as a SERVICE
+  failure, never silently mangled: the relation must be one the group itself could have produced, or
+  an out-of-scope column would join against a same-named variable of the SURROUNDING query. The
+  EMPTY relation makes the surrounding join empty — it is NOT the join identity.
 - **Errors / `SILENT`.** A handler `Err` is a hard query error; under `SERVICE SILENT` it is
   swallowed and yields the join identity so the surrounding solutions survive — identical to how a
   remote failure degrades. Terms interned before a swallowed failure are rolled back and their

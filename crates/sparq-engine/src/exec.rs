@@ -1671,7 +1671,7 @@ pub(crate) mod functions {
 
 // ---- Local rows-returning SERVICE handlers (sq-lsp7k.2.2) ----------------------
 //
-// Mirrors `functions` exactly (install guard + rayon-worker snapshot/re-install) so a
+// Mirrors `functions` (install guard + rayon-worker snapshot/re-install) so a
 // `SERVICE <iri> { … }` nested under a `FILTER EXISTS` — which re-enters pattern
 // evaluation on a rayon worker — still sees the registry. Propagation is load-bearing,
 // not a nicety: a worker that MISSED the registry would fall through to the HTTP path
@@ -1689,16 +1689,22 @@ pub(crate) mod local_services {
         static ACTIVE: RefCell<Option<Arc<LocalServiceRegistry>>> = const { RefCell::new(None) };
     }
 
-    pub(crate) struct Guard;
+    /// Uninstalls on drop by restoring the PREVIOUS registry rather than clearing —
+    /// `with_local_services` is documented as scoped RAII, so a NESTED install must
+    /// hand the outer scope its own registry back when the inner one ends (clearing
+    /// would silently unregister the outer handlers for the rest of the outer scope,
+    /// sending a formerly-local IRI down the HTTP path). Restores on unwind too.
+    /// [SONNET-4.6]
+    pub(crate) struct Guard(Option<Arc<LocalServiceRegistry>>);
     impl Drop for Guard {
         fn drop(&mut self) {
-            ACTIVE.with(|a| a.borrow_mut().take());
+            let prev = self.0.take();
+            ACTIVE.with(|a| *a.borrow_mut() = prev);
         }
     }
 
     pub(crate) fn install(reg: &LocalServiceRegistry) -> Guard {
-        ACTIVE.with(|a| *a.borrow_mut() = Some(Arc::new(reg.clone())));
-        Guard
+        Guard(ACTIVE.with(|a| a.borrow_mut().replace(Arc::new(reg.clone()))))
     }
 
     #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
@@ -5257,7 +5263,18 @@ fn eval_service(
 ///   registry / no registry installed). The caller proceeds EXACTLY as it did before
 ///   this feature existed: the `service` HTTP path, egress allowlist included.
 /// * `Err(_)` — a non-SILENT handler failure (a returned `Err`, or a violation of the
-///   [`crate::LocalServiceRows`] header/arity contract).
+///   [`crate::LocalServiceRows`] header/arity contract, or a returned column that is
+///   NOT in scope in the SERVICE group).
+///
+/// ## Why an out-of-scope column is rejected
+///
+/// The relation must be one the SERVICE group itself could have produced: a remote
+/// endpoint answering `SELECT * WHERE { … }` can only ever return the group's in-scope
+/// variables. A handler returning some OTHER variable would silently join against an
+/// identically-named variable of the SURROUNDING query — `VALUES ?x { 1 } SERVICE <h>
+/// { ?s ?p ?o }` with a returned `?x = 2` would drop the outer row — which is neither
+/// the SERVICE group's semantics nor the remote path's. It is a handler bug, so it is
+/// reported like any other invalid relation rather than projected away silently.
 ///
 /// ## Why the intercept sits here
 ///
@@ -5309,9 +5326,22 @@ fn try_local_service(
     let vocab_mark = local.savepoint();
     let byte_mark = budget::byte_savepoint();
     let produced = handler(&req).and_then(|rows| {
-        rows.validate().map_err(|e| {
-            format!("local SERVICE <{}> returned an invalid relation: {}", iri.as_str(), e)
-        })?;
+        rows.validate()
+            .and_then(|()| {
+                // The returned relation may only name columns the SERVICE group itself
+                // puts in scope (see the doc comment): anything else would join with a
+                // same-named variable OUTSIDE the group. [SONNET-4.6]
+                match rows.vars.iter().find(|v| !vars.contains(v)) {
+                    Some(v) => Err(format!(
+                        "variable ?{} is not in scope in the SERVICE group",
+                        v.as_str()
+                    )),
+                    None => Ok(()),
+                }
+            })
+            .map_err(|e| {
+                format!("local SERVICE <{}> returned an invalid relation: {}", iri.as_str(), e)
+            })?;
         let id_rows: Vec<Row> =
             rows.rows.iter().map(|r| intern_remote_row(graph, local, r)).collect();
         budget::check(id_rows.len())?;
