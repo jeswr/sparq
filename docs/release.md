@@ -476,3 +476,38 @@ the cadence verdict it *would* return. It only ever runs `git`, never `cargo`.
 > Each needs a decision: add a `[[package]]` entry with `version_group = "sparq"` (it ships),
 > or set `publish = false` in its `Cargo.toml` (it does not). The "17 crates" figure in §8c
 > and §0a describes the version_group, not cargo's publishable set.
+
+### 8e. release-plz forge token — one `needs:user` secret unblocks the Release-PR (issue #3273)
+
+`release-plz.yml` cannot open the Release-PR with the workflow's own `GITHUB_TOKEN`: the
+repo/org setting **Settings → Actions → General → "Allow GitHub Actions to create and approve
+pull requests"** is disabled, so every push to `main` ends in
+`Failed to open PR … 403 Forbidden … /pulls`. The job is advisory and the known 403 is
+contained loudly (signature + live probe), so nothing goes red — but no Release-PR is opened,
+which is what the version/changelog automation and the GUI-download release depend on.
+
+Both jobs now pick their forge token in this order, so **no workflow edit is needed** — only
+the secret:
+
+```
+App token (ORCHESTRATOR_APP_ID + ORCHESTRATOR_APP_PRIVATE_KEY)  ← preferred
+  || RELEASE_PLZ_TOKEN     (fine-grained PAT: contents:write + pull_requests:write)
+  || GITHUB_TOKEN          (fallback; cannot open PRs while the setting is disabled)
+```
+
+**needs:user — do exactly one:**
+1. Provision `ORCHESTRATOR_APP_ID` + `ORCHESTRATOR_APP_PRIVATE_KEY` (the App used by
+   `batch-merge.yml`; install it on this repo with contents + pull-requests write), **or**
+2. add a `RELEASE_PLZ_TOKEN` repo secret (fine-grained PAT, same two permissions), **or**
+3. enable the repo setting above.
+
+Options 1–2 also fix a second, independent problem: GitHub suppresses workflow triggers for
+events created with `GITHUB_TOKEN`, so a `v<version>` tag pushed by the `release-plz / tag` job
+would **not** fire `release.yml` (`push: tags: ["v*"]`) — the tag→`release.yml` handoff §3
+describes. A minted App token / PAT is a normal actor and does fire it. Option 3 alone does not.
+
+Once a privileged token is configured the containment step no longer tolerates a 403 at all: a
+provisioned token that still 403s is a real failure (App not installed, PAT expired or
+under-scoped) and fails the job. Promotion: after a main run is observed opening/updating the
+Release-PR, drop the `(advisory)` token from the job name, delete the containment step and
+remove the entry from `.github/advisory-registry.json`.
