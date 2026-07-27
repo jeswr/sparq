@@ -86,6 +86,7 @@ queryJsonChunks(sparql): Generator<string>           // raw ~64 KiB JSON chunks 
 
 // SHACL validation (data graph vs shapes graph) — typed report; needs a shacl bundle (shipped by default)
 validate(data: string, shapes: string, format?: RdfFormat): ValidationReport  // { conforms, results[] }; stateless
+// (store-backed validation — the store's OWN triples — is on the raw wasm Store: validateStore(shapes, format))
 
 // RDF/JS quad lookup (null/undefined/Variable = wildcard; generated SELECT under the hood)
 match(s?, p?, o?, g?): Quad[]
@@ -106,7 +107,7 @@ free(): void                                         // also Symbol.dispose
 
 Other named exports from `@jeswr/sparq`: `DataFactory` (RDF/JS factory: `namedNode`, `blankNode`, `literal`, `variable`, `quad`, ...) and term classes `NamedNode/BlankNode/Literal/Variable/DefaultGraph/Quad`; `init` (idempotent wasm bootstrap); compression helpers `decompress / decompressToString / sniffCodec`; SPARQL helpers `termFromSparqlJson / termToNT / quadsToNQuads / detectQueryForm / SparqlJsonRowsParser`; and the `SparqDictionaryClient` (server dictionary-fetch protocol). `termFromSparqlJson` accepts the SPARQL 1.2 JSON directional-literal shape — `{ type: 'literal', value: 'x', 'xml:lang': 'en', 'its:dir': 'ltr' }` yields a `Literal` with `.language === 'en'`, `.direction === 'ltr'`, and datatype `rdf:dirLangString` (round-tripped by `termToNT` as `"x"@en--ltr`); without `its:dir` the literal stays plain `rdf:langString`.
 
-Raw wasm `Store` (from `../wasm/sparq_wasm.js`, re-exported as `WasmStore` internally) — use only when you need CONSTRUCT/DESCRIBE, batch cursors, or **query-plan introspection**. Methods return SPARQL-JSON / N-Triples / plan-text **strings**, not RDF/JS terms: `Store.load/loadDataset/loadCompressed(text, format)`, `Store.loadBytes(bytes, format)` / `Store.loadBytesWithBase(bytes, format, base)` (ingest a `Uint8Array` directly, `bytes-ingest` bundle only — see below), `.query(sparql)`, `.queryChunks(sparql)`, `.queryCursor(sparql, batchSize)`, `.queryQuads(sparql)` (CONSTRUCT/DESCRIBE -> N-Triples), `.queryQuadsChunks(sparql, batchSize)`, `.count`, `.ask`, `.askWithMaxRows(sparql, maxRows)`, `.explain(sparql)`, `.explainAnalyze(sparql)`, `.validate(data, shapes, format)` (SHACL report as a JSON **string**, shacl bundle only), `.serialize(format, pretty, indent, abbreviate, prefixes?)` (the store's contents as a Turtle / TriG / JSON-LD **string**, serialize-rdf bundle only — see below), `.parseShaclCompact(text, base?)` (SHACL Compact Syntax → the shapes graph as a Turtle **string**, scs bundle only — see below), `.update`, `.updateInPlace`, `.applyDelta(inserts, deletes)`, `.size`, `.heapBytes()`.
+Raw wasm `Store` (from `../wasm/sparq_wasm.js`, re-exported as `WasmStore` internally) — use only when you need CONSTRUCT/DESCRIBE, batch cursors, or **query-plan introspection**. Methods return SPARQL-JSON / N-Triples / plan-text **strings**, not RDF/JS terms: `Store.load/loadDataset/loadCompressed(text, format)`, `Store.loadBytes(bytes, format)` / `Store.loadBytesWithBase(bytes, format, base)` (ingest a `Uint8Array` directly, `bytes-ingest` bundle only — see below), `.query(sparql)`, `.queryChunks(sparql)`, `.queryCursor(sparql, batchSize)`, `.queryQuads(sparql)` (CONSTRUCT/DESCRIBE -> N-Triples), `.queryQuadsChunks(sparql, batchSize)`, `.count`, `.ask`, `.askWithMaxRows(sparql, maxRows)`, `.explain(sparql)`, `.explainAnalyze(sparql)`, `.validate(data, shapes, format)` (SHACL report as a JSON **string**, shacl bundle only), `.validateStore(shapes, format)` (the same report over the store's OWN triples, shacl bundle only — see below), `.serialize(format, pretty, indent, abbreviate, prefixes?)` (the store's contents as a Turtle / TriG / JSON-LD **string**, serialize-rdf bundle only — see below), `.parseShaclCompact(text, base?)` (SHACL Compact Syntax → the shapes graph as a Turtle **string**, scs bundle only — see below), `.update`, `.updateInPlace`, `.applyDelta(inserts, deletes)`, `.size`, `.heapBytes()`.
 
 ### Solid server wasm adapter (host integration)
 
@@ -406,6 +407,15 @@ const violations = report.results.filter(
 ```
 
 The raw `Store.validate(data, shapes, format)` returns the same report as a JSON **string** (`JSON.parse` it yourself). `focusNode`/`value`/`sourceShape` are N-Triples term strings; `path` is a SHACL Turtle path expression; `severity`/`sourceConstraintComponent` are full IRIs; `message` is the first `sh:message` text (or a generated default). `path`/`value`/`message` are `null` when absent. Only a graph parse failure throws; malformed shapes are skipped, not surfaced. For large data graphs validate server-side via the `sparq-server` HTTP `validate` endpoint instead (the other half of the #162 decision). See the `shacl-validation` skill for the engine's SHACL coverage.
+
+**Store-backed SHACL (raw wasm `Store.validateStore`, shacl bundle only, gh-2520).** `validateStore(shapes, format)` is the **stateful** counterpart: the data graph is the store's own contents — whatever `load`/`loadDataset`/`update`/`applyDelta` left in it — so only the *shapes* document is parsed per call. Report shape, `sh:conforms` semantics and error behaviour are identical to `validate`'s (only a shapes parse failure throws). Use it when one loaded store is re-validated as shapes are edited, instead of re-passing (and re-parsing) the data document every time.
+
+```js
+const store = Store.load(dataTurtle, 'turtle');            // parse the data ONCE
+const report = JSON.parse(store.validateStore(shapesTurtle, 'turtle'));
+```
+
+Two caveats. It observes the store's **default graph** only — triples put in named graphs by `loadDataset` are not focus nodes or value nodes (`load` folds named graphs into the default graph, so a store built that way validates in full). And blank-node labels in `sourceShape` are minted fresh by each shapes parse, so they differ between any two calls (of either method) — treat them as per-call identifiers, not stable keys. The typed `SparqStore.validate` wrapper has no store-backed twin yet; reach for the raw `Store` for this one.
 
 **Raw wasm `Store`: init (`initSync` vs async default), errors, and `.free()` (#1127).** The wasm-pack `--target web` glue (`../wasm/sparq_wasm.js`) is a real ESM module that exports a **default async `init`** plus a synchronous **`initSync`** — one of the two MUST run before any `Store.*` static (`SparqStore`/`Dataset` do this for you via the package's memoised `init()`; you only call these when using the raw `Store` directly).
 
