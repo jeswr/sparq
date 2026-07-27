@@ -413,21 +413,25 @@ PY
   # copy). The seam step in turn catches this suite being unwired. Two edges,
   # each pinned; the residual is a diff that disarms both steps at once.
   SEAM_STEP='      - name: "The model-attribution gate is soundly WIRED into this workflow — GATING"'
-  # The first command line of that step, not `run: |` — which appears nine times
-  # in this workflow. mutate_line asserts uniqueness, so an ambiguous anchor
-  # aborts the suite rather than mutating some other step.
-  # Double-quoted so the trailing YAML line-continuation backslash is a literal
-  # `\` (SC1003 — a single-quoted string cannot end in one). Nothing here
-  # expands: no `$`, no backtick.
-  SEAM_CMD="          python3 scripts/check-workflow-seam.py --workflow .github/workflows/docs-quality.yml \\"
+  # Every B5 mutation anchors on that step-NAME line, which is unique, and edits
+  # the step's own `run: |` block through it. Anchoring on the first command line
+  # instead would break the moment #4547 is composed with this branch: it adds a
+  # second seam step whose command line differs only in the needle.
 
-  # mutate_line <anchor> <insert-after|insert-before|replace> <payload>
+  # mutate_line <anchor> <insert-after|insert-before|replace|insert-into-run> <payload>
   # Targets by LINE with a uniqueness assertion and refuses to write a no-op —
   # a whole-file str.replace() hits the wrong occurrence (a comment, a fixture)
-  # and reports a phantom survivor.
+  # and reports a phantom survivor. `insert-into-run` resolves the anchor STEP's
+  # own `run: |` block and inserts as its first line, so the mutation cannot
+  # land in a different step's body: once #4547 is composed with this branch,
+  # `docs-quality.yml` has two steps whose first command line is byte-identical
+  # apart from the needle, and a first-command-line anchor stops being unique.
+  # The result is re-parsed as YAML so a structurally-broken insert reds here
+  # instead of being reported as a surviving mutant.
   mutate_line() {
     python3 - "$WORKFLOW" "$MUT" "$1" "$2" "$3" <<'PY'
 import sys
+import yaml
 src, dst, anchor, mode, payload = sys.argv[1:6]
 text = open(src, encoding="utf-8").read()
 lines = text.splitlines(keepends=True)
@@ -441,11 +445,25 @@ elif mode == "insert-before":
     lines.insert(i, payload + "\n")
 elif mode == "replace":
     lines[i] = payload + "\n"
+elif mode == "insert-into-run":
+    for j in range(i + 1, len(lines)):
+        stripped = lines[j].strip()
+        if stripped in ("run: |", "run: |-"):
+            lines.insert(j + 1, payload + "\n")
+            break
+        if stripped.startswith("- name:"):
+            sys.exit(f"no `run: |` block found in the step anchored at {anchor!r}")
+    else:
+        sys.exit(f"no `run: |` block found after {anchor!r}")
 else:
     sys.exit(f"unknown mutate mode {mode!r}")
 out = "".join(lines)
 if out == text:
     sys.exit("mutation was a NO-OP — refusing to let the test report a phantom survivor")
+try:
+    yaml.safe_load(out)
+except yaml.YAMLError as exc:
+    sys.exit(f"the mutation produced invalid YAML, so it tests nothing: {exc}")
 open(dst, "w", encoding="utf-8").write(out)
 PY
   }
@@ -489,7 +507,7 @@ PY
     "B5d MUTANT: \`|| true\` on the GATING SEAM step's command is caught" \
     'discards its exit status'
 
-  mutate_line "$SEAM_CMD" insert-before '          set +e'
+  mutate_line "$SEAM_STEP" insert-into-run '          set +e'
   expect_seam_finding \
     "B5e MUTANT: \`set +e\` in the GATING SEAM step's run body is caught" \
     'relaxes the shell error mode'
