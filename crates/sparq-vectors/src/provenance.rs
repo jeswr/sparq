@@ -361,6 +361,69 @@ impl ProvenanceWeights {
             WeightMode::Provenance => self.weight_for_subject(h),
         }
     }
+
+    // ---- integration point 3 (WIRING): graph → per-block weights on a real SchemaHeader --------
+    // [OPUS-5] sq-w2af4. sq-oy9ya landed the `block_weight` aggregate and the `Block::weight`
+    // field but left the caller that JOINS them unwritten, so nothing in-tree ever produced a
+    // weighted header. These two methods are that caller: they derive each block's weight from the
+    // graph itself (the subjects of the predicate that feeds the block) and hand back a
+    // `SchemaHeader` whose blocks carry it — which the `.spqv` SPQS-v2 sidecar then persists and
+    // `Block::fusion_weight` serves to the query-time fusion path.
+
+    /// The per-block fusion weight for the block a `predicate` feeds: [`block_weight`](Self::block_weight)
+    /// aggregated over the **subjects** of that predicate's triples in `graph` (the heads whose
+    /// incident edges are what the block encodes).
+    ///
+    /// `1.0` (fail-open) when the graph never mentions `predicate`, and — as everywhere in this
+    /// module — always exactly `1.0` under [`WeightMode::Uniform`], so the ablation-off arm leaves
+    /// every block at the unweighted default.
+    pub fn predicate_block_weight(&self, graph: &Graph, predicate: &str, mode: WeightMode) -> f32 {
+        let Some(pid) = id_of_iri(graph, predicate) else {
+            return 1.0;
+        };
+        let scan = graph.store.scan(&[None, Some(pid), None]);
+        let subjects: Vec<Id> = scan.rows.iter().map(|row| scan.to_spo(row)[0]).collect();
+        self.block_weight(subjects, mode)
+    }
+
+    /// Attach provenance-derived per-block fusion weights to `header`, returning the weighted
+    /// header (design §USE-1 point 3, end-to-end). `block_predicates[i]` names the predicate that
+    /// feeds `header.blocks()[i]`; a `None` entry leaves that block at the fail-open default
+    /// (`weight: 1.0` — e.g. a text or taxonomy lane with no single feeding predicate).
+    ///
+    /// The returned header is layout-identical to `header` ([`Block`](crate::encode::Block)'s
+    /// `PartialEq` excludes the weight), so a weighted header is a drop-in replacement everywhere
+    /// the unweighted one was used; only [`Block::fusion_weight`](crate::encode::Block::fusion_weight)
+    /// — and the SPQS-v2 bytes — differ. Under [`WeightMode::Uniform`] every block resolves to
+    /// `1.0`, so the ablation-off arm is behaviourally identical to today's unweighted header.
+    ///
+    /// `Err` if `block_predicates` is not exactly one entry per block (a caller/layout mismatch is
+    /// a bug, never silently padded).
+    pub fn weight_header(
+        &self,
+        graph: &Graph,
+        header: &crate::encode::SchemaHeader,
+        block_predicates: &[Option<&str>],
+        mode: WeightMode,
+    ) -> Result<crate::encode::SchemaHeader, String> {
+        if block_predicates.len() != header.blocks().len() {
+            return Err(format!(
+                "weight_header: {} block predicates for {} blocks",
+                block_predicates.len(),
+                header.blocks().len()
+            ));
+        }
+        let blocks = header
+            .blocks()
+            .iter()
+            .zip(block_predicates.iter())
+            .map(|(b, pred)| match pred {
+                Some(p) => b.with_weight(self.predicate_block_weight(graph, p, mode)),
+                None => *b,
+            })
+            .collect();
+        crate::encode::SchemaHeader::new(blocks)
+    }
 }
 
 // ---- helpers ----------------------------------------------------------------------------------
@@ -628,6 +691,60 @@ ex:b ex:rel ex:a .
 
         // An empty subject set is the fail-open 1.0 (a block with no provenance edges).
         assert_eq!(pw.block_weight(std::iter::empty(), WeightMode::Provenance), 1.0);
+    }
+
+    // ---- integration point 3 (WIRING): graph → weighted SchemaHeader (sq-w2af4) ---------------
+
+    #[test]
+    fn predicate_block_weight_aggregates_the_predicate_subjects() {
+        // [OPUS-5] `ex:knows` is asserted by alice (w=0.9), bob (w=0.28) and carol (no provenance,
+        // w=1.0), so the block that predicate feeds weighs the mean of the three.
+        let g = graph();
+        let pw = ProvenanceWeights::mine(&g);
+        let alice = id(&g, "http://ex/alice");
+        let bob = id(&g, "http://ex/bob");
+        let carol = id(&g, "http://ex/carol");
+        let expect = (pw.weight_for_subject(alice)
+            + pw.weight_for_subject(bob)
+            + pw.weight_for_subject(carol))
+            / 3.0;
+        let got = pw.predicate_block_weight(&g, "http://ex/knows", WeightMode::Provenance);
+        assert!((got - expect).abs() < 1e-6, "{} vs {}", got, expect);
+        // Ablation-off, and an unknown predicate, are both the fail-open 1.0.
+        assert_eq!(pw.predicate_block_weight(&g, "http://ex/knows", WeightMode::Uniform), 1.0);
+        assert_eq!(pw.predicate_block_weight(&g, "http://ex/absent", WeightMode::Provenance), 1.0);
+    }
+
+    #[test]
+    fn weight_header_attaches_block_weights_and_survives_the_spqs_round_trip() {
+        use crate::encode::{Block, Encoder, Metric, SchemaHeader};
+        let g = graph();
+        let pw = ProvenanceWeights::mine(&g);
+        let plain = SchemaHeader::new(vec![
+            Block::new(Encoder::Numeric, Metric::Euclidean, 0, 4),
+            Block::new(Encoder::Other, Metric::Euclidean, 4, 2),
+        ])
+        .unwrap();
+
+        // Block 0 is fed by `ex:knows`; block 1 has no single feeding predicate (fail-open 1.0).
+        let preds = [Some("http://ex/knows"), None];
+        let weighted = pw.weight_header(&g, &plain, &preds, WeightMode::Provenance).unwrap();
+        let w0 = weighted.blocks()[0].fusion_weight();
+        assert!(w0 > 0.0 && w0 < 1.0, "the provenance-fed block is down-weighted: {}", w0);
+        assert_eq!(weighted.blocks()[1].fusion_weight(), 1.0, "an unfed block stays fail-open");
+        // The LAYOUT is unchanged — a weighted header is a drop-in for the plain one.
+        assert_eq!(weighted, plain, "the weight is not part of the header's identity");
+
+        // And the weight survives the real SPQS-v2 sidecar round trip (not just in RAM).
+        let back = SchemaHeader::from_bytes(&weighted.to_bytes()).unwrap();
+        assert!((back.blocks()[0].fusion_weight() - w0).abs() < 1e-6);
+
+        // Ablation-off: every block resolves to the unweighted 1.0.
+        let off = pw.weight_header(&g, &plain, &preds, WeightMode::Uniform).unwrap();
+        assert!(off.blocks().iter().all(|b| b.fusion_weight() == 1.0));
+
+        // A length mismatch is a caller bug, never silently padded.
+        assert!(pw.weight_header(&g, &plain, &[None], WeightMode::Provenance).is_err());
     }
 
     #[test]

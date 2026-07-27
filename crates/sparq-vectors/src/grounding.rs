@@ -174,10 +174,20 @@ pub enum Grounding {
     /// a fact present in the (possibly closed) graph. The subject is the grounded node itself.
     Subgraph(Vec<GroundFact>),
     /// The relevant typed blocks of the node's stored vector, concatenated in block order, plus
-    /// which encoder families they came from.
+    /// which encoder families they came from and each block's **fusion weight**.
     TypedSubVector {
         values: Vec<f32>,
         blocks: Vec<Encoder>,
+        /// [OPUS-5] sq-w2af4 — the per-block query-time modality multiplier
+        /// ([`Block::fusion_weight`](crate::encode::Block::fusion_weight)), one entry per kept
+        /// block, in the same order as `blocks`. It is the design-§USE-1-point-3 aggregate of the
+        /// incident-edge provenance that fed the block (attached to the header by
+        /// [`ProvenanceWeights::weight_header`](crate::provenance::ProvenanceWeights::weight_header)),
+        /// and it is what the caller feeds to
+        /// [`fuse_rrf_weighted`](crate::fuse_rrf_weighted) / [`fuse_scores`](crate::fuse_scores)
+        /// so a low-provenance modality contributes less to the fused ranking. Every entry is
+        /// `1.0` on a header with no recorded weights (fail-open — grounding is unchanged).
+        weights: Vec<f32>,
     },
     /// The token-budgeted NL rendering.
     NlString(String),
@@ -287,8 +297,13 @@ pub fn ground(
         Modality::NlString => nl_string(graph, node, id, cfg).map(Grounding::NlString),
         Modality::TypedSubVector => {
             let (store, header) = store?;
-            typed_sub_vector(store, header, id, &cfg.keep_blocks)
-                .map(|(values, blocks)| Grounding::TypedSubVector { values, blocks })
+            typed_sub_vector(store, header, id, &cfg.keep_blocks).map(|(values, blocks, weights)| {
+                Grounding::TypedSubVector {
+                    values,
+                    blocks,
+                    weights,
+                }
+            })
         }
         Modality::TypedValue => {
             let vals = typed_values(graph, id, cfg.reconcile_units);
@@ -728,17 +743,20 @@ fn typed_value_key(v: &TypedValue) -> String {
 // ---- typed-sub-vector modality ----------------------------------------------------------------
 
 /// Project `id`'s stored vector to only the blocks in `keep` (empty = all), concatenated in block
-/// order, plus the encoder families kept. `None` when the store has no vector for `id`, or the kept
-/// projection is empty.
+/// order, plus the encoder families kept and each kept block's
+/// [`fusion_weight`](crate::encode::Block::fusion_weight) ([OPUS-5] sq-w2af4 — the design-§USE-1
+/// point-3 modality multiplier the caller hands to the fusion path; `1.0` when the header records
+/// none). `None` when the store has no vector for `id`, or the kept projection is empty.
 fn typed_sub_vector(
     store: &VectorStore,
     header: &crate::encode::SchemaHeader,
     id: Id,
     keep: &[Encoder],
-) -> Option<(Vec<f32>, Vec<Encoder>)> {
+) -> Option<(Vec<f32>, Vec<Encoder>, Vec<f32>)> {
     let full = store.get(id)?;
     let mut values: Vec<f32> = Vec::new();
     let mut blocks: Vec<Encoder> = Vec::new();
+    let mut weights: Vec<f32> = Vec::new();
     for block in header.blocks() {
         if !keep.is_empty() && !keep.contains(&block.encoder) {
             continue;
@@ -749,12 +767,67 @@ fn typed_sub_vector(
         }
         values.extend_from_slice(&full[block.offset..end]);
         blocks.push(block.encoder);
+        weights.push(block.fusion_weight());
     }
     if values.is_empty() {
         None
     } else {
-        Some((values, blocks))
+        Some((values, blocks, weights))
     }
+}
+
+// ---- integration point 2 (WIRING): confidence-weighted structural-sketch pooling ---------------
+// [OPUS-5] sq-w2af4. sq-oy9ya landed `ProvenanceWeights::pool_weighted` but no in-tree caller ever
+// pooled anything with it. `sketch_predicate` is that caller: it is the grounding-path
+// structural-sketch pooler for a node's MULTI-VALUED object predicate.
+
+/// **Confidence-weighted structural sketch** of `node`'s multi-valued `predicate` (design §USE-1
+/// integration point 2): pool the stored vectors of the node's object neighbours under that
+/// predicate, weighting each neighbour's contribution by its provenance `w(t)` via
+/// [`ProvenanceWeights::pool_weighted`](crate::provenance::ProvenanceWeights::pool_weighted).
+///
+/// **Which provenance qualifies a contribution (load-bearing, and deliberately documented).** The
+/// contribution of neighbour `o` is weighted by **`o`'s own** provenance, not `node`'s. A plain
+/// RDF-1.1 graph carries no per-*statement* provenance, and every `(node, predicate, ·)` edge shares
+/// the same subject — so weighting by the subject would give every contribution the identical weight
+/// and silently degenerate to the uniform mean (a no-op dressed up as a feature). Weighting by the
+/// neighbour is the honest reading of "a value a low-assurance source asserted pulls the pooled
+/// vector less", and it is the only reading under which this pooler differs from the mean at all.
+///
+/// Returns `Ok(None)` when the node is absent/inline, the predicate is unknown to the graph, or no
+/// neighbour has a stored vector. `Err` only if the store's vectors disagree in length (a layout
+/// bug, never silently truncated).
+///
+/// Under [`WeightMode::Uniform`](crate::provenance::WeightMode::Uniform) — and over any
+/// provenance-free graph — this is **exactly** the arithmetic mean of the neighbour vectors, i.e.
+/// the ablation-off baseline. **No accuracy claim is made**: the sketch is measured, not asserted
+/// (`eval::run_pooling_ablation`, under the `kge` feature, is the instrument).
+pub fn sketch_predicate(
+    graph: &Graph,
+    store: &VectorStore,
+    node: &oxrdf::Term,
+    predicate: &str,
+    weights: &crate::provenance::ProvenanceWeights,
+    mode: crate::provenance::WeightMode,
+) -> Result<Option<Vec<f32>>, String> {
+    let Some(id) = graph.id_of(node) else {
+        return Ok(None);
+    };
+    if dict::is_inline(id) {
+        return Ok(None);
+    }
+    let Some(pid) = graph.id_of(&named(predicate)) else {
+        return Ok(None);
+    };
+    let scan = graph.store.scan(&[Some(id), Some(pid), None]);
+    let mut contributions: Vec<(Id, Vec<f32>)> = Vec::new();
+    for row in scan.rows.iter() {
+        let [_, _, o] = scan.to_spo(row);
+        if let Some(v) = store.get(o) {
+            contributions.push((o, v.to_vec()));
+        }
+    }
+    weights.pool_weighted(&contributions, mode)
 }
 
 // ---- shared helpers ---------------------------------------------------------------------------

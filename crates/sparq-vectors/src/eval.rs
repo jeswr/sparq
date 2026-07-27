@@ -1060,6 +1060,165 @@ pub fn run_weight_ablation(
     })
 }
 
+// ---- Phase-4 confidence-weighted POOLING ablation (sq-w2af4) ------------------------------------
+
+/// The result of a paired **confidence-weighted structural-sketch pooling** ablation
+/// ([`run_pooling_ablation`], sq-w2af4 — design §USE-1 integration point 2): the two per-arm metric
+/// aggregates (uniform-mean pooling OFF vs provenance-weighted pooling ON) plus the **paired**
+/// per-seed MRR / Hits@10 deltas.
+///
+/// This is the instrument for the *pooling* axis, the sibling of [`WeightAblation`]'s *training*
+/// axis. Per seed the two arms share the parse, closure, split, restricted train graph, type
+/// constraints **and the trained model itself** — the trainer runs exactly **once** per seed and
+/// both arms post-process the *same* parameters — so the delta isolates the pooling weights and
+/// nothing else. On a provenance-free graph both arms pool with identical (all-`1.0`) weights and
+/// every delta is exactly zero (the honest no-op, the same invariant [`WeightAblation`] documents).
+/// **No bar is hard-coded and no accuracy claim is made.**
+#[derive(Clone, Debug)]
+pub struct PoolingAblation {
+    /// Confidence-weighting OFF ([`WeightMode::Uniform`] — the plain arithmetic mean of the
+    /// neighbour sketch), aggregated over seeds.
+    pub off: CellStats,
+    /// Confidence-weighting ON ([`WeightMode::Provenance`]), aggregated over seeds.
+    pub on: CellStats,
+    /// Paired per-seed MRR delta `MRR(on) − MRR(off)` (variance-reduced). The headline statistic.
+    pub mrr: PairedDelta,
+    /// Paired per-seed Hits@10 delta `Hits@10(on) − Hits@10(off)`.
+    pub hits10: PairedDelta,
+}
+
+impl PoolingAblation {
+    /// Convenience: is the weighted-pooling MRR lift significant at `k` standard errors of its
+    /// paired spread (`n ≥ 2` required)? `false` means the honest verdict is **no measured lift**
+    /// — abandon weighted pooling for that dataset, per the pre-registered-bar discipline.
+    pub fn mrr_significant_at(&self, k: f64) -> bool {
+        self.mrr.significant_at(k)
+    }
+}
+
+/// Run the **confidence-weighted pooling ON vs OFF** ablation per seed and return the paired
+/// MRR / Hits@10 deltas (sq-w2af4, GenAI-KB Phase 4, design §USE-1 integration point 2).
+///
+/// Each seed trains **one** model (at `template.train`, with `weight_mode` forced to
+/// [`WeightMode::Uniform`] so the *training* axis is held fixed and cannot confound), then builds
+/// two **structural-sketch-augmented** copies of it that differ only in the pooling mode: every
+/// entity's embedding is blended with the pool of its train-graph object-neighbours' embeddings,
+/// pooled through [`ProvenanceWeights::pool_weighted`](crate::provenance::ProvenanceWeights::pool_weighted)
+/// — a uniform mean in the OFF arm, provenance-weighted in the ON arm. The augmented models are
+/// then scored with the same filtered link-prediction protocol as every other axis.
+///
+/// **No leakage**: the sketch is pooled over the *restricted train graph* only (the same graph the
+/// trainer saw), so a held-out edge can never enter an entity's sketch. The provenance is mined
+/// from that same train graph.
+///
+/// `blend` scales the pooled sketch before it is added to the entity embedding (`e + blend·pool`).
+/// It is a **sweepable, non-canonical** knob, not a tuned constant; `0.0` makes both arms identical
+/// by construction (a useful degenerate sanity check). A non-finite or negative `blend` is an `Err`.
+pub fn run_pooling_ablation(
+    text: &str,
+    format: &str,
+    template: EvalConfig,
+    seeds: &[u64],
+    blend: f32,
+) -> Result<PoolingAblation, String> {
+    assert!(!seeds.is_empty(), "need at least one seed");
+    if !blend.is_finite() || blend < 0.0 {
+        return Err(format!("run_pooling_ablation: blend must be finite and >= 0 (got {})", blend));
+    }
+    let (base_dict, base_triples) = Graph::parse_to_triples(text, format)?;
+
+    let mut off = BucketSamples::default();
+    let mut on = BucketSamples::default();
+    let mut mrr_deltas: Vec<f64> = Vec::with_capacity(seeds.len());
+    let mut hits10_deltas: Vec<f64> = Vec::with_capacity(seeds.len());
+
+    for &seed in seeds {
+        let closed: ClosedGraph =
+            materialise_closure(base_dict.clone(), base_triples.clone(), template.profile);
+        let graph = &closed.graph;
+        let splits = Splits::split(graph, template.train_frac, template.valid_frac, seed ^ 0xF00D);
+        let train_graph = restrict_to_train(graph, &splits);
+        let train_tc = TypeConstraints::mine(&train_graph);
+
+        // ONE training run per seed: the pooling axis post-processes identical parameters, so the
+        // paired delta cannot be contaminated by trainer noise.
+        let mut tcfg = template.train;
+        tcfg.seed = seed;
+        tcfg.weight_mode = WeightMode::Uniform;
+        let (model, _report) = train(&train_graph, &train_tc, tcfg);
+
+        let prov = crate::provenance::ProvenanceWeights::mine(&train_graph);
+        let metric_for = |mode: WeightMode| -> Result<Metrics, String> {
+            let sketched =
+                sketch_augmented(&model, &train_graph, &splits, &prov, mode, blend)?;
+            let (metrics, _long_tail) =
+                evaluate(&sketched, &splits, template.long_tail_threshold, None);
+            Ok(metrics)
+        };
+
+        let m_off = metric_for(WeightMode::Uniform)?;
+        let m_on = metric_for(WeightMode::Provenance)?;
+
+        mrr_deltas.push(m_on.mrr - m_off.mrr);
+        hits10_deltas.push(m_on.hits10 - m_off.hits10);
+        off.push(&m_off);
+        on.push(&m_on);
+    }
+
+    Ok(PoolingAblation {
+        off: off.finish(),
+        on: on.finish(),
+        mrr: PairedDelta::of(&mrr_deltas),
+        hits10: PairedDelta::of(&hits10_deltas),
+    })
+}
+
+/// A copy of `model` whose entity embeddings are blended with each entity's **confidence-weighted
+/// structural sketch**: the pool of its outgoing non-schema object-neighbours' embeddings in
+/// `graph`, pooled through
+/// [`ProvenanceWeights::pool_weighted`](crate::provenance::ProvenanceWeights::pool_weighted) under
+/// `mode`. Deterministic: each row is written independently from a contribution list built in
+/// `graph.iter_ids()` order, so hash-map iteration order cannot affect the result. [OPUS-5] sq-w2af4
+fn sketch_augmented(
+    model: &TrainedModel,
+    graph: &Graph,
+    splits: &Splits,
+    prov: &crate::provenance::ProvenanceWeights,
+    mode: WeightMode,
+    blend: f32,
+) -> Result<TrainedModel, String> {
+    let dim = model.dim;
+    // Per subject, the (neighbour id, neighbour embedding) contributions that feed its sketch.
+    let mut contributions: FxHashMap<Id, Vec<(Id, Vec<f32>)>> = FxHashMap::default();
+    for [s, p, o] in graph.iter_ids() {
+        if splits.schema_preds.contains(&p) {
+            continue;
+        }
+        let (Some(_), Some(o_row)) = (model.entity_row(s), model.entity_row(o)) else {
+            continue;
+        };
+        contributions
+            .entry(s)
+            .or_default()
+            .push((o, model.entity_vec(o_row).to_vec()));
+    }
+
+    let mut out = model.clone();
+    for (&subject, contribs) in &contributions {
+        let Some(row) = model.entity_row(subject) else {
+            continue;
+        };
+        let Some(pooled) = prov.pool_weighted(contribs, mode)? else {
+            continue;
+        };
+        let dst = &mut out.entity_emb[row * dim..row * dim + dim];
+        for (d, p) in dst.iter_mut().zip(pooled.iter()) {
+            *d += blend * *p;
+        }
+    }
+    Ok(out)
+}
+
 // ---- RDF 1.2 QUOTED-TERMS visibility ablation ---------------------------------------------------
 
 /// The result of a paired **quoted-terms visibility** ablation ([`run_quoted_ablation`]): the two

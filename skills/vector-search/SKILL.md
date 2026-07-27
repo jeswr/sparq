@@ -1078,6 +1078,50 @@ parses, every block read back as the fail-open `1.0`). The weight is **layout me
 of a `Block`'s identity — `PartialEq`/`Eq` ignore it, so the header round-trip contract is unchanged.
 **No accuracy claim**; like point 1, adoption is measurement-gated.
 
+**Wired end-to-end (sq-w2af4).** Points 2–3 above are the *primitives*; these are the in-tree
+callers that actually consume them, so the loop runs graph → provenance → vector path without a
+hand-written middle:
+
+```rust,ignore
+# // cargo build -p sparq-vectors --features structure
+use sparq_vectors::{ground, sketch_predicate, Grounding, GroundingConfig, Modality};
+use sparq_vectors::{ProvenanceWeights, WeightMode};
+# fn demo(graph: &sparq_core::Graph, store: &sparq_vectors::VectorStore,
+#         header: &sparq_vectors::SchemaHeader) -> Result<(), String> {
+let pw = ProvenanceWeights::mine(graph);
+
+// (3) PRODUCER: derive each block's fusion weight FROM THE GRAPH — block i is fed by
+//     block_predicates[i]; `None` leaves that block at the fail-open 1.0.
+let weighted = pw.weight_header(
+    graph, header, &[Some("http://ex/good"), None], WeightMode::Provenance)?;
+
+// (3) CONSUMER: the grounding object now carries the per-block multiplier, ready for
+//     `fuse_rrf_weighted` / `fuse_scores` — a low-provenance modality contributes less.
+if let Some(Grounding::TypedSubVector { weights, .. }) = ground(
+    graph, &node, Modality::TypedSubVector, &GroundingConfig::default(), None,
+    Some((store, &weighted))) { let _ = weights; }
+
+// (2) the structural-sketch pooler: pool a node's multi-valued predicate over its neighbours'
+//     stored vectors, each weighted by ITS OWN provenance. Uniform ⇒ exactly the arithmetic mean.
+let sketch = sketch_predicate(graph, store, &node, "http://ex/cites", &pw, WeightMode::Provenance)?;
+# let _ = sketch; Ok(()) }
+```
+
+`sketch_predicate` weights a contribution by the **neighbour's** provenance, not the grounded
+node's: a plain RDF-1.1 graph carries no per-*statement* provenance and every edge of one node
+shares a subject, so subject-weighting would give every contribution the same weight and silently
+degenerate to the uniform mean.
+
+**Measured, and the verdict is honest.** `eval::run_pooling_ablation` (feature `kge`) is the paired
+instrument for the pooling axis — one training run per seed, both arms post-processing the *same*
+parameters, so the delta isolates the pooling weights. On the synthetic provenance slice the
+training axis (point 1) shows a positive paired MRR delta clearing 2·se, while the **pooling axis
+shows no measured lift at any blend** — indistinguishable from zero within its paired spread. Per
+the pre-registered-bar discipline that is an **ABANDON** signal for weighted pooling on that slice,
+not a defect: the wiring exists and is measurable, and the honest reading of the instrument is that
+it does not help there. Re-measure on a real, provenance-bearing KG before adopting anything.
+Runnable: `cargo run -p sparq-vectors --release --features kge --example kge_ablation`.
+
 ### 15. Typed-literal encoders — order-preserving numeric / boolean / date + schema header (opt-in, feature = `structure`)
 
 <!-- [OPUS-4.8] sq-0wo9e.2 (epic sq-0wo9e; design research/structure-aware-vectorisation.md §3.1/§3.2/§6.A). -->
@@ -1233,7 +1277,9 @@ same node projected into whichever object a tool needs. `ground` (the `grounding
   al. ESWC 2016, via `sparq-introspect`). Verifiable facts only — every fact is a real triple of the
   graph, never an approximate signal.
 - **`Modality::TypedSubVector`** — only the relevant `SchemaHeader` blocks of the node's stored
-  vector (e.g. just the numeric block). Minimal by construction.
+  vector (e.g. just the numeric block). Minimal by construction. Also returns each kept block's
+  `weights` entry — the per-block fusion multiplier for `fuse_rrf_weighted` (`1.0` fail-open; see
+  §14 sq-w2af4).
 - **`Modality::NlString`** — the token-budgeted `verbalize` passage, optionally **extended to render
   typed values** (unit-typed quantities + enum labels) via `render_typed_values`.
 - **`Modality::TypedValue`** — a single typed slot filled directly: `TypedValue::{Boolean, Number,

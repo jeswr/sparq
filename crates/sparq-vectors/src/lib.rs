@@ -281,11 +281,12 @@ pub use provenance::{ProvenanceWeights, WeightConfig, WeightMode};
 // harness surface — `kge` feature only.
 #[cfg(feature = "kge")]
 pub use eval::{
-    run_ablation, run_ablation_multiseed, run_ablation_multiseed_paired, run_quoted_ablation,
-    run_weight_ablation, synthetic_gufo_ttl, synthetic_gufo_ttl_sized, synthetic_provenance_ttl,
-    synthetic_rdf12_parts, synthetic_rdf12_ttl, synthetic_relational_ttl, AblationCell, CellStats,
-    EvalConfig, LongTail, MeanStd, Metrics, MultiSeedCell, PairedAblation, PairedDelta,
-    QuotedAblation, Rdf12Parts, Splits, WeightAblation, SCHEMA_PREDICATES,
+    run_ablation, run_ablation_multiseed, run_ablation_multiseed_paired, run_pooling_ablation,
+    run_quoted_ablation, run_weight_ablation, synthetic_gufo_ttl, synthetic_gufo_ttl_sized,
+    synthetic_provenance_ttl, synthetic_rdf12_parts, synthetic_rdf12_ttl, synthetic_relational_ttl,
+    AblationCell, CellStats, EvalConfig, LongTail, MeanStd, Metrics, MultiSeedCell, PairedAblation,
+    PairedDelta, PoolingAblation, QuotedAblation, Rdf12Parts, Splits, WeightAblation,
+    SCHEMA_PREDICATES,
 };
 #[cfg(feature = "kge")]
 pub use train::{train, ModelKind, TrainConfig, TrainReport, TrainedModel};
@@ -328,8 +329,8 @@ pub use ufo_priors::{MetaType, Nature, Rigidity, UfoPriors, GUFO_NS};
 // flexible minimal-and-complete grounding selector + verbaliser. `structure` feature only.
 #[cfg(feature = "structure")]
 pub use grounding::{
-    ground, reconcile_quantity, GroundFact, Grounding, GroundingConfig, Modality, OutputType,
-    TypedValue,
+    ground, reconcile_quantity, sketch_predicate, GroundFact, Grounding, GroundingConfig, Modality,
+    OutputType, TypedValue,
 };
 pub use verbalize::{
     description_predicates, embed_entities, label_predicates, verbalize, EntityTextConfig,
