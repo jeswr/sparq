@@ -101,17 +101,20 @@ lowering table:
 - **RDFox Datalog `NOT`**: expressible — `log:notIncludes` over a formula
   covers single- and multi-pattern NAF (store-scoped reading is a documented
   sparq interpretation; not a missing *construct*).
-- **RDFox `AGGREGATE … ON … BIND f(?v) AS ?x`**: **gap CONFIRMED** (sq-6tykl.3.4,
-  2026-07-27) — verified against the live Notation3 Language spec and the
-  Notation3 Builtin Functions **Final CG Report (3 June 2026)**: neither
-  contains the word "aggregate", and there is no aggregate builtin family. The
-  only idiom is the formula-/list-valued `log:collectAllIn` + list builtins —
-  exactly what a compiled/stratified subset excludes. Two refinements to the
-  original reading, both recorded in `n3-aggregate-gap-upstream.md`:
-  **grouping is NOT missing** (enclosing-body variables are the `ON` key), and
-  the reachability is uneven — SUM (`math:sum`), COUNT (`list:length`) and AVG
-  (`+ math:quotient`) work through the idiom, but **MIN/MAX have no builtin at
-  all**. Venue correction: the CG repo is now **`w3c-cg/N3`**, and upstream
+- **RDFox `AGGREGATE … ON … BIND f(?v) AS ?x`**: **no dedicated primitive**, but
+  **NOT an N3 expressivity gap** (sq-6tykl.3.4, 2026-07-27) — verified against the
+  live Notation3 Language spec and the Notation3 Builtin Functions **Final CG
+  Report (3 June 2026)**: neither contains the word "aggregate", and there is no
+  aggregate builtin family. Aggregation is nonetheless *expressible*, by
+  composition through the formula-/list-valued `log:collectAllIn` + list
+  builtins — which is exactly what **our** compiled/stratified subset excludes,
+  so the blocker is a deliberate profile restriction on the sparq side, not a
+  limit of N3. Refinements to the original reading, all recorded in
+  `n3-aggregate-gap-upstream.md`: **grouping is NOT missing** (enclosing-body
+  variables are the `ON` key); SUM (`math:sum`) and COUNT (`list:length`) have
+  builtins, AVG composes in three steps, and **MIN/MAX have no builtin** but are
+  still encodable via recursion or `list:member` + negation-as-failure. Venue
+  correction: the CG repo is now **`w3c-cg/N3`**, and upstream
   **PR #119** already proposed `list:min/max/sum/avg/…` in 2023 and was closed
   unmerged with zero comments. Issue drafted, **not filed** — @jeswr review
   gate per `AGENTS.md` § *Upstream contributions*.
