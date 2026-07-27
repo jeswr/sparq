@@ -10707,9 +10707,16 @@ mod tests {
             let g = numeric_density_corpus(rows, frac);
             // The cache must agree with a fresh dense recomputation from the dictionary, id by id.
             let reference = numerics_of(&g.dict);
-            for i in 0..g.dict.len() {
+            // Length coupling is load-bearing: iterating the reference alone would silently check
+            // FEWER ids if the dense recomputation ever came up short, so pin the cover explicitly.
+            assert_eq!(
+                reference.len(), g.dict.len(),
+                "dense reference must cover every dictionary id (rows={} frac={})",
+                rows, frac
+            );
+            for (i, &want_raw) in reference.iter().enumerate() {
                 let id = i as Id + 1;
-                let want = (!reference[i].is_nan()).then_some(reference[i]);
+                let want = (!want_raw.is_nan()).then_some(want_raw);
                 assert_eq!(
                     g.numeric_value(id), want,
                     "id {} disagrees with the dense reference (rows={} frac={})",
