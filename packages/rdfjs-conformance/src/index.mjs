@@ -16,8 +16,8 @@
  * any single implementation, so the same suites pass `n3`, `@rdfjs/dataset`, and
  * fail a deliberately-broken impl. Cross-implementation comparison of quads uses
  * a canonical N-Quads-ish key built from `.value` / `.termType` / `.language` /
- * `.datatype.value`, which works across implementations with distinct term
- * classes.
+ * `.direction` / `.datatype.value` (recursing into quoted triples), which works
+ * across implementations with distinct term classes.
  */
 
 import { strict as assert } from 'node:assert';
@@ -35,6 +35,7 @@ import { strict as assert } from 'node:assert';
 
 const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
 const RDF_LANG_STRING = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#langString';
+const RDF_DIR_LANG_STRING = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#dirLangString';
 
 /**
  * Resolve the injected test API, defaulting to node:test.
@@ -68,7 +69,11 @@ function termKey(term) {
     case 'Literal': {
       const dt = term.datatype ? term.datatype.value : XSD_STRING;
       const lang = term.language || '';
-      return `"${term.value}"${lang ? '@' + lang : ''}^^<${dt}>`;
+      // [OPUS-5] sq-iwhl8 (#1116) — RDF 1.2 base direction, rendered N-Quads-1.2-style
+      // (`"x"@en--ltr`) so two literals that differ ONLY in direction get distinct keys.
+      // Absent/unsupported => omitted, so keys are unchanged for every non-directional literal.
+      const dir = lang ? term.direction || '' : '';
+      return `"${term.value}"${lang ? '@' + lang + (dir ? '--' + dir : '') : ''}^^<${dt}>`;
     }
     case 'Quad':
       return quadKey(term);
@@ -114,6 +119,42 @@ function sortedKeys(quads) {
  */
 function has(obj, name) {
   return obj != null && typeof obj[name] === 'function';
+}
+
+/**
+ * [OPUS-5] sq-iwhl8 (#1116) — True iff the factory really builds RDF-star / quoted triples,
+ * i.e. accepts a `Quad` in the subject/object position and keeps it there as a nested `Quad`
+ * term. Probed rather than assumed, so a DataFactory that predates RDF-star skips the block
+ * instead of failing it.
+ * @param {any} factory
+ * @returns {boolean}
+ */
+function supportsQuotedTriples(factory) {
+  try {
+    const n = factory.namedNode('http://example.org/probe');
+    const inner = factory.quad(n, n, n);
+    const outer = factory.quad(inner, n, inner);
+    return outer.subject.termType === 'Quad' && outer.object.termType === 'Quad';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * [OPUS-5] sq-iwhl8 (#1116) — True iff the factory really implements the RDF 1.2
+ * base-direction literal, i.e. `literal(value, { language, direction })` yields a Literal
+ * carrying that `direction`. Probed, so a pre-RDF-1.2 factory skips the block instead of
+ * failing it.
+ * @param {any} factory
+ * @returns {boolean}
+ */
+function supportsDirectionalLiterals(factory) {
+  try {
+    const l = factory.literal('probe', { language: 'en', direction: 'ltr' });
+    return l.termType === 'Literal' && l.value === 'probe' && l.direction === 'ltr';
+  } catch {
+    return false;
+  }
 }
 
 /* ───────────────────────── DataFactory suite ───────────────────────── */
@@ -204,6 +245,139 @@ export async function runDataFactoryTests(options) {
       );
       assert.equal(q.graph.termType, 'NamedNode');
       assert.equal(q.graph.value, 'http://example.org/g');
+    });
+
+    // [OPUS-5] sq-iwhl8 (#1116) — Data-model spec, `Quad`: "value — Contains an empty string as constant value." A Quad is
+    // a Term, so it must carry the Term attributes, not just the four components.
+    test('quad: value is the empty-string constant (a Quad is a Term)', () => {
+      const n = factory.namedNode('http://example.org/s');
+      assert.equal(factory.quad(n, n, n).value, '');
+    });
+
+    // [OPUS-5] sq-iwhl8 (#1116) — Data-model spec: `Quad_Subject` / `Quad_Object` both include `Quad`, i.e. a quoted triple
+    // (RDF-star) is a first-class term. Feature-detected: a pre-RDF-star factory skips.
+    describe('RDF-star / quoted triples (feature-detected)', () => {
+      const quoted = supportsQuotedTriples(factory);
+      /** @param {string} n */
+      const ns = (n) => factory.namedNode(`http://example.org/${n}`);
+      /** Inner quoted triple `<s> <p> <o>`. */
+      const inner = () => factory.quad(ns('s'), ns('p'), ns('o'));
+
+      test('a quad may be the subject of a quad', { skip: !quoted }, () => {
+        const outer = factory.quad(/** @type {any} */ (inner()), ns('says'), factory.literal('yes'));
+        assert.equal(outer.subject.termType, 'Quad');
+        const s = /** @type {Quad} */ (/** @type {any} */ (outer.subject));
+        assert.equal(s.predicate.value, 'http://example.org/p');
+        assert.equal(s.graph.termType, 'DefaultGraph', 'the quoted triple keeps its own graph');
+        assert.equal(outer.graph.termType, 'DefaultGraph');
+      });
+
+      test('a quad may be the object of a quad', { skip: !quoted }, () => {
+        const outer = factory.quad(ns('a'), ns('claims'), /** @type {any} */ (inner()));
+        assert.equal(outer.object.termType, 'Quad');
+        const o = /** @type {Quad} */ (/** @type {any} */ (outer.object));
+        assert.equal(o.object.value, 'http://example.org/o');
+      });
+
+      test('equals recurses into the quoted triple', { skip: !quoted }, () => {
+        /** @param {string} o */
+        const outerWith = (o) => factory.quad(
+          /** @type {any} */ (factory.quad(ns('s'), ns('p'), ns(o))),
+          ns('says'),
+          factory.literal('yes'),
+        );
+        assert.equal(outerWith('o').equals(outerWith('o')), true, 'equal quoted triples => equal');
+        assert.equal(outerWith('o').equals(outerWith('other')), false, 'a differing quoted triple must not be equal');
+        // A quoted triple is NOT equal to a term of another type with the same (empty) value.
+        assert.equal(factory.defaultGraph().equals(/** @type {any} */ (inner())), false);
+      });
+
+      test('the canonical key of a nested quad is stable and discriminating', { skip: !quoted }, () => {
+        const a = factory.quad(/** @type {any} */ (inner()), ns('says'), factory.literal('yes'));
+        const b = factory.quad(/** @type {any} */ (inner()), ns('says'), factory.literal('yes'));
+        const c = factory.quad(/** @type {any} */ (inner()), ns('says'), factory.literal('no'));
+        assert.equal(quadKey(a), quadKey(b));
+        assert.notEqual(quadKey(a), quadKey(c));
+      });
+
+      test(
+        'fromTerm accepts a Quad term and yields an equal Quad',
+        { skip: !quoted || !has(factory, 'fromTerm') },
+        () => {
+          const original = inner();
+          const copy = /** @type {Term} */ (factory.fromTerm(/** @type {any} */ (original)));
+          assert.equal(copy.termType, 'Quad');
+          assert.equal(copy.equals(original), true);
+        },
+      );
+
+      test(
+        'fromQuad deep-copies a quad whose subject is a quoted triple',
+        { skip: !quoted || !has(factory, 'fromQuad') },
+        () => {
+          const original = factory.quad(
+            /** @type {any} */ (inner()),
+            ns('says'),
+            factory.literal('yes'),
+            ns('g'),
+          );
+          const copy = factory.fromQuad(original);
+          assert.equal(copy.termType, 'Quad');
+          assert.equal(copy.subject.termType, 'Quad', 'the quoted triple must survive the copy');
+          assert.equal(copy.equals(original), true);
+          assert.equal(quadKey(copy), quadKey(original));
+        },
+      );
+    });
+
+    // [OPUS-5] sq-iwhl8 (#1116) — Data-model spec (RDF 1.2): `literal(value, { language, direction })` builds a directional
+    // language-tagged string, whose datatype is `rdf:dirLangString`. Feature-detected.
+    describe('directional language-tagged literals (feature-detected)', () => {
+      const directional = supportsDirectionalLiterals(factory);
+      /**
+       * Build a directional literal. The `{ language, direction }` argument shape post-dates
+       * some `@rdfjs/types` releases, so it is passed (and the result read back) through `any`
+       * — the assertions below are what pins the behaviour.
+       * @param {string} value
+       * @param {string} language
+       * @param {'ltr'|'rtl'} direction
+       * @returns {any}
+       */
+      const dirLit = (value, language, direction) =>
+        /** @type {any} */ (factory).literal(value, { language, direction });
+
+      // The language tag's lowercasing is already pinned by the string-form literal test above;
+      // this block is only about the base direction.
+      test('direction is kept and the datatype is rdf:dirLangString', { skip: !directional }, () => {
+        const l = dirLit('مرحبا', 'ar', 'rtl');
+        assert.equal(l.termType, 'Literal');
+        assert.equal(l.value, 'مرحبا');
+        assert.equal(l.direction, 'rtl');
+        assert.equal(l.datatype.value, RDF_DIR_LANG_STRING);
+      });
+
+      test('direction is significant for equals', { skip: !directional }, () => {
+        const ltr = dirLit('x', 'en', 'ltr');
+        const rtl = dirLit('x', 'en', 'rtl');
+        const plain = factory.literal('x', 'en');
+        assert.equal(ltr.equals(dirLit('x', 'en', 'ltr')), true);
+        assert.equal(ltr.equals(rtl), false, 'ltr != rtl');
+        assert.equal(ltr.equals(plain), false, 'directional != plain lang-tagged');
+        assert.equal(plain.equals(ltr), false, 'and symmetrically');
+        assert.notEqual(termKey(ltr), termKey(rtl), 'the canonical key must discriminate direction');
+      });
+
+      test(
+        'fromTerm preserves the direction',
+        { skip: !directional || !has(factory, 'fromTerm') },
+        () => {
+          const original = dirLit('x', 'en', 'rtl');
+          const copy = /** @type {any} */ (factory.fromTerm(original));
+          assert.equal(copy.direction, 'rtl');
+          assert.equal(copy.datatype.value, RDF_DIR_LANG_STRING);
+          assert.equal(copy.equals(original), true);
+        },
+      );
     });
 
     describe('Term#equals', () => {

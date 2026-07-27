@@ -17,9 +17,9 @@ Every assertion derives its expected value **from the RDF/JS spec**
 [dataset](https://rdf.js.org/dataset-spec/),
 [stream](https://rdf.js.org/stream-spec/)) — never from any single
 implementation. Quads are compared with an implementation-agnostic
-N-Quads-ish key built from `.value` / `.termType` / `.language` /
-`.datatype.value`, so the suites pass `n3` and `@rdfjs/dataset` alike, and fail
-a deliberately-broken impl.
+N-Quads-ish key built from `.value` / `.termType` / `.language` / `.direction` /
+`.datatype.value` (recursing into quoted triples), so the suites pass `n3` and
+`@rdfjs/dataset` alike, and fail a deliberately-broken impl.
 
 ## 🚀 Quickstart
 
@@ -68,7 +68,15 @@ so they are framework-agnostic in spirit (default: `node:test`):
   **lowercasing** + datatype defaults (`xsd:string` plain, `rdf:langString`
   lang-tagged), the quad default graph, fresh blank-node uniqueness, and
   `fromTerm`/`fromQuad` deep-copy — **including copying a foreign plain-object
-  term**. `variable` is skipped gracefully if absent.
+  term**. `variable` is skipped gracefully if absent. Two further blocks are
+  **feature-detected** (probed, then skipped whole if unsupported, so an older
+  implementation is not failed for a capability it never claimed):
+  **RDF-star / quoted triples** (a `Quad` in the subject/object position, the
+  `Quad#value` empty-string constant, recursive `equals`, and `fromTerm`/
+  `fromQuad` round-tripping a nested quad) and **RDF 1.2 directional
+  language-tagged literals** (`literal(v, { language, direction })` →
+  `rdf:dirLangString`, `direction` significant for `equals`, preserved by
+  `fromTerm`).
 - **`runDatasetTests({ factory, datasetFactory, label })`** — the **DatasetCore**
   surface (`size`, `add` idempotent + returns this, `delete`, `has`, all `match`
   wildcard combos + empty result + a new independent result, `[Symbol.iterator]`)
