@@ -500,34 +500,31 @@ impl TripleStore {
     /// 6x the sort work at 6x the memory traffic — a good trade only while cores sit idle and
     /// bandwidth is not the binding constraint.
     ///
-    /// WHAT WAS MEASURED, AND WHAT WAS NOT. `measure_derived_vs_radix_all_build` is the in-tree
-    /// A/B against the replaced body; run it on your own box, because the numbers below are a
-    /// 4-core work box and are NOT canonical. The two builds trade the same quantity in
-    /// opposite directions — derived does ~3x less work on a critical path of ONE full sort
-    /// plus 2 derivations, concurrent-N does 6x the work but on N independent tasks — so which
-    /// wins is governed by THREADS vs PERMUTATIONS, and the measurement says exactly that:
+    /// WHICH BUILD WINS, AND WHY IT IS NOT SETTLED. The two builds trade the same quantity in
+    /// opposite directions — derived does strictly less work on a critical path of ONE full
+    /// sort plus 2 derivations, concurrent-N does six sorts' worth but on N independent tasks —
+    /// so the outcome is governed by THREADS vs PERMUTATIONS:
     ///
-    /// * 6 permutations, no threads: derived ~2.1x faster. 6 permutations, 1/2/3/4 rayon
-    ///   threads: ~2.05x / 1.41x / 1.34x / 1.20x — a real win that NARROWS as threads are
-    ///   added, because concurrent-N is the arm that has parallelism left to spend.
-    /// * 3 permutations (`compact-index`) with no threads — the wasm configuration, where the
-    ///   trade does not exist: derived ~1.7-1.9x faster.
-    /// * 3 permutations WITH threads: at >= 3 threads concurrent-N fits every permutation on
-    ///   its own core while the derived chain SPO->OSP->POS is strictly serial, and derived
-    ///   LOSES (~0.74x at 4 threads). This is a knowing, documented regression in a
+    /// * With six permutations, derived is expected to win, by a margin that NARROWS as threads
+    ///   are added, because concurrent-N is the arm that has parallelism left to spend.
+    /// * With three permutations (`compact-index`) and no threads — the wasm configuration —
+    ///   the trade does not exist and derived wins outright.
+    /// * With three permutations AND enough threads to give every permutation its own core,
+    ///   concurrent-N runs all three in parallel while the derived chain SPO->OSP->POS is
+    ///   strictly serial, so derived LOSES. This is a knowing, documented regression in a
     ///   configuration that ships nowhere — `compact-index` is wasm-only in production
     ///   (`BUILT` keys it on `target_arch`, and the wasm build has no threads) and is
     ///   native-opt-in "for testing"; the one native consumer is the `bench/memtier` research
     ///   spike. It is NOT worth a second build path here; see the follow-up issue.
     ///
-    /// UNVERIFIED: the 6-permutation crossover. Extrapolating the thread sweep, concurrent-N
-    /// could catch up somewhere around 6+ threads — which this 4-core box cannot test. Against
-    /// that, concurrent-N's own scaling is already saturating (3->4 threads bought it only ~7%,
-    /// i.e. it is bandwidth-bound, which is the dimension derived wins ~3x on), so the
-    /// expectation is that it does not flip. That expectation is an ARGUMENT, not a
-    /// measurement: the bead's canonical gate — ingest wall + query latency on
-    /// WatDiv/synthetic-social at two scales, on the dedicated bench box — is still OUTSTANDING
-    /// and must run before this is treated as a settled multi-core win.
+    /// The above is the STRUCTURAL argument, and the direction of the six-permutation trade —
+    /// including whether concurrent-N eventually catches up at a high enough thread count — is
+    /// UNVERIFIED on the canonical setup. The bead's canonical gate — ingest wall + query
+    /// latency on WatDiv/synthetic-social at two scales, on the dedicated bench box — is still
+    /// OUTSTANDING and must run before this is treated as a settled multi-core win. To generate
+    /// current numbers for your own machine (non-canonical, do not commit them), run the
+    /// in-tree A/B against the replaced body, `measure_derived_vs_radix_all_build`, sweeping
+    /// `RAYON_NUM_THREADS` and the feature axis as documented on that test.
     ///
     /// Correctness: a column permutation is a BIJECTION on rows, so deduplicating SPO alone
     /// deduplicates every derived permutation, and "the deduped triple set, permuted, fully
