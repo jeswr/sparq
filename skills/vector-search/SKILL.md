@@ -262,8 +262,10 @@ query_vec_with_budget(&Graph, &str, &VectorStore, &QueryBudget) -> Result<QueryR
 prepare_vec(&Graph, &str, &VectorStore) -> Result<PreparedQuery, String>          // compose with engine *_prepared entry points
 rewrite_query(Query, &Graph, &VectorStore) -> Result<Query, String>              // spargebra-algebra rewrite only
 // re-exported when the feature is on: query_prepared, PreparedQuery, QueryBudget, QueryResult (no direct sparq-engine dep needed)
-// vocab: vec::{VEC_NS, NEAREST, SEARCH, VOCAB_REVISION=1}  (http://sparq.dev/vec#)  — exact-scan KNN with the VG-TIE-1
-//   boundary tie-break (nearest_exact_tiebreak); the VG-VOC-1 unknown-predicate error reports VOCAB_REVISION (VG-GOV-3)
+// vocab: vec::{VEC_NS, NEAREST, SEARCH, HYBRID, PROVISIONAL, VOCAB_REVISION=1}  (http://sparq.dev/vec#)  — exact-scan KNN
+//   with the VG-TIE-1 boundary tie-break (nearest_exact_tiebreak); the VG-VOC-1 unknown-predicate error reports
+//   VOCAB_REVISION (VG-GOV-3). vec:hybrid is PROVISIONAL: implemented ahead of the spec amendment, so it is listed in
+//   vocab::PROVISIONAL and does NOT bump VOCAB_REVISION — its shape may change when that spec revision lands.
 // [SONNET-4.6] sq-tb9p0 VG-MET-4 (mainline): prepare/query REJECT a store whose v3 provenance declares a NON-cosine
 //   metric (the vec: surface evaluates cosine only); a legacy no-provenance store keeps the implicit-cosine behaviour
 // [OPUS-4.8] sq-z589: with `approx-ann` ALSO on, the *_approx twins take a &DiskAnnIndex and run the
@@ -279,6 +281,35 @@ prepare_vec_approx(&Graph, &str, &VectorStore, &DiskAnnIndex) -> Result<Prepared
 //   and recomputes — a stale mask is never served (invalidation is SOUND; when in doubt it misses) —
 //   while a thread-count-only dict-id permutation of an unchanged graph correctly HITS (same mask).
 //   The cache is thread-local and transparent (no API change; same answers).
+
+// --- hybrid retrieval + reranking (src/hybrid.rs + `vec:hybrid`) --- feature = "vec-predicate" ONLY [SONNET-4.6] sq-lhcot.4
+// SPARQL surface (subject list is PREFIX-OPTIONAL: ?node | ( ?node ?score ) | ( ?node ?score ?rank ) | + ?prov):
+//   ( ?node ?score ?rank ?prov ) vec:hybrid ( <query> <k> )
+//   <query> = node IRI | "0.1,0.9" (plain literal = dense query vector) | "machine learning"@en (LANG-TAGGED = text query,
+//             needs HybridConfig::query_embedder — a hard error without one, never a silent dense-less fusion)
+//   ?score = FINAL-stage score (fused RRF, or the reranker's own score once reranked — different scales)
+//   ?rank  = 1-based FINAL rank (xsd:integer). VALUES rows carry no order through joins, so ORDER BY ?rank, not by ?score
+//   ?prov  = rank provenance, "vector=1;text=3;rerank=2" (parse_provenance -> Vec<(arm, rank)>)
+query_vec_hybrid(&Graph, &str, &VectorStore, &HybridConfig) -> Result<QueryResult, String>      // the ONLY entry points that
+query_vec_hybrid_with_budget(&Graph, &str, &VectorStore, &HybridConfig, &QueryBudget) -> ...    //   carry the arms; a
+prepare_vec_hybrid(&Graph, &str, &VectorStore, &HybridConfig) -> Result<PreparedQuery, String>  //   vec:hybrid pattern in
+rewrite_query_hybrid(Query, &Graph, &VectorStore, &HybridConfig) -> Result<Query, String>       //   plain query_vec ERRORS
+// HybridConfig (builder; the DENSE arm is built in under the reserved name VECTOR_ARM="vector" and runs the SAME path
+//   vec:search takes — filtered-ann mask + VG-TIE-1 tie-break included):
+HybridConfig::new().arm(name, weight, ArmFn).vector_weight(w /*0.0 mutes -> pure sparse fusion*/)
+//   .rrf_k(f64 /*RRF_K=60*/).over_fetch(n /*DEFAULT_OVER_FETCH=4; candidates(k)=k*n*/)
+//   .query_embedder(QueryEmbedder).reranker(&dyn Reranker, RerankPolicy::{FailOpen,FailClosed})
+//   ArmFn = Box<dyn Fn(&ArmQuery, usize) -> Result<Vec<(Id, f64)>, String>>   // an arm Err is a HARD query error:
+//     an arm that prefers availability returns an EMPTY list itself (the policy switch is for the SECOND stage)
+fuse_arms(&[ArmRanking], rrf_k, top_k) -> Result<Vec<FusedHit>, String>   // == fuse_rrf_weighted + per-rank provenance
+validate_arms(&[ArmRanking]) -> Result<(), String>   // fail-closed on a lying arm: dup name/id, reserved name, bad weight
+apply_rerank(&dyn Reranker, RerankPolicy, &ArmQuery, Vec<FusedHit>, top_k) -> Result<Vec<FusedHit>, String>
+//   Reranker::rerank -> Vec<Rescored{index, score}>: may REORDER or DROP, never INVENT. An out-of-range/duplicate index or
+//   a non-finite score is malformed and handled like an Err. FailOpen -> first-stage order, and NO row is marked rerank=…
+evaluate(&[Id] /*ranked*/, &[Id] /*gold*/, k) -> RetrievalMetrics{k, hits, recall, mrr}
+ablate(&[ArmRanking], &ArmQuery, Option<&dyn Reranker>, gold, k, rrf_k) -> Result<Vec<AblationRow>, String>
+//   rows = one per arm, then FUSED_ROW, then RERANKED_ROW (fail-closed there — an ablation must not report fused as
+//   reranked). It REPORTS: **no lift is claimed** anywhere in this crate; run it on YOUR corpus before quoting a number.
 ```
 
 ## Common recipes
