@@ -74,11 +74,16 @@ function share(rawMs, wrappedMs) {
   return wrappedMs === 0 ? 0 : Math.max(0, (wrappedMs - rawMs) / wrappedMs);
 }
 
-async function consumeResultStream(streamPromise) {
-  const stream = await streamPromise;
-  let rows = 0;
-  for await (const _row of stream) rows++;
-  return rows;
+function consumeResultStream(streamPromise) {
+  return streamPromise.then((stream) => new Promise((resolve, reject) => {
+    let rows = 0;
+    stream
+      .on('data', () => {
+        rows++;
+      })
+      .on('end', () => resolve(rows))
+      .on('error', reject);
+  }));
 }
 
 const nt = makeNTriples(N);

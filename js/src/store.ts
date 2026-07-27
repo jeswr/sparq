@@ -233,6 +233,14 @@ export class SparqStore implements RDF.StringSparqlQueryable<RDF.BindingsResultS
     options: Pick<SparqStoreOptions, 'baseIri'> = {},
   ): Promise<SparqStore> {
     await init();
+    if (
+      typeof WasmStore.loadBytes !== 'function' ||
+      typeof WasmStore.loadBytesWithBase !== 'function'
+    ) {
+      throw new Error(
+        'SparqStore.fromBytes requires a wasm bundle built with the bytes-ingest feature; use fromString with a lean bundle',
+      );
+    }
     const inner = options.baseIri === undefined
       ? WasmStore.loadBytes(bytes, format)
       : WasmStore.loadBytesWithBase(bytes, format, options.baseIri);
