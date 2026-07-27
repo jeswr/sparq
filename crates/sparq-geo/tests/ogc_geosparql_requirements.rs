@@ -42,13 +42,21 @@
 //! ## Mapping to sparq's surface
 //!
 //! sparq-geo is a *library + `geof:` FILTER-function + query-rewrite* GeoSPARQL
-//! implementation; it is not (by itself) a SPARQL endpoint, so the benchmark's
-//! "use this RDFS class / property in a graph pattern" requirements (R2, R3, R7,
-//! R8, R14, R18) are really requirements on the *engine's* graph-pattern
-//! matching, not on sparq-geo. Those are demonstrated end-to-end over real HTTP
-//! in `crates/sparq-server/tests/geo.rs`; here, the corresponding executable
-//! check confirms the vocabulary IRIs and literal/serialization machinery
-//! sparq-geo contributes to that path. The RDFS/OWL entailment requirements
+//! implementation, so the "use this RDFS class / property in a graph pattern"
+//! requirements (R1, R2, R3, R7, R8, R14, R18) are really requirements on the
+//! *engine's* graph-pattern matching over the `geo:` vocabulary. Those are
+//! probed HERE by evaluating real SPARQL through `sparq_engine::query` over a
+//! GeoSPARQL-shaped fixture — see `GRAPH_PATTERN_FIXTURE` and the
+//! `*_graph_pattern` probes (sq-6ep). That in-process evaluation is the whole
+//! of what the requirements assert; the HTTP transport around it is
+//! requirement-agnostic and is `sparq-server`'s concern.
+//!
+//! `crates/sparq-server/tests/geo.rs` is NOT that demonstration and this file
+//! no longer claims it is: those tests prove the server installs sparq-geo's
+//! `geof:` registry on the query and update paths, but their fixture attaches
+//! WKT literals to a plain `ex:loc` predicate and never mentions `geo:Feature`,
+//! `geo:hasGeometry` or `geo:asWKT`, so they exercise none of the `geo:`
+//! vocabulary these requirements are about. The RDFS/OWL entailment requirements
 //! (R25-R27) are covered by [`entailment`](../entailment.rs) (sq-5ts8) via the
 //! generic `sparq-reason` closure; the query-rewrite requirements (R28-R30) are
 //! demonstrated here via [`sparq_geo::is_topology_property`] +
@@ -171,6 +179,205 @@ fn round_trips_wkt(lit: &str) -> bool {
     parse_wkt_literal(lit).is_ok()
 }
 
+// ---- R1/R2/R3/R7/R8/R14/R18: REAL SPARQL graph-pattern probes --------------
+//
+// [SONNET-4.6] sq-6ep. These seven are GRAPH-PATTERN requirements ("allow
+// geo:Feature / geo:Geometry / geo:asWKT / … in SPARQL graph patterns"). Each
+// used to be probed by asserting that a vocabulary CONSTANT ends with its own
+// local name — `vocab::AS_WKT.ends_with("#asWKT")`, and for R2 the outright
+// TAUTOLOGY `format!("{}SpatialObject", GEO_NS).ends_with("#SpatialObject")`,
+// which is true for every possible value of `GEO_NS`. Such a probe cannot fail
+// for any reason connected to conformance, so it demonstrated nothing about
+// graph-pattern matching while still counting toward `REQUIREMENTS_FLOOR`.
+//
+// Evaluating the pattern is precisely the "endpoint" half of sq-6ep. Under the
+// default `engine` feature the probes below now run real SPARQL through
+// `sparq_engine::query` over a GeoSPARQL-shaped fixture and check the bound
+// rows. Without `engine` there is no evaluator in the dependency graph, so they
+// degrade to a full-IRI equality check (still not a tautology: it pins the
+// constant's exact value) — the same honest feature-state degradation
+// `recognizes_topology_property` uses.
+
+/// A GeoSPARQL-shaped fixture for the graph-pattern probes: two `geo:Feature`s,
+/// each with a typed `geo:Geometry` carrying a `geo:asWKT` serialization.
+/// London additionally carries `geo:hasDefaultGeometry` and a `geo:asGML` twin
+/// of its WKT (no `srsName`, so both sides default to CRS84 long/lat and the two
+/// serializations must parse to the SAME geometry).
+#[cfg(feature = "engine")]
+const GRAPH_PATTERN_FIXTURE: &str = r#"
+@prefix geo: <http://www.opengis.net/ont/geosparql#> .
+@prefix ex:  <http://example.org/> .
+
+ex:london a geo:Feature, geo:SpatialObject ;
+    geo:hasGeometry ex:londonGeom ;
+    geo:hasDefaultGeometry ex:londonGeom .
+ex:londonGeom a geo:Geometry, geo:SpatialObject ;
+    geo:asWKT "POINT(-0.1278 51.5074)"^^geo:wktLiteral ;
+    geo:asGML "<gml:Point><gml:pos>-0.1278 51.5074</gml:pos></gml:Point>"^^geo:gmlLiteral .
+
+ex:paris a geo:Feature, geo:SpatialObject ;
+    geo:hasGeometry ex:parisGeom .
+ex:parisGeom a geo:Geometry, geo:SpatialObject ;
+    geo:asWKT "POINT(2.3522 48.8566)"^^geo:wktLiteral .
+"#;
+
+#[cfg(feature = "engine")]
+const GEO_PREFIXES: &str = "PREFIX geo: <http://www.opengis.net/ont/geosparql#> \
+                            PREFIX ex:  <http://example.org/> ";
+
+/// Evaluate `sparql` over [`GRAPH_PATTERN_FIXTURE`] and return the LEXICAL forms
+/// of the first projected variable's bindings, sorted (row order is not
+/// significant for these probes). A literal yields its lexical value so the
+/// caller can hand it straight to sparq-geo's parsers; an IRI yields its string.
+#[cfg(feature = "engine")]
+fn bound(sparql: &str) -> Vec<String> {
+    use oxrdf::Term;
+    let g = sparq_core::Graph::load_str(GRAPH_PATTERN_FIXTURE, "turtle")
+        .expect("the GeoSPARQL graph-pattern fixture parses as Turtle");
+    let r = sparq_engine::query(&g, sparql).expect("the graph-pattern probe query evaluates");
+    let mut out: Vec<String> = r
+        .rows
+        .iter()
+        .filter_map(|row| row.first().and_then(|t| t.as_ref()))
+        .map(|t| match t {
+            Term::Literal(l) => l.value().to_string(),
+            Term::NamedNode(n) => n.as_str().to_string(),
+            other => other.to_string(),
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// R1 — SPARQL query evaluation over the `geo:` vocabulary end to end: join a
+/// feature to its geometry's WKT serialization and confirm both features'
+/// literals come back AND parse as `geo:wktLiteral`s.
+fn core_sparql_query_over_geo_vocab() -> bool {
+    #[cfg(feature = "engine")]
+    {
+        let wkts = bound(&format!(
+            "{GEO_PREFIXES} SELECT ?wkt WHERE {{ ?f geo:hasGeometry ?g . ?g geo:asWKT ?wkt }}"
+        ));
+        wkts.len() == 2 && wkts.iter().all(|w| round_trips_wkt(w))
+    }
+    #[cfg(not(feature = "engine"))]
+    {
+        vocab::GEO_NS == "http://www.opengis.net/ont/geosparql#"
+    }
+}
+
+/// R2 — `geo:SpatialObject` as a graph-pattern class. The fixture asserts it on
+/// all four resources (2 features + 2 geometries).
+fn spatial_object_graph_pattern() -> bool {
+    #[cfg(feature = "engine")]
+    {
+        bound(&format!(
+            "{GEO_PREFIXES} SELECT ?s WHERE {{ ?s a geo:SpatialObject }}"
+        ))
+        .len()
+            == 4
+    }
+    #[cfg(not(feature = "engine"))]
+    {
+        format!("{}SpatialObject", vocab::GEO_NS)
+            == "http://www.opengis.net/ont/geosparql#SpatialObject"
+    }
+}
+
+/// R3 — `geo:Feature` as a graph-pattern class: exactly the two features bind,
+/// and the geometry nodes (which are `geo:SpatialObject`s but NOT features) do
+/// not.
+fn feature_graph_pattern() -> bool {
+    #[cfg(feature = "engine")]
+    {
+        bound(&format!("{GEO_PREFIXES} SELECT ?f WHERE {{ ?f a geo:Feature }}"))
+            == vec!["http://example.org/london", "http://example.org/paris"]
+    }
+    #[cfg(not(feature = "engine"))]
+    {
+        format!("{}Feature", vocab::GEO_NS) == "http://www.opengis.net/ont/geosparql#Feature"
+    }
+}
+
+/// R7 — `geo:Geometry` as a graph-pattern class: the two geometry nodes bind,
+/// the features do not.
+fn geometry_graph_pattern() -> bool {
+    #[cfg(feature = "engine")]
+    {
+        bound(&format!("{GEO_PREFIXES} SELECT ?g WHERE {{ ?g a geo:Geometry }}"))
+            == vec![
+                "http://example.org/londonGeom",
+                "http://example.org/parisGeom",
+            ]
+    }
+    #[cfg(not(feature = "engine"))]
+    {
+        format!("{}Geometry", vocab::GEO_NS) == "http://www.opengis.net/ont/geosparql#Geometry"
+    }
+}
+
+/// R8 — `geo:hasGeometry` and `geo:hasDefaultGeometry` as graph-pattern
+/// predicates. Both features have a `hasGeometry`; only London declares a
+/// DEFAULT geometry, so the two predicates are distinguished rather than
+/// conflated.
+fn has_geometry_properties_graph_pattern() -> bool {
+    #[cfg(feature = "engine")]
+    {
+        let any = bound(&format!(
+            "{GEO_PREFIXES} SELECT ?f WHERE {{ ?f geo:hasGeometry ?g }}"
+        ));
+        let default = bound(&format!(
+            "{GEO_PREFIXES} SELECT ?f WHERE {{ ?f geo:hasDefaultGeometry ?g }}"
+        ));
+        any == vec!["http://example.org/london", "http://example.org/paris"]
+            && default == vec!["http://example.org/london"]
+    }
+    #[cfg(not(feature = "engine"))]
+    {
+        vocab::HAS_GEOMETRY == "http://www.opengis.net/ont/geosparql#hasGeometry"
+            && vocab::HAS_DEFAULT_GEOMETRY
+                == "http://www.opengis.net/ont/geosparql#hasDefaultGeometry"
+    }
+}
+
+/// R14 — `geo:asWKT` as a graph-pattern predicate: both serializations bind and
+/// each parses through sparq-geo's `geo:wktLiteral` reader.
+fn as_wkt_graph_pattern() -> bool {
+    #[cfg(feature = "engine")]
+    {
+        let wkts = bound(&format!(
+            "{GEO_PREFIXES} SELECT ?wkt WHERE {{ ?g geo:asWKT ?wkt }}"
+        ));
+        wkts.len() == 2 && wkts.iter().all(|w| round_trips_wkt(w))
+    }
+    #[cfg(not(feature = "engine"))]
+    {
+        vocab::AS_WKT == "http://www.opengis.net/ont/geosparql#asWKT"
+    }
+}
+
+/// R18 — `geo:asGML` as a graph-pattern predicate: London's GML serialization
+/// binds and parses to the SAME geometry as its `geo:asWKT` twin, so the probe
+/// pins interoperability of the two serializations rather than mere presence.
+fn as_gml_graph_pattern() -> bool {
+    #[cfg(feature = "engine")]
+    {
+        let gmls = bound(&format!(
+            "{GEO_PREFIXES} SELECT ?gml WHERE {{ ?g geo:asGML ?gml }}"
+        ));
+        let wkt = bound(&format!(
+            "{GEO_PREFIXES} SELECT ?wkt WHERE {{ ex:londonGeom geo:asWKT ?wkt }}"
+        ));
+        // `Ok(g) == Ok(w)` also rules out a parse failure on either side: an Err
+        // never equals an Ok, so no separate is_ok() check is needed.
+        gmls.len() == 1 && wkt.len() == 1 && parse_gml_literal(&gmls[0]) == parse_wkt_literal(&wkt[0])
+    }
+    #[cfg(not(feature = "engine"))]
+    {
+        vocab::AS_GML == "http://www.opengis.net/ont/geosparql#asGML"
+    }
+}
+
 const fn req(
     id: u8,
     class: Class,
@@ -199,29 +406,31 @@ fn requirements() -> Vec<Req> {
             Class::Core,
             "Support SPARQL Query + Protocol + the geo: ontology vocabulary.",
             Coverage::Pass,
-            "End-to-end SPARQL over geo: vocab is exercised in \
-             crates/sparq-server/tests/geo.rs; here we confirm the geo: ontology \
-             namespace IRI the whole stack keys on.",
-            || vocab::GEO_NS == "http://www.opengis.net/ont/geosparql#",
+            "Real SPARQL through sparq_engine::query joins geo:hasGeometry to \
+             geo:asWKT over the GeoSPARQL fixture and every bound literal parses \
+             as a geo:wktLiteral (sq-6ep).",
+            core_sparql_query_over_geo_vocab,
         ),
         req(
             2,
             Class::Core,
             "Allow geo:SpatialObject in SPARQL graph patterns.",
             Coverage::Pass,
-            "geo:SpatialObject is the apex of the class hierarchy the \
-             sparq-reason closure entails over (tests/entailment.rs, sq-5ts8); \
-             the IRI is well-formed under the geo: namespace.",
-            || format!("{}SpatialObject", vocab::GEO_NS).ends_with("#SpatialObject"),
+            "A real SELECT with `?s a geo:SpatialObject` binds all four asserted \
+             spatial objects (sq-6ep). geo:SpatialObject is also the apex of the \
+             class hierarchy the sparq-reason closure entails over \
+             (tests/entailment.rs, sq-5ts8).",
+            spatial_object_graph_pattern,
         ),
         req(
             3,
             Class::Core,
             "Allow geo:Feature in SPARQL graph patterns.",
             Coverage::Pass,
-            "geo:Feature graph patterns + hasGeometry extraction are driven by \
-             GeoIndex::build and tests/entailment.rs (sq-5ts8).",
-            || vocab::HAS_GEOMETRY.ends_with("#hasGeometry"),
+            "A real SELECT with `?f a geo:Feature` binds exactly the two features \
+             and not the geometry nodes (sq-6ep); hasGeometry extraction is also \
+             driven by GeoIndex::build and tests/entailment.rs (sq-5ts8).",
+            feature_graph_pattern,
         ),
         // ---- Topology Vocabulary Extension (R4-R6) -------------------------
         // The PROPERTY forms (geo:sfEquals etc. as predicates). sparq answers
@@ -272,21 +481,22 @@ fn requirements() -> Vec<Req> {
             Class::GeometryExt,
             "Allow geo:Geometry in SPARQL graph patterns.",
             Coverage::Pass,
-            "geo:Geometry typing + asWKT extraction drives GeoIndex::build; the \
-             asWKT property IRI is well-formed.",
-            || vocab::AS_WKT.ends_with("#asWKT"),
+            "A real SELECT with `?g a geo:Geometry` binds exactly the two geometry \
+             nodes and not the features (sq-6ep); geo:Geometry typing + asWKT \
+             extraction also drives GeoIndex::build.",
+            geometry_graph_pattern,
         ),
         req(
             8,
             Class::GeometryExt,
             "Allow geo:hasGeometry and geo:hasDefaultGeometry properties.",
             Coverage::Pass,
-            "Both are extracted by GeoIndex::build and entailed by sparq-reason \
-             (tests/entailment.rs, sq-5ts8).",
-            || {
-                vocab::HAS_GEOMETRY.ends_with("#hasGeometry")
-                    && vocab::HAS_DEFAULT_GEOMETRY.ends_with("#hasDefaultGeometry")
-            },
+            "Real SELECTs bind both predicates and DISTINGUISH them — both \
+             features have a geo:hasGeometry, only London a \
+             geo:hasDefaultGeometry (sq-6ep). Both are also extracted by \
+             GeoIndex::build and entailed by sparq-reason (tests/entailment.rs, \
+             sq-5ts8).",
+            has_geometry_properties_graph_pattern,
         ),
         req(
             9,
@@ -373,9 +583,11 @@ fn requirements() -> Vec<Req> {
             Class::GeometryExt,
             "Allow geo:asWKT in SPARQL graph patterns.",
             Coverage::Pass,
-            "geo:asWKT is the serialization GeoIndex::build reads + geof: \
-             functions emit (to_wkt_literal); IRI well-formed.",
-            || vocab::AS_WKT == "http://www.opengis.net/ont/geosparql#asWKT",
+            "A real SELECT binds both geo:asWKT serializations and each parses \
+             through sparq-geo's geo:wktLiteral reader (sq-6ep); geo:asWKT is \
+             also what GeoIndex::build reads and geof: functions emit \
+             (to_wkt_literal).",
+            as_wkt_graph_pattern,
         ),
         req(
             15,
@@ -424,9 +636,10 @@ fn requirements() -> Vec<Req> {
             Class::GeometryExt,
             "Allow geo:asGML in SPARQL graph patterns.",
             Coverage::Pass,
-            "geo:asGML is read by GeoIndex::build interchangeably with asWKT; IRI \
-             well-formed.",
-            || vocab::AS_GML.ends_with("#asGML"),
+            "A real SELECT binds London's geo:asGML serialization and it parses to \
+             the SAME geometry as its geo:asWKT twin (sq-6ep) — so the probe pins \
+             WKT/GML interoperability, not just presence of the IRI.",
+            as_gml_graph_pattern,
         ),
         req(
             19,
