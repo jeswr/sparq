@@ -582,6 +582,18 @@ jobs:
         run: |
           shellcheck scripts/tests/test_model_attribution.sh
           bash scripts/tests/test_model_attribution.sh
+      # The seam guard itself, run BOTH ways: its own hermetic mutants (9 of them, incl. the
+      # backslash-continuation `|| true` that the earlier inline version missed), and then
+      # against this very file. Discarding an earned failure with `|| true` has caused three
+      # separate incidents in this repo in one day; the guard against it now has teeth of
+      # its own instead of living as an untestable heredoc inside the test it belongs to.
+      - name: "Self-test check-workflow-seam.py (swallow / skip / deleted-step mutants)"
+        run: python3 scripts/check-workflow-seam.py --self-test
+      - name: "The model-attribution gate is soundly WIRED into this workflow — GATING"
+        run: |
+          python3 scripts/check-workflow-seam.py --workflow .github/workflows/docs-quality.yml \
+            --needle check-model-attribution.py --needle test_model_attribution.sh \
+            --min-invocations 4
       # The PR-level backstop, ADVISORY for now. It catches the symptom wherever it comes
       # from — a stale brief, a new harness, or an agent copying the markers already in the
       # file it is editing (measured to be the dominant mechanism: agents routed to briefs
@@ -592,13 +604,31 @@ jobs:
       # (.github/E2E-GATING-POLICY.md). Promotion to HARD is tracked on #2531 and needs two
       # things first: the protected-surface brief fix, and the residue cleanup.
       # `--advisory` is a declared MODE of the script, deliberately not a `|| true` in this
-      # workflow — the seam test asserts that distinction so "advisory" can never quietly
-      # become "swallowed".
+      # workflow — check-workflow-seam.py (run above) rejects a `|| true` on this step's
+      # command, INCLUDING one written across a backslash continuation, so "advisory" can
+      # never quietly become "swallowed".
+      #
+      # THE RANGE. `actions/checkout` (fetch-depth: 1) gives us `refs/pull/N/merge` as a
+      # SHALLOW GRAFT: no walkable parents. The first version of this step scanned
+      # `origin/main..HEAD` and produced 15,123 findings on this PR's own head (run
+      # 89851383239) — the entire repository tree reported as additions of the merge commit,
+      # including files the PR never touched. `git fetch --depth=200 origin main` does not
+      # help (the merge ref is unreachable from main, so it is never deepened) and neither
+      # does merge-base narrowing (merge-base exits 1 on a graft). So the range is rebuilt
+      # from the PR's OWN head ref using the event payload, fetched to `commits + 1` so that
+      # every scanned commit has a real parent and therefore a real diff; the +1th commit is
+      # the base and is never scanned. If that fetch fails the script reports INCOMPLETE
+      # rather than "OK" — an inert backstop that claims to pass is the failure being fixed.
       - name: "Model markers added by this PR match their commit trailers (ADVISORY — #2531)"
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_COMMITS: ${{ github.event.pull_request.commits }}
         run: |
-          git fetch --quiet --depth=200 origin "${GITHUB_BASE_REF:-main}" || true
-          python3 scripts/check-model-attribution.py --advisory \
-            --check-commits "origin/${GITHUB_BASE_REF:-main}..HEAD"
+          if [ -n "${PR_NUMBER}" ] && [ -n "${PR_COMMITS}" ]; then
+            git fetch --quiet --no-tags --depth="$(( PR_COMMITS + 1 ))" \
+              origin "+refs/pull/${PR_NUMBER}/head:refs/remotes/origin/pr/${PR_NUMBER}/head" || true
+          fi
+          python3 scripts/check-model-attribution.py --advisory --check-commits-pr
       # [OPUS-4.8] sq-mkza: end-to-end proof that BOTH honesty gates now cover the
       # paper-factory `.typ` sources (site/papers/**/*.typ) — the highest-stakes
       # OUTWARD surface. Before sq-mkza a hard-coded perf ratio or an unqualified

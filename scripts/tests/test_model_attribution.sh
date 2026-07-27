@@ -11,9 +11,17 @@
 #
 #   PART B — the YAML seam. Assert docs-quality.yml actually INVOKES the script
 #            on every PR, that the invocation is not skipped by an `if:`, and
-#            that its exit status is not swallowed by `|| true` /
-#            `continue-on-error`. Deleting the call site must fail THIS test,
-#            not merely go unnoticed.
+#            that its exit status is not swallowed. Deleting the call site must
+#            fail THIS test, not merely go unnoticed.
+#
+#            The swallow/skip analysis itself lives in
+#            scripts/check-workflow-seam.py, NOT in a heredoc here. It used to
+#            be a heredoc, and that is exactly how it shipped broken: it matched
+#            `|| true` LINE BY LINE, so a `|| true` written after a backslash
+#            continuation was invisible and the whole seam test passed 20/20
+#            over a hard gate whose exit status was discarded. A checker you
+#            cannot point a mutant at is a checker nobody mutates. B3 below now
+#            does point mutants at it — including that one.
 #
 # Fixtures below contain literal marker strings while attributing nothing:
 # model-attribution-exempt: fixtures for the marker gate
@@ -29,7 +37,10 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 GATE="$REPO_ROOT/scripts/check-model-attribution.py"
+SEAM="$REPO_ROOT/scripts/check-workflow-seam.py"
 WORKFLOW="$REPO_ROOT/.github/workflows/docs-quality.yml"
+NEEDLES=(--needle check-model-attribution.py --needle test_model_attribution.sh
+         --exclude check-workflow-seam.py --min-invocations 4)
 FAILURES=0
 
 pass() { printf '  ok   %s\n' "$1"; }
@@ -217,49 +228,89 @@ else
     fail "B1d the PR-level --check-commits backstop is not wired at all"
   fi
 
-  # B2 — the invocations must not be neutered. A step that is conditionally
-  # skipped, marked continue-on-error, or `|| true`-ed is a vacuous gate: it
-  # reports green while checking nothing. This parses the workflow structurally
-  # rather than grepping, because an `if:` can sit on the step OR its job.
-  seam_rc=0
-  python3 - "$WORKFLOW" <<'PY' || seam_rc=$?
-import sys, yaml
-wf = yaml.safe_load(open(sys.argv[1]))
-needles = ("check-model-attribution.py", "test_model_attribution.sh")
-found = 0
-bad = []
-for job_name, job in (wf.get("jobs") or {}).items():
-    job_if = job.get("if")
-    for step in job.get("steps") or []:
-        run = step.get("run") or ""
-        if not any(n in run for n in needles):
-            continue
-        found += 1
-        where = f"{job_name}/{step.get('name', '?')}"
-        if step.get("if") is not None:
-            bad.append(f"{where}: step carries an `if:` ({step['if']!r}) so it can be skipped")
-        if job_if is not None:
-            bad.append(f"{where}: job carries an `if:` ({job_if!r}) so the whole gate can be skipped")
-        if step.get("continue-on-error"):
-            bad.append(f"{where}: continue-on-error swallows the failure")
-        for line in run.splitlines():
-            s = line.strip()
-            if any(n in s for n in needles) and ("|| true" in s or s.endswith("|| :")):
-                bad.append(f"{where}: `|| true` discards the gate's exit status")
-if found < 4:
-    bad.append(
-        "expected 4 gate invocations (self-test, check-briefs, test script, "
-        f"PR-level backstop), found {found}"
-    )
-for b in bad:
-    print("  ", b, file=sys.stderr)
-sys.exit(1 if bad else 0)
-PY
-  if [ "$seam_rc" -eq 0 ]; then
-    pass "B2 gate steps are unconditional and do not swallow failure"
+  # B1e — the seam checker itself must be wired, or B2/B3 below are checking a
+  # workflow nobody runs the checker against in CI.
+  if grep -q -- 'check-workflow-seam\.py --workflow' "$WORKFLOW"; then
+    pass "B1e docs-quality.yml runs check-workflow-seam.py against itself"
   else
-    fail "B2 a gate step is skippable or swallows its exit status"
+    fail "B1e the seam checker is not wired into docs-quality.yml"
   fi
+
+  # B2 — the invocations must not be neutered. A step that is conditionally
+  # skipped, marked continue-on-error, `|| true`-ed, or run under a relaxed
+  # shell is a vacuous gate: it reports green while checking nothing. Parsed
+  # structurally (an `if:` can sit on the step OR its job) and over LOGICAL
+  # shell lines (a `|| true` can sit after a backslash continuation).
+  expect_rc 0 "B2 gate steps are unconditional and do not swallow failure" \
+    python3 "$SEAM" --workflow "$WORKFLOW" "${NEEDLES[@]}"
+
+  # B3 — MUTATE THE SEAM ITSELF. B2 passing is worth nothing unless B2 would
+  # have failed on each way the wiring can rot. Every mutant is applied to a
+  # COPY of the real workflow, so these test the shipped file's actual shape.
+  #
+  # B3a is the regression that motivated extracting the checker: the earlier
+  # line-by-line version passed this mutant while the hard --check-briefs gate
+  # ran with its exit status thrown away.
+  MUT="$TMP/mut.yml"
+  ENFORCE='        run: python3 scripts/check-model-attribution.py --check-briefs'
+
+  mutate() {  # mutate <replacement-python-literal>
+    python3 - "$WORKFLOW" "$MUT" "$ENFORCE" "$1" <<'PY'
+import sys
+src, dst, anchor, repl = sys.argv[1:5]
+text = open(src, encoding="utf-8").read()
+if anchor + "\n" not in text:
+    sys.exit("anchor line not found in workflow — update the test")
+open(dst, "w", encoding="utf-8").write(text.replace(anchor + "\n", repl, 1))
+PY
+  }
+
+  mutate '        run: |
+          python3 scripts/check-model-attribution.py --check-briefs \
+            || true
+'
+  expect_rc 1 "B3a MUTANT: \`|| true\` on a BACKSLASH-CONTINUATION line is caught" \
+    python3 "$SEAM" --workflow "$MUT" "${NEEDLES[@]}"
+
+  mutate '        run: python3 scripts/check-model-attribution.py --check-briefs || true
+'
+  expect_rc 1 "B3b MUTANT: \`|| true\` on the same line is caught" \
+    python3 "$SEAM" --workflow "$MUT" "${NEEDLES[@]}"
+
+  mutate '        if: github.event_name == '"'"'never'"'"'
+        run: python3 scripts/check-model-attribution.py --check-briefs
+'
+  expect_rc 1 "B3c MUTANT: a never-true step \`if:\` is caught" \
+    python3 "$SEAM" --workflow "$MUT" "${NEEDLES[@]}"
+
+  mutate '        continue-on-error: true
+        run: python3 scripts/check-model-attribution.py --check-briefs
+'
+  expect_rc 1 "B3d MUTANT: continue-on-error is caught" \
+    python3 "$SEAM" --workflow "$MUT" "${NEEDLES[@]}"
+
+  mutate '        run: |
+          set +e
+          python3 scripts/check-model-attribution.py --check-briefs
+          echo done
+'
+  expect_rc 1 "B3e MUTANT: \`set +e\` in the run body is caught" \
+    python3 "$SEAM" --workflow "$MUT" "${NEEDLES[@]}"
+
+  mutate ''
+  expect_rc 1 "B3f MUTANT: DELETING the enforcing step is caught" \
+    python3 "$SEAM" --workflow "$MUT" "${NEEDLES[@]}"
+
+  # B3g — and the checker must not be a rubber stamp in the other direction:
+  # the unmutated copy passes, so B3a-f fail for their mutation and not because
+  # the copy itself is broken.
+  cp "$WORKFLOW" "$MUT"
+  expect_rc 0 "B3g the UNMUTATED copy passes (B3a-f red on the mutation, not the copy)" \
+    python3 "$SEAM" --workflow "$MUT" "${NEEDLES[@]}"
+
+  # B4 — the seam checker's own hermetic mutants.
+  expect_rc 0 "B4 check-workflow-seam.py --self-test passes (9 mutants killed)" \
+    python3 "$SEAM" --self-test
 fi
 
 echo
