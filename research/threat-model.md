@@ -31,7 +31,7 @@ actually verifies.
 |---|---|---|
 | `sparq-zk`, `sparq-zk-compose` | The ZK estate has its **own** adversarial threat model. **Verdict: v1 verifier soundness is BROKEN** (a prover can forge arbitrary accepted results). | `research/zk-soundness-audit.md` (12 confirmed issues, 6 critical) |
 | `sparq-mpc` | `publish = false` research scaffold; crypto primitive not yet chosen — not ready for a production threat model. | Bead **sq-jskw** (DEFER until a primitive is chosen) |
-| `sparq-gpu` | `publish = false`; measure-first PCIe-break-even prototype. | Bead **sq-vrye** (DEFER until it exits the prototype stage) |
+| `sparq-gpu` | `publish = false`; measure-first PCIe-break-even prototype, depended on by nothing — so no attacker-controlled path reaches a kernel. The runtime/device model stays deferred; the supply-chain + build-isolation surface that exists *today* is now modelled. | [`research/gpu-threat-model.md`](gpu-threat-model.md) — bead **sq-vrye**, deferral PARTIALLY lifted, with mechanical exit criteria for the rest |
 | `sparq-nlq` | LLM→SPARQL; hands untrusted text to a model and executes the result, so it has its **own** model (prompt/data injection, exfiltration, token budget). | [`research/nlq-threat-model.md`](nlq-threat-model.md) — bead **sq-j1wv**, deferral LIFTED by the GPT-5.6 strategy review |
 
 Capability crates not load-bearing for the core production path (`sparq-geo`,
@@ -478,8 +478,13 @@ Ordered by severity. Every gap maps to a bead (existing or new).
 - **ZK estate** (`sparq-zk*`): see `research/zk-soundness-audit.md` — **v1
   verifier soundness is BROKEN**; do not present it as proving anything to a
   relying party.
-- **Research scaffolds** (`sparq-mpc` / `sparq-gpu`): deferred, beads **sq-jskw** /
-  **sq-vrye**.
+- **`sparq-mpc`**: deferred, bead **sq-jskw** (crypto primitive not yet chosen).
+- **`sparq-gpu`**: partially deferred — see `research/gpu-threat-model.md` (bead
+  **sq-vrye**). The device/runtime model is still deferred (nothing calls the
+  kernels); the record covers what is live today — the GPU dependency closure
+  carried in the workspace vet surface, and a "wgpu never reaches the wasm build"
+  invariant that is asserted in three docs but enforced by no gate — and defines
+  the mechanical trigger that discharges the remainder.
 - **`sparq-nlq`** (NL→SPARQL): no longer deferred — see
   `research/nlq-threat-model.md` (bead **sq-j1wv**), which models prompt/data
   injection, `SERVICE` exfiltration, and the token budget. Injection itself is
