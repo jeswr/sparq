@@ -411,7 +411,10 @@ def python_test_regions(text: str) -> str:
     while i < n:
         if _PY_TEST_DEF_RE.match(lines[i]):
             j = i + 1
-            while j < n and (not lines[j].strip() or lines[j][:1] in " \t)"):
+            # NB: membership in a SET, not in a string — `"" in " \t)"` is True in
+            # Python, so a string test would swallow every blank line even if the
+            # `not .strip()` clause were ever reordered away.
+            while j < n and (not lines[j].strip() or lines[j][0] in {" ", "\t", ")"}):
                 j += 1
             out.extend(lines[i:j])
             i = j
