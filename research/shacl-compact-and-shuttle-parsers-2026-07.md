@@ -55,7 +55,9 @@ The maintainer wants (verbatim intent, 2026-07):
 - **shaclcjs strict-mode leak (measured):** with `extendedSyntax:false` the `% … %`
   property escape and trailing-turtle statements are still accepted — only the `;`
   annotations and `a` keyword are guarded. A conformant strict parser must reject them;
-  concrete first upstream fix (sq-tonhr.5).
+  concrete first upstream fix (sq-tonhr.5) — **filed as jeswr/shaclcjs#199, open and
+  awaiting maintainer review**; leak and fix re-verified 2026-07-27, see
+  [`docs/upstream-proposals.md`](../docs/upstream-proposals.md) § D.
 
 ## 2. The Shuttle value proposition
 
@@ -155,7 +157,11 @@ anonymous bnodes doc-scoped fresh.
   sparq's layer.
 - **Licences:** rdf-shuttle MIT, shaclcjs MIT (fixtures vendorable), sparq MIT —
   maintainer-owned on both sides, no friction. shaclc-1.2 has **no LICENSE**; fix
-  upstream before vendoring anything from it (sq-tonhr.5).
+  upstream before vendoring anything from it (sq-tonhr.5) — MIT LICENSE filed as
+  jeswr/shaclc-1.2#3, **still open as of 2026-07-27**, so the no-vendoring
+  constraint still holds. Conformance pairs filed alongside it as
+  jeswr/shaclc-1.2#4; both tracked in
+  [`docs/upstream-proposals.md`](../docs/upstream-proposals.md) § D.
 
 ## 6. SHACL-CS specifics
 

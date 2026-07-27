@@ -73,9 +73,18 @@
 //!   (issue #3752). So:
 //!
 //!   - `+axis` absent (`enu`) + `AXIS[…,EAST],AXIS[…,NORTH]` — the common
-//!     case, accepted; the WKT export omits its AXIS nodes exactly when the
-//!     official order is not the GIS-traditional easting/northing, so a
-//!     no-AXIS projected entry stays refused;
+//!     case, accepted; a no-AXIS projected entry stays refused. The registry
+//!     data is PostGIS `spatial_ref_sys` (`srtext`/`proj4text`), whose WKT1
+//!     export omits its AXIS nodes almost exactly when the official order is
+//!     not the GIS-traditional easting/northing — VERIFIED against the EPSG
+//!     registry's coordinate-system axis table (EPSG v11.022): of the 1249
+//!     projected no-AXIS entries, 1241 are officially northing/easting with
+//!     zero exceptions, and the other 8 are the entries whose `wkt` string is
+//!     EMPTY (so they carry no axis evidence at all) and are officially
+//!     easting/northing. Refusing the whole bucket is therefore correct, and
+//!     "no AXIS means northing-first" is NOT a safe blanket rule — those 8
+//!     are refused by this axis rule alone. See
+//!     `research/epsg-no-axis-projected-axis-order.md` (issue #4284);
 //!   - `+axis=wsu` + `AXIS[…,WEST],AXIS[…,SOUTH]` — the 28 southern-African
 //!     Gauss-conformal "Lo" grids (Hartebeesthoek94, Cape, Schwarzeck), and
 //!     `+axis=swu` + `AXIS[…,SOUTH],AXIS[…,WEST]` — EPSG:8352 (S-JTSK
@@ -85,8 +94,8 @@
 //!     what proj4rs consumes;
 //!   - anything else refused — including a WKT that declares south/west order
 //!     while the proj4 string forgot the matching `+axis=` (EPSG:2065, 5513,
-//!     8044, 8045: the crs-csv export's PROJ.4 column is the east/north
-//!     Krovak/Cassini variant while its WKT column is the official
+//!     8044, 8045: the export's `proj4text` column is the east/north
+//!     Krovak/Cassini variant while its `srtext` column is the official
 //!     south/west one, so the two disagree and neither can be trusted), and
 //!     the two transposed entries EPSG:8433 (Macao Grid) and EPSG:8441
 //!     (Tananarive / Laborde Grid), whose WKT declares `NORTH,EAST` against
