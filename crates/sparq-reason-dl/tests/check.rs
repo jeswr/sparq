@@ -807,3 +807,109 @@ fn entailment_premise_side_bnode_unaffected_skolemisation_stays() {
     assert_eq!(v, EntailmentVerdict::Entailed);
     assert_eq!(b, Branch::AlchTableau);
 }
+
+// -------------------------------------------------------------------------------------------
+// Refutation budget fallback ([OPUS-5] sq-pbz04.4.10)
+//
+// The tableau owns every refutation, but its budget is a deterministic COUNT — a big in-RL
+// premise can exhaust it where the RL materializer decides in one pass. These tests pin BOTH
+// halves of the contract: the fallback RECOVERS a verdict the tableau abandoned, and it stays
+// fail-closed (keeping the honest `ResourceBudget` reason) whenever no profile branch can own
+// the question or a branch guard abstains. `STARVED` is a budget small enough that the tableau
+// cannot finish ANY of these refutations — the point is to reach the fallback deterministically,
+// not to model a realistic budget.
+// -------------------------------------------------------------------------------------------
+
+/// A budget so small every refutation below exhausts it (the fallback's trigger condition).
+const STARVED: Budget = Budget {
+    max_nodes: 1,
+    max_rule_applications: 1,
+};
+
+fn entail_starved(premise: &str, conclusion: &str) -> (EntailmentVerdict, Branch) {
+    let (mut dict, prem, concl) = parse_two(premise, conclusion);
+    let out = DirectChecker::with_budget(STARVED).entailment(&mut dict, &prem, &concl);
+    (out.verdict, out.branch)
+}
+
+#[test]
+fn entailment_budget_fallback_rl_recovers_entailed() {
+    // `A ⊑ B, a : A ⊨ a : B`. The refutation is the premise plus `(¬B)(a)`, which is IN RL
+    // (ClassAssertion of a superClassExpression `¬B`). Starved, the tableau abstains; the RL
+    // materializer derives `a : B` by cax-sco and `inconsistencies()` sees the cls-com clash
+    // against `a : ¬B`, so the refutation is UNSATISFIABLE ⇒ the axiom IS entailed. The verdict
+    // is attributed to the branch that broke the tie, not to the tableau that gave up.
+    let premise = ":A rdfs:subClassOf :B . :a rdf:type :A .";
+    let conclusion = ":a rdf:type :B .";
+    let (v, b) = entail_starved(premise, conclusion);
+    assert_eq!(
+        v,
+        EntailmentVerdict::Entailed,
+        "the RL fallback must recover the verdict the starved tableau abandoned"
+    );
+    assert_eq!(b, Branch::RlMaterialization, "traceability: the fallback branch owns it");
+    // Control: with the DEFAULT budget the tableau decides it itself and nothing is attributed
+    // to a profile branch — the fallback is reached only through budget exhaustion.
+    let (v_default, b_default) = entail(premise, conclusion);
+    assert_eq!(v_default, EntailmentVerdict::Entailed);
+    assert_eq!(b_default, Branch::AlchTableau);
+}
+
+#[test]
+fn entailment_budget_fallback_rl_recovers_not_entailed() {
+    // `A ⊑ C ⊭ A disjointWith B`. The DisjointClasses refutation adds `(A ⊓ B)(x)` — the ONLY
+    // encoding that introduces no `owl:complementOf`, so the augmented model clears the RL
+    // divergence guard and the branch's `Consistent` is sound. Refutation SATISFIABLE ⇒ NOT
+    // entailed, recovered from a starved tableau.
+    let premise = ":A rdfs:subClassOf :C .";
+    let conclusion = ":A owl:disjointWith :B .";
+    let (v, b) = entail_starved(premise, conclusion);
+    assert_eq!(
+        v,
+        EntailmentVerdict::NotEntailed,
+        "the RL fallback must recover the negative verdict too"
+    );
+    assert_eq!(b, Branch::RlMaterialization);
+    // Same answer as the complete tableau at the default budget — the fallback agrees with the
+    // branch it is standing in for, it does not invent a different verdict.
+    assert_eq!(entail(premise, conclusion).0, EntailmentVerdict::NotEntailed);
+}
+
+#[test]
+fn entailment_budget_fallback_keeps_resource_budget_when_out_of_profile() {
+    // NEGATIVE PROBE: the premise puts `owl:complementOf` in a SUBCLASS position, which is in
+    // neither RL nor EL (nor QL), so no profile branch may own the refutation. The fallback
+    // must decline and the checker must keep the tableau's honest `ResourceBudget` abstention
+    // — a starved tableau is never rescued by a guess.
+    let premise = "[ owl:complementOf :B ] rdfs:subClassOf :C . :a rdf:type :A .";
+    let conclusion = ":a rdf:type :B .";
+    let (v, b) = entail_starved(premise, conclusion);
+    assert!(
+        matches!(v, EntailmentVerdict::Unknown(UnknownReason::ResourceBudget(_))),
+        "out-of-profile refutation must keep the ResourceBudget abstention, got {:?}",
+        v
+    );
+    assert_eq!(b, Branch::AlchTableau, "the abstention is still the tableau's");
+}
+
+#[test]
+fn entailment_budget_fallback_respects_the_rl_divergence_guard() {
+    // NEGATIVE PROBE: the `ClassAssertion` refutation introduces `¬B`, so when RL finds NO
+    // clash the divergence guard (owl:complementOf, DisjointClasses-001/-003 /
+    // New-Feature-ObjectQCR-002) refuses to read "no clash" as consistent. The fallback must
+    // therefore NOT produce a `NotEntailed` here — it keeps the `ResourceBudget` abstention.
+    // This is the guard discipline of the consistency branches applying unchanged.
+    let premise = ":A rdfs:subClassOf :C . :a rdf:type :A .";
+    let conclusion = ":a rdf:type :B .";
+    let (v, b) = entail_starved(premise, conclusion);
+    assert!(
+        matches!(v, EntailmentVerdict::Unknown(UnknownReason::ResourceBudget(_))),
+        "the RL divergence guard must block a `Consistent`-derived NotEntailed, got {:?}",
+        v
+    );
+    assert!(!v.is_not_entailed());
+    assert_eq!(b, Branch::AlchTableau);
+    // The COMPLETE tableau does decide it (negatively) at the default budget — proof that the
+    // abstention above is the guard being conservative, not the answer being unknowable.
+    assert_eq!(entail(premise, conclusion).0, EntailmentVerdict::NotEntailed);
+}

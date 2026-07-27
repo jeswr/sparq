@@ -228,6 +228,29 @@ the L1 model) → `Unknown`. **Negative entailment** verdicts are
 emitted only when the refutation check lands in a branch that is *complete* (EL-guarded,
 ALCH, or RL-with-guard) — a definitive "consistent" is what certifies non-entailment.
 
+**§4 amendment, sq-pbz04.4.10 (refutation routing — budget robustness) [OPUS-5].** The
+"RL-with-guard" arm of the sentence above is now implemented, as a *fallback* rather than a
+first-choice route. The ALCH tableau keeps ownership of every refutation (it is the only branch
+complete for the whole §3 fragment, so routing there first cannot lose a verdict); the profile
+branches are re-asked the same question **only** when the tableau returns
+`Unknown(ResourceBudget)`. Rules, all of them the §4 dispatch's own: a transitivity-bearing
+augmented ontology is never re-asked (only the ALCH+S tableau is argued for it); `profiles()`
+routes RL → EL over the *augmented* ontology, never the premise alone, because a branch's
+argument only covers the graph it actually decides; the augmented model is serialised for the
+triple-consuming branches by the L1 forward renderer (sq-pbz04.4.7) with its round-trip
+invariant **re-verified per call** (re-extract, compare axiom multisets) rather than trusted;
+and every branch guard (PR1 punning, RL divergence, EL skipped/unapplied/⊤) applies unchanged.
+Any fallback abstention keeps the tableau's original `ResourceBudget` reason. The change is
+therefore strictly abstention-reducing — it can only replace an abstention with a verdict a
+branch's existing soundness argument already covers. QL is deliberately not routed: that
+branch's soundness rests on the sparq-reason-ql crate's capture accounting over the *original*
+input graph, and a refutation graph is a synthesised augmentation, so extending it needs its own
+argument. **Measured on the pinned L5 corpus: 7 entailment rows abstain on `ResourceBudget` (65
+refutation components), the fallback declines all 65 because the augmented ontology is in no
+profile, and the DIRECT floors are unchanged.** `(C ⊓ ¬D)(x)` is RL-legal only when `C` is also
+an RL superClassExpression, which the budget-exhausting corpus rows are not — so narrowing the
+RL divergence guard, not more routing, is the lever that would move those rows.
+
 **Double-counting discipline:** the dual-tagged (DIRECT + RDF-BASED) tests keep their
 RDF-Based run in the existing standards-conformance lane; the new DIRECT arm is a separate
 sparq-extension row. One test may legitimately appear in both tallies because they test

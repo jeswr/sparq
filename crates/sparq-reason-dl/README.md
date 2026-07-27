@@ -95,10 +95,10 @@ OWN capture accounting owns the verdict; without it, always `Unknown(QlConsisten
 premise ⊨ conclusion per conclusion-axiom by sound refutation encodings on the tableau
 (GCI / class-assertion / the fresh-class trick, its sq-pbz04.4.9 role-subsumption lift for
 `SubObjectPropertyOf`, the sq-zfwzq transitivity lift when enabled, + the record's
-desugarings); a future unencoded kind abstains. A **blank-node individual in the conclusion is read EXISTENTIALLY**
-(sq-pbz04.4.13): a tree-shaped anonymous assertion set rolls up into an `∃`-class assertion
-decided soundly, and a non-rollable shape (shared / cyclic / nominal / free-root) abstains
-`ConclusionAnonymousIndividual` — never a skolem-constant `NotEntailed`. Every verdict carries its producing `Branch`; every guard fails
+desugarings); a future unencoded kind abstains. A **blank-node individual in the conclusion is read EXISTENTIALLY** (sq-pbz04.4.13): a tree-shaped anonymous assertion set rolls up into an `∃`-class assertion
+decided soundly, and a non-rollable shape (shared / cyclic / nominal / free-root) abstains `ConclusionAnonymousIndividual` — never a skolem-constant `NotEntailed`. A refutation that exhausts the
+tableau's deterministic count budget — and ONLY then — is re-asked of the RL/EL branches under their own unchanged guards (sq-pbz04.4.10): strictly abstention-reducing, it can replace
+`Unknown(ResourceBudget)` with a definitive verdict but never widen one a guard refused. Every verdict carries its producing `Branch`; every guard fails
 closed (`Unknown(reason)`, never a guess). The `dispatch` feature pulls `sparq-reason` +
 `sparq-reason-el` as optional deps — **off by default**, so L1–L3 stay dependency-light.
 
