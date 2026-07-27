@@ -121,9 +121,9 @@ Emitted by the specialized path the bead describes, for `max_bits < 128`:
 **The specialization is opcode-for-opcode identical to what HEAD emits.** The saving in the bead
 sketch does not exist: it was already realized, before this bead was written, by the constant-`rhs`
 bit-bound tightening (§3a). A PR implementing the sketch would be a pure refactor of `acir_context`
-that cannot win gates and can only lose them — which is exactly the failure shape §4.2 records for
-#10159. Per the bead's fail-closed instruction, **no PR is proposed and `acir_context/mod.rs` is not
-touched**.
+that cannot win gates and can only lose them — which is exactly the failure shape §4.2 records
+for #10159. Per the bead's fail-closed instruction, **no PR is proposed and `acir_context/mod.rs`
+is not touched**.
 
 Two caveats on the strength of this verdict, stated because they are the honest boundary:
 
