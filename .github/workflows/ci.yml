@@ -1229,8 +1229,15 @@ jobs:
           cargo clippy --manifest-path bench/dict/Cargo.toml --all-targets -- -D warnings
           cargo run --manifest-path bench/dict/Cargo.toml -- selftest
       # Informational until the deferred `cargo fmt --all` reformat lands (see rustfmt.toml).
+      # The formatter VERSION is pinned by rust-toolchain.toml (channel + the `rustfmt`
+      # component), so this check is reproducible in a local checkout even while it is
+      # non-blocking — issue #2360 reported the opposite, a workspace-wide failure on
+      # unchanged files under an ambient rustfmt. Echo the version so any future
+      # disagreement between this log and a contributor's box names its own cause.
       - name: rustfmt (informational)
-        run: cargo fmt --all --check
+        run: |
+          cargo fmt --version
+          cargo fmt --all --check
         continue-on-error: true
 
   msrv:

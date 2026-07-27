@@ -58,6 +58,7 @@ npm test        # node --test against the built dist/
 // Construction (all async; each runs wasm init() once, memoised)
 static empty(): Promise<SparqStore>                                        // empty + mutable; grow via update()/addQuads() (named graphs work out of the box)
 static fromString(data: string, format?: RdfFormat, opts?: SparqStoreOptions): Promise<SparqStore>
+static fromBytes(bytes: Uint8Array, format?: RdfFormat, opts?: Pick<SparqStoreOptions, 'baseIri'>): Promise<SparqStore>
 static fromQuads(quads: Iterable<RDF.Quad>, opts?: SparqStoreOptions): Promise<SparqStore>     // serialised to N-Quads internally
 static fromCompressed(bytes: Uint8Array, format?: RdfFormat,
                       opts?: SparqStoreOptions & { codec?: 'zstd' | 'gzip' }): Promise<SparqStore>

@@ -116,6 +116,17 @@ ASK has no CSV/TSV form; a CSV/TSV `Accept` on an ASK yields the JSON boolean fo
 **Result envelopes** (SPARQL 1.1 Query Results JSON Format): a SELECT body is
 `{"head":{"vars":[…]},"results":{"bindings":[…]}}`; an ASK body is `{"head":{},"boolean":…}`.
 
+<!-- [SONNET-4.6] sq-7d3dj.26 -->
+**Streamed SELECT-JSON and truncation safety.** A SELECT-JSON result larger than one 64 KiB
+chunk is sent under **chunked transfer-encoding with no `Content-Length`**; smaller results stay
+buffered with a `Content-Length`. Once the first byte is on the wire the status is committed, so
+a later row/byte-cap or deadline trip can only **truncate** — and a truncated stream is always
+distinguishable from a complete one: the closing `]}}` is **never** written, so the body fails
+to parse as `sparql-results+json`. A **well-formed but short `200` is not a possible outcome.**
+A client that sends **`TE: trailers`** additionally receives a `Trailer` header and, after the
+body, `X-Sparq-Complete: true` or `X-Sparq-Truncated: deadline|max-rows|max-bytes|cancelled|panic|error`;
+a client that does not gets the chunked stream aborted without its terminating zero-length chunk.
+
 **CONSTRUCT / DESCRIBE** (default: **N-Triples**):
 
 | `Accept` (aliases) | Emitted `Content-Type` |

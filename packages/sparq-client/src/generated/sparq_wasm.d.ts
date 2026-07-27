@@ -180,6 +180,37 @@ export class Store {
      */
     static load(text: string, format: string): Store;
     /**
+     * [FABLE-5] sq-3ul2n.3: like [`load`](Self::load) but ingests **raw bytes** (a JS
+     * `Uint8Array`) instead of a JS string, skipping the UTF-16 string round-trip.
+     *
+     * Pass the `Uint8Array` you already hold — e.g. `new Uint8Array(await
+     * response.arrayBuffer())` or `new Uint8Array(await file.arrayBuffer())`. The bytes
+     * are copied ONCE into wasm linear memory (no intermediate UTF-16 JS string), then
+     * validated as UTF-8 and parsed through the exact same path as [`load`](Self::load),
+     * so the resulting store is identical to `Store.load(new TextDecoder().decode(bytes),
+     * format)`. `format` is the same set [`load`](Self::load) accepts (`"turtle"` |
+     * `"ntriples"` | `"nquads"` | `"trig"` | `"jsonld"` with the opt-in `jsonld` feature).
+     * Named graphs are folded into the default graph (as [`load`](Self::load)).
+     *
+     * Invalid UTF-8 is rejected **fail-closed** with a `JsError` (a `try { … } catch` on
+     * the JS side), the same error surface as a malformed document to [`load`](Self::load)
+     * — never a panic, abort, or lossy decode.
+     */
+    static loadBytes(data: Uint8Array, format: string): Store;
+    /**
+     * [FABLE-5] sq-3ul2n.3: the byte-ingest counterpart to
+     * [`loadWithBase`](Self::load_with_base) — ingests raw bytes (a `Uint8Array`) and
+     * resolves the document's RELATIVE IRIs against `base`.
+     *
+     * Identical semantics to [`loadWithBase`](Self::load_with_base) (a document-level
+     * `@base` still overrides the supplied `base`; the line-based formats
+     * `"ntriples"` / `"nquads"` allow only absolute IRIs so `base` has no effect on them;
+     * an invalid `base` is rejected with a `JsError`), only reading bytes instead of a JS
+     * string. Invalid UTF-8 is rejected fail-closed exactly as in
+     * [`loadBytes`](Self::load_bytes).
+     */
+    static loadBytesWithBase(data: Uint8Array, format: string, base: string): Store;
+    /**
      * Like [`load`](Self::load) but stores the index BLOCK-COMPRESSED (~4-6 B/triple vs
      * 12 — roughly half the index memory, measured −49% on the 6-perm set / −60% on the
      * 3-perm compact set the browser uses). Query results are identical; scans pay a
@@ -493,6 +524,8 @@ export interface InitOutput {
     readonly store_explainPlanJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly store_heapBytes: (a: number) => number;
     readonly store_load: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly store_loadBytes: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly store_loadBytesWithBase: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
     readonly store_loadCompressed: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly store_loadDataset: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly store_loadWithBase: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];

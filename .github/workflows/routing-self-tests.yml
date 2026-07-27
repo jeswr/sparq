@@ -57,6 +57,13 @@ on:
       - "scripts/triage.py"
       - "scripts/retriage.py"
       - ".github/workflows/triage-issue.yml"
+      # [OPUS-5] the maintainer front door (#1135 / #4145) — the curated TOML, the renderer
+      # that drops resolved entries from it, and the suite that pins both plus the
+      # refresh-start-here.yml wiring.
+      - "orchestration/start-here.toml"
+      - "scripts/render-start-here.py"
+      - "scripts/tests/test_start_here_render.py"
+      - ".github/workflows/refresh-start-here.yml"
       - ".github/workflows/routing-self-tests.yml"
       # [OPUS-5] reg#677 — PR `area:` attribution. The scheduler partitions by
       # `area:<name>`; an unlabelled PR takes the serializing `__global__` partition
@@ -108,6 +115,13 @@ on:
       - "scripts/triage.py"
       - "scripts/retriage.py"
       - ".github/workflows/triage-issue.yml"
+      # [OPUS-5] the maintainer front door (#1135 / #4145) — the curated TOML, the renderer
+      # that drops resolved entries from it, and the suite that pins both plus the
+      # refresh-start-here.yml wiring.
+      - "orchestration/start-here.toml"
+      - "scripts/render-start-here.py"
+      - "scripts/tests/test_start_here_render.py"
+      - ".github/workflows/refresh-start-here.yml"
       - ".github/workflows/routing-self-tests.yml"
       # [OPUS-5] reg#677 — PR `area:` attribution. The scheduler partitions by
       # `area:<name>`; an unlabelled PR takes the serializing `__global__` partition
@@ -157,6 +171,12 @@ jobs:
           # runs cannot go red.
           python3 scripts/pr-area-labels.py --self-test
           python3 scripts/tests/test_pr_area_labels.py
+          # [OPUS-5] #4145: the front-door renderer. --self-test validates the SHIPPED
+          # orchestration/start-here.toml (a malformed curated file must fail on ITS PR, not at the
+          # next scheduled refresh of the maintainer's front door); the suite pins the drop /
+          # fail-closed / truncation rules and refresh-start-here.yml's own wiring.
+          python3 scripts/render-start-here.py --self-test
+          python3 scripts/tests/test_start_here_render.py
 
       # [OPUS-5] The bd->issues migration pair, previously ungated on a PR (see the `paths:`
       # note above). Both are hermetic: stdlib only, every subprocess boundary stubbed, no

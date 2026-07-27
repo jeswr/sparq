@@ -120,7 +120,7 @@ access-audit = ["server"]
 # equivalent. Feature unification means the `sparq-core` `sparq-engine` resolves also gains `mmap`,
 # so the WAL-durable `apply_delta` path is live on the shared graph. Without `--persist` the server
 # is in-memory exactly as before (the flag, not the feature, selects durability).
-server = ["dep:sparq-serve", "dep:axum", "dep:hyper", "dep:hyper-util", "dep:tokio", "dep:tower", "dep:tower-http", "dep:tracing", "dep:tracing-subscriber", "dep:futures-util", "dep:serde_json", "dep:flate2", "sparq-core/mmap"]
+server = ["dep:sparq-serve", "dep:axum", "dep:hyper", "dep:hyper-util", "dep:http-body", "dep:tokio", "dep:tower", "dep:tower-http", "dep:tracing", "dep:tracing-subscriber", "dep:futures-util", "dep:serde_json", "dep:flate2", "sparq-core/mmap"]
 # [GPT-5.6] (sq-abhuq) Opt-in outbound gzip/zstd negotiation for HTTP result bodies.
 # The default build remains byte-identical: without this feature the response middleware is
 # cfg-stripped and tower-http's compression codecs are not compiled. The middleware preserves
@@ -498,6 +498,12 @@ axum = { version = "0.8", optional = true, default-features = false, features = 
 # only names them as direct deps so we can call `Builder`. http1-only (matches axum's config).
 hyper = { version = "1", optional = true, default-features = false, features = ["http1", "server"] }
 hyper-util = { version = "0.1", optional = true, default-features = false, features = ["server", "tokio", "service"] }
+# [SONNET-4.6] (sq-7d3dj.26) `http_body::{Body, Frame}` — the streamed SELECT-JSON body is a
+# hand-written `Body` so it can emit an HTTP TRAILER (`X-Sparq-Complete` / `X-Sparq-Truncated`)
+# after its last data frame; `axum::body::Body::from_stream` cannot express a trailers frame.
+# Already in axum's and hyper's dependency graph (http-body 1.x), so this adds NO new transitive
+# code — it only names the direct edge so we can implement the trait.
+http-body = { version = "1", optional = true }
 # [GPT-5.6] sq-oprna.6: TLS wrapping for the opt-in HTTP/2 TCP listener. Crypto and PEM parsing
 # are shared with http3 when both features are selected; TLS 1.2 stays absent because the server
 # config intentionally admits TLS 1.3 only.

@@ -5576,6 +5576,7 @@ dependencies = [
  "futures-util",
  "h3",
  "h3-quinn",
+ "http-body",
  "hyper",
  "hyper-util",
  "mimalloc",
@@ -5822,6 +5823,18 @@ dependencies = [
  "oxrdf 0.3.3",
  "sparq-core",
 ]
+
+[[package]]
+name = "sparq-wrapper-gen"
+version = "0.1.0"
+
+[[package]]
+name = "sparq-wrapper-integration"
+version = "0.1.0"
+
+[[package]]
+name = "sparq-wrapper-shacl"
+version = "0.1.0"
 
 [[package]]
 name = "sparq-zk"

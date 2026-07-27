@@ -31,9 +31,12 @@ import importlib.util
 import io
 import json
 import re
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = REPO_ROOT / "scripts"
@@ -87,8 +90,13 @@ class TestUnlabelledOccupantAttribution(unittest.TestCase):
 
     def test_unlabelled_pr_leaves_every_unrelated_crate_dispatchable(self):
         # The blast radius, not just one row: with the bug, ALL of these vanished at once.
+        # [OPUS-5] sparq#4336: the keys were synthetic `area:crate-21/22/23`. Those share the head
+        # segment `crate`, and containment-aware conflict() now (correctly) treats a shared head
+        # as one partition, so the fixture no longer modelled "three UNRELATED crates" at all.
+        # Switched to three real, disjoint workspace crates — the assertion is unchanged in force.
         board = [pr(70, [])] + [
-            iss(n, READY + ["priority:P1", f"area:crate-{n}"]) for n in (21, 22, 23)]
+            iss(n, READY + ["priority:P1", f"area:{a}"])
+            for n, a in ((21, "sparq-core"), (22, "sparq-hdt"), (23, "sparq-geo"))]
         self.assertEqual(
             numbers(ready.compute_ready(board, conflict_log=quiet)), [21, 22, 23])
 
@@ -114,6 +122,249 @@ class TestUnlabelledOccupantAttribution(unittest.TestCase):
         board = [iss(72, ["status:in-progress"]),
                  iss(20, READY + ["priority:P1", "area:sparq-core"])]
         self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet)), [20])
+
+
+class TestSubCrateContainment(unittest.TestCase):
+    """sparq#4336 — the UNDER-serialisation defect: a region key never overlapped its crate.
+
+    `conflict()` compared partition keys by exact-string set overlap, so `area:sparq-server-http`
+    did not overlap `area:sparq-server`. Both entered the frontier in one tick, and a sub-crate
+    issue entered despite an open PR holding the parent crate: two workers, one crate, no lock.
+    57.1% of same-crate 24h PR pairs share a file (research/crate-region-parallelism.md §4), and a
+    semantic collision (both compile, both pass, together broken) is invisible to git.
+
+    Every test here goes END-TO-END through compute_ready() where it can, so deleting
+    `keys_conflict`, flattening `partition_path` to the identity, or reverting `conflict()` to
+    `pkgs & blockers.keys()` reds this class.
+    """
+
+    # The four live labels that are NOT workspace crates -> they are regions inside one.
+    CONTAINED = {"sparq-server-http": "sparq-server",
+                 "sparq-core-nt-dict": "sparq-core",
+                 "sparq-core-store": "sparq-core",
+                 "sparq-engine-exec": "sparq-engine"}
+    # The fifth label from the issue's table. It IS a real workspace crate at origin/main, so the
+    # table was already stale — see test_conformance_floors_is_a_real_crate_and_must_stay_split.
+    NOT_CONTAINED = "sparq-conformance-floors"
+
+    def test_every_live_sub_crate_label_conflicts_with_its_parent_crate(self):
+        for child, parent in self.CONTAINED.items():
+            with self.subTest(child=child):
+                self.assertTrue(ready.keys_conflict(child, parent),
+                                f"{child} names a region inside {parent}")
+                self.assertTrue(ready.keys_conflict(parent, child), "conflict must be symmetric")
+                self.assertEqual(ready.partition_path(child), (parent,))
+
+    def test_parent_crate_issue_blocks_a_sub_crate_issue_in_the_same_tick(self):
+        # Ordering A: the PARENT is selected first (lower number wins the priority tie).
+        board = [iss(1, READY + ["priority:P1", "area:sparq-server"]),
+                 iss(2, READY + ["priority:P1", "area:sparq-server-http"])]
+        self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet)), [1],
+                         "area:sparq-server-http must not enter alongside area:sparq-server")
+
+    def test_sub_crate_issue_blocks_a_parent_crate_issue_in_the_same_tick(self):
+        # Ordering B: the CHILD is selected first. Both orderings, per the acceptance criteria.
+        board = [iss(1, READY + ["priority:P1", "area:sparq-server-http"]),
+                 iss(2, READY + ["priority:P1", "area:sparq-server"])]
+        self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet)), [1],
+                         "area:sparq-server must not enter alongside area:sparq-server-http")
+
+    def test_open_pr_holding_the_parent_crate_blocks_a_sub_crate_issue(self):
+        # The OCCUPANCY half of the defect, demonstrated live in the issue.
+        board = [pr(70, ["area:sparq-server"]),
+                 iss(20, READY + ["priority:P1", "area:sparq-server-http"])]
+        self.assertEqual(ready.compute_ready(board, conflict_log=quiet), [],
+                         "an open PR on sparq-server must hold the whole crate")
+
+    def test_open_pr_holding_a_sub_crate_blocks_a_parent_crate_issue(self):
+        board = [pr(70, ["area:sparq-core-store"]),
+                 iss(20, READY + ["priority:P1", "area:sparq-core"])]
+        self.assertEqual(ready.compute_ready(board, conflict_log=quiet), [],
+                         "an open PR on a region must hold its containing crate")
+
+    def test_sibling_sub_crate_keys_of_one_parent_conflict_with_each_other(self):
+        # A sibling hole is the SAME defect one level down: sparq-core-store and
+        # sparq-core-nt-dict are both files in crates/sparq-core. Neither string is a prefix of
+        # the other, so a naive prefix-on-the-raw-key rule would pass the parent tests and still
+        # put two workers in sparq-core.
+        self.assertTrue(ready.keys_conflict("sparq-core-store", "sparq-core-nt-dict"))
+        board = [iss(1, READY + ["priority:P1", "area:sparq-core-store"]),
+                 iss(2, READY + ["priority:P1", "area:sparq-core-nt-dict"])]
+        self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet)), [1])
+
+    def test_unrelated_crates_still_do_not_conflict(self):
+        # The fix must not collapse everything into one lock and destroy the frontier.
+        for a, b in (("sparq-core", "sparq-engine"), ("sparq-server", "sparq-hdt"),
+                     ("sparq-zk", "sparq-mpc"), ("site", "bench")):
+            with self.subTest(pair=(a, b)):
+                self.assertFalse(ready.keys_conflict(a, b))
+        board = [iss(n, READY + ["priority:P1", f"area:{a}"]) for n, a in
+                 ((1, "sparq-core"), (2, "sparq-engine"), (3, "sparq-hdt"), (4, "site"))]
+        self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet)), [1, 2, 3, 4])
+
+    def test_real_sibling_crates_sharing_a_name_prefix_stay_independent(self):
+        # `sparq-engine-serialize` is a REAL crate directory, so it is NOT a region inside
+        # `sparq-engine` even though the strings nest. Only the workspace tree can tell these
+        # apart from `sparq-engine-exec`; a hand-written containment table cannot.
+        for crate in ("sparq-engine-serialize", "sparq-engine-service", "sparq-reason-dl",
+                      "sparq-lws-core", "sparq-zk-compose"):
+            with self.subTest(crate=crate):
+                self.assertEqual(ready.partition_path(crate), (crate,))
+        self.assertFalse(ready.keys_conflict("sparq-engine", "sparq-engine-serialize"))
+        self.assertFalse(ready.keys_conflict("sparq-engine-exec", "sparq-engine-serialize"))
+        self.assertTrue(ready.keys_conflict("sparq-engine", "sparq-engine-exec"),
+                        "the non-crate sibling must still collapse into the crate")
+
+    def test_conformance_floors_is_a_real_crate_and_must_stay_split(self):
+        # Issue #4336's table lists area:sparq-conformance-floors as a region inside
+        # crates/sparq-conformance. It is NOT: crates/sparq-conformance-floors is a workspace
+        # member at origin/main. The table was stale before it was written down, which is the
+        # whole argument for deriving containment from the tree instead of listing it.
+        self.assertTrue((REPO_ROOT / "crates" / self.NOT_CONTAINED / "Cargo.toml").is_file())
+        self.assertEqual(ready.partition_path(self.NOT_CONTAINED), (self.NOT_CONTAINED,))
+        self.assertFalse(ready.keys_conflict("sparq-conformance", self.NOT_CONTAINED))
+
+
+class TestTotalPartitionMapping(unittest.TestCase):
+    """The durable half: an UNKNOWN key must fail SAFE with no code change.
+
+    Under-serialisation corrupts; over-serialisation only delays. So the map is total and every
+    unrecognised key resolves UPWARD to the coarsest thing that could contain it.
+    """
+
+    def test_newly_invented_sub_crate_key_resolves_to_its_crate(self):
+        # Nobody registers this label anywhere. It must still be caught by the lock.
+        for invented in ("sparq-server-zzz", "sparq-core-brand-new-region",
+                         "sparq-engine-exec-v2", "sparq-hdt-writer"):
+            with self.subTest(key=invented):
+                parent = ready.partition_path(invented)[0]
+                self.assertIn(parent, ready.workspace_roots())
+                self.assertTrue(invented.startswith(parent + "-"))
+        board = [pr(70, ["area:sparq-server"]),
+                 iss(20, READY + ["priority:P1", "area:sparq-server-zzz"])]
+        self.assertEqual(ready.compute_ready(board, conflict_log=quiet), [],
+                         "an invented region key must fail SAFE into its crate's lock")
+
+    def test_unknown_key_under_an_unknown_parent_still_resolves_upward(self):
+        # `upstream` is not a directory, so the workspace cannot confirm it — the key's own head
+        # segment is then the coarsest partition it names, and honouring it OVER-reserves.
+        self.assertEqual(ready.partition_path("upstream-noir"), ("upstream",))
+        self.assertTrue(ready.keys_conflict("upstream", "upstream-noir"))
+        self.assertTrue(ready.keys_conflict("upstream-noir", "upstream-oxigraph"))
+
+    def test_single_segment_unknown_key_keeps_its_own_partition(self):
+        # It names nothing narrower than itself, so it cannot be under-serialising, and routing it
+        # to __global__ would be a fleet stall, not a fix: MEASURED on the live 2026-07-26
+        # snapshot, a __global__ terminal fallback took the frontier from 6 to 0 because open PR
+        # #4238 carries `area:deps` and `deps` is not a directory.
+        for key in ("upstream", "deps", "workspace", "release", "accuracy", "frobnicate"):
+            with self.subTest(key=key):
+                self.assertEqual(ready.partition_path(key), (key,))
+        board = [iss(1, READY + ["priority:P1", "area:deps"]),
+                 iss(2, READY + ["priority:P1", "area:sparq-core"])]
+        self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet)), [1, 2])
+
+    def test_degenerate_key_fails_all_the_way_closed_to_global(self):
+        # The terminal of the resolution chain. A key with no head segment to latch onto reserves
+        # EVERYTHING rather than nothing.
+        for degenerate in ("", "-", "---"):
+            with self.subTest(key=degenerate):
+                self.assertEqual(ready.partition_path(degenerate), ())
+                self.assertTrue(ready.keys_conflict(degenerate, "sparq-core"))
+                self.assertTrue(ready.keys_conflict(degenerate, ready.GLOBAL))
+
+    def test_global_conflicts_with_every_key_and_the_mapping_is_total(self):
+        self.assertEqual(ready.partition_path(ready.GLOBAL), ())
+        for key in ("sparq-core", "sparq-server-http", "site-papers", "deps", "zz-top"):
+            with self.subTest(key=key):
+                self.assertTrue(ready.keys_conflict(ready.GLOBAL, key))
+                self.assertTrue(ready.keys_conflict(key, ready.GLOBAL))
+                self.assertIsInstance(ready.partition_path(key), tuple)
+
+    def test_containment_is_reflexive_and_symmetric(self):
+        for key in ("sparq-core", "sparq-core-store", ready.GLOBAL, "deps"):
+            with self.subTest(key=key):
+                self.assertTrue(ready.keys_conflict(key, key))
+        self.assertEqual(ready.keys_conflict("sparq-core", "sparq-core-store"),
+                         ready.keys_conflict("sparq-core-store", "sparq-core"))
+
+
+class TestWorkspaceDerivedRoots(unittest.TestCase):
+    """Roots are READ FROM THE TREE. A table would already be stale (see conformance-floors)."""
+
+    def test_roots_come_from_the_real_repository_tree(self):
+        roots = ready.workspace_roots()
+        for crate in (p.name for p in (REPO_ROOT / "crates").iterdir() if p.is_dir()):
+            self.assertIn(crate, roots, f"crate {crate} must be a recognised partition root")
+        for top in ("site", "bench", "scripts", "research", "crates"):
+            self.assertIn(top, roots)
+        self.assertNotIn(".github", roots, "dot-directories are not area: key names")
+
+    def test_a_crate_added_with_no_code_change_is_recognised_immediately(self):
+        # The anti-staleness property, exercised against a synthetic tree rather than asserted.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "crates" / "sparq-brandnew").mkdir(parents=True)
+            (base / "crates" / "sparq-brandnew-region").mkdir(parents=True)
+            (base / "site").mkdir()
+            roots = ready.workspace_roots(str(base))
+            self.assertEqual(roots, {"crates", "site", "sparq-brandnew", "sparq-brandnew-region"})
+            # present in the tree -> its own partition; absent -> collapses into its parent
+            self.assertEqual(ready.partition_path("sparq-brandnew-region", roots),
+                             ("sparq-brandnew-region",))
+            self.assertEqual(ready.partition_path("sparq-brandnew-unlisted", roots),
+                             ("sparq-brandnew",))
+            self.assertFalse(ready.keys_conflict("sparq-brandnew", "sparq-brandnew-region", roots))
+            self.assertTrue(ready.keys_conflict("sparq-brandnew", "sparq-brandnew-unlisted", roots))
+
+    def test_an_unreadable_tree_over_reserves_rather_than_under_reserves(self):
+        # If the scan finds nothing, every key falls back to its head segment. That collapses all
+        # `sparq-*` keys onto `sparq` — a fleet-wide slowdown, never a double dispatch.
+        roots = ready.workspace_roots("/nonexistent/sparq-checkout")
+        self.assertEqual(roots, set())
+        self.assertEqual(ready.partition_path("sparq-core", roots), ("sparq",))
+        self.assertTrue(ready.keys_conflict("sparq-core", "sparq-engine", roots),
+                        "with no tree to read, unrelated crates must OVER-reserve")
+
+    def test_dump_partitions_exports_the_mapping_for_the_registry_parity_fixture(self):
+        # The registry's dispatch.yml mirrors this key space in `busy_packages_of_pulls`; the two
+        # must agree or the fleet double-dispatches. This is the machine-readable contract.
+        out = subprocess.run(
+            [sys.executable, str(SCRIPTS / "ready-issues.py"), "--dump-partitions",
+             "sparq-server-http", "sparq-engine-serialize", "deps"],
+            capture_output=True, text=True, check=True).stdout
+        dumped = json.loads(out)
+        self.assertIn("sparq-core", dumped["roots"])
+        self.assertEqual(dumped["resolved"]["sparq-server-http"], ["sparq-server"])
+        self.assertEqual(dumped["resolved"]["sparq-engine-serialize"], ["sparq-engine-serialize"])
+        self.assertEqual(dumped["resolved"]["deps"], ["deps"])
+
+
+class TestConflictAttribution(unittest.TestCase):
+    """A conflict line must name the RAW held label and the COARSEST holder, deterministically."""
+
+    def test_conflict_line_names_the_raw_parent_label_not_the_resolved_path(self):
+        lines = []
+        board = [pr(70, ["area:sparq-server"]),
+                 iss(20, READY + ["priority:P1", "area:sparq-server-http"])]
+        ready.compute_ready(board, conflict_log=lines.append)
+        self.assertEqual(lines, ["conflict #20: area sparq-server held by pr#70"])
+
+    def test_conflict_line_names_the_raw_child_label_when_the_child_holds(self):
+        lines = []
+        board = [pr(70, ["area:sparq-core-store"]),
+                 iss(20, READY + ["priority:P1", "area:sparq-core"])]
+        ready.compute_ready(board, conflict_log=lines.append)
+        self.assertEqual(lines, ["conflict #20: area sparq-core-store held by pr#70"])
+
+    def test_the_coarsest_holder_is_reported_when_several_conflict(self):
+        # __global__ (path length 0) outranks any named area; named areas tie-break alphabetically.
+        lines = []
+        board = [iss(70, ["status:in-progress"] + ["area:sparq-server"]),
+                 iss(71, ["status:in-progress"] + ["area:sparq-core"]),
+                 iss(30, READY + ["priority:P0"])]
+        ready.compute_ready(board, conflict_log=lines.append)
+        self.assertEqual(lines, ["conflict #30: area sparq-core held by issue#71"])
 
 
 class TestInProgressReviewStatus(unittest.TestCase):
@@ -252,8 +503,14 @@ class TestLocalOrchestratorParity(unittest.TestCase):
         return numbers(ready.compute_ready(rows, conflict_log=quiet))
 
     @staticmethod
-    def _run_cli(issues_and_prs, pulls=(), argv=()):
-        """Execute the REAL main() end-to-end; only `_fetch`/`_fetch_pulls` are stubbed."""
+    def _run_cli_streams(issues_and_prs, pulls=(), argv=()):
+        """Execute the REAL main() end-to-end; only `_fetch`/`_fetch_pulls` are stubbed.
+
+        Returns (stdout, stderr). STDERR is not incidental: `compute_ready`'s default
+        `conflict_log` writes the per-conflict ATTRIBUTION line there, and attribution is the one
+        observable the PR/issue unit fold changes on main()'s default path — see
+        `TestUnitReservation.test_the_default_CLI_path_attributes_a_conflict_to_the_PR`.
+        """
         real_fetch, real_pulls, real_argv = ready._fetch, ready._fetch_pulls, sys.argv
         ready._fetch = lambda repo, ceiling=10000: [dict(it) for it in issues_and_prs]
         ready._fetch_pulls = lambda repo: [dict(p) for p in pulls]
@@ -265,7 +522,11 @@ class TestLocalOrchestratorParity(unittest.TestCase):
         finally:
             ready._fetch, ready._fetch_pulls, sys.argv = real_fetch, real_pulls, real_argv
         assert rc == 0, f"main() exited {rc}"
-        return out.getvalue()
+        return out.getvalue(), err.getvalue()
+
+    @classmethod
+    def _run_cli(cls, issues_and_prs, pulls=(), argv=()):
+        return cls._run_cli_streams(issues_and_prs, pulls, argv)[0]
 
     @classmethod
     def _local(cls, issues_and_prs, pulls=()):
@@ -304,7 +565,7 @@ class TestLocalOrchestratorParity(unittest.TestCase):
     def test_diagnose_does_not_call_an_in_flight_row_merely_pr_covered(self):
         # The bucket must agree with the view: a row dispatchable_view KEEPS is reported as
         # busy, not as suppressed. Otherwise the taxonomy explains a drop that never happened.
-        counts, _roleless, _cands, frontier = ready.diagnose(
+        counts, _roleless, _cands, frontier, _units = ready.diagnose(
             list(self.COUNTEREXAMPLE_BOARD), linked={100})
         self.assertEqual(counts.get("busy: status:in-progress-review"), 1)
         self.assertIsNone(counts.get("covered by an open linked PR"))
@@ -313,8 +574,11 @@ class TestLocalOrchestratorParity(unittest.TestCase):
     # -- the previously-covered shapes, now through the real CLI ---------------------------
     def test_unlabelled_prs_do_not_make_the_two_views_disagree(self):
         # The exact live shape: many area-less open PRs + attested issues on distinct crates.
+        # [OPUS-5] sparq#4336: real disjoint crates, for the reason recorded on
+        # test_unlabelled_pr_leaves_every_unrelated_crate_dispatchable.
         board = [pr(3803, []), pr(3799, []), pr(3798, [])] + [
-            iss(n, READY + ["priority:P3", f"area:crate-{n}"]) for n in (3694, 3756, 3757)]
+            iss(n, READY + ["priority:P3", f"area:{a}"])
+            for n, a in ((3694, "sparq-core"), (3756, "sparq-hdt"), (3757, "sparq-geo"))]
         self.assertEqual(self._local(board), self._orchestrator(board))
         self.assertEqual(self._local(board), [3694, 3756, 3757])
 
@@ -333,6 +597,435 @@ class TestLocalOrchestratorParity(unittest.TestCase):
                  iss(61, READY + ["priority:P1", "area:sparq-hdt"])]
         self.assertEqual(self._local(board, [worker_pr(62, 60)]), [61],
                          "main() must suppress issues covered by an open linked PR, as dispatch does")
+
+
+class TestUnitReservation(unittest.TestCase):
+    """A PR and the issues it closes are ONE unit: they reserve the UNION, exactly ONCE.
+
+    [OPUS-5] MEASURED on the live sparq snapshot (2026-07-27, 1473 open issues / 123 open PRs):
+    65 occupying PRs + 46 in-flight issues produced 158 reservations over 49 distinct partition
+    keys — 20 of them a duplicate of a key the unit's other half already held.
+
+    Two facts pin the shape of the rule, and both are measurements rather than opinions:
+
+    * DEDUP IS NOT A FRONTIER LEVER. `conflict()` tests membership in the SET of held keys, so a
+      second occupant on an already-held key changes nothing. 158 -> 138 reservations left the held
+      set at 49 keys and the live frontier at 3 -> 3. Every test below therefore asserts on the
+      RESERVATION STRUCTURE and on end-to-end dispatch decisions, not on a frontier count that the
+      dedup cannot move.
+    * DROPPING THE ISSUE HALF UNDER-SERIALISES. Over the 94 open PRs with an open linked source
+      issue: 31 pairs PR ⊋ issue, 18 identical, 6 source-with-no-`area:`, but 13 PR ⊊ issue and 26
+      INCOMPARABLE. So in 39/94 = 41% of pairs the PR's key set is NOT a superset and dropping the
+      issue's reservation frees a key the unit really occupies — two workers in one crate, the
+      corrupting direction. Hence union, never drop.
+    """
+
+    @staticmethod
+    def keys(units):
+        return set().union(set(), *[areas for areas, _artifact in units])
+
+    @staticmethod
+    def by_pr(units):
+        return {artifact["number"]: sorted(areas) for areas, artifact in units}
+
+    # -- the headline guard, asserted through compute_ready AND through the real CLI ---------
+    def test_pr_and_source_issue_reserve_the_union_exactly_once(self):
+        # THE titled guard. The pair declares {sparq-core} (PR) and {sparq-hdt} (issue): the unit
+        # must hold BOTH, under ONE artifact, and neither key may be reserved twice.
+        source = iss(100, ["status:in-progress-review", "area:sparq-hdt"])
+        worker = pr(101, ["area:sparq-core"])
+        links = {101: {100}}
+        units = ready.unit_reservations([worker, source], links)
+        self.assertEqual(self.by_pr(units), {101: ["sparq-core", "sparq-hdt"]},
+                         "the pair must reserve the union under the PR, as ONE unit")
+        self.assertEqual(len(units), 1, "the source issue must not reserve a second time")
+        # ...and the union is actually enforced: BOTH crates are held against fresh candidates.
+        board = [worker, source,
+                 iss(200, READY + ["priority:P1", "area:sparq-core"]),
+                 iss(201, READY + ["priority:P1", "area:sparq-hdt"]),
+                 iss(202, READY + ["priority:P1", "area:sparq-geo"])]
+        self.assertEqual(
+            numbers(ready.compute_ready(board, conflict_log=quiet, source_links=links)), [202],
+            "both halves of the unit's union must block, and unrelated crates must not")
+
+    def test_the_pair_is_ONE_occupant_not_two(self):
+        # The dedup itself, stated so that removing `consumed` (letting the source issue reserve
+        # again on its own) reds even though the HELD KEY SET is unchanged by that mutation.
+        source = iss(100, ["status:in-progress-review", "area:sparq-core"])
+        units = ready.unit_reservations([pr(101, ["area:sparq-core"]), source], {101: {100}})
+        self.assertEqual([artifact["number"] for _areas, artifact in units], [101])
+        self.assertEqual(sum(len(areas) for areas, _ in units), 1,
+                         "one unit of work must produce exactly one reservation of sparq-core")
+
+    def test_conflict_attribution_names_the_PR_of_a_paired_unit(self):
+        # Attribution is the one thing dedup DOES change, and it changes it for the better: the
+        # PR is the advanceable artifact (it can merge or close), the source issue is not.
+        board = [iss(100, ["status:in-progress-review", "area:sparq-core"]),
+                 pr(101, ["area:sparq-core"]),
+                 iss(200, READY + ["priority:P1", "area:sparq-core"])]
+        logs = []
+        ready.compute_ready(board, conflict_log=logs.append, source_links={101: {100}})
+        self.assertEqual(logs, ["conflict #200: area sparq-core held by pr#101"])
+
+    # -- the four obligations that make the rule impossible to weaken into a DROP ------------
+    def test_source_issue_broader_than_its_pr_does_not_lose_the_extra_areas(self):
+        # 39/94 live pairs are non-superset. Narrowing the unit to the PR's own set here would
+        # free sparq-hdt and sparq-geo while a worker is mid-flight on them.
+        source = iss(100, ["status:in-progress-review", "area:sparq-hdt", "area:sparq-geo"])
+        links = {101: {100}}
+        self.assertEqual(self.by_pr(ready.unit_reservations([pr(101, ["area:sparq-hdt"]), source],
+                                                            links)),
+                         {101: ["sparq-geo", "sparq-hdt"]})
+        board = [pr(101, ["area:sparq-hdt"]), source,
+                 iss(200, READY + ["priority:P1", "area:sparq-geo"])]
+        self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet,
+                                                     source_links=links)), [],
+                         "an area the ISSUE half alone declares must still be held by the unit")
+
+    def test_source_issue_with_no_area_keeps_the_units_reservation_intact(self):
+        # sparq#4336 / PR #4360: the source issue carried NO `area:` at all. Folding it into the
+        # unit must not shrink what the unit holds — the PR's own key must survive untouched.
+        source = iss(100, ["status:in-progress-review"])
+        links = {101: {100}}
+        self.assertEqual(self.by_pr(ready.unit_reservations([pr(101, ["area:sparq-core"]), source],
+                                                            links)),
+                         {101: ["sparq-core"]})
+        board = [pr(101, ["area:sparq-core"]), source,
+                 iss(200, READY + ["priority:P1", "area:sparq-core"]),
+                 iss(201, READY + ["priority:P1", "area:sparq-hdt"])]
+        self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet,
+                                                     source_links=links)), [201])
+
+    def test_a_units_reservation_is_a_SUPERSET_of_every_members_own(self):
+        # MONOTONICITY — the property that makes under-serialisation structurally impossible,
+        # whatever the two halves declare. Exhaustive over every containment direction, plus the
+        # `{GLOBAL}` member: a half whose own rule yields the serializing partition must keep it.
+        cases = [
+            (["area:sparq-core"], ["area:sparq-core"]),               # identical
+            (["area:sparq-core", "area:sparq-hdt"], ["area:sparq-core"]),   # PR superset
+            (["area:sparq-core"], ["area:sparq-core", "area:sparq-hdt"]),   # issue superset
+            (["area:sparq-core"], ["area:sparq-hdt"]),                # incomparable
+            ([], ["area:sparq-hdt"]),                                 # PR declares nothing
+            (["area:sparq-core"], []),                                # issue declares nothing
+            ([f"area:{ready.GLOBAL}"], ["area:sparq-core"]),          # a GLOBAL-holding half
+            (["area:sparq-core"], [f"area:{ready.GLOBAL}"]),
+        ]
+        for pr_labels, issue_labels in cases:
+            with self.subTest(pr=pr_labels, issue=issue_labels):
+                worker = pr(101, pr_labels)
+                source = iss(100, ["status:in-progress-review"] + issue_labels)
+                units = ready.unit_reservations([worker, source], {101: {100}})
+                held = self.keys(units)
+                for member in (worker, source):
+                    self.assertLessEqual(
+                        ready._own_reservation(member), held,
+                        f"unit dropped a key member #{member['number']} reserves on its own")
+
+    def test_a_GLOBAL_holding_half_still_serializes_the_whole_board(self):
+        # The fail-closed global must survive the fold END-TO-END, not merely in the key set.
+        board = [pr(101, [f"area:{ready.GLOBAL}"]),
+                 iss(100, ["status:in-progress-review", "area:sparq-core"]),
+                 iss(200, READY + ["priority:P1", "area:sparq-geo"])]
+        self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet,
+                                                     source_links={101: {100}})), [],
+                         "a unit holding __global__ must still block every unrelated crate")
+
+    # -- the units that must NOT be folded together -------------------------------------------
+    def test_two_unrelated_units_still_reserve_separately(self):
+        board = [pr(101, ["area:sparq-core"]), iss(100, ["status:in-progress-review",
+                                                         "area:sparq-core"]),
+                 pr(301, ["area:sparq-hdt"]), iss(300, ["status:in-progress-review",
+                                                        "area:sparq-hdt"])]
+        links = {101: {100}, 301: {300}}
+        units = ready.unit_reservations(board, links)
+        self.assertEqual(self.by_pr(units), {101: ["sparq-core"], 301: ["sparq-hdt"]},
+                         "two genuinely distinct units must remain two occupants")
+        # ...and EVERY unit must reach `reserve()`, not just the first. Truncating the occupancy
+        # loop (`unit_reservations(...)[:1]`) is a six-character edit that frees every unit after
+        # the first, so assert the SECOND unit's crate is held too.
+        contenders = [iss(200, READY + ["priority:P1", "area:sparq-core"]),
+                      iss(201, READY + ["priority:P2", "area:sparq-hdt"]),
+                      iss(202, READY + ["priority:P3", "area:sparq-geo"])]
+        self.assertEqual(
+            numbers(ready.compute_ready(board + contenders, conflict_log=quiet,
+                                        source_links=links)), [202],
+            "both units must hold their crate — a truncated occupancy loop frees the second")
+
+    def test_an_issue_with_no_linked_pr_is_unaffected(self):
+        lone = iss(100, ["status:in-progress-review", "area:sparq-core"])
+        other = pr(301, ["area:sparq-hdt"])
+        units = ready.unit_reservations([lone, other], {301: set()})
+        self.assertEqual(sorted(a["number"] for _k, a in units), [100, 301])
+        self.assertEqual(self.keys(units), {"sparq-core", "sparq-hdt"})
+        # and it still blocks its own crate on the frontier
+        board = [lone, iss(200, READY + ["priority:P1", "area:sparq-core"])]
+        self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet,
+                                                     source_links={301: set()})), [])
+
+    def test_a_fork_PR_never_folds_an_issue_into_its_unit(self):
+        # source_issue_links is the ONLY linkage rule; a fork head is attacker-controlled text.
+        fork = {"number": 101, "state": "OPEN", "labels": [], "pull_request": {}, "draft": False,
+                "head": {"ref": "sparq-agent/issue-100-fix", "repo": {"full_name": "attacker/x"}},
+                "body": "Closes #100", "author_association": "NONE"}
+        self.assertEqual(ready.source_issue_links([fork], "sparq-org/sparq"), {})
+
+    # -- the no-op contract the REGISTRY depends on -------------------------------------------
+    def test_unit_reservations_without_links_is_identical_to_the_legacy_loop(self):
+        # dispatch.yml calls `compute_ready(ready_input)` with no source_links. If that call is not
+        # byte-identical to the pre-refactor loop, the two repositories cannot merge in either
+        # order. Reproduce the LEGACY loop here and compare pairs AND their order (attribution is
+        # order-sensitive: `blockers[area][0]` names the first reserver).
+        board = [pr(101, ["area:sparq-core"]),
+                 iss(100, ["status:in-progress-review", "area:sparq-core"]),
+                 iss(102, ["status:in-progress", "area:sparq-hdt"]),
+                 pr(103, ["area:sparq-geo", "needs:user"]),      # parked -> reserves nothing
+                 pr(104, []),                                    # unattributable -> nothing
+                 iss(105, READY + ["priority:P1", "area:sparq-zk"]),
+                 iss(106, ["status:in-progress-review", "review:needs-user", "area:sparq-mpc"])]
+        legacy = []
+        for row in board:
+            if str(row.get("state", "OPEN")).upper() != "OPEN" or not ready.occupies_area(row):
+                continue
+            labels = ready.labels_of(row)
+            if "pull_request" in row or labels & ready.IN_FLIGHT_STATUS:
+                areas = ready._reserving_packages(labels)
+                if areas:
+                    legacy.append((areas, row["number"]))
+        self.assertEqual([(areas, artifact["number"])
+                          for areas, artifact in ready.unit_reservations(board)], legacy)
+        self.assertEqual(legacy, [({"sparq-core"}, 101), ({"sparq-core"}, 100),
+                                  ({"sparq-hdt"}, 102)],
+                         "sanity: the legacy expectation itself must be the live rule, not a stub")
+
+    def test_compute_ready_without_source_links_is_unchanged(self):
+        board = [pr(101, ["area:sparq-core"]),
+                 iss(100, ["status:in-progress-review", "area:sparq-core"]),
+                 iss(200, READY + ["priority:P1", "area:sparq-core"]),
+                 iss(201, READY + ["priority:P2", "area:sparq-hdt"])]
+        logs = []
+        self.assertEqual(numbers(ready.compute_ready(board, conflict_log=logs.append)), [201])
+        self.assertEqual(logs, ["conflict #200: area sparq-core held by pr#101"],
+                         "omitting source_links must leave attribution exactly as it was")
+
+    # -- the CALL SITES, not just the helper ---------------------------------------------------
+    # [OPUS-5] MEASURED, and the reason these three tests are shaped the way they are: the held
+    # KEY SET is invariant under folding, because a unit reserves the union of exactly its members'
+    # own reservations. So NO frontier assertion anywhere can witness `source_links` being dropped
+    # at a call site — a first cut of this suite asserted frontiers and left both CLI legs' mutants
+    # ALIVE. What the fold does change is (a) how many occupants there are and (b) which artifact a
+    # conflict is attributed to. Each leg is therefore pinned on the observable it actually has.
+    @staticmethod
+    def _pair_board():
+        """Live shape: in-review issue #100 on sparq-hdt + its worker PR #101 on sparq-core."""
+        pulls = [dict(worker_pr(101, 100), labels=[{"name": "area:sparq-core"}])]
+        rows = [iss(100, ["status:in-progress-review", "area:sparq-hdt"]),
+                iss(200, READY + ["priority:P1", "area:sparq-core"])]
+        rows += [dict(p, labels=[lb["name"] for lb in p["labels"]]) for p in pulls]
+        return rows, pulls
+
+    def test_the_held_key_set_is_invariant_under_folding(self):
+        # WHY no frontier assertion can guard the fold, asserted rather than asserted-about. A unit
+        # reserves the union of exactly its members' own reservations, so the union OVER UNITS
+        # equals the union OVER MEMBERS: `conflict()` reads only `blockers.keys()`, therefore the
+        # frontier is identical with and without `source_links`. This is what licenses
+        # `diagnose()` not passing it, and it is why the CLI guards pin attribution + unit count.
+        board = [pr(101, ["area:sparq-core"]),
+                 iss(100, ["status:in-progress-review", "area:sparq-hdt"]),
+                 pr(301, []), iss(300, ["status:in-progress-review", "area:sparq-geo"]),
+                 pr(401, ["area:sparq-zk"]), iss(400, ["status:in-progress-review"]),
+                 iss(200, READY + ["priority:P1", "area:sparq-core"]),
+                 iss(201, READY + ["priority:P2", "area:sparq-hdt"]),
+                 iss(202, READY + ["priority:P3", "area:sparq-mpc"])]
+        links = {101: {100}, 301: {300}, 401: {400}}
+        self.assertEqual(self.keys(ready.unit_reservations(board)),
+                         self.keys(ready.unit_reservations(board, links)),
+                         "folding must not add or remove a single held partition key")
+        self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet)),
+                         numbers(ready.compute_ready(board, conflict_log=quiet,
+                                                     source_links=links)))
+        self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet,
+                                                     source_links=links)), [202],
+                         "sanity: the board must actually exercise conflicts, not be all-free")
+
+    def test_diagnose_reports_the_pair_as_ONE_unit(self):
+        # Kills: `diagnose()` dropping `source_links=` from its compute_ready/unit_reservations.
+        board, pulls = self._pair_board()
+        _c, _r, _cands, _frontier, units = ready.diagnose(
+            board, linked={100}, source_links={101: {100}})
+        self.assertEqual([artifact["number"] for _areas, artifact in units], [101])
+        self.assertEqual(sorted(next(iter(a for a, _ in units))), ["sparq-core", "sparq-hdt"])
+
+    def test_the_diagnose_CLI_leg_prints_the_folded_unit_count(self):
+        # Kills: main() --diagnose losing the fold anywhere between diagnose() and the print.
+        board, pulls = self._pair_board()
+        out = TestLocalOrchestratorParity._run_cli(board, pulls, argv=("--diagnose",))
+        self.assertIn("unit occupancy: 1 unit(s), 2 reservation(s) over 2 partition key(s)", out,
+                      "the PR+issue pair must be reported as ONE unit holding TWO keys")
+
+    def test_the_default_CLI_path_attributes_a_conflict_to_the_PR(self):
+        # Kills: main()'s DEFAULT (non---diagnose) leg dropping `source_links=`. That leg's only
+        # observable is the attribution line compute_ready writes to stderr; without the fold the
+        # blocker is reported as `issue#100`, which no one can merge or close.
+        board, pulls = self._pair_board()
+        board = board + [iss(201, READY + ["priority:P1", "area:sparq-hdt"])]
+        _out, err = TestLocalOrchestratorParity._run_cli_streams(board, pulls)
+        self.assertIn("conflict #201: area sparq-hdt held by pr#101", err,
+                      "the default CLI path must fold the unit and attribute to the PR")
+        self.assertNotIn("held by issue#100", err)
+
+
+class TestOrchestratorOccupancyGap(unittest.TestCase):
+    """The consequence of PLAN seeing the ISSUE half of every unit only — and its live precondition.
+
+    [OPUS-5] HISTORY. `dispatch.yml` used to build `readiness_input` from
+    `[issue for issue in snapshot("issues", index) if "pull_request" not in issue]`, so PLAN
+    reserved the ISSUE half of every unit and never the PR half. Registry CLAIM re-derived busy
+    areas from the pulls snapshot and dropped the doomed rows, so they were never double-dispatched
+    — but it dropped them AFTER compute_ready committed the frontier, so each burned a partition
+    with no backfill (the registry's own issue #113 shape).
+
+    [OPUS-5 2026-07-27] THAT IS FIXED, and the fix moved the risk to this side of the seam.
+    Registry #773 (merged 15:54Z) folds every open PR row into PLAN's occupancy — but CONDITIONALLY,
+    on an executable capability probe run against the target repo's own planner, and a planner that
+    fails the probe silently keeps the old issue-only behaviour. VERIFIED against the live PLAN job
+    of registry dispatch run 30283405388 (16:24Z, master 84c1b687, which contains #773 at 58dc61bd),
+    whose runtime output reads:
+
+        sparq-org/sparq: PLAN occupancy carries 118 open pull-request row(s)
+        — reserves PR areas and never dispatches a PR row
+
+    So the gap is no longer a property of dispatch.yml; it is a property of `compute_ready` in THIS
+    repo. `ready.pr_row_occupancy_probe` mirrors the registry's probe so a sparq commit that turns
+    PR-half occupancy back off is caught by sparq's own CI instead of by a warning printed in a
+    repository nobody working here reads.
+    """
+
+    BOARD = (
+        pr(101, ["area:sparq-core"]),                                   # PR half only
+        iss(100, ["status:in-progress-review", "area:sparq-hdt"]),      # issue half only
+    )
+
+    def test_stripping_pr_rows_loses_the_pr_half_of_every_unit(self):
+        pr_aware, issue_only, unheld = ready.occupancy_parity(list(self.BOARD), {101: {100}})
+        self.assertEqual(pr_aware, {"sparq-core", "sparq-hdt"})
+        self.assertEqual(issue_only, {"sparq-hdt"})
+        self.assertEqual(unheld, {"sparq-core"})
+
+    def test_the_gap_is_exactly_what_lets_a_second_worker_into_the_crate(self):
+        # Behavioural, not a set difference: the issue-only view DISPATCHES onto the PR's crate.
+        board = list(self.BOARD) + [iss(200, READY + ["priority:P1", "area:sparq-core"])]
+        issue_only = [row for row in board if "pull_request" not in row]
+        self.assertEqual(numbers(ready.compute_ready(issue_only, conflict_log=quiet)), [200],
+                         "sanity: this is what the orchestrator does today")
+        self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet,
+                                                     source_links={101: {100}})), [],
+                         "the PR-aware unit view must hold #200 back")
+
+    def test_parity_measurement_is_empty_when_nothing_is_stripped(self):
+        # No false alarm: an issue-only snapshot with no PR-held keys reports no gap.
+        board = [iss(100, ["status:in-progress-review", "area:sparq-hdt"])]
+        _pr_aware, _issue_only, unheld = ready.occupancy_parity(board, {})
+        self.assertEqual(unheld, set())
+
+    # -- the probe: the live precondition for PLAN reserving our PR rows ---------------------
+
+    @staticmethod
+    def _engine(kind):
+        """A planner broken in exactly ONE of the ways the probe must catch."""
+        def compute(rows, *_args, **_kwargs):
+            if kind == "raises":
+                raise RuntimeError("hostile planner")
+            if kind == "ignores_pr_areas":
+                # Never selects a PR row (obligation 1 holds) but reserves nothing for it, so the
+                # rival sails through and the whole fold is an expensive no-op.
+                survivors = [row for row in rows if "pull_request" not in row]
+                return ready.compute_ready(survivors, conflict_log=quiet)
+            if kind == "dispatches_pr":
+                return list(rows)                    # treats a PR row as a dispatch candidate
+            raise AssertionError(f"unknown engine kind {kind!r}")
+        return compute
+
+    def test_the_live_engine_satisfies_the_registrys_pr_row_probe(self):
+        # THE contract. If this goes red, dispatch.yml stops folding sparq's PR rows into PLAN's
+        # occupancy and every open PR's crate reads FREE to the orchestrator again.
+        ok, why = ready.pr_row_occupancy_probe()
+        self.assertTrue(ok, f"registry would strip our PR rows: {why}")
+        self.assertEqual(why, "reserves PR areas and never dispatches a PR row")
+
+    def test_the_probe_rejects_an_engine_that_dispatches_a_pull_request_row(self):
+        ok, why = ready.pr_row_occupancy_probe(self._engine("dispatches_pr"))
+        self.assertFalse(ok)
+        self.assertIn("DISPATCHES", why)
+
+    def test_the_probe_rejects_an_engine_that_ignores_a_pull_requests_area(self):
+        # Passes the SAFETY obligation (never selects the PR) while making the fold a no-op.
+        ok, why = ready.pr_row_occupancy_probe(self._engine("ignores_pr_areas"))
+        self.assertFalse(ok)
+        self.assertIn("does not RESERVE", why)
+
+    def test_the_probe_is_fail_closed_on_an_engine_that_raises(self):
+        ok, why = ready.pr_row_occupancy_probe(self._engine("raises"))
+        self.assertFalse(ok)
+        self.assertIn("probe raised", why)
+
+    def test_the_probe_calls_the_engine_exactly_as_the_orchestrator_does(self):
+        # dispatch.yml calls `planner.compute_ready([...])` positionally with NO keywords. A probe
+        # that passed `conflict_log=` would stay green through a signature change that breaks the
+        # orchestrator's real call.
+        seen = []
+
+        def recorder(rows, *args, **kwargs):
+            seen.append((args, dict(kwargs)))
+            return ready.compute_ready(rows, conflict_log=quiet)
+
+        ready.pr_row_occupancy_probe(recorder)
+        self.assertEqual(seen, [((), {}), ((), {})], "probe must not pass extra arguments")
+
+    def test_the_registry_probes_the_engine_this_module_defines(self):
+        # dispatch.yml loads scripts/dispatch-plan.py and probes ITS `compute_ready`. The local
+        # mirror only characterises the orchestrator while dispatch-plan RE-EXPORTS this engine
+        # rather than wrapping it — a wrapper could satisfy the probe here and fail it there.
+        self.assertIs(plan.compute_ready, plan._ready.compute_ready,
+                      "dispatch-plan must re-export the readiness engine, not redefine it")
+        self.assertTrue(ready.pr_row_occupancy_probe(plan.compute_ready)[0],
+                        "the object the registry actually probes must pass the probe")
+
+    # -- the warning is gated on the probe, not on `unheld` -----------------------------------
+
+    GAP_BOARD = [iss(100, ["status:in-progress-review", "area:sparq-hdt"]),
+                 iss(200, READY + ["priority:P1", "area:sparq-geo"])]
+    GAP_PULLS = [dict(worker_pr(101, 100), labels=[{"name": "area:sparq-core"}])]
+
+    def _diagnose(self):
+        prs = [dict(p, labels=[lb["name"] for lb in p["labels"]]) for p in self.GAP_PULLS]
+        return TestLocalOrchestratorParity._run_cli(
+            self.GAP_BOARD + prs, self.GAP_PULLS, argv=("--diagnose",))
+
+    def test_diagnose_reports_the_gap_loudly_when_the_probe_FAILS(self):
+        with mock.patch.object(ready, "pr_row_occupancy_probe",
+                               lambda engine=None: (False, "planner DISPATCHES a pull-request "
+                                                           "row as if it were an issue")):
+            out = self._diagnose()
+        self.assertIn("ORCHESTRATOR OCCUPANCY GAP", out)
+        self.assertIn("sparq-core", out.split("ORCHESTRATOR OCCUPANCY GAP")[1])
+
+    def test_diagnose_does_NOT_warn_while_the_probe_PASSES(self):
+        # The stale-alarm fix. `unheld` is non-empty on this board (the PR holds sparq-core and its
+        # source issue does not), so an `if unheld:` warning fires here — forever, on every healthy
+        # board, since registry #773. Deleting the probe gate re-reds this test.
+        self.assertTrue(ready.pr_row_occupancy_probe()[0], "precondition: probe passes")
+        _pr_aware, _issue_only, unheld = ready.occupancy_parity(
+            [dict(p, labels=[lb["name"] for lb in p["labels"]], state="OPEN",
+                  pull_request={}, open_blockers=0) for p in self.GAP_PULLS] + self.GAP_BOARD,
+            {101: {100}})
+        self.assertIn("sparq-core", unheld, "precondition: the old trigger is armed on this board")
+        out = self._diagnose()
+        self.assertNotIn("ORCHESTRATOR OCCUPANCY GAP", out)
+
+    def test_diagnose_states_the_healthy_verdict_rather_than_going_silent(self):
+        out = self._diagnose()
+        self.assertIn("orchestrator occupancy: dispatch.yml RESERVES", out)
+        self.assertIn("reserves PR areas and never dispatches a PR row", out)
 
 
 class TestLinkedIssueDetection(unittest.TestCase):
@@ -373,7 +1066,7 @@ class TestDiagnoseTaxonomy(unittest.TestCase):
             pr(70, []),
             iss(6, READY + ["priority:P1", "area:d"], state="CLOSED"),
         ]
-        counts, roleless, cands, frontier = ready.diagnose(board, linked={5})
+        counts, roleless, cands, frontier, _units = ready.diagnose(board, linked={5})
         self.assertEqual(sum(counts.values()), 5, "one bucket per OPEN issue, PRs/closed excluded")
         self.assertEqual(counts["ENUMERABLE"], 1)
         self.assertEqual(counts["covered by an open linked PR"], 1)
