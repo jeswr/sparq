@@ -23,6 +23,8 @@ validated `Blocked-by: #NN` body markers — see `open_blocker_count`. Pure `com
 unit-tested; the CLI wraps it over the paginated fetch.
 """
 import argparse
+import contextlib
+import io
 import json
 import os
 import re
@@ -909,14 +911,14 @@ def occupancy_parity(issues, source_links=None):
     """The PR-HALF-STRIPPED occupancy divergence, as a re-runnable measurement.
 
     [OPUS-5] `dispatchable_view` claims local/orchestrator parity on the linked/in-flight axis, and
-    on the CANDIDATE axis it holds. On the OCCUPANCY axis it does not: the registry's dispatch.yml
-    builds its readiness input as `[issue for issue in snapshot("issues") if "pull_request" not in
-    issue]`, so PLAN never sees a PR row and reserves the ISSUE half of every unit only. MEASURED on
-    the live snapshot (2026-07-27): the local CLI holds 49 partition keys and emits a frontier of 3;
-    the orchestrator holds 37 and emits 9 — and 7 of those 9 rows land in a key an open PR already
-    holds. They are not double-dispatched (registry CLAIM re-derives busy areas from the pulls
-    snapshot and drops them), but they are dropped AFTER `compute_ready` committed the frontier, so
-    each one burned a partition with no backfill — the registry's own issue #113 shape.
+    on the CANDIDATE axis it holds. This measures the OCCUPANCY axis: how much of the held key set
+    is contributed by the PR half alone, i.e. exactly what PLAN loses if it is handed the ISSUE
+    half only.
+
+    This is a SIZE, not a verdict. Whether the registry actually strips is decided by
+    `pr_row_occupancy_probe()` — see there, and do NOT reintroduce an unconditional warning off
+    this number: as of registry #773 the orchestrator does NOT strip, so `unheld` is non-empty on
+    every healthy board and a warning keyed on it can never clear.
 
     Returns (pr_aware_keys, issue_only_keys, unheld) where `unheld` is the set of keys the
     issue-only view fails to hold. Pure, so `--diagnose` and the test suite read the same number.
@@ -930,6 +932,62 @@ def occupancy_parity(issues, source_links=None):
     pr_aware = keys(issues, source_links)
     stripped = keys(issue_only, source_links)
     return pr_aware, stripped, pr_aware - stripped
+
+
+# The probe id-space the registry uses. Kept as constants so the mirror below and the tests that
+# characterise it cannot drift apart by a typo'd literal.
+_PROBE_LABELS = ("status:ready", "priority:P0", "role:impl", "area:__pr_probe__")
+_PROBE_PR, _PROBE_RIVAL = 999000001, 999000002
+
+
+def pr_row_occupancy_probe(engine=None):
+    """Does THIS repo's readiness engine still earn PR rows in the orchestrator's occupancy input?
+
+    [OPUS-5 2026-07-27] A VERBATIM mirror of `pr_row_aware()` in the registry's
+    `.github/workflows/dispatch.yml` (jeswr/agent-account-registry, PR #773, merged 15:54Z). That
+    workflow does not strip PR rows any more — it folds every open PR into PLAN's occupancy input
+    — but ONLY IF the target repo's planner passes this probe, and a planner that fails it keeps
+    exactly the old issue-only behaviour. So "does the orchestrator see our PR rows?" is not a
+    property of dispatch.yml at all: it is a property of the function right here in this file, and
+    it is the ONLY thing that can silently turn PR-half occupancy back off.
+
+    Why the mirror lives on THIS side of the seam: when the probe fails, the registry says so in
+    the REGISTRY's own log, on a repo nobody working in sparq reads. The failure would be caused
+    by a sparq commit, land in sparq's CI green, and surface as an unexplained double-dispatch.
+    Running the same probe locally puts the alarm where the cause is.
+
+    Called EXACTLY as the registry calls it — two positional-only invocations of `compute_ready`
+    with no keyword arguments — so a signature change that breaks the orchestrator's call breaks
+    this one too. Two obligations, both executed:
+
+      1. SAFETY — a PR row is never returned as a dispatch candidate (else PLAN emits a plan row
+         whose `number` is a pull request and launches an impl worker against it).
+      2. EFFECT — a PR row really RESERVES the `area:` keys it declares, so an otherwise-ready
+         issue on that key is held. An engine that merely ignores PR rows passes obligation 1
+         while making the whole fold an expensive no-op.
+
+    Fail-closed: an engine that raises is one we cannot characterise, so it does not pass.
+    Returns `(ok, why)`; `why` is the registry's own wording, so the two logs read alike.
+    """
+    compute = compute_ready if engine is None else engine
+    pull = {"number": _PROBE_PR, "state": "OPEN", "labels": list(_PROBE_LABELS),
+            "open_blockers": 0, "pull_request": {}}
+    rival = {"number": _PROBE_RIVAL, "state": "OPEN", "labels": list(_PROBE_LABELS),
+             "open_blockers": 0}
+    try:
+        # The engine's default `conflict_log` writes attribution to stderr; the registry tolerates
+        # that noise, but on `--diagnose` stderr is otherwise clean, so swallow only the probe's
+        # own two calls. The CALL ITSELF stays argument-identical to the orchestrator's.
+        with contextlib.redirect_stderr(io.StringIO()):
+            alone = [row.get("number") for row in compute([pull])]
+            paired = [row.get("number") for row in compute([pull, rival])]
+    except Exception as exc:                       # noqa: BLE001 — characterising a hostile target
+        return False, f"probe raised {type(exc).__name__}"
+    if alone or _PROBE_PR in paired:
+        return False, "planner DISPATCHES a pull-request row as if it were an issue"
+    if paired:
+        return False, "planner does not RESERVE a pull request's declared area"
+    return True, "reserves PR areas and never dispatches a PR row"
 
 
 def diagnose(issues, linked=(), source_links=None):
@@ -1003,12 +1061,26 @@ def main():
         print(f"unit occupancy: {len(units)} unit(s), "
               f"{sum(len(a) for a, _ in units)} reservation(s) over "
               f"{len(set().union(set(), *[a for a, _ in units]))} partition key(s)")
-        _pr_aware, issue_only, unheld = occupancy_parity(visible, source_links)
-        if unheld:
-            print(f"\n::warning:: ORCHESTRATOR OCCUPANCY GAP: dispatch.yml strips PR rows from its "
-                  f"readiness input, so PLAN holds {len(issue_only)} of {len(_pr_aware)} partition "
-                  f"key(s). {len(unheld)} key(s) held here by an open PR are FREE there: "
+        # [OPUS-5 2026-07-27] Gated on the PROBE, not on `unheld`. `unheld` is non-empty whenever
+        # any open PR holds a key its source issue does not — i.e. on every healthy board — so the
+        # old unconditional warning could never clear once registry #773 landed, and an alarm that
+        # cannot clear trains its readers to skip it. The probe is the real precondition: it is
+        # what dispatch.yml itself branches on, so this fires when, and only when, the gap is back.
+        # Reported on EVERY diagnose including the healthy one — a check that goes silent when it
+        # passes is a check nobody notices has stopped running.
+        pr_aware_ok, probe_why = pr_row_occupancy_probe()
+        pr_aware_keys, issue_only, unheld = occupancy_parity(visible, source_links)
+        if not pr_aware_ok:
+            print(f"\n::warning:: ORCHESTRATOR OCCUPANCY GAP: this repo's readiness engine FAILS "
+                  f"the registry's pull-request-awareness probe ({probe_why}), so dispatch.yml "
+                  f"falls back to stripping PR rows from its readiness input and PLAN holds "
+                  f"{len(issue_only)} of {len(pr_aware_keys)} partition key(s). {len(unheld)} "
+                  f"key(s) held here by an open PR are FREE there: "
                   f"{', '.join(sorted(unheld)[:20])}")
+        else:
+            print(f"\norchestrator occupancy: dispatch.yml RESERVES this repo's open PR rows "
+                  f"({probe_why}); {len(unheld)} of {len(pr_aware_keys)} held key(s) come from a "
+                  f"PR half and would be released if that regressed")
         if roleless:
             print(f"\n::warning:: {len(roleless)} attested issue(s) carry NO role:* label and are "
                   f"INVISIBLE to dispatch: {', '.join('#%d' % n for n in roleless[:20])}")

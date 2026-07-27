@@ -36,6 +36,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = REPO_ROOT / "scripts"
@@ -874,20 +875,29 @@ class TestUnitReservation(unittest.TestCase):
 
 
 class TestOrchestratorOccupancyGap(unittest.TestCase):
-    """The measured consequence of dispatch.yml stripping PR rows from its readiness input.
+    """The consequence of PLAN seeing the ISSUE half of every unit only — and its live precondition.
 
-    [OPUS-5] `dispatch.yml` builds `readiness_input` from
+    [OPUS-5] HISTORY. `dispatch.yml` used to build `readiness_input` from
     `[issue for issue in snapshot("issues", index) if "pull_request" not in issue]`, so PLAN
-    reserves the ISSUE half of every unit and never the PR half. MEASURED on the live snapshot
-    (2026-07-27): the PR-aware view holds 49 partition keys and emits a frontier of 3; the
-    issue-only view holds 37 and emits 9 — and 7 of those 9 rows land in a key an open PR already
-    holds. Registry CLAIM re-derives busy areas from the pulls snapshot and drops them, so they are
-    not double-dispatched; but they are dropped AFTER compute_ready committed the frontier, so each
-    burned a partition with no backfill (the registry's own issue #113 shape).
+    reserved the ISSUE half of every unit and never the PR half. Registry CLAIM re-derived busy
+    areas from the pulls snapshot and dropped the doomed rows, so they were never double-dispatched
+    — but it dropped them AFTER compute_ready committed the frontier, so each burned a partition
+    with no backfill (the registry's own issue #113 shape).
 
-    sparq cannot close that from here — PLAN's input is built inside dispatch.yml, which the
-    registry owns. What sparq owns is the DEFINITION (`unit_reservations`) and the measurement, so
-    the gap is loud on every local run instead of being re-derived by hand each time.
+    [OPUS-5 2026-07-27] THAT IS FIXED, and the fix moved the risk to this side of the seam.
+    Registry #773 (merged 15:54Z) folds every open PR row into PLAN's occupancy — but CONDITIONALLY,
+    on an executable capability probe run against the target repo's own planner, and a planner that
+    fails the probe silently keeps the old issue-only behaviour. VERIFIED against the live PLAN job
+    of registry dispatch run 30283405388 (16:24Z, master 84c1b687, which contains #773 at 58dc61bd),
+    whose runtime output reads:
+
+        sparq-org/sparq: PLAN occupancy carries 118 open pull-request row(s)
+        — reserves PR areas and never dispatches a PR row
+
+    So the gap is no longer a property of dispatch.yml; it is a property of `compute_ready` in THIS
+    repo. `ready.pr_row_occupancy_probe` mirrors the registry's probe so a sparq commit that turns
+    PR-half occupancy back off is caught by sparq's own CI instead of by a warning printed in a
+    repository nobody working here reads.
     """
 
     BOARD = (
@@ -917,14 +927,105 @@ class TestOrchestratorOccupancyGap(unittest.TestCase):
         _pr_aware, _issue_only, unheld = ready.occupancy_parity(board, {})
         self.assertEqual(unheld, set())
 
-    def test_diagnose_reports_the_gap_loudly(self):
-        board = [iss(100, ["status:in-progress-review", "area:sparq-hdt"]),
+    # -- the probe: the live precondition for PLAN reserving our PR rows ---------------------
+
+    @staticmethod
+    def _engine(kind):
+        """A planner broken in exactly ONE of the ways the probe must catch."""
+        def compute(rows, *_args, **_kwargs):
+            if kind == "raises":
+                raise RuntimeError("hostile planner")
+            if kind == "ignores_pr_areas":
+                # Never selects a PR row (obligation 1 holds) but reserves nothing for it, so the
+                # rival sails through and the whole fold is an expensive no-op.
+                survivors = [row for row in rows if "pull_request" not in row]
+                return ready.compute_ready(survivors, conflict_log=quiet)
+            if kind == "dispatches_pr":
+                return list(rows)                    # treats a PR row as a dispatch candidate
+            raise AssertionError(f"unknown engine kind {kind!r}")
+        return compute
+
+    def test_the_live_engine_satisfies_the_registrys_pr_row_probe(self):
+        # THE contract. If this goes red, dispatch.yml stops folding sparq's PR rows into PLAN's
+        # occupancy and every open PR's crate reads FREE to the orchestrator again.
+        ok, why = ready.pr_row_occupancy_probe()
+        self.assertTrue(ok, f"registry would strip our PR rows: {why}")
+        self.assertEqual(why, "reserves PR areas and never dispatches a PR row")
+
+    def test_the_probe_rejects_an_engine_that_dispatches_a_pull_request_row(self):
+        ok, why = ready.pr_row_occupancy_probe(self._engine("dispatches_pr"))
+        self.assertFalse(ok)
+        self.assertIn("DISPATCHES", why)
+
+    def test_the_probe_rejects_an_engine_that_ignores_a_pull_requests_area(self):
+        # Passes the SAFETY obligation (never selects the PR) while making the fold a no-op.
+        ok, why = ready.pr_row_occupancy_probe(self._engine("ignores_pr_areas"))
+        self.assertFalse(ok)
+        self.assertIn("does not RESERVE", why)
+
+    def test_the_probe_is_fail_closed_on_an_engine_that_raises(self):
+        ok, why = ready.pr_row_occupancy_probe(self._engine("raises"))
+        self.assertFalse(ok)
+        self.assertIn("probe raised", why)
+
+    def test_the_probe_calls_the_engine_exactly_as_the_orchestrator_does(self):
+        # dispatch.yml calls `planner.compute_ready([...])` positionally with NO keywords. A probe
+        # that passed `conflict_log=` would stay green through a signature change that breaks the
+        # orchestrator's real call.
+        seen = []
+
+        def recorder(rows, *args, **kwargs):
+            seen.append((args, dict(kwargs)))
+            return ready.compute_ready(rows, conflict_log=quiet)
+
+        ready.pr_row_occupancy_probe(recorder)
+        self.assertEqual(seen, [((), {}), ((), {})], "probe must not pass extra arguments")
+
+    def test_the_registry_probes_the_engine_this_module_defines(self):
+        # dispatch.yml loads scripts/dispatch-plan.py and probes ITS `compute_ready`. The local
+        # mirror only characterises the orchestrator while dispatch-plan RE-EXPORTS this engine
+        # rather than wrapping it — a wrapper could satisfy the probe here and fail it there.
+        self.assertIs(plan.compute_ready, plan._ready.compute_ready,
+                      "dispatch-plan must re-export the readiness engine, not redefine it")
+        self.assertTrue(ready.pr_row_occupancy_probe(plan.compute_ready)[0],
+                        "the object the registry actually probes must pass the probe")
+
+    # -- the warning is gated on the probe, not on `unheld` -----------------------------------
+
+    GAP_BOARD = [iss(100, ["status:in-progress-review", "area:sparq-hdt"]),
                  iss(200, READY + ["priority:P1", "area:sparq-geo"])]
-        pulls = [dict(worker_pr(101, 100), labels=[{"name": "area:sparq-core"}])]
-        prs = [dict(p, labels=[lb["name"] for lb in p["labels"]]) for p in pulls]
-        out = TestLocalOrchestratorParity._run_cli(board + prs, pulls, argv=("--diagnose",))
+    GAP_PULLS = [dict(worker_pr(101, 100), labels=[{"name": "area:sparq-core"}])]
+
+    def _diagnose(self):
+        prs = [dict(p, labels=[lb["name"] for lb in p["labels"]]) for p in self.GAP_PULLS]
+        return TestLocalOrchestratorParity._run_cli(
+            self.GAP_BOARD + prs, self.GAP_PULLS, argv=("--diagnose",))
+
+    def test_diagnose_reports_the_gap_loudly_when_the_probe_FAILS(self):
+        with mock.patch.object(ready, "pr_row_occupancy_probe",
+                               lambda engine=None: (False, "planner DISPATCHES a pull-request "
+                                                           "row as if it were an issue")):
+            out = self._diagnose()
         self.assertIn("ORCHESTRATOR OCCUPANCY GAP", out)
         self.assertIn("sparq-core", out.split("ORCHESTRATOR OCCUPANCY GAP")[1])
+
+    def test_diagnose_does_NOT_warn_while_the_probe_PASSES(self):
+        # The stale-alarm fix. `unheld` is non-empty on this board (the PR holds sparq-core and its
+        # source issue does not), so an `if unheld:` warning fires here — forever, on every healthy
+        # board, since registry #773. Deleting the probe gate re-reds this test.
+        self.assertTrue(ready.pr_row_occupancy_probe()[0], "precondition: probe passes")
+        _pr_aware, _issue_only, unheld = ready.occupancy_parity(
+            [dict(p, labels=[lb["name"] for lb in p["labels"]], state="OPEN",
+                  pull_request={}, open_blockers=0) for p in self.GAP_PULLS] + self.GAP_BOARD,
+            {101: {100}})
+        self.assertIn("sparq-core", unheld, "precondition: the old trigger is armed on this board")
+        out = self._diagnose()
+        self.assertNotIn("ORCHESTRATOR OCCUPANCY GAP", out)
+
+    def test_diagnose_states_the_healthy_verdict_rather_than_going_silent(self):
+        out = self._diagnose()
+        self.assertIn("orchestrator occupancy: dispatch.yml RESERVES", out)
+        self.assertIn("reserves PR areas and never dispatches a PR row", out)
 
 
 class TestLinkedIssueDetection(unittest.TestCase):
