@@ -52,8 +52,21 @@
 #   at `searchable_test_text` below, and it deliberately EXCLUDES the symbol's own
 #   definition and every ordinary call site — including ones in the same file as a
 #   test module. This is the STATICALLY decidable slice of GUARD-NOT-PINNED.
-#   MEASURED on the current tree: 42 of 191 guard-shaped surface symbols are named
+#   MEASURED on the current tree: 39 of 191 guard-shaped surface symbols are named
 #   by no test text. The check is NOT wired into CI; it runs when an author runs it.
+#
+#   ITS PRECISION IS ~74%, NOT ~100% — stated because an earlier version of this
+#   header claimed one false positive and that was wrong (see TEST_PATH_HINTS).
+#   Re-measured by deleting each firing symbol and running its script's own gating
+#   `--self-test`: 10 of the 31 Python firings red, i.e. they ARE pinned. Every one
+#   of the 10 is the SAME shape — the self-test calls a top-level entry point which
+#   calls the guard through ordinary production code, so no test TEXT names it.
+#   That residue is not fixed here on purpose: closing it needs a call-graph
+#   over-approximation ("anything reachable from a test region counts"), which
+#   would make a guard reached only via `main()` read as tested. That is the
+#   fail-open direction, and this check exists to catch fail-open. A firing is
+#   therefore an OBLIGATION TO LOOK, not a proof of absence. The 39 current
+#   firings are filed as bead sq-sz0wh, which carries the per-symbol triage.
 #
 # NOT MECHANICAL, and this script does not pretend otherwise: the other slice of
 # GUARD-NOT-PINNED (a test EXISTS but cannot discriminate — it asserts a bound, a
@@ -120,36 +133,37 @@ PY_GUARD_RE = re.compile(
 RUST_SRC_RE = re.compile(r"^crates/[^/]+/src/.*\.rs$")
 PY_SCRIPT_RE = re.compile(r"^scripts/[^/]*\.py$")
 
-# Where a test that "names the guard" is allowed to live, decided from the PATH
-# alone. These four are whole-file test hosts; nothing else is admitted on its
-# path.
+# Whole-file test hosts, decided from the PATH alone. Each is a target that a
+# test runner BUILDS, so deleting an item it names breaks that build:
+# `crates/*/tests` + `scripts/tests` (run outright), `benches` and `examples`
+# (built by `cargo test`), `fuzz` (built by `cargo fuzz`).
 #
 # CORRECTION — the sentence that used to stand here was false, and it was
-# load-bearing, so it is quoted rather than quietly deleted:
+# load-bearing (it was the stated evidence that this tuple is COMPLETE), so it
+# is quoted rather than quietly deleted:
 #
 #   "`/fuzz/` is here on MEASURED evidence: it was the ONE false positive among
 #    the 39 distinct symbols this check reports on the current tree"
 #
-# The `/fuzz/` half is true (`sparq-shacl::validate_graph` is exercised only by
+# The `/fuzz/` half is true: `sparq-shacl::validate_graph` is exercised only by
 # fuzz/fuzz_targets/validate_shacl.rs, which stops compiling if the function is
-# deleted, i.e. it is a test by this check's own definition). "the ONE false
-# positive" was not. Deleting each of the then-32 Python firings and running that
-# script's own gating `--self-test` reds 10 of them; an 11th, Rust, was
-# `sparq-mpc::check_bounded_path`, whose 14 `#[test]` fns live in
-# `hidden_path/planner/tests.rs`. That last one was not a limit of static
-# analysis but a HOLE IN THIS RESOLVER, and it is now fixed below — see
-# `rust_cfg_test_mod_decls`. The honest current numbers, and the residue that
-# remains, are stated in the header block above.
+# deleted, i.e. it is a test by this check's own definition. "the ONE false
+# positive" was not true, and the tuple was not complete. Re-measured by deleting
+# each Python firing and running that script's own gating `--self-test`:
+# 10 of 31 red. Two more were Rust: `sparq-mpc::check_bounded_path` (14 `#[test]`
+# fns in `hidden_path/planner/tests.rs`) and `sparq-shacl::validate_with_model`
+# (two `crates/sparq-shacl/examples/*.rs`).
 #
-# A path hint is the WEAKEST way to decide this and it is deliberately not
-# extended further: the two real misses this round were both fixed by modelling
-# the language's own structure (Rust `mod` resolution, Python's parser) instead
-# of adding a fifth substring.
+# Only ONE of those three mechanisms was a missing path hint (`/examples/`, added
+# here). The other two were holes in the resolver itself and are fixed as such —
+# `#[cfg(test)] mod X;` resolution below, and `python_test_regions` reading the
+# real parse tree. A fifth substring would not have reached either of them.
 TEST_PATH_HINTS = (
     "/tests/",
     "scripts/tests/",
     "/benches/",
     "/fuzz/",
+    "/examples/",
 )
 TEST_NAME_RE = re.compile(r"(^|/)(test_[^/]*\.py|[^/]*_test\.py|[^/]*\.rs)$")
 

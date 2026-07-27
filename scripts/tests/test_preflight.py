@@ -394,6 +394,20 @@ class ADefiningFileIsNotItsOwnTest(unittest.TestCase):
                     "fuzz_target!(|d: &[u8]| { let _ = sparq_x::validate_envelope(); });\n")
             self.assertEqual(pf.check_guard_untested(ADDED, t.root), [])
 
+    def test_an_example_naming_the_guard_satisfies_it(self) -> None:
+        # MEASURED false positive, round 3: `sparq-shacl::validate_with_model` is
+        # named by two `crates/sparq-shacl/examples/*.rs` and by no test. `cargo
+        # test` BUILDS examples, so deleting the function fails `cargo test` —
+        # the identical argument already accepted for /fuzz/ and /benches/, and
+        # strictly stronger (fuzz targets are a separate workspace that `cargo
+        # test` does not build). Kills: dropping "/examples/" from
+        # TEST_PATH_HINTS.
+        with tempfile.TemporaryDirectory() as td:
+            t = _Tree(td)
+            t.write("crates/sparq-x/examples/demo.rs",
+                    "fn main() { sparq_x::validate_envelope(); }\n")
+            self.assertEqual(pf.check_guard_untested(ADDED, t.root), [])
+
     def test_doc_PROSE_naming_the_guard_does_not_satisfy_it(self) -> None:
         # Only the fenced code counts. Prose is documentation, not a test — and
         # accepting it would let a diff test its guard by describing it.
