@@ -550,12 +550,15 @@ class PythonTestRegionsComeFromTheParser(unittest.TestCase):
     `python_test_regions` used to take the header line plus every following line
     that was blank or began with a space, tab or `)`. That is not a Python block,
     and it silently cut two self-tests short at the first column-0 line inside the
-    body. Both shapes are in this tree today, and both produced firings for
-    symbols their own `--self-test` names:
+    body. Both shapes are in this tree today:
 
-      * a `#` comment at column 0 inside a body (scripts/export-kb-dump.py);
+      * a `#` comment at column 0 inside a body (scripts/export-kb-dump.py) —
+        this one DID produce a firing, `run_leak_check`, for a symbol its own
+        `--self-test` names 4 lines past the cut;
       * column-0 content inside a triple-quoted fixture
-        (scripts/check-spec-normative-status.py).
+        (scripts/check-spec-normative-status.py) — no symbol in that file fires
+        either way. Found by differencing the heuristic against `ast` across
+        every `scripts/*.py`, not by a false positive.
 
     Two holes in one heuristic is the design being wrong, so the heuristic is
     gone and `ast` decides the extent. These tests red on the heuristic.

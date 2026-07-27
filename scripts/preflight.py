@@ -433,11 +433,12 @@ def rust_cfg_test_spans(masked: str) -> list[tuple[int, int]]:
 # ---------------------------------------------------------------------------
 # `#[cfg(test)] mod X;` — the test body lives in ANOTHER FILE.  [OPUS-5]
 # ---------------------------------------------------------------------------
-# Round-3 blocking finding. A bodyless `mod X;` under a test cfg is the SECOND
-# most common way this repo writes Rust unit tests, and the resolver could not
-# see it at all: the declaring attribute is in the PARENT file, so `X.rs` itself
-# contains no `#[cfg(test)]` and contributed zero test text. Measured: 14 such
-# files in the tree, 14 of 14 invisible, which is what made
+# Round-3 blocking finding. A bodyless `mod X;` under a test cfg is a MINORITY
+# form here — counted: 611 `crates/*/tests/*.rs` integration files, 421 src files
+# with an in-file `#[cfg(test)]`, and 14 of these — but the resolver could not see
+# it at all, so all 14 contributed nothing while the other two forms worked. The
+# declaring attribute is in the PARENT file, so `X.rs` itself contains no
+# `#[cfg(test)]`. Measured: 14 such files, 14 of 14 invisible, which is what made
 # `sparq-mpc::check_bounded_path` — called by 14 `#[test]` fns in
 # `hidden_path/planner/tests.rs` — read as "named by no test".
 #
