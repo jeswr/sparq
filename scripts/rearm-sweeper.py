@@ -1311,10 +1311,17 @@ class StuckArmSweeper:
         gh_read: Callable[[list[str]], str] | None = None,
         log: Callable[[str], None] = print,
         now: Callable[[], int] = lambda: int(time.time()),
+        dry_run: bool = False,
     ) -> None:
         self.repo = repo
         self.default_branch = default_branch
         self.limits = limits or StuckLimits()
+        # OBSERVE-ONLY. Exists so the census can be taken against the live repository
+        # before any remediation is enabled, and so an operator can answer "what would this
+        # tick do" without doing it. The live workflow step MUST NOT pass it — pinned by
+        # test_arm_capability_wiring.py::TestStuckArmWiring, because a sweep permanently
+        # stuck in dry-run is a lane that reports beautifully and repairs nothing.
+        self.dry_run = dry_run
         self.gh = gh
         self.gh_read = gh_read if gh_read is not None else gh
         self.log = log
@@ -1519,6 +1526,11 @@ class StuckArmSweeper:
 
     def apply(self, pull: ArmedPull, klass: str, run_id: int | None, detail: str) -> None:
         action = CLASS_ACTIONS[klass]
+        if self.dry_run:
+            self.log(
+                f"[{PROGRAM}] stuck-arm PR #{pull.number}: DRY-RUN would {action} ({detail})"
+            )
+            return
         if action == ACTION_PARK:
             self.park(pull, klass, detail)
         elif action == ACTION_ROUTE_FIX:
@@ -2204,6 +2216,39 @@ def stuck_self_test() -> None:
     assert sum(sweeper.counts.values()) == 3, sweeper.counts
     assert sum("DEFERRED" in line for line in messages) == 2, messages
 
+    # A NO-ACTION CLASS MUST NOT CONSUME THE ACTION BUDGET. Without the early return in
+    # `run`, `apply` is still a no-op for ACTION_NONE — so the mutation surface looks
+    # identical and only the BUDGET tells the two apart. A tick full of queued/pending PRs
+    # would silently starve the one PR that actually needed repairing.
+    starved = {70: live_pr(70, queued=True, updated=old, armed=old),
+               71: live_pr(71, queued=True, updated=old, armed=old),
+               72: live_pr(72, labels=("review:pass",), updated=old, armed=old)}
+    fake, messages, errors, sweeper = sweep(
+        starved, [check_run("gate", "failure")],
+        limits_=StuckLimits(grace_seconds=1200, stale_seconds=21600, max_actions=1),
+        now_=clock,
+    )
+    assert sweeper.counts == {"queued": 2, "gate-failed": 1}, sweeper.counts
+    assert sweeper.actions == 1, sweeper.actions
+    assert sweeper.deferred == 0, (
+        "two no-action PRs ahead of the actionable one must not have been 'deferred' — "
+        "that would mean they consumed the per-tick budget"
+    )
+    assert len(fake.mutations("pr", "merge")) == 1, fake.calls
+    assert "72" in fake.mutations("pr", "merge")[0], (
+        "the budget must have been spent on the ACTIONABLE PR, not on a queued one"
+    )
+
+    # A cancelled gate with NO re-requestable run id must SKIP, not call the API with None.
+    fake, messages, errors, sweeper = sweep(
+        {73: live_pr(73, updated=old, armed=old)},
+        [check_run("gate", "cancelled", ident=None)], now_=clock,
+    )
+    assert sweeper.counts == {"gate-cancelled": 1}, sweeper.counts
+    assert not [c for c in fake.calls if c[:3] == ["api", "-X", "POST"]], fake.calls
+    assert any("no re-requestable run id" in line for line in messages), messages
+    assert errors == 0, messages
+
     # A SHORT ENUMERATION is flagged, not silently reported as a full census.
     fake, messages, errors, sweeper = sweep(
         {50: live_pr(50, updated=old, armed=old)}, [check_run("gate", None,
@@ -2230,6 +2275,43 @@ def stuck_self_test() -> None:
     )
     assert errors == 1, messages
     assert any("FAILED" in line for line in messages), messages
+
+    # DRY-RUN MUTATES NOTHING — asserted over EVERY terminal class, not one sample, so a
+    # class added later without a dry-run guard reds here.
+    dry_fixtures = {
+        "gate-failed": (live_pr(80, labels=("review:pass",), updated=old, armed=old),
+                        [check_run("gate", "failure")]),
+        "held": (live_pr(81, labels=("needs:user",), updated=old, armed=old),
+                 [check_run("gate", "success")]),
+        "conflicting": (live_pr(82, mergeable="CONFLICTING", updated=old, armed=old),
+                        [check_run("gate", "success")]),
+        "gate-cancelled": (live_pr(83, updated=old, armed=old),
+                           [check_run("gate", "cancelled")]),
+        "blocked-threads": (live_pr(84, updated=old, armed=old, threads=(False,)),
+                            [check_run("gate", "success")]),
+        # no `gate` row at all on a COMPLETE read, past the stale horizon.
+        "stale": (live_pr(85, updated=old, armed=old),
+                  [check_run("some-other-leg", "success")]),
+    }
+    assert set(dry_fixtures) == TERMINAL_CLASSES, (
+        f"every terminal class needs a dry-run fixture; missing="
+        f"{sorted(TERMINAL_CLASSES - set(dry_fixtures))}"
+    )
+    for expected, (row, runs) in dry_fixtures.items():
+        number = row["number"]
+        listed = [{"number": number, "autoMergeRequest": {"enabledAt": "x"}}]
+        fake = FakeStuckGh(listed, {number: row}, check_pages(runs))
+        messages = []
+        sweeper = StuckArmSweeper(
+            "sparq-org/sparq", "main", limits=limits, gh=fake, log=messages.append,
+            now=lambda: clock, dry_run=True,
+        )
+        assert sweeper.run() == 0, messages
+        assert sweeper.counts == {expected: 1}, (expected, sweeper.counts)
+        for verb in (("pr", "merge"), ("pr", "edit"), ("pr", "comment")):
+            assert not fake.mutations(*verb), (expected, verb, fake.calls)
+        assert not [c for c in fake.calls if c[:2] == ["api", "-X"]], (expected, fake.calls)
+        assert any("DRY-RUN would" in line for line in messages), (expected, messages)
 
     # ---------------------------------------------------------------------------------
     # (5) THE ENUM IS CLOSED. Both directions, so neither a new class nor a new action can
@@ -2929,6 +3011,7 @@ def stuck_arm_exit(args) -> int:
         limits=StuckLimits(max_actions=args.max_stuck_actions),
         gh=run_gh,
         gh_read=run_gh_read,
+        dry_run=args.dry_run,
     )
     transient: str | None = None
     try:
@@ -2992,6 +3075,11 @@ def main() -> int:
             "duals over one decision surface and share this lane's cron, concurrency "
             "group and token; `rearm` skips exactly the PRs `stuck-arm` owns."
         ),
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="stuck-arm only: classify and report, mutate nothing",
     )
     parser.add_argument(
         "--max-stuck-actions",
