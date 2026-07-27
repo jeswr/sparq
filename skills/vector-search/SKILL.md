@@ -308,6 +308,11 @@ HybridConfig::new().arm(name, weight, ArmFn).vector_weight(w /*0.0 mutes -> pure
 //   .query_embedder(QueryEmbedder).reranker(&dyn Reranker, RerankPolicy::{FailOpen,FailClosed})
 //   ArmFn = Box<dyn Fn(&ArmQuery, usize) -> Result<Vec<(Id, f64)>, String>>   // an arm Err is a HARD query error:
 //     an arm that prefers availability returns an EMPTY list itself (the policy switch is for the SECOND stage)
+// [OPUS-4.8] review #4519 round 2 — PAGING CONTRACT (`filtered-ann`): masking one candidates(k)-long response can only
+//   COMPACT the page the arm returned, so an arm whose admissible hits all sit below it would still lose them. When the
+//   mask leaves an arm short, the query path RE-ASKS that arm with a doubled count until it has candidates(k) admissible
+//   hits, has every admissible id, the arm returns fewer than asked (exhausted), or the request hits dict.len(). So an
+//   ArmFn must be prefix-consistent (top-n is a prefix of top-(2n)) and exhaustion-honest (a short answer means "no more").
 fuse_arms(&[ArmRanking], rrf_k, top_k) -> Result<Vec<FusedHit>, String>   // == fuse_rrf_weighted + per-rank provenance
 validate_arms(&[ArmRanking]) -> Result<(), String>   // fail-closed on a lying arm: dup name/id, reserved name, bad weight
 apply_rerank(&dyn Reranker, RerankPolicy, &ArmQuery, Vec<FusedHit>, top_k) -> Result<Vec<FusedHit>, String>

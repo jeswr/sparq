@@ -539,6 +539,76 @@ fn the_candidate_mask_corrects_the_arm_ranks_of_qualifying_hits() {
     );
 }
 
+/// [OPUS-4.8] (review #4519, round 2) A graph deep enough to push the one admissible entity BELOW
+/// the first page an arm is asked for: eight non-matching `n0…n7`, then `m` — the only entity
+/// carrying the constraining `<http://ex/ok>` triple.
+#[cfg(feature = "filtered-ann")]
+fn deep_fixture(tag: &str) -> (Graph, VectorStore, std::path::PathBuf) {
+    let mut ttl = String::new();
+    for i in 0..8 {
+        ttl.push_str(&format!("<http://ex/n{}> <http://ex/p> \"n{}\" .\n", i, i));
+    }
+    ttl.push_str("<http://ex/m> <http://ex/p> \"m\" .\n<http://ex/m> <http://ex/ok> \"yes\" .\n");
+    let g = Graph::load_str(&ttl, "ntriples").unwrap();
+    let path = std::env::temp_dir().join(format!(
+        "sparq-vec-hybrid-{}-{}.spqv",
+        tag,
+        std::process::id()
+    ));
+    let mut store = VectorStore::create(&path, 2).unwrap();
+    // Terms are interned in parse order, so writing the vectors in that order keeps the store's
+    // ids monotonic. The dense arm is muted in the test below; these exist only so the store is
+    // well formed.
+    for i in 0..8 {
+        store.put(id(&g, &format!("n{}", i)), &[1.0, 0.0]).unwrap();
+    }
+    store.put(id(&g, "m"), &[0.0, 1.0]).unwrap();
+    store.finalize().unwrap();
+    (g, store, path)
+}
+
+/// [OPUS-4.8] (review #4519, round 2) An arm's restricted ranking must be its ranking over the
+/// ADMISSIBLE domain — not over whichever page it happened to return.
+///
+/// This is the boundary the two tests above do not reach: they fit every arm hit inside the
+/// requested `cfg.candidates(k)` prefix, so masking only had to compact it. Here the arm ranks
+/// EIGHT non-matching entities above the sole matching `m` while `k = 1` asks for just
+/// `DEFAULT_OVER_FETCH` (4) candidates. Masking that one page alone leaves the arm empty and the
+/// query answers nothing — the very loss the mask exists to prevent, moved one step later. Paging
+/// the arm deeper reaches `m`, and it comes back at the arm's compacted rank 1.
+#[cfg(feature = "filtered-ann")]
+#[test]
+fn an_admissible_arm_hit_below_the_first_page_is_still_found() {
+    let (g, store, _p) = deep_fixture("mask-page");
+    let mut ranked: Vec<(Id, f64)> = (0..8)
+        .map(|i| (id(&g, &format!("n{}", i)), 9.0 - f64::from(i)))
+        .collect();
+    ranked.push((id(&g, "m"), 0.5));
+    let cfg = HybridConfig::new()
+        .vector_weight(0.0)
+        .arm("text", 1.0, fixed_arm(ranked));
+    let r = query_vec_hybrid(
+        &g,
+        "PREFIX vec: <http://sparq.dev/vec#>
+         SELECT ?node ?score ?rank ?prov WHERE {
+           ( ?node ?score ?rank ?prov ) vec:hybrid ( \"1,0\" 1 ) .
+           ?node <http://ex/ok> ?o .
+         }",
+        &store,
+        &cfg,
+    )
+    .unwrap();
+    let rows = rows(&r);
+    assert_eq!(
+        rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(),
+        vec!["m"],
+        "the admissible hit sits below the first page the arm was asked for, so it is found only \
+         if the arm is paged deeper rather than masked-then-dropped"
+    );
+    assert_eq!(rows[0].2, 1);
+    assert_eq!(rows[0].3, "text=1");
+}
+
 /// [OPUS-4.8] (review #4519) An arm is a caller closure, so its ids are untrusted input. An id
 /// outside the graph dictionary's domain — `0` (never a valid 1-based id) or one past the end —
 /// must be a HARD query error naming the arm, not a hit that resolves to the dictionary's

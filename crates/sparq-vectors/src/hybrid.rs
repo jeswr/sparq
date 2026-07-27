@@ -574,6 +574,21 @@ pub fn ablate(
 /// `filtered-ann` — the returned ranking is then restricted to the same BGP-derived candidate mask
 /// the built-in dense arm searched under, preserving the arm's relative order. So an arm need not
 /// know the surrounding BGP: it may rank freely, and the query surface enforces admissibility.
+///
+/// # The paging contract (`filtered-ann`)
+///
+/// Restricting AFTER the arm answered can only compact the prefix the arm returned, so an arm
+/// whose admissible hits all sit below the requested count would lose them. The query path
+/// therefore **re-asks the same arm for a deeper page** (doubling the count) until it has enough
+/// admissible hits, the arm is exhausted, or the dictionary domain is reached. That makes two
+/// requirements of an arm, both of which the "give me your top `n`" reading already implies:
+///
+/// - **Prefix-consistent.** The answer for `n` is a prefix of the answer for any larger `n`: the
+///   arm ranks a fixed order and truncates. An arm whose order depends on `n` gets a ranking that
+///   is still admissible and still its own, but no longer meaningfully "its top `n`".
+/// - **Exhaustion-honest.** Returning fewer than `n` results means "that is all I have"; it is how
+///   the paging loop learns to stop. An arm that pads to `n` is asked for deeper pages until the
+///   dictionary bound.
 pub type ArmFn<'a> = Box<dyn Fn(&ArmQuery<'_>, usize) -> Result<Vec<(Id, f64)>, String> + 'a>;
 
 /// A query embedder for the natural-language `vec:hybrid` form: `(text, language) -> vector`.
@@ -698,6 +713,11 @@ impl<'a> HybridConfig<'a> {
         self.vector_weight
     }
 
+    /// The number of declared auxiliary arms (the built-in dense arm is not one of them).
+    pub(crate) fn arm_count(&self) -> usize {
+        self.arms.len()
+    }
+
     /// Runs the auxiliary arms for `query`, asking each for `candidates` results, and returns
     /// their rankings in declaration order (the caller prepends the built-in dense arm).
     pub(crate) fn run_arms(
@@ -705,14 +725,30 @@ impl<'a> HybridConfig<'a> {
         query: &ArmQuery<'_>,
         candidates: usize,
     ) -> Result<Vec<ArmRanking>, String> {
-        self.arms
-            .iter()
-            .map(|(name, weight, f)| {
-                let ranked = f(query, candidates)
-                    .map_err(|e| format!("hybrid: the {:?} arm failed: {}", name, e))?;
-                Ok(ArmRanking::new(name.clone(), *weight, ranked))
-            })
+        (0..self.arm_count())
+            .map(|i| self.run_arm(i, query, candidates))
             .collect()
+    }
+
+    /// [OPUS-4.8] (review #4519) Runs ONE declared auxiliary arm — the `i`th, `i < arm_count()` —
+    /// asking it for `candidates` results.
+    ///
+    /// The per-arm seam exists so the `filtered-ann` query path can re-ask a single arm for a
+    /// deeper page when the BGP-derived admissibility mask compacted its answer below the
+    /// requested count, without re-running the arms that were already satisfied.
+    pub(crate) fn run_arm(
+        &self,
+        i: usize,
+        query: &ArmQuery<'_>,
+        candidates: usize,
+    ) -> Result<ArmRanking, String> {
+        let (name, weight, f) = self
+            .arms
+            .get(i)
+            .ok_or_else(|| format!("hybrid: no arm at index {}", i))?;
+        let ranked =
+            f(query, candidates).map_err(|e| format!("hybrid: the {:?} arm failed: {}", name, e))?;
+        Ok(ArmRanking::new(name.clone(), *weight, ranked))
     }
 
     /// Embeds a natural-language query, or reports that no embedder is configured.

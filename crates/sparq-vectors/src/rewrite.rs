@@ -1133,7 +1133,10 @@ fn run_knn(
 ///    (`cfg.candidates(k)`) so fusion has consensus evidence beyond the final `k`. Every arm's
 ///    ids are then checked against the graph dictionary (`check_arm_ids`) and, with
 ///    `filtered-ann`, restricted to the SAME BGP-derived mask the dense arm searched under — the
-///    mask is an admissibility constraint on the answer, not a dense-arm optimisation.
+///    mask is an admissibility constraint on the answer, not a dense-arm optimisation. An arm the
+///    mask leaves short is re-asked for a deeper page rather than truncated to whatever survived
+///    (see [`run_aux_arms`]), so its ranking really is its top candidates over the admissible
+///    domain, not over the first page it happened to return.
 /// 2. **Fusion.** Weighted RRF over the named arms, recording which arm ranked each hit and where
 ///    ([`fuse_arms`]).
 /// 3. **Second stage.** The optional out-of-process [`Reranker`](crate::hybrid::Reranker), under
@@ -1206,42 +1209,10 @@ fn run_hybrid(
         dense_ranked,
     )];
 
-    let aux = cfg.run_arms(&arm_query, candidates)?;
-    // [OPUS-4.8] (review #4519) An auxiliary arm is a CALLER closure — an out-of-process service,
-    // a separate index — so the ids it returns are untrusted input to this query. Check them
-    // against the dictionary domain before anything downstream consumes them.
-    for arm in &aux {
-        check_arm_ids(graph, arm)?;
-    }
-    // [OPUS-4.8] (review #4519) The BGP-derived candidate mask is an ADMISSIBILITY constraint on
-    // the answer, not a dense-arm optimisation: an id the surrounding BGP cannot bind contributes
-    // no solution. Fusing auxiliary arms UNRESTRICTED would let such ids occupy the fused top-k —
-    // and the truncation to `k` happens HERE, before the join, so a qualifying lower-ranked
-    // candidate they evict is lost for good rather than merely reordered — as well as inflating
-    // the RRF ranks (and therefore the scores and `?prov` entries) of the hits that do qualify.
-    // So restrict every arm to the mask, preserving each arm's relative order: an arm's ranking
-    // becomes its ranking OVER THE ADMISSIBLE CANDIDATES, exactly what the dense arm's filtered
-    // search already returns.
     #[cfg(feature = "filtered-ann")]
-    let aux: Vec<ArmRanking> = if aux.is_empty() {
-        // Nothing to restrict, so do not pay the constraining sub-BGP evaluation for it.
-        aux
-    } else {
-        match derive_mask(&req.node, constraint, graph)? {
-            Some(mask) => aux
-                .into_iter()
-                .map(|ArmRanking { arm, weight, ranked }| ArmRanking {
-                    arm,
-                    weight,
-                    ranked: ranked
-                        .into_iter()
-                        .filter(|(id, _)| mask.contains(*id))
-                        .collect(),
-                })
-                .collect(),
-            None => aux,
-        }
-    };
+    let aux = run_aux_arms(cfg, graph, &arm_query, candidates, &req.node, constraint)?;
+    #[cfg(not(feature = "filtered-ann"))]
+    let aux = run_aux_arms(cfg, graph, &arm_query, candidates)?;
     arms.extend(aux);
 
     let fused = fuse_arms(&arms, cfg.rrf_constant(), candidates)?;
@@ -1255,6 +1226,110 @@ fn run_hybrid(
             Ok(fused)
         }
     }
+}
+
+/// [OPUS-4.8] (review #4519) Runs the auxiliary arms, validating every id each returns and — with
+/// `filtered-ann` — returning each arm's ranking OVER THE ADMISSIBLE CANDIDATES.
+///
+/// Without `filtered-ann` there is no mask, so this is one pass: ask each arm for `candidates`
+/// results and check the ids it returned.
+#[cfg(not(feature = "filtered-ann"))]
+fn run_aux_arms(
+    cfg: &HybridConfig<'_>,
+    graph: &Graph,
+    query: &ArmQuery<'_>,
+    candidates: usize,
+) -> Result<Vec<ArmRanking>, String> {
+    let aux = cfg.run_arms(query, candidates)?;
+    // An auxiliary arm is a CALLER closure — an out-of-process service, a separate index — so the
+    // ids it returns are untrusted input to this query. Check them against the dictionary domain
+    // before anything downstream consumes them.
+    for arm in &aux {
+        check_arm_ids(graph, arm)?;
+    }
+    Ok(aux)
+}
+
+/// [OPUS-4.8] (review #4519, round 2) Runs the auxiliary arms and restricts each to the
+/// BGP-derived candidate mask, **paging an arm deeper when the restriction leaves it short**.
+///
+/// The mask is an ADMISSIBILITY constraint on the answer, not a dense-arm optimisation: an id the
+/// surrounding BGP cannot bind contributes no solution. Fusing auxiliary arms UNRESTRICTED would
+/// let such ids occupy the fused top-k — and the truncation to `k` happens before the join, so a
+/// qualifying lower-ranked candidate they evict is lost for good rather than merely reordered — as
+/// well as inflating the RRF ranks (and therefore the scores and `?prov` entries) of the hits that
+/// do qualify.
+///
+/// # Why one masked pass is not enough
+///
+/// Masking a single `candidates`-long response can only COMPACT the prefix the arm chose to
+/// return; it cannot make the arm rank over the admissible domain. With `k = 1` and the default
+/// over-fetch, an arm that ranks five inadmissible ids above the sole admissible one returns just
+/// the first four, masking empties it, and the one real answer is lost — the exact failure the
+/// mask exists to prevent, moved one step later. So when the mask leaves an arm short we re-ask
+/// THAT arm for a deeper page (doubling), which is the [`ArmFn`](crate::hybrid::ArmFn) paging
+/// contract: a prefix-consistent, exhaustion-honest arm converges on its true top-`candidates`
+/// over the admissible domain — what the dense arm's filtered search already returns.
+///
+/// The alternative — handing the mask to the arm so it can filter at its own source — would put a
+/// graph-internal id-set into the public arm signature and require every out-of-process arm to
+/// honour it; the paging protocol keeps admissibility enforced HERE, where it is not optional.
+///
+/// # Termination
+///
+/// Each round doubles the request, and stops at the first of: enough admissible hits
+/// (`>= candidates`); every admissible id already collected (`>= mask.len()`, so a deeper page
+/// cannot add one); the arm returned fewer results than asked for (exhausted); or the request
+/// reached the dictionary bound. That last bound is a backstop rather than a real stopping point:
+/// an arm's ids are distinct ([`validate_arms`](crate::hybrid::validate_arms)) and in the
+/// dictionary domain ([`check_arm_ids`]), so an arm with `dict.len()` results in hand has nothing
+/// left to page except inline-integer literal ids, which an entity-retrieval arm does not rank.
+#[cfg(feature = "filtered-ann")]
+fn run_aux_arms(
+    cfg: &HybridConfig<'_>,
+    graph: &Graph,
+    query: &ArmQuery<'_>,
+    candidates: usize,
+    node: &Variable,
+    constraint: &[TriplePattern],
+) -> Result<Vec<ArmRanking>, String> {
+    if cfg.arm_count() == 0 {
+        // Nothing to restrict, so do not pay the constraining sub-BGP evaluation for it.
+        return Ok(Vec::new());
+    }
+    let Some(mask) = derive_mask(node, constraint, graph)? else {
+        // `?node` is unconstrained: every id is admissible and one pass is exact.
+        let aux = cfg.run_arms(query, candidates)?;
+        for arm in &aux {
+            check_arm_ids(graph, arm)?;
+        }
+        return Ok(aux);
+    };
+
+    let ceiling = candidates.max(graph.dict.len());
+    (0..cfg.arm_count())
+        .map(|i| {
+            let mut want = candidates;
+            loop {
+                let arm = cfg.run_arm(i, query, want)?;
+                check_arm_ids(graph, &arm)?;
+                let ArmRanking { arm, weight, ranked } = arm;
+                let returned = ranked.len();
+                let ranked: Vec<(Id, f64)> = ranked
+                    .into_iter()
+                    .filter(|(id, _)| mask.contains(*id))
+                    .collect();
+                if ranked.len() >= candidates
+                    || ranked.len() >= mask.len()
+                    || returned < want
+                    || want >= ceiling
+                {
+                    return Ok(ArmRanking { arm, weight, ranked });
+                }
+                want = want.saturating_mul(2).min(ceiling);
+            }
+        })
+        .collect()
 }
 
 /// [OPUS-4.8] (review #4519) Rejects an auxiliary arm's result whose id is not a term of `graph`'s
