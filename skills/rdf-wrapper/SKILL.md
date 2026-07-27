@@ -99,10 +99,16 @@ Solid pod, an out-of-core on-disk index), based on rdfjs/wrapper
 `AsyncNode::out` / `AsyncNode::r#in` return a `NodeStream` that wraps each term
 into an `AsyncNode` as it arrives: the first node is observable before the
 backend finishes producing, and there is deliberately no `collect`. Building a
-stream polls nothing; dropping one drops the backend stream, so a cancelled
-traversal is never polled again and a partially consumed remote result set is
-abandoned rather than drained. `NodeStream::next` is cancellation-safe — the
+stream polls nothing; dropping one drops the backend stream, so the wrapper
+never polls or drains it again. `NodeStream::next` is cancellation-safe — the
 wrapper buffers nothing of its own.
+
+Whether a dropped traversal also stops in-flight *remote* work is the backend's
+half of the contract: `AsyncStoreBackend` requires an implementation to start no
+I/O before the stream or future it returned is first polled, and to abandon that
+work on drop. Honour it and a partially consumed remote result set is abandoned
+rather than drained; a backend that instead spawns the request eagerly keeps it
+running, because the wrapper holds no handle to it.
 
 The crate depends on no async runtime and contains no executor: `TermStream` is
 `futures_core::Stream` narrowed to `Result<Term, AsyncStoreError>` over

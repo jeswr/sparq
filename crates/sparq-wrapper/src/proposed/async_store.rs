@@ -13,10 +13,22 @@
 //! counterpart return a [`NodeStream`] that wraps each backend term into an
 //! [`AsyncNode`]
 //! *as it arrives*; the wrapper never collects a result set before handing the
-//! first node back, and constructing a stream performs no work at all until it
-//! is polled. Dropping a [`NodeStream`] drops the backend stream with it, so a
-//! cancelled traversal is never polled again and a partially consumed remote
-//! result set is abandoned rather than drained.
+//! first node back.
+//!
+//! The wrapper's own half of the cancellation story is unconditional:
+//! constructing a [`NodeStream`] does nothing but call the backend's
+//! constructor, no term is buffered between polls, and dropping the stream
+//! drops the backend stream and never polls or drains it again.
+//!
+//! Whether that also stops in-flight *remote* work is the backend's half.
+//! [`AsyncStoreBackend`] requires an implementation to start no I/O before the
+//! stream or future it returned is first polled, and to abandon that work when
+//! it is dropped; for a backend meeting that obligation a dropped traversal is
+//! a cancelled one, and a partially consumed remote result set is abandoned
+//! rather than drained. A backend that ignores the contract — one that spawns
+//! the request onto a runtime inside [`objects`](AsyncStoreBackend::objects),
+//! say — keeps that work running no matter what the wrapper does, because the
+//! wrapper holds no handle to it.
 //!
 //! The wrapper has no runtime dependency and never blocks: it contains no
 //! executor, spawns nothing, and only ever forwards the caller's
@@ -67,9 +79,17 @@ impl<S: TermStream + ?Sized> TermStream for Pin<Box<S>> {
 
 /// A remote or disk-backed store that answers wrapper reads asynchronously.
 ///
-/// Every method is lazy: it must return without performing I/O, leaving the
-/// work to the returned stream or future when it is first polled. Returning an
-/// eagerly started operation is allowed but then loses cancellation on drop.
+/// Every method is lazy, and an implementation is required to keep it that
+/// way: the method must return without performing I/O, the stream or future it
+/// returns must start no backend work until it is first polled, and dropping
+/// that stream or future must cancel or abandon whatever work it had started.
+///
+/// The compiler cannot check any of this, so it is an obligation on the
+/// implementor rather than a property of the type — and the laziness and
+/// drop-cancellation the wrapper documents hold exactly for backends that meet
+/// it. An eagerly started operation is still expressible, but it breaks those
+/// guarantees for every caller of the wrapper: the handle it returns no longer
+/// has anything to cancel on drop.
 pub trait AsyncStoreBackend {
     /// The stream of matched terms returned by the traversal methods.
     type Stream: TermStream;
@@ -219,7 +239,8 @@ impl<'store, B: AsyncStoreBackend> AsyncNode<'store, B> {
 
     /// Streams `(focus, predicate, object)` objects as wrapped nodes.
     ///
-    /// No backend work happens until the returned stream is polled.
+    /// The wrapper does nothing here but build the backend stream, which under
+    /// the [`AsyncStoreBackend`] contract performs no work until it is polled.
     pub fn out(&self, predicate: &NamedNode) -> NodeStream<'store, B> {
         NodeStream {
             store: self.store,
@@ -276,8 +297,9 @@ impl<'store, B: AsyncStoreBackend> AsyncNode<'store, B> {
 /// Each backend term is wrapped as it arrives, so the first node is observable
 /// long before the backend finishes producing. There is deliberately no
 /// `collect`: buffering a remote result set is the caller's decision, not the
-/// wrapper's. Dropping the stream drops the backend stream, cancelling the
-/// traversal.
+/// wrapper's. Dropping the stream drops the backend stream and never polls it
+/// again, which cancels the traversal for any backend honouring the
+/// [`AsyncStoreBackend`] laziness and drop-cancellation contract.
 pub struct NodeStream<'store, B: AsyncStoreBackend> {
     store: &'store AsyncStore<B>,
     inner: B::Stream,

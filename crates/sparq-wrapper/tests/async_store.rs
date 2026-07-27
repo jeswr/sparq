@@ -79,9 +79,30 @@ struct FakeState {
     dropped_streams: Cell<usize>,
     /// When set, every term stream fails on its first ready poll.
     fail_reads: Cell<bool>,
+    /// One lifecycle token per traversal handed out, in construction order.
+    traversals: RefCell<Vec<Rc<Cell<Traversal>>>>,
+}
+
+/// The backend-side lifecycle of one traversal — the token a contract-honouring
+/// backend would use to track, and abandon, its remote request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Traversal {
+    /// The stream exists but has never been polled, so no request has started.
+    Idle,
+    /// The request is live.
+    Active,
+    /// The stream was dropped mid-result-set, so the request was abandoned.
+    Cancelled,
+    /// The result set was consumed to its end.
+    Finished,
 }
 
 impl FakeState {
+    /// The lifecycle of the `index`-th traversal this backend handed out.
+    fn traversal(&self, index: usize) -> Traversal {
+        self.traversals.borrow()[index].get()
+    }
+
     fn contains(&self, subject: &Term, predicate: &NamedNode, object: &Term) -> bool {
         self.triples
             .borrow()
@@ -112,6 +133,7 @@ struct FakeStream {
     cursor: usize,
     ticks: usize,
     delay: usize,
+    token: Rc<Cell<Traversal>>,
 }
 
 impl TermStream for FakeStream {
@@ -121,6 +143,11 @@ impl TermStream for FakeStream {
     ) -> Poll<Option<Result<Term, AsyncStoreError>>> {
         let this = self.get_mut();
         this.state.stream_polls.set(this.state.stream_polls.get() + 1);
+        // The first poll is what starts the request, exactly as the
+        // `AsyncStoreBackend` laziness contract requires.
+        if this.token.get() == Traversal::Idle {
+            this.token.set(Traversal::Active);
+        }
         if this.ticks > 0 {
             this.ticks -= 1;
             cx.waker().wake_by_ref();
@@ -141,6 +168,7 @@ impl TermStream for FakeStream {
             }
         }
         this.state.drained.set(true);
+        this.token.set(Traversal::Finished);
         Poll::Ready(None)
     }
 }
@@ -150,6 +178,10 @@ impl Drop for FakeStream {
         self.state
             .dropped_streams
             .set(self.state.dropped_streams.get() + 1);
+        // A backend honouring the contract abandons the request it started.
+        if self.token.get() == Traversal::Active {
+            self.token.set(Traversal::Cancelled);
+        }
     }
 }
 
@@ -195,12 +227,15 @@ impl FakeStore {
     }
 
     fn stream(&self, pattern: Pattern) -> FakeStream {
+        let token = Rc::new(Cell::new(Traversal::Idle));
+        self.state.traversals.borrow_mut().push(Rc::clone(&token));
         FakeStream {
             state: Rc::clone(&self.state),
             pattern,
             cursor: 0,
             ticks: self.delay,
             delay: self.delay,
+            token,
         }
     }
 }
@@ -322,6 +357,63 @@ fn dropping_the_stream_stops_further_polls() {
     assert_eq!(state.stream_polls.get(), polls_at_cancel);
     assert_eq!(state.emitted.get(), 1, "the remaining terms were abandoned");
     assert!(!state.drained.get());
+}
+
+#[test]
+fn a_dropped_traversal_cancels_the_backend_request() {
+    let (state, store) = delayed_store(1);
+    let alice = store.node(iri("alice"));
+    let knows = iri("knows");
+
+    let mut stream = alice.out(&knows);
+    assert_eq!(
+        state.traversal(0),
+        Traversal::Idle,
+        "constructing a traversal must not start the backend request"
+    );
+
+    assert!(poll_once(|cx| stream.poll_next(cx)).is_pending());
+    assert_eq!(
+        state.traversal(0),
+        Traversal::Active,
+        "the first poll is what starts the request"
+    );
+
+    drop(stream);
+    // The witness the poll counter cannot give: the cancellation reached the
+    // backend's own token, not merely the wrapper.
+    assert_eq!(
+        state.traversal(0),
+        Traversal::Cancelled,
+        "dropping the wrapper stream must abandon the backend request"
+    );
+}
+
+#[test]
+fn an_exhausted_traversal_finishes_instead_of_cancelling() {
+    let (state, store) = delayed_store(0);
+    let alice = store.node(iri("alice"));
+    let knows = iri("knows");
+
+    let mut stream = alice.out(&knows);
+    let count = block_on(async {
+        let mut count = 0;
+        while let Some(node) = stream.next().await {
+            node.unwrap();
+            count += 1;
+        }
+        count
+    });
+
+    assert_eq!(count, 3);
+    assert_eq!(state.traversal(0), Traversal::Finished);
+
+    drop(stream);
+    assert_eq!(
+        state.traversal(0),
+        Traversal::Finished,
+        "a result set consumed to its end is not a cancelled request"
+    );
 }
 
 #[test]
