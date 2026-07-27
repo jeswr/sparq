@@ -2202,7 +2202,21 @@ pub struct HiddenIssuerAttestation {
     /// exists — the original sq-z9l behaviour). A hidden-ONLY commitment (no clear
     /// attestation) MUST carry the salt here, or the verifier cannot recompute `m`
     /// and rejects the entry as unreferenced (fail-closed).
+    ///
+    /// # Why the salt is not withheld (sq-93h, assessed — do not re-litigate)
+    /// Disclosing it adds NO cross-presentation linkability, because [`Self::commitment`]
+    /// — the SAME graph's `C(G)` — is disclosed in the clear on this very entry and is
+    /// byte-bound into every scan sub-proof's bb public inputs. `graph -> C(G)` and
+    /// `graph -> salt` (globally unique per audit #9) induce the IDENTICAL partition, so
+    /// the salt is a strictly dominated correlator: a coalition that can link two
+    /// presentations by salt can already link them by `C(G)`. Moving `m`-reconstruction
+    /// behind an in-circuit salt-commitment (the sq-ayv index-commitment analogue) would
+    /// therefore buy zero unlinkability for a new circuit member and VK. Full analysis,
+    /// including the separate (non-linkability) guess-confirmation residual and the
+    /// trip-wire that fires if `C(G)` ever stops being disclosed:
+    /// `research/zk-hidden-path-salt-disclosure.md`.
     // [OPUS-4.8] sq-xxg: salt for hidden-only `m` reconstruction.
+    // [OPUS-5] sq-93h: assessed NO-BUILD — dominated by the clear `commitment`.
     #[serde(default)]
     pub salt: Option<FieldHex>,
     /// The bb proof blob (hex), same `len|proof|len|pi|vk` layout as a

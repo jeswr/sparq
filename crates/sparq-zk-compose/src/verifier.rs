@@ -4434,7 +4434,17 @@ fn bind_holder_set(
 /// preferred when present (the additive mode); the hidden entry's salt is the
 /// fallback so a commitment with no clear attestation can still have its `m`
 /// recomputed. `None` if neither source supplies a parseable salt.
+///
+/// # Disclosure posture (sq-93h, assessed)
+/// Every salt this can return belongs to a commitment the presentation ALREADY
+/// discloses in the clear (a scan's `commitments[g]`, byte-bound into the bb public
+/// inputs by [`reconstruct_public_inputs`]), so the salt is a DOMINATED correlator and
+/// withholding it behind an in-circuit salt-commitment would buy no unlinkability. That
+/// conclusion is conditional on `C(G)` staying public — pinned by
+/// `tests::hidden_only_salt_disclosure_is_dominated_by_the_clear_commitment` and argued
+/// in `research/zk-hidden-path-salt-disclosure.md`.
 // [OPUS-4.8] sq-xxg: salt source for hidden-only message reconstruction.
+// [OPUS-5] sq-93h: disclosure assessed NO-BUILD; the trip-wire guards the premise.
 fn resolve_commitment_salt(manifest: &ProofManifest, c_fr: &Fr) -> Option<Fr> {
     // Prefer the clear attestation's salt (the original sq-z9l additive path).
     if let Some(att) = manifest.commitment_attestations.iter().find(|a| {
@@ -8762,6 +8772,110 @@ mod tests {
         assert!(
             bind_issuer_attestations(&same_slot, &k, &std::collections::BTreeSet::new()).is_ok(),
             "two credentials sharing one status slot must pass — the fixture is otherwise valid"
+        );
+    }
+
+    /// [OPUS-5] sq-93h: THE SALT-DISCLOSURE DOMINATION TRIP-WIRE.
+    ///
+    /// sq-93h asked whether the per-graph salt that `HiddenIssuerAttestation` carries
+    /// on the sq-xxg HIDDEN-ONLY path is a residual cross-presentation linkability
+    /// channel. Assessment (`research/zk-hidden-path-salt-disclosure.md`): NO — it is
+    /// DOMINATED, because the same graph's `C(G)` is disclosed in the clear on the very
+    /// same entry (and byte-bound into the scan sub-proof's bb public inputs). Any two
+    /// presentations linkable by salt are already linkable by `C(G)`, so hiding the salt
+    /// behind an in-circuit salt-commitment would buy zero unlinkability.
+    ///
+    /// That verdict rests on ONE premise — `C(G)` stays public. This test pins it:
+    /// - the hidden-only salt fallback actually resolves (red if `resolve_commitment_salt`
+    ///   loses its hidden-entry arm), and
+    /// - WITHHOLDING the salt leaves the presentation's disclosed-commitment set
+    ///   UNCHANGED and NON-EMPTY — the domination property itself.
+    ///
+    /// TRIP-WIRE: a future hidden / re-randomised-commitment tier makes the disclosed
+    /// set empty and turns this red. That is the intended signal — at that point the
+    /// salt becomes the finest remaining correlator and sq-93h must be RE-OPENED, not
+    /// the assertion relaxed.
+    #[test]
+    fn hidden_only_salt_disclosure_is_dominated_by_the_clear_commitment() {
+        /// Every commitment value this presentation hands the verifier in the CLEAR.
+        fn disclosed_commitments(m: &ProofManifest) -> std::collections::BTreeSet<String> {
+            let mut out = std::collections::BTreeSet::new();
+            for sp in &m.sub_proofs {
+                if let ProofInputs::Scan { commitments, .. } = &sp.inputs {
+                    out.extend(
+                        commitments
+                            .iter()
+                            .filter_map(|c| c.to_field())
+                            .map(|f| field_to_hex(&f)),
+                    );
+                }
+            }
+            out.extend(
+                m.hidden_issuer_attestations
+                    .iter()
+                    .filter_map(|hi| hi.commitment.to_field())
+                    .map(|f| field_to_hex(&f)),
+            );
+            out
+        }
+
+        let c = Fr::from(4242u64);
+        let salt = Fr::from(1357u64);
+
+        // A HIDDEN-ONLY presentation: one scan over `c`, one hidden-issuer entry over
+        // `c` carrying the salt, and NO clear attestation to read the salt from.
+        let mut with_salt = minimal_manifest("SELECT * WHERE { ?s <http://ex/p> ?o }");
+        with_salt.sub_proofs = vec![crate::manifest::SubProof {
+            inputs: flat_scan_with_commit(c),
+            proof_hex: String::new(),
+        }];
+        with_salt.hidden_issuer_attestations = vec![crate::manifest::HiddenIssuerAttestation {
+            commitment: FieldHex::from_field(&c),
+            depth: 4,
+            key_set_root: fh("0x8"),
+            message: fh("0x9"),
+            salt: Some(FieldHex::from_field(&salt)),
+            proof_hex: String::new(),
+        }];
+        assert!(
+            with_salt.commitment_attestations.is_empty(),
+            "the fixture must be HIDDEN-ONLY — a clear attestation would supply the salt \
+             by the preferred path and the hidden fallback would go untested"
+        );
+
+        // (a) The hidden-only fallback resolves the salt (the sq-xxg behaviour).
+        assert_eq!(
+            resolve_commitment_salt(&with_salt, &c),
+            Some(salt),
+            "a hidden-only commitment must resolve its salt from the hidden entry"
+        );
+
+        // The counterfactual: the SAME presentation with the salt WITHHELD, i.e. what an
+        // in-circuit salt-commitment would achieve on the disclosure surface.
+        let mut without_salt = with_salt.clone();
+        without_salt.hidden_issuer_attestations[0].salt = None;
+        assert_eq!(
+            resolve_commitment_salt(&without_salt, &c),
+            None,
+            "withholding the salt must actually remove it from the disclosure surface — \
+             otherwise the comparison below is vacuous"
+        );
+
+        // (b) DOMINATION: withholding the salt does not shrink what the presentation
+        // discloses about WHICH graph this is. `C(G)` remains, so the correlator a
+        // colluding verifier pair would use is untouched.
+        let disclosed = disclosed_commitments(&with_salt);
+        assert!(
+            disclosed.contains(&field_to_hex(&c)),
+            "premise (D1): the committed graph's C(G) is disclosed in the clear even on \
+             the hidden-only path — if this fails, sq-93h must be RE-OPENED"
+        );
+        assert_eq!(
+            disclosed,
+            disclosed_commitments(&without_salt),
+            "hiding the salt changes NOTHING about the disclosed per-graph correlator — \
+             the salt is dominated by C(G), so an in-circuit salt-commitment buys no \
+             cross-presentation unlinkability (sq-93h NO-BUILD)"
         );
     }
 
