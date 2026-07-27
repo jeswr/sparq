@@ -661,6 +661,19 @@ class RustMaskingIsLiteralSafe(unittest.TestCase):
         src = 'fn f() { let s = "a{b}c"; /* } */ }\n'
         self.assertEqual(len(pf.mask_rust(src)), len(src))
 
+    def test_an_unterminated_string_does_not_swallow_the_file_into_a_region(self) -> None:
+        # FAIL-CLOSED on malformed input. An unterminated `"` blanks the rest of
+        # the file, so the test mod's closing `}` disappears and the brace walk
+        # reaches EOF with the block still open. Admitting that span would drag
+        # every later definition into the "test text" and silence every guard
+        # below it — a fail-open in the direction round-1 blocking 1 lived in.
+        # Kills: appending the span regardless of the final depth.
+        src = ('#[cfg(test)]\nmod tests { const S: &str = "oops;\n}\n'
+               "pub fn validate_envelope() {}\n")
+        self.assertEqual(pf.rust_cfg_test_spans(pf.mask_rust(src)), [])
+        self.assertNotIn("validate_envelope",
+                         pf.searchable_test_text("crates/c/src/lib.rs", src))
+
     def test_a_cfg_test_use_statement_opens_no_region(self) -> None:
         # `#[cfg(test)] use foo::bar;` has no body. Walking past the `;` looking
         # for a `{` would attach the NEXT item's body as a test region.

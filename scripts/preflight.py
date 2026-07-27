@@ -411,7 +411,16 @@ def rust_cfg_test_spans(masked: str) -> list[tuple[int, int]]:
                 while e < n and depth:
                     depth += (masked[e] == "{") - (masked[e] == "}")
                     e += 1
-                spans.append((k, e))
+                # [OPUS-5] An UNBALANCED walk is not a test region. The only way to
+                # reach EOF with the block still open is malformed input — an
+                # unterminated string literal blanks the rest of the file, so the
+                # closing `}` disappears and the span would run to EOF, dragging
+                # every later definition into the "test text" and silencing every
+                # guard below it. Fail CLOSED: no span. Verified a no-op on the real
+                # tree (630 Rust src files, 0 unbalanced spans) — it can only fire on
+                # Rust that does not compile.
+                if depth == 0:
+                    spans.append((k, e))
                 break
             k += 1
     return spans
