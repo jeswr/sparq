@@ -6347,3 +6347,85 @@ fn entailment_simple_accepted_progresses_past_gate() {
         ),
     }
 }
+
+// --- sq-rsd3v.7: completeness-under-entailment is UNBUILT — the enforced deferral -
+//
+// [OPUS-5] sq-rsd3v.7. SOUNDNESS of derivation ("every derived triple IS entailed",
+// sq-314 above + the in-circuit relation sq-rsd3v.2) and COMPLETENESS under
+// entailment ("no entailed answer is MISSING") are two obligations that must never
+// be conflated. Completeness needs BOTH an in-circuit closure-sweep over the flat
+// full graph AND a fixpoint-SATURATION proof; the saturation half exists nowhere in
+// sparq, so the property is NOT claimed. A relying party that demands it is REFUSED
+// fail-closed rather than handed a soundness-only accept it could misread.
+
+/// A well-formed rdfs9 step over this fixture's graph. Its `subClassOf` antecedent
+/// is NOT in the disclosed base (the scan discloses only the `rdf:type` row), so
+/// WITHOUT the completeness demand this manifest rejects as
+/// `UngroundedDerivationAntecedent` — which is exactly what makes the tests below
+/// non-vacuous: the completeness refusal must PRE-EMPT a different, later rejection,
+/// proving the new gate fired rather than riding an error that was coming anyway.
+fn rdfs9_step_for_fixture() -> DerivationStep {
+    let t = enc_iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
+    let sc = enc_iri("http://www.w3.org/2000/01/rdf-schema#subClassOf");
+    DerivationStep {
+        rule: EntailmentRule::Rdfs9SubClassType,
+        antecedents: vec![
+            [enc_iri("http://ex/alice"), t.clone(), enc_iri("http://ex/Student")],
+            [enc_iri("http://ex/Student"), sc, enc_iri("http://ex/Person")],
+        ],
+        derived: [enc_iri("http://ex/alice"), t, enc_iri("http://ex/Person")],
+    }
+}
+
+/// sq-rsd3v.7: a relying party that REQUIRES completeness under entailment is
+/// REFUSED on every non-`Simple` regime — `CompletenessUnderEntailmentUnavailable`,
+/// naming the regime — even when its policy accepts that regime. Non-vacuity: the
+/// SAME manifest under the SAME regime-acceptance but WITHOUT the demand rejects
+/// with a DIFFERENT error, so the refusal is attributable to the new gate.
+#[test]
+fn completeness_demand_refuses_every_inference_regime() {
+    for (regime, name, accepting) in [
+        (EntailmentRegime::Rdfs, "rdfs", EntailmentPolicy::simple_only().with_rdfs()),
+        (EntailmentRegime::Owl, "owl", EntailmentPolicy::simple_only().with_owl()),
+    ] {
+        let m = entailment_manifest(regime, vec![rdfs9_step_for_fixture()]);
+        // Baseline (no demand): rejected for an unrelated, LATER reason.
+        match run_entailment(&m, &accepting) {
+            Err(CheckError::UngroundedDerivationAntecedent { .. }) => {}
+            other => panic!(
+                "baseline for {name} must reject at the grounding check (keeps the \
+                 completeness test non-vacuous), got {other:?}"
+            ),
+        }
+        // With the demand: refused FIRST, as a capability gap.
+        match run_entailment(&m, &accepting.clone().require_completeness_under_entailment()) {
+            Err(CheckError::CompletenessUnderEntailmentUnavailable { regime: r }) => {
+                assert_eq!(r, name, "the refusal must name the manifest's regime");
+            }
+            other => panic!(
+                "a demand for completeness under `{name}` must be refused as \
+                 CompletenessUnderEntailmentUnavailable (sq-rsd3v.7 is UNBUILT), got {other:?}"
+            ),
+        }
+    }
+}
+
+/// sq-rsd3v.7: the demand does NOT brick the `Simple` path — a `Simple` manifest
+/// carries no entailment for completeness to range over, so it still passes the
+/// entailment gate (and stops later, at MissingProof). Passing it is NOT an
+/// assertion that its answer set is complete: that rests on the rest of the
+/// (NOT externally audited — sq-qhy4) verifier, and an off-circuit materialised
+/// closure presented as `Simple` is a distinct trust model this dial cannot see
+/// (design §3.6(a)).
+#[test]
+fn completeness_demand_leaves_simple_regime_verifiable() {
+    let m = entailment_manifest(EntailmentRegime::Simple, vec![]);
+    let policy = EntailmentPolicy::simple_only().require_completeness_under_entailment();
+    match run_entailment(&m, &policy) {
+        Err(CheckError::MissingProof { .. }) => {}
+        other => panic!(
+            "Simple must still pass the entailment gate under a completeness demand \
+             (then hit MissingProof), got {other:?}"
+        ),
+    }
+}

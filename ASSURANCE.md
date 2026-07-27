@@ -100,10 +100,19 @@ generator in the [`sparq-org/noir_XPath`](https://github.com/sparq-org/noir_XPat
 (externalized from the in-tree `zk/xpath/` tree, bead sq-5reoy / #1599) evaluates each
 expression with the Python `elementpath` engine and (for floats) pins the IEEE-754 **bit
 pattern**, so circuits are checked bit-exactly against a second implementation, not against
-hand-copied strings.
+hand-copied strings. **PROOF M1 (bead sq-3x7dl.14.2)** adds a *second, sparq-side* oracle for the
+same circuits: [`zk/xpath/differential`](zk/xpath/differential) generates a Noir test file whose
+expected values are read back from **sparq's own Rust SPARQL/XSD evaluator** (bar a labelled
+handful — see *Limits*), over a
+unicode-aware corpus covering precisely the edges qt3 lacks (non-exact `op:numeric-divide`,
+`fn:substring` with `start < 1`, mixed int/float comparisons outside the i8 range, NUL-padded and
+multibyte strings, pre-1970 `xs:dateTime`) — the cases beads `sq-3x7dl.4`–`.7` fixed.
 
-- **See it run:** [`shacl-diff-fuzz.yml`](.github/workflows/shacl-diff-fuzz.yml) (nightly); the
-  `nargo` unit-test lane now lives in the [`sparq-org/noir_XPath`](https://github.com/sparq-org/noir_XPath)
+- **See it run:** [`shacl-diff-fuzz.yml`](.github/workflows/shacl-diff-fuzz.yml) (nightly);
+  [`xpath-differential.yml`](.github/workflows/xpath-differential.yml) (the M1 oracle, plus a
+  fault-injection self-test that fails the lane if a deliberately corrupted expected value still
+  passes `nargo test`); the `nargo` unit-test lane now lives in the
+  [`sparq-org/noir_XPath`](https://github.com/sparq-org/noir_XPath)
   face repo's CI (`scripts/run_real_tests.sh`), which dynamically detects the generated real test
   packages under its `test_packages/` and fails closed if it finds none. (Until sq-5reoy this ran
   in sparq's `zk-toolchain.yml`; the harness moved upstream with the tree.)
@@ -112,7 +121,15 @@ hand-copied strings.
   `zk-toolchain.yml` array is retired) exists for beaded latent failures and is **currently
   empty** — no real package is being skipped.
 - **Limits:** the sparq lane is nightly (see qualifier above); oracle scope is bounded by what
-  the reference engines implement.
+  the reference engines implement. The M1 xpath oracle is **verification, not proof**: its TCB is
+  the (itself unaudited) sparq Rust XSD evaluator, the sampled corpus, and the trusted
+  Noir→ACIR→Barretenberg lowering — `nargo test` exercises witness generation only. Two live
+  divergences where *sparq's own evaluator* is wrong against XPath F&O are recorded in the
+  generated file's header. Those rows are still asserted **live**, but against the F&O value and
+  labelled `SPEC-REFERENCE` — read them as *circuit vs the spec*, not *circuit vs sparq* — so the
+  edges stay executable and a `noir_XPath` regression on one fails the lane. Unit tests pin that
+  no assertion is ever emitted commented out, and self-expiring tests retire the special-casing
+  the day the engine is fixed.
 
 ## 3. Metamorphic self-checks (TLP / NoREC)
 

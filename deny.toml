@@ -142,6 +142,59 @@ exceptions = [
 [bans]
 # Surface (but do not fail on) duplicate versions of the same crate — useful
 # signal for dependency-tree bloat without blocking routine churn.
+#
+# DUPLICATE-VERSION BLOCKER REGISTRY (sq-98w7z.7, surveyed 2026-07-27, [OPUS-5])
+# -----------------------------------------------------------------------------
+# This is the single source of truth for WHY the duplicates this check reports
+# are still here. It exists so the next person who reads a `multiple-versions`
+# warning does not re-run the same survey. Duplicate versions are a COMPILE-TIME
+# and BINARY-SIZE cost, not a runtime hot-path cost — keep that claim honest.
+#
+# Survey method (re-run any of these to re-verify):
+#   cargo tree -d --workspace           # duplicates reachable on the host target
+#   cargo tree -i <crate>@<version>     # who pulls a lagging version
+#   cargo update --workspace --dry-run  # is a semver-compatible bump available?
+#
+# State at survey: 49 crate names carry more than one version in Cargo.lock, and
+# `cargo update --workspace --dry-run` locks ZERO packages — the tree is already
+# at its maximum semver-compatible resolution. Every workspace crate sits on the
+# NEWEST side of every duplicate pair it participates in; each lagging version is
+# held by a third-party crate that is itself at its latest published release. So
+# no duplicate can currently be removed without either an upstream release or a
+# major dependency bump that changes a public API (which needs its own bead).
+#
+# Per-family blockers for the families the epic named:
+#
+#  * hashbrown x4 (0.14.5 / 0.15.5 / 0.16.1 / 0.17.1) — the workspace is on 0.17.
+#      0.14.5 <- dashmap 6.2.1 (<- oxigraph 0.5.9 <- sparq-bench) and hdt 0.7.3
+#        (<- sparq-hdt). Both are the newest stable releases; dashmap 7 is
+#        release-candidate only. Unblocks when dashmap cuts a stable 7 AND
+#        oxigraph adopts it, or when hdt publishes past 0.7.3.
+#      0.15.5 <- wasmparser 0.244.0 alone, via wit-bindgen 0.51 <- wasip2/wasip3
+#        <- getrandom. That chain is `cfg(target_os = "wasi")`-only, so it is a
+#        LOCK-ONLY entry: it is never compiled for any target sparq builds and
+#        costs nothing today. Unblocks when wit-bindgen bumps its wasm-tools
+#        major (0.244 is the ceiling of wit-bindgen 0.51's requirement).
+#      0.16.1 <- gpu-allocator 0.28.0 and spade 2.15.1 (<- geo 0.33.1 <-
+#        sparq-geo). Both are the newest releases.
+#  * foldhash x2 (0.1.5 / 0.2.0) — 0.1.5 is reachable ONLY through hashbrown
+#      0.15.5, i.e. the same WASI-only chain, and disappears with it. sparq's own
+#      direct use (sparq-fedplan) is 0.2.
+#  * rustc-hash x2 (1.1.0 / 2.1.3) — 1.1.0 <- naga / naga-types / wgpu-core
+#      30.0.0 only, which is the newest wgpu. All 25 sparq crates are on 2.1.3.
+#  * oxrdf x2 (0.2.4 / 0.3.3) and oxttl x2 (0.1.8 / 0.2.3) — DELIBERATE and
+#      already documented in crates/sparq-canon/Cargo.toml. rdf-canon 0.15.3 (the
+#      newest release, and the validated RDFC-1.0 implementation) speaks oxrdf
+#      0.2, so sparq-canon carries the aliased `oxrdf02`/`oxttl01` bridge pair.
+#      The git-pinned `solid-oidc-verifier` (see [sources] below) independently
+#      pulls oxttl 0.1 -> oxrdf 0.2. BOTH must move before the pair collapses.
+#  * quick-xml x2 (0.37.5 / 0.41.0) — 0.37.5 <- oxrdfxml 0.2.3 and sparesults
+#      0.3.3, both the newest published releases. Every sparq crate is on 0.41.
+#
+# Why this stays "warn" and does not become "deny" + a skip list: the surveyed
+# set is entirely upstream-blocked, so denying would add a ~49-entry allowance
+# table and red this lane on routine churn without removing a single version.
+# Revisit if a NEW duplicate ever appears that sparq itself introduced.
 multiple-versions = "warn"
 # When duplicates exist, highlight the whole dependency tree for each.
 highlight = "all"

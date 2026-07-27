@@ -354,9 +354,17 @@ from each pairwise `assert(a_val == b_val)` plus the shared-commitment check.)
   micro `join_eq` prove `c_a == c_b` (commitment equality) + open both to the same
   value. *Pro:* no graph re-commit in `join_eq` (cheapest join member). *Con:*
   changes the scan public-input layout → re-touches the audit-#1 reconstruction,
-  the empirical bb anchors (`verifier.rs:3582-3614`), and every `scan_k…` member;
-  higher blast radius, higher re-audit cost. **Better as a v2 once `join_eq`
-  exists**, because it makes joins free but is a breaking layout change.
+  the empirical bb anchors (`verifier.rs`, the `EMPIRICAL anchor` public-input
+  reconstruction tests), and every `scan_k…` member; higher blast radius, higher
+  re-audit cost. **DEFERRED — measured, and the trade does not pay** (§5,
+  `sq-uii0`): whether removing the re-commit pays for a breaking scan
+  public-input-layout change was always a `bb gates` question, and it is now
+  answered by `sq-uii0`'s probe methodology plus its regression-gated
+  `_comment_sq_uii0` snapshot entry — the re-commit does dominate, but a fixed
+  integer-lookup-table floor caps the win at ~2× on one member, which does not buy
+  the blast radius. That verdict rests only on the gated artifact, never on
+  intuition, and it does not license a drive-by: Alt-A is a re-audit of the most
+  soundness-critical surface in the estate, and is planned as one if revisited.
 - **(Alt-B) Set-membership / circuit-PSI inside one prover.** Prove the join value
   is in the *intersection* of the two graphs' value sets via a Merkle/lookup
   argument (the `key_set_membership` gadget, `issuer.nr:221-240`). *Pro:* natural
@@ -634,7 +642,9 @@ soundness-of-claims violation, not just an estimate.
   Poseidon2 permutations."** A probe carrying the `join_eq` ABI and *no relation at
   all* still measures ~two fifths of the whole member: that is the fixed
   ACIR/integer-lookup-table floor the **first integer-typed input** incurs — the
-  same effect `sq-kndw` documented on the revocation member — and the join's public
+  same effect `sq-kndw` documented on the revocation member, where an *unused*
+  integer input carried the identical overhead, i.e. it is table setup and not the
+  comparison (`_comment_sq_kndw` in the same snapshot) — and the join's public
   `slot_a`/`slot_b` are `u32` **by design** (§4.4), so the floor is not removable
   while the slot binding stays public. Removing the re-commit entirely therefore
   buys a **~2×** member, not the ~47× the prior implies. The exact figures + the
@@ -642,14 +652,20 @@ soundness-of-claims violation, not just an estimate.
   (`crates/sparq-zk-compose/tests/gate_count_snapshot.json`, `_comment_sq_uii0`) and
   `bench/zk-compose/gate_counts_latest.json` — cited, never re-typed here. **This is
   the `noir-optimisation` failure mode the section already warned about, caught on
-  its own prior** (cf. `bench/SPIKES.md` / PR #37). Alt-A remains a *breaking* scan
-  public-input-layout change (audit-#1 reconstruction, the empirical `bb` anchors,
-  every `scan_k…` member), so a ~2× on one member is a weak trade — it stays
-  DEFERRED, now on evidence rather than on intuition.
+  its own prior** (cf. `bench/SPIKES.md` / PR #37): the trade was settled the way
+  this section requires — a `bb gates` measurement plus a regression-gated snapshot
+  entry a reviewer can check — and never on intuition. Alt-A remains a *breaking*
+  scan public-input-layout change (audit-#1 public-input reconstruction, the
+  empirical `bb` anchors in `verifier.rs`, every `scan_k…` member), so a ~2× on one
+  member is a weak trade — it stays DEFERRED, now on evidence rather than on
+  intuition, and if it is ever revisited it is planned as the re-audit of that
+  surface it has always been, never a drive-by.
 - **Cardinality-hiding tier (`join_eq_rN`) — MEASURED and LANDED (`sq-uii0`).**
   `compose_core::join::join_eq_r_check` proves `R` lanes over **one** pair of graph
-  re-commitments; the compiled members are `join_eq_r2_na16_nb16` and
-  `join_eq_r4_na16_nb16`. The amortisation is real and *linear with a small
+  re-commitments — the fold is paid once per graph regardless of `R`, which is
+  exactly where the amortisation comes from; the compiled members are
+  `join_eq_r2_na16_nb16` and `join_eq_r4_na16_nb16`.
+  The amortisation is real and *linear with a small
   constant*: the per-lane marginal is a **fixed, measured increment** — the same
   step from R=2 to R=4 as from the v1 single-pair member (which measures exactly
   the R=1 point, though no `join_eq_r1_…` package is compiled) to R=2 — and that
@@ -683,7 +699,12 @@ soundness-of-claims violation, not just an estimate.
   does not prove completeness (still the scan's obligation). And `R` is
   **public** — it is the member identity — while a prover with `N > R` simply drops
   pairs or takes a larger bucket, which is the same reason `R` is not an upper
-  bound on `N`.
+  bound on `N`. Nor does the measurement make it the *default* shape: the earlier
+  "likely the better shape for N>1 joins" reading is exactly the recommendation
+  this section refuses to make on unmeasured priors, and even now that the
+  amortisation is measured, §7 step 7 keeps host wiring a follow-up — so no
+  manifest selects `join_eq_rN` until that lands, and one instance per pair (§2.5)
+  remains the recommended default.
 - **Feasibility verdict: HIGH.** Every primitive (`commit_fold`, `h3`, `h2`,
   present-in-graph sweep, equality) is **already in-tree and compiled** in
   `scan.nr`. `join_eq` is assembled entirely from reused, already-benchmarked
@@ -759,7 +780,10 @@ listed with their step.
 8. **[optional v2] Cardinality-hiding `join_eq_rN`** (§2.5/§5) and **Alt-A
    scan-layout per-row commitments** (§2.6) — filed only if `bb gates` shows the
    re-commit dominates or cardinality leakage (R2) is a deployment blocker.
-   → **bead step 7 (optional, P3)** — `sq-uii0`. **Measured, then split** (§5):
+   → **bead step 7 (optional, P3)** — `sq-uii0`. **Measured, then split** (§5).
+   The trigger was gated on `sq-uii0` and is decided from exactly that artifact —
+   its probe methodology plus its regression-gated `_comment_sq_uii0` snapshot
+   entry — never from intuition:
    - `join_eq_rN` **LANDED as the circuit tier**: the `join_eq_r_check` relation +
      the `join_eq_r2_na16_nb16` / `join_eq_r4_na16_nb16` members + their
      regression-gated `bb gates` baselines + the Noir accept/reject suite
@@ -775,7 +799,9 @@ listed with their step.
      re-commit does dominate, but a fixed integer-lookup-table floor caps the win at
      ~2× on one member, against a breaking scan public-input-layout change that
      re-touches the audit-#1 reconstruction, the empirical `bb` anchors and every
-     `scan_k…` member (§5).
+     `scan_k…` member (§5). If it is ever revisited, it is planned as the
+     scan-layout re-audit it is — the most soundness-critical surface in the estate
+     — never as a drive-by.
 
 ---
 
