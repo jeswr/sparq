@@ -47,16 +47,30 @@
 //! *engine's* graph-pattern matching over the `geo:` vocabulary. Those are
 //! probed HERE by evaluating real SPARQL through `sparq_engine::query` over a
 //! GeoSPARQL-shaped fixture — see `GRAPH_PATTERN_FIXTURE` and the
-//! `*_graph_pattern` probes (sq-6ep). That in-process evaluation is the whole
-//! of what the requirements assert; the HTTP transport around it is
-//! requirement-agnostic and is `sparq-server`'s concern.
+//! `*_graph_pattern` probes (sq-6ep). Graph-pattern MATCHING is the whole of
+//! what R2/R3/R7/R8/R14/R18 assert, so the in-process evaluation settles them;
+//! the HTTP transport around it is requirement-agnostic and is `sparq-server`'s
+//! concern. R1 is the exception: it also asserts SPARQL **Protocol** support,
+//! and an in-process evaluator is not an endpoint — that conjunct is
+//! demonstrated by `crates/sparq-server/tests/geo.rs`'s
+//! `geo_vocabulary_graph_pattern_over_http`, which answers a
+//! `geo:Feature`/`geo:hasGeometry`/`geo:asWKT` pattern over real HTTP (it lives
+//! there because sparq-geo does not depend on the server).
 //!
-//! `crates/sparq-server/tests/geo.rs` is NOT that demonstration and this file
-//! no longer claims it is: those tests prove the server installs sparq-geo's
-//! `geof:` registry on the query and update paths, but their fixture attaches
-//! WKT literals to a plain `ex:loc` predicate and never mentions `geo:Feature`,
-//! `geo:hasGeometry` or `geo:asWKT`, so they exercise none of the `geo:`
-//! vocabulary these requirements are about. The RDFS/OWL entailment requirements
+//! The REST of `crates/sparq-server/tests/geo.rs` is NOT evidence for these
+//! requirements and this file no longer claims it is: those tests prove the
+//! server installs sparq-geo's `geof:` registry on the query and update paths,
+//! but their fixture attaches WKT literals to a plain `ex:loc` predicate and
+//! never mentions `geo:Feature`, `geo:hasGeometry` or `geo:asWKT`, so they
+//! exercise none of the `geo:` vocabulary these requirements are about.
+//!
+//! All seven graph-pattern rows need an evaluator, which is the OPT-IN-by-default
+//! `engine` feature. In the pure-geometry build (`--no-default-features`) there
+//! is no evaluator in the dependency graph, so those rows are honest GAPS that do
+//! NOT count toward [`REQUIREMENTS_FLOOR`]: the committed 30/30 floor is the
+//! `engine`-enabled figure, and the feature-off floor is correspondingly lower.
+//!
+//! The RDFS/OWL entailment requirements
 //! (R25-R27) are covered by [`entailment`](../entailment.rs) (sq-5ts8) via the
 //! generic `sparq-reason` closure; the query-rewrite requirements (R28-R30) are
 //! demonstrated here via [`sparq_geo::is_topology_property`] +
@@ -193,10 +207,16 @@ fn round_trips_wkt(lit: &str) -> bool {
 // Evaluating the pattern is precisely the "endpoint" half of sq-6ep. Under the
 // default `engine` feature the probes below now run real SPARQL through
 // `sparq_engine::query` over a GeoSPARQL-shaped fixture and check the bound
-// rows. Without `engine` there is no evaluator in the dependency graph, so they
-// degrade to a full-IRI equality check (still not a tautology: it pins the
-// constant's exact value) — the same honest feature-state degradation
-// `recognizes_topology_property` uses.
+// rows.
+//
+// Without `engine` there is no evaluator in the dependency graph, and there is
+// no honest degradation available: a vocabulary-constant comparison — even an
+// exact-IRI one — pins a constant and says nothing about graph-pattern matching,
+// which is the SAME vacuity described above. So in that feature state the probes
+// report NOT DEMONSTRATED (`false`) and `graph_pattern_req` records the rows as
+// [`Coverage::Gap`], keeping them out of `REQUIREMENTS_FLOOR`. (This differs from
+// `recognizes_topology_property`, whose feature-off branch re-implements the
+// PREDICATE the requirement is actually about, so it stays meaningful.)
 
 /// A GeoSPARQL-shaped fixture for the graph-pattern probes: two `geo:Feature`s,
 /// each with a typed `geo:Geometry` carrying a `geo:asWKT` serialization.
@@ -249,9 +269,11 @@ fn bound(sparql: &str) -> Vec<String> {
     out
 }
 
-/// R1 — SPARQL query evaluation over the `geo:` vocabulary end to end: join a
-/// feature to its geometry's WKT serialization and confirm both features'
-/// literals come back AND parse as `geo:wktLiteral`s.
+/// R1 (Query + vocabulary conjuncts) — SPARQL query evaluation over the `geo:`
+/// vocabulary end to end: join a feature to its geometry's WKT serialization and
+/// confirm both features' literals come back AND parse as `geo:wktLiteral`s.
+/// R1's SPARQL-**Protocol** conjunct is NOT probed here (an in-process evaluator
+/// is not an endpoint) — see the row's note.
 fn core_sparql_query_over_geo_vocab() -> bool {
     #[cfg(feature = "engine")]
     {
@@ -260,9 +282,10 @@ fn core_sparql_query_over_geo_vocab() -> bool {
         ));
         wkts.len() == 2 && wkts.iter().all(|w| round_trips_wkt(w))
     }
+    // No evaluator without `engine`: not demonstrated (see the block comment).
     #[cfg(not(feature = "engine"))]
     {
-        vocab::GEO_NS == "http://www.opengis.net/ont/geosparql#"
+        false
     }
 }
 
@@ -277,10 +300,10 @@ fn spatial_object_graph_pattern() -> bool {
         .len()
             == 4
     }
+    // No evaluator without `engine`: not demonstrated (see the block comment).
     #[cfg(not(feature = "engine"))]
     {
-        format!("{}SpatialObject", vocab::GEO_NS)
-            == "http://www.opengis.net/ont/geosparql#SpatialObject"
+        false
     }
 }
 
@@ -293,9 +316,10 @@ fn feature_graph_pattern() -> bool {
         bound(&format!("{GEO_PREFIXES} SELECT ?f WHERE {{ ?f a geo:Feature }}"))
             == vec!["http://example.org/london", "http://example.org/paris"]
     }
+    // No evaluator without `engine`: not demonstrated (see the block comment).
     #[cfg(not(feature = "engine"))]
     {
-        format!("{}Feature", vocab::GEO_NS) == "http://www.opengis.net/ont/geosparql#Feature"
+        false
     }
 }
 
@@ -310,9 +334,10 @@ fn geometry_graph_pattern() -> bool {
                 "http://example.org/parisGeom",
             ]
     }
+    // No evaluator without `engine`: not demonstrated (see the block comment).
     #[cfg(not(feature = "engine"))]
     {
-        format!("{}Geometry", vocab::GEO_NS) == "http://www.opengis.net/ont/geosparql#Geometry"
+        false
     }
 }
 
@@ -332,11 +357,10 @@ fn has_geometry_properties_graph_pattern() -> bool {
         any == vec!["http://example.org/london", "http://example.org/paris"]
             && default == vec!["http://example.org/london"]
     }
+    // No evaluator without `engine`: not demonstrated (see the block comment).
     #[cfg(not(feature = "engine"))]
     {
-        vocab::HAS_GEOMETRY == "http://www.opengis.net/ont/geosparql#hasGeometry"
-            && vocab::HAS_DEFAULT_GEOMETRY
-                == "http://www.opengis.net/ont/geosparql#hasDefaultGeometry"
+        false
     }
 }
 
@@ -350,9 +374,10 @@ fn as_wkt_graph_pattern() -> bool {
         ));
         wkts.len() == 2 && wkts.iter().all(|w| round_trips_wkt(w))
     }
+    // No evaluator without `engine`: not demonstrated (see the block comment).
     #[cfg(not(feature = "engine"))]
     {
-        vocab::AS_WKT == "http://www.opengis.net/ont/geosparql#asWKT"
+        false
     }
 }
 
@@ -372,9 +397,10 @@ fn as_gml_graph_pattern() -> bool {
         // never equals an Ok, so no separate is_ok() check is needed.
         gmls.len() == 1 && wkt.len() == 1 && parse_gml_literal(&gmls[0]) == parse_wkt_literal(&wkt[0])
     }
+    // No evaluator without `engine`: not demonstrated (see the block comment).
     #[cfg(not(feature = "engine"))]
     {
-        vocab::AS_GML == "http://www.opengis.net/ont/geosparql#asGML"
+        false
     }
 }
 
@@ -396,37 +422,77 @@ const fn req(
     }
 }
 
+/// The seven GRAPH-PATTERN requirements — the ones whose demonstration needs a
+/// SPARQL evaluator, i.e. the `engine` feature.
+const GRAPH_PATTERN_IDS: &[u8] = &[1, 2, 3, 7, 8, 14, 18];
+
+/// The note recorded for a graph-pattern row in the pure-geometry build.
+#[cfg(not(feature = "engine"))]
+const NO_ENGINE_GRAPH_PATTERN_NOTE: &str =
+    "GAP in this feature state (--no-default-features): demonstrating a \
+     graph-pattern requirement needs an evaluator, and without `engine` there is \
+     none in the dependency graph. A vocabulary-constant comparison would pin a \
+     constant, not graph-pattern matching, so this row reports NOT demonstrated \
+     rather than claiming a vacuous pass (sq-6ep). Enable `engine` (the default) \
+     for the probe.";
+
+/// Build one of the [`GRAPH_PATTERN_IDS`] rows. Its coverage is FEATURE-DEPENDENT:
+/// [`Coverage::Pass`] under `engine`, where the row's probe evaluates real SPARQL,
+/// and an honest [`Coverage::Gap`] without it, so a build with no evaluator cannot
+/// contribute these requirements to [`REQUIREMENTS_FLOOR`].
+fn graph_pattern_req(
+    id: u8,
+    class: Class,
+    statement: &'static str,
+    engine_note: &'static str,
+    check: fn() -> bool,
+) -> Req {
+    debug_assert!(GRAPH_PATTERN_IDS.contains(&id));
+    #[cfg(feature = "engine")]
+    let (coverage, note) = (Coverage::Pass, engine_note);
+    #[cfg(not(feature = "engine"))]
+    let (coverage, note) = {
+        // The engine-state note still describes the row's intended evidence; it
+        // is simply not the evidence THIS build has.
+        let _ = engine_note;
+        (Coverage::Gap, NO_ENGINE_GRAPH_PATTERN_NOTE)
+    };
+    req(id, class, statement, coverage, note, check)
+}
+
 /// The canonical OGC GeoSPARQL R1-R30 conformance requirements, each with a
 /// self-written executable probe over sparq's own API.
 fn requirements() -> Vec<Req> {
     vec![
         // ---- Core (R1-R3) --------------------------------------------------
-        req(
+        graph_pattern_req(
             1,
             Class::Core,
             "Support SPARQL Query + Protocol + the geo: ontology vocabulary.",
-            Coverage::Pass,
-            "Real SPARQL through sparq_engine::query joins geo:hasGeometry to \
-             geo:asWKT over the GeoSPARQL fixture and every bound literal parses \
-             as a geo:wktLiteral (sq-6ep).",
+            "QUERY + VOCABULARY: real SPARQL through sparq_engine::query joins \
+             geo:hasGeometry to geo:asWKT over the GeoSPARQL fixture and every \
+             bound literal parses as a geo:wktLiteral (sq-6ep). PROTOCOL: an \
+             in-process evaluator is not an endpoint, so that conjunct is \
+             demonstrated over real HTTP by crates/sparq-server/tests/geo.rs::\
+             geo_vocabulary_graph_pattern_over_http, which answers the same \
+             geo:Feature/hasGeometry/asWKT pattern through /sparql (it cannot run \
+             from here: sparq-geo does not depend on the server).",
             core_sparql_query_over_geo_vocab,
         ),
-        req(
+        graph_pattern_req(
             2,
             Class::Core,
             "Allow geo:SpatialObject in SPARQL graph patterns.",
-            Coverage::Pass,
             "A real SELECT with `?s a geo:SpatialObject` binds all four asserted \
              spatial objects (sq-6ep). geo:SpatialObject is also the apex of the \
              class hierarchy the sparq-reason closure entails over \
              (tests/entailment.rs, sq-5ts8).",
             spatial_object_graph_pattern,
         ),
-        req(
+        graph_pattern_req(
             3,
             Class::Core,
             "Allow geo:Feature in SPARQL graph patterns.",
-            Coverage::Pass,
             "A real SELECT with `?f a geo:Feature` binds exactly the two features \
              and not the geometry nodes (sq-6ep); hasGeometry extraction is also \
              driven by GeoIndex::build and tests/entailment.rs (sq-5ts8).",
@@ -476,21 +542,19 @@ fn requirements() -> Vec<Req> {
             },
         ),
         // ---- Geometry Extension (R7-R20) -----------------------------------
-        req(
+        graph_pattern_req(
             7,
             Class::GeometryExt,
             "Allow geo:Geometry in SPARQL graph patterns.",
-            Coverage::Pass,
             "A real SELECT with `?g a geo:Geometry` binds exactly the two geometry \
              nodes and not the features (sq-6ep); geo:Geometry typing + asWKT \
              extraction also drives GeoIndex::build.",
             geometry_graph_pattern,
         ),
-        req(
+        graph_pattern_req(
             8,
             Class::GeometryExt,
             "Allow geo:hasGeometry and geo:hasDefaultGeometry properties.",
-            Coverage::Pass,
             "Real SELECTs bind both predicates and DISTINGUISH them — both \
              features have a geo:hasGeometry, only London a \
              geo:hasDefaultGeometry (sq-6ep). Both are also extracted by \
@@ -578,11 +642,10 @@ fn requirements() -> Vec<Req> {
                     || parse_wkt_literal("GEOMETRYCOLLECTION EMPTY").is_ok()
             },
         ),
-        req(
+        graph_pattern_req(
             14,
             Class::GeometryExt,
             "Allow geo:asWKT in SPARQL graph patterns.",
-            Coverage::Pass,
             "A real SELECT binds both geo:asWKT serializations and each parses \
              through sparq-geo's geo:wktLiteral reader (sq-6ep); geo:asWKT is \
              also what GeoIndex::build reads and geof: functions emit \
@@ -631,11 +694,10 @@ fn requirements() -> Vec<Req> {
              documented in crates/sparq-geo/README.md (the §8.5.2 row).",
             || vocab::GML_LITERAL.ends_with("#gmlLiteral"),
         ),
-        req(
+        graph_pattern_req(
             18,
             Class::GeometryExt,
             "Allow geo:asGML in SPARQL graph patterns.",
-            Coverage::Pass,
             "A real SELECT binds London's geo:asGML serialization and it parses to \
              the SAME geometry as its geo:asWKT twin (sq-6ep) — so the probe pins \
              WKT/GML interoperability, not just presence of the IRI.",
@@ -808,7 +870,16 @@ fn requirements() -> Vec<Req> {
 /// demonstrates with a passing executable probe. A ratchet: it may only RISE.
 /// 30 requirements total; ALL 30 now demonstrated after sq-mzmh closed the last
 /// two gaps (R9 geometry-metadata properties + R16 empty gmlLiteral). [OPUS-4.8]
+///
+/// This CANONICAL 30 is the `engine`-enabled figure — the conformance claim sparq
+/// makes. [SONNET-4.6] sq-6ep: the pure-geometry build has no evaluator, so the
+/// seven [`GRAPH_PATTERN_IDS`] rows are gaps there and its floor is 30 - 7; see
+/// `graph_pattern_requirements_are_not_demonstrated_without_engine`. Both floors
+/// ratchet independently.
+#[cfg(feature = "engine")]
 const REQUIREMENTS_FLOOR: usize = 30;
+#[cfg(not(feature = "engine"))]
+const REQUIREMENTS_FLOOR: usize = 23;
 
 #[test]
 fn ogc_geosparql_requirements_conformance() {
@@ -890,6 +961,83 @@ fn ogc_geosparql_requirements_conformance() {
         "OGC GeoSPARQL demonstrated-requirements count regressed: {passed} < floor \
          {REQUIREMENTS_FLOOR} — if a requirement was deliberately demoted to a gap, \
          lower the floor in the same commit and file/keep the tracking bead"
+    );
+}
+
+/// [SONNET-4.6] sq-6ep — the ENGINE-enabled run is where the committed 30/30
+/// floor comes from: every graph-pattern row must really be a demonstrated pass
+/// here, so the canonical claim is derived from an evaluator, never from
+/// vocabulary constants.
+#[cfg(feature = "engine")]
+#[test]
+fn graph_pattern_requirements_are_demonstrated_with_engine() {
+    let reqs = requirements();
+    for id in GRAPH_PATTERN_IDS {
+        let r = reqs
+            .iter()
+            .find(|r| r.id == *id)
+            .unwrap_or_else(|| panic!("requirement row R{} is missing", id));
+        assert_eq!(
+            r.coverage,
+            Coverage::Pass,
+            "R{} is a graph-pattern requirement and the evaluator is present",
+            id
+        );
+        assert!(
+            (r.check)(),
+            "R{}'s graph-pattern probe must evaluate real SPARQL successfully",
+            id
+        );
+    }
+    assert_eq!(
+        REQUIREMENTS_FLOOR, 30,
+        "the canonical floor is the engine-enabled 30/30"
+    );
+}
+
+/// [SONNET-4.6] sq-6ep — feature-off honesty guard. Without `engine` there is no
+/// evaluator, so the seven graph-pattern requirements MUST NOT be reported as
+/// demonstrated: their rows are gaps, their probes report false (never a
+/// vocabulary-constant comparison dressed up as evidence), and the floor for this
+/// feature state is correspondingly below the canonical 30.
+#[cfg(not(feature = "engine"))]
+#[test]
+fn graph_pattern_requirements_are_not_demonstrated_without_engine() {
+    let reqs = requirements();
+    for id in GRAPH_PATTERN_IDS {
+        let r = reqs
+            .iter()
+            .find(|r| r.id == *id)
+            .unwrap_or_else(|| panic!("requirement row R{} is missing", id));
+        assert_eq!(
+            r.coverage,
+            Coverage::Gap,
+            "R{} needs an evaluator: it must be a GAP in the pure-geometry build, \
+             not a pass counted toward the floor",
+            id
+        );
+        assert!(
+            !(r.check)(),
+            "R{}'s probe must report NOT demonstrated without an evaluator — a \
+             vocabulary-constant comparison is not evidence of graph-pattern \
+             matching",
+            id
+        );
+    }
+    let passed = reqs
+        .iter()
+        .filter(|r| r.coverage == Coverage::Pass && (r.check)())
+        .count();
+    assert_eq!(
+        passed,
+        30 - GRAPH_PATTERN_IDS.len(),
+        "the pure-geometry build demonstrates exactly the non-graph-pattern \
+         requirements"
+    );
+    assert_eq!(
+        REQUIREMENTS_FLOOR, passed,
+        "the feature-off floor must be the feature-off achievable count, and \
+         must stay below the canonical engine-enabled 30"
     );
 }
 
