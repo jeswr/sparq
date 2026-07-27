@@ -320,6 +320,13 @@ measurements, unless a number is cited.
 - "Redundant remainder range check in `euclidean_division_var`" — intentional;
   in-code comment says the ACVM optimizer removes it when redundant and it is
   *required* for non-power-of-two divisors (`acir_context/mod.rs:~900-910`).
+  (Confirmed by `sq-jfkwk`, §10.7, with the mechanism corrected: for a
+  power-of-two divisor the duplicate checks land on the *same* witness and the
+  ACVM `redundant_range` optimizer deduplicates them.)
+- **Row 9's own sketch — "specialize the sign-bit split because the quotient is
+  0/1"** — rejected by `sq-jfkwk` (§10.7): the constant-`rhs` bound tightening
+  already makes the quotient range check 1 bit, so the specialized path is
+  opcode-for-opcode identical to HEAD. Do not re-derive it.
 - "AND/XOR outputs unconstrained vs `redundant_range` assumption is a bug" — it
   is a documented Barretenberg backend contract (issue #1439 +
   `redundant_range.rs:172` comment). A portability question, not a missed
@@ -442,7 +449,7 @@ edge sequences them (§10.4).
 | `sq-jthy1` | opus | `ssa/opt/checked_to_unchecked.rs` | elide overflow checks dominated by a later range check (#7161); Brillig failure-point semantics in scope |
 | `sq-m3l62` | opus | `ssa/opt/flatten_cfg/value_merger.rs` | ArrayGet through IfElse (#5501); conservative use/alias analysis; precedent PR #11512 |
 | `sq-seust` | sonnet | `ssa/ir/dfg/simplify.rs` | NOT canonicalization for IfElse merging; PARK with a findings note if measured neutral (PR #11580 upkeep landmine) |
-| `sq-jfkwk` | sonnet | findings first; `acir/acir_context/mod.rs` only on a win | comparison-lowering experiment; fail-closed on the #10159 witness-sharing landmine; null result acceptable |
+| `sq-jfkwk` | sonnet | findings first; `acir/acir_context/mod.rs` only on a win | comparison-lowering experiment; fail-closed on the #10159 witness-sharing landmine; null result acceptable — **NULL RESULT returned, no PR proposed; bead still open, see §10.7** |
 | `sq-felqr` | opus | design note on noir#4629 only | quadratic ACIR growth; NO implementation before upstream buy-in — **design note DELIVERED, empirical half + live-thread check PENDING; bead still open, see §10.6** |
 | `sq-b0vpc` | sonnet | `noir_stdlib/src/collections/bounded_vec.nr` | only the TomAFrench capacity-assert slice of #5027 |
 | `sq-eesz3` | sonnet | none (findings-only) | #6624 / #6313 / #4972 measurement comments upstream — **source analysis done, empirical half + live-thread checks PENDING; bead still open, see §10.5** |
@@ -524,3 +531,40 @@ construction and that shares a root cause with #13046. The blocking first step
 is therefore not design but **re-running the issue's own reproducer at HEAD to
 confirm the bug still reproduces**; the full protocol is §7 of the record. One
 upstream comment is **drafted, not posted**, pending @jeswr review.
+
+### 10.7 `sq-jfkwk` (row 9, comparison lowering power-of-two split) — null result (2026-07-27)
+
+> 🤖 **SPARQ agent** [OPUS-5]. Full record:
+> `noir-comparison-lowering-10159.md` (analysed against noir `e22cd89b`,
+> workspace version `1.0.0-beta.25`).
+
+The experiment was run at source level and **the sketch is rejected on the
+evidence**. No upstream PR is proposed for it and `acir/acir_context/mod.rs` was
+not touched, per the §10.3 fail-closed instruction. The bead stays **open**,
+blocked on the same empirical half as `sq-eesz3` (§10.5) and `sq-felqr` (§10.6) —
+the box had no rustc `1.89.0` (the workspace pin; only `1.88.0` installed,
+`rustup` read-only), hence no `nargo` and no `bb` — and, for the witness-sharing
+question, on reading the #10159 thread, which was not fetchable in that run.
+
+The evidence base is stronger than the sibling records' because upstream commits
+the *expected ACIR* for these lowerings as snapshot tests, so the opcode sequence
+is readable without building:
+
+| finding | consequence |
+|---|---|
+| for constant `rhs`, `euclidean_division_var` already tightens `max_q_bits` to `bit_size - rhs_bits + 1`, which for `more_than_eq_var` is exactly **1** | the "quotient range check" the sketch removes is already a 1-bit range check — i.e. it already *is* the boolean constraint the sketch would emit for `b` |
+| the hint's own output range checks and the explicit ones are identical checks on identical witnesses, deduplicated by the ACVM `redundant_range` optimizer | only one range check per output survives; the §7 "explicitly rejected" entry for the redundant remainder check is confirmed, with the mechanism corrected |
+| for a power-of-two divisor the `r < rhs` bound constraint degenerates (padding constant `0`) to the *same* range check on the *same* witness, and is deduplicated too | nothing is left to save |
+| upstream's committed `lt_u8` snapshot shows the whole comparison as: Brillig hint + `RANGE(q,1)` + `RANGE(r,8)` + one `AssertZero` | the proposed specialization is **opcode-for-opcode identical** to HEAD ⇒ it cannot win gates and can only lose them |
+| `less_than_var` returns the *expression* `1 − q`, never a witness, so `a<b`, `a>=b` and `!(a<b)` all share one hint and one pair of range checks, with the negation free | a derived mechanism for the #10159 regression ("stopped sharing a witness"), and the specific risk any future work in that function must be measured against — **hypothesis, the PR thread was not read** |
+
+One **adjacent candidate** was found and is deliberately left unimplemented:
+`bound_constraint_with_offset`'s constant-`rhs` fast path is gated on
+`try_into_u128()`, which fails at exactly `2^128`, so 128-bit truncations and
+`u128` comparisons fall to the general path and pay a redundant second 128-bit
+range check on a fresh witness (visible in the committed
+`truncate_field_to_128_bits` snapshot). It sits in a different function from the
+comparison lowering and does not engage the witness-sharing risk, but it is a
+constraint *removal* and therefore under-constraining-sensitive; it must clear the
+§10.2 acceptance protocol and the record's §7 measurement protocol before any PR.
+One upstream comment is **drafted, not posted**, pending @jeswr review.
