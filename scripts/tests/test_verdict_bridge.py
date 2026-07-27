@@ -914,6 +914,97 @@ class TestAuthorXorReviewer(unittest.TestCase):
         kw.setdefault("contributors", frozenset({"jeswr", "claude"}))
         return pr(**kw)
 
+    # -- OBLIGATION 0: the OPENER carve-out. Refusing on it stalls the real lane. ------
+
+    def test_a_pass_from_the_PR_OPENER_who_wrote_no_commit_still_PROMOTES(self):
+        """Regression pin for a FALSE POSITIVE this guard originally had.
+
+        sparq#4331 and #4386 are `jeswr`-opened with a `jeswr` head-bound pass, and both
+        are genuine independent cross-agent reviews (confirmed from dispatch records).
+        On the wire: `COMMIT authorship=['claude'], jeswr_committed=False`. An earlier
+        draft of this guard folded the opener into the contributor set and called both
+        self-approvals. Since 29 of 34 open non-draft PRs cannot be reached by the
+        automated review lane at all, refusing these is a total arming stall.
+        """
+        opener_only = pr(opener="jeswr", contributors=frozenset({"claude"}))
+        own = comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr")
+        self.assertEqual(decision(opener_only, [own]), "promote")
+
+    def test_the_opener_pass_is_reported_as_COUNTED_not_refused(self):
+        opener_only = pr(opener="jeswr", contributors=frozenset({"claude"}))
+        got = vb.decide(opener_only, [comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr")])
+        self.assertTrue(got.opener_verdict, got)
+        self.assertFalse(got.self_review, "counted, not refused")
+        self.assertIn("COUNTED", got.reason)
+
+    def test_the_opener_advisory_reaches_the_log_without_blocking_the_write(self):
+        fake = FakeGitHub(
+            [node(4331, author="jeswr", commits=commits_connection(("claude",)))],
+            comments={4331: [vb.comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr")]},
+        )
+        b = bridge(fake)
+        b.run()
+        self.assertEqual(
+            fake.writes,
+            [["pr", "edit", "4331", "--repo", REPO, "--add-label", vb.REVIEW_ATTESTATION]],
+            "the legitimate review must still promote",
+        )
+        self.assertTrue([ln for ln in b.logs if ln.startswith("::notice")], b.logs)
+        self.assertFalse(
+            [ln for ln in b.logs if ln.startswith("::warning")],
+            "an opener verdict is not a refusal and must not be reported as one",
+        )
+        self.assertTrue(any("opener_verdicts=1" in ln for ln in b.logs), b.logs)
+        self.assertTrue(any("self_reviews_refused=0" in ln for ln in b.logs), b.logs)
+
+    def test_the_opener_is_never_in_the_commit_contributor_set(self):
+        contributors, complete = vb.commit_contributors(
+            {"author": {"login": "jeswr"}, "commits": commits_connection(("claude",))}
+        )
+        self.assertTrue(complete)
+        self.assertNotIn("jeswr", contributors)
+        self.assertIn("claude", contributors)
+
+    def test_an_opener_pass_never_causes_a_WITHDRAWAL(self):
+        """The withdrawal is scoped to commit-authorship evidence only.
+
+        Stripping review:pass off a PR whose only pass came from its opener would un-arm
+        a legitimate review — the exact damage the carve-out exists to prevent.
+        """
+        opener_held = pr(
+            opener="jeswr",
+            contributors=frozenset({"claude"}),
+            labels={vb.REVIEW_ATTESTATION},
+        )
+        own = comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr")
+        self.assertEqual(decision(opener_held, [own]), "none")
+
+    def test_a_BOT_AUTHORED_pr_does_not_make_this_guard_fire(self):
+        """DOCUMENTED LIMITATION, pinned so it is not mistaken for a bug and "fixed".
+
+        Under a scheme where agent PRs are opened by the orchestrator App on conforming
+        branches, the PR author is a bot, the commits are `claude`'s and the reviewer
+        comments as the operator. That configuration satisfies this guard REGARDLESS of
+        whether the commenter is an independent reviewer or the authoring session itself
+        — moving the author field does not create a reviewer signal. Closing that gap
+        needs a distinct reviewing principal, not a different PR author.
+        """
+        contributors, _ = vb.commit_contributors(
+            {
+                "author": {"login": "sparq-orchestrator"},
+                "commits": commits_connection(("claude",)),
+            }
+        )
+        bot_pr = pr(opener="sparq-orchestrator", contributors=contributors)
+        verdict = comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr")
+        got = vb.decide(bot_pr, [verdict])
+        self.assertEqual(got.action, "promote")
+        self.assertFalse(got.self_review)
+        self.assertFalse(
+            got.opener_verdict,
+            "not even the advisory fires — the guard is blind here, by construction",
+        )
+
     # -- OBLIGATION 1: a verdict by the PR's own author does not promote or arm --------
 
     def test_a_pass_from_the_prs_own_author_does_not_promote(self):
@@ -974,11 +1065,13 @@ class TestAuthorXorReviewer(unittest.TestCase):
         """
         contributors, complete = vb.commit_contributors(
             {
-                "author": {"login": "sparq-orchestrator"},
-                "commits": commits_connection(("claude",)),
+                "author": {"login": "someone-else"},
+                # The App COMMITTED here, spelled with the [bot] suffix by GitActor.
+                "commits": commits_connection(("sparq-orchestrator[bot]",)),
             }
         )
         self.assertTrue(complete)
+        self.assertIn("sparq-orchestrator", contributors)
         app_self = comment(f"{HEAD}\n\nVERDICT: pass", user="sparq-orchestrator[bot]")
         self.assertNotEqual(
             decision(pr(contributors=contributors), [app_self]), "promote"
@@ -1041,7 +1134,7 @@ class TestAuthorXorReviewer(unittest.TestCase):
         would silently disarm every retraction they can make."""
         own_fail = comment(f"{HEAD}\n\nVERDICT: fail", user="jeswr")
         own_ambiguous = comment(f"{HEAD}\n\nVERDICT: FAIL", user="jeswr", cid=2)
-        countable, self_passes = vb.classify_verdicts(
+        countable, self_passes, _ = vb.classify_verdicts(
             [own_fail, own_ambiguous], HEAD, self.contributor_pr()
         )
         self.assertEqual(
@@ -1055,7 +1148,7 @@ class TestAuthorXorReviewer(unittest.TestCase):
             comment(f"{HEAD}\n\nVERDICT: fail", user="jeswr", cid=2),
             comment(f"{HEAD}\n\nVERDICT: pass", user="reviewer", cid=3),
         ]
-        _, self_passes = vb.classify_verdicts(mixed, HEAD, self.contributor_pr())
+        _, self_passes, _ = vb.classify_verdicts(mixed, HEAD, self.contributor_pr())
         self.assertEqual([(v.author, v.value) for v in self_passes], [("jeswr", "pass")])
 
     def test_a_self_pass_cannot_override_an_independent_FAIL(self):
@@ -1243,7 +1336,7 @@ class TestAuthorXorReviewer(unittest.TestCase):
     def test_classify_verdicts_partitions_rather_than_dropping(self):
         own = comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr", cid=1)
         indep = comment(f"{HEAD}\n\nVERDICT: fail", user="reviewer", cid=2)
-        countable, self_passes = vb.classify_verdicts(
+        countable, self_passes, _ = vb.classify_verdicts(
             [own, indep], HEAD, self.contributor_pr()
         )
         self.assertEqual([v.author for v in countable], ["reviewer"])
@@ -1252,7 +1345,7 @@ class TestAuthorXorReviewer(unittest.TestCase):
     def test_classify_without_a_pr_leaves_the_contributor_axis_off(self):
         """The default must not silently enforce a half-configured guard."""
         own = comment(f"{HEAD}\n\nVERDICT: pass", user="jeswr")
-        countable, self_passes = vb.classify_verdicts([own], HEAD)
+        countable, self_passes, _ = vb.classify_verdicts([own], HEAD)
         self.assertEqual(len(countable), 1)
         self.assertEqual(self_passes, [])
 
@@ -1324,7 +1417,11 @@ class TestAuthorXorReviewer(unittest.TestCase):
             "success",
         )
         self.assertTrue(parsed.contributors_complete)
-        self.assertEqual(parsed.contributors, frozenset({"jeswr", "claude", "codex", "web-flow"}))
+        self.assertEqual(parsed.contributors, frozenset({"claude", "codex", "web-flow"}))
+        self.assertNotIn(
+            "jeswr", parsed.contributors, "the OPENER must not be a refusal signal"
+        )
+        self.assertEqual(parsed.opener, "jeswr", "but it must still be reported")
 
 
 class TestCrossPolicyConsistency(unittest.TestCase):
