@@ -198,10 +198,15 @@ with no synthesized value** — it has nothing to do with the RDF graph slot.
    erased `Term`, that alone admits a literal, so the graph slot needs two checks, neither of which
    exists today:
    - **Compile time, where it is decidable.** In the clause compiler, reject a `@g` expression
-     whose *syntactic* form cannot produce a graph name — a `literal(..)` or `tt(..)` call, or a
-     string-literal constant — with an error naming the grammar position. This is a partial check
-     by construction: a `@g` that is a production call or a binding is erased to `term` and cannot
-     be decided statically without the semantic-type retention that v0.1 does not have.
+     whose *syntactic* form cannot produce a graph name — a `literal(..)` or `tt(..)` call — with
+     an error naming the grammar position. A **string-literal constant is not** one of those
+     forms and must keep compiling: `termArg()` coerces a `str` to a `NamedNode` (see *What the
+     v0.1-surface implementation costs* above), so `@ "http://example/g"` already denotes an IRI
+     graph label, which is in `GraphName`'s value space. Rejecting it would narrow the accepted
+     *grammar language* rather than the graph-term value space — the filter has to be
+     acceptance-preserving, not merely conservative. This is a partial check by construction: a
+     `@g` that is a production call or a binding is erased to `term` and cannot be decided
+     statically without the semantic-type retention that v0.1 does not have.
    - **Emission time, for the rest.** `emit_q` takes the graph argument through a fallible
      `Term -> GraphName` conversion and raises a parse error with a stable code (the generated
      parser already carries stable codes such as `UNDECLARED_PREFIX` and `MAXDEPTH`) when the term
@@ -230,10 +235,14 @@ with no synthesized value** — it has nothing to do with the RDF graph slot.
    fixture beside the existing one and assert the artifact contract on the quad path (`pub struct
    Quad`, `pub enum GraphName`, `pub fn parse_to_quads`, `None` graph for `@g`-free emits,
    std-only, no `unsafe`), plus the byte-identity of the triple artifacts. The value-space rule of
-   step 3 needs its own **negative** tests, in *both* backends, or it is a comment rather than a
-   gate:
+   step 3 needs its own tests — **negative and positive** — in *both* backends, or it is a comment
+   rather than a gate:
    - a grammar whose `@g` is a `literal(..)` and one whose `@g` is a `tt(..)` triple term must be
      **rejected at generation time**, with the error naming the grammar position;
+   - a grammar whose `@g` is a **string-literal constant** must **generate cleanly**, and its
+     parser must yield `Some(GraphName::NamedNode(..))` on an input that reaches the emit — the
+     positive witness that the compile-time filter is acceptance-preserving for the
+     `str`→`NamedNode` coercion, rather than only that it rejects the two bad forms;
    - a grammar whose `@g` is an erased production call returning a literal must produce a
      generated parser that **errors with the stable graph-name code** on an input that reaches it —
      a behavioural witness, like the `@maxdepth` boundary test, not a pattern match on the
