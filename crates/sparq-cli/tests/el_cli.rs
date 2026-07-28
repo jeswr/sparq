@@ -70,11 +70,27 @@ const CONJUNCTION: &str = r#"
 [ owl:intersectionOf ( :C :E ) ] rdfs:subClassOf :D .
 "#;
 
+/// `Bad ⊑ ∃age.(xsd:integer, [18, 10])` — a CONCRETE-DOMAIN axiom that is squarely INSIDE the
+/// OWL 2 EL profile. With `sparq-reason-el/cdomain` the empty facet range is ⊑ ⊥ (CR7) and the
+/// clash propagates to `Bad` (CR5); the CLI's `el` feature does NOT enable `cdomain`, so the
+/// axiom is deferred instead. Fixture mirrors `sparq-reason-el/tests/cdomain.rs`.
+const CONCRETE_DOMAIN: &str = r#"
+@prefix : <http://ex/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+:Bad rdfs:subClassOf
+  [ owl:onProperty :age ; owl:someValuesFrom
+    [ owl:onDatatype xsd:integer ;
+      owl:withRestrictions ( [ xsd:minInclusive 18 ] [ xsd:maxInclusive 10 ] ) ] ] .
+"#;
+
 const SUB_CLASS_OF: &str = "<http://www.w3.org/2000/01/rdf-schema#subClassOf>";
 const SUB_PROPERTY_OF: &str = "<http://www.w3.org/2000/01/rdf-schema#subPropertyOf>";
 
-/// `classify` materializes the complete lattice, reports it as `name<TAB>value` lines on
-/// stdout, and (with `out.nt`) writes the augmented graph as N-Triples.
+/// `classify` materializes the lattice (complete for the E1+E2 fragment the CLI's `el` feature
+/// enables — `rbox` on, `cdomain` off), reports it as `name<TAB>value` lines on stdout, and
+/// (with `out.nt`) writes the augmented graph as N-Triples.
 #[test]
 fn classify_emits_the_existential_subsumption() {
     let dir = scratch("classify");
@@ -92,6 +108,34 @@ fn classify_emits_the_existential_subsumption() {
     assert!(
         closure.contains(&format!("<http://ex/A> {SUB_CLASS_OF} <http://ex/D> .")),
         "the CR4 subsumption A ⊑ D must be materialized: {closure}"
+    );
+}
+
+/// The HONESTY witness for the narrowed capability claim: the CLI's `el` feature is E1+E2
+/// (`rbox` on, `cdomain` OFF), so a *valid EL* concrete-domain axiom is counted in
+/// `skipped_axioms` and NOT applied — `Bad ⊑ ∃age.(xsd:integer, [18, 10])` stays satisfiable
+/// here even though CR7+CR5 would refute it with `cdomain` on. This is why the README / skills
+/// scope the CLI surface to E1+E2 rather than claiming complete OWL 2 EL classification. If a
+/// later change forwards `cdomain`, this test goes red and the docs must be re-scoped with it.
+#[test]
+fn concrete_domain_axioms_are_deferred_not_applied() {
+    let dir = scratch("cdomain-deferred");
+    let ttl = write(&dir, "ex.ttl", CONCRETE_DOMAIN);
+
+    let (code, stdout, stderr) = run3(&["classify", s(&ttl), "turtle"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        !stdout.contains("skipped_axioms\t0"),
+        "the concrete-domain axiom must be COUNTED as skipped without `cdomain`: {stdout}"
+    );
+    assert!(
+        stdout.contains("unsatisfiable_classes\t0"),
+        "without `cdomain` the empty [18, 10] range is never decided, so Bad is not refuted \
+         — the documented incompleteness: {stdout}"
+    );
+    assert!(
+        stderr.contains("cdomain"),
+        "the stderr NOTE must name the `cdomain` deferral, not blame constructs outside EL: {stderr}"
     );
 }
 

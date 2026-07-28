@@ -128,6 +128,14 @@ diff = []
 # `owl:TransitiveProperty`). OFF by default: the default CLI build carries no EL code, the
 # `classify` subcommand is absent, and `--reason el` is a hard exit-2 error naming this feature —
 # never a silent fall-back to the RL profile (which is SOUND but INCOMPLETE for EL classification).
+# SCOPE — the CLI surface is E1+E2 ONLY, NOT the whole OWL 2 EL profile. `cdomain` (CR7–CR9,
+# concrete domains) is deliberately NOT forwarded, so every concrete-domain axiom a valid EL
+# ontology may use — faceted `owl:onDatatype`/`owl:withRestrictions` ranges, literal
+# `owl:hasValue`/`owl:oneOf` — is DEFERRED into `Report::skipped_axioms` and NOT applied: on such
+# an input the emitted lattice can be INCOMPLETE. `classify`/`--reason el` print the count as an
+# explanatory stderr NOTE, so the gap is reported per run, but the capability claim stays scoped
+# to the E1+E2 fragment. (Adding the CLI `cdomain` surface — plus its end-to-end test and
+# feature-matrix leg — is separate follow-up work; the library API has it today.)
 # No new third-party dependency: sparq-reason-el rides sparq-core + oxrdf + rustc-hash, all
 # already in the CLI's tree. Enable with `cargo build -p sparq-cli --features el`.
 el = ["dep:sparq-reason-el", "sparq-reason-el/rbox"]

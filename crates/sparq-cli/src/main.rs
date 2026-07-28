@@ -23,10 +23,11 @@ fn main() {
     match args.get(1).map(String::as_str) {
         Some("query") => cmd_query(&args),
         Some("reason") => cmd_reason(&args),
-        // [OPUS-5] (sq-2ch27, Phase E6) `classify` materializes the COMPLETE OWL 2 EL
-        // subsumption lattice (`sparq-reason-el`) — the class hierarchy OWL 2 RL is sound but
-        // silently incomplete for. Gated behind the opt-in `el` feature: the default CLI build
-        // carries no EL code, so the subcommand is only present under `--features el`.
+        // [OPUS-5] (sq-2ch27, Phase E6) `classify` materializes the OWL 2 EL subsumption lattice
+        // (`sparq-reason-el`, `rbox` on / `cdomain` off — complete for the E1+E2 fragment, with
+        // concrete-domain axioms deferred into `skipped_axioms`) — the class hierarchy OWL 2 RL is
+        // sound but silently incomplete for. Gated behind the opt-in `el` feature: the default CLI
+        // build carries no EL code, so the subcommand is only present under `--features el`.
         #[cfg(feature = "el")]
         Some("classify") => cmd_classify(&args),
         Some("bench") => cmd_bench(&args),
@@ -965,10 +966,14 @@ fn load_n3(path: &str) -> sparq_core::Graph {
     apply_store_profile(sparq_core::Graph::from_parts(dict, triples), store_profile_from_env())
 }
 
-/// [OPUS-5] (sq-2ch27, Phase E6) Parse `path` and materialize the COMPLETE OWL 2 EL
-/// subsumption lattice into the parsed triples via `sparq_reason_el::classify_graph`, returning
-/// the `(Dict, triples)` pair plus the classifier's [`sparq_reason_el::Report`]. Shared by the
-/// `--reason el` load path and the `classify` subcommand so the two cannot drift.
+/// [OPUS-5] (sq-2ch27, Phase E6) Parse `path` and materialize the OWL 2 EL subsumption lattice
+/// into the parsed triples via `sparq_reason_el::classify_graph`, returning the `(Dict, triples)`
+/// pair plus the classifier's [`sparq_reason_el::Report`]. Shared by the `--reason el` load path
+/// and the `classify` subcommand so the two cannot drift.
+///
+/// SCOPE: the CLI pulls `sparq-reason-el` with `rbox` but WITHOUT `cdomain`, so the lattice is
+/// complete for the E1+E2 fragment (CR1–CR6 class saturation + the CR10/CR11 role automaton),
+/// NOT for OWL 2 EL as a whole — concrete-domain axioms are deferred, not applied.
 ///
 /// Everything the classifier could NOT reason over is reported on stderr rather than swallowed:
 /// EL is SOUND but complete only for the fragment it recognises, so a non-zero `skipped_axioms`
@@ -998,9 +1003,12 @@ fn el_classify_parts(
     );
     if report.skipped_axioms > 0 {
         eprintln!(
-            "  NOTE: {} class axiom(s) used a construct OUTSIDE the recognised EL fragment and were NOT applied\n\
-             \x20       (union / complement / allValuesFrom / cardinality / multi-individual oneOf need a\n\
-             \x20        different calculus) — the lattice may be INCOMPLETE for those axioms.",
+            "  NOTE: {} class axiom(s) used a construct this build does NOT reason over and were NOT applied\n\
+             \x20       — either outside EL entirely (union / complement / allValuesFrom / cardinality /\n\
+             \x20         multi-individual oneOf, which need a different calculus), or IN OWL 2 EL but\n\
+             \x20         deferred here: this CLI enables `rbox` and NOT `cdomain`, so every concrete-domain\n\
+             \x20         axiom (faceted owl:onDatatype/owl:withRestrictions, literal owl:hasValue/owl:oneOf)\n\
+             \x20         is skipped. The lattice may be INCOMPLETE for those axioms.",
             report.skipped_axioms
         );
     }
@@ -1026,7 +1034,8 @@ fn el_classify_parts(
 /// [OPUS-5] (sq-2ch27, Phase E6) The `--reason el` load path: classify, then build the graph
 /// from the lattice-augmented triples. The derived `rdfs:subClassOf` / `rdfs:subPropertyOf`
 /// edges are ordinary triples, so the subsequent query is plain BGP evaluation — exactly like
-/// the RL `scm-*` output, just complete for EL.
+/// the RL `scm-*` output, just complete for the E1+E2 fragment (see `el_classify_parts` for the
+/// `cdomain` deferral that keeps this short of full OWL 2 EL).
 #[cfg(feature = "el")]
 fn load_el_classified(path: &str, format: &str) -> sparq_core::Graph {
     let (dict, triples, _) = el_classify_parts(path, format);
