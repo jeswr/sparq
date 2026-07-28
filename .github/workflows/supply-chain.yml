@@ -244,13 +244,16 @@ jobs:
       # parses CVSS v4.0 advisories, so the freshly-cloned RustSec DB loads and the
       # per-advisory `ignore` rules apply as intended. The deny.toml policy is fail-closed:
       # `yanked = "deny"` and (advisories v2) every unignored advisory FAILS the check;
-      # only the two justified `unmaintained` ignores (paste / rustls-pemfile, each with a
-      # documented reason + tracking bead) are tolerated. A REAL vulnerability or a yanked
-      # crate now blocks the PR. Verified: removing either justified ignore makes
-      # `cargo deny check advisories` exit non-zero ("advisories FAILED"); with the ignores
-      # in place it is "advisories ok". This is the PR-time gate; the daily watchdog
+      # only the justified ignores in `deny.toml [advisories].ignore` (each with a documented
+      # reason + tracking bead) are tolerated. A REAL vulnerability or a yanked crate now
+      # blocks the PR. Verified: removing a justified ignore makes `cargo deny check advisories`
+      # exit non-zero ("advisories FAILED"); with the ignores in place it is "advisories ok".
+      # This is the PR-time gate; the daily watchdog
       # (dependency-monitoring.yml) remains as defence-in-depth for advisories disclosed
       # between PRs.
+      # [OPUS-5] The preferred remediation is REMOVING the dependency, not adding an ignore —
+      # sq-5ah3p retired RUSTSEC-2025-0134 (`rustls-pemfile`) that way, migrating the mTLS PEM
+      # parse onto `rustls-pki-types`' `PemObject`.
       - name: cargo-deny check (advisories) — GATING
         if: steps.changes.outputs.rust_changed == 'true'
         run: cargo deny check advisories

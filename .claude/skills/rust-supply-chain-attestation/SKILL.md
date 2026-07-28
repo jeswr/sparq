@@ -47,14 +47,19 @@ can't parse the vendored `spargebra`, which needs `edition2024` / cargo >= 1.85)
   crates.io allowed. The vendored `spargebra` is a `[patch.crates-io]` PATH source
   (a path patch is not a registry/git source, so it doesn't trip the gate);
   `allow-git = []` is the hook for any deliberately-allowed future git source.
-- **Advisories ignore list:** currently **empty** — reserved for `unmaintained`
-  *informational* advisories on transitive deps with no safe upgrade, each with a
-  `reason` + tracking bead. A real **vulnerability** or a **yanked** crate FAILS the
-  gate. Both former ignores were retired: `paste` via wgpu (sq-l8bv, RUSTSEC-2024-0436)
-  left the tree when the GPU stack dropped it; `rustls-pemfile` via ureq (sq-g2xs,
-  RUSTSEC-2025-0134) was eliminated by migrating the federation HTTP client ureq 2 →
-  ureq 3 (whose `rustls-native-certs 0.8` no longer depends on the archived crate). The
-  gate now re-flags any regression that reintroduces either.
+- **Advisories ignore list:** reserved for `unmaintained` *informational* advisories,
+  and for advisories reachable only through a transitive dep with no fixed upstream
+  release — each with a `reason` + tracking bead. A real, fixable **vulnerability** or a
+  **yanked** crate FAILS the gate. Read `deny.toml [advisories].ignore` for the live set;
+  do not quote a count from here. **Prefer removing the dependency to ignoring it** —
+  the ignore list has shrunk that way three times: `paste` via wgpu (sq-l8bv,
+  RUSTSEC-2024-0436) left when the GPU stack dropped it (it later returned via parquet);
+  `rustls-pemfile` via ureq (sq-g2xs, RUSTSEC-2025-0134) left when the federation HTTP
+  client moved ureq 2 → ureq 3; and when the solid-server-rs import brought
+  `rustls-pemfile` back for its mTLS PEM parse, sq-5ah3p ([OPUS-5]) removed it again by
+  migrating that parse to `rustls-pki-types`' `PemObject` — dropping the ignore, the VEX
+  statement and the cargo-vet exemption in ONE change, which is what the `vex-deny-sync`
+  gate requires. The gate re-flags any regression that reintroduces the crate.
 
 ### The advisories-gate gap (GX-1 — know this)
 `cargo deny check advisories` is currently **`continue-on-error` (non-gating)**:
