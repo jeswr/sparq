@@ -119,9 +119,12 @@ than a fourth restatement of the data-model tests.
 `@jeswr/sparq` carries a type reference to a package npm never installed for the consumer.
 
 **This is the epic's own headline claim failing at the package boundary**: "TS bindings that extend
-the RDF/JS types" only holds for a consumer who happens to depend on `@rdfjs/types` themselves.
-Consumers with `skipLibCheck` (the common default) will not see an error — they will silently get
-degraded types, which is the worse failure.
+the RDF/JS types" only holds for a consumer who happens to depend on `@rdfjs/types` themselves. How
+loudly it fails for everyone else was *not* established here: an unresolved import inside a `.d.ts`
+is a module-resolution diagnostic, which is not the same thing as the declaration-file *type*
+checking `skipLibCheck` disables, so it may well still be reported. Whether such a consumer gets a
+hard error or silently degraded types needs a fresh-consumer fixture (§ 7) — but under either
+outcome the claim above does not hold.
 
 It is a decision, not a typo, because sparq deliberately keeps the runtime dependency tree at
 `{fzstd}` so the published-client CycloneDX SBOM stays clean (`.github/workflows/js.yml:100-110`
@@ -129,15 +132,25 @@ records that policy). Options:
 
 | option | effect on the SBOM | effect on consumers |
 |---|---|---|
-| `dependencies` | adds a types-only package to the published runtime tree | always works; matches what most RDF/JS libraries do |
-| `peerDependencies` (+ `peerDependenciesMeta.optional`) | stays out of the runtime tree | npm 7+ auto-installs it; optional-marking avoids a hard failure for JS-only consumers |
+| `dependencies` | adds a types-only package to the published runtime tree (it ships no executable code, but it *is* an SBOM component) | always resolves; matches what most RDF/JS libraries do |
+| `peerDependencies`, **not** optional | stays out of the published runtime tree | npm 7+ auto-installs it, so it resolves — at the cost of a hard unmet-peer failure on version conflict, and pnpm does not auto-install peers by default |
+| `peerDependencies` + `peerDependenciesMeta.optional` | stays out of the runtime tree | **not** auto-installed — npm skips optional peers entirely — so a consumer who installs only `@jeswr/sparq` is exactly where they started |
+| vendor the used declarations into `dist/` | clean | always resolves, but sparq's types then *restate* rather than extend RDF/JS's, and must be kept in sync |
 | leave as-is | clean | the claim above is not true for a fresh consumer |
 
-`peerDependencies` is the recommendation — it preserves the SBOM property that the CI comment says
-was deliberately bought, and it is honest about the relationship (sparq's types *extend* theirs). The
-choice is the maintainer's; `js/guardrails/check-package.mjs` should then grow a check that every
-module named by an emitted `.d.ts` import is declared somewhere in the manifest, so this class of
-drift cannot recur silently.
+There is no option that keeps the runtime tree at `{fzstd}` *and* satisfies definition-of-done (iii)
+below without a caveat, so this is a genuine tradeoff for the maintainer rather than a recommendation
+this record can make for them:
+
+- to hold (iii) as written — types resolve for a consumer who installs only `@jeswr/sparq` — the
+  choices are `dependencies` or vendoring;
+- to keep the SBOM at `{fzstd}`, the choice is a non-optional peer (resolves under npm 7+ only) or an
+  optional peer with (iii) *weakened* to "resolves for a consumer who also installs the declared
+  optional peer". An optional peer must not be sold as an auto-installed fix; it is not one.
+
+Whichever is chosen, `js/guardrails/check-package.mjs` should grow a check that every module named by
+an emitted `.d.ts` import is declared somewhere in the manifest, so this class of drift cannot recur
+silently.
 
 ### G5 — nothing ratchets
 
@@ -170,9 +183,13 @@ is unwired throughout. That is a *good* position, honestly stated — and materi
 Ordered so each phase is independently mergeable and de-risks the next. Sizes are relative effort,
 not estimates in time.
 
-1. **Packaging truth (S).** Move `@rdfjs/types` to `peerDependencies` (pending the § G4 decision) and
-   extend `js/guardrails/check-package.mjs` with an "every `.d.ts` import is a declared dependency"
-   assertion. Acceptance: the guardrail fails on a deliberately-undeclared type import.
+1. **Packaging truth (S).** Declare `@rdfjs/types` in the manifest — as `dependencies` if (iii) is
+   kept as written, or as a peer with (iii) weakened accordingly (the § G4 tradeoff is the
+   maintainer's call and blocks this phase) — and extend `js/guardrails/check-package.mjs` with an
+   "every `.d.ts` import is a declared dependency" assertion. Acceptance: the guardrail fails on a
+   deliberately-undeclared type import, **and** a fresh-consumer fixture that installs only the
+   packed tarball typechecks (with and without `skipLibCheck`), which is also what settles the § G4
+   question of how the current state fails.
 2. **One emitter, conformant (M).** Extract the full emitter surface `ResultStream` already
    implements into a shared internal base; make `QuadStream` and `ArrayQuadStream` use it; delete
    both `as unknown as RDF.Stream` casts so the assignability is compiler-checked. Settle and
@@ -210,8 +227,10 @@ suggests, but not a finished one.
 
 ## 6. Open questions for the maintainer
 
-1. **`peerDependencies` or `dependencies` for `@rdfjs/types`?** § G4 recommends peer to protect the
-   `{fzstd}`-only runtime SBOM, but that is your policy call, and it is the one item blocking phase 1.
+1. **`dependencies`, a peer, or vendoring for `@rdfjs/types`?** § G4 shows no option protects the
+   `{fzstd}`-only runtime SBOM *and* satisfies definition-of-done (iii) unconditionally — so this is a
+   choice between the SBOM property and (iii) as written. It is your policy call, and it is the one
+   item blocking phase 1.
 2. **Is a private mocha lane acceptable** (§ G1 / phase 4) to get an independent oracle, given the
    harness's zero-dependency promise is about *consumers* and would be untouched?
 3. **`read()` vs `data` (§ G2.2)** — deliver every quad to both (ArrayQuadStream's behaviour), or
@@ -230,6 +249,10 @@ suggests, but not a finished one.
 - **`dist/*.d.ts` was not inspected** — the emitted-import claim in § G4 is derived from the source
   imports plus `declaration: true`, which is a sound inference but not a first-hand look at a built
   artifact. Confirm with one `tsc` run before acting on phase 1.
+- **No fresh-consumer install was performed**, so § G4 states *that* the type reference is undeclared,
+  not what a consumer observes: whether an unresolved `.d.ts` import surfaces as an error or as a
+  silent degradation to `any`, and whether `skipLibCheck` changes that, is unverified. The fixture in
+  phase 1 is what would settle it.
 - **No network.** The exact contents of the current upstream `@rdfjs/data-model` test export, and the
   present wording of the stream and query specs, were not re-read; § G1 and § G3 rely on the
   in-repo lockfile entry and on the harness's own description of the prior art. Re-read both before
