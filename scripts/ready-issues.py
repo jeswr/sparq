@@ -46,6 +46,19 @@ IN_FLIGHT_STATUS = {"status:in-progress", "status:in-progress-review"}
 # advance autonomously, so they must not reserve an area indefinitely. Removing the label in a
 # later snapshot restores occupancy immediately; there is no remembered park state.
 PARKED_AREA_LABELS = {"needs:user", "review:needs-user", "status:blocked"}
+# [OPUS-5] sparq#4819. The MACHINE park — set by the registry's park policy when the review loop
+# runs out of rounds — is DELIBERATELY not in PARKED_AREA_LABELS. Unlike the three human-owned
+# labels above, a machine park can be lifted by the machine on any tick, so "cannot advance
+# autonomously" is not true of it by definition and its area must NOT be released on the label
+# alone. It is released only against a POSITIVE, per-row proof of inertness (`INERT_FIELD`), which
+# the two partition legs must agree on; see `is_provably_inert`.
+MACHINE_PARK_PR_LABEL = "review:parked"
+# The field on an occupancy row that carries that proof. It is NOT derived here: the registry's
+# `_pull_inactivity_decision` (scripts/dispatch-claim.py) is the ONE implementation of "is this PR
+# provably inert", and this engine CONSUMES its answer rather than minting a second one — two
+# partition legs disagreeing about the same PR is the whole defect sparq#4819 describes. Absent,
+# non-boolean, or False ⇒ the row keeps holding its areas (fail closed).
+INERT_FIELD = "inert"
 # [OPUS-4.8] an epic is a tracking umbrella (its children are the work) — never dispatchable, even
 # with a full ready label-set + zero blockers. Excluded here so a worker never "implements" an epic.
 NON_DISPATCHABLE = "kind:epic"
@@ -312,9 +325,48 @@ def is_parked(labels):
     return bool(labels & PARKED_AREA_LABELS)
 
 
+def is_provably_inert(artifact):
+    """Whether the SNAPSHOT PRODUCER attested that this PR row cannot advance or land.
+
+    [OPUS-5] sparq#4819. STRICTLY a consumer of the registry's `_pull_inactivity_decision`, whose
+    answer arrives on the row as `INERT_FIELD`. That predicate proves one thing and only one
+    thing — a DRAFT with no latched auto-merge, coherent across the listing/detail split-snapshot
+    read — and it fails closed on every malformed, latched, non-draft, or head-mismatched shape.
+    Nothing about that proof is re-derived here, because a second implementation of it is exactly
+    the drift that let sparq's PLAN leg reserve crates the registry's CLAIM leg was freeing in the
+    same tick.
+
+    `is True` and not truthiness, deliberately: a producer that stamps a string, a dict, or 1 has
+    not proved anything, and a truthiness test would read all three as proof. Absent ⇒ False, so an
+    engine invoked WITHOUT the widened occupancy input (sparq's own `--self-test`, any standalone
+    run, a registry that has not shipped the producer yet) behaves EXACTLY as before this change.
+    """
+    return artifact.get(INERT_FIELD) is True
+
+
 def occupies_area(artifact):
-    """Whether an otherwise in-flight PR/issue occupies its areas in this snapshot."""
-    return not is_parked(labels_of(artifact))
+    """Whether an otherwise in-flight PR/issue occupies its areas in this snapshot.
+
+    [OPUS-5] sparq#4819 adds the SECOND, conditional release. The asymmetry between the two is the
+    point, not an inconsistency:
+
+    * `PARKED_AREA_LABELS` (human park) releases on the LABEL ALONE. Nobody can say when a human
+      will act, so the option the hold buys has unbounded price.
+    * `MACHINE_PARK_PR_LABEL` releases only against a per-row PROOF that the PR is a defused draft
+      with no latch. The machine can un-park on any tick, so on the label alone this would free a
+      crate a re-admitted PR resumes into.
+
+    PR ROWS ONLY. The proof is about `draft` + `auto_merge`, which no issue has; an issue carrying
+    the label keeps its areas. That is the conservative direction and it keeps this carve-out
+    exactly co-extensive with the registry leg's own (`busy_packages_of_pulls`, PR-scoped).
+    """
+    labels = labels_of(artifact)
+    if is_parked(labels):
+        return False
+    if (MACHINE_PARK_PR_LABEL in labels and "pull_request" in artifact
+            and is_provably_inert(artifact)):
+        return False
+    return True
 
 
 def _artifact_name(artifact):
@@ -611,6 +663,60 @@ def _self_test():
     unparked = {**parked, "labels": ["area:sparq-store"]}
     check("park-label removal restores snapshot occupancy",
           compute_ready([unparked, waiting], conflict_log=quiet), [])
+
+    # ---------------------------------------------------------------------------------------
+    # [OPUS-5] sparq#4819 MACHINE-PARK tripwires. EVERY row runs END-TO-END through
+    # compute_ready: an assertion that only inspects `is_provably_inert`'s shape would stay green
+    # while the call site in `occupies_area` was deleted, which is the surviving-mutant class this
+    # estate keeps measuring. The four mutants each row is written to kill are named inline, and
+    # three of them PRESERVE the structure (`is_provably_inert` still exists, still takes a row,
+    # is still called from `occupies_area`) while breaking the behaviour claimed for it.
+    # ---------------------------------------------------------------------------------------
+    def park_pr(n, extra=(), **fields):
+        row = pr(n, ["area:sparq-store", MACHINE_PARK_PR_LABEL] + list(extra))
+        row.update(fields)
+        return row
+
+    def frontier(*rows):
+        return [i["number"] for i in compute_ready(list(rows) + [waiting], conflict_log=quiet)]
+
+    # THE HEADLINE CLAIM: an ATTESTED-inert machine-parked PR releases its crate.
+    check("attested-inert review:parked PR frees its area",
+          frontier(park_pr(74, **{INERT_FIELD: True})), [20])
+    # MUTANT 1 — "just add review:parked to PARKED_AREA_LABELS" (the fix the issue forbids) and
+    # MUTANT 2 — free on the `draft` bit instead of the attestation. Both make these red: an
+    # UNATTESTED parked draft is exactly the shape both mutants would free.
+    check("review:parked with NO inertness attestation keeps holding",
+          frontier(park_pr(75)), [])
+    check("review:parked attested NOT inert keeps holding",
+          frontier(park_pr(76, **{INERT_FIELD: False})), [])
+    # MUTANT 3 — `is True` weakened to truthiness (`bool(...)`, `if artifact.get(INERT_FIELD):`).
+    # Structure-preserving: the helper, its name, and its call site all survive. A producer that
+    # stamps a string or an int has proved NOTHING and must not free a crate.
+    check("truthy-but-not-True attestations prove nothing",
+          [frontier(park_pr(77, **{INERT_FIELD: value}))
+           for value in ("yes", 1, ["proof"], {"inert": True})], [[], [], [], []])
+    # MUTANT 4 — the `and` linking label to proof turned into `or`, or the label test dropped.
+    # Structure-preserving. An inert-attested PR that is NOT machine-parked is an ordinary
+    # in-flight draft and must keep its crate.
+    check("inertness alone (no review:parked) frees nothing",
+          frontier(pr(78, ["area:sparq-store"]) | {INERT_FIELD: True}), [])
+    # MUTANT 5 — the `"pull_request" in artifact` clause dropped. An ISSUE has no draft/latch
+    # surface for the registry predicate to have proved anything about, so a stamped issue row
+    # must be ignored. In-progress so it is an occupant at all.
+    check("a machine-parked ISSUE row is never freed by an attestation",
+          frontier({**iss(79, ["status:in-progress", "area:sparq-store",
+                               MACHINE_PARK_PR_LABEL]), INERT_FIELD: True}), [])
+    # The carve-out must not have widened CANDIDATE enumeration (sparq#4819 constraint: 386
+    # candidates is correct). `review:parked` is deliberately absent from PARKED_AREA_LABELS, so
+    # it is not an exclusion reason — adding it there to "simplify" reds this AND the four rows
+    # above that depend on the unconditional-free behaviour it would introduce.
+    check("review:parked is not a candidate-exclusion reason",
+          exclusion_reason(set(R + ["priority:P1", MACHINE_PARK_PR_LABEL])), None)
+    parked_logs = []
+    compute_ready([park_pr(80), waiting], conflict_log=parked_logs.append)
+    check("an unattested park still names itself in the conflict log",
+          parked_logs, ["conflict #20: area sparq-store held by pr#80"])
 
     active = pr(71, ["area:sparq-store", "review:changes"])
     active_logs = []
