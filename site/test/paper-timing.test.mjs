@@ -394,6 +394,17 @@ test("the source gate rejects every known way to publish a bare timing value", (
       '#str(d.records.at("timing.sp2b.sparq.q01").value)\n',
     // ...and reached as raw text rather than parsed data.
     "raw-read.typ": '#let s = read("/src/data/paper-" + "timing.generated.json")\n#s.len()\n',
+    // ...and CONSTRUCTED reflectively, so the source spells no loader name at all: `eval` builds
+    // `json` from fragments and the path is assembled from fragments too. No loader-name rule can
+    // see this, which is why the reflective construct itself is refused.
+    "reflective-eval.typ":
+      '#let grab = eval("j" + "son", mode: "code")\n' +
+      '#let d = grab("/src/data/paper-" + "timing.generated.json")\n' +
+      '#str(d.records.at("timing.sp2b.sparq.q01").value)\n',
+    // ...same, via the std namespace, which the loader-call lookbehind skips as a field access.
+    "std-namespace-loader.typ":
+      '#let d = std.json("/src/data/paper-" + "timing.generated.json")\n' +
+      '#str(d.records.at("timing.sp2b.sparq.q01").value)\n',
     // A computed module path defeats the literal-path import rules, so it is refused outright.
     "computed-import.typ": '#import "_lib/timing" + ".typ": headline_timing\n',
   };
@@ -406,7 +417,10 @@ test("the source gate rejects every known way to publish a bare timing value", (
   const ok = auditFixturePapers({
     "good.typ":
       '#import "_lib/timing.typ": headline_timing, timing_provenance\n' +
-      'q01 runs in #headline_timing("timing.sp2b.sparq.q01").\n',
+      'q01 runs in #headline_timing("timing.sp2b.sparq.q01").\n' +
+      // The reflection rule matches code position only, so SPARQL notation stays writable: real
+      // papers say eval(P) in prose and `eval(P)` in raw spans, neither of which evaluates.
+      'A solution mapping is in eval(P) iff it is in `eval(Join(P1,P2))`.\n',
   });
   assert.deepEqual(ok.problems, [], "the provenance-rendering accessors must remain usable");
 });

@@ -23,12 +23,21 @@
 // implementations that must load data are allowed exactly one pinned expression each
 // (`EXEMPT` / `AUDITED_LOADER_LINES`), so the exemption cannot widen unnoticed.
 //
+// WHY REFLECTION IS REFUSED TOO: a lexical gate cannot see a name assembled at runtime —
+// `#let grab = eval("j" + "son", mode: "code")` yields the loader while spelling neither `json`
+// nor the timing path, and `std.json(…)` reaches it through the standard-library namespace
+// instead of the bare binding. Neither can be matched by looking for a loader name, so the
+// reflective constructs THEMSELVES (`eval`, `std`) are refused in a paper source, in code
+// position — `eval(P)` as SPARQL notation in prose or a raw span is untouched, since neither
+// evaluates. So a paper cannot manufacture a loader out of fragments it never names, and the
+// only modules it may pull in are the local `_lib/` ones this same scan covers.
+//
 // HONEST SCOPE: this is a SOURCE-TEXT check over `site/papers/**/*.typ`. It bounds the paper
-// surface the factory compiles; it is not a Typst-level capability system. It reads the raw
-// text, so a loader name hidden inside a string literal handed to `#eval` is still matched, but
-// a name assembled from fragments at runtime is beyond a lexical gate — the structural backstop
-// for that is that such a paper still cannot reach a value without naming a loader somewhere.
-// It also says nothing about whether a rendered number is FRAMED honestly (that stays the
+// surface the factory compiles; it is not a Typst-level capability system — a structural
+// boundary in which paper compilation simply cannot address the raw timing JSON would be
+// stronger. Within its lexical means it is fail-closed: loader calls, loader aliases, computed
+// import paths, and the reflective constructs that could manufacture any of them are all
+// refused. It says nothing about whether a rendered number is FRAMED honestly (that stays the
 // Stage-5 claims↔evidence review in `skills/academic-paper/SKILL.md`).
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
@@ -57,6 +66,16 @@ const LOADER_CALL = new RegExp(`(?<![A-Za-z0-9_.])(${LOADER_LIST})\\s*\\(`, "g")
 // sees it once the binding is aliased, so the binding position is matched too.
 const LOADER_ALIAS = new RegExp(
   `#let\\s+[A-Za-z_][A-Za-z0-9_]*\\s*=\\s*(${LOADER_LIST})\\b\\s*(?!\\()`,
+  "g",
+);
+// Reflective routes to a loader that never spell its name: `eval` (code evaluation) and `std`
+// (the standard-library namespace, which `LOADER_CALL`'s lookbehind deliberately skips over as a
+// field access). Papers discuss `eval(P)` as SPARQL notation in prose, so the token is matched
+// only in code position — directly after `#`, `=`, `(`, `,`, `{`, `;` or `:` — which is where
+// Typst would actually evaluate it, and never after a space or a backtick as prose does.
+const REFLECTIVE = ["eval", "std"];
+const REFLECTIVE_CONSTRUCT = new RegExp(
+  `[#=(,{;:]\\s*(${REFLECTIVE.join("|")})(?![A-Za-z0-9_])`,
   "g",
 );
 // The evidence libraries genuinely have to load data — that is what they are. Each is allowed
@@ -141,6 +160,17 @@ export function auditTimingSources(papersDir) {
             "/ timing_provenance(key).",
         );
       }
+    }
+    // ...and may not manufacture one reflectively either, which no loader-name rule can see.
+    for (const m of src.matchAll(REFLECTIVE_CONSTRUCT)) {
+      const line = lineAt(src, m.index);
+      if (audited.some((ok) => ok.test(line))) continue;
+      problems.push(
+        `${rel}: uses the reflective construct '${m[1]}' (\`${line}\`). Code evaluation and the ` +
+          "std namespace yield a data loader without ever naming it, so a paper source may not " +
+          "use them in code position. Render measured numbers via headline_timing(key) / " +
+          "timing_provenance(key); for SPARQL notation in prose, write `eval(P)` as raw text.",
+      );
     }
     // ...and an import path must be a literal, so the check below can actually see it.
     for (const m of src.matchAll(ANY_IMPORT)) {

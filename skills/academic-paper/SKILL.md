@@ -201,10 +201,14 @@ corpus, queries and commit the cited envelope measured.
      lib, never the whole module, and may not load data from disk *at all* — the rule is on
      Typst's loader builtins (`json`/`read`/`csv`/…) and on non-literal `#import` paths, not on
      the file name, because `json("/src/data/paper-" + "timing.generated.json")` spells neither.
+     A loader can also be *manufactured* without naming it (`eval("j" + "son", mode: "code")`, or
+     reached as `std.json(…)`), which no loader-name rule can see, so those reflective constructs
+     are themselves refused in code position — prose/raw `eval(P)` notation stays writable.
      The two evidence libraries that must load data get one pinned, audited expression each.
      Unit tests run negative fixtures (raw-data import, internal accessor, wildcard, direct
-     `json()`, concatenated path, aliased loader, raw `read()`, computed `#import`) through that
-     gate and require each to fail.
+     `json()`, concatenated path, aliased loader, reflective `eval`, `std`-qualified loader, raw
+     `read()`, computed `#import`) through that gate and require each to fail. Honest scope: a
+     source-text gate over the compiled paper sources, not a Typst capability sandbox.
 
    Deliberately **not** provided: any ratio / speed-up helper. A cross-engine ratio is a *claim*
    needing prose framing (which corpus, which queries, what was excluded), so it belongs in the
