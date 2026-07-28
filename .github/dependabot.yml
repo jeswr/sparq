@@ -71,10 +71,11 @@ updates:
           - "version-update:semver-minor"
           - "version-update:semver-major"
       # [OPUS-5] #4572: do NOT let Dependabot version-bump the SLSA trusted builder.
-      # `slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml`
-      # is referenced by TAG in all three isolated-provenance lanes (release.yml#provenance,
-      # release.yml#provenance-artifacts, dist.yml#provenance) — the ONE documented exception
-      # to this repo's SHA-pin convention, because the generator derives the trusted-builder
+      # Both of its reusable builders are referenced by TAG, on ONE shared tag, across the four
+      # isolated-provenance lanes: `generator_generic_slsa3.yml` in release.yml#provenance,
+      # release.yml#provenance-artifacts and dist.yml#provenance, and (#4635)
+      # `generator_container_slsa3.yml` in release.yml#provenance-container — the ONE documented
+      # exception to this repo's SHA-pin convention, because the generator derives the trusted-builder
       # identity baked into the provenance (the identity `slsa-verifier` matches a consumer
       # policy against) from its own `@ref`. Moving that tag changes the builder identity every
       # downstream verification policy is written against, so it is a TRUST decision taken

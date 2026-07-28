@@ -1,8 +1,11 @@
 # Quarterly deliberate-review tick for the ONE tag-pinned action reference in this repo:
-# `slsa-framework/slsa-github-generator`'s generic generator, called by the three isolated
-# provenance lanes (`release.yml#provenance`, `release.yml#provenance-artifacts`,
-# `dist.yml#provenance`). See compliance/slsa/trusted-builder-pin-policy.md for the decision
-# this workflow mechanises. [OPUS-5] #4572
+# `slsa-framework/slsa-github-generator`, called by the four isolated provenance lanes — its
+# GENERIC generator by `release.yml#provenance`, `release.yml#provenance-artifacts` and
+# `dist.yml#provenance`, and its CONTAINER generator by `release.yml#provenance-container`
+# ([OPUS-5] #4635). Two reusable workflows, one trust anchor: the step below matches on the repo
+# path, so both flavours are swept and a lane on a second tag fails the job closed. See
+# compliance/slsa/trusted-builder-pin-policy.md for the decision this workflow mechanises.
+# [OPUS-5] #4572
 #
 # WHY THIS EXISTS. Every other third-party action in the repo is SHA-pinned and swept weekly by
 # Dependabot. This one deliberately is not — the builder identity baked into the provenance
@@ -21,7 +24,7 @@
 #
 # NOT A GATE. Schedule + dispatch only, so it never produces a check-run on a PR and is invisible
 # to the `ci-summary / gate` aggregator (hence no `.github/advisory-registry.json` entry). The
-# structural half of this policy — all three lanes on one tag, the Dependabot ignore intact, this
+# structural half of this policy — all four lanes on one tag, the Dependabot ignore intact, this
 # workflow still scheduled — IS enforced on every PR by
 # scripts/tests/test_release_slsa_l3_provenance.py.
 #
@@ -140,13 +143,15 @@ jobs:
               '- [ ] Read the upstream release notes and the diff between the two tags, focusing on the',
               '      signing path and any change to the builder identity string.',
               '- [ ] Confirm the new tag is a stable release (not a pre-release/RC) and is the version',
-              '      upstream currently recommends for `generator_generic_slsa3.yml`.',
+              '      upstream currently recommends for BOTH `generator_generic_slsa3.yml` and',
+              '      `generator_container_slsa3.yml`.',
               '- [ ] Confirm any published consumer verification guidance still matches (the',
               '      `slsa-verifier` invocation in `scripts/verify-release-provenance.sh` and the',
               '      release-notes verify command in `release.yml`).',
-              '- [ ] Update **all three** lanes together — `release.yml#provenance`,',
-              '      `release.yml#provenance-artifacts`, `dist.yml#provenance`. A partial bump is',
-              '      rejected on every PR by `scripts/tests/test_release_slsa_l3_provenance.py`.',
+              '- [ ] Update **all four** lanes together — `release.yml#provenance`,',
+              '      `release.yml#provenance-artifacts`, `dist.yml#provenance` and',
+              '      `release.yml#provenance-container`. A partial bump is rejected on every PR by',
+              '      `scripts/tests/test_release_slsa_l3_provenance.py`.',
               '- [ ] Keep it a TAG. SHA-pinning it erases the verifiable builder identity — that is the',
               '      whole reason for the exception.',
               '- [ ] Record the decision (and the date) in the review log in the policy record.',
