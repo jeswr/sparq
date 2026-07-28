@@ -1,7 +1,7 @@
 //! The neutral term model and the two comparison regimes (strict RDF equality; value-canonical
 //! keying). Engine-independent. [OPUS-4.8] sq-qcnn.4
 
-use crate::numeric::{canonical_numeric_string, parse_numeric};
+use crate::numeric::{canonical_numeric_string, order_numeric_string, parse_numeric};
 use crate::temporal::{parse_datetime, parse_duration};
 
 /// The XSD namespace prefix.
@@ -121,6 +121,56 @@ pub fn canonical_key(term: &Term) -> String {
             lang,
         } => literal_key(lexical, datatype, lang),
     }
+}
+
+/// **`ORDER BY` sort-key-equivalence key**: like [`canonical_key`], but keyed by SPARQL *ordering*
+/// equality rather than by RDF term identity. Two terms sharing this key are **tied** under
+/// `ORDER BY` (neither is `<` the other), so their relative order is unspecified and either engine
+/// may emit them in either order.
+///
+/// The implication runs one way only: this partition *refines* the tie relation, so a tied pair may
+/// still key apart (see the two unmodelled cases below). That direction is the safe one — a finer
+/// partition only splits a maximal run further, which can report a spurious divergence but can never
+/// hide a real ordering bug.
+///
+/// The one place it differs from [`canonical_key`] is **numeric promotion**: SPARQL compares numeric
+/// operands after promotion, so `1`^^`xsd:integer`, `1.0`^^`xsd:decimal` and `1.0E0`^^`xsd:double`
+/// are one tie class. [`canonical_key`] keeps the datatype in the key — right for a result *bag*,
+/// where those are three different RDF terms — and would split that class into separate maximal
+/// runs, rejecting two conforming sequences that differ only by a permitted permutation. Every
+/// numeric literal therefore folds here to one datatype-free decimal key
+/// (`crate::numeric::order_numeric_string`, whose lossy-promotion residual is documented there).
+///
+/// Deliberately unmodelled elsewhere: pairs whose `<` **errors** — a literal versus an IRI, two
+/// different language tags, `xsd:date` versus `xsd:dateTime`, `NaN`, a triple term — are ordered by
+/// an *implementation-defined* extension order that this engine-independent crate cannot know, so
+/// they keep their distinct [`canonical_key`]s. Within one datatype *this crate models* nothing
+/// more is needed: [`canonical_key`] already collapses value-equal lexical variance (`05`/`5`,
+/// `true`/`1`, same-instant dateTimes), which is exactly the same-datatype tie class. For a datatype
+/// it does not model the value space is unknown, so the exact lexical is kept and two spellings of
+/// one value split — the same conservative direction.
+pub fn order_equiv_key(term: &Term) -> String {
+    numeric_order_key(term).unwrap_or_else(|| canonical_key(term))
+}
+
+/// The datatype-free ordering key of a numeric literal; `None` for anything else (a language-tagged
+/// literal is never numeric, and no other term kind carries a numeric value space).
+fn numeric_order_key(term: &Term) -> Option<String> {
+    let Term::Literal {
+        lexical,
+        datatype,
+        lang,
+    } = term
+    else {
+        return None;
+    };
+    if lang.is_some() {
+        return None;
+    }
+    let n = parse_numeric(lexical, effective_datatype(datatype, lang))?;
+    // `N` tags no `canonical_key` variant, so a promoted numeric key can never collide with the key
+    // of a non-numeric term.
+    Some(format!("N\u{1f}{}", order_numeric_string(&n)))
 }
 
 /// Length-prefix a nested component key (`"<byte-len>\u{1f}<key>"`) so composite (triple) keys stay
@@ -266,6 +316,74 @@ mod tests {
         assert_eq!(canonical_lexical("maybe", XSD_BOOLEAN), "maybe");
         // a genuinely different value still separates.
         assert_ne!(canonical_lexical("1", XSD_INT), canonical_lexical("2", XSD_INT));
+    }
+
+    #[test]
+    fn order_equiv_key_folds_numeric_promotion_but_canonical_key_does_not() {
+        const XSD_DEC: &str = "http://www.w3.org/2001/XMLSchema#decimal";
+        const XSD_DBL: &str = "http://www.w3.org/2001/XMLSchema#double";
+        // The defect this key exists for: SPARQL orders numerics after promotion, so these three
+        // are ONE tie class whose relative order is unspecified.
+        assert_eq!(
+            order_equiv_key(&lit("1", XSD_INT)),
+            order_equiv_key(&lit("1.0", XSD_DEC))
+        );
+        assert_eq!(
+            order_equiv_key(&lit("1", XSD_INT)),
+            order_equiv_key(&lit("1.0E0", XSD_DBL))
+        );
+        // ... while the BAG key must still keep them apart (they are different RDF terms).
+        assert_ne!(
+            canonical_key(&lit("1", XSD_INT)),
+            canonical_key(&lit("1.0", XSD_DEC))
+        );
+        // A genuinely different numeric value stays a different tie class, across datatypes too.
+        assert_ne!(
+            order_equiv_key(&lit("1", XSD_INT)),
+            order_equiv_key(&lit("1.5", XSD_DEC))
+        );
+        assert_ne!(
+            order_equiv_key(&lit("1", XSD_INT)),
+            order_equiv_key(&lit("2.0", XSD_DEC))
+        );
+        // Exponent-scaled values fold to the same key regardless of which class they came from.
+        assert_eq!(
+            order_equiv_key(&lit("100", XSD_INT)),
+            order_equiv_key(&lit("1.0E2", XSD_DBL))
+        );
+        // Non-numerics fall through to `canonical_key` unchanged: a numeric never collides with a
+        // string/IRI/blank/lang literal, and `<` on those pairs ERRORS (implementation-defined
+        // order), so they must stay distinct keys.
+        assert_eq!(order_equiv_key(&lit("1", XSD_STRING)), canonical_key(&lit("1", XSD_STRING)));
+        assert_ne!(order_equiv_key(&lit("1", XSD_INT)), order_equiv_key(&lit("1", XSD_STRING)));
+        assert_ne!(order_equiv_key(&lit("1", XSD_INT)), order_equiv_key(&Term::Iri("1".into())));
+        assert_ne!(order_equiv_key(&lit("1", XSD_INT)), order_equiv_key(&langlit("1", "en")));
+        // Specials keep their own tokens (no decimal form; `<` errors on NaN).
+        assert_ne!(order_equiv_key(&lit("NaN", XSD_DBL)), order_equiv_key(&lit("INF", XSD_DBL)));
+        assert_eq!(
+            order_equiv_key(&lit("NaN", XSD_DBL)),
+            order_equiv_key(&lit("NaN", XSD_DBL))
+        );
+        // An unmodelled datatype is not numeric: exact lexical, as `canonical_key` gives.
+        assert_ne!(
+            order_equiv_key(&lit("1", "http://example.org/weird")),
+            order_equiv_key(&lit("1.0", "http://example.org/weird"))
+        );
+        // An exponent-form double still folds onto the integer of that value — i.e. the decimal
+        // re-parse handles exponent notation rather than silently falling back to the raw lexical.
+        let ten_to_300 = format!("1{}", "0".repeat(300));
+        assert_eq!(
+            order_equiv_key(&lit(&ten_to_300, XSD_INT)),
+            order_equiv_key(&lit("1E300", XSD_DBL))
+        );
+        // The documented residual of keying on EXACT value: promotion to f64 is lossy, so an
+        // integer beyond f64 precision keys apart from the double it would promote to, even though
+        // XSD `=` calls them equal. Promotion-equality is not transitive and so is not a valid
+        // relation to key on; splitting is the safe direction (a spurious diff, never a missed one).
+        assert_ne!(
+            order_equiv_key(&lit("1180591620717411303425", XSD_INT)), // 2^70 + 1
+            order_equiv_key(&lit("1180591620717411303424", XSD_DBL))  // 2^70, exact as an f64
+        );
     }
 
     #[test]

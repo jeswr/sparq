@@ -10,6 +10,9 @@
 //! rows**, because SPARQL `ORDER BY` is a *partial* order — rows equal on all sort keys may appear in
 //! any relative order across engines. Comparing the full sequence element-for-element would be wrong
 //! in general (it is only safe when the sort key is a total order over the projected variables).
+//! "Sort-key-equal" here is SPARQL *ordering* equality ([`crate::term::order_equiv_key`], which
+//! folds numeric promotion), not the bag key — keying a run by the bag key would split the tie class
+//! `1`^^`xsd:integer` / `1.0`^^`xsd:decimal` and reject a conforming permutation of it.
 //!
 //! These are pure comparators over already-normalised results. `crates/sparq-bench`'s Oxigraph
 //! fuzzer wires them to a live oracle (`sq-qcnn.5`): its `check_bindings` decides the `SELECT` bag
@@ -18,7 +21,7 @@
 //! `LIMIT` truncates a sequence whose sort key is not total over the projection.
 
 use crate::json::Solution;
-use crate::term::canonical_key;
+use crate::term::{canonical_key, order_equiv_key};
 
 /// A solution's value-canonical multiset key: the sorted `(var, term-key)` pairs held **structurally**
 /// (a `Vec` of pairs, not a delimiter-joined string). Delimiter-joining would be collision-prone — a
@@ -31,6 +34,11 @@ type SolutionKey = Vec<(String, String)>;
 /// A sort-variable-projection key: one `Option` per sort variable (`None` marks an unbound sort var, so
 /// bound-vs-unbound stays a distinct sort key), held structurally for the same anti-collision reason as
 /// [`SolutionKey`]. Drives the `ORDER BY` run partitioning.
+///
+/// Keyed by [`order_equiv_key`], **not** by [`canonical_key`]: a run is a set of rows `ORDER BY`
+/// leaves tied, and SPARQL ties numeric operands after promotion, so `1`^^`xsd:integer` and
+/// `1.0`^^`xsd:decimal` belong to one run even though they are different RDF terms (and so key
+/// differently in a [`SolutionKey`], which is a *bag* key and must keep them apart).
 type SortKey = Vec<Option<String>>;
 
 fn solution_key(sol: &Solution) -> SolutionKey {
@@ -43,7 +51,7 @@ fn solution_key(sol: &Solution) -> SolutionKey {
 fn sort_key(sol: &Solution, sort_vars: &[&str]) -> SortKey {
     sort_vars
         .iter()
-        .map(|v| sol.get(*v).map(canonical_key))
+        .map(|v| sol.get(*v).map(order_equiv_key))
         .collect()
 }
 
@@ -204,5 +212,49 @@ mod tests {
         assert!(!order_by_equal(&a, &a[..2], &["k"]));
         // empty sort key degrades to multiset equality.
         assert!(order_by_equal(&a, &b, &[]));
+    }
+
+    #[test]
+    fn order_by_ties_follow_numeric_promotion_not_the_bag_key() {
+        const XSD_DEC: &str = "http://www.w3.org/2001/XMLSchema#decimal";
+        let dec = |n: &str| Term::Literal {
+            lexical: n.to_string(),
+            datatype: XSD_DEC.to_string(),
+            lang: None,
+        };
+        // ORDER BY ?k over `1`^^xsd:integer and `1.0`^^xsd:decimal: SPARQL promotes, so neither is
+        // `<` the other — one tie run, and the two rows may permute across engines.
+        let a = vec![
+            sol(&[("k", int("1")), ("v", s("a"))]),
+            sol(&[("k", dec("1.0")), ("v", s("b"))]),
+            sol(&[("k", dec("1.5")), ("v", s("c"))]),
+        ];
+        let permuted = vec![
+            sol(&[("k", dec("1.0")), ("v", s("b"))]),
+            sol(&[("k", int("1")), ("v", s("a"))]),
+            sol(&[("k", dec("1.5")), ("v", s("c"))]),
+        ];
+        assert!(
+            order_by_equal(&a, &permuted, &["k"]),
+            "integer 1 and decimal 1.0 are ONE sort-key class; permuting them is conforming"
+        );
+        // The bag key does keep those two rows distinct — this is what makes the run partitioning a
+        // separate keying regime rather than a reuse of `solution_key`.
+        assert_ne!(canonical_key(&int("1")), canonical_key(&dec("1.0")));
+        // A nearby UNEQUAL numeric is still its own run, so a cross-run swap remains a violation
+        // even though every key now folds across datatypes.
+        let across_runs = vec![
+            sol(&[("k", dec("1.5")), ("v", s("c"))]),
+            sol(&[("k", int("1")), ("v", s("a"))]),
+            sol(&[("k", dec("1.0")), ("v", s("b"))]),
+        ];
+        assert!(!order_by_equal(&a, &across_runs, &["k"]));
+        // And the tie run's CONTENTS still have to match as a multiset.
+        let wrong_in_tie = vec![
+            sol(&[("k", int("1")), ("v", s("a"))]),
+            sol(&[("k", dec("1.0")), ("v", s("x"))]),
+            sol(&[("k", dec("1.5")), ("v", s("c"))]),
+        ];
+        assert!(!order_by_equal(&a, &wrong_in_tie, &["k"]));
     }
 }

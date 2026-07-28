@@ -96,4 +96,4 @@ pub use numeric::{canonical_double_string, numeric_equal, parse_numeric, Numeric
 pub use temporal::{
     dt_compare, duration_compare, parse_datetime, parse_duration, Duration, TemporalOrder,
 };
-pub use term::{canonical_key, term_equal_rdf, Term};
+pub use term::{canonical_key, order_equiv_key, term_equal_rdf, Term};

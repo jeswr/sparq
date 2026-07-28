@@ -173,6 +173,43 @@ pub(crate) fn canonical_numeric_string(n: &NumericValue) -> String {
     }
 }
 
+/// A stable, **datatype-free** ordering key for a numeric value, keyed **across** the three value
+/// classes: `1`^^`xsd:integer`, `1.0`^^`xsd:decimal` and `1.0E0`^^`xsd:double` all yield the same
+/// key. SPARQL orders numeric operands after **numeric promotion**, so those three are one
+/// `ORDER BY` tie class and their relative order is unspecified — unlike
+/// `canonical_numeric_string`, which keys within a class (correct for a result *bag*, where they
+/// are three different RDF terms). Used by `crate::term::order_equiv_key`.
+///
+/// A finite `xsd:double` folds through its **shortest round-trippable** decimal form, which
+/// identifies it exactly (distinct `f64`s have distinct shortest forms) and round-trips back to it,
+/// so sharing a key with an integer/decimal of that value is sound. `NaN` / `±INF` have no decimal
+/// form and keep their own tokens, which can never collide with a decimal string.
+///
+/// Honest residual: promotion to `f64` is *lossy*, so two exact values that XSD `=` calls equal
+/// only after that loss (a `BigInt` beyond `f64` precision versus the double it rounds to) keep
+/// **distinct** keys here. That is deliberate — promotion-equality is not transitive, so it is not
+/// a valid equivalence relation to key on. The result only ever splits a tie run further, which can
+/// report a spurious divergence but can never hide a real ordering bug.
+pub(crate) fn order_numeric_string(n: &NumericValue) -> String {
+    match n {
+        NumericValue::Integer(x) => normalised_decimal_string(&x.to_string()),
+        NumericValue::Decimal(x) => x.normalized().to_string(),
+        NumericValue::Double(x) if x.is_finite() => {
+            normalised_decimal_string(&canonical_double_string(*x))
+        }
+        NumericValue::Double(x) => canonical_double_string(*x),
+    }
+}
+
+/// Parse a decimal lexical and re-emit it in `BigDecimal`'s normalised form (trailing zeros and
+/// exponent folded away), so `1`, `1.0` and `1.0E0` reach one string. Falls back to the input if it
+/// does not parse — unreachable for the callers above (both hand it a decimal they just produced),
+/// and still a stable key if it ever were.
+fn normalised_decimal_string(lexical: &str) -> String {
+    BigDecimal::from_str(lexical)
+        .map_or_else(|_| lexical.to_string(), |d| d.normalized().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
