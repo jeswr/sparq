@@ -78,8 +78,11 @@ fn language_tagged_string_survives_mutation_and_readback_exactly() {
 fn malformed_lexical_forms_fail_instead_of_reading_back_a_substituted_value() {
     // A malformed lexical form is still a well-formed RDF literal, so the store accepts
     // it. The decoder is what must refuse it, and it must refuse it after a real
-    // readback rather than only on a freshly built term.
-    for lexical_form in ["12.5", "", " 7", "0x10", "1e3", "seven", "+ 1"] {
+    // readback rather than only on a freshly built term. `"+ 1"` is the interior
+    // whitespace witness: unlike the boundary padding collapsed by the whiteSpace facet
+    // (see `boundary_whitespace_is_collapsed_before_the_lexical_to_value_mapping`), a
+    // space between the sign and the digits survives the collapse and is not an integer.
+    for lexical_form in ["12.5", "", "0x10", "1e3", "seven", "+ 1"] {
         let readback = store_round_trip(Literal::new_typed_literal(lexical_form, xsd::INTEGER));
         assert_eq!(
             decode_i128(&readback),
@@ -99,6 +102,35 @@ fn malformed_lexical_forms_fail_instead_of_reading_back_a_substituted_value() {
         encode_lang_string("value", ""),
         Err(CodecError::InvalidLanguage { .. })
     ));
+}
+
+#[test]
+fn boundary_whitespace_is_collapsed_before_the_lexical_to_value_mapping() {
+    // xsd:integer fixes XML Schema's whiteSpace facet to `collapse`, so a lexical form
+    // padded with spaces, tabs, or newlines is still in the lexical space and maps to the
+    // ordinary value. Rejecting these would put the codec at odds with the query engine,
+    // which reads `" 1 "^^xsd:integer` as the value 1.
+    for (lexical_form, value) in [
+        (" 7", 7),
+        ("7 ", 7),
+        ("  7  ", 7),
+        ("\t7\n", 7),
+        ("\r\n7\t", 7),
+        (" +7 ", 7),
+        (" -7 ", -7),
+    ] {
+        let readback = store_round_trip(Literal::new_typed_literal(lexical_form, xsd::INTEGER));
+        // The store keeps the padded lexical form verbatim -- the collapse belongs to the
+        // lexical-to-value mapping, not to the term -- so this really is the padded input
+        // reaching the decoder.
+        assert_eq!(readback.value(), lexical_form);
+        assert_eq!(
+            decode_i128(&readback),
+            Ok(value),
+            "{:?} is a whitespace-collapsed xsd:integer",
+            lexical_form
+        );
+    }
 }
 
 #[test]
