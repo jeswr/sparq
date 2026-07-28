@@ -17,6 +17,11 @@
 //
 // Format guessing intentionally stays in `rdf-format.ts` (`guessFormat`) — consumers call it
 // per accepted file; this module only moves bytes.
+//
+// [OPUS-5] sq-3uzlf — consumers that must read the picked files as BINARY (the RDF import pane
+// decompresses .gz/.zip/.zst/.bz2 before parsing) call `pickFilesViaFileSystemAccess` for the
+// `File` objects and supply their own reader + `<input type="file">` fallback; `pickTextFiles`
+// is the text-reading wrapper around that same picker.
 
 /** One successfully read file: its name, full text, and on-disk size in bytes. */
 export interface IngestedFile {
@@ -130,6 +135,67 @@ interface OpenFilePickerOptions {
 
 type ShowOpenFilePicker = (options?: OpenFilePickerOptions) => Promise<PickerFileHandle[]>;
 
+/** The `File` objects a File System Access pick produced, plus any handle that would not open. */
+export interface PickedFiles {
+  files: File[];
+  rejected: RejectedFile[];
+}
+
+/**
+ * [OPUS-5] sq-3uzlf — the File System Access half of {@link pickTextFiles}, exposed on its own
+ * so callers that need the RAW `File` objects (the RDF import pane reads them as BINARY and
+ * decompresses .gz/.zip/.zst/.bz2 archives before parsing — sq-1y04h) get the native picker too,
+ * instead of being forced down an `<input type="file">` just to keep hold of the files.
+ *
+ * Resolves `null` when the File System Access path is unusable — no `showOpenFilePicker`, not a
+ * browser, or the picker failed for any reason other than a user cancel. `null` means "fall back
+ * to your own `<input type="file">`"; it is deliberately distinct from a user cancel, which
+ * resolves an EMPTY result so the caller does not open a second dialog behind the one just
+ * dismissed. Never throws.
+ *
+ * MUST be called from the synchronous prefix of a user-gesture handler (a click): the picker is
+ * invoked before this function's first `await`, so the transient activation the browser requires
+ * is still in effect.
+ */
+export async function pickFilesViaFileSystemAccess(
+  opts: PickOptions = {},
+): Promise<PickedFiles | null> {
+  if (typeof window === "undefined") return null;
+  const picker = (window as { showOpenFilePicker?: ShowOpenFilePicker }).showOpenFilePicker;
+  if (typeof picker !== "function") return null;
+  let handles: PickerFileHandle[];
+  try {
+    handles = await picker({
+      multiple: opts.multiple !== false,
+      // Keep "All files" available: callers REJECT off-list files with a reason rather than
+      // pretending they were never selected.
+      excludeAcceptAllOption: false,
+      types: opts.accept?.length
+        ? [
+            {
+              description: opts.description ?? "Supported files",
+              // The MIME key only labels the filter group; the extension list drives it.
+              accept: { "text/plain": opts.accept },
+            },
+          ]
+        : undefined,
+    });
+  } catch (err) {
+    if (isAbortError(err)) return { files: [], rejected: [] }; // cancelled — nothing was selected
+    return null; // any other picker failure → the caller's fallback floor
+  }
+  const files: File[] = [];
+  const rejected: RejectedFile[] = [];
+  for (const handle of handles) {
+    try {
+      files.push(await handle.getFile());
+    } catch (err) {
+      rejected.push({ name: handle.name, reason: `could not be read: ${errorMessage(err)}` });
+    }
+  }
+  return { files, rejected };
+}
+
 // ── The universal fallback: a hidden <input type="file" multiple> ─────────────────────────────
 
 function pickViaInput(opts: PickOptions): Promise<IngestResult> {
@@ -168,39 +234,10 @@ function pickViaInput(opts: PickOptions): Promise<IngestResult> {
  */
 export async function pickTextFiles(opts: PickOptions = {}): Promise<IngestResult> {
   if (typeof window === "undefined" || typeof document === "undefined") return emptyResult();
-  const picker = (window as { showOpenFilePicker?: ShowOpenFilePicker }).showOpenFilePicker;
-  if (typeof picker !== "function") return pickViaInput(opts);
-  try {
-    const handles = await picker({
-      multiple: opts.multiple !== false,
-      // Keep "All files" available: the extension filter below REJECTS with a reason
-      // rather than pretending off-list files were never selected.
-      excludeAcceptAllOption: false,
-      types: opts.accept?.length
-        ? [
-            {
-              description: opts.description ?? "Supported files",
-              // The MIME key only labels the filter group; the extension list drives it.
-              accept: { "text/plain": opts.accept },
-            },
-          ]
-        : undefined,
-    });
-    const preRejected: RejectedFile[] = [];
-    const files: File[] = [];
-    for (const handle of handles) {
-      try {
-        files.push(await handle.getFile());
-      } catch (err) {
-        preRejected.push({ name: handle.name, reason: `could not be read: ${errorMessage(err)}` });
-      }
-    }
-    const read = await readFiles(files, opts);
-    return { accepted: read.accepted, rejected: [...preRejected, ...read.rejected] };
-  } catch (err) {
-    if (isAbortError(err)) return emptyResult(); // user cancelled — nothing was selected
-    return pickViaInput(opts); // any other picker failure → the fallback floor
-  }
+  const picked = await pickFilesViaFileSystemAccess(opts);
+  if (!picked) return pickViaInput(opts); // no picker, or it failed → the fallback floor
+  const read = await readFiles(picked.files, opts);
+  return { accepted: read.accepted, rejected: [...picked.rejected, ...read.rejected] };
 }
 
 /**

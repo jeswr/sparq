@@ -58,7 +58,7 @@ import {
   urlLabel,
 } from "@/lib/rdf-format";
 import { hasNativeLoader, pickRdfFile } from "@/lib/tauri-ipc";
-import { hasDraggedFiles } from "@/lib/file-ingest";
+import { hasDraggedFiles, pickFilesViaFileSystemAccess } from "@/lib/file-ingest";
 import type { IngestedFile, RejectedFile, IngestResult } from "@/lib/file-ingest";
 // [SONNET-4.6] sq-1y04h — decompression shim; codec chunks loaded lazily on demand.
 import { fetchRdfDocument, maybeDecompressFile } from "@/lib/file-decompress";
@@ -627,9 +627,9 @@ function WebFilePane({
   fileStatuses: Record<string, FileItemStatus>;
   busy: boolean;
 }) {
-  // Stable <input type="file"> in the DOM so Playwright setInputFiles() can target it.
-  // The Dropzone "Browse files…" button uses pickTextFiles (a dynamic hidden input) for the
-  // keyboard/mouse path. This input is an additional test-accessible hook and accessible label.
+  // Stable <input type="file"> in the DOM so Playwright setInputFiles() can target it. It is also
+  // the accessible label and the fallback the "Browse files…" button clicks when the browser has
+  // no File System Access picker (see handleBrowse).
   const inputRef = React.useRef<HTMLInputElement>(null);
   // [SONNET-4.6] sq-1y04h — custom drop state: we handle the drop event ourselves (instead of
   // delegating to Dropzone's readDroppedFiles) so that compressed archives are decoded BEFORE
@@ -706,12 +706,27 @@ function WebFilePane({
     });
   }, [busy, onIngest]);
 
+  // [OPUS-5] sq-3uzlf — "Browse files…" now takes the File System Access picker when the browser
+  // offers one (nicer dialog, remembers the last directory), and only falls back to clicking the
+  // stable hidden input otherwise. Either way the files are read as BINARY through
+  // readFilesWithDecompress, so compressed archives decode on both paths — the previous
+  // input-only route worked but gave up File System Access to keep hold of the File objects
+  // (pickTextFiles returns text, which corrupts binary payloads).
   const handleBrowse = React.useCallback(async () => {
-    // pickTextFiles opens a file picker; we then re-read the File objects as binary so
-    // compressed archives are handled. We can't get File objects back from pickTextFiles,
-    // so instead we open our own hidden input programmatically (same pattern as pickViaInput).
-    if (inputRef.current) inputRef.current.click();
-  }, []);
+    const picked = await pickFilesViaFileSystemAccess({
+      accept: WEB_RDF_ACCEPT,
+      description: "RDF files",
+    });
+    // null = no File System Access here (or it failed) → the universal input fallback.
+    if (!picked) {
+      inputRef.current?.click();
+      return;
+    }
+    // A user cancel resolves an empty pick; nothing to ingest and NO second dialog.
+    if (picked.files.length === 0 && picked.rejected.length === 0) return;
+    const result = await readFilesWithDecompress(picked.files);
+    onIngest({ accepted: result.accepted, rejected: [...picked.rejected, ...result.rejected] });
+  }, [onIngest]);
 
   return (
     <div className="space-y-3">
@@ -726,8 +741,8 @@ function WebFilePane({
         </span>
       </p>
 
-      {/* Stable file input: Playwright setInputFiles() target + accessible fallback.
-          Also the backing input for the "Browse files…" button below (handleBrowse → click). */}
+      {/* Stable file input: Playwright setInputFiles() target + accessible fallback. Also the
+          input the "Browse files…" button below clicks when File System Access is unavailable. */}
       <input
         ref={inputRef}
         type="file"
