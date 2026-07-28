@@ -254,6 +254,8 @@ impl McpServer {
             "void" => self.tool_void(&args),
             #[cfg(feature = "nlq")]
             "ask" => self.tool_ask(&args),
+            #[cfg(feature = "nlq")]
+            "nl_query" => self.tool_nl_query(&args),
             #[cfg(feature = "templates")]
             "template_list" => self.tool_template_list(),
             #[cfg(feature = "templates")]
@@ -330,6 +332,15 @@ impl McpServer {
     fn tool_ask(&self, args: &Value) -> Result<String, String> {
         let question = arg_str(args, "question")?;
         crate::nlq::ask(&self.graph, question, &self.budget())
+    }
+
+    /// `nl_query` (feature `nlq`): server-side NL→SPARQL **translation** via sparq-nlq —
+    /// the query is validated but never executed, so it takes no [`QueryBudget`]. Degrades
+    /// cleanly on the same "not configured" path as `ask`. [SONNET-4.6] sq-sj1f9
+    #[cfg(feature = "nlq")]
+    fn tool_nl_query(&self, args: &Value) -> Result<String, String> {
+        let question = arg_str(args, "question")?;
+        crate::nlq::nl_query(&self.graph, question)
     }
 
     /// `stats`: dataset totals as a small JSON object.

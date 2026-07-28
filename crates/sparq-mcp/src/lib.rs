@@ -13,8 +13,12 @@
 //! - [`tools`] — the advertised tool specs (`name` / `description` / `inputSchema`).
 //! - [`shapes`] — the structured `shapes` grounding tool (the data-grounded
 //!   predicate/datatype/cardinality constraints for one class IRI; no server-side model).
-//! - `nlq` (feature `nlq`) — the server-side natural-language `ask` tool (NL→SPARQL→execute
-//!   via `sparq-nlq`; embeds a configurable LLM call, degrades cleanly when none is set).
+//! - `nlq` (feature `nlq`) — the server-side natural-language tools: `ask`
+//!   (NL→SPARQL→execute via `sparq-nlq`) and `nl_query`, which runs the same grounding
+//!   and the same pre-execution checks (question guard, `spargebra` parse,
+//!   forbidden-construct refusal) but returns the query **unexecuted** for review
+//!   ([SONNET-4.6] sq-sj1f9). Both embed a configurable LLM call and degrade cleanly
+//!   (unadvertised, "not configured" error) when no backend is set.
 //! - `transport` (feature `stdio`) — the line-delimited stdio serve loop.
 //! - `solid` (feature `solid`) — the pod-backed server (`SolidMcpServer`): LDP
 //!   container/resource CRUD tools (`resource_get`/`container_list`, plus the gated
