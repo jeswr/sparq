@@ -15,6 +15,9 @@
 //!   took (`wall_time`);
 //! - **per fixpoint round** — a [`Progress`] notification to the optional callback, carrying
 //!   the round number, the facts newly committed in that round and the running total;
+//! - **per incremental mutation** — a [`Progress`] notification carrying the *base triples the
+//!   mutation processed*, which is a different quantity from a round's committed facts; see
+//!   [`TickKind`];
 //! - **whole run** — [`Report::rounds`], [`Report::total_derived`], [`Report::wall_time`].
 //!
 //! The per-round ticks are a liveness signal and the [`Report`] is the accounting document; the
@@ -96,17 +99,51 @@ pub struct RuleStat {
     pub wall_time: Duration,
 }
 
-/// Materialization progress notification, delivered once per fixpoint round.
+/// What produced a [`Progress`] tick — a batch fixpoint round, or one incrementally
+/// maintained mutation. The two report **different quantities**, so a consumer that sums or
+/// charts ticks must branch on this rather than treating every tick as derived facts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TickKind {
+    /// One fixpoint round of a batch materialization: [`Progress::derived_count`] is the facts
+    /// that round committed to the closure, and [`Progress::base_mutations`] is 0.
+    Round,
+    /// One incrementally maintained insert ([`crate::MaterializedGraph::insert`] /
+    /// [`crate::MaterializedOwlGraph::insert`]): [`Progress::base_mutations`] is the base
+    /// triples asserted, and [`Progress::derived_count`] is 0.
+    Insert,
+    /// One incrementally maintained delete ([`crate::MaterializedGraph::delete`] /
+    /// [`crate::MaterializedOwlGraph::delete`]): [`Progress::base_mutations`] is the base
+    /// triples retracted, and [`Progress::derived_count`] is 0.
+    Delete,
+}
+
+/// Progress notification, delivered once per fixpoint round of a batch materialization and once
+/// per incrementally maintained insert/delete. Read [`kind`](Self::kind) first: the two flavours
+/// carry their magnitude in different fields.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Progress {
-    /// 1-based round number.
+    /// 1-based tick ordinal. Batch rounds and incremental ticks share the counter, so this is
+    /// the round number only within a single batch materialization.
     pub round: usize,
-    /// Facts newly committed to the closure in THIS round.
+    /// Which flavour of tick this is — and therefore which of the two count fields below is
+    /// the meaningful one.
+    pub kind: TickKind,
+    /// Facts newly committed to the closure in THIS round. **Always 0 for an incremental tick**
+    /// ([`TickKind::Insert`] / [`TickKind::Delete`]): incremental maintenance updates
+    /// derivation counts in place and does not compute how many facts became newly visible, so
+    /// reporting a number here would be a guess. Use `stats()` —
+    /// [`rules::INCREMENTAL_INSERT`] / [`rules::INCREMENTAL_DELETE`] — for the maintenance
+    /// sweep's emitted-candidate count.
     pub derived_count: usize,
+    /// Base triples this incremental tick asserted ([`TickKind::Insert`]) or retracted
+    /// ([`TickKind::Delete`]) — the *input* mutation that was processed, NOT the consequences it
+    /// committed or removed from the closure. Always 0 for a [`TickKind::Round`].
+    pub base_mutations: usize,
     /// Facts committed so far across all rounds — a *liveness* figure, not the run's final
     /// count. The OWL-RL owl:sameAs equivalence-class expansion commits facts after the last
     /// round and is not ticked, so on an ontology with equalities this running total can end
-    /// well below [`Report::total_derived`] (see [`rules::SAMEAS_EXPAND`]).
+    /// well below [`Report::total_derived`] (see [`rules::SAMEAS_EXPAND`]). Incremental ticks
+    /// never move it, in either direction.
     pub total_derived: usize,
     /// Time since the profiler was installed.
     pub elapsed: Duration,
@@ -127,8 +164,9 @@ impl Report {
         &self.stats
     }
 
-    /// Fixpoint rounds executed. A single-pass materializer (RDFS, or the OWL-RL fast paths)
-    /// reports exactly one.
+    /// [`Progress`] ticks emitted: fixpoint rounds executed, plus one per incrementally
+    /// maintained insert/delete. A single-pass batch materializer (RDFS, or the OWL-RL fast
+    /// paths) reports exactly one; branch on [`Progress::kind`] to tell the two apart.
     pub fn rounds(&self) -> usize {
         self.rounds
     }
@@ -137,6 +175,13 @@ impl Report {
     /// materialization, exactly the count `materialize` returned, equality expansion included.
     /// This is NOT always the sum of the per-round [`Progress::derived_count`] ticks; see that
     /// field.
+    ///
+    /// **Incremental maintenance contributes nothing to it.** An insert/delete does not compute
+    /// how the visible closure changed, and a delete shrinks the closure rather than growing
+    /// it, so counting either here would be wrong in sign or in meaning — a session of only
+    /// incremental mutations reports 0. What those mutations did is in [`Report::stats`]
+    /// (the [`rules::INCREMENTAL_INSERT`] / [`rules::INCREMENTAL_DELETE`] /
+    /// [`rules::INCREMENTAL_REBUILD`] groups) and in each tick's [`Progress::base_mutations`].
     pub fn total_derived(&self) -> usize {
         self.total_derived
     }
@@ -241,7 +286,9 @@ impl Profiler {
     }
 
     /// Create a profiler that reports [`Progress`] once per fixpoint round of a batch
-    /// materialization, and once per *incrementally maintained* insert/delete.
+    /// materialization, and once per *incrementally maintained* insert/delete. The two flavours
+    /// are distinguished by [`Progress::kind`] and report different quantities — a round's
+    /// committed facts vs. a mutation's processed base triples (see [`TickKind`]).
     ///
     /// A mutation that falls back to a full re-materialization emits **no tick of its own**;
     /// [`rules::INCREMENTAL_REBUILD`] in [`Report::stats`] is what identifies that case. Most
@@ -382,6 +429,23 @@ pub(crate) fn reconcile_total(round_sum: usize, net: usize) {
 /// Record the completion of one fixpoint round that committed `committed` new facts, and
 /// notify the progress callback.
 pub(crate) fn round(committed: usize) {
+    tick(TickKind::Round, committed, 0);
+}
+
+/// Record the completion of one incrementally maintained mutation that processed
+/// `base_mutations` base triples, and notify the progress callback.
+///
+/// Deliberately does NOT touch the running derived-fact total: `base_mutations` counts the
+/// *input* triples, and an insert can commit several consequences per asserted triple while a
+/// delete commits none at all. Folding either into [`Report::total_derived`] would make the
+/// figure mean two different things — and, for a delete, count a shrinking closure as growth.
+pub(crate) fn maintenance(kind: TickKind, base_mutations: usize) {
+    debug_assert!(kind != TickKind::Round, "maintenance() is for incremental ticks only");
+    tick(kind, 0, base_mutations);
+}
+
+/// The shared tick path: bump the counters, build the [`Progress`], fire the callback.
+fn tick(kind: TickKind, committed: usize, base_mutations: usize) {
     // The callback is detached across the call so a re-entrant hook cannot hit the RefCell.
     let notify = ACTIVE.with(|a| {
         let mut slot = a.borrow_mut();
@@ -390,7 +454,9 @@ pub(crate) fn round(committed: usize) {
         p.total_derived += committed;
         let progress = Progress {
             round: p.rounds,
+            kind,
             derived_count: committed,
+            base_mutations,
             total_derived: p.total_derived,
             elapsed: p.started.map_or(Duration::ZERO, |t| t.elapsed()),
         };
@@ -463,6 +529,38 @@ mod tests {
         );
         assert_eq!(report.rounds(), 3);
         assert_eq!(report.total_derived(), 7);
+    }
+
+    /// An incremental tick reports the base mutation it processed and leaves the derived-fact
+    /// accounting alone — in particular a delete must not push `total_derived` UP.
+    #[test]
+    fn maintenance_ticks_report_base_mutations_not_derived_facts() {
+        use std::sync::{Arc, Mutex};
+        let seen: Arc<Mutex<Vec<Progress>>> = Arc::default();
+        let sink = Arc::clone(&seen);
+        let profiler = Profiler::with_progress(move |p| sink.lock().unwrap().push(p));
+        let (_, report) = with_profiler(profiler, || {
+            round(4);
+            maintenance(TickKind::Insert, 2);
+            maintenance(TickKind::Delete, 2);
+        });
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen.iter().map(|p| p.kind).collect::<Vec<_>>(),
+            vec![TickKind::Round, TickKind::Insert, TickKind::Delete]
+        );
+        assert_eq!(
+            seen.iter().map(|p| (p.derived_count, p.base_mutations)).collect::<Vec<_>>(),
+            vec![(4, 0), (0, 2), (0, 2)],
+            "a round carries committed facts; a mutation carries base triples"
+        );
+        assert_eq!(
+            seen.iter().map(|p| p.total_derived).collect::<Vec<_>>(),
+            vec![4, 4, 4],
+            "neither the insert nor the delete moves the running derived total"
+        );
+        assert_eq!(report.total_derived(), 4, "the delete must not inflate it to 8");
+        assert_eq!(report.rounds(), 3, "every tick is counted");
     }
 
     #[test]

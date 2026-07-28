@@ -236,7 +236,7 @@ impl MaterializedGraph {
             *self.counts.entry(t).or_insert(0) += 1;
         }
         prof_phase!(crate::profile::rules::INCREMENTAL_INSERT, __t);
-        prof_round!(added.len());
+        prof_maintenance!(crate::profile::TickKind::Insert, added.len());
         added.len()
     }
 
@@ -282,7 +282,7 @@ impl MaterializedGraph {
             }
         }
         prof_phase!(crate::profile::rules::INCREMENTAL_DELETE, __t);
-        prof_round!(removed.len());
+        prof_maintenance!(crate::profile::TickKind::Delete, removed.len());
         removed.len()
     }
 
@@ -1272,7 +1272,7 @@ impl MaterializedOwlGraph {
             self.refresh_virtual();
         }
         prof_phase!(crate::profile::rules::INCREMENTAL_INSERT, __t);
-        prof_round!(added.len());
+        prof_maintenance!(crate::profile::TickKind::Insert, added.len());
         added.len()
     }
 
@@ -1307,7 +1307,7 @@ impl MaterializedOwlGraph {
             self.refresh_virtual();
         }
         prof_phase!(crate::profile::rules::INCREMENTAL_DELETE, __t);
-        prof_round!(removed.len());
+        prof_maintenance!(crate::profile::TickKind::Delete, removed.len());
         removed.len()
     }
 

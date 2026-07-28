@@ -2,7 +2,7 @@
 //! per-round materialization progress monitor, and the top-N offender summary.
 #![cfg(feature = "profile")]
 use sparq_core::dict::{Dict, Id};
-use sparq_reason::profile::{rules, Profiler, Progress};
+use sparq_reason::profile::{rules, Profiler, Progress, TickKind};
 use sparq_reason::{materialize, materialize_profiled, materialize_profiled_with, Profile};
 use std::sync::{Arc, Mutex};
 
@@ -165,17 +165,28 @@ fn incremental_maintenance_is_profiled() {
     let mut graph = MaterializedGraph::new(&mut dict, &base);
     let ticks: Arc<Mutex<Vec<Progress>>> = Arc::default();
     let sink = Arc::clone(&ticks);
-    let (closure_len, report) = sparq_reason::profile::with_profiler(
+    // ONE asserted triple with SEVERAL consequences, then its deletion: the case that tells a
+    // base-mutation count apart from a derived-fact count in both directions.
+    let ((before, after_insert, after_delete), report) = sparq_reason::profile::with_profiler(
         Profiler::with_progress(move |p| sink.lock().unwrap().push(p)),
         || {
+            let before = graph.closure().len();
             graph.insert(&[[rex, ty, dog]]);
+            let after_insert = graph.closure().len();
             graph.delete(&[[rex, ty, dog]]);
-            graph.closure().len()
+            (before, after_insert, graph.closure().len())
         },
     );
 
+    assert_eq!(before, 3, "2 asserted subClassOf + the entailed Dog ⊑ Animal");
     assert_eq!(
-        closure_len, 3,
+        after_insert - before,
+        3,
+        "the one asserted (rex type Dog) makes 3 closure facts visible: itself plus the \
+         entailed Mammal and Animal types"
+    );
+    assert_eq!(
+        after_delete, 3,
         "deleting the only ABox triple leaves the asserted + entailed TBox"
     );
     let names: Vec<_> = report.stats().iter().map(|s| s.rule).collect();
@@ -192,7 +203,31 @@ fn incremental_maintenance_is_profiled() {
         "(rex type Dog) entails Mammal and Animal: {:?}",
         insert
     );
-    assert_eq!(ticks.lock().unwrap().len(), 2, "one tick per maintenance op");
+
+    // The tick contract: an incremental tick reports the BASE MUTATION it processed, and says
+    // nothing about derived facts. Pinned per tick so the two quantities cannot be conflated
+    // again — the insert moved the closure by 3 while reporting 1, and the delete moved it by
+    // -3 while also reporting 1, so neither number is a signed count of committed facts.
+    let ticks = ticks.lock().unwrap();
+    assert_eq!(ticks.len(), 2, "one tick per maintenance op");
+    assert_eq!(ticks[0].kind, TickKind::Insert);
+    assert_eq!(ticks[1].kind, TickKind::Delete);
+    for t in ticks.iter() {
+        assert_eq!(t.base_mutations, 1, "one base triple processed: {:?}", t);
+        assert_eq!(
+            t.derived_count, 0,
+            "an incremental tick claims no committed facts: {:?}",
+            t
+        );
+        assert_eq!(t.total_derived, 0, "and never moves the running total: {:?}", t);
+    }
+    assert_eq!(
+        report.total_derived(),
+        0,
+        "the mutations cancelled out; total_derived must not end at 2 by counting the two \
+         input triples as derived facts"
+    );
+    assert_eq!(report.rounds(), 2, "rounds() counts ticks, incremental ones included");
 }
 
 /// A TBox change falls back to a full re-materialization — the profiler names that, so a

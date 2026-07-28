@@ -62,6 +62,19 @@ macro_rules! prof_round {
 macro_rules! prof_round {
     ($n:expr) => {};
 }
+/// Close one incrementally-maintained mutation of kind `$kind` that processed `$n` base
+/// triples (fires the progress callback). Distinct from `prof_round!` because `$n` is the
+/// *input* mutation size, not facts committed to the closure — see `profile::TickKind`.
+#[cfg(feature = "profile")]
+macro_rules! prof_maintenance {
+    ($kind:expr, $n:expr) => {
+        $crate::profile::maintenance($kind, $n);
+    };
+}
+#[cfg(not(feature = "profile"))]
+macro_rules! prof_maintenance {
+    ($kind:expr, $n:expr) => {};
+}
 
 mod incremental;
 // [FABLE-5] sq-pbz04.1.2 (epic sq-pbz04.1) — the opt-in substrate seam-3 adoption: the
