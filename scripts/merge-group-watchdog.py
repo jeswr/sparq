@@ -30,13 +30,14 @@
 # proxies are WRONG and were rejected by measurement:
 #   * `entry.enqueuedAt` — an entry can sit outside the `max_entries_to_build` window
 #     for many minutes before its group is built, so this anchor is far too early.
-#   * the group head commit's `committer.date` — GitHub STAMPS the group commit with
-#     the entry's `enqueuedAt`, not the build time. Measured: head `0e043a13`
-#     (PR #4636's group) is stamped 23:01:57Z == #4636's enqueuedAt, but that group's
-#     branch was created at 23:19-ish; head `1bfb0174` is stamped 22:58:53Z while its
-#     own PARENT `3cc1bf828` (#4632) did not reach `main` until 23:18:59Z — a commit
-#     cannot predate its parent, which proves the field is a stamp, not a creation
-#     time. Any latency computed from it is meaningless.
+#   * the group head commit's `committer.date` — GitHub STAMPS the group commit rather
+#     than dating it at build time. THE LOAD-BEARING EVIDENCE IS THE DISTRIBUTION, not
+#     any single commit: over 40 live group heads, `branch_creation - committer.date`
+#     spans 2 s to 3929 s with a median of 16 s, and only 1 of 40 falls within +/-2 s of
+#     the real creation time. `1bfb0174`'s stamp sits 344 s BEFORE its ref existed.
+#     (An earlier draft of this note argued from a parent-commit contradiction instead;
+#     that argument is withdrawn, because the parent's own date is a stamp too and the
+#     claim could not be independently re-derived. The distribution stands on its own.)
 # The CORRECT, exact anchor is the repository ACTIVITY API:
 #     GET /repos/{repo}/activity?activity_type=branch_creation&ref=<full ref>
 # whose rows carry an exact `timestamp` plus `after` = the created head SHA. Measured
@@ -163,10 +164,21 @@ PROGRAM = "merge-group-watchdog"
 DEFAULT_GRACE_SECONDS = 120
 # At most this many watchdog recoveries for one PR inside the rolling window below.
 # A re-enqueue mints a NEW queue attempt, so an attempt-scoped cap would be no cap at
-# all; the budget is per PR per wall-clock window. Exhaustion is not an escalation —
-# the entry is handed back to the platform's own CI_TIMEOUT, whose routing now
-# preserves the review verdict (see classify-dequeue), and a CAP row is emitted every
-# tick for as long as it holds.
+# all; the budget is per PR per wall-clock window.
+#
+# EXHAUSTION BEHAVIOUR, stated as it actually is: the entry is handed back to the
+# platform's own 60-minute CI_TIMEOUT, and that dequeue **DEMOTES to review:changes**
+# like any other. It does NOT preserve the verdict. The reason is mechanical and worth
+# knowing: recovery is marker -> dequeue -> enqueue, so the marker is always ~30 s OLDER
+# than the `added_to_merge_queue` it produces; on the next attempt the newest trusted
+# marker therefore predates that attempt and the queue-attempt binding refuses it.
+#
+# That is the CORRECT outcome, not merely a tolerated one. By exhaustion the PR has
+# burned three consecutive zero-dispatch groups, the only trusted observation names a
+# SUPERSEDED group head, and preserving a verdict on the strength of a stale head's
+# suite count would be unsound. A human look is warranted at that point. What exhaustion
+# does NOT do is stall: there is no `needs:user`, no permanent hold, and a CAP row is
+# emitted every tick for as long as it holds.
 DEFAULT_MAX_RECOVERIES_PER_PR = 2
 DEFAULT_RECOVERY_WINDOW_SECONDS = 6 * 3600
 # Blast-radius bound: one tick may never churn the whole queue.
@@ -188,6 +200,9 @@ ACTIONABLE_STATES = frozenset({"AWAITING_CHECKS"})
 # MERGE_CONFLICT / CI_FAILURE dequeue is never attributed to the watchdog.
 SELF_DEQUEUE_REASONS = frozenset({"MANUAL", "UNKNOWN"})
 ZERO_DISPATCH_REASON = "CI_TIMEOUT"
+# The only action a marker may claim. Checked on the self-dequeue arm so that no other
+# marker shape can ever be mistaken for a recovery in flight.
+MARKER_ACTION_REENQUEUE = "re-enqueue"
 # The verdict label whose survival across an infrastructure dequeue is the whole point
 # of the routing split.
 REVIEW_PASS = "review:pass"
@@ -203,6 +218,26 @@ RECOVER = "RECOVER"
 
 ROUTE_PRESERVE = "preserve"
 ROUTE_DEMOTE = "demote"
+
+# ── THE MARKER IS EVIDENCE, SO ITS AUTHOR IS PART OF THE PREDICATE ───────────────
+# sparq is a PUBLIC repo and anyone can comment on a pull request. A marker read from an
+# arbitrary comment author is UNAUTHENTICATED AUTHOR-CONTROLLED INPUT, and the routing
+# split ACTS on it: a forged marker makes `review:pass` survive a dequeue and skips the
+# arm-disable, so auto-arm.py / rearm-sweeper.py re-arm the PR within ~10 minutes — and
+# on the CI_TIMEOUT arm it reaches `gh pr merge --auto` directly. Naming any commit that
+# happens to have zero check-suites suffices, and such a sha is trivially obtainable.
+#
+# Markers are therefore accepted ONLY from this allow-list. This is the load-bearing
+# control of the routing split, not a hardening nicety: it is the third occurrence in
+# this estate of "the PR's own NAMED control was a forgeable channel", after #681
+# (review evidence read from `pull["body"]`) and #937 (declarations from body/title).
+# The check lives at the READ, so nothing downstream can forget to apply it.
+TRUSTED_MARKER_AUTHORS = frozenset(
+    {
+        "github-actions[bot]",          # the workflow token's identity
+        "sparq-orchestrator[bot]",      # the App used when ORCHESTRATOR_APP_ID is set
+    }
+)
 
 MARKER_KEY = "merge-group-watchdog"
 _MARKER_RE = re.compile(
@@ -326,6 +361,11 @@ def parse_marker(body: str | None) -> Marker | None:
     head = fields.get("head", "")
     if not re.fullmatch(r"[0-9a-f]{40}", head):
         return None
+    # The watchdog only ever records a ZERO observation, so anything else was not
+    # written by this tool. Validated so the field is load-bearing rather than dead
+    # data — a mutant flipping it to 1 otherwise changed nothing observable.
+    if suites != 0:
+        return None
     return Marker(
         pr=pr,
         head=head,
@@ -444,8 +484,9 @@ def decide_entry(
         return Decision(
             CAP,
             f"per-PR recovery budget exhausted ({recoveries_in_window}/"
-            f"{max_recoveries_per_pr}) — handing back to the platform CI_TIMEOUT, "
-            "whose routing preserves the review verdict",
+            f"{max_recoveries_per_pr}) — handing back to the platform CI_TIMEOUT, which "
+            "WILL demote to review:changes (the only trusted observation names a "
+            "superseded group head, so the verdict cannot be preserved soundly)",
         )
     if run_recoveries >= max_recoveries_per_run:
         return Decision(
@@ -526,13 +567,37 @@ def classify_dequeue_route(
 
     # (a) our OWN recovery. The watchdog's dequeue+enqueue fires pull_request.dequeued;
     # without this arm the watchdog would demote every PR it just rescued.
-    if normalised in SELF_DEQUEUE_REASONS and 0 <= marker_age <= self_dequeue_window_seconds:
+    if (
+        normalised in SELF_DEQUEUE_REASONS
+        and newest.action == MARKER_ACTION_REENQUEUE
+        and 0 <= marker_age <= self_dequeue_window_seconds
+    ):
+        # DEFENCE IN DEPTH behind the author allow-list. This arm previously preserved on
+        # the marker alone and compared its head to NOTHING, so "names that exact group
+        # head" was not what the code implemented. Re-derive the count for the head the
+        # marker names: a head that does not exist reads None, and one that was really
+        # dispatched reads non-zero. Neither may carry a verdict through a dequeue.
+        own = live_suites(newest.head)
+        if own is None:
+            return Route(
+                ROUTE_DEMOTE,
+                False,
+                f"marker names head {newest.head[:8]} whose check-suite count cannot be "
+                "read — not provably the watchdog's own recovery",
+            )
+        if own != 0:
+            return Route(
+                ROUTE_DEMOTE,
+                False,
+                f"marker names head {newest.head[:8]}, which has {own} check-suite(s) — "
+                "that group WAS dispatched, so this is not a zero-dispatch recovery",
+            )
         return Route(
             ROUTE_PRESERVE,
             False,
             f"dequeue reason {normalised} within {self_dequeue_window_seconds}s of the "
-            f"watchdog's own recovery of head {newest.head[:8]} "
-            f"({int(marker_age)}s ago) — the watchdog re-enqueues; verdict preserved",
+            f"watchdog's own recovery of head {newest.head[:8]} ({int(marker_age)}s ago, "
+            "0 check-suites re-derived live) — the watchdog re-enqueues; verdict preserved",
         )
 
     # (b) the platform timeout. Split by SUITE COUNT, never by the reason alone.
@@ -755,6 +820,11 @@ class Watchdog:
         return max(stamps) if stamps else None
 
     def pr_markers(self, pr_number: int) -> list[Marker]:
+        """Trusted markers only — see TRUSTED_MARKER_AUTHORS.
+
+        A well-formed marker from an untrusted author is DROPPED and COUNTED, so a
+        forgery attempt is visible in the log rather than silently discarded.
+        """
         raw = self.gh_read(
             [
                 "api",
@@ -766,8 +836,28 @@ class Watchdog:
                 f"repos/{self.repo}/issues/{pr_number}/comments?per_page=100",
             ]
         )
-        markers = [parse_marker(row.get("body")) for row in _ndjson(raw)]
-        return [marker for marker in markers if marker is not None]
+        trusted: list[Marker] = []
+        rejected = 0
+        for row in _ndjson(raw):
+            marker = parse_marker(row.get("body"))
+            if marker is None:
+                continue
+            author = str((row.get("user") or {}).get("login", ""))
+            if author in TRUSTED_MARKER_AUTHORS:
+                trusted.append(marker)
+                continue
+            rejected += 1
+            self.log(
+                f"::warning title={PROGRAM} untrusted marker::PR #{pr_number}: ignoring "
+                f"a watchdog marker authored by {author!r} — markers are honoured only "
+                f"from {sorted(TRUSTED_MARKER_AUTHORS)}"
+            )
+        if rejected:
+            self.log(
+                f"[{PROGRAM}] PR #{pr_number}: {rejected} untrusted marker(s) IGNORED, "
+                f"{len(trusted)} trusted marker(s) accepted"
+            )
+        return trusted
 
     def verdict_state(self, pr_number: int) -> VerdictState:
         """One timeline read for all three facts the routing decision needs.
@@ -1033,7 +1123,12 @@ def write_outputs(route: Route, log: Callable[[str], None] = print) -> None:
     with open(path, "a", encoding="utf-8") as handle:
         handle.write(f"route={route.route}\n")
         handle.write(f"reenqueue={'true' if route.reenqueue else 'false'}\n")
-        handle.write(f"detail={route.detail}\n")
+        # `detail` can embed gh stderr, which is multi-line. A bare `k=v` line would
+        # spill the remainder into the outputs file as further keys, so use the
+        # heredoc form with a delimiter that cannot survive in the payload.
+        delimiter = "MGW_DETAIL_EOF"
+        detail = route.detail.replace(delimiter, "MGW-DETAIL-EOF")
+        handle.write(f"detail<<{delimiter}\n{detail}\n{delimiter}\n")
 
 
 # ── self-test ────────────────────────────────────────────────────────────────────

@@ -506,11 +506,25 @@ class TestMarkerCodec(unittest.TestCase):
 # ── 2. behaviour (fake gh) ───────────────────────────────────────────────────────
 
 
-def _marker_comment(*, head: str = HEAD, observed: datetime | None = None) -> dict:
+TRUSTED_AUTHOR = "github-actions[bot]"
+APP_AUTHOR = "sparq-orchestrator[bot]"
+ATTACKER = "drive-by-attacker"
+
+
+def _marker_comment(
+    *,
+    head: str = HEAD,
+    observed: datetime | None = None,
+    author: str = TRUSTED_AUTHOR,
+    suites: int = 0,
+) -> dict:
     stamp = observed or (NOW - timedelta(minutes=10))
     return {
+        "user": {"login": author},
         "body": "text\n\n"
-        + mgw.render_marker(pr=4534, head=head, base=BASE, ref=REF, suites=0, observed=stamp)
+        + mgw.render_marker(
+            pr=4534, head=head, base=BASE, ref=REF, suites=suites, observed=stamp
+        ),
     }
 
 
@@ -768,6 +782,174 @@ class TestSweepBehaviour(unittest.TestCase):
             m[2] for m in harness.gh.mutations if m[:2] == ["pr", "comment"]
         ]
         self.assertEqual(recovered, ["4534", "4535"], harness.rows)
+
+
+class TestMarkerAuthorIsPartOfThePredicate(unittest.TestCase):
+    """sparq is PUBLIC: anyone can comment, so the marker's AUTHOR is the control.
+
+    A marker is unauthenticated author-controlled input and the routing split acts on
+    it. Forged, it makes `review:pass` survive a dequeue and skips the arm-disable, so
+    auto-arm/rearm-sweeper re-arm within ~10 min — and the CI_TIMEOUT arm reaches
+    `gh pr merge --auto` directly. Both directions are pinned here: an untrusted marker
+    is IGNORED, and a trusted one still WORKS.
+    """
+
+    def test_a_forged_marker_from_an_arbitrary_author_is_ignored(self):
+        harness = FakeWatchdog.build(
+            suites=0, comments=[_marker_comment(author=ATTACKER)]
+        )
+        self.assertEqual(harness.watchdog.pr_markers(4534), [])
+        route = harness.watchdog.classify_dequeue(4534, "MANUAL")
+        self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
+
+    def test_the_exact_ci_timeout_forgery_is_ignored(self):
+        # A forged marker naming ANY commit that reads 0 check-suites — such a sha is
+        # trivially obtainable. Without the author filter this reaches
+        # `gh pr merge --auto` via route=preserve + reenqueue=true.
+        harness = FakeWatchdog.build(
+            suites=0, comments=[_marker_comment(author=ATTACKER)]
+        )
+        route = harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT")
+        self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
+        self.assertFalse(route.reenqueue)
+
+    def test_forged_zero_sha_head_is_ignored(self):
+        harness = FakeWatchdog.build(
+            suites=0, comments=[_marker_comment(author=ATTACKER, head="0" * 40)]
+        )
+        self.assertEqual(
+            harness.watchdog.classify_dequeue(4534, "MANUAL").route, mgw.ROUTE_DEMOTE
+        )
+
+    # THE PAIRED CONTROL: the filter must not break the real thing.
+    def test_a_trusted_bot_marker_still_works(self):
+        for author in (TRUSTED_AUTHOR, APP_AUTHOR):
+            harness = FakeWatchdog.build(
+                suites=0, comments=[_marker_comment(author=author)]
+            )
+            self.assertEqual(len(harness.watchdog.pr_markers(4534)), 1, author)
+            route = harness.watchdog.classify_dequeue(4534, "MANUAL")
+            self.assertEqual(route.route, mgw.ROUTE_PRESERVE, author)
+
+    def test_both_configured_identities_are_allow_listed(self):
+        # The sweep runs under the App token when ORCHESTRATOR_APP_ID is set and the
+        # workflow token otherwise, so BOTH identities must be trusted or the caps stop
+        # working the moment the App is configured (or unconfigured).
+        self.assertEqual(
+            mgw.TRUSTED_MARKER_AUTHORS,
+            frozenset({"github-actions[bot]", "sparq-orchestrator[bot]"}),
+        )
+
+    def test_a_forgery_attempt_is_logged_not_silently_dropped(self):
+        harness = FakeWatchdog.build(
+            suites=0, comments=[_marker_comment(author=ATTACKER)]
+        )
+        harness.watchdog.pr_markers(4534)
+        self.assertTrue(any("untrusted marker" in r for r in harness.rows), harness.rows)
+        self.assertTrue(any(ATTACKER in r for r in harness.rows), harness.rows)
+
+    def test_a_forged_marker_cannot_suppress_a_real_recovery_either(self):
+        # The idempotence key is read from the SAME channel, so an attacker must not be
+        # able to post a marker for the live head and block the watchdog from acting.
+        harness = FakeWatchdog.build(
+            suites=0, comments=[_marker_comment(author=ATTACKER)]
+        )
+        harness.run()
+        self.assertTrue(
+            any("decision=RECOVER" in r for r in harness.rows), harness.rows
+        )
+
+    def test_an_untrusted_marker_does_not_consume_the_cap(self):
+        harness = FakeWatchdog.build(
+            suites=0,
+            comments=[
+                _marker_comment(author=ATTACKER, head="a" * 40),
+                _marker_comment(author=ATTACKER, head="b" * 40),
+                _marker_comment(author=ATTACKER, head="c" * 40),
+            ],
+        )
+        harness.run()
+        self.assertTrue(any("decision=RECOVER" in r for r in harness.rows), harness.rows)
+
+    def test_the_marker_action_must_be_a_recovery(self):
+        # An observation-shaped marker must never read as a recovery in flight.
+        body = mgw.render_marker(
+            pr=4534, head=HEAD, base=BASE, ref=REF, suites=0,
+            observed=NOW - timedelta(minutes=10),
+        ).replace("action=re-enqueue", "action=observed")
+        harness = FakeWatchdog.build(
+            suites=0, comments=[{"user": {"login": TRUSTED_AUTHOR}, "body": body}]
+        )
+        self.assertEqual(
+            harness.watchdog.classify_dequeue(4534, "MANUAL").route, mgw.ROUTE_DEMOTE
+        )
+        self.assertEqual(mgw.MARKER_ACTION_REENQUEUE, "re-enqueue")
+
+    def test_self_dequeue_arm_re_derives_the_named_heads_suite_count(self):
+        # The arm used to compare the marker head to nothing at all.
+        unreadable = FakeWatchdog.build(
+            suites=0, comments=[_marker_comment(head="a" * 40)]
+        )
+        route = unreadable.watchdog.classify_dequeue(4534, "MANUAL")
+        self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
+        self.assertIn("cannot be read", route.detail)
+
+        dispatched = FakeWatchdog.build(suites=8, comments=[_marker_comment()])
+        route = dispatched.watchdog.classify_dequeue(4534, "MANUAL")
+        self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
+        self.assertIn("WAS dispatched", route.detail)
+
+    def test_a_marker_claiming_a_nonzero_suite_count_is_not_ours(self):
+        self.assertIsNone(
+            mgw.parse_marker(
+                mgw.render_marker(
+                    pr=1, head=HEAD, base=BASE, ref=REF, suites=1, observed=NOW
+                )
+            )
+        )
+
+
+class TestCapExhaustionBehaviour(unittest.TestCase):
+    """Pin the DOCUMENTED behaviour so the claim cannot drift away from the code again.
+
+    Recovery is marker -> dequeue -> enqueue, so the marker is always ~30 s OLDER than
+    the `added_to_merge_queue` it produces. On the next attempt the newest trusted
+    marker therefore predates that attempt, the queue-attempt binding refuses it, and
+    the platform CI_TIMEOUT DEMOTES. That is correct — the only trusted observation
+    names a superseded head — but it is the opposite of what four separate comments
+    used to claim.
+    """
+
+    def test_after_exhaustion_a_ci_timeout_demotes(self):
+        harness = FakeWatchdog.build(
+            suites=0,
+            comments=[_marker_comment(observed=NOW - timedelta(minutes=20))],
+            timeline=[
+                {"event": "labeled", "created_at": "2026-07-27T22:20:00Z",
+                 "label": {"name": "review:pass"}},
+                # the attempt the watchdog's own re-enqueue produced, AFTER the marker
+                {"event": "added_to_merge_queue", "created_at": "2026-07-27T23:15:00Z"},
+            ],
+        )
+        route = harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT")
+        self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
+        self.assertIn("predates this queue attempt", route.detail)
+
+    def test_the_cap_row_does_not_claim_the_verdict_is_preserved(self):
+        row = decide(recoveries_in_window=2)
+        self.assertEqual(row.verdict, mgw.CAP)
+        self.assertIn("WILL demote", row.detail)
+        self.assertNotIn("preserves the review verdict", row.detail)
+
+    def test_exhaustion_never_escalates_to_a_human_hold(self):
+        harness = FakeWatchdog.build(
+            suites=0,
+            comments=[_marker_comment(head="a" * 40), _marker_comment(head="b" * 40)],
+        )
+        harness.run()
+        joined = "\n".join(harness.rows)
+        self.assertIn("decision=CAP", joined)
+        self.assertNotIn("needs:user", joined)
 
 
 class TestEmission(unittest.TestCase):
@@ -1132,7 +1314,7 @@ class TestEntrypointFailSafe(unittest.TestCase):
         # `detail`. Dropping any of the three silently disables the feature.
         self.assertIn(f"route={mgw.ROUTE_PRESERVE}\n", written)
         self.assertIn("reenqueue=true\n", written)
-        self.assertIn("detail=zero suites\n", written)
+        self.assertIn("detail<<MGW_DETAIL_EOF\nzero suites\nMGW_DETAIL_EOF\n", written)
         self.assertTrue(any("route=preserve" in row for row in rows), rows)
 
     def test_demote_outputs_are_lowercase_false(self):
@@ -1171,6 +1353,302 @@ def _step(wf: dict, job: str, needle: str) -> dict:
         if needle in (step.get("name") or "") or needle == step.get("id"):
             return step
     raise AssertionError(f"no step matching {needle!r} in job {job}")
+
+
+class TestSurvivorsFromTheCoverageCensus(unittest.TestCase):
+    """Every one of these lived in a function the module self-test never executed.
+
+    The lesson recorded with them: run the coverage census FIRST and treat a 0%-covered
+    entry point as blocking, because that is exactly where the surviving mutants are.
+    """
+
+    def test_sweep_exit_code_is_nonzero_when_a_recovery_fails(self):
+        # THE EXIT-ZERO CLASS. `return 1 if watchdog.sweep() else 0` -> `return 0`
+        # survived the whole suite: a later transient would discard an earned hard
+        # failure and the run would report success. This has bitten this estate before.
+        import os
+        original = mgw.run_gh_read
+        harness = FakeWatchdog.build(suites=0)
+        harness.gh.fail_on = ("dequeuePullRequest",)
+        try:
+            mgw.run_gh_read = harness.gh
+            mgw.run_gh = harness.gh
+            code = mgw.main(["sweep", "--repo", "sparq-org/sparq"])
+        finally:
+            mgw.run_gh_read = original
+        self.assertEqual(code, 1)
+
+    def test_sweep_exit_code_is_zero_on_a_clean_sweep(self):
+        # The paired control: a healthy queue must NOT red the scheduled run.
+        original = mgw.run_gh_read
+        harness = FakeWatchdog.build(suites=8)
+        try:
+            mgw.run_gh_read = harness.gh
+            mgw.run_gh = harness.gh
+            code = mgw.main(["sweep", "--repo", "sparq-org/sparq"])
+        finally:
+            mgw.run_gh_read = original
+        self.assertEqual(code, 0)
+
+    def test_a_failed_recovery_appears_in_the_census(self):
+        harness = FakeWatchdog.build(suites=0)
+        harness.gh.fail_on = ("dequeuePullRequest",)
+        harness.run()
+        census = next(r for r in harness.rows if "sweep complete" in r)
+        self.assertIn("RECOVER_FAILED=1", census)
+        self.assertIn("errors=1", census)
+
+    def test_stacked_green_counts_only_mergeable_entries(self):
+        # MIXED fixture. Every stacked entry in the original fixture was MERGEABLE, so
+        # `stacked_green = list(stacked)` was value-identical and survived.
+        nodes = [
+            {"id": "MQE_1", "position": 1, "state": "AWAITING_CHECKS",
+             "enqueuedAt": "2026-07-27T22:58:00Z",
+             "baseCommit": {"oid": BASE}, "headCommit": {"oid": HEAD},
+             "pullRequest": {"number": 4709, "id": "PR_4709"}},
+            {"id": "MQE_2", "position": 2, "state": "MERGEABLE",
+             "enqueuedAt": "2026-07-27T22:59:00Z",
+             "baseCommit": {"oid": HEAD}, "headCommit": {"oid": "a" * 40},
+             "pullRequest": {"number": 4714, "id": "PR_4714"}},
+            {"id": "MQE_3", "position": 3, "state": "AWAITING_CHECKS",
+             "enqueuedAt": "2026-07-27T23:00:00Z",
+             "baseCommit": {"oid": "a" * 40}, "headCommit": {"oid": "b" * 40},
+             "pullRequest": {"number": 4729, "id": "PR_4729"}},
+            {"id": "MQE_4", "position": 4, "state": "UNMERGEABLE",
+             "enqueuedAt": "2026-07-27T23:01:00Z",
+             "baseCommit": {"oid": "b" * 40}, "headCommit": {"oid": "c" * 40},
+             "pullRequest": {"number": 4731, "id": "PR_4731"}},
+        ]
+        harness = FakeWatchdog.build(suites=0, entries=nodes)
+        harness.run()
+        head_row = next(r for r in harness.rows if "pr=#4709" in r)
+        # three entries behind it have groups, but only ONE is green
+        self.assertIn("stacked=3", head_row)
+        self.assertIn("stacked_green=1", head_row)
+
+    def test_the_queue_query_asks_for_the_whole_queue(self):
+        # QUEUE_ENTRY_PAGE 20 -> 1 survived: nothing asserted the page size, so a
+        # single-entry read would silently miss every entry behind the head.
+        harness = FakeWatchdog.build(suites=8)
+        harness.run()
+        call = next(
+            c for c in harness.gh.calls
+            if c[:2] == ["api", "graphql"] and any("first=" in a for a in c)
+        )
+        first = next(a for a in call if a.startswith("first="))
+        self.assertEqual(first, f"first={mgw.QUEUE_ENTRY_PAGE}")
+        self.assertGreaterEqual(mgw.QUEUE_ENTRY_PAGE, 20)
+
+    def test_multi_line_detail_cannot_inject_extra_outputs(self):
+        import os
+        import tempfile
+        out = Path(tempfile.mkdtemp()) / "outputs.txt"
+        out.write_text("", encoding="utf-8")
+        os.environ["GITHUB_OUTPUT"] = str(out)
+        try:
+            mgw.write_outputs(
+                mgw.Route(mgw.ROUTE_DEMOTE, False, "gh failed:\nroute=preserve\nreenqueue=true"),
+                log=lambda _m: None,
+            )
+        finally:
+            os.environ.pop("GITHUB_OUTPUT", None)
+        written = out.read_text(encoding="utf-8")
+        # The injected `route=preserve` must be INSIDE the delimited block, not a key.
+        self.assertTrue(written.startswith("route=demote\n"), written)
+        self.assertIn("detail<<MGW_DETAIL_EOF\n", written)
+        body = written.split("detail<<MGW_DETAIL_EOF\n", 1)[1]
+        self.assertTrue(body.endswith("MGW_DETAIL_EOF\n"), body)
+
+
+class TestEntrypointExitContract(unittest.TestCase):
+    """Every exit path of `main`, because that is where the exit-zero class hides.
+
+    The coverage census put `main` at 44% under the module self-test with its whole
+    sweep branch unexecuted — precisely where the surviving exit-code mutants lived.
+    """
+
+    def _sweep(self, gh):
+        original_read, original_gh = mgw.run_gh_read, mgw.run_gh
+        try:
+            mgw.run_gh_read = gh
+            mgw.run_gh = gh
+            return mgw.main(["sweep", "--repo", "sparq-org/sparq"])
+        finally:
+            mgw.run_gh_read, mgw.run_gh = original_read, original_gh
+
+    def test_exhausted_transient_is_a_warning_and_exit_zero(self):
+        # A periodic idempotent sweep may skip a cycle on a platform 5xx — the next
+        # tick covers it — but it must SAY so rather than exit quietly.
+        def exhausted(_argv):
+            raise mgw.gh_retry.GhTransientExhausted("HTTP 504 (3 attempts)")
+
+        import io
+        from contextlib import redirect_stdout
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = self._sweep(exhausted)
+        self.assertEqual(code, 0)
+        self.assertIn("::warning", out.getvalue())
+        self.assertIn("skipped a cycle", out.getvalue())
+
+    def test_a_non_transient_gh_failure_exits_nonzero(self):
+        def broken(_argv):
+            raise mgw.GhError("HTTP 401 Bad credentials")
+
+        import io
+        from contextlib import redirect_stderr
+        err = io.StringIO()
+        with redirect_stderr(err):
+            code = self._sweep(broken)
+        self.assertEqual(code, 1)
+        self.assertIn("fatal", err.getvalue())
+
+    def test_a_malformed_repo_argument_exits_nonzero(self):
+        import io
+        from contextlib import redirect_stderr
+        err = io.StringIO()
+        with redirect_stderr(err):
+            code = mgw.main(["sweep", "--repo", "not-a-repo"])
+        self.assertEqual(code, 1)
+
+    def test_no_subcommand_is_an_error_not_a_silent_success(self):
+        with self.assertRaises(SystemExit) as caught:
+            mgw.main([])
+        self.assertNotEqual(caught.exception.code, 0)
+
+    def test_grace_below_the_floor_is_refused(self):
+        with self.assertRaises(ValueError):
+            mgw.Watchdog("sparq-org/sparq", grace_seconds=30)
+
+
+class TestTelemetryPlumbing(unittest.TestCase):
+    def test_rows_are_appended_to_the_job_summary(self):
+        import os
+        import tempfile
+        summary = Path(tempfile.mkdtemp()) / "summary.md"
+        os.environ["GITHUB_STEP_SUMMARY"] = str(summary)
+        try:
+            harness = FakeWatchdog.build(suites=8)
+            harness.run()
+        finally:
+            os.environ.pop("GITHUB_STEP_SUMMARY", None)
+        written = summary.read_text(encoding="utf-8")
+        self.assertIn("decision=HOLD", written)
+        self.assertIn("sweep complete", written)
+
+    def test_an_unwritable_job_summary_never_breaks_the_sweep(self):
+        import os
+        os.environ["GITHUB_STEP_SUMMARY"] = "/proc/definitely/not/writable"
+        try:
+            harness = FakeWatchdog.build(suites=8)
+            self.assertEqual(harness.run(), 0)
+        finally:
+            os.environ.pop("GITHUB_STEP_SUMMARY", None)
+        self.assertTrue(any("decision=HOLD" in r for r in harness.rows))
+
+    def test_a_garbled_page_line_is_a_hard_error_not_an_empty_list(self):
+        # _ndjson must never silently yield [] on malformed input: an empty marker list
+        # reads as "no prior recovery" and would bypass the cap.
+        with self.assertRaises(mgw.GhError):
+            mgw._ndjson("{not json}")
+        self.assertEqual(mgw._ndjson(""), [])
+        self.assertEqual(mgw._ndjson("  \n\n"), [])
+        # non-dict JSON lines are ignored rather than crashing
+        self.assertEqual(mgw._ndjson("[1,2]"), [])
+
+    def test_a_detail_containing_the_delimiter_cannot_break_out(self):
+        # The payload embeds gh stderr. If it contained the delimiter itself, the
+        # heredoc would terminate early and the remainder would be parsed as keys —
+        # the same output-injection the delimiter exists to prevent.
+        import os
+        import tempfile
+        out = Path(tempfile.mkdtemp()) / "outputs.txt"
+        out.write_text("", encoding="utf-8")
+        os.environ["GITHUB_OUTPUT"] = str(out)
+        try:
+            mgw.write_outputs(
+                mgw.Route(
+                    mgw.ROUTE_DEMOTE,
+                    False,
+                    "gh said:\nMGW_DETAIL_EOF\nroute=preserve\nreenqueue=true",
+                ),
+                log=lambda _m: None,
+            )
+        finally:
+            os.environ.pop("GITHUB_OUTPUT", None)
+        written = out.read_text(encoding="utf-8")
+        lines = written.splitlines()
+        # THE SAFETY PROPERTY: the heredoc is well-formed — the delimiter appears
+        # exactly twice (open and close) and no line INSIDE the block equals it. A line
+        # inside the block is inert no matter what it says; a premature close is what
+        # would turn `route=preserve` into a real key.
+        opener = lines.index("detail<<MGW_DETAIL_EOF")
+        body = lines[opener + 1:]
+        self.assertEqual(body[-1], "MGW_DETAIL_EOF", written)
+        self.assertNotIn("MGW_DETAIL_EOF", body[:-1], written)
+        # the attacker's delimiter was neutralised rather than passed through
+        self.assertIn("MGW-DETAIL-EOF", written)
+        # and the real outputs were emitted before the block, unaffected
+        self.assertEqual(lines[0], "route=demote", written)
+        self.assertEqual(lines[1], "reenqueue=false", written)
+
+    def test_run_gh_read_translates_a_fatal_into_the_local_error_type(self):
+        # Three lines, but the translation is real logic: a GhFatalError that escaped
+        # untranslated would bypass every `except GhError` handler and crash the sweep
+        # instead of producing a REFUSE row.
+        original = mgw.gh_retry.run_gh_read
+
+        def fatal(_argv):
+            raise mgw.gh_retry.GhFatalError("HTTP 404 Not Found")
+
+        try:
+            mgw.gh_retry.run_gh_read = fatal
+            with self.assertRaises(mgw.GhError):
+                mgw.run_gh_read(["api", "-X", "GET", "repos/x/y"])
+        finally:
+            mgw.gh_retry.run_gh_read = original
+
+    def test_run_gh_read_lets_transient_exhaustion_through_untouched(self):
+        # Exhaustion must stay its own type so the sweep entrypoint can convert exactly
+        # that case into ::warning + exit 0 and nothing else.
+        original = mgw.gh_retry.run_gh_read
+
+        def exhausted(_argv):
+            raise mgw.gh_retry.GhTransientExhausted("HTTP 504 (3 attempts)")
+
+        try:
+            mgw.gh_retry.run_gh_read = exhausted
+            with self.assertRaises(mgw.gh_retry.GhTransientExhausted):
+                mgw.run_gh_read(["api", "-X", "GET", "repos/x/y"])
+        finally:
+            mgw.gh_retry.run_gh_read = original
+
+    def test_an_unreadable_activity_feed_yields_no_anchor(self):
+        # group_created_at's error branch: no anchor => REFUSE, never a recovery.
+        harness = FakeWatchdog.build(suites=0)
+        harness.gh.fail_on = ("/activity",)
+        harness.run()
+        self.assertEqual(harness.gh.mutations, [])
+        self.assertTrue(any("decision=REFUSE" in r for r in harness.rows), harness.rows)
+
+    def test_a_malformed_activity_row_yields_no_anchor(self):
+        harness = FakeWatchdog.build(
+            suites=0,
+            activity=[{"activity_type": "branch_creation", "after": HEAD,
+                       "timestamp": "not-a-timestamp"}],
+        )
+        harness.run()
+        self.assertEqual(harness.gh.mutations, [])
+        self.assertTrue(any("decision=REFUSE" in r for r in harness.rows), harness.rows)
+
+    def test_parse_iso_rejects_junk_rather_than_guessing(self):
+        for junk in (None, "", "not-a-date", "2026-13-45T99:99:99Z", 17):
+            self.assertIsNone(mgw.parse_iso(junk), junk)
+        self.assertIsNotNone(mgw.parse_iso("2026-07-28T05:15:09Z"))
+        # a naive timestamp is treated as UTC rather than crashing
+        naive = mgw.parse_iso("2026-07-28T05:15:09")
+        self.assertIsNotNone(naive)
+        self.assertEqual(naive.tzinfo, timezone.utc)
 
 
 class TestFeedbackWiring(unittest.TestCase):

@@ -515,8 +515,11 @@ no network); the Python close-script carries a `--self-test`.
   5-minute cron (never on a PR head, so it can never gate), and after a **120 s** grace —
   30× the measured maximum create→first-suite latency (N=209: p50 2 s, max 4 s; the failure is
   categorical, not slow) — it dequeues and re-enqueues the entry. Bounded (1 per group head
-  SHA, 2 per PR per 6 h, 2 per run) and idempotent; on exhaustion it hands back to the platform
-  timeout rather than escalating to a human. **Everything it cannot positively establish is a
+  SHA, 2 per PR per 6 h, 2 per run) and idempotent. On exhaustion it hands back to the platform
+  timeout, which **does demote to `review:changes`** — by then the only trusted observation names
+  a superseded group head, so preserving the verdict would be unsound, and three consecutive
+  zero-dispatch groups on one PR warrant a human look. It never escalates to a `needs:user` hold
+  and never permanently stalls. **Everything it cannot positively establish is a
   refusal, never a recovery.** It emits one row per entry **every tick**, carrying the ref, the
   suite count, the decision, and `stacked=`/`stacked_green=` — the count of groups built on top
   of the dead ref, which is the real cost term and the watchdog's own effectiveness measure.
