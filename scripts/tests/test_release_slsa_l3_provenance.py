@@ -28,14 +28,22 @@
 #   * and the whole thing is FAIL-CLOSED: `release` `needs:` both provenance jobs, and attaches
 #     both signed bundles to the Release before SHA256SUMS is computed over them.
 #
-# THE THREE LANES pinned here, and what each covers:
+# THE FOUR LANES pinned here, and what each covers:
 #   1. `release.yml#provenance`            — the CLI/server archives   (subjects from `package`)
 #   2. `release.yml#provenance-artifacts`  — GUI bundles, SBOM/VEX,
 #                                            served-surface conformance report
 #   3. `dist.yml#provenance`               — the tiered bare binaries  (subjects from `build`)
-# The ghcr.io container image is deliberately NOT here: it needs the generator's separate
-# `generator_container_slsa3.yml` (image-digest subjects), which is its own migration. GX-11
-# stays open for it — do not add a container assertion until that lane actually exists.
+#   4. `release.yml#provenance-container`  — the ghcr.io `sparq-server` image  (#4635)
+#
+# LANE 4 IS SHAPED DIFFERENTLY, and `check_container_builder` exists because of it. Lanes 1-3 call
+# the GENERIC generator, whose only boundary input is `base64-subjects` (file digests) and which is
+# not the uploader (`upload-assets: false`). A registry image is not a file: lane 4 calls
+# `generator_container_slsa3.yml`, which takes `image` + `digest`, has no `base64-subjects` and no
+# `upload-assets`, and IS the uploader — it attaches the attestation to the image in ghcr.io, so it
+# legitimately holds `packages: write`. Applying lane 1-3's checker to it would assert inputs that
+# do not exist, so it gets its own checker with the same isolation properties. The two invariants
+# unique to it: the subject is the DIGEST the push reported (a tag is mutable — provenance keyed on
+# one describes nothing), and the in-band buildkit attestation is NOT removed by the migration.
 #
 # NON-VACUITY. Structural assertions rot into decoration the moment they stop being able to fail
 # (this repo has shipped exactly that: see test_release_container_multiarch.py's header, and the
@@ -72,6 +80,20 @@ TRUSTED_BUILDER = re.compile(
     r"^slsa-framework/slsa-github-generator/\.github/workflows/"
     r"generator_generic_slsa3\.yml@v\d+\.\d+\.\d+$"
 )
+# [OPUS-5] #4635 — lane 4's builder. Same tag-not-SHA rule, for the same reason.
+CONTAINER_BUILDER = re.compile(
+    r"^slsa-framework/slsa-github-generator/\.github/workflows/"
+    r"generator_container_slsa3\.yml@v\d+\.\d+\.\d+$"
+)
+CONTAINER_IMAGE_EXPR = "${{ needs.docker.outputs.image }}"
+CONTAINER_DIGEST_EXPR = "${{ needs.docker.outputs.digest }}"
+# The `docker` job's side of the hand-off: the digest must come from the PUSH step's own output,
+# and the image name must come from the step that computes it (no tag, no digest).
+DOCKER_DIGEST_OUTPUT = "${{ steps.push.outputs.digest }}"
+DOCKER_IMAGE_OUTPUT = "${{ steps.image.outputs.image }}"
+# The in-band buildkit attestation the migration deliberately KEEPS — a different predicate,
+# attached differently, and the one `cosign verify-attestation` reads.
+IN_BAND_CONTAINER_PROVENANCE = "provenance: mode=max"
 SUBJECTS_EXPR = "${{ needs.package.outputs.hashes }}"
 ARTIFACT_SUBJECTS_EXPR = "${{ needs.artifact-subjects.outputs.hashes }}"
 DIST_SUBJECTS_EXPR = "${{ needs.build.outputs.binary-hashes }}"
@@ -262,6 +284,95 @@ def check_trusted_builder(
     return bad
 
 
+def check_container_builder(
+    prov: list[str] | None, docker: list[str] | None
+) -> list[str]:
+    """[OPUS-5] #4635 — lane 4: the ghcr image's isolated provenance.
+
+    Same isolation contract as lanes 1-3 (bare `uses:`, semver tag, own OIDC identity, nothing of
+    ours executing inside), but over the container generator's `image`/`digest` interface. Two
+    extra properties this lane alone can lose:
+
+      * the subject is the digest the PUSH REPORTED. Point it at a tag and the provenance
+        describes a mutable reference — verifiable, and meaningless.
+      * the in-band buildkit attestation survives. The migration ADDS a lane; deleting
+        `provenance: mode=max` as "now redundant" would break `cosign verify-attestation`
+        consumers, and the two attestations are not interchangeable.
+    """
+    where = "release.yml#provenance-container"
+    bad: list[str] = []
+    if prov is None:
+        return [f"{where} is missing — the container image has no isolated-builder lane"]
+
+    used = scalar(prov, "uses")
+    if used is None or not CONTAINER_BUILDER.match(used):
+        bad.append(
+            f"{where} must be a bare call to the slsa-github-generator CONTAINER builder "
+            f"pinned to a semver TAG (not a SHA); found: {used!r}"
+        )
+    if any(re.match(r"^\s*steps:\s*$", line) for line in prov) or scalar_all(prov, "run"):
+        bad.append(
+            f"{where} declares steps/run — anything we execute inside the trusted "
+            "builder call destroys the isolation the L3 claim rests on"
+        )
+    if scalar(prov, "image") != CONTAINER_IMAGE_EXPR:
+        bad.append(
+            f"{where} `image` must be threaded from the pushing job ({CONTAINER_IMAGE_EXPR}); "
+            f"found: {scalar(prov, 'image')!r}"
+        )
+    if scalar(prov, "digest") != CONTAINER_DIGEST_EXPR:
+        bad.append(
+            f"{where} `digest` must be threaded from the pushing job ({CONTAINER_DIGEST_EXPR}) — "
+            "provenance over a mutable tag describes nothing; "
+            f"found: {scalar(prov, 'digest')!r}"
+        )
+    if "docker" not in needs_set(prov):
+        bad.append(f"{where} must `needs: docker`; found: {sorted(needs_set(prov))!r}")
+    if "write" not in scalar_all(prov, "id-token"):
+        bad.append(f"{where} needs `id-token: write` to mint its own signing identity")
+    if "read" not in scalar_all(prov, "actions"):
+        bad.append(f"{where} needs `actions: read` to record the workflow entry point")
+    # Unlike lanes 1-3 this generator IS the uploader — it attaches the attestation to the image
+    # in the registry, so `packages: write` is required rather than privilege creep. `contents`
+    # write is still not: it publishes nothing to the repo.
+    if "write" not in scalar_all(prov, "packages"):
+        bad.append(
+            f"{where} needs `packages: write` — the container generator attaches the "
+            "attestation to the image in ghcr.io itself"
+        )
+    if "write" in scalar_all(prov, "contents"):
+        bad.append(f"{where} must NOT hold `contents: write` — it publishes nothing to the repo")
+
+    if docker is None:
+        return bad + ["release.yml has no `docker` job to push the image or report its digest"]
+    if scalar(docker, "digest") != DOCKER_DIGEST_OUTPUT:
+        bad.append(
+            "release.yml#docker must expose the pushed image's digest as a job output taken from "
+            f"the push step ({DOCKER_DIGEST_OUTPUT}); found: {scalar(docker, 'digest')!r}"
+        )
+    if scalar(docker, "image") != DOCKER_IMAGE_OUTPUT:
+        bad.append(
+            "release.yml#docker must expose the image NAME as a job output taken from the "
+            f"name-resolving step ({DOCKER_IMAGE_OUTPUT}); found: {scalar(docker, 'image')!r}"
+        )
+    push = step_block(docker, "Build and push")
+    if push is None:
+        bad.append("release.yml#docker has no `Build and push` step")
+    else:
+        if scalar(push, "id") != "push":
+            bad.append(
+                "release.yml#docker's `Build and push` step must carry `id: push` — without it "
+                f"{DOCKER_DIGEST_OUTPUT} is empty and the generator attests nothing"
+            )
+        if not any(IN_BAND_CONTAINER_PROVENANCE in line for line in push):
+            bad.append(
+                "release.yml#docker's push must keep the in-band buildkit attestation "
+                f"(`{IN_BAND_CONTAINER_PROVENANCE}`) — the isolated lane ADDS a predicate, it "
+                "does not replace the one `cosign verify-attestation` reads"
+            )
+    return bad
+
+
 def check_collector(
     body: list[str] | None, where: str, deps: tuple[str, ...]
 ) -> list[str]:
@@ -319,6 +430,10 @@ def check(release_text: str, matrix_text: str, dist_text: str) -> list[str]:
     # --- lane 3: dist.yml's tiered bare binaries (#4570).
     bad += check_trusted_builder(
         job_block(dist_text, "provenance"), "dist.yml#provenance", DIST_SUBJECTS_EXPR, ("build",)
+    )
+    # --- lane 4: the ghcr.io container image (#4635) — the container generator's own shape.
+    bad += check_container_builder(
+        job_block(release_text, "provenance-container"), job_block(release_text, "docker")
     )
 
     # --- fail-closed: no Release without BOTH isolated bundles, and both ship in SHA256SUMS.
@@ -494,13 +609,17 @@ def check(release_text: str, matrix_text: str, dist_text: str) -> list[str]:
 #
 # All three are one-line edits that read as tidying. Pinned here, mutation-proved below.
 # --------------------------------------------------------------------------------------
+# [OPUS-5] #4635: BOTH generator flavours. The container lane is a different reusable workflow but
+# the SAME trust anchor — leaving it out of this regex would let it drift onto a second tag while
+# `check` (which only proves each lane is on *a* semver tag) stayed green, which is failure mode 1.
 BUILDER_USES = re.compile(
     r"^\s*uses:\s*slsa-framework/slsa-github-generator/\.github/workflows/"
-    r"generator_generic_slsa3\.yml@(\S+)\s*$",
+    r"generator_(?:generic|container)_slsa3\.yml@(\S+)\s*$",
     re.M,
 )
-# release.yml#provenance, release.yml#provenance-artifacts, dist.yml#provenance.
-EXPECTED_LANES = 3
+# release.yml#provenance, release.yml#provenance-artifacts, release.yml#provenance-container,
+# dist.yml#provenance.
+EXPECTED_LANES = 4
 GENERATOR_REPO = "slsa-framework/slsa-github-generator"
 REQUIRED_IGNORE_TYPES = {
     "version-update:semver-patch",
@@ -555,8 +674,8 @@ def check_pin_policy(
     refs = BUILDER_USES.findall(release_text) + BUILDER_USES.findall(dist_text)
     if len(refs) != EXPECTED_LANES:
         bad.append(
-            f"expected {EXPECTED_LANES} trusted-builder call sites (release.yml x2, dist.yml x1); "
-            f"found {len(refs)}: {refs!r}"
+            f"expected {EXPECTED_LANES} trusted-builder call sites (release.yml x3 — two generic, "
+            f"one container — and dist.yml x1); found {len(refs)}: {refs!r}"
         )
     if len(set(refs)) > 1:
         bad.append(
@@ -789,6 +908,61 @@ MUTATIONS = {
         '          fi',
         '          sha256sum -- "${binaries[@]}" > "binary-hashes-${{ matrix.tier }}.txt"',
     ),
+    # ---- #4635: lane 4, the ghcr container image. ----
+    # MC1 — the container lane reverts to the in-band-only posture it replaced.
+    "container lane reverts to in-band attestation": _sub(
+        "release",
+        "uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0",
+        "uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373",
+    ),
+    # MC2 — the container builder SHA-pinned, erasing the verifiable builder identity. The same
+    # "hardening" edit as M2, on the one lane where the repo's SHA-pin convention is loudest.
+    "container trusted builder pinned by SHA instead of tag": _sub(
+        "release",
+        "generator_container_slsa3.yml@v2.1.0",
+        "generator_container_slsa3.yml@" + "0" * 40,
+    ),
+    # MC3 — THE regression unique to this lane: attest a mutable TAG instead of the digest the
+    # push reported. Every other assertion still passes; the provenance verifies; it describes
+    # "whatever :latest is right now". Reads in review as a tidier expression.
+    "container provenance keyed on a mutable tag instead of the pushed digest": _sub(
+        "release",
+        "digest: ${{ needs.docker.outputs.digest }}",
+        "digest: ${{ needs.setup.outputs.version }}",
+    ),
+    # MC4 — the push step loses `id: push`, so `steps.push.outputs.digest` silently resolves to
+    # the empty string and the generator is handed nothing. A pure deletion, invisible on a PR.
+    "docker push step loses the id the digest output reads": _sub(
+        "release",
+        "      - name: Build and push\n        id: push\n",
+        "      - name: Build and push\n",
+    ),
+    # MC5 — the in-band buildkit attestation deleted as "now redundant". It is not: it is a
+    # different predicate and the one `cosign verify-attestation` reads.
+    "in-band buildkit attestation dropped in favour of the isolated lane": _sub(
+        "release",
+        "          provenance: mode=max\n          sbom: true",
+        "          provenance: false\n          sbom: true",
+    ),
+    # MC6 — privilege creep on the container builder (mirrors M5 for lanes 1-3).
+    "container trusted builder granted contents: write": _sub(
+        "release",
+        "      packages: write # this generator IS the uploader",
+        "      contents: write\n      packages: write # this generator IS the uploader",
+    ),
+    # MC7 — the container lane stops depending on the pushing job, so both threaded inputs become
+    # unresolvable while the lane still LOOKS wired.
+    "container lane no longer needs the docker job": _sub(
+        "release",
+        "  provenance-container:\n    needs: [docker]",
+        "  provenance-container:\n    needs: [setup]",
+    ),
+    # MC8 — the docker job stops reporting the digest at all (e.g. "the generator can look it up").
+    "docker job drops the digest output": _sub(
+        "release",
+        "      digest: ${{ steps.push.outputs.digest }}",
+        '      digest: ""',
+    ),
 }
 
 
@@ -871,6 +1045,21 @@ PIN_POLICY_MUTATIONS = {
     ),
     # PP8 — the policy record is deleted; the SHA-pin exception loses its owner and rationale.
     "the pin policy record is deleted": _drop_policy_doc,
+    # [OPUS-5] #4635 — the container lane is a DIFFERENT reusable workflow on the SAME trust
+    # anchor, so it decays the same two ways and must be counted the same.
+    # PP9 — the container lane bumped on its own: `check` still passes (it is on *a* semver tag),
+    # but one release would then carry provenance from two different builder identities.
+    "the container lane bumped to a different tag": _pin_sub(
+        "release",
+        "generator_container_slsa3.yml@v2.1.0",
+        "generator_container_slsa3.yml@v9.9.9",
+    ),
+    # PP10 — the container lane disappears, dropping the lane count back to three.
+    "the container trusted-builder lane disappears": _pin_sub(
+        "release",
+        "uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0",
+        "uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373",
+    ),
 }
 
 
