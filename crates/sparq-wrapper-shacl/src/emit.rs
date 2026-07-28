@@ -669,13 +669,13 @@ fn emit_type(out: &mut String, ty: &ModelType) {
         .iter()
         .any(|f| matches!(f.value, ValueType::Nested { .. }));
 
-    out.push_str(&format!(
+    out.push_str(
         "\n    /// Reads `subject` out of `triples`.\n    ///\n    \
          /// # Errors\n    ///\n    /// Returns the first [`LoadError`] the subject's triples\n    \
          /// violate; see the module header for what is and is not checked.\n    \
-         pub fn load(subject: &str, triples: &[Triple<'_>]) -> Result<Self, LoadError> {{\n        \
-         Self::load_at(subject, triples, 0)\n    }}\n"
-    ));
+         pub fn load(subject: &str, triples: &[Triple<'_>]) -> Result<Self, LoadError> {\n        \
+         Self::load_at(subject, triples, 0)\n    }\n",
+    );
 
     out.push_str(&format!(
         "\n    fn load_at({}: &str, {}: &[Triple<'_>], {}: u32) -> Result<Self, LoadError> {{\n",
