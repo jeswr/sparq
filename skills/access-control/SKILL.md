@@ -937,9 +937,38 @@ NARROW). `justify_status_decision(grant, &entry, status, at_time)` renders a **m
 justification** for the allow OR the deny (a `prov:Activity` typed `trust:StatusCheck`, `prov:generated`
 the grant, with `trust:statusDecision` = the reason token + the checked index/purpose) — the bead's
 *minimal denial justification*. Revocation propagates by **full re-materialise** (the §4.4 stale window
-is *bounded* by `max_age_secs`, not closed — no in-reasoner incremental retraction). Pure-Rust base layer
+is *bounded* by `max_age_secs`, not closed — no in-reasoner incremental retraction; see the
+`StatusDelta` paragraph below for the bounded incremental *selection* step). Pure-Rust base layer
 (no new default dep); OFF in the default build. One honesty boundary remains: it adds **no privacy** (the
 index + list are clear; the resolver learns which credential is checked).
+
+**Incremental status delta — re-check only the affected grants** (`StatusDelta`, same `status-list`
+feature, [OPUS-5] `sq-pfae.14`). Retraction is still re-materialisation, but an **epoch bump** no longer
+has to re-run the gate over every grant. `StatusDelta::between(list_iri, &prev, &next)` (or
+`between_with_limit(.., max_changed_indices)`; the default cap is `DEFAULT_MAX_CHANGED_INDICES`) diffs two
+`StatusBitstring` snapshots of ONE list and names the slots that moved: `changed_indices()`,
+`requires_full_recheck()`, `unbounded_reason()` (a `DeltaUnbounded`), `successor_as_of_unix_secs()`, and
+the two predicates that form the **skip contract** — skip an entry's re-check only when
+`delta.valid_at(now, max_age_secs) && !delta.affects(&entry)`. `affects` is the per-slot bit selection;
+`valid_at` is the **whole-list** freshness precondition, and it is load-bearing rather than decorative:
+staleness is a property of the *snapshot*, not of a slot, so a future-dated successor moves an unchanged
+slot from `Live` to `Stale` without `affects` ever seeing it. Under that contract a skipped entry
+satisfies `verdict(prev).admits() ⇒ verdict(next).admits()`, i.e. skipping can never leave a grant
+admitted that the full re-run would deny (the stronger `verdict(prev) == verdict(next)` holds when both
+snapshots are fresh). **Why this does not break stratification:** it is a *selection* computed from two **input**
+snapshots — it derives no verdict, reads no derived fact, and retracts nothing in the reasoner, so the
+input-stratified / one-side-bound seeding discipline (`sq-tu4e`: no NAF over derived facts) is untouched.
+**Fail-closed:** a successor that is not strictly newer (`NotNewer`), a change in the list's bit coverage
+(`CoverageChanged` — indices moving in/out of range flip to/from `Unknown`), or more changes than the
+limit (`LimitExceeded`) all yield `requires_full_recheck()`, i.e. the pre-`sq-pfae.14` full re-run, and
+`affects` then reports **every** entry on the list as affected. **Honest residue:** the delta does NOT
+close the §4.4 stale-authority window — an entry whose bit did not change still ages into
+`LiveStatus::Stale` and `affects` will say `false` for it, so `valid_at` (and the caller's own `max_age_secs`-driven
+re-check) is still required; a delta binds exactly one `statusListCredential`; and deep-chain delegation
+revocation is still not incremental. The skip contract is pinned by an exhaustive differential test over
+every single-byte snapshot pair × a `now` sweep covering both-fresh, prev-aged-out and future-successor
+instants (`status_list::tests::unaffected_entries_are_safe_to_skip_across_the_bump`), plus
+`valid_at_rejects_a_future_dated_successor_that_affects_cannot_see`.
 
 **Verified status-list issuer signature** (`VerifyingLiveStatusCheck`, same `status-list` feature,
 [OPUS-4.8] `sq-pfae.13`). The base `LiveStatusCheck` trusts the list AS FETCHED. `VerifyingLiveStatusCheck`
