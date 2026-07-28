@@ -187,15 +187,66 @@ const KEYWORDS: &[&str] = &[
     "YEAR",
 ];
 
+/// The bytes SPARQL's `PN_LOCAL_ESC` production admits after a backslash inside the local
+/// part of a prefixed name (`ex:a\~b`).
+const PN_LOCAL_ESC: &[u8] = br"_~.-!$&'()*+,;=/?#@%";
+
+/// Whether `b` can appear in a SPARQL name — the `PN_CHARS` production, deliberately
+/// approximated *wide*.
+///
+/// `PN_CHARS` is far larger than ASCII: it spans a dozen Unicode `PN_CHARS_BASE` ranges plus
+/// the combining/extender ranges. Rather than decode code points, every non-ASCII byte counts
+/// as a name byte. The approximation errs only in the long direction, which is the safe one
+/// here: this predicate exists to decide what is *data*, and the invariant is one-directional
+/// — over-skipping can at worst cost a hint, whereas under-skipping strands the ASCII tail of
+/// a perfectly valid name in keyword position and invents a false one.
+fn is_name_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || !b.is_ascii()
+}
+
+/// Skips the part of a prefixed name or blank-node label *after* the `:` — SPARQL's
+/// `PN_LOCAL` — starting at `at`, and returns the index just past it.
+///
+/// Beyond [`is_name_byte`], `PN_LOCAL` admits `.` and `:` internally and the two `PLX`
+/// escapes: `PERCENT` (`%C3`) and `PN_LOCAL_ESC` (`\~`). Approximating this with ASCII name
+/// characters alone is what let `ex:éFLTR` and `ex:a\~FLTR` leave a bare `FLTR` behind for the
+/// scanner to hint on. A trailing `.` is over-consumed (the grammar ends `PN_LOCAL` before
+/// one); that only ever swallows a statement-terminating dot, since a word glued straight onto
+/// a dot is part of the name under that same internal-dot rule.
+fn skip_pn_local(bytes: &[u8], at: usize) -> usize {
+    let n = bytes.len();
+    let mut j = at;
+    while j < n {
+        let b = bytes[j];
+        if is_name_byte(b) || b == b'.' || b == b':' {
+            j += 1;
+        } else if b == b'%'
+            && j + 2 < n
+            && bytes[j + 1].is_ascii_hexdigit()
+            && bytes[j + 2].is_ascii_hexdigit()
+        {
+            j += 3;
+        } else if b == b'\\' && j + 1 < n && PN_LOCAL_ESC.contains(&bytes[j + 1]) {
+            j += 2;
+        } else {
+            break;
+        }
+    }
+    j
+}
+
 /// Scans SPARQL that has **already failed to parse** and returns up to [`MAX_SUGGESTIONS`]
 /// did-you-mean hints, in source order, deduplicated by token.
 ///
-/// A candidate is a *bare word* — a token in keyword position. Everything that is lexically
-/// something else is skipped, so it can never be mistaken for a mistyped keyword: string
-/// literals, `<IRI>`s, `#` comments, `?var`/`$var`, `@lang` tags, numbers, and prefixed
-/// names / blank-node labels (`ex:Cat`, `_:b1` — the local part of a prefixed name is data,
-/// not a keyword). What remains in valid SPARQL is essentially keywords only, which is why a
-/// bare word that is *not* a keyword is worth a hint.
+/// A candidate is a *bare word* — an all-ASCII token in keyword position. Everything that is
+/// lexically something else is skipped, so it can never be mistaken for a mistyped keyword:
+/// string literals, `<IRI>`s, `#` comments, `?var`/`$var`, `@lang` tags, numbers, and prefixed
+/// names / blank-node labels (`ex:Cat`, `:Cat` under an empty prefix, `_:b1` — the local part
+/// of a prefixed name is data, not a keyword). Those name forms are skipped by the grammar's
+/// own escape rules plus a deliberately wide name-character rule (see [`skip_pn_local`]) rather
+/// than an ASCII approximation, so a Unicode, percent-escaped or backslash-escaped name cannot
+/// strand an ASCII tail for the scanner to hint on. What remains in valid SPARQL is essentially
+/// keywords only, which is why a bare word that is *not* a keyword is worth a hint.
 pub(crate) fn keyword_suggestions(src: &str) -> Vec<KeywordSuggestion> {
     let bytes = src.as_bytes();
     let n = bytes.len();
@@ -225,12 +276,15 @@ pub(crate) fn keyword_suggestions(src: &str) -> Vec<KeywordSuggestion> {
             b'?' | b'$' | b'@' => {
                 // A variable (?x / $x) or a language tag (@en-GB): the name is not a keyword.
                 let mut j = i + 1;
-                while j < n
-                    && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_' || bytes[j] == b'-')
-                {
+                while j < n && is_name_byte(bytes[j]) {
                     j += 1;
                 }
                 i = j.max(i + 1);
+            }
+            b':' => {
+                // A prefixed name written against the empty prefix (`:Cat`, declared by
+                // `PREFIX : <…>`): its local part is data exactly as `ex:Cat`'s is.
+                i = skip_pn_local(bytes, i + 1);
             }
             b'0'..=b'9' => {
                 // A numeric literal (including a decimal/exponent tail): never a keyword.
@@ -240,28 +294,28 @@ pub(crate) fn keyword_suggestions(src: &str) -> Vec<KeywordSuggestion> {
                 }
                 i = j;
             }
-            _ if c.is_ascii_alphabetic() || c == b'_' => {
+            _ if c.is_ascii_alphabetic() || c == b'_' || !c.is_ascii() => {
                 let mut j = i + 1;
-                while j < n && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+                let mut ascii_only = c.is_ascii();
+                while j < n && is_name_byte(bytes[j]) {
+                    ascii_only &= bytes[j].is_ascii();
                     j += 1;
                 }
                 if j < n && bytes[j] == b':' {
                     // A prefixed name (`ex:Cat`) or blank-node label (`_:b1`): skip the whole
                     // token, local part included — neither half sits in keyword position.
-                    j += 1;
-                    while j < n
-                        && (bytes[j].is_ascii_alphanumeric()
-                            || bytes[j] == b'_'
-                            || bytes[j] == b'-'
-                            || bytes[j] == b'.')
-                    {
-                        j += 1;
-                    }
+                    i = skip_pn_local(bytes, j + 1);
+                    continue;
+                }
+                if !ascii_only {
+                    // SPARQL keywords are ASCII, so a name carrying any other byte is not a
+                    // typo of one. Skipping it whole also keeps the ASCII run inside it from
+                    // being re-read as a bare word on the next iteration.
                     i = j;
                     continue;
                 }
-                // ASCII-only by construction, so `i..j` is a char boundary and the word is
-                // safe to upper-case bytewise.
+                // ASCII-only, so `i..j` is a char boundary and the word is safe to upper-case
+                // bytewise.
                 let word = &src[i..j];
                 words += 1;
                 if let Some(kw) = nearest_keyword(word) {
@@ -440,6 +494,69 @@ mod tests {
         // suggesting against it would be pure noise.
         let src = "SELECT ?s WHERE { ?s <http://ex/FLTR> \"FLTR\" . # FLTR\n ?s ex:FLTR ?o }";
         assert!(keyword_suggestions(src).is_empty(), "got {:?}", keyword_suggestions(src));
+    }
+
+    #[test]
+    fn prefixed_name_locals_are_data_across_the_whole_pn_local_grammar() {
+        // The ASCII approximation this replaced stopped scanning at the first byte `PN_LOCAL`
+        // allows and ASCII names do not, stranding the rest of a VALID name in keyword
+        // position: `ex:éFLTR` became a hint for `FLTR`. Every form below is one prefixed
+        // name, so none of them may produce a hint.
+        for src in [
+            "SELECT ?s WHERE { ?s ?p ex:\u{e9}FLTR }",      // Unicode PN_CHARS_BASE
+            "SELECT ?s WHERE { ?s ?p ex:a\u{0300}FLTR }",   // combining PN_CHARS
+            "SELECT ?s WHERE { ?s ?p ex:a%C3%A9FLTR }",     // PERCENT escape
+            "SELECT ?s WHERE { ?s ?p ex:x%DATE }",          // PERCENT hiding a near-keyword
+            "SELECT ?s WHERE { ?s ?p ex:a\\~FLTR }",        // PN_LOCAL_ESC
+            "SELECT ?s WHERE { ?s ?p ex:a\\#FLTR }",        // PN_LOCAL_ESC of a comment sigil
+            "SELECT ?s WHERE { ?s ?p ex:a:FLTR }",          // `:` inside the local part
+            "SELECT ?s WHERE { ?s ?p :FLTR }",              // the empty prefix
+            "SELECT ?s WHERE { ?s ?p \u{e9}x:FLTR }",       // Unicode in the PREFIX part
+            "SELECT ?s WHERE { ?s ?p my-ex:FLTR }",         // `-` in the PREFIX part
+            "SELECT ?s WHERE { ?s ?p _:\u{e9}FLTR }",       // blank-node label
+            "SELECT ?s WHERE { ?s ?p ?\u{e9}FLTR }",        // and the same trap in a variable
+        ] {
+            assert!(
+                keyword_suggestions(src).is_empty(),
+                "false hint on the valid name in: {} -> {:?}",
+                src,
+                keyword_suggestions(src)
+            );
+        }
+    }
+
+    #[test]
+    fn a_word_carrying_non_ascii_is_never_ranked_by_the_ascii_metric() {
+        // `edit_distance` is a BYTE metric, documented as ASCII-only, so a token holding a
+        // multi-byte character has no meaningful distance to a keyword — `FILTé` sits two
+        // *bytes* from `FILTER` and would otherwise be hinted. Such a token is skipped whole,
+        // which is also what stops the ASCII run inside it being re-read as a bare word.
+        assert!(keyword_suggestions("SELECT ?s WHERE { ?s ?p ?o FILT\u{e9}(?o) }").is_empty());
+        assert!(keyword_suggestions("SELECT ?s WHERE { ?s ?p ?o \u{e9}FLTR(?o) }").is_empty());
+        // Only that token is data — a bare word beside it is still a candidate.
+        let hints = keyword_suggestions("SELECT ?s WHERE { ?s ?p ?o \u{e9} FLTR(?o) }");
+        assert_eq!(hints.first().map(|h| h.suggestion.as_str()), Some("FILTER"), "{hints:?}");
+    }
+
+    #[test]
+    fn a_stray_word_after_a_prefixed_name_is_still_a_candidate() {
+        // The skip above must end WITH the name, not run on: a genuine typo separated from a
+        // prefixed name by anything the grammar excludes from PN_LOCAL is still hinted — a
+        // delimiter, or (last two cases) an escape the grammar does not actually spell — a `%`
+        // without two hex digits, a `\` before a byte outside PN_LOCAL_ESC — which ends the
+        // name where it stands rather than swallowing the bytes after it.
+        for src in [
+            "SELECT ?s WHERE { ?s ?p ex:\u{e9}name FLTR(?o) }",
+            "SELECT ?s WHERE { ?s ?p ex:a\\~name; FLTR(?o) }",
+            "SELECT ?s WHERE { ?s ?p :name FLTR(?o) }",
+            "SELECT ?s WHERE { ?s ?p ex:a%!FLTR(?o) }",
+            "SELECT ?s WHERE { ?s ?p ex:a\\FLTR(?o) }",
+        ] {
+            let hints = keyword_suggestions(src);
+            assert_eq!(hints.len(), 1, "{} -> {:?}", src, hints);
+            assert_eq!(hints[0].token, "FLTR");
+            assert_eq!(hints[0].suggestion, "FILTER");
+        }
     }
 
     #[test]

@@ -105,6 +105,32 @@ fn parse_failure_without_a_keyword_typo_suggests_nothing() {
     }
 }
 
+// [SONNET-4.6] Review round 1 on #4847: the local part of a prefixed name is DATA, and the
+// scanner must hold that line across the whole `PN_LOCAL` grammar — not just its ASCII subset.
+// Each query below carries a VALID prefixed name whose local part ends in a typo-shaped ASCII
+// suffix, and fails to parse for an UNRELATED reason (the `WHERE` block is never closed), so
+// the did-you-mean scanner does run. It must stay silent: an ASCII-only skip stopped inside
+// the name and hinted `FLTR -> FILTER` at a term the user spelled correctly.
+#[test]
+fn valid_prefixed_names_never_become_keyword_hints() {
+    for query in [
+        "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:\u{e9}FLTR ?o",
+        "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:a%C3%A9FLTR ?o",
+        "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:a\\~FLTR ?o",
+        "PREFIX : <http://ex/> SELECT ?s WHERE { ?s :FLTR ?o",
+    ] {
+        let error = terse_to_sparql(query).expect_err("the unclosed block must fail to parse");
+
+        match error {
+            TerseError::CanaryFailed { suggestions, .. } => assert!(
+                suggestions.is_empty(),
+                "hinted at a correctly-spelled prefixed name in {query}: {suggestions:?}"
+            ),
+            other => panic!("expected CanaryFailed, got {other:?}"),
+        }
+    }
+}
+
 #[test]
 fn canonical_sparql_passes_through_byte_identically() {
     let query = "SELECT ?s WHERE { ?s <http://ex/p> ?o }";
