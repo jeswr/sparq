@@ -485,9 +485,7 @@ export class Store {
      * stateless one-shot — it does not consult the receiver's stored triples —
      * so it is the drop-in replacement for `rdf-validate-shacl`'s
      * `validate(dataDataset, { shapes })`: validation runs through
-     * `sparq-shacl`'s SHACL Core + SHACL-SPARQL (`sh:sparql`, §5.2) engine. To
-     * validate the triples the store already holds instead, use
-     * [`validate_store`](Self::validate_store) (`validateStore`).
+     * `sparq-shacl`'s SHACL Core + SHACL-SPARQL (`sh:sparql`, §5.2) engine.
      *
      * Returns a JSON object `{ conforms: boolean, results: [...] }`; each result
      * has `focusNode`, `path`, `value`, `sourceShape`,
@@ -506,34 +504,6 @@ export class Store {
      * graphs are dropped when the call returns.
      */
     validate(data: string, shapes: string, format: string): string;
-    /**
-     * [SONNET-4.6] gh-2520: validates the triples **already loaded in this
-     * store** against a SHACL shapes document, returning the same JSON report
-     * [`validate`](Self::validate) does.
-     *
-     * This is the stateful counterpart of [`validate`](Self::validate): the data
-     * graph is the receiver's own contents (whatever `load` / `loadDataset` /
-     * `update` / `applyDelta` left in it), so a repeat validation — the same
-     * store re-checked as shapes are edited — parses only the *shapes* document
-     * per call instead of re-parsing the data document every time. `shapes` is an
-     * RDF document in any syntax [`Store::load`] accepts (`"turtle"` |
-     * `"ntriples"` | `"nquads"` | `"trig"`); the report shape, `sh:conforms`
-     * semantics and error behaviour are identical to
-     * [`validate`](Self::validate)'s (only a shapes parse failure errors —
-     * malformed shapes are skipped by the engine, never surfaced). Given the same
-     * two documents the two methods report the same results, *up to blank-node
-     * labels*: parsing a shapes document mints fresh labels, so a `sourceShape`
-     * naming an anonymous property shape (`_:…`) differs between any two calls —
-     * of either method. Treat those labels as per-call identifiers, not stable keys.
-     *
-     * **Scope:** validation observes the store's **default graph** only. Triples
-     * loaded into named graphs by [`load_dataset`](Self::load_dataset) are not
-     * focus-node candidates or value nodes here — `load` folds named graphs into
-     * the default graph, so a store built that way validates in full. The wasm
-     * linear-memory ceiling still applies: validating a very large store is
-     * better done server-side (the `sparq-server` HTTP `validate` path).
-     */
-    validateStore(shapes: string, format: string): string;
     /**
      * The number of (deduplicated) triples in the store.
      */
@@ -597,7 +567,6 @@ export interface InitOutput {
     readonly store_update: (a: number, b: number, c: number) => [number, number, number];
     readonly store_updateInPlace: (a: number, b: number, c: number) => [number, number];
     readonly store_validate: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
-    readonly store_validateStore: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly querychunks_next: (a: number) => [number, number];
     readonly __wbg_querychunks_free: (a: number, b: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
