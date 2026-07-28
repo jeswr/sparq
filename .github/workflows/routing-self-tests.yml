@@ -31,6 +31,18 @@ on:
       - "scripts/route-resolve.py"
       - "scripts/dispatch-plan.py"
       - "scripts/ready-issues.py"
+      # [OPUS-5] PR #4925 review — THE INPUTS THE PARTITION GUARD READS FROM THE TREE.
+      # `ready-issues.py`'s `workspace_roots()` derives the `area:` partition algebra from the
+      # workspace manifest plus the crate directory listing, and REFUSES to plan when the two
+      # disagree. Neither input was in this filter, so the one file that can turn the guard into
+      # a hard PLAN stop — root `Cargo.toml` — could change with the guard's own tests never
+      # running, merge green, and stop dispatch for BOTH target repositories on the next tick.
+      # `crates/*/Cargo.toml` (not `crates/**`) is deliberate: what matters here is the SET of
+      # crate partition roots, which changes exactly when a crate manifest is added, removed or
+      # renamed. `crates/**` would fire this lane on essentially every Rust PR in a 67-crate
+      # workspace for no additional coverage of that set.
+      - "Cargo.toml"
+      - "crates/*/Cargo.toml"
       # [OPUS-5] the bd->issues migration pair. Their --self-tests were DEAD in this repo's
       # PR CI: bd-to-issues.py's was invoked by no workflow at all, and
       # ci-close-merged-beads.py's ran only POST-merge inside bead-autoclose.yml
@@ -102,6 +114,18 @@ on:
       - "scripts/route-resolve.py"
       - "scripts/dispatch-plan.py"
       - "scripts/ready-issues.py"
+      # [OPUS-5] PR #4925 review — THE INPUTS THE PARTITION GUARD READS FROM THE TREE.
+      # `ready-issues.py`'s `workspace_roots()` derives the `area:` partition algebra from the
+      # workspace manifest plus the crate directory listing, and REFUSES to plan when the two
+      # disagree. Neither input was in this filter, so the one file that can turn the guard into
+      # a hard PLAN stop — root `Cargo.toml` — could change with the guard's own tests never
+      # running, merge green, and stop dispatch for BOTH target repositories on the next tick.
+      # `crates/*/Cargo.toml` (not `crates/**`) is deliberate: what matters here is the SET of
+      # crate partition roots, which changes exactly when a crate manifest is added, removed or
+      # renamed. `crates/**` would fire this lane on essentially every Rust PR in a 67-crate
+      # workspace for no additional coverage of that set.
+      - "Cargo.toml"
+      - "crates/*/Cargo.toml"
       # [OPUS-5] the bd->issues migration pair. Their --self-tests were DEAD in this repo's
       # PR CI: bd-to-issues.py's was invoked by no workflow at all, and
       # ci-close-merged-beads.py's ran only POST-merge inside bead-autoclose.yml

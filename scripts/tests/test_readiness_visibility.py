@@ -1403,6 +1403,37 @@ class TestRoutingSelfTestWorkflowWiring(unittest.TestCase):
                 "BOTH pull_request and push — it could change without re-running the gate that "
                 "reads it")
 
+    def test_the_partition_guards_tree_inputs_are_path_triggers(self):
+        """[OPUS-5] PR #4925 review — the inputs `workspace_roots()` READS FROM THE TREE.
+
+        The `_declared_data_inputs` derivation above is scoped to `orchestration/*.toml|json`, so
+        it cannot see these: the partition guard's inputs are the root workspace manifest and the
+        crate directory listing. Neither was a path trigger, and root `Cargo.toml` is the one file
+        that can turn the guard into a hard PLAN stop — a routine edit to
+        `members = ["crates/*"]` would have merged green with the guard's own tests never running,
+        then stopped dispatch for BOTH target repositories on the next tick.
+
+        `crates/*/Cargo.toml` rather than `crates/**`: what this gate needs to re-run for is a
+        change to the SET of crate partition roots, which happens exactly when a crate manifest is
+        added, removed or renamed. `crates/**` would fire the lane on essentially every Rust PR in
+        a 67-crate workspace and cover no additional change to that set.
+        """
+        paths_section = self._paths_section()
+        for path in ("Cargo.toml", "crates/*/Cargo.toml"):
+            self.assertEqual(
+                paths_section.count(f'"{path}"'), 2,
+                f"{path} is read by ready-issues.py's partition guard but is not a path trigger "
+                "on BOTH pull_request and push — it could change without re-running the gate "
+                "that reads it, and this one can hard-stop PLAN")
+
+    def test_the_partition_guard_reads_the_manifest_it_claims_to(self):
+        # Non-vacuity pairing for the row above: assert the guard really does open root
+        # Cargo.toml, so the trigger cannot be pinned for a file nothing reads.
+        source = (SCRIPTS / "ready-issues.py").read_text(encoding="utf-8")
+        self.assertIn('WORKSPACE_MANIFEST = "Cargo.toml"', source)
+        self.assertIn('CRATES_DIR = "crates"', source)
+        self.assertIn("os.path.join(repo_root, WORKSPACE_MANIFEST)", source)
+
     def test_gate_is_not_declared_advisory(self):
         # [OPUS-5] Guards the rule that is LIVE. ci-summary's discovery changed on
         # 2026-07-25 (#3773): a check is non-gating iff it is EXPLICITLY DECLARED in

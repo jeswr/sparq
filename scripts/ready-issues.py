@@ -92,6 +92,9 @@ _WORKSPACE_ROOTS = None          # lazily scanned; None = not yet read
 # (no globs), so the tree can state its own floor and a crate added next month raises it with no
 # code change — see `assert_workspace_tree`.
 WORKSPACE_MANIFEST = "Cargo.toml"
+# The one directory the workspace keeps its crates in. Mirrors `pr-area-labels.py`'s CRATES_DIR,
+# whose `workspace_members()` parses the same manifest field for the PR-side deriver.
+CRATES_DIR = "crates"
 
 
 class DegeneratePartitionRoots(RuntimeError):
@@ -120,49 +123,122 @@ def _repo_root():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def declared_crate_members(repo_root):
-    """The `crates/<name>` directories `Cargo.toml` DECLARES as workspace members.
+_GLOB_CHARS = "*?["             # cargo expands `members` with the `glob` crate
+
+
+def _crate_member_root(member):
+    """(partition root, is_glob) for one `[workspace] members` entry, or (None, False).
+
+    Only `crates/...` entries matter — a member elsewhere in the tree (sparq declares none, but
+    `exclude` names `gui/src-tauri` and `vendor/spargebra`) names no `crates/` partition root.
+
+    THE FORMS CARGO ACCEPTS, all of which this must survive (PR #4925 review — every one of them
+    refused a complete, valid tree):
+      * `crates/sparq-core`        -> ("sparq-core", False)   the plain form sparq uses today
+      * `crates/sparq-core/`       -> ("sparq-core", False)   a trailing slash is legal
+      * `crates/sparq-core/derive` -> ("sparq-core", False)   a NESTED member (the proc-macro
+        pattern) is a member, but it is NOT a partition root: it lives INSIDE `sparq-core` and
+        `workspace_roots` never scans that deep, so the root it must be checked against is its
+        first segment under `crates/`.
+      * `crates/*`                 -> (None, True)            a glob delegates the member list to
+        the tree itself, so it names no specific root and cannot be checked against one.
+    """
+    if not isinstance(member, str):
+        return None, False
+    # `.strip()` handles whitespace padding; the empty-segment filter below already absorbs a
+    # trailing slash and a doubled separator, so there is deliberately no `.strip("/")` here — it
+    # was measured to change NO input (a mutation probe could not kill it), and an unkillable
+    # guard reads as protection while providing none.
+    parts = [p for p in member.strip().split("/") if p]
+    if len(parts) < 2 or parts[0] != CRATES_DIR:
+        return None, False
+    if any(c in parts[1] for c in _GLOB_CHARS):
+        return None, True
+    return parts[1], False
+
+
+def declared_crate_roots(repo_root):
+    """`(explicit roots, globbed)` — the `crates/` partition roots `Cargo.toml` names.
 
     The floor for `assert_workspace_tree` is read from the manifest rather than written down, so
-    it tracks the workspace automatically. Returns an empty set when the manifest is missing or
-    unreadable — the caller treats that as its own failure, not as a floor of zero.
+    it tracks the workspace automatically. `globbed` is True when any member delegates to a glob;
+    the caller must then fall back to a structural floor, because a glob states no root to check.
+    Returns `(set(), False)` when the manifest is missing or unreadable — the caller treats that
+    as its own failure, not as a floor of zero.
     """
     path = os.path.join(repo_root, WORKSPACE_MANIFEST)
     try:
         with open(path, "rb") as handle:
             manifest = tomllib.load(handle)
     except (OSError, tomllib.TOMLDecodeError):
-        return set()
+        return set(), False
     members = (manifest.get("workspace") or {}).get("members")
     if not isinstance(members, list):
-        return set()
-    return {m.split("/", 1)[1] for m in members
-            if isinstance(m, str) and m.startswith("crates/") and "/" in m}
+        return set(), False
+    roots, globbed = set(), False
+    for member in members:
+        root, is_glob = _crate_member_root(member)
+        if root is not None:
+            roots.add(root)
+        globbed = globbed or is_glob
+    return roots, globbed
+
+
+def _crates_dir_is_populated(base):
+    """Does `base/crates` exist and hold at least one directory? The floor a GLOB delegates to."""
+    try:
+        entries = os.listdir(os.path.join(base, CRATES_DIR))
+    except OSError:
+        return False
+    return any(not e.startswith(".") and os.path.isdir(os.path.join(base, CRATES_DIR, e))
+               for e in entries)
 
 
 def assert_workspace_tree(base, names):
     """Refuse a scanned root set that cannot be this workspace. Raises DegeneratePartitionRoots.
 
-    Two conditions, both derived FROM THE TREE — there is no magic number here, and adding a crate
-    raises the floor by itself:
+    THREE conditions, all derived FROM THE TREE — there is no magic number here, and adding a
+    crate raises the floor by itself:
 
-      1. `Cargo.toml` must be present and declare `crates/*` workspace members. Its absence means
-         we are not looking at the repository root at all (the exact shape of the accident that
-         motivated this: a target tree containing only `scripts/`).
-      2. EVERY declared member must have been scanned as a root. This is what catches the case
+      1. `Cargo.toml` must be present and name `crates/` workspace members, explicitly or by
+         glob. Its absence means we are not looking at the repository root at all (the exact
+         shape of the accident that motivated this: a target tree containing only `scripts/`).
+      2. EVERY explicitly declared member must have been scanned as a root. This catches what
          condition 1 cannot — a sparse or partial checkout that has the manifest and only some of
-         `crates/`, where the missing crates' keys would each collapse into `sparq` while the
-         present ones resolve correctly. A partly-wrong partition is not safer than a wholly-wrong
-         one; it is harder to notice.
+         `crates/`, where the missing crates' keys each collapse into `sparq` while the present
+         ones resolve correctly. A partly-wrong partition is not safer than a wholly-wrong one;
+         it is harder to notice.
+      3. If any member is a GLOB, `crates/` must exist and hold at least one crate directory.
+
+    WHY CONDITION 3 EXISTS, and why the obvious fix without it is worse than no fix (PR #4925
+    review round 2). Normalising globs so `members = ["crates/*"]` stops being a false positive
+    leaves `declared` EMPTY, which makes condition 2 vacuous and condition 1 satisfied — the
+    guard becomes a COMPLETE NO-OP for exactly that manifest. MEASURED against a model of the
+    normalise-only fix: a glob manifest with `crates/` MISSING, and one with `crates/` EMPTY,
+    were both ACCEPTED. Those are the original defect, restored, under the one manifest edit
+    (`members = ["crates/*"]`) most likely to be made routinely. A glob states no root to check,
+    so it delegates the floor to the tree, and this is that floor.
+
+    ONE LIMITATION, STATED RATHER THAN PAPERED OVER: under a glob a PARTIAL checkout (some crates
+    present, others not) is undetectable here, because the manifest has delegated the member list
+    to the very tree we are trying to check and there is no independent count to compare against.
+    Conditions 1 and 3 still hold; condition 2 has nothing to work with. sparq declares its 67
+    members explicitly today, so all three conditions are live on the real tree.
     """
-    declared = declared_crate_members(base)
-    if not declared:
+    declared, globbed = declared_crate_roots(base)
+    if not declared and not globbed:
         raise DegeneratePartitionRoots(
-            f"refusing to partition: no readable `[workspace] members` in {base}/"
-            f"{WORKSPACE_MANIFEST}. The partition algebra resolves `area:` keys against the "
-            f"directory listing of {base}, and a tree that is not this workspace collapses every "
-            "unrecognised `sparq-*` key onto the single head-segment partition `sparq` — a "
+            f"refusing to partition: no readable `[workspace] members` naming `{CRATES_DIR}/` in "
+            f"{base}/{WORKSPACE_MANIFEST}. The partition algebra resolves `area:` keys against "
+            f"the directory listing of {base}, and a tree that is not this workspace collapses "
+            "every unrecognised `sparq-*` key onto the single head-segment partition `sparq` — a "
             "frontier computed from that is wrong in a way no census line reveals.")
+    if globbed and not _crates_dir_is_populated(base):
+        raise DegeneratePartitionRoots(
+            f"refusing to partition: {base}/{WORKSPACE_MANIFEST} declares its workspace members "
+            f"by glob, which delegates the member list to the tree, but {base}/{CRATES_DIR} is "
+            "missing or holds no crate directory. There is nothing to partition, and every "
+            "`sparq-*` key would collapse onto the head-segment partition `sparq`.")
     missing = sorted(declared - set(names))
     if missing:
         shown = ", ".join(missing[:8]) + (f" (+{len(missing) - 8} more)" if len(missing) > 8 else "")
@@ -198,7 +274,7 @@ def workspace_roots(repo_root=None):
         return _WORKSPACE_ROOTS
     base = repo_root if repo_root is not None else _repo_root()
     names = set()
-    for parent in (base, os.path.join(base, "crates")):
+    for parent in (base, os.path.join(base, CRATES_DIR)):
         try:
             entries = os.listdir(parent)
         except OSError:
@@ -875,17 +951,24 @@ def _self_test():
     import shutil
     import tempfile
 
-    def _tree(members, present=None, manifest=True):
-        """A throwaway repo root. `members` are declared in Cargo.toml; `present` (default: all
-        of them) are the crate directories actually created."""
+    _made = []
+
+    def _tree(members, present=None, manifest=True, raw=None, body=None):
+        """A throwaway repo root. `members` are declared in Cargo.toml as `crates/<name>`;
+        `present` (default: all of them) are the crate directories actually created. `raw`
+        replaces the member list with VERBATIM strings (globs, nested members, trailing
+        slashes); `body` replaces the whole manifest text (malformed-TOML cases)."""
         base = tempfile.mkdtemp(prefix="ready-roots-")
+        _made.append(base)
         os.makedirs(os.path.join(base, "scripts"))
         for name in (members if present is None else present):
-            os.makedirs(os.path.join(base, "crates", name))
+            os.makedirs(os.path.join(base, CRATES_DIR, name), exist_ok=True)
         if manifest:
-            listed = ", ".join(f'"crates/{n}"' for n in members)
+            listed = ", ".join(f'"{m}"' for m in
+                               (raw if raw is not None else [f"crates/{n}" for n in members]))
             with open(os.path.join(base, WORKSPACE_MANIFEST), "w", encoding="utf-8") as handle:
-                handle.write(f"[workspace]\nresolver = \"2\"\nmembers = [{listed}]\n")
+                handle.write(body if body is not None
+                             else f"[workspace]\nresolver = \"2\"\nmembers = [{listed}]\n")
         return base
 
     def _refusal(base):
@@ -956,7 +1039,78 @@ def _self_test():
         globals()["_PARTITION_MEMO"] = _saved_memo
     check("[degenerate] compute_ready REFUSES on a degenerate tree (never a quiet empty plan)",
           _outcome, "REFUSED")
-    for _path in (_scripts_only, _full, _partial, _empty_members):
+    # -------------------------------------------------------------------------------------
+    # [OPUS-5] PR #4925 REVIEW, VERDICT: fail — THE FALSE-POSITIVE SURFACE.
+    # The first cut of this guard parsed `members` with `m.split("/", 1)[1]`, which is correct
+    # for exactly ONE of the forms cargo accepts. Every other legal form refused a COMPLETE,
+    # VALID tree, and `members = ["crates/*"]` — a routine edit — would have hard-stopped PLAN
+    # for BOTH target repositories on the next tick, having merged green because
+    # routing-self-tests.yml's `paths:` filter covered neither `Cargo.toml` nor `crates/**`.
+    #
+    # `declared_crate_roots` had NO direct coverage, which is why a normalisation fix could pass
+    # with no test edits at all. It has some now: each shape below is a NAMED row that goes red
+    # if the normalisation is removed.
+    # -------------------------------------------------------------------------------------
+    check("[members] the plain form sparq uses today",
+          declared_crate_roots(_tree(["a", "b"])), ({"a", "b"}, False))
+    check("[members] a TRAILING SLASH is legal cargo and names the same root",
+          declared_crate_roots(_tree(["a", "b"], raw=["crates/a/", "crates/b"])),
+          ({"a", "b"}, False))
+    check("[members] a NESTED sub-crate member resolves to its CONTAINING crate root",
+          declared_crate_roots(_tree(["a"], raw=["crates/a", "crates/a/derive"])),
+          ({"a"}, False))
+    check("[members] a GLOB names no root and reports itself as a glob",
+          declared_crate_roots(_tree(["a"], raw=["crates/*"])), (set(), True))
+    check("[members] a glob+explicit MIX keeps the explicit root and the glob flag",
+          declared_crate_roots(_tree(["a"], raw=["crates/*", "crates/a"])), ({"a"}, True))
+    check("[members] `?` and `[` are glob metacharacters too",
+          (declared_crate_roots(_tree(["a"], raw=["crates/sparq-?"]))[1],
+           declared_crate_roots(_tree(["a"], raw=["crates/[ab]"]))[1]), (True, True))
+    # Whitespace padding and a doubled separator. This row exists because a mutation probe found
+    # the original `.strip("/")` UNKILLABLE (the empty-segment filter already absorbed every
+    # trailing slash), while `.strip()` — the part that is load-bearing — had no coverage at all.
+    # The dead call is gone; this pins the live one.
+    check("[members] whitespace padding and a doubled separator normalise to the same root",
+          (declared_crate_roots(_tree(["a"], raw=[" crates/a "])),
+           declared_crate_roots(_tree(["a"], raw=["crates//a"]))),
+          (({"a"}, False), ({"a"}, False)))
+    check("[members] members OUTSIDE crates/ name no crate root",
+          declared_crate_roots(_tree(["a"], raw=["gui/src-tauri", "vendor/spargebra"])),
+          (set(), False))
+    check("[members] a missing or malformed manifest yields no roots and no glob",
+          (declared_crate_roots(_tree([], manifest=False)),
+           declared_crate_roots(_tree([], body="[workspace\nmembers = ")),
+           declared_crate_roots(_tree([], body="[workspace]\nmembers = 3\n"))),
+          ((set(), False), (set(), False), (set(), False)))
+
+    # THE FOUR FALSE POSITIVES, END-TO-END: each is a COMPLETE tree and must be ACCEPTED.
+    # Each row goes red if `_crate_member_root`'s normalisation is reverted to `split("/", 1)`.
+    for _label, _raw in (("glob only `crates/*`", ["crates/*"]),
+                         ("glob + explicit mix", ["crates/*", "crates/a"]),
+                         ("nested sub-crate member", ["crates/a", "crates/a/derive"]),
+                         ("trailing slash", ["crates/a/", "crates/b"])):
+        check(f"[members] a COMPLETE tree declaring {_label} is ACCEPTED",
+              _refusal(_tree(["a", "b"], raw=_raw)), "")
+
+    # ...AND THE HOLE THAT NORMALISATION ALONE OPENS. With globs normalised away, `declared` is
+    # empty for a glob-only manifest, so condition 2 is vacuous and condition 1 is satisfied —
+    # the guard silently becomes a NO-OP under precisely the edit most likely to be made. A glob
+    # delegates the member list to the tree, so the tree must carry the floor. Both rows below
+    # are ACCEPTED by a normalise-only fix (measured) and are the reason condition 3 exists.
+    check("[members] a glob manifest with NO crates/ dir still REFUSES",
+          ("declares its workspace members by glob" in _refusal(_tree([], raw=["crates/*"])),
+           "missing or holds no crate directory" in _refusal(_tree([], raw=["crates/*"]))),
+          (True, True))
+    _empty_crates = _tree([], raw=["crates/*"])
+    os.makedirs(os.path.join(_empty_crates, CRATES_DIR), exist_ok=True)
+    check("[members] ...and a glob manifest whose crates/ is EMPTY refuses too",
+          "refusing to partition" in _refusal(_empty_crates), True)
+    # the guard is still LIVE under a glob: a populated crates/ passes, so condition 3 is a
+    # floor and not a blanket refusal of globs.
+    check("[members] a glob manifest with a populated crates/ is accepted",
+          _refusal(_tree(["a"], raw=["crates/*"])), "")
+
+    for _path in (_scripts_only, _full, _partial, _empty_members, *_made):
         shutil.rmtree(_path, ignore_errors=True)
     check("sibling regions of one crate conflict",
           keys_conflict("sparq-core-store", "sparq-core-nt-dict"), True)
