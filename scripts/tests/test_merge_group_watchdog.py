@@ -1332,6 +1332,45 @@ class TestEmission(unittest.TestCase):
                         harness.rows)
 
 
+class TestTheWatchdogIsNotSilentByDefault(unittest.TestCase):
+    """A silent watchdog turns a visible outage into an invisible one — and the
+    DEFAULT is what runs in CI. Both `log=print` defaults survived the sweep, which
+    is exactly the census-silence class this PR exists to prevent."""
+
+    def test_sweep_writes_to_stdout_when_no_logger_is_injected(self):
+        import io
+        from contextlib import redirect_stdout
+
+        harness = FakeWatchdog.build(suites=8)
+        # rebuild WITHOUT log=, so the module default is exercised
+        watchdog = mgw.Watchdog(
+            "sparq-org/sparq", gh=harness.gh, now=lambda: NOW
+        )
+        out = io.StringIO()
+        with redirect_stdout(out):
+            watchdog.sweep()
+        text = out.getvalue()
+        self.assertIn("decision=HOLD", text)
+        self.assertIn("sweep complete", text)
+
+    def test_write_outputs_writes_to_stdout_when_no_logger_is_injected(self):
+        import io
+        import os
+        import tempfile
+        from contextlib import redirect_stdout
+
+        out_file = Path(tempfile.mkdtemp()) / "outputs.txt"
+        out_file.write_text("", encoding="utf-8")
+        os.environ["GITHUB_OUTPUT"] = str(out_file)
+        buf = io.StringIO()
+        try:
+            with redirect_stdout(buf):
+                mgw.write_outputs(mgw.Route(mgw.ROUTE_DEMOTE, False, "no marker"))
+        finally:
+            os.environ.pop("GITHUB_OUTPUT", None)
+        self.assertIn("route=demote", buf.getvalue())
+
+
 class TestClassifyEndToEnd(unittest.TestCase):
     def test_live_suite_count_is_re_derived_not_read_off_the_marker(self):
         # The marker says suites=0, but the LIVE count now reads 8. The route must
@@ -1344,6 +1383,42 @@ class TestClassifyEndToEnd(unittest.TestCase):
         harness = FakeWatchdog.build(suites=0, comments=[_marker_comment()])
         route = harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT")
         self.assertEqual(route.route, mgw.ROUTE_PRESERVE)
+
+    def test_the_LATEST_enqueue_binds_the_marker_not_the_earliest(self):
+        # Every other timeline fixture carries exactly ONE added_to_merge_queue, so
+        # max() and min() were indistinguishable and the mutant survived. Two attempts:
+        # the marker sits AFTER the first enqueue but BEFORE the second, so only
+        # max() correctly rejects it as predating the CURRENT attempt.
+        harness = FakeWatchdog.build(
+            suites=0,
+            comments=[_marker_comment(observed=mgw.parse_iso("2026-07-27T22:40:00Z"))],
+            timeline=[
+                {"event": "labeled", "created_at": "2026-07-27T22:20:00Z",
+                 "label": {"name": "review:pass"}},
+                {"event": "added_to_merge_queue", "created_at": "2026-07-27T22:30:00Z"},
+                {"event": "added_to_merge_queue", "created_at": "2026-07-27T22:50:00Z"},
+            ],
+        )
+        route = harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT")
+        self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
+        self.assertIn("predates this queue attempt", route.detail)
+
+    def test_a_marker_after_the_latest_enqueue_still_binds(self):
+        # The control: with the marker after BOTH enqueues it must still preserve.
+        harness = FakeWatchdog.build(
+            suites=0,
+            comments=[_marker_comment(observed=mgw.parse_iso("2026-07-27T23:00:00Z"))],
+            timeline=[
+                {"event": "labeled", "created_at": "2026-07-27T22:20:00Z",
+                 "label": {"name": "review:pass"}},
+                {"event": "added_to_merge_queue", "created_at": "2026-07-27T22:30:00Z"},
+                {"event": "added_to_merge_queue", "created_at": "2026-07-27T22:50:00Z"},
+            ],
+        )
+        self.assertEqual(
+            harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT").route,
+            mgw.ROUTE_PRESERVE,
+        )
 
     def test_a_commit_after_the_verdict_forfeits_it_end_to_end(self):
         # Exercises the real timeline PARSER, not just the policy: a `committed` event
