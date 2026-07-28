@@ -325,7 +325,9 @@ impl PrunedCombinations {
 /// # Errors
 ///
 /// Returns [`SeamError::DescriptorMismatch`] (phase [`SeamPhase::SourceCombination`]) if the
-/// Phase-2 selection's pattern count does not match the BGP's, if a retained candidate's source
+/// Phase-2 selection's pattern count does not match the BGP's, if its entries' `pattern` ids are
+/// not a permutation of `0..bgp.patterns.len()` (out of range, or repeated — and so leaving a BGP
+/// pattern undescribed), if a retained candidate's source
 /// index is out of range for `sources`, or if a candidate's `source_id` does not match the id of
 /// the descriptor at that index (i.e. the selection was made over a different or reordered slice)
 /// — the pass refuses to guess the alignment rather than silently mis-attribute a pattern or a
@@ -346,6 +348,35 @@ pub fn prune_source_combinations(
             detail:
                 "Phase-2 selection pattern count does not match the BGP (cannot align combinations)",
         });
+    }
+    // The count alone does not pin WHICH pattern each entry describes. `per_pattern` is a public
+    // field of a public struct, and both rules key off the `pattern` FIELD rather than the position
+    // (see `candidates_of`), so a hand-built selection could repeat one pattern id and omit
+    // another while still matching the BGP's length — e.g. an EMPTY entry for pattern 0 plus a
+    // non-empty duplicate entry for pattern 0, which makes Rule C1 declare the whole BGP dead from
+    // a "witness" that also has live candidates, suppressing live work. Require the ids to be a
+    // permutation of `0..len` instead of trusting them: in range, no repeats — with the count
+    // already checked, that leaves none missing (pigeonhole). Order-free, so a reordered but
+    // complete selection is still accepted.
+    let mut seen = vec![false; bgp.patterns.len()];
+    for ps in &selected.per_pattern {
+        let Some(slot) = seen.get_mut(ps.pattern) else {
+            return Err(SeamError::DescriptorMismatch {
+                phase: SeamPhase::SourceCombination,
+                source_id: String::new(),
+                detail: "Phase-2 selection carries a pattern index out of range for the BGP \
+                         (cannot align combinations)",
+            });
+        };
+        if *slot {
+            return Err(SeamError::DescriptorMismatch {
+                phase: SeamPhase::SourceCombination,
+                source_id: String::new(),
+                detail: "Phase-2 selection repeats a pattern index, so some BGP pattern has no \
+                         entry (cannot align combinations)",
+            });
+        }
+        *slot = true;
     }
     // Rule C2 resolves candidates against `sources` by index — fail closed rather than silently
     // skipping a candidate whose descriptor cannot be resolved. The index must ALSO agree with the
@@ -529,12 +560,36 @@ fn char_set_has(cs: &CharSet, predicate: &str) -> bool {
 /// saturated `u64::MAX` sum would spuriously *equal* a `u64::MAX` `distinct_subjects` and so
 /// "prove" completeness from an accounting that never balanced. An overflowing sum is not a valid
 /// subject partition, so it declines like any other unprovable case (fail-closed).
+///
+/// The sum equality is only *evidence* of completeness if the served sets really are keyed by the
+/// **exact** predicate set — the builder normalises predicate order but does not reject a repeated
+/// key, and two entries under the same key are not a partition. Their counts can be chosen to make
+/// the singleton cohorts balance for each predicate separately while the real co-occurrence set is
+/// omitted, "proving" both predicates complete and emitting a dead pairing that suppresses a live
+/// combination. So a repeated key declines. This does **not** establish that the served sets are a
+/// genuine subject partition — that is the source's own declaration — it only rejects the
+/// violations detectable from the descriptor alone (fail-closed, the recall-safe direction).
 fn char_sets_complete_for(desc: &SourceDescriptor, predicate: &str) -> bool {
     let Some(part) = desc.predicate(predicate) else {
         return false;
     };
     if part.distinct_subjects == 0 {
         return false; // unknown ⇒ cannot prove completeness ⇒ decline.
+    }
+    // Keys normalised to sorted order, so (like `char_set_has`) this stays correct for a
+    // hand-built `CharSet` whose predicates are unsorted.
+    let mut keys: Vec<Vec<&str>> = desc
+        .char_sets()
+        .iter()
+        .map(|cs| {
+            let mut key: Vec<&str> = cs.predicates.iter().map(String::as_str).collect();
+            key.sort_unstable();
+            key
+        })
+        .collect();
+    keys.sort_unstable();
+    if keys.windows(2).any(|w| w[0] == w[1]) {
+        return false; // a repeated exact predicate set is not a partition ⇒ decline.
     }
     let mut accounted: u64 = 0;
     for cs in desc.char_sets().iter().filter(|cs| char_set_has(cs, predicate)) {
@@ -1665,5 +1720,162 @@ mod tests {
             }
         ));
         assert!(format!("{}", err).contains("cannot align combinations"));
+    }
+
+    /// A selection with the right entry COUNT whose `pattern` ids do not cover the BGP — one id
+    /// repeated, another therefore missing — is fail-closed. Both rules look patterns up by the
+    /// `pattern` field, so without the permutation check an EMPTY duplicate entry for pattern 0
+    /// would give Rule C1 a witness while pattern 0 also carries live candidates: the whole BGP
+    /// would be declared dead and `combination_is_dead` would return true for every assignment,
+    /// suppressing live work.
+    #[test]
+    fn repeated_pattern_index_in_selection_is_descriptor_mismatch() {
+        let bgp = star_bgp();
+        let sources = vec![source("http://a/", &[SHARES_HOUSE, NAME])];
+        let cand = || {
+            vec![PrivateCandidate {
+                source: 0,
+                source_id: SourceId::new("http://a/"),
+                estimated_cardinality: 1.0,
+            }]
+        };
+        let bogus = SelectedPrivateSources {
+            per_pattern: vec![
+                // An "empty" pattern 0 (the Rule-C1 witness) …
+                PrivatePatternSources {
+                    pattern: 0,
+                    candidates: Vec::new(),
+                },
+                // … plus a non-empty DUPLICATE of pattern 0, leaving pattern 1 undescribed.
+                PrivatePatternSources {
+                    pattern: 0,
+                    candidates: cand(),
+                },
+            ],
+            pruned: Vec::new(),
+        };
+        let err = prune_source_combinations(&bgp, &sources, &bogus).unwrap_err();
+        assert!(matches!(
+            err,
+            SeamError::DescriptorMismatch {
+                phase: SeamPhase::SourceCombination,
+                ..
+            }
+        ));
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("repeats a pattern index"),
+            "the error names the repeated id: {}",
+            msg
+        );
+
+        // Control: the honestly-aligned selection over the same BGP and sources is accepted and
+        // stays live — so the rejection above is the alignment check firing, not the shape.
+        let honest = select_private_sources(&bgp, &sources, &[]).unwrap();
+        let out = prune_source_combinations(&bgp, &sources, &honest).unwrap();
+        assert!(out.bgp_satisfiable);
+        assert!(!out.combination_is_dead(&[0, 0]));
+    }
+
+    /// A `pattern` id past the end of the BGP is fail-closed for the same reason: the entry cannot
+    /// be attributed to a pattern, so some real pattern is undescribed.
+    #[test]
+    fn out_of_range_pattern_index_in_selection_is_descriptor_mismatch() {
+        let bgp = star_bgp();
+        let sources = vec![source("http://a/", &[SHARES_HOUSE, NAME])];
+        let bogus = SelectedPrivateSources {
+            per_pattern: [0, 7]
+                .into_iter()
+                .map(|pattern| PrivatePatternSources {
+                    pattern,
+                    candidates: vec![PrivateCandidate {
+                        source: 0,
+                        source_id: SourceId::new("http://a/"),
+                        estimated_cardinality: 1.0,
+                    }],
+                })
+                .collect(),
+            pruned: Vec::new(),
+        };
+        let err = prune_source_combinations(&bgp, &sources, &bogus).unwrap_err();
+        assert!(matches!(
+            err,
+            SeamError::DescriptorMismatch {
+                phase: SeamPhase::SourceCombination,
+                ..
+            }
+        ));
+        assert!(format!("{}", err).contains("out of range for the BGP"));
+    }
+
+    /// The alignment check is order-FREE (patterns are looked up by field, not position): a
+    /// COMPLETE selection whose entries are permuted is accepted and reaches the same verdict.
+    #[test]
+    fn reordered_but_complete_selection_is_accepted() {
+        let bgp = star_bgp();
+        let sources = vec![
+            split_source("http://a/", Accounting::Exact),
+            covering_source("http://b/"),
+        ];
+        let in_order = select_private_sources(&bgp, &sources, &[]).unwrap();
+        let mut reordered = in_order.clone();
+        reordered.per_pattern.reverse();
+
+        let a = prune_source_combinations(&bgp, &sources, &in_order).unwrap();
+        let b = prune_source_combinations(&bgp, &sources, &reordered).unwrap();
+        assert!(!a.dead_pairings.is_empty(), "the run is not vacuous");
+        assert_eq!(a.dead_pairings, b.dead_pairings, "verdict is order-free");
+        assert_eq!(a.empty_patterns, b.empty_patterns);
+        assert_eq!(a.dead_patterns, b.dead_patterns);
+        assert_eq!(a.pruned, b.pruned);
+        assert_eq!(a.bgp_satisfiable, b.bgp_satisfiable);
+        assert_eq!(a.components, b.components);
+    }
+
+    /// **Recall-safety against a DUPLICATED characteristic set.** The builder normalises predicate
+    /// order but keeps a repeated key, and the completeness guard sums every served set carrying the
+    /// predicate — so serving the `{sharesHouse}` cohort twice (and `{name}` twice) can make both
+    /// sums equal `void:distinctSubjects` while the real `{sharesHouse, name}` co-occurrence set is
+    /// omitted. Two entries under one exact-predicate-set key are not a partition, so nothing is
+    /// proved: the guard must decline rather than emit a dead pairing that prunes a live
+    /// combination.
+    #[test]
+    fn duplicate_char_sets_decline_the_prune() {
+        let bgp = star_bgp();
+        // `distinct_subjects` is 10 for sharesHouse (5+5) and 14 for name (7+7) — each balanced by
+        // DUPLICATE singleton cohorts, and no served set carries both predicates.
+        let sources = vec![cs_source(
+            "http://dup/",
+            &[
+                (&[SHARES_HOUSE], 5),
+                (&[SHARES_HOUSE], 5),
+                (&[NAME], 7),
+                (&[NAME], 7),
+            ],
+            Accounting::Exact,
+        )];
+        let selected = select_private_sources(&bgp, &sources, &[]).unwrap();
+        // Precondition: both patterns retain the source, so the rule is genuinely evaluated.
+        assert!(!selected.per_pattern[0].is_empty() && !selected.per_pattern[1].is_empty());
+
+        let out = prune_source_combinations(&bgp, &sources, &selected).unwrap();
+        assert!(
+            out.dead_pairings.is_empty(),
+            "a repeated characteristic-set key is not a partition and proves nothing: {:?}",
+            out.dead_pairings
+        );
+        assert!(out.bgp_satisfiable);
+        assert!(out.pruned.is_empty());
+        assert!(!out.combination_is_dead(&[0, 0]));
+
+        // Control (non-vacuity): the same shape with DISTINCT keys — one cohort per predicate — is
+        // a valid partition and does prove the pairing dead.
+        let honest = vec![split_source("http://a/", Accounting::Exact)];
+        let sel = select_private_sources(&bgp, &honest, &[]).unwrap();
+        let dead = prune_source_combinations(&bgp, &honest, &sel).unwrap();
+        assert!(
+            !dead.dead_pairings.is_empty(),
+            "distinct cohorts still prove the pairing dead"
+        );
     }
 }

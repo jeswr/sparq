@@ -85,9 +85,9 @@ match sparq_fedplan_mpc::ratify_envelope(&envelope, &privacy, Some(budget)) {
     combination containing that pairing. The source stays a valid candidate for each
     pattern **individually** (a cross-source combination is untouched); a candidate is only
     removed when the peer pattern's *sole* candidate is that same source. Rule C2 fires
-    **only** behind a completeness guard — `Σ_{C ∋ p} subjects == void:distinctSubjects`,
-    which a truncated (long-tail-elided) or unknown summary fails — so an unprovable case
-    declines instead of over-pruning.
+    **only** behind a completeness guard — `Σ_{C ∋ p} subjects == void:distinctSubjects`
+    over DISTINCT set keys, which a truncated (long-tail-elided) or unknown summary fails,
+    as does a repeated key (not a partition) — so an unprovable case declines.
 
   It carries the Phase-2 selection through **unchanged** (advisory + auditable), reporting
   `bgp_satisfiable`, the empty-pattern witnesses, the Rule-C2 `dead_pairings` +
@@ -96,9 +96,9 @@ match sparq_fedplan_mpc::ratify_envelope(&envelope, &privacy, Some(budget)) {
   returns `false` — "keep it" — for anything it cannot prove). The value-overlap /
   bound-IRI-propagation prune is **deliberately declined** — not recall-safely expressible
   from the public summary (single-IRI `may_hold_authority`, no authority-set enumerator)
-  — so a future contributor does not build an unsound prune. A pattern-count mismatch, an
-  out-of-range candidate index, or a `source_id` disagreeing with the descriptor at that
-  index is fail-closed (`SeamError::DescriptorMismatch`, phase `SourceCombination`).
+  — so a future contributor does not build an unsound prune. Pattern ids that are not a
+  permutation of the BGP's, an out-of-range candidate index, and a `source_id` mismatched to
+  the descriptor at that index all fail closed (`DescriptorMismatch`/`SourceCombination`).
 
 > **Internal crate — not published** (`publish = false`). **No soundness or privacy
 > claim.** Phases 2–4 + 6 are **plumbing — source-selection + result-aware combination
