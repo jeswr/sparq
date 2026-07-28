@@ -33,7 +33,7 @@ being benign. Each row is a checkable fact, not a judgement:
 | Fact | Evidence |
 |---|---|
 | Not published; ships in no release artifact | `publish = false` in `crates/sparq-gpu/Cargo.toml`; listed among the unpublished crates in [`docs/release.md`](../docs/release.md) |
-| Nothing in the workspace depends on it | no `sparq-gpu` entry in any other `crates/*/Cargo.toml`; asserted by `crates/sparq-gpu/tests/deferral_premise.rs` |
+| Nothing in the workspace depends on it | no dependency resolving to `sparq-gpu` in any other `crates/*/Cargo.toml`, under that name or a rename; asserted by `crates/sparq-gpu/tests/deferral_premise.rs` |
 | No path from untrusted input | it has no `sparq-core`/`sparq-engine` dependency at all, so no query, RDF byte, or HTTP request can reach a kernel; its only callers are its own tests and `examples/gpu_bench.rs` |
 | Never enters the wasm build | `wgpu` appears in exactly one manifest in the workspace (`crates/sparq-gpu/Cargo.toml`) |
 | No `unsafe` of its own | `#![forbid(unsafe_code)]` in `crates/sparq-gpu/src/lib.rs` |
@@ -97,9 +97,20 @@ boundary, and — if the GPU path can hold personal data — a row in
 ## 5. Enforcement
 
 `crates/sparq-gpu/tests/deferral_premise.rs` asserts (a) and (b) directly: it
-reads the crate's own manifest for `publish = false` and every other
-`crates/*/Cargo.toml` for a `sparq-gpu` dependency, and fails pointing at this
-document. It is an ordinary `cargo test -p sparq-gpu` test, so the PR that wires
+reads the crate's own manifest for a `publish` key whose value is the literal
+boolean `false`, and every other `crates/*/Cargo.toml` for a dependency that
+resolves to `sparq-gpu`, then fails pointing at this document.
+
+It parses those manifests rather than grepping them, because a substring search
+misses the two quiet ways the premise breaks. `publish = ["false"]` is a registry
+allow-list naming a registry called `false` and is *publishable*, yet it contains
+the word. And a member that inherits a renamed workspace dependency —
+`gpu.workspace = true` against a root `gpu = { package = "sparq-gpu" }` — is a
+real dependency edge whose manifest never spells `sparq-gpu`; the test therefore
+resolves aliases out of the root `[workspace.dependencies]` table first. Both
+cases are pinned by their own regression tests in the same file.
+
+It is an ordinary `cargo test -p sparq-gpu` test, so the PR that wires
 the GPU in cannot merge without either landing the threat model or consciously
 editing away the trip-wire — which is a visible diff, not a silent lapse.
 
