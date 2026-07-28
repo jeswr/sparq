@@ -445,7 +445,15 @@ argued refutation encoding onto the tableau (`SubClassOf`, `ClassAssertion`,
 domain/range, and — since sq-pbz04.4.9 — `SubObjectPropertyOf(R,S)` via the
 fresh-individual-pair lift `{R(a,b), B(b), (∀S.¬B)(a)}`, sound and complete because the
 tableau's ∀-rule fires modulo the role hierarchy). Every guard fails CLOSED — uncertainty is a
-typed `UnknownReason`, never a guessed verdict. **Conclusion anonymous individuals
+typed `UnknownReason`, never a guessed verdict. **Refutation budget fallback (sq-pbz04.4.10):**
+the tableau still OWNS every refutation (it is the only branch complete for the whole fragment),
+but when — and only when — one exhausts the deterministic count budget, the SAME question is
+re-asked of the RL/EL branches under their SAME guards, with the augmented model serialised by
+the L1 forward renderer and its round-trip VERIFIED per call (re-extract, compare axiom
+multisets). Strictly abstention-reducing: it can only replace `Unknown(ResourceBudget)` with a
+definitive verdict, and any fallback abstention keeps the tableau's original budget reason. In
+practice it is the RL branch that recovers — every encoding adds an ABox assertion the EL
+classifier does not apply, so the EL arm always abstains today. **Conclusion anonymous individuals
 (sq-pbz04.4.13):** a blank-node individual in the CONCLUSION is read EXISTENTIALLY (per the
 official Direct-Semantics tests) — L1's skolem-constant reading is entailment-preserving on the
 premise but would certify a WRONG `NotEntailed` on the conclusion, so before the refutation loop a

@@ -116,8 +116,8 @@
 //! (sound and complete for the entire L1 fragment, which contains every premise the L1
 //! mapping accepts and every encoding below — so routing refutations to the tableau, the
 //! strongest complete branch, preserves the record's "definitive verdicts only from a
-//! complete branch" rule; RL/EL refutation routes would add only budget robustness and are
-//! future work):
+//! complete branch" rule; when, and only when, the tableau runs OUT OF BUDGET on a
+//! refutation, the profile branches get a second look — see §"Refutation budget fallback"):
 //!
 //! - `SubClassOf(C, D)` — `O ∪ {(C ⊓ ¬D)(x)}` with `x` fresh: inconsistent iff `O ⊨ C ⊑ D`.
 //! - `ClassAssertion(C, a)` — `O ∪ {(¬C)(a)}`: inconsistent iff `O ⊨ C(a)`.
@@ -167,6 +167,65 @@
 //! `Entailed`. Fresh names are minted as `urn:` IRIs checked against every id occurring in
 //! the premise AND conclusion models.
 //!
+//! ## Refutation budget fallback ([OPUS-5] sq-pbz04.4.10)
+//!
+//! The tableau OWNS every refutation: it is the only branch complete for the whole L1
+//! fragment, so routing there FIRST loses no verdict. What it can lose is a verdict to its
+//! deterministic COUNT budget — and a large in-RL premise is exactly the shape where the RL
+//! materializer decides in one pass what the tableau cannot finish. So when, and ONLY when, a
+//! refutation returns [`UnknownReason::ResourceBudget`], `refutation_profile_fallback` re-asks
+//! the SAME question of the profile branches, under the SAME guard discipline as
+//! [`DirectChecker::consistency`]:
+//!
+//! 1. an augmented ontology carrying a transitivity axiom is not re-asked at all — only the
+//!    ALCH+S tableau is argued for transitivity, the same ownership rule `consistency` applies
+//!    (opt-in `dl_transitive` only);
+//! 2. `profiles(O ∪ additions)` routes in the same RL → EL order; a refutation in neither
+//!    profile has no fallback and keeps its `ResourceBudget` abstention;
+//! 3. both branches consume TRIPLES (RL materializes; the EL classifier re-extracts its own
+//!    TBox), so the augmented MODEL is serialised by the L1 forward renderer
+//!    ([`crate::render::render_to_triples`], sq-pbz04.4.7). Its round-trip invariant is
+//!    VERIFIED PER CALL — re-extract the rendering and compare axiom multisets — rather than
+//!    trusted: a rendering gap costs a fallback, it can never manufacture a verdict;
+//! 4. `rl_branch` / `el_branch` then decide with their PR1 / divergence / skipped /
+//!    unapplied / ⊤ guards completely unchanged. Any abstention on the fallback keeps the
+//!    ORIGINAL `ResourceBudget` reason — the honest one, since the tableau is what ran out.
+//!
+//! Soundness needs no new argument. `Inconsistent` from the RL branch is sound by the same
+//! checked-PR1 bridge, so the refutation is unsatisfiable and that component IS entailed;
+//! `Consistent` past the divergence guard is sound by the same argument, so the refutation is
+//! satisfiable and the axiom is NOT entailed. The verdict is therefore attributable to a
+//! branch whose story is already written above, and [`EntailmentOutcome::branch`] names THAT
+//! branch instead of [`Branch::AlchTableau`] whenever the fallback broke the tie. The fallback
+//! is strictly abstention-reducing: it runs only after the tableau has already abstained, and
+//! it can only replace `Unknown(ResourceBudget)` with a definitive verdict.
+//!
+//! **What it actually recovers, stated honestly.** Every refutation encoding above adds at
+//! least one ABox assertion, and the EL classifier applies no ABox axiom — so on today's
+//! encodings the EL arm ALWAYS abstains ([`UnknownReason::ElUnappliedAxioms`]). It is wired
+//! for the routing discipline and for future encodings, not because it decides anything now.
+//! And every encoding except the `DisjointClasses` one introduces an `owl:complementOf`, which
+//! the RL divergence guard implicates — so the RL arm recovers `Inconsistent` (⇒ `Entailed`)
+//! freely, because that verdict is returned BEFORE the guard, while `Consistent` (⇒
+//! `NotEntailed`) survives the guard only for the complement-free `DisjointClasses`
+//! refutation. Recovering an abstention is the whole claim; nothing here widens a verdict the
+//! guards would have refused.
+//!
+//! **Measured against the pinned W3C corpus — where it recovers NOTHING.** The L5 DIRECT arm
+//! (`sparq-conformance`, `dl-direct`, pinned export + pinned budget) does hit the trigger: 7
+//! entailment rows abstain on `ResourceBudget`, 65 refutation components in total. The fallback
+//! declines EVERY one of them at step 2 — the augmented ontology is in neither RL nor EL, so no
+//! branch may own it (measured: 0 round-trip mismatches, 0 guard abstentions, 65 no-profile).
+//! The structural reason is the encodings themselves: `(C ⊓ ¬D)(x)` is RL-legal only when `C` is
+//! ALSO an RL superClassExpression, and the corpus rows whose refutations are hard enough to
+//! exhaust the tableau are exactly the ones carrying an `∃`/`⊔` shape that is not. So the arm's
+//! floors (`DL_DIRECT_FLOOR` / `DL_DIRECT_ABSTAINED`) and its pinned divergence set are
+//! UNCHANGED by this fallback — verified by running the lane, not assumed. What it buys is
+//! robustness for the shape the bead named (a large in-RL premise with an RL-legal refutation,
+//! pinned by `entailment_budget_fallback_rl_recovers_*` in `tests/check.rs`), NOT a corpus
+//! improvement. This note exists so nobody re-derives the measurement or over-claims the
+//! mechanism; narrowing the RL divergence guard, not more routing, is what would move those 7.
+//!
 //! ## Conclusion anonymous individuals ([OPUS-4.8] sq-pbz04.4.13)
 //!
 //! Official OWL 2 Direct-Semantics entailment reads a blank-node individual in the CONCLUSION
@@ -207,6 +266,10 @@
 use crate::extract::extract;
 use crate::model::{Axiom, ClassExpression, ObjectPropertyExpression, Ontology};
 use crate::profile::profiles;
+// [OPUS-5] sq-pbz04.4.10: the L1 forward renderer is the Ontology→triples encoder the
+// refutation budget fallback needs to hand an augmented model to the triple-consuming RL/EL
+// branches (module docs §"Refutation budget fallback").
+use crate::render::render_to_triples;
 use crate::tableau::{self, Budget, ExhaustedBudget};
 #[cfg(feature = "dl_transitive")]
 use oxrdf::NamedNode;
@@ -378,6 +441,11 @@ pub struct EntailmentOutcome {
     /// ran: [`Branch::AlchTableau`] covers both executed refutations and pre-tableau
     /// abstentions (e.g. `UnencodedConclusion`, where the verdict is `Unknown` and no
     /// refutation was attempted); [`Branch::Extraction`] when an input graph was refused.
+    /// [`Branch::RlMaterialization`] / [`Branch::ElClassification`] appear when the
+    /// refutation budget fallback (module docs; [OPUS-5] sq-pbz04.4.10) decided a component
+    /// the tableau had abandoned to its budget — a mixed-provenance verdict is attributed to
+    /// the first profile branch that broke the tie, i.e. the branch WITHOUT which the outcome
+    /// would have been an `Unknown(ResourceBudget)` abstention.
     pub branch: Branch,
 }
 
@@ -567,15 +635,22 @@ impl DirectChecker {
         };
         let mut fresh = FreshNames::new(dict, [&prem, &concl]);
         let mut first_unknown: Option<UnknownReason> = None;
+        // [OPUS-5] sq-pbz04.4.10: the first PROFILE branch that decided a budget-exhausted
+        // refutation, if any — the traceability attribution (see `EntailmentOutcome::branch`).
+        let mut fallback_branch: Option<Branch> = None;
         for axiom in &concl_axioms {
             match self.axiom_entailed(&prem, axiom, &mut fresh) {
-                AxiomVerdict::Entailed => {}
-                AxiomVerdict::NotEntailed => {
+                AxiomVerdict::Entailed(via) => {
+                    if let Some(branch) = via {
+                        fallback_branch.get_or_insert(branch);
+                    }
+                }
+                AxiomVerdict::NotEntailed(via) => {
                     // Sound early exit: the conjunction of conclusion axioms fails as soon
                     // as one conjunct definitively fails, regardless of abstentions.
                     return EntailmentOutcome {
                         verdict: EntailmentVerdict::NotEntailed,
-                        branch: Branch::AlchTableau,
+                        branch: via.or(fallback_branch).unwrap_or(Branch::AlchTableau),
                     };
                 }
                 AxiomVerdict::Unknown(reason) => {
@@ -587,10 +662,13 @@ impl DirectChecker {
             Some(reason) => EntailmentVerdict::Unknown(reason),
             None => EntailmentVerdict::Entailed,
         };
-        EntailmentOutcome {
-            verdict,
-            branch: Branch::AlchTableau,
-        }
+        // An abstaining outcome is still the tableau's — the fallback only ever ATTACHES to a
+        // component it definitively decided, and a decided component cannot be the abstention.
+        let branch = match verdict {
+            EntailmentVerdict::Entailed => fallback_branch.unwrap_or(Branch::AlchTableau),
+            _ => Branch::AlchTableau,
+        };
+        EntailmentOutcome { verdict, branch }
     }
 
     /// One conclusion axiom: build its refutation check(s), decide each on the tableau,
@@ -608,14 +686,36 @@ impl DirectChecker {
             )));
         };
         let mut first_unknown: Option<UnknownReason> = None;
+        let mut fallback_branch: Option<Branch> = None;
         for additions in checks {
             let mut augmented = premise.clone();
             augmented.axioms.extend(additions);
             match tableau::consistency(&augmented, self.budget) {
                 tableau::Verdict::Unsatisfiable => {} // this component is entailed
-                tableau::Verdict::Satisfiable => return AxiomVerdict::NotEntailed,
+                tableau::Verdict::Satisfiable => return AxiomVerdict::NotEntailed(fallback_branch),
                 tableau::Verdict::Unknown(tableau::UnknownReason::ResourceBudget(b)) => {
-                    first_unknown.get_or_insert(UnknownReason::ResourceBudget(b));
+                    // [OPUS-5] sq-pbz04.4.10 — budget robustness: the tableau ran out on THIS
+                    // refutation, so re-ask the profile branches under their own guards
+                    // (module docs §"Refutation budget fallback"). Any abstention there keeps
+                    // the ORIGINAL `ResourceBudget` reason: the tableau is what ran out.
+                    match refutation_profile_fallback(fresh.dict_mut(), &augmented) {
+                        Some(outcome) if outcome.verdict.is_inconsistent() => {
+                            // Refutation unsatisfiable ⇒ this component IS entailed.
+                            fallback_branch.get_or_insert(outcome.branch);
+                        }
+                        Some(outcome) if outcome.verdict.is_consistent() => {
+                            // Refutation satisfiable ⇒ the axiom is NOT entailed.
+                            return AxiomVerdict::NotEntailed(Some(outcome.branch));
+                        }
+                        // `None` (no branch owned the question) and — structurally unreachable,
+                        // since the fallback filters them out — any non-definitive verdict both
+                        // land here and keep the tableau's honest `ResourceBudget` reason.
+                        // Written as a catch-all so the fail-closed default cannot be lost to a
+                        // future refactor of the fallback's return contract.
+                        _ => {
+                            first_unknown.get_or_insert(UnknownReason::ResourceBudget(b));
+                        }
+                    }
                 }
                 tableau::Verdict::Unknown(tableau::UnknownReason::OutOfFragment(m)) => {
                     // Unreachable in practice (both inputs already extracted, and every
@@ -626,16 +726,92 @@ impl DirectChecker {
         }
         match first_unknown {
             Some(reason) => AxiomVerdict::Unknown(reason),
-            None => AxiomVerdict::Entailed,
+            None => AxiomVerdict::Entailed(fallback_branch),
         }
     }
 }
 
 /// Per-conclusion-axiom tri-state (internal aggregation of one axiom's refutation checks).
+///
+/// The definitive arms carry the PROFILE branch that decided a budget-exhausted refutation
+/// component, if any ([OPUS-5] sq-pbz04.4.10); `None` means every component of this axiom was
+/// decided by the tableau itself.
 enum AxiomVerdict {
-    Entailed,
-    NotEntailed,
+    Entailed(Option<Branch>),
+    NotEntailed(Option<Branch>),
     Unknown(UnknownReason),
+}
+
+/// Re-ask a BUDGET-EXHAUSTED refutation of the profile branches (module docs
+/// §"Refutation budget fallback"; [OPUS-5] sq-pbz04.4.10).
+///
+/// Returns `Some` only for a DEFINITIVE verdict produced past the branch's own guards — the
+/// identical guard discipline [`DirectChecker::consistency`] applies, because these are the
+/// identical branch functions. `None` means "no fallback verdict"; the caller then keeps the
+/// tableau's honest [`UnknownReason::ResourceBudget`] abstention. Every `None` arm below is a
+/// fail-closed refusal, never a guess.
+fn refutation_profile_fallback(
+    dict: &mut Dict,
+    augmented: &Ontology,
+) -> Option<ConsistencyOutcome> {
+    // Transitivity: only the ALCH+S tableau's argument covers it, so no profile branch may own
+    // the question — the same ownership rule `consistency` applies before its profile dispatch.
+    // (The RL divergence guard and the EL unapplied-kind guard would also abstain; this arm is
+    // the explicit ownership statement, not a reliance on them.)
+    #[cfg(feature = "dl_transitive")]
+    if augmented
+        .axioms()
+        .iter()
+        .any(|axiom| matches!(axiom, Axiom::TransitiveObjectProperty { .. }))
+    {
+        return None;
+    }
+    let ps = profiles(augmented);
+    // Same RL → EL order as the consistency dispatch. QL is deliberately NOT routed: its
+    // branch's soundness rests on the sparq-reason-ql crate's own capture accounting over the
+    // ORIGINAL input graph, and a refutation graph is a synthesised augmentation, not the
+    // user's input — so extending the QL arm needs its own argument, not this one.
+    let rl = ps.rl.is_in();
+    let el = !rl && ps.el.is_in();
+    if !rl && !el {
+        return None;
+    }
+    // Both branches consume TRIPLES, so serialise the augmented model with the L1 forward
+    // renderer — and VERIFY its round-trip invariant here rather than trusting it: re-extract
+    // the rendering and require the same axiom multiset. A rendering gap then costs a fallback
+    // (we return `None` and keep the budget abstention); it can never feed a branch a graph
+    // that says something other than the refutation we meant to ask about.
+    let rendered = render_to_triples(augmented, dict);
+    let round_trip = extract(dict, &rendered).ok()?;
+    if !same_axiom_multiset(&round_trip, augmented) {
+        return None;
+    }
+    let outcome = if rl {
+        rl_branch(dict, &rendered, augmented)
+    } else {
+        el_branch(dict, &rendered, augmented)
+    };
+    if outcome.verdict.is_unknown() {
+        None
+    } else {
+        Some(outcome)
+    }
+}
+
+/// Order-insensitive axiom-multiset equality — the render round-trip preserves the structural
+/// model but not the axiom ORDER (`render_to_triples` emits the property declarations first),
+/// and the fallback's faithfulness obligation is exactly "the same axioms", nothing stronger.
+/// Compares `Debug` renderings because [`Axiom`] is `PartialEq` but neither `Ord` nor `Hash`;
+/// the rendering is injective over the model (every field is printed).
+fn same_axiom_multiset(left: &Ontology, right: &Ontology) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut l: Vec<String> = left.axioms().iter().map(|a| format!("{:?}", a)).collect();
+    let mut r: Vec<String> = right.axioms().iter().map(|a| format!("{:?}", a)).collect();
+    l.sort_unstable();
+    r.sort_unstable();
+    l == r
 }
 
 /// Collect every named object property whose role kind is established by a fully-extracted
@@ -1014,6 +1190,12 @@ impl<'d> FreshNames<'d> {
             used,
             counter: 0,
         }
+    }
+
+    /// The dict the fresh names are interned into, reborrowed for the refutation budget
+    /// fallback (which must render the augmented model back to triples). [OPUS-5] sq-pbz04.4.10
+    fn dict_mut(&mut self) -> &mut Dict {
+        self.dict
     }
 
     /// Mint an id occurring in neither input model.
@@ -1461,6 +1643,15 @@ mod transitive_guard_tests {
     }
 
     #[test]
+    fn refutation_budget_fallback_never_owns_a_transitive_refutation() {
+        // [OPUS-5] sq-pbz04.4.10: only the ALCH+S tableau's argument covers transitivity, so
+        // the budget fallback must decline a transitivity-bearing augmented ontology OUTRIGHT —
+        // the same ownership rule `consistency` applies before its own profile dispatch.
+        let mut dict = Dict::new();
+        assert!(refutation_profile_fallback(&mut dict, &transitive_onto()).is_none());
+    }
+
+    #[test]
     fn pr1_scan_counts_transitive_property_as_property_use() {
         // The property id 10 is ALSO used as a class: the PR1 punning scan must see the
         // overlap through the TransitiveObjectProperty arm.
@@ -1479,5 +1670,138 @@ mod transitive_guard_tests {
             pr1_punning_violation(&onto).is_some(),
             "class/property punning through the transitivity axiom must be seen"
         );
+    }
+}
+
+// -------------------------------------------------------------------------------------------
+// Direct unit tests for the refutation budget fallback ([OPUS-5] sq-pbz04.4.10).
+//
+// The end-to-end RL recovery / guard-refusal contract is pinned by the integration suite
+// (`tests/check.rs`, `entailment_budget_fallback_*`). These cover the arms that suite cannot
+// reach through `entailment`: the EL routing arm (structurally always an abstention on today's
+// ABox-bearing encodings — module docs), and the render-round-trip faithfulness comparison the
+// fallback verifies before it trusts a rendering.
+// -------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+
+    /// `{ A ⊑ B, (∃p.C ⊓ ∃q.D)(x) }` over a real dict: OUT of RL (`ObjectSomeValuesFrom` is not
+    /// an RL superClassExpression, so the class assertion is not RL-legal) but IN EL.
+    fn el_not_rl(dict: &mut Dict) -> Ontology {
+        let iri = |dict: &mut Dict, local: &str| dict.intern_iri(&format!("http://ex/{}", local));
+        let (a, b) = (iri(dict, "A"), iri(dict, "B"));
+        let (c, d) = (iri(dict, "C"), iri(dict, "D"));
+        let (p, q) = (iri(dict, "p"), iri(dict, "q"));
+        let x = iri(dict, "x");
+        Ontology {
+            axioms: vec![
+                Axiom::SubClassOf {
+                    sub: ClassExpression::Class(a),
+                    sup: ClassExpression::Class(b),
+                },
+                Axiom::ClassAssertion {
+                    class: ClassExpression::ObjectIntersectionOf(vec![
+                        ClassExpression::some(p, ClassExpression::Class(c)),
+                        ClassExpression::some(q, ClassExpression::Class(d)),
+                    ]),
+                    individual: x,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn el_arm_is_routed_but_abstains_on_the_abox_assertion() {
+        let mut dict = Dict::new();
+        let onto = el_not_rl(&mut dict);
+        // Precondition: this really is the EL-not-RL routing case, so the arm below is the EL
+        // one. (If a future profile change moved it, this assert — not the fallback — reds.)
+        let ps = profiles(&onto);
+        assert!(!ps.rl.is_in(), "expected NOT in RL");
+        assert!(ps.el.is_in(), "expected in EL");
+        // The EL classifier applies no ABox axiom, so `ElUnappliedAxioms` abstains and the
+        // fallback declines — the caller keeps its `ResourceBudget` reason.
+        assert!(
+            el_unapplied_kind(&onto).is_some(),
+            "the EL guard must flag the ClassAssertion"
+        );
+        assert!(
+            refutation_profile_fallback(&mut dict, &onto).is_none(),
+            "the EL arm must decline, never manufacture a verdict"
+        );
+    }
+
+    #[test]
+    fn fallback_declines_when_no_profile_owns_the_question() {
+        // `¬B ⊑ C` — a complement in SUBCLASS position is in no profile, so there is no branch
+        // to re-ask and the fallback declines without rendering anything.
+        let mut dict = Dict::new();
+        let b = dict.intern_iri("http://ex/B");
+        let c = dict.intern_iri("http://ex/C");
+        let onto = Ontology {
+            axioms: vec![Axiom::SubClassOf {
+                sub: ClassExpression::ObjectComplementOf(Box::new(ClassExpression::Class(b))),
+                sup: ClassExpression::Class(c),
+            }],
+        };
+        let ps = profiles(&onto);
+        assert!(!ps.rl.is_in() && !ps.el.is_in());
+        assert!(refutation_profile_fallback(&mut dict, &onto).is_none());
+    }
+
+    #[test]
+    fn rl_arm_recovers_an_inconsistent_refutation() {
+        // The `a : B` refutation shape: `{ A ⊑ B, a : A, a : ¬B }` is in RL, and the
+        // materializer + clash scan decide it INCONSISTENT (cax-sco then cls-com) — the verdict
+        // the starved tableau could not produce. Attributed to the RL branch.
+        let mut dict = Dict::new();
+        let a = dict.intern_iri("http://ex/A");
+        let b = dict.intern_iri("http://ex/B");
+        let ind = dict.intern_iri("http://ex/a");
+        let onto = Ontology {
+            axioms: vec![
+                Axiom::SubClassOf {
+                    sub: ClassExpression::Class(a),
+                    sup: ClassExpression::Class(b),
+                },
+                Axiom::ClassAssertion {
+                    class: ClassExpression::Class(a),
+                    individual: ind,
+                },
+                Axiom::ClassAssertion {
+                    class: ClassExpression::ObjectComplementOf(Box::new(ClassExpression::Class(b))),
+                    individual: ind,
+                },
+            ],
+        };
+        let outcome =
+            refutation_profile_fallback(&mut dict, &onto).expect("the RL branch must decide");
+        assert_eq!(outcome.verdict, ConsistencyVerdict::Inconsistent);
+        assert_eq!(outcome.branch, Branch::RlMaterialization);
+    }
+
+    #[test]
+    fn round_trip_faithfulness_is_order_insensitive_but_content_strict() {
+        let sub = |x, y| Axiom::SubClassOf {
+            sub: ClassExpression::Class(x),
+            sup: ClassExpression::Class(y),
+        };
+        let one = Ontology {
+            axioms: vec![sub(1, 2), sub(3, 4)],
+        };
+        let reordered = Ontology {
+            axioms: vec![sub(3, 4), sub(1, 2)],
+        };
+        let different = Ontology {
+            axioms: vec![sub(1, 2), sub(3, 5)],
+        };
+        let shorter = Ontology {
+            axioms: vec![sub(1, 2)],
+        };
+        assert!(same_axiom_multiset(&one, &reordered), "order must not matter");
+        assert!(!same_axiom_multiset(&one, &different), "content must matter");
+        assert!(!same_axiom_multiset(&one, &shorter), "arity must matter");
     }
 }
