@@ -4,14 +4,15 @@
 # WHAT: maintainer-requested 2026-07-28 — "alerting for when runners are not picked up for
 # crons or delayed for other dispatches on both repos. This is an indicator that you are
 # choking on runner availability." scripts/ci_execution_latency_alarm.py runs hourly and
-# checks three DISTINCT choke modes, because they have different signatures and only one of
+# checks two DISTINCT choke modes, because they have different signatures and only one of
 # them is runner availability proper:
 #
 #   M1 a scheduled lane firing far below what its own `cron:` expects. This mode produces
 #      NO ARTIFACT — a cron that never fires leaves no run, no conclusion, no check-run —
 #      so it is invisible to anything that inspects runs, and can only be caught by
 #      computing the expectation and comparing.
-#   M2 a run sitting in `queued` past a measured threshold. Runner availability proper.
+#   -- queue wait is NOT detected: a deliberate, documented gap (see the script's
+#      QUEUE WAIT note). The variable never moved across 44,190 completed runs.
 #      MEASURED known-positive: jeswr/agent-account-registry queued 7 `pr-gate` runs for
 #      12.8-99.5 minutes inside a single 00:58-02:24Z window on 2026-07-28.
 #   M3 a run `in_progress` far past its own lane's measured duration. It consumes capacity
@@ -24,7 +25,7 @@
 # predicate rather than listed, so the two partition the scheduled workflows and can never
 # both raise on one lane. The complement is where the throughput-critical lanes live:
 # ci.yml, auto-arm.yml, batch-merge.yml, verdict-bridge.yml and 9 more all carry a
-# `schedule:` PLUS other triggers, so #4368 structurally cannot see any of them. M2/M3 key
+# `schedule:` PLUS other triggers, so #4368 structurally cannot see any of them. M3 keys
 # on live run STATE, which #4368 does not read in any scope.
 #
 # NOT A GATE (same posture as review-alarm.yml / formal-alarm.yml): scheduled on main,
@@ -52,7 +53,7 @@ on:
   # Hourly at :26 — explicit (no */N) so it is auditable, and offset off every existing
   # sub-hourly lane: auto-arm (4,14,…), verdict-bridge (1,11,…), rearm-sweeper (8,18,…),
   # batch-merge (7,22,37,52), merge-group-watchdog (2,7,12,…). Hourly is well inside the
-  # 24h M1 window, and M2/M3 read live state, so a missed tick cannot hide a choke.
+  # 24h M1 window, and M3 reads live state, so a missed tick cannot hide a choke.
   schedule:
     - cron: "26 * * * *"
   # Manual run for validation / triage.

@@ -278,182 +278,71 @@ class TestM1NewLaneWindow(unittest.TestCase):
         self.assertEqual(by_path[".github/workflows/ci.yml"]["created_at"],
                          "2026-07-01T00:00:00Z")
 
-class TestM2QueueWait(unittest.TestCase):
-    def test_a_run_queued_past_the_threshold_raises(self):
-        late = _run_obj(status="queued",
-                        age_min=int(alarm.QUEUE_MAX_WAIT_SECONDS / 60) + 5)
-        f, c = alarm.find_queue_overruns([late], NOW)
-        self.assertEqual(len(f), 1)
-        self.assertEqual(c.get("queued-over-threshold"), 1)
+class TestQueueWaitIsAnHonestlyDocumentedGap(unittest.TestCase):
+    """Queue wait is NOT detected. This class exists so that stays TRUE and stays VISIBLE.
 
-    def test_a_run_queued_within_the_threshold_does_not_raise(self):
-        f, c = alarm.find_queue_overruns([_run_obj(status="queued", age_min=1)], NOW)
-        self.assertEqual(f, [])
-        self.assertEqual(c.get("queued-within-threshold"), 1)
+    An alarm that reads a variable which never moves answers "would we know if we were
+    starved?" with a confident yes. Across 44,190 completed runs not one attempt recorded
+    a non-zero queue wait, and the single event that motivated a detector turned out to be
+    a configured `max-parallel: 8` rather than withheld runners. So the detector was
+    removed and the gap documented.
 
-    def test_m2_ignores_in_progress_runs(self):
-        f, _ = alarm.find_queue_overruns(
-            [_run_obj(status="in_progress", age_min=10_000)], NOW)
-        self.assertEqual(f, [], "an in_progress run is M3's population, not M2's")
+    Two failure directions are pinned: silently RE-ADDING a detector (implying coverage
+    that is not evidenced), and silently DELETING the evidence that justifies its absence.
+    """
 
-    def test_an_hour_long_queue_wait_raises_under_the_SHIPPED_threshold(self):
-        """ABSOLUTE, not relative to the constant. The sibling tests above derive their
-        fixture age FROM QUEUE_MAX_WAIT_SECONDS, so they scale with it and cannot fail
-        when it changes — a mutant that multiplied the constant by 10**6 SURVIVED them.
+    def test_no_queue_wait_detector_is_exported(self):
+        """Structural, not textual. If someone re-adds one, this reds and forces the
+        question 'what positive validates it?' to be answered rather than skipped."""
+        for gone in ("find_queue_overruns", "QUEUE_MAX_WAIT_SECONDS",
+                     "attempt_created_at", "resolve_attempt_created",
+                     "ATTEMPT_CREATED_KEY"):
+            with self.subTest(symbol=gone):
+                self.assertFalse(hasattr(alarm, gone),
+                                 f"{gone} is back — a queue-wait detector needs an "
+                                 f"observed positive first; see the QUEUE WAIT note")
 
-        NOTE: an earlier revision of this docstring cited "jeswr/agent-account-registry
-        held `pr-gate` runs in `queued` for 12.8-99.5 minutes on 2026-07-28" as a MEASURED
-        known positive. That is WITHDRAWN — those seven runs were `run_attempt: 2` re-runs
-        and neither attempt ever queued (see TestM2ReRunTrap). M2 has no validated known
-        positive; this fixture pins the SHIPPED threshold, it does not evidence it."""
-        f, _ = alarm.find_queue_overruns([_run_obj(status="queued", age_min=60)], NOW)
-        self.assertEqual(len(f), 1, "an hour in `queued` must alarm")
+    def test_the_reported_modes_do_not_imply_queue_coverage(self):
+        """A reader of the issue body must not infer a mode that does not exist."""
+        _, c1 = alarm.find_cron_deficits([_lane(fires=0)], NOW)
+        _, c3 = alarm.find_execution_overruns([_run_obj(age_min=1)], {}, NOW)
+        census = {"M1-cron-firing-deficit": c1, "M3-execution-overrun": c3}
+        body = alarm.render_issue_body("o/r", [], census, NOW)
+        self.assertNotIn("M2", body)
+        self.assertNotIn("queue", body.lower())
 
-    def test_two_minutes_in_queued_stays_quiet_under_the_SHIPPED_threshold(self):
-        """The other direction, also absolute: without it `QUEUE_MAX_WAIT_SECONDS = 0`
-        survives, because every fixture in this class is ABOVE the threshold."""
-        f, _ = alarm.find_queue_overruns([_run_obj(status="queued", age_min=2)], NOW)
-        self.assertEqual(f, [])
-
-    def test_the_queue_threshold_stays_inside_its_validated_band(self):
-        """A literal band, not derived from the constant. The previously-stated 0.022% /
-        0.153% false-positive figures are WITHDRAWN (they were computed with the
-        contaminated estimator); the re-derived rate is 0 over 44,190 attempt-1 runs
-        across both repos, which constrains this constant from below only."""
-        self.assertEqual(alarm.QUEUE_MAX_WAIT_SECONDS, 15 * 60)
-        self.assertGreaterEqual(alarm.QUEUE_MAX_WAIT_SECONDS, 5 * 60)
-        self.assertLessEqual(alarm.QUEUE_MAX_WAIT_SECONDS, 30 * 60)
-
-
-class TestM2ReRunTrap(unittest.TestCase):
-    """M2 must not charge a re-run's IDLE GAP as queue wait.
-
-    MEASURED 2026-07-28 on jeswr/agent-account-registry run 30318886362:
-        run-level    run_attempt=2  created_at=00:58:13Z  run_started_at=02:37:40Z
-        /attempts/1                 created_at=00:58:13Z  run_started_at=00:58:13Z   0s
-        /attempts/2                 created_at=02:37:41Z  run_started_at=02:37:40Z   0s
-    The run-level `created_at` is FROZEN at attempt 1 and never resets, while
-    `run_attempt` and `run_started_at` track the live attempt. `now - created_at` on that
-    exact payload reports waited_seconds=5967 for an attempt picked up in under a second —
-    so the naive form fires on every re-run older than the threshold, which is the normal
-    case. These seven runs were this mode's ENTIRE published known positive."""
-
-    def _rerun(self, **kw):
-        return _run_obj(status="queued", attempt=2, created_age_min=99, **kw)
-
-    def test_the_fixture_reproduces_the_frozen_run_level_created_at(self):
-        r = self._rerun(age_min=1, attempt_created_age_min=1)
-        naive = (NOW - alarm._ts(r["created_at"])).total_seconds()
-        true_wait = (NOW - alarm._ts(r[alarm.ATTEMPT_CREATED_KEY])).total_seconds()
-        self.assertGreater(naive, alarm.QUEUE_MAX_WAIT_SECONDS,
-                           "vacuous unless the NAIVE reading would have fired")
-        self.assertLess(true_wait, alarm.QUEUE_MAX_WAIT_SECONDS)
-
-    def test_a_rerun_idle_gap_is_not_charged_as_queue_wait(self):
-        f, c = alarm.find_queue_overruns(
-            [self._rerun(age_min=1, attempt_created_age_min=1)], NOW)
-        self.assertEqual(f, [], "the re-run false positive is the whole defect")
-        self.assertEqual(c.get("queued-within-threshold"), 1)
-
-    def test_an_unresolvable_rerun_is_quiet_but_COUNTED(self):
-        """Fail-safe quiet, never fail-open silent: the run-level value is available here
-        and known-wrong, so the honest move is to decline and say so in the census."""
-        f, c = alarm.find_queue_overruns([self._rerun(age_min=1)], NOW)
-        self.assertEqual(f, [])
-        self.assertEqual(c.get("queued-rerun-attempt-unresolved"), 1)
-        self.assertIsNone(c.get("queued-no-timestamp"),
-                          "the two skip causes must stay separable in the census")
-
-    def test_the_fix_did_not_simply_disable_m2(self):
-        """A detector that never fires is not a fixed detector. Both a genuine attempt-1
-        wait and a genuine wait ON a re-run attempt must still raise."""
-        f, _ = alarm.find_queue_overruns(
-            [_run_obj(status="queued", age_min=60, attempt=1)], NOW)
-        self.assertEqual(len(f), 1)
-        f, _ = alarm.find_queue_overruns(
-            [_run_obj(status="queued", age_min=60, attempt=3, created_age_min=999,
-                      attempt_created_age_min=60)], NOW)
-        self.assertEqual(len(f), 1, "a re-run CAN queue; it must still be reportable")
-
-    def test_the_fetch_layer_actually_writes_what_the_detector_reads(self):
-        """THE CALL SITE. A pure detector reading ATTEMPT_CREATED_KEY is worthless if
-        nothing ever writes it, and that omission is invisible to every test above."""
-        seen = []
+    def test_the_live_read_does_not_fetch_a_population_nothing_consumes(self):
+        """`status=queued` is no longer fetched. Fetching a population no detector reads
+        is the shape of coverage-without-detection this file exists to avoid."""
+        asked = []
 
         def fake_gh(args, *, parse=True):
-            seen.append(args[-1])
-            return {"created_at": "2026-07-28T11:59:00Z"}
+            asked.append(args[-1])
+            return {"workflow_runs": []}
 
         real = alarm._gh
         alarm._gh = fake_gh
         try:
-            out = alarm.resolve_attempt_created("o/r", [
-                _run_obj(status="queued", age_min=1, attempt=2, created_age_min=99),
-                _run_obj(status="queued", age_min=99, attempt=1),
-                _run_obj(status="in_progress", age_min=99, attempt=2),
-            ])
+            alarm.fetch_live_runs("o/r")
         finally:
             alarm._gh = real
-        self.assertEqual(out[0].get(alarm.ATTEMPT_CREATED_KEY), "2026-07-28T11:59:00Z")
-        self.assertEqual(len(seen), 1, "one request, only for the queued re-run")
-        self.assertTrue(seen[0].endswith("/attempts/2"), seen)
-        self.assertNotIn(alarm.ATTEMPT_CREATED_KEY, out[1])
-        self.assertNotIn(alarm.ATTEMPT_CREATED_KEY, out[2])
-        # End to end: enrichment must turn the false positive into silence, leaving only
-        # the genuine attempt-1 wait.
-        f, _ = alarm.find_queue_overruns(out, NOW)
-        self.assertEqual([x["run_attempt"] for x in f], [1])
+        self.assertTrue(asked)
+        self.assertFalse([u for u in asked if "status=queued" in u], asked)
+        self.assertTrue([u for u in asked if "status=in_progress" in u], asked)
 
-    def test_fetch_live_runs_ENRICHES_what_it_returns(self):
-        """AND THE CALL SITE OF THE CALL SITE. Every sibling test invokes
-        `resolve_attempt_created` DIRECTLY, so deleting the one line in `fetch_live_runs`
-        that invokes it in production survives all of them — MEASURED, that mutant
-        survived this suite before this test existed. A helper called only by its own
-        tests is wired to nothing."""
-        def fake_gh(args, *, parse=True):
-            url = args[-1]
-            if "status=queued" in url:
-                return {"workflow_runs": [
-                    _run_obj(status="queued", age_min=1, attempt=2,
-                             created_age_min=99)]}
-            if "status=in_progress" in url:
-                return {"workflow_runs": []}
-            if "/attempts/2" in url:
-                return {"created_at": "2026-07-28T11:59:00Z"}
-            raise AssertionError(f"unexpected request {url}")
-
-        real = alarm._gh
-        alarm._gh = fake_gh
-        try:
-            live = alarm.fetch_live_runs("o/r")
-        finally:
-            alarm._gh = real
-        self.assertEqual(len(live), 1)
-        self.assertEqual(live[0].get(alarm.ATTEMPT_CREATED_KEY), "2026-07-28T11:59:00Z")
-        self.assertEqual(alarm.find_queue_overruns(live, NOW)[0], [],
-                         "enrichment must reach M2 through the real fetch path")
-
-    def test_a_failed_attempt_lookup_degrades_instead_of_aborting_the_tick(self):
-        """The escaped exception is asserted to be None. A test that let the exception
-        propagate and read the traceback as a pass would certify nothing: a crash looks
-        identical whether the guarantee held or the stub broke."""
-        def raising_gh(args, *, parse=True):
-            raise alarm.AlarmError("attempt lookup unavailable")
-
-        real, escaped = alarm._gh, None
-        alarm._gh = raising_gh
-        try:
-            out = alarm.resolve_attempt_created(
-                "o/r", [_run_obj(status="queued", age_min=1, attempt=2,
-                                 created_age_min=99)])
-        except BaseException as exc:  # noqa: BLE001 - the assertion IS that none escapes
-            out, escaped = None, exc
-        finally:
-            alarm._gh = real
-        self.assertIsNone(escaped, f"an attempt lookup failure escaped: {escaped!r}")
-        self.assertNotIn(alarm.ATTEMPT_CREATED_KEY, out[0])
-        _, c = alarm.find_queue_overruns(out, NOW)
-        self.assertEqual(c.get("queued-rerun-attempt-unresolved"), 1)
+    def test_the_evidence_for_the_gap_is_still_recorded(self):
+        """Pins the CONSEQUENCE deliberately: deleting the justification reds loudly
+        rather than leaving a bare unexplained absence. Each anchor is a specific
+        measured fact, not prose."""
+        src = SCRIPT.read_text()
+        for anchor, why in (
+            ("44,190", "the corpus size behind 'the variable never moves'"),
+            ("max-parallel: 8", "why run 30333511110 was NOT a capacity event"),
+            ("30333511110", "the run the capacity inference was drawn from"),
+            ("30318886362", "the re-run that produced the fabricated known positive"),
+        ):
+            with self.subTest(anchor=anchor):
+                self.assertIn(anchor, src, f"missing {why}")
 
 
 class TestM3ExecutionOverrun(unittest.TestCase):
@@ -569,10 +458,9 @@ class TestCensusAndExitCodes(unittest.TestCase):
     def test_a_clean_run_still_emits_a_census_for_every_mode(self):
         """A silent alarm is indistinguishable from a healthy system."""
         _, c1 = alarm.find_cron_deficits([_lane(fires=36)], NOW)
-        _, c2 = alarm.find_queue_overruns([_run_obj(status="queued", age_min=1)], NOW)
         _, c3 = alarm.find_execution_overruns(
             [_run_obj(age_min=1)], TestM3ExecutionOverrun.BASE, NOW)
-        for name, census in (("M1", c1), ("M2", c2), ("M3", c3)):
+        for name, census in (("M1", c1), ("M3", c3)):
             with self.subTest(mode=name):
                 self.assertTrue(census, f"{name} emitted no census on the all-clear")
 
@@ -629,9 +517,10 @@ class TestIssueBody(unittest.TestCase):
     def test_the_body_carries_the_dedupe_marker_and_self_identifies(self):
         body = alarm.render_issue_body(
             "o/r",
-            [{"mode": "M2-queue-wait", "workflow": "a.yml", "run_id": 1, "event": "push",
-              "waited_seconds": 99, "threshold_seconds": 60, "head_branch": "main"}],
-            {"M2-queue-wait": {"queued-over-threshold": 1}}, NOW)
+            [{"mode": "M3-execution-overrun", "workflow": "a.yml", "run_id": 1,
+              "event": "push", "age_seconds": 99, "threshold_seconds": 60,
+              "basis": "floor", "head_branch": "main"}],
+            {"M3-execution-overrun": {"execution-overrun": 1}}, NOW)
         self.assertTrue(body.rstrip().endswith(
             f"<!-- {alarm.KEY_PREFIX}: o/r -->"))
         self.assertTrue(body.startswith("> 🤖"))

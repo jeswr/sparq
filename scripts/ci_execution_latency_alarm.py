@@ -1,24 +1,28 @@
 #!/usr/bin/env python3
-"""CI EXECUTION-LATENCY alarm — three distinct choke modes, one detector. 🤖 SPARQ agent.
+"""CI EXECUTION-LATENCY alarm — two detected choke modes, one documented gap. 🤖 SPARQ agent.
 
 Bead sq-1lc4i. Maintainer-requested (2026-07-28): "setting up alerting for when runners
 are not picked up for crons or delayed for other dispatches on both repos. This is an
 indicator that you are choking on runner availability and is something that we would need
 to manage."
 
-WHY THREE MODES. They have different signatures and only ONE of them is runner
-availability proper, so a single detector keyed on any one of them is blind to the other
-two:
+WHAT IS AND IS NOT COVERED. Two modes are detected. The third — queue wait, which is
+runner availability proper and the maintainer's literal ask — is NOT detected, and that
+gap is documented rather than filled with a check that cannot see it. Read the QUEUE WAIT
+section below the constants before assuming this file covers starvation; it does not.
 
-  M1 CRON-FIRING DEFICIT   a scheduled run that never fires produces NO artifact at all.
-                           There is no run to inspect, no conclusion, no check-run. The
-                           only way to see it is to compute what the lane's own `cron:`
+  M1 CRON-FIRING DEFICIT   DETECTED. A scheduled run that never fires produces NO artifact
+                           at all. There is no run to inspect, no conclusion, no check-run.
+                           The only way to see it is to compute what the lane's own `cron:`
                            EXPECTED and compare against what arrived.
-  M2 QUEUE WAIT            a run sitting in `queued` past a measured threshold. This is
-                           runner availability proper — the maintainer's stated concern.
-  M3 EXECUTION OVERRUN     a run that is `in_progress` far past its lane's own measured
-                           duration. It consumes capacity while looking perfectly healthy:
-                           no red, no alert, no artifact.
+  M3 EXECUTION OVERRUN     DETECTED. A run that is `in_progress` far past its lane's own
+                           measured duration. It consumes capacity while looking perfectly
+                           healthy: no red, no alert, no artifact.
+  QUEUE WAIT               NOT DETECTED — deliberate, documented gap. Zero non-zero queue
+                           waits across 44,190 completed runs, and the one event that
+                           motivated a detector turned out to be a configured
+                           `max-parallel: 8`, not withheld runners. See the long note
+                           below the constants.
 
 =============================================================================
 THE MEASUREMENT TRAP THIS DETECTOR EXISTS BECAUSE OF — read before editing
@@ -28,15 +32,23 @@ The obvious instrument for "are runners being picked up" is job-level
 the SAFE-LOOKING direction: it reports health while a leak is live.
 
 MEASURED 2026-07-28 on run 30333511110 (sparq-org/sparq, a `schedule` CI run on main that
-had been `in_progress` for 6.7 hours with 8 live jobs), N=65 jobs:
+ran 6.7 hours), RE-MEASURED over the completed run, N=84 jobs:
 
-    pickup lag (started_at - created_at):   min 0s   p50 3s   MAX 10s   >60s: 0 jobs
-    job-creation lag (created_at - run.created_at):        MAX 383 min  (6.4 hours)
+    pickup lag (started_at - created_at):        min 0s   MAX 10s   >60s: 0 jobs
+    job-creation lag (job.created_at - run.created_at):    MAX 402 min  (6.7 hours)
 
-Every job was picked up within ten seconds of EXISTING. The wait was invisible because a
-matrix leg throttled behind `max-parallel` (or behind an account concurrency ceiling) is
-not created as a job object at all while it waits — so it contributes no queue depth and
-no pickup lag. `status=queued` read ZERO for the whole 6.7 hours.
+Every job was picked up within ten seconds of EXISTING. A matrix leg waiting behind a
+concurrency limit is not created as a job object at all, so it contributes no queue depth
+and no pickup lag; `status=queued` read ZERO for the whole 6.7 hours.
+
+CORRECTION, and it matters. An earlier revision presented this run as evidence of an
+invisible CAPACITY problem. It is not. The 402 minutes is INTRA-MATRIX — `mutation ratchet`
+has 51 legs spread over 401.9 min, while the `test` matrix (5 legs, no `max-parallel`) has
+a spread of 0.0 min — and `mutants-nightly-advisory` declares `max-parallel: 8`. 51 legs at
+8 concurrent is 6.4 waves, which IS the 402 minutes. This run shows a configured cap
+working correctly, not GitHub withholding runners. The API observation below stands; the
+capacity inference drawn from it did not, and was removed along with the detector built on
+it.
 
 Two consequences, both load-bearing:
 
@@ -76,7 +88,7 @@ plus bench/codeql/container-scan/fuzz/scorecard/xpath-differential/zk-toolchain.
 cannot see any of them, and `ci.yml` — the single largest capacity consumer in the repo —
 is among them.
 
-M2 and M3 are keyed on live run STATE, which #4368 does not look at in any scope.
+M3 is keyed on live run STATE, which #4368 does not look at in any scope.
 
 =============================================================================
 THRESHOLDS — every one derived from measurement, with the N stated
@@ -173,74 +185,67 @@ CRON_MIN_EXPECTED = 1
 # halving of a sub-hourly lane's achieved rate (12 -> 6 of a capped 12 = 0.50).
 CRON_DELIVERY_FLOOR = 0.60
 
-# --- M2: queue wait (runner availability proper) -----------------------------------
+# =============================================================================
+# QUEUE WAIT / RUNNER STARVATION — DELIBERATELY NOT DETECTED. Read this before
+# adding a detector for it; the obvious one does not work and was removed.
+# =============================================================================
+# There is NO detector on this route. That is a documented gap, not an oversight, and it
+# is recorded here rather than papered over with a check that cannot see the thing.
 #
-# THE RE-RUN TRAP — read before touching anything in this mode.
-# `created_at` on the RUN-level object is the creation time of ATTEMPT 1 and does NOT
-# reset when a run is re-run, while `run_attempt` and `run_started_at` DO track the live
-# attempt. MEASURED 2026-07-28 on jeswr/agent-account-registry run 30318886362:
-#     run-level    run_attempt=2  created_at=00:58:13Z  run_started_at=02:37:40Z
-#     /attempts/1                 created_at=00:58:13Z  run_started_at=00:58:13Z   0s
-#     /attempts/2                 created_at=02:37:41Z  run_started_at=02:37:40Z   0s
-# Neither attempt ever queued. The 99-minute "wait" is the IDLE GAP between attempt 1
-# failing at 01:00Z and a re-run being pressed at 02:37Z.
-# Executed on that exact payload, `now - run["created_at"]` reports waited_seconds=5967
-# for an attempt picked up in under a second — so the naive form fires on EVERY re-run
-# older than the threshold, which is the normal case, and a permanently-red alarm is a
-# muted alarm. `attempt_created_at()` below is the fix. Do not reintroduce a bare
-# `run.get("created_at")` here.
+# An earlier revision of this file shipped "M2", a queue-wait mode keyed on
+# `now - run["created_at"]` for runs in `status=queued`. It was removed for three
+# measured reasons, in increasing order of importance.
 #
-# THRESHOLD — and an HONEST statement of what does and does not support it.
-# WITHDRAWN: an earlier revision of this file claimed "fires on 3 of 13,802 sparq runs
-# (0.022%) and 6 of 3,920 registry runs (0.153%)", and cited the registry six as a real
-# queue event. Both figures were produced by the contaminated estimator above, and the
-# "real event" was those seven `run_attempt: 2` re-runs. That evidence is retracted.
+# 1. THE ESTIMATOR WAS WRONG. The run-level `created_at` is the creation time of ATTEMPT 1
+#    and does NOT reset on re-run, while `run_attempt` and `run_started_at` DO track the
+#    live attempt. MEASURED on jeswr/agent-account-registry run 30318886362:
+#        run-level    run_attempt=2  created_at=00:58:13Z  run_started_at=02:37:40Z
+#        /attempts/1                 created_at=00:58:13Z  run_started_at=00:58:13Z   0s
+#        /attempts/2                 created_at=02:37:41Z  run_started_at=02:37:40Z   0s
+#    Neither attempt ever queued; the 99 minutes is idle time before a human pressed
+#    re-run. Executed on that payload the detector reported waited_seconds=5967 for a
+#    sub-second pickup, i.e. it fired on every re-run older than the threshold.
 #
-# RE-DERIVED 2026-07-28 with the decontaminated estimator, over a per-workflow scan (the
-# repo-wide `actions/runs` listing hard-caps at 1000), splitting on `run_attempt` and
-# resolving every re-run's TRUE wait against its own `/attempts/{n}` record:
+# 2. AFTER FIXING THAT, THE VARIABLE NEVER MOVES. Per-workflow scan, splitting on
+#    `run_attempt` and resolving every re-run against its own `/attempts/{n}`:
 #
-#                                          sparq-org/sparq   jeswr/agent-account-registry
-#   completed runs scanned                          35,128                          9,062
-#   contaminated estimator, over 15 min                  7                              6
-#     ... of which are RE-RUNS                     7 (ALL)                        6 (ALL)
-#   DECONTAMINATED (run_attempt == 1)               35,070                          9,053
-#     over 15 min                                        0                              0
-#     with ANY non-zero wait at all                      0                              0
-#     maximum observed wait                           0.0s                           0.0s
-#   re-runs resolved per-attempt                        58                              9
-#     over 15 min                                        0                              0
-#     true maximum wait                              -1.0s                          -1.0s
+#                                             sparq-org/sparq   agent-account-registry
+#      completed runs scanned                          35,128                    9,062
+#      contaminated estimator, over 15 min                  7                        6
+#        ... of which are RE-RUNS                     7 (ALL)                  6 (ALL)
+#      DECONTAMINATED (run_attempt == 1)               35,070                    9,053
+#        over 15 min                                        0                        0
+#        with ANY non-zero wait at all                      0                        0
+#        maximum observed wait                           0.0s                     0.0s
 #
-# Every single row the old estimator flagged, on BOTH repos, was a re-run artefact. Across
-# 44,190 completed runs there is not ONE attempt whose own queue wait was even non-zero.
+#    Across 44,190 completed runs not ONE attempt recorded even a non-zero queue wait.
+#    The distribution is not zero-INFLATED, it is exactly all-zero, so no percentile,
+#    multiple or maximum exists to anchor a threshold to.
 #
-# SO M2 HAS NO VALIDATED KNOWN POSITIVE. There is no run in either observed corpus that
-# this mode would have fired on. That is stated plainly rather than papered over, and it
-# has two consequences that must not be lost:
+# 3. THE ONE EVENT THAT MOTIVATED THE MODE WAS NOT A CAPACITY EVENT. Run 30333511110 was
+#    cited as a 6.7h run whose starvation was invisible to `status=queued`. Re-measured:
+#      job PICKUP lag (started_at - created_at), N=84:   max 10s,  over 60s: ZERO
+#      job CREATION lag (job.created_at - run.created_at):        max 402 min
+#      the 402 min is INTRA-MATRIX, in `mutation ratchet` (51 legs, spread 401.9 min)
+#      control: `test` (5 legs, no max-parallel) has spread 0.0 min
+#    and `mutants-nightly-advisory` declares `max-parallel: 8`. 51 legs at 8 concurrent
+#    is 6.4 waves; the 402 minutes IS the configured cap working correctly. It is
+#    self-inflicted scheduling, not GitHub withholding runners. So this repository has NO
+#    observed instance of the phenomenon a queue-wait alarm would exist to catch.
 #
-#   (i)  The threshold CANNOT be derived from the observed distribution, because after
-#        decontamination the distribution is not merely zero-inflated, it is essentially
-#        ALL ZERO. There is no percentile, multiple, or maximum to anchor to. The corpus
-#        constrains this constant from BELOW only (any value above the observed max has a
-#        measured false-positive rate of zero); it says nothing about where in that
-#        half-line to sit. 15 min is therefore a JUDGMENT about how long a human should
-#        wait before being told, not a measurement, and is labelled as such.
-#   (ii) The corpus proxy is itself weak. `run_started_at - created_at` is a RUN-level
-#        statistic, and the measurement trap in the header is precisely that a run whose
-#        jobs are throttled behind `max-parallel` reads `status=queued` ZERO for hours.
-#        So a zero here is consistent with "no queueing happened" AND with "the API does
-#        not express the queueing that happened". It cannot distinguish them.
+# WHY NOT RE-POINT IT AT JOB-CREATION LAG. That variable does move, but on THIS corpus it
+# moves because of our own `max-parallel`, so an alarm keyed on it would fire on every
+# nightly mutation run forever. A permanently-red alarm is a muted alarm — the same reason
+# the M1 expectation is capped at what GitHub actually delivers rather than at nominal
+# cron rate. Separating a configured cap from a genuine account-level ceiling needs a model
+# of each lane's configured concurrency and per-leg duration, and there is no observed
+# positive to validate such a model against. That is a research task, not a threshold.
 #
-# M2 therefore ships as an UNVALIDATED detector for the maintainer's stated concern, with
-# a measured false-positive rate of 0 over N and no demonstrated true positive. It is
-# cheap (it reads live state already fetched for M3) and it is the only watcher on
-# `status=queued` at all. It is not evidence that queue waits are being caught.
-QUEUE_MAX_WAIT_SECONDS = 15 * 60
-# Key the fetch layer writes onto a queued run whose live attempt is NOT attempt 1: the
-# `created_at` of that attempt's own `/attempts/{n}` record. Absent on attempt-1 runs by
-# design — for those the run-level field is the attempt's field.
-ATTEMPT_CREATED_KEY = "_attempt_created_at"
+# WHAT WOULD CHANGE THIS. A run observed with `status=queued` and a genuine per-attempt
+# wait — i.e. `/attempts/{n}` showing `run_started_at - created_at` materially above zero.
+# If one appears, the estimator to use is the per-attempt one (point 1), NOT the run-level
+# field. Until then an alarm here would answer "would we know if we were starved?" with a
+# confident yes that the measurements above do not support.
 
 # --- M3: execution overrun ---------------------------------------------------------
 # Threshold = max(EXEC_OVERRUN_MULTIPLE x p90(completed durations for this workflow+event),
@@ -481,64 +486,6 @@ def find_cron_deficits(lanes: list[dict], now: dt.datetime,
     return findings, census
 
 
-def attempt_created_at(run: dict) -> str | None:
-    """The creation time of the run's CURRENTLY-EXECUTING attempt, or None if it cannot
-    be determined.
-
-    This is not `run["created_at"]`. See the RE-RUN TRAP note on QUEUE_MAX_WAIT_SECONDS:
-    the run-level `created_at` is frozen at attempt 1 and does not reset on re-run, so
-    reading it for a re-run charges the idle gap before the re-run press as queue wait.
-
-    Attempt 1 -> the run-level field IS the attempt's field (MEASURED equal on every
-    sampled run). Attempt N>1 -> the value the fetch layer resolved from
-    `/actions/runs/{id}/attempts/{n}`; None when that resolution was unavailable, which
-    the caller must treat as INDETERMINATE and count, never as the run-level value.
-    """
-    if int(run.get("run_attempt") or 1) > 1:
-        return run.get(ATTEMPT_CREATED_KEY) or None
-    return run.get("created_at") or None
-
-
-def find_queue_overruns(live_runs: list[dict], now: dt.datetime,
-                        max_wait: float = QUEUE_MAX_WAIT_SECONDS
-                        ) -> tuple[list[dict], dict]:
-    """M2. Runner availability proper: a run still in `queued` past `max_wait`."""
-    findings: list[dict] = []
-    census: dict[str, int] = {}
-
-    def bump(state: str) -> None:
-        census[state] = census.get(state, 0) + 1
-
-    for run in live_runs:
-        if run.get("status") != "queued":
-            continue
-        created = attempt_created_at(run)
-        if not created:
-            # A re-run whose own attempt record could not be resolved is INDETERMINATE.
-            # Fail-safe QUIET but COUNTED: the run-level `created_at` is available and
-            # known-wrong here, and firing a known-false alarm is worse than a visible
-            # gap. Two distinct census states so the two causes stay separable.
-            bump("queued-rerun-attempt-unresolved"
-                 if int(run.get("run_attempt") or 1) > 1 else "queued-no-timestamp")
-            continue
-        waited = (now - _ts(created)).total_seconds()
-        if waited > max_wait:
-            bump("queued-over-threshold")
-            findings.append({
-                "mode": "M2-queue-wait",
-                "workflow": run.get("name") or run.get("path") or "?",
-                "run_id": run.get("id"),
-                "event": run.get("event"),
-                "waited_seconds": int(waited),
-                "threshold_seconds": int(max_wait),
-                "run_attempt": int(run.get("run_attempt") or 1),
-                "head_branch": run.get("head_branch"),
-            })
-        else:
-            bump("queued-within-threshold")
-    return findings, census
-
-
 def find_execution_overruns(live_runs: list[dict], baselines: dict, now: dt.datetime,
                             multiple: float = EXEC_OVERRUN_MULTIPLE,
                             floor: float = EXEC_FLOOR_SECONDS
@@ -647,45 +594,15 @@ def _paged_runs(repo: str, query: str) -> list[dict]:
     raise AlarmError(f"workflow-run listing exceeded {RUNS_PAGE_CAP} pages for {query!r}")
 
 
-def resolve_attempt_created(repo: str, runs: list[dict]) -> list[dict]:
-    """Enrich every QUEUED run whose live attempt is not attempt 1 with that attempt's own
-    `created_at`, under ATTEMPT_CREATED_KEY.
-
-    WITHOUT THIS CALL M2 IS A FALSE-POSITIVE GENERATOR — see the RE-RUN TRAP note. It is
-    a separate pass rather than logic inside `find_queue_overruns` so the detectors stay
-    pure functions over already-fetched state and remain hermetically testable.
-
-    REQUEST COST is zero in the common case: the pass touches only `queued` runs at
-    attempt > 1. MEASURED over the newest 1000 completed runs per repo on 2026-07-28,
-    re-runs were 2/1000 on sparq and 0/1000 on the registry, and the `queued` population
-    is normally empty. A failed lookup leaves the key absent, which the detector counts as
-    `queued-rerun-attempt-unresolved` rather than falling back to the known-wrong value.
-    """
-    for run in runs:
-        if run.get("status") != "queued":
-            continue
-        attempt = int(run.get("run_attempt") or 1)
-        if attempt <= 1 or not run.get("id"):
-            continue
-        try:
-            payload = _gh(["api", f"repos/{repo}/actions/runs/{run['id']}"
-                                  f"/attempts/{attempt}"])
-        except AlarmError:
-            # Quiet + counted downstream. One unresolvable attempt record must not abort
-            # the whole tick and take M1 and M3 down with it.
-            continue
-        if isinstance(payload, dict) and payload.get("created_at"):
-            run[ATTEMPT_CREATED_KEY] = payload["created_at"]
-    return runs
-
-
 def fetch_live_runs(repo: str) -> list[dict]:
-    """Every run currently `queued` or `in_progress`. This is the live-state read that
-    M2 and M3 key on; it is NOT derived from completed work (header note (a))."""
-    live: list[dict] = []
-    for status in ("queued", "in_progress"):
-        live.extend(_paged_runs(repo, f"status={status}"))
-    return resolve_attempt_created(repo, live)
+    """Every run currently `in_progress`. This is the live-state read M3 keys on; it is
+    NOT derived from completed work (header note (a)).
+
+    `status=queued` is deliberately NOT fetched — see the QUEUE WAIT note near the top.
+    Nothing reads it any more, and fetching a population no detector consumes would be
+    the shape of coverage this file exists to avoid.
+    """
+    return _paged_runs(repo, "status=in_progress")
 
 
 def fetch_baseline(repo: str, workflow_path: str, event: str) -> dict:
@@ -779,11 +696,6 @@ def render_issue_body(repo: str, findings: list[dict], census: dict[str, dict],
                     f"**{f['expected']}** in the last {f['window_hours']:g}h "
                     f"(ratio {f['ratio']}, floor {CRON_DELIVERY_FLOOR}); "
                     f"cron `{' | '.join(f['crons'])}`")
-            elif mode.startswith("M2"):
-                lines.append(
-                    f"- `{f['workflow']}` run {f['run_id']} ({f['event']}) has been "
-                    f"**queued {f['waited_seconds']//60} min**, threshold "
-                    f"{f['threshold_seconds']//60} min")
             else:
                 lines.append(
                     f"- `{f['workflow']}` run {f['run_id']} ({f['event']}) has been "
@@ -868,11 +780,9 @@ def run(args: argparse.Namespace) -> int:
             "predicate broke. Refusing to report health over an empty population.")
 
     m1, c1 = find_cron_deficits(lanes, now, args.window_hours)
-    m2, c2 = find_queue_overruns(live, now)
     m3, c3 = find_execution_overruns(live, baselines, now)
-    findings = m1 + m2 + m3
-    census = {"M1-cron-firing-deficit": c1, "M2-queue-wait": c2,
-              "M3-execution-overrun": c3}
+    findings = m1 + m3
+    census = {"M1-cron-firing-deficit": c1, "M3-execution-overrun": c3}
 
     print(f"ci-latency census for {repo} at {now:%Y-%m-%dT%H:%M:%SZ} "
           f"({len(lanes)} workflows, {len(live)} live runs):")
@@ -929,8 +839,7 @@ def _lane(workflow="a.yml", crons=("*/10 * * * *",), cron_only=False,
 
 
 def _run_obj(status="in_progress", event="schedule", path=".github/workflows/a.yml",
-             age_min=10, now=None, name="A", attempt=1, created_age_min=None,
-             attempt_created_age_min=None):
+             age_min=10, now=None, name="A", attempt=1, created_age_min=None):
     """The REAL shape of an `actions/runs` element, not a minimal hand-built dict.
 
     A narrow fixture is a vacuity generator. `started = run.get("updated_at") or
@@ -940,8 +849,9 @@ def _run_obj(status="in_progress", event="schedule", path=".github/workflows/a.y
     again. The keys and their relationships below are taken from a real payload
     (jeswr/agent-account-registry run 30318886362).
 
-    `created_age_min` exists to reproduce the RE-RUN shape, where the run-level
-    `created_at` is FROZEN at attempt 1 while `run_started_at` tracks the live attempt.
+    `created_age_min` reproduces the RE-RUN shape, where the run-level `created_at` is
+    FROZEN at attempt 1 while `run_started_at` tracks the live attempt — M3 must key on
+    the latter. See the QUEUE WAIT note near the top of this file.
     """
     now = now or dt.datetime(2026, 7, 28, 12, 0, tzinfo=dt.timezone.utc)
 
@@ -959,8 +869,6 @@ def _run_obj(status="in_progress", event="schedule", path=".github/workflows/a.y
         "updated_at": stamp(0) if status != "completed" else stamp(age_min),
         "html_url": "https://example.invalid/run/1",
     }
-    if attempt_created_age_min is not None:
-        obj[ATTEMPT_CREATED_KEY] = stamp(attempt_created_age_min)
     return obj
 
 
@@ -987,7 +895,6 @@ def _self_test() -> int:  # noqa: C901 - a flat table of named assertions reads 
     check("CRON_MAX_CREDIBLE_FIRINGS_PER_HOUR matches the measured sparq ceiling",
           CRON_MAX_CREDIBLE_FIRINGS_PER_HOUR == 0.5)
     check("CRON_GRACE_MINUTES is 15", CRON_GRACE_MINUTES == 15)
-    check("QUEUE_MAX_WAIT_SECONDS is 15 minutes", QUEUE_MAX_WAIT_SECONDS == 15 * 60)
     check("EXEC_OVERRUN_MULTIPLE is inside the band that still catches the 2.08x outlier",
           1.25 <= EXEC_OVERRUN_MULTIPLE <= 2.0)
     check("EXEC_FLOOR_SECONDS is GitHub's 6h hosted-runner job ceiling",
@@ -1116,102 +1023,6 @@ def _self_test() -> int:  # noqa: C901 - a flat table of named assertions reads 
     check("M1 judges a lane born 25h ago (outside the 24h window)",
           len(f) == 1 and c.get("firing-deficit") == 1)
 
-    # --- M2 ---
-    late = _run_obj(status="queued", age_min=int(QUEUE_MAX_WAIT_SECONDS / 60) + 5, now=NOW)
-    early = _run_obj(status="queued", age_min=1, now=NOW)
-    f, c = find_queue_overruns([late], NOW)
-    check("M2 raises past the queue threshold",
-          len(f) == 1 and c.get("queued-over-threshold") == 1)
-    f, c = find_queue_overruns([early], NOW)
-    check("M2 quiet within the queue threshold",
-          not f and c.get("queued-within-threshold") == 1)
-    f, _ = find_queue_overruns([_run_obj(status="in_progress", age_min=999, now=NOW)], NOW)
-    check("M2 ignores in_progress runs (that is M3's job)", not f)
-    # ABSOLUTE fixtures. The two above derive their age FROM QUEUE_MAX_WAIT_SECONDS and
-    # rescale with it, so a mutant that multiplied the constant by 10**6 survived them.
-    f, _ = find_queue_overruns([_run_obj(status="queued", age_min=60, now=NOW)], NOW)
-    check("an hour in `queued` raises under the SHIPPED threshold", len(f) == 1)
-    f, _ = find_queue_overruns([_run_obj(status="queued", age_min=2, now=NOW)], NOW)
-    check("two minutes in `queued` stays quiet under the SHIPPED threshold", not f)
-
-    # --- M2 RE-RUN TRAP: the reason the shipped detector is not `now - created_at` -----
-    # The exact shape of jeswr/agent-account-registry run 30318886362: attempt 2, whose
-    # own creation was 1 minute ago, on a run-level object still reporting attempt 1's
-    # creation 99 minutes ago. The naive form reports a 99-minute queue wait for a
-    # pickup that took under a second.
-    rerun = _run_obj(status="queued", age_min=1, attempt=2, created_age_min=99,
-                     attempt_created_age_min=1, now=NOW)
-    check("the re-run fixture reproduces the FROZEN run-level created_at",
-          (now_minus := (NOW - _ts(rerun["created_at"])).total_seconds()) > 90 * 60
-          and (NOW - _ts(rerun[ATTEMPT_CREATED_KEY])).total_seconds() < 5 * 60)
-    check("the naive `now - created_at` WOULD have fired on it (fixture is not vacuous)",
-          now_minus > QUEUE_MAX_WAIT_SECONDS)
-    f, c = find_queue_overruns([rerun], NOW)
-    check("M2 does NOT charge a re-run's idle gap as queue wait", not f)
-    check("M2 counts the re-run as within threshold, not as a skip",
-          c.get("queued-within-threshold") == 1)
-    # A re-run whose attempt record could not be resolved is INDETERMINATE — quiet, but
-    # counted, never silently scored with the known-wrong run-level value.
-    unresolved = _run_obj(status="queued", age_min=1, attempt=2, created_age_min=99,
-                          now=NOW)
-    f, c = find_queue_overruns([unresolved], NOW)
-    check("an unresolved re-run is quiet", not f)
-    check("an unresolved re-run is COUNTED in its own census state",
-          c.get("queued-rerun-attempt-unresolved") == 1)
-    # And the fix must not have simply disabled M2: a genuine attempt-1 wait still fires.
-    f, _ = find_queue_overruns([_run_obj(status="queued", age_min=60, attempt=1, now=NOW)],
-                               NOW)
-    check("a genuine ATTEMPT-1 queue wait still raises after the re-run fix", len(f) == 1)
-    # A re-run whose CURRENT attempt really has been queued past the threshold must fire.
-    f, _ = find_queue_overruns(
-        [_run_obj(status="queued", age_min=60, attempt=3, created_age_min=999,
-                  attempt_created_age_min=60, now=NOW)], NOW)
-    check("a genuine queue wait ON a re-run attempt still raises", len(f) == 1)
-
-    # THE CALL SITE. A pure detector that reads ATTEMPT_CREATED_KEY is worthless if
-    # nothing ever writes it, and that omission is invisible to every assertion above.
-    _real_gh = globals()["_gh"]
-    try:
-        seen: list[str] = []
-
-        def _fake_gh(args, *, parse=True):
-            seen.append(args[-1])
-            return {"created_at": "2026-07-28T11:59:00Z",
-                    "run_started_at": "2026-07-28T11:59:00Z", "run_attempt": 2}
-
-        globals()["_gh"] = _fake_gh
-        enriched = resolve_attempt_created("o/r", [
-            _run_obj(status="queued", age_min=1, attempt=2, created_age_min=99, now=NOW),
-            _run_obj(status="queued", age_min=99, attempt=1, now=NOW),
-            _run_obj(status="in_progress", age_min=99, attempt=2, now=NOW),
-        ])
-        check("the fetch layer resolves a QUEUED re-run against /attempts/{n}",
-              enriched[0].get(ATTEMPT_CREATED_KEY) == "2026-07-28T11:59:00Z")
-        check("the fetch layer asks for the LIVE attempt number",
-              len(seen) == 1 and seen[0].endswith("/attempts/2"))
-        check("the fetch layer spends no request on an attempt-1 run",
-              ATTEMPT_CREATED_KEY not in enriched[1])
-        check("the fetch layer spends no request on an in_progress run (M3's population)",
-              ATTEMPT_CREATED_KEY not in enriched[2])
-        # End to end through the enrichment: the pass must SILENCE the false positive.
-        f, _ = find_queue_overruns(enriched, NOW)
-        check("enrichment turns the re-run false positive into silence",
-              [x["run_attempt"] for x in f] == [1])
-
-        def _raising_gh(args, *, parse=True):
-            raise AlarmError("attempt lookup unavailable")
-
-        globals()["_gh"] = _raising_gh
-        degraded = resolve_attempt_created("o/r", [
-            _run_obj(status="queued", age_min=1, attempt=2, created_age_min=99, now=NOW)])
-        check("a failed attempt lookup does not abort the tick",
-              ATTEMPT_CREATED_KEY not in degraded[0])
-        _, c = find_queue_overruns(degraded, NOW)
-        check("a failed attempt lookup lands in the unresolved census state",
-              c.get("queued-rerun-attempt-unresolved") == 1)
-    finally:
-        globals()["_gh"] = _real_gh
-
     # --- M3: detection variable is LIVE in_progress age ---
     base = {(".github/workflows/a.yml", "schedule"): {"p90": 3600.0, "n": 50}}
     f, c = find_execution_overruns([_run_obj(age_min=30, now=NOW)], base, NOW)
@@ -1260,16 +1071,16 @@ def _self_test() -> int:  # noqa: C901 - a flat table of named assertions reads 
 
     # --- census is emitted even on the all-clear ---
     _, c1 = find_cron_deficits([_lane(fires=36, now=NOW)], NOW)
-    _, c2 = find_queue_overruns([early], NOW)
     _, c3 = find_execution_overruns([_run_obj(age_min=1, now=NOW)], base, NOW)
     check("a clean run still emits a non-empty census for every mode",
-          bool(c1) and bool(c2) and bool(c3))
+          bool(c1) and bool(c3))
 
     # --- issue body carries the dedupe marker ---
-    body = render_issue_body("o/r", [{"mode": "M2-queue-wait", "workflow": "a.yml",
-                                      "run_id": 1, "event": "push", "waited_seconds": 99,
-                                      "threshold_seconds": 60, "head_branch": "main"}],
-                             {"M2-queue-wait": {"queued-over-threshold": 1}}, NOW)
+    body = render_issue_body("o/r", [{"mode": "M3-execution-overrun", "workflow": "a.yml",
+                                      "run_id": 1, "event": "push", "age_seconds": 99,
+                                      "threshold_seconds": 60, "basis": "floor",
+                                      "head_branch": "main"}],
+                             {"M3-execution-overrun": {"execution-overrun": 1}}, NOW)
     check("issue body ends with the dedupe marker",
           body.rstrip().endswith(f"<!-- {KEY_PREFIX}: o/r -->"))
     check("issue body self-identifies as a SPARQ agent", body.startswith("> 🤖"))
