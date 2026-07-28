@@ -13,7 +13,7 @@ fait accompli. Author: Opus 4.8 (Fable unavailable — flag for re-review).
 Date: 2026-06-19. Parent epics: **sq-pwr** (MPC over federated SPARQL with ZKP of correctness
 + attested-source derivation), **sq-0jsc** (MPC research track).
 
-> ### Decision log — [issue #755](https://github.com/jeswr/sparq/issues/755)
+> ## Decision log — [issue #755](https://github.com/jeswr/sparq/issues/755)
 >
 > #755 held implementation pending a greenlight plus the two structural choices of §9.
 > Both are now **RESOLVED as recommended**, and the resolution is recorded here so this
