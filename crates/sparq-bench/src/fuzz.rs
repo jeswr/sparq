@@ -242,6 +242,11 @@ const CATEGORIES: &[&str] = &[
     // sq-j80vk: the SPARQL 1.1 surfaces that previously had ZERO standing
     // wrong-answer differential vs the Oxigraph oracle.
     "path", "aggregate", "subquery", "exists", "values", "bind", "graph",
+    // sq-avd75: the `OPTIONAL … FILTER(!bound(?v))` negation idiom — the TRIGGER
+    // shape of rewrite (b) of the `algebra-rewrite` pass (#1735), which this crate
+    // builds ON (see Cargo.toml). Without it the pass's anti-join half had no
+    // standing oracle at all.
+    "antijoin",
 ];
 
 /// A random query in the chosen category. **Every category must keep these
@@ -334,6 +339,50 @@ fn gen_query(rng: &mut Rng, category: &str) -> String {
         }
         "union" => "{ ?s ex:age ?a } UNION { ?s ex:name ?a }".to_string(),
         "minus" => "?s ex:name ?n MINUS { ?s ex:age ?a }".to_string(),
+        // ANTI-JOIN (sq-avd75): the `OPTIONAL { B } FILTER(!bound(?v))` negation
+        // idiom. This is the TRIGGER shape of rewrite (b) of the `algebra-rewrite`
+        // pass (#1735) — `Filter(!bound(?v), LeftJoin(A, B))` → `Minus(A, B)` — which
+        // sparq-bench compiles ON, so a TRIGGER shape below is answered by sparq
+        // through the REWRITTEN algebra while Oxigraph answers it through the plain
+        // OPTIONAL+FILTER. That makes the pass's result-equivalence claim an oracle
+        // check on random data rather than only a fixed-fixture assertion
+        // (`sparq-engine/tests/rewrite_pass.rs`, which runs on the feature-matrix leg).
+        //
+        // The `minus` category is deliberately NOT this shape: it generates an
+        // EXPLICIT `MINUS`, i.e. the rewrite's OUTPUT operator, and so can never
+        // exercise the recogniser.
+        //
+        // Shapes 0..=2 MEET the rewrite's firing conditions (`?v` certain in B, absent
+        // from A, A and B sharing a certain variable, and — since `rewrite_filter`
+        // matches `LeftJoin { expression: None }` — an UNFILTERED `OPTIONAL`). Shapes 3
+        // and 4 are the two DECLINE shapes: the pass must return the algebra verbatim
+        // and the un-rewritten `LeftJoin` path stays oracle-checked. Keeping both sides
+        // in ONE category is deliberate — a recogniser that got LOOSER would show up
+        // here as a wrong answer, which is the failure the conservatism guards against.
+        // `antijoin_category_is_the_rewrite_b_trigger` pins which shape is which.
+        "antijoin" => match rng.below(5) {
+            // Plain anti-join on the shared subject: named subjects with no age.
+            0 => "?s ex:name ?n OPTIONAL { ?s ex:age ?a } FILTER(!bound(?a))".to_string(),
+            // Same, over the edge column: named subjects with no outgoing `ex:p`.
+            1 => "?s ex:name ?n OPTIONAL { ?s ex:p ?o } FILTER(!bound(?o))".to_string(),
+            // Anti-join whose A side is itself a join: `ex:p` targets with no name.
+            2 => "?s ex:p ?o OPTIONAL { ?o ex:name ?n } FILTER(!bound(?n))".to_string(),
+            // DECLINE (theta): the OPTIONAL carries its own FILTER, which the parser
+            // lifts into `LeftJoin { expression: Some(…) }`. `Minus(A, B)` is NOT
+            // equivalent to that (the negation is "no age ABOVE the threshold", so the
+            // condition has to move into B), and the pass matches `expression: None`
+            // only — so it declines. Answering it correctly through the un-rewritten
+            // path is exactly what the oracle checks here.
+            3 => format!(
+                "?s ex:name ?n OPTIONAL {{ ?s ex:age ?a . FILTER(?a > {}) }} FILTER(!bound(?a))",
+                rng.below(120)
+            ),
+            // DECLINE (no shared variable): `ex:absent` is never a subject in
+            // `gen_graph` (which emits only `ex:n0..ex:n15`), so B is empty AND shares
+            // no variable with A — every A row survives, and a pass that fired here
+            // would be WRONG, not merely unhelpful.
+            _ => "?s ex:age ?a OPTIONAL { ex:absent ex:name ?n } FILTER(!bound(?n))".to_string(),
+        },
         // ── sq-j80vk categories ──────────────────────────────────────────────────
         // PROPERTY PATHS (SPARQL 1.1 §9). `ex:p` is the edge predicate, so the graph
         // is a small random digraph with chains and cycles — `+`/`*` closure, inverse,
@@ -1852,6 +1901,70 @@ ex:n4 ex:val "s2" .
                 "no nightly shard for category {cat:?} in {path}"
             );
         }
+    }
+
+    /// sq-avd75: the `antijoin` category exists for ONE reason — to put rewrite (b)
+    /// of the `algebra-rewrite` pass (#1735) under the nightly Oxigraph oracle. It
+    /// only does that if the shapes it emits are shapes the recogniser ACTUALLY
+    /// fires on: a grammar that merely *looks* like the `OPTIONAL … FILTER(!bound)`
+    /// idiom but that the (deliberately conservative) pass declines would fuzz the
+    /// un-rewritten path forever while reporting a green `antijoin` shard.
+    ///
+    /// So this asserts the split directly, on the PLAN: the three trigger shapes must
+    /// reach an anti-join (`Minus` in `EXPLAIN`), and the two shapes the pass is
+    /// documented to DECLINE — a theta `OPTIONAL` (its FILTER is lifted into
+    /// `LeftJoin { expression: Some(…) }`, where `Minus(A, B)` is not equivalent) and
+    /// an `A`/`B` pair sharing no variable — must NOT. Firing on either would be
+    /// unsound, not merely unhelpful, so both directions are pinned.
+    ///
+    /// MUTATION GUARD: weaken a trigger shape so a firing condition fails (drop the
+    /// shared `?s`, bind the `!bound` variable in A, put a FILTER in its OPTIONAL) and
+    /// the `fired` half goes red; drop either decline shape and the `declined` half
+    /// loses its case — assert the counts separately so neither can silently vanish.
+    #[test]
+    fn antijoin_category_is_the_rewrite_b_trigger() {
+        let (mut fired, mut declined_theta, mut declined_disjoint) = (0u64, 0u64, 0u64);
+        for seed in 0..200u64 {
+            let (ttl, q) = case(seed, "antijoin");
+            assert!(
+                q.contains("OPTIONAL {") && q.contains("FILTER(!bound(?"),
+                "seed {seed}: not the OPTIONAL+!bound idiom\n{q}"
+            );
+            let g = sparq_core::Graph::load_str(&ttl, "turtle").unwrap();
+            let ex = sparq_engine::explain(&g, &q)
+                .unwrap_or_else(|e| panic!("seed {seed}: EXPLAIN failed: {e}\n{q}"));
+            // The two DECLINE shapes, by their markers: a SECOND `FILTER` (the one
+            // inside the OPTIONAL — the theta shape) and the `ex:absent` subject (the
+            // no-shared-variable shape).
+            let theta = q.matches("FILTER").count() == 2;
+            let disjoint = q.contains("ex:absent");
+            if theta || disjoint {
+                assert!(
+                    !ex.contains("Minus"),
+                    "seed {seed}: the pass must DECLINE this shape — `Minus(A, B)` is \
+                     not equivalent to it\n{q}\n{ex}"
+                );
+                if theta {
+                    declined_theta += 1;
+                } else {
+                    declined_disjoint += 1;
+                }
+            } else {
+                assert!(
+                    ex.contains("Minus"),
+                    "seed {seed}: the trigger shape did NOT reach an anti-join, so this \
+                     shard fuzzes the un-rewritten path and rewrite (b) stays \
+                     oracle-less\n{q}\n{ex}"
+                );
+                fired += 1;
+            }
+        }
+        assert!(fired > 0, "no seed exercised the REWRITTEN anti-join path");
+        assert!(declined_theta > 0, "no seed exercised the theta DECLINE path");
+        assert!(
+            declined_disjoint > 0,
+            "no seed exercised the no-shared-variable DECLINE path"
+        );
     }
 
     // ── the FULL-BINDING differential (`check_bindings`) ────────────────────
