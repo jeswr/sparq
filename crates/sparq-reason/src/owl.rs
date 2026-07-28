@@ -355,8 +355,6 @@ fn commit_candidates(
         }
         return merged;
     }
-    let prof = std::env::var("SPARQ_OWL_PROF").is_ok(); // TEMP PROFILING (removed before merge)
-    let t0 = std::time::Instant::now();
     let main_parts: Vec<&Vec<[Id; 3]>> = std::iter::once(&cand).chain(chunks.iter()).collect();
     let trp_parts: Vec<&Vec<[Id; 3]>> =
         std::iter::once(&trp_cand).chain(trp_chunks.iter()).collect();
@@ -373,7 +371,6 @@ fn commit_candidates(
             merged = true;
         }
     }
-    let t1 = std::time::Instant::now();
     // 2. canonicalize + prefilter against `all` in parallel — separately per stream, so the
     //    insert pass below knows which new facts are prp-trp-derived (→ not generators).
     let prefilter = |parts: &[&Vec<[Id; 3]>]| -> Vec<[Id; 3]> {
@@ -393,8 +390,6 @@ fn commit_candidates(
     };
     let surv_main = prefilter(&main_parts);
     let surv_trp = prefilter(&trp_parts);
-    let t3 = std::time::Instant::now();
-    let ns = surv_main.len() + surv_trp.len();
     // 4. serial insert pass. A fact surviving in BOTH streams keeps whichever marking inserts
     //    first — facts with a prp-trp derivation may be generator or not, both are correct
     //    (see [`TrpGen`]); only facts with NO prp-trp derivation must be marked, and those
@@ -413,14 +408,6 @@ fn commit_candidates(
                 new_delta.push(c);
             }
         }
-    }
-    if prof {
-        eprintln!(
-            "OWL-PROF-COMMIT cand={total} surv={ns} union={:.3} prefilter+sort={:.3} insert={:.3}",
-            (t1 - t0).as_secs_f64(),
-            (t3 - t1).as_secs_f64(),
-            t3.elapsed().as_secs_f64()
-        );
     }
     merged
 }
@@ -1028,16 +1015,11 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
     let mut schema = Schema::default();
     let mut schema_stale = true;
 
-    // TEMP PROFILING (dev only, removed before merge): SPARQ_OWL_PROF=1 prints phase totals.
-    let prof = std::env::var("SPARQ_OWL_PROF").is_ok();
-    let (mut t_schema, mut t_gen, mut t_scm, mut t_fpifp, mut t_class, mut t_commit, mut t_merge) =
-        (0f64, 0f64, 0f64, 0f64, 0f64, 0f64, 0f64);
-    let mut rounds = 0usize;
-    let now = std::time::Instant::now;
-
+    // [SONNET-4.6] sq-6tykl.5: per-rule-group cost + per-round progress, behind the non-default
+    // `profile` feature (every `prof_*!` below expands to nothing without it). This replaces the
+    // ad-hoc `SPARQ_OWL_PROF=1` eprintln scaffolding that used to live here.
     loop {
-        rounds += 1;
-        let __t = now();
+        prof_mark!(__t);
         let schema_dirty = schema_stale
             || delta.iter().any(|t| {
                 let p = t[1];
@@ -1047,10 +1029,10 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
             schema = Schema::build(&all, &v);
             schema_stale = false;
         }
-        t_schema += __t.elapsed().as_secs_f64();
+        prof_phase!(crate::profile::rules::SCHEMA_INDEX, __t);
         let mut cand: Vec<[Id; 3]> = Vec::new();
         let mut trp_cand: Vec<[Id; 3]> = Vec::new();
-        let __t = now();
+        prof_mark!(__t);
 
         // Delta-driven rules, fused into ONE per-fact emitter so the sweep over `delta` can fan
         // out over rayon (every index it joins against is read-only here):
@@ -1180,8 +1162,23 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
         for &t in &delta {
             emit_delta(t, &mut cand, &mut trp_cand);
         }
-        t_gen += __t.elapsed().as_secs_f64();
-        let __t = now();
+        prof_phase!(crate::profile::rules::DELTA_SWEEP, __t);
+        // The fused emitter fans candidates out across `cand`/`trp_cand` and — under `parallel`
+        // — the per-chunk Vecs, so its emission count is the sum of all four streams.
+        #[cfg(feature = "profile")]
+        {
+            #[cfg(feature = "parallel")]
+            let chunked: usize = cand_chunks.iter().map(Vec::len).sum::<usize>()
+                + trp_chunks.iter().map(Vec::len).sum::<usize>();
+            #[cfg(not(feature = "parallel"))]
+            let chunked: usize = 0;
+            crate::profile::derived(
+                crate::profile::rules::DELTA_SWEEP,
+                cand.len() + trp_cand.len() + chunked,
+            );
+        }
+        prof_mark!(__t);
+        prof_len!(__n, cand);
 
         // --- scm-dom1/2, scm-rng1/2: domain/range propagate UP subClassOf and DOWN
         // subPropertyOf (makes the schema-level domain/range closure explicit). Re-fired only
@@ -1222,12 +1219,13 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
             }
         }
 
-        t_scm += __t.elapsed().as_secs_f64();
-        let __t = now();
+        prof_derived!(crate::profile::rules::SCM_DOM_RNG, cand.len() - __n);
+        prof_phase!(crate::profile::rules::SCM_DOM_RNG, __t);
         // (prp-fp / prp-ifp / prp-trp are fused into the delta sweep above — all delta-driven
-        // against the incrementally-maintained `out`/`inc`/`gen` adjacency.)
-        t_fpifp += __t.elapsed().as_secs_f64();
-        let __t = now();
+        // against the incrementally-maintained `out`/`inc`/`gen` adjacency, so they are
+        // attributed to `delta-sweep` rather than carrying a phase of their own.)
+        prof_mark!(__t);
+        prof_len!(__n, cand);
         // --- list/restriction rules (prp-spo2, cls-svf/avf/hv, cls-int, scm-uni) ------
         // Decode RDF lists + restrictions + class lists once, plus the adjacency / type
         // indexes the rules join over. Skipped wholesale when the ontology uses none of these
@@ -1525,8 +1523,9 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
                 }
             }
         } // uses_class_features
-        t_class += __t.elapsed().as_secs_f64();
-        let __t = now();
+        prof_derived!(crate::profile::rules::CLASS_FEATURES, cand.len() - __n);
+        prof_phase!(crate::profile::rules::CLASS_FEATURES, __t);
+        prof_mark!(__t);
 
         let mut new_delta: Vec<[Id; 3]> = Vec::new();
         #[cfg(feature = "parallel")]
@@ -1577,7 +1576,6 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
             );
             m
         };
-        t_commit += __t.elapsed().as_secs_f64();
         // [SONNET-4.6] sq-qonbz.2 — extend DeltaAdj with the newly-committed facts whose
         // predicate is in `need`. This mirrors the `or_default().push()` updates that
         // `commit_serial`/`commit_candidates` apply to `out`/`inc` above. Per-round cost is
@@ -1588,7 +1586,11 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
                 adj.extend_one(s, p, obj);
             }
         }
-        let __t = now();
+        prof_phase!(crate::profile::rules::COMMIT, __t);
+        // One fixpoint round is complete: `new_delta` is exactly the facts it committed, so
+        // this is the progress monitor's tick (and the run's round counter).
+        prof_round!(new_delta.len());
+        prof_mark!(__t);
         if merged {
             // A merge rewrites representatives across `all`; recanonicalize, rebuild the
             // incremental indexes, and run a full (naive) round next so nothing is missed. Merges
@@ -1613,7 +1615,7 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
             // (delta = the whole rewritten `all`) reseeds it.
             cf = ClassFeatureIdx::default();
             delta = all.iter().copied().collect();
-            t_merge += __t.elapsed().as_secs_f64();
+            prof_phase!(crate::profile::rules::SAMEAS_MERGE, __t);
         } else if new_delta.is_empty() {
             break;
         } else {
@@ -1660,13 +1662,7 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
             }
         }
     }
-    if prof {
-        eprintln!(
-            "OWL-PROF rounds={rounds} schema={t_schema:.3} gen={t_gen:.3} scm={t_scm:.3} \
-             fpifp={t_fpifp:.3} class={t_class:.3} commit={t_commit:.3} merge={t_merge:.3}"
-        );
-    }
-    let __t = now();
+    prof_mark!(__t);
 
     // EXPAND the owl:sameAs equivalence classes back into the full closure: every canonical
     // triple is re-emitted for each member combination, plus the full sameAs relation. (The
@@ -1746,10 +1742,8 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
         expanded
     };
 
-    if prof {
-        eprintln!("OWL-PROF expand={:.3}", __t.elapsed().as_secs_f64());
-    }
-    let __t = now();
+    prof_phase!(crate::profile::rules::SAMEAS_EXPAND, __t);
+    prof_mark!(__t);
 
     // Final ordering: original (sorted) then the genuinely-new facts (sorted + deduplicated —
     // set semantics). The filter and both sorts parallelize (the `rdfs::dedup_derived` pattern).
@@ -1785,9 +1779,7 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
     triples.clear();
     triples.append(&mut base);
     triples.extend(derived);
-    if prof {
-        eprintln!("OWL-PROF finalsort={:.3}", __t.elapsed().as_secs_f64());
-    }
+    prof_phase!(crate::profile::rules::FINALIZE, __t);
     // NOT `triples.len() - before`: duplicate input triples dedup away in the
     // rebuild and the subtraction underflows (see rdfs_closure).
     added

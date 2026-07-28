@@ -562,6 +562,7 @@ pub(crate) fn rdfs_closure(
     let v = Vocab::intern(dict);
     let original: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
 
+    prof_mark!(__t);
     // 1. Raw schema maps from the input.
     let mut sc: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
     let mut sp: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
@@ -604,6 +605,9 @@ pub(crate) fn rdfs_closure(
         None
     };
 
+    prof_phase!(crate::profile::rules::SCHEMA_SATURATE, __t);
+    prof_mark!(__t);
+
     // 3. Single parallel ABox sweep + the schema-closure triples (rdfs11 / rdfs5).
     let asserted: Vec<[Id; 3]> = original.iter().copied().collect();
     let mut emitted = sweep(
@@ -631,10 +635,18 @@ pub(crate) fn rdfs_closure(
         }
     }
 
+    prof_derived!(crate::profile::rules::ABOX_SWEEP, emitted.len());
+    prof_phase!(crate::profile::rules::ABOX_SWEEP, __t);
+    prof_mark!(__t);
+
     // 4. De-duplicate the derived facts, drop those already asserted, sort for determinism.
     let derived = dedup_derived(emitted, &original);
 
     let added = derived.len();
+    prof_phase!(crate::profile::rules::FINALIZE, __t);
+    // The RDFS materializer is single-pass by construction (the schema is saturated first), so
+    // the whole closure is exactly one "round" of the progress monitor.
+    prof_round!(added);
     triples.clear();
     triples.extend(original_in_order(&original));
     triples.extend(derived);

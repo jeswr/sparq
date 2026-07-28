@@ -139,6 +139,7 @@ impl MaterializedGraph {
     /// `crate::rdfs::rdfs_closure(.., emit_dr_closure = false, MonoOwl::default())` exactly,
     /// except emissions are *counted* instead of deduplicated away.
     fn rematerialize(&mut self) {
+        prof_mark!(__t);
         self.rebuilds += 1;
         let v = &self.v;
         // 1. Raw TBox maps from the base.
@@ -187,6 +188,7 @@ impl MaterializedGraph {
         }
         #[cfg(feature = "explain")]
         self.explain.rebuild(&self.base, sc, sp, dom, rng);
+        prof_phase!(crate::profile::rules::INCREMENTAL_REBUILD, __t);
     }
 
     /// All one-step consequences (the exact emission multiset) of `triples` against the
@@ -225,11 +227,16 @@ impl MaterializedGraph {
             self.rematerialize();
             return added.len();
         }
+        prof_mark!(__t);
         #[cfg(feature = "explain")]
         self.explain.add_triples(&added);
-        for t in self.consequences(&added) {
+        let consequences = self.consequences(&added);
+        prof_derived!(crate::profile::rules::INCREMENTAL_INSERT, consequences.len());
+        for t in consequences {
             *self.counts.entry(t).or_insert(0) += 1;
         }
+        prof_phase!(crate::profile::rules::INCREMENTAL_INSERT, __t);
+        prof_round!(added.len());
         added.len()
     }
 
@@ -256,9 +263,12 @@ impl MaterializedGraph {
             self.rematerialize();
             return removed.len();
         }
+        prof_mark!(__t);
         #[cfg(feature = "explain")]
         self.explain.remove_triples(&removed);
-        for t in self.consequences(&removed) {
+        let consequences = self.consequences(&removed);
+        prof_derived!(crate::profile::rules::INCREMENTAL_DELETE, consequences.len());
+        for t in consequences {
             match self.counts.get_mut(&t) {
                 Some(c) if *c > 1 => *c -= 1,
                 Some(_) => {
@@ -271,6 +281,8 @@ impl MaterializedGraph {
                 ),
             }
         }
+        prof_phase!(crate::profile::rules::INCREMENTAL_DELETE, __t);
+        prof_round!(removed.len());
         removed.len()
     }
 
@@ -710,6 +722,7 @@ impl MaterializedOwlGraph {
     /// Full re-detection + re-materialization from the current base (counts/state rebuilt for
     /// whichever [`OwlMode`] the base now supports).
     fn rematerialize(&mut self, dict: &mut Dict) {
+        prof_mark!(__t);
         self.rebuilds += 1;
         #[cfg(feature = "explain")]
         self.explain.rebuild(&self.base, &self.v, &self.ow);
@@ -845,6 +858,7 @@ impl MaterializedOwlGraph {
             #[cfg(not(feature = "quoted-triples"))]
             crate::materialize_owl_rl(dict, &mut all);
             self.fallback_closure = all.into_iter().collect();
+            prof_phase!(crate::profile::rules::INCREMENTAL_REBUILD, __t);
             return;
         }
 
@@ -1024,6 +1038,7 @@ impl MaterializedOwlGraph {
             self.emit_owl(t, &mut pre_emit);
         }
         self.schema_facts.extend(pre_emit);
+        prof_phase!(crate::profile::rules::INCREMENTAL_REBUILD, __t);
     }
 
     /// All one-step consequences (exact emission multiset) of one triple against the closed
@@ -1245,14 +1260,19 @@ impl MaterializedOwlGraph {
             self.rematerialize(dict);
             return added.len();
         }
+        prof_mark!(__t);
         #[cfg(feature = "explain")]
         self.explain.add_triples(&added);
-        for t in self.count_sweep(&added) {
+        let consequences = self.count_sweep(&added);
+        prof_derived!(crate::profile::rules::INCREMENTAL_INSERT, consequences.len());
+        for t in consequences {
             *self.counts.entry(t).or_insert(0) += 1;
         }
         if self.mode == OwlMode::CountingFixpoint && self.apply_e0(&added, true) {
             self.refresh_virtual();
         }
+        prof_phase!(crate::profile::rules::INCREMENTAL_INSERT, __t);
+        prof_round!(added.len());
         added.len()
     }
 
@@ -1275,14 +1295,19 @@ impl MaterializedOwlGraph {
             self.rematerialize(dict);
             return removed.len();
         }
+        prof_mark!(__t);
         #[cfg(feature = "explain")]
         self.explain.remove_triples(&removed);
-        for t in self.count_sweep(&removed) {
+        let consequences = self.count_sweep(&removed);
+        prof_derived!(crate::profile::rules::INCREMENTAL_DELETE, consequences.len());
+        for t in consequences {
             self.decrement(t);
         }
         if self.mode == OwlMode::CountingFixpoint && self.apply_e0(&removed, false) {
             self.refresh_virtual();
         }
+        prof_phase!(crate::profile::rules::INCREMENTAL_DELETE, __t);
+        prof_round!(removed.len());
         removed.len()
     }
 

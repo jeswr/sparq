@@ -4,6 +4,65 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{Dict, Id};
 
+// [SONNET-4.6] sq-6tykl.5 — the reasoning-profiler hooks. Defined here (textual macro scope)
+// so every module declared below can use them. WITHOUT the non-default `profile` feature each
+// one expands to NOTHING — no binding, no call, no clock read — so the default build is
+// byte-identical to one where the instrumentation was never written. See `profile`.
+#[cfg(feature = "profile")]
+macro_rules! prof_mark {
+    ($t:ident) => {
+        let $t = $crate::profile::mark();
+    };
+}
+#[cfg(not(feature = "profile"))]
+macro_rules! prof_mark {
+    ($t:ident) => {};
+}
+/// Attribute the time since `prof_mark!($t)` to rule group `$rule`.
+#[cfg(feature = "profile")]
+macro_rules! prof_phase {
+    ($rule:expr, $t:ident) => {
+        $crate::profile::phase($rule, $t);
+    };
+}
+#[cfg(not(feature = "profile"))]
+macro_rules! prof_phase {
+    ($rule:expr, $t:ident) => {};
+}
+/// Snapshot `$v.len()` into `$n` so a later `prof_derived!` can report the growth.
+#[cfg(feature = "profile")]
+macro_rules! prof_len {
+    ($n:ident, $v:expr) => {
+        let $n = $v.len();
+    };
+}
+#[cfg(not(feature = "profile"))]
+macro_rules! prof_len {
+    ($n:ident, $v:expr) => {};
+}
+/// Attribute `$n` emitted candidate facts to rule group `$rule`.
+#[cfg(feature = "profile")]
+macro_rules! prof_derived {
+    ($rule:expr, $n:expr) => {
+        $crate::profile::derived($rule, $n);
+    };
+}
+#[cfg(not(feature = "profile"))]
+macro_rules! prof_derived {
+    ($rule:expr, $n:expr) => {};
+}
+/// Close a fixpoint round that committed `$n` new facts (fires the progress callback).
+#[cfg(feature = "profile")]
+macro_rules! prof_round {
+    ($n:expr) => {
+        $crate::profile::round($n);
+    };
+}
+#[cfg(not(feature = "profile"))]
+macro_rules! prof_round {
+    ($n:expr) => {};
+}
+
 mod incremental;
 // [FABLE-5] sq-pbz04.1.2 (epic sq-pbz04.1) — the opt-in substrate seam-3 adoption: the
 // SHARED SPARQL term total order (`sparq_substrate::compare`) implemented for the
@@ -121,7 +180,12 @@ pub fn materialize(profile: Profile, dict: &mut Dict, triples: &mut Vec<[Id; 3]>
     }
 }
 
-/// Materialize a closure and return opt-in rule instrumentation.
+/// Materialize a closure and return the opt-in per-rule instrumentation
+/// ([`profile::Report`]) — the "which rule blew up my closure?" instrument.
+///
+/// Byte-identical to [`materialize`] in both the closure it produces and the count it
+/// returns; only the observation is added. See the [`profile`] module for what is measured
+/// and at what granularity.
 #[cfg(feature = "profile")]
 pub fn materialize_profiled(
     profile: Profile,
@@ -131,31 +195,15 @@ pub fn materialize_profiled(
     materialize_profiled_with(profile::Profiler::new(), profile, dict, triples)
 }
 
-/// Materialize with a configured profiler, including its progress callback.
+/// Materialize with a configured profiler, including its per-round progress callback.
 #[cfg(feature = "profile")]
 pub fn materialize_profiled_with(
-    mut profiler: profile::Profiler,
+    profiler: profile::Profiler,
     profile: Profile,
     dict: &mut Dict,
     triples: &mut Vec<[Id; 3]>,
 ) -> (usize, profile::Report) {
-    let added = match profile {
-        Profile::Rdfs => {
-            profiler.observe("RDFS rules", |ts| rdfs::materialize_rdfs(dict, ts), triples)
-        }
-        Profile::OwlRl => profiler.observe(
-            "OWL RL fixpoint rules",
-            |ts| owl::materialize_owl_rl(dict, ts),
-            triples,
-        ),
-        #[cfg(feature = "d-entail")]
-        Profile::D => profiler.observe(
-            "rdfD1",
-            |ts| dtype::materialize_d(&dtype::Recognized::standard(), dict, ts),
-            triples,
-        ),
-    };
-    (added, profiler.finish())
+    profile::with_profiler(profiler, || materialize(profile, dict, triples))
 }
 
 /// Standard RDF/RDFS vocabulary ids, interned once. Interning is idempotent — it returns
