@@ -159,7 +159,7 @@ class TestM1CronFiringDeficit(unittest.TestCase):
         self.assertEqual(
             len(alarm.find_cron_deficits([_lane(fires=at_floor - 1)], NOW)[0]), 1)
 
-    def test_an_over_delivering_lane_clamps_to_healthy(self):
+    def test_an_over_delivering_lane_is_healthy(self):
         f, _ = alarm.find_cron_deficits([_lane(fires=self.CAP * 3)], NOW)
         self.assertEqual(f, [])
 
@@ -199,6 +199,21 @@ class TestM2QueueWait(unittest.TestCase):
             [_run_obj(status="in_progress", age_min=10_000)], NOW)
         self.assertEqual(f, [], "an in_progress run is M3's population, not M2's")
 
+    def test_an_hour_long_queue_wait_raises_under_the_SHIPPED_threshold(self):
+        """ABSOLUTE, not relative to the constant. The sibling tests above derive their
+        fixture age FROM QUEUE_MAX_WAIT_SECONDS, so they scale with it and cannot fail
+        when it changes — a mutant that multiplied the constant by 10**6 SURVIVED them.
+        MEASURED known positive: jeswr/agent-account-registry held `pr-gate` runs in
+        `queued` for 12.8-99.5 minutes between 00:58Z and 02:24Z on 2026-07-28."""
+        f, _ = alarm.find_queue_overruns([_run_obj(status="queued", age_min=60)], NOW)
+        self.assertEqual(len(f), 1, "an hour in `queued` must alarm")
+
+    def test_the_queue_threshold_stays_inside_its_validated_band(self):
+        """The band the false-positive measurement was made over. Outside it the stated
+        0.022% / 0.153% figures no longer describe the shipped behaviour."""
+        self.assertGreaterEqual(alarm.QUEUE_MAX_WAIT_SECONDS, 5 * 60)
+        self.assertLessEqual(alarm.QUEUE_MAX_WAIT_SECONDS, 30 * 60)
+
 
 class TestM3ExecutionOverrun(unittest.TestCase):
     BASE = {(".github/workflows/a.yml", "schedule"): {"p90": 3600.0, "n": 50}}
@@ -228,12 +243,23 @@ class TestM3ExecutionOverrun(unittest.TestCase):
         self.assertEqual(len(f), 1)
         self.assertIn("floor", f[0]["basis"])
 
-    def test_an_undersampled_baseline_falls_back_to_the_floor(self):
-        thin = {(".github/workflows/a.yml", "schedule"): {"p90": 60.0, "n": 1}}
-        f, _ = alarm.find_execution_overruns([_run_obj(age_min=7 * 60)], thin, NOW)
-        self.assertEqual(len(f), 1)
-        self.assertEqual(f[0]["threshold_seconds"], int(alarm.EXEC_FLOOR_SECONDS),
-                         "a 1-sample p90 must not become the threshold")
+    def test_an_undersampled_baseline_is_not_trusted_even_when_it_is_LARGE(self):
+        """The under-sampling guard only BITES when the thin baseline would WIDEN the
+        threshold past the floor. A fixture with a small p90 collapses to the floor
+        whether or not the guard exists, and cannot detect its removal — the earlier
+        version of this test used p90=60s and both BASELINE_MIN_N mutants SURVIVED it."""
+        thin_but_huge = {(".github/workflows/a.yml", "schedule"):
+                         {"p90": 20 * 3600.0, "n": 1}}
+        f, _ = alarm.find_execution_overruns([_run_obj(age_min=7 * 60)], thin_but_huge,
+                                             NOW)
+        self.assertEqual(len(f), 1,
+                         "a 1-sample 20h p90 must not widen the threshold to 40h")
+        self.assertEqual(f[0]["threshold_seconds"], int(alarm.EXEC_FLOOR_SECONDS))
+        # Control: the SAME p90 with a real sample size legitimately widens the band.
+        thick = {(".github/workflows/a.yml", "schedule"):
+                 {"p90": 20 * 3600.0, "n": alarm.BASELINE_MIN_N}}
+        self.assertEqual(
+            alarm.find_execution_overruns([_run_obj(age_min=7 * 60)], thick, NOW)[0], [])
 
     def test_a_baseline_WIDER_than_the_floor_raises_the_threshold(self):
         """Quantifier direction: the floor is a MINIMUM, not the answer. A legitimately
@@ -288,6 +314,22 @@ class TestCensusAndExitCodes(unittest.TestCase):
         self.assertEqual(self._run(lanes=[], live=[]), 2)
         only_cron_only = [_lane(cron_only=True, in_scope=False)]
         self.assertEqual(self._run(lanes=only_cron_only, live=[]), 2)
+
+    def test_the_two_empty_scan_set_guards_report_DISTINCT_causes(self):
+        """They are not redundant: 'no workflow files at all' means the sparse-checkout
+        dropped `.github/workflows` (a deploy defect), while 'nothing in scope' means the
+        predicate or the repo changed shape. Collapsing them loses the more actionable
+        diagnosis — and without this assertion, deleting the first guard SURVIVES, because
+        the second one also exits 2 on an empty list."""
+        import contextlib
+        import io
+        for lanes, expect in (([], "no workflows discovered"),
+                              ([_lane(cron_only=True, in_scope=False)], "empty M1 scan set")):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = self._run(lanes=lanes, live=[])
+            self.assertEqual(rc, 2)
+            self.assertIn(expect, buf.getvalue())
 
     @staticmethod
     def _run(lanes, live, baselines=None):

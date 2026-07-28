@@ -382,9 +382,11 @@ def find_cron_deficits(lanes: list[dict], now: dt.datetime,
             bump("expectation-below-floor")
             continue
         actual = sum(1 for t in lane["schedule_run_times"] if start < t <= end)
-        # Clamp: a lane that over-delivers (a manual re-run inside the window) is at 1.00,
-        # never above it. Without the clamp an over-delivering lane could mask a sibling.
-        ratio = min(actual, expected) / expected
+        # No clamp on `actual`: an over-delivering lane gives a ratio above 1.0, which is
+        # >= the floor and therefore healthy either way. A `min(actual, expected)` here
+        # was removed after its own mutant SURVIVED — it changed no observable output, so
+        # it was dead code, and an untestable guard is worse than no guard.
+        ratio = actual / expected
         if ratio < CRON_DELIVERY_FLOOR:
             bump("firing-deficit")
             findings.append({
