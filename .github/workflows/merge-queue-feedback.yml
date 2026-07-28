@@ -66,7 +66,17 @@
 #
 # The same classifier also recognises the watchdog's OWN recovery: the watchdog
 # re-enqueues via dequeue+enqueue, which itself fires `pull_request.dequeued`, and
-# without that arm the watchdog would demote every PR it just rescued.
+# without that arm the watchdog would demote every PR it just rescued. MEASURED on
+# #4709: `review:pass` was swapped for `review:changes` 17 SECONDS after a `MANUAL`
+# dequeue. `MANUAL` conflates "a reviewer withdrew this" (verdict SHOULD fall) with
+# "infrastructure moved it" (it should not), so the split is on EVIDENCE — a fresh
+# watchdog marker for that exact group head — never on the reason string.
+#
+# AND, on every preserve route: the verdict may only survive if the PR head has NOT
+# moved since `review:pass` was granted. A commit, a force-push, or a revoked label
+# after the grant forfeits it — never restore a verdict onto a tree it was not given
+# for. A genuine human dequeue has no fresh marker and still demotes; that control is
+# what stops this from becoming a verdict-preservation hole.
 #
 # No third-party actions (nothing to SHA-pin); every step is plain `gh` against the
 # workflow token, least-privilege scoped below.

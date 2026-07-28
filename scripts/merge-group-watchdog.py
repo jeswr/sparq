@@ -78,6 +78,31 @@
 # implemented as dequeue+enqueue, which itself fires `pull_request.dequeued`, and
 # without this arm the watchdog would demote every PR it rescued.
 #
+# ── the verdict-stripping defect this ALSO has to fix ─────────────────────────────
+# MEASURED on #4709, 2026-07-28 — the dequeue itself takes the verdict down with it:
+#     05:14:56  labeled   review:pass    by sparq-orchestrator[bot]
+#     06:06:38  removed_from_merge_queue (reason MANUAL)
+#     06:06:55  labeled   review:changes by github-actions[bot]
+#     06:06:55  unlabeled review:pass    by github-actions[bot]
+# Seventeen seconds. Because our recovery IS a dequeue, a watchdog without this fix
+# would strip `review:pass`, apply `review:changes`, disable the arm and admit the PR to
+# the FIX pipeline — on every PR it rescued. That is a net regression: it would
+# manufacture a `review:changes` backlog out of a platform event that never fired.
+#
+# The existing routing is CORRECT for its original purpose — a reviewer withdrawing a PR
+# *should* pull the verdict. The defect is that `MANUAL` conflates "a reviewer withdrew
+# this" with "infrastructure moved it", and the handler keys off THAT a dequeue happened,
+# never WHY. So we discriminate on EVIDENCE, never on the event name: a fresh
+# watchdog marker for this exact group head is what makes a dequeue ours.
+#
+# NON-NEGOTIABLE PRECONDITION on every preserve route (`verdict_is_still_for_this_tree`):
+# a verdict may only survive a dequeue if the head has NOT moved since it was granted.
+# A verdict attests to a specific TREE, so if a commit, a force-push, or an
+# `unlabeled review:pass` lands after the grant, the label must be allowed to fall off.
+# Verified by hand on #4709 before restoring it: `review:pass` at 05:14:56Z, last commit
+# 04:56:39Z, zero head-moving events between. Both the latest grant and the latest move
+# are used, so the realistic push-then-re-approve sequence still preserves correctly.
+#
 # The group head SHA cannot be recovered from the API after the ref is deleted (that is
 # exactly the population with no workflow runs to read it off), so the watchdog records
 # it in a machine-readable marker comment BEFORE it acts. The marker is a POINTER, not
@@ -163,6 +188,9 @@ ACTIONABLE_STATES = frozenset({"AWAITING_CHECKS"})
 # MERGE_CONFLICT / CI_FAILURE dequeue is never attributed to the watchdog.
 SELF_DEQUEUE_REASONS = frozenset({"MANUAL", "UNKNOWN"})
 ZERO_DISPATCH_REASON = "CI_TIMEOUT"
+# The verdict label whose survival across an infrastructure dequeue is the whole point
+# of the routing split.
+REVIEW_PASS = "review:pass"
 
 # Verdicts. Named constants so a test cannot silently drift from the emitter.
 SKIP = "SKIP"
@@ -334,6 +362,16 @@ class Route:
     detail: str
 
 
+@dataclass(frozen=True)
+class VerdictState:
+    """What the PR timeline says about the verdict and the head it was granted for."""
+
+    review_pass_at: datetime | None
+    head_moved_at: datetime | None
+    last_enqueued_at: datetime | None
+    readable: bool = True
+
+
 def decide_entry(
     entry: QueueEntry,
     *,
@@ -342,6 +380,7 @@ def decide_entry(
     now: datetime,
     grace_seconds: int,
     markers: Iterable[Marker],
+    markers_readable: bool = True,
     recoveries_in_window: int,
     max_recoveries_per_pr: int,
     run_recoveries: int,
@@ -365,6 +404,12 @@ def decide_entry(
         return Decision(
             HOLD,
             f"{suites} check-suite(s) present — the merge_group event was dispatched",
+        )
+    if not markers_readable:
+        return Decision(
+            REFUSE,
+            "this PR's marker history could not be read — an unreadable history is "
+            "NOT evidence of no prior recovery, so the caps cannot be evaluated",
         )
     if created_at is None:
         return Decision(
@@ -411,11 +456,33 @@ def decide_entry(
     )
 
 
+def verdict_is_still_for_this_tree(state: VerdictState) -> tuple[bool, str]:
+    """May the review verdict survive this dequeue?
+
+    NON-NEGOTIABLE PRECONDITION on every preserve route. A verdict attests to a
+    specific TREE; if the head has moved since `review:pass` was granted, the label
+    describes code nobody reviewed and it must be allowed to fall off. Measured on
+    #4709: `review:pass` at 05:14:56Z for head `c84c0810d681`, last commit 04:56:39Z,
+    zero head-moving events between — which is exactly the check that made restoring it
+    legitimate. Anything unprovable is a refusal to preserve.
+    """
+    if not state.readable:
+        return False, "the PR timeline could not be read"
+    if state.review_pass_at is None:
+        return False, "no review:pass grant found on the timeline — no verdict to keep"
+    if state.head_moved_at is not None and state.head_moved_at > state.review_pass_at:
+        return False, (
+            f"the head moved at {iso(state.head_moved_at)}, after review:pass was "
+            f"granted at {iso(state.review_pass_at)} — the verdict is not for this tree"
+        )
+    return True, f"review:pass granted {iso(state.review_pass_at)} and the head has not moved since"
+
+
 def classify_dequeue_route(
     *,
     reason: str,
     markers: Iterable[Marker],
-    last_enqueued_at: datetime | None,
+    verdict: VerdictState,
     live_suites: Callable[[str], int | None],
     now: datetime,
     self_dequeue_window_seconds: int = DEFAULT_SELF_DEQUEUE_WINDOW_SECONDS,
@@ -429,6 +496,7 @@ def classify_dequeue_route(
     ordered = sorted(markers, key=lambda m: m.observed, reverse=True)
     newest = ordered[0] if ordered else None
     normalised = (reason or "UNKNOWN").strip().upper()
+    last_enqueued_at = verdict.last_enqueued_at
 
     if newest is None:
         return Route(
@@ -436,6 +504,11 @@ def classify_dequeue_route(
             False,
             "no merge-group-watchdog observation recorded for this PR",
         )
+
+    # Applies to BOTH preserve arms, before either is considered.
+    keepable, why = verdict_is_still_for_this_tree(verdict)
+    if not keepable:
+        return Route(ROUTE_DEMOTE, False, f"verdict may not survive this dequeue: {why}")
 
     marker_age = (now - newest.observed).total_seconds()
 
@@ -684,7 +757,13 @@ class Watchdog:
         markers = [parse_marker(row.get("body")) for row in _ndjson(raw)]
         return [marker for marker in markers if marker is not None]
 
-    def last_enqueued_at(self, pr_number: int) -> datetime | None:
+    def verdict_state(self, pr_number: int) -> VerdictState:
+        """One timeline read for all three facts the routing decision needs.
+
+        A `committed` timeline event carries no `created_at` — its time is the
+        commit's own `committer.date`. `head_ref_force_pushed` is a normal event with
+        `created_at`. Both move the head, so both count.
+        """
         try:
             raw = self.gh_read(
                 [
@@ -699,14 +778,37 @@ class Watchdog:
             )
             rows = _ndjson(raw)
         except GhError:
-            return None
-        stamps = [
-            parse_iso(row.get("created_at"))
-            for row in rows
-            if row.get("event") == "added_to_merge_queue"
-        ]
-        stamps = [stamp for stamp in stamps if stamp is not None]
-        return max(stamps) if stamps else None
+            return VerdictState(None, None, None, readable=False)
+
+        enqueued: list[datetime] = []
+        granted: list[datetime] = []
+        moved: list[datetime] = []
+        for row in rows:
+            event = row.get("event")
+            stamp = parse_iso(row.get("created_at"))
+            if event == "added_to_merge_queue" and stamp:
+                enqueued.append(stamp)
+            elif event == "labeled" and stamp:
+                if str((row.get("label") or {}).get("name", "")).lower() == REVIEW_PASS:
+                    granted.append(stamp)
+            elif event == "unlabeled" and stamp:
+                # A verdict that was REMOVED is not a verdict. Model a removal as a
+                # head move at that instant, so any earlier grant stops qualifying.
+                if str((row.get("label") or {}).get("name", "")).lower() == REVIEW_PASS:
+                    moved.append(stamp)
+            elif event == "head_ref_force_pushed" and stamp:
+                moved.append(stamp)
+            elif event == "committed":
+                committed = parse_iso(
+                    (row.get("committer") or {}).get("date")
+                ) or parse_iso((row.get("author") or {}).get("date"))
+                if committed:
+                    moved.append(committed)
+        return VerdictState(
+            review_pass_at=max(granted) if granted else None,
+            head_moved_at=max(moved) if moved else None,
+            last_enqueued_at=max(enqueued) if enqueued else None,
+        )
 
     # -- mutations -----------------------------------------------------------
 
@@ -811,6 +913,7 @@ class Watchdog:
             suites: int | None = None
             created_at: datetime | None = None
             markers: list[Marker] = []
+            markers_readable = True
             recoveries_in_window = 0
 
             if entry.state in ACTIONABLE_STATES and entry.head_oid and entry.base_oid:
@@ -820,18 +923,21 @@ class Watchdog:
                     try:
                         markers = self.pr_markers(entry.pr_number)
                     except (GhError, json.JSONDecodeError) as error:
-                        self.emit(
-                            f"pos={entry.position} pr=#{entry.pr_number} ref={ref} "
-                            f"head={(entry.head_oid or '')[:8]} suites=0 "
-                            f"decision={REFUSE} — marker history unreadable ({error})"
-                        )
-                        counts[REFUSE] = counts.get(REFUSE, 0) + 1
+                        # An unreadable history is NOT "no prior recovery" — assuming
+                        # that would bypass the cap on every API blip. It falls through
+                        # to the ONE decide/emit path below as a REFUSE, so there is a
+                        # single row shape for an operator to parse.
+                        markers_readable = False
                         errors += 1
-                        continue
-                    cutoff = now - timedelta(seconds=self.recovery_window_seconds)
-                    recoveries_in_window = sum(
-                        1 for marker in markers if marker.observed >= cutoff
-                    )
+                        self.log(
+                            f"::warning title={PROGRAM} marker history unreadable::"
+                            f"PR #{entry.pr_number}: {error}"
+                        )
+                    else:
+                        cutoff = now - timedelta(seconds=self.recovery_window_seconds)
+                        recoveries_in_window = sum(
+                            1 for marker in markers if marker.observed >= cutoff
+                        )
 
             decision = decide_entry(
                 entry,
@@ -840,6 +946,7 @@ class Watchdog:
                 now=now,
                 grace_seconds=self.grace_seconds,
                 markers=markers,
+                markers_readable=markers_readable,
                 recoveries_in_window=recoveries_in_window,
                 max_recoveries_per_pr=self.max_recoveries_per_pr,
                 run_recoveries=run_recoveries,
@@ -894,7 +1001,7 @@ class Watchdog:
         return classify_dequeue_route(
             reason=reason,
             markers=markers,
-            last_enqueued_at=self.last_enqueued_at(pr_number),
+            verdict=self.verdict_state(pr_number),
             live_suites=self.check_suite_count,
             now=now,
         )
@@ -1021,7 +1128,11 @@ def self_test() -> None:
         kwargs = dict(
             reason=ZERO_DISPATCH_REASON,
             markers=(parsed,),
-            last_enqueued_at=now - timedelta(hours=1),
+            verdict=VerdictState(
+                review_pass_at=now - timedelta(hours=2),
+                head_moved_at=now - timedelta(hours=3),
+                last_enqueued_at=now - timedelta(hours=1),
+            ),
             live_suites=lambda _sha: 0,
             now=now + timedelta(minutes=40),
         )
@@ -1037,9 +1148,15 @@ def self_test() -> None:
     # No marker => demote.
     assert route(markers=()).route == ROUTE_DEMOTE
     # A marker predating the current attempt cannot steer the route.
-    assert route(last_enqueued_at=now + timedelta(minutes=1)).route == ROUTE_DEMOTE
+    assert route(verdict=VerdictState(now - timedelta(hours=2), None, now + timedelta(minutes=1))).route == ROUTE_DEMOTE
     # No added_to_merge_queue event => demote.
-    assert route(last_enqueued_at=None).route == ROUTE_DEMOTE
+    assert route(verdict=VerdictState(now - timedelta(hours=2), None, None)).route == ROUTE_DEMOTE
+    # A head that moved AFTER the verdict was granted => the verdict may not survive.
+    assert route(verdict=VerdictState(now - timedelta(hours=2), now - timedelta(minutes=1), now - timedelta(hours=1))).route == ROUTE_DEMOTE
+    # No review:pass at all => nothing to preserve.
+    assert route(verdict=VerdictState(None, None, now - timedelta(hours=1))).route == ROUTE_DEMOTE
+    # An unreadable timeline => demote.
+    assert route(verdict=VerdictState(None, None, None, readable=False)).route == ROUTE_DEMOTE
     # A stale marker => demote.
     assert route(now=now + timedelta(hours=7)).route == ROUTE_DEMOTE
     # Reasons other than CI_TIMEOUT keep today's behaviour.

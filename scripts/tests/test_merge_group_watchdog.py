@@ -167,6 +167,15 @@ class TestFailSafe(unittest.TestCase):
     def test_unknown_suite_count_refuses(self):
         self.assertEqual(decide(suites=None).verdict, mgw.REFUSE)
 
+    def test_unreadable_marker_history_refuses(self):
+        # "I could not read the history" is not "there is no history". Treating them as
+        # the same would bypass the per-PR cap on every API blip.
+        self.assertEqual(decide(markers_readable=False).verdict, mgw.REFUSE)
+        # ...and it must outrank the caps, not be masked by them.
+        self.assertEqual(
+            decide(markers_readable=False, recoveries_in_window=99).verdict, mgw.REFUSE
+        )
+
     def test_missing_branch_creation_anchor_refuses(self):
         self.assertEqual(decide(created_at=None).verdict, mgw.REFUSE)
 
@@ -236,11 +245,21 @@ class TestCapAndIdempotence(unittest.TestCase):
 class TestDequeueRouting(unittest.TestCase):
     """Both arms of the CI_TIMEOUT split, keyed on the suite count."""
 
+    @staticmethod
+    def verdict(**overrides) -> "mgw.VerdictState":
+        fields = dict(
+            review_pass_at=NOW - timedelta(hours=2),
+            head_moved_at=NOW - timedelta(hours=3),
+            last_enqueued_at=NOW - timedelta(hours=1),
+        )
+        fields.update(overrides)
+        return mgw.VerdictState(**fields)
+
     def route(self, **overrides) -> "mgw.Route":
         kwargs = dict(
             reason="CI_TIMEOUT",
             markers=(marker(),),
-            last_enqueued_at=NOW - timedelta(hours=1),
+            verdict=self.verdict(),
             live_suites=lambda _sha: 0,
             now=NOW + timedelta(minutes=40),
         )
@@ -299,12 +318,99 @@ class TestDequeueRouting(unittest.TestCase):
 
     def test_marker_predating_this_queue_attempt_demotes(self):
         self.assertEqual(
-            self.route(last_enqueued_at=NOW + timedelta(minutes=1)).route,
+            self.route(verdict=self.verdict(last_enqueued_at=NOW + timedelta(minutes=1))).route,
             mgw.ROUTE_DEMOTE,
         )
 
     def test_missing_enqueue_event_demotes(self):
-        self.assertEqual(self.route(last_enqueued_at=None).route, mgw.ROUTE_DEMOTE)
+        self.assertEqual(
+            self.route(verdict=self.verdict(last_enqueued_at=None)).route, mgw.ROUTE_DEMOTE
+        )
+
+    # ── the verdict may only survive a dequeue for the tree it was granted for ──
+    def test_arm_1_an_infrastructure_dequeue_leaves_the_verdict_intact(self):
+        # The watchdog's own recovery: MANUAL dequeue, fresh marker, head unmoved
+        # since review:pass. Nothing about this PR's diff is in question.
+        result = self.route(reason="MANUAL", now=NOW + timedelta(seconds=30))
+        self.assertEqual(result.route, mgw.ROUTE_PRESERVE)
+        self.assertFalse(result.reenqueue)
+
+    def test_arm_2_control_a_genuine_manual_dequeue_still_strips_the_verdict(self):
+        # THE CONTROL. A human withdrawing a PR SHOULD pull the verdict. Without this
+        # the fix becomes a verdict-preservation hole — any dequeue keeps its approval,
+        # which is far worse than the bug being fixed. A genuine human dequeue has no
+        # fresh watchdog marker.
+        self.assertEqual(
+            self.route(reason="MANUAL", markers=(), now=NOW + timedelta(seconds=30)).route,
+            mgw.ROUTE_DEMOTE,
+        )
+        # ...and one whose marker is old is equally not ours.
+        self.assertEqual(
+            self.route(reason="MANUAL", now=NOW + timedelta(hours=3)).route,
+            mgw.ROUTE_DEMOTE,
+        )
+
+    def test_a_head_that_moved_after_the_verdict_forfeits_it(self):
+        # NON-NEGOTIABLE. Never restore a verdict onto a tree it was not given for.
+        moved = self.verdict(head_moved_at=NOW - timedelta(minutes=1))
+        for reason, when in (("MANUAL", NOW + timedelta(seconds=30)),
+                             ("CI_TIMEOUT", NOW + timedelta(minutes=40))):
+            result = self.route(reason=reason, verdict=moved, now=when)
+            self.assertEqual(result.route, mgw.ROUTE_DEMOTE, reason)
+            self.assertIn("the head moved", result.detail)
+
+    def test_a_head_that_moved_before_the_verdict_is_fine(self):
+        ok = self.verdict(head_moved_at=NOW - timedelta(hours=2, seconds=1))
+        self.assertEqual(self.route(verdict=ok).route, mgw.ROUTE_PRESERVE)
+
+    def test_no_verdict_to_preserve_demotes(self):
+        self.assertEqual(
+            self.route(verdict=self.verdict(review_pass_at=None)).route, mgw.ROUTE_DEMOTE
+        )
+
+    def test_a_revoked_verdict_cannot_be_preserved(self):
+        # `unlabeled review:pass` is modelled as a head move at that instant, so a
+        # grant that was later withdrawn stops qualifying.
+        revoked = self.verdict(head_moved_at=NOW - timedelta(hours=1, minutes=30))
+        self.assertEqual(self.route(verdict=revoked).route, mgw.ROUTE_DEMOTE)
+
+    def test_unreadable_timeline_demotes(self):
+        # ISOLATED: everything else about this verdict is valid, so ONLY the
+        # unreadable flag can produce the demote. The previous version of this test
+        # also set review_pass_at=None, which meant it passed through the "no verdict"
+        # guard and would have stayed green with the readable check deleted.
+        unreadable = mgw.VerdictState(
+            review_pass_at=NOW - timedelta(hours=2),
+            head_moved_at=NOW - timedelta(hours=3),
+            last_enqueued_at=NOW - timedelta(hours=1),
+            readable=False,
+        )
+        result = self.route(verdict=unreadable)
+        self.assertEqual(result.route, mgw.ROUTE_DEMOTE)
+        # "the API failed" and "this PR was never approved" are different operational
+        # facts and the emitted row is the only place anyone sees which one happened.
+        self.assertIn("timeline could not be read", result.detail)
+        self.assertNotIn("no review:pass grant", result.detail)
+
+    def test_no_verdict_reports_a_different_reason_than_an_unreadable_one(self):
+        result = self.route(verdict=self.verdict(review_pass_at=None))
+        self.assertEqual(result.route, mgw.ROUTE_DEMOTE)
+        self.assertIn("no review:pass grant", result.detail)
+        self.assertNotIn("timeline could not be read", result.detail)
+
+    def test_the_LATEST_head_move_is_the_one_that_counts(self):
+        # An early move (before the verdict) must not mask a later one (after it).
+        # Reading min() instead of max() would let a stale verdict survive a push.
+        both = self.verdict(head_moved_at=NOW - timedelta(minutes=1))
+        self.assertEqual(self.route(verdict=both).route, mgw.ROUTE_DEMOTE)
+
+    def test_a_verdict_RE_granted_after_a_push_is_preservable(self):
+        # push at T, re-review, re-approve at T+: the newest grant is what matters.
+        regranted = self.verdict(
+            review_pass_at=NOW - timedelta(minutes=30),
+            head_moved_at=NOW - timedelta(minutes=45),
+        )
+        self.assertEqual(self.route(verdict=regranted).route, mgw.ROUTE_PRESERVE)
 
     def test_stale_marker_demotes(self):
         self.assertEqual(self.route(now=NOW + timedelta(hours=7)).route, mgw.ROUTE_DEMOTE)
@@ -448,7 +554,8 @@ class FakeWatchdog:
 
     @classmethod
     def build(cls, *, suites: int | None = 0, entries=None, comments=None,
-              activity=None, now: datetime | None = None, dry_run: bool = False):
+              activity=None, now: datetime | None = None, dry_run: bool = False,
+              timeline=None):
         node = {
             "id": "MQE_4534",
             "position": 1,
@@ -472,7 +579,12 @@ class FakeWatchdog:
             if activity is None
             else activity,
             comments=comments or [],
-            timeline=[{"event": "added_to_merge_queue", "created_at": "2026-07-27T22:58:53Z"}],
+            timeline=list(timeline) if timeline is not None else [
+                {"event": "committed", "committer": {"date": "2026-07-27T22:40:00Z"}},
+                {"event": "labeled", "created_at": "2026-07-27T22:50:00Z",
+                 "label": {"name": "review:pass"}},
+                {"event": "added_to_merge_queue", "created_at": "2026-07-27T22:58:53Z"},
+            ],
         )
         rows: list[str] = []
         watchdog = mgw.Watchdog(
@@ -525,9 +637,14 @@ class TestSweepBehaviour(unittest.TestCase):
         # per-PR cap be bypassed on every API blip.
         harness = FakeWatchdog.build(suites=0)
         harness.gh.fail_on = ("/comments",)
-        harness.run()
+        self.assertGreater(harness.run(), 0)
         self.assertEqual(harness.gh.mutations, [])
-        self.assertTrue(any("decision=REFUSE" in row for row in harness.rows), harness.rows)
+        row = next(r for r in harness.rows if "decision=REFUSE" in r)
+        # ONE row shape for every entry — this path used to emit a bespoke row missing
+        # `state=` and `stacked=`, so an operator parsing rows saw two formats.
+        for field in ("pos=", "pr=#", "state=", "ref=", "head=", "suites=", "stacked=",
+                      "stacked_green=", "decision="):
+            self.assertIn(field, row, (field, row))
 
     def test_a_failed_recovery_is_a_red_run_not_a_silent_success(self):
         harness = FakeWatchdog.build(suites=0)
@@ -725,6 +842,113 @@ class TestClassifyEndToEnd(unittest.TestCase):
         harness = FakeWatchdog.build(suites=0, comments=[_marker_comment()])
         route = harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT")
         self.assertEqual(route.route, mgw.ROUTE_PRESERVE)
+
+    def test_a_commit_after_the_verdict_forfeits_it_end_to_end(self):
+        # Exercises the real timeline PARSER, not just the policy: a `committed` event
+        # carries no `created_at`, so its time must be read from `committer.date`.
+        harness = FakeWatchdog.build(
+            suites=0,
+            comments=[_marker_comment()],
+            timeline=[
+                {"event": "labeled", "created_at": "2026-07-27T22:50:00Z",
+                 "label": {"name": "review:pass"}},
+                {"event": "added_to_merge_queue", "created_at": "2026-07-27T22:58:53Z"},
+                {"event": "committed", "committer": {"date": "2026-07-27T23:05:00Z"}},
+            ],
+        )
+        route = harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT")
+        self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
+        self.assertIn("the head moved", route.detail)
+
+    def test_a_force_push_after_the_verdict_forfeits_it_end_to_end(self):
+        harness = FakeWatchdog.build(
+            suites=0,
+            comments=[_marker_comment()],
+            timeline=[
+                {"event": "labeled", "created_at": "2026-07-27T22:50:00Z",
+                 "label": {"name": "review:pass"}},
+                {"event": "added_to_merge_queue", "created_at": "2026-07-27T22:58:53Z"},
+                {"event": "head_ref_force_pushed", "created_at": "2026-07-27T23:05:00Z"},
+            ],
+        )
+        self.assertEqual(
+            harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT").route, mgw.ROUTE_DEMOTE
+        )
+
+    def test_a_revoked_verdict_forfeits_it_end_to_end(self):
+        harness = FakeWatchdog.build(
+            suites=0,
+            comments=[_marker_comment()],
+            timeline=[
+                {"event": "labeled", "created_at": "2026-07-27T22:50:00Z",
+                 "label": {"name": "review:pass"}},
+                {"event": "unlabeled", "created_at": "2026-07-27T22:55:00Z",
+                 "label": {"name": "review:pass"}},
+                {"event": "added_to_merge_queue", "created_at": "2026-07-27T22:58:53Z"},
+            ],
+        )
+        self.assertEqual(
+            harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT").route, mgw.ROUTE_DEMOTE
+        )
+
+    def test_a_label_other_than_review_pass_is_not_a_verdict(self):
+        harness = FakeWatchdog.build(
+            suites=0,
+            comments=[_marker_comment()],
+            timeline=[
+                {"event": "labeled", "created_at": "2026-07-27T22:50:00Z",
+                 "label": {"name": "review:changes"}},
+                {"event": "added_to_merge_queue", "created_at": "2026-07-27T22:58:53Z"},
+            ],
+        )
+        self.assertEqual(
+            harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT").route, mgw.ROUTE_DEMOTE
+        )
+
+    def test_two_head_moves_straddling_the_verdict_end_to_end(self):
+        # min(moved) would pick the 22:40 commit and wrongly preserve; max(moved)
+        # picks the 23:05 commit and correctly forfeits the verdict.
+        harness = FakeWatchdog.build(
+            suites=0,
+            comments=[_marker_comment()],
+            timeline=[
+                {"event": "committed", "committer": {"date": "2026-07-27T22:40:00Z"}},
+                {"event": "labeled", "created_at": "2026-07-27T22:50:00Z",
+                 "label": {"name": "review:pass"}},
+                {"event": "added_to_merge_queue", "created_at": "2026-07-27T22:58:53Z"},
+                {"event": "committed", "committer": {"date": "2026-07-27T23:05:00Z"}},
+            ],
+        )
+        route = harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT")
+        self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
+        self.assertIn("the head moved", route.detail)
+
+    def test_two_verdict_grants_straddling_a_push_end_to_end(self):
+        # min(granted) would pick the 22:20 grant, see the 22:45 push after it and
+        # wrongly demote; max(granted) picks the 22:50 re-grant and preserves.
+        harness = FakeWatchdog.build(
+            suites=0,
+            comments=[_marker_comment()],
+            timeline=[
+                {"event": "labeled", "created_at": "2026-07-27T22:20:00Z",
+                 "label": {"name": "review:pass"}},
+                {"event": "committed", "committer": {"date": "2026-07-27T22:45:00Z"}},
+                {"event": "labeled", "created_at": "2026-07-27T22:50:00Z",
+                 "label": {"name": "review:pass"}},
+                {"event": "added_to_merge_queue", "created_at": "2026-07-27T22:58:53Z"},
+            ],
+        )
+        self.assertEqual(
+            harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT").route,
+            mgw.ROUTE_PRESERVE,
+        )
+
+    def test_an_unreadable_timeline_demotes_end_to_end(self):
+        harness = FakeWatchdog.build(suites=0, comments=[_marker_comment()])
+        harness.gh.fail_on = ("/timeline",)
+        route = harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT")
+        self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
+        self.assertIn("timeline could not be read", route.detail)
 
     def test_classify_never_mutates(self):
         harness = FakeWatchdog.build(suites=0, comments=[_marker_comment()])

@@ -523,7 +523,15 @@ no network); the Python close-script carries a `--self-test`.
   Companion routing split in `merge-queue-feedback.yml`: a `CI_TIMEOUT` whose group ref had
   **zero suites** preserves `review:pass` instead of manufacturing a re-review for a platform
   event drop, while a timeout that followed checks that genuinely ran keeps demoting — the two
-  are separated by the **suite count**, never by the reason alone.
+  are separated by the **suite count**, never by the reason alone. The same split makes an
+  INFRASTRUCTURE dequeue verdict-neutral: measured on #4709, `review:pass` was swapped for
+  `review:changes` **17 seconds** after a `MANUAL` dequeue, so a watchdog without this would
+  burn the verdict of every PR it rescued. `MANUAL` conflates "a reviewer withdrew this" with
+  "infrastructure moved it", so the discriminator is a fresh watchdog marker for that exact
+  group head — evidence, never the event name — and **a genuine human dequeue still strips the
+  verdict**. On every preserve route the verdict may only survive if the head has **not moved
+  since it was granted** (a commit, a force-push, or a revoked label after the grant forfeits
+  it): never restore a verdict onto a tree it was not given for.
   **Runbook — resolving and clearing a dead ref by hand.** The group head is the queue entry's
   `headCommit{oid}` (`MergeQueueEntry` has **no** `headOid` field), or read the live refs with
   `git ls-remote origin 'refs/heads/gh-readonly-queue/main/*'`; the trailing sha in a ref name
