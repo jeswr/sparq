@@ -46,7 +46,7 @@ no labels, **zero comments** — the body in full:
 
 > Consider the program
 >
-> ```
+> ```text
 > acir(inline) fn main f0 {
 >         b0(v0: u32):
 >           v2 = add v0, u32 1
@@ -329,8 +329,8 @@ and the in-tree directory now holds only `differential/`, `scripts/` and `tests/
 Compile time on `sha512_100_bytes` was also compared (3 runs each, release `nargo`, baseline vs
 patched). The raw seconds are **deliberately not recorded here**: a wall-clock reading taken on this
 box is non-canonical, and the two run sets overlap well inside their own spread, so the only claim
-the measurement supports is a qualitative one — **no compile-time regression was observed**, i.e. the
-#12927 O(n²) lesson is not being repeated. A quantitative compile-time claim would need a quiet box
+the measurement supports is a qualitative one — **no compile-time regression was observed**, i.e.
+the #12927 O(n²) lesson is not being repeated. A quantitative compile-time claim would need a quiet box
 and the canonical harness; neither was available, and nothing here should be read as one.
 
 ## 7. Reading the result honestly
