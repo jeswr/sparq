@@ -102,13 +102,12 @@ pub fn keyword_hints(sparql: &str) -> Vec<KeywordHint> {
                 // a standalone token, and a word followed by `:` is a prefix label or a `K:`
                 // keyword — neither is a SPARQL keyword position. Both boundaries also have to
                 // account for the name bytes this ASCII scanner cannot itself walk (non-ASCII
-                // `PN_CHARS`, a `PN_LOCAL_ESC`), else a candidate starts or ends inside a valid
-                // name. The two sides differ only in `?`/`$`, which can *start* a name but never
-                // continue one — so a word merely ending at one (`FLTR?x`) is still a bare word.
+                // `PN_CHARS`, a `PN_LOCAL_ESC`, the `-`/`.`/`%` of a prefixed name), else a
+                // candidate starts or ends inside a valid name. The two sides differ only in
+                // `?`/`$`, which can *start* a name but never continue one — so a word merely
+                // ending at one (`FLTR?x`) is still a bare word.
                 let standalone = !preceded_by_name(bytes, i);
-                let glued_right = bytes
-                    .get(end)
-                    .is_some_and(|&b| b == b':' || !b.is_ascii() || b == b'\\');
+                let glued_right = followed_by_name(bytes, end);
                 if standalone && !glued_right {
                     if let Some(hint) = hint_for(&sparql[i..end]) {
                         if !hints.iter().any(|h| h.token == hint.token) {
@@ -139,24 +138,129 @@ pub fn keyword_hints(sparql: &str) -> Vec<KeywordHint> {
 ///
 /// Both cases report a *typo* in syntax the vendored parser accepts, which contradicts this
 /// module's contract that a valid query yields no hints — pinned against the real parser by
-/// `unicode_names_and_pn_local_escapes_are_never_flagged` below.
+/// `unicode_names_and_pn_local_escapes_are_never_flagged` below. A third class of name byte,
+/// [`is_name_punct`], is *context-dependent* rather than unconditional and so is not part of
+/// this predicate.
 fn is_name_byte(b: u8) -> bool {
     !b.is_ascii() || b == b'\\' || crate::transpile::is_ident_char(b)
 }
 
+/// `true` if `b` is name punctuation: a byte that continues a **prefixed** name but cannot
+/// stand at either end of one, and that would otherwise read as a delimiter here.
+///
+/// `PN_PREFIX` and `PN_LOCAL` both admit `-` and an *internal* `.` (`PN_CHARS` contains `-`),
+/// and `PLX` admits a `%`-escape, so `ex:a-selct`, `ex:a.selct`, `ex:a%2Db-selct` and the
+/// prefix labels `selct-ns:` / `selct.ns:` are all names the vendored parser accepts — yet an
+/// ASCII word scanner sees the punctuation as a break and exposes the keyword-ish fragment
+/// beside it. (A `%`-escape's own hex digits are alphanumeric, so they already read as name
+/// bytes; `%` is listed for the run walks below, where a `%2D`-style escape may sit *between*
+/// the word and the rest of the name.)
+///
+/// Unlike [`is_name_byte`] this is **not** sufficient on its own: `.` and `-` are ordinary
+/// SPARQL delimiters too (`?o.FLTR(…)`, `?x-selct`). Only a run that reaches a `:` is a
+/// prefixed name — variables and blank-node labels cannot contain this punctuation — so both
+/// boundary checks below demand that `:` before treating the run as a name.
+fn is_name_punct(b: u8) -> bool {
+    matches!(b, b'-' | b'.' | b'%')
+}
+
+/// How far either boundary check walks along a name run before giving up.
+///
+/// A prefixed name in a real query is a handful of bytes, so this is never reached in
+/// practice. It exists because both walks restart at every word: uncapped, a query that is one
+/// long run of punctuation (`a-a-a-…`) would re-walk that run per word and make the diagnostic
+/// quadratic in the query length — on input that, by construction, has already failed to parse
+/// and may be hostile. Hitting the cap reports *name*, and so no hint: the conservative answer
+/// this module prefers whenever it cannot be sure.
+const MAX_NAME_RUN: usize = 256;
+
 /// `true` if the word starting at `i` is glued to the end of a name, so it is not a bare word.
 ///
-/// One byte of lookback is not enough: a `PN_LOCAL_ESC` is *two* bytes (`\` plus one escaped
-/// ASCII character such as `~`), and it is the escaped character — not the backslash — that
-/// sits immediately before the word. In the valid `ex:a\~selct` a one-byte look-back sees `~`,
-/// reads it as a delimiter, and reports `selct`. Outside strings, IRIs and comments (all
-/// skipped before this point) a `\` in SPARQL *only* opens that escape, so looking back past
-/// one byte for it cannot mask a real bare word.
+/// One byte of lookback is not enough, for two reasons:
+///
+/// - a `PN_LOCAL_ESC` is *two* bytes (`\` plus one escaped ASCII character such as `~`), and it
+///   is the escaped character — not the backslash — that sits immediately before the word. In
+///   the valid `ex:a\~selct` a one-byte look-back sees `~`, reads it as a delimiter, and
+///   reports `selct`. Outside strings, IRIs and comments (all skipped before this point) a `\`
+///   in SPARQL *only* opens that escape, so looking back past one byte for it cannot mask a
+///   real bare word; and
+/// - [`is_name_punct`] bytes are name characters only *inside* a prefixed name, so deciding
+///   whether one is a delimiter means walking the run back to see if it reaches a `:`. In the
+///   valid `ex:a-selct` the `-` is part of the local name and `selct` is not a token at all,
+///   while in `?o.FLTR(…)` the `.` really is a delimiter and `FLTR` really is a bare word.
 fn preceded_by_name(bytes: &[u8], i: usize) -> bool {
     if i == 0 {
         return false;
     }
-    is_name_byte(bytes[i - 1]) || (i >= 2 && bytes[i - 2] == b'\\')
+    let prev = bytes[i - 1];
+    if is_name_byte(prev) || (i >= 2 && bytes[i - 2] == b'\\') {
+        return true;
+    }
+    if !is_name_punct(prev) {
+        return false;
+    }
+    // Walk the name run back from the punctuation, looking for the `:` that would make it a
+    // prefixed name. Running out of run first (`}.FLTR`, `?x-selct`) means the punctuation was
+    // an ordinary delimiter after all, so the word IS a bare word.
+    let mut j = i - 1;
+    let mut budget = MAX_NAME_RUN;
+    while j > 0 {
+        if budget == 0 {
+            return true;
+        }
+        budget -= 1;
+        let b = bytes[j - 1];
+        if b == b':' {
+            return true;
+        } else if is_name_byte(b) || is_name_punct(b) {
+            j -= 1;
+        } else if j >= 2 && bytes[j - 2] == b'\\' {
+            // `b` is the escaped character of a `PN_LOCAL_ESC`; the pair is one name character.
+            j -= 2;
+        } else {
+            break;
+        }
+    }
+    false
+}
+
+/// `true` if the word ending at `end` runs into the start of a name, so it is not a bare word.
+///
+/// The mirror of [`preceded_by_name`], and deliberately narrower on one point: `?` and `$` can
+/// *start* a name but never continue one, so a word merely ending at one (`FLTR?x`) is still a
+/// bare word. As on the left side, [`is_name_punct`] counts only when the run reaches a `:` —
+/// that is what separates the valid prefix label in `selct-ns:p` (no hint) from the genuine
+/// typo in `FLTR.` at the end of a triple (hint).
+fn followed_by_name(bytes: &[u8], end: usize) -> bool {
+    let Some(&next) = bytes.get(end) else {
+        return false;
+    };
+    if next == b':' || !next.is_ascii() || next == b'\\' {
+        return true;
+    }
+    if !is_name_punct(next) {
+        return false;
+    }
+    let mut j = end;
+    let mut budget = MAX_NAME_RUN;
+    while j < bytes.len() {
+        if budget == 0 {
+            return true;
+        }
+        budget -= 1;
+        let b = bytes[j];
+        if b == b':' {
+            return true;
+        } else if b == b'\\' {
+            // Step over the `PN_LOCAL_ESC` pair: the escaped character is arbitrary ASCII.
+            j += 2;
+        } else if b.is_ascii_alphanumeric() || b == b'_' || !b.is_ascii() || is_name_punct(b) {
+            j += 1;
+        } else {
+            break;
+        }
+    }
+    false
 }
 
 /// The byte index just past the word starting at `start` (`[A-Za-z0-9_]+`).
@@ -343,6 +447,53 @@ mod tests {
         assert_eq!(hints.len(), 1, "got {hints:?}");
         assert_eq!(hints[0].token, "SELET");
         assert_eq!(hints[0].suggestions[0], "SELECT");
+    }
+
+    #[test]
+    fn prefixed_names_with_punctuation_are_never_flagged() {
+        // `-`, an internal `.` and a `%`-escape are all legal `PN_PREFIX`/`PN_LOCAL` characters
+        // (`PN_CHARS` contains `-`; `PLX` covers `%2D`), but an ASCII word scanner reads them as
+        // breaks — which exposed the keyword-ish fragment beside the punctuation and reported a
+        // typo in a query the vendored parser accepts. Checked against the real parser first, on
+        // BOTH boundaries: the punctuation before the fragment (a local part) and after it (a
+        // prefix label).
+        for q in [
+            // ...after the `:`, in the local part.
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:a-selct ?o }",
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:a.selct ?o }",
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:a%2Db-selct ?o }",
+            // ...a `PN_LOCAL_ESC` and punctuation in the same local part.
+            r"PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:a\~b-selct ?o }",
+            // ...and before the `:`, in the prefix label itself.
+            "PREFIX selct-ns: <http://ex/> SELECT ?s WHERE { ?s selct-ns:p ?o }",
+            "PREFIX selct.ns: <http://ex/> SELECT ?s WHERE { ?s selct.ns:p ?o }",
+        ] {
+            assert!(
+                spargebra::SparqlParser::new().parse_query(q).is_ok(),
+                "test query is not actually valid SPARQL: {q}"
+            );
+            assert!(keyword_hints(q).is_empty(), "false positive in: {q}");
+        }
+
+        // Positive control: the punctuation is only a name character *inside* a prefixed name,
+        // so a bare typo sitting against a `.` delimiter is still reported.
+        let hints = keyword_hints("PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:a-b ?o } FLTR.");
+        assert_eq!(hints.len(), 1, "got {hints:?}");
+        assert_eq!(hints[0].token, "FLTR");
+        assert_eq!(hints[0].suggestions[0], "FILTER");
+    }
+
+    #[test]
+    fn a_long_punctuation_run_terminates_cheaply() {
+        // The boundary walks restart at every word, so an unbounded one would be quadratic on a
+        // query that is a single vast name run — reachable input, since this only ever runs on
+        // a query that failed to parse. MAX_NAME_RUN caps it; a run past the cap reports "name"
+        // (no hint), which is this module's conservative direction.
+        let long = "a-".repeat(20_000);
+        let q = format!("SELECT ?s WHERE {{ {}selct }}", long);
+        assert!(keyword_hints(&q).is_empty());
+        // The cap is far past any real name, so a short run is still judged on its merits.
+        assert_eq!(keyword_hints("SELECT ?s WHERE { } a-selct").len(), 1);
     }
 
     #[test]
