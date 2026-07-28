@@ -112,8 +112,11 @@ topk-lazy-strkey = ["sparq-engine/topk-lazy-strkey"]
 # is absent. ZERO new dependencies: the streaming RFC-4180 CSV reader is first-party, R2RML
 # mappings parse through sparq-core's Turtle parser, and generated triples stream as N-Triples
 # chunks into the existing parallel ingest (`Graph::load_reader_parallel`) — so `.csv.gz` /
-# `.csv.zst` / `.csv.bz2` inputs reuse `open_reader`'s transparent decompression. Enable with
-# `cargo build -p sparq-cli --features tabular`.
+# `.csv.zst` / `.csv.bz2` inputs reuse `open_reader`'s transparent decompression. [OPUS-5]
+# (sq-u1z86) extends the subset with cross-CSV joins (`rr:parentTriplesMap` +
+# `rr:joinCondition`, a keyed hash join), named-graph output (`rr:graphMap`/`rr:graph` →
+# N-Quads + a dataset load) and `--row-provenance`, still with zero new dependencies.
+# Enable with `cargo build -p sparq-cli --features tabular`.
 tabular = []
 # [GPT-5.6] (sq-lsp7k.28) `diff <file-a> <file-b> [--exact]` compares the two RDF
 # triple sets and emits a deterministic N-Triples patch. OFF by default: without this

@@ -64,8 +64,12 @@ cargo run --release -p sparq-cli -- query data.ttl turtle 'SELECT * WHERE { ?s ?
   template `{col}`/`{_row}` via `--template`, per-column predicates, `xsd` datatype inference,
   per-row `rdf:type`) or an **R2RML mapping** (`--mapping <r2rml.ttl>`, CSV logical tables bound
   by `rr:tableName` = file stem) into a loaded graph (`--query` runs SPARQL in the same shot) or
-  an N-Triples stream (`--out out.nt[.gz|.zst]`). Streaming end-to-end (no whole-file buffering);
-  unsupported R2RML (`rr:sqlQuery`, `rr:parentTriplesMap`, `rr:graphMap`, …) fails loudly.
+  an N-Triples stream (`--out out.nt[.gz|.zst]`). Streaming end-to-end (no whole-file buffering).
+  [OPUS-5] (sq-u1z86) adds cross-CSV **joins** (`rr:parentTriplesMap` + `rr:joinCondition`, run as
+  a keyed hash join over a one-pass parent index), **named-graph** output (`rr:graphMap`/`rr:graph`
+  → N-Quads + a dataset load, so `GRAPH ?g { … }` works) and `--row-provenance`
+  (`prov:wasDerivedFrom` the source row). SQL-connection R2RML stays out of scope (`rr:sqlQuery`,
+  `rr:sqlVersion`, `rr:inverseExpression` fail loudly — sparq materializes, it does not virtualize).
 - **`terse <query | ->`** *(opt-in `terse` feature; [OPUS-4.8] sq-vczh2)* — transpile a terse query
   (the `K:<name>` keyword layer over canonical SPARQL) into the **canonical SPARQL** it expands to,
   printing the verifiable JSON `{ canonical_sparql, keywords, resolutions, warnings, legendVersion }`
