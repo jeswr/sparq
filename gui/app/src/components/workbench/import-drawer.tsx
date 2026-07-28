@@ -6,7 +6,7 @@
 // (sq-eydh9) [SONNET-4.6] Browser-upload addition: the File tab now works in BOTH personas —
 //   * WEB  — multi-file picker via `file-ingest.ts` + drag-and-drop via `dropzone.tsx`;
 //            reads the file as binary, decompresses via `@sparq/client` when compressed
-//            (.gz/.bz2/.zst/.zip), then parses in-tab. Native-only HDT still needs the
+//            (.gz/.zst/.zip), then parses in-tab. Bzip2 and native-only HDT still need the
 //            desktop app (stated honestly; no silent failure).
 //   * TAURI — multi-file native dialog (multiple:true, sq-eydh9 change to tauri-ipc.ts);
 //            each path loaded sequentially via the native loader.
@@ -14,8 +14,8 @@
 // (sq-1y04h) [SONNET-4.6] Decompression wiring: the web pane now routes compressed uploads
 //   through `maybeDecompressFile` (file-decompress.ts), which calls `decompressDatasetBytes`
 //   from `@sparq/client` (sq-epbw4). Codec selection is magic-bytes first, extension second.
-//   gzip/zip are native browser APIs; zstd/bzip2 load codec chunks on demand. The import
-//   drawer no longer tells web users "compressed files need the desktop app" for these four
+//   gzip/zip are native browser APIs; zstd loads its codec chunk on demand. The import
+//   drawer no longer tells web users "compressed files need the desktop app" for these three
 //   formats. Native-only HDT still requires the desktop (no JS/WASM bead for it).
 //
 // [GPT-5.6] sq-n18o5 — the URL tab now fetches response bytes with `arrayBuffer()` and sends
@@ -23,7 +23,7 @@
 //   served RDF Content-Type when available, otherwise the decompressed archive's inner name.
 //
 // Three tabs:
-//   * FILE  — web: browser File upload (incl. compressed .gz/.zip/.zst/.bz2); desktop: native
+//   * FILE  — web: browser File upload (incl. compressed .gz/.zip/.zst); desktop: native
 //             loader (every format incl. HDT), off the main thread.
 //   * URL   — fetch a remote document, then load it.
 //   * PASTE — load a typed/pasted document.
@@ -96,13 +96,13 @@ type FileItemStatus =
   | { kind: "error"; message: string };
 
 // ── RDF extensions the browser file picker + drop filter allow ─────────────────────────────────
-// [SONNET-4.6] sq-1y04h — compressed archives (.gz/.gzip/.zip/.zst/.zstd/.bz2/.bzip2) are now
+// [SONNET-4.6] sq-ljc12 — compressed archives (.gz/.gzip/.zip/.zst/.zstd) are now
 // accepted on the web persona too; `maybeDecompressFile` handles the decode before RDF parse.
-// Native-only HDT is NOT included — there is no JS/WASM decoder bead for it.
+// Bzip2 and native-only HDT remain desktop-only.
 
 const WEB_RDF_ACCEPT = [
   ".ttl", ".nt", ".nq", ".trig", ".jsonld", ".json",
-  ".gz", ".gzip", ".tgz", ".zip", ".zst", ".zstd", ".bz2", ".bzip2",
+  ".gz", ".gzip", ".zip", ".zst", ".zstd",
 ];
 
 // ── The drawer body ────────────────────────────────────────────────────────────────────────────
@@ -267,7 +267,7 @@ function ImportDrawer({
             mode: fileMode,
             preserveGraphs,
             label: file.name,
-            format: guessFormat(file.name),
+            format: guessFormat(file.effectiveName ?? file.name),
             text: file.text,
           }),
         (_key, _status, statuses) => setFileStatuses({ ...statuses }),
@@ -447,8 +447,9 @@ function ImportDrawer({
             </DialogPrimitive.Close>
           </div>
           <DialogPrimitive.Description className="sr-only">
-            Load RDF from a disk file (compressed and HDT supported on the desktop app), from a
-            URL, or by pasting a document, into the active workspace&rsquo;s live store.
+            Load RDF from a disk file, including gzip, zip, and zstd archives in the browser,
+            from a URL, or by pasting a document, into the active workspace&rsquo;s live store.
+            Bzip2 and HDT files require the desktop app.
           </DialogPrimitive.Description>
 
           {/* Tab strip. */}
@@ -588,7 +589,7 @@ function DrawerTab({
 
 /**
  * [SONNET-4.6] sq-1y04h — read a list of `File` objects into an `IngestResult`, routing each
- * through `maybeDecompressFile` so compressed archives (.gz / .zip / .zst / .bz2) are decoded
+ * through `maybeDecompressFile` so compressed archives (.gz / .zip / .zst) are decoded
  * before the text is handed to the RDF parser. Replaces the `readDroppedFiles` / `File.text()`
  * call paths in the web-upload pane; the `file-ingest.ts` text-only paths are unchanged and
  * continue to serve SHACL shapes / N3 rules (no compression needed there).
@@ -599,7 +600,12 @@ async function readFilesWithDecompress(files: File[]): Promise<IngestResult> {
   for (const file of files) {
     try {
       const decoded = await maybeDecompressFile(file);
-      accepted.push({ name: file.name, text: decoded.text, bytes: file.size });
+      accepted.push({
+        name: file.name,
+        text: decoded.text,
+        bytes: file.size,
+        effectiveName: decoded.effectiveName,
+      });
     } catch (err) {
       rejected.push({
         name: file.name,
@@ -716,13 +722,13 @@ function WebFilePane({
   return (
     <div className="space-y-3">
       {/* [SONNET-4.6] sq-1y04h — updated copy: compressed archives are now handled in-tab.
-          Only native-only HDT still requires the desktop app (no JS decoder bead). */}
+          Bzip2 and native-only HDT still require the desktop app. */}
       <p className="text-xs text-muted-foreground">
         Upload RDF files from your computer — Turtle, N-Triples, N-Quads, TriG, JSON-LD, or a
-        compressed archive (.gz / .zip / .zst / .bz2). Each file is read and decompressed
+        compressed archive (.gz / .zip / .zst). Each file is read and decompressed
         in-tab by the WASM engine.{" "}
         <span className="font-medium text-foreground">
-          Native-only HDT archives (.hdt) still require the desktop app.
+          Bzip2 (.bz2) and native-only HDT archives (.hdt) still require the desktop app.
         </span>
       </p>
 
@@ -758,7 +764,7 @@ function WebFilePane({
         <FileUp className="mx-auto size-6 text-muted-foreground" aria-hidden />
         <p className="mt-2 text-sm">Drag &amp; drop RDF files here</p>
         <p className="mt-1 text-xs text-muted-foreground">
-          .ttl · .nt · .nq · .trig · .jsonld · .gz · .zip · .zst · .bz2
+          .ttl · .nt · .nq · .trig · .jsonld · .gz · .zip · .zst
         </p>
         <Button
           type="button"

@@ -23,6 +23,8 @@ export interface IngestedFile {
   name: string;
   text: string;
   bytes: number;
+  /** Inner filename used for format detection after archive decompression. */
+  effectiveName?: string;
 }
 
 /** One file that could NOT be ingested, with a human-readable reason the UI must surface. */

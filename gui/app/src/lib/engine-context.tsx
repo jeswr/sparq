@@ -355,7 +355,8 @@ export interface EngineContextValue {
    * compressed streams, native-only HDT) when running inside the Tauri desktop shell; `paste` /
    * `url` documents go through the native `load_text` there too, so named graphs are preserved by
    * the SAME engine path. On the hosted web target (no native loader) `paste` / `url` parse in
-   * the in-tab WASM engine (no disk / compressed-file / HDT path — the drawer says so honestly).
+   * the in-tab WASM engine; the drawer decodes browser-uploaded gzip, zip, and zstd archives
+   * before calling this text path. Bzip2 and HDT remain native-loader-only.
    * `mode: "add"` MERGES into the current store (named-graph-preserving) instead of replacing it.
    * Resolves with the import outcome; rejects with the loader's error message on a parse failure.
    */

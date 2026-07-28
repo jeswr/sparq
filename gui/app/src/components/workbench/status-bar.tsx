@@ -129,7 +129,7 @@ export function StatusBar() {
         title={
           nativeLoaderAvailable
             ? "Imports decode through the native engine (compressed + native-only HDT)"
-            : "Imports parse in the in-tab WASM engine (no compressed-file / HDT path)"
+            : "Imports parse in-tab; gzip, zip, and zstd are supported, while bzip2 and HDT require the desktop app"
         }
       >
         loader: <span className="text-[var(--success)]">{nativeLoaderAvailable ? "native" : "in-tab"}</span>

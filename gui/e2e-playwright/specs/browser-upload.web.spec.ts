@@ -57,6 +57,30 @@ const FIXTURE_BAD: string = `
 ex:Subject <UNCLOSED_IRI_NO_CLOSE ex:Object .
 `.trim();
 
+const ZSTD_NT =
+  '<http://example.org/zstd#Subject> <http://example.org/zstd#name> "Zstd Browser Upload" .\n';
+
+/**
+ * A standards-compliant single-segment zstd frame containing one raw final block.
+ * Building the fixture here keeps the e2e independent of a zstd encoder while the app still
+ * has to invoke its lazy `fzstd` decoder to recover the N-Triples payload.
+ */
+function rawZstdFrame(text: string): Buffer {
+  const payload = Buffer.from(text, "utf8");
+  if (payload.length > 255) throw new Error("raw zstd fixture must fit the one-byte content size");
+  const blockHeader = (payload.length << 3) | 1;
+  return Buffer.concat([
+    Buffer.from([
+      0x28, 0xb5, 0x2f, 0xfd,
+      0x20, payload.length,
+      blockHeader & 0xff,
+      (blockHeader >> 8) & 0xff,
+      (blockHeader >> 16) & 0xff,
+    ]),
+    payload,
+  ]);
+}
+
 // ── Helper: read the live store size from the top bar ────────────────────────────────────────
 //
 // The TopBar renders "{storeSize.toLocaleString()} quads" in a <span>. Reading this is more
@@ -158,6 +182,34 @@ test.describe("browser-upload (sq-eydh9)", () => {
     await page.getByRole("button", { name: "Run query" }).click();
     await expect(page.locator('[data-result-kind="select"]')).toBeVisible();
     await expect(page.locator('[data-result-kind="select"]').getByText("Carol Upload B")).toBeVisible();
+  });
+
+  test("[SONNET-4.6] sq-ljc12: .zst upload is decoded before RDF format detection", async ({
+    page,
+  }) => {
+    const drawer = await openFileTab(page);
+    const fileInput = drawer.locator("[data-web-file-input]");
+    await fileInput.setInputFiles({
+      name: "browser-upload.nt.zst",
+      mimeType: "application/zstd",
+      buffer: rawZstdFrame(ZSTD_NT),
+    });
+
+    await expect(
+      drawer.locator('[data-file-row="browser-upload.nt.zst"]'),
+    ).toBeVisible();
+    await drawer.getByRole("button", { name: /^Import/i }).click();
+    await expect(drawer.locator('[data-import-feedback="ok"]')).toBeVisible();
+
+    await page.getByRole("button", { name: "Close import drawer" }).click();
+    const editor = page.locator("#repl-query");
+    await editor.fill(
+      "SELECT ?name WHERE { <http://example.org/zstd#Subject> <http://example.org/zstd#name> ?name }",
+    );
+    await page.getByRole("button", { name: "Run query" }).click();
+    await expect(
+      page.locator('[data-result-kind="select"]').getByText("Zstd Browser Upload"),
+    ).toBeVisible();
   });
 
   // ── (b) Drag-and-drop via the global drop input ────────────────────────────────────────────

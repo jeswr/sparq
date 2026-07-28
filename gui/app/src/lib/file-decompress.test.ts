@@ -99,6 +99,18 @@ test("[SONNET-4.6] sq-1y04h: gzip by magic bytes (file named .nt but gzip-compre
   assert.strictEqual(result.text, SAMPLE_NT, "decompressed text must match original");
 });
 
+test("[SONNET-4.6] sq-ljc12: bzip2 remains desktop-only in browser ingest", async () => {
+  const file = new FakeFile(
+    "dataset.nt.bz2",
+    new Uint8Array([0x42, 0x5a, 0x68, 0x39]),
+  );
+
+  await assert.rejects(
+    maybeDecompressFile(file as unknown as File),
+    /Bzip2 archives are supported only by the desktop app/,
+  );
+});
+
 test("[GPT-5.6] sq-n18o5: compressed URL is fetched as binary and decompressed before format detection", async () => {
   const compressed = gzipSync(Buffer.from(SAMPLE_NT, "utf8"));
   let arrayBufferCalls = 0;

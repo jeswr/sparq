@@ -1,7 +1,7 @@
 // [SONNET-4.6] sq-1y04h — browser web-upload decompression shim for the GUI import drawer.
 //
 // Reads a browser `File` as binary, detects whether it is a compressed dataset archive
-// (.gz / .gzip / .tgz, .zip, .zst / .zstd, .bz2 / .bzip2) by magic bytes first and file
+// (.gz / .gzip, .zip, .zst / .zstd) by magic bytes first and file
 // extension second, then routes through `@sparq/client`'s `decompressDatasetBytes` before
 // UTF-8 decoding. Uncompressed files fall through unchanged.
 //
@@ -10,7 +10,7 @@
 // and decoding only AFTER decompression is the only correct path for compressed inputs.
 //
 // Used by the import-drawer.tsx `WebFilePane` and URL tab so the web persona can import
-// `.gz`, `.zip`, `.zst`, and `.bz2` datasets without the desktop app (native loader).
+// `.gz`, `.zip`, and `.zst` datasets without the desktop app (native loader).
 // The native Tauri path (gui/src-tauri open_reader) is unchanged — leave it.
 
 import { decompressDatasetBytes, type DatasetCompressionCodec } from "@sparq/client";
@@ -82,6 +82,21 @@ export async function maybeDecompressBytes(
   bytes: Uint8Array,
   sourceName: string,
 ): Promise<MaybeDecompressedFile> {
+  const lowerName = sourceName.split(/[?#]/)[0].toLowerCase();
+  const isBzip2 =
+    (bytes.length >= 3 &&
+      bytes[0] === 0x42 &&
+      bytes[1] === 0x5a &&
+      bytes[2] === 0x68) ||
+    [".bz2", ".bzip2", ".tbz", ".tbz2"].some((suffix) =>
+      lowerName.endsWith(suffix),
+    );
+  if (isBzip2) {
+    throw new Error(
+      "Bzip2 archives are supported only by the desktop app.",
+    );
+  }
+
   // Try decompress — decompressDatasetBytes throws when it sees no recognised magic/extension.
   // Catch the "Unrecognised compressed payload" error to fall through to the uncompressed path.
   let result: Awaited<ReturnType<typeof decompressDatasetBytes>> | null = null;
@@ -116,7 +131,7 @@ export async function maybeDecompressBytes(
 
 /**
  * [SONNET-4.6] sq-1y04h — read a browser `File` and decompress it if it is a recognised
- * compressed dataset archive (.gz, .zip, .zst, .bz2). Uncompressed files are returned as-is
+ * compressed dataset archive (.gz, .zip, .zst). Uncompressed files are returned as-is
  * (their bytes decoded to UTF-8 text). Codec selection is by magic bytes first (the
  * `decompressDatasetBytes` payload probe), filename extension second — the same strategy
  * the `@sparq/client` util uses. The `effectiveName` is the suffix-stripped inner name so
