@@ -524,6 +524,75 @@ plan (§5, Beads D/E + H), to be added only after the scripts are proven in manu
 shell script is `bash -n`/`shellcheck` clean and carries a `--dry-run-self-test` (hermetic;
 no network); the Python close-script carries a `--self-test`.
 
+### Hermetic suites must be UNABLE to reach the network — poison the runners <!-- [OPUS-5] #4652 -->
+
+A "hermetic" test suite that merely *intends* to inject fakes is not hermetic. `def __init__(self, ..., gh=run_gh)`
+binds the runner **at definition time**, so patching `module.run_gh` from a test cannot reach it — and a suite
+whose reads were faked while its writes were real posted **567 real comments to a production PR** across a
+mutation sweep (#4652). Two rules follow:
+
+- **Late-bind injected collaborators** (`gh=None` → resolve inside `__init__`), never a module-level default arg.
+- **Poison the real runners at test-module import** so any path that forgets to inject raises instead of
+  reaching the network, and add a test asserting the poison is in place. Restore **every** patched name in
+  `finally` — a block that restored one of two leaked a stale fake into every later test.
+
+**Never exercise a write path against a live production PR/issue.** Use a scratch object you own, or a fixture;
+if a test needs a real remote value, *read* it. And when a probe reports hostile input, **verify the author
+before reporting an exploit** — a false attack report costs twice: unwarranted alarm now, and a discounted
+warning when the real thing arrives.
+
+**Mutation harnesses need a preflight.** A greedy edit silently deleted 15 mutants and the harness reported a
+clean total — a dropped mutant is indistinguishable from a killed one, so the number improves as coverage
+disappears. Fail the sweep outright on a duplicate id or an anchor that no longer exists in the tree, count a
+`SyntaxError` as a broken mutant rather than a kill, and prefer a test-file traceback frame over a crash frame
+(the first failure is arbitrary).
+
+- **`.github/workflows/merge-group-watchdog.yml` + `scripts/merge-group-watchdog.py`**
+  (#4652) — the **durable** zero-dispatch merge-group recovery. GitHub occasionally builds a
+  merge-group ref and then never dispatches the `merge_group` event for it: **zero
+  check-suites, zero check-runs, zero workflow runs**. Because the queue merges strictly in
+  order and each entry needs its **own** group's required check (a green *superset* group does
+  **not** substitute), that entry holds position 1 until the ruleset's 60-minute
+  `check_response_timeout_minutes` reaps it, and the rebuild discards every group stacked on
+  top. Observed three days running (#4331, #4534, #4709), ~60 min each. The sweep runs on a
+  5-minute cron (never on a PR head, so it can never gate), and after a **120 s** grace —
+  30× the measured maximum create→first-suite latency (N=209: p50 2 s, max 4 s; the failure is
+  categorical, not slow) — it dequeues and re-enqueues the entry. Bounded (1 per group head
+  SHA, 2 per PR per 6 h, 2 per run) and idempotent. On exhaustion it hands back to the platform
+  timeout, which **does demote to `review:changes`** — by then the only trusted observation names
+  a superseded group head, so preserving the verdict would be unsound, and three consecutive
+  zero-dispatch groups on one PR warrant a human look. It never escalates to a `needs:user` hold
+  and never permanently stalls. **Everything it cannot positively establish is a
+  refusal, never a recovery.** The marker it writes is **evidence**, so its AUTHOR is part of
+  the predicate: markers are honoured only from `github-actions[bot]` / `sparq-orchestrator[bot]`
+  (`TRUSTED_MARKER_AUTHORS`, enforced at the read), because sparq is public and a marker forged
+  by any commenter would otherwise carry `review:pass` through a dequeue and reach
+  `gh pr merge --auto`. The recovery also reads its own marker back before dequeuing and refuses
+  to act if it is not there — a runner whose identity is missing from that list cannot see its
+  own markers, which would silently disarm both caps. It emits one row per entry **every tick**, carrying the ref, the
+  suite count, the decision, and `stacked=`/`stacked_green=` — the count of groups built on top
+  of the dead ref, which is the real cost term and the watchdog's own effectiveness measure.
+  Companion routing split in `merge-queue-feedback.yml`: a `CI_TIMEOUT` whose group ref had
+  **zero suites** preserves `review:pass` instead of manufacturing a re-review for a platform
+  event drop, while a timeout that followed checks that genuinely ran keeps demoting — the two
+  are separated by the **suite count**, never by the reason alone. The same split makes an
+  INFRASTRUCTURE dequeue verdict-neutral: measured on #4709, `review:pass` was swapped for
+  `review:changes` **17 seconds** after a `MANUAL` dequeue, so a watchdog without this would
+  burn the verdict of every PR it rescued. `MANUAL` conflates "a reviewer withdrew this" with
+  "infrastructure moved it", so the discriminator is a fresh watchdog marker for that exact
+  group head — evidence, never the event name — and **a genuine human dequeue still strips the
+  verdict**. On every preserve route the verdict may only survive if the head has **not moved
+  since it was granted** (a commit, a force-push, or a revoked label after the grant forfeits
+  it): never restore a verdict onto a tree it was not given for.
+  **Runbook — resolving and clearing a dead ref by hand.** The group head is the queue entry's
+  `headCommit{oid}` (`MergeQueueEntry` has **no** `headOid` field), or read the live refs with
+  `git ls-remote origin 'refs/heads/gh-readonly-queue/main/*'`; the trailing sha in a ref name
+  is the group's **BASE**, and the ref is named for one *member*, so **absence of a ref named
+  for a PR is not evidence its CI never started**. Test `commits/<head>/check-suites` —
+  `total_count == 0` is the signal, and never `check-runs` (a `paths`-filtered workflow that
+  matches nothing still creates a suite). To clear it, `gh pr merge --disable-auto` does **not**
+  dequeue an already-queued PR; use `dequeuePullRequest`, whose input field is named `id` but
+  wants the **pull request** node id (`PR_…`), not the entry id (`MQE_…`).
 - **`.github/workflows/bead-autoclose.yml` + `scripts/ci-close-merged-beads.py`**
   (sq-84a8; issue-native since #2475) — the **durable** auto-close-on-merge. On a merged PR
   (`pull_request_target: [closed]` gated on `merged == true` — base-repo context so the
