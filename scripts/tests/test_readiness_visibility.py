@@ -1389,5 +1389,162 @@ class TestRoutingSelfTestWorkflowWiring(unittest.TestCase):
         self.assertRegex(self.SOURCE, r"(?m)^  merge_group:")
 
 
+class TestNonReservingCrossCuttingPartitions(unittest.TestCase):
+    """`ci` / `docs` ROUTE work but do not OCCUPY it — and everything else still does.
+
+    [OPUS-5 2026-07-28] The dispatch frontier is the binding throughput constraint: three
+    consecutive production PLAN runs read `candidates=379 frontier=1 partition-deferred=378`, i.e.
+    99.7% of attested candidates refused for partition contention. Driving the REAL production
+    predicate (the registry's dispatch.yml `readiness` step, this repo's engine, a live snapshot)
+    reproduced that at `candidates=376 frontier=1`, and made `ci`+`docs` non-reserving takes it to
+    `candidates=376 frontier=3` — the two added rows declaring exactly `area:ci` and `area:docs`.
+
+    The justification is a MEASURED conflict rate, not an argument (see NON_RESERVING_PARTITIONS
+    for the table): 5% of open `area:ci` holder pairs and 3% of `area:docs` pairs share a changed
+    file, against 100% for `area:deps` (all `Cargo.lock`) and 57.1% for crate areas. So the safety
+    half of this contract is as load-bearing as the throughput half, and both are pinned here.
+
+    Every assertion runs END-TO-END through `compute_ready`. An assertion that only inspected
+    `reserves_partition`'s shape would stay green with its call site in `_reserving_packages`
+    deleted, which is the surviving-mutant class this estate keeps measuring.
+    """
+
+    def test_a_ci_only_issue_is_offered_while_an_occupant_holds_ci(self):
+        # THE headline behaviour. Before: the PR held `ci` and #20 was partition-deferred.
+        waiting = iss(20, READY + ["priority:P1", "area:ci"])
+        occupant = pr(70, ["area:ci"])
+        self.assertEqual(
+            numbers(ready.compute_ready([occupant, waiting], conflict_log=quiet)), [20],
+            "a PR holding area:ci must no longer refuse a ci-only candidate")
+
+    def test_a_docs_only_issue_is_offered_while_an_occupant_holds_docs(self):
+        waiting = iss(20, READY + ["priority:P1", "area:docs"])
+        self.assertEqual(
+            numbers(ready.compute_ready([pr(70, ["area:docs"]), waiting], conflict_log=quiet)),
+            [20])
+
+    def test_an_in_progress_issue_holding_ci_also_stops_reserving_it(self):
+        # The issue-occupancy path, not just the PR path — both go through _reserving_packages.
+        board = [iss(72, ["status:in-progress", "area:ci"]),
+                 iss(20, READY + ["priority:P1", "area:ci"])]
+        self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet)), [20])
+
+    def test_the_exempt_partition_is_released_and_nothing_else_is(self):
+        # The measured shape of the change on the live board: reserved keys lost EXACTLY
+        # {ci, docs}. A mutant that widens the set shows up here as an extra released key.
+        rows = [pr(70, ["area:ci", "area:docs", "area:deps", "area:sparq-core"])]
+        held = {key for keys, _ in ready.unit_reservations(rows) for key in keys}
+        self.assertEqual(held, {"deps", "sparq-core"})
+
+    # -- the SAFETY half: what must still reserve ------------------------------------------
+    def test_deps_still_reserves_because_every_deps_pair_collides_on_the_lockfile(self):
+        # MEASURED: 3 of 3 open `area:deps` holder pairs share a changed file, all Cargo.lock.
+        # Serialising deps is CORRECT and this exemption must never grow to include it.
+        waiting = iss(20, READY + ["priority:P1", "area:deps"])
+        self.assertEqual(
+            numbers(ready.compute_ready([pr(70, ["area:deps"]), waiting], conflict_log=quiet)),
+            [], "area:deps must still be occupied by an open PR that declares it")
+
+    def test_crate_areas_still_reserve(self):
+        # 57.1% pairwise file collision (research/crate-region-parallelism.md §4).
+        waiting = iss(20, READY + ["priority:P1", "area:sparq-core"])
+        self.assertEqual(
+            numbers(ready.compute_ready([pr(70, ["area:sparq-core"]), waiting],
+                                        conflict_log=quiet)), [])
+
+    def test_sub_crate_containment_still_reserves_through_the_exemption(self):
+        # The exemption is applied on the PARTITION PATH, so it must not have flattened the
+        # containment algebra it shares that path with.
+        waiting = iss(20, READY + ["priority:P1", "area:sparq-core-store"])
+        self.assertEqual(
+            numbers(ready.compute_ready([pr(70, ["area:sparq-core"]), waiting],
+                                        conflict_log=quiet)), [])
+
+    def test_the_global_partition_can_never_be_exempted(self):
+        # `partition_path` maps GLOBAL and every degenerate key to `()`, the root that CONTAINS
+        # every partition. Exempting it would be "fail toward exempt everything" exactly.
+        self.assertTrue(ready.reserves_partition(ready.GLOBAL))
+        self.assertTrue(ready.reserves_partition(""))
+        waiting = iss(20, READY + ["priority:P1", "area:sparq-core"])
+        board = [pr(70, [f"area:{ready.GLOBAL}"]), waiting]
+        self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet)), [],
+                         "an occupant on the global partition must still serialize everything")
+        for bad in ({ready.GLOBAL}, {"ci", ready.GLOBAL}, {"-"}, {""}):
+            self.assertEqual(ready.non_reserving_partitions(bad), frozenset(), bad)
+
+    # -- the FAIL-SAFE: malformed declaration degrades to TODAY's behaviour -----------------
+    def test_a_malformed_declaration_falls_back_to_reserving(self):
+        waiting = iss(20, READY + ["priority:P1", "area:ci"])
+        board = [pr(70, ["area:ci"]), waiting]
+        for broken in (None, "ci,docs", 7, {"ci": True}, {"ci", 7}, ["ci", ""], ("ci", None),
+                       {"ci", "  "}):
+            with mock.patch.object(ready, "NON_RESERVING_PARTITIONS", broken):
+                self.assertEqual(ready.non_reserving_partitions(), frozenset(), broken)
+                self.assertEqual(
+                    numbers(ready.compute_ready(board, conflict_log=quiet)), [],
+                    f"a {broken!r} declaration must degrade to RESERVING, never to exempt-all")
+
+    def test_an_absent_declaration_falls_back_to_reserving(self):
+        # Deleting the constant entirely is the "unreadable" case: NameError would abort the
+        # whole dispatch tick for every target, so the engine must simply reserve.
+        waiting = iss(20, READY + ["priority:P1", "area:ci"])
+        board = [pr(70, ["area:ci"]), waiting]
+        with mock.patch.object(ready, "NON_RESERVING_PARTITIONS", frozenset()):
+            self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet)), [])
+
+    def test_a_wellformed_declaration_is_honoured_so_the_failsafe_is_not_vacuous(self):
+        # KNOWN-POSITIVE control for the loop above: the same board, a VALID declaration, the
+        # opposite outcome. Without this a fail-safe that rejected everything would look perfect.
+        waiting = iss(20, READY + ["priority:P1", "area:ci"])
+        board = [pr(70, ["area:ci"]), waiting]
+        with mock.patch.object(ready, "NON_RESERVING_PARTITIONS", frozenset({"ci"})):
+            self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet)), [20])
+
+    # -- SCOPE: what this change deliberately does NOT touch --------------------------------
+    def test_candidacy_is_unchanged_a_ci_issue_is_still_counted_and_routed(self):
+        # Measured obligation 5: `candidates=` must not move. The candidate-side key algebra is
+        # untouched, so a ci issue is still a candidate, still keyed on `ci`, still dispatchable.
+        self.assertEqual(ready.packages_of({"area:ci"}), {"ci"})
+        self.assertEqual(ready.packages_of({"area:docs"}), {"docs"})
+        self.assertEqual(ready.declared_packages({"area:ci", "area:docs"}), {"ci", "docs"})
+        board = [pr(70, ["area:ci"]), iss(20, READY + ["priority:P1", "area:ci"]),
+                 iss(21, READY + ["priority:P1", "area:docs"]),
+                 iss(22, READY + ["priority:P1", "area:deps"])]
+        cands = ready.ready_candidates(board, log=quiet)
+        self.assertEqual([(number, sorted(keys)) for _p, number, _row, keys in cands],
+                         [(20, ["ci"]), (21, ["docs"]), (22, ["deps"])],
+                         "candidacy and candidate keying must be byte-identical to before")
+
+    def test_a_selected_ci_candidate_still_reserves_ci_for_the_tick(self):
+        # The exemption is the OCCUPANCY half ONLY. Per-tick dispatch width stays one worker per
+        # partition; this is why the live frontier moved 1 -> 3 and not 1 -> ~50.
+        board = [iss(20, READY + ["priority:P0", "area:ci"]),
+                 iss(21, READY + ["priority:P1", "area:ci"])]
+        self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet)), [20])
+
+    def test_ci_fragments_travels_with_the_ci_partition(self):
+        # `ci-fragments` is a LIVE label that resolves into the `ci` partition. Exempting the raw
+        # string only would leave it reserving a partition `ci` itself does not — incoherent with
+        # `keys_conflict`, and a trap for the next reader.
+        self.assertEqual(ready.partition_path("ci-fragments"), ("ci",))
+        self.assertFalse(ready.reserves_partition("ci-fragments"))
+        waiting = iss(20, READY + ["priority:P1", "area:ci"])
+        self.assertEqual(
+            numbers(ready.compute_ready([pr(70, ["area:ci-fragments"]), waiting],
+                                        conflict_log=quiet)), [20])
+
+    def test_the_declaration_records_its_measured_basis(self):
+        # The brief's one durable requirement: the next reader must be able to RE-DERIVE the
+        # decision rather than guess at it. Asserted on the numbers, not on prose.
+        source = (SCRIPTS / "ready-issues.py").read_text(encoding="utf-8")
+        head, _, rest = source.partition("NON_RESERVING_PARTITIONS = ")
+        self.assertTrue(rest, "NON_RESERVING_PARTITIONS is no longer declared")
+        basis = head[head.rindex("# ------"):]
+        for token in ("area:ci", "area:docs", "area:deps", "Cargo.lock",
+                      "5%", "3%", "100%", "57.1%", "crate-region-parallelism.md"):
+            self.assertIn(token, basis,
+                          f"the measured basis for the exemption no longer states {token}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

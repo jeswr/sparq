@@ -186,6 +186,78 @@ def keys_conflict(a, b, roots=None):
     """
     pa, pb = partition_path(a, roots), partition_path(b, roots)
     return pa[:len(pb)] == pb or pb[:len(pa)] == pa
+
+
+# ---------------------------------------------------------------------------
+# NON-RESERVING (cross-cutting) PARTITIONS — THE ONE PLACE THIS IS DECLARED.
+#
+# [OPUS-5 2026-07-28] These partitions still ROUTE work and are still valid candidate keys — a
+# candidate declaring `area:ci` is derived, counted and dispatchable exactly as before. They
+# simply do not OCCUPY: an in-flight PR or in-progress issue holding one of them no longer blocks
+# a new worker from being dispatched onto an issue that declares it. See `_reserving_packages`.
+#
+# THE MEASURED BASIS (live sparq snapshot, open non-parked PRs holding each area, counting
+# holder PAIRS that share at least one changed file):
+#
+#     area          holder pairs   sharing >=1 file
+#     area:ci            120          6   ( 5%)   -> exempt
+#     area:docs           66          2   ( 3%)   -> exempt
+#     area:deps            3          3   (100%)  -> NOT exempt (every pair collides on
+#                                                    Cargo.lock; serialising it is correct)
+#     crate areas          -          -   (57.1%) -> NOT exempt
+#                                                    (research/crate-region-parallelism.md §4)
+#
+# So the reservation on `ci`/`docs` was refusing ~99% of a partition-starved frontier to prevent a
+# 3-5% file collision, while `deps` and the crate areas are serialising real overlap and stay.
+# Measured counterfactual on that same snapshot, through this engine: baseline frontier 1;
+# `ci` non-reserving 2; `ci`+`docs` non-reserving 3; adding `deps` would give 4 (not taken).
+#
+# It is also aimed at the right axis only in part, and the comment says so rather than
+# overselling it: `ci`/`docs` reservation never serialised PR-vs-PR contention at all (14 open PRs
+# co-hold `ci` and 10 co-hold `docs` right now, concurrently — a PR enters those partitions by
+# TOUCHING A PATH, with zero admission control). All it ever did was refuse dispatch.
+#
+# FAIL-SAFE DIRECTION: `non_reserving_partitions()` validates this declaration and returns the
+# EMPTY set — i.e. today's fully-reserving behaviour — for anything malformed. Never the reverse.
+NON_RESERVING_PARTITIONS = frozenset({"ci", "docs"})
+
+
+def non_reserving_partitions(declared=None):
+    """`NON_RESERVING_PARTITIONS`, VALIDATED. Anything malformed degrades to RESERVING.
+
+    A wrong answer here is asymmetric: too SMALL a set costs dispatch width (today's behaviour,
+    which the fleet has been running), while too LARGE a set silently un-serialises real work.
+    So the whole declaration is voided by a single bad entry rather than partially honoured, and
+    `GLOBAL` (and any degenerate key, which `partition_path` maps to the `()` root that contains
+    every partition) can NEVER appear in it — exempting the root would exempt everything, which
+    is exactly the "fail toward exempt everything" outcome this must not have.
+    """
+    raw = NON_RESERVING_PARTITIONS if declared is None else declared
+    if isinstance(raw, str) or not isinstance(raw, (set, frozenset, list, tuple)):
+        return frozenset()
+    names = set()
+    for name in raw:
+        if not isinstance(name, str) or not name.strip() or name.strip() == GLOBAL:
+            return frozenset()
+        if partition_path(name.strip()) == ():        # degenerate key -> the containing root
+            return frozenset()
+        names.add(name.strip())
+    return frozenset(names)
+
+
+def reserves_partition(key, exempt=None):
+    """Whether an OCCUPANT declaring `key` reserves it, or merely routes on it.
+
+    Expressed on the PARTITION PATH, not the raw label, so it agrees with `keys_conflict`: every
+    key that resolves INTO the `ci` partition (`ci`, and e.g. the live `ci-fragments`) is exempt
+    together with it. A per-string exemption would leave `ci-fragments` reserving a partition that
+    `ci` itself does not, which reads as a bug to the next person and behaves like one.
+    """
+    path = partition_path(key)
+    if not path:                       # GLOBAL / degenerate: contains everything, never exempt
+        return True
+    exempt = non_reserving_partitions() if exempt is None else exempt
+    return path[0] not in exempt
 # --- open blockers: NATIVE GitHub dependencies UNIONED with the legacy body markers -------------
 # [OPUS-5] Until this landed, BOTH readers of "is this issue blocked" (this file and the registry's
 # dispatch.yml planner step) derived `open_blockers` ONLY by regexing `Blocked-by: #NN` out of the
@@ -305,8 +377,16 @@ def _reserving_packages(labels):
     cross-cutting paths), so 9 open PRs still declare nothing, and making those 9 seize
     `__global__` would reproduce the measured whole-fleet stall. Only the stated reason needed
     correcting; leaving a false premise in place is how a correct rule gets "fixed" back.
+
+    [OPUS-5 2026-07-28] ...and of the areas it declares, only the RESERVING ones — the
+    cross-cutting `NON_RESERVING_PARTITIONS` (`ci`, `docs`) route work without occupying it. That
+    declaration, its measured basis and its fail-safe live in ONE place above; nothing else in
+    this file knows the names. This is the OCCUPANCY half ONLY: `packages_of` (the candidate side)
+    is untouched, so candidacy is unchanged, and a SELECTED candidate still reserves its own areas
+    through `compute_ready`'s `reserve(pkgs, it)` — per-tick width stays one worker per partition,
+    which is why the measured effect is +1 frontier row per exempted partition and not +49.
     """
-    return declared_packages(labels)
+    return {key for key in declared_packages(labels) if reserves_partition(key)}
 
 
 def has_role(labels):
@@ -874,6 +954,57 @@ def _self_test():
     check("flatten pages retains PRs", _flatten_pages(
         [[{"number": 1}, {"number": 2, "pull_request": {}}], [{"number": 3}], "junk", [None]]),
         [{"number": 1}, {"number": 2, "pull_request": {}}, {"number": 3}])
+    # ---------------------------------------------------------------------------------------
+    # [OPUS-5 2026-07-28] NON-RESERVING cross-cutting partitions. END-TO-END through
+    # compute_ready, and run HERE and not only in scripts/tests/ because the registry's
+    # dispatch.yml executes THIS --self-test against every target before it plans anything — so
+    # a tree whose exemption set has been widened to a colliding partition fails at the gate the
+    # fleet actually passes through. `scripts/tests/test_readiness_visibility.py::
+    # TestNonReservingCrossCuttingPartitions` carries the full contract.
+    # ---------------------------------------------------------------------------------------
+    def held_board(area, held_by=None):
+        return [pr(70, [f"area:{held_by or area}"]),
+                iss(20, R + ["priority:P1", f"area:{area}"])]
+
+    def offered(area, held_by=None):
+        return [i["number"] for i in compute_ready(held_board(area, held_by),
+                                                   conflict_log=quiet)]
+
+    check("a PR holding area:ci no longer refuses a ci-only candidate", offered("ci"), [20])
+    check("...same for area:docs", offered("docs"), [20])
+    check("...and for a key that resolves INTO the ci partition", offered("ci", "ci-fragments"),
+          [20])
+    # The SAFETY half. deps: 3 of 3 live holder pairs collide, all on Cargo.lock. Crate areas:
+    # 57.1% (research/crate-region-parallelism.md §4). Widening the set to either is the mutation
+    # this line exists to kill.
+    check("area:deps STILL reserves (every live deps pair collides on Cargo.lock)",
+          offered("deps"), [])
+    check("crate areas STILL reserve", offered("sparq-core"), [])
+    check("sub-crate containment still reserves through the exemption",
+          offered("sparq-core-store", "sparq-core"), [])
+    check("the global partition can never be exempted", offered("sparq-core", GLOBAL), [])
+    # The FAIL-SAFE, both directions: a malformed declaration degrades to TODAY's behaviour, and
+    # a well-formed one is honoured — without the second line a fail-safe that voided everything
+    # would look perfect.
+    _declared = NON_RESERVING_PARTITIONS
+    try:
+        for _broken in (None, "ci", 7, {"ci": True}, {"ci", 7}, ["ci", ""], {GLOBAL}):
+            globals()["NON_RESERVING_PARTITIONS"] = _broken
+            check(f"malformed exemption {_broken!r} falls back to RESERVING", offered("ci"), [])
+        globals()["NON_RESERVING_PARTITIONS"] = frozenset({"ci"})
+        check("...and a well-formed exemption is honoured (fail-safe is not vacuous)",
+              offered("ci"), [20])
+    finally:
+        globals()["NON_RESERVING_PARTITIONS"] = _declared
+    # SCOPE: candidacy untouched, and a SELECTED candidate still reserves — per-tick width stays
+    # one worker per partition, which is why the live frontier moved 1 -> 3 and not 1 -> ~50.
+    check("candidate keying for ci/docs is unchanged", (packages_of({"area:ci"}),
+                                                        packages_of({"area:docs"})),
+          ({"ci"}, {"docs"}))
+    check("a selected ci candidate still reserves ci for the tick",
+          [i["number"] for i in compute_ready(
+              [iss(20, R + ["priority:P0", "area:ci"]), iss(21, R + ["priority:P1", "area:ci"])],
+              conflict_log=quiet)], [20])
     print("ready-issues self-test", "PASSED" if ok else "FAILED")
     return 0 if ok else 1
 
