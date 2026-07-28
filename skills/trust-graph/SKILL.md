@@ -229,14 +229,26 @@ Load-bearing properties (each adversarially tested in
 
 `derive_effective_rules` silently drops a rejected edge; `explain_edge` runs the same
 gates in the same order and returns *why* an edge contributed nothing (the adversarial
-matrix asserts against these). Both route through ONE shared per-hop gate, so they cannot
-disagree.
+matrix asserts against these).
 
 `explain_edge(anchors, cert, now, hop)` explains a SINGLE hop, and the last two arguments
 must agree: pass `direct_rules` with `hop = 1`, or
 `derive_effective_rules(direct_rules, certs, now, k - 1)` with `hop = k`. `hop = 0` denies
 every edge as `OverDepth`; `hop = 1` marks `anchors` as DIRECT (meta-scope exempt), `hop >= 2`
 marks them as DERIVED (meta-scope applies).
+
+**The two paths agree on ADMISSION, and it is `Cyclic` — not the shared gate — that makes
+them.** The per-hop gate takes *two* rule sets and the closure feeds it two different ones
+at hop k>1: the **frontier** (exactly round k-1's output — who may certify, `NoAnchor`) and
+the **closure so far** (direct + every earlier round — the cycle set, `Cyclic`).
+`explain_edge` takes one slice for both, so the recipe above is exact for `Cyclic` but a
+*superset* for `NoAnchor`: it still offers the direct anchors and older rounds as certifiers.
+That cannot admit anything extra, because any older anchor that would admit the edge already
+admitted it when it *was* the frontier, leaving the certified issuer holding a matching-key
+rule that `Cyclic` then rejects. Only the *reason* can differ (`Cyclic` for an edge derived
+at a shallower hop; the stale anchor's gate instead of `NoAnchor`) — never the verdict, so
+neither direction can escalate. Pinned by
+`an_older_round_certifier_cannot_re_admit_an_edge_at_a_later_hop`.
 
 The variants, in gate order:
 

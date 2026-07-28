@@ -1257,3 +1257,110 @@ fn a_direct_anchor_may_certify_regardless_of_meta_scope() {
         assert_eq!(out[1].source.as_str(), ISSUER);
     }
 }
+
+#[test]
+fn an_older_round_certifier_cannot_re_admit_an_edge_at_a_later_hop() {
+    // THE FRONTIER-vs-CLOSURE-SO-FAR question. `derive_effective_rules` evaluates hop k
+    // against EXACTLY round k-1's output (the frontier) for GATE 2, but against the WHOLE
+    // closure so far for GATE 1. `explain_edge` is handed one slice —
+    // `derive_effective_rules(.., k - 1)` — which is exactly right for GATE 1 and a strict
+    // SUPERSET for GATE 2: it also carries the direct anchors and every round older than
+    // k-1. So the explained path offers GATE 2 candidate anchors the closure could NOT use
+    // at that hop. This test pins that the over-approximation cannot turn a denial into an
+    // admission, on the two shapes where it could — a certification-capable DIRECT anchor,
+    // and a registrar derived in an OLDER round — and that GATE 1 (which reads the whole
+    // closure so far) is the interlock that makes it so.
+    const TAIL_A: &str = "https://tail-a.example/issuer"; // certified by GOV   (fires at hop 1)
+    const TAIL_B: &str = "https://tail-b.example/issuer"; // certified by MID   (fires at hop 2)
+    const TAIL_C: &str = "https://tail-c.example/issuer"; // certified by MID, BROADENING
+
+    let (anchor_rule, hop1, mid_sk, _mid_pk) = root_and_first_hop();
+    let (_leaf_sk, leaf_pk) = keypair(3);
+    let (_a_sk, a_pk) = keypair(4);
+    let (_b_sk, b_pk) = keypair(5);
+    let (_c_sk, c_pk) = keypair(6);
+    let (gov_sk, _gov_pk) = keypair(1);
+
+    let hop2 = signed_cert(MID, &mid_sk, LEAF, leaf_pk, CertScope::AnyService, NOW - 10, NOW + 10);
+    // GOV is a DIRECT anchor, so this edge is admitted at hop 1 and GOV is never in the
+    // frontier again — yet it stays in the cumulative set `explain_edge` is handed.
+    let gov_tail_a =
+        signed_cert(GOV, &gov_sk, TAIL_A, a_pk, CertScope::AnyService, NOW - 10, NOW + 10);
+    // MID is derived in round 1, so it is the frontier at hop 2 ONLY.
+    let mid_tail_b =
+        signed_cert(MID, &mid_sk, TAIL_B, b_pk, CertScope::AnyService, NOW - 10, NOW + 10);
+    // …and this one broadens past MID's `age` ceiling, so it is denied at hop 2 and MID is
+    // gone from the frontier from hop 3 on. It must stay denied.
+    let mid_tail_c = signed_cert(
+        MID,
+        &mid_sk,
+        TAIL_C,
+        c_pk,
+        CertScope::Shape(predicate_shape(NAME)),
+        NOW - 10,
+        NOW + 10,
+    );
+    let edges = [
+        hop1.clone(),
+        hop2,
+        gov_tail_a.clone(),
+        mid_tail_b.clone(),
+        mid_tail_c.clone(),
+    ];
+    let anchors = std::slice::from_ref(&anchor_rule);
+
+    // The closure converges after round 2: GOV→{MID, TAIL_A} at hop 1, MID→{LEAF, TAIL_B} at
+    // hop 2, nothing at hop 3 — and deepening the bound never re-admits an older certifier.
+    let after_hop2 = derive_effective_rules(anchors, &edges, NOW, 2);
+    let sources_at_2: Vec<&str> = after_hop2.iter().map(|r| r.source.as_str()).collect();
+    assert_eq!(sources_at_2, [GOV, MID, TAIL_A, LEAF, TAIL_B], "the depth-2 closure");
+    for depth in [3u32, 4, 8] {
+        let deeper = derive_effective_rules(anchors, &edges, NOW, depth);
+        let sources: Vec<&str> = deeper.iter().map(|r| r.source.as_str()).collect();
+        assert_eq!(
+            sources, sources_at_2,
+            "depth {depth}: no older-round certifier may derive anything at a later hop"
+        );
+        assert!(
+            deeper.iter().all(|r| r.source.as_str() != TAIL_C),
+            "depth {depth}: a broadening stays denied once its certifier leaves the frontier"
+        );
+    }
+
+    // THE AGREEMENT PROPERTY AT hop 3 — every edge whose certifier is out of the frontier is
+    // denied by the explained path too, even though the cumulative set still offers that
+    // certifier as a candidate anchor.
+    for (cert, who, want) in [
+        // GOV is a DIRECT anchor in the set handed to `explain_edge`, and still
+        // certification-capable — but the edge already fired at hop 1, so TAIL_A holds a
+        // matching-key rule and GATE 1 denies the re-attempt.
+        (&gov_tail_a, TAIL_A, EdgeRejection::Cyclic),
+        // Same interlock one round deeper: MID derived at round 1, fired at hop 2.
+        (&mid_tail_b, TAIL_B, EdgeRejection::Cyclic),
+        // The edge that NEVER fired: MID is offered to GATE 2 from round 1, so the explained
+        // path reaches GATE 5 — and the attenuation ceiling denies it there. The closure
+        // denies it at hop 3 earlier still (MID is not in the frontier); both contribute
+        // NOTHING, which is the property that matters.
+        (&mid_tail_c, TAIL_C, EdgeRejection::Broadening),
+    ] {
+        // (`TrustRule` has no `PartialEq`, so compare the rejection side.)
+        assert_eq!(
+            explain_edge(&after_hop2, cert, NOW, 3).err(),
+            Some(want),
+            "hop 3: the edge certifying {who} must be denied, not laundered through an \
+             out-of-frontier anchor"
+        );
+    }
+
+    // NON-VACUITY — the denials above are the hop interlock, not a broken fixture: the very
+    // same edges ARE admitted at the hop whose frontier really did hold their certifier.
+    assert!(
+        explain_edge(anchors, &gov_tail_a, NOW, 1).is_ok(),
+        "GOV certifies TAIL_A at hop 1"
+    );
+    let after_hop1 = derive_effective_rules(anchors, &edges, NOW, 1);
+    assert!(
+        explain_edge(&after_hop1, &mid_tail_b, NOW, 2).is_ok(),
+        "MID certifies TAIL_B at hop 2"
+    );
+}

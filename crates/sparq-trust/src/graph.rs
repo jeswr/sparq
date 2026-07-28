@@ -415,19 +415,48 @@ fn confers_certification_authority(shape: &ShapeRef) -> bool {
 ///
 /// The last two arguments identify the **single hop** being explained, and they must agree:
 ///
-/// - `anchors` — the rule set the closure would have had in hand at that hop. Pass the pod's
-///   `direct_rules` for hop 1; for hop *k* of a multi-hop chain pass
-///   `derive_effective_rules(direct_rules, certs, now, k - 1)`.
+/// - `anchors` — the closure state at that hop. Pass the pod's `direct_rules` for hop 1; for
+///   hop *k* of a multi-hop chain pass `derive_effective_rules(direct_rules, certs, now,
+///   k - 1)`.
 /// - `hop` — the 1-based hop index. `0` denies every edge as [`EdgeRejection::OverDepth`]
 ///   (no hop is permitted at all). `1` marks `anchors` as the pod's DIRECT rules, which
 ///   exempts them from the meta-scope gate; `>= 1 + 1` marks them as DERIVED, so only an
 ///   anchor whose shape selects `trustx:Certification` statements may certify.
 ///
-/// Pass the matching pair and the verdict is exactly what the closure did at that hop —
-/// `explain_edge` and [`derive_effective_rules`] route through one shared gate and cannot
-/// disagree. Pass hop `1` with a set of DERIVED anchors and you are asking a different
-/// question (what a pod would decide if it anchored those rules directly), and will get that
-/// question's answer.
+/// ## Why ONE slice is enough, and where it is an over-approximation
+///
+/// The shared gate takes TWO rule sets, and the closure feeds it two DIFFERENT ones at hop
+/// *k > 1*: the **frontier** (exactly what hop *k−1* derived — the certifying set, GATE 2)
+/// and the **known** set (the whole closure so far — the cycle set, GATE 1). `explain_edge`
+/// has one slice and passes it as both, so the set documented above is EXACT for GATE 1 and a
+/// strict **superset** for GATE 2 — it also carries the direct anchors and every round older
+/// than *k−1*, none of which the closure could certify from at that hop. Routing through one
+/// shared gate is therefore NOT on its own why the two paths agree: that is a property of the
+/// per-hop gate, not of the composed closure.
+///
+/// They agree anyway, and GATE 1 is the reason. Take any candidate anchor `R` this call
+/// offers that hop *k*'s real frontier did not: `R` was ITSELF the frontier at some earlier
+/// round *j*, and the edge's verdict against `R` is the same at both hops — GATES 3 and 4 do
+/// not read the anchor set at all, GATE 5 reads only `R`, and GATE 1 saw a SMALLER closure at
+/// round *j* so it was there if anything laxer (as was GATE 2, if *j* was hop 1: direct
+/// anchors skip the meta-scope gate). So if `R` would admit the edge here, the closure
+/// already admitted it at round *j*. That earlier admission leaves the certified issuer
+/// holding a matching-key rule, and GATE 1 — which
+/// reads the WHOLE closure so far — denies the re-attempt as [`EdgeRejection::Cyclic`]. So an
+/// `Ok` here is an edge the closure derives at THIS hop, and the same rule; an `Err` is an
+/// edge it does not derive at all. Pinned, mutation-witnessed, by
+/// `an_older_round_certifier_cannot_re_admit_an_edge_at_a_later_hop` in
+/// `tests/certification_graph_e2e.rs` — disable GATE 1's scan of the known set and it goes red.
+///
+/// Two honest caveats, both on the REASON and never on admission (so neither can escalate):
+/// an edge the closure admitted at a SHALLOWER hop reports `Cyclic` here, where the closure's
+/// loop simply skipped it as already-derived; and an edge whose certifier has left the
+/// frontier reports whichever gate the stale anchor fails (e.g.
+/// [`EdgeRejection::Broadening`]) rather than the [`EdgeRejection::NoAnchor`] the closure
+/// reaches first.
+///
+/// Pass hop `1` with a set of DERIVED anchors and you are asking a different question (what a
+/// pod would decide if it anchored those rules directly), and will get that question's answer.
 pub fn explain_edge(
     anchors: &[TrustRule],
     cert: &Certification,
@@ -454,9 +483,11 @@ fn derive_one(
 
 /// The single shared gate for ONE hop, returning the derived rule OR the first
 /// [`EdgeRejection`]. Both [`derive_effective_rules`] (via [`derive_one`], once per round)
-/// and [`explain_edge`] route through here, so the fast path and the explained path can
-/// NEVER diverge on what they admit — including on the meta-scope gate, which is why that
-/// gate lives HERE and not in the closure's round loop.
+/// and [`explain_edge`] route through here, so ON THE SAME TWO INPUTS the fast path and the
+/// explained path can NEVER diverge on what they admit — including on the meta-scope gate,
+/// which is why that gate lives HERE and not in the closure's round loop. `explain_edge`
+/// cannot in fact supply the same two inputs at hop k>1 (it has one slice); that it still
+/// agrees is a separate argument, made on [`explain_edge`] itself.
 ///
 /// The two rule slices play DIFFERENT roles and are only the same at hop 1:
 /// - `anchors` — the rules that may CERTIFY at this hop (GATE 2). At hop 1 the pod's direct
