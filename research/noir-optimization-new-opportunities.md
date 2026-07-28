@@ -148,6 +148,8 @@ the size-revert is whole-function granularity and compares raw `num_instructions
 against a decision made on Brillig-weighted `cost()`. One ACIR-path robustness gap:
 `RUNAWAY_UNROLL_LIMIT` applies **only** when termination is unproven (`:1238-1250`), so
 a provably-terminating `for i in 0..4_000_000_000` in ACIR hangs with no diagnostic.
+Two adjacent diagnostics gaps in the same file: the ACIR bail-outs at `:392` and
+`:419` discard the source location.
 
 ### 3.2 Array/memory — `value_merger.rs`, `array_set_window_optimization.rs`, `mutable_array_set.rs`
 
@@ -426,13 +428,6 @@ inherits the §10.2 acceptance protocol and the §6 upstream etiquette from
 8. **N3 → bead.** Tier: opus. Target `csat.rs`. Kill-test: a read-only analysis
    counting term-multisets of size `width-1` occurring in ≥3 opcodes but non-contiguous
    in witness order — that count is the candidate's upper bound.
-
-Also captured, as *non-optimisation* follow-ups (correctness/UX/docs, not gates, and
-not paper content): the ACIR runaway-unroll hang for provably-terminating huge loops
-(`unrolling.rs:1238-1250`); two ACIR bail-outs discarding the source location
-(`:392`, `:419`); the stale mem2reg ordering comment (`mod.rs:375-380`); and the
-`CHANGELOG.md:67` over-claim for #11512. Upstream convention closes typo-scale PRs, so
-these should ride along with a substantive PR rather than go up alone.
 
 ## 7. What actually unblocks this — and what it means for P1 (`sq-i50o4`)
 
