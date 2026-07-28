@@ -6,8 +6,17 @@
 #   ./ab.sh --corpus my.ttl      # A/B against a real corpus (e.g. the sq-wrn61 slice)
 #   ./ab.sh --attribute <sha>    # extra leg pinned to an arbitrary oxigraph commit
 #
+# Both legs are built in every configuration the README, the registry entry and
+# research/oxttl-prefixed-name-alloc-2026-07.md quote — default, mimalloc, rdf-12,
+# count-alloc and rdf-12+count-alloc, ten builds in all — so one command really
+# does reproduce every recorded row.
+#
 # Every timing this prints is NON-CANONICAL: it is whatever box you ran it on.
-# The allocation counts are not — they are deterministic for a given corpus.
+# The allocation counts come from no clock, so they do not move with box speed or
+# load: repeated runs of the SAME binary over the same corpus return the same
+# counts. That is not box-independence — the shim counts every allocation the whole
+# binary makes, so toolchain, target, dependency resolution and features can all
+# move them. Record the configuration this script prints alongside any count.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -42,15 +51,33 @@ if [ ! -f "$CORPUS" ]; then
   ./released/target/release/oxttl-prefix-alloc-released gen 60 "$CORPUS"
 fi
 
+# "features|target-dir|mode" — one entry per configuration the docs claim this
+# command reproduces. Each gets its OWN target dir, so no build ever overwrites
+# another's binary (a count-alloc build must never clobber a timed one). `time`
+# legs print the wall-clock table; `count` legs print ONLY the allocation table,
+# because the counting shim's atomics perturb the clock.
+LEGS=(
+  "|target|time"                                 # system allocator, default features
+  "mimalloc|target-mi|time"                      # the allocator sparq-cli ingest ships with
+  "rdf-12|target-rdf12|time"                     # the feature set the sparq workspace enables
+  "count-alloc|target-count|count"               # allocation counts, default features
+  "rdf-12,count-alloc|target-rdf12-count|count"  # ... and under rdf-12, to check they match
+)
+
 for leg in released upstream; do
   bin="oxttl-prefix-alloc-$leg"
-  ( cd "$leg" && "${CARGO[@]}" build --release >/dev/null )
-  "./$leg/target/release/$bin" bench "$CORPUS" --iters "$ITERS"
-  echo
-  # Separate target dir: a count-alloc build must never overwrite the timed one.
-  ( cd "$leg" && "${CARGO[@]}" build --release --features count-alloc --target-dir target-count >/dev/null )
-  "./$leg/target-count/release/$bin" bench "$CORPUS" --iters 3 | sed -n '/allocs\/parse/,$p'
-  echo
+  for spec in "${LEGS[@]}"; do
+    IFS='|' read -r feats dir mode <<<"$spec"
+    args=(build --release --target-dir "$dir")
+    if [ -n "$feats" ]; then args+=(--features "$feats"); fi
+    ( cd "$leg" && "${CARGO[@]}" "${args[@]}" >/dev/null )
+    if [ "$mode" = count ]; then
+      "./$leg/$dir/release/$bin" bench "$CORPUS" --iters 3 | sed -n '/allocs\/parse/,$p'
+    else
+      "./$leg/$dir/release/$bin" bench "$CORPUS" --iters "$ITERS"
+    fi
+    echo
+  done
 done
 
 # Per-commit attribution: "which upstream commit actually bought the delta?".

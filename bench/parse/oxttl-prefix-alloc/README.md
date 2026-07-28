@@ -30,8 +30,13 @@ wasm build.
 
 ## Running
 
+`ab.sh` builds each leg in all five documented configurations — default, `mimalloc`,
+`rdf-12`, `count-alloc`, `rdf-12,count-alloc`, each in its own target directory, ten
+builds in all — so one command reproduces every row recorded in
+`research/oxttl-prefixed-name-alloc-2026-07.md`.
+
 ```sh
-# Both legs, generating the corpus on first run.
+# Both legs × all five configurations, generating the corpus on first run.
 ./ab.sh
 
 # Against a real corpus — e.g. the sq-wrn61 slice, if you have it.
@@ -58,18 +63,25 @@ slice and label the row accordingly.
 - **Timings are NON-CANONICAL.** They are whatever box you ran on, under whatever
   toolchain; the standing rule is that only the canonical bench instance produces
   quotable throughput. Every emitted `--json` document carries a `note` saying so.
-- **Allocation counts are deterministic** — same corpus, same counts, any box —
-  because they come from a counting shim over the system allocator
-  (`--features count-alloc`) rather than from a clock. They are the honest metric
-  for an allocation-reduction claim, and the harness prints them separately from
-  the timings precisely because the shim's atomics perturb the clock.
-- **`--features mimalloc`** re-runs under the allocator `sparq-cli ingest` ships
-  with, so an allocation win measured under system malloc is not quietly
-  over-claimed against the allocator production actually uses.
-- **`--features rdf-12`** re-runs with the feature set the sparq workspace actually
-  enables on `oxttl` (root `Cargo.toml`:
-  `oxttl = { version = "0.2", features = ["rdf-12"] }`). The default build leaves it
-  off; run both, and quote the `rdf-12` row when the question is about sparq.
+- **Allocation counts come from no clock.** They are read off a counting shim over
+  the system allocator (`--features count-alloc`), so they do not move with box
+  speed or load: repeated runs of the *same binary* over the same corpus return
+  the same counts, which is what makes them the honest metric for an
+  allocation-reduction claim. That is **not** box-independence — the shim counts
+  every allocation the whole binary makes, so a different toolchain, target,
+  dependency resolution (the lockfiles here are deliberately uncommitted) or
+  feature set can move them. Quote a count together with the configuration that
+  produced it, and re-derive rather than copy it when any of those change. The
+  harness prints them separately from the timings because the shim's atomics
+  perturb the clock.
+- **`--features mimalloc`** (a leg `ab.sh` always runs) re-times under the allocator
+  `sparq-cli ingest` ships with, so an allocation win measured under system malloc
+  is not quietly over-claimed against the allocator production actually uses.
+- **`--features rdf-12`** (also always run, both timed and under `count-alloc`) uses
+  the feature set the sparq workspace actually enables on `oxttl` (root
+  `Cargo.toml`: `oxttl = { version = "0.2", features = ["rdf-12"] }`). The default
+  build leaves it off, and `ab.sh` prints both — quote the `rdf-12` row when the
+  question is about sparq.
 
 ## The invariant
 

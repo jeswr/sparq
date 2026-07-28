@@ -165,8 +165,17 @@ is the feature set the sparq workspace actually enables
 (`oxttl = { version = "0.2", features = ["rdf-12"] }`). The allocation counts below
 are identical in the `rdf-12` and default builds.
 
-Allocation counts are **deterministic** — same corpus, same counts, any box — so
-unlike the timings these are quotable without a box caveat:
+Allocation counts come from no clock, so unlike the timings they do not move with
+box speed or load: repeated runs of the *same binary* over the same corpus return
+the same counts. They are **not** box-independent facts, though — the shim counts
+every allocation the whole binary makes, so toolchain, target, dependency
+resolution and feature set all feed them. The counts below are measurements of one
+configuration: `rustc 1.88.0`, `x86_64-unknown-linux-gnu`, each leg's `oxttl`/`oxrdf`
+pin as declared in its wrapper manifest (`=0.2.3` from crates.io / git `9af7d59`)
+with the rest of the graph resolved fresh (the harness lockfiles are deliberately
+uncommitted, so transitive revisions can drift between runs), `count-alloc` the only
+feature enabled, on the corpus described above. Re-derive them under any other
+configuration rather than carrying these numbers across:
 
 | oxttl | allocs/parse | reallocs/parse | allocs/triple | bytes/triple |
 |---|---|---|---|---|
@@ -213,7 +222,12 @@ Two honest readings of this table:
   under test; it does not reproduce the real slice's literal/language distribution.
   Re-run with `--corpus` on a box that has the slice before quoting anything.
 - Non-canonical box, non-pinned toolchain (§4). The **ratios** are more robust than
-  the absolute rates, and the allocation counts are robust to both.
+  the absolute rates. The allocation counts are insensitive to box speed and load —
+  they are not timings — but they are a property of the build configuration recorded
+  in §4, not a universal constant: the repo's pinned 1.97.1 toolchain, a different
+  target, or a different transitive resolution (the harness lockfiles are
+  uncommitted) could move them. The **direction** of the delta — reallocation
+  eliminated by an exact-size `concat` — is the robust part.
 - The two legs resolve slightly different transitive graphs (notably `oxiri`
   0.2.11 vs 0.3.1). This is an honest "release vs current tree" comparison, not an
   isolated single-patch A/B — except in §5, where consecutive-commit pairs make the

@@ -23,9 +23,12 @@ use oxttl::TurtleParser;
 // Three mutually-exclusive builds, so a run measures exactly one thing:
 //   * default             — the system allocator, wall-clock timing.
 //   * --features mimalloc — the allocator `sparq-cli ingest` actually ships with.
-//   * --features count-alloc — a counting shim over the system allocator. The
-//     counts it reports are DETERMINISTIC (same input -> same counts on any box),
-//     which is why they, unlike the timings, are quotable without a box label.
+//   * --features count-alloc — a counting shim over the system allocator. Its
+//     counts come from no clock, so unlike the timings they are stable across
+//     repeated runs of the SAME binary on the same corpus, whatever the box is
+//     doing. They are still a property of that build — toolchain, target,
+//     dependency resolution and features all feed them — so quote a count with
+//     the configuration that produced it, not as a box-independent constant.
 //     It perturbs timing, so this build's wall-clock is not reported.
 // `count-alloc` wins over `mimalloc` because only one `#[global_allocator]` may
 // exist; the wrapper manifests never enable both, this is belt-and-braces.
