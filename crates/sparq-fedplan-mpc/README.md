@@ -19,11 +19,9 @@ declared leakage envelope (Phase 4):
 let selected = sparq_fedplan_mpc::select_private_sources(&bgp, &descriptors, &privacy)?;
 // Phase 6 — result-aware combination prune: is any full-BGP combination feasible?
 let combos = sparq_fedplan_mpc::prune_source_combinations(&bgp, &descriptors, &selected)?;
-if combos.is_bgp_dead() {
-    // no conjunct has a live source — skip the MPC path entirely
-}
+if combos.is_bgp_dead() { /* some conjunct has no live source — skip the MPC path entirely */ }
 // ...and skip the individual combinations Rule C2 proved dead (one source index per pattern)
-let live = combinations.filter(|assignment| !combos.combination_is_dead(assignment));
+let live = assignments.filter(|a| !combos.combination_is_dead(a));
 let routing = sparq_fedplan_mpc::route_operators(
     &selected, &privacy, &operators, RoutingPolicy::Default,
 )?;
@@ -67,38 +65,21 @@ match sparq_fedplan_mpc::ratify_envelope(&envelope, &privacy, Some(budget)) {
   private predicates (constraint C-B — the most-private holder wins), AND the **verifier**
   rejects an over-leaking envelope (distinct disclosed operands exceeding its budget),
   returning a `RatificationOutcome` naming *which* ratification failed and *why*.
-- **`prune_source_combinations`** (Phase 6, sq-pwr.3 + sq-xkrt) — the FedUP-style
-  **result-aware source-combination prune** over the Phase-2 selection. A federated query
-  executes a *conjunction* of patterns, and the seam's secure-join cost grows with the
-  number of source *combinations* (one source per pattern) it considers; this pass
-  surfaces which combinations **provably contribute no answer** so the seam routes fewer
-  toward MPC. Two recall-safe, summary-expressible rules:
-  - **Rule C1 — unsatisfiable-conjunct collapse.** If any pattern's Phase-2 candidate list
-    is empty, that conjunct is proved-empty, so the whole conjunction is unsatisfiable and
-    **every** combination is dead (`∅ ⋈ R = ∅`).
-  - **Rule C2 — dead same-source star pairing** (the FedUP *quotient-summary/provenance*
-    rule, and the one that fires on the **live** path). A source's served characteristic
-    sets (`scs:`) are a quotient summary partitioning its subjects by **exact** predicate
-    set. If two patterns share a **subject**-position join variable and **no** set of a
-    source carries both their predicates, then no subject of that source satisfies both
-    conjuncts — so assigning *both* patterns to that source is dead, along with every
-    combination containing that pairing. The source stays a valid candidate for each
-    pattern **individually** (a cross-source combination is untouched); a candidate is only
-    removed when the peer pattern's *sole* candidate is that same source. Rule C2 fires
-    **only** behind a completeness guard — `Σ_{C ∋ p} subjects == void:distinctSubjects`
-    over DISTINCT set keys, which a truncated (long-tail-elided) or unknown summary fails,
-    as does a repeated key (not a partition) — so an unprovable case declines.
-
-  It carries the Phase-2 selection through **unchanged** (advisory + auditable), reporting
-  `bgp_satisfiable`, the empty-pattern witnesses, the Rule-C2 `dead_pairings` +
-  `dead_patterns`, the BGP join components, and a combination-dead audit trail;
-  `combination_is_dead(&assignment)` is the per-combination test an enumerator runs (it
-  returns `false` — "keep it" — for anything it cannot prove). The value-overlap /
-  bound-IRI-propagation prune is **deliberately declined** — not recall-safely expressible
-  from the public summary (single-IRI `may_hold_authority`, no authority-set enumerator)
-  — so a future contributor does not build an unsound prune. Pattern ids that are not a
-  permutation of the BGP's, an out-of-range candidate index, and a `source_id` mismatched to
-  the descriptor at that index all fail closed (`DescriptorMismatch`/`SourceCombination`).
+- **`prune_source_combinations`** (Phase 6, sq-pwr.3 + sq-xkrt) — the FedUP-style **result-aware
+  source-combination prune** over the Phase-2 selection — it surfaces which *combinations* (one source per
+  pattern) **provably contribute no answer**, under two recall-safe, summary-expressible rules. **Rule C1 —
+  unsatisfiable-conjunct collapse:** an empty Phase-2 candidate list proves that conjunct empty, hence the
+  conjunction unsatisfiable (`∅ ⋈ R = ∅`) and **every** combination dead. **Rule C2 — dead same-source star
+  pairing:** if two patterns share a **subject**-position join variable and no *served characteristic set* of
+  a source carries both their predicates, that pairing — and every combination containing it — is dead; the
+  source stays a candidate for each pattern **individually** unless the peer's *sole* candidate is that same
+  source. C2 fires **only** behind a characteristic-set completeness guard, so a truncated or unknown summary
+  *declines* rather than over-prunes; the value-overlap / bound-IRI-propagation prune stays **deliberately
+  declined** — not recall-safely expressible from the public summary. The selection is carried through
+  **unchanged** (advisory + auditable) beside `bgp_satisfiable`, `empty_patterns`, `dead_patterns`/`dead_pairings`,
+  the join components and the audit trail; `combination_is_dead(&a)` answers `false` for anything it cannot
+  prove; a selection disagreeing with the BGP's pattern ids or with `sources` fails closed
+  (`DescriptorMismatch`). Full rules: the `combination` rustdoc.
 
 > **Internal crate — not published** (`publish = false`). **No soundness or privacy
 > claim.** Phases 2–4 + 6 are **plumbing — source-selection + result-aware combination
