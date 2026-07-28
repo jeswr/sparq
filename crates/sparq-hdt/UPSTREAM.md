@@ -84,7 +84,7 @@ maintainer review — so it is not merged. Tracking bead: `sq-fkj`.
 > **yanked** on crates.io. This does not affect sparq: `Cargo.lock` pins `hdt`
 > 0.7.3 → `qwt` 0.4.0. It is the upstream maintainer's concern, and it is
 > orthogonal to this doc-only PR.
-
+>
 > **Re-verified against the released line ([FABLE-5] sq-fkj, 2026-07-18).** With
 > sparq now pinning `hdt` 0.7 (the sq-2l1 bump), the gap was re-checked against the
 > published **0.7.3** crate source: no decode-only entry point has shipped in any
