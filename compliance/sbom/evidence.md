@@ -208,7 +208,7 @@ Wired as `.github/workflows/supply-chain.yml#vex-deny-sync` (job name
 it). Recorded this branch: both = `{RUSTSEC-2024-0436, RUSTSEC-2025-0141, RUSTSEC-2026-0194,
 RUSTSEC-2026-0195}` — **in sync** (no drift to resolve). ([OPUS-5] sq-5ah3p removed
 `RUSTSEC-2025-0134` from both sides in one change, which is exactly the edit shape this gate exists to
-police.) Negative test: temporarily dropping either deny.toml ignore makes the check exit 1 and name
+police.) Negative test: temporarily dropping any one of the four deny.toml ignores makes the check exit 1 and name
 the offending id. A genuinely-intended one-sided entry is recorded with a reason in the script's
 `JUSTIFIED_DRIFT` allow-list (empty today).
 
