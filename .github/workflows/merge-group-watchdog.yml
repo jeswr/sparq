@@ -14,11 +14,16 @@
 # re-enqueue of an entry it has POSITIVELY established has zero check-suites. Every
 # ambiguous reading is a refusal, not an action (see the script header).
 #
-# Cadence is every 5 minutes — the GitHub scheduler minimum — against a 300 s grace, so
-# worst-case detection is ~10 min against the 60-min timeout it replaces. The grace is
-# ~100x the MEASURED create->first-suite latency on this repo (single-digit seconds; see
-# the script's DEFAULT_GRACE_SECONDS note). Minutes are offset from auto-arm.yml's and
-# rearm-sweeper.yml's crons so the three sweeps do not start together.
+# Cadence is every 5 minutes — the GitHub scheduler minimum — against a 120 s grace, so
+# worst-case detection is ~10 min and typical is ~5, against the 60-minute ruleset
+# timeout it replaces. The grace is 30x the MEASURED maximum create->first-suite latency
+# on this repo (N=209, max 4 s; see the script's DEFAULT_GRACE_SECONDS note) and sits
+# below the tick interval so it never costs an extra tick. Minutes are offset from
+# auto-arm.yml's and rearm-sweeper.yml's crons so the three sweeps do not start together.
+#
+# BASE RATE, measured rather than assumed: 2 zero-dispatch refs in 211 merge groups over
+# 2026-07-25 -> 07-28 (~0.95%) — #4534 and #4331 — each costing ~60 min at the head of
+# the queue. This is a recurring platform event, not a one-off.
 name: merge-group watchdog
 
 on:

@@ -40,8 +40,16 @@
 # The CORRECT, exact anchor is the repository ACTIVITY API:
 #     GET /repos/{repo}/activity?activity_type=branch_creation&ref=<full ref>
 # whose rows carry an exact `timestamp` plus `after` = the created head SHA. Measured
-# for the incident ref: `branch_creation` at 23:04:37Z, `after=1bfb0174…`. We match on
-# `after == head_oid` so a ref rebuilt on the same base is keyed by HEAD, never by name.
+# for the incident ref: `branch_creation` at 23:04:37Z, `after=1bfb0174…`, deleted
+# 00:05:04Z — a 3627 s lifetime with zero suites. It is also the ONLY enumeration
+# source that can see such a ref at all: it has no workflow runs and the branch is
+# deleted, so the runs API cannot find it.
+#
+# We match on `after == head_oid`, never on the ref NAME. Measured over the full
+# retained queue population (1281 branch_creation rows, 2026-07-02 -> 07-28): 15 ref
+# NAMES were created 2+ times (max 4x) because the queue rebuilds a group on the same
+# base, while head SHAs had ZERO collisions. Head SHA is the only sound key, and it is
+# the same key the recovery idempotence uses.
 #
 # ── the decision table (fail-safe: only RECOVER is a mutation) ────────────────────
 #   SKIP     entry state is not AWAITING_CHECKS, or no speculative group is built yet
@@ -100,14 +108,22 @@ import gh_retry
 PROGRAM = "merge-group-watchdog"
 
 # ── tunables ─────────────────────────────────────────────────────────────────────
-# Grace before a zero-suite group is called dropped. MEASURED create->first-suite
-# latency on this repo (repository activity `branch_creation` timestamp -> earliest
-# check-suite `created_at`) is a couple of SECONDS: e.g. ref pr-4644-c96f5abe created
-# 00:37:17Z, first suite 00:37:19Z (2 s); pr-4643-1612bd6f created 00:37:18Z, first
-# suite 00:37:20Z (2 s); the 00:05 chain rebuild created three refs at 00:05:04-06Z
-# with suites at 00:05:06-08Z (2 s). 300 s is therefore a ~100x margin over the
-# observed tail while still recovering ~55 of the 60-minute timeout.
-DEFAULT_GRACE_SECONDS = 300
+# Grace before a zero-suite group is called dropped.
+#
+# MEASURED, N=209 merge-group refs over 2026-07-25T00:00Z -> 2026-07-28T01:30Z, using
+# the activity `branch_creation` timestamp -> earliest check-suite `created_at`:
+#     min 1 s | p50 2 s | p90 3 s | p99 4 s | MAX 4 s   (whole-second quantisation)
+# There is NO tail between 4 s and 3600 s. The failure mode is CATEGORICAL, not slow:
+# a group either gets its suites within 1-4 s or gets none at all, ever. Two refs in
+# that population got none — `pr-4534-3cc1bf82…` (2026-07-27, lifetime 60m27s) and
+# `pr-4331-f6be7767…` (2026-07-26, lifetime 61m07s) — a base rate of 2/211 ~ 0.95%,
+# both reaped by the 60-minute ruleset timeout.
+#
+# 120 s is 30x the measured MAXIMUM and 60x the median, and sits strictly below the
+# 300 s cron interval, so it never costs an extra tick: any ref that is going to get
+# suites has them long before the first tick that could look at it. Detection is
+# tick-quantised, so effective recovery is 2-10 min against the 60-minute timeout.
+DEFAULT_GRACE_SECONDS = 120
 # At most this many watchdog recoveries for one PR inside the rolling window below.
 # A re-enqueue mints a NEW queue attempt, so an attempt-scoped cap would be no cap at
 # all; the budget is per PR per wall-clock window. Exhaustion is not an escalation —
@@ -912,9 +928,12 @@ def self_test() -> None:
     assert call(suites=None).verdict == REFUSE, call(suites=None)
     # Fail safe: no branch_creation row => no anchor => no action.
     assert call(created_at=None).verdict == REFUSE, call(created_at=None)
-    # Grace gate.
-    assert call(now=built + timedelta(seconds=299)).verdict == WAIT
-    assert call(now=built + timedelta(seconds=301)).verdict == RECOVER
+    # Grace gate, expressed against the constant so a retune cannot leave it stale.
+    grace = DEFAULT_GRACE_SECONDS
+    assert call(now=built + timedelta(seconds=grace - 1)).verdict == WAIT
+    assert call(now=built + timedelta(seconds=grace)).verdict == RECOVER
+    # ...and pinned against the MEASURED dispatch latency (N=209, max 4 s).
+    assert grace >= 20 * 4 and grace <= 300, grace
     # Idempotence: a repeat detection on the SAME head is a no-op.
     same = Marker(
         pr=4534,

@@ -141,11 +141,15 @@ class TestZeroSuiteDetection(unittest.TestCase):
             mgw.RECOVER,
         )
 
-    def test_grace_exceeds_measured_dispatch_latency_by_two_orders(self):
-        # Measured create->first-suite latency on this repo is single-digit SECONDS
-        # (repository activity branch_creation -> earliest check-suite created_at).
-        # Pin a floor so nobody "tunes" the grace down to the noise band.
-        self.assertGreaterEqual(mgw.DEFAULT_GRACE_SECONDS, 300)
+    def test_grace_is_bounded_by_the_measured_dispatch_latency(self):
+        # MEASURED N=209 (2026-07-25 -> 07-28): create->first-suite latency
+        # min 1 s / p50 2 s / p99 4 s / MAX 4 s, with no tail between 4 s and 3600 s.
+        # Floor: >=20x the measured maximum, so nobody tunes the grace into the noise
+        # band. Ceiling: <= the 300 s cron interval, so the grace never costs an extra
+        # tick (a longer grace would silently halve the recovery speed).
+        measured_max_seconds = 4
+        self.assertGreaterEqual(mgw.DEFAULT_GRACE_SECONDS, 20 * measured_max_seconds)
+        self.assertLessEqual(mgw.DEFAULT_GRACE_SECONDS, 300)
 
     def test_only_awaiting_checks_is_actionable(self):
         self.assertEqual(mgw.ACTIONABLE_STATES, frozenset({"AWAITING_CHECKS"}))
