@@ -137,6 +137,28 @@ The host MUST complete OIDC validation before supplying an authenticated WebID; 
 owner parameter only provisions WAC and is not authentication. Do not enable or stub
 `solid-oidc-verifier` inside wasm: its pinned crypto backend is native-only.
 
+[GPT-5.6] Pod contents are ephemeral by default — `new SolidServer(...)` keeps everything in linear
+memory and loses it when the host drops the instance. `SolidServer.withSnapshot(baseUrl, ownerWebid,
+bytes)` is the opt-in persistent constructor: the same in-memory pod behind a journaling `Store`
+decorator. `snapshot()` returns the bytes to persist (`undefined` for a pod built with `new`), and
+`snapshotRevision()` is a monotonic mutation counter so a host can skip a flush when nothing moved.
+
+```js
+const previous = await readFile(statePath).catch(() => new Uint8Array());
+const pod = SolidServer.withSnapshot("https://pod.example", owner, previous);
+// ... serve requests ...
+await writeFile(statePath, pod.snapshot());   // survives the next listener restart
+```
+
+The wasm module owns only the byte format and the replay; the durable medium (`node:fs`,
+IndexedDB) and the flush policy stay in the host. A `Store` that awaits a JS promise per operation
+is not available: the trait is `Send + Sync` and every `JsValue` is `!Send`. The encoding folds
+superseded writes and deleted resources away, so it tracks current contents rather than full
+history. Restart replays the writes, so `Last-Modified` becomes the replay instant, while the
+body-derived `ETag` is unchanged — a pre-restart `If-None-Match` still gets its 304. An owner ACL is provisioned only when the
+restored pod has none, so a restart never reverts an ACL the owner edited; a snapshot that cannot be
+decoded or replayed is refused rather than booting a partly-populated pod.
+
 [GPT-5.6] The full tier's `/sparql` is query-only SPARQL 1.1 Protocol: GET uses the `query`
 parameter; POST accepts `application/sparql-query` or form encoding. SELECT/ASK return
 `application/sparql-results+json`; CONSTRUCT returns `application/n-triples`; DESCRIBE and UPDATE

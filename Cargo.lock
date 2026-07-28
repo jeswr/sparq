@@ -5329,6 +5329,7 @@ dependencies = [
 name = "sparq-lws-wasm"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "console_error_panic_hook",
  "futures-executor",
