@@ -11,8 +11,11 @@
 //! any relative order across engines. Comparing the full sequence element-for-element would be wrong
 //! in general (it is only safe when the sort key is a total order over the projected variables).
 //!
-//! These are pure comparators over already-normalised results; *wiring* them into the fuzz harness
-//! against a live oracle is a separate DAG node (`sq-qcnn.5`).
+//! These are pure comparators over already-normalised results. `crates/sparq-bench`'s Oxigraph
+//! fuzzer wires them to a live oracle (`sq-qcnn.5`): its `check_bindings` decides the `SELECT` bag
+//! with [`multiset_equal`], and its `check_ordered` decides an `ORDER BY` sequence with
+//! [`order_by_equal`] over every projected variable — falling back to a counted skip where a
+//! `LIMIT` truncates a sequence whose sort key is not total over the projection.
 
 use crate::json::Solution;
 use crate::term::canonical_key;

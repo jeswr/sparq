@@ -3,6 +3,9 @@
 //! random queries across every plan shape, then checks that
 //!   sparq `query().len()`  ==  Oxigraph solution count            (full differential)
 //!   sparq `query()` rows    ==  Oxigraph's solution MULTISET      (`check_bindings`)
+//!   sparq `query()` order   ==  Oxigraph's `ORDER BY` sequence    (`check_ordered`)
+//!   sparq `ask()`           ==  Oxigraph's ASK boolean            (`check_ask`)
+//!   sparq `construct_or_describe()` == Oxigraph's graph, up to bnode iso (`check_graph`)
 //!   sparq `count()`         ==  sparq `query().len()`             (count-path differential)
 //!
 //! The MULTISET check is what makes a same-cardinality WRONG ANSWER visible: a count
@@ -10,8 +13,17 @@
 //! `MIN` / `MAX` returning the wrong number, or a `BIND` / `VALUES` / sub-select binding
 //! the wrong term. Every projected binding is compared, duplicates included, order
 //! independently; the deliberate exclusions (arbitrary row CHOICE under `LIMIT` /
-//! `OFFSET`, and the harness-forced numeric-lexical normalisation) are documented on
-//! `check_bindings` / `term_key` and counted in the summary line.
+//! `OFFSET`, and the harness-forced derived-integer datatype normalisation) are documented
+//! on `check_bindings` / `harness_datatype` and counted in the summary line.
+//!
+//! [OPUS-5] sq-qcnn.5: every value-level equality here is decided by **`sparq-difftest`**,
+//! the engine-independent normalisation library (exact `num-bigint`/`bigdecimal` numerics,
+//! XSD temporal rules, third-party RDFC-1.0 blank-node labelling), NOT by any sparq crate —
+//! see the section header above `to_difftest` for why that independence is load-bearing.
+//! `ASK` and `CONSTRUCT`/`DESCRIBE` are compared by their own oracles (the boolean, and the
+//! triple set up to blank-node isomorphism) rather than by a cardinality, which cannot see
+//! either. The generator emits only `SELECT` today — extending it to the graph/boolean forms
+//! is `sq-qcnn.6`, so those two oracles are currently exercised by this module's unit tests.
 //!
 //! Oxigraph is an independent, mature SPARQL implementation, so an agreement over
 //! thousands of random cases is strong evidence the optimizations (tagged ValueIds,
@@ -42,6 +54,13 @@
 //! category).
 
 use oxigraph::store::Store;
+// [OPUS-5] sq-qcnn.5 — the ENGINE-INDEPENDENT comparators (see the section header above
+// `to_difftest`): every value-level equality decision in this harness is taken by a crate
+// that depends on no sparq crate.
+use sparq_difftest::{
+    canonical_key, graph_isomorphic, multiset_equal, order_by_equal, solutions_have_blank_nodes,
+    solutions_isomorphic, Solution as DSolution, Term as DTerm,
+};
 
 // ── ADJUDICATED-DIVERGENCE ALLOWLIST (bead sq-0iqzw) ─────────────────────────────
 //
@@ -255,8 +274,12 @@ const CATEGORIES: &[&str] = &[
 ///   texts are what `parse_eq_filter` recognises as the adjudicated sq-eibog shape;
 ///   a look-alike elsewhere would be re-derived by a sub-oracle that does not model
 ///   the surrounding query.
-/// * **No `ORDER BY` outside the `order` category** — `check_ordered` compares the
-///   first projected column against Oxigraph's `?a`.
+/// * **A PLAIN-VARIABLE sort key**, and — under `LIMIT`/`OFFSET` — one that covers every
+///   projected variable. `check_ordered` fails CLOSED otherwise (skip-with-count, see
+///   `order_by_vars` / `sort_key_is_total`), so a category that sorted by an expression, or
+///   truncated a sequence whose ties are visible in the projection, would silently lose its
+///   order-level oracle rather than gain a wrong one. The `order` category satisfies both by
+///   projecting exactly its sort variable.
 /// * **No blank nodes.** Keeping them out of the generator is exactly what keeps the
 ///   sq-ai2wa (bnode-vs-IRI) allowlist class INERT; introducing one makes that class
 ///   live (its detector is already wired) and needs its own adjudication first.
@@ -508,8 +531,14 @@ fn gen_query(rng: &mut Rng, category: &str) -> String {
 fn oxi_count(store: &Store, q: &str) -> Result<usize, String> {
     match store.query(q).map_err(|e| e.to_string())? {
         oxigraph::sparql::QueryResults::Solutions(s) => Ok(s.count()),
-        oxigraph::sparql::QueryResults::Boolean(_) => Ok(1),
-        oxigraph::sparql::QueryResults::Graph(g) => Ok(g.count()),
+        // [OPUS-5] sq-qcnn.5: an ASK / CONSTRUCT / DESCRIBE result is NOT count-comparable
+        // (see `QueryForm`) — one boolean result whichever way it answered, and a graph of
+        // the right SIZE can still be the wrong graph. `run` routes those forms to
+        // `check_ask` / `check_graph` before reaching here, so arriving here means the form
+        // classifier missed a case: that must become a SKIP, never a count comparison.
+        _ => Err("not a solution sequence (ASK / CONSTRUCT are compared by their own \
+                  oracle, never by a count)"
+            .to_string()),
     }
 }
 
@@ -840,181 +869,190 @@ fn is_bnode_iri_inequality(store: &Store, q: &str) -> bool {
     })
 }
 
-/// Oxigraph's ordered sequence of a single projected variable, as term strings.
-// clippy: differential oracle pins oxigraph's legacy Store::query semantics
-#[allow(deprecated)]
-fn oxi_seq(store: &Store, q: &str, var: &str) -> Option<Vec<String>> {
-    match store.query(q).ok()? {
-        oxigraph::sparql::QueryResults::Solutions(s) => Some(
-            s.filter_map(|sol| sol.ok())
-                .map(|sol| sol.get(var).map(|t| t.to_string()).unwrap_or_default())
-                .collect(),
-        ),
-        _ => None,
-    }
-}
+// ── THE CANONICAL CROSS-ORACLE COMPARATORS (sq-qcnn.5) ───────────────────────────
+//
+// The value-level comparison is delegated WHOLESALE to `sparq-difftest` — the
+// engine-independent normalisation library built for exactly this job (sq-qcnn.4,
+// `research/differential-testing-value-level.md`). That crate depends on NO sparq crate:
+// its numeric tower is `num-bigint` / `bigdecimal`, its XSD rules are implemented from the
+// spec, and its blank-node labelling is third-party RDFC-1.0 (`rdf-canon`), NOT
+// `sparq-canon`. Keying both sides through sparq's OWN value code would make a bug there
+// apply identically to both sides and CANCEL — the differential would go blind exactly
+// where it must see. Keying them through `sparq-difftest` does not.
+//
+// `oxrdf` is used here purely as a CARRIER: both engines already materialise the same
+// `oxrdf::Term`, and `to_difftest` copies it field-for-field into the neutral model. No
+// equality decision is taken on the oxrdf side — which terms count as equal is settled
+// entirely by `sparq_difftest::canonical_key` / `sparq_difftest::iso`.
 
-/// Order-sensitive differential for `ORDER BY` queries (the count check can't see
-/// reordering): the exact ordered sequence of the projected `?a` (an inline-integer
-/// column) must match Oxigraph element-for-element. Catches a by-id-not-by-value
-/// ordering bug for tagged ValueIds. Returns Err(detail) on a mismatch.
-fn check_ordered(g: &sparq_core::Graph, store: &Store, q: &str) -> Result<(), String> {
-    let r = sparq_engine::query(g, q).map_err(|e| format!("sparq query error: {e}"))?;
-    let sparq: Vec<String> = r
-        .rows
-        .iter()
-        .map(|row| row[0].as_ref().map(|t| t.to_string()).unwrap_or_default())
-        .collect();
-    let oxi = oxi_seq(store, q, "a").ok_or("oxigraph produced no solution sequence")?;
-    if sparq != oxi {
-        return Err(format!(
-            "ORDER sequence differs\n  sparq={sparq:?}\n  oxi  ={oxi:?}"
-        ));
-    }
-    Ok(())
-}
-
-/// One engine's COMPLETE solution multiset, canonicalised for an order-INSENSITIVE,
-/// duplicate-PRESERVING comparison: each row is its bound `(variable name, N-Triples
-/// term)` pairs sorted by variable, and the rows themselves are sorted. Sorting the
-/// pairs makes projection ORDER irrelevant and represents an unbound variable by its
-/// absence; sorting the rows (rather than collecting into a set) keeps duplicate rows
-/// significant, which is what SPARQL's bag semantics require.
-type Solutions = Vec<Vec<(String, String)>>;
+/// One engine's solution sequence in the neutral model, **in engine order**. Order is kept
+/// (not sorted away as it was under the local comparator) because the `ORDER BY` oracle
+/// needs it; the multiset oracle is order-insensitive by construction.
+type Solutions = Vec<DSolution>;
 
 /// XSD normalises a numeric literal's LEXICAL form, and Oxigraph's store additionally
 /// normalises every type DERIVED from `xsd:integer` (`xsd:int`, `xsd:long`, the
-/// unsigned/bounded types, …) down to `xsd:integer` when it loads the graph. sparq
-/// keeps the term exactly as written, so the two engines report a different — but
-/// equally faithful — datatype for the SAME stored triple. Collapsing the derived
-/// integer types onto their `xsd:integer` base makes the two comparable; the primitive
-/// numeric types stay DISTINCT, so an `integer`-vs-`decimal`-vs-`double` disagreement
-/// on a computed value is still a mismatch.
-fn canonical_numeric_datatype(dt: &str) -> &str {
-    match dt {
-        "http://www.w3.org/2001/XMLSchema#decimal"
-        | "http://www.w3.org/2001/XMLSchema#double"
-        | "http://www.w3.org/2001/XMLSchema#float" => dt,
-        // everything else in the numeric family derives from xsd:integer
-        _ => "http://www.w3.org/2001/XMLSchema#integer",
-    }
-}
-
-/// The comparison key of one bound term: its N-Triples form — so lexical form, datatype,
-/// language tag and IRI all matter — EXCEPT that a NUMERIC literal is keyed by its exact
-/// decimal VALUE (`decimal_expansion`, arbitrary precision, never f64) under its
-/// canonical numeric datatype.
+/// unsigned/bounded types, …) down to `xsd:integer` when it loads the graph. sparq keeps the
+/// term exactly as written, so the two engines report a different — but equally faithful —
+/// datatype for the SAME stored triple.
 ///
-/// That single exception is forced by the HARNESS, not a softening of the oracle:
-/// Oxigraph's store re-canonicalises numeric literals on LOAD, so a graph containing
-/// `"-0"^^xsd:integer` / `"116"^^xsd:int` comes back as `"0"^^xsd:integer` /
-/// `"116"^^xsd:integer` from Oxigraph and unchanged from sparq — the same RDF value,
-/// differing only in a lexical form / derived datatype Oxigraph no longer has. The same
-/// applies to a COMPUTED numeric (`SUM` over integers yields `"113"` vs `"113.0"`):
-/// XPath defines the arithmetic VALUE, and SPARQL does not pin which lexical form an
-/// implementation writes for it. Everything the spec DOES pin stays compared EXACTLY —
-/// the value is compared digit-for-digit (the generator's >2^53 integers and 18-digit
-/// decimals, which a shared f64 would wrongly equate, still separate here), and a wrong
-/// number, primitive datatype, IRI, language tag or string is still a mismatch.
-fn term_key(t: &oxigraph::model::Term) -> String {
-    if let oxigraph::model::Term::Literal(l) = t {
-        if oxi_family(t) == Some("num") {
-            if let Some((neg, int, frac)) = decimal_expansion(l.value()) {
-                let sign = if neg { "-" } else { "" };
-                let point = if frac.is_empty() { "" } else { "." };
-                let dt = canonical_numeric_datatype(l.datatype().as_str());
-                return format!("\"{sign}{int}{point}{frac}\"^^<{dt}>");
-            }
-        }
+/// That is a HARNESS artefact, not a softening of the oracle, so it is applied on the way
+/// INTO the neutral model rather than hidden inside the comparator: the types derived from
+/// `xsd:integer` collapse onto their base, and nothing else moves. The primitive numeric
+/// types stay DISTINCT (`integer` vs `decimal` vs `double`), and the VALUE is still compared
+/// exactly and at arbitrary precision inside `sparq-difftest` — so the >2^53 integers and
+/// 18-digit decimals the generator emits to defeat an f64 oracle still separate.
+fn harness_datatype(dt: &str) -> &str {
+    const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+    const INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
+    match dt.strip_prefix(XSD) {
+        Some(
+            "long" | "int" | "short" | "byte" | "nonNegativeInteger" | "positiveInteger"
+            | "nonPositiveInteger" | "negativeInteger" | "unsignedLong" | "unsignedInt"
+            | "unsignedShort" | "unsignedByte",
+        ) => INTEGER,
+        _ => dt,
     }
-    t.to_string()
 }
 
-fn canon_solutions(mut rows: Solutions) -> Solutions {
-    for r in rows.iter_mut() {
-        r.sort();
+/// Copy one engine's `oxrdf` term into `sparq-difftest`'s neutral term model — a carrier
+/// conversion, not an equality decision (see the section header).
+fn to_difftest(t: &oxigraph::model::Term) -> DTerm {
+    use oxigraph::model::Term as OTerm;
+    match t {
+        OTerm::NamedNode(n) => DTerm::Iri(n.as_str().to_string()),
+        OTerm::BlankNode(b) => DTerm::Blank(b.as_str().to_string()),
+        OTerm::Literal(l) => DTerm::Literal {
+            lexical: l.value().to_string(),
+            datatype: harness_datatype(l.datatype().as_str()).to_string(),
+            lang: l.language().map(str::to_string),
+        },
+        OTerm::Triple(t) => DTerm::Triple(Box::new(triple_to_difftest(t))),
     }
-    rows.sort();
-    rows
 }
 
-/// Oxigraph's full solution multiset. `None` when the query did not produce solutions
-/// (ASK / CONSTRUCT — the generator emits neither) or a solution failed to decode.
+/// Copy an `oxrdf` triple (a `CONSTRUCT`/`DESCRIBE` result triple, or an RDF-1.2 triple
+/// term) into the neutral model.
+fn triple_to_difftest(t: &oxigraph::model::Triple) -> [DTerm; 3] {
+    [
+        to_difftest(&oxigraph::model::Term::from(t.subject.clone())),
+        DTerm::Iri(t.predicate.as_str().to_string()),
+        to_difftest(&t.object),
+    ]
+}
+
+/// Oxigraph's full solution sequence, in engine order. `None` when the query did not produce
+/// a solution sequence (an `ASK`/`CONSTRUCT` — compared by its own oracle) or a solution
+/// failed to decode.
 // clippy: differential oracle pins oxigraph's legacy Store::query semantics
 #[allow(deprecated)]
 fn oxi_solutions(store: &Store, q: &str) -> Option<Solutions> {
     match store.query(q).ok()? {
         oxigraph::sparql::QueryResults::Solutions(s) => {
-            let mut out: Solutions = Vec::new();
+            let mut out = Solutions::new();
             for sol in s {
                 let sol = sol.ok()?;
                 out.push(
                     sol.iter()
-                        .map(|(v, t)| (v.as_str().to_string(), term_key(t)))
+                        .map(|(v, t)| (v.as_str().to_string(), to_difftest(t)))
                         .collect(),
                 );
             }
-            Some(canon_solutions(out))
+            Some(out)
         }
         _ => None,
     }
 }
 
-/// sparq's full solution multiset, in the same canonical form as `oxi_solutions`.
-/// Both engines materialise the SAME `oxrdf::Term` type, so one `term_key` decides
-/// both sides identically.
+/// sparq's full solution sequence, in the same neutral form as `oxi_solutions`. Both engines
+/// materialise the SAME `oxrdf::Term`, so one conversion feeds both sides identically.
 fn sparq_solutions(g: &sparq_core::Graph, q: &str) -> Option<Solutions> {
     let r = sparq_engine::query(g, q).ok()?;
-    let rows = r
-        .rows
-        .iter()
-        .map(|row| {
-            r.vars
-                .iter()
-                .zip(row.iter())
-                .filter_map(|(v, t)| t.as_ref().map(|t| (v.as_str().to_string(), term_key(t))))
-                .collect()
-        })
-        .collect();
-    Some(canon_solutions(rows))
+    Some(
+        r.rows
+            .iter()
+            .map(|row| {
+                r.vars
+                    .iter()
+                    .zip(row.iter())
+                    .filter_map(|(v, t)| {
+                        t.as_ref().map(|t| (v.as_str().to_string(), to_difftest(t)))
+                    })
+                    .collect()
+            })
+            .collect(),
+    )
 }
 
-/// A blank node in either engine's ANSWER makes the two multisets incomparable BY LABEL:
-/// SPARQL leaves bnode labels implementation-defined, so equal answers can carry
-/// different ones. The generator emits no blank nodes (see `gen_query`), so this is a
-/// guard, not a routine skip — but it is a REAL coverage gap whenever it fires, and
-/// `BindingsCheck::TriageBnode` keeps it visible (see that variant). [OPUS-5] sq-qcnn.7
-fn has_bnode(s: &Solutions) -> bool {
-    s.iter().flatten().any(|(_, t)| t.starts_with("_:"))
-}
-
-/// The outcome of a full-binding comparison attempt. Distinguishing the two NON-compared
-/// outcomes is the point: a bnode answer is a coverage GAP (an answer nobody checked),
-/// whereas a `LIMIT`-without-total-order answer is a case that is not differential-testable
-/// at all. Folding them into one number would report the gap as if it were the latter.
-/// [OPUS-5] sq-qcnn.7
+/// The outcome of one cross-oracle comparison attempt. The non-failing outcomes mean
+/// DIFFERENT things and are counted separately: an answer compared by value, an answer that
+/// needed blank-node isomorphism, an answer that is not differential-testable at all, and an
+/// answer nobody could compare. Folding them into one number would report a coverage GAP as
+/// if it were a documented non-testable case. [OPUS-5] sq-qcnn.5
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BindingsCheck {
-    /// The full solution multiset was compared.
+enum CheckOutcome {
+    /// The full answer was compared by VALUE (`multiset_equal` / `order_by_equal`).
     Compared,
-    /// Deliberately NOT comparable: `LIMIT`/`OFFSET` without a total order (the row CHOICE
-    /// is arbitrary, so two conformant engines may legitimately differ), or a result that is
-    /// not a solution sequence.
+    /// Compared up to a consistent bijection of the blank nodes (`solutions_isomorphic`,
+    /// RDFC-1.0). Blank-node labels are engine-local, so a bnode-bearing answer is only
+    /// comparable up to a bijection — before this wiring it was routed to a counted TRIAGE
+    /// bucket and compared by nobody.
+    ComparedIsomorphic,
+    /// Deliberately NOT comparable: `LIMIT`/`OFFSET` without a total order (the row CHOICE is
+    /// arbitrary, so two conformant engines may legitimately differ), a sort key this harness
+    /// does not model, or a result that is not a solution sequence.
     SkippedRowChoice,
-    /// A blank node in either answer. Comparing these needs cross-oracle blank-node
-    /// ISOMORPHISM (canonical labelling), which `sparq-difftest`'s `iso` module now provides
-    /// but which reaches this harness only with the difftest wiring (`sq-qcnn.5`). Until
-    /// then this is routed to an explicitly COUNTED triage bucket — never a silent skip, and
-    /// never folded into `SkippedRowChoice`, so a run that stopped comparing bnode answers
-    /// shows up as a number rather than as green.
-    TriageBnode,
+    /// An `ORDER BY` answer carrying a blank node. `sparq-difftest` has no order-PRESERVING
+    /// isomorphism comparator (`canonical_solutions` canonicalises the table as a whole, which
+    /// loses the sequence), so the ordered check cannot run on it. Counted on its own so the
+    /// gap stays a number rather than reading as green.
+    SkippedBnodeOrder,
+}
+
+/// Per-oracle tallies of the [`CheckOutcome`]s, printed verbatim in the summary line.
+#[derive(Default)]
+struct CheckCounts {
+    compared: u64,
+    compared_iso: u64,
+    skipped_row_choice: u64,
+    skipped_bnode_order: u64,
+}
+
+impl CheckCounts {
+    fn record(&mut self, o: CheckOutcome) {
+        match o {
+            CheckOutcome::Compared => self.compared += 1,
+            CheckOutcome::ComparedIsomorphic => self.compared_iso += 1,
+            CheckOutcome::SkippedRowChoice => self.skipped_row_choice += 1,
+            CheckOutcome::SkippedBnodeOrder => self.skipped_bnode_order += 1,
+        }
+    }
+}
+
+impl std::fmt::Display for CheckCounts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "compared={} iso={} skip(row-choice)={} skip(bnode-order)={}",
+            self.compared, self.compared_iso, self.skipped_row_choice, self.skipped_bnode_order
+        )
+    }
+}
+
+/// The value-canonical key of one solution: its `(variable, canonical term key)` pairs, held
+/// structurally. This is the SAME keying `sparq_difftest::multiset_equal` compares by, so the
+/// repro diff below can never disagree with the verdict above it.
+fn row_key(s: &DSolution) -> Vec<(String, String)> {
+    s.iter()
+        .map(|(v, t)| (v.clone(), canonical_key(t)))
+        .collect()
 }
 
 /// The first row present in `a` but not in `b` (as a multiset), for the repro message.
 fn first_extra_row(a: &Solutions, b: &Solutions) -> Option<String> {
-    let mut rest = b.clone();
-    for row in a {
-        match rest.iter().position(|r| r == row) {
+    let mut rest: Vec<Vec<(String, String)>> = b.iter().map(row_key).collect();
+    for row in a.iter().map(row_key) {
+        match rest.iter().position(|r| *r == row) {
             Some(i) => {
                 rest.remove(i);
             }
@@ -1024,43 +1062,50 @@ fn first_extra_row(a: &Solutions, b: &Solutions) -> Option<String> {
     None
 }
 
-/// FULL-BINDING differential: sparq's complete solution multiset must equal Oxigraph's
-/// — every projected binding, duplicates included — not merely its CARDINALITY. The
-/// count differential alone cannot see a same-cardinality WRONG ANSWER (a path landing
-/// on the wrong endpoints, a `COUNT`/`MIN`/`MAX` off by one, a `BIND`/`VALUES`/
-/// sub-select binding the wrong term), which is exactly what the `path`, `aggregate`,
-/// `subquery`, `values` and `bind` categories generate.
+/// FULL-BINDING differential: sparq's complete solution multiset must equal Oxigraph's —
+/// every projected binding, duplicates included — not merely its CARDINALITY. The count
+/// differential alone cannot see a same-cardinality WRONG ANSWER (a path landing on the wrong
+/// endpoints, a `COUNT`/`MIN`/`MAX` off by one, a `BIND`/`VALUES`/sub-select binding the
+/// wrong term), which is exactly what the `path`, `aggregate`, `subquery`, `values` and
+/// `bind` categories generate.
 ///
-/// `Ok(BindingsCheck::SkippedRowChoice)` = deliberately NOT compared (surfaced as
-/// `bindings_skipped` in the summary, so a shard that compared nothing is visible rather
-/// than silently green):
-///   * `LIMIT` / `OFFSET` without a total order — SPARQL leaves the row CHOICE
-///     arbitrary there, so two conformant engines may return different (equally valid)
-///     rows. The `limit` category is exactly that shape; the `order` category's
-///     `ORDER BY … LIMIT` is covered by `check_ordered`, which compares the projected
-///     sequence element-for-element (strictly stronger than this multiset check).
+/// `Ok(CheckOutcome::SkippedRowChoice)`:
+///   * `LIMIT` / `OFFSET` — SPARQL leaves the row CHOICE arbitrary without a total order, so
+///     two conformant engines may return different (equally valid) rows. The `limit` category
+///     is exactly that shape; the `order` category's `ORDER BY … LIMIT` is covered by
+///     `check_ordered`, which additionally pins the sequence.
 ///   * a non-solutions result.
 ///
-/// `Ok(BindingsCheck::TriageBnode)` = a blank node in either answer (see `has_bnode`):
-/// its own COUNTED triage bucket, not a silent skip and not a row-choice skip.
-fn check_bindings(g: &sparq_core::Graph, store: &Store, q: &str) -> Result<BindingsCheck, String> {
+/// `Ok(CheckOutcome::ComparedIsomorphic)` = a blank node in either answer: compared up to a
+/// bijection of the blank nodes instead of by label.
+fn check_bindings(g: &sparq_core::Graph, store: &Store, q: &str) -> Result<CheckOutcome, String> {
     if q.contains("LIMIT") || q.contains("OFFSET") {
-        return Ok(BindingsCheck::SkippedRowChoice);
+        return Ok(CheckOutcome::SkippedRowChoice);
     }
     let (Some(sparq), Some(oxi)) = (sparq_solutions(g, q), oxi_solutions(store, q)) else {
-        return Ok(BindingsCheck::SkippedRowChoice);
+        return Ok(CheckOutcome::SkippedRowChoice);
     };
-    if has_bnode(&sparq) || has_bnode(&oxi) {
-        return Ok(BindingsCheck::TriageBnode);
+    if solutions_have_blank_nodes(&sparq) || solutions_have_blank_nodes(&oxi) {
+        return match solutions_isomorphic(&sparq, &oxi) {
+            Ok(true) => Ok(CheckOutcome::ComparedIsomorphic),
+            Ok(false) => Err(format!(
+                "solution multiset differs UP TO BLANK-NODE ISOMORPHISM \
+                 (sparq {} rows / oxi {} rows)",
+                sparq.len(),
+                oxi.len()
+            )),
+            // A canonical labelling that cannot be produced is invalid/unsupported oracle
+            // output, not agreement — it must be reported, never absorbed.
+            Err(e) => Err(format!("blank-node canonicalisation failed: {e}")),
+        };
     }
-    compare_solutions(&sparq, &oxi).map(|()| BindingsCheck::Compared)
+    compare_solutions(&sparq, &oxi).map(|()| CheckOutcome::Compared)
 }
 
-/// Multiset equality of two canonicalised solution sets, with a repro-sized diff.
-/// Comparing the SORTED row vectors (not sets) makes this sensitive to DUPLICATES —
-/// SPARQL's bag semantics mean `{a, a, b}` and `{a, b, b}` are different answers.
+/// Multiset equality of two solution sequences, with a repro-sized diff. Bag semantics:
+/// `{a, a, b}` and `{a, b, b}` are DIFFERENT answers, so this is sensitive to duplicates.
 fn compare_solutions(sparq: &Solutions, oxi: &Solutions) -> Result<(), String> {
-    if sparq == oxi {
+    if multiset_equal(sparq, oxi) {
         return Ok(());
     }
     let only_sparq = first_extra_row(sparq, oxi).unwrap_or_else(|| "-".to_string());
@@ -1071,6 +1116,204 @@ fn compare_solutions(sparq: &Solutions, oxi: &Solutions) -> Result<(), String> {
         sparq.len(),
         oxi.len()
     ))
+}
+
+/// The variables an `ORDER BY` clause sorts on, in clause order — `None` when the clause
+/// holds anything other than a bare `?v` / `ASC(?v)` / `DESC(?v)`.
+///
+/// Fail-CLOSED on an expression sort key (`ORDER BY (?a + 1)`): partitioning the sequence by
+/// `?a` when the engine sorted by `f(?a)` would SPLIT a genuine tie run into ordered
+/// sub-runs and so demand an agreement SPARQL does not require — a manufactured mismatch.
+/// The caller treats `None` as a skip-with-count.
+fn order_by_vars(q: &str) -> Option<Vec<String>> {
+    let mut clause = q.split("ORDER BY").nth(1)?;
+    // The ORDER BY clause runs to the end of the query or to the next solution modifier.
+    for kw in ["LIMIT", "OFFSET", "VALUES"] {
+        if let Some(i) = clause.find(kw) {
+            clause = &clause[..i];
+        }
+    }
+    let flat = clause.replace(['(', ')', ','], " ");
+    let mut vars = Vec::new();
+    for tok in flat.split_whitespace() {
+        if let Some(name) = tok.strip_prefix('?') {
+            if name.is_empty() {
+                return None;
+            }
+            vars.push(name.to_string());
+        } else if !tok.eq_ignore_ascii_case("ASC") && !tok.eq_ignore_ascii_case("DESC") {
+            return None;
+        }
+    }
+    if vars.is_empty() {
+        None
+    } else {
+        Some(vars)
+    }
+}
+
+/// Is the sort key TOTAL over what the projection can distinguish — i.e. does every variable
+/// bound anywhere in the answer appear in the sort key? When it does, rows sharing a sort key
+/// are the SAME solution, so a `LIMIT` truncation that cuts a tie run cannot make two
+/// conformant engines differ.
+fn sort_key_is_total(sols: &Solutions, sort_vars: &[String]) -> bool {
+    sols.iter()
+        .flat_map(|s| s.keys())
+        .all(|v| sort_vars.contains(v))
+}
+
+/// The whole sequence as canonical row keys, for the repro message.
+fn seq_keys(s: &Solutions) -> Vec<Vec<(String, String)>> {
+    s.iter().map(row_key).collect()
+}
+
+/// ORDER-SENSITIVE differential for `ORDER BY` queries (the multiset check cannot see a
+/// reordering): the two engines' sequences must agree up to permutation WITHIN each maximal
+/// run of rows equal on the sort key (`sparq_difftest::order_by_equal`), comparing EVERY
+/// projected variable — not just the first column against Oxigraph's `?a`, which is all the
+/// pre-`sq-qcnn.5` check did.
+///
+/// SPARQL `ORDER BY` is a PARTIAL order: rows tied on the sort key may appear in any relative
+/// order, so an element-for-element sequence comparison would be wrong in general. The
+/// equivalence-class comparison is exactly as strong as the spec where the spec pins the
+/// order, and no stronger where it does not.
+///
+/// `Ok(CheckOutcome::SkippedRowChoice)`:
+///   * the sort key is not a list of plain variables (see `order_by_vars`);
+///   * `LIMIT`/`OFFSET` truncates the sequence and the sort key is NOT total over the
+///     projected variables — truncation then cuts a tie run and WHICH tied rows survive is
+///     arbitrary, so this stays cardinality-only. With a total sort key each run is a single
+///     row, the truncation is deterministic, and the check runs: that is the "add a total
+///     tiebreaker" escape hatch, and it is why the `order` category (whose only projected
+///     variable IS its sort key) is still compared under its `LIMIT`.
+///   * one side produced no solution sequence.
+///
+/// `Ok(CheckOutcome::SkippedBnodeOrder)`: a blank node in either answer (see [`CheckOutcome`]).
+fn check_ordered(g: &sparq_core::Graph, store: &Store, q: &str) -> Result<CheckOutcome, String> {
+    let Some(sort_vars) = order_by_vars(q) else {
+        return Ok(CheckOutcome::SkippedRowChoice);
+    };
+    let (Some(sparq), Some(oxi)) = (sparq_solutions(g, q), oxi_solutions(store, q)) else {
+        return Ok(CheckOutcome::SkippedRowChoice);
+    };
+    if (q.contains("LIMIT") || q.contains("OFFSET"))
+        && !(sort_key_is_total(&sparq, &sort_vars) && sort_key_is_total(&oxi, &sort_vars))
+    {
+        return Ok(CheckOutcome::SkippedRowChoice);
+    }
+    if solutions_have_blank_nodes(&sparq) || solutions_have_blank_nodes(&oxi) {
+        return Ok(CheckOutcome::SkippedBnodeOrder);
+    }
+    compare_ordered(&sparq, &oxi, &sort_vars).map(|()| CheckOutcome::Compared)
+}
+
+/// Sort-key-equivalence-class equality of two ordered solution sequences, with a repro-sized
+/// diff. Split out of `check_ordered` so the comparison itself is testable against
+/// hand-authored sequences (the engines always agree on the generated shapes, so a live test
+/// cannot show what a REORDERED answer does).
+fn compare_ordered(sparq: &Solutions, oxi: &Solutions, sort_vars: &[String]) -> Result<(), String> {
+    let refs: Vec<&str> = sort_vars.iter().map(String::as_str).collect();
+    if order_by_equal(sparq, oxi, &refs) {
+        return Ok(());
+    }
+    Err(format!(
+        "ORDER BY sequence differs (up to sort-key equivalence classes over {:?})\n  sparq={:?}\n  oxi  ={:?}",
+        sort_vars,
+        seq_keys(sparq),
+        seq_keys(oxi)
+    ))
+}
+
+/// Which RESULT FORM a query asks for. The three forms need three DIFFERENT oracles — a
+/// solution multiset, a BOOLEAN, and a triple SET — and comparing the last two by CARDINALITY
+/// is simply wrong: an `ASK` is one result whether it answered `true` or `false`, and a
+/// `CONSTRUCT` graph of the right SIZE built from the wrong triples counts the same as the
+/// right one. [OPUS-5] sq-qcnn.5
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueryForm {
+    Select,
+    Ask,
+    /// `CONSTRUCT` / `DESCRIBE` — a graph result.
+    Graph,
+}
+
+/// The result form of a query, read from the first keyword after the prologue. This is a
+/// HARNESS-side classifier over the surface the generator emits (no comments, no `#`-quoted
+/// keywords) — both engines still do the real parsing, and a form this misreads becomes a
+/// SKIP (`oxi_count` refuses a non-solutions result), never a wrong comparison.
+fn query_form(q: &str) -> QueryForm {
+    let mut it = q.split_whitespace();
+    while let Some(tok) = it.next() {
+        let upper = tok.to_ascii_uppercase();
+        match upper.as_str() {
+            "PREFIX" => {
+                it.next();
+                it.next();
+            }
+            "BASE" => {
+                it.next();
+            }
+            _ if upper.starts_with("ASK") => return QueryForm::Ask,
+            _ if upper.starts_with("CONSTRUCT") || upper.starts_with("DESCRIBE") => {
+                return QueryForm::Graph
+            }
+            _ => return QueryForm::Select,
+        }
+    }
+    QueryForm::Select
+}
+
+/// `ASK` differential: the BOOLEAN itself. A cardinality oracle cannot see this at all —
+/// Oxigraph reports one boolean result either way, so `true` and `false` have the same
+/// "count". `Ok(None)` = an engine declined the query (a fair skip, not a wrong answer).
+// clippy: differential oracle pins oxigraph's legacy Store::query semantics
+#[allow(deprecated)]
+fn check_ask(g: &sparq_core::Graph, store: &Store, q: &str) -> Result<Option<()>, String> {
+    let Ok(sparq) = sparq_engine::ask(g, q) else {
+        return Ok(None);
+    };
+    let Ok(oxigraph::sparql::QueryResults::Boolean(oxi)) = store.query(q) else {
+        return Ok(None);
+    };
+    if sparq != oxi {
+        return Err(format!("ASK boolean differs: sparq={sparq} oxigraph={oxi}"));
+    }
+    Ok(Some(()))
+}
+
+/// `CONSTRUCT` / `DESCRIBE` differential: the resulting GRAPH, compared as a triple SET up to
+/// a bijection of its blank nodes (`sparq_difftest::graph_isomorphic`, RDFC-1.0). Comparing
+/// triple COUNTS would pass a graph of the right size built from the wrong triples; comparing
+/// blank-node LABELS would fail two correct answers that merely named their fresh template
+/// blank nodes differently (SPARQL 1.1 §16.2 mints a fresh blank node per solution).
+// clippy: differential oracle pins oxigraph's legacy Store::query semantics
+#[allow(deprecated)]
+fn check_graph(g: &sparq_core::Graph, store: &Store, q: &str) -> Result<Option<()>, String> {
+    let Ok(sparq) = sparq_engine::construct_or_describe(g, q) else {
+        return Ok(None);
+    };
+    let Ok(oxigraph::sparql::QueryResults::Graph(it)) = store.query(q) else {
+        return Ok(None);
+    };
+    let mut oxi = Vec::new();
+    for t in it {
+        match t {
+            Ok(t) => oxi.push(t),
+            Err(_) => return Ok(None),
+        }
+    }
+    let sparq_t: Vec<[DTerm; 3]> = sparq.iter().map(triple_to_difftest).collect();
+    let oxi_t: Vec<[DTerm; 3]> = oxi.iter().map(triple_to_difftest).collect();
+    match graph_isomorphic(&sparq_t, &oxi_t) {
+        Ok(true) => Ok(Some(())),
+        Ok(false) => Err(format!(
+            "CONSTRUCT/DESCRIBE graph differs up to blank-node isomorphism \
+             (sparq {} triples / oxi {} triples)",
+            sparq_t.len(),
+            oxi_t.len()
+        )),
+        Err(e) => Err(format!("graph canonicalisation failed: {e}")),
+    }
 }
 
 pub fn run(seed_start: u64, count: u64, category: &str) {
@@ -1108,11 +1351,13 @@ pub fn run(seed_start: u64, count: u64, category: &str) {
     let mut adjudicated_bnode_iri = 0u64;
     let mut full_mismatch = 0u64;
     let mut count_mismatch = 0u64;
-    let mut bindings_checked = 0u64;
-    let mut bindings_skipped = 0u64;
-    // [OPUS-5] sq-qcnn.7: bnode answers get their OWN counter — a coverage gap must be a
-    // visible number, not an entry in the row-choice skip bucket.
-    let mut bindings_triage_bnode = 0u64;
+    // [OPUS-5] sq-qcnn.5: each oracle keeps its OWN split tallies (compared / compared up to
+    // blank-node isomorphism / skipped) — a coverage gap must be a visible number, never
+    // folded into the documented not-testable bucket.
+    let mut bindings = CheckCounts::default();
+    let mut ordered = CheckCounts::default();
+    let mut ask_checked = 0u64;
+    let mut graph_checked = 0u64;
     let mut first_repro: Option<String> = None;
 
     for seed in seed_start..seed_start + count {
@@ -1197,6 +1442,36 @@ pub fn run(seed_start: u64, count: u64, category: &str) {
             continue;
         }
 
+        // ASK / CONSTRUCT / DESCRIBE are answered by their OWN oracle — the boolean and the
+        // triple set — never by a count (see `QueryForm`). The generator emits only SELECT
+        // today (the graph/boolean generator shapes are sq-qcnn.6), so these arms are
+        // exercised by this module's unit tests until that lands.
+        let form = query_form(&q);
+        if form != QueryForm::Select {
+            let outcome = match form {
+                QueryForm::Ask => check_ask(&g, &store, &q),
+                _ => check_graph(&g, &store, &q),
+            };
+            match outcome {
+                Ok(Some(())) => {
+                    checked += 1;
+                    if form == QueryForm::Ask {
+                        ask_checked += 1;
+                    } else {
+                        graph_checked += 1;
+                    }
+                }
+                // An engine declined the surface — fair to skip (not a wrong answer).
+                Ok(None) => skipped_unsupported += 1,
+                Err(detail) => {
+                    checked += 1;
+                    full_mismatch += 1;
+                    report_repro(&mut first_repro, seed, &q, &ttl, &detail);
+                }
+            }
+            continue;
+        }
+
         let oxi = match oxi_count(&store, &q) {
             Ok(n) => n,
             Err(_) => {
@@ -1275,9 +1550,7 @@ pub fn run(seed_start: u64, count: u64, category: &str) {
         // genuine count mismatch has already been reported.
         if sparq_full == oxi {
             match check_bindings(&g, &store, &q) {
-                Ok(BindingsCheck::Compared) => bindings_checked += 1,
-                Ok(BindingsCheck::SkippedRowChoice) => bindings_skipped += 1,
-                Ok(BindingsCheck::TriageBnode) => bindings_triage_bnode += 1,
+                Ok(outcome) => bindings.record(outcome),
                 Err(detail) => {
                     full_mismatch += 1;
                     report_repro(&mut first_repro, seed, &q, &ttl, &detail);
@@ -1286,11 +1559,15 @@ pub fn run(seed_start: u64, count: u64, category: &str) {
         }
 
         // Order-sensitive differential (ORDER BY queries only): the sequence itself
-        // must match, not just the cardinality.
+        // must match — up to permutation within each sort-key equivalence class — not
+        // just the cardinality.
         if q.contains("ORDER BY") {
-            if let Err(detail) = check_ordered(&g, &store, &q) {
-                full_mismatch += 1;
-                report_repro(&mut first_repro, seed, &q, &ttl, &detail);
+            match check_ordered(&g, &store, &q) {
+                Ok(outcome) => ordered.record(outcome),
+                Err(detail) => {
+                    full_mismatch += 1;
+                    report_repro(&mut first_repro, seed, &q, &ttl, &detail);
+                }
             }
         }
 
@@ -1330,8 +1607,7 @@ pub fn run(seed_start: u64, count: u64, category: &str) {
 
     println!(
         "fuzz[{category}] seeds {seed_start}..{} : checked={checked} skipped(unsupported)={skipped_unsupported} \
-         bindings_checked={bindings_checked} bindings_skipped(row-choice)={bindings_skipped} \
-         bindings_triage(bnode)={bindings_triage_bnode} \
+         bindings[{bindings}] ordered[{ordered}] ask_checked={ask_checked} graph_checked={graph_checked} \
          adjudicated(cross-family-eq)={adjudicated_cross_family} adjudicated(bnode-iri)={adjudicated_bnode_iri} \
          full_mismatch={full_mismatch} count_mismatch={count_mismatch}",
         seed_start + count
@@ -1806,8 +2082,16 @@ ex:n4 ex:val "s2" .
                 if *cat != "order" {
                     assert!(
                         !q.contains("ORDER BY"),
-                        "category {cat}: check_ordered compares the first projected \
-                         column against Oxigraph's `?a`\n{q}"
+                        "category {cat}: an ORDER BY needs a plain-variable sort key (and, \
+                         under LIMIT, one covering every projected variable) or it loses \
+                         its order-level oracle to a skip\n{q}"
+                    );
+                } else {
+                    // The `order` category must keep BOTH conditions `check_ordered` needs,
+                    // or its shard silently degrades to cardinality-only under its `LIMIT`.
+                    assert!(
+                        order_by_vars(&q).is_some(),
+                        "category {cat}: the sort key must be plain variables\n{q}"
                     );
                 }
                 assert!(
@@ -1858,6 +2142,26 @@ ex:n2 ex:p ex:n3 . ex:n2 ex:age 30 . ex:n2 ex:name "nm2" .
 ex:n3 ex:age 40 . ex:n3 ex:name "nm3" .
 "#;
 
+    /// A neutral-model solution literal, for the hand-authored mutation fixtures.
+    fn dsol(pairs: &[(&str, DTerm)]) -> DSolution {
+        pairs
+            .iter()
+            .map(|(v, t)| (v.to_string(), t.clone()))
+            .collect()
+    }
+
+    fn dint(n: &str) -> DTerm {
+        DTerm::Literal {
+            lexical: n.to_string(),
+            datatype: "http://www.w3.org/2001/XMLSchema#integer".to_string(),
+            lang: None,
+        }
+    }
+
+    fn diri(iri: &str) -> DTerm {
+        DTerm::Iri(iri.to_string())
+    }
+
     fn binding_case(q: &str) -> (Solutions, Solutions) {
         let g = sparq_core::Graph::load_str(BINDING_TTL, "turtle").unwrap();
         let store = oxi_store(BINDING_TTL);
@@ -1880,11 +2184,12 @@ ex:n3 ex:age 40 . ex:n3 ex:name "nm3" .
         compare_solutions(&sparq, &oxi).expect("both engines agree on the real answer");
 
         // sparq "returns" 3 where the fixture's answer is 4 — one row either way.
-        let wrong = vec![vec![(
-            "c".to_string(),
-            "\"3\"^^<http://www.w3.org/2001/XMLSchema#integer>".to_string(),
-        )]];
-        assert_ne!(wrong, sparq, "the mutation must change the VALUE");
+        let wrong = vec![dsol(&[("c", dint("3"))])];
+        assert_ne!(
+            row_key(&wrong[0]),
+            row_key(&sparq[0]),
+            "the mutation must change the VALUE"
+        );
         assert_eq!(wrong.len(), sparq.len(), "the mutation preserves cardinality");
         assert!(
             compare_solutions(&wrong, &oxi).is_err(),
@@ -1904,13 +2209,13 @@ ex:n3 ex:age 40 . ex:n3 ex:name "nm3" .
         // Redirect one endpoint to a node that IS in the graph (so only the VALUE is
         // wrong, not the shape of the answer).
         let mut wrong = sparq.clone();
-        let o = wrong[0]
-            .iter_mut()
-            .find(|(v, _)| v == "o")
-            .expect("?o is projected");
-        assert_ne!(o.1, "<http://ex/n0>", "the mutation must change the VALUE");
-        o.1 = "<http://ex/n0>".to_string();
-        let wrong = canon_solutions(wrong);
+        let o = wrong[0].get_mut("o").expect("?o is projected");
+        assert_ne!(
+            canonical_key(o),
+            canonical_key(&diri("http://ex/n0")),
+            "the mutation must change the VALUE"
+        );
+        *o = diri("http://ex/n0");
         assert_eq!(wrong.len(), sparq.len(), "the mutation preserves cardinality");
         assert!(
             compare_solutions(&wrong, &oxi).is_err(),
@@ -1923,23 +2228,48 @@ ex:n3 ex:age 40 . ex:n3 ex:name "nm3" .
     /// into set comparison.
     #[test]
     fn duplicate_multiplicity_is_significant() {
-        let row = |v: &str| vec![("x".to_string(), v.to_string())];
-        let (n0, n1) = ("<http://ex/n0>", "<http://ex/n1>");
-        let a = canon_solutions(vec![row(n0), row(n0), row(n1)]);
-        let b = canon_solutions(vec![row(n0), row(n1), row(n1)]);
+        let row = |v: &str| dsol(&[("x", diri(v))]);
+        let (n0, n1) = ("http://ex/n0", "http://ex/n1");
+        let a = vec![row(n0), row(n0), row(n1)];
+        let b = vec![row(n0), row(n1), row(n1)];
         assert_eq!(a.len(), b.len());
         assert!(compare_solutions(&a, &b).is_err());
     }
 
-    /// The harness-forced numeric key (see `term_key`) must absorb ONLY the lexical /
-    /// derived-datatype normalisation Oxigraph's store performs on load — never a
-    /// difference in VALUE, and never across primitive numeric types. The >2^53
-    /// integers and 18-digit decimals the generator emits specifically to defeat an
-    /// f64 oracle must still separate.
+    /// The HARNESS-forced datatype normalisation (`harness_datatype`) must absorb ONLY the
+    /// derived-integer collapse Oxigraph's store performs on load — never a difference in
+    /// VALUE, and never across primitive numeric types.
+    #[test]
+    fn harness_datatype_collapses_only_the_derived_integer_types() {
+        let xsd_iri = |t: &str| format!("http://www.w3.org/2001/XMLSchema#{}", t);
+        let integer = xsd_iri("integer");
+        for derived in ["int", "long", "short", "byte", "unsignedInt", "positiveInteger"] {
+            assert_eq!(
+                harness_datatype(&xsd_iri(derived)),
+                integer,
+                "{} derives from xsd:integer and must collapse onto it",
+                derived
+            );
+        }
+        // The primitive numeric types and everything non-numeric are left ALONE.
+        for kept in ["integer", "decimal", "double", "float", "string", "boolean", "dateTime"] {
+            assert_eq!(harness_datatype(&xsd_iri(kept)), xsd_iri(kept));
+        }
+        assert_eq!(harness_datatype("http://example.org/weird"), "http://example.org/weird");
+    }
+
+    /// The value-canonical key the comparator decides by (`sparq-difftest`, fed through
+    /// `to_difftest`) must absorb the lexical / derived-datatype normalisation Oxigraph's
+    /// store performs on load — never a difference in VALUE, and never across primitive
+    /// numeric types. The >2^53 integers and 18-digit decimals the generator emits
+    /// specifically to defeat an f64 oracle must still separate.
     #[test]
     fn numeric_key_absorbs_lexical_form_but_not_value() {
         let key = |lex: &str, dt: &str| {
-            term_key(&Term::Literal(Literal::new_typed_literal(lex, xsd(dt))))
+            canonical_key(&to_difftest(&Term::Literal(Literal::new_typed_literal(
+                lex,
+                xsd(dt),
+            ))))
         };
         // lexical / derived-type normalisation → SAME key
         assert_eq!(key("-0", "integer"), key("0", "integer"));
@@ -1956,17 +2286,26 @@ ex:n3 ex:age 40 . ex:n3 ex:name "nm3" .
         // primitive numeric types stay distinct
         assert_ne!(key("5", "integer"), key("5", "decimal"));
         assert_ne!(key("5", "decimal"), key("5", "double"));
-        // a non-numeric literal keeps its exact N-Triples form
+        // a simple literal is xsd:string under RDF 1.1, and is NOT the integer 5
         assert_eq!(
-            term_key(&Term::Literal(Literal::new_simple_literal("5"))),
-            "\"5\""
+            canonical_key(&to_difftest(&Term::Literal(Literal::new_simple_literal("5")))),
+            key("5", "string")
+        );
+        assert_ne!(
+            canonical_key(&to_difftest(&Term::Literal(Literal::new_simple_literal("5")))),
+            key("5", "integer")
+        );
+        // IRIs and blank nodes carry through as their own kinds.
+        assert_eq!(
+            canonical_key(&to_difftest(&iri("n0"))),
+            canonical_key(&diri("http://ex/n0"))
         );
     }
 
     /// The value-level oracle must actually RUN on the new categories rather than
-    /// skip them — `check_bindings` returning `Ok(false)` for everything would be a
-    /// silently green differential. `LIMIT`/`OFFSET` is the one deliberate skip (the
-    /// row CHOICE is arbitrary without a total order; `check_ordered` covers `order`).
+    /// skip them — `check_bindings` skipping everything would be a silently green
+    /// differential. `LIMIT`/`OFFSET` is the one deliberate skip (the row CHOICE is
+    /// arbitrary without a total order; `check_ordered` covers `order`).
     #[test]
     fn check_bindings_compares_the_value_carrying_categories() {
         let g = sparq_core::Graph::load_str(BINDING_TTL, "turtle").unwrap();
@@ -1978,11 +2317,11 @@ ex:n3 ex:age 40 . ex:n3 ex:name "nm3" .
                 let _ = gen_graph(&mut rng); // keep the generator's draw sequence
                 let q = gen_query(&mut rng, cat);
                 match check_bindings(&g, &store, &q) {
-                    Ok(BindingsCheck::Compared) => compared += 1,
-                    Ok(BindingsCheck::SkippedRowChoice) => {}
-                    Ok(BindingsCheck::TriageBnode) => panic!(
-                        "category {cat} seed {seed}: the generator emitted a blank-node answer \
-                         — gen_query is documented as bnode-free\n{q}"
+                    Ok(CheckOutcome::Compared) => compared += 1,
+                    Ok(CheckOutcome::SkippedRowChoice) => {}
+                    Ok(other) => panic!(
+                        "category {cat} seed {seed}: unexpected {other:?} — gen_query is \
+                         documented as bnode-free and emits only SELECT\n{q}"
                     ),
                     Err(e) => panic!("category {cat} seed {seed}: {e}\n{q}"),
                 }
@@ -1999,16 +2338,17 @@ ex:n3 ex:age 40 . ex:n3 ex:name "nm3" .
         }
     }
 
-    /// [OPUS-5] sq-qcnn.7: a blank-node answer must reach its OWN counted triage bucket,
-    /// NOT the row-choice skip bucket. Those two numbers mean different things — a
-    /// row-choice skip is a case that is not differential-testable at all, a bnode skip is
-    /// an answer nobody compared — and merging them would report the coverage gap as if it
-    /// were the documented non-testable case.
+    /// [OPUS-5] sq-qcnn.5: a blank-node answer is now COMPARED — up to a consistent
+    /// bijection of the blank nodes (RDFC-1.0, `sparq-difftest`) — instead of being routed to
+    /// a counted triage bucket nobody checked. Labels are engine-local, so the two engines
+    /// name the same blank node differently and a by-LABEL comparison would fail two correct
+    /// answers.
     ///
-    /// This is the mutation guard for that split: fold `TriageBnode` back into
-    /// `SkippedRowChoice` (or drop the `has_bnode` arm entirely) and this test goes red.
+    /// Mutation guard: give the oracle a store holding DIFFERENT data (a genuine engine
+    /// disagreement) and the isomorphism check must go RED. Drop the `solutions_isomorphic`
+    /// arm and the first assertion goes red; weaken it to "bnode ⇒ agree" and the second does.
     #[test]
-    fn a_blank_node_answer_is_counted_triage_not_a_row_choice_skip() {
+    fn a_blank_node_answer_is_compared_up_to_isomorphism() {
         // The generator is bnode-free, so this shape is written by hand: `_:b` is a real
         // blank node in BOTH engines' answers, with engine-local labels.
         let ttl = "@prefix ex: <http://ex/> .\n_:b ex:age 5 .\nex:n0 ex:age 6 .\n";
@@ -2017,25 +2357,237 @@ ex:n3 ex:age 40 . ex:n3 ex:name "nm3" .
         let bnode_q = "PREFIX ex: <http://ex/>\nSELECT ?s WHERE { ?s ex:age ?a }";
         // Precondition: both engines really do bind a blank node here, so the assertion
         // below is about the routing and not about an accidentally-empty answer.
-        assert!(has_bnode(&sparq_solutions(&g, bnode_q).unwrap()));
-        assert!(has_bnode(&oxi_solutions(&store, bnode_q).unwrap()));
+        assert!(solutions_have_blank_nodes(&sparq_solutions(&g, bnode_q).unwrap()));
+        assert!(solutions_have_blank_nodes(&oxi_solutions(&store, bnode_q).unwrap()));
         assert_eq!(
             check_bindings(&g, &store, bnode_q).unwrap(),
-            BindingsCheck::TriageBnode
+            CheckOutcome::ComparedIsomorphic
         );
 
-        // The same graph WITHOUT the blank node in the projection is compared normally —
-        // so the bucket is reached by the bnode, not by anything else about this case.
+        // RED ON A WRONG ANSWER: an oracle holding a THIRD blank node answers a different
+        // (non-isomorphic) table for the same query, and the comparator must say so.
+        let divergent = oxi_store("@prefix ex: <http://ex/> .\n_:b ex:age 5 .\n_:c ex:age 7 .\nex:n0 ex:age 6 .\n");
+        assert!(
+            check_bindings(&g, &divergent, bnode_q).is_err(),
+            "a bnode answer that is NOT isomorphic must fail the oracle"
+        );
+
+        // The same graph WITHOUT the blank node in the projection is compared by value —
+        // so the isomorphism path is reached by the bnode, not by anything else here.
         let ground_q = "PREFIX ex: <http://ex/>\nSELECT ?a WHERE { ex:n0 ex:age ?a }";
         assert_eq!(
             check_bindings(&g, &store, ground_q).unwrap(),
-            BindingsCheck::Compared
+            CheckOutcome::Compared
         );
         // ...and `LIMIT` still lands in the DISTINCT row-choice bucket.
         let limit_q = "PREFIX ex: <http://ex/>\nSELECT ?a WHERE { ?s ex:age ?a } LIMIT 1";
         assert_eq!(
             check_bindings(&g, &store, limit_q).unwrap(),
-            BindingsCheck::SkippedRowChoice
+            CheckOutcome::SkippedRowChoice
+        );
+    }
+
+    // ── the ORDER-BY EQUIVALENCE-CLASS differential (`check_ordered`) ────────────
+
+    /// `ORDER BY` is a PARTIAL order, so the comparator must permit permutation WITHIN a
+    /// sort-key tie run and reject reordering ACROSS runs — over EVERY projected variable.
+    ///
+    /// The last assertion is the mutation proof of the sq-qcnn.5 generalisation: the
+    /// pre-wiring check compared only the FIRST projected column against Oxigraph's `?a`, so
+    /// a sequence whose first column is identical and whose SECOND column is wrong passed it.
+    /// It must now fail.
+    #[test]
+    fn ordered_compare_permits_ties_and_catches_reordering_in_any_column() {
+        let sort = vec!["k".to_string()];
+        let row = |k: &str, v: &str| dsol(&[("k", dint(k)), ("v", diri(v))]);
+        let a = vec![row("1", "a"), row("1", "b"), row("2", "c")];
+        // Tied rows (?k = 1) permuted: legal, both engines are conformant.
+        let tied = vec![row("1", "b"), row("1", "a"), row("2", "c")];
+        compare_ordered(&a, &tied, &sort).expect("a tie run may permute");
+        // Reordering ACROSS runs is a real ORDER BY violation.
+        let reordered = vec![row("2", "c"), row("1", "a"), row("1", "b")];
+        assert!(compare_ordered(&a, &reordered, &sort).is_err());
+        // The generalisation: same first column, WRONG second column.
+        let wrong_second = vec![row("1", "a"), row("1", "b"), row("2", "zzz")];
+        assert_eq!(
+            wrong_second.iter().map(|s| canonical_key(&s["k"])).collect::<Vec<_>>(),
+            a.iter().map(|s| canonical_key(&s["k"])).collect::<Vec<_>>(),
+            "the mutation must leave the sort column identical"
+        );
+        assert!(
+            compare_ordered(&a, &wrong_second, &sort).is_err(),
+            "a wrong NON-sort column must fail — comparing only the first column would miss it"
+        );
+    }
+
+    /// `order_by_vars` reads a plain-variable sort key and FAILS CLOSED on anything else:
+    /// partitioning by `?a` when the engine sorted by `f(?a)` would manufacture mismatches.
+    #[test]
+    fn order_by_vars_reads_plain_variables_and_fails_closed_on_expressions() {
+        let vars = |q: &str| order_by_vars(q);
+        assert_eq!(vars("SELECT ?a WHERE { } ORDER BY ?a"), Some(vec!["a".into()]));
+        assert_eq!(
+            vars("SELECT ?a WHERE { } ORDER BY DESC(?a) LIMIT 3"),
+            Some(vec!["a".into()])
+        );
+        assert_eq!(
+            vars("SELECT * WHERE { } ORDER BY ?a ASC(?b) DESC(?c) OFFSET 1"),
+            Some(vec!["a".into(), "b".into(), "c".into()])
+        );
+        // fail-closed: an expression sort key, and no ORDER BY at all.
+        assert_eq!(vars("SELECT ?a WHERE { } ORDER BY (?a + 1)"), None);
+        assert_eq!(vars("SELECT ?a WHERE { } ORDER BY STRLEN(?n)"), None);
+        assert_eq!(vars("SELECT ?a WHERE { }"), None);
+    }
+
+    /// A `LIMIT`ed sequence is comparable only when the sort key is TOTAL over what the
+    /// projection can distinguish; otherwise truncation cuts a tie run and WHICH tied rows
+    /// survive is arbitrary, so the case stays cardinality-only.
+    #[test]
+    fn a_truncated_non_total_sort_key_stays_cardinality_only() {
+        let sols = vec![dsol(&[("k", dint("1")), ("v", diri("http://ex/a"))])];
+        assert!(sort_key_is_total(&sols, &["k".to_string(), "v".to_string()]));
+        assert!(!sort_key_is_total(&sols, &["k".to_string()]));
+        // Empty answers cannot be distinguished by anything, so any sort key is total.
+        assert!(sort_key_is_total(&Solutions::new(), &["k".to_string()]));
+
+        // Live: the `order` category projects ONLY its sort variable, so its `LIMIT` IS
+        // compared — that is the "total tiebreaker" escape hatch, and losing it would make
+        // the whole `order` shard cardinality-only.
+        let g = sparq_core::Graph::load_str(BINDING_TTL, "turtle").unwrap();
+        let store = oxi_store(BINDING_TTL);
+        let total = "PREFIX ex: <http://ex/>\nSELECT ?a WHERE { ?s ex:age ?a } ORDER BY ?a LIMIT 3";
+        assert_eq!(
+            check_ordered(&g, &store, total).unwrap(),
+            CheckOutcome::Compared
+        );
+        // The same query projecting a variable the sort key does NOT cover is skipped.
+        let partial =
+            "PREFIX ex: <http://ex/>\nSELECT ?a ?s WHERE { ?s ex:age ?a } ORDER BY ?a LIMIT 3";
+        assert_eq!(
+            check_ordered(&g, &store, partial).unwrap(),
+            CheckOutcome::SkippedRowChoice
+        );
+    }
+
+    // ── the ASK / CONSTRUCT oracles (`check_ask` / `check_graph`) ────────────────
+
+    /// The result FORM decides which oracle runs; misreading it is what would send an ASK or
+    /// a CONSTRUCT back to the cardinality comparator that cannot see either.
+    #[test]
+    fn query_form_classifies_the_three_result_forms() {
+        assert_eq!(query_form("SELECT * WHERE { ?s ?p ?o }"), QueryForm::Select);
+        assert_eq!(
+            query_form("PREFIX ex: <http://ex/>\nASK { ?s ex:age ?a }"),
+            QueryForm::Ask
+        );
+        assert_eq!(
+            query_form("PREFIX ex: <http://ex/> PREFIX xsd: <http://x/> ASK { ?s ex:age ?a }"),
+            QueryForm::Ask,
+            "a single-line prologue must not hide the form"
+        );
+        assert_eq!(
+            query_form("BASE <http://ex/>\nCONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }"),
+            QueryForm::Graph
+        );
+        assert_eq!(query_form("DESCRIBE <http://ex/n0>"), QueryForm::Graph);
+        // `ASK{` with no space still classifies.
+        assert_eq!(query_form("ASK{ ?s ?p ?o }"), QueryForm::Ask);
+        // And the count oracle REFUSES a non-solutions result rather than counting it.
+        let store = oxi_store(BINDING_TTL);
+        assert!(oxi_count(&store, "PREFIX ex: <http://ex/>\nASK { ?s ex:age ?a }").is_err());
+        assert!(oxi_count(
+            &store,
+            "PREFIX ex: <http://ex/>\nCONSTRUCT { ?s ex:a ?a } WHERE { ?s ex:age ?a }"
+        )
+        .is_err());
+    }
+
+    /// `ASK` is compared as a BOOLEAN. A cardinality oracle cannot see this at all: Oxigraph
+    /// reports one boolean result whichever way it answered, so `true` and `false` have the
+    /// same "count" — which is why `oxi_count` now refuses the form outright.
+    ///
+    /// Mutation guard: an oracle holding data that makes the ASK answer the OTHER way must
+    /// turn the check red. Delete the boolean comparison and this test goes green (verified).
+    #[test]
+    fn ask_is_compared_as_a_boolean_not_a_count() {
+        let g = sparq_core::Graph::load_str(BINDING_TTL, "turtle").unwrap();
+        let store = oxi_store(BINDING_TTL);
+        let yes = "PREFIX ex: <http://ex/>\nASK { ?s ex:age ?a }";
+        let no = "PREFIX ex: <http://ex/>\nASK { ?s ex:missing ?a }";
+        // Both engines agree, both ways round.
+        assert!(sparq_engine::ask(&g, yes).unwrap());
+        assert!(!sparq_engine::ask(&g, no).unwrap());
+        assert_eq!(check_ask(&g, &store, yes).unwrap(), Some(()));
+        assert_eq!(check_ask(&g, &store, no).unwrap(), Some(()));
+
+        // RED ON A WRONG ANSWER: an oracle whose data makes `no` answer TRUE.
+        let divergent = oxi_store("@prefix ex: <http://ex/> .\nex:n0 ex:missing 1 .\n");
+        assert!(
+            check_ask(&g, &divergent, no).is_err(),
+            "a disagreeing ASK boolean must fail the oracle"
+        );
+    }
+
+    /// `CONSTRUCT` is compared as a triple SET up to a bijection of its blank nodes. Two
+    /// correct engines mint DIFFERENT labels for a template blank node (SPARQL 1.1 §16.2
+    /// mints a fresh one per solution), so a by-label comparison would fail them both; a
+    /// COUNT comparison would instead pass a graph of the right size built from the wrong
+    /// triples.
+    ///
+    /// Mutation guard: an oracle holding data that yields the same NUMBER of triples with
+    /// different subjects must turn the check red.
+    #[test]
+    // clippy: differential oracle pins oxigraph's legacy Store::query semantics
+    #[allow(deprecated)]
+    fn construct_is_compared_as_a_triple_set_up_to_bnode_isomorphism() {
+        let g = sparq_core::Graph::load_str(BINDING_TTL, "turtle").unwrap();
+        let store = oxi_store(BINDING_TTL);
+        let ground = "PREFIX ex: <http://ex/>\nCONSTRUCT { ?s ex:a ?a } WHERE { ?s ex:age ?a }";
+        assert_eq!(check_graph(&g, &store, ground).unwrap(), Some(()));
+
+        // A template blank node: fresh per solution, and labelled independently by each
+        // engine — only isomorphism can see that these two answers agree.
+        let bnodes =
+            "PREFIX ex: <http://ex/>\nCONSTRUCT { _:x ex:a ?a } WHERE { ?s ex:age ?a }";
+        let sparq_triples = sparq_engine::construct_or_describe(&g, bnodes).unwrap();
+        assert!(
+            !sparq_triples.is_empty(),
+            "the fixture must construct blank-node-bearing triples"
+        );
+        assert_eq!(check_graph(&g, &store, bnodes).unwrap(), Some(()));
+
+        // RED ON A WRONG ANSWER, at the SAME triple count: four ages either way, but on
+        // different subjects.
+        let divergent = oxi_store(
+            "@prefix ex: <http://ex/> .\nex:z0 ex:age 10 . ex:z1 ex:age 20 . \
+             ex:z2 ex:age 30 . ex:z3 ex:age 40 .\n",
+        );
+        let sparq_n = sparq_engine::construct_or_describe(&g, ground).unwrap().len();
+        let oxi_n = match divergent.query(ground).unwrap() {
+            oxigraph::sparql::QueryResults::Graph(it) => it.count(),
+            _ => panic!("CONSTRUCT must produce a graph"),
+        };
+        assert_eq!(sparq_n, oxi_n, "the mutation must preserve the triple COUNT");
+        assert!(
+            check_graph(&g, &divergent, ground).is_err(),
+            "a same-size WRONG graph must fail the oracle"
+        );
+    }
+
+    /// The split tallies are what keeps a coverage gap a visible NUMBER: each outcome must
+    /// land in its own bucket and be printed.
+    #[test]
+    fn check_counts_keep_the_outcomes_apart() {
+        let mut c = CheckCounts::default();
+        c.record(CheckOutcome::Compared);
+        c.record(CheckOutcome::Compared);
+        c.record(CheckOutcome::ComparedIsomorphic);
+        c.record(CheckOutcome::SkippedRowChoice);
+        c.record(CheckOutcome::SkippedBnodeOrder);
+        assert_eq!(
+            c.to_string(),
+            "compared=2 iso=1 skip(row-choice)=1 skip(bnode-order)=1"
         );
     }
 

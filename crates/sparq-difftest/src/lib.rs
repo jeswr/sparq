@@ -63,11 +63,17 @@
 //! Rejecting or normalising contradictory outcomes belongs to the producing policy harness and
 //! is a documented non-goal of this engine-independent comparator.
 //!
-//! Deliberately **not** here (separate DAG nodes / beads): wiring these comparators into the fuzz
-//! harness (`sq-qcnn.5`), the query/data generator extension (`sq-qcnn.6`), and the pluggable
-//! second-oracle adapter (`sq-qcnn.8`). Until that wiring lands, `crates/sparq-bench`'s existing
-//! Oxigraph fuzzer does not call [`iso`]; it routes a blank-node-bearing answer to an explicitly
-//! **counted** triage bucket rather than folding it into a generic skip.
+//! Deliberately **not** here (separate DAG nodes / beads): the query/data generator extension
+//! (`sq-qcnn.6`) and the pluggable second-oracle adapter (`sq-qcnn.8`).
+//!
+//! The harness wiring (`sq-qcnn.5`) has landed: `crates/sparq-bench`'s Oxigraph fuzzer now decides
+//! every value-level equality through this crate — [`multiset::multiset_equal`] for the `SELECT`
+//! bag, [`multiset::order_by_equal`] for `ORDER BY` (sort-key equivalence classes over all
+//! projected variables), [`iso::solutions_isomorphic`] for a blank-node-bearing `SELECT` answer,
+//! and [`iso::graph_isomorphic`] for a `CONSTRUCT`/`DESCRIBE` graph. A blank-node answer is
+//! therefore now **compared** rather than routed to a counted triage bucket. That generator still
+//! emits only `SELECT`, so the boolean/graph oracles are exercised by the harness's own unit tests
+//! until `sq-qcnn.6` extends it.
 
 pub mod decision;
 pub mod iso;

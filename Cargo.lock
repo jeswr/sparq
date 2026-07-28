@@ -4927,6 +4927,7 @@ dependencies = [
  "oxigraph",
  "serde_json",
  "sparq-core",
+ "sparq-difftest",
  "sparq-engine",
 ]
 

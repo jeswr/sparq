@@ -219,10 +219,13 @@ general, tractable in practice via canonical labelling — RDFC-1.0 / URDNA2015-
 `canonical_solutions`/`solutions_isomorphic` for a `SELECT` table (reified one-row-node-per-row, so
 duplicate rows and cross-row blank-node sharing are both preserved). The labelling is the
 third-party `rdf-canon` crate, **not** sparq's own `sparq-canon`, per the §2.3 independence trap.
-The gap is NOT yet closed end-to-end: `crates/sparq-bench`'s Oxigraph fuzzer predates the
-`sparq-difftest` wiring (bead B / `sq-qcnn.5`) and so still routes a blank-node answer to triage —
-now under its own counted `bindings_triage(bnode)` bucket rather than folded into the row-choice
-skip, so the remaining gap is a visible number.
+**Closed end-to-end** by bead B / `sq-qcnn.5`: `crates/sparq-bench`'s Oxigraph fuzzer now calls
+`solutions_isomorphic` on a blank-node-bearing `SELECT` answer and `graph_isomorphic` on a
+`CONSTRUCT`/`DESCRIBE` result, so those cases are COMPARED (counted as `bindings[iso=…]`) instead of
+triaged. One residual, named gap: an `ORDER BY` answer carrying a blank node, for which there is no
+order-PRESERVING isomorphism comparator here (`canonical_solutions` canonicalises the table as a
+whole). That case has its own counted `ordered[skip(bnode-order)=…]` bucket, so the remainder stays
+a visible number rather than reading as green.
 
 ## 4. Generator coverage extension
 

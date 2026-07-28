@@ -4,8 +4,9 @@
 The **benchmark + differential harness** for [sparq](../../README.md): it runs
 the same dataset and queries through `sparq` and through
 [Oxigraph](https://github.com/oxigraph/oxigraph) (a mature, independent Rust
-SPARQL engine), cross-checks that both return the same number of solutions, and
-reports load/query timings and peak memory.
+SPARQL engine), cross-checks that both return the same answer VALUES — via the
+engine-independent [`sparq-difftest`](../sparq-difftest/README.md) comparators,
+not just a solution count — and reports load/query timings and peak memory.
 
 Why it exists: it serves a correctness role as well as a speed one — the
 cross-check against an independent implementation is a cheap, continuous
