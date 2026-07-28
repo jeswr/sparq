@@ -808,8 +808,23 @@ active segment, never a partial segment — under a `RetentionPolicy` composing 
 watermark (a HARD safety bound: any unacked record keeps its segment), `max_age`, and
 `max_total_bytes` pressure; the default policy is a no-op and nothing is ever dropped implicitly.
 A `poll` from a trimmed-away offset **fails closed** (never a silent skip) — consumers resume from
-`ChangeLog::first_seq`. A `ChangeSink` trait for an external broker (Kafka/NATS) is
-tracked as a **separate later opt-in** (deferred follow-up bead `sq-l6zks`).
+`ChangeLog::first_seq`.
+**External-broker sink (`sq-l6zks`, gh-3216) — the separate, heavier `sparq-serve` opt-in
+`change-sink` (default OFF, implies `change-stream`).** `change_sink::ChangeSink` is the pluggable
+broker seam; `BrokerRelay::open(dir, consumer, sink, config)` + `pump()` is the resumable pump from
+that durable log to a sink, carrying a **durable delivered-through watermark** (persisted as
+`changesink-<consumer>.offset` beside the segments) so a restarted process resumes rather than
+replays. Delivery is **at-least-once** — the watermark is persisted after the sink's `flush`, so
+consumers dedupe on `sequenceNumber`; the partition key is CONSTANT per stream so a partitioned
+broker preserves commit order; a re-base gap record is delivered as an explicit `"op": "REBASE"`
+entry, never as an empty commit. The relay runs **off the writer thread** (a broker outage stalls
+the relay, never commits), and feeding `delivered_through_seq()` into
+`RetentionPolicy::acked_through_seq` keeps retention from trimming past it (a trimmed watermark
+fails the pump closed). One in-tree sink ships — `NatsSink` (core NATS over plain TCP, std-only,
+**no TLS**). There is deliberately **no in-tree Kafka client**: Kafka (and TLS/SASL/retries) is
+reached by implementing `ChangeSink` over the host's own client, so no broker client and no async
+runtime enter the library-first crate. Payloads are plaintext, unsigned JSON — same boundary as the
+backup family — so pointing a relay at a broker is a data-egress decision.
 **Recording seam (`sq-bdaw5`):** install `ChangeLog::into_commit_hook(on_error)` via
 `Writer::spawn_with_commit_hook` and every commit-publish is recorded **on the writer thread** —
 one append+fsync per PUBLISHED GENERATION, gapless by construction (the writer is the sole
@@ -853,8 +868,9 @@ token (pass as `at=`/`after=`), `lastSequenceNumber`, `totalRecords` (commit cou
 `hasMoreRecords`. A poll is a READ (gated by the read auth). A sequence-anchored `iteratorType` with
 no anchor is a fail-closed `400` (never a silent replay-all). With the feature off the route + the
 recording hook are `#[cfg]`-stripped (byte-identical); with it on, recording rides the sequenced
-writer's group commit and does not serialise submitters. The `ChangeSink` broker trait stays a
-separate later opt-in (`sq-l6zks`).
+writer's group commit and does not serialise submitters. Relaying that log onward to an external
+broker is the separate `sparq-serve` `change-sink` opt-in (`sq-l6zks`, above), not part of this
+endpoint.
 
 **`GET /queries` + `DELETE /queries/{id}` — running-query registry (`sparq-server` feature
 `query-registry`, default OFF; sq-qsm5z, [SONNET-4.6]).** An opt-in in-memory registry of
