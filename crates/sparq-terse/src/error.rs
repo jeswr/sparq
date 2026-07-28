@@ -28,6 +28,12 @@ pub enum TerseError {
         sparql: String,
         /// The underlying `spargebra` parse error.
         parse_error: String,
+        /// Did-you-mean hints for words that look like mistyped SPARQL keywords (design
+        /// §3.2, the only endorsed sliver of lever 2). Computed **only** here, on the
+        /// already-failed parse, and **never applied**: `sparql` is the untouched text that
+        /// failed, and this call still errors. May be empty (a parse failure with no
+        /// keyword-shaped typo is the common case).
+        suggestions: Vec<crate::suggest::KeywordSuggestion>,
     },
     /// A `V("phrase")` could not be resolved confidently and so was **not** bound (design
     /// §6.3, confidence-gated): the score was below the floor, or the top candidate and its
@@ -81,11 +87,21 @@ impl fmt::Display for TerseError {
             TerseError::FeatureRequired { phrase, why } => {
                 write!(f, "cannot resolve V(\"{}\"): {}", phrase, why)
             }
-            TerseError::CanaryFailed { sparql, parse_error } => write!(
-                f,
-                "silent-rewrite canary failed: emitted SPARQL does not parse ({}): {}",
-                parse_error, sparql
-            ),
+            TerseError::CanaryFailed { sparql, parse_error, suggestions } => {
+                write!(
+                    f,
+                    "silent-rewrite canary failed: emitted SPARQL does not parse ({})",
+                    parse_error
+                )?;
+                for s in suggestions {
+                    // A hint, spelled as a hint: the transpiler reports what it did NOT do.
+                    write!(f, "; unknown keyword {} - did you mean {}?", s.token, s.suggestion)?;
+                }
+                if !suggestions.is_empty() {
+                    write!(f, " (suggestion only - not applied)")?;
+                }
+                write!(f, ": {}", sparql)
+            }
             TerseError::Unresolved { phrase, why, candidates } => {
                 write!(f, "V(\"{}\") not bound ({}); candidates: [", phrase, why)?;
                 for (i, (iri, score)) in candidates.iter().enumerate() {

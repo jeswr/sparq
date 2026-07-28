@@ -23,6 +23,11 @@
 //!   [`Expansion::keywords`]; an unknown keyword is [`TerseError::UnknownKeyword`] and a
 //!   collision with a real `PREFIX K:` is [`TerseError::KeywordPrefixCollision`] — never a
 //!   silent guess. Publish the legend behind the prompt-cache breakpoint with [`legend_card`].
+//! - **Phase 4 (default build): the did-you-mean *diagnostic* (design §3.2).** When — and only
+//!   when — the emission fails to parse, [`TerseError::CanaryFailed`] carries
+//!   [`KeywordSuggestion`] hints for words that look like mistyped SPARQL keywords
+//!   (`FLTR` → `FILTER`). The suggestion is **never applied**: this is the endorsed sliver of
+//!   lever 2 (diagnostics), not the rejected lenient-parse mode (silent rewriting).
 //! - **Phase 2 (`vectors` feature):** `V("phrase")` lexical-first concept resolution behind
 //!   the §6 soundness envelope — `terse_to_sparql_with` (the `vectors`-gated entry point)
 //!   expands each `V("phrase")` to the
@@ -32,11 +37,13 @@
 mod error;
 mod keyword;
 mod resolve;
+mod suggest;
 mod transpile;
 
 pub use error::TerseError;
 pub use keyword::{legend, legend_card, legend_len, KeywordExpansion, LEGEND_VERSION};
 pub use resolve::{Method, Resolution};
+pub use suggest::KeywordSuggestion;
 pub use transpile::{terse_to_sparql, Expansion};
 
 #[cfg(feature = "vectors")]

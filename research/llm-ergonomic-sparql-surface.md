@@ -536,8 +536,11 @@ Ordered; each gated on its predecessor.
    breakpoint; collision-with-prefix is a hard error. *(Future bead — conditional on Phase 5
    measuring a win.)*
 5. **Phase 4 — the did-you-mean *diagnostic* (the only sliver of lever 2).** On parse
-   failure only, suggest the nearest keyword without applying it. *(Future bead — small;
-   skip if Phase 5 shows no value.)*
+   failure only, suggest the nearest keyword without applying it. *(LANDED — `sq-h7zlx`:
+   `TerseError::CanaryFailed` carries `KeywordSuggestion` hints, computed only on the failed
+   parse and never applied. Shipped on the "cannot change a query, costs nothing on the
+   success path" argument, NOT on evidence: the Phase-5 A/B measured levers 1 and 3 only, so
+   the §3.2 "low value" reading stands unmeasured.)*
 6. **Phase 5 — the scientific A/B (§5) + verdict object.** Stratified frozen task set over
    the real PKG; counterbalanced A/B/C; cache-discounted effective tokens + first-shot
    composite + resolution-correctness; pre-registered thresholds; emit the §5.5 verdict per

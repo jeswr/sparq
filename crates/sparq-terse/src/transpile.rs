@@ -188,6 +188,13 @@ pub fn terse_to_sparql_with(
 /// Runs the silent-rewrite canary (design §6.7): re-parse the canonical output under the
 /// unmodified `spargebra` parser. The transpiler must only ever emit SPARQL the engine
 /// could run. We accept either a query or an update (the surface transpiles both).
+///
+/// On failure — and **only** on failure (design §3.2, Phase 4) — the emission is scanned for
+/// words that look like mistyped SPARQL keywords, and the hints ride along on
+/// [`TerseError::CanaryFailed`]. That is a *diagnostic*: the suggestion is never applied, the
+/// failing text is returned verbatim, and the call still errors. Lenient parsing (accepting
+/// `FLTR` as `FILTER`) is exactly what the design rejects — it would silently rewrite intent
+/// and remove the agent's loud, recoverable feedback loop.
 pub(crate) fn canary(canonical_sparql: &str) -> Result<(), TerseError> {
     use spargebra::SparqlParser;
     // The surface transpiles both queries and updates, so the emission is conformant if it
@@ -202,6 +209,7 @@ pub(crate) fn canary(canonical_sparql: &str) -> Result<(), TerseError> {
     Err(TerseError::CanaryFailed {
         sparql: canonical_sparql.to_string(),
         parse_error: query_err,
+        suggestions: crate::suggest::keyword_suggestions(canonical_sparql),
     })
 }
 
@@ -593,8 +601,9 @@ fn skip_ws(bytes: &[u8], mut i: usize) -> usize {
 }
 
 /// At `bytes[start]` being a quote, skips a SPARQL string literal (single- or
-/// triple-quoted, honouring backslash escapes), returning the index just past it.
-fn skip_string(bytes: &[u8], start: usize) -> usize {
+/// triple-quoted, honouring backslash escapes), returning the index just past it. Shared with
+/// the did-you-mean scanner ([`crate::suggest`]) so both agree on what is string *data*.
+pub(crate) fn skip_string(bytes: &[u8], start: usize) -> usize {
     let n = bytes.len();
     let quote = bytes[start];
     // Triple-quoted?

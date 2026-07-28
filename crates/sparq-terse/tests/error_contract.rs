@@ -57,6 +57,54 @@ fn vector_phrase_requires_opt_in_feature() {
     }
 }
 
+// [OPUS-5] sq-h7zlx — Phase 4, design §3.2: the did-you-mean diagnostic SUGGESTS on a parse
+// failure and NEVER applies the suggestion (that would be the rejected lenient-parse mode).
+#[test]
+fn parse_failure_suggests_the_nearest_keyword_without_applying_it() {
+    let query = "SELECT ?s WHERE { ?s ?p ?o FLTR(?o > 1) }";
+    let error = terse_to_sparql(query).expect_err("a mistyped keyword must still fail loudly");
+
+    match error {
+        TerseError::CanaryFailed {
+            sparql,
+            suggestions,
+            ..
+        } => {
+            // The suggestion is DATA, not a repair: the text handed back is the query that
+            // failed, byte-for-byte — no `FILTER` was substituted anywhere.
+            assert_eq!(sparql, query, "the failing query must be echoed untouched");
+            assert!(!sparql.contains("FILTER"), "the suggestion must never be applied");
+            let hint = suggestions.first().expect("expected a did-you-mean hint");
+            assert_eq!(hint.token, "FLTR");
+            assert_eq!(hint.suggestion, "FILTER");
+            // ... and it is visible in the message the agent reads.
+            let rendered = TerseError::CanaryFailed {
+                sparql,
+                parse_error: "x".to_string(),
+                suggestions,
+            }
+            .to_string();
+            assert!(rendered.contains("did you mean FILTER?"), "got {rendered}");
+            assert!(rendered.contains("not applied"), "got {rendered}");
+        }
+        other => panic!("expected CanaryFailed, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_failure_without_a_keyword_typo_suggests_nothing() {
+    // The hint fires only on a keyword-shaped word: an ordinary syntax error stays a plain,
+    // loud parse failure rather than acquiring a speculative suggestion.
+    let error = terse_to_sparql("SELECT ?s WHERE { ?s ?p").expect_err("unbalanced query");
+
+    match error {
+        TerseError::CanaryFailed { suggestions, .. } => {
+            assert!(suggestions.is_empty(), "expected no hints, got {suggestions:?}");
+        }
+        other => panic!("expected CanaryFailed, got {other:?}"),
+    }
+}
+
 #[test]
 fn canonical_sparql_passes_through_byte_identically() {
     let query = "SELECT ?s WHERE { ?s <http://ex/p> ?o }";
