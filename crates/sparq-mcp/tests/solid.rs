@@ -587,6 +587,45 @@ fn pod_initialize_negotiates_the_protocol_version() {
     assert_eq!(resp["result"]["protocolVersion"], sparq_mcp::PROTOCOL_VERSION);
 }
 
+// [OPUS-5] gh #2497: the pod server shares the base server's framing core, so it
+// receives JSON-RPC 2.0 §6 batches too — the precondition for negotiating 2025-03-26,
+// the one revision that requires them. Authorization is unchanged inside a batch: a
+// batched read of a forbidden document is refused exactly as a single one is.
+#[test]
+fn pod_receives_a_jsonrpc_batch_and_still_enforces_authorization() {
+    let mut s = server_for(ALICE, false);
+    let resp = rpc(
+        &mut s,
+        r#"[{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}},
+            {"jsonrpc":"2.0","method":"notifications/initialized"},
+            {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"resource_get","arguments":{"uri":"https://pod.ex/secret/s1"}}}]"#,
+    );
+
+    let batch = resp.as_array().expect("a batch is answered with an array");
+    assert_eq!(batch.len(), 2, "the notification element gets no entry");
+    assert_eq!(batch[0]["id"], 1);
+    assert_eq!(
+        batch[0]["result"]["protocolVersion"], "2025-03-26",
+        "the batch-requiring revision is negotiated verbatim now that batches are received"
+    );
+    assert_eq!(batch[1]["id"], 2);
+    assert!(
+        batch[1]["result"]["isError"].as_bool().unwrap_or(false),
+        "alice may not read bob's secret, batched or not: {}",
+        batch[1]
+    );
+}
+
+#[test]
+fn pod_all_notification_batch_gets_no_response() {
+    let mut s = server_for(ALICE, false);
+    let out = s.handle_message(
+        r#"[{"jsonrpc":"2.0","method":"notifications/initialized"},
+            {"jsonrpc":"2.0","method":"ping"}]"#,
+    );
+    assert!(out.is_none(), "a batch of only notifications stays silent");
+}
+
 // ───────── Class N: the resources surface + notifications (draft §8/§10) ─────────
 // [SONNET-4.6] sq-cmjmr. Load-bearing invariants, each red under the matching mutation:
 // - the `resources` capability is declared WITH `subscribe: true`;
