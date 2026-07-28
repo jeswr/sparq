@@ -313,6 +313,14 @@ class TestWorkspaceDerivedRoots(unittest.TestCase):
             (base / "crates" / "sparq-brandnew").mkdir(parents=True)
             (base / "crates" / "sparq-brandnew-region").mkdir(parents=True)
             (base / "site").mkdir()
+            # The fixture must now declare its members: `workspace_roots` asserts the scanned tree
+            # against the manifest (`assert_workspace_tree`). This is a FIXTURE change only — the
+            # property under test is unchanged, and the two crates below are still recognised with
+            # no code change, which is the whole point of the test.
+            (base / "Cargo.toml").write_text(
+                '[workspace]\nresolver = "2"\n'
+                'members = ["crates/sparq-brandnew", "crates/sparq-brandnew-region"]\n',
+                encoding="utf-8")
             roots = ready.workspace_roots(str(base))
             self.assertEqual(roots, {"crates", "site", "sparq-brandnew", "sparq-brandnew-region"})
             # present in the tree -> its own partition; absent -> collapses into its parent
@@ -323,14 +331,43 @@ class TestWorkspaceDerivedRoots(unittest.TestCase):
             self.assertFalse(ready.keys_conflict("sparq-brandnew", "sparq-brandnew-region", roots))
             self.assertTrue(ready.keys_conflict("sparq-brandnew", "sparq-brandnew-unlisted", roots))
 
-    def test_an_unreadable_tree_over_reserves_rather_than_under_reserves(self):
-        # If the scan finds nothing, every key falls back to its head segment. That collapses all
-        # `sparq-*` keys onto `sparq` — a fleet-wide slowdown, never a double dispatch.
-        roots = ready.workspace_roots("/nonexistent/sparq-checkout")
-        self.assertEqual(roots, set())
+    def test_an_empty_root_set_over_reserves_rather_than_under_reserves(self):
+        # UNCHANGED PROPERTY, kept because it is the reason the collapse is not a CORRECTNESS bug:
+        # given an empty root set, every key falls back to its head segment, so all `sparq-*` keys
+        # land on `sparq` and unrelated crates OVER-reserve. Over-serialisation costs delay;
+        # under-serialisation double-dispatches. That direction still holds and is still tested —
+        # here against an EXPLICIT root set, which is the caller-supplies-the-roots path and is
+        # deliberately not guarded.
+        roots = set()
         self.assertEqual(ready.partition_path("sparq-core", roots), ("sparq",))
         self.assertTrue(ready.keys_conflict("sparq-core", "sparq-engine", roots),
-                        "with no tree to read, unrelated crates must OVER-reserve")
+                        "with no roots, unrelated crates must OVER-reserve")
+
+    def test_an_unreadable_tree_now_refuses_instead_of_collapsing_silently(self):
+        """[OPUS-5] A DOCUMENTED TRADE, DELIBERATELY REVISITED — see the PR body.
+
+        This test used to assert that an unreadable tree returns `set()` and lets every key
+        collapse onto `sparq`, on the stated grounds that this is "a fleet-wide slowdown, never a
+        double dispatch". The SAFETY half of that claim is correct and is still tested directly
+        above; it is not what changed.
+
+        What changed is the measured cost of the silence. MEASURED 2026-07-28 against a live sparq
+        snapshot with sparq's own engine: the same board, same labels and same code planned a ready
+        frontier of 4 on the real tree and 2 on a scripts-only tree, with 185 of 377 refusals
+        attributed to a single phantom `sparq-algos` partition — and NOTHING distinguished the two
+        runs. `candidates` and `top-contended` are computed from label sets, so the census line
+        reads exactly the same either way. "A fleet-wide slowdown" that no instrument can see is
+        indistinguishable from a busy board, which is how it survived a whole investigation before
+        being caught by accident.
+
+        So the unattributable case is now LOUD rather than silent. The engine refuses to partition
+        a tree it cannot verify instead of emitting a frontier whose meaning it cannot vouch for.
+        """
+        with self.assertRaises(ready.DegeneratePartitionRoots) as caught:
+            ready.workspace_roots("/nonexistent/sparq-checkout")
+        self.assertIn("refusing to partition", str(caught.exception))
+        # ...and it names the tree it scanned, so the operator can see WHICH checkout was wrong.
+        self.assertIn("/nonexistent/sparq-checkout", str(caught.exception))
 
     def test_dump_partitions_exports_the_mapping_for_the_registry_parity_fixture(self):
         # The registry's dispatch.yml mirrors this key space in `busy_packages_of_pulls`; the two

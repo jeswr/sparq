@@ -30,6 +30,7 @@ import os
 import re
 import subprocess
 import sys
+import tomllib
 
 GATE_LABELS = ("needs:", "trust:untrusted")
 # [OPUS-5] `status:in-progress-review` was MISSING here while the registry's dispatch.yml keeps
@@ -87,10 +88,89 @@ _ROLE = re.compile(r"^role:.+$")
 _SEP = "-"                       # the hierarchy separator inside an `area:` key
 _PARTITION_MEMO = {}             # key -> path, for the default (workspace-derived) root set
 _WORKSPACE_ROOTS = None          # lazily scanned; None = not yet read
+# The manifest that makes the scan CHECKABLE. `crates/<name>` members are an explicit list here
+# (no globs), so the tree can state its own floor and a crate added next month raises it with no
+# code change — see `assert_workspace_tree`.
+WORKSPACE_MANIFEST = "Cargo.toml"
+
+
+class DegeneratePartitionRoots(RuntimeError):
+    """The tree handed to the partition algebra is not this workspace, so it cannot be partitioned.
+
+    [OPUS-5] `workspace_roots()` derives partition semantics from a DIRECTORY LISTING, so the
+    algebra silently changes meaning when the listing is wrong. If `crates/` is absent, no
+    `sparq-*` key resolves through rule 2 and EVERY one of them falls to rule 3's head segment
+    `sparq` — one mega-partition that every sparq crate conflicts on. The frontier then collapses
+    to ~1 and the census line looks completely normal, because `candidates` and `top-contended`
+    are computed from label sets and never mention the collapse.
+
+    MEASURED (2026-07-28, live sparq snapshot, sparq's own engine): with the real tree the ready
+    lane selected 4 rows; with a scripts-only tree — same snapshot, same code, same labels — it
+    selected 2, and 185 of 377 refusals were attributed to a single phantom `sparq-algos` key held
+    by one PR. That was an ACCIDENT in a repro harness, not a hypothetical: nothing in the engine,
+    the workflow, or the census could tell the two runs apart.
+
+    So the scan is asserted instead of trusted, and a violation REFUSES TO PLAN. Returning an
+    empty frontier would have been worse than useless — it prints `frontier=0` and reads as an
+    ordinary fully-contended tick. A raise cannot be mistaken for a plan.
+    """
 
 
 def _repo_root():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def declared_crate_members(repo_root):
+    """The `crates/<name>` directories `Cargo.toml` DECLARES as workspace members.
+
+    The floor for `assert_workspace_tree` is read from the manifest rather than written down, so
+    it tracks the workspace automatically. Returns an empty set when the manifest is missing or
+    unreadable — the caller treats that as its own failure, not as a floor of zero.
+    """
+    path = os.path.join(repo_root, WORKSPACE_MANIFEST)
+    try:
+        with open(path, "rb") as handle:
+            manifest = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return set()
+    members = (manifest.get("workspace") or {}).get("members")
+    if not isinstance(members, list):
+        return set()
+    return {m.split("/", 1)[1] for m in members
+            if isinstance(m, str) and m.startswith("crates/") and "/" in m}
+
+
+def assert_workspace_tree(base, names):
+    """Refuse a scanned root set that cannot be this workspace. Raises DegeneratePartitionRoots.
+
+    Two conditions, both derived FROM THE TREE — there is no magic number here, and adding a crate
+    raises the floor by itself:
+
+      1. `Cargo.toml` must be present and declare `crates/*` workspace members. Its absence means
+         we are not looking at the repository root at all (the exact shape of the accident that
+         motivated this: a target tree containing only `scripts/`).
+      2. EVERY declared member must have been scanned as a root. This is what catches the case
+         condition 1 cannot — a sparse or partial checkout that has the manifest and only some of
+         `crates/`, where the missing crates' keys would each collapse into `sparq` while the
+         present ones resolve correctly. A partly-wrong partition is not safer than a wholly-wrong
+         one; it is harder to notice.
+    """
+    declared = declared_crate_members(base)
+    if not declared:
+        raise DegeneratePartitionRoots(
+            f"refusing to partition: no readable `[workspace] members` in {base}/"
+            f"{WORKSPACE_MANIFEST}. The partition algebra resolves `area:` keys against the "
+            f"directory listing of {base}, and a tree that is not this workspace collapses every "
+            "unrecognised `sparq-*` key onto the single head-segment partition `sparq` — a "
+            "frontier computed from that is wrong in a way no census line reveals.")
+    missing = sorted(declared - set(names))
+    if missing:
+        shown = ", ".join(missing[:8]) + (f" (+{len(missing) - 8} more)" if len(missing) > 8 else "")
+        raise DegeneratePartitionRoots(
+            f"refusing to partition: {len(missing)} of {len(declared)} declared workspace "
+            f"member(s) are absent from the scanned tree at {base}: {shown}. Each missing crate's "
+            "`area:` key would resolve to the head segment `sparq` instead of to itself, silently "
+            "merging unrelated crates into one partition and collapsing the frontier.")
 
 
 def workspace_roots(repo_root=None):
@@ -106,6 +186,12 @@ def workspace_roots(repo_root=None):
 
     The registry's `dispatch.yml` CLONES this repo and runs this script, so the same tree is
     present there; `--dump-partitions` exports the resolved mapping for a parity fixture.
+
+    [OPUS-5] The scan is now ASSERTED against the workspace manifest before it is returned or
+    memoized (`assert_workspace_tree`) — reading semantics off a directory listing means a wrong
+    listing silently changes them, and the resulting frontier is indistinguishable from a healthy
+    one. A caller that passes an explicit `roots` SET to `partition_path`/`keys_conflict` is
+    unaffected: it supplied the roots and owns them (that is how the hermetic fixtures work).
     """
     global _WORKSPACE_ROOTS
     if repo_root is None and _WORKSPACE_ROOTS is not None:
@@ -119,6 +205,7 @@ def workspace_roots(repo_root=None):
             continue
         names.update(e for e in entries
                      if not e.startswith(".") and os.path.isdir(os.path.join(parent, e)))
+    assert_workspace_tree(base, names)     # BEFORE the memo: never cache a degenerate scan
     if repo_root is None:
         _WORKSPACE_ROOTS = names
     return names
@@ -571,6 +658,12 @@ def compute_ready(issues, in_progress_packages=None, conflict_log=None, source_l
     per-row loop, so the registry's existing `compute_ready(ready_input)` call is unaffected and
     the two repositories may merge in either order.
     """
+    # [OPUS-5] EAGER, so the refusal is a property of the TREE and not of the board. `conflict()`
+    # below is the only consumer of the workspace-derived roots, and it is not reached at all when
+    # nothing is held or nothing is a candidate — on those ticks a degenerate tree would plan
+    # silently and the guard would fire only later, on a busier board. Asserting here makes every
+    # call refuse identically. Costs one memoized directory listing per process.
+    workspace_roots()
     blockers = {}
 
     def reserve(pkgs, artifact):
@@ -772,6 +865,99 @@ def _self_test():
     check("degenerate key falls all the way to global", partition_path(""), ())
     check("unrelated crates do not conflict",
           keys_conflict("sparq-core", "sparq-engine"), False)
+
+    # ---------------------------------------------------------------------------------------
+    # [OPUS-5] THE DEGENERATE-TREE GUARD. These build real directories rather than stubbing the
+    # scan, because the defect IS the scan: `workspace_roots()` reads a directory listing and the
+    # algebra silently changes meaning when the listing is wrong. Every row below goes red if
+    # `assert_workspace_tree` is deleted or if either of its two conditions is dropped.
+    # ---------------------------------------------------------------------------------------
+    import shutil
+    import tempfile
+
+    def _tree(members, present=None, manifest=True):
+        """A throwaway repo root. `members` are declared in Cargo.toml; `present` (default: all
+        of them) are the crate directories actually created."""
+        base = tempfile.mkdtemp(prefix="ready-roots-")
+        os.makedirs(os.path.join(base, "scripts"))
+        for name in (members if present is None else present):
+            os.makedirs(os.path.join(base, "crates", name))
+        if manifest:
+            listed = ", ".join(f'"crates/{n}"' for n in members)
+            with open(os.path.join(base, WORKSPACE_MANIFEST), "w", encoding="utf-8") as handle:
+                handle.write(f"[workspace]\nresolver = \"2\"\nmembers = [{listed}]\n")
+        return base
+
+    def _refusal(base):
+        try:
+            workspace_roots(base)
+        except DegeneratePartitionRoots as exc:
+            return str(exc)
+        return ""
+
+    _crates = ["sparq-core", "sparq-engine", "sparq-algos", "sparq-kb"]
+    # (1) THE ACCIDENT, REPRODUCED: a scripts-only tree — no Cargo.toml, no crates/ — is exactly
+    # what the repro harness handed the engine, and it planned a frontier from a phantom
+    # partition with no diagnostic anywhere.
+    _scripts_only = _tree([], manifest=False)
+    _msg = _refusal(_scripts_only)
+    check("[degenerate] a scripts-only tree REFUSES to partition",
+          ("refusing to partition" in _msg, "Cargo.toml" in _msg), (True, True))
+    # ...and the refusal is NON-VACUOUS: on that same tree the algebra really does merge two
+    # unrelated crates into one `sparq` partition. This is the harm the guard exists to stop, so
+    # it is asserted directly — deleting the guard makes the row above green and leaves THIS
+    # collapse in place, which is precisely how the accident went unnoticed.
+    check("[degenerate] ...and that tree really would merge unrelated crates",
+          (partition_path("sparq-core", roots={"scripts"}),
+           partition_path("sparq-algos", roots={"scripts"}),
+           keys_conflict("sparq-core", "sparq-algos", roots={"scripts"})),
+          (("sparq",), ("sparq",), True))
+    # (2) THE HEALTHY PATH IS UNCHANGED: a complete tree returns its roots and does not raise.
+    _full = _tree(_crates)
+    check("[degenerate] a complete workspace tree is accepted",
+          (_refusal(_full),
+           sorted(n for n in workspace_roots(_full) if n not in {"scripts", "crates"})),
+          ("", sorted(_crates)))
+    # ...and on it the same two keys are INDEPENDENT — the guard changes no semantics, it only
+    # refuses trees where the semantics would be wrong.
+    _roots = workspace_roots(_full)
+    check("[degenerate] ...and unrelated crates stay independent there",
+          keys_conflict("sparq-core", "sparq-algos", roots=_roots), False)
+    # (3) THE PARTIAL CHECKOUT — manifest present, only some crates on disk. Condition 1 alone
+    # cannot see this: the missing crates' keys collapse to `sparq` while the present ones
+    # resolve correctly, so the partition is partly right, which is harder to notice than
+    # wholly wrong. Dropping the member-existence half of the guard makes this row red.
+    _partial = _tree(_crates, present=_crates[:2])
+    _msg = _refusal(_partial)
+    check("[degenerate] a PARTIAL checkout (manifest + some crates) also refuses",
+          ("2 of 4 declared workspace member(s) are absent" in _msg,
+           "sparq-algos" in _msg, "sparq-kb" in _msg), (True, True, True))
+    # (4) A manifest with no `crates/*` members is not a floor of zero — it is an unusable
+    # manifest, and admitting it would let an empty `members = []` disable the guard entirely.
+    _empty_members = _tree([], present=["sparq-core"])
+    check("[degenerate] an empty member list is a refusal, never a floor of zero",
+          "refusing to partition" in _refusal(_empty_members), True)
+    # (5) compute_ready REFUSES rather than returning a plausible-looking empty frontier: an
+    # empty result prints `frontier=0` and reads as an ordinary fully-contended tick.
+    _saved_roots, _saved_memo = _WORKSPACE_ROOTS, dict(_PARTITION_MEMO)
+    globals()["_WORKSPACE_ROOTS"] = None
+    globals()["_PARTITION_MEMO"] = {}
+    _saved_repo_root = globals()["_repo_root"]
+    globals()["_repo_root"] = lambda: _scripts_only
+    try:
+        _planned = compute_ready([iss(90, R + ["priority:P1", "area:sparq-core"])],
+                                 conflict_log=quiet)
+        _outcome = f"PLANNED {[i['number'] for i in _planned]}"
+    except DegeneratePartitionRoots:
+        _outcome = "REFUSED"
+    finally:
+        globals()["_repo_root"] = _saved_repo_root
+        globals()["_WORKSPACE_ROOTS"] = _saved_roots
+        globals()["_PARTITION_MEMO"] = _saved_memo
+    check("[degenerate] compute_ready REFUSES on a degenerate tree (never a quiet empty plan)",
+          _outcome, "REFUSED")
+    for _path in (_scripts_only, _full, _partial, _empty_members):
+        shutil.rmtree(_path, ignore_errors=True)
     check("sibling regions of one crate conflict",
           keys_conflict("sparq-core-store", "sparq-core-nt-dict"), True)
     check("parent+child enter the frontier together? (must not)",
