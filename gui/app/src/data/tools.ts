@@ -28,6 +28,7 @@ import {
   Server,
   Scale,
   Gauge,
+  Workflow,
 } from "lucide-react";
 
 /**
@@ -114,6 +115,19 @@ export const TOOLS: ToolDef[] = [
       "Explore EXPLAIN / EXPLAIN ANALYZE as an operator tree — est vs actual rows, q-error heat, per-operator time — and monitor/kill in-flight queries.",
     tier: "live",
     icon: Gauge,
+    built: true,
+    group: "working",
+  },
+  {
+    id: "query-builder",
+    label: "Query builder",
+    // [OPUS-5] sq-ixc3.24 — the diagram-to-SPARQL canvas (Gruff / Stardog Explorer parity, plus
+    // shape-aware suggestions). The generated SPARQL is always visible + editable and hands off
+    // to the Query tool — no hidden dialect, no second execution path.
+    blurb:
+      "Draw a node/edge pattern and get editable SPARQL — pickers driven by the live store's characteristic sets and any SHACL shapes it holds.",
+    tier: "live",
+    icon: Workflow,
     built: true,
     group: "working",
   },

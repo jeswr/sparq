@@ -27,6 +27,7 @@ import { STREAMING_TOOL_OVERRIDE } from "@/components/workbench/streaming-tool.m
 import { SERVER_TOOL_OVERRIDE } from "@/components/workbench/server-tool.meta";
 import { ODRL_TOOL_OVERRIDE } from "@/components/workbench/odrl-tool.meta";
 import { PLAN_TOOL_OVERRIDE } from "@/components/workbench/plan-explorer.meta";
+import { QUERY_BUILDER_TOOL_OVERRIDE } from "@/components/workbench/query-builder-tool.meta";
 import { ToolStub } from "@/components/workbench/tool-stub";
 import { applyToolOverride, toolById, type ToolDef, type ToolOverride } from "@/data/tools";
 
@@ -77,6 +78,9 @@ const OdrlTool = lazyPanel(() =>
 const PlanExplorer = lazyPanel(() =>
   import("@/components/workbench/plan-explorer").then((m) => ({ default: m.PlanExplorer })),
 );
+const QueryBuilderTool = lazyPanel(() =>
+  import("@/components/workbench/query-builder-tool").then((m) => ({ default: m.QueryBuilderTool })),
+);
 
 interface ToolPanelEntry {
   Component: ComponentType;
@@ -111,6 +115,10 @@ const TOOL_PANELS: Record<string, ToolPanelEntry> = {
   // [FABLE-5] sq-ixc3.19 — the visual query-plan explorer (EXPLAIN/ANALYZE operator tree +
   // q-error heat + the this-workbench query monitor with endpoint Kill).
   plan: { Component: PlanExplorer, override: PLAN_TOOL_OVERRIDE },
+  // [OPUS-5] sq-ixc3.24 — the visual query builder (diagram → editable SPARQL, shape-aware
+  // pickers). It EMITS into the Query tool via lib/query-handoff; it never runs a query the
+  // user cannot see.
+  "query-builder": { Component: QueryBuilderTool, override: QUERY_BUILDER_TOOL_OVERRIDE },
 };
 
 /**

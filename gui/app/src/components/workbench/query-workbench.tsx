@@ -74,6 +74,9 @@ import { InferenceControl } from "@/components/workbench/inference-control";
 // [FABLE-5] sq-ixc3.14 — the federation allowlist editor + the honest run-location badge.
 import { FederationControl, RunLocationBadge } from "@/components/workbench/federation-control";
 import { useWorkspace } from "@/lib/workspace-context";
+// [OPUS-5] sq-ixc3.24 — the visual query builder hands its generated SPARQL to THIS editor, so a
+// built query is read/edited/run exactly like a hand-written one (no second execution path).
+import { subscribeToQueryHandoff, takePendingQuery } from "@/lib/query-handoff";
 import { DEFAULT_QUERY } from "@/data/sample-graph";
 // [FABLE-5] sq-ixc3.14 — the honesty-override type for QUERY_TOOL_OVERRIDE (sq-5lyme seam).
 import type { ToolOverride } from "@/data/tools";
@@ -691,12 +694,32 @@ export function QueryWorkbench() {
     setRecentQueries((prev) => pushRecentQuery(prev, q, Date.now()));
   }, []);
 
+  // [OPUS-5] sq-ixc3.24 — accept a query handed over by another tool (the visual query builder's
+  // "Open in Query"). Applied whether this tab was already open (the live subscription) or is
+  // mounting for the first time because the handoff opened it (the pending slot, consumed once).
+  const handoffRef = React.useRef(false);
+  const applyHandoff = React.useCallback((handed: string) => {
+    handoffRef.current = true;
+    setQuery(handed);
+  }, []);
+  React.useEffect(() => {
+    const pendingHandoff = takePendingQuery();
+    if (pendingHandoff !== null) applyHandoff(pendingHandoff);
+    return subscribeToQueryHandoff(applyHandoff);
+  }, [applyHandoff]);
+
   // [OPUS-4.8] sq-lcd6e — hydrate the editor from the restored / switched workspace's saved query.
   // Runs once per workspace id (never re-clobbering the user's in-progress edits within a session).
   React.useEffect(() => {
     if (!workspace) return;
     if (loadedWsRef.current === workspace.id) return;
     loadedWsRef.current = workspace.id;
+    // (sq-ixc3.24) A handoff that arrived before the restore landed wins over the saved query —
+    // the user explicitly asked for it. Clearing the flag keeps the NEXT workspace switch normal.
+    if (handoffRef.current) {
+      handoffRef.current = false;
+      return;
+    }
     setQuery(workspace.editor.query);
   }, [workspace]);
 

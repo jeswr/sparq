@@ -130,6 +130,44 @@ reason — and an `odrl:prohibition` visibly flips a previously visible named gr
 that requester's pane. The browser build labels the tool **native-only** (the ODRL stack is not
 in the wasm bundle) instead of pretending.
 
+## Visual query builder — diagram to SPARQL (`sq-ixc3.24`)
+
+The **Query builder** tool is a node/edge canvas that generates SPARQL: draw the pattern, get the
+query. It covers the AllegroGraph **Gruff** ground (draw a pattern → query) and the Stardog
+**Explorer** ground (walk relationship paths, attribute filters, AND-NOT, GROUP BY), and adds
+**shape-aware suggestions** — when SHACL shapes are present, the predicate picker is driven by
+what the shapes *declare*, not only by what the data happens to contain.
+
+* **Pickers come from real introspection.** The class list is a `SELECT ?class (COUNT(DISTINCT ?s) …)`
+  over the live store; a node's predicate list is that class's **characteristic set** (which
+  predicates its instances actually use, how often, and whether the objects were literals or
+  IRIs), plus the `sh:property` constraints of any `sh:targetClass` shape **in the store**. Each
+  suggestion is labelled `SHACL shape` / `in the data` / `shape + data`, so a shape-declared
+  property that nothing uses yet is offered but never dressed up as observed. Shapes pasted into
+  the SHACL tool's editor are that tool's session state and are not visible here — import them to
+  make them drive suggestions.
+* **Links, filters, negation, aggregates.** A link is a plain triple pattern (`required`), an
+  `OPTIONAL { … }` group, or the AND-NOT form, lowered as `FILTER NOT EXISTS { … }` (correct
+  whether or not the inner group shares a variable, which `MINUS` is not). A node that is only
+  reachable through an optional/negated link has its own class + attribute patterns emitted
+  *inside* that group — emitting them outside would quietly make the branch mandatory. Projected
+  items can carry `COUNT`/`COUNT DISTINCT`/`SUM`/`AVG`/`MIN`/`MAX`; the non-aggregated ones become
+  the `GROUP BY` keys.
+* **Two-way, with no hidden dialect.** The generated SPARQL is always visible and always editable
+  in the pane below the canvas; it is plain SPARQL 1.1 and the exact text is what runs. Editing it
+  detaches it from the canvas — the pane says `manually edited` and only an explicit **Regenerate**
+  discards your text. **Open in Query** hands that same text to the real Query tool
+  (`lib/query-handoff.ts`), which owns execution; the builder's own **Preview** runs the same text
+  on the in-tab engine and shows real rows with the measured latency of that run.
+* **Nothing is silently dropped.** Anything the lowering cannot express — a link whose predicate
+  has not been chosen, an edge to a deleted node, a projected variable that no pattern binds, a
+  non-numeric value in a numeric comparison — is surfaced as a warning above the editor.
+
+The model, the lowering and the introspection/suggestion logic are pure and unit-tested
+(`src/lib/query-builder.ts` + `query-builder.test.ts`); the canvas journey is covered by
+`e2e-playwright/specs/query-builder.web.spec.ts`. The tool is `live` in both targets — it runs
+entirely on the in-tab wasm engine, with no native-only half.
+
 ## File ingest library (`lib/file-ingest.ts`, sq-vnh1v)
 
 The **file ingest library** is a shared zero-server multi-file upload harness for the RDF import (sq-eydh9), SHACL shapes (sq-txrui), and N3 rules (sq-glo5r) surfaces. It operates on a single `IngestResult` contract: every file is `accepted[]` (name, text, bytes) or `rejected[]` (name, reason) — **no silent drops**. 
