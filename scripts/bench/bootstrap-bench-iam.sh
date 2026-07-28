@@ -24,7 +24,8 @@
 #          --expire-days N (0 disables the lifecycle rule) --reader-arn ARN
 #
 # Pinned by scripts/tests/test_bench_result_egress.sh (policy shape + least privilege +
-# "--dry-run makes no AWS call"). The AWS-side calls themselves are DOCUMENTED-UNTESTED
+# "--dry-run makes no AWS call, with or without --bucket" + first-run/re-run/conflicting-role
+# behaviour of the instance profile). The AWS-side calls themselves are DOCUMENTED-UNTESTED
 # here: this repo's CI has no AWS account, so validate them on the first real run.
 set -euo pipefail
 
@@ -62,8 +63,15 @@ PREFIX="${PREFIX#/}"; PREFIX="${PREFIX%/}"
 [[ "$PREFIX" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || die "--prefix '$PREFIX' is not a safe S3 key prefix"
 
 if [ -z "$BUCKET" ]; then
-  if [ "$PRINT_POLICY_ONLY" = 1 ]; then
-    BUCKET="sparq-bench-results-000000000000"   # placeholder: --print-policy makes no AWS call
+  if [ "$DRY_RUN" = 1 ]; then
+    # NEITHER --dry-run NOR --print-policy may touch AWS, and deriving the default bucket
+    # name needs the account id — so the dry run PRINTS the lookup a real run would make
+    # and then previews the rest of the plan against an obvious placeholder account.
+    if [ "$PRINT_POLICY_ONLY" != 1 ]; then
+      printf '  aws sts get-caller-identity --query Account --output text   # => ACCOUNT\n'
+      log "no --bucket given: previewing against the placeholder account 000000000000"
+    fi
+    BUCKET="sparq-bench-results-000000000000"
   else
     command -v aws >/dev/null || die "aws CLI not found (needed to resolve the account id)"
     ACCOUNT=$(aws sts get-caller-identity --query Account --output text) \
@@ -153,10 +161,32 @@ log "4/6 inline write-only policy scoped to s3://$BUCKET/$PREFIX/"
 run_aws iam put-role-policy --role-name "$ROLE_NAME" \
   --policy-name sparq-bench-results-write --policy-document "$PERMISSIONS_POLICY"
 
+# An instance profile holds AT MOST ONE role, and AWS reports a re-attach as a
+# LimitExceeded quota error rather than any AlreadyExists string — so the generic allowlist
+# in run_aws_idempotent cannot make this call idempotent. Ask first instead: the same role
+# is a no-op, a DIFFERENT role is a real conflict the maintainer must resolve explicitly.
+attach_role_to_profile() {
+  if [ "$DRY_RUN" = 1 ]; then
+    run_aws iam get-instance-profile --instance-profile-name "$PROFILE_NAME"
+    run_aws iam add-role-to-instance-profile \
+      --instance-profile-name "$PROFILE_NAME" --role-name "$ROLE_NAME"
+    return 0
+  fi
+  local attached
+  attached=$(aws iam get-instance-profile --instance-profile-name "$PROFILE_NAME" \
+    --query 'InstanceProfile.Roles[0].RoleName' --output text 2>/dev/null) || attached=""
+  case "$attached" in
+    "$ROLE_NAME") log "role $ROLE_NAME is already attached to $PROFILE_NAME (ok)"; return 0 ;;
+    ""|None) ;;
+    *) die "instance profile $PROFILE_NAME already holds role '$attached' (a profile holds at most one role) — detach it, or re-run with --profile-name to use a different profile" ;;
+  esac
+  aws iam add-role-to-instance-profile \
+    --instance-profile-name "$PROFILE_NAME" --role-name "$ROLE_NAME"
+}
+
 log "5/6 instance profile $PROFILE_NAME"
 run_aws_idempotent iam create-instance-profile --instance-profile-name "$PROFILE_NAME"
-run_aws_idempotent iam add-role-to-instance-profile \
-  --instance-profile-name "$PROFILE_NAME" --role-name "$ROLE_NAME"
+attach_role_to_profile
 
 if [ -n "$READER_ARN" ]; then
   log "6/6 bucket policy granting read-back to $READER_ARN"

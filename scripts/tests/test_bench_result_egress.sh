@@ -43,6 +43,12 @@ STUB_DIR="$WORK/bin"; mkdir -p "$STUB_DIR"
 cat > "$STUB_DIR/aws" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${AWS_STUB_LOG:?}"
+# `iam get-instance-profile --query …Roles[0].RoleName --output text` answers with the
+# attached role name, or the literal "None" when the profile holds no role yet — that is
+# how the real CLI renders a null JMESPath result, and the bootstrap branches on it.
+case "$*" in
+  *get-instance-profile*) printf '%s\n' "${AWS_STUB_ATTACHED_ROLE:-None}"; exit 0 ;;
+esac
 exit "${AWS_STUB_RC:-0}"
 STUB
 chmod +x "$STUB_DIR/aws"
@@ -166,6 +172,59 @@ case "$DRY" in *"iam create-instance-profile"*) ok "dry-run prints the instance-
   *) bad "dry-run never mentions the instance profile" ;; esac
 case "$DRY" in *"add-role-to-instance-profile"*) ok "dry-run attaches the role to the profile" ;;
   *) bad "dry-run never attaches the role" ;; esac
+
+# The DOCUMENTED invocation is a bare `--dry-run`, with no --bucket. That is the branch that
+# used to reach `aws sts get-caller-identity` to derive the default bucket name, so a preview
+# spent credentials before printing anything. `env -i` keeps BENCH_RESULTS_BUCKET from leaking
+# in and re-hiding the branch.
+: > "$AWS_STUB_LOG"
+DRY0=$(env -i "PATH=$STUB_PATH" "HOME=$WORK" "AWS_STUB_LOG=$AWS_STUB_LOG" \
+  bash "$BOOTSTRAP" --dry-run 2>&1)
+check "bootstrap --dry-run WITHOUT --bucket makes no aws call" "$(wc -l < "$AWS_STUB_LOG" | tr -d ' ')" "0"
+case "$DRY0" in *"sts get-caller-identity"*) ok "dry-run prints the account lookup a real run would make" ;;
+  *) bad "dry-run hides the account lookup entirely" ;; esac
+case "$DRY0" in *"s3api create-bucket"*) ok "dry-run without --bucket still previews the whole plan" ;;
+  *) bad "dry-run without --bucket stopped short of the plan" ;; esac
+
+echo "== 6b. re-running the bootstrap is a no-op; a foreign role in the profile fails loudly =="
+# An instance profile holds at most ONE role and AWS answers a re-attach with a quota error,
+# not an AlreadyExists — so idempotency here has to come from asking before attaching.
+: > "$AWS_STUB_LOG"
+env -i "PATH=$STUB_PATH" "HOME=$WORK" "AWS_STUB_LOG=$AWS_STUB_LOG" "AWS_STUB_ATTACHED_ROLE=None" \
+  bash "$BOOTSTRAP" --bucket sparq-bench-results-000000000000 >/dev/null 2>&1
+if grep -q 'add-role-to-instance-profile' "$AWS_STUB_LOG"; then
+  ok "first run (empty profile) attaches the role"
+else
+  bad "first run never attached the role to the instance profile"
+fi
+
+: > "$AWS_STUB_LOG"
+if env -i "PATH=$STUB_PATH" "HOME=$WORK" "AWS_STUB_LOG=$AWS_STUB_LOG" \
+     "AWS_STUB_ATTACHED_ROLE=sparq-bench-results-writer" \
+     bash "$BOOTSTRAP" --bucket sparq-bench-results-000000000000 >/dev/null 2>&1; then
+  ok "re-run succeeds when the SAME role is already attached"
+else
+  bad "re-run failed even though the same role was already attached"
+fi
+if grep -q 'add-role-to-instance-profile' "$AWS_STUB_LOG"; then
+  bad "re-run re-issued add-role-to-instance-profile (AWS answers that with a quota error)"
+else
+  ok "re-run skips add-role-to-instance-profile (genuinely idempotent)"
+fi
+
+: > "$AWS_STUB_LOG"
+CONFLICT_RC=0
+CONFLICT=$(env -i "PATH=$STUB_PATH" "HOME=$WORK" "AWS_STUB_LOG=$AWS_STUB_LOG" \
+  "AWS_STUB_ATTACHED_ROLE=someone-elses-role" \
+  bash "$BOOTSTRAP" --bucket sparq-bench-results-000000000000 2>&1) || CONFLICT_RC=$?
+check "a DIFFERENT role occupying the profile is a hard failure" "$CONFLICT_RC" "1"
+case "$CONFLICT" in *someone-elses-role*) ok "the conflict error names the occupying role" ;;
+  *) bad "the conflict error does not name the occupying role" ;; esac
+if grep -q 'add-role-to-instance-profile' "$AWS_STUB_LOG"; then
+  bad "attached over a foreign role instead of failing"
+else
+  ok "no attach attempted while a foreign role occupies the profile"
+fi
 
 echo "== 7. the canonical launchers + gathers are wired to the library =="
 for l in canonical-materialize-bench.sh canonical-competitor-bench.sh canonical-beir-bench.sh; do
