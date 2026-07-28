@@ -370,6 +370,10 @@ class VerdictState:
     head_moved_at: datetime | None
     last_enqueued_at: datetime | None
     readable: bool = True
+    # Tracked SEPARATELY from head_moved_at purely so the emitted reason is accurate:
+    # folding a label revocation into "the head moved" tells an operator a commit
+    # landed when none did, and sends them looking for a push that does not exist.
+    verdict_revoked_at: datetime | None = None
 
 
 def decide_entry(
@@ -470,6 +474,14 @@ def verdict_is_still_for_this_tree(state: VerdictState) -> tuple[bool, str]:
         return False, "the PR timeline could not be read"
     if state.review_pass_at is None:
         return False, "no review:pass grant found on the timeline — no verdict to keep"
+    if (
+        state.verdict_revoked_at is not None
+        and state.verdict_revoked_at > state.review_pass_at
+    ):
+        return False, (
+            f"review:pass was REVOKED at {iso(state.verdict_revoked_at)}, after the "
+            f"grant at {iso(state.review_pass_at)} — there is no live verdict to keep"
+        )
     if state.head_moved_at is not None and state.head_moved_at > state.review_pass_at:
         return False, (
             f"the head moved at {iso(state.head_moved_at)}, after review:pass was "
@@ -783,6 +795,7 @@ class Watchdog:
         enqueued: list[datetime] = []
         granted: list[datetime] = []
         moved: list[datetime] = []
+        revoked: list[datetime] = []
         for row in rows:
             event = row.get("event")
             stamp = parse_iso(row.get("created_at"))
@@ -792,10 +805,10 @@ class Watchdog:
                 if str((row.get("label") or {}).get("name", "")).lower() == REVIEW_PASS:
                     granted.append(stamp)
             elif event == "unlabeled" and stamp:
-                # A verdict that was REMOVED is not a verdict. Model a removal as a
-                # head move at that instant, so any earlier grant stops qualifying.
+                # A verdict that was REMOVED is not a verdict, and it is recorded as a
+                # revocation rather than a head move so the reason stays truthful.
                 if str((row.get("label") or {}).get("name", "")).lower() == REVIEW_PASS:
-                    moved.append(stamp)
+                    revoked.append(stamp)
             elif event == "head_ref_force_pushed" and stamp:
                 moved.append(stamp)
             elif event == "committed":
@@ -808,6 +821,7 @@ class Watchdog:
             review_pass_at=max(granted) if granted else None,
             head_moved_at=max(moved) if moved else None,
             last_enqueued_at=max(enqueued) if enqueued else None,
+            verdict_revoked_at=max(revoked) if revoked else None,
         )
 
     # -- mutations -----------------------------------------------------------

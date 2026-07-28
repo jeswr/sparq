@@ -369,10 +369,33 @@ class TestDequeueRouting(unittest.TestCase):
         )
 
     def test_a_revoked_verdict_cannot_be_preserved(self):
-        # `unlabeled review:pass` is modelled as a head move at that instant, so a
-        # grant that was later withdrawn stops qualifying.
-        revoked = self.verdict(head_moved_at=NOW - timedelta(hours=1, minutes=30))
-        self.assertEqual(self.route(verdict=revoked).route, mgw.ROUTE_DEMOTE)
+        revoked = self.verdict(verdict_revoked_at=NOW - timedelta(hours=1, minutes=30))
+        result = self.route(verdict=revoked)
+        self.assertEqual(result.route, mgw.ROUTE_DEMOTE)
+        # The reason must name the REVOCATION, not invent a push. Reporting "the head
+        # moved" when no commit landed sends an operator hunting a non-existent force
+        # push — a misleading diagnostic baked into the tool.
+        self.assertIn("REVOKED", result.detail)
+        self.assertNotIn("the head moved", result.detail)
+
+    def test_a_head_move_and_a_revocation_report_different_reasons(self):
+        moved = self.route(verdict=self.verdict(head_moved_at=NOW - timedelta(minutes=1)))
+        revoked = self.route(
+            verdict=self.verdict(verdict_revoked_at=NOW - timedelta(minutes=1))
+        )
+        self.assertEqual(moved.route, mgw.ROUTE_DEMOTE)
+        self.assertEqual(revoked.route, mgw.ROUTE_DEMOTE)
+        self.assertIn("the head moved", moved.detail)
+        self.assertNotIn("REVOKED", moved.detail)
+        self.assertIn("REVOKED", revoked.detail)
+
+    def test_a_revocation_before_the_current_grant_is_harmless(self):
+        # The real #4709 shape after a manual restore: demoted at T, re-granted at T+.
+        restored = self.verdict(
+            review_pass_at=NOW - timedelta(minutes=10),
+            verdict_revoked_at=NOW - timedelta(minutes=40),
+        )
+        self.assertEqual(self.route(verdict=restored).route, mgw.ROUTE_PRESERVE)
 
     def test_unreadable_timeline_demotes(self):
         # ISOLATED: everything else about this verdict is valid, so ONLY the
@@ -875,6 +898,27 @@ class TestClassifyEndToEnd(unittest.TestCase):
             harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT").route, mgw.ROUTE_DEMOTE
         )
 
+    def test_a_revocation_then_regrant_preserves_end_to_end(self):
+        # PR #4709 as it actually stands: bot demoted it at 06:06:55, the verdict was
+        # restored at 06:36:41, no commits since. Validated against the live timeline.
+        harness = FakeWatchdog.build(
+            suites=0,
+            comments=[_marker_comment()],
+            timeline=[
+                {"event": "labeled", "created_at": "2026-07-27T22:20:00Z",
+                 "label": {"name": "review:pass"}},
+                {"event": "unlabeled", "created_at": "2026-07-27T22:30:00Z",
+                 "label": {"name": "review:pass"}},
+                {"event": "labeled", "created_at": "2026-07-27T22:50:00Z",
+                 "label": {"name": "review:pass"}},
+                {"event": "added_to_merge_queue", "created_at": "2026-07-27T22:58:53Z"},
+            ],
+        )
+        self.assertEqual(
+            harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT").route,
+            mgw.ROUTE_PRESERVE,
+        )
+
     def test_a_revoked_verdict_forfeits_it_end_to_end(self):
         harness = FakeWatchdog.build(
             suites=0,
@@ -887,9 +931,69 @@ class TestClassifyEndToEnd(unittest.TestCase):
                 {"event": "added_to_merge_queue", "created_at": "2026-07-27T22:58:53Z"},
             ],
         )
-        self.assertEqual(
-            harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT").route, mgw.ROUTE_DEMOTE
+        route = harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT")
+        self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
+        # Through the real PARSER, not a hand-built VerdictState: a revocation must be
+        # reported as a revocation. Folding it into head_moved_at still demotes, so the
+        # route alone cannot catch it — only the reason can.
+        self.assertIn("REVOKED", route.detail)
+        self.assertNotIn("the head moved", route.detail)
+
+    def test_the_LATEST_revocation_counts_end_to_end(self):
+        # revoke, re-grant, revoke again. min(revoked) picks the FIRST revocation,
+        # which predates the grant, and would wrongly preserve.
+        harness = FakeWatchdog.build(
+            suites=0,
+            comments=[_marker_comment()],
+            timeline=[
+                {"event": "unlabeled", "created_at": "2026-07-27T22:10:00Z",
+                 "label": {"name": "review:pass"}},
+                {"event": "labeled", "created_at": "2026-07-27T22:20:00Z",
+                 "label": {"name": "review:pass"}},
+                {"event": "unlabeled", "created_at": "2026-07-27T22:30:00Z",
+                 "label": {"name": "review:pass"}},
+                {"event": "added_to_merge_queue", "created_at": "2026-07-27T22:58:53Z"},
+            ],
         )
+        route = harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT")
+        self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
+        self.assertIn("REVOKED", route.detail)
+
+    def test_removing_an_unrelated_label_is_not_a_revocation_end_to_end(self):
+        # PRs shed `area:*`, `status:*`, `needs:*` labels constantly. Treating any
+        # `unlabeled` event as a verdict revocation would make the preserve route
+        # unreachable in practice, silently and greenly.
+        for other in ("area:ci", "status:untriaged", "needs:user", "role:impl"):
+            harness = FakeWatchdog.build(
+                suites=0,
+                comments=[_marker_comment()],
+                timeline=[
+                    {"event": "labeled", "created_at": "2026-07-27T22:20:00Z",
+                     "label": {"name": "review:pass"}},
+                    {"event": "unlabeled", "created_at": "2026-07-27T22:30:00Z",
+                     "label": {"name": other}},
+                    {"event": "added_to_merge_queue", "created_at": "2026-07-27T22:58:53Z"},
+                ],
+            )
+            self.assertEqual(
+                harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT").route,
+                mgw.ROUTE_PRESERVE,
+                other,
+            )
+
+    def test_adding_an_unrelated_label_is_not_a_verdict_end_to_end(self):
+        harness = FakeWatchdog.build(
+            suites=0,
+            comments=[_marker_comment()],
+            timeline=[
+                {"event": "labeled", "created_at": "2026-07-27T22:20:00Z",
+                 "label": {"name": "area:ci"}},
+                {"event": "added_to_merge_queue", "created_at": "2026-07-27T22:58:53Z"},
+            ],
+        )
+        route = harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT")
+        self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
+        self.assertIn("no review:pass grant", route.detail)
 
     def test_a_label_other_than_review_pass_is_not_a_verdict(self):
         harness = FakeWatchdog.build(
