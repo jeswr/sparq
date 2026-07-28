@@ -34,9 +34,8 @@ assert!(terse_to_sparql("ASK { ?s K:notAKeyword ?o }").is_err());
 // A V("...") construct in the default build fails LOUDLY (needs the `vectors` feature).
 assert!(terse_to_sparql("SELECT ?f WHERE { ?f <http://ex/about> V(\"cats\") }").is_err());
 
-// On PARSE FAILURE ONLY you get a did-you-mean — as a diagnostic, never applied.
-let hints = sparq_terse::keyword_hints("SELECT ?s WHERE { ?s ?p ?o } FLTR(?s > 1)");
-assert_eq!(hints[0].suggestions[0], "FILTER");   // the query is still an error
+// On PARSE FAILURE ONLY, a did-you-mean — a diagnostic, never applied; still an error.
+assert_eq!(sparq_terse::keyword_hints("ASK { ?s ?p ?o } FLTR(?s)")[0].suggestions[0], "FILTER");
 # Ok::<(), sparq_terse::TerseError>(())
 ```
 
@@ -69,22 +68,18 @@ for r in &exp.resolutions {
 - **Silent-rewrite canary** (design §6.7). Every emission is re-parsed under the
   unmodified `spargebra` parser; a non-parsing output is `TerseError::CanaryFailed`,
   never handed back. Canonical input is emitted byte-identical (no silent rewrite).
-- **The `K:<name>` keyword layer** (lever 1, default build, design §3.1). A small,
-  fixed, versioned legend (`legend()`, `LEGEND_VERSION`) of the PKG hot
-  predicates/classes — `K:derivedFrom` → `<…prov#wasDerivedFrom>` — expanded pre-parse
-  so an agent skips the `PREFIX` line. Every expansion is echoed in `Expansion.keywords`;
-  an unknown keyword (`TerseError::UnknownKeyword`, with did-you-mean) and a clash with a
-  real `PREFIX K:` (`TerseError::KeywordPrefixCollision`) are HARD errors, never a guess.
-  Publish the legend once behind the prompt-cache breakpoint with `legend_card()` (the
-  token win is a *caching* property — design §1.6).
+- **The `K:<name>` keyword layer** (lever 1, default build, design §3.1). A small, fixed,
+  versioned legend (`legend()`, `LEGEND_VERSION`) of the PKG hot predicates/classes —
+  `K:derivedFrom` → `<…prov#wasDerivedFrom>` — expanded pre-parse so an agent skips the
+  `PREFIX` line. Every expansion is echoed in `Expansion.keywords`; an unknown keyword
+  (`TerseError::UnknownKeyword`, with did-you-mean) and a clash with a real `PREFIX K:`
+  (`TerseError::KeywordPrefixCollision`) are HARD errors, never a guess. Publish the legend
+  once behind the prompt-cache breakpoint with `legend_card()` (a *caching* win — design §1.6).
 - **A did-you-mean diagnostic that never rewrites** (design §3.2, the *only* sliver of
-  lever 2). On a **parse failure only**, `TerseError::CanaryFailed` carries
-  `KeywordHint { token, suggestions }` — *"unknown keyword `FLTR` — did you mean
-  `FILTER`?"* — and the call **still fails**. Nothing applies the suggestion: a lenient
-  parse could silently produce a *different, valid, wrong* query and would rob the agent
-  of its loud, recoverable feedback loop. Conservative by construction — a structural
-  syntax error yields no hints. `keyword_hints()` exposes the same diagnostic for a parse
-  error obtained elsewhere.
+  lever 2). On a **parse failure only**, `TerseError::CanaryFailed` carries `KeywordHint {
+  token, suggestions }` — *"unknown keyword `FLTR` — did you mean `FILTER`?"* — and the call
+  **still fails**; nothing applies the suggestion, because a lenient parse could silently
+  produce a *different, valid, wrong* query. A structural syntax error yields no hints.
 - **`V("phrase")` lexical-first concept resolution** (`vectors` feature, design §3.3).
   The deterministic, no-model `sparq-nlq` lexical linker is the PRIMARY path; the
   staleness-guarded `sparq-vectors` search is a FALLBACK for genuinely fuzzy phrases.
@@ -111,16 +106,14 @@ for r in &exp.resolutions {
   specified). Resolver-coverage fix tracked in `sq-26fdp`.
 - The reused machinery: `crates/sparq-nlq/src/link.rs` (lexical entity linking),
   `crates/sparq-vectors/src/ann.rs` (`nearest_exact`, the staleness-guarded
-  `nearest_term_exact_checked`), `crates/sparq-vectors/src/store.rs`
-  (`VectorStore::check_graph`).
-- Epic `sq-2m6zm` (dogfood sparq as a Project Knowledge Graph): this surface is
-  `sq-leg8n` (Phase 1 skeleton + Phase 2 `V()`), `sq-vfeme` (Phase 3 keyword layer) and
-  `sq-h7zlx` (Phase 4 did-you-mean diagnostic — shipped as the *diagnostic* only; the
-  lenient-parse mode it is carved out of stays rejected, and the design rates even this
-  sliver low-value because keyword typos are rare);
-  Phase 5 (the A/B verdict) landed in `sq-bzign` (above). Remaining follow-ups: the
-  full-session transcript fan-out (`sq-bmpzd`), the `V()` resolver-coverage fix (`sq-26fdp`),
-  and server/CLI exposure of the transpiler (`sq-vczh2`). The keyword set is **frozen at v1**.
+  `nearest_term_exact_checked`), `crates/sparq-vectors/src/store.rs` (`VectorStore::check_graph`).
+- Epic `sq-2m6zm` (dogfood sparq as a Project Knowledge Graph): this surface is `sq-leg8n`
+  (Phase 1 skeleton + Phase 2 `V()`), `sq-vfeme` (Phase 3 keyword layer), `sq-h7zlx` (Phase 4 —
+  the *diagnostic* only; the lenient-parse mode it is carved out of stays rejected, and the
+  design rates even this sliver low-value because keyword typos are rare) and `sq-bzign`
+  (Phase 5, the A/B verdict above). Remaining follow-ups: the full-session transcript fan-out
+  (`sq-bmpzd`), the `V()` resolver-coverage fix (`sq-26fdp`), and server/CLI exposure of the
+  transpiler (`sq-vczh2`). The keyword set is **frozen at v1**.
 
 ## License
 
