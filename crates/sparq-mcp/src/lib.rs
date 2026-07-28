@@ -20,6 +20,9 @@
 //!   ([SONNET-4.6] sq-sj1f9). Both embed a configurable LLM call and degrade cleanly
 //!   (unadvertised, "not configured" error) when no backend is set.
 //! - `transport` (feature `stdio`) — the line-delimited stdio serve loop.
+//! - `cli` (feature `stdio`) — the argument parsing + dataset loading behind the shipped
+//!   `sparq-mcp` binary (`--allow-update` / `--format` / `--query-timeout` / `--max-rows`
+//!   + a positional data file). [SONNET-4.6] sq-5xgxe
 //! - `solid` (feature `solid`) — the pod-backed server (`SolidMcpServer`): LDP
 //!   container/resource CRUD tools (`resource_get`/`container_list`, plus the gated
 //!   `resource_put`/`resource_delete`/`container_create`) with WAC/ACP-authorized,
@@ -55,6 +58,12 @@ pub mod nlq;
 #[cfg(feature = "stdio")]
 #[cfg_attr(docsrs, doc(cfg(feature = "stdio")))]
 pub mod transport;
+
+// [SONNET-4.6] sq-5xgxe: the shipped `sparq-mcp` binary's argument parsing + dataset
+// loading, kept in the library so the startup contract is unit-testable.
+#[cfg(feature = "stdio")]
+#[cfg_attr(docsrs, doc(cfg(feature = "stdio")))]
+pub mod cli;
 
 // [FABLE-5] sq-u16eq: the pod-backed server with LDP resource tools, behind the opt-in
 // `solid` feature.

@@ -224,6 +224,29 @@ The standard MCP stdio transport is behind the **`stdio`** feature:
 `sparq_mcp::serve_stdio(&mut server)` runs the line-delimited JSON-RPC loop over this
 process's stdin/stdout. For an arbitrary reader/writer pair use `sparq_mcp::serve`.
 
+## Running the server binary
+
+The same feature ships a ready-made server, so an MCP client can launch sparq as a
+subprocess without you writing a `main`:
+
+```bash
+cargo run -p sparq-mcp --features stdio -- [--allow-update] [--format FMT] \
+    [--query-timeout SECS] [--max-rows N] [DATA_FILE]
+```
+
+- `DATA_FILE` is loaded into the served graph (omit it for an empty graph); the format is
+  taken from `--format`, else inferred from the extension (`.nt` → ntriples, `.nq` →
+  nquads, `.trig` → trig, anything else turtle). N-Quads/TriG keep their named graphs.
+- `--allow-update` is the write switch — **without it the process is read-only** and
+  `update` is neither advertised nor callable. `--query-timeout 0` / `--max-rows 0`
+  disable the corresponding bound.
+- Startup lines go to **stderr**; stdout carries nothing but JSON-RPC responses. A bad
+  flag or an unreadable/malformed data file exits non-zero instead of serving.
+
+`sparq_mcp::cli` (`parse_args` / `load_graph` / `format_for` / `USAGE`) is the same
+library code the binary runs, for a host that wants the flags but its own transport.
+[SONNET-4.6] sq-5xgxe
+
 ## Trust model (read this — no overclaim)
 
 This is a **local agent-tool server, not a hardened multi-tenant endpoint**. There is
@@ -235,8 +258,8 @@ was configured with.
   `query` / `construct` / `introspect` / `shapes` / `stats` / `classes` / `prefixes` / `void`; it
   cannot mutate the dataset.
 - **`update` is a mutation surface**, exposed **only** when `ServerConfig::allow_update`
-  is set (or a binary's `--allow-update` flag). It is the single write switch; there is no
-  finer per-tool ACL.
+  is set (the `sparq-mcp` binary's `--allow-update` flag). It is the single write switch;
+  there is no finer per-tool ACL.
 - **Queries are bounded** by a `QueryBudget` (deadline + row cap; default 30 s / 1M rows)
   so one `tools/call` cannot run the server unbounded — a blunt anti-DoS ceiling, not a
   fairness quota.
@@ -247,8 +270,9 @@ Opt-in crate at workspace v0.1.0; verified against branch `main` (default `class
 2026-07-13 [GPT-5.6], sq-cekgj; default `prefixes` tool 2026-07-13 [GPT-5.6], sq-kx5b0;
 default `void` tool 2026-07-12 [GPT-5.6], sq-2kkym;
 pod mode 2026-07-11 [FABLE-5]).
-Tested by a real in-memory MCP round-trip (default features) **and** a real stdio
-serve-loop round-trip (feature `stdio`). Only the **stdio** transport plus the embeddable
+Tested by a real in-memory MCP round-trip (default features), a real stdio serve-loop
+round-trip, and a spawned-process session against the shipped binary (feature `stdio`,
+2026-07-28 [SONNET-4.6], sq-5xgxe). Only the **stdio** transport plus the embeddable
 `handle_message` ship today; SSE/HTTP transports are **not implemented** (follow-up beads).
 The read-only default is proven fail-closed (a disabled `update` returns `-32601` and does
 not mutate the graph).
