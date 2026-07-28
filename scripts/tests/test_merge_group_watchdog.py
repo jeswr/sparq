@@ -541,6 +541,14 @@ class ScriptedGh:
         self.mutations: list[list[str]] = []
         # Substrings of the joined argv that should raise GhError instead of replying.
         self.fail_on: tuple[str, ...] = ()
+        # Identity the fake runner posts under; set to an untrusted login to simulate
+        # TRUSTED_MARKER_AUTHORS missing this runner.
+        self.post_author: str = TRUSTED_AUTHOR
+        # Comments are per-PR, as they are in the API.
+        self.comments_by_pr: dict[int, list] = {}
+        # Every group head the fake knows about; anything else 404s, so a lookup
+        # against the wrong sha cannot silently succeed.
+        self.known_shas: set[str] = {HEAD}
 
     def __call__(self, argv: list[str]) -> str:
         self.calls.append(argv)
@@ -563,6 +571,15 @@ class ScriptedGh:
             return json.dumps({"data": {}})
         if argv[:2] == ["pr", "comment"]:
             self.mutations.append(argv)
+            # Model the write: a posted comment becomes readable ON THAT PR, authored
+            # by the runner's own identity. A fake that swallowed writes made the
+            # readback guard untestable; a fake that pooled comments across PRs let one
+            # entry's marker suppress another's recovery. Both were caught by tests
+            # that had been passing.
+            self.comments_by_pr.setdefault(int(argv[2]), []).append(
+                {"user": {"login": self.post_author},
+                 "body": argv[argv.index("--body") + 1]}
+            )
             return ""
         if "/check-suites" in joined:
             # SHA-KEYED on purpose. A fake that answers every /check-suites URL with
@@ -571,13 +588,16 @@ class ScriptedGh:
             # started resolving the sha out of the path.
             path = next(a for a in argv if "/check-suites" in a)
             sha = path.split("/commits/", 1)[1].split("/", 1)[0]
-            if sha != HEAD:
+            if sha not in self.known_shas:
                 raise mgw.GhError(f"gh api: HTTP 404 — no such commit {sha}")
             return self.suites_raw
         if "/activity" in joined:
             return "\n".join(json.dumps(row) for row in self.activity)
         if "/comments" in joined:
-            return "\n".join(json.dumps(row) for row in self.comments)
+            path = next(a for a in argv if "/comments" in a)
+            pr = int(path.split("/issues/", 1)[1].split("/", 1)[0])
+            rows = list(self.comments) + self.comments_by_pr.get(pr, [])
+            return "\n".join(json.dumps(row) for row in rows)
         if "/timeline" in joined:
             return "\n".join(json.dumps(row) for row in self.timeline)
         raise AssertionError(f"unexpected gh call: {argv}")
@@ -690,6 +710,34 @@ class TestSweepBehaviour(unittest.TestCase):
         self.assertTrue(any("RECOVERY FAILED" in row for row in harness.rows), harness.rows)
         self.assertTrue(any("::error" in row for row in harness.rows), harness.rows)
 
+    def test_recovery_aborts_if_its_own_marker_is_not_readable_back(self):
+        # If this runner's login is not in TRUSTED_MARKER_AUTHORS, every marker the
+        # watchdog writes is invisible to itself: the per-head NOOP never fires and the
+        # per-PR cap never binds, so it would thrash dequeue/enqueue every tick. The
+        # recovery must PROVE its evidence channel works before using it. Driven by
+        # making the fake runner post under an untrusted identity — the real failure.
+        harness = FakeWatchdog.build(suites=0)
+        harness.gh.post_author = ATTACKER
+        self.assertGreater(harness.run(), 0)
+        kinds = [m[:2] for m in harness.gh.mutations]
+        self.assertEqual(kinds, [["pr", "comment"]], harness.gh.mutations)
+        self.assertTrue(any("RECOVERY FAILED" in r for r in harness.rows), harness.rows)
+        self.assertTrue(
+            any("not readable back as TRUSTED" in r for r in harness.rows), harness.rows
+        )
+
+    def test_recovery_proceeds_when_the_marker_reads_back(self):
+        # The paired control: the readback must not block the normal path.
+        for author in (TRUSTED_AUTHOR, APP_AUTHOR):
+            harness = FakeWatchdog.build(suites=0)
+            harness.gh.post_author = author
+            self.assertEqual(harness.run(), 0, author)
+            self.assertEqual(
+                [m[:2] for m in harness.gh.mutations],
+                [["pr", "comment"], ["api", "graphql"], ["api", "graphql"]],
+                author,
+            )
+
     def test_control_group_with_suites_issues_no_mutation_at_all(self):
         harness = FakeWatchdog.build(suites=8)
         self.assertEqual(harness.run(), 0)
@@ -746,23 +794,41 @@ class TestSweepBehaviour(unittest.TestCase):
         self.assertEqual(harness.gh.mutations, [])
         self.assertTrue(any("decision=RECOVER" in row for row in harness.rows), harness.rows)
 
-    @staticmethod
-    def _three_entry_queue():
-        return [
-            {
-                "id": f"MQE_{pr}",
-                "position": index,
-                "state": "AWAITING_CHECKS",
-                "enqueuedAt": "2026-07-27T22:58:53Z",
-                "baseCommit": {"oid": BASE},
-                "headCommit": {"oid": HEAD},
-                "pullRequest": {"number": pr, "id": f"PR_{pr}"},
-            }
-            for index, pr in enumerate((4534, 4535, 4536), start=1)
+    # Each queue entry has its OWN group head, chained on the previous one — the
+    # original fixture reused a single sha for all three, which made one entry's
+    # marker suppress the next entry's recovery once the fake modelled writes.
+    HEADS = (HEAD, "1" * 40, "2" * 40)
+
+    @classmethod
+    def _three_entry_queue(cls):
+        entries = []
+        for index, (pr, head) in enumerate(zip((4534, 4535, 4536), cls.HEADS), start=1):
+            entries.append(
+                {
+                    "id": f"MQE_{pr}",
+                    "position": index,
+                    "state": "AWAITING_CHECKS",
+                    "enqueuedAt": "2026-07-27T22:58:53Z",
+                    "baseCommit": {"oid": BASE if index == 1 else cls.HEADS[index - 2]},
+                    "headCommit": {"oid": head},
+                    "pullRequest": {"number": pr, "id": f"PR_{pr}"},
+                }
+            )
+        return entries
+
+    @classmethod
+    def _three_entry_harness(cls):
+        harness = FakeWatchdog.build(suites=0, entries=cls._three_entry_queue())
+        harness.gh.known_shas = set(cls.HEADS)
+        harness.gh.activity = [
+            {"activity_type": "branch_creation", "after": head,
+             "timestamp": "2026-07-27T23:04:37Z"}
+            for head in cls.HEADS
         ]
+        return harness
 
     def test_per_run_budget_bounds_one_tick(self):
-        harness = FakeWatchdog.build(suites=0, entries=self._three_entry_queue())
+        harness = self._three_entry_harness()
         harness.run()
         dequeues = [
             m
@@ -776,7 +842,7 @@ class TestSweepBehaviour(unittest.TestCase):
         # Only the head-of-line entry actually blocks merges, so a bounded budget must
         # be spent in queue order. Recovering positions 3 and 2 while position 1 stays
         # broken would burn the budget and leave the outage in place.
-        harness = FakeWatchdog.build(suites=0, entries=self._three_entry_queue())
+        harness = self._three_entry_harness()
         harness.run()
         recovered = [
             m[2] for m in harness.gh.mutations if m[:2] == ["pr", "comment"]

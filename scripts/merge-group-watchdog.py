@@ -1068,6 +1068,23 @@ class Watchdog:
             if decision.verdict == RECOVER and not self.dry_run:
                 try:
                     self.post_marker_comment(entry, ref, now)
+                    # PROVE THE EVIDENCE CHANNEL BEFORE RELYING ON IT. The caps and the
+                    # idempotence key are all read back through TRUSTED_MARKER_AUTHORS.
+                    # If this runner's identity is not on that list, every marker we
+                    # write is invisible to us: the per-head NOOP never fires, the
+                    # per-PR cap never binds, and the watchdog degrades into a
+                    # dequeue/enqueue thrash loop bounded only by the per-run budget.
+                    # So read the marker back and refuse to act if it is not there.
+                    if not any(
+                        marker.head == entry.head_oid
+                        for marker in self.pr_markers(entry.pr_number)
+                    ):
+                        raise GhError(
+                            "the marker just posted is not readable back as TRUSTED — "
+                            "refusing to dequeue. TRUSTED_MARKER_AUTHORS is probably "
+                            "missing this runner's identity, and acting without a "
+                            "readable marker would uncap the recovery loop"
+                        )
                     self.recover(entry)
                 except GhError as error:
                     self.emit(f"{row} :: RECOVERY FAILED ({error})")
