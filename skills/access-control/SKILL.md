@@ -733,8 +733,11 @@ let rules: Vec<TrustRule> = parse_policy(&policy_triples, ControlGate::assert_co
 let session = TrustSession { agent: requester_webid, now_unix_secs: now };
 let verdict = trust_admit_verdict(&credential, &rules, &session, &target, abac_rule_n3);
 
-// The only way a grant reaches a decision: an ADDITIVE union onto whatever WAC decided.
-let decision = union_trust_grants(wac_decision, verdict.as_ref());
+// The only way a grant reaches a decision: an ADDITIVE union onto whatever WAC decided, and only
+// for the (requester, resource) pair the grant was issued for — pass the CURRENT request's
+// authenticated WebID (`None` when anonymous) and requested resource, which are re-checked against
+// the grant's stored holder/target.
+let decision = union_trust_grants(wac_decision, verdict.as_ref(), Some(&session.agent), &target);
 ```
 
 `abac_rule_n3` is the controller-authored rule carried in the same Control-gated `.acr` channel,
@@ -752,6 +755,12 @@ Load-bearing behaviour, each adversarially tested in
   becomes `Allow(granted)` — the authenticated-but-unauthorized case a credential-gated resource
   exists for, and the ONLY route by which a WAC denial becomes an allow. A `TrustGrantSet` has no
   public constructor, so that route is unforgeable from outside the module.
+- **Bound to the pair it was issued for.** A verdict is `Clone` and a caller may hold it across
+  requests, so `union_onto`/`union_trust_grants` take the CURRENT authenticated WebID and requested
+  resource and re-check them against the grant's stored `holder()`/`target()`; the raw union is
+  private. On a mismatch — another resource, another authenticated agent, or none — the WAC decision
+  is returned **unchanged**, so a grant minted for Jesse/`resourceX` cannot lift the denial on
+  Jesse/`resourceY` or on Mallory/`resourceX`.
 - **Unauthenticated is NEVER lifted.** `Decision::Unauthenticated` is returned unchanged even for a
   `Control` grant — a deliberate fail-closed narrowing: that variant means no verified WebID, so the
   credential's holder binding has nothing to bind against and a caller could otherwise name any

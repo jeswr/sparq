@@ -9,7 +9,8 @@
 //!      admit NOTHING (fail-closed, `None` — never an error that grants);
 //!   3. the ADVERSARIAL case: the seam cannot flip a WAC-denied resource to allow via the trust
 //!      path — neither for a resource the credential does not cover, nor for an anonymous
-//!      requester, nor when the controller's rule derives a denial.
+//!      requester, nor when the controller's rule derives a denial, nor by REPLAYING an already
+//!      issued grant onto another resource's or another requester's denial.
 //!
 //! Compiled only under `--features trust-graph`.
 //!
@@ -160,13 +161,13 @@ fn valid_credential_yields_exactly_the_expected_additive_read_grant() {
     // ADDITIVE onto a WAC allow: the existing modes survive untouched, read is added.
     let wac = Decision::Allow(BTreeSet::from([AccessMode::Append]));
     assert_eq!(
-        verdict.union_onto(wac),
+        verdict.union_onto(wac, Some(&iri(JESSE)), &iri(RESOURCE_X)),
         Decision::Allow(BTreeSet::from([AccessMode::Append, AccessMode::Read]))
     );
 
     // ...and it lifts the authenticated-but-unauthorized denial to exactly the granted modes.
     assert_eq!(
-        verdict.union_onto(Decision::Forbidden),
+        verdict.union_onto(Decision::Forbidden, Some(&iri(JESSE)), &iri(RESOURCE_X)),
         Decision::Allow(BTreeSet::from([AccessMode::Read]))
     );
 }
@@ -196,7 +197,11 @@ fn a_trust_grant_never_drops_a_wac_allow() {
         BTreeSet::from([AccessMode::Append, AccessMode::Control]),
         BTreeSet::from(all),
     ] {
-        let Decision::Allow(after) = verdict.union_onto(Decision::Allow(start.clone())) else {
+        let Decision::Allow(after) = verdict.union_onto(
+            Decision::Allow(start.clone()),
+            Some(&iri(JESSE)),
+            &iri(RESOURCE_X),
+        ) else {
             panic!("an allow must stay an allow");
         };
         assert!(
@@ -343,7 +348,12 @@ fn adversarial_a_wac_denied_resource_is_not_flipped_by_a_credential_that_does_no
             "an out-of-scope resource must admit nothing"
         );
         assert_eq!(
-            union_trust_grants(wac.clone(), verdict.as_ref()),
+            union_trust_grants(
+                wac.clone(),
+                verdict.as_ref(),
+                Some(&iri(JESSE)),
+                &iri(RESOURCE_Y)
+            ),
             wac,
             "the WAC denial on resourceY must stand"
         );
@@ -381,7 +391,12 @@ fn adversarial_every_failed_admission_leaves_a_wac_denial_intact() {
         let verdict = trust_admit_verdict(&cred, &rules, &sess, &iri(RESOURCE_X), ACR_ABAC_RULE);
         assert!(verdict.is_none(), "{why}: must admit nothing");
         assert_eq!(
-            union_trust_grants(Decision::Forbidden, verdict.as_ref()),
+            union_trust_grants(
+                Decision::Forbidden,
+                verdict.as_ref(),
+                Some(&sess.agent),
+                &iri(RESOURCE_X)
+            ),
             Decision::Forbidden,
             "{why}: the 403 must stand"
         );
@@ -403,7 +418,22 @@ fn adversarial_an_anonymous_requester_is_never_upgraded_even_with_a_valid_grant(
     // `Unauthenticated` means no verified WebID reached the server, so there is no authenticated
     // agent the holder binding could have bound against: the 401 must stand.
     assert_eq!(
-        union_trust_grants(Decision::Unauthenticated, Some(&verdict)),
+        union_trust_grants(
+            Decision::Unauthenticated,
+            Some(&verdict),
+            Some(&iri(JESSE)),
+            &iri(RESOURCE_X)
+        ),
+        Decision::Unauthenticated
+    );
+    // ...and with no authenticated WebID to pass at all, the binding check refuses it too.
+    assert_eq!(
+        union_trust_grants(
+            Decision::Unauthenticated,
+            Some(&verdict),
+            None,
+            &iri(RESOURCE_X)
+        ),
         Decision::Unauthenticated
     );
 }
@@ -430,7 +460,12 @@ fn adversarial_a_derived_denial_refuses_the_whole_verdict() {
     );
     assert!(verdict.is_none(), "a derived denial must refuse the verdict");
     assert_eq!(
-        union_trust_grants(Decision::Forbidden, verdict.as_ref()),
+        union_trust_grants(
+            Decision::Forbidden,
+            verdict.as_ref(),
+            Some(&iri(JESSE)),
+            &iri(RESOURCE_X)
+        ),
         Decision::Forbidden
     );
 }
@@ -454,6 +489,51 @@ fn adversarial_a_grant_derived_for_a_third_party_is_not_usable_by_the_requester(
         RULE_GRANTING_A_THIRD_PARTY,
     );
     assert!(verdict.is_none(), "a third party's grant must not admit");
+}
+
+#[test]
+fn adversarial_an_issued_grant_cannot_be_replayed_onto_another_resource_or_requester() {
+    let (sk, pk) = gov_key();
+    // Issue ONE genuine grant for Jesse/resourceX...
+    let verdict = trust_admit_verdict(
+        &signed_cred(&sk, JESSE, "25", 1),
+        &gov_age_rules(GOV_ISSUER, &pk, RESOURCE_X),
+        &session(JESSE, NOW),
+        &iri(RESOURCE_X),
+        ACR_ABAC_RULE,
+    )
+    .expect("a validly-signed in-scope credential must admit");
+
+    // ...then try to apply THAT EXACT grant (it is `Clone`, and a caller may hold it across
+    // requests) to denials it was never issued for. Each must stand.
+    for (why, agent, target) in [
+        ("another resource", Some(iri(JESSE)), iri(RESOURCE_Y)),
+        ("another requester", Some(iri(MALLORY)), iri(RESOURCE_X)),
+        ("both", Some(iri(MALLORY)), iri(RESOURCE_Y)),
+        ("no authenticated requester", None, iri(RESOURCE_X)),
+    ] {
+        let replayed = verdict.clone();
+        assert_eq!(
+            union_trust_grants(Decision::Forbidden, Some(&replayed), agent.as_ref(), &target),
+            Decision::Forbidden,
+            "{}: the 403 must stand",
+            why
+        );
+        assert_eq!(
+            replayed.union_onto(Decision::Forbidden, agent.as_ref(), &target),
+            Decision::Forbidden,
+            "{}: the 403 must stand for the direct union too",
+            why
+        );
+        // ...and it must not widen an unrelated allow either.
+        let allow = Decision::Allow(BTreeSet::from([AccessMode::Append]));
+        assert_eq!(
+            replayed.union_onto(allow.clone(), agent.as_ref(), &target),
+            allow,
+            "{}: an unrelated allow must not gain the granted modes",
+            why
+        );
+    }
 }
 
 #[test]

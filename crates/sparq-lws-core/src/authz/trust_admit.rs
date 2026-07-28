@@ -24,9 +24,22 @@
 //! `sparq-trust` enters the dependency graph, so the default server build is byte-identical to
 //! today (strict additivity — the `sparq-solid` G6 property this mirrors).
 //!
+//! ## The binding contract
+//!
+//! A [`TrustGrantSet`] is issued for ONE (requester, resource) pair and remembers it
+//! ([`TrustGrantSet::holder`] / [`TrustGrantSet::target`]). Because the type is `Clone` and a caller
+//! may hold a verdict across requests, the public combination operations
+//! ([`TrustGrantSet::union_onto`] and [`union_trust_grants`]) take the CURRENT request's
+//! authenticated WebID and requested resource and RE-CHECK them against that stored pair. On any
+//! mismatch — a different resource, a different authenticated agent, or no authenticated agent at
+//! all — the WAC decision is returned UNCHANGED. The raw, unchecked union is private, so a grant
+//! minted for Jesse/`resourceX` cannot be replayed onto the `Forbidden` decision for
+//! Jesse/`resourceY` or for another requester.
+//!
 //! ## The additivity contract
 //!
-//! A trust grant is **allow-only**. [`TrustGrantSet::union_onto`] can only ADD modes:
+//! Once that binding check passes, a trust grant is **allow-only**. [`TrustGrantSet::union_onto`]
+//! can only ADD modes:
 //!
 //! - [`Decision::Allow(m)`](Decision::Allow) ⇒ `Allow(m ∪ granted)` — a trust grant can never drop
 //!   a WAC allow, and never narrows the `WAC-Allow` advertisement.
@@ -139,6 +152,10 @@ fn access_mode(mode: SolidMode) -> AccessMode {
 /// least one `auth:*` allow for that exact requester and resource. That privacy — no public
 /// constructor, no public field — is what makes the "a WAC denial can only be lifted by a verified
 /// grant" invariant hold by construction rather than by convention.
+///
+/// The pair it was issued for is carried along in [`holder`](Self::holder)/[`target`](Self::target)
+/// and re-checked by [`union_onto`](Self::union_onto), so a clone of this value cannot be replayed
+/// onto a different requester's or a different resource's decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustGrantSet {
     modes: BTreeSet<AccessMode>,
@@ -175,13 +192,34 @@ impl TrustGrantSet {
         &self.issuers
     }
 
-    /// UNION this grant onto a WAC [`Decision`] — the only way a grant reaches a decision.
+    /// UNION this grant onto a WAC [`Decision`] for the request identified by `agent` and `target`
+    /// — the only way a grant reaches a decision.
     ///
-    /// Allow-only, per the module's additivity contract: an existing `Allow` gains modes and never
-    /// loses any; a [`Decision::Forbidden`] becomes an `Allow` of exactly the granted modes; a
-    /// [`Decision::Unauthenticated`] is returned unchanged (no authenticated WebID exists for the
-    /// holder binding to have bound against).
-    pub fn union_onto(&self, wac: Decision) -> Decision {
+    /// `agent` is the CURRENT request's authenticated WebID (`None` for an anonymous request) and
+    /// `target` the CURRENT requested resource. Per the module's binding contract, the union
+    /// happens ONLY when both equal this grant's [`holder`](Self::holder) and
+    /// [`target`](Self::target); on any mismatch `wac` is returned UNCHANGED, so a grant issued for
+    /// one (requester, resource) pair cannot lift another pair's denial.
+    ///
+    /// When the binding holds the union is allow-only, per the module's additivity contract: an
+    /// existing `Allow` gains modes and never loses any; a [`Decision::Forbidden`] becomes an
+    /// `Allow` of exactly the granted modes; a [`Decision::Unauthenticated`] is returned unchanged
+    /// (no authenticated WebID exists for the holder binding to have bound against).
+    pub fn union_onto(
+        &self,
+        wac: Decision,
+        agent: Option<&NamedNode>,
+        target: &NamedNode,
+    ) -> Decision {
+        if agent != Some(&self.holder) || target != &self.target {
+            return wac;
+        }
+        self.union_onto_bound(wac)
+    }
+
+    /// The raw allow-only union, PRIVATE so the binding check in [`union_onto`](Self::union_onto)
+    /// is the only public route into a decision.
+    fn union_onto_bound(&self, wac: Decision) -> Decision {
         match wac {
             Decision::Allow(mut modes) => {
                 modes.extend(self.modes.iter().copied());
@@ -193,11 +231,20 @@ impl TrustGrantSet {
     }
 }
 
-/// Apply an OPTIONAL trust verdict to a WAC decision. `None` (nothing admitted) leaves the
-/// decision exactly as WAC decided it.
-pub fn union_trust_grants(wac: Decision, grants: Option<&TrustGrantSet>) -> Decision {
+/// Apply an OPTIONAL trust verdict to a WAC decision for the request identified by `agent` (the
+/// current authenticated WebID, `None` when anonymous) and `target` (the current requested
+/// resource).
+///
+/// `None` (nothing admitted) leaves the decision exactly as WAC decided it, as does a grant whose
+/// stored holder/target do not match this request — see [`TrustGrantSet::union_onto`].
+pub fn union_trust_grants(
+    wac: Decision,
+    grants: Option<&TrustGrantSet>,
+    agent: Option<&NamedNode>,
+    target: &NamedNode,
+) -> Decision {
     match grants {
-        Some(g) => g.union_onto(wac),
+        Some(g) => g.union_onto(wac, agent, target),
         None => wac,
     }
 }
@@ -304,15 +351,25 @@ mod tests {
         NamedNode::new(s).unwrap()
     }
 
+    const JESSE: &str = "https://jesse.ex/card#me";
+    const MALLORY: &str = "https://mallory.ex/card#me";
+    const RESOURCE_X: &str = "https://pod.ex/resourceX";
+    const RESOURCE_Y: &str = "https://pod.ex/resourceY";
+
     /// A grant set built directly — only reachable from inside the module, which is precisely the
-    /// property the union tests are exercising.
+    /// property the union tests are exercising. Bound to Jesse/`resourceX`.
     fn grant_set(modes: &[AccessMode]) -> TrustGrantSet {
         TrustGrantSet {
             modes: modes.iter().copied().collect(),
-            holder: iri("https://jesse.ex/card#me"),
-            target: iri("https://pod.ex/resourceX"),
+            holder: iri(JESSE),
+            target: iri(RESOURCE_X),
             issuers: vec![iri("https://gov.example/issuer")],
         }
+    }
+
+    /// The request the [`grant_set`] above was issued for.
+    fn bound_request() -> (NamedNode, NamedNode) {
+        (iri(JESSE), iri(RESOURCE_X))
     }
 
     #[test]
@@ -350,8 +407,13 @@ mod tests {
 
     #[test]
     fn union_onto_allow_adds_modes_and_drops_none() {
+        let (agent, target) = bound_request();
         let existing: BTreeSet<AccessMode> = [AccessMode::Read, AccessMode::Append].into();
-        let after = grant_set(&[AccessMode::Write]).union_onto(Decision::Allow(existing));
+        let after = grant_set(&[AccessMode::Write]).union_onto(
+            Decision::Allow(existing),
+            Some(&agent),
+            &target,
+        );
         assert_eq!(
             after,
             Decision::Allow([AccessMode::Read, AccessMode::Append, AccessMode::Write].into())
@@ -360,26 +422,102 @@ mod tests {
 
     #[test]
     fn union_onto_forbidden_allows_exactly_the_granted_modes() {
-        let after = grant_set(&[AccessMode::Read]).union_onto(Decision::Forbidden);
+        let (agent, target) = bound_request();
+        let after =
+            grant_set(&[AccessMode::Read]).union_onto(Decision::Forbidden, Some(&agent), &target);
         assert_eq!(after, Decision::Allow([AccessMode::Read].into()));
     }
 
     #[test]
     fn union_onto_never_lifts_unauthenticated() {
         // No authenticated WebID exists for the holder binding to have bound against, so even a
-        // Control grant must leave the 401 in place.
-        let after = grant_set(&[AccessMode::Control]).union_onto(Decision::Unauthenticated);
+        // Control grant must leave the 401 in place — even if a caller passes the bound holder.
+        let (agent, target) = bound_request();
+        let after = grant_set(&[AccessMode::Control]).union_onto(
+            Decision::Unauthenticated,
+            Some(&agent),
+            &target,
+        );
         assert_eq!(after, Decision::Unauthenticated);
     }
 
     #[test]
-    fn union_trust_grants_without_a_verdict_is_the_identity() {
+    fn union_onto_refuses_a_target_other_than_the_one_the_grant_was_issued_for() {
+        // The SAME grant object, replayed onto another resource's denial: the binding must hold it
+        // off, leaving both the 403 and an unrelated allow exactly as WAC decided them.
+        let grant = grant_set(&[AccessMode::Read, AccessMode::Control]);
+        let (agent, _) = bound_request();
+        let other = iri(RESOURCE_Y);
         assert_eq!(
-            union_trust_grants(Decision::Forbidden, None),
+            grant.union_onto(Decision::Forbidden, Some(&agent), &other),
+            Decision::Forbidden
+        );
+        let allow = Decision::Allow([AccessMode::Append].into());
+        assert_eq!(
+            grant.union_onto(allow.clone(), Some(&agent), &other),
+            allow,
+            "an unrelated resource must not gain the grant's modes"
+        );
+    }
+
+    #[test]
+    fn union_onto_refuses_an_agent_other_than_the_bound_holder() {
+        let grant = grant_set(&[AccessMode::Read]);
+        let (_, target) = bound_request();
+        // Another authenticated requester...
+        assert_eq!(
+            grant.union_onto(Decision::Forbidden, Some(&iri(MALLORY)), &target),
+            Decision::Forbidden
+        );
+        // ...and no authenticated requester at all.
+        assert_eq!(
+            grant.union_onto(Decision::Forbidden, None, &target),
+            Decision::Forbidden
+        );
+    }
+
+    #[test]
+    fn union_trust_grants_without_a_verdict_is_the_identity() {
+        let (agent, target) = bound_request();
+        assert_eq!(
+            union_trust_grants(Decision::Forbidden, None, Some(&agent), &target),
             Decision::Forbidden
         );
         let allow = Decision::Allow([AccessMode::Read].into());
-        assert_eq!(union_trust_grants(allow.clone(), None), allow);
+        assert_eq!(
+            union_trust_grants(allow.clone(), None, Some(&agent), &target),
+            allow
+        );
+    }
+
+    #[test]
+    fn union_trust_grants_enforces_the_same_binding_as_union_onto() {
+        let grant = grant_set(&[AccessMode::Read]);
+        let (agent, target) = bound_request();
+        // Bound: the grant applies.
+        assert_eq!(
+            union_trust_grants(Decision::Forbidden, Some(&grant), Some(&agent), &target),
+            Decision::Allow([AccessMode::Read].into())
+        );
+        // Wrong resource / wrong agent: it does not.
+        assert_eq!(
+            union_trust_grants(
+                Decision::Forbidden,
+                Some(&grant),
+                Some(&agent),
+                &iri(RESOURCE_Y)
+            ),
+            Decision::Forbidden
+        );
+        assert_eq!(
+            union_trust_grants(
+                Decision::Forbidden,
+                Some(&grant),
+                Some(&iri(MALLORY)),
+                &target
+            ),
+            Decision::Forbidden
+        );
     }
 
     #[test]
@@ -388,8 +526,8 @@ mod tests {
         assert!(gs.grants(AccessMode::Read));
         assert!(!gs.grants(AccessMode::Write));
         assert_eq!(gs.modes(), &BTreeSet::from([AccessMode::Read]));
-        assert_eq!(gs.holder().as_str(), "https://jesse.ex/card#me");
-        assert_eq!(gs.target().as_str(), "https://pod.ex/resourceX");
+        assert_eq!(gs.holder().as_str(), JESSE);
+        assert_eq!(gs.target().as_str(), RESOURCE_X);
         assert_eq!(gs.issuers(), &[iri("https://gov.example/issuer")]);
     }
 }
