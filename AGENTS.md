@@ -504,6 +504,35 @@ plan (§5, Beads D/E + H), to be added only after the scripts are proven in manu
 shell script is `bash -n`/`shellcheck` clean and carries a `--dry-run-self-test` (hermetic;
 no network); the Python close-script carries a `--self-test`.
 
+- **`.github/workflows/merge-group-watchdog.yml` + `scripts/merge-group-watchdog.py`**
+  (#4652) — the **durable** zero-dispatch merge-group recovery. GitHub occasionally builds a
+  merge-group ref and then never dispatches the `merge_group` event for it: **zero
+  check-suites, zero check-runs, zero workflow runs**. Because the queue merges strictly in
+  order and each entry needs its **own** group's required check (a green *superset* group does
+  **not** substitute), that entry holds position 1 until the ruleset's 60-minute
+  `check_response_timeout_minutes` reaps it, and the rebuild discards every group stacked on
+  top. Observed three days running (#4331, #4534, #4709), ~60 min each. The sweep runs on a
+  5-minute cron (never on a PR head, so it can never gate), and after a **120 s** grace —
+  30× the measured maximum create→first-suite latency (N=209: p50 2 s, max 4 s; the failure is
+  categorical, not slow) — it dequeues and re-enqueues the entry. Bounded (1 per group head
+  SHA, 2 per PR per 6 h, 2 per run) and idempotent; on exhaustion it hands back to the platform
+  timeout rather than escalating to a human. **Everything it cannot positively establish is a
+  refusal, never a recovery.** It emits one row per entry **every tick**, carrying the ref, the
+  suite count, the decision, and `stacked=`/`stacked_green=` — the count of groups built on top
+  of the dead ref, which is the real cost term and the watchdog's own effectiveness measure.
+  Companion routing split in `merge-queue-feedback.yml`: a `CI_TIMEOUT` whose group ref had
+  **zero suites** preserves `review:pass` instead of manufacturing a re-review for a platform
+  event drop, while a timeout that followed checks that genuinely ran keeps demoting — the two
+  are separated by the **suite count**, never by the reason alone.
+  **Runbook — resolving and clearing a dead ref by hand.** The group head is the queue entry's
+  `headCommit{oid}` (`MergeQueueEntry` has **no** `headOid` field), or read the live refs with
+  `git ls-remote origin 'refs/heads/gh-readonly-queue/main/*'`; the trailing sha in a ref name
+  is the group's **BASE**, and the ref is named for one *member*, so **absence of a ref named
+  for a PR is not evidence its CI never started**. Test `commits/<head>/check-suites` —
+  `total_count == 0` is the signal, and never `check-runs` (a `paths`-filtered workflow that
+  matches nothing still creates a suite). To clear it, `gh pr merge --disable-auto` does **not**
+  dequeue an already-queued PR; use `dequeuePullRequest`, whose input field is named `id` but
+  wants the **pull request** node id (`PR_…`), not the entry id (`MQE_…`).
 - **`.github/workflows/bead-autoclose.yml` + `scripts/ci-close-merged-beads.py`**
   (sq-84a8; issue-native since #2475) — the **durable** auto-close-on-merge. On a merged PR
   (`pull_request_target: [closed]` gated on `merged == true` — base-repo context so the
