@@ -362,7 +362,7 @@ Adjacent hybrids differ in exactly one opened element, so
 `Δ(H_{j−1}, H_j) ≤ ε_j` with `ε_j` the simulation error of that open's lemma, and by the triangle
 inequality `Δ(H_0, H_64) ≤ Σ_j ε_j`. With the §2 counts:
 
-```
+```text
 ε_total(one verdict)  ≤  61·0  (Lemma B, perfect)
                        +  1·(N−2)/(N(N−1))   (Lemma C, N = 2^61)
                        +  1·0  (Lemma A zero-test, perfect)
