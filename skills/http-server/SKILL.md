@@ -11,7 +11,8 @@ with `--persist DIR` (updates WAL-fsync'd, survive a restart with no rebuild; se
 "Durability" gotcha). It implements the **SPARQL 1.1 Protocol** (`query` + `update` at
 `/sparql`) and the **Graph Store HTTP Protocol** (read + write), with `Accept`-driven
 content negotiation, hardening guards, Prometheus `/metrics`, WebSocket + SSE subscriptions,
-and opt-in grouped facet counts, prefix completion, time-travel, and GeoSPARQL.
+and opt-in grouped facet counts, prefix completion, time-travel (both the in-memory
+`?generation=N` window and the durable-log-backed `?at=<instant>` point-in-time pin), and GeoSPARQL.
 
 Build with the default-off `response-compression` feature to negotiate gzip or zstd for outbound
 result bodies from `Accept-Encoding`. Compression is transport-transparent and streaming; SSE
@@ -588,6 +589,49 @@ cargo run -p sparq-server --features time-travel -- data.ttl --time-travel-gener
 Status: aged-out generation → `410 Gone`; never-published / unparsable / pinning an
 *update* (an update always applies to current) → `400`. All identical in both feature states —
 `time-travel` only changes how far back a pin can reach.
+
+**3b. Point-in-time reads — `?at=<instant>` (OPT-IN `point-in-time` feature, [OPUS-5] sq-lsp7k.7).**
+`?generation=N` pins a generation the ring still holds **in memory**: recent, count/age-bounded,
+and gone after a restart. `?at=` pins an **arbitrary past instant** instead, reconstructing that
+state from the **durable CDC change stream** — so its reach is the *log's* retention policy, not
+the ring's. Build with `--features point-in-time` (it implies `time-travel` + `change-stream`) and
+**also** point the server at a log directory — the same double opt-in as `GET /streams`:
+
+```sh
+cargo run -p sparq-server --features point-in-time -- data.ttl --change-stream /var/lib/sparq/cdc
+# the store as it stood at a wall-clock instant …
+curl -G http://127.0.0.1:3030/sparql --data-urlencode 'at=2026-07-28T12:00:00Z' \
+     --data-urlencode 'query=SELECT * WHERE { ?s ?p ?o }'
+# … or at a commit you saw go past on the CDC feed (GET /streams' commitTimestampNanos)
+curl -G http://127.0.0.1:3030/sparql --data-urlencode 'at=1785196800000000000' \
+     --data-urlencode 'query=SELECT * WHERE { ?s ?p ?o }'
+```
+`at=` accepts an **`xsd:dateTime` / RFC-3339 lexical** (a missing offset is read as UTC) **or** an
+integer of **nanoseconds since the Unix epoch** — byte-identical to `GET /streams`'
+`commitTimestampNanos`, so a CDC consumer can time-travel to a record it just saw. The instant
+resolves to the newest commit at or before it, and the response's `Sparq-Generation` header names
+that **historical generation** (so you can re-pin it with `?generation=N` while it is still in the
+ring, or keep paging with the same `at=`).
+
+**Honest boundaries.**
+- **Not free.** Reconstruction is **O(graph)** — the base snapshot is serialised and the commits
+  after the instant are undone onto it. It runs off the async runtime and the most recent result
+  is cached (keyed by the exact span it was rebuilt from), so a repeat `at=` — a paginated sweep —
+  reuses it, but a write between two pages moves the base and forces one rebuild. This cost is why
+  the feature is opt-in.
+- **Fail-closed, never approximate.** An instant *before* the log's retained horizon (older
+  segments trimmed by the retention policy, or recording started later) is `410 Gone`, quoting the
+  earliest reconstructable instant so you can retry at the horizon — the server **never** answers
+  at a nearby instant instead. An **uncaptured span** (an operator re-base marker from
+  `POST /admin/change-stream/rebase`) is also `410`: those commits were never recorded, so nothing
+  before them can be rebuilt from the log.
+- **Blank nodes are identified by label**, because the change stream identifies quads by their
+  N-Quads line. That is exactly as sound as the CDC stream itself — no new assumption, but no
+  repair of one either.
+- Statuses: unparsable `at` → `400`; `at` **and** `generation` in one request → `400` (two
+  different pins; guessing is the substitution this surface refuses); no `--change-stream` dir →
+  `400` naming the flag; before the horizon / across a gap → `410`; a log that does not reach the
+  base snapshot → `500`.
 
 **4. WebSocket subscriptions (SEPA-style live SELECT).** Connect to
 `ws://127.0.0.1:3030/subscriptions`, send `subscribe`, get `subscribed` + an initial
@@ -1790,7 +1834,10 @@ identities and resource IRIs by design (see the privacy-boundary note above).
   header are in the **default build** (bounded to the ring's concurrency-retention window —
   `sq-ci2d6`); `time-travel` (default **off**) only EXTENDS the retention window (the
   `--time-travel-generations` / `--time-travel-max-age` flags, `AppState::at`, and the wider
-  `?generation=N` reach). `geo` (default **off**) installs sparq-geo's `geof:` GeoSPARQL
+  `?generation=N` reach). `point-in-time` (default **off**, [OPUS-5] `sq-lsp7k.7`) implies
+  `time-travel` + `change-stream` and adds the `?at=<instant>` pin — the store as of an
+  ARBITRARY past moment, reverse-replayed from the durable change stream (§"Point-in-time
+  reads"), still gated at runtime by `--change-stream <DIR>`. `geo` (default **off**) installs sparq-geo's `geof:` GeoSPARQL
   functions on query/update/subscription paths; without it an unknown `geof:` IRI is a
   `500`. `federation-descriptors` (default **off**, `sq-d3d8`) pulls the light
   `sparq-introspect` crate and serves the OPT-IN VoID + Service-Description discovery
@@ -1800,7 +1847,8 @@ identities and resource IRIs by design (see the privacy-boundary note above).
   `complete` (default **off**, [GPT-5.6] `sq-lsp7k.9.3`) pulls `sparq-text` with its default
   features disabled and serves `GET /complete`, still gated at runtime by `--complete`.
   Run feature tests: `cargo test -p sparq-server --features time-travel` / `--features geo` /
-  `--features federation-descriptors` / `--features facets` / `--features complete`.
+  `--features federation-descriptors` / `--features facets` / `--features complete` /
+  `--features point-in-time`.
 - **Named graphs are real (since conformance round 3).** The engine stores the FULL dataset
   — default graph + named graphs — so `GRAPH <g> { … }` / `GRAPH ?g { … }` evaluate, and a
   GSP graph resource (`?graph=<iri>` or the direct request URI) addresses a genuine named

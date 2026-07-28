@@ -362,6 +362,32 @@ terse = ["server", "dep:sparq-terse"]
 # cryptographic authenticity of the records are out of scope (same boundary as the backup family).
 # Needs `server`.
 change-stream = ["server", "sparq-serve/change-stream"]
+# [OPUS-5] (sq-lsp7k.7) `point-in-time` (default OFF) extends the generation pin to an ARBITRARY
+# past INSTANT: `?at=<xsd:dateTime | unix-nanos>` on `/sparql` serves the store as it stood at that
+# moment, reconstructed by reverse-replaying the durable CDC change stream onto a snapshot the ring
+# still holds (`crate::pit`). Where `time-travel` widens an IN-MEMORY, restart-losing window of
+# recent generations, this reaches as far back as the change log's RETENTION policy keeps segments
+# — the persistent temporal index is the segmented log itself, which already carries each commit's
+# timestamp, target generation and quad-level diff. It therefore implies BOTH `time-travel` (the
+# ring must retain the base snapshot the rewind starts from, and `AppState::at` resolves it) and
+# `change-stream` (the log is the history). STILL OFF AT RUNTIME by default even when compiled in:
+# the operator must additionally point the server at a log directory via `--change-stream <DIR>` /
+# `SPARQ_CHANGE_STREAM`, exactly like `GET /streams`; with no dir, `?at=` is a `400` naming the
+# missing flag. Fail-CLOSED throughout — a trimmed horizon, an uncaptured span (an operator re-base
+# marker) or a non-contiguous record chain REFUSE (`410`/`500`), never a silent substitution of a
+# nearby instant. Cost is honest and O(graph) per reconstruction (one serialise of the base + one
+# re-parse), run off the async runtime and cached single-slot for the repeat-request (pagination)
+# case — which is why it is opt-in. Pulls ZERO new dependencies. Without the feature the parameter,
+# the `pit` module and the reconstruction cache field are `#[cfg]`-stripped, so a build without it
+# carries ZERO point-in-time code. Stated precisely rather than as the usual "byte-identical":
+# wiring this in DID touch the shared pin path in every feature state — `resolve_pin` is now an
+# `async fn` returning a `RequestPin` (the pinned snapshot PLUS the generation number to report)
+# instead of a bare `PinnedGen`, because a rebuilt snapshot has no generation number of its own.
+# That is a mechanical refactor with identical default-build BEHAVIOUR (same pins, same statuses,
+# same `Sparq-Generation` values — `tests/time_travel.rs` is unchanged and green), but it is not
+# literally the same code. sparq-core / sparq-engine / the wasm bundle are untouched either way
+# (sparq-wasm depends on sparq-core/-engine directly, never on sparq-server). Needs `server`.
+point-in-time = ["server", "time-travel", "change-stream"]
 # [FABLE-5] (sq-snopa.6, issue #992 FR-4) `solid-authz` (default OFF) mounts the OPT-IN Solid
 # WAC/ACP HTTP authorization surface — `POST /authz/decide`, `POST /authz/wac-allow`,
 # `POST /authz/query` — a THIN HTTP shell over the `sparq-solid` library authoriser

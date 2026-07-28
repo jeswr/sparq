@@ -105,6 +105,22 @@ pub mod tpf;
 #[cfg(feature = "change-stream")]
 pub mod streams;
 
+/// [OPUS-5] (sq-lsp7k.7) OPT-IN **point-in-time reconstruction** — the pure core behind the
+/// `?at=<instant>` pin on `/sparql`. Resolves an arbitrary past instant to the generation
+/// current at it, and rebuilds that generation's state by reverse-replaying the durable CDC
+/// change stream onto a snapshot the ring still holds. No async, no I/O, no engine state: a
+/// scan plus a set fold over the retained records, so it is unit-testable in isolation and the
+/// HTTP layer keeps only the wiring. Compiled ONLY behind the `point-in-time` feature (which
+/// implies `time-travel` + `change-stream`), and served only when a change-stream directory is
+/// also configured — the same double-opt-in as `GET /streams`. With the feature off this module,
+/// the `at=` parameter and the reconstruction cache are all `#[cfg]`-stripped, so the default
+/// build carries zero point-in-time code — though not, strictly, the same code as before: the
+/// shared `resolve_pin` now returns a `RequestPin` (snapshot + reported generation number) in
+/// EVERY feature state, since a rebuilt snapshot has no generation number of its own. Default
+/// pin/header BEHAVIOUR is unchanged (`tests/time_travel.rs` is untouched and green).
+#[cfg(feature = "point-in-time")]
+pub(crate) mod pit;
+
 /// [OPUS-4.8] (sq-hj4n, gh-916) OPT-IN Solid-style **N3-Patch** parsing (`text/n3`) for the
 /// Graph-Store-Protocol `PATCH` method — the `solid:InsertDeletePatch` dialect (`solid:where` /
 /// `solid:deletes` / `solid:inserts` formulas), translated into ONE atomic graph-scoped SPARQL

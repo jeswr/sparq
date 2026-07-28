@@ -1743,6 +1743,27 @@ pub(crate) const TIMEOUT_GRACE: Duration = Duration::from_secs(2);
 /// see `chunked_response`), so every response is snapshot-consistent with its start.
 pub type PinnedGen = Arc<Generation<Graph>>;
 
+/// [OPUS-5] (sq-lsp7k.7) What a request evaluates against: the pinned snapshot PLUS the
+/// generation number to report in `Sparq-Generation`.
+///
+/// The two are the same thing on every path but one. Under the opt-in `point-in-time`
+/// feature a `?at=<instant>` pin is a snapshot REBUILT from the durable change stream, not a
+/// generation the ring published, so it carries no number of its own — the number that
+/// belongs in the header is the historical generation it reconstructs. Carrying the number
+/// beside the `Arc` keeps that the ONLY difference, so the header stays the same
+/// read-your-writes / pagination token on every path.
+pub(crate) struct RequestPin {
+    gen: PinnedGen,
+    number: u64,
+}
+
+impl From<PinnedGen> for RequestPin {
+    fn from(gen: PinnedGen) -> Self {
+        let number = gen.number();
+        RequestPin { gen, number }
+    }
+}
+
 /// The catch-all pod: the visibility scope every query implicitly reads, and the
 /// honest conflict unit for any write that cannot be scoped to a finite set of named
 /// graphs (§6.3/§6.5).
@@ -2378,6 +2399,15 @@ impl ChangeStreamState {
         self.next_seq.load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// [OPUS-5] (sq-lsp7k.7) The earliest seq still on disk — `0` until retention drops a
+    /// segment, then the first seq of the oldest survivor. `ChangeLog::poll` fails CLOSED below
+    /// this offset, so the point-in-time path polls from exactly here to read the whole retained
+    /// history rather than guessing an offset that a trim may already have invalidated.
+    #[cfg(feature = "point-in-time")]
+    fn first_seq(&self) -> u64 {
+        self.reader.first_seq()
+    }
+
     /// [FABLE-5] (gh-2436) Operator resync of the LIVE tracked log — the state-level body of
     /// `POST /admin/change-stream/rebase`. Holds the outer hook mutex for the whole
     /// append + tail update, so no commit hook interleaves between the gap-record append
@@ -2494,6 +2524,19 @@ pub struct AppState {
     /// therefore rides group commit and never holds a caller-side lock across `submit`.
     #[cfg(feature = "change-stream")]
     change_stream: Option<Arc<ChangeStreamState>>,
+    /// [OPUS-5] (sq-lsp7k.7) Single-slot cache of the most recent `?at=` reconstruction, keyed
+    /// by the `(base generation, target generation)` pair it was rebuilt from. Rebuilding is
+    /// O(graph), and the motivating access pattern is a REPEAT one — the same instant pinned
+    /// across a multi-request `LIMIT`/`OFFSET` sweep, exactly as `?generation=N` is used today.
+    ///
+    /// Keying on BOTH ends is what makes reuse sound rather than merely fast: an entry is only
+    /// ever handed back for the identical span it was validated over, so a lineage that was
+    /// re-based or restored (which renumbers generations) can never serve a stale snapshot —
+    /// its base moves and the key stops matching. The cost is that a write between two pages
+    /// moves the base and forces one rebuild; correctness wins over the hit rate. Feature-gated
+    /// like `completion_index`, so the default `AppState` layout is unchanged.
+    #[cfg(feature = "point-in-time")]
+    pit_snapshot: Arc<std::sync::RwLock<Option<(u64, u64, PinnedGen)>>>,
     /// [FABLE-5] (sq-fy8ci) SINGLE-FLIGHT restore permit. `true` while a restore is in flight.
     /// Two concurrent restores were previously silently serialized by the single writer thread
     /// (each individually crash-safe, last-writer-wins) — harmless but surprising: an operator
@@ -2937,6 +2980,9 @@ impl AppState {
             access_audit_sink,
             #[cfg(feature = "change-stream")]
             change_stream,
+            // [OPUS-5] sq-lsp7k.7: cold at boot — the first `?at=` request fills the slot.
+            #[cfg(feature = "point-in-time")]
+            pit_snapshot: Arc::new(std::sync::RwLock::new(None)),
             // [FABLE-5] sq-fy8ci: no restore in flight at boot (restore-on-start runs on the
             // seed graph in main.rs BEFORE this state exists, so it never holds the permit).
             #[cfg(feature = "backup")]
@@ -3009,6 +3055,35 @@ impl AppState {
     #[cfg(feature = "change-stream")]
     pub(crate) fn change_stream_next_seq(&self) -> Option<u64> {
         self.change_stream.as_ref().map(|stream| stream.next_seq())
+    }
+
+    /// [OPUS-5] (sq-lsp7k.7) The earliest seq the durable log still retains — the offset the
+    /// point-in-time path polls the WHOLE retained history from. `None` when the change-stream
+    /// is not configured.
+    #[cfg(feature = "point-in-time")]
+    pub(crate) fn change_stream_first_seq(&self) -> Option<u64> {
+        self.change_stream.as_ref().map(|stream| stream.first_seq())
+    }
+
+    /// [OPUS-5] (sq-lsp7k.7) Reads the single-slot point-in-time reconstruction cache. Hits only
+    /// on the EXACT `(base, target)` span the entry was validated over — see the `pit_snapshot`
+    /// field docs for why both ends are part of the key.
+    #[cfg(feature = "point-in-time")]
+    pub(crate) fn pit_cached(&self, base: u64, target: u64) -> Option<PinnedGen> {
+        let slot = self.pit_snapshot.read().ok()?;
+        slot.as_ref()
+            .filter(|(cached_base, cached_target, _)| *cached_base == base && *cached_target == target)
+            .map(|(_, _, gen)| gen.clone())
+    }
+
+    /// [OPUS-5] (sq-lsp7k.7) Publishes a reconstruction into the single-slot cache, replacing
+    /// whatever was there. A poisoned lock is skipped rather than propagated: the cache is a
+    /// pure optimisation, and losing it costs a rebuild, never correctness.
+    #[cfg(feature = "point-in-time")]
+    pub(crate) fn pit_store(&self, base: u64, target: u64, gen: PinnedGen) {
+        if let Ok(mut slot) = self.pit_snapshot.write() {
+            *slot = Some((base, target, gen));
+        }
     }
 
     /// [FABLE-5] (gh-2436) Re-baselines the RUNNING tracked change log — the operator resync
@@ -5521,18 +5596,43 @@ fn explain_mode(
 /// published but no longer retained → **410 Gone** (it aged out of the retention window —
 /// gone permanently, retrying that pin cannot help; re-read the current generation and
 /// restart pagination).
+/// [OPUS-5] (sq-lsp7k.7) Under the opt-in `point-in-time` feature this ALSO understands
+/// `at=<instant>` — an arbitrary past moment rather than a generation token — resolved through
+/// the durable change stream by [`resolve_point_in_time`]. `at` and `generation` are mutually
+/// exclusive (a request that sets both is a 400: they are two different pins and guessing which
+/// one the caller meant is exactly the silent substitution this surface refuses).
+///
+/// `async` for that path alone — the reconstruction is an O(graph) rebuild and must not run on
+/// an async worker. Without the feature the function never awaits anything.
 #[allow(clippy::result_large_err)] // Err is axum's Response; boxing would desync the call-site match
-fn resolve_pin(
+async fn resolve_pin(
     state: &AppState,
     url_params: &HashMap<String, String>,
     body_params: Option<&HashMap<String, String>>,
-) -> Result<PinnedGen, Response> {
+) -> Result<RequestPin, Response> {
+    #[cfg(feature = "point-in-time")]
+    if let Some(instant) = body_params
+        .and_then(|m| m.get("at"))
+        .or_else(|| url_params.get("at"))
+    {
+        if body_params
+            .and_then(|m| m.get("generation"))
+            .or_else(|| url_params.get("generation"))
+            .is_some()
+        {
+            return Err(bad_request(
+                "'at' and 'generation' are mutually exclusive: pin a point in time or a \
+                 generation, not both",
+            ));
+        }
+        return resolve_point_in_time(state, instant).await;
+    }
     let raw = match body_params
         .and_then(|m| m.get("generation"))
         .or_else(|| url_params.get("generation"))
     {
         Some(raw) => raw,
-        None => return Ok(state.current()),
+        None => return Ok(state.current().into()),
     };
     // [SONNET-4.6] (sq-ci2d6) Positional format args throughout (CodeQL `rust/unused-variable`
     // false-positive on inline captures — this path is now compiled into the DEFAULT build).
@@ -5551,13 +5651,13 @@ fn resolve_pin(
         )));
     }
     if number == current.number() {
-        return Ok(current);
+        return Ok(current.into());
     }
     // [OPUS-4.8] (sq-o5bi, sq-0g6g) Resolve the ring once via the accessor: DEFAULT this is a
     // direct field reference (byte-identical to pre-#941); under `backup` it is one clone out of
     // the swappable serving core. Binding it locally keeps `at` + `oldest_retained` on one ring.
     let ring = state.ring();
-    ring.at(number).ok_or_else(|| {
+    ring.at(number).map(RequestPin::from).ok_or_else(|| {
         // [SONNET-4.6] (sq-ci2d6) The 410 + "aged out … oldest retained" prefix is byte-identical
         // in both feature states (the `time-travel` suite is unchanged); only the closing HINT
         // differs — the default build's window is the ring's concurrency-retention floor, the
@@ -5580,6 +5680,173 @@ fn resolve_pin(
             ),
         )
     })
+}
+
+/// [OPUS-5] (sq-lsp7k.7) Resolves a `?at=<instant>` pin: the store as it stood at an ARBITRARY
+/// past moment, reconstructed from the durable CDC change stream (see [`crate::pit`] for the
+/// reconstruction contract and its soundness obligations).
+///
+/// The shape is: pin a base the ring still holds → poll the retained records → resolve the
+/// instant to the generation current at it → reverse-replay the span between them. Everything
+/// after the parse is fail-CLOSED — a trimmed horizon, an uncaptured span, or a chain that does
+/// not reach the base all REFUSE rather than answer against a nearby instant.
+///
+/// **Double opt-in**, exactly like `GET /streams`: compiling the feature is not enough, the
+/// operator must also point the server at a log directory. Without one there is no history to
+/// reconstruct from, so `at=` is a `400` naming the missing flag (a permanent, actionable
+/// refusal — not a `404`, since `/sparql` itself is very much there).
+#[cfg(feature = "point-in-time")]
+#[allow(clippy::result_large_err)] // Err is axum's Response, as in `resolve_pin`
+async fn resolve_point_in_time(state: &AppState, raw: &str) -> Result<RequestPin, Response> {
+    const UNCONFIGURED: &str = "point-in-time queries ('at') require the durable change stream: \
+                                start the server with --change-stream <DIR> (or SPARQ_CHANGE_STREAM)";
+
+    // The caller's raw value is never echoed (the #241 info-leak posture — it is unbounded
+    // request input); the message states the accepted forms instead.
+    let target = crate::pit::parse_instant(raw).map_err(|_| {
+        bad_request(
+            "invalid 'at' parameter: expected an xsd:dateTime instant (e.g. \
+             2026-07-28T12:00:00Z) or an integer count of nanoseconds since the Unix epoch \
+             (the 'commitTimestampNanos' value GET /streams reports)",
+        )
+    })?;
+    if !state.change_stream_enabled() {
+        return Err(bad_request(UNCONFIGURED));
+    }
+
+    // Pin the base BEFORE polling: a commit that lands in between then shows up as a record
+    // beyond the pin, which `pit::base_generation` simply excludes from the span. Pinning
+    // after the poll would instead leave a span the records cannot account for.
+    let current = state.current();
+    let first_seq = state.change_stream_first_seq().unwrap_or(0);
+    let records = match state.poll_change_stream(first_seq) {
+        Ok(Some(records)) => records,
+        // The stream became unconfigured between the check and the poll.
+        Ok(None) => return Err(bad_request(UNCONFIGURED)),
+        Err(e) => {
+            // [OPUS-5] positional format arg (CodeQL rust/unused-variable false-positive).
+            tracing::warn!(target: "sparq_server", detail = %e, "point-in-time change-stream poll failed (detail withheld from client)");
+            return Err(json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "change-stream read error",
+            ));
+        }
+    };
+
+    let target_generation = crate::pit::resolve_generation(&records, target).map_err(pit_error)?;
+    let base_generation = crate::pit::base_generation(&records, current.number());
+    // The log may lag the ring by the commit the CDC hook has not appended yet; step the base
+    // back to the newest RECORDED generation, which the ring's concurrency floor still retains.
+    let base = if base_generation == current.number() {
+        current
+    } else {
+        match state.at(base_generation) {
+            Some(pin) => pin,
+            None => {
+                tracing::warn!(target: "sparq_server", generation = base_generation, "point-in-time base generation is no longer retained");
+                return Err(json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "point-in-time base snapshot unavailable",
+                ));
+            }
+        }
+    };
+    // The instant resolves to a generation the ring itself still holds — no rebuild needed.
+    if target_generation == base.number() {
+        return Ok(RequestPin {
+            gen: base,
+            number: target_generation,
+        });
+    }
+    if let Some(gen) = state.pit_cached(base_generation, target_generation) {
+        return Ok(RequestPin {
+            gen,
+            number: target_generation,
+        });
+    }
+
+    // O(graph): one serialise of the base plus one re-parse of the result. Off the async
+    // runtime, like every other CPU-bound stretch on this path.
+    let rebuilt = tokio::task::spawn_blocking(move || {
+        crate::pit::rewind(base.snapshot(), base_generation, &records, target_generation)
+    })
+    .await;
+    let graph = match rebuilt {
+        Ok(Ok(graph)) => graph,
+        Ok(Err(e)) => return Err(pit_error(e)),
+        Err(e) => {
+            tracing::warn!(target: "sparq_server", detail = %e, "point-in-time reconstruction task failed");
+            return Err(json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "point-in-time reconstruction failed",
+            ));
+        }
+    };
+    // A reconstructed state is not a generation the ring ever published, so it gets its own
+    // throwaway ring purely to mint the `Arc<Generation<Graph>>` every read path takes. The
+    // ring owns retention, not lifetime (see `sparq_serve::GenerationRing`), so dropping it
+    // here leaves the pin fully alive; its own `number()` is meaningless, which is exactly why
+    // `RequestPin` carries the historical number separately.
+    let gen = GenerationRing::new(graph).current();
+    state.pit_store(base_generation, target_generation, gen.clone());
+    Ok(RequestPin {
+        gen,
+        number: target_generation,
+    })
+}
+
+/// [OPUS-5] (sq-lsp7k.7) Maps a [`crate::pit::PitError`] onto the endpoint's status semantics.
+///
+/// `410 Gone` is the "that history is not there" class — a trimmed horizon or an uncaptured
+/// span are both permanent for that instant, so retrying cannot help (the same reading the
+/// aged-out `?generation=N` pin already has). `500` is reserved for server-state conditions
+/// the caller did nothing to cause; their detail goes to the operator log, never the body.
+#[cfg(feature = "point-in-time")]
+fn pit_error(e: crate::pit::PitError) -> Response {
+    use crate::pit::PitError;
+    match e {
+        // `parse_instant` is called before this mapper, so this arm is defensive only.
+        PitError::Malformed => bad_request("invalid 'at' parameter"),
+        PitError::Empty => json_error(
+            StatusCode::GONE,
+            "the change stream holds no records yet, so no past state can be reconstructed",
+        ),
+        PitError::BeforeHorizon {
+            earliest_unix_nanos,
+        } => json_error(
+            StatusCode::GONE,
+            &format!(
+                "the requested instant predates the retained change history (earliest \
+                 reconstructable commit: {} nanoseconds since the Unix epoch — pass that value \
+                 as 'at' to read the horizon); older segments were trimmed by the retention \
+                 policy, or recording started later",
+                earliest_unix_nanos
+            ),
+        ),
+        PitError::Gap { generation } => json_error(
+            StatusCode::GONE,
+            &format!(
+                "the change stream has an uncaptured span at generation {} (an operator re-base \
+                 marker): those commits were never recorded, so the state before them cannot be \
+                 reconstructed from the log",
+                generation
+            ),
+        ),
+        PitError::Uncovered => {
+            tracing::warn!(target: "sparq_server", "point-in-time span not covered by the retained change records");
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "the change stream does not cover the span back to the requested instant",
+            )
+        }
+        PitError::Rebuild(detail) => {
+            tracing::warn!(target: "sparq_server", detail = %detail, "point-in-time reconstruction did not re-parse");
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "point-in-time reconstruction failed",
+            )
+        }
+    }
 }
 
 /// Stamps the `Sparq-Generation` response header: the generation number the response was
@@ -5652,7 +5919,7 @@ async fn sparql_endpoint(
             }
             match url_params.get("query") {
                 Some(q) => {
-                    let pin = match resolve_pin(&state, &url_params, None) {
+                    let pin = match resolve_pin(&state, &url_params, None).await {
                         Ok(pin) => pin,
                         Err(resp) => {
                             #[cfg(feature = "audit-log")]
@@ -5811,7 +6078,7 @@ async fn handle_post(
         // NB: a write smuggled through the query Content-Type still goes to `run_query` (the
         // historical behaviour — it parses as a non-query and returns the existing error); the
         // audit op already records it as an `update` for the access trail.
-        let pin = match resolve_pin(state, url_params, None) {
+        let pin = match resolve_pin(state, url_params, None).await {
             Ok(pin) => pin,
             Err(resp) => {
                 #[cfg(feature = "audit-log")]
@@ -5938,7 +6205,7 @@ async fn handle_post(
         }
         let resp = match params.get("query") {
             Some(q) => {
-                let pin = match resolve_pin(state, url_params, Some(&params)) {
+                let pin = match resolve_pin(state, url_params, Some(&params)).await {
                     Ok(pin) => pin,
                     Err(resp) => {
                         #[cfg(feature = "audit-log")]
@@ -6393,10 +6660,13 @@ async fn run_query(
     headers: &HeaderMap,
     head_only: bool,
     explain: ExplainMode,
-    gen: PinnedGen,
+    pin: RequestPin,
     dataset: &DatasetOverride,
 ) -> Response {
-    let number = gen.number();
+    // [OPUS-5] (sq-lsp7k.7) The reported number comes off the `RequestPin`, not off the
+    // `Generation`: a `?at=` pin is a REBUILT snapshot whose own number is meaningless, and
+    // the header must still name the historical generation it reconstructs.
+    let RequestPin { gen, number } = pin;
     let resp = run_query_pinned(state, sparql, headers, head_only, explain, gen, dataset).await;
     with_generation_header(resp, number)
 }
