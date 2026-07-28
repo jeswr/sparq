@@ -645,6 +645,49 @@ class TestEmission(unittest.TestCase):
             self.assertIn(f"head={HEAD[:8]}", row)
             self.assertIn("pr=#4534", row)
 
+    def test_rows_record_how_many_groups_are_stacked_above(self):
+        # The watchdog's own effectiveness measure. A rebuild discards every group
+        # chained on top of the dead one, so `stacked` IS the cost multiplier — and a
+        # climbing `stacked` over time is the signal that the grace has drifted too
+        # long. Measured 2026-07-28: a 48-minute intervention had stacked=4,
+        # stacked_green=2, and all four were discarded.
+        nodes = [
+            {
+                "id": "MQE_4709", "position": 1, "state": "AWAITING_CHECKS",
+                "enqueuedAt": "2026-07-27T22:58:53Z",
+                "baseCommit": {"oid": BASE}, "headCommit": {"oid": HEAD},
+                "pullRequest": {"number": 4709, "id": "PR_4709"},
+            },
+            {
+                "id": "MQE_4714", "position": 2, "state": "MERGEABLE",
+                "enqueuedAt": "2026-07-27T22:59:00Z",
+                "baseCommit": {"oid": HEAD}, "headCommit": {"oid": "a" * 40},
+                "pullRequest": {"number": 4714, "id": "PR_4714"},
+            },
+            {
+                "id": "MQE_4729", "position": 3, "state": "MERGEABLE",
+                "enqueuedAt": "2026-07-27T22:59:10Z",
+                "baseCommit": {"oid": "a" * 40}, "headCommit": {"oid": "b" * 40},
+                "pullRequest": {"number": 4729, "id": "PR_4729"},
+            },
+            {
+                # No group built yet — nothing to discard, so it must NOT be counted.
+                "id": "MQE_4731", "position": 4, "state": "QUEUED",
+                "enqueuedAt": "2026-07-27T22:59:20Z",
+                "baseCommit": None, "headCommit": None,
+                "pullRequest": {"number": 4731, "id": "PR_4731"},
+            },
+        ]
+        harness = FakeWatchdog.build(suites=0, entries=nodes)
+        harness.run()
+        head_row = next(r for r in harness.rows if "pr=#4709" in r)
+        self.assertIn("stacked=2", head_row)
+        self.assertIn("stacked_green=2", head_row)
+        # The last entry with a group has nothing above it.
+        tail_row = next(r for r in harness.rows if "pr=#4729" in r)
+        self.assertIn("stacked=0", tail_row)
+        self.assertIn("stacked_green=0", tail_row)
+
     def test_holding_states_re_emit_every_tick(self):
         # Three consecutive ticks on an unchanged CAP/NOOP condition must each emit.
         for _ in range(3):

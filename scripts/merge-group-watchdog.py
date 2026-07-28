@@ -784,7 +784,25 @@ class Watchdog:
         counts: dict[str, int] = {}
         errors = 0
         run_recoveries = 0
-        for entry in sorted(entries, key=lambda e: e.position):
+        ordered = sorted(entries, key=lambda e: e.position)
+        for entry in ordered:
+            # THE EFFECTIVENESS TERM. Every entry behind this one is chained ON TOP of
+            # its group head, so a rebuild discards all of their CI too. The real cost
+            # of a dead ref is therefore not the ref — it is how much work stacks above
+            # it before anyone notices:
+            #     cost ~= (groups stacked above the dead ref at detection) x (their CI)
+            # Measured 2026-07-28: intervening at 48 min meant that term was 4 (two of
+            # them already MERGEABLE, i.e. fully green, and all four were discarded on
+            # the rebuild). Firing inside the grace should make it 0. Recording it on
+            # every row makes the watchdog self-measuring: if `stacked` starts climbing
+            # the grace has drifted too long, and the rows say so without anyone having
+            # to notice an outage by hand.
+            stacked = [
+                other
+                for other in ordered
+                if other.position > entry.position and other.head_oid
+            ]
+            stacked_green = [o for o in stacked if o.state == "MERGEABLE"]
             ref = (
                 queue_ref(self.branch, entry.pr_number, entry.base_oid)
                 if entry.base_oid
@@ -832,6 +850,7 @@ class Watchdog:
             row = (
                 f"pos={entry.position} pr=#{entry.pr_number} state={entry.state} "
                 f"ref={ref} head={(entry.head_oid or '-')[:8]} suites={suite_text} "
+                f"stacked={len(stacked)} stacked_green={len(stacked_green)} "
                 f"decision={decision.verdict} — {decision.detail}"
             )
 
