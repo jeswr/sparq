@@ -23,17 +23,25 @@
 //!   [`Expansion::keywords`]; an unknown keyword is [`TerseError::UnknownKeyword`] and a
 //!   collision with a real `PREFIX K:` is [`TerseError::KeywordPrefixCollision`] — never a
 //!   silent guess. Publish the legend behind the prompt-cache breakpoint with [`legend_card`].
+//! - **Phase 4 (default build): the non-rewriting did-you-mean diagnostic (design §3.2).**
+//!   On a *parse failure only*, [`TerseError::CanaryFailed`] carries [`KeywordHint`]s naming
+//!   the tokens that look like mistyped SPARQL keywords (`FLTR` → `FILTER`). The suggestion
+//!   is **never applied** — lenient parsing could silently yield a different, valid, wrong
+//!   query — so the agent keeps its loud, recoverable feedback loop. [`keyword_hints`]
+//!   exposes the same diagnostic for a parse error obtained elsewhere.
 //! - **Phase 2 (`vectors` feature):** `V("phrase")` lexical-first concept resolution behind
 //!   the §6 soundness envelope — `terse_to_sparql_with` (the `vectors`-gated entry point)
 //!   expands each `V("phrase")` to the
 //!   canonical `<iri>` it resolves to, echoing IRI + score + runner-up + confidence +
 //!   method in [`Expansion::resolutions`], confidence-gated and staleness-guarded.
 
+mod diagnose;
 mod error;
 mod keyword;
 mod resolve;
 mod transpile;
 
+pub use diagnose::{keyword_hints, KeywordHint};
 pub use error::TerseError;
 pub use keyword::{legend, legend_card, legend_len, KeywordExpansion, LEGEND_VERSION};
 pub use resolve::{Method, Resolution};

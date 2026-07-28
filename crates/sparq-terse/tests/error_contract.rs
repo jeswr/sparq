@@ -58,6 +58,49 @@ fn vector_phrase_requires_opt_in_feature() {
 }
 
 #[test]
+fn parse_failure_suggests_a_keyword_without_applying_it() {
+    // Phase 4 (sq-h7zlx, design §3.2): the ONLY sliver of lever 2 — a did-you-mean on parse
+    // failure. The public contract is that the call still returns `Err` and the query is
+    // echoed unrepaired; a lenient parse that silently applied the fix could execute a
+    // different, valid, wrong query.
+    let query = "SELECT ?s WHERE { ?s ?p ?o } FLTR(?s > 1)";
+    let error = terse_to_sparql(query).expect_err("a mistyped keyword must still fail");
+
+    match error {
+        TerseError::CanaryFailed { sparql, hints, .. } => {
+            assert_eq!(sparql, query, "the failing query must be echoed verbatim");
+            assert_eq!(hints.len(), 1, "expected one hint, got {hints:?}");
+            assert_eq!(hints[0].token, "FLTR");
+            assert!(
+                hints[0].suggestions.contains(&"FILTER".to_string()),
+                "expected FILTER among {:?}",
+                hints[0].suggestions
+            );
+        }
+        other => panic!("expected CanaryFailed, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_structural_parse_error_gets_no_keyword_noise() {
+    // The diagnostic is conservative: an unbalanced query has no mistyped keyword, so it
+    // yields no suggestions rather than a plausible-looking guess.
+    let error = terse_to_sparql("SELECT ?s WHERE { ?s ?p").expect_err("must fail the canary");
+
+    match error {
+        TerseError::CanaryFailed { hints, .. } => assert!(hints.is_empty(), "got {hints:?}"),
+        other => panic!("expected CanaryFailed, got {other:?}"),
+    }
+}
+
+#[test]
+fn keyword_hints_is_silent_on_valid_queries() {
+    // The public diagnostic entry point never fires on a query that parses, so wiring it into
+    // any other parse-failure path cannot perturb a working query.
+    assert!(sparq_terse::keyword_hints("SELECT ?s WHERE { ?s a <http://ex/T> } LIMIT 1").is_empty());
+}
+
+#[test]
 fn canonical_sparql_passes_through_byte_identically() {
     let query = "SELECT ?s WHERE { ?s <http://ex/p> ?o }";
     let expansion = terse_to_sparql(query).expect("canonical SPARQL must pass through");

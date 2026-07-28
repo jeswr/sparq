@@ -199,9 +199,13 @@ pub(crate) fn canary(canonical_sparql: &str) -> Result<(), TerseError> {
     if SparqlParser::new().parse_update(canonical_sparql).is_ok() {
         return Ok(());
     }
+    // Parse failure — and ONLY parse failure — is where the did-you-mean diagnostic runs
+    // (Phase 4, design §3.2). It attaches suggestions to the error; it never edits the query,
+    // so the agent keeps its loud, recoverable feedback loop.
     Err(TerseError::CanaryFailed {
         sparql: canonical_sparql.to_string(),
         parse_error: query_err,
+        hints: crate::diagnose::keyword_hints(canonical_sparql),
     })
 }
 
@@ -518,7 +522,7 @@ fn scan_v_constructs<T>(
 
 /// `true` if `b` can appear inside a SPARQL identifier / prefixed-name local part (so a `V`
 /// glued to one is not a standalone token).
-fn is_ident_char(b: u8) -> bool {
+pub(crate) fn is_ident_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b':' || b == b'?' || b == b'$'
 }
 
@@ -594,7 +598,7 @@ fn skip_ws(bytes: &[u8], mut i: usize) -> usize {
 
 /// At `bytes[start]` being a quote, skips a SPARQL string literal (single- or
 /// triple-quoted, honouring backslash escapes), returning the index just past it.
-fn skip_string(bytes: &[u8], start: usize) -> usize {
+pub(crate) fn skip_string(bytes: &[u8], start: usize) -> usize {
     let n = bytes.len();
     let quote = bytes[start];
     // Triple-quoted?
@@ -657,7 +661,38 @@ mod tests {
     fn canary_rejects_invalid_sparql() {
         let bad = "SELECT ?s WHERE { ?s ?p"; // unbalanced — does not parse
         let err = terse_to_sparql(bad).expect_err("invalid SPARQL must fail the canary");
-        assert!(matches!(err, TerseError::CanaryFailed { .. }));
+        match err {
+            // A structural error carries no keyword hint — the diagnostic stays quiet.
+            TerseError::CanaryFailed { hints, .. } => assert!(hints.is_empty(), "got {hints:?}"),
+            other => panic!("expected CanaryFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_keyword_typo_is_diagnosed_but_never_applied() {
+        // Phase 4 (design §3.2): on parse failure the error names the mistyped keyword and
+        // suggests the real one — and STILL fails. Nothing is rewritten; there is no path
+        // where a `FLTR` becomes a `FILTER` and gets executed.
+        let bad = "SELECT ?s WHERE { ?s ?p ?o } FLTR(?s > 1)";
+        let err = terse_to_sparql(bad).expect_err("a typo'd keyword must still fail loudly");
+        match err {
+            TerseError::CanaryFailed { sparql, hints, .. } => {
+                assert_eq!(sparql, bad, "the failing query is echoed verbatim, unrepaired");
+                assert_eq!(hints.len(), 1, "got {hints:?}");
+                assert_eq!(hints[0].token, "FLTR");
+                assert_eq!(hints[0].suggestions[0], "FILTER");
+                let msg = TerseError::CanaryFailed { sparql, parse_error: String::new(), hints }
+                    .to_string();
+                assert!(msg.contains("unknown keyword `FLTR` — did you mean `FILTER`"), "got {msg}");
+                assert!(msg.contains("not applied"), "the message must disclaim repair: {msg}");
+            }
+            other => panic!("expected CanaryFailed, got {other:?}"),
+        }
+        // The repaired query is what the AGENT must send next turn — the transpiler never
+        // sends it for them.
+        let fixed = terse_to_sparql("SELECT ?s WHERE { ?s ?p ?o FILTER(?s > 1) }")
+            .expect("the agent's own fix parses");
+        assert!(fixed.canonical_sparql.contains("FILTER"));
     }
 
     #[test]
