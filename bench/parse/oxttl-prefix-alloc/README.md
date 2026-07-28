@@ -44,6 +44,9 @@ builds in all — so one command reproduces every row recorded in
 
 # Which upstream commit bought the delta?
 ./ab.sh --attribute f5383d8 --attribute 924d0b1
+
+# Mutation-check the equivalence gate itself. Builds nothing, needs no corpus.
+./ab.sh --self-test
 ```
 
 `HARNESS_TOOLCHAIN=<toolchain>` prepends `cargo +<toolchain>`, for a box that
@@ -92,3 +95,22 @@ byte/count-identical" invariant. The digest is deliberately computed from
 `as_str()`/`value()`/`datatype()` and **not** from any `Display` impl, so a
 serializer change between the two `oxttl` revisions cannot masquerade as a parse
 divergence.
+
+**`ab.sh` enforces it; it does not just print it.** Each leg also writes a
+`--json` result, and the script compares every leg — both revisions, all five
+configurations, and any `--attribute` leg — against the released reference on
+*both* triple count and digest. A mismatch prints both sides and **exits
+nonzero**. Without that check the comparison would not exist: each binary only
+checks its own repeated parses against its own warm-up, so two revisions that
+deterministically produced *different* triple streams would each print a happy
+table and the one-command A/B would still exit 0 — the timings would be a
+comparison of two parsers doing different work. The count alone would also be a
+vacuous guard: as the research record's mutation table shows, both deliberate
+corpus corruptions move the digest while leaving the count untouched.
+
+The gate is itself mutation-checked, not assumed: `--self-test` drives it with
+stub results where a mutated digest, a mutated triple count, and a leg that
+emitted no result fields must each be rejected while an identical leg passes.
+It builds nothing and needs no corpus, so `ab.sh` also runs it at the **start of
+every A/B** — a gate that had stopped biting would otherwise be discovered only
+after ten release builds had been spent on results it was supposed to check.
