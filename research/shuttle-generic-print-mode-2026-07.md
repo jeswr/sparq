@@ -135,9 +135,28 @@ never runtime surprises:
 - **Recoverability.** Every output slot of a production must be recoverable from the quads that
   production consumes. A production emitting a value that appears in no consumed slot cannot be
   inverted — diagnose it, name the clause.
-- **Linearity.** A quad emitted by two different productions makes consumption ambiguous. The
-  transaction machinery would paper over it (whichever matcher runs first wins); the compiler
-  should instead reject or demand a `@prefer` disambiguation.
+- **Fresh-node linearity.** A `fresh` site's blank node must be referenced exactly once among the
+  quads its production consumes (`singleRef(t)`, §2). This is a property of a single production's
+  own existentials, and it is what makes the `thread` walk of §3 deterministic.
+- **Emission overlap.** Two emit sites — in different productions, or in different clauses of one —
+  whose patterns can produce the *same* quad are a **separate and harder** problem, and `@prefer`
+  does not solve it. RDF dataset set semantics collapse the duplicate on load, so the residual
+  carries **no provenance** recording which site or sites emitted it: the single surviving quad may
+  have to discharge one emit site, or discharge several jointly. `@prefer` only orders competing
+  interpretations of one consumption, so it cannot express "both sites were required"; and choosing
+  the preferred derivation does not by itself establish that the choice replays to the same graph
+  or satisfies the rest of the surrounding production. An overlap is admissible only if:
+  - the overlapping alternatives are **provably mutually exclusive** — the §5 disjointness check,
+    applied to emit patterns rather than oracle branches — so at most one site can have fired and
+    consumption is determined; or
+  - the chosen derivation is discharged by **reconstruction plus full forward replay**: recover the
+    bindings, re-run the production's forward semantics, and require the replay to reproduce
+    *every* quad that production emits. This is what catches the jointly-required case, because a
+    one-site reading leaves the other site's quads unproduced by the replay.
+
+  Anything else is a **generation-time rejection naming both clauses**. The compiler must not fall
+  back on the transaction machinery's incidental behaviour (whichever matcher runs first wins), and
+  must not treat a bare `@prefer` as a discharge.
 
 ### 2. `emit` → residual matcher; `fresh` → linear blank match
 
@@ -154,9 +173,9 @@ the runtime; the generalization is that the *compiler* emits the calls instead o
 for the unique free quad set matching the loop body's linking pattern with the threaded variable
 in its bound position; consume, rebind `prev`, iterate; terminate on the post-loop clause's
 pattern (`emit prev rdf:rest rdf:nil`). Determinism comes from linearity — each intermediate node
-is a `fresh` blank with object-position refcount 1 — which is exactly why the linearity obligation
-above must be checked and not assumed. This subsumes both the `rdf:rest` walk the shaclc printer
-open-codes as `readList`/`orChainText` and Turtle's collection spine.
+is a `fresh` blank with object-position refcount 1 — which is exactly why the fresh-node linearity
+obligation above must be checked and not assumed. This subsumes both the `rdf:rest` walk the
+shaclc printer open-codes as `readList`/`orChainText` and Turtle's collection spine.
 
 ### 4. `when` + `print { … ?? d }` → guard consistency and suppression inversion
 
@@ -257,10 +276,12 @@ modules or gen-rs"* — is the right instinct: the delta is the v0.2 vocabulary 
   are conservatively false in the v0.1 stream window. A batch residual printer *can* answer them,
   and the generic path should — but that is a behaviour *change* for the turtle-spine serializer
   and must not be smuggled into this bead.
-- **Ambiguity is not always decidable.** The disjointness and linearity checks above are decidable
-  for the ground-slot patterns the v0.1 surface admits; they are not a general decision procedure.
-  Where a check cannot be discharged, the compiler must say so and require a `@prefer`, rather
-  than defaulting to source order and hoping.
+- **Ambiguity is not always decidable.** The disjointness and fresh-node linearity checks above are
+  decidable for the ground-slot patterns the v0.1 surface admits; they are not a general decision
+  procedure, and emission overlap is not resolvable by annotation at all — only by proved
+  exclusivity or by replay. Where a check cannot be discharged — including where replay cannot rule
+  out a jointly-required overlap — the compiler must fail and name the clauses, rather than
+  defaulting to source order, or to a `@prefer`, and hoping.
 - **Performance is unmeasured and unclaimed.** A compiled matcher chain doing nested transaction
   rollback over a subject index has a different cost profile from the hand-written skeleton's
   early returns. sparq vendors this generated code into a benchmarked crate, so the generic path
@@ -288,7 +309,8 @@ non-turtle-spine grammar prints"* — is the right gate. Phasing it:
 2. **Mode analysis + matcher compilation in gen-js only**, behind a flag, with the hand-written
    skeleton retained as the default. Gate: the generic path's output is byte-identical to the
    skeleton's on all four shaclc fixture directories, and the suite stays at **362/362**.
-3. **Third grammar.** Gate: it prints, and its verdicts are right.
+3. **Third grammar.** Gate: it prints, and its verdicts are right — including the negative ones,
+   so the overlap cases below reject or replay-validate at generation time rather than printing.
 4. **gen-rs mirror**, then delete both skeletons. Gate: cross-backend identity
    (`packages/gen-rs/test/conformance.sh`) plus byte-identical regeneration of sparq's two
    vendored artifacts. Only after step 4 is the double-maintenance actually retired — a generic
@@ -307,8 +329,14 @@ The honest split is therefore a **gate** and a **demonstration**. The gate is a 
 purpose-built grammar whose graph-typed productions are structurally unlike shaclc and which
 exercises the full clause vocabulary the design touches — `fresh`, `thread`, a `when`-guarded
 emit with a `print { … ?? d }` default, an `oracle` with disjoint branches, and a nested optional
-— with hand-authored conformance pairs. Its value is *coverage of the inversion*, and it should
-be described that way rather than dressed up as a syntax anyone wants. The demonstration is a
+— with hand-authored conformance pairs. It must also carry **negative** cases for the §1
+obligations: a production with a non-recoverable output slot, and two productions that emit the
+same quad, in both variants — one where the two are provably mutually exclusive (must compile, and
+the derivation it picks must be replay-validated) and one where forward execution requires *both*
+emit sites (must be a generation-time rejection naming both clauses, not a `@prefer`-resolved
+pick, and not a silent first-matcher-wins consumption). Its value is *coverage of the inversion*,
+and it should be described that way rather than dressed up as a syntax anyone wants. The
+demonstration is a
 real syntax, and the best-sized real candidate is an **OWL 2 Manchester Syntax class-frame
 subset** (`Class: X SubClassOf: A and (p some B)`): graph-typed via the OWL-2-mapping-to-RDF
 graphs, structurally a keyword-sectioned frame rather than either spine, and it naturally
