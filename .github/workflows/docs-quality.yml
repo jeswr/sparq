@@ -882,6 +882,20 @@ jobs:
       # only, no git/network.
       - name: Self-test check-install-action-tool.py (fixtures + live invariant — sq-1cb6l)
         run: python3 scripts/tests/test_install_action_tool.py
+      # [OPUS-5] sparq-org/sparq#4652: the zero-dispatch merge-group watchdog
+      # (scripts/merge-group-watchdog.py, .github/workflows/merge-group-watchdog.yml)
+      # plus the CI_TIMEOUT routing split it feeds in merge-queue-feedback.yml. Both
+      # are queue-critical and neither can be exercised by a PR run, so their whole
+      # contract is pinned here: the hermetic decision tables (script --self-test), and
+      # the three-layer suite — policy, sweep BEHAVIOUR against a scripted gh (assert on
+      # the mutations issued, not the log text), and cross-file YAML-seam inspection of
+      # every `if:`, step and call site. The fail-closed direction matters most: the
+      # demote guard is `route != 'preserve'`, so a classifier failure keeps the
+      # pre-#4652 behaviour; inverting it to `== 'demote'` fails here.
+      - name: Self-test merge-group-watchdog.py (decision tables — #4652)
+        run: python3 scripts/merge-group-watchdog.py --self-test
+      - name: Zero-dispatch watchdog suite (policy + behaviour + YAML seam — #4652)
+        run: python3 scripts/tests/test_merge_group_watchdog.py
       # [SONNET-4.6] sq-qcnn.32 / [OPUS-5] #3773: the advisory-job registry + gate-intent
       # placement check. Since #3773 the registry is LOAD-BEARING (it is the ONLY thing
       # that makes a check-run non-gating), so this is its integrity gate. THREE
