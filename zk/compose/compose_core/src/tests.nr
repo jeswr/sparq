@@ -1495,6 +1495,29 @@ fn two_pair_universe() -> ([[Field; 3]; 4], [[Field; 3]; 4], Field, Field) {
     (enc_a, enc_b, commit_a, commit_b)
 }
 
+// Two non-joining terms, distinct from each other and from JK/JK2: the second
+// row of each graph in `one_pair_universe` carries one of these in the join
+// slot, so those rows match nothing on the other side.
+global NJA: Field = 0xa11a;
+global NJB: Field = 0xb22b;
+
+// Graph A = { (S1, P, JK), (S2, P, NJA) }; graph B = { (JK, P2, O1), (NJB, P2, O2) }.
+// Same shape and same join column (A slot 2 x B slot 0) as `two_pair_universe`,
+// but the committed universe contains EXACTLY ONE genuine joined pair -- a0 x b0
+// on JK -- because NJA, NJB, JK are pairwise distinct. This is the N=1 fixture
+// the padding test needs: a graph pair whose join cardinality really is 1.
+fn one_pair_universe() -> ([[Field; 3]; 4], [[Field; 3]; 4], Field, Field) {
+    let a0 = [101, 7, JK];
+    let a1 = [102, 7, NJA];
+    let b0 = [JK, 8, 201];
+    let b1 = [NJB, 8, 202];
+    let enc_a = [a0, a1, [0, 0, 0], [0, 0, 0]];
+    let enc_b = [b0, b1, [0, 0, 0], [0, 0, 0]];
+    let commit_a = commit_fold([h3(a0[0], a0[1], a0[2]), h3(a1[0], a1[1], a1[2]), 0, 0], 2);
+    let commit_b = commit_fold([h3(b0[0], b0[1], b0[2]), h3(b1[0], b1[1], b1[2]), 0, 0], 2);
+    (enc_a, enc_b, commit_a, commit_b)
+}
+
 // (JR1) ACCEPT: R=2 lanes carrying TWO GENUINE, DISTINCT joined pairs, each
 // bound to its OWN hiding commitment over its OWN join value. The two graph
 // re-commitments are paid ONCE for both lanes -- the amortisation the tier
@@ -1520,18 +1543,25 @@ fn join_eq_r_two_distinct_pairs_accept() {
 }
 
 // (JR2) ACCEPT -- THE PADDING DISCIPLINE, i.e. the mechanism that decouples the
-// proof shape from N. The prover holds only ONE genuine pair (N=1) but presents
-// R=2 lanes by REPEATING that genuine pair under a FRESH second blinder. Every
-// lane is a TRUE join (nothing false is proved), and because
-// `join_value_commitment` is hiding with independent blinders the two public
-// commitments DIFFER -- so the padded lane is not distinguishable, at the public
-// interface, from JR1's genuinely distinct second lane. Note what this test
+// proof shape from N. The committed graphs here admit EXACTLY ONE joined pair
+// (`one_pair_universe`, N=1), yet the prover still presents R=2 lanes by
+// REPEATING that sole genuine pair under a FRESH second blinder. Every lane is a
+// TRUE join (nothing false is proved), and because `join_value_commitment` is
+// hiding with independent blinders the two public commitments DIFFER -- so the
+// padded lane is not distinguishable, at the public interface, from JR1's
+// genuinely distinct second lane over a two-match universe. Note what this test
 // therefore also demonstrates: R lanes are satisfiable from a SINGLE genuine
 // pair, so the member proves no upper bound on the join cardinality -- R fixes
 // the public shape, it is not a proven `N <= R`.
 #[test]
 fn join_eq_r_repeated_pair_pads_and_accepts() {
-    let (enc_a, enc_b, commit_a, commit_b) = two_pair_universe();
+    let (enc_a, enc_b, commit_a, commit_b) = one_pair_universe();
+    // Pin the N=1 premise: the only join-slot terms in the committed graphs are
+    // JK (which matches across both) and the two non-joining terms, so a0 x b0
+    // is the universe's ONLY genuine pair.
+    assert(NJA != JK, "graph-A padding row must not join");
+    assert(NJB != JK, "graph-B padding row must not join");
+    assert(NJA != NJB, "the non-joining terms must not join each other");
     // Both lanes are the SAME genuine pair (a0 x b0, join value JK), but the
     // blinders differ.
     let jc0 = join_value_commitment(JK, JB);
