@@ -979,12 +979,35 @@ fn sparq_solutions(g: &sparq_core::Graph, q: &str) -> Option<Solutions> {
     Some(canon_solutions(rows))
 }
 
-/// A blank node in either engine's ANSWER makes the two multisets incomparable by
-/// construction: SPARQL leaves bnode LABELS implementation-defined, so equal answers
-/// can carry different labels. The generator emits no blank nodes (see `gen_query`),
-/// so this is a guard, not a routine skip.
+/// A blank node in either engine's ANSWER makes the two multisets incomparable BY LABEL:
+/// SPARQL leaves bnode labels implementation-defined, so equal answers can carry
+/// different ones. The generator emits no blank nodes (see `gen_query`), so this is a
+/// guard, not a routine skip — but it is a REAL coverage gap whenever it fires, and
+/// `BindingsCheck::TriageBnode` keeps it visible (see that variant). [OPUS-5] sq-qcnn.7
 fn has_bnode(s: &Solutions) -> bool {
     s.iter().flatten().any(|(_, t)| t.starts_with("_:"))
+}
+
+/// The outcome of a full-binding comparison attempt. Distinguishing the two NON-compared
+/// outcomes is the point: a bnode answer is a coverage GAP (an answer nobody checked),
+/// whereas a `LIMIT`-without-total-order answer is a case that is not differential-testable
+/// at all. Folding them into one number would report the gap as if it were the latter.
+/// [OPUS-5] sq-qcnn.7
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BindingsCheck {
+    /// The full solution multiset was compared.
+    Compared,
+    /// Deliberately NOT comparable: `LIMIT`/`OFFSET` without a total order (the row CHOICE
+    /// is arbitrary, so two conformant engines may legitimately differ), or a result that is
+    /// not a solution sequence.
+    SkippedRowChoice,
+    /// A blank node in either answer. Comparing these needs cross-oracle blank-node
+    /// ISOMORPHISM (canonical labelling), which `sparq-difftest`'s `iso` module now provides
+    /// but which reaches this harness only with the difftest wiring (`sq-qcnn.5`). Until
+    /// then this is routed to an explicitly COUNTED triage bucket — never a silent skip, and
+    /// never folded into `SkippedRowChoice`, so a run that stopped comparing bnode answers
+    /// shows up as a number rather than as green.
+    TriageBnode,
 }
 
 /// The first row present in `a` but not in `b` (as a multiset), for the repro message.
@@ -1008,25 +1031,29 @@ fn first_extra_row(a: &Solutions, b: &Solutions) -> Option<String> {
 /// sub-select binding the wrong term), which is exactly what the `path`, `aggregate`,
 /// `subquery`, `values` and `bind` categories generate.
 ///
-/// `Ok(false)` = deliberately NOT compared (surfaced as `bindings_skipped` in the
-/// summary, so a shard that compared nothing is visible rather than silently green):
+/// `Ok(BindingsCheck::SkippedRowChoice)` = deliberately NOT compared (surfaced as
+/// `bindings_skipped` in the summary, so a shard that compared nothing is visible rather
+/// than silently green):
 ///   * `LIMIT` / `OFFSET` without a total order — SPARQL leaves the row CHOICE
 ///     arbitrary there, so two conformant engines may return different (equally valid)
 ///     rows. The `limit` category is exactly that shape; the `order` category's
 ///     `ORDER BY … LIMIT` is covered by `check_ordered`, which compares the projected
 ///     sequence element-for-element (strictly stronger than this multiset check).
-///   * a non-solutions result, or a blank node in either answer (see `has_bnode`).
-fn check_bindings(g: &sparq_core::Graph, store: &Store, q: &str) -> Result<bool, String> {
+///   * a non-solutions result.
+///
+/// `Ok(BindingsCheck::TriageBnode)` = a blank node in either answer (see `has_bnode`):
+/// its own COUNTED triage bucket, not a silent skip and not a row-choice skip.
+fn check_bindings(g: &sparq_core::Graph, store: &Store, q: &str) -> Result<BindingsCheck, String> {
     if q.contains("LIMIT") || q.contains("OFFSET") {
-        return Ok(false);
+        return Ok(BindingsCheck::SkippedRowChoice);
     }
     let (Some(sparq), Some(oxi)) = (sparq_solutions(g, q), oxi_solutions(store, q)) else {
-        return Ok(false);
+        return Ok(BindingsCheck::SkippedRowChoice);
     };
     if has_bnode(&sparq) || has_bnode(&oxi) {
-        return Ok(false);
+        return Ok(BindingsCheck::TriageBnode);
     }
-    compare_solutions(&sparq, &oxi).map(|()| true)
+    compare_solutions(&sparq, &oxi).map(|()| BindingsCheck::Compared)
 }
 
 /// Multiset equality of two canonicalised solution sets, with a repro-sized diff.
@@ -1083,6 +1110,9 @@ pub fn run(seed_start: u64, count: u64, category: &str) {
     let mut count_mismatch = 0u64;
     let mut bindings_checked = 0u64;
     let mut bindings_skipped = 0u64;
+    // [OPUS-5] sq-qcnn.7: bnode answers get their OWN counter — a coverage gap must be a
+    // visible number, not an entry in the row-choice skip bucket.
+    let mut bindings_triage_bnode = 0u64;
     let mut first_repro: Option<String> = None;
 
     for seed in seed_start..seed_start + count {
@@ -1245,8 +1275,9 @@ pub fn run(seed_start: u64, count: u64, category: &str) {
         // genuine count mismatch has already been reported.
         if sparq_full == oxi {
             match check_bindings(&g, &store, &q) {
-                Ok(true) => bindings_checked += 1,
-                Ok(false) => bindings_skipped += 1,
+                Ok(BindingsCheck::Compared) => bindings_checked += 1,
+                Ok(BindingsCheck::SkippedRowChoice) => bindings_skipped += 1,
+                Ok(BindingsCheck::TriageBnode) => bindings_triage_bnode += 1,
                 Err(detail) => {
                     full_mismatch += 1;
                     report_repro(&mut first_repro, seed, &q, &ttl, &detail);
@@ -1300,6 +1331,7 @@ pub fn run(seed_start: u64, count: u64, category: &str) {
     println!(
         "fuzz[{category}] seeds {seed_start}..{} : checked={checked} skipped(unsupported)={skipped_unsupported} \
          bindings_checked={bindings_checked} bindings_skipped(row-choice)={bindings_skipped} \
+         bindings_triage(bnode)={bindings_triage_bnode} \
          adjudicated(cross-family-eq)={adjudicated_cross_family} adjudicated(bnode-iri)={adjudicated_bnode_iri} \
          full_mismatch={full_mismatch} count_mismatch={count_mismatch}",
         seed_start + count
@@ -1946,8 +1978,12 @@ ex:n3 ex:age 40 . ex:n3 ex:name "nm3" .
                 let _ = gen_graph(&mut rng); // keep the generator's draw sequence
                 let q = gen_query(&mut rng, cat);
                 match check_bindings(&g, &store, &q) {
-                    Ok(true) => compared += 1,
-                    Ok(false) => {}
+                    Ok(BindingsCheck::Compared) => compared += 1,
+                    Ok(BindingsCheck::SkippedRowChoice) => {}
+                    Ok(BindingsCheck::TriageBnode) => panic!(
+                        "category {cat} seed {seed}: the generator emitted a blank-node answer \
+                         — gen_query is documented as bnode-free\n{q}"
+                    ),
                     Err(e) => panic!("category {cat} seed {seed}: {e}\n{q}"),
                 }
             }
@@ -1961,6 +1997,46 @@ ex:n3 ex:age 40 . ex:n3 ex:name "nm3" .
                 );
             }
         }
+    }
+
+    /// [OPUS-5] sq-qcnn.7: a blank-node answer must reach its OWN counted triage bucket,
+    /// NOT the row-choice skip bucket. Those two numbers mean different things — a
+    /// row-choice skip is a case that is not differential-testable at all, a bnode skip is
+    /// an answer nobody compared — and merging them would report the coverage gap as if it
+    /// were the documented non-testable case.
+    ///
+    /// This is the mutation guard for that split: fold `TriageBnode` back into
+    /// `SkippedRowChoice` (or drop the `has_bnode` arm entirely) and this test goes red.
+    #[test]
+    fn a_blank_node_answer_is_counted_triage_not_a_row_choice_skip() {
+        // The generator is bnode-free, so this shape is written by hand: `_:b` is a real
+        // blank node in BOTH engines' answers, with engine-local labels.
+        let ttl = "@prefix ex: <http://ex/> .\n_:b ex:age 5 .\nex:n0 ex:age 6 .\n";
+        let g = sparq_core::Graph::load_str(ttl, "turtle").unwrap();
+        let store = oxi_store(ttl);
+        let bnode_q = "PREFIX ex: <http://ex/>\nSELECT ?s WHERE { ?s ex:age ?a }";
+        // Precondition: both engines really do bind a blank node here, so the assertion
+        // below is about the routing and not about an accidentally-empty answer.
+        assert!(has_bnode(&sparq_solutions(&g, bnode_q).unwrap()));
+        assert!(has_bnode(&oxi_solutions(&store, bnode_q).unwrap()));
+        assert_eq!(
+            check_bindings(&g, &store, bnode_q).unwrap(),
+            BindingsCheck::TriageBnode
+        );
+
+        // The same graph WITHOUT the blank node in the projection is compared normally —
+        // so the bucket is reached by the bnode, not by anything else about this case.
+        let ground_q = "PREFIX ex: <http://ex/>\nSELECT ?a WHERE { ex:n0 ex:age ?a }";
+        assert_eq!(
+            check_bindings(&g, &store, ground_q).unwrap(),
+            BindingsCheck::Compared
+        );
+        // ...and `LIMIT` still lands in the DISTINCT row-choice bucket.
+        let limit_q = "PREFIX ex: <http://ex/>\nSELECT ?a WHERE { ?s ex:age ?a } LIMIT 1";
+        assert_eq!(
+            check_bindings(&g, &store, limit_q).unwrap(),
+            BindingsCheck::SkippedRowChoice
+        );
     }
 
     /// Non-equality shapes are not recognised → the strict Oxigraph differential is
