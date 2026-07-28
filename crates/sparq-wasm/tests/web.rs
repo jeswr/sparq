@@ -1226,3 +1226,105 @@ mod forms {
         );
     }
 }
+
+// ---- [SONNET-4.6] sq-yz27r (#3251): remote-`@context` JSON-LD ingest, in real wasm ----
+//
+// These drive the REAL exported `Store::loadJsonLdWithContexts(text, contexts)` across the
+// JS boundary — specifically the two halves the native `src/jsonld_context.rs` tests cannot
+// reach, because both are wasm-bindgen imports that panic off-wasm: reading the JS
+// `[[url, documentText], …]` `js_sys::Array` argument, and the `JsError` Err arm. The
+// context-resolution semantics themselves are pinned natively; this proves the binding
+// actually exports to, and runs in, wasm. Compiled only under `jsonld-contexts`, as the
+// binding is.
+#[cfg(feature = "jsonld-contexts")]
+mod jsonld_contexts {
+    use super::*;
+    use wasm_bindgen::JsValue;
+
+    const VC_CONTEXT_URL: &str = "https://www.w3.org/2018/credentials/v1";
+    const VC_CONTEXT: &str = r#"{"@context":{
+        "id": "@id",
+        "type": "@type",
+        "VerifiableCredential": "https://www.w3.org/2018/credentials#VerifiableCredential",
+        "credentialSubject": {
+            "@id": "https://www.w3.org/2018/credentials#credentialSubject",
+            "@type": "@id"
+        }
+    }}"#;
+    const VC: &str = r#"{
+        "@context": "https://www.w3.org/2018/credentials/v1",
+        "id": "http://example.org/creds/1",
+        "type": "VerifiableCredential",
+        "credentialSubject": {"id": "http://example.org/subject/alice"}
+    }"#;
+
+    /// Builds the `[[url, documentText], …]` JS array the binding takes.
+    fn pairs(entries: &[(&str, &str)]) -> js_sys::Array {
+        let out = js_sys::Array::new();
+        for (url, document) in entries {
+            let pair = js_sys::Array::new();
+            pair.push(&JsValue::from_str(url));
+            pair.push(&JsValue::from_str(document));
+            out.push(&pair);
+        }
+        out
+    }
+
+    /// The bead's motivating case, end to end in wasm: a credential naming its `@context`
+    /// only by URL loads once the host hands the fetched context across the boundary, and
+    /// the terms it defines are queryable.
+    #[wasm_bindgen_test]
+    fn vc_with_url_context_loads_and_queries() {
+        let store =
+            Store::load_jsonld_with_contexts(VC, pairs(&[(VC_CONTEXT_URL, VC_CONTEXT)])).unwrap();
+        assert_eq!(store.size(), 2, "rdf:type + credentialSubject");
+        assert!(
+            store
+                .ask("ASK { <http://example.org/creds/1> a <https://www.w3.org/2018/credentials#VerifiableCredential> }")
+                .unwrap(),
+            "the `type` term resolved through the host-supplied remote context",
+        );
+    }
+
+    /// Fail-closed across the boundary: an unsupplied `@context` URL surfaces as the
+    /// `JsError` Err arm (a catchable JS throw), not a wasm trap and not a silent
+    /// partial parse.
+    #[wasm_bindgen_test]
+    fn unsupplied_context_is_the_err_arm_not_a_trap() {
+        assert!(
+            Store::load_jsonld_with_contexts(VC, js_sys::Array::new()).is_err(),
+            "an unsupplied remote @context must fail closed",
+        );
+    }
+
+    /// A malformed `contexts` element (not a 2-string array) is rejected rather than
+    /// skipped — the `js_sys` argument-reading path, unreachable from the native tests.
+    #[wasm_bindgen_test]
+    fn malformed_contexts_argument_is_rejected() {
+        let bad = js_sys::Array::new();
+        bad.push(&JsValue::from_str("not a pair"));
+        assert!(
+            Store::load_jsonld_with_contexts(VC, bad).is_err(),
+            "a non-array contexts element must throw",
+        );
+
+        let short = js_sys::Array::new();
+        let pair = js_sys::Array::new();
+        pair.push(&JsValue::from_str(VC_CONTEXT_URL));
+        short.push(&pair);
+        assert!(
+            Store::load_jsonld_with_contexts(VC, short).is_err(),
+            "a pair missing its document text must throw",
+        );
+    }
+
+    /// An inline `@context` still loads with an EMPTY contexts array, so the binding is a
+    /// superset of `load(_, "jsonld")` rather than a separate, stricter path.
+    #[wasm_bindgen_test]
+    fn inline_context_loads_with_no_supplied_documents() {
+        let doc = r#"{"@context":{"name":"http://schema.org/name"},
+                      "@id":"http://example.org/alice","name":"Alice"}"#;
+        let store = Store::load_jsonld_with_contexts(doc, js_sys::Array::new()).unwrap();
+        assert_eq!(store.size(), 1);
+    }
+}

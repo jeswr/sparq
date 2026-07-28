@@ -916,6 +916,17 @@ jobs:
         run: cargo build -p sparq-wasm --target wasm32-unknown-unknown --features shacl,jsonld
       - name: clippy (wasm32 target, jsonld feature, deny warnings)
         run: cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets --features jsonld -- -D warnings
+      # [SONNET-4.6] sq-yz27r (#3251): also build + clippy WITH the opt-in
+      # `jsonld-contexts` feature (the `Store::loadJsonLdWithContexts` binding, which
+      # installs an oxjsonld LoadDocumentCallback over a host-supplied context map so a
+      # VC naming its `@context` by URL parses in-tab). It links `oxjsonld` DIRECTLY
+      # rather than only through sparq-core, so the wasm32 build of that surface needs
+      # its own gate step. NOT in the published bundle (build:wasm) yet; the DEFAULT
+      # bundle stays byte-identical (module is fully cfg'd out).
+      - name: Build sparq-wasm for the browser target (jsonld-contexts feature)
+        run: cargo build -p sparq-wasm --target wasm32-unknown-unknown --features jsonld-contexts
+      - name: clippy (wasm32 target, jsonld-contexts feature, deny warnings)
+        run: cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets --features jsonld-contexts -- -D warnings
       # [FABLE-5] sq-586sh: also build + clippy WITH the opt-in `policy` feature (the
       # sparq-policy ODRL-evaluator wasm32 probe, #890 ask A) so the wasm32 compat this
       # probe established is gate-protected. NOT in the published bundle (build:wasm) —
@@ -1029,6 +1040,13 @@ jobs:
       - name: Headless wasm tests (wasm-pack test --node, jsonld feature)
         working-directory: crates/sparq-wasm
         run: wasm-pack test --node --features jsonld
+      # [SONNET-4.6] sq-yz27r (#3251): run them WITH `jsonld-contexts` so the real
+      # exported `Store::loadJsonLdWithContexts` is driven in a genuine wasm runtime —
+      # the `js_sys::Array` `[[url, documentText], …]` argument-reading path and the
+      # `JsError` fail-closed arm are wasm-bindgen imports the native tests cannot reach.
+      - name: Headless wasm tests (wasm-pack test --node, jsonld-contexts feature)
+        working-directory: crates/sparq-wasm
+        run: wasm-pack test --node --features jsonld-contexts
       # [OPUS-4.8] sq-6qw3 (W-reason): drive the REAL #[wasm_bindgen] Reasoner exports
       # (crates/sparq-reason-wasm/tests/web.rs) in a genuine wasm runtime, in BOTH feature
       # states — the default suite, then with the opt-in `explain` feature so the `why()`
