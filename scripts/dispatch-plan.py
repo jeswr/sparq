@@ -56,8 +56,25 @@ GLOBAL = _ready.GLOBAL
 # `<target>/scripts/dispatch-plan.py`, never `ready-issues.py`. Defining them only in the readiness
 # engine left both attributes `None` here, so the probe returned "planner declares no inertness
 # contract", the field was never stamped onto any occupancy row, and the whole carve-out was a
-# no-op that printed `NOT STAMPED` in a plain (unannotated) line. MEASURED on the live snapshot
-# (2026-07-28, 1721 issue rows / 91 open PRs): frontier 0 without these two names, 7 with them.
+# no-op that printed `NOT STAMPED` in a plain (unannotated) line.
+#
+# WHAT THAT IS WORTH — stated as the two things that are actually DURABLE, because an earlier
+# revision of this comment hard-coded a frontier delta and the number did not survive the week.
+#   1. WITHOUT these names the effect is CATEGORICAL, not statistical: `inert_aware` refuses,
+#      nothing is ever stamped onto an occupancy row, and the carve-out cannot fire on any board.
+#   2. WITH them, what is guaranteed is the RELEASE, not a frontier gain: an `area:` key held only
+#      by attested machine parks is released, and a key retaining any holder that is not itself an
+#      attested machine park is NOT.
+# The frontier delta is neither of those. It is a PER-TICK YIELD — a released key moves the
+# frontier only if some candidate happened to be waiting on exactly that key — so it is a property
+# of the board on the day, not of this code. Three verbatim replays of the registry's readiness
+# step over the same week disagreed on it (+7, +2, +3) while agreeing on the release semantics
+# every time; that spread IS the finding, and it is why no number is pinned here.
+# For a CURRENT figure, read the registry's own per-tick census rather than trusting this comment:
+#   `parked-release census <repo>: stamped|NOT STAMPED (...); N of M open PR(s) attested inert;
+#    K machine-parked row(s) release their areas: ...`
+#   `partition census <repo>: candidates= frontier= partition-deferred= ...`
+#
 # Bound to the engine's own objects, never re-declared: a second literal here could drift from the
 # value `occupies_area` actually consults, which is the two-legs-disagree defect in miniature.
 INERT_FIELD = _ready.INERT_FIELD
