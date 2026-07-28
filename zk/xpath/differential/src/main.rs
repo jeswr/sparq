@@ -45,12 +45,18 @@
 //! ## Usage
 //!
 //! ```text
-//! sparq-xpath-differential --output PATH        # generate the oracle Noir test file
-//! sparq-xpath-differential --inject-fault PATH  # same file, one expected value corrupted
+//! sparq-xpath-differential --output PATH                   # generate the oracle Noir test file
+//! sparq-xpath-differential --inject-fault PATH             # every test corrupted, one value each
+//! sparq-xpath-differential --inject-fault-in TEST_FN PATH  # exactly ONE test corrupted
+//! sparq-xpath-differential --list-fault-sites              # the faultable test fns, one per line
 //! ```
 //!
-//! `--inject-fault` is the non-vacuity self-test: `nargo test` on that file MUST fail. If
-//! it passes, the harness is not wired to the circuit and every green run is meaningless.
+//! Fault injection is the non-vacuity self-test: `nargo test` on a corrupted file MUST
+//! fail. If it passes, the harness is not wired to the circuit and every green run is
+//! meaningless. The driver script proves that **per test function** — it runs one
+//! `--inject-fault-in` variant per name from `--list-fault-sites` and requires each to
+//! fail — because a single all-faults run only ever proves that SOME test failed. See
+//! [`FaultMode`].
 
 use sparq_core::Graph;
 use std::fmt::Write as FmtWrite;
@@ -433,10 +439,88 @@ fn asciify_comments(src: &str) -> String {
 // Generation
 // ---------------------------------------------------------------------------
 
-/// The line that `--inject-fault` corrupts, plus its corrupted form.
+/// One line fault injection corrupts, plus its corrupted form and the generated Noir
+/// `#[test]` it lives in.
 struct FaultSite {
+    /// The `fn differential_oracle_*` this site sits inside. One site per test function.
+    test_fn: String,
     original: String,
     faulty: String,
+}
+
+/// Which of the registered fault sites [`generate_noir_file`] actually corrupts.
+///
+/// The self-test's whole claim is "a deliberately wrong expected value makes `nargo test`
+/// fail, therefore the generated file is really wired to the circuit". Corrupting the
+/// whole file at once cannot establish that per test function: a `nargo test` run reports
+/// ONE exit status for the whole file, and nonzero there says only that SOME test failed,
+/// so nine sections that had drifted into something incapable of failing (a corpus that
+/// emptied, an expected value computed from the very call it asserts) would hide behind
+/// the one section that still works.
+///
+/// [`FaultMode::Only`] is what makes the claim per-function. A variant carrying exactly
+/// one fault is byte-identical to the oracle file everywhere else, and that oracle file
+/// has just been run green — so if the variant's `nargo test` fails, it failed *because
+/// of that one corrupted value*. Running one variant per site is therefore a proof
+/// obligation discharged once per test function.
+#[derive(Clone, Debug, PartialEq)]
+enum FaultMode {
+    /// No corruption: the real oracle file.
+    None,
+    /// One expected value corrupted in EVERY generated test (`--inject-fault`). Useful
+    /// for eyeballing the whole fault set in one file; NOT sufficient on its own as the
+    /// non-vacuity proof, for the reason above.
+    All,
+    /// One expected value corrupted in exactly the named test (`--inject-fault-in`).
+    Only(String),
+}
+
+/// The fault sites available for injection — **one per generated Noir `#[test]`**.
+#[derive(Default)]
+struct Faults {
+    sites: Vec<FaultSite>,
+}
+
+impl Faults {
+    /// Offer a candidate site for `test_fn`; the FIRST offer per test function wins, so a
+    /// generator loop can offer on every row without special-casing its first iteration.
+    fn offer(&mut self, test_fn: &str, original: &str, faulty: String) {
+        assert_ne!(original, faulty, "fault site for {test_fn} is not actually corrupted");
+        if self.sites.iter().any(|s| s.test_fn == test_fn) {
+            return;
+        }
+        self.sites.push(FaultSite {
+            test_fn: test_fn.to_string(),
+            original: original.to_string(),
+            faulty,
+        });
+    }
+}
+
+/// The `fn differential_oracle_*` names actually emitted into `src`, in file order.
+fn emitted_test_fns(src: &str) -> Vec<String> {
+    src.lines()
+        .filter_map(|l| l.strip_prefix("fn ")?.strip_suffix("() {"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The LIVE assertion lines of `src`, keyed by the generated `#[test]` they sit in.
+/// Used by the non-vacuity guards, which are the only consumers that need the grouping.
+#[cfg(test)]
+fn live_assertions_by_test(src: &str) -> Vec<(String, Vec<String>)> {
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    for line in src.lines() {
+        if let Some(name) = line.strip_prefix("fn ").and_then(|l| l.strip_suffix("() {")) {
+            out.push((name.to_string(), Vec::new()));
+        } else if line.trim_start().starts_with("assert(") {
+            out.last_mut()
+                .expect("an assertion was emitted outside any test function")
+                .1
+                .push(line.trim().to_string());
+        }
+    }
+    out
 }
 
 /// Running assertion count, so the generated file can state its own coverage and an
@@ -450,7 +534,7 @@ struct Counts {
     spec_reference: usize,
 }
 
-fn header(out: &mut String, inject_fault: bool) {
+fn header(out: &mut String, mode: &FaultMode) {
     writeln!(out, "// [SONNET-4.6] GENERATED by zk/xpath/differential/src/main.rs — DO NOT EDIT BY HAND.").unwrap();
     writeln!(out, "// Regenerate: bash zk/xpath/scripts/run_differential_harness.sh --update-committed").unwrap();
     writeln!(out, "//").unwrap();
@@ -489,10 +573,22 @@ fn header(out: &mut String, inject_fault: bool) {
     writeln!(out, "// indexes BYTE positions in the logical content (its own documented caveat; bead").unwrap();
     writeln!(out, "// sq-hjvte tracks codepoint-positional substring) while SPARQL SUBSTR is").unwrap();
     writeln!(out, "// codepoint-indexed. They agree exactly on single-byte content and only there.").unwrap();
-    if inject_fault {
-        writeln!(out, "//").unwrap();
-        writeln!(out, "// !! INJECT-FAULT BUILD: one expected value has been deliberately corrupted.").unwrap();
-        writeln!(out, "// !! `nargo test` on this file MUST FAIL. A pass means the harness is vacuous.").unwrap();
+    match mode {
+        FaultMode::None => {}
+        FaultMode::All => {
+            writeln!(out, "//").unwrap();
+            writeln!(out, "// !! INJECT-FAULT BUILD: ONE expected value in EVERY test below has been").unwrap();
+            writeln!(out, "// !! deliberately corrupted. `nargo test` on this file MUST FAIL -- but a").unwrap();
+            writeln!(out, "// !! single failure only proves SOME test can fail, which is why the driver").unwrap();
+            writeln!(out, "// !! script runs one --inject-fault-in variant per test function instead.").unwrap();
+        }
+        FaultMode::Only(name) => {
+            writeln!(out, "//").unwrap();
+            writeln!(out, "// !! INJECT-FAULT VARIANT for `{}`: ONE expected value in that test has", name).unwrap();
+            writeln!(out, "// !! been deliberately corrupted; every other test below is the real oracle,").unwrap();
+            writeln!(out, "// !! which has already run green. `nargo test` on this file MUST FAIL, and it").unwrap();
+            writeln!(out, "// !! can only fail because of that one value.").unwrap();
+        }
     }
     writeln!(out).unwrap();
     writeln!(out, "use xpath::{{").unwrap();
@@ -508,7 +604,7 @@ fn header(out: &mut String, inject_fault: bool) {
     writeln!(out).unwrap();
 }
 
-fn gen_string_length(out: &mut String, g: &Graph, c: &mut Counts, fault: &mut Option<FaultSite>) {
+fn gen_string_length(out: &mut String, g: &Graph, c: &mut Counts, f: &mut Faults) {
     writeln!(out, "/// fn:string-length — CODEPOINTS, not bytes, and stopping at the NUL terminator.").unwrap();
     writeln!(out, "/// Oracle: SPARQL `STRLEN(<literal>)`.").unwrap();
     writeln!(out, "#[test]").unwrap();
@@ -520,11 +616,12 @@ fn gen_string_length(out: &mut String, g: &Graph, c: &mut Counts, fault: &mut Op
         writeln!(out, "    let s{i}: str<{}> = {};", item.cap, noir_str(item.value, item.cap)).unwrap();
         let line = format!("    assert(string_length::<{}>(s{i}) == {expected});", item.cap);
         // The first non-zero-length case is the fault target: +1 makes it provably wrong.
-        if fault.is_none() && expected > 0 {
-            *fault = Some(FaultSite {
-                original: line.clone(),
-                faulty: format!("    assert(string_length::<{}>(s{i}) == {});", item.cap, expected + 1),
-            });
+        if expected > 0 {
+            f.offer(
+                "differential_oracle_string_length",
+                &line,
+                format!("    assert(string_length::<{}>(s{i}) == {});", item.cap, expected + 1),
+            );
         }
         writeln!(out, "{line}").unwrap();
         c.assertions += 1;
@@ -533,7 +630,7 @@ fn gen_string_length(out: &mut String, g: &Graph, c: &mut Counts, fault: &mut Op
     writeln!(out).unwrap();
 }
 
-fn gen_string_predicates(out: &mut String, g: &Graph, c: &mut Counts) {
+fn gen_string_predicates(out: &mut String, g: &Graph, c: &mut Counts, f: &mut Faults) {
     // (Noir fn, SPARQL builtin)
     for (nfn, builtin) in [("starts_with", "STRSTARTS"), ("ends_with", "STRENDS"), ("contains", "CONTAINS")] {
         writeln!(out, "/// fn:{} — oracle: SPARQL `{builtin}`.", nfn.replace('_', "-")).unwrap();
@@ -545,12 +642,15 @@ fn gen_string_predicates(out: &mut String, g: &Graph, c: &mut Counts) {
             writeln!(out, "    // {expr} -> {expected}").unwrap();
             writeln!(out, "    let h{i}: str<{}> = {};", hay.cap, noir_str(hay.value, hay.cap)).unwrap();
             writeln!(out, "    let n{i}: str<{}> = {};", needle.cap, noir_str(needle.value, needle.cap)).unwrap();
-            writeln!(
-                out,
-                "    assert({nfn}::<{}, {}>(h{i}, n{i}) == {expected});",
-                hay.cap, needle.cap
-            )
-            .unwrap();
+            let line =
+                format!("    assert({nfn}::<{}, {}>(h{i}, n{i}) == {expected});", hay.cap, needle.cap);
+            // Flipping the expected boolean is provably wrong whichever way it went.
+            f.offer(
+                &format!("differential_oracle_{nfn}"),
+                &line,
+                format!("    assert({nfn}::<{}, {}>(h{i}, n{i}) == {});", hay.cap, needle.cap, !expected),
+            );
+            writeln!(out, "{line}").unwrap();
             c.assertions += 1;
         }
         writeln!(out, "}}").unwrap();
@@ -558,7 +658,7 @@ fn gen_string_predicates(out: &mut String, g: &Graph, c: &mut Counts) {
     }
 }
 
-fn gen_substring(out: &mut String, g: &Graph, c: &mut Counts) {
+fn gen_substring(out: &mut String, g: &Graph, c: &mut Counts, f: &mut Faults) {
     writeln!(out, "/// fn:substring — ASCII-only (see the byte-vs-codepoint scope limit above).").unwrap();
     writeln!(out, "/// Oracle: SPARQL `SUBSTR`, cross-checked against the F&O 5.4.3 window. The `start < 1`").unwrap();
     writeln!(out, "/// rows are SPEC-REFERENCE (see the header): sparq-engine shifts the window, so their").unwrap();
@@ -592,7 +692,15 @@ fn gen_substring(out: &mut String, g: &Graph, c: &mut Counts) {
         writeln!(out, "    // {expr} -> {spec_answer:?}").unwrap();
         writeln!(out, "    let ss{i}: str<{cap}> = {};", noir_str(value, cap)).unwrap();
         writeln!(out, "    let ({bind}, len{i}) = substring::<{cap}, {cap}>(ss{i}, {start}, {});", length.max(0)).unwrap();
-        writeln!(out, "    assert(len{i} == {});", spec_answer.len()).unwrap();
+        let len_line = format!("    assert(len{i} == {});", spec_answer.len());
+        // The returned length is asserted on every row, empty ones included, so it is
+        // always available as this section's fault target.
+        f.offer(
+            "differential_oracle_substring",
+            &len_line,
+            format!("    assert(len{i} == {});", spec_answer.len() + 1),
+        );
+        writeln!(out, "{len_line}").unwrap();
         for (j, byte) in spec_answer.as_bytes().iter().enumerate() {
             writeln!(out, "    assert(out{i}[{j}] == {byte});").unwrap();
         }
@@ -601,7 +709,7 @@ fn gen_substring(out: &mut String, g: &Graph, c: &mut Counts) {
     writeln!(out).unwrap();
 }
 
-fn gen_divide(out: &mut String, g: &Graph, c: &mut Counts) {
+fn gen_divide(out: &mut String, g: &Graph, c: &mut Counts, f: &mut Faults) {
     writeln!(out, "/// op:numeric-divide on two xs:integer operands — the DECIMAL quotient (F&O 4.2.6),").unwrap();
     writeln!(out, "/// implemented as the documented double approximation, and DISTINCT from").unwrap();
     writeln!(out, "/// op:numeric-integer-divide (sq-3x7dl.4 de-aliasing). Oracle: SPARQL double").unwrap();
@@ -617,7 +725,18 @@ fn gen_divide(out: &mut String, g: &Graph, c: &mut Counts) {
         let expr = format!("xsd:double(\"{a}\") / xsd:double(\"{b}\")");
         let bits = oracle_double_bits(g, &expr, (a as f64) / (b as f64));
         writeln!(out, "    // {expr} -> bits {}", hex64(bits)).unwrap();
-        writeln!(out, "    assert(numeric_divide_int_as_double({a}, {b}).to_bits() == {});", hex64(bits)).unwrap();
+        let line =
+            format!("    assert(numeric_divide_int_as_double({a}, {b}).to_bits() == {});", hex64(bits));
+        // Flip the low mantissa bit: still a valid double literal, never the right one.
+        f.offer(
+            "differential_oracle_numeric_divide",
+            &line,
+            format!(
+                "    assert(numeric_divide_int_as_double({a}, {b}).to_bits() == {});",
+                hex64(bits ^ 1)
+            ),
+        );
+        writeln!(out, "{line}").unwrap();
         c.assertions += 1;
         // idiv MUST stay a distinct, truncating-toward-zero path.
         writeln!(out, "    assert(numeric_divide_int({a}, {b}) == {});", a / b).unwrap();
@@ -627,7 +746,7 @@ fn gen_divide(out: &mut String, g: &Graph, c: &mut Counts) {
     writeln!(out).unwrap();
 }
 
-fn gen_round(out: &mut String, g: &Graph, c: &mut Counts) {
+fn gen_round(out: &mut String, g: &Graph, c: &mut Counts, f: &mut Faults) {
     writeln!(out, "/// fn:round for xs:double — ties toward +INFINITY (F&O 4.4.3), sign of zero").unwrap();
     writeln!(out, "/// preserved. Oracle: SPARQL `ROUND`, bit-cross-checked against the F&O reference. The").unwrap();
     writeln!(out, "/// -0.5 row is SPEC-REFERENCE (see the header): sparq-engine loses the sign of a zero").unwrap();
@@ -659,19 +778,27 @@ fn gen_round(out: &mut String, g: &Graph, c: &mut Counts) {
         }
         c.assertions += 1;
         writeln!(out, "    // {expr} -> {spec:?}").unwrap();
-        writeln!(
-            out,
+        let line = format!(
             "    assert(round_double(XsdDouble::from_bits({})).to_bits() == {});",
             hex64(input.to_bits()),
             hex64(spec.to_bits())
-        )
-        .unwrap();
+        );
+        f.offer(
+            "differential_oracle_round_double",
+            &line,
+            format!(
+                "    assert(round_double(XsdDouble::from_bits({})).to_bits() == {});",
+                hex64(input.to_bits()),
+                hex64(spec.to_bits() ^ 1)
+            ),
+        );
+        writeln!(out, "{line}").unwrap();
     }
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 }
 
-fn gen_mixed_compare(out: &mut String, g: &Graph, c: &mut Counts) {
+fn gen_mixed_compare(out: &mut String, g: &Graph, c: &mut Counts, f: &mut Faults) {
     writeln!(out, "/// Mixed xs:integer <-> xs:double comparison. Every integer here is OUTSIDE the i8").unwrap();
     writeln!(out, "/// range the pre-sq-3x7dl.5 circuit truncated to (which made `256 = 0.0` TRUE — a").unwrap();
     writeln!(out, "/// wrong FILTER verdict an adversarial prover could satisfy). Oracle: SPARQL").unwrap();
@@ -688,7 +815,13 @@ fn gen_mixed_compare(out: &mut String, g: &Graph, c: &mut Counts) {
         for (nfn, op) in [("eq", "="), ("lt", "<"), ("gt", ">"), ("le", "<="), ("ge", ">=")] {
             let fwd = oracle_bool(g, &format!("xsd:integer(\"{n}\") {op} xsd:double(\"{d}\")"));
             writeln!(out, "    // {n} {op} {d} -> {fwd}").unwrap();
-            writeln!(out, "    assert(compare_int_double_{nfn}({n}, d{i}) == {fwd});").unwrap();
+            let line = format!("    assert(compare_int_double_{nfn}({n}, d{i}) == {fwd});");
+            f.offer(
+                "differential_oracle_mixed_compare",
+                &line,
+                format!("    assert(compare_int_double_{nfn}({n}, d{i}) == {});", !fwd),
+            );
+            writeln!(out, "{line}").unwrap();
             c.assertions += 1;
 
             let rev = oracle_bool(g, &format!("xsd:double(\"{d}\") {op} xsd:integer(\"{n}\")"));
@@ -701,7 +834,7 @@ fn gen_mixed_compare(out: &mut String, g: &Graph, c: &mut Counts) {
     writeln!(out).unwrap();
 }
 
-fn gen_cast(out: &mut String, g: &Graph, c: &mut Counts) {
+fn gen_cast(out: &mut String, g: &Graph, c: &mut Counts, f: &mut Faults) {
     writeln!(out, "/// xs:integer(xs:double) — TRUNCATES toward zero (F&O 17.1.1); it does NOT round.").unwrap();
     writeln!(out, "/// Oracle: SPARQL `xsd:integer(xsd:double(...))`.").unwrap();
     writeln!(out, "#[test]").unwrap();
@@ -717,19 +850,27 @@ fn gen_cast(out: &mut String, g: &Graph, c: &mut Counts) {
             input.trunc()
         );
         writeln!(out, "    // {expr} -> {expected}").unwrap();
-        writeln!(
-            out,
+        let line = format!(
             "    assert(cast_double_to_integer(XsdDouble::from_bits({})).unwrap() == {expected});",
             hex64(input.to_bits())
-        )
-        .unwrap();
+        );
+        f.offer(
+            "differential_oracle_double_to_integer_cast",
+            &line,
+            format!(
+                "    assert(cast_double_to_integer(XsdDouble::from_bits({})).unwrap() == {});",
+                hex64(input.to_bits()),
+                expected + 1
+            ),
+        );
+        writeln!(out, "{line}").unwrap();
         c.assertions += 1;
     }
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 }
 
-fn gen_datetime(out: &mut String, g: &Graph, c: &mut Counts) {
+fn gen_datetime(out: &mut String, g: &Graph, c: &mut Counts, f: &mut Faults) {
     writeln!(out, "/// Pre-1970 xs:dateTime. The epoch is a SIGNED microsecond count; the pre-sq-3x7dl.7").unwrap();
     writeln!(out, "/// circuit cast it through u64 and corrupted every extracted component. Oracle:").unwrap();
     writeln!(out, "/// SPARQL YEAR/MONTH/DAY/HOURS/MINUTES/SECONDS over the parsed lexical.").unwrap();
@@ -764,7 +905,13 @@ fn gen_datetime(out: &mut String, g: &Graph, c: &mut Counts) {
                 oracle_int(g, &expr)
             };
             assert_eq!(got, declared, "corpus component for `{expr}` disagrees with the oracle");
-            writeln!(out, "    assert({nfn}(dt{i}) == {got});").unwrap();
+            let line = format!("    assert({nfn}(dt{i}) == {got});");
+            f.offer(
+                "differential_oracle_datetime_pre_1970",
+                &line,
+                format!("    assert({nfn}(dt{i}) == {});", got + 1),
+            );
+            writeln!(out, "{line}").unwrap();
             c.assertions += 1;
         }
     }
@@ -780,22 +927,22 @@ fn gen_datetime(out: &mut String, g: &Graph, c: &mut Counts) {
     writeln!(out).unwrap();
 }
 
-/// Build the complete Noir test file.
-fn generate_noir_file(inject_fault: bool) -> (String, Counts) {
+/// Build the complete Noir test file, corrupting the sites `mode` selects.
+fn generate_noir_file(mode: &FaultMode) -> (String, Counts) {
     let g = oracle_graph();
     let mut out = String::with_capacity(64 * 1024);
     let mut counts = Counts::default();
-    let mut fault: Option<FaultSite> = None;
+    let mut faults = Faults::default();
 
-    header(&mut out, inject_fault);
-    gen_string_length(&mut out, &g, &mut counts, &mut fault);
-    gen_string_predicates(&mut out, &g, &mut counts);
-    gen_substring(&mut out, &g, &mut counts);
-    gen_divide(&mut out, &g, &mut counts);
-    gen_round(&mut out, &g, &mut counts);
-    gen_mixed_compare(&mut out, &g, &mut counts);
-    gen_cast(&mut out, &g, &mut counts);
-    gen_datetime(&mut out, &g, &mut counts);
+    header(&mut out, mode);
+    gen_string_length(&mut out, &g, &mut counts, &mut faults);
+    gen_string_predicates(&mut out, &g, &mut counts, &mut faults);
+    gen_substring(&mut out, &g, &mut counts, &mut faults);
+    gen_divide(&mut out, &g, &mut counts, &mut faults);
+    gen_round(&mut out, &g, &mut counts, &mut faults);
+    gen_mixed_compare(&mut out, &g, &mut counts, &mut faults);
+    gen_cast(&mut out, &g, &mut counts, &mut faults);
+    gen_datetime(&mut out, &g, &mut counts, &mut faults);
 
     writeln!(
         out,
@@ -810,29 +957,75 @@ fn generate_noir_file(inject_fault: bool) -> (String, Counts) {
     // fault injection so the site match below is against the final text.
     out = asciify_comments(&out);
 
-    if inject_fault {
-        let site = fault.expect("no fault site captured — inject-fault would be a no-op");
-        let replaced = out.replacen(&site.original, &site.faulty, 1);
-        assert_ne!(replaced, out, "fault injection matched nothing");
+    // EVERY generated `#[test]` must have offered a site, or the self-test would silently
+    // stop covering a whole section — exactly the vacuity it exists to rule out.
+    let emitted = emitted_test_fns(&out);
+    for name in &emitted {
+        assert!(
+            faults.sites.iter().any(|s| &s.test_fn == name),
+            "generated test `{name}` offered no fault site: it could never be proved non-vacuous"
+        );
+    }
+    assert_eq!(
+        faults.sites.len(),
+        emitted.len(),
+        "a fault site was registered for a test function that is not in the generated file"
+    );
+
+    let selected: Vec<&FaultSite> = match mode {
+        FaultMode::None => Vec::new(),
+        FaultMode::All => faults.sites.iter().collect(),
+        // An unknown name is a hard error, never an uncorrupted file: the driver script
+        // reads `nargo test` PASSING as "this test function is vacuous", so silently
+        // injecting nothing would report the wrong verdict from the wrong evidence.
+        FaultMode::Only(name) => {
+            let site = faults.sites.iter().find(|s| &s.test_fn == name).unwrap_or_else(|| {
+                let known: Vec<&str> = faults.sites.iter().map(|s| s.test_fn.as_str()).collect();
+                panic!("no fault site for test `{}` — known sites: {}", name, known.join(", "))
+            });
+            vec![site]
+        }
+    };
+
+    for site in selected {
+        assert_eq!(
+            out.matches(&site.original).count(),
+            1,
+            "fault site for {} is not a unique line; injection would corrupt the wrong row",
+            site.test_fn
+        );
+        out = out.replacen(&site.original, &site.faulty, 1);
         eprintln!(
-            "inject-fault: corrupted one expected value\n  was: {}\n  now: {}",
+            "inject-fault: corrupted one expected value in {}\n  was: {}\n  now: {}",
+            site.test_fn,
             site.original.trim(),
             site.faulty.trim()
         );
-        out = replaced;
     }
 
     (out, counts)
+}
+
+/// The generated `#[test]`s that carry a fault site, in file order — the list the driver
+/// script loops over. Taking it from the generator (rather than hard-coding it in the
+/// script) means a renamed or dropped section changes the loop instead of quietly
+/// shrinking the set of test functions the self-test proves anything about.
+fn fault_site_names() -> Vec<String> {
+    let (src, _) = generate_noir_file(&FaultMode::None);
+    emitted_test_fns(&src)
 }
 
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
+const USAGE: &str = "usage: sparq-xpath-differential (--output PATH | --inject-fault PATH \
+                     | --inject-fault-in TEST_FN PATH | --list-fault-sites)";
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut path: Option<String> = None;
-    let mut inject_fault = false;
+    let mut mode = FaultMode::None;
 
     let mut i = 1;
     while i < args.len() {
@@ -843,12 +1036,27 @@ fn main() {
             }
             "--inject-fault" => {
                 i += 1;
-                inject_fault = true;
+                mode = FaultMode::All;
                 path = Some(args.get(i).expect("--inject-fault needs a PATH").clone());
+            }
+            "--inject-fault-in" => {
+                i += 1;
+                let name = args.get(i).expect("--inject-fault-in needs TEST_FN PATH").clone();
+                mode = FaultMode::Only(name);
+                i += 1;
+                path = Some(args.get(i).expect("--inject-fault-in needs TEST_FN PATH").clone());
+            }
+            // The driver script's loop bound: printed to stdout, one name per line, so the
+            // per-test-function self-test covers exactly what the generator emitted.
+            "--list-fault-sites" => {
+                for name in fault_site_names() {
+                    println!("{}", name);
+                }
+                return;
             }
             other => {
                 eprintln!("unknown argument: {other}");
-                eprintln!("usage: sparq-xpath-differential (--output PATH | --inject-fault PATH)");
+                eprintln!("{}", USAGE);
                 std::process::exit(2);
             }
         }
@@ -856,11 +1064,11 @@ fn main() {
     }
 
     let path = path.unwrap_or_else(|| {
-        eprintln!("usage: sparq-xpath-differential (--output PATH | --inject-fault PATH)");
+        eprintln!("{}", USAGE);
         std::process::exit(2);
     });
 
-    let (content, counts) = generate_noir_file(inject_fault);
+    let (content, counts) = generate_noir_file(&mode);
     if let Some(parent) = std::path::Path::new(&path).parent() {
         std::fs::create_dir_all(parent).expect("create output directory");
     }
@@ -913,7 +1121,7 @@ mod tests {
     /// every other check stayed green. This test is that guard.
     #[test]
     fn spec_reference_edges_reach_the_circuit_as_live_assertions() {
-        let (src, counts) = generate_noir_file(false);
+        let (src, counts) = generate_noir_file(&FaultMode::None);
 
         // No assertion may be emitted commented out, in any section.
         let smothered: Vec<&str> =
@@ -1011,8 +1219,8 @@ mod tests {
     /// golden file's drift guard depends on this.
     #[test]
     fn generation_is_deterministic() {
-        let (a, _) = generate_noir_file(false);
-        let (b, _) = generate_noir_file(false);
+        let (a, _) = generate_noir_file(&FaultMode::None);
+        let (b, _) = generate_noir_file(&FaultMode::None);
         assert_eq!(a, b);
     }
 
@@ -1022,8 +1230,12 @@ mod tests {
     /// because a violation only shows up in the (toolchain-gated) `nargo` leg otherwise.
     #[test]
     fn generated_comments_are_ascii_but_literals_keep_their_multibyte() {
-        for inject_fault in [false, true] {
-            let (src, _) = generate_noir_file(inject_fault);
+        for mode in [
+            FaultMode::None,
+            FaultMode::All,
+            FaultMode::Only("differential_oracle_substring".to_string()),
+        ] {
+            let (src, _) = generate_noir_file(&mode);
             for line in src.lines() {
                 if line.trim_start().starts_with("//") {
                     assert!(line.is_ascii(), "noirc rejects this comment: {}", line);
@@ -1040,29 +1252,144 @@ mod tests {
         assert_eq!(ascii_comment("// STRLEN(\"\u{e9}\")"), "// STRLEN(\"\\u{e9}\")");
     }
 
-    /// `--inject-fault` must actually change exactly one assertion, and the corrupted
-    /// line must be a live (uncommented) one — a fault hidden in a comment would make the
-    /// non-vacuity self-test pass for the wrong reason.
+    /// `--inject-fault` must change exactly one LIVE assertion in EVERY generated
+    /// `#[test]`, and never a commented-out one — i.e. every test function has a fault
+    /// site, so [`fault_site_names`] can hand the driver script a variant for each.
+    ///
+    /// This test is about the fault SITES, not about the non-vacuity claim: a corrupted
+    /// assertion is only textual evidence that the line changed, not that the change
+    /// reaches the circuit. The per-function claim is discharged by the script's
+    /// per-variant runs, whose isolation is pinned here by
+    /// [`inject_fault_in_corrupts_only_the_named_test`].
     #[test]
-    fn inject_fault_corrupts_exactly_one_live_assertion() {
-        let (clean, counts) = generate_noir_file(false);
-        let (faulty, _) = generate_noir_file(true);
+    fn inject_fault_corrupts_one_live_assertion_in_every_generated_test() {
+        let (clean, counts) = generate_noir_file(&FaultMode::None);
+        let (faulty, _) = generate_noir_file(&FaultMode::All);
         assert_ne!(clean, faulty);
         assert!(counts.assertions > 100, "corpus shrank unexpectedly: {}", counts.assertions);
 
-        // Compare only LIVE assertions: the fault-injected header carries two extra
-        // warning lines, so a positional whole-file diff would report every line.
-        let live = |src: &str| -> Vec<String> {
-            src.lines()
-                .map(str::trim)
-                .filter(|l| l.starts_with("assert("))
-                .map(str::to_string)
-                .collect()
-        };
-        let (a, b) = (live(&clean), live(&faulty));
-        assert_eq!(a.len(), counts.assertions, "every live assertion must be countable");
-        assert_eq!(a.len(), b.len(), "fault injection must not add or drop an assertion");
-        let differing: Vec<_> = a.iter().zip(b.iter()).filter(|(x, y)| x != y).collect();
-        assert_eq!(differing.len(), 1, "fault injection must change exactly one live assertion");
+        // Compare only LIVE assertions, grouped by test function: the fault-injected
+        // header carries two extra warning lines, so a positional whole-file diff would
+        // report every line.
+        let (a, b) = (live_assertions_by_test(&clean), live_assertions_by_test(&faulty));
+        assert_eq!(a.len(), 10, "the generated file must still carry 10 test functions");
+        assert_eq!(
+            a.iter().map(|(_, l)| l.len()).sum::<usize>(),
+            counts.assertions,
+            "every live assertion must be countable"
+        );
+        assert_eq!(
+            a.iter().map(|(n, _)| n).collect::<Vec<_>>(),
+            b.iter().map(|(n, _)| n).collect::<Vec<_>>(),
+            "fault injection must not add, drop or reorder a test function"
+        );
+
+        for ((name, before), (_, after)) in a.iter().zip(b.iter()) {
+            assert_eq!(
+                before.len(),
+                after.len(),
+                "fault injection must not add or drop an assertion in {name}"
+            );
+            let differing = before.iter().zip(after.iter()).filter(|(x, y)| x != y).count();
+            assert_eq!(differing, 1, "expected exactly one corrupted assertion in {name}");
+        }
+    }
+
+    /// No fault may be hidden in a comment: a corrupted comment cannot fail `nargo test`,
+    /// so the self-test would go green on the fault run and be read as "the harness is
+    /// vacuous" — the wrong verdict, from the wrong evidence.
+    #[test]
+    fn every_fault_site_is_a_live_assertion() {
+        let (faulty, _) = generate_noir_file(&FaultMode::All);
+        let live: Vec<String> =
+            live_assertions_by_test(&faulty).into_iter().flat_map(|(_, l)| l).collect();
+        let (g, mut counts, mut faults) = (oracle_graph(), Counts::default(), Faults::default());
+        let mut sink = String::new();
+        gen_string_length(&mut sink, &g, &mut counts, &mut faults);
+        gen_string_predicates(&mut sink, &g, &mut counts, &mut faults);
+        gen_substring(&mut sink, &g, &mut counts, &mut faults);
+        gen_divide(&mut sink, &g, &mut counts, &mut faults);
+        gen_round(&mut sink, &g, &mut counts, &mut faults);
+        gen_mixed_compare(&mut sink, &g, &mut counts, &mut faults);
+        gen_cast(&mut sink, &g, &mut counts, &mut faults);
+        gen_datetime(&mut sink, &g, &mut counts, &mut faults);
+
+        assert_eq!(faults.sites.len(), 10, "one fault site per generated test function");
+        for site in &faults.sites {
+            assert!(
+                site.original.trim_start().starts_with("assert("),
+                "fault site for {} is not an assertion: {}",
+                site.test_fn,
+                site.original
+            );
+            assert!(
+                live.contains(&site.faulty.trim().to_string()),
+                "the corrupted line for {} never reached the generated file",
+                site.test_fn
+            );
+        }
+    }
+
+    /// `--list-fault-sites` is the driver script's loop bound, so it must name EVERY
+    /// generated `#[test]`. A name missing here is a test function the script would never
+    /// build a variant for — it would run green forever with nothing proving it can go red.
+    #[test]
+    fn fault_site_names_lists_every_generated_test() {
+        let (clean, _) = generate_noir_file(&FaultMode::None);
+        let names = fault_site_names();
+        assert!(!names.is_empty(), "an empty list makes the self-test loop a no-op");
+        assert_eq!(names, emitted_test_fns(&clean), "the loop bound must be the emitted tests");
+    }
+
+    /// `--inject-fault-in NAME` must corrupt exactly one live assertion, inside NAME, and
+    /// leave every other test function byte-identical to the oracle file.
+    ///
+    /// That isolation is what makes the script's per-variant run a proof about NAME: the
+    /// oracle file has just run green, the variant differs from it in one expected value
+    /// inside NAME, so a failing `nargo test` on the variant can only be NAME failing. An
+    /// all-faults run cannot support that step — its nonzero exit says only that SOME test
+    /// failed, which nine vacuous sections would satisfy just as well as ten live ones.
+    #[test]
+    fn inject_fault_in_corrupts_only_the_named_test() {
+        let (clean, _) = generate_noir_file(&FaultMode::None);
+        let baseline = live_assertions_by_test(&clean);
+        let names = fault_site_names();
+
+        for name in &names {
+            let (variant, _) = generate_noir_file(&FaultMode::Only(name.clone()));
+            let after = live_assertions_by_test(&variant);
+            assert_eq!(
+                baseline.iter().map(|(n, _)| n).collect::<Vec<_>>(),
+                after.iter().map(|(n, _)| n).collect::<Vec<_>>(),
+                "injecting into {} changed the set of test functions",
+                name
+            );
+
+            for ((fn_name, before), (_, now)) in baseline.iter().zip(after.iter()) {
+                assert_eq!(
+                    before.len(),
+                    now.len(),
+                    "injecting into {} added or dropped an assertion in {}",
+                    name,
+                    fn_name
+                );
+                let differing = before.iter().zip(now.iter()).filter(|(x, y)| x != y).count();
+                let expected = usize::from(fn_name == name);
+                assert_eq!(
+                    differing, expected,
+                    "injecting into {} changed {} assertions in {}",
+                    name, differing, fn_name
+                );
+            }
+        }
+    }
+
+    /// A name the generator does not emit must be a hard error, never a silently clean
+    /// file: the script reads a PASSING `nargo test` on a variant as "that test function
+    /// is vacuous", so an uncorrupted variant would report a false failure of the harness.
+    #[test]
+    #[should_panic(expected = "no fault site for test")]
+    fn inject_fault_in_rejects_an_unknown_test() {
+        generate_noir_file(&FaultMode::Only("differential_oracle_not_a_test".to_string()));
     }
 }
