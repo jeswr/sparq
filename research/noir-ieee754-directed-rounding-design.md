@@ -89,7 +89,11 @@ fixed-RNE entry points as thin wrappers:
 ```rust
 // Noir, in the generated per-width float type. [verify-at-impl] against the face repo's
 // actual codegen.nr shape and its existing round_to_integral MODE constants.
-fn add_rm<let MODE: u8>(self, other: Self) -> Self { /* mode-threaded kernel */ }
+fn add_rm<let MODE: u8>(self, other: Self) -> Self {
+    // §3.5: MODE's domain is closed — reject anything outside the five constants at
+    // compile time before threading it into the kernel.
+    /* mode-threaded kernel */
+}
 fn add(self, other: Self) -> Self { self.add_rm::<RNE>(other) }   // unchanged behaviour
 ```
 
@@ -134,6 +138,37 @@ If the existing encoding cannot express `roundTiesToAway`, extend it additively;
 renumber an existing constant (that would silently change the meaning of any call already
 written against a literal).
 
+### 3.5 Invalid `MODE` — the domain is closed and must fail closed
+
+`MODE` is carried as `u8` for want of a narrower Noir generic, but its domain is exactly
+the five constants of §3.4. `add_rm::<255>` is nonetheless expressible by any caller, and
+nothing in §4 assigns it a meaning — a kernel written as an `if`/`else if`/`else` chain
+would hand it whichever arm falls through (truncation, or the RNE overflow path), i.e. a
+silently wrong result on a public entry point of a library sitting inside the ZK
+query-proof trust base. Reusing named constants is a convention, not an enforcement.
+
+**Requirement.** Every mode-generic entry point — `add_rm`/`sub_rm`/`mul_rm`/`div_rm`, and
+the mode-threaded `round_pack_normalized{,_u64}` kernels beneath them — must **reject any
+`MODE` outside {`RNE`, `RNA`, `RNDZ`, `RNDU`, `RNDD`} at compile time**, using the face
+repo's supported comptime-assertion mechanism (`std::static_assert` over the comptime
+generic, or an equivalent `comptime` block). [verify-at-impl] which mechanism that Noir
+version actually provides. If none does, the fallback is a plain `assert` on the comptime
+constant, which is unsatisfiable for an out-of-domain mode; it should constant-fold away for
+a valid one by the same mechanism §6 relies on — and, exactly as §6 insists, that is
+measured by the byte-identical RNE gate evidence, not assumed. Fail-closed in either form;
+never fall through to a default arm.
+
+A **closed comptime representation** — a mode type whose only inhabitants are the five
+constants — is strictly preferable to raw `u8` and should be taken if the face repo's Noir
+version admits it as a generic argument. [verify-at-impl] It is not assumed here only
+because §3.4's existing `round_to_integral` encoding is `u8`-shaped, and splitting that
+namespace would cost more than it buys; if the closed form is adopted, §3.4's "one
+namespace" rule means `round_to_integral` moves to it in the same change.
+
+**Both kernels share one validated domain.** The `u64` work kernel and the `u128`/`Field`
+wide kernel must use the same constant set and the same rejection, so that no mode can be
+accepted by one width and fall through in another.
+
 ---
 
 ## 4. Decision D2 — kernel threading
@@ -157,7 +192,10 @@ bit `l`, the round (guard) bit `r`, the sticky bit `s`, and the result sign bit 
 | `RNDD` | `roundTowardNegative` | `inexact` AND `sign_bit` |
 
 The `RNE` row is exactly the existing behaviour, so the `RNE` instantiation must reduce to
-the current constraint set (§6).
+the current constraint set (§6). This table and §4.2's are **exhaustive** over the closed
+domain of §3.5: neither may carry a fall-through `else` arm standing in for "some other
+mode" — an unlisted `MODE` is rejected at compile time, never defaulted to truncation or to
+the RNE path.
 
 ### 4.2 Overflow — the per-mode table (IEEE 754-2019 §7.4)
 
@@ -282,9 +320,16 @@ suite is corpus **plus** targeted invariants **plus** a self-consistency propert
 8. **Mutation check** — inverting the increment predicate for one mode (e.g. swapping the
    `RNDU`/`RNDD` sign test) must turn at least one test **red**. A suite that stays green
    under that mutation is vacuous and does not discharge these criteria.
-9. **Soundness surface unchanged** — the `sq-3x7dl.1` width-bound assertions in `new()`
-   intact; no new `unconstrained` block; the forge-map's conclusions unaffected.
-10. **Docs** — the face repo's README "Known gaps" entry removed (not reworded), and
+9. **Invalid-mode rejection (fail-closed)**, per §3.5 — a compile-failure test per
+   mode-generic entry point, in **both** kernels, showing that an out-of-domain
+   instantiation such as `add_rm::<255>` does not compile. [verify-at-impl] the face repo's
+   harness for asserting a compile failure. *Paired mutation:* with the domain check
+   deleted, that test must go red — the invalid instantiation would then compile and pick
+   up some arm's behaviour, which is precisely the defect being guarded. A criterion that
+   stays green without the check is vacuous.
+10. **Soundness surface unchanged** — the `sq-3x7dl.1` width-bound assertions in `new()`
+    intact; no new `unconstrained` block; the forge-map's conclusions unaffected.
+11. **Docs** — the face repo's README "Known gaps" entry removed (not reworded), and
     `TESTING.md`'s deprecated-rounding-test backlog reconciled against what actually ported.
     [verify-at-impl] the filed count of 37 against the face repo before claiming closure.
 
@@ -314,8 +359,9 @@ Suggested phasing, each phase independently valuable and independently revertibl
 - **Phase A — oracle only (zero risk).** Extend `generate_float_vectors.py` with the five
   modes and emit the vectors. No kernel change, no gate change; the vectors are inert until
   Phase B consumes them, and they are the ground truth Phase B is graded against.
-- **Phase B — kernel threading.** §4 in both kernels behind the §3 comptime `MODE`, with
-  §6's byte-identical RNE gate evidence and §7's criteria 1–9.
+- **Phase B — kernel threading.** §4 in both kernels behind the §3 comptime `MODE` (with
+  §3.5's fail-closed domain check), with §6's byte-identical RNE gate evidence and §7's
+  criteria 1–10.
 - **Phase C — closure.** Port the deprecated rounding tests, clear the README gap entry,
   optionally add the `rustc_apfloat` cross-check, then bump the `sparq_ieee754` tag in
   `zk/compose/compose_core/Nargo.toml` here and re-run the forge suite + gate snapshot.
