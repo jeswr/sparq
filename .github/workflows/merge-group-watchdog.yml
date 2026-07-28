@@ -21,9 +21,11 @@
 # below the tick interval so it never costs an extra tick. Minutes are offset from
 # auto-arm.yml's and rearm-sweeper.yml's crons so the three sweeps do not start together.
 #
-# BASE RATE, measured rather than assumed: 2 zero-dispatch refs in 211 merge groups over
-# 2026-07-25 -> 07-28 (~0.95%) — #4534 and #4331 — each costing ~60 min at the head of
-# the queue. This is a recurring platform event, not a one-off.
+# BASE RATE, measured rather than assumed: THREE zero-dispatch refs on three
+# consecutive days — #4331 (07-26), #4534 (07-27), #4709 (07-28) — against 211 merge
+# groups sampled over the same period. Each held position 1 for ~60 min. #4709 was
+# caught live by this script's own `sweep --dry-run` while its four siblings in the
+# same chain all had 8 suites. This is a recurring platform event, not a one-off.
 name: merge-group watchdog
 
 on:

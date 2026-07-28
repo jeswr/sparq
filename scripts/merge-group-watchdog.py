@@ -114,10 +114,22 @@ PROGRAM = "merge-group-watchdog"
 # the activity `branch_creation` timestamp -> earliest check-suite `created_at`:
 #     min 1 s | p50 2 s | p90 3 s | p99 4 s | MAX 4 s   (whole-second quantisation)
 # There is NO tail between 4 s and 3600 s. The failure mode is CATEGORICAL, not slow:
-# a group either gets its suites within 1-4 s or gets none at all, ever. Two refs in
-# that population got none — `pr-4534-3cc1bf82…` (2026-07-27, lifetime 60m27s) and
-# `pr-4331-f6be7767…` (2026-07-26, lifetime 61m07s) — a base rate of 2/211 ~ 0.95%,
-# both reaped by the 60-minute ruleset timeout.
+# a group either gets its suites within 1-4 s or gets none at all, ever.
+#
+# THREE confirmed zero-dispatch refs, one per day, all reaped by the 60-minute timeout:
+#     pr-4331-f6be7767…  2026-07-26  head f44083c7  lifetime 61m07s  suites 0
+#     pr-4534-3cc1bf82…  2026-07-27  head 1bfb0174  lifetime 60m27s  suites 0
+#     pr-4709-63dfb7a0…  2026-07-28  head 98204656  held pos 1 48m   suites 0
+# #4709 was caught LIVE at 05:55Z by this script's own `sweep --dry-run` and cleared by
+# hand. Its siblings in the same chain that day discriminate the signal perfectly:
+#     pr-4709 -> 0 suites / 0 runs        <-- dead
+#     pr-4714 -> 8 suites / 95 runs       (ref built 05:33:08Z, first suite 05:33:10Z)
+#     pr-4724 -> 8 suites / 54 runs
+#     pr-4729 -> 8 suites / 69 runs
+#     pr-4731 -> 8 suites / 93 runs
+# Zero against eight, every time. Cost of that one dead ref: #4714 and #4729 were both
+# already MERGEABLE behind it and could not land, four PRs stacked, and sparq merged
+# ONE PR in sixty minutes.
 #
 # 120 s is 30x the measured MAXIMUM and 60x the median, and sits strictly below the
 # 300 s cron interval, so it never costs an extra tick: any ref that is going to get
@@ -188,6 +200,14 @@ QUEUE_QUERY = """query($owner:String!,$name:String!,$branch:String!,$first:Int!)
   }
 }"""
 
+# THE REMEDIATION CALL, and the three ways to get it wrong (each cost real time):
+#   * `gh pr merge <N> --disable-auto` does NOT dequeue an already-queued PR — it
+#     answers "is already queued to merge" and leaves the entry in place.
+#   * `DequeuePullRequestInput` names its field `id`, NOT `pullRequestId`, and that
+#     field wants the PULL REQUEST node id (`PR_…`) — not the merge-queue ENTRY id
+#     (`MQE_…`), which is the natural wrong answer given the field name. (Enqueue, in
+#     the other direction, really is `pullRequestId`.)
+#   * `MergeQueueEntry` has no `headOid` field; the group head is `headCommit{oid}`.
 DEQUEUE_MUTATION = """mutation($id:ID!){
   dequeuePullRequest(input:{id:$id}){ mergeQueueEntry{ id } }
 }"""
