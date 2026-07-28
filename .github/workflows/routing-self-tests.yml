@@ -20,6 +20,13 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "orchestration/routing.toml"
+      # [OPUS-5] sparq#4819 — the names jeswr/agent-account-registry reads off
+      # dispatch-plan.py. `dispatch-plan.py --self-test` asserts this file against the
+      # loaded module, so a PR that edits ONLY the contract (adding a name, changing a
+      # wire value) must run that assertion. Without this entry the contract file would be
+      # the one input to the gate that can change without the gate running — which is the
+      # silent-invisibility class it exists to close.
+      - "orchestration/registry-contract.toml"
       - "scripts/routing-validate.py"
       - "scripts/route-resolve.py"
       - "scripts/dispatch-plan.py"
@@ -84,6 +91,13 @@ on:
     branches: [main]
     paths:
       - "orchestration/routing.toml"
+      # [OPUS-5] sparq#4819 — the names jeswr/agent-account-registry reads off
+      # dispatch-plan.py. `dispatch-plan.py --self-test` asserts this file against the
+      # loaded module, so a PR that edits ONLY the contract (adding a name, changing a
+      # wire value) must run that assertion. Without this entry the contract file would be
+      # the one input to the gate that can change without the gate running — which is the
+      # silent-invisibility class it exists to close.
+      - "orchestration/registry-contract.toml"
       - "scripts/routing-validate.py"
       - "scripts/route-resolve.py"
       - "scripts/dispatch-plan.py"
