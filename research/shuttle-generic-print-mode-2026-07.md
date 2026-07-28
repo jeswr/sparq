@@ -149,14 +149,28 @@ never runtime surprises:
   - the overlapping alternatives are **provably mutually exclusive** — the §5 disjointness check,
     applied to emit patterns rather than oracle branches — so at most one site can have fired and
     consumption is determined; or
-  - the chosen derivation is discharged by **reconstruction plus full forward replay**: recover the
-    bindings, re-run the production's forward semantics, and require the replay to reproduce
-    *every* quad that production emits. This is what catches the jointly-required case, because a
-    one-site reading leaves the other site's quads unproduced by the replay.
+  - the overlap is **witness-distinguishable** — the two sites' patterns can never be instantiated
+    to the *same* quad, so a firing that required both necessarily leaves behind a quad the one-site
+    reading does not produce — **and** the chosen reading is discharged by **reconstruction plus
+    full forward replay of the whole derivation instance**: recover the bindings, re-run the forward
+    semantics of every production in the reconstructed derivation, discharge every *mandatory*
+    `emit` clause of each — including the clauses reached through the caller context, not only the
+    production that happens to own the matched quad — and require the replay to produce exactly the
+    set of quads the reading consumed, no more and no fewer.
 
-  Anything else is a **generation-time rejection naming both clauses**. The compiler must not fall
-  back on the transaction machinery's incidental behaviour (whichever matcher runs first wins), and
-  must not treat a bare `@prefer` as a discharge.
+  **Replay alone is not a discharge, and the identical-quad case is why.** When two jointly-required
+  sites emit the byte-identical quad, RDF set semantics erase the multiplicity that replay would
+  have to observe: a reading that fires only one of them replays to the very same dataset, so
+  "reproduce every quad this production emits" passes. Reproducing the chosen production's quads
+  validates *that production locally*; it witnesses neither the site that was elided nor the caller
+  context that may have made the elided site mandatory — so the one-site reading can print text that
+  is not in the grammar's language even though the residual empties. Such an overlap is admissible
+  only if the required-site provenance is reconstructible some other way (a co-emitted quad the two
+  sites do *not* share, or a `fresh` node whose §1 linearity condition forces both firings). Absent
+  that, and for every other overlap that is neither provably exclusive nor witness-distinguishable,
+  the answer is a **generation-time rejection naming both clauses** — the conservative default, not
+  a runtime check. The compiler must not fall back on the transaction machinery's incidental
+  behaviour (whichever matcher runs first wins), and must not treat a bare `@prefer` as a discharge.
 
 ### 2. `emit` → residual matcher; `fresh` → linear blank match
 
@@ -279,9 +293,11 @@ modules or gen-rs"* — is the right instinct: the delta is the v0.2 vocabulary 
 - **Ambiguity is not always decidable.** The disjointness and fresh-node linearity checks above are
   decidable for the ground-slot patterns the v0.1 surface admits; they are not a general decision
   procedure, and emission overlap is not resolvable by annotation at all — only by proved
-  exclusivity or by replay. Where a check cannot be discharged — including where replay cannot rule
-  out a jointly-required overlap — the compiler must fail and name the clauses, rather than
-  defaulting to source order, or to a `@prefer`, and hoping.
+  exclusivity, or by whole-derivation replay of an overlap whose sites are witness-distinguishable.
+  An overlap whose sites can produce the **identical** quad is not resolvable by replay either,
+  because set semantics erase the multiplicity replay would have to observe. Where a check cannot be
+  discharged — including every jointly-required overlap replay cannot rule out — the compiler must
+  fail and name the clauses, rather than defaulting to source order, or to a `@prefer`, and hoping.
 - **Performance is unmeasured and unclaimed.** A compiled matcher chain doing nested transaction
   rollback over a subject index has a different cost profile from the hand-written skeleton's
   early returns. sparq vendors this generated code into a benchmarked crate, so the generic path
@@ -310,7 +326,8 @@ non-turtle-spine grammar prints"* — is the right gate. Phasing it:
    skeleton retained as the default. Gate: the generic path's output is byte-identical to the
    skeleton's on all four shaclc fixture directories, and the suite stays at **362/362**.
 3. **Third grammar.** Gate: it prints, and its verdicts are right — including the negative ones,
-   so the overlap cases below reject or replay-validate at generation time rather than printing.
+   so the overlap cases below are rejected at generation time, or replay-validated when printing,
+   rather than printed.
 4. **gen-rs mirror**, then delete both skeletons. Gate: cross-backend identity
    (`packages/gen-rs/test/conformance.sh`) plus byte-identical regeneration of sparq's two
    vendored artifacts. Only after step 4 is the double-maintenance actually retired — a generic
@@ -333,8 +350,12 @@ emit with a `print { … ?? d }` default, an `oracle` with disjoint branches, an
 obligations: a production with a non-recoverable output slot, and two productions that emit the
 same quad, in both variants — one where the two are provably mutually exclusive (must compile, and
 the derivation it picks must be replay-validated) and one where forward execution requires *both*
-emit sites (must be a generation-time rejection naming both clauses, not a `@prefer`-resolved
-pick, and not a silent first-matcher-wins consumption). Its value is *coverage of the inversion*,
+emit sites *and the two patterns instantiate to the **identical** quad*. That second variant must be
+a generation-time rejection naming both clauses: not a `@prefer`-resolved pick, not a silent
+first-matcher-wins consumption, and — the point of choosing an identical-quad example — **not
+admitted by replay**, since a one-site reading of it replays to the same dataset and so passes any
+replay check. Only the §1 witness-distinguishability precondition rejects it, which is exactly the
+guard this case exists to keep red. Its value is *coverage of the inversion*,
 and it should be described that way rather than dressed up as a syntax anyone wants. The
 demonstration is a
 real syntax, and the best-sized real candidate is an **OWL 2 Manchester Syntax class-frame
