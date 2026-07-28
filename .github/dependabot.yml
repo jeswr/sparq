@@ -70,6 +70,31 @@ updates:
         update-types:
           - "version-update:semver-minor"
           - "version-update:semver-major"
+      # [OPUS-5] #4572: do NOT let Dependabot version-bump the SLSA trusted builder.
+      # `slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml`
+      # is referenced by TAG in all three isolated-provenance lanes (release.yml#provenance,
+      # release.yml#provenance-artifacts, dist.yml#provenance) — the ONE documented exception
+      # to this repo's SHA-pin convention, because the generator derives the trusted-builder
+      # identity baked into the provenance (the identity `slsa-verifier` matches a consumer
+      # policy against) from its own `@ref`. Moving that tag changes the builder identity every
+      # downstream verification policy is written against, so it is a TRUST decision taken
+      # deliberately on a cadence — see compliance/slsa/trusted-builder-pin-policy.md and the
+      # quarterly tick in .github/workflows/slsa-builder-pin-review.yml — not a batched bump
+      # swept into the `actions-minor-patch` group.
+      #
+      # The trailing `*` matters: Dependabot may surface a reusable-workflow reference under
+      # either `owner/repo` or the full `owner/repo/.github/workflows/<file>.yml` name, and the
+      # glob has to cover both forms or the ignore silently does nothing.
+      #
+      # The `update-types` list is REQUIRED, not decoration: a bare `dependency-name` entry with
+      # no `update-types` ignores SECURITY updates too, which is the opposite of what we want
+      # here. Listing the three `version-update:*` types silences routine bumps while leaving
+      # advisory-driven security updates flowing.
+      - dependency-name: "slsa-framework/slsa-github-generator*"
+        update-types:
+          - "version-update:semver-patch"
+          - "version-update:semver-minor"
+          - "version-update:semver-major"
 
   # ---- npm (the @jeswr/sparq wasm package) ----
   - package-ecosystem: npm
