@@ -110,6 +110,16 @@ upstream signal. "Un-examined" = the program has read the pass exists (survey §
 but has not derived a measured optimisation in it. Every candidate here is a
 *hypothesis to be measured*, not a claimed win.
 
+> **STALE — do not cite this table as-is.** [OPUS-5] Bead `sq-mtolx` (P3, §5.3)
+> examined these stages at code level against noir HEAD `e22cd89b` and found five
+> rows wrong: `value_merger.rs` has **moved**; `try_merge_only_changed_indices`
+> **no longer exists** (deleted by upstream #8142, re-introduction tracked as
+> #8145, *not* #5501); PR #11512 shipped a different transform than its changelog
+> line claims; and the two ACIR-gen rows are **already examined** (§10.6/§10.7 of
+> the program record). The corrected table, plus the finding that most of this
+> surface sits on the *unconstrained* path and therefore cannot reduce proving
+> cost at all, is in `research/noir-optimization-new-opportunities.md` §1–§2.
+
 | Stage | Un-examined site (file · pass) | Pre-existing signal | Why plausible |
 |---|---|---|---|
 | Loops | `ssa/opt/loop_invariant.rs` (LICM, ~4.5k LOC), `mod.rs:284` | issues #10439 / #10438 (LICM `ArrayGet` hoisting too pessimistic) | Loop bodies dominate loop-heavy circuits; hoisting one bounds check out of an N-iteration loop scales |
@@ -245,6 +255,15 @@ maintainer's explicit "LOW PRIORITY, defer until little else to do" on the paren
    gates` win via the P1 harness, spawn a measured-PR child bead **under
    `sq-uuvac`** (not from a paper bead). Produces the paper's "new opportunities"
    section — the "surface further optimisations while writing" mandate.
+   **Code-level half DONE (2026-07-28), measured half BLOCKED, bead stays OPEN** —
+   record `research/noir-optimization-new-opportunities.md`. Eight surviving
+   candidates + nine honest negative results + a §8 draft of this outline's §5.
+   **Zero child beads spawned**: no `bb` on the box and P1 (`sq-i50o4`) has not
+   landed, so the "reproduces a `bb gates` win" promotion gate was unmeetable and
+   promoting unmeasured hypotheses would launder the program's own rule 7. That
+   record's §7 also revises the P1 spec — upstream already ships
+   `gates_report.sh` (both metrics), the Brillig channels, `--skip-ssa-pass` and
+   `ssa_pass_impact.rs`, so P1 should wrap them rather than rebuild them.
 4. **`sq-ome8p` — P4: survey-methodology + related-work sections.** The
    reproducible survey protocol + upstream etiquette as the methodological
    contribution; a lit survey of compiler optimisation for ZK/arithmetic circuits

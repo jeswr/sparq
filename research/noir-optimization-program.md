@@ -614,3 +614,70 @@ passed, no snapshot moved) with three added tests that **fail on HEAD and pass
 patched**, and the AST-fuzzer `arbtest` targets green — but none of that
 exercises the both-inner-conditions-false case, so it is not evidence for row 4. It is **not carried in this repo** — no
 upstream PR is proposed, and none should be until a program produces the shape.
+
+### 10.9 `sq-mtolx` (paper P3, gap-analysis / new-opportunities) — source-level pass (2026-07-28)
+
+> 🤖 **SPARQ agent** [OPUS-5]. Full record:
+> `noir-optimization-new-opportunities.md` (analysed against noir `e22cd89b`).
+> This is a *paper* bead (`sq-1j5ow` child), but its output feeds this epic: it is
+> the only pass that has examined the SSA loop/array/memory stages and the whole
+> ACVM layer at code level.
+
+The bead's job was to examine the un-examined stages, then spawn a measured-PR
+child bead **under this epic** for each candidate reproducing a `bb gates` win.
+The examination is delivered; **no bead was spawned**, because the same empirical
+blocker as §10.5–10.7 applies (**no `bb`**, so gate counts are unreachable) *and*
+the paper's P1 harness bead `sq-i50o4` has not landed. Promoting unmeasured
+hypotheses into this epic would launder §6 rule 7, so the record carries eight
+candidate **specs** (each gated on a named kill-test) instead. `sq-mtolx` stays
+**open**.
+
+The structural result is more useful than the candidate list, and it explains the
+shape of §7's ranking after the fact:
+
+| finding | consequence |
+|---|---|
+| a whole Brillig function is **one** ACIR opcode (`acir/src/circuit/opcodes.rs:138-152`) | every unconstrained-path optimisation is a witness-generation win, **not** a proving-cost win |
+| ACIR has no loops — full unrolling is mandatory, enforced by an error (`unrolling.rs:190-213`) | loop unswitching (#6631) and IV elimination (#6629) are **vacuous on the constrained path**; the IV is already a constant folded on insertion |
+| a surviving reference is a compile error / ICE, never a bigger circuit (`acir/mod.rs:531-541`) | on ACIR, memory promotion is a **legalization obligation, not an optimisation**; the mem2reg "cross-block" row is vacuous post-flatten |
+| the compiler has **no ACIR cost model** (`ir/target_cost.rs:1-9`) | every unrolling / basic-conditional profitability heuristic is denominated in Brillig opcodes |
+| `expand_signed_math.rs` / `expand_signed_checks.rs` make **zero** bound queries, while the adjacent `remove_bit_shifts` does — and `checked_to_unchecked` excludes signed outright (`:46-49`) | the surviving constrained-path class is **worst-case-always expansion narrowed by a provable bound** — the same class as every prior measured win here |
+
+**Additions to the §7 "explicitly rejected" list** (documented so they are not
+re-derived): loop unswitching and IV elimination on the ACIR path (subsumed);
+both on the Brillig path (no proving-cost impact); `flatten_basic_conditionals`
+improvements (Brillig-gated, `basic_conditional.rs:280-284`); the ACVM #10109
+on-the-fly term merge (already exists in `Expression::add_mul`; the size channel
+is closed by pass ordering ⇒ **compile-time only**); CSE key-normalisation "gaps"
+(commutativity/scaling/sign already handled, affine-offset vacuous over a
+constant-free key space); `check_u128_mul_overflow`'s small-constant guard
+(already at its theoretical maximum). Two candidates are rejected as **unsound**
+and are better paper material than the survivors: restoring the partial array
+merge (#8145 — the alias obligation is not dischargeable in this IR) and
+persisting the CSE cache across transformer passes (a hit emits no defining
+opcode while `MergeExpressionsOptimizer` deletes opcodes between passes ⇒
+under-constrained circuit).
+
+Three corrections this epic should absorb. **Row 5's site has moved** —
+`value_merger.rs` is now at `ssa/ir/dfg/simplify/value_merger.rs`, and
+`try_merge_only_changed_indices` **no longer exists** (deleted by upstream #8142;
+re-introduction tracked as **#8145**, not #5501). Row 5's cited precedent
+**PR #11512 shipped a different transform** than `CHANGELOG.md:67` claims — cite
+`array_set_window_optimization.rs:14-17`, not the changelog line. And the
+`MergeExpressionsOptimizer` claim in §10.6 needs two refinements: the two-use
+refund is not restricted to CSAT intermediates, and its cache is circuit-global
+**within a pass** but rebuilt on each of the ≤3 passes.
+
+The surviving candidates, none measured, cheapest-first:
+`check_u128_mul_overflow`'s single-constant branch → a predicated `RangeCheck`
+(unconditionally sound, no bound needed); the `array_set_window_optimization`
+64-element cap (`:71-72`, bites array-heavy corpora); looping `optimize_internal`
+to the fixpoint it documents but never runs (`optimizers/mod.rs:34-35`, `:46`);
+the bound-aware `Div→0`/`Lt→1` folds behind the signed narrowing (**opus tier** —
+blocked on an invariant the compiler maintains by construction but asserts
+nowhere); unifying the two sign-bit lowerings so they CSE; pushing `ArrayGet`
+through `IfElse` (the literal #5501, sound by construction, verified absent, but
+plausibly subsumed by the fold-then-DIE tail); widening LICM's in-bounds prover
+to affine IV derivations; and ACVM CSE candidate formation by subset matching
+(upstream TODO `csat.rs:240-242`, issue **#10192** — a different and more valuable
+issue than the #10109 the paper's gap table cited).
