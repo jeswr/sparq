@@ -241,11 +241,28 @@ CRON_DELIVERY_FLOOR = 0.60
 # of each lane's configured concurrency and per-leg duration, and there is no observed
 # positive to validate such a model against. That is a research task, not a threshold.
 #
-# WHAT WOULD CHANGE THIS. A run observed with `status=queued` and a genuine per-attempt
-# wait — i.e. `/attempts/{n}` showing `run_started_at - created_at` materially above zero.
-# If one appears, the estimator to use is the per-attempt one (point 1), NOT the run-level
-# field. Until then an alarm here would answer "would we know if we were starved?" with a
-# confident yes that the measurements above do not support.
+# 4. AND THE STRONGEST REASON, FOUND LAST: THE FIELDS CANNOT EXPRESS THE QUANTITY.
+#    This is not "no positive was observed" — the data source does not carry enqueue time
+#    at all, so no threshold on it could ever have worked.
+#      attempt-1 runs, `run_started_at - created_at`: EXACTLY 0.0 on all 44,123 of them
+#        (35,070 sparq + 9,053 registry). Not approximately zero -- identically zero.
+#      re-run attempts, `run_started_at - attempt.created_at`, N=67 (58 sparq + 9 registry):
+#        NEGATIVE on every single one -- sparq {-1: 41, -2: 15, -4: 1, -5: 1},
+#        registry {-1: 7, -2: 2}. A queue wait cannot be negative.
+#    A negative value means the attempt record's `created_at` is stamped at or AFTER the
+#    run starts, not when it is enqueued; and an exactly-zero run-level difference across
+#    44,123 runs is what you see when the two fields are set together rather than
+#    measuring an interval between two events. So BOTH the run-level pair and the
+#    per-attempt pair are unable to express "how long did this wait to be picked up".
+#    The all-zero corpus in point 2 is therefore not evidence that no queueing happened;
+#    it is evidence that these fields do not report queueing.
+#
+# WHAT WOULD CHANGE THIS -- and it is NOT a better threshold. Do not re-derive a detector
+# from `created_at`/`run_started_at` on either the run or the attempt: point 4 shows they
+# cannot carry the signal at any threshold. It would take a DIFFERENT data source that
+# actually timestamps enqueue -- a webhook capturing `workflow_job` `queued` -> `in_progress`
+# transitions, or self-reported timing from inside the job -- plus at least one observed
+# positive from it before a threshold means anything.
 
 # --- M3: execution overrun ---------------------------------------------------------
 # Threshold = max(EXEC_OVERRUN_MULTIPLE x p90(completed durations for this workflow+event),
