@@ -50,6 +50,19 @@ resolve = _route.resolve
 roleless_ready = _ready.roleless_ready
 ready_candidates = _ready.ready_candidates
 GLOBAL = _ready.GLOBAL
+# [OPUS-5] sparq#4819 — THE SAME SILENT-INVISIBILITY CLASS AS `roleless_ready`, THREE LINES UP.
+# The registry's `inert_aware` probe reads `getattr(planner, "INERT_FIELD")` and
+# `getattr(planner, "MACHINE_PARK_PR_LABEL")` off THIS module — it loads
+# `<target>/scripts/dispatch-plan.py`, never `ready-issues.py`. Defining them only in the readiness
+# engine left both attributes `None` here, so the probe returned "planner declares no inertness
+# contract", the field was never stamped onto any occupancy row, and the whole carve-out was a
+# no-op that printed `NOT STAMPED` in a plain (unannotated) line. MEASURED on the live snapshot
+# (2026-07-28, 1721 issue rows / 91 open PRs): frontier 0 without these two names, 7 with them.
+# Bound to the engine's own objects, never re-declared: a second literal here could drift from the
+# value `occupies_area` actually consults, which is the two-legs-disagree defect in miniature.
+INERT_FIELD = _ready.INERT_FIELD
+MACHINE_PARK_PR_LABEL = _ready.MACHINE_PARK_PR_LABEL
+is_provably_inert = _ready.is_provably_inert
 
 try:
     import tomllib
@@ -243,6 +256,94 @@ def _self_test():
                  for r in plan]
     chk("no planned row names a deprecated alias",
         sorted({m for r in _all_rows for m in r["model_chain"]} & _dep), [])
+
+    # --- [OPUS-5] sparq#4819 THE CROSS-REPO INTERLOCK, REPLAYED AGAINST THIS FILE ----------------
+    # WHY THIS EXISTS, AND WHY IT IS HERE AND NOT IN ready-issues.py. The registry's dispatch.yml
+    # `readiness` step does `load_dispatch(<target>/scripts/dispatch-plan.py)` and then probes THE
+    # LOADED MODULE. ready-issues.py's own suite proved the ENGINE honours the carve-out and was
+    # 9/9 green while this module exported neither name, so the registry read
+    # `getattr(planner, "INERT_FIELD", None) is None`, printed "planner declares no inertness
+    # contract", and stamped nothing — the whole two-PR change was a measured no-op. A guard on
+    # the wrong module is not a guard.
+    #
+    # `_probe` below is the registry's `inert_aware` VERBATIM (jeswr/agent-account-registry
+    # .github/workflows/dispatch.yml, step `id: readiness`), reproduced rather than approximated:
+    # what must hold is the behaviour of the other repo's code against this file, and an
+    # approximation of it can agree with us while the real one refuses.
+    #
+    # THE NAMES ARE STRING LITERALS ON PURPOSE. They are the REGISTRY's wire names, not ours to
+    # rename: dispatch.yml hard-codes "INERT_FIELD"/"MACHINE_PARK_PR_LABEL", so renaming the
+    # Python constant here — however consistently across sparq's own prod and tests — silently
+    # returns the pipeline to NOT STAMPED. Reading them through `getattr(module, "<literal>")` is
+    # what makes such a rename RED here instead of green-and-dead in production.
+    _WIRE_NAMES = ("INERT_FIELD", "MACHINE_PARK_PR_LABEL")
+
+    def _as_registry_loads_it():
+        """This file, loaded byte-for-byte the way `load_dispatch` loads it — not `globals()`.
+
+        A `globals()` read would pass on a module that only defines the name at self-test time;
+        the registry gets whatever `exec_module` leaves on the module object, so that is what is
+        probed."""
+        here = os.path.dirname(os.path.abspath(__file__))
+        spec = importlib.util.spec_from_file_location(
+            "target_dispatch_plan", os.path.join(here, "dispatch-plan.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def _probe(planner):
+        """VERBATIM `inert_aware` from the registry's readiness step. Returns (field, why)."""
+        field = getattr(planner, "INERT_FIELD", None)
+        label = getattr(planner, "MACHINE_PARK_PR_LABEL", None)
+        if not isinstance(field, str) or not isinstance(label, str):
+            return None, "planner declares no inertness contract"
+        area = "area:__inert_probe__"
+        rival = {"number": 999000012, "state": "OPEN", "open_blockers": 0,
+                 "labels": ["status:ready", "priority:P0", "role:impl", area]}
+        holder = {"number": 999000011, "state": "OPEN", "open_blockers": 0,
+                  "pull_request": {}, "labels": [area, label]}
+        try:
+            held = [row.get("number") for row in planner.compute_ready(
+                [dict(holder), dict(rival)])]
+            freed = [row.get("number") for row in planner.compute_ready(
+                [dict(holder, **{field: True}), dict(rival)])]
+        except Exception as exc:                              # noqa: BLE001 — mirrors the registry
+            return None, f"probe raised {type(exc).__name__}"
+        if held:
+            return None, ("planner RELEASES a machine-parked area with no attestation "
+                          "— refusing to feed it attestations")
+        if freed != [999000012]:
+            return None, "planner ignores the inertness attestation"
+        return field, (f"releases an attested machine park via `{field}` and holds an "
+                       "unattested one")
+
+    _mod = _as_registry_loads_it()
+    # (a) THE NAME. Renaming either constant — in prod, or in prod AND every sparq test together —
+    # makes this red, because the expectation is the registry's literal, which no sparq-side
+    # rename reaches.
+    chk("[sparq#4819] dispatch-plan exports the registry's two wire names, as strings",
+        sorted(name for name in _WIRE_NAMES
+               if isinstance(getattr(_mod, name, None), str)), sorted(_WIRE_NAMES))
+    # (b) THE VALUES. `MACHINE_PARK_PR_LABEL` is a real GitHub label and `INERT_FIELD` is the key
+    # the registry writes onto the occupancy row (`row[field] = ...`); both are wire values, so a
+    # "tidy-up" of either detaches this engine from the attestations it is sent.
+    chk("[sparq#4819] ...bound to the wire VALUES the registry writes",
+        (getattr(_mod, "INERT_FIELD", None), getattr(_mod, "MACHINE_PARK_PR_LABEL", None)),
+        ("inert", "review:parked"))
+    # (c) THE BEHAVIOUR, through THIS module's compute_ready. Asserted on the full (field, why)
+    # pair, not on truthiness: every refusal path returns (None, <reason>), and the reason names
+    # which half broke — so this row reports the registry's own diagnosis rather than "not ok".
+    chk("[sparq#4819] the registry's inert_aware probe STAMPS against this module",
+        _probe(_mod),
+        ("inert", "releases an attested machine park via `inert` and holds an unattested one"))
+    # (d) ...and the refusal direction is reachable, so (c) cannot be passing because `_probe`
+    # returns its happy value unconditionally. A planner missing the names must be REFUSED with
+    # the registry's exact wording — this is the state sparq was in when the pair was measured a
+    # no-op, reproduced here as a fixture so it can never be the silent state again.
+    class _NoContract:
+        compute_ready = staticmethod(_mod.compute_ready)
+    chk("[sparq#4819] ...and refuses a planner without the names, by the registry's own reason",
+        _probe(_NoContract), (None, "planner declares no inertness contract"))
 
     print("dispatch-plan self-test", "PASSED" if ok else "FAILED")
     return 0 if ok else 1
