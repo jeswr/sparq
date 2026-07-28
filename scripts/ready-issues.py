@@ -340,6 +340,25 @@ def is_provably_inert(artifact):
     not proved anything, and a truthiness test would read all three as proof. Absent ⇒ False, so an
     engine invoked WITHOUT the widened occupancy input (sparq's own `--self-test`, any standalone
     run, a registry that has not shipped the producer yet) behaves EXACTLY as before this change.
+
+    WHAT THE PROOF IS WORTH, MEASURED — do not read "provably inert" as "will never land".
+    Over the 120 sparq PRs that ever carried `review:parked` (census, 2026-07-14..28; the label
+    itself is only ~5 days old, so long parks are structurally unobservable and every rate below
+    is a FLOOR):
+      * 120/120 were DRAFT at their first park, so the draft conjunct discriminates NOTHING on
+        this cohort — 33 of 33 currently-parked open PRs satisfy the whole predicate;
+      * 75% were un-parked again (80–88% among parks old enough to have resumed), median 6.2 h
+        (N=130 park→unpark pairs, p90 17.3 h);
+      * 34% (41/120) went on to MERGE, median 12.4 h after the park, 13 of them past 24 h;
+      * 30/120 had auto-merge enabled STRICTLY AFTER the park and 24 of those merged — the latch
+        bit is a snapshot, re-read each tick, never a durable property of the PR.
+    So this releases a partition a re-admitted PR can return to. That trade is accepted
+    deliberately (sparq#4819): the release is confined to crates where the parked PR is the ONLY
+    open holder — a union over holders means one un-parked PR keeps the key — so the exposure is
+    1 open PR becoming 2 on ~14 low-traffic crates, never a deepening of the 25-to-30-deep
+    `docs`/`ci` buckets, which stay held. A dwell-threshold narrowing was measured and REJECTED,
+    not skipped: gating on ≥12 h idle leaves the live frontier at 1 (i.e. buys nothing), because
+    the crates with a waiting candidate are held by RECENT parks.
     """
     return artifact.get(INERT_FIELD) is True
 
