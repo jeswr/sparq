@@ -4,10 +4,18 @@
 //! Two tools share this module and the same backend resolution:
 //! - [`ask`] — the full loop: NL→SPARQL→validate→**execute**, returning the executed query
 //!   plus the real result rows;
-//! - [`nl_query`] — **translate only** ([SONNET-4.6] sq-sj1f9): the same grounded
-//!   generation and validation, stopping before execution so the caller reviews the query
-//!   and decides whether to run it (via the `query` tool). Cheaper and reviewable; the
-//!   honest cost is that a returned query is only *syntactically* validated.
+//! - [`nl_query`] — **translate only** ([SONNET-4.6] sq-sj1f9): the same grounding, and
+//!   the same pre-execution checks — the question guard, a `spargebra` parse, and the
+//!   forbidden-construct refusal — stopping before execution so the caller reviews the
+//!   query and decides whether to run it (via the `query` tool). Cheaper and reviewable;
+//!   the honest cost is that a returned query is only *syntactically* validated.
+//!
+//! Neither tool applies sparq-nlq's **dictionary-grounding** constraint
+//! ([`sparq_nlq::constrain`], `NlqConfig::check_dictionary`): it is opt-in and OFF in the
+//! default config both tools build, because it false-positives on a legitimately-empty
+//! answer. So an ungrounded predicate/class IRI is accepted by BOTH — `ask` executes it to
+//! zero rows, `nl_query` hands it back — and that parity is pinned by
+//! `both_tools_accept_an_ungrounded_predicate`. [OPUS-5]
 //!
 //! This is the second of the two complementary grounding tools chosen on the 2026-06-23
 //! design call (`shapes` is the no-LLM structured one): instead of handing the client a
@@ -122,7 +130,9 @@ pub fn nl_query(graph: &Graph, question: &str) -> Result<String, String> {
 /// stopping short of execution.
 ///
 /// This is deliberately the `ask` loop MINUS the execute step, so the two tools ground on
-/// the same [`sparq_nlq::Nlq`] prompt and refuse the same constructs:
+/// the same [`sparq_nlq::Nlq`] prompt and apply the same pre-execution checks — under the
+/// same default [`NlqConfig`], which leaves the opt-in dictionary constraint
+/// (`check_dictionary`) off for both, so neither repairs an ungrounded IRI:
 /// - the question is length-checked by [`sparq_nlq::guard::check_question`] before a token
 ///   is spent, exactly as the executing loop does;
 /// - the completion must yield a SPARQL block that `spargebra` parses — a parse error is
@@ -497,6 +507,48 @@ ex:bob   rdf:type ex:Person ; ex:name "Bob" .
             !err.contains("\"executed\""),
             "the refused query must not come back as a rendered translation: {err}"
         );
+    }
+
+    #[test]
+    fn both_tools_accept_an_ungrounded_predicate() {
+        // The dictionary constraint (`NlqConfig::check_dictionary`) is opt-in and OFF in
+        // the default config BOTH tools build, so a hallucinated predicate is accepted by
+        // `ask` (executed, zero rows) exactly as it is by `nl_query` (handed back). This
+        // pins that parity: it goes red the moment either tool grows a dictionary check
+        // the other lacks.
+        const UNGROUNDED: &str = "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:nosuch ?o }";
+        let completion = || format!("```sparql\n{}\n```", UNGROUNDED);
+
+        // Non-vacuity anchor: the predicate really IS absent from the dictionary, so the
+        // assertions below are about an ungrounded term, not a grounded one.
+        let g = graph();
+        let parsed = spargebra::SparqlParser::new()
+            .parse_query(UNGROUNDED)
+            .expect("the ungrounded query parses");
+        let unknowns = sparq_nlq::constrain::unknown_terms(&g, &parsed);
+        assert!(
+            unknowns.iter().any(|u| u.iri == "http://ex/nosuch"),
+            "the fixture predicate must be absent from the dictionary: {unknowns:?}"
+        );
+
+        // `ask` executes it and returns zero rows — it does NOT repair or reject it.
+        let out = run_ask(
+            &g,
+            "anything",
+            &QueryBudget::unlimited(),
+            Box::new(FnLlm(move |_| Ok(completion()))),
+        )
+        .expect("an ungrounded predicate is executed, not repaired");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["sparql"], UNGROUNDED);
+        assert_eq!(v["result"]["row_count"], 0);
+
+        // `nl_query` returns the same query — the same acceptance, minus the execution.
+        let out = run_nl_query(&g, "anything", Box::new(FnLlm(move |_| Ok(completion()))))
+            .expect("an ungrounded predicate is translated, not repaired");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["sparql"], UNGROUNDED);
+        assert_eq!(v["repairs"], 0);
     }
 
     #[test]

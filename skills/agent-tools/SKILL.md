@@ -163,13 +163,18 @@ same `nlq` feature:
   query's real rows, not a free-form paragraph.
 
 - **`nl_query`** (NL, same **opt-in `nlq` feature**, `sq-sj1f9`) — the **translate-only**
-  middle ground: the same grounded generation and validation as `ask`, but it stops before
-  execution and hands back the query. The response carries `executed: false` and **no
-  rows** — it is a query to review, not an answer. A query that parses is still refused if
-  it uses a construct the loop will not run (`SERVICE` federation), so translation cannot
-  be used to route around `ask`'s refusal; run the returned query with `query`. The honest
-  cost of skipping execution is that validation is only **syntactic**: the query may still
-  fail at runtime or match nothing. Same backend, same fail-closed "not configured" error.
+  middle ground: the same grounding as `ask` and the same **pre-execution** checks — the
+  question guard, a `spargebra` parse, and the forbidden-construct refusal — but it stops
+  before execution and hands back the query. The response carries `executed: false` and
+  **no rows** — it is a query to review, not an answer. A query that parses is still
+  refused if it uses a construct the loop will not run (`SERVICE` federation), so
+  translation cannot be used to route around `ask`'s refusal; run the returned query with
+  `query`. The honest cost of skipping execution is that validation is only **syntactic**:
+  the query may still fail at runtime or match nothing. Note that sparq-nlq's
+  dictionary-grounding constraint (`NlqConfig::check_dictionary`) is opt-in and **off** in
+  the default config, for `ask` as well as `nl_query` — so an ungrounded predicate/class
+  IRI is accepted by **both** (`ask` just executes it to zero rows). Same backend, same
+  fail-closed "not configured" error.
 
 These are **ergonomics / grounding aids pending measurement** — *not* a token-saving
 claim (the project measured representation/token tricks as duds). `shapes` is the lean

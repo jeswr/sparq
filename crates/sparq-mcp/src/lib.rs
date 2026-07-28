@@ -14,8 +14,9 @@
 //! - [`shapes`] — the structured `shapes` grounding tool (the data-grounded
 //!   predicate/datatype/cardinality constraints for one class IRI; no server-side model).
 //! - `nlq` (feature `nlq`) — the server-side natural-language tools: `ask`
-//!   (NL→SPARQL→execute via `sparq-nlq`) and `nl_query`, which runs the same grounded
-//!   generation + validation but returns the query **unexecuted** for review
+//!   (NL→SPARQL→execute via `sparq-nlq`) and `nl_query`, which runs the same grounding
+//!   and the same pre-execution checks (question guard, `spargebra` parse,
+//!   forbidden-construct refusal) but returns the query **unexecuted** for review
 //!   ([SONNET-4.6] sq-sj1f9). Both embed a configurable LLM call and degrade cleanly
 //!   (unadvertised, "not configured" error) when no backend is set.
 //! - `transport` (feature `stdio`) — the line-delimited stdio serve loop.
