@@ -1,7 +1,9 @@
 //! The neutral term model and the two comparison regimes (strict RDF equality; value-canonical
 //! keying). Engine-independent. [OPUS-4.8] sq-qcnn.4
 
-use crate::numeric::{canonical_numeric_string, order_numeric_string, parse_numeric};
+use crate::numeric::{
+    canonical_numeric_string, order_numeric_string, parse_numeric, promoted_tie, NumericValue,
+};
 use crate::temporal::{parse_datetime, parse_duration};
 
 /// The XSD namespace prefix.
@@ -129,9 +131,12 @@ pub fn canonical_key(term: &Term) -> String {
 /// may emit them in either order.
 ///
 /// The implication runs one way only: this partition *refines* the tie relation, so a tied pair may
-/// still key apart (see the two unmodelled cases below). That direction is the safe one — a finer
-/// partition only splits a maximal run further, which can report a spurious divergence but can never
-/// hide a real ordering bug.
+/// still key apart (see the unmodelled cases below). Refining cannot *hide* an ordering bug — it
+/// only splits a maximal run further — but it does **manufacture a false failure**, by rejecting a
+/// permutation the spec permits. A false failure is a defect in a differential oracle, not a safe
+/// direction, so the split cases are not left to the key: `order_key_splits_tie` names the pairs it
+/// splits, and [`crate::multiset::order_by_compare`] consults that before reporting a divergence on
+/// such a column, returning its fail-closed verdict instead.
 ///
 /// The one place it differs from [`canonical_key`] is **numeric promotion**: SPARQL compares numeric
 /// operands after promotion, so `1`^^`xsd:integer`, `1.0`^^`xsd:decimal` and `1.0E0`^^`xsd:double`
@@ -141,21 +146,42 @@ pub fn canonical_key(term: &Term) -> String {
 /// numeric literal therefore folds here to one datatype-free decimal key
 /// (`crate::numeric::order_numeric_string`, whose lossy-promotion residual is documented there).
 ///
-/// Deliberately unmodelled elsewhere: pairs whose `<` **errors** — a literal versus an IRI, two
-/// different language tags, `xsd:date` versus `xsd:dateTime`, `NaN`, a triple term — are ordered by
-/// an *implementation-defined* extension order that this engine-independent crate cannot know, so
-/// they keep their distinct [`canonical_key`]s. Within one datatype *this crate models* nothing
-/// more is needed: [`canonical_key`] already collapses value-equal lexical variance (`05`/`5`,
-/// `true`/`1`, same-instant dateTimes), which is exactly the same-datatype tie class. For a datatype
-/// it does not model the value space is unknown, so the exact lexical is kept and two spellings of
-/// one value split — the same conservative direction.
+/// Two other regimes are deliberately left to the distinct [`canonical_key`]s, for two *different*
+/// reasons. §15.1 **specifies** the order between term kinds (unbound < blank node < IRI < literal),
+/// so those pairs are strictly ordered and never tied — splitting them is simply right. Pairs the
+/// operator mapping does not order — two different language tags, an unmodelled datatype, a triple
+/// term — are ordered by an *implementation-defined* total order this engine-independent crate
+/// cannot know; distinct keys are again right (a total order ties nothing), but two engines may pick
+/// *different* total orders, which this comparator would report as a cross-run reordering. That
+/// residual is a caller precondition — sort on a column whose values this crate can order — not
+/// something a key can repair. Within one modelled datatype nothing more is needed:
+/// [`canonical_key`] already collapses value-equal lexical variance (`05`/`5`, `true`/`1`,
+/// same-instant dateTimes), which is exactly the same-datatype tie class.
 pub fn order_equiv_key(term: &Term) -> String {
-    numeric_order_key(term).unwrap_or_else(|| canonical_key(term))
+    numeric_value(term)
+        .map(|n| numeric_order_key(&n))
+        .unwrap_or_else(|| canonical_key(term))
 }
 
-/// The datatype-free ordering key of a numeric literal; `None` for anything else (a language-tagged
-/// literal is never numeric, and no other term kind carries a numeric value space).
-fn numeric_order_key(term: &Term) -> Option<String> {
+/// Whether `a` and `b` are **tied** under SPARQL `ORDER BY` yet key **apart** under
+/// [`order_equiv_key`] — the pairs for which run partitioning by that key is not a sound oracle,
+/// because it would split a run the spec allows either engine to permute.
+///
+/// Only numeric operands can land here, and only via `f64` promotion: a `double`/`float` compared
+/// against an exact value ties whenever the two differ below `f64` precision, and `NaN` ties with
+/// every numeric (see [`crate::numeric::promoted_tie`]). The tie relation is then not transitive, so
+/// no key can express it — [`crate::multiset::order_by_compare`] uses this predicate to fail closed
+/// instead of returning a verdict it cannot justify.
+pub(crate) fn order_key_splits_tie(a: &Term, b: &Term) -> bool {
+    let (Some(x), Some(y)) = (numeric_value(a), numeric_value(b)) else {
+        return false;
+    };
+    numeric_order_key(&x) != numeric_order_key(&y) && promoted_tie(&x, &y)
+}
+
+/// The numeric value of a literal term; `None` for anything else (a language-tagged literal is
+/// never numeric, and no other term kind carries a numeric value space).
+fn numeric_value(term: &Term) -> Option<NumericValue> {
     let Term::Literal {
         lexical,
         datatype,
@@ -167,10 +193,14 @@ fn numeric_order_key(term: &Term) -> Option<String> {
     if lang.is_some() {
         return None;
     }
-    let n = parse_numeric(lexical, effective_datatype(datatype, lang))?;
+    parse_numeric(lexical, effective_datatype(datatype, lang))
+}
+
+/// The datatype-free ordering key of a numeric value.
+fn numeric_order_key(n: &NumericValue) -> String {
     // `N` tags no `canonical_key` variant, so a promoted numeric key can never collide with the key
     // of a non-numeric term.
-    Some(format!("N\u{1f}{}", order_numeric_string(&n)))
+    format!("N\u{1f}{}", order_numeric_string(n))
 }
 
 /// Length-prefix a nested component key (`"<byte-len>\u{1f}<key>"`) so composite (triple) keys stay
@@ -376,14 +406,41 @@ mod tests {
             order_equiv_key(&lit(&ten_to_300, XSD_INT)),
             order_equiv_key(&lit("1E300", XSD_DBL))
         );
-        // The documented residual of keying on EXACT value: promotion to f64 is lossy, so an
-        // integer beyond f64 precision keys apart from the double it would promote to, even though
-        // XSD `=` calls them equal. Promotion-equality is not transitive and so is not a valid
-        // relation to key on; splitting is the safe direction (a spurious diff, never a missed one).
-        assert_ne!(
-            order_equiv_key(&lit("1180591620717411303425", XSD_INT)), // 2^70 + 1
-            order_equiv_key(&lit("1180591620717411303424", XSD_DBL))  // 2^70, exact as an f64
-        );
+        // Promotion to f64 is lossy, so an integer beyond f64 precision keys apart from the double
+        // it promotes to even though the two are TIED under `ORDER BY`. Promotion-equality is not
+        // transitive, so no key can fix that — the pair must instead be DETECTED, so the comparator
+        // can fail closed rather than reject a legal permutation of the tie.
+        let i70p1 = lit("1180591620717411303425", XSD_INT); // 2^70 + 1
+        let d70 = lit("1180591620717411303424", XSD_DBL); // 2^70, exact as an f64
+        assert_ne!(order_equiv_key(&i70p1), order_equiv_key(&d70));
+        assert!(order_key_splits_tie(&i70p1, &d70));
+        assert!(order_key_splits_tie(&d70, &i70p1), "the predicate is symmetric");
+        // `NaN` ties with every numeric (`<` is false both ways) while keying on its own token.
+        assert!(order_key_splits_tie(&lit("NaN", XSD_DBL), &lit("1", XSD_INT)));
+    }
+
+    /// The detector must be NARROW: firing on a pair that is strictly ordered, or on one the key
+    /// already ties, would turn every ordered comparison into a skip.
+    #[test]
+    fn order_key_splits_tie_fires_only_where_the_key_cannot_model_the_tie() {
+        const XSD_DEC: &str = "http://www.w3.org/2001/XMLSchema#decimal";
+        const XSD_DBL: &str = "http://www.w3.org/2001/XMLSchema#double";
+        // Strictly ordered numerics, within and across classes.
+        assert!(!order_key_splits_tie(&lit("1", XSD_INT), &lit("2", XSD_INT)));
+        assert!(!order_key_splits_tie(&lit("1", XSD_INT), &lit("2.0", XSD_DBL)));
+        assert!(!order_key_splits_tie(&lit("1", XSD_INT), &lit("1.5", XSD_DEC)));
+        // Tied AND keyed together — nothing to fail closed on.
+        assert!(!order_key_splits_tie(&lit("1", XSD_INT), &lit("1.0E0", XSD_DBL)));
+        // Two exact operands never promote, so consecutive huge integers stay strictly ordered.
+        assert!(!order_key_splits_tie(
+            &lit("1180591620717411303425", XSD_INT),
+            &lit("1180591620717411303426", XSD_INT)
+        ));
+        // Non-numerics are ordered by §15.1 / an implementation-defined total order: not this
+        // predicate's business.
+        assert!(!order_key_splits_tie(&lit("1", XSD_INT), &lit("1", XSD_STRING)));
+        assert!(!order_key_splits_tie(&lit("1", XSD_INT), &Term::Iri("x".into())));
+        assert!(!order_key_splits_tie(&langlit("1", "en"), &langlit("1", "fr")));
     }
 
     #[test]

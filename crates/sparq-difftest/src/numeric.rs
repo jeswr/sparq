@@ -132,6 +132,30 @@ pub fn numeric_equal(a: &NumericValue, b: &NumericValue) -> bool {
     }
 }
 
+/// Whether `a` and `b` are **tied** under the SPARQL `ORDER BY` numeric comparison — i.e. neither
+/// `a < b` nor `b < a` holds once XSD numeric promotion has been applied.
+///
+/// This is the relation `order_numeric_string` cannot key (see its docs): with a `double`/`float`
+/// operand both sides promote to `f64`, so values that differ *below* `f64` precision tie although
+/// their exact keys differ, and the relation is not transitive. `NaN` ties with every numeric
+/// (`op:numeric-less-than` is false in both directions), and a value with no `f64` image at all is
+/// reported as tied — the conservative answer, since it drives a fail-closed skip rather than a
+/// verdict. Two *exact* operands (integer/decimal) never promote, so they tie iff they are equal.
+pub(crate) fn promoted_tie(a: &NumericValue, b: &NumericValue) -> bool {
+    match (a, b) {
+        (NumericValue::Double(_), _) | (_, NumericValue::Double(_)) => {
+            match (to_f64(a), to_f64(b)) {
+                (Some(x), Some(y)) => {
+                    !matches!(x.partial_cmp(&y), Some(Ordering::Less | Ordering::Greater))
+                }
+                _ => true,
+            }
+        }
+        // Integer/decimal `<` is exact in both directions, so the tie class is plain equality.
+        _ => numeric_equal(a, b),
+    }
+}
+
 /// Promote a numeric value to `f64` (per XSD, for a comparison against a `double`/`float`).
 fn to_f64(n: &NumericValue) -> Option<f64> {
     match n {
@@ -187,9 +211,14 @@ pub(crate) fn canonical_numeric_string(n: &NumericValue) -> String {
 ///
 /// Honest residual: promotion to `f64` is *lossy*, so two exact values that XSD `=` calls equal
 /// only after that loss (a `BigInt` beyond `f64` precision versus the double it rounds to) keep
-/// **distinct** keys here. That is deliberate — promotion-equality is not transitive, so it is not
-/// a valid equivalence relation to key on. The result only ever splits a tie run further, which can
-/// report a spurious divergence but can never hide a real ordering bug.
+/// **distinct** keys here. That is forced — promotion-equality is not transitive (`2^70+1` and
+/// `2^70+2` each tie with the double `2^70` yet are strictly ordered against each other), so no
+/// key, coarse or fine, can model it: a finer key splits a legal tie run and a coarser one merges
+/// two strictly-ordered rows. Splitting cannot *hide* an ordering bug, but it does **manufacture a
+/// false failure**, which for a differential oracle is a defect and not a "safe direction". So the
+/// comparator does not rely on the key alone: [`promoted_tie`] models the tie relation the key
+/// cannot, and [`crate::multiset::order_by_compare`] consults it before reporting a divergence on
+/// such a column — returning its fail-closed verdict instead.
 pub(crate) fn order_numeric_string(n: &NumericValue) -> String {
     match n {
         NumericValue::Integer(x) => normalised_decimal_string(&x.to_string()),
@@ -295,6 +324,37 @@ mod tests {
         assert_eq!(canonical_double_string(0.0), canonical_double_string(-0.0));
         // distinct finite values -> distinct tokens.
         assert_ne!(canonical_double_string(6.0), canonical_double_string(6.5));
+    }
+
+    #[test]
+    fn promoted_tie_models_the_non_transitive_mixed_numeric_tie() {
+        let n = |lex: &str, dt: &str| parse_numeric(lex, dt).unwrap();
+        // 2^70 is exact as an f64; 2^70+1 and 2^70+2 both round to it, so each TIES with the
+        // double while being strictly ordered against the other. That non-transitivity is the
+        // whole reason a key cannot model this relation.
+        let i70p1 = n("1180591620717411303425", XSD_INT);
+        let i70p2 = n("1180591620717411303426", XSD_INT);
+        let d70 = n("1180591620717411303424", XSD_DBL);
+        assert!(promoted_tie(&i70p1, &d70));
+        assert!(promoted_tie(&d70, &i70p1));
+        assert!(promoted_tie(&i70p2, &d70));
+        assert!(!promoted_tie(&i70p1, &i70p2), "exact operands never promote");
+        // Ordinary distinct values are not tied, in either direction and across classes.
+        assert!(!promoted_tie(&n("1", XSD_INT), &n("2.0", XSD_DBL)));
+        assert!(!promoted_tie(&n("2.0", XSD_DBL), &n("1", XSD_INT)));
+        assert!(!promoted_tie(&n("1", XSD_INT), &n("1.5", XSD_DEC)));
+        // Value-equal across classes IS a tie (that much the key already models).
+        assert!(promoted_tie(&n("1", XSD_INT), &n("1.0", XSD_DEC)));
+        assert!(promoted_tie(&n("1", XSD_INT), &n("1.0E0", XSD_DBL)));
+        // `NaN` is neither `<` nor `>` anything: tied with every numeric.
+        let nan = n("NaN", XSD_DBL);
+        assert!(promoted_tie(&nan, &n("1", XSD_INT)));
+        assert!(promoted_tie(&nan, &nan));
+        // ±INF orders normally against a finite value, and an integer too large for f64
+        // promotes to INF and so ties with it.
+        assert!(!promoted_tie(&n("INF", XSD_DBL), &n("1", XSD_INT)));
+        let huge = format!("1{}", "0".repeat(400));
+        assert!(promoted_tie(&n(&huge, XSD_INT), &n("INF", XSD_DBL)));
     }
 
     #[test]

@@ -68,8 +68,9 @@
 //!
 //! The harness wiring (`sq-qcnn.5`) has landed: `crates/sparq-bench`'s Oxigraph fuzzer now decides
 //! every value-level equality through this crate — [`multiset::multiset_equal`] for the `SELECT`
-//! bag, [`multiset::order_by_equal`] for `ORDER BY` (sort-key equivalence classes over all
-//! projected variables), [`iso::solutions_isomorphic`] for a blank-node-bearing `SELECT` answer,
+//! bag, [`multiset::order_by_compare`] for `ORDER BY` (sort-key equivalence classes over all
+//! projected variables, with a fail-closed third verdict where a lossy numeric promotion makes the
+//! tie relation unkeyable), [`iso::solutions_isomorphic`] for a blank-node-bearing `SELECT` answer,
 //! and [`iso::graph_isomorphic`] for a `CONSTRUCT`/`DESCRIBE` graph. A blank-node answer is
 //! therefore now **compared** rather than routed to a counted triage bucket. That generator still
 //! emits only `SELECT`, so the boolean/graph oracles are exercised by the harness's own unit tests
@@ -91,7 +92,7 @@ pub use iso::{
     solutions_isomorphic, term_has_blank_node, IsoError,
 };
 pub use json::{parse_results_json, QueryResults, Solution};
-pub use multiset::{multiset_equal, order_by_equal};
+pub use multiset::{multiset_equal, order_by_compare, OrderVerdict};
 pub use numeric::{canonical_double_string, numeric_equal, parse_numeric, NumericValue};
 pub use temporal::{
     dt_compare, duration_compare, parse_datetime, parse_duration, Duration, TemporalOrder,

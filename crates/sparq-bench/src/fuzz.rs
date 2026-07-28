@@ -58,8 +58,8 @@ use oxigraph::store::Store;
 // `to_difftest`): every value-level equality decision in this harness is taken by a crate
 // that depends on no sparq crate.
 use sparq_difftest::{
-    canonical_key, graph_isomorphic, multiset_equal, order_by_equal, solutions_have_blank_nodes,
-    solutions_isomorphic, Solution as DSolution, Term as DTerm,
+    canonical_key, graph_isomorphic, multiset_equal, order_by_compare, solutions_have_blank_nodes,
+    solutions_isomorphic, OrderVerdict, Solution as DSolution, Term as DTerm,
 };
 
 // ── ADJUDICATED-DIVERGENCE ALLOWLIST (bead sq-0iqzw) ─────────────────────────────
@@ -279,7 +279,11 @@ const CATEGORIES: &[&str] = &[
 ///   `order_by_vars` / `sort_key_is_total`), so a category that sorted by an expression, or
 ///   truncated a sequence whose ties are visible in the projection, would silently lose its
 ///   order-level oracle rather than gain a wrong one. The `order` category satisfies both by
-///   projecting exactly its sort variable.
+///   projecting exactly its sort variable. A sort column mixing an `xsd:double` with an exact
+///   value it only differs from below `f64` precision loses that oracle the same way (a counted
+///   `skip(numeric-tie)`, see `CheckOutcome::SkippedNumericTie`) — the tie is real and unkeyable,
+///   so the skip is the honest outcome, but a category that introduced one would be trading its
+///   order coverage away.
 /// * **No blank nodes.** Keeping them out of the generator is exactly what keeps the
 ///   sq-ai2wa (bnode-vs-IRI) allowlist class INERT; introducing one makes that class
 ///   live (its detector is already wired) and needs its own adjudication first.
@@ -991,7 +995,7 @@ fn sparq_solutions(g: &sparq_core::Graph, q: &str) -> Option<Solutions> {
 /// if it were a documented non-testable case. [OPUS-5] sq-qcnn.5
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CheckOutcome {
-    /// The full answer was compared by VALUE (`multiset_equal` / `order_by_equal`).
+    /// The full answer was compared by VALUE (`multiset_equal` / `order_by_compare`).
     Compared,
     /// Compared up to a consistent bijection of the blank nodes (`solutions_isomorphic`,
     /// RDFC-1.0). Blank-node labels are engine-local, so a bnode-bearing answer is only
@@ -1007,6 +1011,11 @@ enum CheckOutcome {
     /// loses the sequence), so the ordered check cannot run on it. Counted on its own so the
     /// gap stays a number rather than reading as green.
     SkippedBnodeOrder,
+    /// An `ORDER BY` sort column holding a pair that `ORDER BY` TIES but the sort key cannot
+    /// (`sparq_difftest::OrderVerdict::TieUnmodelled`: a lossy `f64` promotion, or `NaN`). The
+    /// run partition would split a tie the spec lets either engine permute, so a verdict here
+    /// would be a FALSE failure — the comparator fails closed and this counts the loss.
+    SkippedNumericTie,
 }
 
 /// Per-oracle tallies of the [`CheckOutcome`]s, printed verbatim in the summary line.
@@ -1016,6 +1025,7 @@ struct CheckCounts {
     compared_iso: u64,
     skipped_row_choice: u64,
     skipped_bnode_order: u64,
+    skipped_numeric_tie: u64,
 }
 
 impl CheckCounts {
@@ -1025,6 +1035,7 @@ impl CheckCounts {
             CheckOutcome::ComparedIsomorphic => self.compared_iso += 1,
             CheckOutcome::SkippedRowChoice => self.skipped_row_choice += 1,
             CheckOutcome::SkippedBnodeOrder => self.skipped_bnode_order += 1,
+            CheckOutcome::SkippedNumericTie => self.skipped_numeric_tie += 1,
         }
     }
 }
@@ -1033,8 +1044,12 @@ impl std::fmt::Display for CheckCounts {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "compared={} iso={} skip(row-choice)={} skip(bnode-order)={}",
-            self.compared, self.compared_iso, self.skipped_row_choice, self.skipped_bnode_order
+            "compared={} iso={} skip(row-choice)={} skip(bnode-order)={} skip(numeric-tie)={}",
+            self.compared,
+            self.compared_iso,
+            self.skipped_row_choice,
+            self.skipped_bnode_order,
+            self.skipped_numeric_tie
         )
     }
 }
@@ -1169,7 +1184,7 @@ fn seq_keys(s: &Solutions) -> Vec<Vec<(String, String)>> {
 
 /// ORDER-SENSITIVE differential for `ORDER BY` queries (the multiset check cannot see a
 /// reordering): the two engines' sequences must agree up to permutation WITHIN each maximal
-/// run of rows equal on the sort key (`sparq_difftest::order_by_equal`), comparing EVERY
+/// run of rows equal on the sort key (`sparq_difftest::order_by_compare`), comparing EVERY
 /// projected variable — not just the first column against Oxigraph's `?a`, which is all the
 /// pre-`sq-qcnn.5` check did.
 ///
@@ -1189,6 +1204,9 @@ fn seq_keys(s: &Solutions) -> Vec<Vec<(String, String)>> {
 ///   * one side produced no solution sequence.
 ///
 /// `Ok(CheckOutcome::SkippedBnodeOrder)`: a blank node in either answer (see [`CheckOutcome`]).
+///
+/// `Ok(CheckOutcome::SkippedNumericTie)`: a sort column whose `ORDER BY` ties the sort key
+/// cannot express (see [`CheckOutcome::SkippedNumericTie`]).
 fn check_ordered(g: &sparq_core::Graph, store: &Store, q: &str) -> Result<CheckOutcome, String> {
     let Some(sort_vars) = order_by_vars(q) else {
         return Ok(CheckOutcome::SkippedRowChoice);
@@ -1204,24 +1222,31 @@ fn check_ordered(g: &sparq_core::Graph, store: &Store, q: &str) -> Result<CheckO
     if solutions_have_blank_nodes(&sparq) || solutions_have_blank_nodes(&oxi) {
         return Ok(CheckOutcome::SkippedBnodeOrder);
     }
-    compare_ordered(&sparq, &oxi, &sort_vars).map(|()| CheckOutcome::Compared)
+    compare_ordered(&sparq, &oxi, &sort_vars)
 }
 
 /// Sort-key-equivalence-class equality of two ordered solution sequences, with a repro-sized
 /// diff. Split out of `check_ordered` so the comparison itself is testable against
 /// hand-authored sequences (the engines always agree on the generated shapes, so a live test
 /// cannot show what a REORDERED answer does).
-fn compare_ordered(sparq: &Solutions, oxi: &Solutions, sort_vars: &[String]) -> Result<(), String> {
+fn compare_ordered(
+    sparq: &Solutions,
+    oxi: &Solutions,
+    sort_vars: &[String],
+) -> Result<CheckOutcome, String> {
     let refs: Vec<&str> = sort_vars.iter().map(String::as_str).collect();
-    if order_by_equal(sparq, oxi, &refs) {
-        return Ok(());
+    match order_by_compare(sparq, oxi, &refs) {
+        OrderVerdict::Equal => Ok(CheckOutcome::Compared),
+        // Fail closed: the comparator cannot decide this column's order, so neither can this
+        // harness. Reporting it would be a false positive, not a bug.
+        OrderVerdict::TieUnmodelled => Ok(CheckOutcome::SkippedNumericTie),
+        OrderVerdict::Differs => Err(format!(
+            "ORDER BY sequence differs (up to sort-key equivalence classes over {:?})\n  sparq={:?}\n  oxi  ={:?}",
+            sort_vars,
+            seq_keys(sparq),
+            seq_keys(oxi)
+        )),
     }
-    Err(format!(
-        "ORDER BY sequence differs (up to sort-key equivalence classes over {:?})\n  sparq={:?}\n  oxi  ={:?}",
-        sort_vars,
-        seq_keys(sparq),
-        seq_keys(oxi)
-    ))
 }
 
 /// Which RESULT FORM a query asks for. The three forms need three DIFFERENT oracles — a
@@ -2403,7 +2428,10 @@ ex:n3 ex:age 40 . ex:n3 ex:name "nm3" .
         let a = vec![row("1", "a"), row("1", "b"), row("2", "c")];
         // Tied rows (?k = 1) permuted: legal, both engines are conformant.
         let tied = vec![row("1", "b"), row("1", "a"), row("2", "c")];
-        compare_ordered(&a, &tied, &sort).expect("a tie run may permute");
+        assert_eq!(
+            compare_ordered(&a, &tied, &sort).expect("a tie run may permute"),
+            CheckOutcome::Compared
+        );
         // Reordering ACROSS runs is a real ORDER BY violation.
         let reordered = vec![row("2", "c"), row("1", "a"), row("1", "b")];
         assert!(compare_ordered(&a, &reordered, &sort).is_err());
@@ -2418,6 +2446,34 @@ ex:n3 ex:age 40 . ex:n3 ex:name "nm3" .
             compare_ordered(&a, &wrong_second, &sort).is_err(),
             "a wrong NON-sort column must fail — comparing only the first column would miss it"
         );
+    }
+
+    /// A sort column carrying a tie the sort key cannot express must become a COUNTED SKIP, not
+    /// a reported divergence: the integer `2^70+1` promotes onto the double `2^70`, so `ORDER BY`
+    /// leaves the pair tied and either engine may emit either order.
+    #[test]
+    fn an_unmodellable_numeric_tie_becomes_a_counted_skip_not_a_repro() {
+        let sort = vec!["k".to_string()];
+        let dbl = |lex: &str| DTerm::Literal {
+            lexical: lex.to_string(),
+            datatype: "http://www.w3.org/2001/XMLSchema#double".to_string(),
+            lang: None,
+        };
+        let int_row = dsol(&[("k", dint("1180591620717411303425")), ("v", diri("a"))]);
+        let dbl_row = dsol(&[("k", dbl("1180591620717411303424")), ("v", diri("b"))]);
+        let a = vec![int_row.clone(), dbl_row.clone()];
+        let permuted = vec![dbl_row, int_row];
+        assert_eq!(
+            compare_ordered(&a, &permuted, &sort).expect("a promotion tie must not be a repro"),
+            CheckOutcome::SkippedNumericTie
+        );
+        // The skip is narrow: a strictly-ordered column keeps its full strength.
+        let ordered = vec![
+            dsol(&[("k", dint("1")), ("v", diri("a"))]),
+            dsol(&[("k", dbl("2.0")), ("v", diri("b"))]),
+        ];
+        let swapped: Solutions = ordered.iter().rev().cloned().collect();
+        assert!(compare_ordered(&ordered, &swapped, &sort).is_err());
     }
 
     /// `order_by_vars` reads a plain-variable sort key and FAILS CLOSED on anything else:
@@ -2585,9 +2641,10 @@ ex:n3 ex:age 40 . ex:n3 ex:name "nm3" .
         c.record(CheckOutcome::ComparedIsomorphic);
         c.record(CheckOutcome::SkippedRowChoice);
         c.record(CheckOutcome::SkippedBnodeOrder);
+        c.record(CheckOutcome::SkippedNumericTie);
         assert_eq!(
             c.to_string(),
-            "compared=2 iso=1 skip(row-choice)=1 skip(bnode-order)=1"
+            "compared=2 iso=1 skip(row-choice)=1 skip(bnode-order)=1 skip(numeric-tie)=1"
         );
     }
 

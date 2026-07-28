@@ -106,6 +106,18 @@ Two result forms need two comparators:
   sequence equality — the simpler and stricter option, preferred where the generator controls the
   query.
 
+  **Run partitioning is not a complete oracle, and the gap is counted rather than papered over.**
+  SPARQL compares numeric operands after promotion, so a sort column mixing an `xsd:double` with an
+  exact value that only differs *below* `f64` precision leaves the two **tied** while any exact key
+  keys them apart. The relation is not transitive (the integers `2^70+1` and `2^70+2` each tie with
+  the double `2^70` yet are strictly ordered against each other), so no key models it: a finer key
+  splits a legal tie run — a **false failure** — and a coarser one merges strictly-ordered rows,
+  hiding a real bug. The comparator therefore returns a third verdict on such a column when the
+  partition rejects (`OrderVerdict::TieUnmodelled`) and the harness books it as its own counted skip
+  (`ordered[skip(numeric-tie)=…]`), rather than reporting a divergence it cannot justify. An
+  acceptance is still reported as equal — refining a tie relation can only reject, never wrongly
+  accept.
+
 ### 2.2 `LIMIT`/`OFFSET` without a total order is not differential-testable at value level
 
 With `LIMIT`/`OFFSET` and **no** `ORDER BY` (or a non-total one), *which* rows survive is

@@ -59,7 +59,7 @@ probe does.
   associative; a promoted cell is reported fail-closed as a harness failure.
 - **`ORDER BY` differential mode** (`differential::check_differential_ordered`): compares
   ordered results up to permutation within each sort-key equivalence class
-  (`sparq_difftest::order_by_equal`), since SPARQL §15.1 specifies the result sequence only
+  (`sparq_difftest::order_by_compare`), since SPARQL §15.1 specifies the result sequence only
   partially. Catches a reordering the unordered oracle is structurally blind to, and does
   *not* flag the reordering the spec permits.
 - **`EXISTS` stays excluded** from every oracle: its substitution semantics is a known

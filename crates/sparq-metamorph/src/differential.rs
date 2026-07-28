@@ -45,7 +45,7 @@
 //! sort condition may be returned in **any** relative order, and two conforming engines
 //! may differ there. The sound relation is therefore equality **up to permutation within
 //! each sort-key equivalence class**, which is exactly
-//! [`sparq_difftest::order_by_equal`]: both sequences are cut into maximal runs of
+//! [`sparq_difftest::order_by_compare`]: both sequences are cut into maximal runs of
 //! consecutive rows sharing the sort key, the runs must line up in order and by key, and
 //! each pair of corresponding runs must be multiset-equal. Cross-run reordering — a
 //! genuine order bug — is caught; within-run permutation — spec-permitted latitude — is
@@ -72,12 +72,17 @@
 //!    (§15.1) and the run partition is direction-agnostic anyway — it only cares which
 //!    rows tie.
 //!
-//! Note the run-key is [`sparq_difftest::canonical_key`], which distinguishes datatypes:
-//! `"1"^^xsd:integer` and `"1.0"^^xsd:decimal` are `=`-equal (so they may tie under
-//! `ORDER BY`) yet key apart, splitting a legitimate tie run. Precondition 1 rules that
-//! case out; it is the same restriction, seen from the comparator side.
+//! Note the run-key is [`sparq_difftest::order_equiv_key`], not the bag key: it folds
+//! numeric promotion, so `"1"^^xsd:integer` and `"1.0"^^xsd:decimal` — `=`-equal, hence
+//! tied under `ORDER BY` — share a run instead of splitting a legitimate one. What no key
+//! can fold is a tie created by a *lossy* promotion (the integer `2^70+1` ties with the
+//! double `2^70`, yet `2^70+2` ties with that double too while being strictly greater), so
+//! the comparator returns [`sparq_difftest::OrderVerdict::TieUnmodelled`] there and this
+//! module fails closed with a [`FailureKind::Harness`] verdict rather than reporting a
+//! divergence it cannot justify. Precondition 1 keeps that case out by construction; the
+//! fail-closed path is what catches the data that slips past it.
 
-use sparq_difftest::{multiset_equal, order_by_equal, QueryResults};
+use sparq_difftest::{multiset_equal, order_by_compare, OrderVerdict, QueryResults};
 
 use crate::engine::SparqlEngine;
 use crate::verdict::{EngineFailure, FailureKind, OracleKind, Verdict, Violation};
@@ -97,7 +102,7 @@ pub struct OrderedQuery {
 /// and sort variables `sort_vars` (names without `?`, in `ORDER BY` order).
 ///
 /// An empty `sort_vars` emits no `ORDER BY` clause, and the ordered check then degrades
-/// to the unordered multiset relation (`order_by_equal` with an empty key is
+/// to the unordered multiset relation (`order_by_compare` with an empty key is
 /// `multiset_equal`) — sound, but pointless; pass at least one variable. See the module
 /// docs for the scope preconditions on which variables are admissible.
 pub fn ordered_query(pattern: &str, predicate: &str, sort_vars: &[&str]) -> OrderedQuery {
@@ -137,7 +142,7 @@ pub fn check_differential(engines: &[&dyn SparqlEngine], query: &str) -> Verdict
 
 /// The **`ORDER BY` differential mode**: run the ordered `query` on every engine and
 /// require agreement up to permutation within each sort-key equivalence class over
-/// `sort_vars` ([`sparq_difftest::order_by_equal`]).
+/// `sort_vars` ([`sparq_difftest::order_by_compare`]).
 ///
 /// `sort_vars` must be the query's own `ORDER BY` variable list, in order — use
 /// [`ordered_query`] to build the pair. The scope preconditions (comparable sort column,
@@ -191,7 +196,28 @@ fn check_differential_with(
             ) => {
                 let agree = match comparison {
                     Comparison::Unordered => multiset_equal(a, b),
-                    Comparison::Ordered(sort_vars) => order_by_equal(a, b, sort_vars),
+                    Comparison::Ordered(sort_vars) => match order_by_compare(a, b, sort_vars) {
+                        OrderVerdict::Equal => true,
+                        OrderVerdict::Differs => false,
+                        // Precondition 1 broken by the DATA: the sort column holds a pair
+                        // `ORDER BY` ties but the comparator's sort key cannot (a lossy `f64`
+                        // promotion). Neither verdict is honest — "agree" would hide an ordering
+                        // bug, "disagree" would measure spec latitude — so fail closed as a
+                        // harness failure, exactly as a promoted `SUM` cell does.
+                        OrderVerdict::TieUnmodelled => {
+                            return Verdict::EngineFailure(EngineFailure {
+                                engine: (*name).to_string(),
+                                query: query.to_string(),
+                                kind: FailureKind::Harness,
+                                message: format!(
+                                    "sort column {:?} holds a numeric-promotion tie the ORDER BY \
+                                     comparator cannot model; sort on a column of one numeric \
+                                     class (precondition 1)",
+                                    sort_vars
+                                ),
+                            })
+                        }
+                    },
                 };
                 (
                     agree,
@@ -258,6 +284,52 @@ mod tests {
         let no = Canned(QueryResults::Boolean(false));
         assert!(check_differential(&[&yes, &also_yes], "ASK {}").is_pass());
         assert!(check_differential(&[&yes, &no], "ASK {}").is_violation());
+    }
+
+    /// A sort column whose `ORDER BY` ties the comparator cannot model must fail CLOSED — never a
+    /// violation (that would measure spec latitude, since the integer `2^70+1` and the double
+    /// `2^70` are tied and may be emitted in either order) and never a silent pass.
+    #[test]
+    fn an_unmodellable_numeric_tie_in_the_sort_column_fails_closed() {
+        let row = |lexical: &str, datatype: &str, v: &str| -> sparq_difftest::Solution {
+            [
+                (
+                    "w".to_string(),
+                    sparq_difftest::Term::Literal {
+                        lexical: lexical.to_string(),
+                        datatype: datatype.to_string(),
+                        lang: None,
+                    },
+                ),
+                ("v".to_string(), sparq_difftest::Term::Iri(v.to_string())),
+            ]
+            .into_iter()
+            .collect()
+        };
+        let int_row = row(
+            "1180591620717411303425",
+            "http://www.w3.org/2001/XMLSchema#integer",
+            "a",
+        );
+        let dbl_row = row(
+            "1180591620717411303424",
+            "http://www.w3.org/2001/XMLSchema#double",
+            "b",
+        );
+        let solutions = |sols: Vec<_>| {
+            Canned(QueryResults::Solutions {
+                vars: vec!["w".to_string(), "v".to_string()],
+                solutions: sols,
+            })
+        };
+        let a = solutions(vec![int_row.clone(), dbl_row.clone()]);
+        let permuted = solutions(vec![dbl_row, int_row]);
+        let verdict =
+            check_differential_ordered(&[&a, &permuted], "SELECT * WHERE {} ORDER BY ?w", &["w"]);
+        match verdict {
+            Verdict::EngineFailure(f) => assert_eq!(f.kind, FailureKind::Harness),
+            other => panic!("expected a fail-closed harness verdict, got {other:?}"),
+        }
     }
 
     #[test]
