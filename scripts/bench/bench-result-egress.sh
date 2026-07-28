@@ -31,13 +31,20 @@
 #
 # Launcher side:                            Instance side (cloned repo, as root):
 #   . scripts/bench/bench-result-egress.sh    . scripts/bench/bench-result-egress.sh
-#   bench_egress_preflight || die ...         bench_egress_push "$envelope"
-#   RUN_URI=$(bench_egress_run_uri "$KEY")
+#   bench_egress_preflight || die ...         bench_egress_push "$envelope"   # one file
+#   RUN_URI=$(bench_egress_run_uri "$KEY")    bench_egress_sweep "$OUT_DIR"   # new ones
 #   aws ec2 run-instances ... $(bench_egress_launch_args)
 #   bench_egress_pull "$RUN_URI" "$DIR"
 #
+# CALL IT AS THE WORK COMPLETES, NOT AT THE END. A gather box self-terminates and can die
+# mid-run, so an upload deferred to an end-of-gather loop loses every already-completed
+# envelope — the exact silent loss this channel exists to prevent. Each gather therefore
+# uploads per unit of work (per suite / per cut / per scale) and calls the sweep once more
+# at the end purely as the RETRY pass for uploads that failed earlier.
+#
 # Hermetically self-tested (PATH-shadowed `aws`, no network, no AWS account) by
-# scripts/tests/test_bench_result_egress.sh.
+# scripts/tests/test_bench_result_egress.sh; the mid-run-death BEHAVIOUR (a SIGKILLed
+# gather has already uploaded its completed cut) by scripts/tests/test_beir_gather_sentinel.sh.
 
 BENCH_IAM_PROFILE="${BENCH_IAM_PROFILE:-}"
 # Trailing slashes are stripped at source time: an operator writing `s3://bucket/prefix/`
@@ -46,6 +53,10 @@ BENCH_IAM_PROFILE="${BENCH_IAM_PROFILE:-}"
 BENCH_RESULTS_S3="${BENCH_RESULTS_S3:-}"; BENCH_RESULTS_S3="${BENCH_RESULTS_S3%/}"
 BENCH_RESULTS_S3_URI="${BENCH_RESULTS_S3_URI:-}"; BENCH_RESULTS_S3_URI="${BENCH_RESULTS_S3_URI%/}"
 BENCH_EGRESS_REGION="${BENCH_EGRESS_REGION:-${AWS_REGION:-}}"
+# Paths that uploaded SUCCESSFULLY in this process, so bench_egress_sweep can be called
+# after every unit of work without re-uploading — and still retries a file whose upload
+# failed. Process-local by design: it tracks this run's uploads, not the bucket's contents.
+declare -A BENCH_EGRESS_PUSHED=()
 
 bench_egress_log() { printf '[bench-egress %s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 
@@ -155,10 +166,36 @@ bench_egress_push() {
   args+=("$file" "$dest/$(basename "$file")")
   aws "${args[@]}" || rc=$?
   if [ "$rc" -eq 0 ]; then
+    BENCH_EGRESS_PUSHED["$file"]=1
     bench_egress_log "uploaded $(basename "$file") -> $dest/"
   else
     bench_egress_log "WARN: aws s3 cp exited $rc for $file -> $dest/ (console dump remains the backstop)"
   fi
+  return 0
+}
+
+# Upload every *.json in a directory that has not ALREADY uploaded successfully in this
+# process. This is what a gather calls at every point a unit of work completes (a cut, a
+# scale, a suite) so a finished envelope is durable BEFORE the next multi-hour stage
+# starts — a self-terminating box that dies later has already put it in S3. Repeat calls
+# are cheap and idempotent: a file recorded in BENCH_EGRESS_PUSHED is skipped, a file
+# whose upload FAILED is retried, so the end-of-gather call doubles as the retry sweep.
+#
+# Everything present is uploaded, valid JSON or not: a truncated envelope is still the
+# partial evidence a re-run decision needs, and dropping it here would lose exactly what
+# this channel exists to preserve. Validation stays where it already is — the gather's own
+# outcome check, which decides canonical/partial/failed.
+#
+# Best-effort like bench_egress_push: always returns 0, never aborts a gather.
+bench_egress_sweep() {
+  local dir="${1:-}" f
+  [ -n "$BENCH_RESULTS_S3_URI" ] || return 0
+  [ -d "$dir" ] || return 0
+  for f in "$dir"/*.json; do
+    [ -f "$f" ] || continue
+    [ -n "${BENCH_EGRESS_PUSHED[$f]+x}" ] && continue
+    bench_egress_push "$f"
+  done
   return 0
 }
 

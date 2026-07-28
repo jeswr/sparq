@@ -143,6 +143,34 @@ if [ -d "$WORK/pulled" ]; then ok "pull created the destination directory"; else
 lib_run -- 'bench_egress_push "$HOME/materialize-lubm1.json"' >/dev/null 2>&1
 check "push with no destination makes no aws call" "$(wc -l < "$AWS_STUB_LOG" | tr -d ' ')" "0"
 
+echo "== 5b. bench_egress_sweep: incremental, idempotent, retries a FAILED upload =="
+# The gathers call sweep after every unit of work AND once at the end. That is only
+# affordable if a re-sweep is free — so an envelope that already uploaded is skipped,
+# while one whose upload FAILED is tried again (the end-of-gather call is the retry pass).
+SWEEP="$WORK/sweep"; mkdir -p "$SWEEP"
+echo '{"a":1}' > "$SWEEP/one.json"
+printf 'not an envelope\n' > "$SWEEP/notes.txt"
+: > "$AWS_STUB_LOG"
+lib_run "BENCH_RESULTS_S3_URI=s3://bkt/gathers/run7" "SWEEP=$SWEEP" -- \
+  'bench_egress_sweep "$SWEEP"; echo "{\"b\":2}" > "$SWEEP/two.json"; bench_egress_sweep "$SWEEP"; bench_egress_sweep "$SWEEP"' \
+  >/dev/null 2>&1
+check "three sweeps upload each of the two envelopes exactly once" "$(grep -c 's3 cp' "$AWS_STUB_LOG")" "2"
+check "sweep ignores non-.json files" "$(grep -c 'notes.txt' "$AWS_STUB_LOG")" "0"
+: > "$AWS_STUB_LOG"
+AWS_STUB_RC=1 lib_run "BENCH_RESULTS_S3_URI=s3://bkt/gathers/run7" "SWEEP=$SWEEP" -- \
+  'bench_egress_sweep "$SWEEP"; bench_egress_sweep "$SWEEP"' >/dev/null 2>&1
+check "a FAILED upload is retried by the next sweep (2 files x 2 sweeps)" "$(grep -c 's3 cp' "$AWS_STUB_LOG")" "4"
+: > "$AWS_STUB_LOG"
+if lib_run "SWEEP=$SWEEP" -- 'bench_egress_sweep "$SWEEP"' >/dev/null 2>&1; then
+  ok "sweep is a successful no-op when unconfigured"
+else
+  bad "sweep returned non-zero when unconfigured"
+fi
+check "unconfigured sweep makes no aws call" "$(wc -l < "$AWS_STUB_LOG" | tr -d ' ')" "0"
+: > "$AWS_STUB_LOG"
+lib_run "BENCH_RESULTS_S3_URI=s3://bkt/gathers/run7" -- 'bench_egress_sweep "$HOME/no-such-dir"' >/dev/null 2>&1
+check "sweep of a missing directory makes no aws call" "$(wc -l < "$AWS_STUB_LOG" | tr -d ' ')" "0"
+
 echo "== 6. bootstrap policy is least-privilege; --print-policy/--dry-run make no AWS call =="
 : > "$AWS_STUB_LOG"
 POLICY=$(PATH="$STUB_PATH" AWS_STUB_LOG="$AWS_STUB_LOG" bash "$BOOTSTRAP" --print-policy \
@@ -236,8 +264,32 @@ for l in canonical-materialize-bench.sh canonical-competitor-bench.sh canonical-
 done
 for g in canonical-materialize-gather-instance.sh canonical-http-gather-instance.sh canonical-beir-gather-instance.sh; do
   f="$ROOT/scripts/bench/$g"
-  if grep -q 'bench_egress_push' "$f"; then ok "$g uploads its envelopes"; else bad "$g never uploads its envelopes"; fi
+  if grep -q 'bench_egress_push\|bench_egress_sweep' "$f"; then ok "$g uploads its envelopes"; else bad "$g never uploads its envelopes"; fi
 done
+
+echo "== 7b. the gathers upload DURING the run, not only in the end-of-gather dump loop =="
+# An upload that runs only after every stage is worthless on a box that self-terminates
+# or dies mid-run: the already-completed envelopes never leave. So the FIRST egress call
+# must sit strictly before the final ===ENVELOPE-BEGIN console dump. This is a structural
+# check; the resulting BEHAVIOUR is pinned by test_beir_gather_sentinel.sh case 10, which
+# SIGKILLs the gather after one cut and asserts the aws stub already recorded that cut's
+# upload — a bare grep for the function name cannot tell the two apart.
+for g in canonical-materialize-gather-instance.sh canonical-beir-gather-instance.sh; do
+  f="$ROOT/scripts/bench/$g"
+  first="$(grep -n '^[^#]*bench_egress_\(push\|sweep\) ' "$f" | head -1 | cut -d: -f1)"
+  dump="$(grep -n 'ENVELOPE-BEGIN \$' "$f" | head -1 | cut -d: -f1)"
+  if [ -n "$first" ] && [ -n "$dump" ] && [ "$first" -lt "$dump" ]; then
+    ok "$g uploads before its end-of-gather console dump (line $first < $dump)"
+  else
+    bad "$g uploads only in its final dump loop (first=$first dump=$dump) — a box dying mid-run loses every completed envelope"
+  fi
+done
+HTTPG="$ROOT/scripts/bench/canonical-http-gather-instance.sh"
+if awk '/^run_suite_http\(\)/,/^}$/' "$HTTPG" | grep -q 'bench_egress_push'; then
+  ok "canonical-http-gather-instance.sh uploads each suite envelope as it is written"
+else
+  bad "canonical-http-gather-instance.sh does not upload from inside run_suite_http"
+fi
 
 echo "test_bench_result_egress: ${pass} passed, ${fail} failed."
 [ "$fail" -eq 0 ] || exit 1

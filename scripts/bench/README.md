@@ -190,9 +190,14 @@ the AMI:
    universal: the 2026-07-10 x86_64 attempt on an AL2023/Nitro image got no application
    output back through the API at all, and that whole gather was unrecoverable
    (`research/gap-vector-2026-07.md`). If you change the AMI, verify this channel first.
-3. **Durable S3 egress** (opt-in, `bench-result-egress.sh`) — the box writes each
-   envelope to a run-scoped S3 prefix as it is produced, and the launcher syncs it back.
-   Survives a dead SSH path, an unusable console, and the box terminating mid-run.
+3. **Durable S3 egress** (opt-in, `bench-result-egress.sh`) — the box uploads to a
+   run-scoped S3 prefix as each **unit of work** finishes (per suite for the HTTP gather,
+   per cut for BEIR, per LUBM scale and then the HDT stage for materialization) rather
+   than once at the end, and the launcher syncs the prefix back. That granularity is the
+   point: a box that self-terminates or dies partway through has already made its
+   *completed* results durable. The end-of-gather call is a retry sweep for uploads that
+   failed earlier — `bench_egress_sweep` skips what already landed. Survives a dead SSH
+   path, an unusable console, and the box terminating mid-run.
 
 **One-time maintainer setup.** Creating the bucket + role + instance profile needs IAM/S3
 permissions the bench role does not hold — that is why sq-ffaa9 is a maintainer task.

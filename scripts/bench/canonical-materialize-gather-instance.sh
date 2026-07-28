@@ -19,8 +19,10 @@
 # CANONICAL=1. Every envelope is ALSO cat'd into the gather log between
 # ===ENVELOPE-BEGIN/END=== markers so `aws ec2 get-console-output` can recover results
 # even if the SSH pull path dies (envelopes are a few KB), and — when the launcher passed
-# BENCH_RESULTS_S3_URI (sq-ffaa9) — uploaded to the run-scoped S3 prefix, the one channel
-# that survives an AMI whose console output is unusable. Writes /root/GATHER_DONE when
+# BENCH_RESULTS_S3_URI (sq-ffaa9) — uploaded to the run-scoped S3 prefix as each STAGE
+# finishes (per LUBM scale, then the HDT decode), so a box that dies mid-gather has
+# already made its completed scales durable; that is the one channel that survives an AMI
+# whose console output is unusable. Writes /root/GATHER_DONE when
 # everything is on disk. NEVER shuts the box down — the launcher terminates it (its
 # user-data watchdog is the orphan-proof backstop).
 #
@@ -160,11 +162,32 @@ fi
 if [ -n "$NEMO_BIN" ]; then
   export NEMO="$NEMO_BIN" NEMO_VERSION="knowsys/nemo $NEMO_TAG (source build)"
 fi
-CANONICAL=1 LUBM_UNIVS="$LUBM_UNIVS" MAT_ITERS="$MAT_ITERS" TIMEOUT_S="$TIMEOUT_S" \
-  JAVA_XMX="$JAVA_XMX" OUT_DIR="$OUT" \
-  bash scripts/bench/materialize-same-box.sh \
-  && step "materialize gather done (oracle held)" \
-  || step "WARN: materialize-same-box.sh exited non-zero (a pinned univ=1 closure oracle diverged, or a scale failed) — envelopes on disk are still honest per-row records; inspect before citing"
+# ONE SCALE PER INVOCATION, egressed the moment its envelope lands. The box
+# self-terminates, so a univ=1 envelope that has to wait for the (far longer) univ=100
+# run — and then for the whole HDT stage — is LOST if the box dies in between; that is
+# the exact silent-loss shape sq-ffaa9 exists to close, and a single whole-list
+# invocation could not push anything until every scale was done. Otherwise equivalent:
+# MAT_ITERS is index-aligned with LUBM_UNIVS in materialize-same-box.sh too, and its
+# Jena tarball + LUBM corpus are cached across invocations. It also stops a `set -e`
+# abort inside an early scale from taking the later scales down with it.
+read -r -a MAT_UNIVS_ARR <<< "$LUBM_UNIVS"
+read -r -a MAT_ITERS_ARR <<< "$MAT_ITERS"
+MAT_FAILED=0
+for mi in "${!MAT_UNIVS_ARR[@]}"; do
+  mu="${MAT_UNIVS_ARR[$mi]}"
+  mit="${MAT_ITERS_ARR[$mi]:-1}"
+  step "materialize-same-box.sh CANONICAL=1 univ=$mu iters=$mit"
+  CANONICAL=1 LUBM_UNIVS="$mu" MAT_ITERS="$mit" TIMEOUT_S="$TIMEOUT_S" \
+    JAVA_XMX="$JAVA_XMX" OUT_DIR="$OUT" \
+    bash scripts/bench/materialize-same-box.sh \
+    && step "materialize univ=$mu done (oracle held)" \
+    || { MAT_FAILED=$((MAT_FAILED + 1)); step "WARN: materialize-same-box.sh exited non-zero for univ=$mu (a pinned univ=1 closure oracle diverged, or the scale failed) — envelopes on disk are still honest per-row records; inspect before citing"; }
+  # Durable egress AS SOON AS this scale's envelope exists (no-op unless configured).
+  bench_egress_sweep "$OUT"
+done
+[ "$MAT_FAILED" -eq 0 ] \
+  && step "materialize gather done (${#MAT_UNIVS_ARR[@]} scales, oracle held)" \
+  || step "WARN: $MAT_FAILED of ${#MAT_UNIVS_ARR[@]} materialize scales exited non-zero"
 
 # ---- 5. the HDT decode gather (same box, afterwards — sq-hmd7l.33) --------------------
 if [ "$HDT" = "1" ]; then
@@ -191,17 +214,21 @@ if [ "$HDT" = "1" ]; then
     CANONICAL=1 OUT_DIR="$OUT" HDT_ARCHIVE="$HDT_ARCHIVE" \
       bash scripts/bench/hdt-same-box.sh \
       && step "hdt gather done" || step "WARN: hdt-same-box.sh exited non-zero"
+    bench_egress_sweep "$OUT"   # the hdt envelope, durable before the sentinel
   else
     step "WARN: bench_oracle or generated HDT archive absent — hdt gather skipped"
   fi
 fi
 
-# ---- 6. durable egress + console-output backstop + sentinel ---------------------------
+# ---- 6. egress RETRY sweep + console-output backstop + sentinel -----------------------
+# Every envelope was already pushed as its stage finished; this is the retry pass for any
+# upload that failed then (bench_egress_sweep skips what already landed), never the first
+# attempt — a box that dies before reaching here has its completed scales in S3 already.
 step "envelopes in $OUT:"
 ls -la "$OUT" >&2 || true
+bench_egress_sweep "$OUT"
 for f in "$OUT"/*.json; do
   [ -f "$f" ] || continue
-  bench_egress_push "$f"
   echo "===ENVELOPE-BEGIN $(basename "$f")==="
   cat "$f"
   echo "===ENVELOPE-END==="
