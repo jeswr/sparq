@@ -5034,7 +5034,10 @@ version = "0.1.0"
 dependencies = [
  "bigdecimal",
  "num-bigint 0.5.1",
+ "oxrdf 0.2.4",
+ "rdf-canon",
  "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]
