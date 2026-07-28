@@ -23,6 +23,15 @@ readme = "README.md"
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
+# [SONNET-4.6] sq-5xgxe (gh #3218) The shipped MCP server binary. `required-features`
+# keeps it out of the DEFAULT build (and out of a default `--all-targets`): it needs the
+# `stdio` transport, which is itself opt-in, so `cargo build -p sparq-mcp` still compiles
+# only the library. Build/run it with `--features stdio`.
+[[bin]]
+name = "sparq-mcp"
+path = "src/main.rs"
+required-features = ["stdio"]
+
 [features]
 # The transport-agnostic dispatch core (`McpServer::handle_message`, the tool
 # schemas, JSON-RPC framing types) is ALWAYS compiled — it is pure serde_json over

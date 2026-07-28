@@ -37,8 +37,10 @@ let _writable = ServerConfig { allow_update: true, ..ServerConfig::default() };
 # Ok(()) }
 ```
 
-With the `stdio` feature, `serve_stdio(&mut server)` runs the standard MCP stdio
-transport (line-delimited JSON-RPC 2.0 over this process's stdin/stdout).
+The `stdio` feature ships the **`sparq-mcp` binary**: `cargo run -p sparq-mcp --features
+stdio -- [--allow-update] [--format FMT] [--query-timeout SECS] [--max-rows N] [DATA_FILE]`
+loads the file (format inferred from `.nt`/`.nq`/`.trig`, else turtle) and serves it over the
+standard MCP stdio transport — the same loop `serve_stdio(&mut server)` runs for an embedder.
 
 ## ✨ Tools
 
@@ -97,14 +99,12 @@ server was configured with. Run it only against a client you trust.
 
 - **Read-only by default.** Default tools cannot mutate; the feature-gated `validate` and `describe_form` tools are read-only.
 - **`update` is a mutation surface** and is exposed **only** when you set
-  `ServerConfig::allow_update = true` (or a binary's `--allow-update` flag). Turn it on
-  only when the client is trusted to issue writes. There is no per-tool ACL beyond this
-  one switch.
+  `ServerConfig::allow_update = true` (the binary's `--allow-update` flag). Turn it on only
+  when the client is trusted to issue writes; there is no per-tool ACL beyond this switch.
 - **Queries are bounded** by a `QueryBudget` (deadline + row cap) so one tool call cannot
   run the server unbounded — a blunt anti-DoS ceiling, not a fairness quota.
 
-No overclaim: this does not add isolation, sandboxing, or auth that the host process does
-not already provide.
+No overclaim: it adds no isolation, sandboxing, or auth the host process does not provide.
 
 ## 📚 Learn more
 
