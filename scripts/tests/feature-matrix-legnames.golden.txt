@@ -110,6 +110,7 @@ opt-in sparq-reason-ql (ql-consistency — DL-Lite_R violation-query consistency
 opt-in sparq-rsp (session_windows)
 opt-in sparq-rsp (window-aggregate)
 opt-in sparq-rsp (window-origin)
+opt-in sparq-serve (change-sink — external-broker CDC sink seam)
 opt-in sparq-serve (change-stream — durable replayable CDC stream)
 opt-in sparq-server (audit-log, access-audit + server features)
 opt-in sparq-server (brtpf)
