@@ -190,6 +190,18 @@ in `sparq_mcp::SUPPORTED_PROTOCOL_VERSIONS` is accepted verbatim; otherwise the 
 answers with its latest (`sparq_mcp::PROTOCOL_VERSION`) and the client decides whether
 to proceed. The tools flow is identical across the supported revisions.
 
+`handle_message` takes one complete JSON **value**, which may be a single request object
+or a top-level **JSON-RPC 2.0 §6 batch array**. Batches are what the `2025-03-26`
+revision requires (batching was added there and removed again in `2025-06-18`), and
+receiving them is what lets that revision sit in `SUPPORTED_PROTOCOL_VERSIONS`. A batch
+is dispatched element by element, in order, against the same server, and answered with
+an array of the non-notification responses; a batch of nothing but notifications gets no
+response at all, an empty array is answered with a single `-32600` error object, and a
+malformed element gets its own null-id error without voiding the rest of the batch.
+Batches are accepted whatever revision was negotiated — an array is only ever emitted in
+reply to an array, so a client on a batch-free revision is never handed one it did not
+ask for.
+
 The standard MCP stdio transport is behind the **`stdio`** feature:
 `sparq_mcp::serve_stdio(&mut server)` runs the line-delimited JSON-RPC loop over this
 process's stdin/stdout. For an arbitrary reader/writer pair use `sparq_mcp::serve`.
