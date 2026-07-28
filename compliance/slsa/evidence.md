@@ -186,7 +186,8 @@ permissions: { contents: read, packages: write, id-token: write, attestations: w
   `sparq-dist.intoto.jsonl`, and nobody has verified one**. Wiring is not evidence: this line stays
   "no L3 evidence" until a `v*` tag emits bundles that `slsa-verifier verify-artifact <file>
   --provenance-path <bundle> --source-uri github.com/jeswr/sparq` accepts. **Where that evidence
-  will come from (#4571):** publishing a Release fires `.github/workflows/release-verify.yml`,
+  will come from (#4571):** after cutting the Release, `release.yml`'s `verify-provenance` job
+  calls `.github/workflows/release-verify.yml`,
   which runs `scripts/verify-release-provenance.sh` over the *published* assets — both bundles
   attached and listed in `SHA256SUMS`, `SHA256SUMS` matching the published bytes, and every asset
   accepted by `slsa-verifier` against one of the two bundles (an uncovered asset, an empty asset
