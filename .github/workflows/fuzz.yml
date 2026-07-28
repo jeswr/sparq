@@ -518,14 +518,16 @@ jobs:
           "$b" fuzz 4695 2200 filter
           # sq-j80vk: fixed per-category regression windows over the SPARQL 1.1
           # surfaces added to the generator (property paths, aggregates/GROUP BY/
-          # HAVING, sub-selects, EXISTS, VALUES, BIND, GRAPH). 'all' picks ONE
+          # HAVING, sub-selects, EXISTS, VALUES, BIND, GRAPH) — plus sq-avd75's
+          # `antijoin` (the `OPTIONAL … FILTER(!bound)` idiom, i.e. rewrite (b) of the
+          # `algebra-rewrite` pass #1735, which the fuzzer builds ON). 'all' picks ONE
           # category per seed, so the 2000-seed broad window above leaves each of the
-          # 16 categories only ~125 cases — too thin to be a per-PR net for a
+          # 17 categories only ~118 cases — too thin to be a per-PR net for a
           # specific evaluation path. These are deterministic REGRESSION windows, not
           # known-catch ones: no historical bug is pinned to these seeds yet, and if
           # the nightly lane finds one its window gets pinned here the way sq-lr2ii's
           # was. ~2 s per category at release-fast throughput.
-          for c in path aggregate subquery exists values bind graph; do
+          for c in path aggregate subquery exists values bind graph antijoin; do
             "$b" fuzz 0 10000 "$c"
           done
           # Store-mode read paths over the fixed window: the same seeds re-run with
