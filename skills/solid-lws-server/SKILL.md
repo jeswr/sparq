@@ -189,3 +189,7 @@ visible.
   proof-of-possession environment variables.
 - Use `skills/usage-control-policy/SKILL.md` for the default-off
   `odrl-authz` read/query gate.
+- Use `skills/access-control/SKILL.md` § *LWS-server admission seam* for the
+  default-off `trust-graph` feature. It adds the library function
+  `authz::trust_admit::trust_admit_verdict`, which is deliberately not wired
+  into the request pipeline, so enabling it changes no request's outcome.
