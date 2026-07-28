@@ -8,6 +8,13 @@
    "promotion_criteria": "NEVER promotable — promoting it would INVERT its purpose. This is a DETECTOR: it REDs when it finds PRs that no review producer can reach, and it REDs fail-loud when the detector itself breaks. Neither condition is a property of the commit being gated, so gating on it would block every merge on an unrelated repo-wide backlog — the exact pressure that gets an alarm muted, which is the one outcome that destroys the signal. Registered because the lane was SILENTLY GATING: its header claimed it 'can never enter the ci-summary / gate poll set' on the premise that it creates no check-run on a PR head or merge-group ref, but ci-summary.yml ALSO runs on push to main (timeout-minutes: 80) and this workflow's scheduled run puts its check-run on exactly that head SHA. MEASURED 2026-07-27: ci_summary_gate.py render_verdict() over the real 477-check-run set for main head cb0c6739c listed `review-lane blind-spot alarm: failure` as a GATING failure. Delete this entry only if the workflow is removed.",
    "registered": "2026-07-27"
   },
+  "CI execution-latency alarm": {
+   "workflow": "ci-latency-alarm.yml",
+   "job_id": "alarm",
+   "owner_bead": "sq-1lc4i",
+   "promotion_criteria": "NEVER promotable, same reason as `review-lane blind-spot alarm` — this is a DETECTOR of repo-wide CI EXECUTION LATENCY (cron firing deficit, queue wait, execution overrun). Every condition it REDs on is a property of the runner fleet and the scheduler, never of the commit under test, so gating on it would block every merge whenever CI is merely slow — which is exactly the pressure that gets an alarm muted, the one outcome that destroys the signal. It also REDs fail-loud (exit 2) when the detector itself breaks or its scan set is empty. Declared for the same silent-gating reason as its sibling lanes (sq-huwr8): it is scheduled on main, so its check-run lands on the same head SHA the push-triggered ci-summary gate polls. Delete this entry only if the workflow is removed.",
+   "registered": "2026-07-28"
+  },
   "formal-lane no-verdict alarm": {
    "workflow": "formal-alarm.yml",
    "job_id": "alarm",

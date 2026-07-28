@@ -841,6 +841,23 @@ jobs:
       # the same false header reds on arrival.
       - name: Self-test the alarm/detector lanes are DECLARED non-gating (sq-huwr8)
         run: python3 scripts/tests/test_alarm_lanes_non_gating.py
+      # [OPUS-5] sq-1lc4i: the CI EXECUTION-LATENCY alarm
+      # (scripts/ci_execution_latency_alarm.py, .github/workflows/ci-latency-alarm.yml).
+      # Hermetic (no gh, no network). Three halves: the classifiers for all three choke
+      # modes — including the two guards that fail SILENTLY if broken, namely the
+      # missing-baseline fallback (a lane whose runs never complete must still be
+      # watchable, or the detector goes quiet exactly when a lane is 100% hung) and the
+      # empty-scan-set fail-loud (reporting health over an empty population); the
+      # DISJOINTNESS with #4368's cron_lane_liveness.py, asserted over the REAL workflow
+      # tree in both directions so neither a duplicate nor a hole can open; and the YAML
+      # SEAM (self-test ordered before the detector, both invocations matched EXACTLY
+      # rather than by containment, no step `if:`/`continue-on-error`, SHA-pinned actions,
+      # the sparse-checkout that M1 reads its expectation from, and permissions carrying
+      # `issues: write` with NO `pull-requests: write` so the detector can never acquire
+      # arming authority). The suite pins its OWN call site here, so it cannot silently
+      # leave CI.
+      - name: Self-test the CI execution-latency alarm (3 choke modes + YAML seam)
+        run: python3 scripts/tests/test_ci_execution_latency_alarm.py
       # [SONNET-4.6] sq-1cb6l: the 5 remaining hermetic test suites found by the
       # #1670 audit, wired here alongside the other ci-scripts self-tests.
       #
