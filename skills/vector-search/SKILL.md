@@ -1023,11 +1023,15 @@ let w = weights.weight_of([h, r, t], WeightMode::Provenance); // a head with NO 
 # Ok::<(), String>(())
 ```
 
-`w(t)` combines the head's `pkg:confidence` (epistemic weight), an **assurance multiplier**
-(`secx:Proven` → high, `Claimed` → mid, `Conjectured` → low; configurable via `WeightConfig`), and
-the **min** `pkg:confidence` over its `prov:wasDerivedFrom` sources (a fact is only as reliable as
-its least-reliable source). It is clamped to `[floor, 1.0]` so a positive is **down-weighted, never
-dropped** (a zero weight would silently delete it from the loss). The `kge` trainer reads it via the
+`w(t)` combines the qualifying subject's `pkg:confidence` (epistemic weight), an **assurance
+multiplier** (`secx:Proven` → high, `Claimed` → mid, `Conjectured` → low; configurable via
+`WeightConfig`), and the **min** `pkg:confidence` over its `prov:wasDerivedFrom` sources (a fact is
+only as reliable as its least-reliable source). The qualifying subject is the **reified statement**
+where the graph carries one (RDF 1.2 `rdf:reifies`, or RDF 1.1
+`rdf:subject`/`rdf:predicate`/`rdf:object`) — that is `w(t)` proper — and otherwise the **head**,
+a documented fallback that reports "this entity is low-assurance", not "this assertion is doubtful".
+It is clamped to `[floor, 1.0]` so a positive is **down-weighted, never dropped** (a zero weight
+would silently delete it from the loss). The `kge` trainer reads it via the
 new `TrainConfig::weight_mode` (default `Uniform`); under `Provenance` the **positive** step's
 effective LR is scaled by `w(t)` (negatives are unweighted — a corruption has no provenance).
 
@@ -1057,11 +1061,13 @@ under `Uniform` / a provenance-free graph:
 ```rust,ignore
 # // cargo build -p sparq-vectors --features structure
 use sparq_vectors::{ProvenanceWeights, WeightMode, Block, Encoder, Metric};
-# fn demo(weights: &ProvenanceWeights, subj_a: u32, subj_b: u32) -> Result<(), String> {
+# fn demo(weights: &ProvenanceWeights, edge_a: [u32; 3], edge_b: [u32; 3], subj_a: u32,
+#         subj_b: u32) -> Result<(), String> {
 // (2) confidence-weighted STRUCTURAL-SKETCH / characteristic-set pooling: pool a node's
-//     multi-valued contributions weighted by each value's provenance, NOT a uniform mean.
-//     Under WeightMode::Uniform this is EXACTLY the arithmetic mean (the ablation-off baseline).
-let contribs = vec![(subj_a, vec![1.0, 0.0]), (subj_b, vec![0.0, 1.0])];
+//     multi-valued contributions weighted by each CONTRIBUTING ASSERTION's w(t), NOT a uniform
+//     mean. Under WeightMode::Uniform this is EXACTLY the arithmetic mean (the ablation-off
+//     baseline) — and so is Provenance when no reified statement qualifies the edges.
+let contribs = vec![(edge_a, vec![1.0, 0.0]), (edge_b, vec![0.0, 1.0])];
 let pooled = weights.pool_weighted(&contribs, WeightMode::Provenance)?; // higher-quality value dominates
 
 // (3) per-Block query-time FUSION weight: aggregate the incident-edge provenance into a per-block
@@ -1077,6 +1083,76 @@ The `.spqv` `SchemaHeader` round-trips the per-block weight (format **v2**; a **
 parses, every block read back as the fail-open `1.0`). The weight is **layout metadata**, not part
 of a `Block`'s identity — `PartialEq`/`Eq` ignore it, so the header round-trip contract is unchanged.
 **No accuracy claim**; like point 1, adoption is measurement-gated.
+
+**Wired end-to-end (sq-w2af4).** Points 2–3 above are the *primitives*; these are the in-tree
+callers that actually consume them, so the loop runs graph → provenance → vector path without a
+hand-written middle:
+
+```rust,ignore
+# // cargo build -p sparq-vectors --features structure
+use sparq_vectors::{ground_weighted, sketch_predicate, Grounding, GroundingConfig, Modality};
+use sparq_vectors::{NodeWeighting, ProvenanceWeights, WeightMode};
+# fn demo(graph: &sparq_core::Graph, store: &sparq_vectors::VectorStore,
+#         header: &sparq_vectors::SchemaHeader) -> Result<(), String> {
+let pw = ProvenanceWeights::mine(graph);
+let block_preds = [Some("http://ex/good"), None];
+
+// (3) DEFAULT: derive each block's GRAPH-GLOBAL fusion weight — block i is fed by
+//     block_predicates[i]; `None` leaves that block at the fail-open 1.0. The header is shared,
+//     so this is one multiplier per BLOCK, persisted in the `.spqv` sidecar.
+let weighted = pw.weight_header(graph, header, &block_preds, WeightMode::Provenance)?;
+
+// (3) PER-NODE: `ground_weighted` overrides those defaults with weights mined from THIS node's
+//     own incident edges, ready for `fuse_rrf_weighted` / `fuse_scores`. Pass `None` (or call
+//     plain `ground`) to keep the persisted header defaults instead.
+let weighting = NodeWeighting {
+    weights: &pw, block_predicates: &block_preds, mode: WeightMode::Provenance };
+if let Some(Grounding::TypedSubVector { weights, .. }) = ground_weighted(
+    graph, &node, Modality::TypedSubVector, &GroundingConfig::default(), None,
+    Some((store, &weighted)), Some(&weighting)) { let _ = weights; }
+
+// (2) the structural-sketch pooler: pool a node's multi-valued predicate over its neighbours'
+//     stored vectors, each weighted by THAT ASSERTION's w(t). Uniform ⇒ exactly the arithmetic
+//     mean, and so is Provenance on a graph with no reified statements.
+let sketch = sketch_predicate(graph, store, &node, "http://ex/cites", &pw, WeightMode::Provenance)?;
+# let _ = sketch; Ok(()) }
+```
+
+**What `w(t)` keys on — and where it is honestly a no-op.** `ProvenanceWeights` reads `w(t)` at two
+levels: **statement-level** when the graph reifies the triple (RDF 1.2 `:st rdf:reifies
+<<( s p o )>>`, or RDF 1.1 `rdf:subject`/`rdf:predicate`/`rdf:object`) and the reifier itself
+carries `pkg:confidence` / `pkg:assurance` / `prov:wasDerivedFrom`; otherwise **head-level**, the
+subject entity's own annotations. Two consequences to internalise before quoting a result:
+
+- `sketch_predicate` keys each contribution on **the asserting triple**. Where the graph carries no
+  statement-level provenance (`ProvenanceWeights::annotated_statements() == 0`), every
+  `(node, predicate, ·)` edge falls back to the same head weight and the pool is **exactly** the
+  arithmetic mean — this axis is an honest **no-op** there, not a substituted heuristic. It is
+  deliberately not keyed on the object entity: "the object is a low-assurance entity" is a
+  different claim from "this assertion is doubtful".
+- `weight_header` keys each block on the **graph-global** mean over every subject asserting that
+  block's feeding predicate. `SchemaHeader` is one shared, graph-wide layout header, so that is a
+  per-block **default** — every node grounded through `ground` sees the same weights. For the
+  design's per-node scaling use `ground_weighted` with a `NodeWeighting`, which computes each
+  block's multiplier from **that node's own incident edges**
+  (`ProvenanceWeights::node_block_weight`); a node with no incident edge for the predicate fails
+  open at `1.0` rather than inheriting the graph average.
+
+**Measurement-gated, with no result published here.** `eval::run_pooling_ablation` (feature `kge`)
+is the paired instrument for the pooling axis — one training run per seed, both arms
+post-processing the *same* parameters, so the delta isolates the pooling weights. It returns paired
+per-seed MRR / Hits@10 deltas with their standard error; `mrr_significant_at(k)` reports whether the
+lift clears `k` standard errors of its own paired spread. Read it that way: a delta that does not
+clear the pre-registered bar is **no measured lift**, and the honest verdict for that axis on that
+slice is ABANDON, not a defect to be explained away. On a graph with no **statement-level**
+provenance (including any provenance-free graph) both arms pool with identical weights and every
+delta is exactly zero by construction — read a zero there as "no per-statement signal in this
+graph", not as "weighting did not help".
+
+Run it yourself rather than trusting a number quoted here — results are seed-, fixture- and
+box-dependent and are **not** canonical:
+`cargo run -p sparq-vectors --release --features kge --example kge_ablation`. Any adoption decision
+must be re-measured on a real, provenance-bearing KG.
 
 ### 15. Typed-literal encoders — order-preserving numeric / boolean / date + schema header (opt-in, feature = `structure`)
 
@@ -1233,7 +1309,9 @@ same node projected into whichever object a tool needs. `ground` (the `grounding
   al. ESWC 2016, via `sparq-introspect`). Verifiable facts only — every fact is a real triple of the
   graph, never an approximate signal.
 - **`Modality::TypedSubVector`** — only the relevant `SchemaHeader` blocks of the node's stored
-  vector (e.g. just the numeric block). Minimal by construction.
+  vector (e.g. just the numeric block). Minimal by construction. Also returns each kept block's
+  `weights` entry — the per-block fusion multiplier for `fuse_rrf_weighted` (`1.0` fail-open; see
+  §14 sq-w2af4).
 - **`Modality::NlString`** — the token-budgeted `verbalize` passage, optionally **extended to render
   typed values** (unit-typed quantities + enum labels) via `render_typed_values`.
 - **`Modality::TypedValue`** — a single typed slot filled directly: `TypedValue::{Boolean, Number,
