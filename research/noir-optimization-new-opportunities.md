@@ -152,9 +152,12 @@ Two adjacent diagnostics gaps in the same file: the ACIR bail-outs at `:392` and
 `:419` discard the source location. **Disposition:** these are upstream correctness /
 diagnostics defects, not optimisation candidates — they move no gate count, so §6's
 measurement gate does not apply and they are deliberately absent from §4 and §6. They
-*are* actionable, and are captured as a follow-up issue (filed with this PR) for
-upstream reporting; they get no `sq-` bead under `sq-uuvac`, whose remit is measured
-optimisation PRs. No further work on them is pending in this record.
+*are* actionable, and are captured as a `self-improvement` follow-up issue filed with
+this PR for upstream reporting — titled *"Noir upstream: ACIR runaway-unroll hang + two
+location-discarding bail-outs (unrolling.rs)"* and carrying the durable dedupe marker
+**`noir-acir-unroll-2026-07-28`**, which is the handle to search the tracker for. They
+get no `sq-` bead under `sq-uuvac`, whose remit is measured optimisation PRs. No further
+work on them is pending in this record.
 
 ### 3.2 Array/memory — `value_merger.rs`, `array_set_window_optimization.rs`, `mutable_array_set.rs`
 
@@ -510,8 +513,9 @@ Skeleton the paper can take directly, matching the estate's measured-and-honest 
 - **The four non-optimisation findings are dispositioned in place, not left open.** The
   measurement gate above governs the §6 optimisation specs *only*; it is not a reason to
   leave unrelated work untracked. So, explicitly: the ACIR runaway-unroll hang and the two
-  location-discarding ACIR bail-outs (§3.1) are captured as a follow-up issue for upstream
-  reporting; the stale `mem2reg` ordering comment (§3.3) and the `CHANGELOG.md:67`
+  location-discarding ACIR bail-outs (§3.1) are captured as a `self-improvement` follow-up
+  issue filed with this PR, findable by its dedupe marker `noir-acir-unroll-2026-07-28`
+  (§3.1 gives the full title); the stale `mem2reg` ordering comment (§3.3) and the `CHANGELOG.md:67`
   over-claim (§1) are documentation-only and deliberately untracked, for the reasons given
   at each. No reader should expect a bead for any of the four.
 - **HEAD is a moving target.** All citations are `e22cd89b` (the same commit
