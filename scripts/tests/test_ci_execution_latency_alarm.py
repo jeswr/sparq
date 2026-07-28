@@ -159,6 +159,47 @@ class TestM1CronFiringDeficit(unittest.TestCase):
         self.assertEqual(
             len(alarm.find_cron_deficits([_lane(fires=at_floor - 1)], NOW)[0]), 1)
 
+    def test_the_delivery_floor_is_pinned_by_a_LITERAL_fixture(self):
+        """`at_floor` above is COMPUTED FROM CRON_DELIVERY_FLOOR, so it rescales with the
+        constant and cannot fail when it moves — MEASURED: `0.60 -> 0.05` survived the
+        sibling deployment's entire suite for exactly that reason, and dies in this one
+        only by the accident of its smaller cap.
+
+        `0 */4 * * *` has a 24h nominal of 5, BELOW the cap, so `expected` is 5 whatever
+        the cap constant is. Neither 5 nor the fire counts derive from any constant."""
+        f, _ = alarm.find_cron_deficits(
+            [_lane(crons=("0 */4 * * *",), fires=2)], NOW)
+        self.assertEqual(len(f), 1, "2 of 5 = 0.40 must raise")
+        self.assertEqual(f[0]["expected"], 5)
+        self.assertEqual(f[0]["ratio"], 0.4)
+        f, _ = alarm.find_cron_deficits(
+            [_lane(crons=("0 */4 * * *",), fires=3)], NOW)
+        self.assertEqual(f, [], "3 of 5 = 0.60 must NOT raise")
+
+    def test_the_window_constant_is_pinned_by_a_LITERAL_expectation(self):
+        """`CRON_WINDOW_HOURS 24.0 -> 6.0` survived every earlier assertion — and 6.0 is
+        the value the module docstring says was TRIED AND REJECTED. At the 24h window a
+        4-hourly lane's expectation is 5; at 6h it is 1, and the same fixture goes quiet."""
+        self.assertEqual(alarm.CRON_WINDOW_HOURS, 24.0)
+        f, _ = alarm.find_cron_deficits(
+            [_lane(crons=("0 */4 * * *",), fires=2)], NOW)
+        self.assertEqual(len(f), 1)
+        self.assertEqual(f[0]["expected"], 5,
+                         "the DEFAULT window is what makes this expectation 5")
+
+    def test_every_shipped_constant_is_pinned_against_a_literal(self):
+        """A threshold exercised only through fixtures derived from it is not tested.
+        These are the independent write-downs."""
+        self.assertEqual(alarm.CRON_MAX_CREDIBLE_FIRINGS_PER_HOUR, 0.5)
+        self.assertEqual(alarm.CRON_GRACE_MINUTES, 15)
+        self.assertEqual(alarm.EXEC_FLOOR_SECONDS, 6 * 60 * 60)
+        self.assertEqual(alarm.BASELINE_MIN_N, 5)
+        self.assertGreaterEqual(alarm.CRON_DELIVERY_FLOOR, 0.50)
+        self.assertLessEqual(alarm.CRON_DELIVERY_FLOOR, 0.70)
+        self.assertGreaterEqual(alarm.EXEC_OVERRUN_MULTIPLE, 1.25)
+        self.assertLessEqual(alarm.EXEC_OVERRUN_MULTIPLE, 2.0)
+
+
     def test_an_over_delivering_lane_is_healthy(self):
         f, _ = alarm.find_cron_deficits([_lane(fires=self.CAP * 3)], NOW)
         self.assertEqual(f, [])
@@ -180,6 +221,62 @@ class TestM1CronFiringDeficit(unittest.TestCase):
         self.assertEqual(c.get("cron-unparseable"), 1,
                          "a fail-safe skip must be counted, or it is a silent skip")
 
+
+class TestM1NewLaneWindow(unittest.TestCase):
+    """A newly-added lane has not had time to deliver, and M1 cannot tell "did not fire"
+    from "did not exist yet" out of run times alone — so a lane added two hours ago reads
+    ratio 0.08 and alarms for the next ~14 hours. The workflow's own `created_at` resolves
+    it; a lane younger than the window is counted and skipped, not guessed at."""
+
+    def test_a_lane_younger_than_the_window_is_skipped_and_counted(self):
+        f, c = alarm.find_cron_deficits([_lane(fires=1, created_hours_ago=2)], NOW)
+        self.assertEqual(f, [])
+        self.assertEqual(c.get("lane-too-new-for-an-expectation"), 1)
+
+    def test_the_skip_is_not_an_unconditional_mute(self):
+        """ANTI-VACUITY. The identical delivery from a lane with no birth date, and from
+        one born before the window, must still alarm — otherwise the new-lane exit is
+        just M1 switched off."""
+        self.assertEqual(len(alarm.find_cron_deficits([_lane(fires=1)], NOW)[0]), 1)
+        self.assertEqual(
+            len(alarm.find_cron_deficits(
+                [_lane(fires=1, created_hours_ago=48)], NOW)[0]), 1)
+
+    def test_the_birth_date_boundary_is_pinned_from_BOTH_sides(self):
+        """Without both directions `if born > start` and `if born > start - 100 years`
+        are the same test."""
+        f, c = alarm.find_cron_deficits([_lane(fires=1, created_hours_ago=23)], NOW)
+        self.assertEqual(f, [])
+        self.assertEqual(c.get("lane-too-new-for-an-expectation"), 1)
+        f, c = alarm.find_cron_deficits([_lane(fires=1, created_hours_ago=25)], NOW)
+        self.assertEqual(len(f), 1)
+        self.assertEqual(c.get("firing-deficit"), 1)
+
+    def test_an_established_lane_is_unaffected_by_the_check(self):
+        self.assertEqual(
+            alarm.find_cron_deficits(
+                [_lane(fires=TestM1CronFiringDeficit.CAP, created_hours_ago=48)],
+                NOW)[0], [])
+
+    def test_the_fetch_layer_supplies_the_birth_date_the_check_reads(self):
+        """THE CALL SITE again: `fetch_lanes` must carry `created_at` off the workflow
+        listing, or the guard above can never fire in production."""
+        listing = {"workflows": [
+            {"path": ".github/workflows/ci.yml", "state": "active",
+             "created_at": "2026-07-01T00:00:00Z"}]}
+
+        def fake_gh(args, *, parse=True):
+            return listing if "actions/workflows?" in args[-1] else {"workflow_runs": []}
+
+        real = alarm._gh
+        alarm._gh = fake_gh
+        try:
+            lanes = alarm.fetch_lanes("o/r", WORKFLOWS, 24.0, NOW)
+        finally:
+            alarm._gh = real
+        by_path = {lane["workflow"]: lane for lane in lanes}
+        self.assertEqual(by_path[".github/workflows/ci.yml"]["created_at"],
+                         "2026-07-01T00:00:00Z")
 
 class TestM2QueueWait(unittest.TestCase):
     def test_a_run_queued_past_the_threshold_raises(self):
@@ -203,16 +300,131 @@ class TestM2QueueWait(unittest.TestCase):
         """ABSOLUTE, not relative to the constant. The sibling tests above derive their
         fixture age FROM QUEUE_MAX_WAIT_SECONDS, so they scale with it and cannot fail
         when it changes — a mutant that multiplied the constant by 10**6 SURVIVED them.
-        MEASURED known positive: jeswr/agent-account-registry held `pr-gate` runs in
-        `queued` for 12.8-99.5 minutes between 00:58Z and 02:24Z on 2026-07-28."""
+
+        NOTE: an earlier revision of this docstring cited "jeswr/agent-account-registry
+        held `pr-gate` runs in `queued` for 12.8-99.5 minutes on 2026-07-28" as a MEASURED
+        known positive. That is WITHDRAWN — those seven runs were `run_attempt: 2` re-runs
+        and neither attempt ever queued (see TestM2ReRunTrap). M2 has no validated known
+        positive; this fixture pins the SHIPPED threshold, it does not evidence it."""
         f, _ = alarm.find_queue_overruns([_run_obj(status="queued", age_min=60)], NOW)
         self.assertEqual(len(f), 1, "an hour in `queued` must alarm")
 
+    def test_two_minutes_in_queued_stays_quiet_under_the_SHIPPED_threshold(self):
+        """The other direction, also absolute: without it `QUEUE_MAX_WAIT_SECONDS = 0`
+        survives, because every fixture in this class is ABOVE the threshold."""
+        f, _ = alarm.find_queue_overruns([_run_obj(status="queued", age_min=2)], NOW)
+        self.assertEqual(f, [])
+
     def test_the_queue_threshold_stays_inside_its_validated_band(self):
-        """The band the false-positive measurement was made over. Outside it the stated
-        0.022% / 0.153% figures no longer describe the shipped behaviour."""
+        """A literal band, not derived from the constant. The previously-stated 0.022% /
+        0.153% false-positive figures are WITHDRAWN (they were computed with the
+        contaminated estimator); the re-derived rate is 0 over N=9,053 attempt-1 registry
+        runs, which constrains this constant from below only."""
+        self.assertEqual(alarm.QUEUE_MAX_WAIT_SECONDS, 15 * 60)
         self.assertGreaterEqual(alarm.QUEUE_MAX_WAIT_SECONDS, 5 * 60)
         self.assertLessEqual(alarm.QUEUE_MAX_WAIT_SECONDS, 30 * 60)
+
+
+class TestM2ReRunTrap(unittest.TestCase):
+    """M2 must not charge a re-run's IDLE GAP as queue wait.
+
+    MEASURED 2026-07-28 on jeswr/agent-account-registry run 30318886362:
+        run-level    run_attempt=2  created_at=00:58:13Z  run_started_at=02:37:40Z
+        /attempts/1                 created_at=00:58:13Z  run_started_at=00:58:13Z   0s
+        /attempts/2                 created_at=02:37:41Z  run_started_at=02:37:40Z   0s
+    The run-level `created_at` is FROZEN at attempt 1 and never resets, while
+    `run_attempt` and `run_started_at` track the live attempt. `now - created_at` on that
+    exact payload reports waited_seconds=5967 for an attempt picked up in under a second —
+    so the naive form fires on every re-run older than the threshold, which is the normal
+    case. These seven runs were this mode's ENTIRE published known positive."""
+
+    def _rerun(self, **kw):
+        return _run_obj(status="queued", attempt=2, created_age_min=99, **kw)
+
+    def test_the_fixture_reproduces_the_frozen_run_level_created_at(self):
+        r = self._rerun(age_min=1, attempt_created_age_min=1)
+        naive = (NOW - alarm._ts(r["created_at"])).total_seconds()
+        true_wait = (NOW - alarm._ts(r[alarm.ATTEMPT_CREATED_KEY])).total_seconds()
+        self.assertGreater(naive, alarm.QUEUE_MAX_WAIT_SECONDS,
+                           "vacuous unless the NAIVE reading would have fired")
+        self.assertLess(true_wait, alarm.QUEUE_MAX_WAIT_SECONDS)
+
+    def test_a_rerun_idle_gap_is_not_charged_as_queue_wait(self):
+        f, c = alarm.find_queue_overruns(
+            [self._rerun(age_min=1, attempt_created_age_min=1)], NOW)
+        self.assertEqual(f, [], "the re-run false positive is the whole defect")
+        self.assertEqual(c.get("queued-within-threshold"), 1)
+
+    def test_an_unresolvable_rerun_is_quiet_but_COUNTED(self):
+        """Fail-safe quiet, never fail-open silent: the run-level value is available here
+        and known-wrong, so the honest move is to decline and say so in the census."""
+        f, c = alarm.find_queue_overruns([self._rerun(age_min=1)], NOW)
+        self.assertEqual(f, [])
+        self.assertEqual(c.get("queued-rerun-attempt-unresolved"), 1)
+        self.assertIsNone(c.get("queued-no-timestamp"),
+                          "the two skip causes must stay separable in the census")
+
+    def test_the_fix_did_not_simply_disable_m2(self):
+        """A detector that never fires is not a fixed detector. Both a genuine attempt-1
+        wait and a genuine wait ON a re-run attempt must still raise."""
+        f, _ = alarm.find_queue_overruns(
+            [_run_obj(status="queued", age_min=60, attempt=1)], NOW)
+        self.assertEqual(len(f), 1)
+        f, _ = alarm.find_queue_overruns(
+            [_run_obj(status="queued", age_min=60, attempt=3, created_age_min=999,
+                      attempt_created_age_min=60)], NOW)
+        self.assertEqual(len(f), 1, "a re-run CAN queue; it must still be reportable")
+
+    def test_the_fetch_layer_actually_writes_what_the_detector_reads(self):
+        """THE CALL SITE. A pure detector reading ATTEMPT_CREATED_KEY is worthless if
+        nothing ever writes it, and that omission is invisible to every test above."""
+        seen = []
+
+        def fake_gh(args, *, parse=True):
+            seen.append(args[-1])
+            return {"created_at": "2026-07-28T11:59:00Z"}
+
+        real = alarm._gh
+        alarm._gh = fake_gh
+        try:
+            out = alarm.resolve_attempt_created("o/r", [
+                _run_obj(status="queued", age_min=1, attempt=2, created_age_min=99),
+                _run_obj(status="queued", age_min=99, attempt=1),
+                _run_obj(status="in_progress", age_min=99, attempt=2),
+            ])
+        finally:
+            alarm._gh = real
+        self.assertEqual(out[0].get(alarm.ATTEMPT_CREATED_KEY), "2026-07-28T11:59:00Z")
+        self.assertEqual(len(seen), 1, "one request, only for the queued re-run")
+        self.assertTrue(seen[0].endswith("/attempts/2"), seen)
+        self.assertNotIn(alarm.ATTEMPT_CREATED_KEY, out[1])
+        self.assertNotIn(alarm.ATTEMPT_CREATED_KEY, out[2])
+        # End to end: enrichment must turn the false positive into silence, leaving only
+        # the genuine attempt-1 wait.
+        f, _ = alarm.find_queue_overruns(out, NOW)
+        self.assertEqual([x["run_attempt"] for x in f], [1])
+
+    def test_a_failed_attempt_lookup_degrades_instead_of_aborting_the_tick(self):
+        """The escaped exception is asserted to be None. A test that let the exception
+        propagate and read the traceback as a pass would certify nothing: a crash looks
+        identical whether the guarantee held or the stub broke."""
+        def raising_gh(args, *, parse=True):
+            raise alarm.AlarmError("attempt lookup unavailable")
+
+        real, escaped = alarm._gh, None
+        alarm._gh = raising_gh
+        try:
+            out = alarm.resolve_attempt_created(
+                "o/r", [_run_obj(status="queued", age_min=1, attempt=2,
+                                 created_age_min=99)])
+        except BaseException as exc:  # noqa: BLE001 - the assertion IS that none escapes
+            out, escaped = None, exc
+        finally:
+            alarm._gh = real
+        self.assertIsNone(escaped, f"an attempt lookup failure escaped: {escaped!r}")
+        self.assertNotIn(alarm.ATTEMPT_CREATED_KEY, out[0])
+        _, c = alarm.find_queue_overruns(out, NOW)
+        self.assertEqual(c.get("queued-rerun-attempt-unresolved"), 1)
 
 
 class TestM3ExecutionOverrun(unittest.TestCase):
@@ -270,11 +482,47 @@ class TestM3ExecutionOverrun(unittest.TestCase):
 
     def test_the_measured_2026_07_27_outlier_shape_raises(self):
         """KNOWN POSITIVE, from real data: nightly ci.yml ran 17.33h on 2026-07-27 against
-        an 8.35h p90 over the preceding 13 nights (2.08x)."""
+        an 8.35h p90 over the preceding 13 nights (2.08x). This pins EXEC_OVERRUN_MULTIPLE
+        from ABOVE — at K=2.5 the real event is missed."""
         big = {(".github/workflows/a.yml", "schedule"): {"p90": 8.35 * 3600.0, "n": 13}}
         f, _ = alarm.find_execution_overruns(
             [_run_obj(age_min=int(17.33 * 60))], big, NOW)
         self.assertEqual(len(f), 1)
+
+    def test_the_overrun_multiple_is_pinned_from_BELOW_as_well(self):
+        """Nothing pinned the multiple downwards, so `2.0 -> 1.0` survived: every fixture
+        that must RAISE still raises when the threshold shrinks. 9h against an 8h p90 is
+        1.13x — inside the band at K=2.0, outside it at K<=1.13."""
+        big = {(".github/workflows/a.yml", "schedule"): {"p90": 8 * 3600.0, "n": 40}}
+        f, _ = alarm.find_execution_overruns([_run_obj(age_min=9 * 60)], big, NOW)
+        self.assertEqual(f, [], "9h against an 8h p90 is inside a 2.0x band")
+
+    def test_the_floor_is_pinned_from_BOTH_sides_with_no_baseline(self):
+        """`EXEC_FLOOR_SECONDS -> 1h` survives any suite whose no-baseline fixtures are
+        all ABOVE the floor."""
+        self.assertEqual(
+            alarm.find_execution_overruns([_run_obj(age_min=5 * 60)], {}, NOW)[0], [])
+        self.assertEqual(
+            len(alarm.find_execution_overruns([_run_obj(age_min=7 * 60)], {}, NOW)[0]), 1)
+
+    def test_the_fixture_carries_a_live_runs_real_updated_at(self):
+        """`started = run.get("updated_at") or run_started_at` SURVIVED the first battery
+        because the fixture was a 7-key hand-built dict with no `updated_at`. Every live
+        run has one, and on a live run it tracks the PRESENT moment — so that mutant
+        collapses M3's age to ~0 and the mode never fires again. The fixture now carries
+        the real shape, which is what makes the sibling tests able to see it."""
+        live = _run_obj(age_min=17 * 60)
+        self.assertIn("updated_at", live)
+        self.assertLess((NOW - alarm._ts(live["updated_at"])).total_seconds(), 60,
+                        "a live run's updated_at is ~now, not its start")
+        self.assertGreater(
+            (NOW - alarm._ts(live["run_started_at"])).total_seconds(), 16 * 3600)
+        # And the substitution really would be catastrophic — stated as a measurement,
+        # not an assertion about the shipped code.
+        self.assertEqual(
+            alarm.find_execution_overruns(
+                [dict(live, run_started_at=live["updated_at"])], {}, NOW)[0], [],
+            "reading updated_at as the start silences a 17h overrun")
 
     def test_the_detection_variable_is_live_age_not_completed_history(self):
         """A hang is invisible to any statistic over COMPLETED runs — a job that never
