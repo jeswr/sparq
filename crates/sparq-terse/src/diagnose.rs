@@ -100,9 +100,16 @@ pub fn keyword_hints(sparql: &str) -> Vec<KeywordHint> {
                 let end = word_end(bytes, i);
                 // A word glued to an identifier (`?fooBAR`, the local part of `ex:name`) is not
                 // a standalone token, and a word followed by `:` is a prefix label or a `K:`
-                // keyword — neither is a SPARQL keyword position.
-                let standalone = i == 0 || !crate::transpile::is_ident_char(bytes[i - 1]);
-                if standalone && bytes.get(end) != Some(&b':') {
+                // keyword — neither is a SPARQL keyword position. Both boundaries also have to
+                // account for the name bytes this ASCII scanner cannot itself walk (non-ASCII
+                // `PN_CHARS`, a `PN_LOCAL_ESC`), else a candidate starts or ends inside a valid
+                // name. The two sides differ only in `?`/`$`, which can *start* a name but never
+                // continue one — so a word merely ending at one (`FLTR?x`) is still a bare word.
+                let standalone = !preceded_by_name(bytes, i);
+                let glued_right = bytes
+                    .get(end)
+                    .is_some_and(|&b| b == b':' || !b.is_ascii() || b == b'\\');
+                if standalone && !glued_right {
                     if let Some(hint) = hint_for(&sparql[i..end]) {
                         if !hints.iter().any(|h| h.token == hint.token) {
                             hints.push(hint);
@@ -115,6 +122,41 @@ pub fn keyword_hints(sparql: &str) -> Vec<KeywordHint> {
         }
     }
     hints
+}
+
+/// `true` if `b` can be part of a SPARQL **name** — a variable, a prefixed name, a blank node
+/// label — as opposed to a delimiter that a bare keyword may sit against.
+///
+/// This is deliberately wider than [`crate::transpile::is_ident_char`], which is ASCII-only.
+/// Two classes of name byte fall outside that set, and both are *invisible* to this module's
+/// ASCII word scanner, so without them a candidate word can begin (or end) in the middle of a
+/// perfectly legal name:
+///
+/// - **any non-ASCII byte**, because `VARNAME`/`PN_CHARS_BASE` admit Unicode — in the valid
+///   variable `?aéselct` the `é` would otherwise read as a delimiter and expose `selct`; and
+/// - **`\`**, which opens a `PN_LOCAL_ESC` in the local part of a prefixed name — in the valid
+///   `ex:a\~selct` the escape would otherwise expose `selct` the same way.
+///
+/// Both cases report a *typo* in syntax the vendored parser accepts, which contradicts this
+/// module's contract that a valid query yields no hints — pinned against the real parser by
+/// `unicode_names_and_pn_local_escapes_are_never_flagged` below.
+fn is_name_byte(b: u8) -> bool {
+    !b.is_ascii() || b == b'\\' || crate::transpile::is_ident_char(b)
+}
+
+/// `true` if the word starting at `i` is glued to the end of a name, so it is not a bare word.
+///
+/// One byte of lookback is not enough: a `PN_LOCAL_ESC` is *two* bytes (`\` plus one escaped
+/// ASCII character such as `~`), and it is the escaped character — not the backslash — that
+/// sits immediately before the word. In the valid `ex:a\~selct` a one-byte look-back sees `~`,
+/// reads it as a delimiter, and reports `selct`. Outside strings, IRIs and comments (all
+/// skipped before this point) a `\` in SPARQL *only* opens that escape, so looking back past
+/// one byte for it cannot mask a real bare word.
+fn preceded_by_name(bytes: &[u8], i: usize) -> bool {
+    if i == 0 {
+        return false;
+    }
+    is_name_byte(bytes[i - 1]) || (i >= 2 && bytes[i - 2] == b'\\')
 }
 
 /// The byte index just past the word starting at `start` (`[A-Za-z0-9_]+`).
@@ -269,6 +311,38 @@ mod tests {
         ] {
             assert!(keyword_hints(q).is_empty(), "false positive in: {q}");
         }
+    }
+
+    #[test]
+    fn unicode_names_and_pn_local_escapes_are_never_flagged() {
+        // `valid_queries_are_never_flagged` only exercises ASCII names, so it cannot pin the
+        // contract for the name characters the ASCII word scanner cannot walk: a non-ASCII
+        // `PN_CHARS` byte and a `PN_LOCAL_ESC`. Both used to read as delimiters, which started
+        // a candidate word *inside* a valid name and reported its keyword-ish ASCII tail as a
+        // typo. These queries are checked against the real vendored parser first, so the test
+        // asserts the actual contract ("valid query ⇒ no hints") rather than a guess at one.
+        for q in [
+            // `é` (U+00E9) is a legal VARNAME character; `selct` is one edit from SELECT.
+            "SELECT ?aéselct WHERE { ?aéselct ?p ?o }",
+            // ...and in the local part of a prefixed name, and in a blank node label.
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:péselct ?o }",
+            "SELECT ?s WHERE { _:béwhre <http://ex/p> ?s }",
+            // `\~` is a PN_LOCAL_ESC, not a name terminator.
+            r"PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:a\~selct ?o }",
+        ] {
+            assert!(
+                spargebra::SparqlParser::new().parse_query(q).is_ok(),
+                "test query is not actually valid SPARQL: {q}"
+            );
+            assert!(keyword_hints(q).is_empty(), "false positive in: {q}");
+        }
+
+        // Positive control: the wider name boundary must not silence a genuine bare typo that
+        // merely shares a query with a Unicode name.
+        let hints = keyword_hints("SELET ?aéselct WHERE { ?aéselct ?p ?o }");
+        assert_eq!(hints.len(), 1, "got {hints:?}");
+        assert_eq!(hints[0].token, "SELET");
+        assert_eq!(hints[0].suggestions[0], "SELECT");
     }
 
     #[test]
