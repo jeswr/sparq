@@ -227,6 +227,9 @@ test("op 'any' binds the value with no FILTER; an empty value warns instead of e
         node({
           id: "n1",
           variable: "s",
+          // Projected so the empty-value warning is the ONLY one: an unprojected canvas also
+          // (correctly) warns "Nothing is selected", which has its own test.
+          project: true,
           filters: [filter({ id: "f1", predicateIri: `${EX}p`, variable: "v", op: "eq", value: "  " })],
         }),
       ],

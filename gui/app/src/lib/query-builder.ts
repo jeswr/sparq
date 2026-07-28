@@ -133,7 +133,10 @@ export function localName(iri: string): string {
  */
 export function sanitizeVariable(raw: string, fallback = "v"): string {
   const cleaned = raw.replace(/^\?+/, "").replace(/[^A-Za-z0-9_]/g, "_");
-  return cleaned.length > 0 ? cleaned : fallback;
+  // Every illegal character is SUBSTITUTED, not dropped, so `!!!` survives as `___` — a legal
+  // VARNAME that names nothing. "Nothing usable survived" therefore means "no letter or digit
+  // is left", not "the string is empty"; otherwise the user sees `?___` instead of the fallback.
+  return /[A-Za-z0-9]/.test(cleaned) ? cleaned : fallback;
 }
 
 // Characters an IRIREF (`<...>`) may not contain, per the SPARQL grammar. They are
