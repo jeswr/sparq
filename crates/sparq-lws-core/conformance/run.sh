@@ -27,8 +27,10 @@
 #   The VM cannot reach a macOS-host-bound process via `localhost`, so a `--network host` `socat`
 #   sidecar forwards the VM's `localhost:3000` → the macOS host's `:3000` (host.docker.internal). The
 #   net effect: harness, server, and Keycloak all agree on `localhost:3000` / `localhost:8080`, the
-#   DPoP `htu` matches, and the http issuer resolves to loopback. On a native-Linux engine `--network
-#   host` is the literal host netns and the socat hop is a harmless passthrough.
+#   DPoP `htu` matches, and the http issuer resolves to loopback. On a NATIVE-LINUX engine `--network
+#   host` is the literal host netns, so the harness already reaches the host-bound server and the
+#   sidecar is NOT started — it is not a harmless passthrough there, it cannot even bind :3000 because
+#   the server holds it. The script PROBES which case it is rather than assuming.
 #
 # Produces an EARL + HTML + summary report under conformance/reports/, then RATCHETS the generated
 # score against the pinned floor in `baseline.json` (the "keep CTH green through any later change"
@@ -68,6 +70,9 @@ ISSUER="http://localhost:8080/realms/solid"
 # PORT DELTA: renamed from `srs-conformance-fwd` so a stray container from a sibling solid-server-rs
 # checkout on the same box is never force-removed by this script (`docker rm -f` on cleanup).
 FWD_NAME="sparq-lws-cth-fwd"
+# The image used BOTH for the reachability probe and (when needed) the forwarder itself, so the probe
+# and the thing it gates can never disagree about what `--network host` means on this engine.
+FWD_IMAGE="${CTH_FWD_IMAGE:-alpine/socat:latest}"
 # PORT DELTA: the harness `--target` selects the TestSubject node in config/test-subjects.ttl, which
 # this port renamed from `solid-server-rs` to the crate it now drives.
 TARGET_SUBJECT="sparq-lws-core"
@@ -111,6 +116,11 @@ fi
 [ -d "$SPEC_TESTS" ] || { echo "ERROR: specification-tests not found at $SPEC_TESTS (override SPEC_TESTS)" >&2; exit 1; }
 
 docker image inspect "$IMAGE" >/dev/null 2>&1 || { echo "ERROR: CTH image '$IMAGE' not present. Build the ath-patched image (see conformance/README.md 'DPoP ath') or set CTH_IMAGE." >&2; exit 1; }
+# Obtain the probe/forwarder image UP FRONT. The networking probe below reads a failed `docker run` as
+# "the harness netns cannot reach the server"; if the image were merely missing, that misreads as the
+# VM-backed case and starts a forwarder on an engine that does not need one.
+docker image inspect "$FWD_IMAGE" >/dev/null 2>&1 || docker pull "$FWD_IMAGE" >/dev/null 2>&1 \
+  || { echo "ERROR: could not obtain the probe/forwarder image '$FWD_IMAGE' (override CTH_FWD_IMAGE)." >&2; exit 1; }
 curl -s -m 5 "${ISSUER}/.well-known/openid-configuration" -o /dev/null || { echo "ERROR: Keycloak realm unreachable at ${ISSUER} — is the conformance IdP stack up?" >&2; exit 1; }
 
 # Clear the report dir so a FAILED run can never leave stale report.ttl/HTML behind that then look
@@ -158,8 +168,9 @@ server_env() {
   "$@"
 }
 # ^ SOLID_SERVER_RATE_LIMIT_PER_IP=off — disable the pre-crypto per-IP rate limiter for the harness run.
-# The CTH reaches the server through a `--network host` socat sidecar that forwards from a SINGLE
-# NON-loopback Docker-VM gateway IP (host.docker.internal), so ALL harness traffic shares ONE source IP.
+# ALL harness traffic shares ONE source IP on either networking branch: via the socat sidecar it arrives
+# from a single NON-loopback Docker-VM gateway IP (host.docker.internal), and on a native-Linux host
+# netns it arrives from loopback directly.
 # The WAC suite's rapid PARALLEL setup bursts (many common.feature callonce iterations + pool threads,
 # all one source) would otherwise drain that single IP's token bucket → 429s → false WAC failures. The
 # CTH is a TRUSTED single-source load generator, so exempting it is legitimate (the limiter's actual
@@ -221,14 +232,41 @@ done
 # our user, captured immediately after OUR launch — not a pattern re-derived at teardown time).
 SERVER_PID="$(find_server_pid)"
 
-# --- the VM-side socat forwarder: VM localhost:3000 -> host :3000 --------------------------------
-# So a `--network host` harness reaches the host-bound server at `localhost:3000`. On native Linux this
-# forwards localhost:3000 -> host-gateway:3000, a harmless passthrough to the same host process.
-echo ">> Starting the localhost:3000 forwarder into the harness network namespace ..."
-docker rm -f "$FWD_NAME" >/dev/null 2>&1 || true
-docker run -d --name "$FWD_NAME" --network host --add-host host.docker.internal:host-gateway \
-  alpine/socat:latest TCP-LISTEN:3000,fork,reuseaddr TCP:host.docker.internal:3000 >/dev/null
-sleep 1
+# --- the VM-side socat forwarder: VM localhost:3000 -> host :3000 (VM-BACKED ENGINES ONLY) -------
+# The harness runs `--network host`, but what that MEANS differs by engine, and the difference decides
+# whether a forwarder is needed AT ALL:
+#   - Docker Desktop / colima / any VM-backed engine: the "host" netns is the Linux VM's. It cannot
+#     reach a process bound on the real host via `localhost`, so a `--network host` socat sidecar must
+#     forward the VM's localhost:3000 -> host.docker.internal:3000.
+#   - NATIVE LINUX: the "host" netns is the literal host netns, so the harness ALREADY reaches the
+#     server at localhost:3000. Starting socat there is NOT a harmless passthrough: the server holds
+#     0.0.0.0:3000, so socat's `TCP-LISTEN:3000` fails with EADDRINUSE and the sidecar dies on the spot
+#     (`reuseaddr` is SO_REUSEADDR, which does not permit a second listener on a LIVE socket). The
+#     result was a silently-dead container masquerading as the load-bearing hop.
+# So PROBE instead of assuming: ask a throwaway `--network host` container whether it can already open
+# a TCP connection to localhost:3000, and start the forwarder ONLY when it cannot. The probe tests the
+# exact property that matters, so it is correct on engines neither branch was written for.
+harness_netns_reaches_server() {
+  docker run --rm --network host "$FWD_IMAGE" -u /dev/null TCP:localhost:3000 >/dev/null 2>&1
+}
+
+if harness_netns_reaches_server; then
+  echo ">> A --network host container already reaches the server at localhost:3000 (native-Linux host netns) — no forwarder needed."
+else
+  echo ">> A --network host container cannot reach localhost:3000 (VM-backed engine) — starting the socat forwarder ..."
+  docker rm -f "$FWD_NAME" >/dev/null 2>&1 || true
+  docker run -d --name "$FWD_NAME" --network host --add-host host.docker.internal:host-gateway \
+    "$FWD_IMAGE" TCP-LISTEN:3000,fork,reuseaddr TCP:host.docker.internal:3000 >/dev/null
+  sleep 1
+  # A detached `docker run` exits 0 once the container STARTS, so a socat that then failed to bind
+  # would sail past `set -e`. Re-probe and fail loudly rather than hand the harness a dead hop.
+  harness_netns_reaches_server || {
+    echo "ERROR: the socat forwarder did not make the server reachable at localhost:3000 from a --network host container." >&2
+    echo "       Forwarder log:" >&2
+    { docker logs "$FWD_NAME" 2>&1 || true; } >&2
+    exit 1
+  }
+fi
 
 # --- run the harness ----------------------------------------------------------------------------
 echo ">> Running the harness (${IMAGE}) — protocol + WAC suites ..."

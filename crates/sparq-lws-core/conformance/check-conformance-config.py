@@ -14,6 +14,11 @@
 #   C6  baseline.json's skip_tags are exactly the `solid-test:skip` tags the TestSubject declares —
 #       the suite SIZE is a function of those tags, so a tag added on one side and not the other
 #       silently invalidates the pinned floor.
+#   C7  run.sh starts the socat forwarder ONLY behind the `--network host` reachability probe. The
+#       two networking branches need opposite behaviour (VM-backed engine: the sidecar is the
+#       load-bearing hop; native Linux: the server already holds :3000, so the sidecar cannot bind
+#       and dies silently), and `docker run -d` exits 0 either way — so the gate cannot be observed
+#       failing, only asserted here.
 #
 # Exit 0 = clean. Any offence is printed with its C-number and exits 1.
 # Self-test: `python3 check-conformance-config.py --self-test`.
@@ -124,6 +129,27 @@ def check(here: Path, crate: Path) -> list[str]:
             f"pinned expected_total/min_passed are no longer trustworthy."
         )
 
+    # --- C7: the socat forwarder is started only behind the reachability probe. -----------------
+    probe = "harness_netns_reaches_server"
+    if not re.search(rf"^{probe}\(\)\s*\{{", run_sh, re.M):
+        offences.append(
+            f"C7: run.sh no longer defines the {probe}() probe. Without it the forwarder branch is "
+            f"chosen by assumption, and the assumption is wrong on one of the two engines."
+        )
+    lines = run_sh.splitlines()
+    starts = [i for i, ln in enumerate(lines) if re.search(r'docker run -d .*--name "\$FWD_NAME"', ln)]
+    if not starts:
+        offences.append('C7: run.sh has no `docker run -d --name "$FWD_NAME"` forwarder start')
+    for i in starts:
+        guard = next((lines[j] for j in range(i - 1, -1, -1) if re.match(r"\s*(if|elif)\s", lines[j])), None)
+        if guard is None or probe not in guard:
+            offences.append(
+                f"C7: the forwarder start at run.sh:{i + 1} is not gated on {probe} (nearest "
+                f"conditional: {guard.strip() if guard else 'none — top level'}). On a native-Linux "
+                f"engine the server already holds 0.0.0.0:3000, so an unconditional sidecar fails to "
+                f"bind and dies silently behind a successful `docker run -d`."
+            )
+
     return offences
 
 
@@ -196,6 +222,18 @@ def _self_test() -> int:
                 'solid-test:skip "acp" ;', 'solid-test:skip "acp" ;\n    solid-test:skip "extra" ;'))),
     )
 
+    expect(
+        "C7 fires when the forwarder start stops being gated on the reachability probe",
+        any(o.startswith("C7") for o in mutated(
+            run_text=run_sh.replace(
+                "if harness_netns_reaches_server; then", "if true; then"))),
+    )
+    expect(
+        "C7 fires when the reachability probe is removed entirely",
+        any(o.startswith("C7") for o in mutated(
+            run_text=run_sh.replace("harness_netns_reaches_server()", "unused_probe()"))),
+    )
+
     print("self-test: OK" if not failures else f"self-test: {failures} failure(s)")
     return 1 if failures else 0
 
@@ -213,7 +251,7 @@ def main() -> int:
     if offences:
         print(f"\nconformance-config: {len(offences)} offence(s).", file=sys.stderr)
         return 1
-    print("conformance-config: all clear (C1-C6).")
+    print("conformance-config: all clear (C1-C7).")
     return 0
 
 

@@ -101,14 +101,28 @@ resolves to loopback**. So the token `iss` and the server's trusted issuer must 
 - runs the harness with **`--network host`** — on Docker Desktop this shares the Linux VM's network
   namespace, where Keycloak (a VM container) is reachable at `localhost:8080` and discovery returns
   `iss=http://localhost:8080/realms/solid`;
-- starts a **`--network host` `socat` sidecar** forwarding the VM's `localhost:3000` → the host's
-  `:3000` (`host.docker.internal`), because the VM cannot otherwise reach a host-bound process via
-  `localhost`.
+- **probes** whether a throwaway `--network host` container can already open a TCP connection to
+  `localhost:3000`, and starts a **`--network host` `socat` sidecar** forwarding the VM's
+  `localhost:3000` → the host's `:3000` (`host.docker.internal`) **only when it cannot**.
 
 Net effect: harness, server, and Keycloak all agree on `localhost:3000` / `localhost:8080`, the DPoP
-`htu` matches the server's reconstructed URL, and the http issuer resolves to loopback. On a
-native-Linux Docker engine `--network host` is the literal host netns and the socat hop is a harmless
-passthrough — `run.sh` is portable.
+`htu` matches the server's reconstructed URL, and the http issuer resolves to loopback.
+
+The probe is why `run.sh` is portable, and it replaced an unconditional sidecar that was wrong on one
+of the two branches:
+
+| engine | `--network host` means | forwarder |
+| --- | --- | --- |
+| Docker Desktop / colima (VM-backed) | the Linux VM's netns, which cannot reach a host-bound process via `localhost` | **started** — it is the load-bearing hop |
+| native Linux | the literal host netns, which already reaches the server | **skipped** |
+
+On native Linux the sidecar is *not* a harmless passthrough: the server holds `0.0.0.0:3000`, so
+socat's `TCP-LISTEN:3000` fails with `EADDRINUSE` and the container dies immediately (`reuseaddr` is
+`SO_REUSEADDR`, which does not permit a second listener on a live socket). Because `docker run -d`
+exits 0 as soon as the container *starts*, that failure sailed past `set -e` and left a dead container
+posing as the hop. When the forwarder *is* started, `run.sh` now re-probes and fails loudly (dumping
+`docker logs`) if the server is still unreachable. `check-conformance-config.py` C7 keeps the start
+gated on the probe.
 
 ### CORS
 
