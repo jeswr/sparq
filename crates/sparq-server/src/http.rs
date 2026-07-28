@@ -2550,7 +2550,8 @@ struct RegistryEntry {
     started_at_unix_ms: u64,
     /// Monotonic start — used to compute elapsed ms without clock-skew noise.
     started: std::time::Instant,
-    /// FNV-1a non-reversible fingerprint of the raw SPARQL text (trimmed). Never the raw text.
+    /// FNV-1a fingerprint of the raw SPARQL text (trimmed). Never the raw text — but see
+    /// `registry_fingerprint` for what this unkeyed checksum does and does NOT protect.
     fingerprint: String,
     /// The `sq-kq9ia` cross-thread cancel flag shared with the engine's `QueryBudget`.
     cancel: Arc<std::sync::atomic::AtomicBool>,
@@ -2676,9 +2677,32 @@ impl QueryRegistry {
     }
 }
 
-/// [SONNET-4.6] (sq-qsm5z) FNV-1a non-reversible fingerprint of the SPARQL query text
-/// (trimmed). Satisfies the #241 / sq-m9prn audit-log discipline: the `GET /queries` listing
-/// exposes only this hash, never raw query text.
+/// [SONNET-4.6] (sq-qsm5z) FNV-1a fingerprint of the SPARQL query / update text (trimmed).
+/// Satisfies the #241 / sq-m9prn audit-log REDACTION discipline: the `GET /queries` listing
+/// exposes only this hash, never raw text.
+///
+/// # Security contract (honest boundary)
+///
+/// FNV-1a is an **unkeyed, 64-bit, non-cryptographic checksum**. What it provides is *stable
+/// correlation* — the same text always fingerprints the same way, so an operator can tell two
+/// rows apart or match a row against a query they already hold — and the guarantee that the
+/// text is not *transmitted*. It is **not** a one-way function in the cryptographic sense and
+/// it is **not** a confidentiality boundary:
+///
+/// * A reader of the listing can hash candidate texts offline and confirm a match, so a
+///   guessable, low-entropy or template-generated body is recoverable by search.
+/// * 64 bits resists neither exhaustive search over a small candidate set nor collision search.
+/// * This is most material for `kind = "update"` rows, whose `INSERT DATA` body can embed
+///   secrets or personal data (`sq-m9prn`).
+///
+/// Callers must therefore treat the fingerprint as sensitive metadata and keep `/queries`
+/// behind its fail-closed READ gate; it does not protect update content from a party that
+/// already has read access. Closing the offline-guessing gap needs a KEYED construction (e.g.
+/// an HMAC under a per-process random secret), which is deliberately not shipped here — it
+/// would add a cryptographic dependency to this dependency-free feature and is tracked as
+/// follow-up work. `registry_fingerprint_is_unkeyed_and_offline_guessable` pins this contract:
+/// it recomputes the fingerprint from outside the registry, so it fails the day the
+/// construction becomes keyed and forces this doc to be revisited.
 #[cfg(feature = "query-registry")]
 fn registry_fingerprint(sparql: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -9603,6 +9627,39 @@ mod query_registry_tests {
             !listed.contains("sensitive-literal") && !listed.contains("INSERT"),
             "the listing must expose only the fingerprint, never the update text: {}",
             listed
+        );
+    }
+
+    // [SONNET-4.6] (sq-m9prn) Pins the ACTUAL security contract of the exposed fingerprint, so
+    // the docs cannot drift back into claiming it is a one-way/"non-reversible" hash. FNV-1a is
+    // UNKEYED: a party holding only the listing can recompute the fingerprint of candidate texts
+    // offline and confirm which one is running. This test performs exactly that recovery — it is
+    // a WITNESS of the documented weakness, not an endorsement of it.
+    // Non-vacuity in both directions: if the construction ever becomes keyed (an HMAC under a
+    // per-process secret, the fix this contract defers), the offline recomputation stops matching
+    // and this test goes red — forcing `registry_fingerprint`'s security-contract doc and the
+    // SKILL's "honest boundary" bullet to be revisited with it.
+    #[test]
+    fn registry_fingerprint_is_unkeyed_and_offline_guessable() {
+        let registry = Arc::new(QueryRegistry::default());
+        let secret = "INSERT DATA { <http://ex/s> <http://ex/p> \"sensitive-literal\" }";
+        let (_cancel, _guard) = registry.register_update(secret);
+        let exposed = registry.list()[0]["fingerprint"].as_str().unwrap().to_owned();
+
+        // An attacker's offline dictionary — plausible bodies, one of which is the real one.
+        let candidates = [
+            "INSERT DATA { <http://ex/s> <http://ex/p> \"other-literal\" }",
+            "INSERT DATA { <http://ex/s> <http://ex/p> \"sensitive-literal\" }",
+            "DELETE WHERE { ?s ?p ?o }",
+        ];
+        let recovered: Vec<&str> =
+            candidates.iter().copied().filter(|c| registry_fingerprint(c) == exposed).collect();
+        assert_eq!(
+            recovered,
+            vec![secret],
+            "the unkeyed fingerprint must be reproducible from the text alone — offline guessing \
+             recovers exactly the registered body, which is precisely why the listing is NOT a \
+             confidentiality boundary for update payloads"
         );
     }
 

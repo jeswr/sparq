@@ -878,9 +878,8 @@ currently executing SPARQL queries, providing GraphDB query-monitoring and kill 
 
 - **`GET /queries`** — READ-gated (fail-closed). Returns `{"queries":[…]}` where each entry
   carries `id` (opaque hex), `kind` (`"query"` or `"update"`), `start` (Unix epoch ms),
-  `fingerprint` (FNV-1a hex — a NON-REVERSIBLE hash of the trimmed query text, never raw text
-  per the #241 / sq-m9prn audit-log posture), and `elapsed_ms`. Sorted by `id` (registration
-  order).
+  `fingerprint` (FNV-1a hex of the trimmed query text — never raw text, per the #241 /
+  sq-m9prn audit-log posture), and `elapsed_ms`. Sorted by `id` (registration order).
 - **`DELETE /queries/{id}`** — WRITE-gated (fail-closed). Cooperatively cancels the named
   query by flipping the `sq-kq9ia` `Arc<AtomicBool>` cancel flag wired into its `QueryBudget`.
   The engine observes it at the next poll site and aborts. Returns `204 No Content` on success;
@@ -897,8 +896,20 @@ currently executing SPARQL queries, providing GraphDB query-monitoring and kill 
   batch and seals only on success, so the store is left at its pre-update state and the writer
   keeps serving. Non-WHERE operations (`INSERT DATA`, `CLEAR`/`DROP`, …) do not consult the
   budget, so they are listed but complete rather than cancel.
-- **Fingerprint-only**: the `GET /queries` listing NEVER exposes raw query text; only the
-  non-reversible fingerprint is visible, satisfying the audit-log discipline.
+- **Fingerprint-only — and what that does NOT buy you (honest boundary).** The `GET /queries`
+  listing never exposes raw query or update text; only the fingerprint is visible, satisfying
+  the audit-log redaction discipline. But the construction is **FNV-1a: an unkeyed, 64-bit,
+  non-cryptographic checksum**. It is a *stable correlation tag*, **not** a confidentiality
+  boundary and **not** a one-way function in any cryptographic sense: anyone who can read the
+  listing can hash candidate texts offline and confirm a match, so a guessable — or
+  low-entropy, or template-generated — body is recoverable by search, and 64 bits resists
+  neither exhaustive guessing of a small candidate set nor collision search. This matters most
+  for `kind: "update"`, whose `INSERT DATA` body can embed secrets or personal data: the
+  fingerprint stops the payload being *transmitted*, it does not stop it being *guessed*. Treat
+  the fingerprint as sensitive metadata, keep `/queries` behind its READ gate (it is
+  fail-closed), and do not rely on it to protect update content from a party who already has
+  read access. (Keying the fingerprint — e.g. an HMAC under a per-process secret — would close
+  the offline-guessing gap and is tracked as follow-up work, not shipped here.)
 - **Zero cost when feature is OFF**: no `AppState` fields, no routes; byte-identical to before.
 
 ```sh
