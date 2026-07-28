@@ -49,6 +49,9 @@ VENVDIR="$SANDBOX/beir-venv"; CARGOHOME="$SANDBOX/cargo-home"
 RESULTS="$REPO/bench/competitor-results"
 mkdir -p "$REPO/scripts/bench" "$BIN" "$SANDBOX/home" "$CARGOHOME/bin"
 cp "$SCRIPT" "$REPO/scripts/bench/"
+# The gather sources the durable-egress library from its own directory (sq-ffaa9); it is
+# inert here (no BENCH_RESULTS_S3_URI), but it must be present for the source to succeed.
+cp "$ROOT/scripts/bench/bench-result-egress.sh" "$REPO/scripts/bench/"
 
 # ---- scenario stub for scripts/gather-competitors.sh (behavior via STUB_GC_MODE) ----
 cat > "$REPO/scripts/gather-competitors.sh" <<'STUB'

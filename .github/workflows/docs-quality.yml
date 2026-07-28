@@ -428,6 +428,16 @@ jobs:
         run: bash scripts/tests/test_beir_gather_sentinel.sh
       - name: Self-test console envelope extractor (exact names + CRLF + allowlist)
         run: bash scripts/tests/test_extract_console_envelopes.sh
+      # [OPUS-5] sq-ffaa9: the serial console is AMI-dependent — on the AL2023/Nitro x86_64
+      # image `get-console-output` returned nothing usable, so a whole canonical gather was
+      # unrecoverable. scripts/bench/bench-result-egress.sh adds the durable S3 channel; this
+      # hermetic harness (PATH-shadowed `aws`, no account, no network) pins the two properties
+      # that make it safe to leave in every launcher: it is INERT unless both knobs are set,
+      # and a HALF-configured pair (destination, no instance profile) fails fast instead of
+      # running for hours and losing the results. It also pins the bootstrap policy as
+      # write-only + prefix-scoped, and that the launchers stay wired to the library.
+      - name: Self-test durable S3 result egress (inert by default, half-config fails fast)
+        run: bash scripts/tests/test_bench_result_egress.sh
       # [SONNET-4.6] PR #3990 review: bench/geo/gsb.sh advertises a HARD sha256 pin on the
       # GeoSPARQL Compliance Benchmark, but a CACHED extraction was accepted on file COUNTS
       # alone — a stale or locally edited corpus would have been scored silently, making the

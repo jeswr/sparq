@@ -21,7 +21,9 @@
 # scripts/gather-competitors.sh) + $RESULTS_DIR/gather-meta.json (box provenance).
 # Every envelope is ALSO cat'd into the gather log between ===ENVELOPE-BEGIN/END===
 # markers so `aws ec2 get-console-output` can recover results even if the SSH pull
-# path dies (envelopes are a few KB; recovered by scripts/bench/extract-console-envelopes.sh).
+# path dies (envelopes are a few KB; recovered by scripts/bench/extract-console-envelopes.sh)
+# and — when the launcher passed BENCH_RESULTS_S3_URI (sq-ffaa9) — uploaded to the
+# run-scoped S3 prefix, the one channel that survives an unusable serial console.
 #
 # SENTINEL PROTOCOL (machine-enforced honesty): /root/GATHER_DONE is written ONLY
 # after every requested cut has a VALID-JSON envelope for BOTH engines (the
@@ -83,6 +85,11 @@ VENV="${BEIR_VENV_DIR:-/root/beir-venv}"
 SENTINEL_DIR="${SENTINEL_DIR:-/root}"
 
 step() { echo "[STEP $(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$SENTINEL_DIR/GATHER_STEP" >&2; }
+
+# [OPUS-5] sq-ffaa9 — durable result egress. bench_egress_push is a successful no-op
+# unless the launcher passed BENCH_RESULTS_S3_URI in, so a run without the instance
+# profile attached behaves exactly as before (console + SSH pull only).
+. "$HERE/bench-result-egress.sh"
 
 mkdir -p "$RESULTS_DIR" "$BEIR_DATA_DIR"
 step "canonical BEIR gather start: cuts='$BEIR_CUTS' k=$BEIR_K commit=$(git rev-parse --short HEAD 2>/dev/null || echo '?')"
@@ -278,6 +285,7 @@ step "envelopes in $RESULTS_DIR:"
 ls -la "$RESULTS_DIR" >&2 || true
 for f in "$RESULTS_DIR"/*.json; do
   [ -f "$f" ] || continue
+  bench_egress_push "$f"
   echo "===ENVELOPE-BEGIN $(basename "$f")==="
   cat "$f"
   echo "===ENVELOPE-END==="
