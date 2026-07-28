@@ -440,6 +440,30 @@ def test_included_non_rust_file_is_refused() -> None:
           v.outcome == A.REFUSE_ADDED_LINES_ARE_SEMANTIC, f"got {v.outcome}: {v.reason}")
 
 
+def test_diff_paths_absent_from_both_trees_are_refused() -> None:
+    """A diff naming paths that exist in NEITHER tree means the two disagree.
+
+    Every such path is silently skipped by the blanking loop, so the proof would cover less
+    than it claims. Found for real: a harness rewrote `git diff --no-index` prefixes in the
+    wrong order and produced `bvendor/spargebra/src/parser.rs`; nothing matched, nothing was
+    blanked. Only the non-vacuity guard stopped a false declaration — this names the cause.
+    """
+    base = make_tree(base_files())
+    head = make_tree(base_files())
+    diff = ("diff --git abc/x.rs bbc/x.rs\n"
+            "--- abc/x.rs\n"
+            "+++ bbc/x.rs\n"
+            "@@ -0,0 +1 @@\n"
+            "+pub fn mangled() {}\n")
+    try:
+        v = A.decide(base, head, diff, _scripted_builder(b"base-bundle", b"head-bundle"))
+        check("test_diff_paths_absent_from_both_trees_are_refused",
+              v.outcome == A.REFUSE_DIFF_TREE_MISMATCH, f"got {v.outcome}: {v.reason}")
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+        shutil.rmtree(head, ignore_errors=True)
+
+
 def test_symlink_inside_the_closure_is_refused() -> None:
     """Blanking rewrites files in place, which cannot speak for a symlink — refuse."""
     base = make_tree(base_files())
@@ -492,20 +516,19 @@ def test_vacuous_proof_is_refused() -> None:
     catches it without anyone having to know which path class was missed.
     """
     base = make_tree(base_files())
-    head = make_tree(base_files())
-    # A changed path that exists in NEITHER tree: the diff is real, but there is nothing on
-    # disk to blank, so the neutral tree comes out identical to the head tree.
-    diff = ("diff --git a/crates/c/src/ghost.rs b/crates/c/src/ghost.rs\n"
-            "--- a/crates/c/src/ghost.rs\n"
-            "+++ b/crates/c/src/ghost.rs\n"
-            "@@ -0,0 +1 @@\n"
-            "+pub fn ghost() {}\n")
+    # The diff adds only a BLANK line: the path exists, so it is not a diff/tree mismatch,
+    # but blanking an already-empty line is a no-op — so the neutral tree comes out
+    # identical to the head tree and the comparison would be `head == head`. The bundle
+    # moved anyway (the builder says so), which means the drift came from somewhere the
+    # proof does not reach.
+    head = make_tree(base_files(**{"crates/c/src/lib.rs": insert_at(_BASE_LIB, 4, [""])}))
     try:
-        v = A.decide(base, head, diff, _scripted_builder(b"base-bundle", b"head-bundle"))
+        v = A.decide(base, head, diff_of(base, head),
+                     _scripted_builder(b"base-bundle", b"head-bundle"))
         check("test_vacuous_proof_is_refused", v.outcome == A.REFUSE_VACUOUS_PROOF,
               f"got {v.outcome}: {v.reason}")
         check("test_vacuous_proof_is_refused__names_the_paths",
-              "ghost.rs" in v.reason,
+              "lib.rs" in v.reason,
               "the refusal must name where the unexplained diff actually was")
     finally:
         shutil.rmtree(base, ignore_errors=True)
@@ -1027,6 +1050,7 @@ TESTS = [
     test_every_changed_non_manifest_path_is_blanked,
     test_included_non_rust_file_is_refused,
     test_symlink_inside_the_closure_is_refused,
+    test_diff_paths_absent_from_both_trees_are_refused,
     test_root_build_inputs_are_restored_from_base,
     test_base_build_failure_is_refused,
     test_head_build_failure_is_refused,
@@ -1087,6 +1111,10 @@ MUTANTS = [
      "        if _is_manifest(p) or root_input:\n            manifest.append(p)\n"
      "        elif closure is None or any(p.startswith(d) for d in closure):\n            blankable.append(p)",
      "test_out_of_closure_semantic_change_is_refused"),
+    ("M5h-ignore-diff-tree-mismatch",
+     "skip paths the diff names but neither tree has, covering less than claimed",
+     "    if missing:", "    if False:",
+     "test_diff_paths_absent_from_both_trees_are_refused"),
     ("M5f-drop-the-non-vacuity-guard",
      "declare even when the neutral tree is identical to the head tree",
      "    if not mutated and not to_blank:", "    if False:",

@@ -82,6 +82,7 @@ REFUSE_ADDED_LINES_ARE_SEMANTIC = "added-lines-are-semantic"
 REFUSE_DELETED_LINES_ARE_SEMANTIC = "deleted-lines-are-semantic"
 REFUSE_UNSUPPORTED_FILE_CHANGE = "unsupported-file-change"
 REFUSE_VACUOUS_PROOF = "proof-would-be-vacuous"
+REFUSE_DIFF_TREE_MISMATCH = "diff-paths-absent-from-both-trees"
 REFUSE_NO_DIFF = "no-diff-between-base-and-head"
 
 OUTCOME_NO_DRIFT = "no-drift"
@@ -367,6 +368,22 @@ def decide(base_tree: str, head_tree: str, diff_text: str, builder,
     closure = closure_dirs(head_tree)
     rust_paths, manifest_paths, closure_paths = classify_paths(sorted(changes), closure)
 
+    # The diff and the trees must actually describe the same thing. A changed path that
+    # exists in NEITHER tree means they disagree — a mis-parsed diff, a bad path prefix, a
+    # stale export. Every such path would be silently skipped by the blanking loop, so the
+    # proof would quietly cover less than it claims. Caught for real: an ad-hoc harness
+    # rewrote `git diff --no-index` prefixes in the wrong order, yielding paths like
+    # `bvendor/spargebra/src/parser.rs`; nothing matched, nothing was blanked, and only the
+    # non-vacuity guard stood between that and a false declaration. Name it instead.
+    missing = [p for p in rust_paths
+               if not os.path.exists(os.path.join(head_tree, p))
+               and not os.path.exists(os.path.join(base_tree, p))]
+    if missing:
+        return Verdict(REFUSE_DIFF_TREE_MISMATCH,
+                       "the diff names paths that exist in neither the base nor the head "
+                       "tree, so the diff and the trees disagree and the proof would cover "
+                       "less than it claims: " + ", ".join(sorted(missing)[:10]))
+
     # Blanking rewrites files in place, which is meaningless for a symlink or a submodule
     # gitlink — the proof would silently cover nothing. Refuse rather than pretend.
     nonregular = [p for p in rust_paths
@@ -527,6 +544,35 @@ def decide(base_tree: str, head_tree: str, diff_text: str, builder,
     )
 
 
+def _obligation_sentence(ev: dict) -> str:
+    """Say which obligation actually carried the proof.
+
+    A count of zero is normal on one side — a pure-deletion diff blanks no added line, and
+    an addition-only diff deletes none — but phrasing it as "all 0 lines blanked produced an
+    identical bundle" reads as a confession that nothing was checked. It also read that way
+    when something really HAD been missed: the vendored-crate false pass emitted exactly
+    that sentence with both counts at zero. The non-vacuity guard now refuses that state
+    outright; this wording makes the remaining zeroes unambiguous.
+    """
+    added = ev.get("added_nonblank_lines_blanked", 0)
+    deleted = ev.get("deleted_nonblank_lines", 0)
+    parts = []
+    if added:
+        parts.append(f"rebuilding the head tree with all {added} added non-blank line(s) "
+                     "blanked produced a BYTE-IDENTICAL bundle")
+    if deleted:
+        parts.append(f"rebuilding the base tree with all {deleted} deleted non-blank line(s) "
+                     "blanked left the base bundle unchanged")
+    if not parts:  # unreachable: the non-vacuity guard refuses before this point
+        return ("NO obligation was discharged — this declaration must not have been derived."
+                " Treat it as a bug in the derivation, not as evidence.")
+    joined = ", and ".join(parts)
+    covered = ("Both directions were covered" if len(parts) == 2
+               else "The diff changes lines in one direction only, so that is the whole "
+                    "obligation")
+    return f"Specifically: {joined}. {covered}."
+
+
 def declaration_json(pr: int, verdict: Verdict, date: str | None = None) -> dict:
     """The per-PR declaration file content, carrying the MEASURED evidence."""
     ev = verdict.evidence
@@ -538,11 +584,7 @@ def declaration_json(pr: int, verdict: Verdict, date: str | None = None) -> dict
             f"feature-OFF bundle moved {ev.get('differing_bytes')} of "
             f"{ev.get('head_bundle_bytes')} bytes at a size delta of "
             f"{ev.get('size_delta_bytes'):+d}, and the drift was proved to carry no compiled "
-            "code: rebuilding the head tree with all "
-            f"{ev.get('added_nonblank_lines_blanked')} added non-blank line(s) blanked "
-            "produced a BYTE-IDENTICAL bundle, and rebuilding the base tree with all "
-            f"{ev.get('deleted_nonblank_lines')} deleted non-blank line(s) blanked likewise "
-            "left the base bundle unchanged. What moved is line-position metadata "
+            f"code. {_obligation_sentence(ev)} What moved is line-position metadata "
             "(core::panic::Location line numbers shift when lines above them move); no "
             "always-compiled code entered or left the default build. Bundle SIZE remains "
             "governed separately by the wasm_bundle_bytes ratchet."
