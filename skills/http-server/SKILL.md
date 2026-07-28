@@ -513,6 +513,19 @@ curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/ld+json' \
 > for an explicitly rewrite-dark build; the sparq-engine LIBRARY default remains OFF for lean
 > library consumers.
 
+<!-- [OPUS-5] sq-7d3dj.30.15: comment separates the two adjacent blockquotes (markdownlint MD028). -->
+
+> **Default-on DPccp join-order planner (`dp-planner` feature — [OPUS-5] sq-7d3dj.30.15).** The
+> server's default set also lights sparq-engine's DPccp planner (sq-7d3dj.30.5): a connected BGP
+> with 3 or more patterns that fits the connected-subgraph budget is planned as a cost-optimal
+> BUSHY join tree instead of by greedy GOO. It is DEFAULT-ON once compiled, so every request gets
+> it with no explicit install, and it is result-equivalent — only join ORDER changes, never the
+> answer. This closes the gap where sq-7d3dj.30.5 lit the planner in `sparq-cli` alone, which made
+> an HTTP-measured query plan differently from the CLI-measured one the canonical benchmarks use.
+> Zero new dependencies. Drop it with `--no-default-features --features server,jsonld` for an
+> explicitly greedy-GOO build; the sparq-engine LIBRARY default remains OFF for lean library
+> consumers.
+
 **2. EXPLAIN a query plan (no execution) or analyze (execute + per-operator trace).**
 `text/plain` response. Use `explain` / `explain=plan` (or `Accept: text/x-sparq-explain`)
 for the dry run, `explain=analyze` to run + trace (SELECT/ASK only):
@@ -877,9 +890,9 @@ endpoint.
 currently executing SPARQL queries, providing GraphDB query-monitoring and kill parity.
 
 - **`GET /queries`** — READ-gated (fail-closed). Returns `{"queries":[…]}` where each entry
-  carries `id` (opaque hex), `start` (Unix epoch ms), `fingerprint` (FNV-1a hex — a
-  NON-REVERSIBLE hash of the trimmed query text, never raw text per the #241 / sq-m9prn
-  audit-log posture), and `elapsed_ms`. Sorted by `id` (registration order).
+  carries `id` (opaque hex), `kind` (`"query"` or `"update"`), `start` (Unix epoch ms),
+  `fingerprint` (FNV-1a hex of the trimmed query text — never raw text, per the #241 /
+  sq-m9prn audit-log posture), and `elapsed_ms`. Sorted by `id` (registration order).
 - **`DELETE /queries/{id}`** — WRITE-gated (fail-closed). Cooperatively cancels the named
   query by flipping the `sq-kq9ia` `Arc<AtomicBool>` cancel flag wired into its `QueryBudget`.
   The engine observes it at the next poll site and aborts. Returns `204 No Content` on success;
@@ -887,8 +900,29 @@ currently executing SPARQL queries, providing GraphDB query-monitoring and kill 
 - **RAII lifetime**: each executing SELECT/ASK/CONSTRUCT/DESCRIBE/**EXPLAIN (plan + analyze)**
   registers on start and deregisters on completion, error, or panic — the entry is always cleaned
   up. (EXPLAIN ANALYZE wiring added in sq-t1isr, [SONNET-4.6].)
-- **Fingerprint-only**: the `GET /queries` listing NEVER exposes raw query text; only the
-  non-reversible fingerprint is visible, satisfying the audit-log discipline.
+- **SPARQL UPDATEs are registered too** (`kind: "update"`; sq-m9prn, [SONNET-4.6]). An UPDATE
+  registers when the sequenced writer thread STARTS applying it — not when it is queued — so a
+  row names exactly what is consuming the writer, which is the operation whose cancellation
+  also unblocks every write queued behind it. The flag reaches the `DELETE/INSERT … WHERE`
+  evaluation (the engine installs the UPDATE's `QueryBudget` thread-locally for the whole
+  update). A cancelled UPDATE is **rejected, not partially applied**: the writer forks per
+  batch and seals only on success, so the store is left at its pre-update state and the writer
+  keeps serving. Non-WHERE operations (`INSERT DATA`, `CLEAR`/`DROP`, …) do not consult the
+  budget, so they are listed but complete rather than cancel.
+- **Fingerprint-only — and what that does NOT buy you (honest boundary).** The `GET /queries`
+  listing never exposes raw query or update text; only the fingerprint is visible, satisfying
+  the audit-log redaction discipline. But the construction is **FNV-1a: an unkeyed, 64-bit,
+  non-cryptographic checksum**. It is a *stable correlation tag*, **not** a confidentiality
+  boundary and **not** a one-way function in any cryptographic sense: anyone who can read the
+  listing can hash candidate texts offline and confirm a match, so a guessable — or
+  low-entropy, or template-generated — body is recoverable by search, and 64 bits resists
+  neither exhaustive guessing of a small candidate set nor collision search. This matters most
+  for `kind: "update"`, whose `INSERT DATA` body can embed secrets or personal data: the
+  fingerprint stops the payload being *transmitted*, it does not stop it being *guessed*. Treat
+  the fingerprint as sensitive metadata, keep `/queries` behind its READ gate (it is
+  fail-closed), and do not rely on it to protect update content from a party who already has
+  read access. (Keying the fingerprint — e.g. an HMAC under a per-process secret — would close
+  the offline-guessing gap and is tracked as follow-up work, not shipped here.)
 - **Zero cost when feature is OFF**: no `AppState` fields, no routes; byte-identical to before.
 
 ```sh
@@ -1314,7 +1348,9 @@ template layer as `template_invoke` (see the `agent-tools` skill).
 A **thin, fail-closed HTTP shell** over the [`sparq-solid`](../../crates/sparq-solid) library
 authoriser — the deliberately-opt-in `sparq-server` → `sparq-solid` workspace dependency. All three
 endpoints are **POST** and take the pod dataset (N-Quads, incl. the `.acl`/`.acr` control graphs)
-plus an **already-resolved** session in a JSON body. The server does **NOT** authenticate — mapping a
+plus an **already-resolved** session in a JSON body — or, with `"source":"server"` (sq-snopa.8, see
+below), the **server's own loaded store** instead of a body dataset.
+The server does **NOT** authenticate — mapping a
 WebID + a request path is the caller's job (`sparq-solid` is a library authoriser with no HTTP
 surface, `research/sparq-solid-scope.md` §4); this is exactly that missing shell. `view` (`"wac"` /
 `"acp"`) selects the model, else it is inferred (`.acr` present → ACP, else WAC). See also the
@@ -1349,7 +1385,9 @@ surface, `research/sparq-solid-scope.md` §4); this is exactly that missing shel
     (pattern targets = sq-lrtc3.3), a non-read `mode` (query-action contract = sq-lrtc3.2), an
     anonymous session, or a `trust` block combined with an ODRL-carrying dataset on `/decide`
     (the trust dispatch would bypass the lane). Constraints the stateless lane cannot evidence
-    (`odrl:purpose`, `odrl:count` — stateful budgets are sq-snopa.8) never grant. `/decide` stays
+    (`odrl:purpose`, `odrl:count` — stateful budgets remain unimplemented) never grant. The lane
+    reads the request BODY dataset, so it does not apply to `"source":"server"`; an ODRL-carrying
+    server store is REFUSED there rather than un-enforced (see `"source"` below). `/decide` stays
     governing-ACL-scoped: with no discoverable `.acl`/`.acr` it returns its `noAcl` deny even
     where a bridged grant lets `/authz/query` see rows (a deny-side-only divergence). Feature OFF
     ⇒ byte-identical `solid-authz` behaviour (the standard build never compiles `sparq-policy`).
@@ -1359,9 +1397,31 @@ surface, `research/sparq-solid-scope.md` §4); this is exactly that missing shel
 deny, never a grant. **Double opt-in**, OFF by default: compiled only with the `solid-authz` cargo
 feature **and** served only when `--solid-authz` / `SPARQ_SOLID_AUTHZ=1` is set (mirrors `shacl` /
 `terse`); with the feature but not the flag, `/authz/*` is `404`. Read-gated by `--auth-token-read`.
-This v1 is **stateless per request** (the dataset is supplied, not the server's own loaded store) — a
-stateful "authorise over the loaded pod" variant is a deliberate follow-up (it would thread a
-materialised `PodStore` through the concurrent-serving `AppState`).
+
+**Which pod: `"source"` (`sq-snopa.8`).** Every endpoint takes an optional `"source"` field:
+
+- `"body"` (**default**, and the only mode before sq-snopa.8) — **stateless**: the pod dataset
+  arrives in `"dataset"` and dies with the response. Unchanged behaviour.
+- `"server"` — **stateful**: authorise over the **server's own loaded store**. The body must NOT
+  carry a `"dataset"` (a body naming both pods is ambiguous → `400`). A pod resource IS a named
+  graph of the loaded store, so `"resource"` must be that graph's absolute IRI; relative paths are
+  not resolved. The pinned current generation is forked, materialised once, and cached in
+  `AppState` keyed by the **generation number** — so the N3 materialisation is paid once per
+  generation, not once per request, and **an `.acl`/`.acr` write re-materialises automatically**
+  (every commit publishes a new generation, which makes the cached view stale by construction;
+  there is no window in which a revoked grant is still served).
+
+The stateful lane is fail-closed on the same terms, and additionally **refuses** (never silently
+un-enforces) two combinations it cannot evaluate faithfully: under `odrl-authz`, a server store
+carrying ODRL policy rules (`400` — dropping a prohibition would be fail-OPEN); under
+`solid-authz-trust`, a request carrying a `"trust"` block (`400` — that extension decides over its
+own body-derived store).
+
+```sh
+curl -s -X POST http://127.0.0.1:3030/authz/decide -H 'Content-Type: application/json' -d '{
+  "source": "server", "session": { "agent": "https://alice.ex/card#me" },
+  "resource": "https://pod.ex/notes/n1", "mode": "read", "view": "wac" }'
+```
 
 ```sh
 cargo run -p sparq-server --features solid-authz -- data.ttl --solid-authz
@@ -1409,7 +1469,7 @@ env overrides the default.
 | `--shacl` | `SPARQ_SHACL` | off | (feature `shacl`) serve the SHACL validate endpoint `POST /shacl/validate` — POST a shapes graph, the server validates its loaded data graph against it; JSON report (default) or W3C report Turtle (`Accept: text/turtle`); read-only — see "SHACL validation endpoint" |
 | `--shacl-guard` | `SPARQ_SHACL_GUARD` | off | (feature `shacl`) reject non-conforming UPDATE/GSP post-states with `422` + JSON validation report; store unchanged |
 | `--shacl-shapes FILE` | `SPARQ_SHACL_SHAPES` | unset | (feature `shacl`) load the guard shapes graph once at startup; required when the guard is on |
-| `--solid-authz` | `SPARQ_SOLID_AUTHZ` | off | (feature `solid-authz`) serve the Solid WAC/ACP authorization endpoints `POST /authz/decide`+`/wac-allow`+`/query` — a fail-closed HTTP shell over `sparq-solid`; POST the pod dataset + an already-resolved session, get the decision / `WAC-Allow` value / access-controlled query result; read-only — see "Solid WAC/ACP authorization endpoints" |
+| `--solid-authz` | `SPARQ_SOLID_AUTHZ` | off | (feature `solid-authz`) serve the Solid WAC/ACP authorization endpoints `POST /authz/decide`+`/wac-allow`+`/query` — a fail-closed HTTP shell over `sparq-solid`; POST the pod dataset (or `"source":"server"` for the server's own loaded store, sq-snopa.8) + an already-resolved session, get the decision / `WAC-Allow` value / access-controlled query result; read-only — see "Solid WAC/ACP authorization endpoints" |
 | `--solid-authz-trust` | `SPARQ_SOLID_AUTHZ_TRUST` | off | (feature `solid-authz-trust`, implies `solid-authz`) opt-in stateless trust-graph extension to `POST /authz/decide` — a request may carry an additional `"trust"` JSON block containing credentials, a trust policy, and signed certification edges; the server runs the cert-graph closure (`derive_effective_rules`) and the `sparq_trust::admit` gate over them, injects any admitted facts into the pod dataset, then runs the unchanged WAC/ACP decision; double-opt-in: the feature must be compiled AND this flag set AND the request must carry a `"trust"` block — see "Stateless trust-graph decision extension (sq-pfae.17)"; honest scope: anchored-not-proven clear-path only (no ZK/unlinkability claim; sq-qhy4 external audit PENDING) |
 | `--brtpf-max-bindings N` | `SPARQ_BRTPF_MAX_BINDINGS` | `1024` (`0`=off) | (feature `brtpf`) **DoS cap on the brTPF binding-set mapping COUNT** — one index scan per mapping, so cost is super-linear in the count, not the bytes → `413` (`sq-r74h`) |
 | `--brtpf-max-values-bytes N` | `SPARQ_BRTPF_MAX_VALUES_BYTES` | `1048576` (`0`=off) | (feature `brtpf`) **DoS cap on the raw brTPF `values` payload BYTES** — bounds the GET query-string carrier that `--max-body-bytes` never sees → `413` (`sq-r74h`) |

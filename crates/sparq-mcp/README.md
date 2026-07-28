@@ -37,8 +37,10 @@ let _writable = ServerConfig { allow_update: true, ..ServerConfig::default() };
 # Ok(()) }
 ```
 
-With the `stdio` feature, `serve_stdio(&mut server)` runs the standard MCP stdio
-transport (line-delimited JSON-RPC 2.0 over this process's stdin/stdout).
+The `stdio` feature ships the **`sparq-mcp` binary**: `cargo run -p sparq-mcp --features
+stdio -- [--allow-update] [--format FMT] [--query-timeout SECS] [--max-rows N] [DATA_FILE]`
+loads the file (format inferred from `.nt`/`.nq`/`.trig`, else turtle) and serves it over the
+standard MCP stdio transport — the same loop `serve_stdio(&mut server)` runs for an embedder.
 
 ## ✨ Tools
 
@@ -52,12 +54,12 @@ transport (line-delimited JSON-RPC 2.0 over this process's stdin/stdout).
 - **`classes`** — list class IRIs with instance and predicate counts, largest class first. <!-- [GPT-5.6] sq-cekgj -->
 - **`prefixes`** — list detected namespace declarations and distinct IRI term counts, largest namespace first. <!-- [GPT-5.6] sq-kx5b0 -->
 - **`void`** — emit a W3C VoID dataset descriptor as N-Triples, optionally including characteristic-set statistics; `dataset` defaults to `urn:sparq:dataset`.
-- **`ask`** *(feature `nlq`, OFF by default)* — answer a natural-language question
-  **server-side**: NL→SPARQL→validate→execute via `sparq-nlq`, returning the executed
-  SPARQL + the real result rows (+ in-graph citations). Embeds a **configurable** LLM
-  call (`ANTHROPIC_API_KEY`, or an OpenAI-compatible `SPARQ_NLQ_ENDPOINT_URL`+`_MODEL`);
-  no model is bundled. Unconfigured it is unadvertised and returns a clear "not
-  configured" error — never a fabricated answer. The structured tools are the default.
+- **`ask`** / **`nl_query`** *(feature `nlq`, OFF by default)* — NL via `sparq-nlq`: `ask`
+  runs NL→SPARQL→validate→**execute** server-side (executed SPARQL + real result rows + citations);
+  `nl_query` **translates only**, returning a validated (parses, no `SERVICE`) but **unexecuted**
+  query to review and run via `query`. Both embed a **configurable** LLM call
+  (`ANTHROPIC_API_KEY`, or OpenAI-compatible `SPARQ_NLQ_ENDPOINT_URL`+`_MODEL`); no model is
+  bundled, and unconfigured they are unadvertised and error "not configured" — never fabricate.
 - **`update`** *(gated, OFF by default)* — apply an atomic SPARQL 1.1 Update; neither advertised in `tools/list` nor callable unless `ServerConfig::allow_update` is set.
 - **`template_list` / `template_invoke`** *(feature `templates`, OFF by default)* — named
   parameterized templates (registered on `ServerConfig::templates`) invoked with **typed,
@@ -97,14 +99,12 @@ server was configured with. Run it only against a client you trust.
 
 - **Read-only by default.** Default tools cannot mutate; the feature-gated `validate` and `describe_form` tools are read-only.
 - **`update` is a mutation surface** and is exposed **only** when you set
-  `ServerConfig::allow_update = true` (or a binary's `--allow-update` flag). Turn it on
-  only when the client is trusted to issue writes. There is no per-tool ACL beyond this
-  one switch.
+  `ServerConfig::allow_update = true` (the binary's `--allow-update` flag). Turn it on only
+  when the client is trusted to issue writes; there is no per-tool ACL beyond this switch.
 - **Queries are bounded** by a `QueryBudget` (deadline + row cap) so one tool call cannot
   run the server unbounded — a blunt anti-DoS ceiling, not a fairness quota.
 
-No overclaim: this does not add isolation, sandboxing, or auth that the host process does
-not already provide.
+No overclaim: it adds no isolation, sandboxing, or auth the host process does not provide.
 
 ## 📚 Learn more
 

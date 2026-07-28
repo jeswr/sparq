@@ -452,7 +452,7 @@ edge sequences them (§10.4).
 
 | Bead | Tier | Target (noir repo) | One-line scope + risk note |
 |---|---|---|---|
-| `sq-jthy1` | opus | `ssa/opt/checked_to_unchecked.rs` | elide overflow checks dominated by a later range check (#7161); Brillig failure-point semantics in scope |
+| `sq-jthy1` | opus | `ssa/opt/checked_to_unchecked.rs` | elide overflow checks dominated by a later range check (#7161); Brillig failure-point semantics in scope — **DESIGN + FREQUENCY MEASURED, not implemented; a HEAD prerequisite fix must land first; see §10.9** |
 | `sq-m3l62` | opus | `ssa/opt/flatten_cfg/value_merger.rs` | ArrayGet through IfElse (#5501); conservative use/alias analysis; precedent PR #11512 |
 | `sq-seust` | sonnet | `ssa/ir/dfg/simplify.rs` | NOT canonicalization for IfElse merging; PARK with a findings note if measured neutral (PR #11580 upkeep landmine) — **MEASURED NULL RESULT (0 firings / 556 packages); PARKED per that instruction, no PR; see §10.8** |
 | `sq-jfkwk` | sonnet | findings first; `acir/acir_context/mod.rs` only on a win | comparison-lowering experiment; fail-closed on the #10159 witness-sharing landmine; null result acceptable — **NULL RESULT returned, no PR proposed; bead still open, see §10.7** |
@@ -615,7 +615,36 @@ patched**, and the AST-fuzzer `arbtest` targets green — but none of that
 exercises the both-inner-conditions-false case, so it is not evidence for row 4. It is **not carried in this repo** — no
 upstream PR is proposed, and none should be until a program produces the shape.
 
-### 10.9 `sq-mtolx` (paper P3, gap-analysis / new-opportunities) — source-level pass (2026-07-28)
+### 10.9 `sq-jthy1` (row 6, dominated overflow-check elision, noir#7161) — design + measured frequency, NOT implemented (2026-07-28)
+
+> 🤖 **SPARQ agent** [OPUS-5]. Full record:
+> `noir-dominated-overflow-elision-7161.md` (analysed *and measured* against noir
+> `a352e715`, workspace version `1.0.0-beta.25`).
+
+Using the §10.8 toolchain recipe, the compiler was built, the SSA interpreter was
+used as the executable spec, and an instrumented `nargo` counted candidates over
+509 `test_programs/execution_success` packages. `bb` is still absent, so **there
+are no gate numbers** and the optimization itself was **not written** — hence no
+ACIR-opcode delta and no upstream PR.
+
+| finding | consequence |
+|---|---|
+| the issue's claim holds in ACIR — measured: eliding the first check keeps the failure, moving it from the first `add` to the second — but the **same edit in a Brillig function turns the trap into `Ok(1)`** (wrapping) | the pass must be **ACIR-only**; the issue's "insert a brillig overflow check" is then unnecessary, at the cost of the two runtimes reporting different failure spans |
+| three masking shapes measured on the interpreter: a later `sub`, a `mul` by zero, an intervening `truncate` each let the chain re-enter range | the cover needs monotone, non-reducing steps — the elision is not a two-line pattern match |
+| separately, the *elided* op must be a checked unsigned **`add`**: ACIR does not wrap, so an underflowing `sub` escapes **downward** to `p - k`, and a later monotone `add` can carry it past the modulus back into range — **losing** the failure rather than moving it (an analytic argument from the ACIR semantics, not a measured row) | v1 excludes `sub` as the elided target on soundness grounds, and `mul` on magnitude grounds — the latter both as the elided target and as a chain step |
+| the right representation is **flip the checked op to `unchecked_*`**, never delete a `RangeCheck` — HEAD's `get_value_max_num_bits`/`operand_max_num_bits`/`can_simplify_arithmetic_identity` are already conservative about unchecked ACIR results | the transform inherits the existing invariant machinery instead of re-deriving it |
+| **prerequisite:** `checked_to_unchecked`'s private `required_bit_size` lacks the conservative unchecked-arithmetic arm its sibling `get_value_max_num_bits` has; measured at HEAD, it lets the pass flip a checked `u64` add that *can* overflow (execution changes from `Err(Overflow)` to an out-of-range `Ok`) | fix it first, as its own tiny PR — otherwise the elision can remove the very check it depends on. Noir-source reachability on HEAD is **not** demonstrated, so it is filed as a candidate latent bug, not a live one |
+| frequency: **501 structural chain candidates — an upper bound**, not elidable checks (≈20% of the 2516 checked unsigned `add`/`mul` ops surviving the pass today), concentrated in **9 of 509** packages, with **0** of the `RangeCheck`-covered variant. The counter tested the structural shape only: it did not evaluate C5, did not fully establish C3, did not apply the add-only C0 restriction, and did not establish that the covering op survives later passes | the pattern is real (unrolled accumulators, multi-term `+` expressions) yet the existing benchmark suite would show zero movement — a focused fixture is mandatory, and the "does it pay rent" question (PR #11580 landmine) is live |
+| the counter-risk is that a range check is one of the sites that cuts an accumulating ACIR expression into a witness (cf. §10.6 / noir#4629) | eliding every intermediate check on a long unrolled chain may **grow** the circuit; must be gate-measured before the design is trusted |
+
+The bead stays **open**: the recommendation is a four-step sequence (prerequisite
+helper fix → gate-measurement spike on focused fixtures → the ACIR-only v1 pass →
+optional extensions), with an explicit stop-and-park after step 2 if no gate win
+reproduces. Two questions are for the maintainer/upstream *before* code: whether
+the failure-attribution move is acceptable at all, and whether @jeswr's
+open #12780/#12927 range analysis subsumes this. Nothing was posted upstream.
+
+### 10.10 `sq-mtolx` (paper P3, gap-analysis / new-opportunities) — source-level pass (2026-07-28)
 
 > 🤖 **SPARQ agent** [OPUS-5]. Full record:
 > `noir-optimization-new-opportunities.md` (analysed against noir `e22cd89b`).

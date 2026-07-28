@@ -154,11 +154,11 @@ jobs:
         # Consumers here: skill-frontmatter + the ci-scripts selection-wiring inspection.
         run: pip install --require-hashes -r .github/requirements/docs-quality.txt
       - name: Install typos
-        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: typos@1.47.2
       - name: Install lychee (for the site-links self-test)
-        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: lychee@0.23.0
 
@@ -177,7 +177,9 @@ jobs:
           set -euo pipefail
           # HARD scope = root *.md + skills/ + docs/ + crates/ (markdown only).
           # `git ls-files '*.md'` matches at any depth, so EXCLUDE the out-of-scope
-          # dirs to land exactly on the same set markdownlint's config globs (49 files).
+          # dirs to land exactly on the same set markdownlint's config globs. (A file
+          # COUNT was pinned here and rotted — it read 49 while the real scope had grown
+          # to 280; the step prints the live count below, so do not re-pin one. [OPUS-5])
           git ls-files '*.md' \
             ':!:research/**' ':!:zk/**' ':!:bench/**' ':!:js/**' \
             ':!:.beads/**' ':!:.claude/**' ':!:.github/**' \
@@ -839,6 +841,23 @@ jobs:
       # the same false header reds on arrival.
       - name: Self-test the alarm/detector lanes are DECLARED non-gating (sq-huwr8)
         run: python3 scripts/tests/test_alarm_lanes_non_gating.py
+      # [OPUS-5] sq-1lc4i: the CI EXECUTION-LATENCY alarm
+      # (scripts/ci_execution_latency_alarm.py, .github/workflows/ci-latency-alarm.yml).
+      # Hermetic (no gh, no network). Three halves: the classifiers for all three choke
+      # modes — including the two guards that fail SILENTLY if broken, namely the
+      # missing-baseline fallback (a lane whose runs never complete must still be
+      # watchable, or the detector goes quiet exactly when a lane is 100% hung) and the
+      # empty-scan-set fail-loud (reporting health over an empty population); the
+      # DISJOINTNESS with #4368's cron_lane_liveness.py, asserted over the REAL workflow
+      # tree in both directions so neither a duplicate nor a hole can open; and the YAML
+      # SEAM (self-test ordered before the detector, both invocations matched EXACTLY
+      # rather than by containment, no step `if:`/`continue-on-error`, SHA-pinned actions,
+      # the sparse-checkout that M1 reads its expectation from, and permissions carrying
+      # `issues: write` with NO `pull-requests: write` so the detector can never acquire
+      # arming authority). The suite pins its OWN call site here, so it cannot silently
+      # leave CI.
+      - name: Self-test the CI execution-latency alarm (3 choke modes + YAML seam)
+        run: python3 scripts/tests/test_ci_execution_latency_alarm.py
       # [SONNET-4.6] sq-1cb6l: the 5 remaining hermetic test suites found by the
       # #1670 audit, wired here alongside the other ci-scripts self-tests.
       #
@@ -882,6 +901,20 @@ jobs:
       # only, no git/network.
       - name: Self-test check-install-action-tool.py (fixtures + live invariant — sq-1cb6l)
         run: python3 scripts/tests/test_install_action_tool.py
+      # [OPUS-5] sparq-org/sparq#4652: the zero-dispatch merge-group watchdog
+      # (scripts/merge-group-watchdog.py, .github/workflows/merge-group-watchdog.yml)
+      # plus the CI_TIMEOUT routing split it feeds in merge-queue-feedback.yml. Both
+      # are queue-critical and neither can be exercised by a PR run, so their whole
+      # contract is pinned here: the hermetic decision tables (script --self-test), and
+      # the three-layer suite — policy, sweep BEHAVIOUR against a scripted gh (assert on
+      # the mutations issued, not the log text), and cross-file YAML-seam inspection of
+      # every `if:`, step and call site. The fail-closed direction matters most: the
+      # demote guard is `route != 'preserve'`, so a classifier failure keeps the
+      # pre-#4652 behaviour; inverting it to `== 'demote'` fails here.
+      - name: Self-test merge-group-watchdog.py (decision tables — #4652)
+        run: python3 scripts/merge-group-watchdog.py --self-test
+      - name: Zero-dispatch watchdog suite (policy + behaviour + YAML seam — #4652)
+        run: python3 scripts/tests/test_merge_group_watchdog.py
       # [SONNET-4.6] sq-qcnn.32 / [OPUS-5] #3773: the advisory-job registry + gate-intent
       # placement check. Since #3773 the registry is LOAD-BEARING (it is the ONLY thing
       # that makes a check-run non-gating), so this is its integrity gate. THREE

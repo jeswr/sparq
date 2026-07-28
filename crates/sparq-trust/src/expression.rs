@@ -5,8 +5,8 @@
 //! §3.1–3.5, bead `sq-6syab.4`). The verifier sends exactly three things — a
 //! SPARQL query `Q` (ASK or SELECT), a **trust-requirements document** `TR` (a
 //! small RDF graph in the [`crate::framework_vocab`] `trustx:` vocabulary), and a
-//! **nonce** (the zkSPARQL challenge-response mechanism, reused verbatim — no new
-//! freshness scheme). This module:
+//! **nonce** ([`ChallengeNonce`] — the zkSPARQL challenge-response mechanism,
+//! reused verbatim — no new freshness scheme). This module:
 //!
 //! 1. **parses the request** ([`parse_request`]) — fail-closed on a missing /
 //!    duplicated requirements node, a missing question IRI, a missing status
@@ -81,8 +81,11 @@
 //! that `Q` *is* the named question — e.g. a signature over the whole
 //! `(Q, TR, nonce)` request, or a trusted publication resolving the question
 //! IRI to a canonical query — is caller-owned, exactly like the
-//! [`MethodPrecheck`] resolution (design §7.7). Framework trust is **anchored, not
-//! proven** (§7.2). No ZK claim is made here; the ZK realisation is bead
+//! [`MethodPrecheck`] resolution (design §7.7). Nonce *freshness* is likewise
+//! caller-owned: [`ChallengeNonce`] makes a verifier's choice of a constant
+//! visible at the construction site (issue #4621) but cannot detect one.
+//! Framework trust is **anchored, not proven** (§7.2). No ZK claim is made
+//! here; the ZK realisation is bead
 //! `sq-6syab.5` on `sparq-zk-compose`, and the sparq ZK estate remains
 //! internally re-audited with **external accredited-cryptographer sign-off
 //! PENDING** (`sq-qhy4`); `sparq-mpc` is honest-majority semi-honest only.
@@ -130,8 +133,13 @@ const RESERVED_VAR_PREFIX: &str = "__tx_";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExpressionError {
     /// The nonce is empty — the challenge-response freshness binding (reused
-    /// verbatim from the zkSPARQL contract) is mandatory.
+    /// verbatim from the zkSPARQL contract) is mandatory. Raised by
+    /// [`ChallengeNonce::from_wire`], the only path by which an outside value
+    /// becomes a nonce.
     EmptyNonce,
+    /// [`ChallengeNonce::generate`] could not draw from the OS CSPRNG — fail
+    /// closed rather than mint a challenge nonce from a weaker source.
+    NoEntropy,
     /// The query string is empty.
     EmptyQuery,
     /// The requirements graph declares no `trustx:TrustRequirements` node.
@@ -202,6 +210,9 @@ impl fmt::Display for ExpressionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EmptyNonce => write!(f, "empty nonce (challenge-response binding is mandatory)"),
+            Self::NoEntropy => {
+                write!(f, "no OS entropy source available to draw a fresh challenge nonce")
+            }
             Self::EmptyQuery => write!(f, "empty query"),
             Self::NoRequirements => {
                 write!(f, "no trustx:TrustRequirements node in the requirements graph")
@@ -261,6 +272,122 @@ impl fmt::Display for ExpressionError {
 
 impl std::error::Error for ExpressionError {}
 
+// ─────────────────────────── the challenge nonce ────────────────────────────
+
+/// The verifier's challenge nonce — the zkSPARQL challenge-response freshness
+/// binding, carried as a type that makes the *provenance* of the value visible
+/// at every construction site.
+///
+/// Replay protection here rests entirely on the nonce being **freshly
+/// generated and unpredictable per request**. That obligation used to live
+/// only in prose on [`parse_request`]'s `nonce: &str` parameter, so a verifier
+/// could pass a compile-time constant, silently void the freshness guarantee,
+/// and have nothing in the crate object (issue #4621). There are now exactly
+/// two ways to obtain a nonce, and which one a call site reached for is
+/// readable in the source:
+///
+/// * [`ChallengeNonce::generate`] — the **verifier-side** path: bytes drawn
+///   from the OS CSPRNG. The only constructor that *creates* freshness.
+/// * [`ChallengeNonce::from_wire`] — the **adopt-an-outside-value** path, for
+///   a nonce that legitimately arrives from elsewhere (the holder echoing a
+///   challenge, a response decoded off the wire, a verifier whose session
+///   nonce is minted by a layer above this crate). It is named for what it
+///   does: it asserts nothing about freshness, so a call site that reaches for
+///   it to wrap a literal is *visibly* opting out of the guarantee.
+///
+/// ## Honest scope
+///
+/// This is a **hardening** measure, not a soundness claim in either direction.
+/// The type relocates the freshness obligation from prose into the
+/// construction site so that voiding it is explicit rather than invisible; it
+/// cannot *detect* a caller that feeds [`from_wire`](Self::from_wire) a
+/// constant, and it changes no protocol, wire format, or verifier check. The
+/// sparq ZK/trust estate remains internally re-audited with external
+/// accredited-cryptographer sign-off PENDING (`sq-qhy4`).
+///
+/// ```
+/// # use sparq_trust::expression::ChallengeNonce;
+/// let fresh = ChallengeNonce::generate().expect("OS entropy");
+/// assert_ne!(fresh, ChallengeNonce::generate().expect("OS entropy"));
+///
+/// // A value that came from outside has to say so.
+/// let echoed = ChallengeNonce::from_wire(fresh.as_str()).expect("non-empty");
+/// assert_eq!(echoed, fresh);
+/// ```
+///
+/// The call shape [`parse_request`] accepts, for contrast with the one below:
+///
+/// ```
+/// # use sparq_trust::expression::{parse_request, ChallengeNonce, ExpressionError};
+/// let nonce = ChallengeNonce::generate().expect("OS entropy");
+/// assert_eq!(
+///     parse_request("ASK { ?s ?p ?o }", &[], &nonce),
+///     Err(ExpressionError::NoRequirements),
+/// );
+/// ```
+///
+/// A bare `&str` literal is not a nonce — the same call does not compile:
+///
+/// ```compile_fail
+/// # use sparq_trust::expression::parse_request;
+/// let _ = parse_request("ASK { ?s ?p ?o }", &[], "a-constant-nonce");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ChallengeNonce(String);
+
+impl ChallengeNonce {
+    /// How many CSPRNG bytes [`Self::generate`] draws (256 bits, rendered as
+    /// lowercase hex into the wire value).
+    pub const ENTROPY_BYTES: usize = 32;
+
+    /// Draw a FRESH, unpredictable challenge nonce from the OS CSPRNG — the
+    /// verifier-side construction path. [`Self::ENTROPY_BYTES`] bytes are
+    /// filled from the platform entropy source and hex-encoded.
+    ///
+    /// Fails closed with [`ExpressionError::NoEntropy`] when that source is
+    /// unavailable: a nonce is never fabricated from a weaker fallback.
+    pub fn generate() -> Result<Self, ExpressionError> {
+        let mut bytes = [0u8; Self::ENTROPY_BYTES];
+        // The OS CSPRNG — the same primitive (and the same `fill()` API of the
+        // getrandom 0.4 line) the sparq-zk salt mint draws its per-graph salt
+        // from. An error here means the platform has no entropy source.
+        getrandom::fill(&mut bytes).map_err(|_| ExpressionError::NoEntropy)?;
+        // The crate's existing lowercase-hex encoder (`expression` implies `did`).
+        Ok(Self(crate::did::to_hex(&bytes)))
+    }
+
+    /// Adopt a nonce that arrived from OUTSIDE this crate — the holder echoing
+    /// a challenge, a response decoded off the wire, or a verifier whose
+    /// session nonce is minted a layer above. **Asserts nothing about
+    /// freshness**: the name is the signal that the obligation stays with the
+    /// caller here, exactly as it did for the old `&str` parameter.
+    ///
+    /// The only check is the one [`parse_request`] used to make: an empty (or
+    /// all-whitespace) value is refused with [`ExpressionError::EmptyNonce`],
+    /// because the challenge-response binding is mandatory. There is
+    /// deliberately no minimum-length or entropy heuristic — it would reject
+    /// `"n"` while happily accepting a 32-byte constant, buying false
+    /// confidence rather than protection.
+    pub fn from_wire(value: &str) -> Result<Self, ExpressionError> {
+        if value.trim().is_empty() {
+            return Err(ExpressionError::EmptyNonce);
+        }
+        Ok(Self(value.to_string()))
+    }
+
+    /// The nonce's wire value — what is transported to the holder and echoed
+    /// back in the response.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ChallengeNonce {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 // ─────────────────────────────── request ────────────────────────────────
 
 /// The parsed verifier→holder contract carrier: the SPARQL query `Q`, the
@@ -274,8 +401,11 @@ pub struct ContractRequest {
     /// supported v1 fragment).
     pub query: String,
     /// The verifier's challenge nonce (freshness binding; echoed in the
-    /// response and checked by [`verify_response`]).
-    pub nonce: String,
+    /// response and checked by [`verify_response`]). A verifier minting a new
+    /// challenge MUST build this with [`ChallengeNonce::generate`] — see that
+    /// type for why reuse voids replay protection and what
+    /// [`ChallengeNonce::from_wire`] does and does not promise.
+    pub nonce: ChallengeNonce,
     /// The parsed trust-requirements document `TR`.
     pub requirements: TrustRequirements,
 }
@@ -355,18 +485,22 @@ pub struct MethodPrecheck<'a> {
 
 /// Parse a request: the query string `Q`, the trust-requirements graph `TR`
 /// (as parsed RDF triples — the same input shape as [`crate::policy::parse_policy`]),
-/// and the nonce. Fail-closed on every malformation (see [`ExpressionError`]);
-/// notably a `TR` with **no trust mode** is refused here rather than admitted
-/// as a vacuous evaluation, and every `did:`-scheme issuer must pass
-/// [`crate::did::Did::parse`].
+/// and the [`ChallengeNonce`]. Fail-closed on every malformation (see
+/// [`ExpressionError`]); notably a `TR` with **no trust mode** is refused here
+/// rather than admitted as a vacuous evaluation, and every `did:`-scheme issuer
+/// must pass [`crate::did::Did::parse`].
+///
+/// The nonce arrives already constructed, so the emptiness refusal that used to
+/// live here now lives in [`ChallengeNonce::from_wire`] — and a verifier
+/// minting a new challenge reaches for [`ChallengeNonce::generate`] instead.
+/// Nothing at this layer can verify that a nonce is *fresh*; the type makes the
+/// choice visible at the call site, which is as far as the obligation can be
+/// moved (see [`ChallengeNonce`]'s honest scope).
 pub fn parse_request(
     query: &str,
     requirements: &[Triple],
-    nonce: &str,
+    nonce: &ChallengeNonce,
 ) -> Result<ContractRequest, ExpressionError> {
-    if nonce.trim().is_empty() {
-        return Err(ExpressionError::EmptyNonce);
-    }
     if query.trim().is_empty() {
         return Err(ExpressionError::EmptyQuery);
     }
@@ -476,7 +610,7 @@ pub fn parse_request(
 
     Ok(ContractRequest {
         query: query.to_string(),
-        nonce: nonce.to_string(),
+        nonce: nonce.clone(),
         requirements: TrustRequirements {
             question,
             trusted_issuers,
@@ -750,8 +884,10 @@ pub enum ContractAnswer {
 /// admissible derivation ⇒ no binding ⇒ zero bundles disclosed).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProvenanceResponse {
-    /// The request's nonce, echoed (checked by [`verify_response`]).
-    pub nonce: String,
+    /// The request's nonce, echoed (checked by [`verify_response`]). This
+    /// value legitimately comes off the wire, so a caller reconstructing a
+    /// response builds it with [`ChallengeNonce::from_wire`].
+    pub nonce: ChallengeNonce,
     /// Option (a), the NORMATIVE encoding: RDF 1.2 reifiers — one
     /// `<bundle> rdf:reifies <<( s p o )>>` statement per contributing
     /// statement, with the PROV-O/`trustx:` qualification triples on the
@@ -1332,8 +1468,15 @@ mod tests {
         v
     }
 
+    /// A fixture nonce. Deliberately routed through the named
+    /// `from_wire` constructor: a test value is exactly the "came from
+    /// outside, promises nothing about freshness" case that constructor is for.
+    fn nonce(value: &str) -> ChallengeNonce {
+        ChallengeNonce::from_wire(value).expect("fixture nonce is non-empty")
+    }
+
     fn request(query: &str, issuers: &[&str], frameworks: &[&str]) -> ContractRequest {
-        parse_request(query, &tr_triples(issuers, frameworks, None, None), "nonce-1")
+        parse_request(query, &tr_triples(issuers, frameworks, None, None), &nonce("nonce-1"))
             .expect("fixture request parses")
     }
 
@@ -1344,10 +1487,10 @@ mod tests {
         let req = parse_request(
             ASK_AGE,
             &tr_triples(&[ISS_X], &[TRUSTX_EIDAS2], None, None),
-            "n-1",
+            &nonce("n-1"),
         )
         .expect("parses");
-        assert_eq!(req.nonce, "n-1");
+        assert_eq!(req.nonce.as_str(), "n-1");
         assert_eq!(req.requirements.question.as_str(), "urn:q1");
         assert_eq!(req.requirements.trusted_issuers, vec![nn(ISS_X)]);
         assert_eq!(req.requirements.trusted_frameworks, vec![nn(TRUSTX_EIDAS2)]);
@@ -1358,15 +1501,74 @@ mod tests {
     }
 
     #[test]
-    fn parse_request_rejects_empty_nonce_and_empty_query() {
+    fn parse_request_rejects_empty_query() {
         let tr = tr_triples(&[ISS_X], &[], None, None);
-        assert_eq!(parse_request(ASK_AGE, &tr, "  "), Err(ExpressionError::EmptyNonce));
-        assert_eq!(parse_request(" ", &tr, "n"), Err(ExpressionError::EmptyQuery));
+        assert_eq!(parse_request(" ", &tr, &nonce("n")), Err(ExpressionError::EmptyQuery));
+    }
+
+    // ── ChallengeNonce (issue #4621) ─────────────────────────────────────
+
+    #[test]
+    fn from_wire_refuses_an_empty_or_whitespace_nonce() {
+        // The mandatory challenge-response binding: the refusal parse_request
+        // used to make now lives at the one constructor an outside value can
+        // enter through.
+        assert_eq!(ChallengeNonce::from_wire(""), Err(ExpressionError::EmptyNonce));
+        assert_eq!(ChallengeNonce::from_wire("  "), Err(ExpressionError::EmptyNonce));
+        assert_eq!(ChallengeNonce::from_wire("\t\n"), Err(ExpressionError::EmptyNonce));
+    }
+
+    #[test]
+    fn from_wire_preserves_the_value_verbatim() {
+        // It adopts, it does not normalise: the echo check in verify_response
+        // is a byte comparison against whatever the verifier put on the wire.
+        let n = ChallengeNonce::from_wire(" padded ").expect("non-empty");
+        assert_eq!(n.as_str(), " padded ");
+        assert_eq!(n.to_string(), " padded ");
+    }
+
+    #[test]
+    fn generate_draws_a_fresh_unpredictable_nonce_every_time() {
+        // THE red test for the freshness guard: a `generate` that returned a
+        // constant — the exact failure mode issue #4621 is about — collapses
+        // this set to one element.
+        const DRAWS: usize = 64;
+        let drawn: BTreeSet<String> = (0..DRAWS)
+            .map(|_| ChallengeNonce::generate().expect("OS entropy").as_str().to_string())
+            .collect();
+        assert_eq!(drawn.len(), DRAWS, "generate() repeated a nonce across {} draws", DRAWS);
+        for n in &drawn {
+            // 32 CSPRNG bytes, lowercase hex.
+            assert_eq!(n.len(), ChallengeNonce::ENTROPY_BYTES * 2, "unexpected width: {}", n);
+            assert!(
+                n.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')),
+                "not lowercase hex: {}",
+                n
+            );
+        }
+        // A generated nonce is a legal wire value (it round-trips through the
+        // holder's echo without the emptiness refusal firing).
+        let fresh = ChallengeNonce::generate().expect("OS entropy");
+        assert_eq!(ChallengeNonce::from_wire(fresh.as_str()).expect("round-trips"), fresh);
+    }
+
+    #[test]
+    fn a_generated_nonce_drives_the_contract_and_is_echoed() {
+        // The verifier-side path end-to-end: the freshly generated challenge is
+        // what parse_request carries and what the response has to echo back.
+        let fresh = ChallengeNonce::generate().expect("OS entropy");
+        let req = parse_request(ASK_AGE, &tr_triples(&[ISS_X], &[], None, None), &fresh)
+            .expect("parses");
+        assert_eq!(req.nonce, fresh);
+        let holder = holder_mode1(ISS_X, "2026-07-01T00:00:00Z", "2026-07-10T00:00:00Z", true);
+        let out = evaluate_contract(&req, &holder, None).expect("evaluates");
+        assert_eq!(out.response.nonce, fresh);
+        assert_eq!(verify_response(&req, &out.response), Ok(ContractAnswer::Boolean(true)));
     }
 
     #[test]
     fn parse_request_rejects_missing_or_duplicated_requirements_node() {
-        assert_eq!(parse_request(ASK_AGE, &[], "n"), Err(ExpressionError::NoRequirements));
+        assert_eq!(parse_request(ASK_AGE, &[], &nonce("n")), Err(ExpressionError::NoRequirements));
         let mut two = tr_triples(&[ISS_X], &[], None, None);
         two.push(Triple::new(
             nn("urn:tr2"),
@@ -1374,7 +1576,7 @@ mod tests {
             Term::NamedNode(nn(TRUSTX_TRUST_REQUIREMENTS)),
         ));
         assert_eq!(
-            parse_request(ASK_AGE, &two, "n"),
+            parse_request(ASK_AGE, &two, &nonce("n")),
             Err(ExpressionError::MultipleRequirements)
         );
     }
@@ -1385,13 +1587,13 @@ mod tests {
             .into_iter()
             .filter(|t| t.predicate.as_str() != TRUSTX_QUESTION)
             .collect();
-        assert_eq!(parse_request(ASK_AGE, &no_q, "n"), Err(ExpressionError::MissingQuestion));
+        assert_eq!(parse_request(ASK_AGE, &no_q, &nonce("n")), Err(ExpressionError::MissingQuestion));
         let no_t: Vec<Triple> = tr_triples(&[ISS_X], &[], None, None)
             .into_iter()
             .filter(|t| t.predicate.as_str() != TRUSTX_REQUIRES_VALID_STATUS_AT)
             .collect();
         assert_eq!(
-            parse_request(ASK_AGE, &no_t, "n"),
+            parse_request(ASK_AGE, &no_t, &nonce("n")),
             Err(ExpressionError::MissingValidStatusAt)
         );
     }
@@ -1408,7 +1610,7 @@ mod tests {
         // flip to a rejection.
         let tr = tr_triples(&[ISS_X], &[], None, None); // question = urn:q1
         let q = format!("ASK {{ <urn:jesse> <{}> ?name }}", FOAF_NAME);
-        let req = parse_request(&q, &tr, "n").expect("unrelated query accepted");
+        let req = parse_request(&q, &tr, &nonce("n")).expect("unrelated query accepted");
         assert_eq!(req.requirements.question.as_str(), "urn:q1");
 
         let mut d = String::new();
@@ -1442,7 +1644,7 @@ mod tests {
             )),
         ));
         assert_eq!(
-            parse_request(ASK_AGE, &tr, "n"),
+            parse_request(ASK_AGE, &tr, &nonce("n")),
             Err(ExpressionError::BadDateTime("2026-07-05T00:00:00+02:00".to_string()))
         );
     }
@@ -1451,7 +1653,7 @@ mod tests {
     fn parse_request_rejects_no_trust_mode() {
         // Neither issuers nor frameworks: such a TR admits nothing — refused up front.
         assert_eq!(
-            parse_request(ASK_AGE, &tr_triples(&[], &[], None, None), "n"),
+            parse_request(ASK_AGE, &tr_triples(&[], &[], None, None), &nonce("n")),
             Err(ExpressionError::NoTrustMode)
         );
     }
@@ -1460,14 +1662,14 @@ mod tests {
     fn parse_request_validates_did_issuers_and_accepts_plain_iris() {
         // Uppercase DID method is invalid DID syntax → fail-closed via Did::parse.
         assert_eq!(
-            parse_request(ASK_AGE, &tr_triples(&["did:WEB:x.example"], &[], None, None), "n"),
+            parse_request(ASK_AGE, &tr_triples(&["did:WEB:x.example"], &[], None, None), &nonce("n")),
             Err(ExpressionError::BadIssuer("did:WEB:x.example".to_string()))
         );
         // A non-did IRI identity is accepted opaquely.
         let req = parse_request(
             ASK_AGE,
             &tr_triples(&["https://issuers.example/x"], &[], None, None),
-            "n",
+            &nonce("n"),
         )
         .expect("plain IRI issuer accepted");
         assert_eq!(req.requirements.trusted_issuers, vec![nn("https://issuers.example/x")]);
@@ -1478,7 +1680,7 @@ mod tests {
         let req = parse_request(
             ASK_AGE,
             &tr_triples(&[], &[TRUSTX_EIDAS2], Some(false), None),
-            "n",
+            &nonce("n"),
         )
         .expect("parses");
         assert!(!req.requirements.requires_scope_conformance);
@@ -1542,7 +1744,7 @@ mod tests {
         let req = parse_request(
             ASK_AGE,
             &tr_triples(&[], &[TRUSTX_EIDAS2], Some(false), None),
-            "n",
+            &nonce("n"),
         )
         .expect("parses");
         let q = rewrite_query(&req).expect("rewrites");
@@ -1796,7 +1998,7 @@ mod tests {
         let req = parse_request(
             ASK_AGE,
             &tr_triples(&[ISS_X], &[], None, Some("urn:policy1")),
-            "n",
+            &nonce("n"),
         )
         .expect("parses");
         let holder = holder_mode1(ISS_X, "2026-07-01T00:00:00Z", "2026-07-10T00:00:00Z", true);
@@ -1811,7 +2013,7 @@ mod tests {
         let req = parse_request(
             ASK_AGE,
             &tr_triples(&[ISS_X], &[], None, Some("urn:policy1")),
-            "n",
+            &nonce("n"),
         )
         .expect("parses");
         let holder = holder_mode1(ISS_X, "2026-07-01T00:00:00Z", "2026-07-10T00:00:00Z", true);
@@ -1837,7 +2039,7 @@ mod tests {
         let req = parse_request(
             ASK_AGE,
             &tr_triples(&[ISS_X], &[], None, Some("urn:policyA")),
-            "n",
+            &nonce("n"),
         )
         .expect("parses");
         let holder = holder_mode1(ISS_X, "2026-07-01T00:00:00Z", "2026-07-10T00:00:00Z", true);
@@ -1862,7 +2064,7 @@ mod tests {
         let req = parse_request(
             ASK_AGE,
             &tr_triples(&[ISS_X], &[], None, Some("urn:policy1")),
-            "n",
+            &nonce("n"),
         )
         .expect("parses");
         let holder = holder_mode1(ISS_X, "2026-07-01T00:00:00Z", "2026-07-10T00:00:00Z", true);
@@ -1885,7 +2087,7 @@ mod tests {
         let holder = holder_mode1(ISS_X, "2026-07-01T00:00:00Z", "2026-07-10T00:00:00Z", true);
         let out = evaluate_contract(&req, &holder, None).expect("evaluates");
         let mut replayed = out.response;
-        replayed.nonce = "some-other-session".to_string();
+        replayed.nonce = nonce("some-other-session");
         assert_eq!(verify_response(&req, &replayed), Err(ExpressionError::NonceMismatch));
     }
 

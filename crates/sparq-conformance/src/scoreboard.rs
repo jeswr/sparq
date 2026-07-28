@@ -1135,7 +1135,7 @@ pub const SUITES: &[Suite] = &[
             feature: "dl-direct",
         },
         ci_job: "inference-conformance",
-        ratchet_floor: 94,
+        ratchet_floor: 93,
         floor_basis: "positive-tag membership passes, EXACT-pinned (sparq EXTENSION over the \
                       L1/L2 ALCH-fragment checker — scoped fragment, NOT full OWL 2 DL and NOT \
                       a W3C ProfileIdentificationTest conformance claim); re-pinned by \
@@ -1143,7 +1143,10 @@ pub const SUITES: &[Suite] = &[
                       re-pinned by sq-pbz04.4.9 (L1 datatype-map-IRI refusal: -1, 95 -> 94 — the \
                       WebOnt-I5.3-015 EL profile row whose premise carries xsd:integer/xsd:string \
                       ranges now refuses extraction and honestly abstains, was a pass under the \
-                      old opaque-datatype reading)",
+                      old opaque-datatype reading); re-pinned by sq-pbz04.4.8 (L1 built-in \
+                      fixed-extension property refusal: -1, 94 -> 93 — the \
+                      New-Feature-BottomObjectProperty-001 EL profile row, whose premise uses \
+                      owl:bottomObjectProperty, now refuses extraction and honestly abstains)",
         note: "EXTENSION ratchet — the DIRECT-arm ProfileIdentificationTest cases whose \
                POSITIVE test:profile tags the L2 syntactic checker reproduces through the \
                REAL fail-closed L1 extraction + grammar walk; abstentions are never passes. \
@@ -1151,9 +1154,9 @@ pub const SUITES: &[Suite] = &[
                normalizes a 1-ary owl:intersectionOf to its member) and now pass; the \
                positive PROFILE_DIVERGENCES pin is empty. The EXPLICIT-NEGATIVE direction is \
                a SEPARATE lane (sq-pbz04.4.16): the export's owl:NegativePropertyAssertion \
-               profile negations refuted where L2 can (138 after sq-zfwzq graduated three \
-               transitive-property inputs from extraction abstention: +1 refuted and +2 \
-               measured In-gap), with an honest measured In-gap (182 of 320 checkable) where axiom-grammar membership \
+               profile negations refuted where L2 can (134 after sq-pbz04.4.8 moved four \
+               built-in-property rows out of the checkable set into honest extraction \
+               abstention), with an honest measured In-gap (181 of 315 checkable) where axiom-grammar membership \
                over the ALCH shadow cannot refute full-profile membership (deferred \
                restrictions); species assertions remain unchecked (documented)",
     },
@@ -1166,7 +1169,7 @@ pub const SUITES: &[Suite] = &[
             feature: "dl-direct",
         },
         ci_job: "inference-conformance",
-        ratchet_floor: 186,
+        ratchet_floor: 227,
         floor_basis: "definitive expected verdicts through the L4 dispatch, EXACT-pinned \
                       (sparq EXTENSION over the scoped fragment — NOT full OWL 2 DL); \
                       re-pinned by sq-pbz04.4.11 (M1 named-composite fix, net +8); \
@@ -1180,7 +1183,14 @@ pub const SUITES: &[Suite] = &[
                       + L1 datatype-map-IRI refusal net to zero on the pass total, composition \
                       97+69 -> 96+70; fail set still 5, M3/M5/M6); re-pinned by sq-zfwzq \
                       (ALCHS transitive roles: +2 consistency and +2 positive-entailment \
-                      passes, 182 -> 186; composition 98+14+72+2, fail set unchanged)",
+                      passes, 182 -> 186; composition 98+14+72+2, fail set unchanged); \
+                      re-pinned by sq-pbz04.4.8 (guard-abstention tableau fall-through: +41, \
+                      186 -> 227; composition 136+17+72+2 — an abstaining RL/EL/QL branch now \
+                      re-asks the ALCH tableau, which is complete for every L1-extracted \
+                      ontology, so the 43 guard-abstained rows are decided instead of dropped; \
+                      paired with an L1 refusal of owl:top/bottomObjectProperty, whose fixed \
+                      extensions L1 had been reading away — without it the fall-through exposed \
+                      2 wrong verdicts; fail set unchanged at 5)",
         note: "EXTENSION ratchet — the DIRECT-arm consistency / inconsistency / positive- / \
                negative-entailment tests decided by the REAL sparq-reason-dl L4 dispatch \
                (RL guarded / EL guarded / QL deferred / ALCH tableau) under a pinned \

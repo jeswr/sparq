@@ -92,6 +92,7 @@ expression = [
     "secprop-admissibility",
     "dep:sparq-engine",
     "dep:spargebra",
+    "dep:getrandom",
 ]
 # [OPUS-4.8] sq-ufsi9 — the N3 proof-admissibility ruleset over `sparq-reason` (the
 # §4.3 ODRL → admissible-proof-set reduction: strongerThan-closure / atLeast /
@@ -164,6 +165,13 @@ flate2 = { version = "1", optional = true }
 # as the engine allows; the DEFAULT sparq-trust build pulls neither (strict additivity).
 sparq-engine = { path = "../sparq-engine", version = "0.1.0", optional = true, default-features = false }
 spargebra = { workspace = true, optional = true }
+# OPTIONAL — `expression` feature only (issue #4621). The OS CSPRNG behind
+# `ChallengeNonce::generate`, the verifier-side construction path for the
+# challenge-response freshness binding. Same 0.4 line — and same `fill()` API — the
+# `sparq-zk` salt mint already draws from, and `sparq-zk` is an UNCONDITIONAL
+# dependency of this crate, so this adds no new edge to the workspace dependency
+# graph at all; the default sparq-trust build pulls no new code either way.
+getrandom = { version = "0.4", optional = true }
 
 # Test-only: parse-validate the published machine-readable vocabulary
 # `ontologies/trust/trust.ttl` so the Turtle a working group reads stays valid

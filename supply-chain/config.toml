@@ -1465,11 +1465,6 @@ criteria = "safe-to-deploy"
 version = "0.8.4"
 criteria = "safe-to-deploy"
 
-[[exemptions.rustls-pemfile]]
-version = "2.2.0"
-criteria = "safe-to-deploy"
-notes = "solid-server-rs import pre-flight (sq-gg0qq.1): PEM cert-chain/key parse for the incoming mTLS serve path; archived-but-stable (see the deny.toml RUSTSEC-2025-0134 ignore + VEX entry); follow-up migrates to rustls-pki-types PemObject. [FABLE-5]"
-
 [[exemptions.rustls-pki-types]]
 version = "1.14.1"
 criteria = "safe-to-deploy"

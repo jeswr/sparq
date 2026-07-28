@@ -96,12 +96,9 @@ use sparq_core::Graph;
 use sparq_engine::QueryBudget;
 use sparq_solid::{Mode, PodStore, Session};
 
-use crate::jsonrpc::{
-    Request, Response, RpcError, INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND,
-    RESOURCE_NOT_FOUND,
-};
+use crate::jsonrpc::{Request, RpcError, INVALID_PARAMS, METHOD_NOT_FOUND, RESOURCE_NOT_FOUND};
 use crate::notifications::{classify, ActivityType, Subscriptions, TopicDigest};
-use crate::server::{arg_str, serialize, tool_text_result};
+use crate::server::{arg_str, handle_raw, tool_text_result};
 use crate::tools::ToolSpec;
 
 /// `ldp:contains` — the containment predicate a container's own graph stores.
@@ -465,30 +462,11 @@ impl SolidMcpServer {
     }
 
     /// Handle one raw JSON-RPC message — the pod twin of
-    /// [`crate::McpServer::handle_message`], with the identical framing contract
-    /// (`Some(response)` for a request, `None` for a notification).
+    /// [`crate::McpServer::handle_message`], sharing the very same framing core
+    /// (`Some(response)` for a request, `None` for a notification, and top-level
+    /// JSON-RPC batch arrays accepted per JSON-RPC 2.0 §6).
     pub fn handle_message(&mut self, raw: &str) -> Option<String> {
-        let req: Request = match serde_json::from_str(raw) {
-            Ok(r) => r,
-            Err(e) => {
-                let resp = Response::err(
-                    Value::Null,
-                    RpcError::new(INVALID_REQUEST, format!("invalid JSON-RPC request: {e}")),
-                );
-                return Some(serialize(&resp));
-            }
-        };
-        let is_notification = req.is_notification();
-        let id = req.id.clone().unwrap_or(Value::Null);
-        let outcome = self.dispatch(&req);
-        if is_notification {
-            return None;
-        }
-        let resp = match outcome {
-            Ok(result) => Response::ok(id, result),
-            Err(e) => Response::err(id, e),
-        };
-        Some(serialize(&resp))
+        handle_raw(raw, |req| self.dispatch(req))
     }
 
     /// The session this server is bound to (borrowing the config's owned strings).
