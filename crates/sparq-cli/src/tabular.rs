@@ -673,18 +673,34 @@ fn gen_term(
     }))
 }
 
-/// The graph terms a set of graph maps generates for one row, as N-Quads-serialised graph
-/// labels; the EMPTY string means the default graph (an `rr:defaultGraph` constant).
-/// `Ok(None)` = a graph map generated NULL, so the statements it would scope are skipped.
+/// What one scope's graph maps generated for one row.
+struct GraphSet {
+    /// The generated graph labels, N-Quads-serialised and duplicate-free; the EMPTY string is
+    /// the default graph (an `rr:defaultGraph` constant).
+    labels: Vec<String>,
+    /// A declared graph map generated NULL on this row (and so contributed no label). This
+    /// distinguishes "no graph maps declared" — the default graph — from "declared, but every
+    /// one was NULL", which must NOT silently fall back to the default graph.
+    null_seen: bool,
+}
+
+/// The graph terms a set of graph maps generates for one row. A NULL graph map contributes
+/// NOTHING to the set rather than erasing it: R2RML §12.2 scopes a statement by the UNION of
+/// its subject map's and its predicate-object map's graph sets, so a NULL must not wipe out a
+/// graph a sibling map — or the other side of that union — generated.
 fn gen_graphs(
     specs: &[TermSpec],
     row: &[String],
     row_num: u64,
     base: Option<&str>,
-) -> Result<Option<Vec<String>>, String> {
-    let mut out: Vec<String> = Vec::with_capacity(specs.len());
+) -> Result<GraphSet, String> {
+    let mut labels: Vec<String> = Vec::with_capacity(specs.len());
+    let mut null_seen = false;
     for spec in specs {
-        let Some(t) = gen_term(spec, row, row_num, base)? else { return Ok(None) };
+        let Some(t) = gen_term(spec, row, row_num, base)? else {
+            null_seen = true;
+            continue;
+        };
         let label = match t {
             GenTerm::Iri(i) if i == RR_DEFAULT_GRAPH => String::new(),
             GenTerm::Iri(i) => format!("<{i}>"),
@@ -692,11 +708,11 @@ fn gen_graphs(
                 return Err(format!("graph map generated a non-IRI term {other:?} on row {row_num}"))
             }
         };
-        if !out.contains(&label) {
-            out.push(label);
+        if !labels.contains(&label) {
+            labels.push(label);
         }
     }
-    Ok(Some(out))
+    Ok(GraphSet { labels, null_seen })
 }
 
 /// The union of a subject map's graphs and a predicate-object map's graphs (R2RML §12.2),
@@ -756,29 +772,32 @@ fn emit_row(map: &CompiledMap, row: &[String], row_num: u64, out: &mut String) -
         return Err(format!("subject map generated a literal on row {row_num}"));
     }
     let s_nt = nt_term(&subj);
-    // A NULL from a subject-map graph map unscopes every statement of the row: skip it, the
-    // same fail-quiet-per-NULL rule R2RML gives a NULL object (never a silent default-graph
-    // fallback, which would put data somewhere the mapping did not ask for).
-    let Some(s_graphs) = gen_graphs(&map.graphs, row, row_num, base)? else {
-        return Ok(());
-    };
-    for cls in &map.classes {
-        push_stmt(out, &s_nt, RDF_TYPE_NT, cls, &s_graphs);
-    }
-    if let Some(prefix) = &map.provenance {
-        push_stmt(
-            out,
-            &s_nt,
-            &format!("<{PROV_WAS_DERIVED_FROM}>"),
-            &format!("<{prefix}{row_num}>"),
-            &s_graphs,
-        );
+    let s_graphs = gen_graphs(&map.graphs, row, row_num, base)?;
+    // Class and provenance triples are scoped by the subject map's graph set alone. An empty
+    // set means the default graph — UNLESS graph maps were declared and every one generated
+    // NULL, in which case the statement is unscoped and dropped (the same fail-quiet-per-NULL
+    // rule R2RML gives a NULL object, never a silent default-graph fallback that would put data
+    // somewhere the mapping did not ask for).
+    if !(s_graphs.labels.is_empty() && s_graphs.null_seen) {
+        for cls in &map.classes {
+            push_stmt(out, &s_nt, RDF_TYPE_NT, cls, &s_graphs.labels);
+        }
+        if let Some(prefix) = &map.provenance {
+            push_stmt(
+                out,
+                &s_nt,
+                &format!("<{PROV_WAS_DERIVED_FROM}>"),
+                &format!("<{prefix}{row_num}>"),
+                &s_graphs.labels,
+            );
+        }
     }
     for pom in &map.poms {
-        let Some(p_graphs) = gen_graphs(&pom.graphs, row, row_num, base)? else {
-            continue; // NULL graph on this predicate-object map only.
-        };
-        let graphs = union_graphs(&s_graphs, &p_graphs);
+        let p_graphs = gen_graphs(&pom.graphs, row, row_num, base)?;
+        let graphs = union_graphs(&s_graphs.labels, &p_graphs.labels);
+        if graphs.is_empty() && (s_graphs.null_seen || p_graphs.null_seen) {
+            continue; // every declared graph map was NULL: this map's statements are unscoped.
+        }
         let mut preds: Vec<String> = Vec::with_capacity(pom.predicates.len());
         for p in &pom.predicates {
             match gen_term(p, row, row_num, base)? {
@@ -2322,8 +2341,9 @@ mod tests {
                  rr:graphMap [ rr:template \"http://example.com/g/{{cat}}\" ] ] ;\n\
                rr:predicateObjectMap [ rr:predicate ex:q ; rr:objectMap [ rr:column \"v\" ] ] .\n"
         );
-        // Row 1 has a graph; row 2's `cat` is NULL, so its ex:p statement is dropped — but its
-        // graph-map-free ex:q statement still lands in the subject map's default graph.
+        // Row 1 has a graph; row 2's `cat` is NULL, so the predicate-object map generates no
+        // graph — but the subject map's default graph survives the union, so both statements
+        // still land there.
         let got = r2rml_nt(&mapping, &[("t", "id,v,cat\n1,x,red\n2,y,\n")]).unwrap();
         assert_eq!(
             got,
@@ -2331,7 +2351,80 @@ mod tests {
                 "<http://example.com/r/1> <http://example.com/p> \"x\" .",
                 "<http://example.com/r/1> <http://example.com/p> \"x\" <http://example.com/g/red> .",
                 "<http://example.com/r/1> <http://example.com/q> \"x\" .",
+                "<http://example.com/r/2> <http://example.com/p> \"y\" .",
                 "<http://example.com/r/2> <http://example.com/q> \"y\" .",
+            ]
+        );
+    }
+
+    /// A NULL graph map contributes NOTHING to the union — it never erases a graph generated
+    /// by a sibling graph map or by the other side of the subject/predicate-object union.
+    #[test]
+    fn r2rml_null_graph_map_does_not_erase_the_union() {
+        // (a) NULL predicate-object graph map alongside a valid NAMED subject graph.
+        let subject_named = format!(
+            "{PREAMBLE}\
+             ex:TM rr:logicalTable [ rr:tableName \"t\" ] ;\n\
+               rr:subjectMap [ rr:template \"http://example.com/r/{{id}}\" ; rr:class ex:C ; rr:graph ex:g1 ] ;\n\
+               rr:predicateObjectMap [ rr:predicate ex:p ; rr:objectMap [ rr:column \"v\" ] ;\n\
+                 rr:graphMap [ rr:template \"http://example.com/g/{{cat}}\" ] ] .\n"
+        );
+        assert_eq!(
+            r2rml_nt(&subject_named, &[("t", "id,v,cat\n1,x,\n")]).unwrap(),
+            vec![
+                "<http://example.com/r/1> <http://example.com/p> \"x\" <http://example.com/g1> .",
+                "<http://example.com/r/1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/C> <http://example.com/g1> .",
+            ]
+        );
+        // (b) NULL subject graph map alongside a valid predicate-object graph: the class triple
+        // is scoped by the subject set alone, so it drops, but the ex:p statement keeps ex:g2.
+        let pom_named = format!(
+            "{PREAMBLE}\
+             ex:TM rr:logicalTable [ rr:tableName \"t\" ] ;\n\
+               rr:subjectMap [ rr:template \"http://example.com/r/{{id}}\" ; rr:class ex:C ;\n\
+                 rr:graphMap [ rr:template \"http://example.com/g/{{cat}}\" ] ] ;\n\
+               rr:predicateObjectMap [ rr:predicate ex:p ; rr:objectMap [ rr:column \"v\" ] ; rr:graph ex:g2 ] .\n"
+        );
+        assert_eq!(
+            r2rml_nt(&pom_named, &[("t", "id,v,cat\n1,x,\n")]).unwrap(),
+            vec!["<http://example.com/r/1> <http://example.com/p> \"x\" <http://example.com/g2> ."]
+        );
+        // (c) TWO subject graph maps, only one NULL: the survivor still scopes everything.
+        let two_maps = format!(
+            "{PREAMBLE}\
+             ex:TM rr:logicalTable [ rr:tableName \"t\" ] ;\n\
+               rr:subjectMap [ rr:template \"http://example.com/r/{{id}}\" ; rr:graph ex:g1 ;\n\
+                 rr:graphMap [ rr:template \"http://example.com/g/{{cat}}\" ] ] ;\n\
+               rr:predicateObjectMap [ rr:predicate ex:p ; rr:objectMap [ rr:column \"v\" ] ] .\n"
+        );
+        assert_eq!(
+            r2rml_nt(&two_maps, &[("t", "id,v,cat\n1,x,\n")]).unwrap(),
+            vec!["<http://example.com/r/1> <http://example.com/p> \"x\" <http://example.com/g1> ."]
+        );
+    }
+
+    /// When EVERY declared graph map generates NULL the statement is unscoped and dropped — a
+    /// declared-but-NULL graph set is not the same thing as no graph maps at all, so there is
+    /// no silent fallback into the default graph.
+    #[test]
+    fn r2rml_all_null_graph_maps_drop_the_statement() {
+        let mapping = format!(
+            "{PREAMBLE}\
+             ex:TM rr:logicalTable [ rr:tableName \"t\" ] ;\n\
+               rr:subjectMap [ rr:template \"http://example.com/r/{{id}}\" ; rr:class ex:C ;\n\
+                 rr:graphMap [ rr:template \"http://example.com/g/{{cat}}\" ] ] ;\n\
+               rr:predicateObjectMap [ rr:predicate ex:p ; rr:objectMap [ rr:column \"v\" ] ] ;\n\
+               rr:predicateObjectMap [ rr:predicate ex:q ; rr:objectMap [ rr:column \"v\" ] ;\n\
+                 rr:graphMap [ rr:template \"http://example.com/h/{{cat}}\" ] ] .\n"
+        );
+        // Row 1 keeps everything; row 2's NULL `cat` empties BOTH scopes, so it emits nothing.
+        assert_eq!(
+            r2rml_nt(&mapping, &[("t", "id,v,cat\n1,x,red\n2,y,\n")]).unwrap(),
+            vec![
+                "<http://example.com/r/1> <http://example.com/p> \"x\" <http://example.com/g/red> .",
+                "<http://example.com/r/1> <http://example.com/q> \"x\" <http://example.com/g/red> .",
+                "<http://example.com/r/1> <http://example.com/q> \"x\" <http://example.com/h/red> .",
+                "<http://example.com/r/1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.com/C> <http://example.com/g/red> .",
             ]
         );
     }
