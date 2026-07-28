@@ -513,6 +513,19 @@ curl -G http://127.0.0.1:3030/sparql -H 'Accept: application/ld+json' \
 > for an explicitly rewrite-dark build; the sparq-engine LIBRARY default remains OFF for lean
 > library consumers.
 
+<!-- [OPUS-5] sq-7d3dj.30.15: comment separates the two adjacent blockquotes (markdownlint MD028). -->
+
+> **Default-on DPccp join-order planner (`dp-planner` feature — [OPUS-5] sq-7d3dj.30.15).** The
+> server's default set also lights sparq-engine's DPccp planner (sq-7d3dj.30.5): a connected BGP
+> with 3 or more patterns that fits the connected-subgraph budget is planned as a cost-optimal
+> BUSHY join tree instead of by greedy GOO. It is DEFAULT-ON once compiled, so every request gets
+> it with no explicit install, and it is result-equivalent — only join ORDER changes, never the
+> answer. This closes the gap where sq-7d3dj.30.5 lit the planner in `sparq-cli` alone, which made
+> an HTTP-measured query plan differently from the CLI-measured one the canonical benchmarks use.
+> Zero new dependencies. Drop it with `--no-default-features --features server,jsonld` for an
+> explicitly greedy-GOO build; the sparq-engine LIBRARY default remains OFF for lean library
+> consumers.
+
 **2. EXPLAIN a query plan (no execution) or analyze (execute + per-operator trace).**
 `text/plain` response. Use `explain` / `explain=plan` (or `Accept: text/x-sparq-explain`)
 for the dry run, `explain=analyze` to run + trace (SELECT/ASK only):

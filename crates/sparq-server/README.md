@@ -63,6 +63,7 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
 - **Default-on JSON-LD** ([OPUS-4.8] sq-oy1f.4) — `jsonld` is in the **default** set: `application/ld+json`
   joins q-value RDF conneg both directions (`--no-default-features --features server` → 406 read / 415 write).
 - **Default-on algebra rewrite** ([FABLE-5] sq-7d3dj.30.13) — `algebra-rewrite` is in the default set too: the engine's result-equivalent pre-execution rewrite (#1735 — `FILTER(?v = <iri>)` constant folding + `!bound` anti-join), so the shipped binary runs the same plans the CLI/canonical benchmarks measure. Drop via `--no-default-features --features server,jsonld`.
+- **Default-on DPccp join-order planner** ([OPUS-5] sq-7d3dj.30.15) — `dp-planner` is in the default set for the same reason: sq-7d3dj.30.5 lit the engine's cost-optimal bushy join planner in `sparq-cli` only, so the HTTP binary planned joins with greedy GOO and an HTTP-measured query was not comparable to the CLI-measured one. It is result-equivalent (join order only) and applies to connected BGPs of 3+ patterns within the subgraph budget. Drop via `--no-default-features --features server,jsonld`.
 
 ## Security posture (essentials — full detail in the SKILL)
 
