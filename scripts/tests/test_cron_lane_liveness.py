@@ -132,8 +132,25 @@ class TestPeriodDerivedFromSchedule(unittest.TestCase):
         self.assertIsNone(cll.derive_period_hours([], NOW))
 
     def test_cron_firing_at_most_once_in_the_window_is_indeterminate(self):
-        # 29 Feb: at most one fire inside a 90-day window from July.
+        # 29 Feb from a 2026-07 start: the window reaches 2027-08, and 2027 is
+        # not a leap year, so this cron fires ZERO times — no gap, no
+        # expectation, and the lane goes quiet rather than alarming.
         self.assertIsNone(cll.derive_period_hours(["0 0 29 2 *"], NOW))
+
+    def test_a_QUARTERLY_cron_is_derivable_not_indeterminate(self):
+        """`slsa-builder-pin-review.yml` (`37 6 1 1,4,7,10 *`) landed on main and
+        fires ONCE in 90 days. Under the old window its period was None, so the
+        lane was in scope and permanently unwatchable — quiet, not covered."""
+        period = cll.derive_period_hours(["37 6 1 1,4,7,10 *"], NOW)
+        self.assertIsNotNone(period)
+        self.assertGreater(period, 80 * 24)    # a quarter, not a day
+        self.assertLess(period, 95 * 24)
+
+    def test_the_window_is_long_enough_to_see_two_fires_of_a_quarterly_cron(self):
+        """Pins the REASON for the window length, so shortening it reds here and
+        not only in the live-scope test that happens to have such a lane."""
+        fires = cll.cron_fire_times(["37 6 1 1,4,7,10 *"], NOW)
+        self.assertGreaterEqual(len(fires), 2)
 
     def test_dom_and_dow_both_restricted_is_a_union_not_an_intersection(self):
         p = cll.parse_cron("0 0 1 * 1")

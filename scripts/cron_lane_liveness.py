@@ -195,7 +195,16 @@ VERDICT_LANE_MARKER = re.compile(r"^#[ \t]*cron-liveness:[ \t]*verdict-lane[ \t]
 GRACE_PERIODS = 3.0      # missed ticks tolerated before rule B fires
 MIN_GRACE_HOURS = 6.0    # floor: GitHub cron jitter on sub-hourly lanes
 CONSEC_FAILURES = 3      # rule A threshold
-SIM_WINDOW_DAYS = 90     # cron expansion window for period derivation
+# Cron expansion window for period derivation. It must be long enough to see at
+# least TWO fires of any cron GitHub accepts, because one fire yields no gap and
+# therefore no expectation (the lane then goes quiet — fail-safe, but also blind).
+# 90 days was too short: `slsa-builder-pin-review.yml` landed on main with
+# `37 6 1 1,4,7,10 *` (quarterly), which fires ONCE in 90 days, so the lane would
+# have been silently unwatchable. 400 days sees ≥4 fires of a quarterly cron and
+# ≥1 of every month, while still leaving a genuinely underivable cron
+# (`0 0 29 2 *` from a non-leap-adjacent start, an unparseable expression)
+# indeterminate and quiet.
+SIM_WINDOW_DAYS = 400
 RUNS_CAP = 60            # newest completed scheduled runs to consider per lane
 
 BASE_LABELS = ["cron-liveness", "auto"]
