@@ -130,8 +130,14 @@ Public API (5 items, each with a doctest + direct unit test): `parse_program`,
   (sq-iwf3c): sparq-reason has a `measure()` case arm naming `--features datalog`, the
   `sparq-reason-el` `rbox,hasse` pattern, so the module is no longer compiled out of the
   crate's line-coverage denominator. The committed floor was NOT re-seeded in that change
-  (no with-datalog measurement was taken); it is the pre-datalog default-feature floor
-  carried over the larger denominator until the first CI measurement re-seeds it.
+  (the authoring environment had no cargo-llvm-cov, so no honest with-datalog number could
+  be taken there); it is the pre-datalog default-feature floor carried over the larger
+  denominator. It is still ENFORCED against that larger denominator before merge: editing
+  `scripts/coverage.sh` is a full-run trigger, so `coverage ratchet (shard 2/3)` measures
+  sparq-reason with `--features datalog` against floor 90 (`coverage-gate.py
+  --check-robust`) on the non-draft PR head and in the merge queue — a sub-90 result fails rather
+  than landing silently, and the floor was not lowered to accommodate the change. What
+  remains is TIGHTENING the ratchet by re-seeding from the first green CI measurement.
 
 ## 6. Phased decomposition (beaded)
 
@@ -162,5 +168,6 @@ Public API (5 items, each with a doctest + direct unit test): `parse_program`,
    arm in `scripts/coverage.sh` names `--features datalog` (the `sparq-reason-el` pattern),
    so `src/datalog/` enters the crate's line-coverage denominator. Only `datalog` is named —
    the crate's other default-off features (explain/profile/d-entail/rif/compiled-rules/reify)
-   are separately beaded. Floor re-seeding from the first with-datalog CI measurement is the
-   open remainder (see §5).
+   are separately beaded. The floor is enforced against the expanded denominator by that
+   change's own CI (shard 2 `--check-robust`); re-seeding from the first green with-datalog
+   measurement — which TIGHTENS the ratchet — is the open remainder (see §5).
