@@ -113,6 +113,17 @@ mod forms;
 #[cfg(feature = "canon")]
 mod canon;
 
+// [SONNET-4.6] sq-yz27r (#3251): the opt-in `Store.loadJsonLdWithContexts(text, contexts)`
+// binding — JSON-LD ingest for a document whose `@context` is given by URL (a Verifiable
+// Credential's `"@context": "https://www.w3.org/2018/credentials/v1"`), which the
+// no-callback `load(_, "jsonld")` path rejects. Behind the non-default `jsonld-contexts`
+// feature so the lean bundle is unchanged; the module adds a `#[wasm_bindgen] impl Store`
+// method that installs an `oxjsonld` LoadDocumentCallback over a caller-supplied context
+// map. Fail-closed, and it opens no socket — see the module docs for why the fetch has to
+// stay on the JS side.
+#[cfg(feature = "jsonld-contexts")]
+mod jsonld_context;
+
 // Re-export the free function at the crate root so it is reachable as
 // `sparq_wasm::canonicalizeNQuads` from the headless wasm test (tests/web.rs) and any
 // rlib consumer; `#[wasm_bindgen]` already registers it in the generated JS surface.
