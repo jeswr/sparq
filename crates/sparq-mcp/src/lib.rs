@@ -11,6 +11,15 @@
 //!   transport) or, with the `stdio` feature, the `serve_stdio` loop.
 //! - [`jsonrpc`] — the minimal JSON-RPC 2.0 framing the MCP wire format uses.
 //! - [`tools`] — the advertised tool specs (`name` / `description` / `inputSchema`).
+//! - [`resources`] — the MCP **resources** surface (`resources/list` / `resources/read`):
+//!   the served dataset as a VoID descriptor, the default graph, and one resource per
+//!   named graph, each as N-Triples through the same budgeted engine path the
+//!   `construct` tool uses. Read-only; adds no crate to the build. [SONNET-4.6] sq-sjey1
+//! - [`prompts`] — the MCP **prompts** surface (`prompts/list` / `prompts/get`): a static
+//!   catalog of canned query prompts (`explore-dataset`, `count-by-class`,
+//!   `class-overview`, `predicate-usage`) over the tools that already exist. An IRI
+//!   argument is RFC-3987-validated before it is interpolated into a SPARQL `IRIREF`.
+//!   [SONNET-4.6] sq-sjey1
 //! - [`shapes`] — the structured `shapes` grounding tool (the data-grounded
 //!   predicate/datatype/cardinality constraints for one class IRI; no server-side model).
 //! - `nlq` (feature `nlq`) — the server-side natural-language tools: `ask`
@@ -46,6 +55,10 @@
 //!   returning the `FormDescription` JSON verbatim. [FABLE-5] sq-lsp7k.1.6
 
 pub mod jsonrpc;
+// [SONNET-4.6] sq-sjey1: the canned-query prompt catalog behind `prompts/list`/`prompts/get`.
+pub mod prompts;
+// [SONNET-4.6] sq-sjey1: the dataset/named-graph projection behind `resources/list`/`resources/read`.
+pub mod resources;
 pub mod server;
 pub mod shapes;
 pub mod tools;
