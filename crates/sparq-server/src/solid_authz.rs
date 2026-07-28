@@ -167,9 +167,15 @@ enum ServerViewError {
 /// [SONNET-4.6] (sq-snopa.8) The store an endpoint decides over: an owned per-request store
 /// (stateless lane) or the shared per-generation one (stateful lane). Both are read through
 /// [`get`](Self::get); only the owned variant can be mutated by the ODRL lane.
+///
+/// Both variants hold the store BEHIND A POINTER so neither arm pays for the other's payload:
+/// a bare `PodStore` inline would make every `ResolvedStore` — including the shared one, whose
+/// own payload is one `Arc` word — as large as a whole materialised store
+/// (`clippy::large_enum_variant`). The stateless lane's extra allocation is noise beside the
+/// N-Quads parse + materialisation it already paid to build that store.
 enum ResolvedStore {
     /// Stateless: built from the request body's dataset, dies with the response.
-    Owned(PodStore),
+    Owned(Box<PodStore>),
     /// Stateful: the generation-keyed view shared with every other request of this generation.
     Shared(Arc<PodStore>),
 }
@@ -639,7 +645,7 @@ async fn resolve_store(
     req: &AuthzRequest,
 ) -> Result<ResolvedStore, Response> {
     match req.source {
-        AuthzSource::Body => build_store(req).map(ResolvedStore::Owned),
+        AuthzSource::Body => build_store(req).map(|s| ResolvedStore::Owned(Box::new(s))),
         AuthzSource::Server => server_store(state, req.view).await.map(ResolvedStore::Shared),
     }
 }
