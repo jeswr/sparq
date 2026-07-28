@@ -9,9 +9,10 @@
 //!    recall floor (the "search on PQ, re-rank on disk" path);
 //! 4. **staleness-token semantics** — a supplied token round-trips, an absent one reads back as
 //!    `None` ("unverifiable"), never as an all-zero token that would look like a mismatch;
-//! 5. **degenerate + hostile inputs** — empty source, all-zero query, a corrupted header and a
-//!    forged PQ codebook header are rejected cleanly, and a forged neighbour entry inside an
-//!    otherwise-valid file is dropped on read: never a panic, never an out-of-bounds read.
+//! 5. **degenerate + hostile inputs** — empty source, all-zero query, a corrupted header, a forged
+//!    PQ codebook header and an out-of-range PQ code are rejected cleanly, and a forged neighbour
+//!    entry inside an otherwise-valid file is dropped on read: never a panic, never an
+//!    out-of-bounds read.
 //!
 //! The workload is deliberately small so the suite runs under a plain (debug) `cargo test`; the
 //! 50k-scale recall gate lives in `sparq-vectors`' `tests/diskann.rs`, which drives the very same
@@ -354,6 +355,42 @@ fn forged_pq_codebook_headers_are_rejected_not_overflowed() {
     bytes[cb..cb + 12].copy_from_slice(&huge);
     let err = VamanaIndex::open_from_bytes(bytes).unwrap_err();
     assert!(err.contains("<bytes>"), "err: {}", err);
+}
+
+/// A codebook may declare `K < 256` while every persisted code stays a full `u8`, so a code byte
+/// can name a centroid the codebook does not have. Search resolves a code through the ADC table at
+/// `tables[s · K + c]`, where such a byte reads another subspace's row — and, in the last subspace,
+/// runs off the end of the table and panics. The out-of-range code must be rejected at open, by
+/// both readers, so no malformed file survives to panic inside `nearest`.
+#[test]
+fn out_of_range_pq_codes_are_rejected_at_open_not_panicked_at_search() {
+    const SMALL: usize = 64;
+    let src = corpus(SMALL, 7);
+    let path = tmp("pqcode");
+    // K = 16 ≪ 256: every byte in 16..=255 is now a forgeable out-of-range centroid index.
+    let pq_cfg = PqConfig { m: 4, k: 16, ..PqConfig::default() };
+    VamanaIndex::build_with_pq(&src, &path, VamanaConfig::default(), pq_cfg, None).unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).ok();
+
+    // The code array is the file's trailing run of `count × M` bytes, so the final byte is the last
+    // slot's last subspace — the one whose forged code indexes past the end of the ADC table.
+    let last = bytes.len() - 1;
+    assert!(bytes[last] < 16, "the fixture must persist in-range codes to begin with");
+    bytes[last] = 255;
+
+    let err = VamanaIndex::open_from_bytes(bytes.clone()).unwrap_err();
+    assert!(err.contains("PQ code 255"), "err: {}", err);
+    assert!(err.contains("out of range"), "err: {}", err);
+    // The report locates the offending byte: last slot, last subspace.
+    assert!(err.contains(&format!("slot {}", SMALL - 1)), "err: {}", err);
+    assert!(err.contains("subspace 3"), "err: {}", err);
+
+    // The mmap reader shares the check — a file on disk is rejected identically, never opened.
+    std::fs::write(&path, &bytes).unwrap();
+    let mapped = VamanaIndex::open(&path);
+    std::fs::remove_file(&path).ok();
+    assert!(mapped.is_err(), "the mmap reader must reject the same forged code");
 }
 
 #[test]

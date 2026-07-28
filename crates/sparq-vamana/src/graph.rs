@@ -731,8 +731,9 @@ impl VamanaIndex {
 
     /// Parses the trailing PQ section (`tail` begins right after the last node record). Validates
     /// the magic, the codebook (which re-checks its own `dim`/`m`/`k`), that the codebook's `dim`
-    /// matches the graph's, and that exactly `count × M` code bytes are present (no trailing slop)
-    /// so a later code read is always in bounds. Errors are descriptive.
+    /// matches the graph's, that exactly `count × M` code bytes are present (no trailing slop) so a
+    /// later code read is always in bounds, and that every code byte names a centroid the codebook
+    /// actually has (`< K`). Errors are descriptive.
     fn parse_pq_section(
         tail: &[u8],
         count: usize,
@@ -773,6 +774,24 @@ impl VamanaIndex {
                 "{origin}: PQ code array is {} bytes, expected {want_codes} (count {count} × M {stride})",
                 tail.len() - cb_end
             ));
+        }
+        // Every code byte is a centroid index into its subspace's row of the search-time ADC table
+        // (`tables[s · K + c]`, `M × K` entries). `K` comes off the wire and may be well under 256
+        // while a persisted code stays an arbitrary `u8`, so a forged byte `c ≥ K` would silently
+        // read a neighbouring subspace's row — or, past the last row, index out of bounds and panic
+        // mid-`nearest`. Reject it here so a malformed file fails at open, like every other check.
+        let k = pq.k();
+        if k < 256 {
+            if let Some((i, &c)) = tail[cb_end..].iter().enumerate().find(|(_, &c)| c as usize >= k)
+            {
+                return Err(format!(
+                    "{origin}: PQ code {} at slot {} subspace {} is out of range (K {})",
+                    c,
+                    i / stride,
+                    i % stride,
+                    k
+                ));
+            }
         }
         let codes =
             EncodedStore::from_parts((0..count as u32).collect(), tail[cb_end..].to_vec(), stride)
