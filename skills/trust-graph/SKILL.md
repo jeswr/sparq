@@ -289,9 +289,20 @@ build is byte-identical with it OFF):
 sparq-trust = { path = "crates/sparq-trust", features = ["expression"] }
 ```
 
-The five public entry points, in contract order:
+The public surface, in contract order — the challenge-nonce type first, then the five
+contract calls:
 
-1. **`parse_request(query, tr_triples, nonce)` → `ContractRequest`** — fail-closed on a
+0. **`ChallengeNonce::generate()` / `ChallengeNonce::from_wire(&str)`** — the nonce is a
+   type, not a `&str`, so the freshness obligation is visible at the construction site
+   (issue #4621). `generate()` is the **verifier-side** path: 32 bytes from the OS CSPRNG.
+   `from_wire()` adopts a value that legitimately came from outside (the echoed challenge,
+   a decoded response, a session nonce minted a layer above) and **promises nothing about
+   freshness** — a call site wrapping a literal with it is visibly opting out. Empty /
+   all-whitespace is refused (`ExpressionError::EmptyNonce`); there is deliberately no
+   length or entropy heuristic, which would reject `"n"` while accepting a 32-byte
+   constant. Hardening only: nothing here can *detect* a reused nonce, and the ZK/trust
+   estate remains externally unaudited (`sq-qhy4`).
+1. **`parse_request(query, tr_triples, &nonce)` → `ContractRequest`** — fail-closed on a
    missing/duplicated requirements node, a missing `trustx:question` /
    `trustx:requiresValidStatusAt`, a non-UTC `xsd:dateTime`, a malformed `did:` issuer,
    or a `TR` naming **no trust mode** (neither `trustx:trustsIssuer` nor

@@ -237,8 +237,8 @@ pub use did::{
 #[cfg(feature = "expression")]
 pub use expression::{
     evaluate_contract, mint_status_attestation, parse_request, rewrite_query, verify_response,
-    ContractAnswer, ContractOutcome, ContractRequest, ExpressionError, MethodPrecheck,
-    ProvenanceResponse, TrustRequirements,
+    ChallengeNonce, ContractAnswer, ContractOutcome, ContractRequest, ExpressionError,
+    MethodPrecheck, ProvenanceResponse, TrustRequirements,
 };
 #[cfg(feature = "cert-graph")]
 pub use graph::{
