@@ -68,9 +68,9 @@ citations = ["sparq-nlq?/citations"]
 # semantics per the MCP-Solid proposal draft (site/specs/mcp-solid.typ §6.4/§7.3/§9.3).
 # OFF by default — it pulls in `sparq-solid` (the access-control library whose PodStore
 # backs the pod dataset + authorization view); the default sparq-mcp build stays the
-# thin single-graph wrapper. `oxrdf` comes along only for named-graph Term/NamedNode
-# handling (it is already sparq-solid's public-API vocabulary — no new external dep).
-solid = ["dep:sparq-solid", "dep:oxrdf"]
+# thin single-graph wrapper. (`oxrdf` — sparq-solid's public-API vocabulary — is no
+# longer listed here: [SONNET-4.6] sq-sjey1 made it an unconditional dependency, see below.)
+solid = ["dep:sparq-solid"]
 # [FABLE-5] sq-lsp7k.10: the opt-in NAMED-PARAMETERIZED-TEMPLATE tools (`template_list` +
 # `template_invoke`) over `sparq_engine::templates` (the #901 injection-safe `params`
 # algebra binding underneath). The embedder registers validated templates on
@@ -93,7 +93,7 @@ text = ["dep:sparq-text"]
 # tool — shape-aware form derivation shares the validator's caller-supplied-shapes
 # parsing path, so ONE gate covers the whole SHACL tool surface (no second flag to
 # co-enable). `sparq-forms` is an in-workspace path dep (no supply-chain delta).
-shacl = ["dep:sparq-shacl", "dep:sparq-forms", "dep:oxrdf"]
+shacl = ["dep:sparq-shacl", "dep:sparq-forms"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io.
@@ -123,7 +123,13 @@ sparq-shacl = { path = "../sparq-shacl", version = "0.1.0", optional = true }
 # [FABLE-5] sq-lsp7k.1.6: headless FormDescription derivation behind the SAME `shacl`
 # feature (the `describe_form` tool). OPTIONAL — the default build never compiles it.
 sparq-forms = { path = "../sparq-forms", version = "0.1.0", optional = true }
-oxrdf = { workspace = true, optional = true }
+# [SONNET-4.6] sq-sjey1: UNCONDITIONAL, and deliberately so — the `resources/list`
+# surface must read `Graph::named`, whose keys are `oxrdf::Term`s, in the DEFAULT build.
+# This adds no compilation and no supply-chain delta: `oxrdf` is already an unconditional
+# dependency of `sparq-core`, so every sparq-mcp build has always compiled it; naming it
+# directly only makes the existing edge explicit — the build delta is exactly zero, so the
+# "keep the default build lean" rule is not bent.
+oxrdf = { workspace = true }
 # The MCP wire format is JSON-RPC 2.0; serde_json (already ubiquitous in the tree —
 # sparq-engine/introspect/nlq all use it) is the only dependency the framing needs.
 serde = { version = "1", features = ["derive"] }
