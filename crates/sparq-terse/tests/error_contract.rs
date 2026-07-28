@@ -131,6 +131,24 @@ fn valid_prefixed_names_never_become_keyword_hints() {
     }
 }
 
+// [OPUS-5] Review round 2 on #4847: the PREFIX half of a prefixed name is data too, and
+// `PN_PREFIX` admits internal dots. `filtr.x:` is a prefix `spargebra` accepts, so the query
+// below is one whose ONLY defect is the unclosed `WHERE` block — but a scanner that stopped at
+// the first dot read `filtr` as a bare word and hinted `FILTER` at a correctly-spelled term.
+#[test]
+fn a_valid_dotted_prefix_never_becomes_a_keyword_hint() {
+    let query = "PREFIX filtr.x: <http://ex/> SELECT ?s WHERE { ?s filtr.x:item ?o";
+    let error = terse_to_sparql(query).expect_err("the unclosed block must fail to parse");
+
+    match error {
+        TerseError::CanaryFailed { suggestions, .. } => assert!(
+            suggestions.is_empty(),
+            "hinted at the correctly-spelled dotted prefix in {query}: {suggestions:?}"
+        ),
+        other => panic!("expected CanaryFailed, got {other:?}"),
+    }
+}
+
 #[test]
 fn canonical_sparql_passes_through_byte_identically() {
     let query = "SELECT ?s WHERE { ?s <http://ex/p> ?o }";

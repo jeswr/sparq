@@ -241,11 +241,12 @@ fn skip_pn_local(bytes: &[u8], at: usize) -> usize {
 /// A candidate is a *bare word* — an all-ASCII token in keyword position. Everything that is
 /// lexically something else is skipped, so it can never be mistaken for a mistyped keyword:
 /// string literals, `<IRI>`s, `#` comments, `?var`/`$var`, `@lang` tags, numbers, and prefixed
-/// names / blank-node labels (`ex:Cat`, `:Cat` under an empty prefix, `_:b1` — the local part
-/// of a prefixed name is data, not a keyword). Those name forms are skipped by the grammar's
-/// own escape rules plus a deliberately wide name-character rule (see [`skip_pn_local`]) rather
-/// than an ASCII approximation, so a Unicode, percent-escaped or backslash-escaped name cannot
-/// strand an ASCII tail for the scanner to hint on. What remains in valid SPARQL is essentially
+/// names / blank-node labels (`ex:Cat`, `ex.v2:Cat` with `PN_PREFIX`'s internal dot, `:Cat`
+/// under an empty prefix, `_:b1` — neither half of a prefixed name is a keyword). Those name
+/// forms are skipped by the grammar's own escape and dot rules plus a deliberately wide
+/// name-character rule (see [`skip_pn_local`]) rather than an ASCII approximation, so a
+/// Unicode, percent-escaped, backslash-escaped or dotted name cannot strand an ASCII segment
+/// for the scanner to hint on. What remains in valid SPARQL is essentially
 /// keywords only, which is why a bare word that is *not* a keyword is worth a hint.
 pub(crate) fn keyword_suggestions(src: &str) -> Vec<KeywordSuggestion> {
     let bytes = src.as_bytes();
@@ -295,36 +296,55 @@ pub(crate) fn keyword_suggestions(src: &str) -> Vec<KeywordSuggestion> {
                 i = j;
             }
             _ if c.is_ascii_alphabetic() || c == b'_' || !c.is_ascii() => {
+                // The run spans `PN_PREFIX`, which admits internal `.`s on top of `PN_CHARS`
+                // (`ex.v2:Cat` is one prefixed name). Stopping at the first dot would cut a
+                // valid prefix in half and leave its first segment in keyword position.
                 let mut j = i + 1;
-                let mut ascii_only = c.is_ascii();
-                while j < n && is_name_byte(bytes[j]) {
-                    ascii_only &= bytes[j].is_ascii();
+                while j < n && (is_name_byte(bytes[j]) || bytes[j] == b'.') {
                     j += 1;
                 }
-                if j < n && bytes[j] == b':' {
-                    // A prefixed name (`ex:Cat`) or blank-node label (`_:b1`): skip the whole
-                    // token, local part included — neither half sits in keyword position.
+                if j < n && bytes[j] == b':' && bytes[j - 1] != b'.' {
+                    // A prefixed name (`ex:Cat`, `ex.v2:Cat`) or blank-node label (`_:b1`):
+                    // skip the whole token, local part included — neither half sits in keyword
+                    // position. The trailing-dot test is the grammar's: `PN_PREFIX` must END in
+                    // `PN_CHARS`, so `x.:y` is not a prefixed name and `x` stays a candidate.
                     i = skip_pn_local(bytes, j + 1);
                     continue;
                 }
-                if !ascii_only {
-                    // SPARQL keywords are ASCII, so a name carrying any other byte is not a
-                    // typo of one. Skipping it whole also keeps the ASCII run inside it from
-                    // being re-read as a bare word on the next iteration.
-                    i = j;
-                    continue;
-                }
-                // ASCII-only, so `i..j` is a char boundary and the word is safe to upper-case
-                // bytewise.
-                let word = &src[i..j];
-                words += 1;
-                if let Some(kw) = nearest_keyword(word) {
-                    if !out.iter().any(|s| s.token.eq_ignore_ascii_case(word)) {
-                        out.push(KeywordSuggestion {
-                            token: word.to_string(),
-                            suggestion: kw.to_string(),
-                        });
+                // Not a prefixed name, so every `.`-separated segment of the run is back in
+                // keyword position and judged on its own — `FLTR.WEHRE` is two candidates, as
+                // it was before the run learned to span dots. Splitting the run in place rather
+                // than re-scanning forward from each segment keeps the whole scan linear in the
+                // input, so on the hostile-input path [`MAX_WORDS_SCANNED`] still bounds the
+                // WORK and not merely the hint count.
+                let mut start = i;
+                let mut k = i;
+                while k <= j && out.len() < MAX_SUGGESTIONS && words < MAX_WORDS_SCANNED {
+                    if k < j && bytes[k] != b'.' {
+                        k += 1;
+                        continue;
                     }
+                    // SPARQL keywords are ASCII, so a segment carrying any other byte is not a
+                    // typo of one; skipping it whole also keeps the ASCII run inside it from
+                    // being re-read as a bare word. That test doubles as the slicing guard: a
+                    // non-empty all-ASCII segment begins and ends on a character boundary (an
+                    // ASCII byte can be neither the tail of a character nor inside one), so
+                    // `src[start..k]` cannot split one and is safe to upper-case bytewise.
+                    let seg = &bytes[start..k];
+                    if !seg.is_empty() && seg.is_ascii() {
+                        let word = &src[start..k];
+                        words += 1;
+                        if let Some(kw) = nearest_keyword(word) {
+                            if !out.iter().any(|s| s.token.eq_ignore_ascii_case(word)) {
+                                out.push(KeywordSuggestion {
+                                    token: word.to_string(),
+                                    suggestion: kw.to_string(),
+                                });
+                            }
+                        }
+                    }
+                    start = k + 1;
+                    k += 1;
                 }
                 i = j;
             }
@@ -523,6 +543,45 @@ mod tests {
                 keyword_suggestions(src)
             );
         }
+    }
+
+    #[test]
+    fn a_dotted_prefix_is_one_name_but_a_dotted_bare_word_is_not() {
+        // `PN_PREFIX ::= PN_CHARS_BASE ((PN_CHARS|'.')* PN_CHARS)?` admits internal dots, so
+        // `FILTR.x:item` is ONE valid prefixed name whose first segment happens to be
+        // typo-shaped. Cutting the scan at the first dot hinted `FILTR -> FILTER` at a term
+        // the user spelled correctly, contradicting "prefixed names are data".
+        for src in [
+            "SELECT ?s WHERE { ?s ?p FILTR.x:item }",
+            "SELECT ?s WHERE { ?s ?p FILTR.WEHRE.x:item }", // every segment is skipped, not just the first
+            "SELECT ?s WHERE { ?s ?p FILTR.x:SLECT }",      // and the local part stays data too
+        ] {
+            assert!(
+                keyword_suggestions(src).is_empty(),
+                "false hint on the valid dotted prefix in {}: {:?}",
+                src,
+                keyword_suggestions(src)
+            );
+        }
+
+        // The skip is the grammar's, not a greedy one. `PN_PREFIX` must END in `PN_CHARS`, so
+        // a run closing on a dot is not a prefix and the word before it is still a candidate —
+        // whether the dot ends the statement or is followed by a `:` that cannot bind to it.
+        for src in ["SELECT ?s WHERE { ?s ?p ?o FLTR. }", "SELECT ?s WHERE { ?s ?p FLTR.:x }"] {
+            let hints = keyword_suggestions(src);
+            assert_eq!(hints.len(), 1, "{} -> {:?}", src, hints);
+            assert_eq!(hints[0].token, "FLTR");
+            assert_eq!(hints[0].suggestion, "FILTER");
+        }
+
+        // And a dotted run that never reaches a `:` is not a name at all: each segment is
+        // judged on its own, exactly as it was when the scan stopped at every dot.
+        let hints = keyword_suggestions("FLTR.WEHRE");
+        assert_eq!(
+            hints.iter().map(|h| h.suggestion.as_str()).collect::<Vec<_>>(),
+            ["FILTER", "WHERE"],
+            "{hints:?}"
+        );
     }
 
     #[test]
