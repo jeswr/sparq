@@ -185,7 +185,16 @@ permissions: { contents: read, packages: write, id-token: write, attestations: w
   `sparq-cli-<version>.intoto.jsonl` / `sparq-artifacts-<version>.intoto.jsonl` /
   `sparq-dist.intoto.jsonl`, and nobody has verified one**. Wiring is not evidence: this line stays
   "no L3 evidence" until a `v*` tag emits bundles that `slsa-verifier verify-artifact <file>
-  --provenance-path <bundle> --source-uri github.com/jeswr/sparq` accepts. The **ghcr container
+  --provenance-path <bundle> --source-uri github.com/jeswr/sparq` accepts. **Where that evidence
+  will come from (#4571):** after cutting the Release, `release.yml`'s `verify-provenance` job
+  calls `.github/workflows/release-verify.yml`,
+  which runs `scripts/verify-release-provenance.sh` over the *published* assets — both bundles
+  attached and listed in `SHA256SUMS`, `SHA256SUMS` matching the published bytes, and every asset
+  accepted by `slsa-verifier` against one of the two bundles (an uncovered asset, an empty asset
+  set, or a bundle covering nothing it published all red the run). The uploaded
+  `provenance-verification.log` + its run URL are the evidence to cite here, and the flip is
+  bounded to the artifacts that actually verified. **Verify (auditor, any published tag):**
+  `scripts/verify-release-provenance.sh --tag vX.Y.Z` — same checks, run locally. The **ghcr container
   image** is the one artifact with no isolated lane at all — still attested in-band and L2 by
   construction (GX-11, narrowed twice).
 - **Reproducible build — characterised, not yet bit-for-bit** (GX-8 / sq-toze.9):

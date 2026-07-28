@@ -608,6 +608,19 @@ jobs:
         run: shellcheck scripts/check-release-aliases.sh scripts/tests/test_check_release_aliases.sh
       - name: Self-test check-release-aliases.sh (golden contract + partial-extraction teeth)
         run: bash scripts/tests/test_check_release_aliases.sh
+      # [OPUS-5] issue #4571 (GX-11 residual / SL-B3-b): verify-release-provenance.sh is the
+      # EVIDENCE ENGINE for the AR->IV flip — release.yml's `verify-provenance` job runs it right
+      # after cutting the Release, so like every other release-time script its first real execution
+      # is the worst moment to discover a bug in it. Worse, its dangerous failure is the VACUOUS
+      # pass (empty asset set, a bundle covering nothing, an asset silently exempted), which would
+      # manufacture "provenance verified" out of nothing. The self-test drives every fail-closed
+      # branch here, on every PR, against a stub verifier; its non-vacuity is mutation-proved. It
+      # also pins the WIRING — that release.yml itself drives the verifier — because a
+      # `release: published` trigger alone never fires for a GITHUB_TOKEN-created Release.
+      - name: shellcheck verify-release-provenance.sh + its self-test
+        run: shellcheck scripts/verify-release-provenance.sh scripts/tests/test_verify_release_provenance.sh
+      - name: Self-test verify-release-provenance.sh (fail-closed branches + vacuity guard)
+        run: bash scripts/tests/test_verify_release_provenance.sh
       # [OPUS-4.8] sq-mkza: end-to-end proof that BOTH honesty gates now cover the
       # paper-factory `.typ` sources (site/papers/**/*.typ) — the highest-stakes
       # OUTWARD surface. Before sq-mkza a hard-coded perf ratio or an unqualified
