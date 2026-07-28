@@ -18,6 +18,23 @@ sparq-core = { path = "../sparq-core", features = ["mmap", "dict-spill"] }
 sparq-engine = { path = "../sparq-engine", features = ["algebra-rewrite"] }
 # Reference engine to compare against (in-memory; no RocksDB).
 oxigraph = { version = "0.5", default-features = false, features = ["rdf-12"] }
+# [FABLE-5] (sq-hodke) RDFC-1.0, for the UPDATE differential's blank-node-ISOMORPHISM
+# adjudication: once the generator emits blank nodes, sorted N-Quads stops being a
+# canonical form (sparq labels them `_:fbN` from a process counter, Oxigraph from a hash,
+# and sparq's two update paths disagree with EACH OTHER), so the comparator relabels every
+# snapshot to its RDFC-1.0 canonical form first. `rdf12-triple-terms` is required because
+# the generator also emits RDF-1.2 triple terms, which the standard W3C profile fails
+# closed on; the comparator uses only that feature's CONSTRAINED `*_ground_terms` entry
+# points, which are exactly RDFC-1.0 with triple terms as opaque constants (they fail
+# closed on a blank node nested inside a triple term — an invariant the generator upholds
+# with an `isBlank` FILTER guard and `tests::no_nested_blank_nodes_in_triple_terms` pins).
+# Harness crate, `publish = false`; nothing in the shipped build gains a dependency.
+sparq-canon = { path = "../sparq-canon", features = ["rdf12-triple-terms"] }
+# The oxrdf 0.3 term model both engines already render through — used by the comparator to
+# rewrite `xsd:integer` lexicals STRUCTURALLY (never by string surgery) for the adjudicated
+# `update-oxigraph-integer-lexical-canonicalization` class. Already in the dependency graph
+# via sparq-core/sparq-engine/sparq-canon; this adds nothing new to the tree.
+oxrdf = { workspace = true }
 libc = "0.2"
 serde_json = "1"
 
