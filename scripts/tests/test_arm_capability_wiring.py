@@ -404,7 +404,7 @@ class TestScriptContract(unittest.TestCase):
 class TestSelfTestsRunInCi(unittest.TestCase):
     """The self-tests are only worth writing if something runs them on every PR."""
 
-    def test_docs_quality_runs_both_self_tests_and_this_wiring_suite(self) -> None:
+    def test_docs_quality_runs_the_arm_policy_self_tests_and_this_wiring_suite(self) -> None:
         document = load(WORKFLOWS / "docs-quality.yml")
         gating = [
             run_of(step)
@@ -412,16 +412,34 @@ class TestSelfTestsRunInCi(unittest.TestCase):
             for step in (job.get("steps") or [])
             if "advisory" not in str(job.get("name", job_id)).lower()
         ]
-        blob = "\n".join(gating)
-        for needle in (
-            "scripts/rearm-sweeper.py --self-test",
-            "scripts/auto-arm.py --self-test",
-            "scripts/tests/test_arm_capability_wiring.py",
+        # [OPUS-5] #4795: match a whole stripped LINE, not a substring of the blob. A
+        # containment check passes against `… --self-test-DISABLED` / `… --self-test || true`
+        # — the exact suffix-mutation shape that survived a containment pin elsewhere in
+        # this repo — so the command must appear as its own complete command line.
+        commands = {
+            line.strip()
+            for block in gating
+            for line in block.splitlines()
+            if line.strip()
+        }
+        for command in (
+            # [OPUS-5] #4795: gh_retry.py was the ONLY one of the three arm-policy scripts
+            # whose PR-time self-test was unpinned. docs-quality.yml did run it, so the
+            # coverage looked complete — but deleting that single line would have gone
+            # unnoticed, leaving every change to the transient classifier (the thing that
+            # decides whether a platform blip reds main) validated by nothing until the
+            # next cron. Pinning the file whose guard you are relying on is the point.
+            "python3 scripts/gh_retry.py --self-test",
+            "python3 scripts/rearm-sweeper.py --self-test",
+            "python3 scripts/auto-arm.py --self-test",
+            "python3 scripts/tests/test_arm_capability_wiring.py",
         ):
             self.assertIn(
-                needle,
-                blob,
-                f"docs-quality.yml must run `{needle}` in a GATING job",
+                command,
+                commands,
+                f"docs-quality.yml must run `{command}` as a complete command line in a "
+                "GATING job (found gating commands: "
+                f"{sorted(c for c in commands if 'self-test' in c or 'test_arm' in c)})",
             )
 
 
