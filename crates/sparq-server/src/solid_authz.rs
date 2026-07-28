@@ -33,6 +33,12 @@
 //!   [`AppState`](crate::http::AppState) keyed by the generation number, so the N3 materialisation
 //!   is paid once per generation rather than once per request.
 //!
+//! Only an ABSENT `"source"` key takes the `"body"` default. A key that is present but is not one
+//! of those two strings — an unknown keyword, or any non-string JSON type such as `null`/`false`/a
+//! number — is a fail-closed `400`, never an inferred default: the field decides whether a decision
+//! trusts the server's store or a caller-supplied dataset, so a malformed value must not silently
+//! cross into the body lane.
+//!
 //! In the stateful lane a pod resource IS a named graph of the server's store, so `"resource"`
 //! must be that graph's absolute IRI (the server's own path -> named-graph mapping is what the
 //! Graph Store Protocol routes already establish); a relative path is not resolved.
@@ -334,12 +340,15 @@ fn parse_request(body: &Bytes) -> Result<AuthzRequest, Response> {
     let obj = v
         .as_object()
         .ok_or_else(|| json_error(StatusCode::BAD_REQUEST, "request body must be a JSON object"))?;
-    // [SONNET-4.6] sq-snopa.8 — the stateless/stateful switch. Absent => `body` (the historical
-    // behaviour, byte-identical); an unknown keyword is a fail-closed client error, never an
-    // inferred default.
-    let source = match obj.get("source").and_then(|s| s.as_str()) {
+    // [SONNET-4.6] sq-snopa.8 — the stateless/stateful switch. Only an ABSENT key defaults to
+    // `body` (the historical behaviour, byte-identical). A key that is PRESENT but not a string
+    // (`null`, `false`, a number, an array/object) is a fail-closed client error, NOT an absent
+    // key: this selector decides whether authorisation trusts the server's own store or a
+    // caller-supplied dataset, so a malformed value must never silently cross into the body lane.
+    // An unknown keyword is likewise refused, never an inferred default.
+    let source = match obj.get("source") {
         None => AuthzSource::Body,
-        Some(s) => match s.trim().to_ascii_lowercase().as_str() {
+        Some(serde_json::Value::String(s)) => match s.trim().to_ascii_lowercase().as_str() {
             "body" => AuthzSource::Body,
             "server" => AuthzSource::Server,
             _ => {
@@ -349,6 +358,12 @@ fn parse_request(body: &Bytes) -> Result<AuthzRequest, Response> {
                 ))
             }
         },
+        Some(_) => {
+            return Err(json_error(
+                StatusCode::BAD_REQUEST,
+                "'source' must be 'body' or 'server' when present",
+            ))
+        }
     };
     let dataset = match source {
         AuthzSource::Body => obj
@@ -2227,6 +2242,28 @@ mod tests {
         match parse_request(&body) {
             Ok(_) => panic!("an unknown source keyword must be refused"),
             Err(resp) => assert_eq!(resp.status(), StatusCode::BAD_REQUEST),
+        }
+    }
+
+    /// A PRESENT but non-string `"source"` must not be read as an absent key. Each of these bodies
+    /// carries an otherwise-valid `dataset`, so the pre-fix `as_str()` collapse would have parsed
+    /// cleanly into the body lane; the selector is fail-closed, so every non-string type is a 400.
+    #[test]
+    fn parse_request_rejects_non_string_source_fail_closed() {
+        for body in [
+            r#"{"source":null,"dataset":"<a> <b> <c> <g> ."}"#,
+            r#"{"source":false,"dataset":"<a> <b> <c> <g> ."}"#,
+            r#"{"source":0,"dataset":"<a> <b> <c> <g> ."}"#,
+            r#"{"source":["body"],"dataset":"<a> <b> <c> <g> ."}"#,
+            r#"{"source":{"kind":"body"},"dataset":"<a> <b> <c> <g> ."}"#,
+        ] {
+            match parse_request(&Bytes::from(body)) {
+                Ok(req) => panic!(
+                    "a non-string 'source' must be refused, not defaulted to {:?}: {}",
+                    req.source, body
+                ),
+                Err(resp) => assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{}", body),
+            }
         }
     }
 
