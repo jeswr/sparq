@@ -177,7 +177,9 @@ jobs:
           set -euo pipefail
           # HARD scope = root *.md + skills/ + docs/ + crates/ (markdown only).
           # `git ls-files '*.md'` matches at any depth, so EXCLUDE the out-of-scope
-          # dirs to land exactly on the same set markdownlint's config globs (49 files).
+          # dirs to land exactly on the same set markdownlint's config globs. (A file
+          # COUNT was pinned here and rotted — it read 49 while the real scope had grown
+          # to 280; the step prints the live count below, so do not re-pin one. [OPUS-5])
           git ls-files '*.md' \
             ':!:research/**' ':!:zk/**' ':!:bench/**' ':!:js/**' \
             ':!:.beads/**' ':!:.claude/**' ':!:.github/**' \
