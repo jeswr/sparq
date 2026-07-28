@@ -1064,12 +1064,16 @@ conceal:
   by SV-MODE-6 the count MAY fall short of `min(k, n)`, since recall is below one, but the
   shortfall MUST NOT depend on any entry the requester cannot read (SV-MODE-2).
   #rid("SV-ND-1")
-+ #strong[Errors and status.] A request whose seed, bound index, or referenced graph is
-  unreadable or absent MUST be indistinguishable — in status code, headers, error document,
-  and message — from the same request against a non-existent one. There is no
-  forbidden-versus-not-found distinction anywhere in this surface, which is why SV-QRY-6,
-  SV-IDX-5, and SV-OPT-4 all resolve to zero solutions rather than to an error.
-  #rid("SV-ND-2")
++ #strong[Errors and status.] A request whose seed or referenced graph is unreadable or
+  absent MUST be indistinguishable — in status code, headers, error document, message, and
+  solutions — from the same request against a non-existent one. A request whose bound index
+  is unreadable or absent MUST be indistinguishable from the same request against a service
+  with no index bound in status code, headers, error document, and message unconditionally,
+  and in solutions #strong[to a requester whose eligible entry set is empty]; for a requester
+  holding at least one eligible entry the solutions MAY differ, to the extent — and only to
+  the extent — SV-ND-4 excepts. There is no forbidden-versus-not-found distinction anywhere
+  in this surface, which is why SV-QRY-6, SV-IDX-5, and SV-OPT-4 all resolve to zero
+  solutions rather than to an error. #rid("SV-ND-2")
 + #strong[Timing.] A service SHOULD ensure that observable differences in processing time do
   not disclose the existence or contents of resources outside the authorized dataset.
   #rid("SV-ND-3")
@@ -1465,8 +1469,9 @@ and a bound index covers all three of the first-named containers' resources.
 + #strong[Unreadable descriptor.] Where #emph[R] can read `/notes/a` but not the bound
   index's descriptor, a `vec:` pattern still returns `/notes/a`'s neighbours, and the service
   description served to #emph[R] names neither the descriptor nor the vector features. Where
-  #emph[R] can read no resource in the index's scope, the same pattern returns zero solutions,
-  indistinguishable from the same request against a service with no bound index. That #emph[R]
+  #emph[R]'s eligible entry set is empty — here, where #emph[R] can read no resource in the
+  index's scope — the same pattern returns zero solutions, indistinguishable from the same
+  request against a service with no bound index (SV-ND-2). That #emph[R]
   can, from this behaviour, tell that an index is bound — and, by varying a literal query
   vector's dimension, at what dimension — is within SV-ND-4's stated exception and is not a
   conformance failure; disclosing any other descriptor fact is. (@sec-nondisclosure,
