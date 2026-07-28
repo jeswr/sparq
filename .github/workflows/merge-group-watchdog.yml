@@ -140,12 +140,27 @@ jobs:
           # 120 s grace at T+139 s and is recovered by the sweep at ~T+150 s.
           RESWEEPS: "4"
           RESWEEP_INTERVAL_SECONDS: "60"
+          # BLAST RADIUS, stated as it actually is. `--max-recoveries-per-run` is
+          # PROCESS-local, so looping five sweeps in one job silently multiplied the
+          # script's own "one tick may never churn the whole queue" bound by 5 (2 -> 10).
+          # Tightening the per-sweep budget to 1 puts the per-FIRE worst case at 5.
+          #
+          # That is still ABOVE the pre-loop 2, and it is a disclosed residual rather
+          # than a fix: restoring exactly 2 needs a budget shared ACROSS sweeps, which
+          # lives in the script's CAP path — decision logic this change deliberately does
+          # not touch. The residual is bounded and, on the measured base rate (3 dead
+          # refs in a DAY), reaching it needs 5 DISTINCT zero-suite entries inside 4
+          # minutes, which is a repo-wide dispatch outage in which recovering them is the
+          # correct action. Per-PR cap (2 per 6 h) and same-head idempotence are
+          # unaffected and still prevent the same entry being churned twice.
+          MAX_RECOVERIES_PER_SWEEP: "1"
         run: |
           set -euo pipefail
           # Built as an array so the optional flag is passed as ONE argv element and
           # never word-split (shellcheck SC2086 — the folded one-liner this replaced
           # relied on unquoted splitting).
-          sweep_args=(sweep --repo "$REPO" --branch "$DEFAULT_BRANCH")
+          sweep_args=(sweep --repo "$REPO" --branch "$DEFAULT_BRANCH"
+                      --max-recoveries-per-run "$MAX_RECOVERIES_PER_SWEEP")
           if [ -n "$DRY_RUN" ]; then
             sweep_args+=("$DRY_RUN")
           fi

@@ -2542,6 +2542,94 @@ class TestDoorbellWiring(unittest.TestCase):
         self.assertIs(self.wf["concurrency"]["cancel-in-progress"], False)
 
 
+class TestTheYamlSeamCannotGoInert(unittest.TestCase):
+    """THE SEAM. Measured on this estate: structure-preserving mutations at the YAML
+    seam — `if:`, `continue-on-error`, a changed call-site argument — are where every
+    uncaught mutant lives, because the step, its name and its `run:` body all survive
+    intact and every behavioural test keeps passing while the mechanism is dead.
+
+    Eight such mutants survived the first revision of this suite, including `if: false`
+    on either job and on either step. These assertions are deliberately EXACT-MATCH and
+    whole-mapping, not substring or containment.
+    """
+
+    #: The ONLY guard either workflow is allowed to carry, pinned whole. It is the
+    #: fail-soft App-token mint: without the App configured the step must skip and the
+    #: sweep falls back to `github.token`. Any OTHER `if:` is a way to make the
+    #: mechanism inert while it still reads as wired.
+    ALLOWED_STEP_GUARD = "env.ORCHESTRATOR_APP_ID != ''"
+    ALLOWED_GUARD_STEP = "Mint the sparq-orchestrator App token"
+
+    def _assert_no_inert_seam(self, path, job_id):
+        wf = _yaml(path)
+        job = wf["jobs"][job_id]
+        self.assertNotIn("if", job, f"{path.name}: job `{job_id}` carries an `if:`. "
+                         "`if: false` there makes the entire mechanism inert with every "
+                         "step, name and call site intact.")
+        self.assertNotIn("continue-on-error", job, f"{path.name}: job `{job_id}`")
+        for step in job["steps"]:
+            label = step.get("name") or step.get("uses") or "<unnamed>"
+            guard = step.get("if")
+            if guard is not None:
+                self.assertIn(self.ALLOWED_GUARD_STEP, label,
+                              f"{path.name}: unexpected `if:` on step {label!r}")
+                self.assertEqual(guard, self.ALLOWED_STEP_GUARD,
+                                 f"{path.name}: the one permitted guard drifted")
+            self.assertNotIn("continue-on-error", step, f"{path.name}: step {label!r}")
+
+    def test_the_watchdog_sweep_cannot_be_switched_off_at_the_seam(self):
+        self._assert_no_inert_seam(WATCHDOG_YML, "watch")
+
+    def test_the_doorbell_ring_cannot_be_switched_off_at_the_seam(self):
+        self._assert_no_inert_seam(DOORBELL_YML, "doorbell")
+
+    def test_the_doorbell_carries_no_guard_at_all(self):
+        # Stronger than the shared helper: the doorbell has no App-token step, so it has
+        # no legitimate `if:` anywhere. Stated separately so the shared allowance can
+        # never silently license one here.
+        wf = _yaml(DOORBELL_YML)
+        self.assertNotIn("if", wf["jobs"]["doorbell"])
+        for step in wf["jobs"]["doorbell"]["steps"]:
+            self.assertNotIn("if", step, step.get("name"))
+
+    def test_no_guard_anywhere_carries_a_constant_operand(self):
+        # The conditionally-inert class in general: a literal true/false operand makes a
+        # step unconditionally on or off while still reading as a guard.
+        for path in (WATCHDOG_YML, DOORBELL_YML):
+            wf = _yaml(path)
+            for job_id, job in wf["jobs"].items():
+                for guard in [job.get("if")] + [s.get("if") for s in job["steps"]]:
+                    if not guard:
+                        continue
+                    residue = re.sub(r"[=!]=\s*(?:true|false)\b", "", str(guard))
+                    self.assertIsNone(re.search(r"\b(?:true|false)\b", residue),
+                                      f"{path.name}:{job_id}: {guard!r}")
+
+    def test_the_ring_targets_THIS_repository(self):
+        # `--ref` was pinned exactly while `--repo` was not asserted at all, so swapping
+        # in a foreign repository left every other assertion green while the doorbell
+        # rang somebody else's watchdog and this queue was never swept.
+        wf = _yaml(DOORBELL_YML)
+        step = wf["jobs"]["doorbell"]["steps"][0]
+        self.assertIn('--repo "$REPO"', step["run"])
+        self.assertEqual(step["env"]["REPO"], "${{ github.repository }}")
+        # No literal owner/name may appear in the executable line.
+        self.assertNotRegex(step["run"], r"[\w.-]+/[\w.-]+\.yml\s+.*\b\w+/\w+\b(?!\")")
+
+    def test_the_sweep_call_site_arguments_are_all_pinned(self):
+        # Same class on the other side: every argument the sweep depends on is asserted,
+        # so dropping or retargeting one cannot pass.
+        wf = _yaml(WATCHDOG_YML)
+        step = _step(wf, "watch", "Sweep the merge queue")
+        run = step["run"]
+        for fragment in ('--repo "$REPO"', '--branch "$DEFAULT_BRANCH"',
+                         'scripts/merge-group-watchdog.py'):
+            self.assertIn(fragment, run, fragment)
+        self.assertEqual(step["env"]["REPO"], "${{ github.repository }}")
+        self.assertEqual(step["env"]["DEFAULT_BRANCH"],
+                         "${{ github.event.repository.default_branch }}")
+
+
 class TestTheResweepLoopIsExecutedNotJustRead(unittest.TestCase):
     """The loop is the timing fix, so it is verified by RUNNING it.
 
@@ -2568,9 +2656,11 @@ class TestTheResweepLoopIsExecutedNotJustRead(unittest.TestCase):
                 f'codes=({codes})\n'
                 f'log="{tmp}/calls.log"\n'
                 'n=$(wc -l < "$log")\n'
-                # argv COUNT is logged alongside the text: an extra EMPTY element is
-                # invisible in "$*" but is exactly what unquoted `$DRY_RUN` produces
-                # when the flag is unset, and argparse rejects it — killing every sweep.
+                # argv COUNT is logged alongside the text because an extra EMPTY element
+                # is invisible in "$*". It is NOT something the pre-loop call site could
+                # produce — see test_the_dry_run_flag_is_passed_as_one_argument_when_set
+                # for the measurement — but it IS what a plausible edit to the array
+                # form produces, so the count is asserted rather than the joined text.
                 'printf "%s|%s\\n" "$#" "$*" >> "$log"\n'
                 'code=${codes[$n]:-0}\n'
                 'exit "$code"\n',
@@ -2585,6 +2675,7 @@ class TestTheResweepLoopIsExecutedNotJustRead(unittest.TestCase):
                     "DEFAULT_BRANCH": "main",
                     "DRY_RUN": "",
                     "RESWEEPS": "4",
+                    "MAX_RECOVERIES_PER_SWEEP": "1",
                     # the real 60 s would make this suite unrunnable; the interval is
                     # not what is under test, the sequencing and the exit code are.
                     "RESWEEP_INTERVAL_SECONDS": "0",
@@ -2608,11 +2699,15 @@ class TestTheResweepLoopIsExecutedNotJustRead(unittest.TestCase):
             self.assertIn("--repo sparq-org/sparq", text)
             self.assertIn("--branch main", text)
             self.assertNotIn("--dry-run", text)
-            # EXACT argc: script + sweep + --repo + val + --branch + val == 6. An extra
-            # EMPTY seventh element is what unquoted `$DRY_RUN` yields when the flag is
-            # unset; it is invisible in the joined text and argparse rejects it, so
-            # every sweep would fail in the DEFAULT (non-dry-run) configuration.
-            self.assertEqual(argc, "6", call)
+            # EXACT argc: script + sweep + --repo + val + --branch + val
+            # + --max-recoveries-per-run + val == 8, i.e. NO
+            # empty seventh element. The hazard belongs to the ARRAY form this replaced
+            # the folded one-liner with: `sweep_args+=("$DRY_RUN")` applied
+            # UNCONDITIONALLY appends an empty element when the flag is unset, and
+            # argparse rejects it (`error: unrecognized arguments:`, exit 2) — which
+            # would fail every sweep in the DEFAULT non-dry-run configuration. Hence the
+            # `if [ -n "$DRY_RUN" ]` guard, which this count is what pins.
+            self.assertEqual(argc, "8", call)
 
     def test_a_failure_on_the_FIRST_sweep_survives_four_later_successes(self):
         """THE STICKY-STATE ASSERTION. This estate shipped the opposite defect three
@@ -2658,6 +2753,7 @@ class TestTheResweepLoopIsExecutedNotJustRead(unittest.TestCase):
                     "DEFAULT_BRANCH": "main",
                     "DRY_RUN": "--dry-run",
                     "RESWEEPS": "0",
+                    "MAX_RECOVERIES_PER_SWEEP": "1",
                     "RESWEEP_INTERVAL_SECONDS": "0",
                 },
                 capture_output=True,
@@ -2665,10 +2761,20 @@ class TestTheResweepLoopIsExecutedNotJustRead(unittest.TestCase):
             )
             lines = (tmp / "calls.log").read_text(encoding="utf-8").splitlines()
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        # script + sweep + --repo + val + --branch + val + --dry-run == 7 argv elements.
-        # The COUNT is the assertion: `--dry-run` must arrive as ONE element, which is
-        # exactly what the pre-fix unquoted `$DRY_RUN` splitting could not guarantee.
-        self.assertEqual(lines[0], "7", lines)
+        # script + sweep + --repo + val + --branch + val
+        # + --max-recoveries-per-run + val + --dry-run == 9 argv elements.
+        # The COUNT is the assertion: `--dry-run` must arrive as exactly ONE element.
+        #
+        # HISTORICAL CORRECTION, recorded because the wrong version was published: the
+        # folded one-liner this replaced used an UNQUOTED `$DRY_RUN`, and an unquoted
+        # expansion of an empty variable yields ZERO words, so the merge-base call site
+        # produced a clean argc=6 and was NOT buggy. Injecting an empty element requires
+        # a QUOTED expansion. Measured under GitHub's default
+        # `bash --noprofile --norc -eo pipefail` on the MERGE-BASE body: unquoted +
+        # empty => argc=6 (no empty word); quoted + empty => argc=7 with a trailing ``. The array rewrite is a
+        # shellcheck-cleanliness change, NOT a bug fix, and the hazard it introduces is
+        # its own (an unconditional `+=("$DRY_RUN")`), which is what these counts pin.
+        self.assertEqual(lines[0], "9", lines)
         self.assertIn("--dry-run", lines[1])
 
     def test_the_loop_actually_repeats(self):
@@ -2679,6 +2785,32 @@ class TestTheResweepLoopIsExecutedNotJustRead(unittest.TestCase):
         self.assertGreaterEqual(declared, 3)
         _, calls = self._execute([0] * (declared + 1))
         self.assertEqual(len(calls), declared + 1)
+
+    #: The per-FIRE recovery ceiling this workflow is allowed to reach. Pinned so that
+    #: raising RESWEEPS or the per-sweep budget cannot silently widen the blast radius
+    #: again — the loop already multiplied the script's process-local bound once.
+    MAX_RECOVERIES_PER_FIRE = 5
+
+    def test_the_per_fire_blast_radius_is_bounded(self):
+        step = _step(_yaml(WATCHDOG_YML), "watch", "Sweep the merge queue")
+        per_sweep = int(step["env"]["MAX_RECOVERIES_PER_SWEEP"])
+        sweeps = int(step["env"]["RESWEEPS"]) + 1
+        self.assertLessEqual(
+            per_sweep * sweeps, self.MAX_RECOVERIES_PER_FIRE,
+            "`--max-recoveries-per-run` is PROCESS-local, so the per-fire ceiling is "
+            "sweeps x per-sweep budget. Raising either without raising this constant "
+            "widens what a single fire may dequeue.",
+        )
+        self.assertLessEqual(per_sweep, mgw.DEFAULT_MAX_RECOVERIES_PER_RUN,
+                             "the per-sweep budget may only ever TIGHTEN the script "
+                             "default, never widen it")
+
+    def test_the_budget_flag_actually_reaches_the_sweep(self):
+        # The env value is inert unless it is on the command line — the call-site half
+        # of the bound above.
+        _, calls = self._execute([0, 0, 0, 0, 0])
+        for call in calls:
+            self.assertIn("--max-recoveries-per-run 1", call.partition("|")[2], call)
 
     def test_the_loop_covers_the_grace_period(self):
         # The whole reason the loop exists: one fire must outlive
@@ -2696,10 +2828,27 @@ class TestTheResweepLoopIsExecutedNotJustRead(unittest.TestCase):
         # i.e. would silently turn every test in this class vacuous.
         self.assertNotIn("${{", self._run_block())
 
-    def test_no_failure_swallowing_idiom(self):
-        body = self._run_block()
-        self.assertNotIn("|| true", body)
-        self.assertNotIn("continue-on-error", body)
+    def test_no_failure_swallowing_idiom_in_the_shell(self):
+        self.assertNotIn("|| true", self._run_block())
+
+    def test_no_failure_swallowing_at_the_YAML_SEAM(self):
+        """`continue-on-error` is a YAML KEY, so looking for it in the `run:` STRING can
+        never fail for the defect it names — the string is a shell body and the key is a
+        sibling mapping entry. That vacuous shape shipped in the first revision of this
+        file and is why the assertion now reads the PARSED step and job.
+
+        `continue-on-error: true` on this step makes the whole sticky-`rc` design inert:
+        the step still runs all five sweeps and still exits non-zero, and the JOB still
+        reports success. Every behavioural test in this class passes on that mutant."""
+        wf = _yaml(WATCHDOG_YML)
+        job = wf["jobs"]["watch"]
+        step = _step(wf, "watch", "Sweep the merge queue")
+        self.assertNotIn("continue-on-error", step, "the sweep step may not swallow its "
+                         "own failure — the sticky exit code would become decorative")
+        self.assertNotIn("continue-on-error", job)
+        for other in _steps(wf, "watch"):
+            self.assertNotIn("continue-on-error", other,
+                             other.get("name") or other.get("uses"))
 
 
 class TestSuiteIsWiredIntoCI(unittest.TestCase):
