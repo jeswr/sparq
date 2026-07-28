@@ -150,7 +150,10 @@ what the shapes *declare*, not only by what the data happens to contain.
   `OPTIONAL { … }` group, or the AND-NOT form, lowered as `FILTER NOT EXISTS { … }` (correct
   whether or not the inner group shares a variable, which `MINUS` is not). A node that is only
   reachable through an optional/negated link has its own class + attribute patterns emitted
-  *inside* that group — emitting them outside would quietly make the branch mandatory. Projected
+  *inside* that group — emitting them outside would quietly make the branch mandatory. When
+  several soft links converge on the same node, *every* one of those groups restates them: a
+  branch that does not match leaves the node unbound, so a branch missing them could bind it to
+  anything. Projected
   items can carry `COUNT`/`COUNT DISTINCT`/`SUM`/`AVG`/`MIN`/`MAX`; the non-aggregated ones become
   the `GROUP BY` keys.
 * **Two-way, with no hidden dialect.** The generated SPARQL is always visible and always editable

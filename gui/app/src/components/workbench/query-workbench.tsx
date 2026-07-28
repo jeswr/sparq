@@ -76,7 +76,14 @@ import { FederationControl, RunLocationBadge } from "@/components/workbench/fede
 import { useWorkspace } from "@/lib/workspace-context";
 // [OPUS-5] sq-ixc3.24 — the visual query builder hands its generated SPARQL to THIS editor, so a
 // built query is read/edited/run exactly like a hand-written one (no second execution path).
-import { subscribeToQueryHandoff, takePendingQuery } from "@/lib/query-handoff";
+import {
+  INITIAL_RESTORE_GATE,
+  onQueryHandoff,
+  onWorkspaceHydrate,
+  subscribeToQueryHandoff,
+  takePendingQuery,
+  type RestoreGate,
+} from "@/lib/query-handoff";
 import { DEFAULT_QUERY } from "@/data/sample-graph";
 // [FABLE-5] sq-ixc3.14 — the honesty-override type for QUERY_TOOL_OVERRIDE (sq-5lyme seam).
 import type { ToolOverride } from "@/data/tools";
@@ -662,9 +669,10 @@ export function QueryWorkbench() {
   // first restore AND on every workspace-id change, and write the text back (debounced) below.
   const { workspace, setEditorQuery, recordUpdateSnapshot } = useWorkspace();
   const [query, setQuery] = React.useState(DEFAULT_QUERY);
-  // The id of the workspace whose editor text is currently loaded — guards the write-back from
-  // firing (and clobbering the saved query) before the restore has hydrated the editor.
-  const loadedWsRef = React.useRef<string | null>(null);
+  // Which workspace's editor text is currently loaded (and whether a handoff won the mount race)
+  // — guards the write-back from firing, and clobbering the saved query, before the restore has
+  // hydrated the editor. The ordering rule itself lives in `lib/query-handoff` and is unit-tested.
+  const gateRef = React.useRef<RestoreGate>(INITIAL_RESTORE_GATE);
   const [outcome, setOutcome] = React.useState<QueryOutcome | null>(null);
   const [view, setView] = React.useState<ResultView>("table");
   const [running, setRunning] = React.useState(false);
@@ -697,9 +705,8 @@ export function QueryWorkbench() {
   // [OPUS-5] sq-ixc3.24 — accept a query handed over by another tool (the visual query builder's
   // "Open in Query"). Applied whether this tab was already open (the live subscription) or is
   // mounting for the first time because the handoff opened it (the pending slot, consumed once).
-  const handoffRef = React.useRef(false);
   const applyHandoff = React.useCallback((handed: string) => {
-    handoffRef.current = true;
+    gateRef.current = onQueryHandoff(gateRef.current);
     setQuery(handed);
   }, []);
   React.useEffect(() => {
@@ -710,24 +717,21 @@ export function QueryWorkbench() {
 
   // [OPUS-4.8] sq-lcd6e — hydrate the editor from the restored / switched workspace's saved query.
   // Runs once per workspace id (never re-clobbering the user's in-progress edits within a session).
+  // (sq-ixc3.24) A handoff that arrived before this panel had hydrated ANY workspace wins over
+  // that first restore — the user explicitly asked for it. A handoff that arrives afterwards does
+  // not, so the next workspace switch still restores that workspace's saved query.
   React.useEffect(() => {
     if (!workspace) return;
-    if (loadedWsRef.current === workspace.id) return;
-    loadedWsRef.current = workspace.id;
-    // (sq-ixc3.24) A handoff that arrived before the restore landed wins over the saved query —
-    // the user explicitly asked for it. Clearing the flag keeps the NEXT workspace switch normal.
-    if (handoffRef.current) {
-      handoffRef.current = false;
-      return;
-    }
-    setQuery(workspace.editor.query);
+    const { gate, restore } = onWorkspaceHydrate(gateRef.current, workspace.id);
+    gateRef.current = gate;
+    if (restore) setQuery(workspace.editor.query);
   }, [workspace]);
 
   // [OPUS-4.8] sq-lcd6e — write the editor text back to the workspace (debounced) so it persists.
-  // Guarded on `loadedWsRef` so the initial DEFAULT_QUERY never overwrites a saved query before
-  // the restore above has run.
+  // Guarded on the restore gate so the initial DEFAULT_QUERY never overwrites a saved query
+  // before the restore above has run.
   React.useEffect(() => {
-    if (loadedWsRef.current === null) return;
+    if (gateRef.current.hydrated === null) return;
     const handle = setTimeout(() => {
       void setEditorQuery(query);
     }, 400);

@@ -9,6 +9,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  INITIAL_RESTORE_GATE,
+  onQueryHandoff,
+  onWorkspaceHydrate,
   publishQuery,
   resetQueryHandoff,
   subscribeToQueryHandoff,
@@ -71,4 +74,44 @@ test("unsubscribing twice is harmless", () => {
   unsubscribe();
   unsubscribe();
   assert.equal(publishQuery("SELECT * WHERE { }"), 0);
+});
+
+// ---------------------------------------------------------------------------
+// the restore-vs-handoff gate
+// ---------------------------------------------------------------------------
+
+test("a handoff during the mount race wins over the first workspace restore", () => {
+  // The handoff opened the Query tab, so it lands before the (async) workspace restore that
+  // would otherwise clobber it.
+  const gate = onQueryHandoff(INITIAL_RESTORE_GATE);
+  const hydrated = onWorkspaceHydrate(gate, "ws-a");
+  assert.equal(hydrated.restore, false);
+  assert.equal(hydrated.gate.hydrated, "ws-a");
+});
+
+test("a handoff after hydration does NOT suppress the next workspace switch", () => {
+  // Workspace A is already loaded when the handoff arrives — there is no restore in flight for it
+  // to win, so switching to B must still restore B's own saved query.
+  const a = onWorkspaceHydrate(INITIAL_RESTORE_GATE, "ws-a");
+  assert.equal(a.restore, true);
+  const afterHandoff = onQueryHandoff(a.gate);
+  const b = onWorkspaceHydrate(afterHandoff, "ws-b");
+  assert.equal(b.restore, true);
+  assert.equal(b.gate.hydrated, "ws-b");
+});
+
+test("re-rendering with the same workspace never re-clobbers in-progress edits", () => {
+  const first = onWorkspaceHydrate(INITIAL_RESTORE_GATE, "ws-a");
+  const again = onWorkspaceHydrate(first.gate, "ws-a");
+  assert.equal(again.restore, false);
+  assert.equal(again.gate, first.gate);
+});
+
+test("a mount-race handoff is spent on the first hydration only", () => {
+  const gate = onQueryHandoff(INITIAL_RESTORE_GATE);
+  const a = onWorkspaceHydrate(gate, "ws-a");
+  assert.equal(a.restore, false);
+  assert.equal(a.gate.skipNextRestore, false);
+  // The very next switch is normal again.
+  assert.equal(onWorkspaceHydrate(a.gate, "ws-b").restore, true);
 });

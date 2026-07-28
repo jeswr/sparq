@@ -215,6 +215,10 @@ interface ProjectionItem {
  * the required links hanging off the target, and any further soft links below them (nested) —
  * is emitted INSIDE that group. Emitting any of it at the top level would quietly make the
  * branch mandatory, so `?a OPTIONAL→ ?b OPTIONAL→ ?c` never forces `?b` to exist.
+ *
+ * When several soft links converge on the SAME target, every one of those branches restates the
+ * target's sub-graph: a branch that does not match leaves the target unbound, so a branch that
+ * omitted the target's class/attribute patterns would be free to bind it to anything.
  */
 export function buildSparql(model: BuilderModel): BuiltQuery {
   const warnings: string[] = [];
@@ -368,26 +372,39 @@ export function buildSparql(model: BuilderModel): BuiltQuery {
     ...edges.filter((e) => e.mode === "not" && ids.has(e.from)),
   ];
 
-  /** Nodes whose patterns landed inside a FILTER NOT EXISTS — their variables are out of scope. */
-  const outOfScope = new Set<string>();
-  const emitted = new Set<string>();
+  /** Nodes whose patterns landed inside a FILTER NOT EXISTS. */
+  const negatedScope = new Set<string>();
+  /** Nodes whose patterns landed somewhere that BINDS them — the mandatory body or an OPTIONAL. */
+  const bindingScope = new Set<string>();
+  /** A node reached ONLY through negations: its variable is not in scope outside them. */
+  const outOfScope = (id: string) => negatedScope.has(id) && !bindingScope.has(id);
 
-  /** One soft link as a group: its triple, the sub-graph only it reaches, then nested branches. */
-  const softGroup = (e: BuilderEdge, negated: boolean): string[] => {
+  /**
+   * One soft link as a group: its triple, the sub-graph only it reaches, then nested branches.
+   *
+   * `inScope` is the set of nodes whose patterns already hold ALONG THIS PATH — the mandatory
+   * body plus every ENCLOSING branch — and those are not restated. A node emitted in a SIBLING
+   * branch is deliberately NOT in it: sibling soft groups bind their target independently, and a
+   * branch that does not match leaves the target unbound, so a later `?c OPTIONAL→ ?b` would then
+   * bind ?b to anything unless it carries ?b's own class/attribute constraints too. Every branch
+   * that can independently bind a target therefore restates that target's sub-graph. Carrying the
+   * path down (rather than one global emitted-once bit) also stops a soft link cycle
+   * ?b → ?c → ?b from recursing forever.
+   */
+  const softGroup = (e: BuilderEdge, negated: boolean, inScope: ReadonlySet<string>): string[] => {
     const inNegation = negated || e.mode === "not";
     const inner = [edgeLine(e)];
     const inside = new Set<string>();
-    // Only the FIRST branch to reach a component carries it; a later link to the same node is
-    // just its own triple, so the patterns are stated once and correlate across the branches.
-    if (!emitted.has(e.to)) {
+    const below = new Set(inScope);
+    if (!inScope.has(e.to)) {
       for (const node of componentOf(e.to)) {
-        emitted.add(node.id);
+        below.add(node.id);
         inside.add(node.id);
-        if (inNegation) outOfScope.add(node.id);
+        (inNegation ? negatedScope : bindingScope).add(node.id);
         inner.push(...withRequired(node));
       }
     }
-    for (const child of softOut(inside)) inner.push(...softGroup(child, inNegation));
+    for (const child of softOut(inside)) inner.push(...softGroup(child, inNegation, below));
     const keyword = e.mode === "optional" ? "OPTIONAL" : "FILTER NOT EXISTS";
     return [`${keyword} {`, ...inner.map((l) => `  ${l}`), `}`];
   };
@@ -395,7 +412,7 @@ export function buildSparql(model: BuilderModel): BuiltQuery {
   const body: string[] = [];
   for (const node of model.nodes) {
     if (!mandatory.has(node.id)) continue;
-    emitted.add(node.id);
+    bindingScope.add(node.id);
     body.push(...withRequired(node));
     if (node.project && !bound.has(node.id)) {
       warnings.push(
@@ -403,7 +420,8 @@ export function buildSparql(model: BuilderModel): BuiltQuery {
       );
     }
   }
-  for (const e of softOut(mandatory)) body.push(...softGroup(e, false));
+  // The mandatory body is the initial in-scope path: its patterns hold for every branch below it.
+  for (const e of softOut(mandatory)) body.push(...softGroup(e, false, mandatory));
 
   // --- projection ---------------------------------------------------------------------------
   const projection: ProjectionItem[] = [];
@@ -422,7 +440,7 @@ export function buildSparql(model: BuilderModel): BuiltQuery {
   for (const node of model.nodes) {
     const variable = nodeVar.get(node.id)!;
     if (node.project) {
-      if (outOfScope.has(node.id)) {
+      if (outOfScope(node.id)) {
         warnings.push(
           `?${variable} is only reached through an AND-NOT link, so it is out of scope — not projected.`,
         );
@@ -440,7 +458,7 @@ export function buildSparql(model: BuilderModel): BuiltQuery {
         );
         continue;
       }
-      if (outOfScope.has(node.id)) {
+      if (outOfScope(node.id)) {
         warnings.push(`?${variable2} is inside an AND-NOT group, so it is out of scope — not projected.`);
         continue;
       }

@@ -421,6 +421,109 @@ test("AND-NOT → REQUIRED keeps the whole sub-graph inside the negation, and ou
   assert.equal(built.warnings.filter((w) => w.includes("AND-NOT")).length, 2);
 });
 
+/**
+ * Two soft links converging on ONE typed + filtered target `?employer`, reached from two
+ * independent mandatory nodes. `secondMode` is how the second link reaches it.
+ */
+function convergingSoft(secondMode: BuilderEdge["mode"]): BuilderModel {
+  return model({
+    nodes: [
+      node({ id: "n1", variable: "person", classIri: `${FOAF}Person`, project: true }),
+      node({ id: "n2", variable: "other", classIri: `${FOAF}Person`, project: true }),
+      node({
+        id: "n3",
+        variable: "employer",
+        classIri: `${EX}Company`,
+        project: true,
+        filters: [
+          filter({
+            id: "f1",
+            predicateIri: `${EX}country`,
+            variable: "country",
+            op: "eq",
+            value: "NL",
+            project: true,
+          }),
+        ],
+      }),
+    ],
+    edges: [
+      edge({ id: "e1", from: "n1", to: "n3", predicateIri: `${EX}worksAt`, mode: "optional" }),
+      edge({ id: "e2", from: "n2", to: "n3", predicateIri: `${EX}foundedBy`, mode: secondMode }),
+    ],
+  });
+}
+
+test("every OPTIONAL branch reaching a shared target carries that target's own constraints", () => {
+  const built = buildSparql(convergingSoft("optional"));
+  const text = flat(built.sparql);
+  // The second branch may NOT be a bare triple: when the FIRST optional does not match it leaves
+  // ?employer unbound, so a bare `?other ex:foundedBy ?employer` would bind ?employer to anything
+  // — an untyped, unfiltered company silently entering the results.
+  assert.ok(
+    text.includes(
+      "OPTIONAL { ?person ex:worksAt ?employer . ?employer a ex:Company . " +
+        '?employer ex:country ?country . FILTER(?country = "NL") }',
+    ),
+    built.sparql,
+  );
+  assert.ok(
+    text.includes(
+      "OPTIONAL { ?other ex:foundedBy ?employer . ?employer a ex:Company . " +
+        '?employer ex:country ?country . FILTER(?country = "NL") }',
+    ),
+    built.sparql,
+  );
+  // Stated in BOTH branches — and still nowhere in the mandatory body.
+  assert.equal(built.sparql.split("?employer a ex:Company").length - 1, 2);
+  assert.ok(!mandatoryPart(built.sparql).includes("?employer"), built.sparql);
+  assert.deepEqual(built.projected, ["person", "other", "employer", "country"]);
+});
+
+test("an AND-NOT branch sharing an OPTIONAL's target constrains it too, and stays projectable", () => {
+  const built = buildSparql(convergingSoft("not"));
+  const text = flat(built.sparql);
+  // The negation asks "no company FOUNDED BY ?other that satisfies the drawn constraints" — the
+  // class + attribute patterns belong inside it, or it excludes far more than the canvas says.
+  assert.ok(
+    text.includes(
+      "FILTER NOT EXISTS { ?other ex:foundedBy ?employer . ?employer a ex:Company . " +
+        '?employer ex:country ?country . FILTER(?country = "NL") }',
+    ),
+    built.sparql,
+  );
+  // ?employer is BOUND by the optional branch, so appearing inside a negation as well must not
+  // push it (or its attribute) out of scope for the projection.
+  assert.deepEqual(built.projected, ["person", "other", "employer", "country"]);
+  assert.deepEqual(built.warnings, []);
+});
+
+test("a soft link cycle below a branch terminates instead of restating itself forever", () => {
+  const built = buildSparql(
+    model({
+      nodes: [
+        node({ id: "n1", variable: "person", classIri: `${FOAF}Person`, project: true }),
+        node({ id: "n2", variable: "a", classIri: `${EX}A` }),
+        node({ id: "n3", variable: "b", classIri: `${EX}B` }),
+      ],
+      edges: [
+        edge({ id: "e1", from: "n1", to: "n2", predicateIri: `${EX}first`, mode: "optional" }),
+        edge({ id: "e2", from: "n2", to: "n3", predicateIri: `${EX}next`, mode: "optional" }),
+        edge({ id: "e3", from: "n3", to: "n2", predicateIri: `${EX}prev`, mode: "optional" }),
+      ],
+    }),
+  );
+  // ?a is already in scope along this path when the cycle closes, so the innermost group is just
+  // its triple — the walk stops rather than nesting ?a → ?b → ?a forever.
+  assert.ok(
+    flat(built.sparql).includes(
+      "OPTIONAL { ?person ex:first ?a . ?a a ex:A . OPTIONAL { ?a ex:next ?b . ?b a ex:B . " +
+        "OPTIONAL { ?b ex:prev ?a . } } }",
+    ),
+    built.sparql,
+  );
+});
+
 test("a link cycle with no unconditional entry point still emits every node's patterns", () => {
   const built = buildSparql(
     model({
