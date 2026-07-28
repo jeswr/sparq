@@ -101,7 +101,7 @@ let g = Graph::from_parts(dict, triples);
   an id-level IR (constants pre-interned into the caller's `Dict`) and run the semi-naive
   fixpoint DIRECTLY over `[Id; 3]` facts on the shared substrate join kernels — no per-call
   text round-trip. Scoped to the access-control subset (`log:notIncludes`/`log:uri`/`log:(not)equalTo`,
-  `string:` concat/encodeForUri/scrape/notGreaterThan, plus RDF 1.2 `<< s p o >>` quoted triples
+  `string:` concat/encodeForUri/scrape/notGreaterThan, plus RDF 1.2 `<< s p o >>` triple terms
   in premises, matched by component-indexed id unpacking); everything else is a loud compile error.
   Closure set-equality vs `reason_n3` is pinned by `tests/compiled_equivalence.rs`. Off by default.
 
