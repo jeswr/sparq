@@ -945,6 +945,15 @@ jobs:
         run: cargo build -p sparq-wasm --target wasm32-unknown-unknown --features explain-json
       - name: clippy (wasm32 target, explain-json feature, deny warnings)
         run: cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets --features explain-json -- -D warnings
+      # [SONNET-4.6] #3546: also build + clippy WITH the opt-in `native-ttl` feature (the
+      # sparq-core native byte-level Turtle parser sq-3ul2n.11/#2752 routes the wasm SERIAL
+      # Turtle load path through). IN the published bundle (js `build:wasm` enables it), so
+      # without this leg the SHIPPED feature combination was never compiled for wasm32 in
+      # CI. The DEFAULT bundle stays on oxttl (perf floor byte-identical).
+      - name: Build sparq-wasm for the browser target (native-ttl feature)
+        run: cargo build -p sparq-wasm --target wasm32-unknown-unknown --features native-ttl
+      - name: clippy (wasm32 target, native-ttl feature, deny warnings)
+        run: cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets --features native-ttl -- -D warnings
       # [OPUS-4.8] sq-6qw3 (W-reason): the tier-b forward-chaining inference bundle. Build +
       # clippy it on wasm32 in BOTH feature states (default + the opt-in `why()` proof-tree
       # `explain` feature) so the reason bundle is gate-protected exactly like sparq-wasm.
