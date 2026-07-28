@@ -229,6 +229,22 @@
    "owner_bead": "sparq-org/sparq#4652 follow-up — event-driven entry point for the zero-dispatch merge-group watchdog",
    "promotion_criteria": "permanently advisory BY DESIGN, for the same reason as `merge-queue dequeued feedback (advisory)`: it runs on pull_request_target [enqueued, dequeued], i.e. AFTER a gate verdict already exists on the head SHA (a PR cannot be enqueued before it is green), it never checks out or executes anything, and its single action is one `gh workflow run` that rings the merge-group watchdog. Ringing a queue watchdog is not a statement about the commit's merge-worthiness, so a doorbell hiccup must never red a later gate evaluation on that same SHA. No gate_script_waiver: the job invokes no script at all. Promote never; delete this entry only if the workflow is removed",
    "registered": "2026-07-28"
+  },
+  "lws-cth preflight (advisory)": {
+   "workflow": "lws-cth.yml",
+   "job_id": "preflight",
+   "owner_bead": "sq-gg0qq.7",
+   "promotion_criteria": "Promotable in principle — this job IS hermetic (shellcheck + a filesystem-only config consistency check, no Docker/network/Keycloak). It is declared advisory only because it lives in a workflow_dispatch-ONLY workflow: a manual dispatch against a PR branch would otherwise leave a GATING check-run on that head SHA, which is the silent-gating trap this registry's _doc describes. Promote by moving the `check-conformance-config.py` invocation into a lane that already runs per-PR (e.g. the docs-quality shellcheck job), at which point this entry and the preflight job here are both deleted.",
+   "gate_script_waiver": "Runs `shellcheck` and `python3 crates/sparq-lws-core/conformance/check-conformance-config.py`, both gate-classified by C3. Neither is a repo-wide gate script: the python check validates ONLY this harness's own committed config against itself (C1-C6, self-tested via --self-test) and the shellcheck target is this harness's own run.sh. Nothing outside crates/sparq-lws-core/conformance/ is assessed, so an advisory verdict here cannot mask a real gate.",
+   "registered": "2026-07-28"
+  },
+  "lws-cth harness (advisory)": {
+   "workflow": "lws-cth.yml",
+   "job_id": "harness",
+   "owner_bead": "sq-gg0qq.7",
+   "promotion_criteria": "NOT promotable while the harness's prerequisites are external. The Solid CTH needs Docker, network egress, a live Keycloak realm at localhost:8080 with the conformance-alice/bob DPoP service-account clients, and an ath-patched CTH image (the published harness omits the RFC 9449 DPoP `ath` claim and cannot authenticate against this server). A GitHub-hosted runner has none of those, so a gating leg could only ever be red, and the run is long + Docker-heavy + network-bound — exactly the shape that causes CI congestion collapse if it reaches the per-PR path. Promote only if the whole stack (realm + patched image) becomes reproducible on a runner the required gate can depend on. Delete this entry only if the workflow is removed.",
+   "gate_script_waiver": "Runs `cargo build --release -p sparq-lws-core` and `./crates/sparq-lws-core/conformance/run.sh`, gate-classified by C3. run.sh IS a real ratchet — it fails when the generated CTH score drops below the floor in conformance/baseline.json — but it asserts nothing about any other surface, and it is unrunnable without the external stack above, so it cannot stand in for a gate that would otherwise run.",
+   "registered": "2026-07-28"
   }
  }
 }
