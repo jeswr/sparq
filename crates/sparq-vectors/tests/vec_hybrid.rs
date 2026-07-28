@@ -609,6 +609,85 @@ fn an_admissible_arm_hit_below_the_first_page_is_still_found() {
     assert_eq!(rows[0].3, "text=1");
 }
 
+/// [OPUS-4.8] (review #4519, round 5) An admissible id is not always a STORED-TERM id: a `?node`
+/// constrained in an OBJECT position to a small canonical `xsd:integer` is bound to an INLINE
+/// literal id, far outside `1..=dict.len()` — and `check_arm_ids` admits exactly that. So the
+/// paging backstop may not be `dict.len()`: an arm is free to rank `dict.len()` inadmissible ids
+/// above the admissible inline one, and stopping at the dictionary length loses it.
+///
+/// The witness: `?node` is pinned by `<s> <val> ?node` to `"7"^^xsd:integer`, and the arm ranks
+/// every stored-term id (all inadmissible) before that inline id — putting it one past the OLD
+/// `candidates.max(dict.len())` request ceiling. Under that ceiling the arm's masked ranking comes
+/// back EMPTY and the query answers nothing; bounded by the real id domain the arm is paged one
+/// round deeper and the sole admissible answer is found.
+#[cfg(feature = "filtered-ann")]
+#[test]
+fn an_admissible_inline_integer_id_beyond_the_dictionary_length_is_still_found() {
+    // Enough stored terms that the dictionary length exceeds the first page the arm is asked for
+    // (`cfg.candidates(1)` = DEFAULT_OVER_FETCH = 4), so the old ceiling was `dict.len()`.
+    let mut ttl = String::new();
+    for i in 0..6 {
+        ttl.push_str(&format!("<http://ex/e{}> <http://ex/p> \"e{}\" .\n", i, i));
+    }
+    ttl.push_str(
+        "<http://ex/s> <http://ex/val> \"7\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+    );
+    let g = Graph::load_str(&ttl, "ntriples").unwrap();
+    let path = std::env::temp_dir().join(format!(
+        "sparq-vec-hybrid-inline-{}.spqv",
+        std::process::id()
+    ));
+    let mut store = VectorStore::create(&path, 2).unwrap();
+    store.finalize().unwrap();
+
+    let inline_id = g
+        .id_of(&Term::Literal(oxrdf::Literal::new_typed_literal(
+            "7",
+            NamedNode::new("http://www.w3.org/2001/XMLSchema#integer").unwrap(),
+        )))
+        .unwrap();
+    let len = g.dict.len() as Id;
+    assert!(
+        inline_id > len,
+        "the constraining literal must inline (id {} outside 1..={})",
+        inline_id,
+        len
+    );
+    // Every stored-term id first — all inadmissible under the mask `{inline_id}` — then the one
+    // admissible id, at position `dict.len() + 1`.
+    let mut ranked: Vec<(Id, f64)> = (1..=len).map(|i| (i, f64::from(len - i) + 1.0)).collect();
+    ranked.push((inline_id, 0.5));
+
+    let cfg = HybridConfig::new()
+        .vector_weight(0.0)
+        .arm("text", 1.0, fixed_arm(ranked));
+    let r = query_vec_hybrid(
+        &g,
+        "PREFIX vec: <http://sparq.dev/vec#>
+         SELECT ?node ?score ?rank ?prov WHERE {
+           ( ?node ?score ?rank ?prov ) vec:hybrid ( \"1,0\" 1 ) .
+           <http://ex/s> <http://ex/val> ?node .
+         }",
+        &store,
+        &cfg,
+    )
+    .unwrap();
+    let nodes: Vec<String> = r
+        .rows
+        .iter()
+        .map(|row| match row[0].as_ref().unwrap() {
+            Term::Literal(l) => l.value().to_string(),
+            other => panic!("expected the constrained integer literal, got {}", other),
+        })
+        .collect();
+    assert_eq!(
+        nodes,
+        vec!["7".to_string()],
+        "the admissible id is an INLINE literal id past dict.len(), so it is found only if the \
+         paging backstop bounds the whole valid id domain rather than the dictionary alone"
+    );
+}
+
 /// [OPUS-4.8] (review #4519) An arm is a caller closure, so its ids are untrusted input. An id
 /// outside the graph dictionary's domain — `0` (never a valid 1-based id) or one past the end —
 /// must be a HARD query error naming the arm, not a hit that resolves to the dictionary's

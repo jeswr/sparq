@@ -1250,6 +1250,14 @@ fn run_aux_arms(
     Ok(aux)
 }
 
+/// [OPUS-4.8] (review #4519, round 5) The number of inline-integer literal ids — the sub-domain
+/// `[INLINE_BASE, INLINE_BASE + 2^30)` that [`check_arm_ids`] admits alongside the `1..=dict.len()`
+/// stored-term ids. `run_aux_arms`'s paging backstop has to bound that whole domain, so it needs
+/// the size of the inline half. `sparq-core` does not export it, so it is restated here and pinned
+/// against `is_inline` by `the_inline_domain_matches_the_dictionary`.
+#[cfg(feature = "filtered-ann")]
+const INLINE_DOMAIN: usize = 1 << 30;
+
 /// [OPUS-4.8] (review #4519, round 2) Runs the auxiliary arms and restricts each to the
 /// BGP-derived candidate mask, **paging an arm deeper when the restriction leaves it short**.
 ///
@@ -1280,10 +1288,18 @@ fn run_aux_arms(
 /// Each round doubles the request, and stops at the first of: enough admissible hits
 /// (`>= candidates`); every admissible id already collected (`>= mask.len()`, so a deeper page
 /// cannot add one); the arm returned fewer results than asked for (exhausted); or the request
-/// reached the dictionary bound. That last bound is a backstop rather than a real stopping point:
-/// an arm's ids are distinct ([`validate_arms`](crate::hybrid::validate_arms)) and in the
-/// dictionary domain ([`check_arm_ids`]), so an arm with `dict.len()` results in hand has nothing
-/// left to page except inline-integer literal ids, which an entity-retrieval arm does not rank.
+/// reached the ID-DOMAIN bound. That last bound is a backstop rather than a real stopping point:
+/// an arm's ids are distinct ([`validate_arms`](crate::hybrid::validate_arms)) and drawn from the
+/// domain [`check_arm_ids`] admits — the dictionary ids PLUS the inline-integer literal ids — so
+/// no arm can return more than `dict.len() + INLINE_DOMAIN` results and a deeper page than that
+/// cannot exist. The inline half of that bound is not slack: [`derive_mask`] admits an inline id
+/// whenever `?node` is bound in an object position to an integer literal, so an ADMISSIBLE id
+/// genuinely can sit beyond `dict.len()` in an arm's ranking — bounding the paging at `dict.len()`
+/// would stop while such an id was still unreached, losing it (review #4519, round 5).
+///
+/// An arm that never signals exhaustion is therefore asked for geometrically larger pages until it
+/// does; the cost of producing them is the arm's own, and an honest arm stops at its first short
+/// page long before the bound is in sight.
 #[cfg(feature = "filtered-ann")]
 fn run_aux_arms(
     cfg: &HybridConfig<'_>,
@@ -1306,7 +1322,10 @@ fn run_aux_arms(
         return Ok(aux);
     };
 
-    let ceiling = candidates.max(graph.dict.len());
+    // The backstop bounds the WHOLE domain an arm may legitimately rank — the dictionary ids and
+    // the inline-integer literal ids `check_arm_ids` also admits — because an admissible id can be
+    // an inline one. `dict.len()` alone is NOT that domain.
+    let ceiling = candidates.max(graph.dict.len().saturating_add(INLINE_DOMAIN));
     (0..cfg.arm_count())
         .map(|i| {
             let mut want = candidates;
@@ -1636,7 +1655,22 @@ fn pattern_vars(tp: &TriplePattern) -> Vec<Variable> {
 #[cfg(all(test, feature = "filtered-ann"))]
 mod mask_cache_tests {
     use super::*;
-    use sparq_core::dict::Id;
+    use sparq_core::dict::{Id, INLINE_BASE};
+
+    /// [OPUS-4.8] (review #4519, round 5) `INLINE_DOMAIN` restates a `sparq-core` invariant that
+    /// crate does not export, and `run_aux_arms`'s paging backstop is only sound if it is exact:
+    /// too small and an admissible inline id past the bound is never paged to. Pin it against the
+    /// dictionary's own `is_inline` — the last inline id must be inline, the next one must not be.
+    #[test]
+    fn the_inline_domain_matches_the_dictionary() {
+        let last = INLINE_BASE + (INLINE_DOMAIN as Id - 1);
+        assert!(is_inline(last), "id {} must be the last inline id", last);
+        assert!(
+            !is_inline(INLINE_BASE + INLINE_DOMAIN as Id),
+            "the inline sub-domain must hold exactly {} ids",
+            INLINE_DOMAIN
+        );
+    }
 
     /// A constraining sub-BGP `?node <kind> :Car` over the given variable name.
     fn car_constraint(node: &str) -> (Variable, Vec<TriplePattern>) {
