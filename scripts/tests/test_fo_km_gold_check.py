@@ -244,6 +244,72 @@ class TestEntityListGoldPredicate(unittest.TestCase):
                     self.assertFalse(vt.is_entity_list_gold(t["gold_keys"], q), tid)
 
 
+class TestMultiPartGold(unittest.TestCase):
+    """th03 — the MULTI-PART shape: a dict `select` whose parts each carry their own
+    entity list in a dict-shaped `gold_keys`. The per-part `gold_count` check alone let
+    either sub-query return arbitrary entities of the expected cardinality."""
+
+    def setUp(self):
+        self.t = task("th03")
+        self.gold = self.t["gold_keys"]  # {"truth_bearers": [...], "info_bearers": [...]}
+
+    def rows(self, keys):
+        return table(["x"], [[k] for k in keys])[1]
+
+    def test_both_parts_carry_a_checkable_entity_list(self):
+        """Pins the dispatch: neither part is a scalar SENTINEL, so both must be
+        value-checked against their own gold."""
+        for arm, q in self.t["select"].items():
+            self.assertIsInstance(q, dict, arm)
+            for part, sub in q.items():
+                self.assertTrue(vt.is_entity_list_gold(self.gold[part], sub), (arm, part))
+
+    def test_correct_part_entities_pass(self):
+        for part, keys in self.gold.items():
+            self.assertEqual(
+                vt.check_entity_gold("th03", "gufo", self.rows(keys), keys, part=part), [])
+
+    def test_wrong_part_entity_fails_and_names_the_part(self):
+        for part, keys in self.gold.items():
+            wrong = ["surface-not-a-real-thing"] + keys[1:]
+            failures = vt.check_entity_gold("th03", "gufo", self.rows(wrong), keys, part=part)
+            self.assertTrue(any(f"th03/gufo/{part}" in f for f in failures), (part, failures))
+            self.assertTrue(any(keys[0] in f for f in failures), (part, failures))
+
+    def test_parts_are_not_interchangeable(self):
+        """truth_bearers answered with info_bearers' entities is a FAILURE — the gold is
+        per-part, not a union over the task."""
+        failures = vt.check_entity_gold(
+            "th03", "gufo", self.rows(self.gold["info_bearers"]),
+            self.gold["truth_bearers"], part="truth_bearers")
+        self.assertNotEqual(failures, [])
+
+    def test_shipped_part_keys_align(self):
+        for arm, q in self.t["select"].items():
+            self.assertEqual(
+                vt.check_part_keys("th03", arm, q, self.t["gold_count"], self.gold), [])
+
+    def test_missing_gold_entry_for_a_part_is_reported(self):
+        partial = {k: v for k, v in self.gold.items() if k != "info_bearers"}
+        failures = vt.check_part_keys(
+            "th03", "gufo", self.t["select"]["gufo"], self.t["gold_count"], partial)
+        self.assertTrue(
+            any("info_bearers" in f and "no gold_keys entry" in f for f in failures), failures)
+
+    def test_extra_gold_entry_without_a_part_is_reported(self):
+        extra = dict(self.t["gold_count"], phantom_bearers=3)
+        failures = vt.check_part_keys(
+            "th03", "gufo", self.t["select"]["gufo"], extra, self.gold)
+        self.assertTrue(
+            any("phantom_bearers" in f and "no matching select part" in f
+                for f in failures), failures)
+
+    def test_non_dict_gold_keys_is_reported_unchecked(self):
+        failures = vt.check_part_keys(
+            "th03", "gufo", self.t["select"]["gufo"], self.t["gold_count"], ["sentinel"])
+        self.assertTrue(any("UNCHECKED" in f for f in failures), failures)
+
+
 class TestUnparseableTableIsAFailure(unittest.TestCase):
     """An unreadable table must FAIL loudly, never pass as 'nothing to check'."""
 
@@ -312,8 +378,10 @@ def fake_run_factory(overrides: dict | None = None):
     """A `run()` stand-in: answers each query from tasks.jsonl's own gold.
 
     `overrides` maps a task id to a deliberately WRONG result so a test can assert the
-    validator rejects it — either a {category: wrong_value} patch for a dict-of-ints gold
-    (cc03/cc05), or a replacement list of entity local names for an entity-list gold.
+    validator rejects it — a {category: wrong_value} patch for a dict-of-ints gold
+    (cc03/cc05), a replacement list of entity local names for a single-query entity-list
+    gold, or a {part: replacement_list} patch for a MULTI-PART task (th03), which leaves
+    the other part answering its own gold.
     """
     overrides = overrides or {}
     index = {}  # query string -> (task, part)
@@ -344,6 +412,8 @@ def fake_run_factory(overrides: dict | None = None):
         keys = gold_keys[part] if isinstance(gold_keys, dict) else gold_keys
         if isinstance(override, list):
             keys = override
+        elif isinstance(override, dict) and part in override:
+            keys = override[part]
         if vt.is_entity_list_gold(keys, sparql):
             return entity_rows(keys, n)
         return table(["x"], [[f"e{i}"] for i in range(n)])
@@ -409,6 +479,39 @@ class TestEndToEndDispatch(unittest.TestCase):
         self.assertIn("th04", report)
         self.assertIn(gold[0], report)
         self.assertIn("surface-not-a-real-thing", report)
+        self.assertNotIn("expected gold_count", report)
+
+    def test_wrong_th03_part_entity_at_the_right_row_count_fails_validation(self):
+        """MUTATION on the MULTI-PART dispatch path: swap ONE truth_bearers entity for a
+        wrong one, preserving that part's row count (and leaving info_bearers correct).
+
+        Every per-part `gold_count` therefore stays green — asserting no count mismatch
+        was reported is what makes this non-vacuous for the per-part ENTITY invariant.
+        """
+        gold = task("th03")["gold_keys"]["truth_bearers"]
+        mutated = ["surface-not-a-real-thing"] + gold[1:]
+        self.assertEqual(len(mutated), task("th03")["gold_count"]["truth_bearers"])
+        with driven({"th03": {"truth_bearers": mutated}}) as out:
+            with self.assertRaises(SystemExit) as exit_ctx:
+                vt.main()
+        report = out.getvalue()
+        self.assertEqual(exit_ctx.exception.code, 1)
+        self.assertIn("th03", report)
+        self.assertIn("truth_bearers", report)
+        self.assertIn(gold[0], report)
+        self.assertIn("surface-not-a-real-thing", report)
+        self.assertNotIn("expected gold_count", report)
+
+    def test_wrong_th03_info_bearers_entity_fails_validation(self):
+        """The other part is checked independently, not merely the first one."""
+        gold = task("th03")["gold_keys"]["info_bearers"]
+        with driven({"th03": {"info_bearers": ["doc-not-a-real-doc"] + gold[1:]}}) as out:
+            with self.assertRaises(SystemExit) as exit_ctx:
+                vt.main()
+        report = out.getvalue()
+        self.assertEqual(exit_ctx.exception.code, 1)
+        self.assertIn("info_bearers", report)
+        self.assertIn("doc-not-a-real-doc", report)
         self.assertNotIn("expected gold_count", report)
 
     def test_wrong_entity_in_the_pair_shaped_cc04_fails_validation(self):

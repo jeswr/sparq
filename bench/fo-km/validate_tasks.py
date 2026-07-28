@@ -5,9 +5,10 @@
 DISCRIMINATION check: it confirms each task's FO-arm query returns a non-empty answer
 matching the claimed gold — the `gold_count` for a COUNT/row task, PLUS the gold ENTITY
 VALUES when a row-returning task's `gold_keys` names entities (th01/th04/cc01/cc04/th06),
-the per-part count for a multi-part task, the per-CATEGORY values for a dict-of-ints
-`gold_keys` (cc03/cc05) — while the no-FO arm returns 0 / cannot, so the task set genuinely
-differentiates the arms. Every gold shape is dispatched explicitly and an unknown shape
+the per-part count AND per-part entity values for a multi-part task (th03), the
+per-CATEGORY values for a dict-of-ints `gold_keys` (cc03/cc05) — while the no-FO arm
+returns 0 / cannot, so the task set genuinely differentiates the arms. Every gold shape
+is dispatched explicitly and an unknown shape
 FAILS, so a task can never pass merely by returning some non-empty result — nor, for an
 entity-list task, merely by returning the right NUMBER of wrong entities. Run from the
 repo root:
@@ -166,7 +167,7 @@ def is_entity_list_gold(gold_keys, sparql):
     return isinstance(gold_keys, list) and bool(gold_keys) and "COUNT(" not in sparql.upper()
 
 
-def check_entity_gold(tid, arm, data, gold_keys):
+def check_entity_gold(tid, arm, data, gold_keys, part=None):
     """Compare the ENTITIES a row-returning FO arm projected against a list-shaped gold.
 
     `gold_keys` was probed through the same renderer the arms print with (pkg_query.rs's
@@ -178,19 +179,47 @@ def check_entity_gold(tid, arm, data, gold_keys):
     The comparison is on the DISTINCT first-column set rather than the row multiset because
     cc04 projects `?f ?topic` PAIRS — 18 rows over 15 distinct findings. Row cardinality
     stays pinned independently by the `gold_count` check. Returns failure strings.
+
+    `part` names the sub-query for a MULTI-PART task (th03), so its two independent entity
+    comparisons are attributed the same way the per-part count failures are.
     """
+    where = f"{tid}/{arm}/{part}" if part is not None else f"{tid}/{arm}"
     want = set(gold_keys)
     got = {cells(row)[0] for row in data if row.strip()}
     failures = []
     missing, unexpected = sorted(want - got), sorted(got - want)
     if missing:
         failures.append(
-            f"{tid}/{arm}: {len(missing)} gold entity/entities MISSING from the FO arm's "
+            f"{where}: {len(missing)} gold entity/entities MISSING from the FO arm's "
             f"answer: {preview(missing)}")
     if unexpected:
         failures.append(
-            f"{tid}/{arm}: {len(unexpected)} returned entity/entities absent from "
+            f"{where}: {len(unexpected)} returned entity/entities absent from "
             f"gold_keys: {preview(unexpected)}")
+    return failures
+
+
+def check_part_keys(tid, arm, queries, gold_count, gold_keys):
+    """A multi-part task's gold must be keyed EXACTLY like its `select` parts.
+
+    The per-part loop iterates the QUERIES, so a gold entry naming a part that does not
+    exist is silently dropped, and a query part with no gold entry is silently unchecked.
+    Both directions are reported here — once per arm, before the per-part checks — so
+    th03's truth_bearers / info_bearers split cannot drift out of alignment with its gold.
+    Returns failure strings.
+    """
+    failures = []
+    for name, gold in (("gold_count", gold_count), ("gold_keys", gold_keys)):
+        if not isinstance(gold, dict):
+            failures.append(
+                f"{tid}/{arm}: multi-part select needs a dict-shaped {name}, got "
+                f"{type(gold).__name__} — per-part gold UNCHECKED")
+            continue
+        for part in sorted(set(gold) - set(queries)):
+            failures.append(
+                f"{tid}/{arm}: {name} entry '{part}' has no matching select part")
+        for part in sorted(set(queries) - set(gold)):
+            failures.append(f"{tid}/{arm}/{part}: no {name} entry for this part")
     return failures
 
 
@@ -208,6 +237,9 @@ def main():
                 continue  # intentionally-non-applicable arm (e.g. schema.org lacks occurrent)
             # th03/cc05/cc03/th07 etc. may be dict (multi-part) — handle both shapes.
             queries = q if isinstance(q, dict) else {"_": q}
+            if isinstance(q, dict) and isinstance(gold_count, dict):
+                failures.extend(
+                    check_part_keys(tid, arm, queries, gold_count, t["gold_keys"]))
             for part, sub in queries.items():
                 header, data = run(OVERLAY[arm], sub)
                 rows = len(data)
@@ -233,14 +265,21 @@ def main():
                 # info_bearers split) carries a dict-shaped gold_count keyed the same way.
                 # These were previously NOT count-checked at all, which is how a stale gold
                 # (Source 6 -> 71) survived validation while the single-query tasks failed
-                # loudly. Check each part against its own gold.
+                # loudly. Check each part against its own gold — the per-part COUNT, and
+                # (th03's shape) the per-part ENTITY VALUES too: both parts return entity
+                # lists, so a count-only check let either sub-query answer with arbitrary
+                # entities of the right cardinality. Missing/extra part keys are already
+                # reported once per arm by check_part_keys, hence the `in` guards here.
                 elif isinstance(q, dict) and isinstance(gold_count, dict):
-                    if part not in gold_count:
-                        failures.append(f"{tid}/{arm}/{part}: no gold_count entry for this part")
-                    elif answered != gold_count[part]:
+                    if part in gold_count and answered != gold_count[part]:
                         failures.append(
                             f"{tid}/{arm}/{part}: FO arm returned {answered}, "
                             f"expected gold_count {gold_count[part]}")
+                    part_gold = (t["gold_keys"].get(part)
+                                 if isinstance(t["gold_keys"], dict) else None)
+                    if is_entity_list_gold(part_gold, sub):
+                        failures.extend(
+                            check_entity_gold(tid, arm, data, part_gold, part=part))
                 # A PER-CATEGORY task (ONE query, dict-of-ints `gold_keys`: cc03's
                 # event/artifact wide row, cc05's claim/document/method groups). Row count
                 # alone proves nothing here — compare the returned VALUES per category.
