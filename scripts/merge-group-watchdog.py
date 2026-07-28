@@ -79,6 +79,15 @@
 # implemented as dequeue+enqueue, which itself fires `pull_request.dequeued`, and
 # without this arm the watchdog would demote every PR it rescued.
 #
+# ── A DEFENSIVE CONTROL MUST NOT AMPLIFY WHAT IT REJECTS ──────────────────────────
+# Rejecting an untrusted marker emits ONE annotation per PR, never one per marker.
+# Measured the hard way: a per-marker warning against a PR carrying 567 markers
+# produced ~110 KB of log and 567 annotations — past GitHub's annotation cap, burying
+# every other signal in the run. A filter that emits per-item output hands the attacker
+# a log-flood denial of service against its own operator: the cheaper the input is to
+# produce, the louder the defence gets. State the count and the distinct authors; never
+# iterate the payload into the log. (110 KB -> 368 bytes on that same input.)
+#
 # ── the verdict-stripping defect this ALSO has to fix ─────────────────────────────
 # MEASURED on #4709, 2026-07-28 — the dequeue itself takes the verdict down with it:
 #     05:14:56  labeled   review:pass    by sparq-orchestrator[bot]
@@ -696,7 +705,14 @@ class Watchdog:
         recovery_window_seconds: int = DEFAULT_RECOVERY_WINDOW_SECONDS,
         max_recoveries_per_run: int = DEFAULT_MAX_RECOVERIES_PER_RUN,
         dry_run: bool = False,
-        gh: Callable[[list[str]], str] = run_gh,
+        # LATE-BOUND ON PURPOSE. `gh: Callable = run_gh` binds the module function at
+        # DEFINITION time, so a test that patches `merge_group_watchdog.run_gh` does not
+        # change it and the real runner is used anyway. That defect made this suite post
+        # 567 real comments to production PR #4534 during a mutation sweep: main() passes
+        # gh_read= explicitly (late-bound, patched) but let `gh` fall through to the
+        # stale default, so every simulated sweep issued a REAL `gh pr comment`.
+        # None means "resolve at call time", which is what a test patch can reach.
+        gh: Callable[[list[str]], str] | None = None,
         gh_read: Callable[[list[str]], str] | None = None,
         log: Callable[[str], None] = print,
         now: Callable[[], datetime] | None = None,
@@ -716,8 +732,8 @@ class Watchdog:
         self.recovery_window_seconds = recovery_window_seconds
         self.max_recoveries_per_run = max_recoveries_per_run
         self.dry_run = dry_run
-        self.gh = gh
-        self.gh_read = gh_read if gh_read is not None else gh
+        self.gh = gh if gh is not None else run_gh
+        self.gh_read = gh_read if gh_read is not None else self.gh
         self.log = log
         self._now = now or (lambda: datetime.now(timezone.utc))
 

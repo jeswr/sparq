@@ -504,6 +504,29 @@ plan (§5, Beads D/E + H), to be added only after the scripts are proven in manu
 shell script is `bash -n`/`shellcheck` clean and carries a `--dry-run-self-test` (hermetic;
 no network); the Python close-script carries a `--self-test`.
 
+### Hermetic suites must be UNABLE to reach the network — poison the runners <!-- [OPUS-5] #4652 -->
+
+A "hermetic" test suite that merely *intends* to inject fakes is not hermetic. `def __init__(self, ..., gh=run_gh)`
+binds the runner **at definition time**, so patching `module.run_gh` from a test cannot reach it — and a suite
+whose reads were faked while its writes were real posted **567 real comments to a production PR** across a
+mutation sweep (#4652). Two rules follow:
+
+- **Late-bind injected collaborators** (`gh=None` → resolve inside `__init__`), never a module-level default arg.
+- **Poison the real runners at test-module import** so any path that forgets to inject raises instead of
+  reaching the network, and add a test asserting the poison is in place. Restore **every** patched name in
+  `finally` — a block that restored one of two leaked a stale fake into every later test.
+
+**Never exercise a write path against a live production PR/issue.** Use a scratch object you own, or a fixture;
+if a test needs a real remote value, *read* it. And when a probe reports hostile input, **verify the author
+before reporting an exploit** — a false attack report costs twice: unwarranted alarm now, and a discounted
+warning when the real thing arrives.
+
+**Mutation harnesses need a preflight.** A greedy edit silently deleted 15 mutants and the harness reported a
+clean total — a dropped mutant is indistinguishable from a killed one, so the number improves as coverage
+disappears. Fail the sweep outright on a duplicate id or an anchor that no longer exists in the tree, count a
+`SyntaxError` as a broken mutant rather than a kill, and prefer a test-file traceback frame over a crash frame
+(the first failure is arbitrary).
+
 - **`.github/workflows/merge-group-watchdog.yml` + `scripts/merge-group-watchdog.py`**
   (#4652) — the **durable** zero-dispatch merge-group recovery. GitHub occasionally builds a
   merge-group ref and then never dispatches the `merge_group` event for it: **zero

@@ -50,6 +50,57 @@ def _load(module_name: str, filename: str):
 
 mgw = _load("merge_group_watchdog", "merge-group-watchdog.py")
 
+
+# ── THE SUITE MUST NEVER MAKE A REAL `gh` CALL ───────────────────────────────────
+# This is not belt-and-braces; it is a repair. `Watchdog.__init__` used to default
+# `gh=run_gh` as a DEFAULT ARGUMENT, which binds at definition time — so patching
+# `mgw.run_gh` from a test did NOT reach it, and `main(["sweep", ...])` used the REAL
+# runner while its reads were faked. The result: this suite posted **567 real comments
+# to production PR #4534** during a mutation sweep (175 mutants x a few invocations).
+#
+# Poisoning both module-level runners at import makes that class of mistake impossible
+# to repeat SILENTLY: any code path that forgets to inject a fake now raises here
+# instead of reaching the network. A test that needs a runner must inject one.
+class RealGhCallAttempted(AssertionError):
+    """A test tried to invoke the real `gh`. Inject a fake instead."""
+
+
+def _forbidden_gh(argv):
+    raise RealGhCallAttempted(
+        "the test suite attempted a REAL gh call: gh "
+        + " ".join(str(a) for a in argv[:4])
+        + " — inject a fake runner (gh=/gh_read=) instead. See #4652."
+    )
+
+
+# The genuine functions, kept so the two tests that exercise run_gh_read's own
+# exception translation can call it directly rather than the poison.
+_REAL_RUN_GH_READ = mgw.run_gh_read
+
+mgw.run_gh = _forbidden_gh
+mgw.run_gh_read = _forbidden_gh
+
+
+class _NoNetwork:
+    """Swap in fake runners and ALWAYS restore BOTH.
+
+    A finally that restored only `run_gh_read` leaked a stale fake into every later
+    test — which is how the poison tests started failing and how a real runner could
+    be reinstated unnoticed.
+    """
+
+    def __init__(self, gh):
+        self.gh = gh
+
+    def __enter__(self):
+        self._saved = (mgw.run_gh, mgw.run_gh_read)
+        mgw.run_gh = mgw.run_gh_read = self.gh
+        return self.gh
+
+    def __exit__(self, *exc):
+        mgw.run_gh, mgw.run_gh_read = self._saved
+        return False
+
 # The real incident's identifiers (#4652), so the fixtures are not invented shapes.
 BASE = "3cc1bf828c1335577069f5fa65d832c0ae1c8c38"
 HEAD = "1bfb0174f5cc2da1ed9dfe7997b7ab089e7cab26"
@@ -1366,15 +1417,13 @@ class TestEntrypointFailSafe(unittest.TestCase):
         import os
         import tempfile
 
-        original = mgw.run_gh_read
         out = Path(tempfile.mkdtemp()) / "outputs.txt"
         out.write_text("", encoding="utf-8")
         os.environ["GITHUB_OUTPUT"] = str(out)
         try:
-            mgw.run_gh_read = gh_read
-            code = mgw.main(argv)
+            with _NoNetwork(gh_read):
+                code = mgw.main(argv)
         finally:
-            mgw.run_gh_read = original
             os.environ.pop("GITHUB_OUTPUT", None)
         return code, dict(
             line.split("=", 1) for line in out.read_text(encoding="utf-8").splitlines()
@@ -1477,28 +1526,17 @@ class TestSurvivorsFromTheCoverageCensus(unittest.TestCase):
         # THE EXIT-ZERO CLASS. `return 1 if watchdog.sweep() else 0` -> `return 0`
         # survived the whole suite: a later transient would discard an earned hard
         # failure and the run would report success. This has bitten this estate before.
-        import os
-        original = mgw.run_gh_read
         harness = FakeWatchdog.build(suites=0)
         harness.gh.fail_on = ("dequeuePullRequest",)
-        try:
-            mgw.run_gh_read = harness.gh
-            mgw.run_gh = harness.gh
+        with _NoNetwork(harness.gh):
             code = mgw.main(["sweep", "--repo", "sparq-org/sparq"])
-        finally:
-            mgw.run_gh_read = original
         self.assertEqual(code, 1)
 
     def test_sweep_exit_code_is_zero_on_a_clean_sweep(self):
         # The paired control: a healthy queue must NOT red the scheduled run.
-        original = mgw.run_gh_read
         harness = FakeWatchdog.build(suites=8)
-        try:
-            mgw.run_gh_read = harness.gh
-            mgw.run_gh = harness.gh
+        with _NoNetwork(harness.gh):
             code = mgw.main(["sweep", "--repo", "sparq-org/sparq"])
-        finally:
-            mgw.run_gh_read = original
         self.assertEqual(code, 0)
 
     def test_a_failed_recovery_appears_in_the_census(self):
@@ -1571,6 +1609,31 @@ class TestSurvivorsFromTheCoverageCensus(unittest.TestCase):
         self.assertTrue(body.endswith("MGW_DETAIL_EOF\n"), body)
 
 
+class TestTheSuiteCannotTouchTheNetwork(unittest.TestCase):
+    """Guard the guard: the poison above is the only thing standing between this
+    suite and production, so its absence must itself be a test failure."""
+
+    def test_the_module_runners_are_poisoned(self):
+        self.assertIs(mgw.run_gh, _forbidden_gh)
+        self.assertIs(mgw.run_gh_read, _forbidden_gh)
+
+    def test_an_uninjected_watchdog_cannot_reach_the_network(self):
+        # The exact defect: a Watchdog built WITHOUT an injected runner must now fail
+        # loudly rather than silently using the real one.
+        watchdog = mgw.Watchdog("sparq-org/sparq")
+        with self.assertRaises(RealGhCallAttempted):
+            watchdog.queue_entries()
+
+    def test_the_runner_default_is_late_bound(self):
+        # If the default were bound at definition time this would still be the real
+        # runner, which is precisely how 567 comments reached a live PR.
+        self.assertIs(mgw.Watchdog("sparq-org/sparq").gh, _forbidden_gh)
+
+    def test_main_sweep_cannot_reach_the_network_uninjected(self):
+        with self.assertRaises(RealGhCallAttempted):
+            mgw.main(["sweep", "--repo", "sparq-org/sparq"])
+
+
 class TestEntrypointExitContract(unittest.TestCase):
     """Every exit path of `main`, because that is where the exit-zero class hides.
 
@@ -1579,13 +1642,8 @@ class TestEntrypointExitContract(unittest.TestCase):
     """
 
     def _sweep(self, gh):
-        original_read, original_gh = mgw.run_gh_read, mgw.run_gh
-        try:
-            mgw.run_gh_read = gh
-            mgw.run_gh = gh
+        with _NoNetwork(gh):
             return mgw.main(["sweep", "--repo", "sparq-org/sparq"])
-        finally:
-            mgw.run_gh_read, mgw.run_gh = original_read, original_gh
 
     def test_exhausted_transient_is_a_warning_and_exit_zero(self):
         # A periodic idempotent sweep may skip a cycle on a platform 5xx — the next
@@ -1719,7 +1777,7 @@ class TestTelemetryPlumbing(unittest.TestCase):
         try:
             mgw.gh_retry.run_gh_read = fatal
             with self.assertRaises(mgw.GhError):
-                mgw.run_gh_read(["api", "-X", "GET", "repos/x/y"])
+                _REAL_RUN_GH_READ(["api", "-X", "GET", "repos/x/y"])
         finally:
             mgw.gh_retry.run_gh_read = original
 
@@ -1734,7 +1792,7 @@ class TestTelemetryPlumbing(unittest.TestCase):
         try:
             mgw.gh_retry.run_gh_read = exhausted
             with self.assertRaises(mgw.gh_retry.GhTransientExhausted):
-                mgw.run_gh_read(["api", "-X", "GET", "repos/x/y"])
+                _REAL_RUN_GH_READ(["api", "-X", "GET", "repos/x/y"])
         finally:
             mgw.gh_retry.run_gh_read = original
 
