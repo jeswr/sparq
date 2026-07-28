@@ -849,6 +849,11 @@ fn read_offset(path: &Path) -> Result<Option<u64>, SinkError> {
 /// Persists a relay's watermark durably: write a temp file, fsync it, then rename over the
 /// old one, so a crash mid-write leaves the PREVIOUS watermark intact rather than a truncated
 /// file (which would fail closed on the next open).
+///
+/// Every watermark after the first renames over an EXISTING file. `fs::rename` replaces an
+/// existing destination file on all supported platforms (that is its documented contract, not
+/// a Unix-only accident), so the update path needs no platform-specific replace; the
+/// platform-dependent case is renaming *directories*, which this never does.
 fn write_offset(path: &Path, seq: u64) -> Result<(), SinkError> {
     let tmp = path.with_extension(format!("{}.tmp", OFFSET_EXT));
     let body = format!(
@@ -1057,6 +1062,58 @@ mod tests {
                 .expect("open second relay");
         assert_eq!(other.delivered_through_seq(), None);
         assert_eq!(other.pump().expect("pump").delivered, 3);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// The watermark file is REPLACED, not just created: a second pump renames over the
+    /// already-existing offset file, and it is the SECOND value that a reopen observes. (The
+    /// first write goes to a fresh path, so a create-only rename would still pass the
+    /// restart test above while leaving every later watermark stuck at the first one.)
+    #[test]
+    fn a_second_watermark_replaces_the_first_and_survives_a_reopen() {
+        let tmp = scratch("replace");
+        let _ = fs::remove_dir_all(&tmp);
+        let dir = seeded_log(&tmp, ChangeLogConfig::default());
+        let offset_path = dir.join("changesink-repl.offset");
+
+        {
+            // A batch cap of 1 forces three separate watermark writes: create, then replace,
+            // then replace again.
+            let mut relay = BrokerRelay::open(
+                &dir,
+                "repl",
+                RecordingSink::new(),
+                SinkConfig::default().with_max_batch(1),
+            )
+            .expect("open relay");
+            assert_eq!(relay.pump().expect("pump 1").delivered_through_seq, Some(0));
+            assert!(offset_path.is_file(), "the first pump creates the watermark");
+            assert_eq!(relay.pump().expect("pump 2").delivered_through_seq, Some(1));
+            assert_eq!(relay.pump().expect("pump 3").delivered_through_seq, Some(2));
+        } // drop == process restart
+
+        // The on-disk file holds the LAST watermark, and no temp file is left behind.
+        assert!(
+            fs::read_to_string(&offset_path)
+                .expect("read watermark")
+                .contains("delivered-through 2"),
+            "the replaced watermark must hold the newest seq"
+        );
+        assert!(
+            !dir.join("changesink-repl.offset.tmp").exists(),
+            "the temp file is consumed by the rename"
+        );
+
+        // And a reopen resumes from it rather than from the first watermark.
+        let mut reopened =
+            BrokerRelay::open(&dir, "repl", RecordingSink::new(), SinkConfig::default())
+                .expect("reopen relay");
+        assert_eq!(reopened.delivered_through_seq(), Some(2));
+        assert_eq!(
+            reopened.pump().expect("pump after restart").delivered,
+            0,
+            "a replaced watermark must not replay records it already covered"
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 
