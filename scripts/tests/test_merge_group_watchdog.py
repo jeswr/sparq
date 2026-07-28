@@ -541,6 +541,30 @@ class TestMarkerCodec(unittest.TestCase):
         self.assertEqual(parsed.observed, NOW)
         self.assertEqual(parsed.action, "re-enqueue")
 
+    def test_a_non_hex_head_is_rejected_on_an_otherwise_valid_marker(self):
+        # ISOLATED. The earlier fixture also lacked a valid `ref=`, so the newer
+        # self-consistency check rejected it first and the hex guard was never reached
+        # — the mutant that disabled the hex check therefore survived.
+        good = mgw.render_marker(
+            pr=99900001, head=HEAD, base=BASE, ref=REF, suites=0, observed=NOW
+        )
+        self.assertIsNotNone(mgw.parse_marker(good))
+        self.assertIsNone(mgw.parse_marker(good.replace(f"head={HEAD}", "head=nothex")))
+        self.assertIsNone(
+            mgw.parse_marker(good.replace(f"head={HEAD}", "head=" + "g" * 40))
+        )
+        self.assertIsNone(
+            mgw.parse_marker(good.replace(f"head={HEAD}", "head=" + HEAD[:39]))
+        )
+
+    def test_a_nonzero_suite_count_is_rejected_on_an_otherwise_valid_marker(self):
+        good = mgw.render_marker(
+            pr=99900001, head=HEAD, base=BASE, ref=REF, suites=0, observed=NOW
+        )
+        self.assertIsNotNone(mgw.parse_marker(good))
+        for bad in ("suites=1", "suites=8", "suites=-1"):
+            self.assertIsNone(mgw.parse_marker(good.replace("suites=0", bad)), bad)
+
     def test_rejects_malformed(self):
         for body in (
             "",
@@ -2189,7 +2213,18 @@ class TestFeedbackWiring(unittest.TestCase):
         run = _step(self.wf, "feedback", "Preserve the verdict")["run"]
         self.assertIn("gh pr view", run)
         self.assertIn("--json state", run)
-        self.assertIn('"$STATE" != "OPEN"', run)
+        # SHAPE, not substring presence: the guard must compare against OPEN and the
+        # non-open branch must EXIT, before anything mutating runs. A mutant that left
+        # the strings in place while changing what happens survived a presence test.
+        lines = [ln.strip() for ln in run.splitlines()]
+        idx = next(i for i, ln in enumerate(lines) if '"$STATE" != "OPEN"' in ln)
+        branch = lines[idx : idx + 4]
+        self.assertTrue(any(ln == "exit 0" for ln in branch), branch)
+        # ...and it happens before the re-arm / comment, never after.
+        first_mutation = next(
+            i for i, ln in enumerate(lines) if ln.startswith("gh pr merge") or ln.startswith("gh pr comment")
+        )
+        self.assertLess(idx, first_mutation, lines)
 
     def test_every_post_skip_step_carries_the_merged_guard(self):
         # The first step short-circuits a successful-merge dequeue; every later step
