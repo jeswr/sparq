@@ -421,6 +421,37 @@ fn delete_of_asserted_layer_derivable_fact_is_an_ownership_transfer() {
     assert!(g.contains(&[ex("a"), ex("ancestor"), ex("c")]));
     assert_eq!(g.mode(), N3Mode::Counting);
     assert_eq!(g.full_rebuilds(), before, "the insert direction must not rebuild either");
+
+    // BEHAVIOURAL WITNESS for the insert direction (review round 2). Membership + mode +
+    // rebuild count all hold vacuously here: asserting a fact the closure already has adds
+    // nothing to `pending`, so this call propagates nothing and the layer keeps its copy
+    // alongside the new base copy. That double ownership must be INERT — the only way to see
+    // it is to make the two owners disagree. Break the layer's derivation and check the fact
+    // survives on its BASE copy alone, then retract that copy and check nothing else keeps it
+    // alive. A layer entry that were genuinely stale would show up as the fact outliving its
+    // own retraction here.
+    g.delete(&[[ex("a"), ex("parent"), ex("b")]]);
+    assert!(
+        g.contains(&[ex("a"), ex("ancestor"), ex("c")]),
+        "the asserted base copy alone must keep it in the closure"
+    );
+    assert!(
+        !g.contains(&[ex("a"), ex("ancestor"), ex("b")]),
+        "the derivation through the retracted edge is gone"
+    );
+    g.delete(&[[ex("a"), ex("ancestor"), ex("c")]]);
+    assert!(
+        !g.contains(&[ex("a"), ex("ancestor"), ex("c")]),
+        "no owner is left — a stale layer entry would wrongly keep it"
+    );
+    assert_eq!(g.mode(), N3Mode::Counting, "still no fallback");
+    assert_eq!(g.full_rebuilds(), before, "and still no re-materialization");
+    let mirror: FxHashSet<[Term; 3]> = [base[1].clone()].into_iter().collect();
+    let src = format!("{rules}\n{}", serialize(&mirror));
+    let oracle: FxHashSet<[Term; 3]> =
+        reason_n3_terms(&src, None).unwrap().facts.into_iter().collect();
+    let got: FxHashSet<[Term; 3]> = g.closure().into_iter().collect();
+    assert_eq!(got, oracle, "closure must equal the from-scratch oracle");
 }
 
 /// sq-6tykl.6: randomized differential over a schedule that DELIBERATELY asserts facts the
@@ -475,10 +506,19 @@ fn ownership_transfer_deltas_stay_incremental_and_match_from_scratch() {
     let rebuilds = g.full_rebuilds();
 
     let mut transfers = 0usize;
+    let mut insert_transfers = 0usize;
     for batch in 0..150 {
         if rng.below(2) == 0 {
             let n = 1 + rng.below(4);
             let delta: Vec<[Term; 3]> = (0..n).map(|_| gen_fact(&mut rng)).collect();
+            // Count the INSERT direction of the transfer before it happens: an `:ancestor`
+            // fact that is not yet asserted but IS already in the closure. No counted rule
+            // concludes `:ancestor`, so the layer is what currently owns it, and asserting it
+            // moves that ownership to the base.
+            insert_transfers += delta
+                .iter()
+                .filter(|t| t[1] == ex("ancestor") && !base.contains(*t) && g.contains(t))
+                .count();
             g.insert(&delta);
             base.extend(delta);
         } else {
@@ -515,6 +555,14 @@ fn ownership_transfer_deltas_stay_incremental_and_match_from_scratch() {
     assert!(
         transfers > 0,
         "schedule should have exercised the delete direction of the transfer"
+    );
+    // Review round 2: state the insert direction's coverage explicitly rather than leaving it
+    // incidental. The per-batch `full_rebuilds` assertion above is what makes this direction
+    // NON-vacuous — replacing the hand-off branch in `propagate`'s inserting arm with a plain
+    // `removed.is_empty()` bail (its pre-`sq-6tykl.6` behaviour) reds this test at batch 0.
+    assert!(
+        insert_transfers > 0,
+        "schedule should have exercised the insert direction of the transfer"
     );
 }
 

@@ -1479,7 +1479,20 @@ fn tc_pairs(pairs: &FxHashSet<(Id, Id)>) -> FxHashSet<(Id, Id)> {
 //   BOTH asserted and layer-derivable is charged to the base (it seeds the local fixpoint, so
 //   it is excluded from the layer's derived set), so asserting or retracting its base copy
 //   hands ownership over without changing the closure; that hand-off is settled by the same
-//   local layer re-derivation (`sq-6tykl.6`) rather than by a full rematerialization. Counting
+//   local layer re-derivation (`sq-6tykl.6`) rather than by a full rematerialization.
+//   The hand-off is LAZY, and deliberately so: a mutation whose facts are all already settled
+//   (asserting a fact the closure already has; retracting one the layer or a count still
+//   supports) contributes NOTHING to `pending`, so `propagate` recomputes no layer and
+//   `layer_derived` keeps its copy while `base` also holds one. That transient double
+//   ownership is INERT, not stale — `recompute_layer`'s `stale_own` test is guarded by
+//   `!base && !counts`, so while the base copy exists the layer's entry can never suppress a
+//   seed, and the layer's local fixpoint is identical whether the fact arrives as a seed or
+//   as its own derivation. The first recompute that layer does see re-attributes it (the fact
+//   turns up in that round's `removed`, which is exactly what the hand-off branch in
+//   `propagate` absorbs). Nothing in between can observe the difference: the only consult
+//   that reads `layer_derived` without the base guard is `delete`'s `in_any_layer`
+//   short-circuit, and there the entry is accurate — the layer really does still derive the
+//   fact, because a mutation that could have changed that would have hit `pending`. Counting
 //   handles everything outside the SCCs exactly: per derived fact, the count of rule firings
 //   (computed with the classic delta-rewriting: for a delta at plain-atom position i, atoms
 //   before i match the pre-delta store, atom i the delta, atoms after i the post-delta store
