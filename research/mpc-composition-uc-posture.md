@@ -81,10 +81,18 @@ example) composes six stages, each already existing in isolation:
 also runs `compare::disclose_threshold_verdict`, which opens **64** field elements per verdict (61
 square-protocol opens for the Rabbit mask's solved bits, one Rabbit masked open `c = (x+r) mod p`,
 one masked-product zero-test inside the in-protocol range proof, and the verdict bit). Each is
-individually well-masked and one of them is only *statistically* simulatable. The complete open
-inventory, a simulator per open, and the composed error budget are in
+individually well-masked and one of them is only *statistically* simulatable. The open inventory for
+that path, a simulator per open, and the composed error budget are in
 [`mpc-simulator-sketch.md`](./mpc-simulator-sketch.md) §2–§4; §3 of *this* record covers one of the
-five distinct open shapes.
+four distinct open shapes it enumerates.
+
+The same sibling record corrects stage **5** in the other direction: in `pipeline::run_federated`
+step 5 reconstructs **nothing**. The disclosed join result comes from the crypto-free
+`DisclosedKeyJoin` (never secret-shared) and the verdict bit was already opened in step 4, so that
+path never calls `MpcBackend::reconstruct_disclosed`. The stage-5 row above describes the *general*
+disclosed-output shape — real, and reached by other callers — not a step of `run_federated`. Note
+also that the sibling's inventory is scoped to `run_federated` specifically, **not** to every
+production semi-honest API; its §2.4 lists the reconstruction surfaces it excludes.
 
 Load-bearing facts (all `origin/main`): the crate is an **in-process multi-party simulation** (every
 party is a function call — NO real network, NO concurrent sessions, NO broadcast, NO round counter);
@@ -289,8 +297,9 @@ LIVE privacy-claims gate; any ZK/MPC soundness statement stays research-grade / 
   Listed with `sq-wj4k` in the roadmap as "the composition / UC posture design records." This record
   covers the composition-obligations + which-results-apply framing for the MPC pipeline; `sq-aaop`
   took the distinct slice reserved for it — the *formal simulator sketch / paper-grade write-up*
-  (the model, the ideal functionalities with their leakage written out, the complete open inventory
-  with a simulator and simulation quality per open, the hybrid composition with a concrete error
+  (the model, the ideal functionalities with their leakage written out, the open inventory of one
+  fixed entry point — `pipeline::run_federated` — with a simulator and simulation quality per open,
+  the excluded-surface list that bounds that scope, the hybrid composition with a concrete error
   budget, the unfilled-obligation ledger, and `F_prove^{val}` as the functionality-level statement
   of validate-before-prove). One source of truth: it extends this record and does not re-state it.
 - **Surface a `LeakageProfile`.** §2/§3's "carry the leak downstream" obligation wants a machine-readable
