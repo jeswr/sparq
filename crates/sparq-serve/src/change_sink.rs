@@ -620,6 +620,12 @@ pub struct PumpReport {
 /// read the same log independently (each keeps its own watermark); two relays sharing a
 /// consumer name would fight over one watermark and is operator error.
 ///
+/// Durability boundary: each watermark is fsync'd and atomically renamed into place, and on
+/// Unix the containing directory is fsync'd too, so a crash after `pump` returns observes the
+/// watermark it reported. On non-Unix targets a directory cannot be fsync'd, so a crash in
+/// that window can still expose the PREVIOUS watermark and replay its records — which is why
+/// delivery is at-least-once everywhere and consumers must dedupe on `sequenceNumber`.
+///
 /// Drive it from a host thread — never from the writer's commit hook (module docs):
 ///
 /// ```no_run
@@ -846,14 +852,51 @@ fn read_offset(path: &Path) -> Result<Option<u64>, SinkError> {
     Ok(Some(seq))
 }
 
-/// Persists a relay's watermark durably: write a temp file, fsync it, then rename over the
-/// old one, so a crash mid-write leaves the PREVIOUS watermark intact rather than a truncated
-/// file (which would fail closed on the next open).
+/// fsyncs the directory CONTAINING `path`, committing the directory entry a preceding
+/// `create`/`rename` only staged. Syncing a file's CONTENTS does not persist the name that
+/// points at them: on POSIX, without this a crash right after the rename can resurrect the
+/// old directory entry (the previous watermark) or lose a freshly-created one entirely.
+#[cfg(unix)]
+fn sync_parent_dir(path: &Path) -> Result<(), SinkError> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::File::open(parent)?.sync_all()?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_path: &Path) -> Result<(), SinkError> {
+    // Directory fsync is a POSIX notion — a directory cannot be opened as a file here. On
+    // these platforms the watermark's durability is only what the filesystem gives a
+    // replacing rename, which is weaker than the Unix guarantee; a crash in that window can
+    // still expose the previous watermark, so consumers must dedupe on `sequenceNumber`
+    // (which the delivery contract requires regardless).
+    Ok(())
+}
+
+/// Persists a relay's watermark durably: write a temp file, fsync it, rename over the old one,
+/// then fsync the containing directory — so a crash mid-write leaves the PREVIOUS watermark
+/// intact rather than a truncated file (which would fail closed on the next open), and a crash
+/// AFTER this returns observes the new watermark rather than the old one.
+///
+/// The trailing directory fsync is load-bearing, not belt-and-braces: `sync_data` on the temp
+/// file persists only its CONTENTS, while the rename that publishes it under `path` is a
+/// directory-entry change that can still be lost. Without it the durable-resume contract is
+/// unmet and a restart can replay records the broker already confirmed.
 ///
 /// Every watermark after the first renames over an EXISTING file. `fs::rename` replaces an
 /// existing destination file on all supported platforms (that is its documented contract, not
 /// a Unix-only accident), so the update path needs no platform-specific replace; the
 /// platform-dependent case is renaming *directories*, which this never does.
+///
+/// Every reported failure fails SAFE — towards re-delivery, never towards a skipped record. A
+/// failure before the rename cannot have touched `path`, so the previous valid watermark stands.
+/// A failure AT the directory fsync is the one case where `path` already holds the new value
+/// (just not durably); the error still propagates, which stops the caller from advancing its
+/// in-memory watermark, so the worst outcome is re-delivering records a consumer must dedupe
+/// anyway.
 fn write_offset(path: &Path, seq: u64) -> Result<(), SinkError> {
     let tmp = path.with_extension(format!("{}.tmp", OFFSET_EXT));
     let body = format!(
@@ -867,6 +910,7 @@ fn write_offset(path: &Path, seq: u64) -> Result<(), SinkError> {
         file.sync_data()?;
     }
     fs::rename(&tmp, path)?;
+    sync_parent_dir(path)?;
     Ok(())
 }
 
@@ -1114,6 +1158,70 @@ mod tests {
             0,
             "a replaced watermark must not replay records it already covered"
         );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Direct coverage of the durable-replace helper `write_offset` — create, replace, and the
+    /// trailing parent-directory fsync — over a bare directory, with no relay in the way.
+    ///
+    /// HONESTY BOUND: an in-process test cannot establish CRASH durability. Nothing here
+    /// proves the directory entry survives a power cut; only a fault-injection or
+    /// crash-restart harness could, and that is out of scope for a unit test. What this pins
+    /// is the sequence and its error reporting.
+    #[test]
+    fn write_offset_replaces_durably_and_reports_a_failed_sync() {
+        let tmp = scratch("write-offset");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("create scratch dir");
+        let path = tmp.join("direct.offset");
+
+        write_offset(&path, 7).expect("first watermark: create + fsync + rename + dir fsync");
+        assert_eq!(read_offset(&path).expect("read back"), Some(7));
+
+        // The replace path renames over an existing file and re-syncs the directory entry.
+        write_offset(&path, 41).expect("second watermark: replace");
+        assert_eq!(
+            read_offset(&path).expect("read back replaced"),
+            Some(41),
+            "the replaced watermark must hold the newest seq"
+        );
+        assert!(
+            !tmp.join("direct.offset.tmp").exists(),
+            "the temp file is consumed by the rename"
+        );
+
+        // The parent-directory fsync is REACHED, not just defined. A directory that is
+        // writable+searchable but not READABLE still accepts the create and the rename, and
+        // fails only at the `File::open` the sync needs — so this assertion goes red if the
+        // post-rename sync is dropped, which the reopen tests above cannot detect.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let closed = scratch("write-offset-nosync");
+            let _ = fs::remove_dir_all(&closed);
+            fs::create_dir_all(&closed).expect("create scratch dir");
+            let closed_path = closed.join("direct.offset");
+            fs::set_permissions(&closed, fs::Permissions::from_mode(0o300))
+                .expect("drop read permission");
+            // Root bypasses the permission bits, so only assert where the denial is real.
+            if fs::File::open(&closed).is_err() {
+                assert!(
+                    write_offset(&closed_path, 5).is_err(),
+                    "a watermark whose directory entry cannot be fsync'd must be reported"
+                );
+            }
+            let _ = fs::set_permissions(&closed, fs::Permissions::from_mode(0o700));
+            let _ = fs::remove_dir_all(&closed);
+        }
+
+        // A watermark written into a directory that does not exist fails rather than
+        // reporting a durable write it never made.
+        let missing = tmp.join("no-such-dir").join("direct.offset");
+        assert!(
+            write_offset(&missing, 1).is_err(),
+            "a write that cannot be made durable must be reported, not swallowed"
+        );
+
         let _ = fs::remove_dir_all(&tmp);
     }
 
