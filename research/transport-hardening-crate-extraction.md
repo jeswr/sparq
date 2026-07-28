@@ -91,6 +91,25 @@ that triple is the single highest-confidence, lowest-risk win in this whole issu
 | **T3 — service adapter** | `MaxRequestsService`, `MaxRequestsFuture`, `TrackedBody`, `is_upgrade_response` | `tower`, `http`, `http-body` | yes |
 | **T4 — glue** | `TransportConfig` (+ `apply_to_builder`), `ConnectionLimitAcceptor` | `hyper-util`, `axum-server` | `apply_to_builder` yes (behind a `hyper` feature); `ConnectionLimitAcceptor` only behind an `axum-server` feature |
 
+### 2.1 The 35 tests, inventoried by tier
+
+The 35 `#[test]`/`#[tokio::test]` functions in `transport.rs`'s `mod tests` (`:1481–2615`) were read
+and each assigned to the tier of its unit under test. **They do not all belong to T1**, so no single
+phase can migrate all 35 — the split below is what makes §6 disjoint:
+
+| Tier → phase | Count | Tests |
+|---|---|---|
+| **T1 → P0** — parsers | 10 | `h2_max_concurrent_streams_default_on_absent_empty_invalid_or_zero`, `h2_max_concurrent_streams_explicit_positive_is_honoured`, `h2_pending_reset_keeps_hyper_default_unless_positive_override`, `max_connections_default_on_absent_empty_invalid_or_zero`, `max_connections_explicit_positive_is_honoured`, `optional_secs_rules`, `max_connections_per_ip_parse_rules`, `conn_exempt_internal_parse_rules`, `max_requests_per_conn_disabled_on_absent_empty_invalid_or_zero`, `idle_timeout_is_default_off_and_zero_disables` |
+| **T1 → P0** — limiter/per-IP policy | 8 | `connection_limiter_clamps_to_at_least_one_permit`, `connection_limiter_bounds_in_flight_then_recovers`, `connection_limiter_clamps_huge_value_below_semaphore_max`, `per_ip_cap_bounds_a_single_source_and_recovers_on_drop`, `per_ip_cap_isolates_sources`, `per_ip_cap_exempts_internal_ips_by_default`, `per_ip_cap_disabled_admits_everything`, `per_ip_cap_zero_is_clamped_to_one_never_refuses_all` |
+| **T2/T3 → P2** — IO + service | 13 | the five `idle_timeout_stream_*` tests, the six `max_requests_service_*` tests, `tcpstream_peer_ip_is_extracted_for_the_per_source_cap`, `is_upgrade_response_exempts_only_101_not_advisory_upgrade_headers` |
+| **T4 → P3** — builder + acceptor | 3 | `apply_to_builder_does_not_panic_with_timeout_set`, `apply_to_builder_with_disabled_timeouts_does_not_panic`, `acceptor_releases_permit_when_handshake_stalls` |
+| **stays in `sparq-lws-core`** | 1 | `from_env_with_unset_vars_uses_documented_defaults` — asserts the `SOLID_SERVER_*` env wiring, which §3.4 deliberately leaves in the consumer |
+
+Note the parser tests migrate at P0 even for knobs whose *implementation* is T3/T4 (`idle_timeout`,
+`max_requests_per_conn`, the h2 caps): the `parse_*` helpers are `Option<String>`-in, value-out and
+carry no tier dependency. The per-IP tests share a local `pub_ip` helper (`:1797`) that must move
+with them.
+
 The `ENV_*` constants are **not** portable as written: all ten are `SOLID_SERVER_`-prefixed
 (`transport.rs:117–190`), whereas `sparq-server` uses `SPARQ_*`. A general crate must not bake a
 prefix in. See §3.4.
@@ -116,22 +135,44 @@ makes "one crate, three servers" honest rather than a lowest-common-denominator 
 
 ### 3.2 Acceptor-agnostic entry points
 
-`ConnectionLimiter` is *already* acceptor-agnostic — `try_acquire()` / `try_acquire_ip(ip)` return
-guards and know nothing about `Accept`. The coupling is entirely in `ConnectionLimitAcceptor`.
-So the seam is: **keep the guard-returning API as the primary surface**, and ship
+`ConnectionLimiter`'s admission *logic* is already acceptor-agnostic — it works in `IpAddr`s and
+guards and knows nothing about `Accept`. The coupling is entirely in `ConnectionLimitAcceptor`.
+So the seam is: **make the guard-returning API the primary public surface**, and ship
 `ConnectionLimitAcceptor` as one *adapter over* it (feature-gated), with a second documented
 adapter shape for a hand-rolled accept loop:
 
 ```rust
-// hand-rolled loop (sparq-server's four serve fns), inside the accept loop:
-let Some(permit) = limiter.try_acquire() else { continue };          // global cap: shed, don't queue
-let Some(ip_guard) = limiter.try_acquire_ip(remote.ip()) else { continue };  // per-source cap
-let io = PermittedStream::new(IdleTimeoutStream::new(tls_or_tcp, idle, in_flight), permit, ip_guard);
+// hand-rolled loop (sparq-server's four serve fns), inside the accept loop.
+// NB: this is the DESIGN TARGET, not an API that exists today — see the delta below.
+let Some(admit) = limiter.try_admit(peer_addr.map(|a| a.ip())) else { continue }; // shed, don't queue
+let io = PermittedStream::new(IdleTimeoutStream::new(tls_or_tcp, idle, in_flight), admit);
 ```
 
-The API delta for the plain-IO entry point is smaller than it looks: `IdleTimeoutStream::new`
-(`transport.rs:971`) and `MaxRequestsService::new` (`:1237`) are **already `pub`**. Only
-`PermittedStream::new` (`:789`) is private and must be exposed. Everything else already generalises.
+**The API delta is larger than the commissioning premise implies, and it is a real design decision
+that P0 owes, not an incidental `pub` flip.** Verified visibility in `transport.rs` today:
+
+| Item | Site | Today | Needed by P1 |
+|---|---|---|---|
+| `ConnectionLimiter::try_acquire` | `:517` | **private** | yes — global admission |
+| `ConnectionLimiter::try_acquire_ip` | `:482` | **private** | yes — per-source admission |
+| `IpConnGuard::disabled` | `:602` | **private** | yes — the unknown-peer fail-open guard |
+| `PermittedStream::new` | `:789` | **private** | yes — to hold both guards for the connection |
+| `ConnectionLimiter::try_acquire_ip_for_test` | `:525` | `pub`, but `#[doc(hidden)]` | no — a test shim, not a supported cross-crate API |
+| `IdleTimeoutStream::new` | `:971` | `pub` | already fine |
+| `MaxRequestsService::new` | `:1237` | `pub` | already fine |
+
+So **four** private items sit on the P1 path, and today's only public acquisition entry point is a
+`#[doc(hidden)]` test shim. Two shapes are available:
+
+- **(i) One atomic admission method — recommended.** `try_admit(peer: Option<IpAddr>) -> Option<ConnAdmission>`
+  returning both guards in one value. This *encodes* the two load-bearing behaviours named just
+  below (global permit first; unknown peer fails open) instead of documenting them and hoping
+  four hand-rolled call sites get the order right. It also keeps `IpConnGuard::disabled` private.
+- **(ii) Expose the two methods plus a public guard constructor.** More flexible, but it publishes
+  the ordering contract as prose and makes "acquire per-IP before global" a compilable mistake.
+
+Either way this is a **new public API that has never been reviewed**, so P0 must specify it and
+carry its tests (§6), rather than treating it as a mechanical re-export.
 
 Two behaviours the extraction must preserve verbatim, because they are load-bearing and easy to
 lose in a port: the global permit is acquired **fail-fast, outside the async block** (an over-cap
@@ -211,22 +252,30 @@ and in [`docs/upstream-proposals.md`](../docs/upstream-proposals.md). Never mark
 
 Ordered; each is single-crate or single-seam and disjoint from its siblings.
 
-1. **P0 — collapse `is_internal_ip` (crate: new + `sparq-lws-core` + `sparq-http3`).** Create the
-   crate with T1 only (`publish = false`, README, no `std::env`): `is_internal_ip`, the
+1. **P0 — collapse `is_internal_ip` + land the T1 crate (crate: new + `sparq-lws-core` + `sparq-http3`).**
+   Create the crate with T1 only (`publish = false`, README, no `std::env`): `is_internal_ip`, the
    `DEFAULT_MAX_CONNECTIONS` / `DEFAULT_MAX_CONNECTIONS_PER_IP` consts, `ConnectionLimiter`,
-   `IpConnGuard`, the `parse_*` helpers, and the 35 migrated tests. Both existing copies are
-   **deleted**, not deprecated. *Acceptance:* both feature states green; a test asserts the two
-   servers' caps resolve from the same consts.
+   `IpConnGuard`, the `parse_*` helpers, and **the 18 T1 tests of §2.1** (10 parser + 8
+   limiter/per-IP) — the other 17 stay put until their tier moves, because they will not compile
+   against a T1-only crate. P0 also **specifies and reviews the public admission API** of §3.2
+   (shape (i) or (ii)); the four items private today are the point of the bead, not a footnote.
+   Both existing `is_internal_ip` copies are **deleted**, not deprecated. *Acceptance:* both
+   feature states green; the 18 migrated tests pass unchanged; a test asserts the two servers' caps
+   resolve from the same consts; and the new public admission API has a direct unit test for each
+   of — fail-fast global admission (over-cap ⇒ `None`, never awaited), per-IP refusal at the cap,
+   unknown-peer (`None` IP) fail-open, and release of both counters on guard drop.
 2. **P1 — give `sparq-server` the connection cap (crate: `sparq-server`).** Wire T1 into all four
-   serve entry points via the guard API of §3.2. This is the security fix, and it is deliberately
-   ordered before the IO/service tiers so the gap closes even if the rest stalls. *Acceptance:* an
-   over-cap connection is shed (not queued); unknown peer IP fails open; defaults chosen so the
+   serve entry points via the public admission API P0 shipped. This is the security fix, and it is
+   deliberately ordered before the IO/service tiers so the gap closes even if the rest stalls.
+   *Acceptance:* an over-cap connection is shed (not queued); unknown peer IP fails open; a
+   per-source-capped IP is refused while a second IP is still admitted; defaults chosen so the
    conformance harness cannot trip them.
 3. **P2 — move T2/T3 (crate: new + `sparq-lws-core`).** `IdleTimeoutStream`, `PermittedStream`,
    `InFlightGuard`, `PeerAddr`, `MaxRequestsService`, `TrackedBody` move behind the `io` /
-   `service` features; `new()` constructors become `pub`; the four `PeerCertDer`/`TlsExporter`
-   impls move to `pop/conn.rs` per §3.3. *Acceptance:* the mTLS Tier-1b and DPoP-SK paths still
-   read cert/exporter through both wrappers (existing tests must cover this — if they do not,
+   `service` features, **with the 13 T2/T3 tests of §2.1**; `new()` constructors become `pub`; the
+   four `PeerCertDer`/`TlsExporter` impls move to `pop/conn.rs` per §3.3. *Acceptance:* those 13
+   tests pass in the new crate under `--features io,service`; the mTLS Tier-1b and DPoP-SK paths
+   still read cert/exporter through both wrappers (existing tests must cover this — if they do not,
    adding that test is part of this bead).
 4. **P3 — move T4 and re-point `sparq-lws-core` (crate: new + `sparq-lws-core`).**
    `TransportConfig` (env-free) + `apply_to_builder` behind `hyper`, `ConnectionLimitAcceptor`
@@ -279,9 +328,12 @@ The acceptance criterion asks for "a mutation tripwire or test". Be honest about
 
 - **Upstream API state is unverified** (§5) — no network access in this environment. Treat the
   "two missing knobs" claim as sourced to the in-tree pin only.
-- **Test-migration cost is estimated, not measured.** `transport.rs` carries 35 test functions;
-  how many depend on `sparq-lws-core` fixtures rather than on the units under test was not audited
-  line-by-line. P0/P2 should re-check before sizing.
+- **The test split is inventoried but not compiled.** All 35 test functions were read and assigned
+  to a tier by their unit under test (§2.1), and none depends on a `sparq-lws-core` domain fixture —
+  they use `parse_*`, `ConnectionLimiter`, the wrappers, and tokio/http/tower directly. What is
+  *not* verified is that each subset compiles once split: the module is one `mod tests { use
+  super::*; }` block, so shared `use` items and helpers (e.g. `pub_ip`, `:1797`) have to be
+  partitioned along with the tests. Expect per-phase import churn, not per-phase rewrites.
 - **No behaviour of this design was executed.** Nothing here has been compiled; the seam is argued
   from the source, not demonstrated. The first bead to touch code should expect at least one
   surprise in the `Accept` trait bounds (`transport.rs:680–688` carries a five-parameter
