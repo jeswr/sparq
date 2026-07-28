@@ -196,11 +196,24 @@ CRON_DELIVERY_FLOOR = 0.60
 # queue event. Both figures were produced by the contaminated estimator above, and the
 # "real event" was those seven `run_attempt: 2` re-runs. That evidence is retracted.
 #
-# RE-DERIVED 2026-07-28 with the decontaminated estimator, over the completed-run corpus
-# restricted to `run_attempt == 1` (so no re-run can enter it) and with every re-run's
-# TRUE wait resolved against its own `/attempts/{n}` record:
-#   sparq-org/sparq               N=CORPUS_SPARQ_N   over 15 min: CORPUS_SPARQ_OVER
-#   jeswr/agent-account-registry  N=CORPUS_REG_N   over 15 min: CORPUS_REG_OVER
+# RE-DERIVED 2026-07-28 with the decontaminated estimator, over a per-workflow scan (the
+# repo-wide `actions/runs` listing hard-caps at 1000), splitting on `run_attempt` and
+# resolving every re-run's TRUE wait against its own `/attempts/{n}` record:
+#
+#                                          sparq-org/sparq   jeswr/agent-account-registry
+#   completed runs scanned                          35,128                          9,062
+#   contaminated estimator, over 15 min                  7                              6
+#     ... of which are RE-RUNS                     7 (ALL)                        6 (ALL)
+#   DECONTAMINATED (run_attempt == 1)               35,070                          9,053
+#     over 15 min                                        0                              0
+#     with ANY non-zero wait at all                      0                              0
+#     maximum observed wait                           0.0s                           0.0s
+#   re-runs resolved per-attempt                        58                              9
+#     over 15 min                                        0                              0
+#     true maximum wait                              -1.0s                          -1.0s
+#
+# Every single row the old estimator flagged, on BOTH repos, was a re-run artefact. Across
+# 44,190 completed runs there is not ONE attempt whose own queue wait was even non-zero.
 #
 # SO M2 HAS NO VALIDATED KNOWN POSITIVE. There is no run in either observed corpus that
 # this mode would have fired on. That is stated plainly rather than papered over, and it

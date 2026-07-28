@@ -318,8 +318,8 @@ class TestM2QueueWait(unittest.TestCase):
     def test_the_queue_threshold_stays_inside_its_validated_band(self):
         """A literal band, not derived from the constant. The previously-stated 0.022% /
         0.153% false-positive figures are WITHDRAWN (they were computed with the
-        contaminated estimator); the re-derived rate is 0 over N=9,053 attempt-1 registry
-        runs, which constrains this constant from below only."""
+        contaminated estimator); the re-derived rate is 0 over 44,190 attempt-1 runs
+        across both repos, which constrains this constant from below only."""
         self.assertEqual(alarm.QUEUE_MAX_WAIT_SECONDS, 15 * 60)
         self.assertGreaterEqual(alarm.QUEUE_MAX_WAIT_SECONDS, 5 * 60)
         self.assertLessEqual(alarm.QUEUE_MAX_WAIT_SECONDS, 30 * 60)
