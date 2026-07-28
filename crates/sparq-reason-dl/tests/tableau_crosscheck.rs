@@ -47,10 +47,15 @@
 // NON-VACUITY. Budget exhaustion is a legitimate fail-closed abstention, so an `Unknown`
 // iteration is skipped rather than failed — which would let the whole suite pass
 // vacuously if the tableau ever started abstaining everywhere. Every test therefore ends by
-// asserting a COVERAGE FLOOR. Arm (1): enough iterations decided, and the oracle both DID
-// and DID NOT find a model often enough (otherwise the generator is emitting only
-// trivially-consistent ontologies and the assertion never bites). Arm (2): enough iterations
-// decided, and both `Satisfiable` and `Unsatisfiable` observed.
+// asserting a COVERAGE FLOOR. Arm (1): enough iterations decided, plus — counted SEPARATELY
+// for each of the two APIs it cross-checks, `consistency` and `class_satisfiability` — the
+// oracle both DID and DID NOT exhibit a witness often enough (otherwise the generator is
+// emitting only trivially-consistent ontologies, or only trivially-inhabited classes, and
+// that API's assertion never bites). The split matters: a single shared floor would let the
+// class-satisfiability assertion go unexercised while the ontology-model counters still
+// cleared it, so a tableau answering `Unsatisfiable` to every class query would go
+// unchallenged. Arm (2): enough iterations decided, and both `Satisfiable` and
+// `Unsatisfiable` observed.
 
 use sparq_reason_dl::model::{Axiom, ClassExpression as CE, ObjectPropertyExpression as OPE};
 use sparq_reason_dl::tableau::{class_satisfiability, consistency, Budget, Verdict};
@@ -426,10 +431,32 @@ fn desugar(axiom: &Axiom) -> Vec<Axiom> {
 // Arm 1 — cross-check against the independent model oracle
 // -------------------------------------------------------------------------------------------
 
-/// Runs both signatures through the oracle and returns `(decided, models_found, no_model)`.
-fn crosscheck(sig: &Sig, seed: u64, iterations: usize, max_n: usize) -> (usize, usize, usize) {
+/// How often each oracle arm actually bit, so the floors below can prove non-vacuity
+/// SEPARATELY for the two APIs under cross-check.
+///
+/// The two arms are counted apart on purpose: a floor on the ontology-model arm alone would
+/// let the class-satisfiability assertion go silently unexercised (a generator drifting
+/// towards empty classes, or a witness search rendered ineffective, would leave a tableau
+/// that answers `Unsatisfiable` to every class query unchallenged while `decided` /
+/// `onto_model` / `onto_no_model` all still cleared their floors).
+#[derive(Default)]
+struct Coverage {
+    /// Iterations where BOTH verdicts were decided (neither abstained on budget).
+    decided: usize,
+    /// `consistency` arm: the oracle exhibited a model of the ontology.
+    onto_model: usize,
+    /// `consistency` arm: no model within the domain bound.
+    onto_no_model: usize,
+    /// `class_satisfiability` arm: the oracle exhibited a model with a non-empty class.
+    class_witness: usize,
+    /// `class_satisfiability` arm: no such witness within the domain bound.
+    class_no_witness: usize,
+}
+
+/// Runs one signature through the oracle and returns the per-arm [`Coverage`].
+fn crosscheck(sig: &Sig, seed: u64, iterations: usize, max_n: usize) -> Coverage {
     let mut rng = Rng::new(seed);
-    let (mut decided, mut found, mut not_found) = (0usize, 0usize, 0usize);
+    let mut cov = Coverage::default();
 
     for iter in 0..iterations {
         let onto = gen_ontology(&mut rng, sig, 4);
@@ -441,7 +468,7 @@ fn crosscheck(sig: &Sig, seed: u64, iterations: usize, max_n: usize) -> (usize, 
         // A model the oracle can EXHIBIT refutes `Unsatisfiable` — the tableau would be
         // unsound (module docs §4). `Unknown` is a legitimate fail-closed abstention.
         if oracle(sig, &onto, None, max_n) {
-            found += 1;
+            cov.onto_model += 1;
             assert_ne!(
                 v_onto,
                 Verdict::Unsatisfiable,
@@ -451,10 +478,11 @@ fn crosscheck(sig: &Sig, seed: u64, iterations: usize, max_n: usize) -> (usize, 
                 onto
             );
         } else {
-            not_found += 1;
+            cov.onto_no_model += 1;
         }
 
         if oracle(sig, &onto, Some(&class), max_n) {
+            cov.class_witness += 1;
             assert_ne!(
                 v_class,
                 Verdict::Unsatisfiable,
@@ -464,36 +492,90 @@ fn crosscheck(sig: &Sig, seed: u64, iterations: usize, max_n: usize) -> (usize, 
                 class,
                 onto
             );
+        } else {
+            cov.class_no_witness += 1;
         }
 
         if !v_onto.is_unknown() && !v_class.is_unknown() {
-            decided += 1;
+            cov.decided += 1;
         }
     }
-    (decided, found, not_found)
+    cov
 }
 
 #[test]
 fn oracle_never_contradicts_an_unsatisfiable_verdict_wide() {
     // Two roles + two individuals (role hierarchy + no-UNA ABox), domain ≤ 2.
-    let (decided, found, not_found) = crosscheck(&WIDE, 0x5EED_0001, 120, 2);
-    assert!(decided >= 90, "too few decided cases ({}) — test near-vacuous", decided);
-    assert!(found >= 20, "oracle exhibited a model in only {} cases", found);
+    let cov = crosscheck(&WIDE, 0x5EED_0001, 120, 2);
     assert!(
-        not_found >= 5,
+        cov.decided >= 90,
+        "too few decided cases ({}) — test near-vacuous",
+        cov.decided
+    );
+
+    // `consistency` arm.
+    assert!(
+        cov.onto_model >= 20,
+        "oracle exhibited a model in only {} cases",
+        cov.onto_model
+    );
+    assert!(
+        cov.onto_no_model >= 5,
         "oracle found a model in all but {} cases — the generator is producing only \
          trivially-consistent ontologies",
-        not_found
+        cov.onto_no_model
+    );
+
+    // `class_satisfiability` arm — floored SEPARATELY, so this API's oracle assertion is
+    // demonstrably exercised rather than riding on the ontology arm's coverage.
+    assert!(
+        cov.class_witness >= 20,
+        "oracle exhibited a non-empty generated class in only {} cases — the class-\
+         satisfiability assertion is near-vacuous",
+        cov.class_witness
+    );
+    assert!(
+        cov.class_no_witness >= 5,
+        "oracle witnessed a non-empty class in all but {} cases — the generator is producing \
+         only trivially-inhabited classes",
+        cov.class_no_witness
     );
 }
 
 #[test]
 fn oracle_never_contradicts_an_unsatisfiable_verdict_deep() {
     // One role + one individual, domain ≤ 3 — deep enough to need blocking.
-    let (decided, found, not_found) = crosscheck(&DEEP, 0x5EED_0002, 60, 3);
-    assert!(decided >= 45, "too few decided cases ({}) — test near-vacuous", decided);
-    assert!(found >= 10, "oracle exhibited a model in only {} cases", found);
-    assert!(not_found >= 2, "oracle never failed to find a model ({})", not_found);
+    let cov = crosscheck(&DEEP, 0x5EED_0002, 60, 3);
+    assert!(
+        cov.decided >= 45,
+        "too few decided cases ({}) — test near-vacuous",
+        cov.decided
+    );
+
+    // `consistency` arm.
+    assert!(
+        cov.onto_model >= 10,
+        "oracle exhibited a model in only {} cases",
+        cov.onto_model
+    );
+    assert!(
+        cov.onto_no_model >= 2,
+        "oracle never failed to find a model ({})",
+        cov.onto_no_model
+    );
+
+    // `class_satisfiability` arm — see the WIDE test for why this is floored separately.
+    assert!(
+        cov.class_witness >= 10,
+        "oracle exhibited a non-empty generated class in only {} cases — the class-\
+         satisfiability assertion is near-vacuous",
+        cov.class_witness
+    );
+    assert!(
+        cov.class_no_witness >= 2,
+        "oracle never failed to witness a non-empty class ({})",
+        cov.class_no_witness
+    );
 }
 
 // -------------------------------------------------------------------------------------------
