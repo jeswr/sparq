@@ -58,6 +58,7 @@ tokens); consumer-side verification documentation.
 | `controls.md` | The control spine: SLSA Build L1→L3 + Source/Verification controls, each → status (IV/AR/GAP) → evidence (file/CI-job) → owner. The honest per-artifact level table. |
 | `evidence.md` | The verifiable evidence pack — exact workflow snippets + the `gh attestation verify` / `cargo audit bin` / `cargo vet` commands an auditor runs. |
 | `gap-register.md` | Open gaps (GX-8/9/10/11), severity, remediation, target, the `bd` bead each tracks. |
+| `trusted-builder-pin-policy.md` | The review/bump policy for `slsa-github-generator`'s tag pin — the one deliberate exception to the repo's SHA-pin convention (#4572): why the tag *is* the trust anchor, the Dependabot posture that keeps a bot from moving it, the quarterly review cadence + owner, the bump checklist, and the review log. |
 | `reproducible-build.md` | The GX-8 reproducible-build evidence (cross-cutting with cra/sbom/ssdf/openssf): the measured double-build diff, the single named non-determinism source, the scoped remediation, the auditor quick-run. |
 
 ## Status summary (for `compliance/README.md`)

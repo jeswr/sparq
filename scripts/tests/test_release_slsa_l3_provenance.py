@@ -61,6 +61,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 RELEASE = REPO_ROOT / ".github" / "workflows" / "release.yml"
 BUILD_MATRIX = REPO_ROOT / ".github" / "workflows" / "build-matrix.yml"
 DIST = REPO_ROOT / ".github" / "workflows" / "dist.yml"
+# [OPUS-5] #4572 — the pin-POLICY half of the contract (see `check_pin_policy` below).
+DEPENDABOT = REPO_ROOT / ".github" / "dependabot.yml"
+PIN_REVIEW = REPO_ROOT / ".github" / "workflows" / "slsa-builder-pin-review.yml"
+PIN_POLICY_DOC = REPO_ROOT / "compliance" / "slsa" / "trusted-builder-pin-policy.md"
 
 # The trusted reusable builder, referenced by an immutable semver tag. `@<40-hex>` is REJECTED —
 # see the header: a SHA reference produces provenance with no resolvable builder identity.
@@ -473,6 +477,152 @@ def check(release_text: str, matrix_text: str, dist_text: str) -> list[str]:
 
 
 # --------------------------------------------------------------------------------------
+# [OPUS-5] #4572 — THE PIN POLICY. `check` above proves each lane is on *a* semver tag. That
+# leaves three ways the deliberate-tag exception decays, none of which `check` can see:
+#
+#   1. THE LANES DRIFT APART. Two lanes on different tags means one release carrying provenance
+#      from two different builder identities — each lane individually still satisfies `check`.
+#   2. DEPENDABOT MOVES IT ANYWAY. The `github-actions` ecosystem tracks reusable-workflow
+#      `uses:` references, so without an `ignore` entry the pin is swept into the weekly grouped
+#      PR and the trust decision is taken by a bot. The entry itself has two failure modes worth
+#      naming: a glob that misses the `owner/repo/.github/workflows/<file>.yml` name form does
+#      nothing at all, and a BARE entry with no `update-types` overshoots and silences SECURITY
+#      updates for the builder too.
+#   3. THE CADENCE EVAPORATES. The exception is only safe because something reviews it; deleting
+#      a `schedule:` trigger or the policy record leaves the pin ageing with no owner and no
+#      alert — and, unlike a broken gate, nothing ever goes red.
+#
+# All three are one-line edits that read as tidying. Pinned here, mutation-proved below.
+# --------------------------------------------------------------------------------------
+BUILDER_USES = re.compile(
+    r"^\s*uses:\s*slsa-framework/slsa-github-generator/\.github/workflows/"
+    r"generator_generic_slsa3\.yml@(\S+)\s*$",
+    re.M,
+)
+# release.yml#provenance, release.yml#provenance-artifacts, dist.yml#provenance.
+EXPECTED_LANES = 3
+GENERATOR_REPO = "slsa-framework/slsa-github-generator"
+REQUIRED_IGNORE_TYPES = {
+    "version-update:semver-patch",
+    "version-update:semver-minor",
+    "version-update:semver-major",
+}
+
+_IGNORE_NAME = re.compile(r'^(\s*)-\s*dependency-name:\s*"?([^"\s]+)"?\s*$')
+_IGNORE_TYPE = re.compile(r'^\s*-\s*"?(version-update:semver-\w+)"?\s*$')
+
+
+def dependabot_ignore_entries(text: str) -> list[tuple[str, set[str]]]:
+    """`(dependency-name, {update-types})` for every `ignore:` entry in dependabot.yml.
+
+    Stdlib-only for the same reason the rest of this file is (see the header). An entry's block
+    ends at the next `- dependency-name:` or the first dedent to its own indent or shallower.
+    """
+    lines = [ln for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+    entries: list[tuple[str, set[str]]] = []
+    i = 0
+    while i < len(lines):
+        m = _IGNORE_NAME.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        indent, name = len(m.group(1)), m.group(2)
+        types: set[str] = set()
+        j = i + 1
+        while j < len(lines):
+            nxt = lines[j]
+            if _IGNORE_NAME.match(nxt) or len(nxt) - len(nxt.lstrip()) <= indent:
+                break
+            t = _IGNORE_TYPE.match(nxt)
+            if t:
+                types.add(t.group(1))
+            j += 1
+        entries.append((name, types))
+        i = j
+    return entries
+
+
+def check_pin_policy(
+    release_text: str,
+    dist_text: str,
+    dependabot_text: str,
+    review_text: str,
+    policy_doc_present: bool,
+) -> list[str]:
+    bad: list[str] = []
+
+    # --- 1. one tag, every lane.
+    refs = BUILDER_USES.findall(release_text) + BUILDER_USES.findall(dist_text)
+    if len(refs) != EXPECTED_LANES:
+        bad.append(
+            f"expected {EXPECTED_LANES} trusted-builder call sites (release.yml x2, dist.yml x1); "
+            f"found {len(refs)}: {refs!r}"
+        )
+    if len(set(refs)) > 1:
+        bad.append(
+            f"the trusted-builder lanes are pinned to DIFFERENT tags ({sorted(set(refs))!r}) — "
+            "one release would carry provenance from two builder identities"
+        )
+
+    # --- 2. Dependabot must not move the pin, and must still deliver security updates.
+    entries = [e for e in dependabot_ignore_entries(dependabot_text) if e[0].startswith(GENERATOR_REPO)]
+    if not entries:
+        bad.append(
+            f"dependabot.yml has no `ignore` entry for {GENERATOR_REPO} — the tag would be swept "
+            "into the weekly grouped actions PR, making the builder-identity change a bot decision"
+        )
+    for name, types in entries:
+        if not name.endswith("*"):
+            bad.append(
+                f"the dependabot ignore glob {name!r} must end with `*` — a reusable-workflow "
+                "reference can surface under the full `owner/repo/.github/workflows/<f>.yml` name, "
+                "and a glob that misses that form silences nothing"
+            )
+        if not types:
+            bad.append(
+                f"the dependabot ignore entry for {name!r} lists no `update-types` — a bare entry "
+                "also suppresses SECURITY updates for the builder, which is not the policy"
+            )
+        elif not REQUIRED_IGNORE_TYPES.issubset(types):
+            bad.append(
+                f"the dependabot ignore entry for {name!r} must cover every version-update type "
+                f"({sorted(REQUIRED_IGNORE_TYPES)!r}); found {sorted(types)!r} — an uncovered type "
+                "is a blind bump waiting to happen"
+            )
+
+    # --- 3. the review cadence that makes the deliberate-tag exception safe.
+    if not policy_doc_present:
+        bad.append(
+            "compliance/slsa/trusted-builder-pin-policy.md is gone — the pin's owner, cadence and "
+            "bump checklist are the only thing standing behind the SHA-pin exception"
+        )
+    if not review_text.strip():
+        bad.append(
+            ".github/workflows/slsa-builder-pin-review.yml is gone — nothing would notice the pin "
+            "ageing (Dependabot is deliberately ignored for it)"
+        )
+    else:
+        if not re.search(r"^\s*schedule:\s*$", review_text, re.M) or "cron:" not in review_text:
+            bad.append(
+                "slsa-builder-pin-review.yml has no `schedule:`/`cron:` — a dispatch-only reminder "
+                "is not a cadence, and its removal is otherwise invisible"
+            )
+        if GENERATOR_REPO not in review_text:
+            bad.append(
+                f"slsa-builder-pin-review.yml no longer references {GENERATOR_REPO} — it is not "
+                "reviewing the pin it exists for"
+            )
+        # `\s*(#.*)?$` — the permission line carries a trailing rationale comment, as every
+        # permission line in this repo's workflows does.
+        if not re.search(r"^\s*issues:\s*write\s*(#.*)?$", review_text, re.M):
+            bad.append(
+                "slsa-builder-pin-review.yml needs `issues: write` — without it the review it "
+                "performs reaches nobody"
+            )
+    return bad
+
+
+# --------------------------------------------------------------------------------------
 # Mutations: each must make `check` fail. A mutation that no longer applies (the anchor text
 # vanished) is itself a failure — it means the contract moved and this table stopped testing it.
 # --------------------------------------------------------------------------------------
@@ -642,12 +792,103 @@ MUTATIONS = {
 }
 
 
+# --------------------------------------------------------------------------------------
+# [OPUS-5] #4572 — the same discipline for `check_pin_policy`. State is the 5-tuple
+# (release, dist, dependabot, review, policy_doc_present).
+# --------------------------------------------------------------------------------------
+_PIN_FIELDS = ("release", "dist", "dependabot", "review")
+
+
+def _pin_sub(field: str, old: str, new: str):
+    def apply(state: tuple):
+        idx = _PIN_FIELDS.index(field)
+        texts = list(state)
+        if old not in texts[idx]:
+            raise AssertionError(f"mutation anchor not found in {field}: {old!r}")
+        texts[idx] = texts[idx].replace(old, new, 1)
+        return tuple(texts)
+
+    return apply
+
+
+def _drop_policy_doc(state: tuple):
+    return state[:4] + (False,)
+
+
+PIN_POLICY_MUTATIONS = {
+    # PP1 — one lane bumped on its own: every lane still passes `check`, but a single release
+    # would then carry provenance from two different builder identities.
+    "one lane bumped to a different tag": _pin_sub(
+        "dist", "generator_generic_slsa3.yml@v2.1.0", "generator_generic_slsa3.yml@v9.9.9"
+    ),
+    # PP2 — a lane quietly reverts to in-band attestation, so there is nothing to keep in sync.
+    "a trusted-builder lane disappears": _pin_sub(
+        "dist",
+        "uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0",
+        "uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373",
+    ),
+    # PP3 — the ignore entry is repointed, so Dependabot resumes bumping the trust anchor.
+    "dependabot stops ignoring the generator": _pin_sub(
+        "dependabot",
+        '- dependency-name: "slsa-framework/slsa-github-generator*"',
+        '- dependency-name: "some-other/action*"',
+    ),
+    # PP4 — the glob loses its wildcard: still looks like an ignore, may match no dependency name
+    # Dependabot ever reports for a reusable workflow.
+    "the ignore glob loses its wildcard": _pin_sub(
+        "dependabot",
+        '- dependency-name: "slsa-framework/slsa-github-generator*"',
+        '- dependency-name: "slsa-framework/slsa-github-generator"',
+    ),
+    # PP5 — a version-update type slips out of the list; major bumps flow again. The anchor is
+    # the full three-line list, because the neighbouring dtolnay entry ends with the same
+    # `semver-major` line and a one-line anchor would mutate THAT entry instead — a mutation
+    # that changes the wrong thing proves nothing.
+    "the ignore stops covering major bumps": _pin_sub(
+        "dependabot",
+        '          - "version-update:semver-patch"\n'
+        '          - "version-update:semver-minor"\n'
+        '          - "version-update:semver-major"\n',
+        '          - "version-update:semver-patch"\n'
+        '          - "version-update:semver-minor"\n',
+    ),
+    # PP6 — "simplifying" the entry to a bare dependency-name, which OVERSHOOTS: it suppresses
+    # security updates for the builder as well. Reads as noise-removal in review.
+    "the ignore entry loses its update-types list": _pin_sub(
+        "dependabot",
+        '- dependency-name: "slsa-framework/slsa-github-generator*"\n'
+        "        update-types:\n"
+        '          - "version-update:semver-patch"\n'
+        '          - "version-update:semver-minor"\n'
+        '          - "version-update:semver-major"\n',
+        '- dependency-name: "slsa-framework/slsa-github-generator*"\n',
+    ),
+    # PP7 — the reminder becomes dispatch-only: the cadence is gone and nothing ever reds.
+    "the quarterly review loses its schedule": _pin_sub(
+        "review",
+        '  schedule:\n    - cron: "37 6 1 1,4,7,10 *"\n  workflow_dispatch:',
+        "  workflow_dispatch:",
+    ),
+    # PP8 — the policy record is deleted; the SHA-pin exception loses its owner and rationale.
+    "the pin policy record is deleted": _drop_policy_doc,
+}
+
+
 class TestSlsaL3IsolationContract(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.release = RELEASE.read_text(encoding="utf-8")
         cls.matrix = BUILD_MATRIX.read_text(encoding="utf-8")
         cls.dist = DIST.read_text(encoding="utf-8")
+        cls.dependabot = DEPENDABOT.read_text(encoding="utf-8")
+        cls.review = PIN_REVIEW.read_text(encoding="utf-8") if PIN_REVIEW.exists() else ""
+        cls.pin_state = (
+            cls.release,
+            cls.dist,
+            cls.dependabot,
+            cls.review,
+            PIN_POLICY_DOC.exists(),
+        )
 
     def test_contract_holds(self):
         failures = check(self.release, self.matrix, self.dist)
@@ -665,6 +906,29 @@ class TestSlsaL3IsolationContract(unittest.TestCase):
                 )
                 self.assertNotEqual(
                     check(*mutated),
+                    [],
+                    f"mutation {name!r} was NOT caught — the assertion covering it is vacuous",
+                )
+
+    # ---- [OPUS-5] #4572: the tag-pin review/bump policy. ----
+    def test_pin_policy_holds(self):
+        failures = check_pin_policy(*self.pin_state)
+        self.assertEqual(
+            failures,
+            [],
+            "SLSA trusted-builder pin policy violated:\n  - " + "\n  - ".join(failures),
+        )
+
+    def test_every_pin_policy_mutation_is_caught(self):
+        """Non-vacuity: each way the deliberate-tag exception decays must red this gate."""
+        for name, mutate in PIN_POLICY_MUTATIONS.items():
+            with self.subTest(mutation=name):
+                mutated = mutate(self.pin_state)
+                self.assertNotEqual(
+                    mutated, self.pin_state, f"mutation {name!r} changed nothing"
+                )
+                self.assertNotEqual(
+                    check_pin_policy(*mutated),
                     [],
                     f"mutation {name!r} was NOT caught — the assertion covering it is vacuous",
                 )
