@@ -42,15 +42,20 @@ tower = "0.5"
 # stack. PEM cert/key are loaded from file paths via `RustlsConfig::from_pem`. Config-gated: only
 # linked into the serve path when both TLS env vars are set (plain TCP otherwise).
 # Declared for native targets below.
-# PoP Tier-1b (mTLS-bound tokens, `SOLID_SERVER_MTLS_BOUND_TOKENS=1`). BOTH crates are ALREADY resolved
-# in the tree (transitively via axum-server's tls-rustls stack + the dev TLS tests), so promoting them
-# to non-dev [dependencies] adds NO new crate to the build — it only makes the existing types nameable
-# from this crate's mTLS serve path. `rustls-pemfile` parses the PEM cert-chain + key into the DER
-# types `ServerConfig::builder().with_client_cert_verifier(..).with_single_cert(..)` needs (the mTLS
-# path can't use axum-server's `RustlsConfig::from_pem`, which hard-codes `with_no_client_auth`).
-# `tokio-rustls` (matching the in-tree rustls 0.23 / aws-lc-rs) names `server::TlsStream` so the
-# per-connection acceptor can read `peer_certificates()` ONCE after the handshake. Both stay behind the
-# mTLS env flag: the default (flag-off) TLS + plain serve paths are byte-identical.
+# PoP Tier-1b (mTLS-bound tokens, `SOLID_SERVER_MTLS_BOUND_TOKENS=1`). `tokio-rustls` is ALREADY resolved
+# in the tree (transitively via axum-server's tls-rustls stack + the dev TLS tests), so promoting it
+# to a non-dev [dependencies] entry adds NO new crate to the build — it only makes the existing types
+# nameable from this crate's mTLS serve path. It matches the in-tree rustls 0.23 / aws-lc-rs and names
+# `server::TlsStream` so the per-connection acceptor can read `peer_certificates()` ONCE after the
+# handshake. It stays behind the mTLS env flag: the default (flag-off) TLS + plain serve paths are
+# byte-identical.
+# [OPUS-5] sq-5ah3p: the PEM cert-chain + key parse into the DER types
+# `ServerConfig::builder().with_client_cert_verifier(..).with_single_cert(..)` needs (the mTLS path
+# can't use axum-server's `RustlsConfig::from_pem`, which hard-codes `with_no_client_auth`) no longer
+# needs a `rustls-pemfile` entry here. That crate is archived (RUSTSEC-2025-0134) and since 2.x has
+# been a thin shim over `rustls-pki-types`' `PemObject`; `src/tls.rs` now calls `PemObject` directly
+# through rustls' own `rustls::pki_types` re-export, so the parse gains a dependency-free spelling
+# that cannot skew from the rustls version it feeds.
 # Declared for native targets below.
 # Auth: consume the standalone DPoP/Solid-OIDC verifier as a git dependency — do NOT reimplement.
 # The verifier's M2 landed the DNS-pinned SSRF-guarded network adapters (`NetworkJwksProvider` +
@@ -221,7 +226,6 @@ tokio = { version = "1", features = ["fs", "rt-multi-thread", "macros", "net", "
 tower-http = { version = "0.7", features = ["trace", "timeout"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
 axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
-rustls-pemfile = "2"
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
 solid-oidc-verifier = { git = "https://github.com/jeswr/solid-oidc-verifier", rev = "89c896249a726398b78302fd2f65eef0a82af681", features = ["network"] }
 sparq-core = { path = "../sparq-core", features = ["mmap"], optional = true }
@@ -286,7 +290,7 @@ p256 = { version = "0.13", features = ["ecdsa", "jwk", "pem", "std"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 # (`serde_json` is a non-dev, non-optional [dependencies] entry above — the LDP/notifications/PoP
 # handlers name it unconditionally — so the test + example targets already resolve it; a duplicate
-# dev entry adds nothing to the graph. Same reasoning as `tokio-rustls`/`rustls-pemfile` below.)
+# dev entry adds nothing to the graph. Same reasoning as `tokio-rustls` below.)
 # The HttpSparqClient unit tests run against an in-process mock SPARQL endpoint (an axum server on a
 # tokio listener) — no live SPARQ. `net` for the listener, `rt-multi-thread` so the client + server
 # run on the same multi-threaded runtime, `time` for the timeout test.
@@ -296,8 +300,9 @@ http-body-util = "0.1"
 # HTTPS listener. tokio-rustls is the canonical rustls+tokio adapter and is ALREADY in the resolved
 # tree (pulled in transitively by axum-server's tls-rustls feature), so this adds NO new crate —
 # it only makes the existing dep nameable from the test. Matches the in-tree rustls 0.23 / aws-lc-rs.
-# (`tokio-rustls` + `rustls-pemfile` are now non-dev [dependencies] above — the mTLS serve path names
-# them — so the dev TLS tests reuse those; no separate dev entry needed.)
+# (`tokio-rustls` is now a non-dev [dependencies] entry above — the mTLS serve path names it — so the
+# dev TLS tests reuse it; no separate dev entry needed. The tests' PEM parsing likewise goes through
+# `rustls::pki_types::pem::PemObject`, so they need no PEM crate of their own either.)
 # The (default-`#[ignore]`d) live WebSocketChannel2023 handshake test drives a real WebSocket client
 # against the bound axum `…/receive` endpoint. tokio-tungstenite is ALREADY in the resolved tree
 # (pulled in by axum's `ws` feature), so naming it here adds NO new crate to the build. `futures-util`
