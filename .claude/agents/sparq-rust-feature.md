@@ -31,6 +31,31 @@ Beyond the per-crate gates above, these workspace-wide ratchets bite on the surf
 - **WASM feature-off byte declaration.** Whenever the default-path (feature-OFF) WASM byte size moves, declare the new size in `bench/feature-off-declarations/<PR>.json` — the artifact-exact-equality leg compares the built bytes against your declaration and fails if they disagree.
 - **Feature-matrix leg + golden.** A new gated test only actually RUNS in CI if its leg name is in the feature-matrix; keep `scripts/tests/feature-matrix-legnames.golden.txt` in sync when you add a feature-gated test lane, or the test silently never executes on CI.
 
+## Before you open the PR (HARD — identical in every worker brief) [OPUS-5]
+Run **`python3 scripts/preflight.py`** in your worktree. It runs every mechanical
+merge-gate against YOUR diff — G1 `gate-new-crate.py`, G2 `gate-api-skill.py`,
+G6 `check-config-documented.py`, `check-no-perf-numbers.py`,
+`check-readme-template.py`, `check-privacy-claims.sh`, plus a `guard-untested`
+check — so you learn in-worktree instead of on CI or in a review round. It must
+exit 0. These gates already block the merge; running them earlier lowers no bar.
+
+Then do the two things `preflight.py` prints but CANNOT decide for you. In a census
+of the 831 review verdicts on the registry `ledger` branch, these two classes are
+**130 of the 317 blocking round-1 findings** — the largest preventable share:
+
+1. **MUTATE YOUR HEADLINE GUARD** (63 findings). Take the feature named in your PR
+   title — it is disproportionately the one shipped with no red test. **DELETE or
+   INVERT it and RUN the suite.** If nothing goes red, your test is vacuous; that is
+   a blocking defect. Execute it, do not reason about it. Name the test that died in
+   your PR body. (`guard-untested` only catches a guard with NO test at all; a test
+   that asserts a bound, a type, or a marker string instead of the behaviour passes
+   the script and fails review.)
+2. **READ YOUR OWN PROSE AGAINST YOUR OWN DIFF** (67 findings). For every line of
+   doc-comment, README, `SKILL.md`, comment, research record or PR-body claim you
+   added, point at the code in THIS diff that makes it true. If you cannot, delete
+   the sentence or fix the code. Overclaiming is blocking, and citing a module,
+   flag, constant or test file the diff does not contain is the commonest form.
+
 ## Concurrent-wave rule (sibling agents on the same crate) [FABLE-5]
 When sibling agents are working the SAME crate on other branches (a curated disjoint-crate wave), keep your changes **scoped to the named region/module** the brief hands you — do not wander into shared files. Immediately **before opening the PR**, `git fetch && git merge origin/main` into your worktree and **re-run your gates**, so you open against the freshest base and catch a conflicting sibling merge early rather than in the merge queue.
 

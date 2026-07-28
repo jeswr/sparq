@@ -62,3 +62,13 @@
   crate: "sparq-lws-core"
   features: "wasm"
   test: true
+
+# [OPUS-5] sq-hed3q: the opt-in trust-graph admission seam (src/authz/trust_admit.rs) — the
+# library adapter from the sparq-trust admission gate onto this crate's AccessMode/Decision
+# vocabulary. tests/lws_trust_admit.rs is entirely `#![cfg(feature = "trust-graph")]`, so without
+# this leg the seam's signed-credential positive path, its fail-closed cases, and its adversarial
+# never-flips-a-WAC-denial invariants never compile or run in CI.
+- name: "sparq-lws-core (trust-graph)"
+  crate: "sparq-lws-core"
+  features: "trust-graph"
+  test: true

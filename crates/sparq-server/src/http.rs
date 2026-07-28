@@ -1951,6 +1951,12 @@ struct ServerApplier {
     /// by re-applying each committed batch to it, WAL-durably, BEFORE the generation is
     /// published (and hence before the client ack). `None` is today's purely in-memory server.
     durable: Option<DurableStore>,
+    /// [SONNET-4.6] (sq-m9prn) The SAME registry `AppState` serves `GET /queries` from —
+    /// shared by `Arc`, so an update the writer thread registers is visible to (and killable
+    /// by) the HTTP handlers. Compiled only with the `query-registry` feature; without it the
+    /// applier has no extra field and the write path is byte-identical to before.
+    #[cfg(feature = "query-registry")]
+    running_queries: Arc<QueryRegistry>,
 }
 
 /// [OPUS-4.8] (sq-7cxr, gh-44) The writer-thread-owned durable store: the on-disk [`Graph`]
@@ -2047,7 +2053,19 @@ impl ServerApplier {
             inner: GraphApplier::default(),
             config,
             durable: None,
+            #[cfg(feature = "query-registry")]
+            running_queries: Arc::new(QueryRegistry::default()),
         }
+    }
+
+    /// [SONNET-4.6] (sq-m9prn) Points this applier at the `AppState`'s shared running-query
+    /// registry, so the updates it applies are listed by `GET /queries` and killable by
+    /// `DELETE /queries/{id}`. Without this call the applier keeps its own private registry
+    /// and its updates are simply not listed (the pre-sq-m9prn behaviour).
+    #[cfg(feature = "query-registry")]
+    fn with_registry(mut self, registry: Arc<QueryRegistry>) -> Self {
+        self.running_queries = registry;
+        self
     }
 
     /// [OPUS-4.8] (sq-7cxr, gh-44) An applier whose committed batches are also mirrored to
@@ -2058,6 +2076,8 @@ impl ServerApplier {
             inner: GraphApplier::default(),
             config,
             durable: Some(DurableStore::new(graph)),
+            #[cfg(feature = "query-registry")]
+            running_queries: Arc::new(QueryRegistry::default()),
         }
     }
 }
@@ -2086,6 +2106,24 @@ impl ApplyUpdates for ServerApplier {
         // to an OOM. The deadline here is the writer-side cooperative stop; the HTTP side
         // separately hard-caps the client's await (see `await_update_worker`). With both
         // limits off (the default) this is the unlimited budget — identical to before.
+        // [SONNET-4.6] (sq-m9prn) Register this update with the running-query registry
+        // (feature `query-registry`) and install its cancel flag into the budget, so
+        // `GET /queries` lists it as `kind: "update"` and `DELETE /queries/{id}` trips the
+        // engine's cooperative-cancellation poll site inside its WHERE evaluation. The RAII
+        // guard is bound to this stack frame, so the row is removed on EVERY exit path — a
+        // clean apply, a rejected one (the `?` below), or an unwind.
+        //
+        // Registering HERE (rather than at HTTP dispatch) is what makes the listing honest:
+        // the writer is sequenced, so a row exists exactly while an update is consuming the
+        // writer thread. If the writer re-forks and replays the batch after a mid-batch
+        // failure, each replayed apply registers afresh — a killed update is not replayed
+        // (the writer skips it), so its cancellation is not silently undone.
+        #[cfg(feature = "query-registry")]
+        let (budget, _qr_guard) = {
+            let (cancel, guard) = self.running_queries.register_update(update);
+            (update_budget(&self.config).with_cancel(cancel), guard)
+        };
+        #[cfg(not(feature = "query-registry"))]
         let budget = update_budget(&self.config);
         // [OPUS-4.8] (Copilot PR#80) When mirroring durably, CAPTURE the resolved effect log of
         // the in-memory application so the durable graph can replay the EXACT committed delta —
@@ -2502,11 +2540,18 @@ struct QueryRegistry {
 /// poll site on the next iteration.
 #[cfg(feature = "query-registry")]
 struct RegistryEntry {
+    /// [SONNET-4.6] (sq-m9prn) Which operation class this row is: `"query"` for a READ
+    /// (SELECT/ASK/CONSTRUCT/DESCRIBE/EXPLAIN) or `"update"` for a SPARQL UPDATE running on
+    /// the sequenced writer thread. Serialised as `kind` so an operator deciding what to kill
+    /// can tell the two apart — an UPDATE holds the single writer, so it is the row whose
+    /// cancellation also unblocks every write queued behind it.
+    kind: &'static str,
     /// Unix epoch in milliseconds — serialised to the `GET /queries` response.
     started_at_unix_ms: u64,
     /// Monotonic start — used to compute elapsed ms without clock-skew noise.
     started: std::time::Instant,
-    /// FNV-1a non-reversible fingerprint of the raw SPARQL text (trimmed). Never the raw text.
+    /// FNV-1a fingerprint of the raw SPARQL text (trimmed). Never the raw text — but see
+    /// `registry_fingerprint` for what this unkeyed checksum does and does NOT protect.
     fingerprint: String,
     /// The `sq-kq9ia` cross-thread cancel flag shared with the engine's `QueryBudget`.
     cancel: Arc<std::sync::atomic::AtomicBool>,
@@ -2534,11 +2579,34 @@ impl Drop for QueryGuard {
 
 #[cfg(feature = "query-registry")]
 impl QueryRegistry {
-    /// Register a new query and return a cancel flag + RAII guard.
-    /// The returned `Arc<AtomicBool>` should be installed into the `QueryBudget`; the
-    /// guard should be held for the entire duration of the engine call.
+    /// Register a new READ query (SELECT/ASK/CONSTRUCT/DESCRIBE/EXPLAIN) and return a cancel
+    /// flag + RAII guard. The returned `Arc<AtomicBool>` should be installed into the
+    /// `QueryBudget`; the guard should be held for the entire duration of the engine call.
     pub(crate) fn register(
         self: &Arc<Self>,
+        sparql: &str,
+    ) -> (Arc<std::sync::atomic::AtomicBool>, QueryGuard) {
+        self.register_kind("query", sparql)
+    }
+
+    /// [SONNET-4.6] (sq-m9prn) Register a SPARQL UPDATE that the sequenced writer thread is
+    /// about to apply. Same contract as [`register`](Self::register) — the flag goes into the
+    /// UPDATE's `QueryBudget` (which the engine installs thread-locally for the whole update,
+    /// so it reaches the `DELETE/INSERT … WHERE` evaluation), the guard is held for the apply.
+    ///
+    /// Registration happens when the writer STARTS the update, not when it is queued: the row
+    /// therefore names what is actually consuming the writer thread, which is the operation an
+    /// operator needs to kill to unblock the write queue behind it.
+    pub(crate) fn register_update(
+        self: &Arc<Self>,
+        sparql: &str,
+    ) -> (Arc<std::sync::atomic::AtomicBool>, QueryGuard) {
+        self.register_kind("update", sparql)
+    }
+
+    fn register_kind(
+        self: &Arc<Self>,
+        kind: &'static str,
         sparql: &str,
     ) -> (Arc<std::sync::atomic::AtomicBool>, QueryGuard) {
         use std::sync::atomic::Ordering;
@@ -2557,6 +2625,7 @@ impl QueryRegistry {
             .insert(
                 id.clone(),
                 RegistryEntry {
+                    kind,
                     started_at_unix_ms,
                     started: std::time::Instant::now(),
                     fingerprint: registry_fingerprint(sparql),
@@ -2577,6 +2646,7 @@ impl QueryRegistry {
             .map(|(id, e)| {
                 serde_json::json!({
                     "id": id,
+                    "kind": e.kind,
                     "start": e.started_at_unix_ms,
                     "fingerprint": e.fingerprint,
                     "elapsed_ms": u64::try_from(e.started.elapsed().as_millis())
@@ -2607,9 +2677,32 @@ impl QueryRegistry {
     }
 }
 
-/// [SONNET-4.6] (sq-qsm5z) FNV-1a non-reversible fingerprint of the SPARQL query text
-/// (trimmed). Satisfies the #241 / sq-m9prn audit-log discipline: the `GET /queries` listing
-/// exposes only this hash, never raw query text.
+/// [SONNET-4.6] (sq-qsm5z) FNV-1a fingerprint of the SPARQL query / update text (trimmed).
+/// Satisfies the #241 / sq-m9prn audit-log REDACTION discipline: the `GET /queries` listing
+/// exposes only this hash, never raw text.
+///
+/// # Security contract (honest boundary)
+///
+/// FNV-1a is an **unkeyed, 64-bit, non-cryptographic checksum**. What it provides is *stable
+/// correlation* — the same text always fingerprints the same way, so an operator can tell two
+/// rows apart or match a row against a query they already hold — and the guarantee that the
+/// text is not *transmitted*. It is **not** a one-way function in the cryptographic sense and
+/// it is **not** a confidentiality boundary:
+///
+/// * A reader of the listing can hash candidate texts offline and confirm a match, so a
+///   guessable, low-entropy or template-generated body is recoverable by search.
+/// * 64 bits resists neither exhaustive search over a small candidate set nor collision search.
+/// * This is most material for `kind = "update"` rows, whose `INSERT DATA` body can embed
+///   secrets or personal data (`sq-m9prn`).
+///
+/// Callers must therefore treat the fingerprint as sensitive metadata and keep `/queries`
+/// behind its fail-closed READ gate; it does not protect update content from a party that
+/// already has read access. Closing the offline-guessing gap needs a KEYED construction (e.g.
+/// an HMAC under a per-process random secret), which is deliberately not shipped here — it
+/// would add a cryptographic dependency to this dependency-free feature and is tracked as
+/// follow-up work. `registry_fingerprint_is_unkeyed_and_offline_guessable` pins this contract:
+/// it recomputes the fingerprint from outside the registry, so it fails the day the
+/// construction becomes keyed and forces this doc to be revisited.
 #[cfg(feature = "query-registry")]
 fn registry_fingerprint(sparql: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -2747,6 +2840,12 @@ impl AppState {
         // enforces the same SERVICE egress allowlist (a federated `INSERT … WHERE` is
         // gated like a read).
         let config = Arc::new(config);
+        // [SONNET-4.6] (sq-qsm5z) Empty registry at boot; queries self-register when the
+        // `query-registry` feature is compiled in. Built BEFORE the applier so the writer
+        // thread shares the one registry the HTTP handlers list and cancel through
+        // ([SONNET-4.6] sq-m9prn — the UPDATE half).
+        #[cfg(feature = "query-registry")]
+        let running_queries = Arc::new(QueryRegistry::default());
         // [OPUS-4.8] sq-7cxr: a durable-mirroring applier when persistence is on, else the
         // historical in-memory applier.
         let applier = match durable {
@@ -2763,6 +2862,9 @@ impl AppState {
             }
             None => ServerApplier::new(config.clone()),
         };
+        // [SONNET-4.6] (sq-m9prn) Share the one registry with the writer thread.
+        #[cfg(feature = "query-registry")]
+        let applier = applier.with_registry(Arc::clone(&running_queries));
         // [GPT-5.6] (sq-kqofk) Open the CDC state before spawning the writer so the append log can
         // be consumed into its commit hook. A corrupt log remains a clean startup failure.
         #[cfg(feature = "change-stream")]
@@ -2824,10 +2926,8 @@ impl AppState {
             // seed graph in main.rs BEFORE this state exists, so it never holds the permit).
             #[cfg(feature = "backup")]
             restore_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            // [SONNET-4.6] (sq-qsm5z) Empty registry at boot; queries self-register when
-            // the `query-registry` feature is compiled in.
             #[cfg(feature = "query-registry")]
-            running_queries: Arc::new(QueryRegistry::default()),
+            running_queries,
         })
     }
 
@@ -3192,6 +3292,10 @@ impl AppState {
         let ring_config = build_ring_config(&self.config);
         let ring = Arc::new(GenerationRing::with_config(graph, ring_config));
         let applier = ServerApplier::new(self.config.clone());
+        // [SONNET-4.6] (sq-m9prn) The swapped-in writer keeps listing/killing through the SAME
+        // registry the HTTP handlers read, so an update on a restored core is still visible.
+        #[cfg(feature = "query-registry")]
+        let applier = applier.with_registry(Arc::clone(&self.running_queries));
         // [GPT-5.6] (sq-kqofk) A restored writer retains the same single CDC hook. The hook's
         // same-lineage guard reports the documented restore discontinuity instead of diffing it.
         let writer = spawn_server_writer(
@@ -9475,6 +9579,88 @@ mod query_registry_tests {
         let found = registry.cancel_query(&id);
         assert!(found, "cancel must return true for a known id");
         assert!(cancel.load(Ordering::Acquire), "flag must be true after cancel");
+    }
+
+    // [SONNET-4.6] (sq-m9prn) A read query and an UPDATE are distinguishable in the listing,
+    // so an operator can tell which row is holding the sequenced writer thread.
+    // Non-vacuity: collapsing `register_update` onto `register` makes both rows read
+    // "query" and the `kind` assertions below fail.
+    #[test]
+    fn update_and_query_rows_carry_distinct_kinds() {
+        let registry = Arc::new(QueryRegistry::default());
+        let (_c1, _g1) = registry.register("SELECT * WHERE { ?s ?p ?o }");
+        let (_c2, _g2) = registry.register_update("DELETE WHERE { ?s ?p ?o }");
+        let kinds: Vec<String> = registry
+            .list()
+            .iter()
+            .map(|e| e["kind"].as_str().unwrap_or_default().to_owned())
+            .collect();
+        assert!(kinds.contains(&"query".to_string()), "read row must be kind=query: {:?}", kinds);
+        assert!(kinds.contains(&"update".to_string()), "update row must be kind=update: {:?}", kinds);
+    }
+
+    // [SONNET-4.6] (sq-m9prn) An update row is cancellable and RAII-cleaned exactly like a
+    // query row — the two properties `DELETE /queries/{id}` depends on.
+    #[test]
+    fn update_row_is_cancellable_and_raii_cleaned() {
+        use std::sync::atomic::Ordering;
+        let registry = Arc::new(QueryRegistry::default());
+        {
+            let (cancel, _guard) = registry.register_update("DELETE WHERE { ?s ?p ?o }");
+            assert!(!cancel.load(Ordering::Acquire), "flag must start false");
+            let id = registry.list()[0]["id"].as_str().unwrap().to_owned();
+            assert!(registry.cancel_query(&id), "an update row must be cancellable by id");
+            assert!(cancel.load(Ordering::Acquire), "cancelling the update must flip its flag");
+        }
+        assert_eq!(registry.list().len(), 0, "update row must be removed once the apply returns");
+    }
+
+    // [SONNET-4.6] (sq-m9prn) The listing never carries raw query text — for updates too,
+    // which is where a `INSERT DATA` body would otherwise leak the written triples.
+    #[test]
+    fn update_row_exposes_no_raw_text() {
+        let registry = Arc::new(QueryRegistry::default());
+        let secret = "INSERT DATA { <http://ex/s> <http://ex/p> \"sensitive-literal\" }";
+        let (_cancel, _guard) = registry.register_update(secret);
+        let listed = serde_json::to_string(&registry.list()[0]).unwrap();
+        assert!(
+            !listed.contains("sensitive-literal") && !listed.contains("INSERT"),
+            "the listing must expose only the fingerprint, never the update text: {}",
+            listed
+        );
+    }
+
+    // [SONNET-4.6] (sq-m9prn) Pins the ACTUAL security contract of the exposed fingerprint, so
+    // the docs cannot drift back into claiming it is a one-way/"non-reversible" hash. FNV-1a is
+    // UNKEYED: a party holding only the listing can recompute the fingerprint of candidate texts
+    // offline and confirm which one is running. This test performs exactly that recovery — it is
+    // a WITNESS of the documented weakness, not an endorsement of it.
+    // Non-vacuity in both directions: if the construction ever becomes keyed (an HMAC under a
+    // per-process secret, the fix this contract defers), the offline recomputation stops matching
+    // and this test goes red — forcing `registry_fingerprint`'s security-contract doc and the
+    // SKILL's "honest boundary" bullet to be revisited with it.
+    #[test]
+    fn registry_fingerprint_is_unkeyed_and_offline_guessable() {
+        let registry = Arc::new(QueryRegistry::default());
+        let secret = "INSERT DATA { <http://ex/s> <http://ex/p> \"sensitive-literal\" }";
+        let (_cancel, _guard) = registry.register_update(secret);
+        let exposed = registry.list()[0]["fingerprint"].as_str().unwrap().to_owned();
+
+        // An attacker's offline dictionary — plausible bodies, one of which is the real one.
+        let candidates = [
+            "INSERT DATA { <http://ex/s> <http://ex/p> \"other-literal\" }",
+            "INSERT DATA { <http://ex/s> <http://ex/p> \"sensitive-literal\" }",
+            "DELETE WHERE { ?s ?p ?o }",
+        ];
+        let recovered: Vec<&str> =
+            candidates.iter().copied().filter(|c| registry_fingerprint(c) == exposed).collect();
+        assert_eq!(
+            recovered,
+            vec![secret],
+            "the unkeyed fingerprint must be reproducible from the text alone — offline guessing \
+             recovers exactly the registered body, which is precisely why the listing is NOT a \
+             confidentiality boundary for update payloads"
+        );
     }
 
     // Cancelling an unknown id returns false (the 404 path).

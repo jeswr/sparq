@@ -704,6 +704,84 @@ the CURRENT delegator grant, the audit drops the revoked actions); (ii) it adds 
 and no privacy — principals are named in the clear. Pure `oxrdf` (**no `sparq-prov` dependency** — that
 would drag `sparq-engine` onto the crate's dep graph); OFF in the default build.
 
+### LWS-server admission seam — opt-in `trust-graph` on `sparq-lws-core` ([OPUS-5] sq-hed3q)
+
+The pod-side wiring above lives in `sparq-solid`'s `PodStore`. The **native LWS server**
+(`sparq-lws-core`, `skills/solid-lws-server/SKILL.md`) decides access with the flat-`.acl` WAC
+authorizer, which has no notion of an issuer-signed credential. `sparq_lws_core::authz::trust_admit`
+(behind that crate's **own default-OFF `trust-graph` feature**, distinct from the `sparq-solid`
+feature of the same name) is the adapter between the two: it runs the `sparq_trust::admit` gate and
+re-expresses its output in this crate's `AccessMode`/`Decision` vocabulary.
+
+```toml
+sparq-lws-core = { path = "crates/sparq-lws-core", features = ["trust-graph"] }
+```
+
+```rust
+use sparq_lws_core::authz::trust_admit::{trust_admit_verdict, union_trust_grants};
+use sparq_lws_core::authz::trust_admit::{PresentedCredential, TrustRule, TrustSession};
+use sparq_trust::policy::{parse_policy, ControlGate};
+
+// Build rules ONLY from the Control-gated authoring channel. `parse_policy` demands a
+// `ControlGate`, whose sole constructor `assert_control_gated()` is the caller ASSERTING it has
+// verified the policy graph was authored behind `acl:Control` — a loudly-named assertion, not an
+// enforced proof. `TrustRule`'s fields are public, so a caller can also build one by hand; doing
+// so from anything but the Control-gated `.acr` channel is the one mistake that re-opens the
+// trust root of the whole pipeline.
+let rules: Vec<TrustRule> = parse_policy(&policy_triples, ControlGate::assert_control_gated())?;
+
+let session = TrustSession { agent: requester_webid, now_unix_secs: now };
+let verdict = trust_admit_verdict(&credential, &rules, &session, &target, abac_rule_n3);
+
+// The only way a grant reaches a decision: an ADDITIVE union onto whatever WAC decided, and only
+// for the (requester, resource) pair the grant was issued for — pass the CURRENT request's
+// authenticated WebID (`None` when anonymous) and requested resource, which are re-checked against
+// the grant's stored holder/target.
+let decision = union_trust_grants(wac_decision, verdict.as_ref(), Some(&session.agent), &target);
+```
+
+`abac_rule_n3` is the controller-authored rule carried in the same Control-gated `.acr` channel,
+e.g. `{ ?x schema:age ?y . ?y math:greaterThan 18 } => { ?x auth:read <https://pod.ex/resourceX> } .`
+
+Load-bearing behaviour, each adversarially tested in
+`crates/sparq-lws-core/tests/lws_trust_admit.rs`:
+
+- **NOT handler-wired — enabling the feature changes no request's outcome.** `trust_admit_verdict`
+  is a pure function; `ldp::handler`'s `authorize_read`/`authorize_mode` call sites are untouched,
+  so nothing consults it unless *you* call it. Hot-path wiring is a separate, soundness-sensitive
+  follow-up. With the feature OFF the module is not compiled and neither `sparq-solid` nor
+  `sparq-trust` enters the dependency graph (strict additivity, as for `sparq-solid`'s G6).
+- **Allow-only union.** `Decision::Allow(m)` gains modes and never loses any; `Decision::Forbidden`
+  becomes `Allow(granted)` — the authenticated-but-unauthorized case a credential-gated resource
+  exists for, and the ONLY route by which a WAC denial becomes an allow. A `TrustGrantSet` has no
+  public constructor, so that route is unforgeable from outside the module.
+- **Bound to the pair it was issued for.** A verdict is `Clone` and a caller may hold it across
+  requests, so `union_onto`/`union_trust_grants` take the CURRENT authenticated WebID and requested
+  resource and re-check them against the grant's stored `holder()`/`target()`; the raw union is
+  private. On a mismatch — another resource, another authenticated agent, or none — the WAC decision
+  is returned **unchanged**, so a grant minted for Jesse/`resourceX` cannot lift the denial on
+  Jesse/`resourceY` or on Mallory/`resourceX`.
+- **Unauthenticated is NEVER lifted.** `Decision::Unauthenticated` is returned unchanged even for a
+  `Control` grant — a deliberate fail-closed narrowing: that variant means no verified WebID, so the
+  credential's holder binding has nothing to bind against and a caller could otherwise name any
+  `session.agent` it liked. Authenticate first (`skills/solid-lws-server/SKILL.md` § *Authenticate
+  requests*), then the seam can apply.
+- **Fail-closed, `None` never an error.** A forged or malformed issuer signature, a credential whose
+  subject is not the authenticated requester, one outside the rule's freshness window or
+  `trust:scope`, a revoked one, an unparseable `.acr` rule, or a grant derived for a different
+  requester or resource each admit nothing. A rule deriving an `auth:deny*` for this requester and
+  resource refuses the **whole** verdict — an allow-only union cannot express the denial, so
+  honouring only its sibling allows would invert the controller's intent.
+- **The combined (not static) half of the `sq-xc4y` split.** The seam is consulted per request, so it
+  uses `sparq_trust::admit`, which evaluates the session-dependent class (holder binding, freshness)
+  live rather than freezing it into a long-lived `<urn:sparq:auth>` view.
+
+**Honest scope.** RESEARCH prototype, the **clear path** — the credential and the holder binding are
+both in the clear. No privacy, unlinkability, anonymity, or ZK-soundness claim; the ZK estate whose
+commitment/signature primitives it composes with is externally **UNAUDITED** (`sq-qhy4`, external
+accredited-cryptographer sign-off pending) and the issuer key is operator-asserted. Do not read an
+admitted grant as a security guarantee.
+
 ### Security-properties vocabulary — opt-in `secprop-vocab` ([OPUS-4.8] sq-5oru9, epic sq-0dksu)
 
 The `sparq_trust::secprop` module (behind the **default-OFF `secprop-vocab`** cargo feature) is the

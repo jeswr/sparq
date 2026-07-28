@@ -177,7 +177,9 @@ jobs:
           set -euo pipefail
           # HARD scope = root *.md + skills/ + docs/ + crates/ (markdown only).
           # `git ls-files '*.md'` matches at any depth, so EXCLUDE the out-of-scope
-          # dirs to land exactly on the same set markdownlint's config globs (49 files).
+          # dirs to land exactly on the same set markdownlint's config globs. (A file
+          # COUNT was pinned here and rotted — it read 49 while the real scope had grown
+          # to 280; the step prints the live count below, so do not re-pin one. [OPUS-5])
           git ls-files '*.md' \
             ':!:research/**' ':!:zk/**' ':!:bench/**' ':!:js/**' \
             ':!:.beads/**' ':!:.claude/**' ':!:.github/**' \
@@ -334,6 +336,29 @@ jobs:
       - name: readme-template (template) — crate-README cap + sections (sq-9jw5) — GATING
         run: python3 scripts/check-readme-template.py --enforce
 
+      # [OPUS-5] Pre-submit runner (scripts/preflight.py) — the checker that shifts
+      # G1/G2/G6 + no-perf-numbers + readme-template + privacy-claims LEFT into the
+      # worker's worktree, plus the `guard-untested` check. Two HARD legs, both in
+      # this already-GATING job so a regression reds ci-summary:
+      #   * --self-test pins the checker's own logic (mirrors readme-template /
+      #     coverage-gate / perf-gate above);
+      #   * the unittest suite additionally pins that EVERY worker brief still
+      #     carries the shared pre-submit block, byte-identical. A brief silently
+      #     losing a clause is a repeated failure mode here — a worker reads only
+      #     its own brief, so an obligation present in five of six is absent for
+      #     the sixth. Deleting the block from one brief reds this leg.
+      #
+      # Both `run:` values must stay BARE COMMANDS on their own line. Appending
+      # `|| true` (or `; true`, or piping) leaves every substring-matching seam
+      # test green while the leg can no longer fail — the commonest swallow shape
+      # in this repo's verdict corpus. `test_preflight.py::
+      # test_neither_leg_is_invoked_with_its_exit_code_discarded` anchors the call
+      # with `^\s*<cmd>\s*$` and reds on exactly that edit.
+      - name: Self-test the pre-submit runner (pure logic)
+        run: python3 scripts/preflight.py --self-test
+      - name: preflight — checker tests + worker-brief block consistency — GATING
+        run: python3 scripts/tests/test_preflight.py
+
       - name: Demo deployment manifests
         run: |
           bash deploy/demo/check.sh
@@ -405,6 +430,16 @@ jobs:
         run: bash scripts/tests/test_beir_gather_sentinel.sh
       - name: Self-test console envelope extractor (exact names + CRLF + allowlist)
         run: bash scripts/tests/test_extract_console_envelopes.sh
+      # [OPUS-5] sq-ffaa9: the serial console is AMI-dependent — on the AL2023/Nitro x86_64
+      # image `get-console-output` returned nothing usable, so a whole canonical gather was
+      # unrecoverable. scripts/bench/bench-result-egress.sh adds the durable S3 channel; this
+      # hermetic harness (PATH-shadowed `aws`, no account, no network) pins the two properties
+      # that make it safe to leave in every launcher: it is INERT unless both knobs are set,
+      # and a HALF-configured pair (destination, no instance profile) fails fast instead of
+      # running for hours and losing the results. It also pins the bootstrap policy as
+      # write-only + prefix-scoped, and that the launchers stay wired to the library.
+      - name: Self-test durable S3 result egress (inert by default, half-config fails fast)
+        run: bash scripts/tests/test_bench_result_egress.sh
       # [SONNET-4.6] PR #3990 review: bench/geo/gsb.sh advertises a HARD sha256 pin on the
       # GeoSPARQL Compliance Benchmark, but a CACHED extraction was accepted on file COUNTS
       # alone — a stale or locally edited corpus would have been scored silently, making the
@@ -430,6 +465,25 @@ jobs:
       # self-test in differential.yml).
       - name: Self-test demoted-lane failure filer (id/dedupe/append/log-tail logic)
         run: python3 scripts/ci-file-demoted-lane-failure.py --self-test
+      # [OPUS-5] sq-jxeqz / #4559: the bench HARD-ZONE gate's pure logic
+      # (scripts/bench_hardzone.py). Its --self-test previously ran ONLY inside bench.yml's
+      # "Hard zone" step, which is guarded `github.event_name != 'schedule' && github.ref ==
+      # 'refs/heads/main'` — so the gate's own logic was NEVER exercised on a PR, and a change
+      # to it could only be discovered by reddening main AFTER merge. That is exactly how the
+      # zero-boundary defect in #4559 reached main and then persisted (15 of the last 60
+      # Benchmarks runs failed on that one step). Running it HERE, on every PR, means a
+      # regression in the regression gate reds the PR that causes it. Hermetic: no network,
+      # no git, no repo writes (same stdlib-only pattern as the lints above).
+      - name: Self-test bench hard-zone gate (zero boundary + noise floor + resolution bounds)
+        run: python3 scripts/bench_hardzone.py --self-test
+      # ...and the WIRING of that gate: the step above must exist and stay unconditional, the
+      # bench.yml lane must keep `set -euo pipefail` with no `|| true` / continue-on-error, and
+      # the hard-zone step must keep running BEFORE the Store step (the anti-laundering
+      # invariant — Store auto-pushes this run's point, so gating afterwards would publish a
+      # rejected regression into the very median that judges it). This test also asserts its
+      # OWN step is present, so the seam cannot be un-wired one level up.
+      - name: Self-test bench hard-zone WIRING (PR coverage + publish order + no swallow)
+        run: python3 scripts/tests/test_bench_hardzone_wiring.py
       # [FABLE-5] formal-lanes fix: the nightly miri.yml UB lane's verdict CLASSIFIER
       # (scripts/miri_classify_verdict.py) decides whether a shard's non-passes are known
       # per-test-cap TIMEOUTS (cost debt, sq-0s15k — non-fatal) or a GENUINE Miri UB/assertion
@@ -566,6 +620,19 @@ jobs:
         run: shellcheck scripts/check-release-aliases.sh scripts/tests/test_check_release_aliases.sh
       - name: Self-test check-release-aliases.sh (golden contract + partial-extraction teeth)
         run: bash scripts/tests/test_check_release_aliases.sh
+      # [OPUS-5] issue #4571 (GX-11 residual / SL-B3-b): verify-release-provenance.sh is the
+      # EVIDENCE ENGINE for the AR->IV flip — release.yml's `verify-provenance` job runs it right
+      # after cutting the Release, so like every other release-time script its first real execution
+      # is the worst moment to discover a bug in it. Worse, its dangerous failure is the VACUOUS
+      # pass (empty asset set, a bundle covering nothing, an asset silently exempted), which would
+      # manufacture "provenance verified" out of nothing. The self-test drives every fail-closed
+      # branch here, on every PR, against a stub verifier; its non-vacuity is mutation-proved. It
+      # also pins the WIRING — that release.yml itself drives the verifier — because a
+      # `release: published` trigger alone never fires for a GITHUB_TOKEN-created Release.
+      - name: shellcheck verify-release-provenance.sh + its self-test
+        run: shellcheck scripts/verify-release-provenance.sh scripts/tests/test_verify_release_provenance.sh
+      - name: Self-test verify-release-provenance.sh (fail-closed branches + vacuity guard)
+        run: bash scripts/tests/test_verify_release_provenance.sh
       # [OPUS-4.8] sq-mkza: end-to-end proof that BOTH honesty gates now cover the
       # paper-factory `.typ` sources (site/papers/**/*.typ) — the highest-stakes
       # OUTWARD surface. Before sq-mkza a hard-coded perf ratio or an unqualified
@@ -919,6 +986,17 @@ jobs:
       # Needs PyYAML, installed once in the shared setup above.
       - name: Release container contracts (both multi-arch images + safe ghcr tags)
         run: python3 scripts/tests/test_release_container_multiarch.py
+      # [OPUS-5] sq-toze.25 + #4570 + #4635 (GX-11): the SLSA Build L3 isolation contract for all
+      # FOUR isolated-builder lanes — release.yml#provenance (archives),
+      # release.yml#provenance-artifacts (GUI bundles + SBOM/VEX + conformance report),
+      # dist.yml#provenance (tiered binaries) and release.yml#provenance-container (the ghcr
+      # image, via the generator's container builder). Neither workflow runs on a PR, so a
+      # "simplification" that folds a trusted builder back into an in-band attest step — or
+      # SHA-pins it, which erases the verifiable builder identity — would land unnoticed and
+      # quietly downgrade the level the compliance estate publishes. Pure stdlib (no PyYAML
+      # needed); non-vacuity proved by its own mutation table.
+      - name: SLSA Build L3 isolation contract (release + dist artifacts + container)
+        run: python3 scripts/tests/test_release_slsa_l3_provenance.py
       # [GPT-5] #3770 — structural backstop for the recurring failure-swallow shape:
       # once a sweep records a hard failure, a later transient exception must never
       # short-circuit to exit 0. The hermetic fixture reproduces exactly that

@@ -4,7 +4,8 @@
 //! only the subset MCP uses — a request/notification (`method` + optional `params` +
 //! optional `id`) and a response (`result` XOR `error`) — over `serde_json::Value`,
 //! so no heavy dependency or codegen is needed. The transport (stdio, in `transport`)
-//! is line-delimited: one JSON object per line.
+//! is line-delimited: one JSON value per line — an object, or, since the MCP 2025-03-26
+//! revision requires receiving them, a top-level batch array. [OPUS-5] gh #2497
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

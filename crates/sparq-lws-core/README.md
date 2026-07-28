@@ -103,6 +103,8 @@ docker run --rm --name sparq-lws-core -p 127.0.0.1:3000:3000 \
   - `odrl-authz` (off, [SONNET-4.6] sq-elg47) — the native ODRL policy gate seam
     on the read/query path (`authz::odrl`, attached via `LdpState::set_odrl_gate`;
     deny-overrides / permit-extends over the WAC decision, fail-closed).
+  - `trust-graph` (off, [OPUS-5] sq-hed3q) — the LIBRARY-only trust-graph admission
+    seam (`authz::trust_admit`); NOT handler-wired. Research prototype (sq-qhy4).
 
 ## 📚 Learn more
 

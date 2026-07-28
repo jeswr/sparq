@@ -4964,6 +4964,7 @@ dependencies = [
  "sparq-engine",
  "sparq-hdt",
  "sparq-reason",
+ "sparq-reason-el",
  "sparq-server",
  "sparq-terse",
  "zstd",
@@ -5034,7 +5035,10 @@ version = "0.1.0"
 dependencies = [
  "bigdecimal",
  "num-bigint 0.5.1",
+ "oxrdf 0.2.4",
+ "rdf-canon",
  "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -5315,6 +5319,9 @@ dependencies = [
  "sparq-engine",
  "sparq-http3",
  "sparq-policy",
+ "sparq-solid",
+ "sparq-trust",
+ "sparq-zk",
  "subtle",
  "thiserror 2.0.18",
  "tokio",
@@ -5329,6 +5336,7 @@ dependencies = [
 name = "sparq-lws-wasm"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "console_error_panic_hook",
  "futures-executor",
@@ -5739,11 +5747,14 @@ name = "sparq-trust"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "getrandom 0.4.2",
  "oxrdf 0.3.3",
  "oxttl 0.2.3",
  "serde_json",
+ "spargebra",
  "sparq-canon",
  "sparq-core",
+ "sparq-engine",
  "sparq-reason",
  "sparq-shacl",
  "sparq-zk",
@@ -5804,6 +5815,7 @@ dependencies = [
  "getrandom 0.2.17",
  "getrandom 0.3.4",
  "js-sys",
+ "oxjsonld",
  "oxrdf 0.3.3",
  "serde_json",
  "sparq-canon",

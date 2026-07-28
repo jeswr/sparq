@@ -548,8 +548,9 @@ struct WireTrustRule {
 /// }
 /// ```
 ///
-/// `scopeKind` is `"anyService"` (no statement-type narrowing) or absent/other (fail-closed
-/// deny: unknown scope kinds are never silently widened).
+/// `scopeKind` is one of the two explicitly modelled kinds — `"anyService"` (no
+/// statement-type narrowing) or `"shape"` (statement-type-scoped, see [`WireCertScope`]) —
+/// and absent/other is a fail-closed deny: unknown scope kinds are never silently widened.
 #[cfg(feature = "solid-authz-trust")]
 struct WireCertification {
     certifier_iri: String,
@@ -559,7 +560,32 @@ struct WireCertification {
     valid_from_unix_secs: i64,
     valid_until_unix_secs: i64,
     signature_hex: String,
-    scope_kind_any_service: bool,
+    scope: WireCertScope,
+}
+
+/// [SONNET-4.6] (sq-sllu4) The parsed `"scopeKind"` of a wire certification — the JSON
+/// projection of `sparq_trust::graph::CertScope`.
+///
+/// ```json
+/// { …, "scopeKind": "anyService" }
+/// { …, "scopeKind": "shape", "scopeShapePredicateIri": "https://schema.org/age" }
+/// ```
+///
+/// A `"shape"` scope carries a `trust:forPredicate` IRI, desugared server-side by
+/// `cert_scope_predicate_shape` into the CANONICAL single-predicate SHACL node-shape the
+/// certifier signed over. Only a predicate IRI is transportable in v1: an arbitrary
+/// `trust:forShape` closure has no wire encoding here (it would need a canonical RDF
+/// serialisation the signer and this parser agree on term-for-term, in order), so it is
+/// deliberately absent rather than approximated.
+#[cfg(feature = "solid-authz-trust")]
+enum WireCertScope {
+    /// `"scopeKind": "anyService"` — `CertScope::AnyService`: the derived rule inherits the
+    /// certifier anchor's shape unchanged.
+    AnyService,
+    /// `"scopeKind": "shape"` — `CertScope::Shape(canonical desugaring of the predicate)`:
+    /// the certified issuer is vouched for ONLY over statements of this predicate, and the
+    /// closure admits the edge only where that provably narrows the certifier's anchor.
+    Shape { predicate_iri: String },
 }
 
 /// [SONNET-4.6] (sq-pfae.17) A parsed presented credential from the JSON wire format.
@@ -626,17 +652,24 @@ fn parse_wire_certification(obj: &serde_json::Map<String, serde_json::Value>) ->
     let signature_hex = obj.get("signatureHex").and_then(|v| v.as_str())
         .ok_or("certification missing 'signatureHex'")?
         .to_owned();
-    // Fail-closed on scope kind: only "anyService" is accepted; an absent or unrecognised scope
-    // kind denies (never silently widened to AnyService).
+    // Fail-closed on scope kind: only the two explicitly modelled kinds are accepted; an
+    // absent or unrecognised scope kind denies (never silently widened to AnyService).
     let scope_kind = obj.get("scopeKind").and_then(|v| v.as_str())
         .ok_or("certification missing 'scopeKind'")?;
-    let scope_kind_any_service = match scope_kind {
-        "anyService" => true,
-        _ => return Err("certification 'scopeKind' must be 'anyService'"),
+    let scope = match scope_kind {
+        "anyService" => WireCertScope::AnyService,
+        // [SONNET-4.6] (sq-sllu4) A shape scope MUST carry the predicate IRI it is scoped to:
+        // a "shape" kind with no predicate is not a wider scope, it is an unspecified one.
+        "shape" => WireCertScope::Shape {
+            predicate_iri: obj.get("scopeShapePredicateIri").and_then(|v| v.as_str())
+                .ok_or("certification 'shape' scope missing 'scopeShapePredicateIri'")?
+                .to_owned(),
+        },
+        _ => return Err("certification 'scopeKind' must be 'anyService' or 'shape'"),
     };
     Ok(WireCertification {
         certifier_iri, certifier_key_hex, certified_issuer_iri, certified_key_hex,
-        valid_from_unix_secs, valid_until_unix_secs, signature_hex, scope_kind_any_service,
+        valid_from_unix_secs, valid_until_unix_secs, signature_hex, scope,
     })
 }
 
@@ -689,12 +722,74 @@ fn hex_nibble(b: u8) -> Option<u8> {
 /// IRI. This is the same desugaring `sparq_trust::policy` does internally: a single-predicate
 /// SHACL node-shape targeting subjects of `predicate_iri` and requiring it present with
 /// `sh:minCount 1`. Fail-closed if the IRI is not valid.
+///
+/// The blank-node labels are FRESH (they name nothing outside the shape, and the closure's
+/// narrowing matcher is label-agnostic — it matches blank nodes by an injective structural
+/// mapping). A shape that must be REPRODUCED byte-for-byte by a remote signer needs the
+/// canonical-label variant instead — see [`cert_scope_predicate_shape`].
 #[cfg(feature = "solid-authz-trust")]
 fn predicate_shape(predicate_iri: &str) -> Option<sparq_trust::policy::ShapeRef> {
-    use oxrdf::{BlankNode, Literal, NamedNode, Term, Triple};
+    predicate_shape_with_labels(
+        predicate_iri,
+        oxrdf::BlankNode::default(),
+        oxrdf::BlankNode::default(),
+    )
+}
+
+/// [SONNET-4.6] (sq-sllu4) Canonical blank-node label of the shape-scope root. See
+/// [`cert_scope_predicate_shape`] for why it is FIXED rather than fresh.
+#[cfg(feature = "solid-authz-trust")]
+const CERT_SCOPE_SHAPE_LABEL: &str = "certScopeShape";
+
+/// [SONNET-4.6] (sq-sllu4) Canonical blank-node label of the shape-scope property node.
+#[cfg(feature = "solid-authz-trust")]
+const CERT_SCOPE_PROPERTY_LABEL: &str = "certScopeProperty";
+
+/// [SONNET-4.6] (sq-sllu4) Build the CANONICAL `CertScope::Shape` shape for a wire
+/// `"scopeKind": "shape"` certification's `scopeShapePredicateIri`.
+///
+/// Structurally this is [`predicate_shape`] — the same single-predicate node-shape — but its
+/// blank-node labels are FIXED (`_:certScopeShape`, `_:certScopeProperty`) and its triples are
+/// emitted in a FIXED order. That is load-bearing, not cosmetic:
+/// `sparq_trust::graph::certification_message` folds each scope triple through
+/// `sparq_zk::encode::encode_triple`, which hashes a blank node BY ITS LABEL, in listed order.
+/// A fresh-label desugaring would therefore hash differently on every request and the
+/// certifier's signature — made over ITS OWN desugaring — could never verify. Fixing the
+/// labels + order makes the wire shape-scope a canonical, reproducible preimage: the certifier
+/// signs exactly this shape, and this function reconstructs it.
+///
+/// A certifier producing a shape-scoped edge for this endpoint must build the scope as:
+///
+/// ```text
+/// _:certScopeShape sh:targetSubjectsOf <P> .
+/// _:certScopeShape sh:property         _:certScopeProperty .
+/// _:certScopeProperty sh:path          <P> .
+/// _:certScopeProperty sh:minCount      "1" .        # a plain literal, not xsd:integer
+/// ```
+///
+/// (root = `_:certScopeShape`, triples in exactly that order). Anything else signs a
+/// different message and is rejected at the closure's signature gate — fail-closed, as an
+/// unverifiable edge should be. Fail-closed here too if the predicate is not a valid IRI.
+#[cfg(feature = "solid-authz-trust")]
+fn cert_scope_predicate_shape(predicate_iri: &str) -> Option<sparq_trust::policy::ShapeRef> {
+    predicate_shape_with_labels(
+        predicate_iri,
+        oxrdf::BlankNode::new(CERT_SCOPE_SHAPE_LABEL).expect("static label is valid"),
+        oxrdf::BlankNode::new(CERT_SCOPE_PROPERTY_LABEL).expect("static label is valid"),
+    )
+}
+
+/// [SONNET-4.6] (sq-sllu4) The shared single-predicate desugaring behind [`predicate_shape`]
+/// (fresh labels) and [`cert_scope_predicate_shape`] (canonical labels) — ONE construction, so
+/// the two can never structurally drift apart. Fail-closed if the IRI is not valid.
+#[cfg(feature = "solid-authz-trust")]
+fn predicate_shape_with_labels(
+    predicate_iri: &str,
+    root: oxrdf::BlankNode,
+    prop: oxrdf::BlankNode,
+) -> Option<sparq_trust::policy::ShapeRef> {
+    use oxrdf::{Literal, NamedNode, Term, Triple};
     let pred = NamedNode::new(predicate_iri).ok()?;
-    let root = BlankNode::default();
-    let prop = BlankNode::default();
     let sh_target_subjects_of = NamedNode::new("http://www.w3.org/ns/shacl#targetSubjectsOf")
         .expect("static IRI is valid");
     let sh_property = NamedNode::new("http://www.w3.org/ns/shacl#property")
@@ -729,12 +824,18 @@ fn predicate_shape(predicate_iri: &str) -> Option<sparq_trust::policy::ShapeRef>
 ///     "nowUnixSecs": 1720000000,
 ///     "rules": [ { "source": ..., "issuerKeyHex": ..., "scopeIri": ...,
 ///                  "freshWithinSecs": ..., "shapePredicateIri": ... }, ... ],
-///     "certifications": [ { ... }, ... ],
+///     "certifications": [ { ... , "scopeKind": "anyService" },
+///                         { ... , "scopeKind": "shape",
+///                                 "scopeShapePredicateIri": "https://schema.org/age" }, ... ],
 ///     "credentials": [ { "graphNquads": ..., "issuerSignatureHex": ...,
 ///                        "saltHex": ..., "issuedAtUnixSecs": ..., "revoked": ... }, ... ]
 ///   }
 /// }
 /// ```
+///
+/// A `"shape"`-scoped certification (`sq-sllu4`) narrows the certified issuer to ONE
+/// statement type; the shape the certifier must sign over is the canonical desugaring
+/// documented on `cert_scope_predicate_shape`.
 ///
 /// # Fail-closed invariant
 ///
@@ -926,15 +1027,25 @@ fn trust_authz_decide(
                 );
             }
         };
-        let scope = if wire.scope_kind_any_service {
-            CertScope::AnyService
-        } else {
-            // Fail-closed: only AnyService is currently supported; non-AnyService scopes
-            // deny until the shape-scope wire format is specified (sq-pfae.17 follow-up).
-            return json_response(
-                StatusCode::FORBIDDEN,
-                trust_deny_json("certification scopeKind not supported"),
-            );
+        let scope = match &wire.scope {
+            WireCertScope::AnyService => CertScope::AnyService,
+            // [SONNET-4.6] (sq-sllu4) A shape scope is the CANONICAL single-predicate
+            // desugaring the certifier signed over — see `cert_scope_predicate_shape`. The
+            // closure still has to PROVE it narrows the certifier's anchor; a scope that does
+            // not (e.g. a predicate the anchor never covered) contributes nothing.
+            WireCertScope::Shape { predicate_iri } => {
+                match cert_scope_predicate_shape(predicate_iri) {
+                    Some(shape) => CertScope::Shape(shape),
+                    None => {
+                        return json_response(
+                            StatusCode::FORBIDDEN,
+                            trust_deny_json(
+                                "certification 'scopeShapePredicateIri' is not a valid IRI",
+                            ),
+                        );
+                    }
+                }
+            }
         };
         certifications.push(Certification {
             certifier: certifier_iri,
@@ -1939,4 +2050,120 @@ mod odrl_tests {
         let store = lane(&req, Mode::Read).expect("rule-less policy is a no-op");
         assert!(!reads_n1(&store, ALICE), "no grant appears from a literal marker");
     }
+}
+
+// ── [SONNET-4.6] sq-sllu4 — unit tests for the `CertScope::Shape` certification wire
+// format. Gated on `solid-authz-trust` (zero code otherwise), one DIRECT test per new fn
+// (coverage ratchet).
+#[cfg(all(test, feature = "solid-authz-trust"))]
+mod trust_wire_tests {
+    use super::*;
+
+// ── [SONNET-4.6] sq-sllu4 — the `CertScope::Shape` certification wire format ─────────
+//
+// Direct unit tests for the two functions the shape-scope wire format adds: the parser
+// branch and the CANONICAL desugaring. The end-to-end derivation (a signed shape-scoped
+// edge deriving a rule that grants) is pinned by
+// `tests/solid_authz_trust.rs::shape_scoped_certification_derives_rule_and_grants`.
+
+/// Parse a JSON object literal into the map `parse_wire_certification` consumes.
+#[cfg(feature = "solid-authz-trust")]
+fn cert_obj(v: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    v.as_object().expect("test fixture is an object").clone()
+}
+
+/// A wire certification object with every non-scope field present and well-formed.
+#[cfg(feature = "solid-authz-trust")]
+fn cert_fixture(scope: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    let mut obj = cert_obj(serde_json::json!({
+        "certifierIri": "https://gov.example/framework",
+        "certifierKeyHex": "00",
+        "certifiedIssuerIri": "https://issuer.example/dvs",
+        "certifiedKeyHex": "00",
+        "validFromUnixSecs": 0_i64,
+        "validUntilUnixSecs": 9_999_999_999_i64,
+        "signatureHex": "aabbcc"
+    }));
+    for (k, v) in cert_obj(scope) {
+        obj.insert(k, v);
+    }
+    obj
+}
+
+#[cfg(feature = "solid-authz-trust")]
+#[test]
+fn wire_cert_scope_kinds_parse_or_fail_closed() {
+    // "anyService" — the pre-existing kind, unchanged.
+    let any = parse_wire_certification(&cert_fixture(
+        serde_json::json!({ "scopeKind": "anyService" }),
+    ))
+    .expect("anyService parses");
+    assert!(matches!(any.scope, WireCertScope::AnyService));
+
+    // "shape" + a predicate IRI — the new kind.
+    let shaped = parse_wire_certification(&cert_fixture(serde_json::json!({
+        "scopeKind": "shape",
+        "scopeShapePredicateIri": "https://schema.org/age"
+    })))
+    .expect("shape + predicate parses");
+    match shaped.scope {
+        WireCertScope::Shape { ref predicate_iri } => {
+            // [SONNET-4.6] POSITIONAL format args (CodeQL guard).
+            assert_eq!(predicate_iri, "https://schema.org/age");
+        }
+        _ => panic!("expected a shape scope"),
+    }
+
+    // "shape" with NO predicate is UNSPECIFIED, not wider — fail closed.
+    assert!(
+        parse_wire_certification(&cert_fixture(serde_json::json!({ "scopeKind": "shape" })))
+            .is_err(),
+        "a 'shape' scope without 'scopeShapePredicateIri' must fail closed"
+    );
+    // An unmodelled kind is never silently widened to AnyService.
+    assert!(
+        parse_wire_certification(&cert_fixture(
+            serde_json::json!({ "scopeKind": "somethingElse" })
+        ))
+        .is_err(),
+        "an unknown scopeKind must fail closed"
+    );
+}
+
+#[cfg(feature = "solid-authz-trust")]
+#[test]
+fn cert_scope_shape_is_canonical_and_reproducible() {
+    // The load-bearing property: the desugaring is a FUNCTION of the predicate IRI alone.
+    // `certification_message` hashes each scope triple (blank nodes BY LABEL, in listed
+    // order), so a certifier signing its own copy of this shape must reconstruct the same
+    // preimage the server does. Fresh labels would break that on every request.
+    let a = cert_scope_predicate_shape("https://schema.org/age").expect("valid predicate");
+    let b = cert_scope_predicate_shape("https://schema.org/age").expect("valid predicate");
+    assert_eq!(a.root, b.root, "the shape root is canonical, not fresh");
+    assert_eq!(a.triples, b.triples, "the shape triples are canonical, in a fixed order");
+    assert_eq!(
+        a.root.to_string(),
+        format!("_:{}", CERT_SCOPE_SHAPE_LABEL),
+        "the root carries the documented canonical label"
+    );
+    assert_eq!(a.triples.len(), 4, "the documented four-triple desugaring");
+
+    // A different predicate is a different shape (the scope actually scopes something).
+    let other = cert_scope_predicate_shape("https://schema.org/name").expect("valid");
+    assert_ne!(a.triples, other.triples, "the predicate is bound into the shape");
+
+    // The fresh-label sibling is deliberately NOT canonical — the two differ by label.
+    let fresh_a = predicate_shape("https://schema.org/age").expect("valid");
+    let fresh_b = predicate_shape("https://schema.org/age").expect("valid");
+    assert_ne!(
+        fresh_a.root, fresh_b.root,
+        "predicate_shape mints fresh labels (only the cert-scope variant is canonical)"
+    );
+
+    // Fail-closed on a predicate that is not an IRI.
+    assert!(
+        cert_scope_predicate_shape("not an iri").is_none(),
+        "an invalid predicate IRI must fail closed"
+    );
+}
 }
