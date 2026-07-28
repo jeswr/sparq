@@ -161,13 +161,17 @@ def _self_test():
 
     R = ["status:ready"]
 
-    # --- Fixture: an impl issue → fable-led chain, no escalate ------------------------------------
+    # --- Fixture: an impl issue → OPUS5-ONLY chain + escalate -------------------------------------
+    # [OPUS-5] maintainer decision 2026-07-26 on the registry #738 measurement ("Remove sol from
+    # impl fallback"): sol 18% vs opus5 86% in-cell first-attempt yield, n=74. The WHOLE chain is
+    # asserted, not its head — the planner row is what the registry's CLAIM step compares for EXACT
+    # equality, so a demoted-not-removed sol must red here too.
     impl = compute_ready([iss(1, R + ["priority:P1", "role:impl", "area:sparq-core"])])
     p_impl = plan_dispatch(impl, doc)
     chk("impl -> single row", len(p_impl), 1)
     row = p_impl[0]
-    chk("impl row", (row["role"], row["model_chain"][0], row["agent"], row["escalate"]),
-        ("impl", "opus5", "sparq-rust-impl", False))
+    chk("impl row", (row["role"], row["model_chain"], row["agent"], row["escalate"]),
+        ("impl", ["opus5"], "sparq-rust-impl", True))
     chk("impl package", row["package"], "sparq-core")
     chk("impl priority", row["priority"], 1)
 

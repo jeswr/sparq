@@ -152,17 +152,21 @@ pub struct Suite {
 ///   `FLOOR = 52` (sq-oy1f.2; RAISED 51→52 by sq-oy1f.28 flipping the lane to the
 ///   native document-level `sparq_jsonld::from_rdf` oracle; opt-in `jsonld-suite`
 ///   feature).
-/// * JSON-LD compact 228 — `sparq-conformance` `src/floors/compact.rs`
-///   `FLOOR = 228` (sq-3uos5 163; RAISED →186 by sq-oy1f.16; RE-PINNED →228 by
+/// * JSON-LD compact 243 — `sparq-conformance` `src/floors/compact.rs`
+///   `FLOOR = 243` (sq-3uos5 163; RAISED →186 by sq-oy1f.16; RE-PINNED →228 by
 ///   sq-oy1f.27's oracle correction to the native document-level Compaction
-///   Algorithm vs the W3C EXPECTED document; opt-in `jsonld-suite` feature).
+///   Algorithm vs the W3C EXPECTED document; RAISED →243 by sq-gzsky RUNNING the
+///   17 NegativeEvaluationTests against `expectErrorCode`; opt-in `jsonld-suite`
+///   feature).
 /// * JSON-LD frame 92 — `sparq-conformance` `src/floors/frame.rs`
 ///   `FLOOR = 92` (sq-oy1f.19; RE-PINNED 61→92 by sq-oy1f.29 flipping the lane from
 ///   the RDF-first framer to the NATIVE document-level Framing Algorithm compared to
 ///   the W3C EXPECTED document with `json_ld_equal` (negatives RUN, not skipped);
 ///   opt-in `jsonld-suite` feature; over the SEPARATE w3c/json-ld-framing suite).
-/// * JSON-LD expand 259 — `sparq-conformance` `src/floors/expand.rs`
-///   `FLOOR = 259` (sq-oy1f.37 expand() correctness raise from 240; opt-in
+/// * JSON-LD expand 381 — `sparq-conformance` `src/floors/expand.rs`
+///   `FLOOR = 381` (sq-oy1f.37 expand() correctness raise from 240; →276 by
+///   sq-oy1f.45; →381 by sq-gzsky RUNNING the 109 NegativeEvaluationTests against
+///   `expectErrorCode` plus seven spec-faithful `sparq-jsonld` fixes; opt-in
 ///   `jsonld-suite` feature; the expand lane now calls `sparq_jsonld::expand()`
 ///   directly and compares the result to the expected document via `json_ld_equal`
 ///   — a document-level JSON comparator measuring JSON-LD data-model (semantic)
@@ -493,7 +497,8 @@ pub const SUITES: &[Suite] = &[
         floor_basis: "pass",
         note: "native document-level Compaction Algorithm (sparq-jsonld), compared \
                against the W3C EXPECTED compacted document (json_ld_equal — the \
-               normative document oracle)",
+               normative document oracle); NegativeEvaluationTests RUN against the \
+               manifest expectErrorCode since sq-gzsky (a wrong code is a FAIL)",
     },
     // [OPUS-4.8] sq-oy1f.19 — the W3C JSON-LD 1.1 `frame` ratchet (epic sq-oy1f),
     // over the SEPARATE w3c/json-ld-framing suite (fetch-jsonld-framing-tests.sh).
@@ -540,7 +545,11 @@ pub const SUITES: &[Suite] = &[
     // pass count with the corrected oracle at the pinned suite revision, sq-kk1mq), then
     // RAISED to 259 by sq-oy1f.37 (three expand() correctness fixes: value-object
     // @type collapse, empty-array-property retention, free-floating value/list drop —
-    // rise-only ratchet).
+    // rise-only ratchet), then to 276 by sq-oy1f.45 (FsLoader wiring + six more fixes).
+    // [OPUS-5] sq-gzsky — RAISED 276 → 381: the 109-case NegativeEvaluationTest SKIP
+    // bucket (the whole expand gap) is closed — the lane now RUNS the negatives against
+    // the manifest's `expectErrorCode` — plus seven spec-faithful sparq-jsonld fixes.
+    // See src/floors/expand.rs for the itemised fix list and the 4 remaining fails.
     // [FABLE-5] sq-oy1f.26 — the flatten lane ALSO moved to the native document oracle
     // (sparq_jsonld::flatten() = expand ∘ node-map ∘ fold, compared via json_ld_equal),
     // re-pinned off the old RDF-writer oracle.  It composes over expand(), so it inherits
@@ -562,7 +571,9 @@ pub const SUITES: &[Suite] = &[
         note: "native sparq_jsonld::expand() + json_ld_equal semantic-equivalence comparator \
                (sq-kk1mq; NOT structural identity — ~18/240 passes are reordered, \
                strict-ordered count 222; re-baseline from 247 under RDF-equivalence \
-               oracle sq-oy1f); options forwarded (base, expandContext, processingMode)",
+               oracle sq-oy1f); options forwarded (base, expandContext, processingMode); \
+               NegativeEvaluationTests RUN against the manifest expectErrorCode since \
+               sq-gzsky (a wrong code is a FAIL, never a pass)",
     },
     Suite {
         label: "W3C JSON-LD 1.1 flatten",

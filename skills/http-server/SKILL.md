@@ -808,8 +808,23 @@ active segment, never a partial segment — under a `RetentionPolicy` composing 
 watermark (a HARD safety bound: any unacked record keeps its segment), `max_age`, and
 `max_total_bytes` pressure; the default policy is a no-op and nothing is ever dropped implicitly.
 A `poll` from a trimmed-away offset **fails closed** (never a silent skip) — consumers resume from
-`ChangeLog::first_seq`. A `ChangeSink` trait for an external broker (Kafka/NATS) is
-tracked as a **separate later opt-in** (deferred follow-up bead `sq-l6zks`).
+`ChangeLog::first_seq`.
+**External-broker sink (`sq-l6zks`, gh-3216) — the separate, heavier `sparq-serve` opt-in
+`change-sink` (default OFF, implies `change-stream`).** `change_sink::ChangeSink` is the pluggable
+broker seam; `BrokerRelay::open(dir, consumer, sink, config)` + `pump()` is the resumable pump from
+that durable log to a sink, carrying a **durable delivered-through watermark** (persisted as
+`changesink-<consumer>.offset` beside the segments) so a restarted process resumes rather than
+replays. Delivery is **at-least-once** — the watermark is persisted after the sink's `flush`, so
+consumers dedupe on `sequenceNumber`; the partition key is CONSTANT per stream so a partitioned
+broker preserves commit order; a re-base gap record is delivered as an explicit `"op": "REBASE"`
+entry, never as an empty commit. The relay runs **off the writer thread** (a broker outage stalls
+the relay, never commits), and feeding `delivered_through_seq()` into
+`RetentionPolicy::acked_through_seq` keeps retention from trimming past it (a trimmed watermark
+fails the pump closed). One in-tree sink ships — `NatsSink` (core NATS over plain TCP, std-only,
+**no TLS**). There is deliberately **no in-tree Kafka client**: Kafka (and TLS/SASL/retries) is
+reached by implementing `ChangeSink` over the host's own client, so no broker client and no async
+runtime enter the library-first crate. Payloads are plaintext, unsigned JSON — same boundary as the
+backup family — so pointing a relay at a broker is a data-egress decision.
 **Recording seam (`sq-bdaw5`):** install `ChangeLog::into_commit_hook(on_error)` via
 `Writer::spawn_with_commit_hook` and every commit-publish is recorded **on the writer thread** —
 one append+fsync per PUBLISHED GENERATION, gapless by construction (the writer is the sole
@@ -853,17 +868,18 @@ token (pass as `at=`/`after=`), `lastSequenceNumber`, `totalRecords` (commit cou
 `hasMoreRecords`. A poll is a READ (gated by the read auth). A sequence-anchored `iteratorType` with
 no anchor is a fail-closed `400` (never a silent replay-all). With the feature off the route + the
 recording hook are `#[cfg]`-stripped (byte-identical); with it on, recording rides the sequenced
-writer's group commit and does not serialise submitters. The `ChangeSink` broker trait stays a
-separate later opt-in (`sq-l6zks`).
+writer's group commit and does not serialise submitters. Relaying that log onward to an external
+broker is the separate `sparq-serve` `change-sink` opt-in (`sq-l6zks`, above), not part of this
+endpoint.
 
 **`GET /queries` + `DELETE /queries/{id}` — running-query registry (`sparq-server` feature
 `query-registry`, default OFF; sq-qsm5z, [SONNET-4.6]).** An opt-in in-memory registry of
 currently executing SPARQL queries, providing GraphDB query-monitoring and kill parity.
 
 - **`GET /queries`** — READ-gated (fail-closed). Returns `{"queries":[…]}` where each entry
-  carries `id` (opaque hex), `start` (Unix epoch ms), `fingerprint` (FNV-1a hex — a
-  NON-REVERSIBLE hash of the trimmed query text, never raw text per the #241 / sq-m9prn
-  audit-log posture), and `elapsed_ms`. Sorted by `id` (registration order).
+  carries `id` (opaque hex), `kind` (`"query"` or `"update"`), `start` (Unix epoch ms),
+  `fingerprint` (FNV-1a hex of the trimmed query text — never raw text, per the #241 /
+  sq-m9prn audit-log posture), and `elapsed_ms`. Sorted by `id` (registration order).
 - **`DELETE /queries/{id}`** — WRITE-gated (fail-closed). Cooperatively cancels the named
   query by flipping the `sq-kq9ia` `Arc<AtomicBool>` cancel flag wired into its `QueryBudget`.
   The engine observes it at the next poll site and aborts. Returns `204 No Content` on success;
@@ -871,8 +887,29 @@ currently executing SPARQL queries, providing GraphDB query-monitoring and kill 
 - **RAII lifetime**: each executing SELECT/ASK/CONSTRUCT/DESCRIBE/**EXPLAIN (plan + analyze)**
   registers on start and deregisters on completion, error, or panic — the entry is always cleaned
   up. (EXPLAIN ANALYZE wiring added in sq-t1isr, [SONNET-4.6].)
-- **Fingerprint-only**: the `GET /queries` listing NEVER exposes raw query text; only the
-  non-reversible fingerprint is visible, satisfying the audit-log discipline.
+- **SPARQL UPDATEs are registered too** (`kind: "update"`; sq-m9prn, [SONNET-4.6]). An UPDATE
+  registers when the sequenced writer thread STARTS applying it — not when it is queued — so a
+  row names exactly what is consuming the writer, which is the operation whose cancellation
+  also unblocks every write queued behind it. The flag reaches the `DELETE/INSERT … WHERE`
+  evaluation (the engine installs the UPDATE's `QueryBudget` thread-locally for the whole
+  update). A cancelled UPDATE is **rejected, not partially applied**: the writer forks per
+  batch and seals only on success, so the store is left at its pre-update state and the writer
+  keeps serving. Non-WHERE operations (`INSERT DATA`, `CLEAR`/`DROP`, …) do not consult the
+  budget, so they are listed but complete rather than cancel.
+- **Fingerprint-only — and what that does NOT buy you (honest boundary).** The `GET /queries`
+  listing never exposes raw query or update text; only the fingerprint is visible, satisfying
+  the audit-log redaction discipline. But the construction is **FNV-1a: an unkeyed, 64-bit,
+  non-cryptographic checksum**. It is a *stable correlation tag*, **not** a confidentiality
+  boundary and **not** a one-way function in any cryptographic sense: anyone who can read the
+  listing can hash candidate texts offline and confirm a match, so a guessable — or
+  low-entropy, or template-generated — body is recoverable by search, and 64 bits resists
+  neither exhaustive guessing of a small candidate set nor collision search. This matters most
+  for `kind: "update"`, whose `INSERT DATA` body can embed secrets or personal data: the
+  fingerprint stops the payload being *transmitted*, it does not stop it being *guessed*. Treat
+  the fingerprint as sensitive metadata, keep `/queries` behind its READ gate (it is
+  fail-closed), and do not rely on it to protect update content from a party who already has
+  read access. (Keying the fingerprint — e.g. an HMAC under a per-process secret — would close
+  the offline-guessing gap and is tracked as follow-up work, not shipped here.)
 - **Zero cost when feature is OFF**: no `AppState` fields, no routes; byte-identical to before.
 
 ```sh

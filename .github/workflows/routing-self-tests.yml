@@ -57,6 +57,12 @@ on:
       - "scripts/triage.py"
       - "scripts/retriage.py"
       - ".github/workflows/triage-issue.yml"
+      # [OPUS-5] the retriage CRON itself: TestRetriageCronSeam asserts this workflow
+      # still passes --apply, is unconditional and keeps issues:write. Without the
+      # trigger, the one edit that guard exists to catch would not run it.
+      - ".github/workflows/retriage.yml"
+      # ...and the workflow that self-tests triage.py + retriage.py on every PR.
+      - ".github/workflows/docs-quality.yml"
       # [OPUS-5] the maintainer front door (#1135 / #4145) — the curated TOML, the renderer
       # that drops resolved entries from it, and the suite that pins both plus the
       # refresh-start-here.yml wiring.
@@ -115,6 +121,12 @@ on:
       - "scripts/triage.py"
       - "scripts/retriage.py"
       - ".github/workflows/triage-issue.yml"
+      # [OPUS-5] the retriage CRON itself: TestRetriageCronSeam asserts this workflow
+      # still passes --apply, is unconditional and keeps issues:write. Without the
+      # trigger, the one edit that guard exists to catch would not run it.
+      - ".github/workflows/retriage.yml"
+      # ...and the workflow that self-tests triage.py + retriage.py on every PR.
+      - ".github/workflows/docs-quality.yml"
       # [OPUS-5] the maintainer front door (#1135 / #4145) — the curated TOML, the renderer
       # that drops resolved entries from it, and the suite that pins both plus the
       # refresh-start-here.yml wiring.
