@@ -159,6 +159,22 @@ def _routing_doc():
         return tomllib.load(fh)
 
 
+def _registry_contract():
+    """[OPUS-5] sparq#4819 — the names jeswr/agent-account-registry reads off THIS module.
+
+    Deliberately DATA (`orchestration/registry-contract.toml`) rather than a constant in this
+    file: the registry DEGRADES silently on a missing attribute, so the only thing that can catch
+    a rename is an expectation a rename sweep over `scripts/` does not reach. Opened unguarded —
+    an unreadable or malformed contract file must abort `--self-test`, never be skipped, because
+    "the contract could not be read" and "the contract is satisfied" are the two states this whole
+    mechanism exists to keep apart.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    toml = os.path.join(os.path.dirname(here), "orchestration", "registry-contract.toml")
+    with open(toml, "rb") as fh:
+        return tomllib.load(fh)
+
+
 def _self_test():
     doc = _routing_doc()
     ok = True
@@ -271,12 +287,17 @@ def _self_test():
     # what must hold is the behaviour of the other repo's code against this file, and an
     # approximation of it can agree with us while the real one refuses.
     #
-    # THE NAMES ARE STRING LITERALS ON PURPOSE. They are the REGISTRY's wire names, not ours to
-    # rename: dispatch.yml hard-codes "INERT_FIELD"/"MACHINE_PARK_PR_LABEL", so renaming the
-    # Python constant here — however consistently across sparq's own prod and tests — silently
-    # returns the pipeline to NOT STAMPED. Reading them through `getattr(module, "<literal>")` is
-    # what makes such a rename RED here instead of green-and-dead in production.
-    _WIRE_NAMES = ("INERT_FIELD", "MACHINE_PARK_PR_LABEL")
+    # THE NAMES COME FROM DATA, NOT FROM THIS FILE. They are the REGISTRY's wire names, not ours
+    # to rename: dispatch.yml hard-codes "INERT_FIELD"/"MACHINE_PARK_PR_LABEL", so renaming the
+    # Python constant — however consistently across sparq's own prod and tests — silently returns
+    # the pipeline to NOT STAMPED. Holding the expectation in `orchestration/registry-contract.toml`
+    # is what makes such a rename RED here instead of green-and-dead in production: a rename sweep
+    # over `scripts/` cannot carry the expectation along with the thing it is checking. MEASURED:
+    # renaming the identifier in prod AND every sparq test leaves ready-issues.py 9/9 green and
+    # reds three rows here; a blind textual rename that ALSO rewrote the literals in this file was
+    # green until the expectation moved out of it.
+    _contract = _registry_contract()["planner_exports"]
+    _WIRE_NAMES = tuple(_contract["required_attributes"])
 
     def _as_registry_loads_it():
         """This file, loaded byte-for-byte the way `load_dispatch` loads it — not `globals()`.
@@ -318,18 +339,18 @@ def _self_test():
                        "unattested one")
 
     _mod = _as_registry_loads_it()
-    # (a) THE NAME. Renaming either constant — in prod, or in prod AND every sparq test together —
-    # makes this red, because the expectation is the registry's literal, which no sparq-side
-    # rename reaches.
-    chk("[sparq#4819] dispatch-plan exports the registry's two wire names, as strings",
-        sorted(name for name in _WIRE_NAMES
-               if isinstance(getattr(_mod, name, None), str)), sorted(_WIRE_NAMES))
+    # (a) THE NAMES. Every attribute the registry reads off this module must be PRESENT on it, as
+    # loaded. `roleless_ready`/`ready_candidates` ride along because they degrade the same silent
+    # way and had no module-level assertion either.
+    chk("[sparq#4819] dispatch-plan exports every name registry-contract.toml declares",
+        sorted(name for name in _WIRE_NAMES if not hasattr(_mod, name)), [])
     # (b) THE VALUES. `MACHINE_PARK_PR_LABEL` is a real GitHub label and `INERT_FIELD` is the key
-    # the registry writes onto the occupancy row (`row[field] = ...`); both are wire values, so a
-    # "tidy-up" of either detaches this engine from the attestations it is sent.
+    # the registry WRITES onto the occupancy row (`row[field] = ...`); both are wire values, so a
+    # "tidy-up" of either detaches this engine from the attestations it is sent. Compared as a
+    # whole mapping so a name dropped from the contract file is as red as a value changed.
     chk("[sparq#4819] ...bound to the wire VALUES the registry writes",
-        (getattr(_mod, "INERT_FIELD", None), getattr(_mod, "MACHINE_PARK_PR_LABEL", None)),
-        ("inert", "review:parked"))
+        {name: getattr(_mod, name, None) for name in _contract["values"]},
+        dict(_contract["values"]))
     # (c) THE BEHAVIOUR, through THIS module's compute_ready. Asserted on the full (field, why)
     # pair, not on truthiness: every refusal path returns (None, <reason>), and the reason names
     # which half broke — so this row reports the registry's own diagnosis rather than "not ok".
