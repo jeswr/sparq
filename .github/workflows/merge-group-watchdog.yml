@@ -1,0 +1,94 @@
+# [OPUS-5] sparq-org/sparq#4652 — recover a merge-group ref GitHub Actions never
+# dispatched, in minutes instead of the ruleset's 60-minute CI_TIMEOUT.
+#
+# WHY: measured 2026-07-27/28, PR #4534's merge-group ref was created at 23:04:37Z with
+# ZERO check-suites and deleted at 00:05:04Z when the queue timed it out. It held
+# position 1 in AWAITING_CHECKS the whole time — the queue merges strictly in order and
+# each entry needs its OWN group's required check, so three PRs with already-green
+# groups could not land. Total cost: 73 min 41 s of zero merges and ~66 min of group CI
+# thrown away on the rebuild. The full diagnosis is on #4652.
+#
+# NOT A GATE. Schedule / workflow_dispatch only — it never runs on a PR head, never
+# produces a check-run the `ci-summary` aggregator can see, and can therefore never
+# block a merge. Its only mutations are (a) a marker comment and (b) a dequeue +
+# re-enqueue of an entry it has POSITIVELY established has zero check-suites. Every
+# ambiguous reading is a refusal, not an action (see the script header).
+#
+# Cadence is every 5 minutes — the GitHub scheduler minimum — against a 300 s grace, so
+# worst-case detection is ~10 min against the 60-min timeout it replaces. The grace is
+# ~100x the MEASURED create->first-suite latency on this repo (single-digit seconds; see
+# the script's DEFAULT_GRACE_SECONDS note). Minutes are offset from auto-arm.yml's and
+# rearm-sweeper.yml's crons so the three sweeps do not start together.
+name: merge-group watchdog
+
+on:
+  schedule:
+    - cron: "2,7,12,17,22,27,32,37,42,47,52,57 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Emit decisions without dequeuing/re-enqueuing anything"
+        type: boolean
+        default: false
+
+# Least privilege, mirroring rearm-sweeper.yml (the sibling queue sweeper):
+#   contents: read       — the repository ACTIVITY api (branch_creation timestamps),
+#                          which is the only exact merge-group build-time anchor.
+#   checks: read         — the load-bearing predicate: check-SUITE count on the group head.
+#   pull-requests: write — the marker comment + the dequeue/enqueue mutations.
+permissions:
+  contents: read
+  checks: read
+  pull-requests: write
+
+concurrency:
+  group: merge-group-watchdog
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    name: recover zero-dispatch merge groups
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Secrets are not readable from step `if:` expressions — mirror the id into env
+      # so the mint step can be skipped fail-soft when the App is not configured.
+      ORCHESTRATOR_APP_ID: ${{ secrets.ORCHESTRATOR_APP_ID }}
+    steps:
+      - name: Mint the sparq-orchestrator App token (re-enqueue must fire queue events)
+        id: app-token
+        if: env.ORCHESTRATOR_APP_ID != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.ORCHESTRATOR_APP_ID }}
+          private-key: ${{ secrets.ORCHESTRATOR_APP_PRIVATE_KEY }}
+
+      # Always execute the trusted default-branch policy, including on manual dispatch.
+      - name: Checkout watchdog policy
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          # gh_retry.py is the watchdog's bounded transient-retry dependency — the
+          # self-test below imports it, so a missing path fails BEFORE the live sweep.
+          sparse-checkout: |
+            scripts/merge-group-watchdog.py
+            scripts/gh_retry.py
+          sparse-checkout-cone-mode: false
+
+      - name: Self-test policy
+        run: |
+          python3 scripts/gh_retry.py --self-test
+          python3 scripts/merge-group-watchdog.py --self-test
+
+      - name: Sweep the merge queue for zero-dispatch groups
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          DRY_RUN: ${{ inputs.dry_run && '--dry-run' || '' }}
+        run: >-
+          python3 scripts/merge-group-watchdog.py sweep
+          --repo "$REPO"
+          --branch "$DEFAULT_BRANCH"
+          $DRY_RUN
