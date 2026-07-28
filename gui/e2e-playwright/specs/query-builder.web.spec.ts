@@ -16,6 +16,7 @@
 //   [data-tool-panel="query-builder"]  — the panel root
 //   [data-qb-canvas]                   — the SVG canvas
 //   [data-qb-node]                     — a node group
+//   [data-qb-class="<iri>"]            — one class in the picker (data-backed OR shape-declared)
 //   [data-qb-suggestion="<iri>"]       — one predicate suggestion
 //   #query-builder-sparql              — the generated-SPARQL textarea
 //   [data-qb-open-in-query]            — hand off to the Query tool
@@ -26,6 +27,20 @@
 import { webTest as test, webExpect as expect } from "../support/index.ts";
 
 const FOAF = "http://xmlns.com/foaf/0.1/";
+const SH = "http://www.w3.org/ns/shacl#";
+const EX = "http://example.org/";
+
+// A SHACL shape targeting a class NO instance in the sample graph carries. It is the whole point
+// of "shape-aware": the class and its declared property must be reachable from the UI even though
+// the data says nothing about either.
+const GHOST_CLASS = `${EX}Ghost`;
+const GHOST_PATH = `${EX}spookiness`;
+const GHOST_SHAPE_INSERT =
+  `INSERT DATA { <${EX}GhostShape> <${SH}targetClass> <${GHOST_CLASS}> . ` +
+  `<${EX}GhostShape> <${SH}property> <${EX}GhostShapeSpookiness> . ` +
+  `<${EX}GhostShapeSpookiness> <${SH}path> <${GHOST_PATH}> . ` +
+  `<${EX}GhostShapeSpookiness> <${SH}datatype> ` +
+  `<http://www.w3.org/2001/XMLSchema#integer> . }`;
 
 // Set a React-controlled <textarea> the way the rest of this suite does (workbench-query.spec.ts):
 // via the native value setter + an `input` event, so React's synthetic event system sees it.
@@ -118,6 +133,37 @@ test.describe("query-builder (web persona)", () => {
     await expect(sparql).toHaveValue(/FILTER NOT EXISTS/);
     // The negated leaf cannot be projected — the panel says so rather than emitting a broken query.
     await expect(panel.locator("[data-qb-warning]").first()).toContainText("AND-NOT");
+  });
+
+  test("a SHACL target class with zero instances is selectable and yields its shape-only property", async ({
+    page,
+  }) => {
+    // Bring a shape into the live store whose target class no instance carries.
+    await page.locator('[data-tool="query"]').click();
+    await setEditorValue(page, "#repl-query", GHOST_SHAPE_INSERT);
+    await page.getByRole("button", { name: "Run query" }).click();
+    await expect(page.locator('[data-result-kind="update"]')).toBeVisible();
+
+    await page.locator('[data-tool="query-builder"]').click();
+    const panel = page.locator('[data-tool-panel="query-builder"]');
+    // The panel introspects once on mount, which may have happened before the INSERT above.
+    await panel.getByRole("button", { name: "Refresh schema" }).click();
+
+    // REACHABILITY: the shape-declared class is offered by the picker, labelled honestly — it has
+    // no instances, so it can never come from classesQuery().
+    const ghost = panel.locator(`[data-qb-class="${GHOST_CLASS}"]`);
+    await expect(ghost).toBeVisible();
+    await expect(ghost).toContainText("shape only");
+
+    // Selecting it builds a real query over that class…
+    await ghost.click();
+    await expect(page.locator("#query-builder-sparql")).toHaveValue(/\?ghost a ex:Ghost/);
+
+    // …and its shape-declared property is suggested, marked as declared-not-observed.
+    const spookiness = panel.locator(`[data-qb-suggestion="${GHOST_PATH}"]`);
+    await expect(spookiness).toBeVisible();
+    await expect(spookiness).toContainText("SHACL shape");
+    await expect(spookiness).toContainText("not used yet");
   });
 
   test("editing the generated SPARQL detaches it from the canvas until Regenerate", async ({

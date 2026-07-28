@@ -28,6 +28,7 @@
 //   [data-qb-canvas]                   — the SVG canvas
 //   [data-qb-add-node]                 — "Add node"
 //   [data-qb-node]                     — a node group (with data-qb-node-id)
+//   [data-qb-class="<iri>"]            — one class in the picker (data-backed OR shape-declared)
 //   #query-builder-sparql              — the generated-SPARQL textarea
 //   [data-qb-warning]                  — one honest warning row
 //   [data-qb-open-in-query]            — hand off to the Query tool
@@ -60,6 +61,7 @@ import {
   emptyModel,
   linkTargetsQuery,
   localName,
+  mergeClassOptions,
   mergeSuggestions,
   parseClassRows,
   parsePredicateRows,
@@ -72,6 +74,7 @@ import {
   type BuilderEdge,
   type BuilderModel,
   type BuilderNode,
+  type ClassOption,
   type ClassStat,
   type EdgeMode,
   type FilterOp,
@@ -190,6 +193,10 @@ export function QueryBuilderTool() {
 
   const built = React.useMemo(() => buildSparql(model), [model]);
   const sparql = edited ?? built.sparql;
+
+  // What the class pickers offer. A `sh:targetClass` with no instances yet has to be selectable
+  // here, or its shape-declared properties stay unreachable however good the suggestions are.
+  const classOptions = React.useMemo(() => mergeClassOptions(classes, shapes), [classes, shapes]);
 
   // The SVG grows to hold whatever has been dragged where, so the canvas scrolls instead of
   // clipping a node the user pushed off the right edge.
@@ -602,7 +609,7 @@ export function QueryBuilderTool() {
           {selectedNode ? (
             <NodeInspector
               node={selectedNode}
-              classes={classes}
+              classes={classOptions}
               suggestions={activeSuggestions}
               schema={schema}
               linking={linkFrom === selectedNode.id}
@@ -628,7 +635,7 @@ export function QueryBuilderTool() {
             <ResultShapePanel
               model={model}
               outputs={built.projected}
-              classes={classes}
+              classes={classOptions}
               shapes={shapes}
               schema={schema}
               onPatch={(patch) => setModel((m) => ({ ...m, ...patch }))}
@@ -842,6 +849,10 @@ const fieldClass =
 const sectionClass = "border-b px-3 py-2";
 const labelClass = "mb-1 block text-[10px] font-medium uppercase tracking-wide text-muted-foreground";
 
+/** What a class picker shows on the right: a real instance count, or the shape-only provenance. */
+const classOptionCount = (c: ClassOption) =>
+  c.instances === null ? "shape only" : c.instances.toLocaleString();
+
 function NodeInspector({
   node,
   classes,
@@ -857,7 +868,7 @@ function NodeInspector({
   onRemoveFilter,
 }: {
   node: BuilderNode;
-  classes: ClassStat[];
+  classes: ClassOption[];
   suggestions: PredicateSuggestion[] | null;
   schema: SchemaState;
   linking: boolean;
@@ -908,12 +919,13 @@ function NodeInspector({
           onChange={(e) => onPatch({ classIri: e.target.value || null })}
         >
           <option value="">(any — no rdf:type constraint)</option>
+          {/* Shape-declared classes with no instances are in here too — see mergeClassOptions. */}
           {classes.map((c) => (
             <option key={c.iri} value={c.iri}>
-              {localName(c.iri)} · {c.instances.toLocaleString()}
+              {localName(c.iri)} · {classOptionCount(c)}
             </option>
           ))}
-          {/* A class chosen from a shape may have no instances yet — keep it selectable. */}
+          {/* A class that has since vanished from the store stays selectable, honestly labelled. */}
           {node.classIri && !classes.some((c) => c.iri === node.classIri) ? (
             <option value={node.classIri}>{localName(node.classIri)} (not in the data)</option>
           ) : null}
@@ -1182,7 +1194,7 @@ function ResultShapePanel({
 }: {
   model: BuilderModel;
   outputs: string[];
-  classes: ClassStat[];
+  classes: ClassOption[];
   shapes: ShapeProperty[];
   schema: SchemaState;
   onPatch: (patch: Partial<BuilderModel>) => void;
@@ -1257,8 +1269,9 @@ function ResultShapePanel({
           <p className="text-[11px] text-destructive">Introspection failed: {schema.message}</p>
         ) : classes.length === 0 ? (
           <p className="text-[11px] text-muted-foreground">
-            No <code>rdf:type</code> statements in the store yet. Import data (or add an untyped
-            node and type the predicates yourself), then Refresh schema.
+            No <code>rdf:type</code> statements in the store yet, and no SHACL shape declares a
+            target class. Import data or shapes (or add an untyped node and type the predicates
+            yourself), then Refresh schema.
           </p>
         ) : (
           <ul className="flex flex-col gap-1">
@@ -1268,11 +1281,16 @@ function ResultShapePanel({
                   type="button"
                   className="flex w-full items-center gap-1 rounded-md border bg-background px-2 py-1 text-left text-[11px] hover:bg-accent"
                   onClick={() => onAddNodeOfClass(c.iri)}
-                  title={c.iri}
+                  title={
+                    c.instances === null
+                      ? `${c.iri} — declared by a SHACL sh:targetClass; no instance carries it yet`
+                      : c.iri
+                  }
+                  data-qb-class={c.iri}
                 >
                   <span className="truncate">{localName(c.iri)}</span>
                   <span className="ml-auto shrink-0 text-muted-foreground">
-                    {c.instances.toLocaleString()}
+                    {classOptionCount(c)}
                   </span>
                 </button>
               </li>

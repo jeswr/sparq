@@ -210,9 +210,11 @@ interface ProjectionItem {
  *     because it is correct for this shape whether or not the inner group shares a variable —
  *     MINUS silently matches nothing when the two sides are disjoint.
  *
- * A node that is ONLY reachable through optional/negated edges (a pure leaf target) has its own
- * class + attribute patterns emitted INSIDE that group, which is what "optional branch" means;
- * emitting them outside would quietly make the branch mandatory.
+ * A soft (optional/negated) edge is lowered as a BRANCH, not as a lone triple: the whole
+ * sub-graph whose only binding path runs through it — the target's class + attribute patterns,
+ * the required links hanging off the target, and any further soft links below them (nested) —
+ * is emitted INSIDE that group. Emitting any of it at the top level would quietly make the
+ * branch mandatory, so `?a OPTIONAL→ ?b OPTIONAL→ ?c` never forces `?b` to exist.
  */
 export function buildSparql(model: BuilderModel): BuiltQuery {
   const warnings: string[] = [];
@@ -257,31 +259,57 @@ export function buildSparql(model: BuilderModel): BuiltQuery {
     return true;
   });
 
-  // --- which nodes belong inside an optional / negated group --------------------------------
-  // A pure leaf target: no required edge touches it, it is never a source, and at least one
-  // soft (optional / not) edge points at it.
-  const hasRequired = new Set<string>();
-  const isSource = new Set<string>();
-  const softTarget = new Set<string>();
+  // --- scope analysis: the mandatory body vs the soft branches -------------------------------
+  // A soft (optional / not) edge is a BRANCH, not just one triple: every node whose only binding
+  // path runs through it belongs INSIDE that group, together with the links hanging off it. A
+  // REQUIRED edge binds both of its endpoints, so required edges fuse nodes into one component
+  // that is always emitted as a unit — either wholly mandatory or wholly inside one branch.
+  const requiredNeighbours = new Map<string, string[]>(model.nodes.map((n) => [n.id, []]));
+  const inDegree = new Map<string, number>(model.nodes.map((n) => [n.id, 0]));
   for (const e of edges) {
-    isSource.add(e.from);
-    if (e.mode === "required") {
-      hasRequired.add(e.from);
-      hasRequired.add(e.to);
-    } else {
-      softTarget.add(e.to);
-    }
+    inDegree.set(e.to, (inDegree.get(e.to) ?? 0) + 1);
+    if (e.mode !== "required") continue;
+    requiredNeighbours.get(e.from)!.push(e.to);
+    requiredNeighbours.get(e.to)!.push(e.from);
   }
-  const deferred = new Set(
-    model.nodes
-      .filter((n) => !hasRequired.has(n.id) && !isSource.has(n.id) && softTarget.has(n.id))
-      .map((n) => n.id),
-  );
-  // A node whose only home is a NOT group can never be projected — its variable is not in scope.
-  const negatedOnly = new Set<string>();
-  for (const id of deferred) {
-    const incoming = edges.filter((e) => e.to === id);
-    if (incoming.length > 0 && incoming.every((e) => e.mode === "not")) negatedOnly.add(id);
+
+  /** The required-connected component of `id`, in canvas order. */
+  const componentOf = (id: string): BuilderNode[] => {
+    const seen = new Set([id]);
+    const stack = [id];
+    while (stack.length > 0) {
+      for (const other of requiredNeighbours.get(stack.pop()!) ?? []) {
+        if (seen.has(other)) continue;
+        seen.add(other);
+        stack.push(other);
+      }
+    }
+    return model.nodes.filter((n) => seen.has(n.id));
+  };
+
+  // The mandatory scope is seeded by the nodes nothing points at — the unconditional entry
+  // points — and grown across required edges. Everything else is deferred into the soft branch
+  // that reaches it, so a node reachable only through an optional/negated link stays inside it.
+  const mandatory = new Set<string>();
+  const anchor = (id: string) => {
+    for (const n of componentOf(id)) mandatory.add(n.id);
+  };
+  for (const n of model.nodes) if (inDegree.get(n.id) === 0) anchor(n.id);
+
+  // Every node still needs a home: a cycle of links (?a → ?b → ?a) has no unconditional entry
+  // point, so anchor the first unreachable node rather than silently dropping its patterns.
+  for (;;) {
+    const reached = new Set(mandatory);
+    for (;;) {
+      const next = edges.find(
+        (e) => e.mode !== "required" && reached.has(e.from) && !reached.has(e.to),
+      );
+      if (!next) break;
+      for (const n of componentOf(next.to)) reached.add(n.id);
+    }
+    const orphan = model.nodes.find((n) => !reached.has(n.id));
+    if (!orphan) break;
+    anchor(orphan.id);
   }
 
   // --- pattern emission ---------------------------------------------------------------------
@@ -320,37 +348,62 @@ export function buildSparql(model: BuilderModel): BuiltQuery {
     bound.add(e.to);
   }
 
+  const edgeLine = (e: BuilderEdge) =>
+    `?${nodeVar.get(e.from)} ${iri(e.predicateIri)} ?${nodeVar.get(e.to)} .`;
+
+  /** One node's own patterns plus the required links hanging off it. */
+  const withRequired = (node: BuilderNode): string[] => {
+    const out = nodeLines(node);
+    for (const e of edges) if (e.mode === "required" && e.from === node.id) out.push(edgeLine(e));
+    return out;
+  };
+
+  /**
+   * Soft links out of `ids`, OPTIONALs first — both for readability and because a deferred
+   * node's own patterns must land in an optional branch that can BIND it, never inside a
+   * negation (where they would constrain the negated pattern instead).
+   */
+  const softOut = (ids: ReadonlySet<string>): BuilderEdge[] => [
+    ...edges.filter((e) => e.mode === "optional" && ids.has(e.from)),
+    ...edges.filter((e) => e.mode === "not" && ids.has(e.from)),
+  ];
+
+  /** Nodes whose patterns landed inside a FILTER NOT EXISTS — their variables are out of scope. */
+  const outOfScope = new Set<string>();
+  const emitted = new Set<string>();
+
+  /** One soft link as a group: its triple, the sub-graph only it reaches, then nested branches. */
+  const softGroup = (e: BuilderEdge, negated: boolean): string[] => {
+    const inNegation = negated || e.mode === "not";
+    const inner = [edgeLine(e)];
+    const inside = new Set<string>();
+    // Only the FIRST branch to reach a component carries it; a later link to the same node is
+    // just its own triple, so the patterns are stated once and correlate across the branches.
+    if (!emitted.has(e.to)) {
+      for (const node of componentOf(e.to)) {
+        emitted.add(node.id);
+        inside.add(node.id);
+        if (inNegation) outOfScope.add(node.id);
+        inner.push(...withRequired(node));
+      }
+    }
+    for (const child of softOut(inside)) inner.push(...softGroup(child, inNegation));
+    const keyword = e.mode === "optional" ? "OPTIONAL" : "FILTER NOT EXISTS";
+    return [`${keyword} {`, ...inner.map((l) => `  ${l}`), `}`];
+  };
+
   const body: string[] = [];
   for (const node of model.nodes) {
-    if (deferred.has(node.id)) continue;
-    const block = nodeLines(node);
-    for (const e of edges) {
-      if (e.from !== node.id || e.mode !== "required") continue;
-      block.push(`?${nodeVar.get(e.from)} ${iri(e.predicateIri)} ?${nodeVar.get(e.to)} .`);
-    }
-    body.push(...block);
+    if (!mandatory.has(node.id)) continue;
+    emitted.add(node.id);
+    body.push(...withRequired(node));
     if (node.project && !bound.has(node.id)) {
       warnings.push(
         `Node ?${nodeVar.get(node.id)} has no class, attribute or link, so nothing binds it.`,
       );
     }
   }
-
-  // OPTIONAL groups BEFORE the negations — both for readability and because a deferred node's
-  // own class/attribute patterns must land in the optional branch that can bind it, never inside
-  // a negation (where they would constrain the negated pattern instead).
-  const emittedInside = new Set<string>();
-  const softEdge = (e: BuilderEdge) => {
-    const inner = [`?${nodeVar.get(e.from)} ${iri(e.predicateIri)} ?${nodeVar.get(e.to)} .`];
-    if (deferred.has(e.to) && !emittedInside.has(e.to)) {
-      emittedInside.add(e.to);
-      inner.push(...nodeLines(byId.get(e.to)!));
-    }
-    const keyword = e.mode === "optional" ? "OPTIONAL" : "FILTER NOT EXISTS";
-    body.push(`${keyword} {`, ...inner.map((l) => `  ${l}`), `}`);
-  };
-  for (const e of edges) if (e.mode === "optional") softEdge(e);
-  for (const e of edges) if (e.mode === "not") softEdge(e);
+  for (const e of softOut(mandatory)) body.push(...softGroup(e, false));
 
   // --- projection ---------------------------------------------------------------------------
   const projection: ProjectionItem[] = [];
@@ -369,7 +422,7 @@ export function buildSparql(model: BuilderModel): BuiltQuery {
   for (const node of model.nodes) {
     const variable = nodeVar.get(node.id)!;
     if (node.project) {
-      if (negatedOnly.has(node.id)) {
+      if (outOfScope.has(node.id)) {
         warnings.push(
           `?${variable} is only reached through an AND-NOT link, so it is out of scope — not projected.`,
         );
@@ -387,7 +440,7 @@ export function buildSparql(model: BuilderModel): BuiltQuery {
         );
         continue;
       }
-      if (negatedOnly.has(node.id)) {
+      if (outOfScope.has(node.id)) {
         warnings.push(`?${variable2} is inside an AND-NOT group, so it is out of scope — not projected.`);
         continue;
       }
@@ -699,6 +752,36 @@ export function parseShapeRows(results: SparqlResults): ShapeProperty[] {
 // ---------------------------------------------------------------------------
 // Suggestions — shapes ⊕ data
 // ---------------------------------------------------------------------------
+
+/** One entry in the class picker, carrying whether the data actually contains the class. */
+export interface ClassOption {
+  iri: string;
+  /** Instances observed in the live store; null when only a `sh:targetClass` declares it. */
+  instances: number | null;
+}
+
+/**
+ * The classes the pickers offer: everything observed in the data (in the query's
+ * most-instantiated-first order) followed by every `sh:targetClass` the store's shapes declare
+ * but no instance carries yet, by local name.
+ *
+ * Without this second group a shape-declared class with zero instances would be unreachable from
+ * the UI — and with it, every shape-only property suggestion for that class. The `instances: null`
+ * marker is what lets the picker say "declared, not in the data" instead of implying a count.
+ */
+export function mergeClassOptions(
+  data: readonly ClassStat[],
+  shapes: readonly ShapeProperty[],
+): ClassOption[] {
+  const observed = new Set(data.map((c) => c.iri));
+  const declared = [...new Set(shapes.map((s) => s.targetClass))]
+    .filter((iri) => !observed.has(iri))
+    .sort((a, b) => localName(a).localeCompare(localName(b)) || a.localeCompare(b));
+  return [
+    ...data.map((c) => ({ iri: c.iri, instances: c.instances })),
+    ...declared.map((iri) => ({ iri, instances: null })),
+  ];
+}
 
 /** Whether the picker should offer this predicate as a link (to a node) or an attribute (a value). */
 export type SuggestionKind = "link" | "attribute" | "mixed" | "unknown";

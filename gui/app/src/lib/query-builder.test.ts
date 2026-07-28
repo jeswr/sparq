@@ -18,6 +18,7 @@ import {
   emptyModel,
   linkTargetsQuery,
   localName,
+  mergeClassOptions,
   mergeSuggestions,
   parseClassRows,
   parsePredicateRows,
@@ -31,6 +32,7 @@ import {
   type BuilderEdge,
   type BuilderModel,
   type BuilderNode,
+  type ClassStat,
   type PredicateStat,
   type PredicateSuggestion,
   type ShapeProperty,
@@ -325,6 +327,117 @@ test("an AND-NOT link becomes FILTER NOT EXISTS and its leaf target is not proje
   );
   assert.deepEqual(built.projected, ["person"]);
   assert.match(built.warnings.join(" "), /AND-NOT/);
+});
+
+/**
+ * The mandatory part of the WHERE: everything before the first soft group. Nothing reachable
+ * only through an OPTIONAL / AND-NOT link may appear here, or the branch is silently mandatory.
+ */
+function mandatoryPart(sparql: string): string {
+  const where = sparql.slice(sparql.indexOf("WHERE {"));
+  const soft = where.search(/OPTIONAL \{|FILTER NOT EXISTS \{/);
+  return soft >= 0 ? where.slice(0, soft) : where;
+}
+
+/** ?person OPTIONAL→ ?employer OPTIONAL→ ?city — a three-node walk, both links soft. */
+function optionalChain(secondMode: BuilderEdge["mode"]): BuilderModel {
+  return model({
+    nodes: [
+      node({ id: "n1", variable: "person", classIri: `${FOAF}Person`, project: true }),
+      node({ id: "n2", variable: "employer", classIri: `${EX}Company`, project: true }),
+      node({ id: "n3", variable: "city", classIri: `${EX}City`, project: true }),
+    ],
+    edges: [
+      edge({ id: "e1", from: "n1", to: "n2", predicateIri: `${EX}worksAt`, mode: "optional" }),
+      edge({ id: "e2", from: "n2", to: "n3", predicateIri: `${EX}locatedIn`, mode: secondMode }),
+    ],
+  });
+}
+
+test("OPTIONAL → OPTIONAL nests: no intermediate-node constraint reaches the mandatory body", () => {
+  const built = buildSparql(optionalChain("optional"));
+  // ?employer is reachable only through the optional link, so NOTHING about it (nor about the
+  // ?city below it) may be mandatory — otherwise the whole walk is silently forced to exist.
+  const mandatory = mandatoryPart(built.sparql);
+  assert.ok(!mandatory.includes("?employer"), mandatory);
+  assert.ok(!mandatory.includes("?city"), mandatory);
+  assert.ok(
+    flat(built.sparql).includes(
+      "OPTIONAL { ?person ex:worksAt ?employer . ?employer a ex:Company . " +
+        "OPTIONAL { ?employer ex:locatedIn ?city . ?city a ex:City . } }",
+    ),
+    built.sparql,
+  );
+  // Each class triple is stated exactly once, in the branch that binds it.
+  assert.equal(built.sparql.split("?employer a").length - 1, 1);
+  assert.equal(built.sparql.split("?city a").length - 1, 1);
+  assert.deepEqual(built.projected, ["person", "employer", "city"]);
+});
+
+test("OPTIONAL → REQUIRED lowers the whole required sub-graph inside the OPTIONAL", () => {
+  const built = buildSparql(optionalChain("required"));
+  const mandatory = mandatoryPart(built.sparql);
+  assert.ok(!mandatory.includes("?employer"), mandatory);
+  assert.ok(!mandatory.includes("?city"), mandatory);
+  // A required link BELOW a soft one is required *given the branch matched*, so it belongs in
+  // the same group — hoisting it would make ?employer and ?city mandatory after all.
+  assert.ok(
+    flat(built.sparql).includes(
+      "OPTIONAL { ?person ex:worksAt ?employer . ?employer a ex:Company . " +
+        "?employer ex:locatedIn ?city . ?city a ex:City . }",
+    ),
+    built.sparql,
+  );
+  assert.ok(!built.sparql.includes("OPTIONAL {\n  ?employer ex:locatedIn"), built.sparql);
+  assert.deepEqual(built.projected, ["person", "employer", "city"]);
+});
+
+test("AND-NOT → REQUIRED keeps the whole sub-graph inside the negation, and out of scope", () => {
+  const built = buildSparql(
+    model({
+      nodes: [
+        node({ id: "n1", variable: "person", classIri: `${FOAF}Person`, project: true }),
+        node({ id: "n2", variable: "boss", classIri: `${EX}Manager`, project: true }),
+        node({ id: "n3", variable: "city", classIri: `${EX}City`, project: true }),
+      ],
+      edges: [
+        edge({ id: "e1", from: "n1", to: "n2", predicateIri: `${FOAF}knows`, mode: "not" }),
+        edge({ id: "e2", from: "n2", to: "n3", predicateIri: `${EX}locatedIn` }),
+      ],
+    }),
+  );
+  const mandatory = mandatoryPart(built.sparql);
+  assert.ok(!mandatory.includes("?boss"), mandatory);
+  assert.ok(!mandatory.includes("?city"), mandatory);
+  assert.ok(
+    flat(built.sparql).includes(
+      "FILTER NOT EXISTS { ?person foaf:knows ?boss . ?boss a ex:Manager . " +
+        "?boss ex:locatedIn ?city . ?city a ex:City . }",
+    ),
+    built.sparql,
+  );
+  // Neither variable is in scope outside the negation, so neither may be projected.
+  assert.deepEqual(built.projected, ["person"]);
+  assert.equal(built.warnings.filter((w) => w.includes("AND-NOT")).length, 2);
+});
+
+test("a link cycle with no unconditional entry point still emits every node's patterns", () => {
+  const built = buildSparql(
+    model({
+      nodes: [
+        node({ id: "n1", variable: "a", classIri: `${EX}A` }),
+        node({ id: "n2", variable: "b", classIri: `${EX}B` }),
+      ],
+      edges: [
+        edge({ id: "e1", from: "n1", to: "n2", predicateIri: `${EX}next` }),
+        edge({ id: "e2", from: "n2", to: "n1", predicateIri: `${EX}prev` }),
+      ],
+    }),
+  );
+  assert.ok(built.sparql.includes("?a a ex:A ."), built.sparql);
+  assert.ok(built.sparql.includes("?b a ex:B ."), built.sparql);
+  assert.ok(built.sparql.includes("?a ex:next ?b ."), built.sparql);
+  assert.ok(built.sparql.includes("?b ex:prev ?a ."), built.sparql);
 });
 
 test("a required link keeps both endpoints in the mandatory BGP", () => {
@@ -638,4 +751,38 @@ test("mergeSuggestions works with no shapes at all (data-only pickers)", () => {
     ["data", "data", "data"],
   );
   assert.deepEqual(merged.map((s) => s.uses), [10, 6, 4]);
+});
+
+const observedClasses: ClassStat[] = [
+  { iri: `${FOAF}Person`, instances: 12 },
+  { iri: `${EX}Note`, instances: 3 },
+];
+
+test("mergeClassOptions makes a zero-instance sh:targetClass selectable, marked as shape-only", () => {
+  // ex:Ghost is declared by a shape and carried by no instance — without it in the options the
+  // class is unreachable from every picker, and its shape-only properties with it.
+  const ghost: ShapeProperty = {
+    targetClass: `${EX}Ghost`,
+    path: `${EX}spookiness`,
+    objectClass: null,
+    datatype: "http://www.w3.org/2001/XMLSchema#integer",
+    name: null,
+    required: false,
+  };
+  const options = mergeClassOptions(observedClasses, [...shapeProps, ghost]);
+  assert.deepEqual(options, [
+    { iri: `${FOAF}Person`, instances: 12 },
+    { iri: `${EX}Note`, instances: 3 },
+    { iri: `${EX}Ghost`, instances: null },
+  ]);
+});
+
+test("mergeClassOptions never duplicates or re-counts a class the data already has", () => {
+  // foaf:Person is both observed and shape-targeted: one entry, keeping the observed count.
+  const options = mergeClassOptions(observedClasses, shapeProps);
+  assert.deepEqual(options, [
+    { iri: `${FOAF}Person`, instances: 12 },
+    { iri: `${EX}Note`, instances: 3 },
+  ]);
+  assert.deepEqual(mergeClassOptions([], []), []);
 });
