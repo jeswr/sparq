@@ -1322,6 +1322,50 @@ class TestRoutingSelfTestWorkflowWiring(unittest.TestCase):
             self.assertEqual(paths_section.count(f'"{script}"'), 2,
                              f"{script} must be a path trigger on BOTH pull_request and push")
 
+    # [OPUS-5] sparq#4819 review, S8. The rule above covers the SCRIPTS the gate runs. It says
+    # nothing about the DATA those scripts assert against, and `dispatch-plan.py --self-test` now
+    # asserts the shipped `orchestration/registry-contract.toml` (the names the registry reads off
+    # that module). Dropping that file from both `paths:` filters survived the entire suite —
+    # including every test in this class — because a data file is not an invoked script. That is
+    # the same silent-invisibility class the contract file exists to close, one layer out, in the
+    # half whose whole thesis is "pin the wiring".
+    #
+    # DERIVED, not listed. A hard-coded tuple here would be one more written statement that has to
+    # be remembered; scanning the invoked scripts for the orchestration data they actually open
+    # means a NEW data input demands its own trigger with no edit to this file. The derivation is
+    # asserted non-empty and asserted to have found the known inputs, because a regex that silently
+    # matches nothing is the way this kind of check fails — quietly, toward "nothing to report".
+    _DATA_REF = re.compile(r'orchestration/([A-Za-z0-9._-]+\.(?:toml|json))'
+                           r'|"orchestration",\s*"([A-Za-z0-9._-]+\.(?:toml|json))"')
+
+    def _declared_data_inputs(self):
+        found = {}
+        for script in self.INVOKED:
+            text = (REPO_ROOT / script).read_text(encoding="utf-8")
+            for match in self._DATA_REF.finditer(text):
+                name = match.group(1) or match.group(2)
+                found.setdefault(f"orchestration/{name}", set()).add(script)
+        return found
+
+    def test_the_data_input_derivation_is_not_vacuous(self):
+        found = self._declared_data_inputs()
+        # A KNOWN-POSITIVE control: these two are read by the gate's own scripts today, so a
+        # derivation that cannot see them cannot see a third one either.
+        self.assertLessEqual({"orchestration/routing.toml",
+                              "orchestration/registry-contract.toml"}, set(found), found)
+        for path in found:
+            self.assertTrue((REPO_ROOT / path).is_file(),
+                            f"{path} is referenced by a gated script but does not exist")
+
+    def test_every_orchestration_data_input_is_a_path_trigger(self):
+        paths_section = self._paths_section()
+        for path, readers in sorted(self._declared_data_inputs().items()):
+            self.assertEqual(
+                paths_section.count(f'"{path}"'), 2,
+                f"{path} is asserted against by {sorted(readers)} but is not a path trigger on "
+                "BOTH pull_request and push — it could change without re-running the gate that "
+                "reads it")
+
     def test_gate_is_not_declared_advisory(self):
         # [OPUS-5] Guards the rule that is LIVE. ci-summary's discovery changed on
         # 2026-07-25 (#3773): a check is non-gating iff it is EXPLICITLY DECLARED in
