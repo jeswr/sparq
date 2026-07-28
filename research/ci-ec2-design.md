@@ -75,6 +75,27 @@ and must stay **under $5/month**. This is the security + cost design.
    > **not** widened to compensate, so a role that can launch EC2 instances is not over-permitted.
    > Anyone recreating or repointing the role must apply the checklist below.
 
+3. **Permissions policy** — least-privilege, tag-scoped so CI can only touch its own instances:
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [
+       { "Effect": "Allow", "Action": ["ec2:RunInstances"], "Resource": "*",
+         "Condition": { "StringEquals": { "aws:RequestTag/purpose": "sparq-ci-bench" } } },
+       { "Effect": "Allow", "Action": ["ec2:CreateTags"], "Resource": "*",
+         "Condition": { "StringEquals": { "ec2:CreateAction": "RunInstances" } } },
+       { "Effect": "Allow", "Action": ["ec2:TerminateInstances","ec2:DescribeInstances","ec2:DescribeInstanceStatus","ec2:DescribeSpotInstanceRequests"], "Resource": "*",
+         "Condition": { "StringEquals": { "ec2:ResourceTag/purpose": "sparq-ci-bench" } } },
+       { "Effect": "Allow", "Action": ["ec2:DescribeImages","ec2:DescribeSubnets","ec2:DescribeSecurityGroups"], "Resource": "*" }
+     ]
+   }
+   ```
+   No IAM, no S3-write beyond a single results prefix (add an S3 statement only if results go via
+   S3). The role can launch/terminate ONLY `purpose=sparq-ci-bench`-tagged instances.
+4. Set the role ARN as a **repo *variable*** (not a secret — an ARN isn't sensitive):
+   `AWS_BENCH_ROLE_ARN`.
+5. **Budget backstop:** an AWS Budgets monthly alarm at $5 on the `purpose=sparq-ci-bench` tag.
+
 ### Trust-policy hardening checklist (MAINTAINER — requires AWS console access)
 
 **No agent has, or should have, AWS credentials.** Nothing in this repo can apply any of this; it is
@@ -109,26 +130,6 @@ this role safe for a *public* repository whose CI can spend money.
    spending money) but it was never written down, and it is now the lane's only supported trigger
    since #3785 retired the cron. **Decide and record:** keep the pin (dispatch must be from `main`),
    or widen it deliberately to an enumerated allowlist — never to `repo:sparq-org/sparq:*`, per (3).
-3. **Permissions policy** — least-privilege, tag-scoped so CI can only touch its own instances:
-   ```json
-   {
-     "Version": "2012-10-17",
-     "Statement": [
-       { "Effect": "Allow", "Action": ["ec2:RunInstances"], "Resource": "*",
-         "Condition": { "StringEquals": { "aws:RequestTag/purpose": "sparq-ci-bench" } } },
-       { "Effect": "Allow", "Action": ["ec2:CreateTags"], "Resource": "*",
-         "Condition": { "StringEquals": { "ec2:CreateAction": "RunInstances" } } },
-       { "Effect": "Allow", "Action": ["ec2:TerminateInstances","ec2:DescribeInstances","ec2:DescribeInstanceStatus","ec2:DescribeSpotInstanceRequests"], "Resource": "*",
-         "Condition": { "StringEquals": { "ec2:ResourceTag/purpose": "sparq-ci-bench" } } },
-       { "Effect": "Allow", "Action": ["ec2:DescribeImages","ec2:DescribeSubnets","ec2:DescribeSecurityGroups"], "Resource": "*" }
-     ]
-   }
-   ```
-   No IAM, no S3-write beyond a single results prefix (add an S3 statement only if results go via
-   S3). The role can launch/terminate ONLY `purpose=sparq-ci-bench`-tagged instances.
-4. Set the role ARN as a **repo *variable*** (not a secret — an ARN isn't sensitive):
-   `AWS_BENCH_ROLE_ARN`.
-5. **Budget backstop:** an AWS Budgets monthly alarm at $5 on the `purpose=sparq-ci-bench` tag.
 
 ## The workflow (`.github/workflows/bench-ec2.yml`)
 

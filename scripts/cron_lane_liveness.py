@@ -53,6 +53,47 @@
 #      This catches the shape rule A cannot: `cancelled`-at-the-timeout-ceiling
 #      (the miri shape) and a lane that simply stopped firing.
 #
+# DETECTOR LANES: WHY `failure` IS NOT ALWAYS AN ILLNESS SIGNAL
+# -------------------------------------------------------------
+# Rules A and B both read the RUN CONCLUSION as a proxy for lane health. For
+# most lanes that is right. For a DETECTOR lane it is exactly wrong: a detector
+# exits non-zero when it FINDS something, so red is its verdict, not its
+# breakage. Two such lanes are in this scan set today —
+# `scripts/review_lane_alarm.py:504` `return 1` immediately after printing
+# `::error::N open PR(s) have no countable review verdict…`, and
+# `scripts/formal_lane_alarm.py:283` `return 1`, commented "LOUD: the alarm run
+# itself goes red while any lane is verdict-less." Judged by A/B, a working
+# review-alarm reads as a dead lane for as long as the review blind spot it
+# reports persists — a false positive against a lane that is doing its job.
+# False alarms train people to ignore alarms, which is the failure this whole
+# file exists to prevent, so this is not a threshold to widen.
+#
+#   V. A lane may DECLARE, in its OWN YAML, that its non-zero exit is a verdict:
+#      a line `# cron-liveness: verdict-lane` at column 0 (anchored there so the
+#      declaration cannot be smuggled in from inside an indented `run:` block).
+#      The declaration lives with the lane, so it moves and dies with the lane —
+#      there is still no central table to rot, which was the whole design.
+#
+#      A declared lane is NOT muted. Rules A and B are replaced by rule V:
+#      raise unless some completed scheduled run inside `threshold_hours`
+#      actually SPOKE — conclusion in {success, failure}, the detector's own two
+#      exit states. `cancelled` / `timed_out` / `startup_failure` are NOT
+#      verdicts (the detector never got to speak), so the miri
+#      cancelled-at-ceiling shape and a lane that stops firing altogether still
+#      raise on a declared lane exactly as they do on any other.
+#
+#      HONEST BLIND SPOT, stated rather than hidden: a detector whose own
+#      infrastructure is broken also exits non-zero, and the runs API cannot
+#      distinguish that from a finding. On a declared lane that failure mode is
+#      invisible here. That is the cost of the declaration, and it is why the
+#      declaration is per-lane and printed in the run summary
+#      (status LIVE-VERDICT-LANE) rather than inferred — a reader can see which
+#      lanes are on the reduced rule. Inferring it instead from
+#      `.github/advisory-registry.json` was rejected: that registry answers
+#      "may this check block a merge", which is a strictly wider set — `asan.yml`
+#      is declared advisory there and is precisely a lane whose nightly red DOES
+#      mean it is broken.
+#
 # FAIL-SAFE IN THE QUIET DIRECTION (mandated: false alarms train people to
 # ignore alarms, which is how this class recurs). NONE of these raise:
 #   * a lane with zero completed scheduled runs (never ran yet);
@@ -70,6 +111,16 @@
 #     skipping WRONGLY goes quiet here. That is the deliberate trade — those runs
 #     are reported in the run summary as DELIBERATELY-INERT so they are visible
 #     to a reader even though they raise nothing.
+#
+# QUIET IS NOT RECOVERED
+# ----------------------
+# The five states above are QUIET; only one of them is EVIDENCE OF HEALTH. An
+# open alarm is auto-closed IFF `rec["recovered"]` — a real `success` inside the
+# window (or, on a declared verdict-lane, a real verdict inside the window) —
+# and the closing comment quotes that evidence. A lane that goes disabled, loses
+# its run history, or starts skipping keeps its alarm OPEN, and main() prints it
+# as LEFT OPEN. Closing on "it stopped raising" would state something false and
+# re-create, inside the fix, the invisibility this file exists to end.
 #
 # EXIT CODES — and why they differ from formal_lane_alarm.py
 # ----------------------------------------------------------
@@ -109,6 +160,7 @@ import datetime as dt
 import functools
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -125,6 +177,20 @@ INVISIBLE_TRIGGERS = frozenset({"schedule", "workflow_dispatch"})
 
 # Conclusions that count as a hard, loud failure for rule A.
 HARD_FAILURES = frozenset({"failure", "timed_out", "startup_failure"})
+
+# Conclusions that mean a DETECTOR lane's run actually SPOKE: `success` = it
+# found nothing, `failure` = it found something and said so. Everything else
+# (cancelled / timed_out / startup_failure / action_required / stale / neutral)
+# means the run never produced a verdict, so it is not evidence of life even on
+# a declared verdict-lane.
+VERDICT_CONCLUSIONS = frozenset({"success", "failure"})
+
+# A cron-only lane declares "my non-zero exit is my VERDICT, not my breakage"
+# with this line in its own workflow YAML. Anchored at column 0 and matching the
+# WHOLE line: an indented occurrence (inside a `run:` block, a heredoc, a
+# fixture) does NOT declare, and neither does a prose mention of the token.
+VERDICT_LANE_MARKER = re.compile(r"^#[ \t]*cron-liveness:[ \t]*verdict-lane[ \t]*$",
+                                 re.MULTILINE)
 
 GRACE_PERIODS = 3.0      # missed ticks tolerated before rule B fires
 MIN_GRACE_HOURS = 6.0    # floor: GitHub cron jitter on sub-hourly lanes
@@ -309,6 +375,16 @@ def workflow_crons(doc: dict) -> list[str]:
             if isinstance(e, dict) and isinstance(e.get("cron"), str)]
 
 
+def workflow_declares_verdict_lane(text: str) -> bool:
+    """True iff the workflow's OWN text carries the column-0 declaration line.
+
+    Deliberately a whole-line, column-0 match rather than containment: an
+    indented copy inside a `run:` block cannot declare, and neither can a
+    sentence that merely names the token.
+    """
+    return VERDICT_LANE_MARKER.search(text) is not None
+
+
 def formal_alarm_watched(manifest: Path) -> set[str]:
     """Workflows already covered by formal-alarm.yml — read, never duplicated."""
     try:
@@ -331,7 +407,8 @@ def discover_cron_only_lanes(workflows_dir: Path,
     for path in sorted(list(workflows_dir.glob("*.yml"))
                        + list(workflows_dir.glob("*.yaml"))):
         try:
-            doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+            text = path.read_text(encoding="utf-8")
+            doc = yaml.safe_load(text)
         except (OSError, yaml.YAMLError) as exc:
             # An unreadable workflow is an INFRASTRUCTURE problem, not a quiet
             # skip: the scan would otherwise silently shrink its own scope.
@@ -347,6 +424,7 @@ def discover_cron_only_lanes(workflows_dir: Path,
             "workflow": path.name,
             "display_name": doc.get("name") or path.stem,
             "crons": workflow_crons(doc),
+            "verdict_lane": workflow_declares_verdict_lane(text),
         })
     return lanes
 
@@ -365,16 +443,25 @@ def classify_lane(lane: dict, state: str | None, runs: list[dict],
     `runs` = completed `event=schedule` runs, NEWEST FIRST, each
     {conclusion, created_at}.
     """
+    verdict_lane = bool(lane.get("verdict_lane"))
     rec: dict = {
         "workflow": lane["workflow"],
         "display_name": lane.get("display_name", lane["workflow"]),
         "crons": lane.get("crons", []),
+        "verdict_lane": verdict_lane,
         "raise_alarm": False,
         "status": "",
         "reason": "",
         "period_hours": None,
         "threshold_hours": None,
         "last_success": None,
+        "last_verdict": None,
+        "last_verdict_conclusion": None,
+        # POSITIVE evidence of a healthy recent run. Only this closes an open
+        # alarm — "quiet" is not "recovered" (a disabled / never-ran /
+        # deliberately-inert lane is quiet and still produces no verdict).
+        "recovered": False,
+        "recovery_evidence": "",
         "recent": [str(r.get("conclusion")) for r in runs[:8]],
         "rules_fired": [],
     }
@@ -417,43 +504,88 @@ def classify_lane(lane: dict, state: str | None, runs: list[dict],
     rec["last_success"] = last_success.isoformat() if last_success else None
     oldest_seen = min(_parse_iso(r["created_at"]) for r in considered)
 
-    # Rule A — N consecutive hard failures, spanning at least the jitter floor.
-    # The span condition is the quiet-direction fail-safe for FAST lanes: three
-    # consecutive failures of a `*/10` lane is 20 minutes, which is a transient,
-    # not a dead lane. On a daily lane the N failures span ~48h, so the floor is
-    # never the binding constraint there (bench-ec2 still raises on day three).
-    if (len(considered) >= CONSEC_FAILURES
-            and all(str(r.get("conclusion")) in HARD_FAILURES
-                    for r in considered[:CONSEC_FAILURES])):
-        oldest_of_streak = _parse_iso(considered[CONSEC_FAILURES - 1]["created_at"])
-        streak_hours = (now - oldest_of_streak).total_seconds() / 3600.0
-        if streak_hours >= MIN_GRACE_HOURS:
+    if verdict_lane:
+        # Rule V — this lane DECLARED that its non-zero exit is its verdict, so
+        # `failure` is evidence of life, not of illness. What must still hold is
+        # that the lane SPOKE recently: a run that was cancelled, timed out or
+        # never started produced no verdict and counts for nothing here, so the
+        # miri cancelled-at-ceiling shape and a lane that stopped firing raise
+        # on a declared lane exactly as on any other.
+        spoke = [r for r in considered
+                 if str(r.get("conclusion")) in VERDICT_CONCLUSIONS]
+        newest_run = max(spoke, key=lambda r: _parse_iso(r["created_at"]),
+                         default=None)
+        newest = _parse_iso(newest_run["created_at"]) if newest_run else None
+        rec["last_verdict"] = newest.isoformat() if newest else None
+        rec["last_verdict_conclusion"] = (
+            str(newest_run.get("conclusion")) if newest_run else None)
+        if newest is not None:
+            if (now - newest).total_seconds() / 3600.0 > threshold:
+                rec["rules_fired"].append(
+                    f"V: declared verdict-lane, but no scheduled run has produced "
+                    f"a verdict (`success` or `failure`) for >{threshold:.1f}h "
+                    f"({GRACE_PERIODS:g}× the {period:.1f}h cron period)")
+        elif (now - oldest_seen).total_seconds() / 3600.0 > threshold:
             rec["rules_fired"].append(
-                f"A: newest {CONSEC_FAILURES} scheduled runs all failed hard "
-                f"(spanning {streak_hours:.1f}h)")
+                f"V: declared verdict-lane that has never produced a verdict, "
+                f"and the lane has been running for >{threshold:.1f}h")
+    else:
+        # Rule A — N consecutive hard failures, spanning at least the jitter
+        # floor. The span condition is the quiet-direction fail-safe for FAST
+        # lanes: three consecutive failures of a `*/10` lane is 20 minutes,
+        # which is a transient, not a dead lane. On a daily lane the N failures
+        # span ~48h, so the floor is never the binding constraint there
+        # (bench-ec2 still raises on day three).
+        if (len(considered) >= CONSEC_FAILURES
+                and all(str(r.get("conclusion")) in HARD_FAILURES
+                        for r in considered[:CONSEC_FAILURES])):
+            oldest_of_streak = _parse_iso(considered[CONSEC_FAILURES - 1]["created_at"])
+            streak_hours = (now - oldest_of_streak).total_seconds() / 3600.0
+            if streak_hours >= MIN_GRACE_HOURS:
+                rec["rules_fired"].append(
+                    f"A: newest {CONSEC_FAILURES} scheduled runs all failed hard "
+                    f"(spanning {streak_hours:.1f}h)")
 
-    # Rule B — no green inside the derived window.
-    if last_success is not None:
-        if (now - last_success).total_seconds() / 3600.0 > threshold:
+        # Rule B — no green inside the derived window.
+        if last_success is not None:
+            if (now - last_success).total_seconds() / 3600.0 > threshold:
+                rec["rules_fired"].append(
+                    f"B: no successful scheduled run for >{threshold:.1f}h "
+                    f"({GRACE_PERIODS:g}× the {period:.1f}h cron period)")
+        elif (now - oldest_seen).total_seconds() / 3600.0 > threshold:
+            # Never succeeded — only actionable once the lane has had longer than
+            # the threshold to produce its first green (grace for a NEW lane).
             rec["rules_fired"].append(
-                f"B: no successful scheduled run for >{threshold:.1f}h "
-                f"({GRACE_PERIODS:g}× the {period:.1f}h cron period)")
-    elif (now - oldest_seen).total_seconds() / 3600.0 > threshold:
-        # Never succeeded — only actionable once the lane has had longer than the
-        # threshold to produce its first green (grace period for a NEW lane).
-        rec["rules_fired"].append(
-            f"B: never succeeded, and the lane has been running for "
-            f">{threshold:.1f}h")
+                f"B: never succeeded, and the lane has been running for "
+                f">{threshold:.1f}h")
 
     if rec["rules_fired"]:
         rec["raise_alarm"] = True
         rec["status"] = "DEAD"
         rec["reason"] = "; ".join(rec["rules_fired"])
+    elif verdict_lane:
+        rec["status"] = "LIVE-VERDICT-LANE"
+        if rec["last_verdict"]:
+            rec["recovered"] = True
+            rec["recovery_evidence"] = (
+                f"newest scheduled run {rec['last_verdict']} produced a verdict "
+                f"(`{rec['last_verdict_conclusion']}`); this lane declares that a "
+                f"red run is its FINDING, not its breakage")
+            rec["reason"] = (f"newest verdict {rec['last_verdict']} "
+                             f"(inside {threshold:.1f}h) — declared verdict-lane, "
+                             f"so `failure` counts as a verdict")
+        else:
+            rec["reason"] = "declared verdict-lane, within the new-lane grace period"
     else:
         rec["status"] = "LIVE"
-        rec["reason"] = (f"last success {rec['last_success']} "
-                         f"(inside {threshold:.1f}h)") if last_success else \
-            "within the new-lane grace period"
+        if last_success is not None:
+            rec["recovered"] = True
+            rec["recovery_evidence"] = (
+                f"newest successful scheduled run {rec['last_success']}")
+            rec["reason"] = (f"last success {rec['last_success']} "
+                             f"(inside {threshold:.1f}h)")
+        else:
+            rec["reason"] = "within the new-lane grace period"
     return rec
 
 
@@ -476,6 +608,14 @@ def render_issue(rec: dict) -> tuple[str, str]:
         "commit** — it is invisible to every signal the fleet watches. This lane "
         "is currently not producing verdicts.",
         "",
+        *([
+            "This lane carries the `# cron-liveness: verdict-lane` declaration, so a "
+            "`failure` conclusion is treated as its FINDING and never raises here. It "
+            "raised anyway: no scheduled run has concluded `success` **or** `failure` "
+            "inside the window — the runs were cancelled, timed out, never started, or "
+            "stopped happening, so the detector never got to speak.",
+            "",
+        ] if rec.get("verdict_lane") else []),
         "| | |",
         "|---|---|",
         f"| cron | `{'`, `'.join(rec['crons'])}` |",
@@ -484,6 +624,9 @@ def render_issue(rec: dict) -> tuple[str, str]:
         f"{MIN_GRACE_HOURS:g}h floor) | {rec['threshold_hours']:.1f}h |",
         f"| newest successful scheduled run | "
         f"{rec['last_success'] or '**NEVER** (none in the fetched window)'} |",
+        *([f"| newest run that produced a VERDICT (`success`/`failure`) | "
+           f"{rec['last_verdict'] or '**NEVER** (none in the fetched window)'} |"]
+          if rec.get("verdict_lane") else []),
         f"| recent conclusions (newest first) | `{rec['recent']}` |",
         "",
         "**Why this raised:**",
@@ -630,18 +773,43 @@ def upsert_issue(repo: str, rec: dict, existing: dict[str, int]) -> str:
              "--title", title, "--body", body])
         return f"updated #{number}"
     url = _gh(["gh", "issue", "create", "--repo", repo, "--title", title,
-               "--body", body, *sum((["--label", x] for x in BASE_LABELS), [])])
-    return f"filed {url.strip()}"
+               "--body", body, *sum((["--label", x] for x in BASE_LABELS), [])]).strip()
+    # VERIFY THE WRITE BY READING IT BACK. `gh issue create` can exit 0 having
+    # created NOTHING under a secondary content-creation rate limit, which no
+    # `rate_limit` field reports. Without the read-back this function would
+    # print "filed" and the finding would be silently dropped until the next
+    # tick — an exit-zero swallow of exactly the kind this alarm exists to end.
+    m = re.search(r"/issues/(\d+)$", url.splitlines()[-1].strip() if url else "")
+    if not m:
+        raise AlarmError(
+            f"{rec['workflow']}: `gh issue create` exited 0 but returned no issue "
+            f"URL ({url!r}) — the finding was NOT published")
+    created = int(m.group(1))
+    back = _gh_json(f"repos/{repo}/issues/{created}")
+    if not isinstance(back, dict) or back.get("number") != created:
+        raise AlarmError(
+            f"{rec['workflow']}: issue #{created} did not read back after "
+            f"creation — the finding was NOT published")
+    return f"filed {url}"
 
 
 def close_recovered(repo: str, rec: dict, existing: dict[str, int]) -> str | None:
+    """Close an open alarm ONLY on positive evidence of a healthy recent run.
+
+    "Quiet" is not "recovered". A lane that is disabled, has no runs at all, is
+    deliberately inert (newest run `skipped`), or has an indeterminate cron
+    raises nothing — and produces no verdict either. Closing its alarm with the
+    words "is producing successful scheduled runs again" would state something
+    false and re-create, inside the fix, the invisibility this alarm exists to
+    end. Those alarms stay OPEN and are reported by main() as left open.
+    """
     number = existing.get(rec["workflow"])
-    if not number:
+    if not number or not rec.get("recovered"):
         return None
     _gh(["gh", "issue", "close", str(number), "--repo", repo, "--comment",
          "> 🤖 **SPARQ agent** — auto-closed by `scripts/cron_lane_liveness.py`: "
-         f"`{rec['workflow']}` is producing successful scheduled runs again "
-         f"({rec['reason']})."])
+         f"`{rec['workflow']}` is producing scheduled-run verdicts again "
+         f"({rec['recovery_evidence']})."])
     return f"closed #{number}"
 
 
@@ -714,10 +882,17 @@ def main(argv: list[str] | None = None) -> int:
         for r in dead:
             print(f"{r['workflow']}: {upsert_issue(args.repo, r, existing)}")
         for r in records:
-            if not r["raise_alarm"]:
-                done = close_recovered(args.repo, r, existing)
-                if done:
-                    print(f"{r['workflow']}: {done}")
+            if r["raise_alarm"]:
+                continue
+            done = close_recovered(args.repo, r, existing)
+            if done:
+                print(f"{r['workflow']}: {done}")
+            elif existing.get(r["workflow"]):
+                # Quiet but NOT recovered — say so rather than closing on a
+                # claim the evidence does not support.
+                print(f"{r['workflow']}: open alarm #{existing[r['workflow']]} "
+                      f"LEFT OPEN — quiet but not recovered "
+                      f"({r['status']}: {r['reason']})")
         # Exit 0: the ISSUE is the signal. A finding that could not be turned
         # into an issue has already raised AlarmError ⇒ exit 2 below.
         return 0

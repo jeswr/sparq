@@ -1,5 +1,19 @@
 # review-alarm — the review-lane BLIND-SPOT alarm ([OPUS-5]). 🤖 SPARQ agent.
 #
+# cron-liveness: verdict-lane
+#
+# ^ [OPUS-5] #4328. That column-0 line is READ by scripts/cron_lane_liveness.py, the
+# cron-only-lane liveness alarm, which has this lane in its scan set. It declares that a
+# non-zero exit from this workflow is its FINDING, not its breakage —
+# scripts/review_lane_alarm.py:504 `return 1` immediately after printing
+# `::error::N open PR(s) have no countable review verdict…`. MEASURED 2026-07-28: this
+# lane's whole scheduled history is 4/4 `failure`, every one of them a correct report of a
+# standing review blind spot, and without this declaration the liveness alarm classified a
+# WORKING detector as a dead lane.
+# The declaration is NOT a mute: this lane still raises there if no scheduled run concludes
+# `success` OR `failure` inside the derived window — cancelled, timed out, never started, or
+# stopped firing altogether all still alarm.
+#
 # WHAT: sparq has no in-repo verdict PRODUCER. Every review a sparq PR receives is produced
 # out of repo by the registry's review-fix.yml, scheduled by the registry's dispatch.yml,
 # whose `enumerate_review_items` admits a PR only if its head ref matches

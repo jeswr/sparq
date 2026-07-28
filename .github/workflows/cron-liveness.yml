@@ -16,6 +16,22 @@
 # WHY AN ISSUE AND NOT A LOG LINE: registry #740 — the pipeline's structured log telemetry is
 # currently being destroyed by secret masking, so a log-only signal is worthless right now.
 #
+# DETECTOR LANES: a lane whose non-zero exit is its FINDING (review-alarm.yml,
+# formal-alarm.yml) declares so with a column-0 `# cron-liveness: verdict-lane` line in its
+# OWN yaml. Judged by conclusion alone a working detector reads as a dead lane; the
+# declaration replaces the conclusion-based rules with "did any scheduled run inside the
+# window conclude `success` or `failure` at all", so cancelled / timed-out / stopped-firing
+# still raise. It is a per-lane declaration, not a central table, and not a mute switch.
+# THIS workflow is deliberately NOT declared: its finding exits 0, so a `failure` here really
+# does mean the detector is broken.
+#
+# NOTE ON THIS FILE'S OWN SEAM: the swallow class — `continue-on-error`, `|| true`,
+# `; exit 0`, `set +e`, a `--dry-run` slipped into the detector invocation — leaves every
+# observable identical while deleting the feature, and a cron-only lane has nobody watching
+# to notice. scripts/tests/test_cron_lane_liveness.py::TestYamlSeam pins the job, BOTH steps
+# and the docs-quality.yml call site against all of it (key ABSENCE, and the detector argv by
+# EQUALITY), so any of those mutations reds a named test on every PR.
+#
 # EXIT SEMANTICS (deliberately different from formal-alarm.yml, see the script header):
 # finding a dead lane exits 0 — THE ISSUE IS THE SIGNAL. This workflow is ITSELF a cron-only
 # lane and therefore inside its own scan set, so redding its own run on every finding would

@@ -36,6 +36,7 @@ import datetime as dt
 import importlib.util
 import json
 import re
+import shlex
 import sys
 import tempfile
 import unittest
@@ -295,6 +296,165 @@ class TestQuietDirectionFailSafes(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+VERDICT_DAILY = dict(DAILY, verdict_lane=True)
+
+
+class TestDetectorLanesAreNotDeadLanes(unittest.TestCase):
+    """A DETECTOR exits non-zero when it FINDS something, so `failure` is its
+    verdict, not its breakage. Rules A and B read conclusion as a health proxy
+    and therefore classify a WORKING detector as dead — measured live against
+    `review-alarm.yml` (4/4 `failure`, every one a correct finding).
+
+    Rule V replaces them for a lane that DECLARES itself, and only for that lane.
+    """
+
+    # ---- the declaration is read from the lane's own YAML, exactly ---------- #
+    def test_a_column_zero_declaration_line_declares(self):
+        self.assertTrue(cll.workflow_declares_verdict_lane(
+            "# review-alarm\n# cron-liveness: verdict-lane\nname: x\n"))
+
+    def test_an_INDENTED_occurrence_does_not_declare(self):
+        """It must not be smugglable from inside a `run:` block or a heredoc."""
+        self.assertFalse(cll.workflow_declares_verdict_lane(
+            "jobs:\n  a:\n    steps:\n      - run: |\n"
+            "          # cron-liveness: verdict-lane\n"))
+
+    def test_a_PROSE_MENTION_of_the_token_does_not_declare(self):
+        """Containment would accept this; a whole-line match must not."""
+        self.assertFalse(cll.workflow_declares_verdict_lane(
+            "# this lane is not a `# cron-liveness: verdict-lane` and never was\n"))
+        self.assertFalse(cll.workflow_declares_verdict_lane(
+            "# cron-liveness: verdict-lane-NOT\n"))
+
+    def test_an_undeclared_lane_is_not_a_verdict_lane(self):
+        self.assertFalse(cll.workflow_declares_verdict_lane(
+            "# cron-liveness\nname: x\non:\n  schedule: []\n"))
+
+    def test_discovery_reads_the_declaration_off_the_file(self):
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "d.yml").write_text(
+            "# cron-liveness: verdict-lane\nname: d\non:\n  schedule:\n"
+            "    - cron: '0 5 * * *'\njobs: {}\n", encoding="utf-8")
+        (tmp / "p.yml").write_text(
+            "name: p\non:\n  schedule:\n    - cron: '0 5 * * *'\njobs: {}\n",
+            encoding="utf-8")
+        got = {x["workflow"]: x["verdict_lane"]
+               for x in cll.discover_cron_only_lanes(tmp)}
+        self.assertEqual(got, {"d.yml": True, "p.yml": False})
+
+    # ---- what the declaration changes --------------------------------------- #
+    def test_a_declared_lane_failing_every_run_is_LIVE_not_dead(self):
+        """The live review-alarm.yml shape: 4/4 `failure`, all correct findings."""
+        rec = cll.classify_lane(
+            VERDICT_DAILY, "active",
+            runs(("failure", ago(1)), ("failure", ago(6)), ("failure", ago(12)),
+                 ("failure", ago(18))),
+            NOW)
+        self.assertFalse(rec["raise_alarm"])
+        self.assertEqual(rec["status"], "LIVE-VERDICT-LANE")
+        self.assertEqual(rec["last_verdict"], cll._parse_iso(ago(1)).isoformat())
+
+    def test_the_SAME_history_on_an_UNDECLARED_lane_still_raises(self):
+        """The declaration is the ONLY difference — otherwise this fixture is
+        the bench-ec2 shape and rules A and B must be untouched by rule V."""
+        rec = cll.classify_lane(
+            DAILY, "active",
+            runs(("failure", ago(1)), ("failure", ago(6)), ("failure", ago(12)),
+                 ("failure", ago(18))),
+            NOW)
+        self.assertTrue(rec["raise_alarm"])
+        self.assertEqual(rec["status"], "DEAD")
+
+    def test_a_declared_lane_that_STOPPED_speaking_still_raises(self):
+        """The declaration is not a mute: no verdict inside the window raises."""
+        rec = cll.classify_lane(
+            VERDICT_DAILY, "active",
+            runs(("failure", ago(80)), ("success", ago(104))), NOW)
+        self.assertTrue(rec["raise_alarm"])
+        self.assertIn("V:", rec["reason"])
+
+    def test_a_declared_lane_cancelled_at_its_ceiling_still_raises(self):
+        """`cancelled` is NOT a verdict — the miri shape survives the change."""
+        rec = cll.classify_lane(
+            VERDICT_DAILY, "active",
+            runs(("cancelled", ago(1)), ("cancelled", ago(25)),
+                 ("cancelled", ago(49)), ("success", ago(100))),
+            NOW)
+        self.assertTrue(rec["raise_alarm"])
+
+    def test_a_declared_lane_timing_out_every_run_still_raises(self):
+        rec = cll.classify_lane(
+            VERDICT_DAILY, "active",
+            runs(("timed_out", ago(1)), ("timed_out", ago(25)),
+                 ("timed_out", ago(49)), ("timed_out", ago(73))),
+            NOW)
+        self.assertTrue(rec["raise_alarm"])
+
+    def test_a_declared_lane_never_having_spoken_is_inside_its_grace(self):
+        rec = cll.classify_lane(
+            VERDICT_DAILY, "active",
+            runs(("cancelled", ago(1)), ("cancelled", ago(3))), NOW)
+        self.assertFalse(rec["raise_alarm"])
+        self.assertEqual(rec["status"], "LIVE-VERDICT-LANE")
+
+    def test_a_declared_lane_succeeding_is_LIVE(self):
+        rec = cll.classify_lane(
+            VERDICT_DAILY, "active", runs(("success", ago(1))), NOW)
+        self.assertFalse(rec["raise_alarm"])
+        self.assertEqual(rec["last_verdict_conclusion"], "success")
+
+    def test_the_raised_issue_for_a_declared_lane_says_why_it_raised_anyway(self):
+        rec = cll.classify_lane(
+            VERDICT_DAILY, "active",
+            runs(("cancelled", ago(1)), ("cancelled", ago(25)),
+                 ("cancelled", ago(49)), ("success", ago(100))),
+            NOW)
+        _, body = cll.render_issue(rec)
+        self.assertIn("# cron-liveness: verdict-lane", body)
+        self.assertIn("never got to speak", body)
+
+
+class TestLiveDetectorLanesDoNotFalseAlarm(unittest.TestCase):
+    """Bound to the REAL workflow files: the two live detector lanes must carry
+    the declaration, and this alarm must NOT (its finding exits 0, so a
+    `failure` from it genuinely means the detector is broken)."""
+
+    DETECTORS = ("review-alarm.yml", "formal-alarm.yml")
+
+    def test_the_live_detector_lanes_declare_themselves(self):
+        for name in self.DETECTORS:
+            path = WORKFLOWS_DIR / name
+            if not path.exists():
+                self.skipTest(f"{name} removed")
+            self.assertTrue(
+                cll.workflow_declares_verdict_lane(path.read_text(encoding="utf-8")),
+                f"{name} exits non-zero on a FINDING and must declare "
+                "`# cron-liveness: verdict-lane`, or this alarm reports it dead")
+
+    def test_this_alarm_does_NOT_declare_itself_a_verdict_lane(self):
+        # Self-declaring would be the mute switch: a red cron-liveness run means
+        # AlarmError (exit 2), which is real breakage.
+        self.assertFalse(
+            cll.workflow_declares_verdict_lane(WORKFLOW.read_text(encoding="utf-8")))
+
+    def test_a_declared_detector_that_reds_on_every_run_reads_LIVE(self):
+        """End-to-end over the real review-alarm.yml, with its real measured
+        history (4/4 `failure`): at head 06fc5577 this raised a DEAD alarm."""
+        path = WORKFLOWS_DIR / "review-alarm.yml"
+        if not path.exists():
+            self.skipTest("review-alarm.yml removed")
+        lanes = [x for x in cll.discover_cron_only_lanes(WORKFLOWS_DIR, FV_MANIFEST)
+                 if x["workflow"] == "review-alarm.yml"]
+        self.assertEqual(len(lanes), 1, "review-alarm.yml left this alarm's scope")
+        rec = cll.classify_lane(
+            lanes[0], "active",
+            runs(("failure", ago(1.8)), ("failure", ago(7.2)),
+                 ("failure", ago(15.2)), ("failure", ago(20.0))),
+            NOW)
+        self.assertFalse(rec["raise_alarm"], rec["reason"])
+
+
+# --------------------------------------------------------------------------- #
 class TestScopeDiscovery(unittest.TestCase):
     """Scope is DERIVED from each workflow's own `on:` block."""
 
@@ -419,10 +579,16 @@ class FakeGh:
     """Records every `gh` invocation the alarm makes; serves canned reads."""
 
     def __init__(self, open_issues: list[dict] | None = None,
-                 fail_on: str | None = None):
+                 fail_on: str | None = None,
+                 create_returns: str | None = None,
+                 read_back_as: int | None = None):
         self.calls: list[list[str]] = []
         self.open_issues = list(open_issues or [])
         self.fail_on = fail_on
+        # `gh issue create` exiting 0 with no/again-wrong output — the secondary
+        # content-creation rate-limit shape.
+        self.create_returns = create_returns
+        self.read_back_as = read_back_as
         self._next_number = 900
 
     def __call__(self, args: list[str]) -> str:
@@ -433,10 +599,18 @@ class FakeGh:
         if args[:2] == ["gh", "api"] and "/issues?" in args[2]:
             page = int(re.search(r"[?&]page=(\d+)", args[2]).group(1))
             return json.dumps(self.open_issues if page == 1 else [])
+        # Read-back of a single created issue: `repos/<o>/<r>/issues/<n>`.
+        m = args[:2] == ["gh", "api"] and re.fullmatch(
+            r"repos/[^/]+/[^/]+/issues/(\d+)", args[2])
+        if m:
+            return json.dumps({"number": self.read_back_as
+                               if self.read_back_as is not None else int(m.group(1))})
         if args[:3] == ["gh", "issue", "create"]:
             self._next_number += 1
             body = args[args.index("--body") + 1]
             self.open_issues.append({"number": self._next_number, "body": body})
+            if self.create_returns is not None:
+                return self.create_returns
             return f"https://github.com/o/r/issues/{self._next_number}\n"
         return ""
 
@@ -520,6 +694,15 @@ class TestIdempotence(_EndToEnd):
         self.assertEqual(self.run_main(LIVE_STATE), 0)
         self.assertEqual(fake.kinds().count("issue close"), 1)
 
+    def test_the_closing_comment_quotes_the_success_it_claims(self):
+        fake = FakeGh(open_issues=[
+            {"number": 4242, "body": f"<!-- {cll.KEY_PREFIX}: z.yml -->"}])
+        cll._gh = fake
+        self.run_main(LIVE_STATE)
+        closes = [c for c in fake.calls if c[:3] == ["gh", "issue", "close"]]
+        comment = closes[0][closes[0].index("--comment") + 1]
+        self.assertIn("2026-07-26T05:00:00", comment)
+
     def test_a_healthy_lane_with_no_open_issue_writes_nothing(self):
         fake = FakeGh()
         cll._gh = fake
@@ -532,6 +715,136 @@ class TestIdempotence(_EndToEnd):
         cll._gh = fake
         self.assertEqual(self.run_main(DEAD_STATE, ["--dry-run"]), 0)
         self.assertEqual(fake.calls, [])
+
+
+class TestQuietIsNotRecovered(_EndToEnd):
+    """An open alarm is closed ONLY on positive evidence of a healthy run.
+
+    Every state below is QUIET — none of them raises — and NONE of them is a
+    recovery. Closing on "it stopped raising" would assert something false and
+    re-create the invisibility the alarm exists to end.
+    """
+
+    OPEN = [{"number": 4242, "body": f"<!-- {cll.KEY_PREFIX}: z.yml -->"}]
+
+    def _quiet(self, state: dict) -> FakeGh:
+        fake = FakeGh(open_issues=[dict(x) for x in self.OPEN])
+        cll._gh = fake
+        self.assertEqual(self.run_main(state), 0)
+        return fake
+
+    def test_a_newly_SKIPPED_lane_does_not_close_its_alarm(self):
+        """The live remediation shape: #3785 fixed bench-ec2 by adding a
+        role-present job guard, which makes runs `skipped`."""
+        fake = self._quiet({"z.yml": {"state": "active", "runs": [
+            {"conclusion": "skipped", "created_at": "2026-07-26T05:00:00Z"},
+            {"conclusion": "failure", "created_at": "2026-07-25T05:00:00Z"},
+            {"conclusion": "failure", "created_at": "2026-07-24T05:00:00Z"}]}})
+        self.assertEqual(fake.kinds().count("issue close"), 0)
+
+    def test_a_DISABLED_lane_does_not_close_its_alarm(self):
+        fake = self._quiet({"z.yml": {"state": "disabled_manually", "runs": [
+            {"conclusion": "failure", "created_at": "2026-07-26T05:00:00Z"}]}})
+        self.assertEqual(fake.kinds().count("issue close"), 0)
+
+    def test_a_lane_with_NO_RUNS_does_not_close_its_alarm(self):
+        fake = self._quiet({"z.yml": {"state": "active", "runs": []}})
+        self.assertEqual(fake.kinds().count("issue close"), 0)
+
+    def test_a_lane_inside_its_NEW_LANE_GRACE_does_not_close_its_alarm(self):
+        fake = self._quiet({"z.yml": {"state": "active", "runs": [
+            {"conclusion": "failure", "created_at": "2026-07-26T11:00:00Z"}]}})
+        self.assertEqual(fake.kinds().count("issue close"), 0)
+
+    def test_a_DECLARED_verdict_lane_that_has_never_SPOKEN_does_not_close(self):
+        """A declared verdict-lane inside its new-lane grace has produced no
+        verdict at all. It raises nothing — and it has recovered from nothing."""
+        (self.wf / "z.yml").write_text(
+            "# cron-liveness: verdict-lane\nname: z\non:\n  schedule:\n"
+            "    - cron: '0 5 * * *'\n  workflow_dispatch:\njobs: {}\n",
+            encoding="utf-8")
+        fake = self._quiet({"z.yml": {"state": "active", "runs": [
+            {"conclusion": "cancelled", "created_at": "2026-07-26T11:00:00Z"}]}})
+        self.assertEqual(fake.kinds().count("issue close"), 0)
+
+    def test_a_DECLARED_verdict_lane_that_SPOKE_does_close(self):
+        """Control for the test above: `failure` IS a verdict on a declared
+        lane, so it is a genuine recovery and must still close."""
+        (self.wf / "z.yml").write_text(
+            "# cron-liveness: verdict-lane\nname: z\non:\n  schedule:\n"
+            "    - cron: '0 5 * * *'\n  workflow_dispatch:\njobs: {}\n",
+            encoding="utf-8")
+        fake = self._quiet({"z.yml": {"state": "active", "runs": [
+            {"conclusion": "failure", "created_at": "2026-07-26T11:00:00Z"}]}})
+        self.assertEqual(fake.kinds().count("issue close"), 1)
+        closes = [c for c in fake.calls if c[:3] == ["gh", "issue", "close"]]
+        self.assertIn("`failure`", closes[0][closes[0].index("--comment") + 1])
+
+    def test_a_left_open_alarm_is_REPORTED_not_silently_kept(self):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self._quiet({"z.yml": {"state": "disabled_manually", "runs": [
+                {"conclusion": "failure", "created_at": "2026-07-26T05:00:00Z"}]}})
+        self.assertIn("LEFT OPEN", buf.getvalue())
+
+    def test_a_genuine_success_STILL_closes(self):
+        """The guard above must not have vacated the close path entirely."""
+        fake = self._quiet(LIVE_STATE)
+        self.assertEqual(fake.kinds().count("issue close"), 1)
+
+
+class TestTheWriteIsVerifiedByReadingItBack(_EndToEnd):
+    """`gh issue create` can exit 0 having created NOTHING under a secondary
+    content-creation rate limit, which no `rate_limit` field reports. The
+    finding would then be dropped behind a green run."""
+
+    def test_a_create_that_returns_no_url_exits_2(self):
+        cll._gh = FakeGh(create_returns="")
+        self.assertEqual(self.run_main(DEAD_STATE), 2)
+
+    def test_a_create_whose_issue_does_not_read_back_exits_2(self):
+        cll._gh = FakeGh(read_back_as=-1)
+        self.assertEqual(self.run_main(DEAD_STATE), 2)
+
+    def test_a_create_that_reads_back_is_reported_as_filed(self):
+        """The guard above must not have made every successful file fail."""
+        fake = FakeGh()
+        cll._gh = fake
+        self.assertEqual(self.run_main(DEAD_STATE), 0)
+        self.assertEqual(fake.kinds().count("issue create"), 1)
+        self.assertTrue(any(c[:2] == ["gh", "api"]
+                            and re.fullmatch(r"repos/o/r/issues/\d+", c[2])
+                            for c in fake.calls),
+                        "the created issue was never read back")
+
+
+class TestGhErrorsBecomeAlarmErrors(unittest.TestCase):
+    """The load-bearing link of the exit-0 design, exercised on the REAL `_gh`
+    rather than on the fake that raises AlarmError itself."""
+
+    def test_a_nonzero_exit_becomes_an_AlarmError(self):
+        with self.assertRaises(cll.AlarmError):
+            cll._gh([sys.executable, "-c",
+                     "import sys; sys.stderr.write('boom\\n'); sys.exit(3)"])
+
+    def test_the_stderr_of_the_failing_command_is_carried_into_the_error(self):
+        with self.assertRaises(cll.AlarmError) as ctx:
+            cll._gh([sys.executable, "-c",
+                     "import sys; sys.stderr.write('secondary rate limit\\n');"
+                     " sys.exit(1)"])
+        self.assertIn("secondary rate limit", str(ctx.exception))
+
+    def test_an_unlaunchable_binary_becomes_an_AlarmError(self):
+        missing = Path(tempfile.mkdtemp()) / "no-such-binary-4328"
+        with self.assertRaises(cll.AlarmError):
+            cll._gh([str(missing)])
+
+    def test_a_command_that_succeeds_returns_its_stdout(self):
+        """The conversion must not have swallowed the success path."""
+        self.assertEqual(
+            cll._gh([sys.executable, "-c", "print('ok')"]).strip(), "ok")
 
 
 class TestFailLoud(_EndToEnd):
@@ -693,6 +1006,203 @@ class TestYamlSeam(unittest.TestCase):
         jid, job, step = hits[0]
         self.assertNotIn("if", step)
         self.assertNotIn("if", job)
+
+
+# --------------------------------------------------------------------------- #
+# The SWALLOW class. `if: false` and a deleted step change what the log shows;
+# these mutations keep the step, keep the log, and delete the enforcement:
+#
+#   continue-on-error: true   (job or step)   the step "passes" while failing
+#   `… || true` / `; exit 0` / `set +e`       the shell discards the exit status
+#   `--dry-run` on the detector               EVERY observable is identical —
+#                                             the summary renders, the ::warning::
+#                                             is emitted, exit is 0 — and no issue
+#                                             is ever filed. On a cron-only lane
+#                                             there is, by this alarm's own
+#                                             premise, nobody to notice.
+#
+# Two INDEPENDENT channels, either sufficient, so no single assertion is the
+# whole guard: (1) key ABSENCE — `continue-on-error: 'true'` and `${{ true }}`
+# both load as STRINGS, so `!= True` would pass; (2) the detector's argv by
+# EQUALITY after shlex, not containment, because `--apply-DROPPED`-shaped
+# mutants survive containment checks. Asserted at BOTH seams: cron-liveness.yml
+# and the docs-quality.yml call site, which is a GATING check.
+SWALLOW_IN_RUN = re.compile(
+    r"""\|\|\s*(true|:|exit\b)      # || true / || : / || exit 0
+      | ;\s*exit\s+0                # ; exit 0
+      | &&\s*true\b                 # && true
+      | \bset\s+\+e                 # set +e  (and set +eo pipefail)
+      | \bexit\s+0\s*$              # a trailing unconditional exit 0
+    """, re.VERBOSE | re.MULTILINE)
+
+DETECTOR_ARGV = ["python3", "scripts/cron_lane_liveness.py",
+                 "--repo", "$GITHUB_REPOSITORY",
+                 "--summary-file", "$GITHUB_STEP_SUMMARY"]
+SELFTEST_ARGV = ["python3", "scripts/tests/test_cron_lane_liveness.py"]
+
+
+def argv_of(run: str) -> list[str]:
+    """shlex the `run:` block, dropping the whitespace tokens a `\\`-continued
+    line leaves behind. Any inserted flag, emptied value, or appended `|| true`
+    changes this list."""
+    return [t for t in shlex.split(run) if t.strip()]
+
+
+class TestThisLaneIsDeclaredNonGating(unittest.TestCase):
+    """[OPUS-5] sq-huwr8 composition, found while re-checking this branch against
+    the `main` it merges into.
+
+    This workflow is `schedule:`-only, and a scheduled run runs ON MAIN — so its
+    check-run lands on exactly the main head SHA that the PUSH-triggered
+    `ci-summary` gate polls, and that gate waits for the check-run name set to
+    stabilise, so a sibling appearing mid-poll is picked up rather than missed.
+    Since #3773 the ONLY thing that makes a check-run non-gating is a
+    declaration in `.github/advisory-registry.json` — the header claim "NOT A
+    GATE: schedule-only" is TRUE as a premise and does NOT imply the conclusion.
+    MEASURED on main head cb0c6739c: the identically-shaped
+    `review-lane blind-spot alarm: failure` was listed as a GATING failure.
+
+    Undeclared, the one red this lane can produce — exit 2, a broken detector —
+    would block every merge in the repo on a condition unrelated to any commit.
+    That is the pressure that gets alarms muted.
+    """
+
+    REGISTRY = REPO_ROOT / ".github" / "advisory-registry.json"
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import ci_summary_gate  # noqa: PLC0415 — imported for its REAL classifier
+        cls.gate = ci_summary_gate
+        cls.job = yaml.safe_load(
+            WORKFLOW.read_text(encoding="utf-8"))["jobs"]["liveness"]
+        cls.registry = json.loads(cls.REGISTRY.read_text(encoding="utf-8"))
+
+    def setUp(self):
+        # Install the LIVE registry into the gate module exactly as the gate's
+        # own main() does. The module fails CLOSED (nothing advisory) until this
+        # runs, so the assertions below are about the file, not the default.
+        self.gate.load_advisory_registry(str(self.REGISTRY))
+
+    def test_the_live_job_name_is_declared_non_gating(self):
+        # Drives the gate's OWN is_advisory(), never a re-implementation of it,
+        # so this cannot agree with a broken gate.
+        self.assertTrue(
+            self.gate.is_advisory(self.job["name"]),
+            f"{self.job['name']!r} is NOT declared in "
+            ".github/advisory-registry.json, so ci_summary_gate.py GATES on it "
+            "(#3773) — an exit-2 run of this schedule-on-main lane would block "
+            "every merge in the repo")
+
+    def test_control_an_undeclared_name_is_NOT_non_gating(self):
+        """ANTI-VACUITY: an is_advisory() that returned True unconditionally
+        would pass the test above. It must not pass this one."""
+        self.assertFalse(self.gate.is_advisory(
+            self.job["name"] + " (this name is not declared anywhere)"))
+
+    def test_the_declaration_binds_to_THIS_workflow_and_job_id(self):
+        """C4's rename-invariance from this side: the declaration must name the
+        stable identity, so renaming the job cannot silently re-arm the lane as
+        a merge blocker (it fails closed — the renamed job GATES)."""
+        entry = self.registry["jobs"][self.job["name"]]
+        self.assertEqual((entry["workflow"], entry["job_id"]),
+                         ("cron-liveness.yml", "liveness"))
+
+
+class TestNoSwallowAtEitherSeam(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+        cls.job = cls.doc["jobs"]["liveness"]
+        cls.steps = cls.job["steps"]
+        cls.dq = yaml.safe_load(DOCS_QUALITY.read_text(encoding="utf-8"))
+        hits = [(jid, job, s) for jid, job in cls.dq["jobs"].items()
+                for s in (job.get("steps") or [])
+                if "scripts/tests/test_cron_lane_liveness.py" in (s.get("run") or "")]
+        assert len(hits) == 1, f"expected exactly one call site, got {len(hits)}"
+        cls.call_job_id, cls.call_job, cls.call_step = hits[0]
+
+    def _step(self, needle: str) -> dict:
+        hits = [s for s in self.steps if needle in (s.get("run") or "")]
+        self.assertEqual(len(hits), 1, needle)
+        return hits[0]
+
+    # ---- seam 1: cron-liveness.yml ----------------------------------------- #
+    def test_the_liveness_job_carries_no_continue_on_error_key(self):
+        self.assertNotIn("continue-on-error", self.job)
+
+    def test_no_step_of_the_liveness_job_carries_continue_on_error(self):
+        for s in self.steps:
+            self.assertNotIn("continue-on-error", s, s.get("name") or s.get("uses"))
+
+    def test_the_detector_invocation_is_EXACTLY_the_live_form(self):
+        """Kills `--dry-run` (deletes the feature, changes nothing observable),
+        `--repo ""`, and any appended swallow — by EQUALITY, not containment."""
+        self.assertEqual(argv_of(self._step("scripts/cron_lane_liveness.py")["run"]),
+                         DETECTOR_ARGV)
+
+    def test_the_selftest_invocation_is_EXACTLY_the_live_form(self):
+        self.assertEqual(
+            argv_of(self._step("scripts/tests/test_cron_lane_liveness.py")["run"]),
+            SELFTEST_ARGV)
+
+    def test_neither_run_block_can_discard_a_nonzero_exit(self):
+        for needle in ("scripts/cron_lane_liveness.py",
+                       "scripts/tests/test_cron_lane_liveness.py"):
+            run = self._step(needle)["run"]
+            self.assertIsNone(SWALLOW_IN_RUN.search(run), f"{needle}: {run!r}")
+
+    def test_the_detector_step_gets_the_token_and_the_repo(self):
+        env = self._step("scripts/cron_lane_liveness.py").get("env") or {}
+        self.assertEqual(env.get("GH_TOKEN"), "${{ github.token }}")
+        self.assertEqual(env.get("GITHUB_REPOSITORY"), "${{ github.repository }}")
+
+    # ---- seam 2: the docs-quality.yml call site (a GATING check) ------------ #
+    def test_the_call_site_job_carries_no_continue_on_error_key(self):
+        self.assertNotIn("continue-on-error", self.call_job)
+
+    def test_the_call_site_step_carries_no_continue_on_error_key(self):
+        self.assertNotIn("continue-on-error", self.call_step)
+
+    def test_the_call_site_run_cannot_discard_a_nonzero_exit(self):
+        self.assertIsNone(SWALLOW_IN_RUN.search(self.call_step["run"]),
+                          repr(self.call_step["run"]))
+
+    def test_the_call_site_invocation_is_EXACTLY_the_live_form(self):
+        self.assertEqual(argv_of(self.call_step["run"]), SELFTEST_ARGV)
+
+    def test_the_call_site_job_is_not_advisory_registered(self):
+        """`docs-quality / quick-gates` must remain GATING: an entry in the
+        advisory registry is the only thing that makes a check non-gating, and
+        this suite is the only per-PR enforcement the alarm has."""
+        registry = json.loads(
+            (REPO_ROOT / ".github" / "advisory-registry.json").read_text(
+                encoding="utf-8"))
+        declared = {(v.get("workflow"), v.get("job_id"))
+                    for v in registry.get("jobs", {}).values()}
+        self.assertNotIn(("docs-quality.yml", self.call_job_id), declared)
+
+    # ---- the detectors of the above, on a KNOWN POSITIVE -------------------- #
+    def test_the_swallow_regex_matches_every_form_it_claims_to(self):
+        """A zero-result regex is a clean run too. Validate the instrument."""
+        for bad in ("python3 x.py || true", "python3 x.py||true",
+                    "python3 x.py || :", "python3 x.py; exit 0",
+                    "python3 x.py\nexit 0", "set +e\npython3 x.py",
+                    "set +eo pipefail\npython3 x.py", "python3 x.py && true",
+                    "python3 x.py || exit 0"):
+            self.assertIsNotNone(SWALLOW_IN_RUN.search(bad), bad)
+        for ok in ("python3 x.py", "set -euo pipefail\npython3 x.py",
+                   "python3 x.py --repo \"$R\"\npython3 y.py"):
+            self.assertIsNone(SWALLOW_IN_RUN.search(ok), ok)
+
+    def test_argv_equality_rejects_an_appended_flag(self):
+        """Validate the instrument against a known positive: the exact mutant."""
+        live = self._step("scripts/cron_lane_liveness.py")["run"]
+        self.assertEqual(argv_of(live), DETECTOR_ARGV)
+        self.assertNotEqual(argv_of(live + " --dry-run"), DETECTOR_ARGV)
+        self.assertNotEqual(argv_of(live.replace('"$GITHUB_REPOSITORY"', '""')),
+                            DETECTOR_ARGV)
 
 
 if __name__ == "__main__":
