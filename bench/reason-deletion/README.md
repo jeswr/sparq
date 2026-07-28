@@ -21,8 +21,11 @@ cost FBF was invented to remove. The one residual cost axis is the *full-rebuild
 (TBox / guard-predicate / recursive-layer ownership-transfer deltas), tracked as follow-up
 bead `sq-6tykl.6`. Of those, the N3 **recursive-layer ownership transfer** is now settled by
 targeted local re-derivation instead of a rebuild — the affected layer's own local fixpoint
-decides the base↔layer hand-off, so it costs one layer recompute (already paid in that round)
-rather than a from-scratch closure; the TBox and guard-predicate axes remain open. The
+decides the base↔layer hand-off, so it costs at most one layer recompute (already paid in that
+round) rather than a from-scratch closure, and nothing at all when the assertion contributes no
+delta and the hand-off defers to the next recompute of that layer (an inert interim state, see
+the note in `crates/sparq-reason/src/incremental.rs`); the TBox and guard-predicate axes remain
+open. The
 re-derivation correctness invariant itself is guarded in-crate by
 `crates/sparq-reason/tests/incremental_deletion_heavy.rs`, and the transfer's incrementality
 by `incremental_n3_prop::ownership_transfer_deltas_stay_incremental_and_match_from_scratch`.
