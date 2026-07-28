@@ -123,26 +123,41 @@ Recurring invariant shorthands used below:
 | `src/compress.rs:2104` | `Mmap::map` | own-for-lifetime (TEST) | TEST-only (`#[test] corrupt_magic_is_loud_error_never_misdecode`, sq-7d3dj.32.2.7): read-only map of a temp perm file the test itself just created and owns; `File`/`Mmap` live for the map's whole scope and nothing else mutates it during the test, so the loud-error `from_mmap` read stays in-bounds over a stable region. [FABLE-5] |
 | `src/compress.rs:2120` | `Mmap::map` | own-for-lifetime (TEST) | TEST-only (`#[test] corrupt_magic_is_loud_error_never_misdecode`, sq-7d3dj.32.2.7): read-only map of a second temp perm file the same test created and owns; `File`/`Mmap` live for the map's whole scope and nothing else mutates it during the test, so the `from_mmap` read stays in-bounds over a stable region. [FABLE-5] |
 
-### `sparq-vectors` — 12 sites (aligned vector blobs + the ONE shared mmap backing for `.spqv`/`.spqg` + the SIMD ANN kernel)
+### `sparq-vamana` — 5 sites (the ONE shared mmap/aligned-owned read backing + the `.spqg` graph blobs)
+
+[OPUS-5] (issue #3699) NEW section, and the reason the `sparq-vectors` count below fell from 12
+to 7: the persistent Vamana/DiskANN index, the `.spqg` format and the shared read backing were
+EXTRACTED into this stand-alone crate. **No `unsafe` was added, removed, or rewritten** — the five
+rows here are the same five sites, moved (`store.rs:146/154/195` → `backing.rs:36/44/79`,
+`diskann.rs:461/808` → `graph.rs:483/823`) with their `// SAFETY:` comments intact, so the
+workspace total is unchanged at 91. `VectorStore::open` (`.spqv`) and `VamanaIndex::open`
+(`.spqg`) still share **one** map site; on `wasm32` (memmap2 target-gated out) `open_backing`
+takes the owned `AlignedBytes` branch instead, which contains no `unsafe` of its own. Every
+file:line was re-derived from `scripts/unsafe-gate.py --list`.
+
+| File:line | Kind | Invariant relied on | Why sound / how bounded |
+|---|---|---|---|
+| `src/backing.rs:36` | mut slice reinterpret | `words` is u32-aligned, holds ≥ `len` bytes; region exclusively owned | `AlignedBytes::from_vec` over-allocates to a word boundary (`len.div_ceil(4)` u32s); `copy_from_slice` fills exactly `len` bytes of the freshly-allocated, unaliased buffer. |
+| `src/backing.rs:44` | slice reinterpret (read) | u32-aligned, ≥ `len` initialised bytes | `AlignedBytes::as_bytes` reads the bytes copied in above; base ≥ 4-byte aligned by construction (review 1874). |
+| `src/backing.rs:79` | `Mmap::map` (`open_backing`) | own-for-lifetime | the SINGLE read-backing map site, shared by `VectorStore::open` (`.spqv`, in `sparq-vectors`) and `VamanaIndex::open` (`.spqg`); each format's `open_validated` bounds every offset afterwards. Native-only — wasm32 takes the owned-bytes branch. **B5**. |
+| `src/graph.rs:483` | slice reinterpret (read) | f32 no invalid patterns; align ok | build path: f32→LE bytes copied into the fixed-width record; LE target asserted; borrows `b.vectors`. |
+| `src/graph.rs:823` | slice reinterpret (read) | `start` a multiple of 4 ⇒ f32-aligned; range validated in `open_validated` | `node_vector`: `debug_assert_eq!` checks alignment; both backings are ≥ 4-byte aligned; f32 accepts any bit pattern; borrows the backing. **B5**. |
+
+### `sparq-vectors` — 7 sites (aligned `.spqv` vector blobs + the SIMD ANN kernel)
 
 (sq-vopxw.) This section previously listed **13** rows against a live/snapshot count of **12**.
 The extra row was a stale duplicate: `VectorStore::open` and `DiskAnnIndex::open` used to each
-carry their own `Mmap::map`, and sq-98c unified both behind the single `store::open_backing`
-helper + the `Bytes` backing enum, so the `.spqv` and `.spqg` loaders now share **one** map site
-(`store.rs:195`). On `wasm32` (memmap2 target-gated out) `open_backing` takes the owned
-`AlignedBytes` branch instead, which contains no `unsafe` of its own. Every file:line below was
+carry their own `Mmap::map`, and sq-98c unified both behind a single `open_backing` helper + the
+`Bytes` backing enum. [OPUS-5] (issue #3699) That helper, the `AlignedBytes` owned backing and the
+two `.spqg` graph blobs then MOVED to `sparq-vamana` (see the section above), taking 5 rows with
+them — this crate is now the `.spqv` store plus the SIMD kernel. Every file:line below was
 re-derived from `scripts/unsafe-gate.py --list`. [OPUS-5]
 
 | File:line | Kind | Invariant relied on | Why sound / how bounded |
 |---|---|---|---|
-| `src/store.rs:146` | mut slice reinterpret | `words` is u32-aligned, holds ≥ `len` bytes; region exclusively owned | `AlignedBytes::from_vec` over-allocates to a word boundary (`len.div_ceil(4)` u32s); `copy_from_slice` fills exactly `len` bytes of the freshly-allocated, unaliased buffer. |
-| `src/store.rs:154` | slice reinterpret (read) | u32-aligned, ≥ `len` initialised bytes | `AlignedBytes::as_bytes` reads the bytes copied in above; base ≥ 4-byte aligned by construction (review 1874). |
-| `src/store.rs:195` | `Mmap::map` (`open_backing`) | own-for-lifetime | the SINGLE read-backing map site, shared by `VectorStore::open` (`.spqv`) and `DiskAnnIndex::open` (`.spqg`); `open_validated` bounds every offset afterwards. Native-only — wasm32 takes the owned-bytes branch. **B5**. |
-| `src/store.rs:653` | slice reinterpret (write) | f32 has no invalid bit patterns; `align(f32) ≥ align(u8)` | `finalize`: the f32 data section → LE bytes for `write_all`; big-endian targets rejected at create/open. |
-| `src/store.rs:939` | slice reinterpret (read) | `start` is a multiple of 4 ⇒ f32-aligned; range validated in `open` | `slot_vector`: the backing is u32-aligned for BOTH branches — page-aligned map, or `AlignedBytes` (review 1874 fixed a UB align bug here); `debug_assert_eq!` checks it; f32 accepts any bit pattern. **B5**. |
-| `src/store.rs:1459` | slice reinterpret (write) | f32 no invalid patterns; align ok | the streaming builder's `put`: f32→LE bytes for `write_all` after `validate_vector`. |
-| `src/diskann.rs:461` | slice reinterpret (read) | f32 no invalid patterns; align ok | build path: f32→LE bytes copied into the fixed-width record; LE target asserted; borrows `b.vectors`. |
-| `src/diskann.rs:808` | slice reinterpret (read) | `start` a multiple of 4 ⇒ f32-aligned; range validated in `open_validated` | `node_vector`: `debug_assert_eq!` checks alignment; both backings are ≥ 4-byte aligned; f32 accepts any bit pattern; borrows the backing. **B5**. |
+| `src/store.rs:567` | slice reinterpret (write) | f32 has no invalid bit patterns; `align(f32) ≥ align(u8)` | `finalize`: the f32 data section → LE bytes for `write_all`; big-endian targets rejected at create/open. |
+| `src/store.rs:853` | slice reinterpret (read) | `start` is a multiple of 4 ⇒ f32-aligned; range validated in `open` | `slot_vector`: the backing is u32-aligned for BOTH branches — page-aligned map, or `AlignedBytes` (review 1874 fixed a UB align bug here); `debug_assert_eq!` checks it; f32 accepts any bit pattern. **B5**. |
+| `src/store.rs:1393` | slice reinterpret (write) | f32 no invalid patterns; align ok | the streaming builder's `put`: f32→LE bytes for `write_all` after `validate_vector`. |
 | `src/simd.rs:40` (`approx-ann`) | `#[target_feature(enable="neon")]` call | the `neon` ISA extension is present at runtime | entered ONLY inside `if is_aarch64_feature_detected!("neon")` on the line above; `l2_sq_neon` reads exactly `a.len()==b.len()` lanes. [OPUS-4.8] sq-lfo84 |
 | `src/simd.rs:50` (`approx-ann`) | `#[target_feature(enable="avx2,fma")]` call | both `avx2` and `fma` are present at runtime | entered ONLY inside `if is_x86_feature_detected!("avx2") && …("fma")` on the line above; `l2_sq_avx2` reads exactly `a.len()` lanes via unaligned loads. [OPUS-4.8] sq-lfo84 |
 | `src/simd.rs:86` (`approx-ann`) | `unsafe fn l2_sq_neon` (NEON L2² kernel) | caller confirmed `neon`; `a.len()==b.len()` | 16-wide FMA body + 4-wide drain + scalar tail (`get_unchecked` only for `i<len`), so every `vld1q_f32` load is in-bounds. Verified vs an f64 reference for dim 0..=257 (`simd::tests`). [OPUS-4.8] sq-lfo84 |

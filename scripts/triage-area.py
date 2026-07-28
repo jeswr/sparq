@@ -250,6 +250,11 @@ RULES = [
      ["sparq-mcp"], "crates/sparq-mcp"),
     ("vectors-spqv", "title", r"\.spqv\b|vec:hybrid",
      ["sparq-vectors"], "the .spqv / fusion surface in crates/sparq-vectors"),
+    # [OPUS-5] issue #3699: the persistent Vamana/DiskANN engine + `.spqg` format + PQ layer now
+    # live in their own crate, so a graph/format-shaped title routes there rather than to the
+    # `.spqv` store surface above.
+    ("vectors-spqg", "title", r"\.spqg\b|diskann|vamana",
+     ["sparq-vamana"], "the .spqg persistent-ANN engine in crates/sparq-vamana"),
     ("genai-planner", "title", r"gnce-style planner",
      ["sparq-engine"], "a planner-only cardinality estimator"),
     ("kani-harness", "title", r"^sq-\w+: kani:",

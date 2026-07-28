@@ -46,8 +46,9 @@ Per-crate (from `--check`, matching `bench/unsafe-snapshot.json::crates`):
 | crate | snapshot | live |
 |---|---:|---:|
 | sparq-core | 50 | 50 |
-| sparq-vectors | 12 | 12 |
+| sparq-vectors | 7 | 7 |
 | sparq-lws-core | 8 | 8 |
+| sparq-vamana | 5 | 5 |
 | sparq-engine | 8 | 8 |
 | sparq-lws-wasm | 4 | 4 |
 | sparq-py | 4 | 4 |
@@ -63,6 +64,11 @@ sites (register rows in unsafe-register.md). -->
 snapshot: sparq-core rose 45→50, sparq-vectors 9→13, and sparq-engine/sparq-py picked up
 counted TEST-ONLY / arrow-feature-gated sites). Run `python3 scripts/unsafe-gate.py --check`
 to reproduce. -->
+
+<!-- [OPUS-5] issue #3699: sparq-vectors 12 → 7 and a NEW sparq-vamana row at 5. Nothing was
+added or removed — the persistent Vamana/DiskANN index, the `.spqg` format and the ONE shared
+mmap/aligned-owned read backing were EXTRACTED into `sparq-vamana`, moving 5 sites verbatim
+(with their `// SAFETY:` comments). 7 + 5 = 12, so the workspace total is unchanged at 91. -->
 
 Every row carries the site kind, the invariant relied on, and how it is bounded — see
 [`unsafe-register.md`](./unsafe-register.md).

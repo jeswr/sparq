@@ -167,6 +167,11 @@
       "had_integration_dir": true,
       "min_tests": 4
     },
+    "sparq-vamana": {
+      "had_integration_dir": true,
+      "min_tests": 8,
+      "note": "[OPUS-5] issue #3699: NEW crate — the persistent Vamana/DiskANN engine + .spqg format + PQ layer extracted out of sparq-vectors. Seeded at the 8 integration tests it ships with (tests/vamana.rs: recall@10 floor, reopen determinism, PQ round-trip, staleness-token semantics, legacy-v1 open, degenerate inputs, malformed-header rejection, filtered traversal). The heavy 50k-scale recall gate stays in sparq-vectors/tests/diskann.rs, which drives this same code through the facade."
+    },
     "sparq-vectors": {
       "had_integration_dir": true,
       "min_tests": 55

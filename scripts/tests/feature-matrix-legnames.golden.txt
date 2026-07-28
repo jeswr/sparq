@@ -157,6 +157,7 @@ opt-in sparq-trust (status-list-flate2 — live status/revocation + denial justi
 opt-in sparq-trust (status-list-flate2,did — verified status-list issuer signature)
 opt-in sparq-trust (store)
 opt-in sparq-trust (store,cert-graph — TrustStore x certification-graph composition)
+opt-in sparq-vamana (filtered traversal)
 opt-in sparq-vc (did-web — did:web resolver over a pluggable fetcher)
 opt-in sparq-vectors (compose — read-path URI-hiding NL→NL A/B)
 opt-in sparq-vectors (kge — structure-aware + Phase-4 provenance-weighting)

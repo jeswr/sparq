@@ -94,7 +94,10 @@ neuro-symbolic = ["structure-shacl"]
 # `FilterConfig` + exact pre-filter) and the `DiskAnnIndex::nearest_filtered*` traversal path. The
 # engine-side automatic BGP → mask wiring (a filtered form of the `vec:` predicate) is wired in
 # `rewrite.rs` and activates when this composes with `vec-predicate` (sq-bvmd, follow-up to sq-1wc1).
-filtered-ann = []
+# [OPUS-5] (issue #3699) The traversal itself now lives in `sparq-vamana` behind ITS opt-in
+# `filtered` feature, so the lean posture is preserved end-to-end: with `filtered-ann` off,
+# neither crate compiles any filtered-traversal code.
+filtered-ann = ["sparq-vamana/filtered"]
 # [FABLE-5] sq-lhcot.1 (GenAI review gap 1; spec estate sq-rvgr2.4): the `.spqv` v3 EMBEDDING
 # PROVENANCE record — model id / model+content version / metric / normalization / dimension /
 # verbalization regime — plus the mandatory compatibility REJECTION (an incompatible query embedder
@@ -161,6 +164,14 @@ embeddings = ["provider", "dep:reqwest"]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
 # (required to publish — crates.io strips `path`).
 sparq-core = { path = "../sparq-core", version = "0.1.0" }
+# [OPUS-5] (issue #3699) The persistent Vamana/DiskANN engine, the `.spqg` on-disk format, the
+# PQ/SQ quantizers and the shared mmap read-backing were EXTRACTED into this stand-alone,
+# RDF-agnostic crate so they are usable outside sparq. It is a REQUIRED dependency because the
+# always-available on-disk index (`DiskAnnIndex`) is built on it — but it adds no third-party
+# dependency of its own (memmap2 was already here and is now pulled transitively through it),
+# so the lean-core constraint is unchanged. What stays HERE is the consumer glue: dict-id/`Term`
+# keying, `Fingerprint::of(Graph)` and the staleness checks it drives.
+sparq-vamana = { path = "../sparq-vamana", version = "0.1.0" }
 oxrdf.workspace = true
 rustc-hash.workspace = true
 # HNSW (pure Rust, minimal deps, maintained). Evaluated against hnsw_rs 0.3 (heavier
@@ -198,16 +209,15 @@ sparq-introspect = { path = "../sparq-introspect", version = "0.1.0", optional =
 # in. sparq-shacl is itself an opt-in crate that nothing in the workspace depends on by default.
 sparq-shacl = { path = "../sparq-shacl", version = "0.1.0", optional = true }
 
-# [FABLE-5] sq-98c: memmap2 is NATIVE-ONLY — target-gated out of every wasm32 build so the
-# crate compiles to wasm without a memory-map dependency. This is a TARGET cfg rather than a
-# cargo feature ON PURPOSE: cargo features are additive (enabling one can never REMOVE a
-# dependency), and the workspace's wasm crates already prefer `cfg(target_arch = "wasm32")`
-# gating over a feature so the choice never leaks into the native build via feature
-# unification (see crates/sparq-wasm/Cargo.toml). On wasm32 the file-open read paths
-# (`VectorStore::open`, `DiskAnnIndex::open`) fall back to a buffered `std::fs::read` into
-# the same validated owned-bytes backing `open_from_bytes` uses; native is unchanged (mmap).
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-memmap2.workspace = true
+# [OPUS-5] (issue #3699) memmap2 is no longer a DIRECT dependency of this crate: the read
+# backing it powers moved to `sparq-vamana` with the `.spqg` index, and both `.spqv` and `.spqg`
+# reads now go through that one implementation. It is still NATIVE-ONLY, and still target-gated
+# rather than feature-gated, over there — cargo features are additive (enabling one can never
+# REMOVE a dependency), and the workspace's wasm crates prefer `cfg(target_arch = "wasm32")`
+# gating so the choice never leaks into the native build via feature unification (see
+# crates/sparq-wasm/Cargo.toml). On wasm32 the file-open read paths (`VectorStore::open`,
+# `DiskAnnIndex::open`) still fall back to a buffered `std::fs::read` into the same validated
+# owned-bytes backing `open_from_bytes` uses; native is unchanged (mmap).
 
 # oxrdf pulls `rand`/getrandom (blank-node ids). On wasm there is no OS RNG, so select
 # getrandom's browser backend (crypto.getRandomValues). The matching

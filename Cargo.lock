@@ -5750,6 +5750,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sparq-vamana"
+version = "0.1.0"
+dependencies = [
+ "memmap2",
+]
+
+[[package]]
 name = "sparq-vc"
 version = "0.1.0"
 dependencies = [
@@ -5772,7 +5779,6 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.3.4",
  "instant-distance",
- "memmap2",
  "oxrdf 0.3.3",
  "proptest",
  "rayon",
@@ -5786,6 +5792,7 @@ dependencies = [
  "sparq-reason",
  "sparq-shacl",
  "sparq-sim",
+ "sparq-vamana",
 ]
 
 [[package]]

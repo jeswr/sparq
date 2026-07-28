@@ -42,6 +42,7 @@
     "sparq-sim":         { "tier": "medium", "est_minutes": 18, "note": "Similarity crate." },
     "sparq-solid":       { "tier": "medium", "est_minutes": 20, "note": "Solid integration; ACP/WAC modelling. Not the server auth path despite 'auth'-ish vocab." },
     "sparq-text":        { "tier": "medium", "est_minutes": 18, "note": "Full-text-search crate." },
+    "sparq-vamana":      { "tier": "light",  "est_minutes": 6,  "note": "[OPUS-5] Persistent Vamana/DiskANN engine + .spqg format + PQ layer, extracted out of sparq-vectors (#3699). Dependency-free (memmap2 only, native-target-gated); its own suite is a small synthetic recall/format gate. The heavy 50k ANN work still bills to sparq-vectors below." },
     "sparq-vectors":     { "tier": "heavy",  "est_minutes": 30, "note": "Vector/ANN crate; full-feature (approx-ann,filtered-ann,vec-predicate) build + ANN tests are heavy. Any vectors benchmark => DEDICATED EC2 instance." },
     "sparq-wasm":        { "tier": "heavy",  "est_minutes": 28, "note": "WASM bundle build (wasm-pack / tier-* bundles); separate toolchain => heavy." },
     "sparq-zk":          { "tier": "heavy",  "est_minutes": 35, "note": "ZK crate (v1 verifier pending external audit; see SECURITY.md). Noir/Barretenberg circuit build is heavy and slow." },

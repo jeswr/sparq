@@ -50,7 +50,7 @@ let _neighbours = nearest_term_exact(&store, &graph, &some_term, 10);
   O(1) memory, byte-identical to the in-RAM builder. **Compiles on wasm32** (sq-98c): memmap2 is
   target-gated out; `open_from_bytes` (`.spqv` and `.spqg` alike) is the filesystem-less read path.
 - **Exact vs approximate search** — `nearest_exact` (answer-exact ground truth) and the
-  persistent on-disk `DiskAnnIndex` in the default build; the in-RAM HNSW `VectorIndex`
+  persistent on-disk `DiskAnnIndex` in the default build (since #3699 a dict-id/`Term`-keyed facade over the stand-alone [`sparq-vamana`](../sparq-vamana) crate, which owns the Vamana graph, the `.spqg` format and the PQ/SQ quantizers — identical bytes, identical API, no new dependency); the in-RAM HNSW `VectorIndex`
   behind the **opt-in `approx-ann`** feature, the **only** third-party-ANN dependency
   (`instant-distance`). `VectorIndex::nearest_with_ef(q, k, ef)` sweeps `ef_search` at
   query time (recall–QPS Pareto; monotone-non-decreasing recall as `ef` grows). The HNSW distance

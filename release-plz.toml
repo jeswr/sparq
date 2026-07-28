@@ -199,3 +199,9 @@ changelog_path = "CHANGELOG.md"
 name = "sparq-vectors"
 version_group = "sparq"
 changelog_path = "CHANGELOG.md"
+
+# [OPUS-5] (issue #3699) The stand-alone Vamana/DiskANN engine extracted out of sparq-vectors.
+[[package]]
+name = "sparq-vamana"
+version_group = "sparq"
+changelog_path = "CHANGELOG.md"

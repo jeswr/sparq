@@ -91,13 +91,17 @@
 
 use crate::fingerprint::{self, Fingerprint, FINGERPRINT_LEN};
 use crate::spqv_provenance::EmbeddingProvenance;
-// [FABLE-5] (sq-98c) memmap2 is a native-only dependency (target-gated out of wasm32 builds in
-// Cargo.toml); on wasm the read paths use the owned-bytes backing below instead of a map.
-#[cfg(not(target_arch = "wasm32"))]
-use memmap2::Mmap;
 use rustc_hash::FxHashMap;
 use sparq_core::dict::Id;
 use sparq_core::Graph;
+// [OPUS-5] (issue #3699) The read backing moved to `sparq-vamana` when the `.spqg` Vamana index
+// was extracted: `.spqv` and `.spqg` reads go through the SAME mmap/aligned-owned-bytes pair, so
+// it now lives in the crate both formats depend on rather than being duplicated. memmap2 is a
+// native-only dependency of THAT crate (target-gated out of wasm32 builds); on wasm the read
+// paths use its owned-bytes backing instead of a map. `VectorSource` is the seam the extracted
+// index builds over — implemented for `VectorStore` at the bottom of this module.
+use sparq_vamana::backing::{open_backing, Bytes};
+use sparq_vamana::source::{VectorId, VectorSource};
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -122,96 +126,6 @@ const HEADER_LEN_V1: usize = 32;
 /// Header length of the version-2 format: the v1 header + the fingerprint block. Also the length of
 /// the v3 header PREFIX (the v3 provenance block + its `u32` length prefix follow this offset).
 const HEADER_LEN: usize = HEADER_LEN_V1 + FINGERPRINT_LEN;
-
-/// [OPUS-4.8] A 4-byte-aligned owned byte buffer. A plain `Vec<u8>` has alignment 1, so its base
-/// pointer may land on an odd address; `slot_vector` casts `&[u8]` slices of the buffer to
-/// `&[f32]` via `from_raw_parts`, which is UNDEFINED BEHAVIOR on an unaligned pointer. Backing the
-/// owned bytes with a `Vec<u32>` (alignment 4) guarantees the base — and therefore every
-/// `HEADER_LEN + slot·dim·4` offset (all multiples of 4) — is f32-aligned. See review 1874.
-pub(crate) struct AlignedBytes {
-    /// Backing storage; only `len` bytes are logically valid (the last word may be padding).
-    words: Vec<u32>,
-    len: usize,
-}
-
-impl AlignedBytes {
-    fn from_vec(bytes: Vec<u8>) -> AlignedBytes {
-        let len = bytes.len();
-        // ceil(len / 4) words; the final word is zero-padded.
-        let words = vec![0u32; len.div_ceil(4)];
-        let mut ab = AlignedBytes { words, len };
-        // SAFETY: `words` holds at least `len` bytes (rounded up to a word) and is u32-aligned
-        // (≥ align(u8)); the destination region is exclusively owned here.
-        let dst =
-            unsafe { std::slice::from_raw_parts_mut(ab.words.as_mut_ptr() as *mut u8, len) };
-        dst.copy_from_slice(&bytes);
-        ab
-    }
-
-    fn as_bytes(&self) -> &[u8] {
-        // SAFETY: `words` is u32-aligned and holds ≥ `len` initialized bytes (the copy above);
-        // f32/u8 reads of this region are in bounds. The base is 4-byte aligned by construction.
-        unsafe { std::slice::from_raw_parts(self.words.as_ptr() as *const u8, self.len) }
-    }
-}
-
-/// Read-phase backing bytes: a memory map ([`VectorStore::open`]) or an owned
-/// buffer ([`VectorStore::open_from_bytes`] — environments without a
-/// filesystem). Both deref to `[u8]`; every read path is shared.
-/// `pub(crate)` so [`crate::diskann`] shares the same backing for `.spqg` files. [FABLE-5]
-pub(crate) enum Bytes {
-    /// [FABLE-5] (sq-98c) Native-only: memmap2 is target-gated out of wasm32 builds, where
-    /// the owned-bytes backing serves every read instead.
-    #[cfg(not(target_arch = "wasm32"))]
-    Map(Mmap),
-    /// [OPUS-4.8] f32-aligned owned bytes (see `AlignedBytes`) so the `slot_vector` f32 cast is
-    /// always aligned — a plain `Vec<u8>` is alignment 1 and would risk UB. Review 1874.
-    Owned(AlignedBytes),
-}
-
-impl Bytes {
-    /// Copies `bytes` into the f32-aligned owned backing. Shared by the `open_from_bytes`
-    /// entry points here and in [`crate::diskann`]. [FABLE-5]
-    pub(crate) fn owned(bytes: Vec<u8>) -> Bytes {
-        Bytes::Owned(AlignedBytes::from_vec(bytes))
-    }
-}
-
-/// [FABLE-5] (sq-98c) Opens the read backing for a store/index file: a read-only memory map on
-/// native targets, a buffered `std::fs::read` into the f32-aligned owned backing on wasm32
-/// (memmap2 is target-gated out of wasm builds; a wasm target WITH a filesystem, e.g. WASI,
-/// reads the whole file — on `wasm32-unknown-unknown` the read fails with a clean I/O error,
-/// and [`VectorStore::open_from_bytes`] / [`DiskAnnIndex::open_from_bytes`] are the
-/// filesystem-less paths). Validation downstream is identical for both backings.
-///
-/// [`DiskAnnIndex::open_from_bytes`]: crate::diskann::DiskAnnIndex::open_from_bytes
-pub(crate) fn open_backing(path: &Path) -> Result<Bytes, String> {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let file = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
-        // SAFETY: read-only map of a regular file; we treat concurrent external
-        // modification of the file as out of contract (same stance as sparq-core's
-        // mmap'd dictionary/indexes).
-        let map = unsafe { Mmap::map(&file) }.map_err(|e| format!("mmap {}: {e}", path.display()))?;
-        Ok(Bytes::Map(map))
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        Ok(Bytes::owned(bytes))
-    }
-}
-
-impl std::ops::Deref for Bytes {
-    type Target = [u8];
-    fn deref(&self) -> &[u8] {
-        match self {
-            #[cfg(not(target_arch = "wasm32"))]
-            Bytes::Map(m) => m,
-            Bytes::Owned(v) => v.as_bytes(),
-        }
-    }
-}
 
 enum Backing {
     /// Build phase: vectors accumulate in RAM; `finalize` writes the file.
@@ -1238,6 +1152,26 @@ impl VectorStore {
             .apply_delta(delta)
             .map_err(|e| format!("{}: {e}", delta_path.display()))?;
         Ok(store)
+    }
+}
+
+// [OPUS-5] (issue #3699) The seam the EXTRACTED Vamana/DiskANN engine (`sparq-vamana`) builds
+// over. It is deliberately tiny — `dim` / `len` / a stable-order `(id, vector)` walk — because
+// that is genuinely all the graph builder and the quantizers ever needed from a `VectorStore`;
+// everything sparq-specific (dict term ids as the id space, the graph `Fingerprint`, `Term`
+// resolution) stays on THIS side as consumer glue. The ids yielded are raw dictionary term ids,
+// which is exactly what a `.spqg` node record stores.
+impl VectorSource for VectorStore {
+    fn dim(&self) -> usize {
+        VectorStore::dim(self)
+    }
+
+    fn len(&self) -> usize {
+        VectorStore::len(self)
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (VectorId, &[f32])> {
+        VectorStore::iter(self)
     }
 }
 

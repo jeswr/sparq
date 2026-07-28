@@ -18,7 +18,8 @@
     "sparq-lws-core": 8,
     "sparq-lws-wasm": 4,
     "sparq-py": 4,
-    "sparq-vectors": 12,
+    "sparq-vamana": 5,
+    "sparq-vectors": 7,
     "sparq-zk-compose": 2
   }
 }

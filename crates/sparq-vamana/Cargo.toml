@@ -1,0 +1,46 @@
+[package]
+name = "sparq-vamana"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Persistent, memory-mapped Vamana/DiskANN approximate-nearest-neighbour index in pure Rust: build once, reopen with no rebuild (.spqg), with an optional product-quantized in-RAM candidate cache for search-on-PQ / re-rank-on-disk"
+repository.workspace = true
+homepage.workspace = true
+keywords = ["ann", "nearest-neighbor", "diskann", "vamana", "vector-search"]
+categories = ["data-structures", "algorithms", "science"]
+readme = "README.md"
+
+# [OPUS-5] Render README.md as the docs.rs front page (lib.rs uses include_str!) and build
+# with all features so the `filtered` traversal surface is documented.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+# [OPUS-5] (issue #3699) EXTRACTED from `sparq-vectors::diskann` + `::quant` so the persistent
+# ANN engine is usable OUTSIDE this repository: nothing here knows about RDF, SPARQL, dictionary
+# term ids, or `sparq-core`. A consumer supplies vectors through the `VectorSource` trait and an
+# opaque 24-byte `StalenessToken`; `sparq-vectors` keeps the dict-id/`Term` keying and the graph
+# `Fingerprint` computation as consumer glue. The `.spqg` byte layout is UNCHANGED by the move.
+#
+# ZERO required dependencies. `memmap2` is the only dependency at all, and it is TARGET-gated
+# (native only) rather than feature-gated, exactly as `sparq-vectors` does it: cargo features are
+# additive, so a feature could never REMOVE the dependency from a wasm build.
+
+[features]
+default = []
+# [OPUS-5] Predicate-constrained ("filtered") graph traversal: walk the Vamana graph
+# predicate-agnostically for connectivity but accept only the ids a caller-supplied predicate
+# admits (ACORN / NaviX style). OPT-IN and OFF by default; it adds NO dependency — the flag exists
+# so a consumer that only needs unfiltered k-NN compiles zero filtered-traversal code, mirroring
+# `sparq-vectors`' own `filtered-ann` feature (which enables this one).
+filtered = []
+
+[dependencies]
+
+# [OPUS-5] memmap2 is NATIVE-ONLY — target-gated out of every wasm32 build so the crate compiles
+# to wasm without a memory-map dependency (inherited verbatim from sparq-vectors, sq-98c). On
+# wasm32 the file-open read path (`VamanaIndex::open`) falls back to a buffered `std::fs::read`
+# into the same f32-aligned owned-bytes backing `open_from_bytes` uses; native is unchanged (mmap).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+memmap2.workspace = true

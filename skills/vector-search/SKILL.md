@@ -192,7 +192,7 @@ DedupPolicy { recall_gate: f64 /*0.99*/, merge_threshold: f32 /*0.995, NON-canon
 dedup(&ConceptAnnIndex, &DedupPolicy, &GroundTruth) -> Result<DedupReport, String>   // gate FIRST, merges only after it passes
 DedupReport { recall: f64, merges: Vec<(Id /*dup*/, Id /*canonical=smallest*/)>, groups: Vec<Vec<Id>> }
 
-// --- persistent on-disk ANN (src/diskann.rs) ---
+// --- persistent on-disk ANN (src/diskann.rs — a dict-id/Term-keyed FACADE over the `sparq-vamana` crate, #3699) ---
 DiskAnnIndex::build(&VectorStore, path) / ::build_with(&store, path, VamanaConfig{degree, build_beam, search_beam, alpha, seed})
 DiskAnnIndex::build_for(&store, path, &Graph) / ::build_with_for(&store, path, cfg, &Graph)  // embeds the graph fingerprint
 DiskAnnIndex::build_with_pq(&store, path, cfg, PqConfig) -> Result<..>          // [OPUS-4.8] sq-qamd: + a PQ candidate cache (search on codes, re-rank off mmap); persisted as a trailing .spqg section (encoding tag 1)
@@ -202,7 +202,24 @@ impl DiskAnnIndex { fn nearest(&self, &[f32], k) -> Vec<(Id, f32)>; fn nearest_t
                     fn has_pq_cache() -> bool;                                  // [OPUS-4.8] sq-qamd: PQ-guided search when true
                     fn fingerprint() -> Option<Fingerprint>; fn check_graph(&store, &Graph) -> Result<(), String>;
                     fn nearest_term_checked(&Term, &Graph, &store, k) -> Result<Vec<(Term, f32)>, String> }
-sibling_graph_path(&Path) -> PathBuf                                            // foo.spqv -> foo.spqg
+sibling_graph_path(&Path) -> PathBuf                                            // foo.spqv -> foo.spqg (re-exported from sparq-vamana)
+
+// --- the ENGINE underneath, usable WITHOUT sparq (crate `sparq-vamana`, extracted in #3699) ---
+// [OPUS-5] The Vamana build/search, the versioned `.spqg` on-disk format, the PQ/SQ quantizers and
+// the shared mmap/aligned-owned read backing all live there now. `.spqg` bytes are UNCHANGED and
+// every `sparq_vectors::` name above still resolves — this is a decoupling, not an API break.
+// Reach for it directly only when you want ANN over NON-RDF vectors; inside sparq, keep using
+// DiskAnnIndex (it carries the dict-id keying + the graph-fingerprint staleness guard).
+sparq_vamana::VectorSource { fn dim(); fn len(); fn iter() -> impl Iterator<Item=(VectorId /*u32*/, &[f32])> }  // VectorStore impls it
+sparq_vamana::SliceVectors::new(dim, ids: Vec<u32>, data: Vec<f32>) -> Result<..>   // plain row-major in-RAM source
+sparq_vamana::VamanaIndex::build(&src, path, VamanaConfig, Option<StalenessToken>) -> Result<..>
+sparq_vamana::VamanaIndex::build_with_pq(&src, path, cfg, PqConfig, Option<StalenessToken>) -> Result<..>
+impl VamanaIndex { fn open(path)/open_from_bytes(Vec<u8>); fn nearest(&[f32], k) -> Vec<(u32, f32)>;
+                   fn len()/dim()/is_empty()/has_pq_cache()/search_beam();
+                   fn staleness_token() -> Option<StalenessToken>;                 // OPAQUE 24 bytes — the crate never interprets it
+                   fn nearest_filtered_by(&[f32], k, beam, accept: impl Fn(u32)->bool) }  // feature = "filtered" ONLY
+// sparq-vectors supplies `Fingerprint::of(&Graph).to_bytes()` as that token and does the comparing;
+// `DiskAnnIndex::fingerprint()` decodes it back. A missing token reads as None ("unverifiable"), never a mismatch.
 
 // --- predicate-constrained (filtered) ANN (src/filter.rs) --- feature = "filtered-ann" ONLY; LEAN, no new dep [OPUS-4.8] sq-1wc1
 IdMask::new() / ::from_ids(impl IntoIterator<Item=Id>) / FromIterator<Id>   // the BGP-selected "visit mask" of permitted dict-ids
@@ -212,6 +229,8 @@ FilterConfig { prefilter_fraction: f32 /*0.01*/, prefilter_floor: usize /*256*/,
 impl FilterConfig { fn prefer_prefilter(mask_len, store_len) -> bool }       // selectivity crossover: <= max(frac*store, floor) -> pre-filter
 impl DiskAnnIndex { fn nearest_filtered(&self, &[f32], &IdMask, &VectorStore, k) -> Vec<(Id, f32)>     // ACORN/NaviX filtered traversal OR pre-filter, by selectivity
                     fn nearest_filtered_with(&self, &[f32], &IdMask, &VectorStore, k, FilterConfig) -> Vec<(Id, f32)> }
+// [OPUS-5] the traversal half now lives in sparq-vamana behind ITS opt-in `filtered` feature, which
+// `filtered-ann` enables — so with the feature off NEITHER crate compiles filtered-traversal code.
 impl VectorIndex  { fn nearest_filtered(&self, &[f32], &IdMask, &VectorStore, k) -> Vec<(Id, f32)> }   // HNSW: exact pre-filter only (instant-distance adjacency not exposed)
 // empty mask -> no results; full mask -> equals the unfiltered search; every returned id is guaranteed in the mask
 
@@ -1641,6 +1660,20 @@ gate/threshold outside its range, an all-zero/non-finite/duplicate-id input.
   the design requires before any prior is adopted — **no accuracy claim**, indicative numbers only
   (work-box non-canonical). **DistMult is symmetric → near-random on directional relations; read
   ablation deltas off the asymmetric ComplEx, multi-seed.**
+- **The persistent Vamana/DiskANN engine now lives in its own crate, `sparq-vamana` (issue #3699).**
+  [OPUS-5] The graph build + greedy search, the versioned `.spqg` on-disk format, the PQ/SQ
+  quantizers (`quant`) and the ONE shared mmap/aligned-owned read backing `.spqv` and `.spqg` both
+  go through were EXTRACTED into a stand-alone, RDF-agnostic crate — a real ecosystem gap (there is
+  no other maintained pure-Rust *persistent* ANN crate; `instant-distance` is closed-graph HNSW).
+  **Nothing was deprecated and nothing is duplicated:** `sparq_vectors::{DiskAnnIndex, VamanaConfig,
+  ProductQuantizer, …}` all still resolve, `DiskAnnIndex` is a thin facade forwarding to
+  `sparq_vamana::VamanaIndex`, and the `.spqg` byte layout is unchanged (old files still open;
+  new files are byte-identical — the 50k recall gate is exact-valued and stayed put). What remains
+  on the sparq side is the genuinely sparq-specific glue: **dict-id/`Term` keying**, the
+  **graph fingerprint** (the extracted crate stores it as an OPAQUE 24-byte `StalenessToken` it
+  never interprets), and the filtered-ANN **pre-filter-vs-traversal strategy choice**. The new crate
+  has **no required dependency at all** (memmap2 is native-target-gated), so the lean-core posture is
+  unchanged — `sparq-vectors` simply no longer names memmap2 directly.
 - **`approx-ann` is the ONLY heavy ANN dependency, and it is OFF by default (sq-ip3a).** The HNSW
   index (`VectorIndex`/`HnswConfig`), the `ApproxBackend`, and the recall-gated concept-ANN dedup
   surface (`build_ann`/`knn`/`dedup`, recipe 22 — [FABLE-5] #2251) are gated behind it — it is the

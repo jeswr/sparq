@@ -1,0 +1,27 @@
+# Feature-matrix fragment for `sparq-vamana`.
+#
+# One self-contained leg mapping per opt-in feature(group). Assembled into the
+# feature-matrix `opt-in-features` strategy by scripts/assemble-feature-matrix.py
+# (the `setup` job emits the combined matrix as JSON consumed via fromJSON). Adding a
+# leg for THIS crate edits only THIS file, so concurrent opt-in-feature PRs for
+# DIFFERENT crates never textually conflict (bead sq-ibrze). [OPUS-4.8]
+#
+# CONTRACT (gate-critical): each leg's emitted check-run NAME is `opt-in <name>`,
+# discovered as a REQUIRED check by the ci-summary `gate` aggregator BY NAME. Keep
+# `name` free of the whole words "advisory"/"informational" or the leg stops gating.
+# Fields: name (required -> check-run name), crate (required), features (required,
+# non-empty comma list), test (bool — run `cargo test` for the leg).
+
+# [OPUS-5] (issue #3699) `filtered` — the ACORN/NaviX-style predicate-constrained graph
+# traversal (`VamanaIndex::nearest_filtered_by` + `search_slots_filtered`). `default = []`,
+# so the default workspace lane compiles that code EMPTY and runs ZERO of its tests: the
+# `filtered_traversal_returns_only_accepted_ids_and_stays_ranked` integration test in
+# tests/vamana.rs is `#[cfg(feature = "filtered")]`. This leg builds it, clippies it with
+# the feature ON, and runs it. No new dependency — the flag exists purely so a consumer that
+# only needs unfiltered k-NN compiles no filtered-traversal code. (`sparq-vectors`' own
+# `filtered-ann` leg enables this feature transitively, but only through THAT crate's
+# facade; this leg is what exercises the engine's own suite.)
+- name: "sparq-vamana (filtered traversal)"
+  crate: "sparq-vamana"
+  features: "filtered"
+  test: true
