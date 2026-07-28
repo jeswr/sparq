@@ -53,6 +53,13 @@ Write the emitted string to `<name>.rs` and pull it in with `mod <name>;`.
   `Ref<M>` reference, `sh:node` → a nested generated type (boxed, so recursive
   shapes have a finite Rust type), `sh:closed true` → a predicate whitelist plus
   a loader that rejects anything outside it.
+- **Checked, not just typed.** The Rust type is the representation; the loader
+  checks the datatype IRI **and** the lexical form against the datatype's own
+  value space for the XSD boolean, floating-point, decimal and integer families.
+  So `"not-an-integer"^^xsd:integer` is rejected even though it keeps its lexical
+  form, and `"128"^^xsd:byte` is rejected even though it parses as an `i64`.
+  Datatypes with no mechanical lexical space — `xsd:string`, `xsd:anyURI`, the
+  date/time family, `rdf:langString`, anything outside XSD — are taken as given.
 - **Deterministic.** The IR is totally ordered by content, never by shapes-graph
   traversal order, so the emitted bytes are reproducible.
 - **Typed failure.** Ill-formed or contradictory shapes — an `sh:minCount` above

@@ -80,12 +80,24 @@ fn an_open_shape_emits_no_whitelist() {
 /// the binary, and asserts it succeeded.
 #[test]
 fn the_generated_code_compiles_and_enforces_its_closed_shape() {
-    let src = generate(&acceptance_model()).expect("well-formed");
+    compile_and_run("compile", &generate(&acceptance_model()).expect("well-formed"), HARNESS);
+}
 
-    let dir = scratch_dir("compile");
+/// `sh:datatype` is checked the way SHACL defines it — the datatype IRI AND a
+/// well-formed lexical form — for both the `String`-backed datatypes and the
+/// `i64`-backed narrow ones, whose value ranges are narrower than `i64`'s.
+#[test]
+fn the_generated_loader_checks_lexical_forms_and_value_ranges() {
+    let src = generate(&common::shapes_model(DATATYPE_SHAPES)).expect("well-formed");
+    compile_and_run("datatypes", &src, DATATYPE_HARNESS);
+}
+
+fn compile_and_run(tag: &str, src: &str, harness: &str) {
+    let dir = scratch_dir(tag);
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
-    std::fs::write(dir.join("model.rs"), &src).expect("write generated module");
-    std::fs::write(dir.join("main.rs"), HARNESS).expect("write harness");
+    std::fs::write(dir.join("model.rs"), src).expect("write generated module");
+    std::fs::write(dir.join("main.rs"), harness).expect("write harness");
 
     let binary = dir.join("harness");
     let compile = Command::new(rustc())
@@ -259,6 +271,18 @@ fn main() {
         Err(LoadError::DatatypeMismatch { .. })
     ));
 
+    // 7b. Keeping the lexical form is NOT the same as accepting anything: a
+    //     malformed xsd:integer is still rejected.
+    let mut malformed = base();
+    malformed.push(Triple::literal(ALICE, "http://example.org/visits", "not-an-integer", XSD_INTEGER));
+    match PersonShape::load(ALICE, &malformed) {
+        Err(LoadError::LexicalForm { value, expected, .. }) => {
+            assert_eq!(value, "not-an-integer");
+            assert_eq!(expected, XSD_INTEGER);
+        }
+        other => panic!("a malformed xsd:integer was accepted: {:?}", other),
+    }
+
     // 8. A recursive sh:node really nests, and cyclic data terminates.
     let mut managed = base();
     managed.push(Triple::node(ALICE, "http://example.org/manager", ALICE));
@@ -268,5 +292,126 @@ fn main() {
     }
 
     println!("generated-loader behaviour verified");
+}
+"#;
+
+/// One node shape per datatype family the lexical check covers: the narrow
+/// signed types (lowered to `i64`, value space narrower than `i64`'s), the
+/// String-backed unbounded and unsigned ones, and `xsd:string`, which has no
+/// mechanical lexical space and must stay unchecked.
+const DATATYPE_SHAPES: &str = r#"
+@prefix sh:  <http://www.w3.org/ns/shacl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix ex:  <http://example.org/> .
+
+ex:ValueShape a sh:NodeShape ;
+    sh:property [ sh:path ex:count  ; sh:datatype xsd:integer      ; sh:maxCount 1 ] ;
+    sh:property [ sh:path ex:amount ; sh:datatype xsd:decimal      ; sh:maxCount 1 ] ;
+    sh:property [ sh:path ex:size   ; sh:datatype xsd:unsignedByte ; sh:maxCount 1 ] ;
+    sh:property [ sh:path ex:big    ; sh:datatype xsd:long         ; sh:maxCount 1 ] ;
+    sh:property [ sh:path ex:tally  ; sh:datatype xsd:int          ; sh:maxCount 1 ] ;
+    sh:property [ sh:path ex:medium ; sh:datatype xsd:short        ; sh:maxCount 1 ] ;
+    sh:property [ sh:path ex:tiny   ; sh:datatype xsd:byte         ; sh:maxCount 1 ] ;
+    sh:property [ sh:path ex:label  ; sh:datatype xsd:string       ; sh:maxCount 1 ] .
+"#;
+
+/// Every assertion here is about the GENERATED loader: which lexical forms it
+/// accepts for a datatype, and which it rejects as ill-formed or out of range.
+const DATATYPE_HARNESS: &str = r#"
+mod model;
+
+use model::{LoadError, Triple, ValueShape};
+
+const S: &str = "http://example.org/s";
+const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+
+fn load(property: &str, lexical: &str, datatype: &str) -> Result<ValueShape, LoadError> {
+    let predicate = format!("http://example.org/{}", property);
+    let datatype = format!("{}{}", XSD, datatype);
+    let triples = vec![Triple::literal(S, &predicate, lexical, &datatype)];
+    ValueShape::load(S, &triples)
+}
+
+fn accepts(property: &str, lexical: &str, datatype: &str) -> ValueShape {
+    match load(property, lexical, datatype) {
+        Ok(v) => v,
+        Err(e) => panic!("{} {:?}^^xsd:{} must load: {:?}", property, lexical, datatype, e),
+    }
+}
+
+/// Rejected as a LEXICAL failure specifically — not by some unrelated error,
+/// and naming the value that was refused.
+fn rejects(property: &str, lexical: &str, datatype: &str) {
+    match load(property, lexical, datatype) {
+        Err(LoadError::LexicalForm { value, expected, .. }) => {
+            assert_eq!(value, lexical);
+            assert_eq!(expected, format!("{}{}", XSD, datatype));
+        }
+        other => panic!(
+            "{} accepted {:?}^^xsd:{}: {:?}", property, lexical, datatype, other
+        ),
+    }
+}
+
+fn main() {
+    // 1. An UNBOUNDED xsd:integer keeps its lexical form, so its full value
+    //    space loads — and a malformed lexical form is still rejected.
+    let beyond_i64 = "9223372036854775808";
+    assert_eq!(
+        accepts("count", beyond_i64, "integer").count.as_deref(),
+        Some(beyond_i64),
+    );
+    accepts("count", "-0", "integer");
+    accepts("count", "+7", "integer");
+    accepts("count", "007", "integer");
+    // The last is a non-ASCII digit: the XSD integer lexical space is [0-9].
+    for bad in ["not-an-integer", "12.5", "", " 1", "1 ", "0x10", "+-1", "1e3", "\u{0663}"] {
+        rejects("count", bad, "integer");
+    }
+
+    // 2. THE RANGE CLAIM: the narrow signed datatypes reject values an i64
+    //    parse would happily accept. Each boundary loads; each value one step
+    //    outside it does not.
+    for (property, datatype, min, max, under, over) in [
+        ("tiny", "byte", "-128", "127", "-129", "128"),
+        ("medium", "short", "-32768", "32767", "-32769", "32768"),
+        ("tally", "int", "-2147483648", "2147483647", "-2147483649", "2147483648"),
+        ("big", "long", "-9223372036854775808", "9223372036854775807",
+         "-9223372036854775809", "9223372036854775808"),
+    ] {
+        accepts(property, min, datatype);
+        accepts(property, max, datatype);
+        rejects(property, under, datatype);
+        rejects(property, over, datatype);
+        rejects(property, "not-a-number", datatype);
+    }
+    // The accepted value is the parsed i64, not the lexical form.
+    assert_eq!(accepts("tiny", "-128", "byte").tiny, Some(-128));
+    assert_eq!(accepts("tally", "2147483647", "int").tally, Some(2147483647));
+
+    // 3. A String-backed UNSIGNED datatype is range-checked the same way.
+    accepts("size", "0", "unsignedByte");
+    assert_eq!(accepts("size", "255", "unsignedByte").size.as_deref(), Some("255"));
+    rejects("size", "256", "unsignedByte");
+    rejects("size", "-1", "unsignedByte");
+
+    // 4. xsd:decimal keeps its lexical form, but only a decimal one: an
+    //    exponent belongs to xsd:double, not xsd:decimal.
+    accepts("amount", "3", "decimal");
+    assert_eq!(accepts("amount", "-0.50", "decimal").amount.as_deref(), Some("-0.50"));
+    accepts("amount", ".5", "decimal");
+    accepts("amount", "5.", "decimal");
+    for bad in ["1.2.3", "1e3", "", ".", "-", "1,5"] {
+        rejects("amount", bad, "decimal");
+    }
+
+    // 5. The negative half: a datatype with no mechanical lexical space is
+    //    still taken as given, so the check cannot have become a blanket one.
+    assert_eq!(
+        accepts("label", "not-an-integer", "string").label.as_deref(),
+        Some("not-an-integer"),
+    );
+
+    println!("generated-loader datatype checks verified");
 }
 "#;

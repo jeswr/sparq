@@ -118,8 +118,14 @@ pub struct ScalarType {
 /// primitive represents **without loss** get a primitive. Everything else —
 /// including `xsd:decimal`, whose value space is not binary floating point, and
 /// the unbounded/unsigned integer types (`xsd:integer` among them) — keeps its
-/// lexical form as a [`RustScalar::String`], with the datatype still checked at
-/// load time.
+/// lexical form as a [`RustScalar::String`].
+///
+/// The Rust type is the representation, not the constraint. Whichever scalar a
+/// `sh:datatype` lowers to, the generated loader checks the datatype IRI **and**
+/// the lexical form against the datatype's own value space (for the XSD boolean,
+/// floating-point, decimal and integer families), so a `String`-backed
+/// `xsd:integer` still rejects `"not-an-integer"` and an `i64`-backed
+/// `xsd:byte` still rejects `128`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RustScalar {
     /// The literal's lexical form, verbatim.

@@ -524,6 +524,12 @@ fn scalar_type(datatypes: Vec<String>) -> ScalarType {
 /// ℤ, so lowering it to `i64` would make the generated loader reject conforming
 /// literals such as `9223372036854775808`. Only the fixed-width signed
 /// derivations, whose COMPLETE value spaces fit `i64`, get the primitive.
+///
+/// The Rust type is the REPRESENTATION, never the whole check: a datatype
+/// narrower than its Rust type (`xsd:int` in an `i64`) and one that keeps its
+/// lexical form (`xsd:integer`, `xsd:decimal`, the unsigned types) are both
+/// range- and lexical-space-checked by the emitted loader, so `"128"^^xsd:byte`
+/// and `"not-an-integer"^^xsd:integer` are rejected at load time.
 fn rust_scalar(datatype: &str) -> RustScalar {
     let Some(local) = datatype.strip_prefix(XSD) else {
         return RustScalar::String;
