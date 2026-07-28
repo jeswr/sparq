@@ -126,9 +126,12 @@ Public API (5 items, each with a doctest + direct unit test): `parse_program`,
   deletion-maintenance bead sq-6tykl.4 (same-crate collision, per the epic note).
   *(Since shipped as Phase 3, sq-4foq0 — see §6 item 3 and `datalog::incr`.)*
 - **No CLI/`MaterializedGraph` wiring** — library API only.
-- The `datalog` feature is not yet in `scripts/coverage.sh`'s per-crate measurement
-  (sparq-reason is measured default-features, so the module doesn't regress the floor;
-  wiring it like `sparq-reason-el`'s `rbox,hasse` case is beaded).
+- The `datalog` feature IS now in `scripts/coverage.sh`'s per-crate measurement
+  (sq-iwf3c): sparq-reason has a `measure()` case arm naming `--features datalog`, the
+  `sparq-reason-el` `rbox,hasse` pattern, so the module is no longer compiled out of the
+  crate's line-coverage denominator. The committed floor was NOT re-seeded in that change
+  (no with-datalog measurement was taken); it is the pre-datalog default-feature floor
+  carried over the larger denominator until the first CI measurement re-seeds it.
 
 ## 6. Phased decomposition (beaded)
 
@@ -155,5 +158,9 @@ Public API (5 items, each with a doctest + direct unit test): `parse_program`,
    handle, SKILL/docs examples beyond the API reference.
 7. **N3-compiled adoption of the checker** (sq-pi2k0) — replace the documented caller-discipline
    stratification of `n3::compiled` `log:notIncludes` with this checked stratification.
-8. **Coverage measure-case wiring** (sq-iwf3c) — add `--features datalog` to the sparq-reason
-   measurement in `scripts/coverage.sh` (the `sparq-reason-el` pattern).
+8. **Coverage measure-case wiring** (sq-iwf3c) — SHIPPED: the sparq-reason `measure()` case
+   arm in `scripts/coverage.sh` names `--features datalog` (the `sparq-reason-el` pattern),
+   so `src/datalog/` enters the crate's line-coverage denominator. Only `datalog` is named —
+   the crate's other default-off features (explain/profile/d-entail/rif/compiled-rules/reify)
+   are separately beaded. Floor re-seeding from the first with-datalog CI measurement is the
+   open remainder (see §5).
