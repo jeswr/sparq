@@ -47,7 +47,12 @@ required-features = ["server"]
 # (#1735 — result-equivalent, zero new deps; see the feature's own comment below). Like
 # `jsonld` it is a BINARY-crate default only — sparq-engine's LIBRARY default stays OFF, and
 # `--no-default-features --features server,jsonld` drops it for an explicit rewrite-dark build.
-default = ["server", "jsonld", "algebra-rewrite", "explain-json"]
+# [OPUS-5] (sq-7d3dj.30.15) `dp-planner` joins it, for the same reason and by the same
+# mechanism: sq-7d3dj.30.5 lit the DPccp join-order planner in sparq-cli ONLY, so the HTTP
+# binary planned joins with greedy GOO while every CLI-measured build planned them with the
+# cost-optimal DP — the two shipped surfaces disagreed on join order. See the feature's own
+# comment below.
+default = ["server", "jsonld", "algebra-rewrite", "explain-json", "dp-planner"]
 # [FABLE-5] (sq-ixc3.19) `explain-json` (default ON): the STRUCTURED explain response —
 # `Accept: application/x-sparq-explain+json` on `/sparql` answers with sparq-engine's typed
 # plan tree (`explain_json::PlanNode`, sq-u4lgr/#902) as camelCase JSON
@@ -71,6 +76,29 @@ explain-json = ["sparq-engine/explain-json"]
 # The pure serialiser library build (`--no-default-features`) is unaffected either way — this
 # only changes which sparq-engine the QUERY path compiles against.
 algebra-rewrite = ["sparq-engine/algebra-rewrite"]
+# [OPUS-5] (sq-7d3dj.30.15) `dp-planner` (default ON, see above): forwards sparq-engine's
+# opt-in DPccp join-order planner (sq-7d3dj.30.5 / #1732). Once compiled it is DEFAULT-ON in
+# the engine (the `Install::Default` state), so every BGP a request evaluates that is connected,
+# has 3..=63 patterns and fits the `DEFAULT_MAX_SUBGRAPHS` budget is planned by the cost-optimal
+# bushy DP instead of greedy GOO — no `with_dp_planner` call is needed on the request path, and
+# a caller can still opt out per-scope with `sparq_engine::without_dp_planner`.
+#
+# WHY default-on here: sq-7d3dj.30.5 enabled it in sparq-cli only, so the canonical CLI-measured
+# benchmarks and the shipped HTTP binary planned joins DIFFERENTLY — an HTTP-measured number was
+# not comparable to a CLI-measured one, and the server ran the greedy plan the DP's cost model is
+# there to improve on for the shapes it accepts. (The n < 3 case is NOT one of them: greedy GOO is
+# already Cout-optimal there, which is why sq-7d3dj.30.5 raised the threshold.) Same BINARY-crate
+# default rationale as `jsonld` / `algebra-rewrite` / `explain-json` above: sparq-engine's LIBRARY
+# default stays OFF, and `--no-default-features --features server,jsonld` still builds an
+# explicitly greedy-GOO server.
+#
+# Result-EQUIVALENT: the planner only reorders joins, never changes the answer — the invariant is
+# asserted by sparq-engine's `tests/query_features/dp_planner_differential.rs` in the
+# `sparq-engine (dp-planner)` feature-matrix leg. Pulls ZERO new dependencies (`dp-planner = []`
+# in sparq-engine) and no `unsafe`; `tests/dp_planner_default.rs` is this crate's tripwire that
+# the default set keeps it lit. The pure serialiser library build (`--no-default-features`) is
+# unaffected either way — this only changes which sparq-engine the QUERY path compiles against.
+dp-planner = ["sparq-engine/dp-planner"]
 # [OPUS-4.8] (sq-vpx4) Compiles internal TEST SEAMS — currently the durable-write
 # failure-injection hook on the `--persist` seal path, exposed via
 # `AppState::with_config_inject_durable_failure` for the graceful-degradation
