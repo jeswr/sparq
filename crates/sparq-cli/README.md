@@ -59,6 +59,19 @@ cargo run --release -p sparq-cli -- query data.ttl turtle 'SELECT * WHERE { ?s ?
   JSON-LD **parse + serialise + full 1.1 Compaction/Framing**; full conneg-conformance ratcheting
   is on the [sq-oy1f](https://github.com/jeswr/sparq/issues/757) roadmap.
 - **`--reason <rdfs|owl-rl|n3>`** — opt-in forward-chaining materialization before query.
+- **`classify <file> <format> [out.nt]` / `--reason el`** *(opt-in `el` feature; [OPUS-5] sq-2ch27)* —
+  run the **OWL 2 EL** consequence-based classifier (`sparq-reason-el`, pulled with its `rbox` role
+  automaton) and materialize the class-subsumption lattice as `rdfs:subClassOf` triples (plus the
+  role-inclusion closure as `rdfs:subPropertyOf`) — complete for the **E1+E2 fragment** (CR1–CR6
+  class saturation + the CR10/CR11 role automaton), **not** for OWL 2 EL as a whole: the CLI does
+  **not** enable `cdomain`, so concrete-domain axioms (faceted `owl:onDatatype`, literal
+  `owl:hasValue`/`owl:oneOf`) are counted in `skipped_axioms` and **not applied**, and on such an
+  ontology the hierarchy can be incomplete. `classify` prints the report as `name<TAB>value` lines;
+  `--reason el` on `query` (and `reason <f> <fmt> el`) classifies then hands the augmented graph to
+  the ordinary query path. **OWL 2 RL is sound but *incomplete* for class classification** — use
+  `el`, not `--reason owl`, when you need the EL class hierarchy. Honest incompleteness (skipped
+  axioms, a non-regular RBox, unsatisfiable classes) is reported on stderr, never swallowed;
+  without the feature `--reason el` exits 2 naming it rather than silently downgrading to RL.
 - **`tabular <csv[.gz|.zst|.bz2]> …`** *(opt-in `tabular` feature; [FABLE-5] sq-lsp7k.8)* —
   **materializing tabular→RDF import**: stream CSV rows through a direct mapping (subject IRI
   template `{col}`/`{_row}` via `--template`, per-column predicates, `xsd` datatype inference,
