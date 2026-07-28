@@ -285,7 +285,13 @@ def cargo_wasm_builder(tree: str) -> bytes | None:
     if proc.returncode != 0:
         sys.stderr.write(proc.stderr.decode("utf-8", "replace")[-4000:])
         return None
-    out = os.path.join(tree, "target", "wasm32-unknown-unknown", "release-wasm", "sparq_wasm.wasm")
+    # Each obligation builds a freshly-materialised tree, so without a shared target
+    # directory every one of them recompiles the whole dependency graph from cold. Honour
+    # CARGO_TARGET_DIR so a caller can point the extra builds at one warm directory. It must
+    # be a directory the leg's OWN cached `target/` does not share, or the neutral tree's
+    # artefacts would be saved into the head build's cache.
+    target_root = os.environ.get("CARGO_TARGET_DIR") or os.path.join(tree, "target")
+    out = os.path.join(target_root, "wasm32-unknown-unknown", "release-wasm", "sparq_wasm.wasm")
     if not os.path.exists(out):
         return None
     with open(out, "rb") as fh:

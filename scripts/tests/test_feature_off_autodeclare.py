@@ -724,6 +724,56 @@ def test_derivation_suite_is_run_in_ci() -> None:
           "CI must run the derivation suite WITH --mutate")
 
 
+def test_derivation_target_dir_is_off_the_cached_workspace_target() -> None:
+    """The extra builds must NOT write into the `target/` Swatinem caches for this job.
+
+    Sharing it would make the neutral tree's artefacts part of the head build's cache entry,
+    poisoning every later PR that restores that key.
+    """
+    block = _step_block(workflow_text(), "Derive the feature-OFF declaration")
+    m = re.search(r"CARGO_TARGET_DIR:\s*(\S.*)$", block, re.M)
+    check("test_derivation_target_dir_is_off_the_cached_workspace_target",
+          m is not None and "runner.temp" in m.group(1),
+          f"expected a runner.temp path, got {m.group(1) if m else '<unset>'}")
+
+
+def test_builder_honours_the_shared_target_dir() -> None:
+    """`cargo_wasm_builder` must read the bundle from CARGO_TARGET_DIR when it is set.
+
+    If it kept looking under `<tree>/target` it would find nothing there, return None, and
+    every derivation would refuse with `neutral-build-failed` — a silent all-refuse that
+    still looks like the tool is working. Exercised BEHAVIOURALLY with a stubbed cargo, so
+    the assertion cannot pass just because the source happens to mention the variable.
+    """
+    tree = tempfile.mkdtemp(prefix="featoff-tgt-")
+    shared = tempfile.mkdtemp(prefix="featoff-shared-target-")
+    out = os.path.join(shared, "wasm32-unknown-unknown", "release-wasm")
+    os.makedirs(out)
+    with open(os.path.join(out, "sparq_wasm.wasm"), "wb") as fh:
+        fh.write(b"bundle-from-the-shared-target-dir")
+
+    class _Ok:
+        returncode = 0
+        stderr = b""
+
+    real_run, real_env = A.subprocess.run, os.environ.get("CARGO_TARGET_DIR")
+    try:
+        A.subprocess.run = lambda *a, **k: _Ok()
+        os.environ["CARGO_TARGET_DIR"] = shared
+        got = A.cargo_wasm_builder(tree)
+    finally:
+        A.subprocess.run = real_run
+        if real_env is None:
+            os.environ.pop("CARGO_TARGET_DIR", None)
+        else:
+            os.environ["CARGO_TARGET_DIR"] = real_env
+        shutil.rmtree(tree, ignore_errors=True)
+        shutil.rmtree(shared, ignore_errors=True)
+    check("test_builder_honours_the_shared_target_dir",
+          got == b"bundle-from-the-shared-target-dir",
+          f"expected the bundle from CARGO_TARGET_DIR, got {got!r}")
+
+
 def test_paths_filter_includes_the_new_scripts() -> None:
     """Editing the derivation must re-run the leg, in BOTH of the workflow's filter blocks."""
     text = workflow_text()
@@ -739,6 +789,8 @@ TESTS = [
     test_leg2_step_has_the_id_the_derivation_depends_on,
     test_derivation_cannot_change_the_leg2_verdict,
     test_derivation_suite_is_run_in_ci,
+    test_derivation_target_dir_is_off_the_cached_workspace_target,
+    test_builder_honours_the_shared_target_dir,
     test_paths_filter_includes_the_new_scripts,
     test_census_sweep_counts_the_live_class,
     test_census_sweep_matches_leg_name_by_equality,
@@ -846,6 +898,11 @@ MUTANTS = [
      '            if leg is None or (c.get("started_at") or "") >= (leg.get("started_at") or ""):',
      "            if True:",
      "test_census_sweep_uses_the_newest_run_per_name"),
+    ("M14-builder-ignores-shared-target-dir",
+     "look for the bundle under <tree>/target even when CARGO_TARGET_DIR is set",
+     '    target_root = os.environ.get("CARGO_TARGET_DIR") or os.path.join(tree, "target")',
+     '    target_root = os.path.join(tree, "target")',
+     "test_builder_honours_the_shared_target_dir"),
     ("M13-prebuilt-skips-neutral-proof",
      "reuse the head bundle as the neutral bundle instead of rebuilding",
      "    neutral_bytes = builder(neutral)", "    neutral_bytes = head_bytes",
@@ -881,6 +938,11 @@ YAML_MUTANTS = [
      "scripts/tests/test_feature_off_autodeclare.py --mutate",
      "scripts/tests/test_feature_off_autodeclare.py",
      "test_derivation_suite_is_run_in_ci"),
+    ("Y7-share-the-cached-target-dir",
+     "point the derivation's builds at the workspace target/ Swatinem caches",
+     "          CARGO_TARGET_DIR: ${{ runner.temp }}/featoff-derivation-target",
+     "          CARGO_TARGET_DIR: target",
+     "test_derivation_target_dir_is_off_the_cached_workspace_target"),
     ("Y5-drop-paths-filter-entry",
      "stop re-running the leg when the derivation script itself changes",
      "              - 'scripts/feature_off_autodeclare.py'\n", "",

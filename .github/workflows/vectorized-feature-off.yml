@@ -465,6 +465,10 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          # One warm directory shared by the derivation's extra builds, kept OFF the
+          # workspace `target/` that Swatinem caches — pointing it there would save the
+          # neutral tree's artefacts into the head build's cache entry.
+          CARGO_TARGET_DIR: ${{ runner.temp }}/featoff-derivation-target
         run: |
           set -uo pipefail
           python3 scripts/feature_off_autodeclare.py \
