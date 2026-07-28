@@ -641,5 +641,5 @@ The bead stays **open**: the recommendation is a four-step sequence (prerequisit
 helper fix → gate-measurement spike on focused fixtures → the ACIR-only v1 pass →
 optional extensions), with an explicit stop-and-park after step 2 if no gate win
 reproduces. Two questions are for the maintainer/upstream *before* code: whether
-the failure-attribution move is acceptable at all, and whether @jeswr's open
-#12780/#12927 range analysis subsumes this. Nothing was posted upstream.
+the failure-attribution move is acceptable at all, and whether @jeswr's
+open #12780/#12927 range analysis subsumes this. Nothing was posted upstream.
