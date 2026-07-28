@@ -107,9 +107,11 @@ impl JsonProjection {
 
     /// Bounds how deeply nodes are expanded before becoming references.
     ///
-    /// A depth of `0` projects the focus itself as a reference. The bound is a
-    /// stack guard, not a policy for repeats — cycles are already broken by
-    /// [`RepeatedFocus`] at any depth.
+    /// The bound applies to expandable terms only, so a depth of `0` projects a
+    /// non-literal focus as a reference but still projects a literal focus as
+    /// its value object — a literal has no outgoing edges, so there is no
+    /// recursion there to bound. The bound is a stack guard, not a policy for
+    /// repeats — cycles are already broken by [`RepeatedFocus`] at any depth.
     pub fn with_max_depth(mut self, max_depth: usize) -> Self {
         self.max_depth = max_depth;
         self
@@ -154,6 +156,9 @@ struct Projector<'a> {
 
 impl Projector<'_> {
     fn write_term(&mut self, term: &Term, depth: usize) {
+        // A literal is a leaf: it has no outgoing edges, so neither the depth
+        // bound nor the repeat policy has any recursion here to cut, and it is
+        // written as a value object at every depth.
         if let Term::Literal(literal) = term {
             self.write_literal(literal);
             return;
@@ -357,6 +362,21 @@ mod tests {
             JsonProjection::new().with_max_depth(1).project(&node),
             "{\"@id\":\"http://example.org/a\",\"http://example.org/to\":\
              [{\"@ref\":\"http://example.org/b\"},{\"@ref\":\"http://example.org/c\"}]}"
+        );
+    }
+
+    #[test]
+    fn max_depth_zero_still_projects_a_literal_focus_as_its_value_object() {
+        let store = Store::new();
+        let focus = Literal::new_typed_literal("42", xsd::INTEGER);
+
+        // The depth bound guards recursion, and a literal has none to guard, so
+        // it keeps its value object where a node focus becomes `{"@ref":...}`.
+        assert_eq!(
+            JsonProjection::new()
+                .with_max_depth(0)
+                .project(&store.node(focus)),
+            r#"{"@value":"42","@type":"http://www.w3.org/2001/XMLSchema#integer"}"#
         );
     }
 
