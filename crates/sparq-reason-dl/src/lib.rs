@@ -22,6 +22,10 @@
 pub mod extract;
 pub mod model;
 
+// [SONNET-4.6] sq-pbz04.4.19 (L3): the concrete-domain satisfiability oracle, compiled ONLY
+// under the opt-in `dl_datatypes` feature (design record §5c).
+#[cfg(feature = "dl_datatypes")]
+pub mod cdomain;
 pub mod nnf;
 pub mod profile;
 pub mod render;
@@ -36,6 +40,13 @@ pub mod check;
 pub use extract::{extract, ExtractError};
 #[doc(inline)]
 pub use model::{Axiom, ClassExpression, ObjectPropertyExpression, Ontology};
+// [SONNET-4.6] sq-pbz04.4.19: the concrete-domain surface (opt-in `dl_datatypes`).
+#[cfg(feature = "dl_datatypes")]
+#[doc(inline)]
+pub use cdomain::Datatype;
+#[cfg(feature = "dl_datatypes")]
+#[doc(inline)]
+pub use model::{DataPropertyExpression, DataRange};
 // [SONNET-4.6] sq-pbz04.4.7: forward RDF renderer (diagnostic / round-trip aid).
 #[doc(inline)]
 pub use render::{render_to_triples, render_to_turtle, triples_to_turtle};

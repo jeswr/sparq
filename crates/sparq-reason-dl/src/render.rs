@@ -23,6 +23,8 @@
 // production serialiser. No performance guarantees or stability commitments beyond the
 // round-trip invariant.
 
+#[cfg(feature = "dl_datatypes")]
+use crate::model::{DataPropertyExpression, DataRange};
 use crate::model::{Axiom, ClassExpression, ObjectPropertyExpression, Ontology};
 use rustc_hash::FxHashSet;
 use sparq_core::dict::Dict;
@@ -134,6 +136,21 @@ pub fn render_to_triples(onto: &Ontology, dict: &mut Dict) -> Vec<[Id; 3]> {
     for prop_id_val in declared {
         out.push([prop_id_val, ty_id, owl_obj_prop]);
     }
+    // [SONNET-4.6] sq-pbz04.4.19 (opt-in `dl_datatypes`): DATA properties need the
+    // `owl:DatatypeProperty` declaration instead — it is what routes the re-extraction down
+    // the concrete-domain path (and, without it, an `rdfs:range` with a datatype object is
+    // refused fail-closed, so the round-trip would not close).
+    #[cfg(feature = "dl_datatypes")]
+    {
+        let owl_data_prop = owl(dict, "DatatypeProperty");
+        let mut data_declared: FxHashSet<Id> = FxHashSet::default();
+        for axiom in &onto.axioms {
+            collect_data_property_ids(axiom, &mut data_declared);
+        }
+        for prop_id_val in data_declared {
+            out.push([prop_id_val, ty_id, owl_data_prop]);
+        }
+    }
 
     for axiom in &onto.axioms {
         emit_axiom(axiom, dict, &mut counter, &mut out);
@@ -176,6 +193,63 @@ fn collect_property_ids(axiom: &Axiom, out: &mut FxHashSet<Id>) {
         Axiom::TransitiveObjectProperty { property } => {
             out.insert(prop_id(property));
         }
+        // [SONNET-4.6] sq-pbz04.4.19: the DATA-property axioms name no object property; only
+        // a `DataPropertyDomain`'s class expression can nest one.
+        #[cfg(feature = "dl_datatypes")]
+        Axiom::SubDataPropertyOf { .. } | Axiom::DataPropertyRange { .. } => {}
+        #[cfg(feature = "dl_datatypes")]
+        Axiom::DataPropertyDomain { domain, .. } => collect_property_ids_in_ce(domain, out),
+    }
+}
+
+/// Collects the named DATA-property ids mentioned in an axiom into `out`
+/// ([SONNET-4.6] sq-pbz04.4.19, opt-in `dl_datatypes`) — the data-side twin of
+/// [`collect_property_ids`], driving the `owl:DatatypeProperty` declaration pre-pass.
+#[cfg(feature = "dl_datatypes")]
+fn collect_data_property_ids(axiom: &Axiom, out: &mut FxHashSet<Id>) {
+    match axiom {
+        Axiom::SubDataPropertyOf { sub, sup } => {
+            out.insert(sub.named());
+            out.insert(sup.named());
+        }
+        Axiom::DataPropertyRange { property, .. } => {
+            out.insert(property.named());
+        }
+        Axiom::DataPropertyDomain { property, domain } => {
+            out.insert(property.named());
+            collect_data_property_ids_in_ce(domain, out);
+        }
+        Axiom::SubClassOf { sub, sup } => {
+            collect_data_property_ids_in_ce(sub, out);
+            collect_data_property_ids_in_ce(sup, out);
+        }
+        Axiom::EquivalentClasses(left, right) | Axiom::DisjointClasses(left, right) => {
+            collect_data_property_ids_in_ce(left, out);
+            collect_data_property_ids_in_ce(right, out);
+        }
+        Axiom::ClassAssertion { class, .. } => collect_data_property_ids_in_ce(class, out),
+        _ => {}
+    }
+}
+
+/// Recursively collects DATA-property ids from a class expression.
+#[cfg(feature = "dl_datatypes")]
+fn collect_data_property_ids_in_ce(ce: &ClassExpression, out: &mut FxHashSet<Id>) {
+    match ce {
+        ClassExpression::DataSomeValuesFrom(dpe, _) | ClassExpression::DataAllValuesFrom(dpe, _) => {
+            out.insert(dpe.named());
+        }
+        ClassExpression::ObjectIntersectionOf(ops) | ClassExpression::ObjectUnionOf(ops) => {
+            for op in ops {
+                collect_data_property_ids_in_ce(op, out);
+            }
+        }
+        ClassExpression::ObjectComplementOf(inner) => collect_data_property_ids_in_ce(inner, out),
+        ClassExpression::ObjectSomeValuesFrom(_, filler)
+        | ClassExpression::ObjectAllValuesFrom(_, filler) => {
+            collect_data_property_ids_in_ce(filler, out);
+        }
+        ClassExpression::Class(_) | ClassExpression::Thing | ClassExpression::Nothing => {}
     }
 }
 
@@ -196,6 +270,9 @@ fn collect_property_ids_in_ce(ce: &ClassExpression, out: &mut FxHashSet<Id>) {
             out.insert(prop_id(ope));
             collect_property_ids_in_ce(filler, out);
         }
+        // A data quantifier names a DATA property, collected by `collect_data_property_ids`.
+        #[cfg(feature = "dl_datatypes")]
+        ClassExpression::DataSomeValuesFrom(_, _) | ClassExpression::DataAllValuesFrom(_, _) => {}
     }
 }
 
@@ -344,6 +421,31 @@ fn emit_axiom(
             let o = owl(dict, "TransitiveProperty");
             out.push([s, p, o]);
         }
+
+        // [SONNET-4.6] sq-pbz04.4.19 (opt-in `dl_datatypes`) — the concrete-domain axioms
+        // use the SAME RDF predicates as their object-property twins; what distinguishes
+        // them on re-extraction is the `owl:DatatypeProperty` declaration the pre-pass emits.
+        #[cfg(feature = "dl_datatypes")]
+        Axiom::SubDataPropertyOf { sub, sup } => {
+            let s = sub.named();
+            let p = rdfs(dict, "subPropertyOf");
+            let o = sup.named();
+            out.push([s, p, o]);
+        }
+        #[cfg(feature = "dl_datatypes")]
+        Axiom::DataPropertyDomain { property, domain } => {
+            let s = property.named();
+            let p = rdfs(dict, "domain");
+            let o = emit_class_expr(domain, dict, counter, out);
+            out.push([s, p, o]);
+        }
+        #[cfg(feature = "dl_datatypes")]
+        Axiom::DataPropertyRange { property, range } => {
+            let s = property.named();
+            let p = rdfs(dict, "range");
+            let o = emit_data_range(range, dict, counter, out);
+            out.push([s, p, o]);
+        }
     }
 }
 
@@ -422,7 +524,65 @@ fn emit_class_expr_on(
         ClassExpression::ObjectAllValuesFrom(property, filler) => {
             emit_restriction(subject, property, filler, false, dict, counter, out);
         }
+
+        // `subject a owl:Restriction; owl:onProperty T; owl:someValuesFrom / owl:allValuesFrom dr`
+        // [SONNET-4.6] sq-pbz04.4.19 (opt-in `dl_datatypes`).
+        #[cfg(feature = "dl_datatypes")]
+        ClassExpression::DataSomeValuesFrom(property, range) => {
+            emit_data_restriction(subject, property, range, true, dict, counter, out);
+        }
+        #[cfg(feature = "dl_datatypes")]
+        ClassExpression::DataAllValuesFrom(property, range) => {
+            emit_data_restriction(subject, property, range, false, dict, counter, out);
+        }
     }
+}
+
+/// Maps a data range to its RDF node id ([SONNET-4.6] sq-pbz04.4.19, opt-in `dl_datatypes`).
+///
+/// A named datatype is its own IRI. `DataComplementOf` renders to the canonical
+/// `_:b owl:datatypeComplementOf <d>` shape — it can only reach here from an
+/// NNF-transformed model (L1 never EXTRACTS one, since `owl:datatypeComplementOf` stays a
+/// fail-closed refusal), so the round-trip on that shape closes by REFUSAL, not silently.
+#[cfg(feature = "dl_datatypes")]
+fn emit_data_range(
+    range: &DataRange,
+    dict: &mut Dict,
+    counter: &mut BnodeCounter,
+    out: &mut Vec<[Id; 3]>,
+) -> Id {
+    match range {
+        DataRange::Datatype(d) => dict.intern_iri(&d.iri()),
+        DataRange::DataComplementOf(inner) => {
+            let bnode = counter.fresh(dict);
+            let p = owl(dict, "datatypeComplementOf");
+            let o = emit_data_range(inner, dict, counter, out);
+            out.push([bnode, p, o]);
+            bnode
+        }
+    }
+}
+
+/// Emits the three triples defining a DATA `owl:Restriction` node (the data-side twin of
+/// [`emit_restriction`]). [SONNET-4.6] sq-pbz04.4.19
+#[cfg(feature = "dl_datatypes")]
+fn emit_data_restriction(
+    subject: Id,
+    property: &DataPropertyExpression,
+    range: &DataRange,
+    is_some: bool,
+    dict: &mut Dict,
+    counter: &mut BnodeCounter,
+    out: &mut Vec<[Id; 3]>,
+) {
+    let ty_p = rdf(dict, "type");
+    let restriction_c = owl(dict, "Restriction");
+    out.push([subject, ty_p, restriction_c]);
+    let on_property_p = owl(dict, "onProperty");
+    out.push([subject, on_property_p, property.named()]);
+    let filler_p = owl(dict, if is_some { "someValuesFrom" } else { "allValuesFrom" });
+    let filler_id = emit_data_range(range, dict, counter, out);
+    out.push([subject, filler_p, filler_id]);
 }
 
 /// Emits the three triples that define an `owl:Restriction` node:

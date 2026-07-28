@@ -61,6 +61,20 @@ dispatch_ql = ["dispatch", "dep:sparq-reason-ql", "sparq-reason-ql/ql-consistenc
 # Fully cfg-gated: with the feature OFF the crate compiles to exactly the pre-extension code.
 dl_transitive = []
 
+# [SONNET-4.6] sq-pbz04.4.19: OPT-IN concrete domain (the "D" extension) -- OFF by default.
+# Extends the fragment to ALCH(D) over an ADMITTED datatype sub-lattice of the OWL 2 datatype
+# map (`cdomain::Datatype`): L1 recognises data properties, bare datatype IRIs in DATA-RANGE
+# positions, and `rdfs:domain`/`rdfs:range`/`rdfs:subPropertyOf` over them (instead of
+# refusing them), and the L3 tableau grows CONCRETE nodes plus the exists_D/forall_D rules and
+# a D-clash decided by the EXACT `cdomain::satisfiable` oracle -- with the
+# termination/soundness/completeness argument written out in the tableau module docs section
+# 5b (Baader & Hanschke 1991; Lutz 2002 -- the unary, feature-path-free ALC(D) restriction).
+# Facets (`owl:withRestrictions`), data-property ASSERTIONS, `owl:datatypeComplementOf`,
+# `owl:oneOf` data ranges and every unadmitted datatype stay fail-closed refusals in BOTH
+# feature states. Fully cfg-gated: with the feature OFF the crate compiles to exactly the
+# pre-extension code.
+dl_datatypes = []
+
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io.
 sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = false }
@@ -80,6 +94,16 @@ sparq-reason-ql = { path = "../sparq-reason-ql", version = "0.1.0", optional = t
 # microbenchmark; it does not enter the shipped opt-in reasoner crate.
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
+# [SONNET-4.6] sq-pbz04.4.19: DEV-ONLY. The concrete-domain oracle's datatype lattice is
+# cross-checked against the repo's EXISTING D-entailment value seam
+# (`sparq_reason::dtype::d_value_key`) by the differential-parity lane in `tests/cdomain.rs`
+# — the lattice must never claim two datatypes disjoint when a literal's value lies in both.
+# A dev-dependency, so the shipped opt-in crate still pulls sparq-reason only under `dispatch`
+# (dev-deps are absent from `cargo build`, so the default/`dispatch` builds are unchanged).
+# `d-entail` is what compiles `dtype`; it is purely ADDITIVE upstream (a new `Profile::D`
+# variant + the module — the RL/RDFS materializers are untouched), so unifying it into the
+# `dispatch` test build cannot move a dispatch verdict.
+sparq-reason = { path = "../sparq-reason", version = "0.1.0", features = ["d-entail"] }
 
 # [GPT-5.6] sq-7ru8y: pinned synthetic concept expressions exercise NNF conversion and
 # tableau sat/subsumption checks at increasing nesting depths.

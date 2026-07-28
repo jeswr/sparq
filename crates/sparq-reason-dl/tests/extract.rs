@@ -790,16 +790,19 @@ fn reject_pun_use_then_declare_annotation_on_property() {
 }
 
 /// Same two-order test with DatatypeProperty (F2). [SONNET-4.6]
+///
+/// The REFUSAL is the invariant; which arm of the taxonomy carries it depends on the
+/// concrete-domain feature ([SONNET-4.6] sq-pbz04.4.19). With `dl_datatypes` OFF a
+/// declared data property in `owl:onProperty` is a cross-type PUN (`Unclassifiable`); with
+/// it ON that position is legitimate, so the refusal moves to the FILLER — a class IRI is
+/// not a data range, hence `DataConstruct`. Neither state extracts the graph.
 #[test]
 fn reject_pun_declare_datatype_then_use_on_property() {
     let (d, t) = parse(
         ":p a owl:DatatypeProperty .\n\
          :A rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :p ; owl:someValuesFrom :C ] .",
     );
-    assert!(
-        matches!(extract(&d, &t), Err(ExtractError::Unclassifiable(_))),
-        "pun (declare-datatype-then-use) must be refused regardless of triple order"
-    );
+    assert_datatype_property_restriction_refused(extract(&d, &t));
 }
 
 #[test]
@@ -808,9 +811,23 @@ fn reject_pun_use_then_declare_datatype_on_property() {
         ":A rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :p ; owl:someValuesFrom :C ] .\n\
          :p a owl:DatatypeProperty .",
     );
+    assert_datatype_property_restriction_refused(extract(&d, &t));
+}
+
+/// See [`reject_pun_declare_datatype_then_use_on_property`] for why the arm is feature-dependent.
+#[track_caller]
+fn assert_datatype_property_restriction_refused(
+    result: Result<sparq_reason_dl::Ontology, ExtractError>,
+) {
+    #[cfg(not(feature = "dl_datatypes"))]
+    let ok = matches!(result, Err(ExtractError::Unclassifiable(_)));
+    #[cfg(feature = "dl_datatypes")]
+    let ok = matches!(result, Err(ExtractError::DataConstruct(_)));
     assert!(
-        matches!(extract(&d, &t), Err(ExtractError::Unclassifiable(_))),
-        "pun (use-then-declare-datatype) must be refused regardless of triple order"
+        ok,
+        "a class filler on a declared data property must be refused regardless of triple \
+         order, got {:?}",
+        result
     );
 }
 

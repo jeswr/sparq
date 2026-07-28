@@ -17,9 +17,19 @@
 //
 // [GPT-5.6] sq-zfwzq: the OPT-IN `dl_transitive` cargo feature (OFF by default) extends the
 // fragment with TRANSITIVE roles (`owl:TransitiveProperty` → `Axiom::TransitiveObjectProperty`)
-// — the design record's "first-in-line" §5 extension. Inverses / cardinality / nominals /
-// datatypes remain fail-closed deferrals in BOTH feature states.
+// — the design record's "first-in-line" §5 extension. Inverses / cardinality / nominals
+// remain fail-closed deferrals in BOTH feature states.
+//
+// [SONNET-4.6] sq-pbz04.4.19: the OPT-IN `dl_datatypes` cargo feature (OFF by default) extends
+// the fragment with a CONCRETE DOMAIN over the admitted datatype sub-lattice
+// ([`crate::cdomain::Datatype`]) — ALCH(D). It adds data properties, data ranges,
+// `owl:someValuesFrom`/`owl:allValuesFrom` over a data property, and the
+// `rdfs:domain`/`rdfs:range`/`rdfs:subPropertyOf` axioms over them. Facets, data-property
+// ASSERTIONS, `owl:datatypeComplementOf`, `owl:oneOf` data ranges and every unadmitted
+// datatype stay fail-closed deferrals in BOTH feature states (design record §5c).
 
+#[cfg(feature = "dl_datatypes")]
+use crate::cdomain::Datatype;
 use sparq_core::dict::Id;
 
 /// An object-property expression in the ALCH fragment.
@@ -51,6 +61,49 @@ impl ObjectPropertyExpression {
     }
 }
 
+/// A data-property expression in the ALCH(D) fragment (opt-in `dl_datatypes`).
+///
+/// OWL 2's `DataPropertyExpression` grammar admits only named data properties (there is no
+/// inverse for a data property), so the single variant is complete rather than a placeholder
+/// — unlike [`ObjectPropertyExpression`], where the missing variant marks a deferral.
+/// [SONNET-4.6] sq-pbz04.4.19
+#[cfg(feature = "dl_datatypes")]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum DataPropertyExpression {
+    /// A named data property, identified by its `sparq_core` dict id.
+    DataProperty(Id),
+}
+
+#[cfg(feature = "dl_datatypes")]
+impl DataPropertyExpression {
+    /// The dict id of the underlying named data property.
+    #[must_use]
+    pub fn named(&self) -> Id {
+        match self {
+            DataPropertyExpression::DataProperty(id) => *id,
+        }
+    }
+}
+
+/// A data range in the ALCH(D) fragment (opt-in `dl_datatypes`) — the concrete-domain
+/// analogue of a [`ClassExpression`].
+///
+/// The grammar is deliberately TINY: a named datatype from the admitted sub-lattice, or its
+/// complement. `owl:datatypeComplementOf` itself is still refused at L1, so
+/// [`DataRange::DataComplementOf`] is only ever produced by the NNF pass
+/// ([`crate::nnf::nnf_complement`]) when a data quantifier occurs in a negative position —
+/// which is exactly how `rdfs:domain` on a data property internalises. Keeping the grammar
+/// closed under complement is what makes NNF total; keeping it no LARGER than that is what
+/// keeps the concrete-domain oracle exact. [SONNET-4.6] sq-pbz04.4.19
+#[cfg(feature = "dl_datatypes")]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum DataRange {
+    /// A named datatype of the admitted sub-lattice. `Datatype::RdfsLiteral` is ⊤_D.
+    Datatype(Datatype),
+    /// `¬dr` — NNF-internal (see the type docs).
+    DataComplementOf(Box<DataRange>),
+}
+
 /// A class expression in the ALCH fragment (design record §3). Boolean and quantifier nodes
 /// nest arbitrarily; the leaves are named classes and the two constants ⊤/⊥.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -71,6 +124,14 @@ pub enum ClassExpression {
     ObjectSomeValuesFrom(ObjectPropertyExpression, Box<ClassExpression>),
     /// `owl:allValuesFrom` on a named property — the universal restriction `∀R.C`.
     ObjectAllValuesFrom(ObjectPropertyExpression, Box<ClassExpression>),
+    /// `owl:someValuesFrom` on a named DATA property — the concrete existential `∃T.dr`
+    /// (opt-in `dl_datatypes`). [SONNET-4.6] sq-pbz04.4.19
+    #[cfg(feature = "dl_datatypes")]
+    DataSomeValuesFrom(DataPropertyExpression, DataRange),
+    /// `owl:allValuesFrom` on a named DATA property — the concrete universal `∀T.dr`
+    /// (opt-in `dl_datatypes`). [SONNET-4.6] sq-pbz04.4.19
+    #[cfg(feature = "dl_datatypes")]
+    DataAllValuesFrom(DataPropertyExpression, DataRange),
 }
 
 impl ClassExpression {
@@ -176,6 +237,37 @@ pub enum Axiom {
         /// The transitive (named) object property.
         property: ObjectPropertyExpression,
     },
+    /// `rdfs:subPropertyOf` over named DATA properties (opt-in `dl_datatypes`). Kept as a
+    /// separate variant from [`Axiom::SubObjectPropertyOf`] because the two hierarchies live
+    /// in disjoint property namespaces — L1 refuses an IRI declared as both.
+    /// [SONNET-4.6] sq-pbz04.4.19
+    #[cfg(feature = "dl_datatypes")]
+    SubDataPropertyOf {
+        /// The subsumed (left) data property.
+        sub: DataPropertyExpression,
+        /// The subsuming (right) data property.
+        sup: DataPropertyExpression,
+    },
+    /// `rdfs:domain` on a data property (`∃T.⊤_D ⊑ domain`), opt-in `dl_datatypes`.
+    /// [SONNET-4.6] sq-pbz04.4.19
+    #[cfg(feature = "dl_datatypes")]
+    DataPropertyDomain {
+        /// The constrained data property.
+        property: DataPropertyExpression,
+        /// The class every subject of the data property must belong to.
+        domain: ClassExpression,
+    },
+    /// `rdfs:range` on a data property (`⊤ ⊑ ∀T.range`), opt-in `dl_datatypes`. This is the
+    /// axiom whose value-space meaning the pre-sq-pbz04.4.19 fragment could not model — two
+    /// ranges from disjoint families make the property's extension provably EMPTY
+    /// (WebOnt-I5.3-015). [SONNET-4.6] sq-pbz04.4.19
+    #[cfg(feature = "dl_datatypes")]
+    DataPropertyRange {
+        /// The constrained data property.
+        property: DataPropertyExpression,
+        /// The data range every value of the data property must lie in.
+        range: DataRange,
+    },
 }
 
 /// A structural OWL ontology restricted to the ALCH fragment — the output of the fail-closed
@@ -248,6 +340,41 @@ mod tests {
                 Box::new(ClassExpression::Thing)
             )
         );
+    }
+
+    /// [SONNET-4.6] sq-pbz04.4.19 — the concrete-domain model types (opt-in `dl_datatypes`).
+    #[cfg(feature = "dl_datatypes")]
+    #[test]
+    fn data_property_expression_and_data_range() {
+        let t = DataPropertyExpression::DataProperty(42);
+        assert_eq!(t.named(), 42);
+        // A data quantifier is NOT atomic — it is a composite the tableau expands.
+        let some = ClassExpression::DataSomeValuesFrom(
+            t.clone(),
+            DataRange::Datatype(Datatype::XsdInteger),
+        );
+        let all = ClassExpression::DataAllValuesFrom(
+            t.clone(),
+            DataRange::DataComplementOf(Box::new(DataRange::Datatype(Datatype::RdfsLiteral))),
+        );
+        assert!(!some.is_atomic() && !all.is_atomic());
+        assert_ne!(some, all);
+        // The new axiom kinds are distinguishable and carry their property.
+        let range = Axiom::DataPropertyRange {
+            property: t.clone(),
+            range: DataRange::Datatype(Datatype::XsdString),
+        };
+        let domain = Axiom::DataPropertyDomain {
+            property: t.clone(),
+            domain: ClassExpression::Thing,
+        };
+        let sub = Axiom::SubDataPropertyOf {
+            sub: t.clone(),
+            sup: DataPropertyExpression::DataProperty(43),
+        };
+        assert_ne!(range, domain);
+        assert_ne!(domain, sub);
+        assert_eq!(range.clone(), range);
     }
 
     #[test]

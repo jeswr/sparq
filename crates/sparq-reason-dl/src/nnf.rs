@@ -39,10 +39,29 @@
 //! ever add (a) subexpressions of concepts already present or (b) the fixed internalised
 //! GCI constraints, which are themselves seeds.
 //!
+//! # Data ranges (opt-in `dl_datatypes`)
+//! [SONNET-4.6] sq-pbz04.4.19. The concrete-domain extension adds two class-expression
+//! constructors, `∃T.dr` and `∀T.dr` over a data property `T` and a
+//! `crate::model::DataRange` `dr`. Their NNF rewrites are the quantifier duality again,
+//! pushed into the CONCRETE domain:
+//!
+//! ```text
+//! ¬(∃T.dr) ⇝ ∀T.¬dr            ¬(∀T.dr) ⇝ ∃T.¬dr            ¬¬dr ⇝ dr
+//! ```
+//!
+//! Because the data-range grammar is just `Datatype(d) | ¬dr`, an NNF data range is always a
+//! LITERAL — `d` or `¬d` — which is exactly the shape the concrete-domain oracle
+//! (`crate::cdomain::satisfiable`) consumes. Data ranges are NOT class expressions, so they
+//! contribute nothing to [`subexpression_closure`]; the tableau interns them in a separate
+//! table, leaving the concept closure (and hence the termination argument) untouched.
+//!
 //! Fragment note: these functions are total over the L1 [`crate::model`] types, which by
-//! construction admit ONLY the ALCH fragment (no inverses, cardinality, nominals,
-//! datatypes). Nothing here extends the fragment.
+//! construction admit ONLY the ALCH fragment (no inverses, cardinality, nominals) — extended
+//! by the concrete domain when, and only when, `dl_datatypes` is enabled. Nothing here
+//! extends the fragment.
 
+#[cfg(feature = "dl_datatypes")]
+use crate::model::DataRange;
 use crate::model::ClassExpression;
 use rustc_hash::FxHashSet;
 
@@ -71,6 +90,49 @@ pub fn nnf(ce: &ClassExpression) -> ClassExpression {
         ClassExpression::ObjectAllValuesFrom(p, filler) => {
             ClassExpression::ObjectAllValuesFrom(p.clone(), Box::new(nnf(filler)))
         }
+        #[cfg(feature = "dl_datatypes")]
+        ClassExpression::DataSomeValuesFrom(t, dr) => {
+            ClassExpression::DataSomeValuesFrom(t.clone(), dr_nnf(dr))
+        }
+        #[cfg(feature = "dl_datatypes")]
+        ClassExpression::DataAllValuesFrom(t, dr) => {
+            ClassExpression::DataAllValuesFrom(t.clone(), dr_nnf(dr))
+        }
+    }
+}
+
+/// Rewrite a data range into an equivalent NNF data-range LITERAL (`d` or `¬d`).
+///
+/// Total over [`DataRange`]: the only non-literal input is a nested complement, which
+/// collapses by `¬¬dr ⇝ dr`. Idempotent.
+#[cfg(feature = "dl_datatypes")]
+#[must_use]
+pub fn dr_nnf(dr: &DataRange) -> DataRange {
+    match dr {
+        DataRange::Datatype(_) => dr.clone(),
+        DataRange::DataComplementOf(inner) => dr_complement(inner),
+    }
+}
+
+/// The NNF of the **complement** of a data range: `dr_complement(dr) == dr_nnf(¬dr)`.
+#[cfg(feature = "dl_datatypes")]
+#[must_use]
+pub fn dr_complement(dr: &DataRange) -> DataRange {
+    match dr {
+        DataRange::Datatype(_) => DataRange::DataComplementOf(Box::new(dr.clone())),
+        // ¬¬dr ⇝ dr (then normalise dr itself).
+        DataRange::DataComplementOf(inner) => dr_nnf(inner),
+    }
+}
+
+/// `true` iff the data range is an NNF literal — a bare datatype or a complement applied
+/// directly to one.
+#[cfg(feature = "dl_datatypes")]
+#[must_use]
+pub fn is_dr_nnf(dr: &DataRange) -> bool {
+    match dr {
+        DataRange::Datatype(_) => true,
+        DataRange::DataComplementOf(inner) => matches!(inner.as_ref(), DataRange::Datatype(_)),
     }
 }
 
@@ -103,6 +165,15 @@ pub fn nnf_complement(ce: &ClassExpression) -> ClassExpression {
         ClassExpression::ObjectAllValuesFrom(p, filler) => {
             ClassExpression::ObjectSomeValuesFrom(p.clone(), Box::new(nnf_complement(filler)))
         }
+        // Quantifier duality in the concrete domain.
+        #[cfg(feature = "dl_datatypes")]
+        ClassExpression::DataSomeValuesFrom(t, dr) => {
+            ClassExpression::DataAllValuesFrom(t.clone(), dr_complement(dr))
+        }
+        #[cfg(feature = "dl_datatypes")]
+        ClassExpression::DataAllValuesFrom(t, dr) => {
+            ClassExpression::DataSomeValuesFrom(t.clone(), dr_complement(dr))
+        }
     }
 }
 
@@ -123,6 +194,9 @@ pub fn is_nnf(ce: &ClassExpression) -> bool {
         | ClassExpression::ObjectUnionOf(members) => members.iter().all(is_nnf),
         ClassExpression::ObjectSomeValuesFrom(_, filler)
         | ClassExpression::ObjectAllValuesFrom(_, filler) => is_nnf(filler),
+        #[cfg(feature = "dl_datatypes")]
+        ClassExpression::DataSomeValuesFrom(_, dr)
+        | ClassExpression::DataAllValuesFrom(_, dr) => is_dr_nnf(dr),
     }
 }
 
@@ -165,6 +239,10 @@ fn visit(
         ClassExpression::ObjectComplementOf(inner) => visit(inner, seen, out),
         ClassExpression::ObjectSomeValuesFrom(_, filler)
         | ClassExpression::ObjectAllValuesFrom(_, filler) => visit(filler, seen, out),
+        // A data quantifier is a LEAF of the concept closure: its filler is a data range,
+        // not a class expression, so it contributes no further concepts (module docs).
+        #[cfg(feature = "dl_datatypes")]
+        ClassExpression::DataSomeValuesFrom(_, _) | ClassExpression::DataAllValuesFrom(_, _) => {}
     }
 }
 
@@ -245,5 +323,61 @@ mod tests {
         // Closure of NNF seeds is entirely NNF.
         let seeds = vec![CE::ObjectUnionOf(vec![not(a()), CE::only(10, b())])];
         assert!(subexpression_closure(&seeds).iter().all(is_nnf));
+    }
+
+    // [SONNET-4.6] sq-pbz04.4.19 — the concrete-domain NNF arm (opt-in `dl_datatypes`).
+    #[cfg(feature = "dl_datatypes")]
+    mod datatypes {
+        use super::*;
+        use crate::cdomain::Datatype;
+        use crate::model::{DataPropertyExpression, DataRange};
+
+        fn t() -> DataPropertyExpression {
+            DataPropertyExpression::DataProperty(99)
+        }
+        fn int() -> DataRange {
+            DataRange::Datatype(Datatype::XsdInteger)
+        }
+        fn not_dr(dr: DataRange) -> DataRange {
+            DataRange::DataComplementOf(Box::new(dr))
+        }
+
+        #[test]
+        fn data_range_nnf_collapses_double_negation() {
+            assert_eq!(dr_nnf(&int()), int());
+            assert_eq!(dr_nnf(&not_dr(int())), not_dr(int()));
+            assert_eq!(dr_nnf(&not_dr(not_dr(int()))), int());
+            assert_eq!(dr_complement(&int()), not_dr(int()));
+            assert_eq!(dr_complement(&not_dr(int())), int());
+            assert!(is_dr_nnf(&int()));
+            assert!(is_dr_nnf(&not_dr(int())));
+            assert!(!is_dr_nnf(&not_dr(not_dr(int()))));
+        }
+
+        #[test]
+        fn data_quantifier_duality_and_closure_leafness() {
+            let some = CE::DataSomeValuesFrom(t(), int());
+            let all = CE::DataAllValuesFrom(t(), int());
+            // ¬∃T.d ⇝ ∀T.¬d and ¬∀T.d ⇝ ∃T.¬d, matching nnf(¬·) exactly.
+            assert_eq!(
+                nnf_complement(&some),
+                CE::DataAllValuesFrom(t(), not_dr(int()))
+            );
+            assert_eq!(
+                nnf_complement(&all),
+                CE::DataSomeValuesFrom(t(), not_dr(int()))
+            );
+            assert_eq!(nnf_complement(&some), nnf(&not(some.clone())));
+            assert_eq!(nnf_complement(&all), nnf(&not(all.clone())));
+            // Both forms are NNF, and NNF is idempotent on them.
+            assert!(is_nnf(&some) && is_nnf(&all));
+            assert!(is_nnf(&nnf_complement(&some)));
+            assert_eq!(nnf(&nnf(&some)), nnf(&some));
+            // A data quantifier is a closure LEAF — it adds itself and nothing else.
+            assert_eq!(subexpression_closure(&[some.clone()]), vec![some]);
+            // …and nesting one under an object quantifier still terminates the walk there.
+            let nested = CE::some(10, all.clone());
+            assert_eq!(subexpression_closure(&[nested.clone()]), vec![nested, all]);
+        }
     }
 }
