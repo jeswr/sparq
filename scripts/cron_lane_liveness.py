@@ -32,8 +32,10 @@
 #
 # THE EXPECTATION, DERIVED FROM `schedule:`
 # -----------------------------------------
-# `derive_period_hours()` expands the lane's own cron expressions over a 90-day
-# window and takes the LARGEST gap between consecutive fire times (the union of
+# `derive_period_hours()` expands the lane's own cron expressions over the
+# SIM_WINDOW_DAYS window (400 days — long enough to see two fires of any cron
+# GitHub accepts, including a quarterly one) and takes the LARGEST gap between
+# consecutive fire times (the union of
 # all `- cron:` entries). That is the worst-case interval at which the lane is
 # expected to produce a run: 24h for `41 5 * * *`, 168h for `0 6 * * 1`, 10min
 # for `*/10 * * * *`. The staleness threshold is then
@@ -100,7 +102,8 @@
 #   * a lane whose GitHub workflow `state` is not `active` (disabled manually or
 #     for inactivity — a deliberate off switch);
 #   * a lane whose cron cannot be parsed, or whose cron fires fewer than twice in
-#     the 90-day window (period indeterminate ⇒ no expectation ⇒ no alarm);
+#     the SIM_WINDOW_DAYS window (period indeterminate ⇒ no expectation ⇒ no
+#     alarm);
 #   * a NEW lane with no success yet whose FIRST observed run is younger than the
 #     threshold (grace period — otherwise every newly-added lane alarms on its
 #     first red tick);
@@ -341,7 +344,8 @@ def derive_period_hours(exprs: list[str], now: dt.datetime) -> float | None:
     """Largest gap (hours) between consecutive fires; None when indeterminate.
 
     None is the FAIL-SAFE answer: an unparseable cron, an empty schedule, or a
-    cron that fires at most once in the 90-day window yields no expectation, and
+    cron that fires at most once in the SIM_WINDOW_DAYS window yields no
+    expectation, and
     a lane with no expectation never raises.
     """
     if not exprs:
