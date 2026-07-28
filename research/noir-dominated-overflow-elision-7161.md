@@ -128,13 +128,28 @@ later check does **not** cover the earlier one.
 
 ## 4. The elision rule and its side conditions
 
-**Rule.** In an **ACIR** function, a checked unsigned op `r = op(a, b)` may be flipped to `unchecked_*` when some later
-instruction in the same block *proves* that `r`'s own range check is implied. C1–C6 must all hold.
+**Rule (v1).** In an **ACIR** function, a checked unsigned **`add`** `r = add(a, b)` may be flipped to `unchecked_add`
+when some later instruction in the same block *proves* that `r`'s own range check is implied. C0–C6 must all hold.
 
+- **C0 — the elided operation is a checked unsigned `add`.** `sub` and `mul` are excluded **as the elided target**, and
+  `sub` is excluded for a soundness reason, not a rent one. An unsigned checked `sub` also emits a result range check
+  (§2), but ACIR has no wrapping, so an underflowing `a - b` (`a < b`) escapes **downward**: its field representative is
+  `p - (b - a)`, just *below the modulus*, not just above `2^bit_size`. Every downstream argument in this section models
+  the escaped result as a small non-negative integer that stays **ordered below** its descendant — C2's "monotone
+  non-decreasing", C5's `bit_size + ⌈log2(k+1)⌉` bound, and the proof's `r ≤ d` step all assume upward escape only, and
+  all are false modulo `p` for an underflow. Concretely, one later monotone `add` of any `w > b - a` takes
+  `p - (b - a) + w` past the modulus and back down to the small value `w - (b - a)`, which then passes its own range
+  check: the original failure is **lost outright**, not merely re-attributed to a later op. That is strictly worse than
+  the rows 5–7 masking shapes, and it is the opposite of the rows 1–2 result the issue asks for. This is an analytic
+  argument from the §2 citations, not a measured row — no `sub` target was interpreted or counted (§6 counts only
+  `add`/`mul` ops), which is why v1 excludes the case rather than bounding it. `mul` is excluded as a target on the
+  weaker C5 magnitude grounds (§8 step 3).
 - **C1 — a covering check exists downstream.** Either (a) `r` is an operand of a later **checked** unsigned op of the
   same bit width (whose implicit range check at ACIR-gen is the cover), or (b) `r` reaches a later
   `Instruction::RangeCheck { value, max_bit_size }` with `max_bit_size ≤ bit_size(r)`. Variant (b) **never fires on the
-  corpus** (§6) — recommend scoping v1 to (a) alone.
+  corpus** (§6) — recommend scoping v1 to (a) alone. Under (a) the covering op is itself the **last step** of the chain
+  and is therefore subject to C2: rows 5–6 of §3 are exactly the case where the covering op is a `sub`, or a `mul` by
+  zero, and so covers nothing.
 - **C2 — every step from `r` to the covering check is monotone non-decreasing over the integers-in-the-field.** An
   `add` qualifies when the *other* operand is itself known to fit its type — a constant, a block parameter, or a
   checked result, per the invariant quoted in §2 — because only then is its field representative a small non-negative
@@ -157,8 +172,10 @@ instruction in the same block *proves* that `r`'s own range check is implied. C1
   maximum field element value, resulting in [a value] which is less than u128::MAX. We want this to be caught as an
   overflow"*, and `check_u128_mul_overflow.rs:1-8` documents the same capacity arithmetic. v1 should track a
   per-chain magnitude bound (`bit_size + ⌈log2(k+1)⌉` for a `k`-step add chain; the sum of operand bounds for `mul`)
-  and refuse when it approaches `FieldElement::max_num_bits()`. A blunt, defensible v1 alternative: exclude `u128`
-  and exclude `mul` chains entirely.
+  and refuse when it approaches `FieldElement::max_num_bits()`. Note this bound counts *upward* growth from
+  `bit_size` only; it says nothing about a representative sitting near `p`, which is why that case is excluded by C0
+  rather than bounded here. A blunt, defensible v1 alternative: exclude `u128`, and exclude `mul` entirely — both as
+  the elided target and as a propagation step.
 - **C6 — accept the attribution move, and prove it in the snapshots.** `nargo`'s execution-failure tests snapshot the
   **full stderr per runtime** (`tooling/nargo_cli/tests/execute.rs:215-239` → `snapshots/execution_failure/<test>/
   execute__tests__{acir,brillig}_stderr.snap`), and those snapshots carry the source span and call stack, not just the
@@ -166,10 +183,13 @@ instruction in the same block *proves* that `r`'s own range check is implied. C1
   reviewable ACIR-snapshot diff with the Brillig snapshot unchanged. That is the honest way to present the trade to
   upstream; it is also why the PR must regenerate and *explain* each moved snapshot rather than accepting it silently.
 
-**Why the flip is sound under C1–C6, stated once.** Let `S` be the constraint system and `C_r` the elided range
+**Why the flip is sound under C0–C6, stated once.** Let `S` be the constraint system and `C_r` the elided range
 constraint. The claim is `S \ {C_r} ⊨ C_r`: the covering constraint bounds a descendant `d < 2^n`, the chain relations
 `d = r + w₁ + …` (or `r · c`, `c ≥ 1`) are all still in `S \ {C_r}` and are exact field arithmetic (C3, C5), each step
-is non-decreasing (C2), and the cover is active exactly when the elided check was (C4). Hence `r ≤ d < 2^n`. Note this
+is non-decreasing (C2), and the cover is active exactly when the elided check was (C4). Hence `r ≤ d < 2^n`. The whole
+argument is over `r` as a **non-negative integer** whose only escape from its type is *upward* — that is what C0 buys,
+and it is not a formality: for an underflowing `sub` target the representative is `p - k`, the integer ordering is
+destroyed by the reduction mod `p`, and `r ≤ d` is simply false (C0). Note this
 argument is *global over the constraint system* — it does not care how many other consumers `r` has, which is why the
 pass needs no use-list and no aliasing analysis. What it does care about, absolutely, is that the covering check
 **survives every later pass** (§5).
@@ -249,8 +269,10 @@ predicate-region test, same bit width, same block) and `nargo compile` was run o
 | packages with ≥1 candidate | 9 | 9 |
 
 The second column is the number that matters: HEAD's existing rules absorb only **2** of the 503 candidates, so the
-opportunity is almost entirely incremental — **501 elidable checks, ≈20% of the 2516 checked unsigned `add`/`mul` ops
-that survive `checked_to_unchecked` today** — but it is concentrated in **9 of 509 packages**. Separately, 8 of the 9
+opportunity is almost entirely incremental — **501 structural chain candidates (an upper bound, not elidable checks),
+≈20% of the 2516 checked unsigned `add`/`mul` ops that survive `checked_to_unchecked` today** — but it is concentrated
+in **9 of 509 packages**. Throughout this record *candidate* means "passes the structural tests the counter ran";
+*elidable* is reserved for a check shown to satisfy **all** of C0–C6, which nothing here does. Separately, 8 of the 9
 `test_programs/benchmarks` packages have **zero** checked unsigned ops at all (they are Field/Poseidon-shaped, so this
 optimization cannot touch them); the ninth, `bench_eddsa_poseidon`, does not compile at HEAD in this environment and
 was not measured.
@@ -269,8 +291,11 @@ Read this as an **upper bound**, honestly:
 
 - it does not evaluate C3 beyond "the operand is used directly by the covering op" (which does exclude an intervening
   truncate on the chain edge itself), C5 at all, or whether the covering op survives later passes;
-- candidates are counted per chain edge, so a `k`-step chain yields `k` candidates — which is right (all but the last
-  check are elidable) but makes a single unrolled loop dominate the total;
+- it does not apply C0: the counter admits a candidate whose elided op is a checked `add` **or** `mul`, so the
+  add-only v1 set is smaller than 501 by an unmeasured amount. (No `sub` target is in the count either way — `sub` was
+  never counted, so C0's exclusion of it removes nothing from this figure.);
+- candidates are counted per chain edge, so a `k`-step chain yields `k` candidates — which is the right shape (all but
+  the last check are potentially elidable) but makes a single unrolled loop dominate the total;
 - 509 packages of upstream test programs are a *compiler* corpus, not an application corpus. The sparq `zk/` face-repo
   circuits were not measured here.
 
@@ -314,12 +339,16 @@ Each step is a future bead under `sq-uuvac`; none of them arms anything (upstrea
    settles that the existing benchmark suite will show **zero** movement, so a focused fixture under
    `test_programs/benchmarks/` is mandatory for the PR (the same shape jeswr's `live_bit_width_*` fixtures take), and
    the "9 of 509 packages" concentration is the rent question a reviewer will ask first.
-3. **The pass itself**, ACIR-only, C1(a)-only, `u128` and `mul` chains excluded in v1, C4 as "no `EnableSideEffectsIf`
-   in between". Acceptance per `noir-optimization-program.md` §10.2, plus: the §3 interpreter differentials as unit
+3. **The pass itself**, ACIR-only, C1(a)-only, and in v1: C0 (the elided op is a checked unsigned **`add`** — `sub`
+   excluded for the C0 soundness reason, not deferred), `u128` excluded, `mul` excluded **both** as the elided target
+   and as a propagation step in the chain, and C4 as "no `EnableSideEffectsIf` in between". Acceptance per
+   `noir-optimization-program.md` §10.2, plus: the §3 interpreter differentials as unit
    tests; every moved `execution_failure` ACIR snapshot explained in the PR body with its Brillig counterpart shown
    unchanged; a `--force-brillig` run proving Brillig behaviour is untouched.
 4. **Only then** consider C1(b) (`RangeCheck`-covered), `mul` chains with a magnitude analysis, and the `u128` case —
-   each gated on its own measured win. Note C1(b)'s soundness depends on the covering `RangeCheck` surviving
+   each gated on its own measured win. A `sub` target is **not** on this list: it would need a different argument
+   altogether (one that reasons about representatives near `p`, i.e. proves `a ≥ b` independently), not a widening of
+   the C2/C5 magnitude bounds. Note C1(b)'s soundness depends on the covering `RangeCheck` surviving
    `simplify.rs:281-284`, which removes a `RangeCheck` when `get_value_max_num_bits(value) ≤ max_bit_size`; the
    conservative arm from §2 is exactly what keeps it alive, which is a second reason step 1 comes first.
 
