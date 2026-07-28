@@ -9,16 +9,17 @@
 //!    recall floor (the "search on PQ, re-rank on disk" path);
 //! 4. **staleness-token semantics** — a supplied token round-trips, an absent one reads back as
 //!    `None` ("unverifiable"), never as an all-zero token that would look like a mismatch;
-//! 5. **degenerate + hostile inputs** — empty source, all-zero query, and a corrupted header are
-//!    rejected cleanly rather than panicking or reading out of bounds.
+//! 5. **degenerate + hostile inputs** — empty source, all-zero query, a corrupted header and a
+//!    forged PQ codebook header are rejected cleanly, and a forged neighbour entry inside an
+//!    otherwise-valid file is dropped on read: never a panic, never an out-of-bounds read.
 //!
 //! The workload is deliberately small so the suite runs under a plain (debug) `cargo test`; the
 //! 50k-scale recall gate lives in `sparq-vectors`' `tests/diskann.rs`, which drives the very same
 //! code through the facade.
 
 use sparq_vamana::{
-    PqConfig, SliceVectors, StalenessToken, VamanaConfig, VamanaIndex, SPQG_HEADER_LEN,
-    SPQG_HEADER_LEN_V1, SPQG_MAGIC, STALENESS_TOKEN_LEN,
+    PqConfig, ProductQuantizer, SliceVectors, StalenessToken, VamanaConfig, VamanaIndex,
+    SPQG_HEADER_LEN, SPQG_HEADER_LEN_V1, SPQG_MAGIC, STALENESS_TOKEN_LEN,
 };
 
 const DIM: usize = 32;
@@ -248,6 +249,111 @@ fn malformed_files_are_rejected_with_a_descriptive_error() {
     tag[8..12].copy_from_slice(&4u32.to_le_bytes());
     tag[28..32].copy_from_slice(&7u32.to_le_bytes());
     assert!(VamanaIndex::open_from_bytes(tag).unwrap_err().contains("unsupported encoding tag"));
+}
+
+/// A validated file's *records* are still attacker-controlled: `open` checks the header and the
+/// file size but cannot read every record's adjacency without paging the whole file in. A
+/// neighbour entry naming a slot that does not exist must therefore be dropped where it is read,
+/// not indexed with — before this was checked, a one-word edit to a built file opened cleanly and
+/// panicked inside `nearest` on `in_working[nbr as usize]`.
+#[test]
+fn out_of_range_neighbour_entries_cannot_panic_a_search() {
+    const SMALL: usize = 64;
+    let src = corpus(SMALL, 5);
+    let path = tmp("badnbr");
+    VamanaIndex::build(&src, &path, VamanaConfig::default(), None).unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+
+    let dim = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    let degree = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    let count = u64::from_le_bytes(bytes[16..24].try_into().unwrap()) as usize;
+    assert_eq!((dim, count), (DIM, SMALL));
+    let record_len = 8 + dim * 4 + degree * 4;
+    // Every record keeps its declared degree but its first neighbour entry now names slot
+    // `u32::MAX`, and its second a slot just past the end.
+    let mut forged = 0usize;
+    for slot in 0..count {
+        let rec = SPQG_HEADER_LEN + slot * record_len;
+        let deg = u32::from_le_bytes(bytes[rec + 4..rec + 8].try_into().unwrap()) as usize;
+        if deg == 0 {
+            continue;
+        }
+        let nbrs = rec + 8 + dim * 4;
+        bytes[nbrs..nbrs + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        if deg > 1 {
+            bytes[nbrs + 4..nbrs + 8].copy_from_slice(&(count as u32).to_le_bytes());
+        }
+        forged += 1;
+    }
+    assert!(forged > 0, "the fixture must actually contain neighbour entries to forge");
+
+    let mut qseed = 0x9977u64;
+    let q = rand_vec(&mut qseed, DIM);
+    let valid_ids = 1..=SMALL as u32;
+
+    // Both readers — the mmap `open` and the owned-bytes `open_from_bytes` — go through the same
+    // record reader, so exercise each.
+    std::fs::write(&path, &bytes).unwrap();
+    let mapped = VamanaIndex::open(&path).unwrap();
+    let got = mapped.nearest(&q, K);
+    assert!(!got.is_empty(), "the surviving edges still reach neighbours");
+    assert!(got.iter().all(|(id, _)| valid_ids.contains(id)), "returned a phantom id: {:?}", got);
+    std::fs::remove_file(&path).ok();
+
+    let owned = VamanaIndex::open_from_bytes(bytes).unwrap();
+    assert_eq!(owned.nearest(&q, K), got);
+}
+
+/// `dim`/`m`/`k` in a PQ codebook come straight off the wire, and the centroid-block size derived
+/// from them overflows a 32-bit `usize` (wasm32 is a supported target) long before it overflows a
+/// 64-bit one. A forged header must be rejected with an error — never a wrapped offset, an
+/// enormous allocation, or a panic.
+#[test]
+fn forged_pq_codebook_headers_are_rejected_not_overflowed() {
+    let pq_header = |dim: u32, m: u32, k: u32| {
+        let mut hdr = Vec::with_capacity(12);
+        hdr.extend_from_slice(&dim.to_le_bytes());
+        hdr.extend_from_slice(&m.to_le_bytes());
+        hdr.extend_from_slice(&k.to_le_bytes());
+        hdr
+    };
+    // Sizes that overflow `k · dim · 4` on a 32-bit target (and would demand a multi-gigabyte
+    // subspace table on a 64-bit one) — rejected before either can happen.
+    let huge = pq_header(u32::MAX, u32::MAX, 256);
+    assert!(ProductQuantizer::from_bytes(&huge).is_err());
+    assert!(ProductQuantizer::from_bytes(&pq_header(u32::MAX, 1, 256)).is_err());
+    // Header-only sanity: the validity envelope `fit` enforces still applies.
+    assert!(ProductQuantizer::from_bytes(&pq_header(4, 0, 256)).is_err());
+    assert!(ProductQuantizer::from_bytes(&pq_header(4, 8, 256)).is_err());
+    assert!(ProductQuantizer::from_bytes(&pq_header(4, 2, 257)).is_err());
+    // A well-formed header with the centroid payload missing is a truncation, not a wrap.
+    let err = ProductQuantizer::from_bytes(&pq_header(4, 2, 256)).unwrap_err();
+    assert!(err.contains("truncated"), "err: {}", err);
+    // ...and a real codebook still round-trips (the checks reject only malformed blocks).
+    let src = corpus(64, 3);
+    let vectors: Vec<&[f32]> = {
+        use sparq_vamana::VectorSource;
+        src.iter().map(|(_, v)| v).collect()
+    };
+    let pq = ProductQuantizer::fit(DIM, vectors, PqConfig::default()).unwrap();
+    let round = ProductQuantizer::from_bytes(&pq.to_bytes()).unwrap();
+    assert_eq!((round.dim(), round.m(), round.k()), (pq.dim(), pq.m(), pq.k()));
+
+    // The same forged header inside a real file's trailing PQ section: a clean `Err` out of
+    // `open_from_bytes`, prefixed with the file's origin.
+    let path = tmp("badpq");
+    VamanaIndex::build_with_pq(&src, &path, VamanaConfig::default(), PqConfig::default(), None)
+        .unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).ok();
+    let dim = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    let degree = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    let count = u64::from_le_bytes(bytes[16..24].try_into().unwrap()) as usize;
+    // Codebook header = section magic (4) + codebook length (8), right after the node records.
+    let cb = SPQG_HEADER_LEN + count * (8 + dim * 4 + degree * 4) + 12;
+    bytes[cb..cb + 12].copy_from_slice(&huge);
+    let err = VamanaIndex::open_from_bytes(bytes).unwrap_err();
+    assert!(err.contains("<bytes>"), "err: {}", err);
 }
 
 #[test]

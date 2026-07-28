@@ -612,8 +612,11 @@ impl VamanaIndex {
     }
 
     /// Opens a `.spqg` file memory-mapped, **without rebuilding** — the whole point of this
-    /// index. Validates the header and that the file size matches `count` records so no later
-    /// search can read out of bounds; the records themselves page in on access.
+    /// index. Validates the header, the medoid, and that the file size matches `count` records
+    /// (plus the PQ section when the encoding tag declares one); the records themselves page in on
+    /// access, so their *contents* are validated lazily instead — a record's neighbour entries are
+    /// bounds-checked against `count` (in `node_neighbours`) at the moment a search reads them.
+    /// Between the two, no search can read out of bounds, whatever the file contains.
     ///
     /// A version-2 file's staleness token is read for [`staleness_token`](Self::staleness_token).
     /// A legacy version-1 file (32-byte header, no token) still opens — its token is `None`.
@@ -829,15 +832,27 @@ impl VamanaIndex {
         u32::from_le_bytes(self.map[start..start + 4].try_into().unwrap())
     }
 
-    /// `slot`'s valid out-neighbour slots (the first `degree` neighbour entries).
+    /// `slot`'s valid out-neighbour slots (the first `degree` neighbour entries), **bounds-checked
+    /// against `count`**.
+    ///
+    /// The neighbour entries are the one record field [`open`](Self::open) cannot check up front
+    /// without reading every record — which would page the entire file in and defeat the lazy open
+    /// this format exists for — so they are checked HERE, on the single path every searcher reads
+    /// adjacency through: a stored degree above the header's `R` is clamped, and an entry naming a
+    /// slot that does not exist (`>= count`) is dropped. A corrupt or hostile `.spqg` therefore
+    /// loses that edge (a worse-connected graph, possibly worse recall) instead of indexing
+    /// `in_working` / `node_vector` out of bounds and panicking mid-search.
     fn node_neighbours(&self, slot: u32) -> impl Iterator<Item = u32> + '_ {
         let start = self.data_offset + slot as usize * self.record_len;
         let deg = u32::from_le_bytes(self.map[start + 4..start + 8].try_into().unwrap()) as usize;
         let nbr_off = start + 8 + self.dim * 4;
-        (0..deg.min(self.degree)).map(move |i| {
-            let o = nbr_off + i * 4;
-            u32::from_le_bytes(self.map[o..o + 4].try_into().unwrap())
-        })
+        let count = self.count;
+        (0..deg.min(self.degree))
+            .map(move |i| {
+                let o = nbr_off + i * 4;
+                u32::from_le_bytes(self.map[o..o + 4].try_into().unwrap())
+            })
+            .filter(move |&nbr| (nbr as usize) < count)
     }
 
     /// Greedy beam search of width `beam` from the medoid toward `query` (already normalized),

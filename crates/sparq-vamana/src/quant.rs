@@ -411,8 +411,11 @@ impl ProductQuantizer {
     }
 
     /// Reconstructs a quantizer from [`to_bytes`](Self::to_bytes). Errors on a
-    /// truncated/over-long block or an invalid header (`m == 0`, `m > dim`, `k == 0`, `k > 256`) —
-    /// the same validity envelope [`fit`](Self::fit) enforces, so a decoded quantizer is always sound.
+    /// truncated/over-long block, an invalid header (`m == 0`, `m > dim`, `k == 0`, `k > 256`) —
+    /// the same validity envelope [`fit`](Self::fit) enforces, so a decoded quantizer is always
+    /// sound — or a declared `dim`/`k` whose centroid block would not fit the address space. The
+    /// header fields are untrusted bytes, so every size is computed with checked arithmetic: a
+    /// forged header is rejected, never wrapped into a bogus offset (and never panics).
     pub fn from_bytes(bytes: &[u8]) -> Result<ProductQuantizer, String> {
         if bytes.len() < 12 {
             return Err("PQ codebook block truncated (no header)".into());
@@ -428,27 +431,42 @@ impl ProductQuantizer {
         if k == 0 || k > 256 {
             return Err(format!("PQ codebook K must be in 1..=256 (got {k})"));
         }
+        // The centroid payload is exactly `k × dim` f32 values (the subspace lengths sum to `dim`),
+        // so the whole block length is known from the header alone. Check it with CHECKED
+        // arithmetic here, before allocating anything: `dim` and `m` are attacker-controlled u32s
+        // off the wire, and `k · dim · 4` overflows a 32-bit `usize` (this crate builds for wasm32)
+        // for even moderate declared dimensions — after which the per-subspace offsets below would
+        // wrap and slice at a bogus position. It also bounds `m` (`m ≤ dim ≤ bytes.len() / 4`)
+        // before `subspace_offsets` allocates its `m + 1` entries, so a forged `m` near `u32::MAX`
+        // is rejected instead of asking for gigabytes.
+        let want_vals =
+            k.checked_mul(dim).ok_or("PQ codebook centroid count exceeds the address space")?;
+        let need = want_vals
+            .checked_mul(4)
+            .and_then(|payload| payload.checked_add(12))
+            .ok_or("PQ codebook block length exceeds the address space")?;
+        if bytes.len() < need {
+            return Err("PQ codebook block truncated (centroids)".into());
+        }
+        if bytes.len() > need {
+            return Err(format!("PQ codebook block has {} trailing bytes", bytes.len() - need));
+        }
         let sub_offsets = subspace_offsets(dim, m);
         let mut centroids: Vec<Vec<f32>> = Vec::with_capacity(m);
         let mut off = 12;
         for s in 0..m {
             let sub_len = sub_offsets[s + 1] - sub_offsets[s];
+            // `want ≤ k · dim` and `off + want · 4 ≤ need = bytes.len()`, both checked above.
             let want = k * sub_len;
-            let need = off + want * 4;
-            if bytes.len() < need {
-                return Err("PQ codebook block truncated (centroids)".into());
-            }
             let mut sub = Vec::with_capacity(want);
             for c in 0..want {
                 let p = off + c * 4;
                 sub.push(f32::from_le_bytes(bytes[p..p + 4].try_into().unwrap()));
             }
             centroids.push(sub);
-            off = need;
+            off += want * 4;
         }
-        if off != bytes.len() {
-            return Err(format!("PQ codebook block has {} trailing bytes", bytes.len() - off));
-        }
+        debug_assert_eq!(off, bytes.len());
         Ok(ProductQuantizer { dim, m, k, sub_offsets, centroids })
     }
 
