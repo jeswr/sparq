@@ -54,7 +54,7 @@ paper if printed:
 |---|---|
 | `ssa/opt/flatten_cfg/value_merger.rs` | **Path moved** → `ssa/ir/dfg/simplify/value_merger.rs`. Not cosmetic: the merger is no longer a flattening-private helper, it is a DFG-level utility consumed by `remove_if_else.rs:109` |
 | `try_merge_only_changed_indices` is the un-examined site | **The function does not exist.** It was *deliberately deleted* by upstream PR #8142; `remove_if_else.rs:651-654` says so in-tree and points at issue **#8145** ("investigate if this can be brought back") — a different, later ticket than #5501 |
-| "precedent PR #11512 merged" for merging only accessed indices | #11512 landed as `array_set_window_optimization.rs`, which **does something else**: it rewrites `array_set`→`make_array` so the merger can short-circuit one lane's multiply. `CHANGELOG.md:67` ("Only merge modified array indices") **over-claims relative to the code it shipped**. Cite the pass doc (`array_set_window_optimization.rs:14-17`), never the changelog line |
+| "precedent PR #11512 merged" for merging only accessed indices | #11512 landed as `array_set_window_optimization.rs`, which **does something else**: it rewrites `array_set`→`make_array` so the merger can short-circuit one lane's multiply. `CHANGELOG.md:67` ("Only merge modified array indices") **over-claims relative to the code it shipped**. Cite the pass doc (`array_set_window_optimization.rs:14-17`), never the changelog line. **Not actionable as a change** — a released changelog entry is historical record upstream does not rewrite; the remedy is the citation rule stated here, discharged in this record, so nothing is tracked |
 | ACIR-gen comparison lowering (`acir_context/mod.rs:1163-1228`) listed as un-examined | **Already examined** — `sq-jfkwk`, null result, `noir-comparison-lowering-10159.md` (program record §10.7) |
 | Quadratic ACIR expression growth (#4629) listed as un-examined | **Already examined** — `sq-felqr` design note, `noir-acir-expression-growth-4629.md` (program record §10.6) |
 
@@ -149,7 +149,12 @@ against a decision made on Brillig-weighted `cost()`. One ACIR-path robustness g
 `RUNAWAY_UNROLL_LIMIT` applies **only** when termination is unproven (`:1238-1250`), so
 a provably-terminating `for i in 0..4_000_000_000` in ACIR hangs with no diagnostic.
 Two adjacent diagnostics gaps in the same file: the ACIR bail-outs at `:392` and
-`:419` discard the source location.
+`:419` discard the source location. **Disposition:** these are upstream correctness /
+diagnostics defects, not optimisation candidates — they move no gate count, so §6's
+measurement gate does not apply and they are deliberately absent from §4 and §6. They
+*are* actionable, and are captured as a follow-up issue (filed with this PR) for
+upstream reporting; they get no `sq-` bead under `sq-uuvac`, whose remit is measured
+optimisation PRs. No further work on them is pending in this record.
 
 ### 3.2 Array/memory — `value_merger.rs`, `array_set_window_optimization.rs`, `mutable_array_set.rs`
 
@@ -211,6 +216,9 @@ which is broader than the orphan case its test covers — but fixing it means
 introducing a real `undef` plus a reaching-definitions check, and per §2 fact 3 it is
 not a gate story. Also noted: the ordering comment at `mod.rs:375-380` is **stale**
 (it describes a predecessor-unification scheme that IDF placement replaced).
+**Disposition:** documentation-only and upstream-side; upstream convention closes
+typo-scale PRs, so it is deliberately **not tracked** — it should ride in the diff of
+whichever substantive PR from this program next touches `mod.rs`, or not go up at all.
 
 ### 3.4 Signed / wide-integer lowering — the strongest surviving candidate class
 
@@ -499,6 +507,13 @@ Skeleton the paper can take directly, matching the estate's measured-and-honest 
   bead `sq-mtolx` should therefore stay **OPEN**, blocked on the same empirical half as
   `sq-eesz3` / `sq-felqr` / `sq-jfkwk` — plus, for the promotion step specifically, on
   the P1 harness (`sq-i50o4`) landing.
+- **The four non-optimisation findings are dispositioned in place, not left open.** The
+  measurement gate above governs the §6 optimisation specs *only*; it is not a reason to
+  leave unrelated work untracked. So, explicitly: the ACIR runaway-unroll hang and the two
+  location-discarding ACIR bail-outs (§3.1) are captured as a follow-up issue for upstream
+  reporting; the stale `mem2reg` ordering comment (§3.3) and the `CHANGELOG.md:67`
+  over-claim (§1) are documentation-only and deliberately untracked, for the reasons given
+  at each. No reader should expect a bead for any of the four.
 - **HEAD is a moving target.** All citations are `e22cd89b` (the same commit
   §10.5–10.8 analysed). The shallow clone denied `git log`/`git blame`, so
   "did upstream already fix this" rests on `CHANGELOG.md` and fixture presence.
