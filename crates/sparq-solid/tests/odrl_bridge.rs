@@ -3023,6 +3023,32 @@ fn granting_rules(g: &Graph, agent: &str, right: &str, target: &str) -> Vec<Stri
     out
 }
 
+/// The `(anchor, rule, policy)` rows attributed to `agent`'s `right` on `target`. One
+/// row per rule-policy pair; the anchor is exposed so a test can check that a pair is
+/// not smeared across a node shared by two sources.
+fn attribution_pairs(
+    g: &Graph,
+    agent: &str,
+    right: &str,
+    target: &str,
+) -> Vec<(String, String, String)> {
+    let q = format!(
+        "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> \
+         SELECT ?prov ?rule ?policy WHERE {{ GRAPH <urn:sparq:auth-bridged> {{ \
+           ?prov rdf:subject <{}> ; rdf:predicate <{}> ; rdf:object <{}> ; \
+                 <{}> ?rule ; <{}> ?policy }} }}",
+        agent, right, target, BRIDGED_FROM_RULE, BRIDGED_FROM_POLICY
+    );
+    let mut out: Vec<(String, String, String)> = sparq_engine::query(g, &q)
+        .expect("attribution query runs")
+        .rows
+        .iter()
+        .map(|r| (cell(&r[0]), cell(&r[1]), cell(&r[2])))
+        .collect();
+    out.sort();
+    out
+}
+
 // 1. THE BEAD: a bridged grant is attributed to the ODRL rule that granted it, and the
 //    attribution is reachable by SPARQL alone (no bridge API, no in-process report).
 #[test]
@@ -3276,4 +3302,124 @@ fn two_rules_stay_separately_attributable() {
         .collect();
     assert_eq!(anchors.len(), 2, "one anchor per attributed auth triple: {anchors:?}");
     assert_ne!(anchors[0], anchors[1], "distinct grants get distinct anchors");
+}
+
+// 11. COLLISION REGRESSION: a rule id is NOT globally unique — an anonymous rule is a
+//     blank-node label and programmatic ids are supported — so two *different* policies
+//     can emit the same grant through same-labelled rules. Keying the anchor on the rule
+//     alone collapsed both into ONE node carrying both `bridgedFromPolicy` values, which
+//     destroys exactly the attribution the anchor exists to provide. The anchor is keyed
+//     by the rule-POLICY pair, so each source keeps its own node.
+//
+//     Built programmatically because that is the only way to *guarantee* the id
+//     collision the bug needs (test 10 uses distinct rule IRIs, so it never hit this).
+#[test]
+fn same_rule_id_in_two_policies_stays_unambiguously_attributed() {
+    /// A policy granting alice `read` on n1 through a rule whose id is `rule_id` —
+    /// the SAME label both callers pass, standing in for two anonymous rules that
+    /// happened to be labelled alike.
+    fn read_grant(policy_iri: &str, rule_id: &str) -> sparq_policy::Policy {
+        sparq_policy::Policy {
+            iri: Some(policy_iri.to_owned()),
+            permissions: vec![sparq_policy::Rule {
+                id: rule_id.to_owned(),
+                action: sparq_policy::Action(odrl("read")),
+                target: Some(N1.to_owned()),
+                assignee: Some(ALICE.to_owned()),
+                assigner: None,
+                constraints: Vec::new(),
+                logical_constraints: Vec::new(),
+                duties: Vec::new(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    let alpha = read_grant("urn:pol/alpha", "_:b0");
+    let beta = read_grant("urn:pol/beta", "_:b0");
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+
+    let mut g = pod();
+    assert!(materialize_permission(&mut g, &alpha, &req).granted);
+    assert!(materialize_permission(&mut g, &beta, &req).granted);
+
+    // Both policies are attributed, each on its OWN anchor — so a rule can still be
+    // paired back to the policy it came from.
+    let pairs = attribution_pairs(&g, ALICE, AUTH_READ, N1);
+    assert_eq!(pairs.len(), 2, "one anchor per rule-policy pair: {pairs:?}");
+    assert_ne!(pairs[0].0, pairs[1].0, "the two sources mint DISTINCT anchors");
+    let policies: Vec<&str> = pairs.iter().map(|(_, _, p)| p.as_str()).collect();
+    assert_eq!(policies, vec!["<urn:pol/alpha>", "<urn:pol/beta>"]);
+    for (anchor, rule, _) in &pairs {
+        assert_eq!(rule, "\"_:b0\"", "the shared blank-node label stays a literal");
+        // The pairing is unambiguous only because no anchor carries two policies.
+        let on_this_anchor = pairs.iter().filter(|(a, _, _)| a == anchor).count();
+        assert_eq!(on_this_anchor, 1, "an anchor names ONE policy: {pairs:?}");
+    }
+
+    // …and rematerializing both (the refresh replay shape) adds nothing new: the anchor
+    // stays deterministic in (triple, rule, policy).
+    let before = graph_rows(&g, "urn:sparq:auth-bridged").len();
+    assert!(materialize_permission(&mut g, &alpha, &req).granted);
+    assert!(materialize_permission(&mut g, &beta, &req).granted);
+    assert_eq!(
+        graph_rows(&g, "urn:sparq:auth-bridged").len(),
+        before,
+        "re-materializing the same two sources duplicates nothing"
+    );
+}
+
+// 12. The CONDITIONAL anchor is deliberately MANY-SOURCE, and this pins that contract so
+//     it is not mistaken for the pair-keyed reification anchor above. The grant IRI is
+//     keyed by the grant's SHAPE because it is the enforcement node: two policies
+//     granting the same conditional right must collapse to ONE grant, not two. So the
+//     attributions accumulate on it — an audit reads which rules and which policies
+//     contributed, but cannot pair a rule back to its policy.
+#[test]
+fn conditional_grant_is_many_source_across_policies() {
+    fn carol_only_read(policy_iri: &str, rule_iri: &str) -> sparq_policy::Policy {
+        parse_policy_str(
+            &format!(
+                r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<{}> a odrl:Set ; odrl:permission <{}> .
+<{}> odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ;
+                      odrl:operator odrl:eq ;
+                      odrl:rightOperand <https://carol.ex/card#me> ] .
+"#,
+                policy_iri, rule_iri, rule_iri
+            ),
+            "turtle",
+        )
+        .expect("policy parses")
+    }
+    let mut g = pod();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    let c1 = carol_only_read("urn:pol/c1", "urn:pol/c1#p");
+    let c2 = carol_only_read("urn:pol/c2", "urn:pol/c2#p");
+    assert!(materialize_permission_conditional(&mut g, &c1, &req).granted);
+    assert!(materialize_permission_conditional(&mut g, &c2, &req).granted);
+
+    let rows = graph_rows(&g, "urn:sparq:auth-bridged");
+    let grants: Vec<&String> = rows
+        .iter()
+        .filter(|(_, p, _)| p == &format!("<{}>", BRIDGED_FROM_RULE))
+        .map(|(s, _, _)| s)
+        .collect();
+    assert_eq!(grants.len(), 2, "two rules attributed: {rows:?}");
+    assert_eq!(grants[0], grants[1], "…onto the ONE shape-keyed enforcement node");
+    let policies: Vec<&String> = rows
+        .iter()
+        .filter(|(_, p, _)| p == &format!("<{}>", BRIDGED_FROM_POLICY))
+        .map(|(_, _, o)| o)
+        .collect();
+    assert_eq!(policies.len(), 2, "both policies contributed: {rows:?}");
+    // The documented consequence: rule↔policy pairing is NOT recoverable from this node.
+    // Contrast test 11, where the pair-keyed reification anchor keeps it.
+    assert!(
+        !rows.iter().any(|(s, _, _)| s.starts_with("<urn:sparq:odrl-prov?")),
+        "still no reification anchor for a node-bearing grant: {rows:?}"
+    );
 }

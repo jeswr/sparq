@@ -702,12 +702,34 @@ fn named_graph_triples(graph: &Graph, name: &str) -> Vec<[Term; 3]> {
 //   - A PLAIN auth triple (`<party> auth:read <g>`) has no node of its own, so the
 //     attribution hangs off a minted RDF *reification* node:
 //
-//       <urn:sparq:odrl-prov?s=…&p=…&o=…&rule=…> a rdf:Statement ;
+//       <urn:sparq:odrl-prov?s=…&p=…&o=…&rule=…&policy=…> a rdf:Statement ;
 //           rdf:subject <party> ; rdf:predicate auth:read ; rdf:object <g> ;
 //           auth:bridgedFromRule <rule> ; auth:bridgedFromPolicy <policy> .
 //
 //   - A CONDITIONAL grant already IS a per-grant node (`urn:sparq:odrl-cond?…`), so the
 //     attribution is stated directly on it — no second node describing the same thing.
+//
+// RULE↔POLICY PAIRING differs between the two anchors, deliberately, and the docs must
+// not blur them:
+//
+//   - The reification anchor is keyed by the POLICY as well as the rule (see
+//     [`policy_key`]). Rule identifiers are NOT globally unique — an anonymous rule is
+//     just a blank-node label (`_:b0`) and programmatic ids are supported — so keying on
+//     the rule alone let two policies that emit the same grant through same-labelled
+//     rules mint ONE anchor carrying both `bridgedFromPolicy` values, which is exactly
+//     the ambiguity the anchor exists to remove. Keying on `(triple, rule, policy)` keeps
+//     one anchor per source, so each anchor names exactly one rule-policy pair.
+//     RESIDUAL: two *anonymous* policies (neither has an `odrl:Policy` IRI) sharing a
+//     rule label still share an anchor — they have no distinguishing identity to key on,
+//     and the anchor then states only the shared rule label, which is all the identity
+//     the input carried.
+//
+//   - The conditional grant node is MANY-SOURCE by construction: it is an enforcement
+//     node keyed by the grant's shape (`agent`/`mode`/`graph`/`excepts`/`effect`), and
+//     two policies granting the same conditional right must collapse to ONE grant, not
+//     two. Its attributions therefore accumulate — `{rule…} × {policy…}` on one node —
+//     so an audit can read *which rules and which policies contributed* but cannot pair
+//     them up. Pinned by `conditional_grant_is_many_source_across_policies`.
 //
 // ANTI-FORGERY is preserved on both sides. The annotations live ONLY in the reserved
 // `<urn:sparq:auth-bridged>` graph, which `crate::loader::strip_reserved_graphs` drops
@@ -805,17 +827,32 @@ fn attribution_triples(anchor: &Term, prov: &RuleProvenance) -> Vec<[Term; 3]> {
     out
 }
 
+/// The anchor-IRI component identifying the POLICY a rule was attributed to, so an
+/// anchor is keyed by the rule-policy PAIR rather than by a rule id that is not globally
+/// unique (a blank-node label, a programmatic id). A policy with no IRI gets the distinct
+/// valueless `&anonPolicy` component: `encode_for_uri` escapes every byte outside
+/// `[A-Za-z0-9-._~]`, so an encoded IRI can never contain the `&`/`=` that delimit a
+/// component and `&policy=…` can never spell `&anonPolicy`. [SONNET-4.6] sq-luc02.
+fn policy_key(policy: Option<&str>) -> String {
+    match policy {
+        Some(iri) => format!("&policy={}", sparq_reason::n3::encode_for_uri(iri)),
+        None => "&anonPolicy".to_owned(),
+    }
+}
+
 /// The reification-node annotation for one plain auth `triple` — one anchor per
-/// attributed rule, so two rules producing the same grant stay separately attributable.
-/// Empty when `prov` carries no attribution.
+/// attributed rule-policy PAIR, so two rules producing the same grant, or two policies
+/// whose rules share an id, stay separately attributable. Empty when `prov` carries no
+/// attribution.
 ///
-/// The anchor IRI is DETERMINISTIC in `(triple, rule)`, so re-materializing the same
-/// grant re-mints the same node and the provenance graph stays idempotent under the
+/// The anchor IRI is DETERMINISTIC in `(triple, rule, policy)`, so re-materializing the
+/// same grant re-mints the same node and the provenance graph stays idempotent under the
 /// dedupe in [`extend_named_graph`].
 fn reified_provenance(triple: &[Term; 3], prov: &RuleProvenance) -> Vec<[Term; 3]> {
     if prov.rules.is_empty() {
         return Vec::new();
     }
+    let policy_key = policy_key(prov.policy.as_deref());
     let type_p = Term::NamedNode(NamedNode::new_unchecked(RDF_TYPE));
     let statement_o = Term::NamedNode(NamedNode::new_unchecked(RDF_STATEMENT));
     let subject_p = Term::NamedNode(NamedNode::new_unchecked(RDF_SUBJECT));
@@ -825,11 +862,12 @@ fn reified_provenance(triple: &[Term; 3], prov: &RuleProvenance) -> Vec<[Term; 3
     let mut out: Vec<[Term; 3]> = Vec::new();
     for rule in &prov.rules {
         let anchor = Term::NamedNode(NamedNode::new_unchecked(format!(
-            "urn:sparq:odrl-prov?s={}&p={}&o={}&rule={}",
+            "urn:sparq:odrl-prov?s={}&p={}&o={}&rule={}{}",
             sparq_reason::n3::encode_for_uri(&triple[0].to_string()),
             sparq_reason::n3::encode_for_uri(&triple[1].to_string()),
             sparq_reason::n3::encode_for_uri(&triple[2].to_string()),
             sparq_reason::n3::encode_for_uri(rule),
+            policy_key,
         )));
         out.push([anchor.clone(), type_p.clone(), statement_o.clone()]);
         out.push([anchor.clone(), subject_p.clone(), triple[0].clone()]);
@@ -1566,6 +1604,13 @@ struct ConditionalGrant<'a> {
 /// attribution is stated directly on the grant IRI rather than through a second
 /// reification node — the provenance-graph-only rule still holds (see
 /// [`append_bridged_triples`]).
+///
+/// That node is MANY-SOURCE, unlike the reification anchor ([`reified_provenance`],
+/// which is keyed by the rule-policy pair). The grant IRI is keyed by the grant's SHAPE
+/// because it is the enforcement node: two policies granting the same conditional right
+/// must collapse to one grant, not two. So their attributions accumulate on it, and an
+/// audit reads *which rules and which policies contributed* without being able to pair
+/// a rule back to its policy. Pinned by `conditional_grant_is_many_source_across_policies`.
 fn append_conditional_grants(
     graph: &mut Graph,
     spec: ConditionalGrant<'_>,

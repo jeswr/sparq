@@ -37,8 +37,10 @@
 //  `auth:bridgedFromRule` / `auth:bridgedFromPolicy` inside `<urn:sparq:auth-bridged>`, so
 //  "which ODRL rule granted this right?" is a plain SPARQL query. The RESIDUAL limitation is
 //  narrower and is what #5 now states: the independent N3 path stays unattributed (its rule set
-//  does not carry the originating rule through the closure), and attribution is rule-granularity,
-//  not a derivation trace.
+//  does not carry the originating rule through the closure), attribution is rule-granularity and
+//  not a derivation trace, and it is pairwise-exact only where the sources are distinguishable
+//  (the reification node is keyed by the rule-POLICY pair, but two IRI-less policies, and two
+//  policies contributing one conditional grant, still share a node).
 // Single-source Typst. Numbers come ONLY from #headline(...) / #ev(...) (paper-evidence.json),
 // never hard-coded. Compiles to BOTH a PDF (the download) and semantic HTML (the in-site page).
 // EMPIRICAL-HONESTY (sq-gum8): no wall-clock claim (work-box timings are non-canonical and are
@@ -503,7 +505,7 @@ lands in the enforcement graph and is mirrored verbatim into the provenance grap
   <https://alice.example/card#me> auth:read      <https://pod.example/notes/n1> .
   <https://alice.example/card#me> auth:denyWrite <https://pod.example/notes/n1> .
 
-  <urn:sparq:odrl-prov?s=...&p=...&o=...&rule=...> a rdf:Statement ;
+  <urn:sparq:odrl-prov?s=...&p=...&o=...&rule=...&policy=...> a rdf:Statement ;
     rdf:subject   <https://alice.example/card#me> ;
     rdf:predicate auth:read ;
     rdf:object    <https://pod.example/notes/n1> ;
@@ -562,11 +564,20 @@ so it cannot participate in a decision; and because the annotation is minted in 
 namespace inside a reserved graph — which the loader strips from any dataset it reads — the
 anti-forgery property of the mirror is unchanged. A policy-supplied identifier that is a
 blank node, or that is itself in the reserved namespace, is materialised as a literal rather
-than a node, so no policy can mint a reserved node inside that graph. What remains
-unattributed is the independent N3 materialisation path, whose rule set derives the
-authorization triples without carrying the originating ODRL rule through the closure; we
-keep that as the residual limitation (§6) rather than attribute one path's triples to the
-other path's decision.
+than a node, so no policy can mint a reserved node inside that graph.
+
+Rule identifiers are not globally unique — an anonymous rule is only a blank-node label —
+so the reification node is keyed by the rule and the _policy_ together, not by the rule alone;
+otherwise two policies emitting the same grant through same-labelled rules would share one
+node carrying both policies, which is precisely the ambiguity the node exists to remove. Two
+policies that both lack an IRI still share a node, having no distinguishing identity to key
+on. The conditional-grant node is many-source by construction: it is the enforcement node,
+keyed by the grant's shape, so two policies granting the same conditional right collapse to
+one grant and their attributions accumulate on it — an audit reads which rules and which
+policies contributed, but cannot pair them. What remains unattributed altogether is the
+independent N3 materialisation path, whose rule set derives the authorization triples without
+carrying the originating ODRL rule through the closure; we keep these as the residual
+limitations (§6) rather than attribute one path's triples to the other path's decision.
 
 == Evaluation <eval>
 
@@ -746,7 +757,10 @@ Fifth, rule-level provenance is materialised for the Rust materialisation paths 
 all of them: the independent N3 path derives its authorization triples without carrying the
 originating ODRL rule through the closure, so its mirror is the bridged-versus-static marker
 alone (§4.6). Attribution is also rule-granularity, not a derivation trace: it names the rule
-that produced a triple, not which constraints were evaluated or on what evidence.
+that produced a triple, not which constraints were evaluated or on what evidence. And it is
+pairwise-exact only where the sources are distinguishable: two policies that both lack an
+IRI, or two policies contributing the same conditional grant, share one attribution node and
+so cannot be told apart from it (§4.6).
 
 Sixth, this is a library-level, single-node surface: no HTTP wire conformance, no
 multi-server deployment, no users, and no claim that the view scales to adversarial policy
