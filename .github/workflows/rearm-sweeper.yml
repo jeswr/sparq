@@ -28,9 +28,18 @@ on:
 # The App token is still PREFERRED when configured (same identity batch-merge.yml uses,
 # so a merge it triggers is attributed to the App rather than github-actions[bot]); the
 # workflow token is the fallback and, with write, is sufficient to arm.
+#
+# [OPUS-5] #4548 — the stuck-arm phase adds two more scopes. `checks: write` is the ONLY
+# thing that can re-request a cancelled check run, and `issues: write` is what labelling a
+# pull request actually consumes (`gh pr edit --add-label` posts to the ISSUES labels
+# endpoint). Without them the stuck-arm phase would classify correctly and then fail every
+# remediation with a 403 — visible, but useless. `contents: write` already present above
+# also covers the `PUT /pulls/{n}/update-branch` the CONFLICTING class attempts.
 permissions:
   contents: write
   pull-requests: write
+  checks: write
+  issues: write
 
 concurrency:
   group: re-arm-sweeper
@@ -38,12 +47,16 @@ concurrency:
 
 jobs:
   sweep:
-    name: restore dropped merge-queue arms
+    name: restore dropped arms + sweep stuck arms
     runs-on: ubuntu-latest
     # 10 (was 5): headroom for the #3759 bounded transient-retry backoff (up to
     # 10s+30s per idempotent READ during a platform blip) without hitting the
     # job ceiling; the sweep itself is unchanged.
-    timeout-minutes: 10
+    # 15 (was 10) for #4548: the stuck-arm phase adds one live GraphQL read plus a
+    # PAGINATED check-run read per ARMED PR, and heads here really do carry 800 check
+    # runs (8 pages). The armed population is small (4 at the time of writing) but the
+    # per-PR cost is not, so the ceiling has to allow for a backlog.
+    timeout-minutes: 15
     env:
       # Secrets are not readable from step `if:` expressions — mirror the id into env
       # so the mint step can be skipped fail-soft when the App is not configured.
@@ -113,3 +126,27 @@ jobs:
           --repo "$REPO"
           --default-branch "$DEFAULT_BRANCH"
           --max-rearms 10
+
+      # [OPUS-5] #4548 — THE OTHER DIRECTION. The step above restores a DROPPED arm; this
+      # one is its dual, and it must run AFTER it so a PR re-armed seconds ago is inside
+      # the grace window rather than immediately re-examined. `rearm` skips every PR with
+      # a live autoMergeRequest, so until this existed an armed-but-unmergeable PR had NO
+      # exit: it looked healthy, held its `area:` partition against the readiness
+      # frontier, and nothing swept it. MEASURED 2026-07-27T10:45Z: queue depth 0, three
+      # PRs armed, all three individually unmergeable for three DIFFERENT reasons, zero
+      # merges in the preceding hour.
+      #
+      # It fails open on everything pending or unreadable and bounds its mutations per
+      # tick — see scripts/rearm-sweeper.py's stuck-arm section. Pinned by
+      # scripts/tests/test_arm_capability_wiring.py::TestStuckArmWiring.
+      - name: Sweep armed-but-unmergeable PRs to a counted terminal state
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: >-
+          python3 scripts/rearm-sweeper.py
+          --repo "$REPO"
+          --default-branch "$DEFAULT_BRANCH"
+          --phase stuck-arm
+          --max-stuck-actions 5
