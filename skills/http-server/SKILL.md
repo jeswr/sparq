@@ -877,9 +877,10 @@ endpoint.
 currently executing SPARQL queries, providing GraphDB query-monitoring and kill parity.
 
 - **`GET /queries`** — READ-gated (fail-closed). Returns `{"queries":[…]}` where each entry
-  carries `id` (opaque hex), `start` (Unix epoch ms), `fingerprint` (FNV-1a hex — a
-  NON-REVERSIBLE hash of the trimmed query text, never raw text per the #241 / sq-m9prn
-  audit-log posture), and `elapsed_ms`. Sorted by `id` (registration order).
+  carries `id` (opaque hex), `kind` (`"query"` or `"update"`), `start` (Unix epoch ms),
+  `fingerprint` (FNV-1a hex — a NON-REVERSIBLE hash of the trimmed query text, never raw text
+  per the #241 / sq-m9prn audit-log posture), and `elapsed_ms`. Sorted by `id` (registration
+  order).
 - **`DELETE /queries/{id}`** — WRITE-gated (fail-closed). Cooperatively cancels the named
   query by flipping the `sq-kq9ia` `Arc<AtomicBool>` cancel flag wired into its `QueryBudget`.
   The engine observes it at the next poll site and aborts. Returns `204 No Content` on success;
@@ -887,6 +888,15 @@ currently executing SPARQL queries, providing GraphDB query-monitoring and kill 
 - **RAII lifetime**: each executing SELECT/ASK/CONSTRUCT/DESCRIBE/**EXPLAIN (plan + analyze)**
   registers on start and deregisters on completion, error, or panic — the entry is always cleaned
   up. (EXPLAIN ANALYZE wiring added in sq-t1isr, [SONNET-4.6].)
+- **SPARQL UPDATEs are registered too** (`kind: "update"`; sq-m9prn, [SONNET-4.6]). An UPDATE
+  registers when the sequenced writer thread STARTS applying it — not when it is queued — so a
+  row names exactly what is consuming the writer, which is the operation whose cancellation
+  also unblocks every write queued behind it. The flag reaches the `DELETE/INSERT … WHERE`
+  evaluation (the engine installs the UPDATE's `QueryBudget` thread-locally for the whole
+  update). A cancelled UPDATE is **rejected, not partially applied**: the writer forks per
+  batch and seals only on success, so the store is left at its pre-update state and the writer
+  keeps serving. Non-WHERE operations (`INSERT DATA`, `CLEAR`/`DROP`, …) do not consult the
+  budget, so they are listed but complete rather than cancel.
 - **Fingerprint-only**: the `GET /queries` listing NEVER exposes raw query text; only the
   non-reversible fingerprint is visible, satisfying the audit-log discipline.
 - **Zero cost when feature is OFF**: no `AppState` fields, no routes; byte-identical to before.
