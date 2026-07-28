@@ -48,3 +48,10 @@
   crate: "sparq-wrapper"
   features: "proposed-graph-scope"
   test: true
+
+# [SONNET-4.6] sq-1rg2q.11: tests/json.rs is `#![cfg(feature = "proposed-json")]`,
+# so ci.yml's default-feature lane compiles it EMPTY. This leg is its only executor.
+- name: "sparq-wrapper (proposed-json)"
+  crate: "sparq-wrapper"
+  features: "proposed-json"
+  test: true

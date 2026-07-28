@@ -81,7 +81,7 @@ sparq-wrapper = { version = "0.1", features = [
 ] }
 ```
 
-The async events, async node, graph-scope events, and JSON features currently
+The async events, async node, and graph-scope events features currently
 expose reserved, empty modules; enabling them adds no API.
 Every other proposal feature is implemented. `proposed-distinct` is exposed as
 inherent `Dataset` methods in the crate root rather than through a `proposed::`
@@ -318,6 +318,54 @@ predicate-wide `subjects()` / `objects()` helpers are available only on the IRI
 focus returned by `NodeFactory::iri`. Match an `AnyNode` variant to recover
 those kind-specific methods, or call `into_node()` to erase the focus kind and
 return to the untyped wrapper.
+
+`proposed-json` adds `sparq_wrapper::proposed::json::JsonProjection`, which
+projects a focus node and its outgoing reachable subgraph to one compact JSON
+string ([open PR #23](https://github.com/rdfjs/wrapper/pull/23)). RDF graphs
+cycle, so the projection never simply recurses: a node it has already met is
+emitted as the reference `{"@ref": "<term>"}`, whose term is the same stable
+identifier the expanded node carries in `@id` (an IRI as itself, any other term
+in N-Triples form). `RepeatedFocus::OnCycle`, the default, references only
+ancestors of the node being written, so a diamond is expanded once per path;
+`RepeatedFocus::OnRepeat` references every node expanded earlier in the
+document, so each node is expanded at most once. `with_max_depth` bounds
+recursion depth (default `DEFAULT_MAX_DEPTH`), truncating to the same reference
+form. <!-- [SONNET-4.6] sq-1rg2q.11 -->
+
+Output is deterministic — predicates in lexicographic IRI order, each
+predicate's objects in lexicographic N-Triples order — so projecting the same
+store twice is byte-identical and the result is diffable. Literals are value
+objects that keep their metadata: `@value` plus `@type` for a typed literal, or
+`@language` (plus `@direction` for an RDF 1.2 directional literal) for a
+language-tagged one, whose datatype the tag implies. No value is coerced to a
+bare JSON string, number, or boolean, so `"1"^^xsd:integer` and `"1"` stay
+distinguishable.
+
+```rust
+use oxrdf::NamedNode;
+use sparq_core::Graph;
+use sparq_wrapper::proposed::json::JsonProjection;
+use sparq_wrapper::Store;
+
+let graph = Graph::load_str(
+    "@prefix ex: <http://example.org/> .\n\
+     ex:a ex:knows ex:b .\n\
+     ex:b ex:knows ex:a ; ex:label \"Bee\"@en .",
+    "turtle",
+)?;
+let store = Store::borrowed(&graph);
+let a = NamedNode::new("http://example.org/a")?;
+
+let json = JsonProjection::new().project(&store.node(a.clone()));
+assert_eq!(json, JsonProjection::new().project(&store.node(a)));
+assert!(json.contains(r#"{"@ref":"http://example.org/a"}"#)); // cycle closed
+assert!(json.contains(r#"{"@value":"Bee","@language":"en"}"#)); // tag kept
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Only outgoing predicates in the default graph are followed, matching `Node::out`.
+A focus absent from the graph projects to a node object with no predicates, and
+a literal focus projects to its value object, so the call is total for any term.
 
 SHACL-to-Rust struct generation is not part of M1. Reuse `sparq-shacl`'s
 `ShapesModel` for that work; do not invent a second SHACL parser.
