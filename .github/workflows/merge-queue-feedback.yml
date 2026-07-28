@@ -161,6 +161,9 @@ jobs:
       # fails, because a PR carrying review:pass with no live arm is exactly what that
       # sweep restores.
       - name: Preserve the verdict and re-enqueue (zero-dispatch CI_TIMEOUT)
+        # Deliberately NOT `!cancelled()`: preserving a verdict requires the classifier
+        # to have SUCCEEDED and positively returned `preserve`. The implicit `success()`
+        # is the correct default here — do not harmonise this with the step below.
         if: github.event.pull_request.merged != true && steps.classify.outputs.route == 'preserve'
         env:
           CLASSIFY_DETAIL: ${{ steps.classify.outputs.detail }}
@@ -196,7 +199,12 @@ jobs:
       # output (step failed, output lost) still routes to the fix lane exactly as it did
       # before #4652. Never invert this to `== 'demote'`.
       - name: Route genuine dequeue to the fix lane
-        if: github.event.pull_request.merged != true && steps.classify.outputs.route != 'preserve'
+        # `!cancelled() &&` is LOAD-BEARING. A step `if:` with no status function
+        # defaults to `success()`, so a FAILED or TIMED-OUT classify step would SKIP
+        # this one — keeping `review:pass` and leaving the arm enabled, i.e. the exact
+        # opposite of fail-closed. The empty-output case was handled; the failed-step
+        # case was not, and a string-matching test could not see the difference.
+        if: "!cancelled() && github.event.pull_request.merged != true && steps.classify.outputs.route != 'preserve'"
         run: |
           set -euo pipefail
 

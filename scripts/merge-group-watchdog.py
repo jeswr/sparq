@@ -249,9 +249,36 @@ TRUSTED_MARKER_AUTHORS = frozenset(
 )
 
 MARKER_KEY = "merge-group-watchdog"
+# BOUNDED ON PURPOSE. `[^>]*?` is quadratic under backtracking: a 65 536-char comment
+# of repeated `<!-- merge-group-watchdog ` cost 21.4 s to parse, and four such comments
+# took `classify-dequeue` to 63 s — ~19 would exceed merge-queue-feedback.yml's
+# 5-minute job timeout. sparq is PUBLIC and that workflow runs on every dequeue, so
+# that is an anonymous denial of service against merge-queue routing. A real marker's
+# key/value run is 262 chars; 400 is comfortable headroom and makes the parse linear.
 _MARKER_RE = re.compile(
-    r"<!--\s*" + MARKER_KEY + r"\s+(?P<kv>[^>]*?)\s*-->",
+    r"<!--\s*" + MARKER_KEY + r"\s+(?P<kv>[^>]{0,400}?)\s*-->",
 )
+
+# Contexts in which a marker is being QUOTED rather than asserted. A trusted bot that
+# echoes PR content — and `sparq-orchestrator[bot]` really does, quoting file spans on
+# worker PRs — would otherwise launder an attacker's marker through the author filter.
+# Stripped before matching, so a quoted marker is never seen at all.
+_FENCED_RE = re.compile(r"(?ms)^\s*(`{3,}|~{3,}).*?^\s*\1\s*$")
+_INDENTED_CODE_RE = re.compile(r"(?m)^(?: {4,}|\t).*$")
+_BLOCKQUOTE_RE = re.compile(r"(?m)^\s*>.*$")
+_INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+
+
+def strip_quoted_contexts(body: str) -> str:
+    """Remove fenced/indented code, blockquotes and inline spans from a comment body.
+
+    The watchdog's own marker sits on its own unquoted line, so this never removes a
+    genuine marker; it removes every context in which one is being displayed rather
+    than claimed.
+    """
+    for pattern in (_FENCED_RE, _INDENTED_CODE_RE, _BLOCKQUOTE_RE, _INLINE_CODE_RE):
+        body = pattern.sub(" ", body)
+    return body
 _MARKER_FIELD_RE = re.compile(r"(?P<key>[a-z_]+)=(?P<value>\S+)")
 
 QUEUE_QUERY = """query($owner:String!,$name:String!,$branch:String!,$first:Int!){
@@ -352,8 +379,17 @@ def parse_marker(body: str | None) -> Marker | None:
     """Parse a watchdog marker out of a comment body; None when absent/malformed."""
     if not body:
         return None
+    body = strip_quoted_contexts(body)
     match = _MARKER_RE.search(body)
     if not match:
+        return None
+    # NESTING DEPTH, not a substring test. `<!-- quoted: <!-- merge-group-watchdog … -->`
+    # matches on the INNER opener, whose payload is perfectly clean — so inspecting the
+    # match tells you nothing. What matters is whether an enclosing comment was still
+    # open at the match position: more `<!--` than `-->` before it means this marker is
+    # being displayed inside another comment, not asserted.
+    prefix = body[: match.start()]
+    if prefix.count("<!--") > prefix.count("-->"):
         return None
     fields = {
         m.group("key"): m.group("value")
@@ -374,6 +410,11 @@ def parse_marker(body: str | None) -> Marker | None:
     # written by this tool. Validated so the field is load-bearing rather than dead
     # data — a mutant flipping it to 1 otherwise changed nothing observable.
     if suites != 0:
+        return None
+    # Self-consistency: `ref` must name the same PR as `pr`. A marker whose two
+    # identity fields disagree was not written by this tool.
+    ref = fields.get("ref", "")
+    if f"/pr-{pr}-" not in ref:
         return None
     return Marker(
         pr=pr,
@@ -543,6 +584,7 @@ def verdict_is_still_for_this_tree(state: VerdictState) -> tuple[bool, str]:
 def classify_dequeue_route(
     *,
     reason: str,
+    pr_number: int,
     markers: Iterable[Marker],
     verdict: VerdictState,
     live_suites: Callable[[str], int | None],
@@ -555,7 +597,16 @@ def classify_dequeue_route(
     FAIL-SAFE: every arm that cannot POSITIVELY establish zero-dispatch returns
     `demote`, which is the pre-existing behaviour.
     """
-    ordered = sorted(markers, key=lambda m: m.observed, reverse=True)
+    # BIND TO THIS PR. A marker is evidence about ONE pull request; without this a
+    # marker written for a different PR (or naming a foreign zero-suite head) carries a
+    # verdict through this PR's dequeue. Both the `pr=` field and the `ref=` segment
+    # must agree with the PR being routed, so a single mistyped field cannot pass.
+    own = [
+        marker
+        for marker in markers
+        if marker.pr == pr_number and f"/pr-{pr_number}-" in marker.ref
+    ]
+    ordered = sorted(own, key=lambda m: m.observed, reverse=True)
     newest = ordered[0] if ordered else None
     normalised = (reason or "UNKNOWN").strip().upper()
     last_enqueued_at = verdict.last_enqueued_at
@@ -636,6 +687,12 @@ def classify_dequeue_route(
             False,
             f"watchdog observation is {int(marker_age)}s old — outside the "
             f"{marker_staleness_seconds}s freshness bound",
+        )
+    if newest.action != MARKER_ACTION_REENQUEUE:
+        return Route(
+            ROUTE_DEMOTE,
+            False,
+            f"marker action {newest.action!r} is not {MARKER_ACTION_REENQUEUE!r}",
         )
     count = live_suites(newest.head)
     if count is None:
@@ -801,7 +858,12 @@ class Watchdog:
             return None
         total = payload.get("total_count")
         suites = payload.get("check_suites")
-        if not isinstance(total, int) or not isinstance(suites, list):
+        # `isinstance(False, int)` is True, so a bool must be rejected EXPLICITLY:
+        # `{"total_count": false}` otherwise reads as a positively-observed ZERO and
+        # drives a recovery + marker write + preserve off a malformed response.
+        if isinstance(total, bool) or not isinstance(total, int):
+            return None
+        if not isinstance(suites, list):
             return None
         if total == 0 and suites:
             return None
@@ -856,15 +918,20 @@ class Watchdog:
         rejected = 0
         rejected_authors: set[str] = set()
         for row in _ndjson(raw):
-            marker = parse_marker(row.get("body"))
-            if marker is None:
-                continue
+            # AUTHOR FIRST, ALWAYS. The trust check used to run AFTER parse_marker,
+            # so every anonymous comment was parsed before being discarded — a filter
+            # placed after the expensive work does not protect the expensive work.
+            # Cheap string compare first: untrusted bodies are never parsed at all.
             author = str((row.get("user") or {}).get("login", ""))
-            if author in TRUSTED_MARKER_AUTHORS:
-                trusted.append(marker)
+            if author not in TRUSTED_MARKER_AUTHORS:
+                if MARKER_KEY in str(row.get("body") or ""):
+                    rejected += 1
+                    rejected_authors.add(author)
                 continue
-            rejected += 1
-            rejected_authors.add(author)
+            marker = parse_marker(row.get("body"))
+            if marker is not None:
+                trusted.append(marker)
+            continue
         if rejected:
             # ONE annotation per PR, not one per marker. MEASURED on #4534, which
             # already carries 96 forged markers naming the real zero-suite head: a
@@ -1141,6 +1208,7 @@ class Watchdog:
             )
         return classify_dequeue_route(
             reason=reason,
+            pr_number=pr_number,
             markers=markers,
             verdict=self.verdict_state(pr_number),
             live_suites=self.check_suite_count,
@@ -1273,6 +1341,7 @@ def self_test() -> None:
     def route(**overrides):
         kwargs = dict(
             reason=ZERO_DISPATCH_REASON,
+            pr_number=4534,
             markers=(parsed,),
             verdict=VerdictState(
                 review_pass_at=now - timedelta(hours=2),
@@ -1305,6 +1374,8 @@ def self_test() -> None:
     assert route(verdict=VerdictState(None, None, None, readable=False)).route == ROUTE_DEMOTE
     # A stale marker => demote.
     assert route(now=now + timedelta(hours=7)).route == ROUTE_DEMOTE
+    # A marker for a DIFFERENT PR is not evidence about this one.
+    assert route(pr_number=9999).route == ROUTE_DEMOTE, route(pr_number=9999)
     # Reasons other than CI_TIMEOUT keep today's behaviour.
     for other_reason in ("CI_FAILURE", "MERGE_CONFLICT", "QUEUE_CLEARED", "ROLL_BACK"):
         assert route(reason=other_reason).route == ROUTE_DEMOTE, other_reason

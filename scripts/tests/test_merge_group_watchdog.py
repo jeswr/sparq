@@ -104,16 +104,16 @@ class _NoNetwork:
 # The real incident's identifiers (#4652), so the fixtures are not invented shapes.
 BASE = "3cc1bf828c1335577069f5fa65d832c0ae1c8c38"
 HEAD = "1bfb0174f5cc2da1ed9dfe7997b7ab089e7cab26"
-REF = f"gh-readonly-queue/main/pr-4534-{BASE}"
+REF = f"gh-readonly-queue/main/pr-99900001-{BASE}"
 BUILT = mgw.parse_iso("2026-07-27T23:04:37Z")  # measured branch_creation timestamp
 NOW = mgw.parse_iso("2026-07-27T23:20:00Z")
 
 
 def entry(**overrides) -> "mgw.QueueEntry":
     fields = dict(
-        pr_number=4534,
-        pr_id="PR_4534",
-        entry_id="MQE_4534",
+        pr_number=99900001,
+        pr_id="PR_99900001",
+        entry_id="MQE_99900001",
         position=1,
         state="AWAITING_CHECKS",
         enqueued_at=mgw.parse_iso("2026-07-27T22:58:53Z"),
@@ -143,7 +143,7 @@ def decide(**overrides) -> "mgw.Decision":
 
 def marker(**overrides) -> "mgw.Marker":
     fields = dict(
-        pr=4534,
+        pr=99900001,
         head=HEAD,
         base=BASE,
         ref=REF,
@@ -244,6 +244,10 @@ class TestFailSafe(unittest.TestCase):
             # total_count says zero but the array is non-empty: a garbled response must
             # never be mistaken for a positively-observed zero.
             json.dumps({"total_count": 0, "check_suites": [{"id": 1}]}),
+            # `isinstance(False, int)` is True in Python, so a bool total_count read as
+            # a positively-observed ZERO and drove a recovery off a malformed response.
+            json.dumps({"total_count": False, "check_suites": []}),
+            json.dumps({"total_count": True, "check_suites": []}),
         ):
             watchdog.gh.suites_raw = payload
             self.assertIsNone(watchdog.watchdog.check_suite_count(HEAD), payload)
@@ -309,6 +313,7 @@ class TestDequeueRouting(unittest.TestCase):
     def route(self, **overrides) -> "mgw.Route":
         kwargs = dict(
             reason="CI_TIMEOUT",
+            pr_number=99900001,
             markers=(marker(),),
             verdict=self.verdict(),
             live_suites=lambda _sha: 0,
@@ -345,6 +350,9 @@ class TestDequeueRouting(unittest.TestCase):
         # mutant that "survives" by being invisible.
         self.assertIn("could not re-derive", result.detail)
         self.assertNotIn("check-suite(s)", result.detail)
+
+    def test_a_marker_for_a_different_pr_is_ignored(self):
+        self.assertEqual(self.route(pr_number=99900099).route, mgw.ROUTE_DEMOTE)
 
     def test_no_marker_demotes(self):
         self.assertEqual(self.route(markers=()).route, mgw.ROUTE_DEMOTE)
@@ -522,7 +530,7 @@ class TestDequeueRouting(unittest.TestCase):
 class TestMarkerCodec(unittest.TestCase):
     def test_round_trip(self):
         rendered = mgw.render_marker(
-            pr=4534, head=HEAD, base=BASE, ref=REF, suites=0, observed=NOW
+            pr=99900001, head=HEAD, base=BASE, ref=REF, suites=0, observed=NOW
         )
         parsed = mgw.parse_marker(f"prose\n\n{rendered}\n")
         self.assertIsNotNone(parsed)
@@ -574,7 +582,7 @@ def _marker_comment(
         "user": {"login": author},
         "body": "text\n\n"
         + mgw.render_marker(
-            pr=4534, head=head, base=BASE, ref=REF, suites=suites, observed=stamp
+            pr=99900001, head=head, base=BASE, ref=REF, suites=suites, observed=stamp
         ),
     }
 
@@ -665,13 +673,13 @@ class FakeWatchdog:
               activity=None, now: datetime | None = None, dry_run: bool = False,
               timeline=None):
         node = {
-            "id": "MQE_4534",
+            "id": "MQE_99900001",
             "position": 1,
             "state": "AWAITING_CHECKS",
             "enqueuedAt": "2026-07-27T22:58:53Z",
             "baseCommit": {"oid": BASE},
             "headCommit": {"oid": HEAD},
-            "pullRequest": {"number": 4534, "id": "PR_4534"},
+            "pullRequest": {"number": 99900001, "id": "PR_99900001"},
         }
         if suites is None:
             suites_raw = "not json"
@@ -725,7 +733,7 @@ class TestSweepBehaviour(unittest.TestCase):
         self.assertIn("🤖", body)
         self.assertIsNotNone(mgw.parse_marker(body))
         # The comment goes to THIS entry's PR.
-        self.assertEqual(harness.gh.mutations[0][2], "4534")
+        self.assertEqual(harness.gh.mutations[0][2], "99900001")
         queries = [
             next(a for a in m if a.startswith("query="))
             for m in harness.gh.mutations[1:]
@@ -737,7 +745,7 @@ class TestSweepBehaviour(unittest.TestCase):
         # queue-entry id (MQE_…) is the natural wrong answer and would fail at runtime.
         for mutation in harness.gh.mutations[1:]:
             ident = next(a for a in mutation if a.startswith("id="))
-            self.assertEqual(ident, "id=PR_4534", mutation)
+            self.assertEqual(ident, "id=PR_99900001", mutation)
             self.assertNotIn("MQE_", ident)
 
     def test_unreadable_marker_history_refuses_rather_than_assuming_none(self):
@@ -868,7 +876,7 @@ class TestSweepBehaviour(unittest.TestCase):
     @classmethod
     def _three_entry_queue(cls):
         entries = []
-        for index, (pr, head) in enumerate(zip((4534, 4535, 4536), cls.HEADS), start=1):
+        for index, (pr, head) in enumerate(zip((99900001, 99900002, 99900003), cls.HEADS), start=1):
             entries.append(
                 {
                     "id": f"MQE_{pr}",
@@ -913,7 +921,7 @@ class TestSweepBehaviour(unittest.TestCase):
         recovered = [
             m[2] for m in harness.gh.mutations if m[:2] == ["pr", "comment"]
         ]
-        self.assertEqual(recovered, ["4534", "4535"], harness.rows)
+        self.assertEqual(recovered, ["99900001", "99900002"], harness.rows)
 
 
 class TestMarkerAuthorIsPartOfThePredicate(unittest.TestCase):
@@ -930,8 +938,8 @@ class TestMarkerAuthorIsPartOfThePredicate(unittest.TestCase):
         harness = FakeWatchdog.build(
             suites=0, comments=[_marker_comment(author=ATTACKER)]
         )
-        self.assertEqual(harness.watchdog.pr_markers(4534), [])
-        route = harness.watchdog.classify_dequeue(4534, "MANUAL")
+        self.assertEqual(harness.watchdog.pr_markers(99900001), [])
+        route = harness.watchdog.classify_dequeue(99900001, "MANUAL")
         self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
 
     def test_the_exact_ci_timeout_forgery_is_ignored(self):
@@ -941,7 +949,7 @@ class TestMarkerAuthorIsPartOfThePredicate(unittest.TestCase):
         harness = FakeWatchdog.build(
             suites=0, comments=[_marker_comment(author=ATTACKER)]
         )
-        route = harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT")
+        route = harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT")
         self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
         self.assertFalse(route.reenqueue)
 
@@ -950,7 +958,7 @@ class TestMarkerAuthorIsPartOfThePredicate(unittest.TestCase):
             suites=0, comments=[_marker_comment(author=ATTACKER, head="0" * 40)]
         )
         self.assertEqual(
-            harness.watchdog.classify_dequeue(4534, "MANUAL").route, mgw.ROUTE_DEMOTE
+            harness.watchdog.classify_dequeue(99900001, "MANUAL").route, mgw.ROUTE_DEMOTE
         )
 
     # THE PAIRED CONTROL: the filter must not break the real thing.
@@ -959,8 +967,8 @@ class TestMarkerAuthorIsPartOfThePredicate(unittest.TestCase):
             harness = FakeWatchdog.build(
                 suites=0, comments=[_marker_comment(author=author)]
             )
-            self.assertEqual(len(harness.watchdog.pr_markers(4534)), 1, author)
-            route = harness.watchdog.classify_dequeue(4534, "MANUAL")
+            self.assertEqual(len(harness.watchdog.pr_markers(99900001)), 1, author)
+            route = harness.watchdog.classify_dequeue(99900001, "MANUAL")
             self.assertEqual(route.route, mgw.ROUTE_PRESERVE, author)
 
     def test_both_configured_identities_are_allow_listed(self):
@@ -976,7 +984,7 @@ class TestMarkerAuthorIsPartOfThePredicate(unittest.TestCase):
         harness = FakeWatchdog.build(
             suites=0, comments=[_marker_comment(author=ATTACKER)]
         )
-        harness.watchdog.pr_markers(4534)
+        harness.watchdog.pr_markers(99900001)
         self.assertTrue(any("untrusted marker" in r for r in harness.rows), harness.rows)
         self.assertTrue(any(ATTACKER in r for r in harness.rows), harness.rows)
 
@@ -989,7 +997,7 @@ class TestMarkerAuthorIsPartOfThePredicate(unittest.TestCase):
             suites=0,
             comments=[_marker_comment(author=ATTACKER, head=f"{i:040x}") for i in range(96)],
         )
-        self.assertEqual(harness.watchdog.pr_markers(4534), [])
+        self.assertEqual(harness.watchdog.pr_markers(99900001), [])
         warnings = [r for r in harness.rows if "::warning" in r]
         self.assertEqual(len(warnings), 1, warnings)
         self.assertIn("96 watchdog marker(s)", warnings[0])
@@ -1004,7 +1012,7 @@ class TestMarkerAuthorIsPartOfThePredicate(unittest.TestCase):
                 _marker_comment(author="attacker-one", head="c" * 40),
             ],
         )
-        harness.watchdog.pr_markers(4534)
+        harness.watchdog.pr_markers(99900001)
         warning = next(r for r in harness.rows if "::warning" in r)
         self.assertIn("attacker-one", warning)
         self.assertIn("attacker-two", warning)
@@ -1036,14 +1044,14 @@ class TestMarkerAuthorIsPartOfThePredicate(unittest.TestCase):
     def test_the_marker_action_must_be_a_recovery(self):
         # An observation-shaped marker must never read as a recovery in flight.
         body = mgw.render_marker(
-            pr=4534, head=HEAD, base=BASE, ref=REF, suites=0,
+            pr=99900001, head=HEAD, base=BASE, ref=REF, suites=0,
             observed=NOW - timedelta(minutes=10),
         ).replace("action=re-enqueue", "action=observed")
         harness = FakeWatchdog.build(
             suites=0, comments=[{"user": {"login": TRUSTED_AUTHOR}, "body": body}]
         )
         self.assertEqual(
-            harness.watchdog.classify_dequeue(4534, "MANUAL").route, mgw.ROUTE_DEMOTE
+            harness.watchdog.classify_dequeue(99900001, "MANUAL").route, mgw.ROUTE_DEMOTE
         )
         self.assertEqual(mgw.MARKER_ACTION_REENQUEUE, "re-enqueue")
 
@@ -1052,12 +1060,12 @@ class TestMarkerAuthorIsPartOfThePredicate(unittest.TestCase):
         unreadable = FakeWatchdog.build(
             suites=0, comments=[_marker_comment(head="a" * 40)]
         )
-        route = unreadable.watchdog.classify_dequeue(4534, "MANUAL")
+        route = unreadable.watchdog.classify_dequeue(99900001, "MANUAL")
         self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
         self.assertIn("cannot be read", route.detail)
 
         dispatched = FakeWatchdog.build(suites=8, comments=[_marker_comment()])
-        route = dispatched.watchdog.classify_dequeue(4534, "MANUAL")
+        route = dispatched.watchdog.classify_dequeue(99900001, "MANUAL")
         self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
         self.assertIn("WAS dispatched", route.detail)
 
@@ -1069,6 +1077,133 @@ class TestMarkerAuthorIsPartOfThePredicate(unittest.TestCase):
                 )
             )
         )
+
+
+class TestParseIsBoundedAndTrustGatedFirst(unittest.TestCase):
+    """A public repo means anonymous input reaches this parser on every dequeue."""
+
+    ADVERSARIAL = "<!-- merge-group-watchdog " * 2521          # ~65 536 chars
+
+    def test_a_huge_adversarial_body_parses_in_bounded_time(self):
+        import time
+        start = time.monotonic()
+        self.assertIsNone(mgw.parse_marker(self.ADVERSARIAL))
+        elapsed = time.monotonic() - start
+        # Unbounded `[^>]*?` took 21.4 s on this input. Bounded, it is milliseconds.
+        # One second is a generous ceiling that still fails loudly on a regression.
+        self.assertLess(elapsed, 1.0, f"parse took {elapsed:.3f}s — quantifier unbounded?")
+
+    def test_the_bound_still_admits_a_real_marker(self):
+        # The control: bounding the quantifier must not break the genuine payload,
+        # whose key/value run is 262 chars.
+        rendered = mgw.render_marker(
+            pr=99900001, head=HEAD, base=BASE, ref=REF, suites=0, observed=NOW
+        )
+        kv = rendered[rendered.index(mgw.MARKER_KEY) + len(mgw.MARKER_KEY):].strip()[:-3]
+        self.assertLess(len(kv), 400, len(kv))
+        self.assertIsNotNone(mgw.parse_marker(rendered))
+
+    def test_untrusted_bodies_are_never_parsed_at_all(self):
+        # ORDERING IS THE FIX. A trust check placed AFTER the parse does not protect
+        # the parse: every anonymous comment was parsed before being discarded.
+        parsed: list = []
+        real_parse = mgw.parse_marker
+
+        def spy(body):
+            parsed.append(body)
+            return real_parse(body)
+
+        harness = FakeWatchdog.build(
+            suites=0,
+            comments=[_marker_comment(author=ATTACKER), _marker_comment(author=TRUSTED_AUTHOR)],
+        )
+        try:
+            mgw.parse_marker = spy
+            harness.watchdog.pr_markers(99900001)
+        finally:
+            mgw.parse_marker = real_parse
+        self.assertEqual(len(parsed), 1, "the untrusted body was parsed")
+
+    def test_end_to_end_with_many_adversarial_comments_is_fast(self):
+        import time
+        harness = FakeWatchdog.build(
+            suites=0,
+            comments=[{"user": {"login": ATTACKER}, "body": self.ADVERSARIAL} for _ in range(8)],
+        )
+        start = time.monotonic()
+        self.assertEqual(harness.watchdog.pr_markers(99900001), [])
+        elapsed = time.monotonic() - start
+        self.assertLess(elapsed, 1.0, f"{elapsed:.3f}s for 8 adversarial comments")
+
+
+class TestQuotedMarkersAreNotClaims(unittest.TestCase):
+    """A trusted bot that ECHOES PR content must not launder an attacker's marker."""
+
+    def marker_text(self) -> str:
+        return mgw.render_marker(
+            pr=99900001, head=HEAD, base=BASE, ref=REF, suites=0, observed=NOW
+        )
+
+    def test_quoted_contexts_are_stripped(self):
+        m = self.marker_text()
+        for label, body in (
+            ("fenced", f"see below\n\n```\n{m}\n```\n"),
+            ("fenced-tilde", f"~~~\n{m}\n~~~\n"),
+            ("blockquote", f"> {m}\n"),
+            ("indented", f"    {m}\n"),
+            ("inline", f"`{m}`\n"),
+            ("nested-html", f"<!-- quoted: {m} -->\n"),
+        ):
+            self.assertIsNone(mgw.parse_marker(body), label)
+
+    def test_an_unquoted_marker_is_still_a_claim(self):
+        # THE CONTROL: the watchdog's own comment must keep working. Its self-id line
+        # IS a blockquote, and the marker sits unquoted on its own line below it.
+        body = "> 🤖 **SPARQ agent** — merge-group watchdog.\n\nprose\n\n" + self.marker_text()
+        self.assertIsNotNone(mgw.parse_marker(body))
+
+    def test_a_trusted_bot_quoting_an_attackers_marker_is_ignored(self):
+        harness = FakeWatchdog.build(
+            suites=0,
+            comments=[{
+                "user": {"login": APP_AUTHOR},
+                "body": "Quoting the PR body:\n\n```\n" + self.marker_text() + "\n```\n",
+            }],
+        )
+        self.assertEqual(harness.watchdog.pr_markers(99900001), [])
+        self.assertEqual(
+            harness.watchdog.classify_dequeue(99900001, "MANUAL").route, mgw.ROUTE_DEMOTE
+        )
+
+
+class TestMarkerIsBoundToThisPrAndHead(unittest.TestCase):
+    def test_a_marker_for_another_pr_is_not_evidence_here(self):
+        other = _marker_comment()
+        other["body"] = other["body"].replace("pr=99900001", "pr=99900099").replace(
+            "/pr-99900001-", "/pr-9999-"
+        )
+        harness = FakeWatchdog.build(suites=0, comments=[other])
+        self.assertEqual(
+            harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT").route, mgw.ROUTE_DEMOTE
+        )
+
+    def test_pr_and_ref_must_agree(self):
+        # A single mistyped identity field cannot pass: both are checked.
+        body = mgw.render_marker(
+            pr=99900001, head=HEAD, base=BASE, ref=REF, suites=0, observed=NOW
+        ).replace("pr=99900001", "pr=99900099")
+        self.assertIsNone(mgw.parse_marker(body))
+
+    def test_arm_b_requires_the_recovery_action(self):
+        body = mgw.render_marker(
+            pr=99900001, head=HEAD, base=BASE, ref=REF, suites=0, observed=NOW
+        ).replace("action=re-enqueue", "action=observed")
+        harness = FakeWatchdog.build(
+            suites=0, comments=[{"user": {"login": TRUSTED_AUTHOR}, "body": body}]
+        )
+        route = harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT")
+        self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
+        self.assertIn("action", route.detail)
 
 
 class TestCapExhaustionBehaviour(unittest.TestCase):
@@ -1093,7 +1228,7 @@ class TestCapExhaustionBehaviour(unittest.TestCase):
                 {"event": "added_to_merge_queue", "created_at": "2026-07-27T23:15:00Z"},
             ],
         )
-        route = harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT")
+        route = harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT")
         self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
         self.assertIn("predates this queue attempt", route.detail)
 
@@ -1127,7 +1262,7 @@ class TestEmission(unittest.TestCase):
             self.assertIn(f"ref={REF}", row)
             self.assertIn("suites=", row)
             self.assertIn(f"head={HEAD[:8]}", row)
-            self.assertIn("pr=#4534", row)
+            self.assertIn("pr=#99900001", row)
 
     def test_rows_record_how_many_groups_are_stacked_above(self):
         # The watchdog's own effectiveness measure. A rebuild discards every group
@@ -1137,38 +1272,38 @@ class TestEmission(unittest.TestCase):
         # stacked_green=2, and all four were discarded.
         nodes = [
             {
-                "id": "MQE_4709", "position": 1, "state": "AWAITING_CHECKS",
+                "id": "MQE_99900004", "position": 1, "state": "AWAITING_CHECKS",
                 "enqueuedAt": "2026-07-27T22:58:53Z",
                 "baseCommit": {"oid": BASE}, "headCommit": {"oid": HEAD},
-                "pullRequest": {"number": 4709, "id": "PR_4709"},
+                "pullRequest": {"number": 99900004, "id": "PR_99900004"},
             },
             {
-                "id": "MQE_4714", "position": 2, "state": "MERGEABLE",
+                "id": "MQE_99900005", "position": 2, "state": "MERGEABLE",
                 "enqueuedAt": "2026-07-27T22:59:00Z",
                 "baseCommit": {"oid": HEAD}, "headCommit": {"oid": "a" * 40},
-                "pullRequest": {"number": 4714, "id": "PR_4714"},
+                "pullRequest": {"number": 99900005, "id": "PR_99900005"},
             },
             {
-                "id": "MQE_4729", "position": 3, "state": "MERGEABLE",
+                "id": "MQE_99900006", "position": 3, "state": "MERGEABLE",
                 "enqueuedAt": "2026-07-27T22:59:10Z",
                 "baseCommit": {"oid": "a" * 40}, "headCommit": {"oid": "b" * 40},
-                "pullRequest": {"number": 4729, "id": "PR_4729"},
+                "pullRequest": {"number": 99900006, "id": "PR_99900006"},
             },
             {
                 # No group built yet — nothing to discard, so it must NOT be counted.
-                "id": "MQE_4731", "position": 4, "state": "QUEUED",
+                "id": "MQE_99900007", "position": 4, "state": "QUEUED",
                 "enqueuedAt": "2026-07-27T22:59:20Z",
                 "baseCommit": None, "headCommit": None,
-                "pullRequest": {"number": 4731, "id": "PR_4731"},
+                "pullRequest": {"number": 99900007, "id": "PR_99900007"},
             },
         ]
         harness = FakeWatchdog.build(suites=0, entries=nodes)
         harness.run()
-        head_row = next(r for r in harness.rows if "pr=#4709" in r)
+        head_row = next(r for r in harness.rows if "pr=#99900004" in r)
         self.assertIn("stacked=2", head_row)
         self.assertIn("stacked_green=2", head_row)
         # The last entry with a group has nothing above it.
-        tail_row = next(r for r in harness.rows if "pr=#4729" in r)
+        tail_row = next(r for r in harness.rows if "pr=#99900006" in r)
         self.assertIn("stacked=0", tail_row)
         self.assertIn("stacked_green=0", tail_row)
 
@@ -1202,12 +1337,12 @@ class TestClassifyEndToEnd(unittest.TestCase):
         # The marker says suites=0, but the LIVE count now reads 8. The route must
         # follow the live re-derivation, not the recorded value.
         harness = FakeWatchdog.build(suites=8, comments=[_marker_comment()])
-        route = harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT")
+        route = harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT")
         self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
 
     def test_zero_live_count_preserves(self):
         harness = FakeWatchdog.build(suites=0, comments=[_marker_comment()])
-        route = harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT")
+        route = harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT")
         self.assertEqual(route.route, mgw.ROUTE_PRESERVE)
 
     def test_a_commit_after_the_verdict_forfeits_it_end_to_end(self):
@@ -1223,7 +1358,7 @@ class TestClassifyEndToEnd(unittest.TestCase):
                 {"event": "committed", "committer": {"date": "2026-07-27T23:05:00Z"}},
             ],
         )
-        route = harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT")
+        route = harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT")
         self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
         self.assertIn("the head moved", route.detail)
 
@@ -1239,7 +1374,7 @@ class TestClassifyEndToEnd(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT").route, mgw.ROUTE_DEMOTE
+            harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT").route, mgw.ROUTE_DEMOTE
         )
 
     def test_a_revocation_then_regrant_preserves_end_to_end(self):
@@ -1259,7 +1394,7 @@ class TestClassifyEndToEnd(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT").route,
+            harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT").route,
             mgw.ROUTE_PRESERVE,
         )
 
@@ -1275,7 +1410,7 @@ class TestClassifyEndToEnd(unittest.TestCase):
                 {"event": "added_to_merge_queue", "created_at": "2026-07-27T22:58:53Z"},
             ],
         )
-        route = harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT")
+        route = harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT")
         self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
         # Through the real PARSER, not a hand-built VerdictState: a revocation must be
         # reported as a revocation. Folding it into head_moved_at still demotes, so the
@@ -1299,7 +1434,7 @@ class TestClassifyEndToEnd(unittest.TestCase):
                 {"event": "added_to_merge_queue", "created_at": "2026-07-27T22:58:53Z"},
             ],
         )
-        route = harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT")
+        route = harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT")
         self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
         self.assertIn("REVOKED", route.detail)
 
@@ -1320,7 +1455,7 @@ class TestClassifyEndToEnd(unittest.TestCase):
                 ],
             )
             self.assertEqual(
-                harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT").route,
+                harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT").route,
                 mgw.ROUTE_PRESERVE,
                 other,
             )
@@ -1335,7 +1470,7 @@ class TestClassifyEndToEnd(unittest.TestCase):
                 {"event": "added_to_merge_queue", "created_at": "2026-07-27T22:58:53Z"},
             ],
         )
-        route = harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT")
+        route = harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT")
         self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
         self.assertIn("no review:pass grant", route.detail)
 
@@ -1350,7 +1485,7 @@ class TestClassifyEndToEnd(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT").route, mgw.ROUTE_DEMOTE
+            harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT").route, mgw.ROUTE_DEMOTE
         )
 
     def test_two_head_moves_straddling_the_verdict_end_to_end(self):
@@ -1367,7 +1502,7 @@ class TestClassifyEndToEnd(unittest.TestCase):
                 {"event": "committed", "committer": {"date": "2026-07-27T23:05:00Z"}},
             ],
         )
-        route = harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT")
+        route = harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT")
         self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
         self.assertIn("the head moved", route.detail)
 
@@ -1387,20 +1522,20 @@ class TestClassifyEndToEnd(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT").route,
+            harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT").route,
             mgw.ROUTE_PRESERVE,
         )
 
     def test_an_unreadable_timeline_demotes_end_to_end(self):
         harness = FakeWatchdog.build(suites=0, comments=[_marker_comment()])
         harness.gh.fail_on = ("/timeline",)
-        route = harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT")
+        route = harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT")
         self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
         self.assertIn("timeline could not be read", route.detail)
 
     def test_classify_never_mutates(self):
         harness = FakeWatchdog.build(suites=0, comments=[_marker_comment()])
-        harness.watchdog.classify_dequeue(4534, "CI_TIMEOUT")
+        harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT")
         self.assertEqual(harness.gh.mutations, [])
 
 
@@ -1435,7 +1570,7 @@ class TestEntrypointFailSafe(unittest.TestCase):
             raise mgw.GhError("HTTP 500 while reading comments")
 
         code, outputs = self._run_main(
-            ["classify-dequeue", "--repo", "sparq-org/sparq", "--pr", "4534",
+            ["classify-dequeue", "--repo", "sparq-org/sparq", "--pr", "99900001",
              "--reason", "CI_TIMEOUT"],
             boom,
         )
@@ -1448,7 +1583,7 @@ class TestEntrypointFailSafe(unittest.TestCase):
             raise mgw.gh_retry.GhTransientExhausted("HTTP 504 (3 attempts)")
 
         code, outputs = self._run_main(
-            ["classify-dequeue", "--repo", "sparq-org/sparq", "--pr", "4534",
+            ["classify-dequeue", "--repo", "sparq-org/sparq", "--pr", "99900001",
              "--reason", "CI_TIMEOUT"],
             exhausted,
         )
@@ -1554,23 +1689,23 @@ class TestSurvivorsFromTheCoverageCensus(unittest.TestCase):
             {"id": "MQE_1", "position": 1, "state": "AWAITING_CHECKS",
              "enqueuedAt": "2026-07-27T22:58:00Z",
              "baseCommit": {"oid": BASE}, "headCommit": {"oid": HEAD},
-             "pullRequest": {"number": 4709, "id": "PR_4709"}},
+             "pullRequest": {"number": 99900004, "id": "PR_99900004"}},
             {"id": "MQE_2", "position": 2, "state": "MERGEABLE",
              "enqueuedAt": "2026-07-27T22:59:00Z",
              "baseCommit": {"oid": HEAD}, "headCommit": {"oid": "a" * 40},
-             "pullRequest": {"number": 4714, "id": "PR_4714"}},
+             "pullRequest": {"number": 99900005, "id": "PR_99900005"}},
             {"id": "MQE_3", "position": 3, "state": "AWAITING_CHECKS",
              "enqueuedAt": "2026-07-27T23:00:00Z",
              "baseCommit": {"oid": "a" * 40}, "headCommit": {"oid": "b" * 40},
-             "pullRequest": {"number": 4729, "id": "PR_4729"}},
+             "pullRequest": {"number": 99900006, "id": "PR_99900006"}},
             {"id": "MQE_4", "position": 4, "state": "UNMERGEABLE",
              "enqueuedAt": "2026-07-27T23:01:00Z",
              "baseCommit": {"oid": "b" * 40}, "headCommit": {"oid": "c" * 40},
-             "pullRequest": {"number": 4731, "id": "PR_4731"}},
+             "pullRequest": {"number": 99900007, "id": "PR_99900007"}},
         ]
         harness = FakeWatchdog.build(suites=0, entries=nodes)
         harness.run()
-        head_row = next(r for r in harness.rows if "pr=#4709" in r)
+        head_row = next(r for r in harness.rows if "pr=#99900004" in r)
         # three entries behind it have groups, but only ONE is green
         self.assertIn("stacked=3", head_row)
         self.assertIn("stacked_green=1", head_row)
@@ -1607,6 +1742,44 @@ class TestSurvivorsFromTheCoverageCensus(unittest.TestCase):
         self.assertIn("detail<<MGW_DETAIL_EOF\n", written)
         body = written.split("detail<<MGW_DETAIL_EOF\n", 1)[1]
         self.assertTrue(body.endswith("MGW_DETAIL_EOF\n"), body)
+
+
+class TestFixturesNameNothingReal(unittest.TestCase):
+    """Fixtures must name ids that CANNOT resolve.
+
+    Reproducing `N01` necessarily reverts the hermeticity fix — the guard and the
+    mutant are the same switch — so for that one mutant the in-process poison is off by
+    design and only the fixture's own id stands between the suite and a live object.
+    That is how 567 comments reached PR #4534. The reserved band below cannot resolve,
+    so the same mistake now writes nowhere.
+    """
+
+    RESERVED_MIN = 99900000
+
+    def test_no_fixture_names_a_plausibly_real_pr(self):
+        # Scope: ids that can become an API TARGET. Comments are stripped, and
+        # `queue_ref(...)` is exempt because it is a PURE function — its argument is a
+        # recorded live-verified provenance datum (the 2026-07-28 ref-format check),
+        # never a request. The distinction that matters is write-reachability, not the
+        # digits themselves.
+        lines = [
+            ln.split("#", 1)[0]
+            for ln in Path(__file__).read_text(encoding="utf-8").splitlines()
+            if "queue_ref(" not in ln
+        ]
+        found = {
+            int(n)
+            for n in re.findall(
+                r'(?:pr=|"number": |pr_number=|classify_dequeue\(|pr_markers\()(\d{3,})',
+                "\n".join(lines),
+            )
+        }
+        real = sorted(n for n in found if n < self.RESERVED_MIN)
+        self.assertEqual(real, [], f"fixtures name plausibly-real ids: {real}")
+
+    def test_the_reserved_band_is_actually_reserved(self):
+        # sparq is nowhere near 99.9M issues; if it ever were, this test fails FIRST.
+        self.assertGreater(self.RESERVED_MIN, 10_000_000)
 
 
 class TestTheSuiteCannotTouchTheNetwork(unittest.TestCase):
@@ -1851,7 +2024,7 @@ class TestFeedbackWiring(unittest.TestCase):
     # lane would silently stop being fed. Both guards are therefore pinned whole; a
     # deliberate change must update this line.
     DEMOTE_GUARD = (
-        "github.event.pull_request.merged != true "
+        "!cancelled() && github.event.pull_request.merged != true "
         "&& steps.classify.outputs.route != 'preserve'"
     )
     PRESERVE_GUARD = (
@@ -1860,10 +2033,24 @@ class TestFeedbackWiring(unittest.TestCase):
     )
 
     def test_the_demote_guard_is_fail_closed(self):
-        # `!= 'preserve'` means an EMPTY/MISSING output still demotes. Inverting this
-        # to `== 'demote'` would make a classifier failure silently preserve.
+        # `!= 'preserve'` covers an EMPTY/MISSING output. `!cancelled()` covers the
+        # OTHER failure mode the string test could not see: a step `if:` with no status
+        # function defaults to `success()`, so a FAILED or TIMED-OUT classify step would
+        # SKIP the demote — keeping review:pass and leaving the arm enabled.
         guard = _step(self.wf, "feedback", "Route genuine dequeue")["if"]
         self.assertEqual(guard, self.DEMOTE_GUARD)
+        self.assertIn("!cancelled()", guard)
+
+    def test_every_guard_that_must_survive_a_failed_step_says_so(self):
+        # Structural, not string-matching: any step whose condition consumes a previous
+        # step's OUTPUT and is meant to run regardless must carry a status function,
+        # because the implicit default is success().
+        demote = _step(self.wf, "feedback", "Route genuine dequeue")["if"]
+        self.assertRegex(demote, r"!cancelled\(\)|always\(\)")
+        # ...and the preserve route must NOT, since it may only act on a positive
+        # verdict from a step that actually succeeded.
+        preserve = _step(self.wf, "feedback", "Preserve the verdict")["if"]
+        self.assertNotRegex(preserve, r"!cancelled\(\)|always\(\)")
 
     def test_the_preserve_guard_is_fail_open_in_the_safe_direction(self):
         guard = _step(self.wf, "feedback", "Preserve the verdict")["if"]
