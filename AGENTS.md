@@ -520,7 +520,13 @@ no network); the Python close-script carries a `--self-test`.
   a superseded group head, so preserving the verdict would be unsound, and three consecutive
   zero-dispatch groups on one PR warrant a human look. It never escalates to a `needs:user` hold
   and never permanently stalls. **Everything it cannot positively establish is a
-  refusal, never a recovery.** It emits one row per entry **every tick**, carrying the ref, the
+  refusal, never a recovery.** The marker it writes is **evidence**, so its AUTHOR is part of
+  the predicate: markers are honoured only from `github-actions[bot]` / `sparq-orchestrator[bot]`
+  (`TRUSTED_MARKER_AUTHORS`, enforced at the read), because sparq is public and a marker forged
+  by any commenter would otherwise carry `review:pass` through a dequeue and reach
+  `gh pr merge --auto`. The recovery also reads its own marker back before dequeuing and refuses
+  to act if it is not there — a runner whose identity is missing from that list cannot see its
+  own markers, which would silently disarm both caps. It emits one row per entry **every tick**, carrying the ref, the
   suite count, the decision, and `stacked=`/`stacked_green=` — the count of groups built on top
   of the dead ref, which is the real cost term and the watchdog's own effectiveness measure.
   Companion routing split in `merge-queue-feedback.yml`: a `CI_TIMEOUT` whose group ref had

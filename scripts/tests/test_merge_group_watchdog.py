@@ -1592,6 +1592,10 @@ class TestTelemetryPlumbing(unittest.TestCase):
         import os
         import tempfile
         summary = Path(tempfile.mkdtemp()) / "summary.md"
+        # Pre-create it, so a watchdog that writes NOTHING fails on the assertion below
+        # rather than on a FileNotFoundError raised by this test's own read. A kill
+        # should name the behaviour that changed, not crash in the harness.
+        summary.write_text("", encoding="utf-8")
         os.environ["GITHUB_STEP_SUMMARY"] = str(summary)
         try:
             harness = FakeWatchdog.build(suites=8)
