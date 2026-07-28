@@ -5,9 +5,19 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish = false
-description = "Reserved SHACL integration seam for sparq-wrapper"
+description = "SHACL shapes to Rust object-model code generation for sparq-wrapper"
+readme = "README.md"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = []
 
 [dependencies]
+# [FABLE-5] sq-1rg2q.12: the shapes graph is parsed by `sparq-shacl` — the ONE SHACL
+# parser in the workspace. This crate consumes its public `ShapesModel` / `Shape` /
+# `Component` / `Path` / `Target` surface and never re-implements shape parsing.
+sparq-shacl = { path = "../sparq-shacl" }
+oxrdf.workspace = true

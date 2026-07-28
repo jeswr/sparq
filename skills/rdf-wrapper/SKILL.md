@@ -1,6 +1,6 @@
 ---
 name: rdf-wrapper
-description: "Traverse sparq RDF graphs as native Rust objects with the opt-in sparq-wrapper crate: bind a focus Term to an owned or borrowed Store, follow outgoing/incoming NamedNode predicates with iterators, unwrap values, convert typed literals to str/i64/bool, mutate owned stores, and optionally use the unlanded distinct-result, typed-cardinality, literal-codec, typed-focus, and effective-change observation proposals. Use when Rust code should work with focus objects instead of raw triples or dictionary IDs; SHACL-to-Rust code generation is a later surface."
+description: "Traverse sparq RDF graphs as native Rust objects with the opt-in sparq-wrapper crate: bind a focus Term to an owned or borrowed Store, follow outgoing/incoming NamedNode predicates with iterators, unwrap values, convert typed literals to str/i64/bool, mutate owned stores, and optionally use the unlanded distinct-result, typed-cardinality, literal-codec, typed-focus, and effective-change observation proposals. Use when Rust code should work with focus objects instead of raw triples or dictionary IDs, or when generating Rust structs from SHACL shapes with sparq-wrapper-shacl."
 ---
 
 # Use sparq-wrapper
@@ -367,5 +367,48 @@ Only outgoing predicates in the default graph are followed, matching `Node::out`
 A focus absent from the graph projects to a node object with no predicates, and
 a literal focus projects to its value object, so the call is total for any term.
 
-SHACL-to-Rust struct generation is not part of M1. Reuse `sparq-shacl`'s
-`ShapesModel` for that work; do not invent a second SHACL parser.
+## Generate Rust structs from SHACL shapes
+
+`sparq-wrapper-shacl` turns a shapes graph into Rust types. It parses shapes with
+`sparq-shacl`'s `ShapesModel` — there is exactly one SHACL parser in the
+workspace, so do not invent a second one.
+
+```rust
+use sparq_wrapper_shacl::{emit, lower};
+
+let graph = sparq_shacl::load_turtle_with_base(
+    r#"
+        @prefix sh: <http://www.w3.org/ns/shacl#> .
+        @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+        @prefix ex: <http://example.org/> .
+        ex:PersonShape a sh:NodeShape ;
+            sh:targetClass ex:Person ;
+            sh:property [ sh:path ex:name ; sh:datatype xsd:string ;
+                          sh:minCount 1 ; sh:maxCount 1 ] ;
+            sh:property [ sh:path ex:knows ; sh:class ex:Person ] .
+    "#,
+    "http://example.org/",
+)?;
+let ir = lower(&sparq_shacl::ShapesModel::parse(&graph))?;
+let source = emit(&ir); // write to <name>.rs, load with `mod <name>;`
+assert!(source.contains("pub name: String"));
+assert!(source.contains("pub knows: Vec<Ref<PersonClass>>"));
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`sh:maxCount 1` becomes `Option<T>`; `sh:minCount >= 1` with `sh:maxCount 1`
+becomes a required `T`; every other cardinality becomes `Vec<T>` with the bounds
+checked at load time. `sh:datatype` becomes a checked scalar, `sh:class` a typed
+`Ref<M>`, `sh:node` a nested (boxed) type, and `sh:closed true` a predicate
+whitelist the generated loader enforces. Ill-formed or contradictory shapes — an
+`sh:minCount` above its `sh:maxCount`, `sh:datatype` beside `sh:class`, a
+non-predicate `sh:path` — return a typed `LowerError` instead of generating code
+that misrepresents them. Emission is deterministic: the same shapes graph always
+produces the same bytes.
+
+The generated code is a typed **reader**, not a validator: only the structural
+components above are represented, `sh:class` is checked against direct
+`rdf:type` triples with no `rdfs:subClassOf` closure, and nesting stops at
+`MAX_NESTING_DEPTH`. Validate with `sparq_shacl::validate` before trusting a
+graph. See [`crates/sparq-wrapper-shacl`](../../crates/sparq-wrapper-shacl/README.md).
+<!-- [FABLE-5] sq-1rg2q.12 -->
