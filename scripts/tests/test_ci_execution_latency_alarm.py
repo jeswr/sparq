@@ -404,6 +404,35 @@ class TestM2ReRunTrap(unittest.TestCase):
         f, _ = alarm.find_queue_overruns(out, NOW)
         self.assertEqual([x["run_attempt"] for x in f], [1])
 
+    def test_fetch_live_runs_ENRICHES_what_it_returns(self):
+        """AND THE CALL SITE OF THE CALL SITE. Every sibling test invokes
+        `resolve_attempt_created` DIRECTLY, so deleting the one line in `fetch_live_runs`
+        that invokes it in production survives all of them — MEASURED, that mutant
+        survived this suite before this test existed. A helper called only by its own
+        tests is wired to nothing."""
+        def fake_gh(args, *, parse=True):
+            url = args[-1]
+            if "status=queued" in url:
+                return {"workflow_runs": [
+                    _run_obj(status="queued", age_min=1, attempt=2,
+                             created_age_min=99)]}
+            if "status=in_progress" in url:
+                return {"workflow_runs": []}
+            if "/attempts/2" in url:
+                return {"created_at": "2026-07-28T11:59:00Z"}
+            raise AssertionError(f"unexpected request {url}")
+
+        real = alarm._gh
+        alarm._gh = fake_gh
+        try:
+            live = alarm.fetch_live_runs("o/r")
+        finally:
+            alarm._gh = real
+        self.assertEqual(len(live), 1)
+        self.assertEqual(live[0].get(alarm.ATTEMPT_CREATED_KEY), "2026-07-28T11:59:00Z")
+        self.assertEqual(alarm.find_queue_overruns(live, NOW)[0], [],
+                         "enrichment must reach M2 through the real fetch path")
+
     def test_a_failed_attempt_lookup_degrades_instead_of_aborting_the_tick(self):
         """The escaped exception is asserted to be None. A test that let the exception
         propagate and read the traceback as a pass would certify nothing: a crash looks
