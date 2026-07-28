@@ -54,8 +54,10 @@ fi
 # "features|target-dir|mode" — one entry per configuration the docs claim this
 # command reproduces. Each gets its OWN target dir, so no build ever overwrites
 # another's binary (a count-alloc build must never clobber a timed one). `time`
-# legs print the wall-clock table; `count` legs print ONLY the allocation table,
-# because the counting shim's atomics perturb the clock.
+# legs print the wall-clock table; `count` legs drop ONLY that table — the
+# counting shim's atomics perturb the clock — and keep the configuration block
+# (corpus, oxttl features, allocator, iterations, digest) that identifies which
+# build each allocation row came from.
 LEGS=(
   "|target|time"                                 # system allocator, default features
   "mimalloc|target-mi|time"                      # the allocator sparq-cli ingest ships with
@@ -72,7 +74,13 @@ for leg in released upstream; do
     if [ -n "$feats" ]; then args+=(--features "$feats"); fi
     ( cd "$leg" && "${CARGO[@]}" "${args[@]}" >/dev/null )
     if [ "$mode" = count ]; then
-      "./$leg/$dir/release/$bin" bench "$CORPUS" --iters 3 | sed -n '/allocs\/parse/,$p'
+      # Name the exact cargo features, then suppress the wall-clock table (its
+      # header plus the separator and the single data row) while keeping every
+      # other line, so the two count configurations are told apart in the
+      # captured stdout by more than their identical build name.
+      echo "### cargo features: ${feats}"
+      "./$leg/$dir/release/$bin" bench "$CORPUS" --iters 3 \
+        | awk '/^\| build \| oxttl \| s \(min\)/ { skip = 3 } skip { skip--; next } { print }'
     else
       "./$leg/$dir/release/$bin" bench "$CORPUS" --iters "$ITERS"
     fi

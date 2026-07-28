@@ -284,10 +284,16 @@ fn bench(path: &str, iters: usize, json: Option<&str>) -> Result<(), String> {
     // allocator's arenas, so the counted/timed passes measure steady state.
     let warm = parse_once(&data)?;
 
+    // Harness bookkeeping is allocated BEFORE the window opens: `with_capacity`
+    // reserves the whole vector up front, so neither it nor any `push` below can
+    // allocate inside the counted region. Otherwise a once-per-invocation harness
+    // allocation would be divided by `iters` and reported as parser work, making
+    // `allocs/parse` depend on the iteration count.
+    let mut runs = Vec::with_capacity(iters);
+
     #[cfg(feature = "count-alloc")]
     let before = counting::snapshot();
 
-    let mut runs = Vec::with_capacity(iters);
     for _ in 0..iters {
         runs.push(parse_once(&data)?);
     }
