@@ -20,8 +20,12 @@
 #![cfg(feature = "vec-predicate")]
 
 use oxrdf::{NamedNode, Term};
+#[cfg(feature = "filtered-ann")]
+use sparq_core::dict::INLINE_BASE;
 use sparq_core::dict::Id;
 use sparq_core::Graph;
+#[cfg(feature = "filtered-ann")]
+use sparq_vectors::hybrid::MAX_ARM_PAGE;
 use sparq_vectors::hybrid::{
     ArmQuery, FusedHit, HybridConfig, RerankPolicy, Reranker, Rescored,
 };
@@ -685,6 +689,66 @@ fn an_admissible_inline_integer_id_beyond_the_dictionary_length_is_still_found()
         vec!["7".to_string()],
         "the admissible id is an INLINE literal id past dict.len(), so it is found only if the \
          paging backstop bounds the whole valid id domain rather than the dictionary alone"
+    );
+}
+
+/// [SONNET-4.6] (review #4519, round 6) The paging loop's escalation is bounded by a documented
+/// finite cap, and hitting it is a hard arm-named error rather than a deeper request.
+///
+/// The correctness bound on a prefix-consistent arm's ranking is the whole valid id domain —
+/// `dict.len()` plus the ~1.07e9 inline-integer ids — but that is not a safe paging protocol: every
+/// request makes the arm MATERIALIZE a `Vec` of that size, so doubling towards the domain would let
+/// this tiny query ask for over a billion results.
+///
+/// The witness: an arm that PADS (always returns exactly the `n` asked for, here as distinct inline
+/// ids) and whose results are all inadmissible under the mask `{m}` — so no round ever satisfies
+/// `candidates`, `mask.len()` or exhaustion, and only the cap can stop it. Every requested page
+/// must stay at or under [`MAX_ARM_PAGE`], and the query must fail closed naming the arm rather
+/// than answer from a ranking whose admissible hits were never reached.
+#[cfg(feature = "filtered-ann")]
+#[test]
+fn a_non_exhausting_arm_is_paged_no_deeper_than_the_documented_cap() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (g, store, _p) = deep_fixture("page-cap");
+    let deepest = AtomicUsize::new(0);
+    let cfg = HybridConfig::new().vector_weight(0.0).arm(
+        "text",
+        1.0,
+        Box::new(|_q: &ArmQuery<'_>, n: usize| {
+            deepest.fetch_max(n, Ordering::Relaxed);
+            // Exactly `n` distinct ids `check_arm_ids` admits, none of them `m`: an arm that never
+            // signals exhaustion and never offers an admissible hit.
+            Ok((0..n as Id).map(|i| (INLINE_BASE + i, 1.0)).collect())
+        }),
+    );
+    let err = query_vec_hybrid(
+        &g,
+        "PREFIX vec: <http://sparq.dev/vec#>
+         SELECT ?node ?score ?rank ?prov WHERE {
+           ( ?node ?score ?rank ?prov ) vec:hybrid ( \"1,0\" 1 ) .
+           ?node <http://ex/ok> ?o .
+         }",
+        &store,
+        &cfg,
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("\"text\"") && err.contains("cap"),
+        "the exhausted paging budget must be an arm-named hard error, got {}",
+        err
+    );
+    let deepest = deepest.load(Ordering::Relaxed);
+    assert!(
+        deepest <= MAX_ARM_PAGE,
+        "no request may exceed the documented {}-result cap, but one asked for {}",
+        MAX_ARM_PAGE,
+        deepest
+    );
+    assert_eq!(
+        deepest, MAX_ARM_PAGE,
+        "the loop must page up to the cap before giving up — a smaller ceiling would abandon \
+         admissible hits sooner than the budget requires"
     );
 }
 

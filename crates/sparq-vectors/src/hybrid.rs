@@ -587,9 +587,28 @@ pub fn ablate(
 ///   arm ranks a fixed order and truncates. An arm whose order depends on `n` gets a ranking that
 ///   is still admissible and still its own, but no longer meaningfully "its top `n`".
 /// - **Exhaustion-honest.** Returning fewer than `n` results means "that is all I have"; it is how
-///   the paging loop learns to stop. An arm that pads to `n` is asked for deeper pages until the
-///   dictionary bound.
+///   the paging loop learns to stop. An arm that pads to `n` is asked for deeper pages until
+///   [`MAX_ARM_PAGE`], and is then a hard, arm-named query error rather than a deeper request.
+///
+/// The count is bounded by [`MAX_ARM_PAGE`] (or, if larger, the `candidates(k)` the caller asked
+/// for), so an arm sizes its response buffer against a known finite cap.
 pub type ArmFn<'a> = Box<dyn Fn(&ArmQuery<'_>, usize) -> Result<Vec<(Id, f64)>, String> + 'a>;
+
+/// [SONNET-4.6] (review #4519, round 6) The largest number of results ONE
+/// [`ArmFn`] request may ask for while paging an arm past the `filtered-ann`
+/// admissibility mask — **65536**.
+///
+/// An arm returns a MATERIALIZED `Vec`, so the paging loop's request count is a memory and
+/// transport cost paid by the arm, the wire and this process. The id domain that bounds a
+/// prefix-consistent arm's ranking (the dictionary ids plus the ~1.07e9 inline-integer literal ids)
+/// is a CORRECTNESS bound, not a safe paging protocol: doubling towards it would let a small
+/// `vec:hybrid` query ask a valid arm for hundreds of millions of results. The loop therefore stops
+/// at this cap and reports the arm rather than requesting a deeper page — deep paging past it is
+/// only reachable by an arm that pads instead of signalling exhaustion.
+///
+/// A caller whose `candidates(k)` already exceeds the cap still gets the page it asked for: the cap
+/// bounds the loop's own escalation, not the caller's explicit request.
+pub const MAX_ARM_PAGE: usize = 1 << 16;
 
 /// A query embedder for the natural-language `vec:hybrid` form: `(text, language) -> vector`.
 pub type QueryEmbedder<'a> = Box<dyn Fn(&str, &str) -> Result<Vec<f32>, String> + 'a>;

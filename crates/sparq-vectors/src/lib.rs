@@ -271,8 +271,8 @@ pub use rewrite::{prepare_vec, query_vec, query_vec_with_budget, rewrite_query};
 pub use hybrid::{
     ablate, apply_rerank, evaluate, fuse_arms, parse_provenance, validate_arms, AblationRow,
     ArmFn, ArmQuery, ArmRanking, FusedHit, HybridConfig, QueryEmbedder, RerankPolicy, Reranker,
-    Rescored, RetrievalMetrics, DEFAULT_OVER_FETCH, FUSED_ROW, RERANKED_ROW, RERANK_KEY,
-    VECTOR_ARM,
+    Rescored, RetrievalMetrics, DEFAULT_OVER_FETCH, FUSED_ROW, MAX_ARM_PAGE, RERANKED_ROW,
+    RERANK_KEY, VECTOR_ARM,
 };
 #[cfg(feature = "vec-predicate")]
 pub use rewrite::{

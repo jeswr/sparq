@@ -311,11 +311,15 @@ HybridConfig::new().arm(name, weight, ArmFn).vector_weight(w /*0.0 mutes -> pure
 // [OPUS-4.8] review #4519 round 2 — PAGING CONTRACT (`filtered-ann`): masking one candidates(k)-long response can only
 //   COMPACT the page the arm returned, so an arm whose admissible hits all sit below it would still lose them. When the
 //   mask leaves an arm short, the query path RE-ASKS that arm with a doubled count until it has candidates(k) admissible
-//   hits, has every admissible id, the arm returns fewer than asked (exhausted), or the request hits the VALID-ID-DOMAIN
-//   backstop. So an ArmFn must be prefix-consistent (top-n is a prefix of top-(2n)) and exhaustion-honest (a short answer
-//   means "no more"). [round 5] That backstop is dict.len() + the inline-integer id domain, NOT dict.len(): a ?node
-//   constrained in an OBJECT position to a small canonical xsd:integer is admissible at an INLINE id far past dict.len(),
-//   so a dictionary-length ceiling could stop paging while such an id was still unreached and lose it.
+//   hits, has every admissible id, the arm returns fewer than asked (exhausted), or the request hits the per-request
+//   CEILING. So an ArmFn must be prefix-consistent (top-n is a prefix of top-(2n)) and exhaustion-honest (a short answer
+//   means "no more"). [round 5] The CORRECTNESS bound is dict.len() + the inline-integer id domain, NOT dict.len(): a
+//   ?node constrained in an OBJECT position to a small canonical xsd:integer is admissible at an INLINE id far past
+//   dict.len(), so a dictionary-length ceiling could stop paging while such an id was still unreached and lose it.
+//   [round 6] That domain is ~1.07e9 wide and each request makes the arm MATERIALIZE a Vec, so the SAFETY cap
+//   MAX_ARM_PAGE=65536 wins: escalation stops there (only the caller's own larger candidates(k) page may exceed it) and
+//   reaching it is a HARD arm-named error — answering from a ranking whose admissible hits were never reached would be
+//   the silent loss the paging exists to prevent. Only a PADDING arm ever sees the cap.
 fuse_arms(&[ArmRanking], rrf_k, top_k) -> Result<Vec<FusedHit>, String>   // == fuse_rrf_weighted + per-rank provenance
 validate_arms(&[ArmRanking]) -> Result<(), String>   // fail-closed on a lying arm: dup name/id, reserved name, bad weight
 apply_rerank(&dyn Reranker, RerankPolicy, &ArmQuery, Vec<FusedHit>, top_k) -> Result<Vec<FusedHit>, String>

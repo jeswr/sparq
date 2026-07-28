@@ -132,6 +132,8 @@ use crate::ann::{nearest_exact, nearest_exact_tiebreak};
 // provenance + the out-of-process second-stage reranker and its fail-open/fail-closed policy. Same
 // `vec-predicate` feature — the module ships with the query surface it exists to serve and adds no
 // dependency.
+#[cfg(feature = "filtered-ann")]
+use crate::hybrid::MAX_ARM_PAGE;
 use crate::hybrid::{
     apply_rerank, fuse_arms, ArmQuery, ArmRanking, FusedHit, HybridConfig, VECTOR_ARM,
 };
@@ -1288,18 +1290,29 @@ const INLINE_DOMAIN: usize = 1 << 30;
 /// Each round doubles the request, and stops at the first of: enough admissible hits
 /// (`>= candidates`); every admissible id already collected (`>= mask.len()`, so a deeper page
 /// cannot add one); the arm returned fewer results than asked for (exhausted); or the request
-/// reached the ID-DOMAIN bound. That last bound is a backstop rather than a real stopping point:
-/// an arm's ids are distinct ([`validate_arms`](crate::hybrid::validate_arms)) and drawn from the
-/// domain [`check_arm_ids`] admits — the dictionary ids PLUS the inline-integer literal ids — so
-/// no arm can return more than `dict.len() + INLINE_DOMAIN` results and a deeper page than that
-/// cannot exist. The inline half of that bound is not slack: [`derive_mask`] admits an inline id
-/// whenever `?node` is bound in an object position to an integer literal, so an ADMISSIBLE id
-/// genuinely can sit beyond `dict.len()` in an arm's ranking — bounding the paging at `dict.len()`
-/// would stop while such an id was still unreached, losing it (review #4519, round 5).
+/// reached the per-request CEILING — which is a hard, arm-named error, not a quiet short answer.
 ///
-/// An arm that never signals exhaustion is therefore asked for geometrically larger pages until it
-/// does; the cost of producing them is the arm's own, and an honest arm stops at its first short
-/// page long before the bound is in sight.
+/// The ceiling is the smaller of two bounds, and never below the `candidates` page the caller
+/// explicitly asked every arm for:
+///
+/// - **Correctness** — an arm's ids are distinct ([`validate_arms`](crate::hybrid::validate_arms))
+///   and drawn from the domain [`check_arm_ids`] admits (the dictionary ids PLUS the
+///   inline-integer literal ids), so no arm can return more than `dict.len() + INLINE_DOMAIN`
+///   results and a deeper page than that cannot exist. The inline half is not slack:
+///   [`derive_mask`] admits an inline id whenever `?node` is bound in an object position to an
+///   integer literal, so an ADMISSIBLE id genuinely can sit beyond `dict.len()` in an arm's
+///   ranking — bounding at `dict.len()` would stop while such an id was still unreached, losing it
+///   (review #4519, round 5).
+/// - **Safety** — [`MAX_ARM_PAGE`], because each request makes the arm MATERIALIZE a `Vec` of that
+///   size and ship it here. The correctness bound is ~1.07e9 wide, so doubling towards it would let
+///   a small filtered `vec:hybrid` query ask a valid arm for hundreds of millions of results and
+///   exhaust the arm, the transport or this process (review #4519, round 6).
+///
+/// Reaching the safety cap means the arm kept padding full pages while the mask admitted almost
+/// none of them, so its top candidates over the admissible domain cannot be established within a
+/// bounded budget. Answering anyway would silently drop admissible hits — exactly the loss this
+/// loop exists to prevent — so it fails closed and names the arm instead. An exhaustion-honest arm
+/// never sees the cap: it stops at its first short page.
 #[cfg(feature = "filtered-ann")]
 fn run_aux_arms(
     cfg: &HybridConfig<'_>,
@@ -1322,10 +1335,13 @@ fn run_aux_arms(
         return Ok(aux);
     };
 
-    // The backstop bounds the WHOLE domain an arm may legitimately rank — the dictionary ids and
-    // the inline-integer literal ids `check_arm_ids` also admits — because an admissible id can be
-    // an inline one. `dict.len()` alone is NOT that domain.
-    let ceiling = candidates.max(graph.dict.len().saturating_add(INLINE_DOMAIN));
+    // The correctness bound is the WHOLE domain an arm may legitimately rank — the dictionary ids
+    // and the inline-integer literal ids `check_arm_ids` also admits — because an admissible id can
+    // be an inline one; `dict.len()` alone is NOT that domain. But that domain is ~1.07e9 wide and
+    // every request costs a materialized `Vec`, so the SAFETY cap wins: escalation stops at
+    // `MAX_ARM_PAGE`, and only the caller's own `candidates` page may exceed it.
+    let domain = graph.dict.len().saturating_add(INLINE_DOMAIN);
+    let ceiling = candidates.max(MAX_ARM_PAGE.min(domain));
     (0..cfg.arm_count())
         .map(|i| {
             let mut want = candidates;
@@ -1338,12 +1354,25 @@ fn run_aux_arms(
                     .into_iter()
                     .filter(|(id, _)| mask.contains(*id))
                     .collect();
-                if ranked.len() >= candidates
-                    || ranked.len() >= mask.len()
-                    || returned < want
-                    || want >= ceiling
-                {
+                if ranked.len() >= candidates || ranked.len() >= mask.len() || returned < want {
                     return Ok(ArmRanking { arm, weight, ranked });
+                }
+                if want >= ceiling {
+                    // Fail closed: the arm padded a full page of `want` results of which only
+                    // `ranked.len()` are admissible, so its true top candidates over the admissible
+                    // domain are still unknown — and a deeper page is not affordable.
+                    return Err(format!(
+                        "vec:hybrid: the {:?} arm returned all {} results asked for without \
+                         signalling exhaustion, and only {} of them are admissible under the \
+                         surrounding BGP; paging it deeper would exceed the {}-result per-request \
+                         cap, so its top candidates over the admissible domain cannot be \
+                         established. Make the arm exhaustion-honest (return fewer results than \
+                         asked once it has no more) or constrain the query further",
+                        arm,
+                        want,
+                        ranked.len(),
+                        ceiling
+                    ));
                 }
                 want = want.saturating_mul(2).min(ceiling);
             }
