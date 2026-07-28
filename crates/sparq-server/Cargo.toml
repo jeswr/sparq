@@ -344,7 +344,16 @@ change-stream = ["server", "sparq-serve/change-stream"]
 # `sparq-solid` is a LIBRARY-level authoriser with NO HTTP surface — this feature is exactly that
 # missing HTTP shell: authentication (Solid-OIDC/DPoP -> a `(WebID, client)` session) stays the
 # caller's job; the endpoints take an already-resolved session + the pod dataset per request and
-# map the library verdict onto HTTP. FAIL-CLOSED is the soundness invariant — every error path
+# map the library verdict onto HTTP.
+# [SONNET-4.6] (sq-snopa.8) The feature ALSO carries the STATEFUL lane: a request may set
+# `"source":"server"` to authorise over the server's OWN loaded store instead of a body dataset.
+# The materialised `PodStore` is a pure function of one published ring generation, so it is
+# cached BESIDE the ring in `AppState` keyed by the generation number rather than threaded
+# through the writer — which makes "re-materialise on ACL change" automatic (every commit
+# publishes a new generation, staleing the cache) and keeps the writer ignorant of the auth
+# view. The lane REFUSES (never silently un-enforces) an ODRL-carrying server store or a
+# `trust` block, both of which it cannot evaluate faithfully.
+# FAIL-CLOSED is the soundness invariant — every error path
 # (unparseable dataset, materialize failure, unknown mode/view) DENIES (`allow:false`), never
 # opens. STILL OFF AT RUNTIME by default even when compiled in — the operator must additionally
 # set `--solid-authz` / `SPARQ_SOLID_AUTHZ=1` (`ServerConfig::solid_authz`), mirroring `tpf` /
@@ -403,8 +412,10 @@ solid-authz-trust = ["solid-authz", "dep:sparq-trust", "dep:sparq-zk"]
 # target (pattern targets are sq-lrtc3.3), a non-read mode, or an anonymous session is a
 # 4xx refusal — NEVER a silent allow; a constraint the stateless lane cannot evidence
 # (purpose / count / an undischarged duty) simply never grants. STATELESS-lane scope only
-# (the dataset arrives in the request body; the stateful loaded-store variant is sq-snopa.8),
-# which is exactly why the ONE-SHOT bridge entry point is used: the per-request store dies
+# (the dataset arrives in the request body). [SONNET-4.6] sq-snopa.8 landed the stateful
+# loaded-store lane (`"source":"server"`) but did NOT extend this lane to it: an ODRL-carrying
+# server store is REFUSED there (400) rather than un-enforced. Stateless scope is also
+# why the ONE-SHOT bridge entry point is used: the per-request store dies
 # with the response, so frozen-at-materialization semantics and per-session re-checked
 # conditions coincide. OFF by default — a build WITHOUT this feature carries ZERO ODRL code
 # (sparq-policy is never compiled) and `solid-authz` behaviour is byte-identical.

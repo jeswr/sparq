@@ -2518,6 +2518,21 @@ pub struct AppState {
     /// values share one registry (the `Arc`).
     #[cfg(feature = "query-registry")]
     running_queries: Arc<QueryRegistry>,
+    /// [SONNET-4.6] (sq-snopa.8) `solid-authz`-only: the STATEFUL Solid authorization view over
+    /// the server's OWN loaded store, cached per generation. `None` until the first
+    /// `"source":"server"` `/authz/*` request builds it.
+    ///
+    /// WHERE THE AUTH VIEW LIVES relative to the ring's immutable generations (the design
+    /// question sq-snopa.8 exists to settle): the materialised
+    /// [`PodStore`](sparq_solid::PodStore) is a PURE FUNCTION of one published generation, so it
+    /// is cached BESIDE the ring and KEYED BY THE GENERATION NUMBER rather than threaded through
+    /// the writer. Every commit — including an `.acl`/`.acr` write — publishes a new generation,
+    /// which makes the cached entry stale by construction and forces a re-materialise on the next
+    /// request. That is the "re-materialise on ACL change" contract, obtained without any writer
+    /// coupling: the cached view can never be older than the generation the request pins, so a
+    /// request never decides from an auth view staler than the data it would read.
+    #[cfg(feature = "solid-authz")]
+    authz_view: Arc<std::sync::RwLock<Option<crate::solid_authz::CachedAuthView>>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2928,6 +2943,10 @@ impl AppState {
             restore_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(feature = "query-registry")]
             running_queries,
+            // [SONNET-4.6] sq-snopa.8: cold at boot — the stateful auth view is built lazily on
+            // the first `"source":"server"` request and re-built whenever the generation moves.
+            #[cfg(feature = "solid-authz")]
+            authz_view: Arc::new(std::sync::RwLock::new(None)),
         })
     }
 
@@ -3407,6 +3426,17 @@ impl AppState {
 
     pub(crate) fn config(&self) -> &ServerConfig {
         &self.config
+    }
+
+    /// [SONNET-4.6] (sq-snopa.8) The per-generation cache holding the STATEFUL Solid
+    /// authorization view over this server's own loaded store (see the `authz_view` field).
+    /// The whole cache is `solid-authz`-gated, so the default build has neither the field nor
+    /// this accessor.
+    #[cfg(feature = "solid-authz")]
+    pub(crate) fn authz_view_cache(
+        &self,
+    ) -> &std::sync::RwLock<Option<crate::solid_authz::CachedAuthView>> {
+        &self.authz_view
     }
 
     /// [OPUS-4.8] (sq-gos8) The installed structured access-audit sink, if any. `None` short-

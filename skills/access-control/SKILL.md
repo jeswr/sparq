@@ -270,7 +270,11 @@ Materialize the authorization view from the access-control documents, then enfor
   the query lane would refuse to honour. The
   **FR-5 `Link: <acl-iri>; rel="acl"` response header** (sq-snopa.7) is now wired: `/authz/decide`
   and `/authz/wac-allow` emit it from `acl_link_header()` / `resolve_acl()` when a governing ACL
-  was discovered; `None` ⇒ no header (fail-closed). See the `http-server` skill. That HTTP layer
+  was discovered; `None` ⇒ no header (fail-closed). The **STATEFUL lane** (sq-snopa.8) has also
+  LANDED: `"source":"server"` authorises over the server's OWN loaded store instead of a body
+  dataset, materialising this same `PodStore` once per ring generation (so an `.acl` write
+  re-materialises by construction) and refusing — never silently un-enforcing — an ODRL-carrying
+  store or a `trust` block. See the `http-server` skill. That HTTP layer
   does NOT authenticate — it takes an already-resolved session, exactly as this library does. The
   `decide` `scope` is the ACL-*document* discovery scope, while whether a grant within that ACL
   applies is the verdict the oracle computes.

@@ -18,11 +18,36 @@
 //! does NOT authenticate. Each endpoint takes an **already-resolved** session plus the pod dataset
 //! (N-Quads, including the `.acl`/`.acr` control graphs) in the request body, builds a
 //! [`PodStore`](sparq_solid::PodStore), materialises the auth view, and maps the library verdict
-//! onto HTTP. It is STATELESS per request (the dataset is supplied, not the server's loaded store)
-//! — a stateful "authorise over the server's own loaded pod" variant is a deliberate follow-up
-//! (see the crate feature comment / the deferred bead), because it would thread a materialised
-//! `PodStore` through the concurrent-serving `AppState`, a much larger change to a conflict-hot
-//! path.
+//! onto HTTP.
+//!
+//! # Which pod: `"source"` (sq-snopa.8) [SONNET-4.6]
+//!
+//! Every endpoint takes an optional `"source"` field selecting WHICH pod it authorises over:
+//!
+//! * `"body"` (the DEFAULT, and the only mode before sq-snopa.8) — **stateless**: the pod dataset
+//!   arrives in the request's `"dataset"` field, is materialised for that one request, and dies
+//!   with the response.
+//! * `"server"` — **stateful**: authorise over the **server's own loaded store**. The request must
+//!   NOT carry a `"dataset"` (a body naming both pods is ambiguous, so it is refused). The pinned
+//!   current generation is forked, materialised ONCE, and cached in
+//!   [`AppState`](crate::http::AppState) keyed by the generation number, so the N3 materialisation
+//!   is paid once per generation rather than once per request.
+//!
+//! In the stateful lane a pod resource IS a named graph of the server's store, so `"resource"`
+//! must be that graph's absolute IRI (the server's own path -> named-graph mapping is what the
+//! Graph Store Protocol routes already establish); a relative path is not resolved.
+//!
+//! **Re-materialise on ACL change** falls out of the generation key rather than needing writer
+//! bookkeeping: every commit — an `.acl`/`.acr` write included — publishes a new generation, which
+//! makes the cached entry stale immediately, so the next request rebuilds. The cached view can
+//! never be older than the generation the request pins, so a request never decides from an auth
+//! view staler than the data it would read.
+//!
+//! The stateful lane is fail-closed on the same terms as the stateless one, and additionally
+//! REFUSES (never silently un-enforces) two combinations it cannot evaluate faithfully: under
+//! `odrl-authz`, a server store carrying ODRL policy rules (dropping a prohibition would be
+//! fail-OPEN); under `solid-authz-trust`, a request carrying a `"trust"` block (that extension
+//! decides over its own body-derived store).
 //!
 //! # Fail-closed (the soundness invariant)
 //!
@@ -50,7 +75,9 @@
 //! honour). Fail-closed refusals (never a silent allow): a malformed policy, an unimplementable
 //! `odrl:conflict` strategy, a rule without a concrete target graph IRI (pattern targets are
 //! sq-lrtc3.3), a non-read mode (the query-action contract is sq-lrtc3.2), or an anonymous
-//! session each yield a 4xx. Stateless-lane scope only (sq-snopa.8 owns the stateful variant).
+//! session each yield a 4xx. STATELESS-lane scope only: the lane reads the request-BODY dataset,
+//! so it does not apply to `"source":"server"` — an ODRL-carrying server store is REFUSED there
+//! (see the `"source"` section above), never authorised as if the rules were absent.
 //!
 //! ## Read-scoped advertisement (sq-3mu76) [FABLE-5]
 //!
@@ -62,6 +89,8 @@
 //! the fail-closed direction — the `allow` bit / the advertised `read` are exactly what
 //! `/authz/query` enforces; a WAC write grant is merely not repeated where the ODRL lane cannot
 //! yet evaluate a write-action rule against it.
+
+use std::sync::Arc;
 
 use axum::{
     body::Bytes,
@@ -77,18 +106,87 @@ use crate::http::{auth_gate, json_error, AppState, Operation};
 /// Which auth model to materialise before deciding. Chosen by the request's `"view"` field, or
 /// inferred from the dataset's control-document suffixes (`.acr` present -> ACP, else WAC).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AuthView {
+pub(crate) enum AuthView {
     /// Web Access Control — materialise from `.acl` documents ([`PodStore::materialize_wac`]).
     Wac,
     /// Access Control Policy — materialise from `.acr` documents ([`PodStore::materialize_acp`]).
     Acp,
 }
 
+/// [SONNET-4.6] (sq-snopa.8) WHICH POD the endpoint authorises over — the stateless/stateful
+/// switch, selected by the request's `"source"` field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AuthzSource {
+    /// STATELESS (the default, and the only mode before sq-snopa.8): the pod dataset arrives in
+    /// the request body's `"dataset"` field and dies with the response.
+    Body,
+    /// STATEFUL: authorise over the SERVER'S OWN loaded store — the pinned current generation,
+    /// materialised once per generation and cached in [`AppState`] (see
+    /// [`CachedAuthView`]). The body must NOT carry a `"dataset"`.
+    Server,
+}
+
+/// [SONNET-4.6] (sq-snopa.8) The cached STATEFUL authorization view: one materialised
+/// [`PodStore`] plus the generation number and auth model it was built for. Lives in
+/// [`AppState`](crate::http::AppState) behind an `RwLock`; see that field's doc for why a
+/// generation-keyed cache beside the ring is the whole "re-materialise on ACL change" contract.
+///
+/// The `Arc` is what makes concurrent serving cheap: every request of a generation clones the
+/// same materialised store handle, so the N3 materialisation is paid ONCE per generation rather
+/// than once per request.
+pub(crate) struct CachedAuthView {
+    /// The ring generation number this view is a pure function of.
+    generation: u64,
+    /// Which auth model was materialised (a request that asks for the other one rebuilds).
+    view: AuthView,
+    /// The materialised store, shared by every request pinned to `generation`.
+    store: Arc<PodStore>,
+}
+
+/// [SONNET-4.6] (sq-snopa.8) Why the stateful view refused to build. A small `Send` enum rather
+/// than a [`Response`] so it crosses the `spawn_blocking` boundary cleanly; mapped to the
+/// fail-closed HTTP response by [`server_view_error_response`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerViewError {
+    /// The N3 materialisation failed — an operational, retryable condition (503). Fail-closed:
+    /// no store is cached and no request is answered from a partial view.
+    Materialize,
+    /// `odrl-authz` only: the server's own store carries ODRL policy rules. The stateful lane
+    /// cannot yet evaluate them, and SILENTLY DROPPING a prohibition would be fail-OPEN — so the
+    /// whole request is refused (400) instead.
+    #[cfg(feature = "odrl-authz")]
+    Odrl,
+}
+
+/// [SONNET-4.6] (sq-snopa.8) The store an endpoint decides over: an owned per-request store
+/// (stateless lane) or the shared per-generation one (stateful lane). Both are read through
+/// [`get`](Self::get); only the owned variant can be mutated by the ODRL lane.
+enum ResolvedStore {
+    /// Stateless: built from the request body's dataset, dies with the response.
+    Owned(PodStore),
+    /// Stateful: the generation-keyed view shared with every other request of this generation.
+    Shared(Arc<PodStore>),
+}
+
+impl ResolvedStore {
+    /// The store to decide against, whichever lane produced it.
+    fn get(&self) -> &PodStore {
+        match self {
+            ResolvedStore::Owned(s) => s,
+            ResolvedStore::Shared(s) => s,
+        }
+    }
+}
+
 /// A parsed `/authz/*` request envelope. The `session` fields are borrowed from the owned JSON
 /// value the caller keeps alive; `dataset` is the owned N-Quads text.
 #[derive(Debug)]
 struct AuthzRequest {
-    /// The pod dataset as N-Quads (documents + `.acl`/`.acr` control graphs), owned.
+    /// [SONNET-4.6] (sq-snopa.8) Which pod to authorise over — the body's dataset (default) or
+    /// the server's own loaded store.
+    source: AuthzSource,
+    /// The pod dataset as N-Quads (documents + `.acl`/`.acr` control graphs), owned. EMPTY (and
+    /// never read) under [`AuthzSource::Server`], which forbids the field outright.
     dataset: String,
     /// The already-resolved principal — agent (WebID) / client / issuer, all optional; anonymous
     /// when all are absent (fail-closed — an anonymous session sees only public grants).
@@ -236,16 +334,46 @@ fn parse_request(body: &Bytes) -> Result<AuthzRequest, Response> {
     let obj = v
         .as_object()
         .ok_or_else(|| json_error(StatusCode::BAD_REQUEST, "request body must be a JSON object"))?;
-    let dataset = obj
-        .get("dataset")
-        .and_then(|d| d.as_str())
-        .ok_or_else(|| {
-            json_error(
-                StatusCode::BAD_REQUEST,
-                "'dataset' (N-Quads string) is required",
-            )
-        })?
-        .to_owned();
+    // [SONNET-4.6] sq-snopa.8 — the stateless/stateful switch. Absent => `body` (the historical
+    // behaviour, byte-identical); an unknown keyword is a fail-closed client error, never an
+    // inferred default.
+    let source = match obj.get("source").and_then(|s| s.as_str()) {
+        None => AuthzSource::Body,
+        Some(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "body" => AuthzSource::Body,
+            "server" => AuthzSource::Server,
+            _ => {
+                return Err(json_error(
+                    StatusCode::BAD_REQUEST,
+                    "'source' must be 'body' or 'server' when present",
+                ))
+            }
+        },
+    };
+    let dataset = match source {
+        AuthzSource::Body => obj
+            .get("dataset")
+            .and_then(|d| d.as_str())
+            .ok_or_else(|| {
+                json_error(
+                    StatusCode::BAD_REQUEST,
+                    "'dataset' (N-Quads string) is required",
+                )
+            })?
+            .to_owned(),
+        // A body carrying BOTH a dataset and `"source":"server"` is ambiguous about which pod it
+        // means; guessing either way could authorise against the pod the caller did not intend,
+        // so refuse (fail-closed) rather than silently pick one.
+        AuthzSource::Server => {
+            if obj.contains_key("dataset") {
+                return Err(json_error(
+                    StatusCode::BAD_REQUEST,
+                    "'source':'server' authorises over the server's own store; 'dataset' must be absent",
+                ));
+            }
+            String::new()
+        }
+    };
     // The session sub-object; absent -> an anonymous session (fail-closed, sees only public).
     let session = obj.get("session").and_then(|s| s.as_object());
     let field = |name: &str| -> Option<String> {
@@ -269,6 +397,7 @@ fn parse_request(body: &Bytes) -> Result<AuthzRequest, Response> {
         },
     };
     Ok(AuthzRequest {
+        source,
         dataset,
         agent: field("agent"),
         client: field("client"),
@@ -335,9 +464,176 @@ fn infer_view(dataset: &str) -> AuthView {
     }
 }
 
+// ── [SONNET-4.6] sq-snopa.8 — the STATEFUL lane (`"source":"server"`) ──────
+//
+// The stateless lane above materialises a throwaway `PodStore` per request. The stateful lane
+// authorises over the SERVER'S OWN loaded store instead: it pins the current generation, forks
+// its immutable snapshot into an owned `Graph` (`Graph::fork`, whose steady-state cost is
+// O(pending delta) on the already-forked ring lineage — that is what removes the FR-4 note's
+// blocker, which assumed a `&Graph`/no-Clone snapshot forced a full re-parse per request),
+// materialises the auth view ONCE, and caches it in `AppState` keyed by the generation number.
+//
+// INVALIDATION is by construction, not by bookkeeping: the view is a pure function of one
+// published generation, and EVERY commit — an `.acl`/`.acr` write included — publishes a new
+// generation. So an ACL change makes the cached entry stale immediately and the next request
+// re-materialises; the cached view is never older than the generation the request pins, and the
+// writer needs no knowledge of the auth view at all.
+//
+// FAIL-CLOSED, same contract as the stateless lane: a materialisation failure is a retryable 503
+// and caches nothing; under `odrl-authz` an ODRL-carrying server store is REFUSED (dropping a
+// prohibition would be fail-OPEN); under `solid-authz-trust` a `"trust"` block, which decides
+// over its own body-derived store, is refused in this lane.
+
+/// Is the server's own store an ACP pod? True when it holds any `.acr` control graph — the
+/// graph-level twin of [`infer_view_is_acp`] (which scans N-Quads TEXT, unavailable here). WAC
+/// is the safe fallback: an ACP pod materialised as WAC finds no `.acl` grants and denies.
+/// Pure + directly unit-tested. [SONNET-4.6] sq-snopa.8.
+pub(crate) fn graph_view_is_acp(graph: &sparq_core::Graph) -> bool {
+    graph.named.iter().any(|(name, _)| match name {
+        oxrdf::Term::NamedNode(n) => n.as_str().ends_with(".acr"),
+        _ => false,
+    })
+}
+
+/// Does the server's own store carry ODRL policy rules? An OVER-APPROXIMATE check — it asks
+/// whether either ODRL rule predicate IRI is present in the dictionary of the default graph or
+/// any named graph, not whether it is actually used in predicate position. Over-approximating
+/// REFUSES more requests, which is the fail-closed direction; under-approximating would silently
+/// drop a prohibition, which is fail-OPEN. Pure + directly unit-tested. [SONNET-4.6] sq-snopa.8.
+#[cfg(feature = "odrl-authz")]
+pub(crate) fn graph_carries_odrl(graph: &sparq_core::Graph) -> bool {
+    fn holds(g: &sparq_core::Graph) -> bool {
+        [
+            "http://www.w3.org/ns/odrl/2/permission",
+            "http://www.w3.org/ns/odrl/2/prohibition",
+        ]
+        .iter()
+        .any(|iri| match oxrdf::NamedNode::new(*iri) {
+            Ok(n) => g.id_of(&oxrdf::Term::NamedNode(n)).is_some(),
+            Err(_) => false,
+        })
+    }
+    holds(graph) || graph.named.iter().any(|(_, g)| holds(g))
+}
+
+/// The fail-closed [`Response`] for a [`ServerViewError`]. A materialisation failure mirrors the
+/// stateless lane's 503 (operational, retryable); an ODRL-carrying store is a definitive 400.
+fn server_view_error_response(err: ServerViewError) -> Response {
+    match err {
+        ServerViewError::Materialize => json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "could not materialise the authorization view",
+        ),
+        #[cfg(feature = "odrl-authz")]
+        ServerViewError::Odrl => json_error(
+            StatusCode::BAD_REQUEST,
+            "the server's store carries ODRL policy rules; the stateful ('source':'server') lane \
+             cannot enforce them (fail-closed)",
+        ),
+    }
+}
+
+/// Build (or reuse) the STATEFUL authorization view over the server's own loaded store.
+/// Synchronous and CPU-bound (the N3 materialisation) — call it on the blocking pool, which is
+/// what [`server_store`] does.
+///
+/// A cache HIT (same generation, same auth model) is one `RwLock` read plus an `Arc` clone. A
+/// MISS forks the pinned snapshot, materialises, and installs the result. Two concurrent misses
+/// may both materialise; both results are correct for their generation and the newer one wins
+/// the cache slot, so the duplicated work is the only cost of not holding the lock across the
+/// (potentially long) materialisation.
+///
+/// A POISONED cache lock degrades to "no cache" (rebuild every request) rather than failing the
+/// request or, worse, serving a stale view.
+fn build_server_view(
+    state: &AppState,
+    requested_view: Option<AuthView>,
+) -> Result<Arc<PodStore>, ServerViewError> {
+    let pinned = state.current();
+    let generation = pinned.number();
+    let graph = pinned.snapshot();
+    let view = requested_view.unwrap_or(if graph_view_is_acp(graph) {
+        AuthView::Acp
+    } else {
+        AuthView::Wac
+    });
+    // Refuse BEFORE consulting the cache so the refusal cannot be skipped by a warm entry.
+    #[cfg(feature = "odrl-authz")]
+    if graph_carries_odrl(graph) {
+        return Err(ServerViewError::Odrl);
+    }
+    if let Ok(cache) = state.authz_view_cache().read() {
+        if let Some(cached) = cache.as_ref() {
+            if cached.generation == generation && cached.view == view {
+                return Ok(cached.store.clone());
+            }
+        }
+    }
+    let mut store = PodStore::new(graph.fork());
+    let materialized = match view {
+        AuthView::Wac => store.materialize_wac(),
+        AuthView::Acp => store.materialize_acp(),
+    };
+    materialized.map_err(|_| ServerViewError::Materialize)?;
+    let store = Arc::new(store);
+    if let Ok(mut cache) = state.authz_view_cache().write() {
+        // Never let a slow build overwrite a NEWER generation's view with an older one.
+        let install = match cache.as_ref() {
+            None => true,
+            Some(cached) => cached.generation <= generation,
+        };
+        if install {
+            *cache = Some(CachedAuthView {
+                generation,
+                view,
+                store: store.clone(),
+            });
+        }
+    }
+    Ok(store)
+}
+
+/// [`build_server_view`] on the blocking pool — the materialisation is a whole-store N3 run, so
+/// it must never occupy an async worker (the crate's `spawn_blocking` idiom). A join failure is
+/// a fail-closed 503: no decision is produced.
+// [SONNET-4.6] `Response` is large; same `result_large_err` allow as the rest of this module.
+#[allow(clippy::result_large_err)]
+async fn server_store(
+    state: &AppState,
+    requested_view: Option<AuthView>,
+) -> Result<Arc<PodStore>, Response> {
+    let st = state.clone();
+    let task = tokio::task::spawn_blocking(move || build_server_view(&st, requested_view));
+    match task.await {
+        Ok(Ok(store)) => Ok(store),
+        Ok(Err(err)) => Err(server_view_error_response(err)),
+        Err(_) => Err(json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "could not materialise the authorization view",
+        )),
+    }
+}
+
+/// The store an endpoint decides over, per the request's [`AuthzSource`]: the stateless
+/// per-request build ([`build_store`]) or the stateful per-generation view ([`server_store`]).
+/// Both lanes are fail-closed; neither can yield a store that silently grants.
+// [SONNET-4.6] `Response` is large; same `result_large_err` allow as the rest of this module.
+#[allow(clippy::result_large_err)]
+async fn resolve_store(
+    state: &AppState,
+    req: &AuthzRequest,
+) -> Result<ResolvedStore, Response> {
+    match req.source {
+        AuthzSource::Body => build_store(req).map(ResolvedStore::Owned),
+        AuthzSource::Server => server_store(state, req.view).await.map(ResolvedStore::Shared),
+    }
+}
+
 /// `POST /authz/decide` — the per-request WAC/ACP decision (FR-1/FR-4). Body:
 /// `{ "dataset": nquads, "session": { "agent"?, "client"?, "issuer"?, "now"? }, "resource": iri,
-/// "mode": "read"|"write"|"append"|"control", "view"?: "wac"|"acp" }`. Returns the
+/// "mode": "read"|"write"|"append"|"control", "view"?: "wac"|"acp", "source"?: "body"|"server" }`.
+/// With `"source":"server"` the `"dataset"` is omitted and the decision runs over the server's
+/// own loaded store ([SONNET-4.6] sq-snopa.8 — see the module doc). Returns the
 /// [`decision_to_json`] body with the HTTP status [`deny_status_code`] maps a DENY to (an ALLOW is
 /// always `200`).
 ///
@@ -407,10 +703,21 @@ pub(crate) async fn decide_endpoint(
     #[cfg(feature = "solid-authz-trust")]
     if state.config().solid_authz_trust {
         if let Some(trust_val) = v.get("trust") {
+            // [SONNET-4.6] sq-snopa.8 — the trust lane decides over its OWN store, built by
+            // injecting admitted facts into the BODY dataset, so it cannot compose with the
+            // stateful lane's shared per-generation view. Refuse rather than silently authorise
+            // over the wrong pod.
+            if req.source == AuthzSource::Server {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "the trust extension decides over the request dataset; it cannot be combined \
+                     with 'source':'server' (fail-closed)",
+                );
+            }
             return trust_authz_decide(trust_val, &req, &resource, mode, &v);
         }
     }
-    let store = match build_store(&req) {
+    let store = match resolve_store(&state, &req).await {
         Ok(s) => s,
         Err(resp) => return resp,
     };
@@ -421,17 +728,20 @@ pub(crate) async fn decide_endpoint(
     #[cfg(feature = "odrl-authz")]
     let (store, odrl_lane_fired) = {
         let mut store = store;
-        let fired = dataset_carries_odrl(&req.dataset);
-        if fired {
-            if let Err(resp) = apply_odrl_lane(&mut store, &req, mode) {
+        // [SONNET-4.6] sq-snopa.8 — the lane reads the BODY dataset, so it fires only in the
+        // stateless lane; `fired` implies `ResolvedStore::Owned` by construction (the stateful
+        // lane forbids `dataset` outright). A server store that carries ODRL rules is REFUSED in
+        // `build_server_view`, never silently un-enforced.
+        let fired = req.source == AuthzSource::Body && dataset_carries_odrl(&req.dataset);
+        if let (true, ResolvedStore::Owned(s)) = (fired, &mut store) {
+            if let Err(resp) = apply_odrl_lane(s, &req, mode) {
                 return resp;
             }
         }
         (store, fired)
     };
-    // Deciding is CPU-light here (the materialise already ran), but keep the store owned in the
-    // closure so the borrowed session must be rebuilt inside — do it inline (no spawn needed).
-    let decision = store.decide(&req.session(), &resource, mode);
+    // Deciding is CPU-light here (the materialise already ran), so it stays inline.
+    let decision = store.get().decide(&req.session(), &resource, mode);
     // [FABLE-5] sq-3mu76 — read-scoped advertisement (module doc): when the lane fired, mask
     // the advisory `grantedModes` to the requested (read) mode — the lane evidenced no other.
     #[cfg(feature = "odrl-authz")]
@@ -1250,6 +1560,9 @@ fn build_store_with_admitted(
     }
     // Delegate to the unchanged build_store path (WAC/ACP inference + materialisation).
     let augmented_req = AuthzRequest {
+        // [SONNET-4.6] sq-snopa.8 — the trust lane decides over THIS augmented body dataset; the
+        // stateful lane is refused before `trust_authz_decide` is ever reached.
+        source: AuthzSource::Body,
         dataset: augmented,
         agent: req.agent.clone(),
         client: req.client.clone(),
@@ -1279,7 +1592,9 @@ fn trust_deny_json(reason: &str) -> String {
 }
 
 /// `POST /authz/wac-allow` — the `WAC-Allow` header VALUE for a `(session, resource)` (FR-2/FR-4).
-/// Body: `{ "dataset": nquads, "session": {..}, "resource": iri, "view"?: "wac"|"acp" }`. Returns
+/// Body: `{ "dataset": nquads, "session": {..}, "resource": iri, "view"?: "wac"|"acp",
+/// "source"?: "body"|"server" }` ([SONNET-4.6] sq-snopa.8: `"server"` omits `"dataset"` and
+/// advertises over the server's own loaded store). Returns
 /// `{ "wacAllow": "user=\"…\",public=\"…\"" }` — the RFC-style permission advertisement the server
 /// puts in a `WAC-Allow` response header.
 ///
@@ -1324,7 +1639,7 @@ pub(crate) async fn wac_allow_endpoint(
             return json_error(StatusCode::BAD_REQUEST, "'resource' is not a valid IRI");
         }
     };
-    let store = match build_store(&req) {
+    let store = match resolve_store(&state, &req).await {
         Ok(s) => s,
         Err(resp) => return resp,
     };
@@ -1337,9 +1652,10 @@ pub(crate) async fn wac_allow_endpoint(
     #[cfg(feature = "odrl-authz")]
     let (store, odrl_lane_fired) = {
         let mut store = store;
-        let fired = dataset_carries_odrl(&req.dataset);
-        if fired {
-            if let Err(resp) = apply_odrl_lane(&mut store, &req, Mode::Read) {
+        // [SONNET-4.6] sq-snopa.8 — body-dataset lane only (see `decide_endpoint`).
+        let fired = req.source == AuthzSource::Body && dataset_carries_odrl(&req.dataset);
+        if let (true, ResolvedStore::Owned(s)) = (fired, &mut store) {
+            if let Err(resp) = apply_odrl_lane(s, &req, Mode::Read) {
                 return resp;
             }
         }
@@ -1350,9 +1666,10 @@ pub(crate) async fn wac_allow_endpoint(
     // returns `None` when no ACL was discovered — fail-closed: no header emitted in that case.
     // [SONNET-4.6] POSITIONAL format args (CodeQL rust/unused-variable guard).
     let acl_link: Option<String> = store
+        .get()
         .resolve_acl(&resource_iri)
         .map(|eff| format!("<{}>; rel=\"acl\"", eff.acl.as_str()));
-    let value = store.wac_allow(&req.session(), &resource);
+    let value = store.get().wac_allow(&req.session(), &resource);
     // [FABLE-5] sq-3mu76 — read-scoped advertisement (module doc): the lane materialised
     // read-action outcomes only, so advertise at most `user="read"` and never a public mode
     // (an anonymous session is refused wherever the lane fires). Fail-closed: this can only
@@ -1567,7 +1884,9 @@ fn apply_odrl_lane(store: &mut PodStore, req: &AuthzRequest, mode: Mode) -> Resu
 }
 
 /// `POST /authz/query` — an ACCESS-CONTROLLED SPARQL query as `session` (FR-4). Body:
-/// `{ "dataset": nquads, "session": {..}, "mode"?: "read"|…, "query": sparql, "view"?: … }`.
+/// `{ "dataset": nquads, "session": {..}, "mode"?: "read"|…, "query": sparql, "view"?: …,
+/// "source"?: "body"|"server" }` ([SONNET-4.6] sq-snopa.8: `"server"` omits `"dataset"` and
+/// queries the server's own loaded store through the same access-controlled view).
 /// Delegates to [`PodStore::query_json_as`] (the zero-copy authorised-graph-set view path) and
 /// returns the SPARQL 1.1 JSON results serialisation. `mode` defaults to `read` (the query path).
 ///
@@ -1613,7 +1932,7 @@ pub(crate) async fn query_endpoint(
             }
         },
     };
-    let store = match build_store(&req) {
+    let store = match resolve_store(&state, &req).await {
         Ok(s) => s,
         Err(resp) => return resp,
     };
@@ -1624,14 +1943,16 @@ pub(crate) async fn query_endpoint(
     #[cfg(feature = "odrl-authz")]
     let store = {
         let mut store = store;
-        if dataset_carries_odrl(&req.dataset) {
-            if let Err(resp) = apply_odrl_lane(&mut store, &req, mode) {
+        // [SONNET-4.6] sq-snopa.8 — body-dataset lane only (see `decide_endpoint`).
+        let fired = req.source == AuthzSource::Body && dataset_carries_odrl(&req.dataset);
+        if let (true, ResolvedStore::Owned(s)) = (fired, &mut store) {
+            if let Err(resp) = apply_odrl_lane(s, &req, mode) {
                 return resp;
             }
         }
         store
     };
-    match store.query_json_as(&req.session(), mode, &query) {
+    match store.get().query_json_as(&req.session(), mode, &query) {
         Ok(json) => json_response(StatusCode::OK, json),
         // The engine's parse/eval detail is withheld (info-leak posture); the class is enough.
         Err(_) => json_error(
@@ -1822,6 +2143,7 @@ mod tests {
     #[test]
     fn build_store_denies_on_unparseable_dataset() {
         let req = AuthzRequest {
+            source: AuthzSource::Body,
             dataset: "this is not n-quads @@@".to_owned(),
             agent: None,
             client: None,
@@ -1840,6 +2162,7 @@ mod tests {
     #[test]
     fn build_store_then_decide_is_authorized_and_anonymous_fails_closed() {
         let req = AuthzRequest {
+            source: AuthzSource::Body,
             dataset: WAC_NQUADS.to_owned(),
             agent: Some("https://alice.ex/card#me".to_owned()),
             client: None,
@@ -1862,6 +2185,76 @@ mod tests {
         assert!(!dw.allow);
         assert_eq!(deny_status_code(dw.status), StatusCode::FORBIDDEN);
     }
+
+    // ── [SONNET-4.6] sq-snopa.8 — the stateful (`"source":"server"`) lane ──
+
+    /// The default is the historical stateless lane: no `"source"` => `Body`, dataset required.
+    #[test]
+    fn parse_request_defaults_to_the_stateless_body_source() {
+        let body = Bytes::from(r#"{"dataset":"<a> <b> <c> <g> ."}"#);
+        let req = parse_request(&body).unwrap();
+        assert_eq!(req.source, AuthzSource::Body);
+        assert_eq!(req.dataset, "<a> <b> <c> <g> .");
+    }
+
+    /// `"source":"server"` needs no dataset — it authorises over the server's own store.
+    #[test]
+    fn parse_request_accepts_server_source_without_a_dataset() {
+        let body = Bytes::from(r#"{"source":"SERVER","session":{"agent":"https://a.ex#me"}}"#);
+        let req = parse_request(&body).unwrap();
+        assert_eq!(req.source, AuthzSource::Server);
+        assert!(
+            req.dataset.is_empty(),
+            "the stateful lane must carry no body dataset"
+        );
+        assert_eq!(req.agent.as_deref(), Some("https://a.ex#me"));
+    }
+
+    /// A body naming BOTH pods is ambiguous — refused, never silently resolved to one of them.
+    #[test]
+    fn parse_request_rejects_server_source_carrying_a_dataset_fail_closed() {
+        let body = Bytes::from(r#"{"source":"server","dataset":"<a> <b> <c> <g> ."}"#);
+        match parse_request(&body) {
+            Ok(_) => panic!("a body carrying both a dataset and source:server must be refused"),
+            Err(resp) => assert_eq!(resp.status(), StatusCode::BAD_REQUEST),
+        }
+    }
+
+    /// An unknown `"source"` keyword is a fail-closed client error, not an inferred default.
+    #[test]
+    fn parse_request_rejects_unknown_source_fail_closed() {
+        let body = Bytes::from(r#"{"source":"whatever"}"#);
+        match parse_request(&body) {
+            Ok(_) => panic!("an unknown source keyword must be refused"),
+            Err(resp) => assert_eq!(resp.status(), StatusCode::BAD_REQUEST),
+        }
+    }
+
+    /// The graph-level ACP inference: a `.acr` named graph selects ACP, a `.acl` one leaves WAC.
+    #[test]
+    fn graph_view_is_acp_detects_acr_named_graphs() {
+        let acp = sparq_core::Graph::load_dataset(
+            "<https://pod.ex/x#i> <https://ex.dev/ns#p> \"v\" <https://pod.ex/x.acr> .",
+            "nquads",
+        )
+        .unwrap();
+        assert!(graph_view_is_acp(&acp));
+        let wac = sparq_core::Graph::load_dataset(WAC_NQUADS, "nquads").unwrap();
+        assert!(
+            !graph_view_is_acp(&wac),
+            "a WAC pod must fall back to the WAC view"
+        );
+    }
+
+    /// A materialisation failure is the retryable 503; the stateless lane's mapping, kept.
+    #[test]
+    fn server_view_error_maps_materialize_to_retryable_503() {
+        assert_eq!(
+            server_view_error_response(ServerViewError::Materialize).status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
 }
 
 // ── [FABLE-5] sq-lrtc3.1 — unit tests for the ODRL lane helpers ─────────────
@@ -1901,6 +2294,7 @@ mod odrl_tests {
 
     fn authz_req(dataset: String, agent: Option<&str>) -> AuthzRequest {
         AuthzRequest {
+            source: AuthzSource::Body,
             dataset,
             agent: agent.map(str::to_owned),
             client: None,
@@ -2049,6 +2443,47 @@ mod odrl_tests {
         let req = authz_req(dataset, Some(ALICE));
         let store = lane(&req, Mode::Read).expect("rule-less policy is a no-op");
         assert!(!reads_n1(&store, ALICE), "no grant appears from a literal marker");
+    }
+
+    // ── [SONNET-4.6] sq-snopa.8 — the stateful lane's ODRL refusal ────────
+
+    /// A server store carrying ODRL rules is DETECTED, so the stateful lane can REFUSE rather
+    /// than silently un-enforce a prohibition (which would be fail-OPEN); a plain WAC pod is
+    /// not a false positive.
+    #[test]
+    fn graph_carries_odrl_detects_rules_and_spares_a_plain_pod() {
+        // Rules in the DEFAULT graph.
+        let dataset = format!("{}{}", CONTENT, prohibit_nq(ALICE));
+        let with_rules = sparq_core::Graph::load_dataset(&dataset, "nquads").unwrap();
+        assert!(graph_carries_odrl(&with_rules));
+
+        // Rules in a NAMED graph — `union_policy_graph` reads those too, so the refusal must
+        // see them as well (this is the `graph.named` arm of the scan).
+        let named = format!(
+            "{}<urn:pol/p> <http://www.w3.org/ns/odrl/2/prohibition> _:proh <urn:g/policies> .\n",
+            CONTENT
+        );
+        let in_named = sparq_core::Graph::load_dataset(&named, "nquads").unwrap();
+        assert!(
+            graph_carries_odrl(&in_named),
+            "a rule hidden in a named graph must still be detected"
+        );
+
+        let plain = sparq_core::Graph::load_dataset(CONTENT, "nquads").unwrap();
+        assert!(
+            !graph_carries_odrl(&plain),
+            "a plain pod must not be refused as ODRL-carrying"
+        );
+    }
+
+    /// The refusal is a DEFINITIVE 400 (the request can never succeed as written), not the
+    /// retryable 503 a materialisation failure maps to.
+    #[test]
+    fn server_view_error_maps_odrl_to_definitive_400() {
+        assert_eq!(
+            server_view_error_response(ServerViewError::Odrl).status(),
+            StatusCode::BAD_REQUEST
+        );
     }
 }
 
