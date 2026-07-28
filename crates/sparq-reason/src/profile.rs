@@ -17,6 +17,10 @@
 //!   the round number, the facts newly committed in that round and the running total;
 //! - **whole run** — [`Report::rounds`], [`Report::total_derived`], [`Report::wall_time`].
 //!
+//! The per-round ticks are a liveness signal and the [`Report`] is the accounting document; the
+//! two are not the same number when OWL-RL equality reasoning is involved. See
+//! [`Progress::total_derived`].
+//!
 //! ## Honest granularity
 //!
 //! Attribution is per **rule GROUP**, not per individual entailment rule, because that is the
@@ -28,8 +32,9 @@
 //! `derived_count` counts the facts a group **emitted into the round's candidate set**, i.e.
 //! BEFORE cross-rule deduplication against the closure — that is the number that finds the
 //! blow-up (a rule generating millions of duplicates is exactly the offender you are hunting).
-//! The net new facts of the whole run are [`Report::total_derived`]; the two are equal only
-//! when no rule ever emits a duplicate.
+//! The net new facts of the whole run are [`Report::total_derived`]. The two are not comparable
+//! in either direction: duplicates push `derived_count` above the net new facts, while the facts
+//! owl:sameAs expansion creates are in `total_derived` and are emitted by no rule group.
 //!
 //! # Threading
 //!
@@ -98,7 +103,10 @@ pub struct Progress {
     pub round: usize,
     /// Facts newly committed to the closure in THIS round.
     pub derived_count: usize,
-    /// Facts committed so far across all rounds.
+    /// Facts committed so far across all rounds — a *liveness* figure, not the run's final
+    /// count. The OWL-RL owl:sameAs equivalence-class expansion commits facts after the last
+    /// round and is not ticked, so on an ontology with equalities this running total can end
+    /// well below [`Report::total_derived`] (see [`rules::SAMEAS_EXPAND`]).
     pub total_derived: usize,
     /// Time since the profiler was installed.
     pub elapsed: Duration,
@@ -125,7 +133,10 @@ impl Report {
         self.rounds
     }
 
-    /// Net new facts committed to the closure across the whole run.
+    /// Net new facts committed to the closure across the whole run — for a batch
+    /// materialization, exactly the count `materialize` returned, equality expansion included.
+    /// This is NOT always the sum of the per-round [`Progress::derived_count`] ticks; see that
+    /// field.
     pub fn total_derived(&self) -> usize {
         self.total_derived
     }
@@ -230,9 +241,16 @@ impl Profiler {
     }
 
     /// Create a profiler that reports [`Progress`] once per fixpoint round of a batch
-    /// materialization, and once per *incrementally maintained* insert/delete. A mutation that
-    /// falls back to a full rebuild instead ticks the rounds of the batch run it delegates to
-    /// — [`rules::INCREMENTAL_REBUILD`] in [`Report::stats`] is what identifies that case.
+    /// materialization, and once per *incrementally maintained* insert/delete.
+    ///
+    /// A mutation that falls back to a full re-materialization emits **no tick of its own**;
+    /// [`rules::INCREMENTAL_REBUILD`] in [`Report::stats`] is what identifies that case. Most
+    /// rebuild paths — [`crate::MaterializedGraph`], and [`crate::MaterializedOwlGraph`] in its
+    /// counting modes — re-materialize *directly* (they replicate the batch materializer rather
+    /// than calling it) and so report no rounds at all; only a `MaterializedOwlGraph` that has
+    /// fallen back to whole-graph OWL-RL delegates to [`crate::materialize_owl_rl`], whose own
+    /// rounds then tick. So do not treat a silent stretch as a stalled reasoner: check
+    /// `incremental-rebuild` in the report.
     ///
     /// The callback runs on the materializing thread with the profiler temporarily detached, so
     /// it must not itself start a nested materialization; keep it short (a channel send, a
@@ -332,6 +350,31 @@ pub(crate) fn derived(rule: &'static str, n: usize) {
     ACTIVE.with(|a| {
         if let Some(p) = a.borrow_mut().as_mut() {
             p.entry(rule).derived_count += n;
+        }
+    });
+}
+
+/// Replace the `round_sum` this call already reported through [`round`] with `net`, the net-new
+/// fact count the materializer is about to return.
+///
+/// The OWL-RL fixpoint commits *canonical* facts round by round; the owl:sameAs
+/// equivalence-class expansion ([`rules::SAMEAS_EXPAND`]) re-emits them over every class member
+/// once the fixpoint has closed, so those facts belong to no round. A merge can also
+/// recanonicalize an already-committed fact out of the closure and let a later round commit it
+/// again, so the round sum is not guaranteed to be a lower bound either — hence a two-way
+/// reconcile rather than adding a residual. That keeps
+/// [`Report::total_derived`] exactly the returned count. The progress callback is deliberately
+/// NOT fired: the expansion is one post-fixpoint phase, not a round (see
+/// [`Progress::total_derived`]).
+pub(crate) fn reconcile_total(round_sum: usize, net: usize) {
+    if round_sum == net {
+        return;
+    }
+    ACTIVE.with(|a| {
+        if let Some(p) = a.borrow_mut().as_mut() {
+            // This call contributed exactly `round_sum` to the running total (its own rounds);
+            // an enclosing materialization's contribution must survive untouched.
+            p.total_derived = p.total_derived.saturating_sub(round_sum) + net;
         }
     });
 }

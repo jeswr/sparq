@@ -307,6 +307,11 @@ pub fn materialize_d(d: &Recognized, dict: &mut Dict, triples: &mut Vec<[Id; 3]>
     let mut new_sorted: Vec<[Id; 3]> = new_rows.into_iter().collect();
     new_sorted.sort_unstable();
     triples.extend(new_sorted);
+    // [SONNET-4.6] rdfD1 is single-pass by construction (one sweep over the literals), so the
+    // whole closure is exactly one round of the progress monitor — the same shape `rdfs_closure`
+    // reports. Without this, `Report::total_derived` would stay 0 for a `Profile::D` run that
+    // derived facts, so the counter would not mean the same thing across the three profiles.
+    prof_round!(added);
     added
 }
 

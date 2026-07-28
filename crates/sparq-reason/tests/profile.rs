@@ -76,7 +76,7 @@ fn explosive_rule_is_top_without_changing_closure() {
     assert_eq!(
         report.total_derived(),
         plain,
-        "the per-round committed counts must sum to the materializer's return value"
+        "total_derived is the materializer's return value"
     );
     // The commit phase is separately attributed, so a slow commit is distinguishable from a
     // rule that emits too much.
@@ -117,7 +117,8 @@ fn progress_monitor_reports_every_round_of_a_materialization() {
     assert_eq!(
         seen.last().unwrap().total_derived,
         added,
-        "the last notification's total is the closure's new-fact count"
+        "the ticks account for the whole closure — this fixture has no owl:sameAs, so nothing \
+         is committed outside a round (contrast `sameas_expansion_is_counted_in_total_derived`)"
     );
     // The final round of a fixpoint is the one that derives nothing — that is how it stops.
     assert_eq!(seen.last().unwrap().derived_count, 0);
@@ -207,9 +208,14 @@ fn a_tbox_insert_is_attributed_to_the_rebuild_fallback() {
         dict.intern_iri("http://example.com/C"),
     );
     let mut graph = MaterializedGraph::new(&mut dict, &[[a, sc, b]]);
-    let (_, report) = sparq_reason::profile::with_profiler(Profiler::new(), || {
-        graph.insert(&[[b, sc, c]]); // a TBox triple: forces the full rebuild path
-    });
+    let ticks: Arc<Mutex<Vec<Progress>>> = Arc::default();
+    let sink = Arc::clone(&ticks);
+    let (_, report) = sparq_reason::profile::with_profiler(
+        Profiler::with_progress(move |p| sink.lock().unwrap().push(p)),
+        || {
+            graph.insert(&[[b, sc, c]]); // a TBox triple: forces the full rebuild path
+        },
+    );
     let rebuild = report
         .stats()
         .iter()
@@ -222,6 +228,171 @@ fn a_tbox_insert_is_attributed_to_the_rebuild_fallback() {
         !report.stats().iter().any(|s| s.rule == rules::INCREMENTAL_INSERT),
         "a rebuilding insert must NOT also be counted as an incremental sweep"
     );
+    // The documented progress promise for this path: a `MaterializedGraph` rebuild
+    // re-materializes DIRECTLY (it replicates `rdfs_closure` rather than calling it), so it
+    // emits no tick of its own and no round — `incremental-rebuild` above is the only signal
+    // that anything happened. Pinned so the docs cannot drift back to claiming delegation.
+    assert_eq!(
+        ticks.lock().unwrap().len(),
+        0,
+        "a direct rebuild must not fabricate progress ticks"
+    );
+    assert_eq!(report.rounds(), 0, "and it contributes no rounds");
+}
+
+/// The one rebuild path that DOES tick: a `MaterializedOwlGraph` that has fallen back to
+/// whole-graph OWL-RL delegates to the batch materializer, so that run's rounds are reported.
+#[test]
+fn an_owl_fallback_rebuild_ticks_the_batch_run_it_delegates_to() {
+    use sparq_reason::MaterializedOwlGraph;
+    let mut dict = Dict::new();
+    let ty = dict.intern_iri(oxrdf::vocab::rdf::TYPE.as_str());
+    let sc = dict.intern_iri(oxrdf::vocab::rdfs::SUB_CLASS_OF.as_str());
+    let inter = dict.intern_iri("http://www.w3.org/2002/07/owl#intersectionOf");
+    let first = dict.intern_iri(oxrdf::vocab::rdf::FIRST.as_str());
+    let rest = dict.intern_iri(oxrdf::vocab::rdf::REST.as_str());
+    let nil = dict.intern_iri(oxrdf::vocab::rdf::NIL.as_str());
+    let iri = |d: &mut Dict, s: &str| d.intern_iri(s);
+    let (ca, c1, c2) = (
+        iri(&mut dict, "http://example.com/CA"),
+        iri(&mut dict, "http://example.com/C1"),
+        iri(&mut dict, "http://example.com/C2"),
+    );
+    let (l1, l2, x) = (
+        iri(&mut dict, "http://example.com/l1"),
+        iri(&mut dict, "http://example.com/l2"),
+        iri(&mut dict, "http://example.com/x"),
+    );
+    let (d, e) = (
+        iri(&mut dict, "http://example.com/D"),
+        iri(&mut dict, "http://example.com/E"),
+    );
+    // owl:intersectionOf puts the graph in `Fallback` mode (no counting maintenance for it).
+    let base = [
+        [ca, inter, l1],
+        [l1, first, c1],
+        [l1, rest, l2],
+        [l2, first, c2],
+        [l2, rest, nil],
+        [x, ty, c1],
+        [x, ty, c2],
+    ];
+    let mut graph = MaterializedOwlGraph::new(&mut dict, &base);
+    let ticks: Arc<Mutex<Vec<Progress>>> = Arc::default();
+    let sink = Arc::clone(&ticks);
+    let (_, report) = sparq_reason::profile::with_profiler(
+        Profiler::with_progress(move |p| sink.lock().unwrap().push(p)),
+        || {
+            graph.insert(&mut dict, &[[d, sc, e]]); // TBox: forces the rebuild
+        },
+    );
+    let names: Vec<_> = report.stats().iter().map(|s| s.rule).collect();
+    assert!(names.contains(&rules::INCREMENTAL_REBUILD), "{:?}", names);
+    assert!(
+        names.contains(&rules::DELTA_SWEEP) && names.contains(&rules::COMMIT),
+        "the rebuild encloses a whole nested batch run's groups: {:?}",
+        names
+    );
+    let ticks = ticks.lock().unwrap();
+    assert!(!ticks.is_empty(), "the delegated batch run reports its rounds");
+    assert_eq!(ticks.len(), report.rounds(), "one notification per round");
+}
+
+/// `Report::total_derived` means the run's NET NEW FACTS — the materializer's return value —
+/// even when most of them are created after the fixpoint closes. The OWL-RL fixpoint commits
+/// only *canonical* facts; the owl:sameAs equivalence classes are expanded back over the
+/// closure afterwards, so a round sum alone would report far too few (here: none at all).
+#[test]
+fn sameas_expansion_is_counted_in_total_derived() {
+    let mut dict = Dict::new();
+    let iri = |d: &mut Dict, s: &str| d.intern_iri(s);
+    let same = iri(&mut dict, "http://www.w3.org/2002/07/owl#sameAs");
+    let (p, q) = (
+        iri(&mut dict, "http://example.com/p"),
+        iri(&mut dict, "http://example.com/q"),
+    );
+    let (a, b, c) = (
+        iri(&mut dict, "http://example.com/a"),
+        iri(&mut dict, "http://example.com/b"),
+        iri(&mut dict, "http://example.com/c"),
+    );
+    let z = iri(&mut dict, "http://example.com/z");
+    // A three-member equivalence class {a, b, c} that two assertions actually mention, so the
+    // expansion has real work: every triple over a class member is re-emitted for each member.
+    let mut triples = vec![[a, same, b], [b, same, c], [a, p, z], [z, q, c]];
+
+    let mut plain_dict = dict.clone();
+    let mut plain_triples = triples.clone();
+    let plain = materialize(Profile::OwlRl, &mut plain_dict, &mut plain_triples);
+
+    let ticks: Arc<Mutex<Vec<Progress>>> = Arc::default();
+    let sink = Arc::clone(&ticks);
+    let (added, report) = materialize_profiled_with(
+        Profiler::with_progress(move |t| sink.lock().unwrap().push(t)),
+        Profile::OwlRl,
+        &mut dict,
+        &mut triples,
+    );
+
+    assert_eq!(plain, added, "instrumentation must not change the fact count");
+    assert_eq!(plain_triples, triples, "nor the closure, element for element");
+    assert!(added > 0, "the fixture must actually derive something");
+    assert_eq!(
+        report.total_derived(),
+        added,
+        "total_derived is the run's net-new-fact count, expansion included: {:?}",
+        report.stats()
+    );
+    // The equality expansion is a phase, not a round — it must not inflate `rounds()`, and its
+    // facts reach the report without a fabricated tick.
+    let ticks = ticks.lock().unwrap();
+    assert_eq!(ticks.len(), report.rounds(), "one notification per round");
+    let round_sum: usize = ticks.iter().map(|t| t.derived_count).sum();
+    assert_eq!(
+        round_sum,
+        ticks.last().map_or(0, |t| t.total_derived),
+        "each tick's running total is the sum of the round counts before it"
+    );
+    assert!(
+        round_sum < added,
+        "this fixture's facts come from the expansion, so the rounds alone under-report \
+         ({} of {}) — that gap is exactly what total_derived must close",
+        round_sum,
+        added
+    );
+    let expand = report
+        .stats()
+        .iter()
+        .find(|s| s.rule == rules::SAMEAS_EXPAND)
+        .expect("the expansion phase is measured");
+    assert_eq!(expand.fired_count, 1, "expansion runs once, after the fixpoint");
+    // The renderable surfaces carry the reconciled number, not the round sum.
+    assert!(
+        report.to_text_summary(3).contains(&format!("{} fact(s) derived", added)),
+        "{}",
+        report.to_text_summary(3)
+    );
+    assert!(
+        report.to_json().contains(&format!("\"total_derived\":{}", added)),
+        "{}",
+        report.to_json()
+    );
+}
+
+/// Every batch profile reports the same thing: `total_derived` is what `materialize` returned.
+/// D-entailment is single-pass like RDFS, so it is one round.
+#[cfg(feature = "d-entail")]
+#[test]
+fn d_entailment_reports_its_derived_count() {
+    let mut dict = Dict::new();
+    let p = dict.intern_iri("http://example.com/p");
+    let s = dict.intern_iri("http://example.com/s");
+    let lit = dict.intern_lit("42", "http://www.w3.org/2001/XMLSchema#integer", None);
+    let mut triples = vec![[s, p, lit]];
+    let (added, report) = materialize_profiled(Profile::D, &mut dict, &mut triples);
+    assert!(added > 0, "rdfD1 types the recognized literal");
+    assert_eq!(report.total_derived(), added);
+    assert_eq!(report.rounds(), 1, "rdfD1 is single-pass");
 }
 
 /// The renderable surfaces a CLI / server / GUI consumes.

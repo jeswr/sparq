@@ -1018,6 +1018,11 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
     // [SONNET-4.6] sq-6tykl.5: per-rule-group cost + per-round progress, behind the non-default
     // `profile` feature (every `prof_*!` below expands to nothing without it). This replaces the
     // ad-hoc `SPARQ_OWL_PROF=1` eprintln scaffolding that used to live here.
+    //
+    // Running sum of what the fixpoint rounds committed, so the post-fixpoint owl:sameAs
+    // expansion residual can be attributed at the end (see the `prof_round!` after FINALIZE).
+    #[cfg(feature = "profile")]
+    let mut committed_in_rounds = 0usize;
     loop {
         prof_mark!(__t);
         let schema_dirty = schema_stale
@@ -1587,8 +1592,14 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
             }
         }
         prof_phase!(crate::profile::rules::COMMIT, __t);
-        // One fixpoint round is complete: `new_delta` is exactly the facts it committed, so
-        // this is the progress monitor's tick (and the run's round counter).
+        // One fixpoint round is complete: `new_delta` is exactly the CANONICAL facts it
+        // committed, so this is the progress monitor's tick (and the run's round counter).
+        // Facts the owl:sameAs expansion adds after the fixpoint belong to no round and are
+        // attributed separately below.
+        #[cfg(feature = "profile")]
+        {
+            committed_in_rounds += new_delta.len();
+        }
         prof_round!(new_delta.len());
         prof_mark!(__t);
         if merged {
@@ -1780,6 +1791,17 @@ fn owl_rl_closure(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
     triples.append(&mut base);
     triples.extend(derived);
     prof_phase!(crate::profile::rules::FINALIZE, __t);
+    // [SONNET-4.6] The rounds above counted only the CANONICAL facts they committed. The
+    // owl:sameAs expansion then re-emits those facts across every equivalence class AFTER the
+    // fixpoint has closed, so on an ontology with equalities the round sum is NOT the run's
+    // net-new-fact count (a pure-equality ontology closes in one round that commits nothing,
+    // yet derives every expanded fact). Swap this call's round sum for the value the function
+    // actually returns, so `Report::total_derived` means one thing everywhere: net new facts.
+    // Deliberately NOT a progress tick — the expansion is a single post-fixpoint phase, already
+    // timed as `eq-expand`, and reporting it as a fixpoint round would make `Report::rounds`
+    // count a round that never ran (see `Progress::total_derived`).
+    #[cfg(feature = "profile")]
+    crate::profile::reconcile_total(committed_in_rounds, added);
     // NOT `triples.len() - before`: duplicate input triples dedup away in the
     // rebuild and the subtraction underflows (see rdfs_closure).
     added
