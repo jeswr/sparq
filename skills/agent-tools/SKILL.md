@@ -1,6 +1,6 @@
 ---
 name: agent-tools
-description: Use when an LLM/agent should access a sparq RDF dataset over the Model Context Protocol (MCP) as first-class tools — run SPARQL queries, mine the dataset schema, list class profiles or namespace prefixes, read stats or a VoID descriptor, optionally SHACL-validate against caller-supplied shapes or derive a shape-aware describe_form FormDescription for a focus node, and (gated, off by default) apply SPARQL updates. Covers the opt-in sparq-mcp crate — a JSON-RPC 2.0 MCP server (initialize, tools/list, tools/call) exposing query (SELECT/ASK to SPARQL-JSON), construct (CONSTRUCT/DESCRIBE to N-Triples), introspect (effective schema as JSON or token-budgeted text), stats, classes (class IRIs with instance and predicate counts), prefixes (namespace declarations and term counts), void (W3C VoID N-Triples), an opt-in read-only validate tool, and a gated update tool that is OFF by default; the transport-agnostic handle_message dispatch core plus the optional stdio feature; and the honest trust model (a local agent-tool server with no built-in auth, read-only by default, queries bounded by a QueryBudget). Also covers the opt-in solid feature — SolidMcpServer, a pod-backed server over sparq-solid's PodStore with WAC/ACP-authorized session-scoped query plus LDP resource tools (resource_get, container_list from stored ldp:contains data, and gated resource_put/resource_delete/container_create with existence non-disclosure and atomic ACL write-through), plus the MCP resources capability with subscribe:true — resources/list, resources/read, resources/subscribe and content-free notifications/resources/updated bound to Solid Notifications semantics, authorized at subscribe time and again at every delivery. Complements genai-retrieval (sparq-nlq/sparq-introspect) — that is the NL-to-SPARQL loop; this is the MCP front door.
+description: Use when an LLM/agent should access a sparq RDF dataset over the Model Context Protocol (MCP) as first-class tools — run SPARQL queries, mine the dataset schema, list class profiles or namespace prefixes, read stats or a VoID descriptor, optionally SHACL-validate against caller-supplied shapes or derive a shape-aware describe_form FormDescription for a focus node, and (gated, off by default) apply SPARQL updates. Covers the opt-in sparq-mcp crate — a JSON-RPC 2.0 MCP server (initialize, tools/list, tools/call) exposing query (SELECT/ASK to SPARQL-JSON), construct (CONSTRUCT/DESCRIBE to N-Triples), introspect (effective schema as JSON or token-budgeted text), stats, classes (class IRIs with instance and predicate counts), prefixes (namespace declarations and term counts), void (W3C VoID N-Triples), an opt-in read-only validate tool, and a gated update tool that is OFF by default; the transport-agnostic handle_message dispatch core plus the optional stdio feature; and the honest trust model (a local agent-tool server with no built-in auth, read-only by default, queries bounded by a QueryBudget). Also covers the opt-in solid feature — SolidMcpServer, a pod-backed server over sparq-solid's PodStore with WAC/ACP-authorized session-scoped query plus LDP resource tools (resource_get, container_list from stored ldp:contains data, and gated resource_put/resource_delete/container_create with existence non-disclosure and atomic ACL write-through), plus the MCP resources capability with subscribe:true — resources/list, resources/read, resources/subscribe and content-free notifications/resources/updated bound to Solid Notifications semantics, authorized at subscribe time and again at every delivery. Also covers the opt-in nlq feature's two natural-language tools — ask (NL to SPARQL, validated and executed server-side, returning the executed query plus its real result rows) and nl_query (the translate-only variant: the same grounding and validation, but the query is returned unexecuted with executed:false and no rows, for review before you run it with query). Complements genai-retrieval (sparq-nlq/sparq-introspect) — that is the NL-to-SPARQL loop; this is the MCP front door.
 ---
 
 # sparq agent-tools (MCP)
@@ -27,6 +27,7 @@ heavy MCP-SDK dependency.
 | `prefixes` | `sparq_introspect::Introspection` | namespace declarations + distinct IRI term counts, largest first |
 | `void` | `sparq_introspect::Introspection` | W3C VoID N-Triples; optional characteristic sets |
 | `ask` *(feature `nlq`, OFF by default)* | `sparq_nlq` NL→SPARQL loop | executed SPARQL + real result rows (+ citations) |
+| `nl_query` *(feature `nlq`, OFF by default)* | `sparq_nlq` grounding + `spargebra` validation, **no execution** | validated SPARQL, `executed: false`, **no rows** |
 | `update` *(gated, OFF by default)* | `sparq_engine::update_in_place_atomic` | new triple count |
 | `template_list` / `template_invoke` *(feature `templates`, OFF by default)* | `sparq_engine::templates` (#901 injection-safe binding) | definitions / typed fail-closed invocation |
 | `text_search` *(feature `text`, OFF by default)* | `sparq_text::TextIndex` (BM25, lazily built + reconciled) | ranked literal hits JSON |
@@ -138,10 +139,11 @@ Every tool ships a proper MCP `inputSchema` (JSON-Schema). `tools/list` returns
 **tool error** (`isError: true`), not a JSON-RPC protocol error, so the agent can read it
 and retry.
 
-### Two grounding tools (2026-06-23 design call — `shapes` + `ask`)
+### Grounding tools (2026-06-23 design call — `shapes` + `ask`; later `nl_query`)
 
-Two complementary ways to turn a natural-language question into a SPARQL answer, chosen
-**both, opt-in** on the 2026-06-23 call:
+Complementary ways to turn a natural-language question into SPARQL. `shapes` and `ask`
+were chosen **both, opt-in** on the 2026-06-23 call; `nl_query` was added later under the
+same `nlq` feature:
 
 - **`shapes`** (structured, **no LLM**, default build) — give it a **class IRI** and it
   returns the predicates instances of that class actually use, each with coverage,
@@ -160,10 +162,21 @@ Two complementary ways to turn a natural-language question into a SPARQL answer,
   configured"* error — **never** a fabricated answer, never a panic. The answer is the
   query's real rows, not a free-form paragraph.
 
+- **`nl_query`** (NL, same **opt-in `nlq` feature**, `sq-sj1f9`) — the **translate-only**
+  middle ground: the same grounded generation and validation as `ask`, but it stops before
+  execution and hands back the query. The response carries `executed: false` and **no
+  rows** — it is a query to review, not an answer. A query that parses is still refused if
+  it uses a construct the loop will not run (`SERVICE` federation), so translation cannot
+  be used to route around `ask`'s refusal; run the returned query with `query`. The honest
+  cost of skipping execution is that validation is only **syntactic**: the query may still
+  fail at runtime or match nothing. Same backend, same fail-closed "not configured" error.
+
 These are **ergonomics / grounding aids pending measurement** — *not* a token-saving
 claim (the project measured representation/token tricks as duds). `shapes` is the lean
-no-model default; `ask` trades a model call for not writing SPARQL yourself. The two
-overlap deliberately (`shapes` puts the model on the client; `ask` on the server).
+no-model default; `ask` trades a model call for not writing SPARQL yourself, and
+`nl_query` trades it for the query alone when you want to read it before it runs. The
+first two overlap deliberately (`shapes` puts the model on the client; `ask` on the
+server).
 
 ## Use it
 

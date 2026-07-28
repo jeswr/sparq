@@ -39,16 +39,19 @@ stdio = []
 # default; forwarding sparq-core's opt-in parser keeps the lean MCP build free of
 # oxjsonld while allowing application/ld+json pod documents when requested.
 jsonld = ["sparq-core/jsonld"]
-# [OPUS-4.8] sq-jxjgr: the opt-in server-side natural-language `ask` tool. OFF by default —
+# [OPUS-4.8] sq-jxjgr: the opt-in server-side natural-language tools. OFF by default —
 # it pulls in `sparq-nlq` (and through it the configurable LLM backends), so the default
 # `sparq-mcp` build stays a thin, model-free wrapper exactly as before. The structured
-# `shapes`/`introspect` tools are the no-LLM default; `nlq` only adds the `ask` tool, which
-# embeds a CONFIGURABLE LLM call (no model is bundled; the backend is read from the env). It
-# enables sparq-nlq's two configurable backends (`live` = Anthropic, `nlq-endpoint` =
-# OpenAI-compatible) plus `citations` so the `ask` answer can carry in-graph provenance.
-# The `citations` feature on THIS crate is exposed only to forward sparq-nlq's so the
-# all-features rustdoc/clippy lane compiles the citation path. [OPUS-4.8]
-nlq = ["dep:sparq-nlq", "sparq-nlq/live", "sparq-nlq/nlq-endpoint", "citations"]
+# `shapes`/`introspect` tools are the no-LLM default; `nlq` adds only NL tools, each of
+# which embeds a CONFIGURABLE LLM call (no model is bundled; the backend is read from the
+# env). It enables sparq-nlq's two configurable backends (`live` = Anthropic,
+# `nlq-endpoint` = OpenAI-compatible) plus `citations` so the `ask` answer can carry
+# in-graph provenance. The `citations` feature on THIS crate is exposed only to forward
+# sparq-nlq's so the all-features rustdoc/clippy lane compiles the citation path.
+# [SONNET-4.6] sq-sj1f9: the same feature also lights the TRANSLATE-ONLY `nl_query` tool
+# (NL→SPARQL, validated but never executed). It shares the `ask` backend resolution and
+# `sparq-nlq` grounding, so one gate covers the whole NL tool surface — no second flag.
+nlq = ["dep:sparq-nlq", "sparq-nlq/live", "sparq-nlq/nlq-endpoint", "citations", "dep:spargebra"]
 citations = ["sparq-nlq?/citations"]
 # [FABLE-5] sq-u16eq: the opt-in pod-backed server (`SolidMcpServer`) — LDP
 # container/resource CRUD tools (resource_get/container_list, plus gated
@@ -93,6 +96,11 @@ sparq-introspect = { path = "../sparq-introspect", version = "0.1.0" }
 # core/engine stay lean. A reviewed cargo-vet exemption covers the new edge (sparq-mcp ->
 # sparq-nlq under the feature).
 sparq-nlq = { path = "../sparq-nlq", version = "0.1.0", optional = true }
+# [SONNET-4.6] sq-sj1f9: the SPARQL parser the translate-only `nl_query` tool validates
+# with (and hands to `sparq_nlq::guard::forbidden_constructs`, which takes parsed algebra).
+# OPTIONAL, pulled in only by the `nlq` feature. ZERO supply-chain delta: it is the
+# workspace's vendored spargebra, already an unconditional dependency of `sparq-engine`.
+spargebra = { workspace = true, optional = true }
 # [FABLE-5] sq-u16eq: the pod store + WAC/ACP authorization view backing the opt-in
 # `solid` feature's LDP resource tools. OPTIONAL — pulled in ONLY by that feature, so the
 # default build never compiles it (in-workspace path dep; no supply-chain delta).

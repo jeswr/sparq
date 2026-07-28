@@ -52,12 +52,12 @@ transport (line-delimited JSON-RPC 2.0 over this process's stdin/stdout).
 - **`classes`** — list class IRIs with instance and predicate counts, largest class first. <!-- [GPT-5.6] sq-cekgj -->
 - **`prefixes`** — list detected namespace declarations and distinct IRI term counts, largest namespace first. <!-- [GPT-5.6] sq-kx5b0 -->
 - **`void`** — emit a W3C VoID dataset descriptor as N-Triples, optionally including characteristic-set statistics; `dataset` defaults to `urn:sparq:dataset`.
-- **`ask`** *(feature `nlq`, OFF by default)* — answer a natural-language question
-  **server-side**: NL→SPARQL→validate→execute via `sparq-nlq`, returning the executed
-  SPARQL + the real result rows (+ in-graph citations). Embeds a **configurable** LLM
-  call (`ANTHROPIC_API_KEY`, or an OpenAI-compatible `SPARQ_NLQ_ENDPOINT_URL`+`_MODEL`);
-  no model is bundled. Unconfigured it is unadvertised and returns a clear "not
-  configured" error — never a fabricated answer. The structured tools are the default.
+- **`ask`** / **`nl_query`** *(feature `nlq`, OFF by default)* — NL via `sparq-nlq`: `ask`
+  runs NL→SPARQL→validate→**execute** server-side (executed SPARQL + real result rows + citations);
+  `nl_query` **translates only**, returning a validated (parses, no `SERVICE`) but **unexecuted**
+  query to review and run via `query`. Both embed a **configurable** LLM call
+  (`ANTHROPIC_API_KEY`, or OpenAI-compatible `SPARQ_NLQ_ENDPOINT_URL`+`_MODEL`); no model is
+  bundled, and unconfigured they are unadvertised and error "not configured" — never fabricate.
 - **`update`** *(gated, OFF by default)* — apply an atomic SPARQL 1.1 Update; neither advertised in `tools/list` nor callable unless `ServerConfig::allow_update` is set.
 - **`template_list` / `template_invoke`** *(feature `templates`, OFF by default)* — named
   parameterized templates (registered on `ServerConfig::templates`) invoked with **typed,

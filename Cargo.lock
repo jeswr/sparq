@@ -5356,6 +5356,7 @@ dependencies = [
  "oxttl 0.2.3",
  "serde",
  "serde_json",
+ "spargebra",
  "sparq-core",
  "sparq-engine",
  "sparq-forms",
