@@ -70,6 +70,7 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 
 _CFG_FEATURE = re.compile(r'#\[cfg\(feature\s*=\s*"([^"]+)"\)\]')
 _DEFAULT_FEATURES = re.compile(r'^\s*default\s*=\s*\[([^\]]*)\]', re.M)
+_INCLUDE_STR = re.compile(r'include_str!\("([^"]+)"\)')
 
 
 def _enabled_features(tree: str) -> set[str]:
@@ -99,6 +100,7 @@ def fake_build(tree: str) -> bytes | None:
     """
     enabled = _enabled_features(tree)
     out: list[str] = []
+    included: list[str] = []
     roots = []
     for dirpath, dirnames, filenames in os.walk(tree):
         dirnames[:] = [d for d in dirnames if d not in ("target", ".git")]
@@ -124,9 +126,18 @@ def fake_build(tree: str) -> bytes | None:
                 gated_off = False
                 continue
             gated_off = False
+            inc = _INCLUDE_STR.search(s)
+            if inc:
+                # `include_str!` pulls a NON-.rs file's bytes into the artefact — the case
+                # that makes "decide inertness by file extension" unsound.
+                target = os.path.normpath(os.path.join(os.path.dirname(path), inc.group(1)))
+                if os.path.exists(target):
+                    with open(target, encoding="utf-8", errors="surrogateescape") as fh2:
+                        body = "".join(l for l in fh2.read().split("\n") if l.strip())
+                    included.append(hashlib.sha256(body.encode()).hexdigest()[:16])
             h = hashlib.sha256(s.encode("utf-8", "surrogateescape")).hexdigest()[:16]
             out.append(f"{rel}:{i:06d}:{h}")
-    return ("\n".join(out)).encode()
+    return ("\n".join(out + included)).encode()
 
 
 # ---------------------------------------------------------------------------
@@ -403,19 +414,46 @@ def test_neutral_tree_blanks_the_added_lines() -> None:
           "positions fixed, which is the whole basis of the proof)")
 
 
-def test_unknown_path_type_is_refused() -> None:
-    """A changed path INSIDE the build closure that we cannot model must refuse.
+def test_non_rust_file_inside_the_closure_is_blanked_not_refused() -> None:
+    """CONTROL: a crate README the build does not read must not block a derivation."""
+    base = base_files(**{"crates/c/README.md": "# c\n"})
+    head = base_files(**{"crates/c/README.md": "# c\n\nA new paragraph.\n",
+                         "crates/c/src/lib.rs": insert_at(_BASE_LIB, 4, ["// a comment"])})
+    v = run_decide(base, head)
+    check("test_non_rust_file_inside_the_closure_is_blanked_not_refused",
+          v.outcome == A.OUTCOME_DECLARED, f"got {v.outcome}: {v.reason}")
 
-    `closure=None` is the fail-closed shape used when cargo cannot answer: then every path
-    counts as build-relevant, so an unmodelled one has to refuse rather than be waved through.
+
+def test_included_non_rust_file_is_refused() -> None:
+    """RED TEST: the same README, but `include_str!`d — its content DOES reach the bundle.
+
+    This is why inertness cannot be decided by file extension. Blanking the added lines and
+    rebuilding is what tells the two cases apart, and it must refuse this one.
     """
+    lib = _BASE_LIB + '\npub const DOC: &str = include_str!("../README.md");\n'
+    base = base_files(**{"crates/c/README.md": "# c\n", "crates/c/src/lib.rs": lib})
+    head = base_files(**{"crates/c/README.md": "# c\nA new documented invariant.\n",
+                         "crates/c/src/lib.rs": lib})
+    v = run_decide(base, head)
+    check("test_included_non_rust_file_is_refused",
+          v.outcome == A.REFUSE_ADDED_LINES_ARE_SEMANTIC, f"got {v.outcome}: {v.reason}")
+
+
+def test_symlink_inside_the_closure_is_refused() -> None:
+    """Blanking rewrites files in place, which cannot speak for a symlink — refuse."""
+    base = make_tree(base_files())
+    head = make_tree(base_files())
+    link = os.path.join(head, "crates/c/src/aliased.rs")
+    os.symlink("lib.rs", link)
+    with open(os.path.join(head, "crates/c/src/lib.rs"), "a") as fh:
+        fh.write("// touched\n")
     try:
-        A.classify_paths(["crates/c/build/thing.wasmbin"], None)
-        ok = False
-    except ValueError:
-        ok = True
-    check("test_unknown_path_type_is_refused", ok,
-          "an unmodelled path inside the closure must raise, not be classed inert")
+        v = A.decide(base, head, diff_of(base, head), fake_build)
+        check("test_symlink_inside_the_closure_is_refused",
+              v.outcome == A.REFUSE_UNSUPPORTED_FILE_CHANGE, f"got {v.outcome}: {v.reason}")
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+        shutil.rmtree(head, ignore_errors=True)
 
 
 def test_paths_outside_the_build_closure_are_inert() -> None:
@@ -424,15 +462,16 @@ def test_paths_outside_the_build_closure_are_inert() -> None:
     This is what stops unrelated base-branch drift — other crates, research records, bench
     data — from refusing an otherwise-provable PR.
     """
-    rust, manifest, inert = A.classify_paths(
-        ["crates/c/src/lib.rs", "crates/other/src/lib.rs", "research/notes.md",
-         "Cargo.lock", "crates/other/README.md"],
+    blankable, manifest, inert = A.classify_paths(
+        ["crates/c/src/lib.rs", "crates/c/README.md", "crates/other/src/lib.rs",
+         "research/notes.md", "Cargo.lock", "crates/other/README.md"],
         ["crates/c/"])
     check("test_paths_outside_the_build_closure_are_inert",
-          rust == ["crates/c/src/lib.rs"] and manifest == ["Cargo.lock"]
+          sorted(blankable) == ["crates/c/README.md", "crates/c/src/lib.rs"]
+          and manifest == ["Cargo.lock"]
           and sorted(inert) == ["crates/other/README.md", "crates/other/src/lib.rs",
                                 "research/notes.md"],
-          f"got rust={rust} manifest={manifest} inert={inert}")
+          f"got blankable={blankable} manifest={manifest} inert={inert}")
 
 
 def test_root_build_inputs_are_never_inert() -> None:
@@ -724,42 +763,54 @@ def test_derivation_suite_is_run_in_ci() -> None:
           "CI must run the derivation suite WITH --mutate")
 
 
-def test_derivation_target_dir_is_off_the_cached_workspace_target() -> None:
-    """The extra builds must NOT write into the `target/` Swatinem caches for this job.
+def test_workflow_sets_no_shared_target_dir() -> None:
+    """The workflow must NOT hand the derivation a shared CARGO_TARGET_DIR.
 
-    Sharing it would make the neutral tree's artefacts part of the head build's cache entry,
-    poisoning every later PR that restores that key.
+    Sharing one warm target directory across the materialised trees was tried for speed and
+    REVERTED: on #4350 it reported a 299-line `exec.rs` rewrite as byte-identical, because
+    `git archive` stamps commit mtimes and cargo's freshness check is mtime-based. A false
+    "identical" auto-declares a real code change, so the environment must not be able to
+    reintroduce it.
     """
     block = _step_block(workflow_text(), "Derive the feature-OFF declaration")
-    m = re.search(r"CARGO_TARGET_DIR:\s*(\S.*)$", block, re.M)
-    check("test_derivation_target_dir_is_off_the_cached_workspace_target",
-          m is not None and "runner.temp" in m.group(1),
-          f"expected a runner.temp path, got {m.group(1) if m else '<unset>'}")
+    check("test_workflow_sets_no_shared_target_dir", "CARGO_TARGET_DIR" not in block,
+          "the derivation step must not set CARGO_TARGET_DIR")
 
 
-def test_builder_honours_the_shared_target_dir() -> None:
-    """`cargo_wasm_builder` must read the bundle from CARGO_TARGET_DIR when it is set.
+def test_builder_ignores_an_inherited_shared_target_dir() -> None:
+    """An inherited CARGO_TARGET_DIR must NOT redirect the build or the read-back.
 
-    If it kept looking under `<tree>/target` it would find nothing there, return None, and
-    every derivation would refuse with `neutral-build-failed` — a silent all-refuse that
-    still looks like the tool is working. Exercised BEHAVIOURALLY with a stubbed cargo, so
-    the assertion cannot pass just because the source happens to mention the variable.
+    Sharing one target directory across materialised trees returned a STALE bundle on #4350
+    — a 299-line `exec.rs` rewrite read back as byte-identical to its base. Since a false
+    "identical" is the one outcome that would auto-declare a real code change, the builder
+    pins the target directory inside the tree and overrides the inherited variable.
+    Exercised BEHAVIOURALLY with a stubbed cargo: the bundle must come from the TREE, and
+    the env the subprocess receives must point there too.
     """
     tree = tempfile.mkdtemp(prefix="featoff-tgt-")
-    shared = tempfile.mkdtemp(prefix="featoff-shared-target-")
-    out = os.path.join(shared, "wasm32-unknown-unknown", "release-wasm")
-    os.makedirs(out)
-    with open(os.path.join(out, "sparq_wasm.wasm"), "wb") as fh:
-        fh.write(b"bundle-from-the-shared-target-dir")
+    decoy = tempfile.mkdtemp(prefix="featoff-decoy-target-")
+    for root, payload in ((os.path.join(tree, "target"), b"bundle-from-the-tree"),
+                          (decoy, b"STALE-bundle-from-the-shared-dir")):
+        out = os.path.join(root, "wasm32-unknown-unknown", "release-wasm")
+        os.makedirs(out)
+        with open(os.path.join(out, "sparq_wasm.wasm"), "wb") as fh:
+            fh.write(payload)
+
+    seen: dict[str, str] = {}
 
     class _Ok:
         returncode = 0
         stderr = b""
 
+    def _stub(*a, **k):
+        seen.update(k.get("env") or {})
+        seen["argv"] = " ".join(a[0]) if a else ""
+        return _Ok()
+
     real_run, real_env = A.subprocess.run, os.environ.get("CARGO_TARGET_DIR")
     try:
-        A.subprocess.run = lambda *a, **k: _Ok()
-        os.environ["CARGO_TARGET_DIR"] = shared
+        A.subprocess.run = _stub
+        os.environ["CARGO_TARGET_DIR"] = decoy
         got = A.cargo_wasm_builder(tree)
     finally:
         A.subprocess.run = real_run
@@ -768,10 +819,14 @@ def test_builder_honours_the_shared_target_dir() -> None:
         else:
             os.environ["CARGO_TARGET_DIR"] = real_env
         shutil.rmtree(tree, ignore_errors=True)
-        shutil.rmtree(shared, ignore_errors=True)
-    check("test_builder_honours_the_shared_target_dir",
-          got == b"bundle-from-the-shared-target-dir",
-          f"expected the bundle from CARGO_TARGET_DIR, got {got!r}")
+        shutil.rmtree(decoy, ignore_errors=True)
+    check("test_builder_ignores_an_inherited_shared_target_dir",
+          got == b"bundle-from-the-tree",
+          f"expected the tree's own bundle, got {got!r}")
+    check("test_builder_ignores_an_inherited_shared_target_dir__subprocess_env",
+          seen.get("CARGO_TARGET_DIR", "").startswith(tree),
+          f"cargo must be run with the tree's target dir, got "
+          f"{seen.get('CARGO_TARGET_DIR')!r}")
 
 
 def test_paths_filter_includes_the_new_scripts() -> None:
@@ -789,8 +844,8 @@ TESTS = [
     test_leg2_step_has_the_id_the_derivation_depends_on,
     test_derivation_cannot_change_the_leg2_verdict,
     test_derivation_suite_is_run_in_ci,
-    test_derivation_target_dir_is_off_the_cached_workspace_target,
-    test_builder_honours_the_shared_target_dir,
+    test_workflow_sets_no_shared_target_dir,
+    test_builder_ignores_an_inherited_shared_target_dir,
     test_paths_filter_includes_the_new_scripts,
     test_census_sweep_counts_the_live_class,
     test_census_sweep_matches_leg_name_by_equality,
@@ -807,7 +862,9 @@ TESTS = [
     test_neutral_build_failure_is_refused,
     test_deletion_neutral_build_failure_is_refused,
     test_neutral_tree_blanks_the_added_lines,
-    test_unknown_path_type_is_refused,
+    test_non_rust_file_inside_the_closure_is_blanked_not_refused,
+    test_included_non_rust_file_is_refused,
+    test_symlink_inside_the_closure_is_refused,
     test_paths_outside_the_build_closure_are_inert,
     test_root_build_inputs_are_never_inert,
     test_base_build_failure_is_refused,
@@ -854,10 +911,15 @@ MUTANTS = [
      "do not restore the base tree's manifests into the neutral tree",
      "            shutil.copyfile(src, dst)", "            pass",
      "test_manifest_change_that_enables_a_feature_is_refused"),
-    ("M5-accept-unknown-paths",
-     "treat an unmodelled path inside the build closure as inert",
-     "        raise ValueError(", "        _unused = (",
-     "test_unknown_path_type_is_refused"),
+    ("M5-accept-symlinks",
+     "blank symlinks and submodule gitlinks as if they were regular files",
+     "    if nonregular:", "    if False:",
+     "test_symlink_inside_the_closure_is_refused"),
+    ("M5d-only-blank-rust-files",
+     "assume every non-.rs file in the closure is inert, leaving an include_str!'d asset unproven",
+     "        else:\n            blankable.append(p)",
+     "        elif _is_rust(p):\n            blankable.append(p)\n        else:\n            inert.append(p)",
+     "test_included_non_rust_file_is_refused"),
     ("M5b-everything-is-in-closure",
      "treat every changed path as build-relevant, so unrelated crates refuse the PR",
      "        in_closure = closure is None or root_input or any(p.startswith(d) for d in closure)",
@@ -898,11 +960,11 @@ MUTANTS = [
      '            if leg is None or (c.get("started_at") or "") >= (leg.get("started_at") or ""):',
      "            if True:",
      "test_census_sweep_uses_the_newest_run_per_name"),
-    ("M14-builder-ignores-shared-target-dir",
-     "look for the bundle under <tree>/target even when CARGO_TARGET_DIR is set",
-     '    target_root = os.environ.get("CARGO_TARGET_DIR") or os.path.join(tree, "target")',
-     '    target_root = os.path.join(tree, "target")',
-     "test_builder_honours_the_shared_target_dir"),
+    ("M14-builder-obeys-shared-target-dir",
+     "let an inherited CARGO_TARGET_DIR redirect the build, reintroducing the stale-bundle bug",
+     '        env={**os.environ, "CARGO_TARGET_DIR": os.path.join(tree, "target")},',
+     "        env=dict(os.environ),",
+     "test_builder_ignores_an_inherited_shared_target_dir"),
     ("M13-prebuilt-skips-neutral-proof",
      "reuse the head bundle as the neutral bundle instead of rebuilding",
      "    neutral_bytes = builder(neutral)", "    neutral_bytes = head_bytes",
@@ -938,11 +1000,12 @@ YAML_MUTANTS = [
      "scripts/tests/test_feature_off_autodeclare.py --mutate",
      "scripts/tests/test_feature_off_autodeclare.py",
      "test_derivation_suite_is_run_in_ci"),
-    ("Y7-share-the-cached-target-dir",
-     "point the derivation's builds at the workspace target/ Swatinem caches",
-     "          CARGO_TARGET_DIR: ${{ runner.temp }}/featoff-derivation-target",
-     "          CARGO_TARGET_DIR: target",
-     "test_derivation_target_dir_is_off_the_cached_workspace_target"),
+    ("Y7-reintroduce-shared-target-dir",
+     "hand the derivation a shared CARGO_TARGET_DIR again",
+     "          PR_NUMBER: ${{ github.event.pull_request.number }}",
+     "          PR_NUMBER: ${{ github.event.pull_request.number }}\n"
+     "          CARGO_TARGET_DIR: ${{ runner.temp }}/shared",
+     "test_workflow_sets_no_shared_target_dir"),
     ("Y5-drop-paths-filter-entry",
      "stop re-running the leg when the derivation script itself changes",
      "              - 'scripts/feature_off_autodeclare.py'\n", "",

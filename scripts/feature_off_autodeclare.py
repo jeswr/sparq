@@ -150,34 +150,36 @@ def closure_dirs(tree: str, package: str = "sparq-wasm") -> list[str] | None:
 
 def classify_paths(paths: list[str],
                    closure: list[str] | None = None) -> tuple[list[str], list[str], list[str]]:
-    """Split changed paths into (rust, manifest, inert), or raise on one we cannot place.
+    """Split changed paths into (blankable, manifest, inert).
 
     `closure` is the list of crate directories the bundle compiles (see `closure_dirs`).
-    A path outside it — and outside the root build inputs — is INERT BY DERIVATION. Inside
-    it, only `.rs` and cargo manifests are understood; anything else refuses, because a
-    build input we do not model must never be silently assumed harmless.
+    A path outside it — and outside the root build inputs — is INERT BY DERIVATION: cargo
+    cannot compile it into `sparq-wasm`, so a change there needs no attribution. That is
+    what keeps unrelated base-branch drift from refusing an otherwise-provable PR.
+
+    Inside the closure, everything except a cargo manifest is BLANKABLE — not just `.rs`.
+    Deciding by file extension would be both too strict and unsound: too strict because a
+    crate `README.md` is usually inert, and unsound because it is NOT inert when the crate
+    does `#![doc = include_str!("../README.md")]`. Blanking the file and rebuilding answers
+    that question for the actual crate rather than guessing from the name — if the content
+    reached the bundle, the bundle changes and the derivation refuses.
+
+    Manifests are handled separately (restored from the base tree) because blanking a line
+    out of a `Cargo.toml` yields a manifest, not an absence.
     """
-    rust: list[str] = []
+    blankable: list[str] = []
     manifest: list[str] = []
     inert: list[str] = []
-    unknown: list[str] = []
     for p in paths:
         root_input = p in _ROOT_BUILD_INPUTS or p.startswith(".cargo/")
         in_closure = closure is None or root_input or any(p.startswith(d) for d in closure)
         if not in_closure:
             inert.append(p)
-        elif _is_rust(p):
-            rust.append(p)
         elif _is_manifest(p) or root_input:
             manifest.append(p)
         else:
-            unknown.append(p)
-    if unknown:
-        raise ValueError(
-            "changed inside the wasm build closure but not understood as a build input: "
-            + ", ".join(sorted(unknown))
-        )
-    return rust, manifest, inert
+            blankable.append(p)
+    return blankable, manifest, inert
 
 
 # ---------------------------------------------------------------------------
@@ -279,19 +281,34 @@ def cargo_wasm_builder(tree: str) -> bytes | None:
     """
     proc = subprocess.run(
         ["cargo", "build", "--profile", "release-wasm", "-p", "sparq-wasm",
-         "--target", "wasm32-unknown-unknown"],
+         "--target", "wasm32-unknown-unknown",
+         "--target-dir", os.path.join(tree, "target")],
         cwd=tree, capture_output=True,
+        env={**os.environ, "CARGO_TARGET_DIR": os.path.join(tree, "target")},
     )
     if proc.returncode != 0:
         sys.stderr.write(proc.stderr.decode("utf-8", "replace")[-4000:])
         return None
-    # Each obligation builds a freshly-materialised tree, so without a shared target
-    # directory every one of them recompiles the whole dependency graph from cold. Honour
-    # CARGO_TARGET_DIR so a caller can point the extra builds at one warm directory. It must
-    # be a directory the leg's OWN cached `target/` does not share, or the neutral tree's
-    # artefacts would be saved into the head build's cache.
-    target_root = os.environ.get("CARGO_TARGET_DIR") or os.path.join(tree, "target")
-    out = os.path.join(target_root, "wasm32-unknown-unknown", "release-wasm", "sparq_wasm.wasm")
+    # PER-TREE target directory, deliberately. Pointing several materialised trees at ONE
+    # shared CARGO_TARGET_DIR to keep the extra builds warm was TRIED and REVERTED: it
+    # produced a demonstrably WRONG verdict. Run against #4350 — a PR whose merge-base diff
+    # is a 299-line rewrite of crates/sparq-engine/src/exec.rs — the shared-directory run
+    # reported the base and head bundles BYTE-IDENTICAL ("no-drift"), i.e. a stale artefact
+    # was read back as a fresh build. `git archive` stamps each exported tree's files with
+    # its COMMIT time, and cargo's freshness check is mtime-based, so an out-of-order
+    # timestamp can leave a previous tree's `sparq_wasm.wasm` in place.
+    #
+    # A false "identical" is the worst failure this tool has: it would auto-declare a real
+    # code change as line-position churn. Cold builds are the price of the proof meaning
+    # anything, so `--target-dir` stays inside the tree being built and the environment
+    # cannot override it.
+    env_override = os.environ.get("CARGO_TARGET_DIR")
+    if env_override:
+        sys.stderr.write(
+            f"[autodeclare] ignoring CARGO_TARGET_DIR={env_override!r}: each tree must build "
+            "into its own target directory (a shared one has been observed returning a stale "
+            "bundle, which reads as a false 'identical').\n")
+    out = os.path.join(tree, "target", "wasm32-unknown-unknown", "release-wasm", "sparq_wasm.wasm")
     if not os.path.exists(out):
         return None
     with open(out, "rb") as fh:
@@ -340,10 +357,17 @@ def decide(base_tree: str, head_tree: str, diff_text: str, builder,
         return Verdict(REFUSE_NO_DIFF, "the base..head diff is empty — nothing to attribute")
 
     closure = closure_dirs(head_tree)
-    try:
-        rust_paths, manifest_paths, inert_paths = classify_paths(sorted(changes), closure)
-    except ValueError as exc:
-        return Verdict(REFUSE_UNSUPPORTED_FILE_CHANGE, str(exc))
+    rust_paths, manifest_paths, inert_paths = classify_paths(sorted(changes), closure)
+
+    # Blanking rewrites files in place, which is meaningless for a symlink or a submodule
+    # gitlink — the proof would silently cover nothing. Refuse rather than pretend.
+    nonregular = [p for p in rust_paths
+                  if os.path.islink(os.path.join(head_tree, p))
+                  or os.path.islink(os.path.join(base_tree, p))]
+    if nonregular:
+        return Verdict(REFUSE_UNSUPPORTED_FILE_CHANGE,
+                       "changed inside the wasm build closure but not a regular file, so "
+                       "blanking cannot speak for it: " + ", ".join(sorted(nonregular)))
 
     if base_bytes is None:
         base_bytes = builder(base_tree)
@@ -364,7 +388,7 @@ def decide(base_tree: str, head_tree: str, diff_text: str, builder,
         "head_bundle_bytes": len(head_bytes),
         "size_delta_bytes": len(head_bytes) - len(base_bytes),
         "differing_bytes": differing_bytes(base_bytes, head_bytes),
-        "rust_files_changed": rust_paths,
+        "closure_files_changed": rust_paths,
         "manifest_files_changed": manifest_paths,
         "inert_files_changed": len(inert_paths),
     }

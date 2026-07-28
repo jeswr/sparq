@@ -112,11 +112,17 @@ An **intentional always-compiled change** — a hot-path optimisation, a refacto
 default build ships — is refused on purpose. Its author is asserting *intent*, and intent cannot
 be derived; write the declaration by hand, as `3679.json` and `3755.json` do.
 
-Two deliberate limits:
+Three deliberate limits:
 
 * The tool **does not make the leg pass**. It writes a file that still has to be committed, so
   the escape hatch stays inside the reviewed diff. An auto-passing gate whose derivation had a
   hole would be exactly the rubber stamp this leg exists to prevent.
+* Every obligation builds into its **own** target directory. Sharing one warm directory
+  across the materialised trees was tried for speed and reverted: on #4350 it reported a
+  299-line `crates/sparq-engine/src/exec.rs` rewrite as *byte-identical* to its base, because
+  `git archive` stamps each tree's files with its commit time and cargo's freshness check is
+  mtime-based. A false "identical" is the one outcome that would auto-declare a real code
+  change, so cold builds are the price.
 * It attributes against the **merge base**, not `pull_request.base.sha`. Those differ whenever a
   branch is behind its base, and leg 2 itself compares `base.sha` — so on such a PR the leg's
   reported difference also carries, in reverse, base-branch commits the PR does not have. The
