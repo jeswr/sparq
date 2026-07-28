@@ -1,0 +1,5 @@
+{
+  "pr": 4354,
+  "date": "2026-07-28",
+  "reason": "[OPUS-5] #4354 adds the off-by-default `sparse-numerics` A/B arm. The only edit to always-compiled library source is in crates/sparq-core/src/lib.rs: a comment block plus ONE `#[cfg(feature = \"sparse-numerics\")]` statement in `Graph::build`, which the default build compiles out; everything else added is in `#[cfg(test)] mod tests` or the new example. The feature-OFF bundle moves only because those inserted lines shift the line numbers embedded in `core::panic::Location` records below them. MEASURED by rebuilding this PR's own base.sha and head.sha trees locally with the same `cargo build --profile release-wasm -p sparq-wasm --target wasm32-unknown-unknown` the leg runs (deltas reproduce the CI run exactly): base=1559197 head=1559197 bytes, size delta +0, and exactly 2 of 1559197 bytes differ. The dense numerics cache the default build ships is unchanged. Bundle SIZE remains governed by the wasm_bundle_bytes ratchet."
+}
