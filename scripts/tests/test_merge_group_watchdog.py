@@ -726,6 +726,21 @@ class TestSweepBehaviour(unittest.TestCase):
             any("not readable back as TRUSTED" in r for r in harness.rows), harness.rows
         )
 
+    def test_the_readback_must_find_THIS_head_not_merely_a_marker(self):
+        # A PR that already carries an older trusted marker (a previous recovery, a
+        # different group head) must NOT satisfy the readback when the new post fails
+        # to register. Matching "any trusted marker" instead of "a marker for this
+        # head" would wave through exactly the misconfiguration the guard exists for.
+        harness = FakeWatchdog.build(
+            suites=0, comments=[_marker_comment(head="9" * 40)]  # older, trusted, other head
+        )
+        harness.gh.post_author = ATTACKER      # the new marker lands untrusted
+        self.assertGreater(harness.run(), 0)
+        self.assertEqual([m[:2] for m in harness.gh.mutations], [["pr", "comment"]])
+        self.assertTrue(
+            any("not readable back as TRUSTED" in r for r in harness.rows), harness.rows
+        )
+
     def test_recovery_proceeds_when_the_marker_reads_back(self):
         # The paired control: the readback must not block the normal path.
         for author in (TRUSTED_AUTHOR, APP_AUTHOR):
