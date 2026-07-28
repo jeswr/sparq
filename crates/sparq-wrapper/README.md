@@ -68,10 +68,17 @@ hatch.
   contract), and no async runtime is pulled in. This
   proposal follows rdfjs/wrapper issue #10 and draft PR #97 and is not landed
   upstream. <!-- [SONNET-4.6] sq-1rg2q.8 -->
-- The reserved `proposed-graph-scope-events`, `proposed-async-node`,
-  `proposed-async-events`, and `proposed-json` seams are default-off
-  placeholders. Their APIs are intentionally empty until the corresponding
-  proposal work lands. <!-- [SONNET-4.6] sq-1rg2q.1 -->
+- `proposed-json` adds `proposed::json::JsonProjection`, a JSON projection of a
+  focus node and its outgoing reachable subgraph that is total on cyclic graphs
+  (a repeated node becomes a `{"@ref": …}` term reference under an explicit
+  `RepeatedFocus` policy) and deterministic (predicates sorted by IRI, objects
+  by N-Triples form), and that keeps each literal's datatype, language tag, and
+  base direction. This proposal follows rdfjs/wrapper open PR #23 and is not
+  landed upstream. <!-- [SONNET-4.6] sq-1rg2q.11 -->
+- The reserved `proposed-graph-scope-events`, `proposed-async-node`, and
+  `proposed-async-events` seams are default-off placeholders. Their APIs are
+  intentionally empty until the corresponding proposal work lands.
+  <!-- [SONNET-4.6] sq-1rg2q.1 -->
 - All crate features are off by default, and the dependency on `sparq-core`
   disables its default features to keep this capability isolated.
 

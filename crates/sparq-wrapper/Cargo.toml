@@ -31,7 +31,7 @@ proposed-distinct = []
 proposed-graph-scope = []
 # [SONNET-4.6] sq-1rg2q.1: reserved, empty until the graph-scope events proposal lands.
 proposed-graph-scope-events = []
-# [SONNET-4.6] sq-1rg2q.1: reserved, empty until the JSON proposal lands.
+# [SONNET-4.6] sq-1rg2q.11: cycle-safe JSON projection (rdfjs/wrapper #23).
 proposed-json = []
 proposed-observe = []
 # [FABLE-5] sq-1rg2q.2: typed focus kinds + bound node factories (rdfjs/wrapper #83-#87).
