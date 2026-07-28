@@ -1,0 +1,46 @@
+# [OPUS-5] sparq#4819 — THE NAMES jeswr/agent-account-registry READS OFF `scripts/dispatch-plan.py`.
+#
+# WHY THIS FILE EXISTS. The registry's `dispatch.yml` (step `id: readiness`) does
+# `load_dispatch(<target>/scripts/dispatch-plan.py)` and then reads named attributes off THAT
+# module with `getattr(planner, "<name>", None)`. When an attribute it wants is absent the
+# registry does not fail — it DEGRADES, prints a reason, and plans this repository as if the
+# feature did not exist. That is the correct behaviour for a hostile-target planner, and it means
+# a missing export here is invisible from inside sparq: every sparq self-test can be green while
+# the orchestrator has silently stopped consuming the thing those tests prove.
+#
+# It has happened twice. `roleless_ready` went unreported for every tick until it was re-exported;
+# `INERT_FIELD`/`MACHINE_PARK_PR_LABEL` (sparq#4819) were defined only in `scripts/ready-issues.py`
+# and shipped as a MEASURED no-op — ready-issues.py's own suite was 9/9 green throughout, because
+# it pins the ENGINE and the registry reads the MODULE.
+#
+# HOW IT IS ENFORCED. `scripts/dispatch-plan.py --self-test` reads this file and asserts every
+# `required_attributes` name is present on the module as loaded EXACTLY the way `load_dispatch`
+# loads it, and that the pinned `values` still match. Adding a name here without exporting it is
+# red; renaming an export without changing this file is red. It is deliberately DATA and not a
+# Python constant so that a rename sweep over `scripts/` cannot carry the expectation along with
+# the thing it is supposed to be checking.
+#
+# THESE NAMES ARE NOT SPARQ'S TO RENAME. They are hard-coded string literals in the registry's
+# workflow. Changing one here without a matching registry PR does not break a test in CI — it
+# silently returns the pipeline to the degraded path.
+
+[planner_exports]
+# The two-repo interlock that releases a machine-parked (`review:parked`) PR's `area:` keys, but
+# ONLY against the registry's own per-row inertness proof (sparq#4819). The registry's
+# `inert_aware` probe refuses to stamp anything unless BOTH names resolve to strings AND
+# `compute_ready` demonstrably honours them in both directions.
+required_attributes = [
+    "compute_ready",
+    "roleless_ready",
+    "ready_candidates",
+    "INERT_FIELD",
+    "MACHINE_PARK_PR_LABEL",
+]
+
+[planner_exports.values]
+# WIRE VALUES, not just names. `INERT_FIELD` is the key the registry WRITES onto each occupancy
+# row (`row[field] = inert_map.get(pr_number, False)`), and `MACHINE_PARK_PR_LABEL` is a real
+# GitHub label on this repository — so both are observable outside sparq and neither is a free
+# local choice.
+INERT_FIELD = "inert"
+MACHINE_PARK_PR_LABEL = "review:parked"

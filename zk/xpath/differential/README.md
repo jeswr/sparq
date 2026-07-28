@@ -57,6 +57,30 @@ commented out and that `substring("12345", 0, 3)` and `round_double(-0.5)` in pa
 reach the circuit live; two assert each divergence still reproduces, so the special-casing
 **expires** (goes red) the day the engine is fixed.
 
+## Non-vacuity — proved per test function, not once per file
+
+A green `nargo test` only means something if the generated file can actually go red, so the
+driver script re-emits it with a deliberately wrong expected value and requires that run to
+**fail**. It does that **once per generated `#[test]`**: `--list-fault-sites` names the test
+functions, and each gets its own `--inject-fault-in NAME` variant and its own `nargo test`,
+every one of which must fail.
+
+The per-variant loop, not the fault count, is what carries the claim. A `nargo test` run
+reports **one** exit status for the whole file, so one run over a file with every test
+corrupted proves only that *some* test failed — nine sections that had drifted into something
+incapable of failing (a corpus that emptied, an expected value derived from the very call
+it asserts) would hide behind the one section that still works. A single-fault variant is
+byte-identical to the oracle file that just ran green except for one value inside one test
+function, so its failure is attributable to that function; running one per name discharges
+the obligation for each. The cost is one `nargo` invocation per test function.
+
+Generator unit tests keep the loop honest: every emitted test function must register a
+fault site (generation panics otherwise); that site must be a **live** assertion, since a
+fault hidden in a comment cannot fail `nargo test`; `--inject-fault-in` must change exactly
+one assertion and only inside the named function; and an unknown name is a hard error, never
+a silently uncorrupted file. The script itself refuses to run if the site list is empty or
+does not cover every test function in the oracle file.
+
 ## TCB — stated honestly
 
 This is **VERIFICATION, not proof**. Three things are trusted and unproven:

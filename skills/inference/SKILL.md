@@ -144,7 +144,9 @@ impl CompiledRuleSet { pub fn bind(&self, dict: &mut Dict) -> BoundRuleSet<'_>; 
 impl BoundRuleSet<'_> { pub fn eval(&self, dict: &mut Dict, facts: &[[Id;3]]) -> Vec<[Id;3]>; }
 ```
 
-Compiled-rules scope is EXACTLY the WAC/ACP/ODRL-spike corpus subset (scoped `log:notIncludes` over stratum-complete predicates, `log:uri`, `log:(not)equalTo`, `string:` concatenation / encodeForUri / scrape / notGreaterThan); anything else is a loud `compile` error — full N3 stays with `reason_n3`. Closure set-equality vs `reason_n3` is pinned by `crates/sparq-reason/tests/compiled_equivalence.rs`.
+Compiled-rules scope is EXACTLY the WAC/ACP/ODRL-spike corpus subset (scoped `log:notIncludes` over stratum-complete predicates, `log:uri`, `log:(not)equalTo`, `string:` concatenation / encodeForUri / scrape / notGreaterThan) **plus RDF 1.2 triple terms in premises** (`sq-6d43t`); anything else is a loud `compile` error — full N3 stays with `reason_n3`. Closure set-equality vs `reason_n3` is pinned by `crates/sparq-reason/tests/compiled_equivalence.rs`.
+
+**Compiled-rules triple terms (`sq-6d43t`).** A GROUND `<< s p o >>` is an ordinary symbol-table constant anywhere (fact, pattern position, builtin argument, conclusion): `bind` interns it through the Dict's content-addressed RDF 1.2 triple-term path, so it resolves to the SAME id a store-loaded `<<( s p o )>>` carries. A quotation that still contains VARIABLES is admitted in PREMISE positions and compiles to a component-indexed unpack step — the enclosing join binds the candidate's triple-term id, then the unpack reads its three component ids straight out of the dictionary record (no term reconstruction, no allocation) and binds first occurrences / filters already-bound variables and constants, left to right, nesting through the OBJECT. Three shapes are deliberately loud `compile` errors instead: a quotation with variables inside a `log:notIncludes` body (the anti-join runs a flat list of plain patterns), a quotation with variables in a CONCLUSION (minting a triple term from bound components can violate RDF 1.2's structural constraints at derivation time, which `eval` has no channel to report), and a nested quotation in SUBJECT position (no dictionary triple term can have a triple-term subject, so such a pattern could only ever fire zero times). Each falls back to `reason_n3`, which handles all three.
 
 ## RIF-Core rule front-end (opt-in `rif-core` feature, `sparq_reason::rif`)
 
@@ -554,7 +556,7 @@ let g = Graph::from_parts(dict, triples);
 # Ok::<(), String>(())
 ```
 
-**2. Notation3 rules + facts in one document → entailed ground triples.** The rules and data live in the same N3 source; only ground facts survive the closure. RDF 1.2 quoted-triple TERMS (`<< s p o >>` / `<<( s p o )>>`) are first-class in rule bodies AND heads: premises match them structurally (variables inside the quotation bind, nesting included), heads derive them, and `reason_n3` interns ground triple terms via the Dict's content-addressed RDF 1.2 triple-term path (GH #2012; outside the `compiled-rules` subset and the incremental counting profile — both fall back to the text engine).
+**2. Notation3 rules + facts in one document → entailed ground triples.** The rules and data live in the same N3 source; only ground facts survive the closure. RDF 1.2 quoted-triple TERMS (`<< s p o >>` / `<<( s p o )>>`) are first-class in rule bodies AND heads: premises match them structurally (variables inside the quotation bind, nesting included), heads derive them, and `reason_n3` interns ground triple terms via the Dict's content-addressed RDF 1.2 triple-term path (GH #2012). The opt-in `compiled-rules` path also matches them at the id level (`sq-6d43t`, see the compiled-rules section for the exact envelope); the incremental counting profile still disqualifies on them and falls back to the text engine.
 
 ```rust
 use sparq_core::dict::Dict;

@@ -1192,3 +1192,51 @@ async fn shape_scope_for_an_uncertified_predicate_derives_nothing_and_denies() {
         "no derived rule => no admitted fact => WAC denies"
     );
 }
+
+// ---------------------------------------------------------------------------
+// [SONNET-4.6] sq-snopa.8 — the trust extension does NOT compose with the stateful lane.
+//
+// `trust_authz_decide` decides over its OWN store, built by injecting admitted facts into the
+// request-BODY dataset. `"source":"server"` supplies no such dataset, so combining the two
+// would silently authorise over a pod the caller did not name. Refused up front instead.
+// ---------------------------------------------------------------------------
+
+/// A `"source":"server"` decide body carrying a `"trust"` block — the unsupported combination.
+fn server_source_decide_body_with_trust(resource: &str) -> serde_json::Value {
+    serde_json::json!({
+        "source": "server",
+        "session": { "agent": "https://alice.ex/card#me" },
+        "resource": resource,
+        "mode": "read",
+        "view": "wac",
+        "trust": {
+            "agentIri": "https://alice.ex/card#me",
+            "nowUnixSecs": 1_720_000_000_i64,
+            "rules": [],
+            "certifications": [],
+            "credentials": []
+        }
+    })
+}
+
+/// FAIL-CLOSED: `"source":"server"` + a `"trust"` block is refused (400), never answered from
+/// whichever pod the server happened to pick.
+///
+/// MUTATION SPOT-CHECK: delete the `req.source == AuthzSource::Server` refusal in
+/// `decide_endpoint` and this test goes red (the request would fall into the trust lane over an
+/// EMPTY body dataset).
+#[tokio::test]
+async fn trust_block_is_refused_with_the_stateful_source() {
+    let base = spawn_trust_on().await;
+    let resp = client()
+        .post(format!("{}/authz/decide", base))
+        .json(&server_source_decide_body_with_trust("https://pod.ex/notes/n1"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "the trust extension must not silently combine with 'source':'server'"
+    );
+}

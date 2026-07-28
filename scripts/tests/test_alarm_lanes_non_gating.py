@@ -75,6 +75,7 @@ ALARM_WORKFLOWS = {
     "review-alarm.yml": "review-lane blind-spot alarm",
     "formal-alarm.yml": "formal-lane no-verdict alarm",
     "selection-alarm.yml": "nightly selection-bug alarm",
+    "ci-latency-alarm.yml": "CI execution-latency alarm",
 }
 
 # A name that is deliberately NOT in the registry, used by the anti-vacuity control.

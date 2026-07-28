@@ -16,7 +16,10 @@
 //! | 2 | EL (in-EL) | `sparq_reason_el::Classifier::classify` | only for a pure ⊤-free EL+⊥ TBox (argument below) | never (see the ⊤ guard) | [`UnknownReason::ElSkippedAxioms`], [`UnknownReason::ElUnappliedAxioms`], [`UnknownReason::ElTopGuard`] |
 //! | 3 | QL (in-QL) | `sparq_reason_ql::check_consistency` (opt-in feature `dispatch_ql`, [FABLE-5] sq-fj8lj); without it, none — deferred | only past the QL crate's own capture accounting (see §"QL branch soundness") | sound at any capture level (monotonicity) | [`UnknownReason::QlCaptureGap`]; without `dispatch_ql`, [`UnknownReason::QlConsistencyPending`] (always) |
 //! | 4 | ALCH (everything else L1 extracted) | the L3 tableau | complete for the fragment | complete for the fragment | [`UnknownReason::ResourceBudget`] |
+//! | 4′ | any of 1–3 that ABSTAINED (except PR1 punning) | the same L3 tableau | complete for the fragment | complete for the fragment | the ORIGINAL branch's abstention, kept verbatim |
 //! | — | extraction failed | none | never | never | [`UnknownReason::OutOfFragment`] |
+//!
+//! Row 4′ is the guard-abstention fall-through ([SONNET-4.6] sq-pbz04.4.8) — see below.
 //!
 //! **Opt-in transitive roles ([GPT-5.6] sq-zfwzq, feature `dl_transitive`):** an ontology
 //! declaring `owl:TransitiveProperty` (the feature-gated `TransitiveObjectProperty` axiom
@@ -26,12 +29,50 @@
 //! depth). With the feature OFF, extraction refuses transitivity before dispatch, exactly
 //! as before.
 //!
-//! The first branch whose profile test matches OWNS the verdict — an abstaining branch does
-//! NOT fall through (the record specifies dispatch-in-order; a tableau fallback for
-//! guard-abstained RL/EL/QL inputs is possible future work, recorded as such, not silently
-//! added). Every verdict carries the [`Branch`] that produced it (the traceability
-//! invariant), and every guard fails CLOSED: uncertainty is [`UnknownReason`], never a
-//! guessed `Consistent`/`Inconsistent`.
+//! The first branch whose profile test matches OWNS the verdict. Every verdict carries the
+//! [`Branch`] that produced it (the traceability invariant), and every guard fails CLOSED:
+//! uncertainty is [`UnknownReason`], never a guessed `Consistent`/`Inconsistent`.
+//!
+//! ## Guard-abstention tableau fall-through ([SONNET-4.6] sq-pbz04.4.8)
+//!
+//! When the OWNING profile branch ABSTAINS, the dispatch re-asks the SAME ontology of the
+//! L3 ALCH tableau (`tableau_fall_through`) and prefers its definitive verdict, attributed
+//! to [`Branch::AlchTableau`]. This needs no new soundness argument: every ontology the L1
+//! mapping accepts is inside the §3 fragment by construction (that is exactly what licenses
+//! branch 4 as the catch-all), and the tableau is sound AND complete for it — so an
+//! in-profile ontology is no harder for the tableau than a profile-free one. It is the
+//! mirror image of the refutation budget fallback below ([OPUS-5] sq-pbz04.4.10), which
+//! re-asks the profile branches when the TABLEAU abstains.
+//!
+//! Rules, all of them the dispatch's own:
+//!
+//! 1. The profile branch keeps FIRST refusal — the fall-through never pre-empts a branch
+//!    that decided, so no existing verdict or attribution moves.
+//! 2. The fall-through is strictly ABSTENTION-REDUCING: if the tableau also abstains (its
+//!    count budget), the owner's original outcome is returned UNCHANGED — same verdict, same
+//!    reason, same [`Branch`]. The tableau never overwrites a guard's diagnosis with a
+//!    `ResourceBudget` one it earned second.
+//! 3. [`UnknownReason::RlPr1Preconditions`] does NOT fall through. It is the one abstention
+//!    that is not an incompleteness guard: usage-level punning means the input is ill-posed
+//!    as an OWL 2 DL ontology, so the L1 shadow is one arbitrary reading of it rather than
+//!    a faithful one, and a definitive verdict on that shadow would be a verdict on a
+//!    different ontology. Fail-closed, unchanged. (An input that puns but is in NO profile
+//!    already reaches the tableau through branch 4; making that boundary uniform is
+//!    deliberately out of this bead's scope.)
+//! 4. With `dl_transitive` a transitivity-bearing ontology never gets here — it short-
+//!    circuits to the ALCH+S tableau BEFORE the profile dispatch, so the fall-through has
+//!    nothing to add for it.
+//!
+//! **The QL do-not-duplicate rule (sq-pbz04.3.4), re-examined explicitly.** The record's QL
+//! step says DL-Lite_R consistency is deferred to the QL workstream and must not be
+//! DUPLICATED here. The fall-through does not duplicate it: it re-uses the ALCH tableau that
+//! already exists in this crate and is already argued complete for the fragment — no
+//! DL-Lite_R reasoning is written, and no QL-specific claim is made. Ownership is also
+//! preserved: with `dispatch_ql` the QL crate is still asked FIRST and its verdicts still
+//! win, so the fall-through only ever fires on [`UnknownReason::QlCaptureGap`] — the case
+//! the QL crate itself declines. Without `dispatch_ql` it fires on the blanket
+//! [`UnknownReason::QlConsistencyPending`], which is a deferral of the QL PROCEDURE, not a
+//! claim that the ontology is undecidable here.
 //!
 //! ## RL branch soundness
 //!
@@ -302,7 +343,10 @@ pub enum Branch {
     /// (`sparq_reason_ql::check_consistency`, sq-p6yb7) — produced only under the opt-in
     /// `dispatch_ql` feature (module docs §"QL branch soundness"). [FABLE-5] sq-fj8lj
     QlConsistency,
-    /// The L3 ALCH completion-forest tableau (complete for the L1 fragment).
+    /// The L3 ALCH completion-forest tableau (complete for the L1 fragment). Produced both
+    /// for an ontology in NO profile and — since [SONNET-4.6] sq-pbz04.4.8 — for one whose
+    /// owning profile branch abstained and whose verdict the tableau then supplied (module
+    /// docs §"Guard-abstention tableau fall-through").
     AlchTableau,
 }
 
@@ -491,7 +535,9 @@ impl DirectChecker {
     /// `dict` is mutable because the RL branch materializes (interning vocabulary /
     /// derived terms); existing ids are never changed. The dispatch order is RL → EL →
     /// QL → ALCH; extraction failure short-circuits to
-    /// [`UnknownReason::OutOfFragment`]. Every guard fails closed.
+    /// [`UnknownReason::OutOfFragment`]. Every guard fails closed. An abstaining profile
+    /// branch falls through to the ALCH tableau and keeps its own abstention if that adds
+    /// nothing (module docs §"Guard-abstention tableau fall-through").
     #[must_use]
     pub fn consistency(&self, dict: &mut Dict, triples: &[[Id; 3]]) -> ConsistencyOutcome {
         let onto = match extract(dict, triples) {
@@ -528,29 +574,40 @@ impl DirectChecker {
             };
         }
         let ps = profiles(&onto);
-        if ps.rl.is_in() {
-            return rl_branch(dict, triples, &onto);
-        }
-        if ps.el.is_in() {
-            return el_branch(dict, triples, &onto);
-        }
-        if ps.ql.is_in() {
+        let owner = if ps.rl.is_in() {
+            Some(rl_branch(dict, triples, &onto))
+        } else if ps.el.is_in() {
+            Some(el_branch(dict, triples, &onto))
+        } else if ps.ql.is_in() {
             // [FABLE-5] sq-fj8lj: with `dispatch_ql` the QL branch delegates to the
             // sparq-reason-ql DL-Lite_R checker over the RAW input triples (module docs
             // §"QL branch soundness" — the QL crate's OWN capture accounting owns the
             // verdict; L2's `In` only routes). Without the feature, deferred as before.
             #[cfg(feature = "dispatch_ql")]
-            return ql_branch(dict, triples);
+            {
+                Some(ql_branch(dict, triples))
+            }
             #[cfg(not(feature = "dispatch_ql"))]
-            return ConsistencyOutcome {
-                verdict: ConsistencyVerdict::Unknown(UnknownReason::QlConsistencyPending),
-                branch: Branch::QlDeferred,
-            };
-        }
-        // Everything the L1 mapping accepts is inside the ALCH fragment by construction.
-        ConsistencyOutcome {
-            verdict: tableau_consistency(&onto, self.budget),
-            branch: Branch::AlchTableau,
+            {
+                Some(ConsistencyOutcome {
+                    verdict: ConsistencyVerdict::Unknown(UnknownReason::QlConsistencyPending),
+                    branch: Branch::QlDeferred,
+                })
+            }
+        } else {
+            None
+        };
+        match owner {
+            // The profile branch DECIDED: dispatch-in-order, branch-owned verdict (record §4).
+            Some(outcome) if !outcome.verdict.is_unknown() => outcome,
+            // The profile branch ABSTAINED: fall through to the tableau (record §4 amendment,
+            // sq-pbz04.4.8 — module docs §"Guard-abstention tableau fall-through").
+            Some(outcome) => tableau_fall_through(outcome, &onto, self.budget),
+            // Everything the L1 mapping accepts is inside the ALCH fragment by construction.
+            None => ConsistencyOutcome {
+                verdict: tableau_consistency(&onto, self.budget),
+                branch: Branch::AlchTableau,
+            },
         }
     }
 
@@ -1149,6 +1206,43 @@ fn ql_kb(dict: &Dict, triples: &[[Id; 3]]) -> Result<Vec<oxrdf::Triple>, String>
 // -------------------------------------------------------------------------------------------
 // ALCH branch
 // -------------------------------------------------------------------------------------------
+
+/// Guard-abstention fall-through ([SONNET-4.6] sq-pbz04.4.8; module docs
+/// §"Guard-abstention tableau fall-through", design record §4 as amended).
+///
+/// `owner` is the abstaining outcome of the profile branch the in-order dispatch selected.
+/// Re-ask the SAME ontology of the ALCH tableau — the one branch complete for the whole L1
+/// fragment — and prefer its definitive verdict; keep the owner's abstention otherwise.
+/// Strictly abstention-reducing: it runs only after a branch has already abstained, and it
+/// can only replace an `Unknown` with a verdict the tableau's own completeness argument
+/// already covers.
+fn tableau_fall_through(
+    owner: ConsistencyOutcome,
+    onto: &Ontology,
+    budget: Budget,
+) -> ConsistencyOutcome {
+    // The PR1 punning abstention is NOT an incompleteness guard: it says the input is
+    // ill-posed as an OWL 2 DL ontology (an id used as class AND individual AND/OR
+    // property), so the L1 shadow the tableau would decide is one arbitrary reading of it.
+    // Fail closed — this abstention keeps its ownership (module docs).
+    if matches!(
+        owner.verdict,
+        ConsistencyVerdict::Unknown(UnknownReason::RlPr1Preconditions(_))
+    ) {
+        return owner;
+    }
+    let verdict = tableau_consistency(onto, budget);
+    if verdict.is_unknown() {
+        // The tableau added nothing (budget exhaustion): the honest attribution is the
+        // branch that OWNED the dispatch and the guard it tripped, not the tableau's.
+        owner
+    } else {
+        ConsistencyOutcome {
+            verdict,
+            branch: Branch::AlchTableau,
+        }
+    }
+}
 
 /// Map a tableau verdict into the dispatch verdict (the ALCH branch is complete for the
 /// whole L1 fragment, so both definitive verdicts pass through).

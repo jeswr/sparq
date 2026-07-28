@@ -134,6 +134,11 @@ impl DivergenceAllowlist {
             match class["id"].as_str() {
                 Some("cross-family-eq-type-error") => out.cross_family_eq_type_error = true,
                 Some("bnode-iri-inequality") => out.bnode_iri_inequality = true,
+                // `update-*` is the UPDATE differential's namespace in this shared
+                // registry: update_fuzz.rs owns those detectors and pins them with its
+                // own committed-allowlist test. Not unknown — just not this
+                // comparator's, so no warning and (correctly) no effect here.
+                Some(other) if other.starts_with("update-") => {}
                 Some(other) => eprintln!(
                     "warning: divergence allowlist {source} lists unknown class id \
                      {other:?} — no detector for it; that class stays STRICT"
@@ -1966,7 +1971,10 @@ ex:n4 ex:val "s2" .
         for c in v["classes"].as_array().expect("classes array") {
             let id = c["id"].as_str().expect("string id");
             assert!(
-                ["cross-family-eq-type-error", "bnode-iri-inequality"].contains(&id),
+                // `update-*` classes belong to update_fuzz.rs, whose own
+                // committed-allowlist test pins them the same way.
+                id.starts_with("update-")
+                    || ["cross-family-eq-type-error", "bnode-iri-inequality"].contains(&id),
                 "class {id:?} in the committed file has no detector in fuzz.rs"
             );
             assert!(
