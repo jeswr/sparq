@@ -947,13 +947,43 @@ jobs:
         run: cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets --features explain-json -- -D warnings
       # [SONNET-4.6] #3546: also build + clippy WITH the opt-in `native-ttl` feature (the
       # sparq-core native byte-level Turtle parser sq-3ul2n.11/#2752 routes the wasm SERIAL
-      # Turtle load path through). IN the published bundle (js `build:wasm` enables it), so
-      # without this leg the SHIPPED feature combination was never compiled for wasm32 in
-      # CI. The DEFAULT bundle stays on oxttl (perf floor byte-identical).
+      # Turtle load path through). IN the published bundle (js `build:wasm` enables it).
+      # This leg checks `native-ttl` STANDALONE, exactly like the per-feature legs above;
+      # the shipped COMBINATION is compiled by the published-bundle leg below. The DEFAULT
+      # bundle stays on oxttl (perf floor byte-identical).
       - name: Build sparq-wasm for the browser target (native-ttl feature)
         run: cargo build -p sparq-wasm --target wasm32-unknown-unknown --features native-ttl
       - name: clippy (wasm32 target, native-ttl feature, deny warnings)
         run: cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets --features native-ttl -- -D warnings
+      # [SONNET-4.6] #3546: the PUBLISHED bundle's feature COMBINATION. The legs above
+      # compile each opt-in feature standalone (plus the two-feature `shacl,jsonld` site
+      # bundle), so a feature INTERACTION across the wider shipped set is invisible to
+      # them. That set IS built elsewhere — `npm run build:wasm` in gui.yml and
+      # nightly-full-sweep.yml — but gui.yml is path-scoped to gui/**, packages/
+      # sparq-client/**, site/**, js/** and package-lock.json, so a RUST-only PR that
+      # breaks the combination goes green here and is caught post-merge by the nightly at
+      # best. This leg closes that PR-time hole. The list is READ from js/package.json's
+      # `build:wasm` script — the single source of truth for what is shipped — rather than
+      # duplicated here, so adding a feature to the published bundle can never silently
+      # escape this gate. The DEFAULT (lean) bundle is untouched: this is an additional
+      # feature state, not a change to the perf-gate baseline.
+      - name: Resolve the published wasm feature list (js/package.json build:wasm)
+        run: |
+          python3 - <<'PY' >> "$GITHUB_ENV"
+          import json
+          import re
+          import sys
+
+          script = json.load(open("js/package.json"))["scripts"]["build:wasm"]
+          match = re.search(r"--features\s+(\S+)", script)
+          if match is None:
+              sys.exit("js/package.json build:wasm carries no --features list")
+          print("PUBLISHED_WASM_FEATURES=" + match.group(1))
+          PY
+      - name: Build sparq-wasm for the browser target (published bundle features)
+        run: cargo build -p sparq-wasm --target wasm32-unknown-unknown --features "$PUBLISHED_WASM_FEATURES"
+      - name: clippy (wasm32 target, published bundle features, deny warnings)
+        run: cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets --features "$PUBLISHED_WASM_FEATURES" -- -D warnings
       # [OPUS-4.8] sq-6qw3 (W-reason): the tier-b forward-chaining inference bundle. Build +
       # clippy it on wasm32 in BOTH feature states (default + the opt-in `why()` proof-tree
       # `explain` feature) so the reason bundle is gate-protected exactly like sparq-wasm.
