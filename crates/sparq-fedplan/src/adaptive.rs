@@ -186,12 +186,16 @@
 //!   (verified **not** an ancestor of `main`). It ships an opt-in `adaptive-replan-local`
 //!   engine feature (OFF by default), a `replan_result_equals_static` oracle, and an
 //!   in-process micro-benchmark.
-//! * The "put the policy in a shared module so the two cannot diverge" half was **already
-//!   honoured there**: a pure, dependency-free `sparq-replan-policy` crate holds the
-//!   divergence + hysteresis rule. That branch deliberately did **not** rewire *this* module
-//!   onto it, so the federated path (and this file's adaptive test suite) stayed provably
-//!   unaffected. Re-extracting the policy here, with no local consumer on `main`, would take
-//!   that risk for no gain — do not do it as a standalone change.
+//! * The "put the policy in a shared module so the two cannot diverge" half was **started but
+//!   NOT completed there**: that branch extracted a *candidate* shared policy — a pure,
+//!   dependency-free `sparq-replan-policy` crate carrying a verbatim port of the divergence +
+//!   hysteresis rule — and wired only the **local** evaluator onto it. It deliberately did
+//!   **not** rewire *this* module, which keeps its own richer policy (the latency knobs
+//!   below), so the federated path and this file's adaptive test suite stayed provably
+//!   unaffected. One shared crate with one consumer does not stop the two rules drifting, so
+//!   convergence onto a single implementation is still outstanding. Doing that rewiring here
+//!   as a standalone change, with no local consumer on `main`, would take the regression risk
+//!   for no convergence gain — it belongs with whatever lands the local consumer.
 //! * **Why it was held back:** its benchmark gate was recorded UNMET — the engine
 //!   micro-benchmark showed no win on a non-canonical work box. No numbers are repeated
 //!   here; see the commit and `bench/` protocol.
