@@ -51,6 +51,8 @@
 //!
 //! `--inject-fault` is the non-vacuity self-test: `nargo test` on that file MUST fail. If
 //! it passes, the harness is not wired to the circuit and every green run is meaningless.
+//! It corrupts one expected value in EVERY generated `#[test]`, so each test function
+//! fails on its own account and the claim covers the whole file — see [`Faults`].
 
 use sparq_core::Graph;
 use std::fmt::Write as FmtWrite;
@@ -433,10 +435,70 @@ fn asciify_comments(src: &str) -> String {
 // Generation
 // ---------------------------------------------------------------------------
 
-/// The line that `--inject-fault` corrupts, plus its corrupted form.
+/// One line `--inject-fault` corrupts, plus its corrupted form and the generated Noir
+/// `#[test]` it lives in.
 struct FaultSite {
+    /// The `fn differential_oracle_*` this site sits inside. One site per test function.
+    test_fn: String,
     original: String,
     faulty: String,
+}
+
+/// The fault sites `--inject-fault` corrupts — **one per generated Noir `#[test]`**.
+///
+/// The self-test's whole claim is "a deliberately wrong expected value makes `nargo test`
+/// fail, therefore the generated file is really wired to the circuit". A single fault
+/// only ever established that for the ONE test function carrying it: every other section
+/// could have drifted into something that cannot fail (a corpus that emptied, an
+/// expected value computed from the same call it asserts) and the fault run would still
+/// go red — on the faulted function — leaving the rest unproven. Faulting every test
+/// function makes the run red *for each* of them independently, so the claim covers the
+/// whole file.
+#[derive(Default)]
+struct Faults {
+    sites: Vec<FaultSite>,
+}
+
+impl Faults {
+    /// Offer a candidate site for `test_fn`; the FIRST offer per test function wins, so a
+    /// generator loop can offer on every row without special-casing its first iteration.
+    fn offer(&mut self, test_fn: &str, original: &str, faulty: String) {
+        assert_ne!(original, faulty, "fault site for {test_fn} is not actually corrupted");
+        if self.sites.iter().any(|s| s.test_fn == test_fn) {
+            return;
+        }
+        self.sites.push(FaultSite {
+            test_fn: test_fn.to_string(),
+            original: original.to_string(),
+            faulty,
+        });
+    }
+}
+
+/// The `fn differential_oracle_*` names actually emitted into `src`, in file order.
+fn emitted_test_fns(src: &str) -> Vec<String> {
+    src.lines()
+        .filter_map(|l| l.strip_prefix("fn ")?.strip_suffix("() {"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The LIVE assertion lines of `src`, keyed by the generated `#[test]` they sit in.
+/// Used by the non-vacuity guards, which are the only consumers that need the grouping.
+#[cfg(test)]
+fn live_assertions_by_test(src: &str) -> Vec<(String, Vec<String>)> {
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    for line in src.lines() {
+        if let Some(name) = line.strip_prefix("fn ").and_then(|l| l.strip_suffix("() {")) {
+            out.push((name.to_string(), Vec::new()));
+        } else if line.trim_start().starts_with("assert(") {
+            out.last_mut()
+                .expect("an assertion was emitted outside any test function")
+                .1
+                .push(line.trim().to_string());
+        }
+    }
+    out
 }
 
 /// Running assertion count, so the generated file can state its own coverage and an
@@ -491,7 +553,8 @@ fn header(out: &mut String, inject_fault: bool) {
     writeln!(out, "// codepoint-indexed. They agree exactly on single-byte content and only there.").unwrap();
     if inject_fault {
         writeln!(out, "//").unwrap();
-        writeln!(out, "// !! INJECT-FAULT BUILD: one expected value has been deliberately corrupted.").unwrap();
+        writeln!(out, "// !! INJECT-FAULT BUILD: ONE expected value in EVERY test below has been").unwrap();
+        writeln!(out, "// !! deliberately corrupted, so each test function fails on its own account.").unwrap();
         writeln!(out, "// !! `nargo test` on this file MUST FAIL. A pass means the harness is vacuous.").unwrap();
     }
     writeln!(out).unwrap();
@@ -508,7 +571,7 @@ fn header(out: &mut String, inject_fault: bool) {
     writeln!(out).unwrap();
 }
 
-fn gen_string_length(out: &mut String, g: &Graph, c: &mut Counts, fault: &mut Option<FaultSite>) {
+fn gen_string_length(out: &mut String, g: &Graph, c: &mut Counts, f: &mut Faults) {
     writeln!(out, "/// fn:string-length — CODEPOINTS, not bytes, and stopping at the NUL terminator.").unwrap();
     writeln!(out, "/// Oracle: SPARQL `STRLEN(<literal>)`.").unwrap();
     writeln!(out, "#[test]").unwrap();
@@ -520,11 +583,12 @@ fn gen_string_length(out: &mut String, g: &Graph, c: &mut Counts, fault: &mut Op
         writeln!(out, "    let s{i}: str<{}> = {};", item.cap, noir_str(item.value, item.cap)).unwrap();
         let line = format!("    assert(string_length::<{}>(s{i}) == {expected});", item.cap);
         // The first non-zero-length case is the fault target: +1 makes it provably wrong.
-        if fault.is_none() && expected > 0 {
-            *fault = Some(FaultSite {
-                original: line.clone(),
-                faulty: format!("    assert(string_length::<{}>(s{i}) == {});", item.cap, expected + 1),
-            });
+        if expected > 0 {
+            f.offer(
+                "differential_oracle_string_length",
+                &line,
+                format!("    assert(string_length::<{}>(s{i}) == {});", item.cap, expected + 1),
+            );
         }
         writeln!(out, "{line}").unwrap();
         c.assertions += 1;
@@ -533,7 +597,7 @@ fn gen_string_length(out: &mut String, g: &Graph, c: &mut Counts, fault: &mut Op
     writeln!(out).unwrap();
 }
 
-fn gen_string_predicates(out: &mut String, g: &Graph, c: &mut Counts) {
+fn gen_string_predicates(out: &mut String, g: &Graph, c: &mut Counts, f: &mut Faults) {
     // (Noir fn, SPARQL builtin)
     for (nfn, builtin) in [("starts_with", "STRSTARTS"), ("ends_with", "STRENDS"), ("contains", "CONTAINS")] {
         writeln!(out, "/// fn:{} — oracle: SPARQL `{builtin}`.", nfn.replace('_', "-")).unwrap();
@@ -545,12 +609,15 @@ fn gen_string_predicates(out: &mut String, g: &Graph, c: &mut Counts) {
             writeln!(out, "    // {expr} -> {expected}").unwrap();
             writeln!(out, "    let h{i}: str<{}> = {};", hay.cap, noir_str(hay.value, hay.cap)).unwrap();
             writeln!(out, "    let n{i}: str<{}> = {};", needle.cap, noir_str(needle.value, needle.cap)).unwrap();
-            writeln!(
-                out,
-                "    assert({nfn}::<{}, {}>(h{i}, n{i}) == {expected});",
-                hay.cap, needle.cap
-            )
-            .unwrap();
+            let line =
+                format!("    assert({nfn}::<{}, {}>(h{i}, n{i}) == {expected});", hay.cap, needle.cap);
+            // Flipping the expected boolean is provably wrong whichever way it went.
+            f.offer(
+                &format!("differential_oracle_{nfn}"),
+                &line,
+                format!("    assert({nfn}::<{}, {}>(h{i}, n{i}) == {});", hay.cap, needle.cap, !expected),
+            );
+            writeln!(out, "{line}").unwrap();
             c.assertions += 1;
         }
         writeln!(out, "}}").unwrap();
@@ -558,7 +625,7 @@ fn gen_string_predicates(out: &mut String, g: &Graph, c: &mut Counts) {
     }
 }
 
-fn gen_substring(out: &mut String, g: &Graph, c: &mut Counts) {
+fn gen_substring(out: &mut String, g: &Graph, c: &mut Counts, f: &mut Faults) {
     writeln!(out, "/// fn:substring — ASCII-only (see the byte-vs-codepoint scope limit above).").unwrap();
     writeln!(out, "/// Oracle: SPARQL `SUBSTR`, cross-checked against the F&O 5.4.3 window. The `start < 1`").unwrap();
     writeln!(out, "/// rows are SPEC-REFERENCE (see the header): sparq-engine shifts the window, so their").unwrap();
@@ -592,7 +659,15 @@ fn gen_substring(out: &mut String, g: &Graph, c: &mut Counts) {
         writeln!(out, "    // {expr} -> {spec_answer:?}").unwrap();
         writeln!(out, "    let ss{i}: str<{cap}> = {};", noir_str(value, cap)).unwrap();
         writeln!(out, "    let ({bind}, len{i}) = substring::<{cap}, {cap}>(ss{i}, {start}, {});", length.max(0)).unwrap();
-        writeln!(out, "    assert(len{i} == {});", spec_answer.len()).unwrap();
+        let len_line = format!("    assert(len{i} == {});", spec_answer.len());
+        // The returned length is asserted on every row, empty ones included, so it is
+        // always available as this section's fault target.
+        f.offer(
+            "differential_oracle_substring",
+            &len_line,
+            format!("    assert(len{i} == {});", spec_answer.len() + 1),
+        );
+        writeln!(out, "{len_line}").unwrap();
         for (j, byte) in spec_answer.as_bytes().iter().enumerate() {
             writeln!(out, "    assert(out{i}[{j}] == {byte});").unwrap();
         }
@@ -601,7 +676,7 @@ fn gen_substring(out: &mut String, g: &Graph, c: &mut Counts) {
     writeln!(out).unwrap();
 }
 
-fn gen_divide(out: &mut String, g: &Graph, c: &mut Counts) {
+fn gen_divide(out: &mut String, g: &Graph, c: &mut Counts, f: &mut Faults) {
     writeln!(out, "/// op:numeric-divide on two xs:integer operands — the DECIMAL quotient (F&O 4.2.6),").unwrap();
     writeln!(out, "/// implemented as the documented double approximation, and DISTINCT from").unwrap();
     writeln!(out, "/// op:numeric-integer-divide (sq-3x7dl.4 de-aliasing). Oracle: SPARQL double").unwrap();
@@ -617,7 +692,18 @@ fn gen_divide(out: &mut String, g: &Graph, c: &mut Counts) {
         let expr = format!("xsd:double(\"{a}\") / xsd:double(\"{b}\")");
         let bits = oracle_double_bits(g, &expr, (a as f64) / (b as f64));
         writeln!(out, "    // {expr} -> bits {}", hex64(bits)).unwrap();
-        writeln!(out, "    assert(numeric_divide_int_as_double({a}, {b}).to_bits() == {});", hex64(bits)).unwrap();
+        let line =
+            format!("    assert(numeric_divide_int_as_double({a}, {b}).to_bits() == {});", hex64(bits));
+        // Flip the low mantissa bit: still a valid double literal, never the right one.
+        f.offer(
+            "differential_oracle_numeric_divide",
+            &line,
+            format!(
+                "    assert(numeric_divide_int_as_double({a}, {b}).to_bits() == {});",
+                hex64(bits ^ 1)
+            ),
+        );
+        writeln!(out, "{line}").unwrap();
         c.assertions += 1;
         // idiv MUST stay a distinct, truncating-toward-zero path.
         writeln!(out, "    assert(numeric_divide_int({a}, {b}) == {});", a / b).unwrap();
@@ -627,7 +713,7 @@ fn gen_divide(out: &mut String, g: &Graph, c: &mut Counts) {
     writeln!(out).unwrap();
 }
 
-fn gen_round(out: &mut String, g: &Graph, c: &mut Counts) {
+fn gen_round(out: &mut String, g: &Graph, c: &mut Counts, f: &mut Faults) {
     writeln!(out, "/// fn:round for xs:double — ties toward +INFINITY (F&O 4.4.3), sign of zero").unwrap();
     writeln!(out, "/// preserved. Oracle: SPARQL `ROUND`, bit-cross-checked against the F&O reference. The").unwrap();
     writeln!(out, "/// -0.5 row is SPEC-REFERENCE (see the header): sparq-engine loses the sign of a zero").unwrap();
@@ -659,19 +745,27 @@ fn gen_round(out: &mut String, g: &Graph, c: &mut Counts) {
         }
         c.assertions += 1;
         writeln!(out, "    // {expr} -> {spec:?}").unwrap();
-        writeln!(
-            out,
+        let line = format!(
             "    assert(round_double(XsdDouble::from_bits({})).to_bits() == {});",
             hex64(input.to_bits()),
             hex64(spec.to_bits())
-        )
-        .unwrap();
+        );
+        f.offer(
+            "differential_oracle_round_double",
+            &line,
+            format!(
+                "    assert(round_double(XsdDouble::from_bits({})).to_bits() == {});",
+                hex64(input.to_bits()),
+                hex64(spec.to_bits() ^ 1)
+            ),
+        );
+        writeln!(out, "{line}").unwrap();
     }
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 }
 
-fn gen_mixed_compare(out: &mut String, g: &Graph, c: &mut Counts) {
+fn gen_mixed_compare(out: &mut String, g: &Graph, c: &mut Counts, f: &mut Faults) {
     writeln!(out, "/// Mixed xs:integer <-> xs:double comparison. Every integer here is OUTSIDE the i8").unwrap();
     writeln!(out, "/// range the pre-sq-3x7dl.5 circuit truncated to (which made `256 = 0.0` TRUE — a").unwrap();
     writeln!(out, "/// wrong FILTER verdict an adversarial prover could satisfy). Oracle: SPARQL").unwrap();
@@ -688,7 +782,13 @@ fn gen_mixed_compare(out: &mut String, g: &Graph, c: &mut Counts) {
         for (nfn, op) in [("eq", "="), ("lt", "<"), ("gt", ">"), ("le", "<="), ("ge", ">=")] {
             let fwd = oracle_bool(g, &format!("xsd:integer(\"{n}\") {op} xsd:double(\"{d}\")"));
             writeln!(out, "    // {n} {op} {d} -> {fwd}").unwrap();
-            writeln!(out, "    assert(compare_int_double_{nfn}({n}, d{i}) == {fwd});").unwrap();
+            let line = format!("    assert(compare_int_double_{nfn}({n}, d{i}) == {fwd});");
+            f.offer(
+                "differential_oracle_mixed_compare",
+                &line,
+                format!("    assert(compare_int_double_{nfn}({n}, d{i}) == {});", !fwd),
+            );
+            writeln!(out, "{line}").unwrap();
             c.assertions += 1;
 
             let rev = oracle_bool(g, &format!("xsd:double(\"{d}\") {op} xsd:integer(\"{n}\")"));
@@ -701,7 +801,7 @@ fn gen_mixed_compare(out: &mut String, g: &Graph, c: &mut Counts) {
     writeln!(out).unwrap();
 }
 
-fn gen_cast(out: &mut String, g: &Graph, c: &mut Counts) {
+fn gen_cast(out: &mut String, g: &Graph, c: &mut Counts, f: &mut Faults) {
     writeln!(out, "/// xs:integer(xs:double) — TRUNCATES toward zero (F&O 17.1.1); it does NOT round.").unwrap();
     writeln!(out, "/// Oracle: SPARQL `xsd:integer(xsd:double(...))`.").unwrap();
     writeln!(out, "#[test]").unwrap();
@@ -717,19 +817,27 @@ fn gen_cast(out: &mut String, g: &Graph, c: &mut Counts) {
             input.trunc()
         );
         writeln!(out, "    // {expr} -> {expected}").unwrap();
-        writeln!(
-            out,
+        let line = format!(
             "    assert(cast_double_to_integer(XsdDouble::from_bits({})).unwrap() == {expected});",
             hex64(input.to_bits())
-        )
-        .unwrap();
+        );
+        f.offer(
+            "differential_oracle_double_to_integer_cast",
+            &line,
+            format!(
+                "    assert(cast_double_to_integer(XsdDouble::from_bits({})).unwrap() == {});",
+                hex64(input.to_bits()),
+                expected + 1
+            ),
+        );
+        writeln!(out, "{line}").unwrap();
         c.assertions += 1;
     }
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 }
 
-fn gen_datetime(out: &mut String, g: &Graph, c: &mut Counts) {
+fn gen_datetime(out: &mut String, g: &Graph, c: &mut Counts, f: &mut Faults) {
     writeln!(out, "/// Pre-1970 xs:dateTime. The epoch is a SIGNED microsecond count; the pre-sq-3x7dl.7").unwrap();
     writeln!(out, "/// circuit cast it through u64 and corrupted every extracted component. Oracle:").unwrap();
     writeln!(out, "/// SPARQL YEAR/MONTH/DAY/HOURS/MINUTES/SECONDS over the parsed lexical.").unwrap();
@@ -764,7 +872,13 @@ fn gen_datetime(out: &mut String, g: &Graph, c: &mut Counts) {
                 oracle_int(g, &expr)
             };
             assert_eq!(got, declared, "corpus component for `{expr}` disagrees with the oracle");
-            writeln!(out, "    assert({nfn}(dt{i}) == {got});").unwrap();
+            let line = format!("    assert({nfn}(dt{i}) == {got});");
+            f.offer(
+                "differential_oracle_datetime_pre_1970",
+                &line,
+                format!("    assert({nfn}(dt{i}) == {});", got + 1),
+            );
+            writeln!(out, "{line}").unwrap();
             c.assertions += 1;
         }
     }
@@ -785,17 +899,17 @@ fn generate_noir_file(inject_fault: bool) -> (String, Counts) {
     let g = oracle_graph();
     let mut out = String::with_capacity(64 * 1024);
     let mut counts = Counts::default();
-    let mut fault: Option<FaultSite> = None;
+    let mut faults = Faults::default();
 
     header(&mut out, inject_fault);
-    gen_string_length(&mut out, &g, &mut counts, &mut fault);
-    gen_string_predicates(&mut out, &g, &mut counts);
-    gen_substring(&mut out, &g, &mut counts);
-    gen_divide(&mut out, &g, &mut counts);
-    gen_round(&mut out, &g, &mut counts);
-    gen_mixed_compare(&mut out, &g, &mut counts);
-    gen_cast(&mut out, &g, &mut counts);
-    gen_datetime(&mut out, &g, &mut counts);
+    gen_string_length(&mut out, &g, &mut counts, &mut faults);
+    gen_string_predicates(&mut out, &g, &mut counts, &mut faults);
+    gen_substring(&mut out, &g, &mut counts, &mut faults);
+    gen_divide(&mut out, &g, &mut counts, &mut faults);
+    gen_round(&mut out, &g, &mut counts, &mut faults);
+    gen_mixed_compare(&mut out, &g, &mut counts, &mut faults);
+    gen_cast(&mut out, &g, &mut counts, &mut faults);
+    gen_datetime(&mut out, &g, &mut counts, &mut faults);
 
     writeln!(
         out,
@@ -810,16 +924,37 @@ fn generate_noir_file(inject_fault: bool) -> (String, Counts) {
     // fault injection so the site match below is against the final text.
     out = asciify_comments(&out);
 
-    if inject_fault {
-        let site = fault.expect("no fault site captured — inject-fault would be a no-op");
-        let replaced = out.replacen(&site.original, &site.faulty, 1);
-        assert_ne!(replaced, out, "fault injection matched nothing");
-        eprintln!(
-            "inject-fault: corrupted one expected value\n  was: {}\n  now: {}",
-            site.original.trim(),
-            site.faulty.trim()
+    // EVERY generated `#[test]` must have offered a site, or the self-test would silently
+    // stop covering a whole section — exactly the vacuity it exists to rule out.
+    let emitted = emitted_test_fns(&out);
+    for name in &emitted {
+        assert!(
+            faults.sites.iter().any(|s| &s.test_fn == name),
+            "generated test `{name}` offered no fault site: --inject-fault would leave it unproven"
         );
-        out = replaced;
+    }
+    assert_eq!(
+        faults.sites.len(),
+        emitted.len(),
+        "a fault site was registered for a test function that is not in the generated file"
+    );
+
+    if inject_fault {
+        for site in &faults.sites {
+            assert_eq!(
+                out.matches(&site.original).count(),
+                1,
+                "fault site for {} is not a unique line; injection would corrupt the wrong row",
+                site.test_fn
+            );
+            out = out.replacen(&site.original, &site.faulty, 1);
+            eprintln!(
+                "inject-fault: corrupted one expected value in {}\n  was: {}\n  now: {}",
+                site.test_fn,
+                site.original.trim(),
+                site.faulty.trim()
+            );
+        }
     }
 
     (out, counts)
@@ -1040,29 +1175,81 @@ mod tests {
         assert_eq!(ascii_comment("// STRLEN(\"\u{e9}\")"), "// STRLEN(\"\\u{e9}\")");
     }
 
-    /// `--inject-fault` must actually change exactly one assertion, and the corrupted
-    /// line must be a live (uncommented) one — a fault hidden in a comment would make the
-    /// non-vacuity self-test pass for the wrong reason.
+    /// `--inject-fault` must change exactly one LIVE assertion in EVERY generated
+    /// `#[test]`, and never a commented-out one.
+    ///
+    /// One fault in the whole file only ever demonstrated that the ONE test function
+    /// carrying it reaches the circuit: the fault run went red on that function no matter
+    /// what had happened to the other nine, so a section that quietly stopped being able
+    /// to fail would have passed the self-test. Faulting each test function independently
+    /// is what makes the script's "the harness is non-vacuous and wired to noir_XPath"
+    /// claim cover the whole file rather than one section of it.
     #[test]
-    fn inject_fault_corrupts_exactly_one_live_assertion() {
+    fn inject_fault_corrupts_one_live_assertion_in_every_generated_test() {
         let (clean, counts) = generate_noir_file(false);
         let (faulty, _) = generate_noir_file(true);
         assert_ne!(clean, faulty);
         assert!(counts.assertions > 100, "corpus shrank unexpectedly: {}", counts.assertions);
 
-        // Compare only LIVE assertions: the fault-injected header carries two extra
-        // warning lines, so a positional whole-file diff would report every line.
-        let live = |src: &str| -> Vec<String> {
-            src.lines()
-                .map(str::trim)
-                .filter(|l| l.starts_with("assert("))
-                .map(str::to_string)
-                .collect()
-        };
-        let (a, b) = (live(&clean), live(&faulty));
-        assert_eq!(a.len(), counts.assertions, "every live assertion must be countable");
-        assert_eq!(a.len(), b.len(), "fault injection must not add or drop an assertion");
-        let differing: Vec<_> = a.iter().zip(b.iter()).filter(|(x, y)| x != y).collect();
-        assert_eq!(differing.len(), 1, "fault injection must change exactly one live assertion");
+        // Compare only LIVE assertions, grouped by test function: the fault-injected
+        // header carries two extra warning lines, so a positional whole-file diff would
+        // report every line.
+        let (a, b) = (live_assertions_by_test(&clean), live_assertions_by_test(&faulty));
+        assert_eq!(a.len(), 10, "the generated file must still carry 10 test functions");
+        assert_eq!(
+            a.iter().map(|(_, l)| l.len()).sum::<usize>(),
+            counts.assertions,
+            "every live assertion must be countable"
+        );
+        assert_eq!(
+            a.iter().map(|(n, _)| n).collect::<Vec<_>>(),
+            b.iter().map(|(n, _)| n).collect::<Vec<_>>(),
+            "fault injection must not add, drop or reorder a test function"
+        );
+
+        for ((name, before), (_, after)) in a.iter().zip(b.iter()) {
+            assert_eq!(
+                before.len(),
+                after.len(),
+                "fault injection must not add or drop an assertion in {name}"
+            );
+            let differing = before.iter().zip(after.iter()).filter(|(x, y)| x != y).count();
+            assert_eq!(differing, 1, "expected exactly one corrupted assertion in {name}");
+        }
+    }
+
+    /// No fault may be hidden in a comment: a corrupted comment cannot fail `nargo test`,
+    /// so the self-test would go green on the fault run and be read as "the harness is
+    /// vacuous" — the wrong verdict, from the wrong evidence.
+    #[test]
+    fn every_fault_site_is_a_live_assertion() {
+        let (faulty, _) = generate_noir_file(true);
+        let live: Vec<String> =
+            live_assertions_by_test(&faulty).into_iter().flat_map(|(_, l)| l).collect();
+        let (g, mut counts, mut faults) = (oracle_graph(), Counts::default(), Faults::default());
+        let mut sink = String::new();
+        gen_string_length(&mut sink, &g, &mut counts, &mut faults);
+        gen_string_predicates(&mut sink, &g, &mut counts, &mut faults);
+        gen_substring(&mut sink, &g, &mut counts, &mut faults);
+        gen_divide(&mut sink, &g, &mut counts, &mut faults);
+        gen_round(&mut sink, &g, &mut counts, &mut faults);
+        gen_mixed_compare(&mut sink, &g, &mut counts, &mut faults);
+        gen_cast(&mut sink, &g, &mut counts, &mut faults);
+        gen_datetime(&mut sink, &g, &mut counts, &mut faults);
+
+        assert_eq!(faults.sites.len(), 10, "one fault site per generated test function");
+        for site in &faults.sites {
+            assert!(
+                site.original.trim_start().starts_with("assert("),
+                "fault site for {} is not an assertion: {}",
+                site.test_fn,
+                site.original
+            );
+            assert!(
+                live.contains(&site.faulty.trim().to_string()),
+                "the corrupted line for {} never reached the generated file",
+                site.test_fn
+            );
+        }
     }
 }

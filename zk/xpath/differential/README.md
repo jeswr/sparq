@@ -57,6 +57,23 @@ commented out and that `substring("12345", 0, 3)` and `round_double(-0.5)` in pa
 reach the circuit live; two assert each divergence still reproduces, so the special-casing
 **expires** (goes red) the day the engine is fixed.
 
+## Non-vacuity — proved per test function, not once per file
+
+A green `nargo test` only means something if the generated file can actually go red, so
+`--inject-fault` re-emits it with deliberately wrong expected values and the driver script
+asserts that run **fails**. That fault is injected into **every** generated `#[test]` — one
+corrupted expected value each — rather than into a single row somewhere in the file.
+
+The distinction is the whole value of the check. With one fault, the fault run went red on
+the one test function carrying it no matter what had happened to the other nine: a section
+whose corpus emptied, or whose expected value drifted into something derived from the very
+call it asserts, would still have passed the self-test. Faulting each test function makes
+every section fail on its own account, so "the harness is wired to the circuit" is a claim
+about the whole file. Two generator unit tests keep it that way: one requires exactly one
+corrupted **live** assertion inside each generated test function (a fault hidden in a
+comment cannot fail `nargo test`, so it would prove nothing), and generation itself refuses
+to emit a test function that registered no fault site at all.
+
 ## TCB — stated honestly
 
 This is **VERIFICATION, not proof**. Three things are trusted and unproven:

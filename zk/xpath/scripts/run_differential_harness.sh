@@ -3,7 +3,7 @@
 #
 # Drives the XPath differential oracle harness:
 #   1. Run the Rust harness's own unit tests (the F&O references, the self-expiring
-#      oracle-divergence guards, the fault-injection non-vacuity check).
+#      oracle-divergence guards, the per-test-function fault-injection coverage checks).
 #   2. Build the harness (zk/xpath/differential/).
 #   3. Generate the oracle Noir test file — every expected value read back from sparq's
 #      own Rust SPARQL/XSD scalar evaluator, cross-checked bit-for-bit against native f64
@@ -12,7 +12,9 @@
 #   5. Run `nargo test` — every differential test function must pass.
 #   6. SELF-TEST: re-generate with --inject-fault and assert `nargo test` FAILS. A pass
 #      there means the harness is VACUOUS (not wired to the circuit) and this script
-#      exits non-zero.
+#      exits non-zero. The fault is injected into EVERY generated test function (one
+#      corrupted expected value each), so the non-vacuity claim covers the whole file
+#      rather than only the section that happens to carry the fault.
 #
 # Usage:
 #   ./scripts/run_differential_harness.sh                     # full run (normal CI)
@@ -175,6 +177,8 @@ fi
 # Step 2: self-test (inject-fault) — prove the harness is non-vacuous.
 # A deliberately corrupted expected value MUST make nargo test fail. If it passes, the
 # generated file is not actually exercising the circuit and every green run is worthless.
+# One value is corrupted in EACH generated test function, so a single section that has
+# stopped being able to fail cannot hide behind another section's fault.
 # ---------------------------------------------------------------------------
 FAULT_DIR="${TMPDIR_BASE}/fault"
 write_nargo_toml "${FAULT_DIR}" "sparq_xpath_differential_fault"
