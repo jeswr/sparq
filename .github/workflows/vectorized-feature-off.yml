@@ -477,7 +477,12 @@ jobs:
         run: python3 scripts/tests/test_vectorized_feature_off.py
 
       - name: Tripwire self-test (the declaration derivation can refuse)
-        if: steps.changes.outputs.rust_changed == 'true'
+        # `always()` is load-bearing. Without it this step inherits the implicit
+        # `success()`, so it would run ONLY on PRs where leg 2 is already GREEN — i.e.
+        # never on the population the derivation exists to serve, which is exactly the
+        # PRs where leg 2 FAILED. The mutation matrix must run on the failing population
+        # or it is guarding an empty set.
+        if: always() && steps.changes.outputs.rust_changed == 'true'
         # Runs the derivation's own suite INCLUDING the mutation matrix, so a change that
         # stops the derivation refusing a semantic drift fails here rather than silently
         # auto-declaring one.

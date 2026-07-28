@@ -33,6 +33,7 @@ Usage:
 from __future__ import annotations
 
 import hashlib
+import json
 import importlib.util as _ilu
 import os
 import re
@@ -456,31 +457,133 @@ def test_symlink_inside_the_closure_is_refused() -> None:
         shutil.rmtree(head, ignore_errors=True)
 
 
-def test_paths_outside_the_build_closure_are_inert() -> None:
-    """A change to a crate the bundle does not compile cannot be part of its drift.
+def test_out_of_closure_semantic_change_is_refused() -> None:
+    """RED TEST: a real code change in a path the closure query MISSES must still refuse.
 
-    This is what stops unrelated base-branch drift — other crates, research records, bench
-    data — from refusing an otherwise-provable PR.
+    This is the live false pass this tool shipped with. sparq's root manifest carries
+    `exclude = ["vendor/spargebra", ...]` together with `[patch.crates-io] spargebra =
+    { path = "vendor/spargebra" }`, so spargebra IS compiled into the feature-OFF bundle
+    while NOT being a workspace member. Blanking was scoped to a closure derived from
+    `cargo metadata --no-deps` — workspace members only — so a change under `vendor/`
+    was never blanked and `neutral == head` held BY CONSTRUCTION.
+
+    The fixture deliberately hands `decide` a closure that does NOT contain the changed
+    crate, which is exactly the failure mode. The refusal must not depend on the closure
+    being right — that is the whole point of blanking every changed non-manifest path.
     """
-    blankable, manifest, inert = A.classify_paths(
-        ["crates/c/src/lib.rs", "crates/c/README.md", "crates/other/src/lib.rs",
-         "research/notes.md", "Cargo.lock", "crates/other/README.md"],
+    real_closure = A.closure_dirs
+    A.closure_dirs = lambda tree, package="sparq-wasm": ["crates/c/"]  # deliberately WRONG
+    try:
+        base = base_files(**{"vendor/vend/src/lib.rs": _BASE_LIB})
+        head = base_files(**{"vendor/vend/src/lib.rs": insert_at(
+            _BASE_LIB, 4, ["pub fn smuggled(x: u64) -> u64 { x.rotate_right(3) }"])})
+        v = run_decide(base, head)
+    finally:
+        A.closure_dirs = real_closure
+    check("test_out_of_closure_semantic_change_is_refused",
+          v.outcome == A.REFUSE_ADDED_LINES_ARE_SEMANTIC, f"got {v.outcome}: {v.reason}")
+
+
+def test_vacuous_proof_is_refused() -> None:
+    """RED TEST: if the neutral tree equals the head tree, the proof is `head == head`.
+
+    The general form of the bug above: whenever the bundle moved but NOTHING the proof
+    covers was blanked, the drift came from somewhere the proof does not reach. This guard
+    catches it without anyone having to know which path class was missed.
+    """
+    base = make_tree(base_files())
+    head = make_tree(base_files())
+    # A changed path that exists in NEITHER tree: the diff is real, but there is nothing on
+    # disk to blank, so the neutral tree comes out identical to the head tree.
+    diff = ("diff --git a/crates/c/src/ghost.rs b/crates/c/src/ghost.rs\n"
+            "--- a/crates/c/src/ghost.rs\n"
+            "+++ b/crates/c/src/ghost.rs\n"
+            "@@ -0,0 +1 @@\n"
+            "+pub fn ghost() {}\n")
+    try:
+        v = A.decide(base, head, diff, _scripted_builder(b"base-bundle", b"head-bundle"))
+        check("test_vacuous_proof_is_refused", v.outcome == A.REFUSE_VACUOUS_PROOF,
+              f"got {v.outcome}: {v.reason}")
+        check("test_vacuous_proof_is_refused__names_the_paths",
+              "ghost.rs" in v.reason,
+              "the refusal must name where the unexplained diff actually was")
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+        shutil.rmtree(head, ignore_errors=True)
+
+
+def test_closure_query_includes_patched_out_of_workspace_crates() -> None:
+    """`cargo metadata --no-deps` returns WORKSPACE MEMBERS ONLY — the wrong instrument.
+
+    A crate reached through `[patch.crates-io]` from an `exclude`d path is compiled into
+    the bundle but is not a member, so `--no-deps` silently drops it. Pins both halves:
+    the flag is absent from the query, and such a package's directory comes back.
+    """
+    tree = tempfile.mkdtemp(prefix="featoff-closure-")
+    os.makedirs(os.path.join(tree, "vendor/spargebra"))
+    argvs: list[list[str]] = []
+
+    class _R:
+        returncode = 0
+        stderr = ""
+
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    def _stub(argv, **k):
+        argvs.append(argv)
+        if argv[1] == "tree":
+            return _R("sparq-wasm v0.1.0\nspargebra v0.4.6\nserde v1.0.0\n")
+        return _R(json.dumps({"packages": [
+            {"name": "spargebra",
+             "manifest_path": os.path.join(tree, "vendor/spargebra/Cargo.toml")},
+            {"name": "serde", "manifest_path": "/home/u/.cargo/registry/serde/Cargo.toml"},
+        ]}))
+
+    real = A.subprocess.run
+    try:
+        A.subprocess.run = _stub
+        got = A.closure_dirs(tree)
+    finally:
+        A.subprocess.run = real
+        shutil.rmtree(tree, ignore_errors=True)
+    meta_argv = next((a for a in argvs if a[1] == "metadata"), [])
+    check("test_closure_query_includes_patched_out_of_workspace_crates",
+          got == ["vendor/spargebra/"],
+          f"expected the patched vendored crate's dir, got {got}")
+    check("test_closure_query_includes_patched_out_of_workspace_crates__no_no_deps",
+          "--no-deps" not in meta_argv,
+          "cargo metadata must NOT use --no-deps (it hides patched non-member crates)")
+
+
+def test_every_changed_non_manifest_path_is_blanked() -> None:
+    """Nothing is skipped: a path the closure omits is still covered by the proof."""
+    blankable, manifest, in_closure = A.classify_paths(
+        ["crates/c/src/lib.rs", "vendor/vend/src/lib.rs", "research/notes.md", "Cargo.lock"],
         ["crates/c/"])
-    check("test_paths_outside_the_build_closure_are_inert",
-          sorted(blankable) == ["crates/c/README.md", "crates/c/src/lib.rs"]
-          and manifest == ["Cargo.lock"]
-          and sorted(inert) == ["crates/other/README.md", "crates/other/src/lib.rs",
-                                "research/notes.md"],
-          f"got blankable={blankable} manifest={manifest} inert={inert}")
+    check("test_every_changed_non_manifest_path_is_blanked",
+          sorted(blankable) == ["crates/c/src/lib.rs", "research/notes.md",
+                                "vendor/vend/src/lib.rs"]
+          and manifest == ["Cargo.lock"],
+          f"got blankable={blankable} manifest={manifest}")
+    check("test_every_changed_non_manifest_path_is_blanked__closure_is_report_only",
+          in_closure == ["crates/c/src/lib.rs", "Cargo.lock"],
+          f"the closure list is evidence only, got {in_closure}")
 
 
-def test_root_build_inputs_are_never_inert() -> None:
-    """Cargo.lock / rust-toolchain / .cargo live outside every crate dir but reach the build."""
-    rust, manifest, inert = A.classify_paths(
+def test_root_build_inputs_are_restored_from_base() -> None:
+    """Cargo.lock / rust-toolchain / .cargo live outside every crate dir but reach the build.
+
+    They must land in the MANIFEST bucket (restored wholesale from the base tree), never in
+    the blankable one — blanking a line out of a lockfile yields a corrupt lockfile, not an
+    absence — and they are always reported as part of the compiled closure.
+    """
+    blankable, manifest, in_closure = A.classify_paths(
         ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo/config.toml"],
         ["crates/c/"])
-    check("test_root_build_inputs_are_never_inert", inert == [] and len(manifest) == 4,
-          f"got manifest={manifest} inert={inert}")
+    check("test_root_build_inputs_are_restored_from_base",
+          blankable == [] and len(manifest) == 4 and len(in_closure) == 4,
+          f"got blankable={blankable} manifest={manifest} in_closure={in_closure}")
 
 
 def test_base_build_failure_is_refused() -> None:
@@ -722,6 +825,57 @@ def test_workflow_wires_the_derivation_step() -> None:
           "the artifact-exact-equality job must invoke the derivation in report-only mode")
 
 
+def test_derivation_if_carries_always() -> None:
+    """`always()` is load-bearing on the derivation's `if:`.
+
+    Without it the step inherits the implicit `success()`, which is false once leg 2 has
+    failed — so the derivation would be skipped EXACTLY when it is needed and would never
+    run in production. It fails safe, which is precisely why nothing else would go red.
+    """
+    block = _step_block(workflow_text(), "Derive the feature-OFF declaration")
+    check("test_derivation_if_carries_always", re.search(r"if:\s*always\(\)", block) is not None,
+          "the derivation's `if:` must start with always(), or it never runs on a failed leg 2")
+
+
+def test_mutation_tripwire_runs_when_leg2_fails() -> None:
+    """The `--mutate` matrix must run on the population the derivation serves.
+
+    Same trap as above: without `always()` the tripwire only ever runs on PRs where leg 2
+    is already GREEN — i.e. never on a failing PR, which is the only population where the
+    derivation does anything. It would be guarding an empty set.
+    """
+    block = _step_block(workflow_text(), "Tripwire self-test (the declaration derivation")
+    check("test_mutation_tripwire_runs_when_leg2_fails",
+          re.search(r"if:\s*always\(\)", block) is not None,
+          "the derivation tripwire's `if:` must carry always()")
+
+
+def test_ci_invocation_is_report_only() -> None:
+    """CI must never pass `--write`.
+
+    `--write` puts the declaration into the working tree. In a job that has the repo
+    checked out this is the first step towards a gate that declares for you; the whole
+    containment argument is that CI only ever REPORTS and a human commits.
+    """
+    block = _step_block(workflow_text(), "Derive the feature-OFF declaration")
+    check("test_ci_invocation_is_report_only",
+          "--report-only" in block and "--write" not in block,
+          "the CI invocation must be --report-only and must not pass --write")
+
+
+def test_ci_passes_the_bundles_in_the_right_order() -> None:
+    """`--base-wasm` must get the BASE bundle and `--head-wasm` the HEAD one.
+
+    Swapping them silently inverts the comparison: the reported size delta flips sign and
+    the prebuilt bundles no longer correspond to the trees the obligations rebuild.
+    """
+    block = _step_block(workflow_text(), "Derive the feature-OFF declaration")
+    ok = ("--base-wasm base-wasm/base.wasm" in block
+          and "--head-wasm head.wasm" in block)
+    check("test_ci_passes_the_bundles_in_the_right_order", ok,
+          "expected --base-wasm base-wasm/base.wasm and --head-wasm head.wasm")
+
+
 def test_derivation_step_runs_only_when_leg2_failed() -> None:
     block = _step_block(workflow_text(), "Derive the feature-OFF declaration")
     check("test_derivation_step_runs_only_when_leg2_failed",
@@ -841,6 +995,10 @@ def test_paths_filter_includes_the_new_scripts() -> None:
 TESTS = [
     test_workflow_wires_the_derivation_step,
     test_derivation_step_runs_only_when_leg2_failed,
+    test_derivation_if_carries_always,
+    test_mutation_tripwire_runs_when_leg2_fails,
+    test_ci_invocation_is_report_only,
+    test_ci_passes_the_bundles_in_the_right_order,
     test_leg2_step_has_the_id_the_derivation_depends_on,
     test_derivation_cannot_change_the_leg2_verdict,
     test_derivation_suite_is_run_in_ci,
@@ -863,10 +1021,13 @@ TESTS = [
     test_deletion_neutral_build_failure_is_refused,
     test_neutral_tree_blanks_the_added_lines,
     test_non_rust_file_inside_the_closure_is_blanked_not_refused,
+    test_out_of_closure_semantic_change_is_refused,
+    test_vacuous_proof_is_refused,
+    test_closure_query_includes_patched_out_of_workspace_crates,
+    test_every_changed_non_manifest_path_is_blanked,
     test_included_non_rust_file_is_refused,
     test_symlink_inside_the_closure_is_refused,
-    test_paths_outside_the_build_closure_are_inert,
-    test_root_build_inputs_are_never_inert,
+    test_root_build_inputs_are_restored_from_base,
     test_base_build_failure_is_refused,
     test_head_build_failure_is_refused,
     test_empty_diff_is_refused,
@@ -905,7 +1066,7 @@ MUTANTS = [
      "test_deleted_code_lines_are_refused"),
     ("M3-skip-blanking-added-lines",
      "build the neutral tree without blanking anything",
-     "            fh.write(blank_lines(text, added))", "            fh.write(text)",
+     "            fh.write(blanked)", "            fh.write(text)",
      "test_neutral_tree_blanks_the_added_lines"),
     ("M4-keep-head-manifests",
      "do not restore the base tree's manifests into the neutral tree",
@@ -920,16 +1081,26 @@ MUTANTS = [
      "        else:\n            blankable.append(p)",
      "        elif _is_rust(p):\n            blankable.append(p)\n        else:\n            inert.append(p)",
      "test_included_non_rust_file_is_refused"),
-    ("M5b-everything-is-in-closure",
-     "treat every changed path as build-relevant, so unrelated crates refuse the PR",
-     "        in_closure = closure is None or root_input or any(p.startswith(d) for d in closure)",
-     "        in_closure = True",
-     "test_paths_outside_the_build_closure_are_inert"),
+    ("M5e-scope-blanking-to-the-closure",
+     "only blank paths inside the derived closure, reinstating the vendored false pass",
+     "        if _is_manifest(p) or root_input:\n            manifest.append(p)\n        else:\n            blankable.append(p)",
+     "        if _is_manifest(p) or root_input:\n            manifest.append(p)\n"
+     "        elif closure is None or any(p.startswith(d) for d in closure):\n            blankable.append(p)",
+     "test_out_of_closure_semantic_change_is_refused"),
+    ("M5f-drop-the-non-vacuity-guard",
+     "declare even when the neutral tree is identical to the head tree",
+     "    if not mutated and not to_blank:", "    if False:",
+     "test_vacuous_proof_is_refused"),
+    ("M5g-closure-query-uses-no-deps",
+     "ask cargo metadata --no-deps, hiding patched non-member crates",
+     '            ["cargo", "metadata", "--format-version", "1"],',
+     '            ["cargo", "metadata", "--format-version", "1", "--no-deps"],',
+     "test_closure_query_includes_patched_out_of_workspace_crates"),
     ("M5c-root-inputs-fall-outside",
      "forget that Cargo.lock / rust-toolchain / .cargo reach every build",
      '        root_input = p in _ROOT_BUILD_INPUTS or p.startswith(".cargo/")',
      "        root_input = False",
-     "test_root_build_inputs_are_never_inert"),
+     "test_root_build_inputs_are_restored_from_base"),
     ("M6-ignore-neutral-build-failure",
      "treat a neutral tree that fails to build as a pass",
      "    if neutral_bytes is None:", "    if False:",
@@ -1006,6 +1177,30 @@ YAML_MUTANTS = [
      "          PR_NUMBER: ${{ github.event.pull_request.number }}\n"
      "          CARGO_TARGET_DIR: ${{ runner.temp }}/shared",
      "test_workflow_sets_no_shared_target_dir"),
+    ("Y8-drop-always-from-derivation-if",
+     "drop always() so the derivation is skipped exactly when leg 2 fails",
+     "        if: always() && steps.changes.outputs.rust_changed == 'true'\n"
+     "          && steps.leg2.outcome == 'failure' && github.event_name == 'pull_request'",
+     "        if: steps.changes.outputs.rust_changed == 'true'\n"
+     "          && steps.leg2.outcome == 'failure' && github.event_name == 'pull_request'",
+     "test_derivation_if_carries_always"),
+    ("Y9-disable-the-mutation-tripwire",
+     "switch the --mutate tripwire off with if: false",
+     "        if: always() && steps.changes.outputs.rust_changed == 'true'\n"
+     "        # Runs the derivation's own suite INCLUDING the mutation matrix",
+     "        if: false\n"
+     "        # Runs the derivation's own suite INCLUDING the mutation matrix",
+     "test_mutation_tripwire_runs_when_leg2_fails"),
+    ("Y10-ci-invocation-gains-write",
+     "append --write, so CI starts materialising declarations itself",
+     "--base-wasm base-wasm/base.wasm --head-wasm head.wasm --report-only",
+     "--base-wasm base-wasm/base.wasm --head-wasm head.wasm --report-only --write",
+     "test_ci_invocation_is_report_only"),
+    ("Y11-swap-the-bundle-arguments",
+     "swap --base-wasm and --head-wasm, inverting the comparison",
+     "--base-wasm base-wasm/base.wasm --head-wasm head.wasm",
+     "--base-wasm head.wasm --head-wasm base-wasm/base.wasm",
+     "test_ci_passes_the_bundles_in_the_right_order"),
     ("Y5-drop-paths-filter-entry",
      "stop re-running the leg when the derivation script itself changes",
      "              - 'scripts/feature_off_autodeclare.py'\n", "",

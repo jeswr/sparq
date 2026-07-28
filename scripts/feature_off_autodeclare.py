@@ -81,14 +81,12 @@ REFUSE_DELETION_BUILD_FAILED = "deletion-neutral-build-failed"
 REFUSE_ADDED_LINES_ARE_SEMANTIC = "added-lines-are-semantic"
 REFUSE_DELETED_LINES_ARE_SEMANTIC = "deleted-lines-are-semantic"
 REFUSE_UNSUPPORTED_FILE_CHANGE = "unsupported-file-change"
+REFUSE_VACUOUS_PROOF = "proof-would-be-vacuous"
 REFUSE_NO_DIFF = "no-diff-between-base-and-head"
 
 OUTCOME_NO_DRIFT = "no-drift"
 OUTCOME_DECLARED = "declared"
 
-# Source files whose content the wasm build can compile. Everything else (markdown,
-# workflows, research records, bench data) cannot change the bundle, so a change there
-# needs no attribution.
 _RUST_SUFFIX = ".rs"
 _MANIFESTS = ("Cargo.toml", "Cargo.lock")
 
@@ -101,85 +99,95 @@ def _is_rust(path: str) -> bool:
     return path.endswith(_RUST_SUFFIX)
 
 
-def _build_relevant(path: str) -> bool:
-    """Can a change to this path alter the compiled wasm bundle at all?
-
-    Conservative: `.rs` and cargo manifests only. Anything else is inert for the bundle
-    (markdown, YAML, JSON fixtures, the declarations directory itself). A file we do not
-    recognise as inert is NOT silently accepted — see `classify_paths`.
-    """
-    return _is_rust(path) or _is_manifest(path)
-
-
 # Root-level inputs that reach every build regardless of which crate they sit next to.
 _ROOT_BUILD_INPUTS = ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain")
 
 
 def closure_dirs(tree: str, package: str = "sparq-wasm") -> list[str] | None:
-    """The workspace crate directories `package`'s DEFAULT wasm build actually compiles.
+    """The IN-REPO crate directories `package`'s DEFAULT wasm build actually compiles.
 
     DERIVED from cargo, never hardcoded: `cargo tree` for the wasm32 target with default
-    features lists the closure, and `cargo metadata` maps each member to its manifest
-    directory. A path outside those directories provably cannot be compiled into the
-    bundle, so a change there needs no attribution — which is what stops unrelated
-    base-branch drift (research records, other crates, bench data) from being mistaken for
-    part of this PR's diff.
+    features names the closure, and `cargo metadata` maps each package to its directory.
 
-    Returns None when cargo cannot answer, and the caller then treats EVERY changed path as
-    build-relevant (fail-closed).
+    REPORTING ONLY. This once decided which paths the proof covered, and that was the
+    source of a live false pass — see `classify_paths`. Soundness no longer depends on it:
+    every changed non-manifest path is blanked regardless of what this returns. It is kept
+    because naming which changed files the bundle actually compiles is useful evidence in
+    the declaration and in a refusal.
+
+    Returns None when cargo cannot answer, which now costs nothing but the evidence line.
     """
     try:
         tree_out = subprocess.run(
             ["cargo", "tree", "-p", package, "--target", "wasm32-unknown-unknown",
              "--edges", "normal", "--prefix", "none"],
             cwd=tree, capture_output=True, text=True, check=True).stdout
+        # WITH deps, deliberately. `--no-deps` returns WORKSPACE MEMBERS ONLY, which misses
+        # any crate pulled in by `[patch.crates-io]` from a path the workspace `exclude`s —
+        # `vendor/spargebra` on this repo, which really is compiled into the bundle.
         meta = json.loads(subprocess.run(
-            ["cargo", "metadata", "--format-version", "1", "--no-deps"],
+            ["cargo", "metadata", "--format-version", "1"],
             cwd=tree, capture_output=True, text=True, check=True).stdout)
     except Exception:
         return None
+    return closure_dirs_from(tree_out, meta, tree)
+
+
+def closure_dirs_from(tree_out: str, meta: dict, tree: str) -> list[str]:
+    """Pure half of `closure_dirs`: intersect a `cargo tree` listing with package dirs."""
     in_closure = {line.split()[0] for line in tree_out.splitlines() if line.strip()}
+    real_tree = os.path.realpath(tree)
     dirs = []
     for pkg in meta.get("packages", []):
-        if pkg["name"] in in_closure:
-            d = os.path.relpath(os.path.dirname(pkg["manifest_path"]), tree)
-            if d not in (".", ""):
-                dirs.append(d.rstrip("/") + "/")
-    return sorted(dirs)
+        if pkg["name"] not in in_closure:
+            continue
+        pkg_dir = os.path.realpath(os.path.dirname(pkg["manifest_path"]))
+        # Registry crates live under ~/.cargo and cannot be touched by a PR diff; only
+        # in-repo sources are addressable, so only those become directories to report.
+        if pkg_dir == real_tree or not pkg_dir.startswith(real_tree + os.sep):
+            continue
+        dirs.append(os.path.relpath(pkg_dir, real_tree).rstrip("/") + "/")
+    return sorted(set(dirs))
 
 
 def classify_paths(paths: list[str],
                    closure: list[str] | None = None) -> tuple[list[str], list[str], list[str]]:
-    """Split changed paths into (blankable, manifest, inert).
+    """Split changed paths into (blankable, manifest, in_closure_report).
 
-    `closure` is the list of crate directories the bundle compiles (see `closure_dirs`).
-    A path outside it — and outside the root build inputs — is INERT BY DERIVATION: cargo
-    cannot compile it into `sparq-wasm`, so a change there needs no attribution. That is
-    what keeps unrelated base-branch drift from refusing an otherwise-provable PR.
+    EVERY changed path that is not a manifest is BLANKABLE. The classification is
+    deliberately NOT used to decide what the proof covers, because that is precisely how
+    this tool produced a live false pass:
 
-    Inside the closure, everything except a cargo manifest is BLANKABLE — not just `.rs`.
-    Deciding by file extension would be both too strict and unsound: too strict because a
-    crate `README.md` is usually inert, and unsound because it is NOT inert when the crate
-    does `#![doc = include_str!("../README.md")]`. Blanking the file and rebuilding answers
-    that question for the actual crate rather than guessing from the name — if the content
-    reached the bundle, the bundle changes and the derivation refuses.
+        sparq's root manifest carries `exclude = ["vendor/spargebra", ...]` together with
+        `[patch.crates-io] spargebra = { path = "vendor/spargebra" }`, so spargebra IS
+        compiled into the feature-OFF bundle while NOT being a workspace member. An earlier
+        version scoped blanking to a closure derived from `cargo metadata --no-deps` —
+        which returns workspace members only — so `vendor/spargebra/src/parser.rs`
+        classified INERT, was never blanked, and `neutral == head` held BY CONSTRUCTION.
+        Three genuinely non-benign changes there all came back `declared`.
+
+    A skipped path cannot be proved harmless, so nothing is skipped. Blanking a file the
+    build never reads is free — the bundle is unchanged either way — while blanking one it
+    DOES read changes the bundle and the derivation refuses. Letting the compiler answer
+    costs nothing and removes an entire class of classification bug.
 
     Manifests are handled separately (restored from the base tree) because blanking a line
     out of a `Cargo.toml` yields a manifest, not an absence.
+
+    `closure` is reported as evidence only; it no longer gates anything.
     """
     blankable: list[str] = []
     manifest: list[str] = []
-    inert: list[str] = []
+    in_closure: list[str] = []
     for p in paths:
         root_input = p in _ROOT_BUILD_INPUTS or p.startswith(".cargo/")
-        in_closure = closure is None or root_input or any(p.startswith(d) for d in closure)
-        if not in_closure:
-            inert.append(p)
-        elif _is_manifest(p) or root_input:
+        if _is_manifest(p) or root_input:
             manifest.append(p)
         else:
             blankable.append(p)
-    return blankable, manifest, inert
+        if closure is not None and (root_input or any(p.startswith(d) for d in closure)):
+            in_closure.append(p)
+    return blankable, manifest, in_closure
 
 
 # ---------------------------------------------------------------------------
@@ -357,7 +365,7 @@ def decide(base_tree: str, head_tree: str, diff_text: str, builder,
         return Verdict(REFUSE_NO_DIFF, "the base..head diff is empty — nothing to attribute")
 
     closure = closure_dirs(head_tree)
-    rust_paths, manifest_paths, inert_paths = classify_paths(sorted(changes), closure)
+    rust_paths, manifest_paths, closure_paths = classify_paths(sorted(changes), closure)
 
     # Blanking rewrites files in place, which is meaningless for a symlink or a submodule
     # gitlink — the proof would silently cover nothing. Refuse rather than pretend.
@@ -390,16 +398,35 @@ def decide(base_tree: str, head_tree: str, diff_text: str, builder,
         "differing_bytes": differing_bytes(base_bytes, head_bytes),
         "closure_files_changed": rust_paths,
         "manifest_files_changed": manifest_paths,
-        "inert_files_changed": len(inert_paths),
+        "files_in_compiled_closure": closure_paths,
+        "closure_dirs": closure,
     }
 
     # ---- Obligation 1: additions contribute no compiled code ----------------
     # Neutral tree = HEAD with every added .rs line blanked and every changed manifest
     # restored from BASE. It therefore holds BASE's compiled content at HEAD's line
     # positions. If its bundle equals HEAD's, the additions emitted nothing.
+    removed_nonblank = 0
+    to_blank: dict[str, list[int]] = {}
+    for path in rust_paths:
+        removed = changes[path]["removed"]
+        if not removed:
+            continue
+        src = os.path.join(base_tree, path)
+        if not os.path.exists(src):
+            continue
+        with open(src, encoding="utf-8", errors="surrogateescape") as fh:
+            text = fh.read()
+        n = nonblank_count(text, removed)
+        if n:
+            removed_nonblank += n
+            to_blank[path] = removed
+    evidence["deleted_nonblank_lines"] = removed_nonblank
+
     neutral = os.path.join(tempfile.mkdtemp(prefix="featoff-neutral-"), "tree")
     shutil.copytree(head_tree, neutral, symlinks=True)
     added_nonblank = 0
+    mutated: list[str] = []
     for path in rust_paths:
         added = changes[path]["added"]
         if not added:
@@ -410,16 +437,42 @@ def decide(base_tree: str, head_tree: str, diff_text: str, builder,
         with open(target, encoding="utf-8", errors="surrogateescape") as fh:
             text = fh.read()
         added_nonblank += nonblank_count(text, added)
+        blanked = blank_lines(text, added)
+        if blanked != text:
+            mutated.append(path)
         with open(target, "w", encoding="utf-8", errors="surrogateescape") as fh:
-            fh.write(blank_lines(text, added))
+            fh.write(blanked)
     for path in manifest_paths:
         src = os.path.join(base_tree, path)
         dst = os.path.join(neutral, path)
+        head_bytes_of = open(dst, "rb").read() if os.path.exists(dst) else None
         if os.path.exists(src):
             shutil.copyfile(src, dst)
+            if open(dst, "rb").read() != head_bytes_of:
+                mutated.append(path)
         elif os.path.exists(dst):
             os.remove(dst)
+            mutated.append(path)
     evidence["added_nonblank_lines_blanked"] = added_nonblank
+    evidence["neutral_tree_files_mutated"] = len(mutated)
+
+    # NON-VACUITY. Obligation 1 concludes "the additions emitted nothing" from
+    # `build(neutral) == build(head)`. If the neutral tree is IDENTICAL to the head tree,
+    # that comparison is `head == head` — it holds by construction and proves nothing, so a
+    # declaration derived from it would be exactly the rubber stamp this leg exists to
+    # prevent. This is the general form of the vendored-crate false pass: whenever the diff
+    # is real but nothing got blanked, the drift came from somewhere the proof does not
+    # reach. Refuse, and say where the diff actually was.
+    if not mutated and not to_blank:
+        return Verdict(
+            REFUSE_VACUOUS_PROOF,
+            "neither obligation has anything to prove: the neutral tree is identical to the "
+            "head tree (nothing was blanked) and the diff deletes no non-blank line, so "
+            "comparing the bundles would be `head == head` and would hold by construction. "
+            "The bundle moved anyway, so the drift originates outside what the proof "
+            "reaches — do not declare it. Changed paths: "
+            + ", ".join(sorted(changes)[:20]),
+            evidence)
 
     neutral_bytes = builder(neutral)
     if neutral_bytes is None:
@@ -441,23 +494,6 @@ def decide(base_tree: str, head_tree: str, diff_text: str, builder,
     # Deleted lines are absent from BOTH head and neutral, so obligation 1 cannot speak for
     # them. Run the same proof on the base side: blank exactly those lines in BASE and
     # require the bundle to be unchanged.
-    removed_nonblank = 0
-    to_blank: dict[str, list[int]] = {}
-    for path in rust_paths:
-        removed = changes[path]["removed"]
-        if not removed:
-            continue
-        src = os.path.join(base_tree, path)
-        if not os.path.exists(src):
-            continue
-        with open(src, encoding="utf-8", errors="surrogateescape") as fh:
-            text = fh.read()
-        n = nonblank_count(text, removed)
-        if n:
-            removed_nonblank += n
-            to_blank[path] = removed
-    evidence["deleted_nonblank_lines"] = removed_nonblank
-
     if to_blank:
         del_neutral = os.path.join(tempfile.mkdtemp(prefix="featoff-delneutral-"), "tree")
         shutil.copytree(base_tree, del_neutral, symlinks=True)

@@ -106,7 +106,33 @@ Everything else **refuses**, with a named reason, and the leg stays red:
 | `added-lines-are-semantic`       | blanking the additions changed the bundle — real code was added |
 | `deleted-lines-are-semantic`     | blanking the deletions in the base changed it — real code was removed |
 | `neutral-build-failed`           | the additions were load-bearing (the tree stopped compiling)   |
-| `unsupported-file-change`        | something inside the build closure that the tool does not model |
+| `proof-would-be-vacuous`         | nothing was blanked and nothing was deleted, so the comparison would be `head == head` |
+| `unsupported-file-change`        | a symlink or gitlink, which blanking cannot speak for          |
+
+### Why every changed path is blanked, not just the ones in the build closure
+
+An earlier version scoped blanking to a closure derived from `cargo tree` ∩ `cargo metadata
+--no-deps`, and that shipped a **live false pass**. `--no-deps` returns **workspace members
+only**, while sparq's root manifest carries `exclude = ["vendor/spargebra", …]` *together
+with* `[patch.crates-io] spargebra = { path = "vendor/spargebra" }` — so spargebra is
+compiled into the feature-OFF bundle while not being a member. A change under `vendor/`
+classified inert, was never blanked, and `neutral == head` therefore held **by
+construction**: three genuinely non-benign changes there all came back `declared`.
+
+The emitted declaration even confessed it — *"rebuilding the head tree with all **0** added
+non-blank line(s) blanked produced a BYTE-IDENTICAL bundle"* — recording that nothing had
+been proved, and declaring anyway.
+
+Two fixes, and the second matters more than the first:
+
+1. **Nothing is skipped.** Every changed non-manifest path is blanked, wherever it lives.
+   Blanking a file the build never reads is free; blanking one it *does* read moves the
+   bundle and the derivation refuses. The closure is now **reporting only** — no soundness
+   claim rests on it — and its query no longer uses `--no-deps`.
+2. **A proof that proves nothing must refuse.** If the neutral tree comes out identical to
+   the head tree *and* the diff deletes no non-blank line, the comparison is `head == head`
+   and holds regardless. That guard catches the whole class without anyone needing to know
+   which path type was missed.
 
 An **intentional always-compiled change** — a hot-path optimisation, a refactor of code the
 default build ships — is refused on purpose. Its author is asserting *intent*, and intent cannot
