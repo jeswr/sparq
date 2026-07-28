@@ -35,6 +35,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = REPO_ROOT / "scripts"
 FEEDBACK_YML = REPO_ROOT / ".github" / "workflows" / "merge-queue-feedback.yml"
 WATCHDOG_YML = REPO_ROOT / ".github" / "workflows" / "merge-group-watchdog.yml"
+DOORBELL_YML = REPO_ROOT / ".github" / "workflows" / "merge-group-doorbell.yml"
 DOCS_QUALITY_YML = REPO_ROOT / ".github" / "workflows" / "docs-quality.yml"
 
 
@@ -2351,6 +2352,503 @@ class TestWatchdogWorkflowWiring(unittest.TestCase):
         # and require an advisory-registry entry; this job is neither.
         name = self.wf["jobs"]["watch"]["name"]
         self.assertIsNone(re.search(r"\b(advisory|informational)\b", name), name)
+
+
+class TestDoorbellIsNotSubscribedToTheEventItInspects(unittest.TestCase):
+    """THE HEADLINE GUARD. The watchdog's entire predicate is `zero check-suites on the
+    group head`. On this repo a check-suite is created 1:1 per dispatched `merge_group`
+    workflow RUN (MEASURED: group head 6b291b28 -> 8 runs / 8 suites; same 8/8 on
+    37aac5a4, e5a9d403, bef48bee). So ANY workflow that participates in the zero-dispatch
+    sweep and ALSO carries a `merge_group:` trigger would put an extra suite on every
+    group head and make `total_count == 0` unsatisfiable — the detector would be masked
+    completely, silently, and forever.
+
+    This is asserted over the whole workflow directory rather than over the two files
+    this PR happens to add, because the failure mode is someone LATER adding
+    `merge_group:` to the doorbell "so it fires on the group too" — which reads like an
+    improvement and is the exact thing that destroys the signal."""
+
+    #: A step PARTICIPATES in the live sweep if it either performs it or rings it.
+    #  Deliberately narrow. Two neighbours must NOT be swept up:
+    #    * docs-quality.yml runs `merge-group-watchdog.py --self-test`, a hermetic
+    #      decision-table test that touches no queue and reads no group head; and
+    #    * merge-queue-feedback.yml runs `classify-dequeue`, which reads a suite count
+    #      for an already-recorded SHA on the PR-dequeue path.
+    #  Both are fine on a `merge_group` trigger, because their suite exists only when
+    #  dispatch WORKED — that is the baseline the predicate measures against, not
+    #  interference with it. The masking bug is specific to the DETECTOR being
+    #  dispatched by the very event whose non-delivery it detects.
+    SCRIPT_RE = re.compile(r"(?<![\w-])merge-group-watchdog\.py(?![\w.-])")
+    SUBCOMMAND_RE = re.compile(r"(?<![\w-])sweep(?![\w-])")
+    RINGS_RE = re.compile(r"gh\s+workflow\s+run\s+merge-group-watchdog\.yml")
+
+    @classmethod
+    def _performs(cls, body: str) -> bool:
+        """The script AND the `sweep` subcommand, anywhere in the SAME step body.
+
+        Not a lookahead: the real call site builds `sweep_args=(sweep --repo ...)`
+        BEFORE invoking the script, so a forward-only match would silently classify the
+        live sweep as a non-participant — the vacuity this class exists to prevent.
+        """
+        return bool(cls.SCRIPT_RE.search(body) and cls.SUBCOMMAND_RE.search(body))
+
+    def _participants(self):
+        found = {}
+        for path in sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml")):
+            wf = yaml.safe_load(path.read_text(encoding="utf-8"))
+            if not isinstance(wf, dict):
+                continue
+            # Per STEP, never per file: joining a whole workflow's steps would let an
+            # unrelated step contribute the word `sweep` to a self-test invocation.
+            # Only an EXECUTABLE reference counts, so a workflow that merely names the
+            # watchdog in a comment is not a participant.
+            for job in (wf.get("jobs") or {}).values():
+                if not isinstance(job, dict):
+                    continue
+                for step in (job.get("steps") or []):
+                    if not isinstance(step, dict):
+                        continue
+                    body = str(step.get("run", ""))
+                    if self._performs(body) or self.RINGS_RE.search(body):
+                        found[path.name] = wf
+        return found
+
+    def test_the_participant_set_is_the_one_we_think_it_is(self):
+        # Guards the guard: if this set silently empties or narrows, every assertion
+        # below passes vacuously. An instrument that can only report "nothing to see"
+        # is no instrument — so the population is pinned exactly.
+        self.assertEqual(
+            set(self._participants()),
+            {"merge-group-watchdog.yml", "merge-group-doorbell.yml"},
+        )
+
+    def test_the_matcher_separates_a_live_sweep_from_a_hermetic_self_test(self):
+        # Validates the instrument against a KNOWN POSITIVE and a KNOWN NEGATIVE, so a
+        # regex that silently stopped matching anything cannot look like a clean run.
+        self.assertTrue(self._performs(
+            'sweep_args=(sweep --repo "$REPO")\n'
+            'python3 scripts/merge-group-watchdog.py "${sweep_args[@]}"'))
+        self.assertFalse(self._performs(
+            "python3 scripts/merge-group-watchdog.py --self-test"))
+        self.assertFalse(self._performs(
+            "python3 scripts/tests/test_merge_group_watchdog.py"))
+        # ...and the ORDER-INDEPENDENCE that the first lookahead attempt got wrong.
+        self.assertTrue(self._performs(
+            'python3 scripts/merge-group-watchdog.py sweep --repo "$REPO"'))
+        self.assertTrue(self.RINGS_RE.search(
+            'gh workflow run merge-group-watchdog.yml --repo "$REPO"'))
+
+    def test_no_sweep_participant_subscribes_to_merge_group(self):
+        for name, wf in self._participants().items():
+            self.assertNotIn(
+                "merge_group", _on_block(wf),
+                f"{name} subscribes to `merge_group`. A workflow that takes part in the "
+                f"zero-dispatch sweep must never create a check-suite on the group head "
+                f"it inspects — doing so masks the `total_count == 0` predicate on EVERY "
+                f"group, not just its own.",
+            )
+
+    def test_the_doorbell_producer_is_the_pr_level_queue_transition_pair(self):
+        # EXACT list, not a containment check: adding `merge_group` here is the masking
+        # bug, and adding `labeled` (223 events in 4 measured hours, versus 19 queue
+        # transitions) is the cost bug. Either must fail.
+        on = _on_block(_yaml(DOORBELL_YML))
+        self.assertEqual(on["pull_request_target"]["types"], ["enqueued", "dequeued"])
+
+    def test_the_doorbell_creates_no_check_suite_on_a_group_head(self):
+        # The structural reason constraint (a) holds: every trigger this workflow
+        # carries attaches its check-run to a PR head or to nothing at all. `push` is
+        # included in the ban because a merged group head BECOMES the main head.
+        on = _on_block(_yaml(DOORBELL_YML))
+        self.assertEqual(set(on), {"pull_request_target", "workflow_dispatch"})
+
+    def test_the_watchdog_itself_still_has_no_pr_or_group_trigger(self):
+        # The two-stage split exists so the sweep keeps running unassociated with any
+        # PR. Collapsing the doorbell INTO the watchdog would give the sweep a PR-head
+        # check-run and make a 4-minute queue watchdog visible on every enqueue.
+        on = _on_block(_yaml(WATCHDOG_YML))
+        self.assertEqual(set(on), {"schedule", "workflow_dispatch"})
+
+
+class TestDoorbellWiring(unittest.TestCase):
+    def setUp(self):
+        self.wf = _yaml(DOORBELL_YML)
+        self.job = self.wf["jobs"]["doorbell"]
+        self.steps = self.job["steps"]
+
+    def test_the_cron_backstop_is_retained(self):
+        # Two independent paths is the point. A future edit that deletes the schedule
+        # "because the doorbell covers it" removes the only cover for a queue rebase
+        # that produces no PR-level queue event (a direct push to main).
+        on = _on_block(_yaml(WATCHDOG_YML))
+        self.assertIn("schedule", on)
+        minutes = on["schedule"][0]["cron"].split()[0]
+        self.assertEqual(len(minutes.split(",")), 12)
+
+    def test_the_ring_step_dispatches_the_watchdog_on_the_default_branch(self):
+        self.assertEqual(len(self.steps), 1, "the doorbell must stay a one-step job")
+        step = self.steps[0]
+        run = step["run"]
+        self.assertIn("gh workflow run merge-group-watchdog.yml", run)
+        self.assertIn('--ref "$WATCHDOG_REF"', run)
+        self.assertEqual(
+            step["env"]["WATCHDOG_REF"],
+            "${{ github.event.repository.default_branch }}",
+            "the dispatched policy must be the reviewed copy on the default branch, "
+            "never a PR's version of the watchdog",
+        )
+
+    def test_the_watchdog_is_actually_dispatchable(self):
+        # Cross-file contract: `gh workflow run` fails outright unless the target
+        # declares workflow_dispatch. Deleting it there would break the doorbell here.
+        self.assertIn("workflow_dispatch", _on_block(_yaml(WATCHDOG_YML)))
+
+    def test_no_checkout_and_no_repository_script_is_executed(self):
+        # pull_request_target runs with the base repo's token. The mitigation is not
+        # "check out carefully" — it is checking out nothing at all.
+        for step in self.steps:
+            self.assertNotIn("checkout", str(step.get("uses", "")).lower())
+            self.assertNotRegex(str(step.get("run", "")), r"\bpython3?\b|\bbash\b|scripts/")
+
+    def test_no_event_field_is_interpolated_into_an_executable_line(self):
+        for step in self.steps:
+            self.assertNotIn("${{", str(step.get("run", "")))
+
+    def test_permissions_are_exactly_actions_write(self):
+        # Not a superset check. `contents`/`pull-requests`/`checks` would let the
+        # doorbell mutate the very things it exists only to ring about.
+        self.assertEqual(self.wf["permissions"], {"actions": "write"})
+        self.assertNotIn("permissions", self.job)
+
+    def test_the_job_is_declared_advisory_in_the_registry(self):
+        # Since #3773 the registry is the ONLY thing that makes a check-run non-gating,
+        # and this leg lands on a PR head. Undeclared, a doorbell hiccup would red the
+        # gate on a commit whose merge-worthiness it says nothing about.
+        name = self.job["name"]
+        self.assertRegex(name, r"\b(advisory|informational)\b")
+        registry = json.loads(
+            (REPO_ROOT / ".github" / "advisory-registry.json").read_text(encoding="utf-8")
+        )
+        self.assertIn(name, registry["jobs"])
+        entry = registry["jobs"][name]
+        self.assertEqual(entry["workflow"], "merge-group-doorbell.yml")
+        self.assertEqual(entry["job_id"], "doorbell")
+
+    def test_the_job_is_bounded(self):
+        self.assertLessEqual(self.job["timeout-minutes"], 5)
+
+    def test_every_ring_fires(self):
+        # cancel-in-progress would let a burst of queue transitions drop rings.
+        self.assertIs(self.wf["concurrency"]["cancel-in-progress"], False)
+
+
+class TestTheYamlSeamCannotGoInert(unittest.TestCase):
+    """THE SEAM. Measured on this estate: structure-preserving mutations at the YAML
+    seam — `if:`, `continue-on-error`, a changed call-site argument — are where every
+    uncaught mutant lives, because the step, its name and its `run:` body all survive
+    intact and every behavioural test keeps passing while the mechanism is dead.
+
+    Eight such mutants survived the first revision of this suite, including `if: false`
+    on either job and on either step. These assertions are deliberately EXACT-MATCH and
+    whole-mapping, not substring or containment.
+    """
+
+    #: The ONLY guard either workflow is allowed to carry, pinned whole. It is the
+    #: fail-soft App-token mint: without the App configured the step must skip and the
+    #: sweep falls back to `github.token`. Any OTHER `if:` is a way to make the
+    #: mechanism inert while it still reads as wired.
+    ALLOWED_STEP_GUARD = "env.ORCHESTRATOR_APP_ID != ''"
+    ALLOWED_GUARD_STEP = "Mint the sparq-orchestrator App token"
+
+    def _assert_no_inert_seam(self, path, job_id):
+        wf = _yaml(path)
+        job = wf["jobs"][job_id]
+        self.assertNotIn("if", job, f"{path.name}: job `{job_id}` carries an `if:`. "
+                         "`if: false` there makes the entire mechanism inert with every "
+                         "step, name and call site intact.")
+        self.assertNotIn("continue-on-error", job, f"{path.name}: job `{job_id}`")
+        for step in job["steps"]:
+            label = step.get("name") or step.get("uses") or "<unnamed>"
+            guard = step.get("if")
+            if guard is not None:
+                self.assertIn(self.ALLOWED_GUARD_STEP, label,
+                              f"{path.name}: unexpected `if:` on step {label!r}")
+                self.assertEqual(guard, self.ALLOWED_STEP_GUARD,
+                                 f"{path.name}: the one permitted guard drifted")
+            self.assertNotIn("continue-on-error", step, f"{path.name}: step {label!r}")
+
+    def test_the_watchdog_sweep_cannot_be_switched_off_at_the_seam(self):
+        self._assert_no_inert_seam(WATCHDOG_YML, "watch")
+
+    def test_the_doorbell_ring_cannot_be_switched_off_at_the_seam(self):
+        self._assert_no_inert_seam(DOORBELL_YML, "doorbell")
+
+    def test_the_doorbell_carries_no_guard_at_all(self):
+        # Stronger than the shared helper: the doorbell has no App-token step, so it has
+        # no legitimate `if:` anywhere. Stated separately so the shared allowance can
+        # never silently license one here.
+        wf = _yaml(DOORBELL_YML)
+        self.assertNotIn("if", wf["jobs"]["doorbell"])
+        for step in wf["jobs"]["doorbell"]["steps"]:
+            self.assertNotIn("if", step, step.get("name"))
+
+    def test_no_guard_anywhere_carries_a_constant_operand(self):
+        # The conditionally-inert class in general: a literal true/false operand makes a
+        # step unconditionally on or off while still reading as a guard.
+        for path in (WATCHDOG_YML, DOORBELL_YML):
+            wf = _yaml(path)
+            for job_id, job in wf["jobs"].items():
+                for guard in [job.get("if")] + [s.get("if") for s in job["steps"]]:
+                    if not guard:
+                        continue
+                    residue = re.sub(r"[=!]=\s*(?:true|false)\b", "", str(guard))
+                    self.assertIsNone(re.search(r"\b(?:true|false)\b", residue),
+                                      f"{path.name}:{job_id}: {guard!r}")
+
+    def test_the_ring_targets_THIS_repository(self):
+        # `--ref` was pinned exactly while `--repo` was not asserted at all, so swapping
+        # in a foreign repository left every other assertion green while the doorbell
+        # rang somebody else's watchdog and this queue was never swept.
+        wf = _yaml(DOORBELL_YML)
+        step = wf["jobs"]["doorbell"]["steps"][0]
+        self.assertIn('--repo "$REPO"', step["run"])
+        self.assertEqual(step["env"]["REPO"], "${{ github.repository }}")
+        # No literal owner/name may appear in the executable line.
+        self.assertNotRegex(step["run"], r"[\w.-]+/[\w.-]+\.yml\s+.*\b\w+/\w+\b(?!\")")
+
+    def test_the_sweep_call_site_arguments_are_all_pinned(self):
+        # Same class on the other side: every argument the sweep depends on is asserted,
+        # so dropping or retargeting one cannot pass.
+        wf = _yaml(WATCHDOG_YML)
+        step = _step(wf, "watch", "Sweep the merge queue")
+        run = step["run"]
+        for fragment in ('--repo "$REPO"', '--branch "$DEFAULT_BRANCH"',
+                         'scripts/merge-group-watchdog.py'):
+            self.assertIn(fragment, run, fragment)
+        self.assertEqual(step["env"]["REPO"], "${{ github.repository }}")
+        self.assertEqual(step["env"]["DEFAULT_BRANCH"],
+                         "${{ github.event.repository.default_branch }}")
+
+
+class TestTheResweepLoopIsExecutedNotJustRead(unittest.TestCase):
+    """The loop is the timing fix, so it is verified by RUNNING it.
+
+    Every assertion here survives a purely structural inspection of the YAML: a mutant
+    that changes `rc=1` to `rc=0`, moves `exit "$rc"` inside the loop, appends
+    `|| true`, or drops the loop to a single sweep leaves the step present, named,
+    and still containing `sweep --repo --branch`. Only execution separates them.
+    """
+
+    def _run_block(self) -> str:
+        return _step(_yaml(WATCHDOG_YML), "watch", "Sweep the merge queue")["run"]
+
+    def _execute(self, exit_codes: list[int]):
+        """Run the real step body with `python3` stubbed to a scripted exit sequence."""
+        import subprocess
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / "calls.log").write_text("", encoding="utf-8")
+            codes = " ".join(str(c) for c in exit_codes)
+            (tmp / "python3").write_text(
+                "#!/usr/bin/env bash\n"
+                f'codes=({codes})\n'
+                f'log="{tmp}/calls.log"\n'
+                'n=$(wc -l < "$log")\n'
+                # argv COUNT is logged alongside the text because an extra EMPTY element
+                # is invisible in "$*". It is NOT something the pre-loop call site could
+                # produce — see test_the_dry_run_flag_is_passed_as_one_argument_when_set
+                # for the measurement — but it IS what a plausible edit to the array
+                # form produces, so the count is asserted rather than the joined text.
+                'printf "%s|%s\\n" "$#" "$*" >> "$log"\n'
+                'code=${codes[$n]:-0}\n'
+                'exit "$code"\n',
+                encoding="utf-8",
+            )
+            (tmp / "python3").chmod(0o755)
+            proc = subprocess.run(
+                ["bash", "-c", self._run_block()],
+                env={
+                    "PATH": f"{tmp}:/usr/bin:/bin",
+                    "REPO": "sparq-org/sparq",
+                    "DEFAULT_BRANCH": "main",
+                    "DRY_RUN": "",
+                    "RESWEEPS": "4",
+                    "MAX_RECOVERIES_PER_SWEEP": "1",
+                    # the real 60 s would make this suite unrunnable; the interval is
+                    # not what is under test, the sequencing and the exit code are.
+                    "RESWEEP_INTERVAL_SECONDS": "0",
+                },
+                capture_output=True,
+                text=True,
+            )
+            calls = [
+                line for line in (tmp / "calls.log").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            return proc, calls
+
+    def test_a_clean_run_sweeps_reswept_plus_one_times_and_exits_zero(self):
+        proc, calls = self._execute([0, 0, 0, 0, 0])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(len(calls), 5, calls)
+        for call in calls:
+            argc, _, text = call.partition("|")
+            self.assertIn("scripts/merge-group-watchdog.py sweep", text)
+            self.assertIn("--repo sparq-org/sparq", text)
+            self.assertIn("--branch main", text)
+            self.assertNotIn("--dry-run", text)
+            # EXACT argc: script + sweep + --repo + val + --branch + val
+            # + --max-recoveries-per-run + val == 8, i.e. NO
+            # empty seventh element. The hazard belongs to the ARRAY form this replaced
+            # the folded one-liner with: `sweep_args+=("$DRY_RUN")` applied
+            # UNCONDITIONALLY appends an empty element when the flag is unset, and
+            # argparse rejects it (`error: unrecognized arguments:`, exit 2) — which
+            # would fail every sweep in the DEFAULT non-dry-run configuration. Hence the
+            # `if [ -n "$DRY_RUN" ]` guard, which this count is what pins.
+            self.assertEqual(argc, "8", call)
+
+    def test_a_failure_on_the_FIRST_sweep_survives_four_later_successes(self):
+        """THE STICKY-STATE ASSERTION. This estate shipped the opposite defect three
+        times in one day: a later transient discarding an earned hard failure. The
+        interleaved sequence is the only one that can tell `rc` from a plain
+        last-command exit status."""
+        proc, calls = self._execute([1, 0, 0, 0, 0])
+        self.assertEqual(len(calls), 5, "a failed sweep must not abort the loop")
+        self.assertNotEqual(
+            proc.returncode, 0,
+            "sweep 1 failed and sweeps 2-5 succeeded; the run reported success, so the "
+            "failure was discarded by a later success",
+        )
+
+    def test_a_failure_on_the_LAST_sweep_also_fails_the_run(self):
+        proc, _ = self._execute([0, 0, 0, 0, 1])
+        self.assertNotEqual(proc.returncode, 0)
+
+    def test_a_middle_failure_fails_the_run(self):
+        proc, calls = self._execute([0, 0, 1, 0, 0])
+        self.assertEqual(len(calls), 5)
+        self.assertNotEqual(proc.returncode, 0)
+
+    def test_the_dry_run_flag_is_passed_as_one_argument_when_set(self):
+        import subprocess
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / "calls.log").write_text("", encoding="utf-8")
+            (tmp / "python3").write_text(
+                "#!/usr/bin/env bash\n"
+                f'printf "%s\\n" "$#" >> "{tmp}/calls.log"\n'
+                f'printf "%s\\n" "$*" >> "{tmp}/calls.log"\n',
+                encoding="utf-8",
+            )
+            (tmp / "python3").chmod(0o755)
+            proc = subprocess.run(
+                ["bash", "-c", self._run_block()],
+                env={
+                    "PATH": f"{tmp}:/usr/bin:/bin",
+                    "REPO": "sparq-org/sparq",
+                    "DEFAULT_BRANCH": "main",
+                    "DRY_RUN": "--dry-run",
+                    "RESWEEPS": "0",
+                    "MAX_RECOVERIES_PER_SWEEP": "1",
+                    "RESWEEP_INTERVAL_SECONDS": "0",
+                },
+                capture_output=True,
+                text=True,
+            )
+            lines = (tmp / "calls.log").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        # script + sweep + --repo + val + --branch + val
+        # + --max-recoveries-per-run + val + --dry-run == 9 argv elements.
+        # The COUNT is the assertion: `--dry-run` must arrive as exactly ONE element.
+        #
+        # HISTORICAL CORRECTION, recorded because the wrong version was published: the
+        # folded one-liner this replaced used an UNQUOTED `$DRY_RUN`, and an unquoted
+        # expansion of an empty variable yields ZERO words, so the merge-base call site
+        # produced a clean argc=6 and was NOT buggy. Injecting an empty element requires
+        # a QUOTED expansion. Measured under GitHub's default
+        # `bash --noprofile --norc -eo pipefail` on the MERGE-BASE body: unquoted +
+        # empty => argc=6 (no empty word); quoted + empty => argc=7 with a trailing ``. The array rewrite is a
+        # shellcheck-cleanliness change, NOT a bug fix, and the hazard it introduces is
+        # its own (an unconditional `+=("$DRY_RUN")`), which is what these counts pin.
+        self.assertEqual(lines[0], "9", lines)
+        self.assertIn("--dry-run", lines[1])
+
+    def test_the_loop_actually_repeats(self):
+        # Pins the resweep COUNT to the env declaration rather than to a literal, so a
+        # silent drop to a single sweep (the pre-fix behaviour) is caught.
+        step = _step(_yaml(WATCHDOG_YML), "watch", "Sweep the merge queue")
+        declared = int(step["env"]["RESWEEPS"])
+        self.assertGreaterEqual(declared, 3)
+        _, calls = self._execute([0] * (declared + 1))
+        self.assertEqual(len(calls), declared + 1)
+
+    #: The per-FIRE recovery ceiling this workflow is allowed to reach. Pinned so that
+    #: raising RESWEEPS or the per-sweep budget cannot silently widen the blast radius
+    #: again — the loop already multiplied the script's process-local bound once.
+    MAX_RECOVERIES_PER_FIRE = 5
+
+    def test_the_per_fire_blast_radius_is_bounded(self):
+        step = _step(_yaml(WATCHDOG_YML), "watch", "Sweep the merge queue")
+        per_sweep = int(step["env"]["MAX_RECOVERIES_PER_SWEEP"])
+        sweeps = int(step["env"]["RESWEEPS"]) + 1
+        self.assertLessEqual(
+            per_sweep * sweeps, self.MAX_RECOVERIES_PER_FIRE,
+            "`--max-recoveries-per-run` is PROCESS-local, so the per-fire ceiling is "
+            "sweeps x per-sweep budget. Raising either without raising this constant "
+            "widens what a single fire may dequeue.",
+        )
+        self.assertLessEqual(per_sweep, mgw.DEFAULT_MAX_RECOVERIES_PER_RUN,
+                             "the per-sweep budget may only ever TIGHTEN the script "
+                             "default, never widen it")
+
+    def test_the_budget_flag_actually_reaches_the_sweep(self):
+        # The env value is inert unless it is on the command line — the call-site half
+        # of the bound above.
+        _, calls = self._execute([0, 0, 0, 0, 0])
+        for call in calls:
+            self.assertIn("--max-recoveries-per-run 1", call.partition("|")[2], call)
+
+    def test_the_loop_covers_the_grace_period(self):
+        # The whole reason the loop exists: one fire must outlive
+        # (group build latency + grace) or the doorbell ring is wasted.
+        step = _step(_yaml(WATCHDOG_YML), "watch", "Sweep the merge queue")
+        span = int(step["env"]["RESWEEPS"]) * int(step["env"]["RESWEEP_INTERVAL_SECONDS"])
+        self.assertGreater(
+            span, mgw.DEFAULT_GRACE_SECONDS,
+            "the resweep window must outlast the grace period, or every sweep in the "
+            "run decides WAIT on the group it was rung for",
+        )
+
+    def test_the_step_body_is_pure_shell(self):
+        # An `${{ }}` expression inside the run block would make it unexecutable here —
+        # i.e. would silently turn every test in this class vacuous.
+        self.assertNotIn("${{", self._run_block())
+
+    def test_no_failure_swallowing_idiom_in_the_shell(self):
+        self.assertNotIn("|| true", self._run_block())
+
+    def test_no_failure_swallowing_at_the_YAML_SEAM(self):
+        """`continue-on-error` is a YAML KEY, so looking for it in the `run:` STRING can
+        never fail for the defect it names — the string is a shell body and the key is a
+        sibling mapping entry. That vacuous shape shipped in the first revision of this
+        file and is why the assertion now reads the PARSED step and job.
+
+        `continue-on-error: true` on this step makes the whole sticky-`rc` design inert:
+        the step still runs all five sweeps and still exits non-zero, and the JOB still
+        reports success. Every behavioural test in this class passes on that mutant."""
+        wf = _yaml(WATCHDOG_YML)
+        job = wf["jobs"]["watch"]
+        step = _step(wf, "watch", "Sweep the merge queue")
+        self.assertNotIn("continue-on-error", step, "the sweep step may not swallow its "
+                         "own failure — the sticky exit code would become decorative")
+        self.assertNotIn("continue-on-error", job)
+        for other in _steps(wf, "watch"):
+            self.assertNotIn("continue-on-error", other,
+                             other.get("name") or other.get("uses"))
 
 
 class TestSuiteIsWiredIntoCI(unittest.TestCase):
