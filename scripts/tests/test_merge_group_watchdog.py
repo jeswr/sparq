@@ -193,6 +193,16 @@ class TestFailSafe(unittest.TestCase):
         watchdog.gh.suites_raw = json.dumps({"total_count": 0, "check_suites": []})
         self.assertEqual(watchdog.watchdog.check_suite_count(HEAD), 0)
 
+    def test_the_authoritative_counter_is_total_count_not_the_page_length(self):
+        # `check_suites` is capped at per_page; `total_count` is the counter GitHub
+        # itself maintains. Reading the array length would silently under-report any
+        # group with more than one page of suites.
+        watchdog = FakeWatchdog.build()
+        watchdog.gh.suites_raw = json.dumps(
+            {"total_count": 137, "check_suites": [{"id": i} for i in range(100)]}
+        )
+        self.assertEqual(watchdog.watchdog.check_suite_count(HEAD), 137)
+
 
 class TestCapAndIdempotence(unittest.TestCase):
     def test_repeat_detection_on_the_same_ref_is_a_noop(self):
@@ -255,10 +265,37 @@ class TestDequeueRouting(unittest.TestCase):
         self.assertEqual(many.route, mgw.ROUTE_DEMOTE)
 
     def test_unreadable_suite_count_demotes(self):
-        self.assertEqual(self.route(live_suites=lambda _s: None).route, mgw.ROUTE_DEMOTE)
+        result = self.route(live_suites=lambda _s: None)
+        self.assertEqual(result.route, mgw.ROUTE_DEMOTE)
+        # "could not read it" and "it was 8" are the same ROUTE but different
+        # operational facts, and the emitted row is the only place an operator sees
+        # which one happened. Deleting the `count is None` arm would fall through to
+        # `count != 0` and still demote — behaviourally equivalent, diagnostically
+        # blind — so the distinction is asserted explicitly rather than left to a
+        # mutant that "survives" by being invisible.
+        self.assertIn("could not re-derive", result.detail)
+        self.assertNotIn("check-suite(s)", result.detail)
 
     def test_no_marker_demotes(self):
         self.assertEqual(self.route(markers=()).route, mgw.ROUTE_DEMOTE)
+
+    def test_the_newest_marker_wins(self):
+        # A PR can accumulate several observations across queue attempts. The route
+        # must follow the most recent one; picking the oldest would judge this dequeue
+        # against a group head from a previous attempt.
+        stale = marker(head="e" * 40, observed=NOW - timedelta(hours=5))
+        fresh = marker(head=HEAD, observed=NOW - timedelta(minutes=5))
+        seen: list[str] = []
+
+        def spy(sha: str) -> int:
+            seen.append(sha)
+            return 0
+
+        for order in ((stale, fresh), (fresh, stale)):
+            seen.clear()
+            result = self.route(markers=order, live_suites=spy)
+            self.assertEqual(result.route, mgw.ROUTE_PRESERVE)
+            self.assertEqual(seen, [HEAD], order)
 
     def test_marker_predating_this_queue_attempt_demotes(self):
         self.assertEqual(
@@ -359,10 +396,15 @@ class ScriptedGh:
         self.timeline = timeline
         self.calls: list[list[str]] = []
         self.mutations: list[list[str]] = []
+        # Substrings of the joined argv that should raise GhError instead of replying.
+        self.fail_on: tuple[str, ...] = ()
 
     def __call__(self, argv: list[str]) -> str:
         self.calls.append(argv)
         joined = " ".join(argv)
+        for needle in self.fail_on:
+            if needle in joined:
+                raise mgw.GhError(f"simulated failure for {needle}")
         if argv[:2] == ["api", "graphql"]:
             query = next(a for a in argv if a.startswith("query="))
             # Discriminate on the OPERATION keyword, not on a substring of the
@@ -380,6 +422,14 @@ class ScriptedGh:
             self.mutations.append(argv)
             return ""
         if "/check-suites" in joined:
+            # SHA-KEYED on purpose. A fake that answers every /check-suites URL with
+            # the same payload cannot tell the group HEAD from its BASE (or from
+            # `main`), and both of those wrong-sha mutants survived until this fake
+            # started resolving the sha out of the path.
+            path = next(a for a in argv if "/check-suites" in a)
+            sha = path.split("/commits/", 1)[1].split("/", 1)[0]
+            if sha != HEAD:
+                raise mgw.GhError(f"gh api: HTTP 404 — no such commit {sha}")
             return self.suites_raw
         if "/activity" in joined:
             return "\n".join(json.dumps(row) for row in self.activity)
@@ -454,12 +504,37 @@ class TestSweepBehaviour(unittest.TestCase):
         body = harness.gh.mutations[0][harness.gh.mutations[0].index("--body") + 1]
         self.assertIn("🤖", body)
         self.assertIsNotNone(mgw.parse_marker(body))
+        # The comment goes to THIS entry's PR.
+        self.assertEqual(harness.gh.mutations[0][2], "4534")
         queries = [
             next(a for a in m if a.startswith("query="))
             for m in harness.gh.mutations[1:]
         ]
         self.assertIn("dequeuePullRequest", queries[0])
         self.assertIn("enqueuePullRequest", queries[1])
+        # BOTH mutations take the PULL REQUEST node id. GitHub names the dequeue input
+        # field `id` while documenting it as "the ID of the pull request", so the merge-
+        # queue-entry id (MQE_…) is the natural wrong answer and would fail at runtime.
+        for mutation in harness.gh.mutations[1:]:
+            ident = next(a for a in mutation if a.startswith("id="))
+            self.assertEqual(ident, "id=PR_4534", mutation)
+            self.assertNotIn("MQE_", ident)
+
+    def test_unreadable_marker_history_refuses_rather_than_assuming_none(self):
+        # Treating an unreadable comment history as "no prior recovery" would let the
+        # per-PR cap be bypassed on every API blip.
+        harness = FakeWatchdog.build(suites=0)
+        harness.gh.fail_on = ("/comments",)
+        harness.run()
+        self.assertEqual(harness.gh.mutations, [])
+        self.assertTrue(any("decision=REFUSE" in row for row in harness.rows), harness.rows)
+
+    def test_a_failed_recovery_is_a_red_run_not_a_silent_success(self):
+        harness = FakeWatchdog.build(suites=0)
+        harness.gh.fail_on = ("dequeuePullRequest",)
+        self.assertGreater(harness.run(), 0)
+        self.assertTrue(any("RECOVERY FAILED" in row for row in harness.rows), harness.rows)
+        self.assertTrue(any("::error" in row for row in harness.rows), harness.rows)
 
     def test_control_group_with_suites_issues_no_mutation_at_all(self):
         harness = FakeWatchdog.build(suites=8)
@@ -479,6 +554,22 @@ class TestSweepBehaviour(unittest.TestCase):
         harness.run()
         self.assertEqual(harness.gh.mutations, [])
         self.assertTrue(any("decision=REFUSE" in row for row in harness.rows), harness.rows)
+
+    def test_a_non_creation_activity_row_is_not_our_anchor(self):
+        # The URL already filters activity_type server-side; this pins the client-side
+        # half so a force_push / branch_deletion row carrying the same `after` sha can
+        # never be mistaken for the group's build time.
+        for activity_type in ("force_push", "push", "branch_deletion", "merge_queue_merge"):
+            harness = FakeWatchdog.build(
+                suites=0,
+                activity=[{"activity_type": activity_type, "after": HEAD,
+                           "timestamp": "2026-07-27T23:04:37Z"}],
+            )
+            harness.run()
+            self.assertEqual(harness.gh.mutations, [], activity_type)
+            self.assertTrue(
+                any("decision=REFUSE" in row for row in harness.rows), activity_type
+            )
 
     def test_activity_row_for_a_different_head_is_not_our_anchor(self):
         harness = FakeWatchdog.build(
@@ -501,21 +592,23 @@ class TestSweepBehaviour(unittest.TestCase):
         self.assertEqual(harness.gh.mutations, [])
         self.assertTrue(any("decision=RECOVER" in row for row in harness.rows), harness.rows)
 
+    @staticmethod
+    def _three_entry_queue():
+        return [
+            {
+                "id": f"MQE_{pr}",
+                "position": index,
+                "state": "AWAITING_CHECKS",
+                "enqueuedAt": "2026-07-27T22:58:53Z",
+                "baseCommit": {"oid": BASE},
+                "headCommit": {"oid": HEAD},
+                "pullRequest": {"number": pr, "id": f"PR_{pr}"},
+            }
+            for index, pr in enumerate((4534, 4535, 4536), start=1)
+        ]
+
     def test_per_run_budget_bounds_one_tick(self):
-        nodes = []
-        for index, pr in enumerate((4534, 4535, 4536), start=1):
-            nodes.append(
-                {
-                    "id": f"MQE_{pr}",
-                    "position": index,
-                    "state": "AWAITING_CHECKS",
-                    "enqueuedAt": "2026-07-27T22:58:53Z",
-                    "baseCommit": {"oid": BASE},
-                    "headCommit": {"oid": HEAD},
-                    "pullRequest": {"number": pr, "id": f"PR_{pr}"},
-                }
-            )
-        harness = FakeWatchdog.build(suites=0, entries=nodes)
+        harness = FakeWatchdog.build(suites=0, entries=self._three_entry_queue())
         harness.run()
         dequeues = [
             m
@@ -524,6 +617,17 @@ class TestSweepBehaviour(unittest.TestCase):
         ]
         self.assertEqual(len(dequeues), mgw.DEFAULT_MAX_RECOVERIES_PER_RUN)
         self.assertTrue(any("decision=CAP" in row for row in harness.rows), harness.rows)
+
+    def test_the_budget_is_spent_on_the_head_of_the_queue_first(self):
+        # Only the head-of-line entry actually blocks merges, so a bounded budget must
+        # be spent in queue order. Recovering positions 3 and 2 while position 1 stays
+        # broken would burn the budget and leave the outage in place.
+        harness = FakeWatchdog.build(suites=0, entries=self._three_entry_queue())
+        harness.run()
+        recovered = [
+            m[2] for m in harness.gh.mutations if m[:2] == ["pr", "comment"]
+        ]
+        self.assertEqual(recovered, ["4534", "4535"], harness.rows)
 
 
 class TestEmission(unittest.TestCase):
@@ -585,6 +689,96 @@ class TestClassifyEndToEnd(unittest.TestCase):
         self.assertEqual(harness.gh.mutations, [])
 
 
+class TestEntrypointFailSafe(unittest.TestCase):
+    """The OUTERMOST guard: main() must never let a failure preserve a verdict.
+
+    These drive `main()` end to end because the exception handler and the GITHUB_OUTPUT
+    writer are the two pieces the YAML actually consumes, and nothing else exercises
+    them — a mutant that flipped the crash route to `preserve`, or that stopped writing
+    `route=` at all, survived every other test in this file.
+    """
+
+    def _run_main(self, argv, gh_read):
+        import os
+        import tempfile
+
+        original = mgw.run_gh_read
+        out = Path(tempfile.mkdtemp()) / "outputs.txt"
+        out.write_text("", encoding="utf-8")
+        os.environ["GITHUB_OUTPUT"] = str(out)
+        try:
+            mgw.run_gh_read = gh_read
+            code = mgw.main(argv)
+        finally:
+            mgw.run_gh_read = original
+            os.environ.pop("GITHUB_OUTPUT", None)
+        return code, dict(
+            line.split("=", 1) for line in out.read_text(encoding="utf-8").splitlines()
+            if "=" in line
+        )
+
+    def test_classifier_crash_routes_to_demote(self):
+        def boom(_argv):
+            raise mgw.GhError("HTTP 500 while reading comments")
+
+        code, outputs = self._run_main(
+            ["classify-dequeue", "--repo", "sparq-org/sparq", "--pr", "4534",
+             "--reason", "CI_TIMEOUT"],
+            boom,
+        )
+        self.assertEqual(code, 0)  # the step must not red the feedback job
+        self.assertEqual(outputs["route"], mgw.ROUTE_DEMOTE)
+        self.assertEqual(outputs["reenqueue"], "false")
+
+    def test_transient_exhaustion_routes_to_demote(self):
+        def exhausted(_argv):
+            raise mgw.gh_retry.GhTransientExhausted("HTTP 504 (3 attempts)")
+
+        code, outputs = self._run_main(
+            ["classify-dequeue", "--repo", "sparq-org/sparq", "--pr", "4534",
+             "--reason", "CI_TIMEOUT"],
+            exhausted,
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(outputs["route"], mgw.ROUTE_DEMOTE)
+
+    def test_outputs_carry_every_field_the_yaml_reads(self):
+        rows: list[str] = []
+        import os
+        import tempfile
+
+        out = Path(tempfile.mkdtemp()) / "outputs.txt"
+        out.write_text("", encoding="utf-8")
+        os.environ["GITHUB_OUTPUT"] = str(out)
+        try:
+            mgw.write_outputs(
+                mgw.Route(mgw.ROUTE_PRESERVE, True, "zero suites"), log=rows.append
+            )
+        finally:
+            os.environ.pop("GITHUB_OUTPUT", None)
+        written = out.read_text(encoding="utf-8")
+        # The `if:` expressions read `route`; the preserve step reads `reenqueue` and
+        # `detail`. Dropping any of the three silently disables the feature.
+        self.assertIn(f"route={mgw.ROUTE_PRESERVE}\n", written)
+        self.assertIn("reenqueue=true\n", written)
+        self.assertIn("detail=zero suites\n", written)
+        self.assertTrue(any("route=preserve" in row for row in rows), rows)
+
+    def test_demote_outputs_are_lowercase_false(self):
+        import os
+        import tempfile
+
+        out = Path(tempfile.mkdtemp()) / "outputs.txt"
+        out.write_text("", encoding="utf-8")
+        os.environ["GITHUB_OUTPUT"] = str(out)
+        try:
+            mgw.write_outputs(mgw.Route(mgw.ROUTE_DEMOTE, False, "no marker"),
+                              log=lambda _m: None)
+        finally:
+            os.environ.pop("GITHUB_OUTPUT", None)
+        self.assertIn("reenqueue=false\n", out.read_text(encoding="utf-8"))
+
+
 # ── 3. wiring (the YAML seam) ────────────────────────────────────────────────────
 
 
@@ -629,18 +823,55 @@ class TestFeedbackWiring(unittest.TestCase):
         self.assertIn("$PR_NUMBER", run)
         self.assertIn("$DEQUEUE_REASON", run)
 
+    # EXACT-MATCH, not substring. A substring assertion cannot see a guard that is
+    # still present but CONDITIONALLY INERT: `… route != 'preserve' && false` contains
+    # every token a substring test looks for while making the step dead, so the fix
+    # lane would silently stop being fed. Both guards are therefore pinned whole; a
+    # deliberate change must update this line.
+    DEMOTE_GUARD = (
+        "github.event.pull_request.merged != true "
+        "&& steps.classify.outputs.route != 'preserve'"
+    )
+    PRESERVE_GUARD = (
+        "github.event.pull_request.merged != true "
+        "&& steps.classify.outputs.route == 'preserve'"
+    )
+
     def test_the_demote_guard_is_fail_closed(self):
         # `!= 'preserve'` means an EMPTY/MISSING output still demotes. Inverting this
         # to `== 'demote'` would make a classifier failure silently preserve.
         guard = _step(self.wf, "feedback", "Route genuine dequeue")["if"]
-        self.assertIn("steps.classify.outputs.route != 'preserve'", guard)
-        self.assertNotIn("== 'demote'", guard)
-        self.assertIn("github.event.pull_request.merged != true", guard)
+        self.assertEqual(guard, self.DEMOTE_GUARD)
 
     def test_the_preserve_guard_is_fail_open_in_the_safe_direction(self):
         guard = _step(self.wf, "feedback", "Preserve the verdict")["if"]
-        self.assertIn("steps.classify.outputs.route == 'preserve'", guard)
-        self.assertIn("github.event.pull_request.merged != true", guard)
+        self.assertEqual(guard, self.PRESERVE_GUARD)
+
+    def test_no_step_guard_carries_a_constant_disjunct(self):
+        # The conditionally-inert class in general: a literal `true`/`false` operand
+        # anywhere in a step condition makes that step unconditionally on or off while
+        # still reading as a guard.
+        for step in self.steps:
+            guard = step.get("if")
+            if not guard:
+                continue
+            # `merged != true` is a legitimate COMPARISON against a literal; strip
+            # every such comparison first, then any surviving bare literal is a
+            # constant operand of && / || — i.e. an always-on or always-off step.
+            residue = re.sub(r"[=!]=\s*(?:true|false)\b", "", guard)
+            self.assertIsNone(
+                re.search(r"\b(?:true|false)\b", residue),
+                (step.get("name"), guard),
+            )
+
+    def test_the_route_literal_is_the_same_string_on_both_sides(self):
+        # CROSS-FILE CONTRACT. The Python constant and the YAML `if:` literal are two
+        # halves of one comparison; renaming or case-drifting either side silently
+        # makes the preserve route unreachable (and, worse, fails SILENTLY GREEN
+        # because the fail-safe `!= 'preserve'` then always demotes).
+        raw = FEEDBACK_YML.read_text(encoding="utf-8")
+        self.assertIn(f"steps.classify.outputs.route == '{mgw.ROUTE_PRESERVE}'", raw)
+        self.assertIn(f"steps.classify.outputs.route != '{mgw.ROUTE_PRESERVE}'", raw)
 
     def test_the_two_routes_are_mutually_exclusive(self):
         demote = _step(self.wf, "feedback", "Route genuine dequeue")["if"]
@@ -658,6 +889,34 @@ class TestFeedbackWiring(unittest.TestCase):
         self.assertNotIn("--remove-label", run)
         self.assertNotIn("--disable-auto", run)
         self.assertNotIn("gh pr edit", run)
+
+    def test_preserve_route_re_arms_only_when_the_classifier_says_so(self):
+        # When the watchdog itself is mid-recovery (reenqueue=false) a second arm here
+        # would race its enqueue; when the platform timed the entry out (reenqueue=true)
+        # something must put it back. Both directions must be wired.
+        run = _step(self.wf, "feedback", "Preserve the verdict")["run"]
+        self.assertIn('"$CLASSIFY_REENQUEUE" = "true"', run)
+        self.assertIn("gh pr merge", run)
+        self.assertIn("--auto", run)
+        env = _step(self.wf, "feedback", "Preserve the verdict")["env"]
+        self.assertEqual(env["CLASSIFY_REENQUEUE"], "${{ steps.classify.outputs.reenqueue }}")
+
+    def test_preserve_route_checks_the_pr_is_still_open(self):
+        run = _step(self.wf, "feedback", "Preserve the verdict")["run"]
+        self.assertIn("gh pr view", run)
+        self.assertIn("--json state", run)
+        self.assertIn('"$STATE" != "OPEN"', run)
+
+    def test_every_post_skip_step_carries_the_merged_guard(self):
+        # The first step short-circuits a successful-merge dequeue; every later step
+        # must independently re-assert it, because a step `if:` is not inherited.
+        for step in self.steps:
+            name = step.get("name") or step.get("uses") or ""
+            if "Skip successful-merge" in name:
+                continue
+            self.assertIn(
+                "github.event.pull_request.merged != true", step.get("if", ""), name
+            )
 
     def test_demote_route_still_swaps_the_labels(self):
         # The pre-#4652 behaviour must survive intact on the other arm.
