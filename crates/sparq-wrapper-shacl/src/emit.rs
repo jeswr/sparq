@@ -366,7 +366,9 @@ fn scalar_i64(
     datatypes: &'static [&'static str],
 ) -> Result<i64, LoadError> {
     let raw = lexical(shape, predicate, t, datatypes)?;
-    // xsd:integer permits a leading '+', which Rust's parser also accepts.
+    // The xsd integer lexical space permits a leading '+', which Rust's parser
+    // also accepts. Only fixed-width datatypes reach here, so no conforming
+    // literal can overflow i64.
     raw.parse::<i64>().map_err(|_| LoadError::LexicalForm {
         shape,
         predicate,

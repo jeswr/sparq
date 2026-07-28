@@ -117,15 +117,18 @@ pub struct ScalarType {
 /// The mapping is deliberately narrow: only datatypes whose value space a Rust
 /// primitive represents **without loss** get a primitive. Everything else —
 /// including `xsd:decimal`, whose value space is not binary floating point, and
-/// the unbounded/unsigned integer types — keeps its lexical form as a
-/// [`RustScalar::String`], with the datatype still checked at load time.
+/// the unbounded/unsigned integer types (`xsd:integer` among them) — keeps its
+/// lexical form as a [`RustScalar::String`], with the datatype still checked at
+/// load time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RustScalar {
     /// The literal's lexical form, verbatim.
     String,
     /// `xsd:boolean`.
     Bool,
-    /// `xsd:integer` and its `i64`-representable derived types.
+    /// The fixed-width signed integer datatypes whose whole value space fits:
+    /// `xsd:long`, `xsd:int`, `xsd:short`, `xsd:byte`. Unbounded `xsd:integer`
+    /// is deliberately NOT one of them.
     I64,
     /// `xsd:float`.
     F32,

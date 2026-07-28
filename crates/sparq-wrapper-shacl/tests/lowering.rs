@@ -67,6 +67,7 @@ fn the_fixture_lowers_to_exactly_this_object_model() {
                         "ex:nickname",
                         "ex:note",
                         "ex:score",
+                        "ex:visits",
                         "rdf:type",
                     ]
                     .iter()
@@ -92,7 +93,7 @@ fn the_fixture_lowers_to_exactly_this_object_model() {
                     field(
                         "age",
                         "ex:age",
-                        scalar(RustScalar::I64, &["xsd:integer"]),
+                        scalar(RustScalar::I64, &["xsd:long"]),
                         Cardinality::Optional,
                     ),
                     field(
@@ -159,6 +160,14 @@ fn the_fixture_lowers_to_exactly_this_object_model() {
                         "score",
                         "ex:score",
                         scalar(RustScalar::F64, &["xsd:double"]),
+                        Cardinality::Optional,
+                    ),
+                    // `xsd:integer`'s value space is unbounded, so no fixed-
+                    // width primitive is lossless: the lexical form is kept.
+                    field(
+                        "visits",
+                        "ex:visits",
+                        scalar(RustScalar::String, &["xsd:integer"]),
                         Cardinality::Optional,
                     ),
                 ],
@@ -375,6 +384,19 @@ fn a_shape_may_not_shadow_the_emitted_prelude() {
     let err = lower_err(&format!("{PREFIXES}\nex:Triple a sh:NodeShape ."));
     assert!(
         matches!(err, LowerError::ReservedName { ref name, .. } if name == "Triple"),
+        "{err}"
+    );
+}
+
+/// `Self` is a reserved TYPE keyword, so `pub struct Self` does not parse. It
+/// is the only keyword the upper-camel derivation can emit — every other Rust
+/// keyword is lowercase and the first letter is always capitalised — so it must
+/// be rejected at lowering rather than reaching `rustc` as a broken module.
+#[test]
+fn a_shape_named_self_may_not_become_the_type_keyword() {
+    let err = lower_err(&format!("{PREFIXES}\nex:self a sh:NodeShape ."));
+    assert!(
+        matches!(err, LowerError::ReservedName { ref name, .. } if name == "Self"),
         "{err}"
     );
 }

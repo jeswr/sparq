@@ -40,8 +40,11 @@ use crate::schema::{
 };
 
 /// Item names the emitted prelude always defines, plus the `std` prelude names
-/// the emitted code relies on. A shape or class that wants one of these is a
-/// [`LowerError::ReservedName`] rather than a silently shadowed type.
+/// the emitted code relies on, plus `Self` — the one Rust keyword these
+/// derivations can produce, because [`upper_camel`] capitalises the first
+/// letter and `Self` is the only capitalised keyword. A shape or class that
+/// wants one of these is a [`LowerError::ReservedName`] rather than a silently
+/// shadowed type (or, for `Self`, a module that does not compile at all).
 const RESERVED: &[&str] = &[
     "Box",
     "ClassMarker",
@@ -53,6 +56,7 @@ const RESERVED: &[&str] = &[
     "Option",
     "Ref",
     "Result",
+    "Self",
     "Some",
     "String",
     "Triple",
@@ -515,13 +519,18 @@ fn scalar_type(datatypes: Vec<String>) -> ScalarType {
 /// Only datatypes a Rust primitive represents WITHOUT loss get a primitive.
 /// `xsd:decimal` (whose value space is not binary floating point) and the
 /// unbounded / unsigned integer types deliberately keep their lexical form.
+///
+/// `xsd:integer` is one of the unbounded ones: its value space is the whole of
+/// ℤ, so lowering it to `i64` would make the generated loader reject conforming
+/// literals such as `9223372036854775808`. Only the fixed-width signed
+/// derivations, whose COMPLETE value spaces fit `i64`, get the primitive.
 fn rust_scalar(datatype: &str) -> RustScalar {
     let Some(local) = datatype.strip_prefix(XSD) else {
         return RustScalar::String;
     };
     match local {
         "boolean" => RustScalar::Bool,
-        "integer" | "int" | "long" | "short" | "byte" => RustScalar::I64,
+        "long" | "int" | "short" | "byte" => RustScalar::I64,
         "float" => RustScalar::F32,
         "double" => RustScalar::F64,
         _ => RustScalar::String,
@@ -703,7 +712,22 @@ mod tests {
             rust_scalar(&format!("{XSD}unsignedLong")),
             RustScalar::String
         );
-        assert_eq!(rust_scalar(&format!("{XSD}integer")), RustScalar::I64);
+        // Unbounded value spaces stay lexical: no `i64` can hold all of them.
+        for unbounded in ["integer", "nonNegativeInteger", "positiveInteger"] {
+            assert_eq!(
+                rust_scalar(&format!("{XSD}{unbounded}")),
+                RustScalar::String,
+                "{unbounded}"
+            );
+        }
+        // The fixed-width signed derivations do fit.
+        for fixed in ["long", "int", "short", "byte"] {
+            assert_eq!(
+                rust_scalar(&format!("{XSD}{fixed}")),
+                RustScalar::I64,
+                "{fixed}"
+            );
+        }
         assert_eq!(rust_scalar(&format!("{XSD}double")), RustScalar::F64);
         assert_eq!(rust_scalar("http://example.org/dt"), RustScalar::String);
     }

@@ -12,6 +12,7 @@
 //! | `ex:nickname` | `sh:minCount 1`, no max → `Vec<T>` with a retained check |
 //! | `ex:note` | no cardinality, no value type → `Vec<Value>` |
 //! | `ex:active` / `ex:score` | `sh:datatype` → non-string checked scalars |
+//! | `ex:visits` | unbounded `xsd:integer` → the lexical form, NOT `i64` |
 //! | `ex:label` | SHACL 1.2 disjunctive `sh:datatype ( … )` |
 //! | `ex:employer` | `sh:class` → a typed reference |
 //! | `ex:address` | `sh:node` → a nested named type |
@@ -33,7 +34,8 @@ ex:PersonShape a sh:NodeShape ;
     sh:closed true ;
     sh:ignoredProperties ( rdf:type ) ;
     sh:property [ sh:path ex:name     ; sh:datatype xsd:string  ; sh:minCount 1 ; sh:maxCount 1 ] ;
-    sh:property [ sh:path ex:age      ; sh:datatype xsd:integer ; sh:maxCount 1 ] ;
+    sh:property [ sh:path ex:age      ; sh:datatype xsd:long    ; sh:maxCount 1 ] ;
+    sh:property [ sh:path ex:visits   ; sh:datatype xsd:integer ; sh:maxCount 1 ] ;
     sh:property [ sh:path ex:active   ; sh:datatype xsd:boolean ; sh:maxCount 1 ] ;
     sh:property [ sh:path ex:score    ; sh:datatype xsd:double  ; sh:maxCount 1 ] ;
     sh:property [ sh:path ex:label    ; sh:datatype ( xsd:string rdf:langString ) ; sh:maxCount 1 ] ;

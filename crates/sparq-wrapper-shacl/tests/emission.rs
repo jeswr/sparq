@@ -44,6 +44,7 @@ fn the_emitted_source_renders_every_mapping() {
         "pub struct PersonShapeHomepage",
         "pub name: String",                        // minCount 1 + maxCount 1
         "pub age: Option<i64>",                    // maxCount 1
+        "pub visits: Option<String>",              // unbounded xsd:integer
         "pub active: Option<bool>",                //
         "pub score: Option<f64>",                  //
         "pub label: Option<String>",               // disjunctive sh:datatype
@@ -135,14 +136,18 @@ const TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const ALICE: &str = "http://example.org/alice";
 const ADDR: &str = "http://example.org/addr1";
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
-const XSD_INT: &str = "http://www.w3.org/2001/XMLSchema#integer";
+const XSD_LONG: &str = "http://www.w3.org/2001/XMLSchema#long";
+const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
+
+// One past i64::MAX: a perfectly valid xsd:integer lexical form.
+const BEYOND_I64: &str = "9223372036854775808";
 
 fn base() -> Vec<Triple<'static>> {
     vec![
         Triple::node(ALICE, TYPE, "http://example.org/Person"),
         Triple::literal(ALICE, "http://example.org/name", "Alice", XSD_STRING),
         Triple::literal(ALICE, "http://example.org/nickname", "Al", XSD_STRING),
-        Triple::literal(ALICE, "http://example.org/age", "41", XSD_INT),
+        Triple::literal(ALICE, "http://example.org/age", "41", XSD_LONG),
         Triple::node(ALICE, "http://example.org/address", ADDR),
         Triple::literal(ADDR, "http://example.org/city", "Bristol", XSD_STRING),
     ]
@@ -157,6 +162,7 @@ fn main() {
     assert_eq!(alice.nickname, vec!["Al".to_string()]);    // Vec<T>
     assert_eq!(alice.address.city, "Bristol");             // nested type
     assert!(alice.manager.is_none());
+    assert!(alice.visits.is_none());
     assert!(alice.note.is_empty());
     assert_eq!(PersonShape::TARGET_CLASSES, &["http://example.org/Person"]);
 
@@ -235,7 +241,25 @@ fn main() {
         vec![Value::Literal { lexical: "hi".to_string(), datatype: XSD_STRING.to_string() }]
     );
 
-    // 7. A recursive sh:node really nests, and cyclic data terminates.
+    // 7. An UNBOUNDED xsd:integer keeps its lexical form, so a value outside
+    //    i64 — which xsd:integer's value space contains — still loads. An i64
+    //    lowering would fail the second case with LoadError::LexicalForm.
+    for lexical in ["7", BEYOND_I64] {
+        let mut visited = base();
+        visited.push(Triple::literal(ALICE, "http://example.org/visits", lexical, XSD_INTEGER));
+        let alice = PersonShape::load(ALICE, &visited)
+            .unwrap_or_else(|e| panic!("xsd:integer {} must load: {:?}", lexical, e));
+        assert_eq!(alice.visits.as_deref(), Some(lexical));
+    }
+    // The datatype is still checked, even though the value stays lexical.
+    let mut wrong_datatype = base();
+    wrong_datatype.push(Triple::literal(ALICE, "http://example.org/visits", "7", XSD_LONG));
+    assert!(matches!(
+        PersonShape::load(ALICE, &wrong_datatype),
+        Err(LoadError::DatatypeMismatch { .. })
+    ));
+
+    // 8. A recursive sh:node really nests, and cyclic data terminates.
     let mut managed = base();
     managed.push(Triple::node(ALICE, "http://example.org/manager", ALICE));
     match PersonShape::load(ALICE, &managed) {

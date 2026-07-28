@@ -101,7 +101,8 @@ pub enum LowerError {
         second: String,
     },
     /// A generated name collides with an item the emitted prelude always
-    /// defines (`Triple`, `LoadError`, …). Rename the shape or the class.
+    /// defines (`Triple`, `LoadError`, …), or with `Self`, the one Rust keyword
+    /// a generated item name can come out as. Rename the shape or the class.
     ReservedName {
         /// The contested Rust item name.
         name: String,
@@ -165,7 +166,7 @@ impl fmt::Display for LowerError {
             ),
             Self::ReservedName { name, source } => write!(
                 f,
-                "{source} wants the Rust name `{name}`, which the emitted prelude reserves"
+                "{source} wants the Rust name `{name}`, which the generated module cannot use"
             ),
             Self::DuplicateFieldName {
                 type_name,

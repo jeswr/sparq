@@ -21,7 +21,7 @@ let shapes = sparq_shacl::load_turtle_with_base(
             sh:closed true ;
             sh:property [ sh:path ex:name  ; sh:datatype xsd:string ;
                           sh:minCount 1 ; sh:maxCount 1 ] ;
-            sh:property [ sh:path ex:age   ; sh:datatype xsd:integer ; sh:maxCount 1 ] ;
+            sh:property [ sh:path ex:age   ; sh:datatype xsd:long ; sh:maxCount 1 ] ;
             sh:property [ sh:path ex:knows ; sh:class ex:Person ] .
     "#,
     "http://example.org/",
@@ -47,7 +47,9 @@ Write the emitted string to `<name>.rs` and pull it in with `mod <name>;`.
 - **Cardinality.** `sh:maxCount 1` → `Option<T>`; `sh:minCount >= 1` with
   `sh:maxCount 1` → a required `T`; every other cardinality → `Vec<T>` with the
   bounds retained and checked at load time.
-- **Value types.** `sh:datatype` → a checked scalar, `sh:class` → a typed
+- **Value types.** `sh:datatype` → a checked scalar — a Rust primitive only
+  where the whole value space fits, so `xsd:long` is an `i64` while unbounded
+  `xsd:integer` and `xsd:decimal` keep their lexical form — `sh:class` → a typed
   `Ref<M>` reference, `sh:node` → a nested generated type (boxed, so recursive
   shapes have a finite Rust type), `sh:closed true` → a predicate whitelist plus
   a loader that rejects anything outside it.
