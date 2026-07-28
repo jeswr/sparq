@@ -137,7 +137,7 @@ wgpu-hal` to that `FORBIDDEN` array. It is a one-line change that converts three
 into an enforced gate. It is deliberately **not** made in this record (design-only), and is
 filed as §7 P1.
 
-### 4.3 T-GPU-INT (Information disclosure via wrong answer) — CPU and GPU diverge on out-of-range GROUP BY keys, silently on the GPU side
+### 4.3 T-GPU-INT (Tampering / query-result integrity) — CPU and GPU diverge on out-of-range GROUP BY keys, silently on the GPU side
 
 `Gpu::group_aggregate` validates `1 <= groups <= MAX_GROUPS` and `keys.len() == vals.len()`
 (`crates/sparq-gpu/src/lib.rs:535-539`) but **not** the documented precondition `keys[i] <
@@ -251,9 +251,28 @@ be turned into a full model *before* that change merges.
 4. A kernel is invoked with data derived from a query, a parsed RDF document, or any other
    input sparq did not generate itself.
 
-Conditions 1 and 3 become *automatically detectable* once §7 P1 and P2 land, which is the main
-argument for doing those two first: they turn this deferral from something a human has to
-remember into something CI notices.
+**Which condition is detected by what.** The conditions are not uniformly automatable, so the
+mapping is stated per-condition rather than left to a blanket "CI will notice". Condition 3 in
+particular has two halves that need two different detectors:
+
+| # | condition | detector | today |
+|---|---|---|---|
+| 1 | a workspace crate declares a dependency on `sparq-gpu` | §7 P2 — the `cargo tree -i sparq-gpu` inversion | planned |
+| 2 | `publish = false` is removed from the manifest | §7 P2 — the same guard asserts the line is still present | planned |
+| 3a | the `wgpu` family enters a shipped **wasm** bundle graph | §7 P1 — the `FORBIDDEN` set in `scripts/wasm-deps-guard.sh` | planned |
+| 3b | the `wgpu` family enters a shipped **native** artifact graph | §7 P2 — the native half of the same guard (`cargo tree -i` from the GPU-family roots over the shipped native crates) | planned |
+| 4 | a kernel is invoked with data sparq did not generate | **none** — human review at the wiring PR | not automatable |
+
+Row 3b is the one that is easy to lose: `wasm-deps-guard.sh` only inverts **wasm32** graphs, and
+the condition-1 check only sees edges to `sparq-gpu`. A shipped **native** crate that takes a
+direct dependency on `wgpu`/`naga` — or acquires that closure through some third crate — satisfies
+condition 3 while tripping neither, so P2 has to cover the native direction explicitly or the
+condition stays a human check.
+
+With P1 and P2 as scoped, conditions 1–3 become *automatically detectable*, which is the main
+argument for doing those two first: they turn most of this deferral from something a human has to
+remember into something CI notices. Condition 4 does not mechanise, which is why §5 is a written
+catalogue rather than a gate.
 
 Note that meeting a re-open condition in `research/gpu-verdict.md` §5 does **not** by itself fire
 this trigger — re-running the benchmark harness on a discrete GPU is still measurement. The
@@ -266,13 +285,15 @@ make the trigger self-detecting.** Do not write a full device threat model for a
 calls — it would be modelling a system that does not exist, and it would age badly against
 whatever hardware actually motivates the re-open.
 
-Ordered, each a future bead (P1–P4 are implementation and are deliberately not done in this
-design record):
+Ordered (P1–P4 are implementation and are deliberately not done in this design record). Each row
+is independently actionable and is **filed as its own tracked follow-up item** under the parent
+deferral bead **sq-vrye**, which stays open as the exit-model tracker (§6) — the table below is
+the specification for that work, not a substitute for tracking it:
 
 | # | work | why now | surface |
 |---|---|---|---|
 | P1 | Add `wgpu naga wgpu-core wgpu-hal` to `FORBIDDEN` in `scripts/wasm-deps-guard.sh` | Converts §4.2's three prose assertions into the enforced gate they claim to be; one line | `scripts/` |
-| P2 | Pin "nothing depends on `sparq-gpu`" as a gate, mirroring `scripts/fedclient-boundary-guard.sh`'s `cargo tree -i` inversion | Makes §6 exit-condition 1 self-detecting instead of remembered | `scripts/` |
+| P2 | A `sparq-gpu` boundary guard mirroring `scripts/fedclient-boundary-guard.sh`'s `cargo tree -i` inversion, covering all three of: nothing depends on `sparq-gpu`; no shipped **native** artifact's graph contains the `wgpu`/`naga` family (the half `wasm-deps-guard.sh` cannot see, since it inverts wasm32 graphs only); `publish = false` is still in the manifest | Makes §6 exit-conditions 1, 2 and 3b self-detecting instead of remembered | `scripts/` |
 | P3 | Close the two latent preconditions in-crate: promote `upload_table`'s `debug_assert!` to a real check that also requires a free slot; reject out-of-range GROUP BY keys with a typed error; add differential tests that feed each malformed input deliberately | §4.3 leaves the crate's central CPU==GPU equivalence claim unverified exactly where the two sides disagree | `crates/sparq-gpu` |
 | P4 | Bound the WGSL probe walk at `mask + 1` iterations and give `run()` a bounded poll | §4.4 — a malformed table must not be able to wedge a device | `crates/sparq-gpu` |
 | P5 | **ON EXIT ONLY** — the full model: §5.1–5.6 | Blocked on the trigger; premature otherwise | `research/` |
