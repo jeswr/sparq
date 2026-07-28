@@ -248,6 +248,49 @@ jobs:
           echo "::error::release-plz release-pr failed with the blocked-PR-creation signature in its output, but the live PR-creation probe returned HTTP ${code} (not 403) — the blocked-setting condition is not reproducible right now, so this is treated as a real failure. Probe response body follows."
           cat /tmp/rp-probe.json || true
           exit 1
+      # [OPUS-5] sq-lonae — PROMOTION SIGNAL. The promotion of this job back to gating is
+      # needs:user (provision ORCHESTRATOR_APP_ID/_PRIVATE_KEY or RELEASE_PLZ_TOKEN, or enable
+      # the Actions PR-creation setting — see the job comment and docs/release.md §8e), and
+      # until this step nothing in the repo OBSERVED the moment that prerequisite landed: the
+      # forge-token chain resolves silently, so a newly-provisioned token just makes this job go
+      # quietly green and the `(advisory)` declaration in .github/advisory-registry.json rots.
+      #
+      # The registered promotion criterion is "PR-creation works with this job's forge token",
+      # which is exactly what the containment step's side-effect-free probe answers — so re-use
+      # it on the SUCCESS path (the failure path already probed, and already reported). head==base
+      # is invalid, so a token PERMITTED to create PRs gets 422 Validation Failed and no PR is
+      # ever created, while a token blocked by the Actions setting gets 403. The probe is needed
+      # even on success because `release-plz release-pr` also exits 0 when there is simply
+      # nothing to release, which says nothing about whether PR-creation is allowed.
+      #
+      # FAIL-SOFT BY CONSTRUCTION — this step must never fail the release path (no `set -e`, the
+      # curl cannot propagate). Only the DEFINITIVE 422 (authorization passed, body rejected)
+      # claims readiness; 403 means still blocked; anything else — including a probe that never
+      # completed — is reported as inconclusive rather than misread as an unblock.
+      - name: Promotion signal — has PR-creation unblocked? (sq-lonae)
+        if: steps.releasepr.outcome == 'success'
+        env:
+          # Probe with the SAME token release-plz used, or the probe proves nothing about it.
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/pulls" \
+            -d '{"title":"release-plz PR-creation probe (never created: head==base is invalid)","head":"main","base":"main"}') || true
+          echo "PR-creation probe HTTP status: ${code:-<probe did not complete>}"
+          case "${code}" in
+            422)
+              echo "::warning title=release-plz Release-PR promotion unblocked (sq-lonae)::This job's forge token CAN now create pull requests — the side-effect-free probe returned 422 (authorization passed, only the head==base body was rejected), so the known blocked-PR-creation condition no longer holds. The advisory declaration is now STALE. Promote: drop the ' (advisory)' token from this job's name, delete the 'Contain the known 403' step and this step, and delete the 'release-plz / Release-PR (advisory)' entry from .github/advisory-registry.json (docs/release.md §8e)."
+              ;;
+            403)
+              echo "PR-creation is still blocked for this forge token — the job stays advisory (sq-lonae)."
+              ;;
+            *)
+              echo "PR-creation probe inconclusive (HTTP '${code}') — not claiming promotion readiness."
+              ;;
+          esac
 
   # ---- 2. release: when the Release-PR's version commit is on main, create the v<version>
   #         git tag. That tag fires the EXISTING release.yml (push: tags: ["v*"]) which does
