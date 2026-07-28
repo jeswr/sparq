@@ -597,10 +597,11 @@ fn over_depth_is_denied_at_depth_zero() {
 
 #[test]
 fn derived_rule_is_never_reused_as_an_anchor_no_transitive_chain() {
-    // The v1 depth-1 bound: GOV certifies ISSUER (derived), and a second edge ISSUER
-    // certifies THIRD. Because ISSUER is only a DERIVED rule (never a direct anchor), the
-    // ISSUER → THIRD edge finds no anchor and contributes nothing — the closure does NOT
-    // transitively chain. THIRD must NOT appear.
+    // `depth_bound = 1`: GOV certifies ISSUER (derived), and a second edge ISSUER certifies
+    // THIRD. At depth 1 the ONLY anchors are the direct rules, so the ISSUER → THIRD edge
+    // finds no anchor and contributes nothing — the closure does NOT transitively chain at
+    // this bound. THIRD must NOT appear. (At `depth_bound = 2` it would — see
+    // `two_hop_narrowing_chain_admits_at_depth_two` in the depth-N matrix below.)
     let (gov_sk, gov_pk) = keypair(1);
     let (iss_sk, iss_pk) = keypair(2);
     let (_third_sk, third_pk) = keypair(3);
@@ -630,9 +631,10 @@ fn derived_rule_is_never_reused_as_an_anchor_no_transitive_chain() {
 #[test]
 fn attribute_scoped_issuer_cannot_meta_escalate_to_certify_another_issuer() {
     // Meta-scope escalation: an issuer anchored ONLY for an attribute shape (`age`) is NOT a
-    // framework operator and holds no authority to certify OTHER issuers. In this depth-1
-    // model that is exactly the "derived rule can never be an anchor" property, tested from
-    // the escalation angle: an ISSUER anchored for `age` presents a cert ISSUER → ATTACKER.
+    // framework operator and holds no authority to certify OTHER issuers OUTSIDE that shape.
+    // This is the shape-ceiling property tested from the escalation angle, and it is what
+    // holds the depth-N closure together at every hop: an ISSUER anchored for `age` presents
+    // a cert ISSUER → ATTACKER.
     // ISSUER *is* a direct anchor here (anchored for age) — but the derived ATTACKER rule can
     // only NARROW ISSUER's `age` authority, never gain a broader/meta authority. An attempt
     // to certify ATTACKER for a DIFFERENT predicate (`name`, outside ISSUER's `age` anchor)
@@ -834,4 +836,424 @@ fn un_modelled_selection_predicate_cert_fails_closed() {
         "an un-modelled / extra SHACL target predicate ⇒ fail-closed (Broadening), never admitted"
     );
     assert_no_derivation(std::slice::from_ref(&anchor_rule), std::slice::from_ref(&cert));
+}
+
+// ── DEPTH-N matrix: framework-of-frameworks chains (sq-13096) ──────────────────
+//
+// The v1 closure was DEPTH-1 ONLY: a derived rule was never re-used as an anchor, so
+// `GOV certifies MID, MID certifies LEAF` derived nothing for LEAF. `derive_effective_rules`
+// now iterates up to `depth_bound` hops. The HARD invariant is unchanged and now has to hold
+// at EVERY depth: a broadening at ANY hop is a privilege escalation, and a cycle must never
+// amplify across rounds. Each case below drives one multi-hop shape and asserts the outcome.
+
+const MID: &str = "https://mid.example/registrar"; // the intermediate framework in a chain
+const LEAF: &str = "https://leaf.example/issuer"; // the issuer at the end of a chain
+/// `trustx:certifies` — the predicate a REGISTRAR-scoped shape must select for its holder to
+/// act as a certification edge source at a deeper hop (the meta-scope gate).
+const TRUSTX_CERTIFIES: &str = "https://sparq.dev/ns/trust#certifies";
+
+/// A REGISTRAR shape: `predicate_shape(p)` PLUS a root `sh:targetSubjectsOf trustx:certifies`
+/// selection edge, so it selects certification statements as well as `p` statements. A rule
+/// carrying it has an incoming certification scope that covers certification-issuing itself,
+/// which is what the meta-scope gate requires of any DERIVED edge source. A plain
+/// attribute shape is an ISSUER scope and confers no authority to certify.
+fn registrar_shape(p: &str) -> ShapeRef {
+    additive_target_shape(p, TRUSTX_CERTIFIES)
+}
+
+/// The root anchor + the first hop `GOV → MID` (AnyService, in-window, GOV-signed). GOV is
+/// anchored as a REGISTRAR for `age`, so MID inherits that shape (certification authority
+/// included), GOV's resource scope, and a freshness <= GOV's.
+fn root_and_first_hop() -> (TrustRule, Certification, SecretKey, PublicKey) {
+    let (gov_sk, gov_pk) = keypair(1);
+    let (mid_sk, mid_pk) = keypair(2);
+    let anchor_rule = anchor(GOV, gov_pk, registrar_shape(AGE), RES);
+    let hop1 = signed_cert(
+        GOV,
+        &gov_sk,
+        MID,
+        mid_pk,
+        CertScope::AnyService,
+        NOW - 86400,
+        NOW + 86400,
+    );
+    (anchor_rule, hop1, mid_sk, mid_pk)
+}
+
+#[test]
+fn two_hop_narrowing_chain_admits_at_depth_two() {
+    // The legitimate framework-of-frameworks case. GOV (anchored for `age`) certifies MID;
+    // MID certifies LEAF, NARROWING to the integer-typed `age` sub-shape. At depth 2 LEAF is
+    // derived, and its authority telescopes: LEAF ⊆ MID ⊆ GOV on every axis.
+    let (anchor_rule, hop1, mid_sk, _mid_pk) = root_and_first_hop();
+    let (_leaf_sk, leaf_pk) = keypair(3);
+    let hop2 = signed_cert(
+        MID,
+        &mid_sk,
+        LEAF,
+        leaf_pk,
+        CertScope::Shape(narrower_shape(AGE)),
+        NOW - 10,
+        NOW + 10,
+    );
+    let out = derive_effective_rules(
+        std::slice::from_ref(&anchor_rule),
+        &[hop1, hop2],
+        NOW,
+        2,
+    );
+    assert_eq!(out.len(), 3, "anchor + MID (hop 1) + LEAF (hop 2)");
+    assert_eq!(out[1].source.as_str(), MID, "shallowest hop first");
+    let leaf = &out[2];
+    assert_eq!(leaf.source.as_str(), LEAF);
+    assert_eq!(
+        public_key_to_hex(&leaf.issuer_key),
+        public_key_to_hex(&leaf_pk),
+        "the derived rule binds the key MID's signature attested"
+    );
+    // ATTENUATION AT EVERY HOP — the telescoping ceiling.
+    assert_eq!(
+        leaf.scope.as_str(),
+        RES,
+        "resource scope stays the ROOT anchor's ceiling across both hops"
+    );
+    assert!(
+        leaf.fresh_within_secs <= out[1].fresh_within_secs
+            && out[1].fresh_within_secs <= anchor_rule.fresh_within_secs,
+        "freshness narrows monotonically: LEAF <= MID <= GOV"
+    );
+    // The consumed-by-admission invariant: the target-predicate set only ever SHRINKS.
+    let root_targets = target_predicate_set(&anchor_rule.shape);
+    let mid_targets = target_predicate_set(&out[1].shape);
+    let leaf_targets = target_predicate_set(&leaf.shape);
+    assert!(mid_targets.is_subset(&root_targets), "hop 1 targets ⊆ anchor targets");
+    assert!(leaf_targets.is_subset(&mid_targets), "hop 2 targets ⊆ hop 1 targets");
+    assert!(
+        leaf_targets.len() < mid_targets.len(),
+        "hop 2 carried a STRICTLY tighter selection than hop 1 (the narrowing it signed)"
+    );
+    // The narrowing it signed also added a conformance constraint hop 1 did not carry.
+    let datatype = "http://www.w3.org/ns/shacl#datatype";
+    assert!(
+        leaf.shape.triples.iter().any(|t| t.predicate.as_str() == datatype)
+            && !out[1].shape.triples.iter().any(|t| t.predicate.as_str() == datatype),
+        "hop 2's derived shape is the tighter cert shape, not hop 1's inherited one"
+    );
+    // META-SCOPE: LEAF's narrowed shape no longer SELECTS certification statements, so LEAF
+    // is an issuer, not a registrar — the chain terminates here even at a deeper bound.
+    assert!(
+        !leaf_targets.contains(TRUSTX_CERTIFIES) && mid_targets.contains(TRUSTX_CERTIFIES),
+        "MID may certify (registrar scope); LEAF, narrowed to `age` alone, may not"
+    );
+}
+
+#[test]
+fn two_hop_chain_broadening_at_the_second_hop_is_denied() {
+    // THE ESCALATION SHAPE. Hop 1 is legitimate (GOV → MID, AnyService ⇒ MID inherits `age`).
+    // Hop 2 tries to certify LEAF for `name` — a predicate OUTSIDE MID's own derived `age`
+    // ceiling. Attenuation is re-derived per hop, so hop 2 is a broadening and LEAF must
+    // never appear, at ANY depth bound.
+    let (anchor_rule, hop1, mid_sk, _mid_pk) = root_and_first_hop();
+    let (_leaf_sk, leaf_pk) = keypair(3);
+    let broadening_hop2 = signed_cert(
+        MID,
+        &mid_sk,
+        LEAF,
+        leaf_pk,
+        CertScope::Shape(predicate_shape(NAME)),
+        NOW - 10,
+        NOW + 10,
+    );
+    for depth in [2u32, 3, 16] {
+        let out = derive_effective_rules(
+            std::slice::from_ref(&anchor_rule),
+            &[hop1.clone(), broadening_hop2.clone()],
+            NOW,
+            depth,
+        );
+        assert_eq!(
+            out.len(),
+            2,
+            "depth {depth}: only the legitimate hop 1 derives; the broadening hop 2 contributes nothing"
+        );
+        assert!(
+            out.iter().all(|r| r.source.as_str() != LEAF),
+            "depth {depth}: a broadening at hop 2 must never grant LEAF authority"
+        );
+    }
+    // The explained path names the gate. Hop 2 is explained against hop 1's own output —
+    // exactly the anchor set the closure held when it evaluated that hop.
+    let after_hop1 =
+        derive_effective_rules(std::slice::from_ref(&anchor_rule), std::slice::from_ref(&hop1), NOW, 1);
+    assert!(
+        matches!(
+            explain_edge(&after_hop1, &broadening_hop2, NOW, 2),
+            Err(EdgeRejection::Broadening)
+        ),
+        "the second hop is denied AT THAT HOP as Broadening"
+    );
+}
+
+#[test]
+fn two_hop_chain_with_an_additive_target_at_the_second_hop_is_denied() {
+    // The contravariant-selection escalation, moved to hop 2: MID inherits GOV's `age`
+    // targets, then tries to certify LEAF for a shape that keeps every `age` constraint but
+    // ADDS `sh:targetSubjectsOf schema:email`. It is an injective structural superset yet
+    // selects strictly MORE nodes — a broadening that must be denied at the deeper hop too.
+    let (anchor_rule, hop1, mid_sk, _mid_pk) = root_and_first_hop();
+    let (_leaf_sk, leaf_pk) = keypair(3);
+    let smuggle = signed_cert(
+        MID,
+        &mid_sk,
+        LEAF,
+        leaf_pk,
+        CertScope::Shape(additive_target_shape(AGE, "https://schema.org/email")),
+        NOW - 10,
+        NOW + 10,
+    );
+    let out = derive_effective_rules(
+        std::slice::from_ref(&anchor_rule),
+        &[hop1, smuggle],
+        NOW,
+        2,
+    );
+    assert_eq!(out.len(), 2, "the additive-target hop 2 contributes nothing");
+    let root_targets = target_predicate_set(&anchor_rule.shape);
+    for rule in &out {
+        assert!(
+            target_predicate_set(&rule.shape).is_subset(&root_targets),
+            "no rule at any depth may target a predicate the root anchor never selected"
+        );
+    }
+}
+
+#[test]
+fn cross_round_cycle_derives_nothing_new() {
+    // A → B → A. Hop 1 derives MID. Hop 2 would close the loop back onto GOV, which already
+    // holds a matching-key rule, so the cycle gate denies it and the closure converges: the
+    // output is the anchor + MID at EVERY depth. A cycle must never re-enter and amplify.
+    let (anchor_rule, hop1, mid_sk, _mid_pk) = root_and_first_hop();
+    let (_gov_sk, gov_pk) = keypair(1);
+    let back_edge = signed_cert(
+        MID,
+        &mid_sk,
+        GOV,
+        gov_pk,
+        CertScope::AnyService,
+        NOW - 10,
+        NOW + 10,
+    );
+    for depth in [1u32, 2, 5, 32] {
+        let out = derive_effective_rules(
+            std::slice::from_ref(&anchor_rule),
+            &[hop1.clone(), back_edge.clone()],
+            NOW,
+            depth,
+        );
+        assert_eq!(
+            out.len(),
+            2,
+            "depth {depth}: the cycle adds nothing — anchor + MID only"
+        );
+        assert_eq!(out[1].source.as_str(), MID);
+    }
+    // And the gate that denied it is named, evaluated against the closure state at that hop.
+    let after_hop1 =
+        derive_effective_rules(std::slice::from_ref(&anchor_rule), std::slice::from_ref(&hop1), NOW, 1);
+    assert!(
+        matches!(
+            explain_edge(&after_hop1, &back_edge, NOW, 2),
+            Err(EdgeRejection::Cyclic)
+        ),
+        "the back edge of a cross-round cycle is denied as Cyclic"
+    );
+}
+
+#[test]
+fn over_depth_chain_denies_the_tail() {
+    // A THREE-hop chain GOV → MID → LEAF → TAIL evaluated at each bound. The closure admits
+    // exactly `depth_bound` hops and leaves the tail beyond it UNDERIVED — never approximated,
+    // never admitted "because the prefix was fine".
+    const TAIL: &str = "https://tail.example/issuer";
+    let (anchor_rule, hop1, mid_sk, _mid_pk) = root_and_first_hop();
+    let (leaf_sk, leaf_pk) = keypair(3);
+    let (_tail_sk, tail_pk) = keypair(4);
+    let hop2 = signed_cert(MID, &mid_sk, LEAF, leaf_pk, CertScope::AnyService, NOW - 10, NOW + 10);
+    let hop3 = signed_cert(LEAF, &leaf_sk, TAIL, tail_pk, CertScope::AnyService, NOW - 10, NOW + 10);
+    let chain = [hop1, hop2, hop3];
+
+    // depth 1 ⇒ MID only; depth 2 ⇒ + LEAF; depth 3 ⇒ + TAIL; deeper ⇒ no more.
+    let expected: [(u32, &[&str]); 5] = [
+        (1, &[MID]),
+        (2, &[MID, LEAF]),
+        (3, &[MID, LEAF, TAIL]),
+        (4, &[MID, LEAF, TAIL]),
+        (9, &[MID, LEAF, TAIL]),
+    ];
+    for (depth, want) in expected {
+        let out = derive_effective_rules(std::slice::from_ref(&anchor_rule), &chain, NOW, depth);
+        let derived: Vec<&str> = out[1..].iter().map(|r| r.source.as_str()).collect();
+        assert_eq!(derived, want, "depth {depth}: the tail beyond the bound stays underived");
+        // The no-amplification bound holds at every depth: one rule per edge, at most.
+        assert!(derived.len() <= chain.len());
+    }
+    // Attenuation still telescopes across all three hops (the resource ceiling is the root's).
+    let full = derive_effective_rules(std::slice::from_ref(&anchor_rule), &chain, NOW, 3);
+    assert!(full.iter().all(|r| r.scope.as_str() == RES));
+    let root_targets = target_predicate_set(&anchor_rule.shape);
+    assert!(full
+        .iter()
+        .all(|r| target_predicate_set(&r.shape).is_subset(&root_targets)));
+}
+
+#[test]
+fn a_denied_first_hop_denies_the_whole_chain() {
+    // Fail-closed composition: if hop 1 is denied (here: an EXPIRED GOV → MID edge), MID is
+    // never derived, so hop 2 finds no anchor and LEAF is never derived either. A chain is
+    // only as admissible as its weakest hop.
+    let (gov_sk, gov_pk) = keypair(1);
+    let (mid_sk, mid_pk) = keypair(2);
+    let (_leaf_sk, leaf_pk) = keypair(3);
+    let anchor_rule = anchor(GOV, gov_pk, registrar_shape(AGE), RES);
+    let expired_hop1 = signed_cert(GOV, &gov_sk, MID, mid_pk, CertScope::AnyService, NOW - 100, NOW - 50);
+    let good_hop2 = signed_cert(MID, &mid_sk, LEAF, leaf_pk, CertScope::AnyService, NOW - 10, NOW + 10);
+    let out = derive_effective_rules(
+        std::slice::from_ref(&anchor_rule),
+        &[expired_hop1, good_hop2],
+        NOW,
+        4,
+    );
+    assert_eq!(out.len(), 1, "a denied hop 1 leaves the whole chain underived");
+}
+
+#[test]
+fn no_edge_ever_contributes_more_than_one_rule() {
+    // The no-amplification bound, observed behaviourally: two certifiers both vouch for MID
+    // at hop 1 (both derive, exactly as at depth-1 — the per-round snapshot keeps that
+    // order-independent), and no edge fires a second time at a deeper hop, so the derived
+    // count never exceeds the edge count however deep the bound. The mechanism that enforces
+    // this is the CYCLE gate; the `(certifier, certified_issuer)` visited set states the same
+    // bound redundantly (see the module docs — disabling it turns no test red).
+    let (gov_sk, gov_pk) = keypair(1);
+    let (other_sk, other_pk) = keypair(5);
+    let (_mid_sk, mid_pk) = keypair(2);
+    let gov_anchor = anchor(GOV, gov_pk, predicate_shape(AGE), RES);
+    let other_anchor = anchor("https://other.example/framework", other_pk, predicate_shape(AGE), RES);
+    let anchors = vec![gov_anchor, other_anchor];
+    let from_gov = signed_cert(GOV, &gov_sk, MID, mid_pk, CertScope::AnyService, NOW - 10, NOW + 10);
+    let from_other = signed_cert(
+        "https://other.example/framework",
+        &other_sk,
+        MID,
+        mid_pk,
+        CertScope::AnyService,
+        NOW - 10,
+        NOW + 10,
+    );
+    let edges = [from_gov, from_other];
+    for depth in [1u32, 2, 7] {
+        let out = derive_effective_rules(&anchors, &edges, NOW, depth);
+        assert_eq!(
+            out.len(),
+            anchors.len() + 2,
+            "depth {depth}: both certifiers derive ONCE each — no depth-driven duplication"
+        );
+        assert!(out[2..].iter().all(|r| r.source.as_str() == MID));
+    }
+}
+
+#[test]
+fn meta_scope_escalation_an_attribute_issuer_cannot_certify_at_a_deeper_hop() {
+    // THE META-SCOPE ESCALATION (`research/trust-graph-authorisation-2026-07.md` §2.4 rule 3,
+    // which §2.5 made the stated precondition for depth > 1).
+    //
+    // GOV is anchored ONLY for `age` — an ISSUER scope, not a REGISTRAR scope. GOV certifies
+    // MID for `age`: legitimate, and MID's rule derives. MID then certifies LEAF for `age` —
+    // strictly INSIDE MID's own derived shape, in-window, correctly signed, so every
+    // attenuation / signature / time gate PASSES. It must still be denied: MID was certified
+    // to ISSUE age statements, never to CONFER age authority on anyone else. Admitting it
+    // would let a chain of ordinary issuers launder pod authority onto an issuer neither GOV
+    // nor the pod ever vouched for — a broadening in the META dimension, invisible to the
+    // shape ceiling.
+    let (gov_sk, gov_pk) = keypair(1);
+    let (mid_sk, mid_pk) = keypair(2);
+    let (_leaf_sk, leaf_pk) = keypair(3);
+    // Attribute-only anchor — deliberately NOT `registrar_shape`.
+    let issuer_only_anchor = anchor(GOV, gov_pk, predicate_shape(AGE), RES);
+    let hop1 = signed_cert(GOV, &gov_sk, MID, mid_pk, CertScope::AnyService, NOW - 10, NOW + 10);
+    let hop2 = signed_cert(MID, &mid_sk, LEAF, leaf_pk, CertScope::AnyService, NOW - 10, NOW + 10);
+
+    for depth in [2u32, 3, 16] {
+        let out = derive_effective_rules(
+            std::slice::from_ref(&issuer_only_anchor),
+            &[hop1.clone(), hop2.clone()],
+            NOW,
+            depth,
+        );
+        assert_eq!(out.len(), 2, "depth {depth}: MID derives; LEAF must NOT");
+        assert!(
+            out.iter().all(|r| r.source.as_str() != LEAF),
+            "depth {depth}: an attribute-scoped issuer must not confer authority on anyone"
+        );
+    }
+
+    // The EXPLAINED path agrees with the fast path at the SAME hop — the meta-scope gate
+    // lives in the one shared per-hop gate, so `explain_edge` cannot report a rule the
+    // closure refused to derive. MID holds no CERTIFIER anchor at hop 2, hence `NoAnchor`.
+    let after_hop1 = derive_effective_rules(
+        std::slice::from_ref(&issuer_only_anchor),
+        std::slice::from_ref(&hop1),
+        NOW,
+        1,
+    );
+    assert!(
+        matches!(
+            explain_edge(&after_hop1, &hop2, NOW, 2),
+            Err(EdgeRejection::NoAnchor)
+        ),
+        "at hop 2 an attribute-scoped derived anchor is not a certifier ⇒ NoAnchor"
+    );
+    // Non-vacuity of that assertion: the SAME edge and SAME anchor set at hop 1 — i.e. asking
+    // "what if the pod had anchored MID's rule DIRECTLY?" — is admitted. So `NoAnchor` above
+    // is the meta-scope exemption boundary, not a broken fixture.
+    assert!(
+        explain_edge(&after_hop1, &hop2, NOW, 1).is_ok(),
+        "hop 1 exempts DIRECT anchors from the meta-scope gate"
+    );
+
+    // CONTROL — the gate is denying on meta-scope, not on some unrelated defect of the
+    // fixture. Swap ONLY the anchor shape for a registrar shape (so MID's incoming
+    // certification scope now covers certification-issuing itself) and the very same hop 2 is
+    // admitted.
+    let registrar_anchor = anchor(GOV, gov_pk, registrar_shape(AGE), RES);
+    let out = derive_effective_rules(
+        std::slice::from_ref(&registrar_anchor),
+        &[hop1, hop2],
+        NOW,
+        2,
+    );
+    assert_eq!(out.len(), 3, "a registrar-scoped chain admits the same hop 2");
+    assert_eq!(out[2].source.as_str(), LEAF);
+    // And even then LEAF stays inside the ROOT ceiling — the meta-scope gate widens nothing.
+    assert!(target_predicate_set(&out[2].shape).is_subset(&target_predicate_set(&registrar_anchor.shape)));
+}
+
+#[test]
+fn a_direct_anchor_may_certify_regardless_of_meta_scope() {
+    // The meta-scope gate applies to DERIVED edge sources only. A DIRECT anchor is the pod's
+    // own explicit decision about who it trusts to confer, so an attribute-scoped direct
+    // anchor still certifies at hop 1 — which is exactly what keeps `depth_bound = 1`
+    // byte-identical to the pre-sq-13096 closure. (The shape ceiling still binds it: see
+    // `attribute_scoped_issuer_cannot_meta_escalate_to_certify_another_issuer`.)
+    let (anchor_rule, cert, _iss_pk) = good_cert(); // attribute-only `age` anchor
+    for depth in [1u32, 2, 4] {
+        let out = derive_effective_rules(
+            std::slice::from_ref(&anchor_rule),
+            std::slice::from_ref(&cert),
+            NOW,
+            depth,
+        );
+        assert_eq!(out.len(), 2, "depth {depth}: the direct anchor still certifies");
+        assert_eq!(out[1].source.as_str(), ISSUER);
+    }
 }

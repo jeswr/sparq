@@ -18,11 +18,12 @@ ordered array. Every case contains these integer fields:
 - `edges_rejected`: counts keyed by every public `EdgeRejection` reason:
   `no_anchor`, `signature_invalid`, `out_of_window`, `cyclic`, `broadening`, and
   `over_depth`.
-- `max_closure_depth_reached`: actual closure rounds reached. The current implementation
-  is intentionally depth-1, so this is either zero or one.
+- `max_closure_depth_reached`: actual closure rounds reached. The library closure is
+  depth-N (`sq-13096`), but this harness fixes `depth_bound` at zero or one and its
+  fixtures contain no multi-hop chains, so this is either zero or one.
 - `visited_set_size`: unique certifier and certified-issuer identities observed. This is
-  the deterministic visited-set input size for evaluating cycle handling; it does not
-  claim that the current depth-1 library implementation allocates such a set.
+  the deterministic visited-set input size for evaluating cycle handling. It is an input
+  measure of the fixture, not a measurement of the library's own allocation.
 - `derived_rule_count`: effective rules minus direct rules.
 
 All values are deterministic functions of fixed fixtures. The schema excludes clock,

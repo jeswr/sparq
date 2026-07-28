@@ -14,7 +14,7 @@ framework operator, a Trusted-List registrar) — may it therefore admit facts f
 that certifier has **certified**, without me enumerating that issuer myself?"*
 
 `sparq_trust::graph::derive_effective_rules` (opt-in **`cert-graph`** feature on
-`sparq-trust`, default-OFF) runs a **depth-bounded** (v1: depth-1), **attenuation-only**,
+`sparq-trust`, default-OFF) runs a **depth-bounded** (depth-N), **attenuation-only**,
 **fail-closed** closure over signed `trustx:Certification` edges. It is pure
 pre-processing: it produces the `Vec<TrustRule>` that the **UNCHANGED** admission gate
 (`sparq_trust::admit`) then consumes exactly as it consumes a hand-authored policy.
@@ -25,7 +25,7 @@ pre-processing: it produces the `Vec<TrustRule>` that the **UNCHANGED** admissio
                                   ▼                            ▼
   ┌────────────────────────────────────────────────────────────────────┐
   │  derive_effective_rules   (opt-in `cert-graph`, default-OFF)       │
-  │  depth-1 · attenuation-only · fail-closed                          │
+  │  depth-N · attenuation-only · fail-closed                          │
   │  every derived rule ⊆ (anchor ∩ cert scope ∩ validity window)      │
   └────────────────────────────────────────────────────────────────────┘
                                   │  effective_rules = direct_rules ++ derived
@@ -68,8 +68,8 @@ pre-processing: it produces the `Vec<TrustRule>` that the **UNCHANGED** admissio
   (the `trust-graph` feature's admission stratum) — this skill does not repeat it.
 - **The certification-edge closure (this skill)** — you anchor a **certifier** (framework
   operator / Trusted-List) rather than each issuer, and want issuers *it certifies* to be
-  admitted transitively (depth-1), automatically narrowed to what the certifier itself may
-  confer. The `trustx:trustsFramework` mode of the trust-requirements vocabulary
+  admitted transitively (up to `depth_bound` hops — including a framework-of-frameworks
+  chain), automatically narrowed at every hop to what the certifier itself may confer. The `trustx:trustsFramework` mode of the trust-requirements vocabulary
   ("admit issuers certified under this framework, subject to scope conformance") is what
   this closure operationalises pod-side.
 
@@ -191,10 +191,34 @@ Load-bearing properties (each adversarially tested in
 
 - **Strict additivity** — zero surviving certifications ⇒ the output is `direct_rules`
   **byte-identical**. The closure can only append.
-- **Depth-bounded** — v1 is depth-1: derived rules are never re-used as anchors for a
-  further round; `depth_bound = 0` short-circuits to `direct_rules` verbatim.
-- **Attenuation-only** — every derived rule satisfies
-  `derived ⊆ (anchor ∩ cert scope ∩ validity window)`. Shape containment is
+- **Depth-bounded (depth-N, `sq-13096`)** — `depth_bound` is the maximum number of
+  certification HOPS. Hop 1's anchors are `direct_rules`; hop *k*'s anchors are EXACTLY the
+  rules hop *k−1* derived, so `depth_bound = 2` admits a framework-of-frameworks chain
+  (A certifies B, B certifies C). A chain LONGER than the bound has its tail left
+  **underived** (fail-closed); `depth_bound = 0` short-circuits to `direct_rules` verbatim.
+  Depth cannot multiply authority: each edge contributes **at most one** rule to the whole
+  closure, so `derived.len() <= certifications.len()` at any bound.
+  The example above passes `1` — pick the bound your trust policy actually intends; the
+  `sparq-trust` `TrustStore` and the `sparq-server` HTTP handler both pass `1` today.
+- **Meta-scope non-escalation** (the precondition depth>1 always carried,
+  `research/trust-graph-authorisation-2026-07.md` §2.4 rule 3) — a certification confers the
+  authority to **issue** statements of a scope, NOT the authority to **confer**, which is
+  strictly stronger. So a DERIVED rule may act as an edge source at a deeper hop only if its
+  own shape **selects** `trustx:Certification` statements — `sh:targetSubjectsOf` /
+  `sh:targetObjectsOf trustx:certifies`, or `sh:targetClass trustx:Certification`. Being
+  certified for `schema:age` makes you an **issuer**, not a **registrar**: an `age`-scoped
+  derived rule cannot extend a chain, even to a target strictly inside its own shape.
+  Fail-closed (an edge naming it reports `NoAnchor` at that hop). **Direct anchors are
+  exempt** — those are the pod's own explicit decision, which is also why `depth_bound = 1`
+  is byte-identical to the pre-`sq-13096` closure. Practically: anchor a registrar with a
+  shape that selects BOTH `trustx:certifies` and the attribute you care about; the narrowing
+  at the last hop drops the `trustx:certifies` target, so the issuer at the end of the chain
+  cannot extend it further.
+- **Attenuation-only, at EVERY hop** — every derived rule satisfies
+  `derived ⊆ (anchor ∩ cert scope ∩ validity window)`, with the ceiling **re-derived per
+  hop** against the previous hop's rule, so the chain telescopes
+  `derived_N ⊆ … ⊆ derived_1 ⊆ anchor` and a broadening at ANY hop is denied there (which
+  also leaves the rest of that chain underived). Shape containment is
   **target-set-contravariant, conformance-covariant**: a cert shape narrows the anchor
   only when its SHACL *selection/target* predicates are a **subset** of the anchor's
   (targets may only shrink — an extra `sh:targetSubjectsOf` WIDENS) and its *conformance*
@@ -205,16 +229,25 @@ Load-bearing properties (each adversarially tested in
 
 `derive_effective_rules` silently drops a rejected edge; `explain_edge` runs the same
 gates in the same order and returns *why* an edge contributed nothing (the adversarial
-matrix asserts against these). The variants, in gate order:
+matrix asserts against these). Both route through ONE shared per-hop gate, so they cannot
+disagree.
+
+`explain_edge(anchors, cert, now, hop)` explains a SINGLE hop, and the last two arguments
+must agree: pass `direct_rules` with `hop = 1`, or
+`derive_effective_rules(direct_rules, certs, now, k - 1)` with `hop = k`. `hop = 0` denies
+every edge as `OverDepth`; `hop = 1` marks `anchors` as DIRECT (meta-scope exempt), `hop >= 2`
+marks them as DERIVED (meta-scope applies).
+
+The variants, in gate order:
 
 | Variant | The edge is dropped because … |
 | --- | --- |
-| `Cyclic` | `certifier == certified_issuer` (self-certification), or the certified issuer already anchors the certifier — a cycle could launder a broadening, and adds no authority. Checked FIRST, before the signature. |
-| `NoAnchor` | no `direct_rules` anchor has this certifier's `source` **and** matching key — the pod does not anchor this certifier, so it can confer nothing. |
+| `Cyclic` | `certifier == certified_issuer` (self-certification), or the certified issuer already holds a matching-key rule in the closure so far — a direct anchor **or** one derived at an earlier hop. A cycle could launder a broadening, and adds no authority. Checked FIRST, before the signature; reading the whole closure-so-far is what makes a cross-round cycle (`A → B → A`) converge. |
+| `NoAnchor` | no anchor available to THIS hop has this certifier's `source` **and** matching key — the `direct_rules` at hop 1; at hop k>1 the previous hop's derived rules that ALSO pass the meta-scope gate (an attribute-scoped derived rule is not a certifier). So it can confer nothing. This is also what an edge deeper than `depth_bound` reports: it never reaches a hop that could evaluate it. |
 | `SignatureInvalid` | the signature is absent, unparseable, or does not verify under the certifier's key over the domain-separated `certification_message` (a self-asserted / forged edge). |
 | `OutOfWindow` | the window is ill-formed (`valid_until < valid_from`) or does not cover `now` — expired / not-yet-valid; fail-closed on time. |
 | `Broadening` | the certification scope is NOT provably contained in the certifier's anchor shape — a broadening attempt **or** an undecidable containment (undecidable ⇒ not contained ⇒ contributes nothing). |
-| `OverDepth` | `depth_bound` was `0`, or the edge would only be reachable beyond the bound (v1 depth-1: derived rules are never anchors). |
+| `OverDepth` | `depth_bound` was `0` — no hop is permitted at all, so no edge can derive. (An edge merely DEEPER than the bound reports `NoAnchor`, not this; the closure-level statement is that its chain's tail is left underived.) |
 
 ## Pod-side wiring — `sparq-solid` (`trust-graph` feature)
 
