@@ -838,6 +838,7 @@ class Watchdog:
         )
         trusted: list[Marker] = []
         rejected = 0
+        rejected_authors: set[str] = set()
         for row in _ndjson(raw):
             marker = parse_marker(row.get("body"))
             if marker is None:
@@ -847,15 +848,18 @@ class Watchdog:
                 trusted.append(marker)
                 continue
             rejected += 1
-            self.log(
-                f"::warning title={PROGRAM} untrusted marker::PR #{pr_number}: ignoring "
-                f"a watchdog marker authored by {author!r} — markers are honoured only "
-                f"from {sorted(TRUSTED_MARKER_AUTHORS)}"
-            )
+            rejected_authors.add(author)
         if rejected:
+            # ONE annotation per PR, not one per marker. MEASURED on #4534, which
+            # already carries 96 forged markers naming the real zero-suite head: a
+            # per-marker warning emitted 96 annotations and ~110 KB of log, which
+            # would blow GitHub's annotation cap and bury every other signal. The
+            # count and the distinct authors are what an operator needs.
             self.log(
-                f"[{PROGRAM}] PR #{pr_number}: {rejected} untrusted marker(s) IGNORED, "
-                f"{len(trusted)} trusted marker(s) accepted"
+                f"::warning title={PROGRAM} untrusted markers ignored::PR #{pr_number}: "
+                f"{rejected} watchdog marker(s) from untrusted author(s) "
+                f"{sorted(rejected_authors)} IGNORED ({len(trusted)} trusted accepted) — "
+                f"markers are honoured only from {sorted(TRUSTED_MARKER_AUTHORS)}"
             )
         return trusted
 

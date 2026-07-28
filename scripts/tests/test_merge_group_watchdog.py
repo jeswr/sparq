@@ -929,6 +929,36 @@ class TestMarkerAuthorIsPartOfThePredicate(unittest.TestCase):
         self.assertTrue(any("untrusted marker" in r for r in harness.rows), harness.rows)
         self.assertTrue(any(ATTACKER in r for r in harness.rows), harness.rows)
 
+    def test_mass_forgery_emits_ONE_annotation_not_one_per_marker(self):
+        # MEASURED: PR #4534 already carries 96 forged markers naming the real
+        # zero-suite head. A per-marker annotation produced ~110 KB of log and would
+        # blow GitHub's annotation cap, burying every other signal — so the volume of
+        # an attack must not become the volume of the log.
+        harness = FakeWatchdog.build(
+            suites=0,
+            comments=[_marker_comment(author=ATTACKER, head=f"{i:040x}") for i in range(96)],
+        )
+        self.assertEqual(harness.watchdog.pr_markers(4534), [])
+        warnings = [r for r in harness.rows if "::warning" in r]
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertIn("96 watchdog marker(s)", warnings[0])
+        self.assertIn(ATTACKER, warnings[0])
+
+    def test_the_summary_names_every_distinct_untrusted_author(self):
+        harness = FakeWatchdog.build(
+            suites=0,
+            comments=[
+                _marker_comment(author="attacker-one", head="a" * 40),
+                _marker_comment(author="attacker-two", head="b" * 40),
+                _marker_comment(author="attacker-one", head="c" * 40),
+            ],
+        )
+        harness.watchdog.pr_markers(4534)
+        warning = next(r for r in harness.rows if "::warning" in r)
+        self.assertIn("attacker-one", warning)
+        self.assertIn("attacker-two", warning)
+        self.assertIn("3 watchdog marker(s)", warning)
+
     def test_a_forged_marker_cannot_suppress_a_real_recovery_either(self):
         # The idempotence key is read from the SAME channel, so an attacker must not be
         # able to post a marker for the live head and block the watchdog from acting.
