@@ -284,9 +284,12 @@ certification can only **NARROW**, never **WIDEN**, the certifier's own authorit
   shape a cycle would use to launder a broadening. Reading the WHOLE closure-so-far, rather
   than only `direct_rules`, is what makes a cross-round cycle (`A → B → A`) converge instead
   of amplifying, and it bounds the whole closure at **one derived rule per edge** —
-  `derived.len() <= certifications.len()` at any `depth_bound`. A visited set keyed on
-  `(certifier, certified_issuer)` states that bound redundantly; it is belt-and-braces, not
-  the guard (see the `graph` module docs).
+  `derived.len() <= certifications.len()` at any `depth_bound`. A visited set keyed on each
+  certification's INPUT INDEX states that bound redundantly; it is belt-and-braces, not the
+  guard (see the `graph` module docs). It is keyed per RECORD, not per `(certifier,
+  certified_issuer)` pair, so two distinct signed records sharing both endpoints — differing
+  in `certified_key`, scope, window or signature — stay independently eligible; one firing at
+  hop *k* must not skip a sibling that only becomes anchored at hop *k+1*.
 - **Strict additivity.** Zero certifications (or none surviving the gate) ⇒ output is
   `direct_rules` **byte-identical**; a `depth_bound` of `0` short-circuits identically.
 

@@ -87,14 +87,19 @@
 //!   **`derived.len() <= certifications.len()` at any `depth_bound`** — so depth cannot
 //!   multiply authority.
 //!
-//!   A **visited set keyed on `(certifier, certified_issuer)`** sits alongside it as a
+//!   A **visited set keyed on each certification's INPUT INDEX** sits alongside it as a
 //!   REDUNDANT, explicit statement of that same bound. Stated honestly: it is belt-and-braces,
 //!   not the guard — disabling it turns NO test in this crate red, because the cycle gate
 //!   already denies every edge it would have skipped (an edge that has fired leaves its
 //!   certified issuer holding a matching-key rule). It is kept because it makes the
 //!   ≤1-rule-per-edge bound a visible loop invariant rather than a consequence of reasoning
-//!   about the cycle gate's key-equality test, and because it shrinks the per-round scan as
-//!   rounds deepen. Do NOT cite it as the reason a cycle is safe; cite the cycle gate.
+//!   about the cycle gate's key-equality test. Do NOT cite it as the reason a cycle is safe;
+//!   cite the cycle gate. The key is the index and NOT `(certifier, certified_issuer)`:
+//!   distinct signed records may share both endpoints while differing in `certified_key`
+//!   (or scope/window/signature), and an endpoint-pair key would let one record firing at
+//!   hop *k* silently skip a sibling that only becomes anchored at hop *k+1* — a valid
+//!   derivation lost, and one the cycle gate does NOT redundantly cover, since the fired
+//!   record's rule binds a different key than the sibling certifies.
 //! - **Depth-bounded.** The closure runs at most `depth_bound` rounds: round 1's anchors are
 //!   `direct_rules`; round *k*'s anchors are exactly the rules round *k−1* derived that also
 //!   pass the meta-scope gate below. It is iterative, not recursive-in-the-reasoner (the
@@ -142,7 +147,7 @@
 //! [OPUS-5] sq-13096 (issue #3087) — the depth-N generalisation: the v1 closure was
 //! DEPTH-1 ONLY (a derived rule was never re-used as an anchor, so a framework-of-frameworks
 //! chain `A certifies B, B certifies C` derived nothing for `C`). It now iterates rounds up
-//! to `depth_bound` with a `(certifier, certified_issuer)` visited set, a per-hop
+//! to `depth_bound` with a per-record visited set, a per-hop
 //! re-derivation of the ⊆ ceiling, and the SAME signature/time/shape gates per hop — plus the
 //! meta-scope non-escalation gate above, which the depth>1 deferral in
 //! `research/trust-graph-authorisation-2026-07.md` §2.5 named as its precondition and which
@@ -301,9 +306,10 @@ pub enum EdgeRejection {
 /// that admits it — so `derived.len() <= certifications.len()` regardless of `depth_bound`,
 /// and a cycle `A → B → A` cannot re-enter to amplify. That bound is enforced by the CYCLE
 /// gate (an edge that has fired leaves its certified issuer holding a matching-key rule,
-/// which the gate then rejects); the cross-round `seen` set keyed on
-/// `(certifier, certified_issuer)` states the same bound redundantly and is documented as
-/// belt-and-braces in the module docs, not as the guard.
+/// which the gate then rejects); the cross-round `seen` set — keyed on each certification's
+/// INPUT INDEX, so two records sharing both endpoints stay independently eligible — states the
+/// same bound redundantly and is documented as belt-and-braces in the module docs, not as the
+/// guard.
 pub fn derive_effective_rules(
     direct_rules: &[TrustRule],
     certifications: &[Certification],
@@ -318,18 +324,26 @@ pub fn derive_effective_rules(
         return effective;
     }
 
-    // The cross-round visited set (sq-13096). Keyed on the edge IDENTITY `(certifier IRI,
-    // certified-issuer IRI)`, it is populated ONLY on a SUCCESSFUL derivation — an edge that
-    // failed at hop k (typically `NoAnchor`, because its certifier had not been derived yet)
-    // MUST stay eligible at hop k+1, which is exactly what makes the chain transitive. Once
-    // an edge HAS derived, it never derives again at a deeper hop.
+    // The cross-round visited set (sq-13096). Keyed on the certification's INDEX in
+    // `certifications`, it is populated ONLY on a SUCCESSFUL derivation — a record that failed
+    // at hop k (typically `NoAnchor`, because its certifier had not been derived yet) MUST stay
+    // eligible at hop k+1, which is exactly what makes the chain transitive. Once a record HAS
+    // derived, it never derives again at a deeper hop.
     //
-    // HONEST NOTE — this is REDUNDANT with GATE 1, not the guard. A fired edge leaves its
-    // certified issuer holding a matching-key rule, so the cycle gate (which reads the whole
-    // closure-so-far) already rejects the re-attempt; disabling this set turns no test red.
-    // It is kept because it makes the ≤1-rule-per-edge bound a visible loop invariant and
-    // shrinks the per-round scan as rounds deepen. Cite GATE 1, not this, for cycle safety.
-    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    // The index is a collision-free per-RECORD identity. Keying on `(certifier,
+    // certified_issuer)` instead would conflate distinct signed records that share both
+    // endpoints but differ in `certified_key` (or scope/window/signature): one such record
+    // firing at hop k would mark the pair seen and silently skip its sibling at hop k+1, even
+    // though the sibling is a valid derivation the moment its own matching certifier rule
+    // reaches the frontier. GATE 1 does not cover that case — the fired record leaves the
+    // certified issuer holding a rule under a DIFFERENT key, so the cycle gate does not match.
+    //
+    // HONEST NOTE — with the index key this remains REDUNDANT with GATE 1, not the guard. A
+    // fired record leaves its certified issuer holding a rule under exactly that record's
+    // `certified_key`, so the cycle gate (which reads the whole closure-so-far) already rejects
+    // the re-attempt; disabling this set turns no test red. It is kept because it makes the
+    // ≤1-rule-per-record bound a visible loop invariant. Cite GATE 1, not this, for cycle safety.
+    let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
     // The anchors usable at the CURRENT hop: hop 1 is the direct anchors; hop k>1 is EXACTLY
     // the rules hop k-1 derived. Restricting to the previous round's output (rather than all
     // of `effective`) is what gives `depth_bound` its meaning — and costs nothing, since any
@@ -343,20 +357,16 @@ pub fn derive_effective_rules(
         // would depend on the order of `certifications` (two certifiers vouching for the
         // same issuer at the same hop must both derive, exactly as at depth-1).
         let mut derived_this_round: Vec<TrustRule> = Vec::new();
-        let mut edges_this_round: Vec<(String, String)> = Vec::new();
-        for cert in certifications {
-            let edge = (
-                cert.certifier.as_str().to_owned(),
-                cert.certified_issuer.as_str().to_owned(),
-            );
-            if seen.contains(&edge) {
+        let mut edges_this_round: Vec<usize> = Vec::new();
+        for (idx, cert) in certifications.iter().enumerate() {
+            if seen.contains(&idx) {
                 continue;
             }
             // `hop == 1` marks the anchors as the pod's DIRECT rules, which exempts them from
             // the meta-scope gate in GATE 2 — see `derive_one_explained`.
             if let Some(rule) = derive_one(&frontier, &effective, cert, now_unix_secs, hop == 1) {
                 derived_this_round.push(rule);
-                edges_this_round.push(edge);
+                edges_this_round.push(idx);
             }
         }
         if derived_this_round.is_empty() {

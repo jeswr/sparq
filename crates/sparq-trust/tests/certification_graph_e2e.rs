@@ -948,6 +948,89 @@ fn two_hop_narrowing_chain_admits_at_depth_two() {
 }
 
 #[test]
+fn sibling_cert_sharing_endpoints_but_not_keys_still_derives_at_a_later_hop() {
+    // REGRESSION — the visited set is keyed per RECORD, not per `(certifier, certified_issuer)`
+    // pair. Two distinct signed MID → LEAF certifications share both endpoints but name
+    // DIFFERENT keys on both ends:
+    //   - `early` is signed by MID's key1, which the pod anchors DIRECTLY, and vouches for
+    //     LEAF under `leaf_pk1` — so it fires at hop 1.
+    //   - `late` is signed by MID's key2, which is anchored only once `GOV → MID (key2)`
+    //     derives at hop 1 — so it is `NoAnchor` at hop 1 and only becomes evaluable at hop 2,
+    //     where it vouches for LEAF under a DIFFERENT key, `leaf_pk2`.
+    // Under an endpoint-pair key, `early` firing marks `(MID, LEAF)` seen and `late` is skipped
+    // forever. The CYCLE gate does NOT cover this: LEAF holds a rule under `leaf_pk1`, which
+    // does not match `late`'s `leaf_pk2`, so `late` is a genuine, non-redundant derivation.
+    let (gov_sk, gov_pk) = keypair(1);
+    let (mid_sk1, mid_pk1) = keypair(2);
+    let (mid_sk2, mid_pk2) = keypair(3);
+    let (_leaf_sk1, leaf_pk1) = keypair(4);
+    let (_leaf_sk2, leaf_pk2) = keypair(5);
+    let anchors = vec![
+        anchor(GOV, gov_pk, registrar_shape(AGE), RES),
+        anchor(MID, mid_pk1, registrar_shape(AGE), RES),
+    ];
+    // Hop 1: anchored directly under MID's key1.
+    let early = signed_cert(
+        MID,
+        &mid_sk1,
+        LEAF,
+        leaf_pk1,
+        CertScope::AnyService,
+        NOW - 10,
+        NOW + 10,
+    );
+    // Hop 1: GOV vouches for MID under key2 — the anchor `late` needs.
+    let gov_to_mid2 = signed_cert(
+        GOV,
+        &gov_sk,
+        MID,
+        mid_pk2,
+        CertScope::AnyService,
+        NOW - 10,
+        NOW + 10,
+    );
+    // Hop 2 only: MID's key2 is not a DIRECT anchor, so this is `NoAnchor` at hop 1.
+    let late = signed_cert(
+        MID,
+        &mid_sk2,
+        LEAF,
+        leaf_pk2,
+        CertScope::AnyService,
+        NOW - 10,
+        NOW + 10,
+    );
+    assert_eq!(
+        explain_edge(&anchors, &late, NOW, 1).unwrap_err(),
+        EdgeRejection::NoAnchor,
+        "precondition: `late` has no DIRECT anchor, so it cannot fire at hop 1"
+    );
+    let certs = vec![early, gov_to_mid2, late];
+    let out = derive_effective_rules(&anchors, &certs, NOW, 2);
+    assert_eq!(
+        out.len(),
+        5,
+        "2 anchors + hop 1 (LEAF/key1, MID/key2) + hop 2 (LEAF/key2)"
+    );
+    let leaf_keys: Vec<String> = out
+        .iter()
+        .filter(|r| r.source.as_str() == LEAF)
+        .map(|r| public_key_to_hex(&r.issuer_key))
+        .collect();
+    assert_eq!(
+        leaf_keys,
+        vec![public_key_to_hex(&leaf_pk1), public_key_to_hex(&leaf_pk2)],
+        "BOTH sibling records derive — the later-anchored one is not skipped by its endpoint pair"
+    );
+    // The per-RECORD bound still holds: 3 records in, 3 derived rules out, however deep.
+    let deep = derive_effective_rules(&anchors, &certs, NOW, 6);
+    assert_eq!(
+        deep.len(),
+        out.len(),
+        "a deeper bound derives nothing further — at most one rule per record"
+    );
+}
+
+#[test]
 fn two_hop_chain_broadening_at_the_second_hop_is_denied() {
     // THE ESCALATION SHAPE. Hop 1 is legitimate (GOV → MID, AnyService ⇒ MID inherits `age`).
     // Hop 2 tries to certify LEAF for `name` — a predicate OUTSIDE MID's own derived `age`
@@ -1132,8 +1215,8 @@ fn no_edge_ever_contributes_more_than_one_rule() {
     // at hop 1 (both derive, exactly as at depth-1 — the per-round snapshot keeps that
     // order-independent), and no edge fires a second time at a deeper hop, so the derived
     // count never exceeds the edge count however deep the bound. The mechanism that enforces
-    // this is the CYCLE gate; the `(certifier, certified_issuer)` visited set states the same
-    // bound redundantly (see the module docs — disabling it turns no test red).
+    // this is the CYCLE gate; the per-record visited set states the same bound redundantly
+    // (see the module docs — disabling it turns no test red).
     let (gov_sk, gov_pk) = keypair(1);
     let (other_sk, other_pk) = keypair(5);
     let (_mid_sk, mid_pk) = keypair(2);
