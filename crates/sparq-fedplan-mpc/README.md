@@ -96,9 +96,9 @@ match sparq_fedplan_mpc::ratify_envelope(&envelope, &privacy, Some(budget)) {
   returns `false` — "keep it" — for anything it cannot prove). The value-overlap /
   bound-IRI-propagation prune is **deliberately declined** — not recall-safely expressible
   from the public summary (single-IRI `may_hold_authority`, no authority-set enumerator)
-  — so a future contributor does not build an unsound prune. A pattern-count mismatch or
-  an out-of-range candidate source index is fail-closed
-  (`SeamError::DescriptorMismatch`, phase `SourceCombination`).
+  — so a future contributor does not build an unsound prune. A pattern-count mismatch, an
+  out-of-range candidate index, or a `source_id` disagreeing with the descriptor at that
+  index is fail-closed (`SeamError::DescriptorMismatch`, phase `SourceCombination`).
 
 > **Internal crate — not published** (`publish = false`). **No soundness or privacy
 > claim.** Phases 2–4 + 6 are **plumbing — source-selection + result-aware combination

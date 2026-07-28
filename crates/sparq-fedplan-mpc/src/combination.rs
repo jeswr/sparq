@@ -308,7 +308,9 @@ impl PrunedCombinations {
 /// **unchanged**; the verdict is advisory and auditable.
 ///
 /// `sources` supplies the served **quotient summary** (the characteristic sets + predicate
-/// partitions) Rule C2 reads; its indices must be the same slice Phase 2 selected over. Rule C1
+/// partitions) Rule C2 reads; its indices must be the same slice Phase 2 selected over — an
+/// invariant this pass **enforces** by matching each candidate's `source_id` against the
+/// descriptor at its index, rather than trusting the caller (see *Errors*). Rule C1
 /// re-reads no descriptor capability at all — it operates over the already-recall-safe Phase-2
 /// emptiness — and Rule C2 reads only the characteristic-set accounting behind the completeness
 /// guard, never the authority set (the declined value-overlap non-rule; see the module docs).
@@ -323,10 +325,11 @@ impl PrunedCombinations {
 /// # Errors
 ///
 /// Returns [`SeamError::DescriptorMismatch`] (phase [`SeamPhase::SourceCombination`]) if the
-/// Phase-2 selection's pattern count does not match the BGP's, or if a retained candidate's
-/// source index is out of range for `sources` — the pass refuses to guess the alignment rather
-/// than silently mis-attribute a pattern or a descriptor (fail-closed, the same posture as
-/// Phase 2). It never panics and performs **no** MPC.
+/// Phase-2 selection's pattern count does not match the BGP's, if a retained candidate's source
+/// index is out of range for `sources`, or if a candidate's `source_id` does not match the id of
+/// the descriptor at that index (i.e. the selection was made over a different or reordered slice)
+/// — the pass refuses to guess the alignment rather than silently mis-attribute a pattern or a
+/// descriptor (fail-closed, the same posture as Phase 2). It never panics and performs **no** MPC.
 ///
 /// This function makes **no** soundness/privacy claim — see the module docs and the crate
 /// `README.md`. [OPUS-4.8] sq-pwr.3 / sq-xkrt.
@@ -345,14 +348,29 @@ pub fn prune_source_combinations(
         });
     }
     // Rule C2 resolves candidates against `sources` by index — fail closed rather than silently
-    // skipping a candidate whose descriptor cannot be resolved.
+    // skipping a candidate whose descriptor cannot be resolved. The index must ALSO agree with the
+    // candidate's own `source_id`: Rule C2 reads `sources[cand.source]`'s characteristic sets but
+    // reports `cand.source_id`, so a selection built over a different (or reordered) descriptor
+    // slice would otherwise prove a pairing dead from the WRONG source's summary and prune a
+    // possibly-live combination. Enforce the "same slice" invariant instead of trusting it.
     for ps in &selected.per_pattern {
-        if ps.candidates.iter().any(|c| c.source >= sources.len()) {
-            return Err(SeamError::DescriptorMismatch {
-                phase: SeamPhase::SourceCombination,
-                source_id: String::new(),
-                detail: "Phase-2 candidate source index is out of range for the descriptor slice",
-            });
+        for cand in &ps.candidates {
+            let Some(desc) = sources.get(cand.source) else {
+                return Err(SeamError::DescriptorMismatch {
+                    phase: SeamPhase::SourceCombination,
+                    source_id: cand.source_id.0.clone(),
+                    detail:
+                        "Phase-2 candidate source index is out of range for the descriptor slice",
+                });
+            };
+            if desc.id() != &cand.source_id {
+                return Err(SeamError::DescriptorMismatch {
+                    phase: SeamPhase::SourceCombination,
+                    source_id: cand.source_id.0.clone(),
+                    detail: "Phase-2 candidate source id does not match the descriptor at that \
+                             index (the selection was made over a different descriptor slice)",
+                });
+            }
         }
     }
 
@@ -506,6 +524,11 @@ fn char_set_has(cs: &CharSet, predicate: &str) -> bool {
 /// predicate partition's `void:distinctSubjects`. Any elided set carrying `predicate` strictly
 /// lowers the sum (a served set has `subjects > 0` by construction), and an unknown
 /// `distinct_subjects` is served as `0` — both decline, which is the recall-safe direction.
+///
+/// The sum is **checked**, not saturating: a descriptor is public and hand-buildable, and a
+/// saturated `u64::MAX` sum would spuriously *equal* a `u64::MAX` `distinct_subjects` and so
+/// "prove" completeness from an accounting that never balanced. An overflowing sum is not a valid
+/// subject partition, so it declines like any other unprovable case (fail-closed).
 fn char_sets_complete_for(desc: &SourceDescriptor, predicate: &str) -> bool {
     let Some(part) = desc.predicate(predicate) else {
         return false;
@@ -513,11 +536,13 @@ fn char_sets_complete_for(desc: &SourceDescriptor, predicate: &str) -> bool {
     if part.distinct_subjects == 0 {
         return false; // unknown ⇒ cannot prove completeness ⇒ decline.
     }
-    let accounted = desc
-        .char_sets()
-        .iter()
-        .filter(|cs| char_set_has(cs, predicate))
-        .fold(0u64, |acc, cs| acc.saturating_add(cs.subjects));
+    let mut accounted: u64 = 0;
+    for cs in desc.char_sets().iter().filter(|cs| char_set_has(cs, predicate)) {
+        let Some(next) = accounted.checked_add(cs.subjects) else {
+            return false; // overflow ⇒ not a valid partition ⇒ cannot prove ⇒ decline.
+        };
+        accounted = next;
+    }
     accounted == part.distinct_subjects
 }
 
@@ -1506,6 +1531,108 @@ mod tests {
             }
         ));
         assert!(format!("{}", err).contains("out of range"));
+    }
+
+    /// Recall-safety against an OVERFLOWING subject accounting: characteristic-set subject counts
+    /// that overflow `u64` are not a valid subject partition, so the completeness guard must
+    /// decline. A *saturating* sum would land on `u64::MAX` and spuriously equal a `u64::MAX`
+    /// `void:distinctSubjects`, "proving" completeness on a descriptor whose accounting never
+    /// balanced and emitting a dead pairing that suppresses a combination.
+    #[test]
+    fn overflowing_char_set_accounting_declines_the_prune() {
+        let bgp = star_bgp();
+        // Both star predicates report `distinct_subjects == u64::MAX`, and each is carried by two
+        // characteristic sets whose subject counts sum PAST `u64::MAX`. No set carries both, so
+        // with a saturating sum the pairing would be "proved" dead.
+        let mut b =
+            SourceDescriptor::builder(SourceId::new("http://overflow/")).total_triples(1000);
+        for p in [SHARES_HOUSE, NAME] {
+            b = b.predicate(PredPartition {
+                predicate: p.to_string(),
+                triples: 1000,
+                distinct_subjects: u64::MAX,
+                distinct_objects: 1000,
+            });
+        }
+        for (preds, subjects) in [
+            (vec![SHARES_HOUSE], u64::MAX),
+            (vec![SHARES_HOUSE, OWES], 1),
+            (vec![NAME], u64::MAX),
+            (vec![NAME, MEMBER_OF], 1),
+        ] {
+            let arity = preds.len();
+            b = b.char_set(CharSet {
+                predicates: preds.iter().map(|p| (*p).to_string()).collect(),
+                subjects,
+                avg_multiplicity: vec![1.0; arity],
+            });
+        }
+        let sources = vec![b.build()];
+        let selected = select_private_sources(&bgp, &sources, &[]).unwrap();
+        // Precondition: both patterns retain the source, so the rule is genuinely evaluated.
+        assert!(!selected.per_pattern[0].is_empty() && !selected.per_pattern[1].is_empty());
+
+        let out = prune_source_combinations(&bgp, &sources, &selected).unwrap();
+        assert!(
+            out.dead_pairings.is_empty(),
+            "an overflowing subject accounting cannot prove the sets complete: {:?}",
+            out.dead_pairings
+        );
+        assert!(out.bgp_satisfiable);
+        assert!(out.pruned.is_empty());
+        assert!(!out.combination_is_dead(&[0, 0]));
+    }
+
+    /// An in-range candidate index whose `source_id` disagrees with the descriptor at that index —
+    /// a selection made over a different or reordered descriptor slice — is fail-closed. Without
+    /// the identity check Rule C2 would read the INDEXED source's characteristic sets (here the
+    /// partitioned A) while attributing the dead pairing to the named source (B, whose own sets
+    /// cover both predicates), pruning a live combination.
+    #[test]
+    fn candidate_id_not_matching_indexed_descriptor_is_descriptor_mismatch() {
+        let bgp = star_bgp();
+        let sources = vec![
+            split_source("http://a/", Accounting::Exact), // index 0 — partitioned (would prune)
+            covering_source("http://b/"),                 // index 1 — covers both predicates
+        ];
+        // A candidate naming B but indexing A: the disagreement Phase 2 could never produce.
+        let mismatched = SelectedPrivateSources {
+            per_pattern: (0..2)
+                .map(|pattern| PrivatePatternSources {
+                    pattern,
+                    candidates: vec![PrivateCandidate {
+                        source: 0,
+                        source_id: SourceId::new("http://b/"),
+                        estimated_cardinality: 1.0,
+                    }],
+                })
+                .collect(),
+            pruned: Vec::new(),
+        };
+
+        let err = prune_source_combinations(&bgp, &sources, &mismatched).unwrap_err();
+        assert!(matches!(
+            err,
+            SeamError::DescriptorMismatch {
+                phase: SeamPhase::SourceCombination,
+                ..
+            }
+        ));
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("does not match the descriptor"),
+            "the error names the identity disagreement: {}",
+            msg
+        );
+        assert!(msg.contains("http://b/"), "the error names the offending id: {}", msg);
+
+        // Control: the SAME selection against the slice it actually describes is accepted, and
+        // (B covering both predicates) prunes nothing — so the rejection above is the identity
+        // check firing, not the shape.
+        let honest = vec![covering_source("http://b/")];
+        let out = prune_source_combinations(&bgp, &honest, &mismatched).unwrap();
+        assert!(out.dead_pairings.is_empty());
+        assert!(out.bgp_satisfiable);
     }
 
     /// A selection whose pattern count does not match the BGP is a fail-closed
