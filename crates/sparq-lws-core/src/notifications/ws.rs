@@ -155,10 +155,11 @@ pub struct SubscriptionRequest {
 /// the otherwise-headerless WS receive endpoint (see [`receive_handler`]).
 ///
 /// `// M2-next:` per-resource WAC authorization — confirm this WebID has `read` on `topic` — is NOT
-/// yet enforced (gated on `sparq#992`, the SPARQ access-control design; same blocker as LDP read
-/// authorization). KNOWN LIMITATION: a subscriber today must be authenticated (and receive is now
-/// token-gated to that authenticated subscriber+topic) but is not yet ACL-checked per-resource. The
-/// seam is exactly here, right after the authentication check.
+/// yet enforced. It is no longer blocked on the SPARQ access-control design (the LDP routes already
+/// authorize through the local [`crate::authz`] engine); what is missing is a store handle on
+/// [`NotifyState`] to evaluate the topic's `.acl` through. KNOWN LIMITATION: a subscriber today must
+/// be authenticated (and receive is now token-gated to that authenticated subscriber+topic) but is
+/// not yet ACL-checked per-resource. The seam is exactly here, right after the authentication check.
 pub async fn subscribe_handler(
     State(state): State<Arc<NotifyState>>,
     Extension(token): Extension<VerifiedToken>,
@@ -176,8 +177,9 @@ pub async fn subscribe_handler(
         }
     };
 
-    // M2-next: WAC check here — `wac::can_read(&web_id, topic)` once sparq#992 lands. Until then an
-    // authenticated caller may subscribe to any topic IRI (documented known limitation).
+    // M2-next: WAC check here — evaluate the topic's effective ACL for `web_id` through the local
+    // `authz` engine, once `NotifyState` carries a store handle to read `.acl` documents through.
+    // Until then an authenticated caller may subscribe to any topic IRI (documented known limitation).
 
     // Validate the channel type if the client sent one (reject a wrong type rather than silently
     // treating it as WebSocketChannel2023).
@@ -241,8 +243,8 @@ pub struct ReceiveQuery {
 /// resource IRI could receive its change notifications without subscribing).
 ///
 /// `// M2-next:` the DEEPER per-resource WAC check (is this WebID allowed to READ this resource?)
-/// remains the `sparq#992` seam — the token guarantees only that the connecting party is an
-/// authenticated subscriber of THIS topic, which is the minimum bar that closes the bypass.
+/// remains open — the token guarantees only that the connecting party is an authenticated
+/// subscriber of THIS topic, which is the minimum bar that closes the bypass.
 /// `ws` is taken as a `Result` (not a bare `WebSocketUpgrade`) ON PURPOSE: the token-gate must run
 /// FIRST and UNCONDITIONALLY. If `WebSocketUpgrade` were a plain extractor, its rejection would
 /// short-circuit BEFORE the token check — so a request with bad/missing upgrade headers would 426

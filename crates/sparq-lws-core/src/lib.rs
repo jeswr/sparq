@@ -34,10 +34,17 @@
 //! Solid Notifications (WebSocketChannel2023) are implemented as a net-new, isolated `notifications`
 //! module: an in-process subscription registry + AS2.0 notification builder, an axum WebSocket receive
 //! endpoint, a subscribe endpoint, and discovery (storage description + `Link` rels). The LDP write
-//! path makes a single emit call after a successful mutation. Everything else network-facing (the live
-//! SPARQ HTTP client, live JWKS) and the parts of the Solid surface that need designs not yet written
-//! (per-resource authorization of a subscription, the reconciler, multipart Range, `acl:agentGroup`
-//! resolution) are clearly marked `M2-next:` seams. PATCH supports both the Solid N3 Patch and the
+//! path makes a single emit call after a successful mutation. The network-facing paths this list
+//! once deferred have since landed: the live `HttpSparqClient` (opt-in `http-sparq` feature) and live
+//! JWKS/WebID resolution (the verifier's `network` feature), both wired in `main`, plus multipart
+//! `Range` ([`ldp::range`]) and the orphaned-bytes reconciler ([`store::reconcile`] — `main` spawns
+//! one periodic sweep at boot when an interval is configured, none otherwise).
+//! What is still marked `M2-next:` is: per-resource WAC authorization of a
+//! notification subscription (the `notifications` module — an authenticated caller may subscribe to
+//! any topic IRI), `acl:agentGroup` membership resolution (recognised but NEVER matching —
+//! fail-closed, [`authz::acl`]), the N-Triples/N-Quads/N3 read formats ([`ldp::content`]), and the
+//! real `object_store` [`store::BlobStore`] adapter (`list` / `delete_if_unchanged`) — the in-memory
+//! double is today's only impl. PATCH supports both the Solid N3 Patch and the
 //! `application/sparql-update` INSERT/DELETE-DATA subset. The Solid conformance suite passes **41/41**
 //! (Protocol 25/25 + WAC 16/16) — see `conformance/SCORE.md`. The default impls used here are
 //! in-memory test doubles.

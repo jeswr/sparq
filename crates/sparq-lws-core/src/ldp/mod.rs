@@ -13,9 +13,14 @@
 //! - [`handler`] — the GET / HEAD / PUT / POST / DELETE / PATCH axum handlers over the
 //!   [`crate::store::Store`] seam.
 //!
-//! M2-next (clearly seamed, not implemented): full WAC authorization (needs the SPARQ access-control
-//! design). `application/sparql-update` PATCH now supports the INSERT/DELETE DATA
-//! subset (see [`patch`]).
+//! Full WAC authorization is IMPLEMENTED: every handler here authorizes through
+//! [`crate::authz`] (per-resource `.acl` evaluation, own-ACL-else-nearest-ancestor `acl:default`
+//! resolution, the four modes, the 401-vs-403 split, `WAC-Allow`), and the decision runs BEFORE any
+//! existence probe so a denial never discloses whether the target exists.
+//! `application/sparql-update` PATCH now supports the INSERT/DELETE DATA subset (see [`patch`]).
+//!
+//! M2-next (clearly seamed, not implemented): `acl:agentGroup` membership resolution (recognised but
+//! NEVER matching — fail-closed) and the N-Triples/N-Quads/N3 read formats (see [`content`]).
 
 pub mod conditional;
 pub mod content;

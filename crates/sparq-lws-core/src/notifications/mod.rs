@@ -40,11 +40,13 @@
 //! mechanism for exactly this).
 //!
 //! **Known limitation (documented, not silent):** per-resource WAC authorization of a subscription
-//! (does this WebID have `read` on the topic?) is NOT yet enforced — it is a `// M2-next:` seam gated
-//! on `sparq#992` (the SPARQ access-control design), the same blocker as LDP read/write
-//! authorization. The receive token guarantees only that the connecting party is an authenticated
-//! subscriber of that topic (the minimum bar that closes the bypass); the deeper "is this WebID
-//! allowed to READ this resource?" check lands with `sparq#992`.
+//! (does this WebID have `read` on the topic?) is NOT yet enforced — it is a `// M2-next:` seam. This
+//! is NO LONGER blocked on the SPARQ access-control design: the LDP routes already authorize through
+//! the local [`crate::authz`] engine, so what remains is WIRING that same authorizer into the
+//! notification state (the subscribe/receive handlers hold no store handle today). The receive token
+//! guarantees only that the connecting party is an authenticated subscriber of that topic (the
+//! minimum bar that closes the bypass); the deeper "is this WebID allowed to READ this resource?"
+//! check is the open work.
 
 pub mod activity;
 pub mod ws;
