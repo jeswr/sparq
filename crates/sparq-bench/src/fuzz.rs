@@ -2925,18 +2925,21 @@ ex:n4 ex:val "s2" .
         );
     }
 
-    /// `GROUP_CONCAT` is emitted only in shapes whose result is a function of the query.
-    /// The order of a group's members is left unspecified (§11), so a projected
-    /// multi-member concatenation is not comparable across engines — measured, not
-    /// assumed: on a two-member group the two engines return the two members in opposite
-    /// orders.
+    /// Every `GROUP_CONCAT` a generated query contains is either over a SINGLETON group or
+    /// read through an order-invariant operation. The order of a group's members is left
+    /// unspecified (§11), so a projected multi-member concatenation is not a function of
+    /// the query — it is excluded from the generator rather than compared and hoped for.
     ///
-    /// This pins BOTH halves on a fixture that really does contain a MULTI-MEMBER group
-    /// (`ex:n0` has three outgoing `ex:p` edges — `BINDING_TTL`'s chain gives every
-    /// subject exactly one, which would have made the multi-member half vacuous): the
-    /// generator's own shapes agree over that group, and the shape it deliberately does
-    /// NOT emit really would disagree, so the restriction is load-bearing rather than
-    /// superstition.
+    /// The positive half runs on a fixture that really does contain a MULTI-MEMBER group
+    /// (`ex:n0` has three outgoing `ex:p` edges — `BINDING_TTL`'s chain gives every subject
+    /// exactly one, which would have made the `STRLEN` case vacuous), so "the generator's
+    /// shapes agree across engines" is asserted where order could have bitten.
+    ///
+    /// The exclusion itself is pinned STRUCTURALLY, on [`group_concat_is_order_invariant`]:
+    /// the excluded raw multi-member projection must classify as unsafe, and no category
+    /// may emit a query that does. Asserting instead that the excluded shape actually
+    /// DISAGREES across the two engines would be asserting a nondeterminism — both engines
+    /// may legitimately pick the same unspecified order — so it is not asserted here.
     #[test]
     fn group_concat_is_generated_only_in_order_independent_shapes() {
         const TTL: &str = r#"@prefix ex: <http://ex/> .
@@ -2970,31 +2973,39 @@ ex:n0 ex:age 10 . ex:n1 ex:age 20 . ex:n2 ex:age 30 .
                 "an order-independent GROUP_CONCAT shape must compare equal\n{q}"
             );
         }
-        // The EXCLUDED shape: the same multi-member group, projected raw.
+        // The classifier is red on the shape the generator deliberately does NOT emit:
+        // the same multi-member group, projected raw.
         let multi = "PREFIX ex: <http://ex/>\n\
              SELECT ?s (GROUP_CONCAT(STR(?o)) AS ?g) WHERE { ?s ex:p ?o } GROUP BY ?s";
         assert!(
-            compare_select(&g, &store, multi).is_err(),
-            "the excluded multi-member GROUP_CONCAT projection is supposed to be \
-             order-dependent across engines — if it now agrees, revisit the exclusion \
-             documented on `gen_query` rather than leaving the note stale"
+            !group_concat_is_order_invariant(multi),
+            "a raw multi-member GROUP_CONCAT projection must classify as order-dependent"
         );
-        // …and no category may emit it: every generated GROUP_CONCAT is either grouped by
-        // the singleton `ex:age` key or wrapped in `STRLEN`.
+        assert!(
+            group_concat_is_order_invariant(singleton) && group_concat_is_order_invariant(strlen),
+            "the two emitted shapes must classify as order-invariant"
+        );
+        // …and no category may emit an unsafe one.
         for cat in CATEGORIES {
             for seed in 0..300u64 {
                 let (_, q) = case(seed, cat);
-                if let Some(i) = q.find("GROUP_CONCAT") {
-                    let wrapped_in_strlen = q[..i].ends_with("STRLEN(");
-                    let singleton_group = q.contains("WHERE { ?s ex:age ?a } GROUP BY ?s");
-                    assert!(
-                        wrapped_in_strlen || singleton_group,
-                        "category {cat} seed {seed}: a GROUP_CONCAT that is neither \
-                         order-independent nor over a singleton group\n{q}"
-                    );
-                }
+                assert!(
+                    group_concat_is_order_invariant(&q),
+                    "category {cat} seed {seed}: a GROUP_CONCAT that is neither \
+                     order-independent nor over a singleton group\n{q}"
+                );
             }
         }
+    }
+
+    /// True when EVERY `GROUP_CONCAT` in `q` (a query may carry one in `SELECT` and another
+    /// in `HAVING`) sits in a shape whose value is a function of the query rather than of
+    /// the members' unspecified order: read through `STRLEN`, or over the singleton `ex:age`
+    /// group. Vacuously true for a query with no `GROUP_CONCAT` at all.
+    fn group_concat_is_order_invariant(q: &str) -> bool {
+        let singleton_group = q.contains("WHERE { ?s ex:age ?a } GROUP BY ?s");
+        q.match_indices("GROUP_CONCAT")
+            .all(|(i, _)| singleton_group || q[..i].ends_with("STRLEN("))
     }
 
     // ── the VALUE-LEVEL differential (sq-qcnn.5: `compare_select` / `compare_ask` /
