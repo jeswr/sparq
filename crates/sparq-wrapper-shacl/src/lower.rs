@@ -309,10 +309,8 @@ impl<'m> Lowerer<'m> {
                             pred,
                         )?);
                     }
-                    Component::NodeKind(kinds) => {
-                        if kinds.len() == 1 && kinds[0] == SH_IRI {
-                            iri_only = true;
-                        }
+                    Component::NodeKind(kinds) if kinds.len() == 1 && kinds[0] == SH_IRI => {
+                        iri_only = true;
                     }
                     // Every other component constrains VALUES, not the Rust type;
                     // `sparq-shacl` validation remains the place those are enforced.
