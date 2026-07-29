@@ -532,6 +532,16 @@ def apply_remeasurement(report: dict, remeasure_fn, k: int = 1) -> None:
             continue
         med, larger_better = r[2], r[6]
         best = best_reading(vals, larger_better)
+        # ZERO-BOUNDARY ROWS ARE NEVER RELIEVED HERE. A pessimal zero crossing DOES reach the
+        # hard set — `evaluate` admits one whose resolution-aware lower bound proves it passes
+        # HARD_RATIO, and such a row has median 0 (e.g. x_s: 0 -> 0.010 at 19.0x). Re-deriving a
+        # ratio from it would divide by zero, and inventing a second zero-boundary semantics here
+        # would be a place for the two to disagree. The zero boundary already has dedicated,
+        # tested handling in `evaluate` (improved_to_zero / zero_crossing / ratio_lower_bound), so
+        # this pass declines the row and leaves that decision standing: fail-closed, one owner.
+        if med <= 0 or best <= 0:
+            still_hard.append(r)
+            continue
         new_ratio = (med / best) if larger_better else (best / med)
         if new_ratio >= HARD_RATIO:
             still_hard.append(r)
@@ -1917,6 +1927,20 @@ def self_test() -> int:
           and rep["remeasure_readings"]["q_us"][:1] == [2400.0],
           "a re-measurement that OMITS the tripping metric relieves nothing — the reading pool "
           "is seeded with the ORIGINAL measurement (fail-closed without a branch of its own)")
+
+    # 19g2. ZERO-BOUNDARY rows reach the hard set (a pessimal zero crossing whose resolution-aware
+    #      lower bound proves it passes HARD_RATIO), and re-deriving a ratio from a ZERO median
+    #      would divide by zero. The pass must DECLINE them, leaving `evaluate`'s dedicated
+    #      zero-boundary decision standing — not crash, and not invent a second semantics.
+    #      MUTATION: drop the `med <= 0 or best <= 0` guard => THIS goes red (ZeroDivisionError).
+    code, rep = evaluate([{"name": "x_s", "value": 0.010, "unit": "s"}], {"x_s": [0.0] * 5})
+    check(code == 1 and len(rep["hard"]) == 1 and rep["hard"][0][2] == 0.0,
+          "19g2 precondition: a pessimal zero crossing above resolution IS in the hard set, "
+          "with a ZERO median")
+    apply_remeasurement(rep, lambda: [{"name": "x_s", "value": 0.010, "unit": "s"}], 1)
+    check(gate_exit_code(rep) == 1 and len(rep["hard"]) == 1 and not rep["remeasure_relieved"],
+          "a ZERO-median row is declined by the confirmation pass (fail-closed, no divide by "
+          "zero, and evaluate's zero-boundary decision stands)")
 
     # 19h. A DETERMINISTIC row in the hard set is never re-measured — re-running cannot change a
     #      byte count, and it fails the run alone.
