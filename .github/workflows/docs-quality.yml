@@ -81,11 +81,35 @@
 #                       not-yet-clean dirs (bench/, .claude/) so any backlog stays visible.
 #     • vale          — prose hygiene: weasel words, wordy phrases, adjective puffery.
 #     • external-links — lychee online: dead http(s) links (network-flaky → advisory).
+#     • docs-duplication — jscpd copy/paste detection over the doc surface, configured by the
+#                       repo-root `.jscpd.json`. ADVISORY, and the reason is a MEASURED tool
+#                       limitation, not a backlog — see the step body for the evidence: jscpd's
+#                       `markdown` block class reports clones between text that is not
+#                       duplicated at all, so its headline percentage is not trustworthy on a
+#                       prose corpus. The per-fence sub-format classes (the ```rust / ```bash /
+#                       ```sparql blocks inside those docs) ARE exact, and are the half worth
+#                       gating on. The step therefore splits the two classes in its summary
+#                       rather than reporting one blended number.
+#                       `.jscpd.json` notes (it is JSON, so it cannot carry its own comments —
+#                       jscpd warns on an unknown key, including a `_doc` one):
+#                         · `path` is the scope: README.md + skills/ + docs/ + research/ +
+#                           book/src. The mdBook RENDERED output is excluded STRUCTURALLY by
+#                           naming the sources (`book/src`) rather than `book` — an ignore glob
+#                           for `book/book/**` was measured to be unreachable dead config and
+#                           was dropped. `**/target/**` IS reachable and is verified to bite
+#                           (root `.gitignore` only anchors `/target`, so a nested cargo target
+#                           dir under research/ does show up without it).
+#                         · `format: ["markdown"]` selects FILES by extension; the per-fence
+#                           sub-format blocks inside those files are analysed regardless, which
+#                           is what makes the exact half of this lane possible.
+#                         · it sits at the tool's conventional discovery path, so a local bare
+#                           `npx jscpd` reproduces the lane with no flags.
 #
 # WHY this split: markdownlint/typos/internal-links/no-perf-numbers/readme-template are
 # deterministic and now pass on the scoped doc surface, so they gate. Vale/external-links
-# carry a network dependency or a pre-existing prose-style backlog, so they advise until
-# their scope is clean, then flip to HARD.
+# carry a network dependency or a pre-existing prose-style backlog, and docs-duplication
+# carries a per-class precision problem, so they advise until their scope is clean, then
+# flip to HARD.
 #
 # ci-summary aggregation: it polls every check-run on the head commit and fails iff one
 # concluded failure. So every ADVISORY job must CONCLUDE SUCCESS or it would block the
@@ -1098,6 +1122,97 @@ jobs:
             grep -oE ' (MD[0-9]+/[a-z0-9-]+)' md-advisory.txt | sort | uniq -c | sort -rn || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # ---- docs-duplication (jscpd copy/paste detection over the doc surface) ----
+      # [OPUS-5] sq-lrju — a STEP, not a job: sq-6vshe.20 consolidated this workflow to two
+      # runners precisely to stop sub-minute lints each claiming their own, and the registry
+      # entry for `docs-quality quick-advisory (advisory)` already owns per-step promotion.
+      #
+      # WHY ADVISORY. Not a backlog — a measured precision problem in the tool, recorded here
+      # because the next person will otherwise read the headline percentage as a defect count:
+      #   * jscpd's per-fence sub-format classes are EXACT. Verified on a fixture: two ```rust
+      #     blocks with identical bodies in two .md files report one `rust` clone with the
+      #     matching span, and the same pair wrapped in `<!-- jscpd:ignore-start -->` /
+      #     `<!-- jscpd:ignore-end -->` reports none.
+      #   * the `markdown` block class is NOT exact. Verified by hand on this repo's
+      #     research/ corpus with `--reporters console-full`: reported `markdown` pairs
+      #     include ones whose own printed snippets are entirely different text (a prose
+      #     paragraph plus a ```text fence, reported as a clone of unrelated prose plus a
+      #     ```js fence — both spans inside research/autonomous-scheduler-design.md). The
+      #     mechanism is NOT established here; what IS measured is that the whole class
+      #     disappears under `--mode weak`, which the tool documents as dropping comment
+      #     tokens, and that `mild` behaves like `strict`. So there is no middle setting:
+      #     either the class is reported and cannot be trusted, or nothing is reported.
+      # So the summary reports the two classes SEPARATELY instead of one blended number, and
+      # the lane may only be promoted on the exact half. `threshold: 0` in the config is real
+      # (the threshold reporter exits 1) and is swallowed here by `|| true` while advisory.
+      #
+      # jscpd 5.x is the Rust engine: the npm package is a launcher plus per-platform
+      # optionalDependencies carrying a prebuilt binary — same shape as the prebuilt tools
+      # taiki-e/install-action fetches for the gating steps above. Version pinned exactly.
+      - name: docs-duplication (jscpd; copy/paste clones over README + skills + docs + research + book)
+        run: |
+          set -uo pipefail
+          # Console reporter goes straight to the job log (where the full clone list lives —
+          # the summary caps its own list); the json reporter writes the report the summary is
+          # computed from, at target/jscpd/jscpd-report.json (under the gitignored /target), whose
+          # directory jscpd creates itself. `|| true` swallows the threshold reporter exit 1.
+          npx --yes jscpd@5.0.12 --config .jscpd.json --no-colors || true
+          node -e '
+            const fs = require("fs");
+            const P = "target/jscpd/jscpd-report.json";
+            let r = null;
+            try { r = JSON.parse(fs.readFileSync(P, "utf8")); } catch (e) { r = null; }
+            if (!r) {
+              console.log("### docs-duplication (jscpd): NO REPORT PRODUCED");
+              console.log("");
+              console.log("jscpd wrote no `" + P + "`, so nothing was measured. This is a BROKEN");
+              console.log("lane, not a clean one — the reason is in the step log.");
+              process.exit(0);
+            }
+            const total = (r.statistics || {}).total || {};
+            const dups = r.duplicates || [];
+            const prose = dups.filter(function (d) { return d.format === "markdown"; });
+            const code = dups.filter(function (d) { return d.format !== "markdown"; });
+            console.log("### docs-duplication (jscpd): " + code.length + " fenced-code clone(s), " +
+                        prose.length + " prose-class finding(s)");
+            console.log("");
+            if (!total.sources) {
+              console.log("**Nothing was analysed** — 0 eligible blocks. The `path` scope in");
+              console.log("`.jscpd.json` matched no markdown, so these zeros mean the lane is");
+              console.log("vacuous, NOT that the docs are clone-free.");
+              console.log("");
+            }
+            console.log("| class | findings | precision |");
+            console.log("|---|---|---|");
+            console.log("| fenced code blocks (`rust` / `bash` / `sparql` / …) | " + code.length +
+                        " | exact — real copy/paste, fix these |");
+            console.log("| `markdown` prose blocks | " + prose.length +
+                        " | LOW — matches non-identical prose (see the step comment) |");
+            console.log("");
+            if (code.length) {
+              console.log("Fenced-code clones:");
+              console.log("");
+              code.slice(0, 25).forEach(function (d) {
+                console.log("- `" + d.format + "`, " + d.lines + " lines — `" + d.firstFile.name + ":" +
+                            d.firstFile.start + "` ↔ `" + d.secondFile.name + ":" + d.secondFile.start + "`");
+              });
+              if (code.length > 25) { console.log("- … " + (code.length - 25) + " more, full list in the step log"); }
+              console.log("");
+            }
+            console.log("Analysed " + (total.sources || 0) + " eligible block(s) — a block below");
+            console.log("`minTokens` is not analysed at all, so that count moves when the knob does.");
+            console.log("");
+            console.log("Intentional repeats are allowlisted IN THE SOURCE with");
+            console.log("`<!-- jscpd:ignore-start -->` / `<!-- jscpd:ignore-end -->` (verified working for");
+            console.log("markdown). Reserve them for genuinely intentional duplication: wrapping a");
+            console.log("prose-class finding hides a tool defect rather than a repeat.");
+            console.log("");
+            console.log("Reproduce locally: `npx jscpd@5.0.12` — the repo-root `.jscpd.json` is picked");
+            console.log("up automatically. Add `--reporters console-full` to print the matched snippets");
+            console.log("and judge a finding for yourself.");
+          ' >> "$GITHUB_STEP_SUMMARY" \
+            || echo "⚠️ docs-duplication: summary generation failed — see the step log." >> "$GITHUB_STEP_SUMMARY"
 
       # ---- former job: vale (prose, advisory) ----
       - name: vale (prose, advisory) — vendored styles, no network

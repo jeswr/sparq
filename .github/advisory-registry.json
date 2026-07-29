@@ -68,7 +68,7 @@
    "workflow": "docs-quality.yml",
    "job_id": "quick-advisory",
    "owner_bead": "sq-5fd1",
-   "promotion_criteria": "per-step (sq-6vshe.20 consolidation of the former markdownlint-advisory / vale / external-links jobs): a step promotes by MOVING into the quick-gates job — markdownlint-advisory once the whole-repo backlog (bench/, .claude/) is fully clean; vale once the prose-style backlog on README/skills/docs/crates is clean and the vale ruleset has settled; external-links never promotes (network-flaky by nature — dead external links must never block a merge)",
+   "promotion_criteria": "per-step (sq-6vshe.20 consolidation of the former markdownlint-advisory / vale / external-links jobs): a step promotes by MOVING into the quick-gates job — markdownlint-advisory once the whole-repo backlog (bench/, .claude/) is fully clean; vale once the prose-style backlog on README/skills/docs/crates is clean and the vale ruleset has settled; external-links never promotes (network-flaky by nature — dead external links must never block a merge); docs-duplication (sq-lrju — jscpd over README/skills/docs/research/book per the repo-root .jscpd.json) promotes ONLY on its exact half: a gating step must assert zero FENCED-CODE clones (the per-fence sub-format classes, verified exact and currently at zero) and must NOT gate the `markdown` prose class, whose findings were verified by hand to include pairs whose own --reporters console-full snippets are entirely different text, so gating the blended threshold-0 verdict would red every merge on a tool precision defect",
    "registered": "2026-07-11"
   },
   "mutation ratchet (cargo-mutants, advisory)": {
