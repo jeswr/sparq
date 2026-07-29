@@ -44,6 +44,14 @@ oxrdf = { workspace = true }
 # find (see that crate's own header). `publish = false` on both sides; nothing shipped links it.
 sparq-difftest = { path = "../sparq-difftest" }
 libc = "0.2"
+# [SONNET-4.6] (sq-qcnn.8) Private, owner-only (`0o700`) scratch directories with random names for
+# the subprocess oracle's four per-evaluation temp files. Load-bearing for SAFETY, not
+# convenience: paths derived from the public process id in the SHARED system temp directory are
+# predictable, and `fs::write` / `File::create` follow an existing symlink, so another local user
+# could aim one at a file the fuzz runner may write. Already in this workspace's lock file (a
+# dev-dependency of sparq-hdt and sparq-crdt) and carries google + mozilla `cargo-vet` audits, so
+# this adds nothing new to the tree; `publish = false` harness crate, nothing shipped links it.
+tempfile = "3"
 serde_json = "1"
 
 [[bin]]

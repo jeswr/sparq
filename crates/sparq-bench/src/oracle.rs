@@ -38,14 +38,15 @@
 //! performs exactly the comparisons it performed before, spawns no process, and needs no JVM and
 //! no Python. (It does print one extra banner line naming the second oracle as disabled, so a log
 //! always says which oracles a run actually consulted.) The opt-in is an environment variable
-//! rather than a cargo feature *because a cargo feature would
-//! buy nothing here*: the adapter is built on `std::process` alone and pulls in no dependency, so
-//! there is no lean-build surface for a feature flag to protect. What actually needs gating is the
+//! rather than a cargo feature *because a cargo feature would buy nothing here*: the adapter is
+//! built on `std::process` plus `tempfile` (for the owner-only scratch directory — see the private
+//! `Scratch` type), `tempfile` was already in this workspace's lock file, and this is a
+//! `publish = false` harness crate nothing shipped links — so there is no lean-build surface for a
+//! feature flag to protect. What actually needs gating is the
 //! **runtime toolchain** (a JVM, a jar, a Python interpreter), which a compile-time feature cannot
 //! express. This echoes `sparq-difftest`'s own reasoning for carrying no feature flag: where there
 //! is no lean-build surface to protect, a flag adds a build configuration and buys nothing.
 
-use std::cell::Cell;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -56,6 +57,7 @@ use std::time::{Duration, Instant};
 use oxigraph::store::Store;
 use sparq_difftest::json::Solution;
 use sparq_difftest::{parse_results_json, QueryResults, Term};
+use tempfile::TempDir;
 
 /// The command line for the second oracle: program plus any fixed leading arguments, separated by
 /// whitespace. **Unset or empty means no second oracle** (the default). The adapter appends two
@@ -289,9 +291,6 @@ pub struct SubprocessOracle {
     program: String,
     args: Vec<String>,
     timeout: Duration,
-    /// Serial number for temp-file names. A counter (not a clock or RNG) keeps the fuzzer's
-    /// seed-only reproducibility intact — nothing here varies run to run.
-    seq: Cell<u64>,
 }
 
 impl SubprocessOracle {
@@ -307,7 +306,6 @@ impl SubprocessOracle {
             program: program.into(),
             args,
             timeout,
-            seq: Cell::new(0),
         }
     }
 
@@ -421,9 +419,28 @@ enum Outcome {
     TimedOut,
 }
 
-/// The four temp files one evaluation needs, deleted on drop so a long fuzz shard does not fill
-/// the temp directory even when a case fails early.
+/// The four temp files one evaluation needs, inside a **private per-evaluation directory** that is
+/// removed with its contents on drop, so a long fuzz shard does not fill the temp directory even
+/// when a case fails early.
+///
+/// The *directory* — not the file names — is what makes this safe. Naming the four files from the
+/// process id and a counter directly in the shared system temp directory made every path
+/// **predictable**, and `fs::write` / [`fs::File::create`] follow an existing symlink: another
+/// local user could pre-create such a path as a link to any file the fuzz runner may write and
+/// have the runner truncate it, with the adapter's own clean-up then removing only the link.
+///
+/// [`TempDir`] instead puts all four files inside a directory of its own. Be precise about which
+/// property does the work: the random name raises the bar, but it is the **`0o700` mode** that
+/// forecloses the attack — no other user may create an entry inside, so there is no symlink for
+/// the adapter to follow even if the name were guessed. That mode is requested explicitly, because
+/// `tempfile` otherwise creates the directory `0o777 & !umask`, which on a typical box is `0o755`:
+/// unplantable already, but world-*readable*, which would leak the generated data and query.
+///
+/// This does not weaken the fuzzer's seed-only reproducibility: no scratch path is ever read back
+/// into a result, so the directory's random name is not observable in any comparison.
 struct Scratch {
+    /// Held purely for its `Drop`, which removes the directory and everything below it.
+    _dir: TempDir,
     data: PathBuf,
     query: PathBuf,
     out: PathBuf,
@@ -431,23 +448,23 @@ struct Scratch {
 }
 
 impl Scratch {
-    fn new(seq: u64) -> Self {
-        let dir = std::env::temp_dir();
-        let stem = format!("sparq-oracle2-{}-{}", std::process::id(), seq);
-        Scratch {
-            data: dir.join(format!("{}.ttl", stem)),
-            query: dir.join(format!("{}.rq", stem)),
-            out: dir.join(format!("{}.out", stem)),
-            err: dir.join(format!("{}.err", stem)),
+    fn new() -> io::Result<Self> {
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("sparq-oracle2-");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            builder.permissions(fs::Permissions::from_mode(0o700));
         }
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        for p in [&self.data, &self.query, &self.out, &self.err] {
-            let _ = fs::remove_file(p);
-        }
+        let dir = builder.tempdir()?;
+        let base = dir.path();
+        Ok(Scratch {
+            data: base.join("data.ttl"),
+            query: base.join("query.rq"),
+            out: base.join("stdout"),
+            err: base.join("stderr"),
+            _dir: dir,
+        })
     }
 }
 
@@ -457,9 +474,8 @@ impl Oracle for SubprocessOracle {
     }
 
     fn eval(&self, data: &str, query: &str) -> Result<OracleResult, OracleError> {
-        let seq = self.seq.get();
-        self.seq.set(seq.wrapping_add(1));
-        let scratch = Scratch::new(seq);
+        let scratch = Scratch::new()
+            .map_err(|e| OracleError::Backend(format!("oracle scratch directory: {}", e)))?;
 
         fs::write(&scratch.data, data)
             .and_then(|()| fs::write(&scratch.query, query))
@@ -787,6 +803,93 @@ print('{"head":{"vars":["s"]},"results":{"bindings":[{"s":{"type":"uri","value":
             "expected a timeout, got {:?}",
             err
         );
+    }
+
+    #[test]
+    fn scratch_files_live_in_a_private_owner_only_directory() {
+        let a = Scratch::new().expect("scratch");
+        let b = Scratch::new().expect("scratch");
+        let dir_a = a.data.parent().expect("scratch parent").to_path_buf();
+        let dir_b = b.data.parent().expect("scratch parent").to_path_buf();
+
+        assert_ne!(dir_a, dir_b, "two evaluations must not share a directory");
+        assert_ne!(
+            dir_a,
+            std::env::temp_dir(),
+            "the scratch files must NOT sit directly in the shared system temp directory"
+        );
+        for p in [&a.query, &a.out, &a.err] {
+            assert_eq!(
+                p.parent(),
+                Some(dir_a.as_path()),
+                "all four scratch files belong to the one private directory"
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&dir_a).expect("stat").permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o700,
+                "the scratch directory must be owner-only, got {:o}",
+                mode
+            );
+        }
+
+        drop(a);
+        assert!(
+            !dir_a.exists(),
+            "the scratch directory and its contents must be removed on drop"
+        );
+    }
+
+    /// The symlink guard. Plant, at every path the superseded process-id + counter naming scheme
+    /// could have produced for this process, a symlink aimed at a file the fuzz runner may write.
+    /// A full evaluation must leave that file byte-identical. Restore predictable naming in
+    /// [`Scratch::new`] and this goes red: the first `fs::write` follows the link and truncates the
+    /// victim, and the adapter's clean-up then removes only the link.
+    #[cfg(unix)]
+    #[test]
+    fn evaluation_does_not_follow_a_symlink_planted_at_a_predictable_path() {
+        let tmp = std::env::temp_dir();
+        let victim = tmp.join(format!("sparq-oracle-victim-{}.txt", std::process::id()));
+        fs::write(&victim, "PRECIOUS").expect("victim");
+
+        let mut planted: Vec<PathBuf> = Vec::new();
+        for seq in 0..4u64 {
+            for ext in ["ttl", "rq", "out", "err"] {
+                planted.push(tmp.join(format!(
+                    "sparq-oracle2-{}-{}.{}",
+                    std::process::id(),
+                    seq,
+                    ext
+                )));
+            }
+        }
+        for p in &planted {
+            let _ = fs::remove_file(p);
+            std::os::unix::fs::symlink(&victim, p).expect("plant symlink");
+        }
+
+        let (_stub, oracle) = stub("print('{\"head\":{},\"boolean\":true}')\n");
+        let got = oracle.eval(GRAPH, "ASK { ?s ?p ?o }");
+        let survived = fs::read_to_string(&victim);
+
+        for p in &planted {
+            let _ = fs::remove_file(p);
+        }
+        let _ = fs::remove_file(&victim);
+
+        assert_eq!(
+            survived.expect("the victim file must still be readable"),
+            "PRECIOUS",
+            "a symlink at a predictable scratch path must not be followed"
+        );
+        match got {
+            Ok(OracleResult::Boolean(true)) => {}
+            other => panic!("and the evaluation itself must still work, got {:?}", other),
+        }
     }
 
     #[test]
