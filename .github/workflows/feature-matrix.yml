@@ -82,8 +82,16 @@
 #       and the fragment carries no reviewed `tier-reason:` override. This is the RATCHET:
 #       feature-gating a test under a demoted feature reds the NEXT PR until the leg is
 #       promoted back to `tier: test`.
-#   (2) a SENSITIVE feature appears in no `test: true` leg — the sq-vya1 guard itself,
-#       mechanized. The silent gap now fails the gate instead of awaiting a reviewer.
+#   (2) a SENSITIVE (crate, feature) appears in no `test: true` leg FOR THAT CRATE — the
+#       sq-vya1 guard itself, mechanized. The silent gap now fails the gate instead of
+#       awaiting a reviewer. BOTH invariants key on the (crate, feature) PAIR, never the
+#       bare feature name: cargo feature names are crate-LOCAL and 15 are shared across
+#       crates today (`arrow`, `service`, `templates`, …), so a `test: true` leg for `F`
+#       in crate A never stands in for a sensitive `F` in crate B. The ONLY exit from (2)
+#       is a written `test-reason:` on the leg, for coverage that genuinely cannot be a
+#       `cargo test` leg — today exactly one: sparq-py's `arrow`, reachable only through
+#       the pymodule (`[lib] test = false`), whose executor is the gating maturin `arrow`
+#       pytest job in python.yml. Prefer adding the leg to writing a reason.
 # The detector is FAIL-CLOSED: any parse/IO error classifies the leg SENSITIVE (keep the
 # full leg), never a silent demotion. Options (a)/(b) above are still exactly what you DO —
 # what changed is that skipping them is now caught mechanically.

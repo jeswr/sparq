@@ -425,6 +425,16 @@ Done, and deliberately WITHOUT restating the rules in two places:
   step in the gating `setup` job, spell out enforcement invariants (1) and (2), the
   fail-closed detector, and the `tier: test` (default) vs `tier: check`
   (PR clippy-only → full build+test on push-to-main) split.
+- **§4's invariants key on the `(crate, feature)` PAIR, not the bare feature name** —
+  a review finding on the graduation PR. Cargo feature names are crate-LOCAL, and 15 are
+  currently shared across crates (`arrow`, `service`, `templates`, …), so the first cut's
+  bare-name keying let a `test: true` leg for `F` in crate A silently satisfy a sensitive
+  `F` in crate B — the exact silent gap the guard exists to catch. Pair-keying exposed one
+  live instance (`sparq-py`/`arrow`, masked by `sparq-arrow`/`arrow`), so invariant (2)
+  gained a narrow escape: a written `test-reason:` on the leg, for coverage that genuinely
+  cannot be a `cargo test` leg. Regression cover:
+  `scripts/tests/test_feature_matrix_tiers.py::TestCrossCrateFeatureNameCollision` (two
+  crates, one shared feature name, only the unrelated crate `test: true`).
 - **Measured before/after counts:** already recorded above as the dated §9.1 observation
   — **0 → 0 check-tier legs**. Bead 3's per-test audit cleared nothing, which §8
   anticipated as a legitimate outcome, so the leg count is unchanged and the §9 "floor"
