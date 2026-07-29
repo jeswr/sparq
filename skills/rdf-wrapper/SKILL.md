@@ -1,6 +1,6 @@
 ---
 name: rdf-wrapper
-description: "Traverse sparq RDF graphs as native Rust objects with the opt-in sparq-wrapper crate: bind a focus Term to an owned or borrowed Store, follow outgoing/incoming NamedNode predicates with iterators, unwrap values, convert typed literals to str/i64/bool, mutate owned stores, and optionally use the unlanded distinct-result, typed-cardinality, literal-codec, typed-focus, and effective-change observation proposals. Use when Rust code should work with focus objects instead of raw triples or dictionary IDs; SHACL-to-Rust code generation is a later surface."
+description: "Traverse sparq RDF graphs as native Rust objects with the opt-in sparq-wrapper crate: bind a focus Term to an owned or borrowed Store, follow outgoing/incoming NamedNode predicates with iterators, unwrap values, convert typed literals to str/i64/bool, mutate owned stores, and optionally use the unlanded distinct-result, typed-cardinality, literal-codec, typed-focus, and effective-change observation proposals. Use when Rust code should work with focus objects instead of raw triples or dictionary IDs, or when SHACL shapes should be generated into Rust structs with sparq-wrapper-shacl."
 ---
 
 # Use sparq-wrapper
@@ -367,5 +367,30 @@ Only outgoing predicates in the default graph are followed, matching `Node::out`
 A focus absent from the graph projects to a node object with no predicates, and
 a literal focus projects to its value object, so the call is total for any term.
 
-SHACL-to-Rust struct generation is not part of M1. Reuse `sparq-shacl`'s
-`ShapesModel` for that work; do not invent a second SHACL parser.
+## Generate Rust structs from SHACL shapes
+
+`sparq-wrapper-shacl` (internal, opt-in `oo-models` feature) turns a shapes graph
+into Rust. It reuses `sparq-shacl`'s `ShapesModel` — do not invent a second SHACL
+parser — and runs in two deterministic stages, `lower` (shapes to a sorted
+`ModelSchema` IR) then `emit` (IR to source), so the same shapes graph always
+produces byte-identical output.
+
+| shapes graph | generated Rust |
+| --- | --- |
+| `sh:maxCount 1` with `sh:minCount 0`/absent | `Option<T>` |
+| `sh:minCount >= 1` with `sh:maxCount 1` | `T` |
+| every other cardinality | `Vec<T>`, surviving bounds checked at load |
+| `sh:datatype` | a checked scalar (`String`/`i64`/`f64`/`bool`) |
+| `sh:class` | a typed reference newtype, checked via `rdf:type`/`rdfs:subClassOf*` |
+| `sh:node` | a nested generated struct |
+| `sh:nodeKind sh:IRI` (alone) | a bare IRI `String` |
+| `sh:closed true` | a predicate whitelist the loader rejects extras against |
+
+A struct is generated for each named node shape that has `sh:property` children,
+plus the node shapes those reach through `sh:node`; constraints outside the table
+(`sh:pattern`, `sh:in`, …) do not shape the Rust type and stay with `sparq-shacl`
+validation. The emitted file is std-only — implement its two-method `Source`
+trait over your store to drive the loaders. A shapes graph that cannot be
+modelled faithfully (ill-formed, `sh:minCount` above `sh:maxCount`, a
+non-predicate `sh:path`, `sh:closed sh:ByTypes`) is a typed `SchemaError`, never
+a silently dropped constraint.

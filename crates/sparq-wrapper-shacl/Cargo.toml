@@ -5,9 +5,24 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish = false
-description = "Reserved SHACL integration seam for sparq-wrapper"
+description = "SHACL integration seam for sparq-wrapper: SHACL shapes to Rust object models"
 
 [features]
 default = []
+# [FABLE-5] sq-1rg2q.12: SHACL shapes -> Rust object-model generation. OPT-IN so the
+# default build of this seam crate stays an empty, dependency-free stub (as the sibling
+# `sparq-wrapper-gen` / `sparq-wrapper-integration` seams still are) and nothing in the
+# default workspace graph pulls `sparq-shacl` in through the wrapper.
+oo-models = ["dep:sparq-shacl", "dep:oxrdf"]
 
 [dependencies]
+# The SHACL parser is REUSED, never re-implemented: `ShapesModel`/`Shape`/`Component`/
+# `Path`/`Target` come from `sparq-shacl` (see skills/rdf-wrapper/SKILL.md).
+sparq-shacl = { path = "../sparq-shacl", optional = true }
+# `Term` matching for shape nodes, `sh:class` objects and `sh:ignoredProperties`.
+oxrdf = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Turtle -> `Graph` in the lowering/emission acceptance tests; `ShapesModel::parse`
+# takes a `&sparq_core::Graph`.
+sparq-core = { path = "../sparq-core", default-features = false }
