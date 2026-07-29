@@ -412,7 +412,7 @@ fn filtered_traversal_returns_only_accepted_ids_and_stays_ranked() {
 
     // Accept the (broad) even-id half — broad enough that traversal, not a scan, is the sensible
     // strategy, which is exactly the regime this entry point serves.
-    let accept = |id: u32| id % 2 == 0;
+    let accept = |id: u32| id.is_multiple_of(2);
     let mut qseed = 0x5151u64;
     let q = rand_vec(&mut qseed, DIM);
     let got = idx.nearest_filtered_by(&q, K, 400, accept);
