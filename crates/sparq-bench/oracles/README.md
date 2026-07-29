@@ -47,10 +47,16 @@ SPARQ_FUZZ_ORACLE2_CMD="python3 rdflib/sparql_oracle.py" \
   cargo run -p sparq-bench -- fuzz 0 500 all
 ```
 
-The run then prints an extra `oracle2[<name>] agree=… disagree=… skipped=…` line, plus the first
-oracle-vs-oracle divergence for triage. That line is deliberately **separate** from the `fuzz[…]`
-summary, which `scripts/ci-file-differential-failure.py` scrapes and which must stay
+The run then prints an extra `oracle2[<name>] agree=… disagree=… skipped=… broken=…` line, plus the
+first oracle-vs-oracle divergence for triage. That line is deliberately **separate** from the
+`fuzz[…]` summary, which `scripts/ci-file-differential-failure.py` scrapes and which must stay
 byte-compatible.
+
+`skipped` and `broken` are different buckets on purpose. `skipped` is "not comparable" (the oracle
+DECLINED, or the shape is not differential-testable); `broken` is "the oracle did not work" — a
+spawn failure, timeout, crash, garbage stdout, or a rejection of the input graph. A non-zero
+`broken` **fails the run** (with the first fault printed), because those cases compared nothing: a
+dead or misconfigured oracle must not read as an innocuous skip.
 
 ## Wire protocol
 

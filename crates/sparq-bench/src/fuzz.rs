@@ -1129,18 +1129,41 @@ fn compare_solutions(sparq: &Solutions, oxi: &Solutions) -> Result<(), String> {
     ))
 }
 
-/// The outcome of one oracle-vs-oracle comparison. `Skipped` is a COUNTED bucket, printed with
-/// the others: an oracle pair that silently stopped comparing anything must show up as a number.
+/// The outcome of one oracle-vs-oracle comparison. `Skipped` and `Broken` are COUNTED buckets,
+/// printed with the others: an oracle pair that silently stopped comparing anything must show up
+/// as a number, and an oracle that stopped WORKING must show up as a different number.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum OracleCross {
     /// Both oracles produced the same result under the neutral value-canonical comparison.
     Agree,
     /// The oracles produced different results, with a repro-sized description.
     Disagree(String),
-    /// Not comparable: one oracle declined the query, the shape is not differential-testable
-    /// (`LIMIT`/`OFFSET` without a total order), the two returned different result FORMS, or an
-    /// answer carries blank nodes.
+    /// Not comparable: one oracle DECLINED the query ([`oracle::OracleError::Unsupported`]), the
+    /// shape is not differential-testable (`LIMIT`/`OFFSET` without a total order), the two
+    /// returned different result FORMS, or an answer carries blank nodes.
     Skipped,
+    /// An oracle was not operational: a spawn failure, timeout, crash, garbage stdout
+    /// ([`oracle::OracleError::Backend`]) or a rejection of the input graph
+    /// ([`oracle::OracleError::Data`]). A HARNESS fault, deliberately not the same bucket as
+    /// `Skipped` — "the oracle declined" and "the oracle broke" must not be the same number, or a
+    /// dead second oracle compares zero cases and the run still reads green.
+    Broken(String),
+}
+
+/// Consult one oracle for [`cross_check_oracles`], mapping a failure onto the cross-check buckets.
+///
+/// Only a DECLINE is a skip. A `Data` rejection is itself a finding (both oracles are handed the
+/// *same* serialisation, so one refusing it is a fault of that oracle) and a `Backend` failure
+/// means the oracle is not operational at all; collapsing either into `Skipped` is exactly how a
+/// misconfigured or dead oracle would compare nothing while the run stayed successful.
+fn eval_for_cross(o: &dyn Oracle, data: &str, query: &str) -> Result<OracleResult, OracleCross> {
+    match o.eval(data, query) {
+        Ok(r) => Ok(r),
+        Err(oracle::OracleError::Unsupported(_)) => Err(OracleCross::Skipped),
+        Err(e @ (oracle::OracleError::Data(_) | oracle::OracleError::Backend(_))) => {
+            Err(OracleCross::Broken(format!("{}: {}", o.name(), e)))
+        }
+    }
 }
 
 /// Compare two oracles against each other over the **neutral** result form (`sparq-difftest`),
@@ -1164,14 +1187,17 @@ fn cross_check_oracles(a: &dyn Oracle, b: &dyn Oracle, data: &str, query: &str) 
     if query.contains("LIMIT") || query.contains("OFFSET") {
         return OracleCross::Skipped;
     }
-    // An oracle that could not answer has not answered wrongly. Evaluated in sequence, not as a
-    // pair, so a decline by the cheap in-process oracle (passed as `a`) skips the case without
-    // paying for the expensive one's process spawn.
-    let Ok(ra) = a.eval(data, query) else {
-        return OracleCross::Skipped;
+    // An oracle that could not answer has not answered wrongly — but only a DECLINE is a skip;
+    // a break lands in `Broken` (see `eval_for_cross`). Evaluated in sequence, not as a pair, so
+    // a decline by the cheap in-process oracle (passed as `a`) skips the case without paying for
+    // the expensive one's process spawn.
+    let ra = match eval_for_cross(a, data, query) {
+        Ok(r) => r,
+        Err(cross) => return cross,
     };
-    let Ok(rb) = b.eval(data, query) else {
-        return OracleCross::Skipped;
+    let rb = match eval_for_cross(b, data, query) {
+        Ok(r) => r,
+        Err(cross) => return cross,
     };
     match (&ra, &rb) {
         (OracleResult::Solutions(x), OracleResult::Solutions(y)) => {
@@ -1284,11 +1310,14 @@ pub fn run(seed_start: u64, count: u64, category: &str) {
     // visible number, not an entry in the row-choice skip bucket.
     let mut bindings_triage_bnode = 0u64;
     let mut first_repro: Option<String> = None;
-    // [SONNET-4.6] sq-qcnn.8 — second-oracle buckets. All three are printed; none is silent.
+    // [SONNET-4.6] sq-qcnn.8 — second-oracle buckets. All four are printed; none is silent, and
+    // `o2_broken` (the oracle itself failed) is deliberately NOT folded into `o2_skipped`.
     let mut o2_agree = 0u64;
     let mut o2_disagree = 0u64;
     let mut o2_skipped = 0u64;
+    let mut o2_broken = 0u64;
     let mut first_o2_divergence: Option<String> = None;
+    let mut first_o2_fault: Option<String> = None;
 
     for seed in seed_start..seed_start + count {
         let mut rng = Rng::new(seed);
@@ -1465,12 +1494,21 @@ pub fn run(seed_start: u64, count: u64, category: &str) {
         // sparq has already been compared against Oxigraph above, so the information this adds
         // is precisely the one the single-oracle harness cannot produce: a case where sparq and
         // Oxigraph AGREE and an engine of unrelated lineage does not. That is the shape a bug the
-        // two Rust engines SHARE would take. It is NOT a sparq verdict and is never fatal here —
-        // see `cross_check_oracles`.
+        // two Rust engines SHARE would take. A DISAGREEMENT is NOT a sparq verdict and is never
+        // fatal here — see `cross_check_oracles`. A BROKEN oracle is a different matter: that is
+        // a harness fault and it fails the run at the end.
         if let Some(o2) = &oracle2 {
             match cross_check_oracles(&oxi_oracle, o2, &ttl, &q) {
                 OracleCross::Agree => o2_agree += 1,
                 OracleCross::Skipped => o2_skipped += 1,
+                // The oracle broke rather than declined: counted apart, and fatal at the end of
+                // the run (below) — a non-operational oracle compared nothing and must not pass.
+                OracleCross::Broken(detail) => {
+                    o2_broken += 1;
+                    if first_o2_fault.is_none() {
+                        first_o2_fault = Some(format!("seed={seed}\nquery:\n{q}\n{detail}"));
+                    }
+                }
                 OracleCross::Disagree(detail) => {
                     o2_disagree += 1;
                     if first_o2_divergence.is_none() {
@@ -1538,7 +1576,7 @@ pub fn run(seed_start: u64, count: u64, category: &str) {
     // byte-compatible for consumers that predate this bucket.
     if let Some(o2) = &oracle2 {
         println!(
-            "oracle2[{}] agree={o2_agree} disagree={o2_disagree} skipped={o2_skipped}",
+            "oracle2[{}] agree={o2_agree} disagree={o2_disagree} skipped={o2_skipped} broken={o2_broken}",
             o2.name()
         );
         if let Some(d) = &first_o2_divergence {
@@ -1550,9 +1588,28 @@ pub fn run(seed_start: u64, count: u64, category: &str) {
                 "\nFIRST ORACLE-vs-ORACLE DIVERGENCE (triage — NOT a sparq verdict, NOT a failure):\n{d}"
             );
         }
+        if let Some(f) = &first_o2_fault {
+            // Unlike a divergence, this IS a failure: a spawn error, timeout, crash, garbage
+            // stdout or a rejected input graph means the configured oracle was not operational,
+            // so the cases it was consulted on compared NOTHING. Printed here and exited on
+            // below, after any sparq repro has also been printed.
+            println!(
+                "\nERROR: second oracle {} was NOT OPERATIONAL — {} of {} consulted cases failed \
+                 with a backend/data fault (a harness failure, not a skip):\n{}",
+                o2.name(),
+                o2_broken,
+                o2_agree + o2_disagree + o2_skipped + o2_broken,
+                f
+            );
+        }
     }
     if let Some(r) = first_repro {
         println!("\nFIRST FAILING CASE:\n{r}");
+        std::process::exit(1);
+    }
+    // A broken second oracle fails the run (reported just above). Deliberately after the repro
+    // print so a sparq divergence is never hidden by a harness fault.
+    if o2_broken > 0 {
         std::process::exit(1);
     }
     // NON-VACUITY GUARD (sq-j80vk): a shard that skipped every case as unsupported
@@ -2496,6 +2553,49 @@ ex:n3 ex:age 40 . ex:n3 ex:name "nm3" .
                 O2_GRAPH,
                 "SELECT ?s WHERE { ?s <http://ex/p> ?o }"
             ),
+            OracleCross::Skipped
+        );
+    }
+
+    /// The load-bearing separation: an oracle that BROKE (spawn failure, timeout, crash, garbage
+    /// stdout) or rejected the DATA must never land in the skip bucket — that is precisely how a
+    /// dead second oracle would compare zero cases while the run still reported success.
+    #[test]
+    fn a_broken_oracle_is_never_a_skip() {
+        let oxi = OxigraphOracle::new();
+        let query = "SELECT ?s WHERE { ?s <http://ex/p> ?o }";
+
+        for err in [
+            crate::oracle::OracleError::Backend("spawning java: No such file".into()),
+            crate::oracle::OracleError::Data("turtle parse error at line 2".into()),
+        ] {
+            let broken = StubOracle("stub", Err(err.clone()));
+            match cross_check_oracles(&oxi, &broken, O2_GRAPH, query) {
+                OracleCross::Broken(detail) => {
+                    assert!(detail.contains("stub"), "detail was {detail:?}");
+                    assert!(
+                        detail.contains(&err.to_string()),
+                        "detail {detail:?} must carry the underlying fault {err}"
+                    );
+                }
+                other => panic!("a broken oracle must not be {other:?} (err was {err})"),
+            }
+        }
+
+        // The FIRST oracle breaking is the same fault, and is not masked by the second answering.
+        let broken_first = StubOracle("stub", Err(crate::oracle::OracleError::Backend("x".into())));
+        assert!(matches!(
+            cross_check_oracles(&broken_first, &oxi, O2_GRAPH, query),
+            OracleCross::Broken(_)
+        ));
+
+        // ...but a DECLINE still is a skip: only `Unsupported` may reach that bucket.
+        let declines = StubOracle(
+            "stub",
+            Err(crate::oracle::OracleError::Unsupported("nope".into())),
+        );
+        assert_eq!(
+            cross_check_oracles(&oxi, &declines, O2_GRAPH, query),
             OracleCross::Skipped
         );
     }
