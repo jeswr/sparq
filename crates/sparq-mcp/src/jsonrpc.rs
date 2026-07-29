@@ -13,6 +13,10 @@
 //! cost of an unconditional async runtime, and neither the vendoring-policy nor the
 //! cargo-vet precondition held at the time. That record also lists the triggers that
 //! should reopen the question; an HTTP/SSE transport is the strongest one. [SONNET-4.6]
+//! That trigger fired and was re-assessed 2026-07-29 in
+//! `research/mcp-streamable-http-transport-design.md` (sq-2c0f0, gh #3221): the verdict
+//! held — a Streamable HTTP transport on the axum stack already in the workspace lock adds
+//! no new crate to audit, where `rmcp` would. [OPUS-5]
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
