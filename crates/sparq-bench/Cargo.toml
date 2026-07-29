@@ -49,8 +49,13 @@ libc = "0.2"
 # convenience: paths derived from the public process id in the SHARED system temp directory are
 # predictable, and `fs::write` / `File::create` follow an existing symlink, so another local user
 # could aim one at a file the fuzz runner may write. Already in this workspace's lock file (a
-# dev-dependency of sparq-hdt and sparq-crdt) and carries google + mozilla `cargo-vet` audits, so
-# this adds nothing new to the tree; `publish = false` harness crate, nothing shipped links it.
+# dev-dependency of sparq-hdt and sparq-crdt), so it adds no PACKAGE to the tree — but it does add
+# a dependency EDGE that cargo-vet evaluates differently. [OPUS-5] Measured, not assumed: as a
+# dev-dependency the imported audits satisfied it at `safe-to-run`; as a normal dependency of a
+# first-party crate cargo-vet requires `safe-to-deploy`, which no imported audit supplies for
+# tempfile (nor for its `rustix` / `linux-raw-sys` subtree). Those three carry deliberate
+# `[[exemptions]]` entries in supply-chain/config.toml, each explaining the gap. `publish = false`
+# harness crate — nothing shipped links it, so no released artifact carries this code.
 tempfile = "3"
 serde_json = "1"
 

@@ -940,7 +940,8 @@ criteria = "safe-to-deploy"
 
 [[exemptions.linux-raw-sys]]
 version = "0.12.1"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
+notes = "Raw Linux syscall bindings, reached ONLY through `rustix` -> `tempfile`. Raised from safe-to-run because the publish=false sparq-bench fuzz harness now links tempfile as a normal (not dev) dependency, and cargo-vet's default policy requires safe-to-deploy for a first-party crate's normal deps; safe-to-deploy implies safe-to-run, so the pre-existing dev-dependency use stays covered by this single entry. See the tempfile exemption for why no trusted import supplies it. [OPUS-5]"
 
 [[exemptions.litemap]]
 version = "0.8.2"
@@ -1455,7 +1456,8 @@ criteria = "safe-to-run"
 
 [[exemptions.rustix]]
 version = "1.1.4"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
+notes = "Safe syscall wrappers, reached ONLY through `tempfile`. Raised from safe-to-run for the same reason as linux-raw-sys: tempfile became a normal dependency of the publish=false sparq-bench harness, so its subtree is now evaluated at safe-to-deploy. safe-to-deploy implies safe-to-run, so the pre-existing dev-dependency use stays covered. [OPUS-5]"
 
 [[exemptions.rustls]]
 version = "0.23.40"
@@ -1708,6 +1710,11 @@ criteria = "safe-to-deploy"
 [[exemptions.target-lexicon]]
 version = "0.13.5"
 criteria = "safe-to-deploy"
+
+[[exemptions.tempfile]]
+version = "3.27.0"
+criteria = "safe-to-deploy"
+notes = "Owner-only (0o700) scratch directories for the subprocess oracle in the publish=false sparq-bench fuzz harness (crates/sparq-bench/src/oracle.rs). tempfile was already in this lock file as a dev-dependency, where the imported audits satisfy it: google fully audits 3.10.1 at safe-to-run and mozilla carries safe-to-deploy deltas 3.10.1 -> 3.16.0 -> 3.27.0, but there is no safe-to-deploy audit of the 3.10.1 BASE, so the chain yields safe-to-run only. Linking it as a normal dependency raises the required criteria to safe-to-deploy and leaves that gap unfilled. Exempted rather than audited: nothing published or shipped links sparq-bench, so no released artifact carries this code. Retire this entry (and the rustix / linux-raw-sys ones it pulls in) if an upstream safe-to-deploy audit of a tempfile base version lands. [OPUS-5]"
 
 [[exemptions.termcolor]]
 version = "1.4.1"
