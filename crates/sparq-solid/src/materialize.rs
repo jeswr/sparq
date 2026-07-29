@@ -104,11 +104,13 @@ pub struct MaterializeStats {
 /// Materialize the WAC auth view (single stratum) and install it as `<urn:sparq:auth>`.
 ///
 /// The free-function form of [`crate::PodStore::materialize_wac`], for callers
-/// managing a [`Graph`] directly: strips reserved `urn:sparq:` graphs, assembles the
-/// reasoning input (`.acl` graphs + group documents + structural facts — pod content
-/// is **never** fed to the reasoner), evaluates the compiled `rules/common.n3` +
-/// `rules/wac.n3` rule set over those facts at the id level, and swaps the filtered
-/// closure in as the `<urn:sparq:auth>` named graph (replacing any previous view).
+/// managing a [`Graph`] directly: assembles the reasoning input (`.acl` graphs + group
+/// documents + structural facts — pod content and the reserved `urn:sparq:` graph space
+/// are **never** fed to the reasoner), evaluates the compiled `rules/common.n3` +
+/// `rules/wac.n3` rule set over those facts at the id level, then — once all of that has
+/// succeeded — drops the reserved `urn:sparq:` graphs and swaps the filtered closure in
+/// as the `<urn:sparq:auth>` named graph (replacing any previous view). The dataset is
+/// mutated only after the last fallible step, so an `Err` changes nothing.
 ///
 /// Note: a [`crate::PodStore`] does NOT observe direct calls on its `graph` field —
 /// use the method form so the session index and cache are rebuilt.
@@ -145,12 +147,16 @@ pub struct MaterializeStats {
 pub fn materialize_wac(graph: &mut Graph) -> Result<MaterializeStats, String> {
     #[cfg(not(target_arch = "wasm32"))]
     let t0 = Instant::now();
-    strip_reserved_graphs(graph);
+    // Every fallible step runs BEFORE the first mutation of `graph`, so an `Err` leaves
+    // the dataset — including any previously materialized `<urn:sparq:auth>` view —
+    // byte-for-byte untouched, as the contract above promises. Assembly ignores the
+    // reserved graph space itself, so it does not depend on the strip having run.
     let rules = wac_rules()?;
     let mut dict = Dict::new();
     // WAC has no creator/owner vocabulary; provenance is ignored (the loader skips it).
     let facts = assemble_input_ids(&mut dict, graph, System::Wac, &AccessProvenance::new())?;
     let closure = eval(&mut dict, &facts, rules);
+    strip_reserved_graphs(graph);
     let mut stats = install_auth_view(graph, &dict, &closure);
     stats.strata_facts = vec![closure.len()];
     stats.millis = elapsed_millis(
@@ -223,7 +229,7 @@ pub fn materialize_acp_with(
 ) -> Result<MaterializeStats, String> {
     #[cfg(not(target_arch = "wasm32"))]
     let t0 = Instant::now();
-    strip_reserved_graphs(graph);
+    // Fallible work first, mutation last — see [`materialize_wac`].
     let rules = acp_rules()?;
     let mut dict = Dict::new();
     let facts = assemble_input_ids(&mut dict, graph, System::Acp, provenance)?;
@@ -237,6 +243,7 @@ pub fn materialize_acp_with(
         strata_facts.push(closure.len());
     }
 
+    strip_reserved_graphs(graph);
     let mut stats = install_auth_view(graph, &dict, &closure);
     stats.strata_facts = strata_facts;
     stats.millis = elapsed_millis(
@@ -439,6 +446,49 @@ mod tests {
             assert!(!direct.is_empty(), "no facts assembled — vacuous test");
             assert_eq!(direct, round_tripped, "fact entry diverges (system {:?})", system as u8);
         }
+    }
+
+    /// One `.acl`/`.acr` graph asserting a reserved-encoding agent IRI — rejected by
+    /// `validate_principal_iri` during fact assembly, i.e. after rule compilation and
+    /// before any auth view could be installed.
+    fn poison_graph(control_doc: &str, agent_predicate: &str) -> Vec<(Term, Graph)> {
+        let nq = format!(
+            "<{}#a> <{}> <urn:sparq:evil> <{}> .\n",
+            control_doc, agent_predicate, control_doc
+        );
+        Graph::load_dataset(&nq, "nquads").expect("poison graph loads").named
+    }
+
+    /// The documented contract is that an `Err` leaves the dataset's previous auth view
+    /// untouched. That holds ONLY if every fallible step (rule compilation, fact
+    /// assembly / principal validation) runs BEFORE `strip_reserved_graphs` deletes the
+    /// old `<urn:sparq:auth>` — strip-first would fail OPEN into a dataset whose
+    /// authorization view had silently vanished. Both materializers are checked.
+    #[test]
+    fn a_failed_rematerialization_leaves_the_previous_auth_view_in_place() {
+        let mut graph = Graph::load_dataset(&crate::wac_fixture(), "nquads").expect("fixture loads");
+        materialize_wac(&mut graph).expect("first WAC materialization succeeds");
+        let before = auth_view(&graph);
+        assert!(!before.is_empty(), "no auth view to preserve — vacuous test");
+        graph.named.extend(poison_graph(
+            "https://pod.ex/evil.acl",
+            "http://www.w3.org/ns/auth/acl#agent",
+        ));
+        let err = materialize_wac(&mut graph).expect_err("a reserved agent IRI must fail");
+        assert!(err.contains("urn:sparq:"), "unexpected WAC error: {}", err);
+        assert_eq!(auth_view(&graph), before, "WAC: the previous auth view must survive the error");
+
+        let mut graph = Graph::load_dataset(&crate::acp_fixture(), "nquads").expect("fixture loads");
+        materialize_acp(&mut graph).expect("first ACP materialization succeeds");
+        let before = auth_view(&graph);
+        assert!(!before.is_empty(), "no auth view to preserve — vacuous test");
+        graph.named.extend(poison_graph(
+            "https://pod.ex/evil.acr",
+            "http://www.w3.org/ns/solid/acp#agent",
+        ));
+        let err = materialize_acp(&mut graph).expect_err("a reserved agent IRI must fail");
+        assert!(err.contains("urn:sparq:"), "unexpected ACP error: {}", err);
+        assert_eq!(auth_view(&graph), before, "ACP: the previous auth view must survive the error");
     }
 
     /// A rule set outside the compiled subset must surface as a materialize `Err`, never

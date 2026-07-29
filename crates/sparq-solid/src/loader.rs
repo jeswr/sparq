@@ -24,7 +24,7 @@
 //! group-document triple whose predicate is in `solidx:` space — the analogue of the
 //! `urn:sparq:` reserved-principal guard ([`validate_principal_iri`]).
 
-use crate::{AccessProvenance, AUTH_GRAPH, SOLIDX_NS};
+use crate::{AccessProvenance, SOLIDX_NS};
 use oxrdf::{Literal, NamedNode, Term};
 use rustc_hash::FxHashSet;
 use sparq_core::dict::{Dict, Id};
@@ -190,7 +190,12 @@ pub(crate) fn assemble_facts(
     let mut control_graphs: Vec<(usize, &str, &Graph)> = Vec::new(); // (idx, name, sub)
     for (gix, (name, sub)) in graph.named.iter().enumerate() {
         let Some(iri) = graph_iri(name) else { continue };
-        if iri == AUTH_GRAPH {
+        // Skip the whole reserved space (`<urn:sparq:auth>` included): a graph there is
+        // never reasoning input. [`strip_reserved_graphs`] also drops these from the
+        // dataset, but assembly must not DEPEND on that having run first — the
+        // materializer defers every mutation until after this fallible pass so an error
+        // leaves the previous auth view in place (roborev 5005).
+        if iri.starts_with(RESERVED_PREFIX) {
             continue;
         }
         if iri.ends_with(ACL_SUFFIX) || iri.ends_with(ACR_SUFFIX) {
@@ -246,7 +251,9 @@ pub(crate) fn assemble_facts(
     if system == System::Wac {
         for (gix, (name, sub)) in graph.named.iter().enumerate() {
             let Some(iri) = graph_iri(name) else { continue };
-            if !group_docs.contains(iri) {
+            // Same reserved-space skip as the resource pass above: a forged
+            // `<urn:sparq:…>` graph named by an `acl:agentGroup` must never be read.
+            if iri.starts_with(RESERVED_PREFIX) || !group_docs.contains(iri) {
                 continue;
             }
             for t in graph_triples(sub) {
