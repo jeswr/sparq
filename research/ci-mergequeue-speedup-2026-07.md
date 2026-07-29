@@ -193,6 +193,30 @@ The residual risk is the batch-stacking case: two PRs individually ≥ floor mer
 This needs an explicit maintainer-visible design (proceed-and-document), not a quick flip.
 **Est. saved:** −2–6 m median entry wall (run 29105286547 would have been ~7 m, not 11.9 m).
 
+> **IMPLEMENTED 2026-07-29 (bead sq-6vshe.17), as proposed above.** The
+> maintainer-visible design is recorded in `docs/branch-protection.md` §*Coverage
+> MEASUREMENT off the merge queue* (the proceed-and-document requirement); the wiring is
+> in `ci.yml` and pinned behaviourally by
+> `scripts/tests/test_ci_select_wiring.py::TestCoverageMergeGroupDemotion`.
+> Deltas from the sketch above, all narrowing:
+> * the fast **no-compile** floor gates (`coverage-floors`: test-presence, floor
+>   MONOTONICITY, shard-partition) were **kept on `merge_group`** — they are well under a
+>   minute and they are what makes "no committed floor is silently lowered" true of a
+>   *batch*, not just of a PR. Only the instrumented MEASURE legs were demoted.
+> * the push-to-main run is left **unchanged** rather than narrowed to "only its coverage
+>   legs": lever 1 (sq-6vshe.14) is not implemented yet, so there is no push-run skip to
+>   be exempt from. The exemption is instead pinned as a **test** that REDs if a future
+>   push-run skip covers coverage — the coordination point, made mechanical.
+> * "blocks further ratchet advances until green" landed as
+>   `coverage-gate.py --check-advance-allowed`: it blocks only a **raise** of an existing
+>   floor while the `[demoted-lane] lane=coverage-ratchet-main` alarm is open, never the
+>   recovery path (a governed lowering under `--allow-lower`), never a new crate row, and
+>   it fails **open** if the alarm probe is unavailable.
+>
+> The estimated saving above is a **projection from the 2026-07-10 profile, not a measured
+> post-change result**; the next merge-group entry-wall sample is what will confirm or
+> refute it.
+
 **(b) Selection-soundness memo + the fmx4u §7 P8 decision → bead sq-6vshe.18 — SAFE.**
 The union-diff-vs-target-tip argument that makes merge-group selection sound under
 ALLGREEN + a sole required `gate` is currently a bead note, and the maintainer's
