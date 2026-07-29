@@ -77,6 +77,12 @@ const OdrlTool = lazyPanel(() =>
 const PlanExplorer = lazyPanel(() =>
   import("@/components/workbench/plan-explorer").then((m) => ({ default: m.PlanExplorer })),
 );
+// [OPUS-5] sq-ixc3.24 — the visual query builder (diagram → standard SPARQL, shape-aware pickers).
+const QueryBuilderTool = lazyPanel(() =>
+  import("@/components/workbench/query-builder-tool").then((m) => ({
+    default: m.QueryBuilderTool,
+  })),
+);
 
 interface ToolPanelEntry {
   Component: ComponentType;
@@ -94,6 +100,9 @@ const TOOL_PANELS: Record<string, ToolPanelEntry> = {
   // (native engine on desktop, allowlist-gated fail-closed; honestly native-only in the browser).
   // STATIC import: the default tab paints on first render, never behind a chunk fetch.
   query: { Component: QueryWorkbench, override: QUERY_TOOL_OVERRIDE },
+  // [OPUS-5] sq-ixc3.24 — draw the pattern, get the query. Emits STANDARD SPARQL into its own
+  // always-editable editor and (via the shell hand-off) into the Query tool's — no hidden dialect.
+  builder: { Component: QueryBuilderTool },
   shacl: { Component: ShaclTool },
   // [GPT-5.6] sq-lsp7k.1.2 — invocation-only chunk shared by desktop and hosted web.
   forms: { Component: FormsTool },

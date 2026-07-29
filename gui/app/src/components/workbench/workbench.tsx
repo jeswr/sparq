@@ -41,7 +41,11 @@ import {
   CommandPaletteProvider,
   useRegisterPaletteCommands,
 } from "@/components/workbench/command-palette";
-import { WorkbenchProvider, type WorkbenchActions } from "@/components/workbench/workbench-context";
+import {
+  WorkbenchProvider,
+  type QueryHandoff,
+  type WorkbenchActions,
+} from "@/components/workbench/workbench-context";
 import { graphLabel, type PaletteCommand } from "@/lib/palette-commands";
 // [OPUS-4.8] sq-ixc3.13 — the Import drawer (real disk/URL/paste ingest via the native loader)
 // is mounted once here and opened from the rail's "+ Import", the top bar, and Cmd-K.
@@ -103,7 +107,21 @@ export function Workbench() {
     [activeId],
   );
 
-  const actions = React.useMemo<WorkbenchActions>(() => ({ openTool }), [openTool]);
+  // [OPUS-5] sq-ixc3.24 — the visual query builder's hand-off slot: the SPARQL it emits, plus a
+  // monotonic sequence so sending the same text twice still re-loads the Query editor.
+  const [queryHandoff, setQueryHandoff] = React.useState<QueryHandoff | null>(null);
+  const sendToQueryEditor = React.useCallback(
+    (sparql: string) => {
+      setQueryHandoff((prev) => ({ sparql, seq: (prev?.seq ?? 0) + 1 }));
+      openTool("query");
+    },
+    [openTool],
+  );
+
+  const actions = React.useMemo<WorkbenchActions>(
+    () => ({ openTool, sendToQueryEditor, queryHandoff }),
+    [openTool, sendToQueryEditor, queryHandoff],
+  );
 
   return (
     // [OPUS-4.8] sq-ixc3.10 — the whole workbench is wrapped in the Cmd-K palette provider (the

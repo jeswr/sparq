@@ -130,6 +130,49 @@ reason — and an `odrl:prohibition` visibly flips a previously visible named gr
 that requester's pane. The browser build labels the tool **native-only** (the ODRL stack is not
 in the wasm bundle) instead of pretending.
 
+## The visual query builder (`sq-ixc3.24`)
+
+The **Builder tool** is the diagram-to-SPARQL canvas: draw nodes (a variable + an optional
+`rdf:type` class), hang literal attributes off them (with filters), link them with predicate
+edges, and set the result shape (DISTINCT / GROUP BY / aggregates / ORDER BY / LIMIT). The
+competitor reference is AllegroGraph **Gruff** ("draw the pattern, get the query") and Stardog
+**Explorer**'s model-driven query builder (relationship paths, attribute filters, AND-NOT,
+GROUP BY).
+
+What it does differently is **shape-aware suggestion**. The predicate pickers are filled by four
+ordinary SPARQL queries over the LIVE store: a class index, a **characteristic set** per class
+(the predicates instances actually carry), a store-wide predicate list, and — when the store
+holds SHACL shapes — `sh:targetClass` + `sh:property`/`sh:path`. Every suggestion is labelled
+with which of the two it is, because `shape` (declared: expected whether or not anything uses it)
+and `data` (observed: a fact about the data you loaded, not a schema) are different claims. No
+store, no suggestions: the panel says so rather than offering an invented vocabulary. Shapes
+typed into the **SHACL tool's** editor are not in the store, and are deliberately invisible here.
+
+The honesty rules the tool holds itself to:
+
+- the generated query is **standard SPARQL 1.1**, always visible and always editable — there is
+  no sparq-only dialect and no rewriting behind the user's back;
+- **editing the SPARQL by hand DETACHES it from the canvas**, and the panel says so, with a
+  "Regenerate from canvas" way back. The canvas cannot parse SPARQL into a diagram, so it never
+  claims the two are still in sync;
+- a diagram whose SPARQL would be **invalid still renders its SPARQL** (so it can be read and
+  fixed) but cannot be run — the issues list gives the reason (duplicate variable, a variable
+  projected out of a `NOT EXISTS` branch, a projected non-grouped variable beside an aggregate,
+  an undeclared prefix, …);
+- introspection is **not** run unasked on a large store — the panel offers the button and says
+  why — and a loaded index is marked **stale** when the store changes under it.
+
+Stated v1 limits (do the rest by editing the query, which is the point of keeping it editable):
+UNION is offered only as **alternative predicates on one edge**, a `NOT EXISTS` branch must be a
+leaf, and the builder generates SELECT queries only.
+
+The pure model, serializer and validation live in `app/src/lib/query-builder.ts` (no React, no
+DOM) and are unit-tested in `query-builder.test.ts`. The UI is the panel
+(`query-builder-tool.tsx`) over two presentational siblings — `query-builder-canvas.tsx` (node
+cards, edges, drag + click-to-link) and `query-builder-inspectors.tsx` (node / edge editors, the
+predicate picker, the result-shape controls) — and is covered by
+`e2e-playwright/specs/query-builder.web.spec.ts`.
+
 ## File ingest library (`lib/file-ingest.ts`, sq-vnh1v)
 
 The **file ingest library** is a shared zero-server multi-file upload harness for the RDF import (sq-eydh9), SHACL shapes (sq-txrui), and N3 rules (sq-glo5r) surfaces. It operates on a single `IngestResult` contract: every file is `accepted[]` (name, text, bytes) or `rejected[]` (name, reason) — **no silent drops**. 

@@ -7,9 +7,27 @@
 
 import * as React from "react";
 
+/**
+ * [OPUS-5] sq-ixc3.24 — one hand-off of SPARQL text to the Query tool. `seq` increments on every
+ * send so the Query editor re-loads the text even when the SAME query is sent twice; without it a
+ * repeat send would be a silent no-op the user reads as "the button did nothing".
+ */
+export interface QueryHandoff {
+  sparql: string;
+  seq: number;
+}
+
 export interface WorkbenchActions {
   /** Open a tool as a tab (or focus it if already open). */
   openTool: (toolId: string) => void;
+  /**
+   * [OPUS-5] sq-ixc3.24 — load `sparql` into the Query tool's editor and focus that tab. The text
+   * crosses VERBATIM (the visual builder emits standard SPARQL and nothing else) and REPLACES the
+   * editor's current content, which the Query tool then persists per workspace as usual.
+   */
+  sendToQueryEditor: (sparql: string) => void;
+  /** The latest hand-off, for the Query tool to consume. `null` until something is sent. */
+  queryHandoff: QueryHandoff | null;
 }
 
 const WorkbenchContext = React.createContext<WorkbenchActions | null>(null);

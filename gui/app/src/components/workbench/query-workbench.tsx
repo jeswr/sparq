@@ -700,6 +700,21 @@ export function QueryWorkbench() {
     setQuery(workspace.editor.query);
   }, [workspace]);
 
+  // [OPUS-5] sq-ixc3.24 — accept a hand-off from the visual query builder: the SPARQL it emitted
+  // REPLACES the editor text (and is then persisted by the write-back below like any other edit).
+  // Keyed on `seq`, so sending the same query twice still lands, and re-renders for other reasons
+  // never re-apply a hand-off the user has since edited away.
+  const handoffSeqRef = React.useRef(0);
+  const handoff = workbench?.queryHandoff ?? null;
+  React.useEffect(() => {
+    if (!handoff || handoff.seq === handoffSeqRef.current) return;
+    handoffSeqRef.current = handoff.seq;
+    setQuery(handoff.sparql);
+    // Mark the workspace's editor state as already loaded: a restore that lands AFTER the
+    // hand-off must not overwrite the query the user just sent over.
+    if (workspace) loadedWsRef.current = workspace.id;
+  }, [handoff, workspace]);
+
   // [OPUS-4.8] sq-lcd6e — write the editor text back to the workspace (debounced) so it persists.
   // Guarded on `loadedWsRef` so the initial DEFAULT_QUERY never overwrites a saved query before
   // the restore above has run.

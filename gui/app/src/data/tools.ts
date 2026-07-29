@@ -28,6 +28,7 @@ import {
   Server,
   Scale,
   Gauge,
+  Workflow,
 } from "lucide-react";
 
 /**
@@ -100,6 +101,21 @@ export const TOOLS: ToolDef[] = [
     blurb: "Run SPARQL 1.1/1.2 over the live store — SELECT/ASK/CONSTRUCT/DESCRIBE/UPDATE.",
     tier: "live",
     icon: Database,
+    built: true,
+    group: "working",
+  },
+  {
+    id: "builder",
+    label: "Builder",
+    // [OPUS-5] sq-ixc3.24 — the visual query builder: draw a node/edge pattern, get standard
+    // SPARQL 1.1. Predicate pickers are driven by SHACL shapes IN THE STORE when present, else
+    // by characteristic sets observed in the loaded data — each suggestion labelled with which.
+    // Runs entirely in-tab: introspection and the preview are ordinary queries over the store.
+    blurb:
+      "Draw a graph pattern and get standard SPARQL — predicate pickers driven by SHACL shapes " +
+      "when the store has them, else by observed characteristic sets. The query stays editable.",
+    tier: "live",
+    icon: Workflow,
     built: true,
     group: "working",
   },
