@@ -15,6 +15,22 @@
 //!   [`solid-oidc-verifier`](https://github.com/jeswr/solid-oidc-verifier) crate (a git dependency).
 //!   Auth is **not** reimplemented here. See [`auth`].
 //!
+//! ## Specification estate
+//! What this crate is actually pinned to, and what is still unresolved (issue #4971). [OPUS-5]
+//! - **DPoP-SK** (<https://jeswr.github.io/dpop-sk-spec/>) — normative for the `pop::sk`
+//!   proof-of-possession tier. An EXPERIMENTAL profile, **not** a ratified standard, so treat its
+//!   guarantees as unreviewed. Its execution-verified Appendix-A worked example is asserted
+//!   byte-for-byte by the `pop::sk` tests, and the RFC 5705 §4 exporter label
+//!   (`EXPERIMENTAL-dpop-sk-v1`) is pinned against the spec string.
+//! - **Solid-OIDC verification** — delegated (see Architecture above), not reimplemented here: the
+//!   `solid-oidc-verifier` git dependency is `rev`-pinned in this crate's `Cargo.toml`.
+//! - **`lws-spec`, `lws-ucs`** — **UNRESOLVED**. Location and content unknown; outside this note
+//!   neither name is referenced by any source file, dependency, or test vector in this repository,
+//!   and no shipped behaviour here is known to depend on either.
+//!   Promoting them out of UNRESOLVED takes what DPoP-SK already has — a maintainer-confirmed
+//!   reference **plus** an executed spec vector, not a prose citation. Until that pointer exists do
+//!   not cite a URL for them: a guessed one would read as a normative claim this crate cannot back.
+//!
 //! ## Vertical slice (this crate)
 //! A coherent, compiling slice with clean trait seams + tests:
 //! - an axum server skeleton ([`app`]) that boots,
