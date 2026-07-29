@@ -32,6 +32,15 @@ oxigraph = { version = "0.5", default-features = false, features = ["rdf-12"] }
 # with an `isBlank` FILTER guard and `tests::no_nested_blank_nodes_in_triple_terms` pins).
 # Harness crate, `publish = false`; nothing in the shipped build gains a dependency.
 sparq-canon = { path = "../sparq-canon", features = ["rdf12-triple-terms"] }
+# [OPUS-5] (sq-qcnn.5) The ENGINE-INDEPENDENT value-level comparator library (node A of
+# research/differential-testing-value-level.md, bead sq-qcnn.4): exact arbitrary-precision
+# integer/decimal equality, canonical doubles incl. INF/NaN, UTC-normalised temporals, the
+# solution-MULTISET and ORDER-BY-equivalence-class comparators, and RDFC-1.0 blank-node
+# isomorphism. The query differential (`fuzz.rs`) routes BOTH engines' answers through it, so
+# every value decision is made by code that depends on NO sparq crate — canonicalising both
+# sides through sparq's own numeric tower / term comparator would make any bug there CANCEL and
+# the differential would go blind exactly where it must see. Harness crate, `publish = false`.
+sparq-difftest = { path = "../sparq-difftest" }
 # The oxrdf 0.3 term model both engines already render through — used by the comparator to
 # rewrite `xsd:integer` lexicals STRUCTURALLY (never by string surgery) for the adjudicated
 # `update-oxigraph-integer-lexical-canonicalization` class. Already in the dependency graph
