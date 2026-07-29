@@ -1035,7 +1035,13 @@ class TestWorkflowSeam(unittest.TestCase):
 
     def test_uses_pull_request_not_pull_request_target(self):
         """`pull_request_target` would hand a FORK's PR a WRITE token — the escalation
-        this design deliberately refuses."""
+        this design deliberately refuses.
+
+        LOAD-BEARING, not decorative: the job's `issues: write` / `pull-requests: write`
+        are bounded by the read-only token a fork gets on `pull_request`, NOT by the
+        default-branch checkout (which cannot protect the workflow definition, since
+        `pull_request` selects the workflow file from the PR's merge ref). Flipping this
+        trigger hands those exact scopes to arbitrary fork authors."""
         self.assertNotIn("pull_request_target", _on_block(self.wf))
 
     # --- the `if:` seam ------------------------------------------------------------
@@ -1120,8 +1126,13 @@ class TestWorkflowSeam(unittest.TestCase):
     def test_permissions_are_exactly_the_declared_set(self):
         """Pinned by EQUALITY, so a widened scope cannot ship unreviewed. `issues: write`
         is here for ONE reason — `POST /repos/{owner}/{repo}/labels`, the crate-label
-        provisioning of #4582 — and is safe to hold only because the checkout is the
-        default branch, so no PR-authored code runs under it."""
+        provisioning of #4582.
+
+        What bounds it is NOT the checkout ref: on `pull_request` the workflow FILE is
+        taken from the PR's merge ref, so a PR can rewrite these steps and this very
+        block. It is the TOKEN — a fork PR gets a read-only one, so only an author who
+        ALREADY holds push access (and could run their own `on: push` workflow at any
+        scope) can reach these. See the permissions header of the workflow."""
         self.assertEqual(self.wf["permissions"],
                          {"contents": "read", "issues": "write",
                           "pull-requests": "write"})

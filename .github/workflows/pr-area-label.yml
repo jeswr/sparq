@@ -19,13 +19,20 @@
 # the one-pass backfill of the existing open PRs. The policy lives in reviewable TOML
 # (ci/area-labels.toml), not inline YAML.
 #
-# TRUSTED-CODE POSTURE. The job holds `pull-requests: write`, so it must NOT execute code
-# from the pull request. `actions/checkout` is therefore pinned to the repository's
-# DEFAULT BRANCH, not to the PR head or merge ref: the deriver and its policy table are
-# always the reviewed on-main versions. A PR that edits either is validated by the
-# hermetic self-tests (scripts/tests/test_pr_area_labels.py, run by routing-self-tests.yml)
-# and takes effect once merged. Pinned by
+# TRUSTED-CODE POSTURE — WHAT THE DEFAULT-BRANCH CHECKOUT DOES, AND WHAT IT DOES NOT.
+# `actions/checkout` is pinned to the repository's DEFAULT BRANCH, not to the PR head or
+# merge ref, so the DERIVER and its POLICY TABLE are always the reviewed on-main versions:
+# an unmerged PR cannot change what this job DECIDES. A PR that edits either is validated
+# by the hermetic self-tests (scripts/tests/test_pr_area_labels.py, run by
+# routing-self-tests.yml) and takes effect once merged. Pinned by
 # test_pr_area_labels.py::TestWorkflowSeam::test_checkout_uses_default_branch_not_pr_head.
+#
+# It does NOT make this job free of PR-authored code, and nothing here may claim it does.
+# On `pull_request` GitHub selects the WORKFLOW FILE ITSELF from the PR's merge ref (cf.
+# GATING POSTURE below), so a PR can rewrite these steps, this `run:` body and even the
+# `permissions:` block, and run its own version. Pinning the checkout cannot protect the
+# workflow definition. The boundary that actually bounds the blast radius is the TOKEN,
+# not the ref — see the permissions block.
 #
 # FORK PRs. `pull_request` (deliberately NOT `pull_request_target`) hands a fork PR a
 # READ-ONLY token, so no label write can succeed. That path is handled EXPLICITLY inside
@@ -68,11 +75,29 @@ on:
 # #4582). Such a crate does not exist on the default branch, so no label can have been
 # created for it in advance, and without one the PR is unattributable forever — which
 # falls through to the SERIALIZING `__global__` partition whenever the scheduler's
-# source-issue fallback also fails. The scope is safe to hold HERE specifically
-# because the checkout is the default branch (TRUSTED-CODE POSTURE above): no PR-authored
-# code ever runs under it. The PR-controlled INPUT that reaches it is a list of changed
-# paths, and scripts/pr-area-labels.py will only turn one into a label on positive
-# evidence — the crate is already a workspace member, or the diff itself carries
+# source-issue fallback also fails.
+#
+# WHO CAN ACTUALLY OBTAIN THESE SCOPES. NOT "nobody, because the checkout is pinned" — a
+# PR gets to rewrite this very file (TRUSTED-CODE POSTURE above), so while the pin does
+# fix WHICH DERIVER runs, it constrains nothing about this block. The bound is the TOKEN:
+#   - FORK PR -> `pull_request` hands it a READ-ONLY GITHUB_TOKEN whatever this block
+#     says, so an untrusted contributor cannot reach `issues: write` here at all. That is
+#     load-bearing, and it is why `pull_request_target` (which WOULD hand a fork a write
+#     token) is refused — pinned by
+#     test_pr_area_labels.py::TestWorkflowSeam::test_uses_pull_request_not_pull_request_target.
+#   - SAME-REPO PR -> the scopes are live. But that author already holds PUSH ACCESS, and
+#     anyone with push access can already run an `on: push` workflow of their own
+#     declaring any scope. This block therefore widens nobody's reach; it is bounded by
+#     who may push, and is not a substitute for that control.
+# RESIDUAL, stated plainly: a push-access actor who is mistaken or compromised gains label
+# create/edit/delete next to the `pull-requests: write` this job already held. Closing
+# that needs a trusted-DEFINITION execution path (a `workflow_run` job consuming only
+# validated PR metadata) — filed as a follow-up, and NOT something the checkout pin
+# provides.
+#
+# The PR-controlled INPUT that reaches the deriver is a list of changed paths, and
+# scripts/pr-area-labels.py will only turn one into a label on positive evidence — the
+# crate is already a workspace member, or the diff itself carries
 # `crates/<name>/Cargo.toml` — under a strict name pattern. Pinned by
 # test_pr_area_labels.py::TestWorkflowSeam::test_permissions_are_exactly_the_declared_set.
 permissions:
