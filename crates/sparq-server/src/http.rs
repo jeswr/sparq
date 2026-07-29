@@ -2525,18 +2525,31 @@ pub struct AppState {
     #[cfg(feature = "change-stream")]
     change_stream: Option<Arc<ChangeStreamState>>,
     /// [OPUS-5] (sq-lsp7k.7) Single-slot cache of the most recent `?at=` reconstruction, keyed
-    /// by the `(base generation, target generation)` pair it was rebuilt from. Rebuilding is
-    /// O(graph), and the motivating access pattern is a REPEAT one — the same instant pinned
-    /// across a multi-request `LIMIT`/`OFFSET` sweep, exactly as `?generation=N` is used today.
+    /// by the `(lineage epoch, base generation, target generation)` triple it was rebuilt from.
+    /// Rebuilding is O(graph), and the motivating access pattern is a REPEAT one — the same
+    /// instant pinned across a multi-request `LIMIT`/`OFFSET` sweep, exactly as `?generation=N`
+    /// is used today.
     ///
-    /// Keying on BOTH ends is what makes reuse sound rather than merely fast: an entry is only
-    /// ever handed back for the identical span it was validated over, so a lineage that was
-    /// re-based or restored (which renumbers generations) can never serve a stale snapshot —
-    /// its base moves and the key stops matching. The cost is that a write between two pages
-    /// moves the base and forces one rebuild; correctness wins over the hit rate. Feature-gated
-    /// like `completion_index`, so the default `AppState` layout is unchanged.
+    /// Keying on BOTH ends of the span is what makes reuse sound WITHIN a lineage: an entry is
+    /// only ever handed back for the identical span it was validated over, and a same-lineage
+    /// re-base is forward-only, so the base strictly advances and a stale key cannot recur.
+    /// Generation numbers alone are NOT enough ACROSS lineages: an online restore installs a
+    /// fresh ring that restarts at generation 0 (`install_restored_graph`), so the replacement
+    /// lineage climbs back through the very same numbers and would otherwise hit a cached
+    /// old-lineage reconstruction — a `200` carrying the replaced graph. The `pit_lineage` epoch
+    /// is therefore part of the key. The cost is that a write between two pages moves the base
+    /// and forces one rebuild; correctness wins over the hit rate. Feature-gated like
+    /// `completion_index`, so the default `AppState` layout is unchanged.
     #[cfg(feature = "point-in-time")]
-    pit_snapshot: Arc<std::sync::RwLock<Option<(u64, u64, PinnedGen)>>>,
+    pit_snapshot: Arc<std::sync::RwLock<Option<(u64, u64, u64, PinnedGen)>>>,
+    /// [OPUS-5] (sq-lsp7k.7) Monotonic LINEAGE EPOCH — the identity the generation numbers in
+    /// `pit_snapshot`'s key are relative to. Bumped whenever the generation numbering the
+    /// point-in-time path reasons over is replaced: an online restore (a fresh ring restarting at
+    /// generation 0) and an operator change-stream re-base. Because a request reads the epoch
+    /// BEFORE it pins the ring, an entry stored under a superseded epoch is simply never handed
+    /// back — no clear-the-slot race with a reconstruction that is already in flight.
+    #[cfg(feature = "point-in-time")]
+    pit_lineage: Arc<std::sync::atomic::AtomicU64>,
     /// [FABLE-5] (sq-fy8ci) SINGLE-FLIGHT restore permit. `true` while a restore is in flight.
     /// Two concurrent restores were previously silently serialized by the single writer thread
     /// (each individually crash-safe, last-writer-wins) — harmless but surprising: an operator
@@ -2983,6 +2996,9 @@ impl AppState {
             // [OPUS-5] sq-lsp7k.7: cold at boot — the first `?at=` request fills the slot.
             #[cfg(feature = "point-in-time")]
             pit_snapshot: Arc::new(std::sync::RwLock::new(None)),
+            // [OPUS-5] sq-lsp7k.7: the boot lineage; a restore / re-base moves it forward.
+            #[cfg(feature = "point-in-time")]
+            pit_lineage: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             // [FABLE-5] sq-fy8ci: no restore in flight at boot (restore-on-start runs on the
             // seed graph in main.rs BEFORE this state exists, so it never holds the permit).
             #[cfg(feature = "backup")]
@@ -3065,24 +3081,46 @@ impl AppState {
         self.change_stream.as_ref().map(|stream| stream.first_seq())
     }
 
-    /// [OPUS-5] (sq-lsp7k.7) Reads the single-slot point-in-time reconstruction cache. Hits only
-    /// on the EXACT `(base, target)` span the entry was validated over — see the `pit_snapshot`
-    /// field docs for why both ends are part of the key.
+    /// [OPUS-5] (sq-lsp7k.7) The CURRENT lineage epoch — the identity a point-in-time request
+    /// reads ONCE, before it pins the ring, and then uses for both halves of the cache lookup.
+    /// `Acquire` pairs with the `Release` in `bump_pit_lineage`, so a request that observes the
+    /// new epoch also observes the core swap that preceded the bump.
     #[cfg(feature = "point-in-time")]
-    pub(crate) fn pit_cached(&self, base: u64, target: u64) -> Option<PinnedGen> {
+    pub(crate) fn pit_lineage(&self) -> u64 {
+        self.pit_lineage.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// [OPUS-5] (sq-lsp7k.7) Retires every cached point-in-time reconstruction by moving the
+    /// lineage epoch forward. Call AFTER the replacement is live (the core swap, the appended
+    /// gap record) so no request can observe the new epoch alongside the old lineage's state.
+    #[cfg(feature = "point-in-time")]
+    fn bump_pit_lineage(&self) {
+        self.pit_lineage
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+    }
+
+    /// [OPUS-5] (sq-lsp7k.7) Reads the single-slot point-in-time reconstruction cache. Hits only
+    /// on the EXACT `(lineage, base, target)` the entry was validated under — see the
+    /// `pit_snapshot` field docs for why the lineage epoch and both span ends are all in the key.
+    #[cfg(feature = "point-in-time")]
+    pub(crate) fn pit_cached(&self, lineage: u64, base: u64, target: u64) -> Option<PinnedGen> {
         let slot = self.pit_snapshot.read().ok()?;
         slot.as_ref()
-            .filter(|(cached_base, cached_target, _)| *cached_base == base && *cached_target == target)
-            .map(|(_, _, gen)| gen.clone())
+            .filter(|(cached_lineage, cached_base, cached_target, _)| {
+                *cached_lineage == lineage && *cached_base == base && *cached_target == target
+            })
+            .map(|(_, _, _, gen)| gen.clone())
     }
 
     /// [OPUS-5] (sq-lsp7k.7) Publishes a reconstruction into the single-slot cache, replacing
-    /// whatever was there. A poisoned lock is skipped rather than propagated: the cache is a
-    /// pure optimisation, and losing it costs a rebuild, never correctness.
+    /// whatever was there. `lineage` is the epoch the CALLER read before pinning, not the epoch
+    /// now: a restore that landed mid-reconstruction leaves this entry keyed to the superseded
+    /// lineage, which no later lookup can match — it costs the slot, never correctness. A
+    /// poisoned lock is skipped rather than propagated, on the same reasoning.
     #[cfg(feature = "point-in-time")]
-    pub(crate) fn pit_store(&self, base: u64, target: u64, gen: PinnedGen) {
+    pub(crate) fn pit_store(&self, lineage: u64, base: u64, target: u64, gen: PinnedGen) {
         if let Ok(mut slot) = self.pit_snapshot.write() {
-            *slot = Some((base, target, gen));
+            *slot = Some((lineage, base, target, gen));
         }
     }
 
@@ -3097,9 +3135,18 @@ impl AppState {
         generation: u64,
         new_lineage: bool,
     ) -> Option<Result<sparq_serve::ChangeRecord, sparq_serve::BackupError>> {
-        self.change_stream
+        let outcome = self
+            .change_stream
             .as_ref()
-            .map(|stream| stream.rebase(generation, new_lineage))
+            .map(|stream| stream.rebase(generation, new_lineage))?;
+        // [OPUS-5] sq-lsp7k.7: a successful re-base re-baselines the numbering the point-in-time
+        // cache key is stated in — unconditionally under `new_lineage` (numbering restarted), and
+        // conservatively for the forward-only variant too, where the worst case is one rebuild.
+        #[cfg(feature = "point-in-time")]
+        if outcome.is_ok() {
+            self.bump_pit_lineage();
+        }
+        Some(outcome)
     }
 
     /// Pins the current generation for a request: lock-free, never blocked
@@ -3412,6 +3459,13 @@ impl AppState {
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         }
+        // [OPUS-5] sq-lsp7k.7: same hazard for the `?at=` reconstruction cache, and the same
+        // reason — the restored lineage climbs back through the SAME generation numbers, so a
+        // `(base, target)` pair it reaches later would otherwise hit a cached reconstruction of
+        // the REPLACED graph. Bumped after the core swap so a request that sees the new epoch
+        // also sees the new ring.
+        #[cfg(feature = "point-in-time")]
+        self.bump_pit_lineage();
         // Advance the commit watch so active subscriptions re-evaluate against the restored store.
         let restored_gen = self.current().number();
         self.commits.send_replace(restored_gen);
@@ -5715,6 +5769,11 @@ async fn resolve_point_in_time(state: &AppState, raw: &str) -> Result<RequestPin
         return Err(bad_request(UNCONFIGURED));
     }
 
+    // Read the lineage epoch BEFORE pinning: everything below is stated in the generation
+    // numbering of whatever lineage is live from here on, and an epoch read first can only be
+    // STALER than the state that follows — never newer. A restore landing mid-flight therefore
+    // costs this reconstruction its cache slot, never a cross-lineage hit (see `pit_snapshot`).
+    let lineage = state.pit_lineage();
     // Pin the base BEFORE polling: a commit that lands in between then shows up as a record
     // beyond the pin, which `pit::base_generation` simply excludes from the span. Pinning
     // after the poll would instead leave a span the records cannot account for.
@@ -5765,7 +5824,7 @@ async fn resolve_point_in_time(state: &AppState, raw: &str) -> Result<RequestPin
             number: target_generation,
         });
     }
-    if let Some(gen) = state.pit_cached(base_generation, target_generation) {
+    if let Some(gen) = state.pit_cached(lineage, base_generation, target_generation) {
         return Ok(RequestPin {
             gen,
             number: target_generation,
@@ -5795,7 +5854,7 @@ async fn resolve_point_in_time(state: &AppState, raw: &str) -> Result<RequestPin
     // here leaves the pin fully alive; its own `number()` is meaningless, which is exactly why
     // `RequestPin` carries the historical number separately.
     let gen = GenerationRing::new(graph).current();
-    state.pit_store(base_generation, target_generation, gen.clone());
+    state.pit_store(lineage, base_generation, target_generation, gen.clone());
     Ok(RequestPin {
         gen,
         number: target_generation,
@@ -6009,6 +6068,153 @@ mod point_in_time_lag_tests {
                 );
                 assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
             }
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(all(test, feature = "point-in-time", feature = "backup"))]
+mod point_in_time_lineage_tests {
+    //! [OPUS-5] (sq-lsp7k.7) The `?at=` reconstruction cache ACROSS an online restore. A restore
+    //! installs a fresh ring that restarts at generation 0, so the replacement lineage climbs
+    //! back through the very same generation numbers the previous one used — which makes a cache
+    //! keyed on numbers ALONE able to answer a new-lineage request with the replaced graph. The
+    //! lineage epoch is what stops that, and these are its witnesses.
+    use super::*;
+    use sparq_engine::serialize::graph_to_nquads;
+
+    /// The subject each lineage's quads hang off, so "which lineage answered" is a substring
+    /// test on the reconstructed N-Quads.
+    const OLD: &str = "http://ex/old";
+    const NEW: &str = "http://ex/new";
+
+    /// `INSERT DATA` of one quad on `subject`, distinguished by `predicate`.
+    // [OPUS-5] positional format args (CodeQL rust/unused-variable false-positive).
+    fn insert(subject: &str, predicate: &str) -> String {
+        format!(
+            "INSERT DATA {{ <{}> <http://ex/{}> <http://ex/o> }}",
+            subject, predicate
+        )
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "sparq-pit-lineage-{}-{}-{:?}",
+            tag,
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn state_with_log(dir: &std::path::Path) -> AppState {
+        AppState::with_config(
+            Graph::load_str("", "turtle").expect("empty graph"),
+            ServerConfig {
+                change_stream_dir: Some(dir.to_path_buf()),
+                time_travel_generations: 16,
+                ..ServerConfig::default()
+            },
+        )
+    }
+
+    fn recorded_instants(state: &AppState) -> Vec<u128> {
+        state
+            .poll_change_stream(0)
+            .expect("poll succeeds")
+            .expect("change stream configured")
+            .iter()
+            .map(|r| r.timestamp_unix_nanos)
+            .collect()
+    }
+
+    /// A real backup artifact holding exactly `turtle`, for the in-memory `restore_from` path.
+    fn artifact(turtle: &str) -> Vec<u8> {
+        let graph = Graph::load_str(turtle, "turtle").expect("fixture parses");
+        let mut bytes = Vec::new();
+        sparq_serve::backup_export(&GenerationRing::new(graph).current(), &mut bytes)
+            .expect("export succeeds");
+        bytes
+    }
+
+    /// THE witness for the cross-lineage collision. Two commits build lineage A and a `?at=`
+    /// request caches its reconstruction under `(base 2, target 1)`; an online restore then
+    /// replaces the ring with lineage B numbering from zero, and two commits walk B back to the
+    /// SAME numeric pair. The cached lineage-A graph must be unreachable from there. Drop the
+    /// lineage epoch from the cache key (`pit_cached` / `pit_store` / `bump_pit_lineage`) and
+    /// both halves of this test go red — the direct lookup finds the retired entry, and the real
+    /// `?at=` path answers a lineage-B instant with lineage A's graph.
+    #[tokio::test]
+    async fn a_restored_lineage_cannot_hit_the_replaced_lineages_cached_reconstruction() {
+        let dir = scratch("collide");
+        let state = state_with_log(&dir);
+        let lineage_a = state.pit_lineage();
+
+        // Lineage A: generation 1 holds OLD, generation 2 adds a second quad so the instant at
+        // generation 1 is a genuine REBUILD (target != base) and therefore lands in the cache.
+        state.apply_update(&insert(OLD, "p1")).expect("update commits");
+        state.apply_update(&insert(OLD, "p2")).expect("update commits");
+        let instants = recorded_instants(&state);
+        assert_eq!(instants.len(), 2, "one record per lineage-A commit");
+
+        match resolve_point_in_time(&state, &instants[0].to_string()).await {
+            Ok(pin) => {
+                assert_eq!(pin.number, 1, "reconstructed at lineage A generation 1");
+                assert!(
+                    graph_to_nquads(pin.gen.snapshot()).contains(OLD),
+                    "lineage A generation 1 holds OLD"
+                );
+            }
+            Err(resp) => panic!("lineage A's own instant should resolve, got {}", resp.status()),
+        }
+        assert!(
+            state.pit_cached(lineage_a, 2, 1).is_some(),
+            "the reconstruction is cached under lineage A's (base 2, target 1)"
+        );
+
+        // The restore: a fresh ring holding only NEW, numbering from generation 0.
+        state
+            .restore_from(
+                &artifact(&format!("<{}> <http://ex/p0> <http://ex/o> .", NEW))[..],
+                false,
+            )
+            .expect("in-memory restore succeeds");
+        assert_eq!(state.current().number(), 0, "the restored ring restarts at 0");
+        let lineage_b = state.pit_lineage();
+        assert_ne!(lineage_a, lineage_b, "the restore retired lineage A");
+        assert!(
+            state.pit_cached(lineage_b, 2, 1).is_none(),
+            "lineage A's entry must be unreachable from lineage B, whose (base 2, target 1) \
+             names entirely different commits"
+        );
+
+        // Re-arm recording on the replaced numbering, then walk lineage B to the same pair.
+        state
+            .rebase_change_stream(0, true)
+            .expect("change stream configured")
+            .expect("new-lineage rebase appends the gap record");
+        state.apply_update(&insert(NEW, "p1")).expect("update commits");
+        state.apply_update(&insert(NEW, "p2")).expect("update commits");
+        assert_eq!(state.current().number(), 2, "lineage B reached generation 2");
+        let after = recorded_instants(&state);
+        let at_b1 = after[after.len() - 2].to_string();
+
+        // The load-bearing assertion: whatever lineage B's generation-1 instant resolves to, it
+        // is never lineage A's graph. Here the retained records no longer form a contiguous
+        // chain across the lineage boundary, so `rewind` refuses — fail-closed, as this surface
+        // does everywhere. What must NOT happen is a `200` carrying the replaced store.
+        match resolve_point_in_time(&state, &at_b1).await {
+            Ok(pin) => assert!(
+                !graph_to_nquads(pin.gen.snapshot()).contains(OLD),
+                "a lineage-B instant was answered with the REPLACED lineage A graph"
+            ),
+            Err(resp) => assert!(
+                resp.status().is_server_error(),
+                "expected the fail-closed refusal for a span crossing the lineage boundary, got {}",
+                resp.status()
+            ),
         }
 
         let _ = std::fs::remove_dir_all(&dir);

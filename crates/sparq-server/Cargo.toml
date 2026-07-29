@@ -378,7 +378,9 @@ change-stream = ["server", "sparq-serve/change-stream"]
 # nearby instant. Cost is honest and O(graph) per reconstruction (one serialise of the base + one
 # re-parse), run off the async runtime and cached single-slot for the repeat-request (pagination)
 # case — which is why it is opt-in. Pulls ZERO new dependencies. Without the feature the parameter,
-# the `pit` module and the reconstruction cache field are `#[cfg]`-stripped, so a build without it
+# the `pit` module and the reconstruction cache fields (the slot plus the lineage epoch its key is
+# stated in, so a restore's restarted generation numbering cannot hit a replaced lineage's entry)
+# are `#[cfg]`-stripped, so a build without it
 # carries ZERO point-in-time code. Stated precisely rather than as the usual "byte-identical":
 # wiring this in DID touch the shared pin path in every feature state — `resolve_pin` is now an
 # `async fn` returning a `RequestPin` (the pinned snapshot PLUS the generation number to report)
