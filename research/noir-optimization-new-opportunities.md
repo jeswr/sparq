@@ -60,8 +60,16 @@ this bead could deliver.
    produced by running anything.
 
 One framing the record carries throughout, unchanged from the paper skeleton:
-these are **circuit-size (proving-cost) optimisations**. They touch no
-zero-knowledge privacy or soundness property and this record makes no such claim.
+these are **circuit-size (proving-cost) optimisations**. They neither change nor
+make any claim about the *cryptographic* privacy or proof-system soundness of the
+ZK backend. That is not a blanket soundness disclaimer: a compiler rewrite is
+**constraint-soundness-sensitive** — getting one wrong under-constrains the
+circuit, so it accepts witnesses the original rejected — and several candidates
+below are explicitly of that shape (P3-5 carries the highest under-constraining
+risk in the register, P3-4 may have been removed upstream *for* soundness, and
+the P3-1 constraint-width change can admit values outside the caller's budget).
+Each candidate therefore carries its own equivalence / fail-closed obligation,
+stated with it, and that obligation is load-bearing.
 
 ## 1. What was actually done
 
@@ -763,6 +771,11 @@ acquiring a `bb` binary in the measurement environment and landing P1 around it.
   program records; at least one (#5501) is demonstrably superseded.
 - **None of the program's seven PRs is merged**, verified at this pin for the
   four fresh drafts (§1). The paper must never present any as landed.
-- **No ZK claim.** These are circuit-size (proving-cost) optimisations. They make
-  and require no zero-knowledge privacy or soundness property, and the Noir
-  soundness question is orthogonal to all of it.
+- **No *cryptographic* ZK claim — but not "no soundness concern".** These are
+  circuit-size (proving-cost) optimisations: they make and require no
+  zero-knowledge privacy or proof-system soundness property of the backend. They
+  are nonetheless **constraint-soundness-sensitive**, because a wrong rewrite
+  under-constrains the circuit. The per-candidate equivalence obligations in §4
+  and the fail-closed spawn conditions in §7 (interpreter differentials,
+  precondition audits, the P3-4 "why was this removed upstream" prerequisite)
+  are the mitigation, and **none of them has been discharged here**.
