@@ -44,3 +44,49 @@ required_attributes = [
 # local choice.
 INERT_FIELD = "inert"
 MACHINE_PARK_PR_LABEL = "review:parked"
+
+[partition_resolver]
+# [OPUS-5] sparq#4365 — the `area:` PARTITION ALGEBRA, offered to `busy_packages_of_pulls`.
+#
+# sparq#4360 made this repo's readiness engine containment-aware: two `area:` keys conflict iff one
+# workspace-derived partition path is a prefix of the other. Per sparq#4365 — a claim about the
+# PRIVATE registry, which nothing in this repository can verify — its `dispatch.yml` mirrors the
+# same key space and still compares by EXACT STRING, so the two legs disagree on every sub-crate
+# key: the double-dispatch class `scripts/dispatch-plan.py`'s #3691 fixtures exist for.
+#
+# #4365 proposed porting a six-line resolver into `dispatch.yml`. These names are the alternative:
+# `dispatch.yml` already clones this checkout and already `load_dispatch`es `dispatch-plan.py`, so
+# `planner.keys_conflict(a, b)` gets the rule AND the tree-derived root set from the same tree, and
+# there is exactly ONE implementation to keep honest. A port would be a second one — and #4360
+# found #4336's hand-written containment table stale before it was even written down.
+required_attributes = [
+    "partition_path",
+    "keys_conflict",
+    "workspace_roots",
+    "DegeneratePartitionRoots",
+]
+
+[partition_resolver.parity_fixture]
+# THE ASSERTION #4365 ASKS FOR, as data both repositories can read. Key -> the partition path it
+# reserves. `python3 scripts/ready-issues.py --dump-partitions KEY...` prints
+# `{"roots": [...], "resolved": {key: path}}` offline with no API calls, precisely so a registry
+# leg can diff against this table cheaply; `dispatch-plan.py --self-test` asserts the loaded module
+# reproduces it here.
+#
+# Every row is load-bearing and each covers a distinct resolution rule:
+"sparq-server-http" = ["sparq-server"]            # region -> its crate
+"sparq-core-store" = ["sparq-core"]               # region -> its crate...
+"sparq-core-nt-dict" = ["sparq-core"]             # ...and two regions of one crate collide
+"sparq-engine-exec" = ["sparq-engine"]            # region -> its crate
+"sparq-engine-serialize" = ["sparq-engine-serialize"]  # REAL sibling crate: stays independent
+"sparq-conformance-floors" = ["sparq-conformance-floors"]  # ditto — #4336's table said otherwise
+"deps" = ["deps"]                                 # single-segment: keeps its OWN partition
+"upstream-noir" = ["upstream"]                    # unknown parent: over-reserves to the head
+"" = []                                           # degenerate: falls CLOSED to the global root
+#
+# NOT `__global__`: an unrecognised single-segment key keeps its OWN partition, which is why `deps`
+# is pinned here as a row rather than left implicit. A registry leg that "falls closed" on those
+# instead would stall the fleet, not harden it — the measurement is recorded on
+# `scripts/ready-issues.py::partition_path` and in
+# `test_readiness_visibility.py::test_single_segment_unknown_key_keeps_its_own_partition`, and is
+# deliberately NOT restated here so there is one place to correct when it is re-measured.

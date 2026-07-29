@@ -34,6 +34,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -381,6 +382,30 @@ class TestWorkspaceDerivedRoots(unittest.TestCase):
         self.assertEqual(dumped["resolved"]["sparq-server-http"], ["sparq-server"])
         self.assertEqual(dumped["resolved"]["sparq-engine-serialize"], ["sparq-engine-serialize"])
         self.assertEqual(dumped["resolved"]["deps"], ["deps"])
+
+    def test_dump_partitions_reproduces_the_declared_registry_parity_fixture(self):
+        """sparq#4365 — the CLI artifact and the declared fixture are ONE expectation, not two.
+
+        `dispatch-plan.py --self-test` asserts the loaded planner MODULE against
+        `orchestration/registry-contract.toml`'s `[partition_resolver.parity_fixture]`. A registry
+        leg that would rather diff a file than call the module reads it from
+        `--dump-partitions`, which is a different code path (argv parsing, JSON encoding, a fresh
+        process with its own tree scan). If those two ever disagree the contract has two answers
+        and the second repo can pick the wrong one, so both are pinned to the same table here.
+        """
+        fixture = tomllib.loads(
+            (REPO_ROOT / "orchestration" / "registry-contract.toml").read_text(encoding="utf-8")
+        )["partition_resolver"]["parity_fixture"]
+        # Every key #4365 enumerates must be declared — a fixture is only as good as its coverage,
+        # and silently dropping a row would leave this test green over a shrinking contract.
+        self.assertEqual(set(fixture), {
+            "sparq-server-http", "sparq-core-store", "sparq-core-nt-dict", "sparq-engine-exec",
+            "sparq-engine-serialize", "sparq-conformance-floors", "deps", "upstream-noir", ""})
+        keys = sorted(fixture)
+        out = subprocess.run(
+            [sys.executable, str(SCRIPTS / "ready-issues.py"), "--dump-partitions", *keys],
+            capture_output=True, text=True, check=True).stdout
+        self.assertEqual(json.loads(out)["resolved"], dict(fixture))
 
 
 class TestConflictAttribution(unittest.TestCase):
