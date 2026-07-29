@@ -457,7 +457,7 @@ edge sequences them (§10.4).
 | `sq-seust` | sonnet | `ssa/ir/dfg/simplify.rs` | NOT canonicalization for IfElse merging; PARK with a findings note if measured neutral (PR #11580 upkeep landmine) — **MEASURED NULL RESULT (0 firings / 556 packages); PARKED per that instruction, no PR; see §10.8** |
 | `sq-jfkwk` | sonnet | findings first; `acir/acir_context/mod.rs` only on a win | comparison-lowering experiment; fail-closed on the #10159 witness-sharing landmine; null result acceptable — **NULL RESULT returned, no PR proposed; bead still open, see §10.7** |
 | `sq-felqr` | opus | design note on noir#4629 only | quadratic ACIR growth; NO implementation before upstream buy-in — **design note DELIVERED, empirical half + live-thread check PENDING; bead still open, see §10.6** |
-| `sq-b0vpc` | sonnet | `noir_stdlib/src/collections/bounded_vec.nr` | only the TomAFrench capacity-assert slice of #5027 |
+| `sq-b0vpc` | sonnet | `noir_stdlib/src/collections/bounded_vec.nr` | only the TomAFrench capacity-assert slice of #5027 — **ALREADY IMPLEMENTED UPSTREAM as draft noir#13314 (@jeswr, 2026-07-10); do NOT re-implement. Two pre-flip review findings outstanding; see §10.11** |
 | `sq-eesz3` | sonnet | none (findings-only) | #6624 / #6313 / #4972 measurement comments upstream — **source analysis done, empirical half + live-thread checks PENDING; bead still open, see §10.5** |
 | `sq-jj3ne` | opus | new `ssa/ir/dfg/` range-analysis module + its two consumer passes | flagship v1; dep-gated on `sq-jthy1` + `sq-rxir8` (shared consumer files) and on the #12780/#12927 coordination pre-flight |
 | `sq-uuvac.2` | haiku | none (existing PR branches only) | shepherd the four open drafts: triage feedback (escalate substantive objections to an opus bead, never rebut directly), rebase on conflict, close sibling beads on merge, refresh the baseline on a new noir pin |
@@ -674,3 +674,37 @@ capability** (`sq-eesz3`, `sq-felqr`, `sq-jfkwk`, and the gate half of
 highest-value next action in the program. Nothing was posted upstream, and no
 upstream issue thread was read from this bead — the issue numbers above are
 carried from these records unverified, and #5501 is demonstrably superseded.
+
+### 10.11 `sq-b0vpc` (row 11, `BoundedVec` capacity assert, noir#5027) — already shipped upstream as a draft (2026-07-29)
+
+> 🤖 **SPARQ agent** [OPUS-5]. Full record:
+> `noir-bounded-vec-capacity-assert-5027.md`.
+
+**Tracking correction.** The bead was picked up cold as an implementation task and
+is **already implemented**: draft PR **noir#13314** (*"feat(stdlib): move BoundedVec
+push capacity check to unconstrained hint"*, @jeswr, commit `efec45ef`, authored
+2026-07-10) touches exactly the §10.3 target file and nothing else. §10.1's status
+table predates it and lists only #13263–#13266; the PR is recorded elsewhere in this
+repo (`orchestration/start-here.toml`, as the ask behind sparq#1840) but was never
+reflected here, so §10.3 read as un-started. It is not. **Do not re-implement it.**
+
+Verified at `master` on 2026-07-29: the PR is still `DRAFT` and unmerged, and
+`bounded_vec.nr:182` still carries the constrained assert. The block is @jeswr's
+author review (§6), not fleet capacity. No acceptance criterion in §10.2 was run in
+that session — no noir checkout, no `nargo`, no `bb` — so nothing below is a
+measurement taken by this bead.
+
+Two findings the companion record raises as preconditions for flipping draft → ready:
+
+| finding | why it blocks the flip |
+|---|---|
+| **No red-on-wrong-answer test.** The existing `#[test(should_fail_with = "push out of bounds")] push_to_full_vector` (`bounded_vec.nr:1353`) still passes with the patch, because the assert still fires during *execution*. It cannot distinguish a constrained check from an unconstrained hint, and the PR adds no test that can | the PR trades away the only constraint-level enforcement and ships no regression guard for the property it traded. §10.2's step-2 differential is the cheapest existing instrument |
+| **The measured table is unreproducible today.** Its corpus rows match §5.2 exactly (8 compose + 4 benchmark packages), so the numbers were plainly taken — but the UltraHonk gate row is the figure §10.8 and §10.10 report the fleet environment could not produce, and `sq-i50o4` has not landed | §5.1 makes gates the arbiter and §4.2's #10159 lesson is that opcodes alone mislead. Unreproducible ≠ wrong, but it goes upstream under a named human author |
+
+A third, softer item: the PR justifies the elision by the ACVM's execution-time
+`IndexOutOfBounds` error, which is an honest-prover property. The stronger in-tree
+argument — that upstream already relies on ACIR's built-in memory-op bound for every
+simple-element array index, via `array_index_needs_explicit_oob_check`
+(`ssa_gen/context.rs:131-136`) — is the one a maintainer will want. On that reading
+the elision is *plausibly* dominated by the array write's own bound; it is **not
+certified sound** by this bead, per `sq-qhy4`.
