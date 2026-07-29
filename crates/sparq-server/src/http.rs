@@ -2378,6 +2378,12 @@ impl ChangeStreamState {
         self.next_seq.load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// [OPUS-5] (sq-iz7ag) The read handle's trim horizon — the oldest seq the durable log still
+    /// retains (`0` until retention drops a segment).
+    fn trim_horizon(&self) -> u64 {
+        self.reader.first_seq()
+    }
+
     /// [FABLE-5] (gh-2436) Operator resync of the LIVE tracked log — the state-level body of
     /// `POST /admin/change-stream/rebase`. Holds the outer hook mutex for the whole
     /// append + tail update, so no commit hook interleaves between the gap-record append
@@ -3009,6 +3015,27 @@ impl AppState {
     #[cfg(feature = "change-stream")]
     pub(crate) fn change_stream_next_seq(&self) -> Option<u64> {
         self.change_stream.as_ref().map(|stream| stream.next_seq())
+    }
+
+    /// [OPUS-5] (sq-iz7ag) The change-stream's **trim horizon** — the oldest seq retention still
+    /// keeps (`sparq_serve::ChangeLog::first_seq`; `0` for a never-trimmed log). `GET /streams`
+    /// resolves `TRIM_HORIZON` to it (a whole-stream replay of a trimmed log would otherwise poll
+    /// below the log's earliest record and fail closed), and answers `410` for an `at`/`after`
+    /// anchor below it. `None` when the change-stream is not configured.
+    ///
+    /// **Scope of the value.** It is the read handle's view, established when this server opened
+    /// the log directory. Retention is an explicit host action (`ChangeLog::apply_retention`) that
+    /// sparq-server never performs itself, so the horizon only moves under a server that opened an
+    /// ALREADY-trimmed log (the restart-after-retention case). A host that trims through its own
+    /// handle *while this server runs* leaves this view stale, and such a poll still fails closed
+    /// as a `500` rather than a `410` — never a silent gap. Reflecting an out-of-band trim live
+    /// needs a cheap re-derived-from-disk horizon in `sparq-serve` (`first_seq` is cached, and
+    /// re-opening the log per poll would re-validate every segment); tracked as follow-up work.
+    #[cfg(feature = "change-stream")]
+    pub(crate) fn change_stream_trim_horizon(&self) -> Option<u64> {
+        self.change_stream
+            .as_ref()
+            .map(|stream| stream.trim_horizon())
     }
 
     /// [FABLE-5] (gh-2436) Re-baselines the RUNNING tracked change log — the operator resync
@@ -4677,8 +4704,9 @@ fn terse_expansion_to_json(expansion: &sparq_terse::Expansion) -> String {
 ///
 /// **Contract.** Read-only — `GET` / `HEAD` only (other methods are `405` with `Allow: GET, HEAD`).
 /// Parameters (see [`crate::streams`]):
-///   * `iteratorType` — `TRIM_HORIZON` (replay all, the default), `AT_SEQUENCE_NUMBER` (`at=N`),
-///     `AFTER_SEQUENCE_NUMBER` (`after=N`, the resume case), or `LATEST` (tail only);
+///   * `iteratorType` — `TRIM_HORIZON` (replay everything RETAINED, the default),
+///     `AT_SEQUENCE_NUMBER` (`at=N`), `AFTER_SEQUENCE_NUMBER` (`after=N`, the resume case), or
+///     `LATEST` (tail only);
 ///   * `at` / `after` — the sequence-number anchor for the anchored iterator types (a bare
 ///     `?after=N` / `?at=N` infers the type);
 ///   * `limit` — the max number of change records (commits) in one response page (default
@@ -4689,6 +4717,12 @@ fn terse_expansion_to_json(expansion: &sparq_terse::Expansion) -> String {
 /// (`nextSequenceNumber`) the consumer persists to resume — gaplessly, across a process restart
 /// (the on-disk log is the source of truth). A poll is a READ over the durable log, so the endpoint
 /// is gated by the read auth like any GET.
+///
+/// [OPUS-5] (sq-iz7ag) **Retention-aware.** `TRIM_HORIZON` starts at the log's trim horizon
+/// (`AppState::change_stream_trim_horizon`), so a retention-trimmed log still replays instead of
+/// answering `500`; an `at` / `after` anchor resolving BELOW the horizon is a `410 Gone` naming
+/// the horizon to resume from (the records are permanently gone — that consumer re-bootstraps),
+/// never a silent restart at the horizon that would skip records it has not seen.
 #[cfg(feature = "change-stream")]
 async fn streams_endpoint(
     State(state): State<AppState>,
@@ -4730,7 +4764,17 @@ async fn streams_endpoint(
     // advances this atomic only after a durable append, so the lookup needs no submitter/log lock.
     // Absent (disabled) is the 404 above, so this is `Some`.
     let next_seq = state.change_stream_next_seq().unwrap_or(0);
-    let from_seq = iter.from_seq(next_seq);
+    // [OPUS-5] (sq-iz7ag) Resolve against the TRIM HORIZON, not seq 0. Retention (sq-n9s4d) drops
+    // whole old segments, and the durable log fails a poll below its earliest retained record
+    // closed — so a `TRIM_HORIZON` replay pinned at 0 would answer `500` on any trimmed log. An
+    // `at`/`after` anchor below the horizon is the caller-recoverable `410` instead of that `500`:
+    // the records it asked for are permanently gone, so it must re-bootstrap (the same status the
+    // time-travel surface returns for a `from` outside the retention window).
+    let trim_horizon = state.change_stream_trim_horizon().unwrap_or(0);
+    let from_seq = match iter.from_seq(next_seq, trim_horizon) {
+        Ok(seq) => seq,
+        Err(trimmed) => return json_error(StatusCode::GONE, &trimmed.to_string()),
+    };
 
     // Poll the durable log from the resolved offset (re-reads the segments from disk; fail-closed on
     // a mid-stream corruption). `None` only if the stream is unconfigured (handled above).
