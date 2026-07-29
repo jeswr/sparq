@@ -446,6 +446,40 @@ impl SecurityDescriptor {
         }
     }
 
+    /// [OPUS-5] sq-km34 — the **IT-MAC** descriptor: honest-majority,
+    /// malicious-with-**unanimous-abort**, for an operator whose integrity rests on
+    /// a session-global secret MAC key `α` rather than on Reed–Solomon redundancy
+    /// (see [`crate::auth_equal`], design §2.5). This is the descriptor that can
+    /// honestly claim detection at the MINIMAL `n = 2t+1`, where
+    /// [`Self::shamir_degree_recon`] at degree `2t` has no redundancy to claim from:
+    /// a deviation is caught with probability `≥ 1 − 1/p` because the adversary
+    /// would have to fix the MAC without knowing `α`.
+    ///
+    /// AXIS-1 `Malicious` (the upgrade over [`Self::semi_honest_only`]), AXIS-2
+    /// `Abort(Unanimous)` — detect-and-abort, deliberately NOT
+    /// [`AbortKind::Identifiable`] (the backend's `Tampered { cheaters }` set is
+    /// heuristic, not sound attribution) and NOT GOD (nothing is corrected).
+    ///
+    /// **FAIL-CLOSED under a dishonest majority** (`n <= 2t`), exactly as
+    /// [`Self::shamir_degree_recon`] does: the batched MAC-check opens `σ` through a
+    /// degree-`t` reconstruction that assumes a strict honest majority, so with
+    /// `n <= 2t` the abort claim is unbacked and this degrades to the semi-honest
+    /// baseline rather than over-claiming. (A genuine dishonest-majority MAC regime
+    /// is SPDZ/MASCOT — a different construction with its own preprocessing, not
+    /// this helper.) `[OPUS-5]`
+    pub fn it_mac_malicious_abort(n: usize, t: usize) -> Self {
+        let threshold = CorruptionThreshold::from_n_t(n, t);
+        if !threshold.is_honest_majority() {
+            return SecurityDescriptor::semi_honest_only(n, t);
+        }
+        SecurityDescriptor {
+            adversary: AdversaryModel::Malicious,
+            output_guarantee: OutputGuarantee::Abort(AbortKind::Unanimous),
+            threshold,
+            public_verifiability: PublicVerifiability(false),
+        }
+    }
+
     /// **Back-compat PROJECTION → [`TrustModel`].** Collapses AXIS-3 to the old
     /// binary trust model so existing callers of `BackendInfo::trust_model`
     /// keep working: honest-/super-honest-majority project to
@@ -515,6 +549,19 @@ pub enum OperatorClass {
     /// (the honest-majority odd-`n` case) degree `2t` has ZERO RS redundancy, so
     /// this open is semi-honest-only there even though the aggregate is robust.
     EqualityJoin,
+    /// [OPUS-5] sq-km34 — the **IT-MAC authenticated** equality / hidden-value join
+    /// ([`crate::auth_equal`]): the same match-bit test, but the masked product is a
+    /// MAC-carrying [`crate::shamir::MacSession::auth_mul`] whose result is
+    /// batch-MAC-checked and opened at degree `t`, never at degree `2t`. Because its
+    /// soundness comes from the secret session key `α` and not from RS redundancy, it
+    /// is detect-and-abort at EVERY honest-majority `(n, t)` — including the minimal
+    /// `n = 2t+1` where [`OperatorClass::EqualityJoin`] is semi-honest-only. Reported
+    /// as a SEPARATE class precisely so the unauthenticated path keeps telling the
+    /// truth about itself: a federation that runs `secure_equal` gets the
+    /// semi-honest-only descriptor, and only one that runs the authenticated path
+    /// gets the abort guarantee. Research-grade; external sign-off pending
+    /// (`sq-qhy4`).
+    AuthenticatedEqualityJoin,
     /// Comparison (`<`, `≤`, `>`): bit-decomposition; not yet realized in the
     /// crate (disclosed operands are recomputed by the verifier outside the
     /// crypto). Reported for completeness so a federation sees the gap.

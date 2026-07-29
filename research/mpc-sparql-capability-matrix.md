@@ -303,7 +303,7 @@ leaks the boolean) or needs P5 to keep the sum itself secret (OPEN — see §4.2
 |---|---|---|---|
 | SH, HM, any N | **BUILT** | equality-to-zero: `d=a−b`, mask `m=d·r`, open `m`; `m==0 ⇔ equal`. 1 mult + 1 open. Leaks only the match bit. | `secure_equal` (`join.rs:411`) |
 | Mal, HM, over-provisioned N | KNOWN→partial | same with checked open; full malicious needs IT-MAC | `reconstruct_degree` checks the 2t open where redundancy exists |
-| Mal, HM, **minimal N=2t+1** | **OPEN (the one real hole)** | **IT-MAC** on the degree-2t product (NOT RS redundancy — there is none at degree 2t when n=2t+1) | documented gap; seam **sq-6d6g**. Per coZK eprint 2025/1026 this is also a *confidentiality* hole, not just correctness |
+| Mal, HM, **minimal N=2t+1** | **BUILT (sq-km34, opt-in)** — was "the one real hole" | **IT-MAC** on the degree-2t product (NOT RS redundancy — there is none at degree 2t when n=2t+1) | `auth_equal::malicious_secure_equal{,_batch}` — never opens at degree 2t: `[[(a−b)·r]]` is a MAC-carrying `auth_mul`, batch-MAC-checked and opened at degree `t`, aborting BEFORE any verdict is returned (the coZK-2025/1026 abort-before-acting discipline). Reported as the separate `OperatorClass::AuthenticatedEqualityJoin` @ Malicious+Abort(Unanimous), so the unauthenticated `secure_equal` keeps its honest SemiHonestOnly descriptor. **Residual:** the hidden-join / bounded-path operators are NOT rewired onto it (follow-on); trusted-dealer + `sq-qhy4` sign-off still pending |
 | any, DM | KNOWN | SPDZ equality (MAC-checked) | no backend |
 
 #### Inner JOIN (hidden key) / cross-credential hidden join
@@ -452,7 +452,7 @@ The directive asks the cost of hardening each operator. Per primitive:
 | Primitive | SH→Mal cost (HM) | SH→Mal cost (DM) |
 |---|---|---|
 | P0 linear / SUM | ~free — RS-checked open is the same Lagrange on clean input; cost only on tamper (BUILT) | SPDZ MAC-check before open (adds the preprocessing tax) |
-| P2 equality | **IT-MAC** at minimal N (the one real hole, sq-6d6g); otherwise RS-checked (BUILT) | SPDZ MAC |
+| P2 equality | **IT-MAC** at minimal N — **BUILT (sq-km34, `auth_equal`)**: ~2× the semi-honest per-pair mult (a second mult-then-reduce carries the MAC) + ONE `σ` open per BATCH, so the marginal round cost is `O(1)` per batch, not per pair; otherwise RS-checked (BUILT) | SPDZ MAC |
 | P3 shuffle | malicious shuffle needs a proof-of-permutation (verifiable shuffle) — KNOWN | heavier |
 | P4 mult / P5 comparison | Goyal–Song "malicious comes free in honest majority" (eprint 2020/134) — **~no online overhead at HM** | Beaver triples + MAC-check — preprocessing dominates |
 | P6 sort | inherits comparator + checked opens | inherits |
@@ -660,10 +660,21 @@ LANDED on `main`** — see the per-item ✅ DONE notes.
    set-returning query. Bead **sq-shk5 (OPEN)** ✅ tracked.
 5. **IT-MAC for the degree-2t equality open at minimal N=2t+1.** Promotes `secure_equal` from
    semi-honest-only to detect/abort at minimal N; also closes the coZK-2025/1026 confidentiality
-   interaction. **[RECONCILED 2026-06-16] Now beaded and IN FLIGHT:** the authenticated-sharing
-   foundation (`authenticated.rs`, **`sq-km34.1` CLOSED**) has landed; the remaining IT-MAC work
-   (MAC-carrying mult, batched MAC-check, malicious equality/comparison, registry wiring,
-   adversarial catch-tests, the bench AXIS-1 lift) is decomposed into **`sq-km34.2–.9` (OPEN)**.
+   interaction. **[RECONCILED 2026-06-16] Beaded and IN FLIGHT:** the authenticated-sharing
+   foundation (`authenticated.rs`, **`sq-km34.1` CLOSED**) landed; the MAC-carrying mult
+   (`sq-km34.3`), the batched MAC-check (`sq-km34.4`) and the malicious comparison (`sq-ka8m`)
+   followed. **[RECONCILED 2026-07] ✅ The EQUALITY promotion itself has now landed —
+   `auth_equal.rs` (`sq-km34`)**: `malicious_secure_equal{,_batch}` runs the same
+   `m = (a−b)·r` test over authenticated sharings, so the product is never opened at degree
+   `2t` at all — it is batch-MAC-checked and opened at degree `t`, and the check ABORTS before
+   any verdict is returned (that abort-before-acting is the coZK-2025/1026 mitigation). One `σ`
+   open authenticates a whole `|L|·|R|` sweep. It is reported as the SEPARATE
+   `OperatorClass::AuthenticatedEqualityJoin` @ Malicious+Abort(Unanimous) — the promotion is
+   real only for callers that actually run the authenticated path, and the unauthenticated
+   `secure_equal` keeps its honest SemiHonestOnly descriptor. **Still open around it:** wiring
+   the hidden-value join / bounded-path hops onto the authenticated equality, the dealer-less
+   randomness (`sq-yyro`), selective-failure/abort-leakage composition, and the `sq-qhy4`
+   external sign-off (nothing here is an audited claim).
 6. **Distributed randomness (PRSS / dealer-less VSS).** Replace the single-dealer simulation so
    masks/correlated randomness are jointly generated — prerequisite for any real federation and
    for P4/P5 correlated randomness. **Design + seam DONE** (bead **sq-yyro**:

@@ -137,6 +137,22 @@ pub mod compare;
 // the secret α). Reported as OperatorClass::Comparison @ Malicious+Abort. See the
 // module docs and `research/mpc-malicious-security-design.md`.
 pub mod auth_compare;
+// [OPUS-5] sq-km34: the IT-MAC twin of the masked-open EQUALITY test — the residual
+// "one real hole" of the capability matrix §4.2. The semi-honest `secure_equal` opens
+// its masked product `m = (a−b)·r` at degree `2t`, which at the MINIMAL n = 2t+1 has
+// ZERO Reed–Solomon redundancy, so a forged share flips the match bit silently and
+// undetectably. This module never opens at degree `2t`: the product is a MAC-carrying
+// `MacSession::auth_mul` and the value is opened only through the §2.5 batched
+// MAC-check, which aborts on `σ != 0` BEFORE any verdict is acted on (the
+// coZK-2025/1026 confidentiality discipline). Soundness comes from the secret session
+// key `α`, not RS over-determination, so the equality operator is promoted from
+// SemiHonestOnly to detect-and-abort AT THE MINIMAL n — reported as the separate
+// OperatorClass::AuthenticatedEqualityJoin @ Malicious+Abort(Unanimous), leaving the
+// unauthenticated OperatorClass::EqualityJoin telling the truth about itself. One σ
+// open authenticates a whole |L|·|R| batch. Read the module docs' operand-order note
+// and residuals (trusted dealer, adopted mask slot, sq-qhy4 sign-off pending) before
+// making any claim from it.
+pub mod auth_equal;
 // [OPUS-4.8] sq-6fv7 (sq-ka8m residual): the IT-MAC-HARDENED twin of
 // `compare::disclose_threshold_verdict` — the federation £100k path that operates
 // on an EXISTING secret-shared sum. sq-ka8m's `auth_compare` made the cleartext

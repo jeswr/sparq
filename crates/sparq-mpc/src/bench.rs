@@ -148,7 +148,11 @@ impl CellSecurity {
         let e = match operator {
             OperatorClass::LinearAggregate => rs_budget(backend.parties(), backend.threshold()),
             OperatorClass::EqualityJoin => rs_budget(backend.parties(), 2 * backend.threshold()),
-            OperatorClass::Comparison => 0,
+            // [OPUS-5] sq-km34: the IT-MAC equality's detection comes from the secret
+            // session key `α`, NOT from RS redundancy, so it has no correction budget
+            // to report — `0` (detect-and-abort, never correct) is the faithful value
+            // for the `MaliciousSecurity` projection.
+            OperatorClass::AuthenticatedEqualityJoin | OperatorClass::Comparison => 0,
         };
         CellSecurity {
             trust_model: desc.trust_model(),

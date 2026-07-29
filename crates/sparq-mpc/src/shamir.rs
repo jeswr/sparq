@@ -264,6 +264,19 @@ impl ShamirBackend {
                 None => SecurityDescriptor::semi_honest_only(self.n, self.t),
                 Some(e) => SecurityDescriptor::shamir_degree_recon(self.n, self.t, e),
             },
+            // [OPUS-5] sq-km34 — the IT-MAC authenticated equality
+            // (`crate::auth_equal`). It NEVER opens at degree `2t`: the masked
+            // product is a MAC-carrying `MacSession::auth_mul` (mult + BGW reduce,
+            // with an independent reduce carrying `[α·m]`), and the value is opened
+            // only through the §2.5 batched check, which aborts on `σ != 0` BEFORE
+            // the verdict is acted on. Detection therefore does NOT come from the RS
+            // budget — there is none at `n = 2t+1` — but from the secret session key
+            // `α`, so the guarantee is the SAME at every honest-majority `(n, t)`
+            // and does not consult `rs_correction_budget` at all. That is the whole
+            // point of the promotion: no over-provisioning required.
+            OperatorClass::AuthenticatedEqualityJoin => {
+                SecurityDescriptor::it_mac_malicious_abort(self.n, self.t)
+            }
             // Comparison (`<`,`≤`,`>`, threshold) IS realized in-crypto now
             // (sq-rrz4, [`crate::compare`]): bit-decomposition MSB-first comparison
             // that chains multiplications through `degree_reduce` and opens ONLY the
@@ -1532,8 +1545,13 @@ pub fn mul_shares_raw(a: &[Share], b: &[Share]) -> Result<Vec<Share>, MpcError> 
 /// The honest-majority constructor fixes `t = ⌊(n−1)/2⌋`, so `n = 2t + 1` for odd
 /// `n` (e.g. n=3,5,7,9): there is **zero** RS redundancy at degree `2t` and
 /// tampering one product share is undetectable — pinned by a boundary test. A
-/// true fix at `n = 2t + 1` needs an information-theoretic MAC (the deferred WI-4
-/// seam, bead sq-6d6g), not RS redundancy. Even `n` (n=4,6,8) yields exactly one
+/// true fix at `n = 2t + 1` needs an information-theoretic MAC (WI-4, beads
+/// sq-6d6g / sq-km34), not RS redundancy — **landed for the equality open as
+/// [`crate::auth_equal`]**, which avoids the degree-`2t` open entirely (the
+/// masked product is a MAC-carrying [`MacSession::auth_mul`] batch-checked and
+/// opened at degree `t`). It is a SEPARATE, opt-in path: THIS function's
+/// degree-`2t` boundary is unchanged, and the unauthenticated callers keep the
+/// semi-honest-only descriptor. Even `n` (n=4,6,8) yields exactly one
 /// redundant share at degree `2t` (`e_max = 0`), so tampering is DETECT-only
 /// there; correction (`e_max ≥ 1`) at degree `2t` needs `n ≥ 2t + 3`.
 pub fn reconstruct_degree(shares: &[Share], degree: usize) -> Result<Fp, MpcError> {

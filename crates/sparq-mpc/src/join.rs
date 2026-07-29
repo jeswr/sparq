@@ -437,9 +437,18 @@ impl HiddenValueJoin {
     /// silently flip the match verdict. HONESTY: the honest-majority instantiation
     /// `t = ⌊(n−1)/2⌋` gives `n = 2t + 1` for odd `n`, where degree-`2t` has ZERO
     /// RS redundancy — tampering is information-theoretically undetectable and is
-    /// NOT claimed otherwise (pinned by a boundary test; a true fix needs a MAC,
-    /// deferred WI-4 / bead sq-6d6g). Detection at `n > 2t + 1` thus requires
-    /// running the equality test on MORE than the minimal party count.
+    /// NOT claimed otherwise (pinned by a boundary test). Detection at `n > 2t + 1`
+    /// thus requires running THIS test on MORE than the minimal party count.
+    /// **The MAC fix (WI-4 / sq-6d6g / sq-km34) has landed as the opt-in
+    /// [`crate::auth_equal`]** — it never opens at degree `2t`, so it detects and
+    /// aborts at the MINIMAL `n = 2t+1` (soundness from a secret session MAC key,
+    /// not RS redundancy). This primitive is deliberately left on the cheap
+    /// semi-honest path and keeps reporting
+    /// [`OperatorClass::EqualityJoin`](crate::backend::OperatorClass::EqualityJoin);
+    /// a federation that needs the abort guarantee must call the authenticated
+    /// path (reported as
+    /// [`OperatorClass::AuthenticatedEqualityJoin`](crate::backend::OperatorClass::AuthenticatedEqualityJoin)),
+    /// which costs a second mult-then-reduce per pair plus ONE batched check.
     fn secure_equal(&self, dealer: &mut ShamirDealer, a: Fp, b: Fp) -> Result<bool, MpcError> {
         // Secret-share both keys, then run the shared-input core. The scalar path
         // deals its own shares; the batched path deals a whole key COLUMN up front
@@ -468,8 +477,9 @@ impl HiddenValueJoin {
     /// EVERY party count the constructor builds:
     ///
     /// - **odd `n`** (`n = 2t+1`): zero RS redundancy at degree `2t` ⇒ tampering
-    ///   is information-theoretically undetectable (a MAC is the deferred WI-4
-    ///   fix, bead sq-6d6g) — NOT claimed otherwise;
+    ///   is information-theoretically undetectable ON THIS PATH — NOT claimed
+    ///   otherwise; the MAC fix (WI-4, sq-6d6g / sq-km34) is the opt-in
+    ///   [`crate::auth_equal`], which detects and aborts at this same `n`;
     /// - **even `n`** (`n = 2t+2`): exactly one redundant share ⇒ a tampered
     ///   product share is DETECTED and the open aborts with [`MpcError::Tampered`].
     ///
