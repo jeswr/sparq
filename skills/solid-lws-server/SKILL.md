@@ -205,12 +205,22 @@ contract** — where this server and the spec disagree, treat the spec as right 
 server as the defect. Write integration code against the spec, and pin the same revision
 the server pins:
 
-- **Solid-OIDC access tokens and DPoP proofs** are not verified by this crate at all.
-  Verification is delegated to the pinned
+- **Solid-OIDC access tokens and DPoP proofs**: baseline verification on the normal
+  cache-miss path is delegated to the pinned
   [`solid-oidc-verifier`](https://github.com/jeswr/solid-oidc-verifier) git dependency
-  (see `crates/sparq-lws-core/Cargo.toml` for the exact revision). What a token or proof
-  must look like is whatever that revision enforces; this server adds no acceptance of
-  its own.
+  (see `crates/sparq-lws-core/Cargo.toml` for the exact revision), so what a token or
+  proof must look like is whatever that revision enforces. Delegated is not
+  pass-through, though, and integrators should know the two places this crate
+  participates. On a **verified-token-cache hit** the token signature and claims are not
+  re-verified (they were checked once on the miss, and the entry is keyed by the token
+  and expires at `min(token exp, a shorter validation-freshness TTL)`), while the fresh
+  DPoP proof is verified locally on every request — proof signature, `htm`/`htu`/`iat`,
+  `ath`, the `jti` replay mark against the same shared replay store, and the `cnf.jkt`
+  binding — orchestrated from the verifier's own public primitives
+  (`crates/sparq-lws-core/src/auth_cache.rs`). Separately, the
+  server layers **opt-in** proof-of-possession tiers on top of an already-verified token:
+  RFC 8705 mTLS cert-bound tokens, and DPoP-SK below. Both are off by default
+  (`crates/sparq-lws-core/src/auth.rs`).
 - **DPoP-SK**, the sender-key proof-of-possession tier, follows the
   [DPoP-SK profile](https://jeswr.github.io/dpop-sk-spec/). The spec's Appendix-A worked
   example is executed as a test vector in `crates/sparq-lws-core/src/pop/sk/derive.rs`, so
