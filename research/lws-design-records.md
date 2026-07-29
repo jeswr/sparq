@@ -263,7 +263,8 @@ Verified in-tree members of that estate:
 | Spec / dependency | Pinned reference | What depends on it | Evidence |
 |---|---|---|---|
 | **DPoP-SK** — the sender-key DPoP profile (<https://jeswr.github.io/dpop-sk-spec/>) | cited by section; the spec's Appendix-A worked example is executed as a test vector | `src/pop/sk/**` (HKDF/HMAC DPoP-SK attestation) | `src/pop/sk/mod.rs:4-5`; `src/pop/sk/derive.rs:5`, `:162` |
-| **solid-oidc-verifier** (<https://github.com/jeswr/solid-oidc-verifier>) | git dependency at rev `89c896249a726398b78302fd2f65eef0a82af681`, `network` feature | all Solid-OIDC access-token + DPoP proof verification; `JwksProvider` / `ReplayStore` | `Cargo.toml:230`; `src/auth.rs:5`; `src/lib.rs:15` |
+| **solid-oidc-verifier** (<https://github.com/jeswr/solid-oidc-verifier>) | git dependency at rev `89c896249a726398b78302fd2f65eef0a82af681`, `network` feature | baseline (cache-miss) Solid-OIDC access-token + DPoP proof verification; `JwksProvider` / `ReplayStore` | `Cargo.toml:230`; `src/auth.rs:5`; `src/lib.rs:15` |
+| **solid-oidc-verifier**, cache-hit path | same pin, used through the verifier's *public* primitives (`verify_proof_with_embedded_jwk`, `Jwk::thumbprint_sha256`, `proof_has_ath`, `peek_claims`) + the SHARED `ReplayStore` | on a verified-token-cache hit the cached token is reused, and `src/auth_cache.rs` re-verifies the fresh proof itself: signature, `htm`/`htu`/`iat`, `ath == H(token)`, the `jti` replay mark, and the `cnf.jkt` binding | `src/auth_cache.rs:13-31`, `:55-57` |
 | **lws-acp** (<https://github.com/jeswr/lws-acp/tree/main/docs>) | consulted as prior art | the ACP/trust-graph authorization design | [`solid-trust-graph-authz-design.md`](./solid-trust-graph-authz-design.md) §; [`security-properties-ontology-design.md`](./security-properties-ontology-design.md) |
 
 The DPoP-SK row is the pattern worth copying: `src/pop/sk/derive.rs:162` runs the *spec's
