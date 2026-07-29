@@ -118,7 +118,7 @@ at construction — the MCP-Solid proposal draft's local-trusted-agent deploymen
 | tool | wraps | notes |
 | --- | --- | --- |
 | `query` | `wrap_for_view_opt_in` + `query_json_view_with_budget` | session-scoped; empty default graph, union opt-in via the reserved `FROM` IRI |
-| `resource_get` | the document's named graph, serialized | same dataset `query` reads — the two surfaces cannot disagree |
+| `resource_get` | the document's named graph, serialized | same dataset `query` reads — the two surfaces cannot disagree; optional `accept` picks `application/n-triples` (default) or `text/turtle` |
 | `container_list` | `ldp:contains` triples in the container's OWN graph | data-derived, never IRI-path guessing |
 | `update` *(gated)* | `PodStore::update_as` / `update_as_acp` | per-graph session write check, fail-closed |
 | `resource_put` *(gated)* | atomic named-graph swap (+ containment link on create) | `.acl`/`.acr` route through `put_acl`/`put_acl_acp` |
@@ -130,8 +130,29 @@ nonexistent one (existence non-disclosure, draft §9.3); ACL writes are gated on
 `acl:Control` of the governed resource and re-derive authorization **atomically with
 fail-closed rollback**; creation is authorized at the closest existing parent container
 (the Solid creation rule); every content write re-materializes the view so the next
-tool call sees it. RDF sources only (Turtle / N-Triples) in v1; non-RDF binaries stay
-out of scope (spec gaps stay beaded, not spun).
+tool call sees it. RDF sources only (Turtle / N-Triples, plus JSON-LD under the `jsonld`
+feature) — see the content-negotiation and non-RDF notes below.
+
+**Content negotiation + the non-RDF story — [SONNET-4.6] sq-wbsf5.** `resource_get`
+takes an optional `accept` and serves either `application/n-triples` (the default when
+`accept` is absent, so existing callers are unchanged) or `text/turtle` — the SAME
+triples from the SAME read gate, written by `oxttl`'s `TurtleSerializer` with the pod
+vocabularies (`ldp`/`acl`/`acp`/`solid`/…) registered for compaction. It is ONE media
+type, not an HTTP `Accept` list; `;`-parameters (`q=`) are ignored; anything else is a
+tool error naming what IS served, never a silent coercion. Negotiation is a pure
+function of the `accept` string evaluated BEFORE the read gate, so it cannot become an
+existence oracle. JSON-LD is INGEST-only (`resource_put` under the `jsonld` feature) —
+there is no JSON-LD writer, so `accept: application/ld+json` is refused.
+`resources/read` has no per-request `accept` in MCP, so it stays N-Triples.
+
+**Non-RDF (binary) resources are SCOPED OUT — by decision, not omission.** The pod IS an
+RDF dataset (one named graph per document); a binary body has nowhere to live, and a
+base64-in-a-literal side-channel would be a fake pod whose ACL has no graph to anchor
+to. `resource_put` therefore refuses a non-RDF `content_type` with a message that names
+the scope-out, and no non-RDF resource can exist to be read. Adding one is a
+`sparq-solid` STORAGE design (blob half + its authorization join), not an MCP
+tool-surface change; if it lands, the MCP shape is already known — `resources/read`
+carries a base64 `blob` field alongside `text`.
 
 #### The `resources` surface + notifications (draft §8/§10) — [SONNET-4.6] sq-cmjmr
 
