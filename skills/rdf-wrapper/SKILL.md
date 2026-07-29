@@ -397,6 +397,14 @@ against the *specific* datatype it carries, so `-1`^^`xsd:nonNegativeInteger` an
 `1e5`^^`xsd:decimal` are `LoadError::ValueSpace`, and the XSD float specials are
 exactly `INF`/`-INF`/`NaN` — not Rust's `inf`/`infinity`/`nan` spellings.
 
+A node shape may nest itself, directly or through a cycle, so the nested field is
+boxed — but the generated struct still OWNS its nested values, and cyclic *data*
+has no finite owned representation. Each loader therefore tracks the
+`(shape, focus)` pairs whose loads are in progress and returns
+`LoadError::Cycle` the moment a `sh:node` edge leads back into one, rather than
+recursing until the stack is exhausted. A node reached twice on disjoint branches
+is a tree, not a cycle, and still loads.
+
 A struct is generated for each named node shape that has `sh:property` children,
 plus the node shapes those reach through `sh:node`; constraints outside the table
 (`sh:pattern`, `sh:in`, …) do not shape the Rust type and stay with `sparq-shacl`

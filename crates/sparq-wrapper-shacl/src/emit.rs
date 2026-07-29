@@ -130,6 +130,14 @@ pub enum LoadError {
         shape: &'static str,
         predicate: String,
     },
+    /// A `sh:node` edge led back to a shape already being loaded at this same
+    /// focus node. The generated structs OWN their nested values, so a cyclic
+    /// graph has no finite representation: the loader fails closed here instead
+    /// of recursing until the stack is exhausted.
+    Cycle {
+        shape: &'static str,
+        node: String,
+    },
 }
 
 impl fmt::Display for LoadError {
@@ -204,6 +212,11 @@ impl fmt::Display for LoadError {
                 f,
                 "<{}>: sh:closed shape does not allow predicate <{}>",
                 shape, predicate
+            ),
+            LoadError::Cycle { shape, node } => write!(
+                f,
+                "<{}>: cyclic sh:node data re-enters this shape at {}",
+                shape, node
             ),
         }
     }
@@ -503,6 +516,30 @@ fn is_instance_of<S: Source + ?Sized>(
     }
     false
 }
+
+/// The `(shape, focus)` pairs whose loads are in progress, outermost first. Each
+/// generated loader records its own pair before reading the values it nests, so a
+/// `sh:node` edge that leads back into an in-progress load is seen as the cycle it
+/// is rather than followed.
+#[allow(dead_code)]
+type Active = Vec<(&'static str, Value)>;
+
+/// Records `(shape, focus)` as in progress, or reports the cycle that entering it
+/// again would be.
+///
+/// Nothing is unwound on the error path: the error aborts the whole load, and every
+/// public `load` starts from a fresh, empty stack.
+#[allow(dead_code)]
+fn enter(active: &mut Active, shape: &'static str, focus: &Value) -> Result<(), LoadError> {
+    if active.iter().any(|(s, node)| *s == shape && node == focus) {
+        return Err(LoadError::Cycle {
+            shape,
+            node: focus.describe(),
+        });
+    }
+    active.push((shape, focus.clone()));
+    Ok(())
+}
 "#;
 
 /// Emits the whole object model as one Rust source file.
@@ -639,12 +676,26 @@ fn emit_struct(out: &mut String, def: &StructSchema) {
         }
     }
 
-    out.push_str("\n    /// Loads `focus` from `source`, enforcing the shape's constraints.\n");
     out.push_str(
-        "    pub fn load<S: Source + ?Sized>(source: &S, focus: &Value) -> Result<Self, LoadError> {\n",
+        "\n    /// Loads `focus` from `source`, enforcing the shape's constraints.\n\
+         \x20   ///\n\
+         \x20   /// Cyclic `sh:node` data — a nested value that leads back to this shape at\n\
+         \x20   /// a focus node already being loaded — is a `LoadError::Cycle`, not\n\
+         \x20   /// unbounded recursion.\n\
+         \x20   pub fn load<S: Source + ?Sized>(source: &S, focus: &Value) -> Result<Self, LoadError> {\n\
+         \x20       Self::load_guarded(source, focus, &mut Active::new())\n\
+         \x20   }\n\n\
+         \x20   /// `load`, threading the active `(shape, focus)` stack through the nested\n\
+         \x20   /// loads so a cyclic `sh:node` edge is refused instead of followed.\n\
+         \x20   fn load_guarded<S: Source + ?Sized>(\n\
+         \x20       source: &S,\n\
+         \x20       focus: &Value,\n\
+         \x20       __active: &mut Active,\n\
+         \x20   ) -> Result<Self, LoadError> {\n\
+         \x20       enter(__active, Self::SHAPE, focus)?;\n",
     );
     if def.fields.is_empty() && def.closed.is_none() {
-        out.push_str("        let _ = (source, focus);\n");
+        out.push_str("        let _ = source;\n");
     }
     if def.closed.is_some() {
         out.push_str(
@@ -664,13 +715,20 @@ fn emit_struct(out: &mut String, def: &StructSchema) {
     for field in &def.fields {
         emit_field_load(out, field);
     }
-    out.push_str("        Ok(Self {\n");
+    out.push_str("        __active.pop();\n        Ok(Self {\n");
     for field in &def.fields {
         let _ = writeln!(out, "            {},", field.name);
     }
     out.push_str("        })\n    }\n}\n");
 }
 
+/// Emits one field's `let <name> = { … };`.
+///
+/// Each binding SHADOWS anything of the same name for the rest of the loader, and
+/// a field name is `to_snake(local_name(predicate))` — which can be `active`, as
+/// `ex:active` in the emission test is. The cycle stack is therefore threaded as
+/// `__active`: `to_snake` trims leading underscores, so no generated field can
+/// ever be spelled that way.
 fn emit_field_load(out: &mut String, field: &crate::schema::FieldSchema) {
     let p = predicate_const(&field.name);
     let convert = converter(field);
@@ -769,9 +827,11 @@ fn converter(field: &crate::schema::FieldSchema) -> String {
         ValueSchema::Reference { rust, .. } => {
             format!("{rust}::load(source, Self::SHAPE, Self::{p}, value)?")
         }
+        // The GUARDED entry point, so the active `(shape, focus)` stack survives the
+        // descent and a cyclic `sh:node` edge is refused rather than re-entered.
         ValueSchema::Nested { rust } => match field.cardinality {
-            Cardinality::Many { .. } => format!("{rust}::load(source, value)?"),
-            _ => format!("Box::new({rust}::load(source, value)?)"),
+            Cardinality::Many { .. } => format!("{rust}::load_guarded(source, value, __active)?"),
+            _ => format!("Box::new({rust}::load_guarded(source, value, __active)?)"),
         },
         ValueSchema::Iri => format!("load_iri(Self::SHAPE, Self::{p}, value)?"),
         ValueSchema::Term => "value.clone()".to_string(),

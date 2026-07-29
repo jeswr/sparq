@@ -266,8 +266,147 @@ fn main() {
 }
 "#;
 
+/// A SELF-REFERENTIAL node shape: `ex:next`/`ex:alt` both nest `ex:LinkShape`
+/// itself, which the IR boxes. Cyclic data under it is what the guard is for.
+/// `ex:child` is unbounded, so the `Vec<Nested>` descent — the other emitted
+/// nesting path — is compiled and guarded here too, not only the boxed one.
+const CYCLIC_SHAPES: &str = r#"
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix ex:   <http://example.org/> .
+
+ex:LinkShape a sh:NodeShape ;
+    sh:property [ sh:path ex:label ; sh:datatype xsd:string ; sh:minCount 1 ; sh:maxCount 1 ] ;
+    sh:property [ sh:path ex:next ;  sh:node ex:LinkShape ; sh:maxCount 1 ] ;
+    sh:property [ sh:path ex:alt ;   sh:node ex:LinkShape ; sh:maxCount 1 ] ;
+    sh:property [ sh:path ex:child ; sh:node ex:LinkShape ] .
+"#;
+
+/// Drives the recursive model: a cyclic graph must be a typed error, an acyclic
+/// one must still load, and a node reached twice on DISJOINT branches must not be
+/// mistaken for a cycle.
+const CYCLIC_HARNESS: &str = r#"
+#[allow(dead_code)]
+mod model;
+
+use model::{Link, LoadError, Source, Value};
+
+const EX: &str = "http://example.org/";
+const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+
+struct Triples(Vec<(Value, String, Value)>);
+
+impl Source for Triples {
+    fn values(&self, subject: &Value, predicate: &str) -> Vec<Value> {
+        self.0
+            .iter()
+            .filter(|(s, p, _)| s == subject && p == predicate)
+            .map(|(_, _, o)| o.clone())
+            .collect()
+    }
+
+    fn predicates(&self, subject: &Value) -> Vec<String> {
+        self.0
+            .iter()
+            .filter(|(s, _, _)| s == subject)
+            .map(|(_, p, _)| p.clone())
+            .collect()
+    }
+}
+
+fn iri(local: &str) -> Value {
+    Value::Iri(format!("{}{}", EX, local))
+}
+
+fn p(local: &str) -> String {
+    format!("{}{}", EX, local)
+}
+
+fn label(node: &str) -> (Value, String, Value) {
+    (
+        iri(node),
+        p("label"),
+        Value::Literal {
+            lexical: node.to_string(),
+            datatype: XSD_STRING.to_string(),
+            language: None,
+        },
+    )
+}
+
+/// Asserts the graph is refused as cyclic, at `at`.
+fn cyclic(triples: Vec<(Value, String, Value)>, at: &str) {
+    match Link::load(&Triples(triples), &iri("a")) {
+        Err(LoadError::Cycle { shape, node }) => {
+            assert_eq!(shape, Link::SHAPE);
+            assert_eq!(node, format!("<{}{}>", EX, at));
+        }
+        other => panic!("cyclic sh:node data was not refused: {:?}", other),
+    }
+}
+
+fn main() {
+    // THE obligation: a self-loop under a self-referential shape is a typed error,
+    // not recursion until the stack is exhausted.
+    cyclic(vec![label("a"), (iri("a"), p("next"), iri("a"))], "a");
+
+    // And a longer cycle, a -> b -> a, reported where it closes.
+    cyclic(
+        vec![
+            label("a"),
+            (iri("a"), p("next"), iri("b")),
+            label("b"),
+            (iri("b"), p("next"), iri("a")),
+        ],
+        "a",
+    );
+
+    // The `Vec<Nested>` descent is guarded on the same terms as the boxed one.
+    cyclic(
+        vec![
+            label("a"),
+            (iri("a"), p("child"), iri("b")),
+            label("b"),
+            (iri("b"), p("child"), iri("a")),
+        ],
+        "a",
+    );
+
+    // An ACYCLIC chain of the very same shape still loads in full.
+    let chain = Triples(vec![
+        label("a"),
+        (iri("a"), p("next"), iri("b")),
+        label("b"),
+        (iri("b"), p("next"), iri("c")),
+        label("c"),
+    ]);
+    let link = Link::load(&chain, &iri("a")).expect("an acyclic chain loads");
+    assert_eq!(link.label, "a");
+    let second = link.next.as_ref().expect("a -> b");
+    assert_eq!(second.label, "b");
+    assert_eq!(second.next.as_ref().map(|l| l.label.as_str()), Some("c"));
+
+    // One node reached twice on DISJOINT branches is a tree, not a cycle: the
+    // guard tracks loads IN PROGRESS, not every node ever seen.
+    let shared = Triples(vec![
+        label("a"),
+        (iri("a"), p("next"), iri("b")),
+        (iri("a"), p("alt"), iri("b")),
+        label("b"),
+    ]);
+    let link = Link::load(&shared, &iri("a")).expect("a shared child is not a cycle");
+    assert_eq!(link.next.as_ref().map(|l| l.label.as_str()), Some("b"));
+    assert_eq!(link.alt.as_ref().map(|l| l.label.as_str()), Some("b"));
+    assert!(link.child.is_empty());
+}
+"#;
+
 fn generated_source() -> String {
-    let graph = Graph::load_str(SHAPES, "turtle").expect("shapes graph parses");
+    source_for(SHAPES)
+}
+
+fn source_for(shapes: &str) -> String {
+    let graph = Graph::load_str(shapes, "turtle").expect("shapes graph parses");
     let model = ShapesModel::parse(&graph);
     let schema = lower(&model).expect("the shapes graph lowers");
     emit(&schema)
@@ -285,18 +424,36 @@ fn emission_is_byte_identical_across_runs() {
     assert_eq!(emit(&schema), emit(&schema));
 }
 
-/// Writes the generated model plus the harness, compiles both with `rustc -D
-/// warnings`, and runs the result.
+/// The closed-shape/scalar/reference model: compiled and run for real.
 #[test]
 fn generated_model_compiles_and_enforces_its_shape() {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("sq-1rg2q-12-emission");
+    compile_and_run("sq-1rg2q-12-emission", &generated_source(), HARNESS);
+}
+
+/// A self-referential `sh:node` shape over cyclic data must be a DETERMINISTIC
+/// typed error. Before the active-`(shape, node)` guard this recursed until the
+/// harness process died of stack exhaustion — so this test fails loudly, at the
+/// run step, if the guard is removed.
+#[test]
+fn generated_loader_refuses_cyclic_nesting() {
+    compile_and_run(
+        "sq-1rg2q-12-cyclic",
+        &source_for(CYCLIC_SHAPES),
+        CYCLIC_HARNESS,
+    );
+}
+
+/// Writes `model` plus `harness` into a scratch dir named `slug`, compiles them
+/// with `rustc -D warnings`, and runs the result.
+fn compile_and_run(slug: &str, model: &str, harness: &str) {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(slug);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
 
     let model_rs = dir.join("model.rs");
     let main_rs = dir.join("main.rs");
-    std::fs::write(&model_rs, generated_source()).expect("write model.rs");
-    std::fs::write(&main_rs, HARNESS).expect("write main.rs");
+    std::fs::write(&model_rs, model).expect("write model.rs");
+    std::fs::write(&main_rs, harness).expect("write main.rs");
 
     let exe = dir.join("harness");
     let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
