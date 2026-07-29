@@ -125,7 +125,14 @@ Public API (5 items, each with a doctest + direct unit test): `parse_program`,
   maintenance across strata is the BIG follow-up phase and must be SEQUENCED with the
   deletion-maintenance bead sq-6tykl.4 (same-crate collision, per the epic note).
   *(Since shipped as Phase 3, sq-4foq0 — see §6 item 3 and `datalog::incr`.)*
-- **No CLI/`MaterializedGraph` wiring** — library API only.
+- **No CLI/`MaterializedGraph` wiring** — library API only. *(Both since shipped. The
+  `MaterializedGraph`-style handle landed as Phase 3's `MaterializedProgram` (sq-4foq0, §6 item 3)
+  — the same `new`/`insert`/`delete`/`contains`/`closure`/`len` shape as
+  `MaterializedGraph`/`MaterializedOwlGraph`, plus a batched `update`. The CLI
+  landed as sq-p4zci (§6 item 6): `--reason datalog:<rules.dlog>` on `query` and
+  `reason <f> <fmt> datalog:<rules.dlog> [out.nt]`, behind the CLI's own opt-in `datalog` feature
+  forwarding this crate's. The one-shot CLI path calls `eval`, not `MaterializedProgram` — there
+  is nothing to maintain across a single process run.)* <!-- [SONNET-4.6] sq-p4zci -->
 - The `datalog` feature IS now in `scripts/coverage.sh`'s per-crate measurement
   (sq-iwf3c): sparq-reason has a `measure()` case arm naming `--features datalog`, the
   `sparq-reason-el` `rbox,hasse` pattern, so the module is no longer compiled out of the
@@ -164,8 +171,19 @@ Public API (5 items, each with a doctest + direct unit test): `parse_program`,
    projected `COUNT(DISTINCT ?v)`, relational float/double FILTER, and variable
    predicates with conservative top-node stratification and incremental relevance.
    <!-- [GPT-5.6] -->
-6. **Surface wiring** (sq-p4zci) — CLI `--reason datalog:<rules.dlog>`, `MaterializedGraph`-style
-   handle, SKILL/docs examples beyond the API reference.
+6. **Surface wiring** (sq-p4zci) — SHIPPED: CLI `--reason datalog:<rules.dlog>` on `query` plus
+   `reason <f> <fmt> datalog:<rules.dlog> [out.nt]`, behind sparq-cli's opt-in `datalog` feature
+   (forwards `sparq-reason/datalog`; no new third-party dep). Reasoning runs at the same
+   parse → index-build seam as `--reason rdfs`, so the default path is untouched; the profile is
+   intercepted before the RDFS/RL profile parse (as `el` is) and, feature-off, is a hard exit-2
+   error naming the feature with NO fall-back — RDFS/OWL-RL are monotone, so substituting one
+   would silently drop `NOT`/`AGGREGATE`. Parse errors and stratification rejections are exit-1
+   and name the construct / a predicate on the cycle. Worked examples in `skills/cli/SKILL.md`
+   and `skills/inference/SKILL.md`; end-to-end tests in `crates/sparq-cli/tests/datalog_cli.rs`
+   with the feature-OFF half in `tests/error_paths_cli.rs`, run by the
+   `sparq-cli (datalog …)` feature-matrix leg. The `MaterializedGraph`-style handle this item
+   also listed was ALREADY shipped by Phase 3 (`MaterializedProgram`, item 3), so no second
+   handle was added. <!-- [SONNET-4.6] -->
 7. **N3-compiled adoption of the checker** (sq-pi2k0) — replace the documented caller-discipline
    stratification of `n3::compiled` `log:notIncludes` with this checked stratification.
 8. **Coverage measure-case wiring** (sq-iwf3c) — SHIPPED: the sparq-reason `measure()` case

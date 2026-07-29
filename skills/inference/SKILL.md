@@ -284,6 +284,29 @@ change; its per-update set/index bookkeeping is O(affected visible input) — th
 incrementality win is delta-driven RULE-FIRING work (deterministic counters), not set
 ops. <!-- [GPT-5.6] sq-citho / sq-a7bmo --> <!-- [FABLE-5] sq-4foq0 -->
 
+**CLI surface** (`sparq-cli --features datalog`; [SONNET-4.6] sq-p4zci). The rules live in a file,
+because unlike `rdfs`/`owl` a Datalog program is user-supplied, so the reasoning profile carries an
+argument — `datalog:<rules.dlog>`, split on the first `:`:
+
+```bash
+# Materialize the closure to N-Triples...
+sparq-cli reason graph.nt ntriples datalog:rules.dlog closure.nt
+# ...or reason-then-query in one shot; derived facts are ordinary triples, so this is plain BGP
+sparq-cli query graph.nt ntriples 'SELECT ?x WHERE { ?x a <http://ex/Leaf> }' \
+  --reason datalog:rules.dlog
+```
+
+Reasoning runs at the parse → index-build seam (as `--reason rdfs` does), and stderr reports the
+program shape and the expansion: `reasoned [datalog rules.dlog]: <n> rule(s) in <k> stratum/strata;
+<base> -> <total> distinct triples (+<derived> derived) in <elapsed>s`. A rule document outside the
+documented fragment — or with a plain syntax error — (exit 1, the parser names the construct) and a
+program whose recursion cycles through `NOT`/`AGGREGATE` (exit 1, the checker names a predicate on
+the cycle) both fail LOUDLY, each message carrying the rules-file path.
+Without the feature, `--reason datalog:…` is exit 2 naming it, with **no** fall-back profile —
+RDFS/OWL-RL are monotone, so silently substituting one would drop `NOT`/`AGGREGATE` and change the
+answer set. The one-shot CLI path uses `eval`; for a long-lived closure under mutation, use
+`MaterializedProgram` from the library API above.
+
 ## D-entailment datatype typing (opt-in `d-entail` feature, `sparq_reason::dtype`)
 
 The RDF 1.1 Semantics D-entailment regime materializes the **rdfD1 datatype-typing rule**: a well-formed literal of a recognized datatype `d` entails a typing triple. `materialize(Profile::D, …)` adds the recognized 30-XSD-datatype map via `Recognized::standard()` — the `DTYPE_TABLE` single source of truth in `dtype.rs` — plus the always-recognized `rdf:langString` (or bring a custom map via `materialize_d(d, …, …)`):
