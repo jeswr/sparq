@@ -4920,6 +4920,7 @@ dependencies = [
  "serde_json",
  "sparq-canon",
  "sparq-core",
+ "sparq-difftest",
  "sparq-engine",
 ]
 
