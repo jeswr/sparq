@@ -13,26 +13,54 @@
 #   * fail-loud: replay errors AND a total blocker both exit NON-ZERO.
 #   * idempotency-key stability + the dry-run path (no gh calls).
 #
-# Fully hermetic: no gh, no git, no cargo, no network. Correlation is a pure
-# function; the CLI is exercised via --failed-jobs-file + --metadata-file +
-# --dry-run and a monkeypatched git-log/diff.
+# [OPUS-5] sparq-org/sparq#4965 — THE ADMISSION SEAM. The alarm's analysis was always
+# correct and its workflow `if:` was where it died: the job admitted only
+# `github.event.workflow_run.conclusion == 'failure'`, and fail-fast cancellation
+# means a nightly with real failures concludes `cancelled`. 266 of 267 alarm runs were
+# job-SKIPPED, and a skipped job is never red. Three new classes pin the fix, and each
+# one can go RED:
+#   * TestKnownPositiveRun30333511110 — the REAL job census of the real cancelled
+#     nightly that carried four real failures. Asserts the alarm fires and names
+#     EXACTLY sparq-mpc / sparq-fedplan / sparq-reason. The fixture is its own
+#     negative control: sparq-core and sparq-geo sit in the SAME job family with
+#     `cancelled` conclusions, so an admission that let cancelled jobs through would
+#     name them too and this test would red.
+#   * TestQuietOnACleanCancelledRun — the NOISE half. A cancelled run with nothing
+#     genuinely failed must exit 0 SILENTLY (no finding, no red). Without this,
+#     "admit everything" satisfies the positive test and buys a nightly alarm that
+#     cries wolf 35 times a window — muted is inert by a slower route.
+#   * TestWorkflowAdmissionSeam — evaluates the LIVE `if:` from
+#     .github/workflows/selection-alarm.yml against real event payloads, with the
+#     evaluator itself validated against a KNOWN ANSWER: the verbatim OLD expression
+#     must reject the known positive and admit the 2026-07-19 `failure` run, exactly
+#     as GitHub was observed to behave. An instrument that cannot reproduce the bug
+#     cannot certify the fix.
 #
-# Run:  python3 scripts/tests/test_ci_selection_alarm.py   (stdlib only)
+# Fully hermetic: no gh, no git, no cargo, no network. Correlation is a pure
+# function; the CLI is exercised via --failed-jobs-file / a stubbed `_run` +
+# --metadata-file + --dry-run and a monkeypatched git-log/diff.
+#
+# Run:  python3 scripts/tests/test_ci_selection_alarm.py   (stdlib + PyYAML, which the
+#       docs-quality quick-gates job installs once in its shared setup)
 
 from __future__ import annotations
 
 import importlib.util
 import io
 import json
+import re
 import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
+import yaml
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 ALARM = REPO_ROOT / "scripts" / "ci_selection_alarm.py"
 CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+ALARM_YML = REPO_ROOT / ".github" / "workflows" / "selection-alarm.yml"
 
 
 def _load_module():
@@ -273,6 +301,458 @@ class TestCliFailLoud(unittest.TestCase):
             self.assertIn("[dry-run] WOULD file", out)
             self.assertIn("crate:sparq-core", out)
             self.assertIn("#55", out)
+
+
+# --------------------------------------------------------------------------- #
+# #4965 — THE ADMISSION SEAM
+# --------------------------------------------------------------------------- #
+
+# The REAL job census of nightly CI run 30333511110 (sparq-org/sparq, 2026-07-28,
+# event=schedule, head_branch=main). Fetched from
+# `repos/sparq-org/sparq/actions/runs/30333511110/jobs` with `gh api --paginate`
+# (--limit would have truncated silently): 84 jobs — 43 success, 31 cancelled,
+# 6 skipped, 4 FAILURE. GitHub concluded the RUN `cancelled`.
+#
+# The four failures are reproduced VERBATIM. The cancelled/success/skipped rows are a
+# faithful sample of the real names, chosen to preserve the property that matters: the
+# cancelled rows are SIBLINGS of the failed ones in the very same job family, naming
+# crates that were ALSO selection-skipped. So "admit any non-success job" and
+# "admit the run, then correlate every job" both name extra crates and red the test.
+KNOWN_POSITIVE_RUN_ID = "30333511110"
+KNOWN_POSITIVE_HEAD_SHA = "63dfb7a0b0a8c92c8b478929a09b650843ce0a87"
+KNOWN_POSITIVE_RUN_CONCLUSION = "cancelled"
+KNOWN_POSITIVE_JOBS: list[tuple[str, str]] = [
+    # (job name, conclusion) — the four GENUINE failures:
+    ("mutation ratchet (cargo-mutants, advisory) (sparq-mpc)", "failure"),
+    ("mutation ratchet (cargo-mutants, advisory) (sparq-fedplan)", "failure"),
+    ("mutation ratchet (cargo-mutants, advisory) (sparq-reason, 1/3)", "failure"),
+    ("mutation ratchet (cargo-mutants, advisory) (sparq-reason, 2/3)", "failure"),
+    # …fail-fast cancelled siblings, same family, crates also in the skipped set:
+    ("mutation ratchet (cargo-mutants, advisory) (sparq-core)", "cancelled"),
+    ("mutation ratchet (cargo-mutants, advisory) (sparq-geo)", "cancelled"),
+    ("mutation ratchet (cargo-mutants, advisory) (sparq-shacl)", "cancelled"),
+    ("mutation ratchet (cargo-mutants, advisory) (sparq-solid)", "cancelled"),
+    ("mutation ratchet (cargo-mutants, advisory) (sparq-server)", "cancelled"),
+    ("mutation ratchet (cargo-mutants, advisory) (sparq-vectors)", "cancelled"),
+    ("mutation ratchet (cargo-mutants, advisory) (sparq-engine, 1/24, 360)", "cancelled"),
+    # …and green/skipped rows.
+    ("unsafe-register (count ratchet)", "success"),
+    ("detect rust changes", "success"),
+    ("nightly-gate", "success"),
+    ("coverage (nightly, full incl. heavy vectors)", "skipped"),
+]
+
+# The crates the four REAL failures name. Anything else appearing is over-admission.
+KNOWN_POSITIVE_CRATES = {"sparq-mpc", "sparq-fedplan", "sparq-reason"}
+
+
+def _jobs_tsv(jobs: list[tuple[str, str]]) -> str:
+    """The exact `gh api --jq '.jobs[] | [.name, (.conclusion // "")] | @tsv'` shape."""
+    return "".join(f"{name}\t{conclusion}\n" for name, conclusion in jobs)
+
+
+class _StubRun:
+    """Stands in for ci_selection_alarm._run so the REAL gh/git call sites execute.
+
+    Dispatches on the actual argv the script builds, so a change to those call sites
+    surfaces here as an unstubbed-command error rather than a silent pass."""
+
+    def __init__(self, jobs: list[tuple[str, str]], base_sha: str | None,
+                 commits: list[tuple[str, int | None]],
+                 diffs: dict[str, list[str]], run_conclusion: str = ""):
+        self.jobs, self.base_sha = jobs, base_sha
+        self.commits, self.diffs = commits, diffs
+        self.run_conclusion = run_conclusion
+        self.calls: list[list[str]] = []
+
+    def __call__(self, cmd, cwd=None, check=True):  # noqa: ANN001 — mirrors _run
+        self.calls.append(list(cmd))
+        joined = " ".join(cmd)
+        if cmd[0] == "gh" and "/jobs" in joined:
+            return _jobs_tsv(self.jobs)
+        if cmd[0] == "gh" and any(re.search(r"actions/runs/\d+$", c) for c in cmd):
+            return self.run_conclusion + "\n"
+        if cmd[0] == "gh" and "status=success" in joined:
+            return (self.base_sha or "") + "\n"
+        if cmd[:2] == ["git", "log"]:
+            return "".join(f"{sha}\x00subject (#{pr})\n" for sha, pr in self.commits)
+        if cmd[:2] == ["git", "diff"]:
+            return "".join(f"{p}\n" for p in self.diffs.get(cmd[-1], []))
+        raise AssertionError(f"unstubbed command: {cmd}")
+
+
+def _metadata_with(members: list[str], deps: dict[str, list[str]] | None = None) -> dict:
+    """Minimal cargo-metadata-shaped dict (see ci_select.parse_workspace)."""
+    deps = deps or {}
+    root = "/repo"
+    pkgs = [
+        {
+            "id": f"{m} 0", "name": m, "source": None,
+            "manifest_path": f"{root}/crates/{m}/Cargo.toml",
+            "dependencies": [{"name": d} for d in deps.get(m, [])],
+        }
+        for m in members
+    ]
+    return {"workspace_root": root, "packages": pkgs,
+            "workspace_members": [f"{m} 0" for m in members]}
+
+
+class TestKnownPositiveRun30333511110(unittest.TestCase):
+    """CRITERION 1. The real cancelled nightly that carried four real failures must
+    make the alarm ACT, and name exactly the crates those four failures name."""
+
+    MEMBERS = ["sparq-core", "sparq-geo", "sparq-mpc", "sparq-fedplan", "sparq-reason",
+               "sparq-shacl", "sparq-solid", "sparq-server", "sparq-vectors",
+               "sparq-engine"]
+
+    def test_gather_failed_jobs_admits_only_the_four_genuine_failures(self):
+        """The analysis half, driven through the REAL gather_failed_jobs over the real
+        job census — cancelled siblings must not enter the failed set."""
+        mod = _load_module()
+        mod._run = _StubRun(KNOWN_POSITIVE_JOBS, None, [], {})
+        failed = mod.gather_failed_jobs(
+            KNOWN_POSITIVE_RUN_ID, "sparq-org/sparq", KNOWN_POSITIVE_RUN_CONCLUSION
+        )
+        self.assertEqual(
+            len(failed), 4,
+            f"expected the 4 genuinely-failed jobs of run {KNOWN_POSITIVE_RUN_ID}, "
+            f"got {failed}",
+        )
+        crates: set[str] = set()
+        for job in failed:
+            crates |= mod.job_crate_tokens(job, set(self.MEMBERS))
+        self.assertEqual(
+            crates, KNOWN_POSITIVE_CRATES,
+            "the failed jobs must map onto exactly the crates the four real failures "
+            "name; extra crates mean cancelled siblings leaked into the failed set",
+        )
+
+    def test_end_to_end_alarm_fires_and_names_the_crates(self):
+        """CRITERION 1, end to end through main(): the real cancelled run, the real job
+        census, a landed PR that selection-skipped those crates => findings filed.
+
+        Before the #4965 fix this run never reached the script at all — the workflow
+        `if:` skipped the job (266 of 267 runs). Pinning it at the script level is only
+        half the guard; TestWorkflowAdmissionSeam pins the other half."""
+        mod = _load_module()
+        with tempfile.TemporaryDirectory() as d:
+            meta_f = Path(d) / "meta.json"
+            # sparq-geo is the only crate the landed commit touches and nothing depends
+            # on it, so ci_select selects {sparq-geo} and SKIPS every other member —
+            # including the four failures' crates AND their cancelled siblings.
+            meta_f.write_text(json.dumps(_metadata_with(self.MEMBERS)))
+            landed_sha = "a" * 40
+            mod._run = _StubRun(
+                jobs=KNOWN_POSITIVE_JOBS,
+                base_sha="9" * 40,
+                commits=[(landed_sha, 4321)],
+                diffs={landed_sha: ["crates/sparq-geo/src/lib.rs"]},
+            )
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = mod.main([
+                    "--run-id", KNOWN_POSITIVE_RUN_ID,
+                    "--head-sha", KNOWN_POSITIVE_HEAD_SHA,
+                    "--run-conclusion", KNOWN_POSITIVE_RUN_CONCLUSION,
+                    "--repo", "sparq-org/sparq", "--repo-root", d,
+                    "--metadata-file", str(meta_f), "--dry-run",
+                ])
+            out = buf.getvalue()
+            self.assertEqual(rc, 0, f"alarm exited {rc} on the known positive:\n{out}")
+            self.assertIn("[dry-run] WOULD file", out,
+                          "the alarm did NOT act on the known positive:\n" + out)
+            for crate in sorted(KNOWN_POSITIVE_CRATES):
+                self.assertIn(f"crate:{crate}", out,
+                              f"finding for {crate} missing:\n{out}")
+            self.assertIn("#4321", out, "the suspect landed PR must be named")
+            # Negative control INSIDE the positive: crates whose jobs were merely
+            # CANCELLED were skipped by the same PR, so they are in the skip set and
+            # would be named the moment admission stopped distinguishing them.
+            for cancelled_crate in ("sparq-core", "sparq-shacl", "sparq-server"):
+                self.assertNotIn(
+                    f"crate:{cancelled_crate}", out,
+                    f"{cancelled_crate} was only CANCELLED, never failed — naming it "
+                    f"means the admission stopped being precise:\n{out}",
+                )
+
+
+class TestQuietOnACleanCancelledRun(unittest.TestCase):
+    """CRITERION 2 — the NOISE half. `cancelled` is the COMMON nightly conclusion (35
+    of 45 all-time). A cancelled run with nothing genuinely failed must produce NO
+    finding and NO red; otherwise the fix trades a silent alarm for a muted one."""
+
+    def test_clean_cancelled_run_is_a_quiet_no_op(self):
+        mod = _load_module()
+        clean = [(name, "cancelled" if c == "failure" else c)
+                 for name, c in KNOWN_POSITIVE_JOBS]
+        self.assertNotIn("failure", {c for _, c in clean},
+                         "fixture must contain NO genuine failure for this control")
+        with tempfile.TemporaryDirectory() as d:
+            meta_f = Path(d) / "meta.json"
+            meta_f.write_text(json.dumps(_metadata_with(["sparq-core", "sparq-geo"])))
+            mod._run = _StubRun(clean, base_sha="9" * 40, commits=[("a" * 40, 1)],
+                                diffs={"a" * 40: ["crates/sparq-geo/src/lib.rs"]})
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = mod.main([
+                    "--run-id", "1", "--head-sha", "b" * 40,
+                    "--run-conclusion", "cancelled",
+                    "--repo", "o/r", "--repo-root", d,
+                    "--metadata-file", str(meta_f), "--dry-run",
+                ])
+            out = buf.getvalue()
+            self.assertEqual(rc, 0, "a clean cancelled run must NOT red the alarm lane")
+            self.assertNotIn("WOULD file", out, "a clean cancelled run must file nothing")
+            self.assertIn("nothing genuinely failed", out,
+                          "the quiet no-op must still say why it did nothing:\n" + out)
+
+    def test_failure_concluded_run_with_no_failed_job_is_still_LOUD(self):
+        """ANTI-REGRESSION on the fail-loud invariant. The quiet branch must be scoped
+        to conclusions that can legitimately carry zero failures. A run GitHub concluded
+        `failure` MUST contain a failed job, so an empty set there is an API-shape
+        anomaly and must still exit NON-ZERO — otherwise #4965's fix would have bought
+        its quiet by deleting the masking guard the alarm was built around."""
+        mod = _load_module()
+        green_only = [(n, "success") for n, _ in KNOWN_POSITIVE_JOBS]
+        with tempfile.TemporaryDirectory() as d:
+            meta_f = Path(d) / "meta.json"
+            meta_f.write_text(json.dumps(_metadata_with(["sparq-core"])))
+            for conclusion in ("failure", "timed_out", ""):
+                with self.subTest(run_conclusion=conclusion or "<unknown>"):
+                    mod._run = _StubRun(green_only, None, [], {},
+                                        run_conclusion=conclusion)
+                    buf = io.StringIO()
+                    with redirect_stdout(buf):
+                        rc = mod.main([
+                            "--run-id", "1", "--head-sha", "b" * 40,
+                            "--run-conclusion", conclusion,
+                            "--repo", "o/r", "--repo-root", d,
+                            "--metadata-file", str(meta_f), "--dry-run",
+                        ])
+                    self.assertEqual(
+                        rc, 1,
+                        f"a {conclusion or 'conclusion-unknown'}-concluded run with no "
+                        f"failed job must fail LOUD, not exit 0",
+                    )
+
+
+# --- the workflow `if:` seam ------------------------------------------------- #
+
+# The expression this job carried until #4965, verbatim from
+# .github/workflows/selection-alarm.yml. It is the KNOWN ANSWER the evaluator below is
+# validated against: it must REJECT the cancelled known positive (which is why the
+# alarm was skipped 266 times) and ADMIT a failure-concluded nightly (which is why it
+# acted once, on 2026-07-19). An evaluator that cannot reproduce the bug cannot
+# certify the fix.
+OLD_BROKEN_IF = (
+    "github.event_name == 'workflow_dispatch' || "
+    "(github.event.workflow_run.conclusion == 'failure' && "
+    "(github.event.workflow_run.event == 'schedule' || "
+    "github.event.workflow_run.event == 'workflow_dispatch') && "
+    "github.event.workflow_run.head_branch == 'main')"
+)
+
+_TOKEN_RE = re.compile(r"\s*(\(|\)|\|\||&&|==|!=|'[^']*'|[A-Za-z_][A-Za-z0-9_.\-]*)")
+
+
+def _tokenize(expr: str) -> list[str]:
+    """Tokenize the SMALL GitHub-expression grammar these `if:`s use. Anything outside
+    it RAISES — the evaluator is fail-closed, so an expression shape it does not
+    understand REDs the suite instead of being silently judged admissible."""
+    toks, pos = [], 0
+    while pos < len(expr):
+        m = _TOKEN_RE.match(expr, pos)
+        if not m:
+            if expr[pos].isspace():
+                pos += 1
+                continue
+            raise ValueError(f"unsupported token at {pos}: {expr[pos:pos + 30]!r}")
+        toks.append(m.group(1))
+        pos = m.end()
+    return toks
+
+
+def _lookup(path: str, ctx: dict):
+    """`github.event.workflow_run.event` -> ctx['github']['event']['workflow_run']
+    ['event']; a missing leg is null, and null == 'literal' is False (GitHub semantics
+    for an absent context property)."""
+    cur = ctx
+    for part in path.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return None
+        cur = cur[part]
+    return cur
+
+
+def eval_if(expr: str, ctx: dict) -> bool:
+    """Evaluate a `||`/`&&`/`==`/`!=`/parenthesised GitHub `if:` against a context."""
+    toks = _tokenize(expr)
+    pos = 0
+
+    def peek():
+        return toks[pos] if pos < len(toks) else None
+
+    def operand():
+        nonlocal pos
+        t = toks[pos]
+        pos += 1
+        if t.startswith("'"):
+            return t[1:-1]
+        if t in ("true", "false"):
+            return t == "true"
+        return _lookup(t, ctx)
+
+    def primary():
+        nonlocal pos
+        if peek() == "(":
+            pos += 1
+            val = or_expr()
+            if peek() != ")":
+                raise ValueError("unbalanced parentheses")
+            pos += 1
+            return val
+        left = operand()
+        if peek() in ("==", "!="):
+            op = toks[pos]
+            pos += 1
+            right = operand()
+            return (left == right) if op == "==" else (left != right)
+        return bool(left)
+
+    def and_expr():
+        nonlocal pos
+        val = primary()
+        while peek() == "&&":
+            pos += 1
+            val = primary() and val
+        return val
+
+    def or_expr():
+        nonlocal pos
+        val = and_expr()
+        while peek() == "||":
+            pos += 1
+            val = and_expr() or val
+        return val
+
+    result = or_expr()
+    if pos != len(toks):
+        raise ValueError(f"trailing tokens: {toks[pos:]}")
+    return bool(result)
+
+
+def _workflow_run_ctx(conclusion: str, event: str = "schedule",
+                      head_branch: str = "main") -> dict:
+    return {"github": {"event_name": "workflow_run",
+                       "event": {"workflow_run": {"conclusion": conclusion,
+                                                  "event": event,
+                                                  "head_branch": head_branch}}}}
+
+
+class TestWorkflowAdmissionSeam(unittest.TestCase):
+    """CRITERION 1+2 at the seam that actually killed the alarm. Every assertion drives
+    the LIVE `if:` string parsed structurally out of the workflow, so a comment
+    mentioning `conclusion` cannot satisfy or break it."""
+
+    @staticmethod
+    def _live_if() -> str:
+        doc = yaml.safe_load(ALARM_YML.read_text())
+        return " ".join(doc["jobs"]["alarm"]["if"].split())
+
+    # -- instrument validation (run FIRST: a broken evaluator invalidates everything) --
+    def test_evaluator_reproduces_the_old_bug(self):
+        """KNOWN ANSWER. The pre-#4965 expression must SKIP the cancelled known positive
+        and RUN on a failure-concluded nightly — exactly the live behaviour measured
+        over 267 runs (266 skipped; the one action on the 2026-07-19 `failure`). If this
+        ever passes trivially, every other assertion in this class is vacuous."""
+        self.assertFalse(
+            eval_if(OLD_BROKEN_IF, _workflow_run_ctx("cancelled")),
+            "CONTROL FAILED: the evaluator thinks the OLD expression admitted a "
+            "cancelled run. It did not — that is the entire defect of #4965, and an "
+            "instrument that cannot see it cannot certify the fix.",
+        )
+        self.assertTrue(
+            eval_if(OLD_BROKEN_IF, _workflow_run_ctx("failure")),
+            "CONTROL FAILED: the evaluator thinks the OLD expression rejected a "
+            "failure-concluded nightly. It admitted them — that is how the alarm acted "
+            "on 2026-07-19.",
+        )
+
+    def test_evaluator_is_fail_closed_on_an_unknown_shape(self):
+        """An expression using syntax outside the supported grammar must RAISE, never
+        be silently judged admissible."""
+        with self.assertRaises(ValueError):
+            eval_if("contains(github.ref, 'main') ? 1 : 0", _workflow_run_ctx("failure"))
+
+    # -- the fix ---------------------------------------------------------------- #
+    def test_live_if_admits_the_known_positive_cancelled_nightly(self):
+        """CRITERION 1, seam half. Reinstate `conclusion == 'failure'` in the live
+        workflow and this REDs by name."""
+        self.assertTrue(
+            eval_if(self._live_if(), _workflow_run_ctx(KNOWN_POSITIVE_RUN_CONCLUSION)),
+            f"the selection-alarm job `if:` does NOT admit nightly run "
+            f"{KNOWN_POSITIVE_RUN_ID} (conclusion=cancelled, event=schedule, "
+            f"branch=main), which carried FOUR genuinely-failed jobs. A run-level "
+            f"conclusion cannot express 'some job failed' — do not filter on it here; "
+            f"scripts/ci_selection_alarm.py makes that decision over the real job list.",
+        )
+
+    def test_live_if_admits_every_terminal_run_conclusion(self):
+        """The general property behind the known positive: NO run conclusion may be
+        excluded here, because the aggregate is lossy for every one of them."""
+        for conclusion in ("failure", "cancelled", "timed_out", "success",
+                           "startup_failure", "neutral", "action_required", "stale"):
+            with self.subTest(conclusion=conclusion):
+                self.assertTrue(
+                    eval_if(self._live_if(), _workflow_run_ctx(conclusion)),
+                    f"conclusion={conclusion!r} is excluded by the job `if:`",
+                )
+
+    def test_live_if_still_rejects_the_runs_that_are_not_the_oracle(self):
+        """QUANTIFIER DIRECTION. Widening on CONCLUSION must not widen on EVENT or
+        BRANCH: only the full-matrix nightly on main is the selection oracle. A PR's CI
+        completion carries a diff, so selection narrowing there is legitimate and
+        correlating it would manufacture findings. Without this, 'admit everything'
+        passes the two tests above."""
+        for label, ctx in (
+            ("pull_request run on main",
+             _workflow_run_ctx("failure", event="pull_request")),
+            ("push run on main", _workflow_run_ctx("failure", event="push")),
+            ("merge_group run", _workflow_run_ctx("failure", event="merge_group")),
+            ("scheduled run off main",
+             _workflow_run_ctx("failure", head_branch="sparq-agent/x")),
+        ):
+            with self.subTest(case=label):
+                self.assertFalse(
+                    eval_if(self._live_if(), ctx),
+                    f"the alarm must not fire for a {label}",
+                )
+
+    def test_operator_dispatch_always_runs(self):
+        """The manual re-correlation path is unconditional (operator asked)."""
+        self.assertTrue(
+            eval_if(self._live_if(), {"github": {"event_name": "workflow_dispatch"}})
+        )
+
+    def test_the_workflow_passes_the_run_conclusion_to_the_script(self):
+        """The conclusion is still NEEDED — for the fail-loud/quiet split — so it must
+        reach the script. Structural: read the step's env + the run command."""
+        doc = yaml.safe_load(ALARM_YML.read_text())
+        steps = doc["jobs"]["alarm"]["steps"]
+        correlate = [s for s in steps if "ci_selection_alarm.py" in s.get("run", "")]
+        self.assertEqual(len(correlate), 1, "expected exactly one correlate step")
+        step = correlate[0]
+        self.assertIn(
+            "workflow_run.conclusion", str(step.get("env", {})),
+            "the step must receive the run conclusion — without it the script cannot "
+            "tell an anomalous empty failed-job set from an ordinary cancelled run",
+        )
+        self.assertIn("--run-conclusion", step["run"])
+
+    def test_suite_is_wired_into_ci(self):
+        """Anti-vacuity anchor: this file could otherwise leave CI's reachable set."""
+        text = (REPO_ROOT / ".github" / "workflows" / "docs-quality.yml").read_text()
+        self.assertIn("scripts/tests/test_ci_selection_alarm.py", text)
 
 
 if __name__ == "__main__":

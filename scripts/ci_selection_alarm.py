@@ -21,6 +21,13 @@
 #   `workflow_run` trigger, see .github/workflows/selection-alarm.yml), files
 #   issues, and never blocks a merge (design §6.1: "fail-open").
 #
+#   [OPUS-5] #4965 — WHAT COUNTS AS A NIGHTLY WORTH CORRELATING. A "failed nightly"
+#   means "a nightly with genuinely-failed JOBS", never "a nightly GitHub concluded
+#   `failure`". Those are different populations: fail-fast cancels the surviving
+#   matrix legs, so the RUN concludes `cancelled` and the run-level conclusion is a
+#   lossy aggregate. Admission is therefore made HERE, over the job list, by the same
+#   FAILED_CONCLUSIONS predicate the analysis uses — see STRICT_EMPTY_CONCLUSIONS.
+#
 # TWO DESIGN INVARIANTS (both load-bearing):
 #   1. FAIL-SAFE / FAIL-LOUD (opposite of ci_select.py's fail-CLOSED). An
 #      alarm-INFRASTRUCTURE error (cannot list the failed jobs, cannot load cargo
@@ -88,6 +95,33 @@ KEY_PREFIX = "selection-alarm-key"
 
 # Job conclusions that count as a "failed" nightly job.
 FAILED_CONCLUSIONS = {"failure", "timed_out"}
+
+# RUN-level conclusions for which an EMPTY genuinely-failed-job set is ANOMALOUS
+# (fail-loud, invariant 1). [OPUS-5] sparq-org/sparq#4965.
+#
+# WHY THIS EXISTS. The workflow used to admit ONLY `conclusion == 'failure'` runs,
+# so "the run fired => at least one job failed" was a safe premise and an empty
+# failed-job set could only be an API-shape surprise. That premise cost the alarm
+# its whole population: on a fail-fast matrix ONE dying job CANCELS the other 30,
+# and GitHub then concludes the RUN `cancelled`, not `failure`. MEASURED over all
+# 45 nightlies: 35 `cancelled`, 7 `success`, 3 `failure` (last 2026-07-19) — 266 of
+# 267 alarm runs job-SKIPPED, and a skipped job is never red, so the alarm went
+# inert in silence. Known positive: run 30333511110 concluded `cancelled` while
+# carrying FOUR genuinely `failure` jobs (sparq-mpc / sparq-fedplan / sparq-reason).
+#
+# The run conclusion is therefore a LOSSY aggregate and is no longer the admission
+# filter (see .github/workflows/selection-alarm.yml). What survives of the old
+# premise is exactly this: a run GitHub concluded `failure` or `timed_out` MUST
+# contain a job in FAILED_CONCLUSIONS, so an empty set there is still anomalous and
+# must never be swallowed into a silent exit 0. Every OTHER conclusion — above all
+# `cancelled`, which is the COMMON case here — can legitimately carry zero genuine
+# job failures, and for those an empty set is a correct, quiet no-op. That split is
+# what keeps a nightly alarm from crying wolf 35 times a window; an alarm that cries
+# wolf gets muted, which is the same inertness by a slower route.
+#
+# "" (conclusion unknown / unresolvable) is STRICT on purpose: fail loud on
+# ignorance rather than assume the quiet branch.
+STRICT_EMPTY_CONCLUSIONS = {"failure", "timed_out", ""}
 
 # --- triage lanes (design §5.2 + the erratum) --------------------------------
 # The change-based selector skips two lane CLASSES per PR:
@@ -323,9 +357,24 @@ def _run(cmd: list[str], cwd: str | None = None, check: bool = True) -> str:
     return proc.stdout
 
 
-def gather_failed_jobs(run_id: str, repo: str) -> list[str]:
-    """Names of the nightly run's jobs whose conclusion is a failure (design: the
-    failed-job set to correlate). Uses `gh api --paginate` over the run's jobs."""
+def fetch_run_conclusion(run_id: str, repo: str) -> str:
+    """The RUN-level conclusion of `run_id`, for the paths where the caller does not
+    already have it (the alarm's own workflow_dispatch). Fail-loud: an unreadable
+    run conclusion leaves us unable to tell an anomaly from a quiet no-op."""
+    out = _run(
+        ["gh", "api", f"repos/{repo}/actions/runs/{run_id}", "--jq", ".conclusion // \"\""]
+    )
+    return out.strip()
+
+
+def gather_failed_jobs(run_id: str, repo: str, run_conclusion: str = "") -> list[str]:
+    """Names of the nightly run's jobs whose conclusion is a GENUINE failure (design:
+    the failed-job set to correlate). Uses `gh api --paginate` over the run's jobs.
+
+    `run_conclusion` is the RUN-level aggregate, used ONLY to decide whether an empty
+    result is anomalous — see STRICT_EMPTY_CONCLUSIONS. The per-JOB filter is
+    unchanged: cancelled siblings of a fail-fast matrix are not failures and never
+    enter the correlation."""
     out = _run(
         [
             "gh", "api", "--paginate",
@@ -340,13 +389,15 @@ def gather_failed_jobs(run_id: str, repo: str) -> list[str]:
         name, _, conclusion = line.partition("\t")
         if conclusion.strip() in FAILED_CONCLUSIONS:
             failed.append(name)
-    # The workflow only fires on a failure-concluded run, so an empty failed-job
-    # set is always anomalous (jobs-API filter=latest re-run race, shape surprise,
-    # etc.).  Distinguish this from "no correlation found" to prevent silent exit 0
-    # masking a real failure.
-    if not failed:
+    # A run GitHub concluded `failure`/`timed_out` MUST contain a failed job, so an
+    # empty set there is anomalous (jobs-API filter=latest re-run race, shape
+    # surprise) and must be distinguished from "no correlation found" to prevent a
+    # silent exit 0 masking a real failure. A `cancelled` (or `success`) run may
+    # legitimately have none — that is the quiet no-op, handled by the caller.
+    if not failed and run_conclusion.strip() in STRICT_EMPTY_CONCLUSIONS:
         raise AlarmError(
-            "gather_failed_jobs: empty failed-job set on a failure-concluded run "
+            "gather_failed_jobs: empty failed-job set on a "
+            f"{run_conclusion.strip() or 'conclusion-unknown'}-concluded run "
             f"(run_id={run_id}); jobs-API shape surprise or filter=latest re-run "
             "race — cannot correlate, refusing to exit 0"
         )
@@ -508,6 +559,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     p.add_argument("--run-id", required=True, help="the failed nightly CI run id")
     p.add_argument("--head-sha", required=True, help="the nightly run's head SHA")
+    p.add_argument("--run-conclusion", default="",
+                   help="the nightly run's RUN-level conclusion. NOT an admission "
+                        "filter (#4965) — it only decides whether an EMPTY "
+                        "genuinely-failed-job set is anomalous (STRICT_EMPTY_"
+                        "CONCLUSIONS) or a quiet no-op. Empty => looked up via gh on "
+                        "the non-hermetic path, and STRICT on the hermetic one.")
     p.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY"),
                    help="owner/name (default $GITHUB_REPOSITORY)")
     p.add_argument("--event", default="schedule",
@@ -540,6 +597,14 @@ def run_alarm(args: argparse.Namespace) -> tuple[list[Finding], list[str], str]:
     repo = args.repo or ""
     repo_root = _resolve_repo_root(args.repo_root)
 
+    # The RUN-level aggregate. It is NOT the admission filter (#4965: it is lossy —
+    # one fail-fast cancellation turns a run full of real failures into `cancelled`).
+    # It decides ONE thing: whether an EMPTY genuinely-failed-job set is anomalous.
+    run_conclusion = (args.run_conclusion or "").strip()
+    if not run_conclusion and not args.failed_jobs_file and repo:
+        # The alarm's own workflow_dispatch path has no event payload to read it from.
+        run_conclusion = fetch_run_conclusion(args.run_id, repo)
+
     # Failed jobs — hermetic file or gh.
     if args.failed_jobs_file:
         failed_jobs = [
@@ -549,17 +614,31 @@ def run_alarm(args: argparse.Namespace) -> tuple[list[Finding], list[str], str]:
     else:
         if not repo:
             raise AlarmError("--repo (or $GITHUB_REPOSITORY) required for the gh path")
-        failed_jobs = gather_failed_jobs(args.run_id, repo)
-    # The workflow only fires on a failure-concluded run, so an empty failed-job
-    # set (from either the file path or the gh path) is always anomalous — an
-    # empty correlation must be distinguishable from anomalous-empty to prevent a
-    # silent exit 0 masking a real failure.
+        failed_jobs = gather_failed_jobs(args.run_id, repo, run_conclusion)
     if not failed_jobs:
-        raise AlarmError(
-            "run_alarm: empty failed-jobs set; workflow fires on failure-concluded "
-            "runs only, so this is anomalous (jobs-API shape surprise, re-run race, "
-            "or empty --failed-jobs-file). Refusing to exit 0."
+        # THE PRECISE ADMISSION (#4965). Analysis and admission now agree: a job is
+        # a failure iff its conclusion is in FAILED_CONCLUSIONS, at BOTH ends.
+        if run_conclusion in STRICT_EMPTY_CONCLUSIONS:
+            # A failure/timed_out-concluded run with no failed job is anomalous —
+            # an empty correlation must stay distinguishable from anomalous-empty
+            # so a silent exit 0 can never mask a real failure.
+            raise AlarmError(
+                "run_alarm: empty failed-jobs set on a "
+                f"{run_conclusion or 'conclusion-unknown'}-concluded run — anomalous "
+                "(jobs-API shape surprise, re-run race, or empty --failed-jobs-file). "
+                "Refusing to exit 0."
+            )
+        # The NOISE half: a `cancelled` run whose jobs contain no genuine failure is
+        # the COMMON case (fail-fast cancels the matrix). Nothing failed, so there is
+        # no correlation input and no finding to make — exit quiet, not loud and not
+        # green-with-a-fake-finding. Returning here also skips the cargo-metadata load
+        # and the per-commit git replay, which have nothing to work on.
+        print(
+            f"selection-alarm: run {args.run_id} concluded '{run_conclusion}' and no "
+            f"job concluded {sorted(FAILED_CONCLUSIONS)} — nothing genuinely failed, "
+            "so there is no correlation input. No alarm."
         )
+        return [], [], repo
 
     # cargo metadata (member set + reverse closure for the replay).
     meta = ci_select.load_metadata(args.metadata_file, repo_root)
