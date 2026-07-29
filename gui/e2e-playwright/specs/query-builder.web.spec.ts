@@ -142,7 +142,10 @@ test.describe("query builder (web persona)", () => {
     // The canvas cannot parse SPARQL back into a diagram, so an edit must be declared, not hidden.
     await expect(page.locator("[data-builder-regenerate]")).toHaveCount(0);
     await setTextarea(page, "#builder-sparql", "SELECT * WHERE { ?s ?p ?o } LIMIT 1");
-    await expect(page.getByText("edited by hand")).toBeVisible();
+    // `exact` scopes this to the editor header's BADGE. A substring match also catches the
+    // issues pane's "The SPARQL has been edited by hand, …" note — two elements, and Playwright's
+    // strict mode (rightly) refuses to guess which one the assertion meant.
+    await expect(page.getByText("edited by hand", { exact: true })).toBeVisible();
 
     const regenerate = page.locator("[data-builder-regenerate]");
     await expect(regenerate).toBeVisible();
