@@ -5,7 +5,9 @@
 DEFAULT is --dry-run: it parses `bd export`, computes the issue payloads + label mapping + the
 dependency edges, and prints a summary WITHOUT creating anything. `--apply` does the real two-pass
 (create issues, then link blocked-by dependencies) and writes the `sq-… ↔ #NN` map — held for the
-maintainer's go-ahead because it bulk-creates hundreds of issues.
+maintainer's go-ahead because it bulk-creates hundreds of issues. `--verify` is the after-the-fact
+pass: it reconciles a FINISHED `--apply` against the live tracker (bead counts, duplicate bd-id
+maps, dependency markers) and exits non-zero on any discrepancy, creating and editing nothing.
 
 Label mapping (bd -> issue):
   priority 0..4            -> priority:P{n}
@@ -465,6 +467,15 @@ def _snapshot_body(issues, num):
     return None
 
 
+def _marker_present(body, marker):
+    """Does `body` already carry this edge marker? The SINGLE predicate both the writer
+    (`_ensure_markers`) and the checker (`verify_migration`) use — deliberately shared rather than
+    written twice. If the checker were stricter than the writer it would report an edge as missing
+    that a re-run of `--apply` then declines to write, i.e. a permanently red verify no repair can
+    clear."""
+    return marker in (body or "")
+
+
 def _ensure_markers(repo, num, markers, body=None):
     """Append every missing edge marker to the issue body in ONE edit (idempotent). Returns True
     if it wrote.
@@ -479,7 +490,7 @@ def _ensure_markers(repo, num, markers, body=None):
     if body is None:
         body = json.loads(_run(["gh", "issue", "view", str(num), "-R", repo,
                                 "--json", "body"]).stdout)["body"] or ""
-    missing = [m for m in markers if m not in body]
+    missing = [m for m in markers if not _marker_present(body, m)]
     if not missing:
         return False
     _run(["gh", "issue", "edit", str(num), "-R", repo,
@@ -695,6 +706,72 @@ def apply_migration(repo, open_ids, blockers, parents, limit=None, checkpoint="/
         print(f"[apply] authenticated {len(backfill)} pre-label issue(s) via migration-owned "
               f"provenance (unique marker + migration title format + write-permission author)")
     return id_map, created, reconciled, edged
+
+
+# --- post-migration reconciliation (--verify) ---------------------------------------------------
+def _marker_index(issues):
+    """{bd-id: [issue numbers]} over EVERY issue carrying a bd-id marker, duplicates included.
+
+    Deliberately not `migration_owned`: provenance filtering answers "may I resume onto this
+    issue" and drops an ambiguous bd-id on the floor, but verification has to SEE the ambiguity —
+    two issues carrying one bd-id is a defect being looked for, and filtering it out would report
+    a clean migration over a broken map."""
+    idx = {}
+    for it in issues:
+        mm = MARKER_RE.search(it.get("body") or "")
+        if mm:
+            idx.setdefault(mm.group(1), []).append(it["number"])
+    return {bid: sorted(nums) for bid, nums in idx.items()}
+
+
+def verify_migration(open_ids, blockers, parents, issues):
+    """Reconcile a FINISHED `--apply` against the live tracker. Pure — `issues` is the LIST
+    snapshot, `blockers`/`parents` come from `plan()` (both endpoints already restricted to
+    `open_ids`).
+
+    The failure this exists to catch is asymmetric and SILENT. `apply_migration` writes edge
+    markers in pass 2, i.e. only after pass 1 has an issue for every bead: a run that dies partway
+    through pass 1 leaves a tracker that looks migrated (issues exist, labels are right) but
+    carries none of the migrated dependency edges. The body marker is the only blocker channel this
+    migration writes, so unless a maintainer separately added a native GitHub dependency, every one
+    of those beads reads as unblocked to `ready-issues.py` and is dispatched while it is genuinely
+    blocked. Nothing in the apply path reports that after the fact — the process
+    is simply gone — which is why this is a separate re-verify pass rather than an assertion inside
+    `--apply`.
+
+    So the two classes are kept apart rather than summed. `unwritable_edges` is an edge whose
+    dependent or blocker never got an issue (pass 1 incomplete — the cause), while `missing_edges`
+    is an edge whose BOTH endpoints exist but whose marker is absent from the dependent's body
+    (pass 1 finished, pass 2 did not — the marker write is what is missing). They point at
+    different repairs: the first needs a full `--apply` re-run, the second only pass 2.
+    """
+    idx = _marker_index(issues)
+    bodies = {it["number"]: (it.get("body") or "") for it in issues}
+    duplicate_maps = {bid: nums for bid, nums in idx.items() if len(nums) > 1}
+    # An ambiguous bd-id is NOT resolved by picking one — it stays out of the map, so its edges
+    # surface as unwritable rather than being checked against a guessed issue number.
+    id_map = {bid: nums[0] for bid, nums in idx.items() if len(nums) == 1}
+    missing_issues = sorted(b for b in open_ids if b not in id_map)
+    missing_edges, unwritable_edges, planned_edges = [], [], 0
+    for kind, table in (("Blocked-by", blockers), ("Parent", parents)):
+        for bid in sorted(table):
+            for to in table[bid]:
+                planned_edges += 1
+                src, dst = id_map.get(bid), id_map.get(to)
+                if src is None or dst is None:
+                    unwritable_edges.append((bid, to))
+                elif not _marker_present(bodies.get(src), f"{kind}: #{dst}"):
+                    missing_edges.append((bid, src, f"{kind}: #{dst}"))
+    return {
+        "planned": len(open_ids),
+        "mapped": sum(1 for b in open_ids if b in id_map),
+        "missing_issues": missing_issues,
+        "duplicate_maps": duplicate_maps,
+        "planned_edges": planned_edges,
+        "missing_edges": missing_edges,
+        "unwritable_edges": unwritable_edges,
+        "ok": not (missing_issues or duplicate_maps or missing_edges or unwritable_edges),
+    }
 
 
 def _self_test():
@@ -1078,6 +1155,52 @@ def _self_test():
     finally:
         globals()["_run"], globals()["_label_node_ids"] = real_run, real_ids
 
+    # --- post-migration reconciliation (--verify) ---
+    # Three beads: sq-a blocked by sq-b, sq-c a child of sq-b.
+    vbeads = {b: {"id": b} for b in ("sq-a", "sq-b", "sq-c")}
+    vblk, vpar = {"sq-a": ["sq-b"]}, {"sq-c": ["sq-b"]}
+
+    def vissue(num, bid, extra=""):
+        return {"number": num, "body": f"body\n<!-- bd-id:{bid} -->\n{extra}"}
+
+    full = [vissue(1, "sq-a", "Blocked-by: #2"), vissue(2, "sq-b"),
+            vissue(3, "sq-c", "Parent: #2")]
+    r = verify_migration(vbeads, vblk, vpar, full)
+    chk("a complete migration reconciles clean",
+        (r["ok"], r["planned"], r["mapped"], r["planned_edges"]), (True, 3, 3, 2))
+    # THE failure this whole mode exists for: pass 1 finished (every issue exists, so counts and
+    # labels look perfect) but pass 2 never ran, so NOTHING carries an edge marker and
+    # ready-issues.py reads every blocked issue as ready. Counts alone cannot see this.
+    r = verify_migration(vbeads, vblk, vpar, [vissue(1, "sq-a"), vissue(2, "sq-b"),
+                                              vissue(3, "sq-c")])
+    chk("pass 2 never ran is CAUGHT even though every issue exists",
+        (r["ok"], r["mapped"], sorted(r["missing_edges"]), r["missing_issues"]),
+        (False, 3, [("sq-a", 1, "Blocked-by: #2"), ("sq-c", 3, "Parent: #2")], []))
+    # Died mid pass 1: sq-b has no issue. Its edges are UNWRITABLE (the blocker has no number to
+    # point at), which is a different repair from a missing marker — do not conflate them.
+    r = verify_migration(vbeads, vblk, vpar, [vissue(1, "sq-a"), vissue(3, "sq-c")])
+    chk("died mid pass 1: missing issue, edges unwritable rather than 'missing markers'",
+        (r["ok"], r["missing_issues"], sorted(r["unwritable_edges"]), r["missing_edges"]),
+        (False, ["sq-b"], [("sq-a", "sq-b"), ("sq-c", "sq-b")], []))
+    # Duplicate bd-id: the map is ambiguous, so it is REPORTED and never resolved by guessing —
+    # the edges into it stay unwritable instead of being checked against a coin-flipped number.
+    r = verify_migration(vbeads, vblk, vpar, full + [vissue(4, "sq-b")])
+    chk("duplicate bd-id map is reported, never silently resolved",
+        (r["ok"], r["duplicate_maps"], r["mapped"], sorted(r["unwritable_edges"])),
+        (False, {"sq-b": [2, 4]}, 2, [("sq-a", "sq-b"), ("sq-c", "sq-b")]))
+    # A marker pointing at the WRONG issue is missing, not present (the 2026-07-17 sample
+    # sq-0d744 -> sq-lmz40 is exactly this shape: #2647 must carry `Blocked-by: #2640`).
+    r = verify_migration({"sq-a": {}, "sq-b": {}}, {"sq-a": ["sq-b"]}, {},
+                         [vissue(2647, "sq-a", "Blocked-by: #9999"), vissue(2640, "sq-b")])
+    chk("a marker aimed at the wrong issue does not count as the edge",
+        (r["ok"], r["missing_edges"]), (False, [("sq-a", 2647, "Blocked-by: #2640")]))
+    # Writer and checker must agree on "already present" — a checker that is stricter than
+    # `_ensure_markers` reds forever, because re-running --apply then declines to write the edge.
+    chk("verify and the writer share one presence predicate",
+        (_marker_present("x Blocked-by: #2 y", "Blocked-by: #2"),
+         _marker_present("", "Blocked-by: #2"), _marker_present(None, "Blocked-by: #2")),
+        (True, False, False))
+
     print("bd-to-issues self-test", "PASSED" if ok else "FAILED")
     return 0 if ok else 1
 
@@ -1091,6 +1214,10 @@ def main():
     ap.add_argument("--export-file", help="read bd export from a file instead of running bd")
     ap.add_argument("--no-reconcile", action="store_true",
                     help="skip the ADD-only label reconcile over already-migrated issues")
+    ap.add_argument("--verify", action="store_true",
+                    help="reconcile a finished --apply against the live tracker (counts, duplicate "
+                         "bd-id maps, dependency markers) and exit non-zero on any discrepancy; "
+                         "creates and edits nothing")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
 
@@ -1109,6 +1236,30 @@ def main():
         if missing:
             print(f"warning: --only ids not in the open set (skipped): {sorted(missing)}")
         open_ids = {k: v for k, v in open_ids.items() if k in keep}
+
+    if args.verify:
+        r = verify_migration(open_ids, blockers, parents, fetch_issues(args.repo))
+        print(f"[verify] beads planned open/in_progress: {r['planned']}  |  "
+              f"mapped to an issue: {r['mapped']}")
+        print(f"[verify] dependency edges planned: {r['planned_edges']}")
+        if r["missing_issues"]:
+            print(f"[verify] MISSING ISSUES ({len(r['missing_issues'])}) — pass 1 never finished: "
+                  f"{r['missing_issues'][:10]}")
+        if r["duplicate_maps"]:
+            print(f"[verify] DUPLICATE bd-id maps ({len(r['duplicate_maps'])}) — the map is "
+                  f"ambiguous, resume fails closed on these: "
+                  f"{sorted(r['duplicate_maps'].items())[:10]}")
+        if r["unwritable_edges"]:
+            print(f"[verify] UNWRITABLE EDGES ({len(r['unwritable_edges'])}) — an endpoint has no "
+                  f"issue; re-run --apply in full: {r['unwritable_edges'][:10]}")
+        if r["missing_edges"]:
+            print(f"[verify] MISSING EDGE MARKERS ({len(r['missing_edges'])}) — both endpoints "
+                  f"exist but pass 2 did not write the marker, so this edge holds nothing back: "
+                  f"{r['missing_edges'][:10]}")
+        print("[verify] " + ("reconciled clean." if r["ok"] else
+                             "DISCREPANCIES above — re-run --apply (it is idempotent), then "
+                             "re-verify."))
+        return 0 if r["ok"] else 1
 
     # --- summary (always) ---
     from collections import Counter
