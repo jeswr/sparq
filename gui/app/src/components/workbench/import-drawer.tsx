@@ -25,9 +25,13 @@
 // (sq-ljc12) [OPUS-5] The web FILE tab now derives its RDF format from the archive's INNER name
 //   too, closing the gap the URL tab already handled. Previously it guessed from the OUTER
 //   upload name, which `rdf-format.ts#stripCompression` only unwraps for `.gz`/`.bz2`/`.zst[d]`
-//   — so a `bundle.zip` (member `data.nq`), a `data.nt.gzip` or a `data.ttl.tgz` all fell back
-//   to Turtle and mis-parsed. Each accepted upload now carries the `effectiveName` that
-//   `maybeDecompressFile` already computed (the zip member name, or the suffix-stripped name).
+//   — so a `bundle.zip` (member `data.nq`) or a `data.nt.gzip` fell back to Turtle and
+//   mis-parsed. Each accepted upload now carries the `effectiveName` that `maybeDecompressFile`
+//   already computed (the zip member name, or the suffix-stripped name).
+//   NOT fixed here: tar-gzip (`.tgz`/`.tbz`). `decompressDatasetBytes` inflates the gzip layer
+//   but there is no tar reader, so the result is tar bytes rather than the RDF member — and
+//   `innerNameForSource` deliberately returns `null` for those extensions. A name alone cannot
+//   fix that; `.tgz` still falls back to Turtle and fails to parse.
 //
 // Three tabs:
 //   * FILE  — web: browser File upload (incl. compressed .gz/.zip/.zst/.bz2); desktop: native
