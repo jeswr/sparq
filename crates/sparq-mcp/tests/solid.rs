@@ -16,6 +16,12 @@
 //! - **ACL write-through (draft §7.3)**: a `resource_put`/`resource_delete` of an
 //!   `.acl` re-derives authorization atomically (grant appears/disappears with no
 //!   separate materialize call), and a malformed ACL body changes nothing.
+//! - **Content negotiation (draft §6.4, sq-wbsf5)**: `accept: text/turtle` yields REAL
+//!   prefix-compacted Turtle carrying the same triples as the N-Triples body (N-Triples
+//!   relabelled `text/turtle` fails); absent `accept` is unchanged; §9.3 non-disclosure
+//!   holds in the Turtle path; and an unservable `accept` answers identically whether
+//!   the resource exists, is unreadable, or is absent. Non-RDF bodies are REFUSED with
+//!   the scope-out named, never stored.
 
 #![cfg(feature = "solid")]
 
@@ -136,15 +142,137 @@ fn resource_get_serves_the_document_as_ntriples() {
 }
 
 #[test]
-fn resource_get_rejects_a_non_ntriples_accept_instead_of_coercing() {
+fn resource_get_rejects_an_unservable_accept_instead_of_coercing() {
+    let mut s = server_for(ALICE, false);
+    for accept in ["application/ld+json", "application/rdf+xml", "image/png"] {
+        let (text, is_err) = tool(
+            &mut s,
+            "resource_get",
+            json!({"url": "https://pod.ex/notes/n1", "accept": accept}),
+        );
+        assert!(is_err, "unsupported accept must be a tool error, not silent coercion: {text}");
+        assert!(text.contains("unsupported accept"), "honest error: {text}");
+        assert!(
+            text.contains("application/n-triples") && text.contains("text/turtle"),
+            "the refusal must name what IS served: {text}"
+        );
+    }
+}
+
+// ── [SONNET-4.6] sq-wbsf5: `accept` content negotiation (draft §6.4) ──
+
+#[test]
+fn resource_get_serves_turtle_when_accept_asks_for_it() {
+    // The negotiated body must be REAL Turtle (prefix-compacted, so N-Triples returned
+    // under a `text/turtle` label would not pass), and must parse back to the very same
+    // triples the default N-Triples body carries — negotiation changes syntax, not content.
     let mut s = server_for(ALICE, false);
     let (text, is_err) = tool(
         &mut s,
         "resource_get",
-        json!({"url": "https://pod.ex/notes/n1", "accept": "application/ld+json"}),
+        json!({"url": "https://pod.ex/notes/", "accept": "text/turtle"}),
     );
-    assert!(is_err, "unsupported accept must be a tool error, not silent coercion");
-    assert!(text.contains("unsupported accept"), "honest error: {text}");
+    assert!(!is_err, "authorized read must succeed: {text}");
+    let v: Value = serde_json::from_str(&text).expect("result is JSON");
+    assert_eq!(v["content_type"], "text/turtle");
+    let ttl = v["content"].as_str().expect("content");
+    assert!(
+        ttl.contains("@prefix ldp:") && ttl.contains("ldp:contains"),
+        "the body must be prefix-compacted Turtle, not N-Triples relabelled: {ttl}"
+    );
+
+    let (nt_text, _) = tool(&mut s, "resource_get", json!({"url": "https://pod.ex/notes/"}));
+    let nt = serde_json::from_str::<Value>(&nt_text).expect("result is JSON");
+    let from_ttl = Graph::load_str(ttl, "turtle").expect("the served Turtle parses");
+    let from_nt = Graph::load_str(nt["content"].as_str().expect("content"), "ntriples")
+        .expect("the served N-Triples parses");
+    assert_eq!(from_ttl.len(), from_nt.len(), "both representations carry the same triples");
+    assert!(sparq_engine::ask(
+        &from_ttl,
+        "ASK { <https://pod.ex/notes/> <http://www.w3.org/ns/ldp#contains> <https://pod.ex/notes/n1> }"
+    )
+    .expect("ASK evaluates"));
+}
+
+#[test]
+fn resource_get_defaults_to_ntriples_when_accept_is_absent() {
+    // The v1 default is load-bearing: a caller that never sent `accept` must not silently
+    // change syntax now that a second representation exists.
+    let mut s = server_for(ALICE, false);
+    let (text, _) = tool(&mut s, "resource_get", json!({"url": "https://pod.ex/notes/n1"}));
+    let v: Value = serde_json::from_str(&text).expect("result is JSON");
+    assert_eq!(v["content_type"], "application/n-triples");
+    let (explicit, _) = tool(
+        &mut s,
+        "resource_get",
+        json!({"url": "https://pod.ex/notes/n1", "accept": "application/n-triples"}),
+    );
+    assert_eq!(text, explicit, "absent `accept` must serve exactly the N-Triples body");
+}
+
+#[test]
+fn turtle_negotiation_does_not_weaken_existence_non_disclosure() {
+    // §9.3 must hold in EVERY representation: a Turtle read of an existing-but-unreadable
+    // document is byte-identical to a Turtle read of a nonexistent one.
+    let mut s = server_for(ALICE, false);
+    let (denied, is_err_denied) = tool(
+        &mut s,
+        "resource_get",
+        json!({"url": "https://pod.ex/secret/s1", "accept": "text/turtle"}),
+    );
+    let (absent, is_err_absent) = tool(
+        &mut s,
+        "resource_get",
+        json!({"url": "https://pod.ex/secret/nope", "accept": "text/turtle"}),
+    );
+    assert!(is_err_denied && is_err_absent);
+    assert_eq!(
+        denied.replace("secret/s1", "X"),
+        absent.replace("secret/nope", "X"),
+        "the Turtle path must not disclose existence"
+    );
+    // The message is the SAME template the N-Triples path uses — not a Turtle-specific one.
+    let (nt_denied, _) = tool(&mut s, "resource_get", json!({"url": "https://pod.ex/secret/s1"}));
+    assert_eq!(denied, nt_denied);
+}
+
+#[test]
+fn an_unservable_accept_answers_the_same_whether_the_resource_exists_or_not() {
+    // Negotiation runs BEFORE the read gate and depends only on the `accept` string, so
+    // it cannot be turned into an existence oracle by probing with a bad media type.
+    let mut s = server_for(ALICE, false);
+    let probe = |s: &mut SolidMcpServer, url: &str| {
+        tool(s, "resource_get", json!({"url": url, "accept": "application/rdf+xml"})).0
+    };
+    let readable = probe(&mut s, "https://pod.ex/notes/n1");
+    let unreadable = probe(&mut s, "https://pod.ex/secret/s1");
+    let nonexistent = probe(&mut s, "https://pod.ex/notes/nope");
+    assert_eq!(readable, unreadable);
+    assert_eq!(readable, nonexistent);
+}
+
+#[test]
+fn resource_put_refuses_a_non_rdf_body_and_names_the_scope_out() {
+    // [SONNET-4.6] sq-wbsf5 — the DECIDED non-RDF story: binary resources are scoped out,
+    // and the refusal says so rather than looking like a missing parser. If a blob path is
+    // ever added this test is the one that must be rewritten, deliberately.
+    let mut s = server_for(ALICE, true);
+    let (text, is_err) = tool(
+        &mut s,
+        "resource_put",
+        json!({
+            "url": "https://pod.ex/notes/photo.png",
+            "content": "\u{89}PNG not-really-a-png",
+            "content_type": "image/png"
+        }),
+    );
+    assert!(is_err, "a non-RDF body must be refused, never stored: {text}");
+    assert!(text.contains("RDF sources only"), "honest error: {text}");
+    assert!(text.contains("out of scope"), "the refusal names the scope-out: {text}");
+    // And nothing was created — the refusal is total, not partial.
+    let (probe, denied) =
+        tool(&mut s, "resource_get", json!({"url": "https://pod.ex/notes/photo.png"}));
+    assert!(denied, "the refused resource must not exist: {probe}");
 }
 
 #[test]

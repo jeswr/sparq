@@ -126,9 +126,22 @@ Public API (5 items, each with a doctest + direct unit test): `parse_program`,
   deletion-maintenance bead sq-6tykl.4 (same-crate collision, per the epic note).
   *(Since shipped as Phase 3, sq-4foq0 — see §6 item 3 and `datalog::incr`.)*
 - **No CLI/`MaterializedGraph` wiring** — library API only.
-- The `datalog` feature is not yet in `scripts/coverage.sh`'s per-crate measurement
-  (sparq-reason is measured default-features, so the module doesn't regress the floor;
-  wiring it like `sparq-reason-el`'s `rbox,hasse` case is beaded).
+- The `datalog` feature IS now in `scripts/coverage.sh`'s per-crate measurement
+  (sq-iwf3c): sparq-reason has a `measure()` case arm naming `--features datalog`, the
+  `sparq-reason-el` `rbox,hasse` pattern, so the module is no longer compiled out of the
+  crate's line-coverage denominator. The committed floor could NOT be re-seeded in that
+  change (the authoring environment had no cargo-llvm-cov, so no honest with-datalog number
+  could be taken there); it is the pre-datalog default-feature floor carried over the larger
+  denominator, and the entry is marked `"seed_pending": true` to say so in the one place the
+  gate reads. That flag makes CI, not the author, settle the seed: `coverage-gate.py --check`
+  recomputes `floor(measured) - MARGIN` for a `seed_pending` entry and FAILS if it exceeds
+  the committed floor, naming the number to write. So the carried-forward floor cannot land
+  wrong in either direction — measuring below it fails as an ordinary floor breach, and
+  measuring far enough above it fails as a stale seed; only a measurement that genuinely
+  seeds the same floor passes. Editing `scripts/coverage.sh` is a full-run trigger, so
+  `coverage ratchet (shard 2/3)` — the shard that owns sparq-reason — runs that check with
+  `--features datalog` on the non-draft PR head and again in the merge queue. `--seed` clears
+  the flag, because it rebuilds each entry from the measurement.
 
 ## 6. Phased decomposition (beaded)
 
@@ -155,5 +168,11 @@ Public API (5 items, each with a doctest + direct unit test): `parse_program`,
    handle, SKILL/docs examples beyond the API reference.
 7. **N3-compiled adoption of the checker** (sq-pi2k0) — replace the documented caller-discipline
    stratification of `n3::compiled` `log:notIncludes` with this checked stratification.
-8. **Coverage measure-case wiring** (sq-iwf3c) — add `--features datalog` to the sparq-reason
-   measurement in `scripts/coverage.sh` (the `sparq-reason-el` pattern).
+8. **Coverage measure-case wiring** (sq-iwf3c) — SHIPPED: the sparq-reason `measure()` case
+   arm in `scripts/coverage.sh` names `--features datalog` (the `sparq-reason-el` pattern),
+   so `src/datalog/` enters the crate's line-coverage denominator. Only `datalog` is named —
+   the crate's other default-off features (explain/profile/d-entail/rif/compiled-rules/reify)
+   are separately beaded. The floor is enforced against the expanded denominator by that
+   change's own CI (shard 2 `--check-robust`), and the entry's `"seed_pending": true` makes
+   that run also reject a floor looser than the measurement supports — so the re-seed is a
+   gate, not a promise (see §5).

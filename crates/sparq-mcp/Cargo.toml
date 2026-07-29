@@ -91,7 +91,13 @@ citations = ["sparq-nlq?/citations"]
 # backs the pod dataset + authorization view); the default sparq-mcp build stays the
 # thin single-graph wrapper. (`oxrdf` — sparq-solid's public-API vocabulary — is no
 # longer listed here: [SONNET-4.6] sq-sjey1 made it an unconditional dependency, see below.)
-solid = ["dep:sparq-solid"]
+# [SONNET-4.6] sq-wbsf5 adds `dep:oxttl` — the Turtle WRITER behind `resource_get`'s
+# `text/turtle` content negotiation. It stays OPTIONAL so the DEFAULT build's dependency
+# graph is unchanged; and even with `solid` on the compiled delta is zero, because `oxttl`
+# is already an unconditional dependency of `sparq-core` (every sparq-mcp build has always
+# compiled it) — naming it here only makes the existing edge explicit. Turtle serving
+# therefore needs no second feature flag of its own: `solid` IS the opt-in.
+solid = ["dep:sparq-solid", "dep:oxttl"]
 # [FABLE-5] sq-lsp7k.10: the opt-in NAMED-PARAMETERIZED-TEMPLATE tools (`template_list` +
 # `template_invoke`) over `sparq_engine::templates` (the #901 injection-safe `params`
 # algebra binding underneath). The embedder registers validated templates on
@@ -159,6 +165,12 @@ oxrdf = { workspace = true }
 # unconditional `oxrdf` line above. A session id is generated ONLY from this CSPRNG; if
 # the OS refuses entropy the transport answers 500 rather than mint a guessable id.
 getrandom = { version = "0.3", optional = true }
+# [SONNET-4.6] sq-wbsf5: the Turtle WRITER (`oxttl::TurtleSerializer`, the oxigraph writer,
+# so the negotiated `text/turtle` body is guaranteed well-formed). OPTIONAL — pulled in only
+# by the `solid` feature, whose `resource_get` is the sole caller. Zero supply-chain and zero
+# compiled delta: `oxttl` is already an unconditional dependency of `sparq-core` (and this
+# crate's own dev-dependency), so naming it only makes the existing edge explicit.
+oxttl = { workspace = true, optional = true }
 # The MCP wire format is JSON-RPC 2.0; serde_json (already ubiquitous in the tree —
 # sparq-engine/introspect/nlq all use it) is the only dependency the framing needs.
 serde = { version = "1", features = ["derive"] }
