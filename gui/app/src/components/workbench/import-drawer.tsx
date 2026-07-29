@@ -98,7 +98,8 @@ type FileItemStatus =
 // ── RDF extensions the browser file picker + drop filter allow ─────────────────────────────────
 // [SONNET-4.6] sq-ljc12 — compressed archives (.gz/.gzip/.zip/.zst/.zstd) are now
 // accepted on the web persona too; `maybeDecompressFile` handles the decode before RDF parse.
-// Bzip2 and native-only HDT remain desktop-only.
+// Tar containers (.tgz/.tbz) are unsupported because decompression yields TAR rather than RDF;
+// bzip2 and native-only HDT remain desktop-only.
 
 const WEB_RDF_ACCEPT = [
   ".ttl", ".nt", ".nq", ".trig", ".jsonld", ".json",

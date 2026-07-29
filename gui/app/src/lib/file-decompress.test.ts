@@ -19,6 +19,36 @@ const SAMPLE_NT =
   "<http://example.org/s> <http://example.org/p> <http://example.org/o> .\n" +
   '<http://example.org/s> <http://example.org/q> "literal value" .\n';
 
+function storedZip(memberName: string, content: string): Uint8Array {
+  const name = Buffer.from(memberName, "utf8");
+  const data = Buffer.from(content, "utf8");
+  const local = Buffer.alloc(30 + name.length + data.length);
+  local.writeUInt32LE(0x04034b50, 0);
+  local.writeUInt16LE(20, 4);
+  local.writeUInt32LE(data.length, 18);
+  local.writeUInt32LE(data.length, 22);
+  local.writeUInt16LE(name.length, 26);
+  name.copy(local, 30);
+  data.copy(local, 30 + name.length);
+
+  const central = Buffer.alloc(46 + name.length);
+  central.writeUInt32LE(0x02014b50, 0);
+  central.writeUInt16LE(20, 4);
+  central.writeUInt16LE(20, 6);
+  central.writeUInt32LE(data.length, 20);
+  central.writeUInt32LE(data.length, 24);
+  central.writeUInt16LE(name.length, 28);
+  name.copy(central, 46);
+
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(1, 8);
+  end.writeUInt16LE(1, 10);
+  end.writeUInt32LE(central.length, 12);
+  end.writeUInt32LE(local.length, 16);
+  return new Uint8Array(Buffer.concat([local, central, end]));
+}
+
 // ── Minimal browser `File` shim (Node has no DOM File) ───────────────────────────────────────
 //
 // `maybeDecompressFile` only calls `file.arrayBuffer()` and reads `file.name` — the shim
@@ -99,15 +129,52 @@ test("[SONNET-4.6] sq-1y04h: gzip by magic bytes (file named .nt but gzip-compre
   assert.strictEqual(result.text, SAMPLE_NT, "decompressed text must match original");
 });
 
-test("[SONNET-4.6] sq-ljc12: bzip2 remains desktop-only in browser ingest", async () => {
+test("[SONNET-4.6] sq-ljc12: bzip2 magic remains desktop-only regardless of filename", async () => {
   const file = new FakeFile(
-    "dataset.nt.bz2",
+    "dataset.nt",
     new Uint8Array([0x42, 0x5a, 0x68, 0x39]),
   );
 
   await assert.rejects(
     maybeDecompressFile(file as unknown as File),
     /Bzip2 archives are supported only by the desktop app/,
+  );
+});
+
+test("[SONNET-4.6] sq-ljc12: bzip2 extension remains desktop-only regardless of content", async () => {
+  const file = new FakeFile(
+    "dataset.nt.bz2",
+    new TextEncoder().encode(SAMPLE_NT),
+  );
+
+  await assert.rejects(
+    maybeDecompressFile(file as unknown as File),
+    /Bzip2 archives are supported only by the desktop app/,
+  );
+});
+
+test("[SONNET-4.6] sq-ljc12: incomplete bzip2 magic prefix passes through as text", async () => {
+  const bytes = new TextEncoder().encode("BZhX is not a bzip2 stream");
+  const result = await maybeDecompressFile(
+    new FakeFile("dataset.nt", bytes) as unknown as File,
+  );
+
+  assert.strictEqual(result.wasDecompressed, false);
+  assert.strictEqual(result.text, "BZhX is not a bzip2 stream");
+});
+
+test("[SONNET-4.6] sq-1y04h: zip member name drives RDF format detection", async () => {
+  const result = await maybeDecompressFile(
+    new FakeFile("bundle.zip", storedZip("payload.nq", SAMPLE_NT)) as unknown as File,
+  );
+
+  assert.strictEqual(result.wasDecompressed, true);
+  assert.strictEqual(result.effectiveName, "payload.nq");
+  assert.strictEqual(guessFormat(result.effectiveName), "nquads");
+  assert.strictEqual(
+    guessFormat("bundle.zip"),
+    "turtle",
+    "the outer archive name must not accidentally satisfy the inner-format assertion",
   );
 });
 

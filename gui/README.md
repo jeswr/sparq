@@ -104,8 +104,8 @@ For **ingest**, the Import drawer (`sq-ixc3.13`) calls the engine's **native loa
 behind the crate's opt-in `hdt` feature) — is decoded by the native engine (threads, no ~2 GiB
 wasm-tab ceiling) and handed back as N-Quads for the in-tab store to merge (named-graph-
 preserving). On the hosted web target, the drawer parses paste, file uploads, and URL responses in
-the in-tab WASM engine; compressed uploads and URL responses (`.gz` / `.zip` / `.zst` / `.bz2`)
-are decoded in the browser before parsing, while HDT remains native-only. A successful import
+the in-tab WASM engine; compressed uploads and URL responses (`.gz` / `.zip` / `.zst`) are
+decoded in the browser before parsing, while bzip2 and HDT remain native-only. A successful import
 records a `WorkspaceSourceMeta` + a workspace snapshot (the `sq-atb0` save/open cache). The full
 on-disk workspace persistence path activates once the shell grants the `fs` capability
 (`sq-ixc3.6`).

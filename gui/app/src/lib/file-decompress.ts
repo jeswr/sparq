@@ -84,10 +84,12 @@ export async function maybeDecompressBytes(
 ): Promise<MaybeDecompressedFile> {
   const lowerName = sourceName.split(/[?#]/)[0].toLowerCase();
   const isBzip2 =
-    (bytes.length >= 3 &&
+    (bytes.length >= 4 &&
       bytes[0] === 0x42 &&
       bytes[1] === 0x5a &&
-      bytes[2] === 0x68) ||
+      bytes[2] === 0x68 &&
+      bytes[3] >= 0x31 &&
+      bytes[3] <= 0x39) ||
     [".bz2", ".bzip2", ".tbz", ".tbz2"].some((suffix) =>
       lowerName.endsWith(suffix),
     );
