@@ -230,6 +230,31 @@ Materialize the authorization view from the access-control documents, then enfor
   (proposed-stable)** — the proposed semver-stable per-resource decision surface (freeze
   pending maintainer ratification, #1346 / #1248; see
   [`docs/api-stability.md`](../../docs/api-stability.md)).
+- `store.decide_create(&Session, container: &str, child_name: &str, Mode) -> WacDecision` /
+  `is_control_document_name(name: &str) -> bool` — the **CREATE decision + its
+  control-document guard** ([OPUS-5] sq-gg0qq.5, issue #2571). Minting a container child
+  needs only `acl:Append`, but an access-control document is governed by `acl:Control`, so
+  an Append-only principal who POSTs `Slug: secret.acl` passes the container's mode check
+  and still ends up authoring `<container>/secret.acl` — the document the ACL resolver
+  afterwards consults as `<container>/secret`'s governing ACL. The escalation is carried by
+  the NAME, so a mode-only `decide` cannot see it. `decide_create` runs the name through
+  `is_control_document_name` BEFORE the mode question and refuses `.acl`/`.acr` for **every**
+  principal, `Control` holders included (the legitimate route to author an ACL is a
+  `Control`-gated write of the governed resource's own ACL, never a child mint — so the
+  create path stays uniformly closed). The guard is deliberately broader than the exact-case
+  suffix the resolver derives: case variants (`secret.ACL`), the container-child trailing
+  slash (`secret.acl/`), the bare `.acl`/`.acr`, and percent-encoded spellings (`secret%2Eacl`,
+  `secret.ac%6C`, double-encoded, or a smuggled `%2F`) are all refused; a mid-path `.acl`
+  (`x.acl/child`) and a name that merely contains `acl` are not. Unusable child names (empty,
+  `.`/`..`, any decoded path separator) and a non-slash-terminated `container` are refused
+  the same way. **The refusal is DEFINITIVE (`Resolved` ⇒ 403), never retryable** — it does
+  not depend on the ACL state, so a transient/`Unloaded` condition can never downgrade it to
+  "try again". When the name is benign the decision is exactly `decide(container, mode)`,
+  fail-closed contract unchanged. `mode` is what the create verb requires on the CONTAINER
+  (`Append` for POST, `Write` for a PUT-create); this crate's rules do not materialize WAC's
+  `Write` ⇒ `Append` subsumption, so ask for the mode you mean. `is_control_document_name`
+  is public so a resource server applies the SAME predicate at its own mint chokepoint and
+  the two cannot drift.
 - `WacDecision::acl_link_header() -> Option<String>` / `AclScope::as_acl_predicate() ->
   &'static str` — **effective-ACL provenance surface** (FR-5, sq-snopa.4): the `<acl-iri>;
   rel="acl"` RFC-8288 [`Link`](https://solidproject.org/TR/protocol#acl-resource) value a
