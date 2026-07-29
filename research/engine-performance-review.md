@@ -50,14 +50,15 @@ anyway).
 **Expected impact (qualitative):** removes the largest single ingest bucket; ingest is the
 dominant cold-load / `query-mmap` cost, so this is a direct product win for load time.
 
-**Canonical measurement:** EC2 bench (tag `sparq-bench`, orphan-proof self-terminate):
-ingest wall on the synthetic social graph + WatDiv at two scales; `perf` self-time share of
-the sort family before/after; the deterministic `bytes/triple` ratchet must hold or improve
-(hard-gated), with `parse_ns_per_byte` an advisory timing signal (tracked/warned,
-non-blocking — `scripts/perf-gate.py` classes it `mode: noise`). Correctness gate:
-byte-identical index content vs the comparison sort (exact output-equivalence test), and
-dict-id-order determinism per
-`research/dict-id-order-determinism-audit.md`.
+**Acceptance measurement:** ingest wall on the synthetic social graph + WatDiv at two scales
+and the `perf` self-time share of the sort family before/after, taken on the EC2 bench lane
+(tag `sparq-bench`, orphan-proof self-terminate), are **advisory, non-canonical** timing
+evidence — they motivate adoption, they do not decide it. The decision criteria are the
+deterministic gates: the `bytes/triple` ratchet must hold or improve (hard-gated), and the
+correctness gate — byte-identical index content vs the comparison sort (exact
+output-equivalence test) plus dict-id-order determinism per
+`research/dict-id-order-determinism-audit.md`. `parse_ns_per_byte` is likewise advisory
+(tracked/warned, non-blocking — `scripts/perf-gate.py` classes it `mode: noise`).
 
 **M4 composition:** ingest-side; fully orthogonal to sq-pntvh.
 
@@ -86,10 +87,13 @@ replays deterministically per PR. No adoption without that lane green.
 **Expected impact:** attacks the largest aggregate ingest cost; effect scales with prefix
 uniformity (real dumps are highly prefix-uniform; WatDiv/BSBM/Wikidata all are).
 
-**Canonical measurement:** EC2 ingest wall + `perf` share of the oxiri symbol family;
-`parse_ns_per_byte` as an advisory timing signal (tracked/warned, non-blocking), so the EC2
-wall reading is the decision input. A prefix-diverse adversarial input must show no
-regression (memo miss cost ≈ one short memcmp).
+**Acceptance measurement:** EC2 ingest wall + `perf` share of the oxiri symbol family are
+**advisory, non-canonical** supporting evidence — host wall time is noisy and cannot by
+itself justify adoption — and `parse_ns_per_byte` is advisory too (tracked/warned,
+non-blocking). No deterministic timing gate covers this path, so adoption requires
+*corroborated repeated* readings on a quiet bench box (before/after on the same box) **plus**
+the deterministic gates: the differential-fuzz equivalence lane above green, and a
+prefix-diverse adversarial input showing no regression (memo miss cost ≈ one short memcmp).
 
 **M4 composition:** orthogonal (ingest).
 
@@ -114,9 +118,10 @@ spec before landing; the feature-OFF bit-identical guarantee (#1386) must hold.
 **Expected impact:** removes an allocation and a redundant hash per output row on the
 join-heavy shapes (star joins, high-fanout probes) that dominate BGP workloads.
 
-**Canonical measurement:** EC2 criterion benches on star/WatDiv high-fanout queries;
-allocation counts via the bench harness's counting allocator; operator-coverage `.rq`
-suite for correctness; substrate perf-neutrality gate (#1303) stays green.
+**Acceptance measurement:** EC2 criterion benches on star/WatDiv high-fanout queries
+(advisory, non-canonical timing); the deciding gates are the deterministic ones —
+allocation counts via the bench harness's counting allocator, the operator-coverage `.rq`
+suite for correctness, and the substrate perf-neutrality gate (#1303) staying green.
 
 ### 1.4 `Leapfrog::search` small-arity specialization
 
@@ -133,9 +138,10 @@ workloads — small, contained, no trait surface change.
 **Expected impact:** micro but concentrated — this is the hottest single query-eval loop
 on cyclic/analytic queries, sparq's WCO differentiator.
 
-**Canonical measurement:** EC2 triangle/clique microbench + the graph-pattern slice of the
-bench suite; `perf` self-time of `Leapfrog::search`. Arity ≠ 3 paths covered by the
-existing LFTJ correctness tests (unchanged results required).
+**Acceptance measurement:** EC2 triangle/clique microbench + the graph-pattern slice of the
+bench suite and the `perf` self-time of `Leapfrog::search` are advisory, non-canonical
+timing signals; the deciding gate is correctness — arity ≠ 3 paths covered by the existing
+LFTJ correctness tests (unchanged results required).
 
 **M4 composition:** safe independently — trie-based WCO join stays tuple-at-a-time under
 M4 (it does not vectorize naturally); this loop survives the morsel refactor.
@@ -154,8 +160,10 @@ lane coverage. (b) In `Dict` dedup, compare the stored 64-bit hash before fallin
 **Expected impact:** small, steady ingest win; zero algorithmic risk but real attestation
 cost — which is why it ranks below the three items above despite being trivial.
 
-**Canonical measurement:** EC2 ingest wall delta; Miri lane green; cargo-geiger ratchet
-accounted; `parse_ns_per_byte` tracked as an advisory timing signal (warned, non-blocking).
+**Acceptance measurement:** the deterministic gates decide — Miri lane green, cargo-geiger
+ratchet accounted, unchanged parse/ingest correctness. The EC2 ingest wall delta and
+`parse_ns_per_byte` are advisory, non-canonical timing signals (tracked/warned,
+non-blocking) that need corroborated repeated readings before they support adoption.
 
 ---
 
