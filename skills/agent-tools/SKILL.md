@@ -1,6 +1,6 @@
 ---
 name: agent-tools
-description: Use when an LLM/agent should access a sparq RDF dataset over the Model Context Protocol (MCP) as first-class tools — run SPARQL queries, mine the dataset schema, list class profiles or namespace prefixes, read stats or a VoID descriptor, optionally SHACL-validate against caller-supplied shapes or derive a shape-aware describe_form FormDescription for a focus node, and (gated, off by default) apply SPARQL updates. Covers the opt-in sparq-mcp crate — a JSON-RPC 2.0 MCP server (initialize, tools/list, tools/call, plus the default-build read-only resources/list, resources/read, prompts/list and prompts/get surfaces that expose the dataset VoID descriptor, the default graph and each named graph as N-Triples resources and serve four canned query prompts — explore-dataset, count-by-class, class-overview, predicate-usage — whose IRI arguments are RFC-3987-validated before they reach a SPARQL IRIREF) exposing query (SELECT/ASK to SPARQL-JSON), construct (CONSTRUCT/DESCRIBE to N-Triples), introspect (effective schema as JSON or token-budgeted text), stats, classes (class IRIs with instance and predicate counts), prefixes (namespace declarations and term counts), void (W3C VoID N-Triples), an opt-in read-only validate tool, and a gated update tool that is OFF by default; the transport-agnostic handle_message dispatch core plus the optional stdio feature; and the honest trust model (a local agent-tool server with no built-in auth, read-only by default, queries bounded by a QueryBudget). Also covers the opt-in solid feature — SolidMcpServer, a pod-backed server over sparq-solid's PodStore with WAC/ACP-authorized session-scoped query plus LDP resource tools (resource_get, container_list from stored ldp:contains data, and gated resource_put/resource_delete/container_create with existence non-disclosure and atomic ACL write-through), plus the MCP resources capability with subscribe:true — resources/list, resources/read, resources/subscribe and content-free notifications/resources/updated bound to Solid Notifications semantics, authorized at subscribe time and again at every delivery. Also covers the opt-in nlq feature's two natural-language tools — ask (NL to SPARQL, validated and executed server-side, returning the executed query plus its real result rows) and nl_query (the translate-only variant — the same grounding and validation, but the query is returned unexecuted with executed:false and no rows, for review before you run it with query). Complements genai-retrieval (sparq-nlq/sparq-introspect) — that is the NL-to-SPARQL loop; this is the MCP front door.
+description: Use when an LLM/agent should access a sparq RDF dataset over the Model Context Protocol (MCP) as first-class tools — run SPARQL queries, mine the dataset schema, list class profiles or namespace prefixes, read stats or a VoID descriptor, optionally SHACL-validate against caller-supplied shapes or derive a shape-aware describe_form FormDescription for a focus node, and (gated, off by default) apply SPARQL updates. Covers the opt-in sparq-mcp crate — a JSON-RPC 2.0 MCP server (initialize, tools/list, tools/call, plus the default-build read-only resources/list, resources/read, prompts/list and prompts/get surfaces that expose the dataset VoID descriptor, the default graph and each named graph as N-Triples resources and serve four canned query prompts — explore-dataset, count-by-class, class-overview, predicate-usage — whose IRI arguments are RFC-3987-validated before they reach a SPARQL IRIREF) exposing query (SELECT/ASK to SPARQL-JSON), construct (CONSTRUCT/DESCRIBE to N-Triples), introspect (effective schema as JSON or token-budgeted text), stats, classes (class IRIs with instance and predicate counts), prefixes (namespace declarations and term counts), void (W3C VoID N-Triples), an opt-in read-only validate tool, and a gated update tool that is OFF by default; the transport-agnostic handle_message dispatch core plus the optional stdio feature and the optional http feature (MCP Streamable HTTP for remote/multiplexed clients — one endpoint, per-session Mcp-Session-Id, a server-to-client SSE stream with Last-Event-ID resumption, Origin validation and a session cap, std-only and adding zero crates); and the honest trust model (a local agent-tool server with no built-in auth, read-only by default, queries bounded by a QueryBudget). Also covers the opt-in solid feature — SolidMcpServer, a pod-backed server over sparq-solid's PodStore with WAC/ACP-authorized session-scoped query plus LDP resource tools (resource_get, container_list from stored ldp:contains data, and gated resource_put/resource_delete/container_create with existence non-disclosure and atomic ACL write-through), plus the MCP resources capability with subscribe:true — resources/list, resources/read, resources/subscribe and content-free notifications/resources/updated bound to Solid Notifications semantics, authorized at subscribe time and again at every delivery. Also covers the opt-in nlq feature's two natural-language tools — ask (NL to SPARQL, validated and executed server-side, returning the executed query plus its real result rows) and nl_query (the translate-only variant — the same grounding and validation, but the query is returned unexecuted with executed:false and no rows, for review before you run it with query). Complements genai-retrieval (sparq-nlq/sparq-introspect) — that is the NL-to-SPARQL loop; this is the MCP front door.
 ---
 
 # sparq agent-tools (MCP)
@@ -262,6 +262,37 @@ The standard MCP stdio transport is behind the **`stdio`** feature:
 `sparq_mcp::serve_stdio(&mut server)` runs the line-delimited JSON-RPC loop over this
 process's stdin/stdout. For an arbitrary reader/writer pair use `sparq_mcp::serve`.
 
+## Streamable HTTP (feature `http`, OFF by default) — [SONNET-4.6] sq-2c0f0
+
+The **remote/multiplexed** transport, for clients that cannot launch a subprocess. One
+endpoint (`HttpConfig::endpoint`, default `/mcp`) on a `TcpListener` you bind, one thread per
+connection, and one shared `Mutex<McpServer>` behind all of them:
+
+```rust,ignore
+let server = Arc::new(Mutex::new(McpServer::new(graph)));
+let transport = Arc::new(HttpTransport::new(server, HttpConfig::default()));
+serve_http(TcpListener::bind("127.0.0.1:7332")?, transport)?;   // loopback: no auth
+```
+
+- **`POST`** — one JSON-RPC message (object or batch) in, one `application/json` response
+  out; a message that is nothing but notifications is answered `202 Accepted` with no body.
+- **Sessions** — a successful `initialize` mints a random 128-bit `Mcp-Session-Id` returned as
+  a response header; every later request must carry it (missing ⇒ `400`, unknown ⇒ `404`), and
+  `DELETE` terminates it (`204`). `HttpConfig::max_sessions` (default 256) caps how many exist.
+- **`GET`** — the session's **SSE** stream (`text/event-stream`) for server→client messages,
+  which the embedder pushes with `HttpTransport::notify` / `broadcast`. Each event carries an
+  `id:`, so a reconnect with `Last-Event-ID` replays what the client missed (ring bounded by
+  `HttpConfig::replay_buffer`, default 64). Idle streams emit `: keepalive` comments. At most
+  one stream per session — a second `GET` is `409`.
+- **Concurrency, honestly** — the *transport* is concurrent; *engine access is serialised* by
+  the one mutex, so a long `query` blocks other sessions for its duration (bounded by
+  `ServerConfig::query_timeout_secs`).
+- **Lean** — the HTTP/1.1 + SSE framing and the session registry are std-only, so the feature
+  adds **zero** crates to the closure (measured: 62 packages with and without it). The
+  `rmcp` SDK was declined for this in `research/mcp-rmcp-sdk-adoption-assessment.md`.
+
+Runnable demo: `cargo run -p sparq-mcp --features http --example mcp_http_server`.
+
 ## Running the server binary
 
 The same feature ships a ready-made server, so an MCP client can launch sparq as a
@@ -290,7 +321,10 @@ library code the binary runs, for a host that wants the flags but its own transp
 This is a **local agent-tool server, not a hardened multi-tenant endpoint**. There is
 **no built-in authentication or authorization**: the MCP transport is the trust boundary
 you, the operator, establish, and whoever can speak to the server has exactly the access it
-was configured with.
+was configured with. That is as true of the `http` listener as of the stdio pipe — its
+`Origin` allowlist is a DNS-rebinding defence and `max_sessions` is a DoS ceiling; **neither
+is authentication**, and a session id is a correlation handle, not a credential. Bind
+loopback.
 
 - **Read-only by default** — a default `McpServer` advertises and accepts only
   `query` / `construct` / `introspect` / `shapes` / `stats` / `classes` / `prefixes` / `void`; it
@@ -311,8 +345,12 @@ default resources + prompts surfaces 2026-07-28 [SONNET-4.6], sq-sjey1;
 pod mode 2026-07-11 [FABLE-5]).
 Tested by a real in-memory MCP round-trip (default features), a real stdio serve-loop
 round-trip, and a spawned-process session against the shipped binary (feature `stdio`,
-2026-07-28 [SONNET-4.6], sq-5xgxe). Only the **stdio** transport plus the embeddable
-`handle_message` ship today; SSE/HTTP transports are **not implemented** (follow-up beads).
+2026-07-28 [SONNET-4.6], sq-5xgxe). Three transports ship: the embeddable `handle_message`,
+**stdio** (feature `stdio`), and **Streamable HTTP + SSE** (feature `http`, 2026-07-29
+[SONNET-4.6], sq-2c0f0 — tested over a real loopback `TcpListener` with a hand-written
+HTTP/1.1 client: handshake, tool call, `DELETE`, SSE delivery, `Last-Event-ID` resumption and
+the malformed-request statuses). The `sparq-mcp` **binary** still serves stdio only — wiring
+the HTTP listener behind a flag is a follow-up.
 The read-only default is proven fail-closed (a disabled `update` returns `-32601` and does
 not mutate the graph).
 

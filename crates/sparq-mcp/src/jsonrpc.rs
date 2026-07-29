@@ -11,8 +11,10 @@
 //! `research/mcp-rmcp-sdk-adoption-assessment.md` (sq-95zda, gh #3219). Verdict was to
 //! keep this module — `rmcp` would replace it and `transport` (146 lines together) at the
 //! cost of an unconditional async runtime, and neither the vendoring-policy nor the
-//! cargo-vet precondition held at the time. That record also lists the triggers that
-//! should reopen the question; an HTTP/SSE transport is the strongest one. [SONNET-4.6]
+//! cargo-vet precondition held at the time. That record listed an HTTP/SSE transport as the
+//! strongest trigger to reopen the question; sq-2c0f0 (gh #3221) then built one (the `http`
+//! module, feature `http`) — std-only and at zero added crates, so the verdict stood and this
+//! module is still the framing both transports share. [SONNET-4.6]
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

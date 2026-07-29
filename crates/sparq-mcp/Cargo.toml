@@ -32,6 +32,14 @@ name = "sparq-mcp"
 path = "src/main.rs"
 required-features = ["stdio"]
 
+# [SONNET-4.6] sq-2c0f0 (gh #3221) The Streamable HTTP demo server. `required-features`
+# keeps it out of the DEFAULT `--all-targets` build for the same reason the binary above
+# is kept out: it needs the opt-in `http` transport.
+[[example]]
+name = "mcp_http_server"
+path = "examples/mcp_http_server.rs"
+required-features = ["http"]
+
 [features]
 # The transport-agnostic dispatch core (`McpServer::handle_message`, the tool
 # schemas, JSON-RPC framing types) is ALWAYS compiled — it is pure serde_json over
@@ -44,6 +52,19 @@ required-features = ["stdio"]
 # their own transport. [OPUS-4.8]
 default = []
 stdio = []
+# [SONNET-4.6] sq-2c0f0 (gh #3221): the MCP **Streamable HTTP** transport — the
+# remote/multiplexed counterpart to `stdio` (many concurrent clients on one listener,
+# a per-session SSE stream with `Last-Event-ID` resumption). OFF by default, and LEAN by
+# the same rule as `stdio`: the HTTP/1.1 framing, the SSE framing and the session
+# registry are std-only (`std::net`/`io`/`sync`/`thread`/`collections`/`time`). The ONE
+# dependency it forwards is `getrandom`, for cryptographically-random session ids — and
+# that is a ZERO supply-chain delta: `getrandom` 0.3 is ALREADY in this crate's default
+# native closure (oxrdf -> rand -> rand_core, verified with `cargo tree -p sparq-mcp`),
+# is already a direct dependency of sparq-introspect/sparq-forms, and already carries a
+# supply-chain/config.toml exemption — no crate enters the lock. Deliberately NOT `rmcp`:
+# research/mcp-rmcp-sdk-adoption-assessment.md measured that at +45 crates and an
+# unconditional async runtime, for a crate whose defining property is having neither.
+http = ["dep:getrandom"]
 # [GPT-5.6] sq-bvkn6: JSON-LD ingest for the Solid resource_put path. OFF by
 # default; forwarding sparq-core's opt-in parser keeps the lean MCP build free of
 # oxjsonld while allowing application/ld+json pod documents when requested.
@@ -130,6 +151,14 @@ sparq-forms = { path = "../sparq-forms", version = "0.1.0", optional = true }
 # directly only makes the existing edge explicit — the build delta is exactly zero, so the
 # "keep the default build lean" rule is not bent.
 oxrdf = { workspace = true }
+# [SONNET-4.6] sq-2c0f0: OS entropy for the Streamable HTTP transport's `Mcp-Session-Id`
+# values. OPTIONAL — pulled in ONLY by the `http` feature. It adds NOTHING to the lock:
+# `getrandom` 0.3 is already resolved in this crate's native closure through
+# oxrdf -> rand -> rand_core (blank-node ids), so naming it directly only makes an edge
+# that already exists explicit — the same argument (and the same zero build delta) as the
+# unconditional `oxrdf` line above. A session id is generated ONLY from this CSPRNG; if
+# the OS refuses entropy the transport answers 500 rather than mint a guessable id.
+getrandom = { version = "0.3", optional = true }
 # The MCP wire format is JSON-RPC 2.0; serde_json (already ubiquitous in the tree —
 # sparq-engine/introspect/nlq all use it) is the only dependency the framing needs.
 serde = { version = "1", features = ["derive"] }

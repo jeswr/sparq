@@ -29,6 +29,12 @@
 //!   ([SONNET-4.6] sq-sj1f9). Both embed a configurable LLM call and degrade cleanly
 //!   (unadvertised, "not configured" error) when no backend is set.
 //! - `transport` (feature `stdio`) — the line-delimited stdio serve loop.
+//! - `http` (feature `http`) — the MCP **Streamable HTTP** transport: one endpoint
+//!   serving many concurrent clients, each with an `Mcp-Session-Id` and its own
+//!   Server-Sent-Events stream (`Last-Event-ID` resumption), all multiplexed onto one
+//!   shared [`McpServer`]. Std-only framing; `Origin` validation is on by default and
+//!   is a DNS-rebinding defence, **not** authentication — there is still none.
+//!   [SONNET-4.6] sq-2c0f0
 //! - `cli` (feature `stdio`) — the argument parsing + dataset loading behind the shipped
 //!   `sparq-mcp` binary (`--allow-update` / `--format` / `--query-timeout` / `--max-rows`
 //!   + a positional data file). [SONNET-4.6] sq-5xgxe
@@ -71,6 +77,12 @@ pub mod nlq;
 #[cfg(feature = "stdio")]
 #[cfg_attr(docsrs, doc(cfg(feature = "stdio")))]
 pub mod transport;
+
+// [SONNET-4.6] sq-2c0f0: the MCP Streamable HTTP transport (remote/multiplexed clients),
+// behind the opt-in `http` feature.
+#[cfg(feature = "http")]
+#[cfg_attr(docsrs, doc(cfg(feature = "http")))]
+pub mod http;
 
 // [SONNET-4.6] sq-5xgxe: the shipped `sparq-mcp` binary's argument parsing + dataset
 // loading, kept in the library so the startup contract is unit-testable.

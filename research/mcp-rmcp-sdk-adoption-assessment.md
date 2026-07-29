@@ -4,6 +4,34 @@
 preconditions the bead names — *vendored-policy-friendly* and *cargo-vet auditable* — with
 measured evidence, and records a verdict plus the triggers that should reopen it.
 
+> **UPDATE 2026-07-29 — trigger 1 fired, and the verdict held. [SONNET-4.6] (sq-2c0f0, gh
+> #3221).** The HTTP/SSE transport named as the decisive re-evaluation trigger below was
+> implemented, as `crates/sparq-mcp/src/http/` behind an opt-in `http` feature. It is
+> **hand-rolled and std-only**, not `rmcp`. Why the trigger did not flip the answer: the
+> argument in [Reopen this when](#reopen-this-when) was that at HTTP/SSE scope "+45 crates
+> buys something real instead of replacing a `for line in reader.lines()` loop" — but the
+> shape actually needed turned out to be small enough that it was cheaper to write than to
+> adopt. Measured on the merged branch: `cargo tree -p sparq-mcp -e normal` resolves **62
+> packages both with and without `--features http`** — the transport adds **zero** crates
+> (its one new dependency edge, `getrandom` 0.3, was already in the closure via
+> `oxrdf -> rand -> rand_core`, itself already carrying a `safe-to-deploy` exemption), and
+> `Cargo.lock` gains one line, not a package. Adopting `rmcp` would still have meant a
+> bootstrap exemption for the SDK itself — the ratchet the `vet` gate exists to prevent —
+> in exchange for code that did not need writing twice.
+>
+> **What this update did NOT re-measure.** The three blocking preconditions (audit-set
+> coverage, Apache-2.0-only licensing, no declared `rust-version`) were **not** re-checked
+> here; they are carried over from the body below, measured one day earlier on 2026-07-28.
+> One day is short enough that they are very unlikely to have moved — but that is an
+> inference, not a measurement. Anyone reopening this must re-run them, as the body says.
+>
+> What is honestly *given up* by not adopting: OAuth2 client auth, client-side types, and
+> spec-churn absorption. Those remain reasons to revisit. What is honestly *not* claimed:
+> the hand-rolled transport is a deliberately small HTTP/1.1 subset (`Content-Length` bodies
+> only, one request per connection, no HTTP/2, no compression) — it is a transport for a
+> loopback agent-tool server, not a general-purpose HTTP server, and the module says so.
+> Triggers 2–4 below are untouched by this and still stand.
+
 **Verdict: DECLINE for now. Keep the hand-rolled framing.** Not because `rmcp` is bad — it
 is the official SDK, it tracks the spec, and its transport layer is genuinely valuable —
 but because at today's scope the trade is **146 lines of framing code for 45–52 extra
@@ -172,10 +200,12 @@ separately (the SSE/HTTP transport follow-up recorded in
 
 Re-evaluate when **any** of these becomes true:
 
-1. **An HTTP/SSE MCP transport is actually required.** This is the decisive trigger. A
-   hand-rolled streamable-HTTP transport with session resumption is a far larger surface
-   than 146 lines, and at that point "+45 crates" buys something real instead of replacing
-   a `for line in reader.lines()` loop.
+1. ~~**An HTTP/SSE MCP transport is actually required.**~~ **FIRED and RESOLVED 2026-07-29
+   without adopting `rmcp`** — see the UPDATE at the top. This trigger's premise (that the
+   transport would be "a far larger surface than 146 lines", making "+45 crates" a fair
+   trade) was tested and did not hold at the scope required: a std-only Streamable HTTP +
+   SSE transport landed at zero added crates while every precondition against `rmcp`
+   remained unmet. Keep this entry as history, not as an open trigger.
 2. **`rmcp` lands in an imported audit set**, or a first-party `safe-to-deploy` audit of it
    becomes affordable.
 3. **`rmcp` declares a `rust-version` and stabilises** — no new major for at least two
@@ -215,9 +245,9 @@ version list both move, so re-run before acting on this record.
 
 ## Follow-ups (beads/issues, not TODOs)
 
-- If the HTTP/SSE transport work is scheduled, re-run this comparison **first** — trigger 1
-  above is the one that changes the answer, and the decision should be made before the
-  transport is hand-rolled, not after.
+- ~~If the HTTP/SSE transport work is scheduled, re-run this comparison **first**~~ — done
+  2026-07-29 (sq-2c0f0, gh #3221): the dependency-delta measurement was re-run against the
+  actual transport before it landed, and it is recorded in the UPDATE at the top.
 - The Mozilla `[[trusted]]` entries for `ref-cast` / `ref-cast-impl` carry `end =
   "2026-08-19"`. Those crates are not in the tree today, so nothing is currently at risk —
   but any future dependency that pulls them in inherits an expiring trust window.

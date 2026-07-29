@@ -42,6 +42,8 @@ stdio -- [--allow-update] [--format FMT] [--query-timeout SECS] [--max-rows N] [
 loads the file (format inferred from `.nt`/`.nq`/`.trig`, else turtle) and serves it over the
 standard MCP stdio transport — the same loop `serve_stdio(&mut server)` runs for an embedder.
 
+**Streamable HTTP** *(feature `http`, OFF by default)* is the remote/multiplexed transport: `serve_http(listener, transport)` serves many concurrent clients on one endpoint (`/mcp`), each with an `Mcp-Session-Id` and its own SSE stream (`GET`, with `Last-Event-ID` resumption; `HttpTransport::notify`/`broadcast` push to it), over one shared `Mutex<McpServer>` — so the transport is concurrent but engine access is serialised. Std-only framing, **zero** added crates. `Origin` is validated (by default *any* `Origin` is refused) and sessions are capped, but that is DNS-rebinding + DoS hedging, **not authentication** — bind loopback. See `examples/mcp_http_server.rs`. <!-- [SONNET-4.6] sq-2c0f0 -->
+
 ## ✨ Tools
 
 - **`query`** — run a read-only SELECT/ASK; returns SPARQL 1.1 Query Results JSON. Bounded by a configurable `QueryBudget` (default 30 s / 1M rows).
@@ -66,10 +68,9 @@ capabilities — read-only, adding no crate to the build, both `listChanged: fal
 (nothing pushes unsolicited notifications). `resources/list` exposes `urn:sparq:dataset`
 (the VoID descriptor), `urn:sparq:graph:default`, and one resource per **named graph**
 (`uri` = the graph IRI); `resources/read` returns N-Triples through the same budgeted
-engine path as `construct`. `prompts/list` / `prompts/get` serve four canned query
-prompts — `explore-dataset`, `count-by-class`, `class-overview`, `predicate-usage` —
-whose IRI arguments are RFC-3987-validated before interpolation into a SPARQL `IRIREF`,
-so a hostile argument is refused rather than rendered. <!-- [SONNET-4.6] sq-sjey1 -->
+engine path as `construct`. `prompts/list` / `prompts/get` serve four canned query prompts —
+`explore-dataset`, `count-by-class`, `class-overview`, `predicate-usage` — whose IRI arguments are
+RFC-3987-validated before interpolation into a SPARQL `IRIREF`, so a hostile one is refused rather than rendered. <!-- [SONNET-4.6] sq-sjey1 -->
 
 **Pod mode** *(feature `solid`, OFF by default)*: `SolidMcpServer` serves a `sparq-solid`
 `PodStore` (named graph per document, WAC/ACP-authorized, bound to one session) with LDP
@@ -92,9 +93,9 @@ not a protocol error, so the agent can read it and retry.
 ## 🔒 Trust model — read this
 
 This is a **local agent-tool server, not a hardened multi-tenant endpoint**. It has **no
-built-in authentication or authorization**: the MCP transport (stdio) is a trust boundary
-you, the operator, establish — whoever can speak to the server has exactly the access the
-server was configured with. Run it only against a client you trust.
+built-in authentication or authorization**: the MCP transport (stdio, or the `http` listener)
+is a trust boundary you, the operator, establish — whoever can speak to the server has exactly
+the access it was configured with. Run it only against a client you trust, on loopback.
 
 - **Read-only by default.** Default tools cannot mutate; the feature-gated `validate` and `describe_form` tools are read-only.
 - **`update` is a mutation surface** and is exposed **only** when you set
