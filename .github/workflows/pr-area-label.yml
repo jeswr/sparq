@@ -12,8 +12,9 @@
 # workflow closes the layer that actually binds.
 #
 # WHY NOT actions/labeler: it cannot express the three properties this needs — (a) the
-# label must ALREADY EXIST (labeler's add-label call silently CREATES an unknown label,
-# which is how a typo becomes permanent repo state), (b) a >max_areas fan-out must fall
+# label must ALREADY EXIST, or else be provisioned on explicit evidence (labeler's
+# add-label call silently CREATES whatever name it is handed, which is how a typo becomes
+# permanent repo state), (b) a >max_areas fan-out must fall
 # BACK to `__global__` rather than acquiring many labels, and (c) the same code must drive
 # the one-pass backfill of the existing open PRs. The policy lives in reviewable TOML
 # (ci/area-labels.toml), not inline YAML.
@@ -57,12 +58,26 @@ on:
   # deriver receives `--pr 0` and no-ops — see the Python no-pull-request-context path.
   merge_group:
 
-# Least privilege. `pull-requests: write` is the ONLY write scope, and it is the exact
-# scope the "add labels to a pull request" call needs. `contents: read` is required by
-# actions/checkout to read the deriver + ci/area-labels.toml; it grants no write.
-# NO `issues: write`, no `contents: write`, no secrets are referenced anywhere.
+# Least privilege. `pull-requests: write` is the exact scope the "add labels to a pull
+# request" call needs. `contents: read` is required by actions/checkout to read the
+# deriver + ci/area-labels.toml; it grants no write. NO `contents: write`, and no secret
+# other than the scoped GITHUB_TOKEN is referenced anywhere.
+#
+# `issues: write` is the scope `POST /repos/{owner}/{repo}/labels` needs, and it is here
+# for exactly one job: PROVISIONING `area:<crate>` for a crate a PR is ADDING (issue
+# #4582). Such a crate does not exist on the default branch, so no label can have been
+# created for it in advance, and without one the PR is unattributable forever — which
+# falls through to the SERIALIZING `__global__` partition whenever the scheduler's
+# source-issue fallback also fails. The scope is safe to hold HERE specifically
+# because the checkout is the default branch (TRUSTED-CODE POSTURE above): no PR-authored
+# code ever runs under it. The PR-controlled INPUT that reaches it is a list of changed
+# paths, and scripts/pr-area-labels.py will only turn one into a label on positive
+# evidence — the crate is already a workspace member, or the diff itself carries
+# `crates/<name>/Cargo.toml` — under a strict name pattern. Pinned by
+# test_pr_area_labels.py::TestWorkflowSeam::test_permissions_are_exactly_the_declared_set.
 permissions:
   contents: read
+  issues: write
   pull-requests: write
 
 concurrency:

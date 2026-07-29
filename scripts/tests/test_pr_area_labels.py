@@ -8,11 +8,14 @@
 #
 #   1. DERIVATION (pure) — a crates/x-only PR narrows to x; a workspace-spanning PR stays
 #      `__global__`; an unattributable path stays `__global__`; an area with no live label
-#      is never invented.
+#      is never invented, EXCEPT the one evidence-gated case of #4582 (a crate the PR's
+#      own diff establishes with `crates/<name>/Cargo.toml`), whose evidence rule and
+#      buys-the-narrow-partition precondition each have their own discriminating test.
 #   2. EFFECTS (fake `gh`) — the recorded call list IS the assertion: additive-only (a
 #      human `area:` label survives, observed on the fake's simulated label state, not by
 #      grepping the source), idempotent (a second pass writes nothing), dry-run writes
-#      nothing, a fork PR and a no-pull-request ref make ZERO api calls.
+#      nothing, a fork PR and a no-pull-request ref make ZERO api calls, and a new-crate
+#      PR ends up NARROW rather than on `__global__`.
 #   3. THE YAML SEAM — parsed STRUCTURALLY, never by substring or `count(...) == N`, which
 #      is what lets `if: false`, a deleted step or a swapped call-site argument survive.
 #      Measured in this project: 18/18 Python mutants died while EVERY surviving mutant
@@ -111,16 +114,36 @@ class FakeGH:
         `previous_filename` exactly as the REST payload does.
     """
 
-    def __init__(self, prs, labels):
+    def __init__(self, prs, labels, create_races=(), create_fails=()):
         # prs: {number: {"labels": [..], "files": [entry..], "cap": int|None,
         #                "title": str, "isDraft": bool}}
         self.prs = {n: dict(p) for n, p in prs.items()}
         self.labels = list(labels)
         self.calls: list[list[str]] = []
+        # Label names whose creation POST fails. `create_races` models the LOST
+        # CREATE-RACE (another actor created it first: the 422, but the label IS there
+        # afterwards); `create_fails` models a REAL failure (a token without
+        # `issues: write`), where the label is still absent. The two must be
+        # distinguished by behaviour, not by the exception type.
+        self.create_races = set(create_races)
+        self.create_fails = set(create_fails)
 
     @property
     def writes(self):
-        return [c for c in self.calls if c[:2] == ["pr", "edit"]]
+        """Every MUTATING call — a PR label add OR an `area:` label creation. Both are
+        writes, so the dry-run assertion stays discriminating for the provisioning
+        path added for issue #4582."""
+        return [c for c in self.calls
+                if c[:2] == ["pr", "edit"] or (c[0] == "api" and "-X" in c)]
+
+    @property
+    def created(self):
+        """The label names this fake was asked to CREATE, in call order."""
+        out = []
+        for c in self.calls:
+            if c[0] == "api" and "-X" in c:
+                out += [a[len("name="):] for a in c if a.startswith("name=")]
+        return out
 
     @staticmethod
     def _entries(pr):
@@ -151,6 +174,17 @@ class FakeGH:
             m = re.search(r"/pulls/(\d+)/files", url)
             if m:
                 return self._files_payload(int(m.group(1)), url, "--paginate" in args)
+            if "-X" in args:
+                assert url.endswith("/labels") and "POST" in args, args
+                name = next(a[len("name="):] for a in args if a.startswith("name="))
+                if name in self.create_races:
+                    self.labels.append(name)          # the winner of the race got there
+                    raise RuntimeError("gh api failed: 422 already_exists")
+                if name in self.create_fails:
+                    raise RuntimeError("gh api failed: 403 Resource not accessible")
+                assert name not in self.labels, f"double-created {name}"
+                self.labels.append(name)
+                return ""
             return "".join(f"{name}\n" for name in self.labels)
         if args[:2] == ["pr", "view"]:
             n = int(args[2])
@@ -479,6 +513,73 @@ class TestDerivation(unittest.TestCase):
     def test_empty_change_set_stays_global(self):
         self.assertEqual(self.d([]), (frozenset(), "no-paths"))
 
+    # --- provisioning: the ONE narrow exception to never-invent-a-label (#4582) -----
+    NEW = "sparq-brand-new"
+
+    def p(self, paths, known=None):
+        return M.crate_labels_to_provision(
+            paths, self.policy, self.known if known is None else known)
+
+    def test_a_new_crate_pr_provisions_the_label_its_own_diff_establishes(self):
+        """THE HEADLINE GUARD for #4582. A PR that ADDS a crate names a lane that cannot
+        already have a label — measured live on #4578, which stayed `unresolved`. The
+        diff carrying `crates/<name>/Cargo.toml` IS the evidence: a cargo crate cannot
+        exist without its manifest."""
+        self.assertNotIn(self.NEW, self.policy.members)
+        self.assertEqual(self.p([f"crates/{self.NEW}/Cargo.toml",
+                                 f"crates/{self.NEW}/src/lib.rs"]), [self.NEW])
+        # ... and that label is exactly what turns the PR from __global__ into narrow.
+        self.assertEqual(self.d([f"crates/{self.NEW}/src/lib.rs"]),
+                         (frozenset(), "unresolved"))
+        self.assertEqual(self.d([f"crates/{self.NEW}/src/lib.rs"],
+                                known=self.known | {self.NEW}),
+                         (frozenset({self.NEW}), "resolved"))
+
+    def test_a_crates_path_without_manifest_evidence_provisions_nothing(self):
+        """DISCRIMINATING: deleting the evidence rule makes `crates/<typo>/notes.txt`
+        create `area:<typo>` — a PR-author-controlled path becoming permanent repo
+        state, which is the failure mode the never-invent rule exists to prevent."""
+        self.assertEqual(self.p([f"crates/{self.NEW}/notes.txt"]), [])
+        self.assertEqual(self.p(["crates/sparq-typoo/src/lib.rs"]), [])
+
+    def test_a_manifest_deeper_than_the_crate_root_is_not_evidence(self):
+        """`crates/<name>/vendored/Cargo.toml` does not make `<name>` a crate root."""
+        self.assertEqual(self.p([f"crates/{self.NEW}/vendored/Cargo.toml"]), [])
+
+    def test_a_missing_label_for_an_existing_crate_is_provisioned(self):
+        """The other evidence branch: the crate is a workspace member on the DEFAULT
+        BRANCH, so the label is simply missing (repo drift), not a guess."""
+        member = sorted(self.policy.members)[0]
+        self.assertEqual(self.p([f"crates/{member}/src/lib.rs"],
+                                known=self.known - {member}), [member])
+
+    def test_provisioning_never_invents_a_non_crate_area(self):
+        """A path that is not a crate directory can never produce a label, whatever its
+        shape — this is the invariant that keeps `area:*` meaning crate-or-declared-lane."""
+        self.assertEqual(self.p(["crates/README.md", "crates"], known=set()), [])
+        self.assertEqual(self.p(["brand/new/top/level/dir.txt"], known=set()), [])
+        self.assertEqual(self.p([".github/workflows/ci.yml"], known=set()), [])
+
+    def test_provisioning_refuses_a_name_that_collides_with_a_declared_lane(self):
+        """`[lanes] non_crate` names denote lanes, not crates; a `crates/<lane>/` path
+        must never blur the two even if that label somehow went missing."""
+        lane = sorted(self.policy.non_crate)[0]
+        self.assertEqual(self.p([f"crates/{lane}/Cargo.toml"], known=set()), [])
+
+    def test_nothing_is_provisioned_when_the_pr_stays_global_regardless(self):
+        """No speculative repo state: a label is created only when it BUYS the narrow
+        partition. An unattributable sibling path, or a cross-cutting fan-out, means the
+        PR is `__global__` whatever labels exist."""
+        self.assertEqual(self.p([f"crates/{self.NEW}/Cargo.toml",
+                                 "no/such/top/level/x.txt"]), [])
+        wide = [f"crates/{c}/src/lib.rs"
+                for c in sorted(self.policy.members)[:self.policy.max_areas]]
+        self.assertEqual(self.p([f"crates/{self.NEW}/Cargo.toml",
+                                 f"crates/{self.NEW}/src/lib.rs"] + wide), [])
+
+    def test_an_already_labelled_crate_is_never_re_provisioned(self):
+        self.assertEqual(self.p(["crates/sparq-reason/src/lib.rs"]), [])
+
     def test_area_with_no_live_label_is_never_invented(self):
         """The `POST .../labels` call CREATES an unknown label, so an area outside the
         live label set must be treated as unresolved."""
@@ -641,6 +742,105 @@ class TestEffects(unittest.TestCase):
                 M._gh(["api", "x"], sleep=lambda _s: None)
         finally:
             sp.run = orig
+
+
+class TestNewCrateProvisioningEffects(unittest.TestCase):
+    """What reaches `gh` on the #4582 path: a PR that ADDS a crate must end up on a
+    NARROW partition, which means the `area:<crate>` label has to be created first.
+
+    Every assertion is on the fake's recorded calls and simulated label state."""
+
+    NEW = "sparq-brand-new"
+
+    def fake(self, files=None, labels=(), **kw):
+        policy = M.load_policy()
+        assert self.NEW not in policy.members
+        live = [f"area:{a}" for a in sorted(policy.members | policy.non_crate)]
+        files = list(files or [f"crates/{self.NEW}/Cargo.toml",
+                              f"crates/{self.NEW}/src/lib.rs"])
+        return FakeGH({7: {"labels": list(labels), "files": files}}, live, **kw)
+
+    def test_a_new_crate_pr_is_provisioned_and_lands_narrow_not_global(self):
+        """THE END-TO-END GUARD. Before this, the run printed
+        `#4578 KEEP __global__ [unresolved]` and the PR kept the SERIALIZING partition.
+
+        "narrow" here is the DERIVER's verdict — the PR carries an `area:<crate>` key
+        instead of none. How much that key reserves is `ready-issues.py::partition_path`'s
+        longest-recognised-ancestor rule, which for a crate not yet on the default branch
+        resolves to an ancestor or the head segment; see `crate_labels_to_provision`."""
+        f = self.fake()
+        out = _run(f, ["--pr", "7", "--apply"])
+        self.assertIn(f"area:{self.NEW}", f.labels, "the label was never created")
+        self.assertEqual(f.prs[7]["labels"], [f"area:{self.NEW}"])
+        self.assertNotIn("KEEP __global__", out)
+        self.assertIn(f"CREATE area:{self.NEW}", out)
+
+    def test_the_creation_call_is_a_label_post_carrying_the_prefixed_name(self):
+        """Pins the call site: a POST to the repo's LABELS collection (not the PR's), with
+        the `area:`-prefixed name. Dropping the prefix would create a bare `sparq-*`
+        label that the scheduler never reads."""
+        f = self.fake()
+        _run(f, ["--pr", "7", "--apply"])
+        posts = [c for c in f.calls if c[0] == "api" and "-X" in c]
+        self.assertEqual(len(posts), 1, posts)
+        self.assertIn("POST", posts[0])
+        self.assertIn(f"repos/{REPO}/labels", posts[0])
+        self.assertEqual(f.created, [f"area:{self.NEW}"])
+
+    def test_dry_run_creates_no_label_but_still_previews_the_partition(self):
+        f = self.fake()
+        out = _run(f, ["--pr", "7"])
+        self.assertEqual(f.writes, [], "a dry run must not create a label")
+        self.assertNotIn(f"area:{self.NEW}", f.labels)
+        self.assertIn(f"would create area:{self.NEW}", out)
+        self.assertIn("would label", out)
+
+    def test_a_second_pass_creates_nothing(self):
+        f = self.fake()
+        _run(f, ["--pr", "7", "--apply"])
+        f.calls.clear()
+        _run(f, ["--pr", "7", "--apply"])
+        self.assertEqual(f.writes, [], "provisioning is not idempotent")
+
+    def test_a_stray_crates_path_creates_nothing_and_stays_global(self):
+        """DISCRIMINATING at the effect layer: without manifest evidence the PR keeps its
+        pre-existing fail-closed behaviour and no repo state is invented."""
+        f = self.fake(files=[f"crates/{self.NEW}/notes.txt"])
+        out = _run(f, ["--pr", "7", "--apply"])
+        self.assertEqual(f.writes, [])
+        self.assertEqual(f.prs[7]["labels"], [])
+        self.assertIn("KEEP __global__", out)
+
+    def test_a_truncated_file_list_creates_nothing(self):
+        """The input boundary still dominates: an enumeration that disagrees with
+        `changedFiles` is `incomplete-paths`, so no label is bought for it."""
+        f = self.fake()
+        f.prs[7]["cap"] = 1
+        out = _run(f, ["--pr", "7", "--apply"])
+        self.assertEqual(f.writes, [])
+        self.assertEqual(f.labels.count(f"area:{self.NEW}"), 0)
+        self.assertIn("incomplete-paths", out)
+
+    def test_a_fork_pr_creates_nothing(self):
+        f = self.fake()
+        _run(f, ["--pr", "7", "--apply", "--head-repo", "someone-else/sparq"])
+        self.assertEqual(f.calls, [])
+
+    def test_a_lost_create_race_is_tolerated(self):
+        """Two PRs adding the same crate race; the loser's 422 is not a failure of the
+        postcondition, and must not red a gating check."""
+        f = self.fake(create_races=[f"area:{self.NEW}"])
+        _run(f, ["--pr", "7", "--apply"])
+        self.assertEqual(f.prs[7]["labels"], [f"area:{self.NEW}"])
+
+    def test_a_real_creation_failure_raises_instead_of_warning_and_falling_back(self):
+        """"Auto-create or fail loudly" (#4582): a token without `issues: write` must
+        turn this gating check RED, not silently leave the PR on `__global__`."""
+        import io
+        f = self.fake(create_fails=[f"area:{self.NEW}"])
+        with self.assertRaises(RuntimeError):
+            M.main(["--pr", "7", "--apply", "--repo", REPO], runner=f, out=io.StringIO())
+        self.assertEqual(f.prs[7]["labels"], [])
 
 
 # ============================================================== the INPUT boundary
@@ -917,9 +1117,14 @@ class TestWorkflowSeam(unittest.TestCase):
         self.assertEqual(with_.get("ref"), "${{ github.event.repository.default_branch }}")
         self.assertIs(with_.get("persist-credentials"), False)
 
-    def test_permissions_are_exactly_the_least_privilege_pair(self):
+    def test_permissions_are_exactly_the_declared_set(self):
+        """Pinned by EQUALITY, so a widened scope cannot ship unreviewed. `issues: write`
+        is here for ONE reason — `POST /repos/{owner}/{repo}/labels`, the crate-label
+        provisioning of #4582 — and is safe to hold only because the checkout is the
+        default branch, so no PR-authored code runs under it."""
         self.assertEqual(self.wf["permissions"],
-                         {"contents": "read", "pull-requests": "write"})
+                         {"contents": "read", "issues": "write",
+                          "pull-requests": "write"})
         for job in self.jobs.values():
             self.assertNotIn("permissions", job, "a job-level permissions block would "
                                                  "override the least-privilege default")

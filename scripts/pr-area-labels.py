@@ -31,11 +31,20 @@ THE CONTRACT
     the authoritative `changedFiles` count; any disagreement is `incomplete-paths`.
     Renames are consumed via `previous_filename` (REST-only), so a cross-crate move
     implicates BOTH the source and the destination crate.
-  * It NEVER creates a label. GitHub's "add labels to an issue" REST call SILENTLY
-    CREATES an unknown label, so a typo'd area would become permanent repo state; every
-    candidate area is therefore checked against the repo's live label set first and
-    dropped (loudly) if absent. A dropped area means the PR stays `__global__` — the
-    safe direction.
+  * It creates a label in EXACTLY ONE case and never otherwise. GitHub's "add labels to
+    an issue" REST call SILENTLY CREATES an unknown label, so a typo'd area would become
+    permanent repo state; every candidate area is therefore checked against the repo's
+    live label set first and dropped (loudly) if absent. A dropped area means the PR
+    stays `__global__` — the safe direction. The single exception is a CRATE area the PR
+    ITSELF ESTABLISHES: `<name>` is already a workspace member, or the PR's own changed
+    files carry `crates/<name>/Cargo.toml`. That is a fact about the diff, not a guess,
+    and it is the case that was previously unfixable in-pipeline — a PR that ADDS a crate
+    names a lane that cannot yet have a label, so it stayed unattributable forever
+    (issue #4582, measured on #4578). Provisioning runs ONLY under `--apply`, only on a
+    COMPLETE file list, and creates at most `[policy] max_areas` labels per PR. A
+    creation that fails for any reason other than a lost create-race is RAISED, not
+    warned about: the gating check goes red rather than silently falling back to
+    `__global__` — "warn and fall back" would be the worst of both.
   * IDEMPOTENT: areas already on the PR are never re-posted; a second run over an
     already-labelled PR issues zero writes.
   * READ-ONLY BY DEFAULT (repo convention, cf. scripts/push-frontier.sh): `--dry-run` is
@@ -69,6 +78,20 @@ WORKSPACE_MANIFEST = REPO_ROOT / "Cargo.toml"
 GLOBAL = "__global__"          # mirrors ready-issues.py / dispatch-claim.py
 AREA_PREFIX = "area:"
 CRATES_DIR = "crates"
+CRATE_MANIFEST = "Cargo.toml"  # a cargo crate cannot exist without one — the EVIDENCE
+
+# The only crate-directory names this module is willing to turn into permanent repo
+# state. Deliberately far stricter than the filesystem allows: a changed PATH is
+# PR-author-controlled input, and label creation is the one place it becomes durable.
+CRATE_DIR_RE = re.compile(r"\A[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?\Z")
+# `ededed` is the neutral grey scripts/bd-to-issues.py and scripts/retriage.py already use
+# when they auto-create a label, so a provisioned lane looks like the repo's other
+# machine-made ones. Nothing reads the colour; the DESCRIPTION is what names the origin.
+AUTO_AREA_LABEL_COLOR = "ededed"
+AUTO_AREA_LABEL_DESCRIPTION = (
+    "Scheduler conflict partition. Auto-provisioned by scripts/pr-area-labels.py for a "
+    "crate directory carried by a pull request."
+)
 
 
 class PolicyError(RuntimeError):
@@ -165,6 +188,34 @@ def matches(pattern, path):
     return bool(_segment_glob(pattern).match(path))
 
 
+def crate_dir_of(path):
+    """`crates/<name>/<something>` -> `<name>`; anything else -> None.
+
+    Rule 1 of ci/area-labels.toml's RESOLUTION ORDER, factored out so `attribute` and the
+    label-provisioning path below decide "is this a crate path, and which crate" with ONE
+    implementation and cannot drift apart.
+
+    A CRATE DIRECTORY is at least three segments. A file sitting directly in `crates/`
+    (two segments, e.g. `crates/README.md`) is NOT a crate and resolves to nothing =>
+    fail closed.
+
+    Deliberately NOT gated on workspace membership. The workflow evaluates a PR against
+    the DEFAULT BRANCH's manifest (a `pull-requests: write` job must not run PR-authored
+    code), so a PR that ADDS a crate would otherwise be permanently unresolvable — and
+    those are exactly the PRs that collide with nothing and most deserve a narrow
+    partition. The guard against inventing an area is the caller's live-`area:`-label
+    check, which a non-crate name cannot pass, plus `crate_labels_to_provision`'s
+    evidence rule for the one case where a label is created.
+    """
+    if not isinstance(path, str) or not path:
+        return None
+    path = path[2:] if path.startswith("./") else path
+    parts = path.split("/")
+    if parts[0] != CRATES_DIR or len(parts) < 3:
+        return None
+    return parts[1]
+
+
 def attribute(path, policy):
     """The single area a changed path implicates, or None when nothing claims it.
 
@@ -174,20 +225,11 @@ def attribute(path, policy):
     if not isinstance(path, str) or not path:
         return None
     path = path[2:] if path.startswith("./") else path
-    parts = path.split("/")
-    if parts[0] == CRATES_DIR:
-        # A CRATE DIRECTORY is `crates/<name>/<something>` — at least three segments.
-        # A file sitting directly in `crates/` (two segments, e.g. `crates/README.md`)
-        # is NOT a crate and resolves to nothing => fail closed.
-        if len(parts) < 3:
-            return None
-        # Deliberately NOT gated on workspace membership. The workflow evaluates a PR
-        # against the DEFAULT BRANCH's manifest (a `pull-requests: write` job must not
-        # run PR-authored code), so a PR that ADDS a crate would be permanently
-        # unresolvable — and those are exactly the PRs that collide with nothing and
-        # most deserve a narrow partition. The guard against inventing an area is the
-        # caller's live-`area:`-label check, which a non-crate name cannot pass.
-        return parts[1]
+    if path.split("/")[0] == CRATES_DIR:
+        # Everything under `crates/` is answered by rule 1 alone — including the
+        # two-segment non-crate case, which returns None and so falls CLOSED rather than
+        # dropping through to the `[[map]]` rows below.
+        return crate_dir_of(path)
     for pattern, area in policy.rows:
         if matches(pattern, path):
             return area
@@ -289,6 +331,81 @@ def unresolved_paths(pr, policy, known_areas):
     return out
 
 
+def crate_labels_to_provision(paths, policy, known_areas):
+    """The crate areas this PR ESTABLISHES for which no `area:` label exists yet.
+
+    This is the ONE narrow hole in the never-invent-a-label rule, and it exists because
+    the rule had no honest answer for a PR that ADDS a crate (issue #4582): the deriver
+    reads the DEFAULT BRANCH, where the crate does not exist, so no `area:<crate>` label
+    can have been created in advance and the PR is unattributable forever. Such a PR
+    collides with nothing, so leaving it unattributed is the worst possible answer.
+
+    Scope, stated exactly (the correction #4582 makes to its own first filing): an
+    unattributed PR is not automatically on the scheduler's `__global__` partition —
+    `busy_packages_of_pulls` unions a PR's own labels with the `area:*` of its
+    provenance-linked source issue, which rescued the measured case (#4578 via #2659,
+    `reason.global-reservation=0` across four dispatch runs). `__global__` results only
+    when that source-issue fallback ALSO fails. So this closes a latent hazard gated
+    behind a second condition, not a live fleet-wide stall.
+
+    Exactly two kinds of EVIDENCE qualify a name, and nothing else does:
+      * `<name>` is a workspace member on the default branch — the crate demonstrably
+        exists and the label is simply missing (repo drift); or
+      * the PR's own changed paths carry `crates/<name>/Cargo.toml` — a cargo crate
+        cannot exist without its manifest, so the diff itself establishes that `<name>`
+        is a crate. A FACT about the diff, not a guess.
+    A stray `crates/<typo>/notes.txt` has neither and stays unresolved => `__global__`,
+    which is the pre-existing behaviour and the safe direction.
+
+    Both branches keep the `[lanes] non_crate` invariant honest — every `area:` label
+    still denotes either a workspace crate (here, one that exists at least on the PR
+    branch) or a declared non-crate lane. A name that collides with a declared lane is
+    refused outright rather than blurring the two.
+
+    Finally — and this is what keeps it from becoming speculative repo state — nothing is
+    provisioned unless it BUYS a resolved derivation: the labels are proposed only when
+    the PR would then derive `resolved`. A PR that stays `__global__` regardless (another
+    unattributable path, or more than `[policy] max_areas` areas) creates nothing. That
+    also bounds one PR's creations at `max_areas` without a separate cap.
+
+    HOW NARROW THE RESULT ACTUALLY IS — do not overstate this. What provisioning buys
+    here is that the PR carries an `area:<crate>` key at all instead of none. How much
+    that key reserves downstream is `ready-issues.py::partition_path`'s business, and for
+    a crate that is not yet on the default branch its longest-recognised-ancestor rule
+    resolves the key to the nearest ancestor the workspace DOES recognise (so
+    `sparq-wrapper-shacl` -> `sparq-wrapper`), or, failing that, to the key's head
+    segment (`sparq`), which over-reserves every `sparq-*` crate. That is strictly
+    narrower than `__global__` — which is a prefix of EVERY partition path and so defers
+    `ci`, `docs`, `site` and the rest as well — but it is only exactly-narrow once the
+    crate lands on the default branch and becomes a recognised root in its own right.
+    """
+    manifests = set()
+    for path in paths:
+        name = crate_dir_of(path)
+        if name is None:
+            continue
+        norm = path[2:] if path.startswith("./") else path
+        if norm.split("/") == [CRATES_DIR, name, CRATE_MANIFEST]:
+            manifests.add(name)
+    wanted = set()
+    for path in paths:
+        name = crate_dir_of(path)
+        if name is None or name in known_areas:
+            continue
+        if name not in policy.members and name not in manifests:
+            continue                    # no evidence — do not invent a lane
+        if not CRATE_DIR_RE.match(name):
+            continue                    # unreachable for a real crate; belt and braces
+        if name in policy.non_crate:
+            continue                    # a declared lane is never provisioned as a crate
+        wanted.add(name)
+    if not wanted:
+        return []
+    if derive_areas(paths, policy, set(known_areas) | wanted)[1] != "resolved":
+        return []
+    return sorted(wanted)
+
+
 # ------------------------------------------------------------------------ github I/O
 
 
@@ -386,6 +503,53 @@ def fetch_open_prs(repo, limit=300, runner=None):
             "isDraft": bool(data.get("isDraft")),
         }, data.get("changedFiles"), runner=runner))
     return out
+
+
+def create_area_label(repo, area, runner=None):
+    """Create `area:<area>`. The ONLY write in this module that is not a PR label add."""
+    _gh(["api", "-X", "POST", f"repos/{repo}/labels",
+         "-f", f"name={AREA_PREFIX}{area}",
+         "-f", f"color={AUTO_AREA_LABEL_COLOR}",
+         "-f", f"description={AUTO_AREA_LABEL_DESCRIPTION}"], runner=runner)
+
+
+def ensure_area_label(repo, area, runner=None):
+    """Create `area:<area>`, tolerating the LOST CREATE-RACE and nothing else.
+
+    Two PRs adding the same crate can race; the loser gets a 422 `already_exists`, which
+    is not a failure of the postcondition — so the label set is re-read and, if the label
+    is now there, the run continues. Every other failure (a token without `issues:
+    write`, a rate limit, a 404 repo) is RE-RAISED, so this gating check goes RED and the
+    breakage is visible. That is the "auto-create or fail loudly" rule from issue #4582:
+    it never degrades into a silent warn-and-fall-back to `__global__`.
+    """
+    try:
+        create_area_label(repo, area, runner=runner)
+    except RuntimeError:
+        if area not in known_area_labels(repo, runner=runner):
+            raise
+
+
+def provision_crate_labels(repo, pr, policy, known, apply, out, runner=None):
+    """Create the `area:<crate>` labels this PR establishes. Returns the names now usable.
+
+    Only under a COMPLETE file list: a truncated one derives a proper SUBSET, so the PR
+    is `incomplete-paths` (=> `__global__`) whatever labels exist and creating them would
+    be repo state bought for nothing.
+
+    Under `--dry-run` (the default) NOTHING is created, but the names are still returned
+    so the printed plan shows the partition the PR WOULD land in.
+    """
+    if pr.get("complete") is not True:
+        return set()
+    wanted = crate_labels_to_provision(pr.get("files") or [], policy, known)
+    for area in wanted:
+        if apply:
+            ensure_area_label(repo, area, runner=runner)
+        verb = "CREATE" if apply else "would create"
+        print(f"#{pr.get('number')} {verb} {AREA_PREFIX}{area}"
+              f"   (crate directory carried by this PR; see issue #4582)", file=out)
+    return set(wanted)
 
 
 def apply_areas(repo, number, labels, runner=None):
@@ -488,6 +652,10 @@ def main(argv=None, runner=None, out=None):
            else fetch_open_prs(args.repo, limit=args.limit, runner=runner))
     changed = kept = 0
     for pr in prs:
+        # Provision BEFORE planning: a crate the PR itself adds cannot have had a label
+        # created in advance, and without one the whole PR is `unresolved` (#4582).
+        known |= provision_crate_labels(args.repo, pr, policy, known, args.apply, out,
+                                        runner=runner)
         plan = plan_for_pr(pr, policy, known)
         changed += _emit(plan, pr, policy, known, args.apply, out)
         if plan["reason"] != "resolved":
@@ -555,9 +723,21 @@ def _self_test():
     assert paths_are_complete(100, 646) is False
     assert paths_are_complete(646, 646) is True
     assert paths_are_complete(0, None) is False
-    # An area with no live label is unresolved, never auto-created.
+    # An area with no live label is unresolved: DERIVATION never invents one.
     assert derive_areas(["crates/sparq-core/src/lib.rs"], policy, set()) == (
         frozenset(), "unresolved")
+    # PROVISIONING is the one narrow exception (#4582), and only on EVIDENCE. A PR that
+    # carries `crates/<new>/Cargo.toml` establishes the crate; a stray path does not.
+    new = "sparq-brand-new-crate"
+    assert new not in policy.members
+    assert crate_labels_to_provision(
+        [f"crates/{new}/{CRATE_MANIFEST}", f"crates/{new}/src/lib.rs"], policy, known) == [new]
+    assert crate_labels_to_provision([f"crates/{new}/notes.txt"], policy, known) == []
+    # ... and never for a path that is not a crate directory at all.
+    assert crate_labels_to_provision(["crates/README.md", "docs/x.md"], policy, known) == []
+    # Nothing is provisioned when it would NOT buy the narrow partition.
+    assert crate_labels_to_provision(
+        [f"crates/{new}/{CRATE_MANIFEST}", "no/such/dir/x.txt"], policy, known) == []
     # `*` never crosses `/`: the root-markdown row must not swallow a skill or a crate doc.
     assert attribute("README.md", policy) == "docs"
     assert attribute("skills/inference/SKILL.md", policy) == "sparq-reason"
