@@ -1,0 +1,76 @@
+{
+  "clauses": [
+    "core#authz-discovery"
+  ],
+  "exchanges": [
+    {
+      "expected": {
+        "headers": {
+          "WWW-Authenticate": {
+            "authParams": {
+              "params": {
+                "resource_metadata": {
+                  "present": true
+                }
+              },
+              "scheme": "Bearer"
+            }
+          }
+        },
+        "status": 401
+      },
+      "request": {
+        "agent": null,
+        "method": "GET",
+        "target": "https://storage.example/alice/hello.txt"
+      }
+    },
+    {
+      "expected": {
+        "body": {
+          "jsonContains": {
+            "authorization_servers": [
+              "https://as.example"
+            ]
+          },
+          "jsonHasMembers": [
+            "resource",
+            "authorization_servers",
+            "jlws_storage_description"
+          ]
+        },
+        "status": 200
+      },
+      "request": {
+        "agent": null,
+        "method": "GET",
+        "target": "${response[0].authParam(resource_metadata)}"
+      }
+    }
+  ],
+  "id": "discovery/protected-resource-metadata-document",
+  "input": {
+    "state": {
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/hello.txt": {
+          "content": "hi",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/",
+      "trustedIssuers": [
+        "https://as.example"
+      ]
+    }
+  },
+  "level": "MUST",
+  "notes": "The document URI is whatever the 401 challenge advertises as resource_metadata; the harness resolves it from a challenge first.",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#authz-discovery (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "the RFC 9728 protected resource metadata document carries resource, authorization_servers, and jlws_storage_description"
+}

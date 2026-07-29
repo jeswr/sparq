@@ -1,0 +1,29 @@
+{
+  "clauses": [
+    "core#access-token"
+  ],
+  "expected": {
+    "accept": false,
+    "errorCode": "TYP_MISMATCH"
+  },
+  "id": "auth/token-wrong-typ-rejected",
+  "input": {
+    "issuerJwks": {
+      "https://as.example": "keyring/as.jwks.json",
+      "https://rogue-as.example": "keyring/rogue-as.jwks.json"
+    },
+    "maxClockSkewSeconds": 60,
+    "now": "2026-07-01T12:00:00Z",
+    "targetResource": "https://storage.example/alice/notes/a.txt",
+    "token": "keyring/at-wrong-typ.jwt",
+    "trustedIssuers": [
+      "https://as.example"
+    ]
+  },
+  "level": "MUST",
+  "notes": "RFC 9068 §4 requires resource servers to verify typ; the spec makes RFC 9068 conformance a MUST for the issued token.",
+  "operation": "validate-access-token",
+  "source": "lws-spec@59da847 core#access-token (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "a token without the at+jwt typ header is rejected (RFC 9068 conformance)"
+}

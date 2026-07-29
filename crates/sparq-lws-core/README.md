@@ -65,27 +65,23 @@ docker run --rm --name sparq-lws-core -p 127.0.0.1:3000:3000 \
 
 ## ✨ Features
 
-- **LDP surface** — containers + RDF/non-RDF resources, Turtle / JSON-LD content
-  negotiation (oxrdf/oxttl/oxjsonld) honouring the JSON-LD `profile` parameter
-  (expanded / compacted forms echoed in `Content-Type`; compaction is local and
-  context-free — nothing fetched), conditional requests, `Content-Range` reads.
-- **Access control** — WAC (`acl:`) evaluated against the SPARQ-authoritative
-  store, with an ACL decision cache; public-read fast path.
-- **WAC-scoped query endpoint** — [GPT-5.6] default-on, query-only
-  `GET`/`POST /sparql` for SELECT, ASK, and CONSTRUCT. Each request rebuilds a
-  named-graph-per-readable-resource dataset; the default graph is empty and
-  unreadable or uncertain resources never reach the query engine.
-- **Auth** — Solid-OIDC access tokens + mandatory DPoP, verified-token cache,
-  tiered PoP: RFC 8705 mTLS cert-bound tokens and HKDF/HMAC DPoP-SK attestation.
-- **Storage seams** — `Store` / `SparqClient` / `BlobStore` traits: the
-  embedded in-process engine (default), in-memory double, opt-in live SPARQ
-  HTTP client, and `object_store` blob backends.
-- **Notification observability** — [GPT-5.6] process-wide backlog-overflow totals
-  are available through `notifications::ws::NotificationMetrics::snapshot()`.
-- **Transport hardening** — HTTP/2 rapid-reset and HTTP/1 slowloris guards,
-  including explicit header-count, aggregate-byte, and slow-header timeout
-  bounds; request timeouts, body limits, per-connection max-requests, rate
-  limiting, and overload shedding.
+- **LDP surface** — containers + RDF/non-RDF resources, Turtle / JSON-LD content negotiation
+  (oxrdf/oxttl/oxjsonld) honouring the JSON-LD `profile` parameter (expanded / compacted forms echoed
+  in `Content-Type`; compaction is local and context-free — nothing fetched), conditional requests, `Content-Range` reads.
+- **Access control** — WAC (`acl:`) evaluated against the SPARQ-authoritative store, with an ACL
+  decision cache; public-read fast path.
+- **WAC-scoped query endpoint** — [GPT-5.6] default-on, query-only `GET`/`POST /sparql` for SELECT,
+  ASK, and CONSTRUCT. Each request rebuilds a named-graph-per-readable-resource dataset; the default
+  graph is empty and unreadable or uncertain resources never reach the query engine.
+- **Auth** — Solid-OIDC access tokens + mandatory DPoP, verified-token cache, tiered PoP: RFC 8705
+  mTLS cert-bound tokens and HKDF/HMAC DPoP-SK attestation.
+- **Storage seams** — `Store` / `SparqClient` / `BlobStore` traits: the embedded in-process engine
+  (default), in-memory double, opt-in live SPARQ HTTP client, and `object_store` blob backends.
+- **Notification observability** — [GPT-5.6] process-wide backlog-overflow totals are available
+  through `notifications::ws::NotificationMetrics::snapshot()`.
+- **Transport hardening** — HTTP/2 rapid-reset and HTTP/1 slowloris guards, including explicit
+  header-count, aggregate-byte, and slow-header timeout bounds; request timeouts, body limits,
+  per-connection max-requests, rate limiting, and overload shedding.
 - Cargo features:
   - `embedded-sparq` (**default-on**, sq-gg0qq.3) — the first-class in-process
     SPARQ engine backend (in-workspace path deps on `sparq-core`/`sparq-engine`);
@@ -105,12 +101,16 @@ docker run --rm --name sparq-lws-core -p 127.0.0.1:3000:3000 \
     deny-overrides / permit-extends over the WAC decision, fail-closed).
   - `trust-graph` (off, [OPUS-5] sq-hed3q) — the LIBRARY-only trust-graph admission
     seam (`authz::trust_admit`); NOT handler-wired. Research prototype (sq-qhy4).
+  - `access-profile-odrl1` (off, [SONNET-4.6] sq-gg0qq.6) — the LWS spec's strict ODRL access
+    profile (`authz::access_profile`), a port of its normative N3 access-decision rule set. LIBRARY-only; NOT handler-wired.
 
 ## 📚 Learn more
 
 - Solid CTH wire conformance: [`conformance/`](./conformance) — opt-in lane; the
   score is generated + ratcheted, never committed prose (sq-gg0qq.7). bench/,
   docs/, decisions/ stay in the source repo until their own sq-gg0qq beads land.
+- LWS spec conformance: [`lws-spec/`](./lws-spec) — the vendored `jeswr/lws-spec` test-vectors +
+  normative N3 semantics, pinned. **The spec wins**; coverage is a ledger, not a pass count (sq-gg0qq.6).
 - Design records: `docs/` + `decisions/` in [jeswr/solid-server-rs](https://github.com/jeswr/solid-server-rs).
 - Related crates: [`sparq-solid`](../sparq-solid) (Solid protocol pieces),
   [`sparq-server`](../sparq-server) (the SPARQL endpoint it can delegate to).

@@ -1,0 +1,8 @@
+{
+  "alg": "hmac-sha256",
+  "cb": "none",
+  "expiresAt": "2026-07-01T11:59:00Z",
+  "key": "NOHMfTK4vvw-oI0Uj0_Vst8kZO3-is1MWCQwetGma9E",
+  "session_id": "EBESExQVFhcYGRobHB0eHw",
+  "tokenHash": "gHvME6bygnwltEOQCKAPRlOU-4DlfkKPkghZAJRwgYY"
+}

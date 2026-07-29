@@ -1,0 +1,36 @@
+{
+  "clauses": [
+    "core#odrl-profile"
+  ],
+  "expected": {
+    "errorCode": "PROFILE_MISSING",
+    "ok": false
+  },
+  "id": "access-grants/document-missing-profile-rejected",
+  "input": {
+    "document": {
+      "@context": [
+        "http://www.w3.org/ns/odrl.jsonld",
+        "https://w3id.org/jeswr/lws/v1"
+      ],
+      "@type": "Offer",
+      "assigner": "https://id.example/alice",
+      "permission": [
+        {
+          "action": "read",
+          "assignee": "https://id.example/bob",
+          "target": {
+            "@type": "DataResource",
+            "uid": "https://storage.example/alice/notes/a.txt"
+          }
+        }
+      ],
+      "uid": "https://storage.example/alice/.grants/vec-2"
+    }
+  },
+  "level": "MUST",
+  "operation": "validate-access-document",
+  "source": "lws-spec@59da847 core#odrl-profile (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "an unprofiled ODRL document is not a conforming access document (profile is REQUIRED)"
+}

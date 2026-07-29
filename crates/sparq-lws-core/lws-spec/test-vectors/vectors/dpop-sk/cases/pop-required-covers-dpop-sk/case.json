@@ -1,0 +1,101 @@
+{
+  "clauses": [
+    "core#presentation-pop",
+    "core#authz-discovery"
+  ],
+  "exchanges": [
+    {
+      "expected": {
+        "headers": {
+          "WWW-Authenticate": {
+            "excludesScheme": "Bearer"
+          }
+        },
+        "status": 401
+      },
+      "request": {
+        "agent": null,
+        "method": "GET",
+        "target": "https://storage.example/alice/notes/a.txt"
+      }
+    },
+    {
+      "expected": {
+        "body": {
+          "jsonContains": {
+            "dpop_bound_access_tokens_required": true
+          },
+          "jsonHasMembers": [
+            "pop_session"
+          ]
+        },
+        "status": 200
+      },
+      "request": {
+        "agent": null,
+        "method": "GET",
+        "target": "${response[0].authParam(resource_metadata)}"
+      }
+    }
+  ],
+  "id": "dpop-sk/pop-required-covers-dpop-sk",
+  "input": {
+    "state": {
+      "issuerJwks": {
+        "https://as.example": "keyring/as.jwks.json"
+      },
+      "now": "2026-07-01T12:00:00Z",
+      "popProfiles": [
+        "DPoP",
+        "DPoP-SK"
+      ],
+      "popRequiredRealms": [
+        "https://storage.example/alice/"
+      ],
+      "popSession": {
+        "algs": [
+          "hmac-sha256"
+        ],
+        "channelBindings": [
+          "none"
+        ],
+        "endpoint": "https://storage.example/alice/.pop/session",
+        "profile": "https://w3id.org/jeswr/dpop-sk/v1"
+      },
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "alpha",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        },
+        "https://storage.example/alice/notes/b.txt": {
+          "content": "beta",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/",
+      "trustedIssuers": [
+        "https://as.example"
+      ]
+    }
+  },
+  "level": "MUST",
+  "notes": "Normative rule (core#presentation-pop, as corrected on the alignment pass): a DPoP-SK session is established FROM a DPoP-bound access token, so RFC 9728's registered dpop_bound_access_tokens_required: true governs DPoP-SK too; DPoP-SK availability is signalled by pop_session's presence.",
+  "operation": "http-exchange",
+  "preconditions": {
+    "features": [
+      "pop-required-realm",
+      "pop-profile-dpop-sk"
+    ]
+  },
+  "source": "lws-spec@59da847 core#presentation-pop + dpop-sk-spec@f485855 #establishment, #discovery (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "a PoP-required realm offering DPoP-SK signals it with the single dpop_bound_access_tokens_required member — no separate DPoP-SK required-member exists — and omits Bearer from its challenges"
+}

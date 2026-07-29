@@ -1,0 +1,40 @@
+{
+  "clauses": [
+    "rdf#indexing",
+    "core#query-services"
+  ],
+  "expected": {
+    "errorCode": "SERVICE_REQUIRES_PROFILE",
+    "ok": false
+  },
+  "id": "rdf-transform/sparql-service-requires-profile-on",
+  "input": {
+    "document": {
+      "@context": [
+        "https://w3id.org/jeswr/lws/v1",
+        "https://www.w3.org/ns/cid/v1"
+      ],
+      "conformsTo": [
+        "https://w3id.org/jeswr/lws/protocol/core/1.0"
+      ],
+      "id": "https://storage.example/alice/",
+      "service": [
+        {
+          "serviceEndpoint": "https://storage.example/alice/description",
+          "type": "StorageDescription"
+        },
+        {
+          "serviceEndpoint": "https://storage.example/alice/.query/sparql",
+          "type": "SparqlQueryService"
+        }
+      ],
+      "type": "Storage"
+    }
+  },
+  "level": "MUST",
+  "notes": "rdf#indexing: \"The SparqlQueryService MUST only be advertised when this profile is on\" (SPARQL is meaningless over an opaque byte substrate). The document below advertises the service but neither an rdf-1 capability entry nor the profile URI in conformsTo. The full AC-SPARQL binding surface (gating behaviour, per-solution authorization filtering) is the planned ac-sparql suite, gated on its implementation (docs/alignment/ac-sparql.md); this case pins only the discovery-consistency half.",
+  "operation": "validate-storage-description",
+  "source": "lws-spec@59da847 rdf#indexing (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/transform/rdf-1",
+  "title": "a SparqlQueryService MUST only be advertised when the rdf-1 profile is on: advertising it without the profile is rejected"
+}

@@ -1,0 +1,29 @@
+{
+  "clauses": [
+    "core#rs-validation",
+    "core#access-token"
+  ],
+  "expected": {
+    "accept": false,
+    "errorCode": "AUDIENCE_MULTIPLE"
+  },
+  "id": "auth/token-multi-audience-rejected",
+  "input": {
+    "issuerJwks": {
+      "https://as.example": "keyring/as.jwks.json",
+      "https://rogue-as.example": "keyring/rogue-as.jwks.json"
+    },
+    "maxClockSkewSeconds": 60,
+    "now": "2026-07-01T12:00:00Z",
+    "targetResource": "https://storage.example/alice/notes/a.txt",
+    "token": "keyring/at-multi-aud.jwt",
+    "trustedIssuers": [
+      "https://as.example"
+    ]
+  },
+  "level": "MUST",
+  "operation": "validate-access-token",
+  "source": "lws-spec@59da847 core#rs-validation (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "aud MUST contain exactly one value: a multi-audience access token is rejected"
+}

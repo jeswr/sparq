@@ -1,0 +1,41 @@
+{
+  "clauses": [
+    "core#token-exchange",
+    "core#access-token"
+  ],
+  "expected": {
+    "issued": true,
+    "tokenClaims": {
+      "aud": [
+        "https://storage.example/alice/"
+      ],
+      "requiredMembers": [
+        "sub",
+        "iss",
+        "client_id",
+        "aud",
+        "exp",
+        "iat",
+        "jti"
+      ]
+    }
+  },
+  "id": "auth/exchange-issues-single-audience-at-jwt",
+  "input": {
+    "now": "2026-07-01T12:00:00Z",
+    "request": {
+      "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+      "resource": "https://storage.example/alice/",
+      "subject_token": "«a valid authentication credential accepted by the harness AS»",
+      "subject_token_type": "urn:ietf:params:oauth:token-type:id_token"
+    },
+    "trustedStorages": [
+      "https://storage.example/alice/"
+    ]
+  },
+  "level": "MUST",
+  "operation": "evaluate-token-exchange",
+  "source": "lws-spec@59da847 core#token-exchange (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "a valid exchange issues an at+jwt whose aud is exactly the resource value, with the REQUIRED claims"
+}

@@ -1,0 +1,82 @@
+{
+  "clauses": [
+    "core#discovery-model",
+    "core#ssrf"
+  ],
+  "expected": {
+    "found": false
+  },
+  "id": "discovery/sd-agent-interaction-service-hostile-fails-closed",
+  "input": {
+    "document": {
+      "@context": [
+        "https://w3id.org/jeswr/lws/v1",
+        "https://www.w3.org/ns/cid/v1"
+      ],
+      "capability": [
+        {
+          "mediaType": {
+            "application/linkset+json": [
+              "application/merge-patch+json"
+            ]
+          },
+          "type": "PatchSupport"
+        },
+        {
+          "profile": "https://w3id.org/jeswr/lws/transform/rdf-1",
+          "source": "text/turtle",
+          "target": [
+            "application/ld+json",
+            "application/n-triples"
+          ],
+          "type": "ContentNegotiation"
+        },
+        {
+          "type": "RecursiveDelete"
+        }
+      ],
+      "conformsTo": [
+        "https://w3id.org/jeswr/lws/protocol/core/1.0",
+        "https://w3id.org/jeswr/lws/transform/rdf-1"
+      ],
+      "id": "https://storage.example/alice/",
+      "service": [
+        {
+          "serviceEndpoint": "https://storage.example/alice/description",
+          "type": "StorageDescription"
+        },
+        {
+          "serviceEndpoint": "https://storage.example/alice/notifications",
+          "subscriptionType": [
+            "WebhookSubscription",
+            "SseSubscription"
+          ],
+          "type": "NotificationService"
+        },
+        {
+          "conformsTo": "https://w3id.org/jeswr/lws/access-profile/odrl-1",
+          "serviceEndpoint": "https://storage.example/alice/.access/requests/",
+          "type": "AccessRequestService"
+        },
+        {
+          "conformsTo": "https://w3id.org/jeswr/lws/access-profile/odrl-1",
+          "serviceEndpoint": "https://storage.example/alice/.access/grants/",
+          "type": "AccessGrantService"
+        },
+        {
+          "conformsTo": "https://w3id.org/jeswr/a2a-rdf/v1",
+          "serviceEndpoint": "http://169.254.169.254/latest/agent-card.json",
+          "type": "https://w3id.org/jeswr/a2a-rdf/v1#AgentInteractionService"
+        }
+      ],
+      "type": "Storage"
+    },
+    "serviceType": "https://w3id.org/jeswr/a2a-rdf/v1#AgentInteractionService"
+  },
+  "level": "MUST",
+  "notes": "The storage description is attacker-influenceable input to any consumer that dereferences advertised endpoints, so the core#ssrf policy (https only, decided before any request) applies to the consumption boundary: an entry whose serviceEndpoint is not https — here the classic cloud-metadata target — MUST NOT be dereferenced; discovery yields no usable entry. (The a2a-rdf negotiation-layer protections, including the no-silent-NL-downgrade rule, are that spec's own surface and are vectored in agentic-solid-conformance's a2a-rdf suite, not here.)",
+  "operation": "discover-service",
+  "source": "lws-spec@59da847 core#ssrf + a2a-rdf-extension@d3a2773 #AgentInteractionService (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "a hostile extension-service entry with a non-https serviceEndpoint is unusable: the consumer fails closed and performs no fetch"
+}

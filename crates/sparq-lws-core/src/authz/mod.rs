@@ -13,6 +13,10 @@
 //!   effective-permissions computation for `WAC-Allow`.
 //! - [`wac_allow`] — the `WAC-Allow` response-header serialiser.
 //!
+//! The opt-in `access_profile` module is a different contract: the strict ODRL access profile of
+//! the LWS spec (`access-profile-odrl1`), a pure port of that spec's normative access-decision rule
+//! set measured against its vendored test-vectors. It is NOT part of the WAC decision path.
+//!
 //! ## Architecture note (the maintainer's directive)
 //! In the production architecture WAC evaluation is SPARQ-authoritative (the ACL graph in SPARQ is the
 //! source of truth, gated on `sparq#992`). In this slice — which runs on the in-memory store doubles —
@@ -22,6 +26,13 @@
 //! evaluating the `.acl` here) with no change to the handler wiring.
 
 pub mod acl;
+// [SONNET-4.6] sq-gg0qq.6: the opt-in strict ODRL access profile (`access-profile-odrl1`) — a Rust
+// port of the LWS spec's normative access-decision rule set, gated by the vendored `lws-spec/`
+// test-vectors. A PURE library function over already-decoded documents (no I/O, no store reach),
+// deliberately NOT wired into `ldp::handler`: enabling the feature changes no request's outcome.
+// Native-only, mirroring the ODRL gate below.
+#[cfg(all(feature = "access-profile-odrl1", not(target_arch = "wasm32")))]
+pub mod access_profile;
 pub mod mode;
 // The opt-in ODRL policy gate seam on the read/query path (`odrl-authz`, sq-elg47) — see the
 // module's own docs. Native-only: the wasm request core keeps the policy layer out.

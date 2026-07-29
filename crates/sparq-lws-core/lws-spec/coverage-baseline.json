@@ -1,0 +1,39 @@
+{
+  "_comment": [
+    "[SONNET-4.6] sq-gg0qq.6 — the honest coverage ledger for the vendored jeswr/lws-spec",
+    "conformance corpus, asserted EXACTLY by tests/lws_spec_vectors.rs. Every one of the 157",
+    "vendored cases appears in exactly one bucket: `evaluated` operations are reproduced in Rust",
+    "and their verdicts are diffed against the vectors; `pending` operations are not implemented",
+    "yet and are counted, never silently skipped.",
+    "",
+    "The assertion is equality in BOTH directions, so this file must be edited deliberately when",
+    "coverage grows (move an operation from `pending` to `evaluated`) or when the vendored pin is",
+    "refreshed (a corpus that gained, lost, or re-classified a vector). A green suite therefore",
+    "means 'exactly this much is covered', not 'nothing failed'.",
+    "",
+    "Next slice: `http-exchange` is the largest pending bucket and needs a live-server harness",
+    "over the assembled LDP router; the remaining pure-function operations (validate-*, verify-*,",
+    "evaluate-*) need no server and are cheaper."
+  ],
+  "caseCount": 157,
+  "evaluated": {
+    "evaluate-access": 19
+  },
+  "pending": {
+    "decode-webauthn-assertion-bundle": 2,
+    "discover-service": 2,
+    "enforce-authorization-details": 4,
+    "evaluate-pop-session-offer": 2,
+    "evaluate-token-exchange": 5,
+    "evaluate-transform-offer": 2,
+    "http-exchange": 74,
+    "transform-representation": 6,
+    "validate-access-document": 5,
+    "validate-access-token": 15,
+    "validate-as-metadata": 2,
+    "validate-notification-envelope": 4,
+    "validate-storage-description": 7,
+    "verify-realm-containment": 3,
+    "verify-webhook-signature": 5
+  }
+}

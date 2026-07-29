@@ -1,0 +1,26 @@
+{
+  "clauses": [
+    "core#token-exchange"
+  ],
+  "expected": {
+    "error": "invalid_request",
+    "issued": false
+  },
+  "id": "auth/exchange-missing-resource-rejected",
+  "input": {
+    "now": "2026-07-01T12:00:00Z",
+    "request": {
+      "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+      "subject_token": "«a valid authentication credential accepted by the harness AS»",
+      "subject_token_type": "urn:ietf:params:oauth:token-type:id_token"
+    },
+    "trustedStorages": [
+      "https://storage.example/alice/"
+    ]
+  },
+  "level": "MUST",
+  "operation": "evaluate-token-exchange",
+  "source": "lws-spec@59da847 core#token-exchange (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "an exchange without the REQUIRED resource parameter is rejected"
+}

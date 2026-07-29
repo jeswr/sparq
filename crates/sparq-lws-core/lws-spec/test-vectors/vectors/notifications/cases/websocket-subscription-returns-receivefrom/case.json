@@ -1,0 +1,73 @@
+{
+  "clauses": [
+    "core#websocket-binding",
+    "core#subscription-api"
+  ],
+  "expected": {
+    "body": {
+      "jsonHasMembers": [
+        "receiveFrom"
+      ],
+      "jsonMemberMatches": {
+        "receiveFrom": {
+          "startsWith": "wss://"
+        }
+      }
+    },
+    "statusOneOf": [
+      200,
+      201
+    ]
+  },
+  "id": "notifications/websocket-subscription-returns-receivefrom",
+  "input": {
+    "request": {
+      "agent": "https://id.example/bob",
+      "body": "{\"@context\":\"https://w3id.org/jeswr/lws/v1\",\"type\":\"WebSocketSubscription\",\"topic\":[\"https://storage.example/alice/notes/a.txt\"]}",
+      "headers": {
+        "Content-Type": "application/ld+json"
+      },
+      "method": "POST",
+      "target": "https://storage.example/alice/notifications"
+    },
+    "state": {
+      "access": {
+        "https://id.example/bob": {
+          "https://storage.example/alice/notes/a.txt": [
+            "read"
+          ]
+        }
+      },
+      "notificationService": "https://storage.example/alice/notifications",
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "alpha",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        },
+        "https://storage.example/alice/notes/b.txt": {
+          "content": "beta",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "operation": "http-exchange",
+  "preconditions": {
+    "features": [
+      "websocket-subscription"
+    ]
+  },
+  "source": "lws-spec@59da847 core#websocket-binding (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "creating a WebSocket subscription returns a wss: capability URL in receiveFrom"
+}

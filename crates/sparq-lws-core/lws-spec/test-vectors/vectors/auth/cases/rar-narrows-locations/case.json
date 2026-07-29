@@ -1,0 +1,32 @@
+{
+  "clauses": [
+    "core#rar"
+  ],
+  "expected": {
+    "decision": "deny"
+  },
+  "id": "auth/rar-narrows-locations",
+  "input": {
+    "authorizationDetails": [
+      {
+        "actions": [
+          "read"
+        ],
+        "locations": [
+          "https://storage.example/alice/notes/other.txt"
+        ],
+        "type": "https://w3id.org/jeswr/lws#AccessRequest"
+      }
+    ],
+    "request": {
+      "action": "read",
+      "target": "https://storage.example/alice/notes/a.txt"
+    },
+    "serverPolicyDecision": "permit"
+  },
+  "level": "MUST",
+  "operation": "enforce-authorization-details",
+  "source": "lws-spec@59da847 core#rar (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "an approved authorization_details claim is enforced in addition to policy: a target outside its locations is denied"
+}

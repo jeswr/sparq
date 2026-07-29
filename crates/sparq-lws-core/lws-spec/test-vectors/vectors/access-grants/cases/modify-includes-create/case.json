@@ -1,0 +1,47 @@
+{
+  "clauses": [
+    "core#odrl-profile"
+  ],
+  "expected": {
+    "decision": "permit"
+  },
+  "id": "access-grants/modify-includes-create",
+  "input": {
+    "grants": [
+      {
+        "@context": [
+          "http://www.w3.org/ns/odrl.jsonld",
+          "https://w3id.org/jeswr/lws/v1"
+        ],
+        "@type": "Offer",
+        "assigner": "https://id.example/alice",
+        "permission": [
+          {
+            "action": "modify",
+            "assignee": "https://id.example/bob",
+            "target": {
+              "@type": "Container",
+              "recursive": true,
+              "uid": "https://storage.example/alice/notes/"
+            }
+          }
+        ],
+        "profile": "https://w3id.org/jeswr/lws/access-profile/odrl-1",
+        "uid": "https://storage.example/alice/.grants/vec-1"
+      }
+    ],
+    "request": {
+      "action": "create",
+      "agent": "https://id.example/bob",
+      "context": {
+        "dateTime": "2026-07-01T12:00:00Z"
+      },
+      "target": "https://storage.example/alice/notes/new.txt"
+    }
+  },
+  "level": "MUST",
+  "operation": "evaluate-access",
+  "source": "lws-spec@59da847 core#odrl-profile (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "a grant of odrl:modify also permits the narrower jlws:create"
+}

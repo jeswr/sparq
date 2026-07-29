@@ -1,0 +1,46 @@
+{
+  "clauses": [
+    "core#http-create-put"
+  ],
+  "expected": {
+    "stateAfter": {
+      "notExists": [
+        "https://storage.example/alice/notes/never-created.txt"
+      ]
+    },
+    "status": 428
+  },
+  "id": "resources/put-unconditional-nonexistent-428",
+  "input": {
+    "request": {
+      "body": "should not be created",
+      "headers": {
+        "Content-Type": "text/plain"
+      },
+      "method": "PUT",
+      "target": "https://storage.example/alice/notes/never-created.txt"
+    },
+    "state": {
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "abcdefghijklmnopqrstuvwxyz",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "notes": "Every PUT in JLWS is explicitly conditional: an unconditional PUT whose target does not exist MUST yield 428 rather than create.",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#http-create-put (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "unconditional PUT to a non-existent URI is never a create: 428, nothing created"
+}

@@ -1,0 +1,377 @@
+# AUTHORED-BY Claude Fable 5
+#
+# JLWS access-decision semantics — the NORMATIVE, EXECUTABLE decision rule set
+# for the strict ODRL access profile
+# <https://w3id.org/jeswr/lws/access-profile/odrl-1>
+# (JLWS Core Protocol #odrl-profile, #grants-are-records).
+#
+# This file IS the definition of the profile's `evaluate-access` decision
+# function. Run under an N3 reasoner (EYE / eyereasoner; verified with
+# EYE v11.24.4) over an encoded request + the recorded grants:
+#
+#     eyereasoner --quiet --nope <encoded-input>.n3 \
+#         semantics/access-decision.n3 \
+#         --query semantics/access-decision.query.n3
+#
+# THE DECISION RULE (closed-world, decision-time):
+#
+#     permit  <=>  at least one `?req ax:permittedBy ?g` triple is derived;
+#     deny    <=>  no such derivation exists (default deny — the closed-world
+#                  absence of a permit justification at decision time).
+#
+# DECISION-TIME COMPOSITION of a grant (policy) carrying odrl:prohibition
+# and/or odrl:obligation rules alongside odrl:permission rules (rules M, N, O,
+# D below). ODRL 2.2 names three Conflict Resolution strategies for a policy
+# whose Permission and Prohibition overlap — `odrl:perm`, `odrl:prohibit`,
+# `odrl:invalid` — and leaves the choice to the profile; this profile adopts
+# `odrl:prohibit` (deny overrides), the fail-closed choice already used
+# throughout this rule set:
+#
+#   - a PROHIBITION of the SAME grant that also matches the request (the
+#     identical assignee/action/target/constraint matching a permission
+#     uses) denies: that grant derives no permit for the request, regardless
+#     of an otherwise-matching permission of the same grant (rule N);
+#   - an OBLIGATION of the SAME grant that also matches the request makes the
+#     matching permission NOT exercisable unless the duty is discharged. This
+#     profile version defines no wire representation of duty fulfilment, so a
+#     matching obligation is always unverifiable at decision time and always
+#     blocks (fail closed — rule O);
+#   - a NON-matching prohibition/obligation (different assignee, action,
+#     target, or one of its own constraints unsatisfied) does not
+#     participate — composition is scoped by matching, not a blanket veto on
+#     the grant merely carrying the rule kind.
+#
+# Both compose PER GRANT, never globally: a prohibition/obligation recorded
+# in one grant never affects a DIFFERENT grant's permit derivation — each
+# grant is evaluated independently, exactly as revocation composes
+# structurally per grant (#grants-are-records).
+#
+# The conformance oracle `test-suite/tools/oracle-access.mjs` executes this
+# file over every `evaluate-access` test vector and diffs the derived decision
+# against the vector's expected decision; the vectors and this file must never
+# disagree.
+#
+# INPUT ENCODING (produced by the oracle from the profile's JSON-LD document
+# shape; any implementation reproducing the decision function uses the same
+# mapping — see semantics/README.md for the field-by-field table):
+#
+#   Each RECORDED grant (a live record: revocation = the DELETE removed it,
+#   so a revoked grant simply never appears in the input):
+#
+#     <grant-uid> a odrl:Offer ;
+#         odrl:profile <https://w3id.org/jeswr/lws/access-profile/odrl-1> ;
+#         ax:recordedIn ax:GrantStore ;
+#         odrl:permission [
+#             odrl:assignee <agent-iri> ;         # or foaf:Agent (public)
+#             odrl:action   <action-iri> ;
+#             odrl:target   [ a jlws:DataResource | jlws:Container
+#                               | jlws:StorageResource ;
+#                             odrl:uid <target-iri> ;
+#                             jlws:recursive true ] ;  # Container only, optional
+#             odrl:constraint [ odrl:leftOperand  <operand-iri> ;
+#                               odrl:operator     <operator-iri> ;
+#                               odrl:rightOperand <iri-or-literal> ] , … ] .
+#
+#   The request under decision:
+#
+#     [] a ax:Request ;
+#         ax:agent   <agent-iri> ;
+#         ax:action  <action-iri> ;
+#         ax:target  <resource-iri> ;
+#         ax:context [ odrl:dateTime "2026-07-01T12:00:00Z" ;
+#                      odrl:purpose  <purpose-iri> ] .   # left-operand IRIs
+#                                                        # ARE the context keys
+#
+#   SECURITY INVARIANT (untrusted-input discipline): the encoding maps ONLY
+#   the fields of the profile's document shape listed above. Profile facts —
+#   ax:KnownAction membership and the odrl:includedIn action lattice — are
+#   defined in THIS file and MUST NOT be read from evaluated documents: a
+#   hostile grant document cannot inject `odrl:includedIn` (or any other)
+#   assertions into the evaluation, because no encoded field produces them.
+#
+#   dateTime values are RFC 3339 UTC ("Z", fixed-width) lexical forms, under
+#   which chronological order coincides with lexicographic string order; the
+#   encoding MUST present them canonically (the profile's documents already
+#   carry this form).
+#
+# TERMINATION: the rule set is stratified and non-recursive (no derived
+# predicate feeds its own derivation; the only negation — the empty-collection
+# checks below — is scoped, over input facts and the constraint stratum). The
+# strata run: K (constraint satisfaction) -> M (rule matching, per permission/
+# prohibition/obligation) -> N, O (per-grant prohibition/obligation matches,
+# from M) -> D (permit, negating N and O for the same grant). Nothing in N, O,
+# or D feeds back into K or M.
+#
+# SCOPE: permits derive from PERMISSION rules, subject to the prohibition
+# (deny-overrides) and obligation (fail-closed-until-discharged) composition
+# above; an unmatched prohibition/obligation is inert, exactly as an unknown
+# action grants nothing.
+
+@prefix odrl:   <http://www.w3.org/ns/odrl/2/> .
+@prefix jlws:   <https://w3id.org/jeswr/lws#> .
+@prefix ax:     <https://w3id.org/jeswr/lws/authz#> .
+@prefix log:    <http://www.w3.org/2000/10/swap/log#> .
+@prefix string: <http://www.w3.org/2000/10/swap/string#> .
+@prefix list:   <http://www.w3.org/2000/10/swap/list#> .
+@prefix foaf:   <http://xmlns.com/foaf/0.1/> .
+
+## ---------------------------------------------------------------------------
+## P. Profile facts (Actions bullet of #odrl-profile). Defined HERE, never
+##    read from evaluated documents (see the security invariant above).
+## ---------------------------------------------------------------------------
+
+odrl:read   a ax:KnownAction .
+odrl:modify a ax:KnownAction .
+odrl:delete a ax:KnownAction .
+jlws:create a ax:KnownAction .
+jlws:append a ax:KnownAction .
+
+# The inclusion lattice is one-directional BY RULE SHAPE (A2 below): these are
+# the only includedIn facts, and nothing derives the converse.
+jlws:create odrl:includedIn odrl:modify .
+jlws:append odrl:includedIn odrl:modify .
+
+# The (leftOperand, operator) pairs this profile version can evaluate
+# (Constraints bullet). Anything outside this set fails closed (rule K4).
+odrl:purpose      ax:supportsOperator odrl:eq .
+jlws:client       ax:supportsOperator odrl:eq .
+jlws:mediaType    ax:supportsOperator odrl:eq .
+jlws:resourceType ax:supportsOperator odrl:eq .
+odrl:dateTime     ax:supportsOperator odrl:lt .
+
+## ---------------------------------------------------------------------------
+## A. Action satisfaction — fail-closed widening.
+## ---------------------------------------------------------------------------
+
+# A1. A known action satisfies a grant of itself. An UNKNOWN action is never
+#     ax:KnownAction, so it cannot even satisfy itself: a rule granting an
+#     action this profile does not define grants nothing (fail closed), and a
+#     request for such an action can never be permitted.
+{ ?a a ax:KnownAction . } => { ?a ax:satisfiesGranted ?a . } .
+
+# A2. Profile inclusion widens ONE WAY: a modify grant covers create/append;
+#     never the reverse (no rule derives the converse edge).
+{ ?narrow odrl:includedIn ?wide . } => { ?narrow ax:satisfiesGranted ?wide . } .
+
+## ---------------------------------------------------------------------------
+## B. Assignee matching (Assignee bullet). A permission without an assignee
+##    matches no request (fail closed — no rule fires).
+## ---------------------------------------------------------------------------
+
+# B1. The named assignee matches the requesting agent.
+{ ?p odrl:assignee ?agent .
+  ?req a ax:Request ; ax:agent ?agent .
+} => { ?p ax:assigneeMatches ?req . } .
+
+# B2. Public access: foaf:Agent as assignee matches every requesting agent.
+{ ?p odrl:assignee foaf:Agent .
+  ?req a ax:Request ; ax:agent ?anyone .
+} => { ?p ax:assigneeMatches ?req . } .
+
+## ---------------------------------------------------------------------------
+## C. Target coverage (Targets bullet; path-aligned per #path-alignment).
+##    Container and storage URIs end in "/" (path alignment), and the prefix
+##    rules REQUIRE that trailing slash, so prefix coverage is segment-safe:
+##    <…/notes/> covers <…/notes/deep/file.txt> but never <…/notes-evil.txt>,
+##    and a non-slash-terminated uid grants no prefix coverage at all.
+## ---------------------------------------------------------------------------
+
+# C1. A DataResource target covers exactly its own URI.
+{ ?t a jlws:DataResource ; odrl:uid ?u . } => { ?t ax:covers ?u . } .
+
+# C2. A Container target covers the container resource itself.
+{ ?t a jlws:Container ; odrl:uid ?u . } => { ?t ax:covers ?u . } .
+
+# C3. A recursive Container target also covers every descendant of the
+#     container (jlws:recursive true; trailing-slash-guarded prefix match).
+{ ?t a jlws:Container ; odrl:uid ?cnt ; jlws:recursive true .
+  ?req a ax:Request ; ax:target ?r .
+  ?cnt log:uri ?cs .
+  ?r   log:uri ?rs .
+  ?cs string:endsWith "/" .
+  ?rs string:startsWith ?cs .
+} => { ?t ax:covers ?r . } .
+
+# C4. A StorageResource target covers every resource in the storage
+#     (the storage root URI ends in "/"; same guarded prefix match).
+{ ?t a jlws:StorageResource ; odrl:uid ?s .
+  ?req a ax:Request ; ax:target ?r .
+  ?s log:uri ?ss .
+  ?r log:uri ?rs .
+  ?ss string:endsWith "/" .
+  ?rs string:startsWith ?ss .
+} => { ?t ax:covers ?r . } .
+
+## ---------------------------------------------------------------------------
+## K. Constraint evaluation (Constraints bullet) — CONJUNCTIVE, fail-closed.
+##    Failure modes derive `?c ax:unsatisfiedFor ?req` POSITIVELY; the decision
+##    boundary (rule D) then requires the closed-world ABSENCE of any
+##    unsatisfied constraint on the matched permission. A constraint no rule
+##    below can falsify is satisfied; a constraint the profile cannot evaluate
+##    is unsatisfied (K4); a malformed constraint is unsatisfied (K5–K7).
+## ---------------------------------------------------------------------------
+
+# K1. eq — the request context carries a DIFFERENT value for the left operand.
+{ ?p odrl:constraint ?c .
+  ?c odrl:leftOperand ?l ; odrl:operator odrl:eq ; odrl:rightOperand ?v .
+  ?l ax:supportsOperator odrl:eq .
+  ?req a ax:Request ; ax:context ?ctx .
+  ?ctx ?l ?w .
+  ?w log:notEqualTo ?v .
+} => { ?c ax:unsatisfiedFor ?req . } .
+
+# K2. The request context carries NO value for the constraint's left operand
+#     (whatever the operator): nothing to check against, fail closed.
+{ ?p odrl:constraint ?c .
+  ?c odrl:leftOperand ?l .
+  ?req a ax:Request ; ax:context ?ctx .
+  ( ?w { ?ctx ?l ?w } ?L ) log:collectAllIn _:sk2 .
+  ?L list:length 0 .
+} => { ?c ax:unsatisfiedFor ?req . } .
+
+# K3. dateTime lt — the request instant is not strictly before the bound
+#     (expired grant). Lexicographic comparison over the canonical RFC 3339
+#     UTC form (see the encoding note in the header).
+{ ?p odrl:constraint ?c .
+  ?c odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lt ; odrl:rightOperand ?b .
+  ?req a ax:Request ; ax:context ?ctx .
+  ?ctx odrl:dateTime ?now .
+  ?now string:notLessThan ?b .
+} => { ?c ax:unsatisfiedFor ?req . } .
+
+# K3b/K3c. Lexicographic order is chronological ONLY over the fixed-width
+#     canonical RFC 3339 UTC "Z" form (no fractional seconds, no offsets), and
+#     only for instants that EXIST. A dateTime bound or request instant
+#     outside that form cannot be compared and therefore fails CLOSED —
+#     otherwise a malformed bound such as "zzzz", "2026-99-99T99:99:99Z", or
+#     "2027-02-30T00:00:00Z" would sort after real instants and widen an lt
+#     bound (up to "never expires"). The pattern is fully calendar-aware:
+#     month 01-12; day valid for the month, with 02-29 only in Gregorian leap
+#     years (divisible by 4, excluding centuries not divisible by 400); hour
+#     00-23 (the canonical form excludes 24:00); minute/second 00-59 (no leap
+#     seconds). Verified against: valid 2028-02-29 / 2000-02-29 / month-end
+#     dates; invalid 2027-02-29, 1900-02-29, 02-30, 04-31, T24:00, :60,
+#     month 00/99, and non-digit garbage.
+{ ?p odrl:constraint ?c .
+  ?c odrl:leftOperand odrl:dateTime ; odrl:rightOperand ?b .
+  ?req a ax:Request .
+  ?b string:notMatches "^(([0-9]{4})-((01|03|05|07|08|10|12)-(0[1-9]|[12][0-9]|3[01])|(04|06|09|11)-(0[1-9]|[12][0-9]|30)|02-(0[1-9]|1[0-9]|2[0-8]))|([0-9]{2}(0[48]|[2468][048]|[13579][26])|([02468][048]|[13579][26])00)-02-29)T([01][0-9]|2[0-3]):([0-5][0-9]):([0-5][0-9])Z$" .
+} => { ?c ax:unsatisfiedFor ?req . } .
+
+{ ?p odrl:constraint ?c .
+  ?c odrl:leftOperand odrl:dateTime .
+  ?req a ax:Request ; ax:context ?ctx .
+  ?ctx odrl:dateTime ?now .
+  ?now string:notMatches "^(([0-9]{4})-((01|03|05|07|08|10|12)-(0[1-9]|[12][0-9]|3[01])|(04|06|09|11)-(0[1-9]|[12][0-9]|30)|02-(0[1-9]|1[0-9]|2[0-8]))|([0-9]{2}(0[48]|[2468][048]|[13579][26])|([02468][048]|[13579][26])00)-02-29)T([01][0-9]|2[0-3]):([0-5][0-9]):([0-5][0-9])Z$" .
+} => { ?c ax:unsatisfiedFor ?req . } .
+
+# K4. FAIL CLOSED on anything this profile version cannot evaluate: a
+#     (leftOperand, operator) pair outside the supported set (profile facts
+#     above) is never satisfied. An enforcement layer that cannot evaluate a
+#     constraint treats it as unsatisfied.
+{ ?p odrl:constraint ?c .
+  ?c odrl:leftOperand ?l ; odrl:operator ?o .
+  ?req a ax:Request .
+  ( true { ?l ax:supportsOperator ?o } ?L ) log:collectAllIn _:sk4 .
+  ?L list:length 0 .
+} => { ?c ax:unsatisfiedFor ?req . } .
+
+# K5–K7. A malformed constraint (missing leftOperand, operator, or
+#        rightOperand) can never be satisfied (fail closed).
+{ ?p odrl:constraint ?c .
+  ?req a ax:Request .
+  ( true { ?c odrl:leftOperand ?x } ?L ) log:collectAllIn _:sk5 .
+  ?L list:length 0 .
+} => { ?c ax:unsatisfiedFor ?req . } .
+
+{ ?p odrl:constraint ?c .
+  ?req a ax:Request .
+  ( true { ?c odrl:operator ?x } ?L ) log:collectAllIn _:sk6 .
+  ?L list:length 0 .
+} => { ?c ax:unsatisfiedFor ?req . } .
+
+{ ?p odrl:constraint ?c .
+  ?req a ax:Request .
+  ( true { ?c odrl:rightOperand ?x } ?L ) log:collectAllIn _:sk7 .
+  ?L list:length 0 .
+} => { ?c ax:unsatisfiedFor ?req . } .
+
+## ---------------------------------------------------------------------------
+## M. Rule matching (Assignee/Targets/Constraints bullets) — shared across
+##    EVERY ODRL rule kind. A permission, prohibition, and obligation rule
+##    carry the identical shape (odrl:assignee, odrl:action, odrl:target,
+##    odrl:constraint*; only the grant-level predicate linking a rule to its
+##    kind — odrl:permission / odrl:prohibition / odrl:obligation — differs),
+##    so "does this rule match this request" is one derivation reused by the
+##    permit (D), prohibition (N), and obligation (O) strata: the assignee
+##    matches, the requested action satisfies the rule's granted action, the
+##    rule's target covers the requested target, and none of the rule's own
+##    constraints is unsatisfied (conjunctive, per K).
+## ---------------------------------------------------------------------------
+
+{ ?p ax:assigneeMatches ?req ;
+     odrl:action ?granted ;
+     odrl:target ?t .
+  ?req ax:action ?a ; ax:target ?r .
+  ?a ax:satisfiesGranted ?granted .
+  ?t ax:covers ?r .
+  ( ?c { ?p odrl:constraint ?c . ?c ax:unsatisfiedFor ?req . } ?LU )
+      log:collectAllIn _:sm1 .
+  ?LU list:length 0 .
+} => { ?p ax:matchesRequest ?req . } .
+
+## ---------------------------------------------------------------------------
+## N. Prohibition composition — ODRL 2.2 `odrl:prohibit` conflict-resolution
+##    strategy (deny overrides): a prohibition rule of a grant that matches
+##    the request (rule M) makes that SAME grant prohibited for the request.
+##    Consulted only as a per-grant guard in rule D — a prohibition in one
+##    grant never reaches into a different grant's permit derivation.
+## ---------------------------------------------------------------------------
+
+{ ?g odrl:prohibition ?pr .
+  ?pr ax:matchesRequest ?req .
+} => { ?req ax:prohibitedIn ?g . } .
+
+## ---------------------------------------------------------------------------
+## O. Obligation composition — fail closed until discharged. This profile
+##    version defines no wire representation of duty fulfilment (no field of
+##    the document shape asserts "this duty was performed"), so an obligation
+##    rule of a grant that matches the request (rule M) is always
+##    unverifiable at decision time: that SAME grant's matching permission is
+##    therefore never exercisable while the obligation remains. Discharging a
+##    duty — recording that it was fulfilled — is out of scope for this
+##    profile version (test-vectors/GAPS.md).
+## ---------------------------------------------------------------------------
+
+{ ?g odrl:obligation ?ob .
+  ?ob ax:matchesRequest ?req .
+} => { ?req ax:obligationUnmetIn ?g . } .
+
+## ---------------------------------------------------------------------------
+## D. The permit derivation — revocation composes HERE.
+##    A grant justifies a request iff it is IN THE LIVE RECORD (revocation =
+##    the DELETE removed it, so it is absent from the input), one of its
+##    permission rules matches the request (rule M), no prohibition rule of
+##    THE SAME grant also matches (rule N — deny overrides), and no
+##    obligation rule of THE SAME grant also matches (rule O — fail closed
+##    until discharged). The decision is permit <=> SOME recorded grant
+##    derives ax:permittedBy; deny is its decision-time closed-world absence.
+##    "Revoking one grant" therefore cannot deny while another recorded grant
+##    still covers — the composition is structural, not a side condition.
+## ---------------------------------------------------------------------------
+
+{ ?g a odrl:Offer ;
+     odrl:profile <https://w3id.org/jeswr/lws/access-profile/odrl-1> ;
+     ax:recordedIn ax:GrantStore ;
+     odrl:permission ?p .
+  ?p ax:matchesRequest ?req .
+  # N. Prohibition of the SAME grant wins over this otherwise-matching
+  # permission (closed-world absence of a matching prohibition, scoped to
+  # ?g — stratified, terminating).
+  ( true { ?req ax:prohibitedIn ?g } ?LP ) log:collectAllIn _:sdp .
+  ?LP list:length 0 .
+  # O. Obligation of the SAME grant that matches the request is always
+  # unmet (no discharge mechanism), so it blocks this permission too.
+  ( true { ?req ax:obligationUnmetIn ?g } ?LO ) log:collectAllIn _:sdo .
+  ?LO list:length 0 .
+} => { ?req ax:permittedBy ?g . } .

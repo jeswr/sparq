@@ -1,0 +1,4 @@
+@prefix schema: <http://schema.org/> .
+<https://storage.example/alice/notes/addr.ttl#me> schema:address _:a .
+_:a schema:streetAddress "1 Example Way" ;
+    schema:addressLocality "Oxford" .

@@ -1,0 +1,28 @@
+{
+  "clauses": [
+    "core#token-exchange"
+  ],
+  "expected": {
+    "error": "invalid_target",
+    "issued": false
+  },
+  "id": "auth/exchange-untrusted-storage-rejected",
+  "input": {
+    "now": "2026-07-01T12:00:00Z",
+    "request": {
+      "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+      "resource": "https://unknown-storage.example/mallory/",
+      "subject_token": "«a valid authentication credential accepted by the harness AS»",
+      "subject_token_type": "urn:ietf:params:oauth:token-type:id_token"
+    },
+    "trustedStorages": [
+      "https://storage.example/alice/"
+    ]
+  },
+  "level": "MUST",
+  "notes": "Error code per RFC 8693 §2.2.2 (invalid_target), within the RFC 6749 §5.2 error frame the spec mandates.",
+  "operation": "evaluate-token-exchange",
+  "source": "lws-spec@59da847 core#token-exchange (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "an exchange whose resource identifies an unknown or untrusted storage is rejected (invalid_target)"
+}

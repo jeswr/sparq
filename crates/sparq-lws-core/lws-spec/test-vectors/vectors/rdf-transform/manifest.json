@@ -1,0 +1,146 @@
+{
+  "caseCount": 21,
+  "cases": [
+    {
+      "id": "rdf-transform/capability-requires-conformsto-profile",
+      "path": "cases/capability-requires-conformsto-profile/case.json"
+    },
+    {
+      "id": "rdf-transform/capability-entry-requires-source-and-target",
+      "path": "cases/capability-entry-requires-source-and-target/case.json"
+    },
+    {
+      "id": "rdf-transform/advertised-conneg-honoured",
+      "path": "cases/advertised-conneg-honoured/case.json"
+    },
+    {
+      "id": "rdf-transform/client-detects-transform-offer",
+      "path": "cases/client-detects-transform-offer/case.json"
+    },
+    {
+      "id": "rdf-transform/client-fail-closed-no-advertisement",
+      "path": "cases/client-fail-closed-no-advertisement/case.json"
+    },
+    {
+      "id": "rdf-transform/sparql-service-requires-profile-on",
+      "path": "cases/sparql-service-requires-profile-on/case.json"
+    },
+    {
+      "id": "rdf-transform/turtle-to-jsonld-isomorphic",
+      "path": "cases/turtle-to-jsonld-isomorphic/case.json"
+    },
+    {
+      "id": "rdf-transform/jsonld-to-turtle-isomorphic",
+      "path": "cases/jsonld-to-turtle-isomorphic/case.json"
+    },
+    {
+      "id": "rdf-transform/blank-node-isomorphism",
+      "path": "cases/blank-node-isomorphism/case.json"
+    },
+    {
+      "id": "rdf-transform/no-inference-applied",
+      "path": "cases/no-inference-applied/case.json"
+    },
+    {
+      "id": "rdf-transform/remote-context-declined-not-fetched",
+      "path": "cases/remote-context-declined-not-fetched/case.json"
+    },
+    {
+      "id": "rdf-transform/relative-iris-resolve-against-resource-uri",
+      "path": "cases/relative-iris-resolve-against-resource-uri/case.json"
+    },
+    {
+      "id": "rdf-transform/stored-bytes-byte-exact",
+      "path": "cases/stored-bytes-byte-exact/case.json"
+    },
+    {
+      "id": "rdf-transform/per-representation-etags-differ",
+      "path": "cases/per-representation-etags-differ/case.json"
+    },
+    {
+      "id": "rdf-transform/if-match-derived-etag-accepted",
+      "path": "cases/if-match-derived-etag-accepted/case.json"
+    },
+    {
+      "id": "rdf-transform/write-rotates-every-representation-etag",
+      "path": "cases/write-rotates-every-representation-etag/case.json"
+    },
+    {
+      "id": "rdf-transform/unconditional-put-still-428",
+      "path": "cases/unconditional-put-still-428/case.json"
+    },
+    {
+      "id": "rdf-transform/unparseable-source-degrades-per-resource",
+      "path": "cases/unparseable-source-degrades-per-resource/case.json"
+    },
+    {
+      "id": "rdf-transform/normalizes-deterministic-readback",
+      "path": "cases/normalizes-deterministic-readback/case.json"
+    },
+    {
+      "id": "rdf-transform/transform-off-byte-native-only",
+      "path": "cases/transform-off-byte-native-only/case.json"
+    },
+    {
+      "id": "rdf-transform/rdf-patch-not-advertised-when-off",
+      "path": "cases/rdf-patch-not-advertised-when-off/case.json"
+    }
+  ],
+  "clauseIndex": {
+    "core#content-transformation": [
+      "rdf-transform/transform-off-byte-native-only"
+    ],
+    "core#http-update": [
+      "rdf-transform/unconditional-put-still-428",
+      "rdf-transform/rdf-patch-not-advertised-when-off"
+    ],
+    "core#query-services": [
+      "rdf-transform/sparql-service-requires-profile-on"
+    ],
+    "rdf#authoritative-bytes": [
+      "rdf-transform/advertised-conneg-honoured",
+      "rdf-transform/stored-bytes-byte-exact",
+      "rdf-transform/per-representation-etags-differ",
+      "rdf-transform/if-match-derived-etag-accepted",
+      "rdf-transform/write-rotates-every-representation-etag",
+      "rdf-transform/unconditional-put-still-428"
+    ],
+    "rdf#capability": [
+      "rdf-transform/capability-requires-conformsto-profile",
+      "rdf-transform/capability-entry-requires-source-and-target",
+      "rdf-transform/advertised-conneg-honoured",
+      "rdf-transform/client-detects-transform-offer",
+      "rdf-transform/client-fail-closed-no-advertisement"
+    ],
+    "rdf#conformance": [
+      "rdf-transform/client-detects-transform-offer"
+    ],
+    "rdf#indexing": [
+      "rdf-transform/sparql-service-requires-profile-on"
+    ],
+    "rdf#normalizes": [
+      "rdf-transform/stored-bytes-byte-exact",
+      "rdf-transform/normalizes-deterministic-readback"
+    ],
+    "rdf#rdf-patch": [
+      "rdf-transform/rdf-patch-not-advertised-when-off"
+    ],
+    "rdf#round-trip": [
+      "rdf-transform/advertised-conneg-honoured",
+      "rdf-transform/turtle-to-jsonld-isomorphic",
+      "rdf-transform/jsonld-to-turtle-isomorphic",
+      "rdf-transform/blank-node-isomorphism",
+      "rdf-transform/no-inference-applied",
+      "rdf-transform/remote-context-declined-not-fetched",
+      "rdf-transform/relative-iris-resolve-against-resource-uri",
+      "rdf-transform/unparseable-source-degrades-per-resource"
+    ],
+    "rdf#security-privacy": [
+      "rdf-transform/remote-context-declined-not-fetched"
+    ]
+  },
+  "description": "The RDF Content Transformation Profile (the opt-in that makes a byte-native storage RDF-aware): capability/conformsTo consistency, the advertisement contract (an advertised pair is actually negotiable with Vary: Accept; RDF-aware clients feature-detect fail-closed — a profile-less ContentNegotiation entry makes no rdf-1 claim; a SparqlQueryService MUST NOT be advertised without the profile), graph-isomorphic source→target transformation with no inference and resource-URI base resolution, authoritative stored bytes with per-representation ETags + Vary: Accept + cross-representation If-Match, deterministic normalizes read-back, 406 degradation for unparseable sources, RDF PATCH formats scoped to the profile, and exact byte-native behaviour when the opt-in is off.",
+  "schemaVersion": 1,
+  "spec": "https://w3id.org/jeswr/lws/transform/rdf-1",
+  "suite": "rdf-transform"
+}

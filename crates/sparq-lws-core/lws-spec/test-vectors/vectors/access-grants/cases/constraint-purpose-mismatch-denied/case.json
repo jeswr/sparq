@@ -1,0 +1,54 @@
+{
+  "clauses": [
+    "core#odrl-profile"
+  ],
+  "expected": {
+    "decision": "deny"
+  },
+  "id": "access-grants/constraint-purpose-mismatch-denied",
+  "input": {
+    "grants": [
+      {
+        "@context": [
+          "http://www.w3.org/ns/odrl.jsonld",
+          "https://w3id.org/jeswr/lws/v1"
+        ],
+        "@type": "Offer",
+        "assigner": "https://id.example/alice",
+        "permission": [
+          {
+            "action": "read",
+            "assignee": "https://id.example/bob",
+            "constraint": [
+              {
+                "leftOperand": "purpose",
+                "operator": "eq",
+                "rightOperand": "https://purpose.example/collaboration"
+              }
+            ],
+            "target": {
+              "@type": "DataResource",
+              "uid": "https://storage.example/alice/notes/a.txt"
+            }
+          }
+        ],
+        "profile": "https://w3id.org/jeswr/lws/access-profile/odrl-1",
+        "uid": "https://storage.example/alice/.grants/vec-1"
+      }
+    ],
+    "request": {
+      "action": "read",
+      "agent": "https://id.example/bob",
+      "context": {
+        "dateTime": "2026-07-01T12:00:00Z",
+        "purpose": "https://purpose.example/advertising"
+      },
+      "target": "https://storage.example/alice/notes/a.txt"
+    }
+  },
+  "level": "MUST",
+  "operation": "evaluate-access",
+  "source": "lws-spec@59da847 core#odrl-profile (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "a purpose constraint not matched by the request context denies"
+}

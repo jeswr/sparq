@@ -1,0 +1,54 @@
+{
+  "clauses": [
+    "core#oracle-freedom",
+    "core#rs-validation"
+  ],
+  "expected": {
+    "status": 404
+  },
+  "id": "errors/no-access-hidden-as-404",
+  "input": {
+    "request": {
+      "agent": "https://id.example/bob",
+      "method": "GET",
+      "target": "https://storage.example/alice/notes/secret.txt"
+    },
+    "state": {
+      "access": {
+        "https://id.example/bob": {
+          "https://storage.example/alice/notes/": [
+            "read"
+          ],
+          "https://storage.example/alice/notes/a.txt": [
+            "read"
+          ]
+        }
+      },
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "alpha",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        },
+        "https://storage.example/alice/notes/secret.txt": {
+          "content": "hidden from bob",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "notes": "A 403 to an unentitled agent is the existence oracle the error-response rule forbids. The authorized-to-know carve-out does not apply here: bob can read the parent listing, but fail-closed listings never disclose members he cannot read.",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#oracle-freedom (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "an agent with no permitted operation on a resource (and no entitlement to learn it exists) MUST draw 404, not 403"
+}

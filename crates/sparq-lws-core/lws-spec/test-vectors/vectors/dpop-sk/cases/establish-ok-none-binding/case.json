@@ -1,0 +1,100 @@
+{
+  "clauses": [
+    "core#presentation-pop",
+    "core#rs-validation"
+  ],
+  "expected": {
+    "body": {
+      "jsonContains": {
+        "alg": "hmac-sha256",
+        "cb": "none"
+      },
+      "jsonHasMembers": [
+        "session_id",
+        "cb",
+        "alg",
+        "expires_in",
+        "key"
+      ],
+      "jsonLacksMembers": [
+        "confirm"
+      ],
+      "jsonMemberMatches": {
+        "expires_in": {
+          "atMost": 270
+        }
+      }
+    },
+    "headers": {
+      "Cache-Control": {
+        "includesToken": "no-store"
+      }
+    },
+    "status": 201
+  },
+  "id": "dpop-sk/establish-ok-none-binding",
+  "input": {
+    "request": {
+      "body": "{\"cb\":\"none\"}",
+      "headers": {
+        "Authorization": "DPoP ${file:keyring/at-sk-bound.jwt}",
+        "Content-Type": "application/json",
+        "DPoP": "${file:keyring/dpop-establish.jwt}"
+      },
+      "method": "POST",
+      "target": "https://storage.example/alice/.pop/session"
+    },
+    "state": {
+      "issuerJwks": {
+        "https://as.example": "keyring/as.jwks.json"
+      },
+      "now": "2026-07-01T12:00:00Z",
+      "popProfiles": [
+        "DPoP-SK"
+      ],
+      "popSession": {
+        "algs": [
+          "hmac-sha256"
+        ],
+        "channelBindings": [
+          "none"
+        ],
+        "endpoint": "https://storage.example/alice/.pop/session",
+        "profile": "https://w3id.org/jeswr/dpop-sk/v1"
+      },
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "alpha",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        },
+        "https://storage.example/alice/notes/b.txt": {
+          "content": "beta",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/",
+      "trustedIssuers": [
+        "https://as.example"
+      ]
+    }
+  },
+  "level": "MUST",
+  "notes": "The DPoP proof fixture binds htm=POST/htu=the establishment endpoint/iat=state.now/ath=hash of the presented token, under the key whose RFC 7638 thumbprint is the token's cnf.jkt. Under cb=none the key is server-generated CSPRNG output (dpop-sk-spec #kd-none), so only the response SHAPE is pinned: key REQUIRED (base64url), confirm MUST be absent, Cache-Control: no-store REQUIRED, and expires_in MUST NOT exceed the remaining token lifetime (the fixture token has 270 s left at state.now).",
+  "operation": "http-exchange",
+  "preconditions": {
+    "features": [
+      "pop-profile-dpop-sk"
+    ]
+  },
+  "source": "lws-spec@59da847 core#presentation-pop + dpop-sk-spec@f485855 #establishment-request, #establishment-response, #kd-none, #lifetime (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "a full-DPoP-verified establishment request with cb=none creates a session: 201, no-store, session_id/cb/alg/expires_in/key present, confirm absent, expires_in bounded by the token lifetime"
+}

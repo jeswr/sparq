@@ -1,0 +1,38 @@
+{
+  "caseCount": 4,
+  "cases": [
+    {
+      "id": "errors/problem-details-on-4xx",
+      "path": "cases/problem-details-on-4xx/case.json"
+    },
+    {
+      "id": "errors/no-access-hidden-as-404",
+      "path": "cases/no-access-hidden-as-404/case.json"
+    },
+    {
+      "id": "errors/hidden-indistinguishable-from-missing",
+      "path": "cases/hidden-indistinguishable-from-missing/case.json"
+    },
+    {
+      "id": "errors/partial-access-403",
+      "path": "cases/partial-access-403/case.json"
+    }
+  ],
+  "clauseIndex": {
+    "core#http-general": [
+      "errors/problem-details-on-4xx"
+    ],
+    "core#oracle-freedom": [
+      "errors/no-access-hidden-as-404",
+      "errors/hidden-indistinguishable-from-missing"
+    ],
+    "core#rs-validation": [
+      "errors/no-access-hidden-as-404",
+      "errors/partial-access-403"
+    ]
+  },
+  "description": "The error contract: every 4xx/5xx carries an RFC 9457 problem-details body; agents with no access draw 404 (existence hidden); a resource the agent cannot see is indistinguishable from a missing one; 403 is reserved for agents with partial access.",
+  "schemaVersion": 1,
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "suite": "errors"
+}

@@ -1,0 +1,3 @@
+<https://storage.example/alice/notes/rel.ttl> <http://schema.org/name> "notes about relative IRIs" .
+<https://storage.example/alice/notes/rel.ttl#section-1> <http://schema.org/isPartOf> <https://storage.example/alice/notes/rel.ttl> .
+<https://storage.example/alice/notes/sibling.txt> <http://schema.org/sameAs> <https://storage.example/alice/notes/sibling.txt> .

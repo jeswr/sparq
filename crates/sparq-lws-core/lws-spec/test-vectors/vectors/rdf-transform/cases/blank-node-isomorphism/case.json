@@ -1,0 +1,21 @@
+{
+  "clauses": [
+    "rdf#round-trip"
+  ],
+  "expected": {
+    "isomorphicTo": "expected.nq",
+    "ok": true
+  },
+  "id": "rdf-transform/blank-node-isomorphism",
+  "input": {
+    "base": "https://storage.example/alice/notes/addr.ttl",
+    "source": "source.ttl",
+    "sourceMediaType": "text/turtle",
+    "targetMediaType": "application/n-triples"
+  },
+  "level": "MUST",
+  "operation": "transform-representation",
+  "source": "lws-spec@59da847 rdf#round-trip (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/transform/rdf-1",
+  "title": "blank nodes survive transformation up to relabelling (isomorphism, not identifier stability)"
+}

@@ -1,0 +1,83 @@
+{
+  "clauses": [
+    "core#presentation-pop",
+    "core#presentation-bearer"
+  ],
+  "exchanges": [
+    {
+      "expected": {
+        "headers": {
+          "WWW-Authenticate": {
+            "excludesScheme": "Bearer"
+          }
+        },
+        "status": 401
+      },
+      "request": {
+        "headers": {
+          "Authorization": "Bearer ${file:keyring/at-valid.jwt}"
+        },
+        "method": "GET",
+        "target": "https://storage.example/alice/notes/a.txt"
+      }
+    },
+    {
+      "expected": {
+        "body": {
+          "jsonContains": {
+            "dpop_bound_access_tokens_required": true
+          }
+        },
+        "status": 200
+      },
+      "request": {
+        "agent": null,
+        "method": "GET",
+        "target": "${response[0].authParam(resource_metadata)}"
+      }
+    }
+  ],
+  "id": "auth/pop-required-realm-rejects-bearer",
+  "input": {
+    "state": {
+      "issuerJwks": {
+        "https://as.example": "keyring/as.jwks.json"
+      },
+      "now": "2026-07-01T12:00:00Z",
+      "popProfiles": [
+        "DPoP"
+      ],
+      "popRequiredRealms": [
+        "https://storage.example/alice/"
+      ],
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "alpha",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/",
+      "trustedIssuers": [
+        "https://as.example"
+      ]
+    }
+  },
+  "level": "MUST",
+  "notes": "The PoP-required signal is concrete on both discovery surfaces: the realm's resource metadata MUST set dpop_bound_access_tokens_required: true (RFC 9728 §2) and its 401 challenges MUST list only the required profile's scheme(s), omitting Bearer.",
+  "operation": "http-exchange",
+  "preconditions": {
+    "features": [
+      "pop-required-realm"
+    ]
+  },
+  "source": "lws-spec@59da847 core#presentation-pop (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "a PoP-required realm rejects bare Bearer presentation, omits the Bearer scheme from its challenges, and sets dpop_bound_access_tokens_required"
+}

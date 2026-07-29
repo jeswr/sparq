@@ -1,0 +1,12 @@
+{
+  "keys": [
+    {
+      "alg": "EdDSA",
+      "crv": "Ed25519",
+      "kid": "rogue-key-1",
+      "kty": "OKP",
+      "use": "sig",
+      "x": "E6CfQ76anysPlB3FX6OUtH4-0UIcjIVJuwEg4tHfPNE"
+    }
+  ]
+}

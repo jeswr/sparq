@@ -1,0 +1,236 @@
+{
+  "caseCount": 36,
+  "cases": [
+    {
+      "id": "auth/challenge-401-shape",
+      "path": "cases/challenge-401-shape/case.json"
+    },
+    {
+      "id": "auth/challenge-rejected-token-error",
+      "path": "cases/challenge-rejected-token-error/case.json"
+    },
+    {
+      "id": "auth/bearer-accepted-baseline",
+      "path": "cases/bearer-accepted-baseline/case.json"
+    },
+    {
+      "id": "auth/pop-required-realm-rejects-bearer",
+      "path": "cases/pop-required-realm-rejects-bearer/case.json"
+    },
+    {
+      "id": "auth/pop-advertised-in-resource-metadata",
+      "path": "cases/pop-advertised-in-resource-metadata/case.json"
+    },
+    {
+      "id": "auth/realm-contains-request",
+      "path": "cases/realm-contains-request/case.json"
+    },
+    {
+      "id": "auth/realm-disjoint-rejected",
+      "path": "cases/realm-disjoint-rejected/case.json"
+    },
+    {
+      "id": "auth/realm-segment-prefix-trap-rejected",
+      "path": "cases/realm-segment-prefix-trap-rejected/case.json"
+    },
+    {
+      "id": "auth/exchange-issues-single-audience-at-jwt",
+      "path": "cases/exchange-issues-single-audience-at-jwt/case.json"
+    },
+    {
+      "id": "auth/exchange-lifetime-recommended",
+      "path": "cases/exchange-lifetime-recommended/case.json"
+    },
+    {
+      "id": "auth/exchange-missing-resource-rejected",
+      "path": "cases/exchange-missing-resource-rejected/case.json"
+    },
+    {
+      "id": "auth/exchange-relative-resource-rejected",
+      "path": "cases/exchange-relative-resource-rejected/case.json"
+    },
+    {
+      "id": "auth/exchange-untrusted-storage-rejected",
+      "path": "cases/exchange-untrusted-storage-rejected/case.json"
+    },
+    {
+      "id": "auth/token-valid-accepted",
+      "path": "cases/token-valid-accepted/case.json"
+    },
+    {
+      "id": "auth/token-aud-prefix-containment",
+      "path": "cases/token-aud-prefix-containment/case.json"
+    },
+    {
+      "id": "auth/token-expired-rejected",
+      "path": "cases/token-expired-rejected/case.json"
+    },
+    {
+      "id": "auth/token-nbf-future-rejected",
+      "path": "cases/token-nbf-future-rejected/case.json"
+    },
+    {
+      "id": "auth/token-iat-future-rejected",
+      "path": "cases/token-iat-future-rejected/case.json"
+    },
+    {
+      "id": "auth/token-exp-too-far-rejected",
+      "path": "cases/token-exp-too-far-rejected/case.json"
+    },
+    {
+      "id": "auth/token-multi-audience-rejected",
+      "path": "cases/token-multi-audience-rejected/case.json"
+    },
+    {
+      "id": "auth/token-aud-not-containing-rejected",
+      "path": "cases/token-aud-not-containing-rejected/case.json"
+    },
+    {
+      "id": "auth/token-aud-segment-prefix-trap-rejected",
+      "path": "cases/token-aud-segment-prefix-trap-rejected/case.json"
+    },
+    {
+      "id": "auth/token-alg-none-rejected",
+      "path": "cases/token-alg-none-rejected/case.json"
+    },
+    {
+      "id": "auth/token-tampered-rejected",
+      "path": "cases/token-tampered-rejected/case.json"
+    },
+    {
+      "id": "auth/token-untrusted-issuer-rejected",
+      "path": "cases/token-untrusted-issuer-rejected/case.json"
+    },
+    {
+      "id": "auth/token-wrong-typ-rejected",
+      "path": "cases/token-wrong-typ-rejected/case.json"
+    },
+    {
+      "id": "auth/token-pop-bound-presented-bare-rejected",
+      "path": "cases/token-pop-bound-presented-bare-rejected/case.json"
+    },
+    {
+      "id": "auth/webauthn-bundle-decode-ok",
+      "path": "cases/webauthn-bundle-decode-ok/case.json"
+    },
+    {
+      "id": "auth/webauthn-bundle-noncanonical-b64url-rejected",
+      "path": "cases/webauthn-bundle-noncanonical-b64url-rejected/case.json"
+    },
+    {
+      "id": "auth/webauthn-suite-advertised",
+      "path": "cases/webauthn-suite-advertised/case.json"
+    },
+    {
+      "id": "auth/webauthn-suite-omitted-flagged",
+      "path": "cases/webauthn-suite-omitted-flagged/case.json"
+    },
+    {
+      "id": "auth/webauthn-issued-token-never-bare",
+      "path": "cases/webauthn-issued-token-never-bare/case.json"
+    },
+    {
+      "id": "auth/rar-cannot-widen",
+      "path": "cases/rar-cannot-widen/case.json"
+    },
+    {
+      "id": "auth/rar-narrows-locations",
+      "path": "cases/rar-narrows-locations/case.json"
+    },
+    {
+      "id": "auth/rar-covering-claim-permits",
+      "path": "cases/rar-covering-claim-permits/case.json"
+    },
+    {
+      "id": "auth/rar-absent-policy-alone",
+      "path": "cases/rar-absent-policy-alone/case.json"
+    }
+  ],
+  "clauseIndex": {
+    "core#access-token": [
+      "auth/exchange-issues-single-audience-at-jwt",
+      "auth/exchange-lifetime-recommended",
+      "auth/token-valid-accepted",
+      "auth/token-multi-audience-rejected",
+      "auth/token-wrong-typ-rejected"
+    ],
+    "core#authz-discovery": [
+      "auth/challenge-401-shape",
+      "auth/challenge-rejected-token-error",
+      "auth/pop-advertised-in-resource-metadata",
+      "auth/realm-contains-request",
+      "auth/realm-segment-prefix-trap-rejected",
+      "auth/webauthn-suite-advertised",
+      "auth/webauthn-suite-omitted-flagged"
+    ],
+    "core#client-rules": [
+      "auth/realm-contains-request",
+      "auth/realm-disjoint-rejected",
+      "auth/realm-segment-prefix-trap-rejected"
+    ],
+    "core#credential-model": [
+      "auth/token-alg-none-rejected",
+      "auth/webauthn-bundle-decode-ok",
+      "auth/webauthn-bundle-noncanonical-b64url-rejected",
+      "auth/webauthn-suite-advertised",
+      "auth/webauthn-suite-omitted-flagged"
+    ],
+    "core#path-alignment": [
+      "auth/token-aud-prefix-containment"
+    ],
+    "core#presentation-bearer": [
+      "auth/bearer-accepted-baseline",
+      "auth/pop-required-realm-rejects-bearer"
+    ],
+    "core#presentation-pop": [
+      "auth/pop-required-realm-rejects-bearer",
+      "auth/pop-advertised-in-resource-metadata"
+    ],
+    "core#rar": [
+      "auth/rar-cannot-widen",
+      "auth/rar-narrows-locations",
+      "auth/rar-covering-claim-permits",
+      "auth/rar-absent-policy-alone"
+    ],
+    "core#rs-validation": [
+      "auth/challenge-rejected-token-error",
+      "auth/bearer-accepted-baseline",
+      "auth/token-valid-accepted",
+      "auth/token-aud-prefix-containment",
+      "auth/token-expired-rejected",
+      "auth/token-nbf-future-rejected",
+      "auth/token-iat-future-rejected",
+      "auth/token-exp-too-far-rejected",
+      "auth/token-multi-audience-rejected",
+      "auth/token-aud-not-containing-rejected",
+      "auth/token-aud-segment-prefix-trap-rejected",
+      "auth/token-alg-none-rejected",
+      "auth/token-tampered-rejected",
+      "auth/token-untrusted-issuer-rejected",
+      "auth/token-pop-bound-presented-bare-rejected",
+      "auth/webauthn-issued-token-never-bare"
+    ],
+    "core#sec-collusion": [
+      "auth/realm-disjoint-rejected"
+    ],
+    "core#sec-tokens": [
+      "auth/token-aud-not-containing-rejected",
+      "auth/token-untrusted-issuer-rejected"
+    ],
+    "core#suite-webauthn": [
+      "auth/webauthn-bundle-decode-ok",
+      "auth/webauthn-bundle-noncanonical-b64url-rejected",
+      "auth/webauthn-issued-token-never-bare"
+    ],
+    "core#token-exchange": [
+      "auth/exchange-issues-single-audience-at-jwt",
+      "auth/exchange-missing-resource-rejected",
+      "auth/exchange-relative-resource-rejected",
+      "auth/exchange-untrusted-storage-rejected"
+    ]
+  },
+  "description": "The authorization chain end to end: 401 challenges carrying RFC 9728 resource_metadata + realm (no error parameter without presented credentials), client-side realm containment verification, RFC 8693 token exchange with the REQUIRED absolute-URI resource parameter, single-audience RFC 9068 at+jwt validation (14 signed fixtures), the Bearer-baseline / negotiated-PoP presentation rules, narrowing-only RFC 9396 authorization_details enforcement, and the WebAuthn suite's composition surface (fail-closed assertion-bundle decode, RFC 8414 suite advertisement, DPoP-bound-only issuance).",
+  "schemaVersion": 1,
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "suite": "auth"
+}

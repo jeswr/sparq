@@ -1,0 +1,86 @@
+{
+  "caseCount": 12,
+  "cases": [
+    {
+      "id": "notifications/subscription-requires-read-on-all-topics",
+      "path": "cases/subscription-requires-read-on-all-topics/case.json"
+    },
+    {
+      "id": "notifications/sse-subscription-returns-source",
+      "path": "cases/sse-subscription-returns-source/case.json"
+    },
+    {
+      "id": "notifications/websocket-subscription-returns-receivefrom",
+      "path": "cases/websocket-subscription-returns-receivefrom/case.json"
+    },
+    {
+      "id": "notifications/envelope-valid",
+      "path": "cases/envelope-valid/case.json"
+    },
+    {
+      "id": "notifications/envelope-must-not-carry-content",
+      "path": "cases/envelope-must-not-carry-content/case.json"
+    },
+    {
+      "id": "notifications/envelope-published-required",
+      "path": "cases/envelope-published-required/case.json"
+    },
+    {
+      "id": "notifications/envelope-actor-omitted-by-default",
+      "path": "cases/envelope-actor-omitted-by-default/case.json"
+    },
+    {
+      "id": "notifications/webhook-signature-valid",
+      "path": "cases/webhook-signature-valid/case.json"
+    },
+    {
+      "id": "notifications/webhook-body-tampered-rejected",
+      "path": "cases/webhook-body-tampered-rejected/case.json"
+    },
+    {
+      "id": "notifications/webhook-unknown-keyid-rejected",
+      "path": "cases/webhook-unknown-keyid-rejected/case.json"
+    },
+    {
+      "id": "notifications/webhook-insufficient-coverage-rejected",
+      "path": "cases/webhook-insufficient-coverage-rejected/case.json"
+    },
+    {
+      "id": "notifications/webhook-bad-signature-rejected",
+      "path": "cases/webhook-bad-signature-rejected/case.json"
+    }
+  ],
+  "clauseIndex": {
+    "core#discovery-model": [
+      "notifications/webhook-signature-valid"
+    ],
+    "core#notification-envelope": [
+      "notifications/envelope-valid",
+      "notifications/envelope-must-not-carry-content",
+      "notifications/envelope-published-required",
+      "notifications/envelope-actor-omitted-by-default"
+    ],
+    "core#sse-binding": [
+      "notifications/sse-subscription-returns-source"
+    ],
+    "core#subscription-api": [
+      "notifications/subscription-requires-read-on-all-topics",
+      "notifications/sse-subscription-returns-source",
+      "notifications/websocket-subscription-returns-receivefrom"
+    ],
+    "core#webhook-binding": [
+      "notifications/webhook-signature-valid",
+      "notifications/webhook-body-tampered-rejected",
+      "notifications/webhook-unknown-keyid-rejected",
+      "notifications/webhook-insufficient-coverage-rejected",
+      "notifications/webhook-bad-signature-rejected"
+    ],
+    "core#websocket-binding": [
+      "notifications/websocket-subscription-returns-receivefrom"
+    ]
+  },
+  "description": "Subscriptions and notification delivery: subscription creation is rejected unless the agent has read access to EVERY topic; the SSE and WebSocket binding responses carry source / receiveFrom; the envelope is content-free with REQUIRED published and default-omitted actor; webhook deliveries are RFC 9421-signed (Ed25519) with the keyid resolving into the storage description's verificationMethod set and RFC 9530 Content-Digest coverage.",
+  "schemaVersion": 1,
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "suite": "notifications"
+}

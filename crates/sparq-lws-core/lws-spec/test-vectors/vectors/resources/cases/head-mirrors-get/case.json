@@ -1,0 +1,68 @@
+{
+  "clauses": [
+    "core#http-read"
+  ],
+  "exchanges": [
+    {
+      "expected": {
+        "status": 200
+      },
+      "request": {
+        "method": "GET",
+        "target": "https://storage.example/alice/notes/a.txt"
+      }
+    },
+    {
+      "expected": {
+        "body": {
+          "empty": true
+        },
+        "headers": {
+          "ETag": {
+            "present": true
+          }
+        },
+        "status": 200
+      },
+      "request": {
+        "method": "HEAD",
+        "target": "https://storage.example/alice/notes/a.txt"
+      }
+    }
+  ],
+  "expected": {
+    "asserts": [
+      {
+        "kind": "equal",
+        "refs": [
+          "response[0].header.ETag",
+          "response[1].header.ETag"
+        ]
+      }
+    ]
+  },
+  "id": "resources/head-mirrors-get",
+  "input": {
+    "state": {
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "abcdefghijklmnopqrstuvwxyz",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#http-read (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "HEAD returns GET's status and headers without a body"
+}

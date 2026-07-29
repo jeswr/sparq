@@ -1,0 +1,36 @@
+{
+  "clauses": [
+    "core#credential-model",
+    "core#authz-discovery"
+  ],
+  "expected": {
+    "errorCode": "SUITE_NOT_ADVERTISED",
+    "ok": false
+  },
+  "id": "auth/webauthn-suite-omitted-flagged",
+  "input": {
+    "document": {
+      "grant_types_supported": [
+        "urn:ietf:params:oauth:grant-type:token-exchange"
+      ],
+      "issuer": "https://as.example",
+      "subject_token_types_supported": [
+        "urn:ietf:params:oauth:token-type:id_token"
+      ],
+      "token_endpoint": "https://as.example/token"
+    },
+    "offeredSuiteTokenTypes": [
+      "urn:solid:token-type:webauthn-assertion"
+    ]
+  },
+  "level": "SHOULD",
+  "operation": "validate-as-metadata",
+  "preconditions": {
+    "features": [
+      "suite-webauthn"
+    ]
+  },
+  "source": "lws-spec@59da847 core#credential-model + solid-webauthn-reauth@cf81736 src/protocol/constants.ts WEBAUTHN_ASSERTION_TOKEN_TYPE (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "metadata for an AS offering the WebAuthn suite that omits its token-type URI fails the advertisement check (advisory)"
+}

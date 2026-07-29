@@ -1,0 +1,103 @@
+{
+  "clauses": [
+    "core#http-move",
+    "core#metadata-categories"
+  ],
+  "exchanges": [
+    {
+      "expected": {
+        "headers": {
+          "Link": {
+            "includesLinkRel": {
+              "rel": "linkset"
+            }
+          }
+        },
+        "status": 200
+      },
+      "request": {
+        "method": "GET",
+        "target": "https://storage.example/alice/a/doc.txt"
+      }
+    },
+    {
+      "expected": {
+        "headers": {
+          "ETag": {
+            "present": true
+          }
+        },
+        "status": 200
+      },
+      "request": {
+        "method": "GET",
+        "target": "${response[0].link(linkset)}"
+      }
+    },
+    {
+      "expected": {
+        "headers": {
+          "Location": {
+            "equals": "https://storage.example/alice/b/doc.txt"
+          }
+        },
+        "status": 200
+      },
+      "request": {
+        "body": "{\"linkset\":[{\"anchor\":\"https://storage.example/alice/a/doc.txt\",\"up\":[{\"href\":\"https://storage.example/alice/b/\"}]}]}",
+        "headers": {
+          "Content-Type": "application/merge-patch+json",
+          "If-Match": "${response[1].header.ETag}"
+        },
+        "method": "PATCH",
+        "target": "${response[0].link(linkset)}"
+      }
+    }
+  ],
+  "expected": {
+    "stateAfter": {
+      "exists": [
+        "https://storage.example/alice/b/doc.txt"
+      ],
+      "notExists": [
+        "https://storage.example/alice/a/doc.txt"
+      ]
+    }
+  },
+  "id": "containers/move-reparents-with-new-uri",
+  "input": {
+    "state": {
+      "capabilities": [
+        "MoveResource"
+      ],
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/a/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/a/doc.txt": {
+          "content": "movable",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        },
+        "https://storage.example/alice/b/": {
+          "type": "Container"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "notes": "The up link is the ONE system-managed link writable through this operation, and only under this capability. The final path segment is preserved (no conflict in the destination).",
+  "operation": "http-exchange",
+  "preconditions": {
+    "capabilities": [
+      "MoveResource"
+    ]
+  },
+  "source": "lws-spec@59da847 core#http-move (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "move (optional): PATCHing the up link under the MoveResource capability reparents, reassigns a path-aligned URI, returns it in Location"
+}

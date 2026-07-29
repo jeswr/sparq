@@ -1,0 +1,62 @@
+{
+  "clauses": [
+    "core#http-delete"
+  ],
+  "expected": {
+    "stateAfter": {
+      "exists": [
+        "https://storage.example/alice/"
+      ],
+      "notExists": [
+        "https://storage.example/alice/notes/",
+        "https://storage.example/alice/notes/a.txt",
+        "https://storage.example/alice/notes/archive/"
+      ]
+    },
+    "status": 204
+  },
+  "id": "containers/delete-depth-infinity-recursive",
+  "input": {
+    "request": {
+      "headers": {
+        "Depth": "infinity"
+      },
+      "method": "DELETE",
+      "target": "https://storage.example/alice/notes/"
+    },
+    "state": {
+      "capabilities": [
+        "RecursiveDelete"
+      ],
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "alpha",
+          "mediaType": "text/plain",
+          "modified": "2026-06-24T12:00:00Z",
+          "type": "DataResource"
+        },
+        "https://storage.example/alice/notes/archive/": {
+          "modified": "2026-06-20T09:00:00Z",
+          "type": "Container"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "operation": "http-exchange",
+  "preconditions": {
+    "capabilities": [
+      "RecursiveDelete"
+    ]
+  },
+  "source": "lws-spec@59da847 core#http-delete (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "a server advertising RecursiveDelete MUST honour DELETE with Depth: infinity, deleting the subtree"
+}

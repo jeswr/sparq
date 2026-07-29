@@ -1,0 +1,1 @@
+{"@context":["https://www.w3.org/ns/activitystreams","https://w3id.org/jeswr/lws/v1"],"object":{"id":"https://storage.example/alice/notes/a.txt","type":"DataResource"},"published":"2026-07-01T13:00:00Z","type":["Notification","Update"]}

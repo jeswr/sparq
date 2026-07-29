@@ -1,0 +1,40 @@
+{
+  "clauses": [
+    "core#http-read"
+  ],
+  "expected": {
+    "status": 416
+  },
+  "id": "resources/range-unsatisfiable-416",
+  "input": {
+    "request": {
+      "headers": {
+        "Range": "bytes=100-200"
+      },
+      "method": "GET",
+      "target": "https://storage.example/alice/notes/a.txt"
+    },
+    "state": {
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "abcdefghijklmnopqrstuvwxyz",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "notes": "Range support is a MUST (RFC 9110 §14 via core#http-read); an unsatisfiable byte range yields 416 per RFC 9110 §15.5.17.",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#http-read (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "a Range entirely beyond the representation length yields 416"
+}

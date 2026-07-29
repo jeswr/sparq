@@ -1,0 +1,69 @@
+{
+  "clauses": [
+    "core#membership-authorization",
+    "core#oracle-freedom"
+  ],
+  "expected": {
+    "body": {
+      "jsonArrayExcludes": {
+        "path": "items",
+        "subset": {
+          "id": "https://storage.example/alice/notes/b.txt"
+        }
+      },
+      "jsonContains": {
+        "items": [
+          {
+            "id": "https://storage.example/alice/notes/a.txt"
+          }
+        ],
+        "totalItems": 1
+      }
+    },
+    "status": 200
+  },
+  "id": "containers/listing-excludes-inaccessible-members",
+  "input": {
+    "request": {
+      "agent": "https://id.example/bob",
+      "method": "GET",
+      "target": "https://storage.example/alice/notes/"
+    },
+    "state": {
+      "access": {
+        "https://id.example/bob": {
+          "https://storage.example/alice/notes/": [
+            "read"
+          ],
+          "https://storage.example/alice/notes/a.txt": [
+            "read"
+          ]
+        }
+      },
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "alpha",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        },
+        "https://storage.example/alice/notes/b.txt": {
+          "content": "beta",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#membership-authorization (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "the listing MUST NOT include members the agent has no access to, and totalItems counts only the visible view"
+}

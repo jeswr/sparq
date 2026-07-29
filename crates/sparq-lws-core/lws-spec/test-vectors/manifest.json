@@ -1,0 +1,90 @@
+{
+  "caseCount": 157,
+  "evaluationInstant": "2026-07-01T12:00:00Z",
+  "name": "jlws-conformance-test-vectors",
+  "schemaVersion": 1,
+  "specSource": "lws-spec@59da847",
+  "specs": {
+    "core": {
+      "document": "../index.html",
+      "uri": "https://w3id.org/jeswr/lws/protocol/core/1.0"
+    },
+    "rdf-transform": {
+      "document": "../rdf-transform.html",
+      "uri": "https://w3id.org/jeswr/lws/transform/rdf-1"
+    }
+  },
+  "suiteCount": 10,
+  "suites": [
+    {
+      "caseCount": 17,
+      "description": "Byte-native data-resource semantics over the HTTP binding: idempotent PUT + If-None-Match: * creation, the strict 428/412 conditional-write discipline, byte-exact and media-type round-trips, Range, conditional GET, HEAD, the mandatory response links, path-traversal rejection, and quota exhaustion.",
+      "path": "vectors/resources/manifest.json",
+      "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+      "suite": "resources"
+    },
+    {
+      "caseCount": 14,
+      "description": "Container listings as server-managed JSON-LD (flat items, totalItems, member descriptions), identical-bytes content negotiation across the JSON media types, rel=\"up\" containment links, POST/Slug creation with the namespace-alias rule, empty-vs-recursive DELETE with Depth: infinity, atomic membership maintenance, fail-closed listings, and the strict container-is-not-a-data-resource separation.",
+      "path": "vectors/containers/manifest.json",
+      "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+      "suite": "containers"
+    },
+    {
+      "caseCount": 7,
+      "description": "Linkset metadata resources per RFC 9264: discovery via rel=\"linkset\", application/linkset+json availability with ETags, REQUIRED JSON merge-patch support advertised in Accept-Patch, the 428/412 strict precondition discipline, immutability of system-managed links, and linkset deletion alongside its resource.",
+      "path": "vectors/metadata/manifest.json",
+      "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+      "suite": "metadata"
+    },
+    {
+      "caseCount": 8,
+      "description": "The storage description as the single feature-detection surface: REQUIRED members (id, type, conformsTo, service incl. the StorageDescription self-entry), unknown-capability forward compatibility, the storage-description Link on every resource response, the RFC 9728 protected resource metadata document with the jlws_storage_description extension member, and extension-service consumption (the a2a-rdf AgentInteractionService entry, fail-closed on a non-https endpoint).",
+      "path": "vectors/discovery/manifest.json",
+      "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+      "suite": "discovery"
+    },
+    {
+      "caseCount": 36,
+      "description": "The authorization chain end to end: 401 challenges carrying RFC 9728 resource_metadata + realm (no error parameter without presented credentials), client-side realm containment verification, RFC 8693 token exchange with the REQUIRED absolute-URI resource parameter, single-audience RFC 9068 at+jwt validation (14 signed fixtures), the Bearer-baseline / negotiated-PoP presentation rules, narrowing-only RFC 9396 authorization_details enforcement, and the WebAuthn suite's composition surface (fail-closed assertion-bundle decode, RFC 8414 suite advertisement, DPoP-bound-only issuance).",
+      "path": "vectors/auth/manifest.json",
+      "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+      "suite": "auth"
+    },
+    {
+      "caseCount": 14,
+      "description": "The DPoP-SK proof-of-possession presentation profile over the JLWS auth surface (cb=none flavour): RFC 9728 pop_session advertisement beside jlws_storage_description, the single dpop_bound_access_tokens_required member covering both PoP profiles, fail-closed client negotiation, session establishment from a DPoP-bound token (and refusal for an unbound one), and per-request RFC 9421 hmac-sha256 attestation with RFC 4303 verify-then-mark anti-replay — accept, tamper, cross-target transplant, token substitution, replay, forged-traffic window integrity, session expiry, and no-bearer-fallback.",
+      "path": "vectors/dpop-sk/manifest.json",
+      "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+      "suite": "dpop-sk"
+    },
+    {
+      "caseCount": 24,
+      "description": "The ODRL Access Requests & Grants interface: conforming-document validation (REQUIRED profile declaration, odrl:Request/odrl:Offer, exactly one action and one target per rule) and default-deny grant evaluation — a permitting grant, a denied request, one-directional jlws:create/jlws:append ⊑ odrl:modify inclusion, unknown-action fail-closed, recursive vs non-recursive Container targets, conjunctive purpose/dateTime constraints, unsupported-constraint fail-closed, the foaf:Agent public assignee, and structural revocation composition over the recorded grant set. Every evaluate-access decision is reproduced by the normative executable rule set semantics/access-decision.n3 (test-suite/tools/oracle-access.mjs).",
+      "path": "vectors/access-grants/manifest.json",
+      "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+      "suite": "access-grants"
+    },
+    {
+      "caseCount": 12,
+      "description": "Subscriptions and notification delivery: subscription creation is rejected unless the agent has read access to EVERY topic; the SSE and WebSocket binding responses carry source / receiveFrom; the envelope is content-free with REQUIRED published and default-omitted actor; webhook deliveries are RFC 9421-signed (Ed25519) with the keyid resolving into the storage description's verificationMethod set and RFC 9530 Content-Digest coverage.",
+      "path": "vectors/notifications/manifest.json",
+      "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+      "suite": "notifications"
+    },
+    {
+      "caseCount": 21,
+      "description": "The RDF Content Transformation Profile (the opt-in that makes a byte-native storage RDF-aware): capability/conformsTo consistency, the advertisement contract (an advertised pair is actually negotiable with Vary: Accept; RDF-aware clients feature-detect fail-closed — a profile-less ContentNegotiation entry makes no rdf-1 claim; a SparqlQueryService MUST NOT be advertised without the profile), graph-isomorphic source→target transformation with no inference and resource-URI base resolution, authoritative stored bytes with per-representation ETags + Vary: Accept + cross-representation If-Match, deterministic normalizes read-back, 406 degradation for unparseable sources, RDF PATCH formats scoped to the profile, and exact byte-native behaviour when the opt-in is off.",
+      "path": "vectors/rdf-transform/manifest.json",
+      "spec": "https://w3id.org/jeswr/lws/transform/rdf-1",
+      "suite": "rdf-transform"
+    },
+    {
+      "caseCount": 4,
+      "description": "The error contract: every 4xx/5xx carries an RFC 9457 problem-details body; agents with no access draw 404 (existence hidden); a resource the agent cannot see is indistinguishable from a missing one; 403 is reserved for agents with partial access.",
+      "path": "vectors/errors/manifest.json",
+      "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+      "suite": "errors"
+    }
+  ]
+}

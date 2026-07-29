@@ -38,6 +38,14 @@ extend-exclude = [
   # zk/xpath/differential/src/main.rs and marked DO NOT EDIT BY HAND. Excluded like the
   # other generated artifacts above; the generator's own prose IS still scanned.
   "zk/xpath/tests/differential_oracle",
+  # [SONNET-4.6] sq-gg0qq.6: the VENDORED jeswr/lws-spec conformance corpus, copied verbatim at a
+  # pinned commit (crates/sparq-lws-core/lws-spec/README.md). Upstream artifacts, never hand-edited
+  # here — the SPEC WINS, so a typo in a vector is fixed upstream, not in this repo. The tree is
+  # also deliberately non-prose: JWKS/JWT fixture segments, base64url bundles, N3 rule syntax, and
+  # deliberately-malformed inputs ("zzzz", "2027-02-30") chosen to exercise fail-closed edges.
+  # The crate's OWN prose about the corpus (that README, the src module, the test) IS still scanned.
+  "crates/sparq-lws-core/lws-spec/test-vectors",
+  "crates/sparq-lws-core/lws-spec/semantics",
 ]
 
 [default]

@@ -1,0 +1,77 @@
+{
+  "clauses": [
+    "rdf#capability",
+    "rdf#round-trip",
+    "rdf#authoritative-bytes"
+  ],
+  "expected": {
+    "body": {
+      "jsonParses": true
+    },
+    "headers": {
+      "Content-Type": {
+        "mediaType": "application/ld+json"
+      },
+      "Vary": {
+        "includesToken": "Accept"
+      }
+    },
+    "status": 200
+  },
+  "id": "rdf-transform/advertised-conneg-honoured",
+  "input": {
+    "request": {
+      "headers": {
+        "Accept": "application/ld+json"
+      },
+      "method": "GET",
+      "target": "https://storage.example/alice/notes/card.ttl"
+    },
+    "state": {
+      "capabilities": [
+        {
+          "profile": "https://w3id.org/jeswr/lws/transform/rdf-1",
+          "source": "text/turtle",
+          "target": [
+            "application/ld+json",
+            "application/n-triples"
+          ],
+          "type": "ContentNegotiation"
+        },
+        {
+          "profile": "https://w3id.org/jeswr/lws/transform/rdf-1",
+          "source": "application/ld+json",
+          "target": [
+            "text/turtle",
+            "application/n-triples"
+          ],
+          "type": "ContentNegotiation"
+        }
+      ],
+      "conformsTo": [
+        "https://w3id.org/jeswr/lws/protocol/core/1.0",
+        "https://w3id.org/jeswr/lws/transform/rdf-1"
+      ],
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/card.ttl": {
+          "content": "@prefix schema: <http://schema.org/> .\n\n# stored formatting and this comment are part of the authoritative bytes\n<https://storage.example/alice/notes/card.ttl#me>\n    a             schema:Person ;\n    schema:name   \"Alice\" ;\n    schema:knows  <https://id.example/bob> .\n",
+          "mediaType": "text/turtle",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "notes": "The advertisement contract on the wire: \"servers MUST NOT advertise pairs they do not implement\" (rdf#capability, the core conformance rule). The representation-stability half — the derived body encoding a graph isomorphic to the stored one — is pinned by the transform-representation cases (turtle-to-jsonld-isomorphic and siblings); this case pins that the advertised pair is actually negotiable and varies by Accept. The body check is jsonParses (not jsonIsObject): rdf-1 constrains the encoded GRAPH, never the JSON document shape — a JSON-LD serializer may legitimately emit a top-level node-object array (JSON-LD 1.1 §9), and demanding an object here would reject conformant servers.",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 rdf#capability (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/transform/rdf-1",
+  "title": "a server advertising the rdf-1 pair actually serves the derived representation: Accept application/ld+json on stored Turtle yields JSON-LD with Vary: Accept"
+}

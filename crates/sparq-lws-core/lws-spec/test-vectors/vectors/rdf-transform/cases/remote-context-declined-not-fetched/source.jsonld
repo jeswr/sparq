@@ -1,0 +1,6 @@
+{
+  "@context": "https://untrusted-context.example/context.jsonld",
+  "@id": "https://storage.example/alice/notes/remote-ctx.jsonld#it",
+  "@type": "Thing",
+  "name": "cannot be interpreted without fetching the context"
+}

@@ -1,0 +1,30 @@
+{
+  "clauses": [
+    "core#rs-validation",
+    "core#suite-webauthn"
+  ],
+  "expected": {
+    "accept": false,
+    "errorCode": "POP_PROOF_MISSING"
+  },
+  "id": "auth/webauthn-issued-token-never-bare",
+  "input": {
+    "issuerJwks": {
+      "https://as.example": "keyring/as.jwks.json",
+      "https://rogue-as.example": "keyring/rogue-as.jwks.json"
+    },
+    "maxClockSkewSeconds": 60,
+    "now": "2026-07-01T12:00:00Z",
+    "targetResource": "https://storage.example/alice/notes/a.txt",
+    "token": "keyring/at-webauthn-cnf.jwt",
+    "trustedIssuers": [
+      "https://as.example"
+    ]
+  },
+  "level": "MUST",
+  "notes": "Composition consequence (docs/alignment/webauthn-reauth.md): the [WEBAUTHN-REAUTH] exchange issues only DPoP-bound tokens, so every token this suite produces carries cnf.jkt, and rs-validation step 5 already refuses it bare — the storage server needs no WebAuthn awareness. The fixture is a valid at+jwt whose cnf.jkt is the committed sk-client key thumbprint.",
+  "operation": "validate-access-token",
+  "source": "lws-spec@59da847 core#rs-validation + solid-webauthn-reauth@cf81736 #token-exchange (\"there is no Bearer variant\") (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "a token issued via the WebAuthn suite is always DPoP-bound (cnf present) and therefore never accepted bare — the Bearer baseline is not weakened by the suite"
+}

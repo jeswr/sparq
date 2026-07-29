@@ -1,0 +1,8 @@
+# AUTHORED-BY Claude Fable 5
+#
+# Decision-extraction query for semantics/access-decision.n3: project the
+# derived permit justifications. permit <=> the result is non-empty;
+# deny <=> the result is empty (closed-world absence at decision time).
+@prefix ax: <https://w3id.org/jeswr/lws/authz#> .
+
+{ ?req ax:permittedBy ?g . } => { ?req ax:permittedBy ?g . } .

@@ -1,0 +1,64 @@
+{
+  "clauses": [
+    "core#http-create-post"
+  ],
+  "expected": {
+    "anyOf": [
+      {
+        "headers": {
+          "Location": {
+            "notEquals": "https://storage.example/alice/notes/a.txt",
+            "present": true
+          }
+        },
+        "status": 201
+      },
+      {
+        "status": 409
+      }
+    ],
+    "stateAfter": {
+      "bytesUnchanged": [
+        "https://storage.example/alice/notes/a.txt"
+      ]
+    }
+  },
+  "id": "containers/post-slug-conflict",
+  "input": {
+    "request": {
+      "body": "colliding create",
+      "headers": {
+        "Content-Type": "text/plain",
+        "Slug": "a.txt"
+      },
+      "method": "POST",
+      "target": "https://storage.example/alice/notes/"
+    },
+    "state": {
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "alpha",
+          "mediaType": "text/plain",
+          "modified": "2026-06-24T12:00:00Z",
+          "type": "DataResource"
+        },
+        "https://storage.example/alice/notes/archive/": {
+          "modified": "2026-06-20T09:00:00Z",
+          "type": "Container"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#http-create-post (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "POST with a Slug colliding with an existing member: the server assigns a different URI or responds 409"
+}

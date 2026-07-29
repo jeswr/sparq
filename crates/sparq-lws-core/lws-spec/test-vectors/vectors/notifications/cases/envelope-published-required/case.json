@@ -1,0 +1,32 @@
+{
+  "clauses": [
+    "core#notification-envelope"
+  ],
+  "expected": {
+    "errorCode": "PUBLISHED_MISSING",
+    "ok": false
+  },
+  "id": "notifications/envelope-published-required",
+  "input": {
+    "envelope": {
+      "@context": [
+        "https://www.w3.org/ns/activitystreams",
+        "https://w3id.org/jeswr/lws/v1"
+      ],
+      "object": {
+        "id": "https://storage.example/alice/notes/a.txt",
+        "type": "DataResource"
+      },
+      "type": [
+        "Notification",
+        "Update"
+      ]
+    },
+    "subscriberMayLearnActor": false
+  },
+  "level": "MUST",
+  "operation": "validate-notification-envelope",
+  "source": "lws-spec@59da847 core#notification-envelope (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "an envelope without published is rejected"
+}

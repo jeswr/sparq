@@ -1,0 +1,40 @@
+{
+  "@context": [
+    "https://w3id.org/jeswr/lws/v1",
+    "https://www.w3.org/ns/cid/v1"
+  ],
+  "conformsTo": [
+    "https://w3id.org/jeswr/lws/protocol/core/1.0"
+  ],
+  "id": "https://storage.example/alice/",
+  "service": [
+    {
+      "serviceEndpoint": "https://storage.example/alice/description",
+      "type": "StorageDescription"
+    },
+    {
+      "serviceEndpoint": "https://storage.example/alice/notifications",
+      "subscriptionType": [
+        "WebhookSubscription",
+        "SseSubscription",
+        "WebSocketSubscription"
+      ],
+      "type": "NotificationService"
+    }
+  ],
+  "type": "Storage",
+  "verificationMethod": [
+    {
+      "controller": "https://storage.example/alice/description",
+      "id": "https://storage.example/alice/description#whk-1",
+      "publicKeyJwk": {
+        "alg": "EdDSA",
+        "crv": "Ed25519",
+        "kty": "OKP",
+        "use": "sig",
+        "x": "0MvzJT3zT0LFk6eESc0VkzWKqSL5ojx4VfFNK87p6xc"
+      },
+      "type": "JsonWebKey"
+    }
+  ]
+}

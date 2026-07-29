@@ -1,0 +1,70 @@
+{
+  "clauses": [
+    "rdf#authoritative-bytes",
+    "core#http-update"
+  ],
+  "expected": {
+    "stateAfter": {
+      "bytesUnchanged": [
+        "https://storage.example/alice/notes/card.ttl"
+      ]
+    },
+    "status": 428
+  },
+  "id": "rdf-transform/unconditional-put-still-428",
+  "input": {
+    "request": {
+      "body": "<https://storage.example/alice/notes/card.ttl#me> <http://schema.org/name> \"clobbered\" .\n",
+      "headers": {
+        "Content-Type": "text/turtle"
+      },
+      "method": "PUT",
+      "target": "https://storage.example/alice/notes/card.ttl"
+    },
+    "state": {
+      "capabilities": [
+        {
+          "profile": "https://w3id.org/jeswr/lws/transform/rdf-1",
+          "source": "text/turtle",
+          "target": [
+            "application/ld+json",
+            "application/n-triples"
+          ],
+          "type": "ContentNegotiation"
+        },
+        {
+          "profile": "https://w3id.org/jeswr/lws/transform/rdf-1",
+          "source": "application/ld+json",
+          "target": [
+            "text/turtle",
+            "application/n-triples"
+          ],
+          "type": "ContentNegotiation"
+        }
+      ],
+      "conformsTo": [
+        "https://w3id.org/jeswr/lws/protocol/core/1.0",
+        "https://w3id.org/jeswr/lws/transform/rdf-1"
+      ],
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/card.ttl": {
+          "content": "@prefix schema: <http://schema.org/> .\n\n# stored formatting and this comment are part of the authoritative bytes\n<https://storage.example/alice/notes/card.ttl#me>\n    a             schema:Person ;\n    schema:name   \"Alice\" ;\n    schema:knows  <https://id.example/bob> .\n",
+          "mediaType": "text/turtle",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 rdf#authoritative-bytes (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/transform/rdf-1",
+  "title": "the core's 428 rule applies unchanged to RDF-readable resources: no unconditional overwrite"
+}

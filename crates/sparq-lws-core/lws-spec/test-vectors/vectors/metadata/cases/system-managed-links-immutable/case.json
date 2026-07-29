@@ -1,0 +1,80 @@
+{
+  "clauses": [
+    "core#metadata-categories",
+    "core#metadata-updates",
+    "core#containment"
+  ],
+  "exchanges": [
+    {
+      "expected": {
+        "headers": {
+          "Link": {
+            "includesLinkRel": {
+              "rel": "linkset"
+            }
+          }
+        },
+        "status": 200
+      },
+      "request": {
+        "method": "GET",
+        "target": "https://storage.example/alice/notes/a.txt"
+      }
+    },
+    {
+      "expected": {
+        "headers": {
+          "ETag": {
+            "present": true
+          }
+        },
+        "status": 200
+      },
+      "request": {
+        "method": "GET",
+        "target": "${response[0].link(linkset)}"
+      }
+    },
+    {
+      "expected": {
+        "problem": {
+          "type": "https://w3id.org/jeswr/lws/problems/system-managed-metadata"
+        },
+        "statusClass": "4xx"
+      },
+      "request": {
+        "body": "{\"linkset\":[{\"anchor\":\"https://storage.example/alice/notes/a.txt\",\"up\":[{\"href\":\"https://storage.example/alice/elsewhere/\"}]}]}",
+        "headers": {
+          "Content-Type": "application/merge-patch+json",
+          "If-Match": "${response[1].header.ETag}"
+        },
+        "method": "PATCH",
+        "target": "${response[0].link(linkset)}"
+      }
+    }
+  ],
+  "id": "metadata/system-managed-links-immutable",
+  "input": {
+    "state": {
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "alpha",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#metadata-categories (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "attempts to modify system-managed links (up, items) are rejected with problem type system-managed-metadata"
+}

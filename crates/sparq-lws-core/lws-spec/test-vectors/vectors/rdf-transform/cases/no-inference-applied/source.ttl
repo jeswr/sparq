@@ -1,0 +1,4 @@
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix ex: <https://vocab.example/> .
+ex:Dog rdfs:subClassOf ex:Animal .
+<https://storage.example/alice/notes/pets.ttl#rex> a ex:Dog .

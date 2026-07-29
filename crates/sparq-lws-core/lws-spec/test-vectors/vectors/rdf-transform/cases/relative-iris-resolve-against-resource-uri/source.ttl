@@ -1,0 +1,4 @@
+@prefix schema: <http://schema.org/> .
+<> schema:name "notes about relative IRIs" .
+<#section-1> schema:isPartOf <> .
+<sibling.txt> schema:sameAs <./sibling.txt> .

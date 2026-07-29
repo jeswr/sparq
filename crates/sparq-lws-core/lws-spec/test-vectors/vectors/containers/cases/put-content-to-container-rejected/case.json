@@ -1,0 +1,70 @@
+{
+  "clauses": [
+    "core#container-vs-data"
+  ],
+  "exchanges": [
+    {
+      "expected": {
+        "statusClass": "4xx"
+      },
+      "request": {
+        "body": "<> a <https://w3id.org/jeswr/lws#Container> .",
+        "headers": {
+          "Content-Type": "text/turtle",
+          "If-Match": "*"
+        },
+        "method": "PUT",
+        "target": "https://storage.example/alice/notes/archive/"
+      }
+    },
+    {
+      "expected": {
+        "body": {
+          "jsonContains": {
+            "type": "Container"
+          }
+        },
+        "headers": {
+          "Content-Type": {
+            "mediaType": "application/ld+json"
+          }
+        },
+        "status": 200
+      },
+      "request": {
+        "method": "GET",
+        "target": "https://storage.example/alice/notes/archive/"
+      }
+    }
+  ],
+  "id": "containers/put-content-to-container-rejected",
+  "input": {
+    "state": {
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "alpha",
+          "mediaType": "text/plain",
+          "modified": "2026-06-24T12:00:00Z",
+          "type": "DataResource"
+        },
+        "https://storage.example/alice/notes/archive/": {
+          "modified": "2026-06-20T09:00:00Z",
+          "type": "Container"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "notes": "The only representation of a container is the server-managed listing; a successful content PUT would (per RFC 9110) mean the enclosed representation replaced it, so the PUT cannot succeed.",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#container-vs-data (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "client-authored content is never served as a container representation: content PUT to a container fails, the listing survives"
+}

@@ -1,0 +1,45 @@
+{
+  "clauses": [
+    "core#http-create-post"
+  ],
+  "expected": {
+    "status": 404
+  },
+  "id": "containers/post-to-missing-container-404",
+  "input": {
+    "request": {
+      "body": "x",
+      "headers": {
+        "Content-Type": "text/plain"
+      },
+      "method": "POST",
+      "target": "https://storage.example/alice/no-such-container/"
+    },
+    "state": {
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "alpha",
+          "mediaType": "text/plain",
+          "modified": "2026-06-24T12:00:00Z",
+          "type": "DataResource"
+        },
+        "https://storage.example/alice/notes/archive/": {
+          "modified": "2026-06-20T09:00:00Z",
+          "type": "Container"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#http-create-post (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "POST to a non-existent container responds 404"
+}

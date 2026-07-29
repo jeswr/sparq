@@ -1,0 +1,72 @@
+{
+  "clauses": [
+    "core#presentation-pop",
+    "core#authz-discovery"
+  ],
+  "exchanges": [
+    {
+      "expected": {
+        "status": 401
+      },
+      "request": {
+        "agent": null,
+        "method": "GET",
+        "target": "https://storage.example/alice/notes/a.txt"
+      }
+    },
+    {
+      "expected": {
+        "body": {
+          "jsonHasMembers": [
+            "dpop_signing_alg_values_supported"
+          ]
+        },
+        "status": 200
+      },
+      "request": {
+        "agent": null,
+        "method": "GET",
+        "target": "${response[0].authParam(resource_metadata)}"
+      }
+    }
+  ],
+  "id": "auth/pop-advertised-in-resource-metadata",
+  "input": {
+    "state": {
+      "issuerJwks": {
+        "https://as.example": "keyring/as.jwks.json"
+      },
+      "now": "2026-07-01T12:00:00Z",
+      "popProfiles": [
+        "DPoP"
+      ],
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "alpha",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/",
+      "trustedIssuers": [
+        "https://as.example"
+      ]
+    }
+  },
+  "level": "MUST",
+  "operation": "http-exchange",
+  "preconditions": {
+    "features": [
+      "pop-profile-dpop"
+    ]
+  },
+  "source": "lws-spec@59da847 core#presentation-pop (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "an offered DPoP profile is advertised through RFC 9728 resource metadata (dpop_signing_alg_values_supported)"
+}

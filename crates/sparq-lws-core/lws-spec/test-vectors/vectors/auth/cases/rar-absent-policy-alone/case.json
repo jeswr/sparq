@@ -1,0 +1,22 @@
+{
+  "clauses": [
+    "core#rar"
+  ],
+  "expected": {
+    "decision": "permit"
+  },
+  "id": "auth/rar-absent-policy-alone",
+  "input": {
+    "authorizationDetails": null,
+    "request": {
+      "action": "read",
+      "target": "https://storage.example/alice/notes/a.txt"
+    },
+    "serverPolicyDecision": "permit"
+  },
+  "level": "MUST",
+  "operation": "enforce-authorization-details",
+  "source": "lws-spec@59da847 core#rar (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "without an authorization_details claim the storage-server policy alone decides"
+}

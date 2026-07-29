@@ -1,0 +1,34 @@
+{
+  "clauses": [
+    "core#notification-envelope"
+  ],
+  "expected": {
+    "errorCode": "ACTOR_DISCLOSED",
+    "ok": false
+  },
+  "id": "notifications/envelope-actor-omitted-by-default",
+  "input": {
+    "envelope": {
+      "@context": [
+        "https://www.w3.org/ns/activitystreams",
+        "https://w3id.org/jeswr/lws/v1"
+      ],
+      "actor": "https://id.example/alice",
+      "object": {
+        "id": "https://storage.example/alice/notes/a.txt",
+        "type": "DataResource"
+      },
+      "published": "2026-07-01T12:00:00Z",
+      "type": [
+        "Notification",
+        "Update"
+      ]
+    },
+    "subscriberMayLearnActor": false
+  },
+  "level": "MUST",
+  "operation": "validate-notification-envelope",
+  "source": "lws-spec@59da847 core#notification-envelope (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "actor MUST be omitted unless the subscriber is authorised to learn it"
+}

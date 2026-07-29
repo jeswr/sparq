@@ -1,0 +1,44 @@
+{
+  "clauses": [
+    "core#presentation-pop"
+  ],
+  "expected": {
+    "establish": false
+  },
+  "id": "dpop-sk/client-fail-closed-unsupported-binding",
+  "input": {
+    "client": {
+      "algs": [
+        "hmac-sha256"
+      ],
+      "channelBindings": [
+        "none"
+      ],
+      "recognizedProfiles": [
+        "https://w3id.org/jeswr/dpop-sk/v1"
+      ]
+    },
+    "resourceMetadata": {
+      "authorization_servers": [
+        "https://as.example"
+      ],
+      "jlws_storage_description": "https://storage.example/alice/description",
+      "pop_session": {
+        "algs": [
+          "hmac-sha256"
+        ],
+        "channel_bindings": [
+          "tls-exporter"
+        ],
+        "endpoint": "https://storage.example/alice/.pop/session",
+        "profile": "https://w3id.org/jeswr/dpop-sk/v1"
+      },
+      "resource": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "operation": "evaluate-pop-session-offer",
+  "source": "lws-spec@59da847 core#presentation-pop + dpop-sk-spec@f485855 #discovery, #downgrade (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "a client MUST NOT attempt establishment unless the metadata offers an algorithm AND a channel-binding flavour it supports (exact-match, fail-closed)"
+}

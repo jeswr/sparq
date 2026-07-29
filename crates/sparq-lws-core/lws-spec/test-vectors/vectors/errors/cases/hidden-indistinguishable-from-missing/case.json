@@ -1,0 +1,85 @@
+{
+  "clauses": [
+    "core#oracle-freedom"
+  ],
+  "exchanges": [
+    {
+      "expected": {
+        "statusClass": "4xx"
+      },
+      "request": {
+        "agent": "https://id.example/bob",
+        "method": "GET",
+        "target": "https://storage.example/alice/notes/genuinely-missing.txt"
+      }
+    },
+    {
+      "expected": {
+        "statusClass": "4xx"
+      },
+      "request": {
+        "agent": "https://id.example/bob",
+        "method": "GET",
+        "target": "https://storage.example/alice/notes/secret.txt"
+      }
+    }
+  ],
+  "expected": {
+    "asserts": [
+      {
+        "kind": "equal",
+        "refs": [
+          "response[0].status",
+          "response[1].status"
+        ]
+      },
+      {
+        "kind": "equal",
+        "refs": [
+          "response[0].problem.type",
+          "response[1].problem.type"
+        ]
+      }
+    ]
+  },
+  "id": "errors/hidden-indistinguishable-from-missing",
+  "input": {
+    "state": {
+      "access": {
+        "https://id.example/bob": {
+          "https://storage.example/alice/notes/": [
+            "read"
+          ],
+          "https://storage.example/alice/notes/a.txt": [
+            "read"
+          ]
+        }
+      },
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "alpha",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        },
+        "https://storage.example/alice/notes/secret.txt": {
+          "content": "hidden from bob",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "notes": "Operationalisation: whatever status/problem-type the server uses for a genuinely missing resource, the response for an existing-but-inaccessible one must be indistinguishable in status and problem type.",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#oracle-freedom (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "error responses MUST NOT leak existence: a hidden resource answers exactly like a missing one (status and problem type)"
+}

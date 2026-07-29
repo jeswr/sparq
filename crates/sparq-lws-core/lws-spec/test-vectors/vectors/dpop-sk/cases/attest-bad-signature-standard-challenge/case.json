@@ -1,0 +1,84 @@
+{
+  "clauses": [
+    "core#presentation-pop",
+    "core#rs-validation"
+  ],
+  "expected": {
+    "headers": {
+      "WWW-Authenticate": {
+        "authParams": {
+          "params": {},
+          "scheme": "DPoP"
+        }
+      }
+    },
+    "status": 401
+  },
+  "id": "dpop-sk/attest-bad-signature-standard-challenge",
+  "input": {
+    "request": {
+      "headers": {
+        "Authorization": "DPoP ${file:keyring/at-sk-bound.jwt}",
+        "Signature": "sig=:EB2jasOdfWlKFWSqbFdRWCqL2oZTN5dWtWGkZi1xEiI=:",
+        "Signature-Input": "sig=(\"@method\" \"@target-uri\" \"authorization\");created=1782907200;keyid=\"AAECAwQFBgcICQoLDA0ODw\";alg=\"hmac-sha256\";nonce=\"1\";tag=\"dpop-sk\""
+      },
+      "method": "GET",
+      "target": "https://storage.example/alice/notes/a.txt"
+    },
+    "state": {
+      "issuerJwks": {
+        "https://as.example": "keyring/as.jwks.json"
+      },
+      "now": "2026-07-01T12:00:00Z",
+      "popProfiles": [
+        "DPoP-SK"
+      ],
+      "popSession": {
+        "algs": [
+          "hmac-sha256"
+        ],
+        "channelBindings": [
+          "none"
+        ],
+        "endpoint": "https://storage.example/alice/.pop/session",
+        "profile": "https://w3id.org/jeswr/dpop-sk/v1"
+      },
+      "popSkSessions": [
+        "keyring/session-valid.json"
+      ],
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "alpha",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        },
+        "https://storage.example/alice/notes/b.txt": {
+          "content": "beta",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/",
+      "trustedIssuers": [
+        "https://as.example"
+      ]
+    }
+  },
+  "level": "MUST",
+  "notes": "Fails verification step 6 (HMAC mismatch). Servers MUST NOT emit any DPoP-SK-specific error code; the generic DPoP challenge keeps the failure path identical to plain DPoP.",
+  "operation": "http-exchange",
+  "preconditions": {
+    "features": [
+      "pop-profile-dpop-sk"
+    ]
+  },
+  "source": "lws-spec@59da847 core#presentation-pop + dpop-sk-spec@f485855 #attestation-verification (step 6, failure signalling E) (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "a tampered attestation draws 401 with the STANDARD DPoP challenge — no DPoP-SK-specific error code, and never bearer processing"
+}

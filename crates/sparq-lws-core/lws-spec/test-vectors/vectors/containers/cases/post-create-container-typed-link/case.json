@@ -1,0 +1,69 @@
+{
+  "clauses": [
+    "core#http-create-post"
+  ],
+  "exchanges": [
+    {
+      "expected": {
+        "headers": {
+          "Location": {
+            "present": true,
+            "startsWith": "https://storage.example/alice/notes/"
+          }
+        },
+        "status": 201
+      },
+      "request": {
+        "headers": {
+          "Link": "<https://w3id.org/jeswr/lws#Container>; rel=\"type\"",
+          "Slug": "subdir"
+        },
+        "method": "POST",
+        "target": "https://storage.example/alice/notes/"
+      }
+    },
+    {
+      "expected": {
+        "body": {
+          "jsonContains": {
+            "type": "Container"
+          }
+        },
+        "status": 200
+      },
+      "request": {
+        "method": "GET",
+        "target": "${response[0].header.Location}"
+      }
+    }
+  ],
+  "id": "containers/post-create-container-typed-link",
+  "input": {
+    "state": {
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "alpha",
+          "mediaType": "text/plain",
+          "modified": "2026-06-24T12:00:00Z",
+          "type": "DataResource"
+        },
+        "https://storage.example/alice/notes/archive/": {
+          "modified": "2026-06-20T09:00:00Z",
+          "type": "Container"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#http-create-post (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "POST with Link rel=\"type\" jlws#Container creates a container"
+}

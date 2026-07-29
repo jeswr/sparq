@@ -1,0 +1,60 @@
+{
+  "clauses": [
+    "core#metadata-updates"
+  ],
+  "exchanges": [
+    {
+      "expected": {
+        "headers": {
+          "Link": {
+            "includesLinkRel": {
+              "rel": "linkset"
+            }
+          }
+        },
+        "status": 200
+      },
+      "request": {
+        "method": "GET",
+        "target": "https://storage.example/alice/notes/a.txt"
+      }
+    },
+    {
+      "expected": {
+        "status": 428
+      },
+      "request": {
+        "body": "{\"linkset\":[{\"anchor\":\"https://storage.example/alice/notes/a.txt\",\"describedby\":[{\"href\":\"https://storage.example/alice/notes/a-meta.ttl\"}]}]}",
+        "headers": {
+          "Content-Type": "application/merge-patch+json"
+        },
+        "method": "PATCH",
+        "target": "${response[0].link(linkset)}"
+      }
+    }
+  ],
+  "id": "metadata/linkset-patch-without-if-match-428",
+  "input": {
+    "state": {
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "alpha",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#metadata-updates (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "PATCH on a linkset without If-Match is rejected 428 Precondition Required"
+}

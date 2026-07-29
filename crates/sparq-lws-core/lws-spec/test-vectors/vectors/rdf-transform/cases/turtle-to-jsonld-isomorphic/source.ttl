@@ -1,0 +1,7 @@
+@prefix schema: <http://schema.org/> .
+
+# stored formatting and this comment are part of the authoritative bytes
+<https://storage.example/alice/notes/card.ttl#me>
+    a             schema:Person ;
+    schema:name   "Alice" ;
+    schema:knows  <https://id.example/bob> .

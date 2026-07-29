@@ -1,0 +1,47 @@
+{
+  "clauses": [
+    "core#http-delete"
+  ],
+  "expected": {
+    "stateAfter": {
+      "exists": [
+        "https://storage.example/alice/notes/",
+        "https://storage.example/alice/notes/a.txt"
+      ]
+    },
+    "status": 409
+  },
+  "id": "containers/delete-nonempty-no-depth-409",
+  "input": {
+    "request": {
+      "method": "DELETE",
+      "target": "https://storage.example/alice/notes/"
+    },
+    "state": {
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "alpha",
+          "mediaType": "text/plain",
+          "modified": "2026-06-24T12:00:00Z",
+          "type": "DataResource"
+        },
+        "https://storage.example/alice/notes/archive/": {
+          "modified": "2026-06-20T09:00:00Z",
+          "type": "Container"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#http-delete (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "DELETE on a non-empty container without recursion is rejected 409"
+}

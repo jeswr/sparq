@@ -1,0 +1,45 @@
+{
+  "clauses": [
+    "rdf#capability"
+  ],
+  "expected": {
+    "errorCode": "CONFORMS_TO_PROFILE_MISSING",
+    "ok": false
+  },
+  "id": "rdf-transform/capability-requires-conformsto-profile",
+  "input": {
+    "document": {
+      "@context": [
+        "https://w3id.org/jeswr/lws/v1",
+        "https://www.w3.org/ns/cid/v1"
+      ],
+      "capability": [
+        {
+          "profile": "https://w3id.org/jeswr/lws/transform/rdf-1",
+          "source": "text/turtle",
+          "target": [
+            "application/ld+json",
+            "application/n-triples"
+          ],
+          "type": "ContentNegotiation"
+        }
+      ],
+      "conformsTo": [
+        "https://w3id.org/jeswr/lws/protocol/core/1.0"
+      ],
+      "id": "https://storage.example/alice/",
+      "service": [
+        {
+          "serviceEndpoint": "https://storage.example/alice/description",
+          "type": "StorageDescription"
+        }
+      ],
+      "type": "Storage"
+    }
+  },
+  "level": "MUST",
+  "operation": "validate-storage-description",
+  "source": "lws-spec@59da847 rdf#capability (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/transform/rdf-1",
+  "title": "a storage description with a ContentNegotiation entry claiming rdf-1 MUST list the profile URI in conformsTo"
+}

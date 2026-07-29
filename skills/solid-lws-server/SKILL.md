@@ -193,3 +193,39 @@ visible.
   default-off `trust-graph` feature. It adds the library function
   `authz::trust_admit::trust_admit_verdict`, which is deliberately not wired
   into the request pipeline, so enabling it changes no request's outcome.
+
+## Decide access under the LWS spec's ODRL profile
+
+The default-off `access-profile-odrl1` feature adds `authz::access_profile`, a
+Rust port of the access-decision rule set that the Linked Web Storage spec
+[`jeswr/lws-spec`](https://github.com/jeswr/lws-spec) defines as normative for
+its strict ODRL access profile. Like `trust-graph`, it is a pure library
+function that is deliberately not wired into the request pipeline, so enabling
+it changes no request's outcome.
+
+Decide one recorded-grants-plus-request input:
+
+```rust
+use sparq_lws_core::authz::access_profile::{evaluate_access_json, Decision};
+
+let decision = evaluate_access_json(&input)?; // input: serde_json::Value
+assert_eq!(decision, Decision::Permit);
+```
+
+`Decision::Permit` means at least one recorded grant justifies the request;
+`Decision::Deny` is the closed-world absence of any justification, so revocation
+composes by removing a grant from the input. Use `Grant::from_json` plus
+`AccessRequest::from_json` and `decide` instead when you want to decode a grant
+store once and answer many requests against it.
+
+The profile fails closed on every fallible edge: an action it does not define
+grants nothing, a constraint it cannot evaluate is unsatisfied, and a document
+outside the profile's shape is a `ProfileError` rather than a silent deny — so
+treat a decode error as an operator-visible fault, not an access decision.
+
+The spec is the authority, not this crate. `crates/sparq-lws-core/lws-spec/`
+carries the spec's test-vectors and N3 semantics vendored at a pinned commit,
+and `tests/lws_spec_vectors.rs` diffs this port against them; read
+`crates/sparq-lws-core/lws-spec/README.md` before changing the module or
+refreshing the pin. Coverage is an explicit per-operation ledger, so check it
+there rather than assuming a green suite means full conformance.

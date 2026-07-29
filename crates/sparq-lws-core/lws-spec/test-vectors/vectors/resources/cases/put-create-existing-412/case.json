@@ -1,0 +1,46 @@
+{
+  "clauses": [
+    "core#http-create-put"
+  ],
+  "expected": {
+    "stateAfter": {
+      "bytesUnchanged": [
+        "https://storage.example/alice/notes/a.txt"
+      ]
+    },
+    "status": 412
+  },
+  "id": "resources/put-create-existing-412",
+  "input": {
+    "request": {
+      "body": "overwrite attempt",
+      "headers": {
+        "Content-Type": "text/plain",
+        "If-None-Match": "*"
+      },
+      "method": "PUT",
+      "target": "https://storage.example/alice/notes/a.txt"
+    },
+    "state": {
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "abcdefghijklmnopqrstuvwxyz",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#http-create-put (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "PUT + If-None-Match: * to an existing resource fails 412 and MUST NOT modify it"
+}

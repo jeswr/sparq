@@ -1,0 +1,47 @@
+{
+  "clauses": [
+    "core#grants-are-records",
+    "core#odrl-profile"
+  ],
+  "expected": {
+    "decision": "permit"
+  },
+  "id": "access-grants/revoke-one-covering-grant-still-permitted",
+  "input": {
+    "grants": [
+      {
+        "@context": [
+          "http://www.w3.org/ns/odrl.jsonld",
+          "https://w3id.org/jeswr/lws/v1"
+        ],
+        "@type": "Offer",
+        "assigner": "https://id.example/alice",
+        "permission": [
+          {
+            "action": "read",
+            "assignee": "https://id.example/bob",
+            "target": {
+              "@type": "DataResource",
+              "uid": "https://storage.example/alice/notes/deep/nested/file.txt"
+            }
+          }
+        ],
+        "profile": "https://w3id.org/jeswr/lws/access-profile/odrl-1",
+        "uid": "https://storage.example/alice/.grants/vec-2"
+      }
+    ],
+    "request": {
+      "action": "read",
+      "agent": "https://id.example/bob",
+      "context": {
+        "dateTime": "2026-07-01T12:00:00Z"
+      },
+      "target": "https://storage.example/alice/notes/deep/nested/file.txt"
+    }
+  },
+  "level": "MUST",
+  "operation": "evaluate-access",
+  "source": "lws-spec@59da847 core#grants-are-records (spec-derived; decision reproduced by semantics/access-decision.n3)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "revocation composes structurally: with one of two covering grants revoked (its record DELETEd), the remaining recorded grant still permits"
+}

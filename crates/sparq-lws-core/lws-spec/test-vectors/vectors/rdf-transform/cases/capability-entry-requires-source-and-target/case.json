@@ -1,0 +1,41 @@
+{
+  "clauses": [
+    "rdf#capability"
+  ],
+  "expected": {
+    "errorCode": "CAPABILITY_MALFORMED",
+    "ok": false
+  },
+  "id": "rdf-transform/capability-entry-requires-source-and-target",
+  "input": {
+    "document": {
+      "@context": [
+        "https://w3id.org/jeswr/lws/v1",
+        "https://www.w3.org/ns/cid/v1"
+      ],
+      "capability": [
+        {
+          "profile": "https://w3id.org/jeswr/lws/transform/rdf-1",
+          "type": "ContentNegotiation"
+        }
+      ],
+      "conformsTo": [
+        "https://w3id.org/jeswr/lws/protocol/core/1.0",
+        "https://w3id.org/jeswr/lws/transform/rdf-1"
+      ],
+      "id": "https://storage.example/alice/",
+      "service": [
+        {
+          "serviceEndpoint": "https://storage.example/alice/description",
+          "type": "StorageDescription"
+        }
+      ],
+      "type": "Storage"
+    }
+  },
+  "level": "MUST",
+  "operation": "validate-storage-description",
+  "source": "lws-spec@59da847 rdf#capability (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/transform/rdf-1",
+  "title": "a ContentNegotiation entry without REQUIRED source/target members is rejected"
+}

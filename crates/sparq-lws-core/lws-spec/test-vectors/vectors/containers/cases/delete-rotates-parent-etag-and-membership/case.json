@@ -1,0 +1,96 @@
+{
+  "clauses": [
+    "core#http-delete",
+    "core#containment"
+  ],
+  "exchanges": [
+    {
+      "expected": {
+        "headers": {
+          "ETag": {
+            "present": true
+          }
+        },
+        "status": 200
+      },
+      "request": {
+        "method": "GET",
+        "target": "https://storage.example/alice/notes/"
+      }
+    },
+    {
+      "expected": {
+        "status": 204
+      },
+      "request": {
+        "method": "DELETE",
+        "target": "https://storage.example/alice/notes/a.txt"
+      }
+    },
+    {
+      "expected": {
+        "body": {
+          "jsonArrayExcludes": {
+            "path": "items",
+            "subset": {
+              "id": "https://storage.example/alice/notes/a.txt"
+            }
+          },
+          "jsonContains": {
+            "totalItems": 1
+          }
+        },
+        "status": 200
+      },
+      "request": {
+        "method": "GET",
+        "target": "https://storage.example/alice/notes/"
+      }
+    }
+  ],
+  "expected": {
+    "asserts": [
+      {
+        "kind": "differ",
+        "refs": [
+          "response[0].header.ETag",
+          "response[2].header.ETag"
+        ]
+      }
+    ],
+    "stateAfter": {
+      "notExists": [
+        "https://storage.example/alice/notes/a.txt"
+      ]
+    }
+  },
+  "id": "containers/delete-rotates-parent-etag-and-membership",
+  "input": {
+    "state": {
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "alpha",
+          "mediaType": "text/plain",
+          "modified": "2026-06-24T12:00:00Z",
+          "type": "DataResource"
+        },
+        "https://storage.example/alice/notes/archive/": {
+          "modified": "2026-06-20T09:00:00Z",
+          "type": "Container"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#http-delete (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "deleting a resource atomically removes it from the parent's items and changes the parent's ETag"
+}

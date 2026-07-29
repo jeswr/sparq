@@ -392,6 +392,16 @@ odrl-authz = ["dep:sparq-policy"]
 # `ldp::handler`; hot-path wiring is a separate soundness-sensitive follow-up. RESEARCH prototype,
 # clear path: no privacy / unlinkability / anonymity / ZK-soundness claim (sq-qhy4).
 trust-graph = ["dep:sparq-solid", "dep:sparq-trust"]
+# [SONNET-4.6] sq-gg0qq.6: OPT-IN strict ODRL access profile (`authz::access_profile`) — a Rust port
+# of the LWS spec's NORMATIVE access-decision rule set
+# (`lws-spec/semantics/access-decision.n3`), gated by the vendored `lws-spec/` test-vectors
+# (`tests/lws_spec_vectors.rs`). Adds NO dependency: the decoder is `serde_json`, which is already a
+# non-optional dep. OFF by default so the default build compiles zero profile code; enabling it is
+# ALSO behaviour-identical, because the module is a pure library function deliberately NOT called
+# from `ldp::handler` (hot-path wiring is a separate, soundness-sensitive slice). Distinct from
+# `odrl-authz` above: that gates reads with a `sparq-policy` ODRL policy, this reproduces the LWS
+# spec's own profile decision function.
+access-profile-odrl1 = []
 # Opt-in REMOTE backend (sq-gg0qq.3): the live `HttpSparqClient` (`src/store/http.rs`) — a SPARQL
 # 1.1 Protocol client over a remote SPARQ `/sparql` endpoint, selected at runtime by
 # `PSS_SPARQ_BACKEND=http`. OFF by default: in-workspace builds talk to the engine in-process

@@ -1,0 +1,121 @@
+{
+  "caseCount": 17,
+  "cases": [
+    {
+      "id": "resources/put-create-if-none-match",
+      "path": "cases/put-create-if-none-match/case.json"
+    },
+    {
+      "id": "resources/put-create-existing-412",
+      "path": "cases/put-create-existing-412/case.json"
+    },
+    {
+      "id": "resources/put-unconditional-existing-428",
+      "path": "cases/put-unconditional-existing-428/case.json"
+    },
+    {
+      "id": "resources/put-unconditional-nonexistent-428",
+      "path": "cases/put-unconditional-nonexistent-428/case.json"
+    },
+    {
+      "id": "resources/put-create-missing-parent-409",
+      "path": "cases/put-create-missing-parent-409/case.json"
+    },
+    {
+      "id": "resources/put-create-container-trailing-slash",
+      "path": "cases/put-create-container-trailing-slash/case.json"
+    },
+    {
+      "id": "resources/byte-exact-roundtrip",
+      "path": "cases/byte-exact-roundtrip/case.json"
+    },
+    {
+      "id": "resources/range-request-206",
+      "path": "cases/range-request-206/case.json"
+    },
+    {
+      "id": "resources/range-unsatisfiable-416",
+      "path": "cases/range-unsatisfiable-416/case.json"
+    },
+    {
+      "id": "resources/conditional-get-if-none-match-304",
+      "path": "cases/conditional-get-if-none-match-304/case.json"
+    },
+    {
+      "id": "resources/conditional-get-if-modified-since-304",
+      "path": "cases/conditional-get-if-modified-since-304/case.json"
+    },
+    {
+      "id": "resources/head-mirrors-get",
+      "path": "cases/head-mirrors-get/case.json"
+    },
+    {
+      "id": "resources/required-links-on-get",
+      "path": "cases/required-links-on-get/case.json"
+    },
+    {
+      "id": "resources/path-traversal-rejected",
+      "path": "cases/path-traversal-rejected/case.json"
+    },
+    {
+      "id": "resources/quota-exhaustion-507",
+      "path": "cases/quota-exhaustion-507/case.json"
+    },
+    {
+      "id": "resources/error-carries-problem-details",
+      "path": "cases/error-carries-problem-details/case.json"
+    },
+    {
+      "id": "resources/agent-authenticated-via-bob",
+      "path": "cases/agent-authenticated-via-bob/case.json"
+    }
+  ],
+  "clauseIndex": {
+    "core#containment": [
+      "resources/required-links-on-get"
+    ],
+    "core#discovery-binding": [
+      "resources/required-links-on-get"
+    ],
+    "core#http-create-put": [
+      "resources/put-create-if-none-match",
+      "resources/put-create-existing-412",
+      "resources/put-unconditional-nonexistent-428",
+      "resources/put-create-missing-parent-409",
+      "resources/put-create-container-trailing-slash"
+    ],
+    "core#http-general": [
+      "resources/required-links-on-get",
+      "resources/path-traversal-rejected",
+      "resources/quota-exhaustion-507",
+      "resources/error-carries-problem-details"
+    ],
+    "core#http-read": [
+      "resources/byte-exact-roundtrip",
+      "resources/range-request-206",
+      "resources/range-unsatisfiable-416",
+      "resources/conditional-get-if-none-match-304",
+      "resources/conditional-get-if-modified-since-304",
+      "resources/head-mirrors-get"
+    ],
+    "core#http-update": [
+      "resources/put-unconditional-existing-428"
+    ],
+    "core#oracle-freedom": [
+      "resources/agent-authenticated-via-bob"
+    ],
+    "core#path-alignment": [
+      "resources/put-create-container-trailing-slash"
+    ],
+    "core#resource-classes": [
+      "resources/byte-exact-roundtrip"
+    ],
+    "core#rs-validation": [
+      "resources/agent-authenticated-via-bob"
+    ]
+  },
+  "description": "Byte-native data-resource semantics over the HTTP binding: idempotent PUT + If-None-Match: * creation, the strict 428/412 conditional-write discipline, byte-exact and media-type round-trips, Range, conditional GET, HEAD, the mandatory response links, path-traversal rejection, and quota exhaustion.",
+  "schemaVersion": 1,
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "suite": "resources"
+}

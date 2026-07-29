@@ -72,3 +72,13 @@
   crate: "sparq-lws-core"
   features: "trust-graph"
   test: true
+
+# [SONNET-4.6] sq-gg0qq.6: the opt-in strict ODRL access profile (src/authz/access_profile.rs) — the
+# Rust port of the LWS spec's normative access-decision rule set. tests/lws_spec_vectors.rs is
+# entirely `#![cfg(feature = "access-profile-odrl1")]`, so without this leg the vendored
+# jeswr/lws-spec conformance corpus (lws-spec/) never runs in CI: neither the per-vector verdict
+# diff nor the coverage-ledger ratchet that stops an unimplemented operation being silently skipped.
+- name: "sparq-lws-core (access-profile-odrl1)"
+  crate: "sparq-lws-core"
+  features: "access-profile-odrl1"
+  test: true

@@ -1,0 +1,67 @@
+{
+  "clauses": [
+    "core#http-read",
+    "core#resource-classes"
+  ],
+  "exchanges": [
+    {
+      "expected": {
+        "status": 201
+      },
+      "request": {
+        "bodyBase64": "AP8QIjNEVWZ3iJmqu8zd7g==",
+        "headers": {
+          "Content-Type": "application/x.jlws-test+octets",
+          "If-None-Match": "*"
+        },
+        "method": "PUT",
+        "target": "https://storage.example/alice/notes/blob.bin"
+      }
+    },
+    {
+      "expected": {
+        "body": {
+          "byteEqualsBase64": "AP8QIjNEVWZ3iJmqu8zd7g=="
+        },
+        "headers": {
+          "Content-Type": {
+            "mediaType": "application/x.jlws-test+octets"
+          },
+          "ETag": {
+            "present": true
+          }
+        },
+        "status": 200
+      },
+      "request": {
+        "method": "GET",
+        "target": "https://storage.example/alice/notes/blob.bin"
+      }
+    }
+  ],
+  "id": "resources/byte-exact-roundtrip",
+  "input": {
+    "state": {
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "abcdefghijklmnopqrstuvwxyz",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "notes": "The server stores and returns the representation without interpreting it: GET returns the stored bytes with the stored media type.",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#http-read (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "written bytes (including non-UTF-8 binary) and the full stored media type round-trip exactly"
+}

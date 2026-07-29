@@ -1,0 +1,84 @@
+{
+  "clauses": [
+    "core#http-general"
+  ],
+  "exchanges": [
+    {
+      "expected": {
+        "body": {
+          "jsonIsObject": true
+        },
+        "headers": {
+          "Content-Type": {
+            "mediaType": "application/problem+json"
+          }
+        },
+        "status": 404
+      },
+      "request": {
+        "method": "GET",
+        "target": "https://storage.example/alice/notes/missing.txt"
+      }
+    },
+    {
+      "expected": {
+        "body": {
+          "jsonIsObject": true
+        },
+        "headers": {
+          "Content-Type": {
+            "mediaType": "application/problem+json"
+          }
+        },
+        "status": 428
+      },
+      "request": {
+        "body": "unconditional",
+        "headers": {
+          "Content-Type": "text/plain"
+        },
+        "method": "PUT",
+        "target": "https://storage.example/alice/notes/a.txt"
+      }
+    }
+  ],
+  "id": "errors/problem-details-on-4xx",
+  "input": {
+    "state": {
+      "access": {
+        "https://id.example/bob": {
+          "https://storage.example/alice/notes/": [
+            "read"
+          ],
+          "https://storage.example/alice/notes/a.txt": [
+            "read"
+          ]
+        }
+      },
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "alpha",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        },
+        "https://storage.example/alice/notes/secret.txt": {
+          "content": "hidden from bob",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#http-general (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "every 4xx response carries an RFC 9457 application/problem+json body"
+}

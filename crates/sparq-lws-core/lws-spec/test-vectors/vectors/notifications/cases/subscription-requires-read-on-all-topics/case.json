@@ -1,0 +1,54 @@
+{
+  "clauses": [
+    "core#subscription-api"
+  ],
+  "expected": {
+    "statusClass": "4xx"
+  },
+  "id": "notifications/subscription-requires-read-on-all-topics",
+  "input": {
+    "request": {
+      "agent": "https://id.example/bob",
+      "body": "{\"@context\":\"https://w3id.org/jeswr/lws/v1\",\"type\":\"SseSubscription\",\"topic\":[\"https://storage.example/alice/notes/a.txt\",\"https://storage.example/alice/notes/b.txt\"]}",
+      "headers": {
+        "Content-Type": "application/ld+json"
+      },
+      "method": "POST",
+      "target": "https://storage.example/alice/notifications"
+    },
+    "state": {
+      "access": {
+        "https://id.example/bob": {
+          "https://storage.example/alice/notes/a.txt": [
+            "read"
+          ]
+        }
+      },
+      "notificationService": "https://storage.example/alice/notifications",
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "alpha",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        },
+        "https://storage.example/alice/notes/b.txt": {
+          "content": "beta",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#subscription-api (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "a subscription whose agent lacks read access to every topic is rejected"
+}

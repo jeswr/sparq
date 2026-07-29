@@ -1,0 +1,63 @@
+{
+  "clauses": [
+    "core#http-general",
+    "core#discovery-binding",
+    "core#containment"
+  ],
+  "expected": {
+    "headers": {
+      "ETag": {
+        "present": true
+      },
+      "Link": {
+        "includesLinkRelAll": [
+          {
+            "rel": "linkset"
+          },
+          {
+            "rel": "up",
+            "target": "https://storage.example/alice/notes/"
+          },
+          {
+            "rel": "type"
+          },
+          {
+            "relOneOf": [
+              "https://w3id.org/jeswr/lws#storageDescription",
+              "https://www.w3.org/ns/lws#storageDescription"
+            ]
+          }
+        ]
+      }
+    },
+    "status": 200
+  },
+  "id": "resources/required-links-on-get",
+  "input": {
+    "request": {
+      "method": "GET",
+      "target": "https://storage.example/alice/notes/a.txt"
+    },
+    "state": {
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "abcdefghijklmnopqrstuvwxyz",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#http-general (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "every GET response carries ETag plus the linkset, up, type, and storage-description links"
+}

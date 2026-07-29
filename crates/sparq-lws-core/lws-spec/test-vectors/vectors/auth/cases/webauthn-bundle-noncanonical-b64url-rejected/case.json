@@ -1,0 +1,25 @@
+{
+  "clauses": [
+    "core#suite-webauthn",
+    "core#credential-model"
+  ],
+  "expected": {
+    "errorCode": "MALFORMED_BUNDLE",
+    "ok": false
+  },
+  "id": "auth/webauthn-bundle-noncanonical-b64url-rejected",
+  "input": {
+    "token": "bundle-noncanonical.b64u"
+  },
+  "level": "MUST",
+  "notes": "The credential's signature field is \"AB\": inside the base64url alphabet, but no encoder emits it (the final sextet's unused bits are non-zero — it aliases the bytes of \"AA\" as a distinct string, a malleability hazard for string-keyed lookups). The wire contract requires canonical unpadded base64url and rejects via a decode→re-encode round-trip; the AS maps the failure to the RFC 6749 §5.2 invalid_request error at the exchange.",
+  "operation": "decode-webauthn-assertion-bundle",
+  "preconditions": {
+    "features": [
+      "suite-webauthn"
+    ]
+  },
+  "source": "lws-spec@59da847 core#suite-webauthn + solid-webauthn-reauth@cf81736 src/protocol/codec.ts isBase64url (spec-derived; the wire contract is the normative shape)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "a bundle whose binary field carries alphabet-valid but NON-CANONICAL base64url is rejected (fail-closed decode)"
+}

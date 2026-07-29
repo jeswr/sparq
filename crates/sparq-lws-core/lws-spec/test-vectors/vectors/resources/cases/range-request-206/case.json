@@ -1,0 +1,47 @@
+{
+  "clauses": [
+    "core#http-read"
+  ],
+  "expected": {
+    "body": {
+      "byteEquals": "abcde"
+    },
+    "headers": {
+      "Content-Range": {
+        "equals": "bytes 0-4/26"
+      }
+    },
+    "status": 206
+  },
+  "id": "resources/range-request-206",
+  "input": {
+    "request": {
+      "headers": {
+        "Range": "bytes=0-4"
+      },
+      "method": "GET",
+      "target": "https://storage.example/alice/notes/a.txt"
+    },
+    "state": {
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "abcdefghijklmnopqrstuvwxyz",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#http-read (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "Range: bytes=0-4 yields 206 with exactly the requested slice and Content-Range"
+}

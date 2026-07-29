@@ -1,0 +1,40 @@
+{
+  "clauses": [
+    "core#http-read"
+  ],
+  "expected": {
+    "status": 304
+  },
+  "id": "resources/conditional-get-if-modified-since-304",
+  "input": {
+    "request": {
+      "headers": {
+        "If-Modified-Since": "Wed, 01 Jul 2026 00:00:00 GMT"
+      },
+      "method": "GET",
+      "target": "https://storage.example/alice/notes/a.txt"
+    },
+    "state": {
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "abcdefghijklmnopqrstuvwxyz",
+          "mediaType": "text/plain",
+          "modified": "2026-06-20T09:00:00Z",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#http-read (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "GET with If-Modified-Since later than the modification time yields 304"
+}

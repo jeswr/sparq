@@ -1,0 +1,83 @@
+{
+  "clauses": [
+    "core#discovery-model",
+    "core#capability-registry"
+  ],
+  "expected": {
+    "ok": true
+  },
+  "id": "discovery/storage-description-unknown-capability-ignored",
+  "input": {
+    "document": {
+      "@context": [
+        "https://w3id.org/jeswr/lws/v1",
+        "https://www.w3.org/ns/cid/v1"
+      ],
+      "capability": [
+        {
+          "mediaType": {
+            "application/linkset+json": [
+              "application/merge-patch+json"
+            ]
+          },
+          "type": "PatchSupport"
+        },
+        {
+          "profile": "https://w3id.org/jeswr/lws/transform/rdf-1",
+          "source": "text/turtle",
+          "target": [
+            "application/ld+json",
+            "application/n-triples"
+          ],
+          "type": "ContentNegotiation"
+        },
+        {
+          "type": "RecursiveDelete"
+        },
+        {
+          "dial": 11,
+          "type": "https://extension.example/Frobnicate"
+        }
+      ],
+      "conformsTo": [
+        "https://w3id.org/jeswr/lws/protocol/core/1.0",
+        "https://w3id.org/jeswr/lws/transform/rdf-1"
+      ],
+      "id": "https://storage.example/alice/",
+      "service": [
+        {
+          "serviceEndpoint": "https://storage.example/alice/description",
+          "type": "StorageDescription"
+        },
+        {
+          "serviceEndpoint": "https://storage.example/alice/notifications",
+          "subscriptionType": [
+            "WebhookSubscription",
+            "SseSubscription"
+          ],
+          "type": "NotificationService"
+        },
+        {
+          "conformsTo": "https://w3id.org/jeswr/lws/access-profile/odrl-1",
+          "serviceEndpoint": "https://storage.example/alice/.access/requests/",
+          "type": "AccessRequestService"
+        },
+        {
+          "conformsTo": "https://w3id.org/jeswr/lws/access-profile/odrl-1",
+          "serviceEndpoint": "https://storage.example/alice/.access/grants/",
+          "type": "AccessGrantService"
+        },
+        {
+          "serviceEndpoint": "https://teleport.example/",
+          "type": "https://extension.example/TeleportService"
+        }
+      ],
+      "type": "Storage"
+    }
+  },
+  "level": "MUST",
+  "operation": "validate-storage-description",
+  "source": "lws-spec@59da847 core#discovery-model (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "consumers MUST ignore unrecognised capability and service types (forward compatibility)"
+}

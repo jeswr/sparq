@@ -1,0 +1,84 @@
+{
+  "clauses": [
+    "core#discovery-model",
+    "core#capability-registry"
+  ],
+  "expected": {
+    "conformsTo": "https://w3id.org/jeswr/a2a-rdf/v1",
+    "found": true,
+    "serviceEndpoint": "https://agent.example/.well-known/agent-card.json"
+  },
+  "id": "discovery/sd-agent-interaction-service",
+  "input": {
+    "document": {
+      "@context": [
+        "https://w3id.org/jeswr/lws/v1",
+        "https://www.w3.org/ns/cid/v1"
+      ],
+      "capability": [
+        {
+          "mediaType": {
+            "application/linkset+json": [
+              "application/merge-patch+json"
+            ]
+          },
+          "type": "PatchSupport"
+        },
+        {
+          "profile": "https://w3id.org/jeswr/lws/transform/rdf-1",
+          "source": "text/turtle",
+          "target": [
+            "application/ld+json",
+            "application/n-triples"
+          ],
+          "type": "ContentNegotiation"
+        },
+        {
+          "type": "RecursiveDelete"
+        }
+      ],
+      "conformsTo": [
+        "https://w3id.org/jeswr/lws/protocol/core/1.0",
+        "https://w3id.org/jeswr/lws/transform/rdf-1"
+      ],
+      "id": "https://storage.example/alice/",
+      "service": [
+        {
+          "serviceEndpoint": "https://storage.example/alice/description",
+          "type": "StorageDescription"
+        },
+        {
+          "serviceEndpoint": "https://storage.example/alice/notifications",
+          "subscriptionType": [
+            "WebhookSubscription",
+            "SseSubscription"
+          ],
+          "type": "NotificationService"
+        },
+        {
+          "conformsTo": "https://w3id.org/jeswr/lws/access-profile/odrl-1",
+          "serviceEndpoint": "https://storage.example/alice/.access/requests/",
+          "type": "AccessRequestService"
+        },
+        {
+          "conformsTo": "https://w3id.org/jeswr/lws/access-profile/odrl-1",
+          "serviceEndpoint": "https://storage.example/alice/.access/grants/",
+          "type": "AccessGrantService"
+        },
+        {
+          "conformsTo": "https://w3id.org/jeswr/a2a-rdf/v1",
+          "serviceEndpoint": "https://agent.example/.well-known/agent-card.json",
+          "type": "https://w3id.org/jeswr/a2a-rdf/v1#AgentInteractionService"
+        }
+      ],
+      "type": "Storage"
+    },
+    "serviceType": "https://w3id.org/jeswr/a2a-rdf/v1#AgentInteractionService"
+  },
+  "level": "MUST",
+  "notes": "The term is minted and defined by the a2a-rdf extension (#AgentInteractionService): serviceEndpoint is the controller-agent's A2A Agent Card URL (the card, not the A2A endpoint); conformsTo asserts the agent declares the extension. JLWS needs no edit — extension services use absolute URIs (core#capability-registry), and consumers that do not recognise the type ignore it (core#discovery-model; already pinned by storage-description-unknown-capability-ignored).",
+  "operation": "discover-service",
+  "source": "lws-spec@59da847 core#capability-registry + a2a-rdf-extension@d3a2773 #AgentInteractionService (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "a storage description advertising the a2a-rdf AgentInteractionService extension entry yields the agent-card URL to a recognising consumer"
+}

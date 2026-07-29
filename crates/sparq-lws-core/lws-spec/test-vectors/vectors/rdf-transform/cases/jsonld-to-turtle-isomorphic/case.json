@@ -1,0 +1,21 @@
+{
+  "clauses": [
+    "rdf#round-trip"
+  ],
+  "expected": {
+    "isomorphicTo": "expected.nq",
+    "ok": true
+  },
+  "id": "rdf-transform/jsonld-to-turtle-isomorphic",
+  "input": {
+    "base": "https://storage.example/alice/notes/card.jsonld",
+    "source": "source.jsonld",
+    "sourceMediaType": "application/ld+json",
+    "targetMediaType": "text/turtle"
+  },
+  "level": "MUST",
+  "operation": "transform-representation",
+  "source": "lws-spec@59da847 rdf#round-trip (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/transform/rdf-1",
+  "title": "application/ld+json → text/turtle preserves the RDF graph up to isomorphism"
+}

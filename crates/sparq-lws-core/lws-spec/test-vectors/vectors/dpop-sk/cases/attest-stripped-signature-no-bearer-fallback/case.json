@@ -1,0 +1,79 @@
+{
+  "clauses": [
+    "core#rs-validation",
+    "core#presentation-pop"
+  ],
+  "expected": {
+    "headers": {
+      "WWW-Authenticate": {
+        "present": true
+      }
+    },
+    "status": 401
+  },
+  "id": "dpop-sk/attest-stripped-signature-no-bearer-fallback",
+  "input": {
+    "request": {
+      "headers": {
+        "Authorization": "DPoP ${file:keyring/at-sk-bound.jwt}"
+      },
+      "method": "GET",
+      "target": "https://storage.example/alice/notes/a.txt"
+    },
+    "state": {
+      "issuerJwks": {
+        "https://as.example": "keyring/as.jwks.json"
+      },
+      "now": "2026-07-01T12:00:00Z",
+      "popProfiles": [
+        "DPoP-SK"
+      ],
+      "popSession": {
+        "algs": [
+          "hmac-sha256"
+        ],
+        "channelBindings": [
+          "none"
+        ],
+        "endpoint": "https://storage.example/alice/.pop/session",
+        "profile": "https://w3id.org/jeswr/dpop-sk/v1"
+      },
+      "popSkSessions": [
+        "keyring/session-valid.json"
+      ],
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "alpha",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        },
+        "https://storage.example/alice/notes/b.txt": {
+          "content": "beta",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/",
+      "trustedIssuers": [
+        "https://as.example"
+      ]
+    }
+  },
+  "level": "MUST",
+  "notes": "core#rs-validation step 5: a cnf-bound token MUST NOT be accepted bare. dpop-sk-spec #downgrade rule 1: there is no bearer fallback under any failure mode — removing Signature/Signature-Input yields a request with no PoP, which is rejected. Adopting DPoP-SK therefore cannot weaken the realm's baseline.",
+  "operation": "http-exchange",
+  "preconditions": {
+    "features": [
+      "pop-profile-dpop-sk"
+    ]
+  },
+  "source": "lws-spec@59da847 core#rs-validation + dpop-sk-spec@f485855 #downgrade (rule 1) (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "the Bearer baseline is not weakened: stripping the attestation leaves a cnf-bound token with no proof of possession at all, which is refused"
+}

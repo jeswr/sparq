@@ -1,0 +1,52 @@
+{
+  "clauses": [
+    "core#http-general"
+  ],
+  "expected": {
+    "stateAfter": {
+      "notExists": [
+        "https://storage.example/alice/notes/big.txt"
+      ]
+    },
+    "status": 507
+  },
+  "id": "resources/quota-exhaustion-507",
+  "input": {
+    "request": {
+      "body": "this write exceeds the remaining quota",
+      "headers": {
+        "Content-Type": "text/plain",
+        "If-None-Match": "*"
+      },
+      "method": "PUT",
+      "target": "https://storage.example/alice/notes/big.txt"
+    },
+    "state": {
+      "quotaRemainingBytes": 0,
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "abcdefghijklmnopqrstuvwxyz",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "operation": "http-exchange",
+  "preconditions": {
+    "features": [
+      "storage-quota"
+    ]
+  },
+  "source": "lws-spec@59da847 core#http-general (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "storage-quota exhaustion is reported as 507 Insufficient Storage"
+}

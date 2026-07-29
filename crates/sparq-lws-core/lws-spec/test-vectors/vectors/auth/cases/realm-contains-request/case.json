@@ -1,0 +1,19 @@
+{
+  "clauses": [
+    "core#authz-discovery",
+    "core#client-rules"
+  ],
+  "expected": {
+    "ok": true
+  },
+  "id": "auth/realm-contains-request",
+  "input": {
+    "realm": "https://storage.example/alice/",
+    "requestUri": "https://storage.example/alice/notes/a.txt"
+  },
+  "level": "MUST",
+  "operation": "verify-realm-containment",
+  "source": "lws-spec@59da847 core#authz-discovery (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "realm containment: the originating request URI inside the presented realm verifies"
+}

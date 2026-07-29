@@ -1,0 +1,37 @@
+{
+  "clauses": [
+    "core#credential-model",
+    "core#authz-discovery"
+  ],
+  "expected": {
+    "ok": true
+  },
+  "id": "auth/webauthn-suite-advertised",
+  "input": {
+    "document": {
+      "grant_types_supported": [
+        "urn:ietf:params:oauth:grant-type:token-exchange"
+      ],
+      "issuer": "https://as.example",
+      "subject_token_types_supported": [
+        "urn:ietf:params:oauth:token-type:id_token",
+        "urn:solid:token-type:webauthn-assertion"
+      ],
+      "token_endpoint": "https://as.example/token"
+    },
+    "offeredSuiteTokenTypes": [
+      "urn:solid:token-type:webauthn-assertion"
+    ]
+  },
+  "level": "SHOULD",
+  "notes": "SHOULD rather than MUST for the privacy reason the spec records (suite enumeration is a fingerprinting surface — core#credential-model). The token-type URI is the one minted by the wire contract.",
+  "operation": "validate-as-metadata",
+  "preconditions": {
+    "features": [
+      "suite-webauthn"
+    ]
+  },
+  "source": "lws-spec@59da847 core#credential-model + solid-webauthn-reauth@cf81736 src/protocol/constants.ts WEBAUTHN_ASSERTION_TOKEN_TYPE (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "an authorization server offering the WebAuthn suite SHOULD list its token-type URI in RFC 8414 subject_token_types_supported"
+}

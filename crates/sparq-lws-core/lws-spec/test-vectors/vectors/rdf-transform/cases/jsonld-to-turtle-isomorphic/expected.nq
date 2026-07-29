@@ -1,0 +1,3 @@
+<https://storage.example/alice/notes/card.jsonld#me> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://schema.org/Person> .
+<https://storage.example/alice/notes/card.jsonld#me> <http://schema.org/name> "Alice" .
+<https://storage.example/alice/notes/card.jsonld#me> <http://schema.org/knows> <https://id.example/bob> .

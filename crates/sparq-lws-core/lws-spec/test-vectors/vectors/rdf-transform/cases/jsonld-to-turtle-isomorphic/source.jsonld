@@ -1,0 +1,14 @@
+{
+  "@context": {
+    "name": "http://schema.org/name",
+    "knows": {
+      "@id": "http://schema.org/knows",
+      "@type": "@id"
+    },
+    "Person": "http://schema.org/Person"
+  },
+  "@id": "https://storage.example/alice/notes/card.jsonld#me",
+  "@type": "Person",
+  "name": "Alice",
+  "knows": "https://id.example/bob"
+}

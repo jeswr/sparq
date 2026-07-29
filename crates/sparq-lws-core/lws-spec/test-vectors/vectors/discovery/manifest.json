@@ -1,0 +1,67 @@
+{
+  "caseCount": 8,
+  "cases": [
+    {
+      "id": "discovery/storage-description-valid",
+      "path": "cases/storage-description-valid/case.json"
+    },
+    {
+      "id": "discovery/storage-description-missing-conformsto",
+      "path": "cases/storage-description-missing-conformsto/case.json"
+    },
+    {
+      "id": "discovery/storage-description-missing-self-service",
+      "path": "cases/storage-description-missing-self-service/case.json"
+    },
+    {
+      "id": "discovery/storage-description-unknown-capability-ignored",
+      "path": "cases/storage-description-unknown-capability-ignored/case.json"
+    },
+    {
+      "id": "discovery/sd-agent-interaction-service",
+      "path": "cases/sd-agent-interaction-service/case.json"
+    },
+    {
+      "id": "discovery/sd-agent-interaction-service-hostile-fails-closed",
+      "path": "cases/sd-agent-interaction-service-hostile-fails-closed/case.json"
+    },
+    {
+      "id": "discovery/storage-description-link-on-get",
+      "path": "cases/storage-description-link-on-get/case.json"
+    },
+    {
+      "id": "discovery/protected-resource-metadata-document",
+      "path": "cases/protected-resource-metadata-document/case.json"
+    }
+  ],
+  "clauseIndex": {
+    "core#authz-discovery": [
+      "discovery/protected-resource-metadata-document"
+    ],
+    "core#capability-registry": [
+      "discovery/storage-description-unknown-capability-ignored",
+      "discovery/sd-agent-interaction-service"
+    ],
+    "core#discovery-binding": [
+      "discovery/storage-description-link-on-get"
+    ],
+    "core#discovery-model": [
+      "discovery/storage-description-valid",
+      "discovery/storage-description-missing-conformsto",
+      "discovery/storage-description-missing-self-service",
+      "discovery/storage-description-unknown-capability-ignored",
+      "discovery/sd-agent-interaction-service",
+      "discovery/sd-agent-interaction-service-hostile-fails-closed"
+    ],
+    "core#namespace": [
+      "discovery/storage-description-link-on-get"
+    ],
+    "core#ssrf": [
+      "discovery/sd-agent-interaction-service-hostile-fails-closed"
+    ]
+  },
+  "description": "The storage description as the single feature-detection surface: REQUIRED members (id, type, conformsTo, service incl. the StorageDescription self-entry), unknown-capability forward compatibility, the storage-description Link on every resource response, the RFC 9728 protected resource metadata document with the jlws_storage_description extension member, and extension-service consumption (the a2a-rdf AgentInteractionService entry, fail-closed on a non-https endpoint).",
+  "schemaVersion": 1,
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "suite": "discovery"
+}

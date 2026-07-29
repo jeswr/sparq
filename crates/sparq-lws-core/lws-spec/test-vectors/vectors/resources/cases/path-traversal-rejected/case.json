@@ -1,0 +1,37 @@
+{
+  "clauses": [
+    "core#http-general"
+  ],
+  "expected": {
+    "statusClass": "4xx"
+  },
+  "id": "resources/path-traversal-rejected",
+  "input": {
+    "request": {
+      "method": "GET",
+      "target": "https://storage.example/alice/notes/%2e%2e/%2e%2e/other-storage/secret.txt"
+    },
+    "state": {
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "abcdefghijklmnopqrstuvwxyz",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "notes": "The spec additionally requires the rejection to happen BEFORE any authorization matching; that ordering is not black-box observable and is recorded in GAPS.md. The vector pins the observable half: the request never succeeds.",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#http-general (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "request targets containing encoded path-traversal sequences are rejected"
+}

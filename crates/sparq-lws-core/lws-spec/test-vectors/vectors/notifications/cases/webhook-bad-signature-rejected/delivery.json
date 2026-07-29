@@ -1,0 +1,11 @@
+{
+  "bodyFile": "body.json",
+  "headers": {
+    "Content-Digest": "sha-256=:nQ2ljiH4Bu7JTTeacBIc32lZdtsCJi18yof4wuq3rXE=:",
+    "Content-Type": "application/ld+json",
+    "Signature": "sig1=:3LlCltY60myfwLRwLW1CO+x11zZ1NNxLq4c2smDzi0Fxv57H/T8/x3yQ0CDmFIZBYvIeekV6KOP4ntNXIQ9vCw==:",
+    "Signature-Input": "sig1=(\"@method\" \"@target-uri\" \"content-type\" \"content-digest\");created=1782907200;keyid=\"https://storage.example/alice/description#whk-1\";alg=\"ed25519\""
+  },
+  "method": "POST",
+  "targetUri": "https://receiver.example/inbox"
+}

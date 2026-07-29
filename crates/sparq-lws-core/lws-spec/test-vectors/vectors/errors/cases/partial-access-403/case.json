@@ -1,0 +1,57 @@
+{
+  "clauses": [
+    "core#rs-validation"
+  ],
+  "expected": {
+    "stateAfter": {
+      "exists": [
+        "https://storage.example/alice/notes/a.txt"
+      ]
+    },
+    "status": 403
+  },
+  "id": "errors/partial-access-403",
+  "input": {
+    "request": {
+      "agent": "https://id.example/bob",
+      "method": "DELETE",
+      "target": "https://storage.example/alice/notes/a.txt"
+    },
+    "state": {
+      "access": {
+        "https://id.example/bob": {
+          "https://storage.example/alice/notes/": [
+            "read"
+          ],
+          "https://storage.example/alice/notes/a.txt": [
+            "read"
+          ]
+        }
+      },
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "alpha",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        },
+        "https://storage.example/alice/notes/secret.txt": {
+          "content": "hidden from bob",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#rs-validation (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "a valid agent with SOME access to the resource but not the requested operation draws 403"
+}

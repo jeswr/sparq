@@ -1,0 +1,44 @@
+{
+  "clauses": [
+    "core#discovery-binding",
+    "core#namespace"
+  ],
+  "expected": {
+    "headers": {
+      "Link": {
+        "includesLinkRel": {
+          "relOneOf": [
+            "https://w3id.org/jeswr/lws#storageDescription",
+            "https://www.w3.org/ns/lws#storageDescription"
+          ]
+        }
+      }
+    },
+    "status": 200
+  },
+  "id": "discovery/storage-description-link-on-get",
+  "input": {
+    "request": {
+      "method": "GET",
+      "target": "https://storage.example/alice/hello.txt"
+    },
+    "state": {
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/hello.txt": {
+          "content": "hi",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#discovery-binding (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "every GET response on a storage resource links the storage description (rel jlws#storageDescription, alias accepted)"
+}

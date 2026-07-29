@@ -1,0 +1,113 @@
+{
+  "clauses": [
+    "core#metadata-updates",
+    "core#metadata-categories"
+  ],
+  "exchanges": [
+    {
+      "expected": {
+        "headers": {
+          "Link": {
+            "includesLinkRel": {
+              "rel": "linkset"
+            }
+          }
+        },
+        "status": 200
+      },
+      "request": {
+        "method": "GET",
+        "target": "https://storage.example/alice/notes/a.txt"
+      }
+    },
+    {
+      "expected": {
+        "headers": {
+          "ETag": {
+            "present": true
+          }
+        },
+        "status": 200
+      },
+      "request": {
+        "method": "GET",
+        "target": "${response[0].link(linkset)}"
+      }
+    },
+    {
+      "expected": {
+        "statusOneOf": [
+          200,
+          204
+        ]
+      },
+      "request": {
+        "body": "{\"linkset\":[{\"anchor\":\"https://storage.example/alice/notes/a.txt\",\"describedby\":[{\"href\":\"https://storage.example/alice/notes/a-meta.ttl\"}]}]}",
+        "headers": {
+          "Content-Type": "application/merge-patch+json",
+          "If-Match": "${response[1].header.ETag}"
+        },
+        "method": "PATCH",
+        "target": "${response[0].link(linkset)}"
+      }
+    },
+    {
+      "expected": {
+        "body": {
+          "jsonContains": {
+            "linkset": [
+              {
+                "anchor": "https://storage.example/alice/notes/a.txt",
+                "describedby": [
+                  {
+                    "href": "https://storage.example/alice/notes/a-meta.ttl"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "status": 200
+      },
+      "request": {
+        "method": "GET",
+        "target": "${response[0].link(linkset)}"
+      }
+    }
+  ],
+  "expected": {
+    "asserts": [
+      {
+        "kind": "differ",
+        "refs": [
+          "response[1].header.ETag",
+          "response[3].header.ETag"
+        ]
+      }
+    ]
+  },
+  "id": "metadata/linkset-merge-patch-updates-user-links",
+  "input": {
+    "state": {
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "alpha",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#metadata-updates (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "a conditional merge patch adds a user-managed link and rotates the linkset ETag"
+}

@@ -1,0 +1,26 @@
+{
+  "clauses": [
+    "core#suite-webauthn",
+    "core#credential-model"
+  ],
+  "expected": {
+    "credentialId": "amx3cy12ZWN0b3ItY3JlZGVudGlhbC0wMQ",
+    "ok": true,
+    "version": 1
+  },
+  "id": "auth/webauthn-bundle-decode-ok",
+  "input": {
+    "token": "bundle.b64u"
+  },
+  "level": "MUST",
+  "notes": "Structural decode only — the fail-closed boundary an AS crosses before any cryptography. The fixture is a deterministic AuthenticationResponseJSON (no live authenticator); its signature bytes are arbitrary because the decode surface does not verify them.",
+  "operation": "decode-webauthn-assertion-bundle",
+  "preconditions": {
+    "features": [
+      "suite-webauthn"
+    ]
+  },
+  "source": "lws-spec@59da847 core#suite-webauthn + solid-webauthn-reauth@cf81736 src/protocol/codec.ts decodeAssertionBundle (spec-derived; the wire contract is the normative shape)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "a well-formed WebAuthn assertion bundle decodes: version 1 envelope, public-key credential, canonical base64url binary fields"
+}

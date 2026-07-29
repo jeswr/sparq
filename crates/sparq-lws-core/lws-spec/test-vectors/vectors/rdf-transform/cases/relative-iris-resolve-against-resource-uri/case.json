@@ -1,0 +1,21 @@
+{
+  "clauses": [
+    "rdf#round-trip"
+  ],
+  "expected": {
+    "isomorphicTo": "expected.nq",
+    "ok": true
+  },
+  "id": "rdf-transform/relative-iris-resolve-against-resource-uri",
+  "input": {
+    "base": "https://storage.example/alice/notes/rel.ttl",
+    "source": "source.ttl",
+    "sourceMediaType": "text/turtle",
+    "targetMediaType": "application/n-triples"
+  },
+  "level": "MUST",
+  "operation": "transform-representation",
+  "source": "lws-spec@59da847 rdf#round-trip (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/transform/rdf-1",
+  "title": "relative IRIs resolve against the resource URI as base, identically in every representation"
+}

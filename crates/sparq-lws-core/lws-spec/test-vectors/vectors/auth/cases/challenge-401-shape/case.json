@@ -1,0 +1,64 @@
+{
+  "clauses": [
+    "core#authz-discovery"
+  ],
+  "expected": {
+    "headers": {
+      "WWW-Authenticate": {
+        "authParams": {
+          "params": {
+            "error": {
+              "absent": true
+            },
+            "realm": {
+              "absoluteUri": true,
+              "present": true
+            },
+            "resource_metadata": {
+              "absoluteUri": true,
+              "present": true
+            }
+          },
+          "scheme": "Bearer"
+        }
+      }
+    },
+    "status": 401
+  },
+  "id": "auth/challenge-401-shape",
+  "input": {
+    "request": {
+      "agent": null,
+      "method": "GET",
+      "target": "https://storage.example/alice/notes/a.txt"
+    },
+    "state": {
+      "issuerJwks": {
+        "https://as.example": "keyring/as.jwks.json"
+      },
+      "now": "2026-07-01T12:00:00Z",
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "alpha",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/",
+      "trustedIssuers": [
+        "https://as.example"
+      ]
+    }
+  },
+  "level": "MUST",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#authz-discovery (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "a credential-less request draws 401 with resource_metadata + absolute-URI realm and NO error parameter"
+}

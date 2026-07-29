@@ -1,0 +1,99 @@
+{
+  "caseCount": 14,
+  "cases": [
+    {
+      "id": "dpop-sk/prm-carries-pop-session",
+      "path": "cases/prm-carries-pop-session/case.json"
+    },
+    {
+      "id": "dpop-sk/pop-required-covers-dpop-sk",
+      "path": "cases/pop-required-covers-dpop-sk/case.json"
+    },
+    {
+      "id": "dpop-sk/client-ignores-unknown-pop-profile",
+      "path": "cases/client-ignores-unknown-pop-profile/case.json"
+    },
+    {
+      "id": "dpop-sk/client-fail-closed-unsupported-binding",
+      "path": "cases/client-fail-closed-unsupported-binding/case.json"
+    },
+    {
+      "id": "dpop-sk/establish-ok-none-binding",
+      "path": "cases/establish-ok-none-binding/case.json"
+    },
+    {
+      "id": "dpop-sk/establish-requires-pop-bound-token",
+      "path": "cases/establish-requires-pop-bound-token/case.json"
+    },
+    {
+      "id": "dpop-sk/attest-ok",
+      "path": "cases/attest-ok/case.json"
+    },
+    {
+      "id": "dpop-sk/attest-bad-signature-standard-challenge",
+      "path": "cases/attest-bad-signature-standard-challenge/case.json"
+    },
+    {
+      "id": "dpop-sk/attest-cross-target-transplant-rejected",
+      "path": "cases/attest-cross-target-transplant-rejected/case.json"
+    },
+    {
+      "id": "dpop-sk/attest-token-substitution-rejected",
+      "path": "cases/attest-token-substitution-rejected/case.json"
+    },
+    {
+      "id": "dpop-sk/attest-replay-rejected",
+      "path": "cases/attest-replay-rejected/case.json"
+    },
+    {
+      "id": "dpop-sk/attest-forged-cannot-burn-counter",
+      "path": "cases/attest-forged-cannot-burn-counter/case.json"
+    },
+    {
+      "id": "dpop-sk/attest-expired-session-rechallenge",
+      "path": "cases/attest-expired-session-rechallenge/case.json"
+    },
+    {
+      "id": "dpop-sk/attest-stripped-signature-no-bearer-fallback",
+      "path": "cases/attest-stripped-signature-no-bearer-fallback/case.json"
+    }
+  ],
+  "clauseIndex": {
+    "core#authz-discovery": [
+      "dpop-sk/prm-carries-pop-session",
+      "dpop-sk/pop-required-covers-dpop-sk"
+    ],
+    "core#presentation-pop": [
+      "dpop-sk/prm-carries-pop-session",
+      "dpop-sk/pop-required-covers-dpop-sk",
+      "dpop-sk/client-ignores-unknown-pop-profile",
+      "dpop-sk/client-fail-closed-unsupported-binding",
+      "dpop-sk/establish-ok-none-binding",
+      "dpop-sk/establish-requires-pop-bound-token",
+      "dpop-sk/attest-ok",
+      "dpop-sk/attest-bad-signature-standard-challenge",
+      "dpop-sk/attest-cross-target-transplant-rejected",
+      "dpop-sk/attest-token-substitution-rejected",
+      "dpop-sk/attest-replay-rejected",
+      "dpop-sk/attest-forged-cannot-burn-counter",
+      "dpop-sk/attest-expired-session-rechallenge",
+      "dpop-sk/attest-stripped-signature-no-bearer-fallback"
+    ],
+    "core#rs-validation": [
+      "dpop-sk/establish-ok-none-binding",
+      "dpop-sk/establish-requires-pop-bound-token",
+      "dpop-sk/attest-ok",
+      "dpop-sk/attest-bad-signature-standard-challenge",
+      "dpop-sk/attest-cross-target-transplant-rejected",
+      "dpop-sk/attest-token-substitution-rejected",
+      "dpop-sk/attest-replay-rejected",
+      "dpop-sk/attest-forged-cannot-burn-counter",
+      "dpop-sk/attest-expired-session-rechallenge",
+      "dpop-sk/attest-stripped-signature-no-bearer-fallback"
+    ]
+  },
+  "description": "The DPoP-SK proof-of-possession presentation profile over the JLWS auth surface (cb=none flavour): RFC 9728 pop_session advertisement beside jlws_storage_description, the single dpop_bound_access_tokens_required member covering both PoP profiles, fail-closed client negotiation, session establishment from a DPoP-bound token (and refusal for an unbound one), and per-request RFC 9421 hmac-sha256 attestation with RFC 4303 verify-then-mark anti-replay — accept, tamper, cross-target transplant, token substitution, replay, forged-traffic window integrity, session expiry, and no-bearer-fallback.",
+  "schemaVersion": 1,
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "suite": "dpop-sk"
+}

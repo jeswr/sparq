@@ -1,0 +1,20 @@
+{
+  "clauses": [
+    "core#client-rules",
+    "core#authz-discovery"
+  ],
+  "expected": {
+    "ok": false
+  },
+  "id": "auth/realm-segment-prefix-trap-rejected",
+  "input": {
+    "realm": "https://storage.example/alice",
+    "requestUri": "https://storage.example/aliceevil/notes/a.txt"
+  },
+  "level": "MUST",
+  "notes": "Logical containment is normatively defined (rs-validation) over parsed, normalized URIs: same origin plus complete /-delimited path-segment-boundary ancestry — never raw string prefixing. \"https://storage.example/alice\" is a string prefix of \"https://storage.example/aliceevil/…\" but does not logically contain it.",
+  "operation": "verify-realm-containment",
+  "source": "lws-spec@59da847 core#client-rules (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "realm containment is logical (path-segment) containment, not naive string prefixing"
+}

@@ -1,0 +1,84 @@
+{
+  "clauses": [
+    "core#presentation-pop",
+    "core#rs-validation"
+  ],
+  "expected": {
+    "headers": {
+      "WWW-Authenticate": {
+        "authParams": {
+          "params": {},
+          "scheme": "DPoP"
+        }
+      }
+    },
+    "status": 401
+  },
+  "id": "dpop-sk/attest-token-substitution-rejected",
+  "input": {
+    "request": {
+      "headers": {
+        "Authorization": "DPoP ${file:keyring/at-sk-other.jwt}",
+        "Signature": "sig=:N/9Y/+4zGdTRHFGXcpKzcl747oR8mL2zzyG2m2xv+sY=:",
+        "Signature-Input": "sig=(\"@method\" \"@target-uri\" \"authorization\");created=1782907200;keyid=\"AAECAwQFBgcICQoLDA0ODw\";alg=\"hmac-sha256\";nonce=\"1\";tag=\"dpop-sk\""
+      },
+      "method": "GET",
+      "target": "https://storage.example/alice/notes/a.txt"
+    },
+    "state": {
+      "issuerJwks": {
+        "https://as.example": "keyring/as.jwks.json"
+      },
+      "now": "2026-07-01T12:00:00Z",
+      "popProfiles": [
+        "DPoP-SK"
+      ],
+      "popSession": {
+        "algs": [
+          "hmac-sha256"
+        ],
+        "channelBindings": [
+          "none"
+        ],
+        "endpoint": "https://storage.example/alice/.pop/session",
+        "profile": "https://w3id.org/jeswr/dpop-sk/v1"
+      },
+      "popSkSessions": [
+        "keyring/session-valid.json"
+      ],
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "alpha",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        },
+        "https://storage.example/alice/notes/b.txt": {
+          "content": "beta",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/",
+      "trustedIssuers": [
+        "https://as.example"
+      ]
+    }
+  },
+  "level": "MUST",
+  "notes": "The signature is computed correctly under the session key over the presented request (including its Authorization value), but SHA-256 of the presented token differs from the session's token_hash — the ath-equivalent check (step 4) rejects before any window mutation.",
+  "operation": "http-exchange",
+  "preconditions": {
+    "features": [
+      "pop-profile-dpop-sk"
+    ]
+  },
+  "source": "lws-spec@59da847 core#presentation-pop + dpop-sk-spec@f485855 #attestation-verification (step 4; adversarial review A9) (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "a session cannot be ridden with a different token: a valid attestation presenting another (equally valid, cnf-bound) token fails the token-binding check"
+}

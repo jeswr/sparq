@@ -1,0 +1,29 @@
+{
+  "clauses": [
+    "core#rs-validation"
+  ],
+  "expected": {
+    "accept": false,
+    "errorCode": "AUDIENCE_MISMATCH"
+  },
+  "id": "auth/token-aud-segment-prefix-trap-rejected",
+  "input": {
+    "issuerJwks": {
+      "https://as.example": "keyring/as.jwks.json",
+      "https://rogue-as.example": "keyring/rogue-as.jwks.json"
+    },
+    "maxClockSkewSeconds": 60,
+    "now": "2026-07-01T12:00:00Z",
+    "targetResource": "https://storage.example/aliceevil/x.txt",
+    "token": "keyring/at-aud-segment-trap.jwt",
+    "trustedIssuers": [
+      "https://as.example"
+    ]
+  },
+  "level": "MUST",
+  "notes": "Normative rule (rs-validation): logical containment is evaluated over parsed, normalized URIs (RFC 3986 §6) — same origin, and the audience path equal to or an ancestor of the target path on complete /-delimited segment boundaries; a raw prefix comparison would authorize sibling resources. aud \"https://storage.example/alice\" is a string prefix of \"https://storage.example/aliceevil/x.txt\" but does not logically contain it.",
+  "operation": "validate-access-token",
+  "source": "lws-spec@59da847 core#rs-validation (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "audience containment is logical (path-segment) containment: a string-prefix aud does not contain a sibling storage"
+}

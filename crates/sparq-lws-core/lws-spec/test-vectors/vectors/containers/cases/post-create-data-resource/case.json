@@ -1,0 +1,75 @@
+{
+  "clauses": [
+    "core#http-create-post",
+    "core#path-alignment"
+  ],
+  "exchanges": [
+    {
+      "expected": {
+        "headers": {
+          "Link": {
+            "includesLinkRel": {
+              "rel": "up",
+              "target": "https://storage.example/alice/notes/"
+            }
+          },
+          "Location": {
+            "present": true,
+            "startsWith": "https://storage.example/alice/notes/"
+          }
+        },
+        "status": 201
+      },
+      "request": {
+        "body": "posted content",
+        "headers": {
+          "Content-Type": "text/plain",
+          "Slug": "fresh"
+        },
+        "method": "POST",
+        "target": "https://storage.example/alice/notes/"
+      }
+    },
+    {
+      "expected": {
+        "body": {
+          "byteEquals": "posted content"
+        },
+        "status": 200
+      },
+      "request": {
+        "method": "GET",
+        "target": "${response[0].header.Location}"
+      }
+    }
+  ],
+  "id": "containers/post-create-data-resource",
+  "input": {
+    "state": {
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "alpha",
+          "mediaType": "text/plain",
+          "modified": "2026-06-24T12:00:00Z",
+          "type": "DataResource"
+        },
+        "https://storage.example/alice/notes/archive/": {
+          "modified": "2026-06-20T09:00:00Z",
+          "type": "Container"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#http-create-post (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "POST to a container creates a data resource: 201, server-assigned path-aligned Location, retrievable content"
+}

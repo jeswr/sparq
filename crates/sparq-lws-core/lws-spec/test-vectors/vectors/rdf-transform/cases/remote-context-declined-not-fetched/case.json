@@ -1,0 +1,24 @@
+{
+  "clauses": [
+    "rdf#round-trip",
+    "rdf#security-privacy"
+  ],
+  "expected": {
+    "errorCode": "REMOTE_CONTEXT_DECLINED",
+    "ok": false
+  },
+  "id": "rdf-transform/remote-context-declined-not-fetched",
+  "input": {
+    "allowlistedContexts": [],
+    "base": "https://storage.example/alice/notes/remote-ctx.jsonld",
+    "source": "source.jsonld",
+    "sourceMediaType": "application/ld+json",
+    "targetMediaType": "text/turtle"
+  },
+  "level": "MUST",
+  "notes": "A compacted source cannot be interpreted as an RDF graph without resolving its context, and a remote-context fetch on attacker-supplied content is an SSRF primitive: the server declines the transformation (at the HTTP binding: 406 + problem details, as for an unparseable source). The no-fetch half is only fully observable with an instrumented network layer (GAPS.md); this vector pins the decline.",
+  "operation": "transform-representation",
+  "source": "lws-spec@59da847 rdf#round-trip (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/transform/rdf-1",
+  "title": "a compacted JSON-LD source declaring a non-allowlisted remote @context MUST be declined — never resolved with a network fetch"
+}

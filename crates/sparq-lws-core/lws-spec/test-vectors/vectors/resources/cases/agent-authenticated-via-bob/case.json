@@ -1,0 +1,75 @@
+{
+  "clauses": [
+    "core#rs-validation",
+    "core#oracle-freedom"
+  ],
+  "exchanges": [
+    {
+      "expected": {
+        "body": {
+          "byteEquals": "abcdefghijklmnopqrstuvwxyz"
+        },
+        "status": 200
+      },
+      "request": {
+        "agent": "https://id.example/bob",
+        "method": "GET",
+        "target": "https://storage.example/alice/notes/a.txt"
+      }
+    },
+    {
+      "expected": {
+        "status": 403
+      },
+      "request": {
+        "agent": "https://id.example/bob",
+        "body": "bob tries to write",
+        "headers": {
+          "Content-Type": "text/plain",
+          "If-Match": "${response[0].header.ETag}"
+        },
+        "method": "PUT",
+        "target": "https://storage.example/alice/notes/a.txt"
+      }
+    }
+  ],
+  "expected": {
+    "stateAfter": {
+      "bytesUnchanged": [
+        "https://storage.example/alice/notes/a.txt"
+      ]
+    }
+  },
+  "id": "resources/agent-authenticated-via-bob",
+  "input": {
+    "state": {
+      "access": {
+        "https://id.example/bob": {
+          "https://storage.example/alice/notes/a.txt": [
+            "read"
+          ]
+        }
+      },
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "abcdefghijklmnopqrstuvwxyz",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "notes": "Establishes the state.access seam every authorization-sensitive case builds on: bob holds read (only) on a.txt. The write attempt draws 403 (agent has SOME access to the resource, so existence is not hidden).",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#rs-validation (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "an authenticated agent with read access reads; the same agent gets no write without a write grant"
+}

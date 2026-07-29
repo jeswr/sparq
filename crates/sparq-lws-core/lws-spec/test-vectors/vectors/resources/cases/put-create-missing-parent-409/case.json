@@ -1,0 +1,50 @@
+{
+  "clauses": [
+    "core#http-create-put"
+  ],
+  "expected": {
+    "problem": {
+      "type": "https://w3id.org/jeswr/lws/problems/missing-parent"
+    },
+    "stateAfter": {
+      "notExists": [
+        "https://storage.example/alice/no-such-dir/",
+        "https://storage.example/alice/no-such-dir/new.txt"
+      ]
+    },
+    "status": 409
+  },
+  "id": "resources/put-create-missing-parent-409",
+  "input": {
+    "request": {
+      "body": "x",
+      "headers": {
+        "Content-Type": "text/plain",
+        "If-None-Match": "*"
+      },
+      "method": "PUT",
+      "target": "https://storage.example/alice/no-such-dir/new.txt"
+    },
+    "state": {
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "abcdefghijklmnopqrstuvwxyz",
+          "mediaType": "text/plain",
+          "type": "DataResource"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#http-create-put (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "PUT-create under a missing parent container: 409 with problem type missing-parent (no auto-created intermediates)"
+}

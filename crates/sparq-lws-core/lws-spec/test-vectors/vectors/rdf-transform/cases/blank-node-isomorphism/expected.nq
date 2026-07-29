@@ -1,0 +1,3 @@
+<https://storage.example/alice/notes/addr.ttl#me> <http://schema.org/address> _:b0 .
+_:b0 <http://schema.org/streetAddress> "1 Example Way" .
+_:b0 <http://schema.org/addressLocality> "Oxford" .

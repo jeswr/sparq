@@ -1,0 +1,71 @@
+{
+  "clauses": [
+    "core#discovery-model"
+  ],
+  "expected": {
+    "errorCode": "SERVICE_SELF_MISSING",
+    "ok": false
+  },
+  "id": "discovery/storage-description-missing-self-service",
+  "input": {
+    "document": {
+      "@context": [
+        "https://w3id.org/jeswr/lws/v1",
+        "https://www.w3.org/ns/cid/v1"
+      ],
+      "capability": [
+        {
+          "mediaType": {
+            "application/linkset+json": [
+              "application/merge-patch+json"
+            ]
+          },
+          "type": "PatchSupport"
+        },
+        {
+          "profile": "https://w3id.org/jeswr/lws/transform/rdf-1",
+          "source": "text/turtle",
+          "target": [
+            "application/ld+json",
+            "application/n-triples"
+          ],
+          "type": "ContentNegotiation"
+        },
+        {
+          "type": "RecursiveDelete"
+        }
+      ],
+      "conformsTo": [
+        "https://w3id.org/jeswr/lws/protocol/core/1.0",
+        "https://w3id.org/jeswr/lws/transform/rdf-1"
+      ],
+      "id": "https://storage.example/alice/",
+      "service": [
+        {
+          "serviceEndpoint": "https://storage.example/alice/notifications",
+          "subscriptionType": [
+            "WebhookSubscription",
+            "SseSubscription"
+          ],
+          "type": "NotificationService"
+        },
+        {
+          "conformsTo": "https://w3id.org/jeswr/lws/access-profile/odrl-1",
+          "serviceEndpoint": "https://storage.example/alice/.access/requests/",
+          "type": "AccessRequestService"
+        },
+        {
+          "conformsTo": "https://w3id.org/jeswr/lws/access-profile/odrl-1",
+          "serviceEndpoint": "https://storage.example/alice/.access/grants/",
+          "type": "AccessGrantService"
+        }
+      ],
+      "type": "Storage"
+    }
+  },
+  "level": "MUST",
+  "operation": "validate-storage-description",
+  "source": "lws-spec@59da847 core#discovery-model (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "a storage description whose service set lacks the StorageDescription self-entry is rejected"
+}

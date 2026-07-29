@@ -1,0 +1,111 @@
+{
+  "caseCount": 14,
+  "cases": [
+    {
+      "id": "containers/listing-shape",
+      "path": "cases/listing-shape/case.json"
+    },
+    {
+      "id": "containers/listing-conneg-identical-bytes",
+      "path": "cases/listing-conneg-identical-bytes/case.json"
+    },
+    {
+      "id": "containers/rel-up-on-non-root",
+      "path": "cases/rel-up-on-non-root/case.json"
+    },
+    {
+      "id": "containers/post-create-data-resource",
+      "path": "cases/post-create-data-resource/case.json"
+    },
+    {
+      "id": "containers/post-create-container-typed-link",
+      "path": "cases/post-create-container-typed-link/case.json"
+    },
+    {
+      "id": "containers/post-create-container-namespace-alias",
+      "path": "cases/post-create-container-namespace-alias/case.json"
+    },
+    {
+      "id": "containers/post-to-missing-container-404",
+      "path": "cases/post-to-missing-container-404/case.json"
+    },
+    {
+      "id": "containers/post-slug-conflict",
+      "path": "cases/post-slug-conflict/case.json"
+    },
+    {
+      "id": "containers/delete-nonempty-no-depth-409",
+      "path": "cases/delete-nonempty-no-depth-409/case.json"
+    },
+    {
+      "id": "containers/delete-depth-infinity-recursive",
+      "path": "cases/delete-depth-infinity-recursive/case.json"
+    },
+    {
+      "id": "containers/delete-rotates-parent-etag-and-membership",
+      "path": "cases/delete-rotates-parent-etag-and-membership/case.json"
+    },
+    {
+      "id": "containers/listing-excludes-inaccessible-members",
+      "path": "cases/listing-excludes-inaccessible-members/case.json"
+    },
+    {
+      "id": "containers/put-content-to-container-rejected",
+      "path": "cases/put-content-to-container-rejected/case.json"
+    },
+    {
+      "id": "containers/move-reparents-with-new-uri",
+      "path": "cases/move-reparents-with-new-uri/case.json"
+    }
+  ],
+  "clauseIndex": {
+    "core#container-media-type": [
+      "containers/listing-shape",
+      "containers/listing-conneg-identical-bytes"
+    ],
+    "core#container-properties": [
+      "containers/listing-shape"
+    ],
+    "core#container-vs-data": [
+      "containers/put-content-to-container-rejected"
+    ],
+    "core#containment": [
+      "containers/rel-up-on-non-root",
+      "containers/delete-rotates-parent-etag-and-membership"
+    ],
+    "core#http-create-post": [
+      "containers/post-create-data-resource",
+      "containers/post-create-container-typed-link",
+      "containers/post-create-container-namespace-alias",
+      "containers/post-to-missing-container-404",
+      "containers/post-slug-conflict"
+    ],
+    "core#http-delete": [
+      "containers/delete-nonempty-no-depth-409",
+      "containers/delete-depth-infinity-recursive",
+      "containers/delete-rotates-parent-etag-and-membership"
+    ],
+    "core#http-move": [
+      "containers/move-reparents-with-new-uri"
+    ],
+    "core#membership-authorization": [
+      "containers/listing-excludes-inaccessible-members"
+    ],
+    "core#metadata-categories": [
+      "containers/move-reparents-with-new-uri"
+    ],
+    "core#namespace": [
+      "containers/post-create-container-namespace-alias"
+    ],
+    "core#oracle-freedom": [
+      "containers/listing-excludes-inaccessible-members"
+    ],
+    "core#path-alignment": [
+      "containers/post-create-data-resource"
+    ]
+  },
+  "description": "Container listings as server-managed JSON-LD (flat items, totalItems, member descriptions), identical-bytes content negotiation across the JSON media types, rel=\"up\" containment links, POST/Slug creation with the namespace-alias rule, empty-vs-recursive DELETE with Depth: infinity, atomic membership maintenance, fail-closed listings, and the strict container-is-not-a-data-resource separation.",
+  "schemaVersion": 1,
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "suite": "containers"
+}

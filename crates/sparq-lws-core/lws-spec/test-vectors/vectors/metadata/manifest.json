@@ -1,0 +1,57 @@
+{
+  "caseCount": 7,
+  "cases": [
+    {
+      "id": "metadata/linkset-discoverable-and-served",
+      "path": "cases/linkset-discoverable-and-served/case.json"
+    },
+    {
+      "id": "metadata/linkset-advertises-accept-patch",
+      "path": "cases/linkset-advertises-accept-patch/case.json"
+    },
+    {
+      "id": "metadata/linkset-merge-patch-updates-user-links",
+      "path": "cases/linkset-merge-patch-updates-user-links/case.json"
+    },
+    {
+      "id": "metadata/linkset-patch-without-if-match-428",
+      "path": "cases/linkset-patch-without-if-match-428/case.json"
+    },
+    {
+      "id": "metadata/linkset-patch-stale-if-match-412",
+      "path": "cases/linkset-patch-stale-if-match-412/case.json"
+    },
+    {
+      "id": "metadata/system-managed-links-immutable",
+      "path": "cases/system-managed-links-immutable/case.json"
+    },
+    {
+      "id": "metadata/delete-removes-linkset",
+      "path": "cases/delete-removes-linkset/case.json"
+    }
+  ],
+  "clauseIndex": {
+    "core#containment": [
+      "metadata/system-managed-links-immutable"
+    ],
+    "core#metadata": [
+      "metadata/linkset-discoverable-and-served",
+      "metadata/delete-removes-linkset"
+    ],
+    "core#metadata-categories": [
+      "metadata/linkset-merge-patch-updates-user-links",
+      "metadata/system-managed-links-immutable"
+    ],
+    "core#metadata-updates": [
+      "metadata/linkset-advertises-accept-patch",
+      "metadata/linkset-merge-patch-updates-user-links",
+      "metadata/linkset-patch-without-if-match-428",
+      "metadata/linkset-patch-stale-if-match-412",
+      "metadata/system-managed-links-immutable"
+    ]
+  },
+  "description": "Linkset metadata resources per RFC 9264: discovery via rel=\"linkset\", application/linkset+json availability with ETags, REQUIRED JSON merge-patch support advertised in Accept-Patch, the 428/412 strict precondition discipline, immutability of system-managed links, and linkset deletion alongside its resource.",
+  "schemaVersion": 1,
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "suite": "metadata"
+}

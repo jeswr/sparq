@@ -1,0 +1,68 @@
+{
+  "clauses": [
+    "core#container-properties",
+    "core#container-media-type"
+  ],
+  "expected": {
+    "body": {
+      "jsonContains": {
+        "id": "https://storage.example/alice/notes/",
+        "items": [
+          {
+            "id": "https://storage.example/alice/notes/a.txt",
+            "mediaType": "text/plain",
+            "type": "DataResource"
+          },
+          {
+            "id": "https://storage.example/alice/notes/archive/",
+            "type": "Container"
+          }
+        ],
+        "totalItems": 2,
+        "type": "Container"
+      }
+    },
+    "headers": {
+      "Content-Type": {
+        "mediaType": "application/ld+json"
+      },
+      "ETag": {
+        "present": true
+      }
+    },
+    "status": 200
+  },
+  "id": "containers/listing-shape",
+  "input": {
+    "request": {
+      "method": "GET",
+      "target": "https://storage.example/alice/notes/"
+    },
+    "state": {
+      "resources": {
+        "https://storage.example/alice/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/": {
+          "type": "Container"
+        },
+        "https://storage.example/alice/notes/a.txt": {
+          "content": "alpha",
+          "mediaType": "text/plain",
+          "modified": "2026-06-24T12:00:00Z",
+          "type": "DataResource"
+        },
+        "https://storage.example/alice/notes/archive/": {
+          "modified": "2026-06-20T09:00:00Z",
+          "type": "Container"
+        }
+      },
+      "storageRoot": "https://storage.example/alice/"
+    }
+  },
+  "level": "MUST",
+  "operation": "http-exchange",
+  "source": "lws-spec@59da847 core#container-properties (spec-derived; no reference implementation yet)",
+  "spec": "https://w3id.org/jeswr/lws/protocol/core/1.0",
+  "title": "GET on a container returns the server-managed JSON-LD listing (id, type, totalItems, items with member descriptions)"
+}
