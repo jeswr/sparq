@@ -2,7 +2,7 @@
 //
 // Covers: qErrorSeverity bucketing (the heat thresholds), maxQError / planSummary
 // derivation, hotOperatorPath (jump-to-hot, incl. the honest "no measured time → no hot
-// operator" case), and the honest formatters (0 wasm nanos renders as unmeasured "—",
+// operator" case), and the honest formatters (0/sub-resolution nanos render as “—”,
 // never "0 ns"). The rendering itself is covered by the Playwright mocked-IPC spec
 // (e2e-playwright/specs/plan-explorer.web.spec.ts).
 //
@@ -111,9 +111,9 @@ test("hotOperatorPath – the largest measured nanos wins (a child, not the root
   assert.deepEqual(hotOperatorPath(t2), [1, 0]);
 });
 
-test("hotOperatorPath – no measured time (dry run / wasm zeros) → null, no fake hot op", () => {
+test("hotOperatorPath – no positive time (dry run / sub-resolution zeros) → null", () => {
   assert.equal(hotOperatorPath(node({ operator: "BGP" })), null);
-  // A wasm ANALYZE: every node reads 0 nanos — unmeasured, so no hot operator.
+  // A host timer can report 0 for work below its resolution, so there is no honest hot operator.
   const zeros: PlanNode = node({
     operator: "root",
     nanos: 0,
@@ -134,7 +134,7 @@ test("planNodeId – stable row ids from the child-index path", () => {
 
 test("formatNanos – 0/null render as unmeasured '—', real nanos scale units", () => {
   assert.equal(formatNanos(null), "—");
-  assert.equal(formatNanos(0), "—"); // wasm32 reads 0 = unmeasured, NOT "0 ns"
+  assert.equal(formatNanos(0), "—"); // 0 is sub-resolution/unmeasured, NOT "0 ns"
   assert.equal(formatNanos(999), "999 ns");
   assert.equal(formatNanos(1_500), "1.5 µs");
   assert.equal(formatNanos(2_500_000), "2.5 ms");

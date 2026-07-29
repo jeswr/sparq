@@ -3,8 +3,8 @@
 // Everything a rendered operator row derives from the typed EXPLAIN tree (the sq-jbqh4
 // `PlanNode` schema contract, `@sparq/client`) lives here so it is unit-testable with the
 // gui/app node test runner: q-error severity bucketing (the heat scale), the hot-operator
-// path (jump-to-hot + auto-expand), honest number formatting (a wasm ANALYZE reads 0 wall
-// nanos — "unmeasured", never "free"), and the plan summary line. The React tree component
+// path (jump-to-hot + auto-expand), honest number formatting (0 wall nanos are
+// sub-resolution/unmeasured, never "free"), and the plan summary line. The React tree component
 // (components/workbench/plan-tree.tsx) is a thin renderer over these.
 
 import type { PlanNode } from "@sparq/client";
@@ -49,8 +49,8 @@ export function maxQError(node: PlanNode): number | null {
 /**
  * Path (child indexes from the root; `[]` = the root itself) to the operator with the
  * LARGEST wall nanos — the panel's "jump to hot operator" target. Returns `null` when no
- * node carries a positive `nanos` (a plan-only dry run, or a wasm ANALYZE where every
- * node reads 0): there is no honest hot operator to jump to then.
+ * node carries a positive `nanos` (a plan-only dry run, or work below the host timer's
+ * resolution): there is no honest hot operator to jump to then.
  */
 export function hotOperatorPath(node: PlanNode): number[] | null {
   let best: { path: number[]; nanos: number } | null = null;
@@ -75,8 +75,8 @@ export function planNodeId(path: number[]): string {
 
 /**
  * Format an operator's wall time. `null` (not analyzed) and `0` both render as `"—"`:
- * a 0 from the in-tab wasm engine means UNMEASURED (no monotonic clock on wasm32), and
- * claiming "0 ns" would misread as "free". Real (positive) nanos scale to the readable
+ * a 0 is sub-resolution or unmeasured, and claiming "0 ns" would misread as "free".
+ * Real (positive) nanos scale to the readable
  * unit. The panel-level source note explains WHY times may be absent.
  */
 export function formatNanos(nanos: number | null): string {

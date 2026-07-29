@@ -7,9 +7,10 @@
 // Three plan sources, one schema (the sq-jbqh4 `PlanNode` contract), rendered by the shared
 // `PlanTree`:
 //   * IN-TAB — the live workspace store's wasm engine (`run(query, {mode})`, the same canonical
-//     EXPLAIN path as the Query tool). Exact rows + q-error; wall times unmeasured on wasm32.
+//     EXPLAIN path as the Query tool). Exact rows + q-error; structured ANALYZE wall times use
+//     performance.now() at browser host-timer resolution.
 //   * NATIVE (desktop only) — the `explain_native` Tauri command over an N-Quads snapshot of the
-//     same store: the one source with REAL per-operator wall nanos.
+//     same store, with per-operator wall nanos from the native monotonic clock.
 //   * ENDPOINT — a remote sparq-server (`Accept: application/x-sparq-explain+json`), degrading
 //     HONESTLY to the text plan on a lean/older server (rendered as text, never a faked tree).
 //
@@ -184,7 +185,7 @@ export function PlanExplorer() {
             variant="outline"
             disabled={!engineReady || state.kind === "running"}
             onClick={() => void runLocal("analyze", false)}
-            title="Execute over the live in-tab store and trace per-operator rows + q-error (wall times unmeasured in wasm)"
+            title="Execute over the live in-tab store and trace per-operator rows, q-error, and wall time at browser timer resolution"
             data-plan-analyze
           >
             <Activity className="size-3.5" aria-hidden />

@@ -10,9 +10,10 @@
 // thresholds, hot path, honest formatting) lives in lib/plan-view.ts where it is
 // unit-tested; this file is the thin renderer.
 //
-// HONESTY: a wasm ANALYZE reads 0 wall nanos (no monotonic clock on wasm32) — those render
-// as "—" with an explicit note, never as "0 ns"; the tree itself is never synthesised from
-// the text plan (a text-only source renders as text, upstream).
+// [SONNET-4.6] sq-vx7ez — HONESTY: structured wasm ANALYZE measures wall time through the browser's
+// `performance.now()` clock. Browser timer precision may be coarsened, so a 0 still renders
+// as "—" (sub-resolution/unmeasured), never as "0 ns"; the tree itself is never synthesised
+// from the text plan (a text-only source renders as text, upstream).
 
 import * as React from "react";
 import { ChevronRight, Crosshair } from "lucide-react";
@@ -53,8 +54,8 @@ export interface PlanTreeProps {
   /** True for EXPLAIN ANALYZE (actual/nanos/qError populated); false for the dry run. */
   analyzed: boolean;
   /**
-   * Where the plan came from — drives the wall-time honesty note: `wasm` ANALYZE times
-   * read 0 (unmeasured), only `native` / `endpoint` measure real per-operator time.
+   * Where the plan came from — drives the wall-time honesty note: structured `wasm`
+   * ANALYZE uses the browser host timer, whose precision may be coarsened.
    */
   source?: "wasm" | "native" | "endpoint";
 }
@@ -97,8 +98,8 @@ export function PlanTree({ tree, analyzed, source }: PlanTreeProps) {
     });
   }, [hotPath]);
 
-  // A wasm ANALYZE cannot measure wall time — say so rather than showing a column of "—"
-  // with no explanation (and never render "0 ns").
+  // Structured wasm ANALYZE uses the browser host timer. Explain its resolution limits
+  // beside the measurements (and never render a sub-resolution 0 as "0 ns").
   const wasmTimeNote = analyzed && source === "wasm";
 
   return (
@@ -126,9 +127,9 @@ export function PlanTree({ tree, analyzed, source }: PlanTreeProps) {
       </div>
       {wasmTimeNote && (
         <p className="border-b border-border px-3 py-1.5 text-[11px] text-muted-foreground" data-plan-time-note>
-          Wall times are unmeasured in the in-tab engine (wasm has no monotonic clock) — row
-          counts and q-error are exact. Use the desktop app&apos;s native ANALYZE or a server
-          endpoint for real per-operator times.
+          Wall times are measured through the browser&apos;s performance.now() clock. Browser
+          timer precision may be coarsened, so sub-resolution operators display “—”; row counts
+          and q-error are exact.
         </p>
       )}
       <ul role="tree" aria-label="Query plan operators" className="py-1">

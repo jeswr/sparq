@@ -11,7 +11,7 @@
 //   [data-plan-explain] / [data-plan-analyze]           — in-tab source buttons
 //   [data-plan-result]            — result region (attr = idle|running|tree|text|error)
 //   [data-plan-tree] / [data-plan-node] / [data-plan-severity] — the operator tree
-//   [data-plan-time-note]         — the wasm "wall times unmeasured" honesty note
+//   [data-plan-time-note]         — the wasm host-timer resolution honesty note
 //   [data-plan-jump-hot]          — jump-to-hot-operator (only with measured times)
 //   [data-plan-endpoint-url] / [data-plan-endpoint-analyze]   — endpoint strip
 //   [data-plan-monitor] / [data-plan-monitor-row] / [data-plan-kill] — the monitor
@@ -102,8 +102,10 @@ test.describe("plan-explorer (web persona)", () => {
     await expect(
       page.locator('[data-plan-severity="warn"], [data-plan-severity="hot"]').first(),
     ).toBeVisible();
-    // HONESTY: the in-tab engine cannot measure wall time — the note says so.
-    await expect(page.locator("[data-plan-time-note]")).toBeVisible();
+    // HONESTY: structured ANALYZE measures through the browser host timer and states its limit.
+    await expect(page.locator("[data-plan-time-note]")).toContainText(
+      "performance.now() clock",
+    );
   });
 
   test("operator rows collapse and expand (navigable tree)", async ({ page }) => {

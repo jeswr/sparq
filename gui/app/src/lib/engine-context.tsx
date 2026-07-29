@@ -126,8 +126,8 @@ export type QueryOutcome =
   // [FABLE-5] sq-ixc3.19 — `tree` is the STRUCTURED plan (the sq-jbqh4 schema contract)
   // when the source can produce one; `plan` keeps the text form (the lean-bundle
   // fallback — exactly one of the two is populated, never a fabricated tree from text).
-  // `source` drives the wall-time honesty note: the in-tab wasm engine reads 0 nanos
-  // (no monotonic clock), only the desktop-native / endpoint sources measure real time.
+  // `source` drives the wall-time honesty note: structured in-tab wasm ANALYZE uses the
+  // browser's performance.now() clock, whose precision may be coarsened.
   | {
       kind: "explain";
       mode: "explain" | "analyze";
@@ -191,8 +191,9 @@ export interface RunOptions {
   /**
    * [FABLE-5] sq-ixc3.19 — with mode `"explain"`/`"analyze"`, run the explain over the
    * DESKTOP-NATIVE engine (the `explain_native` Tauri command) instead of the in-tab wasm
-   * engine: the only source that measures REAL per-operator wall nanos (wasm reads 0 — no
-   * monotonic clock). Snapshot semantics match federation (`query_service`): the whole
+   * engine. Structured in-tab wasm ANALYZE also measures per-operator wall nanos through
+   * performance.now(), at the browser host timer's resolution. Snapshot semantics match
+   * federation (`query_service`): the whole
    * (possibly reasoned) target store crosses as N-Quads. Web builds degrade to a clear
    * error, never a silent wasm fallback mislabelled as native. Ignored for mode `"run"`.
    */
@@ -1299,10 +1300,11 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
           //
           // [FABLE-5] sq-ixc3.19 — three-way source selection for the plan explorer:
           //   * `native` (desktop only): the `explain_native` Tauri command over an N-Quads
-          //     snapshot of the SAME target store (federation's snapshot semantics) — the one
-          //     source with REAL per-operator wall nanos.
+          //     snapshot of the SAME target store (federation's snapshot semantics), using
+          //     the native monotonic clock.
           //   * structured wasm (`explainPlanJson` / `explainPlanAnalyzeJson`, present in the
-          //     published bundle): the typed tree; exact rows + q-error, nanos read 0 on wasm32.
+          //     published bundle): the typed tree; exact rows + q-error, and per-operator wall
+          //     nanos measured through performance.now() at the browser host timer's resolution.
           //     For ANALYZE exactly ONE binding runs — the text and JSON analyze forms would
           //     each execute the query, so calling both would double the measured work.
           //   * text (a lean bundle without the explain-json feature): today's `<pre>` plan.
@@ -1318,7 +1320,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
               outcome = {
                 kind: "error",
                 message:
-                  "Native EXPLAIN runs only in the desktop app — the hosted web build has no native engine. The in-tab EXPLAIN/ANALYZE still works (row counts and q-error are exact; wall times are unmeasured).",
+                  "Native EXPLAIN runs only in the desktop app — the hosted web build has no native engine. Structured in-tab EXPLAIN/ANALYZE still works (row counts and q-error are exact; wall times use performance.now() at browser timer resolution).",
               };
             } else {
               outcome = { kind: "explain", mode, plan: "", tree: parsePlanJson(json), source: "native" };

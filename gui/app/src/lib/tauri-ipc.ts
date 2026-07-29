@@ -182,8 +182,9 @@ export async function nativeServiceQuery(
  * [FABLE-5] sq-ixc3.19 — structured EXPLAIN / EXPLAIN ANALYZE over the NATIVE engine
  * (`explain_native`, gui/src-tauri/src/explain.rs): `dataset` is the live workspace store's
  * whole-dataset N-Quads snapshot (the same wire as `query_service`), `analyze` executes
- * (SELECT/ASK only) and measures REAL per-operator wall nanos — the datum the in-tab wasm
- * engine fundamentally cannot provide (reads 0, no monotonic clock). Returns the typed plan
+ * (SELECT/ASK only) and measures per-operator wall nanos with the native monotonic clock.
+ * Structured in-tab wasm ANALYZE measures them through performance.now() at browser timer
+ * resolution. Returns the typed plan
  * tree as camelCase JSON (the sq-jbqh4 schema contract, parse with `parsePlanJson`), or
  * `null` outside the desktop shell (the web target degrades honestly in the plan explorer).
  * Never dials: under the `federation` build the command pins the STRICT EMPTY egress

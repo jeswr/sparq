@@ -1,12 +1,13 @@
 // [FABLE-5] sq-ixc3.19 — native structured EXPLAIN / EXPLAIN ANALYZE for the plan explorer.
 //
 // The GUI's query path runs in the in-tab WASM engine, whose `explainPlanAnalyzeJson`
-// binding is exact on row counts and q-error but reads **0 wall nanos** on wasm32 (no
-// monotonic clock). This module is the second deliberate, reviewed native query surface
+// binding is exact on row counts and q-error and measures wall time through the browser's
+// performance.now() clock at host-timer resolution. This module is the second deliberate,
+// reviewed native query surface
 // (after `federation::query_service`, see the lib.rs note on the removed pre-wired
-// commands): exactly ONE command, `explain_native`, scoped to the one job the webview
-// cannot do itself — measure REAL per-operator wall time by running the analyze over a
-// native snapshot of the live workspace store. It reuses `query_service`'s snapshot wire
+// commands): exactly ONE command, `explain_native`, scoped to running the analyze over a
+// native snapshot of the live workspace store with a native monotonic clock. It reuses
+// `query_service`'s snapshot wire
 // pattern (the whole dataset as N-Quads, the same format the native loader returns) and
 // returns `sparq-engine`'s typed plan tree (`explain_json::PlanNode`, sq-u4lgr/#902)
 // serialised as camelCase JSON — the sq-jbqh4 schema contract, byte-identical to what the
@@ -103,8 +104,8 @@ mod tests {
         assert!(json.contains("\"actual\":null"), "{json}");
     }
 
-    /// ANALYZE executes natively: exact row counts AND a real (non-null) wall-nanos
-    /// field — the datum the wasm path fundamentally cannot provide (reads 0 there).
+    /// ANALYZE executes natively: exact row counts and a wall-nanos field measured by
+    /// the native monotonic clock.
     #[test]
     fn analyze_fills_actual_rows_and_wall_nanos() {
         let json = run_explain_native(
