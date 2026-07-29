@@ -21,6 +21,14 @@ the `research/zk-*-audit.md` records and are unchanged by this ledger.
 Columns: `Issue` = the steering issue that captured it · `Evidence` = the merged PR (and,
 where relevant, the design record) · GitHub auto-links `#NNNN`.
 
+**Separate estate — the imported LWS server.** `crates/sparq-lws-core` was imported from
+another repository and brought its own, independently-numbered `decisions/` tree with it.
+Those are **not** proceed-and-document calls made here, so they are not rows in this table;
+their durable in-repo home is
+[`research/lws-design-records.md`](../../research/lws-design-records.md). Read that record
+before interpreting any bare `decisions/NNNN` citation inside `crates/sparq-lws-core/**` —
+its §2 documents a genuine number collision between two upstream ADR trees.
+
 ## Reasoner (OWL RL / EL / QL / DL, RIF, N3)
 
 | Issue | Date | Decision | Rationale | Evidence | Status |

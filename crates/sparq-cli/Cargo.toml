@@ -142,6 +142,17 @@ diff = []
 # No new third-party dependency: sparq-reason-el rides sparq-core + oxrdf + rustc-hash, all
 # already in the CLI's tree. Enable with `cargo build -p sparq-cli --features el`.
 el = ["dep:sparq-reason-el", "sparq-reason-el/rbox"]
+# [SONNET-4.6] (sq-p4zci, design record research/stratified-datalog-rules.md §6 item 6)
+# `datalog` — the STRATIFIED DATALOG surface: `--reason datalog:<rules.dlog>` on `query` and
+# `reason <f> <fmt> datalog:<rules.dlog>`. Forwards the already-present `sparq-reason` dep's
+# opt-in `datalog` feature (the parser + stratification checker + per-stratum evaluator), so
+# there is NO new dependency — sparq-reason is already a plain dep, and the feature pulls only
+# the `sparq-substrate` rows+join slices it already builds on. OFF by default: the default CLI
+# build carries no Datalog code, and `--reason datalog:…` is a hard exit-2 error naming this
+# feature. There is deliberately no fall-back profile — RDFS/OWL-RL are monotone and cannot
+# express negation as failure or aggregation, so downgrading would silently change semantics.
+# Enable with `cargo build -p sparq-cli --features datalog`.
+datalog = ["sparq-reason/datalog"]
 
 [dependencies]
 # `version` alongside `path` on the sparq-* deps: cargo uses the path locally and the

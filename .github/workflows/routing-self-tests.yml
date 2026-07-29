@@ -67,7 +67,25 @@ on:
       # in settings.json or a workflow JS dispatch site without ever running this gate.
       - "scripts/tests/test_no_deprecated_models.py"
       - ".claude/settings.json"
+      # [OPUS-5] sq-sgu1.2: EVERY harness workflow script, not only the one carrying the
+      # canonical TIER table. test_no_deprecated_models.py::TestWorkflowJsDispatch scans them
+      # ALL for `agent({model: ...})` dispatch values, and test_workflow_dispatch_contract.py
+      # pins the schema-on-every-producing-stage / parse / durability contracts over the same
+      # set — so an edit to any of them must run this gate. Without these entries the guards
+      # scan files their own trigger cannot see, which is how a workflow dispatch site changes
+      # without the gate that guards it ever running.
+      #
+      # PR #4967 review: this is a DIRECTORY glob, not an enumeration of the files that happen to
+      # exist today. An enumeration cannot cover a workflow that does not exist yet — a newly
+      # added fifth script matches no filter, this lane never runs, and it merges unlinked,
+      # unschema'd or unparseable. Nor can the suite's own "every workflow is a path trigger"
+      # assertion catch that, since it only runs when this lane does.
+      - ".claude/workflows/*.js"
+      # Retained alongside the glob (redundant for CI, load-bearing for a guard):
+      # test_no_deprecated_models.py::test_routing_surfaces_are_path_triggers asserts this exact
+      # literal is a trigger on both events.
       - ".claude/workflows/fable-architect-drain.js"
+      - "scripts/tests/test_workflow_dispatch_contract.py"
       # [OPUS-5] the LABELS -> MODEL CHAIN surfaces (review of PR #4211). The `area:gui` carve-out
       # is decided in route-resolve.py from labels written by these two files, so the end-to-end
       # suite must re-run when either the role derivation or the label WRITE path changes. The
@@ -90,6 +108,14 @@ on:
       - "scripts/tests/test_start_here_render.py"
       - ".github/workflows/refresh-start-here.yml"
       - ".github/workflows/routing-self-tests.yml"
+      # [OPUS-5] sparq#5098 — the SELF-TEST WRITE GUARD's scan surface. It scans
+      # `scripts/**/*.py` for a self-test that can reach a live write (the shape that posted four
+      # real comments to #7/#8 from `--selftest`), so its trigger must be the same DIRECTORY GLOB
+      # rather than an enumeration: the offending file, `retriage-needs-user.py`, did not exist
+      # when this filter was written, and an enumeration cannot name a script that does not exist
+      # yet. That is the same reasoning already applied to `.claude/workflows/*.js` above. This
+      # lane is seconds-cheap and does no build, so widening it to every script is affordable.
+      - "scripts/**/*.py"
       # [OPUS-5] reg#677 — PR `area:` attribution. The scheduler partitions by
       # `area:<name>`; an unlabelled PR takes the serializing `__global__` partition
       # and defers EVERY issue, so a drift in the deriver, its declared table, or the
@@ -150,7 +176,25 @@ on:
       # in settings.json or a workflow JS dispatch site without ever running this gate.
       - "scripts/tests/test_no_deprecated_models.py"
       - ".claude/settings.json"
+      # [OPUS-5] sq-sgu1.2: EVERY harness workflow script, not only the one carrying the
+      # canonical TIER table. test_no_deprecated_models.py::TestWorkflowJsDispatch scans them
+      # ALL for `agent({model: ...})` dispatch values, and test_workflow_dispatch_contract.py
+      # pins the schema-on-every-producing-stage / parse / durability contracts over the same
+      # set — so an edit to any of them must run this gate. Without these entries the guards
+      # scan files their own trigger cannot see, which is how a workflow dispatch site changes
+      # without the gate that guards it ever running.
+      #
+      # PR #4967 review: this is a DIRECTORY glob, not an enumeration of the files that happen to
+      # exist today. An enumeration cannot cover a workflow that does not exist yet — a newly
+      # added fifth script matches no filter, this lane never runs, and it merges unlinked,
+      # unschema'd or unparseable. Nor can the suite's own "every workflow is a path trigger"
+      # assertion catch that, since it only runs when this lane does.
+      - ".claude/workflows/*.js"
+      # Retained alongside the glob (redundant for CI, load-bearing for a guard):
+      # test_no_deprecated_models.py::test_routing_surfaces_are_path_triggers asserts this exact
+      # literal is a trigger on both events.
       - ".claude/workflows/fable-architect-drain.js"
+      - "scripts/tests/test_workflow_dispatch_contract.py"
       # [OPUS-5] the LABELS -> MODEL CHAIN surfaces (review of PR #4211). The `area:gui` carve-out
       # is decided in route-resolve.py from labels written by these two files, so the end-to-end
       # suite must re-run when either the role derivation or the label WRITE path changes. The
@@ -173,6 +217,14 @@ on:
       - "scripts/tests/test_start_here_render.py"
       - ".github/workflows/refresh-start-here.yml"
       - ".github/workflows/routing-self-tests.yml"
+      # [OPUS-5] sparq#5098 — the SELF-TEST WRITE GUARD's scan surface. It scans
+      # `scripts/**/*.py` for a self-test that can reach a live write (the shape that posted four
+      # real comments to #7/#8 from `--selftest`), so its trigger must be the same DIRECTORY GLOB
+      # rather than an enumeration: the offending file, `retriage-needs-user.py`, did not exist
+      # when this filter was written, and an enumeration cannot name a script that does not exist
+      # yet. That is the same reasoning already applied to `.claude/workflows/*.js` above. This
+      # lane is seconds-cheap and does no build, so widening it to every script is affordable.
+      - "scripts/**/*.py"
       # [OPUS-5] reg#677 — PR `area:` attribution. The scheduler partitions by
       # `area:<name>`; an unlabelled PR takes the serializing `__global__` partition
       # and defers EVERY issue, so a drift in the deriver, its declared table, or the
@@ -215,6 +267,12 @@ jobs:
           # frontmatter. This suite also pins its OWN wiring in this workflow structurally
           # (parsed YAML, not substrings), so `if: false` on the job or the step reds it.
           python3 scripts/tests/test_no_deprecated_models.py
+          # [OPUS-5] sq-sgu1.2: the harness-workflow dispatch contract — every producing stage
+          # of every `.claude/workflows/*.js` carries a defined, closed schema (the
+          # schema-guard trap of research/fable-work-plan.md §6.3), every script still parses,
+          # and each is discoverable per the durability contract. Structural only: it reads the
+          # scripts, never runs or writes them (that surface is maintainer-applied).
+          python3 scripts/tests/test_workflow_dispatch_contract.py
           # [OPUS-5] reg#677: the PR `area:` deriver + its YAML seam. The suite is
           # invoked HERE and that invocation is itself pinned by
           # test_pr_area_labels.py::TestSelfTestIsActuallyInvoked — a suite nobody
@@ -225,6 +283,10 @@ jobs:
           # orchestration/start-here.toml (a malformed curated file must fail on ITS PR, not at the
           # next scheduled refresh of the maintainer's front door); the suite pins the drop /
           # fail-closed / truncation rules and refresh-start-here.yml's own wiring.
+          # [OPUS-5] sparq#5098: no `--self-test` anywhere under scripts/ may reach a live
+          # write. Static (AST) — it never imports or runs the files it scans. The suite also
+          # pins its OWN wiring here structurally, so `if: false` on this job or this step reds it.
+          python3 scripts/tests/test_selftest_never_writes.py
           python3 scripts/render-start-here.py --self-test
           python3 scripts/tests/test_start_here_render.py
 

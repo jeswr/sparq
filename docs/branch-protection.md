@@ -11,7 +11,8 @@ recreated.
 ## Protected branch
 
 - **`main`** — the only long-lived branch. All changes land via pull request; direct
-  pushes are disallowed (including for administrators — see "Other settings").
+  pushes are disallowed for non-administrators. Repository administrators can always
+  bypass the ruleset (see "Other settings"); the automated landing flow does not.
 
 ## Required status checks
 
@@ -231,6 +232,7 @@ no check-run there either — not a byte-identical copy of the PR check-set.)
 |---|---|---|
 | coverage ratchet (measure + engine split + aggregate) | `ci.yml` | never on drafts (merge_group + ready_for_review re-measure) |
 | benchmarks (deterministic ratchet + PR comparison/alert comments) | `bench.yml` | never on drafts |
+| `cargo-fuzz` corpus replay (nightly toolchain + a libFuzzer build of every `fuzz/fuzz_targets/` target) | `fuzz.yml` `fuzz` | kept iff the PR carries `ci-full`/`fuzz-full` (`fuzz-full` also selects the randomized budget, so a bare draft skip would neuter it); otherwise the `ready_for_review` run re-replays at full tier. `differential-smoke` — the wrong-answer gate in the same workflow — is deliberately NOT draft-skipped: a wrong-answer regression is review-relevant |
 | CodeQL analysis | `codeql.yml` | never on drafts (push-main + weekly schedule + merge_group + the ready_for_review run keep the `code_scanning` rule fed *when the workflow is enabled*; codeql.yml is byte-identical to `main` — its triggers, including merge_group, are untouched by this PR — but the workflow is currently operationally disabled (`disabled_manually`), so no CodeQL check-run is produced on any trigger today; open PR #3427 owns the successor policy) |
 | heavy recall shards (`heavy-diskann`/`heavy-hnsw`) | `ci.yml` `test` | never on drafts (same demotion mechanism as their merge_group demotion) |
 | wasm bundle build | `ci.yml` `wasm` | kept iff a wasm-bundle crate is in the affected closure (the existing lane-seed guard — unchanged on both tiers) |
@@ -423,9 +425,14 @@ un-draft moment.
 
 ## Other settings
 
-- **Do not allow bypassing the above** — the rules apply to administrators too. The live
-  ruleset has an **empty `bypass_actors` list** and reports `current_user_can_bypass:
-  never`, so the gate is uniform (no bypass actors, including the owner).
+- **Repository administrators can always bypass the ruleset.** The live ruleset's
+  `bypass_actors` list contains the repository-role actor (`actor_id: 5`,
+  `bypass_mode: always`). This is an explicit exception to uniform enforcement, not a
+  compensating control. The automated landing flow does not use the bypass: auto-merge
+  still enters the merge queue and waits for its required checks.
+- **Use the merge queue.** The live `merge_queue` rule groups with `ALLGREEN`, admits at
+  most 8 entries per merge, and gives required checks 60 minutes to report
+  (`check_response_timeout_minutes: 60`).
 - **Require conversation resolution before merging** (all PR review threads resolved —
   `required_review_thread_resolution: true`).
 
@@ -516,8 +523,9 @@ this document (procedure below).
   "no second human" values (`0` / `false` / `false`, see [§Required reviews](#required-reviews)),
   so those particular sub-signals do not earn points even though the *substantive*
   protections (no force-push, no deletion, squash-only linear history, conversation
-  resolution, CodeQL alert gate, no bypass actors, a required CI aggregator) are all
-  present and enforced.
+  resolution, CodeQL alert gate, a required CI aggregator, and merge-queue admission) are
+  present and enforced for the normal automated landing path. Repository administrators
+  retain the always-on bypass documented above.
 
 These are **inherent to the operating model**, not fixable code changes — consistent with
 the disposition recorded in `compliance/openssf/gap-register.md` (the Scorecard SARIF is no
@@ -531,7 +539,7 @@ alerts).
 | Independent human approving review | **GitHub Copilot code review on every PR** (`copilot_code_review`, `review_on_push: true`) — an automated, independent reviewer recorded on the PR. |
 | Code-owner gate | **CodeQL code-scanning gate** (`code_scanning` rule, `CodeQL`, `errors_and_warnings`) — blocks merge on new alerts; plus the SHA-pinned clippy/test/conformance gate aggregated by `ci-summary`. |
 | Review-thread accountability | **Conversation resolution required** (`required_review_thread_resolution: true`) — every Copilot/CodeQL thread must be resolved before merge. |
-| "Trusted committer only" | **No bypass actors** (`bypass_actors: []`, `current_user_can_bypass: never`) — the gate applies to the owner too; **squash-only** + **no force-push** + **no deletion** keep history linear and auditable. |
+| "Trusted committer only" | **No equivalent ruleset control.** Repository administrators can always bypass (`RepositoryRole`, `actor_id: 5`); the normal automated flow does not bypass and remains constrained by **merge-queue admission**, **squash-only** merges, **no force-push**, and **no deletion**. |
 
 The agent operating discipline (`AGENTS.md`) adds a *process* layer on top: changes land via
 PR (never direct push), and an out-of-band Codex/roborev review pass is run before arming a
@@ -552,7 +560,8 @@ gh api repos/jeswr/sparq/rulesets/<id> | python3 -m json.tool
 ```
 
 As verified on the date of this commit, the live `main` ruleset
-(`enforcement: active`, `bypass_actors: []`) carries exactly these rules, all of which match
+(`enforcement: active`) carries one always-on repository-administrator bypass actor
+(`actor_id: 5`, `actor_type: RepositoryRole`) and exactly these rules, all of which match
 the sections above:
 
 | Live rule (`type`) | Key parameters | Doc section |
@@ -564,6 +573,7 @@ the sections above:
 | `code_quality` | `severity: all` | Required reviews |
 | `code_scanning` | `CodeQL`, `alerts_threshold: errors_and_warnings`, `security_alerts_threshold: all` | Required reviews |
 | `copilot_code_review` | `review_on_push: true`, `review_draft_pull_requests: false` | Required reviews |
+| `merge_queue` | `grouping_strategy: ALLGREEN`, `max_entries_to_merge: 8`, `check_response_timeout_minutes: 60` | Other settings; Omnibus batching |
 
 If a future check finds drift (e.g. a rule added or a parameter changed), update **this
 table and the matching section above in the same commit** so the doc-of-record never lags
