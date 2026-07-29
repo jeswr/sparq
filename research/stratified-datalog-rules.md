@@ -108,8 +108,11 @@ slices, no new transitive crate):
   substitution evaluator (no kernels, no indexes, `i128` integer compare) that must
   agree with the engine on every fixture and on seed-randomised graphs (deterministic
   LCG). Rationale: an in-tree independent-implementation oracle is the house pattern
-  (`compiled_equivalence`, the Rust-vs-N3 ODRL differential); an EXTERNAL-engine
-  (Soufflé) differential arm is beaded (§6) rather than adding a CI dependency here.
+  (`compiled_equivalence`, the Rust-vs-N3 ODRL differential).
+- `souffle.rs` (test-only) — the **EXTERNAL-engine** differential arm (sq-xzb9p, §6.4):
+  translates the relational fragment into Soufflé Datalog and compares closures. Soufflé
+  is an external binary, never a cargo dependency, so the default build and the dependency
+  graph are untouched; the fixtures skip (loudly) when it is absent.
 
 Public API (5 items, each with a doctest + direct unit test): `parse_program`,
 `Program::n_rules`, `stratify`, `Stratification::n_strata`, `eval`.
@@ -158,8 +161,29 @@ Public API (5 items, each with a doctest + direct unit test): `parse_program`,
    (no persistent deletable index); the incrementality is delta-driven rule-firing work,
    measured by deterministic counters. FBF-style over-deletion limits await the sq-6tykl.4
    deletion-heavy benchmark (profile first).
-4. **External-engine differential arm** (sq-xzb9p) — the same fixtures run through Soufflé (or
-   crepe) in an optional CI lane; requires a cargo-vet/tooling decision.
+4. **External-engine differential arm** (sq-xzb9p) — SHIPPED, with a deliberately NARROW
+   scope. `datalog::souffle` (test-only) translates a `Program` into Soufflé Datalog and
+   compares closures over the same seed-randomised graphs the oracle arm uses; the optional
+   `datalog-souffle.yml` lane (heavy tier, never a PR check-run) installs Soufflé and runs it
+   with `SPARQ_DATALOG_SOUFFLE_REQUIRED=1` so a missing binary fails instead of skipping.
+   *Tooling decision:* **Soufflé as an EXTERNAL BINARY, not a cargo dependency** — so the arm
+   adds no crate and needs no cargo-vet audit at all (`crepe` would have been a new proc-macro
+   dep plus a shared attestation; this sidesteps that sequencing entirely).
+   *Why it is worth having on top of `oracle`:* the translation does NOT consult our
+   `stratify()` — it emits one relation per dependency node and lets Soufflé stratify the
+   program itself — so it checks BOTH directions (Soufflé must accept what we accept and
+   refuse what we refuse) and can catch a stratification bug an in-tree oracle structurally
+   cannot. The per-CLASS relation encoding is what makes Soufflé accept the class-granular
+   negation of §3, so that decision is now externally corroborated too.
+   *Honest scope:* the arm covers the RELATIONAL fragment only — constant-predicate atoms,
+   recursion, single-atom and grouped `NOT`, multi-atom heads. `AGGREGATE`/`FILTER` and
+   variable predicates/classes are OUT, and translating them is a loud error rather than a
+   silent partial comparison: their semantics are term-level and XSD-typed, so encoding them
+   into Soufflé's untyped-symbol domain would mean re-implementing the substrate numeric tower
+   inside the translator, at which point the "external reference" would be running largely on
+   our own code. Those paths keep the in-tree `oracle` differential. Extending the arm past
+   the relational fragment is NOT beaded — it should stay unbeaded unless someone first shows
+   a faithful encoding that does not import our numeric tower.
 5. **Fragment extensions** (sq-a7bmo) — SHIPPED: grouped `NOT` / `NOT EXISTS`,
    projected `COUNT(DISTINCT ?v)`, relational float/double FILTER, and variable
    predicates with conservative top-node stratification and incremental relevance.
