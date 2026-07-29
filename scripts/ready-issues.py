@@ -791,6 +791,26 @@ def unit_reservations(issues, source_links=None):
             if number in consumed:          # already reserved as part of its PR's unit
                 continue
             areas = _own_reservation(row)
+        elif not occupies_area(row):
+            # [OPUS-5] A PARK RELEASES THE WHOLE UNIT, NOT ONE HALF.
+            #
+            # `occupies_area` released the PR half (human park on the label alone; machine park
+            # against the `INERT_FIELD` proof) and the loop then re-held the SAME crate through
+            # the unit's source ISSUE, whose `status:in-progress-review` row has no park predicate
+            # of its own. The union rule that exists to stop a unit reserving twice was therefore
+            # re-acquiring exactly what the park had just released.
+            #
+            # MEASURED on the live board (2026-07-29, 1769 open issues / 94 open PRs, sparq's own
+            # engine): 39 `status:in-progress-review` issues, 39/39 with a linked open PR, 30 of
+            # those PRs parked (21 `needs:user`, 9 `review:parked`). 19 partition keys were held by
+            # NOTHING BUT the issue half of a unit whose PR was already released, with 114 ready
+            # candidates waiting behind them.
+            #
+            # The release is keyed on the PR's proof, never on the issue's own labels, so the
+            # documented asymmetry in `occupies_area` is preserved: an issue still never releases
+            # itself, and the moment the PR un-parks the next snapshot re-holds both halves. There
+            # is no remembered state.
+            areas = set()
         else:
             areas = set(_own_reservation(row))
             for _number, source in sources_of(number):
@@ -1010,6 +1030,28 @@ def _self_test():
           [[it["number"] for it in compute_ready(
               [pr(73 + i, ["area:sparq-store", label]), waiting], conflict_log=quiet)]
            for i, label in enumerate(sorted(PARKED_AREA_LABELS))], [[20], [20], [20]])
+    # [OPUS-5] WHOLE-UNIT PARK RELEASE. The seam had NO coverage before this: the change above was
+    # made and `--self-test` stayed green unchanged, which is the signature of an untested branch.
+    # The source issue declares a key its PR does NOT (measured: 39/94 = 41% of live pairs are not
+    # supersets), so a fixture where the PR declares the same key would pass for the wrong reason.
+    parked_unit = pr(90, ["needs:user"])
+    unit_source = iss(91, ["status:in-progress-review", "area:sparq-store"])
+    check("a parked PR releases its SOURCE ISSUE's areas too",
+          [it["number"] for it in compute_ready([parked_unit, unit_source, waiting],
+                                                conflict_log=quiet, source_links={90: {91}})], [20])
+    active_unit = pr(92, ["review:changes"])
+    check("a NON-parked PR's unit keeps both halves (negative control)",
+          compute_ready([active_unit, unit_source, waiting],
+                        conflict_log=quiet, source_links={92: {91}}), [])
+    # THE REACHABILITY PIN, and it is deliberately an assertion of the DEFECT rather than of the
+    # fix. `dispatch.yml:868` calls `compute_ready(ready_input)` positionally — no `source_links` —
+    # so in production no unit is ever formed and the release above CANNOT FIRE. Measured through
+    # the production call shape on the live board: frontier 1 -> 1 (+0) under both inert models,
+    # against 1 -> 11 / 1 -> 17 for the same snapshot through the local CLI shape. Until the
+    # orchestrator passes the pairing, the branch above is correct and unreachable; this line goes
+    # RED the moment that changes, which is the signal to re-measure the production frontier.
+    check("UNREACHABLE without source_links (production call shape) — see sparq#4819 follow-up",
+          compute_ready([parked_unit, unit_source, waiting], conflict_log=quiet), [])
     # [OPUS-5] sparq#4336 CONTAINMENT fixtures. The registry's dispatch.yml runs THIS --self-test,
     # so these are the assertions that gate the fleet's own copy of the key algebra.
     check("sub-crate key resolves to its crate", partition_path("sparq-server-http"),
