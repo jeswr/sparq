@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import copy
 import json
 import re
@@ -33,6 +34,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable
 
 
@@ -1465,6 +1467,48 @@ def unpark_satisfied(receipt: object, pull: ArmedPull, gate: str) -> bool:
     return False
 
 
+# The exact phrase that CLAIMS the park clears itself. Named once so the self-test can ask
+# the rendered comment whether the claim was made, rather than eyeballing an f-string.
+AUTO_UNPARK_PROMISE = "Un-parks automatically when:"
+
+
+def unpark_production_callers() -> set[str]:
+    """Names of the functions that actually CALL `unpark_satisfied`, minus the self-test.
+
+    Asked of the parse tree, not of the file's text. A containment check ("does
+    'unpark_satisfied' appear outside the self-test?") is vacuous for this guard class —
+    the identifier necessarily appears in its own definition, its docstring and this very
+    function — so it would pass while the evaluator remained dead. The AST question has
+    exactly one answer: for each `Call` to that name, which `FunctionDef` most closely
+    encloses it?
+
+    Returning names (not a bool) is deliberate: the assertion message can then say WHO wired
+    it, which is the difference between a failure a reader can act on and one they cannot.
+    """
+    tree = ast.parse(Path(__file__).resolve().read_text(encoding="utf-8"))
+    parents: dict[ast.AST, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+
+    callers: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+        if name != "unpark_satisfied":
+            continue
+        enclosing, cursor = "<module>", parents.get(node)
+        while cursor is not None:
+            if isinstance(cursor, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                enclosing = cursor.name
+                break
+            cursor = parents.get(cursor)
+        callers.add(enclosing)
+    return callers - {"stuck_self_test", "unpark_production_callers"}
+
+
 def stuck_comment(pull: ArmedPull, klass: str, gate: str, detail: str, now: int) -> str:
     """The one comment body: prose for the human, a receipt for the machine.
 
@@ -1478,7 +1522,9 @@ def stuck_comment(pull: ArmedPull, klass: str, gate: str, detail: str, now: int)
         f"**stuck-arm sweep — `{klass}`**\n\n"
         f"This PR was armed for auto-merge but {reason}\n\n"
         f"Observed: {detail}\n\n"
-        f"Un-parks automatically when: `{receipt['unpark_when']}`\n\n"
+        f"Un-park condition: `{receipt['unpark_when']}` — the named state that ends this "
+        f"park. It is evaluated by `unpark_satisfied`, which is NOT wired into this sweep, "
+        f"so clearing this park is a HUMAN action today (#5041).\n\n"
         f"_Posted by the `{PROGRAM}` stuck-arm phase because an armed PR that cannot merge "
         f"is otherwise invisible: it looks healthy, and it holds its `area:` partition "
         f"against the readiness frontier._\n\n"
@@ -2776,6 +2822,22 @@ def stuck_self_test() -> None:
                       GATE_SUCCESS, clock + 1)
     )
     assert parse_stuck_receipt(f"{first}\n\n{second}")["class"] == "blocked-threads"
+
+    # [OPUS-5] #5041. PROMISE vs IMPLEMENTATION. A park that ADVERTISES an exit it does not
+    # perform turns a transient cause into a permanent stall while reading as self-healing:
+    # #4847 carried "Un-parks automatically when: `gate-green`" while `unpark_satisfied` had
+    # no caller at all. The two must ship together, so this is an IFF in both directions —
+    # re-adding the claim without wiring the evaluator fails, and wiring the evaluator
+    # without telling anyone also fails.
+    rendered = stuck_comment(armed_pull(1), "stale", GATE_SUCCESS, "detail", clock)
+    promised = AUTO_UNPARK_PROMISE in rendered
+    wired = unpark_production_callers()
+    assert promised == bool(wired), (
+        "the automatic-un-park PROMISE and its IMPLEMENTATION must ship together: "
+        f"promise_rendered={promised} production_callers={sorted(wired) or 'NONE'}. "
+        "Either wire `unpark_satisfied` into the sweep, or do not claim the park clears "
+        "itself (see #5041)."
+    )
 
     print("rearm-sweeper stuck-arm self-test: PASS")
 
