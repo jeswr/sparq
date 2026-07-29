@@ -472,8 +472,14 @@ def _marker_present(body, marker):
     (`_ensure_markers`) and the checker (`verify_migration`) use — deliberately shared rather than
     written twice. If the checker were stricter than the writer it would report an edge as missing
     that a re-run of `--apply` then declines to write, i.e. a permanently red verify no repair can
-    clear."""
-    return marker in (body or "")
+    clear.
+
+    The trailing `(?![0-9])` is load-bearing, not defensive: a marker ends in an issue NUMBER, so a
+    plain substring test makes `Blocked-by: #2` present in a body that says `Blocked-by: #20`. Both
+    users read that wrong. The writer then declines to add the real edge, and the checker reports a
+    dependent as correctly blocked when it points at an entirely different issue — precisely the
+    silent wrong-edge this verification pass exists to catch."""
+    return re.search(re.escape(marker) + r"(?![0-9])", body or "") is not None
 
 
 def _ensure_markers(repo, num, markers, body=None):
@@ -640,7 +646,20 @@ def apply_reconcile(repo, plan, node_ids, batch=8, pause=2.0, log=print):
     return done
 
 
-def apply_migration(repo, open_ids, blockers, parents, limit=None, checkpoint="/tmp/bd-migration-map.json",
+DEFAULT_CHECKPOINT = "/tmp/bd-migration-map.json"
+
+
+def _load_checkpoint(path=DEFAULT_CHECKPOINT):
+    """The trusted {bd-id: number} map this migration wrote, or {} if there is none. Trusted
+    because only a local `--apply` run writes it — it is one of the three provenance channels
+    `resolve_resume_map` and `_marker_index` accept in place of the forgeable body marker."""
+    try:
+        return json.load(open(path, encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def apply_migration(repo, open_ids, blockers, parents, limit=None, checkpoint=DEFAULT_CHECKPOINT,
                     reconcile=True, crates=None):
     """Resumable: pass 1 upserts issues by bd-id marker (checkpointing the map); pass 2 idempotently
     adds Blocked-by:/Parent: markers; pass 3 ADD-only label reconcile over already-mapped issues.
@@ -650,10 +669,7 @@ def apply_migration(repo, open_ids, blockers, parents, limit=None, checkpoint="/
     have_labels = {it["number"]: [lb["name"] if isinstance(lb, dict) else lb
                                   for lb in it.get("labels") or []] for it in issues_snapshot}
     trusted, unverified = fetch_bd_map(repo, issues_snapshot)
-    try:
-        ckpt = json.load(open(checkpoint, encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        ckpt = {}
+    ckpt = _load_checkpoint(checkpoint)
     authors = {((it.get("author") or {}).get("login") if isinstance(it.get("author"), dict)
                 else it.get("author")) for it in issues_snapshot}
     owned = migration_owned(issues_snapshot, _writer_logins(repo, {a for a in authors if a}))
@@ -709,25 +725,43 @@ def apply_migration(repo, open_ids, blockers, parents, limit=None, checkpoint="/
 
 
 # --- post-migration reconciliation (--verify) ---------------------------------------------------
-def _marker_index(issues):
-    """{bd-id: [issue numbers]} over EVERY issue carrying a bd-id marker, duplicates included.
+def _marker_index(issues, owned=frozenset(), checkpoint_map=None):
+    """(authenticated, unauthenticated) {bd-id: [issue numbers]} over every issue carrying a bd-id
+    marker, duplicates included in both.
 
-    Deliberately not `migration_owned`: provenance filtering answers "may I resume onto this
-    issue" and drops an ambiguous bd-id on the floor, but verification has to SEE the ambiguity —
-    two issues carrying one bd-id is a defect being looked for, and filtering it out would report
-    a clean migration over a broken map."""
-    idx = {}
+    A body marker is FORGEABLE (resolve_resume_map, PR #2528 review round 2): any unprivileged user
+    can open an issue carrying a target `<!-- bd-id:… -->` marker. So the map verification treats as
+    authoritative is built from the SAME migration-owned provenance the resume path requires —
+    MIGRATION_LABEL (attaching one needs triage/write permission), the exact (bd-id, number) pair
+    recorded in the trusted on-disk checkpoint this migration wrote, or a bd-id `migration_owned`
+    vouches for (unique marker + migration title format + a write-permission author). Everything
+    else lands in the second dict: surfaced for operator review, never authoritative. That is what
+    stops a decoy from standing in for a bead that was never migrated — including the nastier
+    variant that also copies the expected edge text and would otherwise verify an incomplete
+    migration clean — and equally stops one from turning a correct tracker permanently red.
+
+    Duplicates are kept rather than collapsed, unlike `fetch_bd_map`'s last-wins dict: two
+    AUTHENTICATED issues carrying one bd-id is a defect verification exists to surface, and
+    dropping it would report a clean migration over a broken map."""
+    ckpt = checkpoint_map or {}
+    auth, unauth = {}, {}
     for it in issues:
         mm = MARKER_RE.search(it.get("body") or "")
-        if mm:
-            idx.setdefault(mm.group(1), []).append(it["number"])
-    return {bid: sorted(nums) for bid, nums in idx.items()}
+        if not mm:
+            continue
+        bid, num = mm.group(1), it["number"]
+        labels = {lb["name"] if isinstance(lb, dict) else lb for lb in it.get("labels") or []}
+        vouched = MIGRATION_LABEL in labels or ckpt.get(bid) == num or bid in owned
+        (auth if vouched else unauth).setdefault(bid, []).append(num)
+    return ({bid: sorted(nums) for bid, nums in auth.items()},
+            {bid: sorted(nums) for bid, nums in unauth.items()})
 
 
-def verify_migration(open_ids, blockers, parents, issues):
+def verify_migration(open_ids, blockers, parents, issues, owned=frozenset(), checkpoint_map=None):
     """Reconcile a FINISHED `--apply` against the live tracker. Pure — `issues` is the LIST
     snapshot, `blockers`/`parents` come from `plan()` (both endpoints already restricted to
-    `open_ids`).
+    `open_ids`), and `owned`/`checkpoint_map` carry the same migration-owned provenance `--apply`
+    resumes on (see `_marker_index`: an unauthenticated marker is reported, never mapped).
 
     The failure this exists to catch is asymmetric and SILENT. `apply_migration` writes edge
     markers in pass 2, i.e. only after pass 1 has an issue for every bead: a run that dies partway
@@ -745,7 +779,7 @@ def verify_migration(open_ids, blockers, parents, issues):
     (pass 1 finished, pass 2 did not — the marker write is what is missing). They point at
     different repairs: the first needs a full `--apply` re-run, the second only pass 2.
     """
-    idx = _marker_index(issues)
+    idx, unauthenticated = _marker_index(issues, owned, checkpoint_map)
     bodies = {it["number"]: (it.get("body") or "") for it in issues}
     duplicate_maps = {bid: nums for bid, nums in idx.items() if len(nums) > 1}
     # An ambiguous bd-id is NOT resolved by picking one — it stays out of the map, so its edges
@@ -767,6 +801,9 @@ def verify_migration(open_ids, blockers, parents, issues):
         "mapped": sum(1 for b in open_ids if b in id_map),
         "missing_issues": missing_issues,
         "duplicate_maps": duplicate_maps,
+        # Reported, never summed into `ok`: an unprivileged decoy must not be able to hold the
+        # migration red forever any more than it may vouch for one.
+        "unauthenticated_markers": unauthenticated,
         "planned_edges": planned_edges,
         "missing_edges": missing_edges,
         "unwritable_edges": unwritable_edges,
@@ -1160,8 +1197,13 @@ def _self_test():
     vbeads = {b: {"id": b} for b in ("sq-a", "sq-b", "sq-c")}
     vblk, vpar = {"sq-a": ["sq-b"]}, {"sq-c": ["sq-b"]}
 
-    def vissue(num, bid, extra=""):
-        return {"number": num, "body": f"body\n<!-- bd-id:{bid} -->\n{extra}"}
+    def vissue(num, bid, extra="", labels=(MIGRATION_LABEL,)):
+        return {"number": num, "body": f"body\n<!-- bd-id:{bid} -->\n{extra}",
+                "labels": [{"name": lb} for lb in labels]}
+
+    def decoy(num, bid, extra=""):
+        """A marker an unprivileged user can forge: no label, no checkpoint, not migration-owned."""
+        return vissue(num, bid, extra, labels=())
 
     full = [vissue(1, "sq-a", "Blocked-by: #2"), vissue(2, "sq-b"),
             vissue(3, "sq-c", "Parent: #2")]
@@ -1194,6 +1236,51 @@ def _self_test():
                          [vissue(2647, "sq-a", "Blocked-by: #9999"), vissue(2640, "sq-b")])
     chk("a marker aimed at the wrong issue does not count as the edge",
         (r["ok"], r["missing_edges"]), (False, [("sq-a", 2647, "Blocked-by: #2640")]))
+    # The wrong target that a SUBSTRING test cannot see: `Blocked-by: #2` is a prefix of
+    # `Blocked-by: #20`, so #1 points at a completely different blocker while reading as migrated.
+    r = verify_migration(vbeads, vblk, vpar,
+                         [vissue(1, "sq-a", "Blocked-by: #20"), vissue(2, "sq-b"),
+                          vissue(3, "sq-c", "Parent: #2")])
+    chk("an edge to #20 is NOT the planned edge to #2",
+        (r["ok"], r["missing_edges"]), (False, [("sq-a", 1, "Blocked-by: #2")]))
+    chk("marker presence stops at the issue-number boundary",
+        (_marker_present("Blocked-by: #20", "Blocked-by: #2"),
+         _marker_present("Blocked-by: #21", "Blocked-by: #2"),
+         _marker_present("Blocked-by: #2", "Blocked-by: #2"),
+         _marker_present("Blocked-by: #2\nParent: #7", "Blocked-by: #2"),
+         _marker_present("Parent: #20", "Parent: #2")),
+        (False, False, True, True, False))
+
+    # --- verification provenance: a forgeable marker is never authoritative -----------------------
+    # The decoy is sq-b's ONLY marker AND copies the edge text the real migration would have
+    # written, so a marker-trusting verifier reports this incomplete migration clean. sq-b was
+    # never migrated, so it must read as missing and its edges as unwritable.
+    r = verify_migration(vbeads, vblk, vpar,
+                         [vissue(1, "sq-a", "Blocked-by: #4"), decoy(4, "sq-b"),
+                          vissue(3, "sq-c", "Parent: #4")])
+    chk("an unprivileged decoy cannot stand in for a bead that was never migrated",
+        (r["ok"], r["missing_issues"], r["mapped"], sorted(r["unwritable_edges"]),
+         r["unauthenticated_markers"]),
+        (False, ["sq-b"], 2, [("sq-a", "sq-b"), ("sq-c", "sq-b")], {"sq-b": [4]}))
+    # ...and equally it cannot hold a correct migration red forever: it is REPORTED beside the
+    # authenticated map, not counted as a duplicate of it.
+    r = verify_migration(vbeads, vblk, vpar, full + [decoy(4, "sq-b")])
+    chk("a decoy beside the real issue is reported, not a verification failure",
+        (r["ok"], r["duplicate_maps"], r["unauthenticated_markers"]), (True, {}, {"sq-b": [4]}))
+    # The other two provenance channels the resume path accepts, so the ~750 pre-label issues of
+    # the 2026-07-17 bulk run do not read as one big missing migration.
+    r = verify_migration(vbeads, vblk, vpar,
+                         [decoy(1, "sq-a", "Blocked-by: #2"), decoy(2, "sq-b"),
+                          decoy(3, "sq-c", "Parent: #2")],
+                         owned={"sq-a", "sq-c"}, checkpoint_map={"sq-b": 2})
+    chk("migration-owned and checkpointed issues authenticate without the label",
+        (r["ok"], r["mapped"], r["unauthenticated_markers"]), (True, 3, {}))
+    # A checkpoint entry authenticates the EXACT (bd-id, number) pair it recorded, not the bd-id.
+    r = verify_migration(vbeads, vblk, vpar, full[:2] + [decoy(3, "sq-c")],
+                         checkpoint_map={"sq-c": 99})
+    chk("a checkpoint pointing elsewhere does not authenticate this issue",
+        (r["ok"], r["missing_issues"], r["unauthenticated_markers"]),
+        (False, ["sq-c"], {"sq-c": [3]}))
     # Writer and checker must agree on "already present" — a checker that is stricter than
     # `_ensure_markers` reds forever, because re-running --apply then declines to write the edge.
     chk("verify and the writer share one presence predicate",
@@ -1238,7 +1325,15 @@ def main():
         open_ids = {k: v for k, v in open_ids.items() if k in keep}
 
     if args.verify:
-        r = verify_migration(open_ids, blockers, parents, fetch_issues(args.repo))
+        # Same provenance the resume path authenticates on — a forgeable body marker alone never
+        # counts as a migrated bead (see _marker_index).
+        issues_snapshot = fetch_issues(args.repo)
+        authors = {((it.get("author") or {}).get("login") if isinstance(it.get("author"), dict)
+                    else it.get("author")) for it in issues_snapshot}
+        owned = migration_owned(issues_snapshot, _writer_logins(args.repo,
+                                                                {a for a in authors if a}))
+        r = verify_migration(open_ids, blockers, parents, issues_snapshot, owned,
+                             _load_checkpoint())
         print(f"[verify] beads planned open/in_progress: {r['planned']}  |  "
               f"mapped to an issue: {r['mapped']}")
         print(f"[verify] dependency edges planned: {r['planned_edges']}")
@@ -1256,6 +1351,13 @@ def main():
             print(f"[verify] MISSING EDGE MARKERS ({len(r['missing_edges'])}) — both endpoints "
                   f"exist but pass 2 did not write the marker, so this edge holds nothing back: "
                   f"{r['missing_edges'][:10]}")
+        if r["unauthenticated_markers"]:
+            print(f"[verify] unauthenticated bd-id markers "
+                  f"({len(r['unauthenticated_markers'])}) — no migration provenance (no "
+                  f"'{MIGRATION_LABEL}' label, not in the checkpoint, not migration-owned), so "
+                  f"NOT counted as migrated; review whether these are pre-label legacy issues to "
+                  f"label or decoys to close: "
+                  f"{sorted(r['unauthenticated_markers'].items())[:10]}")
         print("[verify] " + ("reconciled clean." if r["ok"] else
                              "DISCREPANCIES above — re-run --apply (it is idempotent), then "
                              "re-verify."))
