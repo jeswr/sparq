@@ -11,7 +11,8 @@ recreated.
 ## Protected branch
 
 - **`main`** — the only long-lived branch. All changes land via pull request; direct
-  pushes are disallowed (including for administrators — see "Other settings").
+  pushes are disallowed for non-administrators. Repository administrators can always
+  bypass the ruleset (see "Other settings"); the automated landing flow does not.
 
 ## Required status checks
 
@@ -423,7 +424,7 @@ un-draft moment.
 
 ## Other settings
 
-- **Repository administrators have an emergency bypass.** The live ruleset's
+- **Repository administrators can always bypass the ruleset.** The live ruleset's
   `bypass_actors` list contains the repository-role actor (`actor_id: 5`,
   `bypass_mode: always`). This is an explicit exception to uniform enforcement, not a
   compensating control. The automated landing flow does not use the bypass: auto-merge
@@ -523,7 +524,7 @@ this document (procedure below).
   protections (no force-push, no deletion, squash-only linear history, conversation
   resolution, CodeQL alert gate, a required CI aggregator, and merge-queue admission) are
   present and enforced for the normal automated landing path. Repository administrators
-  retain the explicit emergency bypass documented above.
+  retain the always-on bypass documented above.
 
 These are **inherent to the operating model**, not fixable code changes — consistent with
 the disposition recorded in `compliance/openssf/gap-register.md` (the Scorecard SARIF is no

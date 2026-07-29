@@ -375,7 +375,8 @@ jobs:
       # behind the remote tip (other merges land during the long bench job) so the direct `git push
       # HEAD:main` is rejected `! [rejected] HEAD -> main (fetch first)` (a non_fast_forward race), and
       # even past that race the `main` ruleset (id 17688455: pull_request + required_status_checks "gate"
-      # + code_scanning + non_fast_forward, EMPTY bypass list) rejects it with `GH013`. Confirmed RED on
+      # + code_scanning + non_fast_forward; only the repository-administrator role can bypass)
+      # rejects the non-administrator GITHUB_TOKEN with `GH013`. Confirmed RED on
       # Benchmarks runs #27827073571 and #27826231986 (both push:main):
       #     1 file changed, 2 insertions(+), 2 deletions(-)
       #     ! [rejected]        HEAD -> main (fetch first)
@@ -444,7 +445,7 @@ jobs:
           push_rc=$?
           set -e
           if [ "$push_rc" -ne 0 ]; then
-            echo "::warning title=perf-floor push declined::Could not push the tightened perf floor to protected main (git push exit ${push_rc}; likely a non_fast_forward race or the GH013 ruleset rejection — direct pushes to main are blocked, empty bypass list). Best-effort no-op: the perf measurement + hard gate ran and the floor WAS computed, but the bench/perf-baseline.json update was NOT landed. Resolve by adding the github-actions bot to the main ruleset bypass list (owner-only; sq-llxc/sq-roe3 needs:user) or folding the baseline update into the periodic .beads / data-sync PR (sq-2xdg). The floor only tightens via a human/orchestrator commit in the meantime."
+            echo "::warning title=perf-floor push declined::Could not push the tightened perf floor to protected main (git push exit ${push_rc}; likely a non_fast_forward race or the GH013 ruleset rejection — the bypass list contains only the repository-administrator role, not the github-actions bot). Best-effort no-op: the perf measurement + hard gate ran and the floor WAS computed, but the bench/perf-baseline.json update was NOT landed. Resolve by adding the github-actions bot to the main ruleset bypass list (owner-only; sq-llxc/sq-roe3 needs:user) or folding the baseline update into the periodic .beads / data-sync PR (sq-2xdg). The floor only tightens via a human/orchestrator commit in the meantime."
             exit 0
           fi
           echo "committed + pushed tightened perf floor to main."
