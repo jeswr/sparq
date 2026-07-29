@@ -1094,11 +1094,17 @@ fn order_by_vars(q: &str) -> Option<Vec<String>> {
     Some(out)
 }
 
-/// Every variable either engine PROJECTS — the union of the two result HEADERS, plus (as a
-/// belt-and-braces against a header that omits something its own rows bind) every variable
-/// bound by a solution on either side.
+/// The PROJECTION the two answers agree on — or the header mismatch, as a repro message.
 ///
-/// The HEADER, not the bound pairs of the returned rows, is the right set for
+/// The result header is part of the answer, not metadata about it: a projected-but-unbound
+/// variable appears ONLY there (`rows` records bound pairs), so two answers with identical row
+/// maps but different headers are DIFFERENT answers — one engine projected a variable the other
+/// did not. Comparing the rows alone cannot see that, which is why the header sets are required
+/// to match here, BEFORE any window classification or row comparison. Projection ORDER is not
+/// compared: `SELECT *` leaves it to the implementation, and the row maps this harness compares
+/// are keyed by variable name, so order cannot affect any verdict it reaches.
+///
+/// The agreed header, not the bound pairs of the returned rows, is the right set for
 /// [`is_total_order`]. The rows reaching that decision have already been SLICED by
 /// `LIMIT`/`OFFSET`, so a projected variable that happens to be unbound in every SURVIVING row
 /// has vanished from them — even though it may be bound, to different values, on the tied
@@ -1106,22 +1112,35 @@ fn order_by_vars(q: &str) -> Option<Vec<String>> {
 /// therefore call such a window "totally ordered" and value-compare a row choice SPARQL leaves
 /// implementation-defined, recording a non-testable case as a passing value comparison.
 ///
-/// Taking the UNION of the two headers (rather than demanding they match) is the conservative
-/// side: a variable EITHER engine projects can distinguish rows, so requiring the sort key to
-/// cover all of them can only route MORE windows to the honest `skipped(row-choice)` bucket,
-/// never fewer.
-fn result_vars(a: &Answer, b: &Answer) -> BTreeSet<String> {
-    a.vars
-        .iter()
-        .chain(&b.vars)
-        .cloned()
+/// The bound pairs are folded in afterwards only as a defensive consistency check — a row
+/// binding a variable its own header omits is an engine defect this comparator has no verdict
+/// for, and widening the coverage set can only route MORE windows to the honest
+/// `skipped(row-choice)` bucket, never fewer.
+fn result_vars(a: &Answer, b: &Answer) -> Result<BTreeSet<String>, String> {
+    let header = |ans: &Answer| -> BTreeSet<String> { ans.vars.iter().cloned().collect() };
+    let (ha, hb) = (header(a), header(b));
+    if ha != hb {
+        let only = |x: &BTreeSet<String>, y: &BTreeSet<String>| -> Vec<String> {
+            x.difference(y).cloned().collect()
+        };
+        return Err(format!(
+            "result HEADER differs (sparq {:?} / oxigraph {:?})\n  only in sparq: {:?}\n  \
+             only in oxi  : {:?}",
+            a.vars,
+            b.vars,
+            only(&ha, &hb),
+            only(&hb, &ha)
+        ));
+    }
+    Ok(ha
+        .into_iter()
         .chain(
             a.rows
                 .iter()
                 .chain(&b.rows)
                 .flat_map(|sol| sol.keys().cloned()),
         )
-        .collect()
+        .collect())
 }
 
 /// Is the sort key TOTAL over the projection — i.e. does it cover every variable either engine
@@ -1296,7 +1315,17 @@ fn compare_select(g: &sparq_core::Graph, store: &Store, q: &str) -> Result<Compa
     let (Some(sparq), Some(oxi)) = (sparq_solutions(g, q), oxi_solutions(store, q)) else {
         return Ok(Compared::Unsupported);
     };
-    let projected = result_vars(&sparq, &oxi);
+    compare_answers(&sparq, &oxi, q)
+}
+
+/// The comparison itself, on the two answers already bridged into the neutral model — split out
+/// so it can be driven from a hand-built pair (which is the only way to state a HEADER defect:
+/// a real engine will not produce one on demand).
+fn compare_answers(sparq: &Answer, oxi: &Answer, q: &str) -> Result<Compared, String> {
+    // The header is part of the answer: check it FIRST, so a projected-variable disagreement is
+    // a mismatch rather than something the window classification or the row comparison — both
+    // of which see only bound pairs — silently accepts. See [`result_vars`].
+    let projected = result_vars(sparq, oxi)?;
     // A sort variable OUTSIDE the projection cannot be read off the compared rows, so its
     // equivalence classes are not computable here — treat the clause as unmodelled and fall
     // back to the (always-sound) order-insensitive comparison rather than guess.
@@ -1308,18 +1337,18 @@ fn compare_select(g: &sparq_core::Graph, store: &Store, q: &str) -> Result<Compa
     if windowed && !total {
         return Ok(Compared::SkippedRowChoice);
     }
-    let (sparq, oxi) = (sparq.rows, oxi.rows);
+    let (sparq, oxi) = (&sparq.rows, &oxi.rows);
     // Blank-node labels are engine-local, so a bnode-bearing answer is comparable only up to a
     // bijection. RDFC-1.0 canonicalises the whole TABLE at once (so identity shared between
     // rows is part of what is compared), which necessarily discards row ORDER — an ordered
     // bnode answer therefore has its order un-checked, and lands in its own counter.
-    if solutions_have_blank_nodes(&sparq) || solutions_have_blank_nodes(&oxi) {
-        return match solutions_isomorphic(&sparq, &oxi) {
+    if solutions_have_blank_nodes(sparq) || solutions_have_blank_nodes(oxi) {
+        return match solutions_isomorphic(sparq, oxi) {
             Ok(true) => Ok(Compared::Isomorphic),
             Ok(false) => Err(multiset_detail(
                 "solution table is NOT isomorphic (no bijection of the blank nodes matches it)",
-                &sparq,
-                &oxi,
+                sparq,
+                oxi,
             )),
             Err(e) => Ok(Compared::TriageIso(e.to_string())),
         };
@@ -1327,17 +1356,17 @@ fn compare_select(g: &sparq_core::Graph, store: &Store, q: &str) -> Result<Compa
     match &sort_vars {
         Some(vs) if !vs.is_empty() => {
             let refs: Vec<&str> = vs.iter().map(String::as_str).collect();
-            if order_by_equal(&sparq, &oxi, &refs) {
+            if order_by_equal(sparq, oxi, &refs) {
                 Ok(Compared::Ordered)
             } else {
-                Err(order_detail(&sparq, &oxi, &refs))
+                Err(order_detail(sparq, oxi, &refs))
             }
         }
         _ => {
-            if multiset_equal(&sparq, &oxi) {
+            if multiset_equal(sparq, oxi) {
                 Ok(Compared::Multiset)
             } else {
-                Err(multiset_detail("solution MULTISET differs", &sparq, &oxi))
+                Err(multiset_detail("solution MULTISET differs", sparq, oxi))
             }
         }
     }
@@ -2636,15 +2665,16 @@ ex:n3 ex:age 40 . ex:n3 ex:name "nm3" .
         // correctly refused.
         assert_eq!(sliced, ["a".to_string()].into_iter().collect());
         assert!(is_total_order(&["a".to_string()], &sliced));
-        let projected = result_vars(&survivor, &survivor);
+        let projected = result_vars(&survivor, &survivor).expect("the headers agree");
         assert_eq!(
             projected,
             ["a".to_string(), "o".to_string()].into_iter().collect(),
             "a projected-but-unbound variable must survive in the coverage set"
         );
         assert!(!is_total_order(&["a".to_string()], &projected));
-        // ...and it survives from EITHER engine's header, which is why the union is taken.
-        assert_eq!(result_vars(&survivor, &tied_candidate), projected);
+        // ...and it survives whether or not the ROWS bind it: coverage comes from the agreed
+        // header, so the survivor's rows dropping `?o` cannot shrink it.
+        assert_eq!(result_vars(&survivor, &tied_candidate), Ok(projected));
 
         // End to end. Both candidate rows tie on `?a`; `?o` is projected and unbound in every
         // surviving row, so the window must land in the COUNTED row-choice bucket.
@@ -2678,6 +2708,69 @@ ex:n3 ex:age 40 . ex:n3 ex:name "nm3" .
             compare_select(&g, &store, unwindowed),
             Ok(Compared::Ordered)
         );
+    }
+
+    /// [SONNET-4.6] A HEADER-only disagreement is a MISMATCH, not a pass and not a skip.
+    ///
+    /// A projected-but-unbound variable exists ONLY in the result header — `rows` records bound
+    /// pairs — so an engine that omits (or invents) a projected variable can produce row maps
+    /// identical to the other engine's. Every comparator downstream of the header sees only
+    /// those rows: the multiset and `ORDER BY` paths would return a passing verdict, and the
+    /// window path would return the `skipped(row-choice)` bucket. All three read as "no defect
+    /// here", so the headers must be compared BEFORE any of them.
+    ///
+    /// The mutation is stated directly: one `Answer` drops `?o` from its header while both row
+    /// maps stay byte-identical.
+    #[test]
+    fn a_header_only_projection_difference_is_a_mismatch() {
+        // `?o` is projected; no row binds it (the `OPTIONAL` never matched). The rows below are
+        // therefore identical on both sides — the header is the ONLY difference.
+        let rows = || vec![nsol(&[("a", nint("7"))]), nsol(&[("a", nint("7"))])];
+        let full = Answer {
+            vars: vec!["a".to_string(), "o".to_string()],
+            rows: rows(),
+        };
+        let dropped = Answer {
+            vars: vec!["a".to_string()],
+            rows: rows(),
+        };
+        assert!(
+            multiset_equal(&full.rows, &dropped.rows),
+            "premise: the ROWS agree, so only a header comparison can see this defect"
+        );
+
+        let where_ = "WHERE { ?s ex:age ?a OPTIONAL { ?s ex:p ?o } }";
+        for (path, q) in [
+            ("multiset", format!("SELECT ?a ?o {where_}")),
+            ("ordered", format!("SELECT ?a ?o {where_} ORDER BY ?a")),
+            // Without the header check this one reaches `skipped(row-choice)` — a COUNTED
+            // non-testable case, which is exactly as wrong as a pass.
+            ("window", format!("SELECT ?a ?o {where_} ORDER BY ?a LIMIT 1")),
+        ] {
+            for (a, b) in [(&full, &dropped), (&dropped, &full)] {
+                let err = compare_answers(a, b, &q)
+                    .expect_err(&format!("{path}: a dropped projected variable must not pass"));
+                assert!(err.contains("result HEADER differs"), "{path}: {err}");
+                assert!(
+                    err.contains("\"o\""),
+                    "{path}: the repro must name the dropped variable: {err}"
+                );
+            }
+        }
+
+        // Not a blanket `Err`: agreeing headers over the same rows still compare normally, and
+        // projection ORDER alone is not a mismatch (`SELECT *` leaves it implementation-defined,
+        // and the compared row maps are keyed by variable name).
+        let permuted = Answer {
+            vars: vec!["o".to_string(), "a".to_string()],
+            rows: rows(),
+        };
+        for other in [&full, &permuted] {
+            assert_eq!(
+                compare_answers(&full, other, &format!("SELECT ?a ?o {where_}")),
+                Ok(Compared::Multiset)
+            );
+        }
     }
 
     /// The value-level oracle must actually RUN on every category rather than skip it — a
