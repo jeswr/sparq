@@ -720,6 +720,36 @@ disappears. Fail the sweep outright on a duplicate id or an anchor that no longe
   gets silently re-improvised. (This is why this entry, the *STANDING RULE* link, and the skill
   frontmatter all exist — closing the old gap where the scheduler header claimed an AGENTS.md
   link the Maintenance-loop section did not yet carry.)
+- **The escalated-tier workflow trio** (`sq-sgu1.2`; design: [`research/fable-work-plan.md`](research/fable-work-plan.md) §6.3)
+  <!-- [OPUS-5] sq-sgu1.2: the durability contract needs the LINK. All three had a
+  meta.description but NO AGENTS.md link — fable-architect-drain was mentioned only by name
+  (rules 5/11) and the other two not at all — so they were re-improvised rather than re-run.
+  Catalog entry added; pinned by scripts/tests/test_workflow_dispatch_contract.py. -->
+  — three committed Workflows that spend the scarce escalated tier (Opus 5 primary) only where
+  judgment is the product, with the cheap fleet doing the mechanical middle. **Every producing
+  stage of each carries a schema** (the schema-guard trap), research fan-out is findings-only so
+  a recon stage never opens its own `research/` PR (the researcher-PR gotcha), and each arms
+  strictly by iterating the **verdict objects** — never a blind PR-number loop:
+  - [`.claude/workflows/fable-architect-drain.js`](.claude/workflows/fable-architect-drain.js)
+    — the flagship epic drain: escalated-tier architect decomposes an epic into N **disjoint**
+    beads (one call/epic) → cheap recon grounds each spec → the fleet implements one isolated
+    worktree per bead → cheap mechanical verify arms the clean ones → the escalated tier reviews
+    only the escalated diffs, including the rare `fable_implements` branch where it authors the
+    fix itself and re-enters mechanical verify. It also carries the **canonical per-tier
+    marker/trailer/dispatch TIER table** that rule 5 and every brief point at.
+    `Workflow({ name: "fable-architect-drain", args: { epic: "sq-…" } })`.
+  - [`.claude/workflows/fable-soundness-verdict.js`](.claude/workflows/fable-soundness-verdict.js)
+    — clears the pile of OPEN honesty/soundness PRs the cheap loop deliberately leaves for
+    stronger judgment: cheap recon assembles a compact per-PR evidence pack, the escalated tier
+    returns one verdict per PR, and the glue **holds** anything `honest=false` or touching the
+    PENDING external ZK audit (`sq-qhy4`) for the maintainer regardless of the other fields.
+    `Workflow({ name: "fable-soundness-verdict" })` (or `args: { prs: ["<url>", …] }`).
+  - [`.claude/workflows/fable-lens-review.js`](.claude/workflows/fable-lens-review.js)
+    — the cadenced review campaign, one **lens** at a time (privacy-claims, unsafe-sites,
+    perf-honesty, coverage-ratchet, …): cheap recon enumerates the lens's targets, the mid tier
+    builds claim→evidence→status tables, the escalated tier adjudicates ONE subtle question off
+    that tight table, and the fleet files the follow-up beads via `bd create`.
+    `Workflow({ name: "fable-lens-review", args: { lens: "privacy-claims", question: "…" } })`.
 - **`scripts/worktree-gc.sh [--dry-run | --apply] [--reclaim-completed]`** (sq-6xdr, sq-h34dc) — a **manual / idle-time**
   broom for the harness's `.claude/worktrees/` dirs. The harness creates one git worktree
   per agent but never auto-removes a finished one, so they pile up (366+ this session) and
