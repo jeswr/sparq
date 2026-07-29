@@ -35,6 +35,9 @@ the decision should be made before the transport is hand-rolled, not after."* Th
 5. **Scope the first phase to the base `McpServer`.** `SolidMcpServer` binds ONE
    authenticated Solid session at construction, so per-HTTP-session pod identity is a
    separate, larger design — [§ Deliberately out of scope](#deliberately-out-of-scope).
+   That scope has a consequence this record states rather than hides: the only queued
+   server-initiated notifications in the tree belong to `SolidMcpServer`, so this
+   transport builds the *channel* for them and does not itself deliver them.
 
 ## Premise correction: "SSE" is not a second transport
 
@@ -65,21 +68,33 @@ Sources: MCP spec, *Basic / Transports*, revisions
 | stdio transport | line-delimited loop over the above, feature `stdio` | `crates/sparq-mcp/src/transport.rs` |
 | `sparq-mcp` binary | stdio only; `--allow-update` / `--format` / `--query-timeout` / `--max-rows` | `crates/sparq-mcp/src/main.rs`, `src/cli.rs` |
 | any HTTP transport | **none** | — |
-| server-initiated notifications | queued, but **no shipped transport drains them** | `crates/sparq-mcp/src/solid.rs:873` |
+| server-initiated notifications | queued on `SolidMcpServer` only, and **no shipped transport drains them**; the base `McpServer` declares `subscribe: false` and enqueues nothing | `crates/sparq-mcp/src/solid.rs:873`, `crates/sparq-mcp/src/server.rs:226` |
 | `PROTOCOL_VERSION` | `"2025-11-25"` | `crates/sparq-mcp/src/server.rs:29` |
 | `SUPPORTED_PROTOCOL_VERSIONS` | `2025-11-25`, `2025-06-18`, `2025-03-26`, `2024-11-05` | `crates/sparq-mcp/src/server.rs:44` |
 | trust model | "no built-in authentication or authorization … the stdio transport is a trust boundary you, the operator, establish" | `crates/sparq-mcp/README.md:93` |
 
 Two of these deserve emphasis because they change what the transport is *for*.
 
-**The notification queue has no delivery channel today.** `SolidMcpServer` implements
-`resources/subscribe` and advertises `subscribe: true`, and enqueues content-free
-`notifications/resources/updated` messages — but `take_notifications` is called in exactly
-one place in the whole tree, `crates/sparq-mcp/tests/solid.rs:785`. The `stdio` serve loop
-never drains it: it only writes what `handle_message` returns. So an embedder must invent
-its own pump. Streamable HTTP's server-initiated `GET` stream is the **first real delivery
-channel** for that surface. That is a stronger motivation for this bead than
-"remote/multiplexed clients" — and it is not mentioned in the bead title.
+**The notification queue has no delivery channel today, and this transport alone does not
+give it one.** `SolidMcpServer` implements `resources/subscribe` and advertises
+`subscribe: true`, and enqueues content-free `notifications/resources/updated` messages —
+but `take_notifications` is called in exactly one place in the whole tree,
+`crates/sparq-mcp/tests/solid.rs:785`. The `stdio` serve loop never drains it: it only
+writes what `handle_message` returns. So an embedder must invent its own pump.
+
+The honest scoping consequence, which the rest of this record is written to respect: that
+queue is on **`SolidMcpServer`**, a distinct type, and this transport wraps the **base
+`McpServer`**, which declares `subscribe: false` (`crates/sparq-mcp/src/server.rs:226`) and
+enqueues nothing. A transport around `McpServer` cannot reach a `SolidMcpServer`'s queue,
+and both types merely existing in one process does not bridge them. So Streamable HTTP's
+server-initiated `GET` stream is the **shape** of the delivery channel that surface has
+been missing, and phases 1–5 build it; actually delivering `SolidMcpServer`'s
+notifications additionally needs (a) a notification-source seam the transport drains and
+(b) the Solid-over-HTTP session/authorization design that owns the `SolidMcpServer`
+instances — both out of scope here, see [§ Deliberately out of
+scope](#deliberately-out-of-scope). The motivation for *this* bead therefore remains
+remote/multiplexed clients, plus building the channel that makes the Solid work
+schedulable.
 
 **The trust model is transport-shaped.** The README's honesty about having no auth is
 currently *load-bearing on stdio*: a pipe is only reachable by whoever the operator handed
@@ -172,7 +187,7 @@ One path, `/mcp` by default, configurable. Behaviour, mapped to the spec's MUSTs
 | `POST` body = JSON-RPC **notification** or **response** | `202 Accepted`, empty body. |
 | `POST` body = batch array | answered as a batch array in `application/json`; retained because 2025-03-26 requires receiving batches and `handle_message` already handles them. Later revisions permit only a single message per POST, so this is tolerance, never a requirement we impose. |
 | `POST` `initialize` | `application/json` + `Mcp-Session-Id: <id>` on the response. |
-| `GET` (Accept includes `text/event-stream`) | `text/event-stream`: the session's server-initiated notification stream. **This is the channel `take_notifications` has been missing.** |
+| `GET` (Accept includes `text/event-stream`) | `text/event-stream`: the session's server-initiated notification stream. With the base `McpServer` it carries keep-alives (and, from phase 5, the priming event) **and no notifications**, because that server enqueues none; it is the transport-side channel a future notification source plugs into (see [§ Phased plan](#phased-plan-each-phase-is-a-future-bead) phase 4). |
 | `GET` with `Last-Event-ID` | replay from that cursor **on that stream only**, then resume. |
 | `DELETE` | terminate the session; `204`. |
 | any method, unknown/expired session id | `404` — the client's cue to re-`initialize`. |
@@ -220,15 +235,25 @@ SessionState {
     protocol_version: &'static str,   // frozen at initialize; validates MCP-Protocol-Version
     created, last_seen: Instant,      // idle expiry -> 404
     streams: Map<StreamId, EventLog>, // bounded ring buffer for Last-Event-ID replay
-    outbound: VecDeque<String>,       // fed by take_notifications, drained by the GET stream
+    outbound: VecDeque<String>,       // fed by a notification source, drained by the GET stream
+                                      // (the base McpServer supplies none — see phase 4)
 }
 ```
 
 Three notes:
 
-- **No new dependency is needed for the session id.** `getrandom`, `rand` and `uuid`
-  (v4) are all already in `sparq-mcp`'s measured native closure, via `sparq-engine`
-  (`crates/sparq-engine/Cargo.toml:472-473` gates `uuid` to
+- **The session id needs a direct dependency declaration, but adds nothing to the lock.**
+  A crate cannot import a transitive dependency because it appears in its resolved
+  closure, so `sparq-mcp` must *declare* whichever generator it uses — concretely
+  `getrandom = { version = "0.3", optional = true }` in `[dependencies]`, added to the
+  feature as `http = [..., "dep:getrandom"]` (the alternative, `uuid = { version = "1",
+  features = ["v4"], optional = true }`, is heavier for 128 random bits and would pull
+  `getrandom` anyway). The narrower claim that **is** true, and is the one that matters
+  for the supply-chain gate: **no new package or version enters `Cargo.lock`, so there is
+  no new audit target or exemption.** `getrandom` and `rand` are already in `sparq-mcp`'s
+  measured native closure via `oxrdf`'s blank-node ids — the same edge
+  `crates/sparq-introspect/Cargo.toml:69-73` documents and pins a wasm backend for — and
+  `uuid` v4 via `sparq-engine` (`crates/sparq-engine/Cargo.toml:472-473` gates it to
   `cfg(not(target_arch = "wasm32"))`, which is where an HTTP server runs anyway).
 - **The session id is a bearer credential.** It must never be logged, and 2025-11-25
   explicitly points at session-hijacking mitigations. Follow the existing
@@ -278,8 +303,15 @@ keep.
   Solid-OIDC-derived session at construction (`crates/sparq-mcp/src/solid.rs:159`), so
   per-HTTP-session pod identity means many `SolidMcpServer`s over a shared `PodStore` plus
   a token→session mapping. That is a genuine authorization design, not a transport detail,
-  and it must not be smuggled in behind an `http` flag. Its notification queue *is* served
-  by the `GET` stream once phase 1 exists in-process — which is the right order.
+  and it must not be smuggled in behind an `http` flag.
+- **Delivery of `SolidMcpServer`'s notification queue.** It is *not* served by phases 1–5:
+  those wrap the base `McpServer`, and being in the same process does not let a transport
+  over one type drain a queue held by another. What phase 4 ships is the channel and the
+  notification-source seam; wiring `take_notifications` into that seam belongs to the
+  Solid-over-HTTP bead above, because it is that design which decides *which* pod session's
+  notifications an HTTP session is entitled to see — an authorization question, not a
+  plumbing one. Building the channel first is still the right order; it is just not
+  delivery.
 - **OAuth 2.1 / MCP authorization framework.** A separate bead.
 - **Cross-process or persisted session state.** In-memory only; a restart invalidates
   sessions, and the spec already defines `404` → re-`initialize` for exactly that.
@@ -300,7 +332,7 @@ prose. The wire-byte-level pattern to copy is `crates/sparq-server/tests/subscri
 | `DELETE` ⇒ session gone, next request `404` | sequence |
 | present, un-allowlisted `Origin` ⇒ `403`; absent `Origin` ⇒ allowed | two cases |
 | unsupported `MCP-Protocol-Version` ⇒ `400`; absent ⇒ treated as `2025-03-26` | two cases |
-| `GET` stream delivers a queued notification; `id:` present and monotonic | raw-byte read |
+| `GET` stream delivers a notification queued through the phase-4 notification-source seam (a test double, since the base server emits none); `id:` present and monotonic | raw-byte read |
 | `Last-Event-ID` replays only that stream's missed events | raw-byte read |
 | non-loopback bind + `allow_update` + no token ⇒ **refuses to start** | unit test on the posture fn, no bind |
 | a stream dropped by the client releases its state | drop-observability assertion |
@@ -316,11 +348,21 @@ prose. The wire-byte-level pattern to copy is `crates/sparq-server/tests/subscri
    from `bind_posture`; Bearer gate with constant-time compare; the fail-closed
    `allow_update`-on-remote-bind refusal. Ships with phase 1's endpoint or immediately after —
    **not later**, so no intermediate commit exposes an ungated socket.
-3. **Session management.** `Mcp-Session-Id` issuance at `initialize`, the session table, idle
-   expiry, `400`/`404` semantics, `DELETE`, `MCP-Protocol-Version` validation.
-4. **Server-initiated `GET` SSE stream.** `axum` `Sse` + `unfold`, keep-alive, `Event::id()`,
-   draining the notification queue — the first shipped delivery channel for
-   `notifications/resources/updated`.
+3. **Session management.** `Mcp-Session-Id` issuance at `initialize` — which is where the
+   `dep:getrandom` optional dependency lands, per [§ Session state](#session-state) — the
+   session table, idle expiry, `400`/`404` semantics, `DELETE`, `MCP-Protocol-Version`
+   validation.
+4. **Server-initiated `GET` SSE stream + the notification-source seam.** `axum` `Sse` +
+   `unfold`, keep-alive, `Event::id()`, draining `SessionState::outbound`. Because the base
+   `McpServer` produces no notifications, this phase must also define *where* `outbound` is
+   fed from, and that is its main design content: a small crate-internal seam — a trait with
+   one "take the messages queued since last call" method, owned by the transport module and
+   NOT added to `McpServer`'s public surface — with exactly one implementor in this phase, a
+   test double. That keeps the stream testable end-to-end while leaving the real producer
+   (`SolidMcpServer::take_notifications`) to the Solid-over-HTTP bead, which owns the
+   token→pod-session mapping that decides who may see those notifications. This phase
+   therefore ships **a delivery channel, not delivered notifications** — the PR body must
+   say so, since the queue stays undeliverable in-tree until that separate bead lands.
 5. **Resumability.** Bounded per-stream event log, `Last-Event-ID` replay with the
    "never replay another stream's events" invariant, the 2025-11-25 priming event and `retry`
    field.
@@ -403,9 +445,13 @@ cargo tree -p sparq-mcp --no-default-features -e normal --prefix none \
   have (the in-tree axum SSE stack). Triggers 2–4 are untouched. `crates/sparq-mcp/src/jsonrpc.rs:15`
   says "an HTTP/SSE transport is the strongest one" and should point here.
 - `SolidMcpServer` over a multi-session transport is its own bead — a `PodStore`-sharing,
-  token→Solid-session authorization design, explicitly not a transport change.
+  token→Solid-session authorization design, explicitly not a transport change. It also owns
+  the *last* step of notification delivery: implementing phase 4's notification-source seam
+  over `take_notifications`, scoped to whatever pod session the HTTP session is entitled to.
 - The lazy `text_index` on the read path (`text_search` needs `&mut self`) blocks any
   read/write concurrency split. Worth capturing independently of this transport, since it
   constrains every future concurrent embedder.
-- `take_notifications` currently has no in-tree consumer outside a test. Whatever happens
-  to this bead, that is a shipped-but-undeliverable surface and should be recorded as such.
+- `take_notifications` currently has no in-tree consumer outside a test, and **still will
+  not have one when phases 1–8 are done** — see the phase-4 seam and the out-of-scope entry.
+  Whatever happens to this bead, that is a shipped-but-undeliverable surface and should be
+  recorded as such, tracked against the Solid bead above rather than this transport.
