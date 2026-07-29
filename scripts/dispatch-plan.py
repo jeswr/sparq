@@ -50,6 +50,39 @@ resolve = _route.resolve
 roleless_ready = _ready.roleless_ready
 ready_candidates = _ready.ready_candidates
 GLOBAL = _ready.GLOBAL
+# [OPUS-5] sparq#4365 — THE PARTITION RESOLVER, ON THE MODULE THE REGISTRY ALREADY LOADS.
+#
+# #4360 made this repo's `conflict()` containment-aware: an `area:` key resolves through a TOTAL,
+# workspace-tree-derived map and two keys conflict iff one partition path is a prefix of the other,
+# so `area:sparq-server-http` now conflicts with `area:sparq-server`. PER sparq#4365 — which is a
+# statement about the PRIVATE `jeswr/agent-account-registry`, not something this repository can
+# check — its `dispatch.yml` mirrors the same key space in `busy_packages_of_pulls` and still
+# compares by EXACT STRING, so the two legs disagree on every sub-crate key. That disagreement is
+# the double-dispatch class: sparq defers the child, the registry does not, and two workers land in
+# one crate with no lock.
+#
+# #4365 proposed porting the six-line resolver into `dispatch.yml`. These four exports are offered
+# INSTEAD, because a port is a second implementation of a rule whose whole point is that it is
+# derived rather than written down. `dispatch.yml` already clones this checkout and already does
+# `load_dispatch(<target>/scripts/dispatch-plan.py)`, so calling `keys_conflict` off the loaded
+# module gets the resolver AND the tree-derived root set from the same checkout, for free and
+# without a table to go stale — which is exactly the argument #4360 made when it found #4336's
+# hand-written table already wrong (`sparq-conformance-floors` is a real crate, not a region).
+#
+# HONESTLY SCOPED: this is the sparq HALF, and it is not the fix. Exporting a name the registry
+# does not yet read changes nothing on its own — the registry degrades SILENTLY on a missing
+# attribute (see `_registry_contract`, and the two prior occurrences it records), which is why
+# `orchestration/registry-contract.toml` pins these names and a parity fixture as DATA and
+# `--self-test` asserts both. Until a registry PR calls them, `busy_packages_of_pulls` compares
+# however it compares today and #4365 stays open; nothing below can observe that.
+#
+# `DegeneratePartitionRoots` rides along because `workspace_roots` REFUSES an unverifiable tree
+# rather than collapsing to a phantom partition; a caller that cannot name that exception can only
+# catch it as a bare `Exception`, which is how the refusal becomes indistinguishable from a bug.
+partition_path = _ready.partition_path
+keys_conflict = _ready.keys_conflict
+workspace_roots = _ready.workspace_roots
+DegeneratePartitionRoots = _ready.DegeneratePartitionRoots
 # [OPUS-5] sparq#4819 — THE SAME SILENT-INVISIBILITY CLASS AS `roleless_ready`, THREE LINES UP.
 # The registry's `inert_aware` probe reads `getattr(planner, "INERT_FIELD")` and
 # `getattr(planner, "MACHINE_PARK_PR_LABEL")` off THIS module — it loads
@@ -382,6 +415,49 @@ def _self_test():
         compute_ready = staticmethod(_mod.compute_ready)
     chk("[sparq#4819] ...and refuses a planner without the names, by the registry's own reason",
         _probe(_NoContract), (None, "planner declares no inertness contract"))
+
+    # --- #4365: the PARTITION RESOLVER offered to `busy_packages_of_pulls` -----------------------
+    # Same failure shape as #4819 one section up, on a different name set. #4360 made THIS repo's
+    # `conflict()` containment-aware; the registry's `dispatch.yml` mirrors the key space in
+    # `busy_packages_of_pulls` and still compares by exact string, so the two legs disagree on
+    # every sub-crate key. Rather than port the rule into `dispatch.yml` — a second implementation
+    # of a rule whose whole value is being DERIVED from the tree — the resolver is exported off
+    # the module `load_dispatch` already loads from the checkout `dispatch.yml` already clones.
+    #
+    # These rows assert the sparq half only. They cannot observe the registry, and passing them
+    # does NOT mean `busy_packages_of_pulls` has been changed.
+    _partition = _registry_contract()["partition_resolver"]
+    _FIXTURE = _partition["parity_fixture"]
+
+    # (e) THE NAMES, as loaded — an absent export is the silent-degrade state, not an error.
+    chk("[sparq#4365] dispatch-plan exports the partition resolver the registry must call",
+        sorted(n for n in _partition["required_attributes"] if not hasattr(_mod, n)), [])
+
+    # (f) THE MAPPING, through THIS module. Every rule the fixture pins, in one comparison, so a
+    # dropped fixture row is as red as a changed resolution.
+    chk("[sparq#4365] ...and reproduces registry-contract.toml's parity fixture",
+        {k: list(_mod.partition_path(k)) for k in _FIXTURE}, dict(_FIXTURE))
+
+    # (g) ...and it is NOT exact-string equality — the whole point. Scanned over the fixture keys
+    # UNIONED WITH THE PARENTS THEY RESOLVE TO, because the headline disagreement of #4365 is
+    # `sparq-server-http` vs `sparq-server` and the parent is not itself a fixture key: a scan over
+    # the fixture alone would miss every region/parent pair and report only sibling collisions.
+    # The list is both the bug report — each pair is a key the registry's `busy_packages_of_pulls`
+    # currently treats as free — and the mutation guard: flatten `partition_path` to the identity,
+    # or revert `keys_conflict` to `a == b`, and it goes EMPTY rather than merely wrong.
+    _universe = sorted(set(_FIXTURE) | {p for path in _FIXTURE.values() for p in path})
+    _disagree = sorted((a, b) for i, a in enumerate(_universe) for b in _universe[i + 1:]
+                       if _mod.keys_conflict(a, b) != (a == b))
+    chk("[sparq#4365] ...and disagrees with exact-string comparison on the containment pairs",
+        _disagree,
+        # The degenerate key contains EVERYTHING (it is the `()` root), so it pairs with all 12
+        # named keys; the rest are the region/parent and region/sibling pairs #4360 introduced.
+        [("", k) for k in _universe if k != ""] +
+        [("sparq-core", "sparq-core-nt-dict"), ("sparq-core", "sparq-core-store"),
+         ("sparq-core-nt-dict", "sparq-core-store"),
+         ("sparq-engine", "sparq-engine-exec"),
+         ("sparq-server", "sparq-server-http"),
+         ("upstream", "upstream-noir")])
 
     print("dispatch-plan self-test", "PASSED" if ok else "FAILED")
     return 0 if ok else 1
