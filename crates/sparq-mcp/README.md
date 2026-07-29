@@ -93,10 +93,9 @@ not a protocol error, so the agent can read it and retry.
 
 ## 🔒 Trust model — read this
 
-This is a **local agent-tool server, not a hardened multi-tenant endpoint**. It has **no
-built-in authentication or authorization**: the MCP transport (stdio, or the `http` listener)
-is a trust boundary you, the operator, establish — whoever can speak to the server has exactly
-the access it was configured with. Run it only against a client you trust, on loopback.
+This is a **local agent-tool server, not a hardened multi-tenant endpoint**. It has **no built-in authentication
+or authorization**: the MCP transport (stdio, or the `http` listener) is a trust boundary you, the operator,
+establish — whoever can speak to the server has exactly the access it was configured with. Run it only against a client you trust, on loopback.
 
 - **Read-only by default.** Default tools cannot mutate; the feature-gated `validate` and `describe_form` tools are read-only.
 - **`update` is a mutation surface** and is exposed **only** when you set
