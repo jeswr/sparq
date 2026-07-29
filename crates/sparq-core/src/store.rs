@@ -1076,7 +1076,9 @@ impl TripleStore {
         // dropped) — hence `merge` would reproduce `base` verbatim, rows AND sort order.
         // We therefore return the BORROWED base slice directly, restoring allocation-free
         // scans for every untouched range (the read-mostly mutated-server common case)
-        // instead of copying+re-sorting the whole range through the owned merge path.
+        // instead of paying the owned merge path — which copies the whole base range into a
+        // fresh `Vec` and merge-interleaves the (separately, already perm-sorted) in-range
+        // `added` rows. It never re-sorts the range; the cost is the copy plus the interleave.
         let rows = match &self.overlay {
             None => base,
             Some(ov) if ov.count_correction(perm, lo, hi) == (0, 0) => base,
