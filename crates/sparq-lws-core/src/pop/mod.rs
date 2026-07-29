@@ -1,7 +1,8 @@
 // AUTHORED-BY Claude Opus 4.8
 //! Tiered proof-of-possession (PoP) — the auth-confirmation dispatch.
 //!
-//! Design: [`docs/design/high-throughput-pop-auth.md`](../../docs/design/high-throughput-pop-auth.md).
+//! Design: `research/lws-design-records.md` §7 (RSS `docs/design/high-throughput-pop-auth.md`, not
+//! carried over by the import — these module docs are the durable record of the tiering design).
 //! DPoP (RFC 9449) stays the **mandatory** Solid-OIDC baseline; the tiers here are negotiated,
 //! opt-in fast paths that are *individually refusable* and never a silent downgrade.
 //!

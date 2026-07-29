@@ -1,8 +1,9 @@
 // AUTHORED-BY Claude Opus 4.8
 //! PoP Tier-1b — the per-connection client-certificate binding (`ConnPop`) + its acceptor wiring.
 //!
-//! Design: [`docs/design/high-throughput-pop-auth.md`](../../docs/design/high-throughput-pop-auth.md)
-//! §7 (bead 2). This is the TRANSPORT half of RFC 8705 mTLS-bound tokens: read the client certificate
+//! Design: `research/lws-design-records.md` §7 (RSS `docs/design/high-throughput-pop-auth.md` §7,
+//! bead 2 — not carried over by the import; this module's docs are the durable record).
+//! This is the TRANSPORT half of RFC 8705 mTLS-bound tokens: read the client certificate
 //! the peer presented on the TLS connection **once per connection**, compute its `cnf.x5t#S256`
 //! thumbprint, and make it available to every request served over that connection so the auth layer
 //! can match a cert-bound token against it ([`crate::auth`] + [`crate::pop::dispatch`]).

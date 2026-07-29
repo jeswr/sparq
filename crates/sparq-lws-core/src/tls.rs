@@ -51,11 +51,12 @@
 //! [`DEFAULT_TLS_SESSION_CACHE_SIZE`] = 10 240; `0` disables resumption entirely). A larger cache lets
 //! more returning clients complete an ABBREVIATED (resumed) handshake — skipping the asymmetric key
 //! exchange — which is the connection-amortization half of the beyond-50k throughput plan
-//! (`docs/design/beyond-50k-throughput.md` §4 P1.3). This is a pure PERFORMANCE knob: it changes no
-//! LDP/auth/WAC semantics, and it does **NOT** enable TLS 0-RTT early data — `max_early_data_size`
-//! stays `0`. 0-RTT is replayable by design, which is incoherent under this server's anti-replay DPoP
-//! (`jti`) model, so it is never turned on here (§5 of the design doc). The tuning is installed
-//! uniformly on both build paths (default + mTLS) by `apply_transport_tuning`.
+//! (`research/lws-design-records.md` §7 — RSS `docs/design/beyond-50k-throughput.md` §4 P1.3).
+//! This is a pure PERFORMANCE knob: it changes no LDP/auth/WAC semantics, and it does **NOT**
+//! enable TLS 0-RTT early data — `max_early_data_size` stays `0`. 0-RTT is replayable by design,
+//! which is incoherent under this server's anti-replay DPoP (`jti`) model, so it is never turned
+//! on here (RSS `docs/design/beyond-50k-throughput.md` §5). The tuning is installed uniformly on
+//! both build paths (default + mTLS) by `apply_transport_tuning`.
 //!
 //! ## TLS session resumption — the stateless-`Ticketer` half (opt-in), 0-RTT STILL OFF
 //! By default rustls keeps its `NeverProducesTickets` ticketer, so TLS 1.3 resumption is STATEFUL
@@ -64,14 +65,15 @@
 //! — AES-256-CBC + HMAC-SHA256, RANDOM per-process keys rotated every ~6h (≈12h ticket life, forward-secret
 //! by key erasure) — so a returning client resumes STATELESSLY from an encrypted ticket, with NO server-side
 //! per-session memory. This is the second half of the beyond-50k P1.3 connection-amortization lever
-//! (`docs/design/beyond-50k-throughput.md` §4 P1.3). It stays OPT-IN and default OFF on purpose: a
-//! per-process ticket key is NOT shared across a horizontally-scaled fleet, so tickets issued by one node
-//! do not resume on another (a cross-node full-handshake fallback — a perf, never a correctness, effect;
-//! and the shared-key design belongs with the horizontal-scale / shared-replay work). Crucially, a
-//! ticketer does **NOT** enable 0-RTT: [`max_early_data_size`](rustls::ServerConfig) is still forced to
-//! `0` in `apply_transport_tuning` even when the ticketer is on, so the anti-replay DPoP invariant holds
-//! regardless. Building the ticketer is FAIL-SAFE — an RNG error logs and falls back to the stateful cache,
-//! never a boot failure.
+//! (`research/lws-design-records.md` §7 — RSS `docs/design/beyond-50k-throughput.md` §4 P1.3).
+//! It stays OPT-IN and default OFF on purpose: a per-process ticket key is NOT shared across a
+//! horizontally-scaled fleet, so tickets issued by one node do not resume on another (a cross-node
+//! full-handshake fallback — a perf, never a correctness, effect; and the shared-key design
+//! belongs with the horizontal-scale / shared-replay work). Crucially, a ticketer does **NOT**
+//! enable 0-RTT: [`max_early_data_size`](rustls::ServerConfig) is still forced to `0` in
+//! `apply_transport_tuning` even when the ticketer is on, so the anti-replay DPoP invariant holds
+//! regardless. Building the ticketer is FAIL-SAFE — an RNG error logs and falls back to the
+//! stateful cache, never a boot failure.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -98,7 +100,8 @@ pub const ENV_TLS_KEY: &str = "SOLID_SERVER_TLS_KEY";
 /// token can be matched against the presented cert's `cnf.x5t#S256` thumbprint. **Default OFF** — when
 /// unset/falsy the TLS + plain serve paths are byte-identical to the pre-Tier-1b behaviour (no client
 /// cert requested, no confirmation dispatch). See [`mtls_bound_tokens_from_env`] +
-/// [`build_rustls_config`]. Design: `docs/design/high-throughput-pop-auth.md` §7 (bead 2).
+/// [`build_rustls_config`]. Design: `research/lws-design-records.md` §7
+/// (RSS `docs/design/high-throughput-pop-auth.md` §7 — bead 2).
 pub const ENV_MTLS_BOUND_TOKENS: &str = "SOLID_SERVER_MTLS_BOUND_TOKENS";
 
 /// Env var tuning the size of the in-memory TLS **session-resumption cache** (rustls's
@@ -111,11 +114,12 @@ pub const ENV_MTLS_BOUND_TOKENS: &str = "SOLID_SERVER_MTLS_BOUND_TOKENS";
 /// - `N` ⇒ remember up to ≈`N` sessions, clamped to [`MAX_TLS_SESSION_CACHE_SIZE`].
 ///
 /// This is a pure THROUGHPUT knob — the connection-amortization half of the beyond-50k plan
-/// (`docs/design/beyond-50k-throughput.md` §4 P1.3): a larger cache lets more distinct concurrent
-/// clients resume before eviction forces a full handshake, exactly as a connection-bound PoP check
-/// amortizes per-request asymmetric verifies. It changes NO LDP/auth/WAC semantics and, crucially,
-/// does NOT enable TLS 0-RTT early data — `max_early_data_size` stays `0`, because 0-RTT is replayable
-/// by design and this server's auth model is anti-replay (DPoP `jti`). See the module docs.
+/// (`research/lws-design-records.md` §7 — RSS `docs/design/beyond-50k-throughput.md` §4 P1.3):
+/// a larger cache lets more distinct concurrent clients resume before eviction forces a full
+/// handshake, exactly as a connection-bound PoP check amortizes per-request asymmetric verifies.
+/// It changes NO LDP/auth/WAC semantics and, crucially, does NOT enable TLS 0-RTT early data —
+/// `max_early_data_size` stays `0`, because 0-RTT is replayable by design and this server's auth
+/// model is anti-replay (DPoP `jti`). See the module docs.
 pub const ENV_TLS_SESSION_CACHE_SIZE: &str = "SOLID_SERVER_TLS_SESSION_CACHE_SIZE";
 
 /// Default TLS session-resumption cache size when [`ENV_TLS_SESSION_CACHE_SIZE`] is unset. Chosen well
@@ -677,8 +681,9 @@ impl rustls::server::danger::ClientCertVerifier for SelfSignedOptionalClientCert
 /// is FORCED to `0` here on every path, regardless of the ticketer. A ticketer makes 0-RTT *possible* only
 /// if `max_early_data_size > 0`; keeping it `0` means installing the ticketer never opens the 0-RTT
 /// replay window. 0-RTT early data is replayable by design, which is incoherent under this server's
-/// anti-replay DPoP `jti` model (`docs/design/beyond-50k-throughput.md` §5). The `debug_assert` pins that
-/// the value was already `0` so a future rustls default change surfaces in tests.
+/// anti-replay DPoP `jti` model (RSS `docs/design/beyond-50k-throughput.md` §5 →
+/// `research/lws-design-records.md` §7). The `debug_assert` pins that the value was already `0` so
+/// a future rustls default change surfaces in tests.
 fn apply_transport_tuning(config: &RustlsConfig, tuning: TransportTuning) {
     let mut server_config = (*config.get_inner()).clone();
     server_config.alpn_protocols = ALPN_PROTOCOLS.iter().map(|p| p.to_vec()).collect();

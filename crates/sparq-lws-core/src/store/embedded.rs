@@ -9,7 +9,8 @@
 //! selected at boot by `PSS_SPARQ_BACKEND=embedded` (see `main.rs`). Behind the `embedded-sparq`
 //! build feature, ON BY DEFAULT since sq-gg0qq.3 (this crate lives in the sparq workspace, so the
 //! in-process engine binding is the default backend); `--no-default-features` builds the
-//! engine-free profile. See `decisions/0001-embed-sparq-in-process.md`.
+//! engine-free profile. See RSS `decisions/0001-embed-sparq-in-process.md` →
+//! `research/lws-design-records.md` §3.
 //!
 //! ## Why this is a net simplification over the HTTP path
 //! - **Same queries, different transport.** Every query/update is built by the SAME injection-safe

@@ -294,9 +294,10 @@ impl<'a, S: Store> WacAuthorizer<'a, S> {
     }
 
     /// The full ACL-candidate chain for `target`, NEAREST-FIRST — the up-front, pure-string
-    /// derivation the combined read-plan query (read-2, `docs/design/backend-read-path.md` §3.1)
-    /// needs: element 0 is the PROTECTED resource's OWN ACL (scope [`AclScope::AccessTo`]), the
-    /// rest are its ancestors' ACLs child→root (scope [`AclScope::Default`]).
+    /// derivation the combined read-plan query (read-2, RSS `docs/design/backend-read-path.md` §3.1
+    /// → `research/lws-design-records.md` §7) needs: element 0 is the PROTECTED resource's OWN ACL
+    /// (scope [`AclScope::AccessTo`]), the rest are its ancestors' ACLs child→root (scope
+    /// [`AclScope::Default`]).
     ///
     /// Derived from the PROTECTED resource, not the raw target (the design's "two IRI roles"): a
     /// GET of `foo.acl` is governed by Control on `foo`, so its chain starts at `foo.acl` itself —

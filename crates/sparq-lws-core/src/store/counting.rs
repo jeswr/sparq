@@ -1,6 +1,7 @@
 // AUTHORED-BY Claude Fable 5
 //! Deterministic backend round-trip counters at the [`SparqClient`] / [`BlobStore`] seams —
-//! read-1 of the read-path perf plan (`docs/design/backend-read-path.md` §7).
+//! read-1 of the read-path perf plan (RSS `docs/design/backend-read-path.md` §7 →
+//! `research/lws-design-records.md` §7).
 //!
 //! ## What this measures (and why it is deterministic)
 //! [`CountingSparqClient`] / [`CountingBlobStore`] are transparent decorators that count, per trait

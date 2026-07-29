@@ -364,7 +364,8 @@ redis-replay = ["dep:redis", "dep:r2d2"]
 # the first-class backend: `PSS_SPARQ_BACKEND=embedded` selects it at runtime (boot default stays
 # the in-memory double — explicit runtime selection, fail-safe). Disable with
 # `--no-default-features` to build the engine-free profile.
-# See `sparq_lws_core::store::embedded` and decisions/0001-embed-sparq-in-process.md.
+# See `sparq_lws_core::store::embedded` and `research/lws-design-records.md` §3
+# (RSS `decisions/0001-embed-sparq-in-process.md`).
 embedded-sparq = ["dep:sparq-core", "dep:sparq-engine"]
 # [GPT-5.6] sq-r1ei8: default-on full-tier query surface. The route, handler,
 # protocol parser, and engine dependencies are all compiled out together; this

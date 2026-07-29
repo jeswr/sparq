@@ -1,7 +1,8 @@
 // AUTHORED-BY Claude Fable 5
-//! P1.5 (beyond-50k `docs/design/beyond-50k-throughput.md` §4): `TCP_NODELAY` is set on the accepted
-//! sockets of BOTH serve paths. The DETERMINISTIC metric (per the perf-gate rule) is the socket-option
-//! STATE — `TcpStream::nodelay()` reads back `true` after the path's nodelay mechanism runs — not any
+//! P1.5 (beyond-50k RSS `docs/design/beyond-50k-throughput.md` §4 →
+//! `research/lws-design-records.md` §7): `TCP_NODELAY` is set on the accepted sockets of BOTH serve
+//! paths. The DETERMINISTIC metric (per the perf-gate rule) is the socket-option STATE —
+//! `TcpStream::nodelay()` reads back `true` after the path's nodelay mechanism runs — not any
 //! wall-clock latency (which is advisory). Each test drives the EXACT primitive `src/main.rs` wires:
 //!
 //! - the plain `axum::serve` path taps every accepted stream with [`sparq_lws_core::nodelay::tap_nodelay`]

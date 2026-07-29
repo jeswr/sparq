@@ -1,12 +1,12 @@
 // AUTHORED-BY Claude Fable 5
 //! Provider-issued WebIDs hosted OUTSIDE the pod — the identity host.
 //!
-//! See `docs/design/webid-outside-pod.md` (the RSS adaptation of prod-solid-server
-//! `decisions/0020-webid-outside-pod.md`). The WebID document is the Solid-OIDC identity trust
-//! root: every resource server on the web dereferences it to learn which issuers may mint tokens
-//! for that WebID (`solid:oidcIssuer`). Hosting it INSIDE the pod — a WAC-governed, owner-writable
-//! resource — leaves it one over-broad `acl:default` grant away from ecosystem-wide identity
-//! takeover. This module bakes the separation in from the start:
+//! See RSS `docs/design/webid-outside-pod.md` → `research/lws-design-records.md` §4 — the RSS
+//! adaptation of PSS `decisions/0020-webid-outside-pod.md`. The WebID document is the Solid-OIDC
+//! identity trust root: every resource server on the web dereferences it to learn which issuers
+//! may mint tokens for that WebID (`solid:oidcIssuer`). Hosting it INSIDE the pod — a WAC-governed,
+//! owner-writable resource — leaves it one over-broad `acl:default` grant away from ecosystem-wide
+//! identity takeover. This module bakes the separation in from the start:
 //!
 //! - **WebID form:** `https://<identity-host>/<handle>#me` (document at
 //!   `https://<identity-host>/<handle>`); default host `id.<base authority>`.

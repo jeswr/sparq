@@ -1,8 +1,9 @@
 // AUTHORED-BY Claude Fable 5
 //! PoP **Tier 2 — DPoP-SK**: negotiated symmetric session keys for DPoP-bound requests.
 //!
-//! Design: [`docs/design/high-throughput-pop-auth.md`](../../../docs/design/high-throughput-pop-auth.md)
-//! §4–§6; normative spec: **DPoP-SK** (<https://jeswr.github.io/dpop-sk-spec/> — the CG-shaped
+//! Design: `research/lws-design-records.md` §7 (RSS `docs/design/high-throughput-pop-auth.md`
+//! §4–§6, not carried over by the import; this module's docs are the durable record).
+//! Normative spec: **DPoP-SK** (<https://jeswr.github.io/dpop-sk-spec/> — the CG-shaped
 //! draft whose Appendix-A worked example this implementation reproduces byte-for-byte in tests).
 //!
 //! ## What it does

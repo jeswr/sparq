@@ -1,9 +1,10 @@
 // AUTHORED-BY Claude Fable 5
-//! P1.4 (`docs/design/beyond-50k-throughput.md` §4, item P1.4 — the vectored-write /
-//! response-coalescing audit): a DETERMINISTIC guard that pins the number of write-family
-//! syscalls the HTTP/1.1 response path emits per response, measured at the hyper→transport seam,
-//! **driving the REAL assembled router** (`build_router` — CORS → public-read skip → auth → WAC →
-//! LDP handler → `serve_read`/`negotiate_body`) over the SAME `axum::serve` path production uses.
+//! P1.4 (RSS `docs/design/beyond-50k-throughput.md` §4, item P1.4 →
+//! `research/lws-design-records.md` §7 — the vectored-write / response-coalescing audit): a
+//! DETERMINISTIC guard that pins the number of write-family syscalls the HTTP/1.1 response path
+//! emits per response, measured at the hyper→transport seam, **driving the REAL assembled router**
+//! (`build_router` — CORS → public-read skip → auth → WAC → LDP handler →
+//! `serve_read`/`negotiate_body`) over the SAME `axum::serve` path production uses.
 //! Both read paths are covered: the anonymous cases traverse CORS → public-read skip → `serve_read`
 //! (the skip short-circuits before the auth middleware), and the authenticated case
 //! (`real_authenticated_get_…`) carries a DPoP-bound token so it traverses the FULL auth middleware

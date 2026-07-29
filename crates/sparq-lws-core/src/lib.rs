@@ -41,6 +41,23 @@
 //! `application/sparql-update` INSERT/DELETE-DATA subset. The Solid conformance suite passes **41/41**
 //! (Protocol 25/25 + WAC 16/16) — see `conformance/SCORE.md`. The default impls used here are
 //! in-memory test doubles.
+//!
+//! ## Design records — how to read the `decisions/` + `docs/design/` citations
+//! This crate was imported whole from [jeswr/solid-server-rs](https://github.com/jeswr/solid-server-rs)
+//! (`sq-gg0qq.2`); that import deliberately left the source repo's `docs/design/` and `decisions/`
+//! trees behind, so those paths **do not exist in this checkout**. Their durable in-repo home is
+//! `research/lws-design-records.md`, whose §1 is the source-path → in-repo map.
+//!
+//! Two independently-numbered `decisions/` trees are cited, and their numbers collide, so every
+//! citation names its namespace:
+//! - **RSS** = `jeswr/solid-server-rs`, the Rust server this crate came from (RSS `decisions/0001`
+//!   is *embed sparq in-process*);
+//! - **PSS** = `prod-solid-server`, the upstream TypeScript server (PSS `decisions/0001` is
+//!   *foundational architecture*, PSS `decisions/0020` the WebID-host convention RSS adapted).
+//!
+//! Doc-comments carry the full `research/lws-design-records.md §N` pointer; dense implementation
+//! comments use the short namespaced form (`RSS decisions/0003`), which §1 of that record resolves.
+//! A bare `decisions/NNNN` with no namespace is ambiguous — do not write one.
 
 pub mod acl_cache;
 #[cfg(not(target_arch = "wasm32"))]
@@ -68,7 +85,8 @@ pub mod body_limit;
 mod clock;
 pub mod error;
 /// Provider-issued WebIDs hosted OUTSIDE the pod — the identity host (the RSS adaptation of
-/// prod-solid-server `decisions/0020`; design in `docs/design/webid-outside-pod.md`). The id-docs
+/// PSS `decisions/0020`; design in `research/lws-design-records.md` §4, from RSS
+/// `docs/design/webid-outside-pod.md`). The id-docs
 /// live in a reserved namespace the LDP surface refuses outright (no `.acl` can ever exist ⇒ no
 /// WAC grant can ever apply), served GET/HEAD-only by a Host-keyed route with no authorization.
 pub mod identity;
@@ -81,7 +99,8 @@ pub mod notifications;
 pub mod overload;
 /// Tiered proof-of-possession (RFC 8705 cert-bound tokens, later DPoP-SK) — the negotiated,
 /// opt-in fast paths that keep DPoP as the mandatory Solid-OIDC baseline. See
-/// `docs/design/high-throughput-pop-auth.md`. T1a lands the confirmation dispatch + cert-bound
+/// `research/lws-design-records.md` §7 (RSS `docs/design/high-throughput-pop-auth.md`; the design
+/// itself lives in these module docs). T1a lands the confirmation dispatch + cert-bound
 /// verification core; the acceptor + verifier wiring are tracked follow-ups.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod pop;

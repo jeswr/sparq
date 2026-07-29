@@ -171,14 +171,15 @@ const ENV_SEED_DEMO: &str = "SOLID_SERVER_SEED_DEMO";
 /// ONLY for an EPHEMERAL embedded test instance that the harness legitimately seeds (the
 /// conformance run.sh embedded leg sets it). NEVER set it against a real/persistent backend.
 const ENV_ALLOW_SEED_NONMEMORY: &str = "SOLID_SERVER_ALLOW_SEED_NONMEMORY";
-/// Provider WebIDs OUTSIDE the pod (`docs/design/webid-outside-pod.md` — the RSS adaptation of
-/// prod-solid-server `decisions/0020`): when `1`/`true`, the identity gate SERVES id-docs
-/// (GET/HEAD-only, Turtle/JSON-LD, NO WAC, no `.acl` Link) on the identity host, and the
-/// conformance seed mints id-host WebIDs (`https://<identity-host>/<handle>#me` with the LOCKED
-/// `solid:oidcIssuer` + `pim:storage`) instead of in-pod cards. Default OFF — byte-for-byte the
-/// prior behaviour EXCEPT the unconditional LDP refusal of the reserved `/.identity/**` namespace,
-/// which holds regardless of this flag (pre-seeded documents must never become LDP-addressable —
-/// and thus `.acl`-able — when the flag later turns on).
+/// Provider WebIDs OUTSIDE the pod (RSS `docs/design/webid-outside-pod.md` →
+/// `research/lws-design-records.md` §4 — the RSS adaptation of PSS `decisions/0020`): when
+/// `1`/`true`, the identity gate SERVES id-docs (GET/HEAD-only, Turtle/JSON-LD, NO WAC, no `.acl`
+/// Link) on the identity host, and the conformance seed mints id-host WebIDs
+/// (`https://<identity-host>/<handle>#me` with the LOCKED `solid:oidcIssuer` + `pim:storage`)
+/// instead of in-pod cards. Default OFF — byte-for-byte the prior behaviour EXCEPT the
+/// unconditional LDP refusal of the reserved `/.identity/**` namespace, which holds regardless of
+/// this flag (pre-seeded documents must never become LDP-addressable — and thus `.acl`-able —
+/// when the flag later turns on).
 const ENV_IDENTITY_ENABLE: &str = "SOLID_SERVER_IDENTITY_ENABLE";
 /// The identity-host authority (`host[:port]`) the gate exact-Host-matches (the analogue of
 /// `PSS_IDENTITY_HOST`). Unset ⇒ derived as `id.<base authority>` (deployment-agnostic). Only read
@@ -198,14 +199,14 @@ const ENV_TOKEN_CACHE_CAPACITY: &str = "SOLID_SERVER_TOKEN_CACHE_CAPACITY";
 /// etag/`meta` gate). Set to `0` to DISABLE the cache (every read re-reads + re-parses each ACL — the
 /// pre-cache path). Conformance-neutral. See [`sparq_lws_core::acl_cache`].
 const ENV_ACL_CACHE_CAPACITY: &str = "SOLID_SERVER_ACL_CACHE_CAPACITY";
-/// Blob-body cache byte budget (read-4 — `docs/design/backend-read-path.md` §3.4). Unset =>
-/// [`DEFAULT_BODY_CACHE_BYTES`]. The cache holds resource BODIES keyed by `(blob_key, etag)` in front
-/// of the blob store, so a hot UNCHANGED resource's repeat read pays ZERO blob round-trips — without
-/// ever serving stale bytes (every lookup is keyed by the request's own authoritative index metadata;
-/// blob keys are unique per write, so a rewrite is a guaranteed miss) and without touching
-/// authorization (WAC runs before any body fetch, hit or miss). Set to `0` to DISABLE (every read
-/// pays the blob fetch — the pre-cache path). Conformance-neutral. See
-/// [`sparq_lws_core::store::body_cache`].
+/// Blob-body cache byte budget (read-4 — RSS `docs/design/backend-read-path.md` §3.4 →
+/// `research/lws-design-records.md` §7). Unset => [`DEFAULT_BODY_CACHE_BYTES`]. The cache holds
+/// resource BODIES keyed by `(blob_key, etag)` in front of the blob store, so a hot UNCHANGED
+/// resource's repeat read pays ZERO blob round-trips — without ever serving stale bytes (every
+/// lookup is keyed by the request's own authoritative index metadata; blob keys are unique per
+/// write, so a rewrite is a guaranteed miss) and without touching authorization (WAC runs before
+/// any body fetch, hit or miss). Set to `0` to DISABLE (every read pays the blob fetch — the
+/// pre-cache path). Conformance-neutral. See [`sparq_lws_core::store::body_cache`].
 const ENV_BODY_CACHE_BYTES: &str = "SOLID_SERVER_BODY_CACHE_BYTES";
 /// Per-entry size cap for the blob-body cache: a body larger than this BYPASSES the cache (served,
 /// never stored), so one large media blob cannot evict the whole hot set. Unset => 1/8 of the byte
@@ -223,7 +224,8 @@ const ENV_BODY_CACHE_MAX_ENTRY_BYTES: &str = "SOLID_SERVER_BODY_CACHE_MAX_ENTRY_
 ///   selection stays EXPLICIT via this variable (fail-safe: an unconfigured boot serves the
 ///   ephemeral in-memory double, never a store an operator did not choose). With
 ///   `SOLID_SERVER_SPARQ_DIR` set it opens a directory-backed graph; otherwise a fresh in-memory
-///   graph. See decisions/0001-embed-sparq-in-process.md.
+///   graph. See RSS `decisions/0001-embed-sparq-in-process.md` →
+///   `research/lws-design-records.md` §3.
 ///
 /// `CompositeStore<S>` / `AppState<J,R,S>` / the router are all generic over the SparqClient `S`, so
 /// each arm monomorphizes the SAME wiring — no consumer code changes between backends.
@@ -327,7 +329,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let bidirectional = parse_bidirectional(std::env::var(ENV_BIDIRECTIONAL).ok().as_deref());
 
-    // --- Identity host (provider WebIDs OUTSIDE the pod — docs/design/webid-outside-pod.md). ------
+    // --- Identity host (provider WebIDs OUTSIDE the pod). ----------------------------------------
+    // Design: RSS `docs/design/webid-outside-pod.md` → `research/lws-design-records.md` §4.
     // Default OFF. When on, the identity gate serves id-docs on the id host (GET/HEAD-only, no WAC)
     // and the conformance seed mints id-host WebIDs. The LDP surface's refusal of the reserved
     // `/.identity/**` namespace is UNCONDITIONAL either way (flag-independent — the security
@@ -656,7 +659,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // EXPLICIT-selection posture when the embedded feature went default-on). `embedded` wires the
     // in-process engine (`embedded-sparq` feature, default-on — the first-class backend); `http`
     // wires the live HttpSparqClient (opt-in `http-sparq` feature — the remote shared-service
-    // shape). See decisions/0001-embed-sparq-in-process.md.
+    // shape). See RSS `decisions/0001-embed-sparq-in-process.md` →
+    // `research/lws-design-records.md` §3.
     let backend = std::env::var(ENV_SPARQ_BACKEND)
         .ok()
         .map(|s| s.trim().to_ascii_lowercase())
