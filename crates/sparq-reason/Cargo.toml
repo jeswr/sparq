@@ -242,9 +242,12 @@ required-features = ["compiled-rules"]
 
 # [OPUS-5] sq-zgbso.6: the Phase-4 SPIKE that gates RDFS/OWL-RL-as-compiled-N3 — compiles
 # `rules/rdfs.n3` (the same six rules src/rdfs.rs implements) through the compiled-rules
-# evaluator, asserts closure equivalence against `materialize(Profile::Rdfs, ..)` on the
-# entailment-conformance fixtures, and only then reports the wall-clock ratio. Measurement
-# only: it reads nothing the shipping materializer writes and changes no shipping path.
+# evaluator, asserts closure equivalence against `materialize(Profile::Rdfs, ..)` on a
+# hand-written differential corpus (each document carrying the conclusions RDFS requires
+# and the near-misses it must not reach — NOT the W3C entailment-conformance suite, which
+# runs against the shipping materializer in sparq-conformance), and only then reports the
+# wall-clock ratio. Measurement only: it reads nothing the shipping materializer writes
+# and changes no shipping path.
 # Wall-clock output is NON-canonical (work-box; bead/PR comments, never docs or tests).
 # Compiled only with the feature it exercises.
 [[example]]

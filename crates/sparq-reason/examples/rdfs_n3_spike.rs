@@ -18,10 +18,21 @@
 //!
 //! 1. Compiles `rules/rdfs.n3` — the same six rules (rdfs2/3/5/7/9/11) `src/rdfs.rs`
 //!    implements — through [`sparq_reason::n3::compiled::compile`].
-//! 2. **Entailment-conformance corpus** (§A): one fixture per rule plus the rule
-//!    interactions the RDFS conformance shapes exercise. Both closures must be
-//!    SET-EQUAL — a hard assert, so the example cannot report a ratio for a path that
-//!    computes a different answer.
+//! 2. **Differential corpus** (§A): 17 hand-written documents — one per rule, plus the
+//!    rule interactions and the degenerate shapes (diamond, cycle, no-op, schema-only).
+//!    TWO hard asserts per case: the two closures must be SET-EQUAL, **and** each
+//!    closure must contain the conclusions RDFS requires on that document and must NOT
+//!    contain the listed near-miss non-conclusions. The expectations are what stop a
+//!    shared error in BOTH paths from reading as agreement — set-equality alone cannot
+//!    see that case.
+//!
+//!    This corpus is a differential harness, **not** the W3C entailment-conformance
+//!    suite, and is not a substitute for it. That suite (`rdf/rdf11/rdf-mt`, with its
+//!    positive AND negative entailment tests) runs against the SHIPPING materializer in
+//!    `sparq-conformance` (`src/inference/rdfmt.rs`); the always-on negative floor is
+//!    `sparq-reason/tests/non_entailment.rs`. The question THIS spike answers is
+//!    narrower: does the compiled-N3 path compute the same closure as the shipping path
+//!    on shapes covering the six rules?
 //! 3. **Scale corpora** (§B): a deep-taxonomy shape (rdfs9/rdfs11 heavy) and a
 //!    schema+ABox shape (rdfs2/3/7 heavy). Set-equality is asserted first, then each
 //!    path is timed best-of-N and the ratio reported.
@@ -134,7 +145,12 @@ fn time_compiled(dict: &Dict, facts: &[[Id; 3]], rules: &CompiledRuleSet) -> (f6
 }
 
 // ---------------------------------------------------------------------------------
-// §A — entailment-conformance corpus: one fixture per rule + the interactions.
+// §A — differential corpus: one document per rule + the interactions, each carrying the
+// conclusions RDFS REQUIRES on it and the near-misses it must NOT reach.
+//
+// NOT the W3C entailment-conformance suite (see the module docs): that one runs against
+// the shipping materializer in `sparq-conformance`. These expectations exist so the
+// §A verdict does not rest on the two paths merely agreeing with each other.
 // ---------------------------------------------------------------------------------
 
 const PREFIXES: &str = "@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n\
@@ -142,82 +158,241 @@ const PREFIXES: &str = "@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns
                         @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
                         @prefix ex: <http://ex/> .\n";
 
-/// `(name, facts)` — each fixture is a complete N3 fact document.
-fn conformance_corpus() -> Vec<(&'static str, String)> {
-    let f = |body: &str| format!("{PREFIXES}{body}");
+/// One §A case: a complete N3 fact document plus the conclusions the RDFS regime must
+/// and must not reach on it. `entailed`/`absent` are triples written in the [`PREFIXES`]
+/// vocabulary and expanded by [`expand_triple`] into the rendering [`as_strings`] emits.
+struct Case {
+    name: &'static str,
+    facts: String,
+    /// Conclusions RDFS entails on `facts`. Asserted PRESENT in the closure.
+    entailed: &'static [&'static str],
+    /// Near-misses RDFS does NOT entail (a swapped domain/range, a reversed edge, an
+    /// unmentioned class). Asserted ABSENT — this is the over-entailment side.
+    absent: &'static [&'static str],
+}
+
+/// Expand a compact `prefix:local` token into the `<full-iri>` form `oxrdf`'s `Display`
+/// — and therefore [`as_strings`] — produces. A typed literal keeps its lexical form and
+/// has its datatype expanded the same way.
+fn expand(token: &str) -> String {
+    const NS: [(&str, &str); 4] = [
+        ("rdf:", "http://www.w3.org/1999/02/22-rdf-syntax-ns#"),
+        ("rdfs:", "http://www.w3.org/2000/01/rdf-schema#"),
+        ("xsd:", "http://www.w3.org/2001/XMLSchema#"),
+        ("ex:", "http://ex/"),
+    ];
+    if let Some((lex, dt)) = token.split_once("^^") {
+        return format!("{}^^{}", lex, expand(dt));
+    }
+    for (p, ns) in NS {
+        if let Some(local) = token.strip_prefix(p) {
+            return format!("<{}{}>", ns, local);
+        }
+    }
+    token.to_string()
+}
+
+/// Expand a whole `s p o` expectation written in the [`PREFIXES`] vocabulary.
+fn expand_triple(t: &str) -> String {
+    t.split_whitespace()
+        .map(expand)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Assert the required conclusions are present and the near-misses absent. Runs against
+/// a closure §A has already asserted set-equal to the other path's, so a failure here is
+/// a SHARED error in both paths — precisely what set-equality cannot detect. Returns the
+/// number of expectations checked.
+fn assert_expectations(case: &Case, closure: &BTreeSet<String>) -> usize {
+    for t in case.entailed {
+        assert!(
+            closure.contains(&expand_triple(t)),
+            "{}: RDFS entails `{}`, but BOTH paths omit it from the closure",
+            case.name,
+            t,
+        );
+    }
+    for t in case.absent {
+        assert!(
+            !closure.contains(&expand_triple(t)),
+            "{}: `{}` is NOT RDFS-entailed, but BOTH paths derived it",
+            case.name,
+            t,
+        );
+    }
+    case.entailed.len() + case.absent.len()
+}
+
+fn differential_corpus() -> Vec<Case> {
+    let case = |name: &'static str,
+                body: &str,
+                entailed: &'static [&'static str],
+                absent: &'static [&'static str]| Case {
+        name,
+        facts: format!("{PREFIXES}{body}"),
+        entailed,
+        absent,
+    };
     vec![
-        (
+        case(
             "rdfs2 domain",
-            f("ex:p rdfs:domain ex:C . ex:a ex:p ex:b ."),
+            "ex:p rdfs:domain ex:C . ex:a ex:p ex:b .",
+            &["ex:a rdf:type ex:C"],
+            // domain types the SUBJECT only — no range is asserted.
+            &["ex:b rdf:type ex:C"],
         ),
-        ("rdfs3 range", f("ex:p rdfs:range ex:C . ex:a ex:p ex:b .")),
-        (
+        case(
+            "rdfs3 range",
+            "ex:p rdfs:range ex:C . ex:a ex:p ex:b .",
+            &["ex:b rdf:type ex:C"],
+            &["ex:a rdf:type ex:C"],
+        ),
+        case(
             "rdfs5 subPropertyOf transitivity",
-            f("ex:p rdfs:subPropertyOf ex:q . ex:q rdfs:subPropertyOf ex:r .\n\
-               ex:r rdfs:subPropertyOf ex:s ."),
+            "ex:p rdfs:subPropertyOf ex:q . ex:q rdfs:subPropertyOf ex:r .\n\
+             ex:r rdfs:subPropertyOf ex:s .",
+            &[
+                "ex:p rdfs:subPropertyOf ex:r",
+                "ex:q rdfs:subPropertyOf ex:s",
+                "ex:p rdfs:subPropertyOf ex:s",
+            ],
+            // transitivity, not symmetry; and rdfs5 alone is not reflexive.
+            &[
+                "ex:s rdfs:subPropertyOf ex:p",
+                "ex:p rdfs:subPropertyOf ex:p",
+            ],
         ),
-        (
+        case(
             "rdfs7 subPropertyOf rewrite",
-            f("ex:p rdfs:subPropertyOf ex:q . ex:a ex:p ex:b ."),
+            "ex:p rdfs:subPropertyOf ex:q . ex:a ex:p ex:b .",
+            &["ex:a ex:q ex:b"],
+            // the rewrite keeps subject and object in place.
+            &["ex:b ex:q ex:a", "ex:q rdfs:subPropertyOf ex:p"],
         ),
-        (
+        case(
             "rdfs9 subClassOf typing",
-            f("ex:C rdfs:subClassOf ex:D . ex:a rdf:type ex:C ."),
+            "ex:C rdfs:subClassOf ex:D . ex:a rdf:type ex:C .",
+            &["ex:a rdf:type ex:D"],
+            &["ex:D rdfs:subClassOf ex:C"],
         ),
-        (
+        case(
             "rdfs11 subClassOf transitivity",
-            f("ex:C rdfs:subClassOf ex:D . ex:D rdfs:subClassOf ex:E .\n\
-               ex:E rdfs:subClassOf ex:F ."),
+            "ex:C rdfs:subClassOf ex:D . ex:D rdfs:subClassOf ex:E .\n\
+             ex:E rdfs:subClassOf ex:F .",
+            &[
+                "ex:C rdfs:subClassOf ex:E",
+                "ex:D rdfs:subClassOf ex:F",
+                "ex:C rdfs:subClassOf ex:F",
+            ],
+            &["ex:F rdfs:subClassOf ex:C", "ex:C rdfs:subClassOf ex:C"],
         ),
-        (
+        case(
             "rdfs9 x rdfs11 (transitive typing)",
-            f("ex:Dog rdfs:subClassOf ex:Mammal . ex:Mammal rdfs:subClassOf ex:Animal .\n\
-               ex:rex rdf:type ex:Dog ."),
+            "ex:Dog rdfs:subClassOf ex:Mammal . ex:Mammal rdfs:subClassOf ex:Animal .\n\
+             ex:rex rdf:type ex:Dog .",
+            &[
+                "ex:Dog rdfs:subClassOf ex:Animal",
+                "ex:rex rdf:type ex:Mammal",
+                "ex:rex rdf:type ex:Animal",
+            ],
+            &["ex:Animal rdfs:subClassOf ex:Dog"],
         ),
-        (
+        case(
             "rdfs7 x rdfs2 (rewrite then domain typing)",
-            f("ex:p rdfs:subPropertyOf ex:q . ex:q rdfs:domain ex:C . ex:s ex:p ex:o ."),
+            "ex:p rdfs:subPropertyOf ex:q . ex:q rdfs:domain ex:C . ex:s ex:p ex:o .",
+            &["ex:s ex:q ex:o", "ex:s rdf:type ex:C"],
+            // the domain is not inherited by the object, and not by the subproperty's range.
+            &["ex:o rdf:type ex:C"],
         ),
-        (
+        case(
             "rdfs7 x rdfs3 x rdfs9 (rewrite, range typing, subclass)",
-            f("ex:p rdfs:subPropertyOf ex:q . ex:q rdfs:range ex:C .\n\
-               ex:C rdfs:subClassOf ex:D . ex:s ex:p ex:o ."),
+            "ex:p rdfs:subPropertyOf ex:q . ex:q rdfs:range ex:C .\n\
+             ex:C rdfs:subClassOf ex:D . ex:s ex:p ex:o .",
+            &["ex:s ex:q ex:o", "ex:o rdf:type ex:C", "ex:o rdf:type ex:D"],
+            &["ex:s rdf:type ex:C", "ex:s rdf:type ex:D"],
         ),
-        (
+        case(
             "rdfs2+rdfs3 through a subPropertyOf chain",
-            f("ex:p rdfs:subPropertyOf ex:q . ex:q rdfs:subPropertyOf ex:r .\n\
-               ex:r rdfs:domain ex:C . ex:r rdfs:range ex:D . ex:a ex:p ex:b ."),
+            "ex:p rdfs:subPropertyOf ex:q . ex:q rdfs:subPropertyOf ex:r .\n\
+             ex:r rdfs:domain ex:C . ex:r rdfs:range ex:D . ex:a ex:p ex:b .",
+            &[
+                "ex:p rdfs:subPropertyOf ex:r",
+                "ex:a ex:q ex:b",
+                "ex:a ex:r ex:b",
+                "ex:a rdf:type ex:C",
+                "ex:b rdf:type ex:D",
+            ],
+            // domain and range must not swap through the chain.
+            &["ex:b rdf:type ex:C", "ex:a rdf:type ex:D"],
         ),
-        (
+        case(
             "shared subject/object (rdfs2 and rdfs3 on one term)",
-            f("ex:p rdfs:domain ex:C . ex:p rdfs:range ex:D . ex:a ex:p ex:a ."),
+            "ex:p rdfs:domain ex:C . ex:p rdfs:range ex:D . ex:a ex:p ex:a .",
+            &["ex:a rdf:type ex:C", "ex:a rdf:type ex:D"],
+            // one term in both roles must not relate the two classes.
+            &["ex:C rdfs:subClassOf ex:D", "ex:D rdfs:subClassOf ex:C"],
         ),
-        (
+        case(
             "literal object typed by rdfs3",
-            f("ex:age rdfs:range xsd:integer . ex:a ex:age \"42\"^^xsd:integer ."),
+            "ex:age rdfs:range xsd:integer . ex:a ex:age \"42\"^^xsd:integer .",
+            &["\"42\"^^xsd:integer rdf:type xsd:integer"],
+            &["ex:a rdf:type xsd:integer"],
         ),
-        (
+        case(
             "diamond subclass hierarchy",
-            f("ex:A rdfs:subClassOf ex:B . ex:A rdfs:subClassOf ex:C .\n\
-               ex:B rdfs:subClassOf ex:D . ex:C rdfs:subClassOf ex:D .\n\
-               ex:x rdf:type ex:A ."),
+            "ex:A rdfs:subClassOf ex:B . ex:A rdfs:subClassOf ex:C .\n\
+             ex:B rdfs:subClassOf ex:D . ex:C rdfs:subClassOf ex:D .\n\
+             ex:x rdf:type ex:A .",
+            &[
+                "ex:A rdfs:subClassOf ex:D",
+                "ex:x rdf:type ex:B",
+                "ex:x rdf:type ex:C",
+                "ex:x rdf:type ex:D",
+            ],
+            // the two arms of the diamond are siblings, not related to each other.
+            &["ex:B rdfs:subClassOf ex:C", "ex:C rdfs:subClassOf ex:B"],
         ),
-        (
+        case(
             "cyclic subClassOf (equivalence by mutual subsumption)",
-            f("ex:A rdfs:subClassOf ex:B . ex:B rdfs:subClassOf ex:A . ex:x rdf:type ex:A ."),
+            "ex:A rdfs:subClassOf ex:B . ex:B rdfs:subClassOf ex:A . ex:x rdf:type ex:A .",
+            // here rdfs11 DOES close reflexively — the cycle entails it.
+            &[
+                "ex:A rdfs:subClassOf ex:A",
+                "ex:B rdfs:subClassOf ex:B",
+                "ex:x rdf:type ex:B",
+            ],
+            &["ex:x rdf:type ex:C"],
         ),
-        (
+        case(
             "cyclic subPropertyOf",
-            f("ex:p rdfs:subPropertyOf ex:q . ex:q rdfs:subPropertyOf ex:p . ex:a ex:p ex:b ."),
+            "ex:p rdfs:subPropertyOf ex:q . ex:q rdfs:subPropertyOf ex:p . ex:a ex:p ex:b .",
+            &[
+                "ex:p rdfs:subPropertyOf ex:p",
+                "ex:q rdfs:subPropertyOf ex:q",
+                "ex:a ex:q ex:b",
+            ],
+            &["ex:b ex:p ex:a"],
         ),
-        (
+        case(
             "no entailment (nothing to fire)",
-            f("ex:a ex:p ex:b . ex:c ex:q ex:d ."),
+            "ex:a ex:p ex:b . ex:c ex:q ex:d .",
+            &[],
+            // no schema at all: the closure must stay the two asserted triples.
+            &["ex:a ex:q ex:b", "ex:c ex:p ex:d", "ex:a rdf:type ex:C"],
         ),
-        (
+        case(
             "schema-only (no ABox)",
-            f("ex:C rdfs:subClassOf ex:D . ex:p rdfs:subPropertyOf ex:q .\n\
-               ex:p rdfs:domain ex:C . ex:q rdfs:range ex:D ."),
+            "ex:C rdfs:subClassOf ex:D . ex:p rdfs:subPropertyOf ex:q .\n\
+             ex:p rdfs:domain ex:C . ex:q rdfs:range ex:D .",
+            &[],
+            // domain/range are not inherited along subPropertyOf, and with no assertion
+            // to rewrite nothing fires at all.
+            &[
+                "ex:q rdfs:domain ex:C",
+                "ex:p rdfs:range ex:D",
+                "ex:C rdf:type ex:D",
+            ],
         ),
     ]
 }
@@ -373,21 +548,35 @@ fn main() {
     );
     assert_eq!(rules.n_rules(), 6, "the RDFS ruleset is rdfs2/3/5/7/9/11");
 
-    // ---- §A equivalence on the entailment-conformance corpus --------------------
-    println!("§A entailment-conformance corpus (equivalence is a HARD assert):");
-    let corpus = conformance_corpus();
+    // ---- §A differential corpus: equivalence AND expected conclusions ------------
+    println!(
+        "§A differential corpus — set-equality AND the per-case expected/forbidden\n\
+         conclusions are BOTH hard asserts. This is not the W3C entailment-conformance\n\
+         suite (that runs against the shipping materializer in sparq-conformance,\n\
+         src/inference/rdfmt.rs); it asks only whether the two paths agree, and whether\n\
+         what they agree on is actually RDFS:"
+    );
+    let corpus = differential_corpus();
     let mut total = 0usize;
-    for (name, facts) in &corpus {
+    let mut checks = 0usize;
+    for case in &corpus {
         let mut dict = Dict::new();
-        let ids = intern_facts(&mut dict, facts).expect("fixture facts must parse");
+        let ids = intern_facts(&mut dict, &case.facts).expect("fixture facts must parse");
         let hand = hand_closure(&dict, &ids);
         let comp = compiled_closure(&dict, &ids, &rules);
-        assert_equivalent(name, &hand, &comp);
+        assert_equivalent(case.name, &hand, &comp);
+        let n = assert_expectations(case, &hand);
         total += hand.len();
-        println!("  ok  {name} — {} closure triples", hand.len());
+        checks += n;
+        println!(
+            "  ok  {} — {} closure triples, {n} expectations",
+            case.name,
+            hand.len()
+        );
     }
     println!(
-        "  => {} fixtures equivalent, {total} closure triples compared\n",
+        "  => {} documents equivalent, {total} closure triples compared, \
+         {checks} expected/forbidden conclusions checked\n",
         corpus.len()
     );
 
@@ -396,7 +585,8 @@ fn main() {
     let scales: Vec<(String, String)> = vec![
         ("deep taxonomy (chain 120, 200 individuals)".into(), taxonomy_facts(120, 200)),
         (
-            "schema+ABox (84 leaf classes, 24 properties, 20k assertions)".into(),
+            // 4 tops x 4 mids x 4 leaves = 64 leaf classes.
+            "schema+ABox (64 leaf classes, 24 properties, 20k assertions)".into(),
             schema_abox_facts(4, 4, 4, 24, 20_000),
         ),
         (
