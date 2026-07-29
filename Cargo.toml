@@ -92,6 +92,18 @@ instant-distance = "0.6"
 # dev-profile lib); every other crate's dev build is untouched.
 [profile.dev.package.sparq-vectors]
 opt-level = 2
+# [OPUS-5] (issue #3699) sparq-vamana carries the Vamana graph build/search + the PQ
+# quantizer loops that were EXTRACTED out of sparq-vectors, so the override above no
+# longer covers the hot code the recall gates actually spend their time in — it has to
+# follow the code. Without this entry those loops build at dev's opt-level 0 while the
+# now-thin sparq-vectors facade keeps its 2, which is exactly the "minutes-slow" regime
+# the comment above warns about. Measured on this crate's own recall test
+# (`recall_at_10_clears_the_floor_and_survives_a_reopen`): ~34.5s at dev opt-level 0 vs
+# ~2.2s with this override — work-box wall-clock, NON-canonical, quoted only as the
+# order-of-magnitude that justifies the override. The 50k diskann/pq gates that ci.yml's
+# test matrix budgets its heavy shards around run the same loops.
+[profile.dev.package.sparq-vamana]
+opt-level = 2
 [profile.dev.package.instant-distance]
 opt-level = 3
 
