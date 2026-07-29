@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 mod dataset;
 mod fuzz;
+mod oracle;
 mod update_fuzz;
 
 /// The query workload. Each exercises a different plan shape.

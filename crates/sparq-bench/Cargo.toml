@@ -37,6 +37,12 @@ sparq-canon = { path = "../sparq-canon", features = ["rdf12-triple-terms"] }
 # `update-oxigraph-integer-lexical-canonicalization` class. Already in the dependency graph
 # via sparq-core/sparq-engine/sparq-canon; this adds nothing new to the tree.
 oxrdf = { workspace = true }
+# [SONNET-4.6] (sq-qcnn.8) The ENGINE-INDEPENDENT neutral result form + comparators that every
+# `Oracle` in `src/oracle.rs` emits. Load-bearing that this is NOT sparq's own value code: a
+# second oracle exists to catch a bug sparq and Oxigraph SHARE, so normalising both sides through
+# sparq's numeric tower / term comparator would cancel exactly the class of bug it is there to
+# find (see that crate's own header). `publish = false` on both sides; nothing shipped links it.
+sparq-difftest = { path = "../sparq-difftest" }
 libc = "0.2"
 serde_json = "1"
 

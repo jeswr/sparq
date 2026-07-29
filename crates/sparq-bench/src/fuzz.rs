@@ -43,6 +43,8 @@
 
 use oxigraph::store::Store;
 
+use crate::oracle::{self, Oracle, OracleResult, OxigraphOracle, SubprocessOracle};
+
 // ── ADJUDICATED-DIVERGENCE ALLOWLIST (bead sq-0iqzw) ─────────────────────────────
 //
 // The adjudicated cross-engine divergence classes live machine-readably in
@@ -1127,6 +1129,107 @@ fn compare_solutions(sparq: &Solutions, oxi: &Solutions) -> Result<(), String> {
     ))
 }
 
+/// The outcome of one oracle-vs-oracle comparison. `Skipped` is a COUNTED bucket, printed with
+/// the others: an oracle pair that silently stopped comparing anything must show up as a number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OracleCross {
+    /// Both oracles produced the same result under the neutral value-canonical comparison.
+    Agree,
+    /// The oracles produced different results, with a repro-sized description.
+    Disagree(String),
+    /// Not comparable: one oracle declined the query, the shape is not differential-testable
+    /// (`LIMIT`/`OFFSET` without a total order), the two returned different result FORMS, or an
+    /// answer carries blank nodes.
+    Skipped,
+}
+
+/// Compare two oracles against each other over the **neutral** result form (`sparq-difftest`),
+/// never through either engine's own value code.
+///
+/// Honest bounds on what a disagreement here means — this is the whole reason it is non-fatal:
+/// Jena and rdflib are *implementations*, not the specification, so "the oracles disagree" is
+/// evidence of a spec ambiguity or of one engine's non-conformance and is **not attributable to
+/// sparq**. The N-way triage that turns such a case into a reviewed, checked-in allowlist entry
+/// with a written reason (design record §5.2) is a separate bead; until it exists this function's
+/// job is to make the divergence VISIBLE, not to adjudicate it.
+///
+/// Both sides go through the trait's `eval(data, query)`, so the in-process oracle re-parses the
+/// graph here rather than reusing the store the caller already loaded. That is a deliberate trade:
+/// it keeps this function a pure two-oracle comparison with no Oxigraph-specific coupling, and the
+/// cost is a second parse of a small generated graph on an opt-in path whose other side is a
+/// process spawn — which dominates it.
+fn cross_check_oracles(a: &dyn Oracle, b: &dyn Oracle, data: &str, query: &str) -> OracleCross {
+    // Same exclusion as `check_bindings`: under `LIMIT`/`OFFSET` without a total order the row
+    // CHOICE is arbitrary, so two conformant engines may legitimately return different rows.
+    if query.contains("LIMIT") || query.contains("OFFSET") {
+        return OracleCross::Skipped;
+    }
+    // An oracle that could not answer has not answered wrongly. Evaluated in sequence, not as a
+    // pair, so a decline by the cheap in-process oracle (passed as `a`) skips the case without
+    // paying for the expensive one's process spawn.
+    let Ok(ra) = a.eval(data, query) else {
+        return OracleCross::Skipped;
+    };
+    let Ok(rb) = b.eval(data, query) else {
+        return OracleCross::Skipped;
+    };
+    match (&ra, &rb) {
+        (OracleResult::Solutions(x), OracleResult::Solutions(y)) => {
+            // Blank-node labels are engine-local, so labelled comparison across engines is
+            // meaningless. Comparing these needs RDFC-1.0 canonical labelling
+            // (`sparq_difftest::iso`), which reaches this harness with the difftest wiring node —
+            // until then this is a counted skip, matching `BindingsCheck::TriageBnode`'s posture.
+            if sparq_difftest::solutions_have_blank_nodes(x)
+                || sparq_difftest::solutions_have_blank_nodes(y)
+            {
+                return OracleCross::Skipped;
+            }
+            if sparq_difftest::multiset_equal(x, y) {
+                OracleCross::Agree
+            } else {
+                OracleCross::Disagree(format!(
+                    "solution MULTISET differs between oracles: {} has {} rows, {} has {} rows",
+                    a.name(),
+                    x.len(),
+                    b.name(),
+                    y.len()
+                ))
+            }
+        }
+        (OracleResult::Boolean(x), OracleResult::Boolean(y)) => {
+            if x == y {
+                OracleCross::Agree
+            } else {
+                OracleCross::Disagree(format!(
+                    "ASK differs between oracles: {}={x}, {}={y}",
+                    a.name(),
+                    b.name()
+                ))
+            }
+        }
+        (OracleResult::Graph(x), OracleResult::Graph(y)) => {
+            // `CONSTRUCT`/`DESCRIBE` graphs are compared up to blank-node ISOMORPHISM (RDFC-1.0),
+            // never by label. An `Err` is the canonicaliser refusing (e.g. a poison graph hitting
+            // the hash-n-degree call limit) — a counted skip, not a divergence.
+            match sparq_difftest::graph_isomorphic(x, y) {
+                Ok(true) => OracleCross::Agree,
+                Ok(false) => OracleCross::Disagree(format!(
+                    "CONSTRUCT graph differs between oracles (up to bnode isomorphism): \
+                     {} has {} triples, {} has {} triples",
+                    a.name(),
+                    x.len(),
+                    b.name(),
+                    y.len()
+                )),
+                Err(_) => OracleCross::Skipped,
+            }
+        }
+        // Different result FORMS — one oracle answered a different question than the other, which
+        // is a harness/protocol fault rather than a semantic divergence this node can judge.
+        _ => OracleCross::Skipped,
+    }
+}
+
 pub fn run(seed_start: u64, count: u64, category: &str) {
     // An unknown category would otherwise fall through `gen_query`'s catch-all arm
     // and quietly fuzz a single BGP shape — i.e. a typo in the CI shard matrix would
@@ -1156,6 +1259,19 @@ pub fn run(seed_start: u64, count: u64, category: &str) {
             "STRICT"
         },
     );
+    // [SONNET-4.6] sq-qcnn.8 — the oracles. Oxigraph is always present (in-process); a SECOND,
+    // independent oracle is opt-in: absent `SPARQ_FUZZ_ORACLE2_CMD` this run makes exactly the
+    // comparisons it always made and spawns nothing — no JVM, no Python, no extra process.
+    let oxi_oracle = OxigraphOracle::new();
+    let oracle2 = SubprocessOracle::from_env();
+    match &oracle2 {
+        Some(o) => println!("second oracle: {}", o.describe()),
+        None => println!(
+            "second oracle: disabled (set {} to enable — see crates/sparq-bench/oracles/README.md)",
+            oracle::ENV_CMD
+        ),
+    }
+
     let mut checked = 0u64;
     let mut skipped_unsupported = 0u64;
     let mut adjudicated_cross_family = 0u64;
@@ -1168,6 +1284,11 @@ pub fn run(seed_start: u64, count: u64, category: &str) {
     // visible number, not an entry in the row-choice skip bucket.
     let mut bindings_triage_bnode = 0u64;
     let mut first_repro: Option<String> = None;
+    // [SONNET-4.6] sq-qcnn.8 — second-oracle buckets. All three are printed; none is silent.
+    let mut o2_agree = 0u64;
+    let mut o2_disagree = 0u64;
+    let mut o2_skipped = 0u64;
+    let mut first_o2_divergence: Option<String> = None;
 
     for seed in seed_start..seed_start + count {
         let mut rng = Rng::new(seed);
@@ -1237,19 +1358,20 @@ pub fn run(seed_start: u64, count: u64, category: &str) {
         } else {
             g
         };
-        let store = Store::new().unwrap();
-        if let Err(e) = store.load_from_reader(oxigraph::io::RdfFormat::Turtle, ttl.as_bytes()) {
-            // Both engines parse the same Turtle; a divergence here is itself a bug.
-            report_repro(
-                &mut first_repro,
-                seed,
-                &q,
-                &ttl,
-                &format!("oxigraph load error: {e}"),
-            );
-            full_mismatch += 1;
-            continue;
-        }
+        // Loading goes through the `Oracle` impl (sq-qcnn.8) rather than open-coding
+        // `Store::new()` + `load_from_reader` here, so Oxigraph's oracle behaviour lives in ONE
+        // place and a second engine can stand beside it. The same two steps; a load failure is
+        // still a reported mismatch, and a `Store::new()` failure — previously an `unwrap()`
+        // panic — now takes that same path rather than aborting the shard.
+        let store = match oxi_oracle.load(&ttl) {
+            Ok(s) => s,
+            Err(e) => {
+                // Both engines parse the same Turtle; a divergence here is itself a bug.
+                report_repro(&mut first_repro, seed, &q, &ttl, &format!("{e}"));
+                full_mismatch += 1;
+                continue;
+            }
+        };
 
         let oxi = match oxi_count(&store, &q) {
             Ok(n) => n,
@@ -1339,6 +1461,27 @@ pub fn run(seed_start: u64, count: u64, category: &str) {
             }
         }
 
+        // SECOND-ORACLE cross-check (sq-qcnn.8) — opt-in, and deliberately ORACLE-vs-ORACLE.
+        // sparq has already been compared against Oxigraph above, so the information this adds
+        // is precisely the one the single-oracle harness cannot produce: a case where sparq and
+        // Oxigraph AGREE and an engine of unrelated lineage does not. That is the shape a bug the
+        // two Rust engines SHARE would take. It is NOT a sparq verdict and is never fatal here —
+        // see `cross_check_oracles`.
+        if let Some(o2) = &oracle2 {
+            match cross_check_oracles(&oxi_oracle, o2, &ttl, &q) {
+                OracleCross::Agree => o2_agree += 1,
+                OracleCross::Skipped => o2_skipped += 1,
+                OracleCross::Disagree(detail) => {
+                    o2_disagree += 1;
+                    if first_o2_divergence.is_none() {
+                        first_o2_divergence = Some(format!(
+                            "seed={seed}\nquery:\n{q}\ngraph:\n{ttl}\n{detail}"
+                        ));
+                    }
+                }
+            }
+        }
+
         // Order-sensitive differential (ORDER BY queries only): the sequence itself
         // must match, not just the cardinality.
         if q.contains("ORDER BY") {
@@ -1390,6 +1533,24 @@ pub fn run(seed_start: u64, count: u64, category: &str) {
          full_mismatch={full_mismatch} count_mismatch={count_mismatch}",
         seed_start + count
     );
+    // A SEPARATE line, printed only when a second oracle ran: `scripts/ci-file-differential-
+    // failure.py` scrapes the LAST line starting with `fuzz[`, so the summary above must stay
+    // byte-compatible for consumers that predate this bucket.
+    if let Some(o2) = &oracle2 {
+        println!(
+            "oracle2[{}] agree={o2_agree} disagree={o2_disagree} skipped={o2_skipped}",
+            o2.name()
+        );
+        if let Some(d) = &first_o2_divergence {
+            // Reported, never suppressed — and NOT a failure. Two oracles disagreeing means a
+            // spec ambiguity or one engine's non-conformance; which one is a human, reviewed
+            // call. Recording those decisions in a checked-in reviewed allowlist (and only then
+            // gating on the bucket) is design record §5.2 and its own follow-on bead.
+            println!(
+                "\nFIRST ORACLE-vs-ORACLE DIVERGENCE (triage — NOT a sparq verdict, NOT a failure):\n{d}"
+            );
+        }
+    }
     if let Some(r) = first_repro {
         println!("\nFIRST FAILING CASE:\n{r}");
         std::process::exit(1);
@@ -2182,5 +2343,160 @@ ex:n3 ex:age 40 . ex:n3 ex:name "nm3" .
             "PREFIX ex: <http://ex/>\nSELECT * WHERE { ?s ex:age ?a }"
         )
         .is_none());
+    }
+
+    // ── SECOND-ORACLE cross-check (sq-qcnn.8) ────────────────────────────────────────
+
+    const O2_GRAPH: &str = "@prefix ex: <http://ex/> .\nex:a ex:p 1 .\nex:b ex:p 2 .\n";
+
+    /// An oracle that returns a canned answer — the only way to stage a controlled
+    /// oracle-vs-oracle DISAGREEMENT without a second engine installed on the box.
+    struct StubOracle(&'static str, Result<OracleResult, crate::oracle::OracleError>);
+
+    impl Oracle for StubOracle {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn eval(&self, _: &str, _: &str) -> Result<OracleResult, crate::oracle::OracleError> {
+            self.1.clone()
+        }
+    }
+
+    #[test]
+    fn oracles_that_answer_alike_agree() {
+        let a = OxigraphOracle::new();
+        let b = OxigraphOracle::new();
+        assert_eq!(
+            cross_check_oracles(&a, &b, O2_GRAPH, "SELECT ?s WHERE { ?s <http://ex/p> ?o }"),
+            OracleCross::Agree
+        );
+        assert_eq!(
+            cross_check_oracles(&a, &b, O2_GRAPH, "ASK { <http://ex/a> <http://ex/p> 1 }"),
+            OracleCross::Agree
+        );
+        assert_eq!(
+            cross_check_oracles(
+                &a,
+                &b,
+                O2_GRAPH,
+                "CONSTRUCT { ?s <http://ex/r> ?o } WHERE { ?s <http://ex/p> ?o }"
+            ),
+            OracleCross::Agree
+        );
+    }
+
+    /// The load-bearing case: a second oracle returning a DIFFERENT answer must be flagged.
+    /// Oxigraph answers this query with two rows; the stub answers with one.
+    #[test]
+    fn a_second_oracle_with_a_different_answer_is_flagged() {
+        let oxi = OxigraphOracle::new();
+        let one_row = {
+            let mut row = std::collections::BTreeMap::new();
+            row.insert(
+                "s".to_string(),
+                sparq_difftest::Term::Iri("http://ex/a".into()),
+            );
+            StubOracle("stub", Ok(OracleResult::Solutions(vec![row])))
+        };
+        match cross_check_oracles(
+            &oxi,
+            &one_row,
+            O2_GRAPH,
+            "SELECT ?s WHERE { ?s <http://ex/p> ?o }",
+        ) {
+            OracleCross::Disagree(d) => {
+                assert!(d.contains("oxigraph has 2 rows"), "detail was {d:?}");
+                assert!(d.contains("stub has 1 rows"), "detail was {d:?}");
+            }
+            other => panic!("a differing second oracle must DISAGREE, got {other:?}"),
+        }
+
+        // A differing ASK is likewise a divergence, not a skip.
+        let says_false = StubOracle("stub", Ok(OracleResult::Boolean(false)));
+        assert!(matches!(
+            cross_check_oracles(
+                &oxi,
+                &says_false,
+                O2_GRAPH,
+                "ASK { <http://ex/a> <http://ex/p> 1 }"
+            ),
+            OracleCross::Disagree(_)
+        ));
+
+        // A differing CONSTRUCT graph is compared up to bnode isomorphism, and still differs.
+        let empty_graph = StubOracle("stub", Ok(OracleResult::Graph(vec![])));
+        assert!(matches!(
+            cross_check_oracles(
+                &oxi,
+                &empty_graph,
+                O2_GRAPH,
+                "CONSTRUCT { ?s <http://ex/r> ?o } WHERE { ?s <http://ex/p> ?o }"
+            ),
+            OracleCross::Disagree(_)
+        ));
+    }
+
+    /// Every NON-comparison route lands in the counted `Skipped` bucket rather than being
+    /// mistaken for agreement — an oracle pair that compared nothing must not read as green.
+    #[test]
+    fn non_comparable_cases_skip_rather_than_agree() {
+        let oxi = OxigraphOracle::new();
+
+        // (1) Arbitrary row choice under LIMIT — checked BEFORE either oracle is consulted,
+        // so a stub that would otherwise disagree still skips.
+        let disagrees = StubOracle("stub", Ok(OracleResult::Solutions(vec![])));
+        assert_eq!(
+            cross_check_oracles(
+                &oxi,
+                &disagrees,
+                O2_GRAPH,
+                "SELECT ?s WHERE { ?s <http://ex/p> ?o } LIMIT 1"
+            ),
+            OracleCross::Skipped
+        );
+
+        // (2) The second oracle declined the query.
+        let declines = StubOracle(
+            "stub",
+            Err(crate::oracle::OracleError::Unsupported("nope".into())),
+        );
+        assert_eq!(
+            cross_check_oracles(
+                &oxi,
+                &declines,
+                O2_GRAPH,
+                "SELECT ?s WHERE { ?s <http://ex/p> ?o }"
+            ),
+            OracleCross::Skipped
+        );
+
+        // (3) The two oracles returned different result FORMS.
+        let wrong_form = StubOracle("stub", Ok(OracleResult::Boolean(true)));
+        assert_eq!(
+            cross_check_oracles(
+                &oxi,
+                &wrong_form,
+                O2_GRAPH,
+                "SELECT ?s WHERE { ?s <http://ex/p> ?o }"
+            ),
+            OracleCross::Skipped
+        );
+
+        // (4) A blank node in an answer — labels are engine-local, so a labelled comparison
+        // across engines is meaningless until RDFC-1.0 canonical labelling is wired in.
+        let bnode = {
+            let mut row = std::collections::BTreeMap::new();
+            row.insert("s".to_string(), sparq_difftest::Term::Blank("b0".into()));
+            StubOracle("stub", Ok(OracleResult::Solutions(vec![row])))
+        };
+        assert_eq!(
+            cross_check_oracles(
+                &oxi,
+                &bnode,
+                O2_GRAPH,
+                "SELECT ?s WHERE { ?s <http://ex/p> ?o }"
+            ),
+            OracleCross::Skipped
+        );
     }
 }
