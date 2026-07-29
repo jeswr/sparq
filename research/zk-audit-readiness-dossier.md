@@ -146,7 +146,7 @@ face repos and REMOVED from this repo. Ground truth from
 > `AGENTS.md` recorded `noir_XPath` as `v0.2.0` in its externalized-deps note, which went stale
 > when v0.3.0 was released 2026-07-06; that note was **synced to v0.3.0** by the doc-sync
 > follow-up (`sq-6mhcd` / #3138). This is a version-provenance note, not a soundness statement.
-
+>
 > **Pin vs. release.** The face repos' latest release is not automatically what a lane here
 > verifies: the XPath differential lane still pins `XPATH_TAG: "v0.2.0"`
 > (`.github/workflows/xpath-differential.yml`, `zk/xpath/scripts/run_differential_harness.sh`),
