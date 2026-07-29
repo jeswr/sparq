@@ -54,6 +54,33 @@ consumed** from real sub-agent transcripts and adds a third, cheaper arm:
   pkg-query NL-tool). The decision metric is **model-price-weighted cost**, since
   arm C runs the verbose middle on a model ~15× cheaper per token.
 
+## Phase 7 — provenance-driven KB vs inert-PKG (sq-2489d.6)
+
+`research/provenance-driven-genai-kb.md` §5 Phase 7 is the honest payoff test for the
+three capabilities Phases 1–5 landed — **citations**, **hedging/abstention**, and
+**provenance-weighting**. Each shipped behind an on/off ablation with the instruction to
+claim nothing ahead of a metric; this is the metric. It reuses the frozen 30-task set, the
+`analyze3.py` graders and the `stats.py` bars unchanged, and `tokens_real.py` with its arm
+tag broadened from `[ABC]` to a name so the Phase-7 arms attribute.
+
+- **`PREREG-phase7.md`** — the frozen pre-registration: arms (`base` = the inert PKG vs
+  `cite` / `hedge` / `weight`), the required per-capability instrumentation, the bars, and
+  the kill criteria.
+- **`analyze_prov.py`** — emits ONE §5.6 verdict object **per capability**, each compared
+  pairwise against the inert-PKG baseline on the same task.
+
+```bash
+python3 bench/pkg-dogfood/tokens_real.py <transcript-dir> tok_p7.json
+python3 bench/pkg-dogfood/analyze_prov.py \
+  --tokens tok_p7.json --answers answers-p7.json --out verdict-phase7.json
+```
+
+**Not yet run.** The canonical A/B host is `needs-maintainer-steer`, and every verdict is
+model-dependent — issue #1111 requires a re-run under Fable before any verdict, adopt *or*
+abandon, is final. The analyzer returns `honest = false` with a `blocked_reason` rather
+than a flattering number whenever a pair, the task count, or a capability's required
+instrumentation is missing.
+
 ## Honesty (load-bearing)
 
 - **Fidelity caveat.** This measures the **read-payload** effective tokens via a

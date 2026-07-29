@@ -40,7 +40,9 @@ EFF_FRESH, EFF_CACHE_READ, EFF_CACHE_WRITE = 1.0, 0.1, 1.25
 
 # Each fresh sub-agent's brief opens with this tag so we can attribute its transcript
 # to one (task, arm). The orchestrator that fans out the runs writes it verbatim.
-TAG = re.compile(r"\[ABM task=(\S+) arm=([ABC])\]")
+# Arm labels are the 3-arm A/B's `A`/`B`/`C` AND the Phase-7 named arms
+# (`base`/`cite`/`hedge`/`weight`, sq-2489d.6) — hence a name, not an [ABC] class.
+TAG = re.compile(r"\[ABM task=(\S+) arm=([A-Za-z][A-Za-z0-9_-]*)\]")
 
 
 def mine(transcript_dir: str) -> list[dict]:

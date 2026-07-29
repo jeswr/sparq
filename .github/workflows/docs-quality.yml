@@ -484,6 +484,15 @@ jobs:
       # OWN step is present, so the seam cannot be un-wired one level up.
       - name: Self-test bench hard-zone WIRING (PR coverage + publish order + no swallow)
         run: python3 scripts/tests/test_bench_hardzone_wiring.py
+      # [OPUS-5] sq-2489d.6: the Phase-7 provenance-KB A/B analyzer decides whether the
+      # citations / hedging / provenance-weighting capabilities are ADOPTED, so its refusal
+      # paths are the load-bearing part: a capability with no outcome win, an over-budget
+      # token overhead, one fabricated citation, a missing arm pair, or absent instrumentation
+      # must never return `recommend_adopt`. Each of those guards has a named test that reds
+      # when the guard is deleted or inverted. Hermetic: stdlib-only, synthetic transcripts
+      # over the committed frozen task set, no network.
+      - name: Self-test Phase-7 provenance-KB A/B analyzer (verdict refusal paths)
+        run: python3 scripts/tests/test_prov_kb_phase7.py
       # [FABLE-5] formal-lanes fix: the nightly miri.yml UB lane's verdict CLASSIFIER
       # (scripts/miri_classify_verdict.py) decides whether a shard's non-passes are known
       # per-test-cap TIMEOUTS (cost debt, sq-0s15k — non-fatal) or a GENUINE Miri UB/assertion

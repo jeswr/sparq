@@ -8,3 +8,5 @@ verdict.json
 tok_*.json
 answers*.json
 tokens_real_out.json
+# [OPUS-5] sq-2489d.6 — Phase-7 per-capability verdict (NON-CANONICAL, regenerable).
+verdict-phase7.json
