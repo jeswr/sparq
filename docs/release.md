@@ -544,3 +544,13 @@ provisioned token that still 403s is a real failure (App not installed, PAT expi
 under-scoped) and fails the job. Promotion: after a main run is observed opening/updating the
 Release-PR, drop the `(advisory)` token from the job name, delete the containment step and
 remove the entry from `.github/advisory-registry.json`.
+
+**You do not have to watch for that moment.** The `release-plz-pr` job self-reports: on every
+successful run it re-runs the same side-effect-free PR-creation probe (`POST /pulls` with
+`head == base`, which can never create a PR), and the moment that probe returns **422** instead
+of **403** — authorization passed, only the body was rejected, i.e. PR-creation is unblocked —
+the run emits a `release-plz Release-PR promotion unblocked (sq-lonae)` warning naming the three
+edits above. The probe runs even on success because `release-plz release-pr` also exits 0 when
+there is simply nothing to release, which says nothing about whether PR-creation is allowed.
+A probe that returns anything else (or does not complete) is reported as inconclusive and never
+claims readiness, and the step can never fail the release path.

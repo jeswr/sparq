@@ -31,6 +31,18 @@ on:
       - "scripts/route-resolve.py"
       - "scripts/dispatch-plan.py"
       - "scripts/ready-issues.py"
+      # [OPUS-5] PR #4925 review — THE INPUTS THE PARTITION GUARD READS FROM THE TREE.
+      # `ready-issues.py`'s `workspace_roots()` derives the `area:` partition algebra from the
+      # workspace manifest plus the crate directory listing, and REFUSES to plan when the two
+      # disagree. Neither input was in this filter, so the one file that can turn the guard into
+      # a hard PLAN stop — root `Cargo.toml` — could change with the guard's own tests never
+      # running, merge green, and stop dispatch for BOTH target repositories on the next tick.
+      # `crates/*/Cargo.toml` (not `crates/**`) is deliberate: what matters here is the SET of
+      # crate partition roots, which changes exactly when a crate manifest is added, removed or
+      # renamed. `crates/**` would fire this lane on essentially every Rust PR in a 67-crate
+      # workspace for no additional coverage of that set.
+      - "Cargo.toml"
+      - "crates/*/Cargo.toml"
       # [OPUS-5] the bd->issues migration pair. Their --self-tests were DEAD in this repo's
       # PR CI: bd-to-issues.py's was invoked by no workflow at all, and
       # ci-close-merged-beads.py's ran only POST-merge inside bead-autoclose.yml
@@ -55,7 +67,25 @@ on:
       # in settings.json or a workflow JS dispatch site without ever running this gate.
       - "scripts/tests/test_no_deprecated_models.py"
       - ".claude/settings.json"
+      # [OPUS-5] sq-sgu1.2: EVERY harness workflow script, not only the one carrying the
+      # canonical TIER table. test_no_deprecated_models.py::TestWorkflowJsDispatch scans them
+      # ALL for `agent({model: ...})` dispatch values, and test_workflow_dispatch_contract.py
+      # pins the schema-on-every-producing-stage / parse / durability contracts over the same
+      # set — so an edit to any of them must run this gate. Without these entries the guards
+      # scan files their own trigger cannot see, which is how a workflow dispatch site changes
+      # without the gate that guards it ever running.
+      #
+      # PR #4967 review: this is a DIRECTORY glob, not an enumeration of the files that happen to
+      # exist today. An enumeration cannot cover a workflow that does not exist yet — a newly
+      # added fifth script matches no filter, this lane never runs, and it merges unlinked,
+      # unschema'd or unparseable. Nor can the suite's own "every workflow is a path trigger"
+      # assertion catch that, since it only runs when this lane does.
+      - ".claude/workflows/*.js"
+      # Retained alongside the glob (redundant for CI, load-bearing for a guard):
+      # test_no_deprecated_models.py::test_routing_surfaces_are_path_triggers asserts this exact
+      # literal is a trigger on both events.
       - ".claude/workflows/fable-architect-drain.js"
+      - "scripts/tests/test_workflow_dispatch_contract.py"
       # [OPUS-5] the LABELS -> MODEL CHAIN surfaces (review of PR #4211). The `area:gui` carve-out
       # is decided in route-resolve.py from labels written by these two files, so the end-to-end
       # suite must re-run when either the role derivation or the label WRITE path changes. The
@@ -102,6 +132,18 @@ on:
       - "scripts/route-resolve.py"
       - "scripts/dispatch-plan.py"
       - "scripts/ready-issues.py"
+      # [OPUS-5] PR #4925 review — THE INPUTS THE PARTITION GUARD READS FROM THE TREE.
+      # `ready-issues.py`'s `workspace_roots()` derives the `area:` partition algebra from the
+      # workspace manifest plus the crate directory listing, and REFUSES to plan when the two
+      # disagree. Neither input was in this filter, so the one file that can turn the guard into
+      # a hard PLAN stop — root `Cargo.toml` — could change with the guard's own tests never
+      # running, merge green, and stop dispatch for BOTH target repositories on the next tick.
+      # `crates/*/Cargo.toml` (not `crates/**`) is deliberate: what matters here is the SET of
+      # crate partition roots, which changes exactly when a crate manifest is added, removed or
+      # renamed. `crates/**` would fire this lane on essentially every Rust PR in a 67-crate
+      # workspace for no additional coverage of that set.
+      - "Cargo.toml"
+      - "crates/*/Cargo.toml"
       # [OPUS-5] the bd->issues migration pair. Their --self-tests were DEAD in this repo's
       # PR CI: bd-to-issues.py's was invoked by no workflow at all, and
       # ci-close-merged-beads.py's ran only POST-merge inside bead-autoclose.yml
@@ -126,7 +168,25 @@ on:
       # in settings.json or a workflow JS dispatch site without ever running this gate.
       - "scripts/tests/test_no_deprecated_models.py"
       - ".claude/settings.json"
+      # [OPUS-5] sq-sgu1.2: EVERY harness workflow script, not only the one carrying the
+      # canonical TIER table. test_no_deprecated_models.py::TestWorkflowJsDispatch scans them
+      # ALL for `agent({model: ...})` dispatch values, and test_workflow_dispatch_contract.py
+      # pins the schema-on-every-producing-stage / parse / durability contracts over the same
+      # set — so an edit to any of them must run this gate. Without these entries the guards
+      # scan files their own trigger cannot see, which is how a workflow dispatch site changes
+      # without the gate that guards it ever running.
+      #
+      # PR #4967 review: this is a DIRECTORY glob, not an enumeration of the files that happen to
+      # exist today. An enumeration cannot cover a workflow that does not exist yet — a newly
+      # added fifth script matches no filter, this lane never runs, and it merges unlinked,
+      # unschema'd or unparseable. Nor can the suite's own "every workflow is a path trigger"
+      # assertion catch that, since it only runs when this lane does.
+      - ".claude/workflows/*.js"
+      # Retained alongside the glob (redundant for CI, load-bearing for a guard):
+      # test_no_deprecated_models.py::test_routing_surfaces_are_path_triggers asserts this exact
+      # literal is a trigger on both events.
       - ".claude/workflows/fable-architect-drain.js"
+      - "scripts/tests/test_workflow_dispatch_contract.py"
       # [OPUS-5] the LABELS -> MODEL CHAIN surfaces (review of PR #4211). The `area:gui` carve-out
       # is decided in route-resolve.py from labels written by these two files, so the end-to-end
       # suite must re-run when either the role derivation or the label WRITE path changes. The
@@ -191,6 +251,12 @@ jobs:
           # frontmatter. This suite also pins its OWN wiring in this workflow structurally
           # (parsed YAML, not substrings), so `if: false` on the job or the step reds it.
           python3 scripts/tests/test_no_deprecated_models.py
+          # [OPUS-5] sq-sgu1.2: the harness-workflow dispatch contract — every producing stage
+          # of every `.claude/workflows/*.js` carries a defined, closed schema (the
+          # schema-guard trap of research/fable-work-plan.md §6.3), every script still parses,
+          # and each is discoverable per the durability contract. Structural only: it reads the
+          # scripts, never runs or writes them (that surface is maintainer-applied).
+          python3 scripts/tests/test_workflow_dispatch_contract.py
           # [OPUS-5] reg#677: the PR `area:` deriver + its YAML seam. The suite is
           # invoked HERE and that invocation is itself pinned by
           # test_pr_area_labels.py::TestSelfTestIsActuallyInvoked — a suite nobody

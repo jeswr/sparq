@@ -921,14 +921,22 @@ marker entry (no `data`) — never silently flattened away.
 generation as one ordered change record on the writer thread (possibly containing several
 concurrent SPARQL Updates; [GPT-5.6] `sq-kqofk`), and (2) serves `GET /streams` over it (the route
 is `404` unless the directory is set — the same double-opt-in as `/tpf`). Parameters: `iteratorType`
-(`TRIM_HORIZON` = replay all, the default; `AT_SEQUENCE_NUMBER` + `at=N`; `AFTER_SEQUENCE_NUMBER` +
-`after=N`, the resume case; `LATEST` = tail only) and `limit` (max commits per page, default 100,
+(`TRIM_HORIZON` = replay everything RETAINED, the default; `AT_SEQUENCE_NUMBER` + `at=N`;
+`AFTER_SEQUENCE_NUMBER` + `after=N`, the resume case; `LATEST` = tail only) and `limit` (max commits per page, default 100,
 clamped to 10000). The JSON response flattens each commit's quad-level changes to one stream record
 per `(op, quad)` — `{ eventId: { commitNum: <seq>, opNum: <1-based> }, op: ADD|REMOVE, generation,
 commitTimestampNanos, data: { stmt: "<n-quads line>" } }` — plus a `nextSequenceNumber` continuation
 token (pass as `at=`/`after=`), `lastSequenceNumber`, `totalRecords` (commit count) and
 `hasMoreRecords`. A poll is a READ (gated by the read auth). A sequence-anchored `iteratorType` with
-no anchor is a fail-closed `400` (never a silent replay-all). With the feature off the route + the
+no anchor is a fail-closed `400` (never a silent replay-all). **Retention-aware (`sq-iz7ag`)**:
+`TRIM_HORIZON` resolves to the log's TRIM HORIZON (`ChangeLog::first_seq`), not seq 0 — polling
+below the horizon fails closed in the durable log, so pinning the whole-stream replay at 0 would
+`500` on any trimmed log. An `at`/`after` anchor whose RESOLVED start (`after=N` ⇒ `N+1`) is below
+the horizon is a `410 Gone` naming the seq to resume from — the records are permanently gone and
+that consumer must re-bootstrap — never a silent restart at the horizon (which would skip records
+it has not seen). The horizon is the read handle's view, taken when the server opened the log
+directory: sparq-server never applies retention itself, so a host that trims through its own handle
+while the server runs still gets the fail-closed `500` until a restart. With the feature off the route + the
 recording hook are `#[cfg]`-stripped (byte-identical); with it on, recording rides the sequenced
 writer's group commit and does not serialise submitters. Relaying that log onward to an external
 broker is the separate `sparq-serve` `change-sink` opt-in (`sq-l6zks`, above), not part of this

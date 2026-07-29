@@ -108,10 +108,10 @@ docker run --rm --name sparq-lws-core -p 127.0.0.1:3000:3000 \
 
 ## 📚 Learn more
 
-- Epic sq-gg0qq tracks the migration: bench/, conformance/, docs/, decisions/
-  stay in the source repo until their own beads land (sq-gg0qq.3 landed).
-- Design records: `docs/` + `decisions/` in
-  [jeswr/solid-server-rs](https://github.com/jeswr/solid-server-rs).
+- Solid CTH wire conformance: [`conformance/`](./conformance) — opt-in lane; the
+  score is generated + ratcheted, never committed prose (sq-gg0qq.7). bench/,
+  docs/, decisions/ stay in the source repo until their own sq-gg0qq beads land.
+- Design records: `docs/` + `decisions/` in [jeswr/solid-server-rs](https://github.com/jeswr/solid-server-rs).
 - Related crates: [`sparq-solid`](../sparq-solid) (Solid protocol pieces),
   [`sparq-server`](../sparq-server) (the SPARQL endpoint it can delegate to).
 

@@ -313,6 +313,14 @@ class TestWorkspaceDerivedRoots(unittest.TestCase):
             (base / "crates" / "sparq-brandnew").mkdir(parents=True)
             (base / "crates" / "sparq-brandnew-region").mkdir(parents=True)
             (base / "site").mkdir()
+            # The fixture must now declare its members: `workspace_roots` asserts the scanned tree
+            # against the manifest (`assert_workspace_tree`). This is a FIXTURE change only — the
+            # property under test is unchanged, and the two crates below are still recognised with
+            # no code change, which is the whole point of the test.
+            (base / "Cargo.toml").write_text(
+                '[workspace]\nresolver = "2"\n'
+                'members = ["crates/sparq-brandnew", "crates/sparq-brandnew-region"]\n',
+                encoding="utf-8")
             roots = ready.workspace_roots(str(base))
             self.assertEqual(roots, {"crates", "site", "sparq-brandnew", "sparq-brandnew-region"})
             # present in the tree -> its own partition; absent -> collapses into its parent
@@ -323,14 +331,43 @@ class TestWorkspaceDerivedRoots(unittest.TestCase):
             self.assertFalse(ready.keys_conflict("sparq-brandnew", "sparq-brandnew-region", roots))
             self.assertTrue(ready.keys_conflict("sparq-brandnew", "sparq-brandnew-unlisted", roots))
 
-    def test_an_unreadable_tree_over_reserves_rather_than_under_reserves(self):
-        # If the scan finds nothing, every key falls back to its head segment. That collapses all
-        # `sparq-*` keys onto `sparq` — a fleet-wide slowdown, never a double dispatch.
-        roots = ready.workspace_roots("/nonexistent/sparq-checkout")
-        self.assertEqual(roots, set())
+    def test_an_empty_root_set_over_reserves_rather_than_under_reserves(self):
+        # UNCHANGED PROPERTY, kept because it is the reason the collapse is not a CORRECTNESS bug:
+        # given an empty root set, every key falls back to its head segment, so all `sparq-*` keys
+        # land on `sparq` and unrelated crates OVER-reserve. Over-serialisation costs delay;
+        # under-serialisation double-dispatches. That direction still holds and is still tested —
+        # here against an EXPLICIT root set, which is the caller-supplies-the-roots path and is
+        # deliberately not guarded.
+        roots = set()
         self.assertEqual(ready.partition_path("sparq-core", roots), ("sparq",))
         self.assertTrue(ready.keys_conflict("sparq-core", "sparq-engine", roots),
-                        "with no tree to read, unrelated crates must OVER-reserve")
+                        "with no roots, unrelated crates must OVER-reserve")
+
+    def test_an_unreadable_tree_now_refuses_instead_of_collapsing_silently(self):
+        """[OPUS-5] A DOCUMENTED TRADE, DELIBERATELY REVISITED — see the PR body.
+
+        This test used to assert that an unreadable tree returns `set()` and lets every key
+        collapse onto `sparq`, on the stated grounds that this is "a fleet-wide slowdown, never a
+        double dispatch". The SAFETY half of that claim is correct and is still tested directly
+        above; it is not what changed.
+
+        What changed is the measured cost of the silence. MEASURED 2026-07-28 against a live sparq
+        snapshot with sparq's own engine: the same board, same labels and same code planned a ready
+        frontier of 4 on the real tree and 2 on a scripts-only tree, with 185 of 377 refusals
+        attributed to a single phantom `sparq-algos` partition — and NOTHING distinguished the two
+        runs. `candidates` and `top-contended` are computed from label sets, so the census line
+        reads exactly the same either way. "A fleet-wide slowdown" that no instrument can see is
+        indistinguishable from a busy board, which is how it survived a whole investigation before
+        being caught by accident.
+
+        So the unattributable case is now LOUD rather than silent. The engine refuses to partition
+        a tree it cannot verify instead of emitting a frontier whose meaning it cannot vouch for.
+        """
+        with self.assertRaises(ready.DegeneratePartitionRoots) as caught:
+            ready.workspace_roots("/nonexistent/sparq-checkout")
+        self.assertIn("refusing to partition", str(caught.exception))
+        # ...and it names the tree it scanned, so the operator can see WHICH checkout was wrong.
+        self.assertIn("/nonexistent/sparq-checkout", str(caught.exception))
 
     def test_dump_partitions_exports_the_mapping_for_the_registry_parity_fixture(self):
         # The registry's dispatch.yml mirrors this key space in `busy_packages_of_pulls`; the two
@@ -1366,6 +1403,37 @@ class TestRoutingSelfTestWorkflowWiring(unittest.TestCase):
                 "BOTH pull_request and push — it could change without re-running the gate that "
                 "reads it")
 
+    def test_the_partition_guards_tree_inputs_are_path_triggers(self):
+        """[OPUS-5] PR #4925 review — the inputs `workspace_roots()` READS FROM THE TREE.
+
+        The `_declared_data_inputs` derivation above is scoped to `orchestration/*.toml|json`, so
+        it cannot see these: the partition guard's inputs are the root workspace manifest and the
+        crate directory listing. Neither was a path trigger, and root `Cargo.toml` is the one file
+        that can turn the guard into a hard PLAN stop — a routine edit to
+        `members = ["crates/*"]` would have merged green with the guard's own tests never running,
+        then stopped dispatch for BOTH target repositories on the next tick.
+
+        `crates/*/Cargo.toml` rather than `crates/**`: what this gate needs to re-run for is a
+        change to the SET of crate partition roots, which happens exactly when a crate manifest is
+        added, removed or renamed. `crates/**` would fire the lane on essentially every Rust PR in
+        a 67-crate workspace and cover no additional change to that set.
+        """
+        paths_section = self._paths_section()
+        for path in ("Cargo.toml", "crates/*/Cargo.toml"):
+            self.assertEqual(
+                paths_section.count(f'"{path}"'), 2,
+                f"{path} is read by ready-issues.py's partition guard but is not a path trigger "
+                "on BOTH pull_request and push — it could change without re-running the gate "
+                "that reads it, and this one can hard-stop PLAN")
+
+    def test_the_partition_guard_reads_the_manifest_it_claims_to(self):
+        # Non-vacuity pairing for the row above: assert the guard really does open root
+        # Cargo.toml, so the trigger cannot be pinned for a file nothing reads.
+        source = (SCRIPTS / "ready-issues.py").read_text(encoding="utf-8")
+        self.assertIn('WORKSPACE_MANIFEST = "Cargo.toml"', source)
+        self.assertIn('CRATES_DIR = "crates"', source)
+        self.assertIn("os.path.join(repo_root, WORKSPACE_MANIFEST)", source)
+
     def test_gate_is_not_declared_advisory(self):
         # [OPUS-5] Guards the rule that is LIVE. ci-summary's discovery changed on
         # 2026-07-25 (#3773): a check is non-gating iff it is EXPLICITLY DECLARED in
@@ -1387,6 +1455,163 @@ class TestRoutingSelfTestWorkflowWiring(unittest.TestCase):
         # merge_group cannot use a paths filter; without the trigger the queue ref
         # never exposes this gating check.
         self.assertRegex(self.SOURCE, r"(?m)^  merge_group:")
+
+
+class TestNonReservingCrossCuttingPartitions(unittest.TestCase):
+    """`ci` / `docs` ROUTE work but do not OCCUPY it — and everything else still does.
+
+    [OPUS-5 2026-07-28] The dispatch frontier is the binding throughput constraint: three
+    consecutive production PLAN runs read `candidates=379 frontier=1 partition-deferred=378`, i.e.
+    99.7% of attested candidates refused for partition contention. Driving the REAL production
+    predicate (the registry's dispatch.yml `readiness` step, this repo's engine, a live snapshot)
+    reproduced that at `candidates=376 frontier=1`, and made `ci`+`docs` non-reserving takes it to
+    `candidates=376 frontier=3` — the two added rows declaring exactly `area:ci` and `area:docs`.
+
+    The justification is a MEASURED conflict rate, not an argument (see NON_RESERVING_PARTITIONS
+    for the table): 5% of open `area:ci` holder pairs and 3% of `area:docs` pairs share a changed
+    file, against 100% for `area:deps` (all `Cargo.lock`) and 57.1% for crate areas. So the safety
+    half of this contract is as load-bearing as the throughput half, and both are pinned here.
+
+    Every assertion runs END-TO-END through `compute_ready`. An assertion that only inspected
+    `reserves_partition`'s shape would stay green with its call site in `_reserving_packages`
+    deleted, which is the surviving-mutant class this estate keeps measuring.
+    """
+
+    def test_a_ci_only_issue_is_offered_while_an_occupant_holds_ci(self):
+        # THE headline behaviour. Before: the PR held `ci` and #20 was partition-deferred.
+        waiting = iss(20, READY + ["priority:P1", "area:ci"])
+        occupant = pr(70, ["area:ci"])
+        self.assertEqual(
+            numbers(ready.compute_ready([occupant, waiting], conflict_log=quiet)), [20],
+            "a PR holding area:ci must no longer refuse a ci-only candidate")
+
+    def test_a_docs_only_issue_is_offered_while_an_occupant_holds_docs(self):
+        waiting = iss(20, READY + ["priority:P1", "area:docs"])
+        self.assertEqual(
+            numbers(ready.compute_ready([pr(70, ["area:docs"]), waiting], conflict_log=quiet)),
+            [20])
+
+    def test_an_in_progress_issue_holding_ci_also_stops_reserving_it(self):
+        # The issue-occupancy path, not just the PR path — both go through _reserving_packages.
+        board = [iss(72, ["status:in-progress", "area:ci"]),
+                 iss(20, READY + ["priority:P1", "area:ci"])]
+        self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet)), [20])
+
+    def test_the_exempt_partition_is_released_and_nothing_else_is(self):
+        # The measured shape of the change on the live board: reserved keys lost EXACTLY
+        # {ci, docs}. A mutant that widens the set shows up here as an extra released key.
+        rows = [pr(70, ["area:ci", "area:docs", "area:deps", "area:sparq-core"])]
+        held = {key for keys, _ in ready.unit_reservations(rows) for key in keys}
+        self.assertEqual(held, {"deps", "sparq-core"})
+
+    # -- the SAFETY half: what must still reserve ------------------------------------------
+    def test_deps_still_reserves_because_every_deps_pair_collides_on_the_lockfile(self):
+        # MEASURED: 3 of 3 open `area:deps` holder pairs share a changed file, all Cargo.lock.
+        # Serialising deps is CORRECT and this exemption must never grow to include it.
+        waiting = iss(20, READY + ["priority:P1", "area:deps"])
+        self.assertEqual(
+            numbers(ready.compute_ready([pr(70, ["area:deps"]), waiting], conflict_log=quiet)),
+            [], "area:deps must still be occupied by an open PR that declares it")
+
+    def test_crate_areas_still_reserve(self):
+        # 57.1% pairwise file collision (research/crate-region-parallelism.md §4).
+        waiting = iss(20, READY + ["priority:P1", "area:sparq-core"])
+        self.assertEqual(
+            numbers(ready.compute_ready([pr(70, ["area:sparq-core"]), waiting],
+                                        conflict_log=quiet)), [])
+
+    def test_sub_crate_containment_still_reserves_through_the_exemption(self):
+        # The exemption is applied on the PARTITION PATH, so it must not have flattened the
+        # containment algebra it shares that path with.
+        waiting = iss(20, READY + ["priority:P1", "area:sparq-core-store"])
+        self.assertEqual(
+            numbers(ready.compute_ready([pr(70, ["area:sparq-core"]), waiting],
+                                        conflict_log=quiet)), [])
+
+    def test_the_global_partition_can_never_be_exempted(self):
+        # `partition_path` maps GLOBAL and every degenerate key to `()`, the root that CONTAINS
+        # every partition. Exempting it would be "fail toward exempt everything" exactly.
+        self.assertTrue(ready.reserves_partition(ready.GLOBAL))
+        self.assertTrue(ready.reserves_partition(""))
+        waiting = iss(20, READY + ["priority:P1", "area:sparq-core"])
+        board = [pr(70, [f"area:{ready.GLOBAL}"]), waiting]
+        self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet)), [],
+                         "an occupant on the global partition must still serialize everything")
+        for bad in ({ready.GLOBAL}, {"ci", ready.GLOBAL}, {"-"}, {""}):
+            self.assertEqual(ready.non_reserving_partitions(bad), frozenset(), bad)
+
+    # -- the FAIL-SAFE: malformed declaration degrades to TODAY's behaviour -----------------
+    def test_a_malformed_declaration_falls_back_to_reserving(self):
+        waiting = iss(20, READY + ["priority:P1", "area:ci"])
+        board = [pr(70, ["area:ci"]), waiting]
+        for broken in (None, "ci,docs", 7, {"ci": True}, {"ci", 7}, ["ci", ""], ("ci", None),
+                       {"ci", "  "}):
+            with mock.patch.object(ready, "NON_RESERVING_PARTITIONS", broken):
+                self.assertEqual(ready.non_reserving_partitions(), frozenset(), broken)
+                self.assertEqual(
+                    numbers(ready.compute_ready(board, conflict_log=quiet)), [],
+                    f"a {broken!r} declaration must degrade to RESERVING, never to exempt-all")
+
+    def test_an_absent_declaration_falls_back_to_reserving(self):
+        # Deleting the constant entirely is the "unreadable" case: NameError would abort the
+        # whole dispatch tick for every target, so the engine must simply reserve.
+        waiting = iss(20, READY + ["priority:P1", "area:ci"])
+        board = [pr(70, ["area:ci"]), waiting]
+        with mock.patch.object(ready, "NON_RESERVING_PARTITIONS", frozenset()):
+            self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet)), [])
+
+    def test_a_wellformed_declaration_is_honoured_so_the_failsafe_is_not_vacuous(self):
+        # KNOWN-POSITIVE control for the loop above: the same board, a VALID declaration, the
+        # opposite outcome. Without this a fail-safe that rejected everything would look perfect.
+        waiting = iss(20, READY + ["priority:P1", "area:ci"])
+        board = [pr(70, ["area:ci"]), waiting]
+        with mock.patch.object(ready, "NON_RESERVING_PARTITIONS", frozenset({"ci"})):
+            self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet)), [20])
+
+    # -- SCOPE: what this change deliberately does NOT touch --------------------------------
+    def test_candidacy_is_unchanged_a_ci_issue_is_still_counted_and_routed(self):
+        # Measured obligation 5: `candidates=` must not move. The candidate-side key algebra is
+        # untouched, so a ci issue is still a candidate, still keyed on `ci`, still dispatchable.
+        self.assertEqual(ready.packages_of({"area:ci"}), {"ci"})
+        self.assertEqual(ready.packages_of({"area:docs"}), {"docs"})
+        self.assertEqual(ready.declared_packages({"area:ci", "area:docs"}), {"ci", "docs"})
+        board = [pr(70, ["area:ci"]), iss(20, READY + ["priority:P1", "area:ci"]),
+                 iss(21, READY + ["priority:P1", "area:docs"]),
+                 iss(22, READY + ["priority:P1", "area:deps"])]
+        cands = ready.ready_candidates(board, log=quiet)
+        self.assertEqual([(number, sorted(keys)) for _p, number, _row, keys in cands],
+                         [(20, ["ci"]), (21, ["docs"]), (22, ["deps"])],
+                         "candidacy and candidate keying must be byte-identical to before")
+
+    def test_a_selected_ci_candidate_still_reserves_ci_for_the_tick(self):
+        # The exemption is the OCCUPANCY half ONLY. Per-tick dispatch width stays one worker per
+        # partition; this is why the live frontier moved 1 -> 3 and not 1 -> ~50.
+        board = [iss(20, READY + ["priority:P0", "area:ci"]),
+                 iss(21, READY + ["priority:P1", "area:ci"])]
+        self.assertEqual(numbers(ready.compute_ready(board, conflict_log=quiet)), [20])
+
+    def test_ci_fragments_travels_with_the_ci_partition(self):
+        # `ci-fragments` is a LIVE label that resolves into the `ci` partition. Exempting the raw
+        # string only would leave it reserving a partition `ci` itself does not — incoherent with
+        # `keys_conflict`, and a trap for the next reader.
+        self.assertEqual(ready.partition_path("ci-fragments"), ("ci",))
+        self.assertFalse(ready.reserves_partition("ci-fragments"))
+        waiting = iss(20, READY + ["priority:P1", "area:ci"])
+        self.assertEqual(
+            numbers(ready.compute_ready([pr(70, ["area:ci-fragments"]), waiting],
+                                        conflict_log=quiet)), [20])
+
+    def test_the_declaration_records_its_measured_basis(self):
+        # The brief's one durable requirement: the next reader must be able to RE-DERIVE the
+        # decision rather than guess at it. Asserted on the numbers, not on prose.
+        source = (SCRIPTS / "ready-issues.py").read_text(encoding="utf-8")
+        head, _, rest = source.partition("NON_RESERVING_PARTITIONS = ")
+        self.assertTrue(rest, "NON_RESERVING_PARTITIONS is no longer declared")
+        basis = head[head.rindex("# ------"):]
+        for token in ("area:ci", "area:docs", "area:deps", "Cargo.lock",
+                      "5%", "3%", "100%", "57.1%", "crate-region-parallelism.md"):
+            self.assertIn(token, basis,
+                          f"the measured basis for the exemption no longer states {token}")
 
 
 if __name__ == "__main__":

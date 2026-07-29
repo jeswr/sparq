@@ -39,6 +39,22 @@
 #                             not CI). A deliberate, reviewed regression must pass --allow-
 #                             lower. New crates and RAISED floors always pass.
 #
+# THE `seed_pending` FLAG (sq-iwf3c) [SONNET-4.6]
+# -----------------------------------------------
+# A floor entry may carry `"seed_pending": true`. It means: THIS FLOOR WAS NOT MEASURED
+# OVER THE SURFACE THE GATE NOW MEASURES — it was carried forward across a change that
+# WIDENED the crate's denominator (e.g. scripts/coverage.sh starting to compile in an
+# opt-in feature's module), by an author who had no way to run llvm-cov. A carried-forward
+# floor is not merely unproven: if the wider surface actually measures HIGHER, the entry
+# silently installs a floor LOOSER than the seed procedure (floor(measured) - MARGIN)
+# would give, and the ratchet quietly loses ground.
+# `--check` therefore ENFORCES the seed procedure for such an entry instead of trusting a
+# note: it recomputes floor(measured) - MARGIN and FAILS if that exceeds the committed
+# floor, printing the exact number to write. If it does NOT exceed it, the measurement
+# CONFIRMS the carried-forward floor and the gate prints that as evidence and passes.
+# Either way CI — not the PR author's promise — is what settles it, and `--seed` clears
+# the flag automatically because it rebuilds each entry from the measurement.
+#
 # THE MAX-REMEASURE PRINCIPLE (sq-x4jy) [OPUS-4.8]
 # ------------------------------------------------
 # llvm-cov instrumentation only ever UNDERCOUNTS: when a test process aborts/OOMs or a
@@ -164,6 +180,11 @@ def seed(summary_path, floor_path, allow_lower):
             chosen = proposed; lowered.append(f"{crate} {prev}->{chosen}")
         else:
             chosen = prev; kept.append(crate)  # ratchet: never auto-lower
+        # Rebuilt from the measurement, so a `seed_pending` flag on the previous entry is
+        # DELIBERATELY dropped here: this floor has now been seeded from a real run over
+        # the current denominator, which is exactly what the flag was waiting for.
+        # [SONNET-4.6] sq-iwf3c. (The nightly/merged branch above keeps it — it seeds
+        # `nightly_floor` only and leaves the base floor unproven.)
         entry = {"floor": chosen}
         if note: entry["note"] = note
         # preserve a previously-seeded nightly_floor when seeding from a per-commit summary
@@ -196,6 +217,12 @@ def seed(summary_path, floor_path, allow_lower):
             "BINARIES (which run as `cargo run`, not `cargo test`) into that crate's llvm-cov "
             "report. Seeding from a nightly summary raises `nightly_floor`; seeding from a "
             "per-commit summary raises the base `floor`. Neither seed touches the other.",
+            "[SONNET-4.6] sq-iwf3c: an entry with `seed_pending: true` carries a floor "
+            "that was NOT measured over the surface the gate now measures (it was carried "
+            "forward across a change that WIDENED the crate's denominator). --check "
+            "recomputes floor(measured) - MARGIN for such an entry and FAILS if that "
+            "exceeds the committed floor — so a carried-forward floor can never be looser "
+            "than the measurement supports. --seed clears the flag.",
             "Regenerate after a deliberate coverage rise: scripts/coverage.sh && "
             "scripts/coverage-gate.py --seed target/coverage/coverage-summary.json "
             "(per-commit -> base floor); COVERAGE_TIER=nightly scripts/coverage.sh && "
@@ -231,6 +258,9 @@ def check(summary_path, floor_path, require_all):
     measured = s["crates"]
     tier = s.get("tier")            # [OPUS-4.8] sq-bjct: tier-aware nightly_floor
     fails, missing, unmeasured, oks = [], [], [], []
+    # [SONNET-4.6] sq-iwf3c: (crate, measured, committed floor, seed-procedure floor) for
+    # each `seed_pending` entry that this tier actually measured — see the header.
+    pending = []
     for crate, fentry in sorted(floors.items()):
         floor = effective_floor(fentry, tier)
         row = measured.get(crate)
@@ -240,9 +270,14 @@ def check(summary_path, floor_path, require_all):
             unmeasured.append((crate, floor)); continue
         val = row["lines_pct"]
         if val + 1e-9 < floor:
+            # A sub-floor crate is reported as the ordinary floor breach it is, with no
+            # seed line: its seed cannot be stale anyway, since val < floor implies
+            # floor(val) - MARGIN < floor.
             fails.append((crate, val, floor))
         else:
             oks.append((crate, val, floor))
+            if isinstance(fentry, dict) and fentry.get("seed_pending"):
+                pending.append((crate, val, floor, max(0, math.floor(val) - MARGIN)))
     # A crate that failed to MEASURE but carries a real (>0) effective floor is a hard
     # failure regardless of --require-all; a floor-0 (artifact) crate is not %-gated.
     unmeasured_gated = [(c, f) for c, f in unmeasured if f > 0]
@@ -259,7 +294,27 @@ def check(summary_path, floor_path, require_all):
                   f"— floor 0, not %-gated")
     for crate, val, floor in fails:
         print(f"  FAIL {crate:<20} {val:6.2f}% < floor {floor}")
-    bad = bool(fails) or bool(unmeasured_gated) or (require_all and bool(missing))
+    # [SONNET-4.6] sq-iwf3c: a carried-forward floor is settled HERE, by the measurement.
+    stale_seeds = [t for t in pending if t[3] > t[2]]
+    for crate, val, floor, proposed in pending:
+        if proposed > floor:
+            print(f"  FAIL {crate:<20} seed_pending: measured {val:.2f}% over the CURRENT "
+                  f"denominator seeds floor {proposed}, but the carried-forward floor is "
+                  f"{floor} — the committed floor is LOOSER than the measurement supports")
+        else:
+            print(f"  ok   {crate:<20} seed_pending CONFIRMED: measured {val:.2f}% seeds "
+                  f"floor {proposed} <= committed floor {floor} — the carried-forward "
+                  f"floor is valid over the current denominator; drop the "
+                  f"\"seed_pending\" flag and record this measurement in the note")
+    bad = bool(fails) or bool(unmeasured_gated) or bool(stale_seeds) \
+        or (require_all and bool(missing))
+    if stale_seeds:
+        print(f"::error::{len(stale_seeds)} crate(s) carry \"seed_pending\" but measure "
+              f"ABOVE their carried-forward floor: "
+              + "; ".join(f"set bench/coverage-floor.json crates.{c}.floor = {p} "
+                          f"(floor({v:.2f}) - {MARGIN}), drop \"seed_pending\", and record "
+                          f"the measurement in the note"
+                          for c, v, _f, p in stale_seeds))
     if fails:
         print(f"::error::coverage regressed below the floor for {len(fails)} crate(s)")
     if unmeasured_gated:
@@ -271,7 +326,8 @@ def check(summary_path, floor_path, require_all):
               f"(--require-all): {', '.join(c for c, _ in missing)}")
     print(f"\ncoverage gate: {len(oks)} ok / {len(fails)} fail / "
           f"{len(unmeasured)} unmeasured ({len(unmeasured_gated)} gated) / "
-          f"{len(missing)} missing")
+          f"{len(missing)} missing / {len(pending)} seed_pending "
+          f"({len(stale_seeds)} stale)")
     return 1 if bad else 0
 
 # --- pure aggregation primitives (unit-tested by --self-test) -----------------
@@ -806,6 +862,55 @@ def self_test():
     assert run_check({"sparq-core": (0, False)}, FLC, require_all=False,
                      tier="nightly") == 1, \
         "sparq-core failing to measure (fixtures absent) must FAIL the nightly gate"
+
+    # --- `seed_pending`: a carried-forward floor is settled by the measurement (sq-iwf3c)
+    # [SONNET-4.6] The failure mode this closes: coverage.sh starts measuring a crate over
+    # a WIDER denominator, the floor is carried forward unmeasured, and --check happily
+    # passes it because it only ever compares measured-vs-floor. If the wider surface
+    # measures HIGHER, the entry has silently installed a floor LOOSER than the seed
+    # procedure (floor(measured) - MARGIN) gives, and the ratchet loses ground with no
+    # signal at all. With the flag, --check re-runs the seed procedure and FAILS on that.
+    FSP = {"p": {"floor": 90, "seed_pending": True}}
+    # measured 95.0 -> seed floor 93 > 90: the carried floor is too loose -> FAIL, even
+    # though 95.0 is comfortably ABOVE 90 (this is exactly what plain --check misses).
+    assert run_check({"p": 95.0}, FSP, require_all=False) == 1, \
+        "a seed_pending crate measuring above its seed floor must FAIL (stale seed)"
+    # ...and WITHOUT the flag the identical measurement passes — proving the flag, not
+    # some other rule, is what fails it.
+    assert run_check({"p": 95.0}, {"p": {"floor": 90}}, require_all=False) == 0, \
+        "the same measurement must PASS without seed_pending (flag is the cause)"
+    # measured 92.99 -> seed floor 90 == committed 90: the measurement CONFIRMS the
+    # carried-forward floor -> PASS (top of the confirming band).
+    assert run_check({"p": 92.99}, FSP, require_all=False) == 0, \
+        "a seed_pending crate whose measurement confirms its floor must PASS"
+    # 93.0 is the first value that seeds 91 > 90 -> FAIL (boundary of the band).
+    assert run_check({"p": 93.0}, FSP, require_all=False) == 1, \
+        "floor(93.0) - 2 = 91 > 90 -> stale seed"
+    # A seed_pending crate BELOW its floor still fails as an ordinary floor breach.
+    assert run_check({"p": 88.0}, FSP, require_all=False) == 1, \
+        "a seed_pending crate below its floor must still fail the ordinary floor check"
+    # A seed_pending crate that this tier did not MEASURE is not settleable here: the
+    # unmeasured/missing rules apply unchanged, never the seed check.
+    assert run_check({}, FSP, require_all=False) == 0, \
+        "a seed_pending crate absent from the summary keeps the MISSING semantics"
+    # The flag is tier-aware via effective_floor: nightly gates the (higher) nightly_floor,
+    # so the same 95.0 that is a stale seed against floor 90 CONFIRMS a nightly_floor 93.
+    FSPN = {"p": {"floor": 90, "nightly_floor": 93, "seed_pending": True}}
+    assert run_check({"p": 95.0}, FSPN, require_all=False, tier="nightly") == 0, \
+        "seed_pending compares against the EFFECTIVE (tier) floor"
+    # --seed rebuilds the entry from the measurement, which is what drops the flag.
+    with tempfile.NamedTemporaryFile("w", suffix=".sum.json", delete=False) as sf, \
+         tempfile.NamedTemporaryFile("w", suffix=".floor.json", delete=False) as ff:
+        json.dump({"crates": {"p": crate(95.0)}}, sf); sp = sf.name
+        json.dump({"crates": FSP}, ff); fp = ff.name
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            seed(sp, fp, allow_lower=False)
+        reseeded = load(fp)["crates"]["p"]
+    finally:
+        os.unlink(sp); os.unlink(fp)
+    assert reseeded["floor"] == 93, f"--seed must raise the floor to 93, got {reseeded}"
+    assert "seed_pending" not in reseeded, "--seed must clear the seed_pending flag"
 
     print("coverage-gate self-test: ALL ASSERTIONS PASSED")
     return 0

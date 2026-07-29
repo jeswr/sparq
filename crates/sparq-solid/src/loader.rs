@@ -1,5 +1,12 @@
-//! Reasoning-input assembly: reflect the named-graph structure into facts and serialize
-//! the ACCESS-CONTROL graphs (only!) as N3 source for `sparq_reason::reason_n3`.
+//! Reasoning-input assembly: reflect the named-graph structure into facts and hand the
+//! ACCESS-CONTROL graphs (only!) to the reasoner.
+//!
+//! [SONNET-4.6] sq-zgbso.4: [`assemble_facts`] is the SINGLE traversal both fact-entry
+//! paths share. It yields ground `[Term; 3]` triples (blank nodes already skolemized);
+//! [`assemble_input_ids`] interns those straight into the caller's [`Dict`] for the
+//! id-level compiled evaluator — no N3 text is produced or re-parsed — and the
+//! `#[cfg(test)]`-only `assemble_input` serializes the SAME triples to N3 source for
+//! the differential reference path. One traversal means the two entries cannot diverge.
 //!
 //! Security boundary (design doc §2.4): pod *content* graphs are never fed to the
 //! reasoner — otherwise any agent who can write a document could embed `acl:`/`acp:`
@@ -17,11 +24,11 @@
 //! group-document triple whose predicate is in `solidx:` space — the analogue of the
 //! `urn:sparq:` reserved-principal guard ([`validate_principal_iri`]).
 
-use crate::{AccessProvenance, AUTH_GRAPH, SOLIDX_NS};
-use oxrdf::Term;
+use crate::{AccessProvenance, SOLIDX_NS};
+use oxrdf::{Literal, NamedNode, Term};
 use rustc_hash::FxHashSet;
+use sparq_core::dict::{Dict, Id};
 use sparq_core::Graph;
-use std::fmt::Write;
 
 pub(crate) const ACL_SUFFIX: &str = ".acl";
 pub(crate) const ACR_SUFFIX: &str = ".acr";
@@ -130,29 +137,32 @@ fn graph_iri(name: &Term) -> Option<&str> {
     }
 }
 
-/// One term in N3 source form; blank nodes are skolemized per graph (`gix`) so the
-/// single-graph merge keeps per-document scoping and `solidx:inDoc` stays sound.
-fn write_term(out: &mut String, t: &Term, gix: usize) {
+/// A term with blank nodes skolemized per graph (`gix`) so the single-graph merge keeps
+/// per-document scoping and `solidx:inDoc` stays sound. Named nodes and literals pass
+/// through unchanged — the reasoner sees exactly the control document's own terms.
+fn skolemize(t: &Term, gix: usize) -> Term {
     match t {
-        Term::BlankNode(b) => {
-            let _ = write!(out, "<urn:skolem:g{gix}:{}>", b.as_str());
-        }
-        // NamedNode -> `<iri>`, Literal -> `"…"`/`"…"^^<dt>`/`"…"@lang` (N-Triples
-        // shapes, all accepted by the N3 parser).
-        other => {
-            let _ = write!(out, "{other}");
-        }
+        Term::BlankNode(b) => named(&format!("urn:skolem:g{}:{}", gix, b.as_str())),
+        other => other.clone(),
     }
 }
 
-/// Skolemized subject IRI of a triple (used for `solidx:inDoc` provenance).
-fn subject_repr(t: &Term, gix: usize) -> String {
-    let mut s = String::new();
-    write_term(&mut s, t, gix);
-    s
+/// A term for the IRI `iri` (the loader only ever mints IRIs it built itself).
+fn named(iri: &str) -> Term {
+    Term::NamedNode(NamedNode::new_unchecked(iri))
 }
 
-/// Assemble the full facts source: structural facts + the access-control graphs +
+/// The `xsd:boolean` `true` object of the structural marker facts (`solidx:isResource`,
+/// `solidx:isWebId`) — the term the N3 keyword `true` parses to, so the id-level and the
+/// text entry paths agree on it.
+fn xsd_true() -> Term {
+    Term::Literal(Literal::new_typed_literal(
+        "true",
+        NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#boolean"),
+    ))
+}
+
+/// Assemble the full fact set: structural facts + the access-control graphs +
 /// (ACP only) the TRUSTED per-resource creator/owner facts from `provenance`.
 /// Errors if any agent/client/origin/creator/owner value collides with the reserved
 /// principal encoding (see [`validate_principal_iri`]).
@@ -161,14 +171,18 @@ fn subject_repr(t: &Term, gix: usize) -> String {
 /// `acp:OwnerAgent`. Its `<r> solidx:creator|owner <webid>` facts are synthesized HERE,
 /// from the caller-supplied map ONLY — never read from the resource graphs (design doc
 /// §2.4). For WAC (no creator/owner vocabulary) `provenance` is ignored.
-pub(crate) fn assemble_input(
+pub(crate) fn assemble_facts(
     graph: &Graph,
     system: System,
     provenance: &AccessProvenance,
-) -> Result<String, String> {
-    let mut out = String::new();
+) -> Result<Vec<[Term; 3]>, String> {
+    let mut out: Vec<[Term; 3]> = Vec::new();
     let suffix = if system == System::Wac { ACL_SUFFIX } else { ACR_SUFFIX };
     let own_pred = if system == System::Wac { "ownAcl" } else { "ownAcr" };
+    let is_resource = named(&format!("{SOLIDX_NS}isResource"));
+    let owns = named(&format!("{SOLIDX_NS}{own_pred}"));
+    let in_doc_p = named(&format!("{SOLIDX_NS}inDoc"));
+    let is_webid = named(&format!("{SOLIDX_NS}isWebId"));
 
     // 1) resources: every non-control, non-auth graph + every structural container
     //    prefix (containers exist as inheritance anchors even without their own graph).
@@ -176,7 +190,12 @@ pub(crate) fn assemble_input(
     let mut control_graphs: Vec<(usize, &str, &Graph)> = Vec::new(); // (idx, name, sub)
     for (gix, (name, sub)) in graph.named.iter().enumerate() {
         let Some(iri) = graph_iri(name) else { continue };
-        if iri == AUTH_GRAPH {
+        // Skip the whole reserved space (`<urn:sparq:auth>` included): a graph there is
+        // never reasoning input. [`strip_reserved_graphs`] also drops these from the
+        // dataset, but assembly must not DEPEND on that having run first — the
+        // materializer defers every mutation until after this fallible pass so an error
+        // leaves the previous auth view in place (roborev 5005).
+        if iri.starts_with(RESERVED_PREFIX) {
             continue;
         }
         if iri.ends_with(ACL_SUFFIX) || iri.ends_with(ACR_SUFFIX) {
@@ -196,14 +215,14 @@ pub(crate) fn assemble_input(
         }
     }
     for r in &resources {
-        let _ = writeln!(out, "<{r}> <{SOLIDX_NS}isResource> true .");
+        out.push([named(r), is_resource.clone(), xsd_true()]);
     }
 
     // 2) control-document linkage by naming convention: <R + ".acl"> controls <R>.
     //    The .acl/.acr graphs are themselves resources too (Control gates them).
     for (_, iri, _) in &control_graphs {
         let r = &iri[..iri.len() - suffix.len()];
-        let _ = writeln!(out, "<{r}> <{SOLIDX_NS}{own_pred}> <{iri}> .");
+        out.push([named(r), owns.clone(), named(iri)]);
     }
 
     // 3) the access-control graphs' triples (skolemized) + inDoc provenance + WebIDs,
@@ -212,7 +231,7 @@ pub(crate) fn assemble_input(
     let mut webids: FxHashSet<String> = FxHashSet::default();
     let mut principal_iris: FxHashSet<String> = FxHashSet::default();
     for (gix, iri, sub) in &control_graphs {
-        let mut in_doc: FxHashSet<String> = FxHashSet::default();
+        let mut in_doc: FxHashSet<Term> = FxHashSet::default();
         for t in graph_triples(sub) {
             // [OPUS-4.8] sq-3jtd.5: hard-reject any forged derivation-internal fact
             // (`solidx:creator|owner|appliesToResource|…`) smuggled into the control
@@ -220,23 +239,21 @@ pub(crate) fn assemble_input(
             if is_reserved_derivation_predicate(&t) {
                 continue;
             }
-            write_term(&mut out, &t[0], *gix);
-            out.push(' ');
-            write_term(&mut out, &t[1], *gix);
-            out.push(' ');
-            write_term(&mut out, &t[2], *gix);
-            out.push_str(" .\n");
-            in_doc.insert(subject_repr(&t[0], *gix));
+            let s = skolemize(&t[0], *gix);
+            in_doc.insert(s.clone());
+            out.push([s, skolemize(&t[1], *gix), skolemize(&t[2], *gix)]);
             collect_agents(&t, &mut webids, &mut group_docs, &mut principal_iris);
         }
         for s in in_doc {
-            let _ = writeln!(out, "{s} <{SOLIDX_NS}inDoc> <{iri}> .");
+            out.push([s, in_doc_p.clone(), named(iri)]);
         }
     }
     if system == System::Wac {
         for (gix, (name, sub)) in graph.named.iter().enumerate() {
             let Some(iri) = graph_iri(name) else { continue };
-            if !group_docs.contains(iri) {
+            // Same reserved-space skip as the resource pass above: a forged
+            // `<urn:sparq:…>` graph named by an `acl:agentGroup` must never be read.
+            if iri.starts_with(RESERVED_PREFIX) || !group_docs.contains(iri) {
                 continue;
             }
             for t in graph_triples(sub) {
@@ -245,12 +262,11 @@ pub(crate) fn assemble_input(
                 if is_reserved_derivation_predicate(&t) {
                     continue;
                 }
-                write_term(&mut out, &t[0], gix);
-                out.push(' ');
-                write_term(&mut out, &t[1], gix);
-                out.push(' ');
-                write_term(&mut out, &t[2], gix);
-                out.push_str(" .\n");
+                out.push([
+                    skolemize(&t[0], gix),
+                    skolemize(&t[1], gix),
+                    skolemize(&t[2], gix),
+                ]);
                 if let (Term::NamedNode(p), Term::NamedNode(o)) = (&t[1], &t[2]) {
                     if p.as_str() == VCARD_MEMBER {
                         webids.insert(o.as_str().to_owned());
@@ -273,17 +289,63 @@ pub(crate) fn assemble_input(
             if let Some(c) = creator {
                 validate_principal_iri(c)?;
                 webids.insert(c.to_owned());
-                let _ = writeln!(out, "<{resource}> <{SOLIDX_NS}creator> <{c}> .");
+                out.push([
+                    named(resource),
+                    named(&format!("{SOLIDX_NS}creator")),
+                    named(c),
+                ]);
             }
             if let Some(o) = owner {
                 validate_principal_iri(o)?;
                 webids.insert(o.to_owned());
-                let _ = writeln!(out, "<{resource}> <{SOLIDX_NS}owner> <{o}> .");
+                out.push([named(resource), named(&format!("{SOLIDX_NS}owner")), named(o)]);
             }
         }
     }
     for a in &webids {
-        let _ = writeln!(out, "<{a}> <{SOLIDX_NS}isWebId> true .");
+        out.push([named(a), is_webid.clone(), xsd_true()]);
+    }
+    Ok(out)
+}
+
+/// The reasoning input as `[Id; 3]` facts interned DIRECTLY into `dict` — the id-level
+/// fact entry of the compiled evaluator ([SONNET-4.6] sq-zgbso.4).
+///
+/// Same fact set as the `assemble_input` text entry by construction (both are thin
+/// adapters over [`assemble_facts`]), with the serialize → re-parse round trip gone: terms
+/// go from the source [`Graph`] to the caller's dictionary without ever becoming text.
+pub(crate) fn assemble_input_ids(
+    dict: &mut Dict,
+    graph: &Graph,
+    system: System,
+    provenance: &AccessProvenance,
+) -> Result<Vec<[Id; 3]>, String> {
+    let facts = assemble_facts(graph, system, provenance)?;
+    Ok(facts
+        .iter()
+        .map(|t| [dict.intern(&t[0]), dict.intern(&t[1]), dict.intern(&t[2])])
+        .collect())
+}
+
+/// The reasoning input as N3 source — the DEV-ONLY differential reference path
+/// ([SONNET-4.6] sq-zgbso.4). The production materializer feeds
+/// [`assemble_input_ids`] to the compiled evaluator; this serialization exists so the
+/// in-crate equivalence tests can run the same facts through the text engine
+/// (`sparq_reason::reason_n3`) and compare the resulting auth views.
+///
+/// Every term is written in its N-Triples shape (`<iri>` / `"…"`/`"…"^^<dt>`/`"…"@lang`),
+/// all of which the N3 parser accepts.
+#[cfg(test)]
+pub(crate) fn assemble_input(
+    graph: &Graph,
+    system: System,
+    provenance: &AccessProvenance,
+) -> Result<String, String> {
+    use std::fmt::Write;
+    let facts = assemble_facts(graph, system, provenance)?;
+    let mut out = String::new();
+    for t in &facts {
+        let _ = writeln!(out, "{} {} {} .", t[0], t[1], t[2]);
     }
     Ok(out)
 }

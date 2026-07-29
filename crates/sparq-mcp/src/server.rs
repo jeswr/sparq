@@ -17,8 +17,10 @@ use serde_json::{json, Value};
 
 use crate::jsonrpc::{
     Request, Response, RpcError, INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST,
-    METHOD_NOT_FOUND,
+    METHOD_NOT_FOUND, RESOURCE_NOT_FOUND,
 };
+use crate::prompts;
+use crate::resources::{self, ReadError};
 use crate::tools;
 
 /// The newest MCP protocol revision this server implements — the version offered in
@@ -196,6 +198,11 @@ impl McpServer {
             "ping" => Ok(json!({})),
             "tools/list" => Ok(self.tools_list_result()),
             "tools/call" => self.tools_call(&req.params),
+            // [SONNET-4.6] sq-sjey1: the read-only resources + prompts surfaces.
+            "resources/list" => Ok(self.resources_list()),
+            "resources/read" => self.resources_read(&req.params),
+            "prompts/list" => Ok(self.prompts_list()),
+            "prompts/get" => self.prompts_get(&req.params),
             other => Err(RpcError::new(
                 METHOD_NOT_FOUND,
                 format!("method not found: {}", other),
@@ -204,11 +211,21 @@ impl McpServer {
     }
 
     /// The `initialize` handshake result: the negotiated protocol version, server
-    /// info, and the declared capabilities (just `tools`).
+    /// info, and the declared capabilities.
+    ///
+    /// [SONNET-4.6] sq-sjey1: `resources` and `prompts` join `tools`. Both sub-capability
+    /// flags are declared FALSE and mean it: this server never pushes an unsolicited
+    /// `listChanged` notification, and it implements no `resources/subscribe` (the pod
+    /// server — feature `solid` — is the one that does, and declares `subscribe: true`
+    /// itself). Declaring a flag whose machinery does not exist would be an overclaim.
     fn initialize_result(&self, params: &Value) -> Value {
         json!({
             "protocolVersion": negotiate_protocol_version(params),
-            "capabilities": { "tools": {} },
+            "capabilities": {
+                "tools": {},
+                "resources": { "subscribe": false, "listChanged": false },
+                "prompts": { "listChanged": false },
+            },
             "serverInfo": {
                 "name": self.config.server_name,
                 "version": env!("CARGO_PKG_VERSION"),
@@ -221,6 +238,65 @@ impl McpServer {
     fn tools_list_result(&self) -> Value {
         let tools: Vec<Value> = tools::advertised(self).iter().map(|t| t.to_json()).collect();
         json!({ "tools": tools })
+    }
+
+    /// `resources/list`: the dataset descriptor, the default graph, and one entry per
+    /// named graph. See [`crate::resources`]. [SONNET-4.6] sq-sjey1
+    fn resources_list(&self) -> Value {
+        json!({ "resources": resources::descriptors(&self.graph) })
+    }
+
+    /// `resources/read`: materialise one resource in the MCP `contents` shape, under the
+    /// server's [`QueryBudget`].
+    ///
+    /// A URI this server does not serve is MCP's `RESOURCE_NOT_FOUND`; a served resource
+    /// that could not be materialised (a tripped budget) is an INTERNAL error, because
+    /// reporting it as "not found" would assert something false about the dataset.
+    /// [SONNET-4.6] sq-sjey1
+    fn resources_read(&self, params: &Value) -> Result<Value, RpcError> {
+        let uri = params.get("uri").and_then(Value::as_str).ok_or_else(|| {
+            RpcError::new(INVALID_PARAMS, "resources/read requires a string `uri`")
+        })?;
+        let text = resources::read(&self.graph, uri, &self.budget()).map_err(|e| match e {
+            ReadError::NotFound(m) => RpcError::new(RESOURCE_NOT_FOUND, m),
+            ReadError::Failed(m) => RpcError::new(INTERNAL_ERROR, m),
+        })?;
+        Ok(json!({
+            "contents": [ {
+                "uri": uri,
+                "mimeType": resources::NTRIPLES_MIME,
+                "text": text,
+            } ]
+        }))
+    }
+
+    /// `prompts/list`: the static canned-query prompt catalog. See [`crate::prompts`].
+    /// [SONNET-4.6] sq-sjey1
+    fn prompts_list(&self) -> Value {
+        let prompts: Vec<Value> = prompts::PROMPTS.iter().map(|p| p.to_json()).collect();
+        json!({ "prompts": prompts })
+    }
+
+    /// `prompts/get`: render one prompt into the MCP `messages` shape. An unknown prompt
+    /// name and an unusable argument are both `INVALID_PARAMS`, as the MCP prompts spec
+    /// prescribes — a prompt is never rendered around an argument that failed validation.
+    /// [SONNET-4.6] sq-sjey1
+    fn prompts_get(&self, params: &Value) -> Result<Value, RpcError> {
+        let name = params
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| RpcError::new(INVALID_PARAMS, "prompts/get requires a string `name`"))?;
+        let spec = prompts::find(name)
+            .ok_or_else(|| RpcError::new(INVALID_PARAMS, format!("unknown prompt: {}", name)))?;
+        let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+        let text = (spec.render)(&args).map_err(|m| RpcError::new(INVALID_PARAMS, m))?;
+        Ok(json!({
+            "description": spec.description,
+            "messages": [ {
+                "role": "user",
+                "content": { "type": "text", "text": text },
+            } ]
+        }))
     }
 
     /// Handle a `tools/call`: validate the requested tool name + arguments, run it,

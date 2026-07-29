@@ -38,7 +38,8 @@ Date: 2026-06-19. Parent epics: **sq-pwr** (MPC over federated SPARQL with ZKP o
 >      predicate private. Evidence: `routing::operand_disclosable`.
 >
 > **Landed since** (each its own bead, all opt-in, none in the default build): Phase 1
-> `sq-2q1x`, Phase 2 `sq-fix4`, Phase 3 `sq-i1wh2`, Phase 4 `sq-pwr.2`, Phase 6 `sq-pwr.3`.
+> `sq-2q1x`, Phase 2 `sq-fix4`, Phase 3 `sq-i1wh2`, Phase 4 `sq-pwr.2`, Phase 6 `sq-pwr.3` +
+> `sq-xkrt`.
 > See §8 for the per-phase status and `crates/sparq-fedplan-mpc/README.md` for the honest
 > boundary. **§9 Q3** (where the Phase-5 untrusted-plan re-validation binds) and **§9 Q4**
 > (B7 authorisation scope) remain **OPEN**.
@@ -383,7 +384,7 @@ four-flatmates pipeline.
 
 > **Status as of 2026-07-28** (issue #755 greenlight — see the decision log at the top).
 > **LANDED:** Phases 1 (`sq-2q1x`), 2 (`sq-fix4`), 3 (`sq-i1wh2`), 4 (`sq-pwr.2`),
-> 6 (`sq-pwr.3`), in `crates/sparq-fedplan-mpc/`. **NOT STARTED:** Phase 5 (audit-gated on
+> 6 (`sq-pwr.3` + `sq-xkrt`), in `crates/sparq-fedplan-mpc/`. **NOT STARTED:** Phase 5 (audit-gated on
 > `sq-qhy4` / `sq-9hrn` *and* on §9 Q3) and Phase 7 (needs the §9 Q4 decision). Per-phase
 > annotations below.
 
@@ -409,11 +410,24 @@ four-flatmates pipeline.
    a forged accept. **BLOCKED** on `proof.rs` ceasing to be a stub AND the external audit
    (sq-qhy4) + collaborative coZK re-audit (sq-9hrn) — do NOT present as sound until then. *(P3,
    depends Phase 4 + the audit gates)*
-6. **Phase 6 — FedUP-style result-aware source-combination pruning.** **[LANDED — `sq-pwr.3`;
-   the value-overlap prune was deliberately DECLINED as not recall-safely expressible from the
-   public summary — see the crate README]** Add provenance/quotient-
+6. **Phase 6 — FedUP-style result-aware source-combination pruning.** **[LANDED — `sq-pwr.3`
+   (Rule C1) + `sq-xkrt` (Rule C2, the quotient-summary rule); the value-overlap prune remains
+   deliberately DECLINED as not recall-safely expressible from the public summary — see the
+   crate README]** Add provenance/quotient-
    summary pruning to Phase 2 to cut the source-combination blow-up before MPC (the highest-
-   leverage pre-MPC cost win). *(P3, depends Phase 2)*
+   leverage pre-MPC cost win). **Rule C1** (`sq-pwr.3`) collapses the whole combination space
+   when any conjunct has no candidate source (`∅ ⋈ R = ∅`) — sound, but it only fires on an
+   already-dead query. **Rule C2** (`sq-xkrt`) is the rule that fires on the **live** path, and
+   is the actual FedUP *provenance-over-quotient-summaries* lever: a source's served
+   characteristic sets (`scs:`) partition its subjects by their **exact** predicate set, so if
+   two patterns share a **subject**-position join variable and no characteristic set of a source
+   carries both their predicates, no subject of that source satisfies both conjuncts — that
+   same-source pairing, and every source-combination containing it, is provably dead, while the
+   source stays a valid candidate for each pattern *individually*. Recall-safety rests on a
+   **completeness guard** (`Σ_{C ∋ p} subjects == void:distinctSubjects` over distinct set
+   keys): served characteristic sets are routinely truncated, and truncation strictly lowers
+   that sum, so a truncated / unknown / non-partition summary **declines** rather than
+   over-prunes. *(P3, depends Phase 2)*
 7. **Phase 7 — B7 authorisation hook (WAC/ACP-aware source skipping).** **[NOT STARTED —
    needs the §9 Q4 decision; only the reserved `participates` field exists (Phase 1), which
    Phase 2 reads as a bare participation flag, NOT as access control]** Design + wire the
