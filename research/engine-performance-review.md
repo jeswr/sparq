@@ -52,9 +52,11 @@ dominant cold-load / `query-mmap` cost, so this is a direct product win for load
 
 **Canonical measurement:** EC2 bench (tag `sparq-bench`, orphan-proof self-terminate):
 ingest wall on the synthetic social graph + WatDiv at two scales; `perf` self-time share of
-the sort family before/after; `parse_ns_per_byte` and `bytes/triple` ratchets hold or
-improve. Correctness gate: byte-identical index content vs the comparison sort (exact
-output-equivalence test), and dict-id-order determinism per
+the sort family before/after; the deterministic `bytes/triple` ratchet must hold or improve
+(hard-gated), with `parse_ns_per_byte` an advisory timing signal (tracked/warned,
+non-blocking — `scripts/perf-gate.py` classes it `mode: noise`). Correctness gate:
+byte-identical index content vs the comparison sort (exact output-equivalence test), and
+dict-id-order determinism per
 `research/dict-id-order-determinism-audit.md`.
 
 **M4 composition:** ingest-side; fully orthogonal to sq-pntvh.
@@ -85,8 +87,9 @@ replays deterministically per PR. No adoption without that lane green.
 uniformity (real dumps are highly prefix-uniform; WatDiv/BSBM/Wikidata all are).
 
 **Canonical measurement:** EC2 ingest wall + `perf` share of the oxiri symbol family;
-`parse_ns_per_byte` ratchet. A prefix-diverse adversarial input must show no regression
-(memo miss cost ≈ one short memcmp).
+`parse_ns_per_byte` as an advisory timing signal (tracked/warned, non-blocking), so the EC2
+wall reading is the decision input. A prefix-diverse adversarial input must show no
+regression (memo miss cost ≈ one short memcmp).
 
 **M4 composition:** orthogonal (ingest).
 
@@ -152,7 +155,7 @@ lane coverage. (b) In `Dict` dedup, compare the stored 64-bit hash before fallin
 cost — which is why it ranks below the three items above despite being trivial.
 
 **Canonical measurement:** EC2 ingest wall delta; Miri lane green; cargo-geiger ratchet
-accounted; `parse_ns_per_byte` holds or improves.
+accounted; `parse_ns_per_byte` tracked as an advisory timing signal (warned, non-blocking).
 
 ---
 
