@@ -963,6 +963,19 @@ jobs:
         run: python3 scripts/check-fast-fix-ring-guard.py --self-test
       - name: "Enforce the fast-fix ring fail-closed cross-repo guard (#3475) — GATING"
         run: python3 scripts/check-fast-fix-ring-guard.py
+      # [OPUS-5] #4966: the SAME two doorbells, from the opposite direction — a MISSING
+      # REGISTRY_RING_TOKEN must fail LOUD instead of suppressing ~130 rings into green
+      # runs. Extracts each ring job's real `run:` script from the live YAML and
+      # EXECUTES it under bash with a stubbed `gh`, asserting the exit code and the
+      # emitted annotations in BOTH credential states (empty => non-zero + `::error::`
+      # + no dispatch; present => exit 0 + the dispatch actually attempted, so the fix
+      # cannot be "always fail"). Also drives the REAL ci_summary_gate.render_verdict()
+      # to prove the new hard failure cannot red `ci-summary / gate` — both check-runs
+      # land on the main head SHA that the push-triggered gate polls (sq-huwr8), so the
+      # advisory-registry declaration is what keeps them non-gating. Needs PyYAML,
+      # installed once in the shared setup above.
+      - name: Self-test the ring doorbells fail LOUD on a missing credential (#4966)
+        run: python3 scripts/tests/test_ring_credential_loud.py
       # [OPUS-5] The VERDICT-comment -> review:pass bridge (scripts/verdict-bridge.py,
       # .github/workflows/verdict-bridge.yml). It is the ONLY automated writer of the
       # label the whole arming chain admits on, so a regression in it either strands
