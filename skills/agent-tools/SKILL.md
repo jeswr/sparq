@@ -279,6 +279,10 @@ serve_http(TcpListener::bind("127.0.0.1:7332")?, transport)?;   // loopback: no 
 - **Sessions** — a successful `initialize` mints a random 128-bit `Mcp-Session-Id` returned as
   a response header; every later request must carry it (missing ⇒ `400`, unknown ⇒ `404`), and
   `DELETE` terminates it (`204`). `HttpConfig::max_sessions` (default 256) caps how many exist.
+  Before a session exists the *only* admissible body is the handshake itself: a batch is
+  dispatched only if **every** element is an `initialize` request/notification or
+  `notifications/initialized`, so `[initialize, tools/call]` is `400` rather than a tool call
+  smuggled ahead of the session it should have needed.
 - **`GET`** — the session's **SSE** stream (`text/event-stream`) for server→client messages,
   which the embedder pushes with `HttpTransport::notify` / `broadcast`. Each event carries an
   `id:`, so a reconnect with `Last-Event-ID` replays what the client missed (ring bounded by
@@ -286,7 +290,10 @@ serve_http(TcpListener::bind("127.0.0.1:7332")?, transport)?;   // loopback: no 
   one stream per session — a second `GET` is `409`.
 - **Concurrency, honestly** — the *transport* is concurrent; *engine access is serialised* by
   the one mutex, so a long `query` blocks other sessions for its duration (bounded by
-  `ServerConfig::query_timeout_secs`).
+  `ServerConfig::query_timeout_secs`). Threads are bounded by `HttpConfig::max_connections`
+  (default 512, `0` disables): an over-cap socket is answered `503` and closed on the accept
+  thread without spawning a worker. That, not `max_sessions`, is what bounds a peer that
+  connects and withholds request bytes — such a peer never mints a session at all.
 - **Lean** — the HTTP/1.1 + SSE framing and the session registry are std-only, so the feature
   adds **zero** crates to the closure (measured: 62 packages with and without it). The
   `rmcp` SDK was declined for this in `research/mcp-rmcp-sdk-adoption-assessment.md`.
@@ -322,8 +329,8 @@ This is a **local agent-tool server, not a hardened multi-tenant endpoint**. The
 **no built-in authentication or authorization**: the MCP transport is the trust boundary
 you, the operator, establish, and whoever can speak to the server has exactly the access it
 was configured with. That is as true of the `http` listener as of the stdio pipe — its
-`Origin` allowlist is a DNS-rebinding defence and `max_sessions` is a DoS ceiling; **neither
-is authentication**, and a session id is a correlation handle, not a credential. Bind
+`Origin` allowlist is a DNS-rebinding defence and `max_sessions` / `max_connections` are DoS
+ceilings; **none of them is authentication**, and a session id is a correlation handle, not a credential. Bind
 loopback.
 
 - **Read-only by default** — a default `McpServer` advertises and accepts only

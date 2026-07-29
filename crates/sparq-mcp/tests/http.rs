@@ -404,3 +404,63 @@ fn malformed_and_unauthorized_requests_are_answered_on_the_wire() {
     ));
     assert_eq!(elsewhere.status, 404);
 }
+
+#[test]
+fn incomplete_connections_are_capped_rather_than_spawning_unbounded_workers() {
+    let (address, transport) = start(HttpConfig {
+        max_connections: 2,
+        ..HttpConfig::default()
+    });
+
+    // Two peers that connect and then withhold the end of the request head — the
+    // slow-loris shape. Neither will ever initialize, so `max_sessions` never sees them.
+    let holders: Vec<TcpStream> = (0..2)
+        .map(|_| {
+            let mut stream = TcpStream::connect(&address).expect("connect");
+            stream
+                .write_all(format!("POST /mcp HTTP/1.1\r\nhost: {}\r\n", address).as_bytes())
+                .unwrap();
+            stream.flush().unwrap();
+            stream
+        })
+        .collect();
+    await_connection_count(&transport, 2);
+    assert_eq!(transport.session_count(), 0, "no session was ever minted");
+
+    // The third is refused promptly instead of occupying a thread for the read timeout.
+    let mut extra = TcpStream::connect(&address).expect("connect");
+    extra.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let mut refusal = String::new();
+    extra.read_to_string(&mut refusal).expect("read the refusal");
+    assert!(
+        refusal.starts_with("HTTP/1.1 503"),
+        "an over-cap connection is answered 503 and closed: {:?}",
+        refusal
+    );
+
+    // Freeing the held sockets frees their slots, and the listener serves again.
+    drop(holders);
+    await_connection_count(&transport, 0);
+    assert_eq!(
+        post(&address, None, INIT).status,
+        200,
+        "a released slot admits the next client"
+    );
+}
+
+/// Wait for the transport's live-connection count to settle on `expected`. The accept
+/// loop and the connection threads run independently of the test thread, so the count is
+/// polled rather than read once.
+fn await_connection_count(transport: &Arc<HttpTransport>, expected: usize) {
+    for _ in 0..200 {
+        if transport.connection_count() == expected {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!(
+        "connection count stayed at {}, expected {}",
+        transport.connection_count(),
+        expected
+    );
+}

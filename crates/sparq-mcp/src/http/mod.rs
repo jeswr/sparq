@@ -36,10 +36,12 @@
 //!
 //! # Concurrency
 //!
-//! One thread per connection, and one `Mutex<McpServer>` shared by all of them, so tool
-//! calls from different sessions are **serialised** against the dataset. That is the
-//! honest description: the transport is concurrent, the engine access underneath it is
-//! not. A long `query` blocks other sessions for its duration — which is what
+//! One thread per connection — capped by [`HttpConfig::max_connections`], because a
+//! connection costs a thread from the moment it is accepted, long before it has a session
+//! — and one `Mutex<McpServer>` shared by all of them, so tool calls from different
+//! sessions are **serialised** against the dataset. That is the honest description: the
+//! transport is concurrent, the engine access underneath it is not. A long `query` blocks
+//! other sessions for its duration — which is what
 //! [`crate::ServerConfig::query_timeout_secs`] bounds.
 
 mod session;
@@ -47,6 +49,7 @@ mod wire;
 
 use std::io::{BufReader, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -61,6 +64,11 @@ use wire::{HttpRequest, HttpResponse, WireError};
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a single SSE write may block before the stream is abandoned as dead.
 const STREAM_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long the accept loop will spend telling an over-cap peer `503` before dropping it.
+/// Short on purpose: the refusal is written on the accept thread (spawning a thread for it
+/// would reintroduce the very unbounded growth the cap exists to stop), so a peer that
+/// never reads must not be able to stall accepting for long.
+const REFUSAL_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Configuration for the Streamable HTTP transport.
 #[derive(Debug, Clone)]
@@ -90,6 +98,16 @@ pub struct HttpConfig {
     /// blunt ceiling, not a fairness quota — exactly like
     /// [`crate::ServerConfig::max_rows`].
     pub max_sessions: usize,
+    /// Largest number of connections being served at once. An accepted connection past
+    /// this is answered `503` and closed on the accept thread without spawning a worker.
+    /// `0` removes the cap. Default 512.
+    ///
+    /// [`Self::max_sessions`] does **not** cover this: a connection costs a thread and a
+    /// read buffer from the moment it is accepted, and a peer that never sends a complete
+    /// request never mints a session at all — so without this cap a slow-loris peer can
+    /// hold one thread per socket for the whole request read timeout with the session ceiling
+    /// untouched. This is the *pre-session* half of the same blunt hedge.
+    pub max_connections: usize,
 }
 
 impl Default for HttpConfig {
@@ -102,6 +120,7 @@ impl Default for HttpConfig {
             sse_keepalive: Duration::from_secs(15),
             replay_buffer: 64,
             max_sessions: 256,
+            max_connections: 512,
         }
     }
 }
@@ -131,6 +150,18 @@ pub struct HttpTransport {
     server: Arc<Mutex<McpServer>>,
     config: HttpConfig,
     sessions: SessionRegistry,
+    connections: Arc<AtomicUsize>,
+}
+
+/// A live-connection slot, released on **every** exit path of the connection thread —
+/// a normal return, an early `return` from a dead socket, or an unwinding panic — because
+/// the release is a `Drop`, not a statement someone has to remember to write.
+struct ConnectionPermit(Arc<AtomicUsize>);
+
+impl Drop for ConnectionPermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// What routing decided to do with one request.
@@ -153,6 +184,7 @@ impl HttpTransport {
             server,
             config,
             sessions: SessionRegistry::new(replay),
+            connections: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -169,6 +201,27 @@ impl HttpTransport {
     /// Whether `session` is live.
     pub fn has_session(&self, session: &str) -> bool {
         self.sessions.contains(session)
+    }
+
+    /// The number of connections currently being served — the quantity
+    /// [`HttpConfig::max_connections`] caps. Counts sockets, not sessions: a peer that
+    /// has not (or never will) complete a request is in here and in no session.
+    pub fn connection_count(&self) -> usize {
+        self.connections.load(Ordering::Acquire)
+    }
+
+    /// Claim a connection slot, or `None` when the cap is already reached.
+    ///
+    /// The claim is a compare-and-swap rather than a `fetch_add` + check, so a burst of
+    /// simultaneous accepts cannot momentarily overshoot the cap.
+    fn acquire_connection(&self) -> Option<ConnectionPermit> {
+        let cap = self.config.max_connections;
+        self.connections
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |live| {
+                (cap == 0 || live < cap).then_some(live + 1)
+            })
+            .ok()
+            .map(|_| ConnectionPermit(Arc::clone(&self.connections)))
     }
 
     /// Queue one raw JSON-RPC message for delivery on `session`'s SSE stream. Returns
@@ -274,15 +327,24 @@ impl HttpTransport {
             return respond(400, "unsupported MCP-Protocol-Version\n");
         }
 
-        // Session lifecycle. An `initialize` message is the one thing a client may send
-        // without a session id — that request is what mints one.
-        let initializing = is_initialize(body);
-        match request.header("mcp-session-id") {
-            Some(id) if self.sessions.contains(id) => {}
+        // Session lifecycle. The handshake is the one thing a client may send without a
+        // session id, so a sessionless body is classified in full *before* dispatch: a
+        // batch is admitted only if EVERY element belongs to the handshake. Testing
+        // "contains an initialize" instead would let `[initialize, tools/call]` run the
+        // tool call pre-session, since `handle_message` dispatches the whole batch.
+        let pre_session = match request.header("mcp-session-id") {
+            Some(id) if self.sessions.contains(id) => None,
             Some(_) => return respond(404, "unknown or terminated session\n"),
-            None if initializing => {}
-            None => return respond(400, "Mcp-Session-Id header required\n"),
-        }
+            None => match classify_pre_session(body) {
+                PreSession::Refused => {
+                    return respond(
+                        400,
+                        "Mcp-Session-Id header required for anything but an initialize handshake\n",
+                    )
+                }
+                admitted => Some(admitted),
+            },
+        };
 
         let reply = {
             let Ok(mut server) = self.server.lock() else {
@@ -297,8 +359,10 @@ impl HttpTransport {
         };
 
         let mut response = HttpResponse::json(reply);
-        // A successful handshake that arrived without a session id mints one.
-        if initializing && request.header("mcp-session-id").is_none() {
+        // A successful handshake mints one. `Handshake` is only reached for a sessionless
+        // body carrying exactly one `initialize` *request*, and the classification admits
+        // nothing else that can produce a response — so a reply here is that handshake's.
+        if matches!(pre_session, Some(PreSession::Handshake)) {
             match new_session_id() {
                 // Fail closed: a session id the OS could not make random is not a
                 // session id, and inventing a predictable one would be worse than 500.
@@ -432,16 +496,56 @@ fn respond(status: u16, message: &str) -> Outcome {
     Outcome::Respond(HttpResponse::text(status, message))
 }
 
-/// Whether a raw JSON-RPC message is (or, for a batch, contains) an `initialize`
-/// request. Only that message may arrive without an `Mcp-Session-Id`.
-fn is_initialize(body: &str) -> bool {
-    fn method_is_initialize(value: &Value) -> bool {
-        value.get("method").and_then(Value::as_str) == Some("initialize")
+/// What a body that arrived **without** a session id is permitted to be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreSession {
+    /// Exactly one `initialize` request, alone or alongside handshake notifications:
+    /// dispatch it, and mint a session for its response.
+    Handshake,
+    /// Handshake notifications only. Dispatchable — JSON-RPC forbids a response to a
+    /// notification, so there is nothing to attach a session to and nothing is minted.
+    NotificationsOnly,
+    /// Anything else. It needs a session id, and is refused before dispatch.
+    Refused,
+}
+
+/// Classify a raw JSON-RPC message for the pre-session boundary.
+///
+/// Deliberately narrow, because `McpServer::handle_message` dispatches a batch as a
+/// whole: one non-handshake element anywhere in the batch refuses the *entire* body,
+/// rather than letting it ride along with an `initialize`. Two `initialize` requests are
+/// refused too — one response header cannot answer both handshakes.
+fn classify_pre_session(body: &str) -> PreSession {
+    /// `Some(true)` for the `initialize` request, `Some(false)` for a handshake
+    /// notification, `None` for anything that needs a session.
+    fn handshake_element(value: &Value) -> Option<bool> {
+        let method = value.get("method").and_then(Value::as_str)?;
+        // JSON-RPC: an absent (or null) id is a notification, which gets no response.
+        let is_request = value.get("id").is_some_and(|id| !id.is_null());
+        match (method, is_request) {
+            ("initialize", true) => Some(true),
+            ("initialize", false) | ("notifications/initialized", false) => Some(false),
+            _ => None,
+        }
     }
-    match serde_json::from_str::<Value>(body) {
-        Ok(Value::Array(elements)) => elements.iter().any(method_is_initialize),
-        Ok(value) => method_is_initialize(&value),
-        Err(_) => false,
+    let elements = match serde_json::from_str::<Value>(body) {
+        // An empty batch is not a handshake; neither is a bare scalar or bad JSON.
+        Ok(Value::Array(elements)) if !elements.is_empty() => elements,
+        Ok(value @ Value::Object(_)) => vec![value],
+        _ => return PreSession::Refused,
+    };
+    let mut requests = 0usize;
+    for element in &elements {
+        match handshake_element(element) {
+            Some(true) => requests += 1,
+            Some(false) => {}
+            None => return PreSession::Refused,
+        }
+    }
+    match requests {
+        0 => PreSession::NotificationsOnly,
+        1 => PreSession::Handshake,
+        _ => PreSession::Refused,
     }
 }
 
@@ -463,15 +567,35 @@ fn new_session_id() -> Option<String> {
 /// Serve MCP over Streamable HTTP on an already-bound listener, one thread per
 /// connection, until `listener.accept()` fails.
 ///
+/// At most [`HttpConfig::max_connections`] connections are served at once; an accepted
+/// connection past that is answered `503` and closed **without** a thread being spawned
+/// for it, so a peer that opens sockets and then withholds request bytes cannot grow the
+/// thread pool without bound.
+///
 /// The caller owns the bind address, and should bind **loopback**: this transport has no
 /// authentication (see the module docs). Individual connection failures are handled
 /// per-connection and never stop the accept loop.
 pub fn serve_http(listener: TcpListener, transport: Arc<HttpTransport>) -> std::io::Result<()> {
     loop {
         let (stream, _peer) = listener.accept()?;
+        let Some(permit) = transport.acquire_connection() else {
+            refuse_connection(stream);
+            continue;
+        };
         let transport = Arc::clone(&transport);
-        std::thread::spawn(move || transport.serve_connection(stream));
+        std::thread::spawn(move || {
+            // Held for the whole connection; its `Drop` frees the slot however we leave.
+            let _permit = permit;
+            transport.serve_connection(stream);
+        });
     }
+}
+
+/// Tell an over-cap peer `503` and close, on the accept thread and under a short write
+/// timeout — a refusal must never cost the resource it is refusing.
+fn refuse_connection(mut stream: TcpStream) {
+    let _ = stream.set_write_timeout(Some(REFUSAL_WRITE_TIMEOUT));
+    let _ = HttpResponse::text(503, "connection limit reached\n").write_to(&mut stream);
 }
 
 #[cfg(test)]
@@ -641,6 +765,58 @@ mod tests {
         assert_eq!(response.status, 200);
         assert!(header_of(&response, "mcp-session-id").is_some());
         assert_eq!(transport.session_count(), 1);
+    }
+
+    #[test]
+    fn a_sessionless_batch_cannot_smuggle_a_call_alongside_the_handshake() {
+        // The dataset is writable here *only* so a smuggled mutation would leave a mark:
+        // if the batch were dispatched, the graph would grow and the assertion below
+        // would catch it. Nothing about the boundary depends on `allow_update`.
+        let graph =
+            Graph::load_str("<http://ex/a> <http://ex/p> <http://ex/b> .", "ntriples").unwrap();
+        let server = Arc::new(Mutex::new(McpServer::with_config(
+            graph,
+            crate::ServerConfig {
+                allow_update: true,
+                ..crate::ServerConfig::default()
+            },
+        )));
+        let transport = HttpTransport::new(server, HttpConfig::default());
+
+        let smuggled = format!(
+            r#"[{},{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"update","arguments":{{"sparql":"INSERT DATA {{ <http://ex/x> <http://ex/y> <http://ex/z> }}"}}}}}}]"#,
+            INIT
+        );
+        let refused = responded(transport.route(&post(&[], &smuggled)));
+        assert_eq!(refused.status, 400, "a mixed batch is refused before dispatch");
+        assert_eq!(transport.session_count(), 0, "and mints nothing");
+
+        // Prove the `update` never ran: a legitimate session still sees one triple.
+        let session = initialize(&transport);
+        let stats = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"stats","arguments":{}}}"#;
+        let response = responded(transport.route(&post(&[("mcp-session-id", &session)], stats)));
+        let reply: Value = serde_json::from_slice(&response.body).unwrap();
+        let payload: Value =
+            serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["triples"], 1, "the smuggled INSERT DATA never ran");
+    }
+
+    #[test]
+    fn a_sessionless_batch_mints_only_for_a_real_initialize_request() {
+        let transport = build(HttpConfig::default());
+        // An `initialize` *notification* plus a `ping` request: the ping would produce a
+        // response, but there is no handshake to hang a session on, and the ping needs a
+        // session of its own — so the whole body is refused.
+        let batch = r#"[{"jsonrpc":"2.0","method":"initialize","params":{}},{"jsonrpc":"2.0","id":2,"method":"ping"}]"#;
+        let refused = responded(transport.route(&post(&[], batch)));
+        assert_eq!(refused.status, 400);
+        assert!(header_of(&refused, "mcp-session-id").is_none());
+        assert_eq!(transport.session_count(), 0);
+
+        // Two handshakes in one batch: one response header cannot answer both.
+        let doubled = format!(r#"[{},{}]"#, INIT, INIT);
+        assert_eq!(responded(transport.route(&post(&[], &doubled))).status, 400);
+        assert_eq!(transport.session_count(), 0);
     }
 
     #[test]
@@ -912,12 +1088,68 @@ mod tests {
     }
 
     #[test]
-    fn initialize_detection_covers_objects_batches_and_junk() {
-        assert!(is_initialize(INIT));
-        assert!(is_initialize(&format!("[{}]", INIT)));
-        assert!(!is_initialize(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#));
-        assert!(!is_initialize("not json"));
-        assert!(!is_initialize("[]"));
+    fn pre_session_classification_admits_only_the_handshake() {
+        use PreSession::*;
+        let init_note = r#"{"jsonrpc":"2.0","method":"initialize","params":{}}"#;
+        let initialized = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+
+        assert_eq!(classify_pre_session(INIT), Handshake);
+        assert_eq!(classify_pre_session(&format!("[{}]", INIT)), Handshake);
+        assert_eq!(
+            classify_pre_session(&format!("[{},{}]", INIT, initialized)),
+            Handshake
+        );
+        // No response to attach a session to.
+        assert_eq!(classify_pre_session(init_note), NotificationsOnly);
+        assert_eq!(classify_pre_session(initialized), NotificationsOnly);
+
+        // Everything else needs a session id.
+        let ping = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        assert_eq!(classify_pre_session(ping), Refused);
+        assert_eq!(classify_pre_session(&format!("[{},{}]", INIT, ping)), Refused);
+        assert_eq!(
+            classify_pre_session(&format!("[{},{}]", init_note, ping)),
+            Refused
+        );
+        assert_eq!(classify_pre_session(&format!("[{},{}]", INIT, INIT)), Refused);
+        // An `initialize` with a null id is a notification, not a mintable handshake.
+        assert_eq!(
+            classify_pre_session(r#"{"jsonrpc":"2.0","id":null,"method":"initialize"}"#),
+            NotificationsOnly
+        );
+        assert_eq!(classify_pre_session("not json"), Refused);
+        assert_eq!(classify_pre_session("[]"), Refused);
+        assert_eq!(classify_pre_session("5"), Refused);
+        assert_eq!(classify_pre_session(r#"{"jsonrpc":"2.0"}"#), Refused);
+    }
+
+    #[test]
+    fn the_connection_cap_is_claimed_and_released_by_the_permit() {
+        let transport = build(HttpConfig {
+            max_connections: 2,
+            ..HttpConfig::default()
+        });
+        assert_eq!(transport.connection_count(), 0);
+        let first = transport.acquire_connection().expect("a free slot");
+        let second = transport.acquire_connection().expect("the last free slot");
+        assert_eq!(transport.connection_count(), 2);
+        assert!(
+            transport.acquire_connection().is_none(),
+            "the cap refuses rather than overshooting"
+        );
+        drop(second);
+        assert_eq!(transport.connection_count(), 1);
+        assert!(transport.acquire_connection().is_some(), "a slot came back");
+        drop(first);
+
+        // `0` is the documented escape hatch.
+        let uncapped = build(HttpConfig {
+            max_connections: 0,
+            ..HttpConfig::default()
+        });
+        let permits: Vec<_> = (0..64).map(|_| uncapped.acquire_connection()).collect();
+        assert!(permits.iter().all(Option::is_some));
+        assert_eq!(uncapped.connection_count(), 64);
     }
 
     #[test]
@@ -940,6 +1172,7 @@ mod tests {
         assert_eq!(config.max_body_bytes, 4 * 1024 * 1024);
         assert_eq!(config.replay_buffer, 64);
         assert_eq!(config.max_sessions, 256);
+        assert_eq!(config.max_connections, 512);
         let transport = build(config);
         assert_eq!(transport.config().endpoint, "/mcp");
     }
