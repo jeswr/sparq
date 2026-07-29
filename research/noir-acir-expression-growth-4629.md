@@ -19,6 +19,15 @@ and its fleet spec says *design note only, no implementation before upstream buy
 deliverable is therefore an analysis of where the growth comes from, what the candidate cut points
 are, and what would have to be true for a patch to be worth proposing — not a patch.
 
+<!-- jscpd allowlist (sq-lrju) — DELIBERATE cross-record repeat: this environment-limits
+     preamble + table is shared with the sibling record `noir-comparison-lowering-10159.md`,
+     which the header of both records already states explicitly ("same environment limits").
+     Both were produced in one run against the same clone, so the limits ARE the same fact,
+     and restating them per record is what lets each record be read standalone.
+     The markers below MUST use the `[//]: #` form, not an HTML comment — see .jscpd.json. -->
+
+[//]: # (jscpd:ignore-start)
+
 Environment limits, stated up front because they bound every claim below:
 
 | capability | available | consequence |
@@ -28,6 +37,8 @@ Environment limits, stated up front because they bound every claim below:
 | `bb` | **no** | no gate counts |
 | noir issue/PR bodies (#4629, #6539, #13046) | **not fetched** — no outbound page-fetch permission in this run | the *ask*, the reproducer and the thread history are taken from `noir-optimization-program.md` §4.1 + the bead text, **not** from the live issues |
 | noir git history | **no** — depth-1 clone | cannot check whether upstream already attempted a fix |
+
+[//]: # (jscpd:ignore-end)
 
 So this is a **source-derived** design note. **Nothing here is a measured claim**, and per the
 program's own doctrine (§2, and the PR #10159 lesson — *measure gates, not intuition*) nothing here

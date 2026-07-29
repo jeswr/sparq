@@ -23,6 +23,13 @@ it does so from a stronger evidence base than "intuition": upstream's own commit
 tests print the exact opcode sequence a comparison lowers to, so the sketch can be evaluated
 opcode-for-opcode without a compiler build.
 
+<!-- jscpd allowlist (sq-lrju) — DELIBERATE cross-record repeat: see the matching marker in the
+     sibling record `noir-acir-expression-growth-4629.md`. Both headers state "same environment
+     limits"; the shared preamble + first table rows are the same fact about the same run,
+     restated so each record stands alone. -->
+
+[//]: # (jscpd:ignore-start)
+
 Environment limits, stated up front because they bound every claim below:
 
 | capability | available | consequence |
@@ -33,6 +40,8 @@ Environment limits, stated up front because they bound every claim below:
 | `bb` | **no** | **no gate counts** — so no claim here is a gate measurement |
 | PR #10159 body/thread, and the issues it references | **not fetched** — outbound page fetch is not permitted in this run | the #10159 outcome is taken from `noir-optimization-program.md` §4.2, **not** from the live thread; §5 below *derives* a mechanism consistent with that summary and labels it a hypothesis |
 | noir git history | **no** — depth-1 clone | cannot check whether the §6 gap was already attempted upstream |
+
+[//]: # (jscpd:ignore-end)
 
 So: §2–§4 are **source- and snapshot-derived facts** about HEAD. §5 is a **hypothesis**. §6 is a
 **candidate**, not a result. Nothing here is a measurement, and per the program's own doctrine

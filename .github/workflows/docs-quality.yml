@@ -1037,6 +1037,97 @@ jobs:
       - name: "Reject exception handlers that erase collected failures (#3770) — GATING"
         run: python3 scripts/check-sticky-failure-exits.py
 
+  # ------------------- HARD GATE (its own runner) -------------------
+  # [OPUS-5] sq-lrju — copy/paste detection over the documentation corpus.
+  #
+  # WHY a SEPARATE job and not another step-group in quick-gates: the sq-6vshe.20
+  # consolidation folded thirteen SUB-MINUTE jobs onto one runner because each was
+  # paying more for its runner claim than for its work. This one is not sub-minute: it
+  # tokenizes the whole ~115k-line markdown corpus, which takes minutes, not seconds
+  # (developer-box timing, not a canonical measurement). So the runner claim amortises,
+  # and on its own runner the scan overlaps quick-gates instead of extending it.
+  # It carries NO advisory/informational token and has no .github/advisory-registry.json
+  # entry, so ci-summary GATES on it (that is the default since #3773).
+  #
+  # WHAT it enforces: `.jscpd.json` (read its `_doc*` keys first — they carry the
+  # threshold/allowlist/scope rationale). `threshold: 0` means ANY duplicated block of
+  # >=80 tokens / >=5 lines across README.md + docs/ + skills/ + research/ + book/ reds
+  # the build. Prose has no compiler and no test to notice that two pages have drifted
+  # apart, so a copy/pasted paragraph is how a doc corpus grows two contradictory
+  # answers to the same question.
+  #
+  # ESCAPE HATCH (never widen the threshold): mark a DELIBERATE repeat in the file with
+  #   [//]: # (jscpd:ignore-start)  …  [//]: # (jscpd:ignore-end)
+  # plus an ordinary HTML comment saying why. The HTML-comment spelling of the marker
+  # itself does NOT work in markdown — see .jscpd.json `_doc_allowlist`; self-test cases
+  # B and C pin the working form and the broken one respectively (the broken one is
+  # fail-CLOSED: a mis-spelled marker leaves the gate red, never green).
+  docs-duplication:
+    name: docs-duplication (jscpd)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      # Proves the gate is not vacuous BEFORE trusting its verdict on the corpus: a
+      # duplicate fixture must red, the `[//]: #` allowlist must green it, the
+      # HTML-comment spelling must NOT, and the rendered-book glob must exclude
+      # book/book/ while the same fixture reds without it. Also fails fast if
+      # `.jscpd.json` loses `threshold: 0` — the single knob supplying the teeth.
+      - name: shellcheck the docs-duplication self-test
+        run: shellcheck scripts/tests/test_docs_duplication.sh
+      - name: Self-test the docs-duplication gate (teeth + allowlist + book exclusion)
+        run: bash scripts/tests/test_docs_duplication.sh
+
+      - name: "jscpd (docs corpus, threshold 0) — GATING"
+        run: |
+          set -uo pipefail
+          # Same pinned version the self-test defaults to; bump both together.
+          status=0
+          npx --yes jscpd@4.0.5 \
+            --config .jscpd.json \
+            --reporters consoleFull,json \
+            --output "${RUNNER_TEMP}/jscpd" \
+            > "${RUNNER_TEMP}/jscpd-console.txt" 2>&1 || status=$?
+          cat "${RUNNER_TEMP}/jscpd-console.txt"
+          python3 - "${RUNNER_TEMP}/jscpd/jscpd-report.json" "${status}" <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, pathlib, sys
+
+          report, status = pathlib.Path(sys.argv[1]), int(sys.argv[2])
+          if not report.is_file():
+              # jscpd died before any reporter ran (bad config, install failure). Say so
+              # rather than rendering a reassuring empty table.
+              print("### docs-duplication (jscpd)\n")
+              print(f"jscpd produced no JSON report and exited **{status}** — see the step log.")
+              sys.exit(0)
+
+          data = json.loads(report.read_text())
+          total = data["statistics"]["total"]
+          dupes = data.get("duplicates", [])
+          verdict = "✅ no duplication" if status == 0 else f"❌ {len(dupes)} duplicate block(s)"
+          print(f"### docs-duplication (jscpd) — {verdict}\n")
+          print("| files | lines | duplicated lines | duplication |")
+          print("|---|---|---|---|")
+          print(f"| {total['sources']} | {total['lines']} | {total['duplicatedLines']} "
+                f"| {total['percentage']}% (threshold 0%) |\n")
+
+          for d in dupes:
+              a, b = d["firstFile"], d["secondFile"]
+              print(f"- `{a['name']}` L{a['start']}–{a['end']} ↔ "
+                    f"`{b['name']}` L{b['start']}–{b['end']} ({d['lines']} lines)")
+          if dupes:
+              print("\nFix by single-sourcing the shared prose. If the repeat is DELIBERATE, "
+                    "wrap it in `[//]: # (jscpd:ignore-start)` / `[//]: # (jscpd:ignore-end)` "
+                    "with an HTML comment saying why — never by raising the threshold. "
+                    "(An `<!-- jscpd:ignore-start -->` HTML comment does NOT work in markdown; "
+                    "see `.jscpd.json`.)")
+          PY
+          exit "${status}"
+
   # ----------------------------- ADVISORY -----------------------------
   # [FABLE-5] sq-6vshe.20: the three former advisory jobs as step-groups on ONE
   # runner. The job NAME carries the advisory token (ci-summary exclusion +
