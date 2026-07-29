@@ -809,11 +809,14 @@ jobs:
         run: python3 scripts/tests/test_ci_select_wiring.py
       # [OPUS-4.8] sq-va7at: the nightly selection-bug ALARM
       # (scripts/ci_selection_alarm.py, .github/workflows/selection-alarm.yml,
-      # design §6.1). Hermetic stdlib-unittest suite (NO gh, NO git, NO cargo,
-      # NO network): the pure correlation core (precise per-crate hit, fail-safe
-      # triage for narrowed shards, the non-spam empty-skip-set property), the
-      # TRIAGE_LANE_RE pin against the real ci.yml shard job name, and the
-      # fail-loud exits (replay error / total blocker => non-zero).
+      # design §6.1). Hermetic unittest suite (NO gh, NO git, NO cargo, NO network;
+      # stdlib + PyYAML, installed once in the shared setup above): the pure
+      # correlation core (precise per-crate hit, fail-safe triage for narrowed
+      # shards, the non-spam empty-skip-set property), the TRIAGE_LANE_RE pin
+      # against the real ci.yml shard job name, the fail-loud exits (replay error /
+      # total blocker => non-zero), and — since #4965 — the ADMISSION SEAM: the live
+      # workflow `if:` evaluated against the real known-positive event payload, with
+      # the evaluator validated against the pre-fix expression as a known answer.
       - name: Self-test the nightly selection-bug alarm (correlation + fail-loud — sq-va7at)
         run: python3 scripts/tests/test_ci_selection_alarm.py
       # [OPUS-5] The review-lane BLIND-SPOT alarm (scripts/review_lane_alarm.py,
