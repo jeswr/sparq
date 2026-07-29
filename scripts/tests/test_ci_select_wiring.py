@@ -132,7 +132,7 @@ _TOKEN_RE = re.compile(
     r"""\s*(?:
         (?P<str>'(?:[^']|'')*')
       | (?P<op>&&|\|\||==|!=|!|\(|\)|,)
-      | (?P<word>[A-Za-z_][A-Za-z0-9_.\-]*)
+      | (?P<word>[A-Za-z_][A-Za-z0-9_.\-*]*)
     )""",
     re.VERBOSE,
 )
@@ -166,6 +166,27 @@ def _truthy(value) -> bool:
     if value == "":
         return False
     return True
+
+
+def _walk(node, parts):
+    """Resolve a dotted context path against `node`.
+
+    [OPUS-5] #3508 adds GitHub's OBJECT-FILTER syntax `a.*.b`: it maps the
+    remaining path over an array (or an object's values) and yields an ARRAY of
+    the results — the shape that makes
+    `contains(github.event.pull_request.labels.*.name, 'fuzz-full')` work. An
+    absent path yields null (falsy), exactly as in GitHub, so a payload with no
+    `labels` key makes every such `contains(...)` false rather than erroring.
+    """
+    for idx, part in enumerate(parts):
+        if part == "*":
+            items = list(node.values()) if isinstance(node, dict) else list(node or [])
+            rest = parts[idx + 1:]
+            return [v for v in (_walk(item, rest) for item in items) if v is not None]
+        if not isinstance(node, dict) or part not in node:
+            return None  # an absent context value is null (falsy), as in GitHub
+        node = node[part]
+    return node
 
 
 class _GhExpr:
@@ -262,12 +283,7 @@ class _GhExpr:
         raise GhExprError(f"unsupported function {fn}()")
 
     def _lookup(self, path):
-        node = self.ctx
-        for part in path.split("."):
-            if not isinstance(node, dict) or part not in node:
-                return None  # an absent context value is null (falsy), as in GitHub
-            node = node[part]
-        return node
+        return _walk(self.ctx, path.split("."))
 
 
 def _marker_expr_of(name: str) -> str:
@@ -289,14 +305,30 @@ def render_job_name(name: str, ctx: dict) -> str:
     return name.replace(expr, str(value))
 
 
-def pr_event(*, draft=False, action="synchronize", label=None, event="pull_request"):
-    """A synthetic `github` context for a pull_request (or other) event."""
+def pr_event(*, draft=False, action="synchronize", label=None, labels=None,
+             event="pull_request"):
+    """A synthetic `github` context for a pull_request (or other) event.
+
+    `label` is the SINGLE label of a labeled/unlabeled event payload;
+    `labels` ([OPUS-5] #3508) is the PR's standing label set, which the draft
+    escapes read via `github.event.pull_request.labels.*.name`. Omitting
+    `labels` leaves the key absent — the unlabelled-PR case.
+    """
     ctx = {"event_name": event, "event": {}}
     if event == "pull_request":
         ctx["event"] = {"action": action, "pull_request": {"draft": draft}}
         if label is not None:
             ctx["event"]["label"] = {"name": label}
+        if labels is not None:
+            ctx["event"]["pull_request"]["labels"] = [{"name": n} for n in labels]
     return {"github": ctx}
+
+
+def eval_job_if(cond: str, ctx: dict) -> bool:
+    """Evaluate a job `if:` the way GitHub does — the condition is an implicit
+    expression (no `${{ }}` wrapper), and its truthiness decides whether the job
+    runs. Returns True == the job RUNS."""
+    return _truthy(_GhExpr(" ".join(str(cond).split()), ctx).parse())
 
 
 class TestWiring(unittest.TestCase):
@@ -1202,6 +1234,7 @@ class TestDraftTierWiring(unittest.TestCase):
         wfdir = REPO_ROOT / ".github" / "workflows"
         cls.ci = _load(CI_YML)
         cls.bench = _load(BENCH_YML)
+        cls.fuzz = _load(FUZZ_YML)  # [OPUS-5] #3508
         cls.sel = _load(SELECT_YML)
         cls.codeql = _load(wfdir / "codeql.yml")
         cls.vfo = _load(wfdir / "vectorized-feature-off.yml")
@@ -1255,6 +1288,58 @@ class TestDraftTierWiring(unittest.TestCase):
                       "bench.yml:bench must skip entirely on draft PR heads")
         self.assertIn(FAIL_CLOSED_DISJUNCT, cond,
                       "the selection disjunction must survive the draft guard")
+
+    def test_fuzz_job_skips_on_draft_heads(self):
+        """[OPUS-5] #3508 — the review-fix loop re-pushes a draft head many times
+        per PR and nothing in it reads a corpus-replay result, yet the job pays a
+        nightly-toolchain install + a `cargo fuzz build` of every target every
+        time. So the `fuzz` job is draft-skipped like bench/coverage and the
+        `ready_for_review` run re-replays at full tier. Asserted BEHAVIOURALLY by
+        evaluating the live `if:` (not by substring), because the two label
+        escapes are the part that a substring check would happily let rot."""
+        cond = self.fuzz["jobs"]["fuzz"].get("if", "")
+        self.assertIn(FAIL_CLOSED_DISJUNCT, str(cond),
+                      "the selection disjunction must survive the draft guard")
+
+        # mode=full => the selection disjunct is TRUE, so the draft guard alone
+        # decides. (mode=full is what push/schedule/dispatch always produce.)
+        def runs(**kw):
+            ctx = pr_event(**kw)
+            ctx["needs"] = {"select": {"outputs": {"mode": "full", "affected": "[]"}}}
+            return eval_job_if(cond, ctx)
+
+        self.assertFalse(runs(draft=True),
+                         "fuzz.yml:fuzz must SKIP on an unlabelled draft PR head")
+        self.assertFalse(runs(draft=True, labels=["review:changes"]),
+                         "an unrelated label must not resurrect the lane on a draft")
+        # FAIL-OPEN off the PR path: push / schedule / dispatch are byte-identical
+        # to before, so the randomized full-form runs (and the demotion auto-bead
+        # protocol they feed) are untouched.
+        for event in ("push", "schedule", "workflow_dispatch"):
+            self.assertTrue(runs(event=event), f"{event} must still run the fuzz lane")
+        self.assertTrue(runs(draft=False), "a non-draft PR head must still run it")
+        # LABEL ESCAPES. `fuzz-full` selects this job's RANDOMIZED budget (the
+        # budget step reads it), so a bare draft skip would silently neuter the
+        # label on exactly the drafts where a maintainer applies it.
+        for lbl in ("ci-full", "fuzz-full"):
+            self.assertTrue(runs(draft=True, labels=[lbl]),
+                            f"the {lbl} label must override the draft skip")
+        # The escapes compose with the #2546 label-trigger guard: a review:* flip
+        # stays a no-op on a draft even though the PR carries fuzz-full.
+        self.assertFalse(runs(draft=True, labels=["fuzz-full"],
+                              action="labeled", label="review:changes"),
+                         "a non-ci-full/fuzz-full label FLIP must stay a no-op")
+
+    def test_differential_smoke_is_not_draft_skipped(self):
+        """The sibling job in fuzz.yml is the wrong-answer gate, and a
+        wrong-answer regression IS review-relevant — #3508 scopes out the
+        corpus-replay lane only. Pinned so a later sweep does not quietly widen
+        the draft skip to a correctness gate."""
+        cond = str(self.fuzz["jobs"]["differential-smoke"].get("if", ""))
+        self.assertNotIn("draft", cond,
+                         "differential-smoke (the wrong-answer gate) must keep "
+                         "running on draft heads — see docs/branch-protection.md "
+                         "§Draft-tier CI")
 
     def test_codeql_analyze_skips_on_draft_heads(self):
         cond = str(self.codeql["jobs"]["analyze"].get("if", ""))

@@ -231,6 +231,7 @@ no check-run there either — not a byte-identical copy of the PR check-set.)
 |---|---|---|
 | coverage ratchet (measure + engine split + aggregate) | `ci.yml` | never on drafts (merge_group + ready_for_review re-measure) |
 | benchmarks (deterministic ratchet + PR comparison/alert comments) | `bench.yml` | never on drafts |
+| `cargo-fuzz` corpus replay (nightly toolchain + a libFuzzer build of every `fuzz/fuzz_targets/` target) | `fuzz.yml` `fuzz` | kept iff the PR carries `ci-full`/`fuzz-full` (`fuzz-full` also selects the randomized budget, so a bare draft skip would neuter it); otherwise the `ready_for_review` run re-replays at full tier. `differential-smoke` — the wrong-answer gate in the same workflow — is deliberately NOT draft-skipped: a wrong-answer regression is review-relevant |
 | CodeQL analysis | `codeql.yml` | never on drafts (push-main + weekly schedule + merge_group + the ready_for_review run keep the `code_scanning` rule fed *when the workflow is enabled*; codeql.yml is byte-identical to `main` — its triggers, including merge_group, are untouched by this PR — but the workflow is currently operationally disabled (`disabled_manually`), so no CodeQL check-run is produced on any trigger today; open PR #3427 owns the successor policy) |
 | heavy recall shards (`heavy-diskann`/`heavy-hnsw`) | `ci.yml` `test` | never on drafts (same demotion mechanism as their merge_group demotion) |
 | wasm bundle build | `ci.yml` `wasm` | kept iff a wasm-bundle crate is in the affected closure (the existing lane-seed guard — unchanged on both tiers) |
