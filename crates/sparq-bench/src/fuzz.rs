@@ -1,6 +1,9 @@
 //! Differential fuzzer: generates random small graphs (with **mixed datatypes** on
-//! a numeric predicate — the case that stresses inline-integer range-pruning) and
-//! random queries across every plan shape, then checks that
+//! a numeric predicate — the case that stresses inline-integer range-pruning — and, since
+//! sq-qcnn.6, **typed-literal columns**: timezoned and bare dateTimes/dates, the three
+//! duration datatypes incl. the incomparable pair, booleans in both lexical forms,
+//! integers beyond `i128`, and doubles incl. `INF`/`-INF`/`NaN`) and
+//! random queries across every plan shape **and every result form**, then checks that
 //!   sparq `query().len()`  ==  Oxigraph solution count            (full differential)
 //!   sparq's ANSWER          ==  Oxigraph's ANSWER, by VALUE       (`compare_select` …)
 //!   sparq `count()`         ==  sparq `query().len()`             (count-path differential)
@@ -175,6 +178,29 @@ impl Rng {
 /// (an all-inline column → range-pruning active). `ex:val` is deliberately MIXED
 /// (xsd:int / xsd:decimal / negative / non-canonical integer / string) → the
 /// range-pruning guard must fall back to a full scan and still be correct.
+///
+/// [SONNET-4.6] sq-qcnn.6 — the TYPED-LITERAL columns (`ex:when` / `ex:day` / `ex:dur` /
+/// `ex:flag` / `ex:huge` / `ex:dbl`) extend the data generator past the numeric-and-string
+/// space the columns above cover, into the datatype families where the two engines'
+/// STORES legitimately disagree about the lexical they hand back. That disagreement is the
+/// point: Oxigraph RE-CANONICALISES a literal when it loads a graph — measured on this
+/// generator's own output, `"1"^^xsd:boolean` comes back as `"true"` and
+/// `"1.5E3"^^xsd:double` as `"1500"` — while sparq stores the term exactly as written, so
+/// a projection of one of these columns only compares EQUAL if `sparq-difftest` really is
+/// canonicalising by VALUE (`canonical_lexical`: exact numeric expansion, UTC-normalised
+/// instant, canonical duration, `true`/`false` — the temporal and duration families go
+/// through the same rule even where the two stores happen to agree lexically today).
+/// Every family below is therefore an end-to-end check on the
+/// engine-independent comparator as much as on the engine, and each is pinned by
+/// `typed_literal_columns_cover_every_datatype_family` /
+/// `typed_columns_agree_by_value_despite_lexical_recanonicalisation`.
+///
+/// The families deliberately include the pairs an `f64`- or `i128`-shaped oracle would
+/// wrongly equate or drop — two integers BEYOND `i128` differing only in their last digit,
+/// `INF` / `-INF` / `NaN`, and (from `ex:val`) 18-significant-digit decimals — and the
+/// INCOMPARABLE duration pair (`xsd:yearMonthDuration` vs `xsd:dayTimeDuration`), whose
+/// value spaces have no common order. See `gen_query`'s invariants for why the duration
+/// column is projected but never ORDERED or compared against a constant.
 fn gen_graph(rng: &mut Rng) -> String {
     let n = 3 + rng.below(14) as usize; // 3..=16 subjects
     let mut s = String::from(
@@ -222,6 +248,97 @@ fn gen_graph(rng: &mut Rng) -> String {
                 s.push_str(&format!("{subj} ex:name \"nm{}\" .\n", rng.below(6)));
             }
         }
+        // ── sq-qcnn.6 TYPED-LITERAL columns ──────────────────────────────────
+        // ex:when — `xsd:dateTime`, ALWAYS timezoned (`Z` / `±hh:mm`). Keeping the
+        // whole column timezoned is what makes it safe to COMPARE against a
+        // timezoned constant: a comparison mixing a timezoned and an untimezoned
+        // dateTime resolves through the IMPLICIT timezone of XPath's dynamic context,
+        // which is not fixed by the query.
+        if rng.chance(1, 2) {
+            let tz = ["Z", "+05:30", "-08:00", "+00:00"][rng.below(4) as usize];
+            let (y, mo, d) = (2000 + rng.below(40), 1 + rng.below(12), 1 + rng.below(28));
+            let (h, mi) = (rng.below(24), rng.below(60));
+            s.push_str(&format!(
+                "{subj} ex:when \"{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:00{tz}\"^^xsd:dateTime .\n"
+            ));
+        }
+        // ex:day — the DATE-granularity and UNTIMEZONED temporals: `xsd:date` with and
+        // without a timezone, plus a BARE `xsd:dateTime`. Projected only (see above).
+        if rng.chance(1, 3) {
+            let tz = ["Z", "+05:30", "-08:00"][rng.below(3) as usize];
+            let (y, mo, d) = (2000 + rng.below(40), 1 + rng.below(12), 1 + rng.below(28));
+            let (h, mi) = (rng.below(24), rng.below(60));
+            let v = match rng.below(3) {
+                0 => format!("\"{y:04}-{mo:02}-{d:02}\"^^xsd:date"), // bare date
+                1 => format!("\"{y:04}-{mo:02}-{d:02}{tz}\"^^xsd:date"), // timezoned date
+                _ => format!("\"{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:00\"^^xsd:dateTime"),
+            };
+            s.push_str(&format!("{subj} ex:day {v} .\n"));
+        }
+        // ex:dur — the three duration datatypes, INCLUDING the incomparable pair:
+        // `xsd:yearMonthDuration` and `xsd:dayTimeDuration` partition `xsd:duration`'s
+        // value space into two axes with no common order (XSD 1.1 §3.4.26–28).
+        if rng.chance(1, 3) {
+            let v = match rng.below(6) {
+                0 => format!(
+                    "\"P{}Y{}M\"^^xsd:yearMonthDuration",
+                    1 + rng.below(5),
+                    1 + rng.below(11)
+                ),
+                1 => format!("\"P{}M\"^^xsd:yearMonthDuration", 1 + rng.below(30)),
+                2 => format!(
+                    "\"P{}DT{}H\"^^xsd:dayTimeDuration",
+                    1 + rng.below(10),
+                    1 + rng.below(23)
+                ),
+                3 => format!("\"PT{}M\"^^xsd:dayTimeDuration", 1 + rng.below(120)),
+                4 => format!(
+                    "\"P{}Y{}M{}DT{}H\"^^xsd:duration",
+                    1 + rng.below(3),
+                    1 + rng.below(11),
+                    1 + rng.below(10),
+                    1 + rng.below(23)
+                ),
+                _ => format!("\"-P{}D\"^^xsd:dayTimeDuration", 1 + rng.below(9)),
+            };
+            s.push_str(&format!("{subj} ex:dur {v} .\n"));
+        }
+        // ex:flag — `xsd:boolean` in BOTH lexical forms. `"1"`/`"0"` are the
+        // non-canonical ones Oxigraph rewrites to `true`/`false` on load, so this
+        // column is what pins the comparator's boolean value-canonicalisation.
+        if rng.chance(1, 2) {
+            let v = ["true", "false", "\"1\"^^xsd:boolean", "\"0\"^^xsd:boolean"]
+                [rng.below(4) as usize];
+            s.push_str(&format!("{subj} ex:flag {v} .\n"));
+        }
+        // ex:huge — `xsd:integer` values BEYOND `i128`, including a pair differing only
+        // in their last digit: any oracle that narrows an integer to a machine word (or
+        // to an `f64`) either drops these rows or equates the pair.
+        if rng.chance(1, 3) {
+            let v = [
+                "170141183460469231731687303715884105728", // 2^127 — one past i128::MAX
+                "170141183460469231731687303715884105729", // …+1, differs in the last digit
+                "-170141183460469231731687303715884105729", // one past i128::MIN
+                "99999999999999999999999999999999999999999", // 41 digits
+            ][rng.below(4) as usize];
+            s.push_str(&format!("{subj} ex:huge \"{v}\"^^xsd:integer .\n"));
+        }
+        // ex:dbl — `xsd:double` including the three XSD specials (`INF` / `-INF` /
+        // `NaN`), signed zero, and an `xsd:float` (a DIFFERENT datatype the comparator
+        // must not silently merge with double).
+        if rng.chance(1, 2) {
+            let v = match rng.below(8) {
+                0 => "\"INF\"^^xsd:double".to_string(),
+                1 => "\"-INF\"^^xsd:double".to_string(),
+                2 => "\"NaN\"^^xsd:double".to_string(),
+                3 => format!("\"{}.5E2\"^^xsd:double", rng.below(100)),
+                4 => "\"0.0E0\"^^xsd:double".to_string(),
+                5 => "\"-0.0E0\"^^xsd:double".to_string(),
+                6 => format!("\"{}E-3\"^^xsd:double", 1 + rng.below(999)),
+                _ => format!("\"{}\"^^xsd:float", rng.below(100)),
+            };
+            s.push_str(&format!("{subj} ex:dbl {v} .\n"));
+        }
         // ex:p — edges (chain/star/cycle fodder).
         let edges = rng.below(4);
         for _ in 0..edges {
@@ -262,6 +379,11 @@ const CATEGORIES: &[&str] = &[
     // builds ON (see Cargo.toml). Without it the pass's anti-join half had no
     // standing oracle at all.
     "antijoin",
+    // sq-qcnn.6: the TYPED-LITERAL surfaces (`gen_graph`'s dateTime/date/duration/
+    // boolean/beyond-i128-integer/double-with-specials columns), the SPARQL 1.1 string
+    // functions (§17.4.3), and the two non-`SELECT` RESULT FORMS — which `compare_ask` /
+    // `compare_graph` were wired for by sq-qcnn.5 but which nothing generated.
+    "typed", "strfn", "ask", "construct",
 ];
 
 /// A random query in the chosen category. **Every category must keep these
@@ -291,6 +413,41 @@ const CATEGORIES: &[&str] = &[
 /// * **No blank nodes.** Keeping them out of the generator is exactly what keeps the
 ///   sq-ai2wa (bnode-vs-IRI) allowlist class INERT; introducing one makes that class
 ///   live (its detector is already wired) and needs its own adjudication first.
+/// * **Every query's RESULT FORM must be the one `expected_form` records for its
+///   category** (sq-qcnn.6). `run` dispatches on `query_form` BEFORE the cardinality
+///   flow, so a category that silently changed form would change which oracle judges it.
+///
+/// # sq-qcnn.6: what the typed-literal columns are and are NOT queried with
+///
+/// The typed columns exist to be COMPARED BY VALUE, and the shapes that use them are
+/// chosen so that the answer is a function of the query — never of a semantic choice
+/// SPARQL leaves open. Three exclusions are deliberate, each MEASURED against Oxigraph
+/// rather than assumed:
+///
+/// * **Durations are projected, never compared or ordered.** `<` between an
+///   `xsd:yearMonthDuration` and an `xsd:dayTimeDuration` has no defined answer (their
+///   value spaces share no order, and SPARQL's operator table §17.3 maps no duration
+///   comparison at all). The two engines resolve it differently — sparq drops the
+///   incomparable rows as type errors, Oxigraph keeps them — so generating the
+///   comparison would manufacture a nightly failure for an UNADJUDICATED divergence
+///   rather than find a bug. Projection still exercises the whole store → materialise →
+///   canonicalise path, which is what this column is for.
+/// * **`MIN`/`MAX` never run over `ex:dbl`.** `NaN`'s position in the ordering is not
+///   fixed (sparq's `MAX` skips it, Oxigraph's returns it), so an extremum over a column
+///   containing `NaN` is not a function of the data.
+/// * **No `DISTINCT` / `COUNT(DISTINCT …)` over a typed column.** Oxigraph
+///   RE-CANONICALISES literals on load, so `"1"^^xsd:boolean` and `true` are ONE term in
+///   its store and TWO in sparq's — a cardinality difference that belongs to the
+///   harness's storage layers, not to either engine's DISTINCT. (The same is already
+///   true of `ex:val`'s non-canonical integers; the `distinct` category reads the
+///   all-canonical `ex:age` column instead.)
+///
+/// `GROUP_CONCAT` carries the same care in the `aggregate` category: it is emitted only
+/// where the group is a SINGLETON by construction, or under `STRLEN`, because the ORDER
+/// of a group's members — and so the concatenation — is left unspecified (§11 aggregates).
+/// Its argument is always `STR(…)`-wrapped: `fn:concat` takes strings, and the engines
+/// disagree about coercing a non-string (sparq coerces, Oxigraph errors the aggregate to
+/// UNBOUND), which is a divergence about the argument, not about the aggregate.
 fn gen_query(rng: &mut Rng, category: &str) -> String {
     let pfx = "PREFIX ex: <http://ex/>\nPREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\n";
     // Pick an effective category (when "all", choose one at random).
@@ -448,7 +605,7 @@ fn gen_query(rng: &mut Rng, category: &str) -> String {
         "aggregate" => {
             let k = rng.below(4);
             let t = rng.below(200);
-            return match rng.below(7) {
+            return match rng.below(9) {
                 0 => format!("{pfx}SELECT (COUNT(*) AS ?c) WHERE {{ ?s ex:age ?a }}"),
                 1 => format!("{pfx}SELECT ?s (COUNT(?o) AS ?c) WHERE {{ ?s ex:p ?o }} GROUP BY ?s"),
                 2 => format!(
@@ -467,9 +624,24 @@ fn gen_query(rng: &mut Rng, category: &str) -> String {
                     "{pfx}SELECT (MIN(?a) AS ?mn) (MAX(?a) AS ?mx) WHERE {{ ?s ex:age ?a }} \
                      HAVING(MAX(?a) > {t})"
                 ),
-                _ => format!(
+                6 => format!(
                     "{pfx}SELECT ?s (SUM(?a) AS ?sm) WHERE {{ ?s ex:p ?o . ?o ex:age ?a }} \
                      GROUP BY ?s HAVING(AVG(?a) > {t})"
+                ),
+                // sq-qcnn.6 — GROUP_CONCAT, in two shapes whose value is a function of
+                // the query (see the header note): a SINGLETON group (a
+                // subject carries at most one `ex:age`, so the concatenation has one
+                // member and no order to be arbitrary about), and a multi-member group
+                // read through `STRLEN`, which is invariant under the members' order.
+                7 => format!(
+                    "{pfx}SELECT ?s (GROUP_CONCAT(STR(?a)) AS ?g) WHERE {{ ?s ex:age ?a }} \
+                     GROUP BY ?s"
+                ),
+                _ => format!(
+                    "{pfx}SELECT ?s (STRLEN(GROUP_CONCAT(STR(?o))) AS ?l) \
+                     WHERE {{ ?s ex:p ?o }} GROUP BY ?s \
+                     HAVING(STRLEN(GROUP_CONCAT(STR(?o))) > {})",
+                    10 + rng.below(30)
                 ),
             };
         }
@@ -619,6 +791,145 @@ fn gen_query(rng: &mut Rng, category: &str) -> String {
             return format!(
                 "{pfx}SELECT ?a ?o WHERE {{ ?s ex:age ?a . ?s ex:p ?o }} ORDER BY {dir}"
             );
+        }
+        // ── sq-qcnn.6 categories ─────────────────────────────────────────────────
+        // TYPED LITERALS (§17.1 + the XSD datatypes `gen_graph`'s new columns carry).
+        // The projection shapes are the load-bearing ones: they put EVERY stored literal
+        // of the column in front of the value comparator unfiltered, so they are what
+        // proves `sparq-difftest` absorbs Oxigraph's load-time canonicalisation without
+        // absorbing a value difference. The comparison shapes stay inside the families
+        // where the answer is determined (all-timezoned dateTimes, doubles, boolean EBV)
+        // — see the exclusions on `gen_query`'s header for the three that are not.
+        "typed" => match rng.below(10) {
+            0 => "?s ex:when ?w".to_string(),
+            1 => "?s ex:day ?w".to_string(),
+            2 => "?s ex:dur ?d".to_string(),
+            3 => "?s ex:huge ?h".to_string(),
+            4 => "?s ex:dbl ?d".to_string(),
+            // The typed column JOINED with the integer column — the value has to survive
+            // a join, not merely a scan.
+            5 => "?s ex:when ?w . ?s ex:age ?a".to_string(),
+            // Boolean EBV, both polarities.
+            6 => {
+                if rng.chance(1, 2) {
+                    "?s ex:flag ?f FILTER(?f)".to_string()
+                } else {
+                    "?s ex:flag ?f FILTER(!?f)".to_string()
+                }
+            }
+            // An all-timezoned dateTime column against a timezoned constant: every
+            // comparison is between two instants, so the answer is determined.
+            7 => format!(
+                "?s ex:when ?w FILTER(?w < \"{}-01-01T00:00:00Z\"^^xsd:dateTime)",
+                2000 + rng.below(40)
+            ),
+            // Doubles, where the constant straddles zero and the column carries
+            // `INF`/`-INF`/`NaN` (`NaN` compares false against everything, in both).
+            8 => format!("?s ex:dbl ?d FILTER(?d > {}.0)", rng.below(200) as i64 - 100),
+            // `DATATYPE` over the duration column, which is the one column carrying three
+            // DIFFERENT datatypes over a shared value space: this projects the datatype
+            // IRI as a TERM, so the subtype has to survive the store round-trip and come
+            // back out of a function, not merely sit on the literal.
+            _ => "?s ex:dur ?d BIND(DATATYPE(?d) AS ?t)".to_string(),
+        },
+        // STRING FUNCTIONS (§17.4.3), over `ex:name` — the column that is deliberately a
+        // mix of plain and language-tagged strings, so both readings are exercised: the
+        // LANG-SENSITIVE ones (`UCASE(?n)` on the raw literal returns the argument's
+        // language tag; `LANG(?n)` returns the tag itself) and the `STR(…)`-wrapped
+        // forms, which drop it. Every FILTER is on a value the function COMPUTES, so the
+        // computed string is visible to the cardinality differential and not merely
+        // projected.
+        "strfn" => {
+            let k = rng.below(6);
+            match rng.below(12) {
+                0 => format!("?s ex:name ?n FILTER(CONTAINS(STR(?n), \"m{k}\"))"),
+                1 => format!("?s ex:name ?n FILTER(STRSTARTS(STR(?n), \"nm{k}\"))"),
+                2 => format!("?s ex:name ?n FILTER(STRENDS(STR(?n), \"{k}\"))"),
+                3 => format!("?s ex:name ?n FILTER(REGEX(STR(?n), \"^nm[0-{k}]$\"))"),
+                4 => format!("?s ex:name ?n FILTER(STRLEN(STR(?n)) > {k})"),
+                5 => "?s ex:name ?n BIND(UCASE(?n) AS ?u) FILTER(STRSTARTS(STR(?u), \"NM\"))"
+                    .to_string(),
+                6 => format!(
+                    "?s ex:name ?n BIND(LCASE(STR(?n)) AS ?u) FILTER(STRLEN(?u) > {k})"
+                ),
+                7 => "?s ex:name ?n BIND(SUBSTR(STR(?n), 2, 2) AS ?u) \
+                      FILTER(STRSTARTS(?u, \"m\"))"
+                    .to_string(),
+                8 => format!(
+                    "?s ex:name ?n BIND(CONCAT(STR(?n), \"-x\") AS ?u) FILTER(STRLEN(?u) > {k})"
+                ),
+                9 => "?s ex:name ?n BIND(STRAFTER(STR(?n), \"nm\") AS ?u) \
+                      FILTER(STRLEN(?u) > 0)"
+                    .to_string(),
+                10 => format!(
+                    "?s ex:name ?n BIND(STRBEFORE(STR(?n), \"{k}\") AS ?u) FILTER(STRLEN(?u) > 0)"
+                ),
+                // `LANG` over the mixed plain/`@en` column: the empty tag of a plain
+                // literal is what makes this shape select a strict subset.
+                _ => "?s ex:name ?n BIND(LANG(?n) AS ?l) FILTER(STRLEN(?l) > 0)".to_string(),
+            }
+        }
+        // ASK (§16.3) — compared by its BOOLEAN through `compare_ask`. The thresholds
+        // straddle the data range so a shard sees both answers; an `ASK` category whose
+        // every seed answered `true` would be a differential that cannot fail.
+        "ask" => {
+            let t = rng.below(120);
+            return match rng.below(6) {
+                0 => format!("{pfx}ASK WHERE {{ ?s ex:age ?a FILTER(?a > {t}) }}"),
+                1 => format!(
+                    "{pfx}ASK WHERE {{ ?s ex:p ?o . ?o ex:age ?a FILTER(?a > {t}) }}"
+                ),
+                2 => format!(
+                    "{pfx}ASK WHERE {{ ?s ex:name ?n \
+                     FILTER NOT EXISTS {{ ?s ex:age ?a . FILTER(?a < {t}) }} }}"
+                ),
+                3 => format!(
+                    "{pfx}ASK WHERE {{ ?s ex:p+ ?o . ?o ex:age ?a FILTER(?a > {t}) }}"
+                ),
+                4 => format!(
+                    "{pfx}ASK WHERE {{ ?s ex:when ?w . ?s ex:age ?a FILTER(?a > {t}) }}"
+                ),
+                _ => format!(
+                    "{pfx}ASK WHERE {{ {{ SELECT ?s (COUNT(?o) AS ?c) WHERE {{ ?s ex:p ?o }} \
+                     GROUP BY ?s }} FILTER(?c > {}) }}",
+                    rng.below(4)
+                ),
+            };
+        }
+        // CONSTRUCT / DESCRIBE (§16.2, §16.4) — compared as a canonical TRIPLE SET
+        // through `compare_graph`, never as a triple tally.
+        //
+        // `DESCRIBE`'s graph is explicitly left to the query service to determine, so
+        // its agreement is not something the spec guarantees. It is
+        // emitted anyway, and deliberately: both engines implement the outgoing-CBD
+        // reading, and the generator is BNODE-FREE — which is where the two common
+        // readings (with and without blank-node closure) would part company — so on this
+        // data they describe the same graph. A divergence here would be an
+        // implementation-CHOICE difference to adjudicate into
+        // `bench/differential-divergences.json`, not a wrong answer; that is the reason
+        // it is one arm out of seven rather than a category of its own.
+        "construct" => {
+            return match rng.below(7) {
+                0 => format!("{pfx}CONSTRUCT {{ ?s ex:age ?a }} WHERE {{ ?s ex:age ?a }}"),
+                1 => format!("{pfx}CONSTRUCT {{ ?s ex:knows ?o }} WHERE {{ ?s ex:p ?o }}"),
+                // A two-triple template over a join — the constructed graph is bigger
+                // than the solution sequence that produced it.
+                2 => format!(
+                    "{pfx}CONSTRUCT {{ ?o ex:reached ?s . ?o ex:age ?a }} \
+                     WHERE {{ ?s ex:p ?o . ?o ex:age ?a }}"
+                ),
+                // The MIXED column, so a constructed object carries the non-canonical
+                // numeric lexicals through the graph comparator.
+                3 => format!("{pfx}CONSTRUCT {{ ?s ex:v ?v }} WHERE {{ ?s ex:val ?v }}"),
+                // …and the typed columns (sq-qcnn.6).
+                4 => format!("{pfx}CONSTRUCT {{ ?s ex:t ?d }} WHERE {{ ?s ex:dbl ?d }}"),
+                // The short form, whose template IS its pattern.
+                5 => format!("{pfx}CONSTRUCT WHERE {{ ?s ex:name ?n }}"),
+                _ => format!(
+                    "{pfx}DESCRIBE ?s WHERE {{ ?s ex:age ?a . FILTER(?a > {}) }}",
+                    rng.below(120)
+                ),
+            };
         }
         _ => "?s ex:age ?a".to_string(),
     };
@@ -1562,9 +1873,10 @@ pub fn run(seed_start: u64, count: u64, category: &str) {
         // dispatched FIRST. `ASK` and `CONSTRUCT`/`DESCRIBE` are compared by VALUE — the
         // boolean itself, the canonical triple set — and never enter the cardinality flow,
         // where an `ASK` would collapse to "one row" whatever it answered and a graph to a
-        // triple tally. (The generator emits only `SELECT` today; the `ask` / `construct`
-        // categories are the generator-extension node, `sq-qcnn.6`. Routing them here is what
-        // makes those categories value-checked the moment they land, rather than counted.)
+        // triple tally. [SONNET-4.6] sq-qcnn.6 landed the generator side: the `ask` and
+        // `construct` categories now emit those two forms, so this dispatch is live rather
+        // than merely wired, and `expected_form` (in the tests) pins which category reaches
+        // which comparator.
         let form = query_form(&q);
         if form != Form::Select {
             let outcome = if form == Form::Ask {
@@ -2172,23 +2484,66 @@ ex:n4 ex:val "s2" .
         store
     }
 
+    /// The RESULT FORM each category is contracted to emit — the same dispatch `run`
+    /// makes on `query_form` before choosing a comparator. Written as data rather than
+    /// derived from a generated query, so a category that CHANGED form (and so changed
+    /// which oracle judges it) fails `generator_invariants_hold_for_every_category`
+    /// instead of silently moving to another comparator. [SONNET-4.6] sq-qcnn.6
+    fn expected_form(cat: &str) -> Form {
+        match cat {
+            "ask" => Form::Ask,
+            "construct" => Form::Graph,
+            _ => Form::Select,
+        }
+    }
+
     /// EVERY category must emit SPARQL 1.1 that the INDEPENDENT oracle (Oxigraph)
     /// parses AND evaluates — a query only sparq understands is not a differential at
     /// all. Pinning that sparq answers it too is what keeps a category from silently
     /// degrading into an all-`skipped(unsupported)` shard that reports green while
     /// comparing nothing.
+    ///
+    /// Each form is checked through the entry point `run` actually uses for it: a
+    /// `CONSTRUCT` is NOT evaluable through `sparq_engine::query` at all (that entry
+    /// point answers `SELECT`/`ASK` only), so asking it there would report a category
+    /// as broken that the fuzzer answers correctly.
     #[test]
     fn every_category_is_evaluable_by_both_engines() {
         for cat in CATEGORIES {
             for seed in 0..60u64 {
                 let (ttl, q) = case(seed, cat);
-                oxi_count(&oxi_store(&ttl), &q).unwrap_or_else(|e| {
-                    panic!("category {cat} seed {seed}: oxigraph rejected\n{q}\n{e}")
-                });
+                let store = oxi_store(&ttl);
                 let g = sparq_core::Graph::load_str(&ttl, "turtle").unwrap();
-                sparq_engine::query(&g, &q).unwrap_or_else(|e| {
-                    panic!("category {cat} seed {seed}: sparq rejected\n{q}\n{e}")
-                });
+                match expected_form(cat) {
+                    Form::Select => {
+                        oxi_count(&store, &q).unwrap_or_else(|e| {
+                            panic!("category {cat} seed {seed}: oxigraph rejected\n{q}\n{e}")
+                        });
+                        sparq_engine::query(&g, &q).unwrap_or_else(|e| {
+                            panic!("category {cat} seed {seed}: sparq rejected\n{q}\n{e}")
+                        });
+                    }
+                    Form::Ask => {
+                        sparq_engine::ask(&g, &q).unwrap_or_else(|e| {
+                            panic!("category {cat} seed {seed}: sparq rejected\n{q}\n{e}")
+                        });
+                        assert_eq!(
+                            compare_ask(&g, &store, &q),
+                            Ok(Compared::AskBoolean),
+                            "category {cat} seed {seed}: not compared as a boolean\n{q}"
+                        );
+                    }
+                    Form::Graph => {
+                        sparq_engine::construct_or_describe(&g, &q).unwrap_or_else(|e| {
+                            panic!("category {cat} seed {seed}: sparq rejected\n{q}\n{e}")
+                        });
+                        assert_eq!(
+                            compare_graph(&g, &store, &q),
+                            Ok(Compared::GraphIsomorphic),
+                            "category {cat} seed {seed}: not compared as a triple set\n{q}"
+                        );
+                    }
+                }
             }
         }
     }
@@ -2198,16 +2553,45 @@ ex:n4 ex:val "s2" .
     /// is the deliberate floor — the harness's dataset has no named graphs, so its
     /// two bare-`GRAPH` shapes are empty BY DESIGN and only the UNION / OPTIONAL
     /// compositions bind rows.)
+    ///
+    /// For the non-`SELECT` forms "binds a row" is read as "the answer is not the empty
+    /// one": a non-empty constructed graph, and — the strictly stronger reading, because
+    /// an `ASK` has only two possible answers — an `ASK` category that produces BOTH
+    /// booleans. An `ASK` shard answering `true` on every seed would agree with any
+    /// oracle that also always said `true`, which is exactly the blindness sq-qcnn.5
+    /// removed from the comparator and that this keeps out of the generator.
     #[test]
     fn every_category_binds_rows_on_a_healthy_share_of_seeds() {
         const SEEDS: u64 = 120;
         for cat in CATEGORIES {
             let mut non_empty = 0u64;
+            let (mut asked_true, mut asked_false) = (0u64, 0u64);
             for seed in 0..SEEDS {
                 let (ttl, q) = case(seed, cat);
                 let g = sparq_core::Graph::load_str(&ttl, "turtle").unwrap();
-                if sparq_engine::query(&g, &q).map(|r| r.len()).unwrap_or(0) > 0 {
-                    non_empty += 1;
+                match expected_form(cat) {
+                    Form::Select => {
+                        if sparq_engine::query(&g, &q).map(|r| r.len()).unwrap_or(0) > 0 {
+                            non_empty += 1;
+                        }
+                    }
+                    Form::Ask => match sparq_engine::ask(&g, &q) {
+                        Ok(true) => {
+                            asked_true += 1;
+                            non_empty += 1;
+                        }
+                        Ok(false) => asked_false += 1,
+                        Err(_) => {}
+                    },
+                    Form::Graph => {
+                        if sparq_engine::construct_or_describe(&g, &q)
+                            .map(|t| t.len())
+                            .unwrap_or(0)
+                            > 0
+                        {
+                            non_empty += 1;
+                        }
+                    }
                 }
             }
             assert!(
@@ -2215,6 +2599,14 @@ ex:n4 ex:val "s2" .
                 "category {cat}: only {non_empty}/{SEEDS} seeds bind ANY row — that \
                  shard's differential is near-vacuous"
             );
+            if expected_form(cat) == Form::Ask {
+                assert!(
+                    asked_true > 0 && asked_false > 0,
+                    "category {cat}: {asked_true} true / {asked_false} false over {SEEDS} \
+                     seeds — an ASK shard that never changes its answer cannot catch a \
+                     comparator that always agrees"
+                );
+            }
         }
     }
 
@@ -2247,14 +2639,16 @@ ex:n4 ex:val "s2" .
                     "category {cat}: `order_by_vars` does not model this ORDER BY, so the \
                      case would silently lose its ORDER oracle\n{q}"
                 );
-                // Every generated query is a `SELECT`. The `ask` / `construct` forms are the
-                // generator-extension node (sq-qcnn.6); `compare_ask` / `compare_graph` are
-                // wired and unit-tested, but nothing here emits them yet, and asserting that
-                // keeps `query_form`'s dispatch honest about what the shards actually cover.
+                // [SONNET-4.6] sq-qcnn.6: the RESULT FORM decides which comparator judges
+                // the case (`run` dispatches on `query_form` before the cardinality flow),
+                // so each category must keep emitting the form `expected_form` records for
+                // it. A category that drifted — an `ask` shape that came out a `SELECT`,
+                // say — would be counted rather than compared as a boolean, with nothing
+                // in the summary line to show it.
                 assert_eq!(
                     query_form(&q),
-                    Form::Select,
-                    "category {cat}: unexpected non-SELECT result form\n{q}"
+                    expected_form(cat),
+                    "category {cat}: unexpected result form\n{q}"
                 );
                 assert!(
                     !q.contains("_:"),
@@ -2356,17 +2750,293 @@ ex:n4 ex:val "s2" .
         );
     }
 
+    // ── sq-qcnn.6: the TYPED-LITERAL data surface ───────────────────────────────
+
+    /// The typed columns are only worth their cost if the generator actually REACHES
+    /// every datatype family the bead names. Each probe below is a distinct family (and,
+    /// for the ones whose point is a specific hazard, a distinct HAZARD: the two
+    /// beyond-`i128` integers that differ only in their last digit; the three doubles XSD
+    /// spells specially; the boolean lexical Oxigraph rewrites on load).
+    ///
+    /// MUTATION GUARD: delete any arm from `gen_graph`'s typed columns — or narrow one,
+    /// e.g. drop `NaN` from the double arm or the `+1` twin from the huge-integer array —
+    /// and exactly that probe goes red. The probes are matched on the emitted Turtle, so
+    /// they cannot be satisfied by anything but the generator emitting that literal.
+    ///
+    /// Each probe is a set of fragments that must ALL appear on ONE triple line — a
+    /// whole-document `contains` is too weak here, because `^^xsd:date` is a PREFIX of
+    /// `^^xsd:dateTime`. The `ex:day` column, whose whole point is the UNTIMEZONED forms,
+    /// is not probed by substring at all: a `+00:00` timezone ends in the same `:00"` a
+    /// bare dateTime does, and a `+05:30`-timezoned date ends in the same `"^^xsd:date .`
+    /// a bare one does, so that column's lexicals are CLASSIFIED (below) instead.
+    #[test]
+    fn typed_literal_columns_cover_every_datatype_family() {
+        const PROBES: &[(&str, &[&str])] = &[
+            ("timezoned dateTime (Z)", &[":00Z\"^^xsd:dateTime"]),
+            ("offset-timezoned dateTime", &[":00+05:30\"^^xsd:dateTime"]),
+            ("negative-offset dateTime", &[":00-08:00\"^^xsd:dateTime"]),
+            ("xsd:yearMonthDuration", &["\"^^xsd:yearMonthDuration"]),
+            ("xsd:dayTimeDuration", &["\"^^xsd:dayTimeDuration"]),
+            ("negative dayTimeDuration", &["\"-P"]),
+            ("xsd:duration", &["\"^^xsd:duration ."]),
+            ("boolean (canonical true)", &["ex:flag true"]),
+            ("boolean (canonical false)", &["ex:flag false"]),
+            ("boolean (non-canonical 1)", &["ex:flag \"1\"^^xsd:boolean"]),
+            ("boolean (non-canonical 0)", &["ex:flag \"0\"^^xsd:boolean"]),
+            ("integer beyond i128::MAX", &["\"170141183460469231731687303715884105728\""]),
+            ("its last-digit twin", &["\"170141183460469231731687303715884105729\""]),
+            ("integer beyond i128::MIN", &["\"-170141183460469231731687303715884105729\""]),
+            ("41-digit integer", &["\"99999999999999999999999999999999999999999\""]),
+            ("double INF", &["\"INF\"^^xsd:double"]),
+            ("double -INF", &["\"-INF\"^^xsd:double"]),
+            ("double NaN", &["\"NaN\"^^xsd:double"]),
+            ("negative zero double", &["\"-0.0E0\"^^xsd:double"]),
+            ("xsd:float", &["\"^^xsd:float"]),
+        ];
+        let mut seen = vec![0u64; PROBES.len()];
+        for seed in 0..400u64 {
+            let ttl = gen_graph(&mut Rng::new(seed));
+            for (i, (_, parts)) in PROBES.iter().enumerate() {
+                if ttl
+                    .lines()
+                    .any(|line| parts.iter().all(|p| line.contains(p)))
+                {
+                    seen[i] += 1;
+                }
+            }
+        }
+        for (i, (what, parts)) in PROBES.iter().enumerate() {
+            assert!(
+                seen[i] > 0,
+                "the generator never emitted {what} ({parts:?}) in 400 seeds — that \
+                 datatype family has no standing differential"
+            );
+        }
+
+        // `ex:day`, classified on the LEXICAL rather than by substring. Its three arms
+        // differ only in what follows the `YYYY-MM-DD` date: nothing (bare date), a
+        // timezone (`Z` / `±hh:mm`), or a `T`-prefixed time (bare dateTime).
+        let (mut bare_date, mut tz_date, mut bare_datetime) = (0u64, 0u64, 0u64);
+        for seed in 0..400u64 {
+            let ttl = gen_graph(&mut Rng::new(seed));
+            for line in ttl.lines() {
+                let Some(rest) = line.split_once(" ex:day \"").map(|(_, r)| r) else {
+                    continue;
+                };
+                let lex = rest.split('"').next().expect("a closing quote");
+                assert!(lex.len() >= 10, "an ex:day lexical starts with a date: {lex}");
+                match &lex[10..] {
+                    "" => bare_date += 1,
+                    tail if tail.starts_with('T') => bare_datetime += 1,
+                    _ => tz_date += 1,
+                }
+            }
+        }
+        assert!(bare_date > 0, "no BARE (untimezoned) xsd:date was generated");
+        assert!(tz_date > 0, "no TIMEZONED xsd:date was generated");
+        assert!(
+            bare_datetime > 0,
+            "no BARE (untimezoned) xsd:dateTime was generated — the untimezoned temporal \
+             is exactly what `ex:day` exists for"
+        );
+    }
+
+    /// The load-bearing property of the typed columns: the two engines' STORES hand back
+    /// DIFFERENT lexicals for the same RDF value (Oxigraph re-canonicalises on load,
+    /// sparq does not), and the answers must still compare EQUAL — by value, through
+    /// `sparq-difftest`, not by string.
+    ///
+    /// Both halves are asserted, and the first is what stops this from being vacuous: if
+    /// no case ever differed lexically the comparison would be proving nothing about
+    /// canonicalisation. The mutation guard runs the other way — a changed VALUE must
+    /// still fail — so "compares equal" cannot degrade into "compares everything equal".
+    #[test]
+    fn typed_columns_agree_by_value_despite_lexical_recanonicalisation() {
+        const COLUMNS: &[&str] = &["when", "day", "dur", "flag", "huge", "dbl"];
+        const SEEDS: u64 = 150;
+        let mut bound = vec![0u64; COLUMNS.len()];
+        let mut lexically_differed = 0u64;
+        // The RAW answer as each store spells it — the pre-canonicalisation view.
+        let raw = |rows: &Solutions| -> BTreeSet<String> {
+            rows.iter().map(|r| format!("{:?}", r)).collect()
+        };
+        for seed in 0..SEEDS {
+            let ttl = gen_graph(&mut Rng::new(seed));
+            let g = sparq_core::Graph::load_str(&ttl, "turtle").unwrap();
+            let store = oxi_store(&ttl);
+            for (i, col) in COLUMNS.iter().enumerate() {
+                let q =
+                    format!("PREFIX ex: <http://ex/>\nSELECT ?s ?v WHERE {{ ?s ex:{col} ?v }}");
+                let sparq = sparq_solutions(&g, &q).expect("sparq answers the projection");
+                let oxi = oxi_solutions(&store, &q).expect("oxigraph answers the projection");
+                if !sparq.rows.is_empty() {
+                    bound[i] += 1;
+                }
+                if raw(&sparq.rows) != raw(&oxi.rows) {
+                    lexically_differed += 1;
+                }
+                assert_eq!(
+                    compare_select(&g, &store, &q),
+                    Ok(Compared::Multiset),
+                    "seed {seed}: ex:{col} does not compare equal by VALUE\n{ttl}"
+                );
+            }
+        }
+        for (i, col) in COLUMNS.iter().enumerate() {
+            assert!(
+                bound[i] * 4 >= SEEDS,
+                "ex:{col} bound rows on only {}/{SEEDS} seeds — that column is too sparse \
+                 to be a standing differential",
+                bound[i]
+            );
+        }
+        assert!(
+            lexically_differed > 0,
+            "no generated case ever differed LEXICALLY between the two stores, so this \
+             test proved nothing about value-canonicalisation"
+        );
+        // MUTATION GUARD: equality here is by value, not a blanket pass. Change one bound
+        // VALUE and the multiset comparison must fail.
+        let ttl = "@prefix ex: <http://ex/> .\n@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+                   ex:n0 ex:flag \"1\"^^xsd:boolean .\n";
+        let g = sparq_core::Graph::load_str(ttl, "turtle").unwrap();
+        let store = oxi_store(ttl);
+        let q = "PREFIX ex: <http://ex/>\nSELECT ?v WHERE { ?s ex:flag ?v }";
+        let sparq = sparq_solutions(&g, q).unwrap();
+        let oxi = oxi_solutions(&store, q).unwrap();
+        assert_ne!(
+            raw(&sparq.rows),
+            raw(&oxi.rows),
+            "the fixture must be one the two stores spell differently (\"1\" vs \"true\")"
+        );
+        assert!(multiset_equal(&sparq.rows, &oxi.rows));
+        let mut wrong = sparq.rows.clone();
+        wrong[0].insert(
+            "v".to_string(),
+            sparq_difftest::Term::Literal {
+                lexical: "false".to_string(),
+                datatype: "http://www.w3.org/2001/XMLSchema#boolean".to_string(),
+                lang: None,
+            },
+        );
+        assert!(
+            !multiset_equal(&wrong, &oxi.rows),
+            "`true` and `false` are different VALUES — the comparator must not absorb that"
+        );
+    }
+
+    /// Every `GROUP_CONCAT` a generated query contains is either over a SINGLETON group or
+    /// read through an order-invariant operation. The order of a group's members is left
+    /// unspecified (§11), so a projected multi-member concatenation is not a function of
+    /// the query — it is excluded from the generator rather than compared and hoped for.
+    ///
+    /// The positive half runs on a fixture that really does contain a MULTI-MEMBER group
+    /// (`ex:n0` has three outgoing `ex:p` edges — `BINDING_TTL`'s chain gives every subject
+    /// exactly one, which would have made the `STRLEN` case vacuous), so "the generator's
+    /// shapes agree across engines" is asserted where order could have bitten.
+    ///
+    /// The exclusion itself is pinned STRUCTURALLY, on [`group_concat_is_order_invariant`]:
+    /// the excluded raw multi-member projection must classify as unsafe, and no category
+    /// may emit a query that does. Asserting instead that the excluded shape actually
+    /// DISAGREES across the two engines would be asserting a nondeterminism — both engines
+    /// may legitimately pick the same unspecified order — so it is not asserted here.
+    #[test]
+    fn group_concat_is_generated_only_in_order_independent_shapes() {
+        const TTL: &str = r#"@prefix ex: <http://ex/> .
+ex:n0 ex:p ex:n1 . ex:n0 ex:p ex:n2 . ex:n0 ex:p ex:n3 .
+ex:n1 ex:p ex:n2 .
+ex:n0 ex:age 10 . ex:n1 ex:age 20 . ex:n2 ex:age 30 .
+"#;
+        let g = sparq_core::Graph::load_str(TTL, "turtle").unwrap();
+        let store = oxi_store(TTL);
+        // Precondition: the `ex:p` grouping really is multi-member, so the `STRLEN` shape
+        // below is exercising order-independence and not a one-element concatenation.
+        let members = "PREFIX ex: <http://ex/>\n\
+             SELECT ?s (COUNT(?o) AS ?c) WHERE { ?s ex:p ?o } GROUP BY ?s";
+        let biggest = sparq_engine::query(&g, members)
+            .unwrap()
+            .rows
+            .iter()
+            .filter_map(|r| r[1].as_ref().map(|t| t.to_string()))
+            .filter(|c| c.starts_with("\"3\""))
+            .count();
+        assert_eq!(biggest, 1, "the fixture must contain a three-member group");
+
+        let singleton = "PREFIX ex: <http://ex/>\n\
+             SELECT ?s (GROUP_CONCAT(STR(?a)) AS ?g) WHERE { ?s ex:age ?a } GROUP BY ?s";
+        let strlen = "PREFIX ex: <http://ex/>\n\
+             SELECT ?s (STRLEN(GROUP_CONCAT(STR(?o))) AS ?l) WHERE { ?s ex:p ?o } GROUP BY ?s";
+        for q in [singleton, strlen] {
+            assert_eq!(
+                compare_select(&g, &store, q),
+                Ok(Compared::Multiset),
+                "an order-independent GROUP_CONCAT shape must compare equal\n{q}"
+            );
+        }
+        // The classifier is red on the shape the generator deliberately does NOT emit:
+        // the same multi-member group, projected raw.
+        let multi = "PREFIX ex: <http://ex/>\n\
+             SELECT ?s (GROUP_CONCAT(STR(?o)) AS ?g) WHERE { ?s ex:p ?o } GROUP BY ?s";
+        assert!(
+            !group_concat_is_order_invariant(multi),
+            "a raw multi-member GROUP_CONCAT projection must classify as order-dependent"
+        );
+        assert!(
+            group_concat_is_order_invariant(singleton) && group_concat_is_order_invariant(strlen),
+            "the two emitted shapes must classify as order-invariant"
+        );
+        // …and no category may emit an unsafe one.
+        for cat in CATEGORIES {
+            for seed in 0..300u64 {
+                let (_, q) = case(seed, cat);
+                assert!(
+                    group_concat_is_order_invariant(&q),
+                    "category {cat} seed {seed}: a GROUP_CONCAT that is neither \
+                     order-independent nor over a singleton group\n{q}"
+                );
+            }
+        }
+    }
+
+    /// True when EVERY `GROUP_CONCAT` in `q` (a query may carry one in `SELECT` and another
+    /// in `HAVING`) sits in a shape whose value is a function of the query rather than of
+    /// the members' unspecified order: read through `STRLEN`, or over the singleton `ex:age`
+    /// group. Vacuously true for a query with no `GROUP_CONCAT` at all.
+    fn group_concat_is_order_invariant(q: &str) -> bool {
+        let singleton_group = q.contains("WHERE { ?s ex:age ?a } GROUP BY ?s");
+        q.match_indices("GROUP_CONCAT")
+            .all(|(i, _)| singleton_group || q[..i].ends_with("STRLEN("))
+    }
+
     // ── the VALUE-LEVEL differential (sq-qcnn.5: `compare_select` / `compare_ask` /
     //    `compare_graph`, all through `sparq-difftest`) ─────────────────────────────
 
     /// A graph with chains (`ex:p`), a value column and names — enough for the
     /// path / aggregate / subquery / values / bind shapes to bind real rows.
+    ///
+    /// [SONNET-4.6] sq-qcnn.6: it also carries at least one literal from each typed family the
+    /// generator emits, including the lexicals Oxigraph re-canonicalises on load
+    /// (`"1"^^xsd:boolean`, `"1.5E3"^^xsd:double`) and the specials, so the `typed`
+    /// category is value-compared against real rows here rather than against an
+    /// accidentally-empty answer.
     const BINDING_TTL: &str = r#"@prefix ex: <http://ex/> .
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
 ex:n0 ex:p ex:n1 . ex:n0 ex:age 10 . ex:n0 ex:name "nm0" .
 ex:n1 ex:p ex:n2 . ex:n1 ex:age 20 . ex:n1 ex:name "nm1" .
 ex:n2 ex:p ex:n3 . ex:n2 ex:age 30 . ex:n2 ex:name "nm2" .
 ex:n3 ex:age 40 . ex:n3 ex:name "nm3" .
+ex:n0 ex:when "2024-03-05T12:30:00Z"^^xsd:dateTime .
+ex:n1 ex:when "2011-07-02T01:02:00+05:30"^^xsd:dateTime .
+ex:n0 ex:day "2024-03-05"^^xsd:date .
+ex:n1 ex:day "2019-11-30T23:59:00"^^xsd:dateTime .
+ex:n0 ex:dur "P1Y2M"^^xsd:yearMonthDuration .
+ex:n1 ex:dur "P3DT4H"^^xsd:dayTimeDuration .
+ex:n2 ex:dur "P1Y2M3DT4H"^^xsd:duration .
+ex:n0 ex:flag true . ex:n1 ex:flag "0"^^xsd:boolean . ex:n2 ex:flag "1"^^xsd:boolean .
+ex:n0 ex:huge "170141183460469231731687303715884105728"^^xsd:integer .
+ex:n1 ex:huge "170141183460469231731687303715884105729"^^xsd:integer .
+ex:n0 ex:dbl "INF"^^xsd:double . ex:n1 ex:dbl "-INF"^^xsd:double .
+ex:n2 ex:dbl "NaN"^^xsd:double . ex:n3 ex:dbl "1.5E3"^^xsd:double .
 "#;
 
     fn binding_case(q: &str) -> (Solutions, Solutions) {
@@ -2786,6 +3456,30 @@ ex:n3 ex:age 40 . ex:n3 ex:name "nm3" .
                 let mut rng = Rng::new(seed);
                 let _ = gen_graph(&mut rng); // keep the generator's draw sequence
                 let q = gen_query(&mut rng, cat);
+                // [SONNET-4.6] sq-qcnn.6: the non-`SELECT` forms have no cardinality flow
+                // to gate on — they are value-compared directly by `run`, so they are
+                // value-compared directly here.
+                match expected_form(cat) {
+                    Form::Ask => {
+                        assert_eq!(
+                            compare_ask(&g, &store, &q),
+                            Ok(Compared::AskBoolean),
+                            "category {cat} seed {seed}: the ASK was not compared\n{q}"
+                        );
+                        compared += 1;
+                        continue;
+                    }
+                    Form::Graph => {
+                        assert_eq!(
+                            compare_graph(&g, &store, &q),
+                            Ok(Compared::GraphIsomorphic),
+                            "category {cat} seed {seed}: the graph was not compared\n{q}"
+                        );
+                        compared += 1;
+                        continue;
+                    }
+                    Form::Select => {}
+                }
                 // Mirror `run`: the value comparison only runs once the CARDINALITIES agree,
                 // because a cardinality difference is the adjudicated sq-eibog / sq-ai2wa
                 // channel (re-reporting it here would double-count one divergence). Without

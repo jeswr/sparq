@@ -544,14 +544,18 @@ jobs:
           # surfaces added to the generator (property paths, aggregates/GROUP BY/
           # HAVING, sub-selects, EXISTS, VALUES, BIND, GRAPH) — plus sq-avd75's
           # `antijoin` (the `OPTIONAL … FILTER(!bound)` idiom, i.e. rewrite (b) of the
-          # `algebra-rewrite` pass #1735, which the fuzzer builds ON). 'all' picks ONE
-          # category per seed, so the 2000-seed broad window above leaves each of the
-          # 17 categories only ~118 cases — too thin to be a per-PR net for a
-          # specific evaluation path. These are deterministic REGRESSION windows, not
+          # `algebra-rewrite` pass #1735, which the fuzzer builds ON) — and sq-qcnn.6's
+          # `typed` / `strfn` / `ask` / `construct` (the typed-literal columns, the
+          # string functions, and the two non-SELECT RESULT FORMS, which are compared
+          # by their boolean / canonical triple set rather than by a count). 'all'
+          # picks ONE category per seed, so the 2000-seed broad window above leaves
+          # each of the 21 categories only ~95 cases — too thin to be a per-PR net for
+          # a specific evaluation path. These are deterministic REGRESSION windows, not
           # known-catch ones: no historical bug is pinned to these seeds yet, and if
           # the nightly lane finds one its window gets pinned here the way sq-lr2ii's
           # was. ~2 s per category at release-fast throughput.
-          for c in path aggregate subquery exists values bind graph antijoin; do
+          for c in path aggregate subquery exists values bind graph antijoin \
+                   typed strfn ask construct; do
             "$b" fuzz 0 10000 "$c"
           done
           # Store-mode read paths over the fixed window: the same seeds re-run with
