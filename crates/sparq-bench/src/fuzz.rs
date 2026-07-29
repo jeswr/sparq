@@ -1094,23 +1094,40 @@ fn order_by_vars(q: &str) -> Option<Vec<String>> {
     Some(out)
 }
 
-/// Every variable BOUND by at least one solution on either side.
+/// Every variable either engine PROJECTS — the union of the two result HEADERS, plus (as a
+/// belt-and-braces against a header that omits something its own rows bind) every variable
+/// bound by a solution on either side.
 ///
-/// This — rather than the projection HEADER — is the right set for [`is_total_order`]: a
-/// variable no solution ever binds is unbound in every row, so it cannot distinguish two rows
-/// and cannot affect which rows a `LIMIT` window keeps. Two rows agreeing on all of these are
-/// therefore IDENTICAL rows.
-fn bound_vars(a: &[Solution], b: &[Solution]) -> BTreeSet<String> {
-    a.iter()
-        .chain(b)
-        .flat_map(|sol| sol.keys().cloned())
+/// The HEADER, not the bound pairs of the returned rows, is the right set for
+/// [`is_total_order`]. The rows reaching that decision have already been SLICED by
+/// `LIMIT`/`OFFSET`, so a projected variable that happens to be unbound in every SURVIVING row
+/// has vanished from them — even though it may be bound, to different values, on the tied
+/// candidate rows the window chose between. Reading coverage off the sliced rows would
+/// therefore call such a window "totally ordered" and value-compare a row choice SPARQL leaves
+/// implementation-defined, recording a non-testable case as a passing value comparison.
+///
+/// Taking the UNION of the two headers (rather than demanding they match) is the conservative
+/// side: a variable EITHER engine projects can distinguish rows, so requiring the sort key to
+/// cover all of them can only route MORE windows to the honest `skipped(row-choice)` bucket,
+/// never fewer.
+fn result_vars(a: &Answer, b: &Answer) -> BTreeSet<String> {
+    a.vars
+        .iter()
+        .chain(&b.vars)
+        .cloned()
+        .chain(
+            a.rows
+                .iter()
+                .chain(&b.rows)
+                .flat_map(|sol| sol.keys().cloned()),
+        )
         .collect()
 }
 
-/// Is the sort key TOTAL over the projected rows — i.e. does it cover every variable either
-/// engine ever binds?
+/// Is the sort key TOTAL over the projection — i.e. does it cover every variable either engine
+/// projects (see [`result_vars`])?
 ///
-/// If it does, any two rows in the same sort-key-equivalence class agree on every bound
+/// If it does, any two rows in the same sort-key-equivalence class agree on every projected
 /// variable and are therefore the SAME row, so WHICH of them a `LIMIT` / `OFFSET` window keeps
 /// cannot change the answer: the windowed result becomes a function of the query and the full
 /// value-level comparison applies (§2.2 of the design record — the "total tiebreaker" option).
@@ -1124,12 +1141,27 @@ fn is_total_order(sort_vars: &[String], projected: &BTreeSet<String>) -> bool {
 /// care, and sorts internally).
 type Solutions = Vec<Solution>;
 
+/// One engine's `SELECT` answer together with its result HEADER.
+///
+/// The header is carried alongside the rows because it is the only place a
+/// PROJECTED-BUT-UNBOUND variable survives: such a variable is invisible in `rows`, yet it can
+/// still distinguish the tied candidate rows a `LIMIT` window chose between, so
+/// [`is_total_order`] must see it. See [`result_vars`].
+struct Answer {
+    /// Every variable the engine reports in the result header, in projection order.
+    vars: Vec<String>,
+    /// The solutions, in the order the engine produced them.
+    rows: Solutions,
+}
+
 /// sparq's `SELECT` answer, bridged into the neutral model. `None` when sparq declines the
 /// query (an unsupported surface — fair to skip; a WRONG ANSWER is not).
-fn sparq_solutions(g: &sparq_core::Graph, q: &str) -> Option<Solutions> {
+fn sparq_solutions(g: &sparq_core::Graph, q: &str) -> Option<Answer> {
     let r = sparq_engine::query(g, q).ok()?;
-    Some(
-        r.rows
+    Some(Answer {
+        vars: r.vars.iter().map(|v| v.as_str().to_string()).collect(),
+        rows: r
+            .rows
             .iter()
             .map(|row| {
                 neutral_solution(
@@ -1140,7 +1172,7 @@ fn sparq_solutions(g: &sparq_core::Graph, q: &str) -> Option<Solutions> {
                 )
             })
             .collect(),
-    )
+    })
 }
 
 /// Oxigraph's `SELECT` answer, bridged into the neutral model. `None` when the query did not
@@ -1148,15 +1180,17 @@ fn sparq_solutions(g: &sparq_core::Graph, q: &str) -> Option<Solutions> {
 /// elsewhere) or a solution failed to decode.
 // clippy: differential oracle pins oxigraph's legacy Store::query semantics
 #[allow(deprecated)]
-fn oxi_solutions(store: &Store, q: &str) -> Option<Solutions> {
+fn oxi_solutions(store: &Store, q: &str) -> Option<Answer> {
     match store.query(q).ok()? {
         oxigraph::sparql::QueryResults::Solutions(s) => {
-            let mut out: Solutions = Vec::new();
+            // The header must be read BEFORE the iterator is consumed.
+            let vars: Vec<String> = s.variables().iter().map(|v| v.as_str().to_string()).collect();
+            let mut rows: Solutions = Vec::new();
             for sol in s {
                 let sol = sol.ok()?;
-                out.push(neutral_solution(sol.iter().map(|(v, t)| (v.as_str(), t))));
+                rows.push(neutral_solution(sol.iter().map(|(v, t)| (v.as_str(), t))));
             }
-            Some(out)
+            Some(Answer { vars, rows })
         }
         _ => None,
     }
@@ -1262,7 +1296,7 @@ fn compare_select(g: &sparq_core::Graph, store: &Store, q: &str) -> Result<Compa
     let (Some(sparq), Some(oxi)) = (sparq_solutions(g, q), oxi_solutions(store, q)) else {
         return Ok(Compared::Unsupported);
     };
-    let projected = bound_vars(&sparq, &oxi);
+    let projected = result_vars(&sparq, &oxi);
     // A sort variable OUTSIDE the projection cannot be read off the compared rows, so its
     // equivalence classes are not computable here — treat the clause as unmodelled and fall
     // back to the (always-sound) order-insensitive comparison rather than guess.
@@ -1274,6 +1308,7 @@ fn compare_select(g: &sparq_core::Graph, store: &Store, q: &str) -> Result<Compa
     if windowed && !total {
         return Ok(Compared::SkippedRowChoice);
     }
+    let (sparq, oxi) = (sparq.rows, oxi.rows);
     // Blank-node labels are engine-local, so a bnode-bearing answer is comparable only up to a
     // bijection. RDFC-1.0 canonicalises the whole TABLE at once (so identity shared between
     // rows is part of what is compared), which necessarily discards row ORDER — an ordered
@@ -2309,8 +2344,8 @@ ex:n3 ex:age 40 . ex:n3 ex:name "nm3" .
         let g = sparq_core::Graph::load_str(BINDING_TTL, "turtle").unwrap();
         let store = oxi_store(BINDING_TTL);
         (
-            sparq_solutions(&g, q).expect("sparq solutions"),
-            oxi_solutions(&store, q).expect("oxigraph solutions"),
+            sparq_solutions(&g, q).expect("sparq solutions").rows,
+            oxi_solutions(&store, q).expect("oxigraph solutions").rows,
         )
     }
 
@@ -2422,10 +2457,10 @@ ex:n3 ex:age 40 . ex:n3 ex:name "nm3" .
     }
 
     /// `is_total_order` decides whether a `LIMIT` window is differential-testable at VALUE
-    /// level: only a sort key covering every bound variable makes tied rows IDENTICAL rows,
-    /// so that which of them the window keeps cannot change the answer.
+    /// level: only a sort key covering every PROJECTED variable makes tied rows IDENTICAL
+    /// rows, so that which of them the window keeps cannot change the answer.
     #[test]
-    fn is_total_order_requires_covering_every_bound_variable() {
+    fn is_total_order_requires_covering_every_projected_variable() {
         let projected: BTreeSet<String> = ["a", "o"].iter().map(|s| s.to_string()).collect();
         assert!(is_total_order(&["a".into(), "o".into()], &projected));
         assert!(
@@ -2495,7 +2530,9 @@ ex:n3 ex:age 40 . ex:n3 ex:name "nm3" .
             if q.contains("?o") {
                 subset_shapes += 1;
                 let g = sparq_core::Graph::load_str(&ttl, "turtle").unwrap();
-                let rows = sparq_solutions(&g, &q).expect("sparq answers the order shape");
+                let rows = sparq_solutions(&g, &q)
+                    .expect("sparq answers the order shape")
+                    .rows;
                 let keys: Vec<Option<String>> =
                     rows.iter().map(|r| r.get("a").map(canonical_key)).collect();
                 if keys.windows(2).any(|w| w[0] == w[1]) {
@@ -2562,6 +2599,87 @@ ex:n3 ex:age 40 . ex:n3 ex:name "nm3" .
         );
     }
 
+    /// [SONNET-4.6] A window's TOTALITY must be read off the result HEADER, never off the
+    /// bindings of the ALREADY-SLICED rows.
+    ///
+    /// A projected variable unbound in every SURVIVING row has vanished from those rows — even
+    /// though it may have been bound, to a different value, on a tied candidate row the window
+    /// chose against. Reading coverage off the sliced rows loses it, calls the sort key TOTAL
+    /// over a projection it does not cover, and value-compares a window whose row choice
+    /// SPARQL leaves to the implementation.
+    ///
+    /// Both halves are asserted: the hand-built pair states that hazard exactly (a surviving
+    /// row that dropped the discriminator beside a tied candidate that kept it), and the
+    /// end-to-end fixture then pins the classification `compare_select` actually reaches, on a
+    /// real pair of engines, for a query whose surviving rows leave `?o` unbound.
+    #[test]
+    fn window_totality_comes_from_the_header_not_the_sliced_rows() {
+        // The exact hazard, stated on the two views of one answer: a `SELECT ?a ?o` whose
+        // surviving row binds only `?a`, next to a tied candidate row binding `?o` that the
+        // window could equally well have kept.
+        let header = || vec!["a".to_string(), "o".to_string()];
+        let survivor = Answer {
+            vars: header(),
+            rows: vec![nsol(&[("a", nint("7"))])],
+        };
+        let tied_candidate = Answer {
+            vars: header(),
+            rows: vec![nsol(&[("a", nint("7")), ("o", niri("m2"))])],
+        };
+        let sliced: BTreeSet<String> = survivor
+            .rows
+            .iter()
+            .flat_map(|sol| sol.keys().cloned())
+            .collect();
+        // Read off the SLICED rows alone the discriminator has vanished and `ORDER BY ?a`
+        // looks total — the defect. Read off the HEADER it survives, and the window is
+        // correctly refused.
+        assert_eq!(sliced, ["a".to_string()].into_iter().collect());
+        assert!(is_total_order(&["a".to_string()], &sliced));
+        let projected = result_vars(&survivor, &survivor);
+        assert_eq!(
+            projected,
+            ["a".to_string(), "o".to_string()].into_iter().collect(),
+            "a projected-but-unbound variable must survive in the coverage set"
+        );
+        assert!(!is_total_order(&["a".to_string()], &projected));
+        // ...and it survives from EITHER engine's header, which is why the union is taken.
+        assert_eq!(result_vars(&survivor, &tied_candidate), projected);
+
+        // End to end. Both candidate rows tie on `?a`; `?o` is projected and unbound in every
+        // surviving row, so the window must land in the COUNTED row-choice bucket.
+        let ttl = "@prefix ex: <http://ex/> .\nex:m0 ex:age 7 .\nex:m1 ex:age 7 .\n";
+        let g = sparq_core::Graph::load_str(ttl, "turtle").unwrap();
+        let store = oxi_store(ttl);
+        let windowed = "PREFIX ex: <http://ex/>\nSELECT ?a ?o \
+                        WHERE { ?s ex:age ?a OPTIONAL { ?s ex:p ?o } } ORDER BY ?a LIMIT 1";
+        // Precondition: nothing in the compared rows records that `?o` was projected at all,
+        // so a bound-pair coverage set would have called `ORDER BY ?a` total here.
+        for answer in [
+            sparq_solutions(&g, windowed).expect("sparq answers"),
+            oxi_solutions(&store, windowed).expect("oxigraph answers"),
+        ] {
+            assert!(answer.vars.contains(&"o".to_string()), "`?o` is projected");
+            assert!(
+                answer.rows.iter().all(|r| !r.contains_key("o")),
+                "no surviving row binds `?o`"
+            );
+        }
+        assert_eq!(
+            compare_select(&g, &store, windowed),
+            Ok(Compared::SkippedRowChoice),
+            "the sort key does not cover the projection, so the row choice is arbitrary"
+        );
+        // The rule bites ONLY on the window: drop `LIMIT` and the same query is still fully
+        // value-compared, so this is not a blanket skip.
+        let unwindowed = "PREFIX ex: <http://ex/>\nSELECT ?a ?o \
+                          WHERE { ?s ex:age ?a OPTIONAL { ?s ex:p ?o } } ORDER BY ?a";
+        assert_eq!(
+            compare_select(&g, &store, unwindowed),
+            Ok(Compared::Ordered)
+        );
+    }
+
     /// The value-level oracle must actually RUN on every category rather than skip it — a
     /// comparator that returned `SkippedRowChoice` for everything would be a silently green
     /// differential. This is the per-category counterpart of `run`'s value-vacuity guard.
@@ -2622,8 +2740,8 @@ ex:n3 ex:age 40 . ex:n3 ex:name "nm3" .
         let bnode_q = "PREFIX ex: <http://ex/>\nSELECT ?s ?a WHERE { ?s ex:age ?a }";
         // Precondition: both engines really do bind a blank node here, so the assertion
         // below is about the routing and not about an accidentally-empty answer.
-        let sparq = sparq_solutions(&g, bnode_q).unwrap();
-        let oxi = oxi_solutions(&store, bnode_q).unwrap();
+        let sparq = sparq_solutions(&g, bnode_q).unwrap().rows;
+        let oxi = oxi_solutions(&store, bnode_q).unwrap().rows;
         assert!(solutions_have_blank_nodes(&sparq));
         assert!(solutions_have_blank_nodes(&oxi));
         assert_eq!(
