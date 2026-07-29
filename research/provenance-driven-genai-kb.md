@@ -9,7 +9,7 @@
 > ([issue #1111](https://github.com/jeswr/sparq/issues/1111)) — every adopt/abandon
 > verdict below is **model-dependent** and should be re-iterated when a stronger model
 > (Fable) is available. Verdicts here are honest-best-effort on Opus 4.8, not final.
-
+>
 > **Update (2026-07-29 — issue #3246, bead sq-dbesf; see #1139):** §4.2's access table and
 > the two `[needs-access]` lists were written when **OpenAlex** served an anonymous
 > "polite pool" keyed only on a `mailto`. **OpenAlex retired the no-key polite pool in
