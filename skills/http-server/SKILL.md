@@ -624,14 +624,19 @@ ring, or keep paging with the same `at=`).
   earliest reconstructable instant so you can retry at the horizon — the server **never** answers
   at a nearby instant instead. An **uncaptured span** (an operator re-base marker from
   `POST /admin/change-stream/rebase`) is also `410`: those commits were never recorded, so nothing
-  before them can be rebuilt from the log.
+  before them can be rebuilt from the log. And because the CDC hook appends *after* the ring
+  publishes, the ring can briefly hold a commit no record describes — an instant at or after the
+  log's newest record cannot be shown to precede that commit, so it is a **retryable `503`**
+  rather than the state before it (the window closes when the record lands; it persists only if a
+  record was dropped by a recording I/O failure, whose resync is
+  `POST /admin/change-stream/rebase`).
 - **Blank nodes are identified by label**, because the change stream identifies quads by their
   N-Quads line. That is exactly as sound as the CDC stream itself — no new assumption, but no
   repair of one either.
 - Statuses: unparsable `at` → `400`; `at` **and** `generation` in one request → `400` (two
   different pins; guessing is the substitution this surface refuses); no `--change-stream` dir →
-  `400` naming the flag; before the horizon / across a gap → `410`; a log that does not reach the
-  base snapshot → `500`.
+  `400` naming the flag; before the horizon / across a gap → `410`; the log not yet caught up
+  with the ring → `503` (the only retryable one); a log that does not reach the base → `500`.
 
 **4. WebSocket subscriptions (SEPA-style live SELECT).** Connect to
 `ws://127.0.0.1:3030/subscriptions`, send `subscribe`, get `subscribed` + an initial

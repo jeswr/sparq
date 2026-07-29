@@ -5688,8 +5688,9 @@ async fn resolve_pin(
 ///
 /// The shape is: pin a base the ring still holds → poll the retained records → resolve the
 /// instant to the generation current at it → reverse-replay the span between them. Everything
-/// after the parse is fail-CLOSED — a trimmed horizon, an uncaptured span, or a chain that does
-/// not reach the base all REFUSE rather than answer against a nearby instant.
+/// after the parse is fail-CLOSED — a trimmed horizon, an uncaptured span, a commit the ring has
+/// published but the log has not recorded yet, or a chain that does not reach the base all
+/// REFUSE rather than answer against a nearby instant.
 ///
 /// **Double opt-in**, exactly like `GET /streams`: compiling the feature is not enough, the
 /// operator must also point the server at a log directory. Without one there is no history to
@@ -5734,6 +5735,12 @@ async fn resolve_point_in_time(state: &AppState, raw: &str) -> Result<RequestPin
     };
 
     let target_generation = crate::pit::resolve_generation(&records, target).map_err(pit_error)?;
+    // Fail-closed on the CDC lag window BEFORE resolving a base: the ring can be one
+    // published-but-unrecorded commit ahead of the log, and an instant that resolves to the log's
+    // tail cannot be shown to precede that commit — so it is refused (retryable), never answered
+    // with the state before it.
+    crate::pit::check_unrecorded_commit(&records, current.number(), target_generation)
+        .map_err(pit_error)?;
     let base_generation = crate::pit::base_generation(&records, current.number());
     // The log may lag the ring by the commit the CDC hook has not appended yet; step the base
     // back to the newest RECORDED generation, which the ring's concurrency floor still retains.
@@ -5799,8 +5806,11 @@ async fn resolve_point_in_time(state: &AppState, raw: &str) -> Result<RequestPin
 ///
 /// `410 Gone` is the "that history is not there" class — a trimmed horizon or an uncaptured
 /// span are both permanent for that instant, so retrying cannot help (the same reading the
-/// aged-out `?generation=N` pin already has). `500` is reserved for server-state conditions
-/// the caller did nothing to cause; their detail goes to the operator log, never the body.
+/// aged-out `?generation=N` pin already has). `503` is the one TRANSIENT class: the log has not
+/// caught up with the ring yet, so the identical request can succeed on a retry (the
+/// `429`/`503`-only transient reading the rest of this surface follows). `500` is reserved for
+/// server-state conditions the caller did nothing to cause; their detail goes to the operator
+/// log, never the body.
 #[cfg(feature = "point-in-time")]
 fn pit_error(e: crate::pit::PitError) -> Response {
     use crate::pit::PitError;
@@ -5832,6 +5842,25 @@ fn pit_error(e: crate::pit::PitError) -> Response {
                 generation
             ),
         ),
+        PitError::Unrecorded {
+            published,
+            recorded,
+        } => {
+            // Ordinarily the window between the ring publish and the hook's append, which closes
+            // on its own. It PERSISTS if a record was dropped by a recording I/O failure — the
+            // operator resync for that is `POST /admin/change-stream/rebase`.
+            tracing::warn!(target: "sparq_server", published, recorded, "point-in-time request hit the change-stream lag window (ring ahead of the log)");
+            json_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &format!(
+                    "the change stream has not recorded generation {} yet (newest record: \
+                     generation {}), and the requested instant is at or after that record: \
+                     answering it would assume the unrecorded commit falls after the instant. \
+                     Retry once the record lands",
+                    published, recorded
+                ),
+            )
+        }
         PitError::Uncovered => {
             tracing::warn!(target: "sparq_server", "point-in-time span not covered by the retained change records");
             json_error(
@@ -5846,6 +5875,143 @@ fn pit_error(e: crate::pit::PitError) -> Response {
                 "point-in-time reconstruction failed",
             )
         }
+    }
+}
+
+#[cfg(all(test, feature = "point-in-time"))]
+mod point_in_time_lag_tests {
+    //! [OPUS-5] The CDC lag window on the REAL `?at=` path. `tests/point_in_time.rs` drives the
+    //! e2e surface, but it cannot reach this window: the commit hook appends before the writer
+    //! acks, so by the time an HTTP update response returns, the record is already durable. The
+    //! window only exists between the ring's publish and the hook's append — so these tests
+    //! reproduce it by publishing straight onto the ring, which is exactly a commit the hook has
+    //! not appended (and, permanently, a record dropped by a recording I/O failure).
+    use super::*;
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "sparq-pit-lag-{}-{}-{:?}",
+            tag,
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn state_with_log(dir: &std::path::Path) -> AppState {
+        AppState::with_config(
+            Graph::load_str("", "turtle").expect("empty graph"),
+            ServerConfig {
+                change_stream_dir: Some(dir.to_path_buf()),
+                time_travel_generations: 16,
+                ..ServerConfig::default()
+            },
+        )
+    }
+
+    /// The recorded commit timestamps, newest last — the same authority the resolution itself
+    /// compares against, so these assertions carry no wall-clock race.
+    fn recorded_instants(state: &AppState) -> Vec<u128> {
+        state
+            .poll_change_stream(0)
+            .expect("poll succeeds")
+            .expect("change stream configured")
+            .iter()
+            .map(|r| r.timestamp_unix_nanos)
+            .collect()
+    }
+
+    /// THE guard for this window: with a generation published but not yet recorded, an instant at
+    /// the log's tail is REFUSED (retryable `503`), not answered with the state before the
+    /// unrecorded commit. Delete the `check_unrecorded_commit` call in `resolve_point_in_time`
+    /// and this goes red on a `200` carrying the stale generation.
+    #[tokio::test]
+    async fn at_refuses_while_the_ring_is_ahead_of_the_change_log() {
+        let dir = scratch("ahead");
+        let state = state_with_log(&dir);
+        state
+            .apply_update("INSERT DATA { <http://ex/a> <http://ex/p> <http://ex/o> }")
+            .expect("update commits");
+        let instants = recorded_instants(&state);
+        assert_eq!(instants.len(), 1, "one record for the one commit");
+        let at_tail = instants[0].to_string();
+
+        // Control: while the log covers the ring, that instant is served.
+        // (`RequestPin` carries a `Graph` and implements no `Debug`, so the refusals below are
+        // matched rather than `expect_err`'d.)
+        match resolve_point_in_time(&state, &at_tail).await {
+            Ok(pin) => assert_eq!(pin.number, 1),
+            Err(resp) => panic!("the recorded instant should resolve, got {}", resp.status()),
+        }
+
+        // Now the window: generation 2 goes onto the ring with no record behind it.
+        state
+            .ring()
+            .publish(Graph::load_str("", "turtle").expect("empty graph"), Vec::<PodId>::new());
+        assert_eq!(state.current().number(), 2, "the ring advanced");
+        assert_eq!(recorded_instants(&state).len(), 1, "the log did not");
+
+        let refused = match resolve_point_in_time(&state, &at_tail).await {
+            Ok(pin) => panic!(
+                "expected a refusal in the lag window, got generation {}",
+                pin.number
+            ),
+            Err(resp) => resp.status(),
+        };
+        assert_eq!(
+            refused,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "retryable refusal, never the state before the unrecorded commit"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The guard is not a blanket outage: an instant that resolves STRICTLY before the log's tail
+    /// is provably unaffected by the unrecorded commit (it commits later still), so it is served
+    /// throughout the window.
+    #[tokio::test]
+    async fn an_instant_before_the_log_tail_is_still_served_in_the_lag_window() {
+        let dir = scratch("before-tail");
+        let state = state_with_log(&dir);
+        state
+            .apply_update("INSERT DATA { <http://ex/a> <http://ex/p> <http://ex/o> }")
+            .expect("update commits");
+        state
+            .apply_update("INSERT DATA { <http://ex/b> <http://ex/p> <http://ex/o> }")
+            .expect("update commits");
+        let instants = recorded_instants(&state);
+        assert_eq!(instants.len(), 2);
+
+        state
+            .ring()
+            .publish(Graph::load_str("", "turtle").expect("empty graph"), Vec::<PodId>::new());
+        assert_eq!(state.current().number(), 3, "generation 3 is unrecorded");
+
+        // Generation 1's instant resolves before the tail record (generation 2) — unless both
+        // commits share a timestamp, in which case it resolves TO the tail and is refused. Assert
+        // whichever the recorded timestamps make true; both are the correct answer for them.
+        match resolve_point_in_time(&state, &instants[0].to_string()).await {
+            Ok(pin) => {
+                assert_ne!(
+                    instants[0], instants[1],
+                    "an instant indistinguishable from the tail must be refused, not served"
+                );
+                assert_eq!(pin.number, 1, "served at the generation the instant names");
+            }
+            Err(resp) => {
+                assert_eq!(
+                    instants[0], instants[1],
+                    "generation 1's instant is provably unaffected by the unrecorded commit, \
+                     yet it was refused with {}",
+                    resp.status()
+                );
+                assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

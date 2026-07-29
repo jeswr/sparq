@@ -27,7 +27,8 @@
 //!   `rewind_is_order_sensitive` is the witness test that goes red if that is reversed.
 //! * **Never approximate.** Every failure is a REFUSAL (`PitError`), never a silent
 //!   substitution of a nearby instant. A trimmed horizon, an uncaptured span (an operator
-//!   re-base marker) and a non-contiguous chain are all distinct, reported errors.
+//!   re-base marker), a non-contiguous chain and the CDC lag window (a published-but-unrecorded
+//!   commit — `check_unrecorded_commit`) are all distinct, reported errors.
 //! * **The line-set representation is exact BECAUSE it is the same serialiser.** The log's
 //!   own diff (`change_stream::diff_changes`) renders quads with
 //!   [`graph_to_nquads`](sparq_engine::serialize::graph_to_nquads) and compares the resulting
@@ -68,6 +69,11 @@ pub(crate) enum PitError {
     /// undone: that span was never captured, so the earlier state cannot be rebuilt from the
     /// log. → `410`.
     Gap { generation: u64 },
+    /// The ring has PUBLISHED a generation the log has not recorded yet — the CDC hook appends
+    /// after the publish — and the requested instant resolves to the log's tail, so that commit
+    /// cannot be shown to fall after it. Carries both numbers. Retryable, unlike every other
+    /// refusal here. → `503`.
+    Unrecorded { published: u64, recorded: u64 },
     /// The retained records do not form the contiguous chain from the target generation up to
     /// the base snapshot's generation (a dropped record, or a log that never covered it). A
     /// server-state condition, not a client error. → `500`.
@@ -142,13 +148,52 @@ pub(crate) fn resolve_generation(records: &[ChangeRecord], target: i128) -> Resu
 /// * the CDC hook appends AFTER the ring publishes, so a commit can be current-but-unrecorded
 ///   for a moment — starting from `current` then would leave a span the log cannot undo, so
 ///   the base steps back to the newest RECORDED generation (which the ring still retains: the
-///   concurrency floor keeps the last K ≥ 4);
+///   concurrency floor keeps the last K ≥ 4). Stepping back keeps the REBUILD sound; whether the
+///   requested instant may be answered at all in that window is [`check_unrecorded_commit`]'s
+///   call;
 /// * conversely a commit may land between pinning `current` and polling, putting records
 ///   BEYOND the pin in the log — those are simply not part of the span.
 pub(crate) fn base_generation(records: &[ChangeRecord], current: u64) -> u64 {
     records
         .last()
         .map_or(current, |r| r.generation.min(current))
+}
+
+/// Fail-closed guard for the CDC lag window — the case [`base_generation`]'s step back cannot
+/// resolve on its own.
+///
+/// While the ring holds a published-but-unrecorded commit, [`resolve_generation`] can only answer
+/// with a RECORDED generation, so an instant at or after the log's tail resolves to the state
+/// BEFORE that commit. The unrecorded commit has no recorded timestamp yet, so it cannot be shown
+/// to fall after the requested instant — answering would be exactly the silent approximation this
+/// module refuses. The request is [`PitError::Unrecorded`] instead: retryable, because the append
+/// happens within the commit that triggered it (the writer acks the update only after the hook
+/// returns), so the window closes on its own.
+///
+/// An instant resolving STRICTLY BEFORE the newest recorded generation is provably unaffected —
+/// generations commit in order, so the unrecorded commit is newer than the record that already
+/// answers the instant — and is served normally. So is the opposite edge, records BEYOND
+/// `current` (a commit that landed between the pin and the poll): there the log LEADS the ring
+/// rather than lagging it, and the extra records are simply outside the span.
+///
+/// A non-empty `records` is the caller's precondition — [`resolve_generation`] refuses an empty
+/// log with [`PitError::Empty`] before this runs, and an empty log is nothing this guard can say
+/// anything about.
+pub(crate) fn check_unrecorded_commit(
+    records: &[ChangeRecord],
+    current: u64,
+    target_generation: u64,
+) -> Result<(), PitError> {
+    let Some(recorded) = records.last().map(|r| r.generation) else {
+        return Ok(());
+    };
+    if recorded < current && target_generation >= recorded {
+        return Err(PitError::Unrecorded {
+            published: current,
+            recorded,
+        });
+    }
+    Ok(())
 }
 
 /// Reconstructs the store's state at `target_generation` by reverse-replaying every recorded
@@ -344,6 +389,36 @@ mod tests {
         // A commit landed after the pin — the extra record is simply out of the span.
         assert_eq!(base_generation(&records, 1), 1);
         assert_eq!(base_generation(&[], 4), 4, "no records: current is the base");
+    }
+
+    /// The CDC lag window is a REFUSAL, not the preceding state. The ring publishes before the
+    /// hook appends, so it can hold a commit no record describes; an instant at or after the
+    /// log's tail may or may not include that commit, and this surface refuses rather than
+    /// answering at the older one. Narrow the `>=` to `>` (or drop the guard) and the
+    /// published-but-unrecorded case below goes green on exactly that silent substitution.
+    #[test]
+    fn check_unrecorded_commit_refuses_inside_the_cdc_lag_window() {
+        let records = vec![record(0, 1, 1, vec![]), record(1, 2, 2, vec![])];
+        // Steady state — the log has recorded everything the ring published.
+        assert_eq!(check_unrecorded_commit(&records, 2, 2), Ok(()));
+        assert_eq!(check_unrecorded_commit(&records, 2, 1), Ok(()));
+        // Generation 3 is published but not appended yet: an instant resolving to the tail is at
+        // or after generation 2's record, so generation 3 cannot be shown to postdate it.
+        assert_eq!(
+            check_unrecorded_commit(&records, 3, 2),
+            Err(PitError::Unrecorded {
+                published: 3,
+                recorded: 2
+            })
+        );
+        // … but an instant resolving STRICTLY before the tail is provably unaffected: generation
+        // 3 commits after generation 2, which already answers that instant.
+        assert_eq!(check_unrecorded_commit(&records, 3, 1), Ok(()));
+        // The opposite edge — a commit landed between the pin and the poll, so the log LEADS the
+        // ring. Not a lag, and not a refusal.
+        assert_eq!(check_unrecorded_commit(&records, 1, 1), Ok(()));
+        // An empty log is the caller's precondition (`resolve_generation` refuses it first).
+        assert_eq!(check_unrecorded_commit(&[], 3, 0), Ok(()));
     }
 
     #[test]
