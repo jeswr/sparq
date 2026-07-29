@@ -176,6 +176,12 @@ Re-evaluate when **any** of these becomes true:
    hand-rolled streamable-HTTP transport with session resumption is a far larger surface
    than 146 lines, and at that point "+45 crates" buys something real instead of replacing
    a `for line in reader.lines()` loop.
+   **FIRED and re-assessed, 2026-07-29** — `research/mcp-streamable-http-transport-design.md`
+   (sq-2c0f0, gh #3221). The verdict **held**, for a reason this record did not measure: the
+   workspace already contains a vetted axum SSE server (`sparq-server`'s
+   `subscriptions::sse`), so hand-rolling the transport costs **+29 crates in `sparq-mcp`'s
+   closure and 0 crates new to `Cargo.lock`** — no new exemption or audit — against `rmcp`'s
+   +52/+8. Triggers 2–4 below are untouched.
 2. **`rmcp` lands in an imported audit set**, or a first-party `safe-to-deploy` audit of it
    becomes affordable.
 3. **`rmcp` declares a `rust-version` and stabilises** — no new major for at least two
