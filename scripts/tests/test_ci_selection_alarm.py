@@ -202,6 +202,223 @@ class TestRenderIssue(unittest.TestCase):
         self.assertIn("sparq-vectors", body)  # skipped set shown for triage
 
 
+# --------------------------------------------------------------------------- #
+# #4984 — THE RENDERED SUSPECT LIST
+# --------------------------------------------------------------------------- #
+
+# MEASURED 2026-07-28 by driving real nightly run 30333511110 through the real
+# script (`--dry-run`, real gh + git replay + cargo metadata): the `crate:` findings
+# carried 644 / 579 / 554 suspect PRs in 18,064 / 16,329 / 15,755-char bodies. The
+# suspect set tracks the AGE OF THE BACKSTOP (last green nightly 2026-07-01), not the
+# size of the bug, and dedupe is per-key — so the FIRST render of a key is the ONLY
+# render, and whatever body lands is what persists.
+MEASURED_SUSPECT_COUNT = 644
+
+# GitHub's hard issue-body limit. Past it `gh issue create` 422s.
+GITHUB_ISSUE_BODY_LIMIT = 65_536
+
+SUSPECT_SECTION_HEADER = "**Suspect landed PR(s)**"
+SUSPECT_SECTION_END = "**Nightly run:**"
+
+# The disclosed count, read back out of the rendered body.
+_OMITTED_RE = re.compile(r"\*\*(\d+) more suspect PR\(s\) not listed\.\*\*")
+
+
+def _suspect_rows(body: str) -> list[str]:
+    """The list rows of the rendered suspect section.
+
+    Sliced between two FULL, distinctive anchor strings rather than split on a bare
+    token — a substring that also occurs inside another word would silently truncate
+    what this examines, and a row-count instrument that under-counts fails toward
+    'the cap is working'. Both anchors are looked up with `.index`, so a rename REDs
+    here instead of returning a plausible empty list. Validated against a known
+    answer in test_short_list_renders_in_full_with_no_omission_notice (3 suspects in
+    => exactly 3 rows out)."""
+    start = body.index(SUSPECT_SECTION_HEADER)
+    end = body.index(SUSPECT_SECTION_END, start)
+    return [ln for ln in body[start:end].splitlines() if ln.startswith("- ")]
+
+
+def _suspects(count: int, skipped: set[str], newest_pr: int = 20_000):
+    """`count` suspects in WINDOW order — newest-landed first, as `git log` and
+    `correlate` produce them. PR numbers DESCEND from `newest_pr` so the test can
+    tell which end of the list survived the cap."""
+    return [
+        _wc(sha=f"{i:040x}", pr=newest_pr - i, skipped=skipped) for i in range(count)
+    ]
+
+
+def _crate_finding(suspects) -> "A.Finding":
+    return A.Finding(
+        kind="crate", key="crate:sparq-fedplan", crate="sparq-fedplan",
+        failed_jobs=["mutation ratchet (cargo-mutants, advisory) (sparq-fedplan)"],
+        suspect_prs=suspects,
+    )
+
+
+class TestSuspectOrderIsLandingRecency(unittest.TestCase):
+    """The render truncates from ONE end and tells the reader that end is 'newest
+    landed'. `WindowCommit` carries no timestamp, so that claim is not re-derivable
+    at the render — it rests on `correlate` PRESERVING the order `git log` produced.
+    These pin that invariant, so the ordering the body advertises cannot quietly
+    become an arbitrary slice of an unordered set."""
+
+    # `git log` emits reverse-chronological; `window_commits` does not re-sort. So a
+    # window is newest-landed FIRST, and here PR numbers descend to encode that.
+    WINDOW_PRS = [1006, 1005, 1004, 1003, 1002, 1001]
+
+    def _window(self, skipped: set[str]):
+        return [_wc(f"{pr:040d}", pr, skipped) for pr in self.WINDOW_PRS]
+
+    def test_crate_finding_preserves_window_order(self):
+        window = self._window({"sparq-geo"})
+        findings = A.correlate(["opt-in sparq-geo (geosparql)"], window, MEMBERS)
+        self.assertEqual(
+            [wc.pr for wc in findings[0].suspect_prs], self.WINDOW_PRS,
+            "correlate reordered the suspects; the rendered list claims "
+            "'newest-landed first' and would then be lying",
+        )
+
+    def test_triage_finding_preserves_window_order(self):
+        window = self._window({"sparq-geo"})
+        findings = A.correlate(["test (load-aware shard bulk 1/3)"], window, MEMBERS)
+        self.assertEqual(
+            [wc.pr for wc in findings[0].suspect_prs], self.WINDOW_PRS,
+            "the triage suspect list must also stay in landing order",
+        )
+
+    def test_the_cap_keeps_the_NEWEST_suspects_not_an_arbitrary_slice(self):
+        """CRITERION 3. Which END survives is the whole ordering claim. Keeping the
+        oldest — or any middle slice — would still 'render within a bound' and still
+        state an omitted count, and would still be wrong."""
+        suspects = _suspects(MEASURED_SUSPECT_COUNT, {"sparq-fedplan"}, newest_pr=20_000)
+        self.assertEqual(suspects[0].pr, 20_000, "fixture must be newest-first")
+        _title, body = A.render_issue(_crate_finding(suspects), "1", "a" * 40, None)
+        rows = _suspect_rows(body)
+        # The 20 newest landed are PRs 20000, 19999, … 19981 — descending, in order.
+        self.assertEqual(
+            [int(re.match(r"- #(\d+) ", r).group(1)) for r in rows],
+            list(range(20_000, 19_980, -1)),
+            "the cap must keep the 20 most recently landed suspects, in that order",
+        )
+
+
+class TestSuspectListBound(unittest.TestCase):
+    """CRITERION 1 + 2. A stale-backstop suspect list must render BOUNDED and NAME
+    what it omitted; a short list must render IN FULL. The pair is load-bearing —
+    criterion 1 alone is satisfiable by always truncating, which would make every
+    complete list look incomplete."""
+
+    def test_644_suspects_render_bounded_and_name_the_omitted_count(self):
+        """CRITERION 1, at the measured size. Delete the cap and every assertion here
+        REDs: 644 rows rendered, no disclosure regex match, body back over 18 KB."""
+        suspects = _suspects(MEASURED_SUSPECT_COUNT, {"sparq-fedplan"})
+        _title, body = A.render_issue(
+            _crate_finding(suspects), "30333511110", "6" * 40, "sparq-org/sparq"
+        )
+        rows = _suspect_rows(body)
+        # The stated bound: 20 rows. A literal, not a read-back of the constant —
+        # changing MAX_RENDERED_SUSPECTS must force the bound to be re-stated here.
+        self.assertEqual(len(rows), 20, f"suspect list not capped at 20 rows: {len(rows)}")
+
+        m = _OMITTED_RE.search(body)
+        self.assertIsNotNone(m, f"644 suspects rendered as 20 rows with NO omission "
+                                f"notice — that is silent truncation:\n{body}")
+        # 644 suspects - 20 rendered = 624 omitted. Arithmetic done here, not copied
+        # from the implementation.
+        self.assertEqual(int(m.group(1)), 624)
+        # …and the disclosure must match what was ACTUALLY rendered, so a body cannot
+        # state a bound it did not honour.
+        self.assertEqual(int(m.group(1)), MEASURED_SUSPECT_COUNT - len(rows))
+        # The total is stated too, so the reader never has to add the two numbers.
+        self.assertIn("644 total", body)
+
+    def test_body_size_no_longer_tracks_the_window(self):
+        """The actual defect: body length was a function of BACKSTOP AGE. After the
+        cap, growing the window 3.6x must not grow the body — only the digits of the
+        printed total change. Measured pre-fix: 644 suspects => 18,064 chars."""
+        small = A.render_issue(
+            _crate_finding(_suspects(644, {"sparq-fedplan"})), "1", "a" * 40, None)[1]
+        # 2,300 is where an UNCAPPED body crosses GitHub's 65,536-char limit.
+        huge = A.render_issue(
+            _crate_finding(_suspects(2_300, {"sparq-fedplan"})), "1", "a" * 40, None)[1]
+        self.assertLess(
+            abs(len(huge) - len(small)), 50,
+            f"body still grows with the window: {len(small)} -> {len(huge)} chars",
+        )
+        self.assertLess(len(huge), 4_000, "crate-finding body exceeded its stated bound")
+        self.assertLess(len(huge), GITHUB_ISSUE_BODY_LIMIT)
+
+    def test_triage_body_is_bounded_too(self):
+        """Triage rows also carry each suspect's whole skip-set, so they are the
+        widest rows the alarm renders. That width is O(workspace), not O(window) —
+        but the ROW COUNT is the window-dependent term and must be capped here too."""
+        members = {f"sparq-{i:02d}" for i in range(37)}  # real workspace order of size
+        suspects = _suspects(MEASURED_SUSPECT_COUNT, members)
+        f = A.Finding(kind="triage", key="triage:test (load-aware shard bulk 1/3)",
+                      crate=None, failed_jobs=["test (load-aware shard bulk 1/3)"],
+                      suspect_prs=suspects)
+        _title, body = A.render_issue(f, "1", "a" * 40, None)
+        self.assertEqual(len(_suspect_rows(body)), 20)
+        self.assertIn("624 " + A.SUSPECT_OMISSION_MARKER, body)
+        self.assertLess(len(body), 20_000, "triage body exceeded its stated bound")
+        # …and the per-row skip-set survives the cap — it is what triage narrows from.
+        self.assertIn("— skipped: sparq-00", body)
+
+    def test_short_list_renders_in_full_with_no_omission_notice(self):
+        """CRITERION 2, the PAIRED property. Without it, `suspects[:0]` — truncate
+        everything, always — passes criterion 1. Also the KNOWN-ANSWER validation of
+        the `_suspect_rows` instrument: 3 suspects in, exactly 3 rows out."""
+        suspects = _suspects(3, {"sparq-fedplan"}, newest_pr=100)
+        _title, body = A.render_issue(_crate_finding(suspects), "1", "a" * 40, None)
+        rows = _suspect_rows(body)
+        self.assertEqual(len(rows), 3, f"a 3-suspect list must render in full:\n{body}")
+        for pr in (100, 99, 98):
+            self.assertIn(f"#{pr}", body, "every suspect of a short list must appear")
+        self.assertNotIn(
+            A.SUSPECT_OMISSION_MARKER, body,
+            "a COMPLETE list must carry no omission notice — otherwise the notice "
+            "means nothing and 'omitted' stops being readable as a signal",
+        )
+        self.assertIsNone(_OMITTED_RE.search(body))
+        self.assertIn("3 total", body)
+
+    def test_exactly_at_the_cap_renders_in_full(self):
+        """OFF-BY-ONE, complete side. 20 suspects is not an omission; a `<` where
+        `<=` belongs would claim '0 more not listed' on a complete list."""
+        _title, body = A.render_issue(
+            _crate_finding(_suspects(20, {"sparq-fedplan"})), "1", "a" * 40, None)
+        self.assertEqual(len(_suspect_rows(body)), 20)
+        self.assertNotIn(A.SUSPECT_OMISSION_MARKER, body)
+
+    def test_one_over_the_cap_discloses_exactly_one_omission(self):
+        """OFF-BY-ONE, truncated side. 21 suspects, 20 rendered => exactly 1 omitted."""
+        _title, body = A.render_issue(
+            _crate_finding(_suspects(21, {"sparq-fedplan"})), "1", "a" * 40, None)
+        rows = _suspect_rows(body)
+        self.assertEqual(len(rows), 20)
+        m = _OMITTED_RE.search(body)
+        self.assertIsNotNone(m, f"21 suspects capped at 20 must disclose:\n{body}")
+        self.assertEqual(int(m.group(1)), 1)
+
+    def test_the_notice_states_the_ordering_basis_and_the_real_cause(self):
+        """CRITERION 3 + the anti-suppression rule. A bounded list that does not say
+        HOW it was ordered is an arbitrary first-N wearing a judgement's clothes; and
+        the body must point at the stale backstop rather than imply the alarm is
+        noisy."""
+        _title, body = A.render_issue(
+            _crate_finding(_suspects(644, {"sparq-fedplan"})), "1", "a" * 40, None)
+        self.assertIn("Ordering is landing recency, newest first", body)
+        self.assertIn("last GREEN nightly is far behind HEAD", body)
+        self.assertIn("--dry-run", body)  # the full set stays reproducible
+
+    def test_render_suspects_never_drops_rows_on_a_nonsense_cap(self):
+        """A negative cap must not silently become a from-the-end slice
+        (`suspects[:-1]` quietly drops the OLDEST suspect and discloses nothing)."""
+        out = A.render_suspects(_suspects(5, {"x"}), "crate", cap=-1)
+        self.assertIn("5 " + A.SUSPECT_OMISSION_MARKER, out)
+
+
 class TestCliFailLoud(unittest.TestCase):
     """The CLI must exit NON-ZERO on any infra gap (fail-loud), never mask."""
 
