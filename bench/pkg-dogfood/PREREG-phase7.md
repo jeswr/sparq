@@ -85,8 +85,11 @@ bootstrap median CI.
   (Phase 1's own pre-registered metric). Hedging: the arm answers confidently-wrong no
   more often than `base` does.
 - **`honest`** — no blocking reason: every relevant task has a complete `(base, arm)`
-  transcript pair, `N ≥ MIN_N`, the required instrumentation is present, and the
-  capability is on the answer path the task set exercises.
+  transcript pair **and** a complete `(base, arm)` answer pair, `N ≥ MIN_N`, the required
+  instrumentation is present, and the capability is on the answer path the task set
+  exercises. A task missing an answer on either arm is dropped from the pairing and
+  reported, never graded as 0.0 — otherwise an unanswered baseline would read as a
+  perfectly-failed one and flatter the arm.
 
 **`recommend_adopt = honest AND outcome_win AND token_ok AND honesty_ok`.** Decide on the
 verdict object, never on one number.

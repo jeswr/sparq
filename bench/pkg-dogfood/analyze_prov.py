@@ -199,11 +199,25 @@ def verdict_for(
     relevant = [t for t in sorted(tasks) if cap["relevant"](tasks[t])]
     # Only COMPLETE pairs count: a capability that answered a task the baseline
     # skipped (or vice versa) would bias the paired delta.
-    paired_ids = [t for t in relevant if (t, BASE_ARM) in tok and (t, arm) in tok]
-    if len(paired_ids) < len(relevant):
+    tok_paired = [t for t in relevant if (t, BASE_ARM) in tok and (t, arm) in tok]
+    if len(tok_paired) < len(relevant):
         blocked.append(
-            f"{len(relevant) - len(paired_ids)} of {len(relevant)} relevant tasks lack a "
+            f"{len(relevant) - len(tok_paired)} of {len(relevant)} relevant tasks lack a "
             f"complete ({BASE_ARM}, {arm}) transcript pair"
+        )
+    # A transcript pair is not evidence of an ANSWER pair. `analyze3.grade(task, None)`
+    # scores a missing answer 0.0, so a run with every token pair but no baseline
+    # answers would credit the arm with a maximal outcome win over a baseline the host
+    # never actually ran. An ungraded task is dropped from the pairing and SAID, never
+    # graded as zero.
+    paired_ids = [
+        t for t in tok_paired
+        if answers.get((t, BASE_ARM)) is not None and answers.get((t, arm)) is not None
+    ]
+    if len(paired_ids) < len(tok_paired):
+        blocked.append(
+            f"{len(tok_paired) - len(paired_ids)} of {len(tok_paired)} transcript-paired "
+            f"tasks lack a complete ({BASE_ARM}, {arm}) answer pair"
         )
 
     # --- tokens: delta = base - arm, so POSITIVE means the capability is cheaper.
@@ -284,7 +298,7 @@ def verdict_for(
     )
 
     if not paired_ids:
-        blocked.append(f"no ({BASE_ARM}, {arm}) transcript pairs found")
+        blocked.append(f"no complete ({BASE_ARM}, {arm}) transcript+answer pairs found")
     elif not n_ok:
         blocked.append(f"N={len(paired_ids)} < {MIN_N} (underpowered by construction)")
     if not cap["on_agent_answer_path"]:

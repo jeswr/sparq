@@ -270,6 +270,51 @@ class TestHonestyGate(unittest.TestCase):
             v["_detail"]["blocked_reason"],
         )
 
+    def test_a_missing_answer_on_either_arm_is_blocked_not_graded_as_zero(self):
+        # A transcript pair is not an ANSWER pair: `analyze3.grade(task, None)` returns
+        # 0.0, so an ungraded task must leave the pairing rather than be scored zero.
+        for missing_arm in ("base", "cite"):
+            cap = ap._capabilities()["citations"]
+            tok, answers, records = fixture(arm=cap["arm"])
+            del answers[(sorted(TASKS)[0], missing_arm)]
+            v = ap.verdict_for("citations", cap, TASKS, tok, answers, records)
+            self.assertFalse(v["honest"], missing_arm)
+            self.assertFalse(v["recommend_adopt"], missing_arm)
+            self.assertEqual(len(TASKS) - 1, v["_detail"]["n_pairs"], missing_arm)
+            self.assertIn(
+                f"1 of {len(TASKS)} transcript-paired tasks lack a complete "
+                f"(base, cite) answer pair",
+                v["_detail"]["blocked_reason"],
+            )
+
+    def test_absent_baseline_answers_cannot_manufacture_an_outcome_win(self):
+        # The exact bias this guard exists to stop, and the one the token-pair guard
+        # does NOT catch: every token pair present, every arm answer and record present,
+        # but the baseline was never answered. Grading the absent baselines as 0.0 gave
+        # the arm a maximal, significant `outcome_win` and `recommend_adopt=true`.
+        # Citations require no baseline instrumentation, so nothing else blocks it.
+        cap = ap._capabilities()["citations"]
+        tok, answers, records = fixture(arm=cap["arm"])
+        for t in sorted(TASKS):
+            del answers[(t, "base")]
+        v = ap.verdict_for("citations", cap, TASKS, tok, answers, records)
+        self.assertEqual(0, v["_detail"]["n_pairs"])
+        self.assertEqual(len(TASKS), v["_detail"]["n_relevant"])
+        self.assertFalse(v["_detail"]["outcome_win"])
+        self.assertFalse(v["honest"])
+        self.assertFalse(v["recommend_adopt"])
+
+    def test_a_null_answer_counts_as_missing_not_as_a_wrong_answer(self):
+        # `analyze3.load_answers` yields `None` for a record whose `answer` key is absent;
+        # that is missing evidence, not a scored-zero response.
+        cap = ap._capabilities()["citations"]
+        tok, answers, records = fixture(arm=cap["arm"])
+        answers[(sorted(TASKS)[0], "base")] = None
+        v = ap.verdict_for("citations", cap, TASKS, tok, answers, records)
+        self.assertEqual(len(TASKS) - 1, v["_detail"]["n_pairs"])
+        self.assertFalse(v["honest"])
+        self.assertFalse(v["recommend_adopt"])
+
     def test_provenance_weighting_is_reported_off_the_agent_answer_path(self):
         # It is measured by the Phase-4 Hits@k/MRR ablation, not by this agent A/B —
         # the analyzer says so rather than emitting an under-powered flattering verdict.
