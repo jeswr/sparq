@@ -223,6 +223,13 @@ area = "ci"
 pattern = ".roborev.toml"
 area = "ci"
 
+# jscpd's config for the docs-duplication gate: it sets the threshold, the scanned
+# globs and the allowlist, i.e. what that leg checks — same lane as the other
+# scanner configs above.
+[[map]]
+pattern = ".jscpd.json"
+area = "ci"
+
 [[map]]
 pattern = ".config/**"
 area = "ci"
