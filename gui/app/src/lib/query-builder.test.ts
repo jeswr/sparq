@@ -3,10 +3,12 @@
 // Covers the two things that MUST hold for the tool to be honest:
 //   1. the serializer emits standard SPARQL 1.1 for what the canvas shows — nothing hidden,
 //      nothing invented (prefix header derived from actual use; OPTIONAL filters scoped
-//      inside the OPTIONAL; NOT-EXISTS carrying its leaf node's patterns);
+//      inside the OPTIONAL; an OPTIONAL edge carrying its target node's own patterns;
+//      NOT-EXISTS carrying its leaf node's patterns);
 //   2. validation catches the models whose SPARQL would be invalid or would mean something
-//      other than the diagram (duplicate variables, projecting a negated variable, projecting
-//      a non-grouped variable alongside an aggregate).
+//      other than the diagram (duplicate variables, projecting a negated variable or one of its
+//      attributes, projecting a non-grouped variable alongside an aggregate, an undeclared
+//      prefix the header cannot supply).
 //
 // Plus the schema-introspection parsers, whose job is to report ONLY what the store returned
 // (shape-declared vs data-observed kept distinct, unbound/odd rows dropped rather than guessed).
@@ -287,11 +289,18 @@ test("serializeModel – a required attribute's filter follows its triple at gro
   );
 });
 
-test("serializeModel – an edge joins two nodes; OPTIONAL wraps the edge", () => {
+test("serializeModel – an OPTIONAL edge carries its target node's own patterns INSIDE", () => {
+  // `?friend a foaf:Person` at group level would be REQUIRED: a person with no matching friend
+  // would then drop out of the results entirely, which is the opposite of an optional edge.
   const m = model({
     nodes: [
       node({ variable: "person", classIri: `${FOAF}Person`, projected: true }),
-      node({ variable: "friend", classIri: `${FOAF}Person`, projected: true }),
+      node({
+        variable: "friend",
+        classIri: `${FOAF}Person`,
+        projected: true,
+        attributes: [attr({ variable: "friendName", projected: true })],
+      }),
     ],
     edges: [
       {
@@ -307,10 +316,38 @@ test("serializeModel – an edge joins two nodes; OPTIONAL wraps the edge", () =
   assert.equal(
     serializeModel(m),
     [
+      "SELECT ?person ?friend ?friendName",
+      "WHERE {",
+      "  ?person a foaf:Person .",
+      "  OPTIONAL {",
+      "    ?person foaf:knows ?friend .",
+      "    ?friend a foaf:Person .",
+      "    ?friend foaf:name ?friendName .",
+      "  }",
+      "}",
+    ].join("\n"),
+  );
+  // …and the target's patterns are emitted exactly once — never left behind at group level too.
+  assert.equal(serializeModel(m).match(/\?friend a foaf:Person/g)?.length, 1);
+  assert.equal(validateModel(m).length, 0);
+});
+
+test("serializeModel – an OPTIONAL edge to a bare node stays a one-line OPTIONAL", () => {
+  const m = model({
+    nodes: [
+      node({ variable: "person", classIri: `${FOAF}Person`, projected: true }),
+      node({ variable: "friend", projected: true }),
+    ],
+    edges: [
+      { id: "e1", from: "n-person", to: "n-friend", predicate: `${FOAF}knows`, alternatives: [], mode: "optional" },
+    ],
+  });
+  assert.equal(
+    serializeModel(m),
+    [
       "SELECT ?person ?friend",
       "WHERE {",
       "  ?person a foaf:Person .",
-      "  ?friend a foaf:Person .",
       "  OPTIONAL { ?person foaf:knows ?friend . }",
       "}",
     ].join("\n"),
@@ -500,6 +537,47 @@ test("validateModel – a NOT-EXISTS branch must be a leaf in v1", () => {
   assert.ok(errors(m).some((e) => /must be a leaf in v1/.test(e)));
 });
 
+test("validateModel – projecting an ATTRIBUTE of a NOT EXISTS leaf is an error too", () => {
+  // The attribute variable is bound by a triple inside FILTER NOT EXISTS, exactly like the node
+  // variable is — leaving it in the SELECT clause would project something nothing binds.
+  const m = model({
+    nodes: [
+      node({ variable: "person", classIri: `${FOAF}Person`, projected: true }),
+      node({ variable: "blocked", attributes: [attr({ variable: "blockedName", projected: true })] }),
+    ],
+    edges: [
+      { id: "e1", from: "n-person", to: "n-blocked", predicate: `${FOAF}knows`, alternatives: [], mode: "not-exists" },
+    ],
+  });
+  assert.deepEqual(projectedVariables(m), ["person", "blockedName"]);
+  assert.ok(errors(m).some((e) => /\?blockedName/.test(e) && /only inside a NOT-EXISTS branch/.test(e)));
+  assert.equal(buildQuery(m).runnable, false);
+});
+
+test("validateModel – an OPTIONAL edge's target must be a leaf once it carries patterns", () => {
+  // Its class/attributes are emitted inside the OPTIONAL, so a second edge on the same node
+  // leaves it ambiguous which group they belong to — v1 refuses rather than picking one.
+  const withPatterns = model({
+    nodes: [
+      node({ variable: "person", classIri: `${FOAF}Person`, projected: true }),
+      node({ variable: "friend", classIri: `${FOAF}Person` }),
+      node({ variable: "city", classIri: `${FOAF}Agent` }),
+    ],
+    edges: [
+      { id: "e1", from: "n-person", to: "n-friend", predicate: `${FOAF}knows`, alternatives: [], mode: "optional" },
+      { id: "e2", from: "n-friend", to: "n-city", predicate: `${FOAF}based_near`, alternatives: [], mode: "required" },
+    ],
+  });
+  assert.ok(errors(withPatterns).some((e) => /must be a leaf/.test(e)));
+
+  // A bare join variable carries nothing into the OPTIONAL, so there is nothing to be ambiguous.
+  const bare = {
+    ...withPatterns,
+    nodes: withPatterns.nodes.map((n) => (n.variable === "friend" ? { ...n, classIri: null } : n)),
+  };
+  assert.deepEqual(errors(bare), []);
+});
+
 test("validateModel – a projected non-grouped variable alongside an aggregate is an error", () => {
   const m = model({
     nodes: [
@@ -547,12 +625,16 @@ test("validateModel – a numeric filter whose value is not a number is an error
   assert.ok(errors(m).some((e) => /not a number/.test(e)));
 });
 
-test("validateModel – an undeclared prefix is a WARNING, and the query still builds", () => {
+test("validateModel – an undeclared prefix is an ERROR: the header cannot declare it", () => {
+  // requiredPrefixLines only knows COMMON_PREFIXES, so `acme:Widget` reaches the text with no
+  // PREFIX line behind it — the query would not parse, so the panel must not offer to run it.
   const m = model({ nodes: [node({ variable: "p", classIri: "acme:Widget", projected: true })] });
-  const issues = validateModel(m);
-  assert.equal(issues.filter((i) => i.severity === "error").length, 0);
-  assert.ok(issues.some((i) => i.severity === "warning" && /acme:/.test(i.message)));
-  assert.equal(buildQuery(m).runnable, true);
+  const built = buildQuery(m);
+  assert.ok(built.issues.some((i) => i.severity === "error" && /acme:/.test(i.message)));
+  assert.equal(built.runnable, false);
+  // The SPARQL is still rendered in full — best-effort text is the point of showing it.
+  assert.match(built.sparql, /\?p a acme:Widget \./);
+  assert.doesNotMatch(built.sparql, /PREFIX acme:/);
 });
 
 test("buildQuery – an invalid model STILL produces readable SPARQL, just not runnable", () => {

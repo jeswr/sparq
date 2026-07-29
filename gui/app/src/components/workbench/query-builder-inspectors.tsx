@@ -205,6 +205,7 @@ export function NodeInspector({
           <AttributeEditor
             key={a.id}
             attribute={a}
+            negated={negated}
             onChange={(fn) => onChangeAttribute(a.id, fn)}
             onDrop={() => onDropAttribute(a.id)}
           />
@@ -237,10 +238,13 @@ const VALUE_KINDS: ValueKind[] = ["string", "number", "boolean", "date", "iri"];
 
 function AttributeEditor({
   attribute,
+  negated,
   onChange,
   onDrop,
 }: {
   attribute: BuilderAttribute;
+  /** The owning node is bound only inside a NOT EXISTS branch — so this variable is too. */
+  negated: boolean;
   onChange: (fn: (a: BuilderAttribute) => BuilderAttribute) => void;
   onDrop: () => void;
 }) {
@@ -271,9 +275,13 @@ function AttributeEditor({
           <input
             type="checkbox"
             checked={attribute.projected}
+            disabled={negated}
             onChange={(e) => onChange((a) => ({ ...a, projected: e.target.checked }))}
           />
           select
+          {negated && (
+            <span className="text-[10px] text-[var(--warning)]">(not visible outside NOT EXISTS)</span>
+          )}
         </label>
         <label className="flex items-center gap-1">
           <input
@@ -352,7 +360,11 @@ function AttributeEditor({
 
 const EDGE_MODES: { value: EdgeMode; label: string; hint: string }[] = [
   { value: "required", label: "required", hint: "A plain triple pattern." },
-  { value: "optional", label: "optional", hint: "OPTIONAL { … } — the match may be absent." },
+  {
+    value: "optional",
+    label: "optional",
+    hint: "OPTIONAL { … } — the match may be absent. The target node's class and attributes go inside the OPTIONAL too, so while it carries any it must be a leaf.",
+  },
   {
     value: "not-exists",
     label: "not exists",

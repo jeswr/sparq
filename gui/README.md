@@ -157,14 +157,18 @@ The honesty rules the tool holds itself to:
   claims the two are still in sync;
 - a diagram whose SPARQL would be **invalid still renders its SPARQL** (so it can be read and
   fixed) but cannot be run — the issues list gives the reason (duplicate variable, a variable
-  projected out of a `NOT EXISTS` branch, a projected non-grouped variable beside an aggregate,
-  an undeclared prefix, …);
+  *or one of its attributes* projected out of a `NOT EXISTS` branch, a projected non-grouped
+  variable beside an aggregate, a prefix the generated header cannot declare, …);
+- a group means what the canvas means: an `OPTIONAL` edge carries the target node's own class,
+  attributes and filters **inside** the `OPTIONAL`, so an unmatched target leaves the source row
+  in the results instead of deleting it;
 - introspection is **not** run unasked on a large store — the panel offers the button and says
   why — and a loaded index is marked **stale** when the store changes under it.
 
 Stated v1 limits (do the rest by editing the query, which is the point of keeping it editable):
 UNION is offered only as **alternative predicates on one edge**, a `NOT EXISTS` branch must be a
-leaf, and the builder generates SELECT queries only.
+leaf, an `OPTIONAL` edge's target must be a leaf while it carries a class or attributes (that is
+what keeps the group it belongs to unambiguous), and the builder generates SELECT queries only.
 
 The pure model, serializer and validation live in `app/src/lib/query-builder.ts` (no React, no
 DOM) and are unit-tested in `query-builder.test.ts`. The UI is the panel

@@ -19,9 +19,11 @@
 //   * **Invalid models still serialize.** {@link buildQuery} returns best-effort SPARQL
 //     ALONGSIDE its issues, so the user can always read (and fix) the text. The panel refuses
 //     to RUN on an error; it never hides the query.
-//   * **Stated v1 limits.** UNION is offered only as alternative predicates on one edge, and a
-//     NOT-EXISTS edge must be a leaf. Anything beyond that is done by editing the SPARQL — the
-//     builder does not pretend to cover the whole language.
+//   * **Stated v1 limits.** UNION is offered only as alternative predicates on one edge; a
+//     NOT-EXISTS edge must be a leaf; and so must an OPTIONAL edge's target while it carries a
+//     class or attributes, since those are emitted inside the OPTIONAL with it. Anything beyond
+//     that is done by editing the SPARQL — the builder does not pretend to cover the whole
+//     language.
 
 import { COMMON_PREFIXES, type SparqlResults, type SparqlTerm } from "@sparq/client";
 
@@ -90,7 +92,10 @@ export interface BuilderNode {
 /**
  * How an edge participates in the pattern:
  *   * `required`   — a plain triple pattern;
- *   * `optional`   — wrapped in `OPTIONAL { … }` (the target node's own patterns come with it);
+ *   * `optional`   — wrapped in `OPTIONAL { … }`, and the target node's own class/attributes/
+ *     filters go INSIDE that group with it (leaving them outside would make an unmatched target
+ *     drop the source row). v1 therefore requires a target that carries any of those to be a
+ *     leaf, so the group it belongs to is unambiguous (see {@link validateModel});
  *   * `not-exists` — wrapped in `FILTER NOT EXISTS { … }` (Stardog's AND-NOT). The target node
  *     is then bound only INSIDE the negation, so it cannot be projected — v1 additionally
  *     requires it to be a leaf (see {@link validateModel}).
@@ -283,8 +288,8 @@ export function renderFilterExpr(variable: string, filter: AttributeFilter): str
 
 /**
  * One problem with the drawn model. `error` blocks running (the query would be invalid or
- * would not mean what the canvas shows); `warning` is a heads-up the user may accept — most
- * often an undeclared prefix, which the panel cannot resolve for them without guessing.
+ * would not mean what the canvas shows); `warning` is a heads-up the user may accept — a
+ * GROUP BY with nothing to aggregate, or an ORDER BY over a variable that is not projected.
  */
 export interface BuilderIssue {
   severity: "error" | "warning";
@@ -296,8 +301,14 @@ export interface BuilderIssue {
 /** The prefix labels the serializer can declare automatically. */
 const KNOWN_PREFIX_LABELS: ReadonlySet<string> = new Set(COMMON_PREFIXES.map((p) => p.prefix));
 
-/** Collect an undeclared-prefix warning for one IRI-position term, if it needs one. */
-function prefixWarning(value: string, where: string, subject: string): BuilderIssue | null {
+/**
+ * Collect the undeclared-prefix issue for one IRI-position term, if it needs one. This is an
+ * ERROR, not a warning: {@link requiredPrefixLines} can only declare {@link COMMON_PREFIXES}, so
+ * a prefix label the builder does not know reaches the generated text with no `PREFIX` line
+ * behind it — the query would not parse, and the panel must not offer to run it. The text is
+ * still shown, because it is the right starting point for adding that line by hand.
+ */
+function prefixIssue(value: string, where: string, subject: string): BuilderIssue | null {
   const v = value.trim();
   if (v === "a" || v.startsWith("<") || looksAbsolute(v)) return null;
   const m = PREFIXED_NAME_RE.exec(v);
@@ -305,11 +316,12 @@ function prefixWarning(value: string, where: string, subject: string): BuilderIs
   const label = m[1] ?? "";
   if (KNOWN_PREFIX_LABELS.has(label)) return null;
   return {
-    severity: "warning",
+    severity: "error",
     subject,
     message:
-      `${where} uses the prefix \`${label}:\`, which is not one the builder can declare. ` +
-      `Add a PREFIX line to the generated SPARQL, or use the full IRI.`,
+      `${where} uses the prefix \`${label}:\`, which is not one the builder can declare, so the ` +
+      `generated query carries no PREFIX line for it and will not parse. Add that PREFIX line ` +
+      `to the SPARQL yourself, or use the full IRI.`,
   };
 }
 
@@ -330,9 +342,32 @@ export function negatedNodeIds(model: BuilderModel): Set<string> {
 }
 
 /**
+ * Which node each `optional` edge carries INSIDE its `OPTIONAL { … }` group — the edge's target
+ * — keyed by edge id. An OPTIONAL wrapping only the edge triple would leave the target's class,
+ * attributes and filters REQUIRED at group level, so a row whose target does not match would be
+ * dropped rather than kept with unbound values: the opposite of what an optional edge shows.
+ *
+ * A node is claimed by at most one edge (and never when a negation already binds it, or when the
+ * edge is a self-loop and the node is its own source), so its patterns are emitted exactly once.
+ * {@link validateModel} rejects the shapes where that ownership would be ambiguous.
+ */
+export function optionalScopedNodes(model: BuilderModel): Map<string, string> {
+  const negated = negatedNodeIds(model);
+  const claimed = new Set<string>();
+  const out = new Map<string, string>();
+  for (const e of model.edges) {
+    if (e.mode !== "optional" || e.from === e.to) continue;
+    if (negated.has(e.to) || claimed.has(e.to)) continue;
+    claimed.add(e.to);
+    out.set(e.id, e.to);
+  }
+  return out;
+}
+
+/**
  * Check the drawn model against the things that would make the generated SPARQL invalid, or
  * make it mean something other than what the canvas shows. Deterministic order: structural
- * issues first, then projection/aggregation, then prefix warnings.
+ * issues first, then projection/aggregation, then prefix issues.
  */
 export function validateModel(model: BuilderModel): BuilderIssue[] {
   const issues: BuilderIssue[] = [];
@@ -447,23 +482,50 @@ export function validateModel(model: BuilderModel): BuilderIssue[] {
         });
       }
     }
-    if (e.mode === "optional" && e.alternatives.length > 0) {
-      issues.push({
-        severity: "error",
-        subject: e.id,
-        message: "Alternative predicates (UNION) are only available on a required edge.",
-      });
+    if (e.mode === "optional") {
+      if (e.alternatives.length > 0) {
+        issues.push({
+          severity: "error",
+          subject: e.id,
+          message: "Alternative predicates (UNION) are only available on a required edge.",
+        });
+      }
+      // The target's class/attributes/filters are emitted INSIDE the OPTIONAL (see
+      // {@link optionalScopedNodes}). Which group they belong to is only unambiguous while the
+      // target is bound nowhere else, so v1 requires it to be a leaf whenever it carries any.
+      const target = model.nodes.find((n) => n.id === e.to);
+      const carries = target ? target.classIri !== null || target.attributes.length > 0 : false;
+      const touching = model.edges.filter((o) => o.id !== e.id && (o.from === e.to || o.to === e.to));
+      if (target && carries && touching.length > 0) {
+        issues.push({
+          severity: "error",
+          subject: e.id,
+          message:
+            `An OPTIONAL edge carries \`?${target.variable}\`'s class, attributes and filters ` +
+            `inside the OPTIONAL, so in v1 that target must be a leaf — it cannot also sit on ` +
+            `another edge. Clear them, or model the rest by editing the generated SPARQL.`,
+        });
+      }
     }
   }
 
   // --- projection + aggregation -----------------------------------------
+  // Which node BINDS each projectable variable — its own, and every attribute hanging off it.
+  // An attribute of a negated node is bound inside the negation exactly like the node variable
+  // is, so both have to be checked against `negated` (a node-variable-only lookup would let
+  // `?blockedName` stay in the SELECT clause while FILTER NOT EXISTS is all that binds it).
+  const owners = new Map<string, string>();
+  for (const n of model.nodes) {
+    if (!owners.has(n.variable)) owners.set(n.variable, n.id);
+    for (const a of n.attributes) if (!owners.has(a.variable)) owners.set(a.variable, n.id);
+  }
   const projected = projectedVariables(model);
   for (const name of projected) {
-    const owner = model.nodes.find((n) => n.variable === name);
-    if (owner && negated.has(owner.id)) {
+    const ownerId = owners.get(name);
+    if (ownerId !== undefined && negated.has(ownerId)) {
       issues.push({
         severity: "error",
-        subject: owner.id,
+        subject: ownerId,
         message:
           `\`?${name}\` is bound only inside a NOT-EXISTS branch, so it is not visible to the ` +
           `SELECT clause. Clear its projection.`,
@@ -531,17 +593,17 @@ export function validateModel(model: BuilderModel): BuilderIssue[] {
   // --- prefixes ----------------------------------------------------------
   for (const n of model.nodes) {
     if (n.classIri) {
-      const w = prefixWarning(n.classIri, `The class of \`?${n.variable}\``, n.id);
+      const w = prefixIssue(n.classIri, `The class of \`?${n.variable}\``, n.id);
       if (w) issues.push(w);
     }
     for (const a of n.attributes) {
-      const w = prefixWarning(a.predicate, `The attribute \`?${a.variable}\``, n.id);
+      const w = prefixIssue(a.predicate, `The attribute \`?${a.variable}\``, n.id);
       if (w) issues.push(w);
     }
   }
   for (const e of model.edges) {
     for (const p of [e.predicate, ...e.alternatives]) {
-      const w = prefixWarning(p, "An edge predicate", e.id);
+      const w = prefixIssue(p, "An edge predicate", e.id);
       if (w) issues.push(w);
     }
   }
@@ -609,16 +671,21 @@ export function renderAggregate(agg: BuilderAggregate): string {
  * {@link buildQuery}, which prepends exactly the prefixes the body uses).
  *
  * Emission order is deterministic — nodes in canvas order (each with its own patterns), then
- * edges in canvas order — so the text only changes when the diagram does.
+ * edges in canvas order — so the text only changes when the diagram does. The exception is a
+ * node scoped to a `not-exists` or `optional` edge: its patterns move into that edge's group
+ * (exactly once), because the group is where they have to hold.
  */
 export function serializeModel(model: BuilderModel): string {
   const byId = new Map(model.nodes.map((n) => [n.id, n]));
   const negated = negatedNodeIds(model);
+  const optionalScoped = optionalScopedNodes(model);
+  const scoped = new Set(optionalScoped.values());
   const lines: string[] = [];
 
-  // 1. Node patterns — but a node bound only inside a negation is emitted THERE, not here.
+  // 1. Node patterns — but a node bound only inside a negation, or carried by an OPTIONAL edge,
+  //    is emitted THERE, not here.
   for (const node of model.nodes) {
-    if (negated.has(node.id)) continue;
+    if (negated.has(node.id) || scoped.has(node.id)) continue;
     lines.push(...nodePatterns(node, INDENT));
   }
 
@@ -647,7 +714,22 @@ export function serializeModel(model: BuilderModel): string {
         ? alts.map((p) => `{ ${triple(p).replace(/ \.$/, "")} }`).join(" UNION ")
         : triple(edge.predicate);
 
-    lines.push(edge.mode === "optional" ? `${INDENT}OPTIONAL { ${body} }` : `${INDENT}${body}`);
+    if (edge.mode === "optional") {
+      // The target's own patterns belong in the SAME group as the edge: outside, they would be
+      // required, and a target that did not match would take the whole source row with it.
+      const inner = optionalScoped.get(edge.id) === to.id ? nodePatterns(to, INDENT + INDENT) : [];
+      if (inner.length === 0) {
+        lines.push(`${INDENT}OPTIONAL { ${body} }`);
+      } else {
+        lines.push(`${INDENT}OPTIONAL {`);
+        lines.push(`${INDENT}${INDENT}${body}`);
+        lines.push(...inner);
+        lines.push(`${INDENT}}`);
+      }
+      continue;
+    }
+
+    lines.push(`${INDENT}${body}`);
   }
 
   const projected = projectedVariables(model);
