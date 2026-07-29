@@ -106,6 +106,21 @@ docker run --rm --name sparq-lws-core -p 127.0.0.1:3000:3000 \
   - `trust-graph` (off, [OPUS-5] sq-hed3q) — the LIBRARY-only trust-graph admission
     seam (`authz::trust_admit`); NOT handler-wired. Research prototype (sq-qhy4).
 
+## 📜 Specification estate
+
+<!-- [OPUS-5] issue #4971: what this crate is actually pinned to, and what is still unresolved. -->
+
+| Spec | Status for this crate | In-tree evidence |
+| --- | --- | --- |
+| **DPoP-SK** — <https://jeswr.github.io/dpop-sk-spec/> | Normative for the `pop::sk` proof-of-possession tier. An EXPERIMENTAL profile, not a ratified standard — treat its guarantees as unreviewed. | Appendix-A worked-example vectors asserted byte-for-byte in [`src/pop/sk/derive.rs`](./src/pop/sk/derive.rs); the RFC 5705 §4 exporter label is pinned against the spec string. |
+| **Solid-OIDC verification** — [jeswr/solid-oidc-verifier](https://github.com/jeswr/solid-oidc-verifier) | Delegated, not reimplemented here. | Pinned by `rev = "89c8962…"` in [`Cargo.toml`](./Cargo.toml). |
+| **`lws-spec`**, **`lws-ucs`** | **UNRESOLVED.** Location and content unknown; no shipped behaviour in this crate is known to depend on either. | None — neither name appears anywhere in this repository. |
+
+Promoting `lws-spec` / `lws-ucs` out of UNRESOLVED takes what DPoP-SK already has: a
+maintainer-confirmed reference **plus** an executed spec vector, not a prose citation.
+Until that pointer exists, do not cite a URL for them — a guessed one would read as a
+normative claim this crate cannot back (issue #4971).
+
 ## 📚 Learn more
 
 - Solid CTH wire conformance: [`conformance/`](./conformance) — opt-in lane; the
