@@ -38,6 +38,32 @@ WORKFLOW_DIR = REPO_ROOT / ".claude" / "workflows"
 GATE = REPO_ROOT / ".github" / "workflows" / "routing-self-tests.yml"
 AGENTS_MD = REPO_ROOT / "AGENTS.md"
 SELF_PATH = "scripts/tests/test_workflow_dispatch_contract.py"
+# The path filter that must wire this gate to the workflow DIRECTORY (PR #4967 review). Pinning
+# the directory rather than each current file is what makes the invariant hold for a workflow
+# added after this suite was written.
+WORKFLOW_GLOB = ".claude/workflows/*.js"
+
+
+def _gh_path_filter_re(pattern):
+    """Compile a GitHub Actions `paths:` filter to a regex.
+
+    Only the two wildcards the filters here use: `*` matches within one path segment, `**`
+    crosses separators. Everything else is literal (`.` especially — `*.js` must not match
+    `xxjs`)."""
+    out, i = [], 0
+    while i < len(pattern):
+        if pattern[i] == "*":
+            if pattern[i + 1:i + 2] == "*":
+                out.append(".*")
+                i += 2
+            else:
+                out.append("[^/]*")
+                i += 1
+        else:
+            out.append(re.escape(pattern[i]))
+            i += 1
+    return re.compile("".join(out) + r"\Z")
+
 
 # A dispatch site: `agent(` not preceded by an identifier char or a dot (so `subagent(` and
 # `x.agent(` are not counted, and `agentType:` — no paren — never matches).
@@ -212,19 +238,40 @@ class TestGateWiring(unittest.TestCase):
         self.assertEqual(self.trigger_section.count(f'"{SELF_PATH}"'), 2,
                          "must be a path trigger on BOTH pull_request and push")
 
-    def test_every_workflow_script_is_a_path_trigger(self):
+    def test_the_workflow_directory_is_a_path_trigger(self):
         """The model-deprecation guard (test_no_deprecated_models.py::TestWorkflowJsDispatch)
         scans EVERY `.claude/workflows/*.js` for its dispatch models, but only
         fable-architect-drain.js was a path trigger — so a PR editing any other workflow's
         dispatch site never ran the gate that guards it.
 
-        MUTANT: drop any workflow file from the `paths:` lists => RED."""
-        for f in workflow_files():
-            rel = f".claude/workflows/{f.name}"
-            self.assertEqual(
-                self.trigger_section.count(f'"{rel}"'), 2,
-                f"{rel} must re-run this gate on BOTH pull_request and push — it carries "
-                "`agent({model: ...})` dispatch sites the gate's suites scan")
+        The trigger must be the DIRECTORY, not an enumeration of today's files: an enumeration
+        cannot cover a workflow that does not exist yet, so a newly added script would match no
+        filter, this lane would not run, and it would merge unlinked, unschema'd or unparseable —
+        with every assertion in this file silently skipped rather than red.
+
+        MUTANT: replace the glob with the individual workflow filenames => RED."""
+        self.assertEqual(
+            self.trigger_section.count(f'"{WORKFLOW_GLOB}"'), 2,
+            f"`{WORKFLOW_GLOB}` must be a path trigger on BOTH pull_request and push — an "
+            "enumeration of the current files lets a NEW workflow merge without this gate")
+
+    def test_every_workflow_file_is_covered_by_a_declared_path_filter(self):
+        """Anti-vacuity for the glob above: a workflow the declared filters do not MATCH — a
+        `.mjs` script, or one nested a directory deeper — is back in the bypass class even though
+        the glob is present.
+
+        MUTANT: add `.claude/workflows/lib/helper.mjs` => RED (no declared filter matches it)."""
+        on = self.doc.get(True, self.doc.get("on", {}))
+        files = sorted(p for p in WORKFLOW_DIR.rglob("*") if p.is_file())
+        self.assertTrue(files, f"no files under {WORKFLOW_DIR} — the coverage check is vacuous")
+        for event in ("pull_request", "push"):
+            patterns = [_gh_path_filter_re(p) for p in on[event]["paths"]]
+            for f in files:
+                rel = f.relative_to(REPO_ROOT).as_posix()
+                self.assertTrue(
+                    any(p.match(rel) for p in patterns),
+                    f"{rel} matches no `{event}:` path filter — an edit to it would not run "
+                    "this gate, whose suites nonetheless scan it")
 
 
 if __name__ == "__main__":
