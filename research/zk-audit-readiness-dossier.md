@@ -143,10 +143,15 @@ face repos and REMOVED from this repo. Ground truth from
 > commitment hash the compose tree pins) **and, coincidentally, is also the current latest
 > `noir_XPath` release** cut the same day; **v0.11.0 is `sparq_ieee754`** (the float lane
 > `zk/compose` pins). `noir_XPath` is not on `zk/compose`'s dependency path at all. Separately,
-> **`AGENTS.md` currently records `noir_XPath` as `v0.2.0`** in its externalized-deps note —
-> that is now stale (v0.3.0 released 2026-07-06). Flagged for the maintainer as a doc-sync
-> follow-up (not fixed here — out of this doc's scope). This is a version-provenance note, not a
-> soundness statement.
+> `AGENTS.md` recorded `noir_XPath` as `v0.2.0` in its externalized-deps note, which went stale
+> when v0.3.0 was released 2026-07-06; that note was **synced to v0.3.0** by the doc-sync
+> follow-up (`sq-6mhcd` / #3138). This is a version-provenance note, not a soundness statement.
+>
+> **Pin vs. release.** The face repos' latest release is not automatically what a lane here
+> verifies: the XPath differential lane still pins `XPATH_TAG: "v0.2.0"`
+> (`.github/workflows/xpath-differential.yml`, `zk/xpath/scripts/run_differential_harness.sh`),
+> so any evidence that lane produces is evidence about **v0.2.0**, not v0.3.0. Bumping that pin
+> is a CI change requiring a green re-run, tracked separately from this doc-sync.
 
 **Cross-repo audit consequence:** an external auditor auditing the FILTER float lanes must audit
 `sparq_ieee754 @ v0.11.0` in its own repo (its `nargo test` + differential oracle now live in the
@@ -415,8 +420,11 @@ This dossier is evidence assembly; the following are the *tracked* follow-ups th
 audit-readiness further. Each is a candidate future bead (none is a soundness claim; none is
 implemented here).
 
-1. **Sync `AGENTS.md` externalized-deps note to `noir_XPath v0.3.0`** (doc-only; it currently
-   reads v0.2.0 — live-verified stale, release cut 2026-07-06). Small, mechanical.
+1. ~~**Sync `AGENTS.md` externalized-deps note to `noir_XPath v0.3.0`**~~ — DONE (`sq-6mhcd` /
+   #3138); the note now records v0.3.0 and distinguishes the face-repo release from the
+   `XPATH_TAG: "v0.2.0"` pin the differential lane actually verifies. The **pin bump itself**
+   (v0.2.0 → v0.3.0 in `xpath-differential.yml` + `run_differential_harness.sh`) remains open —
+   it is a CI change needing a green re-run, not doc-sync.
 2. **Sync `compliance/cryptoreview/gap-register.md` CR-G6 + `research/zk-verifier-reaudit.md`
    NEW-2** to drop the "`HolderPop` not yet credential-bound" line — that item CLOSED on `main`
    (`sq-c2ql`/`sq-z8s7`/`sq-i1dt`/`sq-42e3`, forge-pinned by `holder_pop_forge.rs`). Leave the

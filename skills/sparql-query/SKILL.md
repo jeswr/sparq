@@ -680,12 +680,14 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   `f64::NAN` sentinel for a non-numeric cell, with a gather-free fast path for an all-inline-integer
   column — the SIMD enabler, M4 Phase 2 `sq-pntvh.2`), a numeric FILTER comparison kernel
   (`DataChunk::select_numeric` → a `SelVec`), a **compare-over-decoded-column** kernel
-  (`DataChunk::select_decoded`, the branchless auto-vectorising compare that consumes the decode
-  kernel's output — M4 Phase 3 `sq-pntvh.3`), and a selection/gather kernel
+  (`DataChunk::select_decoded`, the contiguous-memory, auto-vectorisable compare that consumes the
+  decode kernel's output — M4 Phase 3 `sq-pntvh.3`), and a selection/gather kernel
   (`DataChunk::apply_selection`). When off, zero columnar code compiles and the default native + wasm
   builds are byte-identical (no new dependencies; no `unsafe`).
-  **`query`/`query_json`/etc. return byte-identical results whether the feature is on or off** — it
-  is a perf optimisation, never a semantics change. The first evaluator wiring landed in Phase 3
+  **`query`/`query_json`/etc. return identical results whether the feature is on or off** — the same
+  bindings/rows in the same order (byte-identical for the serialising entry points such as
+  `query_json`; `query` returns a structured result, so the equality is over its rows, not bytes).
+  It is a perf optimisation, never a semantics change. The first evaluator wiring landed in Phase 3
   (`sq-pntvh.3`): a **columnar residual-FILTER seam** inside `apply_filter` (Seam A) that, for an
   eligible single sargable-numeric residual `?v OP const`, decodes the column once and runs the
   **hybrid tri-mask** (`src/chunk_select.rs`, bead `sq-y5ew5`): each lane is classified Confident

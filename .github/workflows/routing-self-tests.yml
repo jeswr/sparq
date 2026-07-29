@@ -108,6 +108,14 @@ on:
       - "scripts/tests/test_start_here_render.py"
       - ".github/workflows/refresh-start-here.yml"
       - ".github/workflows/routing-self-tests.yml"
+      # [OPUS-5] sparq#5098 — the SELF-TEST WRITE GUARD's scan surface. It scans
+      # `scripts/**/*.py` for a self-test that can reach a live write (the shape that posted four
+      # real comments to #7/#8 from `--selftest`), so its trigger must be the same DIRECTORY GLOB
+      # rather than an enumeration: the offending file, `retriage-needs-user.py`, did not exist
+      # when this filter was written, and an enumeration cannot name a script that does not exist
+      # yet. That is the same reasoning already applied to `.claude/workflows/*.js` above. This
+      # lane is seconds-cheap and does no build, so widening it to every script is affordable.
+      - "scripts/**/*.py"
       # [OPUS-5] reg#677 — PR `area:` attribution. The scheduler partitions by
       # `area:<name>`; an unlabelled PR takes the serializing `__global__` partition
       # and defers EVERY issue, so a drift in the deriver, its declared table, or the
@@ -209,6 +217,14 @@ on:
       - "scripts/tests/test_start_here_render.py"
       - ".github/workflows/refresh-start-here.yml"
       - ".github/workflows/routing-self-tests.yml"
+      # [OPUS-5] sparq#5098 — the SELF-TEST WRITE GUARD's scan surface. It scans
+      # `scripts/**/*.py` for a self-test that can reach a live write (the shape that posted four
+      # real comments to #7/#8 from `--selftest`), so its trigger must be the same DIRECTORY GLOB
+      # rather than an enumeration: the offending file, `retriage-needs-user.py`, did not exist
+      # when this filter was written, and an enumeration cannot name a script that does not exist
+      # yet. That is the same reasoning already applied to `.claude/workflows/*.js` above. This
+      # lane is seconds-cheap and does no build, so widening it to every script is affordable.
+      - "scripts/**/*.py"
       # [OPUS-5] reg#677 — PR `area:` attribution. The scheduler partitions by
       # `area:<name>`; an unlabelled PR takes the serializing `__global__` partition
       # and defers EVERY issue, so a drift in the deriver, its declared table, or the
@@ -267,6 +283,10 @@ jobs:
           # orchestration/start-here.toml (a malformed curated file must fail on ITS PR, not at the
           # next scheduled refresh of the maintainer's front door); the suite pins the drop /
           # fail-closed / truncation rules and refresh-start-here.yml's own wiring.
+          # [OPUS-5] sparq#5098: no `--self-test` anywhere under scripts/ may reach a live
+          # write. Static (AST) — it never imports or runs the files it scans. The suite also
+          # pins its OWN wiring here structurally, so `if: false` on this job or this step reds it.
+          python3 scripts/tests/test_selftest_never_writes.py
           python3 scripts/render-start-here.py --self-test
           python3 scripts/tests/test_start_here_render.py
 

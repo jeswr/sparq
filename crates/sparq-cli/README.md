@@ -59,6 +59,9 @@ cargo run --release -p sparq-cli -- query data.ttl turtle 'SELECT * WHERE { ?s ?
   JSON-LD **parse + serialise + full 1.1 Compaction/Framing**; full conneg-conformance ratcheting
   is on the [sq-oy1f](https://github.com/jeswr/sparq/issues/757) roadmap.
 - **`--reason <rdfs|owl-rl|n3>`** — opt-in forward-chaining materialization before query.
+- **`--reason datalog:<rules.dlog>`** *(opt-in `datalog`; [SONNET-4.6] sq-p4zci)* — run a **stratified Datalog** program
+  over the parsed triples, then query the closure: negation as failure + `AGGREGATE`/`FILTER`, which monotone RDFS/OWL-RL
+  cannot express. Loud exit-1 outside the fragment or on a `NOT`/`AGGREGATE` cycle; exit 2, no fall-back, when off.
 - **`classify <file> <format> [out.nt]` / `--reason el`** *(opt-in `el` feature; [OPUS-5] sq-2ch27)* —
   run the **OWL 2 EL** consequence-based classifier (`sparq-reason-el`, pulled with its `rbox` role
   automaton) and materialize the class-subsumption lattice as `rdfs:subClassOf` triples (plus the

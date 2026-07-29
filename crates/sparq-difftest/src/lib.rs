@@ -63,11 +63,20 @@
 //! Rejecting or normalising contradictory outcomes belongs to the producing policy harness and
 //! is a documented non-goal of this engine-independent comparator.
 //!
-//! Deliberately **not** here (separate DAG nodes / beads): wiring these comparators into the fuzz
-//! harness (`sq-qcnn.5`), the query/data generator extension (`sq-qcnn.6`), and the pluggable
-//! second-oracle adapter (`sq-qcnn.8`). Until that wiring lands, `crates/sparq-bench`'s existing
-//! Oxigraph fuzzer does not call [`iso`]; it routes a blank-node-bearing answer to an explicitly
-//! **counted** triage bucket rather than folding it into a generic skip.
+//! # Who calls this (and who does not yet)
+//!
+//! `crates/sparq-bench`'s Oxigraph query fuzzer (`src/fuzz.rs`) is wired onto these comparators as
+//! of `sq-qcnn.5`: it bridges both engines' answers into this crate's neutral model (through
+//! `sparq-bench`'s own `neutral` module, a structural carrier→model conversion that decides no
+//! equality) and then compares by result form — [`multiset::multiset_equal`] for an un-ordered
+//! `SELECT`, [`multiset::order_by_equal`] under `ORDER BY`, [`iso::solutions_isomorphic`] for a
+//! blank-node-bearing solution table, and [`iso::graph_isomorphic`] for a `CONSTRUCT`/`DESCRIBE`
+//! graph. An [`IsoError`] is routed to a COUNTED triage bucket there, never read as agreement.
+//!
+//! Deliberately **not** here (separate DAG nodes / beads): the query/data generator extension
+//! (`sq-qcnn.6`) — so the fuzzer's `ASK` / `CONSTRUCT` comparators are wired and unit-tested but
+//! its generator does not emit those forms yet — and the pluggable second-oracle adapter
+//! (`sq-qcnn.8`).
 
 pub mod decision;
 pub mod iso;

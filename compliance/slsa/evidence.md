@@ -122,7 +122,7 @@ permissions: { contents: read, packages: write, id-token: write, attestations: w
 
 | Control | File / command |
 |---|---|
-| Two-person review (AR) | `CODEOWNERS` (catch-all `@jeswr` + high-risk path overrides); `docs/branch-protection.md` (≥1 approving review, require-code-owners, dismiss-stale, no admin bypass) |
+| Two-person review (AR) | `CODEOWNERS` (catch-all `@jeswr` + high-risk path overrides); `docs/branch-protection.md` records zero required approving reviews, no required code-owner review, no stale-review dismissal, and an always-on repository-administrator bypass; the automated landing path does not use the bypass |
 | Protected branch (AR) | `docs/branch-protection.md` — linear history, block force-push, block deletion |
 | Single required gate (IV) | `.github/workflows/ci-summary.yml` (`ci-summary / gate`); required-check record in `docs/branch-protection.md` |
 | Trusted dep sources (IV) | `deny.toml [sources]` (`unknown-registry/unknown-git = "deny"`); gated by `supply-chain.yml#audit` (`cargo deny check … sources`) |
