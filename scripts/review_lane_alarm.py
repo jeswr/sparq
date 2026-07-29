@@ -62,15 +62,17 @@
 # happened. `hold_ownership` therefore resolves the hold from the `labeled` TIMELINE EVENT
 # — who actually applied the label the PR still carries — and not from its name:
 #   * applied by a Bot actor            -> MACHINE-owned; the PR is judged on its verdict.
-#   * applied by a human actor, but a BOT-authored park receipt (a `class=<reason>`
-#     marker) lands within RECEIPT_WINDOW_SECONDS of the write -> MACHINE-owned too. This
-#     is the credential-drift half: the predicate means to trust an INTENT, and an actor
-#     identity is only a proxy for it. sparq#4911's PR #3620 is the measured shape — the
-#     label written under the maintainer's alias at 08:54:39 and the loop's own
-#     `class=capacity cause=partition` receipt posted by the bot 86s later, mixed
-#     credentials inside one logical operation. The receipt must be BOT-authored: a
-#     `class=` marker in a human's own comment proves nothing and must never be able to
-#     silence a real human decision.
+#   * applied by a human actor, but an ORCHESTRATOR-authored park receipt (a
+#     `class=<reason>` marker) lands within RECEIPT_WINDOW_SECONDS of the write ->
+#     MACHINE-owned too. This is the credential-drift half: the predicate means to trust an
+#     INTENT, and an actor identity is only a proxy for it. sparq#4911's PR #3620 is the
+#     measured shape — the label written under the maintainer's alias at 08:54:39 and the
+#     loop's own `class=capacity cause=partition` receipt posted by the bot 86s later,
+#     mixed credentials inside one logical operation. The receipt's author must be the
+#     ALLOWLISTED orchestrator App (`RECEIPT_AUTHOR_LOGINS`), not merely some machine
+#     account: a `class=` marker in a human's own comment — or in an unrelated review bot's
+#     — proves nothing about the loop's intent and must never be able to silence a real
+#     human decision.
 #   * applied by a human actor with no such receipt -> HUMAN-owned, exempt as before.
 #   * no `labeled` event resolvable at all -> UNKNOWN, treated as human-owned (the quiet,
 #     under-reporting direction this file takes everywhere) but COUNTED in the census as
@@ -162,9 +164,23 @@ HUMAN_HOLD_LABELS = frozenset({"needs:user", "review:needs-user"})
 # `class=question` and `cause=partition` on real receipts). Not every machine hold carries
 # one — 8 of the 23 `needs:user` holds in that census did — so this is a POSITIVE signal
 # only: its presence machine-owns a write, its absence proves nothing either way. A
-# BOT-authored comment carrying the marker, within RECEIPT_WINDOW_SECONDS of the label
-# write, is an INTENT signal that survives a mis-signed credential.
+# comment carrying the marker, within RECEIPT_WINDOW_SECONDS of the label write and from an
+# allowlisted author, is an INTENT signal that survives a mis-signed credential.
 RECEIPT_CLASS_RE = re.compile(r"\bclass=[A-Za-z][A-Za-z0-9_-]*\b")
+# …and the receipt only means anything as the ORCHESTRATOR'S OWN intent, so its author is
+# allowlisted by LOGIN and not merely "some machine account". Comment bodies are untrusted
+# and RECEIPT_CLASS_RE is deliberately broad, so blanket `[bot]` trust would let any
+# unrelated review/app bot post — or merely QUOTE — a `class=` token inside the symmetric
+# window and convert a genuinely human-applied hold to machine-owned, silencing the one
+# exit this file treats as terminal. That is the wrong direction to fail in, and it is the
+# same one-App trust the sibling writers already take (scripts/retriage.py's TRUSTED_BOT,
+# scripts/bd-to-issues.py's _MIGRATION_BOTS). Logins are normalised (case-folded, an
+# `app/` prefix and a `[bot]` suffix stripped) because GitHub reports the SAME App under
+# all three spellings — `gh` as `app/x`, REST as `x[bot]`, GraphQL as `x` — and an
+# un-normalised comparison would read as a guard while never matching. Same rule as
+# scripts/release_pr_guard.py's `normalize_login`, re-stated locally rather than imported
+# to keep this alarm stdlib-only and free-standing (see the header).
+RECEIPT_AUTHOR_LOGINS = frozenset({"sparq-orchestrator"})
 # Symmetric, because a receipt may be posted either side of the write it explains. Sized
 # off the one measured interval sparq#4911 gives (86s, PR #3620) with room to spare; a
 # tighter window would drop that case, a much wider one would start sweeping in unrelated
@@ -308,6 +324,32 @@ def _is_bot_actor(who: dict) -> bool:
     return str(who.get("type") or "") == "Bot" or str(who.get("login") or "").endswith("[bot]")
 
 
+def _normalise_login(login: object) -> str:
+    """Case-folded login with an `app/` prefix and a `[bot]` suffix stripped.
+
+    One App is spelled three ways depending on which surface reports it:
+    `app/sparq-orchestrator` (`gh`), `sparq-orchestrator[bot]` (REST),
+    `sparq-orchestrator` (GraphQL)."""
+    name = str(login or "").strip().lower()
+    if name.startswith("app/"):
+        name = name[len("app/"):]
+    if name.endswith("[bot]"):
+        name = name[: -len("[bot]")]
+    return name
+
+
+def _is_receipt_author(who: dict) -> bool:
+    """True iff an actor/user object is an ALLOWLISTED park-receipt author.
+
+    Strictly narrower than `_is_bot_actor`, which only establishes that SOME machine posted
+    the comment — not enough to speak for the orchestrator (see RECEIPT_AUTHOR_LOGINS). The
+    machine-account test is kept as a conjunct so a human registering a colliding login
+    cannot mint receipts either."""
+    if not isinstance(who, dict):
+        return False
+    return _is_bot_actor(who) and _normalise_login(who.get("login")) in RECEIPT_AUTHOR_LOGINS
+
+
 def latest_hold_application(pr: dict, events: list[dict] | None) -> dict | None:
     """The LATEST `labeled` event that applied a hold label the PR STILL carries, or None.
 
@@ -343,9 +385,10 @@ def hold_ownership(pr: dict, events: list[dict] | None, comments: list[dict]) ->
     open sparq PRs was machine-applied, some under the maintainer's own alias. Resolved
     from the write itself, in two steps (see the module header):
       1. a Bot actor is machine-owned outright;
-      2. a HUMAN actor whose write is accompanied by a bot-authored `class=<reason>` park
-         receipt inside RECEIPT_WINDOW_SECONDS is machine-owned as well — the receipt is
-         the loop's intent, and no credential drift can move it to a human.
+      2. a HUMAN actor whose write is accompanied by an ORCHESTRATOR-authored (login in
+         RECEIPT_AUTHOR_LOGINS, not merely any bot) `class=<reason>` park receipt inside
+         RECEIPT_WINDOW_SECONDS is machine-owned as well — that receipt is the loop's own
+         intent, and no credential drift can move it to a human.
     'unknown' when no `labeled` event resolves; callers treat that as human-owned (the
     under-reporting direction) and count it, rather than alarming on a guess."""
     latest = latest_hold_application(pr, events)
@@ -357,7 +400,7 @@ def hold_ownership(pr: dict, events: list[dict] | None, comments: list[dict]) ->
     for comment in comments or []:
         if not isinstance(comment, dict):
             continue
-        if not _is_bot_actor(comment.get("user") or {}):
+        if not _is_receipt_author(comment.get("user") or {}):
             continue
         body = comment.get("body")
         if not isinstance(body, str) or not RECEIPT_CLASS_RE.search(body):
@@ -503,7 +546,7 @@ def render_issue_body(findings: list[dict], census: dict, repo: str, max_age_hou
         "",
         "A `needs:user` / `review:needs-user` hold exempts a PR from this alarm only when a "
         "HUMAN applied it — resolved from the `labeled` timeline event, and downgraded to a "
-        "machine write when a bot-authored `class=<reason>` park receipt lands within "
+        "machine write when an orchestrator-authored `class=<reason>` park receipt lands within "
         f"{RECEIPT_WINDOW_SECONDS}s of it (sparq#4911). `hold-owner-machine` in the census "
         "counts holds that bought no exemption; `hold-owner-unknown` counts holds whose "
         "applier could not be resolved, which stay exempt.",
@@ -722,8 +765,11 @@ def _pr(number=1, *, ref="research/x", login="jeswr", sha=SHA_A, draft=False, la
     }
 
 
-def _comment(body, login="reviewer", created="2026-07-02T00:00:00Z"):
-    return {"body": body, "user": {"login": login}, "created_at": created}
+def _comment(body, login="reviewer", created="2026-07-02T00:00:00Z", kind=None):
+    user = {"login": login}
+    if kind:
+        user["type"] = kind
+    return {"body": body, "user": user, "created_at": created}
 
 
 def _labeled(label="needs:user", login="jeswr", created="2026-07-20T00:00:00Z", kind=None):
@@ -899,6 +945,36 @@ def _self_test() -> int:  # noqa: C901 - a flat table of named assertions reads 
     check(
         "a HUMAN comment carrying a class= marker does not machine-own the write",
         hold_ownership(held, alias, [_comment("class=capacity", login="jeswr",
+                                              created="2026-07-28T08:55:00Z")]) == "human",
+    )
+    # …nor does an UNRELATED machine account. `_is_bot_actor` only proves "some bot posted
+    # this"; the receipt has to be the orchestrator's own, or any app that quotes a
+    # `class=` token inside the window revokes a genuine human hold.
+    other_bot = [
+        _comment(
+            "flagging: class=capacity looks wrong here",
+            login="some-review-app[bot]",
+            created="2026-07-28T08:55:00Z",
+        )
+    ]
+    check(
+        "an UNRELATED BOT's class= comment does not machine-own a human write",
+        hold_ownership(held, alias, other_bot) == "human",
+    )
+    check(
+        "…and the hold therefore stays terminal",
+        classify_pr(held, other_bot, repo, alias) == "human-held",
+    )
+    check(
+        "the receipt author is matched across GitHub's login spellings",
+        hold_ownership(held, alias, [_comment("park: class=capacity",
+                                              login="app/Sparq-Orchestrator", kind="Bot",
+                                              created="2026-07-28T08:55:00Z")]) == "machine",
+    )
+    check(
+        "a HUMAN squatting the orchestrator login cannot mint a receipt",
+        hold_ownership(held, alias, [_comment("park: class=capacity",
+                                              login="sparq-orchestrator",
                                               created="2026-07-28T08:55:00Z")]) == "human",
     )
     check(
