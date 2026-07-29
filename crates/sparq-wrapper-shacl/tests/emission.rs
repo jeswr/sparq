@@ -34,6 +34,11 @@ ex:PersonShape a sh:NodeShape ;
     sh:property [ sh:path ex:nickname ; sh:datatype xsd:string  ; sh:maxCount 1 ] ;
     sh:property [ sh:path ex:active ;   sh:datatype xsd:boolean ; sh:maxCount 1 ] ;
     sh:property [ sh:path ex:score ;    sh:datatype xsd:double  ; sh:maxCount 1 ] ;
+    sh:property [ sh:path ex:weight ;   sh:datatype xsd:float   ; sh:maxCount 1 ] ;
+    sh:property [ sh:path ex:ratio ;    sh:datatype xsd:decimal ; sh:maxCount 1 ] ;
+    sh:property [ sh:path ex:quota ;    sh:datatype xsd:unsignedLong ; sh:maxCount 1 ] ;
+    sh:property [ sh:path ex:visits ;   sh:datatype xsd:nonNegativeInteger ; sh:maxCount 1 ] ;
+    sh:property [ sh:path ex:rank ;     sh:datatype xsd:byte    ; sh:maxCount 1 ] ;
     sh:property [ sh:path ex:email ;    sh:datatype xsd:string  ; sh:minCount 1 ] ;
     sh:property [ sh:path ex:homepage ; sh:nodeKind sh:IRI ; sh:maxCount 1 ] ;
     sh:property [ sh:path ex:note ] ;
@@ -92,13 +97,26 @@ fn p(local: &str) -> String {
     format!("{}{}", EX, local)
 }
 
+/// An `xsd:integer` well outside `i64` — and outside `i128` too, so the
+/// arbitrary-precision path is exercised past every fixed-width fallback.
+const HUGE: &str = "170141183460469231731687303715884105728";
+/// `xsd:unsignedLong`'s maximum, 2^64-1: conforming, and above `i64::MAX`.
+const UNSIGNED_LONG_MAX: &str = "18446744073709551615";
+/// More significant digits than an `f64` can hold.
+const LONG_DECIMAL: &str = "3.14159265358979323846264338327950288419716939937510";
+
 fn base() -> Vec<(Value, String, Value)> {
     vec![
         (iri("alice"), RDF_TYPE.to_string(), iri("Person")),
         (iri("alice"), p("name"), lit("Alice", "string")),
-        (iri("alice"), p("age"), lit("42", "integer")),
+        (iri("alice"), p("age"), lit(HUGE, "integer")),
         (iri("alice"), p("active"), lit("true", "boolean")),
         (iri("alice"), p("score"), lit("1.5", "double")),
+        (iri("alice"), p("weight"), lit("0.1", "float")),
+        (iri("alice"), p("ratio"), lit(LONG_DECIMAL, "decimal")),
+        (iri("alice"), p("quota"), lit(UNSIGNED_LONG_MAX, "unsignedLong")),
+        (iri("alice"), p("visits"), lit("0", "nonNegativeInteger")),
+        (iri("alice"), p("rank"), lit("-7", "byte")),
         (iri("alice"), p("email"), lit("alice@example.org", "string")),
         (iri("alice"), p("homepage"), iri("alice/home")),
         (iri("alice"), p("note"), lit("free text", "string")),
@@ -109,13 +127,48 @@ fn base() -> Vec<(Value, String, Value)> {
     ]
 }
 
+/// `base()` with the single object of `pred` replaced.
+fn with(pred: &str, object: Value) -> Vec<(Value, String, Value)> {
+    let mut triples: Vec<_> = base()
+        .into_iter()
+        .filter(|(s, pr, _)| !(s == &iri("alice") && pr == &p(pred)))
+        .collect();
+    triples.push((iri("alice"), p(pred), object));
+    triples
+}
+
+/// Loads with `pred` replaced, asserting the value CONFORMS.
+fn loads(pred: &str, object: Value) -> Person {
+    Person::load(&Triples(with(pred, object)), &iri("alice"))
+        .unwrap_or_else(|e| panic!("conforming {} rejected: {:?}", pred, e))
+}
+
+/// Asserts the value is refused as outside its datatype's XSD value space.
+fn outside_value_space(pred: &str, object: Value) {
+    match Person::load(&Triples(with(pred, object)), &iri("alice")) {
+        Err(LoadError::ValueSpace { predicate, .. }) => assert_eq!(predicate, p(pred)),
+        other => panic!("{} accepted a non-conforming lexical: {:?}", pred, other),
+    }
+}
+
 fn main() {
     // Happy path: every mapping round-trips into the generated struct.
     let person = Person::load(&Triples(base()), &iri("alice")).expect("a conforming focus loads");
     assert_eq!(person.name, "Alice");
-    assert_eq!(person.age, 42);
+    // Arbitrary-precision families keep their exact lexical form — an `i64`/`f64`
+    // would have rejected or rounded every one of these conforming values.
+    assert_eq!(person.age, HUGE);
+    assert_eq!(person.quota.as_deref(), Some(UNSIGNED_LONG_MAX));
+    assert_eq!(person.visits.as_deref(), Some("0"));
+    assert_eq!(person.ratio.as_deref(), Some(LONG_DECIMAL));
+    // A BOUNDED integer type still lowers to a real `i64`.
+    assert_eq!(person.rank, Some(-7));
     assert_eq!(person.active, Some(true));
     assert_eq!(person.score, Some(1.5));
+    // xsd:float is binary32, so its value is the f32 one widened — NOT the binary64
+    // value the same lexical would have named as an xsd:double.
+    assert_eq!(person.weight, Some(f64::from(0.1f32)));
+    assert_ne!(person.weight, Some(0.1f64));
     assert_eq!(person.nickname, None);
     assert_eq!(person.email, vec!["alice@example.org".to_string()]);
     assert_eq!(person.homepage.as_deref(), Some("http://example.org/alice/home"));
@@ -188,6 +241,28 @@ fn main() {
         Err(LoadError::Class { predicate, .. }) => assert_eq!(predicate, p("knows")),
         other => panic!("sh:class not enforced: {:?}", other),
     }
+
+    // A derived integer type's VALUE space is enforced, not just the lexical
+    // shape it shares with xsd:integer.
+    outside_value_space("visits", lit("-1", "nonNegativeInteger"));
+    outside_value_space("rank", lit("999", "byte"));
+    outside_value_space("quota", lit(HUGE, "unsignedLong"));
+    assert_eq!(loads("rank", lit("+007", "byte")).rank, Some(7));
+
+    // xsd:decimal has no exponent and no special values, however happily an `f64`
+    // parse would have swallowed them.
+    outside_value_space("ratio", lit("1e5", "decimal"));
+    outside_value_space("ratio", lit("NaN", "decimal"));
+    assert_eq!(loads("ratio", lit("-.5", "decimal")).ratio.as_deref(), Some("-.5"));
+
+    // xsd:double's specials are EXACTLY `INF`/`-INF`/`NaN` — the `inf`/`infinity`/
+    // `nan` spellings Rust's own float parser accepts are not in the value space.
+    assert_eq!(loads("score", lit("INF", "double")).score, Some(f64::INFINITY));
+    assert_eq!(loads("score", lit("-INF", "double")).score, Some(f64::NEG_INFINITY));
+    assert!(loads("score", lit("NaN", "double")).score.unwrap().is_nan());
+    outside_value_space("score", lit("inf", "double"));
+    outside_value_space("score", lit("infinity", "double"));
+    outside_value_space("score", lit("nan", "double"));
 }
 "#;
 

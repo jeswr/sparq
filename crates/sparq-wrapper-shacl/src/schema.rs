@@ -78,7 +78,8 @@ pub enum Cardinality {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValueSchema {
     /// `sh:datatype` — a checked scalar. The loader rejects any value whose
-    /// datatype IRI is outside `datatypes`, then parses the lexical form.
+    /// datatype IRI is outside `datatypes`, rejects a lexical form outside that
+    /// datatype's XSD value space, then parses it.
     Scalar {
         kind: ScalarKind,
         /// The allowed datatype IRIs, sorted and deduplicated. A single
@@ -102,16 +103,23 @@ pub enum ValueSchema {
 
 /// The Rust scalar a checked `sh:datatype` field lowers to.
 ///
-/// A datatype set whose members do not all map to the same scalar falls back to
-/// [`Lexical`](Self::Lexical): the datatype check still runs, but the value is
-/// carried as its lexical form.
+/// A datatype only lowers to a numeric scalar when that scalar carries its whole
+/// XSD value space. A datatype set whose members do not all map to the same
+/// scalar also falls back to [`Lexical`](Self::Lexical). The datatype and
+/// value-space checks run for every kind, [`Lexical`](Self::Lexical) included.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScalarKind {
-    /// `String` (the lexical form of a well-known string datatype).
+    /// `String` — the exact lexical form. Used for string datatypes, for a mixed
+    /// datatype set, and for every family no std-only Rust scalar represents
+    /// faithfully: `xsd:integer` and its unbounded derivations, `xsd:unsignedLong`
+    /// (whose maximum exceeds `i64::MAX`), and arbitrary-precision `xsd:decimal`.
     Lexical,
-    /// `i64`.
+    /// `i64` — the bounded XSD integer types (`long`, `int`, `short`, `byte`,
+    /// `unsignedInt`, `unsignedShort`, `unsignedByte`), range-checked at load
+    /// against the specific datatype the literal carries.
     I64,
-    /// `f64`.
+    /// `f64` — `xsd:double`, and `xsd:float` parsed at binary32 precision then
+    /// widened.
     F64,
     /// `bool`.
     Bool,

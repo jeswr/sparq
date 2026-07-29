@@ -380,11 +380,22 @@ produces byte-identical output.
 | `sh:maxCount 1` with `sh:minCount 0`/absent | `Option<T>` |
 | `sh:minCount >= 1` with `sh:maxCount 1` | `T` |
 | every other cardinality | `Vec<T>`, surviving bounds checked at load |
-| `sh:datatype` | a checked scalar (`String`/`i64`/`f64`/`bool`) |
+| `sh:datatype` | a value-space-checked scalar (`String`/`i64`/`f64`/`bool`) |
 | `sh:class` | a typed reference newtype, checked via `rdf:type`/`rdfs:subClassOf*` |
 | `sh:node` | a nested generated struct |
 | `sh:nodeKind sh:IRI` (alone) | a bare IRI `String` |
 | `sh:closed true` | a predicate whitelist the loader rejects extras against |
+
+A `sh:datatype` only becomes a numeric Rust scalar where that scalar carries the
+datatype's whole XSD value space — `i64` for the bounded integer types (`xsd:int`,
+`xsd:long`, `xsd:unsignedInt`, …), `f64` for `xsd:double` and `xsd:float` (parsed
+at binary32 precision, then widened), `bool` for `xsd:boolean`. `xsd:integer` and
+its unbounded derivations, `xsd:unsignedLong` (whose maximum exceeds `i64::MAX`)
+and arbitrary-precision `xsd:decimal` keep their exact lexical form as a `String`
+instead of being silently narrowed. Either way the loader checks the lexical
+against the *specific* datatype it carries, so `-1`^^`xsd:nonNegativeInteger` and
+`1e5`^^`xsd:decimal` are `LoadError::ValueSpace`, and the XSD float specials are
+exactly `INF`/`-INF`/`NaN` — not Rust's `inf`/`infinity`/`nan` spellings.
 
 A struct is generated for each named node shape that has `sh:property` children,
 plus the node shapes those reach through `sh:node`; constraints outside the table

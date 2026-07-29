@@ -34,7 +34,10 @@ ex:PersonShape a sh:NodeShape ;
     sh:ignoredProperties ( rdf:type ) ;
     # minCount >= 1 + maxCount 1 -> required T
     sh:property [ sh:path ex:name ;     sh:datatype xsd:string  ; sh:minCount 1 ; sh:maxCount 1 ] ;
+    # arbitrary-precision xsd:integer has no faithful std scalar -> lexical String
     sh:property [ sh:path ex:age ;      sh:datatype xsd:integer ; sh:minCount 1 ; sh:maxCount 1 ] ;
+    # a BOUNDED integer type does fit i64 -> i64
+    sh:property [ sh:path ex:height ;   sh:datatype xsd:int     ; sh:maxCount 1 ] ;
     # maxCount 1 + minCount 0/absent -> Option<T>
     sh:property [ sh:path ex:nickname ; sh:datatype xsd:string  ; sh:minCount 0 ; sh:maxCount 1 ] ;
     sh:property [ sh:path ex:score ;    sh:datatype xsd:double  ; sh:maxCount 1 ] ;
@@ -130,7 +133,9 @@ fn expected() -> ModelSchema {
                         "age",
                         &ex("age"),
                         Cardinality::Required,
-                        scalar(ScalarKind::I64, &[xsd("integer")]),
+                        // `xsd:integer` is arbitrary-precision: an `i64` would
+                        // reject conforming values, so the lexical form is kept.
+                        scalar(ScalarKind::Lexical, &[xsd("integer")]),
                     ),
                     field(
                         "alias",
@@ -171,6 +176,13 @@ fn expected() -> ModelSchema {
                         ValueSchema::Nested {
                             rust: "PersonGeo".to_string(),
                         },
+                    ),
+                    field(
+                        "height",
+                        &ex("height"),
+                        Cardinality::Optional,
+                        // `xsd:int`'s whole value space fits in `i64`.
+                        scalar(ScalarKind::I64, &[xsd("int")]),
                     ),
                     field(
                         "homepage",
@@ -248,6 +260,7 @@ fn expected() -> ModelSchema {
                         ex("contact"),
                         ex("email"),
                         ex("geo"),
+                        ex("height"),
                         ex("homepage"),
                         ex("knows"),
                         ex("label"),

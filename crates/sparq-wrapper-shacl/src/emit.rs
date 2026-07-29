@@ -66,6 +66,9 @@ pub trait Source {
 
 /// `rdf:type`.
 pub const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+/// The XML Schema datatype namespace.
+#[allow(dead_code)]
+const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 /// `rdfs:subClassOf`.
 pub const RDFS_SUB_CLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
 
@@ -93,6 +96,14 @@ pub enum LoadError {
         shape: &'static str,
         predicate: &'static str,
         rust: &'static str,
+        got: String,
+    },
+    /// The datatype matched but the lexical form is outside that datatype's XSD
+    /// value space (`-1`^^`xsd:nonNegativeInteger`, `1e5`^^`xsd:decimal`, …).
+    ValueSpace {
+        shape: &'static str,
+        predicate: &'static str,
+        datatype: String,
         got: String,
     },
     /// A literal was required (`sh:datatype`) and something else was found.
@@ -155,6 +166,16 @@ impl fmt::Display for LoadError {
                 "<{}> <{}>: {:?} does not parse as {}",
                 shape, predicate, got, rust
             ),
+            LoadError::ValueSpace {
+                shape,
+                predicate,
+                datatype,
+                got,
+            } => write!(
+                f,
+                "<{}> <{}>: {:?} is outside the value space of <{}>",
+                shape, predicate, got, datatype
+            ),
             LoadError::NotLiteral {
                 shape,
                 predicate,
@@ -190,27 +211,162 @@ impl fmt::Display for LoadError {
 
 impl std::error::Error for LoadError {}
 
+/// `[0-9]+(\.[0-9]*)?` or `\.[0-9]+` — an UNSIGNED decimal mantissa.
+#[allow(dead_code)]
+fn unsigned_decimal_ok(s: &str) -> bool {
+    let (whole, frac) = match s.find('.') {
+        Some(i) => (&s[..i], &s[i + 1..]),
+        None => (s, ""),
+    };
+    let digits = |t: &str| t.bytes().all(|b| b.is_ascii_digit());
+    !(whole.is_empty() && frac.is_empty()) && digits(whole) && digits(frac)
+}
+
+/// The `xsd:decimal` lexical space: a signed decimal mantissa, no exponent and no
+/// special values.
+#[allow(dead_code)]
+fn decimal_lexical_ok(lexical: &str) -> bool {
+    unsigned_decimal_ok(strip_sign(lexical))
+}
+
+/// The `xsd:double`/`xsd:float` lexical space: a decimal mantissa with an optional
+/// exponent, plus the exactly-spelled specials `INF`, `+INF`, `-INF` and `NaN`
+/// (`inf`/`infinity`/`nan`, which Rust's own float parser accepts, are NOT in it).
+#[allow(dead_code)]
+fn double_lexical_ok(lexical: &str) -> bool {
+    if lexical == "NaN" {
+        return true;
+    }
+    let body = strip_sign(lexical);
+    if body == "INF" {
+        return true;
+    }
+    let (mantissa, exponent) = match body.find(['e', 'E']) {
+        Some(i) => (&body[..i], Some(&body[i + 1..])),
+        None => (body, None),
+    };
+    if let Some(exponent) = exponent {
+        let digits = strip_sign(exponent);
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+    }
+    unsigned_decimal_ok(mantissa)
+}
+
+/// The inclusive `(minimum, maximum)` of an XSD integer type, `None` where that
+/// direction is unbounded; `None` overall when the local name is not an XSD
+/// integer type. Every bound XSD defines is far inside `i128`.
+#[allow(dead_code)]
+fn integer_bounds(local: &str) -> Option<(Option<i128>, Option<i128>)> {
+    Some(match local {
+        "integer" => (None, None),
+        "long" => (Some(i64::MIN as i128), Some(i64::MAX as i128)),
+        "int" => (Some(i32::MIN as i128), Some(i32::MAX as i128)),
+        "short" => (Some(i16::MIN as i128), Some(i16::MAX as i128)),
+        "byte" => (Some(i8::MIN as i128), Some(i8::MAX as i128)),
+        "nonNegativeInteger" => (Some(0), None),
+        "positiveInteger" => (Some(1), None),
+        "nonPositiveInteger" => (None, Some(0)),
+        "negativeInteger" => (None, Some(-1)),
+        "unsignedLong" => (Some(0), Some(u64::MAX as i128)),
+        "unsignedInt" => (Some(0), Some(u32::MAX as i128)),
+        "unsignedShort" => (Some(0), Some(u16::MAX as i128)),
+        "unsignedByte" => (Some(0), Some(u8::MAX as i128)),
+        _ => return None,
+    })
+}
+
+/// The `xsd:integer` lexical space (an optional sign then digits, leading zeros
+/// allowed) narrowed to `bounds`.
+#[allow(dead_code)]
+fn integer_ok(lexical: &str, bounds: (Option<i128>, Option<i128>)) -> bool {
+    let (low, high) = bounds;
+    let digits = strip_sign(lexical);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    match lexical.parse::<i128>() {
+        Ok(value) => {
+            let above = match low {
+                Some(low) => value >= low,
+                None => true,
+            };
+            let below = match high {
+                Some(high) => value <= high,
+                None => true,
+            };
+            above && below
+        }
+        // Beyond `i128`, so beyond every bound XSD names: in range only where that
+        // direction is unbounded.
+        Err(_) if lexical.starts_with('-') => low.is_none(),
+        Err(_) => high.is_none(),
+    }
+}
+
+/// Drops one leading `+`/`-`.
+#[allow(dead_code)]
+fn strip_sign(s: &str) -> &str {
+    match s.as_bytes().first() {
+        Some(b'+') | Some(b'-') => &s[1..],
+        _ => s,
+    }
+}
+
+/// Whether `lexical` is in the value space `datatype` names.
+///
+/// Only the XSD datatypes this generator models are checked; anything else
+/// (`xsd:string`, a non-XSD IRI) has no lexical constraint here and is accepted.
+/// The check runs for every scalar kind, so a datatype carried as its lexical
+/// form is no less checked than one parsed into a Rust scalar.
+#[allow(dead_code)]
+fn in_value_space(datatype: &str, lexical: &str) -> bool {
+    let local = match datatype.strip_prefix(XSD) {
+        Some(local) => local,
+        None => return true,
+    };
+    match local {
+        "boolean" => matches!(lexical, "true" | "false" | "1" | "0"),
+        "decimal" => decimal_lexical_ok(lexical),
+        "double" | "float" => double_lexical_ok(lexical),
+        _ => match integer_bounds(local) {
+            Some(bounds) => integer_ok(lexical, bounds),
+            None => true,
+        },
+    }
+}
+
+/// The checked `(lexical, datatype)` of a literal whose datatype is in `allowed`
+/// and whose lexical form is in that datatype's value space.
 #[allow(dead_code)]
 fn checked_literal<'a>(
     shape: &'static str,
     predicate: &'static str,
     allowed: &'static [&'static str],
     value: &'a Value,
-) -> Result<&'a str, LoadError> {
+) -> Result<(&'a str, &'a str), LoadError> {
     match value {
         Value::Literal {
             lexical, datatype, ..
         } => {
-            if allowed.contains(&datatype.as_str()) {
-                Ok(lexical)
-            } else {
-                Err(LoadError::Datatype {
+            if !allowed.contains(&datatype.as_str()) {
+                return Err(LoadError::Datatype {
                     shape,
                     predicate,
                     allowed,
                     got: datatype.clone(),
-                })
+                });
             }
+            if !in_value_space(datatype, lexical) {
+                return Err(LoadError::ValueSpace {
+                    shape,
+                    predicate,
+                    datatype: datatype.clone(),
+                    got: lexical.clone(),
+                });
+            }
+            Ok((lexical, datatype))
         }
         other => Err(LoadError::NotLiteral {
             shape,
@@ -227,7 +383,7 @@ fn load_string(
     allowed: &'static [&'static str],
     value: &Value,
 ) -> Result<String, LoadError> {
-    Ok(checked_literal(shape, predicate, allowed, value)?.to_string())
+    Ok(checked_literal(shape, predicate, allowed, value)?.0.to_string())
 }
 
 #[allow(dead_code)]
@@ -237,7 +393,7 @@ fn load_i64(
     allowed: &'static [&'static str],
     value: &Value,
 ) -> Result<i64, LoadError> {
-    let lexical = checked_literal(shape, predicate, allowed, value)?;
+    let (lexical, _) = checked_literal(shape, predicate, allowed, value)?;
     lexical.parse::<i64>().map_err(|_| LoadError::Lexical {
         shape,
         predicate,
@@ -253,8 +409,15 @@ fn load_f64(
     allowed: &'static [&'static str],
     value: &Value,
 ) -> Result<f64, LoadError> {
-    let lexical = checked_literal(shape, predicate, allowed, value)?;
-    lexical.parse::<f64>().map_err(|_| LoadError::Lexical {
+    let (lexical, datatype) = checked_literal(shape, predicate, allowed, value)?;
+    // `xsd:float` is binary32: parse at ITS precision and widen, so the stored
+    // value is the one XSD's lexical mapping names rather than a binary64 one.
+    let parsed = if datatype.strip_prefix(XSD) == Some("float") {
+        lexical.parse::<f32>().map(f64::from)
+    } else {
+        lexical.parse::<f64>()
+    };
+    parsed.map_err(|_| LoadError::Lexical {
         shape,
         predicate,
         rust: "f64",
@@ -269,7 +432,7 @@ fn load_bool(
     allowed: &'static [&'static str],
     value: &Value,
 ) -> Result<bool, LoadError> {
-    let lexical = checked_literal(shape, predicate, allowed, value)?;
+    let (lexical, _) = checked_literal(shape, predicate, allowed, value)?;
     match lexical {
         "true" | "1" => Ok(true),
         "false" | "0" => Ok(false),

@@ -22,6 +22,17 @@
 //! | `sh:nodeKind sh:IRI` (alone) | [`ValueSchema::Iri`] |
 //! | `sh:closed true` | [`ClosedSchema`] — a predicate whitelist |
 //!
+//! A `sh:datatype` lowers to a numeric Rust scalar only where that scalar carries
+//! the datatype's **whole** XSD value space: `i64` for the bounded integer types,
+//! `f64` for `xsd:double`/`xsd:float`, `bool` for `xsd:boolean`. The
+//! arbitrary-precision and out-of-range families — `xsd:integer` and its
+//! unbounded derivations, `xsd:unsignedLong` (maximum 2^64-1), `xsd:decimal` —
+//! have no faithful std-only scalar, so they keep their exact lexical form as a
+//! `String`. The generated loader checks the lexical against the specific
+//! datatype's value space for EVERY kind, so it neither accepts
+//! `-1`^^`xsd:nonNegativeInteger` nor rejects a conforming
+//! `18446744073709551615`^^`xsd:unsignedLong`.
+//!
 //! Several property shapes on one predicate are conjoined (`min` = the largest
 //! `sh:minCount`, `max` = the smallest `sh:maxCount`, datatype sets intersected);
 //! an irreconcilable conjunction is a [`SchemaError`], never a silent drop.
@@ -543,10 +554,19 @@ fn kind_of(datatype: &str) -> ScalarKind {
     };
     match local {
         "boolean" => ScalarKind::Bool,
-        "integer" | "int" | "long" | "short" | "byte" | "nonNegativeInteger"
-        | "nonPositiveInteger" | "negativeInteger" | "positiveInteger" | "unsignedLong"
-        | "unsignedInt" | "unsignedShort" | "unsignedByte" => ScalarKind::I64,
-        "decimal" | "double" | "float" => ScalarKind::F64,
+        // ONLY the integer types whose whole value space fits in `i64`. The
+        // arbitrary-precision ones (`integer` and the four unbounded derived
+        // types) and `unsignedLong` — whose maximum, 2^64-1, is above `i64::MAX`
+        // — would have conforming values rejected by an `i64` parse, so they keep
+        // their exact lexical form instead. The generated loader still checks
+        // every one of them against its own XSD value space.
+        "long" | "int" | "short" | "byte" | "unsignedInt" | "unsignedShort" | "unsignedByte" => {
+            ScalarKind::I64
+        }
+        // IEEE binary64/binary32 — the only numeric families an `f64` carries
+        // faithfully. `decimal` is arbitrary-precision (and excludes the special
+        // values), so it is carried lexically for the same reason as `integer`.
+        "double" | "float" => ScalarKind::F64,
         _ => ScalarKind::Lexical,
     }
 }
