@@ -453,7 +453,7 @@ edge sequences them (§10.4).
 | Bead | Tier | Target (noir repo) | One-line scope + risk note |
 |---|---|---|---|
 | `sq-jthy1` | opus | `ssa/opt/checked_to_unchecked.rs` | elide overflow checks dominated by a later range check (#7161); Brillig failure-point semantics in scope — **DESIGN + FREQUENCY MEASURED, not implemented; a HEAD prerequisite fix must land first; see §10.9** |
-| `sq-m3l62` | opus | `ssa/opt/flatten_cfg/value_merger.rs` | ArrayGet through IfElse (#5501); conservative use/alias analysis; precedent PR #11512 |
+| `sq-m3l62` | opus | ~~`ssa/opt/flatten_cfg/value_merger.rs`~~ | ArrayGet through IfElse (#5501); conservative use/alias analysis; precedent PR #11512 — **RE-SPEC REQUIRED BEFORE PICKUP: the target file moved and the target function no longer exists; the #5501 ask is already implemented upstream. See §10.10** |
 | `sq-seust` | sonnet | `ssa/ir/dfg/simplify.rs` | NOT canonicalization for IfElse merging; PARK with a findings note if measured neutral (PR #11580 upkeep landmine) — **MEASURED NULL RESULT (0 firings / 556 packages); PARKED per that instruction, no PR; see §10.8** |
 | `sq-jfkwk` | sonnet | findings first; `acir/acir_context/mod.rs` only on a win | comparison-lowering experiment; fail-closed on the #10159 witness-sharing landmine; null result acceptable — **NULL RESULT returned, no PR proposed; bead still open, see §10.7** |
 | `sq-felqr` | opus | design note on noir#4629 only | quadratic ACIR growth; NO implementation before upstream buy-in — **design note DELIVERED, empirical half + live-thread check PENDING; bead still open, see §10.6** |
@@ -643,3 +643,34 @@ optional extensions), with an explicit stop-and-park after step 2 if no gate win
 reproduces. Two questions are for the maintainer/upstream *before* code: whether
 the failure-attribution move is acceptable at all, and whether @jeswr's
 open #12780/#12927 range analysis subsumes this. Nothing was posted upstream.
+
+### 10.10 `sq-mtolx` (paper P3, gap analysis over the un-examined stages) — code-level half only (2026-07-29)
+
+> 🤖 **SPARQ agent** [OPUS-5]. Full record:
+> `noir-optimization-new-opportunities.md` (analysed against noir `8f33502e`).
+
+A child of the paper bead `sq-1j5ow`, not of this epic, but it lands here because
+it produces candidate specs for `sq-uuvac` and corrects two of this section's
+rows. Ten un-examined pipeline stages were read at code level; **nothing was
+measured** (no `nargo`, no `bb`, no build), so the bead's own spawn gate — *"for
+each candidate that reproduces a `bb`-gates win via the P1 harness"* — is unmet by
+construction and **zero beads were spawned**. Five candidate specs are written up
+ready for `bd create`, each blocked on `sq-i50o4`.
+
+| finding | consequence |
+|---|---|
+| three absorption layers — mandatory full unrolling, post-unroll dominance-aware CSE, and ACVM circuit-global CSE + two-use-intermediate refunding — each void a whole family of textbook optimisations | the classical catalogue is mostly null here *structurally*; surviving candidates concentrate in expensive **lowering formulations** and **N-distinct-constraints-to-one** rewrites that CSE cannot perform |
+| the loop family is refuted: LICM's four real hoisting pessimisms are absorbed by post-unroll CSE (the payoff is SSA size, not gates), and #6631/#6629 are moot under full unrolling — unswitching's risk direction is a gate *regression* | issues #10439/#10438 are probably describing IR size, not proving cost — a correction to take upstream once measured |
+| `mem2reg` is **not proof-cost-relevant**: reference memory ops are `unreachable!()`/`Err` in ACIR-gen, and the hypothesised post-flatten cross-block run already exists | the area closes; the gate-bearing memory surface is `ArrayGet`/`ArraySet` lowering, a different pass family |
+| **`try_merge_only_changed_indices` no longer exists** — removed upstream by PR #8142, file moved to `ssa/ir/dfg/simplify/value_merger.rs`, live tracker **#8145**, and the #5501 ask is implemented in `flatten_cfg::try_optimize_array_set_merge` | **`sq-m3l62` (§10.3) targets a deleted function in a moved file and must be re-spec'd before pickup.** The residual candidate is narrower: the merger emits two identical reads per *unchanged* index |
+| `sq-jfkwk`'s comparison-lowering null result (§10.7) **re-confirmed** at the new pin, all three findings; and its flagged adjacent lead is now a code-level candidate — `bound_constraint_with_offset`'s constant fast path is gated on a 128-bit conversion, so every `u128` comparison and every `Field as u128` pays a redundant full-width range check the 8/64-bit paths do not | the strongest genuinely-new candidate, confirmed by upstream's own committed fixtures; it is a *restructuring*, not a constraint removal — but it is a witness-topology change inside the exact function #10159 regressed, so opcode counts are not admissible evidence |
+| an independent re-derivation of PR #13263's rule arrived from the `check_u128_mul_overflow` expansion | evidence that #13263 fires on **compiler-generated** `Div`s, not only hand-written ones — relevant to the honest reading of its focused-fixture number. **No bead**; it is the program's own PR |
+
+The record's own headline recommendation is a program-level one: **`sq-i50o4`
+(P1) is not merely the paper's reproducibility prerequisite — it gates this entire
+candidate register plus four beads already open and blocked on the same missing
+capability** (`sq-eesz3`, `sq-felqr`, `sq-jfkwk`, and the gate half of
+`sq-jthy1`). Acquiring a `bb` binary in the measurement environment is the single
+highest-value next action in the program. Nothing was posted upstream, and no
+upstream issue thread was read from this bead — the issue numbers above are
+carried from these records unverified, and #5501 is demonstrably superseded.
