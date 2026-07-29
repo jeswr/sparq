@@ -23,6 +23,23 @@
   features: "stdio"
   test: true
 
+# [SONNET-4.6] sq-2c0f0 (gh #3221): the opt-in **Streamable HTTP** transport — the
+# remote/multiplexed counterpart to `stdio` (per-session SSE stream, `Last-Event-ID`
+# resumption). OFF by default, so the workspace lane never compiles it. It gets its OWN
+# leg rather than being folded into the `stdio` one because the two transports are
+# independent surfaces and a combined leg would hide which of them broke. This leg builds
+# + tests the feature-ON state — the src/http/ unit suites (route-level protocol decisions
+# without a port) PLUS tests/http.rs (`#![cfg(feature = "http")]`: the end-to-end loopback
+# `TcpListener` round-trip through the real `serve_http` accept loop — handshake, session
+# headers, SSE delivery, resumption), which ci.yml's featureless `--all-targets` archive
+# compiles EMPTY — with `clippy --all-targets -D warnings` (that also reaches
+# examples/mcp_http_server.rs, whose `required-features` keeps it out of the default
+# build). The DEFAULT (feature-OFF) build is covered by the workspace lane.
+- name: "sparq-mcp (http — Streamable HTTP transport with SSE sessions)"
+  crate: "sparq-mcp"
+  features: "http"
+  test: true
+
 # [OPUS-4.8] sq-jxjgr (2026-06-23 design call): the opt-in server-side natural-language
 # `ask` tool wiring sparq-nlq's NL→SPARQL loop behind the `nlq` feature (OFF by default —
 # it pulls sparq-nlq + the configurable LLM backends, so it must not touch the lean
