@@ -261,3 +261,29 @@
   crate: "sparq-server"
   features: "odrl-authz,solid-authz-trust"
   test: true
+
+# [SONNET-4.6] sq-lsp7k.7: `point-in-time` (default OFF) — the OPT-IN `?at=<xsd:dateTime |
+# unix-nanos>` pin on `/sparql`, which serves the store as it stood at an ARBITRARY past
+# instant by reverse-replaying the durable CDC change stream onto a snapshot the ring still
+# holds. The `crate::pit` module (the pure resolve + reverse-fold core and its unit tests),
+# the `at=` query parameter, the reconstruction cache fields on `AppState`, and the whole
+# `tests/point_in_time.rs` integration suite are ALL `#[cfg(feature = "point-in-time")]`, so
+# the DEFAULT build never compiled, clippy'd or tested this code — the structural guard C1
+# (scripts/check-feature-test-execution.py) flags exactly that gap; this leg is its executor.
+# It builds the feature, runs `clippy --all-targets -D warnings` with it ON (the real gate),
+# and runs the crate's tests — which now include the 6-test gated `tests/point_in_time.rs`
+# suite driving the REAL axum path: an `xsd:dateTime` lexical and a unix-nanos instant both
+# resolving to the state as of that moment, a rewind that reaches PAST the in-memory
+# `time-travel` retention window (the property that distinguishes this feature from
+# `time-travel`), repeat/alternating instants each getting their own reconstructed state, and
+# the two fail-closed refusals — a `400` when no `--change-stream DIR` is configured, and a
+# refusal rather than a silent substitution of a nearby instant past the log's horizon.
+# `point-in-time` implies `server` + `time-travel` + `change-stream` (all in-crate/workspace —
+# it pulls ZERO new external dependencies), so the full async server compiles under it. A
+# dedicated single-feature leg mirrors the `change-stream` / `solid-authz` pattern above; the
+# implied features mean this leg also re-exercises the time-travel and change-stream paths in
+# the combined state the single-feature legs never compile together.
+- name: "sparq-server (point-in-time — ?at= instant pin over the durable change stream)"
+  crate: "sparq-server"
+  features: "point-in-time"
+  test: true
