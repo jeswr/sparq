@@ -436,13 +436,17 @@ the way DPoP-SK is pinned) is follow-up work, not something this record can asse
   in this repo it survives in the module doc-comments, several of which explicitly designate
   themselves as the durable record (`src/pop/mod.rs`, `src/pop/conn.rs`,
   `src/pop/sk/mod.rs`). Where it does not, the source repository remains the only copy.
-- **It does not rewrite the imported doc-comments.** The ~70 stale `docs/design/…` and
-  `decisions/…` citations inside `crates/sparq-lws-core/**` still point at the source repo.
-  Rewriting Rust doc-comments is outside a docs-scoped change; §1 is the map that makes them
-  resolvable in the meantime, and re-pointing them is tracked as follow-up. Bringing the RSS
-  `docs/` + `decisions/` trees into this repo is likewise tracked under the `sq-gg0qq` epic;
-  until such a bead lands, this record is the in-repo index and nothing here should be read
-  as a transcription of the originals.
+- **It does not bring the upstream trees in — the rewritten citations resolve *here*, not to
+  the originals.** The imported citations inside `crates/sparq-lws-core/**` now carry their
+  namespace (`RSS`/`PSS`) per §2's rule, with the module- and item-level doc-comments
+  additionally carrying the `research/lws-design-records.md §N` pointer and dense
+  implementation comments using the short form §1 resolves. So they resolve — but they
+  resolve to **this reconstruction**. The RSS `docs/design/` + `decisions/` trees themselves
+  are still not in this repository and no upstream prose is copied verbatim, so whatever
+  those documents hold that the in-tree code does not state remains readable only in the
+  source repo (§5's options 1 and 2 are the one instance this pass could prove). Bringing the
+  trees in is tracked under the `sq-gg0qq` epic; until such a bead lands, nothing here should
+  be read as a transcription of the originals.
 - **It claims no capability.** Every behaviour above is stated with its default posture
   (`embedded-sparq` on, `SOLID_SERVER_IDENTITY_ENABLE` off, `http-sparq` off) and its
   durability caveat. `sparq-lws-core` remains **EXPERIMENTAL**, is `publish = false`, and
