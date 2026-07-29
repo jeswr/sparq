@@ -476,6 +476,8 @@ def apply_remeasurement(report: dict, remeasure_fn, k: int = 1) -> None:
       * a metric MISSING from a re-measurement  -> that row is NOT relieved
       * a DETERMINISTIC row in the hard set     -> no re-measurement is attempted at all
         (re-running cannot change an integer byte count, and its failure is already decisive)
+      * a ZERO-median (zero-boundary) row        -> declined; evaluate()'s own zero-boundary
+        decision stands, and no second semantics for it is invented here
     The first three hold STRUCTURALLY rather than by a separate branch, and that is deliberate:
     every metric's reading pool is SEEDED with the original measurement, which is by construction
     already at or above HARD_RATIO (it is in `hard`). So a pool that gained nothing — no attempt
