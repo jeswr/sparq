@@ -319,7 +319,10 @@ Materialize the authorization view from the access-control documents, then enfor
   `odrl:invalid` **with** a detected conflict, or an unknown strategy IRI is **REFUSED** — every
   `materialize_odrl_*` entry materializes nothing and returns `BridgeOutcome { refused: true, .. }`
   with a `REFUSED (odrl:conflict): …` reason, rather than silently coercing it into deny-overrides.
-  An unset `odrl:conflict` defaults to `prohibit` (not refused). See the `usage-control-policy` skill.
+  An unset `odrl:conflict` operates under `prohibit` (not refused) — sparq's own fail-closed default, a
+  **deliberate divergence** from the ODRL 2.2 IM default of `invalid`, not a spec default the bridge is
+  following (the ODRL Formal Semantics CG report supplies no conflict default either — its
+  conflict-resolution machinery is explicitly pending). See the `usage-control-policy` skill.
 - `store.materialize_odrl_permission_conditional(&Policy, &Request) -> BridgeOutcome` —
   **opt-in** (`odrl-bridge`; [OPUS-4.8] sq-hiz4): persists a *faithfully-mappable* ODRL
   constraint as a re-checked ACP `auth:ConditionalGrant` (agent matcher) instead of a
