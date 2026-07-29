@@ -96,6 +96,30 @@ KEY_PREFIX = "selection-alarm-key"
 # Job conclusions that count as a "failed" nightly job.
 FAILED_CONCLUSIONS = {"failure", "timed_out"}
 
+# How many suspect PRs a rendered issue body LISTS. [OPUS-5] sparq-org/sparq#4984.
+#
+# WHY A CAP AT ALL. The suspect set is every PR that selection-skipped the crate in
+# the window (last green nightly, HEAD] — so it grows with the AGE OF THE BACKSTOP,
+# not with the size of the bug. MEASURED 2026-07-28 against real nightly
+# 30333511110: 644 / 579 / 554 suspects per finding in 18,064 / 16,329 / 15,755-char
+# bodies, because the last GREEN nightly was 2026-07-01. Unbounded that reaches
+# GitHub's 65,536-char issue-body limit at roughly 2,300 suspects, where
+# `gh issue create` 422s and create_issue()'s AlarmError escapes main()'s try.
+#
+# WHAT THE CAP IS NOT. It is not a fix for the stale backstop and it does not narrow
+# the correlation: `correlate` still computes the FULL suspect set, dedupe still keys
+# on the same marker, and the omitted COUNT is always stated in the body. A 644-entry
+# list is a TRUE statement about a 28-day gap; the defect is that it is unreadable.
+# Silent truncation would turn a true-but-unreadable body into a false one.
+#
+# WHY 20. It is a page a human actually reads. Past ~20 candidates the response to a
+# suspect list stops being "read it" and becomes "bisect", and the body says so.
+MAX_RENDERED_SUSPECTS = 20
+
+# Stable token marking the truncation disclosure. Present IFF suspects were omitted,
+# so its ABSENCE is the machine-checkable form of "this list is complete".
+SUSPECT_OMISSION_MARKER = "more suspect PR(s) not listed"
+
 # RUN-level conclusions for which an EMPTY genuinely-failed-job set is ANOMALOUS
 # (fail-loud, invariant 1). [OPUS-5] sparq-org/sparq#4965.
 #
@@ -284,6 +308,62 @@ def key_marker(key: str) -> str:
     return f"<!-- {KEY_PREFIX}: {key} -->"
 
 
+def _suspect_row(wc: WindowCommit, kind: str) -> str:
+    row = f"- {_pr_ref(wc)} (`{wc.sha[:12]}`)"
+    if kind == "triage":
+        # Triage cannot name the failing crate from the job, so each suspect's
+        # skip-set is what a human narrows from. Bounded by the WORKSPACE size, not
+        # by the window, so it is not the dimension #4984 caps.
+        row += f" — skipped: {', '.join(sorted(wc.skipped))}"
+    return row
+
+
+def render_suspects(
+    suspects: list[WindowCommit], kind: str, cap: int = MAX_RENDERED_SUSPECTS
+) -> str:
+    """The suspect-PR block, BOUNDED at `cap` rows, disclosing any omission by COUNT.
+
+    ORDERING — landing recency, NEWEST FIRST. This is the INPUT order, not a re-sort:
+    `window_commits` reads `git log <base>..<head>`, which is reverse-chronological;
+    `build_window` appends in that order; and `correlate` appends into
+    `skip_to_prs[crate]` (and filters `window` for triage) in that order too. So
+    `Finding.suspect_prs` arrives newest-landed first. `WindowCommit` carries no
+    timestamp, so the render cannot re-derive this — it is an invariant of the
+    pipeline above, pinned by TestSuspectOrderIsLandingRecency.
+
+    WHY newest-first is the defensible end to keep. Every PR that landed AFTER a
+    given suspect and that AFFECTED the failing crate re-ran that crate's lanes on a
+    tree already containing the suspect. So the older a suspect is, the more
+    independent chances its breakage has already had to surface elsewhere, and the
+    newest suspects are the ones with the least intervening coverage. That is a
+    PRIOR, not an exoneration — per-PR selected lanes are narrower than the nightly
+    full matrix, so an older suspect is not cleared — which is exactly why the
+    omitted count is STATED rather than dropped.
+    """
+    cap = max(cap, 0)
+    total = len(suspects)
+    shown = suspects[:cap]
+    lines = [_suspect_row(wc, kind) for wc in shown]
+    omitted = total - len(shown)
+    if omitted:
+        # Never a silent truncation: the count, the total, the cap, and the ordering
+        # basis all appear, so the reader can tell what was dropped and why.
+        lines.append(
+            f"\n> ⚠️ **{omitted} {SUSPECT_OMISSION_MARKER}.** {total} landed PR(s) "
+            f"are in this finding's suspect set; the {len(shown)} above are the most "
+            f"recently landed, capped at {cap} for legibility.\n"
+            f"> **Ordering is landing recency, newest first.** A suspect that landed "
+            f"earlier has had more subsequent PRs re-run this crate's lanes on top of "
+            f"it, so it is the less likely culprit — a prior, not an exoneration. Past "
+            f"~{cap} candidates, bisect the window rather than read the list.\n"
+            f"> A suspect list this long means the last GREEN nightly is far behind "
+            f"HEAD — the window, not the bug, is what is large. The full set is "
+            f"unchanged in the correlation and reproducible with "
+            f"`scripts/ci_selection_alarm.py --run-id <id> --head-sha <sha> --dry-run`."
+        )
+    return "\n".join(lines)
+
+
 def render_issue(f: Finding, run_id: str, head_sha: str, repo: str | None) -> tuple[str, str]:
     """Return (title, body) for a finding."""
     run_url = (
@@ -317,16 +397,13 @@ def render_issue(f: Finding, run_id: str, head_sha: str, repo: str | None) -> tu
             "then check whether it was among the skipped crates listed."
         )
 
-    prs = "\n".join(
-        f"- {_pr_ref(wc)} (`{wc.sha[:12]}`)"
-        + (f" — skipped: {', '.join(sorted(wc.skipped))}" if f.kind == "triage" else "")
-        for wc in f.suspect_prs
-    )
+    prs = render_suspects(f.suspect_prs, f.kind)
     jobs = "\n".join(f"- `{j}`" for j in f.failed_jobs)
     body = (
         f"{lead}\n\n"
         f"**Failed nightly job(s):**\n{jobs}\n\n"
-        f"**Suspect landed PR(s)** (selection-skipped since last green nightly):\n"
+        f"**Suspect landed PR(s)** — {len(f.suspect_prs)} total, selection-skipped "
+        f"since the last green nightly, newest-landed first:\n"
         f"{prs}\n\n"
         f"**Nightly run:** {run_url} (head `{head_sha[:12]}`)\n\n"
         f"This is a DETECTOR signal, not a proof: a nightly failure can also be a "
