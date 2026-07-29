@@ -80,6 +80,12 @@ on:
       # still passes --apply, is unconditional and keeps issues:write. Without the
       # trigger, the one edit that guard exists to catch would not run it.
       - ".github/workflows/retriage.yml"
+      # [OPUS-5] #3816 — the `needs:area` park's ONLY EXIT. `triage.py` parks a no-area
+      # issue and only triage-area.py can lift it, so if that cron stops applying, the
+      # partition key the whole fleet keys off silently stops being assigned.
+      # TestAreaClassifierCronSeam asserts the same seam (scheduled, unconditional,
+      # --apply, self-tested first, issues:write) and is vacuous without this trigger.
+      - ".github/workflows/triage-area.yml"
       # ...and the workflow that self-tests triage.py + retriage.py on every PR.
       - ".github/workflows/docs-quality.yml"
       # [OPUS-5] the maintainer front door (#1135 / #4145) — the curated TOML, the renderer
@@ -163,6 +169,12 @@ on:
       # still passes --apply, is unconditional and keeps issues:write. Without the
       # trigger, the one edit that guard exists to catch would not run it.
       - ".github/workflows/retriage.yml"
+      # [OPUS-5] #3816 — the `needs:area` park's ONLY EXIT. `triage.py` parks a no-area
+      # issue and only triage-area.py can lift it, so if that cron stops applying, the
+      # partition key the whole fleet keys off silently stops being assigned.
+      # TestAreaClassifierCronSeam asserts the same seam (scheduled, unconditional,
+      # --apply, self-tested first, issues:write) and is vacuous without this trigger.
+      - ".github/workflows/triage-area.yml"
       # ...and the workflow that self-tests triage.py + retriage.py on every PR.
       - ".github/workflows/docs-quality.yml"
       # [OPUS-5] the maintainer front door (#1135 / #4145) — the curated TOML, the renderer
