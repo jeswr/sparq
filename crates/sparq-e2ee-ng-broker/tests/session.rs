@@ -352,6 +352,69 @@ fn publish_requires_an_admitted_key_a_valid_signature_and_an_uploaded_root() {
 }
 
 #[test]
+fn a_publisher_admission_expires_with_the_grant_that_carried_it() {
+    let mut f = open_fixture(BrokerConfig::default());
+
+    // A second publisher, admitted by a grant valid only for [NOW, NOW + 10].
+    // (The fixture's own publisher holds an unbounded grant, so it cannot show
+    // expiry.) The topic's admin key is already pinned, so this grant is folded
+    // into the existing topic rather than pinning a fresh one.
+    let temporary = SecretSigningKey::generate();
+    let mut g = grant_for(&f.admin, Some(&temporary), f.topic, Epoch(0));
+    g.validity = Validity {
+        not_before: NOW,
+        not_after: NOW + 10,
+    };
+    g.sign(&f.admin).expect("re-sign the narrowed grant");
+    assert!(matches!(
+        call!(f,
+            Request::OpenRepo(OpenRepo {
+                overlay: OverlayId::random(),
+                topic: f.topic,
+                epoch: Epoch(0),
+                peer: PeerId::random(),
+                auth: Some(g),
+            })
+        ),
+        Response::Ok
+    ));
+
+    // Inside the window: the real path accepts.
+    let env = seal(&f, b"in-window root");
+    call!(f,
+        Request::BlocksPut {
+            envelopes: vec![env.clone()],
+        },
+    );
+    let mut inside = signed_publish(&f, &env);
+    inside.sign(&temporary);
+    assert!(matches!(
+        f.broker
+            .handle(f.session, NOW + 5, Request::PublishEvent(inside), 0),
+        Response::Published { .. }
+    ));
+
+    // Past not_after: the same publisher, a correctly signed announcement, and an
+    // uploaded root — and it is no longer admitted.
+    let late_env = seal(&f, b"post-expiry root");
+    f.broker.handle(
+        f.session,
+        NOW + 5,
+        Request::BlocksPut {
+            envelopes: vec![late_env.clone()],
+        },
+        0,
+    );
+    let mut late = signed_publish(&f, &late_env);
+    late.sign(&temporary);
+    late.verify().expect("the late announcement is self-consistent");
+    assert_eq!(
+        err_code(&f.broker.handle(f.session, NOW + 11, Request::PublishEvent(late), 0)),
+        Some(ErrorCode::NotAdmitted)
+    );
+}
+
+#[test]
 fn parent_commit_ids_are_refused_in_opaque_header_mode() {
     let mut f = open_fixture(BrokerConfig::default());
     let env = seal(&f, b"root");
@@ -933,6 +996,49 @@ fn a_topic_storage_budget_is_enforced_on_put() {
         err_code(&call!(f,
             Request::BlocksPut {
                 envelopes: vec![seal(&f, b"two")]
+            }
+        )),
+        Some(ErrorCode::LimitExceeded)
+    );
+}
+
+#[test]
+fn repeating_a_put_at_the_exact_quota_boundary_stays_idempotent() {
+    // Size the budget to admit exactly one envelope. Envelope length depends only
+    // on the padded plaintext length, so a probe fixture measures it; the assert
+    // below keeps that assumption honest.
+    let probe = open_fixture(BrokerConfig::default());
+    let one_envelope = seal(&probe, b"exactly one").encode().len() as u64;
+    let mut cfg = BrokerConfig::default();
+    cfg.retention.max_topic_bytes = one_envelope;
+    let mut f = open_fixture(cfg);
+    let env = seal(&f, b"exactly one");
+    assert_eq!(env.encode().len() as u64, one_envelope);
+
+    let put = Request::BlocksPut {
+        envelopes: vec![env],
+    };
+    assert_eq!(
+        call!(f, put.clone()),
+        Response::Stored {
+            stored: 1,
+            duplicate: 0
+        }
+    );
+    // The topic is now exactly at budget. Re-attributing a block it already holds
+    // consumes no further bytes, so the repeat is a duplicate, not LimitExceeded.
+    assert_eq!(
+        call!(f, put),
+        Response::Stored {
+            stored: 0,
+            duplicate: 1
+        }
+    );
+    // ...and the budget really is exhausted for anything new.
+    assert_eq!(
+        err_code(&call!(f,
+            Request::BlocksPut {
+                envelopes: vec![seal(&f, b"another one")],
             }
         )),
         Some(ErrorCode::LimitExceeded)

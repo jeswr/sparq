@@ -12,9 +12,9 @@
 //! * **Routing context**: block and topic operations are scoped to a topic the
 //!   session has opened with `OpenRepo`.
 //! * **Publisher admission**: a publish is accepted only if its key is admitted
-//!   for the topic/epoch by an admin-signed [`AdmissionGrant`], *and* the
-//!   announcement's own signature verifies, *and* the announced root block is
-//!   already stored.
+//!   for the topic/epoch by an admin-signed [`AdmissionGrant`] *whose validity
+//!   window still covers the publication time*, *and* the announcement's own
+//!   signature verifies, *and* the announced root block is already stored.
 //! * **Epoch advance**: only under the admin key pinned for the topic, only
 //!   strictly forward, and only to a fresh topic.
 //! * **Limits and rate**: every negotiated ceiling is checked before work is done.
@@ -108,7 +108,19 @@ struct Session {
 struct TopicState {
     epoch: Epoch,
     admin_pub: [u8; PUBLIC_KEY_LEN],
-    publishers: BTreeSet<[u8; PUBLIC_KEY_LEN]>,
+    /// Admitted publisher keys, each mapped to the `(not_before, not_after)`
+    /// windows that admitted it. A publication is admitted only while some
+    /// window covers its time, so an admission stops working when the grant
+    /// that carried it expires.
+    ///
+    /// Repeated or overlapping grants **union**: registering a grant adds its
+    /// window and never narrows an existing one, so a replayed narrow grant
+    /// cannot cut an admission short (revocation is an epoch advance, which
+    /// clears the map). Because it is a union of windows and not their hull, a
+    /// gap between two disjoint grants is *not* admitted. Windows that had
+    /// already expired are dropped whenever a grant is registered, so the set
+    /// does not accumulate dead grants.
+    publishers: BTreeMap<[u8; PUBLIC_KEY_LEN], BTreeSet<(u64, u64)>>,
     pinned: bool,
     /// Set once an epoch advance retires this topic in favour of another.
     retired_to: Option<TopicId>,
@@ -307,7 +319,7 @@ impl<L: MetadataLog> Broker<L> {
             Request::BlocksGet { ids } => self.on_get(session, now, ids),
             Request::BlocksPut { envelopes } => self.on_put(session, now, envelopes),
             Request::CommitGet { commit_ids } => self.on_commit_get(session, now, commit_ids),
-            Request::PublishEvent(p) => self.on_publish(session, p),
+            Request::PublishEvent(p) => self.on_publish(session, now, p),
             Request::EpochAdvance(a) => self.on_epoch_advance(session, a),
             _ => (
                 err(ErrorCode::Unsupported, "unsupported request kind"),
@@ -483,14 +495,14 @@ impl<L: MetadataLog> Broker<L> {
                     ));
                 }
                 if let Some(p) = g.publisher_pub {
-                    t.publishers.insert(p);
+                    t.admit(p, (g.validity.not_before, g.validity.not_after), now);
                 }
             }
             None => {
                 // Trust-on-first-use: this grant pins the topic's admin key.
                 let mut t = TopicState::new(epoch, g.admin_pub);
                 if let Some(p) = g.publisher_pub {
-                    t.publishers.insert(p);
+                    t.admit(p, (g.validity.not_before, g.validity.not_after), now);
                 }
                 self.topics.insert(topic, t);
             }
@@ -766,14 +778,21 @@ impl<L: MetadataLog> Broker<L> {
                     0,
                 );
             }
-            let (_, used) = self.store.usage(&topic);
-            if used.saturating_add(bytes.len() as u64) > self.cfg.retention.max_topic_bytes {
-                return (
-                    err(ErrorCode::LimitExceeded, "topic storage budget exhausted"),
-                    Outcome::Rejected("LimitExceeded"),
-                    Some(topic),
-                    0,
-                );
+            // Charge the budget only for a NEW attribution to this topic. A block
+            // already attributed here costs zero further bytes, so re-putting it
+            // must stay idempotent right up to the boundary rather than turning
+            // into `LimitExceeded`. (The store keeps the first-seen bytes either
+            // way, so the repeat never changes what is stored.)
+            if !self.store.contains_in(&env.block_id, &topic) {
+                let (_, used) = self.store.usage(&topic);
+                if used.saturating_add(bytes.len() as u64) > self.cfg.retention.max_topic_bytes {
+                    return (
+                        err(ErrorCode::LimitExceeded, "topic storage budget exhausted"),
+                        Outcome::Rejected("LimitExceeded"),
+                        Some(topic),
+                        0,
+                    );
+                }
             }
             if self.store.put(env.block_id, bytes, topic, now) {
                 stored += 1;
@@ -828,7 +847,7 @@ impl<L: MetadataLog> Broker<L> {
 
     // ---- publication ------------------------------------------------------
 
-    fn on_publish(&mut self, session: SessionId, p: PublishEvent) -> Handled {
+    fn on_publish(&mut self, session: SessionId, now: u64, p: PublishEvent) -> Handled {
         let (topic, e) = self.routing_topic(session);
         if let Some(e) = e {
             let label = code_label(&e);
@@ -891,11 +910,14 @@ impl<L: MetadataLog> Broker<L> {
                     0,
                 );
             }
-            if !t.publishers.contains(&p.publisher_key_id) {
+            // Admission is validity-bounded, not a one-way latch: a key admitted
+            // by a grant that has since expired is no longer admitted, however
+            // well the announcement is signed.
+            if !t.is_admitted_at(&p.publisher_key_id, now) {
                 return (
                     err(
                         ErrorCode::NotAdmitted,
-                        "publisher key is not admitted for this topic/epoch",
+                        "no unexpired admission grant covers this publisher for the topic/epoch",
                     ),
                     Outcome::Rejected("NotAdmitted"),
                     Some(topic),
@@ -1017,7 +1039,14 @@ impl<L: MetadataLog> Broker<L> {
         }
         let admin_pub = a.admin_pub;
         let mut fresh = TopicState::new(a.new_epoch, admin_pub);
-        fresh.publishers = a.new_publishers.iter().copied().collect();
+        // An epoch advance carries no validity window of its own, so the keys it
+        // names are admitted for the life of the new epoch: the next advance
+        // retires the topic and clears them.
+        fresh.publishers = a
+            .new_publishers
+            .iter()
+            .map(|p| (*p, BTreeSet::from([(0u64, u64::MAX)])))
+            .collect();
         self.topics.insert(a.new_topic, fresh);
         if let Some(old) = self.topics.get_mut(&a.old_topic) {
             old.retired_to = Some(a.new_topic);
@@ -1169,7 +1198,7 @@ impl TopicState {
         TopicState {
             epoch,
             admin_pub,
-            publishers: BTreeSet::new(),
+            publishers: BTreeMap::new(),
             pinned: false,
             retired_to: None,
             cursor: 0,
@@ -1177,6 +1206,23 @@ impl TopicState {
             commit_root: BTreeMap::new(),
             non_heads: BTreeSet::new(),
         }
+    }
+
+    /// Admit `publisher` for the window `(not_before, not_after)`, forgetting any
+    /// of its windows that had already expired at `now`.
+    fn admit(&mut self, publisher: [u8; PUBLIC_KEY_LEN], window: (u64, u64), now: u64) {
+        let windows = self.publishers.entry(publisher).or_default();
+        windows.retain(|(_, not_after)| *not_after >= now);
+        windows.insert(window);
+    }
+
+    /// Does some admission window for `publisher` cover `now`?
+    fn is_admitted_at(&self, publisher: &[u8; PUBLIC_KEY_LEN], now: u64) -> bool {
+        self.publishers.get(publisher).is_some_and(|windows| {
+            windows
+                .iter()
+                .any(|(not_before, not_after)| now >= *not_before && now <= *not_after)
+        })
     }
 }
 
