@@ -2,9 +2,14 @@
 #
 # WHAT: when MORE than the merge queue's window (8) of reviewed, orchestrator-armed
 # sparq-agent/* worker PRs are waiting, the pure policy in scripts/batch-merge.py batches
-# the overflow into ONE sparq-omnibus/<utcstamp> integration PR (fresh off main, no-ff
-# merges; conflicting constituents are skipped and stay individually armed) and arms it —
-# the merge queue picks the strategy. It also closes constituents of MERGED omnibus PRs
+# the overflow into ONE sparq-omnibus/<class>-<utcstamp> integration PR PER CHANGE-CLASS
+# (issue #3433: `slim` = docs-/orchestration-only constituents per ci_select's audited
+# allowlist, so the batch rides the slim merge-group lane set of #3428 and never waits on
+# a full-matrix run; `engine` = everything else; at most 15 constituents per omnibus —
+# batch-15 per 15-minute run tracks the 60-merges/hour target and keeps a v2 culprit
+# bisect at log2(15) ~= 4 runs). Each omnibus is fresh off main, built with no-ff
+# merges; conflicting constituents are skipped and stay individually armed; the batcher
+# arms the PR — the merge queue picks the strategy. It also closes constituents of MERGED omnibus PRs
 # whose branches now add nothing vs main, closes a FAILED / conflicting / OVER-AGE
 # omnibus (the age bound is the liveness backstop for merge-group failures, which are
 # invisible on the PR head; v1: no bisection — constituents stay individually armed),
@@ -40,8 +45,9 @@ on:
         required: false
         default: "false"
   schedule:
-    # Three times an hour, offset from the registry's on-the-hour/quarter crons.
-    - cron: "7,27,47 * * * *"
+    # Every 15 minutes (issue #3433 throughput program: batch-15 per class per run
+    # ~= the 60-merges/hour target), offset +7 from the registry's quarter-hour crons.
+    - cron: "7,22,37,52 * * * *"
   # The moment any head CI concludes the armed set may have grown past the window.
   workflow_run:
     workflows: [ci-summary]
@@ -95,7 +101,7 @@ jobs:
           token: ${{ steps.app-token.outputs.token || github.token }}
 
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
@@ -123,8 +129,22 @@ jobs:
           python3 scripts/batch-merge.py "${args[@]}"
 
   # Merged-PR pickup ring: a merge into main frees merge-queue/worker capacity — poke the
-  # registry dispatcher immediately instead of waiting for its cron. Fail-soft: without
-  # the secret this skips with a notice (the registry cron is the backstop).
+  # registry dispatcher immediately instead of waiting for its cron.
+  #
+  # FAIL-LOUD on a missing credential (#4966), was `::notice::` + exit 0. This job has
+  # never once rung: REGISTRY_RING_TOKEN does not exist at repo or org level, so every
+  # push-triggered run took the fail-soft branch and reported SUCCESS. 12 of 12 sampled
+  # push runs, 0 rings. Reporting success while doing nothing is what kept it invisible.
+  #
+  # DECLARED ADVISORY (.github/advisory-registry.json, "ring registry dispatcher") in
+  # the same change, and that declaration is what makes this hard failure SAFE. This
+  # job runs on `push: branches: [main]`, so its check-run lands on the main head SHA —
+  # MEASURED present on main head 2cbf37359 — which is exactly the SHA the
+  # push-triggered `ci-summary / gate` polls (the sq-huwr8 refutation). Undeclared, a
+  # red here would have gated `ci-summary / gate` on EVERY push to main, and AGENTS.md
+  # treats a red main as a stop-the-line condition: that is a manufactured outage, not
+  # an alarm. Declared, the run itself reds (visible, countable, named) and the gate
+  # stays green. Pinned by scripts/tests/test_ring_credential_loud.py.
   ring:
     name: ring registry dispatcher
     if: github.event_name == 'push'
@@ -138,7 +158,13 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${REGISTRY_RING_TOKEN}" ]; then
-            echo "::notice::REGISTRY_RING_TOKEN not configured — skipping the registry ring (the registry's own cron is the backstop)."
-            exit 0
+            echo "::error title=registry ring suppressed::REGISTRY_RING_TOKEN is not configured, so the merged-PR pickup ring was NOT sent. Freed merge-queue/worker capacity will not be picked up until the registry's own ~10-min cron tick. Provision the secret — or delete this job if the ring is no longer wanted."
+            {
+              echo "### registry ring SUPPRESSED — REGISTRY_RING_TOKEN unset"
+              echo
+              echo "A merge landed on \`main\` but the pickup ring could not be sent."
+              echo "Effect: capacity pickup waits for the next ~10-min registry cron."
+            } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+            exit 1
           fi
           GH_TOKEN="${REGISTRY_RING_TOKEN}" gh workflow run dispatch.yml -R jeswr/agent-account-registry

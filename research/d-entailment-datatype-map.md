@@ -18,6 +18,11 @@
 `crates/sparq-conformance/tests/d_entail_suite.rs`, floor `D_ENTAIL_FLOOR`
 mirrored in `tests/scoreboard_floors.rs`). Verified inventory:
 
+> **[GPT-5] Historical snapshot:** the 23-datatype inventory below records the
+> PRE-broadening state verified when this design was written. After D2,
+> `Recognized::standard()` is table-driven and contains 30 datatypes; do not
+> re-propagate 23 as the current count.
+
 - **rdfD1 typing closure** (`materialize_d`): recognized + well-formed +
   value-mapped literals get `"l"^^d rdf:type d`; ill-formed literals are
   correctly NOT typed (clash is the inconsistency checker's concern);

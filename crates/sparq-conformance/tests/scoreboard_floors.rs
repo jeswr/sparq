@@ -1,36 +1,63 @@
 //! [OPUS-4.8] sq-ncvq.16 — guard that the CENTRAL conformance scoreboard's
-//! declared ratchet floors stay in lock-step with the floors the crate-local
-//! SHACL + GeoSPARQL runners actually enforce.
+//! declared ratchet floors stay in lock-step with the floors the runners actually
+//! enforce.
 //!
 //! The scoreboard registry ([`sparq_conformance::scoreboard::SUITES`]) is the
 //! single index of every conformance ratchet, but it does NOT depend on
 //! `sparq-shacl` / `sparq-geo` (those crates must not become deps of this
-//! dev-only harness — see `scoreboard.rs`). So the SHACL/geo floors are copied
-//! into the registry as plain `usize`s. This test reads the crate-local source
-//! files TEXTUALLY (no cargo build, no cross-crate dep) and asserts the copied
-//! values still equal the `const` floors the runners assert — so the central
-//! scoreboard can never silently fall out of sync with what CI enforces. If a
-//! runner raises its floor, this test fails until the registry is updated too.
+//! dev-only harness — see `scoreboard.rs`). So a floor enforced elsewhere has to
+//! reach the registry somehow. This test reads the crate-local source files
+//! TEXTUALLY (no cargo build, no cross-crate dep) and asserts the copied values
+//! still equal the `const` floors the runners assert — so the central scoreboard
+//! can never silently fall out of sync with what CI enforces. If a runner raises
+//! its floor, this test fails until the registry is updated too.
+//!
+//! # [SONNET-4.6] sq-z1xv8 — the textual read is now CRATE-LOCAL ONLY
+//!
+//! This guard used to reach OUT of `sparq-conformance` and read sibling crates'
+//! test sources (`sparq-shacl`, `sparq-geo`, `sparq-solid`, `sparq-policy`,
+//! `sparq-text`, `sparq-rsp`) by joining `../..` and a table-supplied
+//! workspace-relative path. Besides being fragile, that was a CI test-selection
+//! soundness hole — `scripts/ci_audit_inputs.py` "residual 3": the read escapes
+//! this crate's directory, and because the path is assembled at RUNTIME it is
+//! statically unresolvable, so neither a reverse-dependency closure nor a
+//! `ci/path-ownership.toml` `readers = [...]` entry could attribute it. A change
+//! to `sparq-solid`'s floor could skip the very lane that read it, caught only by
+//! the nightly FULL run (design `research/change-based-test-selection.md` §6.1).
+//!
+//! Those floors now live in the zero-dependency `sparq-conformance-floors` crate
+//! and are imported by BOTH the runner and the registry row, so they read one
+//! compile-time `const` and cannot drift at all — the same shape the six JSON-LD
+//! lanes get from `sparq_conformance::floors`. What is left here is the textual
+//! guard for floors whose runner lives in THIS crate, and `const_floor_in` is now
+//! rooted at `CARGO_MANIFEST_DIR` so it CANNOT address another crate;
+//! [`textual_guard_reads_only_crate_local_sources`] pins that invariant.
+//!
+//! Three buckets, and every crate-test suite is in exactly one:
+//! * [`CRATE_LOCAL_FLOORS`] — runner in this crate; floor read textually.
+//! * [`SHARED_CRATE_FLOORS`] — floor in `sparq-conformance-floors`, imported by
+//!   both sides ([`shared_crate_floors_are_pinned`] catches a silent LOWERING).
+//! * [`LIB_SOURCED_FLOORS`] — floor in `src/floors/<lane>.rs`, imported by both
+//!   sides ([`lib_sourced_jsonld_floors_are_pinned`] does the same).
 
 use sparq_conformance::scoreboard::{Runner, SUITES};
 use std::path::PathBuf;
 
-/// Read `const <NAME>: usize = <N>;` from a crate-local test source, hermetically.
-fn const_floor_in(rel_from_workspace: &str, const_name: &str) -> usize {
-    // CARGO_MANIFEST_DIR is crates/sparq-conformance; the workspace root is two up.
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(rel_from_workspace);
+/// Read `const <NAME>: usize = <N>;` from a source file in THIS crate, hermetically.
+///
+/// `rel_from_crate` is relative to `CARGO_MANIFEST_DIR` (i.e. to
+/// `crates/sparq-conformance/`) and must stay inside it — see the module docs and
+/// [`textual_guard_reads_only_crate_local_sources`].
+fn const_floor_in(rel_from_crate: &str, const_name: &str) -> usize {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel_from_crate);
     let src = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     for line in src.lines() {
         let line = line.trim();
-        // [OPUS-4.8] sq-t58w.6 — tolerate an optional `pub ` visibility prefix. The
-        // Solid WAC/ACP floor consts moved into the shared `tests/common/mod.rs`
-        // module where they are declared `pub const` (so both conformance test
-        // binaries can read them); the SHACL/geo floors remain bare `const`. Match
-        // e.g. `const BASELINE_PASS: usize = 98;` AND `pub const WAC_SCENARIO_FLOOR:
-        // usize = 12;` (ignoring any trailing comment).
+        // [OPUS-4.8] sq-t58w.6 — tolerate an optional `pub ` visibility prefix: some
+        // floor consts are declared `pub const` (so a sibling test module can read
+        // them), others bare `const`. Match e.g. `const NT_SYNTAX_FLOOR: usize = 12;`
+        // AND `pub const D_ENTAIL_FLOOR: usize = 5;` (ignoring any trailing comment).
         let line = line.strip_prefix("pub ").unwrap_or(line);
         if let Some(rest) = line.strip_prefix("const ") {
             if let Some(after_name) = rest.strip_prefix(const_name) {
@@ -52,68 +79,28 @@ fn const_floor_in(rel_from_workspace: &str, const_name: &str) -> usize {
     panic!("did not find `const {const_name}: usize = N;` in {}", path.display());
 }
 
-/// (suite label, source file, const name) for each crate-local ratchet the
-/// scoreboard mirrors. Keep this aligned with the `CrateTest` rows in `SUITES`.
+/// (suite label, source file, const name) for each ratchet whose runner lives in
+/// THIS crate and whose floor the scoreboard mirrors. Keep this aligned with the
+/// `CrateTest` rows in `SUITES`.
+///
+/// The source file is relative to `CARGO_MANIFEST_DIR` and MUST stay inside this
+/// crate — [`textual_guard_reads_only_crate_local_sources`] enforces that, because a
+/// read that escapes the crate dir is the CI test-selection hole sq-z1xv8 closed (see
+/// the module docs).
 const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
-    (
-        "W3C SHACL core",
-        "crates/sparq-shacl/tests/w3c_core.rs",
-        "BASELINE_PASS",
-    ),
-    (
-        "W3C SHACL-SPARQL",
-        "crates/sparq-shacl/tests/w3c_sparql.rs",
-        "SHACL_SPARQL_FLOOR",
-    ),
-    (
-        "OGC GeoSPARQL topology compliance",
-        "crates/sparq-geo/tests/ogc_compliance_ratchet.rs",
-        "OGC_RATCHET_FLOOR",
-    ),
-    // [OPUS-4.8] sq-wf9qg / [SONNET-4.6] sq-lk3aw.2 — the OGC GeoSPARQL
-    // QUERY-REWRITE extension ratchet. The floor const
-    // (`const OGC_QUERY_REWRITE_FLOOR: usize = 48;`) lives in `sparq-geo`'s
-    // `tests/ogc_query_rewrite_ratchet.rs` (behind the opt-in `geosparql_rewrite`
-    // feature); the guard reads it textually — exactly like the sibling OGC topology
-    // floor — so the central scoreboard's `ratchet_floor` can never drift from what
-    // the runner asserts.
-    (
-        "OGC GeoSPARQL query-rewrite extension",
-        "crates/sparq-geo/tests/ogc_query_rewrite_ratchet.rs",
-        "OGC_QUERY_REWRITE_FLOOR",
-    ),
-    // [OPUS-4.8] sq-j174 — the Solid WAC + ACP decision-parity ratchets.
-    // [OPUS-4.8] sq-t58w.6 — the floor consts moved from `conformance_{wac,acp}.rs`
-    // into the shared `tests/common/mod.rs` parity-corpus module (so both the
-    // conformance suites AND the differential oracle read ONE floor); point the
-    // floor-sync guard at the new single source. Floor value unchanged (12).
-    (
-        "Solid WAC decision parity",
-        "crates/sparq-solid/tests/common/mod.rs",
-        "WAC_SCENARIO_FLOOR",
-    ),
-    (
-        "Solid ACP decision parity",
-        "crates/sparq-solid/tests/common/mod.rs",
-        "ACP_SCENARIO_FLOOR",
-    ),
-    // [OPUS-4.8] sq-t58w.8 — the Solid WAC + ACP DIFFERENTIAL ORACLE ratchets. Both
-    // rows mirror the SAME hard divergence-count floor const (`DIVERGENCE_FLOOR = 0`)
-    // declared in `tests/differential_oracle.rs` (the oracle landed under sq-t58w.7).
-    // Unlike the scenario-count floors above (which rise as the corpus grows), the
-    // only acceptable divergence count is 0, so this floor is the fixed 0 — and this
-    // guard pins the central scoreboard's `ratchet_floor: 0` to that source const so
-    // the two can never silently diverge.
-    (
-        "Solid WAC differential oracle",
-        "crates/sparq-solid/tests/differential_oracle.rs",
-        "DIVERGENCE_FLOOR",
-    ),
-    (
-        "Solid ACP differential oracle",
-        "crates/sparq-solid/tests/differential_oracle.rs",
-        "DIVERGENCE_FLOOR",
-    ),
+    // [SONNET-4.6] sq-z1xv8 — the ELEVEN foreign-runner ratchets (W3C SHACL core +
+    // SHACL-SPARQL, both OGC GeoSPARQL lanes, Solid WAC/ACP decision parity + the two
+    // differential oracles, the SolidLab ODRL suite, the sparq-text BM25 oracle, the
+    // sparq-rsp expressivity oracle) are NO LONGER listed here. Their floor consts
+    // moved to the zero-dependency `sparq-conformance-floors` crate and are IMPORTED
+    // into BOTH the `Suite` rows in `scoreboard::SUITES`
+    // (`ratchet_floor: sparq_conformance_floors::<module>::<FLOOR>`) AND the runner in
+    // its own crate (which takes the floors crate as a `dev-dependency`). Both read the
+    // SAME compile-time constant, so they CANNOT drift — and the guard no longer reads
+    // another crate's test source, which is what closed the `ci_audit_inputs.py`
+    // "residual 3". These eleven are the `SHARED_CRATE_FLOORS` set below; the
+    // `all_crate_test_suites_are_guarded` test exempts exactly them.
+    //
     // [FABLE-5] sq-oy1f.40 — the SIX W3C JSON-LD 1.1 ratchets (toRdf, fromRdf,
     // compact, frame, expand, flatten) are NO LONGER listed here. Their floor consts
     // moved LIB-SIDE to `src/floors/<lane>.rs` (`floors::<lane>::FLOOR`) and are
@@ -126,16 +113,6 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
     // `all_crate_test_suites_are_guarded` test exempts exactly them, so no OTHER
     // crate-test suite can silently escape the textual guard. See
     // `crates/sparq-conformance/src/floors/mod.rs`.
-    // [OPUS-4.8] sq-tmsd6 — the SolidLab ODRL Test Suite decision-parity ratchet.
-    // The floor const (`pub const ODRL_SUITE_FLOOR`) lives top-level in
-    // `sparq-policy`'s `tests/odrl_test_suite.rs`; the guard reads it textually
-    // (the `pub ` prefix is already tolerated) so the central scoreboard's
-    // `ratchet_floor` can never drift from what the runner asserts.
-    (
-        "SolidLab ODRL Test Suite",
-        "crates/sparq-policy/tests/odrl_test_suite.rs",
-        "ODRL_SUITE_FLOOR",
-    ),
     // [FABLE-5] sq-tonhr.2 (epic sq-tonhr) — the W3C rdf-n-triples / rdf-n-quads /
     // rdf-trig syntax-suite ratchets. The three floor consts live in this crate's
     // `tests/rdf_line_syntax_ratchet.rs` (default-on, self-skipping without the fetched
@@ -143,17 +120,17 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
     // `ratchet_floor`s can never drift from what the runner asserts.
     (
         "W3C N-Triples syntax (rdf11 rdf-n-triples)",
-        "crates/sparq-conformance/tests/rdf_line_syntax_ratchet.rs",
+        "tests/rdf_line_syntax_ratchet.rs",
         "NT_SYNTAX_FLOOR",
     ),
     (
         "W3C N-Quads syntax (rdf11 rdf-n-quads)",
-        "crates/sparq-conformance/tests/rdf_line_syntax_ratchet.rs",
+        "tests/rdf_line_syntax_ratchet.rs",
         "NQ_SYNTAX_FLOOR",
     ),
     (
         "W3C TriG syntax + eval (rdf11 rdf-trig)",
-        "crates/sparq-conformance/tests/rdf_line_syntax_ratchet.rs",
+        "tests/rdf_line_syntax_ratchet.rs",
         "TRIG_SYNTAX_FLOOR",
     ),
     // [OPUS-4.8] sq-e5atd (epic sq-pbz04) — the W3C SPARQL 1.1 D-entailment ratchet.
@@ -164,7 +141,7 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
     // never silently drift.
     (
         "W3C SPARQL 1.1 D-entailment",
-        "crates/sparq-conformance/tests/d_entail_suite.rs",
+        "tests/d_entail_suite.rs",
         "D_ENTAIL_FLOOR",
     ),
     // [FABLE-5] sq-pbz04.5.5 (epic sq-pbz04.5) — the W3C RIF WG Core test-suite
@@ -177,7 +154,7 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
     // sparq-EXTENSION `RIF_CORE_FLOOR` expressivity ratchet below.
     (
         "W3C RIF WG Core test suite",
-        "crates/sparq-conformance/tests/rif_wg_core_suite.rs",
+        "tests/rif_wg_core_suite.rs",
         "RIF_WG_CORE_FLOOR",
     ),
     // [FABLE-5] sq-pbz04.6.4 (epic sq-pbz04.6) — the sparq D VALUE-SPACE MATRIX arm's
@@ -189,7 +166,7 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
     // assertions), tallied separately from the W3C D-entailment pass count above.
     (
         "D value-space matrix (integer/decimal/boolean/binary/temporal)",
-        "crates/sparq-conformance/tests/d_entail_suite.rs",
+        "tests/d_entail_suite.rs",
         "D_VALUE_MATRIX_FLOOR",
     ),
     // [OPUS-4.8] sq-ddpgx (epic sq-my8wd) — the W3C SPARQL 1.1 sparql11/service
@@ -200,7 +177,7 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
     // `ratchet_floor` to it so the two can never silently drift.
     (
         "W3C SPARQL 1.1 sparql11/service evaluation",
-        "crates/sparq-conformance/tests/service_eval_suite.rs",
+        "tests/service_eval_suite.rs",
         "SERVICE_EVAL_FLOOR",
     ),
     // [OPUS-4.8] sq-jaj38 (epic sq-my8wd) — the W3C SPARQL 1.1 PROTOCOL (HTTP layer) ratchet.
@@ -210,7 +187,7 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
     // central scoreboard's `ratchet_floor` to it so the two can never silently drift.
     (
         "W3C SPARQL 1.1 Protocol (HTTP)",
-        "crates/sparq-conformance/tests/http_protocol_suite.rs",
+        "tests/http_protocol_suite.rs",
         "HTTP_PROTOCOL_FLOOR",
     ),
     // [OPUS-4.8] sq-1uuxz (epic sq-my8wd) — the SPARQL 1.1 SERVICE-DESCRIPTION +
@@ -221,34 +198,8 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
     // so the two can never silently drift.
     (
         "SPARQL 1.1 Service Description + Graph Store Protocol",
-        "crates/sparq-conformance/tests/sd_gsp_suite.rs",
+        "tests/sd_gsp_suite.rs",
         "SD_GSP_FLOOR",
-    ),
-    // [OPUS-4.8] sq-ripcg (epic sq-lk3aw) — the sparq-text DIFFERENTIAL BM25 ORACLE,
-    // a sparq EXTENSION ratchet (NOT standards conformance — no normative
-    // full-text-over-RDF / BM25 suite exists). `const TEXT_ORACLE_FLOOR` lives
-    // top-level in `sparq-text`'s `tests/bm25_oracle.rs`; the guard reads it
-    // TEXTUALLY (same hermetic mechanism — the dev-only conformance crate takes NO
-    // dependency edge on sparq-text) so the central scoreboard's `ratchet_floor`
-    // can never silently drift from what the runner asserts.
-    (
-        "text-search differential oracle",
-        "crates/sparq-text/tests/bm25_oracle.rs",
-        "TEXT_ORACLE_FLOOR",
-    ),
-    // [OPUS-4.8] sq-mcb3q (epic sq-2n1q3) — the sparq-rsp RSP EXPRESSIVITY /
-    // SRBench CORRECTNESS oracle, a sparq EXTENSION ratchet (NOT standards
-    // conformance — no normative RDF-Stream-Processing / RSP conformance suite
-    // exists; RSP-QL is a W3C-community spec and SRBench a benchmark). `const
-    // RSP_EXPRESSIVITY_FLOOR` lives top-level in `sparq-rsp`'s
-    // `tests/srbench_oracle.rs`; the guard reads it TEXTUALLY (same hermetic
-    // mechanism — the dev-only conformance crate takes NO dependency edge on
-    // sparq-rsp) so the central scoreboard's `ratchet_floor` can never silently
-    // drift from what the runner asserts.
-    (
-        "RSP expressivity / SRBench correctness",
-        "crates/sparq-rsp/tests/srbench_oracle.rs",
-        "RSP_EXPRESSIVITY_FLOOR",
     ),
     // [OPUS-4.8] sq-rh4gu (epic sq-pbz04) — the RIF-Core EXPRESSIVITY ratchet. The
     // floor const (`pub const RIF_CORE_FLOOR`) lives in THIS crate's
@@ -260,7 +211,7 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
     // normative W3C SPARQL-RIF conformance suite.
     (
         "RIF-Core expressivity (monotone Horn subset)",
-        "crates/sparq-conformance/tests/rif_core_suite.rs",
+        "tests/rif_core_suite.rs",
         "RIF_CORE_FLOOR",
     ),
     // [OPUS-4.8] sq-qo1a9 (epic sq-pbz04, the LAST conformance bead) — the GRADUATED
@@ -274,7 +225,7 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
     // claim.
     (
         "OWL 2 QL (DL-Lite_R) certain-answer oracle",
-        "crates/sparq-conformance/tests/ql_dllite_suite.rs",
+        "tests/ql_dllite_suite.rs",
         "QL_DLLITE_FLOOR",
     ),
     // [FABLE-5] sq-pbz04.3.4 (epic sq-pbz04.3) — the OWL 2 QL ENTAILMENT-REGIME
@@ -288,7 +239,7 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
     // sound `pr:QL` subset, NOT an OWL 2 QL / entailment-regime conformance claim.
     (
         "OWL 2 QL entailment-regime graduated subset",
-        "crates/sparq-conformance/tests/ql_entailment_floor.rs",
+        "tests/ql_entailment_floor.rs",
         "QL_ENTAILMENT_FLOOR",
     ),
     // [SONNET-4.6] sq-pbz04.2.4 (epic sq-pbz04) — the OWL 2 EL classification ratchet.
@@ -301,7 +252,7 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
     // conformance claim.
     (
         "OWL 2 EL classification (sparq-reason-el)",
-        "crates/sparq-conformance/tests/el_suite.rs",
+        "tests/el_suite.rs",
         "EL_SUITE_FLOOR",
     ),
     // [FABLE-5] sq-pbz04.4.5 (epic sq-pbz04.4) — the OWL 2 DIRECT-SEMANTICS arm's two
@@ -316,12 +267,12 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
     // pass" needs the inflation direction caught too).
     (
         "OWL 2 DL profile identification (Direct arm)",
-        "crates/sparq-conformance/tests/dl_suite.rs",
+        "tests/dl_suite.rs",
         "DL_PROFILE_FLOOR",
     ),
     (
         "OWL 2 Direct-Semantics consistency + entailment (scoped fragment)",
-        "crates/sparq-conformance/tests/dl_suite.rs",
+        "tests/dl_suite.rs",
         "DL_DIRECT_FLOOR",
     ),
     // [FABLE-5] the UFO-SN3 finite-world expressibility ratchet. The floor const
@@ -334,7 +285,7 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
     // (no normative UFO conformance suite exists).
     (
         "UFO-SN3 finite-world expressibility",
-        "crates/sparq-conformance/tests/ufo_sn3_suite.rs",
+        "tests/ufo_sn3_suite.rs",
         "UFO_SN3_FLOOR",
     ),
     // [KERN] the RDF 1.2 quoted-triple opacity ratchet. The floor const
@@ -347,9 +298,53 @@ const CRATE_LOCAL_FLOORS: &[(&str, &str, &str)] = &[
     // non-interference), NOT a W3C-suite pass count.
     (
         "RDF 1.2 quoted-triple opacity (reasoning)",
-        "crates/sparq-conformance/tests/quoted_triple_opacity.rs",
+        "tests/quoted_triple_opacity.rs",
         "QUOTED_OPACITY_FLOOR",
     ),
+];
+
+/// [SONNET-4.6] sq-z1xv8 — the suite labels whose ratchet floor is sourced at COMPILE
+/// TIME from the SHARED `sparq-conformance-floors` crate, imported into BOTH
+/// `scoreboard::SUITES` and the enforcing runner in its own crate. These eleven do NOT
+/// need — and must NOT have — a textual floor-sync row in `CRATE_LOCAL_FLOORS`: the
+/// registry and the runner read the SAME `const`, so they cannot drift, and reading the
+/// runner's source would mean reaching back out of this crate (the CI test-selection
+/// hole this bead closed). `all_crate_test_suites_are_guarded` exempts exactly this set.
+const SHARED_CRATE_FLOORS: &[&str] = &[
+    "W3C SHACL core",
+    "W3C SHACL-SPARQL",
+    "OGC GeoSPARQL topology compliance",
+    "OGC GeoSPARQL query-rewrite extension",
+    "Solid WAC decision parity",
+    "Solid ACP decision parity",
+    "Solid WAC differential oracle",
+    "Solid ACP differential oracle",
+    "SolidLab ODRL Test Suite",
+    "text-search differential oracle",
+    "RSP expressivity / SRBench correctness",
+];
+
+/// [SONNET-4.6] sq-z1xv8 — the pinned floor VALUES the eleven shared-crate registry
+/// rows must carry, as `(label, expected_floor)`. Because the registry imports the
+/// shared `const` directly, drift is impossible — but a silent LOWERING is not: editing
+/// `sparq-conformance-floors` down would drop the registry value with it. A ratchet may
+/// only RISE, so this assertion fires on any decrease; a deliberate raise updates the
+/// value here in the SAME commit that edits the floors crate (mirroring how a
+/// textual-guard floor is bumped, and exactly how `LIB_SOURCED_EXPECTED` pins the six
+/// JSON-LD lanes).
+const SHARED_CRATE_EXPECTED: &[(&str, usize)] = &[
+    ("W3C SHACL core", 98),
+    ("W3C SHACL-SPARQL", 5),
+    ("OGC GeoSPARQL topology compliance", 197),
+    ("OGC GeoSPARQL query-rewrite extension", 48),
+    ("Solid WAC decision parity", 13),
+    ("Solid ACP decision parity", 13),
+    // A divergence count, not a rising ratchet: the only acceptable value is 0.
+    ("Solid WAC differential oracle", 0),
+    ("Solid ACP differential oracle", 0),
+    ("SolidLab ODRL Test Suite", 67),
+    ("text-search differential oracle", 18750),
+    ("RSP expressivity / SRBench correctness", 317),
 ];
 
 /// [FABLE-5] sq-oy1f.40 — the suite labels whose ratchet floor is sourced at
@@ -391,7 +386,11 @@ const LIB_SOURCED_EXPECTED: &[(&str, usize)] = &[
     // Compaction Algorithm compared against the W3C EXPECTED document (see
     // src/floors/compact.rs for the side-by-side). Bumped in the SAME commit as the
     // lib const (rise-only).
-    ("W3C JSON-LD 1.1 compact", 228),
+    // [OPUS-5] sq-gzsky — raised 228 → 243: the lane now RUNS the 17
+    // NegativeEvaluationTests against the manifest's `expectErrorCode` instead of
+    // skipping them (a wrong code is a FAIL). Bumped in the SAME commit as the lib
+    // const src/floors/compact.rs::FLOOR (rise-only).
+    ("W3C JSON-LD 1.1 compact", 243),
     // [FABLE-5] sq-oy1f.29 — raised 61 → 92: the frame lane moved from the RDF-first
     // framer (`graph_to_jsonld_framed`) to the NATIVE Framing pipeline compared against
     // the W3C EXPECTED document under the stronger normative oracle (see
@@ -402,7 +401,14 @@ const LIB_SOURCED_EXPECTED: &[(&str, usize)] = &[
     // wiring + @id-null retention + IRI-colon scheme check + @nest scoped ctx
     // propagation + @reverse @index + 1.0-mode round-trip guard). Bumped in the
     // SAME commit as src/floors/expand.rs::FLOOR (rise-only).
-    ("W3C JSON-LD 1.1 expand", 276),
+    // [OPUS-5] sq-gzsky — raised 276 → 381: the 109-case NegativeEvaluationTest SKIP
+    // bucket (the WHOLE expand gap) is closed — the lane RUNS them against the
+    // manifest's `expectErrorCode` — plus seven spec-faithful sparq-jsonld fixes
+    // (@included arrayification, @type+@direction, datatype-IRI + blank-node-datatype
+    // validation, the keyword round-trip check, and the two 1.0-mode restrictions on
+    // @container arrays and relative @vocab). Bumped in the SAME commit as
+    // src/floors/expand.rs::FLOOR (rise-only).
+    ("W3C JSON-LD 1.1 expand", 381),
     // [FABLE-5] sq-oy1f.26 — oracle-change re-pin (RDF-writer 50 → native flatten() 53).
     // The native lane composes over expand() and inherits the sq-oy1f.37 expand raises,
     // so merging main flips its 7 inherited fails to passes and it now MEASURES 53 pass /
@@ -427,6 +433,92 @@ fn lib_sourced_jsonld_floors_are_pinned() {
              only RISE; if this is a deliberate raise, bump LIB_SOURCED_EXPECTED in the same \
              commit that edits src/floors/<lane>::FLOOR (and the ci.yml grep gate)",
             suite.ratchet_floor, expected
+        );
+    }
+}
+
+/// [SONNET-4.6] sq-z1xv8 — the registry's eleven shared-crate floors carry the pinned
+/// values (a ratchet may only RISE; a silent LOWERING of a
+/// `sparq_conformance_floors::<module>::<FLOOR>` const drops the registry value and
+/// trips this). Also asserts the registry row and the shared const are literally the
+/// same number, which is what makes the retired textual guard unnecessary.
+#[test]
+fn shared_crate_floors_are_pinned() {
+    use sparq_conformance_floors as floors;
+    // The registry row's value MUST be the shared const, not a copy of it.
+    let shared: &[(&str, usize)] = &[
+        ("W3C SHACL core", floors::shacl::CORE_FLOOR),
+        ("W3C SHACL-SPARQL", floors::shacl::SPARQL_FLOOR),
+        ("OGC GeoSPARQL topology compliance", floors::geo::OGC_TOPOLOGY_FLOOR),
+        ("OGC GeoSPARQL query-rewrite extension", floors::geo::OGC_QUERY_REWRITE_FLOOR),
+        ("Solid WAC decision parity", floors::solid::WAC_SCENARIO_FLOOR),
+        ("Solid ACP decision parity", floors::solid::ACP_SCENARIO_FLOOR),
+        ("Solid WAC differential oracle", floors::solid::DIVERGENCE_FLOOR),
+        ("Solid ACP differential oracle", floors::solid::DIVERGENCE_FLOOR),
+        ("SolidLab ODRL Test Suite", floors::policy::ODRL_SUITE_FLOOR),
+        ("text-search differential oracle", floors::text::BM25_ORACLE_FLOOR),
+        ("RSP expressivity / SRBench correctness", floors::rsp::EXPRESSIVITY_FLOOR),
+    ];
+    // All three lists must cover the same suites, or a newly shared floor could be
+    // listed as exempt from the textual guard while nothing actually pins its value.
+    assert_eq!(
+        shared.len(),
+        SHARED_CRATE_FLOORS.len(),
+        "SHARED_CRATE_FLOORS and this test's const table must cover the same suites"
+    );
+    assert_eq!(
+        SHARED_CRATE_EXPECTED.len(),
+        SHARED_CRATE_FLOORS.len(),
+        "every SHARED_CRATE_FLOORS suite needs a SHARED_CRATE_EXPECTED pin, else a \
+         silent floor LOWERING goes uncaught"
+    );
+    for (label, expected) in SHARED_CRATE_EXPECTED {
+        let suite = SUITES
+            .iter()
+            .find(|s| s.label == *label)
+            .unwrap_or_else(|| panic!("scoreboard registry missing shared-crate suite {label:?}"));
+        let (_, shared_floor) = shared
+            .iter()
+            .find(|(l, _)| l == label)
+            .unwrap_or_else(|| panic!("shared-crate const table missing suite {label:?}"));
+        assert_eq!(
+            suite.ratchet_floor, *shared_floor,
+            "scoreboard floor for {} does not read the shared sparq-conformance-floors \
+             const — the registry row must IMPORT the const, never copy the number",
+            label
+        );
+        assert_eq!(
+            suite.ratchet_floor, *expected,
+            "shared-crate floor for {} is {} but the pinned ratchet is {} — a floor may \
+             only RISE; if this is a deliberate raise, bump SHARED_CRATE_EXPECTED in the \
+             same commit that edits the sparq-conformance-floors const",
+            label, suite.ratchet_floor, expected
+        );
+    }
+}
+
+/// [SONNET-4.6] sq-z1xv8 — the textual guard may only read sources inside THIS crate.
+///
+/// `const_floor_in` resolves against `CARGO_MANIFEST_DIR`, so a row naming `../<other
+/// crate>` would re-open the CI test-selection hole this bead closed: an out-of-crate
+/// read on a runtime-built path that neither a reverse-dependency closure nor a
+/// `ci/path-ownership.toml` `readers` entry can attribute (`scripts/ci_audit_inputs.py`
+/// residual 3). A floor enforced in another crate belongs in `sparq-conformance-floors`
+/// (the `SHARED_CRATE_FLOORS` bucket), never in a textual row.
+#[test]
+fn textual_guard_reads_only_crate_local_sources() {
+    for (label, src, _) in CRATE_LOCAL_FLOORS {
+        assert!(
+            src.starts_with("tests/") && !src.contains(".."),
+            "floor-sync row {:?} names {:?}, which escapes crates/sparq-conformance — put \
+             the floor in the shared sparq-conformance-floors crate and add the suite to \
+             SHARED_CRATE_FLOORS instead of reading another crate's source",
+            label, src
+        );
+        assert!(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(src).is_file(),
+            "floor-sync row {:?} names missing source {:?}",
+            label, src
         );
     }
 }
@@ -463,14 +555,23 @@ fn central_floors_match_crate_local_sources() {
 /// Every crate-test suite in the registry is covered by a sync check above (so a
 /// new crate-local ratchet added to `SUITES` cannot escape the guard).
 ///
-/// [FABLE-5] sq-oy1f.40 — a crate-test suite is guarded either by a TEXTUAL
-/// floor-sync row in `CRATE_LOCAL_FLOORS` (the runner's `const` is read out of
-/// source and `assert_eq!`'d against the registry copy) OR by being LIB-SOURCED —
-/// its floor lives in `src/floors/<lane>::FLOOR` and is imported into BOTH the
-/// registry row and the runner, so the two read the same compile-time const and
-/// cannot drift (the `LIB_SOURCED_FLOORS` set, covered by
-/// `lib_sourced_jsonld_floors_are_pinned`). Every crate-test suite must be in
-/// exactly one of those two buckets — nothing escapes the guard.
+/// [FABLE-5] sq-oy1f.40 / [SONNET-4.6] sq-z1xv8 — a crate-test suite is guarded by
+/// EXACTLY ONE of three mechanisms:
+///
+/// 1. a TEXTUAL floor-sync row in `CRATE_LOCAL_FLOORS` — the runner lives in THIS
+///    crate, so its `const` is read out of source and `assert_eq!`'d against the
+///    registry copy;
+/// 2. SHARED-CRATE — the floor lives in `sparq-conformance-floors` and is imported into
+///    BOTH the registry row and the runner in its own crate (`SHARED_CRATE_FLOORS`,
+///    covered by `shared_crate_floors_are_pinned`);
+/// 3. LIB-SOURCED — the floor lives in `src/floors/<lane>::FLOOR` and is imported into
+///    BOTH the registry row and the runner (`LIB_SOURCED_FLOORS`, covered by
+///    `lib_sourced_jsonld_floors_are_pinned`).
+///
+/// Buckets 2 and 3 read ONE compile-time const on both sides, so they cannot drift;
+/// bucket 1 is the textual fallback for same-crate runners. A new ratchet added to
+/// `SUITES` must land in one of them, and in only one — nothing escapes the guard, and
+/// nothing carries a redundant hard-coded duplicate.
 #[test]
 fn all_crate_test_suites_are_guarded() {
     for suite in SUITES {
@@ -482,20 +583,26 @@ fn all_crate_test_suites_are_guarded() {
         ) {
             let textually_guarded =
                 CRATE_LOCAL_FLOORS.iter().any(|(label, _, _)| *label == suite.label);
+            let shared_crate = SHARED_CRATE_FLOORS.contains(&suite.label);
             let lib_sourced = LIB_SOURCED_FLOORS.contains(&suite.label);
+            let buckets = usize::from(textually_guarded)
+                + usize::from(shared_crate)
+                + usize::from(lib_sourced);
             assert!(
-                textually_guarded || lib_sourced,
-                "registry CrateTest suite {:?} has neither a textual floor-sync guard in \
-                 CRATE_LOCAL_FLOORS nor a lib-sourced floor in LIB_SOURCED_FLOORS",
+                buckets > 0,
+                "registry CrateTest suite {:?} has no floor guard: it is in none of \
+                 CRATE_LOCAL_FLOORS, SHARED_CRATE_FLOORS or LIB_SOURCED_FLOORS",
                 suite.label
             );
-            // A suite must not be in BOTH buckets — a textual row for a lib-sourced
-            // floor re-introduces the hard-coded duplicate sq-oy1f.40 removed.
+            // A suite must not be in more than one bucket — a textual row for a
+            // const-sourced floor re-introduces the hard-coded duplicate sq-oy1f.40 and
+            // sq-z1xv8 removed (and, for a foreign runner, the out-of-crate read too).
             assert!(
-                !(textually_guarded && lib_sourced),
-                "registry CrateTest suite {:?} is BOTH textually guarded and lib-sourced — \
-                 remove the CRATE_LOCAL_FLOORS row (the lib-side const is the single source)",
-                suite.label
+                buckets == 1,
+                "registry CrateTest suite {:?} is in {} floor-guard buckets — keep exactly \
+                 one (the imported const is the single source; drop the CRATE_LOCAL_FLOORS \
+                 row)",
+                suite.label, buckets
             );
         }
     }

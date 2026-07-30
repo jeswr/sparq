@@ -137,7 +137,7 @@ pub mod compare;
 // the secret α). Reported as OperatorClass::Comparison @ Malicious+Abort. See the
 // module docs and `research/mpc-malicious-security-design.md`.
 pub mod auth_compare;
-// [OPUS-4.8] sq-6fv7 (sq-ka8m residual): the MALICIOUS-SECURE twin of
+// [OPUS-4.8] sq-6fv7 (sq-ka8m residual): the IT-MAC-HARDENED twin of
 // `compare::disclose_threshold_verdict` — the federation £100k path that operates
 // on an EXISTING secret-shared sum. sq-ka8m's `auth_compare` made the cleartext
 // fresh-operand comparison malicious-secure, but the disclose path's THREE
@@ -146,8 +146,26 @@ pub mod auth_compare;
 // routes all three through the §2.5 batched IT-MAC check: the existing sum is
 // authenticated (`MacSession::authenticate_existing`), the mask bits come from an
 // AUTHENTICATED square protocol, the masked open and the verdict are MAC-checked
-// BEFORE they are acted on, so a tamper on any of the three aborts fail-closed at
-// the minimal n=2t+1. Honest-majority, malicious-with-abort. See the module docs.
+// BEFORE they are acted on, so a tamper on any of those three OPENS aborts
+// fail-closed at the minimal n=2t+1. Honest-majority; see the tier correction below
+// before reading that as malicious-with-abort — it is not.
+// [OPUS-4.8] sq-km34.6: the production path is now the AUTHENTICATED RABBIT chain —
+// every product/reduce in the solved-bits / LTBits / ripple-add / ripple-sub wrap
+// recovery is a `MacSession::auth_mul`, lifting the malicious magnitude from the
+// masked-open 2^20 to the full 2^60 (parity with the semi-honest `compare` path).
+// Read the module docs' "What the MAC-check does NOT cover" before making any
+// tamper-detection claim: `auth_mul` ADOPTS a value tamper on its second operand and
+// `mac_check` only covers values that are opened, so "any tamper aborts" is NOT the
+// delivered property. [SONNET-4.6] Stronger than a caveat — it is EXPLOITABLE: the
+// range proof's zero-test mask sits in that adopted slot, so zeroing it switches the
+// range proof off and the path returns a WRONG VERDICT instead of aborting (witness
+// `a_zeroed_zero_test_mask_defeats_the_range_proof_and_flips_the_verdict`). The
+// delivered tier is therefore honest-majority TAMPER-EVIDENT-with-abort on the opened
+// values, NOT AXIS-1 `Malicious`; do not deploy it as the integrity tier until
+// `MacSession` gains multiplication-gate verification binding BOTH operands. Review
+// round 2 acted on that: the public entry point is now named
+// `experimental_tamper_evident_disclose_threshold_verdict`, so the API surface no
+// longer claims the tier the code misses. See the module docs.
 pub mod auth_disclose;
 // [OPUS-4.8] sq-sxm: the (security model × N × query class) benchmark MATRIX
 // harness + its deterministic communication/round/multiplication counter — the
@@ -281,7 +299,7 @@ mod witness_validation_tests;
 
 // [OPUS-4.8] sq-km34.1: the IT-MAC authenticated-sharing foundation surface.
 pub use authenticated::{
-    auth_add, auth_add_constant, auth_scale, auth_sub, AuthenticatedShare, MacKey,
+    auth_add, auth_add_constant, auth_scale, auth_sub, auth_sum, AuthenticatedShare, MacKey,
 };
 pub use backend::{
     AbortKind, AdversaryModel, BackendInfo, BackendRegistry, CorruptionThreshold,
@@ -334,9 +352,18 @@ pub use compare::{
 // [OPUS-4.8] sq-ka8m: the malicious-secure (honest-majority, with-abort) comparison
 // surface — IT-MAC-carried decompose+compare chain, verdict MAC-checked before open.
 pub use auth_compare::{malicious_greater_than, malicious_threshold, open_auth_verdict};
-// [OPUS-4.8] sq-6fv7: the malicious-secure disclose path over an EXISTING sum — the
+// [OPUS-4.8] sq-6fv7: the IT-MAC-hardened disclose path over an EXISTING sum — the
 // three decomposition opens (a², c=sum+r, verdict) routed through the MAC-check.
-pub use auth_disclose::malicious_disclose_threshold_verdict;
+// [SONNET-4.6] Review round 2 — RENAMED from `malicious_disclose_threshold_verdict`.
+// The old name asserted a tier the code does not deliver (a demonstrated wrong-verdict
+// path under its own named adversarial setting), and a doc caveat on a `malicious_*`
+// drop-in is not containment. The break predates the sq-km34.6 Rabbit lift — the
+// pre-lift masked-open path fed `auth_secret_is_zero` the same adopted second-operand
+// mask twice — so reverting would hide it, not fix it; the fix is a `MacSession`
+// change (see the module docs). No alias is kept under the old name: an alias would
+// preserve exactly the misleading surface. Nothing in the workspace depends on
+// `sparq-mpc` (`publish = false`), so no caller is silently retargeted.
+pub use auth_disclose::experimental_tamper_evident_disclose_threshold_verdict;
 pub use field::Fp;
 pub use holder::{Holder, HolderResult};
 pub use join::{

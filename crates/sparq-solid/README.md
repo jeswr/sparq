@@ -45,7 +45,7 @@ let _public_only = store.query_as(&Session::default(), Mode::Read, q)?.rows.len(
   named graphs ("who can read G?" is one SPARQL pattern); the default path evaluates through the engine's
   zero-copy dataset view, with a v1 `FROM NAMED` rewrite as a standard-SPARQL portability path. The default-graph semantics are **spec-compliant by default** ([solid-sparql-query](https://github.com/jeswr/solid-sparql-query) Editor's Draft, issue #1546): the standing default graph is **empty** and a bare `{ ?s ?p ?o }` opts into the authorized union only via `FROM <…#union-default-graph>`; the opt-in `legacy-union-default-graph` feature reinstates the old union-always default — see the SKILL.
 - **Write-path gating, WAC-Allow, per-resource decision + ACL write-through (#992 FR-1/3/5/6/7)** — `update_as` gates writes; `put_acl`/`delete_acl` are the authoritative LDP-`PUT`/`DELETE`-on-`.acl` write-through (atomic graph replace + re-materialize, fail-closed rollback; a single-`.acl` write uses **diff-based** invalidation — `reindex_with` diffs old vs new `AuthIndex` per-origin and invalidates exactly the origins whose buckets changed, so other pods stay warm and cross-origin dependencies (WAC agentGroup, foreign-subject grants, ACP cross-doc indirection) are caught automatically; sound by construction, `sq-b7k7u`); `wac_allow` builds the header; `decide`/`decide_batch`/`resolve_acl` answer the per-request *"may X do M on R?"* with the
-  governing-ACL + `accessTo`/`default` scope (FR-5: `WacDecision::acl_link_header()` → the `Link: rel="acl"` value) and a typed fail-closed `AclStatus` (absent/unloaded/transient ⇒ deny, never open — for a server's 401/403-vs-503 mapping).
+  governing-ACL + `accessTo`/`default` scope (FR-5: `WacDecision::acl_link_header()` → the `Link: rel="acl"` value) and a typed fail-closed `AclStatus` (absent/unloaded/transient ⇒ deny, never open — for a server's 401/403-vs-503 mapping). `decide_create` adds the **create** decision: a container child needs only `acl:Append` but an access-control document is governed by `acl:Control`, so the child NAME goes through `is_control_document_name` (case variants, container-child trailing slash, percent-encoded spellings) BEFORE the mode question and `.acl`/`.acr` is refused for every principal — `Control` holders included — as a definitive, non-retryable deny; the legitimate route to author an ACL stays the `Control`-gated write of the governed resource's own ACL.
 - **ODRL bridge (opt-in `odrl-bridge`, research-track — not a production cutover)** — runs the
   [`sparq-policy`](../sparq-policy) ODRL evaluator and materializes the equivalent WAC/ACP grant (or dual
   `auth:deny*`) into the auth view — no new enforcement engine (zero ODRL code by default; see below).
@@ -65,13 +65,13 @@ a grant materializes **only** on a definite Permit + mappable action + concrete 
 **only** on a genuine prohibition match); a Deny, unsatisfied constraint, undischarged duty, unmapped
 action, or partyless/targetless request materializes **nothing**.
 
-**Conditions, refresh & revocation.** A *faithfully-mappable* constraint
-(`materialize_odrl_permission_conditional`) persists as a per-session-rechecked ACP `auth:ConditionalGrant`
+**SPARQL-query action contract ([SONNET-4.6] sq-lrtc3.2).** Represent a query request with standard `odrl:read`, which maps exactly to `Mode::Read`; sparq does not mint a profile-specific query action IRI. A request carrying only the `odrl:use` umbrella remains unmapped and grants no `query_as` visibility. Although ODRL defines `read` below `use`, hierarchy matching is the policy evaluator's concern: the bridge maps the concrete request action and will not guess that the broader `use` request meant read rather than one of the mutation actions it also covers.
+
+**Conditions, refresh & revocation.** A *faithfully-mappable* constraint (`materialize_odrl_permission_conditional`) persists as a per-session-rechecked ACP `auth:ConditionalGrant`
 (recipient/assignee matchers; an inclusive `odrl:dateTime` window vs `Session::now`, **fail-closed with no
 clock**); `purpose`/`count`/strict bounds have no stateless analogue and stay **one-shot** (any unmappable
 constraint falls the rule back to one-shot). Bridged grants are ledger-tracked; `refresh_odrl_grant(s)`
-rebuilds the view (static baseline + replay of valid entries), retracting lapsed ones. **Deny retraction is
-asymmetric (fail-OPEN risk):** an `auth:deny*` is retracted **only** on a *definite* `Withdrawn` verdict. Full detail in the SKILL.
+rebuilds the view (static baseline + replay of valid entries), retracting lapsed ones. **Deny retraction is asymmetric (fail-OPEN risk):** an `auth:deny*` is retracted **only** on a *definite* `Withdrawn` verdict. Full detail in the SKILL.
 
 ## WASM support
 

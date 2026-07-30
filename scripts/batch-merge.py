@@ -16,16 +16,30 @@
 #     carrying label `review:pass` AND an ACTIVE auto-merge arm enabled by
 #     app/sparq-orchestrator. NEVER touched: release-plz PRs, dependabot/* branches,
 #     drafts, PRs labeled needs:user or trust:*, or any non-sparq-agent branch.
-#  2. THRESHOLD. eligible <= QUEUE_WINDOW (8) -> no-op (the queue handles them alone).
-#     Otherwise sort by PR number ASCENDING; the first QUEUE_WINDOW stay individually
-#     queued, the REST are the overflow. Overflow < MIN_CONSTITUENTS (2) -> no-op.
-#  3. INTEGRATION BRANCH. sparq-omnibus/<utcstamp> fresh off origin/main; sequentially
-#     `git merge --no-ff` each overflow branch (ascending PR number). A conflicting
-#     constituent is SKIPPED (it stays individually armed) and recorded in the PR body.
-#     If fewer than MIN_CONSTITUENTS merge cleanly the branch is deleted and no PR opens.
-#  4. ONE PR. Title `omnibus: <n> reviewed worker PRs`; body = SPARQ-agent self-ID +
-#     machine marker (constituent PR numbers) + constituent table (PR, issue, crate) +
-#     one `Closes #<issue>` line per constituent target issue. The PR is armed with
+#  2. THRESHOLD + CLASS PARTITION (issue #3433 throughput program). eligible <=
+#     QUEUE_WINDOW (8) -> no-op (the queue handles them alone). Otherwise sort by PR
+#     number ASCENDING; the first QUEUE_WINDOW stay individually queued, the REST are
+#     the overflow. The overflow is PARTITIONED by change-class: SLIM = every changed
+#     path is docs-/orchestration-only per ci_select.classify_change (the SAME audited
+#     allowlist behind the #3428 merge-group slimming), ENGINE = everything else (an
+#     unknown/unfetchable diff is engine — fail-closed into the heavy class). Per
+#     class: overflow < MIN_CONSTITUENTS (2) -> no batch for that class; at most
+#     MAX_CONSTITUENTS (15) per omnibus (wall-time-tuned toward the 60-merges/hour
+#     target; a v2 culprit bisect at 15 stays log2(15) ~= 4 runs) — the excess waits,
+#     still individually armed, for the next run. Classification is SCHEDULING-ONLY:
+#     the omnibus's own CI computes its change-class from its real diff (ci-select),
+#     so a misclassification here can never skip a required check — a slim batch just
+#     rides the slim merge-group lane set instead of waiting on a full-matrix batch.
+#  3. INTEGRATION BRANCH. sparq-omnibus/<class>-<utcstamp> fresh off origin/main;
+#     sequentially `git merge --no-ff` each overflow branch (ascending PR number). A
+#     conflicting constituent is SKIPPED (it stays individually armed) and recorded in
+#     the PR body. If fewer than MIN_CONSTITUENTS merge cleanly the branch is deleted
+#     and no PR opens.
+#  4. ONE PR PER CLASS. Title `omnibus(<class>): <n> reviewed worker PRs`; body =
+#     SPARQ-agent self-ID + machine marker (class + constituent PR numbers — the class
+#     in branch/title/marker is what makes per-class omnibus CI wall time measurable
+#     straight from PR history) + constituent table (PR, issue, crate) + one
+#     `Closes #<issue>` line per constituent target issue. The PR is armed with
 #     `gh pr merge --auto` (strategy is chosen by the merge queue). The sparq-omnibus/
 #     prefix keeps it OUT of the worker review loop: the registry's enumerator
 #     (dispatch-claim.py) admits only heads matching ^sparq-agent/issue-<n>- and keys
@@ -79,6 +93,7 @@
 # Exit 0 on success; non-zero only on a real error or a failed self-test.
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -87,11 +102,44 @@ from datetime import datetime, timezone
 
 PROG = "batch-merge"
 
+# Change-class source (issue #3433): reuse ci_select.classify_change — the SAME audited
+# orchestration-safe/docs-only allowlist that drives merge-group CI slimming (#3428) —
+# so "slim to the batcher" and "slim to the merge-group lanes" can never drift apart.
+# Fail-soft: if the import ever breaks, everything classifies engine (exactly the
+# pre-#3433 single-batch behaviour). Grouping is scheduling-only — the omnibus's own
+# CI recomputes the class from its real diff, so this can never skip a required check.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from ci_select import classify_change
+except Exception:  # defensive only; --self-test pins the working import path red/green
+    def classify_change(_paths):
+        return "engine"
+
+# [OPUS-5] #1135: the shared Release-PR predicate. NOT fail-soft — unlike
+# classify_change above (whose worst case is a coarser batch), a missing Release-PR
+# exclusion can put the Release PR into an omnibus batch. The stub refuses everything.
+try:
+    import release_pr_guard
+except ImportError:  # pragma: no cover - see scripts/tests/test_release_publish_guard.py
+
+    class release_pr_guard:  # type: ignore[no-redef]
+        @staticmethod
+        def arm_block_reason(**_kwargs) -> str:
+            return (
+                "release-pr-guard: scripts/release_pr_guard.py is not importable — "
+                "treating every PR as un-batchable (fail-closed, #1135)"
+            )
+
 # The merge queue's max_entries_to_merge: up to this many armed PRs land in one queue
 # window, so a backlog at or under it needs no batching.
 QUEUE_WINDOW = 8
 # An omnibus with a single constituent is pure overhead — require at least two.
 MIN_CONSTITUENTS = 2
+# Per-class cap on omnibus size (issue #3433): batch-15 per 15-minute run ~= the
+# 60-merges/hour target from one queue slot per class, while a v2 culprit bisect at 15
+# stays log2(15) ~= 4 runs. Excess overflow waits — still individually armed — for the
+# next run rather than growing one unbounded (and unbisectable) batch.
+MAX_CONSTITUENTS = 15
 # Liveness bound: an omnibus that has not MERGED this many hours after creation has no
 # route to merge (merge-group failure / dropped arm / checks never reported — all
 # invisible on the PR head) and is closed so it cannot suppress batching indefinitely.
@@ -100,12 +148,22 @@ MIN_CONSTITUENTS = 2
 MAX_OMNIBUS_AGE_HOURS = 4
 
 OMNIBUS_PREFIX = "sparq-omnibus/"
+# Omnibus change-classes (issue #3433). SLIM batches carry only constituents whose
+# diffs are docs-/orchestration-only, so their merge-group run is the slim lane set
+# (#3428) and never waits on a full Rust matrix; ENGINE carries everything else.
+# One omnibus PER CLASS may be in flight; a legacy unclassed sparq-omnibus/<stamp>
+# branch suppresses both classes (conservative) until it drains.
+BATCH_CLASS_SLIM = "slim"
+BATCH_CLASS_ENGINE = "engine"
+BATCH_CLASSES = (BATCH_CLASS_SLIM, BATCH_CLASS_ENGINE)
 WORKER_BRANCH_RE = re.compile(r"^sparq-agent/")
 # Worker heads encode their target issue: sparq-agent/issue-<N>-<run_id>-<attempt>.
 WORKER_ISSUE_RE = re.compile(r"^sparq-agent/issue-([1-9][0-9]*)-")
 ORCHESTRATOR_APP = "sparq-orchestrator"
-# Machine marker embedded in every omnibus PR body; closure keys on it.
-MARKER_RE = re.compile(r"<!--\s*sparq-omnibus:v1\s+constituents=([0-9,]+)\s*-->")
+# Machine marker embedded in every omnibus PR body; closure keys on it. The class
+# attribute is newer than v1 bodies, so it is optional here (legacy markers parse).
+MARKER_RE = re.compile(
+    r"<!--\s*sparq-omnibus:v1\s+(?:class=[a-z]+\s+)?constituents=([0-9,]+)\s*-->")
 
 SELF_ID = "> 🤖 SPARQ agent"
 
@@ -120,9 +178,21 @@ def author_handle(login: str) -> str:
 
 
 def is_release_plz(pr: dict) -> bool:
+    """[OPUS-5] #1135: one shared predicate for every arming/merging path.
+
+    WAS: `author == github-actions AND title startswith "chore: release"`. That
+    conjunction misses the Release PR whenever EITHER signal shifts — a different bot
+    identity, or a retitled PR. release_pr_guard.arm_block_reason keys on branch OR
+    author OR title and fails CLOSED on an unknown head branch. Widening the exclusion
+    is the safe direction here: the batcher's only response is to leave the PR alone.
+    """
     return (
-        author_handle(pr.get("author_login", "")) == "github-actions"
-        and pr.get("title", "").lower().startswith("chore: release")
+        release_pr_guard.arm_block_reason(
+            head_ref=pr.get("head_ref"),
+            author_login=pr.get("author_login"),
+            title=pr.get("title"),
+        )
+        is not None
     )
 
 
@@ -160,6 +230,21 @@ def crate_of(pr: dict) -> str:
     return "—"
 
 
+def constituent_class(pr: dict) -> str:
+    """Which omnibus class a constituent belongs to (issue #3433).
+
+    SLIM iff ci_select classifies its changed paths docs-only or orchestration-only
+    (the audited-inert surfaces); ENGINE otherwise — including `mixed`, `engine`, and
+    an EMPTY/unfetched file list (fail-closed: an unknown diff rides the heavy class,
+    which is exactly the pre-partition behaviour)."""
+    files = [f for f in pr.get("files", []) if f]
+    if not files:
+        return BATCH_CLASS_ENGINE
+    return (BATCH_CLASS_SLIM
+            if classify_change(files) in ("docs-only", "orchestration-only")
+            else BATCH_CLASS_ENGINE)
+
+
 def eligible_constituents(prs: list) -> list:
     """The armed, reviewed worker PRs the batcher may consider — sorted by number ASCENDING."""
     out = []
@@ -187,12 +272,25 @@ def constituents_of_marker(body: str) -> list:
     return [int(x) for x in m.group(1).split(",") if x]
 
 
+def omnibus_class(head_ref: str):
+    """The omnibus's batch class from its branch name (sparq-omnibus/<class>-<stamp>).
+
+    None for a legacy unclassed branch (sparq-omnibus/<stamp>) — the caller treats
+    None as suppressing EVERY class (conservative: we cannot tell what it carries)."""
+    rest = head_ref[len(OMNIBUS_PREFIX):] if head_ref.startswith(OMNIBUS_PREFIX) else ""
+    cls = rest.split("-", 1)[0]
+    return cls if cls in BATCH_CLASSES else None
+
+
 def omnibus_age_hours(head_ref: str, now: datetime):
-    """Hours since the omnibus branch's creation stamp (sparq-omnibus/<utcstamp>).
+    """Hours since the omnibus branch's creation stamp — sparq-omnibus/<class>-<utcstamp>
+    (or the legacy classless sparq-omnibus/<utcstamp>).
 
     None on an unparseable stamp — the caller treats that as EXPIRED (an omnibus branch
     we cannot date must never become immortal)."""
-    stamp = head_ref[len(OMNIBUS_PREFIX):] if head_ref.startswith(OMNIBUS_PREFIX) else ""
+    rest = head_ref[len(OMNIBUS_PREFIX):] if head_ref.startswith(OMNIBUS_PREFIX) else ""
+    # Stamps never contain "-", so anything before the first dash is a class prefix.
+    stamp = rest.split("-", 1)[1] if "-" in rest else rest
     try:
         created = datetime.strptime(stamp, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
     except ValueError:
@@ -230,22 +328,31 @@ class Action:
     # A merge step may fail on conflict; the runner then aborts the merge + records a skip.
     may_conflict: bool = False
     constituent: int = 0
+    # The omnibus branch this action builds ("" = a hygiene action). With one batch
+    # per class in a single plan, the runner keys survivors/skips/abort per group.
+    group: str = ""
 
 
-def omnibus_branch(now: datetime) -> str:
-    return OMNIBUS_PREFIX + now.strftime("%Y%m%dT%H%M%SZ")
+def omnibus_branch(now: datetime, batch_class: str) -> str:
+    return f"{OMNIBUS_PREFIX}{batch_class}-{now.strftime('%Y%m%dT%H%M%SZ')}"
 
 
-def omnibus_body(constituents: list, skipped: list) -> str:
+def omnibus_title(count: int, batch_class: str) -> str:
+    return f"omnibus({batch_class}): {count} reviewed worker PRs"
+
+
+def omnibus_body(constituents: list, skipped: list, batch_class: str) -> str:
     """The omnibus PR body: self-ID, machine marker, constituent table, Closes lines."""
     nums = ",".join(str(p["number"]) for p in constituents)
     lines = [
         f"{SELF_ID} — omnibus batcher (`scripts/batch-merge.py`). This PR batches the "
         f"reviewed, orchestrator-armed worker PRs beyond the merge queue's window into one "
-        f"queue entry. Every constituent already carries `review:pass`; its issue closes "
+        f"queue entry (change-class: **{batch_class}** — slim batches carry only "
+        f"docs-/orchestration-only diffs so their CI never waits on the full matrix). "
+        f"Every constituent already carries `review:pass`; its issue closes "
         f"below. A conflicting constituent was skipped and stays individually armed.",
         "",
-        f"<!-- sparq-omnibus:v1 constituents={nums} -->",
+        f"<!-- sparq-omnibus:v1 class={batch_class} constituents={nums} -->",
         "",
         "| PR | Issue | Crate |",
         "|---|---|---|",
@@ -370,42 +477,60 @@ def plan(state: dict) -> list:
         log(f"eligible armed worker PRs: {len(eligible)} <= {QUEUE_WINDOW} — queue handles them (no batch)")
         return actions
     overflow = eligible[QUEUE_WINDOW:]  # ascending: the first WINDOW stay individually queued
-    if len(overflow) < MIN_CONSTITUENTS:
-        log(f"overflow of {len(overflow)} < {MIN_CONSTITUENTS} — not worth an omnibus")
-        return actions
-    if open_omnibus:
-        # One omnibus in flight at a time: never stack a second while one is open (the
-        # closed-above ones no longer count).
-        still_open = [p["number"] for p in open_omnibus if p["head_ref"] not in dying_branches]
-        if still_open:
-            log(f"omnibus PR(s) {still_open} still open — not opening another")
-            return actions
-
-    branch = omnibus_branch(state["now"])
-    actions.append(Action("fetch", "git",
-                          ["fetch", "origin", "main"] + [p["head_ref"] for p in overflow]))
-    actions.append(Action("create-branch", "git",
-                          ["checkout", "-B", branch, "origin/main"], note=branch))
+    # Partition by change-class (issue #3433): a slim (docs/orchestration-only) batch
+    # rides the slim merge-group lane set (#3428) and never waits on an engine batch's
+    # full-matrix run. Order within each class stays ascending.
+    by_class = {cls: [] for cls in BATCH_CLASSES}
     for p in overflow:
+        by_class[constituent_class(p)].append(p)
+    # One omnibus PER CLASS in flight: never stack a second of the same class while one
+    # is open (the closed-above dying ones no longer count — close-and-recreate). A
+    # legacy unclassed sparq-omnibus/<stamp> suppresses every class (unknown contents).
+    alive = [p for p in open_omnibus if p["head_ref"] not in dying_branches]
+    for cls in BATCH_CLASSES:
+        batch = by_class[cls][:MAX_CONSTITUENTS]
+        if len(batch) < MIN_CONSTITUENTS:
+            if by_class[cls]:
+                log(f"{cls} overflow of {len(by_class[cls])} < {MIN_CONSTITUENTS} — "
+                    f"not worth an omnibus (stays individually armed)")
+            continue
+        blockers = [p["number"] for p in alive
+                    if omnibus_class(p["head_ref"]) in (cls, None)]
+        if blockers:
+            log(f"omnibus PR(s) {blockers} still open — not opening another {cls} batch")
+            continue
+        if len(by_class[cls]) > MAX_CONSTITUENTS:
+            log(f"{cls} overflow of {len(by_class[cls])} capped at {MAX_CONSTITUENTS} — "
+                f"the excess stays individually armed for the next run")
+        branch = omnibus_branch(state["now"], cls)
+        actions.append(Action("fetch", "git",
+                              ["fetch", "origin", "main"] + [p["head_ref"] for p in batch],
+                              group=branch))
+        actions.append(Action("create-branch", "git",
+                              ["checkout", "-B", branch, "origin/main"], note=branch,
+                              group=branch))
+        for p in batch:
+            actions.append(Action(
+                "merge", "git",
+                ["merge", "--no-ff", "--no-edit", "-m",
+                 f"omnibus: merge PR #{p['number']} ({p['head_ref']})",
+                 f"origin/{p['head_ref']}"],
+                may_conflict=True, constituent=p["number"],
+                note=f"constituent #{p['number']}", group=branch))
+        # The runner resolves the surviving constituent set (conflicts skipped) and then
+        # executes these tail actions with the body/count templated over the survivors.
+        actions.append(Action("push-branch", "git", ["push", "origin", branch],
+                              note=branch, group=branch))
         actions.append(Action(
-            "merge", "git",
-            ["merge", "--no-ff", "--no-edit", "-m",
-             f"omnibus: merge PR #{p['number']} ({p['head_ref']})",
-             f"origin/{p['head_ref']}"],
-            may_conflict=True, constituent=p["number"],
-            note=f"constituent #{p['number']}"))
-    # The runner resolves the surviving constituent set (conflicts skipped) and then
-    # executes these tail actions with the body/count templated over the survivors.
-    actions.append(Action("push-branch", "git", ["push", "origin", branch], note=branch))
-    actions.append(Action(
-        "open-pr", "gh",
-        ["pr", "create", "--repo", repo, "--base", "main", "--head", branch,
-         "--title", f"omnibus: {len(overflow)} reviewed worker PRs",
-         "--body", omnibus_body(overflow, [])],
-        note=f"{len(overflow)} constituents"))
-    # Arm: strategy is chosen by the merge queue, so no method flag.
-    actions.append(Action("arm", "gh", ["pr", "merge", branch, "--repo", repo, "--auto"],
-                          note=branch))
+            "open-pr", "gh",
+            ["pr", "create", "--repo", repo, "--base", "main", "--head", branch,
+             "--title", omnibus_title(len(batch), cls),
+             "--body", omnibus_body(batch, [], cls)],
+            note=f"{len(batch)} constituents ({cls})", group=branch))
+        # Arm: strategy is chosen by the merge queue, so no method flag.
+        actions.append(Action("arm", "gh",
+                              ["pr", "merge", branch, "--repo", repo, "--auto"],
+                              note=branch, group=branch))
     return actions
 
 
@@ -519,44 +644,48 @@ def gather_state(repo: str, now: datetime, batch_enabled: bool = True) -> dict:
 
 def execute(actions: list, state: dict, dry_run: bool) -> int:
     """Run the plan. The merge sequence is stateful: conflicting constituents are skipped
-    and the tail (push / open-pr / arm) is re-templated over the survivors."""
-    survivors, skipped = [], []
-    overflow_by_num = {a.constituent: a for a in actions if a.kind == "merge"}
+    and the tail (push / open-pr / arm) is re-templated over the survivors. All per-batch
+    state is keyed by the Action's `group` (the omnibus branch) — a single plan may build
+    one omnibus per change-class, and one class's abort must never leak into the other."""
+    survivors: dict = {}   # group -> [constituent numbers that merged cleanly]
+    skipped: dict = {}     # group -> [constituent numbers skipped on conflict]
+    aborted: set = set()   # groups whose branch was deleted (too few clean merges)
+    batch_groups = {a.group for a in actions if a.kind == "merge"}
     open_by_num = {p["number"]: p for p in state.get("open_prs", [])}
-    aborted_branch = None
     for act in actions:
-        if aborted_branch and act.kind in ("merge", "push-branch", "open-pr", "arm"):
+        if act.group in aborted and act.kind in ("merge", "push-branch", "open-pr", "arm"):
             continue
         argv = list(act.argv)
-        if act.kind == "push-branch" and overflow_by_num and not dry_run \
-                and len(survivors) < MIN_CONSTITUENTS:
+        if act.kind == "push-branch" and act.group in batch_groups and not dry_run \
+                and len(survivors.get(act.group, [])) < MIN_CONSTITUENTS:
             # Too few clean merges: delete the local branch, never push/open/arm.
-            log(f"only {len(survivors)} constituent(s) merged cleanly — aborting omnibus")
-            branch = next(a.note for a in actions if a.kind == "create-branch")
+            log(f"only {len(survivors.get(act.group, []))} constituent(s) merged cleanly "
+                f"— aborting omnibus {act.group}")
             run_git(["checkout", "--detach", "origin/main"])
-            run_git(["branch", "-D", branch], check=False)
-            aborted_branch = branch
+            run_git(["branch", "-D", act.group], check=False)
+            aborted.add(act.group)
             continue
-        if act.kind == "open-pr" and overflow_by_num:
-            live = [open_by_num[n] for n in sorted(survivors)]
+        if act.kind == "open-pr" and act.group in batch_groups:
+            live = [open_by_num[n] for n in sorted(survivors.get(act.group, []))]
+            cls = omnibus_class(act.group) or BATCH_CLASS_ENGINE
             argv = ["pr", "create", "--repo", state["repo"], "--base", "main",
-                    "--head", next(a.note for a in actions if a.kind == "create-branch"),
-                    "--title", f"omnibus: {len(live)} reviewed worker PRs",
-                    "--body", omnibus_body(live, skipped)]
+                    "--head", act.group,
+                    "--title", omnibus_title(len(live), cls),
+                    "--body", omnibus_body(live, skipped.get(act.group, []), cls)]
         log(("DRY-RUN " if dry_run else "") + f"{act.kind}: {act.tool} "
             + " ".join(argv[:6]) + (" …" if len(argv) > 6 else "")
             + (f"  [{act.note}]" if act.note else ""))
         if dry_run:
             if act.kind == "merge":
-                survivors.append(act.constituent)
+                survivors.setdefault(act.group, []).append(act.constituent)
             continue
         if act.tool == "git":
             if act.may_conflict:
                 if run_git(argv, check=False) == 0:
-                    survivors.append(act.constituent)
+                    survivors.setdefault(act.group, []).append(act.constituent)
                 else:
                     run_git(["merge", "--abort"], check=False)
-                    skipped.append(act.constituent)
+                    skipped.setdefault(act.group, []).append(act.constituent)
                     log(f"constituent #{act.constituent} conflicts — skipped (stays armed)")
             else:
                 run_git(argv)
@@ -607,7 +736,42 @@ def self_test() -> int:
         if got != want:
             failures.append(f"{name}:\n  got : {got!r}\n  want: {want!r}")
 
-    stamp_branch = "sparq-omnibus/20260717T120000Z"
+    stamp_branch = "sparq-omnibus/20260717T120000Z"  # legacy classless branch shape
+    engine_branch = "sparq-omnibus/engine-20260717T120000Z"
+    slim_branch = "sparq-omnibus/slim-20260717T120000Z"
+
+    # 0. PARSERS: class + stamp round-trip for both branch shapes; marker with and
+    #    without the class attribute (legacy bodies must keep closing).
+    check("class parsed from classed branch", omnibus_class(engine_branch), "engine")
+    check("legacy branch has no class", omnibus_class(stamp_branch), None)
+    check("unknown class token is not a class",
+          omnibus_class("sparq-omnibus/mystery-20260717T120000Z"), None)
+    now = datetime(2026, 7, 17, 12, 0, 0, tzinfo=timezone.utc)
+    check("age parsed through the class prefix",
+          omnibus_age_hours("sparq-omnibus/slim-20260717T060000Z", now), 6.0)
+    check("age parsed on a legacy branch",
+          omnibus_age_hours("sparq-omnibus/20260717T060000Z", now), 6.0)
+    check("legacy marker (no class) still parses",
+          constituents_of_marker("<!-- sparq-omnibus:v1 constituents=1,2 -->"), [1, 2])
+    check("classed marker parses",
+          constituents_of_marker("<!-- sparq-omnibus:v1 class=slim constituents=3,4 -->"),
+          [3, 4])
+
+    # 0b. CLASSIFICATION (via the real ci_select.classify_change import — a broken
+    #     import degrades everything to engine and flips these red):
+    check("docs-only diff classifies slim",
+          constituent_class(_worker(1, 1, files=("docs/a.md", "research/b.md"))), "slim")
+    check("orchestration-only diff classifies slim",
+          constituent_class(_worker(1, 1, files=("orchestration/routing.toml",
+                                                 "scripts/batch-merge.py"))), "slim")
+    check("crate diff classifies engine",
+          constituent_class(_worker(1, 1, files=("crates/sparq-core/src/lib.rs",))),
+          "engine")
+    check("mixed diff classifies engine (fail-closed)",
+          constituent_class(_worker(1, 1, files=("docs/a.md", "crates/x/src/lib.rs"))),
+          "engine")
+    check("unknown (empty) diff classifies engine (fail-closed)",
+          constituent_class(_worker(1, 1)), "engine")
 
     # 1. DO-NOTHING: empty repo state -> zero actions.
     check("empty state is a no-op", plan(_state()), [])
@@ -638,37 +802,87 @@ def self_test() -> int:
     check("overflow of one is a no-op", plan(_state(open_prs=nine)), [])
 
     # 5. OVERFLOW of 2 (10 eligible) -> full batch plan; the LOWEST 8 numbers stay
-    #    individually queued and #109/#110 overflow, ascending.
+    #    individually queued and #109/#110 overflow, ascending. Both constituents are
+    #    engine-class (empty diff fail-closed / crate path) -> ONE engine omnibus.
     ten = nine + [_worker(110, 910, files=("crates/sparq-core/src/lib.rs",))]
     got = plan(_state(open_prs=ten))
     kinds = [a.kind for a in got]
     check("overflow-of-two plan shape", kinds,
           ["fetch", "create-branch", "merge", "merge", "push-branch", "open-pr", "arm"])
-    check("branch off origin/main", got[1].argv, ["checkout", "-B", stamp_branch, "origin/main"])
+    check("branch off origin/main carries the class", got[1].argv,
+          ["checkout", "-B", engine_branch, "origin/main"])
     check("first merge is lowest overflow number", got[2].argv,
           ["merge", "--no-ff", "--no-edit", "-m",
            "omnibus: merge PR #109 (sparq-agent/issue-909-123-1)",
            "origin/sparq-agent/issue-909-123-1"])
     check("merges flagged conflict-skippable", [a.may_conflict for a in got[2:4]],
           [True, True])
-    check("push argv", got[4].argv, ["push", "origin", stamp_branch])
-    check("PR title counts constituents", got[5].argv[got[5].argv.index("--title") + 1],
-          "omnibus: 2 reviewed worker PRs")
+    check("batch actions all carry the group", {a.group for a in got}, {engine_branch})
+    check("push argv", got[4].argv, ["push", "origin", engine_branch])
+    check("PR title counts constituents + class",
+          got[5].argv[got[5].argv.index("--title") + 1],
+          "omnibus(engine): 2 reviewed worker PRs")
     body = got[5].argv[got[5].argv.index("--body") + 1]
-    check("body carries the machine marker",
-          "<!-- sparq-omnibus:v1 constituents=109,110 -->" in body, True)
+    check("body carries the classed machine marker",
+          "<!-- sparq-omnibus:v1 class=engine constituents=109,110 -->" in body, True)
     check("body self-IDs as SPARQ agent", body.startswith(SELF_ID), True)
     check("body closes both issues",
           ("Closes #909" in body, "Closes #910" in body), (True, True))
     check("body crate column from changed files", "| #110 | #910 | sparq-core |" in body, True)
     check("arm has no merge-method flag (queue chooses)", got[6].argv,
-          ["pr", "merge", stamp_branch, "--repo", "sparq-org/sparq", "--auto"])
+          ["pr", "merge", engine_branch, "--repo", "sparq-org/sparq", "--auto"])
     check("no review:* label is ever added to the omnibus",
           any("label" in " ".join(a.argv) for a in got if a.tool == "gh"), False)
 
-    # 6. An OPEN (fresh, armed, mergeable) omnibus PR suppresses a second batch.
-    open_om = _pr(200, stamp_branch, author="app/github-actions")  # armed by orchestrator
-    check("open omnibus suppresses another batch", plan(_state(open_prs=ten + [open_om])), [])
+    # 5b. CLASS PARTITION: docs/orchestration-only overflow batches SEPARATELY from
+    #     engine overflow — one omnibus per class in the same plan, slim first, each
+    #     ascending within its class.
+    slim_over = [_worker(111, 911, files=("docs/notes.md",)),
+                 _worker(113, 913, files=("orchestration/routing.toml",))]
+    got = plan(_state(open_prs=ten + slim_over))
+    check("two-class plan shape", [a.kind for a in got],
+          ["fetch", "create-branch", "merge", "merge", "push-branch", "open-pr", "arm",
+           "fetch", "create-branch", "merge", "merge", "push-branch", "open-pr", "arm"])
+    check("slim batch first, engine second",
+          [a.argv[2] for a in got if a.kind == "create-branch"],
+          [slim_branch, engine_branch])
+    check("slim batch carries the slim constituents",
+          [a.constituent for a in got[:7] if a.kind == "merge"], [111, 113])
+    check("engine batch carries the engine constituents",
+          [a.constituent for a in got[7:] if a.kind == "merge"], [109, 110])
+    slim_title = got[5].argv[got[5].argv.index("--title") + 1]
+    check("slim PR title carries the class", slim_title,
+          "omnibus(slim): 2 reviewed worker PRs")
+    slim_body = got[5].argv[got[5].argv.index("--body") + 1]
+    check("slim marker carries the class",
+          "<!-- sparq-omnibus:v1 class=slim constituents=111,113 -->" in slim_body, True)
+
+    # 5c. BATCH CAP: overflow beyond MAX_CONSTITUENTS in one class is left for the
+    #     next run (still individually armed) — the batch never exceeds the cap.
+    many = at_window + [_worker(200 + i, 800 + i) for i in range(MAX_CONSTITUENTS + 2)]
+    got = plan(_state(open_prs=many))
+    check("batch capped at MAX_CONSTITUENTS",
+          len([a for a in got if a.kind == "merge"]), MAX_CONSTITUENTS)
+    check("capped batch keeps the LOWEST overflow numbers",
+          [a.constituent for a in got if a.kind == "merge"],
+          [200 + i for i in range(MAX_CONSTITUENTS)])
+    check("capped title counts the capped batch",
+          got[-2].argv[got[-2].argv.index("--title") + 1],
+          f"omnibus(engine): {MAX_CONSTITUENTS} reviewed worker PRs")
+
+    # 6. An OPEN (fresh, armed, mergeable) omnibus suppresses another batch OF ITS
+    #    CLASS only; a LEGACY classless omnibus suppresses every class.
+    open_om = _pr(200, stamp_branch, author="app/github-actions")  # legacy, armed
+    check("legacy open omnibus suppresses every class",
+          plan(_state(open_prs=ten + slim_over + [open_om])), [])
+    open_engine = _pr(201, engine_branch, author="app/github-actions")
+    got = plan(_state(open_prs=ten + slim_over + [open_engine]))
+    check("open engine omnibus suppresses engine only — slim still batches",
+          [a.argv[2] for a in got if a.kind == "create-branch"], [slim_branch])
+    open_slim = _pr(202, slim_branch, author="app/github-actions")
+    got = plan(_state(open_prs=ten + slim_over + [open_slim]))
+    check("open slim omnibus suppresses slim only — engine still batches",
+          [a.argv[2] for a in got if a.kind == "create-branch"], [engine_branch])
 
     # 6b. --hygiene-only NEVER creates an omnibus (no App token: a GITHUB_TOKEN omnibus
     #     cannot enter the merge queue), but the closure legs still run.
@@ -797,14 +1011,14 @@ def self_test() -> int:
     check("one PR opened after conflict", len(opened), 1)
     tbody = opened[0][1][opened[0][1].index("--body") + 1]
     check("re-templated marker drops the conflicted constituent",
-          "<!-- sparq-omnibus:v1 constituents=109,111 -->" in tbody, True)
+          "<!-- sparq-omnibus:v1 class=engine constituents=109,111 -->" in tbody, True)
     check("re-templated body records the skip",
           "Skipped (merge conflict — still individually armed): #110" in tbody, True)
     check("re-templated title", opened[0][1][opened[0][1].index("--title") + 1],
-          "omnibus: 2 reviewed worker PRs")
+          "omnibus(engine): 2 reviewed worker PRs")
     armed = [c for c in calls if c[0] == "gh" and c[1][:2] == ["pr", "merge"]]
     check("armed exactly once, --auto, no method", armed,
-          [("gh", ["pr", "merge", stamp_branch, "--repo", "sparq-org/sparq", "--auto"])])
+          [("gh", ["pr", "merge", engine_branch, "--repo", "sparq-org/sparq", "--auto"])])
 
     # 11. EXECUTE abort: 2 overflow, BOTH conflict -> branch deleted, nothing pushed/opened.
     acts = plan(_state(open_prs=ten))
@@ -823,7 +1037,38 @@ def self_test() -> int:
           [c for c in calls if c[0] == "gh"
            or c[1][:1] == ["push"]], [])
     check("all-conflict: local branch deleted",
-          ("git", ["branch", "-D", stamp_branch]) in calls, True)
+          ("git", ["branch", "-D", engine_branch]) in calls, True)
+
+    # 12. EXECUTE abort isolation: in a two-class plan, the SLIM batch all-conflicting
+    #     aborts ONLY the slim group — the engine omnibus still pushes, opens and arms.
+    two_class_state = _state(open_prs=ten + slim_over)
+    acts = plan(two_class_state)
+    calls.clear()
+
+    def stub_git_slim_conflict(argv, check=True):
+        calls.append(("git", list(argv)))
+        if argv[:1] == ["merge"] and "--abort" not in argv and any(
+                ("issue-911-" in a or "issue-913-" in a) for a in argv):
+            return 1
+        return 0
+
+    run_git, run_gh = stub_git_slim_conflict, stub_gh
+    try:
+        execute(acts, two_class_state, dry_run=False)
+    finally:
+        run_git, run_gh = real_git, real_gh
+    check("slim all-conflict: slim branch deleted",
+          ("git", ["branch", "-D", slim_branch]) in calls, True)
+    check("slim all-conflict: engine branch still pushed",
+          ("git", ["push", "origin", engine_branch]) in calls, True)
+    opened = [c for c in calls if c[0] == "gh" and c[1][:2] == ["pr", "create"]]
+    check("slim all-conflict: exactly one (engine) PR opened", len(opened), 1)
+    check("surviving PR is the engine omnibus",
+          opened[0][1][opened[0][1].index("--title") + 1],
+          "omnibus(engine): 2 reviewed worker PRs")
+    armed = [c for c in calls if c[0] == "gh" and c[1][:2] == ["pr", "merge"]]
+    check("slim all-conflict: only the engine omnibus armed", armed,
+          [("gh", ["pr", "merge", engine_branch, "--repo", "sparq-org/sparq", "--auto"])])
 
     if failures:
         for f in failures:

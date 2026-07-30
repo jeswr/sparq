@@ -67,6 +67,34 @@ that changed — the **import** name stays `sparq` (`import sparq`), and no crat
 name is affected. Done in `crates/sparq-py/pyproject.toml` (`[project] name = "sparq-rdf"` +
 `[tool.maturin] module-name = "sparq"`); see the Python wheels section below.
 
+## 0b. v0.1.0 ships ahead of the external ZK review (issue #2552)
+
+**Decision (maintainer, issue #2552, 2026-07-26): v0.1.0 goes out without waiting for the
+external accredited-cryptographer review of the ZK estate (bead `sq-qhy4`), carrying
+experimental warnings instead.** Recorded here because it is a release-scope decision and
+nothing in CI encodes it: there is no audit gate in `release.yml`, `release-plz.yml`,
+`release-plz.toml` or either release guard, and there never was — the review is a P0 task,
+not a release blocker.
+
+What the release ships instead of the review, and what must stay true of every future
+release while `sq-qhy4` is open:
+
+- The GitHub Release body carries an **Experimental** paragraph naming `sparq-zk` and
+  `sparq-mpc` as research scaffolds, stating that no external accredited cryptographer has
+  reviewed them and that the release makes no soundness/security/privacy claim for either,
+  and linking `SECURITY.md`. It is pinned by
+  `scripts/tests/test_release_publish_guard.py::TestReleaseCarriesTheExperimentalZkCaveat`
+  — the release notes are the one surface a downloader who never opens the repo still
+  reads, so it is a test, not a convention.
+- `SECURITY.md` (§ *Scope and a critical caveat*), `README.md`, `crates/sparq-zk/README.md`,
+  `crates/sparq-mpc/README.md`, `skills/zk-query-proofs/SKILL.md` and `skills/mpc/SKILL.md`
+  already carry the matching "research scaffold / not externally audited / semi-honest
+  only" language, and `scripts/check-privacy-claims.sh` gates against any unqualified
+  soundness or privacy claim creeping back in.
+
+The one thing this decision does **not** license: presenting a ZK "verified" result or an
+MPC run as a production-grade guarantee anywhere. That stays false until `sq-qhy4` closes.
+
 ## 1. Version bump
 
 The version lives in **one place**: `[workspace.package] version` in the root `Cargo.toml`
@@ -97,6 +125,12 @@ git push jeswr vX.Y.Z
 
 Pushing the tag triggers `.github/workflows/release.yml`:
 
+0. **publish-cadence guard** — the `setup` job runs
+   `scripts/release-interval-guard.py --enforce --released-tag vX.Y.Z` before anything is
+   built. If the previous release was less than 24h ago the job fails and **every** job
+   below it is blocked (they all depend on `setup`). See §8d — this is the tag-push half
+   of the at-most-one-release-per-day policy. The tag stays pushed; delete it
+   (`git push --delete <remote> vX.Y.Z`) and re-push once the window has passed.
 1. **package** — builds `sparq-cli` for every hardware tier (same matrix as `dist.yml`:
    arm64/x64 darwin, x86-64 baseline/v2/v3/v4 + arm64 Linux, x64/arm64 Windows) and packages
    each as `sparq-cli-vX.Y.Z-<tier>.tar.gz` (`.zip` on Windows) containing the binary,
@@ -110,13 +144,51 @@ Pushing the tag triggers `.github/workflows/release.yml`:
    delete the `docker` job from `release.yml` (or gate it with `if: false`) — the other
    jobs are independent of it.
 
-Note: `dist.yml` *also* fires on `v*` tags (bare per-tier binaries as workflow artifacts).
-`release.yml` deliberately duplicates its matrix rather than `workflow_call`-ing it —
-`dist.yml` has no `workflow_call` trigger and is owned by another work-thread; see the
-header comment in `release.yml`. Once both are merged, drop the `tags:` trigger from
-`dist.yml` (keep `workflow_dispatch`) to stop double-building, and keep the two matrices
-in sync until they're unified. (The retired `macos-13` runner label has been replaced with
-`macos-15-intel` in both workflows' x64-darwin tier.)
+Note: [GPT-5] `dist.yml` is manual-dispatch only; it does not run on `v*` tags. Both
+`dist.yml` and `release.yml` call the reusable `build-matrix.yml`, which is the single
+source of truth for the hardware-tier matrix and build steps. `dist.yml` selects
+`mode: binary` for bare per-tier workflow artifacts, while `release.yml` selects
+`mode: archive` for the versioned release archives described above.
+
+## 3a. The LWS / Solid server binary — container only, no `dist`/`release` archive
+
+<!-- [OPUS-5] sq-gg0qq.11 (issue #2741): the bead asks for a decision, recorded here so the
+runbook is the single place a releaser looks. Related: research/lws-3-crate-split.md §3
+(blast radius) and its §7 Q2 (the published image name is still a maintainer question). -->
+
+**Decision: the Solid/LDP server binary is NOT added to `dist.yml` or to the `release.yml`
+archives. It ships only as a container image, and it is labelled EXPERIMENTAL.**
+
+`crates/sparq-lws-core` builds an implicit binary from `src/main.rs` (there is no `[[bin]]`
+stanza and the crate is `publish = false`). A **second** workflow fires on a `v*` tag alongside
+`release.yml` (`dist.yml` is dispatch-only, per the note above) —
+`.github/workflows/lws-container.yml` — which smoke-tests
+(`crates/sparq-lws-core/tests/container-smoke.sh`) and Trivy-scans a native amd64 image, then
+pushes a multi-arch `linux/amd64,linux/arm64` index to
+`ghcr.io/sparq-org/sparq-lws-core:{X.Y.Z, X.Y, latest}` with SBOM and max-mode build
+provenance. It is also `workflow_dispatch`-able, which tags only `:latest` — that is the form
+the demo and the `deploy/` templates reference. Nothing else about the LWS binary is published.
+
+Why not a `dist`/`release` archive:
+
+- **The crate's own description says `EXPERIMENTAL`**, and its whole distribution surface is a
+  long-lived server process configured entirely through `SOLID_SERVER_*` / `PSS_*` environment
+  variables. A bare `solid-server` archive next to `sparq-cli-vX.Y.Z-<tier>.tar.gz` reads as a
+  supported product; a container carries the runtime contract with it and is the honest shape.
+- **The crate boundary is still moving.** `sparq-lws` and `sparq-solid-server` do not exist yet
+  and the partition that would create them is an open maintainer decision
+  (research/lws-3-crate-split.md §5/§7); the container/deploy cutover is deliberately sequenced
+  last in that record's §6 phase 4, because it is the only phase that can break a running demo.
+  Adding hardware-tiered release archives now would pin a binary NAME (`sparq-lws-core` today,
+  `solid-server` after the cutover) that the split is expected to change, and
+  `.github/workflows/deploy-lint.yml` already asserts the current image string literally.
+- **Cost.** `build-matrix.yml` builds ten hardware tiers. Doubling it for a binary whose
+  supported deployment is a container buys nothing a consumer has asked for.
+
+**Revisit when** (any one is enough): the `sq-gg0qq` split lands and the bin has a stable
+crate + name; or a consumer needs a non-container deployment. The change is then small — add a
+package/bin selector to `build-matrix.yml` — and it should ship as a clearly EXPERIMENTAL-
+labelled OPT-IN artifact, not silently alongside the `sparq-cli` archives.
 
 ## 4. crates.io publication
 
@@ -245,6 +317,41 @@ Users get `sparq-cli` plus a `sparq` symlink on PATH.
 
 - Check the release page artifacts + `SHA256SUMS`, `docker run ghcr.io/jeswr/sparq-server:X.Y.Z`,
   and the crates.io pages render the README.
+- **Confirm the isolated-builder provenance verified** (issue #4571 / GX-11 / SL-B3-b). After the
+  Release is cut, `release.yml`'s `verify-provenance` job calls
+  `.github/workflows/release-verify.yml`, which re-downloads every published
+  asset and checks, fail-closed, that: both `.intoto.jsonl` bundles are attached and listed in
+  `SHA256SUMS`; `SHA256SUMS` matches the published bytes; and `slsa-verifier verify-artifact`
+  accepts **every** asset against one of the two bundles (an asset covered by neither reds the
+  run). It is part of the release run — look for the `verify published provenance` job on the same
+  workflow run that cut the tag; its uploaded `provenance-verification.log` is the evidence record.
+
+  > It is driven from `release.yml` deliberately, and `release-verify.yml`'s `release: published`
+  > trigger is only an out-of-band net for a Release published **by hand**. GitHub does not start
+  > a workflow run from an event generated by a workflow's own `GITHUB_TOKEN`, and that is the
+  > token `release.yml` creates the Release with — so a normal `v*` release emits no
+  > run-starting `release` event at all. `scripts/tests/test_verify_release_provenance.sh` pins
+  > the caller structurally so this cannot silently regress to trigger-only.
+
+  To run the identical checks by hand — e.g. to re-verify an older tag, or from a consumer's
+  machine:
+
+  ```bash
+  go install github.com/slsa-framework/slsa-verifier/v2/cli/slsa-verifier@v2.7.1
+  scripts/verify-release-provenance.sh --tag vX.Y.Z          # `gh release download` + verify
+  scripts/verify-release-provenance.sh --tag vX.Y.Z --dir ./assets   # already-downloaded assets
+  ```
+
+  A **red** run means a *published* release does not carry the provenance the compliance estate
+  claims for it: treat it as a supply-chain incident and fix forward — never relax the checks and
+  never drop `release`'s `needs: [provenance, provenance-artifacts]`, which is what stops a
+  Release being cut when a trusted builder fails in the first place.
+- **Then, and only then, update the compliance estate.** A green verification run is the evidence
+  `compliance/slsa/controls.md` SL-B3-b needs to move from **AR** to **IV** *for the artifacts that
+  verified*. Record the run URL in `compliance/slsa/evidence.md` and narrow GX-11 in both gap
+  registers. Keep the wording bounded: the verified property is *unforgeable provenance*, not a
+  hardened build (the generic generator signs digests our build jobs reported), and the ghcr.io
+  container image is still in-band **L2** — so GX-11 narrows, it does not close.
 - Bump `[workspace.package] version` to the next `-dev` cycle if desired, and start a new
   `## [Unreleased]` section in `CHANGELOG.md`.
 
@@ -359,3 +466,131 @@ tag-cutting). This is the "config-flip" the design record (§6 item 4) calls "th
 > Provenance honesty: crates.io trusted publishing is an **auth** mechanism only — it does **not**
 > put a provenance link on the crates.io page (no upstream scheme exists, unlike npm/PyPI). The
 > "do not describe a crates.io publish as signed" caveat in §4 is unchanged.
+
+### 8d. Publish-rate protections (issues #1135, #2552) — what stops a runaway release
+
+**The policy: at most one release per day.** `MIN_RELEASE_INTERVAL` in
+`scripts/release-interval-guard.py` is the single constant that states it (24h), and it is
+enforced at **both** points a release can start — the Release-PR path (`release-plz.yml`)
+and the `v*` tag push (`release.yml`). There is no override flag: releasing inside the
+window is done by hand, deliberately.
+
+**A crates.io version can never be unpublished.** Four protections stand between an
+automated pipeline and the registry. All four are already in place; none of them is what
+you flip.
+
+1. **The Release PR can never be armed.** `scripts/release_pr_guard.py` is the single
+   predicate every arming/merging path consults — `auto-arm.py`, `rearm-sweeper.py`, the
+   `check-pr-arm-base.py` PreToolUse hook (which is where agent-typed `gh pr merge --auto`
+   goes), `batch-merge.py`, `pr-backlog.py`. It keys on **head branch, author and title —
+   never a label**, because anything holding `pull-requests: write` can add or remove a
+   label. Adding `review:pass` to the Release PR does not make it armable. It fails closed:
+   an unknown head branch refuses rather than admits. The Release PR is merged by a
+   maintainer, by hand, deliberately.
+
+   **Read "armed" literally.** The PreToolUse hook recognises `gh pr merge` **with**
+   `--auto`. A direct `gh pr merge <n> --squash` (no `--auto`), `--admin`, a
+   `gh api graphql … enablePullRequestAutoMerge` mutation, a REST
+   `PUT …/pulls/<n>/merge`, a backslash line-continuation, or shell-variable indirection
+   all reach `gh` unblocked — verified by executing the hook against a fake `gh`. That is a
+   deliberate scope (the hook governs *arming*), not an oversight, and it is why
+   protection 2 exists: the interval guard runs inside `release-plz.yml` itself and does
+   not care how the merge happened. If the guard script itself cannot run,
+   `.claude/settings.json`'s wrapper **denies** any `gh pr merge` rather than allowing it.
+2. **A minimum release interval.** `scripts/release-interval-guard.py --enforce` runs in
+   `release-plz.yml`'s `release-plz-release` job **before** the tag/publish step.
+   `MIN_RELEASE_INTERVAL` is 24 hours, measured from `max(newest v* tag date, newest
+   crates.io publication)`. It refuses on any indeterminacy — shallow checkout, unreadable
+   tag list, unparseable date, unreachable crates.io, a future-dated last release. A
+   definitive crates.io 404 is the only accepted "never published" answer. There is no
+   override flag: publishing inside the window is done by hand, consciously.
+3. **The same interval, on the tag-push path** (issue #2552). Protection 2 only covers
+   releases that go through the Release PR. §3's canonical instruction — push a `vX.Y.Z`
+   tag — fires `release.yml` **directly**, which was previously uncadenced: a hand-pushed
+   tag (or a script pushing one) could cut a release minutes after the last. The guard now
+   also runs in `release.yml`'s `setup` job, the job every other job there depends on, so a
+   refusal stops the archives, the SBOM/VEX, the GitHub Release and the ghcr image.
+
+   It runs there with `--released-tag vX.Y.Z`, and that flag is load-bearing: on a tag push
+   `v<workspace version>` is already in the tag list, so without it the guard takes its
+   "already tagged, nothing to release" branch and allows unconditionally. `--released-tag`
+   excludes the tag being cut and suppresses that branch, so the interval is measured
+   against the *previous* release. It refuses if handed anything that is not a `vX.Y.Z`
+   tag.
+
+   It is **unconditional** — `workflow_dispatch` builds are guarded too. They look like a
+   developer/test path (pre-release, `dev-`-prefixed image tags), but the Release they
+   create fires `release: published`, and `publish.yml`'s `npm` job runs on *any* `release`
+   event, so a dispatch reaches a registry as well. Two consequences: `inputs.tag` on a
+   dispatch **must** be a `vX.Y.Z` tag (a `-dev` suffix is fine), and the unbounded way to
+   exercise the pipeline is a local build, not a dispatch.
+   `scripts/tests/test_release_publish_guard.py` pins the step's `run:`, that it carries
+   no `if:` and no `continue-on-error`, the `fetch-depth: 0` checkout it depends on, and
+   that no job in `release.yml` escapes `setup`.
+4. **Version-group coverage.** The same guard refuses when a crate cargo *would* publish is
+   absent from `release-plz.toml`'s `version_group` — release-plz would version it
+   independently of the locked workspace version and publish it anyway, so what ships would
+   not be what the config describes. While `publish = false` this is a loud warning; it
+   becomes a hard refusal on the flip.
+
+See what would be published, without touching anything:
+
+```sh
+python3 scripts/release-interval-guard.py --dry-run
+```
+
+It prints the publishable crate list, each version, the dependency-first publish order and
+the cadence verdict it *would* return. It only ever runs `git`, never `cargo`.
+
+> **Open item blocking the flip.** As measured by `--dry-run` on 2026-07-26, **26** crates
+> are cargo-publishable (no `publish = false`) while only **17** are in the `version_group`.
+> The nine outside it are `sparq-arrow`, `sparq-fedplan`, `sparq-forms`, `sparq-mcp`,
+> `sparq-reason-el`, `sparq-reason-ql`, `sparq-shaclc`, `sparq-substrate`, `sparq-wrapper`.
+> Each needs a decision: add a `[[package]]` entry with `version_group = "sparq"` (it ships),
+> or set `publish = false` in its `Cargo.toml` (it does not). The "17 crates" figure in §8c
+> and §0a describes the version_group, not cargo's publishable set.
+
+### 8e. release-plz forge token — one `needs:user` secret unblocks the Release-PR (issue #3273)
+
+`release-plz.yml` cannot open the Release-PR with the workflow's own `GITHUB_TOKEN`: the
+repo/org setting **Settings → Actions → General → "Allow GitHub Actions to create and approve
+pull requests"** is disabled, so every push to `main` ends in
+`Failed to open PR … 403 Forbidden … /pulls`. The job is advisory and the known 403 is
+contained loudly (signature + live probe), so nothing goes red — but no Release-PR is opened,
+which is what the version/changelog automation and the GUI-download release depend on.
+
+Both jobs now pick their forge token in this order, so **no workflow edit is needed** — only
+the secret:
+
+```text
+App token (ORCHESTRATOR_APP_ID + ORCHESTRATOR_APP_PRIVATE_KEY)  ← preferred
+  || RELEASE_PLZ_TOKEN     (fine-grained PAT: contents:write + pull_requests:write)
+  || GITHUB_TOKEN          (fallback; cannot open PRs while the setting is disabled)
+```
+
+**needs:user — do exactly one:**
+1. Provision `ORCHESTRATOR_APP_ID` + `ORCHESTRATOR_APP_PRIVATE_KEY` (the App used by
+   `batch-merge.yml`; install it on this repo with contents + pull-requests write), **or**
+2. add a `RELEASE_PLZ_TOKEN` repo secret (fine-grained PAT, same two permissions), **or**
+3. enable the repo setting above.
+
+Options 1–2 also fix a second, independent problem: GitHub suppresses workflow triggers for
+events created with `GITHUB_TOKEN`, so a `v<version>` tag pushed by the `release-plz / tag` job
+would **not** fire `release.yml` (`push: tags: ["v*"]`) — the tag→`release.yml` handoff §3
+describes. A minted App token / PAT is a normal actor and does fire it. Option 3 alone does not.
+
+Once a privileged token is configured the containment step no longer tolerates a 403 at all: a
+provisioned token that still 403s is a real failure (App not installed, PAT expired or
+under-scoped) and fails the job. Promotion: after a main run is observed opening/updating the
+Release-PR, drop the `(advisory)` token from the job name, delete the containment step and
+remove the entry from `.github/advisory-registry.json`.
+
+**You do not have to watch for that moment.** The `release-plz-pr` job self-reports: on every
+successful run it re-runs the same side-effect-free PR-creation probe (`POST /pulls` with
+`head == base`, which can never create a PR), and the moment that probe returns **422** instead
+of **403** — authorization passed, only the body was rejected, i.e. PR-creation is unblocked —
+the run emits a `release-plz Release-PR promotion unblocked (sq-lonae)` warning naming the three
+edits above. The probe runs even on success because `release-plz release-pr` also exits 0 when
+there is simply nothing to release, which says nothing about whether PR-creation is allowed.
+A probe that returns anything else (or does not complete) is reported as inconclusive and never
+claims readiness, and the step can never fail the release path.

@@ -40,6 +40,15 @@
 //!   de-duplicates `?v`; there are no rows for empty groups) by the `ON` variables and
 //!   binds the count (an `xsd:integer`) to `?c`. Body variables other
 //!   than the `ON` list are aggregate-local. `ON` may be omitted for a global count.
+//! * **`SUM`/`MIN`/`MAX`/`AVG`** read the same distinct body matches over the **whole**
+//!   shared XSD numeric tower — `xsd:float`/`xsd:double` are accepted alongside the exact
+//!   `integer`/`decimal` tiers, and a non-numeric value fails only that row (fail-closed,
+//!   as `FILTER` does). `SUM`/`AVG` mint a result under XPath operand promotion (so a
+//!   double operand yields an `xsd:double`; `AVG` over integers is an `xsd:decimal`);
+//!   `MIN`/`MAX` return an INPUT term verbatim. Because floating-point addition is not
+//!   associative, the fold order is PINNED so the closure stays a function of the
+//!   completed lower strata, and `NaN`/`-0.0` get an explicit rule — see
+//!   `eval::fold_numeric_group` for the full semantics.
 //! * **`FILTER(x op y)`** compares two bound-or-constant XSD numeric values with
 //!   `= != < <= > >=` via [`sparq_substrate::numeric::Num::cmp_relational`].
 //!   Float/double operands participate with XPath promotion; NaN and non-numeric

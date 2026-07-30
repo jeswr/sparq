@@ -1,0 +1,42 @@
+# [OPUS-5] sq-i6du2.8 — ODRE decision-agreement lane: the SPARQ-SIDE exporter.
+#
+# DELIBERATELY a STANDALONE cargo project (own `[workspace]` table, the same isolation
+# pattern as bench/ac/, bench/ac/live/, bench/ac/overhead/, bench/parse, bench/dict). It
+# is NOT a workspace member, so the root workspace never links it and the lean-core
+# invariant is untouched.
+#
+# SCOPE (bead sq-i6du2.8): emit the ODRL comparison CORPUS — for each (policy, request)
+# case drawn from the constraint-rich U3 financial + U4 consortium generators:
+#   * the ODRL 2.2 policy graph, as N-Triples (the shared input both systems read);
+#   * the normalised request (party / action / target / purpose / instant / count);
+#   * sparq's OWN decision, produced by running the real `sparq_policy::evaluate` path
+#     (the ODRL evaluator the `sparq-solid` `odrl-bridge` compiles into an auth view);
+#   * the by-construction acbench oracle's decision, for CONTEXT only — it is not the
+#     system under test and never arbitrates the sparq-vs-ODRE diff.
+# The ODRE side, the divergence classifier, and the report live in the Python half
+# (odre_adapter.py / agreement.py) — this binary never decides agreement.
+#
+# HONESTY: no timing is produced here at all. This lane's contract is a DECISION
+# ledger, not a benchmark number (design record §2.5: agreement first, timing second —
+# and timing is out of scope for v1 of this lane).
+[package]
+name = "ac-odre-export"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Standalone workspace root — keeps this exporter out of the root workspace.
+[workspace]
+
+[dependencies]
+# The corpora: the U3/U4 generators + the model-agnostic intent IR + `compile_odrl`.
+sparq-acbench = { path = "../../../../crates/sparq-acbench" }
+# The SYSTEM UNDER TEST on the sparq side: the real ODRL parse + evaluate path.
+# Default features only — the stateful `count-enforcement` counter store is NOT linked,
+# so `odrl:count` is evaluated statelessly here (recorded as a declared scope limit in
+# MAPPING.md, never papered over).
+sparq-policy = { path = "../../../../crates/sparq-policy" }
+
+[[bin]]
+name = "ac-odre-export"
+path = "src/main.rs"

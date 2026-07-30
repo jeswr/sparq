@@ -50,12 +50,33 @@
 #
 # Exit 0 on success; non-zero only on a real error or a failed self-test.
 import argparse
+from contextlib import redirect_stderr
+import io
 import json
 import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+
+import os
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# [OPUS-5] #1135: the shared Release-PR predicate (branch/author/title, never a label).
+# NOT fail-soft: the stub treats every PR as a release PR, so a missing module makes this
+# script groom nothing rather than groom the Release PR.
+try:
+    import release_pr_guard
+except ImportError:  # pragma: no cover - see scripts/tests/test_release_publish_guard.py
+
+    class release_pr_guard:  # type: ignore[no-redef]
+        @staticmethod
+        def arm_block_reason(**_kwargs) -> str:
+            return (
+                "release-pr-guard: scripts/release_pr_guard.py is not importable — "
+                "treating every PR as untouchable (fail-closed, #1135)"
+            )
+
 
 PROG = "pr-backlog"
 
@@ -87,10 +108,20 @@ def is_dependabot(pr: dict) -> bool:
 
 
 def is_release_plz(pr: dict) -> bool:
-    # release-plz opens a PR as github-actions with a `chore: release ...` title.
+    """[OPUS-5] #1135: one shared predicate for every arming/merging/grooming path.
+
+    WAS: `author == github-actions AND title startswith "chore: release"` — a conjunction
+    that misses the Release PR whenever EITHER signal shifts. release_pr_guard keys on
+    branch OR author OR title and fails CLOSED on an unknown head branch. Widening is the
+    safe direction: this script's only response to a match is to leave the PR untouched.
+    """
     return (
-        author_handle(pr.get("author_login", "")) == GITHUB_ACTIONS_LOGIN
-        and pr.get("title", "").lower().startswith("chore: release")
+        release_pr_guard.arm_block_reason(
+            head_ref=pr.get("head_ref"),
+            author_login=pr.get("author_login"),
+            title=pr.get("title"),
+        )
+        is not None
     )
 
 
@@ -377,37 +408,41 @@ def _parse_iso(s: str) -> datetime:
 
 
 # --------------------------------------------------------------------------------------
-# LIVE data collection (real gh). Not exercised by the self-test (gh stubbed there).
+# LIVE data collection (real gh). The self-test exercises it only through a hermetic stub.
 # --------------------------------------------------------------------------------------
 def _gh_json(argv):
     out = subprocess.check_output(["gh"] + argv, text=True)
     return json.loads(out)
 
 
-def collect_prs(repo):
-    """Fetch open PRs with the fields the policy needs."""
-    prs = _gh_json([
+def _normalise_checks(status_check_rollup):
+    checks = []
+    for c in status_check_rollup or []:
+        # CheckRun entries have name/status/conclusion; StatusContext entries have
+        # context/state. Normalise both into {name,status,conclusion}.
+        if "name" in c:
+            checks.append({"name": c.get("name"),
+                           "status": c.get("status"),
+                           "conclusion": c.get("conclusion")})
+        else:
+            state = (c.get("state") or "").lower()
+            concl = {"success": "success", "failure": "failure",
+                     "error": "failure", "pending": ""}.get(state, state)
+            status = "completed" if state in ("success", "failure", "error") else "pending"
+            checks.append({"name": c.get("context"),
+                           "status": status, "conclusion": concl})
+    return checks
+
+
+def collect_prs(repo, gh_json=_gh_json):
+    """Fetch the light open-PR snapshot used to decide which details are needed."""
+    prs = gh_json([
         "pr", "list", "--repo", repo, "--state", "open", "--limit", "200",
         "--json",
-        "number,title,author,isDraft,headRefName,labels,updatedAt,files,statusCheckRollup",
+        "number,title,author,isDraft,headRefName,labels,updatedAt",
     ])
     norm = []
     for p in prs:
-        checks = []
-        for c in p.get("statusCheckRollup") or []:
-            # CheckRun entries have name/status/conclusion; StatusContext entries have
-            # context/state. Normalise both into {name,status,conclusion}.
-            if "name" in c:
-                checks.append({"name": c.get("name"),
-                               "status": c.get("status"),
-                               "conclusion": c.get("conclusion")})
-            else:
-                state = (c.get("state") or "").lower()
-                concl = {"success": "success", "failure": "failure",
-                         "error": "failure", "pending": ""}.get(state, state)
-                status = "completed" if state in ("success", "failure", "error") else "pending"
-                checks.append({"name": c.get("context"),
-                               "status": status, "conclusion": concl})
         norm.append({
             "number": p["number"],
             "title": p.get("title", ""),
@@ -416,10 +451,60 @@ def collect_prs(repo):
             "head_ref": p.get("headRefName", ""),
             "labels": [l.get("name", "") for l in (p.get("labels") or [])],
             "updated_at": p.get("updatedAt"),
-            "files": [f.get("path", "") for f in (p.get("files") or [])],
-            "checks": checks,
+            "files": [],
+            "checks": [],
         })
     return norm
+
+
+def enrich_prs(prs, existing_markers, repo, exclude_pr, now, gh_json=_gh_json):
+    """Fetch heavy fields per PR, only when the policy will inspect them.
+
+    A failed detail query leaves that field empty, records the PR-local error, and does not
+    prevent later PRs from being evaluated. The caller returns the error count as its exit
+    status after finishing the run.
+    """
+    errors = 0
+    existing_markers = set(existing_markers)
+    fetch_errors = (subprocess.CalledProcessError, json.JSONDecodeError, OSError)
+
+    for pr in prs:
+        num = pr["number"]
+
+        # [GPT-5.6] Match plan()'s exclusion order before issuing any detail query.
+        if exclude_pr is not None and num == exclude_pr:
+            continue
+        if is_release_plz(pr) or has_excluded_label(pr) or is_sparq_agent_draft(pr):
+            continue
+
+        if is_dependabot(pr):
+            try:
+                detail = gh_json([
+                    "pr", "view", str(num), "--repo", repo,
+                    "--json", "statusCheckRollup",
+                ])
+                pr["checks"] = _normalise_checks(detail.get("statusCheckRollup"))
+            except fetch_errors as error:
+                log(f"ERROR: status-check fetch failed for PR #{num}: {error} — continuing.")
+                errors += 1
+            continue
+
+        updated = pr.get("updated_at")
+        if updated is None or now - _parse_iso(updated) <= timedelta(days=STALE_DAYS):
+            continue
+        if stale_marker(num) in existing_markers:
+            continue
+
+        try:
+            detail = gh_json([
+                "pr", "view", str(num), "--repo", repo, "--json", "files",
+            ])
+            pr["files"] = [f.get("path", "") for f in (detail.get("files") or [])]
+        except fetch_errors as error:
+            log(f"ERROR: changed-files fetch failed for PR #{num}: {error} — continuing.")
+            errors += 1
+
+    return errors
 
 
 def collect_existing_markers(repo):
@@ -492,6 +577,7 @@ def main() -> int:
     prs = collect_prs(args.repo)
     markers = collect_existing_markers(args.repo)
     now = datetime.now(timezone.utc)
+    errors = enrich_prs(prs, markers, args.repo, args.exclude_pr, now)
     actions = plan(prs, markers, args.repo, args.exclude_pr, now)
 
     summary = render_summary(actions)
@@ -502,7 +588,7 @@ def main() -> int:
 
     if args.dry_run:
         log("--dry-run: no gh mutations performed.")
-        return 0
+        return errors
 
     gh = real_gh
     # Ensure the labels exist ONLY if we are about to use them.
@@ -514,7 +600,7 @@ def main() -> int:
         except subprocess.CalledProcessError as e:
             log(f"WARNING: gh action failed for PR #{a.pr} ({a.kind}): {e} — continuing.")
     log(f"applied {sum(1 for a in actions if a.argv)} mutation(s).")
-    return 0
+    return errors
 
 
 # --------------------------------------------------------------------------------------
@@ -539,6 +625,78 @@ def self_test() -> int:
 
     def days_ago(n):
         return (now - timedelta(days=n)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # [GPT-5.6] Collection regression fixture: the list stays light at backlog scale, heavy
+    # fields are fetched only for actionable PRs, and one detail failure cannot stop the rest.
+    large_raw = [
+        {
+            "number": 2000 + offset,
+            "title": f"feat: fixture {offset}",
+            "author": {"login": "someone"},
+            "isDraft": False,
+            "headRefName": f"fixture/{offset}",
+            "labels": [],
+            "updatedAt": days_ago(1),
+        }
+        for offset in range(76)
+    ]
+    large_raw[0].update({
+        "title": "build(deps): bump serde from 1.0.203 to 1.0.204",
+        "author": {"login": "app/dependabot"},
+        "headRefName": "dependabot/cargo/serde-1.0.204",
+    })
+    large_raw[1]["updatedAt"] = days_ago(8)   # detail fetch fails
+    large_raw[2]["updatedAt"] = days_ago(9)   # proves the run continues
+    large_raw[3]["updatedAt"] = days_ago(10)  # deduped: no files needed
+
+    collection_calls = []
+
+    def collection_gh(argv):
+        collection_calls.append(list(argv))
+        if argv[:2] == ["pr", "list"]:
+            return large_raw
+        if argv[:3] == ["pr", "view", "2000"]:
+            return {"statusCheckRollup": [
+                {"name": "gate", "status": "completed", "conclusion": "success"},
+            ]}
+        if argv[:3] == ["pr", "view", "2001"]:
+            raise subprocess.CalledProcessError(1, ["gh"] + argv)
+        if argv[:3] == ["pr", "view", "2002"]:
+            return {"files": [{"path": "crates/sparq-engine/src/lib.rs"}]}
+        raise AssertionError(f"unexpected collection gh call: {argv}")
+
+    collected = collect_prs(repo, gh_json=collection_gh)
+    list_call = collection_calls[0]
+    list_fields = set(list_call[list_call.index("--json") + 1].split(","))
+    check("large-list fixture collects all 76 open PRs", len(collected) == 76)
+    check("large-list fixture uses one light list query", len(collection_calls) == 1)
+    check("mutation tripwire: list query excludes files/statusCheckRollup",
+          list_fields.isdisjoint({"files", "statusCheckRollup"}))
+
+    collection_stderr = io.StringIO()
+    with redirect_stderr(collection_stderr):
+        collection_errors = enrich_prs(
+            collected,
+            existing_markers={stale_marker(2003)},
+            repo=repo,
+            exclude_pr=None,
+            now=now,
+            gh_json=collection_gh,
+        )
+    detail_calls = collection_calls[1:]
+    check("lazy detail fetches target only the three PRs that need heavy fields",
+          [(call[2], call[-1]) for call in detail_calls] == [
+              ("2000", "statusCheckRollup"), ("2001", "files"), ("2002", "files"),
+          ])
+    check("per-PR fetch failure contributes one exit error", collection_errors == 1)
+    check("per-PR fetch failure is recorded loudly",
+          "ERROR:" in collection_stderr.getvalue()
+          and "PR #2001" in collection_stderr.getvalue()
+          and "continuing" in collection_stderr.getvalue())
+    check("per-PR fetch failure isolates and later enrichment continues",
+          collected[2]["files"] == ["crates/sparq-engine/src/lib.rs"])
+    check("dependabot status rollup is normalised by its lazy fetch",
+          gate_status(collected[0])[0] == "success")
 
     fixtures = [
         # 1. failing dependabot PR -> close + issue

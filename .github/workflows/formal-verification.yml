@@ -137,7 +137,7 @@ jobs:
       # Unconditional: ANY PR can add a `#[cfg(kani)]` module or touch kani.yml/the
       # manifest, and the check is seconds-cheap (a comment-aware source scan + two
       # config parses — no cargo, no build).
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: Install PyYAML (hash-pinned)
@@ -170,6 +170,18 @@ jobs:
       fail-fast: false
       matrix:
         suite: ${{ fromJSON(needs.fv-select.outputs.suites) }}
+    # [OPUS-5] PINNED-TOOLCHAIN ESCAPE — REQUIRED here, not belt-and-braces, and this lane
+    # GATES the merge. The repo root carries a `rust-toolchain.toml` pinning STABLE, and
+    # rustup resolves that file (precedence 4) ABOVE the `rustup default <toolchain>` that
+    # `dtolnay/rust-toolchain` performs (precedence 5). Every cargo call in this job
+    # (`cargo install --locked kani-verifier`, `cargo kani setup`, `cargo kani --harness`)
+    # is a plain invocation with no `+<toolchain>`, so without this env var they would all
+    # silently move off the declared nightly onto pinned stable. `RUSTUP_TOOLCHAIN` is
+    # precedence 2 and beats the file, preserving exactly the toolchain this lane resolved
+    # to before the pin existed. Keep in sync with the `toolchain:` input below and with
+    # kani.yml's identical escape.
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-06-11
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:

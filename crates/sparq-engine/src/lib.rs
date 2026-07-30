@@ -25,6 +25,8 @@ mod cs_gate;
 mod dataset;
 mod exec;
 mod explain;
+#[cfg(feature = "persistent-stats")]
+pub mod stats;
 // [OPUS-4.8] (sq-u4lgr, #902) Structured EXPLAIN: typed `PlanNode` plan tree + JSON +
 // per-operator q-error + bounded slow-query ring. NON-DEFAULT `explain-json` feature —
 // when off, zero of this code compiles and the default native + wasm builds are
@@ -43,7 +45,7 @@ pub mod params;
 #[cfg(feature = "paths")]
 pub mod paths;
 #[cfg(feature = "paths")]
-pub use paths::{enumerate_paths, PathMode, PathSolution, PathSpec, Via};
+pub use paths::{enumerate_paths, Endpoint, PathMode, PathSolution, PathSpec, Via};
 // [GPT-5.6] (sq-lsp7k.3.2) Dedicated non-standard PATHS syntax. The ordinary
 // SPARQL parser remains untouched, so this surface is available only by explicit opt-in.
 #[cfg(feature = "paths")]
@@ -393,6 +395,52 @@ impl FunctionRegistry {
 /// uninstalled when the closure returns.
 pub fn with_functions<T>(fns: &FunctionRegistry, f: impl FnOnce() -> T) -> T {
     let _guard = exec::functions::install(fns);
+    f()
+}
+
+// ---- Local rows-returning SERVICE handlers (sq-lsp7k.2.2) --------------------
+//
+// The ROWS-returning twin of `FunctionRegistry` (which is scalar: terms in, ONE term
+// out). A registered IRI is intercepted at `SERVICE <iri> { … }` BEFORE the HTTP
+// transport, so a handled SERVICE performs no network I/O and the egress allowlist has
+// nothing to police; an unregistered IRI falls through to the unchanged `service` path
+// where the default-deny SSRF filter still applies in full. NON-DEFAULT
+// `service-local` feature: when off, none of this compiles, the executor's SERVICE
+// dispatch is byte-identical to before, and no new dependency enters the graph
+// (oxrdf + spargebra are already direct deps). [OPUS-5]
+#[cfg(feature = "service-local")]
+pub mod service_local;
+#[cfg(feature = "service-local")]
+pub use service_local::{
+    LocalServiceFn, LocalServicePattern, LocalServiceRegistry, LocalServiceRequest,
+    LocalServiceRows, LocalServiceSlot,
+};
+
+/// Runs `f` with `reg` installed as the active local SERVICE-handler registry: every
+/// `SERVICE <iri> { … }` whose IRI is registered is answered IN PROCESS by the handler
+/// instead of being forwarded over HTTP. See the [`service_local`] module docs for the
+/// egress/SSRF argument and the v1 scope-outs.
+///
+/// The registry is visible to every query the closure runs on this thread (installed
+/// thread-locally and propagated into the engine's rayon workers, so a `SERVICE` nested
+/// under a `FILTER EXISTS` still sees it) and uninstalled when the closure returns.
+/// Composes with [`with_functions`] / [`with_spatial_index`] in either nesting order.
+///
+/// Nests with ITSELF: an inner install SHADOWS the outer registry only for the inner
+/// closure, and the outer one is restored when that closure returns — including on
+/// unwind, so a panicking inner scope never leaves the outer scope's handlers
+/// unregistered.
+///
+/// ```ignore
+/// let mut reg = LocalServiceRegistry::new();
+/// reg.register("urn:sparq:local:evens", |_req| {
+///     Ok(LocalServiceRows::new(vec![Variable::new("n")?], rows))
+/// });
+/// with_local_services(&reg, || query(&graph, "SELECT * WHERE { SERVICE <urn:sparq:local:evens> { ?n } }"))
+/// ```
+#[cfg(feature = "service-local")]
+pub fn with_local_services<T>(reg: &LocalServiceRegistry, f: impl FnOnce() -> T) -> T {
+    let _guard = exec::local_services::install(reg);
     f()
 }
 
@@ -1210,11 +1258,13 @@ mod temporal_cache_tests {
     //! operators, ORDER BY sort keys and the MIN/MAX id-level fold. Each test
     //! pins behaviour the cache must NOT change relative to the per-row
     //! dict-parse path: XPath timezone semantics (equal instants across
-    //! offsets; the ±14h mixed-presence indeterminate window), sub-second
-    //! precision, dateTime/date family disjointness, and ORDER BY / MIN/MAX
-    //! tie handling (lexical fallback, first/last-of-equals). The mixed-tz
-    //! ORDER BY permutation and MIN/MAX results are LOCKED against the
-    //! pre-cache (per-row dict-parse) engine, verified by running both.
+    //! offsets; the ±14h mixed-presence indeterminate window — a type error for
+    //! the RELATIONAL operators, positioned by the sq-2k5py total-order
+    //! extension for the SORT), sub-second precision, dateTime/date family
+    //! disjointness, and ORDER BY / MIN/MAX tie handling (first/last-of-equals).
+    //! The MIN/MAX results are LOCKED against the pre-cache (per-row dict-parse)
+    //! engine, verified by running both; the mixed-tz ORDER BY permutation was
+    //! too, until sq-2k5py deliberately replaced its lexical fallback.
     use super::*;
 
     const TDATA: &str = r#"@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
@@ -1315,16 +1365,48 @@ mod temporal_cache_tests {
         assert_eq!(r.rows[0][0].as_ref().unwrap().to_string(), "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>");
     }
 
-    /// ORDER BY over temporals: same-presence values order by instant (across
-    /// offsets); the indeterminate mixed-presence pairs fall back to LEXICAL order —
-    /// exactly `compare_values`' fallback. The permutation below is what the
-    /// PRE-CACHE engine produces for this data (verified by running it).
+    /// ORDER BY over temporals: every pair orders by INSTANT (across offsets), with
+    /// timezone PRESENCE breaking an equal-instant tie — `Temporal::cmp_t_total`, the
+    /// total-order extension over XPath's indeterminate mixed-presence window
+    /// (sq-2k5py). `floating` is the same instant as utc/plus1/minus5 and tz-less, so it
+    /// sorts immediately BEFORE that equal-instant class; the three zoned members are
+    /// mutually Equal and keep scan (dictionary) order under the stable sort. Before
+    /// sq-2k5py the indeterminate pairs fell back to LEXICAL order, which put `floating`
+    /// lexically between them and made the comparator intransitive.
     #[test]
     fn order_by_mixed_timezones_matches_lenient_order() {
         let g = tg();
         let got = names(&g, "SELECT ?s WHERE { ?s ex:at ?d } ORDER BY ?d");
-        let want = ["farpast", "utc", "plus1", "minus5", "floating", "subsec", "later"];
-        assert_eq!(got, want, "ORDER BY dateTime must match the pre-cache lenient order");
+        let want = ["farpast", "floating", "utc", "plus1", "minus5", "subsec", "later"];
+        assert_eq!(got, want, "ORDER BY dateTime must match the total temporal order");
+    }
+
+    /// The GENERAL comparison path (`compare_values` → `CompareTerm::strict_cmp` →
+    /// `temporal_total_cmp`) must order the indeterminate window exactly as the
+    /// temporals-cache sort-cell path (`Temporal::cmp_t_total`) does — the two comparators
+    /// sq-2k5py had to fix in LOCK-STEP. These `VALUES` lexicals are absent from the graph,
+    /// so they are local-vocab terms with no cache cell and take the general path.
+    ///
+    /// The three are the sq-2k5py WITNESS: `12:00:00-01:00` and `14:00:00+01:00` are the
+    /// SAME instant (timeline-Equal) while the tz-less `13:00:00` is XPath-indeterminate
+    /// against both and sits lexically BETWEEN them. Under the old lexical fallback the
+    /// comparator was inconsistent and produced the lexical permutation; the total order
+    /// puts the tz-less value first and keeps the equal-instant pair in input order.
+    #[test]
+    fn order_by_general_path_orders_the_indeterminate_window_totally() {
+        let g = tg();
+        let got = names(
+            &g,
+            r#"SELECT ?v WHERE { VALUES ?v {
+                 "2024-03-15T12:00:00-01:00"^^xsd:dateTime
+                 "2024-03-15T13:00:00.000"^^xsd:dateTime
+                 "2024-03-15T14:00:00+01:00"^^xsd:dateTime } } ORDER BY ?v"#,
+        );
+        let dt = |lex: &str| format!("\"{}\"^^<http://www.w3.org/2001/XMLSchema#dateTime>", lex);
+        // tz-less FIRST (same instant, floating < zoned), then the equal-instant zoned
+        // pair in input order. The lexical fallback would give 12:00 / 13:00 / 14:00.
+        let want = [dt("2024-03-15T13:00:00.000"), dt("2024-03-15T12:00:00-01:00"), dt("2024-03-15T14:00:00+01:00")];
+        assert_eq!(got, want, "the general path must order the indeterminate window by instant, then presence");
     }
 
     /// MIN/MAX over temporals through the id-level fold: value semantics across
@@ -1348,6 +1430,39 @@ mod temporal_cache_tests {
         )
         .unwrap();
         assert!(r.rows[0][0].is_some(), "mixed group MAX must still produce a value");
+    }
+
+    /// MIN/MAX over the INDETERMINATE mixed-timezone window: the id-level fold
+    /// (`minmax_temporal`) and the general (`minmax_values` → `compare_values`) path must
+    /// agree, and both must use the total order rather than a lexical fallback — the third
+    /// lock-step site of sq-2k5py.
+    ///
+    /// All three values are the SAME instant, with the tz-less one lexically BETWEEN the two
+    /// zoned ones. The total order puts the tz-less value strictly first, so MIN is `ex:b`;
+    /// a lexical fallback would compare `"12:00:00-01:00" < "13:00:00"` and answer `ex:a`.
+    #[test]
+    fn minmax_over_the_indeterminate_window_is_total_on_both_paths() {
+        let data = r#"@prefix ex: <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            ex:a ex:at "2024-03-15T12:00:00-01:00"^^xsd:dateTime .
+            ex:b ex:at "2024-03-15T13:00:00"^^xsd:dateTime .
+            ex:c ex:at "2024-03-15T14:00:00+01:00"^^xsd:dateTime .
+        "#;
+        let g = Graph::load_str(data, "turtle").unwrap();
+        let pfx = "PREFIX ex: <http://ex/> PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> ";
+        let one = |q: &str| -> String {
+            let r = query(&g, &format!("{pfx}{q}")).unwrap();
+            r.rows[0][0].as_ref().unwrap().to_string()
+        };
+        // The id-level fold (every member is a cached graph temporal).
+        let fast = one("SELECT (MIN(?d) AS ?m) WHERE { ?s ex:at ?d }");
+        assert!(fast.contains("\"2024-03-15T13:00:00\""), "MIN must be the tz-less value, got {fast}");
+        // The GENERAL path: the local-vocab BIND member aborts the fast fold, and its own
+        // value is later, so the answer must be identical.
+        let general = one(
+            r#"SELECT (MIN(?d) AS ?m) WHERE
+               { { ?s ex:at ?d } UNION { BIND("2024-03-15T20:00:00Z"^^xsd:dateTime AS ?d) } }"#,
+        );
+        assert_eq!(general, fast, "the general MIN path must agree with the id-level fold");
     }
 
     /// MAX tie semantics: equal instants in different offsets are equal-comparing
@@ -2453,6 +2568,71 @@ mod tests {
         let b = QueryBudget { max_rows: Some(3), ..QueryBudget::unlimited() };
         let e = query_json_chunks_with_budget(&g(), "SELECT * WHERE { ?s ?p ?o }", &b).unwrap_err();
         assert!(e.contains("query budget exceeded (max-rows)"), "got: {e}");
+    }
+
+    /// [SONNET-4.6] (sq-yfcu2) The general (multi-pattern) SELECT-JSON path bounds the
+    /// SERIALIZE step by the budget, not just evaluation. The pre-serialize gate prices the
+    /// row/byte caps exactly (the rows are materialised, so the count is known), but
+    /// serialising a large materialised set is itself unbounded work — a deadline can fall
+    /// due *during* it, and before this the full body was serialised and returned as if it
+    /// were in time. The post-serialization gate now reports the trip instead.
+    ///
+    /// Pinned deterministically with the CANCEL limit rather than a wall clock: the sink
+    /// raises the flag when it receives the FIRST flush chunk, i.e. strictly after the
+    /// pre-serialize gate has passed and while the body is still being produced — exactly
+    /// the mid-serialize window a deadline falls into, and `budget::exhausted` treats the
+    /// two identically. Covers BOTH branches: a below-threshold result (the cooperative
+    /// serial loop) and a >`PAR_THRESHOLD` one (the rayon fan-out, where the whole set is
+    /// already serialised when the trip is seen, so only the post-serialization gate can
+    /// catch it).
+    #[test]
+    fn json_serialize_is_budget_bounded_mid_stream() {
+        use std::ops::ControlFlow;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        // A two-pattern (general-path) query over enough rows that the body exceeds the
+        // 64 KiB flush size several times over, so the sink is reached mid-serialize.
+        // `parallel` is default-on, so the 60k case takes the fan-out branch.
+        let q = "SELECT ?s ?o WHERE { ?s ?p ?o . ?s ?p2 ?o }";
+        for rows in [3_000u32, 60_000] {
+            let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
+            for i in 0..rows {
+                ttl.push_str(&format!("ex:s{} ex:p \"value-{}-padding-padding-padding\" .\n", i, i));
+            }
+            let graph = Graph::load_str(&ttl, "turtle").unwrap();
+
+            // Reference: the untripped body, complete and unaffected by the new gate.
+            let full = query_json(&graph, q).unwrap();
+            assert_eq!(full.matches("\"s\":").count(), rows as usize, "unbudgeted body must be complete");
+
+            let flag = Arc::new(AtomicBool::new(false));
+            let budget = QueryBudget::cancelled_by(Arc::clone(&flag));
+            let mut chunks = 0usize;
+            let err = query_json_stream_with_budget(&graph, q, &budget, |_c| {
+                chunks += 1;
+                flag.store(true, Ordering::Relaxed); // budget falls due mid-serialize
+                ControlFlow::Continue(())
+            })
+            .unwrap_err();
+            // The flag is raised ONLY by the sink, so reaching the error at all proves the
+            // trip happened after the pre-serialize gate. The serial branch stops within
+            // ~1024 further rows, so it legitimately emits just the one chunk.
+            assert!(chunks >= 1, "sink never reached at {} rows — trip is not mid-serialize", rows);
+            assert_eq!(err, "query budget exceeded (cancelled)", "at {} rows", rows);
+
+            // A budget that never trips still yields the complete body byte-for-byte —
+            // the gate costs nothing on the success path.
+            let ok = Arc::new(AtomicBool::new(false));
+            let budget = QueryBudget::cancelled_by(ok);
+            let mut streamed = String::new();
+            query_json_stream_with_budget(&graph, q, &budget, |c| {
+                streamed.push_str(&c);
+                ControlFlow::Continue(())
+            })
+            .unwrap();
+            assert_eq!(streamed, full, "untripped budgeted body must equal the unbudgeted one at {} rows", rows);
+        }
     }
 
     /// [OPUS-4.8] (sq-7d3dj.34.2) `query_json_stream_with_budget` hands each chunk to the

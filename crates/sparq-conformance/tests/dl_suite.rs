@@ -145,7 +145,14 @@ mod gated {
     /// abstained bucket (`DL_PROFILE_ABSTAINED` 117 → 118). Honest fail-closed shift — a
     /// pass under a wrong opaque-datatype reading becomes an honest abstention (the M4
     /// precedent). [FABLE-5]
-    pub const DL_PROFILE_FLOOR: usize = 94;
+    /// Re-pinned by sq-pbz04.4.8 (L1 built-in fixed-extension property refusal): −1 (94 → 93).
+    /// `New-Feature-BottomObjectProperty-001` is tagged `test:profile EL` and previously
+    /// extracted with `owl:bottomObjectProperty` read as an ordinary named role; L1 now
+    /// refuses the built-in IRI, so its profile set is `Unknown` → the row moves to the
+    /// abstained bucket (`DL_PROFILE_ABSTAINED` 118 → 119). The same honest fail-closed shift
+    /// as the sq-pbz04.4.9 datatype-map precedent: a pass under a wrong opaque-role reading
+    /// becomes an honest abstention. [SONNET-4.6]
+    pub const DL_PROFILE_FLOOR: usize = 93;
 
     /// EXPLICIT-NEGATIVE profile lane REFUTED (pass) count — checkable
     /// `owl:NegativePropertyAssertion(case, test:profile, {EL|QL|RL})` rows the L2 checker
@@ -161,7 +168,14 @@ mod gated {
     /// Re-pinned by sq-zfwzq ([GPT-5.6]): +1 (137 → 138). Enabling fail-closed extraction
     /// of `owl:TransitiveProperty` makes one formerly-abstained negative-profile row
     /// definitively refutable; the two other newly checkable rows enter the measured In-gap.
-    pub const DL_PROFILE_NEGATIVE_REFUTED: usize = 138;
+        /// Re-pinned by sq-pbz04.4.8 (L1 built-in fixed-extension property refusal): −4
+    /// (138 → 134). Four explicit-negation rows whose input carries `owl:topObjectProperty` /
+    /// `owl:bottomObjectProperty` in a property position now REFUSE extraction, so L2 can no
+    /// longer answer `NotIn` on them — they move from refuted to abstained
+    /// (`DL_PROFILE_NEGATIVE_ABSTAINED` 614 → 619; checkable denominator 320 → 315). Not a
+    /// refutation regression: the rows became honestly out-of-fragment, exactly the
+    /// fail-closed L1 boundary (the sq-pbz04.4.9 datatype precedent). [SONNET-4.6]
+    pub const DL_PROFILE_NEGATIVE_REFUTED: usize = 134;
 
     /// EXPLICIT-NEGATIVE profile lane In-GAP — checkable explicit-negation rows where L2
     /// answered `In` (could not refute full-profile membership from axiom-grammar membership
@@ -177,7 +191,10 @@ mod gated {
     /// Re-pinned by sq-zfwzq ([GPT-5.6]): +2 (180 → 182) as two transitive-property inputs
     /// become structurally checkable but L2 axiom-grammar membership cannot refute their
     /// full-profile negations. This is the existing honest In-gap, never a fabricated pass.
-    pub const DL_PROFILE_NEGATIVE_IN_GAP: usize = 182;
+        /// Re-pinned by sq-pbz04.4.8 (L1 built-in fixed-extension property refusal): −1
+    /// (182 → 181), denominator 320 → 315. One In-gap row left the checkable set with the
+    /// four refuted ones; the gap is now 181 of 315. [SONNET-4.6]
+    pub const DL_PROFILE_NEGATIVE_IN_GAP: usize = 181;
 
     /// EXPLICIT-NEGATIVE profile lane ABSTAINED — explicit-negation rows where L1 extraction
     /// refused (out-of-fragment input), so L2 abstained (`Unknown`) rather than answering
@@ -187,7 +204,11 @@ mod gated {
     /// Re-pinned by sq-zfwzq ([GPT-5.6]): −3 (617 → 614); all three rows moved out only
     /// because `dl_transitive` now extracts their transitivity axiom, closing accounting
     /// with +1 refuted pass and +2 measured In-gap rows above.
-    pub const DL_PROFILE_NEGATIVE_ABSTAINED: usize = 614;
+        /// Re-pinned by sq-pbz04.4.8 (L1 built-in fixed-extension property refusal): +5
+    /// (614 → 619) — the four rows that left [`DL_PROFILE_NEGATIVE_REFUTED`] plus the one
+    /// that left [`DL_PROFILE_NEGATIVE_IN_GAP`] land here, closing the accounting.
+    /// [SONNET-4.6]
+    pub const DL_PROFILE_NEGATIVE_ABSTAINED: usize = 619;
 
     /// EXPLICIT-NEGATIVE profile lane OUT-OF-SCOPE — explicit-negation rows excluded at
     /// selection (owl:imports / functional-syntax-only input). [FABLE-5] sq-pbz04.4.16
@@ -257,7 +278,36 @@ mod gated {
     /// dispatch to the QL branch — reaching it needs in-QL ∧ not-RL ∧ not-EL, which forces
     /// a complement shape absent from the extractable corpus (the pre-change abstention
     /// histogram carried no "QL consistency pending" entry), so no row's verdict moves.
-    pub const DL_DIRECT_FLOOR: usize = 186;
+    /// Re-pinned by sq-pbz04.4.8 ([SONNET-4.6] — the guard-abstention tableau fall-through,
+    /// design record §4 as amended): **+41 (186 → 227)**, composition 136 consistency +
+    /// 17 inconsistency + 72 positive-entailment + 2 negative-entailment. This is the bead,
+    /// and it is the largest single move this floor has made. MECHANISM: when the owning
+    /// RL/EL/QL branch abstains, the dispatch now re-asks the ALCH tableau — complete for the
+    /// whole L1 fragment, hence for every in-profile ontology too — instead of returning
+    /// `Unknown`. The pre-change abstention histogram's three guard buckets (16 RL-divergence,
+    /// 26 EL-unapplied, 1 EL-⊤ = 43 rows) are GONE from the post-change histogram entirely;
+    /// 41 of those rows graduated to a definitive expected verdict (+38 consistency, +3
+    /// inconsistency) and the other 2 are accounted for by the L1 built-in-property refusal
+    /// below, NOT by a new budget abstention (`deterministic count budget exhausted` is
+    /// unchanged at 16). The 8 `WebOnt-disjointWith-003`…`-009` / `WebOnt-I5.26-005`
+    /// consistency rows that sq-pbz04.4.16 re-routed into `RlDivergenceGuard` are among those
+    /// recovered — verified per row, not inferred from the totals — exactly as that re-pin
+    /// note anticipated ("graduating them back is a deliberate future re-pin once … a tableau
+    /// fallback is added").
+    ///
+    /// The audited five-row divergence set is UNCHANGED — verified, and the verification
+    /// mattered: the FIRST measurement of the fall-through alone put two NEW rows in the fail
+    /// bucket (`New-Feature-BottomObjectProperty-001` / `New-Feature-TopObjectProperty-001`,
+    /// both `InconsistencyTest`s). Those were not fall-through bugs but a pre-existing L1 gap
+    /// the profile guards had been accidentally MASKING: L1 read `owl:bottomObjectProperty` /
+    /// `owl:topObjectProperty` as ordinary named roles, dropping the fixed extensions (∅ and
+    /// ΔI × ΔI) that are the sole reason those two ontologies are inconsistent. Fixed at L1 by
+    /// refusing the built-in property IRIs fail-closed at every property position — the
+    /// sq-pbz04.4.9 precedent, where the escalated soundness verdict likewise directed
+    /// refusing at L1 rather than pinning a wrong definitive verdict. With that refusal the
+    /// inconsistency lane's fail count returns to 0 and both rows abstain honestly.
+    /// [SONNET-4.6]
+    pub const DL_DIRECT_FLOOR: usize = 227;
 
     /// Abstained (fail-closed OutOfFragment / guard / deferred / budget) row totals,
     /// EXACT-pinned so the tri-state accounting is closed: profile lane, then the four
@@ -273,7 +323,10 @@ mod gated {
     /// `WebOnt-I5.3-015` positive profile row (EL-tagged; its premise carries `xsd:integer`/
     /// `xsd:string` ranges) now REFUSES extraction, moving from a pass to an abstention (see
     /// [`DL_PROFILE_FLOOR`]). [FABLE-5]
-    pub const DL_PROFILE_ABSTAINED: usize = 118;
+        /// Re-pinned by sq-pbz04.4.8 (L1 built-in fixed-extension property refusal): +1
+    /// (118 → 119). The `New-Feature-BottomObjectProperty-001` positive profile row (EL-tagged)
+    /// now REFUSES extraction — see [`DL_PROFILE_FLOOR`]. [SONNET-4.6]
+    pub const DL_PROFILE_ABSTAINED: usize = 119;
     /// See [`DL_PROFILE_ABSTAINED`].
     /// Re-pinned by sq-pbz04.4.11: +4 from the 4 consistency cases that shifted from
     /// Pass to OutOfFragment (budget exhaustion on the now-more-complete model).
@@ -303,7 +356,14 @@ mod gated {
     /// and two positive-entailment rows graduated into [`DL_DIRECT_FLOOR`].
     /// UNCHANGED at 468 by sq-fj8lj (the graduated QL dispatch branch): zero corpus rows
     /// reach the QL branch — see the [`DL_DIRECT_FLOOR`] note.
-    pub const DL_DIRECT_ABSTAINED: usize = 468;
+    /// Re-pinned by sq-pbz04.4.8 ([SONNET-4.6]): **−41 (468 → 427)**, composition 194
+    /// consistency + 96 inconsistency + 123 positive-entailment + 14 negative-entailment.
+    /// The mirror image of the [`DL_DIRECT_FLOOR`] +41: the guard-abstention tableau
+    /// fall-through is strictly abstention-REDUCING, so every row it graduated leaves this
+    /// bucket and nothing enters it from that change. The L1 built-in-property refusal moves
+    /// its 2 rows WITHIN the bucket (guard → out-of-fragment), not into or out of it, which
+    /// is why the two deltas are exactly equal and opposite. [SONNET-4.6]
+    pub const DL_DIRECT_ABSTAINED: usize = 427;
 
     /// Audited, PINNED divergence rows (module docs — mechanisms M3/M5/M6): every row
     /// where a checker verdict contradicts the export expectation, keyed by the
@@ -393,19 +453,69 @@ mod gated {
     /// Re-pinned by sq-zfwzq ([GPT-5.6]): +5 (291 → 296). Five corpus documents whose
     /// only formerly-unmodelled role characteristic was `owl:TransitiveProperty` now
     /// extract and round-trip through the feature-gated structural axiom; violations stay 0.
-    pub const DL_RENDER_ROUNDTRIP_FLOOR: usize = 296;
+        /// Re-pinned by sq-pbz04.4.8 (L1 built-in fixed-extension property refusal): −2
+    /// (296 → 294), with `DL_RENDER_ROUNDTRIP_REFUSED` +2 (375 → 377) — the accounting stays
+    /// closed at 672 documents. The two `New-Feature-{Top,Bottom}ObjectProperty-001` premise
+    /// documents no longer extract, so they leave the round-trip pass set for the
+    /// extraction-refused bucket. `violations` remains EMPTY, which is the load-bearing
+    /// assertion here: no renderer/extractor fidelity bug is involved. [SONNET-4.6]
+    pub const DL_RENDER_ROUNDTRIP_FLOOR: usize = 294;
     /// See [`DL_RENDER_ROUNDTRIP_FLOOR`] — documents the L1 extractor refused
     /// (out-of-ALCH-fragment; the renderer contract is scoped to successful extractions).
     /// Re-pinned by sq-pbz04.4.9: +2 (378 → 380) — see [`DL_RENDER_ROUNDTRIP_FLOOR`].
     /// Re-pinned by sq-zfwzq ([GPT-5.6]): −5 (380 → 375), exactly the five documents
     /// graduated to [`DL_RENDER_ROUNDTRIP_FLOOR`].
-    pub const DL_RENDER_ROUNDTRIP_REFUSED: usize = 375;
+        /// Re-pinned by sq-pbz04.4.8: +2 (375 → 377). See [`DL_RENDER_ROUNDTRIP_FLOOR`].
+    /// [SONNET-4.6]
+    pub const DL_RENDER_ROUNDTRIP_REFUSED: usize = 377;
     /// See [`DL_RENDER_ROUNDTRIP_FLOOR`] — documents whose RDF/XML literal oxrdfxml
     /// rejects (the M6 mechanism, `FS2RDF-literals-ar`); they reach no lane's extraction.
     pub const DL_RENDER_ROUNDTRIP_PARSE_FAILED: usize = 1;
     /// See [`DL_RENDER_ROUNDTRIP_FLOOR`] — total documents examined (closed accounting:
     /// `DOCUMENTS = FLOOR + REFUSED + PARSE_FAILED + violations(0)`).
     pub const DL_RENDER_ROUNDTRIP_DOCUMENTS: usize = 672;
+
+    /// RENDER ROUND-TRIP arm, **RDF-BASED-only slice** (sq-pbz04.4.18) — the same
+    /// renderer-fidelity invariant over the corpus complement the DIRECT arm never sees:
+    /// cases carrying `test:semantics test:RDF-BASED` and NOT `test:DIRECT`. EXACT-pinned
+    /// on the same discipline as [`DL_RENDER_ROUNDTRIP_FLOOR`], and likewise NOT a
+    /// scoreboard row — no reasoning verdict is attributed to an RDF-BASED test anywhere
+    /// (the round trip is purely syntactic, so it makes no semantics claim at all).
+    ///
+    /// ## MEASURED: the slice is 7 cases / 13 documents, NOT "several hundred"
+    ///
+    /// The bead estimated "several hundred MORE ontology documents". That is WRONG at the
+    /// pinned snapshot, and the measurement is the correction: of the export's 493
+    /// `test:TestCase` nodes, **479 are DUAL-tagged** (DIRECT ∧ RDF-BASED) and so were
+    /// already fully covered by the DIRECT arm's 672 documents; 6 are DIRECT-only, 1 is
+    /// untagged, and only **7 are RDF-BASED-only** — `WebOnt-Class-005`,
+    /// `WebOnt-I4.6-003`, `WebOnt-I4.6-005`, `WebOnt-Restriction-005`, `WebOnt-Thing-005`,
+    /// `WebOnt-equivalentClass-008`, `WebOnt-miscellaneous-302` (all `Proposed`-status
+    /// OWL-1-era WebOnt cases), carrying 13 RDF/XML ontology documents between them.
+    /// So the bead's own "marginal value is honestly LOW" call was right, and understated
+    /// it: the extension adds 13 documents (+1.9% corpus), not hundreds. It is pinned
+    /// anyway because it is closed-form and cheap, and because pinning it CLOSES the
+    /// question — the ELIGIBLE slice (non-`Rejected`, recognised check kind, DIRECT and/or
+    /// RDF-BASED) is now exhaustively covered, and this const records the true size so the
+    /// "hundreds of unexamined documents" premise cannot be re-raised. The 1 case tagged
+    /// with NEITHER semantics, and any case with no recognised check kind, is in neither
+    /// arm: the two arms are disjoint, but their union is not the whole export.
+    ///
+    /// 10 of the 13 round-trip; violations are 0 — the renderer is faithful on every
+    /// RDF-BASED-only document L1 accepts, so this slice found NO new fidelity bug (unlike
+    /// the DIRECT arm's first run, which caught 15).
+    pub const DL_RDF_BASED_ROUNDTRIP_FLOOR: usize = 10;
+    /// See [`DL_RDF_BASED_ROUNDTRIP_FLOOR`] — RDF-BASED-only documents the L1 extractor
+    /// refused (out-of-ALCH-fragment). The bead expected refusals to DOMINATE this slice
+    /// ("most refuse extraction at L1 — OWL-Full-heavy"); measured, they do not (3 of 13),
+    /// because these 7 cases are OWL-1-era WebOnt and syntactically tame.
+    pub const DL_RDF_BASED_ROUNDTRIP_REFUSED: usize = 3;
+    /// See [`DL_RDF_BASED_ROUNDTRIP_FLOOR`] — RDF-BASED-only documents oxrdfxml rejects.
+    /// ZERO: the M6 mechanism (`FS2RDF-literals-ar`) is a DIRECT-arm case.
+    pub const DL_RDF_BASED_ROUNDTRIP_PARSE_FAILED: usize = 0;
+    /// See [`DL_RDF_BASED_ROUNDTRIP_FLOOR`] — total RDF-BASED-only documents examined
+    /// (closed accounting: `DOCUMENTS = FLOOR + REFUSED + PARSE_FAILED + violations(0)`).
+    pub const DL_RDF_BASED_ROUNDTRIP_DOCUMENTS: usize = 13;
 
     /// Locate the OWL WG export the same way the inference binary + el-suite lane do.
     fn owl_export() -> PathBuf {
@@ -471,6 +581,95 @@ mod gated {
         assert!(report.accounting_closed(), "every document in exactly one bucket");
     }
 
+    /// The RENDER ROUND-TRIP arm over the **RDF-BASED-only** slice (sq-pbz04.4.18) — the
+    /// corpus complement the DIRECT arm never sees. Same load-bearing assertion: EMPTY
+    /// `violations`; a mis-render here is a REAL renderer/extractor fidelity bug and is NOT
+    /// pinnable. Counts EXACT-pinned so the arm cannot silently go vacuous — which matters
+    /// MORE here than in the DIRECT arm, because this slice is small (13 documents): a
+    /// selection bug that skipped it entirely would otherwise look like a green no-op.
+    #[test]
+    fn dl_rdf_based_roundtrip_corpus() {
+        let export = owl_export();
+        if !export.exists() {
+            eprintln!(
+                "SKIP: OWL WG export not present at {} — run scripts/fetch-inference-suites.sh",
+                export.display()
+            );
+            return;
+        }
+        let text = std::fs::read_to_string(&export)
+            .unwrap_or_else(|e| panic!("read {}: {e}", export.display()));
+        let report =
+            dl_suite::run_render_roundtrip_rdf_based_arm(&text).expect("all.rdf parses");
+        println!("{}", report.render());
+        println!(
+            "OWL 2 RDF-Based-only render round-trip ratchet pass {} of {} (floor {})",
+            report.round_tripped,
+            report.documents,
+            DL_RDF_BASED_ROUNDTRIP_FLOOR
+        );
+        assert!(
+            report.violations.is_empty(),
+            "RDF-BASED-only render round-trip violations (REAL renderer/extractor fidelity \
+             bugs): {:#?}",
+            report.violations
+        );
+        assert_eq!(
+            report.round_tripped, DL_RDF_BASED_ROUNDTRIP_FLOOR,
+            "RDF-BASED-only round-trip pass count moved (got {}, pinned {}) — re-pin \
+             DL_RDF_BASED_ROUNDTRIP_FLOOR deliberately with evidence",
+            report.round_tripped, DL_RDF_BASED_ROUNDTRIP_FLOOR
+        );
+        assert_eq!(
+            report.extraction_refused, DL_RDF_BASED_ROUNDTRIP_REFUSED,
+            "RDF-BASED-only refused count moved — the accounting is pinned"
+        );
+        assert_eq!(
+            report.parse_failed, DL_RDF_BASED_ROUNDTRIP_PARSE_FAILED,
+            "RDF-BASED-only parse-failed count moved — the accounting is pinned"
+        );
+        assert_eq!(
+            report.documents, DL_RDF_BASED_ROUNDTRIP_DOCUMENTS,
+            "RDF-BASED-only document count moved — the accounting is pinned"
+        );
+        assert!(report.accounting_closed(), "every document in exactly one bucket");
+    }
+
+    /// The two round-trip arms must be DISJOINT (sq-pbz04.4.18): the RDF-BASED-only slice
+    /// is the COMPLEMENT of the DIRECT selection, not "all RDF-BASED cases", so no
+    /// dual-tagged case's documents are counted in both floors. Asserted on the violation
+    /// KEYS' case identifiers would be vacuous (both violation sets are empty), so this
+    /// pins the property that actually encodes disjointness: the two document counts are
+    /// pinned separately AND their sum is the total the two selections cover — a bug that
+    /// made `RdfBasedOnly` mean "all RDF-BASED" would blow the 13 pin up past 600.
+    #[test]
+    fn dl_roundtrip_arms_are_disjoint() {
+        let export = owl_export();
+        if !export.exists() {
+            eprintln!("SKIP: OWL WG export not present at {}", export.display());
+            return;
+        }
+        let text = std::fs::read_to_string(&export)
+            .unwrap_or_else(|e| panic!("read {}: {e}", export.display()));
+        let direct = dl_suite::run_render_roundtrip_arm(&text).expect("all.rdf parses");
+        let rdf_based =
+            dl_suite::run_render_roundtrip_rdf_based_arm(&text).expect("all.rdf parses");
+        // The arms self-identify, so a report can never be mistaken for the other slice.
+        assert_eq!(direct.arm, dl_suite::RoundTripArm::Direct);
+        assert_eq!(rdf_based.arm, dl_suite::RoundTripArm::RdfBasedOnly);
+        // Disjointness: the RDF-BASED-only slice is a small complement, NOT a superset of
+        // (or overlapping with) the DIRECT corpus. If the semantics filter regressed to
+        // "any RDF-BASED", this count would jump to ~the whole corpus.
+        assert!(
+            rdf_based.documents < direct.documents / 10,
+            "RDF-BASED-only slice ({} docs) should be a small complement of the DIRECT arm \
+             ({} docs) — a much larger count means the DIRECT-exclusion was dropped and the \
+             two floors now double-count dual-tagged cases",
+            rdf_based.documents,
+            direct.documents
+        );
+    }
+
     /// Render round-trip derivation canary — NOT a W3C case, NOT counted in any pin.
     /// Proves the arm drives the REAL extract → render → re-extract pipeline end-to-end
     /// on a mini manifest with KNOWN counts: two in-fragment documents round-trip, one
@@ -510,6 +709,66 @@ mod gated {
         assert_eq!(report.parse_failed, 0);
         assert!(report.violations.is_empty(), "{:?}", report.violations);
         assert!(report.accounting_closed());
+    }
+
+    /// RDF-BASED-only SELECTION canary (sq-pbz04.4.18) — NOT a W3C case, NOT counted in
+    /// any pin, and runs WITHOUT the corpus file so the selection logic is exercised on an
+    /// offline checkout. A mini manifest of exactly two cases, one DUAL-tagged
+    /// (DIRECT ∧ RDF-BASED) and one RDF-BASED-only, pins the discrimination in BOTH
+    /// directions: the dual-tagged case belongs to the DIRECT arm ONLY, the RDF-BASED-only
+    /// case to the RDF-BASED arm ONLY. Each arm therefore sees exactly ONE document.
+    ///
+    /// This is the test that fails if the filter regresses. Dropping the `!DIRECT`
+    /// exclusion makes the RDF-BASED arm see 2 documents (double-counting the dual case);
+    /// matching the wrong local name (`RDFBASED` — the export hyphenates it, `RDF-BASED`)
+    /// makes it see 0.
+    #[test]
+    fn dl_rdf_based_selection_canary() {
+        // Two in-fragment documents (A ⊑ ∃r.B and A ⊑ C), one per case, so any
+        // mis-selection shows up as a document COUNT change, not as a refusal.
+        let mini = r#"<?xml version="1.0"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns:owl="http://www.w3.org/2002/07/owl#"
+         xmlns:test="http://www.w3.org/2007/OWL/testOntology#">
+  <test:TestCase rdf:about="http://ex/canary-dual-tagged">
+    <rdf:type rdf:resource="http://www.w3.org/2007/OWL/testOntology#ConsistencyTest"/>
+    <test:identifier rdf:datatype="http://www.w3.org/2001/XMLSchema#string">canary-dual-tagged</test:identifier>
+    <test:status rdf:resource="http://www.w3.org/2007/OWL/testOntology#Approved"/>
+    <test:semantics rdf:resource="http://www.w3.org/2007/OWL/testOntology#DIRECT"/>
+    <test:semantics rdf:resource="http://www.w3.org/2007/OWL/testOntology#RDF-BASED"/>
+    <test:rdfXmlPremiseOntology rdf:datatype="http://www.w3.org/2001/XMLSchema#string">&lt;rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:owl="http://www.w3.org/2002/07/owl#" xmlns:rdfs="http://www.w3.org/2000/01/rdf-schema#" xml:base="http://example.org/"&gt;&lt;owl:Ontology/&gt;&lt;owl:Class rdf:about="A"&gt;&lt;rdfs:subClassOf&gt;&lt;owl:Restriction&gt;&lt;owl:onProperty&gt;&lt;owl:ObjectProperty rdf:about="r"/&gt;&lt;/owl:onProperty&gt;&lt;owl:someValuesFrom rdf:resource="B"/&gt;&lt;/owl:Restriction&gt;&lt;/rdfs:subClassOf&gt;&lt;/owl:Class&gt;&lt;/rdf:RDF&gt;</test:rdfXmlPremiseOntology>
+  </test:TestCase>
+  <test:TestCase rdf:about="http://ex/canary-rdf-based-only">
+    <rdf:type rdf:resource="http://www.w3.org/2007/OWL/testOntology#ConsistencyTest"/>
+    <test:identifier rdf:datatype="http://www.w3.org/2001/XMLSchema#string">canary-rdf-based-only</test:identifier>
+    <test:status rdf:resource="http://www.w3.org/2007/OWL/testOntology#Approved"/>
+    <test:semantics rdf:resource="http://www.w3.org/2007/OWL/testOntology#RDF-BASED"/>
+    <test:rdfXmlPremiseOntology rdf:datatype="http://www.w3.org/2001/XMLSchema#string">&lt;rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:owl="http://www.w3.org/2002/07/owl#" xmlns:rdfs="http://www.w3.org/2000/01/rdf-schema#" xml:base="http://example.org/"&gt;&lt;owl:Ontology/&gt;&lt;owl:Class rdf:about="A"&gt;&lt;rdfs:subClassOf&gt;&lt;owl:Class rdf:about="C"/&gt;&lt;/rdfs:subClassOf&gt;&lt;/owl:Class&gt;&lt;/rdf:RDF&gt;</test:rdfXmlPremiseOntology>
+  </test:TestCase>
+</rdf:RDF>"#;
+        let direct = dl_suite::run_render_roundtrip_arm(mini).expect("canary export parses");
+        let rdf_based =
+            dl_suite::run_render_roundtrip_rdf_based_arm(mini).expect("canary export parses");
+        // DIRECT arm: the dual-tagged case ONLY (the RDF-BASED-only case is not sanctioned
+        // under Direct semantics).
+        assert_eq!(direct.documents, 1, "DIRECT arm must see only the dual-tagged case");
+        assert_eq!(direct.round_tripped, 1);
+        // RDF-BASED-only arm: the RDF-BASED-only case ONLY. `2` here means the `!DIRECT`
+        // exclusion was dropped and the arms now overlap.
+        assert_eq!(
+            rdf_based.documents, 1,
+            "RDF-BASED-only arm must EXCLUDE the dual-tagged case (2 = overlapping arms, \
+             0 = the RDF-BASED local name stopped matching)"
+        );
+        assert_eq!(rdf_based.round_tripped, 1);
+        assert_eq!(rdf_based.extraction_refused, 0);
+        assert_eq!(rdf_based.parse_failed, 0);
+        assert!(rdf_based.violations.is_empty(), "{:?}", rdf_based.violations);
+        assert!(rdf_based.accounting_closed());
+        // Violation keys are segmented per arm, so concatenating two reports keeps the
+        // rows distinguishable even for the same case identifier.
+        assert_eq!(rdf_based.arm.label(), "RDF-Based-only");
+        assert_eq!(direct.arm.label(), "Direct-Semantics");
     }
 
     #[test]

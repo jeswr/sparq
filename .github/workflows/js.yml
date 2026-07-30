@@ -6,7 +6,8 @@
 # THIS GATES (it is NOT informational). The check name is `js` and carries NO
 # `advisory`/`informational` token, so the `ci-summary / gate` aggregator
 # (.github/workflows/ci-summary.yml — it excludes only names matching the whole word
-# `\b(advisory|informational)\b`) treats `js` as a HARD required gate. Gating is correct:
+# only DECLARED names, .github/advisory-registry.json — #3773) treats `js` as a HARD required
+# gate. Gating is correct:
 # this lane caught a real regression (PR #922's undeclared-npm-dep break, surfaced as a
 # red main and fixed in #953 / sq-fvz8). The old "Informational CI" header was stale.
 #
@@ -79,7 +80,7 @@ jobs:
           shared-key: site-wasm
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
 
@@ -131,8 +132,9 @@ jobs:
           npm test
 
       # [FABLE-5] sq-ohnj1 (#1499): the eye-js migration package. Build its wasm bundle
-      # (crates/sparq-reason-wasm) + tsc, run the eye-js socrates acceptance + overload/stub
-      # suite, and verify the tarball ships dist/ + the wasm engine. wasm-pack is installed above.
+      # (crates/sparq-reason-wasm) + tsc + the classic-`<script>` IIFE bundle ([OPUS-5]
+      # sq-xqchl.3, esbuild), run the eye-js socrates acceptance + overload/stub + IIFE suite,
+      # and verify the tarball ships dist/ + the wasm engine. wasm-pack is installed above.
       - name: eye-js compat package (build + test + guardrail)
         working-directory: packages/eyereasoner-compat
         run: |

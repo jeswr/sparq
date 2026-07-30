@@ -61,7 +61,7 @@ These are re-runnable, file-or-test-cited, and gating in CI — sparq can stand 
 | **ISMS / Statement-of-Applicability** sign-off + operating programme | iso27001 | GAP-ISO-1 (`soa-template.md` is the scaffold) |
 | **External penetration test** + accredited ASVS L2 assessor | asvs (cis) | AUDIT-READY |
 | **CE marking / EU Declaration of Conformity / Article-14 reporting** | cra | CRA-CA.2/CA.3 (org act) |
-| **SLSA Build L3** (isolated trusted builder) — L2 is the honest ceiling today | slsa | GX-11 / `sq-toze.25` |
+| **SLSA Build L3** (isolated trusted builder) — L2 is the honest ceiling today; sq-toze.25 wired the isolated builder for the release **archives** and #4570 extended it to the GUI bundles, SBOM/VEX, conformance report and `dist.yml` binaries, but every lane is tag/dispatch-triggered and none has run yet, and the **ghcr container image** is still in-band | slsa | GX-11 / `sq-toze.25` + #4570 |
 | Accredited-body **certificates** (ISO 27001, SLSA-L3, SOC2/27701) | iso27001, slsa, privacy | external by definition |
 | Memory-safety **formal-methods** proof / accredited third-party B5 audit | memsafety | MS-G4 + external |
 | Human-owned filings: **OpenSSF Best-Practices badge** (`sq-toze.5`), first `v*` release + first Sigstore/SLSA attestation, registry-publish provenance (crates.io has no upstream mechanism) | openssf, sbom, slsa | `sq-toze.5` / `sq-toze.24` / `sq-jgt3` |

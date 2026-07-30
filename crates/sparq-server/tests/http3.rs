@@ -16,6 +16,8 @@ use bytes::{Buf as _, Bytes};
 use futures_util::{SinkExt as _, StreamExt as _};
 use h3::quic::OpenStreams;
 use quinn::crypto::rustls::QuicClientConfig;
+use rustls::pki_types::pem::PemObject as _;
+use rustls::pki_types::CertificateDer;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -77,7 +79,7 @@ fn free_udp_addr() -> TestResult<SocketAddr> {
 fn h3_client(ca_path: &std::path::Path) -> TestResult<quinn::Endpoint> {
     let ca_file = std::fs::File::open(ca_path)?;
     let mut roots = rustls::RootCertStore::empty();
-    for cert in rustls_pemfile::certs(&mut std::io::BufReader::new(ca_file)) {
+    for cert in CertificateDer::pem_reader_iter(ca_file) {
         roots.add(cert?)?;
     }
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
@@ -227,28 +229,46 @@ async fn h3_response_matrix_matches_h1_and_websocket_falls_back() -> TestResult 
 
     let (http, tcp_base) = tcp_client(tcp_addr, cfg!(feature = "http2"))?;
     let readiness_url = format!("{tcp_base}/health");
-    let mut ready = false;
+    let expected_alt_svc = format!("h3=\":{}\"; ma=86400", udp_addr.port());
+    // [SONNET-4.6] The Alt-Svc header is installed only after the QUIC endpoint
+    // is bound, so it is the readiness condition needed by this test.
+    let mut health = None;
+    let mut last_probe_failure = None;
     for _ in 0..100 {
         match http.get(&readiness_url).send().await {
-            Ok(_) => {
-                ready = true;
-                break;
+            Ok(response) => {
+                let status = response.status();
+                let alt_svc = response
+                    .headers()
+                    .get("alt-svc")
+                    .and_then(|value| value.to_str().ok());
+                if status.is_success() && alt_svc == Some(expected_alt_svc.as_str()) {
+                    health = Some(response);
+                    break;
+                } else {
+                    last_probe_failure =
+                        Some(format!("status {}, alt-svc {:?}", status, alt_svc));
+                }
             }
-            Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
+            Err(error) => last_probe_failure = Some(error.to_string()),
         }
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    if !ready {
+    let Some(health) = health else {
         let _ = server.0.kill();
         let mut stderr = String::new();
         if let Some(mut pipe) = server.0.stderr.take() {
             pipe.read_to_string(&mut stderr)?;
         }
         let _ = server.0.wait();
-        return Err(format!("server did not become ready: {stderr}").into());
-    }
-    let health = http.get(format!("{tcp_base}/health")).send().await?;
+        return Err(format!(
+            "server did not become ready (last probe failure: {}): {}",
+            last_probe_failure.as_deref().unwrap_or("no probe completed"),
+            stderr
+        )
+        .into());
+    };
     assert_eq!(health.version(), reqwest::Version::HTTP_11);
-    let expected_alt_svc = format!("h3=\":{}\"; ma=86400", udp_addr.port());
     assert_eq!(
         health
             .headers()
@@ -383,7 +403,7 @@ async fn h3_response_matrix_matches_h1_and_websocket_falls_back() -> TestResult 
     let (mut websocket, upgrade) = {
         let ca_file = std::fs::File::open(fixture("http3-ca.pem"))?;
         let mut roots = rustls::RootCertStore::empty();
-        for cert in rustls_pemfile::certs(&mut std::io::BufReader::new(ca_file)) {
+        for cert in CertificateDer::pem_reader_iter(ca_file) {
             roots.add(cert?)?;
         }
         let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());

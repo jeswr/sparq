@@ -80,6 +80,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum_server::tls_rustls::RustlsConfig;
+// [OPUS-5] sq-5ah3p: PEM decoding comes from `rustls-pki-types`' `PemObject` trait, reached through
+// rustls' own `pki_types` re-export rather than a separate direct dependency — that spelling makes
+// version skew between the DER types rustls accepts and the ones we decode structurally impossible,
+// and it retires the archived `rustls-pemfile` shim (RUSTSEC-2025-0134), which since 2.x has been a
+// thin legacy wrapper over exactly these APIs.
+use rustls::pki_types::pem::{Error as PemError, PemObject};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 /// Env var naming the PEM **certificate chain** file (leaf first). Set together with [`ENV_TLS_KEY`].
@@ -518,8 +524,13 @@ fn build_mtls_server_config(
 
 /// Parse a PEM certificate chain (leaf first) into DER. A PEM with no CERTIFICATE block is a Malformed
 /// boot error (an empty chain would fail deep inside rustls with an opaque message).
+///
+/// `pem_slice_iter` yields ONLY `CERTIFICATE` sections, in file order, skipping any other section
+/// kind — notably a `PRIVATE KEY` bundled into the same file, which operators commonly do. That is
+/// the same filtering the retired `rustls_pemfile::certs` did, because that function was itself a
+/// wrapper over this parser.
 fn load_cert_chain(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>, TlsConfigError> {
-    let certs = rustls_pemfile::certs(&mut &pem[..])
+    let certs = CertificateDer::pem_slice_iter(pem)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| TlsConfigError::Malformed {
             source: io::Error::other(e),
@@ -533,14 +544,19 @@ fn load_cert_chain(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>, TlsConfig
 }
 
 /// Parse the FIRST PEM private key (PKCS#8 / PKCS#1 / SEC1) into DER. Absent ⇒ a Malformed boot error.
+///
+/// `PrivateKeyDer::from_pem_slice` reports "no key here" as [`PemError::NoItemsFound`], where the
+/// retired `rustls_pemfile::private_key` reported it as `Ok(None)`; that one variant is mapped back
+/// to the same operator-facing message so the boot diagnostic is unchanged by the migration.
 fn load_private_key(pem: &[u8]) -> Result<PrivateKeyDer<'static>, TlsConfigError> {
-    rustls_pemfile::private_key(&mut &pem[..])
-        .map_err(|e| TlsConfigError::Malformed {
-            source: io::Error::other(e),
-        })?
-        .ok_or_else(|| TlsConfigError::Malformed {
-            source: io::Error::other("TLS private-key PEM contains no PRIVATE KEY block"),
-        })
+    PrivateKeyDer::from_pem_slice(pem).map_err(|e| TlsConfigError::Malformed {
+        source: match e {
+            PemError::NoItemsFound => {
+                io::Error::other("TLS private-key PEM contains no PRIVATE KEY block")
+            }
+            other => io::Error::other(other),
+        },
+    })
 }
 
 /// The RFC 8705 §2.2 **self-signed-flavour** optional client-certificate verifier.
@@ -1064,6 +1080,73 @@ mod tests {
         assert!(
             !mtls_bound_tokens_from_env(),
             "absent ⇒ OFF (the default posture)"
+        );
+    }
+
+    /// [OPUS-5] sq-5ah3p: the behavioural contract of the two PEM loaders, pinned independently of
+    /// which crate implements the decode. These four properties are exactly what the retired
+    /// `rustls-pemfile` calls provided, so they are what the `PemObject` migration must preserve:
+    /// (1) EVERY `CERTIFICATE` section is returned, in file order, leaf first; (2) a non-certificate
+    /// section sharing the file (the common "cert and key concatenated" layout) is SKIPPED rather
+    /// than erroring or being mistaken for a cert; (3) a PEM carrying no certificate is a `Malformed`
+    /// boot error with the operator-facing message, not an empty chain handed to rustls; (4) a key
+    /// file with no key section is likewise `Malformed` with its own message — the one case where
+    /// `PemObject` reports `NoItemsFound` and the old API reported `Ok(None)`.
+    #[test]
+    fn pem_loaders_split_chain_from_key_and_reject_empty_input() {
+        let (cert_pem, key_pem) = self_signed_localhost_pem();
+
+        // (1) A two-element chain round-trips in order. The second element is the checked-in fixture
+        // CA — a certificate that is definitely NOT the minted leaf — so a reversed or deduplicated
+        // iterator cannot satisfy the index assertions below.
+        let ca_pem = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/test-ca.pem"
+        ))
+        .expect("read fixture CA");
+        let mut chain_pem = cert_pem.clone();
+        chain_pem.extend_from_slice(&ca_pem);
+        let chain = load_cert_chain(&chain_pem).expect("a two-certificate chain parses");
+        assert_eq!(chain.len(), 2, "both CERTIFICATE sections must be returned");
+        let leaf_only = load_cert_chain(&cert_pem).expect("single-cert PEM parses");
+        let ca_only = load_cert_chain(&ca_pem).expect("fixture CA parses");
+        assert_ne!(leaf_only[0], ca_only[0], "the two fixtures must differ");
+        assert_eq!(
+            chain[0], leaf_only[0],
+            "the FIRST section of the file must be the FIRST (leaf) entry of the chain"
+        );
+        assert_eq!(chain[1], ca_only[0], "the issuer must follow the leaf");
+
+        // (2) A cert file that also carries the key yields the certs only — and the key loader
+        // reads that same bundle happily, skipping the certificate section ahead of the key.
+        let mut bundle = cert_pem.clone();
+        bundle.extend_from_slice(&key_pem);
+        assert_eq!(
+            load_cert_chain(&bundle).expect("bundle parses").len(),
+            1,
+            "the PRIVATE KEY section must be skipped, not counted as a certificate"
+        );
+        load_private_key(&bundle).expect("the key is found past the leading certificate");
+
+        // (3) No CERTIFICATE section ⇒ Malformed, with the operator-facing message.
+        let err = load_cert_chain(&key_pem).expect_err("a key-only PEM has no certificate");
+        let TlsConfigError::Malformed { source } = err else {
+            panic!("a certificate-less PEM must be Malformed");
+        };
+        assert!(
+            source.to_string().contains("no CERTIFICATE block"),
+            "unexpected diagnostic: {source}"
+        );
+
+        // (4) No key section ⇒ Malformed. This is the `NoItemsFound` remap: without it the operator
+        // would see `PemObject`'s bare "no items found" instead of the actionable message.
+        let err = load_private_key(&cert_pem).expect_err("a cert-only PEM has no private key");
+        let TlsConfigError::Malformed { source } = err else {
+            panic!("a key-less PEM must be Malformed");
+        };
+        assert!(
+            source.to_string().contains("no PRIVATE KEY block"),
+            "unexpected diagnostic: {source}"
         );
     }
 

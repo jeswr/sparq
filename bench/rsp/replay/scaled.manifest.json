@@ -1,0 +1,18 @@
+{
+  "bead": "sq-3f5ay",
+  "note": "PIN for the scaled matched-workload replay. The payload is NOT committed (~10^5 lines); what is pinned is the deterministic generator (rsp4j_compare.py gen-replay) plus these parameters and the sha256 of the file they produce. Regenerating with these parameters MUST reproduce the sha256 byte-for-byte, and both engines are driven from that one file.",
+  "shape": "srbench_join (the only count-comparable scenario \u2014 research/gap-rsp-2026-07.md)",
+  "generator": "bench/rsp/rsp4j_compare.py gen-replay",
+  "params": {
+    "sensors": 100,
+    "windows": 100,
+    "obs_per_sensor": 20,
+    "range": 10,
+    "step": 10
+  },
+  "file": "scaled_srbench.ts.tsv",
+  "sha256": "55fd9ca008996830a281e904fa735624cc2afa57174a0d00c822dcc91af9bdfb",
+  "events": 210000,
+  "windows": 100,
+  "srbench_join_rows_per_window": 2000
+}

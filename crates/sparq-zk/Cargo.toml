@@ -56,8 +56,8 @@ secprop-annotations = ["dep:oxttl"]
 # (`eddsa-rdfc-2022` / `ecdsa-rdfc-2019`) at the HOST (off-circuit, fail-closed),
 # then re-commit under sparq's commitment pipeline and record the
 # `zk:sourceCryptosuite` provenance. OFF by default: a normal build does NOT pull
-# ed25519/p256/sha2 and the `vc_bridge` module is compiled out — the default
-# `commit`/`ingest`/`registry`/`sig` surface is byte-unchanged. The
+# ed25519/p256/sha2/serde_json and the `vc_bridge` module is compiled out — the
+# default `commit`/`ingest`/`registry`/`sig` surface is byte-unchanged. The
 # `zk:sourceCryptosuite` registry SLOT (the provenance field + IRI const +
 # (de)serialization) is always present (it is just an optional registry field);
 # this feature gates the VERIFY+re-commit bridge that POPULATES it. NOT externally

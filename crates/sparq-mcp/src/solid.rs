@@ -23,6 +23,37 @@
 //!   gated behind the SAME off-by-default write enablement as the base server's
 //!   `update` tool ([`SolidServerConfig::allow_update`], draft §7.1).
 //!
+//! # The `resources` surface + notifications (Class N, draft §8 / §10)
+//!
+//! [SONNET-4.6] sq-cmjmr — the pod server declares the MCP **`resources`** capability
+//! with **`subscribe: true`** and binds it to Solid Notifications Protocol semantics:
+//!
+//! - `resources/list` — the pod documents THIS session may read, one MCP resource per
+//!   document with `uri` = the resource IRI. A document the session cannot read is
+//!   simply absent (never an entry, never an error), so the listing itself is the
+//!   authorization boundary.
+//! - `resources/read` — the same bytes [`SolidMcpServer`]'s `resource_get` tool serves,
+//!   from the same dataset the `query` tool evaluates over.
+//! - `resources/subscribe` / `resources/unsubscribe` — a subscription on the topic IRI,
+//!   the MCP-side spelling of a Solid Notifications subscription on that topic.
+//! - `notifications/resources/updated` — emitted when a subscribed topic's state
+//!   changes. The payload is **content-free**: the topic IRI plus an ActivityStreams 2.0
+//!   activity type (`Create`/`Update`/`Delete`/`Add`/`Remove`), never the triples. The
+//!   subscriber re-reads through the authorized read path.
+//!
+//! **Authorization is checked twice** (draft §10): once when the subscription is created
+//! (no read access ⇒ the same existence-non-disclosure not-found error described below,
+//! so subscribing cannot probe for resources) and AGAIN before every
+//! single delivery. If the session's read access is revoked after subscribing, deliveries
+//! simply stop — the client is **never told**, because a revocation notification would
+//! itself disclose that a resource it can no longer read had changed. If access is later
+//! restored, deliveries resume; the subscription is not silently torn down.
+//!
+//! Delivery is pull-based, matching this crate's transport-agnostic dispatch core: a
+//! mutating tool call queues the notifications it caused, and the embedder drains them
+//! with [`SolidMcpServer::take_notifications`] after each
+//! [`SolidMcpServer::handle_message`], writing them to its transport.
+//!
 //! # Existence non-disclosure (draft §9.3)
 //!
 //! For every resource-addressed tool, a session **lacking read access to the target
@@ -44,30 +75,71 @@
 //! same way, and re-materialize the view so a created document becomes visible (and a
 //! deleted one invisible) to the very next tool call.
 //!
+//! # Content negotiation (draft §6.4)
+//!
+//! [SONNET-4.6] sq-wbsf5 — `resource_get` takes an optional `accept` and serves the
+//! representation it names, from the SAME triples in both cases:
+//!
+//! - `application/n-triples` — the default when `accept` is absent, so an existing caller
+//!   sees no change.
+//! - `text/turtle` — the same triples through `oxttl`'s `TurtleSerializer` (the oxigraph
+//!   writer, so the body is guaranteed well-formed Turtle), with `TURTLE_PREFIXES`
+//!   registered so pod vocabularies compact to `prefix:local`.
+//!
+//! Negotiation is a **pure function of the `accept` string** (`negotiate`) evaluated
+//! BEFORE the read gate, so it cannot become an existence oracle. An unsupported `accept`
+//! is a tool error naming exactly what IS served — never silent coercion to another
+//! syntax. `accept` is ONE media type (`;`-parameters such as `q=` are ignored), not an
+//! HTTP `Accept` header list: a comma-separated list matches nothing and is refused
+//! rather than silently resolved to a guess.
+//!
+//! The MCP `resources/read` surface has no per-request `accept` in the protocol, so it
+//! stays `application/n-triples` — the same bytes `resource_get` serves by default, from
+//! the same `document_triples` read path, so the two cannot disagree.
+//!
+//! # Non-RDF (binary) resources — SCOPED OUT, deliberately
+//!
+//! [SONNET-4.6] sq-wbsf5 — LDP has non-RDF sources (an image, a PDF); **this server has
+//! none, by decision, not by omission**, and both write and read paths say so:
+//! `resource_put` refuses any non-RDF `content_type` naming the scope-out, and no non-RDF
+//! resource can exist to be read (nothing else can create one). The reasons:
+//!
+//! - **There is nowhere to put the bytes.** The pod IS a `sparq_solid::PodStore` — an RDF
+//!   dataset of one named graph per document. A binary body is not triples, so supporting
+//!   it needs a second, non-RDF store plus its own authorization join; that is a
+//!   `sparq-solid` storage design, not an MCP tool-surface change, and inventing a
+//!   base64-literal side-channel in the graph would be a fake pod.
+//! - **The authorization story would have to be re-derived.** WAC/ACP modes are evaluated
+//!   over the dataset; a blob outside it has no graph to anchor its ACL to, and the
+//!   existence-non-disclosure guarantee above is only as good as the one gate every read
+//!   passes through.
+//!
+//! Until a pod store with a blob half exists, an honest refusal beats a half-implemented
+//! binary path. When it does, the MCP shape is already known: `resources/read` carries a
+//! base64 `blob` field alongside `text` for exactly this case.
+//!
 //! # Honest v1 limits
 //!
-//! - RDF sources only: `content_type` must be Turtle or N-Triples (or JSON-LD when
-//!   the opt-in `jsonld` feature is enabled), and `resource_get` serves
-//!   `application/n-triples` (an `accept` for anything else is a tool error, never
-//!   silent coercion). Non-RDF (binary) resources are out of scope. [GPT-5.6]
+//! - RDF sources only: `content_type` must be Turtle or N-Triples (or JSON-LD when the
+//!   opt-in `jsonld` feature is enabled) — see the non-RDF scope-out above. [GPT-5.6]
 //! - The SPARQL `update` tool delegates to the session-checked
 //!   `PodStore::update_as` / `update_as_acp`, which applies the per-graph write
 //!   permission check but not the wall-clock/row budget the read tools enforce.
 //! - Time-windowed conditional grants fail closed unless [`SolidServerConfig::now`]
 //!   supplies a request clock.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use oxrdf::{NamedNode, Term};
+use oxrdf::{NamedNode, Term, Triple};
 use serde_json::{json, Value};
 use sparq_core::Graph;
 use sparq_engine::QueryBudget;
 use sparq_solid::{Mode, PodStore, Session};
 
-use crate::jsonrpc::{
-    Request, Response, RpcError, INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND,
-};
-use crate::server::{arg_str, serialize, tool_text_result};
+use crate::jsonrpc::{Request, RpcError, INVALID_PARAMS, METHOD_NOT_FOUND, RESOURCE_NOT_FOUND};
+use crate::notifications::{classify, ActivityType, Subscriptions, TopicDigest};
+use crate::server::{arg_str, handle_raw, tool_text_result};
 use crate::tools::ToolSpec;
 
 /// `ldp:contains` — the containment predicate a container's own graph stores.
@@ -143,6 +215,11 @@ impl Default for SolidServerConfig {
 pub struct SolidMcpServer {
     store: PodStore,
     config: SolidServerConfig,
+    /// [SONNET-4.6] sq-cmjmr — the topics this session subscribed to plus the queue of
+    /// content-free notifications awaiting [`SolidMcpServer::take_notifications`]. Bound
+    /// to this server (⇒ to this one authenticated session), so a subscription can never
+    /// outlive or escape its authorization context.
+    subs: Subscriptions,
 }
 
 /// The pod `query` tool (session-scoped — distinct semantics from the base server's).
@@ -175,9 +252,10 @@ pub const RESOURCE_GET: ToolSpec = ToolSpec {
     name: "resource_get",
     description: "Return the RDF representation of ONE pod resource (document), served \
                   from the same named-graph-per-document dataset the `query` tool \
-                  evaluates over. Result: the resource content as N-Triples plus its \
-                  media type. A resource this session cannot read is reported with the \
-                  SAME error as a resource that does not exist.",
+                  evaluates over. Result: the resource content plus the media type it \
+                  was served as — N-Triples by default, or Turtle when `accept` asks for \
+                  it (same triples, different syntax). A resource this session cannot \
+                  read is reported with the SAME error as a resource that does not exist.",
     input_schema: || {
         json!({
             "type": "object",
@@ -188,9 +266,12 @@ pub const RESOURCE_GET: ToolSpec = ToolSpec {
                 },
                 "accept": {
                     "type": "string",
-                    "description": "Optional preferred media type. This server serves \
-                                    \"application/n-triples\"; any other value is a tool \
-                                    error (no silent coercion)."
+                    "description": "Optional media type to serve: \
+                                    \"application/n-triples\" (the default when omitted) \
+                                    or \"text/turtle\". ONE media type, not an HTTP \
+                                    Accept list; any other value is a tool error (no \
+                                    silent coercion). Non-RDF (binary) representations \
+                                    are out of scope — this pod stores RDF only."
                 }
             },
             "required": ["url"],
@@ -263,7 +344,10 @@ pub const RESOURCE_PUT: ToolSpec = ToolSpec {
                 "content": { "type": "string", "description": "The full new RDF body." },
                 "content_type": {
                     "type": "string",
-                    "description": "\"text/turtle\" or \"application/n-triples\"."
+                    "description": "\"text/turtle\" or \"application/n-triples\" — RDF \
+                                    sources only. Non-RDF (binary) resources are out of \
+                                    scope: this pod is an RDF dataset with nowhere to \
+                                    store bytes, so a binary body is refused, not stored."
                 }
             },
             "required": ["url", "content", "content_type"],
@@ -342,6 +426,105 @@ fn rdf_format(content_type: &str) -> Option<&'static str> {
     }
 }
 
+/// The media types `resource_put` will INGEST, for the refusal message. RDF sources only
+/// — non-RDF (binary) bodies are scoped out, see the module docs. [SONNET-4.6] sq-wbsf5
+#[cfg(not(feature = "jsonld"))]
+const INGESTED_MEDIA_TYPES: &str = "text/turtle, application/n-triples";
+#[cfg(feature = "jsonld")]
+const INGESTED_MEDIA_TYPES: &str = "text/turtle, application/n-triples, application/ld+json";
+
+/// The media types `resource_get` will SERVE, for the refusal message. Hand-kept in step
+/// with the arms of `negotiate`; `negotiate_refuses_an_unservable_accept_naming_what_is_served`
+/// asserts the refusal names both, so a representation added without updating this string
+/// is caught by the tests rather than shipped as a wrong advertisement. [SONNET-4.6] sq-wbsf5
+const SERVED_MEDIA_TYPES: &str = "application/n-triples, text/turtle";
+
+/// The representation `resource_get` serves, chosen by [`negotiate`] from the caller's
+/// `accept`. Both variants render the SAME triples from the SAME read path — the choice
+/// is syntax only, never content. [SONNET-4.6] sq-wbsf5
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Representation {
+    /// `application/n-triples` — the default when no `accept` is supplied.
+    NTriples,
+    /// `text/turtle`, written by `oxttl`'s `TurtleSerializer`.
+    Turtle,
+}
+
+impl Representation {
+    /// The media type this representation is reported as in the tool result.
+    fn media_type(self) -> &'static str {
+        match self {
+            Representation::NTriples => "application/n-triples",
+            Representation::Turtle => "text/turtle",
+        }
+    }
+}
+
+/// Content negotiation for `resource_get` (draft §6.4): resolve the caller's `accept` to
+/// the representation to serve.
+///
+/// A **pure function of the `accept` value** — it never touches the store, so it cannot
+/// become an existence oracle no matter where the caller runs it. Absent `accept` keeps
+/// the v1 default (N-Triples). An unsupported value is refused with a message naming
+/// exactly what IS served: no silent coercion to a syntax the caller did not ask for.
+/// One media type only (`;`-parameters such as `q=` are ignored) — an HTTP-style
+/// comma-separated `Accept` list matches nothing and is refused rather than guessed at.
+fn negotiate(accept: Option<&str>) -> Result<Representation, String> {
+    let Some(accept) = accept else { return Ok(Representation::NTriples) };
+    match rdf_format(accept) {
+        Some("ntriples") => Ok(Representation::NTriples),
+        Some("turtle") => Ok(Representation::Turtle),
+        // Includes `Some("jsonld")` under the `jsonld` feature: that parser is INGEST-only
+        // (`resource_put`), there is no JSON-LD writer here, so serving it would be a lie.
+        _ => Err(format!(
+            "unsupported accept `{}`: this server serves {}",
+            accept, SERVED_MEDIA_TYPES
+        )),
+    }
+}
+
+/// Prefixes registered on the Turtle writer so the vocabularies that dominate pod
+/// documents compact to `prefix:local`. Purely cosmetic and purely additive: a
+/// non-matching IRI simply renders in full, so the set can never make output wrong —
+/// only more or less compact. Kept short and stable on purpose (there is no per-request
+/// prefix input to negotiate against). [SONNET-4.6] sq-wbsf5
+const TURTLE_PREFIXES: &[(&str, &str)] = &[
+    ("rdf", "http://www.w3.org/1999/02/22-rdf-syntax-ns#"),
+    ("rdfs", "http://www.w3.org/2000/01/rdf-schema#"),
+    ("xsd", "http://www.w3.org/2001/XMLSchema#"),
+    ("ldp", "http://www.w3.org/ns/ldp#"),
+    ("acl", "http://www.w3.org/ns/auth/acl#"),
+    ("acp", "http://www.w3.org/ns/solid/acp#"),
+    ("solid", "http://www.w3.org/ns/solid/terms#"),
+    ("foaf", "http://xmlns.com/foaf/0.1/"),
+    ("dcterms", "http://purl.org/dc/terms/"),
+    ("schema", "https://schema.org/"),
+];
+
+/// Serialize a document's triples as **Turtle** through `oxttl`'s `TurtleSerializer` —
+/// the oxigraph writer, so the body is guaranteed well-formed Turtle rather than
+/// hand-rolled — with [`TURTLE_PREFIXES`] registered for compaction.
+///
+/// Writing into an in-memory `Vec<u8>` cannot actually fail, but a serializer-internal
+/// error is propagated as `Err` rather than swallowed: a truncated body reported as a
+/// successful read would be exactly the kind of silent lie this surface must not tell.
+fn triples_to_turtle(triples: &[Triple]) -> Result<String, String> {
+    let mut ser = oxttl::TurtleSerializer::new();
+    for (name, iri) in TURTLE_PREFIXES {
+        // `with_prefix` fails only on a syntactically invalid namespace IRI; ours are
+        // constants, so fall back to the un-prefixed writer rather than panic if a future
+        // edit breaks one (less compaction, never wrong output).
+        ser = ser.with_prefix(*name, *iri).unwrap_or_else(|_| oxttl::TurtleSerializer::new());
+    }
+    let mut w = ser.for_writer(Vec::new());
+    for t in triples {
+        w.serialize_triple(t.as_ref())
+            .map_err(|e| format!("Turtle serialization failed: {}", e))?;
+    }
+    let bytes = w.finish().map_err(|e| format!("Turtle serialization failed: {}", e))?;
+    String::from_utf8(bytes).map_err(|e| format!("Turtle serialization was not UTF-8: {}", e))
+}
+
 /// Whether `iri` names an access-control document by the `.acl`/`.acr` convention
 /// (mirrors `sparq-solid`'s write-through targeting rule).
 fn is_control_doc(iri: &str) -> bool {
@@ -369,6 +552,14 @@ fn valid_target(url: &str) -> Result<NamedNode, String> {
         return Err(format!("invalid target <{url}>: the `{RESERVED_PREFIX}` graph space is reserved"));
     }
     NamedNode::new(url).map_err(|e| format!("invalid resource IRI <{url}>: {e}"))
+}
+
+/// Extract the required string `uri` of a `resources/*` request, or the JSON-RPC
+/// invalid-params error naming the method. [SONNET-4.6] sq-cmjmr
+fn resource_uri_param<'a>(params: &'a Value, method: &str) -> Result<&'a str, RpcError> {
+    params.get("uri").and_then(Value::as_str).ok_or_else(|| {
+        RpcError::new(INVALID_PARAMS, format!("{} requires a string `uri`", method))
+    })
 }
 
 /// Pretty-print a JSON tool result.
@@ -401,7 +592,7 @@ impl SolidMcpServer {
     ///
     /// Returns `Err` if that materialization fails.
     pub fn with_config(store: PodStore, config: SolidServerConfig) -> Result<Self, String> {
-        let mut server = SolidMcpServer { store, config };
+        let mut server = SolidMcpServer { store, config, subs: Subscriptions::default() };
         server.rematerialize()?;
         Ok(server)
     }
@@ -418,30 +609,11 @@ impl SolidMcpServer {
     }
 
     /// Handle one raw JSON-RPC message — the pod twin of
-    /// [`crate::McpServer::handle_message`], with the identical framing contract
-    /// (`Some(response)` for a request, `None` for a notification).
+    /// [`crate::McpServer::handle_message`], sharing the very same framing core
+    /// (`Some(response)` for a request, `None` for a notification, and top-level
+    /// JSON-RPC batch arrays accepted per JSON-RPC 2.0 §6).
     pub fn handle_message(&mut self, raw: &str) -> Option<String> {
-        let req: Request = match serde_json::from_str(raw) {
-            Ok(r) => r,
-            Err(e) => {
-                let resp = Response::err(
-                    Value::Null,
-                    RpcError::new(INVALID_REQUEST, format!("invalid JSON-RPC request: {e}")),
-                );
-                return Some(serialize(&resp));
-            }
-        };
-        let is_notification = req.is_notification();
-        let id = req.id.clone().unwrap_or(Value::Null);
-        let outcome = self.dispatch(&req);
-        if is_notification {
-            return None;
-        }
-        let resp = match outcome {
-            Ok(result) => Response::ok(id, result),
-            Err(e) => Response::err(id, e),
-        };
-        Some(serialize(&resp))
+        handle_raw(raw, |req| self.dispatch(req))
     }
 
     /// The session this server is bound to (borrowing the config's owned strings).
@@ -493,7 +665,15 @@ impl SolidMcpServer {
         match req.method.as_str() {
             "initialize" => Ok(json!({
                 "protocolVersion": crate::server::negotiate_protocol_version(&req.params),
-                "capabilities": { "tools": {} },
+                // [SONNET-4.6] sq-cmjmr: `resources` with `subscribe: true` — pod
+                // documents are MCP resources and a client may subscribe to one.
+                // `listChanged` stays FALSE: this server never pushes an unsolicited
+                // list-changed notification, and declaring a capability it does not
+                // implement would be an overclaim.
+                "capabilities": {
+                    "tools": {},
+                    "resources": { "subscribe": true, "listChanged": false },
+                },
                 "serverInfo": {
                     "name": self.config.server_name,
                     "version": env!("CARGO_PKG_VERSION"),
@@ -506,6 +686,10 @@ impl SolidMcpServer {
                 Ok(json!({ "tools": tools }))
             }
             "tools/call" => self.tools_call(&req.params),
+            "resources/list" => Ok(self.resources_list()),
+            "resources/read" => self.resources_read(&req.params),
+            "resources/subscribe" => self.resources_subscribe(&req.params),
+            "resources/unsubscribe" => self.resources_unsubscribe(&req.params),
             other => {
                 Err(RpcError::new(METHOD_NOT_FOUND, format!("method not found: {other}")))
             }
@@ -520,9 +704,11 @@ impl SolidMcpServer {
             .ok_or_else(|| RpcError::new(INVALID_PARAMS, "tools/call requires a string `name`"))?;
         let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
+        let mutating = MUTATING.contains(&name);
+
         // Reject every mutating tool up front when writes are disabled — before any
         // argument is even parsed (the same fail-closed shape as the base server).
-        if MUTATING.contains(&name) && !self.allow_update() {
+        if mutating && !self.allow_update() {
             return Err(RpcError::new(
                 METHOD_NOT_FOUND,
                 format!(
@@ -531,6 +717,19 @@ impl SolidMcpServer {
                 ),
             ));
         }
+
+        // [SONNET-4.6] sq-cmjmr: snapshot every subscribed topic BEFORE a mutating tool
+        // runs, so the change it causes is detected uniformly — including the SPARQL
+        // `update` tool, which does not report which documents it touched. Costs nothing
+        // when nothing is subscribed. The read-authorization snapshot is taken at the same
+        // instant: a topic the mutation DELETES no longer has a policy afterwards, so its
+        // pre-mutation readability is the only honest record of whether this session was
+        // still allowed to learn about it (see `queue_topic_changes`).
+        let (before, readable_before) = if mutating {
+            (self.digest_subscribed(), self.readable_subscribed())
+        } else {
+            (BTreeMap::new(), BTreeSet::new())
+        };
 
         let result = match name {
             "query" => self.tool_query(&args),
@@ -544,6 +743,12 @@ impl SolidMcpServer {
                 return Err(RpcError::new(METHOD_NOT_FOUND, format!("unknown tool: {other}")))
             }
         };
+
+        if mutating {
+            // A tool that failed (or that rolled back) leaves every digest equal, so this
+            // emits nothing — no bespoke per-tool success plumbing needed.
+            self.queue_topic_changes(&before, &readable_before);
+        }
 
         match result {
             Ok(text) => Ok(tool_text_result(text, false)),
@@ -578,30 +783,53 @@ impl SolidMcpServer {
     fn tool_resource_get(&self, args: &Value) -> Result<String, String> {
         let url = arg_str(args, "url")?;
         NamedNode::new(url).map_err(|e| format!("invalid resource IRI <{url}>: {e}"))?;
-        if let Some(accept) = args.get("accept").and_then(Value::as_str) {
-            if rdf_format(accept) != Some("ntriples") {
-                return Err(format!(
-                    "unsupported accept `{accept}`: this server serves application/n-triples"
-                ));
-            }
+        // Negotiate BEFORE the read gate: the choice depends only on `accept`, so an
+        // unsupported media type answers identically whether or not the resource exists.
+        let representation = negotiate(args.get("accept").and_then(Value::as_str))?;
+        let content = self.document_as(url, representation)?;
+        Ok(pretty(&json!({
+            "url": url,
+            "content_type": representation.media_type(),
+            "content": content,
+        })))
+    }
+
+    /// One pod document rendered in the negotiated `representation`, behind the read gate.
+    /// Both syntaxes come from the SAME `document_triples` call, so negotiation can only
+    /// change the spelling, never the content. [SONNET-4.6] sq-wbsf5
+    fn document_as(&self, url: &str, representation: Representation) -> Result<String, String> {
+        let triples = self.document_triples(url)?;
+        match representation {
+            Representation::NTriples => Ok(sparq_engine::triples_to_ntriples(&triples)),
+            Representation::Turtle => triples_to_turtle(&triples),
         }
-        // NON-DISCLOSURE: unauthorized-read and nonexistent produce the SAME error.
+    }
+
+    /// The N-Triples representation of one pod document — what the `resources/read`
+    /// RESOURCE surface serves (MCP has no per-request `accept`, so it is not negotiable
+    /// there). It is the SAME rendering of the SAME triples the `resource_get` TOOL
+    /// serves by default, so the two surfaces cannot disagree (draft §6.4/§8).
+    fn document_ntriples(&self, url: &str) -> Result<String, String> {
+        self.document_as(url, Representation::NTriples)
+    }
+
+    /// The triples of one pod document — THE read gate every representation passes
+    /// through, under the configured budget.
+    ///
+    /// NON-DISCLOSURE (draft §9.3): unauthorized-read and nonexistent produce the SAME
+    /// error, so no surface built on this reveals that a resource exists.
+    fn document_triples(&self, url: &str) -> Result<Vec<Triple>, String> {
         if !self.allowed(url, Mode::Read) {
             return Err(not_found_error(url));
         }
         let Some(doc) = self.find_doc(url) else {
             return Err(not_found_error(url));
         };
-        let nt = sparq_engine::construct_ntriples_with_budget(
+        sparq_engine::construct_with_budget(
             doc,
             "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }",
             &self.budget(),
-        )?;
-        Ok(pretty(&json!({
-            "url": url,
-            "content_type": "application/n-triples",
-            "content": nt,
-        })))
+        )
     }
 
     /// `container_list`: direct `ldp:contains` members from the container's OWN stored
@@ -628,6 +856,184 @@ impl SolidMcpServer {
         }
         members.sort_by(|a, b| a["url"].as_str().cmp(&b["url"].as_str()));
         Ok(pretty(&json!({ "url": url, "members": members })))
+    }
+
+    // ───────── the MCP `resources` surface + notifications (draft §8/§10) ─────────
+
+    /// Drain every notification queued since the last call, each a complete JSON-RPC
+    /// notification message (`notifications/resources/updated`) ready to write to the
+    /// transport verbatim.
+    ///
+    /// Delivery is PULL-based because this crate's dispatch core owns no transport: call
+    /// this after each [`SolidMcpServer::handle_message`] and write whatever it returns
+    /// alongside the response. Each message carries only the topic IRI and the
+    /// ActivityStreams 2.0 activity type — the payload is content-free by construction
+    /// (draft §10). Only topics that passed the read check at delivery time appear.
+    /// [SONNET-4.6] sq-cmjmr
+    pub fn take_notifications(&mut self) -> Vec<String> {
+        self.subs.take()
+    }
+
+    /// The topic IRIs this session currently subscribes to, sorted (for embedders and
+    /// tests). [SONNET-4.6] sq-cmjmr
+    pub fn subscribed_topics(&self) -> Vec<String> {
+        self.subs.topics()
+    }
+
+    /// Digest every subscribed topic that currently exists. Topics absent from the map
+    /// do not exist right now — [`classify`] turns an absent→present transition into
+    /// `Create` and present→absent into `Delete`.
+    fn digest_subscribed(&self) -> BTreeMap<String, TopicDigest> {
+        let mut digests = BTreeMap::new();
+        if self.subs.is_empty() {
+            return digests;
+        }
+        for topic in self.subs.topics() {
+            if let Some(doc) = self.find_doc(&topic) {
+                digests.insert(topic, TopicDigest::of(doc));
+            }
+        }
+        digests
+    }
+
+    /// The subscribed topics this session may read RIGHT NOW, checked against each topic
+    /// ITSELF (never an ancestor). Snapshotted alongside [`Self::digest_subscribed`] so a
+    /// `Delete` delivery can be held to the topic's own pre-deletion policy — the policy
+    /// that vanishes with the resource. [SONNET-4.6] sq-cmjmr
+    fn readable_subscribed(&self) -> BTreeSet<String> {
+        let mut readable = BTreeSet::new();
+        if self.subs.is_empty() {
+            return readable;
+        }
+        for topic in self.subs.topics() {
+            if self.allowed(&topic, Mode::Read) {
+                readable.insert(topic);
+            }
+        }
+        readable
+    }
+
+    /// Compare the current topic digests against `before` and queue one notification per
+    /// changed topic — after RE-CHECKING read access against the post-mutation
+    /// authorization view.
+    ///
+    /// A session whose read access was revoked (possibly by this very write, e.g. an
+    /// `.acl` replacement) is dropped SILENTLY: no notification, no error, no "you were
+    /// unsubscribed" message. Telling it would itself disclose that a resource it may no
+    /// longer read had changed (draft §10). The subscription survives, so restoring
+    /// access resumes deliveries.
+    ///
+    /// The check runs at the topic's [authorization anchor](Self::auth_anchor), which is
+    /// the topic itself whenever the topic still exists. That matters for a `Delete`: a
+    /// just-deleted resource has no policy of its own left to evaluate, so a literal
+    /// check against it would fail closed and make deletion permanently unnotifiable.
+    /// The anchor — the nearest existing ancestor container, the same rule that
+    /// authorizes creating and deleting that IRI — is the policy that governs it.
+    ///
+    /// The ancestor fallback must not RE-GRANT what a resource-specific policy took away.
+    /// A session whose read access to the topic itself had been revoked (by an ACL on the
+    /// topic) can typically still read the parent container, so anchoring a `Delete` at
+    /// the parent alone would deliver — disclosing the deletion of a resource the session
+    /// was no longer allowed to read. So a `Delete` needs BOTH: the topic was readable
+    /// immediately BEFORE the mutation (`readable_before`, from
+    /// [`Self::readable_subscribed`] — the topic's own vanished policy), AND the surviving
+    /// governing policy at the anchor still permits disclosure.
+    fn queue_topic_changes(
+        &mut self,
+        before: &BTreeMap<String, TopicDigest>,
+        readable_before: &BTreeSet<String>,
+    ) {
+        if self.subs.is_empty() {
+            return;
+        }
+        let after = self.digest_subscribed();
+        for topic in self.subs.topics() {
+            let Some(activity) = classify(before.get(&topic), after.get(&topic)) else {
+                continue;
+            };
+            // A deleted topic's OWN pre-deletion policy still has to have allowed the
+            // read: the anchor stands in for a missing policy, never for a revoked one.
+            if activity == ActivityType::Delete && !readable_before.contains(&topic) {
+                continue;
+            }
+            // DELIVERY-TIME authorization — the second of the two checks (draft §10).
+            if !self.allowed(&self.auth_anchor(&topic), Mode::Read) {
+                continue;
+            }
+            self.subs.enqueue(&topic, activity);
+        }
+    }
+
+    /// `resources/list`: the pod documents THIS session may read, as MCP resources whose
+    /// `uri` IS the resource IRI. A document the session cannot read is simply absent —
+    /// the listing never errors and never hints that something was filtered.
+    fn resources_list(&self) -> Value {
+        let mut resources: Vec<Value> = Vec::new();
+        for (name, _) in &self.store.graph.named {
+            let Term::NamedNode(node) = name else { continue };
+            let uri = node.as_str();
+            // The reserved space holds the materialized auth view, not pod content.
+            if uri.starts_with(RESERVED_PREFIX) || !self.allowed(uri, Mode::Read) {
+                continue;
+            }
+            resources.push(json!({
+                "uri": uri,
+                // The IRI is the name: deriving a prettier label would be guessing, and
+                // the pod is the only authority on what a document is called.
+                "name": uri,
+                "mimeType": "application/n-triples",
+            }));
+        }
+        resources.sort_by(|a, b| a["uri"].as_str().cmp(&b["uri"].as_str()));
+        json!({ "resources": resources })
+    }
+
+    /// `resources/read`: the same representation the `resource_get` tool serves, in the
+    /// MCP `contents` shape. Unreadable and nonexistent are the same error (draft §9.3).
+    fn resources_read(&self, params: &Value) -> Result<Value, RpcError> {
+        let uri = resource_uri_param(params, "resources/read")?;
+        let text = self
+            .document_ntriples(uri)
+            .map_err(|message| RpcError::new(RESOURCE_NOT_FOUND, message))?;
+        Ok(json!({
+            "contents": [ {
+                "uri": uri,
+                "mimeType": "application/n-triples",
+                "text": text,
+            } ]
+        }))
+    }
+
+    /// `resources/subscribe`: bind an MCP subscription to a Solid Notifications
+    /// subscription on `uri` as the topic.
+    ///
+    /// SUBSCRIBE-TIME authorization (the first of the two checks, draft §10): a session
+    /// that cannot read the topic gets the existence-non-disclosure not-found error, so
+    /// subscribing cannot be used to probe which resources exist. v1 additionally
+    /// requires the topic to exist NOW — the fail-closed reading, since a decision on an
+    /// absent resource has no policy to evaluate.
+    fn resources_subscribe(&mut self, params: &Value) -> Result<Value, RpcError> {
+        let uri = resource_uri_param(params, "resources/subscribe")?;
+        NamedNode::new(uri).map_err(|e| {
+            RpcError::new(INVALID_PARAMS, format!("invalid resource IRI <{}>: {}", uri, e))
+        })?;
+        if uri.starts_with(RESERVED_PREFIX)
+            || !self.allowed(uri, Mode::Read)
+            || self.find_doc(uri).is_none()
+        {
+            return Err(RpcError::new(RESOURCE_NOT_FOUND, not_found_error(uri)));
+        }
+        self.subs.subscribe(uri);
+        Ok(json!({}))
+    }
+
+    /// `resources/unsubscribe`: drop the subscription. Idempotent and uniform — an
+    /// unknown topic gets the SAME empty result as a known one, so an unsubscribe never
+    /// discloses what this session was watching (or whether the topic exists).
+    fn resources_unsubscribe(&mut self, params: &Value) -> Result<Value, RpcError> {
+        let uri = resource_uri_param(params, "resources/unsubscribe")?;
+        self.subs.unsubscribe(uri);
+        Ok(json!({}))
     }
 
     /// `update`: session-checked SPARQL Update (`PodStore::update_as` — every touched
@@ -713,8 +1119,15 @@ impl SolidMcpServer {
         let content = arg_str(args, "content")?.to_string();
         let content_type = arg_str(args, "content_type")?.to_string();
         let name = valid_target(&url)?;
+        // RDF sources only. The refusal NAMES the scope-out (module docs: non-RDF
+        // resources are a `sparq-solid` storage decision, not an MCP surface one) so a
+        // caller learns the shape of the limit, not just that its body was rejected.
         let fmt = rdf_format(&content_type).ok_or_else(|| {
-            format!("unsupported content_type `{content_type}`: use text/turtle or application/n-triples")
+            format!(
+                "unsupported content_type `{}`: this server stores RDF sources only ({}); \
+                 non-RDF (binary) resources are out of scope",
+                content_type, INGESTED_MEDIA_TYPES
+            )
         })?;
 
         if is_control_doc(&url) {
@@ -993,6 +1406,67 @@ mod unit {
         assert_eq!(rdf_format("application/octet-stream"), None);
         #[cfg(not(feature = "jsonld"))]
         assert_eq!(rdf_format("application/ld+json"), None); // fail closed without parser
+    }
+
+    #[test]
+    fn negotiate_defaults_to_ntriples_and_maps_turtle() {
+        // [SONNET-4.6] sq-wbsf5 — absent `accept` must keep the v1 default, or every
+        // existing caller silently changes syntax.
+        assert_eq!(negotiate(None), Ok(Representation::NTriples));
+        assert_eq!(negotiate(Some("application/n-triples")), Ok(Representation::NTriples));
+        assert_eq!(negotiate(Some("text/turtle")), Ok(Representation::Turtle));
+        // Media-type parameters are ignored, so a `q=` weight still resolves.
+        assert_eq!(negotiate(Some("text/turtle; q=0.9")), Ok(Representation::Turtle));
+    }
+
+    #[test]
+    fn negotiate_refuses_an_unservable_accept_naming_what_is_served() {
+        // No silent coercion, and the message must enumerate the real served set.
+        for accept in ["application/rdf+xml", "image/png", "application/n-triples, text/turtle"] {
+            let err = negotiate(Some(accept)).expect_err("unservable accept is an error");
+            assert!(err.contains("unsupported accept"), "honest error: {err}");
+            assert!(err.contains("application/n-triples") && err.contains("text/turtle"));
+        }
+    }
+
+    #[cfg(feature = "jsonld")]
+    #[test]
+    fn negotiate_refuses_jsonld_even_though_it_can_be_ingested() {
+        // The `jsonld` feature adds a PARSER, not a writer: serving it would be a lie.
+        assert!(negotiate(Some("application/ld+json")).is_err());
+    }
+
+    #[test]
+    fn representation_media_types_are_the_wire_spellings() {
+        assert_eq!(Representation::NTriples.media_type(), "application/n-triples");
+        assert_eq!(Representation::Turtle.media_type(), "text/turtle");
+    }
+
+    #[test]
+    fn triples_to_turtle_writes_well_formed_prefix_compacted_turtle() {
+        let graph = Graph::load_str(
+            "<https://pod.ex/a> <http://www.w3.org/ns/ldp#contains> <https://pod.ex/a/b> .\n",
+            "ntriples",
+        )
+        .expect("fixture parses");
+        let triples =
+            sparq_engine::construct(&graph, "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }")
+                .expect("CONSTRUCT evaluates");
+        let ttl = triples_to_turtle(&triples).expect("in-memory serialization succeeds");
+        assert!(ttl.contains("ldp:contains"), "registered prefixes compact: {ttl}");
+        // Well-formed: it parses back to the same one triple.
+        let back = Graph::load_str(&ttl, "turtle").expect("output is valid Turtle");
+        assert_eq!(back.len(), 1);
+        assert!(sparq_engine::ask(
+            &back,
+            "ASK { <https://pod.ex/a> <http://www.w3.org/ns/ldp#contains> <https://pod.ex/a/b> }"
+        )
+        .expect("ASK evaluates"));
+    }
+
+    #[test]
+    fn triples_to_turtle_of_no_triples_is_an_empty_document() {
+        assert_eq!(triples_to_turtle(&[]).expect("empty serializes"), "");
     }
 
     #[cfg(feature = "jsonld")]

@@ -557,7 +557,19 @@ fn expand_keyword(
                 frame_expansion,
                 false,
             )?;
-            let items = as_array(expanded.unwrap_or_else(|| Json::Arr(Vec::new())));
+            // §5.1.2 step 13.4.13: "ensuring that the result is an array", then EVERY
+            // element must be a node object. A DROPPED expansion (`None` — a free-floating
+            // scalar, value object, or list object under the null active property) is not
+            // an empty array: arrayifying null yields a one-element array whose element is
+            // not a node object, so it is an `invalid @included value`. Collapsing it to
+            // `[]` instead would vacuously accept `@included: "string"` / `{"@value": …}` /
+            // `{"@list": […]}` (W3C expand/in07, in08, in09), which the suite requires to
+            // raise. Matches jsonld.js (`_asArray(null)` → `[null]`, `_isSubject(null)`
+            // false) and pyld.
+            let items = match expanded {
+                Some(j) => as_array(j),
+                None => vec![json_null()],
+            };
             for item in &items {
                 if !is_node_object(item) {
                     return Err(JsonLdError::new(E::InvalidIncludedValue));
@@ -878,11 +890,10 @@ fn expand_value(active_context: &ActiveContext, active_property: &str, value: &J
     // @id / @vocab coercion of a string value → a node reference (§5.3.2 steps 1–2): "return
     // a new map containing a single entry where the key is @id and the value is the result of
     // IRI expanding value". When IRI Expansion returns `None` (a keyword-shaped token, or a
-    // `@vocab` term bound to null) the spec-literal result is therefore `{"@id": null}` — the
-    // entry is KEPT with a JSON null, never emitted as an empty-string `@id` and never as an
-    // empty `{}`. This matches the suite's `@id`-keyword precedent (expand/0122-out retains
-    // `"@id": null`, its manifest noting the result "will not be valid JSON-LD") and the
-    // reference processors.
+    // `@vocab` term bound to null; see `context::iri`) the spec-literal result is therefore
+    // `{"@id": null}`. The entry is KEPT with a JSON null, never emitted as an empty-string
+    // `@id` or an empty `{}`. This matches the suite's `@id`-keyword precedent
+    // (W3C expand/0122-out retains `"@id": null`).
     if let Json::Str(s) = value {
         if type_mapping == Some("@id") {
             let id = active_context.expand_iri(s, true, false).map_or_else(json_null, Json::Str);
@@ -955,7 +966,11 @@ fn cleanup(
         if members.iter().any(|(k, _)| !ALLOWED.contains(&k.as_str())) {
             return Err(JsonLdError::new(E::InvalidValueObject));
         }
-        if has(&members, "@type") && has(&members, "@language") {
+        // §5.1.2 step 15.1: the value object "must not contain an `@type` entry if it
+        // contains either `@language` or `@direction` entries" — a typed literal cannot
+        // also carry a language tag OR a base direction (W3C expand/di09 pins the
+        // `@direction` half).
+        if has(&members, "@type") && (has(&members, "@language") || has(&members, "@direction")) {
             return Err(JsonLdError::new(E::InvalidValueObject));
         }
         // A value object's `@type` is a SINGLE value in the JSON-LD data model
@@ -1000,9 +1015,16 @@ fn cleanup(
             if let Some(t) = obj_get(&members, "@type") {
                 // [FABLE-5] sq-oy1f.29 — a frame value pattern's @type alternative may
                 // also be the wildcard `{}` or `@json`.
+                // §5.1.2 step 15.4: the value of `@type` must be an IRI — a blank node
+                // identifier is NOT one, so a `_:`-datatyped literal is an
+                // `invalid typed value` (W3C expand/er40). Blank-node datatypes are only
+                // meaningful under the `GeneralizedRdf` optional feature, which sparq does
+                // not opt into (those suite cases are the `requires` skip bucket).
+                // Frame expansion keeps admitting a blank node so a frame can pattern-match
+                // one (json-ld11-framing §2.2 value patterns).
                 let type_ok = |e: &Json| match e {
                     Json::Str(s) => {
-                        is_absolute_iri(s) || is_blank_node(s) || (frame_expansion && s == "@json")
+                        is_absolute_iri(s) || (frame_expansion && (is_blank_node(s) || s == "@json"))
                     }
                     Json::Obj(m) => frame_expansion && m.is_empty(),
                     _ => false,
@@ -1435,23 +1457,15 @@ mod tests {
         // A resolvable absolute IRI under `@id` coercion → a `{"@id": <iri>}` node reference.
         assert_eq!(
             expand_value(&ac, "id_term", &Json::Str("http://ex/target".into())),
-            Json::Obj(vec![("@id".to_string(), Json::Str("http://ex/target".into()))]),
+            Json::Obj(vec![(
+                "@id".to_string(),
+                Json::Str("http://ex/target".into()),
+            )]),
         );
-        // A keyword-shaped token IRI-expands to null under `@id` coercion (document-relative,
-        // no vocab). §5.3.2 step 1 is literal: the result is `{"@id": null}` — the `@id`
-        // entry is KEPT with a JSON null (the W3C expand/0122 precedent), never an
-        // empty-string `@id` (the original `unwrap_or_default()` bug) and never an empty
-        // `{}` (the follow-up Copilot review).
-        let expanded = expand_value(&ac, "id_term", &Json::Str("@notakeyword".into()));
         assert_eq!(
-            expanded,
+            expand_value(&ac, "id_term", &Json::Str("@notakeyword".into())),
             Json::Obj(vec![("@id".to_string(), json_null())]),
-            "a null IRI expansion must yield the spec-literal {{\"@id\": null}}",
-        );
-        assert!(
-            !matches!(&expanded, Json::Obj(m) if m.iter().any(|(k, v)| k == "@id"
-                && matches!(v, Json::Str(s) if s.is_empty()))),
-            "must never produce an empty-string @id",
+            "a null IRI expansion must remain an explicit null @id",
         );
     }
 
@@ -1461,10 +1475,11 @@ mod tests {
         // A plain term under `@vocab` coercion resolves against `@vocab`.
         assert_eq!(
             expand_value(&ac, "vocab_term", &Json::Str("thing".into())),
-            Json::Obj(vec![("@id".to_string(), Json::Str("http://ex/v#thing".into()))]),
+            Json::Obj(vec![(
+                "@id".to_string(),
+                Json::Str("http://ex/v#thing".into()),
+            )]),
         );
-        // A keyword-shaped token still expands to null under `@vocab` coercion → the
-        // spec-literal `{"@id": null}` (§5.3.2 step 2).
         assert_eq!(
             expand_value(&ac, "vocab_term", &Json::Str("@notakeyword".into())),
             Json::Obj(vec![("@id".to_string(), json_null())]),

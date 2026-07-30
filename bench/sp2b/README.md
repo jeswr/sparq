@@ -62,3 +62,9 @@ the per-commit path — they live in `queries-heavy/` for the EC2/nightly tier. 
 (the slowest, q04, is ~0.32 s). The **full-scale SP2Bench tier (5M-100M triples)** belongs to
 `bench-ec2.yml` / nightly with per-query timeouts and result-size assertions — run
 `bench/sp2b/gen.sh <triples>` at the larger `-t` there.
+
+`bench/sp2b/run-ec2.sh` is the self-asserting EC2/nightly entry point. It runs the three heavy
+queries at 250k, then generates 5M, 25M, and 100M corpora and runs the committed reference
+subset at each scale. Each query has an independent timeout (set
+`SP2B_QUERY_TIMEOUT_SECONDS`), and each count must match `expected-rows-ec2.tsv`. Set
+`SP2B_FULL_SCALES` to select scales for a manual diagnostic run.

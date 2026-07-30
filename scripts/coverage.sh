@@ -36,6 +36,14 @@
 #                                       `…_with_base` (`#[cfg(feature = "rdfxml")]`) + its
 #                                       direct unit tests are otherwise compiled out / 0%.
 #                                       [OPUS-4.8] sq-f47w1 (survey §B1).
+#   - sparq-reason    MUST be measured with `--features datalog`. The crate is NOT empty
+#                     by default (RDFS/OWL-RL/N3 are default-on), but the stratified
+#                     Datalog module (`src/datalog/`) is entirely `#[cfg(feature =
+#                     "datalog")]`, so a default-feature run computes the line% over a
+#                     denominator that EXCLUDES it — the module could rot to 0% without
+#                     moving this crate's floor. See the case arm in measure() for why
+#                     only `datalog` (and not the crate's other default-off features) is
+#                     named. [SONNET-4.6] sq-iwf3c
 #   - sparq-vectors   the two `*_recall_at_10_vs_brute_force_on_50k` tests (HNSW +
 #                     DiskANN) are EXCLUDED from the per-commit subset via `--skip`
 #                     (they dominate wall-clock under instrumentation). They are
@@ -110,6 +118,9 @@ PER_COMMIT_CRATES=(
   # [FABLE-5] sq-lsp7k.1.1: sparq-forms — opt-in headless SHACL-to-form derivation.
   # No cargo features (whole surface default-compiled), so no measure() case arm.
   sparq-forms
+  # [SONNET-4.6] sq-97cxm: sparq-jsonld — native JSON-LD 1.1 processing and RDF conversion.
+  # No cargo features (whole surface default-compiled), so no measure() case arm.
+  sparq-jsonld
   # [OPUS-4.8] sq-bif.7: the OPT-IN ODRL usage-control policy crate, untracked by BOTH
   # gates. The STATELESS evaluator (parse/eval/compare/hierarchy) is default-on, but the
   # stateful `odrl:count` counter stores (the `count`/`count_file`/`count_backend` modules
@@ -220,7 +231,7 @@ SHARD_GROUPS=(
   # shard's CRATE SET is byte-identical to before, so every non-engine floor is enforced by
   # the SAME crate group as prior — only the shard NUMBER moved (the ci.yml matrix is [1,2,3]).
   # shard 1 (was 2; ~336s measured)
-  "sparq-core sparq-mpc sparq-fedclient sparq-geo sparq-cli sparq-conformance sparq-text sparq-policy sparq-nlq sparq-sim"
+  "sparq-core sparq-mpc sparq-fedclient sparq-geo sparq-cli sparq-conformance sparq-text sparq-policy sparq-nlq sparq-sim sparq-jsonld"
   # shard 2 (was 3; ~336s measured; + sparq-reason-el [EL rbox+hasse] + sparq-reason-ql [QL experimental], sq-qcnn.23)
   "sparq-vectors sparq-zk-compose sparq-gpu sparq-serve sparq-reason sparq-reason-el sparq-reason-ql sparq-hdt sparq-shacl sparq-fedplan sparq-zk sparq-substrate sparq-introspect"
   # shard 3 (was 4; ~336s measured; + sparq-engine-serialize [seam 1] + sparq-engine-service [seam A2], sq-6vshe.4)
@@ -519,8 +530,18 @@ measure() {
     # (`numeric` = XSD value tower, `join` = the four id-tuple join kernels, `compare` =
     # the SPARQL term total order, `rows` = the id-tuple Row/Key/Posting vocabulary). A
     # default-feature build compiles NONE of it (empty crate -> meaningless number); this
-    # names the maximal set so the measured line% reflects the real code the floor gates,
-    # exactly as sparq-core/-fedclient/-policy above name their whole-surface features.
+    # names the CORRECTNESS-CORE set so the measured line% reflects the real code the floor
+    # gates, exactly as sparq-core/-fedclient/-policy above name their whole-surface features.
+    #
+    # [OPUS-5] PR #3799: do NOT add `overhead` here. It used to be true that this was also the
+    # crate's MAXIMAL feature set; it no longer is — the feature-matrix leg now enables
+    # `rows,numeric,join,compare,overhead` so `src/overhead.rs`'s tests actually gate (they
+    # were compiled by NO required check before). `overhead` is the zero-overhead DELTA
+    # TIMING harness, not correctness surface: instrumenting it would fold ~2k lines of
+    # measurement/reporting code into the denominator behind only a handful of tests and
+    # would push this crate under its floor of 96 for no correctness gain. Coverage measures
+    # the correctness core; the matrix leg EXECUTES everything. They are deliberately
+    # different sets — keep them that way.
     sparq-substrate)
       cargo_args+=(--features numeric,join,compare,rows)
       features+=("numeric" "join" "compare" "rows") ;;
@@ -536,6 +557,28 @@ measure() {
     sparq-reason-el)
       cargo_args+=(--features rbox,hasse)
       features+=("rbox" "hasse") ;;
+    # [SONNET-4.6] sq-iwf3c (epic sq-6tykl, design record
+    # research/stratified-datalog-rules.md §5/§6 item 8): the OPT-IN STRATIFIED DATALOG
+    # module. Unlike the crates above, sparq-reason is NOT empty by default — the
+    # RDFS/OWL-RL/N3 chainers are default-on — but `crates/sparq-reason/src/datalog/`
+    # (parser + stratification checker + per-stratum evaluator + `datalog::incr` DRed
+    # maintenance, plus its in-crate differential-oracle suite) is entirely behind the
+    # DEFAULT-OFF `datalog` feature, so a default-feature run compiles it OUT and the
+    # module never enters this crate's line-coverage floor at all. Naming the feature
+    # here brings it under the ratchet, the same way rbox+hasse does for sparq-reason-el.
+    #
+    # ONLY `datalog` is named, deliberately. sparq-reason carries several other
+    # default-off features (explain / profile / d-entail / rif / compiled-rules /
+    # reify / …) whose wiring is separately beaded; adding them here would change the
+    # denominator for reasons this bead did not measure. Scope = the one feature the
+    # bead names.
+    #
+    # `datalog`'s tests are ALL in-crate unit tests (`#[cfg(test)] mod tests` +
+    # `#[cfg(test)] mod oracle` in src/datalog/mod.rs) — there is no
+    # `#![cfg(feature = "datalog")]` integration test under tests/ — so `cargo llvm-cov
+    # test -p sparq-reason --features datalog` runs the whole suite with no extra args.
+    sparq-reason)
+      cargo_args+=(--features datalog); features+=("datalog") ;;
     # [OPUS-4.8] sq-qcnn.23 (epic sq-qcnn): OWL 2 QL query-rewriting reasoner.
     # Whole gate-exercising surface is behind DEFAULT-OFF `experimental`:
     # without it only the cheap CQ-shape gate types compile in and the PerfectRef

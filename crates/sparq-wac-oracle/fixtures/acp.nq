@@ -73,3 +73,31 @@
 <https://pod.ex/origin5/.acr#m-pub> <http://www.w3.org/ns/solid/acp#agent> <http://www.w3.org/ns/solid/acp#PublicAgent> <https://pod.ex/origin5/.acr> .
 <https://pod.ex/origin5/.acr#pol-nocarol> <http://www.w3.org/ns/solid/acp#noneOf> <https://pod.ex/origin5/.acr#m-carol> <https://pod.ex/origin5/.acr> .
 <https://pod.ex/origin5/.acr#m-carol> <http://www.w3.org/ns/solid/acp#agent> <https://carol.ex/card#me> <https://pod.ex/origin5/.acr> .
+# iss6/.acr: bob ONLY when vouched for by good-idp.ex — allOf { agent bob } { issuer
+# good-idp } (the acp:issuer dimension, the exact twin of acp:client). alice keeps her
+# root grant regardless of issuer (an issuer-unconstrained grant ignores the dimension).
+<https://pod.ex/iss6/d0.ttl#it> <https://ex.dev/ns#title> "iss6 doc" <https://pod.ex/iss6/d0.ttl> .
+<https://pod.ex/iss6/.acr> <http://www.w3.org/ns/solid/acp#resource> <https://pod.ex/iss6/> <https://pod.ex/iss6/.acr> .
+<https://pod.ex/iss6/.acr> <http://www.w3.org/ns/solid/acp#memberAccessControl> <https://pod.ex/iss6/.acr#ctl-iss> <https://pod.ex/iss6/.acr> .
+<https://pod.ex/iss6/.acr#ctl-iss> <http://www.w3.org/ns/solid/acp#apply> <https://pod.ex/iss6/.acr#pol-iss> <https://pod.ex/iss6/.acr> .
+<https://pod.ex/iss6/.acr#pol-iss> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/iss6/.acr> .
+<https://pod.ex/iss6/.acr#pol-iss> <http://www.w3.org/ns/solid/acp#allOf> <https://pod.ex/iss6/.acr#m-agent> <https://pod.ex/iss6/.acr> .
+<https://pod.ex/iss6/.acr#m-agent> <http://www.w3.org/ns/solid/acp#agent> <https://bob.ex/card#me> <https://pod.ex/iss6/.acr> .
+<https://pod.ex/iss6/.acr#pol-iss> <http://www.w3.org/ns/solid/acp#allOf> <https://pod.ex/iss6/.acr#m-issuer> <https://pod.ex/iss6/.acr> .
+<https://pod.ex/iss6/.acr#m-issuer> <http://www.w3.org/ns/solid/acp#issuer> <https://good-idp.ex> <https://pod.ex/iss6/.acr> .
+# prov7/.acr: the resource's CREATOR reads, its OWNER writes — acp:CreatorAgent /
+# acp:OwnerAgent, resolved from the TRUSTED AccessProvenance channel (never pod
+# content). d0: creator bob, owner carol. d1: creator carol, owner UNKNOWN (fail-closed).
+<https://pod.ex/prov7/d0.ttl#it> <https://ex.dev/ns#title> "prov7 doc 0" <https://pod.ex/prov7/d0.ttl> .
+<https://pod.ex/prov7/d1.ttl#it> <https://ex.dev/ns#title> "prov7 doc 1" <https://pod.ex/prov7/d1.ttl> .
+<https://pod.ex/prov7/.acr> <http://www.w3.org/ns/solid/acp#resource> <https://pod.ex/prov7/> <https://pod.ex/prov7/.acr> .
+<https://pod.ex/prov7/.acr> <http://www.w3.org/ns/solid/acp#memberAccessControl> <https://pod.ex/prov7/.acr#ctl-creator> <https://pod.ex/prov7/.acr> .
+<https://pod.ex/prov7/.acr#ctl-creator> <http://www.w3.org/ns/solid/acp#apply> <https://pod.ex/prov7/.acr#pol-creator> <https://pod.ex/prov7/.acr> .
+<https://pod.ex/prov7/.acr#pol-creator> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/prov7/.acr> .
+<https://pod.ex/prov7/.acr#pol-creator> <http://www.w3.org/ns/solid/acp#allOf> <https://pod.ex/prov7/.acr#m-creator> <https://pod.ex/prov7/.acr> .
+<https://pod.ex/prov7/.acr#m-creator> <http://www.w3.org/ns/solid/acp#agent> <http://www.w3.org/ns/solid/acp#CreatorAgent> <https://pod.ex/prov7/.acr> .
+<https://pod.ex/prov7/.acr> <http://www.w3.org/ns/solid/acp#memberAccessControl> <https://pod.ex/prov7/.acr#ctl-owner> <https://pod.ex/prov7/.acr> .
+<https://pod.ex/prov7/.acr#ctl-owner> <http://www.w3.org/ns/solid/acp#apply> <https://pod.ex/prov7/.acr#pol-owner> <https://pod.ex/prov7/.acr> .
+<https://pod.ex/prov7/.acr#pol-owner> <http://www.w3.org/ns/solid/acp#allow> <http://www.w3.org/ns/auth/acl#Write> <https://pod.ex/prov7/.acr> .
+<https://pod.ex/prov7/.acr#pol-owner> <http://www.w3.org/ns/solid/acp#allOf> <https://pod.ex/prov7/.acr#m-owner> <https://pod.ex/prov7/.acr> .
+<https://pod.ex/prov7/.acr#m-owner> <http://www.w3.org/ns/solid/acp#agent> <http://www.w3.org/ns/solid/acp#OwnerAgent> <https://pod.ex/prov7/.acr> .

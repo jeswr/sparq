@@ -217,6 +217,51 @@ fn unmapped_action_materializes_nothing() {
 }
 
 // ---------------------------------------------------------------------------
+// 6a. SPARQL-query action contract: query uses `odrl:read`, never `odrl:use`.
+//     [SONNET-4.6] sq-lrtc3.2.
+// ---------------------------------------------------------------------------
+#[test]
+fn sparql_query_requires_concrete_read_action() {
+    let use_policy = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/query-use> a odrl:Set ; odrl:permission [
+    odrl:action odrl:use ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:assignee <https://alice.ex/card#me> ] .
+"#,
+        "turtle",
+    )
+    .unwrap();
+    let alice = Session { agent: Some(ALICE), client: None, issuer: None, now: None };
+    let sel = "SELECT ?t WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?t } }";
+
+    // `odrl:use` is an umbrella, not the bridge's SPARQL-query action. Even though
+    // the policy evaluator permits the use request, its action has no single WAC
+    // mode, so no grant reaches the real query path.
+    let mut use_store = PodStore::new(pod());
+    let use_request = Request::new(odrl("use")).on(N1).by(ALICE);
+    let use_outcome = use_store.materialize_odrl_permission(&use_policy, &use_request);
+    assert!(!use_outcome.granted, "odrl:use must stay unmapped: {use_outcome:?}");
+    assert!(
+        use_outcome.reasons.iter().any(|reason| reason.contains("no WAC/ACP mode mapping")),
+        "expected an unmapped-action refusal, not a policy denial: {use_outcome:?}"
+    );
+    assert!(use_outcome.mode.is_none());
+    assert!(use_outcome.grant_triple.is_none());
+    assert_eq!(use_store.query_as(&alice, Mode::Read, sel).unwrap().rows.len(), 0);
+
+    // A query is represented by the concrete `odrl:read` action, which maps to
+    // exactly Mode::Read and exposes the target through query_as.
+    let mut read_store = PodStore::new(pod());
+    let read_request = Request::new(odrl("read")).on(N1).by(ALICE);
+    let read_outcome = read_store.materialize_odrl_permission(&read_policy(), &read_request);
+    assert!(read_outcome.granted, "odrl:read should grant query access: {read_outcome:?}");
+    assert_eq!(read_outcome.mode, Some(Mode::Read));
+    assert_eq!(read_store.query_as(&alice, Mode::Read, sel).unwrap().rows.len(), 1);
+}
+
+// ---------------------------------------------------------------------------
 // 7. Partyless / targetless Permit → NOTHING (a partyless grant would widen access).
 // ---------------------------------------------------------------------------
 #[test]

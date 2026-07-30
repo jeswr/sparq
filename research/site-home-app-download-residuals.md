@@ -175,6 +175,8 @@ Cutting v0.1.0 itself — and whether to first dispatch a developer test release
 the alias path end-to-end (release.yml has a `workflow_dispatch` mode for exactly this) —
 is the maintainer's call; flagged via a proceed-and-document issue rather than a bead.
 
-Adjacent stale artefact noted while grounding (not this epic's scope): parent-epic child
-`sq-vw3ax.10` ("/try Graph view", P3) targets the removed /try surface and should be
-re-pointed at the /app workbench (gui/app) or closed — noted on the bead.
+Adjacent artefact noted while grounding: parent-epic child `sq-vw3ax.10` ("/try Graph
+view", P3) has been **resolved by implementation** — the node-link graph view is now
+live in the home hero runner (the surviving primary surface for result visualization;
+`site/src/components/home/hero-runner.tsx` lines 440–465, Table | Graph toggle active
+when results are entity-relationship shaped).
