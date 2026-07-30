@@ -17,6 +17,18 @@
 //!   `CommitId = SHA-256(canonical encrypted root envelope)`;
 //! * [`epoch`] — signed **epoch transitions** (the revocation mechanism).
 //!
+//! Plus one **opt-in** module behind the `se` cargo feature (OFF by default):
+//!
+//! * `literal` — the **Profile SE** ("structure-exposed") encrypted-literal codec
+//!   (`research/e2ee-queryable-options.md` §3.c): a literal *value* is AEAD-sealed
+//!   into an ordinary typed literal, so an untrusted server can still evaluate the
+//!   *structural* SPARQL fragment over the cleartext skeleton with no new
+//!   server-side code. It is a **different, weaker disclosure posture** than the
+//!   block profile above — it reveals the **full graph topology** to the server
+//!   and protects the values, not the shape of the user's life — which is exactly
+//!   why it is opt-in. Read that module's leakage headline before enabling the
+//!   feature.
+//!
 //! ## Honesty & audit boundary — read first
 //!
 //! Every confidentiality, integrity, authorization, revocation, and convergence
@@ -29,9 +41,16 @@
 //! SPARQL into ciphertext-side evaluation — the profile keeps querying *local*
 //! over decrypted, materialized state.
 //!
-//! The primitives here are the *capability / envelope / epoch* layer only. The
-//! sync, broker-protocol, CRDT, and materialization layers of the profile (§6,
-//! §8.4–8.5) are **not** implemented in this crate.
+//! The `se` module does not change that last sentence: nothing there evaluates
+//! SPARQL over ciphertext either. What Profile SE moves server-side is the
+//! *structural* fragment over structure that was never encrypted in the first
+//! place; anything touching an encrypted value stays opaque and must be
+//! post-filtered client-side after decryption.
+//!
+//! The primitives here are the *capability / envelope / epoch* layer only (plus
+//! the opt-in `se` value codec). The sync, broker-protocol, CRDT, and
+//! materialization layers of the profile (§6, §8.4–8.5) are **not** implemented in
+//! this crate.
 //!
 //! ## Crate-boundary invariant
 //!
@@ -70,6 +89,9 @@ pub mod epoch;
 pub mod error;
 pub mod ids;
 pub mod keyschedule;
+#[cfg(feature = "se")]
+#[cfg_attr(docsrs, doc(cfg(feature = "se")))]
+pub mod literal;
 pub mod sign;
 pub mod suite;
 pub mod wrap;

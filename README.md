@@ -147,6 +147,16 @@ standard it implements.
 - **Federated MPC** *(research scaffold — no security guarantee yet)* — model evaluating SPARQL
   across parties with multi-party computation ([guide](skills/mpc/SKILL.md)); honest-majority
   semi-honest, **not** maliciously secure ([SECURITY.md](SECURITY.md)). <!-- privacy-claims-allow: negative caveat ("not maliciously secure"); sq-toze.35 -->
+<!-- [OPUS-5] issue #2548 — E2EE was absent from the README entirely. Outside the
+     `features-core` anchor, like the other two research scaffolds. -->
+- **End-to-end-encrypted RDF** *(research scaffold — designed, not proven, not audited)* — store
+  RDF a server cannot read: capability-scoped keys with read/publish/admin separation, sealed
+  padded blocks, and epoch-based revocation ([guide](skills/e2ee-ng/SKILL.md)). Three profiles are
+  specified in the [E2EE-SPARQL draft](site/specs/e2ee-sparql.typ) — client-side query,
+  broker-relayed collaboration, and a structure-exposed profile in which an ordinary server still
+  answers the *structural* fragment. Query is local after decryption in the first two; the third
+  discloses the full graph structure to the server. No forward secrecy in any profile
+  ([SECURITY.md](SECURITY.md)). <!-- privacy-claims-allow: negative caveat ("designed, not proven, not audited", "No forward secrecy"); sq-qhy4 pending -->
 <!-- sq-g4h0c: the `interfaces` anchor is the SINGLE SOURCE for the docs guide's
      "Interfaces" line (book/src/getting-started/capabilities.md {{#include}}s it). Repo-
      relative `skills/<x>/SKILL.md` links are kept for the lychee gate and rewritten to

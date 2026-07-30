@@ -30,6 +30,7 @@ import {
   Info,
   Waypoints,
   FileLock2,
+  KeyRound,
 } from "lucide-react";
 
 /** Live-execution tier — drives the honesty badge colour + label. */
@@ -344,9 +345,9 @@ export const GROUPS: SurfaceGroup[] = [
   },
   {
     id: "privacy",
-    label: "Privacy (ZK / MPC)",
+    label: "Privacy (ZK / MPC / E2EE)",
     description:
-      "Answer queries without revealing the data — zero-knowledge query proofs and threshold MPC federation. Research-grade: the v1 verifier is not externally audited.",
+      "Answer queries without revealing the data — zero-knowledge query proofs, threshold MPC federation, and end-to-end-encrypted RDF a server cannot read. Research-grade: none of this estate is externally audited.",
     surfaces: [
       {
         slug: "zk",
@@ -365,6 +366,28 @@ export const GROUPS: SurfaceGroup[] = [
         tier: "live-sim",
         icon: Network,
         built: true,
+      },
+      {
+        // [OPUS-5] issue #2548 — E2EE had NO site surface at all. It is a built opt-in crate
+        // (capability/envelope/epoch primitives + the Profile-SE literal codec), not an in-tab
+        // demo, so it lands as a native row. The honest framing lives in the /specs draft
+        // (e2ee-sparql): query is local in the CS/BR profiles; only Profile SE evaluates
+        // server-side, and it discloses the whole graph structure.
+        slug: "e2ee",
+        href: "https://github.com/sparq-org/sparq/tree/main/crates/sparq-e2ee-ng",
+        title: "E2EE RDF",
+        blurb:
+          "Encrypted RDF a server cannot read: capabilities, sealed blocks, epoch revocation — plus the structure-exposed profile where an ordinary server still answers the structural fragment, at the cost of disclosing graph topology. See the e2ee-sparql draft.",
+        tier: "native",
+        icon: KeyRound,
+        native: {
+          snippet:
+            "let env = sparq_e2ee_ng::envelope::seal_block_random(&k_read, &ctx, &object, 0, 1, delta)?;",
+          readme:
+            "https://github.com/sparq-org/sparq/tree/main/crates/sparq-e2ee-ng",
+          skill:
+            "https://github.com/sparq-org/sparq/blob/main/skills/e2ee-ng/SKILL.md",
+        },
       },
     ],
   },

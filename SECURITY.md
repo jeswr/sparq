@@ -126,6 +126,40 @@ is **deferred and not implemented** to a production standard. It provides **no
 confidentiality, correctness, attestation, or malicious-security guarantee** today and
 must not be used to protect real data across distrusting parties.
 
+<!-- [OPUS-5] issue #2548 — the E2EE estate had NO entry on this honesty surface. Posture
+     source: research/e2ee-*.md + the E2EE-SPARQL draft (site/specs/e2ee-sparql.typ). Do NOT
+     relax the designed-not-proven framing, the no-forward-secrecy disclosure, or the
+     external-pending (sq-qhy4) caveat. -->
+### `sparq-e2ee-ng` — end-to-end encryption: designed, NOT proven, NOT externally audited
+
+The end-to-end-encryption crate (`sparq-e2ee-ng`) implements the capability, envelope, key
+schedule, signature, and epoch-transition primitives of the E2EE profiles, plus the opt-in
+structure-exposed literal codec (feature `se`). Its individual primitives are vetted building
+blocks, but their **composition into these profiles is unreviewed**: every confidentiality,
+integrity, authorization, and revocation property is **designed/intended, not proven**, there
+has been **no external cryptographic review**, and the v0 suite selection is a placeholder
+pending that review. Production reliance is gated by the same open audit gate as the rest of
+the estate (`sq-qhy4`).
+<!-- privacy-claims-allow: NEGATIVE/scoped posture statement — denies any proven property and names the open sq-qhy4 gate. -->
+
+Four scope limits matter to a relying party, and none of them is a bug report:
+
+- **No forward secrecy and no post-compromise security**, in any profile, by design. Revocation
+  re-keys *future* writes; it cannot erase plaintext or keys a removed member already holds.
+- **Nothing runs SPARQL over ciphertext.** In the client-side and broker-relayed profiles the
+  query is evaluated locally after decryption; a relay routes opaque blocks and never evaluates.
+- **The structure-exposed profile deliberately discloses the full graph structure** — every
+  subject, predicate, IRI-valued object, and named-graph membership — to the server that
+  evaluates over it. It protects values, not shape. Its optional equality tags additionally
+  disclose per-predicate value-equality patterns and are off by default.
+- **Access patterns, sizes, and timing are not hidden** in any profile; padding and batching
+  bound the resolution of those observations rather than removing them.
+
+The profiles, their leakage tiers, and the rejected alternatives (deterministic and
+order-revealing value encryption; server-side decryption of any kind) are specified in the
+E2EE-SPARQL draft under [`site/specs/`](site/specs/e2ee-sparql.typ), and the design records are
+in [`research/`](research/e2ee-queryable-options.md).
+
 ### Other capability crates
 
 The opt-in capability crates (`sparq-geo`, `sparq-text`, `sparq-vectors`, `sparq-rsp`,

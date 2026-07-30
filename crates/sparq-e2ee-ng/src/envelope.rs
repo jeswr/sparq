@@ -56,14 +56,20 @@ pub const PAD_CLASSES: [usize; 8] = [
     256, 1024, 4096, 16384, 65536, 262144, 1_048_576, 4_194_304,
 ];
 
-/// Pad `plaintext` to the smallest fitting class. Layout: 4-byte big-endian real
-/// length, then the plaintext, then zero padding to the class size. Returns the
-/// padded buffer (whose length equals the class size).
-fn pad(plaintext: &[u8]) -> Result<Vec<u8>> {
+/// Pad `plaintext` to the smallest fitting class of `classes` (which MUST be
+/// ascending). Layout: 4-byte big-endian real length, then the plaintext, then
+/// zero padding to the class size. Returns the padded buffer (whose length
+/// equals the class size).
+///
+/// The class table is a parameter so a caller whose plaintexts live in a
+/// different size regime can reuse this exact discipline with its own table:
+/// `crate::literal` (Profile SE) pads *literal values*, which are far smaller
+/// than a block, against its own finer table.
+pub(crate) fn pad_to_classes(plaintext: &[u8], classes: &[usize]) -> Result<Vec<u8>> {
     let need = 4usize
         .checked_add(plaintext.len())
         .ok_or(Error::LimitExceeded("plaintext length overflow"))?;
-    let class = *PAD_CLASSES
+    let class = *classes
         .iter()
         .find(|&&c| c >= need)
         .ok_or(Error::LimitExceeded("plaintext exceeds largest pad class"))?;
@@ -73,10 +79,15 @@ fn pad(plaintext: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Reverse [`pad`]: validate the padded length matches a class and extract the
-/// real plaintext.
-fn unpad(padded: &[u8]) -> Result<Vec<u8>> {
-    if !PAD_CLASSES.contains(&padded.len()) {
+/// Pad a block plaintext against the block [`PAD_CLASSES`].
+fn pad(plaintext: &[u8]) -> Result<Vec<u8>> {
+    pad_to_classes(plaintext, &PAD_CLASSES)
+}
+
+/// Reverse [`pad_to_classes`]: validate the padded length is one of `classes`
+/// and extract the real plaintext. Fail-closed on any mismatch.
+pub(crate) fn unpad_from_classes(padded: &[u8], classes: &[usize]) -> Result<Vec<u8>> {
+    if !classes.contains(&padded.len()) {
         return Err(Error::Malformed("padded length is not a pad class"));
     }
     if padded.len() < 4 {
@@ -90,6 +101,11 @@ fn unpad(padded: &[u8]) -> Result<Vec<u8>> {
         return Err(Error::Malformed("declared length exceeds pad class"));
     }
     Ok(padded[4..end].to_vec())
+}
+
+/// Reverse [`pad`] against the block [`PAD_CLASSES`].
+fn unpad(padded: &[u8]) -> Result<Vec<u8>> {
+    unpad_from_classes(padded, &PAD_CLASSES)
 }
 
 /// Build the AEAD associated data binding all scoping + position fields (§8.3).

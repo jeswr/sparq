@@ -479,6 +479,21 @@ into `site/specs/e2ee-sparql.typ` (house Typst format, sq-rvgr2) and later contr
 namespace by this record** — it is drafted here for review. Status language MUST never claim
 W3C standing (sq-tag1q house rule). RFC-2119 keywords are UPPERCASE.
 
+> **[FOLDED IN] `[OPUS-5]` 2026-07-26 (issue #2548).** BR-1…BR-9 below have been folded into
+> [`site/specs/e2ee-sparql.typ`](../site/specs/e2ee-sparql.typ) §"Profile BR", **as amended by
+> the program reconciliation** — read the spec, not this draft, as the current clause text. The
+> substantive amendments: BR-2's `SHOULD` on encrypted commit headers reads as `MUST` for a
+> default-conforming deployment; BR-3 mandates **randomized** keys and identifiers (convergent
+> keying + dedup are a future opt-in extension, not v0); BR-4 separates **three** authorities
+> (read / publish / admin) rather than two; BR-5 incorporates the SPARQL-CRDT draft by reference
+> over **quads**, one branch = one dataset, with a single shared epoch counter; BR-8 gains the
+> `ReplicaId`-visible-to-authorized-readers disclosure; and the revocation token names are
+> `forward-only` / `history-rekeyed`. This record stays the **privacy authority** for the threat
+> model (§5) and the leakage comparison (§6). Nothing has been published to the jeswr / w3id
+> namespace: the spec's own IRIs are non-dereferenceable placeholders.
+
+<!-- -->
+
 > ### Profile BR — Broker-Relayed E2EE-Queryable (optional, leakage-disclosed)
 >
 > **BR-1 (Overview, informative).** A conforming Profile-BR deployment stores RDF as a

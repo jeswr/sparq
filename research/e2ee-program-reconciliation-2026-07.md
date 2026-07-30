@@ -194,7 +194,7 @@ ciphertext, no external audit — all of it sq-qhy4-gated, all of it designed-no
 
 | Bead | Surface | What this reconciliation binds it to |
 |---|---|---|
-| **sq-tag1q.5** | `site/specs/e2ee-sparql.typ` — the E2EE-SPARQL spec draft (gated by the survey; **not yet written**) | Specify **one** optional profile, **Profile BR**, alongside the survey's mandatory Profile CS. Carry #2005 BR-1…BR-9 as the normative clauses, **amended by** ledger rows 2–8, 10, 13 and §4 A1–A3. Use #2001 §8 as the v0 binding annex. Keep the ZK/MPC composition informative-only with the sq-qhy4 caveat verbatim. Reference `sparq-crdt-delta/1` for the CRDT — do not restate the algebra. |
+| **sq-tag1q.5** *(landed — see the [LANDED] note below)* | `site/specs/e2ee-sparql.typ` — the E2EE-SPARQL spec draft | Specify **one** optional profile, **Profile BR**, alongside the survey's mandatory Profile CS. Carry #2005 BR-1…BR-9 as the normative clauses, **amended by** ledger rows 2–8, 10, 13 and §4 A1–A3. Use #2001 §8 as the v0 binding annex. Keep the ZK/MPC composition informative-only with the sq-qhy4 caveat verbatim. Reference `sparq-crdt-delta/1` for the CRDT — do not restate the algebra. |
 | **sq-tag1q.4** *(landed)* | `site/specs/sparql-crdt.typ` | Unchanged and authoritative for the CRDT. Ledger row 18 records that its `CRDT-SCOPE` supersedes #2002 §5.2 on `COPY`/`MOVE`/`ADD`. |
 | **sq-tag1q.9** *(landed)* | `crates/sparq-e2ee-ng` | Corroborates rows 2, 3, 6, 8. No change required. When its sync layer lands it inherits B1–B8. |
 | **sq-tag1q.7.x** *(partly landed)* | `crates/sparq-crdt` | The single CRDT artifact (B1). Its epoch field is the epoch of B3; its JCS bytes are the opaque payload of B4. |
@@ -203,6 +203,21 @@ ciphertext, no external audit — all of it sq-qhy4-gated, all of it designed-no
 Every bead above inherits the same hard boundary: opt-in crates, lean core, no cipher in
 `sparq-core`/`sparq-engine`/`sparq-substrate`, and no claim that is not caveated as
 research-grade and externally unaudited (sq-qhy4).
+
+> **[LANDED] `[OPUS-5]` 2026-07-26 (issue #2548).** `site/specs/e2ee-sparql.typ` now exists and
+> is published through the spec factory at `/specs/e2ee-sparql`. It follows this record's
+> instruction with **one deliberate addition**: it specifies **three** profiles, not two —
+> the survey's **Profile SE** (structure-exposed; §3.c of the survey, tier `T1`) is carried as a
+> second optional profile, because SE is the only shape in which a *server* evaluates any part
+> of a query, and issue #2548 asked specifically for that option to exist and to state its
+> privacy cost. This does not disturb the reconciliation: §6 Q6's verdict is preserved verbatim
+> as spec clause `SE-9` (BR × SE composition **unspecified and discouraged**), and CS remains
+> the mandatory core. BR-1…BR-9 are carried as amended by ledger rows 2–8, 10, 13 and §4
+> A1–A3 — in particular `BR-8` now names the `ReplicaId` pseudonym leak of §4 A3. The v0
+> binding of #2001 §8 is the spec's informative Annex A; the CRDT is incorporated by reference
+> only (B1). The two questions of §6 that need the maintainer (relay binding, revocation
+> default) are recorded in the spec as explicit deployment decisions rather than silently
+> resolved.
 
 ---
 
@@ -236,5 +251,6 @@ Genuinely open, needing a maintainer decision:
 - Privacy authority (#2005): [`e2ee-queryable-nextgraph-variant-2026-07.md`](./e2ee-queryable-nextgraph-variant-2026-07.md)
 - Binding authority (#2001): [`e2ee-nextgraph-variant-gpt56-2026-07.md`](./e2ee-nextgraph-variant-gpt56-2026-07.md)
 - CRDT authority (#2002): [`sparql-crdt-gpt56-2026-07.md`](./sparql-crdt-gpt56-2026-07.md), frozen in `site/specs/sparql-crdt.typ`
+- **The spec this record wires to (landed):** [`site/specs/e2ee-sparql.typ`](../site/specs/e2ee-sparql.typ) — published at `/specs/e2ee-sparql`
 - Shipped: `crates/sparq-e2ee-ng` + [`skills/e2ee-ng/SKILL.md`](../skills/e2ee-ng/SKILL.md), `crates/sparq-crdt`
 - Adjacent estate: [`threat-model.md`](./threat-model.md), [`crypto-erase-at-rest.md`](./crypto-erase-at-rest.md), [`zk-audit-readiness-dossier.md`](./zk-audit-readiness-dossier.md), [`sparq-solid-scope.md`](./sparq-solid-scope.md)

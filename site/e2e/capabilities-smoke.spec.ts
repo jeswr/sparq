@@ -2,8 +2,9 @@
 //
 // WHAT IT GUARDS. /capabilities (src/app/capabilities/page.tsx) is the consolidated, bold
 // showcase of the full feature set — a hero, a flagship "start here" band, and five capability
-// THEME lanes (Query & data / Reason & validate / Search & GenAI / Privacy (ZK / MPC) / Serve &
-// embed), all derived from the single data/surfaces.ts source. This spec asserts the page renders
+// THEME lanes (Query & data / Reason & validate / Search & GenAI / Privacy (ZK / MPC / E2EE) /
+// Serve & embed), all derived from the single data/surfaces.ts source. This spec asserts the
+// page renders
 // ALL of those structural sections on a DIRECT load AND produces ZERO console errors. It is the
 // SECTIONS-RENDER smoke (complementing capabilities-lazy.spec.ts, which guards the lazy-mount /
 // code-split invariant, and site-nav.spec.ts, which reaches the themes via a nav click): here we
@@ -28,7 +29,7 @@ const THEMES = [
   "Query & data",
   "Reason & validate",
   "Search & GenAI",
-  "Privacy (ZK / MPC)",
+  "Privacy (ZK / MPC / E2EE)",
   "Serve & embed",
 ];
 

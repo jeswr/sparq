@@ -263,6 +263,15 @@ ingestion surfaces. This is a design target, not evidence that such a crate exis
 namespace. This record does not allocate or publish any term there. Examples use the
 non-dereferenceable placeholder `urn:jeswr:w3id:e2ee-ng:draft:2026-07#` (`eng:`).
 
+> **[BOUND] `[OPUS-5]` 2026-07-26 (issue #2548).** This section is now the **informative Annex
+> A** of [`site/specs/e2ee-sparql.typ`](../site/specs/e2ee-sparql.typ) — the v0 wire binding of
+> that spec's Profile BR. The spec's normative clauses win where the two disagree, and the
+> concrete suite identifiers remain placeholders pending sq-qhy4. The sibling Profile-SE literal
+> encoding added by that spec uses the parallel placeholder namespace
+> `urn:jeswr:w3id:e2ee-sparql:draft:2026-07#` (datatypes `#enc` and `#eqtag`), which
+> `crates/sparq-e2ee-ng` implements behind its opt-in `se` feature. Still nothing is published to
+> the jeswr / w3id namespace.
+
 ### 8.1 Conformance and encoding
 
 The profile identifier is `urn:jeswr:w3id:e2ee-ng:draft:2026-07`. Protocol structures
