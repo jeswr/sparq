@@ -13,7 +13,7 @@ dataset as first-class MCP tools; SPARQL **`update` is OFF by default**. It is a
 wrapper over the existing engine read API (`sparq-engine` query path + `sparq-introspect`
 schema mining): nothing in the workspace depends on it, the default engine build does not
 compile it, and it adds **zero engine capability** and **no heavy dependency** (JSON-RPC
-2.0 framing is hand-rolled over `serde_json`).
+2.0 framing is hand-rolled over `serde_json`). Its **default** feature set does light two sparq-engine planner opt-ins — `algebra-rewrite` and `dp-planner` — so a tool call executes the same plans the CLI and the canonical benchmarks measure; both are result-equivalent and pull zero new dependencies, and `--no-default-features` opts out. <!-- [SONNET-4.6] sq-mc06h -->
 
 ## 🚀 Quickstart
 
