@@ -221,6 +221,33 @@ export class SparqStore implements RDF.StringSparqlQueryable<RDF.BindingsResultS
   }
 
   /**
+   * [SONNET-4.6] sq-3ul2n.5: parses UTF-8 RDF bytes without first building a JS string.
+   * This is the cheap ingest path for fetch/File sources:
+   * `SparqStore.fromBytes(new Uint8Array(await response.arrayBuffer()), format)`.
+   * `options.baseIri` is supported; dataset/compressed storage modes still require their
+   * existing string loaders because wasm has no byte variants for those modes.
+   */
+  static async fromBytes(
+    bytes: Uint8Array,
+    format: RdfFormat = 'turtle',
+    options: Pick<SparqStoreOptions, 'baseIri'> = {},
+  ): Promise<SparqStore> {
+    await init();
+    if (
+      typeof WasmStore.loadBytes !== 'function' ||
+      typeof WasmStore.loadBytesWithBase !== 'function'
+    ) {
+      throw new Error(
+        'SparqStore.fromBytes requires a wasm bundle built with the bytes-ingest feature; use fromString with a lean bundle',
+      );
+    }
+    const inner = options.baseIri === undefined
+      ? WasmStore.loadBytes(bytes, format)
+      : WasmStore.loadBytesWithBase(bytes, format, options.baseIri);
+    return new SparqStore(inner);
+  }
+
+  /**
    * [OPUS-4.8] sq-lii76: parses an RDF document into a store SYNCHRONOUSLY — the same as
    * {@link fromString} but WITHOUT the `await init()`. The wasm engine must ALREADY be
    * initialised (a prior `await init()` / `await SparqStore.fromString(...)` has resolved),

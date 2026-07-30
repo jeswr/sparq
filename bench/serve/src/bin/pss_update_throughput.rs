@@ -297,9 +297,11 @@ fn results_json(sum: &Summary, windows: &[WindowRow]) -> String {
     s.push_str("  \"harness\": \"serve-spikes pss_update_throughput\",\n");
     s.push_str(
         "  \"note\": \"single-writer write-throughput on the PSS update set (gh-52); the binding \
-         metric is p99 commit latency, single-client throughput is ~1/window-bound by design. \
-         Every µs/ms-latency, updates/s and RSS figure is best-effort, MEASURED on the running \
-         host — ADVISORY, NON-CANONICAL (this dev box) — do not bake into committed files\",\n",
+         metric is p99 commit latency. This harness uses ServerConfig::default(), whose \
+         adaptive_commit is ON, so single-client throughput is engine-bound and is not the \
+         concurrent write ceiling measured by writer_spike. Every µs/ms-latency, updates/s and \
+         RSS figure is best-effort, MEASURED on the running host — ADVISORY, NON-CANONICAL \
+         (this dev box) — do not bake into committed files\",\n",
     );
     s.push_str(&format!("  \"profile\": {},\n", json_str(&sum.profile)));
     s.push_str(&format!("  \"updates\": {},\n", sum.updates));
@@ -350,11 +352,13 @@ fn results_json(sum: &Summary, windows: &[WindowRow]) -> String {
 /// HONESTY — this is a SINGLE synchronous client (one in-flight update at a time), which is
 /// exactly the interactive PSS shape: each LDP request blocks on its own commit. So the
 /// **binding metric is p99 commit latency** (it must sit inside the LDP request budget); the
-/// per-client *throughput* is bounded by `1/group-commit-window` (≈ 333/s at the 3 ms default)
-/// NO MATTER how fast the writer is, because one client never fills a batch window. Aggregate
-/// write throughput rises with CONCURRENT clients filling the window — that ceiling is
-/// `writer_spike` (group-commit throughput at `max_batch` 1/16/256), not this binary. Do NOT
-/// read the single-client `updates/s` here as the writer's capacity.
+/// per-client *throughput* is `1/group-commit-window`-bounded only when adaptive commit is
+/// disabled. [SONNET-4.6] (sq-p7kk5) This harness uses `ServerConfig::default()`, whose
+/// `adaptive_commit` is ON and is carried into the writer config, so a serial client commits
+/// in engine time and is therefore engine-bound. Aggregate write throughput rises with
+/// CONCURRENT clients filling the window — that ceiling is `writer_spike` (group-commit
+/// throughput at `max_batch` 1/16/256), not this binary. Do NOT read the single-client
+/// `updates/s` here as the writer's concurrent capacity.
 fn crud_stream(state: &AppState, updates: usize, resources: usize, windows: &mut Vec<WindowRow>) -> Run {
     let pod = 0usize;
     let mut lat_us = Vec::with_capacity(updates);
@@ -561,7 +565,7 @@ fn main() {
     sum.final_graph_triples = g.len();
     sum.final_rss_mb = rss_mb();
     println!(
-        "\nTOTAL: {} commits in {:.2}s = {:.0} updates/s (SINGLE-client, window-bound); p50={:.3}ms p99={:.3}ms max={:.3}ms",
+        "\nTOTAL: {} commits in {:.2}s = {:.0} updates/s (SINGLE-client, engine-bound with ServerConfig adaptive_commit ON; not the concurrent write ceiling); p50={:.3}ms p99={:.3}ms max={:.3}ms",
         run.updates,
         run.wall.as_secs_f64(),
         thr,
@@ -576,12 +580,12 @@ fn main() {
     );
 
     // Reference targets from gh-52 (NOT the gate — the gate is QLever-parity). The BINDING
-    // interactive metric is p99 commit latency (< ~50 ms). Single-client throughput is
-    // ~1/window-bound by design (see crud_stream doc + writer_spike for the concurrent ceiling),
-    // so "below few-hundred/s" here is the single-client window bound, not a writer limit.
+    // interactive metric is p99 commit latency (< ~50 ms). This harness uses
+    // ServerConfig::default(), whose adaptive_commit is ON, so the single-client result is
+    // engine-bound; writer_spike measures the concurrent write ceiling.
     sum.reference_p99_verdict = if p99 < 50.0 { "PASS" } else { "OVER" }.to_string();
     println!(
-        "# reference (gh-52, non-gating): p99 {} < ~50ms (BINDING interactive metric); single-client thr {:.0}/s is ~1/window-bound (writer_spike = concurrent ceiling)",
+        "# reference (gh-52, non-gating): p99 {} < ~50ms (BINDING interactive metric); single-client thr {:.0}/s is engine-bound with ServerConfig adaptive_commit ON (writer_spike = concurrent ceiling)",
         sum.reference_p99_verdict,
         thr
     );
@@ -702,7 +706,12 @@ mod tests {
         // The dependency-free emit must round-trip through a REAL serde_json parse.
         let v: serde_json::Value = serde_json::from_str(&doc).expect("emit must be valid JSON");
         assert_eq!(v["harness"], "serve-spikes pss_update_throughput");
-        assert!(v["note"].as_str().unwrap().contains("NON-CANONICAL"));
+        let note = v["note"].as_str().unwrap();
+        assert!(note.contains("NON-CANONICAL"));
+        assert!(note.contains("ServerConfig::default()"));
+        assert!(note.contains("adaptive_commit is ON"));
+        assert!(note.contains("single-client throughput is engine-bound"));
+        assert!(note.contains("not the concurrent write ceiling measured by writer_spike"));
         assert_eq!(v["profile"], "crud");
         assert_eq!(v["updates"], 20_000);
         assert!(v["p99_ms"].is_number());

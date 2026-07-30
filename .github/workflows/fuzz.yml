@@ -20,6 +20,10 @@
 #     marginal detection probability, so it was pole, not net; replay keeps every
 #     deterministic guarantee. The `fuzz-full` PR label restores randomized fuzzing on
 #     a specific PR (see the budget step) for a fuzz-sensitive change.
+#     [OPUS-5] #3508 DRAFT TIER: on a DRAFT pull_request head the `fuzz` job is skipped
+#     entirely (unless the PR carries `ci-full`/`fuzz-full`) — the replay re-runs at
+#     FULL tier on the same head SHA the moment the PR is un-drafted
+#     (`ready_for_review`), so no PR reaches the queue without it. See the job `if:`.
 #   - merge_group : this lane does NOT trigger on merge_group (removed by the
 #     2026-07-18 merge-queue-subset directive — see the `on:` block below). The
 #     deterministic replay already ran + gated on the PR head, so re-running it per
@@ -168,14 +172,34 @@ jobs:
     # the lane; a skipped job reports conclusion `skipped` (= satisfied) to the
     # ci-summary gate — no per-leg name is individually required (bead sq-fmx4u.4).
     needs: select
+    # [OPUS-5] #3508 DRAFT-TIER CI (docs/branch-protection.md §Draft-tier CI): this
+    # lane is SKIPPED ENTIRELY on draft PR heads — the second AND-term below. The
+    # review-fix loop re-pushes a draft head many times per PR and NOTHING in that
+    # loop reads a corpus-replay result: the deterministic replay is a pure function
+    # of the code, and the un-draft moment (`ready_for_review`, in the pull_request
+    # `types` above) re-runs this job at FULL tier on the SAME head SHA before the PR
+    # can be armed. Meanwhile the job pays a full nightly-toolchain install plus a
+    # `cargo fuzz build` of EVERY target in fuzz/fuzz_targets/ per draft push, which
+    # is exactly the runner occupancy the draft tier exists to reclaim. Same shape +
+    # same safety argument as bench.yml:bench and ci.yml's coverage jobs.
+    #   FAIL-OPEN off the PR path: push-to-main / schedule / workflow_dispatch all
+    #   satisfy `github.event_name != 'pull_request'`, so the randomized full-form
+    #   runs (and the demotion auto-bead protocol they feed) are byte-identical.
+    #   LABEL ESCAPE: `ci-full`/`fuzz-full` on the PR override the draft skip. Unlike
+    #   bench-full, `fuzz-full` selects this job's RANDOMIZED budget (the "Pick the
+    #   per-target budget + mode for this trigger" step reads it), so a bare draft
+    #   guard would silently neuter that label on the drafts where it is applied.
     # [FABLE-5] label-trigger guard: the first AND-term skips this job on any
     # labeled/unlabeled event whose label is not ci-full/fuzz-full (select, the only
-    # root here, must keep running — see the pull_request trigger note). The second
+    # root here, must keep running — see the pull_request trigger note). The last
     # AND-term is the unchanged fail-closed selection guard.
     if: >-
       (github.event_name != 'pull_request' ||
        !contains(fromJSON('["labeled","unlabeled"]'), github.event.action) ||
        contains(fromJSON('["ci-full","fuzz-full"]'), github.event.label.name)) &&
+      (github.event_name != 'pull_request' || github.event.pull_request.draft != true ||
+       contains(github.event.pull_request.labels.*.name, 'ci-full') ||
+       contains(github.event.pull_request.labels.*.name, 'fuzz-full')) &&
       (needs.select.outputs.mode != 'selected' ||
        contains(needs.select.outputs.affected, '"sparq-core"') ||
        contains(needs.select.outputs.affected, '"sparq-engine"') ||
@@ -249,7 +273,7 @@ jobs:
           # cache on its manifests so it is not shared with the workspace build.
           workspaces: "fuzz"
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: cargo-fuzz
       # [FABLE-5] sq-0iqzw: persistent corpus. Without this, every run — including
@@ -518,14 +542,20 @@ jobs:
           "$b" fuzz 4695 2200 filter
           # sq-j80vk: fixed per-category regression windows over the SPARQL 1.1
           # surfaces added to the generator (property paths, aggregates/GROUP BY/
-          # HAVING, sub-selects, EXISTS, VALUES, BIND, GRAPH). 'all' picks ONE
-          # category per seed, so the 2000-seed broad window above leaves each of the
-          # 16 categories only ~125 cases — too thin to be a per-PR net for a
-          # specific evaluation path. These are deterministic REGRESSION windows, not
+          # HAVING, sub-selects, EXISTS, VALUES, BIND, GRAPH) — plus sq-avd75's
+          # `antijoin` (the `OPTIONAL … FILTER(!bound)` idiom, i.e. rewrite (b) of the
+          # `algebra-rewrite` pass #1735, which the fuzzer builds ON) — and sq-qcnn.6's
+          # `typed` / `strfn` / `ask` / `construct` (the typed-literal columns, the
+          # string functions, and the two non-SELECT RESULT FORMS, which are compared
+          # by their boolean / canonical triple set rather than by a count). 'all'
+          # picks ONE category per seed, so the 2000-seed broad window above leaves
+          # each of the 21 categories only ~95 cases — too thin to be a per-PR net for
+          # a specific evaluation path. These are deterministic REGRESSION windows, not
           # known-catch ones: no historical bug is pinned to these seeds yet, and if
           # the nightly lane finds one its window gets pinned here the way sq-lr2ii's
           # was. ~2 s per category at release-fast throughput.
-          for c in path aggregate subquery exists values bind graph; do
+          for c in path aggregate subquery exists values bind graph antijoin \
+                   typed strfn ask construct; do
             "$b" fuzz 0 10000 "$c"
           done
           # Store-mode read paths over the fixed window: the same seeds re-run with

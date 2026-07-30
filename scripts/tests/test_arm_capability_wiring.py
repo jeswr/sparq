@@ -404,7 +404,7 @@ class TestScriptContract(unittest.TestCase):
 class TestSelfTestsRunInCi(unittest.TestCase):
     """The self-tests are only worth writing if something runs them on every PR."""
 
-    def test_docs_quality_runs_both_self_tests_and_this_wiring_suite(self) -> None:
+    def test_docs_quality_runs_the_arm_policy_self_tests_and_this_wiring_suite(self) -> None:
         document = load(WORKFLOWS / "docs-quality.yml")
         gating = [
             run_of(step)
@@ -412,16 +412,34 @@ class TestSelfTestsRunInCi(unittest.TestCase):
             for step in (job.get("steps") or [])
             if "advisory" not in str(job.get("name", job_id)).lower()
         ]
-        blob = "\n".join(gating)
-        for needle in (
-            "scripts/rearm-sweeper.py --self-test",
-            "scripts/auto-arm.py --self-test",
-            "scripts/tests/test_arm_capability_wiring.py",
+        # [OPUS-5] #4795: match a whole stripped LINE, not a substring of the blob. A
+        # containment check passes against `… --self-test-DISABLED` / `… --self-test || true`
+        # — the exact suffix-mutation shape that survived a containment pin elsewhere in
+        # this repo — so the command must appear as its own complete command line.
+        commands = {
+            line.strip()
+            for block in gating
+            for line in block.splitlines()
+            if line.strip()
+        }
+        for command in (
+            # [OPUS-5] #4795: gh_retry.py was the ONLY one of the three arm-policy scripts
+            # whose PR-time self-test was unpinned. docs-quality.yml did run it, so the
+            # coverage looked complete — but deleting that single line would have gone
+            # unnoticed, leaving every change to the transient classifier (the thing that
+            # decides whether a platform blip reds main) validated by nothing until the
+            # next cron. Pinning the file whose guard you are relying on is the point.
+            "python3 scripts/gh_retry.py --self-test",
+            "python3 scripts/rearm-sweeper.py --self-test",
+            "python3 scripts/auto-arm.py --self-test",
+            "python3 scripts/tests/test_arm_capability_wiring.py",
         ):
             self.assertIn(
-                needle,
-                blob,
-                f"docs-quality.yml must run `{needle}` in a GATING job",
+                command,
+                commands,
+                f"docs-quality.yml must run `{command}` as a complete command line in a "
+                "GATING job (found gating commands: "
+                f"{sorted(c for c in commands if 'self-test' in c or 'test_arm' in c)})",
             )
 
 
@@ -449,16 +467,27 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 ARM_SCRIPTS = (REARM_PY, AUTO_ARM_PY)
 
 
-def run_without_gh_retry(script: Path, driver: str | None = None):
+def run_without_gh_retry(
+    script: Path, driver: str | None = None, *, with_release_guard: bool = True
+):
     """Run ``script`` from a temp dir holding ONLY it, so `import gh_retry` cannot resolve.
 
     This reproduces the runner's state exactly: sys.path[0] is the script's own directory,
     and scripts/gh_retry.py was never checked out into it.
+
+    [OPUS-5] #1135: ``with_release_guard`` (default True) ALSO copies
+    scripts/release_pr_guard.py in, isolating exactly ONE variable — the missing
+    gh_retry.py this class is about. That guard has the OPPOSITE degradation contract
+    (its absence must stop every arm, not degrade one), so leaving it out here would
+    conflate the two and make this class assert something it does not mean. The
+    release-guard-absent case has its own class: TestMissingReleaseGuardArmsNothing.
     """
     env = {k: v for k, v in __import__("os").environ.items() if k != "PYTHONPATH"}
     with tempfile.TemporaryDirectory() as tmp:
         target = Path(tmp) / script.name
         shutil.copy2(script, target)
+        if with_release_guard:
+            shutil.copy2(script.parent / "release_pr_guard.py", Path(tmp))
         if (Path(tmp) / "gh_retry.py").exists():  # pragma: no cover - paranoia
             raise AssertionError("the isolation dir must NOT contain gh_retry.py")
         if driver is None:
@@ -579,6 +608,52 @@ class TestSurvivesMissingGhRetry(unittest.TestCase):
                     f"stderr:\n{result.stderr}",
                 )
                 self.assertIn("DEGRADED-MUTATION-OK", result.stdout, result.stdout)
+
+
+class TestMissingReleaseGuardArmsNothing(unittest.TestCase):
+    """[OPUS-5] #1135: the OPPOSITE degradation contract to TestSurvivesMissingGhRetry.
+
+    A missing `gh_retry.py` costs RETRIES and must never cost the arm (#3776). A missing
+    `release_pr_guard.py` costs the ARM ITSELF and must: without it the sweep cannot prove
+    any candidate is not the release-plz Release PR, and arming that PR cuts a `v*` tag
+    and — once `publish = true` — publishes 17 crates to crates.io, irreversibly. A missed
+    sweep is covered by the next cron; an unpublishable version is covered by nothing.
+
+    These are the tests that go red if someone 'fixes' the fail-closed stub into a
+    permissive one to make TestSurvivesMissingGhRetry pass more easily.
+    """
+
+    def test_arm_sweeps_refuse_every_candidate_without_the_guard(self) -> None:
+        for script in ARM_SCRIPTS:
+            with self.subTest(script=script.name):
+                result = run_without_gh_retry(
+                    script,
+                    driver=DEGRADED_DRIVERS[script],
+                    with_release_guard=False,
+                )
+                # The driver asserts `outcome.armed == 1`, so a NON-zero exit here is the
+                # assertion that nothing was armed. Paired with
+                # TestSurvivesMissingGhRetry, which runs the SAME driver WITH the guard
+                # present and requires exit 0 — the two together prove the difference is
+                # attributable to the guard and to nothing else.
+                self.assertNotEqual(
+                    0,
+                    result.returncode,
+                    f"{script.name} ARMED a PR with release_pr_guard.py absent. The "
+                    "Release-PR exclusion could not be evaluated, so nothing may be "
+                    "armed (#1135).\nstdout:\n" + result.stdout,
+                )
+                self.assertNotIn("DEGRADED-MUTATION-OK", result.stdout, result.stdout)
+
+    def test_the_refusal_is_loud_and_actionable(self) -> None:
+        for script in ARM_SCRIPTS:
+            with self.subTest(script=script.name):
+                out = run_without_gh_retry(
+                    script, with_release_guard=False
+                ).stdout
+                self.assertIn("::error title=", out, out)
+                for needle in ("release_pr_guard.py", "sparse-checkout", "#1135"):
+                    self.assertIn(needle, out, f"{script.name}: must name {needle!r}")
 
 
 class TestDegradedHelperContract(unittest.TestCase):
@@ -956,6 +1031,217 @@ class TestEventModeIsPerPr(unittest.TestCase):
             "policy decision about what may block a merge",
         ):
             self.assertIn(needle, source, f"auto-arm.py must keep {needle!r}")
+
+
+
+# --------------------------------------------------------------------------------------
+# [OPUS-5] #4548 — THE STUCK-ARM PHASE, pinned at the YAML SEAM.
+#
+# Measured here repeatedly: every uncaught mutant in this repo's recent rounds lived in the
+# workflow, not the Python. A wiring assertion once stayed green because the step's COMMENT
+# named the file it searched for; a `paths:`-filtered workflow never ran the suite guarding
+# its own headline mutant. So the pins below assert against the PARSED document (yaml drops
+# comments structurally — proved by `test_the_harness_is_comment_blind`) and against the
+# SCRIPT's real argparse surface, so deleting either half reds.
+STUCK_PHASE_FLAG = "--phase stuck-arm"
+STUCK_CAP_FLAG = "--max-stuck-actions"
+
+
+class TestStuckArmWiring(unittest.TestCase):
+    """The stuck-arm sweep must be REACHED, BOUNDED, and PERMITTED — or it is decoration."""
+
+    def setUp(self) -> None:
+        self.document = load(REARM_YML)
+        self.steps = steps_of(self.document)
+
+    def _stuck_indexes(self) -> list[int]:
+        return [
+            index
+            for index, step in enumerate(self.steps)
+            if STUCK_PHASE_FLAG in " ".join(run_of(step).split())
+        ]
+
+    def test_the_harness_is_comment_blind(self) -> None:
+        """The tripwire for the measured false-green: a COMMENT must not satisfy a pin."""
+        commented = yaml.safe_load(
+            "jobs:\n  j:\n    steps:\n"
+            f"      # runs rearm-sweeper.py {STUCK_PHASE_FLAG} {STUCK_CAP_FLAG} 5\n"
+            "      - name: decoy\n        run: echo nothing-here\n"
+        )
+        blob = "\n".join(run_of(step) for step in steps_of(commented))
+        self.assertNotIn(STUCK_PHASE_FLAG, blob)
+        self.assertNotIn(STUCK_CAP_FLAG, blob)
+        # ...and the same token in a real `run:` IS seen, so the check is not vacuous.
+        live = yaml.safe_load(
+            "jobs:\n  j:\n    steps:\n"
+            f"      - name: real\n        run: python3 x.py {STUCK_PHASE_FLAG}\n"
+        )
+        self.assertIn(
+            STUCK_PHASE_FLAG, "\n".join(run_of(step) for step in steps_of(live))
+        )
+
+    def test_the_stuck_arm_phase_is_actually_invoked_exactly_once(self) -> None:
+        indexes = self._stuck_indexes()
+        self.assertEqual(
+            len(indexes),
+            1,
+            f"rearm-sweeper.yml must run `{STUCK_PHASE_FLAG}` exactly once; a phase that "
+            "is never invoked classifies nothing, and two invocations double-act",
+        )
+        self.assertIn(
+            "scripts/rearm-sweeper.py",
+            run_of(self.steps[indexes[0]]),
+            "the stuck-arm flag must be passed to rearm-sweeper.py itself",
+        )
+
+    def test_it_runs_after_the_rearm_step(self) -> None:
+        """Order is policy: a PR re-armed seconds ago must be inside the grace window."""
+        stuck = self._stuck_indexes()[0]
+        rearm = [
+            index
+            for index, step in enumerate(self.steps)
+            if "scripts/rearm-sweeper.py" in run_of(step)
+            and PROBE_FLAG not in run_of(step)
+            and "--self-test" not in run_of(step)
+            and STUCK_PHASE_FLAG not in " ".join(run_of(step).split())
+        ]
+        self.assertTrue(rearm, "the re-arm step must still exist")
+        self.assertGreater(
+            stuck, max(rearm), "the stuck-arm phase must run AFTER the re-arm phase"
+        )
+
+    def test_the_per_tick_bound_is_actually_passed(self) -> None:
+        """A congestion bound that is never supplied is not a bound.
+
+        This repo has a measured congestion-collapse mode, so the cap has to be on the
+        command line, not merely available as a default.
+        """
+        run = " ".join(run_of(self.steps[self._stuck_indexes()[0]]).split())
+        self.assertIn(STUCK_CAP_FLAG, run)
+        value = run.split(STUCK_CAP_FLAG, 1)[1].split()[0]
+        self.assertTrue(value.isdigit(), f"{STUCK_CAP_FLAG} needs a numeric cap, got {value!r}")
+        self.assertGreaterEqual(int(value), 1)
+        self.assertLessEqual(
+            int(value), 10, "a per-tick cap above 10 re-opens the congestion-collapse mode"
+        )
+
+    def test_the_live_step_is_not_stuck_in_dry_run(self) -> None:
+        """A sweep permanently in --dry-run reports beautifully and repairs nothing.
+
+        The flag exists so the census can be taken against the live repository before
+        remediation is switched on; leaving it in the scheduled step would recreate exactly
+        the invisible-no-exit state this phase was built to remove.
+        """
+        run = " ".join(run_of(self.steps[self._stuck_indexes()[0]]).split())
+        self.assertNotIn("--dry-run", run)
+
+    def test_it_uses_the_same_token_expression_as_the_probe(self) -> None:
+        stuck = self.steps[self._stuck_indexes()[0]]
+        probe = next(
+            step for step in self.steps if PROBE_FLAG in run_of(step)
+        )
+        self.assertEqual(
+            (stuck.get("env") or {}).get("GH_TOKEN"),
+            (probe.get("env") or {}).get("GH_TOKEN"),
+            "a stuck-arm phase on a different token than the probe attests capability it "
+            "does not have",
+        )
+
+    def test_the_scopes_its_mutations_need_are_granted(self) -> None:
+        """Classify-then-403 is the failure mode this pin exists for.
+
+        `checks: write` is the only scope that can re-request a cancelled run, and
+        labelling a pull request consumes the ISSUES scope.
+        """
+        permissions = self.document.get("permissions") or {}
+        for scope in ("contents", "pull-requests", "checks", "issues"):
+            self.assertEqual(
+                permissions.get(scope),
+                "write",
+                f"the stuck-arm phase cannot remediate without `{scope}: write`",
+            )
+
+
+class TestStuckArmScriptContract(unittest.TestCase):
+    """Cross-file pin: the YAML above is only meaningful if the SCRIPT still honours it."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.rearm = load_module(REARM_PY, "rearm_sweeper_stuck_under_test")
+
+    def test_the_script_accepts_the_flags_the_workflow_passes(self) -> None:
+        source = REARM_PY.read_text(encoding="utf-8")
+        for needle in ('"--phase"', '"stuck-arm"', '"--max-stuck-actions"'):
+            self.assertIn(needle, source, f"rearm-sweeper.py must define {needle}")
+        self.assertTrue(hasattr(self.rearm, "StuckArmSweeper"))
+        self.assertTrue(hasattr(self.rearm, "stuck_arm_exit"))
+
+    def test_the_stuck_self_test_is_reachable_from_dash_dash_self_test(self) -> None:
+        """THE VACUITY GUARD.
+
+        Everything else in this file assumes the stuck-arm suite runs. If `self_test()`
+        stops calling `stuck_self_test()`, that whole suite becomes dead code that still
+        reports PASS — the exact shape of a green-but-vacuous gate. Asserted on the AST so
+        a mention in a comment or a docstring cannot satisfy it.
+        """
+        tree = ast.parse(REARM_PY.read_text(encoding="utf-8"))
+        self_test = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "self_test"
+        )
+        called = {
+            node.func.id
+            for node in ast.walk(self_test)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        self.assertIn(
+            "stuck_self_test",
+            called,
+            "self_test() must CALL stuck_self_test(); otherwise the stuck-arm suite never "
+            "runs and every pin in this file is vacuous",
+        )
+
+    def test_the_two_gate_names_are_distinct_and_matched_exactly(self) -> None:
+        """registry #761 in miniature: `gate` is a strict prefix of `gate, draft-tier`."""
+        self.assertNotEqual(self.rearm.GATE_CHECK_NAME, self.rearm.DRAFT_GATE_CHECK_NAME)
+        self.assertTrue(
+            self.rearm.DRAFT_GATE_CHECK_NAME.startswith(self.rearm.GATE_CHECK_NAME)
+        )
+        pages = [
+            {
+                "total_count": 1,
+                "check_runs": [
+                    {
+                        "name": self.rearm.DRAFT_GATE_CHECK_NAME,
+                        "status": "completed",
+                        "conclusion": "success",
+                        "started_at": "2026-07-27T00:00:00Z",
+                        "id": 1,
+                    }
+                ],
+            }
+        ]
+        self.assertEqual(
+            self.rearm.resolve_gate(pages, is_draft=False), self.rearm.GATE_MISSING
+        )
+        self.assertEqual(
+            self.rearm.resolve_gate(pages, is_draft=True), self.rearm.GATE_SUCCESS
+        )
+
+    def test_every_class_is_routed(self) -> None:
+        """The enum is closed in BOTH directions — no class without an action."""
+        actions = self.rearm.CLASS_ACTIONS
+        self.assertTrue(actions)
+        self.assertEqual(
+            set(actions.values()) - {
+                self.rearm.ACTION_NONE, self.rearm.ACTION_PARK,
+                self.rearm.ACTION_ROUTE_FIX, self.rearm.ACTION_REBASE,
+                self.rearm.ACTION_RETRIGGER,
+            },
+            set(),
+        )
+
 
 
 if __name__ == "__main__":

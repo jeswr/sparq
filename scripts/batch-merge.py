@@ -115,6 +115,21 @@ except Exception:  # defensive only; --self-test pins the working import path re
     def classify_change(_paths):
         return "engine"
 
+# [OPUS-5] #1135: the shared Release-PR predicate. NOT fail-soft — unlike
+# classify_change above (whose worst case is a coarser batch), a missing Release-PR
+# exclusion can put the Release PR into an omnibus batch. The stub refuses everything.
+try:
+    import release_pr_guard
+except ImportError:  # pragma: no cover - see scripts/tests/test_release_publish_guard.py
+
+    class release_pr_guard:  # type: ignore[no-redef]
+        @staticmethod
+        def arm_block_reason(**_kwargs) -> str:
+            return (
+                "release-pr-guard: scripts/release_pr_guard.py is not importable — "
+                "treating every PR as un-batchable (fail-closed, #1135)"
+            )
+
 # The merge queue's max_entries_to_merge: up to this many armed PRs land in one queue
 # window, so a backlog at or under it needs no batching.
 QUEUE_WINDOW = 8
@@ -163,9 +178,21 @@ def author_handle(login: str) -> str:
 
 
 def is_release_plz(pr: dict) -> bool:
+    """[OPUS-5] #1135: one shared predicate for every arming/merging path.
+
+    WAS: `author == github-actions AND title startswith "chore: release"`. That
+    conjunction misses the Release PR whenever EITHER signal shifts — a different bot
+    identity, or a retitled PR. release_pr_guard.arm_block_reason keys on branch OR
+    author OR title and fails CLOSED on an unknown head branch. Widening the exclusion
+    is the safe direction here: the batcher's only response is to leave the PR alone.
+    """
     return (
-        author_handle(pr.get("author_login", "")) == "github-actions"
-        and pr.get("title", "").lower().startswith("chore: release")
+        release_pr_guard.arm_block_reason(
+            head_ref=pr.get("head_ref"),
+            author_login=pr.get("author_login"),
+            title=pr.get("title"),
+        )
+        is not None
     )
 
 

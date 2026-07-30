@@ -24,6 +24,18 @@ readme = "README.md"
 # dependency of NOTHING in the workspace, so the deps stay off every default build path.
 sparq-core = { path = "../sparq-core", default-features = false }
 sparq-solid = { path = "../sparq-solid", default-features = false }
+# [SONNET-4.6] sq-x1ayt — the ODRL policy source for the time-windowed conditional-grant
+# rows. OPTIONAL + behind the `odrl-bridge` feature (OFF by default): the live-clock
+# `auth:notBefore`/`auth:notAfter` window is produced ONLY by sparq-solid's ODRL bridge
+# (ACP has no native time vocabulary), so the default oracle build carries zero ODRL
+# code or deps and the WAC/ACP corpus above is unchanged.
+sparq-policy = { path = "../sparq-policy", default-features = false, optional = true }
+
+[features]
+# [SONNET-4.6] sq-x1ayt: the `window_corpus` module — decision rows whose verdict turns
+# on `Session::now` against a persisted `auth:notBefore`/`auth:notAfter` window. Enables
+# sparq-solid's own `odrl-bridge` feature, which is what mints the windowed grant.
+odrl-bridge = ["dep:sparq-policy", "sparq-solid/odrl-bridge"]
 
 # [FABLE-5] sq-39kps — register the `kani` cfg so the `#[cfg(kani)]` domain-coverage
 # self-check in `escalation_corpus.rs` does not trip `-D warnings` (unexpected_cfgs) on

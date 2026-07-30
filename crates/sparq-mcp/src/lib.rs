@@ -11,11 +11,27 @@
 //!   transport) or, with the `stdio` feature, the `serve_stdio` loop.
 //! - [`jsonrpc`] — the minimal JSON-RPC 2.0 framing the MCP wire format uses.
 //! - [`tools`] — the advertised tool specs (`name` / `description` / `inputSchema`).
+//! - [`resources`] — the MCP **resources** surface (`resources/list` / `resources/read`):
+//!   the served dataset as a VoID descriptor, the default graph, and one resource per
+//!   named graph, each as N-Triples through the same budgeted engine path the
+//!   `construct` tool uses. Read-only; adds no crate to the build. [SONNET-4.6] sq-sjey1
+//! - [`prompts`] — the MCP **prompts** surface (`prompts/list` / `prompts/get`): a static
+//!   catalog of canned query prompts (`explore-dataset`, `count-by-class`,
+//!   `class-overview`, `predicate-usage`) over the tools that already exist. An IRI
+//!   argument is RFC-3987-validated before it is interpolated into a SPARQL `IRIREF`.
+//!   [SONNET-4.6] sq-sjey1
 //! - [`shapes`] — the structured `shapes` grounding tool (the data-grounded
 //!   predicate/datatype/cardinality constraints for one class IRI; no server-side model).
-//! - `nlq` (feature `nlq`) — the server-side natural-language `ask` tool (NL→SPARQL→execute
-//!   via `sparq-nlq`; embeds a configurable LLM call, degrades cleanly when none is set).
+//! - `nlq` (feature `nlq`) — the server-side natural-language tools: `ask`
+//!   (NL→SPARQL→execute via `sparq-nlq`) and `nl_query`, which runs the same grounding
+//!   and the same pre-execution checks (question guard, `spargebra` parse,
+//!   forbidden-construct refusal) but returns the query **unexecuted** for review
+//!   ([SONNET-4.6] sq-sj1f9). Both embed a configurable LLM call and degrade cleanly
+//!   (unadvertised, "not configured" error) when no backend is set.
 //! - `transport` (feature `stdio`) — the line-delimited stdio serve loop.
+//! - `cli` (feature `stdio`) — the argument parsing + dataset loading behind the shipped
+//!   `sparq-mcp` binary (`--allow-update` / `--format` / `--query-timeout` / `--max-rows`
+//!   + a positional data file). [SONNET-4.6] sq-5xgxe
 //! - `solid` (feature `solid`) — the pod-backed server (`SolidMcpServer`): LDP
 //!   container/resource CRUD tools (`resource_get`/`container_list`, plus the gated
 //!   `resource_put`/`resource_delete`/`container_create`) with WAC/ACP-authorized,
@@ -39,6 +55,10 @@
 //!   returning the `FormDescription` JSON verbatim. [FABLE-5] sq-lsp7k.1.6
 
 pub mod jsonrpc;
+// [SONNET-4.6] sq-sjey1: the canned-query prompt catalog behind `prompts/list`/`prompts/get`.
+pub mod prompts;
+// [SONNET-4.6] sq-sjey1: the dataset/named-graph projection behind `resources/list`/`resources/read`.
+pub mod resources;
 pub mod server;
 pub mod shapes;
 pub mod tools;
@@ -51,6 +71,12 @@ pub mod nlq;
 #[cfg(feature = "stdio")]
 #[cfg_attr(docsrs, doc(cfg(feature = "stdio")))]
 pub mod transport;
+
+// [SONNET-4.6] sq-5xgxe: the shipped `sparq-mcp` binary's argument parsing + dataset
+// loading, kept in the library so the startup contract is unit-testable.
+#[cfg(feature = "stdio")]
+#[cfg_attr(docsrs, doc(cfg(feature = "stdio")))]
+pub mod cli;
 
 // [FABLE-5] sq-u16eq: the pod-backed server with LDP resource tools, behind the opt-in
 // `solid` feature.

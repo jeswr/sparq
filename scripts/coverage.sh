@@ -36,6 +36,14 @@
 #                                       `…_with_base` (`#[cfg(feature = "rdfxml")]`) + its
 #                                       direct unit tests are otherwise compiled out / 0%.
 #                                       [OPUS-4.8] sq-f47w1 (survey §B1).
+#   - sparq-reason    MUST be measured with `--features datalog`. The crate is NOT empty
+#                     by default (RDFS/OWL-RL/N3 are default-on), but the stratified
+#                     Datalog module (`src/datalog/`) is entirely `#[cfg(feature =
+#                     "datalog")]`, so a default-feature run computes the line% over a
+#                     denominator that EXCLUDES it — the module could rot to 0% without
+#                     moving this crate's floor. See the case arm in measure() for why
+#                     only `datalog` (and not the crate's other default-off features) is
+#                     named. [SONNET-4.6] sq-iwf3c
 #   - sparq-vectors   the two `*_recall_at_10_vs_brute_force_on_50k` tests (HNSW +
 #                     DiskANN) are EXCLUDED from the per-commit subset via `--skip`
 #                     (they dominate wall-clock under instrumentation). They are
@@ -549,6 +557,28 @@ measure() {
     sparq-reason-el)
       cargo_args+=(--features rbox,hasse)
       features+=("rbox" "hasse") ;;
+    # [SONNET-4.6] sq-iwf3c (epic sq-6tykl, design record
+    # research/stratified-datalog-rules.md §5/§6 item 8): the OPT-IN STRATIFIED DATALOG
+    # module. Unlike the crates above, sparq-reason is NOT empty by default — the
+    # RDFS/OWL-RL/N3 chainers are default-on — but `crates/sparq-reason/src/datalog/`
+    # (parser + stratification checker + per-stratum evaluator + `datalog::incr` DRed
+    # maintenance, plus its in-crate differential-oracle suite) is entirely behind the
+    # DEFAULT-OFF `datalog` feature, so a default-feature run compiles it OUT and the
+    # module never enters this crate's line-coverage floor at all. Naming the feature
+    # here brings it under the ratchet, the same way rbox+hasse does for sparq-reason-el.
+    #
+    # ONLY `datalog` is named, deliberately. sparq-reason carries several other
+    # default-off features (explain / profile / d-entail / rif / compiled-rules /
+    # reify / …) whose wiring is separately beaded; adding them here would change the
+    # denominator for reasons this bead did not measure. Scope = the one feature the
+    # bead names.
+    #
+    # `datalog`'s tests are ALL in-crate unit tests (`#[cfg(test)] mod tests` +
+    # `#[cfg(test)] mod oracle` in src/datalog/mod.rs) — there is no
+    # `#![cfg(feature = "datalog")]` integration test under tests/ — so `cargo llvm-cov
+    # test -p sparq-reason --features datalog` runs the whole suite with no extra args.
+    sparq-reason)
+      cargo_args+=(--features datalog); features+=("datalog") ;;
     # [OPUS-4.8] sq-qcnn.23 (epic sq-qcnn): OWL 2 QL query-rewriting reasoner.
     # Whole gate-exercising surface is behind DEFAULT-OFF `experimental`:
     # without it only the cheap CQ-shape gate types compile in and the PerfectRef
