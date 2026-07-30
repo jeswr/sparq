@@ -17,7 +17,9 @@ The bead id (`sq-…`) is preserved in the issue title so existing PR-title toke
 
 `--verify` is the read-only post-migration reconcile (see verify_migration): counts, duplicate
 bd-id mappings, and whether pass 2's dependency markers actually landed. It creates and edits
-nothing, so it is safe to run at any time against a live board.
+nothing, so it is safe to run at any time against a live board. It counts a bead as migrated only
+on the same authentication `--apply` demands — MIGRATION_LABEL on the issue — so a board of
+forgeable marker-only decoys fails closed instead of verifying as a finished migration.
 """
 import argparse
 import json
@@ -731,17 +733,33 @@ NATIVE_SUMMARY_FIELD = "issue_dependencies_summary"
 
 
 def marker_index(issues):
-    """{bd-id: [issue, ...]} over every issue carrying a shape-valid bd-id marker, duplicates KEPT.
+    """(authenticated, marker_only): two {bd-id: [issue, ...]} maps over every issue carrying a
+    shape-valid bd-id marker, split on MIGRATION_LABEL, duplicates KEPT in both.
 
+    The split is the SAME trust boundary fetch_bd_map draws, and it is load-bearing here for the
+    same reason: a body marker is FORGEABLE. An unprivileged user can pre-create one decoy issue
+    per planned bead carrying the expected marker — and correctly-edged decoys are no harder to
+    forge than bare ones. `--apply` already fails closed on exactly that shape (the `unverifiable`
+    check in apply_migration refuses to map to a marker-only issue with no migration provenance),
+    so `--verify` must not accept as migrated what `--apply` refuses to resume from; otherwise a
+    board of decoys reports PASSED although the migration never created or authenticated anything.
+    MIGRATION_LABEL is the stable POST-migration invariant to check against: pass 3 stamps it on
+    every mapped bead, including the ~750 pre-label issues of the 2026-07-17 run (see `backfill`).
+    A marker-only issue is therefore an unfinished migration or a decoy — never a pass.
+
+    Duplicates are kept because "one bd-id, two issues" is a defect this reconcile looks for.
     fetch_bd_map collapses a repeated bd-id by dict assignment (last write wins). That is right for
     resume — resolve_resume_map re-derives provenance afterwards — but it is precisely the wrong
-    shape for a count reconcile, where "one bd-id, two issues" is the defect being looked for."""
-    idx = {}
+    shape for a count reconcile."""
+    authenticated, marker_only = {}, {}
     for it in issues:
         mm = MARKER_RE.search(it.get("body") or "")
-        if mm:
-            idx.setdefault(mm.group(1), []).append(it)
-    return idx
+        if not mm:
+            continue
+        labels = {lb["name"] if isinstance(lb, dict) else lb for lb in it.get("labels") or []}
+        (authenticated if MIGRATION_LABEL in labels else marker_only).setdefault(
+            mm.group(1), []).append(it)
+    return authenticated, marker_only
 
 
 def _is_closed(issue):
@@ -761,9 +779,16 @@ def verify_migration(open_ids, blockers, parents, issues, native_blockers=None):
 
     Verdict rules, and why each is drawn where it is:
 
-    * A bd-id found on TWO issues is NOT a mapping. It is reported as a duplicate and the bead
-      counts as unmigrated, because choosing one of the two here would be guessing — the same
-      fail-closed rule migration_owned already applies.
+    * ONLY a MIGRATION_LABEL-carrying issue counts as a mapping (marker_index). A marker-only
+      issue is a forgeable claim, not evidence the migration ran; `--apply` refuses to resume from
+      one, so `--verify` must not pass on one. Such bd-ids are reported under `unauthenticated`
+      and their beads stay `unmigrated`, i.e. the verdict fails closed. The remedy is the same
+      re-run of `--apply`, whose pass 3 stamps the label (or stops for review if it is a decoy).
+    * A bd-id found on TWO authenticated issues is NOT a mapping. It is reported as a duplicate and
+      the bead counts as unmigrated, because choosing one of the two here would be guessing — the
+      same fail-closed rule migration_owned already applies. A marker-only copy SHADOWING an
+      authenticated issue is inert (resolve_resume_map already treats it so): the authenticated
+      issue is canonical, and the copy is reported under `shadowed` for information only.
     * A missing marker is a missing marker even when the issue carries native edges. Pass 2 either
       wrote it or it did not, and the count-only native summary cannot confirm that one SPECIFIC
       edge exists. The native count is attached to the record so the operator can tell a
@@ -772,10 +797,14 @@ def verify_migration(open_ids, blockers, parents, issues, native_blockers=None):
       verdict: a closed issue is never dispatched and never holds anything, so no marker written
       there could change an outcome.
     """
-    idx = marker_index(issues)
+    authenticated, marker_only = marker_index(issues)
     duplicates = {bid: sorted(it["number"] for it in cands)
-                  for bid, cands in idx.items() if len(cands) > 1}
-    by_bid = {bid: cands[0] for bid, cands in idx.items() if len(cands) == 1}
+                  for bid, cands in authenticated.items() if len(cands) > 1}
+    by_bid = {bid: cands[0] for bid, cands in authenticated.items() if len(cands) == 1}
+    unauthenticated = {bid: sorted(it["number"] for it in cands)
+                       for bid, cands in marker_only.items() if bid not in authenticated}
+    shadowed = {bid: sorted(it["number"] for it in cands)
+                for bid, cands in marker_only.items() if bid in authenticated}
     unmigrated = sorted(b for b in open_ids if b not in by_bid)
     stray = sorted(b for b in by_bid if b not in open_ids)
 
@@ -802,6 +831,7 @@ def verify_migration(open_ids, blockers, parents, issues, native_blockers=None):
     return {
         "planned": len(open_ids), "mapped": len(by_bid),
         "duplicates": duplicates, "unmigrated": unmigrated, "stray": stray,
+        "unauthenticated": unauthenticated, "shadowed": shadowed,
         "edges_planned": landed + len(missing) + len(unresolvable),
         "edges_landed": landed, "edges_missing": missing, "edges_live_missing": live_missing,
         "edges_unresolvable": unresolvable,
@@ -814,7 +844,7 @@ def print_verify_report(rep, log=print, sample=8):
     """Human-readable rendering of a verify_migration report. Samples the long lists — the counts
     are the verdict, the samples are the starting point for the operator's own look."""
     log(f"[verify] planned (open/in_progress beads): {rep['planned']}  |  "
-        f"mapped to exactly one issue: {rep['mapped']}")
+        f"mapped to exactly one '{MIGRATION_LABEL}'-labelled issue: {rep['mapped']}")
     log(f"[verify] planned edges: {rep['edges_planned']}  |  markers present: "
         f"{rep['edges_landed']}  |  absent: {len(rep['edges_missing'])} "
         f"({len(rep['edges_live_missing'])} on issue pairs that are both still open)")
@@ -827,8 +857,21 @@ def print_verify_report(rep, log=print, sample=8):
         for bid, nums in sorted(rep["duplicates"].items())[:sample]:
             log(f"          {bid} -> {['#' + str(n) for n in nums]}")
     if rep["unmigrated"]:
-        log(f"[verify] FAIL {len(rep['unmigrated'])} planned bead(s) have NO unambiguous issue "
-            f"— pass 1 did not finish: {rep['unmigrated'][:sample]}")
+        log(f"[verify] FAIL {len(rep['unmigrated'])} planned bead(s) have NO unambiguous "
+            f"authenticated issue — pass 1 did not finish: {rep['unmigrated'][:sample]}")
+    if rep["unauthenticated"]:
+        # These are NOT mappings, and saying so is the whole point: a marker without the label is
+        # either an unfinished migration or a pre-created decoy, and this report cannot tell which.
+        log(f"[verify] {len(rep['unauthenticated'])} bd-id(s) appear ONLY on issue(s) with no "
+            f"'{MIGRATION_LABEL}' label — an unauthenticated body marker is not evidence of "
+            f"migration (--apply refuses to resume from one). Any that are in the plan are counted "
+            f"unmigrated above; re-run --apply to label the genuine ones or close the decoys:")
+        for bid, nums in sorted(rep["unauthenticated"].items())[:sample]:
+            log(f"          {bid} -> {['#' + str(n) for n in nums]}")
+    if rep["shadowed"]:
+        log(f"[verify] {len(rep['shadowed'])} bd-id(s) also appear on an unlabelled COPY of an "
+            f"authenticated issue — inert (the labelled issue is canonical), informational: "
+            f"{sorted(rep['shadowed'])[:sample]}")
     if rep["edges_unresolvable"]:
         log(f"[verify] {len(rep['edges_unresolvable'])} edge(s) have an unmigrated endpoint "
             f"(a consequence of the unmigrated beads above, not a separate defect)")
@@ -1270,8 +1313,12 @@ def _self_test():
     # The defect being pinned is an --apply that died inside pass 1: issues exist, dependency
     # markers silently do not. Every assertion below therefore separates "the board matches the
     # plan" from "the board merely has issues on it".
-    def _iss(num, bid, body_extra="", state="OPEN"):
+    # `labeled` is EXPLICIT because the label is what authenticates the marker: an issue built with
+    # labeled=False is exactly the forgeable decoy shape --apply refuses to resume from, and the
+    # verifier must refuse it too. Default True = the post-migration board pass 3 leaves behind.
+    def _iss(num, bid, body_extra="", state="OPEN", labeled=True):
         return {"number": num, "title": f"{bid}: t", "state": state,
+                "labels": [{"name": MIGRATION_LABEL}] if labeled else [],
                 "body": f"prose\n<!-- bd-id:{bid} -->\n{body_extra}"}
 
     beads3 = {"sq-a": {"id": "sq-a"}, "sq-b": {"id": "sq-b"}, "sq-c": {"id": "sq-c"}}
@@ -1281,6 +1328,32 @@ def _self_test():
     chk("a complete migration verifies clean",
         (rep["ok"], rep["mapped"], rep["edges_landed"], rep["edges_planned"]), (True, 3, 2, 2))
     chk("a clean verify consults nothing it was not given", rep["native_consulted"], False)
+    # THE FORGED-BOARD SHAPE (review round 2). A body marker is forgeable, so an unprivileged user
+    # can pre-create one issue per planned bead — WITH the right markers and the right edges, which
+    # cost nothing extra to forge — and a marker-trusting verifier would report PASSED for a
+    # migration that never ran. --apply already refuses to resume from these (the `unverifiable`
+    # fail-closed check), so --verify must refuse them too. The ONLY difference from `complete`
+    # above, which passes, is MIGRATION_LABEL: every bd-id here is unique and every edge lands.
+    decoys = [_iss(1, "sq-a", "Blocked-by: #2\nParent: #3", labeled=False),
+              _iss(2, "sq-b", labeled=False), _iss(3, "sq-c", labeled=False)]
+    rep = verify_migration(beads3, blk, par, decoys)
+    chk("unique, correctly-edged marker-only issues never verify as migrated",
+        (rep["ok"], rep["mapped"], rep["unmigrated"]), (False, 0, ["sq-a", "sq-b", "sq-c"]))
+    chk("the unauthenticated bd-ids are named, not silently dropped",
+        rep["unauthenticated"], {"sq-a": [1], "sq-b": [2], "sq-c": [3]})
+    chk("an unauthenticated marker is not a duplicate either (it is simply not a mapping)",
+        (rep["duplicates"], rep["edges_landed"], len(rep["edges_unresolvable"])), ({}, 0, 2))
+    lines = []
+    chk("the forged board renders a FAILED verdict",
+        print_verify_report(rep, log=lines.append), 1)
+    chk("the report says the markers are unauthenticated",
+        any(MIGRATION_LABEL in l and "not evidence of migration" in l for l in lines), True)
+    # A marker-only COPY shadowing an authenticated issue is inert, exactly as resolve_resume_map
+    # already treats it: the labelled issue is canonical, so the verdict is unchanged.
+    rep = verify_migration(beads3, blk, par, complete + [_iss(9, "sq-b", labeled=False)])
+    chk("a marker-only copy shadowing an authenticated issue is inert, not a failure",
+        (rep["ok"], rep["mapped"], rep["shadowed"], rep["unauthenticated"]),
+        (True, 3, {"sq-b": [9]}, {}))
     # THE DIED-MID-PASS-1 SHAPE: every issue present, not one marker written. The count reconcile
     # alone reports a perfectly healthy board here, which is exactly why the edge check exists.
     no_edges = [_iss(1, "sq-a"), _iss(2, "sq-b"), _iss(3, "sq-c")]
