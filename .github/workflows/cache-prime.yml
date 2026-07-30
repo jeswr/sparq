@@ -1,0 +1,378 @@
+# cache-prime — nightly (+ targeted push-to-main) PRIMING of the canonical Rust
+# dependency-cache families, so the FIRST job of a fresh PR restores warm. [FABLE-5]
+# Bead sq-6vshe.5 — the cache TOPOLOGY around the per-job rust-cache wiring.
+# Design: research/ci-structural-speedup.md §6.
+#
+# ── Key schema (the operative rule for every rust-cache step in this repo) ─────────
+# Swatinem/rust-cache composes its key as
+#   {prefix-key(v0-rust)}-{shared-key}-{hash(rustc version + CARGO*/RUSTFLAGS-family
+#   env)}-{hash(Cargo.lock + manifests)}
+# and its prefix-fallback restore drops ONLY the trailing lockfile hash. That is
+# exactly the sq-6vshe.5 schema: primary {rustc, target, feature-family, lockfile};
+# fallback across lockfile only; NEVER across rustc (rot) or family (thrash).
+#   • A FAMILY is a `shared-key`. `shared-key` ignores workflow/job identity, so a
+#     save here restores in ci.yml / feature-matrix.yml (the proven in-repo pattern:
+#     `differential-nightly` is shared across three workflows).
+#   • Never set `restore-keys`/`prefix-key` tricks that alias two families.
+#   • ENV TRAP (load-bearing): rust-cache hashes the CARGO*/RUSTFLAGS-family env vars
+#     into the key. Each prime job below REPLICATES its target workflow's global env
+#     block EXACTLY — ci.yml's block includes CARGO_NET_RETRY, feature-matrix.yml's
+#     does NOT. Any env drift between a prime job and its target workflow silently
+#     forks the key and the prime warms nothing. If you touch one side, touch both.
+#
+# ── Why priming, when ci.yml/feature-matrix already save on push-to-main ───────────
+# Post-merge main runs do seed most families — but three holes remain:
+#   1. A rustc STABLE release rekeys every cache with NO repo commit (the toolchain is
+#      the floating `stable` pin). Until the next Rust-touching merge, every PR is
+#      fully cold. The nightly schedule re-primes against the new compiler.
+#   2. The `feature-matrix-check-tier-*` family is NEVER saved by its own workflow:
+#      on PRs its `save-if` is false, and on push-to-main the assembler emits zero
+#      check-tier legs (the full opt-in matrix runs instead), so the save step skips.
+#      This workflow is that family's ONLY writer — hence the push trigger below on
+#      the check-tier leg-set inputs.
+#   3. GHA evicts by LRU/7-day-idle; a quiet spell can drop a family. The nightly
+#      restore+save keeps the canonical families alive.
+# The per-crate `feature-matrix-<crate>` families are deliberately NOT primed here:
+# they re-seed on the next post-merge main run and priming ~30 of them nightly would
+# cost more runner time than the cold restores they'd save.
+#
+# ── Poisoning discipline (public repo) ─────────────────────────────────────────────
+# Writes to the shared (main-scope) cache happen ONLY from trusted contexts. This
+# workflow has NO pull_request trigger; it runs on schedule/push/dispatch, where the
+# executed code is main's (or a maintainer-chosen ref whose saves are scoped to that
+# ref). PR-context jobs elsewhere restore main's entries but their saves land in the
+# PR's own merge-ref scope — GitHub's native branch scoping — so a fork PR cannot
+# poison what main-context jobs read. Any future S3/sccache backend MUST reproduce
+# this via role separation (GitHub-OIDC → scoped IAM per research/ci-ec2-design.md:
+# read-only role for pull_request contexts, write role only for main/schedule; never
+# a long-lived key).
+#
+# ── Staleness cannot mask failure ──────────────────────────────────────────────────
+# rust-cache stores DEPENDENCY artifacts only (workspace members are pruned before
+# save) and cargo fingerprints every restored artifact against rustc/features/
+# manifests — stale entry ⇒ miss/rebuild, never wrong output. The same property is
+# why a future sccache backend must key on the full compiler invocation hash. The
+# fmx4u nightly full sweep (nightly-full-sweep.yml) intentionally does NOT restore
+# any of these families for its Rust builds — it stays cache-cold as the from-scratch
+# buildability proof. Do not "optimize" it onto these keys.
+#
+# ── Sizing ─────────────────────────────────────────────────────────────────────────
+# The repo Actions-cache budget is 10 GiB, LRU-evicted, across every family + npm +
+# buildx + actions/cache entries. The `cache-audit` job below measures real usage per
+# family and prints a verdict to the run summary (scripts/ci-cache-audit.sh). If the
+# canonical families thrash at the cap, the §6.4 contingency is sccache+S3 with a
+# ~30-day lifecycle expiry — an infra change (bucket + OIDC role) tracked by a steer
+# issue, not something to hack around here by deleting families.
+#
+# GATING: none. This workflow never runs in a PR/merge_group context, so the
+# `ci-summary / gate` aggregator never sees it; a red run here blocks nothing and is
+# a maintainer signal only.
+name: cache-prime
+
+on:
+  schedule:
+    # 01:47 UTC daily — off the top of the hour, and BEFORE ci.yml's 03:17 nightly and
+    # the 05:17 full sweep, so a rustc-stable-bump morning starts with warm keys.
+    - cron: "47 1 * * *"
+  push:
+    branches: [main]
+    # Push-trigger ONLY for the check-tier family's inputs (hole 2 above): merges that
+    # change the demoted-leg set or this workflow. Everything else re-seeds via the
+    # normal post-merge ci.yml/feature-matrix runs; the three `!= 'push'` jobs below
+    # skip so an ordinary merge never double-builds the workspace here.
+    paths:
+      - ".github/workflows/cache-prime.yml"
+      - ".github/feature-matrix.d/**"
+      - "scripts/assemble-feature-matrix.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Never cancel a prime mid-save (a cancelled job skips the rust-cache post step and
+  # the build is wasted); overlapping triggers just queue.
+  group: cache-prime-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Family `test-workspace` — ci.yml's build-archive job (the workspace default-features
+  # build + the three archive-carried opt-in features, sq-vya1/#363).
+  prime-workspace-default:
+    name: prime test-workspace family
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # EXACT REPLICA of ci.yml's global env (see ENV TRAP above).
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+      CARGO_NET_RETRY: "10"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Free runner disk before the workspace build
+        run: ./scripts/ci-free-disk.sh
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: "test-workspace"
+          # Save even if the build reds (main should be green; if it isn't, partial dep
+          # progress is still worth keeping for the next attempt).
+          cache-on-failure: true
+      # Same target set + feature set as `cargo nextest archive --workspace --all-targets
+      # --features approx-ann,filtered-ann,vec-predicate` (the archive/.tar.zst packaging
+      # adds nothing to the dep cache, so plain `cargo build` primes identically).
+      - name: Build workspace test closure (primes the dependency cache)
+        run: cargo build --workspace --all-targets --features approx-ann,filtered-ann,vec-predicate
+
+  # Family `lint` — ci.yml's "clippy (gate) + fmt (non-blocking)" job (default-features
+  # clippy + --all-features clippy + the two rustdoc passes; clippy IS check-mode, so
+  # these passes produce the same dependency artifacts the real job needs).
+  prime-all-features:
+    name: prime lint/all-features family
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    # EXACT REPLICA of ci.yml's global env (see ENV TRAP above).
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+      CARGO_NET_RETRY: "10"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Free runner disk before the all-features build
+        run: ./scripts/ci-free-disk.sh
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: "lint"
+          cache-on-failure: true
+      # NO `-D warnings`: this is a cache builder, not a second lint gate — on a
+      # new-stable-lint morning the prime must still SAVE the dep cache; the real lint
+      # gate reds honestly on the next PR/merge run. Artifacts are identical either way.
+      - name: clippy workspace, default features (primes check-mode deps)
+        run: cargo clippy --workspace --all-targets
+      - name: clippy workspace, all features (primes the all-features dep closure)
+        run: cargo clippy --workspace --all-targets --all-features
+
+  # Family `wasm` — ci.yml's wasm job (every browser bundle + wasm-safety crate on
+  # wasm32-unknown-unknown). The three cargo steps below mirror that job's FULL
+  # build/clippy/test closure — every (package, feature-state) it compiles, including
+  # the wasm-pack test steps' dev-dependency closures. The mirror must be exact:
+  # rust-cache prunes workspace members before saving (dependency artifacts only), and
+  # cargo resolves third-party dep features PER invocation state, so a state omitted
+  # here restores COLD in the target job even when a sibling state is primed — and an
+  # omitted TEST state would leave its dev-dep closure (wasm-bindgen-test + friends)
+  # cold for every PR between a fresh stable key and the next post-merge main run,
+  # exactly the hole this workflow closes for the build states. ENFORCED structurally
+  # by scripts/check-cache-prime-wasm.py (docs-quality quick-gates): a cargo
+  # build/clippy or wasm-pack test state added to ci.yml's wasm job without a matching
+  # line here — or a stale extra here — reds that gate, so the mirror cannot silently
+  # drift.
+  prime-wasm:
+    name: prime wasm family
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    # 90 covered build+clippy; the test-closure mirror adds dev-dep compiles + wasm
+    # test-binary links on a cold morning.
+    timeout-minutes: 120
+    # EXACT REPLICA of ci.yml's global env (see ENV TRAP above).
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+      CARGO_NET_RETRY: "10"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install Rust (stable + wasm32 target)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: "wasm"
+          cache-on-failure: true
+      - name: Build every wasm32 bundle feature state (mirrors ci.yml `wasm`)
+        run: |
+          cargo build -p sparq-wasm --target wasm32-unknown-unknown
+          cargo build -p sparq-wasm --target wasm32-unknown-unknown --features shacl
+          cargo build -p sparq-wasm --target wasm32-unknown-unknown --features jsonld
+          cargo build -p sparq-wasm --target wasm32-unknown-unknown --features shacl,jsonld
+          cargo build -p sparq-wasm --target wasm32-unknown-unknown --features policy
+          cargo build -p sparq-wasm --target wasm32-unknown-unknown --features explain-json
+          cargo build -p sparq-reason-wasm --target wasm32-unknown-unknown
+          cargo build -p sparq-reason-wasm --target wasm32-unknown-unknown --features explain
+          cargo build -p sparq-rsp-wasm --target wasm32-unknown-unknown
+          cargo build -p sparq-text-wasm --target wasm32-unknown-unknown
+          cargo build -p sparq-shacl-wasm --target wasm32-unknown-unknown
+          cargo build -p sparq-shacl-wasm --target wasm32-unknown-unknown --features shacl-af
+          cargo build -p sparq-vectors --target wasm32-unknown-unknown
+      # Same states in check mode — NO `-D warnings` (cache builder, not a second lint
+      # gate; see the prime-all-features note). sparq-vectors stays lib-only (no
+      # --all-targets), exactly like the target job.
+      - name: clippy every wasm32 state (primes check-mode deps; mirrors ci.yml `wasm`)
+        run: |
+          cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets
+          cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets --features shacl
+          cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets --features jsonld
+          cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets --features policy
+          cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets --features explain-json
+          cargo clippy -p sparq-reason-wasm --target wasm32-unknown-unknown --all-targets
+          cargo clippy -p sparq-reason-wasm --target wasm32-unknown-unknown --all-targets --features explain
+          cargo clippy -p sparq-rsp-wasm --target wasm32-unknown-unknown --all-targets
+          cargo clippy -p sparq-text-wasm --target wasm32-unknown-unknown --all-targets
+          cargo clippy -p sparq-shacl-wasm --target wasm32-unknown-unknown --all-targets
+          cargo clippy -p sparq-shacl-wasm --target wasm32-unknown-unknown --all-targets --features shacl-af
+          cargo clippy -p sparq-introspect --target wasm32-unknown-unknown --all-targets
+          cargo clippy -p sparq-solid --target wasm32-unknown-unknown --all-targets
+          cargo clippy -p sparq-vectors --target wasm32-unknown-unknown
+      # Same states' TEST closures — one line per `wasm-pack test --node` state in the
+      # target job. wasm-pack drives `cargo test` under the hood (dev profile, dev-deps
+      # resolved per feature state); `cargo test --no-run` compiles that same
+      # third-party dev-dep closure without needing the wasm-pack/Node toolchain or a
+      # wasm runner here (rust-cache prunes the workspace test binaries anyway — only
+      # the dependency artifacts survive into the family).
+      - name: Build every wasm32 test closure (mirrors ci.yml `wasm` wasm-pack states)
+        run: |
+          cargo test --no-run -p sparq-wasm --target wasm32-unknown-unknown
+          cargo test --no-run -p sparq-wasm --target wasm32-unknown-unknown --features shacl
+          cargo test --no-run -p sparq-wasm --target wasm32-unknown-unknown --features jsonld
+          cargo test --no-run -p sparq-wasm --target wasm32-unknown-unknown --features explain-json
+          cargo test --no-run -p sparq-reason-wasm --target wasm32-unknown-unknown
+          cargo test --no-run -p sparq-reason-wasm --target wasm32-unknown-unknown --features explain
+          cargo test --no-run -p sparq-rsp-wasm --target wasm32-unknown-unknown
+          cargo test --no-run -p sparq-text-wasm --target wasm32-unknown-unknown
+          cargo test --no-run -p sparq-shacl-wasm --target wasm32-unknown-unknown
+          cargo test --no-run -p sparq-shacl-wasm --target wasm32-unknown-unknown --features shacl-af
+          cargo test --no-run -p sparq-introspect --target wasm32-unknown-unknown
+          cargo test --no-run -p sparq-solid --target wasm32-unknown-unknown
+
+  # Family `feature-matrix-check-tier-{engine,rest}` — feature-matrix.yml's check-tier
+  # shards. This job is the family's ONLY writer (see hole 2 in the header), so it runs
+  # on EVERY trigger, including the path-filtered push. Mirrors the real shard: same
+  # assembler, same shards, same shared target dir — with `--event pull_request` so the
+  # primed leg set is exactly what a PR-context shard will compile (no selection args ⇒
+  # the assembler fail-closes to the full demoted set). Zero demoted legs (the state
+  # until sq-s5dvo flips demotion) makes this a fast no-op that skips every Rust step.
+  prime-check-tier:
+    name: prime check-tier family (${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [engine, rest]
+    # EXACT REPLICA of feature-matrix.yml's global env — note: NO CARGO_NET_RETRY there,
+    # so none here (see ENV TRAP above).
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Install PyYAML
+        # HASH-pinned: the same full-closure PyYAML set feature-matrix.yml pins.
+        run: pip install --require-hashes -r .github/requirements/docs-quality.txt
+      - name: Assemble the PR-visible check-tier legs for this shard
+        id: legs
+        run: |
+          set -euo pipefail
+          CHECK="$(python3 scripts/assemble-feature-matrix.py \
+            --event pull_request --tier check --shard "${{ matrix.shard }}")"
+          N="$(echo "$CHECK" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["include"]))')"
+          echo "matrix=$CHECK" >> "$GITHUB_OUTPUT"
+          echo "legs=$N" >> "$GITHUB_OUTPUT"
+          echo "check-tier shard '${{ matrix.shard }}': priming $N demoted leg(s)"
+      - name: Install Rust (stable)
+        if: steps.legs.outputs.legs != '0'
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        if: steps.legs.outputs.legs != '0'
+        with:
+          shared-key: feature-matrix-check-tier-${{ matrix.shard }}
+          cache-on-failure: true
+      - name: Fetch dependencies (retry transient crates.io fetch)
+        if: steps.legs.outputs.legs != '0'
+        run: |
+          set -euo pipefail
+          n=0
+          until cargo fetch --locked; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then
+              echo "::error::cargo fetch failed after $n attempts (registry outage?)" >&2
+              exit 1
+            fi
+            echo "cargo fetch attempt $n failed; retrying in 10s..." >&2
+            sleep 10
+          done
+      - name: clippy each demoted leg (shared target dir; primes the shard's deps)
+        if: steps.legs.outputs.legs != '0'
+        env:
+          CHECK_MATRIX: ${{ steps.legs.outputs.matrix }}
+        run: |
+          set -euo pipefail
+          # Same per-leg loop as the real shard, minus `-D warnings` (cache builder, not
+          # a second lint gate — see the prime-all-features note).
+          mapfile -t LEGS < <(printf '%s' "$CHECK_MATRIX" | python3 -c '
+          import json, sys
+          for leg in json.load(sys.stdin)["include"]:
+              print("{}\t{}".format(leg["crate"], leg["features"]))
+          ')
+          for line in "${LEGS[@]:-}"; do
+            [ -z "$line" ] && continue
+            crate="${line%%$'\t'*}"
+            features="${line#*$'\t'}"
+            echo "::group::clippy -p ${crate} --features ${features}"
+            cargo clippy -p "${crate}" --features "${features}"
+            echo "::endgroup::"
+          done
+
+  # Sizing audit (§6.4): measure real Actions-cache usage per family against the 10 GiB
+  # repo budget, AFTER the primes have saved. Report-not-gate: the verdict goes to the
+  # run summary; the job reds only on execution errors (e.g. the cache API failing).
+  cache-audit:
+    name: cache sizing audit
+    needs: [prime-workspace-default, prime-all-features, prime-wasm, prime-check-tier]
+    if: always() && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Audit Actions-cache usage vs the 10 GiB budget
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: ./scripts/ci-cache-audit.sh >> "$GITHUB_STEP_SUMMARY"

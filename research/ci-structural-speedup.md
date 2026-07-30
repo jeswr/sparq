@@ -207,6 +207,22 @@ they are policy, not wiring (bead `sq-6vshe.5`):
    pennies against the runner-minutes it saves. Bucket + role are an infra change:
    proceed-and-document with a steer issue.
 
+**Status (2026-07-17, sq-6vshe.5 — implemented).** `.github/workflows/cache-prime.yml`
+is the topology home: nightly + dispatch primes of the four canonical families
+(`test-workspace`, `lint`, `wasm`, `feature-matrix-check-tier-{engine,rest}`), plus a
+path-filtered push-to-main leg for the check-tier family only — that family's own
+workflow structurally never saves it (PR runs are restore-only, push-to-main runs
+assemble zero check-tier legs), so the prime is its sole writer. ci.yml's lint and wasm
+jobs carry explicit family `shared-key`s so the prime can write them cross-workflow.
+The key schema (item 2) and poisoning rule (item 3) hold natively via rust-cache's key
+composition + GHA branch scoping and are documented as operative rules in
+cache-prime.yml's header — including the load-bearing ENV TRAP: a prime job must
+replicate its target workflow's `CARGO*`/RUSTFLAGS env block exactly or the keys fork.
+Item 4 ships as `scripts/ci-cache-audit.sh` + the `cache-audit` summary job
+(report-not-gate); the sccache+S3 contingency stays unexecuted until a measured THRASH
+verdict (steer issue filed). The per-crate `feature-matrix-<crate>` families are
+deliberately un-primed — they re-seed on the next post-merge main run.
+
 ## 7. Q5 — always-run heavy lanes. Position: **per-PR keeps only the deterministic slice**
 
 fmx4u.6 already decides *whether* an unaffected PR runs these lanes. The structural
