@@ -15,7 +15,9 @@
 //!   read/publish/admin separation** and constrained delegation;
 //! * [`envelope`] — **randomized** block & commit envelopes, padded, with a
 //!   `CommitId = SHA-256(canonical encrypted root envelope)`;
-//! * [`epoch`] — signed **epoch transitions** (the revocation mechanism).
+//! * [`epoch`] — signed **epoch transitions** (the revocation mechanism);
+//! * [`broker_protocol`] — the **versioned client/broker messages** (§8.4) that
+//!   carry *only* routing metadata and opaque ciphertext to a broker.
 //!
 //! ## Honesty & audit boundary — read first
 //!
@@ -29,9 +31,11 @@
 //! SPARQL into ciphertext-side evaluation — the profile keeps querying *local*
 //! over decrypted, materialized state.
 //!
-//! The primitives here are the *capability / envelope / epoch* layer only. The
-//! sync, broker-protocol, CRDT, and materialization layers of the profile (§6,
-//! §8.4–8.5) are **not** implemented in this crate.
+//! The layers here are the *capability / envelope / epoch* primitives plus the
+//! [`broker_protocol`] message codec. The client-side sync driver, the CRDT, and
+//! materialization (§6, §8.5) are **not** implemented in this crate; the
+//! server-side opaque broker lives in the separate opt-in `sparq-e2ee-ng-broker`
+//! crate, which never links the query engine.
 //!
 //! ## Crate-boundary invariant
 //!
@@ -63,6 +67,7 @@
 #![deny(missing_docs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+pub mod broker_protocol;
 pub mod capability;
 pub mod cbor;
 pub mod envelope;

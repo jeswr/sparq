@@ -81,6 +81,18 @@ id32!(
     /// Ed25519 public key bytes.
     AuthorKeyId
 );
+id32!(
+    /// A broker **overlay** routing identifier (§8.4 `OpenRepo`). It scopes a set
+    /// of topics inside one broker/overlay and is deliberately *not* derived from
+    /// (and carries no bits of) the stable `RepoId`, which a conforming broker
+    /// never sees (§5).
+    OverlayId
+);
+id32!(
+    /// A **peer** identifier presented to the broker (§8.4 `OpenRepo`). In v0 this
+    /// is a pseudonymous 32-byte peer public key; §5 lists it as broker-visible.
+    PeerId
+);
 
 /// Monotonic membership/key-rotation counter (§4.1). Wrapped in a newtype so an
 /// epoch is never confused with a logical clock or any other `u64`.

@@ -5052,6 +5052,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sparq-e2ee-ng-broker"
+version = "0.1.0"
+dependencies = [
+ "sparq-e2ee-ng",
+]
+
+[[package]]
 name = "sparq-engine"
 version = "0.1.0"
 dependencies = [

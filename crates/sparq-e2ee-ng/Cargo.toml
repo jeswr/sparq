@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Opt-in E2EE-NG profile primitives for sparq: deterministic capability encoding, read/publish/admin capability separation, recipient-wrapped secrets, randomized block/commit envelopes, a domain-separated key schedule, signatures, and epoch transitions. RESEARCH-GRADE, NOT externally audited — production use gated by sq-qhy4."
+description = "Opt-in E2EE-NG profile primitives for sparq: deterministic capability encoding, read/publish/admin capability separation, recipient-wrapped secrets, randomized block/commit envelopes, a domain-separated key schedule, signatures, epoch transitions, and the versioned client/broker message codec. RESEARCH-GRADE, NOT externally audited — production use gated by sq-qhy4."
 repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
@@ -26,9 +26,12 @@ rustdoc-args = ["--cfg", "docsrs"]
 # `sparq-mpc`), so `sparq-core` / `sparq-engine` / `sparq-substrate` and the wasm
 # artifact are byte-identical with or without it. Encryption + key material live ONLY
 # behind this crate boundary (research doc §7): the core crates never link a cipher.
-# This bead is the PRIMITIVES layer only — capability / envelope / epoch + the key
-# schedule, signatures and deterministic codec underneath them. Sync / broker /
-# CRDT / materialize are separate later beads and are NOT implemented here.
+# The layers here are the PRIMITIVES — capability / envelope / epoch + the key
+# schedule, signatures and deterministic codec underneath them — plus the
+# `broker_protocol` client/broker message codec (bead sq-tag1q.18, design §8.4).
+# The client-side sync driver, the CRDT, and materialize are separate beads and
+# are NOT implemented here; the SERVER side lives in the separate opt-in
+# `sparq-e2ee-ng-broker` crate, which must never link the query engine (§7).
 [dependencies]
 # Deterministic key schedule: HKDF-SHA256 (extract + expand) built on the RustCrypto
 # `hmac` + `sha2` already vetted-and-present in the tree (sparq-vc / sparq-zk). SHA-256

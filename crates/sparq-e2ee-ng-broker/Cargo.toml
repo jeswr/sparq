@@ -1,0 +1,42 @@
+[package]
+name = "sparq-e2ee-ng-broker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Opt-in OPAQUE broker for the sparq E2EE-NG profile: stores and routes encrypted blocks and topics without ever seeing RDF, SPARQL, or a read secret. RESEARCH-GRADE, NOT externally audited — production use gated by sq-qhy4."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+# Design/spec: research/e2ee-nextgraph-variant-gpt56-2026-07.md §5 (disclosure ledger),
+# §7 (architecture), §8.4 (client/broker messages); program sq-tag1q, bead sq-tag1q.18.
+#
+# THE CRATE-BOUNDARY INVARIANT THIS CRATE EXISTS TO HOLD (design §7): "A separate
+# opt-in broker binary/crate stores opaque blocks and topics; it MUST not link the
+# query engine." So this crate depends on `sparq-e2ee-ng` (for the wire codec and
+# signature verification it needs for admission) and on NOTHING ELSE in the
+# workspace — no `sparq-core`, no `sparq-engine`, no `sparq-substrate`. That is
+# enforced, not merely asserted, by `tests/boundary.rs`.
+#
+# It is also opt-in by construction: nothing in the workspace depends on this crate,
+# so the default build and the wasm artifact are byte-identical with or without it.
+# No cargo features — the whole crate is the opt-in unit (cf. sparq-crdt), so the
+# default workspace lane exercises the entire surface.
+publish = false
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+# The ONLY dependency: the profile's wire codec, identifiers, envelopes, and
+# Ed25519 verification. Deliberately no async runtime, no TLS stack, no JSON, and
+# no workspace crate other than this one — the daemon speaks length-prefixed
+# deterministic CBOR over a plain std TCP socket.
+sparq-e2ee-ng = { path = "../sparq-e2ee-ng" }
+
+[[bin]]
+name = "sparq-e2ee-ng-brokerd"
+path = "src/main.rs"
