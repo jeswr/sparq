@@ -44,6 +44,35 @@ Also available via `https://cdn.jsdelivr.net/npm/@sparq-org/eyereasoner-compat/+
 point at it explicitly: `import { configureWasm } from '...'; configureWasm(new URL(...));`
 before the first call.
 
+### Classic `<script>` tag (no modules, no bundler)
+
+For a page that cannot use `<script type="module">`, the tarball also ships a **non-module IIFE
+bundle** at `dist/eyereasoner-compat.iife.js`. It defines one global, `eyereasoner`:
+
+```html
+<script src="https://cdn.jsdelivr.net/npm/@sparq-org/eyereasoner-compat/dist/eyereasoner-compat.iife.js"></script>
+<script>
+  eyereasoner
+    .n3reasoner('@prefix : <http://ex/>. {:a a :A} => {:a a :B}. :a a :A.')
+    .then(console.log);
+</script>
+```
+
+The global carries the same named surface as the ESM entry (`n3reasoner`, `configureWasm`,
+`dataFactory`, `parseNTriples`, `writeQuads`, and the migration stubs).
+
+The engine wasm is **not** inlined into the script — it is fetched lazily on the first
+`n3reasoner(...)` call from `../wasm/` **relative to the `<script src>` itself** (a classic
+script has no `import.meta.url`, so the loader reads `document.currentScript` instead). That
+works as-is from any npm CDN and from a self-hosted copy of the `dist/` + `wasm/` pair. If you
+relocate or inline the script, name the engine explicitly first:
+
+```html
+<script>eyereasoner.configureWasm('/assets/sparq_reason_wasm_bg.wasm');</script>
+```
+
+This build is browser-only; in Node, use the ESM entry (`import { n3reasoner } from '@sparq-org/eyereasoner-compat'`).
+
 ## ✨ Features
 
 - **`n3reasoner` — the eye-js drop-in.** Same overloads: `string`/`[string,…]` → `string`,

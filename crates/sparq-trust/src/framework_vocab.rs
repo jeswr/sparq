@@ -72,7 +72,11 @@ pub const SEC_REQ_NS: &str = "https://w3id.org/zkp-sparql/sec-req#";
 /// binding a query to its trust conditions. The trust conditions live HERE, never in
 /// the query (no new query syntax — design §3.1 / D1).
 pub const TRUSTX_TRUST_REQUIREMENTS: &str = "https://sparq.dev/ns/trust#TrustRequirements";
-/// `trustx:question` — binds the trust requirements to the SPARQL query they scope.
+/// `trustx:question` — an opaque IRI naming the question a trust-requirements
+/// document was authored for. A correlation label ONLY: no layer of this crate
+/// resolves or verifies it against the query string, so the question↔query
+/// association belongs to whoever authenticates the request (see the
+/// `expression` module's honest-scope docs).
 pub const TRUSTX_QUESTION: &str = "https://sparq.dev/ns/trust#question";
 /// `trustx:trustsIssuer` — **MODE 1** (enumerated parties): admit contributing
 /// statements issued by this enumerated issuer identity (a DID/key binding; the

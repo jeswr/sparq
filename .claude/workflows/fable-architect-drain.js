@@ -75,11 +75,15 @@ const TIER = {
   // current cheap models claude-sonnet-4-6 / claude-haiku-4-5, per orchestration/routing.toml).
   sonnet: { model: 'sonnet', marker: '[SONNET-4.6]', trailer: 'Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>' },
   haiku:  { model: 'haiku',  marker: '[HAIKU-4.5]',  trailer: 'Co-Authored-By: Claude Haiku 4.5 <noreply@anthropic.com>' },
-  // Downgrade tiers (Opus 5 unavailable) — stamped only by the model that ACTUALLY served.
-  // Reachable two ways: a DELIBERATE downgrade dispatch (pass this row's full `model` id) or a
-  // detected downgraded serving (scripts/fable/detect-tier.sh on the run's transcript).
-  'fable-5':  { model: 'claude-fable-5',  marker: '[FABLE-5]',  trailer: 'Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>' },
-  'opus-4-8': { model: 'claude-opus-4-8', marker: '[OPUS-4.8]', trailer: 'Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>' },
+  // ATTRIBUTION-ONLY rows (`model: null`). Fable 5 and Opus 4.8 were DEPRECATED as routing
+  // targets on 2026-07-26 (maintainer: "deprecate the use of fable and opus entirely in favour of
+  // opus5"), so neither is dispatchable any more — `model` is null and dispatchModel() THROWS on
+  // these rows rather than returning undefined, which the harness would silently read as "use the
+  // default model". They survive because attribution is not routing: scripts/fable/detect-tier.sh
+  // can still detect that a run was SERVED by a downgraded tier, and the correct stamp for that
+  // run is this row's marker/trailer. Existing [FABLE-5]/[OPUS-4.8] stamps are accurate HISTORY.
+  'fable-5':  { model: null, marker: '[FABLE-5]',  trailer: 'Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>' },
+  'opus-4-8': { model: null, marker: '[OPUS-4.8]', trailer: 'Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>' },
 }
 const mark = (t) => (TIER[t] || TIER.opus).marker
 const trailer = (t) => (TIER[t] || TIER.opus).trailer
@@ -88,7 +92,19 @@ const trailer = (t) => (TIER[t] || TIER.opus).trailer
 // This workflow has no in-band served-model hook, so attribution rides the dispatched row:
 // safe because full-ID dispatch == served (probe above); verify post-hoc with
 // scripts/fable/detect-tier.sh, whose downgrade verdict routes stamping to the downgrade rows.
-const dispatchModel = (t) => (TIER[t] || TIER.opus).model
+// FAILS CLOSED on a non-dispatchable tier. Returning `undefined` here would hand the harness no
+// --model flag, i.e. a SILENT fallback to whatever the session default happens to be — the exact
+// failure mode the 2026-07-26 deprecation is meant to remove. Refuse instead.
+const dispatchModel = (t) => {
+  const row = TIER[t] || TIER.opus
+  if (!row.model) {
+    throw new Error(
+      `[OPUS-5] tier '${t}' is attribution-only and has no dispatchable model (Fable 5 / Opus 4.8 ` +
+      `were deprecated as routing targets 2026-07-26 in favour of opus5). Dispatch 'opus'/'fable' ` +
+      `(both -> claude-opus-5) instead; this row exists only to STAMP a detected downgraded run.`)
+  }
+  return row.model
+}
 
 const DISK_SCHEMA = {
   type: 'object',

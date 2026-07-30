@@ -230,7 +230,7 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - name: Install cargo-deny + cargo-vet + cargo-cyclonedx
-        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: cargo-deny,cargo-vet@0.10.2,cargo-cyclonedx
 
@@ -244,13 +244,16 @@ jobs:
       # parses CVSS v4.0 advisories, so the freshly-cloned RustSec DB loads and the
       # per-advisory `ignore` rules apply as intended. The deny.toml policy is fail-closed:
       # `yanked = "deny"` and (advisories v2) every unignored advisory FAILS the check;
-      # only the two justified `unmaintained` ignores (paste / rustls-pemfile, each with a
-      # documented reason + tracking bead) are tolerated. A REAL vulnerability or a yanked
-      # crate now blocks the PR. Verified: removing either justified ignore makes
-      # `cargo deny check advisories` exit non-zero ("advisories FAILED"); with the ignores
-      # in place it is "advisories ok". This is the PR-time gate; the daily watchdog
+      # only the justified ignores in `deny.toml [advisories].ignore` (each with a documented
+      # reason + tracking bead) are tolerated. A REAL vulnerability or a yanked crate now
+      # blocks the PR. Verified: removing a justified ignore makes `cargo deny check advisories`
+      # exit non-zero ("advisories FAILED"); with the ignores in place it is "advisories ok".
+      # This is the PR-time gate; the daily watchdog
       # (dependency-monitoring.yml) remains as defence-in-depth for advisories disclosed
       # between PRs.
+      # [OPUS-5] The preferred remediation is REMOVING the dependency, not adding an ignore —
+      # sq-5ah3p retired RUSTSEC-2025-0134 (`rustls-pemfile`) that way, migrating the mTLS PEM
+      # parse onto `rustls-pki-types`' `PemObject`.
       - name: cargo-deny check (advisories) — GATING
         if: steps.changes.outputs.rust_changed == 'true'
         run: cargo deny check advisories

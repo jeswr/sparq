@@ -53,6 +53,36 @@ npm run build   # wasm-pack build ../crates/sparq-wasm (--features shacl) + tsc
 npm test        # node --test against the built dist/
 ```
 
+### Reproducing the `js` CI gate locally
+
+Install from the **repo root**, not from `js/` — this is the one step that differs
+from a normal single-package checkout, and skipping it is what makes the gate look
+irreproducible from a fresh worktree:
+
+```sh
+cd .. && npm ci   # repo-root npm workspaces install
+cd js && npm run build && npm test
+```
+
+`js/test/rdfjs-conformance.test.mjs` imports `@rdfjs-test/conformance` (the
+`packages/rdfjs-conformance` workspace member) and `js/test/solid-differential.test.mjs`
+imports `@solid/acl-check` / `@solidlab/policy-engine` / `rdflib` (resolved out of the
+repo-root install). Those are test-only and stay **out** of `js/package.json` on
+purpose, because the `js-sbom` lane derives the published `@jeswr/sparq` SBOM from
+this manifest and test deps there would pollute the runtime component list. An
+`npm ci` run inside `js/` installs only this member's own closure, so those imports
+fail with `ERR_MODULE_NOT_FOUND`; a root install hoists them and links the workspace
+member. `.github/workflows/js.yml` installs from the root for exactly this reason.
+
+`npm test`'s `pretest` guardrail (`guardrails/check-test-deps.mjs`) checks this up
+front and names the missing packages, rather than letting the suite fail two thirds
+of the way through. To run one file without a root install, invoke the runner
+directly — that path skips `pretest`:
+
+```sh
+node --test test/store.test.mjs
+```
+
 ### Pinning a git build (before the npm release)
 
 Until `@jeswr/sparq` is published to npm under its settled name, depend on it by

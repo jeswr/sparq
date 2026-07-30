@@ -60,12 +60,12 @@ let g = Graph::from_parts(dict, triples);
 - **Incremental maintenance** — `MaterializedGraph` keeps the closure current under
   inserts/deletes by exact derivation counting; cost scales with the change, not a re-run.
 - **Stratified Datalog** (opt-in `datalog`) — a small native rule dialect (RDFox-parity
-  track): single or grouped `NOT { atom, atom }` (negation as failure),
-  `AGGREGATE … BIND COUNT(DISTINCT ?v)/SUM/MIN/MAX/AVG(?v) AS ?c`, variable
-  predicates, and numeric `FILTER` over the shared exact/float/double tower. The
-  **stratification checker** rejects cycles through NOT/AGGREGATE and conservatively
-  couples variable predicates to every relation; the semi-naive evaluator and
-  incremental maintainer share that invariant. <!-- [GPT-5.6] sq-a7bmo -->
+  track): single or grouped `NOT { atom, atom }` (negation as failure), `AGGREGATE … BIND
+  COUNT(DISTINCT ?v)/SUM/MIN/MAX/AVG(?v) AS ?c`, variable predicates, and numeric `FILTER`
+  over the shared exact/float/double tower. The **stratification checker** rejects cycles
+  through NOT/AGGREGATE and conservatively couples variable predicates to every relation;
+  the semi-naive evaluator and incremental maintainer share that invariant. Surfaced by
+  `sparq-cli --features datalog` as `--reason datalog:<rules.dlog>`. <!-- [GPT-5.6] sq-a7bmo, [SONNET-4.6] sq-p4zci -->
 - **Quoted-triple inference** (opt-in `quoted-triples`) — RDF 1.2 reifier rules for the
   OWL-RL profile: **reif-dtr** destructures `R rdf:reifies <<( s p o )>>` into the classic
   `rdf:subject`/`rdf:predicate`/`rdf:object` view of `R` (so RL rules reason over reifier
@@ -100,10 +100,10 @@ let g = Graph::from_parts(dict, triples);
 - **Compiled rules** (opt-in `compiled-rules`) — `n3::compiled`: lower N3 rule text ONCE to
   an id-level IR (constants pre-interned into the caller's `Dict`) and run the semi-naive
   fixpoint DIRECTLY over `[Id; 3]` facts on the shared substrate join kernels — no per-call
-  graph→text→re-parse round-trip. Scoped to the access-control subset (`log:notIncludes`/
-  `log:uri`/`log:(not)equalTo`, `string:` concatenation/encodeForUri/scrape/notGreaterThan);
-  everything else is a loud compile error. Closure set-equality vs `reason_n3` is pinned by
-  `tests/compiled_equivalence.rs` over the sparq-solid WAC/ACP rule corpus. Off by default.
+  text round-trip. Scoped to the access-control subset (`log:notIncludes`/`log:uri`/`log:(not)equalTo`,
+  `string:` concat/encodeForUri/scrape/notGreaterThan, plus RDF 1.2 `<< s p o >>` triple terms
+  in premises, matched by component-indexed id unpacking); everything else is a loud compile error.
+  Closure set-equality vs `reason_n3` is pinned by `tests/compiled_equivalence.rs`. Off by default.
 
 ## 📚 Learn more
 

@@ -75,12 +75,53 @@
 //! same way, and re-materialize the view so a created document becomes visible (and a
 //! deleted one invisible) to the very next tool call.
 //!
+//! # Content negotiation (draft §6.4)
+//!
+//! [SONNET-4.6] sq-wbsf5 — `resource_get` takes an optional `accept` and serves the
+//! representation it names, from the SAME triples in both cases:
+//!
+//! - `application/n-triples` — the default when `accept` is absent, so an existing caller
+//!   sees no change.
+//! - `text/turtle` — the same triples through `oxttl`'s `TurtleSerializer` (the oxigraph
+//!   writer, so the body is guaranteed well-formed Turtle), with `TURTLE_PREFIXES`
+//!   registered so pod vocabularies compact to `prefix:local`.
+//!
+//! Negotiation is a **pure function of the `accept` string** (`negotiate`) evaluated
+//! BEFORE the read gate, so it cannot become an existence oracle. An unsupported `accept`
+//! is a tool error naming exactly what IS served — never silent coercion to another
+//! syntax. `accept` is ONE media type (`;`-parameters such as `q=` are ignored), not an
+//! HTTP `Accept` header list: a comma-separated list matches nothing and is refused
+//! rather than silently resolved to a guess.
+//!
+//! The MCP `resources/read` surface has no per-request `accept` in the protocol, so it
+//! stays `application/n-triples` — the same bytes `resource_get` serves by default, from
+//! the same `document_triples` read path, so the two cannot disagree.
+//!
+//! # Non-RDF (binary) resources — SCOPED OUT, deliberately
+//!
+//! [SONNET-4.6] sq-wbsf5 — LDP has non-RDF sources (an image, a PDF); **this server has
+//! none, by decision, not by omission**, and both write and read paths say so:
+//! `resource_put` refuses any non-RDF `content_type` naming the scope-out, and no non-RDF
+//! resource can exist to be read (nothing else can create one). The reasons:
+//!
+//! - **There is nowhere to put the bytes.** The pod IS a `sparq_solid::PodStore` — an RDF
+//!   dataset of one named graph per document. A binary body is not triples, so supporting
+//!   it needs a second, non-RDF store plus its own authorization join; that is a
+//!   `sparq-solid` storage design, not an MCP tool-surface change, and inventing a
+//!   base64-literal side-channel in the graph would be a fake pod.
+//! - **The authorization story would have to be re-derived.** WAC/ACP modes are evaluated
+//!   over the dataset; a blob outside it has no graph to anchor its ACL to, and the
+//!   existence-non-disclosure guarantee above is only as good as the one gate every read
+//!   passes through.
+//!
+//! Until a pod store with a blob half exists, an honest refusal beats a half-implemented
+//! binary path. When it does, the MCP shape is already known: `resources/read` carries a
+//! base64 `blob` field alongside `text` for exactly this case.
+//!
 //! # Honest v1 limits
 //!
-//! - RDF sources only: `content_type` must be Turtle or N-Triples (or JSON-LD when
-//!   the opt-in `jsonld` feature is enabled), and `resource_get` serves
-//!   `application/n-triples` (an `accept` for anything else is a tool error, never
-//!   silent coercion). Non-RDF (binary) resources are out of scope. [GPT-5.6]
+//! - RDF sources only: `content_type` must be Turtle or N-Triples (or JSON-LD when the
+//!   opt-in `jsonld` feature is enabled) — see the non-RDF scope-out above. [GPT-5.6]
 //! - The SPARQL `update` tool delegates to the session-checked
 //!   `PodStore::update_as` / `update_as_acp`, which applies the per-graph write
 //!   permission check but not the wall-clock/row budget the read tools enforce.
@@ -90,18 +131,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use oxrdf::{NamedNode, Term};
+use oxrdf::{NamedNode, Term, Triple};
 use serde_json::{json, Value};
 use sparq_core::Graph;
 use sparq_engine::QueryBudget;
 use sparq_solid::{Mode, PodStore, Session};
 
-use crate::jsonrpc::{
-    Request, Response, RpcError, INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND,
-    RESOURCE_NOT_FOUND,
-};
+use crate::jsonrpc::{Request, RpcError, INVALID_PARAMS, METHOD_NOT_FOUND, RESOURCE_NOT_FOUND};
 use crate::notifications::{classify, ActivityType, Subscriptions, TopicDigest};
-use crate::server::{arg_str, serialize, tool_text_result};
+use crate::server::{arg_str, handle_raw, tool_text_result};
 use crate::tools::ToolSpec;
 
 /// `ldp:contains` — the containment predicate a container's own graph stores.
@@ -214,9 +252,10 @@ pub const RESOURCE_GET: ToolSpec = ToolSpec {
     name: "resource_get",
     description: "Return the RDF representation of ONE pod resource (document), served \
                   from the same named-graph-per-document dataset the `query` tool \
-                  evaluates over. Result: the resource content as N-Triples plus its \
-                  media type. A resource this session cannot read is reported with the \
-                  SAME error as a resource that does not exist.",
+                  evaluates over. Result: the resource content plus the media type it \
+                  was served as — N-Triples by default, or Turtle when `accept` asks for \
+                  it (same triples, different syntax). A resource this session cannot \
+                  read is reported with the SAME error as a resource that does not exist.",
     input_schema: || {
         json!({
             "type": "object",
@@ -227,9 +266,12 @@ pub const RESOURCE_GET: ToolSpec = ToolSpec {
                 },
                 "accept": {
                     "type": "string",
-                    "description": "Optional preferred media type. This server serves \
-                                    \"application/n-triples\"; any other value is a tool \
-                                    error (no silent coercion)."
+                    "description": "Optional media type to serve: \
+                                    \"application/n-triples\" (the default when omitted) \
+                                    or \"text/turtle\". ONE media type, not an HTTP \
+                                    Accept list; any other value is a tool error (no \
+                                    silent coercion). Non-RDF (binary) representations \
+                                    are out of scope — this pod stores RDF only."
                 }
             },
             "required": ["url"],
@@ -302,7 +344,10 @@ pub const RESOURCE_PUT: ToolSpec = ToolSpec {
                 "content": { "type": "string", "description": "The full new RDF body." },
                 "content_type": {
                     "type": "string",
-                    "description": "\"text/turtle\" or \"application/n-triples\"."
+                    "description": "\"text/turtle\" or \"application/n-triples\" — RDF \
+                                    sources only. Non-RDF (binary) resources are out of \
+                                    scope: this pod is an RDF dataset with nowhere to \
+                                    store bytes, so a binary body is refused, not stored."
                 }
             },
             "required": ["url", "content", "content_type"],
@@ -379,6 +424,105 @@ fn rdf_format(content_type: &str) -> Option<&'static str> {
         "application/ld+json" | "jsonld" | "json-ld" => Some("jsonld"), // [GPT-5.6]
         _ => None,
     }
+}
+
+/// The media types `resource_put` will INGEST, for the refusal message. RDF sources only
+/// — non-RDF (binary) bodies are scoped out, see the module docs. [SONNET-4.6] sq-wbsf5
+#[cfg(not(feature = "jsonld"))]
+const INGESTED_MEDIA_TYPES: &str = "text/turtle, application/n-triples";
+#[cfg(feature = "jsonld")]
+const INGESTED_MEDIA_TYPES: &str = "text/turtle, application/n-triples, application/ld+json";
+
+/// The media types `resource_get` will SERVE, for the refusal message. Hand-kept in step
+/// with the arms of `negotiate`; `negotiate_refuses_an_unservable_accept_naming_what_is_served`
+/// asserts the refusal names both, so a representation added without updating this string
+/// is caught by the tests rather than shipped as a wrong advertisement. [SONNET-4.6] sq-wbsf5
+const SERVED_MEDIA_TYPES: &str = "application/n-triples, text/turtle";
+
+/// The representation `resource_get` serves, chosen by [`negotiate`] from the caller's
+/// `accept`. Both variants render the SAME triples from the SAME read path — the choice
+/// is syntax only, never content. [SONNET-4.6] sq-wbsf5
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Representation {
+    /// `application/n-triples` — the default when no `accept` is supplied.
+    NTriples,
+    /// `text/turtle`, written by `oxttl`'s `TurtleSerializer`.
+    Turtle,
+}
+
+impl Representation {
+    /// The media type this representation is reported as in the tool result.
+    fn media_type(self) -> &'static str {
+        match self {
+            Representation::NTriples => "application/n-triples",
+            Representation::Turtle => "text/turtle",
+        }
+    }
+}
+
+/// Content negotiation for `resource_get` (draft §6.4): resolve the caller's `accept` to
+/// the representation to serve.
+///
+/// A **pure function of the `accept` value** — it never touches the store, so it cannot
+/// become an existence oracle no matter where the caller runs it. Absent `accept` keeps
+/// the v1 default (N-Triples). An unsupported value is refused with a message naming
+/// exactly what IS served: no silent coercion to a syntax the caller did not ask for.
+/// One media type only (`;`-parameters such as `q=` are ignored) — an HTTP-style
+/// comma-separated `Accept` list matches nothing and is refused rather than guessed at.
+fn negotiate(accept: Option<&str>) -> Result<Representation, String> {
+    let Some(accept) = accept else { return Ok(Representation::NTriples) };
+    match rdf_format(accept) {
+        Some("ntriples") => Ok(Representation::NTriples),
+        Some("turtle") => Ok(Representation::Turtle),
+        // Includes `Some("jsonld")` under the `jsonld` feature: that parser is INGEST-only
+        // (`resource_put`), there is no JSON-LD writer here, so serving it would be a lie.
+        _ => Err(format!(
+            "unsupported accept `{}`: this server serves {}",
+            accept, SERVED_MEDIA_TYPES
+        )),
+    }
+}
+
+/// Prefixes registered on the Turtle writer so the vocabularies that dominate pod
+/// documents compact to `prefix:local`. Purely cosmetic and purely additive: a
+/// non-matching IRI simply renders in full, so the set can never make output wrong —
+/// only more or less compact. Kept short and stable on purpose (there is no per-request
+/// prefix input to negotiate against). [SONNET-4.6] sq-wbsf5
+const TURTLE_PREFIXES: &[(&str, &str)] = &[
+    ("rdf", "http://www.w3.org/1999/02/22-rdf-syntax-ns#"),
+    ("rdfs", "http://www.w3.org/2000/01/rdf-schema#"),
+    ("xsd", "http://www.w3.org/2001/XMLSchema#"),
+    ("ldp", "http://www.w3.org/ns/ldp#"),
+    ("acl", "http://www.w3.org/ns/auth/acl#"),
+    ("acp", "http://www.w3.org/ns/solid/acp#"),
+    ("solid", "http://www.w3.org/ns/solid/terms#"),
+    ("foaf", "http://xmlns.com/foaf/0.1/"),
+    ("dcterms", "http://purl.org/dc/terms/"),
+    ("schema", "https://schema.org/"),
+];
+
+/// Serialize a document's triples as **Turtle** through `oxttl`'s `TurtleSerializer` —
+/// the oxigraph writer, so the body is guaranteed well-formed Turtle rather than
+/// hand-rolled — with [`TURTLE_PREFIXES`] registered for compaction.
+///
+/// Writing into an in-memory `Vec<u8>` cannot actually fail, but a serializer-internal
+/// error is propagated as `Err` rather than swallowed: a truncated body reported as a
+/// successful read would be exactly the kind of silent lie this surface must not tell.
+fn triples_to_turtle(triples: &[Triple]) -> Result<String, String> {
+    let mut ser = oxttl::TurtleSerializer::new();
+    for (name, iri) in TURTLE_PREFIXES {
+        // `with_prefix` fails only on a syntactically invalid namespace IRI; ours are
+        // constants, so fall back to the un-prefixed writer rather than panic if a future
+        // edit breaks one (less compaction, never wrong output).
+        ser = ser.with_prefix(*name, *iri).unwrap_or_else(|_| oxttl::TurtleSerializer::new());
+    }
+    let mut w = ser.for_writer(Vec::new());
+    for t in triples {
+        w.serialize_triple(t.as_ref())
+            .map_err(|e| format!("Turtle serialization failed: {}", e))?;
+    }
+    let bytes = w.finish().map_err(|e| format!("Turtle serialization failed: {}", e))?;
+    String::from_utf8(bytes).map_err(|e| format!("Turtle serialization was not UTF-8: {}", e))
 }
 
 /// Whether `iri` names an access-control document by the `.acl`/`.acr` convention
@@ -465,30 +609,11 @@ impl SolidMcpServer {
     }
 
     /// Handle one raw JSON-RPC message — the pod twin of
-    /// [`crate::McpServer::handle_message`], with the identical framing contract
-    /// (`Some(response)` for a request, `None` for a notification).
+    /// [`crate::McpServer::handle_message`], sharing the very same framing core
+    /// (`Some(response)` for a request, `None` for a notification, and top-level
+    /// JSON-RPC batch arrays accepted per JSON-RPC 2.0 §6).
     pub fn handle_message(&mut self, raw: &str) -> Option<String> {
-        let req: Request = match serde_json::from_str(raw) {
-            Ok(r) => r,
-            Err(e) => {
-                let resp = Response::err(
-                    Value::Null,
-                    RpcError::new(INVALID_REQUEST, format!("invalid JSON-RPC request: {e}")),
-                );
-                return Some(serialize(&resp));
-            }
-        };
-        let is_notification = req.is_notification();
-        let id = req.id.clone().unwrap_or(Value::Null);
-        let outcome = self.dispatch(&req);
-        if is_notification {
-            return None;
-        }
-        let resp = match outcome {
-            Ok(result) => Response::ok(id, result),
-            Err(e) => Response::err(id, e),
-        };
-        Some(serialize(&resp))
+        handle_raw(raw, |req| self.dispatch(req))
     }
 
     /// The session this server is bound to (borrowing the config's owned strings).
@@ -658,35 +783,49 @@ impl SolidMcpServer {
     fn tool_resource_get(&self, args: &Value) -> Result<String, String> {
         let url = arg_str(args, "url")?;
         NamedNode::new(url).map_err(|e| format!("invalid resource IRI <{url}>: {e}"))?;
-        if let Some(accept) = args.get("accept").and_then(Value::as_str) {
-            if rdf_format(accept) != Some("ntriples") {
-                return Err(format!(
-                    "unsupported accept `{accept}`: this server serves application/n-triples"
-                ));
-            }
-        }
-        let nt = self.document_ntriples(url)?;
+        // Negotiate BEFORE the read gate: the choice depends only on `accept`, so an
+        // unsupported media type answers identically whether or not the resource exists.
+        let representation = negotiate(args.get("accept").and_then(Value::as_str))?;
+        let content = self.document_as(url, representation)?;
         Ok(pretty(&json!({
             "url": url,
-            "content_type": "application/n-triples",
-            "content": nt,
+            "content_type": representation.media_type(),
+            "content": content,
         })))
     }
 
-    /// The N-Triples representation of one pod document, behind the read gate. Shared by
-    /// the `resource_get` TOOL and the `resources/read` RESOURCE surface so the two can
-    /// never disagree (draft §6.4/§8).
+    /// One pod document rendered in the negotiated `representation`, behind the read gate.
+    /// Both syntaxes come from the SAME `document_triples` call, so negotiation can only
+    /// change the spelling, never the content. [SONNET-4.6] sq-wbsf5
+    fn document_as(&self, url: &str, representation: Representation) -> Result<String, String> {
+        let triples = self.document_triples(url)?;
+        match representation {
+            Representation::NTriples => Ok(sparq_engine::triples_to_ntriples(&triples)),
+            Representation::Turtle => triples_to_turtle(&triples),
+        }
+    }
+
+    /// The N-Triples representation of one pod document — what the `resources/read`
+    /// RESOURCE surface serves (MCP has no per-request `accept`, so it is not negotiable
+    /// there). It is the SAME rendering of the SAME triples the `resource_get` TOOL
+    /// serves by default, so the two surfaces cannot disagree (draft §6.4/§8).
+    fn document_ntriples(&self, url: &str) -> Result<String, String> {
+        self.document_as(url, Representation::NTriples)
+    }
+
+    /// The triples of one pod document — THE read gate every representation passes
+    /// through, under the configured budget.
     ///
     /// NON-DISCLOSURE (draft §9.3): unauthorized-read and nonexistent produce the SAME
-    /// error, so neither surface reveals that a resource exists.
-    fn document_ntriples(&self, url: &str) -> Result<String, String> {
+    /// error, so no surface built on this reveals that a resource exists.
+    fn document_triples(&self, url: &str) -> Result<Vec<Triple>, String> {
         if !self.allowed(url, Mode::Read) {
             return Err(not_found_error(url));
         }
         let Some(doc) = self.find_doc(url) else {
             return Err(not_found_error(url));
         };
-        sparq_engine::construct_ntriples_with_budget(
+        sparq_engine::construct_with_budget(
             doc,
             "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }",
             &self.budget(),
@@ -980,8 +1119,15 @@ impl SolidMcpServer {
         let content = arg_str(args, "content")?.to_string();
         let content_type = arg_str(args, "content_type")?.to_string();
         let name = valid_target(&url)?;
+        // RDF sources only. The refusal NAMES the scope-out (module docs: non-RDF
+        // resources are a `sparq-solid` storage decision, not an MCP surface one) so a
+        // caller learns the shape of the limit, not just that its body was rejected.
         let fmt = rdf_format(&content_type).ok_or_else(|| {
-            format!("unsupported content_type `{content_type}`: use text/turtle or application/n-triples")
+            format!(
+                "unsupported content_type `{}`: this server stores RDF sources only ({}); \
+                 non-RDF (binary) resources are out of scope",
+                content_type, INGESTED_MEDIA_TYPES
+            )
         })?;
 
         if is_control_doc(&url) {
@@ -1260,6 +1406,67 @@ mod unit {
         assert_eq!(rdf_format("application/octet-stream"), None);
         #[cfg(not(feature = "jsonld"))]
         assert_eq!(rdf_format("application/ld+json"), None); // fail closed without parser
+    }
+
+    #[test]
+    fn negotiate_defaults_to_ntriples_and_maps_turtle() {
+        // [SONNET-4.6] sq-wbsf5 — absent `accept` must keep the v1 default, or every
+        // existing caller silently changes syntax.
+        assert_eq!(negotiate(None), Ok(Representation::NTriples));
+        assert_eq!(negotiate(Some("application/n-triples")), Ok(Representation::NTriples));
+        assert_eq!(negotiate(Some("text/turtle")), Ok(Representation::Turtle));
+        // Media-type parameters are ignored, so a `q=` weight still resolves.
+        assert_eq!(negotiate(Some("text/turtle; q=0.9")), Ok(Representation::Turtle));
+    }
+
+    #[test]
+    fn negotiate_refuses_an_unservable_accept_naming_what_is_served() {
+        // No silent coercion, and the message must enumerate the real served set.
+        for accept in ["application/rdf+xml", "image/png", "application/n-triples, text/turtle"] {
+            let err = negotiate(Some(accept)).expect_err("unservable accept is an error");
+            assert!(err.contains("unsupported accept"), "honest error: {err}");
+            assert!(err.contains("application/n-triples") && err.contains("text/turtle"));
+        }
+    }
+
+    #[cfg(feature = "jsonld")]
+    #[test]
+    fn negotiate_refuses_jsonld_even_though_it_can_be_ingested() {
+        // The `jsonld` feature adds a PARSER, not a writer: serving it would be a lie.
+        assert!(negotiate(Some("application/ld+json")).is_err());
+    }
+
+    #[test]
+    fn representation_media_types_are_the_wire_spellings() {
+        assert_eq!(Representation::NTriples.media_type(), "application/n-triples");
+        assert_eq!(Representation::Turtle.media_type(), "text/turtle");
+    }
+
+    #[test]
+    fn triples_to_turtle_writes_well_formed_prefix_compacted_turtle() {
+        let graph = Graph::load_str(
+            "<https://pod.ex/a> <http://www.w3.org/ns/ldp#contains> <https://pod.ex/a/b> .\n",
+            "ntriples",
+        )
+        .expect("fixture parses");
+        let triples =
+            sparq_engine::construct(&graph, "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }")
+                .expect("CONSTRUCT evaluates");
+        let ttl = triples_to_turtle(&triples).expect("in-memory serialization succeeds");
+        assert!(ttl.contains("ldp:contains"), "registered prefixes compact: {ttl}");
+        // Well-formed: it parses back to the same one triple.
+        let back = Graph::load_str(&ttl, "turtle").expect("output is valid Turtle");
+        assert_eq!(back.len(), 1);
+        assert!(sparq_engine::ask(
+            &back,
+            "ASK { <https://pod.ex/a> <http://www.w3.org/ns/ldp#contains> <https://pod.ex/a/b> }"
+        )
+        .expect("ASK evaluates"));
+    }
+
+    #[test]
+    fn triples_to_turtle_of_no_triples_is_an_empty_document() {
+        assert_eq!(triples_to_turtle(&[]).expect("empty serializes"), "");
     }
 
     #[cfg(feature = "jsonld")]
