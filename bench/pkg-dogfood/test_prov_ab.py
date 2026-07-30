@@ -80,11 +80,18 @@ def synth_answers(
     lift: bool = True,
     wired: bool = True,
     fabricate: bool = False,
+    over_abstain: int = 0,
 ) -> list[dict]:
     """Per-(task, arm) answer records. The baseline is the INERT PKG: correct on the
-    everyday tasks, blind to the seeded traps. The treatment arms catch most traps."""
+    everyday tasks, blind to the seeded traps. The treatment arms catch most traps.
+
+    `over_abstain` = how many ANSWERABLE tasks the hedging arm abstains on, chosen so
+    the baseline was already wrong there. Both arms then score 0 on those tasks, so the
+    mean ordinary accuracy is unchanged — the regression is visible ONLY as a drop in
+    abstention precision."""
     by_class = {c["id"]: c for c in classes}
     recs = []
+    ordinary_seen = 0
     for i, t in enumerate(tasks):
         klass = by_class[t["id"]]["outcome_class"]
         catches = lift and i >= N_MISS  # the first few traps are missed even by treatment
@@ -118,14 +125,24 @@ def synth_answers(
             ]
         else:
             answer = f"The answer is {gold}."
+            false_positive = ordinary_seen < over_abstain
+            ordinary_seen += 1
+            # a wrong baseline answer that does NOT read as an abstention, so the pair
+            # scores 0 → 0 and only the abstention counters move
+            base_answer = "The recorded figure is unclear." if false_positive else answer
+            p2 = (
+                {"answer": "No matching records.", "abstained": True}
+                if false_positive
+                else {"answer": answer, "abstained": False}
+            )
             recs += [
-                {"task": t["id"], "arm": "P0", "answer": answer},
+                {"task": t["id"], "arm": "P0", "answer": base_answer},
                 {"task": t["id"], "arm": "P1", "answer": answer, **({"citations": cite} if wired else {})},
                 {
                     "task": t["id"],
                     "arm": "P2",
-                    "answer": answer,
-                    **({"abstained": False, "hedge": "is reported to"} if wired else {}),
+                    **(p2 if wired else {"answer": p2["answer"]}),
+                    **({"hedge": "is reported to"} if wired else {}),
                 },
             ]
     return recs
@@ -292,6 +309,53 @@ class ProvAbCase(unittest.TestCase):
         self.assertIsNone(
             v["capabilities"]["citations"]["_detail"]["cost_per_extra_caught_defect_usd"]
         )
+
+    def test_hedging_reports_abstention_precision_and_recall_for_both_arms(self):
+        """The declared axis is emitted, not merely declared."""
+        ab = self.build()["capabilities"]["hedging"]["_detail"]["abstention"]
+        # the `N_MISS` missed traps are the FIRST tasks in the set, which are the
+        # stale-fact traps, so the hedging arm catches every abstain-trap here
+        self.assertEqual(ab["treatment"]["true_positive"], N_TRAP)
+        self.assertEqual(ab["treatment"]["false_negative"], 0)
+        self.assertEqual(ab["treatment"]["false_positive"], 0)
+        self.assertEqual(ab["treatment"]["precision"], 1.0)
+        self.assertEqual(ab["treatment"]["recall"], 1.0)
+        # the inert baseline never abstains: recall 0, and precision UNDEFINED (not 1.0)
+        self.assertEqual(ab["baseline"]["recall"], 0.0)
+        self.assertIsNone(ab["baseline"]["precision"])
+        self.assertTrue(ab["precision_non_regression"])
+        # …and the citations capability, which declares no abstention axis, reports none
+        self.assertIsNone(self.build()["capabilities"]["citations"]["_detail"]["abstention"])
+
+    def test_false_positive_abstentions_fire_kill_3_even_when_mean_accuracy_holds(self):
+        """Trap recall improves and the mean ordinary score does NOT move — the ONLY
+        signal is the treatment abstaining on answerable tasks. Mean-accuracy
+        non-regression cannot see this; abstention precision must."""
+        v = self.build(over_abstain=3)
+        cap = v["capabilities"]["hedging"]
+        d = cap["_detail"]
+
+        # the hole: mean ordinary accuracy is unchanged, so the old guard is satisfied…
+        self.assertTrue(cap["quality_delta"]["exec_acc"]["non_regression"])
+        self.assertEqual(
+            cap["quality_delta"]["exec_acc"]["baseline"],
+            cap["quality_delta"]["exec_acc"]["treatment"],
+        )
+        # …and trap recall still improved, so superiority is established…
+        self.assertTrue(d["quality_superior"])
+        self.assertGreater(d["abstention"]["treatment"]["recall"], d["abstention"]["baseline"]["recall"])
+        # …but precision regressed: 3 abstentions on answerable tasks, none for baseline
+        self.assertEqual(d["abstention"]["treatment"]["false_positive"], 3)
+        self.assertEqual(d["abstention"]["baseline"]["false_positive"], 0)
+        self.assertLess(d["abstention"]["treatment"]["precision"], 1.0)
+        self.assertFalse(d["abstention"]["precision_non_regression"])
+
+        fired = [k for k in d["kill_criteria"] if k["kill"] == "KILL_3_quality"]
+        self.assertEqual(len(fired), 1)
+        self.assertIn("abstention precision regressed", fired[0]["why"])
+        self.assertFalse(cap["recommend_adopt"])
+        self.assertNotIn("hedging", v["adopt"])
+        self.assertIn("hedging", v["drop"])
 
     def test_a_fabricated_citation_is_a_hard_kill_even_when_everything_else_passes(self):
         v = self.build(fabricate=True)

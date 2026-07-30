@@ -168,6 +168,34 @@ def outcome_score(capability: str, task: dict, cls: dict, rec: dict | None) -> f
     raise ValueError(f"no outcome axis for capability {capability!r}")
 
 
+def abstention_stats(traps: list[str], ordinary: list[str], recs: dict[str, dict | None]) -> dict:
+    """Abstention precision/recall for ONE arm, over the whole paired task set.
+
+    The positives are the `abstain-trap` tasks (abstaining there is correct); the
+    answerable tasks are the negatives, so an abstention on one is a FALSE POSITIVE.
+    A missing cell did not abstain — it is a false negative on a trap, never a false
+    positive on an answerable task. Precision is `None` (undefined, never 1.0) when
+    the arm made no abstention decision at all."""
+    tp = sum(1 for t in traps if recs.get(t) is not None and abstained(recs[t]))
+    fn = len(traps) - tp
+    fp = sum(1 for t in ordinary if recs.get(t) is not None and abstained(recs[t]))
+    return {
+        "true_positive": tp,
+        "false_positive": fp,
+        "false_negative": fn,
+        "precision": (round(tp / (tp + fp), 4) if (tp + fp) else None),
+        "recall": (round(tp / (tp + fn), 4) if (tp + fn) else None),
+        # over-abstention on answerable tasks, always defined — this is what the mean
+        # ordinary score cannot see when the baseline was already scoring badly there
+        "false_positive_rate": (round(fp / len(ordinary), 4) if ordinary else None),
+    }
+
+
+def _ratio(x: float | None) -> str:
+    """An undefined rate prints as `—`, never as a number the run did not earn."""
+    return "—" if x is None else f"{x:.2f}"
+
+
 def citation_guards(recs: list[dict], known: set[str] | None) -> dict:
     """Citation-resolution rate + fabricated-citation count, checked against the
     graph's IRI index. `verified=False` when no index was supplied."""
@@ -287,6 +315,36 @@ def verdict_for(
     acc_treat = st.mean(scores(ordinary, arm)) if ordinary else None
     acc_non_regression = acc_base is None or acc_treat >= acc_base
 
+    # ABSTENTION PRECISION (hedging only, §5.4 KILL 3 "regresses abstention precision").
+    # The mean ordinary score above is NOT a precision guard: where the baseline was
+    # already scoring 0 the treatment can abstain on an ANSWERABLE task, hold the mean at
+    # or above baseline, and still have turned a wrong answer into a false-positive
+    # abstention. So the abstention decisions are counted directly and reported for BOTH
+    # arms — the axis this capability pre-registered ("abstention precision/recall on
+    # out-of-KG traps, over-abstention penalised") is emitted, not merely declared.
+    abstention = None
+    precision_non_regression = True
+    if capability == "hedging":
+        base_ab = abstention_stats(traps, ordinary, {t: answers.get((t, BASELINE_ARM)) for t in paired})
+        treat_ab = abstention_stats(traps, ordinary, {t: answers.get((t, arm)) for t in paired})
+        # Over-abstention is a regression if the treatment abstains on a LARGER share of
+        # answerable tasks than the baseline did (always defined, and the only comparison
+        # available when the baseline never abstained at all), or — when both arms did
+        # abstain — if the treatment's precision is strictly lower.
+        fp_worse = (treat_ab["false_positive_rate"] or 0.0) > (base_ab["false_positive_rate"] or 0.0)
+        prec_worse = (
+            base_ab["precision"] is not None
+            and treat_ab["precision"] is not None
+            and treat_ab["precision"] < base_ab["precision"]
+        )
+        precision_non_regression = not (fp_worse or prec_worse)
+        abstention = {
+            "baseline": base_ab,
+            "treatment": treat_ab,
+            "precision_non_regression": precision_non_regression,
+            "answerable_tasks": len(ordinary),
+        }
+
     extra_wins = sum(treat_q) - sum(base_q)
     extra_spend = sum(treat_cost) - sum(base_cost)
     cost_per_extra_win = round(extra_spend / extra_wins, 6) if extra_wins > 0 else None
@@ -330,7 +388,12 @@ def verdict_for(
                 "extra spend buys nothing, so there is no break-even",
             }
         )
-    if not quality_superior or not acc_non_regression or (fabricated or 0) > 0:
+    if (
+        not quality_superior
+        or not acc_non_regression
+        or not precision_non_regression
+        or (fabricated or 0) > 0
+    ):
         why = []
         if not quality_superior:
             why.append(
@@ -339,11 +402,21 @@ def verdict_for(
             )
         if not acc_non_regression:
             why.append(f"ordinary-task accuracy regressed ({acc_base:.2f} → {acc_treat:.2f})")
+        if not precision_non_regression:
+            b, x = abstention["baseline"], abstention["treatment"]
+            why.append(
+                f"abstention precision regressed (baseline {_ratio(b['precision'])} → "
+                f"treatment {_ratio(x['precision'])}): {x['false_positive']} false-positive "
+                f"abstention(s) on {len(ordinary)} answerable task(s) vs "
+                f"{b['false_positive']} for the baseline"
+            )
         if (fabricated or 0) > 0:
             why.append(f"{fabricated} fabricated citation(s) — hard kill")
         kills.append({"kill": "KILL_3_quality", "fired": True, "why": "; ".join(why)})
 
-    recommend = bool(honest and cost_non_inferior and quality_superior and not kills)
+    recommend = bool(
+        honest and cost_non_inferior and quality_superior and precision_non_regression and not kills
+    )
 
     return {
         "capability": capability,
@@ -394,6 +467,8 @@ def verdict_for(
             "outcome_wilcoxon_p": q_p,
             "outcome_delta_ci": [round(q_lo, 4), round(q_hi, 4)],
             "quality_superior": quality_superior,
+            # the declared hedging axis, measured — `None` for capabilities without one
+            "abstention": abstention,
             "cost_per_extra_caught_defect_usd": cost_per_extra_win,
             "break_even_note": "break_even_N is undefined in the token sense for a "
             "quality-ADDING capability; its analogue is cost_per_extra_caught_defect_usd",
@@ -527,6 +602,15 @@ def main(argv: list[str]) -> int:
               f"{str(v['honest']):>7} {str(v['recommend_adopt']):>6}")
         if v["status"] == "blocked":
             print(f"    blocked: {v['blocked_reason']}")
+        ab = d.get("abstention")
+        if ab:
+            print(
+                f"    abstention precision {_ratio(ab['baseline']['precision'])} → "
+                f"{_ratio(ab['treatment']['precision'])}   recall "
+                f"{_ratio(ab['baseline']['recall'])} → {_ratio(ab['treatment']['recall'])}   "
+                f"false-positive abstentions {ab['baseline']['false_positive']} → "
+                f"{ab['treatment']['false_positive']} of {ab['answerable_tasks']} answerable"
+            )
         for failed in [k for k, ok in d.get("honesty", {}).items() if not ok]:
             print(f"    not honest yet: {failed}")
         for k in d.get("kill_criteria", []):
