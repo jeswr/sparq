@@ -7,7 +7,10 @@ measured on the aarch64 work box. **All figures cited here are RELATIVE, NON-CAN
 shapes** — they steer prioritization only and must never be baked into docs, tests, or CI
 thresholds. Any adopted change proves itself on the canonical EC2 lane
 (`research/ci-ec2-design.md`, greenlit sq-vw3ax.12) and against the deterministic
-`scripts/perf-gate.py` ratchets, which must hold or improve.
+`scripts/perf-gate.py` ratchets, which must hold or improve. Mind the split those ratchets
+enforce: only the deterministic byte-count metrics hard-fail, while the wall-clock-derived
+`parse_ns_per_byte` is an **advisory timing signal (tracked/warned, non-blocking)** — the
+measurement obligations below cite it in that sense, never as a hard ratchet.
 
 ## 0. Disjointness map — what this record must NOT restate
 
@@ -52,8 +55,9 @@ dominant cold-load / `query-mmap` cost, so this is a direct product win for load
 
 **Canonical measurement:** EC2 bench (tag `sparq-bench`, orphan-proof self-terminate):
 ingest wall on the synthetic social graph + WatDiv at two scales; `perf` self-time share of
-the sort family before/after; `parse_ns_per_byte` and `bytes/triple` ratchets hold or
-improve. Correctness gate: byte-identical index content vs the comparison sort (exact
+the sort family before/after; the `bytes/triple` ratchet holds or improves, and
+`parse_ns_per_byte` (advisory timing signal — tracked/warned, non-blocking) shows no
+regression. Correctness gate: byte-identical index content vs the comparison sort (exact
 output-equivalence test), and dict-id-order determinism per
 `research/dict-id-order-determinism-audit.md`.
 
@@ -85,8 +89,9 @@ replays deterministically per PR. No adoption without that lane green.
 uniformity (real dumps are highly prefix-uniform; WatDiv/BSBM/Wikidata all are).
 
 **Canonical measurement:** EC2 ingest wall + `perf` share of the oxiri symbol family;
-`parse_ns_per_byte` ratchet. A prefix-diverse adversarial input must show no regression
-(memo miss cost ≈ one short memcmp).
+`parse_ns_per_byte` as an advisory timing signal (tracked/warned, non-blocking). A
+prefix-diverse adversarial input must show no regression (memo miss cost ≈ one short
+memcmp).
 
 **M4 composition:** orthogonal (ingest).
 
@@ -152,7 +157,8 @@ lane coverage. (b) In `Dict` dedup, compare the stored 64-bit hash before fallin
 cost — which is why it ranks below the three items above despite being trivial.
 
 **Canonical measurement:** EC2 ingest wall delta; Miri lane green; cargo-geiger ratchet
-accounted; `parse_ns_per_byte` holds or improves.
+accounted; `parse_ns_per_byte` (advisory timing signal — tracked/warned, non-blocking)
+shows no regression.
 
 ---
 
