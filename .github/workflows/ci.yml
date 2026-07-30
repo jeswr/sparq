@@ -386,6 +386,18 @@ jobs:
           # key is removed). A stable `shared-key` is still worth keeping so this job's
           # dep cache survives across this branch's runs.
           shared-key: "test-workspace"
+          # [SONNET-4.6] sq-aemq7 (follow-up to sq-3sbrr, which did this for
+          # feature-matrix.yml) — SAVE ONLY ON main; PR and ephemeral merge_group runs
+          # are RESTORE-ONLY. Every rust-cache step in this file carries the same line.
+          # WHY: a branch-scoped save is unreadable from main and from every sibling PR,
+          # yet it counts against the repo-wide 10 GB Actions-cache budget and LRU-evicts
+          # main's warm SHARED caches — so each PR run was paying to make the next run
+          # colder. WHY IT IS SAFE: rust-cache stores the DEPENDENCY build only (it cleans
+          # workspace-crate artifacts out of `target/` before saving), and deps are pinned
+          # by the committed Cargo.lock, so main's dep cache is the same closure the PR
+          # would build for itself. A PR that ADDS a dep just compiles that dep cold.
+          # Push-to-main re-runs this workflow and reseeds the keys for the legs it runs.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # [OPUS-4.8] sq-x4jy: cargo-nextest is the test runner — each test in its OWN
       # process (a stray abort can't take the whole binary down), a never-executed
       # BINARY reported as a DETERMINISTIC failure, and retries = 2 (now set by
@@ -889,6 +901,9 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [SONNET-4.6] sq-aemq7: restore-only off main (rationale on `build-archive`).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build sparq-wasm for the browser target
         run: cargo build -p sparq-wasm --target wasm32-unknown-unknown
       # [OPUS-4.8] sq-yqi1 (#162): also build WITH the opt-in `shacl` feature so the
@@ -1224,6 +1239,9 @@ jobs:
           rustup component add rustfmt clippy
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [SONNET-4.6] sq-aemq7: restore-only off main (rationale on `build-archive`).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # GATES: the whole workspace (sparq-py included) is clippy-clean under -D warnings.
       # A new warning — from new code or a Rust-stable bump that adds a lint — fails CI.
       - name: clippy (deny warnings)
@@ -1370,6 +1388,9 @@ jobs:
           rustup default 1.88
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [SONNET-4.6] sq-aemq7: restore-only off main (rationale on `build-archive`).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: cargo check on the declared MSRV
         # [SONNET-4.6] Test targets must compile at the declared floor too; they can
         # otherwise hide newer temporary-lifetime-extension behavior from this gate.
@@ -1448,6 +1469,9 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [SONNET-4.6] sq-aemq7: restore-only off main (rationale on `build-archive`).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch W3C test suites (pinned)
         run: ./scripts/fetch-conformance.sh
       - name: Run conformance suites
@@ -1578,6 +1602,9 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [SONNET-4.6] sq-aemq7: restore-only off main (rationale on `build-archive`).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch W3C SHACL test suite (pinned)
         run: ./crates/sparq-shacl/fetch-shacl-tests.sh
       - name: Run SHACL core + SHACL-SPARQL suites
@@ -1711,6 +1738,9 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [SONNET-4.6] sq-aemq7: restore-only off main (rationale on `build-archive`).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run OGC GeoSPARQL topology compliance ratchet
         # The runner asserts its own floor (OGC_RATCHET_FLOOR) + fail==0; capture the
         # scoreboard so the grep gate below re-checks the pass count.
@@ -1853,6 +1883,9 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [SONNET-4.6] sq-aemq7: restore-only off main (rationale on `build-archive`).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run Solid WAC + ACP decision-parity suites
         # The runners assert their own pinned floors; capture the output so the grep
         # gate below re-checks the scenario counts.
@@ -1959,6 +1992,9 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [SONNET-4.6] sq-aemq7: restore-only off main (rationale on `build-archive`).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch SolidLab ODRL Test Suite (pinned)
         run: bash scripts/fetch-odrl-suite.sh
       - name: Run SolidLab ODRL decision-parity suite
@@ -2061,6 +2097,9 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [SONNET-4.6] sq-aemq7: restore-only off main (rationale on `build-archive`).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run sparq-text BM25 differential oracle
         # The runner asserts its own floor (TEXT_ORACLE_FLOOR) + per-hit score
         # equality; capture the output so the grep gate below re-checks the count.
@@ -2166,6 +2205,9 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [SONNET-4.6] sq-aemq7: restore-only off main (rationale on `build-archive`).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run sparq-rsp RSP expressivity / SRBench correctness oracle
         # The runner asserts its own floor (RSP_EXPRESSIVITY_FLOOR) + every
         # per-window correctness equality; capture the output so the grep gate below
@@ -2276,6 +2318,9 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [SONNET-4.6] sq-aemq7: restore-only off main (rationale on `build-archive`).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch W3C JSON-LD 1.1 API test suite (toRdf/fromRdf/compact, pinned)
         run: ./scripts/fetch-jsonld-tests.sh
       - name: Fetch W3C JSON-LD 1.1 Framing test suite (frame, pinned)
@@ -2414,6 +2459,9 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [SONNET-4.6] sq-aemq7: restore-only off main (rationale on `build-archive`).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Clippy the gated harness surface (service-loopback feature ON)
         # The REAL gate for the feature-gated code: -D warnings over all targets with the
         # feature ON (the default `cargo clippy` never compiles this module/test).
@@ -2571,6 +2619,9 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [SONNET-4.6] sq-aemq7: restore-only off main (rationale on `build-archive`).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch inference test suites (pinned)
         run: ./scripts/fetch-inference-suites.sh
       - name: Run inference suites
@@ -3021,12 +3072,28 @@ jobs:
       # the ACTIVE (pinned) toolchain. Idempotent, and a no-op if it is already there.
       - name: Ensure llvm-tools-preview on the pinned toolchain
         run: rustup component add llvm-tools-preview
-      # Per-shard cache key: each shard builds a DIFFERENT crate subset (different
-      # instrumented objects), so keying the cache by shard keeps them from clobbering /
-      # thrashing one another's saved target dir.
+      # [SONNET-4.6] sq-aemq7: ONE SHARED dep cache across the shards, not one per shard.
+      # The superseded per-shard `key: coverage-shard-<n>` was justified by "each shard
+      # builds a DIFFERENT crate subset (different instrumented objects)" — but those
+      # differing objects are WORKSPACE-crate objects, which rust-cache deletes from
+      # `target/` before saving. It caches the DEPENDENCY build, which the shards resolve
+      # from one committed Cargo.lock under one set of instrumentation flags, so the three
+      # entries overlapped heavily while costing three entries' worth of the 10 GB budget.
+      # `shared-key` is documented as replacing the automatic job-id-derived key, so the
+      # matrix legs land on one entry instead of one per leg.
+      # HONEST RESIDUAL, since the shards are NOT identical builds: coverage.sh selects
+      # per-crate `--features` (sparq-core mmap,dict-spill,rdfxml; sparq-reason datalog; …),
+      # so each shard's dep closure is a different subset. rust-cache skips saving on an
+      # exact key hit, so one shard's closure wins the entry and the others still compile
+      # their extra deps cold. That is a smaller compile win than three warm caches would
+      # give, traded deliberately for the cache-budget headroom this bead is about.
+      # NOT affected: the shard PARTITION is chosen by the COVERAGE_SHARD env var below,
+      # which coverage.sh maps to SHARD_GROUPS[n-1]. Nothing reads the cache key, so which
+      # crates each shard measures is unchanged by this.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: coverage-shard-${{ matrix.shard }}
+          shared-key: coverage-shards
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-llvm-cov
         # [OPUS-4.8] sq-tool-pin: taiki-e/install-action picks the tool from its @<tool> ref;
         # SHA-pinning (our code-scanning=0 policy) drops that ref, so an explicit `with: tool:`
@@ -3190,6 +3257,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: coverage-engine-run-${{ matrix.part }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-llvm-cov + nextest
         # [OPUS-4.8] sq-tool-pin: explicit `with: tool:` is MANDATORY when SHA-pinning
         # install-action (the @<tool> ref is dropped by the pin). Both tools are needed:
@@ -3249,6 +3317,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: coverage-engine-run-1
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-llvm-cov + nextest
         uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # cargo-llvm-cov
         with:
@@ -3587,6 +3656,9 @@ jobs:
       - name: Ensure llvm-tools-preview on the pinned toolchain
         run: rustup component add llvm-tools-preview
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [SONNET-4.6] sq-aemq7: restore-only off main (rationale on `build-archive`).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-llvm-cov
         # [OPUS-4.8] sq-tool-pin: explicit `with: tool:` is MANDATORY when SHA-pinning
         # install-action — the @<tool> ref is dropped by the SHA pin, so without this the
@@ -3967,6 +4039,9 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [SONNET-4.6] sq-aemq7: restore-only off main (rationale on `build-archive`).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-mutants
         uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # cargo-mutants
         with:
@@ -4112,6 +4187,9 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [SONNET-4.6] sq-aemq7: restore-only off main (rationale on `build-archive`).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-geiger
         uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
