@@ -150,6 +150,46 @@ source of truth for the hardware-tier matrix and build steps. `dist.yml` selects
 `mode: binary` for bare per-tier workflow artifacts, while `release.yml` selects
 `mode: archive` for the versioned release archives described above.
 
+## 3a. The LWS / Solid server binary — container only, no `dist`/`release` archive
+
+<!-- [OPUS-5] sq-gg0qq.11 (issue #2741): the bead asks for a decision, recorded here so the
+runbook is the single place a releaser looks. Related: research/lws-3-crate-split.md §3
+(blast radius) and its §7 Q2 (the published image name is still a maintainer question). -->
+
+**Decision: the Solid/LDP server binary is NOT added to `dist.yml` or to the `release.yml`
+archives. It ships only as a container image, and it is labelled EXPERIMENTAL.**
+
+`crates/sparq-lws-core` builds an implicit binary from `src/main.rs` (there is no `[[bin]]`
+stanza and the crate is `publish = false`). A **second** workflow fires on a `v*` tag alongside
+`release.yml` (`dist.yml` is dispatch-only, per the note above) —
+`.github/workflows/lws-container.yml` — which smoke-tests
+(`crates/sparq-lws-core/tests/container-smoke.sh`) and Trivy-scans a native amd64 image, then
+pushes a multi-arch `linux/amd64,linux/arm64` index to
+`ghcr.io/sparq-org/sparq-lws-core:{X.Y.Z, X.Y, latest}` with SBOM and max-mode build
+provenance. It is also `workflow_dispatch`-able, which tags only `:latest` — that is the form
+the demo and the `deploy/` templates reference. Nothing else about the LWS binary is published.
+
+Why not a `dist`/`release` archive:
+
+- **The crate's own description says `EXPERIMENTAL`**, and its whole distribution surface is a
+  long-lived server process configured entirely through `SOLID_SERVER_*` / `PSS_*` environment
+  variables. A bare `solid-server` archive next to `sparq-cli-vX.Y.Z-<tier>.tar.gz` reads as a
+  supported product; a container carries the runtime contract with it and is the honest shape.
+- **The crate boundary is still moving.** `sparq-lws` and `sparq-solid-server` do not exist yet
+  and the partition that would create them is an open maintainer decision
+  (research/lws-3-crate-split.md §5/§7); the container/deploy cutover is deliberately sequenced
+  last in that record's §6 phase 4, because it is the only phase that can break a running demo.
+  Adding hardware-tiered release archives now would pin a binary NAME (`sparq-lws-core` today,
+  `solid-server` after the cutover) that the split is expected to change, and
+  `.github/workflows/deploy-lint.yml` already asserts the current image string literally.
+- **Cost.** `build-matrix.yml` builds ten hardware tiers. Doubling it for a binary whose
+  supported deployment is a container buys nothing a consumer has asked for.
+
+**Revisit when** (any one is enough): the `sq-gg0qq` split lands and the bin has a stable
+crate + name; or a consumer needs a non-container deployment. The change is then small — add a
+package/bin selector to `build-matrix.yml` — and it should ship as a clearly EXPERIMENTAL-
+labelled OPT-IN artifact, not silently alongside the `sparq-cli` archives.
+
 ## 4. crates.io publication
 
 <!-- [OPUS-4.8] sq-v286.1: reconciled 16 → 17 publishable crates. sparq-algos has full
