@@ -37,6 +37,14 @@ without a second concurrent author to race against). The required check is:
 > header of `ci-summary.yml` for the full semantics (newest-run resolution, bounded
 > cancelled-run re-dispatch, stability window, and self-exclusion).
 
+> **In progress (bead sq-lfmvd):** a second, **slotless** aggregator —
+> the `ci-summary-status` COMMIT STATUS published by
+> [`ci-summary-status.yml`](../.github/workflows/ci-summary-status.yml) — now runs in
+> SHADOW alongside the job above, computing the same verdict from the same code without
+> occupying a runner slot. It is **required by nothing** and the ruleset is unchanged;
+> see *Event-driven aggregation (staged migration)* below for the runbook, the parity
+> exit criteria, and the two gaps that block dropping the resident job.
+
 ### What `ci-summary` aggregates (informational — do NOT add these individually)
 
 The gate covers **every newest Actions workflow run** and every external check-run on the
@@ -153,6 +161,79 @@ From the binding/packaging workflows (when those surfaces are exercised):
 > deterministic ratchet needs no ruleset edit. (If the maintainer had ever added the bench job by name
 > to the required-checks list, THAT name would now need removing — but per the "select only
 > `ci-summary / gate`" rule above, it was never added.)
+
+### Event-driven aggregation (staged migration) — `ci-summary-status`
+
+<!-- [SONNET-4.6] bead sq-lfmvd, design record research/ci-gate-slotless-aggregation.md.
+     This section is the RUNBOOK for the required-check migration; nothing here has
+     happened to the live ruleset yet. -->
+
+The required `ci-summary / gate` job is a **waiter**: it polls sibling check-runs for up
+to ~67 minutes and holds a hosted-runner slot for the whole wait, so under pool
+saturation the waiters starve the builds they wait on. `sq-90cv4`'s adaptive budget fixed
+the resulting *false verdicts*; it could not remove the *slot occupancy*.
+
+[`.github/workflows/ci-summary-status.yml`](../.github/workflows/ci-summary-status.yml)
+is the **slotless transport** for the same verdict: a `workflow_run`-triggered evaluation
+fires whenever any sibling workflow completes, evaluates the head commit's check-runs
+**once** (seconds), and publishes the aggregate as the commit status **`ci-summary-status`**.
+Every pass/fail decision is the resident gate's own brain
+(`scripts/ci_summary_gate.py`); `scripts/ci_summary_status.py` owns only the transport.
+
+**Status today: SHADOW. The ruleset is unchanged — `gate` is still the single required
+check, and `ci-summary-status` is required by nothing.** Both run on every PR head so
+their verdicts can be compared on live traffic. The evaluator job is DECLARED in
+[`.github/advisory-registry.json`](../.github/advisory-registry.json), so a shadow
+evaluator's own red cannot block a merge.
+
+**Why it is staged and not swapped.** A required context that is never posted blocks
+**every** merge, and a required context posted by the wrong actor is worse. So:
+
+1. **Add, don't replace.** Add `ci-summary-status` to the ruleset's required-status-checks
+   list *alongside* `gate` once parity holds (below). Both required = a merge needs both.
+2. **Drop `gate` only after** the two liveness gaps below are closed, then delete the
+   registry declaration for the evaluator job in the same change.
+3. Verify with the `gh api` recipe in *Verifying the live ruleset matches this document*
+   after each step. Never edit both entries in one push.
+
+**Parity exit criteria (what must be observed before step 1).** For a representative
+sample of live PRs — including a docs-only PR, a draft PR that is later readied, a PR
+with a genuinely failing leg, and one merge-queue batch:
+
+- `ci-summary-status` reaches the **same terminal state** as `ci-summary / gate` on the
+  same head SHA. It legitimately reaches it *sooner* — it has no settle window to sit
+  through — so "the status is green while `gate` is still pending" is **expected**, not a
+  parity failure. What must never happen is a green status while a **gating sibling** is
+  still pending or unresolved (that is what the registration floor and the reused
+  draft-tier / feature-matrix-reporter holds exist to prevent);
+- it never reads `success` on a **draft** head (a draft head's reduced leg set must hold
+  at `pending` until the `ready_for_review` full-tier re-runs land — see *Draft-tier CI*);
+- on the **merge-queue** ref the status lands on the merge-group head commit the ruleset
+  evaluates (design §3.4 — this is the one path that cannot be proven from the repo and
+  must be observed);
+- on a **fork** PR the status is still published (the evaluator runs from the default
+  branch with base-repo permissions; the triggering fork run's own token is irrelevant).
+
+**The two liveness gaps that block step 2** (both fail *closed* — an absent required
+context blocks the merge, so neither can produce a false green):
+
+| Gap | What breaks after `gate` is dropped | What closes it |
+|---|---|---|
+| **quiet head** | A head that triggers **no** sibling workflow triggers no evaluation, so no status is ever published. Unreachable while the resident gate exists — its own completion is a guaranteed `workflow_run` event on every PR/queue/push head. | A guaranteed always-running sibling workflow, or a periodic sweep that re-evaluates open heads whose context is missing. |
+| **cancelled-run re-dispatch** | The resident gate re-dispatches a newest **cancelled** workflow run once (`actions: write`, #3505). The evaluator holds read-only `actions` on purpose and reports that state as `pending` until its absolute budget. | Move the bounded re-dispatch into the evaluator (and with it, `actions: write`). |
+
+**Trust model — deliberately narrower than the resident gate's.** The evaluator has **no
+`pull_request` trigger**. `workflow_run` always executes the **default-branch** copy of
+both the workflow and the script, so the code holding `statuses: write` is never
+PR-attested and never PR-editable. A `pull_request`-triggered publisher would take its
+definition from the PR head — which on same-repo agent branches can edit that very code —
+i.e. a PR could forge a green status for the context destined to be *the* required check
+(the [#3474](https://github.com/jeswr/sparq/issues/3474) threat model that moved the
+fast-fix ring into its own `workflow_run` workflow). That is also why design §3.3's
+"seed evaluation on `pull_request`" is **not** implemented; the cost is the quiet-head gap
+above, stated rather than paid in trust. The wiring facts this argument rests on (no
+`pull_request` trigger, exactly one write capability, `actions` read-only) are pinned by
+`scripts/tests/test_ci_summary_status.py::TestWorkflowWiring`.
 
 ### Merge-queue subset — the maintainer-directed risk posture (2026-07-18)
 

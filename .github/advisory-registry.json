@@ -57,6 +57,13 @@
    "promotion_criteria": "MS-G3 memsafety gap (epic sq-toze) addressed and lane proven stable on main with sufficient green runs",
    "registered": "2026-07-06"
   },
+  "ci-summary status evaluator (advisory)": {
+   "workflow": "ci-summary-status.yml",
+   "job_id": "evaluate",
+   "owner_bead": "sq-lfmvd",
+   "promotion_criteria": "SHADOW LANE — promoted by DELETING this entry at the same time as the required-check migration (research/ci-gate-slotless-aggregation.md §3.1; runbook in docs/branch-protection.md §Event-driven aggregation). This is the EVENT-DRIVEN aggregator: it publishes the `ci-summary-status` COMMIT STATUS intended to REPLACE the resident `ci-summary / gate` job as the single required check. While the migration is staged the resident gate is still the authority, so this evaluator's own check-runs must not gate: it fires via workflow_run on EVERY sibling completion, so its check-runs land on the very head SHA the resident gate polls (the sq-huwr8 class — PR heads, main and merge-group refs alike), and a SHADOW evaluator's red must never block a merge. Once the ruleset requires the status context and the resident job is dropped, this job's check-run no longer feeds any aggregator and the declaration is moot — delete it then, or if the workflow is removed.",
+   "registered": "2026-07-30"
+  },
   "new-bench-registry-dashboard (G3, advisory)": {
    "workflow": "flow-on-gates.yml",
    "job_id": "new-bench-registry-dashboard",

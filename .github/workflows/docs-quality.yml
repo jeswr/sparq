@@ -806,6 +806,20 @@ jobs:
         run: python3 scripts/ci_summary_gate.py --self-test
       - name: Self-test ci-summary gate loop (verdict semantics + adaptive saturation budget — sq-90cv4)
         run: python3 scripts/tests/test_ci_summary_gate.py
+      # [SONNET-4.6] sq-lfmvd: the EVENT-DRIVEN half of the same gate — the
+      # short-lived, slotless evaluator that publishes the `ci-summary-status` commit
+      # status (scripts/ci_summary_status.py, ci-summary-status.yml). It reuses the
+      # verdict brain the step above pins, so this suite covers only what a SINGLE
+      # observation could get wrong that a 155-poll loop cannot: the registration
+      # floor (no green over a partially-registered sibling set), the reused
+      # draft-tier / feature-matrix-reporter holds, aggregator scoping (the resident
+      # gate excluded by workflow PATH, so a rename cannot re-admit it), status
+      # monotonicity (never downgrade a terminal status to pending), and the wiring
+      # the trust model rests on (NO pull_request trigger => the evaluator is never
+      # PR-attested; exactly one write capability). The lane is SHADOW until the
+      # required-check migration, but its logic gates here from day one.
+      - name: Self-test ci-summary event-driven status evaluator (slotless transport — sq-lfmvd)
+        run: python3 scripts/tests/test_ci_summary_status.py
       # [FABLE-5] sq-fmx4u.3: the change-based test-selection stack is now
       # LOAD-BEARING (the select pre-job feeds every wide lane's skip guard and
       # the ci-summary gate's skipped-only-under-successful-selection rule), so

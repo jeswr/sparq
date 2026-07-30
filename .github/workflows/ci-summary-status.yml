@@ -1,0 +1,171 @@
+# ci-summary-status — EVENT-DRIVEN aggregation: the ci-summary verdict with NO
+# resident waiter (bead sq-lfmvd, follow-up to sq-90cv4). [SONNET-4.6]
+# Design record: research/ci-gate-slotless-aggregation.md §2.
+#
+# WHY. `ci-summary / gate` — the single REQUIRED branch-protection check — is a
+# WAITER: it polls sibling check-runs for up to ~67 minutes and holds a hosted-runner
+# slot for the whole wait. Under account-pool saturation the waiters collectively
+# starve the builds they are waiting on (observed 2026-07-02 as a congestion collapse
+# with false gate=FAILURE verdicts). sq-90cv4's adaptive budget fixed the FALSE
+# VERDICT; it could not fix the SLOT OCCUPANCY. This workflow is the same verdict on a
+# different transport: every time ANY sibling workflow completes, a run of this
+# workflow evaluates the head commit's check-runs ONCE (seconds, not minutes) and
+# publishes the aggregate as a COMMIT STATUS named `ci-summary-status`. There is no
+# waiter left to starve the pool.
+#
+# THE VERDICT IS NOT REIMPLEMENTED. scripts/ci_summary_status.py owns only the
+# transport (sibling-set scoping, when one observation may conclude, how it becomes a
+# status). Every pass/fail decision is scripts/ci_summary_gate.py's already-extracted
+# and unit-tested brain — render_verdict / failfast_failures /
+# draft_selects_unsuperseded / fm_report_status / is_advisory. That is the reuse
+# sq-90cv4's extraction existed to enable (design §4).
+#
+# STAGED, NEVER SWAPPED (design §3.1). `ci-summary-status` is NOT a required check
+# yet and this workflow does NOT touch the branch-protection ruleset. It runs
+# ALONGSIDE the resident `gate` job so parity can be measured on live PRs first; a
+# missing "expected" required check blocks every merge, so the ruleset edit is a
+# separate, maintainer-signed step. The runbook, the parity exit criteria and the two
+# liveness gaps that must close BEFORE the resident job is dropped are in
+# docs/branch-protection.md §"Event-driven aggregation (staged migration)".
+#
+# TRUST MODEL (design §3.2 — resolved, and deliberately NARROWER than the resident
+# gate's). This workflow has NO `pull_request` trigger. `workflow_run` (and
+# `workflow_dispatch`) always execute the DEFAULT-BRANCH copy of this file and of the
+# script, so the evaluator's logic is never PR-attested and never PR-editable. A
+# `pull_request`-triggered job would take its definition from the PR HEAD, and on
+# same-repo agent branches that head could edit the very code that holds
+# `statuses: write` — i.e. forge a green status for a context destined to become THE
+# required check. That is the sparq-org/sparq#3474 threat model (see
+# fast-fix-ring.yml's header) and it is why design §3.3's "seed evaluation on
+# pull_request" is NOT implemented here. The cost is stated as gap (G-quiet) in the
+# script header instead of being paid in trust. The token is otherwise minimal:
+# READ-only `checks`/`contents`/`actions`, and `statuses: write` as the single write
+# capability — no `actions: write` (so this workflow cannot re-dispatch anything) and
+# no source write.
+#
+# NO `workflows:` FILTER, ON PURPOSE. `workflow_run.workflows` is an optional NAME
+# filter; omitting it subscribes to EVERY workflow's completion. Enumerating names here
+# would rebuild exactly the brittleness ci-summary exists to remove (every added or
+# renamed workflow silently dropping out of the trigger set). `workflow_run` is also the
+# ONLY usable event for this: `check_run`/`check_suite` explicitly "do not trigger
+# workflows if the check suite was created by GitHub Actions" (events reference), i.e.
+# they are blind to exactly the sibling completions we need.
+#
+# THE SELF-SUBSCRIPTION, STATED HONESTLY. Subscribing to all workflows means
+# subscribing to ITSELF. Two facts bound that, and only the first one TERMINATES it:
+#   (1) GitHub caps the chain — "You can't use `workflow_run` to chain together more
+#       than three levels of workflows" (events reference). That platform cap is what
+#       stops the chain; nothing in this file could.
+#   (2) The job `if:` below stands the job down when the TRIGGERING run is this
+#       workflow, so those chained runs are NO-OPS: they neither re-evaluate nor
+#       re-publish anything.
+# Residual cost: up to two no-op runs per real evaluation. Accepted deliberately over
+# an allowlist of every other workflow name, and listed for measurement on live traffic
+# during the staged migration (docs/branch-protection.md).
+#
+# ADVISORY, BY DECLARATION. This job's check-runs land on the same head SHA the
+# resident gate is polling, so — since sparq-org/sparq#3773 — it MUST be DECLARED in
+# .github/advisory-registry.json to be non-gating. It is (key
+# `ci-summary status evaluator (advisory)`), which is what keeps a shadow evaluator's
+# own red from blocking a merge while the migration is staged. Do not delete that
+# entry while this lane is shadow.
+#
+# Hermetic tests: scripts/tests/test_ci_summary_status.py, run as a HARD step in
+# docs-quality.yml's `ci-scripts` bucket (the same lane that gates the resident gate's
+# suite). The wiring in this file — triggers, permissions, the self-trigger stand-down,
+# the sparse-checkout list — is pinned there too.
+name: ci-summary-status
+
+on:
+  # Every sibling workflow completion is one evaluation. See the "NO `workflows:`
+  # FILTER" note above; no `branches` filter either, because the status is needed on
+  # PR heads, on `main`, and on the merge queue's `gh-readonly-queue/**` refs alike.
+  workflow_run:
+    types: [completed]
+  # Maintainer-driven re-evaluation of one head — used to prove parity against the
+  # resident gate during the staged migration, and to recover a head whose events
+  # were lost. workflow_dispatch also runs the default-branch copy of this file.
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "head SHA to evaluate"
+        required: true
+      trigger_event:
+        description: >-
+          the event that produced that head (pull_request | push | merge_group) —
+          `pull_request` is what arms render_verdict's draft-tier belt
+        required: false
+        default: push
+
+# `statuses: write` is the ONE write capability: it publishes the aggregate status on
+# the head SHA. Reads: `checks` for the sibling check-runs, `actions` for the
+# workflow-run + attempt-scoped Jobs API (the #3505 newest-run resolution), `contents`
+# for the sparse checkout. Deliberately NO `actions: write` — the resident gate owns
+# the once-only cancelled-run re-dispatch, and this evaluator reports that state as
+# pending instead (gap (G-redispatch) in the script header).
+permissions:
+  checks: read
+  statuses: write
+  contents: read
+  actions: read
+
+# Debounce (design §3.5): one in-flight evaluation per head SHA. A superseded
+# evaluation is cancelled because the newer one observes a strict superset of the
+# completions — and the script never downgrades an already-terminal status back to
+# `pending`, so a cancelled-then-late writer cannot leave a green head reading
+# pending.
+concurrency:
+  group: ci-summary-status-${{ github.event.workflow_run.head_sha || github.event.inputs.sha }}
+  cancel-in-progress: true
+
+jobs:
+  evaluate:
+    # DECLARED in .github/advisory-registry.json under exactly this name (C4 binds the
+    # declaration to ci-summary-status.yml + job id `evaluate`, so a rename REDs
+    # check-advisory-registry.py instead of silently re-arming this lane as a merge
+    # blocker). Literal, never an expression: C4 compares the key to this string.
+    name: ci-summary status evaluator (advisory)
+    # Stand down when the triggering run is THIS workflow: an evaluation must not chain
+    # off its own completion. workflow_dispatch carries no workflow_run payload.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.name != 'ci-summary-status'
+    runs-on: ubuntu-latest
+    # One evaluation is a handful of API reads. A minute-scale cap is the structural
+    # proof that this lane is NOT a waiter — if it ever needs longer, that is a bug in
+    # the transport, not a wait to be extended.
+    timeout-minutes: 5
+    steps:
+      # Sparse checkout of ONLY the evaluator, the verdict brain it imports, and the
+      # advisory registry the brain reads. ci_summary_status.py imports
+      # ci_summary_gate, so BOTH .py files must be listed — pinned by
+      # scripts/tests/test_arm_capability_wiring.py's sparse-checkout import-graph
+      # check (the #3434 class of failure). The registry is LOAD-BEARING: the
+      # evaluator exits 1 loudly when it is absent rather than guessing which checks
+      # are non-gating (#3773).
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/ci_summary_gate.py
+            scripts/ci_summary_status.py
+            .github/advisory-registry.json
+          sparse-checkout-cone-mode: false
+      - name: Evaluate the sibling set once and publish the commit status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          # The head the triggering run ran on. For a merge_group-triggered sibling
+          # this is the merge-group ref's commit, which is the SHA the queue's
+          # required checks are evaluated against (design §3.4).
+          SHA: ${{ github.event.workflow_run.head_sha || github.event.inputs.sha }}
+          # This run's id — the resolver excludes the whole self-WORKFLOW by it, so
+          # earlier evaluations of the same head never appear in the sibling set.
+          SELF_RUN_ID: ${{ github.run_id }}
+          # The TRIGGERING run's originating event, NOT this run's (always
+          # `workflow_run`). `pull_request` is what arms render_verdict's draft-tier
+          # belt, so getting this wrong would disarm it on exactly the PR heads it
+          # exists for.
+          TRIGGER_EVENT: ${{ github.event.workflow_run.event || github.event.inputs.trigger_event }}
+          TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 scripts/ci_summary_status.py
