@@ -115,6 +115,35 @@ env:
   # (b) lld-18 is pre-installed on ubuntu-24.04 runners; (c) no per-job apt install step is
   # needed — tests that spawn cargo as a subprocess (e.g. crate-doc guard tests) inherit
   # this flag safely. Bench/release/dist profiles are NOT changed (bench.yml, build-matrix.yml).
+  #
+  # [SONNET-4.6] sq-6vshe.11 — THE THIRD LEG DOES NOT REACH EVERY JOB. Audit result of
+  # "does the sq-6vshe.1 trio reach the coverage lane?", measured, not assumed:
+  #   * CARGO_INCREMENTAL=0            — REACHES it (a plain cargo env var, no competition).
+  #   * CARGO_PROFILE_DEV_DEBUG        — REACHES it. Verified by running `cargo test --no-run
+  #     -v` with the var set: rustc is invoked with `-C debuginfo=line-tables-only`. Cargo's
+  #     `test` profile inherits `dev`, and a config/env profile key overrides the manifest,
+  #     so instrumented TEST binaries do get the thin-debuginfo build.
+  #   * CARGO_TARGET_<triple>_RUSTFLAGS — DOES **NOT** reach any job that also sets
+  #     `RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS`. Cargo's four rustflags sources are
+  #     FIRST-MATCH-WINS, never merged: `CARGO_ENCODED_RUSTFLAGS` > `RUSTFLAGS` >
+  #     `target.<triple>.rustflags` (which is what this var is) > `build.rustflags`.
+  #     Verified directly: with only the per-target var set, rustc gets its flags; with
+  #     `RUSTFLAGS` ALSO set, the per-target var is dropped entirely and only `RUSTFLAGS`
+  #     survives. cargo-llvm-cov sets exactly those variables to inject `-C
+  #     instrument-coverage` — this repo already depends on that: scripts/
+  #     coverage-engine-shard.sh `build-objects` runs `eval "$(cargo llvm-cov show-env
+  #     --export-prefix)"` precisely to import "RUSTC_WRAPPER + coverage RUSTFLAGS" into its
+  #     shell. So every coverage job was silently linking with the DEFAULT linker while
+  #     every sibling job used lld.
+  # Fix: the coverage jobs below set `RUSTFLAGS` themselves, which is the source
+  # cargo-llvm-cov reads and extends rather than one it shadows. NOT VERIFIED IN-SANDBOX:
+  # cargo-llvm-cov is not installed on the authoring box, so "it appends to an existing
+  # RUSTFLAGS instead of replacing it" is its documented behaviour, not something measured
+  # here — confirm on the first CI run by checking a coverage job's compile line. The
+  # failure mode is benign either way: if it replaced RUSTFLAGS, this change is a no-op
+  # (status quo, still no lld) rather than a regression. They must all use the IDENTICAL
+  # value (the engine split's cross-runner .profraw merge requires identical compile
+  # inputs); `scripts/check-coverage-rustflags.py` enforces presence AND sameness.
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
   CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
@@ -2938,6 +2967,19 @@ jobs:
       needs.changes.outputs.rust_changed == 'true' &&
       (needs.select.outputs.mode != 'selected' || needs.select.outputs.affected != '[]')
     runs-on: ubuntu-latest
+    # [SONNET-4.6] sq-6vshe.11: RE-DELIVER the workflow-level lld link flag to this job.
+    # cargo-llvm-cov sets RUSTFLAGS/CARGO_ENCODED_RUSTFLAGS to inject -C instrument-coverage,
+    # and cargo's rustflags sources are first-match-wins, so the workflow-level
+    # CARGO_TARGET_<triple>_RUSTFLAGS is DROPPED here (see the env: block at the top of this
+    # file for the measurement). Setting RUSTFLAGS at job level puts the flag on the source
+    # cargo-llvm-cov actually reads and extends, so the instrumented links — the heaviest in
+    # CI — should go through lld like every other native job (the append behaviour is
+    # documented, not measured here; see the env: block's note). Host-only job, so the
+    # per-target scoping the workflow-level var provided (wasm32 on wasm-ld) is not needed.
+    # VALUE MUST STAY IDENTICAL across all four cargo-llvm-cov jobs; enforced by
+    # scripts/check-coverage-rustflags.py.
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
     strategy:
       fail-fast: false   # one failing shard must NOT cancel the others (want all verdicts)
       matrix:
@@ -3071,7 +3113,8 @@ jobs:
   # runner compiling its own objects is far simpler + more robust than the fragile
   # cargo-llvm-cov `--archive-file` transport (whose 0.8.7 object layout does NOT
   # match where `report` reads objects). Each run/merge job passes ONE pinned
-  # toolchain and NO per-runner RUSTFLAGS, keeping the binaries reproducible.
+  # toolchain and the SAME job-level RUSTFLAGS (sq-6vshe.11 — no per-runner
+  # variation), keeping the binaries reproducible.
   #
   # Two jobs (both driven by scripts/coverage-engine-shard.sh):
   #   coverage-engine-run   : matrix[part 1..N] — compile + run a nextest test-level
@@ -3102,6 +3145,12 @@ jobs:
       needs.changes.outputs.rust_changed == 'true' &&
       (needs.select.outputs.mode != 'selected' || needs.select.outputs.affected != '[]')
     runs-on: ubuntu-latest
+    # [SONNET-4.6] sq-6vshe.11: re-deliver the lld link flag (see coverage-measure above and
+    # the env: block at the top of this file). EXTRA constraint here: the cross-runner
+    # .profraw merge requires the run partitions and coverage-engine-merge to compile with
+    # IDENTICAL inputs, so this value and coverage-engine-merge's MUST match exactly.
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
     strategy:
       fail-fast: false   # one partition failing must not cancel the others (want all profraw)
       matrix:
@@ -3166,6 +3215,11 @@ jobs:
     # and the aggregator counts `skipped` as satisfied.
     if: needs.coverage-engine-run.result == 'success'
     runs-on: ubuntu-latest
+    # [SONNET-4.6] sq-6vshe.11: MUST be byte-identical to coverage-engine-run's RUSTFLAGS —
+    # this job recompiles the instrumented objects the downloaded partition .profraw are
+    # merged against, and that merge is only valid when both compiles saw the same inputs.
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Free runner disk before instrumented build
@@ -3377,6 +3431,10 @@ jobs:
     needs: nightly-gate
     if: needs.nightly-gate.outputs.fresh == 'true'
     runs-on: ubuntu-latest
+    # [SONNET-4.6] sq-6vshe.11: re-deliver the lld link flag past cargo-llvm-cov's
+    # RUSTFLAGS (see coverage-measure above and the env: block at the top of this file).
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

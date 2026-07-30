@@ -584,6 +584,19 @@ jobs:
         run: python3 scripts/check-install-action-tool.py --self-test
       - name: "Enforce explicit `with: tool:` on every SHA-pinned install-action — GATING"
         run: python3 scripts/check-install-action-tool.py
+      # [SONNET-4.6] sq-6vshe.11: every cargo-llvm-cov job MUST set a job-level RUSTFLAGS,
+      # and they must all set the SAME value. cargo picks ONE rustflags source (first match
+      # wins, never merged) and cargo-llvm-cov sets RUSTFLAGS/CARGO_ENCODED_RUSTFLAGS to
+      # inject `-C instrument-coverage` — which silently DROPS ci.yml's workflow-level
+      # CARGO_TARGET_<triple>_RUSTFLAGS lld flag in exactly those jobs. Nothing fails when
+      # that happens; the flag just stops applying, which is how it went unnoticed from
+      # sq-6vshe.1 until it was measured. The sameness half additionally protects the engine
+      # coverage split, whose cross-runner .profraw merge is only valid while the run and
+      # merge jobs compile with identical inputs. Stdlib-only, no compile, no deps.
+      - name: Self-test coverage RUSTFLAGS gate (pure logic)
+        run: python3 scripts/check-coverage-rustflags.py --self-test
+      - name: "Enforce job-level RUSTFLAGS on every cargo-llvm-cov job — GATING"
+        run: python3 scripts/check-coverage-rustflags.py
       # [OPUS-4.8] sq-u59rq: the stacked-PR arm guard. A deterministic PreToolUse command-hook
       # (.claude/settings.json, sibling to the perf-reviewer) that DENIES `gh pr merge … --auto`
       # when the PR's baseRefName ≠ main — so we never squash-merge a stacked PR into its base
@@ -928,6 +941,17 @@ jobs:
       # only, no git/network.
       - name: Self-test check-install-action-tool.py (fixtures + live invariant — sq-1cb6l)
         run: python3 scripts/tests/test_install_action_tool.py
+      # [SONNET-4.6] test_coverage_rustflags.py (17 tests) — supplements the
+      # check-coverage-rustflags.py --self-test + enforce run above: the pure
+      # fixtures (job-level vs step-level env, CSV `tool:` list, bare `run: cargo
+      # llvm-cov`, no-compile coverage job out of scope, value divergence), the
+      # scalar parser (a mis-parsed value would fake a divergence), the live
+      # workflows invariant, and TWO vacuity guards — the scan must find at least
+      # one cargo-llvm-cov job, and it must specifically cover the
+      # coverage-engine-{run,merge} pair whose RUSTFLAGS must match for the
+      # cross-runner .profraw merge to be valid. Stdlib-only, no git/network.
+      - name: Self-test check-coverage-rustflags.py (fixtures + live invariant — sq-6vshe.11)
+        run: python3 scripts/tests/test_coverage_rustflags.py
       # [OPUS-5] sparq-org/sparq#4652: the zero-dispatch merge-group watchdog
       # (scripts/merge-group-watchdog.py, .github/workflows/merge-group-watchdog.yml)
       # plus the CI_TIMEOUT routing split it feeds in merge-queue-feedback.yml. Both
