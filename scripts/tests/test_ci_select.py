@@ -737,6 +737,7 @@ class OrchestrationSafeInertnessTests(unittest.TestCase):
         "metamorph.yml", "vectorized-feature-off.yml", "ci-select.yml",
         "ci-summary.yml", "formal-verification.yml", "differential.yml",
         "shacl-diff-fuzz.yml", "nightly-full-sweep.yml",
+        "datalog-souffle.yml",
     ]
 
     def test_no_orch_safe_script_is_referenced_by_a_rust_ci_workflow(self):
