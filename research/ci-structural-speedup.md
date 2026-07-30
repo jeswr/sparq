@@ -236,6 +236,48 @@ run doctests, so a `cargo test --doc` lane must survive any consolidation); and 
 always-run legs into fewer, fatter jobs where the per-job constant tax dominates their
 runtime. Explicitly disjoint from sq-piapk (coverage-instrumented topology is piapk's).
 
+### 8.1 The instrument — `scripts/ci_leg_inventory.py` (sub-part **a**, landed) [SONNET-4.6]
+
+Sub-part (a) is the only one of the five that can be done without first knowing the
+answer, so it landed first and on its own: `scripts/ci_leg_inventory.py` turns the Actions
+jobs API into the per-leg table this section asks for, medianed across runs —
+
+    wait | constant overhead | compile | test-run | other | unclassified
+
+plus three derived sections that are exactly the remaining sub-parts' input: matrix
+families whose legs do not finish together with the idle runner-time that costs (**b**),
+the slowest individual steps (**c**), the measured doctest-step cost (**d**), and the
+short overhead-dominated legs worth merging (**e**). Run it with `--repo owner/name`
+(defaults to `ci.yml`), or `--fixture` on a saved `gh api .../jobs` dump; `--json` for
+machine consumption. It is a REPORTER — deliberately wired into no workflow, exit 0 or a
+fail-loud 2, never a check-run. Its hermetic suite gates in `docs-quality.yml`.
+
+Three properties of the instrument constrain how its output may be read, and they are in
+the module header rather than here because they are maintenance facts, not design ones:
+the jobs API returns a step NAME and two timestamps and nothing else, so (i) the
+constant-overhead column is the trustworthy one — its members are mechanical and mostly
+GitHub's own implicit steps; (ii) compile-vs-run is STEP-granular, so a bare `cargo test`
+step that compiles and runs inside one step is attributed whole to `test-run` and reads as
+"compile+run" — which is precisely what makes such a leg an archive-split candidate under
+(c) rather than a measurement; and (iii) the classifier keys on names, so it fails loudly
+when it can no longer classify enough step time instead of quietly emitting a wrong table.
+
+### 8.2 What (b)–(e) still need, and why they were not done in the same change
+
+**No measurement has been taken yet.** (b), (c) and (e) are all of the form "re-derive a
+partition from measured runtimes", and the current `HEAVY` filterset + 3-way bulk split in
+`ci.yml` already encodes a measured claim from an earlier round. Re-deriving it from
+anything other than a fresh run of this instrument would be a guess dressed as a
+rebalance, and an unbalanced flake-isolation split is a real cost. So the sequencing is:
+run the inventory over a representative sample of `ci.yml` runs, then open one change per
+sub-part against that table. Note for whoever does (b): moving a test OUT of `HEAVY`
+silently adds it to all three `bulk K/3` legs' input set, because those legs partition
+`not ( $HEAVY )` — the filterset and the shard count have to move together. Note for (c):
+`build-archive` already implements the build-once pattern for the `test` matrix; the
+question the instrument answers is which OTHER legs pay a compile that a sibling leg
+already paid. Note for (d): any doctest consolidation must keep a `cargo test --doc` lane,
+since nextest neither archives nor runs doctests.
+
 ## 9. Program — beads, ordered by payoff-per-risk
 
 | # | Bead | What (one line) | Payoff | Risk | Tier |
