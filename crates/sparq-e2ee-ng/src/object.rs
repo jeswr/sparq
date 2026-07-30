@@ -483,6 +483,17 @@ pub fn open_object(
         }
     }
 
+    // The root must itself be a member of `blocks`, and be *the* block that set
+    // holds under its id. Otherwise a caller could drop the real root, add any
+    // other block to keep `blocks.len()` matching `chunk_count`, and still reach
+    // `visited.len() == chunk_count` by traversing an externally supplied root —
+    // accepting a set that is not exactly the object's blocks.
+    let indexed_root =
+        *index.get(&root.block_id).ok_or(Error::Schema("object root is not in the block set"))?;
+    if indexed_root != root {
+        return Err(Error::Schema("object root differs from the block set entry with its id"));
+    }
+
     let mut opener = Opener {
         k_read,
         ctx,
@@ -494,9 +505,9 @@ pub fn open_object(
         limits,
         out: Vec::new(),
     };
-    opener.visited.insert(root.block_id);
-    opener.positions.insert(root.chunk_index);
-    opener.visit(root, None)?;
+    opener.visited.insert(indexed_root.block_id);
+    opener.positions.insert(indexed_root.chunk_index);
+    opener.visit(indexed_root, None)?;
 
     // Completeness: exactly the declared number of blocks was reachable.
     if opener.visited.len() as u64 != root.chunk_count {

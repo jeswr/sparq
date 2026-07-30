@@ -216,6 +216,33 @@ fn object_leaf_presented_as_root_fails_closed() {
 }
 
 #[test]
+fn object_root_outside_the_block_set_fails_closed() {
+    let (k, c) = (key(), ctx());
+    let sealed = sealed_sample();
+    let root = sealed.blocks[0].clone();
+
+    // Drop the real root and swap in a fresh same-object block so the set still
+    // has `chunk_count` entries, then present the root separately. Every
+    // descendant still authenticates, so only the root's own membership in the
+    // set can reject this.
+    let mut blocks = sealed.blocks.clone();
+    blocks.remove(0);
+    let mut extra = blocks[0].clone();
+    extra.block_id = sparq_e2ee_ng::ids::BlockId::random();
+    blocks.push(extra);
+    assert_eq!(blocks.len() as u64, root.chunk_count);
+    let got = open_object(&k, &c, &root, &blocks, ObjectLimits::default());
+    assert!(matches!(got, Err(Error::Schema(_))), "got {got:?}");
+
+    // Same block id, different envelope: the set's entry is not the root that
+    // was passed, so the traversed root would not be the one in the set.
+    let mut blocks = sealed.blocks.clone();
+    blocks[0].nonce[0] ^= 0x01;
+    let got = open_object(&k, &c, &root, &blocks, ObjectLimits::default());
+    assert!(matches!(got, Err(Error::Schema(_))), "got {got:?}");
+}
+
+#[test]
 fn object_wrong_context_fails_closed() {
     let k = key();
     let sealed = sealed_sample();
