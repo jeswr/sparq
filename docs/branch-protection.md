@@ -80,7 +80,7 @@ From the **CI** workflow (`.github/workflows/ci.yml`):
 | `W3C SPARQL conformance (ratchet >= 1229 pass+divergence)` | The W3C SPARQL conformance ratchet (never lower). |
 | `W3C SHACL conformance (ratchet — core >= 98, sparql >= 5)` | The W3C SHACL core + SHACL-SPARQL ratchets. |
 | `Inference conformance (ratchet >= 1967 pass+divergence)` | The RDFS/OWL-RL/N3/entailment + rdf-turtle inference ratchet. |
-| `coverage ratchet + test-presence gate (per-crate)` | The per-crate line-coverage floor + the test-presence gate. |
+| `coverage ratchet + test-presence gate (per-crate)` | The per-crate line-coverage floor + the test-presence gate. **On `merge_group` this verdict covers the fast no-compile FLOOR gates only** — the instrumented per-crate line-% MEASUREMENT is demoted off the queue's blocking path (see *Coverage MEASUREMENT off the merge queue* below). |
 | `wasm build (sparq-wasm)` | The `wasm32-unknown-unknown` build, the wasm-deps guard, and `wasm-pack test --node`. |
 
 From the security / supply-chain / SAST workflows (aggregated by the gate; all LIVE except
@@ -200,6 +200,40 @@ combination* of PRs (not on any single PR head) reaches `main` and is caught pos
 rather than pre-merge. The maintainer accepted this trade against per-enqueue wall-clock
 and shared-runner contention.
 
+### Coverage MEASUREMENT off the merge queue (sq-6vshe.17, 2026-07-29)
+
+<!-- [SONNET-4.6] sq-6vshe.17 — LEVER 4a of research/ci-mergequeue-speedup-2026-07.md
+     §3.4a. Recorded here (not only in the workflow comments) because it changes what a
+     green merge-queue coverage check MEANS. -->
+
+**Measured motive.** The instrumented per-crate coverage shards are the merge-group *entry
+pole* whenever change-based selection skips the test shards: in the profiled runs cited in
+`research/ci-mergequeue-speedup-2026-07.md` §2.2 a single coverage shard *was* the entry
+critical path. (That record's timings are a dated snapshot of shared-runner CI, kept there
+rather than restated here — steering data, not a canonical performance claim.)
+
+**Why this one is demotable at all.** Coverage is a **ratchet, not a correctness test**. A
+floor regression that slips through a queued batch is *detectable and recoverable*
+post-merge; a functional bug is not. That asymmetry — and nothing about wall-clock — is
+what makes the demotion designable.
+
+**The enforcement topology** (`ci.yml`):
+
+| Where | What runs |
+|---|---|
+| `pull_request` (non-draft) | **UNCHANGED — the primary gate.** Every PR measures per-crate line-% and enforces the floor. |
+| `merge_group` | The `coverage-measure` / `coverage-engine-run` / `coverage-engine-merge` legs are **skipped**. `coverage-floors` — the fast, no-compile test-presence + floor-**monotonicity** + shard-partition gates — **still runs**, so a batch can never *lower* a committed floor. The `coverage` aggregate still concludes (a skipped leg counts as satisfied), so the gate never sees an expected-but-missing check; its step summary says plainly that only the floor gates ran. |
+| `push` to `main` | **UNCHANGED, and now load-bearing** — this is the enforcement point for the batch-stacking case. It is deliberately **EXEMPT** from the sq-6vshe.14 push-run skip; the exemption is pinned behaviourally by `scripts/tests/test_ci_select_wiring.py::TestCoverageMergeGroupDemotion`, so landing that lever without the exemption REDs a test rather than silently removing the last enforcement point. |
+| a `main` coverage red | `coverage-demoted-filer` auto-files a **P1 bead + a deduped GitHub issue** (`[demoted-lane] lane=coverage-ratchet-main`) via `scripts/ci-file-demoted-lane-failure.py` — the same demotion auto-bead protocol the fuzz and heavy-recall demotions use — **and** that open issue **pauses further ratchet ADVANCES**: `coverage-gate.py --check-advance-allowed` (a step in `coverage-floors`) fails a branch that *raises* a floor while the alarm is open, because the measured numbers a raise cites are exactly the numbers in doubt. It never blocks the recovery path (a governed lowering under `--allow-lower`), never blocks adding a *new* crate row, and fails **open** if the alarm probe is unavailable. |
+
+**The residual risk, stated honestly.** Two PRs that each individually sit at or above
+their floors can merge to a combined tree that sits below one. That case is **rare**, is
+caught on the next `push` to `main` (order of ~15 minutes later), and is recovered by
+revert / fix-forward — the same recovery mechanism the rest of this subset relies on.
+What is **not** risked: no committed floor is ever silently lowered (the monotonicity gate
+never left the queue, and a deliberate lowering stays a governed, loud re-baseline), and
+the nightly full-coverage tier (`coverage-nightly`) is untouched.
+
 ## Draft-tier CI (reduced matrix on draft PR heads)
 
 <!-- [FABLE-5] Draft-tier CI design record (2026-07-17). Motivation: the autonomous
@@ -230,7 +264,7 @@ no check-run there either — not a byte-identical copy of the PR check-set.)
 
 | Skipped on drafts | Where | Kept when |
 |---|---|---|
-| coverage ratchet (measure + engine split + aggregate) | `ci.yml` | never on drafts (merge_group + ready_for_review re-measure) |
+| coverage ratchet (measure + engine split + aggregate) | `ci.yml` | never on drafts. The `ready_for_review` run re-measures at full tier; since sq-6vshe.17 the `merge_group` run does **not** re-measure (only the fast floor gates run there — see *Coverage MEASUREMENT off the merge queue*), so the non-draft PR head and the post-merge `main` run are the measurement points |
 | benchmarks (deterministic ratchet + PR comparison/alert comments) | `bench.yml` | never on drafts |
 | `cargo-fuzz` corpus replay (nightly toolchain + a libFuzzer build of every `fuzz/fuzz_targets/` target) | `fuzz.yml` `fuzz` | kept iff the PR carries `ci-full`/`fuzz-full` (`fuzz-full` also selects the randomized budget, so a bare draft skip would neuter it); otherwise the `ready_for_review` run re-replays at full tier. `differential-smoke` — the wrong-answer gate in the same workflow — is deliberately NOT draft-skipped: a wrong-answer regression is review-relevant |
 | CodeQL analysis | `codeql.yml` | never on drafts (push-main + weekly schedule + merge_group + the ready_for_review run keep the `code_scanning` rule fed *when the workflow is enabled*; codeql.yml is byte-identical to `main` — its triggers, including merge_group, are untouched by this PR — but the workflow is currently operationally disabled (`disabled_manually`), so no CodeQL check-run is produced on any trigger today; open PR #3427 owns the successor policy) |

@@ -39,6 +39,16 @@
 #                             not CI). A deliberate, reviewed regression must pass --allow-
 #                             lower. New crates and RAISED floors always pass.
 #
+#   --check-advance-allowed   [SONNET-4.6] sq-6vshe.17: the RATCHET-ADVANCE PAUSE. The
+#                             coverage MEASUREMENT is demoted off the merge_group blocking
+#                             path (PR + push-to-main still measure), so `main` is an
+#                             enforcement point — and while the post-merge coverage alarm
+#                             issue is OPEN, RAISING a floor is unverifiable book-keeping
+#                             (the numbers a raise cites are the numbers in doubt). FAIL
+#                             (exit 1) iff this branch raises a floor AND that alarm is
+#                             open. Fail-OPEN on any probe error, and it NEVER blocks the
+#                             recovery path (lowering under --allow-lower).
+#
 # THE `seed_pending` FLAG (sq-iwf3c) [SONNET-4.6]
 # -----------------------------------------------
 # A floor entry may carry `"seed_pending": true`. It means: THIS FLOOR WAS NOT MEASURED
@@ -80,7 +90,7 @@
 # WHY a margin: line% drifts a little with toolchain bumps / nondeterministic test
 # ordering. MARGIN=2 (points) keeps the gate meaningful without flaking. The floor is
 # the ratchet of record — raise it deliberately as coverage grows.
-import argparse, json, math, os, subprocess, sys
+import argparse, json, math, os, subprocess, sys, tempfile
 
 MARGIN = 2  # percentage points of slack below the measured value
 
@@ -413,6 +423,131 @@ def dropped_crates(base_floors, new_floors):
     return sorted(c for c in base_floors if c not in new_floors)
 
 
+def floor_advances(base_floors, new_floors):
+    """[SONNET-4.6] sq-6vshe.17: PURE — the exact MIRROR of floor_regressions: the list of
+    (label, base_floor, new_floor) rows where THIS branch RAISES a floor relative to
+    `base_floors`. Used by --check-advance-allowed to answer "does this branch advance the
+    ratchet?" without re-deriving the floor-file shape.
+
+    Deliberately NARROW — only a RAISE of a floor the base already had counts:
+      * a brand-NEW crate row is NOT an advance (adding a crate to the ratchet must stay
+        possible while the post-merge alarm is open — it gates something previously
+        un-gated, it does not move an existing bar);
+      * a newly-ADDED `nightly_floor` is likewise not an advance;
+      * a LOWERING is not an advance (floor_regressions owns that direction).
+    Keeping it narrow keeps the advance BLOCK's blast radius to exactly the operation the
+    demotion protocol pauses, and never blocks the RECOVERY path (a governed, reviewed
+    re-baseline that lowers a floor under --allow-lower)."""
+    out = []
+    for crate, bentry in sorted(base_floors.items()):
+        if crate not in new_floors:
+            continue  # dropped, not raised — floor_regressions/dropped_crates own it
+        nentry = new_floors[crate]
+        bf, nf = floor_of(bentry), floor_of(nentry)
+        if nf > bf:
+            out.append((crate, bf, nf))
+        bnf = bentry.get("nightly_floor") if isinstance(bentry, dict) else None
+        if bnf is not None:
+            nnf = nentry.get("nightly_floor") if isinstance(nentry, dict) else None
+            if nnf is not None and nnf > bnf:
+                out.append((f"{crate}.nightly_floor", bnf, nnf))
+    return out
+
+
+def advance_block_verdict(advances, alarm_open):
+    """[SONNET-4.6] sq-6vshe.17: PURE — the exit code for --check-advance-allowed.
+
+    The demotion protocol (research/ci-mergequeue-speedup-2026-07.md §3.4a) pauses
+    RATCHET ADVANCES while the post-merge coverage measurement on `main` is RED: until
+    main is green again the measured numbers a raise would be justified by are exactly the
+    numbers in doubt, so raising a floor then is unverifiable book-keeping.
+
+    BLOCK (exit 1) iff BOTH: (a) this branch raises a floor, AND (b) the alarm is KNOWN
+    open. `alarm_open is None` means the probe could not run (no `gh`, no token, API
+    error) => FAIL-OPEN (exit 0): an unavailable GitHub API must never block a PR whose
+    only sin is raising a floor, and the floor DIRECTION gate (--check-monotonic) plus the
+    measured --check are unaffected either way, so fail-open costs no soundness."""
+    if not advances:
+        return 0
+    if alarm_open is True:
+        return 1
+    return 0
+
+
+# The lane token the demoted-lane filer files the post-merge coverage alarm under
+# (scripts/ci-file-demoted-lane-failure.py --lane); the alarm issue title is
+# "[demoted-lane] lane=<lane>: full-form CI run failed".
+COVERAGE_ALARM_LANE = "coverage-ratchet-main"
+
+
+def open_alarm_issue_state(lane=COVERAGE_ALARM_LANE, log=print):
+    """[SONNET-4.6] sq-6vshe.17: probe GitHub for an OPEN post-merge coverage alarm issue.
+
+    Returns True (an open alarm exists), False (none), or None (the probe could not run —
+    the caller FAILS OPEN). Matches the filer's own dedupe query + title contract exactly
+    (scripts/ci-file-demoted-lane-failure.py find_open_issue), so the two cannot drift on
+    which issue counts as "the alarm"."""
+    marker = "[demoted-lane]"
+    try:
+        r = subprocess.run(
+            ["gh", "issue", "list", "--state", "open",
+             "--search", f'in:title "{marker} lane={lane}"',
+             "--json", "number,title", "--limit", "10"],
+            capture_output=True, text=True, timeout=120, check=True)
+        items = json.loads(r.stdout or "[]")
+    except (subprocess.SubprocessError, OSError, json.JSONDecodeError) as e:
+        log(f"  note: could not probe the post-merge coverage alarm ({e}) — fail-OPEN")
+        return None
+    for item in items:
+        title = item.get("title", "")
+        if marker in title and f"lane={lane}" in title:
+            log(f"  OPEN post-merge coverage alarm: issue #{item['number']} — {title}")
+            return True
+    return False
+
+
+def check_advance_allowed(floor_path, base_ref, base_file, lane=COVERAGE_ALARM_LANE,
+                         probe=None, log=print):
+    """[SONNET-4.6] sq-6vshe.17: "no ratchet ADVANCE while post-merge coverage is RED".
+
+    The companion to --check-monotonic in the same fast, no-compile `coverage-floors` job:
+    monotonic forbids LOWERING a floor in any state; this forbids RAISING one while the
+    demoted post-merge coverage lane's alarm is open. Returns an exit code."""
+    new_floors = _load_floors_obj(load(floor_path))
+    if base_file is not None:
+        base_floors = _load_floors_obj(load(base_file))
+        src = base_file
+    else:
+        base_floors = _base_floors_from_git(base_ref, floor_path, log=log)
+        src = f"{base_ref}:{os.path.basename(floor_path)}"
+    if base_floors is None:
+        log("coverage advance gate: no base to compare — PASS")
+        return 0
+
+    advances = floor_advances(base_floors, new_floors)
+    log(f"==> coverage advance gate: comparing floors vs {src}")
+    if not advances:
+        log("  this branch raises no committed floor — nothing for the advance pause to "
+            "block. PASS")
+        return 0
+    for label, bf, nf in advances:
+        log(f"  RAISED   {label:<20} floor {bf} -> {nf}")
+    alarm_open = (probe or open_alarm_issue_state)(lane, log=log)
+    rc = advance_block_verdict(advances, alarm_open)
+    if rc == 0:
+        state = "none open" if alarm_open is False else "probe unavailable (fail-OPEN)"
+        log(f"  post-merge coverage alarm: {state} — the advance is allowed. PASS")
+        return 0
+    log(f"::error::coverage RATCHET ADVANCE paused: this branch raises "
+        f"{len(advances)} floor(s) while the post-merge coverage lane on `main` is RED "
+        f"(an open '[demoted-lane] lane={lane}' issue). The coverage MEASUREMENT is "
+        f"demoted off the merge queue (sq-6vshe.17), so main is the enforcement point — "
+        f"fix/close that alarm first, then re-push this raise. Nothing here lowers a "
+        f"floor; drop the raise from this PR to unblock it.")
+    log("coverage advance gate: FAIL")
+    return 1
+
+
 def merge_max(prev, new):
     """Pure: return a NEW summary that is `prev` with each crate's coverage replaced by
     the per-crate MAX(lines_pct) seen across `prev` and `new`.
@@ -607,6 +742,10 @@ def main():
     g.add_argument("--check-monotonic", action="store_true",
                    help="[OPUS-4.8] sq-neq8: FAIL if the floor file LOWERS/DROPS any crate's "
                         "floor vs the base (origin/main); the ratchet only RISES")
+    g.add_argument("--check-advance-allowed", action="store_true",
+                   help="[SONNET-4.6] sq-6vshe.17: FAIL if the floor file RAISES a floor "
+                        "while the post-merge coverage alarm issue is OPEN (fail-OPEN on "
+                        "any probe error; never blocks a lowering)")
     ap.add_argument("--floor", default=os.path.join(os.path.dirname(__file__), "..",
                     "bench", "coverage-floor.json"))
     ap.add_argument("--allow-lower", action="store_true",
@@ -625,10 +764,15 @@ def main():
     ap.add_argument("--base-file", default=None,
                     help="--check-monotonic: compare against a base floor FILE on disk "
                          "instead of a git ref (overrides --base-ref)")
+    ap.add_argument("--alarm-lane", default=COVERAGE_ALARM_LANE,
+                    help="--check-advance-allowed: demoted-lane token of the post-merge "
+                         f"coverage alarm issue (default {COVERAGE_ALARM_LANE})")
     a = ap.parse_args()
     floor = os.path.abspath(a.floor)
     if a.check_monotonic:
         sys.exit(check_monotonic(floor, a.base_ref, a.base_file, a.allow_lower))
+    if a.check_advance_allowed:
+        sys.exit(check_advance_allowed(floor, a.base_ref, a.base_file, a.alarm_lane))
     if a.summary is None:
         ap.error("the 'summary' argument is required for "
                  "--seed/--check/--check-robust")
@@ -810,6 +954,60 @@ def self_test():
     assert floor_regressions({"core": {"floor": 90}},
                              {"core": {"floor": 90, "nightly_floor": 92}}) == []
 
+    # === ADVANCE PAUSE (sq-6vshe.17): floor_advances + advance_block_verdict ====
+    # [SONNET-4.6] floor_advances is the exact MIRROR of floor_regressions: only RAISES.
+    # Same fixtures as above: c is raised 90->95, b LOWERED, a equal, d new.
+    assert floor_advances(base, nw) == [("c", 90, 95)], floor_advances(base, nw)
+    # a LOWERING is never an advance (that direction belongs to floor_regressions).
+    assert floor_advances(b661, n661) == []
+    # a brand-NEW crate row is NOT an advance — adding a crate to the ratchet must stay
+    # possible while the alarm is open (it gates something previously un-gated).
+    assert floor_advances(base, {**base, "z": {"floor": 99}}) == []
+    # a DROPPED crate is not an advance either.
+    assert floor_advances(base, {"a": {"floor": 80}, "c": {"floor": 90}}) == []
+    # bare-int floor form on either side is handled (floor_of normalises).
+    assert floor_advances({"b": 83}, {"b": {"floor": 90}}) == [("b", 83, 90)]
+    # nightly_floor RAISE is an advance; ADDING one where base had none is not.
+    assert floor_advances(bnf, {"core": {"floor": 90, "nightly_floor": 95}}) \
+        == [("core.nightly_floor", 94, 95)]
+    assert floor_advances({"core": {"floor": 90}},
+                          {"core": {"floor": 90, "nightly_floor": 92}}) == []
+    # both directions at once on one crate: floor raised AND nightly_floor raised.
+    assert floor_advances({"core": {"floor": 90, "nightly_floor": 94}},
+                          {"core": {"floor": 91, "nightly_floor": 95}}) \
+        == [("core", 90, 91), ("core.nightly_floor", 94, 95)]
+
+    # advance_block_verdict: BLOCK iff (raises a floor) AND (alarm KNOWN open).
+    adv = [("c", 90, 95)]
+    assert advance_block_verdict(adv, True) == 1, "a raise + an OPEN alarm must BLOCK"
+    assert advance_block_verdict(adv, False) == 0, "a raise with no alarm is allowed"
+    assert advance_block_verdict(adv, None) == 0, "an unavailable probe must FAIL-OPEN"
+    # no advance => never blocked, whatever the alarm says (incl. the recovery path: a
+    # governed lowering under --allow-lower raises nothing, so it is never paused).
+    for st in (True, False, None):
+        assert advance_block_verdict([], st) == 0, "no raise must never block"
+
+    # check_advance_allowed end-to-end over the PURE seam (injected probe, no gh):
+    # a raise + open alarm FAILS; the same tree with no alarm PASSES.
+    with tempfile.TemporaryDirectory() as td:
+        bfp = os.path.join(td, "base-floor.json")
+        nfp = os.path.join(td, "coverage-floor.json")
+        with open(bfp, "w") as fh:
+            json.dump({"crates": {"a": {"floor": 80}}}, fh)
+        with open(nfp, "w") as fh:
+            json.dump({"crates": {"a": {"floor": 85}}}, fh)
+        assert check_advance_allowed(nfp, "origin/main", bfp,
+                                     probe=lambda lane, log=print: True, log=quiet) == 1
+        assert check_advance_allowed(nfp, "origin/main", bfp,
+                                     probe=lambda lane, log=print: False, log=quiet) == 0
+        assert check_advance_allowed(nfp, "origin/main", bfp,
+                                     probe=lambda lane, log=print: None, log=quiet) == 0
+        # No raise (identical floors) => the probe must not even be consulted.
+        assert check_advance_allowed(bfp, "origin/main", bfp,
+                                     probe=lambda lane, log=print: (_ for _ in ()).throw(
+                                         AssertionError("must not probe without a raise")),
+                                     log=quiet) == 0
+
     # === UNMEASURED vs MISSING in check() (sq-039g) [OPUS-4.8] ==================
     # The bug: a crate present in the summary with "measured": false (its coverage step
     # ERRORED — e.g. conformance fixtures absent -> sparq-conformance exit 2, or a
@@ -819,7 +1017,11 @@ def self_test():
     # its floor. Fix: an UNMEASURED crate with a non-zero (effective) floor ALWAYS fails;
     # a genuinely-MISSING crate keeps the --require-all semantics; a floor-0 unmeasured
     # crate (artifact) is reported but not fatal.
-    import tempfile, contextlib, io
+    # [SONNET-4.6] `tempfile` is now a MODULE-level import (the sq-6vshe.17 advance-pause
+    # scenarios above use it earlier in this same function; a function-local `import
+    # tempfile` here would make the name local for the WHOLE function body and turn those
+    # earlier uses into an UnboundLocalError).
+    import contextlib, io
     def run_check(summary_crates, floor_crates, require_all, tier=None):
         """Drive the real check() over tempfile summary + floor; return its exit code."""
         sdoc = {"crates": {k: (crate(*v) if isinstance(v, tuple) else crate(v))
