@@ -223,6 +223,13 @@ area = "ci"
 pattern = ".roborev.toml"
 area = "ci"
 
+# jscpd's copy/paste-detection config, read by the docs-quality `docs-duplication` step.
+# `ci` for the same reason as the other lint configs: it redefines what a CI leg checks,
+# so two concurrent editors of it collide on the pipeline lane, not on a doc surface.
+[[map]]
+pattern = ".jscpd.json"
+area = "ci"
+
 [[map]]
 pattern = ".config/**"
 area = "ci"
