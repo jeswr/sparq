@@ -24,6 +24,8 @@ client-side, both opt-in:
 > `sparq-engine` / `sparq-substrate` do not depend on it, and the default + wasm
 > builds are byte-identical with or without it.
 
+<!-- -->
+
 > **Profile SE leakage — read before enabling `se`.** SE reveals the **full graph
 > topology** to the server: every subject, every predicate, every IRI-valued
 > object, named-graph membership, degree, co-occurrence and update dynamics — and

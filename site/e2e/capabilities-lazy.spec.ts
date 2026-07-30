@@ -61,7 +61,9 @@ test("no demo body or demo chunk loads on /capabilities entry", async ({ page })
   await gotoSettled(page, "capabilities/");
 
   // The page rendered the themes, but NO demo body is mounted yet (lazy: present only on expand).
-  await expect(page.getByRole("heading", { name: "Privacy (ZK / MPC)" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Privacy (ZK / MPC / E2EE)" }),
+  ).toBeVisible();
   await expect(page.locator("[data-demo-body]")).toHaveCount(0);
 
   // Snapshot the chunk set after the route + its app shell have fully settled.

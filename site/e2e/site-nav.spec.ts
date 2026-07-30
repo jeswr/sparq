@@ -76,7 +76,7 @@ test("Capabilities is reachable from the top bar and renders the 5 themes", asyn
     "Query & data",
     "Reason & validate",
     "Search & GenAI",
-    "Privacy (ZK / MPC)",
+    "Privacy (ZK / MPC / E2EE)",
     "Serve & embed",
   ]) {
     await expect(page.getByRole("heading", { name: theme })).toBeVisible();

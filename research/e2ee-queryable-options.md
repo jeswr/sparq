@@ -22,6 +22,8 @@ the profiles this survey concludes are *specifiable today*.
 > prohibitions (no server-side decrypt UDF, no ORE, no SSE indexes) are carried as normative
 > clauses `CORE-6`, `REJ-1`, and `REJ-3`.
 
+<!-- -->
+
 > **Honesty banner.** General **server-side SPARQL evaluation over end-to-end-encrypted
 > data without leakage does not exist** — not in the literature, not in any deployed
 > system, and not in sparq. Every known scheme that lets an untrusted server answer

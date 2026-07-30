@@ -492,6 +492,8 @@ W3C standing (sq-tag1q house rule). RFC-2119 keywords are UPPERCASE.
 > model (§5) and the leakage comparison (§6). Nothing has been published to the jeswr / w3id
 > namespace: the spec's own IRIs are non-dereferenceable placeholders.
 
+<!-- -->
+
 > ### Profile BR — Broker-Relayed E2EE-Queryable (optional, leakage-disclosed)
 >
 > **BR-1 (Overview, informative).** A conforming Profile-BR deployment stores RDF as a
