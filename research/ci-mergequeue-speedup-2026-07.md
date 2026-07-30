@@ -150,6 +150,35 @@ rebuild. The honest remaining deltas, in measured order:
 **Safety: SAFE** (cache poisoning discipline per sq-6vshe.5 applies; measure-first).
 **Est. saved:** −0.5–2 m entry wall, mostly from (1).
 
+> **Status 2026-07-30 [SONNET-4.6] — sq-6vshe.15 landed items 1+2; item 3 is NOT done.**
+>
+> - **(1) partially done, and NOT the 90 s the profile attributed to compression.** The
+>   `nextest-archive` upload now sets `compression-level: 0`, so upload-artifact stops
+>   re-running its default DEFLATE-6 zip pass over an already-zstd-compressed
+>   `nextest.tar.zst`. That removes re-compression CPU only; the 90 s step is CPU **plus**
+>   transfer, and this change does not shrink the bytes, so the saving is un-quantified
+>   until the next re-profile — no number is claimed here. The other two options the lever
+>   listed (nextest `--zstd-level` retune, pruning non-test content from the archive) were
+>   **NOT** attempted: both change the archive's bytes/content, so both need the
+>   before/after test-count parity measurement this bead had no measured baseline for.
+> - **(2) done, over a lane set much smaller than §2.1 implies.** `save-if: ${{ github.ref
+>   == 'refs/heads/main' }}` is now on every `Swatinem/rust-cache` step in every workflow
+>   that still triggers on `merge_group`. **That is only `ci.yml` (20 steps),
+>   `feature-matrix.yml` (6, already compliant under sq-3sbrr) and
+>   `vectorized-feature-off.yml` (1)** — most §2.1 lanes no longer trigger on
+>   `merge_group` at all (`fuzz.yml`, `zk-toolchain.yml` and `formal-verification.yml`
+>   under the 2026-07-18 maintainer directive; `bench.yml` under sq-6vshe.6), and the
+>   nightly-only lanes asan/miri/kani never were queue-triggered. So this bead added the
+>   guard to **21 steps**, not to the whole tree.
+>   **Re-profile §2.1 before acting on any other lever here**: the record's own §6 caveat
+>   ("re-profile if the lane set has materially changed") has now fired.
+>   Pinned structurally by `scripts/tests/test_mergequeue_cache_posture.py`.
+>   NEW COUPLING for **sq-6vshe.14**: main-scope cache freshness now depends entirely on
+>   push-to-main runs, so .14 must keep its promised cache-primer leg.
+> - **(3) NOT done — no verdict either way.** No sccache A/B was run, so there is neither
+>   an adoption nor an honest negative result to record; the ≥60 s bar is untested. Nothing
+>   about sccache is wired. Tracked as a follow-up issue.
+
 ### 3.3 Lever 3 — prioritize/parallelize the thing about to merge → **bead sq-6vshe.16**
 
 - **CodeQL: KEEP on the blocking path.** Measured 3.8 m median (buildless). Moving a
