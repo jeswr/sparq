@@ -386,6 +386,33 @@ jobs:
           # key is removed). A stable `shared-key` is still worth keeping so this job's
           # dep cache survives across this branch's runs.
           shared-key: "test-workspace"
+          # [OPUS-5] sq-h2gz6 (follow-up to sq-3sbrr / #1395, which did this for the
+          # feature-matrix legs) — RESTORE-ONLY off main. THIS IS THE CANONICAL NOTE;
+          # every other rust-cache step in this file carries the same `save-if` and
+          # points back here.
+          #
+          # WHY: the repo shares a 10 GB Actions-cache budget, GitHub LRU-evicts against
+          # it, and rust-cache keys embed the ref scope — so every PR and every ephemeral
+          # merge_group run was WRITING its own branch-scoped copy of a dependency cache
+          # that already exists on main. Two costs: (1) a save on a
+          # `gh-readonly-queue/*` ref is dead on arrival — the queue branch is deleted
+          # the moment the batch merges, so nothing can ever restore that entry, yet it
+          # occupies budget until evicted; (2) those write-only copies push the WARM
+          # main-scoped entries out of the budget, so the heavy jobs (coverage,
+          # conformance, mutants) restore COLD and pay the dependency-compile floor from
+          # scratch. Caching was present but self-defeating.
+          #
+          # `save-if` makes non-main runs pure RESTORE — they still get the warm main
+          # entry, they just stop writing. EVERY key here still has a seeder, which is
+          # the condition that makes this safe rather than a permanent cold start:
+          #   - the per-commit jobs are seeded by the post-merge push-to-main run — the
+          #     `changes` job forces rust_changed=true on any non-PR/non-merge_group
+          #     event, so `push` runs the full matrix;
+          #   - `coverage-nightly` / `mutants-nightly-advisory` never run on push (they
+          #     hang off `nightly-gate`, which is schedule/workflow_dispatch only), and
+          #     are seeded by the 03:17 UTC cron — a scheduled run's ref IS
+          #     refs/heads/main, so save-if holds there too.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # [OPUS-4.8] sq-x4jy: cargo-nextest is the test runner — each test in its OWN
       # process (a stray abort can't take the whole binary down), a never-executed
       # BINARY reported as a DETERMINISTIC failure, and retries = 2 (now set by
@@ -889,6 +916,10 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
+          # are on the `build-archive` cache step above (the canonical note).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build sparq-wasm for the browser target
         run: cargo build -p sparq-wasm --target wasm32-unknown-unknown
       # [OPUS-4.8] sq-yqi1 (#162): also build WITH the opt-in `shacl` feature so the
@@ -1224,6 +1255,10 @@ jobs:
           rustup component add rustfmt clippy
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
+          # are on the `build-archive` cache step above (the canonical note).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # GATES: the whole workspace (sparq-py included) is clippy-clean under -D warnings.
       # A new warning — from new code or a Rust-stable bump that adds a lint — fails CI.
       - name: clippy (deny warnings)
@@ -1370,6 +1405,10 @@ jobs:
           rustup default 1.88
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
+          # are on the `build-archive` cache step above (the canonical note).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: cargo check on the declared MSRV
         # [SONNET-4.6] Test targets must compile at the declared floor too; they can
         # otherwise hide newer temporary-lifetime-extension behavior from this gate.
@@ -1448,6 +1487,10 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
+          # are on the `build-archive` cache step above (the canonical note).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch W3C test suites (pinned)
         run: ./scripts/fetch-conformance.sh
       - name: Run conformance suites
@@ -1578,6 +1621,10 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
+          # are on the `build-archive` cache step above (the canonical note).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch W3C SHACL test suite (pinned)
         run: ./crates/sparq-shacl/fetch-shacl-tests.sh
       - name: Run SHACL core + SHACL-SPARQL suites
@@ -1711,6 +1758,10 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
+          # are on the `build-archive` cache step above (the canonical note).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run OGC GeoSPARQL topology compliance ratchet
         # The runner asserts its own floor (OGC_RATCHET_FLOOR) + fail==0; capture the
         # scoreboard so the grep gate below re-checks the pass count.
@@ -1853,6 +1904,10 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
+          # are on the `build-archive` cache step above (the canonical note).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run Solid WAC + ACP decision-parity suites
         # The runners assert their own pinned floors; capture the output so the grep
         # gate below re-checks the scenario counts.
@@ -1959,6 +2014,10 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
+          # are on the `build-archive` cache step above (the canonical note).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch SolidLab ODRL Test Suite (pinned)
         run: bash scripts/fetch-odrl-suite.sh
       - name: Run SolidLab ODRL decision-parity suite
@@ -2061,6 +2120,10 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
+          # are on the `build-archive` cache step above (the canonical note).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run sparq-text BM25 differential oracle
         # The runner asserts its own floor (TEXT_ORACLE_FLOOR) + per-hit score
         # equality; capture the output so the grep gate below re-checks the count.
@@ -2166,6 +2229,10 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
+          # are on the `build-archive` cache step above (the canonical note).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run sparq-rsp RSP expressivity / SRBench correctness oracle
         # The runner asserts its own floor (RSP_EXPRESSIVITY_FLOOR) + every
         # per-window correctness equality; capture the output so the grep gate below
@@ -2276,6 +2343,10 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
+          # are on the `build-archive` cache step above (the canonical note).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch W3C JSON-LD 1.1 API test suite (toRdf/fromRdf/compact, pinned)
         run: ./scripts/fetch-jsonld-tests.sh
       - name: Fetch W3C JSON-LD 1.1 Framing test suite (frame, pinned)
@@ -2414,6 +2485,10 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
+          # are on the `build-archive` cache step above (the canonical note).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Clippy the gated harness surface (service-loopback feature ON)
         # The REAL gate for the feature-gated code: -D warnings over all targets with the
         # feature ON (the default `cargo clippy` never compiles this module/test).
@@ -2571,6 +2646,10 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
+          # are on the `build-archive` cache step above (the canonical note).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch inference test suites (pinned)
         run: ./scripts/fetch-inference-suites.sh
       - name: Run inference suites
@@ -2964,12 +3043,35 @@ jobs:
       # the ACTIVE (pinned) toolchain. Idempotent, and a no-op if it is already there.
       - name: Ensure llvm-tools-preview on the pinned toolchain
         run: rustup component add llvm-tools-preview
-      # Per-shard cache key: each shard builds a DIFFERENT crate subset (different
-      # instrumented objects), so keying the cache by shard keeps them from clobbering /
-      # thrashing one another's saved target dir.
+      # [OPUS-5] sq-h2gz6: ONE shared dep cache for ALL shards (was `key:
+      # coverage-shard-${{ matrix.shard }}`, i.e. one cache per matrix leg — 4 of them
+      # before sq-piapk split the engine shard out, 3 now).
+      #
+      # The per-shard key's premise was "each shard builds a DIFFERENT crate subset
+      # (different instrumented objects), so keying by shard keeps them from clobbering
+      # one another". That premise is about sparq's OWN crates — and rust-cache never
+      # stores those: it deletes workspace-member artifacts from the target dir before
+      # saving, so what a shard actually persists is the EXTERNAL dependency closure,
+      # compiled from the same Cargo.lock with the same llvm-cov instrumentation flags
+      # in every shard. Near-identical caches, one budget slot each.
+      #
+      # Collapsing them frees ~2 slots of the shared 10 GB Actions-cache budget (the
+      # sq-3sbrr / #1395 finding: budget pressure is what LRU-evicts the warm entries
+      # and makes the heavy jobs restore cold). Per-shard feature unification can still
+      # make one shard's dep set a superset of another's, so a shared entry is a partial
+      # restore for some shards rather than an exact one — cargo just recompiles the
+      # difference, which is strictly better than the cold rebuild an evicted key
+      # forces, and carries no stale-artifact risk (fingerprints + the key already
+      # embed Cargo.lock, the rustc version and the Cargo.toml hashes).
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: coverage-shard-${{ matrix.shard }}
+          shared-key: coverage-measure
+          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — full rationale on the
+          # `build-archive` cache step above. Also removes the concurrent-save race the
+          # per-shard key was working around: on main the shards still run together, but
+          # a duplicate-key save is a benign no-op (the cache API rejects the second
+          # writer), not a clobber.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-llvm-cov
         # [OPUS-4.8] sq-tool-pin: taiki-e/install-action picks the tool from its @<tool> ref;
         # SHA-pinning (our code-scanning=0 policy) drops that ref, so an explicit `with: tool:`
@@ -3127,6 +3229,11 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: coverage-engine-run-${{ matrix.part }}
+          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — full rationale on the
+          # `build-archive` cache step above. The per-part key is LEFT ALONE here: it is
+          # outside this bead's named scope (coverage-shard-N), and unlike those shards
+          # the merge job below deliberately points at part 1's key.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-llvm-cov + nextest
         # [OPUS-4.8] sq-tool-pin: explicit `with: tool:` is MANDATORY when SHA-pinning
         # install-action (the @<tool> ref is dropped by the pin). Both tools are needed:
@@ -3186,6 +3293,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: coverage-engine-run-1
+          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — full rationale on the
+          # `build-archive` cache step above.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-llvm-cov + nextest
         uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # cargo-llvm-cov
         with:
@@ -3402,6 +3512,10 @@ jobs:
       - name: Ensure llvm-tools-preview on the pinned toolchain
         run: rustup component add llvm-tools-preview
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
+          # are on the `build-archive` cache step above (the canonical note).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-llvm-cov
         # [OPUS-4.8] sq-tool-pin: explicit `with: tool:` is MANDATORY when SHA-pinning
         # install-action — the @<tool> ref is dropped by the SHA pin, so without this the
@@ -3782,6 +3896,10 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
+          # are on the `build-archive` cache step above (the canonical note).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-mutants
         uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # cargo-mutants
         with:
@@ -3927,6 +4045,10 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
+          # are on the `build-archive` cache step above (the canonical note).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-geiger
         uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
