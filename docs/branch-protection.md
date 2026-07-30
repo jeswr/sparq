@@ -80,7 +80,7 @@ From the **CI** workflow (`.github/workflows/ci.yml`):
 | `W3C SPARQL conformance (ratchet >= 1229 pass+divergence)` | The W3C SPARQL conformance ratchet (never lower). |
 | `W3C SHACL conformance (ratchet — core >= 98, sparql >= 5)` | The W3C SHACL core + SHACL-SPARQL ratchets. |
 | `Inference conformance (ratchet >= 1967 pass+divergence)` | The RDFS/OWL-RL/N3/entailment + rdf-turtle inference ratchet. |
-| `coverage ratchet + test-presence gate (per-crate)` | The per-crate line-coverage floor + the test-presence gate. |
+| `coverage ratchet + test-presence gate (per-crate)` | The per-crate line-coverage floor + the test-presence gate. **Changed-cone scoped** (sq-3dr4t): a PR re-measures only the changed crates and their transitive reverse-dep closure; a crate outside that cone is unchanged (as is everything it depends on) so its floor verdict is inherited from `main` — reported as `INHERITED`, not silently dropped. Any full-run trigger (`Cargo.lock`, root `Cargo.toml`, `.github/`, `scripts/`, an unowned path — which includes `bench/coverage-floor.json`) or any selector error measures everything, and the nightly full run on `main` is the drift backstop. |
 | `wasm build (sparq-wasm)` | The `wasm32-unknown-unknown` build, the wasm-deps guard, and `wasm-pack test --node`. |
 
 From the security / supply-chain / SAST workflows (aggregated by the gate; all LIVE except
