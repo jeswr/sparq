@@ -17,6 +17,6 @@
     "@playwright/test": "^1.61.0",
     "@types/node": "^22.10.0",
     "serve": "14.2.6",
-    "typescript": "^5.7.0"
+    "typescript": "^7.0.2"
   }
 }

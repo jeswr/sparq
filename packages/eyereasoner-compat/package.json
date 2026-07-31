@@ -63,6 +63,6 @@
     "@rdfjs/types": "^2.0.1",
     "@types/node": "^22.10.0",
     "esbuild": "^0.25.12",
-    "typescript": "^6.0.3"
+    "typescript": "^7.0.2"
   }
 }

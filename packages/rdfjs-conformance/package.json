@@ -43,6 +43,6 @@
     "@rdfjs/types": "^2.0.1",
     "@types/node": "^25.9.3",
     "n3": "^1.26.0",
-    "typescript": "^6.0.3"
+    "typescript": "^7.0.2"
   }
 }
