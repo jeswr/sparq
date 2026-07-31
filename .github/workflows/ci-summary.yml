@@ -50,6 +50,29 @@
 # queue-depth signal needs `actions: read` (read-only) on the token. The deeper fix
 # (moving the waiter OFF the build-runner slot entirely) is a design-record follow-up.
 #
+# SLOTLESS-TRANSPORT SEAM (bead sq-6vshe.19). [SONNET-4.6] The deep fix above is
+# staged, not landed. THIS FILE STILL RUNS THE RESIDENT WAITER and still produces the
+# required `gate` check-run — nothing about the transport changed. What changed is
+# inside scripts/ci_summary_gate.py: the per-evaluation decision (`evaluate_once`),
+# the state it carries between evaluations (`GateState`, JSON-serializable) and the
+# end-of-budget render (`render_budget_exhausted`) are now SEPARATE from the poll
+# loop, which is a thin driver over them. `run_gate_once` (CLI: `--oneshot`, state in
+# `GATE_STATE_PATH`) is the entry point a future event-driven transport calls once per
+# sibling completion — seconds of runner time instead of the resident slot this gate
+# holds per merge-group entry (dated 2026-07-10 profile:
+# research/ci-mergequeue-speedup-2026-07.md §2.1). Because BOTH transports execute the same
+# `evaluate_once`, the verdict semantics are identical by construction rather than by
+# re-implementation; the state carrier's COMPLETENESS is what needed proving, and
+# scripts/tests/test_ci_summary_gate.py::TestSlotlessTransportSeam proves it
+# field-by-field (same verdict, same observation count, same narration; drop any one
+# persisted field and it REDs). Wiring the required check to that transport is Phase 2
+# and is NOT authorised by this seam — it needs the required-check migration staged in
+# research/ci-gate-slotless-aggregation.md §3.1 plus the three transport-level deltas
+# listed on `run_gate_once` (poll-count budgets must become wall-clock; the once-only
+# cancelled-run re-dispatch guard is process-local; concurrent invocations need a
+# per-head-SHA lock). test_resident_transport_is_still_the_one_wired_to_the_required
+# _check REDs if this file starts passing `--oneshot` before that work lands.
+#
 # ADVISORY/INFORMATIONAL checks are NON-GATING — but ONLY WHEN DECLARED (#3773).
 # [OPUS-5] A check-run is excluded from the gating set iff its name is EXPLICITLY
 # DECLARED in `.github/advisory-registry.json`; every other check GATES, whatever it

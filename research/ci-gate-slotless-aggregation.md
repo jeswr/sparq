@@ -1,11 +1,18 @@
 # Getting the ci-summary gate off the build-runner slot — design record (sq-90cv4 follow-up)
 
-> Status: **DESIGN-ONLY.** The shipped sq-90cv4 increment is the *adaptive saturation
-> budget* in `scripts/ci_summary_gate.py` (unit-tested; see the PR that added this
-> record). This record documents the **deferred deeper fix** — removing the gate's
+> Status: **DESIGN + PHASE 1 LANDED.** The shipped sq-90cv4 increment is the *adaptive
+> saturation budget* in `scripts/ci_summary_gate.py` (unit-tested; see the PR that added
+> this record). This record documents the **deferred deeper fix** — removing the gate's
 > slot occupancy entirely — so the follow-up bead starts from a vetted design instead
 > of re-deriving one against the merge-critical required check. Authored by Claude
 > Fable 5 `[FABLE-5]`.
+>
+> **Update (sq-6vshe.19, 2026-07-31) `[SONNET-4.6]`: Phase 1 — the transport seam — is
+> implemented; Phase 2 — the transport switch — is NOT, and is still blocked on the
+> maintainer. §6 below records exactly what landed, what the bead's hard constraint
+> changed about §2, and what must be true before anything gates on it. The resident
+> waiter is still the transport in `ci-summary.yml`; no runner slot has been freed
+> yet.**
 
 ## 1. Problem
 
@@ -87,3 +94,93 @@ follow-up only replaces the *transport* (resident loop → event-driven invocati
 Tracked as a follow-up bead (created with sq-90cv4's PR; blocked on maintainer
 appetite for a required-check migration). Until then the adaptive budget is the
 operative mitigation, and the merge-queue/org plans reduce exposure.
+
+## 6. sq-6vshe.19 — Phase 1 (the transport seam) `[SONNET-4.6]`
+
+### 6.1 The bead's hard constraint changes §2's shape
+
+The bead states: **the required check stays exactly `gate`** (the branch-protection
+ruleset names that context). §2 above proposed publishing a **commit status** and
+re-pointing branch protection at it — that is a required-check *rename*, which the
+constraint forbids. Two ways to satisfy both, neither costed here:
+
+* **(i) Checks API, same name.** The evaluator `POST`s/`PATCH`es a check-run literally
+  named `gate` (`checks: write`), leaving it `in_progress` while siblings are
+  outstanding and concluding it when the verdict renders. Branch protection is
+  untouched. This ALSO gives the state carrier for free (the check-run's `external_id`
+  / `output` persists across invocations, which is the "check-run state" the bead
+  names). Cost: the gate's self-exclusion is currently anchored on
+  `details_url`'s `/runs/<SELF_RUN_ID>/` — an API-created check-run has no such URL, so
+  `is_self` needs a second, name+`external_id`-based rule, and it must be at least as
+  tight (a sibling literally named `gate` must not be able to self-exclude).
+* **(ii) Commit status, same context.** GitHub matches a required context against both
+  check-runs and commit statuses, so a status with context `gate` would satisfy
+  `{context: "gate"}` without a ruleset edit. Rejected as the primary: during any
+  overlap a check-run `gate` and a status `gate` both exist and which one branch
+  protection honours is not something this repo should be discovering empirically on
+  the check that authorises every merge.
+
+**Recommendation: (i), staged behind §3.1's add-alongside-then-cut sequence.**
+
+### 6.2 What Phase 1 actually landed
+
+`scripts/ci_summary_gate.py` — no behaviour change, one structural change:
+
+| before | after |
+|---|---|
+| `run_gate` = one ~340-line poll loop; all cross-poll state in locals | `evaluate_once(cfg, state, …) -> PollOutcome` (one evaluation), `GateState` (the former locals, JSON-serializable), `render_budget_exhausted(cfg, state, …)` (the end-of-budget render) |
+| — | `run_gate` is a thin driver over those three |
+| — | `run_gate_once` + CLI `--oneshot` + `GATE_STATE_PATH`: one evaluation, state persisted, exit `0`/`1`/`75` (`STILL_SETTLING_EXIT`) |
+
+The INVARIANT the bead demands — *gate verdict semantics bit-identical for every
+scenario in the existing unit tests* — is met **structurally**: both transports call
+the same `evaluate_once`, so there is no second implementation to diverge. All 183
+pre-existing tests pass unchanged. What genuinely needed proving is that the state
+CARRIER is complete — that no decision input was left in a process-local — and
+`TestSlotlessTransportSeam` proves it by driving `run_gate_once` through a JSON file
+and asserting three-way parity with the resident loop (**same verdict, same number of
+observations, same narration**) across the load-bearing scenarios. Verdict-only parity
+was measurably too weak: a carrier that forgets `stable` still reaches the same exit
+code via the #997 graceful-timeout path, having burned the whole budget. Each of the
+eight persisted fields was mutation-checked individually — deleting any one from
+`PERSISTED` REDs the suite.
+
+`--oneshot` is wired to **nothing**. `ci-summary.yml` still runs the resident loop, and
+`test_resident_transport_is_still_the_one_wired_to_the_required_check` REDs if that
+changes.
+
+### 6.3 What Phase 2 must resolve before it can gate
+
+Beyond §3's six risks (all still open), the seam surfaced three that are properties of
+the *transport*, not of the verdict, and so could not be settled in the script:
+
+1. **The budgets are poll counts, not wall-clock.** `min_polls` (3), `base_polls`
+   (110) and `max_total_polls` (155) were calibrated against a fixed 20 s cadence to
+   mean ~37 m / ~67 m. Under event-driven invocation the cadence is whatever the
+   sibling-completion stream does, so those numbers stop meaning any duration at all —
+   a quiet PR could exhaust `min_polls` in three seconds, and a busy one could see 155
+   completions well inside the intended window. **They must become wall-clock deadlines
+   carried in the state.** This is the single largest correctness item in Phase 2.
+2. **The once-only re-dispatch guard is process-local.** `WorkflowRunResolver` keeps an
+   in-process attempted-set as the API-lag belt on #3505's bounded re-run of a newest
+   *cancelled* workflow. It does not survive a process exit; only the durable
+   server-side `run_attempt` marker does. A non-resident transport can therefore
+   re-`POST` during API lag. Either carry the attempted-set in `GateState` or make the
+   `run_attempt` check strictly sufficient.
+3. **Concurrent invocations.** Sibling completions arrive in bursts, so two evaluations
+   can overlap and read-modify-write one state. Needs a per-head-SHA concurrency group
+   (cheap, `cancel-in-progress: false`) or a compare-and-set carrier — and note this
+   interacts with (1): serialising evaluations behind a concurrency group re-introduces
+   queueing latency between them.
+
+Also unresolved from §3.3: a `pull_request` seed evaluation is still required for the
+stable-empty-set pass (a docs-only PR whose sibling set is empty produces no completion
+event to trigger on), and the fork path cannot write checks/statuses.
+
+### 6.4 Honest accounting of the saving
+
+**Phase 1 frees zero runner slots.** The estimate the bead carries (3–6 slots during a
+drain) is entirely Phase 2's, and it is a projection from the 2026-07-10 profile
+(`research/ci-mergequeue-speedup-2026-07.md` §2.1), not a measurement — and that
+record's own §6 re-profile caveat has already fired once for the lane set. Phase 2
+should re-measure the entry wall before claiming any number.

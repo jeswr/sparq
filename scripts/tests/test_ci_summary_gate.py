@@ -2977,5 +2977,242 @@ class TestLatestRunRelativePresence(unittest.TestCase):
         self.assertEqual(g.fm_report_status([FM_GROUP, FM_REPORT_OK, GREEN]), "ok")
 
 
+class TestSlotlessTransportSeam(unittest.TestCase):
+    """[SONNET-4.6] sq-6vshe.19 — the gate's evaluation is now separable from its
+    TRANSPORT (`evaluate_once` + `GateState` + `render_budget_exhausted`, driven by
+    the resident `run_gate` today and by `run_gate_once` in the future
+    event-driven/slotless transport).
+
+    THE INVARIANT THIS PINS: driving `run_gate_once` once per sibling-completion
+    event, carrying the state through a JSON file between invocations, yields the
+    verdict the resident poll loop yields — for EVERY scenario below, which are the
+    load-bearing shapes the rest of this file already gates (clean green, real
+    failure, sq-ipkku terminal injection, #997 graceful timeout, fail-fast,
+    saturation extension, genuine hang, absolute-budget expiry, draft-tier hold).
+    Bit-identity is structural — both transports execute the SAME `evaluate_once` —
+    so this suite's job is to prove the STATE CARRIER is complete: that nothing the
+    decision depends on was left behind in a process-local."""
+
+    # --- scenarios: (label, polls, depth, cfg overrides, tier_ctx) -----------------
+    def _scenarios(self):
+        flip = [[GREEN, PENDING], [GREEN, R("coverage")]] * 4
+        return [
+            ("clean green", [[GREEN, GREEN2]], 0, {}, None),
+            ("real failure", [[GREEN, RED]], 0, {}, None),
+            ("empty set", [[]], 0, {}, None),
+            ("terminal injection (sq-ipkku)", [
+                [GREEN, PENDING],
+                [GREEN, R("coverage")],
+                [GREEN, R("coverage"), R("late")],
+            ], 0, {}, None),
+            ("graceful timeout, green (#997)", flip, 20, {}, None),
+            ("graceful timeout, red (#997)", [[GREEN, PENDING], [GREEN, R("coverage")]] * 3
+                + [[GREEN, PENDING], [GREEN, R("coverage", conclusion="failure")]],
+                20, {}, None),
+            ("fail-fast on a concluded red", [[RED, PENDING]], 0, {}, None),
+            ("saturation extension then green", [[GREEN, PENDING]] * 6 + [[GREEN, GREEN2]],
+                20, {}, None),
+            ("genuine hang (idle queue, no progress)", [[GREEN, PENDING]], 0, {}, None),
+            ("absolute budget expiry under saturation", [[GREEN, PENDING]], 20, {}, None),
+            ("advisory failure excluded", [[R("vale (prose, advisory)", conclusion="failure"),
+                                            GREEN]], 0, {}, None),
+            ("incomplete conclusion gates", [[R("weird", conclusion=None)]], 0, {}, None),
+            # `completed_hist`: the PROGRESS signal grants the extension on an IDLE
+            # queue (depth=0), so forgetting the history collapses to a genuine-hang RED.
+            ("progress-granted extension, idle queue", [
+                [PENDING, R("a", status="queued", conclusion=None)],
+                [PENDING, R("a")],
+                [PENDING, R("a"), R("b", status="queued", conclusion=None)],
+                [PENDING, R("a"), R("b")],
+                [PENDING, R("a"), R("b"), R("c", status="queued", conclusion=None)],
+                [PENDING, R("a"), R("b"), R("c")],
+                [GREEN, R("a"), R("b"), R("c")],
+            ], 0, {}, None),
+            # `consec_fetch_failures`: only the CARRIED count reaches the cap and REDs;
+            # a forgetful transport would retry until the budget ran out instead.
+            ("repeated fetch failures RED at the cap",
+                [g.FetchError("api down")], 0, {}, None),
+            # `prev_names` / `extension_started` are log-only, and are covered by the
+            # stdout parity assertion below rather than by the verdict.
+            ("name-set churn under saturation", [
+                [GREEN, PENDING], [GREEN, PENDING, R("late-a")],
+                [GREEN, PENDING], [GREEN, PENDING, R("late-a"), R("late-b")],
+                [GREEN, R("late-a"), R("late-b")],
+            ], 20, {}, None),
+        ]
+
+    def _drive_resident(self, cfg, polls, depth=0, tier_ctx=None):
+        """`run()`, but also reporting how many observations the loop consumed —
+        the latency half of parity."""
+        out = io.StringIO()
+        fetch = scripted(polls)
+        with redirect_stdout(out):
+            code = g.run_gate(cfg, fetch, lambda: depth, sleep_fn=lambda s: None,
+                              tier_ctx=tier_ctx)
+        return code, out.getvalue(), fetch.state["calls"]
+
+    def _drive_oneshot(self, cfg, polls, depth=0, tier_ctx=None, carry=True,
+                       max_invocations=40):
+        """Drive `run_gate_once` like an event-driven transport would: one
+        evaluation per invocation, state serialized to disk and reloaded in
+        between. `carry=False` models a transport that FORGETS the state — the
+        mutation control below."""
+        import tempfile
+
+        out = io.StringIO()
+        fetch = scripted(polls)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "gate-state.json")
+            code = g.STILL_SETTLING_EXIT
+            invocations = 0
+            with redirect_stdout(out):
+                while code == g.STILL_SETTLING_EXIT and invocations < max_invocations:
+                    invocations += 1
+                    state = g.load_state_file(path) if carry else g.GateState()
+                    code = g.run_gate_once(cfg, state, fetch, lambda: depth,
+                                           tier_ctx=tier_ctx)
+                    g.save_state_file(path, state)
+        return code, out.getvalue(), fetch.state["calls"]
+
+    def test_oneshot_sequence_matches_resident_loop(self):
+        """Parity is BOTH halves: the same verdict AND the same number of
+        observations. Verdict-only parity is too weak — a carrier that forgets the
+        settle counter still converges on the #997 graceful-timeout path with the
+        same exit code, having burned the entire budget to get there. Comparing
+        observation counts is what makes a dropped field visible."""
+        for label, polls, depth, over, ctx in self._scenarios():
+            with self.subTest(scenario=label):
+                resident, r_out, r_calls = self._drive_resident(
+                    tiny_cfg(**over), polls, depth=depth, tier_ctx=ctx)
+                slotless, s_out, s_calls = self._drive_oneshot(
+                    tiny_cfg(**over), polls, depth=depth, tier_ctx=ctx)
+                self.assertEqual(
+                    slotless, resident,
+                    f"{label}: slotless transport returned {slotless}, resident loop "
+                    f"returned {resident} — the state carrier is incomplete.")
+                self.assertEqual(
+                    s_calls, r_calls,
+                    f"{label}: slotless transport needed {s_calls} observation(s) vs "
+                    f"the resident loop's {r_calls} — a decision input is not being "
+                    f"carried across invocations.")
+                # Third half: the per-evaluation LOG must match too. `prev_names` and
+                # `extension_started` never change a verdict — they change what the
+                # gate REPORTS — so nothing else in this suite would notice them being
+                # dropped from the carrier.
+                self.assertEqual(
+                    s_out, r_out,
+                    f"{label}: the two transports narrated the same evaluations "
+                    f"differently — a diagnostic input is not being carried.")
+
+    def test_oneshot_sequence_matches_resident_loop_on_the_draft_tier_hold(self):
+        """The draft-tier belts (`awaiting_full`, the unsatisfiable-hold confirmation
+        counter) are the state most at risk of being left process-local, so they get
+        their own parity case with a live tier context."""
+        ctx = g.TierContext(run_tier="full", event_name="pull_request",
+                            fetch_pr_draft=lambda: True)
+        polls = [[GREEN, R("select (change-based test selection), draft-tier")]]
+        resident, _, r_calls = self._drive_resident(
+            tiny_cfg(unsat_confirm_polls=2), polls, tier_ctx=ctx)
+        slotless, out, s_calls = self._drive_oneshot(
+            tiny_cfg(unsat_confirm_polls=2), polls, tier_ctx=ctx)
+        self.assertEqual(slotless, resident)
+        self.assertEqual(slotless, 1)
+        self.assertIn("UNSATISFIABLE draft-tier hold", out)
+        # `unsat_polls` is the confirmation counter: uncarried, it never reaches
+        # `unsat_confirm_polls`, so the fast-fail never fires and the run burns the
+        # whole budget. Observation-count parity is what catches that.
+        self.assertEqual(s_calls, r_calls)
+
+    def test_forgetting_the_state_cannot_reach_a_verdict(self):
+        """MUTATION CONTROL — the parity above is not vacuous. A transport that does
+        NOT carry `GateState` never advances `attempt`, so it can never clear the
+        startup-race floor or the settle window: it stays STILL_SETTLING forever
+        instead of passing. If `evaluate_once` ever stops depending on the carried
+        state, this test goes green-when-it-should-be-red and must be re-derived."""
+        code, _, invocations = self._drive_oneshot(
+            tiny_cfg(), [[GREEN, GREEN2]], carry=False, max_invocations=12)
+        self.assertEqual(code, g.STILL_SETTLING_EXIT)
+        self.assertEqual(invocations, 12)
+        # ...whereas the same scenario WITH the carrier converges to the real verdict.
+        carried, _, _ = self._drive_oneshot(tiny_cfg(), [[GREEN, GREEN2]])
+        self.assertEqual(carried, 0)
+
+    def test_still_settling_exit_is_outside_the_verdict_space(self):
+        """A transport must never be able to read "no verdict yet" as pass or fail."""
+        self.assertNotIn(g.STILL_SETTLING_EXIT, (0, 1, 2))
+
+    def test_state_round_trips_through_json(self):
+        state = g.GateState(
+            attempt=7, prev_names=["a", "b"], stable=2, pending=3,
+            completed_hist=[1, 2, 3], consec_fetch_failures=1,
+            extension_started=True, ff_suspect=[["clippy", 42]], unsat_polls=2,
+            runs=[GREEN],
+        )
+        restored = g.GateState.from_dict(json.loads(json.dumps(state.to_dict())))
+        for field_name in g.GateState.PERSISTED:
+            self.assertEqual(getattr(restored, field_name), getattr(state, field_name),
+                             f"{field_name} did not survive the JSON round trip")
+        # The last OBSERVATION is deliberately not carried: a stale sibling set must
+        # never be rendered over — the transport re-fetches.
+        self.assertNotIn("runs", state.to_dict())
+        self.assertEqual(restored.runs, [])
+
+    def test_state_reload_degrades_safely(self):
+        """A missing / partial / corrupt carrier restarts the window (costs extra
+        seconds-long evaluations); it never shortens it, because only shortening can
+        turn a still-settling set into a premature verdict."""
+        self.assertEqual(g.GateState.from_dict(None).attempt, 0)
+        self.assertEqual(g.GateState.from_dict("not a mapping").attempt, 0)
+        partial = g.GateState.from_dict({"attempt": 4, "unknown_future_field": 1})
+        self.assertEqual(partial.attempt, 4)
+        self.assertEqual(partial.stable, 0)
+        self.assertEqual(partial.completed_hist, [])
+
+    def test_load_state_file_missing_and_corrupt(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = str(Path(tmp) / "nope.json")
+            self.assertEqual(g.load_state_file(missing).attempt, 0)
+            corrupt = Path(tmp) / "corrupt.json"
+            corrupt.write_text("{not json", encoding="utf-8")
+            out = io.StringIO()
+            with redirect_stdout(out):
+                self.assertEqual(g.load_state_file(str(corrupt)).attempt, 0)
+            self.assertIn("starting fresh", out.getvalue())
+
+    def test_exhausted_state_refuses_to_re_render(self):
+        """`runs` is not persisted, so a transport that re-invokes AFTER the budget
+        was spent has no fresh observation. Rendering over the empty carried set
+        would read as the stable-empty-set PASS — the one way this seam could
+        manufacture a false green. It fails closed instead."""
+        cfg = tiny_cfg()
+        state = g.GateState(attempt=cfg.max_total_polls)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = g.run_gate_once(cfg, state, lambda: [], lambda: 0)
+        self.assertEqual(code, 1)
+        self.assertIn("Refusing to re-render", out.getvalue())
+
+    def test_resident_transport_is_still_the_one_wired_to_the_required_check(self):
+        """HONESTY GUARD: this increment adds the seam, it does NOT switch the
+        transport. `ci-summary.yml` — the workflow that produces the required `gate`
+        context — must still invoke the resident loop (no `--oneshot`). Flipping it
+        is Phase 2 and carries the required-check migration + the budget/concurrency
+        deltas documented on `run_gate_once`; this test REDs if that lands
+        accidentally."""
+        wf = (REPO_ROOT / ".github" / "workflows" / "ci-summary.yml").read_text()
+        # Scoped to the EXECUTED command, not the whole file: the file's doctrine
+        # header discusses `--oneshot` at length, and a whole-file `assertNotIn`
+        # would be a prose tripwire rather than a behavioural one.
+        invocations = [ln.strip() for ln in wf.splitlines()
+                       if "python3 scripts/ci_summary_gate.py" in ln
+                       and not ln.lstrip().startswith("#")]
+        self.assertEqual(
+            invocations, ["run: python3 scripts/ci_summary_gate.py"],
+            "ci-summary.yml must still invoke the RESIDENT gate loop (no --oneshot): "
+            "switching the required check to the slotless transport is Phase 2.")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

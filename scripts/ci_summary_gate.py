@@ -1741,293 +1741,380 @@ def _name_list(runs: list[dict], limit: int = 6) -> str:
     return shown + (f", +{len(names) - limit} more" if len(names) > limit else "")
 
 
-def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
-             tier_ctx: TierContext | None = None) -> int:
-    """The poll loop. `fetch_runs()` -> list of {name,status,conclusion,details_url,
-    started_at,id} dicts (raises FetchError on API failure); `fetch_queue_depth()`
-    -> int queued workflow-run count for the repo, or None when unknown (API
-    failure — the gate then falls back to the progress signal alone). tier_ctx
-    carries the draft-tier integrity context (None => pre-draft-tier semantics).
-    Returns the exit code."""
+
+# ---------------------- SLOTLESS-TRANSPORT SEAM (sq-6vshe.19) ----------------------
+# [SONNET-4.6] The gate's per-evaluation logic is EXTRACTED from its transport.
+# `evaluate_once` is one poll's decision; `GateState` is everything that poll
+# carries forward; `render_budget_exhausted` is the end-of-budget render. The
+# resident poll loop (`run_gate`) is now a thin driver over those three, so the
+# verdict semantics of the resident waiter and of any future NON-RESIDENT transport
+# are identical BY CONSTRUCTION rather than by re-implementation-plus-parity-testing.
+#
+# WHY: `ci-summary / gate` occupies a hosted-runner slot for the whole sibling
+# wall-clock while doing no compute — a DATED (2026-07-10) profile of that per-entry
+# cost is research/ci-mergequeue-speedup-2026-07.md §2.1, whose own re-profile caveat
+# has already fired once, so re-measure before quoting it. The deferred
+# deep fix (research/ci-gate-slotless-aggregation.md) is to drive the SAME evaluation
+# from sibling-completion events, seconds at a time. The blocker that design named was
+# that the anti-thrash state (settle window sq-ipkku, saturation extension sq-90cv4,
+# fail-fast grace, unsatisfiable-hold confirmation) lived in poll-loop LOCALS and so
+# could not survive a process exit. `GateState` is that state, made explicit and
+# JSON-serializable — the "check-run state or cache" carrier the bead requires.
+#
+# WHAT IS **NOT** DONE HERE, deliberately: no transport is switched. `ci-summary.yml`
+# still runs the resident loop and still produces the required `gate` check-run. The
+# event-driven transport, and the semantics deltas it must resolve BEFORE it can gate
+# (see `run_gate_once`), are Phase 2.
+
+
+@dataclass
+class PollOutcome:
+    """One evaluation's result.
+
+    `exit_code is None` means STILL SETTLING — the transport must evaluate again.
+    `sleep` is the resident driver's cadence hint. `guard_sleep` reproduces the
+    pre-extraction loop exactly: every sleep was suppressed on the final attempt
+    EXCEPT the fetch-failure path's, which always slept."""
+
+    exit_code: int | None = None
+    sleep: int = 0
+    guard_sleep: bool = True
+
+
+@dataclass
+class GateState:
+    """Everything one evaluation carries to the next — the poll loop's former
+    locals, named and serializable.
+
+    `runs`/`pending` are the LAST OBSERVATION, kept only so
+    `render_budget_exhausted` can render over the set the final evaluation actually
+    saw. Both are re-derived from a fresh fetch before every use, so both are
+    deliberately absent from `PERSISTED` — persisting an observation is exactly how
+    a STALE sibling set would end up rendered as a verdict.
+
+    Everything in `PERSISTED` is a DECISION input: drop any one and a slotless
+    transport either reaches a different verdict or reaches the same verdict after a
+    different number of observations. That is pinned field-by-field by
+    scripts/tests/test_ci_summary_gate.py::TestSlotlessTransportSeam."""
+
+    attempt: int = 0
     prev_names: list[str] | None = None
-    stable = 0
-    runs: list[dict] = []
-    pending = 0
-    completed_hist: list[int] = []
-    consec_fetch_failures = 0
-    extension_started = False
-    # Fail-fast grace state: the (name, id) key set of concluded gating failures
-    # observed on the PREVIOUS poll — the red fires only when a fresh re-poll
-    # re-observes the identical set (header §FAIL-FAST).
-    ff_suspect: tuple | None = None
-    # [OPUS-5] #3781: consecutive polls the UNSATISFIABLE-HOLD state has persisted.
-    unsat_polls = 0
+    stable: int = 0
+    pending: int = 0
+    completed_hist: list[int] = field(default_factory=list)
+    consec_fetch_failures: int = 0
+    extension_started: bool = False
+    ff_suspect: list | None = None
+    unsat_polls: int = 0
+    runs: list[dict] = field(default_factory=list)
 
-    attempt = 0
-    while attempt < cfg.max_total_polls:
-        attempt += 1
-        try:
-            raw = fetch_runs()
-        except SupersededLegsError as exc:
-            _emit(
-                f"### ci-summary: FAILED — {exc}. The gate did not treat the "
-                "cancelled newest run as a test failure and did not dispatch it "
-                "more than once; a fresh workflow run or new head is required.",
-                cfg.summary_path,
-            )
-            print(f"::error::ci-summary failed — {exc}")
-            return 1
-        except FetchError as exc:
-            consec_fetch_failures += 1
-            if consec_fetch_failures >= cfg.max_consec_fetch_failures:
-                print(
-                    f"::error::ci-summary: {consec_fetch_failures} consecutive check-run "
-                    f"fetch failures — cannot observe the sibling set. Last error: {exc}"
-                )
-                return 1
+    #: the fields a non-resident transport MUST carry across invocations.
+    PERSISTED = (
+        "attempt", "prev_names", "stable", "completed_hist",
+        "consec_fetch_failures", "extension_started", "ff_suspect", "unsat_polls",
+    )
+
+    def to_dict(self) -> dict:
+        return {k: getattr(self, k) for k in self.PERSISTED}
+
+    @classmethod
+    def from_dict(cls, payload: object) -> "GateState":
+        """Rebuild from a persisted mapping. Unknown keys are ignored and missing
+        keys fall back to the field default, so a state file written by an older
+        revision degrades to "start this field fresh" rather than crashing the one
+        check every merge depends on."""
+        state = cls()
+        if not isinstance(payload, dict):
+            return state
+        for key in cls.PERSISTED:
+            if key in payload:
+                setattr(state, key, payload[key])
+        return state
+
+
+#: `run_gate_once` exit code meaning "no verdict yet — evaluate again later".
+#: Chosen outside the gate's own {0, 1} verdict space so a transport can never
+#: mistake a still-settling evaluation for a pass or a fail.
+STILL_SETTLING_EXIT = 75
+
+
+def evaluate_once(cfg: Config, state: GateState, fetch_runs, fetch_queue_depth,
+                  tier_ctx: TierContext | None = None) -> PollOutcome:
+    """ONE evaluation of the sibling set — the former body of `run_gate`'s poll
+    loop, verbatim, with its cross-poll locals moved onto `state`.
+
+    Performs no sleeping and owns no budget: it reports what it decided and what
+    cadence it would like next, and the caller supplies the transport."""
+    state.attempt += 1
+    attempt = state.attempt
+    try:
+        raw = fetch_runs()
+    except SupersededLegsError as exc:
+        _emit(
+            f"### ci-summary: FAILED — {exc}. The gate did not treat the "
+            "cancelled newest run as a test failure and did not dispatch it "
+            "more than once; a fresh workflow run or new head is required.",
+            cfg.summary_path,
+        )
+        print(f"::error::ci-summary failed — {exc}")
+        return PollOutcome(exit_code=1)
+    except FetchError as exc:
+        state.consec_fetch_failures += 1
+        if state.consec_fetch_failures >= cfg.max_consec_fetch_failures:
             print(
-                f"attempt {attempt}: check-run fetch failed ({exc}) — skipping this poll "
-                f"({consec_fetch_failures}/{cfg.max_consec_fetch_failures} consecutive)."
+                f"::error::ci-summary: {state.consec_fetch_failures} consecutive check-run "
+                f"fetch failures — cannot observe the sibling set. Last error: {exc}"
             )
-            sleep_fn(cfg.sat_interval if extension_started else cfg.interval)
-            continue
-        consec_fetch_failures = 0
-
-        # [FABLE-5] Draft-tier CI: forgive cancelled/stale check-runs a later
-        # same-normalized-name run supersedes — over the RAW list (self included)
-        # so this run's own fresh `gate` check-run supersedes a cancelled
-        # predecessor left on the SHA by the ready_for_review concurrency cancel.
-        # Then drop (a) this run's own check-run and (b) any `gate, draft-tier`
-        # check-run — a draft-tier gate VERDICT is a tier artifact of a
-        # superseded evaluation, never a leg (a completed draft-tier gate
-        # FAILURE on the SHA must not permanently RED the full-tier gate, and
-        # its SUCCESS never was the required context).
-        kept, forgiven = forgive_superseded(raw)
-        runs = [
-            r for r in kept
-            if not is_self(r, cfg.self_run_id)
-            and not is_draft_gate_artifact(r.get("name", ""))
-        ]
-        total = len(runs)
-        pending = sum(1 for r in runs if r.get("status") != "completed")
-        # [FABLE-5] Draft-tier CI: on a FULL-tier pull_request run, a draft-tier-
-        # assembled selection with no full-tier successor means the ready_for_review
-        # re-run has not registered yet — treat the set as STILL-SETTLING (hold the
-        # settle window open) instead of concluding over draft-tier legs. Budget
-        # exhaustion in this state REDs via render_verdict's stale-draft-tier belt.
-        awaiting_full = bool(
-            tier_ctx
-            and tier_ctx.run_tier == "full"
-            and tier_ctx.event_name == "pull_request"
-            and draft_selects_unsuperseded(runs)
-        )
-        # [FABLE-5] PR #3511 finding 1 (HIGH): STRUCTURAL AWAIT of the trusted
-        # feature-matrix reporter. When `opt-in group (…)` legs ran for this head
-        # but the `feature-matrix report` verdict has not yet landed as a
-        # terminal-SUCCESS check-run (absent — reporter's workflow_run not in yet
-        # or crashed pre-post — or present-but-not-terminal), treat the set as
-        # STILL-SETTLING and hold the settle window open, exactly like a
-        # draft-tier awaiting_full. A "failed" reporter does NOT hold (it is
-        # terminal and must conclude RED). Budget exhaustion while still awaiting
-        # FAILS CLOSED via render_verdict's reporter belt — never conclude-by-timing.
-        awaiting_report = fm_report_status(runs) == "pending"
-        completed_hist.append(total - pending)
-        # Settle is a POST-TERMINAL window re-armed ONLY by pending work (sq-ipkku):
-        # already-terminal injections must not starve convergence.
-        stable = 0 if (pending or awaiting_full or awaiting_report) else stable + 1
-        names = sorted({r.get("name", "") for r in runs})
-        changed = " (name set changed)" if prev_names is not None and names != prev_names else ""
-        prev_names = names
-        extra = f", {len(forgiven)} superseded-cancelled forgiven" if forgiven else ""
-        extra += ", awaiting the full-tier re-run (draft-tier selection present)" if awaiting_full else ""
-        extra += ", awaiting the feature-matrix reporter verdict" if awaiting_report else ""
+            return PollOutcome(exit_code=1)
         print(
-            f"attempt {attempt}: {total} check-run(s), {pending} running, "
-            f"all-terminal stable for {stable}/{cfg.settle_polls} poll(s){changed}{extra}",
-            flush=True,
+            f"attempt {attempt}: check-run fetch failed ({exc}) — skipping this poll "
+            f"({state.consec_fetch_failures}/{cfg.max_consec_fetch_failures} consecutive)."
         )
+        return PollOutcome(
+            sleep=cfg.sat_interval if state.extension_started else cfg.interval,
+            guard_sleep=False,
+        )
+    state.consec_fetch_failures = 0
 
-        # [FABLE-5] FAIL-FAST (header §FAIL-FAST): a concluded gating failure in
-        # the (already forgiveness-filtered) sibling set decides the verdict now
-        # — a genuine `failure` in the authoritative newest run is never forgiven,
-        # so every later render REDs
-        # anyway; waiting out the remaining legs only delays the red and the
-        # fast-fix trigger behind it. Applies only while siblings are still
-        # outstanding (pending / awaiting_full): an all-terminal set renders via
-        # the normal settle path below, byte-identical to before. The first
-        # observation arms a grace re-poll (immediate, no sleep — dodges an API
-        # read race); the red fires when a fresh fetch re-observes the same set.
-        # awaiting_report is included so a real failing leg still fails FAST while
-        # the gate is (correctly) holding for the reporter verdict.
-        if pending or awaiting_full or awaiting_report:
-            ff = failfast_failures(runs)
-            if ff:
-                key = tuple(sorted((r.get("name", ""), r.get("id") or 0) for r in ff))
-                if key == ff_suspect:
+    # [FABLE-5] Draft-tier CI: forgive cancelled/stale check-runs a later
+    # same-normalized-name run supersedes — over the RAW list (self included)
+    # so this run's own fresh `gate` check-run supersedes a cancelled
+    # predecessor left on the SHA by the ready_for_review concurrency cancel.
+    # Then drop (a) this run's own check-run and (b) any `gate, draft-tier`
+    # check-run — a draft-tier gate VERDICT is a tier artifact of a
+    # superseded evaluation, never a leg (a completed draft-tier gate
+    # FAILURE on the SHA must not permanently RED the full-tier gate, and
+    # its SUCCESS never was the required context).
+    kept, forgiven = forgive_superseded(raw)
+    runs = [
+        r for r in kept
+        if not is_self(r, cfg.self_run_id)
+        and not is_draft_gate_artifact(r.get("name", ""))
+    ]
+    total = len(runs)
+    pending = sum(1 for r in runs if r.get("status") != "completed")
+    state.runs, state.pending = runs, pending
+    # [FABLE-5] Draft-tier CI: on a FULL-tier pull_request run, a draft-tier-
+    # assembled selection with no full-tier successor means the ready_for_review
+    # re-run has not registered yet — treat the set as STILL-SETTLING (hold the
+    # settle window open) instead of concluding over draft-tier legs. Budget
+    # exhaustion in this state REDs via render_verdict's stale-draft-tier belt.
+    awaiting_full = bool(
+        tier_ctx
+        and tier_ctx.run_tier == "full"
+        and tier_ctx.event_name == "pull_request"
+        and draft_selects_unsuperseded(runs)
+    )
+    # [FABLE-5] PR #3511 finding 1 (HIGH): STRUCTURAL AWAIT of the trusted
+    # feature-matrix reporter. When `opt-in group (…)` legs ran for this head
+    # but the `feature-matrix report` verdict has not yet landed as a
+    # terminal-SUCCESS check-run (absent — reporter's workflow_run not in yet
+    # or crashed pre-post — or present-but-not-terminal), treat the set as
+    # STILL-SETTLING and hold the settle window open, exactly like a
+    # draft-tier awaiting_full. A "failed" reporter does NOT hold (it is
+    # terminal and must conclude RED). Budget exhaustion while still awaiting
+    # FAILS CLOSED via render_verdict's reporter belt — never conclude-by-timing.
+    awaiting_report = fm_report_status(runs) == "pending"
+    state.completed_hist.append(total - pending)
+    # Settle is a POST-TERMINAL window re-armed ONLY by pending work (sq-ipkku):
+    # already-terminal injections must not starve convergence.
+    state.stable = 0 if (pending or awaiting_full or awaiting_report) else state.stable + 1
+    names = sorted({r.get("name", "") for r in runs})
+    changed = " (name set changed)" if state.prev_names is not None and names != state.prev_names else ""
+    state.prev_names = names
+    extra = f", {len(forgiven)} superseded-cancelled forgiven" if forgiven else ""
+    extra += ", awaiting the full-tier re-run (draft-tier selection present)" if awaiting_full else ""
+    extra += ", awaiting the feature-matrix reporter verdict" if awaiting_report else ""
+    print(
+        f"attempt {attempt}: {total} check-run(s), {pending} running, "
+        f"all-terminal stable for {state.stable}/{cfg.settle_polls} poll(s){changed}{extra}",
+        flush=True,
+    )
+
+    # [FABLE-5] FAIL-FAST (header §FAIL-FAST): a concluded gating failure in
+    # the (already forgiveness-filtered) sibling set decides the verdict now
+    # — a genuine `failure` in the authoritative newest run is never forgiven,
+    # so every later render REDs
+    # anyway; waiting out the remaining legs only delays the red and the
+    # fast-fix trigger behind it. Applies only while siblings are still
+    # outstanding (pending / awaiting_full): an all-terminal set renders via
+    # the normal settle path below, byte-identical to before. The first
+    # observation arms a grace re-poll (immediate, no sleep — dodges an API
+    # read race); the red fires when a fresh fetch re-observes the same set.
+    # awaiting_report is included so a real failing leg still fails FAST while
+    # the gate is (correctly) holding for the reporter verdict.
+    if pending or awaiting_full or awaiting_report:
+        ff = failfast_failures(runs)
+        if ff:
+            key = sorted([r.get("name", ""), r.get("id") or 0] for r in ff)
+            if key == state.ff_suspect:
+                _emit(
+                    f"### ci-summary: FAILED (fail-fast) — {len(ff)} gating "
+                    f"check(s) concluded failure while {pending} sibling(s) "
+                    f"were still running; no later state can turn this verdict "
+                    f"green (a newest-run failure is never forgiven), so the gate "
+                    f"REDs now instead of waiting out the remaining legs.",
+                    cfg.summary_path,
+                )
+                for r in ff:
+                    _emit(f"- ✗ {r.get('name')}: failure", cfg.summary_path)
+                print(
+                    "::error::ci-summary failed fast — a gating check concluded "
+                    "failure; the remaining siblings were not waited on."
+                )
+                return PollOutcome(exit_code=1)
+            state.ff_suspect = key
+            print(
+                f"  fail-fast: {len(ff)} concluded gating failure(s) observed — "
+                f"immediate grace re-poll to confirm before concluding."
+            )
+            # no sleep: the grace re-poll is deliberately immediate
+            return PollOutcome(sleep=0)
+        state.ff_suspect = None
+
+    # [OPUS-5] #3781 — UNSATISFIABLE HOLD: detect it, do not wait it out.
+    # The draft-tier hold (awaiting_full) is a WAIT for the ready_for_review
+    # full-tier re-runs to register. That wait is only meaningful while such a
+    # re-run can still happen. When ALL THREE hold —
+    #   (1) every awaited sibling has CONCLUDED (pending == 0: nothing is coming),
+    #   (2) a draft-marked select instance still lacks a full-tier successor, and
+    #   (3) the PR is CURRENTLY A DRAFT (live API read),
+    # — the hold is unsatisfiable ON ARRIVAL: a full-tier select is produced ONLY
+    # by a non-draft pull_request payload, so while the PR stays a draft no
+    # successor can ever register on this SHA. Measured on #3472/#3468/#3681: the
+    # gate spent all 155 polls (~67 min of wall-clock budget) in exactly this state
+    # and then emitted the refusal it could have emitted at poll 3, on PRs with
+    # ZERO failing legs. This is a `return 1` — the SAME refusal render_verdict's
+    # stale-draft-tier belt reaches at budget exhaustion, arrived at sooner and
+    # named honestly; it never turns a would-be RED green.
+    # NOT fired while anything is still settling (pending / awaiting_report), before
+    # the startup-race floor, or on a state that has not persisted for
+    # unsat_confirm_polls — that window is the discrimination against check-run
+    # registration lag. An UNREADABLE draft state does NOT fire either: the gate
+    # keeps polling exactly as before (a false RED here would be a new failure mode,
+    # while the pre-#3781 behaviour of burning the budget is merely slow).
+    if (
+        awaiting_full
+        and pending == 0
+        and not awaiting_report
+        and attempt >= cfg.min_polls
+    ):
+        state.unsat_polls += 1
+        if state.unsat_polls >= cfg.unsat_confirm_polls:
+            still_draft, draft_err = _bounded_draft_read(tier_ctx)
+            if still_draft is True:
+                stale = draft_selects_unsuperseded(runs)
+                _emit(
+                    "### ci-summary: FAILED (fail-fast) — UNSATISFIABLE draft-tier "
+                    "hold, not a slow run. Every sibling check-run on this head SHA "
+                    f"has CONCLUDED, {len(stale)} draft-marked select instance(s) "
+                    "still have no full-tier successor, and the PR is CURRENTLY A "
+                    "DRAFT — so no full-tier select can ever register on this SHA "
+                    "(only a non-draft pull_request payload produces one). The hold "
+                    "is unsatisfiable on arrival, so the gate REDs NOW with the "
+                    f"diagnosis instead of burning the remaining "
+                    f"{cfg.max_total_polls - attempt} poll(s) on a refusal that is "
+                    "already decided (#3781). REMEDY: re-ready the PR (`gh pr "
+                    "ready` fires ready_for_review, which re-runs every selecting "
+                    "workflow at FULL tier), or push a new head. A worker PR that "
+                    "the review pipeline re-drafts mid-gate hits this whenever the "
+                    "re-draft lands inside the gate's polling window.",
+                    cfg.summary_path,
+                )
+                for n in sorted(set(stale)):
                     _emit(
-                        f"### ci-summary: FAILED (fail-fast) — {len(ff)} gating "
-                        f"check(s) concluded failure while {pending} sibling(s) "
-                        f"were still running; no later state can turn this verdict "
-                        f"green (a newest-run failure is never forgiven), so the gate "
-                        f"REDs now instead of waiting out the remaining legs.",
+                        f"- ✗ {n}: draft-tier selection with no full-tier successor",
                         cfg.summary_path,
                     )
-                    for r in ff:
-                        _emit(f"- ✗ {r.get('name')}: failure", cfg.summary_path)
-                    print(
-                        "::error::ci-summary failed fast — a gating check concluded "
-                        "failure; the remaining siblings were not waited on."
-                    )
-                    return 1
-                ff_suspect = key
                 print(
-                    f"  fail-fast: {len(ff)} concluded gating failure(s) observed — "
-                    f"immediate grace re-poll to confirm before concluding."
+                    "::error::ci-summary failed fast — unsatisfiable draft-tier hold "
+                    "(all siblings terminal, PR still a draft, no full-tier select "
+                    "possible)."
                 )
-                continue  # no sleep: the grace re-poll is deliberately immediate
-            ff_suspect = None
+                return PollOutcome(exit_code=1)
+            # Not unsatisfiable (PR is ready, or the state is unreadable): keep
+            # polling and re-arm the window, so the live draft state is re-read at
+            # most once every unsat_confirm_polls polls rather than on every poll.
+            state.unsat_polls = 0
+            print(
+                "  unsatisfiable-hold check: the draft-tier hold is all-terminal but "
+                f"the PR draft state read as {still_draft!r}"
+                + (f" (last error: {draft_err})" if draft_err else "")
+                + " — not declaring it unsatisfiable; continuing to poll."
+            )
+    else:
+        state.unsat_polls = 0
 
-        # [OPUS-5] #3781 — UNSATISFIABLE HOLD: detect it, do not wait it out.
-        # The draft-tier hold (awaiting_full) is a WAIT for the ready_for_review
-        # full-tier re-runs to register. That wait is only meaningful while such a
-        # re-run can still happen. When ALL THREE hold —
-        #   (1) every awaited sibling has CONCLUDED (pending == 0: nothing is coming),
-        #   (2) a draft-marked select instance still lacks a full-tier successor, and
-        #   (3) the PR is CURRENTLY A DRAFT (live API read),
-        # — the hold is unsatisfiable ON ARRIVAL: a full-tier select is produced ONLY
-        # by a non-draft pull_request payload, so while the PR stays a draft no
-        # successor can ever register on this SHA. Measured on #3472/#3468/#3681: the
-        # gate spent all 155 polls (~67 min of wall-clock budget) in exactly this state
-        # and then emitted the refusal it could have emitted at poll 3, on PRs with
-        # ZERO failing legs. This is a `return 1` — the SAME refusal render_verdict's
-        # stale-draft-tier belt reaches at budget exhaustion, arrived at sooner and
-        # named honestly; it never turns a would-be RED green.
-        # NOT fired while anything is still settling (pending / awaiting_report), before
-        # the startup-race floor, or on a state that has not persisted for
-        # unsat_confirm_polls — that window is the discrimination against check-run
-        # registration lag. An UNREADABLE draft state does NOT fire either: the gate
-        # keeps polling exactly as before (a false RED here would be a new failure mode,
-        # while the pre-#3781 behaviour of burning the budget is merely slow).
-        if (
-            awaiting_full
-            and pending == 0
-            and not awaiting_report
-            and attempt >= cfg.min_polls
-        ):
-            unsat_polls += 1
-            if unsat_polls >= cfg.unsat_confirm_polls:
-                still_draft, draft_err = _bounded_draft_read(tier_ctx)
-                if still_draft is True:
-                    stale = draft_selects_unsuperseded(runs)
-                    _emit(
-                        "### ci-summary: FAILED (fail-fast) — UNSATISFIABLE draft-tier "
-                        "hold, not a slow run. Every sibling check-run on this head SHA "
-                        f"has CONCLUDED, {len(stale)} draft-marked select instance(s) "
-                        "still have no full-tier successor, and the PR is CURRENTLY A "
-                        "DRAFT — so no full-tier select can ever register on this SHA "
-                        "(only a non-draft pull_request payload produces one). The hold "
-                        "is unsatisfiable on arrival, so the gate REDs NOW with the "
-                        f"diagnosis instead of burning the remaining "
-                        f"{cfg.max_total_polls - attempt} poll(s) on a refusal that is "
-                        "already decided (#3781). REMEDY: re-ready the PR (`gh pr "
-                        "ready` fires ready_for_review, which re-runs every selecting "
-                        "workflow at FULL tier), or push a new head. A worker PR that "
-                        "the review pipeline re-drafts mid-gate hits this whenever the "
-                        "re-draft lands inside the gate's polling window.",
-                        cfg.summary_path,
-                    )
-                    for n in sorted(set(stale)):
-                        _emit(
-                            f"- ✗ {n}: draft-tier selection with no full-tier successor",
-                            cfg.summary_path,
-                        )
-                    print(
-                        "::error::ci-summary failed fast — unsatisfiable draft-tier hold "
-                        "(all siblings terminal, PR still a draft, no full-tier select "
-                        "possible)."
-                    )
-                    return 1
-                # Not unsatisfiable (PR is ready, or the state is unreadable): keep
-                # polling and re-arm the window, so the live draft state is re-read at
-                # most once every unsat_confirm_polls polls rather than on every poll.
-                unsat_polls = 0
-                print(
-                    "  unsatisfiable-hold check: the draft-tier hold is all-terminal but "
-                    f"the PR draft state read as {still_draft!r}"
-                    + (f" (last error: {draft_err})" if draft_err else "")
-                    + " — not declaring it unsatisfiable; continuing to poll."
-                )
+    # Clean convergence: everything terminal, held for the settle, past the floor.
+    if attempt >= cfg.min_polls and pending == 0 and state.stable >= cfg.settle_polls:
+        return PollOutcome(exit_code=render_verdict(runs, cfg.summary_path, tier_ctx))
+
+    # ADAPTIVE SATURATION BUDGET (sq-90cv4): at/after the base budget with work
+    # still pending, extend ONLY while the evidence says throughput-starvation
+    # (deep queue) or live progress — otherwise it's a genuine hang: RED.
+    if attempt >= cfg.base_polls and pending > 0:
+        progressing = (
+            len(state.completed_hist) > cfg.progress_window
+            and state.completed_hist[-1] > state.completed_hist[-1 - cfg.progress_window]
+        )
+        # [SONNET-4.6] Guard: if fetch_queue_depth() raises (e.g. subprocess.run
+        # raises inside the closure before returning None), treat depth as the
+        # "unknown" sentinel — never crash the gate, and never grant a saturation
+        # extension on depth alone (None → saturated = False, conservative branch).
+        try:
+            depth = fetch_queue_depth()
+        except Exception as exc:
+            print(f"  (queue-depth fetch raised {exc!r} — treating depth as unknown)")
+            depth = None
+        saturated = depth is not None and depth >= cfg.sat_queue_min
+        # [OPUS-5] #3783 LIVENESS VETO (header §LIVENESS VETO). An awaited
+        # sibling in `in_progress` is POSITIVE evidence the work is alive, and
+        # it invalidates BOTH hang signals at once: the queue is idle because
+        # that job already dequeued, and a long bounded proof emits no
+        # completion for tens of minutes by design. Queue depth may therefore
+        # only count toward "hang" when the awaited siblings are `queued` or
+        # absent — i.e. genuinely NOT running.
+        live = live_siblings(runs)
+        if not (saturated or progressing or live):
+            print(
+                f"::error::ci-summary timed out — {pending} sibling check-run(s) never "
+                f"finished within the base budget, NO awaited sibling is `in_progress` "
+                f"(nothing is executing), the Actions queue is idle "
+                f"(depth={depth if depth is not None else 'unknown'} < {cfg.sat_queue_min}) "
+                f"and no completions landed in the last {cfg.progress_window} poll(s): "
+                f"genuine hang, not a still-settling set. See the per-poll log above."
+            )
+            return PollOutcome(exit_code=1)
+        live_note = (
+            f", {len(live)} sibling(s) EXECUTING ({_name_list(live)})" if live else ""
+        )
+        if not state.extension_started:
+            state.extension_started = True
+            print(
+                f"::notice::ci-summary base budget reached with {pending} sibling(s) still "
+                f"pending, but the runner pool shows saturation/progress/liveness "
+                f"(queued runs={depth if depth is not None else 'unknown'}, "
+                f"progressing={progressing}{live_note}) — this is a throughput/liveness "
+                f"signal, not a hang. "
+                f"Extending the wait (adaptive budget, sq-90cv4) up to poll "
+                f"{cfg.max_total_polls}."
+            )
         else:
-            unsat_polls = 0
-
-        # Clean convergence: everything terminal, held for the settle, past the floor.
-        if attempt >= cfg.min_polls and pending == 0 and stable >= cfg.settle_polls:
-            return render_verdict(runs, cfg.summary_path, tier_ctx)
-
-        # ADAPTIVE SATURATION BUDGET (sq-90cv4): at/after the base budget with work
-        # still pending, extend ONLY while the evidence says throughput-starvation
-        # (deep queue) or live progress — otherwise it's a genuine hang: RED.
-        if attempt >= cfg.base_polls and pending > 0:
-            progressing = (
-                len(completed_hist) > cfg.progress_window
-                and completed_hist[-1] > completed_hist[-1 - cfg.progress_window]
+            print(
+                f"  extension: queued runs={depth if depth is not None else 'unknown'}, "
+                f"progressing={progressing}{live_note} — still settling."
             )
-            # [SONNET-4.6] Guard: if fetch_queue_depth() raises (e.g. subprocess.run
-            # raises inside the closure before returning None), treat depth as the
-            # "unknown" sentinel — never crash the gate, and never grant a saturation
-            # extension on depth alone (None → saturated = False, conservative branch).
-            try:
-                depth = fetch_queue_depth()
-            except Exception as exc:
-                print(f"  (queue-depth fetch raised {exc!r} — treating depth as unknown)")
-                depth = None
-            saturated = depth is not None and depth >= cfg.sat_queue_min
-            # [OPUS-5] #3783 LIVENESS VETO (header §LIVENESS VETO). An awaited
-            # sibling in `in_progress` is POSITIVE evidence the work is alive, and
-            # it invalidates BOTH hang signals at once: the queue is idle because
-            # that job already dequeued, and a long bounded proof emits no
-            # completion for tens of minutes by design. Queue depth may therefore
-            # only count toward "hang" when the awaited siblings are `queued` or
-            # absent — i.e. genuinely NOT running.
-            live = live_siblings(runs)
-            if not (saturated or progressing or live):
-                print(
-                    f"::error::ci-summary timed out — {pending} sibling check-run(s) never "
-                    f"finished within the base budget, NO awaited sibling is `in_progress` "
-                    f"(nothing is executing), the Actions queue is idle "
-                    f"(depth={depth if depth is not None else 'unknown'} < {cfg.sat_queue_min}) "
-                    f"and no completions landed in the last {cfg.progress_window} poll(s): "
-                    f"genuine hang, not a still-settling set. See the per-poll log above."
-                )
-                return 1
-            live_note = (
-                f", {len(live)} sibling(s) EXECUTING ({_name_list(live)})" if live else ""
-            )
-            if not extension_started:
-                extension_started = True
-                print(
-                    f"::notice::ci-summary base budget reached with {pending} sibling(s) still "
-                    f"pending, but the runner pool shows saturation/progress/liveness "
-                    f"(queued runs={depth if depth is not None else 'unknown'}, "
-                    f"progressing={progressing}{live_note}) — this is a throughput/liveness "
-                    f"signal, not a hang. "
-                    f"Extending the wait (adaptive budget, sq-90cv4) up to poll "
-                    f"{cfg.max_total_polls}."
-                )
-            else:
-                print(
-                    f"  extension: queued runs={depth if depth is not None else 'unknown'}, "
-                    f"progressing={progressing}{live_note} — still settling."
-                )
-            if attempt < cfg.max_total_polls:
-                sleep_fn(cfg.sat_interval)
-            continue
+        return PollOutcome(sleep=cfg.sat_interval)
 
-        if attempt < cfg.max_total_polls:
-            sleep_fn(cfg.interval)
+    return PollOutcome(sleep=cfg.interval)
 
+
+def render_budget_exhausted(cfg: Config, state: GateState,
+                            tier_ctx: TierContext | None = None) -> int:
+    """The verdict once the ABSOLUTE budget is spent — the former post-loop tail of
+    `run_gate`, unchanged."""
     # Absolute budget exhausted.
-    if pending == 0:
+    if state.pending == 0:
         # The #997 graceful timeout: everything IS terminal, we just never got a
         # full quiet settle — render the real verdict, never a blind RED.
         print(
@@ -2035,7 +2122,7 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
             "(the set kept being injected into without a full quiet settle) — rendering "
             "the verdict on the final all-terminal set."
         )
-        return render_verdict(runs, cfg.summary_path, tier_ctx)
+        return render_verdict(state.runs, cfg.summary_path, tier_ctx)
     # [OPUS-5] #3783 VERDICT TAXONOMY (header §VERDICT TAXONOMY). Exhausting the
     # ABSOLUTE budget with work still outstanding is NOT the same event as a gating
     # leg failing: nothing in the tree has been shown to be broken, the gate simply
@@ -2043,7 +2130,7 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
     # exit 1 (fail-closed — an unobserved leg can never be assumed green), but they
     # must not READ like a test failure, because reading them that way is what
     # burned repeated diagnosis on #3758/#3765/#3781/#3783.
-    live = live_siblings(runs)
+    live = live_siblings(state.runs)
     if live:
         _emit(
             f"### ci-summary: UNDETERMINED (not a test failure) — the wait budget "
@@ -2063,7 +2150,7 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
         )
         return 1
     _emit(
-        f"### ci-summary: UNDETERMINED (not a test failure) — {pending} sibling "
+        f"### ci-summary: UNDETERMINED (not a test failure) — {state.pending} sibling "
         f"check-run(s) never finished within the ABSOLUTE budget (base + saturation "
         f"extension, sq-90cv4). The runner pool stayed saturated longer than the "
         f"extension allows, so the sibling set never resolved; no gating check has "
@@ -2072,12 +2159,83 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
         cfg.summary_path,
     )
     print(
-        f"::error::ci-summary timed out — {pending} sibling check-run(s) never finished "
+        f"::error::ci-summary timed out — {state.pending} sibling check-run(s) never finished "
         f"within the ABSOLUTE budget (base + saturation extension, sq-90cv4). The runner "
         f"pool stayed saturated longer than the extension allows; re-run this gate once "
         f"the queue drains. See the per-poll log above."
     )
     return 1
+
+
+def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
+             tier_ctx: TierContext | None = None) -> int:
+    """The RESIDENT poll loop (the transport `ci-summary.yml` uses today).
+
+    `fetch_runs()` -> list of {name,status,conclusion,details_url,started_at,id}
+    dicts (raises FetchError on API failure); `fetch_queue_depth()` -> int queued
+    workflow-run count for the repo, or None when unknown (API failure — the gate
+    then falls back to the progress signal alone). tier_ctx carries the draft-tier
+    integrity context (None => pre-draft-tier semantics). Returns the exit code.
+
+    [SONNET-4.6] sq-6vshe.19: this is now a thin driver over `evaluate_once` +
+    `render_budget_exhausted`. The decision logic, the budgets and the sleep
+    placement are unchanged — the sleep the loop used to skip on the final attempt
+    is `guard_sleep`, and the fetch-failure path's unconditional sleep is
+    `guard_sleep=False`."""
+    state = GateState()
+    while state.attempt < cfg.max_total_polls:
+        outcome = evaluate_once(cfg, state, fetch_runs, fetch_queue_depth, tier_ctx)
+        if outcome.exit_code is not None:
+            return outcome.exit_code
+        if outcome.sleep and (not outcome.guard_sleep or state.attempt < cfg.max_total_polls):
+            sleep_fn(outcome.sleep)
+    return render_budget_exhausted(cfg, state, tier_ctx)
+
+
+def run_gate_once(cfg: Config, state: GateState, fetch_runs, fetch_queue_depth,
+                  tier_ctx: TierContext | None = None) -> int:
+    """ONE evaluation with NO resident wait — the slotless transport's entry point.
+
+    Returns the gate's exit code once a verdict exists, or `STILL_SETTLING_EXIT`
+    when the caller must evaluate again after the next sibling completion. `state`
+    is mutated in place; persist `state.to_dict()` and feed it back to make a
+    sequence of invocations equivalent to the resident loop's sequence of polls
+    (pinned by TestSlotlessTransportSeam.test_oneshot_sequence_matches_resident_loop).
+
+    PHASE-2 SEMANTICS DELTAS — this entry point is NOT yet wired to any required
+    check, and must not be until these are resolved (they are transport properties,
+    not verdict properties, which is why they cannot be settled in this module):
+      * BUDGETS ARE POLL COUNTS, NOT WALL-CLOCK. `min_polls` / `base_polls` /
+        `max_total_polls` were calibrated against a fixed 20 s cadence. Under
+        event-driven invocation the cadence is whatever the sibling-completion
+        stream does, so the budgets stop meaning ~37 m / ~67 m. They must become
+        wall-clock deadlines carried in the state before this gates.
+      * THE RE-DISPATCH GUARD IS PROCESS-LOCAL. `WorkflowRunResolver`'s in-process
+        attempted-set (the API-lag belt on #3505's once-only cancelled-run re-run)
+        does not survive a process exit; only the durable `run_attempt` marker
+        does. A non-resident transport can therefore re-POST during API lag.
+      * CONCURRENT INVOCATIONS. Sibling completions arrive in bursts; two
+        overlapping evaluations would read-modify-write one state. The transport
+        needs a per-head-SHA concurrency group (or a compare-and-set carrier)."""
+    if state.attempt >= cfg.max_total_polls:
+        # Reachable only if a transport re-invokes after a verdict was already
+        # rendered. `runs` is deliberately not persisted, so there is no fresh
+        # observation to render over — and rendering over an EMPTY set would read as
+        # the stable-empty-set PASS. Fail closed instead.
+        print(
+            f"::error::ci-summary --oneshot: the carried state is already at the "
+            f"absolute budget (attempt {state.attempt}/{cfg.max_total_polls}) — its "
+            f"verdict was already rendered. Refusing to re-render without a fresh "
+            f"observation of the sibling set."
+        )
+        return 1
+    outcome = evaluate_once(cfg, state, fetch_runs, fetch_queue_depth, tier_ctx)
+    if outcome.exit_code is not None:
+        return outcome.exit_code
+    if state.attempt >= cfg.max_total_polls:
+        return render_budget_exhausted(cfg, state, tier_ctx)
+    return STILL_SETTLING_EXIT
+
 
 
 # ----------------------------- live (gh-backed) wiring -----------------------------
@@ -2370,11 +2528,40 @@ def _self_test() -> int:
     return 0
 
 
+def load_state_file(path: str) -> GateState:
+    """[SONNET-4.6] sq-6vshe.19: read the slotless transport's carried state.
+
+    A MISSING file is the first evaluation of a head SHA — a fresh state. An
+    UNREADABLE/corrupt one also degrades to a fresh state, deliberately: restarting
+    the settle window costs extra evaluations (seconds each), whereas honouring a
+    half-written state could shorten it, and only the SHORTENING direction can turn
+    a still-settling set into a premature verdict."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return GateState.from_dict(json.load(fh))
+    except FileNotFoundError:
+        return GateState()
+    except (OSError, ValueError) as exc:
+        print(f"::notice::ci-summary: gate state at {path} unreadable ({exc}) — starting fresh.")
+        return GateState()
+
+
+def save_state_file(path: str, state: GateState) -> None:
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(state.to_dict(), fh)
+
+
 def main() -> int:
     if sys.argv[1:] == ["--self-test"]:
         return _self_test()
-    if sys.argv[1:]:
-        print("usage: ci_summary_gate.py [--self-test]", file=sys.stderr)
+    # [SONNET-4.6] sq-6vshe.19 — the NON-RESIDENT entry point: evaluate once against
+    # the state carried in GATE_STATE_PATH, persist it, and exit. Exit codes are the
+    # gate's own 0/1 once a verdict exists, or STILL_SETTLING_EXIT (75) meaning
+    # "evaluate me again after the next sibling completion". NOT wired to any
+    # required check yet — see run_gate_once's PHASE-2 SEMANTICS DELTAS.
+    oneshot = sys.argv[1:] == ["--oneshot"]
+    if sys.argv[1:] and not oneshot:
+        print("usage: ci_summary_gate.py [--self-test | --oneshot]", file=sys.stderr)
         return 2
     repo = os.environ.get("REPO", "")
     sha = os.environ.get("SHA", "")
@@ -2417,8 +2604,25 @@ def main() -> int:
     )
     print(f"ci-summary: evaluating tier={run_tier} (event={event_name or '<unset>'}).")
     cfg = Config(self_run_id=self_run_id)
-    return run_gate(cfg, make_fetch_runs(repo, sha, self_run_id), make_fetch_queue_depth(repo),
-                    tier_ctx=tier_ctx)
+    fetch_runs = make_fetch_runs(repo, sha, self_run_id)
+    fetch_queue_depth = make_fetch_queue_depth(repo)
+    if not oneshot:
+        return run_gate(cfg, fetch_runs, fetch_queue_depth, tier_ctx=tier_ctx)
+    state_path = os.environ.get("GATE_STATE_PATH", "").strip()
+    if not state_path:
+        print("::error::ci-summary: --oneshot requires GATE_STATE_PATH (the carrier for "
+              "the settle/saturation state the resident loop keeps in memory).")
+        return 1
+    state = load_state_file(state_path)
+    code = run_gate_once(cfg, state, fetch_runs, fetch_queue_depth, tier_ctx=tier_ctx)
+    save_state_file(state_path, state)
+    print(
+        f"ci-summary --oneshot: evaluation {state.attempt}/{cfg.max_total_polls} "
+        f"exited {code}"
+        + (" (still settling — re-evaluate on the next sibling completion)."
+           if code == STILL_SETTLING_EXIT else " (VERDICT).")
+    )
+    return code
 
 
 if __name__ == "__main__":
