@@ -18,6 +18,11 @@
 //! * **F&O cross-check** — every `fn:substring` result is recomputed with an explicit
 //!   XPath F&O 3.1 §5.4.3 `fn:substring` window reference implemented here.
 //!
+//! That F&O reference is itself cross-checked, in this file's own unit tests, against
+//! **CPython string slicing** — an out-of-repo, codepoint-indexed statement of the same
+//! window — so the multibyte rows do not rest on two in-repo references agreeing with
+//! each other. See `tests::fo_substring_agrees_with_cpython_slicing`.
+//!
 //! Where a cross-check fires, the case is NOT silently dropped or downgraded: it is
 //! recorded in [`DIVERGENCES`] and emitted as a **LIVE** assertion carrying the
 //! SPEC-correct value, labelled a SPEC-REFERENCE row rather than a sparq-differential one.
@@ -160,6 +165,48 @@ fn fo_substring(s: &str, start: i64, length: i64) -> String {
         .collect()
 }
 
+/// The CODEPOINT → BYTE position conversion for `fn:substring` (`sq-hjvte`).
+///
+/// `noir_XPath`'s `substring` windows **byte** positions in the logical content (its own
+/// documented caveat), while `fn:substring` / SPARQL `SUBSTR` — and the `string_length`
+/// that `sq-3x7dl.6` made codepoint-counting — window **codepoint** positions. Composing
+/// the two, e.g. `substring(s, i, string_length(s))`, is therefore wrong for any
+/// multibyte input. This is the *convert positions at the boundary* half of that bead:
+/// given the F&O CODEPOINT window parameters, return the equivalent BYTE window
+/// `(start, length)`, already NORMALIZED (`start >= 1`, `length >= 0`) so neither side
+/// has to clamp again.
+///
+/// The window rule is [`fo_substring`]'s, unchanged — this only re-expresses the SAME
+/// window in byte units, which is why the two are pinned against each other by
+/// [`tests::codepoint_window_to_byte_window_reproduces_the_fo_window`].
+///
+/// SCOPE, honestly: this converts on the HOST, which requires the host to know the
+/// string's bytes. It does NOT make the in-circuit primitive codepoint-positional — for a
+/// PRIVATE (witness) string the conversion has to happen in-circuit, and that stays a
+/// `noir_XPath` change under `sq-hjvte`. What it buys here is (a) an executable,
+/// oracle-checked statement of the conversion rule, and (b) multibyte coverage of the
+/// byte-window primitive, which the corpus previously had none of by construction.
+fn codepoint_window_to_byte_window(s: &str, start: i64, length: i64) -> (i64, i64) {
+    let end = start.saturating_add(length); // exclusive, in CODEPOINTS
+    // The F&O window is contiguous, so the selected bytes are exactly
+    // [first selected char's offset, last selected char's end offset).
+    let mut lo: Option<usize> = None;
+    let mut hi = 0usize;
+    for (i, (offset, ch)) in s.char_indices().enumerate() {
+        let pos = i as i64 + 1;
+        if pos >= start && pos < end {
+            lo.get_or_insert(offset);
+            hi = offset + ch.len_utf8();
+        }
+    }
+    match lo {
+        // Byte positions are 1-based, exactly like the codepoint ones.
+        Some(lo) => ((lo + 1) as i64, (hi - lo) as i64),
+        // Empty window — any normalized zero-length window will do; pick the canonical one.
+        None => (1, 0),
+    }
+}
+
 /// XPath F&O 3.1 §4.4.4 `fn:round` for `xs:double`: round to nearest, TIES TOWARD +∞
 /// (`0.5 -> 1`, `-0.5 -> -0.0`, `-1.5 -> -1`), preserving the sign of a zero result.
 fn fo_round_double(v: f64) -> f64 {
@@ -275,11 +322,18 @@ fn pair_corpus() -> Vec<(S, S)> {
     ]
 }
 
-/// `fn:substring` cases. **ASCII ONLY, deliberately.** `noir_XPath`'s `substring` indexes
-/// BYTE positions in the logical content (documented caveat in its `string.nr`; codepoint
-/// positional substring is bead `sq-hjvte`), while SPARQL SUBSTR is codepoint-indexed.
-/// The two agree exactly on single-byte content and only there — sampling multibyte here
-/// would pin a divergence that is a KNOWN, beaded gap rather than a regression.
+/// `fn:substring` cases whose positions are passed to the circuit **VERBATIM**.
+///
+/// **ASCII ONLY, deliberately.** `noir_XPath`'s `substring` indexes BYTE positions in the
+/// logical content (documented caveat in its `string.nr`; codepoint-positional substring
+/// is bead `sq-hjvte`), while SPARQL SUBSTR is codepoint-indexed. The two agree exactly on
+/// single-byte content and only there — sampling multibyte HERE would pin a divergence
+/// that is a KNOWN, beaded gap rather than a regression. Multibyte content is covered by
+/// [`substring_multibyte_corpus`] instead, through the boundary conversion.
+///
+/// This section is what exercises the primitive's OWN F&O window arithmetic (`start < 1`
+/// consuming the length budget, `sq-3x7dl.6`), because only here does the circuit receive
+/// an un-normalized window.
 ///
 /// `start < 1` cases carry the F&O window semantics that `sq-3x7dl.6` fixed in the
 /// circuit; sparq-engine still shifts (see [`DIVERGENCES`]), so those rows are emitted
@@ -298,6 +352,41 @@ fn substring_corpus() -> Vec<(&'static str, usize, i64, i64)> {
         ("hello", 5, -2, 4),  // start < 1  (F&O window: "h")
         ("12345", 5, -3, 5),  // start < 1  (F&O window: "1")
         ("hello", 5, -100, 3), // window entirely before the string
+    ]
+}
+
+/// `fn:substring` cases with **MULTIBYTE** content, driven through
+/// [`codepoint_window_to_byte_window`] (`sq-hjvte`).
+///
+/// The positions below are CODEPOINT positions — what SPARQL `SUBSTR` and `fn:substring`
+/// take, and what the oracle is asked for. The generator converts each to the equivalent
+/// BYTE window before emitting the call, so the byte-positional primitive is held to the
+/// CODEPOINT answer. Every entry has `chars().count() != len()`, which is exactly the
+/// regime [`substring_corpus`] cannot reach.
+///
+/// What this catches that the ASCII section cannot: a byte window that lands mid-codepoint
+/// or truncates a trailing continuation byte, a logical-length (NUL) scan that misreads a
+/// `>= 0x80` byte, and any per-byte handling that is only correct for 7-bit content. What
+/// it deliberately does NOT claim: that the primitive is codepoint-positional. It is not —
+/// see the scope note on [`codepoint_window_to_byte_window`].
+fn substring_multibyte_corpus() -> Vec<(&'static str, usize, i64, i64)> {
+    vec![
+        // (value, cap, CODEPOINT start, CODEPOINT length)
+        ("naïve", 6, 3, 1),     // the 2-byte codepoint, alone
+        ("naïve", 6, 1, 3),     // window ENDING on the 2-byte codepoint
+        ("naïve", 6, 3, 100),   // multibyte start, length past the end
+        ("naïve", 6, 1, 5),     // whole string: 5 codepoints, 6 bytes
+        ("naïve", 6, 4, 2),     // window STARTING after the multibyte codepoint
+        ("日本語", 9, 2, 1),     // interior 3-byte codepoint
+        ("日本語", 9, 2, 2),     // two 3-byte codepoints
+        ("日本語", 15, 2, 2),    // ... in a NUL-PADDED buffer
+        ("𝄞", 4, 1, 1),         // astral (4-byte) codepoint
+        ("aé", 3, 2, 1),        // ASCII then 2-byte
+        ("e\u{301}", 3, 2, 1),  // combining acute: codepoint 2 of a one-grapheme string
+        ("ﬀ", 3, 1, 1),         // 3-byte ligature
+        ("日本語", 9, 3, 0),     // zero length at a multibyte position
+        ("日本語", 9, 4, 2),     // start past the CODEPOINT end (byte length would not be)
+        ("日本語", 9, 0, 2),     // start < 1: the F&O window consumes length
     ]
 }
 
@@ -570,10 +659,19 @@ fn header(out: &mut String, mode: &FaultMode) {
         writeln!(out, "//       {}", d.why).unwrap();
     }
     writeln!(out, "//").unwrap();
-    writeln!(out, "// KNOWN SCOPE LIMIT: fn:substring cases are ASCII-only. noir_XPath's `substring`").unwrap();
-    writeln!(out, "// indexes BYTE positions in the logical content (its own documented caveat; bead").unwrap();
-    writeln!(out, "// sq-hjvte tracks codepoint-positional substring) while SPARQL SUBSTR is").unwrap();
-    writeln!(out, "// codepoint-indexed. They agree exactly on single-byte content and only there.").unwrap();
+    writeln!(out, "// KNOWN SCOPE LIMIT (sq-hjvte): noir_XPath's `substring` indexes BYTE positions in").unwrap();
+    writeln!(out, "// the logical content (its own documented caveat), while SPARQL SUBSTR / fn:substring").unwrap();
+    writeln!(out, "// index CODEPOINTS -- and `string_length` counts CODEPOINTS too (sq-3x7dl.6), so").unwrap();
+    writeln!(out, "// `substring(s, i, string_length(s))` is WRONG for multibyte s. The two units agree").unwrap();
+    writeln!(out, "// exactly on single-byte content and only there. Both regimes are covered here:").unwrap();
+    writeln!(out, "//   * differential_oracle_substring -- ASCII, positions passed VERBATIM, so it holds").unwrap();
+    writeln!(out, "//     noir_XPath to the F&O window arithmetic itself (the start < 1 budget rule).").unwrap();
+    writeln!(out, "//   * differential_oracle_substring_multibyte -- multibyte, with each CODEPOINT window").unwrap();
+    writeln!(out, "//     converted to the equivalent BYTE window by the generator before the call, so the").unwrap();
+    writeln!(out, "//     byte-positional primitive is held to the CODEPOINT answer.").unwrap();
+    writeln!(out, "// That conversion is HOST-side and needs the string's bytes. The in-circuit primitive").unwrap();
+    writeln!(out, "// is still byte-positional; making it codepoint-positional for a PRIVATE string stays").unwrap();
+    writeln!(out, "// open as sq-hjvte in the noir_XPath face repo.").unwrap();
     match mode {
         FaultMode::None => {}
         FaultMode::All => {
@@ -659,15 +757,105 @@ fn gen_string_predicates(out: &mut String, g: &Graph, c: &mut Counts, f: &mut Fa
     }
 }
 
+/// Which position UNIT the generated `substring` call passes to `noir_XPath`.
+#[derive(Clone, Copy, PartialEq)]
+enum Positions {
+    /// Pass the F&O positions straight through. Sound only for ASCII content, and the
+    /// only way the primitive's OWN window arithmetic (`start < 1`) gets exercised.
+    Verbatim,
+    /// Convert the CODEPOINT window to the equivalent BYTE window
+    /// ([`codepoint_window_to_byte_window`]) before the call — the host-side half of
+    /// `sq-hjvte`, and what makes multibyte content samplable at all.
+    ConvertedToBytes,
+}
+
 fn gen_substring(out: &mut String, g: &Graph, c: &mut Counts, f: &mut Faults) {
     writeln!(out, "/// fn:substring — ASCII-only (see the byte-vs-codepoint scope limit above).").unwrap();
     writeln!(out, "/// Oracle: SPARQL `SUBSTR`, cross-checked against the F&O 3.1 sec. 5.4.3 fn:substring").unwrap();
     writeln!(out, "/// window. The `start < 1` rows are SPEC-REFERENCE (see the header): sparq-engine shifts").unwrap();
     writeln!(out, "/// the window, so their expected value is F&O's, and they assert noir_XPath against the SPEC.").unwrap();
+    writeln!(out, "///").unwrap();
+    writeln!(out, "/// Positions reach the circuit VERBATIM here, which is what holds noir_XPath to the F&O").unwrap();
+    writeln!(out, "/// window arithmetic itself (sq-3x7dl.6). Multibyte content is covered separately, by").unwrap();
+    writeln!(out, "/// differential_oracle_substring_multibyte.").unwrap();
+    substring_section(
+        out,
+        g,
+        c,
+        f,
+        &SubstringSection {
+            test_fn: "differential_oracle_substring",
+            var: "",
+            corpus: substring_corpus(),
+            positions: Positions::Verbatim,
+        },
+    );
+}
+
+fn gen_substring_multibyte(out: &mut String, g: &Graph, c: &mut Counts, f: &mut Faults) {
+    writeln!(out, "/// fn:substring over MULTIBYTE content (sq-hjvte). Oracle: SPARQL `SUBSTR`, which is").unwrap();
+    writeln!(out, "/// CODEPOINT-indexed, cross-checked against the F&O 3.1 sec. 5.4.3 window reference (and,").unwrap();
+    writeln!(out, "/// in the generator's own unit tests, against CPython's codepoint slicing).").unwrap();
+    writeln!(out, "///").unwrap();
+    writeln!(out, "/// noir_XPath's `substring` windows BYTE positions, so each row's CODEPOINT window is").unwrap();
+    writeln!(out, "/// converted to the equivalent BYTE window BY THE GENERATOR and the byte window is what").unwrap();
+    writeln!(out, "/// the call below carries -- the row comment shows both. The expected value is still the").unwrap();
+    writeln!(out, "/// CODEPOINT answer, so these rows hold the primitive to fn:substring on content where").unwrap();
+    writeln!(out, "/// byte and codepoint positions DISAGREE.").unwrap();
+    writeln!(out, "///").unwrap();
+    writeln!(out, "/// HONEST SCOPE: that conversion happens on the HOST, which knows the string's bytes. It").unwrap();
+    writeln!(out, "/// does NOT make the primitive codepoint-positional -- for a PRIVATE (witness) string the").unwrap();
+    writeln!(out, "/// conversion has to happen in-circuit, which is still open as sq-hjvte in the noir_XPath").unwrap();
+    writeln!(out, "/// face repo. Until then `substring(s, i, string_length(s))` remains WRONG for multibyte s.").unwrap();
+    substring_section(
+        out,
+        g,
+        c,
+        f,
+        &SubstringSection {
+            test_fn: "differential_oracle_substring_multibyte",
+            var: "m",
+            corpus: substring_multibyte_corpus(),
+            positions: Positions::ConvertedToBytes,
+        },
+    );
+}
+
+/// One generated `fn:substring` test function: which corpus it walks, which position unit
+/// its calls carry, and how its generated bindings are named.
+struct SubstringSection {
+    test_fn: &'static str,
+    /// Prefixes the generated bindings so two sections can share row indices without
+    /// either colliding with the other's fault site (matched by unique line text).
+    var: &'static str,
+    corpus: Vec<(&'static str, usize, i64, i64)>,
+    positions: Positions,
+}
+
+/// Emit one `fn:substring` test function.
+fn substring_section(
+    out: &mut String,
+    g: &Graph,
+    c: &mut Counts,
+    f: &mut Faults,
+    section: &SubstringSection,
+) {
+    let SubstringSection { test_fn, var, positions, .. } = *section;
     writeln!(out, "#[test]").unwrap();
-    writeln!(out, "fn differential_oracle_substring() {{").unwrap();
-    for (i, &(value, cap, start, length)) in substring_corpus().iter().enumerate() {
-        assert!(value.is_ascii(), "substring corpus must stay ASCII: {value:?}");
+    writeln!(out, "fn {test_fn}() {{").unwrap();
+    for (i, &(value, cap, start, length)) in section.corpus.iter().enumerate() {
+        match positions {
+            Positions::Verbatim => assert!(
+                value.is_ascii(),
+                "a verbatim-position substring corpus must stay ASCII: {value:?}"
+            ),
+            // A single-byte row here would be indistinguishable from a Verbatim one and
+            // would silently stop this section from covering what it exists to cover.
+            Positions::ConvertedToBytes => assert!(
+                value.chars().count() != value.len(),
+                "the multibyte substring corpus must not carry ASCII: {value:?}"
+            ),
+        }
         let expr = format!("SUBSTR({}, {start}, {length})", sparql_str(value));
         let sparq_answer = oracle_plain_string(g, &expr);
         let spec_answer = fo_substring(value, start, length);
@@ -690,21 +878,40 @@ fn gen_substring(out: &mut String, g: &Graph, c: &mut Counts, f: &mut Faults) {
         c.assertions += 1 + spec_answer.len();
         // An empty expected result leaves the byte buffer unread; bind it to `_out` so
         // the generated file does not trip Noir's unused-variable warning.
-        let bind = if spec_answer.is_empty() { format!("_out{i}") } else { format!("out{i}") };
+        let bind =
+            if spec_answer.is_empty() { format!("_{var}out{i}") } else { format!("{var}out{i}") };
+        // The window the CALL carries. Verbatim rows pass the F&O positions through;
+        // converted rows carry the byte window, and say so, so the row stays readable as
+        // "codepoint question, byte call, codepoint answer".
+        let (call_start, call_length) = match positions {
+            Positions::Verbatim => (start, length.max(0)),
+            Positions::ConvertedToBytes => codepoint_window_to_byte_window(value, start, length),
+        };
         writeln!(out, "    // {expr} -> {spec_answer:?}").unwrap();
-        writeln!(out, "    let ss{i}: str<{cap}> = {};", noir_str(value, cap)).unwrap();
-        writeln!(out, "    let ({bind}, len{i}) = substring::<{cap}, {cap}>(ss{i}, {start}, {});", length.max(0)).unwrap();
-        let len_line = format!("    assert(len{i} == {});", spec_answer.len());
+        if positions == Positions::ConvertedToBytes {
+            writeln!(
+                out,
+                "    // codepoint window ({start}, {length}) -> byte window ({call_start}, {call_length})"
+            )
+            .unwrap();
+        }
+        writeln!(out, "    let {var}ss{i}: str<{cap}> = {};", noir_str(value, cap)).unwrap();
+        writeln!(
+            out,
+            "    let ({bind}, {var}len{i}) = substring::<{cap}, {cap}>({var}ss{i}, {call_start}, {call_length});"
+        )
+        .unwrap();
+        let len_line = format!("    assert({var}len{i} == {});", spec_answer.len());
         // The returned length is asserted on every row, empty ones included, so it is
         // always available as this section's fault target.
         f.offer(
-            "differential_oracle_substring",
+            test_fn,
             &len_line,
-            format!("    assert(len{i} == {});", spec_answer.len() + 1),
+            format!("    assert({var}len{i} == {});", spec_answer.len() + 1),
         );
         writeln!(out, "{len_line}").unwrap();
         for (j, byte) in spec_answer.as_bytes().iter().enumerate() {
-            writeln!(out, "    assert(out{i}[{j}] == {byte});").unwrap();
+            writeln!(out, "    assert({var}out{i}[{j}] == {byte});").unwrap();
         }
     }
     writeln!(out, "}}").unwrap();
@@ -944,6 +1151,7 @@ fn generate_noir_file(mode: &FaultMode) -> (String, Counts) {
     gen_string_length(&mut out, &g, &mut counts, &mut faults);
     gen_string_predicates(&mut out, &g, &mut counts, &mut faults);
     gen_substring(&mut out, &g, &mut counts, &mut faults);
+    gen_substring_multibyte(&mut out, &g, &mut counts, &mut faults);
     gen_divide(&mut out, &g, &mut counts, &mut faults);
     gen_round(&mut out, &g, &mut counts, &mut faults);
     gen_mixed_compare(&mut out, &g, &mut counts, &mut faults);
@@ -1106,6 +1314,136 @@ mod tests {
         assert_eq!(fo_substring("naïve", 3, 1), "ï");
     }
 
+    /// The `sq-hjvte` boundary conversion is EXACTLY the F&O window re-expressed in byte
+    /// units: taking `length` bytes from `start` (1-based, in bytes) out of the SAME string
+    /// must reproduce [`fo_substring`] byte-for-byte. Checked over the whole multibyte
+    /// corpus AND over every window in a small exhaustive sweep, so an off-by-one at a
+    /// codepoint boundary cannot hide behind a hand-picked case.
+    ///
+    /// This is the property the generated multibyte rows rest on: it is what makes
+    /// "call the BYTE-positional primitive with the converted window" equivalent to
+    /// "call a CODEPOINT-positional primitive with the original window".
+    #[test]
+    fn codepoint_window_to_byte_window_reproduces_the_fo_window() {
+        // Taking the converted window out of `s` — the byte-positional read the circuit
+        // performs, modelled here so the equivalence is asserted rather than assumed.
+        fn byte_window(s: &str, start: i64, length: i64) -> &[u8] {
+            let lo = (start - 1) as usize;
+            &s.as_bytes()[lo..lo + length as usize]
+        }
+
+        let mut checked = 0usize;
+        let mut multibyte_windows = 0usize;
+        for &(value, _, start, length) in substring_multibyte_corpus().iter() {
+            let (b_start, b_len) = codepoint_window_to_byte_window(value, start, length);
+            assert!(b_start >= 1 && b_len >= 0, "the converted window must be normalized");
+            assert_eq!(
+                byte_window(value, b_start, b_len),
+                fo_substring(value, start, length).as_bytes(),
+                "conversion diverges from the F&O window for ({value:?}, {start}, {length})"
+            );
+            checked += 1;
+        }
+        assert!(checked >= 10, "the multibyte corpus shrank to {checked} rows");
+
+        // Exhaustive sweep over every window a small corpus admits, negative starts and
+        // lengths included. `fo_substring` is the reference; the conversion must never
+        // disagree with it, at any offset, on any string.
+        for value in ["naïve", "日本語", "𝄞a", "e\u{301}x", "ﬀ", "aé日", "ascii", ""] {
+            for start in -4i64..=8 {
+                for length in -2i64..=8 {
+                    let (b_start, b_len) = codepoint_window_to_byte_window(value, start, length);
+                    assert_eq!(
+                        byte_window(value, b_start, b_len),
+                        fo_substring(value, start, length).as_bytes(),
+                        "conversion diverges for ({value:?}, {start}, {length})"
+                    );
+                    if !value.is_ascii() && b_len > 0 {
+                        multibyte_windows += 1;
+                    }
+                }
+            }
+        }
+        // A sweep that never produced a non-empty window on multibyte content would pass
+        // while proving nothing.
+        assert!(multibyte_windows > 100, "the sweep hit only {multibyte_windows} live windows");
+    }
+
+    /// THIRD, out-of-repo reference for the CODEPOINT window: **CPython string slicing**.
+    ///
+    /// [`fo_substring`] is this file's F&O reference and sparq-engine is the oracle — both
+    /// live in this repository, so agreeing with each other is weaker evidence than it
+    /// looks. CPython's `str` is a sequence of CODEPOINTS, so `s[start-1 : start+length-1]`
+    /// (both ends floored at 0) is an independent statement of the same window, written by
+    /// someone else, in another language. Every substring case the generator emits — ASCII
+    /// and multibyte — is checked against it, and a disagreement FAILS: it would mean the
+    /// reference the multibyte rows are pinned to is itself wrong.
+    ///
+    /// If `python3` is absent the check cannot run. That is reported loudly and skipped
+    /// rather than quietly passed — on such a box this test is not evidence of anything.
+    #[test]
+    fn fo_substring_agrees_with_cpython_slicing() {
+        let cases: Vec<(&str, i64, i64)> = substring_corpus()
+            .iter()
+            .chain(substring_multibyte_corpus().iter())
+            .map(|&(v, _, start, length)| (v, start, length))
+            .collect();
+
+        // Every character goes out as an explicit \U000xxxxx escape, so the program text
+        // is pure ASCII and no quoting, encoding or normalization step sits between this
+        // corpus and CPython's view of it.
+        let mut prog = String::from("cases = [\n");
+        for &(value, start, length) in &cases {
+            prog.push_str("    (\"");
+            for ch in value.chars() {
+                prog.push_str(&format!("\\U{:08X}", ch as u32));
+            }
+            prog.push_str(&format!("\", {start}, {length}),\n"));
+        }
+        prog.push_str(
+            "]\n\
+             for s, start, length in cases:\n\
+             \x20   # XPath F&O 3.1 sec. 5.4.3 fn:substring: the 1-based window\n\
+             \x20   # [start, start + length) over CODEPOINTS, as a Python slice.\n\
+             \x20   out = s[max(start - 1, 0):max(start + length - 1, 0)]\n\
+             \x20   print(','.join(str(ord(ch)) for ch in out))\n",
+        );
+
+        let run = std::process::Command::new("python3").arg("-c").arg(&prog).output();
+        let out = match run {
+            Ok(out) => out,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!(
+                    "SKIPPED fo_substring_agrees_with_cpython_slicing: python3 is not installed, \
+                     so the CPython cross-check verified NOTHING on this machine."
+                );
+                return;
+            }
+            Err(e) => panic!("running python3 failed: {e}"),
+        };
+        assert!(
+            out.status.success(),
+            "the CPython reference program failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let stdout = String::from_utf8(out.stdout).expect("python3 emitted non-UTF-8");
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), cases.len(), "CPython returned the wrong number of answers");
+        for ((value, start, length), line) in cases.iter().zip(lines) {
+            let ours: String = fo_substring(value, *start, *length)
+                .chars()
+                .map(|c| (c as u32).to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            assert_eq!(
+                line, ours,
+                "CPython slicing and the F&O reference disagree on ({value:?}, {start}, {length}): \
+                 python {line:?} vs harness {ours:?}"
+            );
+        }
+    }
+
     /// `fn:round` ties go toward +INFINITY and a negative argument rounding to zero keeps
     /// its sign — the two properties the circuit's `round_double` implements.
     #[test]
@@ -1213,6 +1551,37 @@ mod tests {
         assert!(corpus.iter().any(|s| s.value.chars().count() == 1 && s.value.len() == 4), "no astral case");
         // start < 1 in the substring corpus (sq-3x7dl.6).
         assert!(substring_corpus().iter().any(|&(_, _, start, _)| start < 1));
+        // Multibyte substring coverage through the boundary conversion (sq-hjvte). The
+        // whole point of that section is content where the byte and codepoint units
+        // DISAGREE, so a row whose window happens to be byte-identical proves nothing on
+        // its own — require the corpus to carry rows where the converted window actually
+        // moved, an astral codepoint, and a NUL-padded multibyte buffer.
+        let multibyte = substring_multibyte_corpus();
+        assert!(
+            multibyte.iter().all(|&(v, _, _, _)| v.chars().count() != v.len()),
+            "an ASCII row in the multibyte substring corpus covers nothing new"
+        );
+        assert!(
+            multibyte
+                .iter()
+                .filter(|&&(v, _, start, length)| codepoint_window_to_byte_window(v, start, length)
+                    != (start, length.max(0)))
+                .count()
+                >= 5,
+            "too few rows where the byte window actually differs from the codepoint window"
+        );
+        assert!(
+            multibyte.iter().any(|&(v, _, _, _)| v.chars().count() == 1 && v.len() == 4),
+            "no astral substring case"
+        );
+        assert!(
+            multibyte.iter().any(|&(v, cap, _, _)| cap > v.len()),
+            "no NUL-padded multibyte substring case"
+        );
+        assert!(
+            multibyte.iter().any(|&(_, _, start, _)| start < 1),
+            "no start < 1 multibyte substring case"
+        );
         // A non-exact quotient (sq-3x7dl.4).
         assert!(DIVIDE_CORPUS.iter().any(|&(a, b)| a % b != 0));
         // Every mixed-comparison integer is out of i8 range (sq-3x7dl.5).
@@ -1278,7 +1647,7 @@ mod tests {
         // header carries two extra warning lines, so a positional whole-file diff would
         // report every line.
         let (a, b) = (live_assertions_by_test(&clean), live_assertions_by_test(&faulty));
-        assert_eq!(a.len(), 10, "the generated file must still carry 10 test functions");
+        assert_eq!(a.len(), 11, "the generated file must still carry 11 test functions");
         assert_eq!(
             a.iter().map(|(_, l)| l.len()).sum::<usize>(),
             counts.assertions,
@@ -1314,13 +1683,14 @@ mod tests {
         gen_string_length(&mut sink, &g, &mut counts, &mut faults);
         gen_string_predicates(&mut sink, &g, &mut counts, &mut faults);
         gen_substring(&mut sink, &g, &mut counts, &mut faults);
+        gen_substring_multibyte(&mut sink, &g, &mut counts, &mut faults);
         gen_divide(&mut sink, &g, &mut counts, &mut faults);
         gen_round(&mut sink, &g, &mut counts, &mut faults);
         gen_mixed_compare(&mut sink, &g, &mut counts, &mut faults);
         gen_cast(&mut sink, &g, &mut counts, &mut faults);
         gen_datetime(&mut sink, &g, &mut counts, &mut faults);
 
-        assert_eq!(faults.sites.len(), 10, "one fault site per generated test function");
+        assert_eq!(faults.sites.len(), 11, "one fault site per generated test function");
         for site in &faults.sites {
             assert!(
                 site.original.trim_start().starts_with("assert("),
