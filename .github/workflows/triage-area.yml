@@ -1,0 +1,119 @@
+# [OPUS-5] 🤖 SPARQ agent — sparq-org/sparq#3816. The `needs:area` park's ONLY EXIT.
+#
+# WHY THIS EXISTS. `area:<name>` is the partition key the whole orchestration system keys
+# off, and an issue without one is undispatchable at three independent stages:
+#   * scripts/triage.py refuses to promote a no-area issue — it parks it `needs:area`;
+#   * the registry curator refuses to stage an issue whose area it cannot derive;
+#   * scripts/ready-issues.py maps a no-area candidate to the SERIALIZING `__global__`
+#     partition, where it defers against everything.
+# scripts/triage-area.py is the classifier that clears that park, and #1135 authorised its
+# automated pass — but nothing ever RAN it. It was hand-invoked only, so the park was
+# TERMINAL in automation: `retriage.py` emits PROMOTING deltas only and therefore cannot
+# lift it, and every other consumer treats the missing area as a reason to skip. The
+# backlog it was written for sat parked, re-skipped every tick, with no exit.
+#
+# This lane is that exit. It is deliberately a SEPARATE workflow from retriage.yml rather
+# than a step inside it: the two sweeps fail differently (this one writes `area:` labels
+# and can mislabel; retriage writes `status:ready` and can mis-promote), and coupling them
+# would mean a fault in either silences both.
+#
+# ORDER IS LOAD-BEARING. The cron fires five minutes BEFORE retriage.yml's `*/30`, so an
+# issue unparked here is promotable by the very next retriage tick instead of waiting a
+# further half hour. It is a schedule, not a dependency: if this lane is red or skipped,
+# retriage simply finds nothing newly unparked and does its normal work.
+#
+# WHY IT IS SAFE TO POINT AT THE LIVE BOARD. Every property is enforced in
+# scripts/triage-area.py, not here, and each is covered by scripts/tests/test_triage_area.py:
+#   * FAIL CLOSED — no confident evidence yields NO label and the issue stays parked. A
+#     wrong `area:` routes a worker at the wrong crate and can put two workers on one
+#     conflict partition, which is strictly worse than a maintainer-visible park.
+#   * NEVER INVENTS A LABEL — every produced area is checked against the repo's LIVE label
+#     list and an unknown one is a hard error (exit 2), never a `gh label create`.
+#   * NO BARE UNPARK — `needs:area` is removed only in the same call that adds >=1 real
+#     `area:` label, so the two can never drift into "unparked with no partition".
+#   * IDEMPOTENT — an issue that already carries an `area:` is a no-op, so re-running never
+#     re-decides settled work and a timed-out run resumes cleanly on the next tick.
+#
+# THE UNATTRIBUTABLE CLASS GETS A REPORT, NOT SILENCE. #3816's third finding is that the
+# issues no classifier can attribute get no label, no report and no route back to a human —
+# they are simply re-skipped forever. The final step therefore ALWAYS writes the counts and
+# the full left-parked list to the run summary, whether or not anything was classified, so
+# the residue is a visible number a maintainer can act on rather than an absence.
+#
+# GATING POSTURE: NOT A GATE. schedule + workflow_dispatch only — it never runs on a PR head
+# or a merge_group ref, so it produces no check-run for ci-summary to aggregate and cannot
+# affect the required `gate`. Its job name carries no advisory/informational token and it
+# needs no .github/advisory-registry.json entry (that registry governs check-runs, and this
+# workflow creates none).
+#
+# The seam this file must keep — scheduled, unconditional, `--apply`, self-tested first,
+# `issues: write` — is pinned by
+# scripts/tests/test_readiness_visibility.py::TestAreaClassifierCronSeam.
+name: triage-area
+
+on:
+  # Five minutes ahead of retriage.yml's `*/30` — see ORDER IS LOAD-BEARING above.
+  schedule:
+    - cron: '25,55 * * * *'
+  workflow_dispatch:
+
+# Least privilege. `issues: write` is what `gh issue edit --add-label/--remove-label`
+# consumes and the ONLY write scope here; `contents: read` is for actions/checkout.
+# Without issues:write every label write 403s one issue at a time.
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: triage-area
+  cancel-in-progress: false
+
+jobs:
+  classify:
+    name: clear the needs:area park
+    runs-on: ubuntu-latest
+    # The first sweep over a large parked backlog is one `gh issue edit` per classified
+    # issue. A timeout mid-sweep is not a corruption: the tool is idempotent, so the next
+    # tick resumes where this one stopped — but the run reds, which is the honest signal.
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # scripts/triage-area.py defaults REPO to the hard-coded upstream name; pin it to the
+      # repository this run belongs to so a fork or a rename can never write to the wrong board.
+      SPARQ_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      # Both suites are hermetic (stdlib only, no gh, no network) and run BEFORE any write:
+      # the script's own rule fixtures, plus the independent safety suite (fail-closed / no
+      # unpark-without-an-area / no invented label / scope discipline). A rule-table
+      # regression must stop this run before it mislabels a live issue, not after.
+      - name: Self-test the classifier before it writes
+        run: |
+          set -euo pipefail
+          python3 scripts/triage-area.py --self-test
+          python3 scripts/tests/test_triage_area.py
+
+      - name: Classify the needs:area backlog
+        run: |
+          set -euo pipefail
+          python3 scripts/triage-area.py --apply | tee "$RUNNER_TEMP/triage-area.log"
+
+      # ALWAYS runs, including on a tick that classified nothing — the point is that the
+      # unattributable residue is a number a human sees, not silence. `if: always()` is
+      # deliberately absent: a failed sweep must not be summarised as if it had completed.
+      - name: Report the residue that no rule could attribute
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/triage-area.log"
+          # The script's own tally line: "-- N classified, M left parked (...), K scanned".
+          summary=$(sed -n 's/^-- //p' "$log" | tail -1)
+          summary=${summary:-'no tally line — the classifier produced no report'}
+          {
+            printf '### needs:area classifier\n\n%s\n\n' "$summary"
+            printf 'The issues below carry no confident evidence in the checked-in rule table, so they stay parked `needs:area` and remain undispatchable until a human attributes them or a rule is added. This list is the route back to a maintainer that #3816 found missing.\n\n'
+            sed -n 's/^   LEFT /- /p' "$log"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=needs:area residue::${summary}"

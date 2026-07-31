@@ -1234,6 +1234,132 @@ class TestRetriageCronSeam(unittest.TestCase):
                           f"{script} --self-test is never RUN on a PR — its assertions are dead")
 
 
+class TestAreaClassifierCronSeam(unittest.TestCase):
+    """The YAML seam that makes the `needs:area` park's ONLY EXIT actually fire.
+
+    [OPUS-5] #3816. `area:` is the partition key every dispatch stage keys off, and
+    `triage.py` parks a no-area issue `needs:area` rather than promoting it. Only
+    `scripts/triage-area.py` can lift that park — `retriage.py` emits PROMOTING deltas and
+    structurally cannot — and until triage-area.yml existed nothing RAN it, so the park was
+    terminal in automation: the parked backlog was re-skipped every tick with no exit.
+
+    Each property below is one edit away from restoring that state, and none of them is
+    observable anywhere else — a lane that has stopped writing looks exactly like a lane
+    with nothing to write:
+
+      * dropping `--apply` turns the sweep into a permanent silent dry-run;
+      * `if: false` (or a deleted step/job) stops it with the schedule still green;
+      * dropping the schedule leaves a lane only a human can fire, i.e. the hand-run state
+        this workflow was added to replace;
+      * removing `issues: write` makes every label write 403 one issue at a time;
+      * running the sweep before its fixtures lets a rule-table regression mislabel live
+        issues, and a wrong `area:` routes a worker at the wrong crate.
+
+    Parsed structurally rather than by substring for the same reason as
+    TestRetriageCronSeam: `if: false` on the job or a step is invisible to a substring
+    search, and that is the measured shape of every uncaught workflow mutant in this repo.
+    """
+
+    TRIAGE_AREA = REPO_ROOT / ".github" / "workflows" / "triage-area.yml"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.doc = yaml.safe_load(cls.TRIAGE_AREA.read_text(encoding="utf-8"))
+
+    def _steps(self):
+        jobs = self.doc["jobs"]
+        self.assertIn("classify", jobs, "the classify job must exist")
+        job = jobs["classify"]
+        self.assertNotIn("if", job, "the classify job must not be conditionally disabled")
+        return job["steps"]
+
+    def _run_blocks(self):
+        blocks = []
+        for step in self._steps():
+            self.assertNotIn("if", step, f"triage-area step {step.get('name')!r} is conditional")
+            if "run" in step:
+                blocks.append(step["run"])
+        return "\n".join(blocks)
+
+    def test_the_cron_actually_applies_its_plan(self):
+        # MUTANT: drop `--apply` => the sweep prints a plan forever and unparks nothing, so
+        # every parked issue stays undispatchable exactly as it was before this lane existed.
+        self.assertRegex(self._run_blocks(), r"triage-area\.py\b[^\n]*--apply",
+                         "triage-area.yml must run triage-area.py with --apply, or the cron "
+                         "is a permanent dry-run and the needs:area park never lifts")
+
+    def test_the_cron_self_tests_before_it_writes(self):
+        run = self._run_blocks()
+        # Presence before ORDER: `str.index` on a missing needle raises, which would make a
+        # deleted --apply an ERROR (a crash-kill) instead of a clean assertion failure.
+        self.assertIn("triage-area.py --self-test", run)
+        self.assertIn("scripts/tests/test_triage_area.py", run)
+        self.assertIn("--apply", run)
+        self.assertLess(run.index("triage-area.py --self-test"), run.index("--apply"),
+                        "the rule fixtures must run BEFORE the sweep writes area: labels")
+        self.assertLess(run.index("scripts/tests/test_triage_area.py"), run.index("--apply"),
+                        "the fail-closed safety suite must run BEFORE the sweep writes labels")
+
+    def test_the_sweep_is_scheduled(self):
+        on = self.doc.get("on") or self.doc.get(True)      # YAML 1.1 parses bare `on:` as True
+        self.assertTrue((on or {}).get("schedule"),
+                        "without a schedule this is the hand-run state #3816 measured: the "
+                        "park has no automated exit")
+
+    def test_the_job_can_write_labels(self):
+        # MUTANT: drop `issues: write` => every unpark fails at runtime, one 403 per issue.
+        perms = self.doc.get("permissions") or {}
+        self.assertEqual(perms.get("issues"), "write",
+                         "triage-area writes area: labels; without issues:write every "
+                         "unpark 403s")
+
+    def test_the_unattributable_residue_is_always_reported(self):
+        # #3816's third finding: the issues no rule can attribute get no label, no report and
+        # no route back to a human, so they are re-skipped forever. The report step is what
+        # turns that residue into a number a maintainer sees; deleting it must red here.
+        run = self._run_blocks()
+        self.assertIn("GITHUB_STEP_SUMMARY", run,
+                      "the left-parked residue must reach the run summary, or the "
+                      "unattributable class is silent again")
+        self.assertIn("LEFT", run,
+                      "the residue report must extract the classifier's LEFT lines")
+
+    def test_this_lane_never_runs_on_a_pull_request(self):
+        # It holds `issues: write` and executes the checked-out tree. A `pull_request`
+        # trigger would run PR-authored code with a write token; `pull_request_target`
+        # would be worse. schedule + workflow_dispatch only.
+        on = self.doc.get("on") or self.doc.get(True) or {}
+        for trigger in ("pull_request", "pull_request_target", "merge_group", "issues",
+                        "issue_comment"):
+            self.assertNotIn(trigger, on,
+                             f"triage-area holds issues:write — it must not trigger on "
+                             f"{trigger}")
+
+    def test_the_workflow_this_class_guards_is_a_path_trigger(self):
+        # [OPUS-5] Otherwise this whole class is VACUOUS on the one edit it exists to catch:
+        # routing-self-tests.yml is `paths:`-filtered, so a PR touching ONLY triage-area.yml
+        # would never run it and deleting --apply would sail through green. Exactly 2 — the
+        # pull_request filter AND the push filter.
+        source = (REPO_ROOT / ".github" / "workflows"
+                  / "routing-self-tests.yml").read_text(encoding="utf-8")
+        paths_section = source[:source.index("permissions:")]
+        self.assertEqual(paths_section.count('".github/workflows/triage-area.yml"'), 2,
+                         ".github/workflows/triage-area.yml must re-run this gate on BOTH "
+                         "pull_request and push, or the seam assertions above never execute "
+                         "on the PR that breaks them")
+
+    def test_the_classifier_fixtures_run_on_every_pr(self):
+        # The classifier is self-tested in docs-quality.yml (no paths filter) so a rule-table
+        # change reds THERE rather than silently at the next cron fire — the same #3419
+        # argument that covers triage.py/retriage.py.
+        source = TestRetriageCronSeam.DOCS_QUALITY.read_text(encoding="utf-8")
+        self.assertIn("python3 scripts/triage-area.py --self-test", source,
+                      "scripts/triage-area.py --self-test is never RUN on a PR — its "
+                      "assertions are dead")
+        self.assertIn("python3 scripts/tests/test_triage_area.py", source,
+                      "the fail-closed safety suite is never RUN on a PR")
+
+
 class TestTriageGateAgreesWithReadinessEngine(unittest.TestCase):
     """`triage.py` and `ready-issues.py` must mean the same thing by "gated".
 

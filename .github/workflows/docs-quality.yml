@@ -527,10 +527,14 @@ jobs:
           python3 scripts/triage.py --self-test
           python3 scripts/retriage.py --self-test
       # [OPUS-5] #1135: scripts/triage-area.py is the third member of that triage
-      # family — it CLEARS the `needs:area` park triage.py sets. It runs by hand
-      # (no cron), so without a PR-time gate a rule-table edit would only be
-      # discovered by mislabeling live issues, and a wrong `area:` routes a worker
-      # at the wrong crate. Both suites are hermetic (stdlib only, no gh/network):
+      # family — it CLEARS the `needs:area` park triage.py sets. As of #3816 it also
+      # runs unattended every half hour (.github/workflows/triage-area.yml), which
+      # makes this PR-time gate load-bearing rather than merely prudent: without it a
+      # rule-table edit would first be observed by mislabeling LIVE issues on the next
+      # cron fire, and a wrong `area:` routes a worker at the wrong crate. The cron
+      # re-runs both suites itself before it writes, so this gate and that one fail on
+      # the same regression — here on the PR, there before any label is touched.
+      # Both suites are hermetic (stdlib only, no gh/network):
       # the script's own rule self-test, plus the independent safety tests
       # (fail-closed / no unpark-without-an-area / no invented label / the three
       # rule orderings that were measured wrong on the live backlog).
