@@ -114,6 +114,13 @@ wrong near the boundary). Depends on `sq-3x7dl.1` (shares `codegen.nr`).
 > kernel-level gap tracked as `sq-xs0pa` (#3140); its decision record is
 > [`noir-ieee754-directed-rounding-design.md`](noir-ieee754-directed-rounding-design.md).
 > Both touch the round-and-pack step, so sequence them rather than running them in parallel.
+> Wider still, `sq-i6f4l` (#3155) evaluates the whole set of API items dropped from the
+> published surface in the Float-API migration — `abs`, that directed-rounding arithmetic,
+> and `Field`↔float — in
+> [`noir-ieee754-dropped-api-evaluation.md`](noir-ieee754-dropped-api-evaluation.md); it
+> **routes** the directed-rounding item to the record above rather than re-deciding it, and
+> notes that `abs` is a sign-lane transform that does *not* touch round-and-pack, so it does
+> not need that sequencing.
 
 **`sq-3x7dl.3` — docs + dead code (haiku).** README "Known gaps" lists implemented ops
 (comparisons, sqrt, round-to-integral, casts) as "Not yet implemented"; refresh it. Delete

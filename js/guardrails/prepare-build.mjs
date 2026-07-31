@@ -26,11 +26,16 @@ import { fileURLToPath } from 'node:url';
 
 const pkgDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const wasmArtifact = resolve(pkgDir, 'wasm', 'sparq_wasm_bg.wasm');
+// [OPUS-5] sq-2hk — the `--target nodejs` CommonJS sibling is part of a complete
+// build too, so a tree that has wasm/ + dist/ but no wasm-node/ is NOT "already
+// built": skipping there would hand a git-pin consumer a package whose
+// `./wasm-node` export resolves to nothing.
+const wasmNodeArtifact = resolve(pkgDir, 'wasm-node', 'sparq_wasm_bg.wasm');
 const distEntry = resolve(pkgDir, 'dist', 'index.js');
 const sourceCrate = resolve(pkgDir, '..', 'crates', 'sparq-wasm', 'Cargo.toml');
 
 // Already built (or shipping a built tree) — nothing to do.
-if (existsSync(wasmArtifact) && existsSync(distEntry)) {
+if (existsSync(wasmArtifact) && existsSync(wasmNodeArtifact) && existsSync(distEntry)) {
   process.exit(0);
 }
 

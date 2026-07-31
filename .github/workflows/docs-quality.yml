@@ -74,11 +74,16 @@
 #                       is deliberately pinned as the step name (de-facto REQUIRED gate).
 #     • inference-report-drift — the committed inference-conformance-report.md must state
 #                       the SAME `pass + documented divergence` total as the conformance
-#                       scoreboard's `ratchet_floor` and as ci.yml's enforced `RATCHET=`
-#                       (scripts/check-inference-report-drift.py; sq-1d528 / issue #3171).
+#                       scoreboard's `ratchet_floor`, as ci.yml's enforced `RATCHET=` and as
+#                       the ratchet ci.yml ADVERTISES in its job `name:`; and its heading +
+#                       totals must stay parseable by ci.yml's own `grep -A2` extractor, in
+#                       the spelling inference/report.rs emits (scripts/check-inference-
+#                       report-drift.py; sq-t099c + sq-1d528 / issue #3171, one gate).
 #                       Equality both ways: a lower total means the tracked report is stale
 #                       (the #1428 finding — it had drifted a whole suite behind), a higher
-#                       one means the ratchet was never raised with the improvement. Runs
+#                       one means the ratchet was never raised with the improvement; a
+#                       heading/window mismatch is the #1425 finding, where the artefact
+#                       readers cite could not be parsed by the gate guarding it. Runs
 #                       here, not in the Rust-gated inference-conformance job, because the
 #                       drift lands in PRs that never run that job. Deterministic, no build.
 #     • ci-scripts     — the CI-helper self-tests + workflow lints bucket (absorbed whole;
@@ -392,26 +397,42 @@ jobs:
       - name: preflight — checker tests + worker-brief block consistency — GATING
         run: python3 scripts/tests/test_preflight.py
 
-      # ---- inference-conformance report drift (sq-1d528 / issue #3171) ----
-      # [OPUS-5] The inference ratchet number lives in four places and only one is
-      # machine-regenerated: the scoreboard export's `ratchet_floor` (source of
-      # truth), ci.yml's `RATCHET=` + job name, and the COMMITTED
-      # inference-conformance-report.md. CI enforces the floor against the report it
-      # regenerates in-job and then throws that copy away as an artifact — nothing
-      # compared it to the copy in git, so sq-pbz04.1.3 (#1428) found the tracked
-      # report a full suite behind the enforced snapshot with every gate green. A
-      # stale committed report is a published-honesty problem: it is what a reader
-      # (and research/inference-completeness-audit.md) takes as the current state.
-      # This gate pins report `pass + documented divergence` == scoreboard floor ==
-      # ci.yml RATCHET, EQUALITY in both directions (below = stale report; above =
-      # an improvement whose ratchet was never raised, leaving CI guarding a number
-      # the engine already beat). It lives HERE rather than in the
-      # inference-conformance job because that job is Rust-gated + selection-gated —
-      # the drift lands in a PR that never runs it. Deterministic (text/JSON parse),
-      # no cargo build, no network, so it costs the shared runner milliseconds.
-      - name: Self-test the inference-report drift gate (both directions)
+      # ---- inference-conformance report drift (sq-t099c + sq-1d528 / issue #3171) ----
+      # [OPUS-5] Two beads landed this gate independently; the script unifies them and
+      # is wired in ONCE here. The inference ratchet number lives in four places and
+      # only one is machine-regenerated: the scoreboard export's `ratchet_floor`
+      # (source of truth), ci.yml's `RATCHET=` + the job `name:` that advertises it,
+      # and the COMMITTED inference-conformance-report.md. CI enforces the floor
+      # against the report it regenerates in-job and then throws that copy away as an
+      # artifact — nothing compared it to the copy in git.
+      #
+      # Both silent-drift classes are covered:
+      #   • sq-pbz04.1.3 (#1428) found the tracked report a full suite BEHIND the
+      #     enforced snapshot with every gate green. A stale committed report is a
+      #     published-honesty problem: it is what a reader (and
+      #     research/inference-completeness-audit.md) takes as the current state.
+      #   • #1425 found the emitter writing "## Overall (all inference suites)" while
+      #     the committed report said "## Overall (all suites)" with a hand-added
+      #     paragraph wedged between heading and totals — so ci.yml's own
+      #     `grep -A2 <heading>` could not parse the artefact readers cite.
+      #
+      # So the gate binds the emitter (inference/report.rs), ci.yml's two greps +
+      # `RATCHET=` literal + advertised job name, scoreboard.rs + its generated mirror
+      # (including the doc-comment floor list), and the tracked report. Report
+      # `pass + documented divergence` == scoreboard floor == ci.yml RATCHET ==
+      # advertised job-name ratchet, EQUALITY in both directions (below = stale
+      # report; above = an improvement whose ratchet was never raised, leaving CI
+      # guarding a number the engine already beat). It never regenerates the report
+      # (that needs the pinned suites + a release build), so a legitimately-lagging
+      # artefact is fine; only a heading/count contradiction is red. It lives HERE
+      # rather than in the inference-conformance job because that job is Rust-gated +
+      # selection-gated — the drift lands in a PR that never runs it. GATING:
+      # deterministic (text/JSON parse), in-repo, no cargo build, no network, so it
+      # costs the shared runner milliseconds. The --self-test mutation table proves
+      # each check has teeth.
+      - name: Self-test inference report drift gate (both directions + mutation table)
         run: python3 scripts/check-inference-report-drift.py --self-test
-      - name: inference-report drift (report == scoreboard floor == ci.yml RATCHET) — GATING
+      - name: "Enforce inference report ↔ ci.yml ratchet/job-name ↔ central scoreboard floor agree — GATING"
         run: python3 scripts/check-inference-report-drift.py
 
       - name: Demo deployment manifests
@@ -619,6 +640,19 @@ jobs:
         run: python3 scripts/check-install-action-tool.py --self-test
       - name: "Enforce explicit `with: tool:` on every SHA-pinned install-action — GATING"
         run: python3 scripts/check-install-action-tool.py
+      # [SONNET-4.6] sq-6vshe.11: every cargo-llvm-cov job MUST set a job-level RUSTFLAGS,
+      # and they must all set the SAME value. cargo picks ONE rustflags source (first match
+      # wins, never merged) and cargo-llvm-cov sets RUSTFLAGS/CARGO_ENCODED_RUSTFLAGS to
+      # inject `-C instrument-coverage` — which silently DROPS ci.yml's workflow-level
+      # CARGO_TARGET_<triple>_RUSTFLAGS lld flag in exactly those jobs. Nothing fails when
+      # that happens; the flag just stops applying, which is how it went unnoticed from
+      # sq-6vshe.1 until it was measured. The sameness half additionally protects the engine
+      # coverage split, whose cross-runner .profraw merge is only valid while the run and
+      # merge jobs compile with identical inputs. Stdlib-only, no compile, no deps.
+      - name: Self-test coverage RUSTFLAGS gate (pure logic)
+        run: python3 scripts/check-coverage-rustflags.py --self-test
+      - name: "Enforce job-level RUSTFLAGS on every cargo-llvm-cov job — GATING"
+        run: python3 scripts/check-coverage-rustflags.py
       # [OPUS-4.8] sq-u59rq: the stacked-PR arm guard. A deterministic PreToolUse command-hook
       # (.claude/settings.json, sibling to the perf-reviewer) that DENIES `gh pr merge … --auto`
       # when the PR's baseRefName ≠ main — so we never squash-merge a stacked PR into its base
@@ -655,6 +689,10 @@ jobs:
         run: python3 scripts/check-dashboard-publish-wiring.py --self-test
       - name: "Enforce every served bench/dashboard asset is wired into the Pages publisher — GATING"
         run: python3 scripts/check-dashboard-publish-wiring.py
+      # [OPUS-5] sq-t099c's inference report/scoreboard drift gate was wired in here and
+      # sq-1d528's (#3171) a few steps above; the two scripts are now ONE gate, invoked
+      # once at the earlier site (search "inference-conformance report drift"). Running
+      # the same script twice in this job bought nothing but runner seconds.
       # [OPUS-4.8] sq-d8or: the built-docs-site link gate (scripts/check-site-links.sh) is
       # invoked on the publish path in pages.yml (after `next build`), where the static export
       # exists. Its remap of the /sparq GitHub-Pages base path + its TEETH (a broken internal
@@ -876,6 +914,13 @@ jobs:
       # content-parity contract. Hermetic + stdlib-only (no PyYAML needed).
       - name: Merge-queue cache/artifact posture (save-if + archive diet — sq-6vshe.15)
         run: python3 scripts/tests/test_mergequeue_cache_posture.py
+      # [OPUS-5] sq-khm3f: same invisible-regression shape as the posture test above.
+      # The gating `js` lane installs wasm-pack as a PREBUILT, SHA-pinned, exactly-
+      # versioned binary; reverting to `cargo install wasm-pack` would keep the lane
+      # green on a good day while re-exposing it to a transient crates.io blip
+      # (which red-gated PR #1131). Hermetic + stdlib-only (no PyYAML needed).
+      - name: js lane wasm-pack install posture (prebuilt + pinned — sq-khm3f)
+        run: python3 scripts/tests/test_js_wasm_pack_install.py
       # [OPUS-4.8] sq-va7at: the nightly selection-bug ALARM
       # (scripts/ci_selection_alarm.py, .github/workflows/selection-alarm.yml,
       # design §6.1). Hermetic unittest suite (NO gh, NO git, NO cargo, NO network;
@@ -933,12 +978,18 @@ jobs:
       # [SONNET-4.6] sq-1cb6l: the 5 remaining hermetic test suites found by the
       # #1670 audit, wired here alongside the other ci-scripts self-tests.
       #
-      # test_cone_coverage.py (27 tests) — the cone-based coverage selector
+      # test_cone_coverage.py (49 tests) — the cone-based coverage selector
       # (scripts/cone_coverage.py): compute_cone() closure math, §4.1 full-run
-      # triggers, dev-dep propagation, shadow/enforce mode flags, shadow_report()
+      # triggers, dev-dep propagation, shadow/enforce mode flags, report()
       # label semantics, shard-filtering intersection, and the empty-all_members
-      # fallback. Stdlib-only, no cargo/network.
-      - name: Self-test cone_coverage.py (cone selector + shadow_report — sq-1cb6l)
+      # fallback. [SONNET-4.6] sq-3dr4t adds the ENFORCE-flip guards: cone_from_selection()
+      # (the path CI uses — narrows for an explicit select mode=selected and NOTHING
+      # else), which cases write a NARROWING --crates-output (cone+enforce ONLY — shadow,
+      # mode=full and every fail-safe write EMPTY), the enforce-mode report's inherited
+      # rows and divergence-detection-unavailable honesty, and coverage.sh's COVERAGE_CONE
+      # intersection driven through `coverage.sh --print-crates` (including the
+      # whitespace-only-cone no-op). Stdlib-only, no cargo/network.
+      - name: Self-test cone_coverage.py (cone selector + cone report — sq-1cb6l)
         run: python3 scripts/tests/test_cone_coverage.py
       # test_drift_scan.py (37 tests) — the periodic drift scanner
       # (scripts/drift-scan.py): all 5 scanner classes (bench-missing,
@@ -973,6 +1024,17 @@ jobs:
       # only, no git/network.
       - name: Self-test check-install-action-tool.py (fixtures + live invariant — sq-1cb6l)
         run: python3 scripts/tests/test_install_action_tool.py
+      # [SONNET-4.6] test_coverage_rustflags.py (17 tests) — supplements the
+      # check-coverage-rustflags.py --self-test + enforce run above: the pure
+      # fixtures (job-level vs step-level env, CSV `tool:` list, bare `run: cargo
+      # llvm-cov`, no-compile coverage job out of scope, value divergence), the
+      # scalar parser (a mis-parsed value would fake a divergence), the live
+      # workflows invariant, and TWO vacuity guards — the scan must find at least
+      # one cargo-llvm-cov job, and it must specifically cover the
+      # coverage-engine-{run,merge} pair whose RUSTFLAGS must match for the
+      # cross-runner .profraw merge to be valid. Stdlib-only, no git/network.
+      - name: Self-test check-coverage-rustflags.py (fixtures + live invariant — sq-6vshe.11)
+        run: python3 scripts/tests/test_coverage_rustflags.py
       # [OPUS-5] sparq-org/sparq#4652: the zero-dispatch merge-group watchdog
       # (scripts/merge-group-watchdog.py, .github/workflows/merge-group-watchdog.yml)
       # plus the CI_TIMEOUT routing split it feeds in merge-queue-feedback.yml. Both

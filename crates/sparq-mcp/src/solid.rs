@@ -19,9 +19,30 @@
 //! - `container_list` (Class R) — the direct `ldp:contains` members of one container,
 //!   derived ONLY from stored containment triples in the container's own graph — never
 //!   from IRI-path guessing (draft §6.4).
+//! - `introspect`, `shapes`, `stats` (Class R) — the schema/statistics tools, mined from
+//!   the session's authorized projection rather than the whole pod. [SONNET-4.6] sq-8n6iv
 //! - `update`, `resource_put`, `resource_delete`, `container_create` (Class U) — all
 //!   gated behind the SAME off-by-default write enablement as the base server's
 //!   `update` tool ([`SolidServerConfig::allow_update`], draft §7.1).
+//!
+//! # Session-scoped aggregates — [SONNET-4.6] sq-8n6iv
+//!
+//! [`crate::McpServer`]'s `introspect` / `shapes` / `stats` tools mine the WHOLE served
+//! graph. Handing a whole-pod schema or a whole-pod triple count to one principal is an
+//! **aggregate leak**: it discloses the classes, predicates, vocabularies and volume of
+//! documents that principal cannot open — a leak that no per-resource check catches,
+//! because no resource was read. So this server does not reuse them. Its `introspect` /
+//! `shapes` / `stats` are derived from ONE input — the session's **authorized
+//! projection** — which is built through the SAME [`sparq_engine::DatasetView`] the
+//! `query` tool evaluates under (`PodStore::view_for`). Two consequences follow by
+//! construction rather than by a second check:
+//!
+//! - an unauthorized document contributes to no count, in any of the three tools;
+//! - a session with no grants gets an empty schema and zero totals (fail-closed), not
+//!   the pod's real totals.
+//!
+//! The standing default graph is empty here too: the projection ranges over
+//! `GRAPH ?g`, so it is the authorized NAMED graphs and nothing else.
 //!
 //! # The `resources` surface + notifications (Class N, draft §8 / §10)
 //!
@@ -135,6 +156,7 @@ use oxrdf::{NamedNode, Term, Triple};
 use serde_json::{json, Value};
 use sparq_core::Graph;
 use sparq_engine::QueryBudget;
+use sparq_introspect::Introspection;
 use sparq_solid::{Mode, PodStore, Session};
 
 use crate::jsonrpc::{Request, RpcError, INVALID_PARAMS, METHOD_NOT_FOUND, RESOURCE_NOT_FOUND};
@@ -298,6 +320,87 @@ pub const CONTAINER_LIST: ToolSpec = ToolSpec {
                 }
             },
             "required": ["url"],
+            "additionalProperties": false
+        })
+    },
+};
+
+/// The pod `introspect` tool: the effective schema of the session's AUTHORIZED
+/// documents only (never the whole pod). [SONNET-4.6] sq-8n6iv
+pub const POD_INTROSPECT: ToolSpec = ToolSpec {
+    name: "introspect",
+    description: "Return the effective schema of the pod documents THIS SESSION MAY \
+                  READ — classes (by instance count), predicates (by usage), namespace \
+                  prefixes, and characteristic sets — mined from exactly the named \
+                  graphs the `query` tool can see. A document this session cannot read \
+                  contributes to no count, so the schema is not an aggregate view of the \
+                  whole pod. Set `format` to \"text\" for a compact token-budgeted \
+                  summary suitable for LLM grounding, or \"json\" (the default) for the \
+                  full machine-readable structure.",
+    input_schema: || {
+        json!({
+            "type": "object",
+            "properties": {
+                "format": {
+                    "type": "string",
+                    "enum": ["json", "text"],
+                    "description": "Output shape: \"json\" (full structure, default) or \
+                                    \"text\" (compact prompt-ready summary)."
+                },
+                "budget_chars": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "For format=\"text\": approximate character budget for \
+                                    the summary (default 4000)."
+                }
+            },
+            "additionalProperties": false
+        })
+    },
+};
+
+/// The pod `shapes` tool: one class's data-grounded shape over the AUTHORIZED
+/// documents only. [SONNET-4.6] sq-8n6iv
+pub const POD_SHAPES: ToolSpec = ToolSpec {
+    name: "shapes",
+    description: "Given a class/type IRI, return the data-grounded shape of that class \
+                  — which predicates its instances actually use, with coverage, observed \
+                  datatypes, object-kind split, observed range, and the cardinalities the \
+                  data supports — derived ONLY from the pod documents this session may \
+                  read. Instances in unauthorized documents are invisible here exactly as \
+                  they are to `query`, so a class only this session's unreadable \
+                  documents use is reported as absent. No LLM is involved.",
+    input_schema: || {
+        json!({
+            "type": "object",
+            "properties": {
+                "class": {
+                    "type": "string",
+                    "description": "The full class IRI (e.g. \
+                                    \"http://xmlns.com/foaf/0.1/Person\"). Call \
+                                    `introspect` first to discover the classes the \
+                                    authorized documents use."
+                }
+            },
+            "required": ["class"],
+            "additionalProperties": false
+        })
+    },
+};
+
+/// The pod `stats` tool: totals over the AUTHORIZED documents only. [SONNET-4.6] sq-8n6iv
+pub const POD_STATS: ToolSpec = ToolSpec {
+    name: "stats",
+    description: "Return summary statistics — total triples, distinct subjects, typed \
+                  entities, and the number of distinct classes / predicates / namespaces \
+                  — computed over exactly the pod documents this session may read, not \
+                  over the whole pod. Two sessions get different totals; a session with \
+                  no grants gets zeros. Counts are over the RDF MERGE of those documents, \
+                  so a triple asserted in two of them counts once.",
+    input_schema: || {
+        json!({
+            "type": "object",
+            "properties": {},
             "additionalProperties": false
         })
     },
@@ -652,7 +755,14 @@ impl SolidMcpServer {
 
     /// The advertised tool list: read tools always; mutating tools only when enabled.
     pub fn advertised(&self) -> Vec<&'static ToolSpec> {
-        let mut tools: Vec<&'static ToolSpec> = vec![&POD_QUERY, &RESOURCE_GET, &CONTAINER_LIST];
+        let mut tools: Vec<&'static ToolSpec> = vec![
+            &POD_QUERY,
+            &RESOURCE_GET,
+            &CONTAINER_LIST,
+            &POD_INTROSPECT,
+            &POD_SHAPES,
+            &POD_STATS,
+        ];
         if self.allow_update() {
             tools.extend([&POD_UPDATE, &RESOURCE_PUT, &RESOURCE_DELETE, &CONTAINER_CREATE]);
         }
@@ -735,6 +845,9 @@ impl SolidMcpServer {
             "query" => self.tool_query(&args),
             "resource_get" => self.tool_resource_get(&args),
             "container_list" => self.tool_container_list(&args),
+            "introspect" => self.tool_introspect(&args),
+            "shapes" => self.tool_shapes(&args),
+            "stats" => self.tool_stats(),
             "update" => self.tool_update(&args),
             "resource_put" => self.tool_resource_put(&args),
             "resource_delete" => self.tool_resource_delete(&args),
@@ -856,6 +969,97 @@ impl SolidMcpServer {
         }
         members.sort_by(|a, b| a["url"].as_str().cmp(&b["url"].as_str()));
         Ok(pretty(&json!({ "url": url, "members": members })))
+    }
+
+    // ───────── session-scoped aggregates (schema / statistics), sq-8n6iv ─────────
+
+    /// The session's authorized data as ONE standalone graph — the single input every
+    /// aggregate tool below is derived from.
+    ///
+    /// It is built by CONSTRUCTing `GRAPH ?g { ?s ?p ?o }` **through the same
+    /// [`DatasetView`](sparq_engine::DatasetView) the `query` tool evaluates under**
+    /// ([`PodStore::view_for`]), so the set of documents it can possibly contain is
+    /// exactly the set `query` can read: a document this session may not read is not
+    /// enumerated by `GRAPH ?g` at all, and therefore contributes to no count. That
+    /// shared view is the whole point — an aggregate derived from `store.graph` directly
+    /// would be a whole-pod summary handed to one principal, which in a multi-principal
+    /// deployment leaks the shape (and the size) of documents it cannot open.
+    ///
+    /// The projection is a COPY (the authorized sub-graphs each own a private
+    /// dictionary, so there is no zero-copy union to introspect over) and is rebuilt per
+    /// call rather than cached, because a mutating tool or an `.acl` write can change
+    /// either the data or the authorized set between calls and a stale schema would be a
+    /// silent lie. Cost is linear in authorized data — the same order as the
+    /// `Introspection::build` it feeds.
+    ///
+    /// It runs under the configured [budget](Self::budget), whose `max_rows` **refuses
+    /// rather than truncates**, so an over-budget pod yields an error, never a quietly
+    /// undercounted schema.
+    fn authorized_projection(&self) -> Result<Graph, String> {
+        let view = self.store.view_for(&self.session(), Mode::Read);
+        let budget = self.budget();
+        let triples = sparq_engine::with_view(&view, || {
+            sparq_engine::construct_with_budget(
+                view.base,
+                "CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } }",
+                &budget,
+            )
+        })?;
+        Graph::load_str(&sparq_engine::triples_to_ntriples(&triples), "ntriples")
+            .map_err(|e| format!("authorized projection did not round-trip: {}", e))
+    }
+
+    /// The mined schema of [the authorized projection](Self::authorized_projection).
+    fn introspection(&self) -> Result<Introspection, String> {
+        Ok(Introspection::build(&self.authorized_projection()?))
+    }
+
+    /// `introspect`: the effective schema of the documents THIS session may read, as
+    /// JSON (default) or a token-budgeted text summary.
+    fn tool_introspect(&self, args: &Value) -> Result<String, String> {
+        let format = args.get("format").and_then(Value::as_str).unwrap_or("json");
+        let ix = self.introspection()?;
+        match format {
+            "json" => Ok(ix.to_json()),
+            "text" => {
+                let budget = args
+                    .get("budget_chars")
+                    .and_then(Value::as_u64)
+                    .map(|n| n as usize)
+                    .unwrap_or(4000);
+                Ok(ix.to_text_summary(budget))
+            }
+            other => Err(format!("unknown format `{}` (expected \"json\" or \"text\")", other)),
+        }
+    }
+
+    /// `shapes`: one class's data-grounded shape, mined from the authorized projection
+    /// only — the same miner the base server uses, over a session-scoped graph.
+    fn tool_shapes(&self, args: &Value) -> Result<String, String> {
+        let class_iri = arg_str(args, "class")?;
+        let ix = self.introspection()?;
+        let shape = crate::shapes::class_shape(&ix, class_iri)?;
+        Ok(pretty(&shape))
+    }
+
+    /// `stats`: dataset totals over the authorized projection. A session with no read
+    /// grants gets zeros — the fail-closed answer, not the pod's totals.
+    ///
+    /// `triples` is the size of the projection, i.e. of the RDF **merge** of the readable
+    /// documents: a triple asserted in two of them is one triple here, not two. That is
+    /// the number every other figure in this object is consistent with, which is why it is
+    /// reported rather than the sum of the per-document sizes.
+    fn tool_stats(&self) -> Result<String, String> {
+        let projection = self.authorized_projection()?;
+        let ix = Introspection::build(&projection);
+        Ok(pretty(&json!({
+            "triples": projection.len(),
+            "distinct_subjects": ix.subjects,
+            "typed_entities": ix.entities,
+            "classes": ix.classes.len(),
+            "predicates": ix.predicates.len(),
+            "namespaces": ix.vocabularies.distinct,
+        })))
     }
 
     // ───────── the MCP `resources` surface + notifications (draft §8/§10) ─────────
@@ -1554,12 +1758,110 @@ mod unit {
         assert!(c.agent.is_none() && c.client.is_none() && c.issuer.is_none() && c.now.is_none());
     }
 
+    /// A two-principal pod: alice reads `pub/`, bob reads `priv/` — and neither can
+    /// read the other's document. Both documents use a DIFFERENT class and predicate,
+    /// so any aggregate that spilled across the boundary is visible as a name, not just
+    /// as a count. [SONNET-4.6] sq-8n6iv
+    fn split_pod() -> PodStore {
+        let nq = r#"
+<https://pod.ex/pub/d#it> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://ex.dev/ns#Public> <https://pod.ex/pub/d> .
+<https://pod.ex/pub/d#it> <https://ex.dev/ns#openField> "open" <https://pod.ex/pub/d> .
+<https://pod.ex/priv/d#it> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://ex.dev/ns#Secret> <https://pod.ex/priv/d> .
+<https://pod.ex/priv/d#it> <https://ex.dev/ns#secretField> "shh" <https://pod.ex/priv/d> .
+<https://pod.ex/pub/.acl#a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.ex/pub/.acl> .
+<https://pod.ex/pub/.acl#a> <http://www.w3.org/ns/auth/acl#default> <https://pod.ex/pub/> <https://pod.ex/pub/.acl> .
+<https://pod.ex/pub/.acl#a> <http://www.w3.org/ns/auth/acl#agent> <https://alice.ex/card#me> <https://pod.ex/pub/.acl> .
+<https://pod.ex/pub/.acl#a> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/pub/.acl> .
+<https://pod.ex/priv/.acl#a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.ex/priv/.acl> .
+<https://pod.ex/priv/.acl#a> <http://www.w3.org/ns/auth/acl#default> <https://pod.ex/priv/> <https://pod.ex/priv/.acl> .
+<https://pod.ex/priv/.acl#a> <http://www.w3.org/ns/auth/acl#agent> <https://bob.ex/card#me> <https://pod.ex/priv/.acl> .
+<https://pod.ex/priv/.acl#a> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/priv/.acl> .
+"#;
+        PodStore::new(Graph::load_dataset(nq, "nquads").expect("fixture parses"))
+    }
+
+    fn split_server(agent: Option<&str>) -> SolidMcpServer {
+        let config = SolidServerConfig {
+            agent: agent.map(str::to_string),
+            ..SolidServerConfig::default()
+        };
+        SolidMcpServer::with_config(split_pod(), config).expect("materializes")
+    }
+
+    #[test]
+    fn authorized_projection_holds_exactly_the_readable_documents() {
+        // [SONNET-4.6] sq-8n6iv — THE aggregate boundary: the projection every schema
+        // and statistics tool is mined from must contain alice's document and nothing
+        // of bob's. Widening it to `store.graph` flips this red.
+        let alice = split_server(Some("https://alice.ex/card#me"));
+        let projection = alice.authorized_projection().expect("projection builds");
+        assert_eq!(projection.len(), 2, "exactly the two triples of pub/d");
+        assert!(sparq_engine::ask(
+            &projection,
+            "ASK { <https://pod.ex/pub/d#it> <https://ex.dev/ns#openField> \"open\" }"
+        )
+        .expect("ASK evaluates"));
+        assert!(
+            !sparq_engine::ask(&projection, "ASK { ?s <https://ex.dev/ns#secretField> ?o }")
+                .expect("ASK evaluates"),
+            "the unreadable document must contribute nothing"
+        );
+    }
+
+    #[test]
+    fn authorized_projection_is_empty_for_a_grant_less_session() {
+        // Fail-closed: no grants ⇒ no aggregate at all, not the pod's totals.
+        let anon = split_server(None);
+        assert_eq!(anon.authorized_projection().expect("projection builds").len(), 0);
+    }
+
+    #[test]
+    fn stats_and_introspect_count_only_the_session_view() {
+        let alice = split_server(Some("https://alice.ex/card#me"));
+        let bob = split_server(Some("https://bob.ex/card#me"));
+
+        let stats: Value =
+            serde_json::from_str(&alice.tool_stats().expect("stats")).expect("stats is JSON");
+        assert_eq!(stats["triples"], 2);
+        assert_eq!(stats["classes"], 1);
+
+        let ix = alice.tool_introspect(&json!({})).expect("introspect");
+        assert!(ix.contains("ns#Public"), "the readable class is present: {ix}");
+        assert!(!ix.contains("ns#Secret"), "the unreadable class must not appear: {ix}");
+        assert!(!ix.contains("secretField"), "nor its predicate: {ix}");
+
+        // The mirror image: bob sees his own document and none of alice's.
+        let ix = bob.tool_introspect(&json!({})).expect("introspect");
+        assert!(ix.contains("ns#Secret") && !ix.contains("ns#Public"), "{ix}");
+    }
+
+    #[test]
+    fn shapes_reports_a_class_only_unreadable_documents_use_as_absent() {
+        let alice = split_server(Some("https://alice.ex/card#me"));
+        // Alice's own class resolves…
+        let shape = alice
+            .tool_shapes(&json!({ "class": "https://ex.dev/ns#Public" }))
+            .expect("the readable class has a shape");
+        assert!(shape.contains("openField"), "{shape}");
+        // …and bob's does not, exactly as if the instances were absent.
+        let err = alice
+            .tool_shapes(&json!({ "class": "https://ex.dev/ns#Secret" }))
+            .expect_err("an unreadable class is not describable");
+        assert!(!err.contains("secretField"), "the error must not leak the shape: {err}");
+    }
+
     #[test]
     fn tool_spec_consts_serialize_with_schema() {
         for spec in [
             &POD_QUERY,
             &RESOURCE_GET,
             &CONTAINER_LIST,
+            &POD_INTROSPECT,
+            &POD_SHAPES,
+            &POD_STATS,
+            &POD_INTROSPECT,
+            &POD_SHAPES,
+            &POD_STATS,
             &POD_UPDATE,
             &RESOURCE_PUT,
             &RESOURCE_DELETE,

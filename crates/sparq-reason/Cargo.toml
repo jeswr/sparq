@@ -213,6 +213,13 @@ required-features = ["substrate-compare"]
 name = "substrate_join_owl"
 required-features = ["substrate-join"]
 
+# [OPUS-5] sq-3xsx0: the bench Datalog encodings' cls-int1 generalises to ANY
+# owl:intersectionOf list arity — the rule shape is validated through this crate's own
+# semi-naive Datalog fixpoint, so it needs (and only needs) the `datalog` feature.
+[[test]]
+name = "datalog_intersection_arity"
+required-features = ["datalog"]
+
 # [Kern] quoted-triple RL inference, end-to-end: Turtle 1.2 fixtures (reifiers,
 # annotation blocks, classic-reification data) through `Graph::parse_to_triples`,
 # asserting the destructure/construct closures, the opacity non-entailments, the

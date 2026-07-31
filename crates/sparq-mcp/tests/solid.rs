@@ -111,7 +111,7 @@ fn tool_names(server: &mut SolidMcpServer) -> Vec<String> {
 fn read_only_pod_server_advertises_read_tools_only() {
     let mut s = server_for(ALICE, false);
     let names = tool_names(&mut s);
-    assert_eq!(names, ["query", "resource_get", "container_list"]);
+    assert_eq!(names, ["query", "resource_get", "container_list", "introspect", "shapes", "stats"]);
 }
 
 #[test]
@@ -120,8 +120,8 @@ fn write_enabled_pod_server_advertises_the_mutating_tools() {
     let names = tool_names(&mut s);
     assert_eq!(
         names,
-        ["query", "resource_get", "container_list", "update", "resource_put",
-         "resource_delete", "container_create"]
+        ["query", "resource_get", "container_list", "introspect", "shapes", "stats",
+         "update", "resource_put", "resource_delete", "container_create"]
     );
 }
 
@@ -357,6 +357,111 @@ fn query_tool_is_session_scoped() {
     let (text, is_err) = tool(&mut bob, "query", q);
     assert!(!is_err, "{text}");
     assert!(text.contains("classified") && !text.contains("hello"), "{text}");
+}
+
+/// [SONNET-4.6] sq-8n6iv — the aggregate tools are session-scoped exactly as `query` is.
+/// The base server's `stats` counts the WHOLE graph; if the pod server's did, alice's
+/// totals would include bob's `secret/` documents — an aggregate leak that no
+/// per-resource check catches, because no resource was read.
+#[test]
+fn stats_counts_only_the_documents_the_session_may_read() {
+    let mut alice = server_for(ALICE, false);
+    let (text, is_err) = tool(&mut alice, "stats", json!({}));
+    assert!(!is_err, "{text}");
+    let alice_stats: Value = serde_json::from_str(&text).expect("stats is JSON");
+
+    let mut bob = server_for(BOB, false);
+    let (text, is_err) = tool(&mut bob, "stats", json!({}));
+    assert!(!is_err, "{text}");
+    let bob_stats: Value = serde_json::from_str(&text).expect("stats is JSON");
+
+    // Two sessions, two different totals — neither is the pod's total.
+    let (a, b) = (alice_stats["triples"].as_u64().unwrap(), bob_stats["triples"].as_u64().unwrap());
+    assert!(a > 0 && b > 0, "each session sees its own data: {a} / {b}");
+    assert_ne!(a, b, "a whole-pod count would make these equal");
+    // The pod holds strictly more than either session can read.
+    let whole_pod: u64 = alice
+        .store()
+        .graph
+        .named
+        .iter()
+        .filter(|(name, _)| !name.to_string().starts_with("<urn:sparq:"))
+        .map(|(_, g)| g.len() as u64)
+        .sum();
+    assert!(a < whole_pod && b < whole_pod, "{a} / {b} must both be under {whole_pod}");
+}
+
+#[test]
+fn introspect_mines_only_the_authorized_documents() {
+    // Alice's authorized documents use ldp:contains and ex:title; bob's `secret/s1`
+    // is invisible to her, so nothing OF THAT DOCUMENT may reach her schema.
+    //
+    // What legitimately DOES appear is the `https://pod.ex/secret/` container IRI: the
+    // root container — which alice may read — stores `<pod.ex/> ldp:contains
+    // <pod.ex/secret/>`, so the name is part of a document she is authorized to read
+    // (the same disclosure `container_list` already makes). The boundary this test pins
+    // is the unreadable document's own subjects and terms, not the mention of its
+    // container's name in a readable one.
+    let mut alice = server_for(ALICE, false);
+    let (text, is_err) = tool(&mut alice, "introspect", json!({}));
+    assert!(!is_err, "{text}");
+    assert!(text.contains("https://ex.dev/ns#title"), "the readable predicate is mined: {text}");
+    assert!(!text.contains("secret/s1"), "no trace of the unreadable document: {text}");
+    // The materialized authorization view lives in the reserved graph space and is not
+    // pod content: mining it would hand the agent the pod's policy vocabulary.
+    assert!(!text.contains("urn:sparq:"), "the reserved auth view is not pod data: {text}");
+
+    // The text summary is the same projection, so it cannot disagree.
+    let (text, is_err) = tool(&mut alice, "introspect", json!({"format": "text"}));
+    assert!(!is_err, "{text}");
+    assert!(!text.contains("secret/s1"), "{text}");
+}
+
+#[test]
+fn aggregate_tools_fail_closed_for_a_session_with_no_grants() {
+    // An anonymous session reads nothing, so it must learn nothing in aggregate either
+    // — zeros, not the pod's real totals.
+    let config = SolidServerConfig::default();
+    let mut anon = SolidMcpServer::with_config(pod(), config).expect("materializes");
+    let (text, is_err) = tool(&mut anon, "stats", json!({}));
+    assert!(!is_err, "{text}");
+    let stats: Value = serde_json::from_str(&text).expect("stats is JSON");
+    assert_eq!(stats["triples"], 0);
+    assert_eq!(stats["classes"], 0);
+    assert_eq!(stats["predicates"], 0);
+
+    let (text, is_err) = tool(&mut anon, "introspect", json!({}));
+    assert!(!is_err, "{text}");
+    assert!(!text.contains("https://ex.dev/ns#title"), "{text}");
+}
+
+#[test]
+fn a_write_is_reflected_in_the_next_aggregate() {
+    // The aggregate is derived per call from the live authorized view, so it can never
+    // serve a stale schema after a mutation (or after an ACL change).
+    let mut alice = server_for(ALICE, true);
+    let (text, _) = tool(&mut alice, "stats", json!({}));
+    let before: Value = serde_json::from_str(&text).expect("stats is JSON");
+
+    let (text, is_err) = tool(
+        &mut alice,
+        "resource_put",
+        json!({
+            "url": "https://pod.ex/notes/n2",
+            "content_type": "text/turtle",
+            "content": "<https://pod.ex/notes/n2#it> <https://ex.dev/ns#tag> \"fresh\" .",
+        }),
+    );
+    assert!(!is_err, "{text}");
+
+    let (text, _) = tool(&mut alice, "stats", json!({}));
+    let after: Value = serde_json::from_str(&text).expect("stats is JSON");
+    assert!(
+        after["triples"].as_u64().unwrap() > before["triples"].as_u64().unwrap(),
+        "the new document must be counted: {before} -> {after}"
+    );
+    let (text, _) = tool(&mut alice, "introspect", json!({}));
+    assert!(text.contains("https://ex.dev/ns#tag"), "the new predicate is mined: {text}");
 }
 
 // ───────────────────────── Class U (gated writes) ─────────────────────────

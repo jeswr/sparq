@@ -76,13 +76,29 @@
 #   { "generated": "<iso8601>", "tier": "...", "toolchain": "...",
 #     "crates": { "<crate>": { "lines_pct": <float>, "lines_covered": N,
 #                              "lines_total": N, "seconds": N, "skipped_tests": [...],
-#                              "features": [...], "measured": true } } }
+#                              "features": [...], "measured": true } },
+#     # present ONLY when COVERAGE_CONE filtered the selection (sq-3dr4t):
+#     "cone": { "filter": [...], "measured": [...], "inherited": [...] } }
 #
 # USAGE:
 #   scripts/coverage.sh                 # per-commit tier (FAST + medium crates)
 #   COVERAGE_TIER=nightly scripts/coverage.sh   # all crates incl. heavy vectors
 #   COVERAGE_TIER=full    scripts/coverage.sh   # every measurable crate, no skips
 #   COVERAGE_CRATES="sparq-core sparq-parse" scripts/coverage.sh   # ad-hoc subset
+#   COVERAGE_CONE="sparq-core sparq-geo" scripts/coverage.sh  # changed-cone filter (sq-3dr4t)
+#   scripts/coverage.sh --print-crates  # print the crates THIS invocation would measure
+#
+# COVERAGE_CONE (changed-cone coverage, bead sq-3dr4t — see scripts/cone_coverage.py):
+#   A space-separated crate allowlist that INTERSECTS the tier/shard selection: a crate in
+#   the selection but NOT in the cone is left UNMEASURED and inherits its floor verdict
+#   from main's last full run (it is unchanged, and so is everything it depends on — the
+#   same soundness argument ci_select.py already makes for test skipping). It can only ever
+#   NARROW the selection, never add a crate. UNSET or EMPTY => no filter at all, so every
+#   fail-safe path in cone_coverage.py degrades to the pre-flip full measurement.
+#   An explicit COVERAGE_CRATES BYPASSES the filter (it is already an exact subset — this
+#   is what keeps coverage-gate.py --check-robust's targeted re-measure working unchanged).
+#   The skipped crates are recorded in the summary JSON under "cone" (no silent truncation),
+#   which coverage-gate.py prints as INHERITED and cone_coverage.py --mode report renders.
 #
 # Honours the AGENTS.md "no silent truncation" rule: every crate that is excluded /
 # skipped / measured-with-a-quirk is recorded explicitly in the JSON and printed.
@@ -94,6 +110,18 @@ cd "$ROOT"
 TIER="${COVERAGE_TIER:-per-commit}"          # per-commit | nightly | full
 OUT="${COVERAGE_OUT:-$ROOT/target/coverage/coverage-summary.json}"
 FETCH_FIXTURES="${COVERAGE_FETCH_FIXTURES:-1}"
+
+# [SONNET-4.6] sq-3dr4t: --print-crates — resolve the tier/shard selection AND the
+# COVERAGE_CONE filter, print the crate list, exit. NO cargo, NO fixtures, NO measurement,
+# so the selection+filter logic is unit-testable hermetically (scripts/tests/
+# test_cone_coverage.py drives it) instead of only being observable by reading the log of
+# a full instrumented CI run.
+PRINT_CRATES=0
+if [ "${1:-}" = "--print-crates" ]; then
+  PRINT_CRATES=1
+  FETCH_FIXTURES=0
+fi
+
 mkdir -p "$(dirname "$OUT")"
 
 # ---- crate tiers ------------------------------------------------------------
@@ -351,6 +379,45 @@ elif [ -n "${COVERAGE_SHARD:-}" ]; then
   echo "==> shard $COVERAGE_SHARD/$SHARD_TOTAL: measuring ${#CRATES[@]} crate(s): ${CRATES[*]}"
 else
   CRATES=("${PER_COMMIT_CRATES[@]}")
+fi
+
+# ---- changed-cone filter (sq-3dr4t) [SONNET-4.6] ----------------------------
+# INTERSECT the selection above with COVERAGE_CONE (see the COVERAGE_CONE header block).
+# Pure narrowing: a cone entry that is not in the selection is ignored, so this can never
+# widen what is measured, and an unset/empty COVERAGE_CONE is a no-op. Precedence-wise it
+# sits BELOW COVERAGE_CRATES: an explicit subset is already exact (the --check-robust
+# re-measure path), so filtering it again could only drop a crate the gate asked for.
+declare -a CONE_INHERITED=()
+declare -a CONE_LIST=()
+# Split FIRST and gate on the WORD COUNT, never on string-emptiness: a whitespace-only
+# COVERAGE_CONE (e.g. the CI `tr '\n' ' '` of an EMPTY cone-crates.txt) is a non-empty
+# STRING that splits to ZERO crates. Gating on `-n "$COVERAGE_CONE"` would treat that as
+# "a cone containing nothing", intersect to nothing, and measure NOTHING — inverting the
+# fail-safe into the worst possible outcome. Word count makes it the intended no-op.
+if [ -n "${COVERAGE_CONE:-}" ]; then read -r -a CONE_LIST <<<"$COVERAGE_CONE"; fi
+if [ ${#CONE_LIST[@]} -gt 0 ] && [ -z "${COVERAGE_CRATES:-}" ]; then
+  declare -a CONE_KEPT=()
+  for c in ${CRATES[@]+"${CRATES[@]}"}; do
+    in_cone=0
+    for k in ${CONE_LIST[@]+"${CONE_LIST[@]}"}; do
+      if [ "$c" = "$k" ]; then in_cone=1; break; fi
+    done
+    if [ "$in_cone" -eq 1 ]; then CONE_KEPT+=("$c"); else CONE_INHERITED+=("$c"); fi
+  done
+  CRATES=(${CONE_KEPT[@]+"${CONE_KEPT[@]}"})
+  echo "==> changed-cone filter (sq-3dr4t): measuring ${#CRATES[@]} crate(s)" \
+       "(${#CONE_INHERITED[@]} inherit their floor verdict from main — unchanged)"
+  [ ${#CRATES[@]} -gt 0 ] && echo "    measured : ${CRATES[*]}"
+  [ ${#CONE_INHERITED[@]} -gt 0 ] && echo "    inherited: ${CONE_INHERITED[*]}"
+  if [ ${#CRATES[@]} -eq 0 ]; then
+    echo "    NOTE: nothing in this shard is in the cone — no instrumented run needed."
+  fi
+fi
+
+if [ "$PRINT_CRATES" -eq 1 ]; then
+  # One crate per line so a caller can read it without re-splitting a joined string.
+  for c in ${CRATES[@]+"${CRATES[@]}"}; do echo "$c"; done
+  exit 0
 fi
 
 TOOLCHAIN="$(rustc --version 2>/dev/null || echo unknown)"
@@ -706,7 +773,7 @@ PY
 # cleans). It does NOT mask a regression — it re-compiles + re-measures the SAME tests.
 cargo llvm-cov clean --workspace
 echo "==> Measuring per-crate line coverage (tier=$TIER)…"
-for c in "${CRATES[@]}"; do measure "$c"; done
+for c in ${CRATES[@]+"${CRATES[@]}"}; do measure "$c"; done
 TOTAL_END=$(date +%s)
 
 # ---- assemble the summary JSON ---------------------------------------------
@@ -715,9 +782,14 @@ TOTAL_END=$(date +%s)
 ROWS_FILE="$WORK/rows.ndjson"
 : > "$ROWS_FILE"
 [ ${#ROWS[@]} -gt 0 ] && printf '%s\n' "${ROWS[@]}" > "$ROWS_FILE"
-python3 - "$OUT" "$TIER" "$TOOLCHAIN" "$((TOTAL_END-TOTAL_START))" "$NIGHTLY_ONLY_NOTE" "$ROWS_FILE" <<'PY'
+# [SONNET-4.6] sq-3dr4t: pass the cone filter + the crates it SKIPPED so the summary
+# records the skip explicitly (AGENTS.md "no silent truncation"): coverage-gate.py prints
+# them as INHERITED rather than the indistinguishable MISSING, and cone_coverage.py
+# --mode report renders them as inherited rows.
+python3 - "$OUT" "$TIER" "$TOOLCHAIN" "$((TOTAL_END-TOTAL_START))" "$NIGHTLY_ONLY_NOTE" \
+  "$ROWS_FILE" "${COVERAGE_CONE:-}" "${CONE_INHERITED[*]:-}" <<'PY'
 import json,sys,datetime
-out,tier,toolchain,total,note,rows_file=sys.argv[1:7]
+out,tier,toolchain,total,note,rows_file,cone_filter,cone_inherited=sys.argv[1:9]
 total=int(total)
 crates={}
 for line in open(rows_file):
@@ -726,6 +798,14 @@ for line in open(rows_file):
     r=json.loads(line); crates[r.pop("crate")]=r
 doc={"generated":datetime.datetime.now(datetime.timezone.utc).isoformat(),"tier":tier,
      "toolchain":toolchain,"total_seconds":total,"note":note,"crates":crates}
+inherited=sorted(cone_inherited.split())
+if cone_filter.split() and inherited:
+    # Only when the filter actually NARROWED this run — an unset/empty COVERAGE_CONE, or a
+    # cone that happened to contain the whole selection, leaves no "cone" block at all, so
+    # the summary shape is byte-identical to the pre-flip one on every unfiltered path.
+    doc["cone"]={"filter":sorted(set(cone_filter.split())),
+                 "measured":sorted(crates),"inherited":inherited}
 json.dump(doc,open(out,"w"),indent=2,sort_keys=True); open(out,"a").write("\n")
-print(f"\n==> wrote {out}  ({len(crates)} crates, {total}s total)")
+print(f"\n==> wrote {out}  ({len(crates)} crates, {total}s total"
+      + (f", {len(inherited)} inherited via the changed cone" if inherited else "") + ")")
 PY

@@ -80,7 +80,7 @@ From the **CI** workflow (`.github/workflows/ci.yml`):
 | `W3C SPARQL conformance (ratchet >= 1229 pass+divergence)` | The W3C SPARQL conformance ratchet (never lower). |
 | `W3C SHACL conformance (ratchet — core >= 98, sparql >= 5)` | The W3C SHACL core + SHACL-SPARQL ratchets. |
 | `Inference conformance (ratchet >= 1967 pass+divergence)` | The RDFS/OWL-RL/N3/entailment + rdf-turtle inference ratchet. |
-| `coverage ratchet + test-presence gate (per-crate)` | The per-crate line-coverage floor + the test-presence gate. **On `merge_group` this verdict covers the fast no-compile FLOOR gates only** — the instrumented per-crate line-% MEASUREMENT is demoted off the queue's blocking path (see *Coverage MEASUREMENT off the merge queue* below). |
+| `coverage ratchet + test-presence gate (per-crate)` | The per-crate line-coverage floor + the test-presence gate. **On `merge_group` this verdict covers the fast no-compile FLOOR gates only** — the instrumented per-crate line-% MEASUREMENT is demoted off the queue's blocking path (see *Coverage MEASUREMENT off the merge queue* below). Where the measurement *does* run, it is **changed-cone scoped** (sq-3dr4t): a PR re-measures only the changed crates and their transitive reverse-dep closure; a crate outside that cone is unchanged (as is everything it depends on) so its floor verdict is inherited from `main` — reported as `INHERITED`, not silently dropped. Any full-run trigger (`Cargo.lock`, root `Cargo.toml`, `.github/`, `scripts/`, an unowned path — which includes `bench/coverage-floor.json`) or any selector error measures everything, and the nightly full run on `main` is the drift backstop. |
 | `wasm build (sparq-wasm)` | The `wasm32-unknown-unknown` build, the wasm-deps guard, and `wasm-pack test --node`. |
 
 From the security / supply-chain / SAST workflows (aggregated by the gate; all LIVE except
@@ -221,7 +221,7 @@ what makes the demotion designable.
 
 | Where | What runs |
 |---|---|
-| `pull_request` (non-draft) | **UNCHANGED — the primary gate.** Every PR measures per-crate line-% and enforces the floor. |
+| `pull_request` (non-draft) | **UNCHANGED — the primary gate.** A PR measures per-crate line-% and enforces the floor, over its **changed cone** (sq-3dr4t): the changed crates plus their transitive reverse-dep closure are re-measured, and a crate outside the cone — unchanged, as is everything it depends on — inherits its floor verdict from `main` (reported `INHERITED`). A full-run trigger or any selector error still measures everything. |
 | `merge_group` | The `coverage-measure` / `coverage-engine-run` / `coverage-engine-merge` legs are **skipped**. `coverage-floors` — the fast, no-compile test-presence + floor-**monotonicity** + shard-partition gates — **still runs**, so a batch can never *lower* a committed floor. The `coverage` aggregate still concludes (a skipped leg counts as satisfied), so the gate never sees an expected-but-missing check; its step summary says plainly that only the floor gates ran. |
 | `push` to `main` | **UNCHANGED, and now load-bearing** — this is the enforcement point for the batch-stacking case. It is deliberately **EXEMPT** from the sq-6vshe.14 push-run skip; the exemption is pinned behaviourally by `scripts/tests/test_ci_select_wiring.py::TestCoverageMergeGroupDemotion`, so landing that lever without the exemption REDs a test rather than silently removing the last enforcement point. |
 | a `main` coverage red | `coverage-demoted-filer` auto-files a **P1 bead + a deduped GitHub issue** (`[demoted-lane] lane=coverage-ratchet-main`) via `scripts/ci-file-demoted-lane-failure.py` — the same demotion auto-bead protocol the fuzz and heavy-recall demotions use — **and** that open issue **pauses further ratchet ADVANCES**: `coverage-gate.py --check-advance-allowed` (a step in `coverage-floors`) fails a branch that *raises* a floor while the alarm is open, because the measured numbers a raise cites are exactly the numbers in doubt. It never blocks the recovery path (a governed lowering under `--allow-lower`), never blocks adding a *new* crate row, and fails **open** if the alarm probe is unavailable. |
@@ -274,7 +274,8 @@ no check-run there either — not a byte-identical copy of the PR check-set.)
 
 **The integrity invariant — a draft-tier gate result must NEVER admit a PR to the
 merge queue.** The load-bearing mechanism is rule 1 (structural); rules 2–8 are
-belts (all in `scripts/ci_summary_gate.py`, unit-tested in
+belts, and rule 9 is diagnosis + a recorded decision rather than a belt (all in
+`scripts/ci_summary_gate.py`, unit-tested in
 `scripts/tests/test_ci_summary_gate.py`; the name/trigger wiring pinned by
 `scripts/tests/test_ci_select_wiring.py`):
 
@@ -368,6 +369,25 @@ belts (all in `scripts/ci_summary_gate.py`, unit-tested in
    reaches at budget exhaustion — never a new pass — and it stands down whenever the
    set is still settling, the PR reads non-draft, or the draft state is unreadable
    (then the pre-#3781 budget-exhaustion path renders the verdict unchanged).
+9. **Both draft-tier refusals say that re-running the gate is futile, and the
+   idle-head case deliberately has no exit (#4614).** [OPUS-5] Two carry-overs from
+   the superseded #3765:
+   * **Re-run futility is stated, not implied.** Rule 8's fast fail and rule 4's
+     budget-exhaustion belt both end with the shared `UNSAT_HOLD_REMEDY` tail
+     (`scripts/ci_summary_gate.py`): re-running `ci-summary` re-runs no *selecting*
+     workflow, so a bare `gh run rerun` cannot make the missing full-tier select
+     appear — only `gh pr ready` or a new head commit does. The audience is the
+     automated repair lanes, whose reflex for any RED is otherwise "re-run it".
+   * **The idle head gets no exit — decided, not overlooked.** Rule 8 fires only on
+     a live draft read of `True`. If the PR reads NON-draft, or the draft read
+     fails, the gate polls to the absolute budget. That is deliberate: the exit is
+     licensed by a causal fact (only a non-draft payload produces a full-tier
+     select), and no equivalent fact exists for an idle head — the successor may
+     merely be late. #3765's alternative, a head-activity probe counting
+     non-terminal Actions runs on the head SHA, is circumstantial evidence and
+     would buy speed by introducing a new false-RED mode on PRs with zero failing
+     legs. Burning the budget is slow; a false RED is a regression. Prior art if
+     revisited: closed branch `fable/gate-unsatisfiable-hold-3758` at `dc92b4af`.
 
 **Why the queue can never latch a draft-tier result.** Rule 1 is structural: the
 queue and branch protection admit a PR only on a successful check-run of the
