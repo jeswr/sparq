@@ -44,7 +44,10 @@
 #       count-source probe — each exactly once, over the report path, spelling that
 #       heading. (Counting mentions is NOT sufficient: the real job also names the
 #       heading in an `echo ::error::` diagnostic and in a comment, so a block that
-#       has lost a command outright still carries two or more mentions.)
+#       has lost a command outright still carries two or more mentions. Nor is
+#       matching the command TEXT sufficient: commenting a step out with a leading
+#       `#` leaves that text byte-for-byte intact while the runner stops executing
+#       it, so a match inside a shell comment does not count.)
 #   C2  the committed report contains that exact heading, exactly once.
 #   C3  the emitter still spells the four buckets ci.yml greps for, AND the committed
 #       report's totals line is inside ci.yml's own `grep -A2` window after the
@@ -149,6 +152,43 @@ def _unescape_grep(text: str) -> str:
     return text.replace("\\(", "(").replace("\\)", ")")
 
 
+def _comment_start(line: str) -> int:
+    """Index where a shell comment begins on `line`, or `len(line)` if none.
+
+    Quote-aware on purpose: the commands this gate matches CONTAIN `#` characters
+    (`grep -qE '^## Overall (…)'`), so a naive "is there a `#`?" scan would read
+    every command as commented out. In shell a `#` opens a comment only outside
+    quotes and at the start of a word.
+    """
+    quote: str | None = None
+    for i, ch in enumerate(line):
+        if quote is not None:
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "#" and (i == 0 or line[i - 1].isspace()):
+            return i
+    return len(line)
+
+
+def _active_matches(cmd_re: re.Pattern[str], block: str) -> list[re.Match[str]]:
+    """`cmd_re` matches in `block`, minus any that sit inside a shell comment.
+
+    Commenting a step out with a leading `#` leaves the command's text byte-for-byte
+    intact, so a plain `finditer` would still count a command the runner no longer
+    executes — the whole point of C1 is that the command RUNS.
+    """
+    active: list[re.Match[str]] = []
+    for m in cmd_re.finditer(block):
+        line_start = block.rfind("\n", 0, m.start()) + 1
+        line_end = block.find("\n", m.start())
+        line = block[line_start : line_end if line_end != -1 else len(block)]
+        if m.start() - line_start < _comment_start(line):
+            active.append(m)
+    return active
+
+
 def emitted_heading(emitter_src: str) -> tuple[str | None, list[str]]:
     """The one `## Overall …` heading report.rs writes for the grand total."""
     found = HEADING_EMIT_RE.findall(emitter_src)
@@ -173,6 +213,10 @@ def heading_grep_offences(block: str, job_id: str, heading: str) -> list[str]:
     of >= 2 survives while the documented two-grep contract is broken. Each command
     is matched by its own shape instead, required to appear EXACTLY ONCE over the
     report path, and required to spell the heading the emitter writes.
+
+    Matches inside a shell comment do NOT count: commenting a step out with a
+    leading `#` preserves the command text exactly, so a text-only match would keep
+    C1 green for a command the runner never executes.
     """
     offences: list[str] = []
     specs = (
@@ -194,13 +238,14 @@ def heading_grep_offences(block: str, job_id: str, heading: str) -> list[str]:
         ),
     )
     for kind, cmd_re, shape, why in specs:
-        found = [m for m in cmd_re.finditer(block) if m.group("path") == REPORT]
+        found = [m for m in _active_matches(cmd_re, block) if m.group("path") == REPORT]
         if len(found) != 1:
             offences.append(
                 f"{CI_WORKFLOW} job `{job_id}`: expected exactly ONE {kind} grep over "
-                f"`{REPORT}` (`{shape}`), found {len(found)}. Naming the heading in a "
-                f"comment or an `echo ::error::` diagnostic is not a substitute — "
-                f"{why}. Did a step get rewritten?"
+                f"`{REPORT}` (`{shape}`), found {len(found)} that the runner actually "
+                f"executes. Naming the heading in a comment or an `echo ::error::` "
+                f"diagnostic — or leaving the command itself commented out — is not a "
+                f"substitute: {why}. Did a step get rewritten?"
             )
             continue
         m = found[0]
@@ -574,6 +619,18 @@ _MUTATIONS = [
         CI_WORKFLOW,
         "grep -A2 '^## Overall (all inference suites)' inference-conformance-report.md | ",
         "",
+    ),
+    (
+        "C1 existence grep COMMENTED OUT (its full text survives verbatim)",
+        CI_WORKFLOW,
+        "          if [ ! -s inference-conformance-report.md ]",
+        "          # if [ ! -s inference-conformance-report.md ]",
+    ),
+    (
+        "C1 count-source grep COMMENTED OUT (its full text survives verbatim)",
+        CI_WORKFLOW,
+        "          OVERALL=$(grep -A2",
+        "          # OVERALL=$(grep -A2",
     ),
     (
         "C1 count-source grep widened past the -A2 window C3 models",
