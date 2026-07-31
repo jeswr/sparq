@@ -2,7 +2,8 @@
 //! sign/verify, capability separation + delegation, and epoch transitions.
 
 use sparq_e2ee_ng::capability::{
-    base_grant, delegate, Authority, Capability, Delegation, PublicGrant, ScopedBranch, Validity,
+    base_grant, delegate, unwrap_capability, wrap_capability, Authority, Capability, Delegation,
+    PublicGrant, ScopedBranch, Validity, CAPABILITY_WRAP_AAD,
 };
 use sparq_e2ee_ng::cbor::{enc_bytes, enc_map, enc_uint, Limits, Reader, Writer};
 use sparq_e2ee_ng::envelope::{
@@ -381,6 +382,161 @@ fn capability_secret_roundtrip() {
     assert_eq!(decoded.publisher_sk, Some(publisher.to_seed()));
     assert!(decoded.admin_sk.is_none());
     decoded.grant.verify(&admin.public()).unwrap();
+}
+
+// --- typed capability wrapping (§4.2 recommended secret-transfer path) -------
+
+#[test]
+fn wrap_capability_roundtrip_recovers_every_secret_field() {
+    let publisher = SecretSigningKey::from_seed([2u8; 32]);
+    let admin = SecretSigningKey::from_seed([1u8; 32]);
+    let mut write =
+        Capability::new_write(sample_grant(), Secret32([9u8; 32]), &publisher).unwrap();
+    write.grant.sign(&admin);
+
+    let recipient = RecipientSecretKey::from_bytes([5u8; 32]);
+    let wrapped = wrap_capability(&write, &recipient.public()).unwrap();
+
+    // The bearer secrets must not survive in the clear anywhere in the wrapping.
+    let bytes = wrapped.encode();
+    assert!(
+        !bytes.windows(32).any(|w| w == [9u8; 32]),
+        "read secret leaked into the wrapping"
+    );
+    assert!(
+        !bytes.windows(32).any(|w| w == publisher.to_seed()),
+        "publisher key leaked into the wrapping"
+    );
+
+    let opened = unwrap_capability(&recipient, &wrapped, lim()).unwrap();
+    assert_eq!(opened.grant, write.grant);
+    assert_eq!(opened.read_secret.as_ref().unwrap().expose(), &[9u8; 32]);
+    assert_eq!(opened.publisher_sk, Some(publisher.to_seed()));
+    assert!(opened.admin_sk.is_none());
+    opened.grant.verify(&admin.public()).unwrap();
+}
+
+#[test]
+fn wrap_capability_aad_is_domain_separated() {
+    let recipient = RecipientSecretKey::from_bytes([5u8; 32]);
+    let cap = Capability::new_read(sample_grant(), Secret32([9u8; 32])).unwrap();
+
+    // A wrapping of the very same bytes under any other AAD is NOT a capability
+    // wrapping: the typed unwrap must reject it rather than open a payload some
+    // other purpose produced.
+    let foreign = wrap(&recipient.public(), &cap.encode_secret(), b"purpose:dek").unwrap();
+    assert!(matches!(
+        unwrap_capability(&recipient, &foreign, lim()),
+        Err(Error::Decrypt)
+    ));
+
+    // ...and symmetrically, a capability wrapping does not open under a
+    // caller-chosen label, only under the fixed domain-separation AAD.
+    let wrapped = wrap_capability(&cap, &recipient.public()).unwrap();
+    assert!(matches!(
+        unwrap(&recipient, &wrapped, b"purpose:dek"),
+        Err(Error::Decrypt)
+    ));
+    assert_eq!(
+        unwrap(&recipient, &wrapped, CAPABILITY_WRAP_AAD).unwrap(),
+        cap.encode_secret()
+    );
+}
+
+#[test]
+fn wrap_capability_wrong_recipient_fails_closed() {
+    let recipient = RecipientSecretKey::from_bytes([5u8; 32]);
+    let attacker = RecipientSecretKey::from_bytes([6u8; 32]);
+    let cap = Capability::new_read(sample_grant(), Secret32([9u8; 32])).unwrap();
+    let wrapped = wrap_capability(&cap, &recipient.public()).unwrap();
+    assert!(matches!(
+        unwrap_capability(&attacker, &wrapped, lim()),
+        Err(Error::Decrypt)
+    ));
+}
+
+#[test]
+fn wrap_capability_rejects_a_capability_that_violates_separation() {
+    // A hand-built capability combining publisher and admin keys must fail at
+    // wrap time, not produce bytes whose only possible outcome is a rejected
+    // unwrap on the far side.
+    let mut cap = Capability {
+        grant: sample_grant(),
+        read_secret: None,
+        publisher_sk: Some([1u8; 32]),
+        admin_sk: Some([2u8; 32]),
+    };
+    cap.grant.authority = vec![Authority::Publish, Authority::Admin];
+    let recipient = RecipientSecretKey::from_bytes([5u8; 32]);
+    assert!(matches!(
+        wrap_capability(&cap, &recipient.public()),
+        Err(Error::Separation(_))
+    ));
+}
+
+#[test]
+fn wrap_capability_rejects_a_structurally_invalid_public_grant() {
+    // Separation-correct secrets are NOT enough: every `PublicGrant` field is
+    // public, so a caller can hand `wrap_capability` a read capability whose
+    // grant half only `PublicGrant::decode` would have caught. Wrapping such a
+    // grant would produce bytes that `unwrap_capability` must reject on the far
+    // side, so it has to fail here instead.
+    let recipient = RecipientSecretKey::from_bytes([5u8; 32]);
+    let read_cap = || Capability::new_read(sample_grant(), Secret32([9u8; 32])).unwrap();
+
+    // An unsupported suite.
+    let mut cap = read_cap();
+    cap.grant.suite = "urn:jeswr:w3id:e2ee-ng:suite:not-a-suite".to_string();
+    assert!(matches!(
+        wrap_capability(&cap, &recipient.public()),
+        Err(Error::UnknownSuite)
+    ));
+
+    // An inverted validity window.
+    let mut cap = read_cap();
+    cap.grant.validity = Validity { not_before: 200, not_after: 100 };
+    assert!(matches!(
+        wrap_capability(&cap, &recipient.public()),
+        Err(Error::Schema(_))
+    ));
+
+    // A max_epoch ceiling behind the epoch the grant is scoped to.
+    let mut cap = read_cap();
+    cap.grant.max_epoch = Some(Epoch(3));
+    assert!(matches!(
+        wrap_capability(&cap, &recipient.public()),
+        Err(Error::Schema(_))
+    ));
+
+    // A branch set assigned directly rather than via `set_branch_scope`, so not
+    // strictly ascending by branch id.
+    let mut cap = read_cap();
+    cap.grant.extra_branches = vec![ScopedBranch {
+        branch: BranchId::from_bytes([1u8; 32]),
+        topic: TopicId::from_bytes([4u8; 32]),
+    }];
+    assert!(matches!(
+        wrap_capability(&cap, &recipient.public()),
+        Err(Error::NonCanonical(_))
+    ));
+
+    // The baseline the four above differ from by exactly one field still wraps
+    // AND opens with the matching recipient — the invariant this guards is that
+    // a successful typed wrap is always openable, not that wrapping is hard.
+    let cap = read_cap();
+    let wrapped = wrap_capability(&cap, &recipient.public()).unwrap();
+    let opened = unwrap_capability(&recipient, &wrapped, lim()).unwrap();
+    assert_eq!(opened.grant, cap.grant);
+}
+
+#[test]
+fn wrap_capability_rejects_low_order_recipient_key() {
+    let cap = Capability::new_read(sample_grant(), Secret32([9u8; 32])).unwrap();
+    let low_order = RecipientPublicKey([0u8; 32]);
+    assert!(matches!(
+        wrap_capability(&cap, &low_order),
+        Err(Error::BadKey(_))
+    ));
 }
 
 #[test]
