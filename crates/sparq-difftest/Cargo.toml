@@ -44,7 +44,7 @@ serde_json = "1"
 # settled by this crate's own rules BEFORE the conversion. `sha2` names the RDFC-1.0 hash so
 # the HNDQ call limit can be set explicitly (a poison graph must return an error, not hang).
 rdf-canon = "0.15.3"
-oxrdf = "0.2.4"
+oxrdf = "0.3.3"
 sha2 = "0.10"
 
 [dev-dependencies]
