@@ -259,8 +259,9 @@ pub use store::{
 };
 #[cfg(feature = "status-list")]
 pub use status_list::{
-    decode_encoded_list, justify_status_decision, GzipDecoder, IdentityGzipDecoder, LiveStatus,
-    LiveStatusCheck, SignedStatusList, StatusBitstring, StatusJustification, StatusListEntry,
-    StatusListResolver, StatusPurpose, VerifiedStatusListResolver, VerifyingLiveStatusCheck,
+    decode_encoded_list, justify_status_decision, DeltaUnbounded, GzipDecoder, IdentityGzipDecoder,
+    LiveStatus, LiveStatusCheck, SignedStatusList, StatusBitstring, StatusDelta,
+    StatusJustification, StatusListEntry, StatusListResolver, StatusPurpose,
+    VerifiedStatusListResolver, VerifyingLiveStatusCheck, DEFAULT_MAX_CHANGED_INDICES,
 };
 pub use wire::{derive_conditional_grants, derive_grants, ConditionalGrant};
