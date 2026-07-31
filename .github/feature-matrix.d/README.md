@@ -12,18 +12,26 @@ REQUIRED checks — so the emitted name set is gate-critical.
 
 ## THE TWO-FILE SCOPE RULE
 
-**Adding, renaming or removing a leg is a TWO-FILE change.** A bead / issue / PR that
-touches a fragment here must have BOTH of these in its permitted file scope:
+The rule keys off the emitted **leg-name set**, nothing else.
+
+**Changing the leg-name set — adding, removing or renaming a leg — is a TWO-FILE
+change.** A bead / issue / PR that does so must have BOTH of these in its permitted
+file scope:
 
 1. `.github/feature-matrix.d/<crate>.yml` — the leg itself; and
 2. `scripts/tests/feature-matrix-legnames.golden.txt` — the gate-name golden.
 
+Every **other** fragment edit leaves the name set untouched and stays a SINGLE-file
+change — see *When the golden does NOT change* below. Do not scope the golden into a
+task that cannot change a `name:`; that only adds contention on a file every leg PR
+shares, for an update it must not make.
+
 `scripts/tests/test_feature_matrix_assemble.py` compares the assembled leg-name set
-against that golden **byte-for-byte**. A spec scoped to the fragment *alone* forbids
-the golden update it simultaneously requires — a self-contradiction that leaves the
-`assemble feature matrix` job red and, because that job produces the whole matrix,
+against that golden **byte-for-byte**. A name-set change scoped to the fragment *alone*
+forbids the golden update it simultaneously requires — a self-contradiction that leaves
+the `assemble feature matrix` job red and, because that job produces the whole matrix,
 makes **every** `opt-in *` required check go expected-but-unreported. Decomposing a
-feature-leg task without the golden in scope is the bug this file exists to prevent.
+leg-name-set task without the golden in scope is the bug this file exists to prevent.
 
 ## Regenerating the golden
 

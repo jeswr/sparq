@@ -93,7 +93,7 @@ class TestFeatureMatrixAssemble(unittest.TestCase):
         (or carrying a comment, or a stray blank line). This pins the documented
         regeneration command instead — `python3 scripts/assemble-feature-matrix.py --names
         > scripts/tests/feature-matrix-legnames.golden.txt` — so the only way to update the
-        golden is to run it. That matters because the decomposition rule says a feature-leg
+        golden is to run it. That matters because the decomposition rule says a leg-NAME-SET
         change scopes BOTH the fragment and this golden, with the golden regenerated.
         """
         buf = io.StringIO()
@@ -1476,11 +1476,13 @@ class TestGroupReporter(unittest.TestCase):
 class TestTwoFileScopeRuleIsDocumented(unittest.TestCase):
     """[SONNET-4.6] issue #2384 — the leg/golden pairing must be stated where it is read.
 
-    A feature-leg task decomposed with `.github/feature-matrix.d/<crate>.yml` as its ONLY
-    permitted file is self-contradicting: the leg-name change it asks for also requires the
-    golden update it forbids, and a worker that obeys the scope has to decline. (That is
-    exactly what happened on sq-19f1i / sq-kf56o.) The contract therefore lives in the
-    fragment directory itself, and these tests keep it from being deleted or drifting.
+    A task that adds/removes/RENAMES a leg but is decomposed with
+    `.github/feature-matrix.d/<crate>.yml` as its ONLY permitted file is
+    self-contradicting: the leg-name change it asks for also requires the golden update it
+    forbids, and a worker that obeys the scope has to decline. (That is exactly what
+    happened on sq-19f1i / sq-kf56o.) Edits that cannot move the name set stay single-file.
+    The contract therefore lives in the fragment directory itself, and these tests keep it
+    from being deleted or drifting.
 
     Pure file reads — no PyYAML, no assembler import.
     """
@@ -1495,7 +1497,8 @@ class TestTwoFileScopeRuleIsDocumented(unittest.TestCase):
         for needle in (".github/feature-matrix.d/<crate>.yml", self.GOLDEN_REL):
             self.assertIn(
                 needle, text,
-                f"{self.README} must name {needle} as an in-scope file for a leg change",
+                f"{self.README} must name {needle} as an in-scope file for a "
+                "leg-name-set change",
             )
 
     def test_fragment_dir_readme_gives_the_regeneration_command(self):
@@ -1507,7 +1510,8 @@ class TestTwoFileScopeRuleIsDocumented(unittest.TestCase):
         )
 
     def test_every_fragment_points_at_the_golden(self):
-        """A fragment author/decomposer reading ONLY their crate's file still sees the rule."""
+        """A fragment author/decomposer reading ONLY their crate's file still sees the rule
+        — including its name-set qualification, so a non-name edit is not over-scoped."""
         frags = sorted(FRAGMENT_DIR.glob("*.yml"))
         self.assertTrue(frags, "no fragment files found")
         missing = [
@@ -1516,8 +1520,9 @@ class TestTwoFileScopeRuleIsDocumented(unittest.TestCase):
         ]
         self.assertEqual(
             missing, [],
-            "these fragments never mention the gate-name golden, so a task scoped from "
-            "them alone would forbid the golden update it requires. Add the SCOPE comment "
+            "these fragments never mention the gate-name golden, so a leg-name-set task "
+            "scoped from them alone would forbid the golden update it requires. Add the "
+            "SCOPE comment "
             f"(see any sibling fragment or {self.README}): {missing}",
         )
 
