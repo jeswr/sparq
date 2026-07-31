@@ -42,7 +42,7 @@
     "@rdfjs/dataset": "^2.0.2",
     "@rdfjs/types": "^2.0.1",
     "@types/node": "^25.9.3",
-    "n3": "^1.26.0",
+    "n3": "^2.1.1",
     "typescript": "^6.0.3"
   }
 }
