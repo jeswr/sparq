@@ -2701,6 +2701,116 @@ fn filter_two_rows_both_gated_verifies() {
         .expect("both rows gated true => verifies");
 }
 
+/// L-1 / `sq-q9r5e` (`research/zk-audit-gpt56-2026-07.md`): a filtered variable
+/// may occupy MORE THAN ONE slot within the SAME scan. Two query patterns with
+/// the same constant layout (`(?, <age>, ?)`) are BOTH answered by one scan
+/// sub-proof (pattern→scan is resolved by constant MEMBERSHIP, not an explicit
+/// mapping — see `bind_attributions`), and here they place `?v` at slot 2
+/// (pattern 0, object) and slot 0 (pattern 1, subject).
+///
+/// The prover gates only slot 2, with an HONEST `25 >= 18` filter proof. Slot 0
+/// — the column `?v` binds to under pattern 1, disclosed in the same row — is
+/// left ungated, so the relying party reads a solution binding `?v` to a term
+/// the FILTER was never proven over. Every slot the variable occupies within a
+/// matching scan must be gated => REJECT (`UnboundFilter`).
+///
+/// RED before the sq-q9r5e fix: `bind_query_correctness` used `find_map` over
+/// the variable's `(pattern, slot)` positions, so only the FIRST matching
+/// pattern's slot (2) was gated and this manifest verified structurally.
+#[test]
+fn filter_reject_ungated_second_slot_within_scan() {
+    let scan = scan_inputs_for(&credential_graph(), "http://ex/age"); // age=25
+    let scan_operand = match &scan {
+        ProofInputs::Scan { rows, .. } => rows[0][2].clone(),
+        _ => unreachable!(),
+    };
+    // An honest, bb-valid `25 >= 18` filter proof over the OBJECT slot only.
+    let mut filt = filter_inputs(25, FilterOp::Ge, 18, true);
+    if let ProofInputs::FilterInt { operand_enc, .. } = &mut filt {
+        *operand_enc = scan_operand;
+    }
+    let mut m = ProofManifest {
+        fully_hidden_revocation: None,
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?s ?v ?o WHERE { ?s <http://ex/age> ?v . ?v <http://ex/age> ?o FILTER(?v >= \"18\"^^<http://www.w3.org/2001/XMLSchema#integer>) }".into(),
+        issuers: vec![],
+        key_set: vec![],
+        commitment_attestations: vec![],
+        attributions: vec![vec![0], vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
+        binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
+        revocation: Some(fixture_revocation()),
+        status_snapshots: vec![fixture_snapshot(false)],
+        sub_proofs: vec![
+            SubProof { inputs: scan, proof_hex: String::new() }, // proof 0
+            SubProof { inputs: filt, proof_hex: String::new() }, // proof 1
+        ],
+        // Slot 2 gated; slot 0 (where ?v binds under pattern 1) NOT gated.
+        binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
+        join_edges: vec![],
+        hidden_revocation: None,
+        hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
+    };
+    attest_all(&mut m, &test_issuer_sk(1), salt_from_bytes(&[9u8; 32]));
+    match prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)), &fresh_policy()) {
+        Err(CheckError::UnboundFilter { variable }) if variable == "v" => {}
+        other => panic!(
+            "L-1/sq-q9r5e: a filtered variable's SECOND slot within the same scan \
+             must be gated too; expected UnboundFilter(v), got {other:?}"
+        ),
+    }
+}
+
+/// `sq-q9r5e` positive control: when the two patterns one scan answers place the
+/// filtered variable at the SAME slot, the every-slot rule must collapse to the
+/// single slot and NOT demand a second, non-existent gating edge. `?v` is at slot
+/// 2 in both `(?a <age> ?v)` and `(?b <age> ?v)`, so one true-verdict edge per
+/// disclosed row is the whole obligation => verifies.
+#[test]
+fn filter_same_slot_in_two_patterns_needs_one_edge() {
+    let scan = scan_inputs_for(&credential_graph(), "http://ex/age"); // age=25
+    let scan_operand = match &scan {
+        ProofInputs::Scan { rows, .. } => rows[0][2].clone(),
+        _ => unreachable!(),
+    };
+    let mut filt = filter_inputs(25, FilterOp::Ge, 18, true);
+    if let ProofInputs::FilterInt { operand_enc, .. } = &mut filt {
+        *operand_enc = scan_operand;
+    }
+    let mut m = ProofManifest {
+        fully_hidden_revocation: None,
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: "SELECT ?a ?b ?v WHERE { ?a <http://ex/age> ?v . ?b <http://ex/age> ?v FILTER(?v >= \"18\"^^<http://www.w3.org/2001/XMLSchema#integer>) }".into(),
+        issuers: vec![],
+        key_set: vec![],
+        commitment_attestations: vec![],
+        attributions: vec![vec![0], vec![0]],
+        join_obligations: vec![],
+        entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
+        binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
+        revocation: Some(fixture_revocation()),
+        status_snapshots: vec![fixture_snapshot(false)],
+        sub_proofs: vec![
+            SubProof { inputs: scan, proof_hex: String::new() },
+            SubProof { inputs: filt, proof_hex: String::new() },
+        ],
+        binding_edges: vec![BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 1 }],
+        join_edges: vec![],
+        hidden_revocation: None,
+        hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
+    };
+    attest_all(&mut m, &test_issuer_sk(1), salt_from_bytes(&[9u8; 32]));
+    prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)), &fresh_policy())
+        .expect("same-slot-in-both-patterns needs only the one gating edge");
+}
+
 // --- issuer-signature / key-set NEGATIVE tests (audit #3) -----------------
 //
 // [OPUS-4.8] The forge-and-verify suite the brief + test-bench design (§5.1 #3)
