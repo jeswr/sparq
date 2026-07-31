@@ -18,10 +18,19 @@ this file. Upstream state could NOT be checked from the executing environment
 
 The issue's primary action is an **upstream** contribution to `zkp-ld/rdf-canon`, and its
 stated fallback is a **large in-house substitution** (promote `crates/sparq-canon/src/rdf12.rs`
-to the standard canonicalization path). The first cannot be executed from the implementing
-environment at all; the second turns out to have concrete, code-visible blockers, and it
-trades away a property of the current design that the issue does not price in. Both facts
-are maintainer decisions, so the honest deliverable is this record plus a phased plan.
+to the standard canonicalization path). Neither was executable by the read-only pass that
+wrote this file: the environment has no network and no usable Rust toolchain (§6), so the
+upstream crate could be neither fetched nor compiled. The fallback additionally turns out to
+have concrete, code-visible blockers, and it trades away a property of the current design
+that the issue does not price in.
+
+That is an **environment limit on this pass, not a decision to wait for the maintainer.**
+Per `AGENTS.md` §*STANDING RULE — proceed without waiting for the maintainer's greenlight*,
+the choice between the options is made here on best judgment (§7) and every phase in §8 that
+an agent with a network and a toolchain can execute proceeds **without** a greenlight. The
+one genuinely owner-only step is the literal act of *opening* a PR on the third-party repo
+(§8 phase 3) — an out-of-repo publication, which `AGENTS.md`'s maintenance loop step 7 lists
+as owner-filed. Nothing waits on it: option B ships the identical diff locally.
 
 ## 2. Premise check against the actual tree
 
@@ -122,8 +131,10 @@ Deletes the bridge outright and keeps the algorithm third-party. Notes:
   larger design change (a term-model trait, or a `Cow`-ish abstraction over four term
   enums) and should not be offered as an equal-effort option in the same PR.
 - Latency is upstream's. This option alone leaves sparq blocked for an unbounded time.
-- **Cannot be executed in this environment**: opening PRs / calling GitHub APIs is
-  forbidden by the implementation contract, and there is no network.
+- **Not executable by the pass that wrote this record** (no network, no Rust toolchain) —
+  but the port, the patch and its validation are executable by any agent that has both, and
+  §8 phase 3 schedules them autonomously. Only *publishing* the PR on `zkp-ld/rdf-canon` is
+  owner-filed, and that never blocks sparq because B lands the same diff locally.
 
 ### B — Fork + `[patch.crates-io]` now, upstream the same diff (recommended pairing with A)
 
@@ -228,7 +239,15 @@ Two honesty caveats on that recommendation:
 2. §6.1 must be fixed regardless of which option wins. It is a defect in code that ships
    today, not a hypothetical blocker for a future one.
 
-## 8. Phased plan (each phase = a future bead)
+## 8. Phased plan
+
+**Tracking.** This section is a plan, not a tracker. Each phase is queued as a bead with
+this record's landing, and the two items that are **defects in shipped code, independent of
+this issue** — §6.1 (eager permutation materialization defeats the HNDQ guard) and §2.2a
+(`deny.toml`'s duplicate-version blocker registry omits `sparq-difftest`) — are queued
+additionally on the `self-improvement` issue lane, per the shared-contract rule that an
+out-of-scope discovery becomes a git-native issue rather than an inline fix. Backfill the
+concrete bead ids / issue URLs into the phase lines below once minted.
 
 1. **Measure the port.** Fetch `rdf-canon 0.15.3`, port to `oxrdf 0.3`, record the diff
    size and whether any public signature changes beyond term types. Deliverable: a patch
@@ -236,9 +255,17 @@ Two honesty caveats on that recommendation:
 2. **Fix `permutations` to be lazy** in `src/rdf12.rs`, and run `test074-in.nq` through
    `canonicalize_rdf12` asserting `CanonError::Canonicalization`. Independent of phases
    1/3/4 — this is §6.1, a live bug. *Should land first regardless of the option chosen.*
-3. **Draft the upstream PR** in `zkp-ld/rdf-canon` house style, @jeswr-tagged and carrying
-   the "not yet ready for maintainer review" note, per `AGENTS.md` §upstream. Record the
-   URL in this file and in `crates/sparq-canon/Cargo.toml`. *`needs:user` — owner-filed.*
+3. **Prepare the upstream contribution — autonomously — and stop only at publication.**
+   Everything up to the filing is ordinary agent work and must not wait on anyone: push the
+   phase-1 port to a fork branch, validate it against the W3C suite there, and check the PR
+   body into the fork's `SPARQ-PATCHES.md` in `zkp-ld/rdf-canon` house style per
+   `AGENTS.md` §upstream — Why-first, @jeswr-tagged, carrying the "not yet ready for
+   maintainer review" note. The **only** blocked step is the literal act of opening the PR
+   on the third-party repo, an out-of-repo publication `AGENTS.md`'s maintenance loop step 7
+   reserves to the owner; raise that one action, and nothing else, on the `needs:user` queue.
+   **Default while it is unfiled:** carry the fork + `[patch.crates-io]` (option B)
+   indefinitely — sparq is unblocked either way. Record the URL in this file and in
+   `crates/sparq-canon/Cargo.toml` once filed.
 4. **Land the port locally** via a fork + `[patch.crates-io]` + a `deny.toml` `[sources]`
    allowance; delete `bridge_to_02`, `bridge_triples_to_02`, `parse_02`, `serialize_quads`,
    `serialize_quads_default`, the `bridge-lowcopy` feature, the `oxrdf02`/`oxttl01`
