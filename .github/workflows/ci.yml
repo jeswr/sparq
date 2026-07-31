@@ -384,34 +384,51 @@ jobs:
           # `nextest.tar.zst` artifact and run it with `--archive-file`, so there is no
           # shared cache key with them (the earlier per-shard build that did share this
           # key is removed). A stable `shared-key` is still worth keeping so this job's
-          # dep cache survives across this branch's runs.
+          # dep cache is the one every branch's run restores.
           shared-key: "test-workspace"
-          # [OPUS-5] sq-h2gz6 (follow-up to sq-3sbrr / #1395, which did this for the
-          # feature-matrix legs) — RESTORE-ONLY off main. THIS IS THE CANONICAL NOTE;
-          # every other rust-cache step in this file carries the same `save-if` and
-          # points back here.
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE. THIS IS THE CANONICAL NOTE; every other rust-cache step in this
+          # file carries the same `save-if` and points back here. Both beads reached the
+          # same posture from opposite ends (sq-h2gz6 as the follow-up to sq-3sbrr /
+          # #1395, which did this for the feature-matrix legs; sq-6vshe.15 as lever 2 of
+          # the CI structural-speedup program) — this note is their union.
           #
-          # WHY: the repo shares a 10 GB Actions-cache budget, GitHub LRU-evicts against
-          # it, and rust-cache keys embed the ref scope — so every PR and every ephemeral
-          # merge_group run was WRITING its own branch-scoped copy of a dependency cache
-          # that already exists on main. Two costs: (1) a save on a
-          # `gh-readonly-queue/*` ref is dead on arrival — the queue branch is deleted
-          # the moment the batch merges, so nothing can ever restore that entry, yet it
-          # occupies budget until evicted; (2) those write-only copies push the WARM
-          # main-scoped entries out of the budget, so the heavy jobs (coverage,
-          # conformance, mutants) restore COLD and pay the dependency-compile floor from
-          # scratch. Caching was present but self-defeating.
+          # RESTORE is unconditional — PR heads and `gh-readonly-queue/*` entries both
+          # branch off main and read main's entry, which is where the dep-cache hit
+          # comes from. SAVE happens on push-to-main ONLY, for two reasons:
+          #   1. A save from a merge-queue entry is DEAD ON ARRIVAL. Actions cache
+          #      scoping makes an entry written from `refs/heads/gh-readonly-queue/<base>/
+          #      pr-<N>-<sha>` visible to that ref alone, and GitHub deletes that ref the
+          #      moment the entry merges or is ejected — nothing can ever restore it. The
+          #      save is pure post-step wall-clock on the queue's critical path.
+          #   2. Branch-scoped saves churn the repo's shared 10 GB Actions-cache budget,
+          #      which GitHub LRU-evicts against, so those write-only copies push the
+          #      WARM main-scoped entries out and the heavy jobs (coverage, conformance,
+          #      mutants) restore COLD and pay the dependency-compile floor from scratch.
+          #      Caching was present but self-defeating. This is sq-3sbrr's doctrine,
+          #      already applied to feature-matrix.yml and the wasm lanes; this file's
+          #      cache steps (plus the one in vectorized-feature-off.yml) were the gap
+          #      left on the queue path.
           #
-          # `save-if` makes non-main runs pure RESTORE — they still get the warm main
-          # entry, they just stop writing. EVERY key here still has a seeder, which is
-          # the condition that makes this safe rather than a permanent cold start:
+          # WHY main-only is safe rather than a permanent cold start: EVERY key here
+          # still has a seeder.
           #   - the per-commit jobs are seeded by the post-merge push-to-main run — the
           #     `changes` job forces rust_changed=true on any non-PR/non-merge_group
-          #     event, so `push` runs the full matrix;
+          #     event (`ci_select.py` treats `push` as mode=full), so `push` runs the
+          #     full matrix;
           #   - `coverage-nightly` / `mutants-nightly-advisory` never run on push (they
           #     hang off `nightly-gate`, which is schedule/workflow_dispatch only), and
           #     are seeded by the 03:17 UTC cron — a scheduled run's ref IS
           #     refs/heads/main, so save-if holds there too.
+          # No job is left permanently cold by this.
+          #
+          # COST: a PR that changes `Cargo.lock` re-resolves/rebuilds deps on each push
+          # instead of once. Accepted — that PR class is rare, and it is exactly the
+          # class whose branch-scoped save was evicting main's entry for everyone else.
+          # COUPLING (read before landing sq-6vshe.14): main-scope freshness now depends
+          # ENTIRELY on push-to-main runs. .14 skips queue-validated push legs and must
+          # keep its promised cache-primer leg, or these caches go stale.
+          # The posture is pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # [OPUS-4.8] sq-x4jy: cargo-nextest is the test runner — each test in its OWN
       # process (a stray abort can't take the whole binary down), a never-executed
@@ -454,6 +471,18 @@ jobs:
           path: nextest.tar.zst
           retention-days: 1
           if-no-files-found: error
+          # [SONNET-4.6] sq-6vshe.15 lever 1 — ARTIFACT DIET. upload-artifact wraps its
+          # payload in a zip at DEFLATE level 6 by default. `nextest.tar.zst` is ALREADY
+          # zstd-compressed, so that pass re-compresses incompressible bytes: it burns CPU
+          # on this job — which sits on the merge-queue critical path, with every test
+          # shard blocked on the artifact via `needs:` — for a size delta that on
+          # already-compressed input is ~0 (DEFLATE cannot find redundancy zstd removed).
+          # `0` = store, i.e. zip the file without re-compressing it. NOT a content change:
+          # the archive bytes the shards download are identical, only the zip container's
+          # compression method differs, so the nextest test set is unchanged by
+          # construction (and any drift would still fail LOUD — a shard's exact `-E` filter
+          # matching zero tests is nextest exit 4, not a silent pass).
+          compression-level: 0
       # [OPUS-4.8] Doctests run ONCE here (nextest neither executes nor archives them,
       # and --partition does not apply to them), off the warm archive build for ~12s at
       # ZERO extra build cost — the whole point of build-once (sq-vyxy). Tradeoff (raised
@@ -917,8 +946,10 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
-          # are on the `build-archive` cache step above (the canonical note).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build sparq-wasm for the browser target
         run: cargo build -p sparq-wasm --target wasm32-unknown-unknown
@@ -1256,8 +1287,10 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
-          # are on the `build-archive` cache step above (the canonical note).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # GATES: the whole workspace (sparq-py included) is clippy-clean under -D warnings.
       # A new warning — from new code or a Rust-stable bump that adds a lint — fails CI.
@@ -1406,8 +1439,10 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
-          # are on the `build-archive` cache step above (the canonical note).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: cargo check on the declared MSRV
         # [SONNET-4.6] Test targets must compile at the declared floor too; they can
@@ -1488,8 +1523,10 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
-          # are on the `build-archive` cache step above (the canonical note).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch W3C test suites (pinned)
         run: ./scripts/fetch-conformance.sh
@@ -1622,8 +1659,10 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
-          # are on the `build-archive` cache step above (the canonical note).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch W3C SHACL test suite (pinned)
         run: ./crates/sparq-shacl/fetch-shacl-tests.sh
@@ -1759,8 +1798,10 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
-          # are on the `build-archive` cache step above (the canonical note).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run OGC GeoSPARQL topology compliance ratchet
         # The runner asserts its own floor (OGC_RATCHET_FLOOR) + fail==0; capture the
@@ -1905,8 +1946,10 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
-          # are on the `build-archive` cache step above (the canonical note).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run Solid WAC + ACP decision-parity suites
         # The runners assert their own pinned floors; capture the output so the grep
@@ -2015,8 +2058,10 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
-          # are on the `build-archive` cache step above (the canonical note).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch SolidLab ODRL Test Suite (pinned)
         run: bash scripts/fetch-odrl-suite.sh
@@ -2121,8 +2166,10 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
-          # are on the `build-archive` cache step above (the canonical note).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run sparq-text BM25 differential oracle
         # The runner asserts its own floor (TEXT_ORACLE_FLOOR) + per-hit score
@@ -2230,8 +2277,10 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
-          # are on the `build-archive` cache step above (the canonical note).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run sparq-rsp RSP expressivity / SRBench correctness oracle
         # The runner asserts its own floor (RSP_EXPRESSIVITY_FLOOR) + every
@@ -2344,8 +2393,10 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
-          # are on the `build-archive` cache step above (the canonical note).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch W3C JSON-LD 1.1 API test suite (toRdf/fromRdf/compact, pinned)
         run: ./scripts/fetch-jsonld-tests.sh
@@ -2486,8 +2537,10 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
-          # are on the `build-archive` cache step above (the canonical note).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Clippy the gated harness surface (service-loopback feature ON)
         # The REAL gate for the feature-gated code: -D warnings over all targets with the
@@ -2647,8 +2700,10 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
-          # are on the `build-archive` cache step above (the canonical note).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch inference test suites (pinned)
         run: ./scripts/fetch-inference-suites.sh
@@ -2933,6 +2988,13 @@ jobs:
     # is coverage-nightly), skip a doc-only PR. push/merge_group force rust_changed=true.
     if: github.event_name != 'schedule' && needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
+    # [SONNET-4.6] sq-6vshe.17: `issues: read` is what the ratchet-ADVANCE pause step needs
+    # to probe for an open post-merge coverage alarm. Least privilege — this job never
+    # writes anything (the alarm is FILED by `coverage-demoted-filer`, which owns the write
+    # scope), and the probe fails OPEN if the read is unavailable.
+    permissions:
+      contents: read
+      issues: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Test-presence gate (fast, no compile)
@@ -2952,6 +3014,25 @@ jobs:
         run: |
           git fetch --no-tags --depth=1 origin main
           python3 scripts/coverage-gate.py --check-monotonic --base-ref origin/main
+      - name: Ratchet-ADVANCE pause while post-merge coverage is RED (sq-6vshe.17) [SONNET-4.6]
+        # [SONNET-4.6] sq-6vshe.17: the second half of the demotion protocol. Because the
+        # coverage MEASUREMENT is demoted off merge_group, `main` is an enforcement point;
+        # while its coverage is RED (an open `[demoted-lane] lane=coverage-ratchet-main`
+        # issue, filed by `coverage-demoted-filer`), RAISING a floor is unverifiable
+        # book-keeping — the measured numbers a raise cites are exactly the numbers in
+        # doubt. So a branch that RAISES a floor is blocked until that alarm closes.
+        #
+        # Deliberately narrow + non-blocking by default:
+        #   * only a RAISE of an existing floor blocks; a new crate row, an unchanged
+        #     floor, and the RECOVERY path (a governed lowering under --allow-lower) never
+        #     do — see coverage-gate.py floor_advances();
+        #   * the alarm probe FAILS OPEN (no gh / no token / API error => PASS), so an
+        #     unavailable GitHub API can never red this fast gating job;
+        #   * `issues: read` is the only permission it needs.
+        # Unit-tested (pure seam + injected probe): coverage-gate.py --self-test.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/coverage-gate.py --check-advance-allowed --base-ref origin/main
 
   coverage-measure:
     # [OPUS-4.8] PER-CRATE line-coverage RATCHET (sq-hbg7), now SHARDED for merge-queue
@@ -2994,10 +3075,14 @@ jobs:
     # gated identically by the merge job's `coverage-gate.py --check`.
     name: coverage ratchet (shard ${{ matrix.shard }}/3)
     # [OPUS-4.8] sq-fmx4u.6 (design §5.2, phase 2): coverage is a function of
-    # compiled code + tests, so it stays ALWAYS-RUN with ONE exception — skip only
-    # when the affected closure is PROVABLY EMPTY (every changed path SAFE-listed /
+    # compiled code + tests, so its SELECTION exception is a single narrow one — skip
+    # only when the affected closure is PROVABLY EMPTY (every changed path SAFE-listed /
     # non-crate, so mode=selected AND affected==[]). Any NON-empty closure keeps it
     # running, because a dependency change can shift executed lines in dependents.
+    # [SONNET-4.6] (This comment used to say "ALWAYS-RUN with ONE exception". Two
+    # EVENT-level demotions have since been layered on top of the selection rule —
+    # draft-tier CI and the sq-6vshe.17 merge_group demotion, both documented below —
+    # so the "always-run" framing is scoped to the SELECTION axis only.)
     # Same fail-closed guard shape build-archive uses: `mode != 'selected'` (full/
     # shadow/empty output) => RUN, and `affected != '[]'` => RUN; both false (the
     # SAFE-only case) => skip (the shard reports `skipped`, which the `coverage`
@@ -3006,13 +3091,40 @@ jobs:
     # nightly full coverage backstop is `coverage-nightly` (schedule), unaffected.
     # [FABLE-5] Draft-tier CI: coverage is SKIPPED on draft PR heads entirely (the
     # instrumented rebuild is one of the heaviest lanes; the ready_for_review
-    # full-tier run + the merge_group run both re-measure it before any merge, and
-    # a draft-tier gate can never admit a PR — docs/branch-protection.md
-    # §Draft-tier CI). The guard is fail-open off the PR path: any non-pull_request
-    # event (push/merge_group) satisfies the first disjunct => RUN.
+    # full-tier run re-measures it, and a draft-tier gate can never admit a PR —
+    # docs/branch-protection.md §Draft-tier CI). The guard is fail-open off the PR
+    # path: any non-pull_request event (push) satisfies the first disjunct => RUN.
+    #
+    # [SONNET-4.6] sq-6vshe.17 (research/ci-mergequeue-speedup-2026-07.md §3.4a):
+    # the coverage MEASUREMENT is DEMOTED off the merge_group blocking path. MEASURED
+    # MOTIVE: these instrumented shards (448-785 s each) are the merge-group entry
+    # POLE whenever change-based selection skips the test shards. WHY it is designable
+    # at all: coverage is a RATCHET, not a correctness test — a floor regression that
+    # slips through a queued BATCH is detectable and RECOVERABLE post-merge, unlike a
+    # functional bug. Enforcement topology after this change:
+    #   * pull_request  — UNCHANGED, and the PRIMARY gate (every PR still measures).
+    #   * merge_group   — the measure legs are skipped (this guard). `coverage-floors`
+    #                     (fast, no-compile: presence + monotonicity + shard-partition)
+    #                     STILL RUNS here, so a batch can never LOWER a committed floor.
+    #   * push-to-main  — UNCHANGED and now load-bearing: the post-merge measurement is
+    #                     the enforcement point for the batch-stacking case. It is
+    #                     EXEMPT from any future push-run skip (sq-6vshe.14) — pinned by
+    #                     scripts/tests/test_ci_select_wiring.py so the exemption cannot
+    #                     be silently dropped when that lever lands.
+    #   * a main red    — auto-files a P1 bead + deduped issue via the demotion protocol
+    #                     (`coverage-demoted-filer` below) AND pauses further ratchet
+    #                     ADVANCES until green (`coverage-floors`
+    #                     --check-advance-allowed).
+    # RESIDUAL RISK, stated honestly: two PRs each individually >= floor can merge to a
+    # combined tree < floor. Rare, caught ~15 min later on main, recoverable by
+    # revert/fix-forward — and no committed floor is ever silently lowered.
+    # The skipped legs report `skipped`, which the `coverage` aggregator counts as
+    # satisfied, so the ci-summary gate still sees ONE terminal coverage check on the
+    # merge_group ref — never an expected-but-missing one.
     needs: [changes, coverage-floors, select]
     if: >-
       github.event_name != 'schedule' &&
+      github.event_name != 'merge_group' &&
       (github.event_name != 'pull_request' || github.event.pull_request.draft != true) &&
       needs.changes.outputs.rust_changed == 'true' &&
       (needs.select.outputs.mode != 'selected' || needs.select.outputs.affected != '[]')
@@ -3066,11 +3178,13 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: coverage-measure
-          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — full rationale on the
-          # `build-archive` cache step above. Also removes the concurrent-save race the
-          # per-shard key was working around: on main the shards still run together, but
-          # a duplicate-key save is a benign no-op (the cache API rejects the second
-          # writer), not a clobber.
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Full rationale on the
+          # `build-archive` cache step above; pinned by
+          # scripts/tests/test_mergequeue_cache_posture.py. Saving on main only also
+          # removes the concurrent-save race the per-shard key was working around: on
+          # main the shards still run together, but a duplicate-key save is a benign
+          # no-op (the cache API rejects the second writer), not a clobber.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-llvm-cov
         # [OPUS-4.8] sq-tool-pin: taiki-e/install-action picks the tool from its @<tool> ref;
@@ -3197,9 +3311,15 @@ jobs:
     name: coverage engine run (partition ${{ matrix.part }}/3)
     # [FABLE-5] Draft-tier CI: skipped on draft PR heads, same rationale + guard
     # shape as coverage-measure above (fail-open off the PR path).
+    # [SONNET-4.6] sq-6vshe.17: DEMOTED off merge_group with the same guard + the same
+    # recoverable-ratchet argument as coverage-measure above (this partitioned engine
+    # measurement is the other half of the instrumented pole). `coverage-engine-merge`
+    # needs `coverage-engine-run.result == 'success'`, so it skips with these — and the
+    # `coverage` aggregator counts both `skipped` results as satisfied.
     needs: [changes, coverage-floors, select]
     if: >-
       github.event_name != 'schedule' &&
+      github.event_name != 'merge_group' &&
       (github.event_name != 'pull_request' || github.event.pull_request.draft != true) &&
       needs.changes.outputs.rust_changed == 'true' &&
       (needs.select.outputs.mode != 'selected' || needs.select.outputs.affected != '[]')
@@ -3228,6 +3348,10 @@ jobs:
       # shared-key cache warms the deps; keying by part avoids save-race clobbering.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE DISCIPLINE: restore always,
+          # save on push-to-main only (rationale on `build-archive` above; pinned by
+          # scripts/tests/test_mergequeue_cache_posture.py).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: coverage-engine-run-${{ matrix.part }}
           # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — full rationale on the
           # `build-archive` cache step above. The per-part key is LEFT ALONE here: it is
@@ -3292,6 +3416,10 @@ jobs:
       # Reuse a run partition's dep cache to warm the merge job's object compile.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE DISCIPLINE: restore always,
+          # save on push-to-main only (rationale on `build-archive` above; pinned by
+          # scripts/tests/test_mergequeue_cache_posture.py).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: coverage-engine-run-1
           # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — full rationale on the
           # `build-archive` cache step above.
@@ -3417,6 +3545,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate coverage floor + shard results
+        env:
+          EVENT: ${{ github.event_name }}
         run: |
           floors='${{ needs.coverage-floors.result }}'
           measure='${{ needs.coverage-measure.result }}'
@@ -3433,8 +3563,128 @@ jobs:
           done
           if [ "$rc" -eq 0 ]; then
             echo "### coverage ratchet + test-presence gate: PASS" >> "$GITHUB_STEP_SUMMARY"
+            # [SONNET-4.6] sq-6vshe.17: say plainly WHAT passed on the merge_group ref, so a
+            # reviewer reading a green merge-queue coverage check never reads it as "the
+            # per-crate line-% was re-measured on the merged tree". It was not: only the
+            # fast no-compile floor gates ran here (presence + monotonicity + shard
+            # partition). The MEASUREMENT ran on the PR head and runs again on push-to-main.
+            if [ "$EVENT" = "merge_group" ]; then
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "> NOTE (sq-6vshe.17): on the \`merge_group\` ref this verdict covers the" \
+                   "fast no-compile FLOOR gates only (test-presence, floor monotonicity," \
+                   "shard-partition). The instrumented per-crate line-% MEASUREMENT is" \
+                   "demoted off the queue's blocking path — it gated the PR head and" \
+                   "re-runs on push-to-main, where a red auto-files a P1 and pauses further" \
+                   "ratchet advances." >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
           exit "$rc"
+
+  # [SONNET-4.6] sq-6vshe.17 (research/ci-mergequeue-speedup-2026-07.md §3.4a) — the
+  # DEMOTED-LANE SAFETY NET for the coverage MEASUREMENT demoted off merge_group.
+  # The measure legs' FULL FORM runs at PR level AND on push-to-main. This tiny job is
+  # the "cannot silently rot" backstop the demotion protocol mandates (the same shape as
+  # `heavy-recall-demoted-filer` above): if a coverage MEASURE leg FAILS on the canonical
+  # push-to-main build — the batch-stacking regression a merge_group run no longer catches
+  # — it auto-files a P1 bead + a deduped GitHub issue naming the lane + run, via
+  # scripts/ci-file-demoted-lane-failure.py. That issue is ALSO what the `coverage-floors`
+  # ratchet-ADVANCE pause reads, so a red main both tracks the finding to closure and stops
+  # the ratchet from advancing on numbers that are in doubt.
+  # It files ONLY when a DEMOTED leg failed: a `coverage-floors` red on main is a normal
+  # red main build (those gates never left the queue), not a demoted-lane finding.
+  # SEPARATE job so the write scope stays off the coverage matrix — least privilege,
+  # matching the heavy-recall / fuzz / differential filer precedent.
+  coverage-demoted-filer:
+    name: coverage demoted-lane safety-net (push-to-main)
+    # Only the aggregate verdict is needed — it already folds in every measure leg, and an
+    # unused `needs` edge would just add a false dependency.
+    needs: [coverage]
+    # push-to-main only, and only when the coverage aggregate did not succeed. `always()`
+    # so this runs despite the failed `needs`; the body then confirms a DEMOTED leg was the
+    # culprit.
+    if: >-
+      always() && github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.coverage.result != 'success' && needs.coverage.result != 'skipped'
+    runs-on: ubuntu-latest
+    # Scoped write: append the bead + best-effort push (contents), file/comment the issue
+    # (issues), read this run's job list to detect which leg failed (actions).
+    permissions:
+      contents: write
+      issues: write
+      actions: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Detect a failed DEMOTED coverage measure leg in this run
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # List THIS workflow-run's jobs and find a FAILED leg whose measurement is the
+          # part demoted off merge_group. The regex matches EXACTLY the three demoted job
+          # names — "coverage ratchet (shard N/3)", "coverage engine run (partition N/3)",
+          # "coverage engine merge + ratchet (per-crate)" — and NOT the still-queued
+          # "coverage floors (…)", the "coverage ratchet + test-presence gate (per-crate)"
+          # aggregate, or the nightly "coverage (nightly, …)" tier. Pinned by
+          # scripts/tests/test_ci_select_wiring.py against the live job names.
+          failed="$(gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" \
+            --jq '.jobs[] | select(.conclusion == "failure") | select(.name | test("^coverage (ratchet \\(shard |engine )")) | .name' \
+            | head -n1 || true)"
+          if [ -z "$failed" ]; then
+            echo "No DEMOTED coverage measure leg failed in this run (a coverage-floors red is a normal red main build) — nothing to file."
+            echo "file=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Failed demoted coverage leg detected: $failed"
+            echo "file=true" >> "$GITHUB_OUTPUT"
+            echo "leg_name=$failed" >> "$GITHUB_OUTPUT"
+          fi
+      - name: File the demoted-lane P1 bead + issue
+        if: steps.detect.outputs.file == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          LEG_NAME: ${{ steps.detect.outputs.leg_name }}
+        run: |
+          set -euo pipefail
+          # Self-test the filer first (hermetic; no gh, no writes) so a script regression
+          # is caught here, not silently.
+          python3 scripts/ci-file-demoted-lane-failure.py --self-test
+          # --lane MUST stay coverage-ratchet-main: coverage-gate.py COVERAGE_ALARM_LANE
+          # reads back the SAME token to decide whether to pause ratchet advances. The
+          # wiring test pins the two together.
+          python3 scripts/ci-file-demoted-lane-failure.py \
+            --lane "coverage-ratchet-main" \
+            --bead-prefix "cv" \
+            --full-form "instrumented per-crate coverage measurement on push-to-main ($LEG_NAME)" \
+            --per-pr-form "runs at PR level; demoted off merge_group (sq-6vshe.17) — the merge queue keeps the fast no-compile floor gates only" \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+      - name: Commit + push the auto-filed bead (best-effort)
+        if: steps.detect.outputs.file == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          if git diff --quiet -- .beads/issues.jsonl; then
+            echo "no bead appended (dedupe hit) — nothing to push."
+            exit 0
+          fi
+          git config user.name "sparq-ci[bot]"
+          git config user.email "sparq-ci@users.noreply.github.com"
+          git add .beads/issues.jsonl
+          git commit -m "chore(ci): auto-file demoted coverage-measure lane failure (sq-6vshe.17). [SONNET-4.6]"
+          push_rc=0
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main || push_rc=$?
+          if [ "$push_rc" -ne 0 ]; then
+            echo "::warning title=demoted-lane bead push declined::Could not push the auto-filed bead to protected main (git push exit ${push_rc}; likely GH013 ruleset rejection). The GitHub issue filed in the previous step is the durable record; the orchestrator beads it on the next issue sweep."
+          else
+            echo "pushed the demoted-lane bead to main."
+          fi
 
   nightly-gate:
     # [OPUS-4.8] Freshness gate for ALL nightly (schedule-triggered) jobs: run them
@@ -3513,8 +3763,10 @@ jobs:
         run: rustup component add llvm-tools-preview
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
-          # are on the `build-archive` cache step above (the canonical note).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-llvm-cov
         # [OPUS-4.8] sq-tool-pin: explicit `with: tool:` is MANDATORY when SHA-pinning
@@ -3897,8 +4149,10 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
-          # are on the `build-archive` cache step above (the canonical note).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-mutants
         uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # cargo-mutants
@@ -4046,8 +4300,10 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — rationale + the seeder argument
-          # are on the `build-archive` cache step above (the canonical note).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-geiger
         uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2

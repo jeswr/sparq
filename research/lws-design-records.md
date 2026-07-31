@@ -6,8 +6,8 @@
 > imported whole from [jeswr/solid-server-rs](https://github.com/jeswr/solid-server-rs)
 > at rev `1e555b10` under `sq-gg0qq.2`. That import deliberately left the source repo's
 > `docs/design/` and `decisions/` trees behind, so ~70 doc-comments in the imported code
-> now cite paths that **do not exist in this checkout**. This record is the durable
-> in-repo home those citations should resolve to.
+> cited paths that **do not exist in this checkout**. This record is the durable in-repo
+> home those citations resolve to; #4970 re-pointed them at the sections below.
 >
 > Bead: **sq-gg0qq.10** · Issue: **#2742** · Parent: **#2572** / `sq-gg0qq`.
 > Siblings: `.1` supply-chain pre-flight, `.2` the crate import, `.3` the in-workspace
@@ -31,8 +31,9 @@
 
 ## 1. The reference map — source-repo path → in-repo home
 
-Every path in the left column is cited by an imported doc-comment and **does not exist in
-this repository**. The right column is where the load-bearing content actually lives now.
+Every path in the left column was cited by an imported doc-comment (pre-#4970) and **does
+not exist in this repository**. The right column is where the load-bearing content actually
+lives now, and is what those doc-comments cite today.
 
 | Cited path (source repo) | Namespace | Subject | Durable in-repo home |
 |---|---|---|---|
@@ -61,11 +62,12 @@ the numbers overlap:
   that RSS adapted.
 
 So `decisions/0001` means two unrelated things depending on which repo the citing comment
-belongs to. `crates/sparq-lws-core/src/identity.rs:4-5` is the one place the code
-disambiguates explicitly — it names `docs/design/webid-outside-pod.md` as "the RSS
-adaptation of prod-solid-server `decisions/0020-webid-outside-pod.md`". Everywhere else the
-namespace is implicit: a citation inside `crates/sparq-lws-core/**` is RSS unless it names
-prod-solid-server, and a citation inside `research/concurrent-serving.md` is PSS.
+belongs to. Since **#4970** the crate's doc-comments cite *this record's* section numbers
+instead, and the ones that still name a source-repo path carry an explicit `RSS`/`PSS`
+prefix — e.g. `src/identity.rs:4-6`, `src/lib.rs:86-87`, `src/main.rs:174-175`,
+`src/ldp/public_read_skip.rs:32`, `src/tls.rs:57`, and the `decisions/0003` defining sites
+in `src/ldp/handler.rs`. So no bare, ambiguous `decisions/NNNN` remains under
+`crates/sparq-lws-core/**`. A citation inside `research/concurrent-serving.md` is PSS.
 
 **Rule for future edits:** when you touch one of these citations, write the namespace into
 it (`RSS decisions/0003`, `PSS decisions/0020`). Bare `decisions/NNNN` is ambiguous.
@@ -285,10 +287,10 @@ the way DPoP-SK is pinned) is follow-up work, not something this record can asse
 - **It is not a verbatim migration.** The source ADRs were not read. Everything above is
   reconstructed from code, and §5 flags the one place where the source ADR provably holds
   content (options 1 and 2) that the code does not restate.
-- **It does not rewrite the imported doc-comments.** The ~70 stale `docs/design/…` and
-  `decisions/…` citations inside `crates/sparq-lws-core/**` still point at the source repo.
-  Rewriting Rust doc-comments is outside a docs-scoped change; §1 is the map that makes them
-  resolvable in the meantime, and re-pointing them is tracked as follow-up.
+- **It is not itself the reason the citations resolve.** The ~70 imported doc-comments that
+  cited `docs/design/…` / `decisions/…` were re-pointed at this record's sections under
+  **#4970**, a separate change; §1 remains the source-path → in-repo map, and §2 the
+  namespace rule any future citation must follow.
 - **It claims no capability.** Every behaviour above is stated with its default posture
   (`embedded-sparq` on, `SOLID_SERVER_IDENTITY_ENABLE` off, `http-sparq` off) and its
   durability caveat. `sparq-lws-core` remains **EXPERIMENTAL**, is `publish = false`, and
