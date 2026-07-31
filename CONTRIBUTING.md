@@ -163,11 +163,16 @@ workspace-wide diff that collides with every open PR. The formatter *version* is
 `rust-toolchain.toml` fixes the channel and ships the `rustfmt` component, so the check is
 reproducible between CI and a local checkout even while it is non-blocking.
 
-Security-specific lanes also run: **CodeQL** SAST
-([`codeql.yml`](./.github/workflows/codeql.yml), `security-and-quality` queries), **miri**,
-**fuzz**, **supply-chain**, and the **OpenSSF Scorecard** analysis
-([`scorecard.yml`](./.github/workflows/scorecard.yml)). The aggregate `ci-summary` check
-gates the merge.
+Security-specific lanes also run: **miri**, **fuzz**, **supply-chain**, and the **OpenSSF
+Scorecard** analysis ([`scorecard.yml`](./.github/workflows/scorecard.yml)). The aggregate
+`ci-summary` check gates the merge.
+
+**CodeQL SAST does *not* currently run.** [`codeql.yml`](./.github/workflows/codeql.yml)
+(`security-and-quality` queries) is retained in-tree but has been disabled at the Actions
+level since 2026-07-18 by maintainer direction, so it produces no check-run and gates
+nothing. Nothing else in the stack replaces it — expect **no** taint or crypto-misuse
+analysis on your PR, and rely on review plus the live lanes above. See
+[`ASSURANCE.md`](./ASSURANCE.md) §11.
 
 ### Reporting a vulnerability you find while contributing
 
@@ -180,7 +185,8 @@ jesse@jeswr.org). The machine-readable pointer is
 
 The above maps onto the NIST SSDF practices: a documented secure-coding standard and threat
 model (PW.1 — this section plus [`SECURITY.md`](./SECURITY.md) and the threat model),
-review and analysis before merge (PW.7/PW.8 — code review, CodeQL, clippy, miri, fuzz),
+review and analysis before merge (PW.7/PW.8 — code review, clippy, miri, fuzz; CodeQL is
+disabled, see above),
 supply-chain provenance (PW.4/PS.3 — cargo-deny, SBOM), and coordinated vulnerability
 handling (RV — the disclosure policy and `security.txt`). Follow the PR conventions in
 `AGENTS.md` (small, reviewed, all review comments resolved before merge).

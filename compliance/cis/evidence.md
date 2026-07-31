@@ -136,8 +136,26 @@ grep -nE 'deny check|cargo vet|cyclonedx' .github/workflows/supply-chain.yml
 #  supply-chain.yml#sbom:  cargo cyclonedx --all --format json
 ```
 
-Plus daily `dependency-monitoring.yml` advisory watchdog and CodeQL SAST (`codeql.yml`). The
-*application/dependency* half of CIS 7.5/7.6 is covered; only the *image-OS* half is the GX-12 gap.
+Plus the daily `dependency-monitoring.yml` advisory watchdog. The *dependency* half of CIS 7.5/7.6
+is covered and merge-gating.
+
+> **CodeQL struck from this step (GX-14).** This paragraph previously also cited "CodeQL SAST
+> (`codeql.yml`)". `.github/workflows/codeql.yml` is **disabled at the Actions level**
+> (`disabled_manually`, since 2026-07-18); the file and its triggers are retained on `main`, so a
+> `grep` over the file still "passes" — but **no run is scheduled on any event**, there is no
+> `CodeQL analysis (rust)` check-run, no SARIF upload, and it gates nothing. Verify by **state**,
+> never by file contents:
+> ```sh
+> gh api repos/sparq-org/sparq/actions/workflows/codeql.yml --jq '.state'   # → disabled_manually
+> gh run list --workflow codeql.yml --limit 5                               # → no recent runs
+> ```
+> So the **first-party source** half of "application vulnerability scanning" is **not** covered, and
+> **nothing compensates** — clippy `-D warnings` is a linter, the unsafe ratchet is a count gate, and
+> fuzz/Miri find undefined behaviour, not vulnerability classes. That is why **C-16.12 is PARTIAL**,
+> not PASS. Anchor: **GX-14** in `../gap-register.md`; `ASSURANCE.md` §11; posture decision **#4620**.
+> [OPUS-5]
+
+The *image-OS* half of 7.5/7.6 is the GX-12 gap.
 
 ## E-10 — CI access control + least-privilege (C-6.8)
 

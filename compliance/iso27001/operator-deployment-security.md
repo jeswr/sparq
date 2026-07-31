@@ -297,10 +297,19 @@ during disruption), A.5.30 (ICT readiness for BC).
 A.8.32 (change management).
 
 **Built-in (sparq):** sparq's own supply chain is gated and monitored — `cargo deny check
-advisories` (gating), a daily RustSec advisory watchdog, Dependabot (4 ecosystems), CodeQL,
+advisories` (gating), a daily RustSec advisory watchdog, Dependabot (4 ecosystems),
 and a coordinated-disclosure intake (`SECURITY.md`, `.well-known/security.txt`). Releases are
 SLSA-attested with a CycloneDX SBOM + VEX. (See `controls.md` A.8.8 / `../sbom/`, `../slsa/`,
 `../cra/`.)
+
+> **Honest limit — no SAST (GX-14).** CodeQL was previously listed here; it is **disabled at the
+> Actions level** (`disabled_manually`, since 2026-07-18) and runs on no event, so sparq performs
+> **no static application security testing** of its own source, and **no other control compensates**
+> (clippy `-D warnings`, the unsafe-count ratchet, `cargo-deny`/`cargo-vet`, fuzz and Miri are live
+> and genuine, but none does taint or crypto-misuse analysis). The *dependency* advisory pipeline
+> above is unaffected and remains merge-gating. An operator whose own assurance programme requires
+> SAST over the components it deploys **must run its own** against sparq's source. Anchor: **GX-14**
+> in `../gap-register.md`; `ASSURANCE.md` §11; posture decision issue **#4620**. [OPUS-5]
 
 **Operator MUST supply:**
 

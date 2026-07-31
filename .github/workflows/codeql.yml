@@ -1,7 +1,26 @@
 # CodeQL SAST — static security/quality analysis for the Rust workspace.
-# Resolves the OpenSSF Scorecard `SAST` alert and is the security-quality SAST gate
-# (the `analyze` job feeds the ci-summary aggregator; CodeQL findings also land in the
-# code-scanning dashboard and the Copilot/CodeQL PR review). [OPUS-4.8]
+#
+# ┌─ OPERATIONALLY DISABLED (2026-07-18) — READ FIRST ────────────────────────────┐
+# │ This workflow is disabled at the Actions level (`gh workflow disable`, state  │
+# │ `disabled_manually`) by separate maintainer direction, to cut merge latency.  │
+# │ The file and its triggers are retained verbatim, but GitHub schedules NO run  │
+# │ on ANY event: no `CodeQL analysis (rust)` check-run is produced, nothing is   │
+# │ uploaded to code scanning, and this lane gates NOTHING today. Every           │
+# │ "gates" / "alerts-at-zero" statement below describes the ENABLED posture and  │
+# │ is NOT a description of current CI — it is retained as the rationale to weigh │
+# │ if the lane is switched back on. sparq has NO compensating SAST control while │
+# │ this is off (clippy / cargo-deny / cargo-vet / fuzz / the unsafe ratchet are  │
+# │ all live and genuine, but none does taint or crypto-misuse analysis).         │
+# │ Cross-refs: `ASSURANCE.md` §11 · `docs/branch-protection.md` · the            │
+# │ `compliance/gap-register.md` SAST row. The durable posture (re-enable         │
+# │ advisory-only / re-enable on a schedule / accept and document no SAST) is an  │
+# │ OPEN maintainer decision — see issue #4620.                                   │
+# └──────────────────────────────────────────────────────────────────────────────┘
+#
+# When enabled, this resolves the OpenSSF Scorecard `SAST` alert and is the
+# security-quality SAST gate (the `analyze` job feeds the ci-summary aggregator; CodeQL
+# findings also land in the code-scanning dashboard and the Copilot/CodeQL PR
+# review). [OPUS-4.8]
 #
 # Rust CodeQL is GA, so we analyse the `rust` language. We use CodeQL's buildless
 # extraction (`build-mode: none`): the Rust extractor reads the Cargo workspace +
@@ -13,6 +32,11 @@
 #
 # [FABLE-5] sq-6vshe.6 heavy-lane placement — CodeQL PLACEMENT DECISION (measured):
 # KEEP per-push (per-PR) analysis; do NOT demote to merge_group + nightly.
+# NOTE (2026-07-18): this verdict is OVERTAKEN BY EVENTS — the whole workflow was
+# disabled, which is strictly stronger than the demotion it argued against. Its two
+# appeals below to preserving "alerts-at-zero" are stale as descriptions of today:
+# the lane runs nowhere, so it preserves nothing. The measurement itself still holds
+# and is the reason queue latency is NOT a valid argument against re-enabling.
 # The bead's decision rule is CONDITIONAL: demote CodeQL to the merge queue + nightly
 # ONLY IF it is a post-piapk wall-time POLE. It is NOT. MEASURED per-PR / merge_group
 # wall time over 20+ recent runs is ~3.8–4.8 min (this workflow uses `build-mode: none`

@@ -75,7 +75,7 @@ mapped as **implemented & verified**.
 | V7 Error Handling & Logging | **Applies — core** | structured JSON errors, panic isolation, opt-in tracing |
 | V8 Data Protection | **Applies narrowly** | no PII collection; TLS = proxy responsibility |
 | V9 Communication | **Mostly operator** | TLS terminated at proxy by design |
-| V10 Malicious Code | **Applies** | supply-chain gates, `forbid(unsafe_code)`, CodeQL |
+| V10 Malicious Code | **Applies** | supply-chain gates, `forbid(unsafe_code)`; **no SAST** — the CodeQL lane is disabled and gates nothing (GX-14), so L3 V10.1.1 is unmet |
 | V11 Business Logic | **Applies narrowly** | DoS/anti-automation limits |
 | V12 Files & Resources | **Applies** | SSRF egress allowlist, decompression-bomb cap, no file serving |
 | V13 API & Web Service | **Applies — core** | method restriction, content-type, the token gate |

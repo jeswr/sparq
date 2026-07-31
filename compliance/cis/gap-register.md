@@ -15,7 +15,13 @@ maturity/nice-to-have.
 
 | ID | Gap | Sev | CIS mapping | Remediation | Bead |
 |---|---|---|---|---|---|
-| _(none open)_ | | | | | |
+| _(none owned by this slice)_ | | | | | |
+
+## Cross-cutting open gaps affecting this slice (anchored elsewhere — not restated here)
+
+| ID | Anchor | Sev | CIS mapping | Effect on this slice |
+|---|---|---|---|---|
+| **GX-14** | **SAST is not running** — CodeQL is operationally disabled and nothing compensates. Full statement, evidence and the remediation options live in the top-level [`../gap-register.md`](../gap-register.md) and `ASSURANCE.md` §11; the durable-posture decision is open maintainer issue **#4620**. Not restated here. | **P1** | **C-16.12**, **C-7.5/7.6** (source half) | **C-16.12 downgraded PASS → PARTIAL** in [`controls.md`](./controls.md): its PASS rested substantially on CodeQL, and clippy alone is a *linter*, not SAST. CodeQL struck from the C-7.5/7.6 evidence — its dependency half stays PASS and merge-gating, its first-party-source half is now uncovered. The `evidence.md` E-9 step was corrected to verify by workflow **state** rather than by grepping the (intact but disabled) workflow file. |
 
 ## Resolved gaps (owned by this slice)
 
@@ -77,7 +83,11 @@ These are **not** CIS-owned; they back CIS rows and are already closed/tracked e
 
 ## Honesty statement
 
-The CIS slice has **no remaining technical gap** — GX-12 (image-CVE-scan + Dockerfile linter) and
+The CIS slice has **one remaining technical gap, and it is not slice-owned: GX-14 — SAST is not
+running.** CodeQL is disabled at the Actions level and **nothing compensates**, so **C-16.12 is
+PARTIAL, not PASS** (see the cross-cutting table above); claiming SAST coverage from clippy alone
+would be an overclaim, and the 35 open critical alerts left behind are *triaged* (issue #4615), not
+covered. The slice's **own** gaps are closed — GX-12 (image-CVE-scan + Dockerfile linter) and
 GX-13 (HEALTHCHECK, sq-toze.36, distroless-aware in-binary `--health-probe`) are both now
 addressed (see above). The `Dockerfile` hardening itself is verified PASS against the actual file;
 GX-12's closed gap was *automated scanning/linting* coverage, not a hardening deficiency. Nothing here is satisfied by the ZK/MPC

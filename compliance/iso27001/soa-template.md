@@ -40,9 +40,19 @@ organization:
 6. Has **top management approve and sign** (clause 5.1 leadership) — the `Approved by` column.
 
 **Status legend (sparq-side, from `controls.md`):** `IMPL` = Implemented & verified (technical
-control + re-runnable evidence) · `AUDIT-READY` = doc/substrate in repo, certificate needs an
-org act · `N/A(op)` = property of the operator's deployed environment · `GAP` = open readiness
-gap (see [`gap-register.md`](./gap-register.md)).
+control + re-runnable evidence) · `PARTIAL` = materially but not fully met, with the shortfall
+named in-row and carrying a gap id — the org **must not** inherit a `PARTIAL` as implemented and
+must record its own compensating control · `AUDIT-READY` = doc/substrate in repo, certificate
+needs an org act · `N/A(op)` = property of the operator's deployed environment · `GAP` = open
+readiness gap (see [`gap-register.md`](./gap-register.md)).
+
+> **SAST is not running (GX-14).** `.github/workflows/codeql.yml` is disabled at the Actions level
+> (`disabled_manually`, since 2026-07-18); the file is retained on `main` but no run is scheduled
+> on any event, so there is no check-run, no SARIF upload, and it gates nothing. **No compensating
+> SAST control exists.** A.8.7 and A.8.28 are therefore `PARTIAL`, and every other row that cited
+> CodeQL has had it struck from the evidence. An adopting org that needs SAST coverage in its ISMS
+> **must supply its own**. Anchor: **GX-14** in `../gap-register.md`; `ASSURANCE.md` §11; posture
+> decision issue **#4620**. [OPUS-5]
 
 > **Honesty banner (load-bearing).** The `sparq-side status` column is **not** an org SoA
 > status — it states what sparq-the-component already evidences. An org **must not** copy an
@@ -73,9 +83,9 @@ gap (see [`gap-register.md`](./gap-register.md)).
 | A.5.3 | Segregation of duties | AUDIT-READY | PR review + `CODEOWNERS` + branch protection; org ruleset out-of-repo | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | A.5.4 | Management responsibilities | AUDIT-READY | `CONTRIBUTING.md` + `AGENTS.md` obligations; enforcement is an org act | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | A.5.5 | Contact with authorities | N/A(op) | Operator owns for their deployment | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
-| A.5.6 | Contact with special interest groups | IMPL | OpenSSF Scorecard published; RustSec/GHSA/CodeQL participation | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
-| A.5.7 | Threat intelligence | IMPL | Daily `dependency-monitoring.yml`; Dependabot; CodeQL | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
-| A.5.8 | Information security in project management | IMPL | CI gate stack (`ci.yml`, `codeql.yml`, `supply-chain.yml`, `miri.yml`, `fuzz.yml`, `scorecard.yml`, `ci-summary.yml`); threat model | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
+| A.5.6 | Contact with special interest groups | IMPL | OpenSSF Scorecard published; RustSec/GHSA participation (CodeQL struck — disabled, GX-14) | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
+| A.5.7 | Threat intelligence | IMPL | Daily `dependency-monitoring.yml`; Dependabot; GHSA/`SECURITY.md` intake (CodeQL struck — disabled, GX-14) | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
+| A.5.8 | Information security in project management | IMPL | CI gate stack (`ci.yml`, `supply-chain.yml`, `miri.yml`, `fuzz.yml`, `scorecard.yml`, `ci-summary.yml`); threat model (`codeql.yml` struck — disabled at the Actions level, not part of the running stack, GX-14) | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | A.5.9 | Inventory of information & associated assets | AUDIT-READY | CycloneDX SBOM per build; crate list; threat-model §Assets. Operator data inventory is the operator's | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | A.5.10 | Acceptable use of information & assets | N/A(op) | Operator policy for deployed instance + data | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | A.5.11 | Return of assets | N/A(op) | People/asset-return; no employees | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
@@ -102,7 +112,7 @@ gap (see [`gap-register.md`](./gap-register.md)).
 | A.5.32 | Intellectual property rights | IMPL | `deny.toml` `[licenses]` gate; `LICENSE` (MIT); contributor IP terms in `CONTRIBUTING.md` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | A.5.33 | Protection of records | N/A(op) | Operator records retention | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | A.5.34 | Privacy & protection of PII | AUDIT-READY | sparq processes no PII of its own; loaded-RDF PII is operator-controller (`compliance/data-flow.md` + `dpia.md`) | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
-| A.5.35 | Independent review of information security | AUDIT-READY | OpenSSF Scorecard, CodeQL, adversarial threat model + ZK soundness audit, engineer↔auditor loop; accredited internal-audit programme is an org act | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
+| A.5.35 | Independent review of information security | AUDIT-READY | OpenSSF Scorecard, adversarial threat model + ZK soundness audit, engineer↔auditor loop; accredited internal-audit programme is an org act (CodeQL struck — disabled, GX-14; automated review is now Scorecard-only) | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | A.5.36 | Compliance with policies, rules & standards | IMPL | `ci-summary.yml` required branch-protection gate fails merge on any red policy lane; `docs/branch-protection.md` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | A.5.37 | Documented operating procedures | IMPL | `AGENTS.md`, `CONTRIBUTING.md`, `docs/branch-protection.md`, workflows as executable procedure | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 
@@ -153,8 +163,8 @@ gap (see [`gap-register.md`](./gap-register.md)).
 | A.8.4 | Access to source code | IMPL | Branch protection on `main` (PR + review + `ci-summary` gate); `CODEOWNERS`; SHA-pinned actions; SLSA-attested releases + SHA256SUMS | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | A.8.5 | Secure authentication | N/A(op) → AUDIT-READY | Optional bearer token; full secure-auth (MFA/session) is operator's gateway (B3); repo-side GitHub auth + signed attestations | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | A.8.6 | Capacity management | N/A(op) → IMPL(partial) | `QueryBudget` DoS-limit primitive (`sparq-engine`, T-DoS); capacity of a running deployment is operator-owned | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
-| A.8.7 | Protection against malware | IMPL | CodeQL SAST; supply-chain advisory gating + daily watchdog; SHA-pinned actions; distroless non-root image | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
-| A.8.8 | Management of technical vulnerabilities | IMPL | `cargo deny check advisories` GATING; daily watchdog; Dependabot; CodeQL; `SECURITY.md` + `.well-known/security.txt`; beads | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
+| A.8.7 | Protection against malware | **PARTIAL** (was IMPL — GX-14) | Prevention/containment live: supply-chain advisory gating + daily watchdog; `cargo-deny`/`cargo-vet`; SHA-pinned actions; distroless non-root image. **Detection over first-party source absent** — CodeQL SAST disabled, nothing compensates | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
+| A.8.8 | Management of technical vulnerabilities | IMPL | `cargo deny check advisories` GATING; daily watchdog; Dependabot; `SECURITY.md` + `.well-known/security.txt`; beads (CodeQL struck — disabled, GX-14; dependency half fully gating, no first-party code-vuln discovery — residual carried by A.8.28) | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | A.8.9 | Configuration management | IMPL | Pinned toolchain/MSRV, SHA-pinned actions, pinned base image digest, `Cargo.lock`, `deny.toml` policy-as-code | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | A.8.10 | Information deletion | N/A(op) | Deletion of operator data is operator-owned | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | A.8.11 | Data masking | N/A(op) → cross-ref | sparq does not mask loaded RDF; ZK privacy story (`compliance/cryptoreview/`) flagged **not yet sound** — not claimed | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
@@ -174,7 +184,7 @@ gap (see [`gap-register.md`](./gap-register.md)).
 | A.8.25 | Secure development life cycle | IMPL | `CONTRIBUTING.md` §Secure coding + SDLC touchpoints; CI gate stack; threat model. `compliance/ssdf/` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | A.8.26 | Application security requirements | IMPL | `research/threat-model.md` (boundaries B1–B5, STRIDE); `SECURITY.md`; ASVS re-scope (`compliance/asvs/`) | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | A.8.27 | Secure system architecture & engineering principles | IMPL | `#![forbid(unsafe_code)]` in 31/36 crates; boundary threat model; defense-in-depth gate stack; `compliance/memsafety/unsafe-register.md` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
-| A.8.28 | Secure coding | IMPL | `CONTRIBUTING.md` §Secure coding; `clippy … -D warnings` GATING; CodeQL; unsafe-count ratchet (`scripts/unsafe-gate.py`) | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
+| A.8.28 | Secure coding | **PARTIAL** (was IMPL — GX-14) | `CONTRIBUTING.md` §Secure coding; `clippy … -D warnings` GATING; unsafe-count ratchet (`scripts/unsafe-gate.py`). **No SAST** — CodeQL disabled at the Actions level, runs on no event, and nothing compensates (clippy is a linter, not a taint/crypto-misuse analyser); 35 open critical alerts triaged FP under #4615 (triaged ≠ covered) | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | A.8.29 | Security testing in development & acceptance | IMPL | `cargo test --workspace`; W3C conformance ratchets; `cargo-fuzz`; Miri lane; mmap corruption oracle | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | A.8.30 | Outsourced development | N/A | No outsourced development | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | A.8.31 | Separation of dev/test/production environments | AUDIT-READY | Branch model separates in-progress from released; release artifacts built only on tags; operator owns prod env separation | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |

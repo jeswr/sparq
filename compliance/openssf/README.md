@@ -31,10 +31,24 @@ Every row in [`controls.md`](./controls/openssf.md) is labelled one of:
   plan and the tracking `bd` bead (epic `sq-toze`).
 
 We do **not** re-claim the strong base posture as new work — Scorecard itself
-(`scorecard.yml`), SHA-pinned actions, the `ci-summary` branch-protection gate, CodeQL
-SAST, cargo-fuzz, cargo-deny, the CycloneDX SBOM, the SLSA build-provenance attestation,
-`SECURITY.md`, and `.well-known/security.txt` already exist. They are cited as **evidence**,
-not presented as additions.
+(`scorecard.yml`), SHA-pinned actions, the `ci-summary` branch-protection gate, the clippy
+`-D warnings` hard gate, cargo-fuzz, cargo-deny, the CycloneDX SBOM, the SLSA
+build-provenance attestation, `SECURITY.md`, and `.well-known/security.txt` already exist.
+They are cited as **evidence**, not presented as additions.
+
+> [OPUS-5] **CodeQL SAST was listed above and has been removed from the list.** The workflow
+> file [`.github/workflows/codeql.yml`](../../.github/workflows/codeql.yml) is retained on
+> `main`, but it has been **disabled at the Actions level (`disabled_manually`) since
+> 2026-07-18** by separate maintainer direction (merge latency): no run is scheduled on any
+> event, so there is no check-run, no SARIF upload to code scanning, and it gates nothing.
+> **No compensating SAST control exists** — the remaining lanes (clippy, the unsafe-count
+> ratchet, cargo-deny/cargo-vet, fuzz, Miri) are live and genuine but none performs taint or
+> crypto-misuse analysis. Scorecard's `SAST` check is therefore **expected to degrade**. This
+> is tracked as cross-cutting gap **GX-14** in
+> [`compliance/gap-register.md`](../gap-register.md); see also
+> [`ASSURANCE.md`](../../ASSURANCE.md) §11, the alert triage (#4615) and the open durable-posture
+> decision (#4620). It is stated here, not quietly dropped, because a *stated* control that is
+> switched off is worse than an acknowledged gap.
 
 ## Scope — what is in / out for a library + server
 

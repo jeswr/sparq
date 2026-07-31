@@ -126,8 +126,17 @@ cargo deny check advisories bans sources licenses
 - **Gating cargo-deny (advisories included).**
   `grep -n "GATING\|cargo deny" .github/workflows/supply-chain.yml` — `cargo deny check
   advisories bans sources licenses`, no `continue-on-error`. (GX-1 resolved.)
-- **CodeQL SAST.** `.github/workflows/codeql.yml` — `queries: security-and-quality`, `rust`
-  language, push/PR/schedule.
+- **CodeQL SAST — NOT RUNNING; not usable as evidence.** `.github/workflows/codeql.yml` still
+  declares `queries: security-and-quality`, `rust`, push/PR/schedule, but the workflow has been
+  **disabled at the Actions level** (`disabled_manually`) since **2026-07-18** by separate
+  maintainer direction (merge latency). GitHub schedules **no** run on **any** event, so there is
+  no `CodeQL analysis (rust)` check-run, no SARIF upload, and it feeds `ci-summary` nothing and
+  gates nothing. The 35 open critical `rust/hard-coded-cryptographic-value` alerts it left behind
+  were **triaged** as false positives of one query-model defect (issue **#4615**) — *triaged is not
+  covered*. **No compensating SAST exists:** clippy `-D warnings`, the unsafe-count ratchet,
+  cargo-deny/cargo-vet, fuzz and Miri are live and genuine but none performs taint or crypto-misuse
+  analysis. Tracked as cross-cutting gap **GX-14** (`../gap-register.md`, P1); the durable posture
+  is an open maintainer decision (issue **#4620**). See `ASSURANCE.md` §11.
 - **Daily advisory watchdog + Dependabot.** `.github/workflows/dependency-monitoring.yml`;
   Dependabot config (4 ecosystems).
 - **Parser safe-only; executor unsafe confined to cancellation.** `compliance/memsafety/` MS-13;

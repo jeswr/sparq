@@ -63,8 +63,17 @@
   `sparq-core` (mmap/dict-spill/SIMD = threat-model boundary **B5**), justified in the GX-5 register
   (#217, the `memsafety` slice).
 - `.github/workflows/miri.yml` (nightly Miri), `fuzz.yml` (cargo-fuzz PR smoke + nightly),
-  `codeql.yml` (SAST), `scorecard.yml` (OpenSSF, published), `supply-chain.yml` (cargo-deny +
-  CycloneDX SBOM), `release.yml` (SLSA `attest-build-provenance` + buildkit `provenance: mode=max`).
+  `scorecard.yml` (OpenSSF, published), `supply-chain.yml` (cargo-deny + cargo-vet, GATING +
+  CycloneDX SBOM), `ci.yml` (clippy `-D warnings`, hard gate), `release.yml` (SLSA
+  `attest-build-provenance` + buildkit `provenance: mode=max`).
+- **NOT evidence:** `codeql.yml` (SAST). The workflow file is retained on `main` but has been
+  **disabled at the Actions level (`disabled_manually`) since 2026-07-18** by separate maintainer
+  direction (merge latency) — no run on any event, no check-run, no SARIF, gates nothing. **No
+  compensating SAST exists** (nothing else performs taint or crypto-misuse analysis); 35 open
+  critical alerts are triaged as false positives of one query-model defect (#4615), which is not
+  the same as covered. Gap **GX-14** (P1, [`../gap-register.md`](../gap-register.md)); posture
+  decision issue **#4620**; `ASSURANCE.md` §11. The 4.1 maturity **4** was re-tested without this
+  leg and kept — see [`controls.md`](./controls.md) 4.1 for the reasoning.
 - `crates/sparq-server/src/main.rs` — four-limit DoS guards: `--query-timeout` (30s),
   `--max-body-bytes` (1 MiB), `--max-concurrent` (32 → 429), `--max-results`/`--max-query-rows`
   (413), `--max-decompress-ratio` (20, zip-bomb guard), plus subscription caps. Env-overridable.
