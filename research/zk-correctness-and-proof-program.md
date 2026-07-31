@@ -161,8 +161,9 @@ per-finding invariants, fixes, and acceptance tests are in each bead body.
 > **Downstream of `sq-3x7dl.4`:** its fix landed `numeric_divide_int_as_double`, a *documented
 > binary64 approximation*, because the module has no `xs:decimal` value type to land the
 > quotient in — `numeric_types.nr` carries only the `NumericType::decimal()` enum tag. Building
-> that type (and thereby unblocking `sq-3x7dl.9`'s duration ratio, which truncates for the same
-> reason) is `sq-n5e7p` (#3357); its decision record is
+> that type — a **bounded 18-digit, comptime-fixed-scale subset**, not arbitrary precision, with
+> anything outside the declared range failing closed — and thereby unblocking `sq-3x7dl.9`'s
+> duration ratio, which truncates for the same reason, is `sq-n5e7p` (#3357); its record is
 > [`noir-xpath-xsd-decimal-design.md`](noir-xpath-xsd-decimal-design.md). Note the sequencing it
 > fixes: re-pointing `op:numeric-divide` at the decimal path **changes answers** the committed
 > `sq-3x7dl.14.2` golden currently pins, so it is a separate step from adding the type.

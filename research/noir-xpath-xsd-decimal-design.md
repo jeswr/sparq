@@ -1,7 +1,7 @@
 <!-- [OPUS-5] sq-n5e7p (#3357): decision record for the `xs:decimal` gap in the externalized
 noir_XPath face repo. DESIGN-FOR-REVIEW only — no production code, and none is possible here:
 the module lives in sparq-org/noir_XPath, not in this repo. -->
-# `xs:decimal` arbitrary-precision fixed-point arithmetic for `noir_XPath`
+# Bounded 18-digit `xs:decimal` fixed-point arithmetic for `noir_XPath`
 
 Maintainer-review decision record for bead **`sq-n5e7p`** (issue **#3357**) — the `xs:decimal`
 deferral inherited from the deleted `IMPLEMENTATION_PLAN.md` ("Deferred due to fixed-point
@@ -17,6 +17,17 @@ them.
 
 ## 0. Honesty framing (read first)
 
+- **Bounded precision, NOT arbitrary precision.** What is decided here is an **18-digit,
+  comptime-fixed-scale subset** of `xs:decimal`, not the unbounded value space the datatype
+  defines: every value satisfies `mag < 10^18` at a scale `S <= 18`, giving `S` fraction digits
+  and `18 - S` integer digits (§2.1). That is exactly the "at least 18 decimal digits" a
+  *minimally conforming* processor owes (XSD 1.1 Part 2 §3.3.4), and F&O 3.1 §4.2 licenses an
+  implementation-defined precision limit — so the subset is conformant. It does **not** close
+  the general arbitrary-precision gap, and no wording here, in the parent program record, or in
+  any implementing PR may say it does. The range is **implementation-defined and fail-closed**:
+  an input, an aligned operand, or a result outside it makes a constrained assert fire (§2.3,
+  §3) — it is never silently rounded, truncated, or wrapped. Choosing a larger budget later
+  means changing the representation, not a constant.
 - **This record decides; it does not implement.** Per `sq-5reoy` (#1599) the `zk/xpath` tree was
   externalized and **removed from this repo** — `git ls-files zk/xpath` returns only the
   differential harness (`zk/xpath/differential`, `zk/xpath/scripts`,
@@ -125,8 +136,16 @@ declares **no single default `S`**: the right value is a property of the query's
 
 ### 2.3 The operations
 
-All at a common comptime `S`; alignment between two `XsdDecimal<S>` is a no-op, and between
-different `S` is a comptime power-of-ten multiply with a `mag < 10^18` assert on the result.
+All at a common comptime `S`; alignment between two `XsdDecimal<S>` is a no-op. Between
+different scales `S_lo < S_hi` the multiplier `10^delta` (`delta = S_hi - S_lo`) is comptime but
+the **product is not**: with `mag < 10^18` and `delta` reaching 18, `mag * 10^delta` reaches
+`10^36`, so a `u64` multiply **wraps** and a post-hoc `mag < 10^18` assert then passes on a
+wrong value. Alignment therefore widens first: `let wide: u128 = mag as u128 * pow10(delta)`,
+`assert(wide < 10^18)`, and only then narrow to `u64`. (Asserting `mag < 10^(18 - delta)`
+*before* the `u64` multiply is equivalent; the `u128` form is preferred because it is the same
+shape as `mul`/`div` below.) The rule this instantiates binds every product in this section:
+**range-check in a wider type or before multiplying — never on a value that may already have
+wrapped.**
 
 | Op | Construction | Overflow / error posture |
 | --- | --- | --- |
@@ -134,14 +153,15 @@ different `S` is a comptime power-of-ten multiply with a `mag < 10^18` assert on
 | `neg()` | `neg = !neg & (mag != 0)` | preserves invariant 3 |
 | `checked_add` | same sign: `mag_a + mag_b`; opposite: larger magnitude minus smaller, taking its sign; then renormalize per invariant 3 | both operands `< 10^18`, so the `u64` sum is `< 2·10^18 < u64::MAX` and **cannot wrap before** the `mag < 10^18` assert fires — the assert is meaningful, not post-hoc |
 | `checked_sub` | `checked_add(a, neg(b))` | as above |
-| `checked_mul` | `p: u128 = mag_a * mag_b` (`< 10^36 < 2^127`), then rescale by `10^S`: `q = p / 10^S`, `r = p % 10^S`, `q += (2r >= 10^S)` | assert `q < 10^18` |
-| `checked_div` | **`assert(mag_b != 0)`** first; `n: u128 = mag_a * 10^S` (`< 10^36`), `q = n / mag_b`, `r = n % mag_b`, `q += (2r >= mag_b)`; sign is the xor | zero divisor is `err:FOAR0001` — **fail-closed, no Infinity escape**, matching the posture `numeric_divide_int_as_double` already takes for decimal operands |
+| `checked_mul` | `p: u128 = (mag_a as u128) * (mag_b as u128)` — widened *before* the multiply, per the rule above (`< 10^36 < 2^127`), then rescale by `10^S`: `q = p / 10^S`, `r = p % 10^S`, `q += (2r >= 10^S)` | assert `q < 10^18` |
+| `checked_div` | **`assert(mag_b != 0)`** first; `n: u128 = (mag_a as u128) * pow10(S)` — widened before the multiply (`< 10^36`), `q = n / mag_b`, `r = n % mag_b`, `q += (2r >= mag_b)`; sign is the xor | zero divisor is `err:FOAR0001` — **fail-closed, no Infinity escape**, matching the posture `numeric_divide_int_as_double` already takes for decimal operands |
 | `round_to_int(Ceil \| Floor \| HalfUp)` | mirrors `Dec::round_to_int`'s euclidean form on the signed value | total |
-| `from_i64` | `mag = \|n\| * 10^S` | assert `\|n\| < 10^(18-S)` |
+| `from_i64` | magnitude via an **unsigned** absolute that cannot overflow: widen before negating — `m: u128 = if n < 0 { (-(n as i128)) as u128 } else { n as u128 }` — then `wide: u128 = m * 10^S` | `assert(wide < 10^18)` before narrowing to `u64`. `\|i64::MIN\|` is **not** representable as an `i64`, so a signed `-n`/`abs()` overflows *ahead of* any range assert; the widen is load-bearing, not stylistic. `m * 10^S` likewise must not be a `u64` multiply |
 | `numeric_divide_int_as_decimal` | `from_i64(a).checked_div(from_i64(b))` | the exact replacement for the `sq-3x7dl.4` approximation |
 
-Every intermediate closes inside `u128`. The two widest are `mag_a · mag_b` (`mul`) and
-`mag_a · 10^S` (`div`); with `mag < 10^18` and `S <= 18` both are bounded by `10^36`, well under
+Every intermediate — including the two conversions above — closes inside `u128`. The widest are
+`mag_a · mag_b` (`mul`), `mag_a · 10^S` (`div`), `mag · 10^delta` (alignment), each bounded by
+`10^36`, and `|i64::MIN| · 10^18 < 9.3·10^36` (`from_i64`); all are well under
 `u128::MAX ≈ 3.4·10^38`. `2r` is bounded by `2·10^18`. No step needs a wider type than Noir
 offers **[verify-at-impl]**.
 
@@ -191,6 +211,15 @@ non-canonical value either.
 `{neg: true, mag: 0}` and one that constructs `mag = 10^18` from witness data **fails**
 construction, while the canonical forms still pass — the same shape as the `sq-3x7dl.1`
 acceptance test. A green positive-only suite does not discharge this.
+
+Two further `should_fail` rows pin the widening rules of §2.3, and both are chosen so that an
+unwidened implementation **wraps** rather than merely exceeding the bound — a `u64` intermediate
+lands back in range, does *not* assert, and so reds the `should_fail` test, which is the point:
+
+- aligning a scale-`S_lo` value to `S_hi` where the unbounded `mag · 10^delta` exceeds **both**
+  `10^18` and `u64::MAX` (e.g. `mag = 10^17 - 1` with `delta = 18`);
+- `from_i64(i64::MIN)` at any `S >= 1`, which a signed `abs()`/`-n` overflows before reaching
+  the range assert.
 
 **Gate cost is an obligation, not a claim.** `u128` division lowers to euclidean division — the
 expensive primitive per [`noir-optimization-paper.md`](noir-optimization-paper.md) — so `mul`
