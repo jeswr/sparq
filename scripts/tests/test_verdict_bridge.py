@@ -396,11 +396,25 @@ def node(number: int, **overrides) -> dict:
     orchestrator App and its commits are authored by `claude`, while reviewers comment
     under a DIFFERENT login. A fixture whose author fields were absent would make every
     grant fail closed for the wrong reason and hide real regressions.
+
+    The head ref / head repo / author `__typename` default to the REACHABLE shape — a
+    worker-branch PR the registry review lane can enumerate — for the same reason
+    (sparq#4677): `flag` is only defined for that population, so a fixture defaulting to
+    unreachable would make every inherited flag assertion pass for the wrong reason.
+    `__typename` is load-bearing, not decoration: GraphQL reports an App's login WITHOUT
+    the `[bot]` suffix the registry's REST-side gate keys on.
     """
     labels = overrides.pop("labels", ())
     reviews = overrides.pop("reviews", ())
     base = {
-        "author": {"login": overrides.pop("author", "sparq-orchestrator")},
+        "author": {
+            "login": overrides.pop("author", "sparq-orchestrator"),
+            "__typename": overrides.pop("author_typename", "Bot"),
+        },
+        "headRefName": overrides.pop(
+            "headRefName", f"sparq-agent/issue-{number}-30221671021-1"
+        ),
+        "headRepository": {"nameWithOwner": overrides.pop("headRepository", REPO)},
         "commits": overrides.pop("commits", commits_connection()),
         "reviews": {
             "nodes": [
@@ -575,6 +589,149 @@ def bridge(fake: FakeGitHub, **kw) -> "vb.VerdictBridge":
 
 PASS_COMMENT = [vb.comment(f"reviewed {HEAD}\n\nVERDICT: pass")]
 FAIL_COMMENT = [vb.comment(f"reviewed {HEAD}\n\nVERDICT: fail")]
+
+
+class TestLabellerVisibilityMatchesTheReviewer(unittest.TestCase):
+    """sparq#4677 — the labeller must not see further than the reviewer.
+
+    `review:unreviewed` reads as "enrolled, awaiting review", but the thing that would
+    perform that review lives in ANOTHER repository and admits PRs on three author-side
+    gates this labeller never consulted. Every PR in the difference was labelled and then
+    never reviewed — MEASURED at 4 live PRs, 20-29h old, including the first crates.io
+    release PR. A labelled-but-unreviewable PR is worse than an unlabelled one, because
+    the label makes it look enrolled and it silently leaves every population anyone
+    counts.
+    """
+
+    # The four measured live PRs from the issue, as (head ref, author login, kind).
+    LIVE = {
+        3798: ("ci/auto-arm-workflows-permission", "jeswr", "User"),
+        4193: ("research/knowledge-management-strategy", "jeswr", "User"),
+        4460: ("release-plz-2026-07-27T02-19-35Z", "sparq-orchestrator", "Bot"),
+        4488: ("dependabot/github_actions/actions-minor-1a2b", "dependabot", "Bot"),
+    }
+
+    def unreachable_node(self, number: int) -> dict:
+        ref, login, kind = self.LIVE[number]
+        return node(number, headRefName=ref, author=login, author_typename=kind)
+
+    def test_a_pr_the_review_lane_cannot_reach_is_never_flagged(self):
+        """The defect itself: the labeller manufacturing invisible backlog."""
+        for number in self.LIVE:
+            with self.subTest(pr=number):
+                fake = FakeGitHub([self.unreachable_node(number)])
+                self.assertEqual(bridge(fake).run(), 0)
+                self.assertEqual(fake.writes, [], "labelled something nothing can review")
+                self.assertNotIn(vb.UNREVIEWED_LABEL, fake.labels_of(number))
+
+    def test_an_existing_unreviewable_flag_is_WITHDRAWN(self):
+        """The heal for the live four: a label already applied is taken back off."""
+        for number in self.LIVE:
+            with self.subTest(pr=number):
+                stale = self.unreachable_node(number)
+                stale["labels"] = {"nodes": [{"name": vb.UNREVIEWED_LABEL}],
+                                   "pageInfo": {"hasNextPage": False}}
+                fake = FakeGitHub([stale])
+                self.assertEqual(bridge(fake).run(), 0)
+                self.assertEqual(
+                    fake.writes,
+                    [["pr", "edit", str(number), "--repo", REPO,
+                      "--remove-label", vb.UNREVIEWED_LABEL]],
+                )
+                self.assertNotIn(vb.UNREVIEWED_LABEL, fake.labels_of(number))
+
+    def test_the_reachable_population_is_STILL_flagged(self):
+        """The control arm. Without it, `return None` from the predicate would pass every
+        assertion above while silently disabling the whole informational lane."""
+        fake = FakeGitHub([node(4200)])
+        self.assertEqual(bridge(fake).run(), 0)
+        self.assertEqual(
+            fake.writes,
+            [["pr", "edit", "4200", "--repo", REPO, "--add-label", vb.UNREVIEWED_LABEL]],
+        )
+
+    def test_a_graphql_bot_author_without_the_bot_suffix_is_still_reachable(self):
+        """THE BOT-SUFFIX TRAP, named in verdict-bridge.py's module docstring.
+
+        The registry spells its author gate `login.endswith("[bot]")` because it reads
+        REST. This module reads GraphQL, where the SAME App's `PullRequest.author.login`
+        is `sparq-orchestrator` with NO suffix. Copying the REST spelling verbatim would
+        make EVERY PR unreachable — silently stopping all flagging and unflagging the
+        whole repository, a guard that reads as present and is not.
+        """
+        for login in ("sparq-orchestrator", "sparq-orchestrator[bot]"):
+            with self.subTest(login=login):
+                pr = vb.pr_fixture(author_login=login, author_typename="Bot")
+                self.assertIs(vb.author_is_bot(pr), True)
+                self.assertEqual(vb.lane_reachability(pr), vb.REACHABLE)
+        # A human is not laundered into a bot by either spelling.
+        human = vb.pr_fixture(author_login="jeswr", author_typename="User")
+        self.assertIs(vb.author_is_bot(human), False)
+        self.assertEqual(vb.lane_reachability(human), vb.UNREACHABLE)
+        # ...and the suffix alone still answers when `__typename` was not selected.
+        self.assertIs(vb.author_is_bot(vb.pr_fixture(author_login="x[bot]",
+                                                     author_typename="")), True)
+
+    def test_each_admission_gate_is_independently_sufficient(self):
+        """They are AND-ed, so a fixture failing two gates proves nothing about either."""
+        for override in (
+            {"head_ref": "chore/bump-actions"},
+            {"head_repo": "attacker/sparq"},
+            {"author_login": "jeswr", "author_typename": "User"},
+            {"head_ref": "sparq-agent/issue-0-1-1"},  # issue-0 is not a worker branch
+        ):
+            with self.subTest(**override):
+                self.assertEqual(
+                    vb.lane_reachability(vb.pr_fixture(**override)), vb.UNREACHABLE
+                )
+
+    def test_an_UNKNOWN_reachability_writes_nothing_in_either_direction(self):
+        """An unreadable field must never strip the label off the whole repository."""
+        for override in (
+            {"head_ref": ""}, {"head_repo": ""}, {"repo": ""}, {"author_login": ""},
+            {"author_login": "someone", "author_typename": ""},
+        ):
+            with self.subTest(**override):
+                self.assertEqual(
+                    vb.lane_reachability(vb.pr_fixture(**override)), vb.UNKNOWN
+                )
+                self.assertEqual(vb.decide(vb.pr_fixture(**override), []).action, "none")
+                self.assertEqual(
+                    vb.decide(
+                        vb.pr_fixture(labels={vb.UNREVIEWED_LABEL}, **override), []
+                    ).action,
+                    "none",
+                )
+
+    def test_reachability_gates_only_the_informational_label(self):
+        """Named in verdict-bridge.py's module docstring. For the unreachable population
+        a HAND-DISPATCHED verdict is the only route to a review, so it must still
+        promote — if this fails, the fix has become an arming stall."""
+        unreachable = vb.unreachable_fixture()
+        self.assertEqual(vb.lane_reachability(unreachable), vb.UNREACHABLE)
+        self.assertEqual(vb.decide(unreachable, [PASS_COMMENT[0]]).action, "promote")
+        # ...end to end, through the real write path.
+        live = self.unreachable_node(4193)
+        fake = FakeGitHub([live], comments={4193: PASS_COMMENT})
+        self.assertEqual(bridge(fake).run(), 0)
+        self.assertIn(vb.REVIEW_ATTESTATION, fake.labels_of(4193))
+        # ...and a fail still retracts on that same population.
+        held = vb.unreachable_fixture(labels={vb.REVIEW_ATTESTATION})
+        self.assertEqual(vb.decide(held, [FAIL_COMMENT[0]]).action, "retract")
+
+    def test_the_head_ref_regex_is_byte_identical_to_the_alarms(self):
+        """The whole claim is "the lane cannot see this PR", so the predicate must BE the
+        lane's, not a paraphrase. review_lane_alarm.py replicates the same registry regex;
+        if the two drift, one of the two components is again wrong about who is visible."""
+        rla = load(SCRIPTS / "review_lane_alarm.py", "review_lane_alarm_for_bridge")
+        self.assertEqual(
+            vb.REGISTRY_HEAD_REF_RE.pattern, rla.REGISTRY_HEAD_REF_RE.pattern
+        )
+
+    def test_the_informational_label_is_still_not_a_hold_anywhere(self):
+        """Unchanged invariant, re-pinned: the flag must never gate arming."""
+        self.assertNotIn(vb.UNREVIEWED_LABEL, vb.HOLD_LABELS)
+        self.assertEqual(vb.hold_labels({vb.UNREVIEWED_LABEL}), [])
 
 
 class TestWritePathDispatch(unittest.TestCase):
@@ -1440,11 +1597,17 @@ class TestAuthorXorReviewer(unittest.TestCase):
                 query = getattr(vb, name)
                 lines = [line.strip() for line in query.splitlines()]
                 self.assertIn(
-                    "author{login}",
+                    "author{login __typename}",
                     lines,
                     "the PR-node-level author field is gone; the `reviews` one does "
                     "not feed the guard",
                 )
+                # `__typename` is the PRIMARY bot signal for `lane_reachability`
+                # (sparq#4677): GraphQL reports an App's `author.login` WITHOUT the
+                # `[bot]` suffix the registry's REST-side gate keys on, so dropping it
+                # would make every PR read as unreachable and unflag the repository.
+                for field in ("headRefName", "headRepository{nameWithOwner}"):
+                    self.assertIn(field, lines, f"{field} feeds lane_reachability")
                 start = query.find("commits(last:")
                 self.assertGreater(start, 0, "the commits connection is gone")
                 block = query[start : start + 260]
@@ -1594,7 +1757,9 @@ class TestScopedRunAuthority(unittest.TestCase):
         self.assertIn(vb.PR_NODE_FIELDS, vb.PR_LIST_QUERY)
         self.assertIn(vb.PR_NODE_FIELDS, vb.PR_ONE_QUERY)
         for field in ("labels(", "reviews(", "headRefOid", "baseRefName", "mergeable",
-                      "isDraft", "state", "authorAssociation", "submittedAt"):
+                      "isDraft", "state", "authorAssociation", "submittedAt",
+                      # lane_reachability's three author-side inputs (sparq#4677).
+                      "headRefName", "headRepository", "__typename"):
             with self.subTest(field=field):
                 self.assertIn(field, vb.PR_NODE_FIELDS)
 

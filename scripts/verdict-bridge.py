@@ -127,6 +127,46 @@ until one exists this guard must not be weakened on the assumption that one is c
 So this guard is NECESSARY, not SUFFICIENT, and both the refused set and the
 merely-reported set are surfaced (``::warning``) rather than failing silently.
 
+THE LABELLER MUST NOT SEE FURTHER THAN THE REVIEWER (sparq#4677)
+----------------------------------------------------------------
+``flag`` writes ``review:unreviewed``, which reads as "enrolled, awaiting a review".  The
+thing that would perform that review lives in ANOTHER REPOSITORY — the registry's
+``review-fix.yml``, scheduled by its ``dispatch.yml`` — and its ``enumerate_review_items``
+admits a PR only through three AUTHOR-SIDE gates: the head ref matches
+``^sparq-agent/issue-([1-9][0-9]*)-``, the head repo is this repo, and the author is the
+worker App bot.  Nothing here ever compared the two, so the labeller's vision was strictly
+WIDER than its worker's, and every PR in the difference was labelled and then never
+reviewed.  MEASURED on live sparq 2026-07-29: four such PRs, 20-29h old, including #4460 —
+the first crates.io release PR, authored by the CORRECT App bot and still invisible purely
+because release-plz names its branch ``release-plz-<timestamp>``.
+
+A PR that is labelled but never reviewed is WORSE than one never labelled, because the
+label makes it look enrolled and it drops out of every population anyone counts.  So
+``flag`` now requires POSITIVE evidence that the review lane can enumerate the PR, and a
+``review:unreviewed`` already sitting on a PR the lane cannot reach is REMOVED
+(``unflag``).  The population does not become invisible by being unlabelled:
+``scripts/review_lane_alarm.py`` censuses it every tick and names each PR's disposition.
+
+This is a write-path narrowing ONLY.  Reachability gates ``flag``/``unflag`` and NOTHING
+else — a hand-dispatched verdict on an unreachable PR still promotes exactly as before,
+which matters because for that population a hand-dispatched verdict is the ONLY route to
+a review.  Pinned by ``test_reachability_gates_only_the_informational_label``.
+
+Reachability is TRI-STATE, not boolean.  ``unknown`` (the query dropped a field, the head
+repo was deleted, the author is a ghost) writes NOTHING in either direction, mirroring
+this module's standing "never act on absence of evidence" rule: an unreadable input must
+not be able to strip labels off the whole repository.
+
+THE BOT-SUFFIX TRAP (why this predicate is not a verbatim copy).  The registry spells its
+author gate ``login.endswith("[bot]")`` because it reads the REST API.  This module reads
+GRAPHQL, where ``PullRequest.author.login`` for an App is ``sparq-orchestrator`` — WITHOUT
+the suffix (the same inconsistency ``normalize_login`` exists for).  Copying the REST
+spelling verbatim would make EVERY PR read as unreachable, silently stopping all flagging
+and unflagging the entire repository — a guard that reads as present and is not.  The
+author's kind is therefore taken from the GraphQL ``__typename`` of the ``Actor`` union,
+with the suffix kept only as a fallback.  Pinned by
+``test_a_graphql_bot_author_without_the_bot_suffix_is_still_reachable``.
+
 ACTIONS
 -------
 promote   head-bound verdict is pass, no hold label, ``review:pass`` absent -> add it.
@@ -136,10 +176,12 @@ retract   head-bound verdict is fail (or AMBIGUOUS) and ``review:pass`` is prese
           orchestrator applied by hand is never fought.  Deleting the pass COMMENT is
           therefore not a retraction gesture the bridge can see — post a fail instead.
 flag      green + mergeable + non-draft + no head-bound verdict + no ``review:*`` label
-          -> add ``review:unreviewed``.  Purely informational: no arming predicate
-          anywhere consumes this label, so it can never block or cause a merge.
-unflag    ``review:unreviewed`` is stale (a verdict or another ``review:*`` label
-          arrived) -> remove it.
+          + the registry review lane can REACH the PR -> add ``review:unreviewed``.
+          Purely informational: no arming predicate anywhere consumes this label, so it
+          can never block or cause a merge.
+unflag    ``review:unreviewed`` is stale — a verdict arrived, another ``review:*`` label
+          arrived, or the PR is one the review lane structurally cannot reach -> remove
+          it.
 """
 
 # [OPUS-5] sparq-org/sparq — maintainer observation 2026-07-26: "there seem to be a
@@ -234,6 +276,19 @@ COAUTHOR_NOREPLY_RE = re.compile(
 VERDICT_SHAPE_RE = re.compile(r"^\s*(?:\*\*|__)?VERDICT\b", re.IGNORECASE)
 FULL_SHA_RE = re.compile(r"(?<![0-9a-fA-F])([0-9a-fA-F]{40})(?![0-9a-fA-F])")
 
+# The registry review lane's own head-ref admission regex, replicated VERBATIM from
+# `enumerate_review_items` (registry scripts/dispatch-claim.py) and byte-identical to
+# scripts/review_lane_alarm.py's REGISTRY_HEAD_REF_RE.  Kept byte-identical on purpose:
+# the whole claim of `lane_reachability` is "the lane can/cannot see this PR", so the test
+# must BE the lane's test rather than a paraphrase of it.
+REGISTRY_HEAD_REF_RE = re.compile(r"^sparq-agent/issue-([1-9][0-9]*)-")
+
+# Tri-state reachability.  `UNKNOWN` writes nothing in EITHER direction — see the module
+# docstring; an unreadable input must never be able to strip labels off the repository.
+REACHABLE = "reachable"
+UNREACHABLE = "unreachable"
+UNKNOWN = "unknown"
+
 # A trusted, head-bound, verdict-shaped line whose polarity cannot be read.  Never a
 # pass, and it defeats an earlier pass — see the module docstring.
 AMBIGUOUS = "ambiguous"
@@ -275,6 +330,19 @@ class PullRequest:
     # False when the commit list was truncated, so the set above is a LOWER BOUND and
     # disjointness cannot be proven.  Refuses every grant; never blocks a retraction.
     contributors_complete: bool = True
+    # The three AUTHOR-SIDE inputs the registry review lane admits on, plus this repo's
+    # own full name to compare the head repo against.  Consumed ONLY by
+    # `lane_reachability`, which gates ONLY the informational flag/unflag pair.
+    head_ref: str = ""
+    head_repo: str = ""
+    repo: str = ""
+    # RAW, DELIBERATELY UN-NORMALISED: the `[bot]` suffix is the fallback signal here, so
+    # stripping it (as `normalize_login` does) would destroy the thing being read.
+    author_login: str = ""
+    # The GraphQL `Actor` union's concrete type — `Bot` | `User` | `Organization` |
+    # `Mannequin` | `EnterpriseUserAccount`.  The PRIMARY bot signal; see the bot-suffix
+    # trap in the module docstring.
+    author_typename: str = ""
 
 
 @dataclass(frozen=True)
@@ -288,6 +356,9 @@ class Decision:
     # True when a counted pass came from whoever OPENED the PR.  ADVISORY: reported so
     # the population stays measurable, never acted on.  See `is_opener`.
     opener_verdict: bool = False
+    # This PR's `lane_reachability` at decision time, carried so `run()` can COUNT the
+    # withheld-flag population rather than re-deriving it from the reason string.
+    lane: str = ""
 
 
 def normalize_login(login: object) -> str:
@@ -359,6 +430,54 @@ def is_opener(login: object, pr: PullRequest) -> bool:
     """
     who = normalize_login(login)
     return bool(who) and bool(pr.opener) and who == pr.opener
+
+
+def author_is_bot(pr: PullRequest) -> bool | None:
+    """True / False / ``None`` when the PR author's KIND cannot be determined.
+
+    THE BOT-SUFFIX TRAP.  The registry lane spells this gate ``login.endswith("[bot]")``
+    against the REST API, where an App is ``sparq-orchestrator[bot]``.  This module reads
+    GRAPHQL, where the SAME App's ``PullRequest.author.login`` is ``sparq-orchestrator``
+    with NO suffix — the very inconsistency ``normalize_login`` exists for.  A verbatim
+    copy of the REST spelling would therefore match NOTHING, making every PR read as
+    unreachable and unflagging the whole repository.
+
+    So the GraphQL ``__typename`` of the ``Actor`` union is authoritative when present,
+    and the suffix is only a fallback for a caller that did not select it.  Absent both,
+    a human and an unsuffixed App are indistinguishable, so the answer is ``None``
+    (``UNKNOWN``) rather than a guess in either direction.
+    """
+    if pr.author_typename:
+        return pr.author_typename == "Bot"
+    if pr.author_login.endswith("[bot]"):
+        return True
+    return None
+
+
+def lane_reachability(pr: PullRequest) -> str:
+    """Can the (cross-repo) registry review lane EVER enumerate this PR?
+
+    ``REACHABLE`` / ``UNREACHABLE`` / ``UNKNOWN`` — replicating the three AUTHOR-SIDE
+    gates of the registry's ``enumerate_review_items``.  The registry ADDITIONALLY
+    requires a provenance record it alone can write; that is a live cross-repo read this
+    repo holds no token for, and it can only ever NARROW admission — so a ``REACHABLE``
+    here is an upper bound, and every ``UNREACHABLE`` is certain.  Certainty is the
+    direction that matters: ``UNREACHABLE`` is the only value that REMOVES a label.
+
+    Gates ONLY the informational ``flag``/``unflag`` pair.  It is deliberately absent from
+    every arming-relevant path, because a hand-dispatched verdict is the sole route to a
+    review for exactly this population and must keep promoting.
+    """
+    if not pr.head_ref or not pr.head_repo or not pr.repo or not pr.author_login:
+        return UNKNOWN
+    if not REGISTRY_HEAD_REF_RE.match(pr.head_ref):
+        return UNREACHABLE
+    if pr.head_repo != pr.repo:
+        return UNREACHABLE
+    is_bot = author_is_bot(pr)
+    if is_bot is None:
+        return UNKNOWN
+    return REACHABLE if is_bot else UNREACHABLE
 
 
 def hold_labels(labels: Iterable[str]) -> list[str]:
@@ -522,6 +641,8 @@ def decide(pr: PullRequest, comments: Sequence[dict]) -> Decision:
 
     countable, self_passes, opener_passes = classify_verdicts(comments, pr.head_sha, pr)
     verdict = countable[-1] if countable else None
+    # Gates the informational label ONLY (sparq#4677). Never consulted by promote/retract.
+    reach = lane_reachability(pr)
 
     def out(action: str, reason: str) -> Decision:
         """Stamp every exit so neither a refusal nor an advisory exits silently."""
@@ -548,7 +669,16 @@ def decide(pr: PullRequest, comments: Sequence[dict]) -> Decision:
             reason,
             self_review=bool(self_passes),
             opener_verdict=bool(opener_passes),
+            lane=reach,
         )
+
+    # The one reason string both unflag-on-unreachable exits share, so the two branches
+    # cannot drift into describing the same write differently.
+    unreachable_reason = (
+        f"{UNREVIEWED_LABEL} claims a review is pending, but the registry review lane "
+        f"structurally cannot enumerate this PR (head ref {pr.head_ref or '?'}, author "
+        f"{pr.author_login or '?'}) — withdrawing a label nothing can act on (sparq#4677)"
+    )
 
     has_attestation = REVIEW_ATTESTATION in pr.labels
     flagged = UNREVIEWED_LABEL in pr.labels
@@ -572,6 +702,12 @@ def decide(pr: PullRequest, comments: Sequence[dict]) -> Decision:
         # NEVER retract on absence: an orchestrator-applied label has no comment behind
         # it, and removing it would fight the human lane and un-arm a real review.
         if flagged:
+            # ...but a flag on a PR the review lane CANNOT REACH is not evidence of a
+            # pending review, it is the manufactured-backlog bug itself (sparq#4677).
+            # Removing it is the one write that shrinks, rather than grows, the set of
+            # PRs wearing a claim nothing will honour.
+            if reach == UNREACHABLE:
+                return out("unflag", unreachable_reason)
             return out("none", "flagged, still unreviewed")
         other_review_label = any(
             label.startswith("review:") for label in pr.labels
@@ -579,6 +715,13 @@ def decide(pr: PullRequest, comments: Sequence[dict]) -> Decision:
         if other_review_label or has_attestation:
             return out("none", "already in a review lane")
         if is_green_and_ready(pr):
+            # POSITIVE evidence of reachability is required to claim a review is pending.
+            if reach != REACHABLE:
+                return out(
+                    "none",
+                    f"green + mergeable but {reach} by the registry review lane — not "
+                    f"flagging (review_lane_alarm censuses it instead; sparq#4677)",
+                )
             return out("flag", "green + mergeable but invisible to every lane")
         return out("none", "no head-bound verdict")
 
@@ -593,9 +736,14 @@ def decide(pr: PullRequest, comments: Sequence[dict]) -> Decision:
                 f"ambiguous verdict line by {verdict.author} supersedes "
                 f"{REVIEW_ATTESTATION} — polarity unreadable, refusing to arm",
             )
-        if (
-            not flagged
-            and is_green_and_ready(pr)
+        if flagged:
+            # Same reasoning as the no-verdict branch: an unreachable PR's flag is a
+            # claim nothing can honour, whatever the comment thread says (sparq#4677).
+            if reach == UNREACHABLE:
+                return out("unflag", unreachable_reason)
+        elif (
+            is_green_and_ready(pr)
+            and reach == REACHABLE
             and not any(label.startswith("review:") for label in pr.labels)
         ):
             return out(
@@ -654,7 +802,13 @@ def run_gh_read(argv: list[str]) -> str:
 # scripts/tests/test_verdict_bridge.py::TestScopedRunAuthority.
 PR_NODE_FIELDS = """
         number state isDraft baseRefName headRefOid mergeable
-        author{login}
+        # The three AUTHOR-SIDE inputs the registry review lane admits on (sparq#4677).
+        # `__typename` is NOT decoration: GraphQL reports an App's `author.login` WITHOUT
+        # the `[bot]` suffix the REST-side gate keys on, so dropping it here would make
+        # every PR read as unreachable. See `author_is_bot`.
+        headRefName
+        headRepository{nameWithOwner}
+        author{login __typename}
         labels(first:100){nodes{name} pageInfo{hasNextPage}}
         # 100 is GitHub's DOCUMENTED per-connection maximum.  A larger `last:` is
         # currently accepted (probed: `last:250` returns without an error), but resting a
@@ -940,6 +1094,7 @@ class VerdictBridge:
             # Fail closed: an unseen label could be a hold.
             raise GhError(f"PR #{node.get('number')}: label set exceeds one page")
         contributors, complete = commit_contributors(node)
+        author = node.get("author") or {}
         return PullRequest(
             number=int(node["number"]),
             state=str(node.get("state") or "").upper(),
@@ -955,7 +1110,13 @@ class VerdictBridge:
             ),
             contributors=contributors,
             contributors_complete=complete,
-            opener=normalize_login((node.get("author") or {}).get("login")),
+            opener=normalize_login(author.get("login")),
+            head_ref=str(node.get("headRefName") or ""),
+            head_repo=str((node.get("headRepository") or {}).get("nameWithOwner") or ""),
+            repo=self.repo,
+            # RAW on purpose — `normalize_login` would strip the `[bot]` fallback signal.
+            author_login=str(author.get("login") or ""),
+            author_typename=str(author.get("__typename") or ""),
         )
 
     def reconfirm(
@@ -996,6 +1157,7 @@ class VerdictBridge:
         writes = 0
         self_reviews = 0
         opener_verdicts = 0
+        unreachable = 0
         if self.only_pr is not None:
             nodes = self.fetch_one(self.only_pr)
             self.log(
@@ -1042,6 +1204,13 @@ class VerdictBridge:
                     f"::notice title={PROGRAM} counted an opener verdict::"
                     f"PR #{pr.number}: {decision.reason}"
                 )
+            if decision.lane == UNREACHABLE:
+                # COUNTED, not warned. This is the steady-state majority of open PRs
+                # here, so a per-PR annotation would be noise — but the count must appear
+                # in the run summary, because a silently-shrinking flag population is how
+                # sparq#4677 stayed invisible for weeks. The per-PR breakdown, with each
+                # PR's disposition, is review_lane_alarm.py's census.
+                unreachable += 1
             if decision.action == "none":
                 continue
             self.log(
@@ -1085,7 +1254,8 @@ class VerdictBridge:
                 errors += 1
         self.log(
             f"[{PROGRAM}] complete: writes={writes} errors={errors} "
-            f"self_reviews_refused={self_reviews} opener_verdicts={opener_verdicts}"
+            f"self_reviews_refused={self_reviews} opener_verdicts={opener_verdicts} "
+            f"review_lane_unreachable={unreachable}"
         )
         return errors
 
@@ -1147,7 +1317,17 @@ HEAD = "a" * 40
 OTHER = "b" * 40
 
 
+REPO = "sparq-org/sparq"
+
+
 def pr_fixture(**overrides) -> PullRequest:
+    """A PR the registry review lane CAN reach, unless a test says otherwise.
+
+    The reachable shape is the default because ``flag`` is only defined for that
+    population (sparq#4677) — a fixture that defaulted to unreachable would make every
+    inherited ``flag`` assertion in this file and in
+    ``scripts/tests/test_verdict_bridge.py`` pass for the wrong reason.
+    """
     base = {
         "number": 4200,
         "state": "OPEN",
@@ -1157,10 +1337,26 @@ def pr_fixture(**overrides) -> PullRequest:
         "mergeable": "MERGEABLE",
         "gate_conclusion": "success",
         "labels": frozenset(),
+        "head_ref": "sparq-agent/issue-4677-30221671021-1",
+        "head_repo": REPO,
+        "repo": REPO,
+        "author_login": "sparq-orchestrator",
+        "author_typename": "Bot",
     }
     base.update(overrides)
     base["labels"] = frozenset(base["labels"])
     return PullRequest(**base)
+
+
+def unreachable_fixture(**overrides) -> PullRequest:
+    """The complement: a PR no review producer in existence can enumerate."""
+    base = {
+        "head_ref": "research/knowledge-management-strategy",
+        "author_login": "jeswr",
+        "author_typename": "User",
+    }
+    base.update(overrides)
+    return pr_fixture(**base)
 
 
 def self_test() -> None:
@@ -1278,6 +1474,95 @@ def self_test() -> None:
     assert decide(pr_fixture(labels={UNREVIEWED_LABEL}), [passing]).action == "unflag"
     assert decide(pr_fixture(labels={UNREVIEWED_LABEL}), [failing]).action == "unflag"
     assert decide(pr_fixture(labels={UNREVIEWED_LABEL}), []).action == "none"
+
+    # ------------------------------------------------------------------ sparq#4677
+    # THE LABELLER MUST NOT SEE FURTHER THAN THE REVIEWER.
+    #
+    # Control arm first: the flag assertions above all run on the REACHABLE fixture, so
+    # they only mean something if the unreachable complement behaves differently.
+    assert lane_reachability(pr_fixture()) == REACHABLE
+    assert decide(pr_fixture(), []).action == "flag"
+    assert lane_reachability(unreachable_fixture()) == UNREACHABLE
+    assert decide(unreachable_fixture(), []).action == "none", "must not manufacture backlog"
+
+    # The FOUR MEASURED live PRs from sparq#4677, by (head ref, author) shape. Every one
+    # was carrying review:unreviewed for 20-29h while nothing could ever review it.
+    live_unreviewable = [
+        ("#3798", "ci/auto-arm-workflows-permission", "jeswr", "User"),
+        ("#4193", "research/knowledge-management-strategy", "jeswr", "User"),
+        # The FIRST crates.io release PR — authored by the CORRECT App bot and still
+        # invisible, purely because release-plz names its branch `release-plz-<stamp>`.
+        ("#4460", "release-plz-2026-07-27T02-19-35Z", "sparq-orchestrator", "Bot"),
+        ("#4488", "dependabot/github_actions/actions-minor-1a2b3c", "dependabot", "Bot"),
+    ]
+    for name, ref, login, kind in live_unreviewable:
+        shape = pr_fixture(head_ref=ref, author_login=login, author_typename=kind)
+        assert lane_reachability(shape) == UNREACHABLE, name
+        # ...it is never flagged in the first place...
+        assert decide(shape, []).action == "none", name
+        # ...and a flag already on it is WITHDRAWN, which is what heals the live four.
+        healed = decide(pr_fixture(
+            labels={UNREVIEWED_LABEL}, head_ref=ref,
+            author_login=login, author_typename=kind), [])
+        assert healed.action == "unflag", (name, healed)
+        assert "sparq#4677" in healed.reason, (name, healed)
+
+    # THE BOT-SUFFIX TRAP. GraphQL reports an App's `author.login` WITHOUT the `[bot]`
+    # suffix the registry's REST-side gate keys on. Copying that gate verbatim would make
+    # this shape — the ordinary worker PR, the ENTIRE flaggable population — unreachable,
+    # silently unflagging the whole repository. `__typename` is what prevents it.
+    assert author_is_bot(pr_fixture(author_login="sparq-orchestrator",
+                                    author_typename="Bot")) is True
+    assert lane_reachability(pr_fixture(author_login="sparq-orchestrator",
+                                        author_typename="Bot")) == REACHABLE
+    # ...and the REST spelling of the same App is equally reachable.
+    assert lane_reachability(pr_fixture(author_login="sparq-orchestrator[bot]",
+                                        author_typename="Bot")) == REACHABLE
+    # ...the suffix alone still works when `__typename` was not selected (fallback).
+    assert author_is_bot(pr_fixture(author_login="x[bot]", author_typename="")) is True
+    # ...but a human is not laundered into a bot by either spelling.
+    assert author_is_bot(pr_fixture(author_login="jeswr", author_typename="User")) is False
+    assert lane_reachability(
+        pr_fixture(author_login="jeswr", author_typename="User")) == UNREACHABLE
+
+    # Each of the three admission gates is INDEPENDENTLY sufficient to make a PR
+    # unreachable (they are AND-ed) — a fixture failing two proves nothing about either.
+    assert lane_reachability(pr_fixture(head_ref="chore/bump")) == UNREACHABLE
+    assert lane_reachability(pr_fixture(head_repo="attacker/sparq")) == UNREACHABLE
+    assert lane_reachability(
+        pr_fixture(author_login="jeswr", author_typename="User")) == UNREACHABLE
+    # `issue-0` is not a worker branch (the regex demands [1-9][0-9]*).
+    assert lane_reachability(pr_fixture(head_ref="sparq-agent/issue-0-1-1")) == UNREACHABLE
+
+    # UNKNOWN writes NOTHING in either direction. An unreadable field must never be able
+    # to strip review:unreviewed off every PR in the repository at once.
+    for blind in (
+        {"head_ref": ""},
+        {"head_repo": ""},
+        {"repo": ""},
+        {"author_login": ""},
+        # Author present but its KIND unreadable: a human and an unsuffixed App are
+        # indistinguishable here, so neither answer may be guessed.
+        {"author_login": "someone", "author_typename": ""},
+    ):
+        blinded = pr_fixture(**blind)
+        assert lane_reachability(blinded) == UNKNOWN, blind
+        assert decide(blinded, []).action == "none", blind
+        assert decide(pr_fixture(labels={UNREVIEWED_LABEL}, **blind), []).action == "none", blind
+
+    # REACHABILITY GATES ONLY THE INFORMATIONAL LABEL. For the unreachable population a
+    # hand-dispatched verdict is the ONLY route to a review, so it must still promote —
+    # and a fail must still retract. If this ever fails, the fix has become a stall.
+    assert decide(unreachable_fixture(), [passing]).action == "promote"
+    assert decide(
+        unreachable_fixture(labels={REVIEW_ATTESTATION}), [early, later]
+    ).action == "retract"
+    assert decide(unreachable_fixture(labels={UNREVIEWED_LABEL}), [passing]).action == "unflag"
+
+    # The decision CARRIES the lane state, so run() can count the withheld population
+    # without re-deriving it from prose.
+    assert decide(unreachable_fixture(), []).lane == UNREACHABLE
+    assert decide(pr_fixture(), []).lane == REACHABLE
 
     # SCOPING (the event path). The number an event payload names is parsed strictly;
     # anything present but non-numeric must RAISE, never degrade to a full sweep.

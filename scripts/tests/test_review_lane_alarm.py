@@ -305,8 +305,11 @@ class TestNonAlarmingStates(unittest.TestCase):
             # `hold-owner-unknown` rides alongside the state exits: #3's hold is exempt,
             # but with no event log supplied nothing PROVED a human applied it, and an
             # unproved exemption has to be countable or it is invisible (sparq#4911).
+            # `blind-spot-<disposition>` likewise rides alongside: the blind spot is
+            # partitioned by WHO OWNS each PR, so the release and dependabot classes stop
+            # reading as "someone forgot to review it" (sparq#4677).
             {"blind-spot": 1, "draft": 1, "human-held": 1, "registry-lane": 1,
-             "hold-owner-unknown": 1},
+             "hold-owner-unknown": 1, "blind-spot-agent-dispatch": 1},
         )
 
 

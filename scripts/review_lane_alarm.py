@@ -113,6 +113,33 @@
 #   2. NON-SPAMMY: ONE open issue, keyed by a stable `<!-- review-lane-alarm-key: … -->`
 #      body marker searched over open `review-alarm`-labelled issues before filing.
 #
+# A LABELLER WITH WIDER VISION THAN ITS WORKER (sparq#4677). Something in THIS repo wrote
+# `review:unreviewed` — a label that reads as "enrolled, awaiting review" — onto PRs the
+# (cross-repo) reviewer structurally cannot see. MEASURED 2026-07-29: 4 such PRs, 20-29h
+# old, including #4460, the FIRST crates.io release PR, authored by the CORRECT App bot and
+# still invisible purely because release-plz names its branch `release-plz-<timestamp>`. The
+# string `review:unreviewed` appears NOWHERE in jeswr/agent-account-registry: the labeller
+# is sparq-side, the reviewer is registry-side, and the two disagreed about who is visible.
+#
+# A PR that is labelled but never reviewed is WORSE than one never labelled, because the
+# label makes it look enrolled — so it silently leaves every population anyone counts, and
+# the lane reports a healthy per-run success rate over a set that EXCLUDES it while this
+# class grows without bound. scripts/verdict-bridge.py now REPLICATES the reachability
+# predicate below — byte-identical head-ref regex, same three author-side gates, pinned by
+# test_verdict_bridge.py::test_the_head_ref_regex_is_byte_identical_to_the_alarms — and
+# refuses to write the label without POSITIVE evidence the lane can reach the PR
+# (withdrawing the ones it already wrote). Replicated rather than imported because
+# review-alarm.yml and verdict-bridge.yml each sparse-check-out only their own script, so
+# neither may depend on the other. This alarm carries the census rows that keep the gap
+# visible EVERY
+# TICK rather than only when someone goes looking — `mislabelled-unreviewed` (the
+# regression detector, expected 0) and `blind-spot-<disposition>` (who owns each class).
+#
+# THE GENERALISABLE RULE, worth applying beyond this instance: when auditing a pipeline,
+# compare the VISIBILITY PREDICATE OF EVERY COMPONENT THAT WRITES STATE against the one
+# that does the WORK. A labeller with wider vision than its worker manufactures invisible
+# backlog.
+#
 # WHAT THIS IS NOT. It is NOT a gate: scheduled on main, creates no check-run on any PR
 # head or merge-group ref, blocks no merge. It grants NO arming authority and writes NO PR
 # labels — it cannot arm, promote, or unblock anything, by construction (the workflow holds
@@ -191,7 +218,65 @@ RECEIPT_WINDOW_SECONDS = 300
 # migration puts one there we honour it rather than double-reporting.
 LANE_LABELS = frozenset({"review:pass", "review:changes", "review:needs", "review:parked"})
 
+# The informational label scripts/verdict-bridge.py writes. Deliberately NOT in
+# LANE_LABELS: it is not a verdict and buys no exemption. Counted here because a PR
+# wearing it while UNREACHABLE is the sparq#4677 defect — a labeller with wider vision
+# than its worker, manufacturing backlog that LOOKS enrolled and therefore drops out of
+# every population anyone counts. verdict-bridge no longer writes it on this population
+# and withdraws the ones it already wrote, so `mislabelled-unreviewed` should converge to
+# ZERO; a non-zero count is the regression detector for that fix.
+UNREVIEWED_LABEL = "review:unreviewed"
+
 DEFAULT_MAX_AGE_HOURS = 24
+
+# ---------------------------------------------------------------------------- #
+# DISPOSITION (sparq#4677 ask 2): what a human should actually DO about a blind-spot PR.
+#
+# Registry #916 enables enrolment for the ORCHESTRATOR-AUTHORED class only, and that
+# limit is STRUCTURAL rather than a policy preference: reviewer selection INVERTS
+# `impl_provider` to guarantee cross-provider review, and release-plz / dependabot PRs
+# have no implementing model at all. Admitting one would require FABRICATING a provider,
+# which makes the cross-provider assertion vacuous rather than merely weaker. So these
+# classes need a DIFFERENT disposition, not a wider allowlist.
+#
+# They still ALARM. Each is legitimate work with a real risk profile (a crates.io publish
+# that can never be unpublished; pinned action SHAs), and the issue's own rule is that
+# silent accumulation is not defensible. What the disposition changes is the NOTE, so the
+# maintainer reads the correct action instead of waiting for a review that structurally
+# cannot come.
+DISPOSITIONS = {
+    # Merged by a maintainer BY POLICY. scripts/release_pr_guard.py already refuses to
+    # arm it on every automated path (#1135) — the crates.io publish is irreversible — so
+    # "no review lane sees it" is the intended state, and the pending action is a human
+    # merge decision, not a review dispatch.
+    "maintainer-release": (
+        "release PR — maintainer-merged by policy; automated arming is refused outright "
+        "(scripts/release_pr_guard.py, #1135) because a crates.io publish is irreversible"
+    ),
+    # Risk lives in the diff's SHAs, which CI already checks mechanically
+    # (scripts/check-install-action-tool.py, cargo-deny, the Scorecard pin posture).
+    "maintainer-dependabot": (
+        "dependabot PR — no implementing model exists to invert, so the review lane "
+        "cannot admit it; the pinned-SHA/dependency risk is carried by CI plus a "
+        "maintainer merge, not by a model review"
+    ),
+    # Everything else: an interactive agent session's PR. A HAND-DISPATCHED agent review
+    # is its only route to a verdict, and that verdict promotes normally.
+    "agent-dispatch": (
+        "agent-authored PR outside the worker branch convention — a hand-dispatched "
+        "review is its only route to a verdict"
+    ),
+}
+
+# release-plz names its Release-PR branch `<prefix><base>`, default prefix `release-plz-`.
+# Matched on the PREFIX WITHOUT the trailing separator so a prefix change still catches.
+# Restated locally rather than imported from scripts/release_pr_guard.py: review-alarm.yml
+# sparse-checks-out ONLY this file, so an import would ImportError at runtime — the same
+# free-standing rule the receipt-author normaliser above follows.
+RELEASE_BRANCH_PREFIX = "release-plz"
+RELEASE_BOT_LOGINS = frozenset({"release-plz", "release-plz-bot", "releaseplz"})
+DEPENDABOT_LOGINS = frozenset({"dependabot", "dependabot-preview"})
+DEPENDABOT_BRANCH_PREFIX = "dependabot/"
 
 
 class AlarmError(Exception):
@@ -433,6 +518,43 @@ def classify_pr(pr: dict, comments: list[dict], repo: str, events: list[dict] | 
     return "blind-spot"
 
 
+def disposition(pr: dict) -> str:
+    """Which of `DISPOSITIONS` a blind-spot PR belongs to (sparq#4677 ask 2).
+
+    Keyed on BRANCH and AUTHOR, never on a label: a label can be written by anything
+    holding `pull-requests: write`, while the head branch and the author of a bot-opened
+    PR cannot be changed by relabelling. Same rule, and the same reason, as
+    scripts/release_pr_guard.py's `arm_block_reason`.
+
+    Total by construction — `agent-dispatch` is the fallback — because an unclassifiable
+    PR must still get a row and a note rather than vanishing from the census."""
+    head = pr.get("head") or {}
+    ref = str(head.get("ref") or "").strip().lower()
+    login = _normalise_login((pr.get("user") or {}).get("login"))
+    if ref.startswith(RELEASE_BRANCH_PREFIX) or login in RELEASE_BOT_LOGINS:
+        return "maintainer-release"
+    if ref.startswith(DEPENDABOT_BRANCH_PREFIX) or login in DEPENDABOT_LOGINS:
+        return "maintainer-dependabot"
+    return "agent-dispatch"
+
+
+def is_mislabelled_unreviewed(pr: dict, repo: str) -> bool:
+    """True iff this PR wears `review:unreviewed` while NO review producer can reach it.
+
+    THE GENERALISABLE RULE this alarm now checks (sparq#4677): when auditing a pipeline,
+    compare the visibility predicate of every component that WRITES STATE against the one
+    that does the WORK. A labeller with wider vision than its worker manufactures
+    invisible backlog — the label makes the PR look enrolled, so it silently leaves every
+    population anyone measures, and the lane can report a fully healthy success rate while
+    this class grows without bound. It was found by accident; this row means it cannot be
+    again.
+
+    Reads only the PR listing (labels + head + author), so it costs no extra API call and
+    is computed for EVERY open PR — drafts and human-held PRs included, because a label
+    that lies does so regardless of why the PR is quiet."""
+    return UNREVIEWED_LABEL in _labels(pr) and not registry_lane_reachable(pr, repo)
+
+
 def _parse_iso(ts: str) -> dt.datetime:
     try:
         return dt.datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
@@ -460,6 +582,11 @@ def find_blind_spot(
         events = (events_by_pr or {}).get(number) or (events_by_pr or {}).get(str(number)) or []
         state = classify_pr(pr, comments, repo, events)
         census[state] = census.get(state, 0) + 1
+        # Counted over EVERY open PR, independently of the state exit above: the defect
+        # is a LABEL that lies, which a draft or a human-held PR can wear just as well as
+        # a blind-spot one (sparq#4677).
+        if is_mislabelled_unreviewed(pr, repo):
+            census["mislabelled-unreviewed"] = census.get("mislabelled-unreviewed", 0) + 1
         hold_notes: list[str] = []
         if HUMAN_HOLD_LABELS & _labels(pr):
             owner = hold_ownership(pr, events, comments)
@@ -475,6 +602,10 @@ def find_blind_spot(
                 )
         if state != "blind-spot":
             continue
+        # The disposition partitions the blind spot by WHAT A HUMAN SHOULD DO, so the
+        # release PR and the dependabot PR stop reading as "someone forgot to review it".
+        how = disposition(pr)
+        census[f"blind-spot-{how}"] = census.get(f"blind-spot-{how}", 0) + 1
         age = (now - _parse_iso(pr.get("created_at"))).total_seconds() / 3600.0
         if age < max_age_hours:
             census["blind-spot-fresh"] = census.get("blind-spot-fresh", 0) + 1
@@ -490,6 +621,7 @@ def find_blind_spot(
                 "age_hours": round(age, 1),
                 "discredited": discredited,
                 "hold_notes": hold_notes,
+                "disposition": how,
             }
         )
     findings.sort(key=lambda f: -f["age_hours"])
@@ -499,8 +631,15 @@ def find_blind_spot(
 def finding_note(finding: dict) -> str:
     """The one-line explanation printed AND rendered into the issue table. Machine-hold
     provenance leads: "this hold was never a human's" is the reason the row is here at
-    all, and it needs a different human response from a stale or missing verdict."""
+    all, and it needs a different human response from a stale or missing verdict.
+
+    The DISPOSITION trails, and only when it is not the default: for a release or
+    dependabot PR the honest note is not "nobody reviewed this" but "no lane can, and
+    here is who owns it instead" (sparq#4677)."""
     parts = list(finding.get("hold_notes") or []) + list(finding.get("discredited") or [])
+    how = finding.get("disposition")
+    if how and how != "agent-dispatch" and how in DISPOSITIONS:
+        parts.append(DISPOSITIONS[how])
     return "; ".join(parts) or "no verdict comment at all"
 
 
@@ -521,17 +660,18 @@ def render_issue_body(findings: list[dict], census: dict, repo: str, max_age_hou
         "worker App bot. That lane is the only verdict producer sparq has, so nothing will "
         "ever dispatch a review for them without a human or an orchestrator doing it by hand.",
         "",
-        "| PR | age (h) | author | head ref | note |",
-        "| --- | --- | --- | --- | --- |",
+        "| PR | age (h) | author | head ref | disposition | note |",
+        "| --- | --- | --- | --- | --- | --- |",
     ]
     for finding in findings[:50]:
         note = finding_note(finding)
         lines.append(
             f"| #{finding['number']} | {finding['age_hours']} | {finding['author']} | "
-            f"`{finding['head_ref']}` | {note} |"
+            f"`{finding['head_ref']}` | `{finding.get('disposition', 'agent-dispatch')}` "
+            f"| {note} |"
         )
     if len(findings) > 50:
-        lines.append(f"| … | | | | {len(findings) - 50} more |")
+        lines.append(f"| … | | | | | {len(findings) - 50} more |")
     lines += [
         "",
         "**Census of every state exit** (open PRs in `" + repo + "`):",
@@ -543,6 +683,23 @@ def render_issue_body(findings: list[dict], census: dict, repo: str, max_age_hou
         "A verdict is countable only when it is line-anchored (`VERDICT: pass|fail` as the "
         "comment's last non-blank line), names the current head as a standalone 40-hex SHA, "
         "and was **not** posted by the PR's own author.",
+        "",
+        "**Disposition** partitions the blind spot by what a human should actually DO. "
+        "Registry #916 enrols the orchestrator-authored class only, and that limit is "
+        "structural rather than a preference: reviewer selection inverts `impl_provider` to "
+        "guarantee cross-provider review, and release/dependabot PRs have no implementing "
+        "model — admitting one would require *fabricating* a provider, making the "
+        "cross-provider assertion vacuous rather than merely weaker. So these classes get a "
+        "different disposition, not a wider allowlist:",
+        "",
+        *[f"* `{name}` — {why}" for name, why in sorted(DISPOSITIONS.items())],
+        "",
+        f"**`mislabelled-unreviewed`** counts open PRs wearing `{UNREVIEWED_LABEL}` that no "
+        "review producer can reach. `scripts/verdict-bridge.py` no longer applies that label "
+        "to this population and withdraws the ones it already wrote, so this row should read "
+        "**0**; a non-zero value means a labeller has again been given wider vision than its "
+        "worker, which manufactures backlog that *looks* enrolled and therefore drops out of "
+        "every population anyone measures (sparq#4677).",
         "",
         "A `needs:user` / `review:needs-user` hold exempts a PR from this alarm only when a "
         "HUMAN applied it — resolved from the `labeled` timeline event, and downgraded to a "
@@ -1040,9 +1197,109 @@ def _self_test() -> int:  # noqa: C901 - a flat table of named assertions reads 
         bool(findings3) and any("self-review" in r for r in findings3[0]["discredited"]),
     )
 
+    # --- sparq#4677: the labeller must not see further than the reviewer.
+    #
+    # DISPOSITION, on the real shapes from the issue. Keyed on branch/author, never a
+    # label, so relabelling cannot move a PR between classes.
+    check(
+        "the release-plz PR is maintainer-release",
+        disposition(_pr(ref="release-plz-2026-07-27T02-19-35Z",
+                        login="sparq-orchestrator[bot]")) == "maintainer-release",
+    )
+    check(
+        "a release-plz AUTHOR is maintainer-release on any branch",
+        disposition(_pr(ref="whatever", login="release-plz[bot]")) == "maintainer-release",
+    )
+    check(
+        "the dependabot PR is maintainer-dependabot",
+        disposition(_pr(ref="dependabot/github_actions/actions-minor-1a2b",
+                        login="dependabot[bot]")) == "maintainer-dependabot",
+    )
+    check(
+        "a dependabot AUTHOR is maintainer-dependabot on any branch",
+        disposition(_pr(ref="whatever", login="app/dependabot")) == "maintainer-dependabot",
+    )
+    check(
+        "an agent-session PR falls back to agent-dispatch",
+        disposition(_pr(ref="ci/auto-arm-workflows-permission",
+                        login="jeswr")) == "agent-dispatch",
+    )
+    check(
+        "a PR merely MENTIONING release-plz is not a release PR",
+        disposition(_pr(ref="sparq-agent/issue-1-release-plz-config",
+                        login="jeswr")) == "agent-dispatch",
+    )
+    # ...and every disposition the classifier can return has a note to render.
+    check(
+        "every disposition is documented",
+        all(disposition(_pr(ref=r, login=u)) in DISPOSITIONS
+            for r, u in (("release-plz-x", "x"), ("dependabot/x", "x"), ("ci/x", "jeswr"))),
+    )
+
+    # The disposition reaches the census AND the human-facing note.
+    disp_prs = [
+        _pr(number=4460, ref="release-plz-2026-07-27T02-19-35Z",
+            login="sparq-orchestrator[bot]", created="2026-07-18T00:00:00Z"),
+        _pr(number=4488, ref="dependabot/github_actions/actions-minor-1a2b",
+            login="dependabot[bot]", created="2026-07-18T00:00:00Z"),
+        _pr(number=3798, ref="ci/auto-arm-workflows-permission", login="jeswr",
+            created="2026-07-18T00:00:00Z"),
+    ]
+    findings_d, census_d = find_blind_spot(disp_prs, {}, repo, now, DEFAULT_MAX_AGE_HOURS)
+    check("all three dispositions alarm — none is silently exempt", len(findings_d) == 3)
+    check("the release row is censused", census_d.get("blind-spot-maintainer-release") == 1)
+    check("the dependabot row is censused",
+          census_d.get("blind-spot-maintainer-dependabot") == 1)
+    check("the agent row is censused", census_d.get("blind-spot-agent-dispatch") == 1)
+    by_number = {f["number"]: f for f in findings_d}
+    check(
+        "the release finding says a MAINTAINER merges it, not a reviewer",
+        "maintainer-merged by policy" in finding_note(by_number[4460]),
+    )
+    check(
+        "the dependabot finding names its own disposition",
+        "dependabot PR" in finding_note(by_number[4488]),
+    )
+    check(
+        "the ordinary agent finding is NOT given a disposition sentence",
+        finding_note(by_number[3798]) == "no verdict comment at all",
+    )
+
+    # THE CENSUS ROW FOR LABELLED-BUT-UNREVIEWABLE PRs — the class found by accident.
+    mislabelled = _pr(number=4193, ref="research/knowledge-management-strategy",
+                      login="jeswr", labels=(UNREVIEWED_LABEL,),
+                      created="2026-07-18T00:00:00Z")
+    check("an unreachable PR wearing the label is mislabelled",
+          is_mislabelled_unreviewed(mislabelled, repo))
+    _, census_m = find_blind_spot([mislabelled], {}, repo, now, DEFAULT_MAX_AGE_HOURS)
+    check("...and it is COUNTED every tick", census_m.get("mislabelled-unreviewed") == 1)
+    # A REACHABLE PR wearing the label is the label working as intended — never counted.
+    honest = _pr(number=9, ref="sparq-agent/issue-9-1-1", login="sparq-orchestrator[bot]",
+                 labels=(UNREVIEWED_LABEL,), created="2026-07-18T00:00:00Z")
+    check("a REACHABLE PR wearing the label is not mislabelled",
+          not is_mislabelled_unreviewed(honest, repo))
+    _, census_h2 = find_blind_spot([honest], {}, repo, now, DEFAULT_MAX_AGE_HOURS)
+    check("...and contributes no row", "mislabelled-unreviewed" not in census_h2)
+    # An unreachable PR WITHOUT the label is the post-fix steady state: still a blind
+    # spot, but no longer wearing a claim nothing will honour.
+    check("an unreachable PR without the label is not mislabelled",
+          not is_mislabelled_unreviewed(_pr(ref="research/x", login="jeswr"), repo))
+    # The row is computed for EVERY open PR, not only blind-spot ones — a draft or a
+    # human-held PR wears a lying label just as well.
+    _, census_dr = find_blind_spot(
+        [_pr(number=11, draft=True, labels=(UNREVIEWED_LABEL,))], {}, repo, now,
+        DEFAULT_MAX_AGE_HOURS)
+    check("a DRAFT wearing the label is still counted",
+          census_dr.get("mislabelled-unreviewed") == 1)
+
     body = render_issue_body(findings3, {"blind-spot": 1}, repo, DEFAULT_MAX_AGE_HOURS)
     check("the issue body self-identifies", body.startswith("> 🤖 SPARQ agent"))
     check("the issue body carries the dedupe key", f"<!-- {KEY_PREFIX}: {ALARM_KEY} -->" in body)
+    body_d = render_issue_body(findings_d, census_d, repo, DEFAULT_MAX_AGE_HOURS)
+    check("the issue body carries a disposition column", "| disposition |" in body_d)
+    check("the issue body explains every disposition",
+          all(name in body_d for name in DISPOSITIONS))
+    check("the issue body explains the mislabelled row", "mislabelled-unreviewed" in body_d)
 
     # --- fail-loud on malformed input (never a quiet green).
     for name, thunk in (
