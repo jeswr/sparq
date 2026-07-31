@@ -279,6 +279,32 @@ Batches are accepted whatever revision was negotiated — an array is only ever 
 reply to an array, so a client on a batch-free revision is never handed one it did not
 ask for.
 
+### Which engine plans a tool call runs (default-on, [SONNET-4.6] sq-mc06h)
+
+`sparq-mcp` is a **native** engine-embedding surface with no bundle-size floor, so — like
+`sparq-cli`, `sparq-server` and the `sparq-rdf` Python wheel — its **default** feature set
+lights two `sparq-engine` planner opt-ins that the engine LIBRARY leaves off:
+
+- **`algebra-rewrite`** — the pre-execution algebra rewrite pass: `FILTER(?v = <iri>)`
+  IRI-constant substitution plus `FILTER(!bound)` → anti-join, applied before evaluation.
+  IRI constants **only** — a literal equality is never rewritten (the `sq-lr2ii` avoidance
+  contract).
+- **`dp-planner`** — the DPccp join-order planner. A connected BGP of 3 or more patterns
+  that fits the connected-subgraph budget is planned as a cost-optimal **bushy** join tree
+  instead of by greedy GOO. It is default-on once compiled, so a `tools/call` gets it with
+  no explicit install; `sparq_engine::without_dp_planner` opts out for one scope.
+
+Both are **result-equivalent** — they change which plan runs, never the answer — and pull
+**zero** new dependencies, so the default dependency graph is unchanged. The point is that
+an agent's `query` / `construct` call executes the same plans the CLI and the canonical
+benchmarks measure, rather than a rewrite-dark, greedy-GOO variant of the same engine.
+Build `sparq-mcp` with `--no-default-features` for the unoptimised engine.
+
+This is a **per-surface** decision, not a blanket one: `sparq-wasm` deliberately keeps both
+off, because that surface has a bundle-size floor the native ones do not.
+`crates/sparq-mcp/tests/planner_features_default.rs` is the tripwire that the default set
+keeps them lit and that the forwarding actually reaches the engine.
+
 The standard MCP stdio transport is behind the **`stdio`** feature:
 `sparq_mcp::serve_stdio(&mut server)` runs the line-delimited JSON-RPC loop over this
 process's stdin/stdout. For an arbitrary reader/writer pair use `sparq_mcp::serve`.
@@ -329,6 +355,7 @@ Opt-in crate at workspace v0.1.0; verified against branch `main` (default `class
 2026-07-13 [GPT-5.6], sq-cekgj; default `prefixes` tool 2026-07-13 [GPT-5.6], sq-kx5b0;
 default `void` tool 2026-07-12 [GPT-5.6], sq-2kkym;
 default resources + prompts surfaces 2026-07-28 [SONNET-4.6], sq-sjey1;
+default-on `algebra-rewrite` + `dp-planner` 2026-07-30 [SONNET-4.6], sq-mc06h;
 pod mode 2026-07-11 [FABLE-5]).
 Tested by a real in-memory MCP round-trip (default features), a real stdio serve-loop
 round-trip, and a spawned-process session against the shipped binary (feature `stdio`,
