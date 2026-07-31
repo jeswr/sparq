@@ -159,9 +159,13 @@ jobs:
           npm run check:package
 
       # Publish guardrail + git-pin verification (sq-bkag): `prepare` wired, the
-      # `files` allowlist intact, and the packed tarball actually ships dist/ + wasm/.
+      # `files` allowlist intact, and the packed tarball actually ships dist/ + wasm/
+      # + the `--target nodejs` CommonJS engine in wasm-node/ ([OPUS-5] sq-2hk).
       - name: Package guardrail check
         run: npm run check:package
 
+      # Both targets are built from the same crate + feature set (the glue differs,
+      # so the two byte counts are close but not identical) — printing both makes a
+      # feature-set drift between them visible in the log.
       - name: Report wasm size
-        run: ls -l wasm/sparq_wasm_bg.wasm
+        run: ls -l wasm/sparq_wasm_bg.wasm wasm-node/sparq_wasm_bg.wasm

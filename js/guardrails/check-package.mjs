@@ -19,10 +19,15 @@
 // WHAT IT CHECKS (no network, no Rust toolchain required — inspects the tree
 // `npm pack` WOULD ship via `npm pack --dry-run --json`):
 //   1. `prepare` is wired so a git-pinned `npm install` builds the binding.
-//   2. The publish allowlist (`files`) names `dist` and `wasm`.
+//   2. The publish allowlist (`files`) names `dist`, `wasm` and `wasm-node`.
 //   3. The packed tarball actually contains the JS entrypoint (`main`), the
 //      type entrypoint (`types`), and the wasm artifact (`wasm/*_bg.wasm`).
 //   4. The package self-identifies as `@jeswr/sparq` (settled name guard).
+//   5. The CommonJS engine (`--target nodejs`, sq-2hk) is shipped AND usable:
+//      the `./wasm-node` export condition is wired, the glue + wasm bytes are in
+//      the tarball, and `wasm-node/package.json` re-scopes that directory to
+//      CommonJS (without it the `"type": "module"` at the package root would make
+//      Node parse the CJS glue as ESM and `require()` would throw).
 //
 // USAGE
 //   node guardrails/check-package.mjs           # check the packable tree
@@ -64,10 +69,23 @@ if (!scripts.prepare) {
 
 // (2) publish allowlist names the built outputs.
 const files = pkg.files ?? [];
-for (const required of ['dist', 'wasm']) {
+for (const required of ['dist', 'wasm', 'wasm-node']) {
   if (!files.includes(required)) {
     fail(`package.json \`files\` allowlist is missing "${required}" — it would be omitted from the published/packed tarball`);
   }
+}
+
+// (5a) the CommonJS engine is reachable: `require('@jeswr/sparq/wasm-node')` only
+//      resolves if the subpath export declares a `require` condition (the root
+//      `exports` field makes every undeclared subpath unreachable).
+const wasmNodeExport = pkg.exports?.['./wasm-node'];
+if (!wasmNodeExport) {
+  fail(
+    'package.json `exports` has no "./wasm-node" subpath — CommonJS consumers cannot ' +
+      "`require('@jeswr/sparq/wasm-node')` (an `exports` field blocks every undeclared subpath)",
+  );
+} else if (typeof wasmNodeExport.require !== 'string') {
+  fail('the "./wasm-node" export has no `require` condition, so `require()` of it fails to resolve');
 }
 
 // (3) the tree `npm pack` would ship actually contains the entrypoints + wasm.
@@ -102,6 +120,20 @@ if (packed) {
   }
   if (!has((p) => /^wasm\/.*\.js$/.test(p))) {
     fail('packed tarball is missing the wasm JS glue (wasm/*.js)');
+  }
+
+  // (5b) the `--target nodejs` sibling: glue + bytes + the CommonJS marker.
+  if (!has((p) => /^wasm-node\/.*_bg\.wasm$/.test(p))) {
+    fail('packed tarball is missing the CommonJS wasm artifact (wasm-node/*_bg.wasm) — `require()` consumers would have no engine');
+  }
+  if (!has((p) => /^wasm-node\/.*\.js$/.test(p))) {
+    fail('packed tarball is missing the CommonJS wasm glue (wasm-node/*.js)');
+  }
+  if (!entries.includes('wasm-node/package.json')) {
+    fail(
+      'packed tarball is missing wasm-node/package.json — without its `{"type": "commonjs"}` the ' +
+        'package-root `"type": "module"` makes Node parse the CommonJS glue as ESM and `require()` throws',
+    );
   }
 }
 
