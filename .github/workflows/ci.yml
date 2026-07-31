@@ -415,12 +415,12 @@ jobs:
           # key is removed). A stable `shared-key` is still worth keeping so this job's
           # dep cache is the one every branch's run restores.
           shared-key: "test-workspace"
-          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE. THIS IS THE CANONICAL NOTE; every other rust-cache step in this
-          # file carries the same `save-if` and points back here. Both beads reached the
-          # same posture from opposite ends (sq-h2gz6 as the follow-up to sq-3sbrr /
-          # #1395, which did this for the feature-matrix legs; sq-6vshe.15 as lever 2 of
-          # the CI structural-speedup program) — this note is their union.
+          # file carries the same `save-if` and points back here. All three beads reached
+          # the same posture from different ends (sq-h2gz6 and sq-aemq7 as follow-ups to
+          # sq-3sbrr / #1395, which did this for the feature-matrix legs; sq-6vshe.15 as
+          # lever 2 of the CI structural-speedup program) — this note is their union.
           #
           # RESTORE is unconditional — PR heads and `gh-readonly-queue/*` entries both
           # branch off main and read main's entry, which is where the dep-cache hit
@@ -434,26 +434,33 @@ jobs:
           #      which GitHub LRU-evicts against, so those write-only copies push the
           #      WARM main-scoped entries out and the heavy jobs (coverage, conformance,
           #      mutants) restore COLD and pay the dependency-compile floor from scratch.
-          #      Caching was present but self-defeating. This is sq-3sbrr's doctrine,
+          #      Caching was present but self-defeating: a branch-scoped entry is
+          #      unreadable from main and from every sibling PR anyway, so each PR run
+          #      was paying to make the next run colder. This is sq-3sbrr's doctrine,
           #      already applied to feature-matrix.yml and the wasm lanes; this file's
           #      cache steps (plus the one in vectorized-feature-off.yml) were the gap
           #      left on the queue path.
           #
-          # WHY main-only is safe rather than a permanent cold start: EVERY key here
-          # still has a seeder.
-          #   - the per-commit jobs are seeded by the post-merge push-to-main run — the
-          #     `changes` job forces rust_changed=true on any non-PR/non-merge_group
-          #     event (`ci_select.py` treats `push` as mode=full), so `push` runs the
-          #     full matrix;
-          #   - `coverage-nightly` / `mutants-nightly-advisory` never run on push (they
-          #     hang off `nightly-gate`, which is schedule/workflow_dispatch only), and
-          #     are seeded by the 03:17 UTC cron — a scheduled run's ref IS
-          #     refs/heads/main, so save-if holds there too.
-          # No job is left permanently cold by this.
+          # WHY main-only is safe rather than a permanent cold start, twice over:
+          #   - SEEDING: EVERY key here still has a seeder.
+          #     - the per-commit jobs are seeded by the post-merge push-to-main run — the
+          #       `changes` job forces rust_changed=true on any non-PR/non-merge_group
+          #       event (`ci_select.py` treats `push` as mode=full), so `push` runs the
+          #       full matrix;
+          #     - `coverage-nightly` / `mutants-nightly-advisory` never run on push (they
+          #       hang off `nightly-gate`, which is schedule/workflow_dispatch only), and
+          #       are seeded by the 03:17 UTC cron — a scheduled run's ref IS
+          #       refs/heads/main, so save-if holds there too.
+          #     No job is left permanently cold by this.
+          #   - CONTENT: rust-cache stores the DEPENDENCY build only (it cleans
+          #     workspace-crate artifacts out of `target/` before saving), and deps are
+          #     pinned by the committed Cargo.lock, so main's dep cache is the same
+          #     closure the PR would build for itself.
           #
           # COST: a PR that changes `Cargo.lock` re-resolves/rebuilds deps on each push
-          # instead of once. Accepted — that PR class is rare, and it is exactly the
-          # class whose branch-scoped save was evicting main's entry for everyone else.
+          # instead of once (a PR that merely ADDS a dep just compiles that dep cold).
+          # Accepted — that PR class is rare, and it is exactly the class whose
+          # branch-scoped save was evicting main's entry for everyone else.
           # COUPLING (read before landing sq-6vshe.14): main-scope freshness now depends
           # ENTIRELY on push-to-main runs. .14 skips queue-validated push legs and must
           # keep its promised cache-primer leg, or these caches go stale.
@@ -975,7 +982,7 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
           # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
@@ -1316,7 +1323,7 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
           # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
@@ -1468,7 +1475,7 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
           # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
@@ -1552,7 +1559,7 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
           # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
@@ -1688,7 +1695,7 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
           # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
@@ -1827,7 +1834,7 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
           # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
@@ -1975,7 +1982,7 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
           # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
@@ -2087,7 +2094,7 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
           # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
@@ -2195,7 +2202,7 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
           # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
@@ -2306,7 +2313,7 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
           # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
@@ -2422,7 +2429,7 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
           # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
@@ -2566,7 +2573,7 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
           # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
@@ -2729,7 +2736,7 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
           # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
@@ -3197,9 +3204,10 @@ jobs:
       # the ACTIVE (pinned) toolchain. Idempotent, and a no-op if it is already there.
       - name: Ensure llvm-tools-preview on the pinned toolchain
         run: rustup component add llvm-tools-preview
-      # [OPUS-5] sq-h2gz6: ONE shared dep cache for ALL shards (was `key:
-      # coverage-shard-${{ matrix.shard }}`, i.e. one cache per matrix leg — 4 of them
-      # before sq-piapk split the engine shard out, 3 now).
+      # [OPUS-5] sq-h2gz6 / [SONNET-4.6] sq-aemq7 (both beads reached this independently;
+      # the shared key is named `coverage-measure` after the job): ONE shared dep cache
+      # for ALL shards (was `key: coverage-shard-${{ matrix.shard }}`, i.e. one cache per
+      # matrix leg — 4 of them before sq-piapk split the engine shard out, 3 now).
       #
       # The per-shard key's premise was "each shard builds a DIFFERENT crate subset
       # (different instrumented objects), so keying by shard keeps them from clobbering
@@ -3207,20 +3215,35 @@ jobs:
       # stores those: it deletes workspace-member artifacts from the target dir before
       # saving, so what a shard actually persists is the EXTERNAL dependency closure,
       # compiled from the same Cargo.lock with the same llvm-cov instrumentation flags
-      # in every shard. Near-identical caches, one budget slot each.
+      # in every shard. Near-identical caches, one budget slot each. `shared-key` is
+      # documented as replacing the automatic job-id-derived key, so the matrix legs land
+      # on one entry instead of one per leg.
       #
       # Collapsing them frees ~2 slots of the shared 10 GB Actions-cache budget (the
       # sq-3sbrr / #1395 finding: budget pressure is what LRU-evicts the warm entries
-      # and makes the heavy jobs restore cold). Per-shard feature unification can still
-      # make one shard's dep set a superset of another's, so a shared entry is a partial
-      # restore for some shards rather than an exact one — cargo just recompiles the
-      # difference, which is strictly better than the cold rebuild an evicted key
-      # forces, and carries no stale-artifact risk (fingerprints + the key already
-      # embed Cargo.lock, the rustc version and the Cargo.toml hashes).
+      # and makes the heavy jobs restore cold).
+      #
+      # HONEST RESIDUAL, since the shards are NOT identical builds: coverage.sh selects
+      # per-crate `--features` (sparq-core mmap,dict-spill,rdfxml; sparq-reason datalog; …),
+      # so each shard's dep closure is a different subset and per-shard feature
+      # unification can make one shard's dep set a superset of another's. rust-cache skips
+      # saving on an exact key hit, so one shard's closure wins the entry and the others
+      # get a PARTIAL restore and still compile their extra deps cold. That is a smaller
+      # compile win than three warm caches would give, traded deliberately for the
+      # cache-budget headroom these beads are about — and it is still strictly better than
+      # the cold rebuild an evicted key forces, with no stale-artifact risk (fingerprints
+      # + the key already embed Cargo.lock, the rustc version and the Cargo.toml hashes).
+      #
+      # NOT affected: the shard PARTITION is chosen by the COVERAGE_SHARD env var below,
+      # which coverage.sh maps to SHARD_GROUPS[n-1]. Nothing reads the cache key, so which
+      # crates each shard measures is unchanged by this.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          # REPLACES the former per-shard `key: coverage-shard-<n>` for the reason
+          # spelled out in the note above this step — the two are mutually exclusive,
+          # since a per-shard `key:` would re-split the one entry back into three.
           shared-key: coverage-measure
-          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Full rationale on the
           # `build-archive` cache step above; pinned by
           # scripts/tests/test_mergequeue_cache_posture.py. Saving on main only also
@@ -3426,14 +3449,15 @@ jobs:
       # shared-key cache warms the deps; keying by part avoids save-race clobbering.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
           # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          # [OPUS-5] sq-h2gz6: the per-part key is LEFT ALONE here — it is outside this
-          # bead's named scope (coverage-shard-N), and unlike those shards the merge job
-          # below deliberately points at part 1's key.
+          # [OPUS-5] sq-h2gz6 / [SONNET-4.6] sq-aemq7: the per-part key is LEFT ALONE
+          # here — it is outside both beads' named scope (coverage-shard-N), which
+          # collapsed only the coverage-SHARD matrix onto one `shared-key`, and unlike
+          # those shards the merge job below deliberately points at part 1's key.
           key: coverage-engine-run-${{ matrix.part }}
       - name: Install cargo-llvm-cov + nextest
         # [OPUS-4.8] sq-tool-pin: explicit `with: tool:` is MANDATORY when SHA-pinning
@@ -3498,10 +3522,12 @@ jobs:
       # Reuse a run partition's dep cache to warm the merge job's object compile.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
-          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py. The pinned
+          # `key:` stays (see the note above this step) — both beads collapsed only the
+          # coverage-SHARD matrix onto one `shared-key`.
           save-if: ${{ github.ref == 'refs/heads/main' }}
           key: coverage-engine-run-1
       - name: Install cargo-llvm-cov + nextest
@@ -3847,7 +3873,7 @@ jobs:
         run: rustup component add llvm-tools-preview
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
           # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
@@ -4233,7 +4259,7 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
           # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
@@ -4384,7 +4410,7 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 / sq-aemq7 — CACHE-SAVE
           # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
           # seeder argument are on the `build-archive` cache step above (the canonical
           # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
