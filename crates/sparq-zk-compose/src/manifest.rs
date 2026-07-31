@@ -1837,54 +1837,51 @@ pub struct ProofManifest {
     /// the SCAN sub-proofs that answer query BGP pattern `pi`. Indexed per query
     /// pattern in query order, exactly like [`Self::attributions`].
     ///
-    /// # Why it exists (the same-constant-layout ambiguity)
-    /// Without it the verifier resolves pattern→scan by constant MEMBERSHIP
-    /// (`crate::verifier`'s `scan_matches_pattern`), so two query patterns
-    /// sharing a constant layout — e.g. `{ ?x <age> ?v . ?x <age> ?c }`, both
-    /// `(?, <age>, ?)` — are BOTH matched by the SAME scan sub-proof and the
-    /// verifier cannot tell which one it was meant to answer. The FILTER gate
-    /// then has to fail CLOSED and demand the filter be discharged at EVERY slot
-    /// the filtered variable occupies across EVERY pattern the scan matches
-    /// (sq-q9r5e / audit L-1) — correct, but an over-demand. Under
-    /// `FILTER(?v >= 18)`, an honest prover answering pattern 0 from `{alice age
-    /// 25}` and pattern 1 from `{alice age 5}` presents a GENUINE joined solution
-    /// (`?x = alice`, `?v = 25`, `?c = 5`) — yet membership also matches the
-    /// second scan to pattern 0 and demands a true-verdict `?v >= 18` proof over
-    /// its `5`, which no honest prover can supply. Declaring the mapping lets the
-    /// verifier demand exactly the slots the DECLARED answering scan binds.
+    /// # It carries NO verification weight — do not read it as one
+    /// The verifier resolves pattern→scan by constant MEMBERSHIP
+    /// (`crate::verifier`'s `scan_matches_pattern`) for EVERY obligation it
+    /// derives: the FILTER slot gate (`bind_query_correctness`), the cross-graph
+    /// attribution gate (`bind_attributions`), the Q6 namespace
+    /// (`global_attributions`) and `bind_joins` all ignore this field. A
+    /// declaration therefore CANNOT shrink what the verifier demands — a manifest
+    /// carrying one is never accepted where the same manifest without one is
+    /// rejected; it can only fail ADDITIONALLY, on the well-formedness checks
+    /// below.
+    ///
+    /// # Why it does not narrow (the residual this field is a placeholder for)
+    /// The reason to declare a mapping is the same-constant-layout over-demand:
+    /// two query patterns sharing a constant layout — `{ ?x <age> ?v . ?x <age>
+    /// ?c }`, both `(?, <age>, ?)` — are BOTH matched by BOTH scan sub-proofs, so
+    /// under `FILTER(?v >= 18)` the fail-closed sq-q9r5e / audit-L-1 rule demands
+    /// a true-verdict `?v >= 18` proof over the `5` of a genuine solution
+    /// `(?x = alice, ?v = 25, ?c = 5)`, which no honest prover can supply. Letting
+    /// the declaration narrow that obligation would fix the over-demand and open a
+    /// hole: SPARQL evaluates each pattern over EVERY compatible committed row and
+    /// the query text authorises no prover-chosen partition of the data, so the
+    /// prover could drop a constant-compatible scan's rows out of a pattern's
+    /// FILTER and attribution obligations by fiat while still disclosing them. The
+    /// well-formedness checks below pin only that the declaration is a TOTAL map
+    /// of scans to patterns; they establish nothing about whether an excluded scan
+    /// contributes to the claimed result. Narrowing needs what the flat manifest
+    /// cannot yet express — a claimed result row bound to the selected scan rows
+    /// with all shared-variable joins enforced — so it is NOT done, and the
+    /// over-demand stands (`crate::verifier`'s `check_pattern_scans` carries the
+    /// full argument).
     ///
     /// # It is DECLARED, not trusted — the verifier re-checks it
-    /// `crate::verifier`'s `resolve_pattern_scans` gate rejects a declaration
+    /// `crate::verifier`'s `check_pattern_scans` gate rejects a declaration
     /// that is mis-sized (not one entry per query pattern), leaves a pattern
     /// unanswered (empty entry), names a sub-proof that is out of range / not a
     /// scan / whose bb-bound `pattern_is_const`/`pattern_const_enc` do NOT match
     /// the pattern's constants, or leaves a scan sub-proof DANGLING (declared for
-    /// no pattern at all). So a declaration can only ever be a sub-set of the
-    /// membership relation, and every disclosed scan is attributed to a pattern.
+    /// no pattern at all). Those are ADDITIONAL rejections, never a relaxation.
     ///
-    /// # It is a READING CLAIM, and that puts an obligation on the CONSUMER
-    /// Declaring NARROWS what acceptance certifies — from "no constant-compatible
-    /// reading of the disclosed rows binds the filtered variable to an ungated
-    /// value" down to "the DECLARED reading is gated". In the example above the
-    /// `5` is disclosed and never filter-gated. Reading it at pattern 0 is a
-    /// DIFFERENT solution the manifest does not claim, and a prover that wants to
-    /// claim it must declare that scan for pattern 0 — which is then rejected,
-    /// so a declaration cannot present a FILTER-violating solution as proved. But
-    /// a relying party MUST read the disclosed rows AS `pattern_scans` says; one
-    /// that instead re-evaluates the query over the disclosed rows alone can
-    /// recover solutions this manifest proves nothing about. That reading rule is
-    /// an interface contract, NOT a cryptographically established property, and
-    /// no soundness claim is made for it. A consumer unwilling to honour it
-    /// should refuse a manifest whose `pattern_scans` is non-empty.
+    /// # EMPTY = not declared
+    /// An empty vector means "no declaration" and skips the checks above; the
+    /// obligations are identical either way, so omitting the field neither weakens
+    /// nor strengthens any gate.
     ///
-    /// # EMPTY = not declared (legacy manifests keep the fail-closed behaviour)
-    /// An empty vector means "no declaration"; the verifier falls back to the
-    /// membership inference and its fail-closed over-demand. Omitting the field
-    /// is therefore never a way to WEAKEN a gate — the inferred set is always a
-    /// superset of any valid declaration, so the inferred obligations are always
-    /// at least as strong.
-    ///
-    /// Consumed by the FLAT stage-1 gates only. The `extended-fragment` regime
+    /// Checked by the FLAT stage-1 gates only. The `extended-fragment` regime
     /// defers all query-text term binding (see `verify_fragment_manifest`), so a
     /// declaration is neither validated nor used there.
     // [OPUS-5] sq-q9r5e follow-up: explicit pattern→scan mapping. Research-grade,

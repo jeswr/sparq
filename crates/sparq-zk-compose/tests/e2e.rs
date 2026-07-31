@@ -2834,31 +2834,40 @@ fn filter_same_slot_in_two_patterns_needs_one_edge() {
 //
 // [OPUS-5] sq-q9r5e follow-up. The sq-q9r5e fix closed audit L-1 by demanding
 // the FILTER be discharged at EVERY slot the filtered variable occupies across
-// EVERY pattern a scan MATCHES BY CONSTANTS. Correct, but an over-demand where
-// two query patterns share a constant layout: a scan answering pattern 1 also
-// matches pattern 0, so its rows must ALSO discharge pattern 0's filter — even
-// when the manifest presents a genuine joined solution in which those rows never
-// bind the filtered variable. `manifest.pattern_scans` declares the mapping so
-// the gate can demand exactly the declared answering scan's slots.
+// EVERY pattern a scan MATCHES BY CONSTANTS. That is an over-demand where two
+// query patterns share a constant layout — but narrowing it to a prover-DECLARED
+// pattern→scan mapping is UNSOUND, because SPARQL evaluates each pattern over
+// every compatible committed row and the query text authorises no prover-chosen
+// partition of the data. So `manifest.pattern_scans` is recorded and re-checked
+// for well-formedness, and carries NO verification weight: every obligation
+// still runs over constant membership.
 //
-// These tests are STRUCTURAL (no bb): the declaration is checked against the
-// same bb-bound `pattern_is_const`/`pattern_const_enc` the audit-#1
-// reconstruction binds, so the structural stage decides it on its own.
+// These tests pin BOTH halves: the declaration never buys an acceptance
+// (`pattern_scans_do_not_narrow_the_filter_obligation` and friends), and a
+// malformed declaration is an ADDITIONAL rejection.
+//
+// They are STRUCTURAL (no bb): the declaration is checked against the same
+// bb-bound `pattern_is_const`/`pattern_const_enc` the audit-#1 reconstruction
+// binds, so the structural stage decides it on its own.
 
 /// The `{ ?x <age> ?v . ?x <age> ?c }` shape: TWO query patterns with the SAME
 /// constant layout `(?, <ex/age>, ?)`, JOINED on `?x` (slot 0 of both), with the
 /// FILTER on `?v` — which occurs only in pattern 0, at slot 2.
 ///
-/// This shape is the honest witness the over-demand actually blocks: the two
-/// scans below disclose `(alice, age, 25)` and `(alice, age, 5)`, which AGREE on
-/// the join variable `?x`, so `(?x=alice, ?v=25, ?c=5)` is a real solution of
-/// this BGP over the committed union and `FILTER(25 >= 18)` holds on it.
+/// This shape is the one the over-demand blocks: the two scans below disclose
+/// `(alice, age, 25)` and `(alice, age, 5)`, which AGREE on the join variable
+/// `?x`, so `(?x=alice, ?v=25, ?c=5)` is a solution of this BGP over the
+/// committed union and `FILTER(25 >= 18)` holds on it. It is nevertheless
+/// REJECTED: `{alice age 5}` is a constant-compatible row of pattern 0 too, and
+/// nothing in the manifest proves it does not contribute there, so its `5` needs
+/// a `?v >= 18` proof it cannot have. That over-demand is the price of not
+/// letting the prover partition the data by declaration.
 const SAME_LAYOUT_QUERY: &str = "SELECT ?x ?v ?c WHERE { ?x <http://ex/age> ?v . ?x <http://ex/age> ?c FILTER(?v >= \"18\"^^<http://www.w3.org/2001/XMLSchema#integer>) }";
 
 /// The `{ ?s <age> ?v . ?v <age> ?o }` shape, which places the FILTERED variable
-/// `?v` at slot 2 (pattern 0) AND slot 0 (pattern 1). Used only by the L-1
-/// REJECTION witness: `?v` at a subject slot cannot bind an `xsd:integer`, so
-/// this query has no solution over any real RDF and is not a valid happy path.
+/// `?v` at slot 2 (pattern 0) AND slot 0 (pattern 1). Used by the L-1 REJECTION
+/// witnesses only: `?v` at a subject slot cannot bind an `xsd:integer`, so this
+/// query has no solution over any real RDF and is not a valid happy path.
 const L1_CROSS_SLOT_QUERY: &str = "SELECT ?s ?v ?o WHERE { ?s <http://ex/age> ?v . ?v <http://ex/age> ?o FILTER(?v >= \"18\"^^<http://www.w3.org/2001/XMLSchema#integer>) }";
 
 /// A one-triple `<ex/age>` credential committed under its OWN salt (audit #9
@@ -2901,16 +2910,16 @@ fn scan_row_slot(inputs: &ProofInputs, row: usize, slot: usize) -> FieldHex {
 
 /// The honest two-scan, same-constant-layout manifest over [`SAME_LAYOUT_QUERY`].
 ///
-/// Scan 0 = `{alice age 25}` answers pattern 0 (`?x` slot 0, `?v` slot 2); scan 1
-/// = `{alice age 5}` answers pattern 1 (`?x` slot 0, `?c` slot 2). The two rows
-/// AGREE on the join variable `?x` (`alice`), so the declared reading
-/// `(?x=alice, ?v=25, ?c=5)` is a REAL solution of this BGP over the committed
-/// union — not merely a structurally-accepted shape — and it satisfies
-/// `FILTER(?v >= 18)` at the one slot `?v` occupies.
+/// Scan 0 = `{alice age 25}` is the intended answer for pattern 0 (`?x` slot 0,
+/// `?v` slot 2); scan 1 = `{alice age 5}` for pattern 1 (`?x` slot 0, `?c` slot
+/// 2). The two rows AGREE on the join variable `?x` (`alice`), so the intended
+/// reading `(?x=alice, ?v=25, ?c=5)` is a real solution of this BGP satisfying
+/// `FILTER(?v >= 18)`.
 ///
 /// Exactly one true-verdict FILTER edge is carried: scan 0's slot 2 (`25`). Scan
-/// 1's slot 2 (`5`) is a filter-VIOLATING value, deliberately: it is the
-/// adversarially-matching-but-undeclared row the tests below reason about.
+/// 1's slot 2 (`5`) is a filter-VIOLATING value, deliberately: it is the row
+/// membership also places at pattern 0, and the whole point of the tests below is
+/// that no declaration lets the prover drop it out of pattern 0's obligation.
 /// `pattern_scans` is left EMPTY here; each test sets it as it wants.
 fn same_layout_manifest() -> ProofManifest {
     let (scan_a, commit_a, salt_a) = age_scan("http://ex/alice", 25, 9);
@@ -2957,77 +2966,131 @@ fn same_layout_manifest() -> ProofManifest {
     }
 }
 
-/// The issue this whole schema addition exists for, on a manifest whose selected
-/// rows form a REAL joined BGP solution (`?x=alice, ?v=25, ?c=5` — see
-/// [`same_layout_manifest`]). WITHOUT a declaration the verifier resolves
-/// pattern→scan by constant membership, so scan 1 also matches pattern 0 and the
-/// sq-q9r5e every-slot rule demands a true-verdict `?v >= 18` proof over its `5`
-/// — a proof no honest prover can supply, so this VALID solution is rejected.
-/// WITH the explicit `pattern_scans` declaration the gate demands exactly the one
-/// slot the declared answering scan binds, and it verifies.
+/// THE load-bearing witness of the round-2 review finding: a `pattern_scans`
+/// declaration must not suppress a query-semantic FILTER obligation.
 ///
-/// HONEST SCOPE: the rows here genuinely agree on `?x`, so the manifest is a
-/// valid witness of the motivating case — but this gate does NOT itself check
-/// disclosed-row join equality (`prefilter_manifest_structure` accepts the same
-/// manifest with the subjects made to disagree; the disclosed-row join lives on
-/// `join_edges`/`bind_joins`, left empty here). This test therefore witnesses the
-/// over-demand and its removal, not join enforcement.
+/// [`same_layout_manifest`] discloses `{alice age 25}` and `{alice age 5}` under
+/// `FILTER(?v >= 18)`, with only the `25` gated. The `5` is a constant-compatible
+/// row of pattern 0 (where `?v` binds), so membership demands a `?v >= 18` proof
+/// over it and the manifest is rejected. EVERY declaration a prover could write —
+/// including the "obvious" one that assigns each scan to the pattern it was meant
+/// to answer, and the opposite assignment that hides the failing slot behind
+/// pattern 1 — leaves that rejection standing, because the obligations are
+/// derived from constant membership and never from the declaration.
+///
+/// Deleting the `check_pattern_scans` call does NOT turn this test red (it never
+/// asserts a `PatternScan*` error) — that is deliberate: it asserts the ABSENCE
+/// of narrowing, so it goes red exactly when `bind_query_correctness` starts
+/// reading `pattern_scans`, which is the regression worth catching. The four
+/// tests below cover `check_pattern_scans` itself.
 #[test]
-fn pattern_scans_declaration_removes_the_same_layout_over_demand() {
+fn pattern_scans_do_not_narrow_the_filter_obligation() {
     let mut m = same_layout_manifest();
-    match prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)), &fresh_policy()) {
-        Err(CheckError::UnboundFilter { variable }) if variable == "v" => {}
-        other => panic!(
-            "without an explicit pattern→scan mapping the membership fallback must \
-             fail closed (over-demand); expected UnboundFilter(v), got {other:?}"
-        ),
-    }
+    let expect_reject = |m: &ProofManifest, case: &str| {
+        match prefilter_manifest_structure(m, &trusted_k(&test_issuer_sk(1)), &fresh_policy()) {
+            Err(CheckError::UnboundFilter { variable }) if variable == "v" => {}
+            other => panic!(
+                "{}: the ungated `5` matches pattern 0 by constants, so the FILTER \
+                 obligation must stand; expected UnboundFilter(v), got {:?}",
+                case, other
+            ),
+        }
+    };
 
+    // No declaration: the membership over-demand, unchanged.
+    expect_reject(&m, "no declaration");
+
+    // The intended reading — scan 0 answers pattern 0, scan 1 answers pattern 1.
+    // Accepting this is exactly the soundness gap the round-2 review named: it
+    // would let the prover drop scan 1's rows out of pattern 0's FILTER on its
+    // own say-so, with nothing proving they cannot contribute there.
     m.pattern_scans = vec![vec![0], vec![1]];
-    prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)), &fresh_policy())
-        .expect("declared pattern→scan mapping demands exactly the declared slots");
+    expect_reject(&m, "declaration excluding the failing scan from pattern 0");
+
+    // The cross assignment — the prover hides the failing slot by pointing the
+    // declaration at the opposite pattern.
+    m.pattern_scans = vec![vec![1], vec![0]];
+    expect_reject(&m, "cross declaration");
+
+    // Widening pattern 0 to cover both scans changes nothing either.
+    m.pattern_scans = vec![vec![0, 1], vec![0, 1]];
+    expect_reject(&m, "declaration naming both scans for both patterns");
 }
 
-/// The adversarial half of the declaration's semantics, and the bound on what
-/// acceptance above means.
+/// The round-1 reviewer's "declarations hide the opposite failing slots" witness,
+/// on the CROSS-SHAPED query [`L1_CROSS_SLOT_QUERY`] where the filtered variable
+/// sits at a DIFFERENT slot in each pattern (`?v` at slot 2 of pattern 0, slot 0
+/// of pattern 1).
 ///
-/// Scan 1's disclosed `5` MATCHES pattern 0 by constants, and reading it there
-/// would give `?v = 5`, which VIOLATES `FILTER(?v >= 18)`. Under the declaration
-/// accepted above, that `5` carries no gating obligation — so acceptance does NOT
-/// certify "no reading of the disclosed rows violates the FILTER"; a consumer
-/// must read the rows AS `pattern_scans` says (documented on
-/// `ProofManifest::pattern_scans`).
+/// Two scans disclose `{alice age 25}` and `{bob age 17}`, and the manifest
+/// gates EXACTLY the slot each scan's intended pattern binds `?v` at: scan 0's
+/// slot 2 and scan 1's slot 0. Every OTHER slot the query reads `?v` off — scan
+/// 0's subject and scan 1's `17` — is ungated. So the declaration `[[0], [1]]` is
+/// precisely a declaration engineered to hide the failing slots, and it must be
+/// REJECTED: membership demands slots {0, 2} of BOTH scans, so the ungated `17`
+/// is caught. Narrowing to the declared mapping would ACCEPT it (verified by
+/// mutation: making `bind_query_correctness` read `pattern_scans` turns this
+/// test red).
 ///
-/// What the declaration DOES foreclose is CLAIMING that reading: a prover who
-/// wants the `?v = 5` solution must declare scan 1 for pattern 0, and is then
-/// rejected because the `5` slot has no true-verdict edge. Both ways of claiming
-/// it — swapping the mapping, and widening pattern 0 to cover both scans — are
-/// pinned here, so the declaration cannot present a FILTER-violating solution as
-/// proved.
+/// (The reviewer's literal `(17, age, 25)` / `(25, age, 17)` rows are not
+/// constructible: an integer literal cannot occupy an RDF subject slot, so the
+/// commit/scan builders cannot produce such a graph. Two cross-read scans carry
+/// the same property — each scan's rows are read at both slots `?v` occupies —
+/// which is what this pins.)
 #[test]
-fn pattern_scans_cannot_claim_an_ungated_reading() {
-    let mut m = same_layout_manifest();
+fn pattern_scans_do_not_narrow_the_cross_slot_filter_obligation() {
+    let (scan_a, commit_a, salt_a) = age_scan("http://ex/alice", 25, 13);
+    let (scan_b, commit_b, salt_b) = age_scan("http://ex/bob", 17, 15);
+    // One true-verdict edge per scan, over the slot that scan's INTENDED pattern
+    // binds `?v` at — and nothing else.
+    let filt_a = filter_over_slot(scan_row_slot(&scan_a, 0, 2));
+    let filt_b = filter_over_slot(scan_row_slot(&scan_b, 0, 0));
+    let sk = test_issuer_sk(1);
+    let mut m = ProofManifest {
+        fully_hidden_revocation: None,
+        r#type: "urn:sparq:zk:ProofManifest".into(),
+        query: L1_CROSS_SLOT_QUERY.into(),
+        issuers: vec![],
+        key_set: vec![public_key_to_hex(&sk.public_key())],
+        commitment_attestations: vec![
+            attest_with_salt(commit_a, salt_a, &sk),
+            attest_with_salt(commit_b, salt_b, &sk),
+        ],
+        attributions: vec![vec![0], vec![0]],
+        pattern_scans: vec![],
+        join_obligations: vec![("v".to_string(), 0, 1)],
+        entailment_regime: EntailmentRegime::Simple,
+        derivation_steps: vec![],
+        binding: BindingMode::Challenge { challenge: FieldHex("0x2a".into()) },
+        revocation: Some(fixture_revocation()),
+        status_snapshots: vec![fixture_snapshot(false)],
+        sub_proofs: vec![
+            SubProof { inputs: scan_a, proof_hex: String::new() },
+            SubProof { inputs: scan_b, proof_hex: String::new() },
+            SubProof { inputs: filt_a, proof_hex: String::new() },
+            SubProof { inputs: filt_b, proof_hex: String::new() },
+        ],
+        binding_edges: vec![
+            BindingEdge { from_proof: 0, from_row: 0, from_slot: 2, to_proof: 2 },
+            BindingEdge { from_proof: 1, from_row: 0, from_slot: 0, to_proof: 3 },
+        ],
+        join_edges: vec![],
+        hidden_revocation: None,
+        hidden_issuer_attestations: vec![],
+        holder_pok_proofs: vec![],
+        holder_set_proofs: vec![],
+    };
 
-    // Claim scan 1 (the `5`) answers pattern 0, where `?v` sits.
-    m.pattern_scans = vec![vec![1], vec![0]];
-    match prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)), &fresh_policy()) {
-        Err(CheckError::UnboundFilter { variable }) if variable == "v" => {}
-        other => panic!(
-            "declaring the filter-violating scan as pattern 0's answer must demand a \
-             gating edge over its `5`; expected UnboundFilter(v), got {other:?}"
-        ),
-    }
-
-    // …and widening pattern 0 to cover BOTH scans is the same rejection: the
-    // declaration is a set, so naming the `5` scan anywhere `?v` binds re-imposes
-    // the obligation.
-    m.pattern_scans = vec![vec![0, 1], vec![1]];
-    match prefilter_manifest_structure(&m, &trusted_k(&test_issuer_sk(1)), &fresh_policy()) {
-        Err(CheckError::UnboundFilter { variable }) if variable == "v" => {}
-        other => panic!(
-            "a declaration naming BOTH scans for pattern 0 must keep BOTH scans' slot 2 \
-             in the FILTER obligation; expected UnboundFilter(v), got {other:?}"
-        ),
+    for decl in [vec![], vec![vec![0], vec![1]], vec![vec![1], vec![0]]] {
+        m.pattern_scans = decl.clone();
+        match prefilter_manifest_structure(&m, &trusted_k(&sk), &fresh_policy()) {
+            Err(CheckError::UnboundFilter { variable }) if variable == "v" => {}
+            other => panic!(
+                "declaration {:?} must not ungate the opposite slot on a cross-shaped \
+                 query; expected UnboundFilter(v), got {:?}",
+                decl, other
+            ),
+        }
     }
 }
 
@@ -3085,12 +3148,12 @@ fn pattern_scans_cannot_ungate_the_l1_second_slot() {
     }
 }
 
-/// A scan sub-proof named by NO pattern is rejected: its rows would be disclosed
-/// without the manifest saying which pattern's solution they are, so no FILTER or
-/// attribution obligation from any pattern would reach them. This is what makes
-/// the declared (narrower) mapping TOTAL over the disclosed scans — it does not,
-/// on its own, make every disclosed VALUE gated (see
-/// `pattern_scans_cannot_claim_an_ungated_reading`).
+/// A scan sub-proof named by NO pattern is rejected: the manifest discloses its
+/// rows while its own declared reading gives them no pattern, which is
+/// incoherent. This makes a declaration TOTAL over the disclosed scans. It is an
+/// ADDITIONAL rejection, not a step toward narrowing — the FILTER obligations are
+/// membership-derived either way
+/// (`pattern_scans_do_not_narrow_the_filter_obligation`).
 #[test]
 fn pattern_scans_reject_a_dangling_scan() {
     let mut m = same_layout_manifest();
@@ -3105,10 +3168,11 @@ fn pattern_scans_reject_a_dangling_scan() {
     }
 }
 
-/// A declaration may NARROW the constant-membership relation, never contradict
-/// it: naming a sub-proof that is not a scan, is out of range, or whose bb-bound
-/// pattern constants do not answer the pattern (audit #10) is rejected — so a
-/// prover cannot move the FILTER obligation onto a scan of a different predicate.
+/// A declaration must not contradict the proof-bound constants: naming a
+/// sub-proof that is not a scan, is out of range, or whose bb-bound pattern
+/// constants do not answer the pattern (audit #10) is rejected — a recorded
+/// reading that a scan of a different predicate answers this pattern is a false
+/// statement about the proofs, whatever weight the field carries.
 #[test]
 fn pattern_scans_reject_a_declaration_contradicting_the_bound_constants() {
     let mut m = same_layout_manifest();
@@ -3153,7 +3217,7 @@ fn pattern_scans_reject_a_declaration_contradicting_the_bound_constants() {
 
 /// The declaration is indexed per query pattern in query order (like
 /// `attributions`), so a mis-sized vector cannot be interpreted — it is rejected
-/// rather than silently falling back to the membership inference.
+/// rather than silently recorded.
 #[test]
 fn pattern_scans_reject_an_arity_mismatch() {
     let mut m = same_layout_manifest();
@@ -3168,9 +3232,9 @@ fn pattern_scans_reject_an_arity_mismatch() {
 }
 
 /// `pattern_scans` is `#[serde(default)]`, so a legacy manifest that never heard
-/// of the field parses with an EMPTY declaration and keeps the membership
-/// inference (and its fail-closed over-demand) byte-for-byte. Omitting the field
-/// is therefore never a way to WEAKEN a gate.
+/// of the field parses with an EMPTY declaration and skips the well-formedness
+/// checks. The FILTER/attribution obligations are membership-derived either way,
+/// so omitting the field neither weakens nor strengthens a gate.
 #[test]
 fn pattern_scans_absent_in_json_means_no_declaration() {
     let m = same_layout_manifest();

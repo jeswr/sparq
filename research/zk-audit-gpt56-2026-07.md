@@ -184,52 +184,52 @@ until a human accredited cryptographer signs off; that engagement is still recom
   have distinct constant layouts (the ordinary case, incl. every other test in the suite) are
   unaffected.
 
-  **Structural follow-up — LANDED (the explicit pattern→scan mapping).** The fail-closed direction
-  above was correct but an over-demand. Take `{ ?x <age> ?v . ?x <age> ?c FILTER(?v >= 18) }` — two
-  same-layout patterns joined on `?x`, with the FILTER on `?v`, which occurs only in pattern 0. An
-  honest prover answering pattern 0 from `{alice age 25}` and pattern 1 from `{alice age 5}` presents
-  a GENUINE joined solution (`?x = alice`, `?v = 25`, `?c = 5`) satisfying the FILTER — yet
-  membership also matches the second scan to pattern 0 and demands a true-verdict `?v >= 18` proof
-  over its `5`, which no honest prover can supply, so the manifest is rejected. (Note the *pre*-fix
-  code could not serve that shape either — `find_map` gated the FIRST-matching pattern's slot on
-  EVERY matching scan.) The structural fix is now in the schema: `ProofManifest::pattern_scans` declares, per query
-  BGP pattern (query order, exactly like `attributions`), the `sub_proofs` indices of the scans that
-  answer it. It is DECLARED, not trusted — `verifier::resolve_pattern_scans` rejects a declaration
-  that is mis-sized (`PatternScanArityMismatch`), leaves a pattern unanswered
-  (`PatternScanUnbound`), names a sub-proof that is out of range / not a scan / whose bb-bound
-  `pattern_is_const`/`pattern_const_enc` contradict the pattern's constants (`PatternScanMismatch`,
-  audit #10), or leaves a scan DANGLING, i.e. declared for no pattern at all
-  (`PatternScanUndeclared`). Because every declared pair must satisfy `scan_matches_pattern`, a valid
-  declaration is always a SUBSET of the membership relation, so declaring can only ever RELAX toward
-  obligations the prover could already have met, and the "no dangling scan" rule makes the narrower
-  mapping total over the disclosed SCANS. **It does NOT make every disclosed VALUE gated, and that
-  narrows what acceptance certifies — state this to any consumer.** Without a declaration, acceptance
-  says "no constant-compatible reading of the disclosed rows binds the filtered variable to an
-  ungated value"; with one it says only "the DECLARED reading is gated". In the example above the `5`
-  is disclosed and never filter-gated, because reading it at pattern 0 is a DIFFERENT solution the
-  manifest does not claim. A prover that wants to CLAIM it must declare that scan for pattern 0 and
-  is then rejected (witness `pattern_scans_cannot_claim_an_ungated_reading`, which also pins the
-  widen-to-both variant), so a declaration cannot present a FILTER-violating solution as proved — but
-  the relying party MUST read the disclosed rows AS `pattern_scans` says. That reading rule is an
-  INTERFACE CONTRACT, not a cryptographically established property, and no soundness claim is made
-  for it; a consumer unwilling to honour it should refuse a manifest whose `pattern_scans` is
-  non-empty. The residual — an independently verified, query-semantic witness that the excluded
-  scans cannot contribute to a claimed result row (join/result-row binding included) — is NOT built.
-  `bind_query_correctness` (FILTER
-  slots) and `bind_attributions` (audit #8) both read the resolved mapping. An EMPTY `pattern_scans`
-  means "not declared" and keeps the membership inference — and its fail-closed over-demand —
-  byte-for-byte, so a legacy manifest is unaffected and omitting the field is never a way to weaken a
-  gate. `global_attributions` (the Q6 cross-graph namespace) and `bind_joins` are DELIBERATELY left
-  on membership: membership is the wider relation, which is the conservative-safe direction for both
-  (more non-bnode obligations demanded, no join accepted that a narrower mapping would reject);
-  narrowing them is a separate, security-critical change. Witnesses:
-  `crates/sparq-zk-compose/tests/e2e.rs::pattern_scans_*` — the honest two-scan same-layout manifest
-  (whose selected rows DO agree on the join variable, i.e. a real BGP answer) now verifies, claiming
-  the ungated reading is rejected both ways, the L-1 single-scan witness is still rejected under
-  every declaration a prover could write, and each of the four rejections above is pinned. Note the
-  structural gate does not itself check disclosed-row join equality (that lives on
-  `join_edges`/`bind_joins`), so the happy-path test witnesses the over-demand and its removal, not
-  join enforcement. NOT externally audited (sq-qhy4).
+  **Structural follow-up — the over-demand STANDS; the explicit pattern→scan mapping does NOT
+  relax it.** The fail-closed direction above is an over-demand. Take `{ ?x <age> ?v . ?x <age> ?c
+  FILTER(?v >= 18) }` — two same-layout patterns joined on `?x`, with the FILTER on `?v`, which
+  occurs only in pattern 0. An honest prover answering pattern 0 from `{alice age 25}` and pattern 1
+  from `{alice age 5}` presents a joined solution (`?x = alice`, `?v = 25`, `?c = 5`) satisfying the
+  FILTER — yet membership also matches the second scan to pattern 0 and demands a true-verdict
+  `?v >= 18` proof over its `5`, which no honest prover can supply, so the manifest is rejected.
+  (Note the *pre*-fix code could not serve that shape either — `find_map` gated the FIRST-matching
+  pattern's slot on EVERY matching scan.)
+
+  The obvious fix — let the prover DECLARE which scan answers which pattern and demand only the
+  declared scan's slots — was attempted and **rejected as unsound** in review. Ordinary SPARQL
+  evaluates each BGP pattern over EVERY compatible committed row, and the query text contains no
+  source partition authorising the prover to redefine membership. A prover free to exclude a
+  constant-compatible scan from a pattern can therefore drop that scan's rows out of the pattern's
+  FILTER and attribution obligations by fiat while still disclosing them; well-formedness rules on
+  the declaration (no empty entry, no dangling scan, no pair contradicting the bb-bound constants)
+  establish only that the declaration is a TOTAL map of scans to labels, never that an excluded scan
+  cannot contribute to the claimed result. Shifting the correct reading onto the consumer does not
+  prove the query result, so the flat verifier keeps FULL constant-membership obligations.
+
+  What DID land is the schema slot plus a fail-closed well-formedness gate, deliberately carrying no
+  verification weight. `ProofManifest::pattern_scans` records, per query BGP pattern (query order,
+  exactly like `attributions`), the `sub_proofs` indices of the scans the prover says answer it, and
+  `verifier::check_pattern_scans` rejects a declaration that is mis-sized
+  (`PatternScanArityMismatch`), leaves a pattern unanswered (`PatternScanUnbound`), names a sub-proof
+  that is out of range / not a scan / whose bb-bound `pattern_is_const`/`pattern_const_enc`
+  contradict the pattern's constants (`PatternScanMismatch`, audit #10), or leaves a scan DANGLING
+  (`PatternScanUndeclared`). Those are ADDITIONAL rejections: `bind_query_correctness` (FILTER
+  slots), `bind_attributions` (audit #8), `global_attributions` (the Q6 cross-graph namespace) and
+  `bind_joins` all resolve pattern→scan by `scan_matches_pattern` membership and never read the
+  field, so a manifest carrying a declaration is never accepted where the same manifest without one
+  is rejected — it can only fail additionally. An EMPTY `pattern_scans` means "not declared" and skips the checks; obligations are identical
+  either way.
+
+  **What narrowing would need before it can be revisited:** a claimed result row bound to the
+  selected scan rows, with all shared-variable joins enforced, so "this scan does not contribute to
+  the answer" is a VERIFIED property and not a prover assertion. The flat `ProofManifest` carries no
+  claimed result row, so it cannot express that witness today. Witnesses:
+  `crates/sparq-zk-compose/tests/e2e.rs::pattern_scans_*` — the same-layout manifest stays REJECTED
+  under every declaration a prover could write (including the intended one-scan-per-pattern
+  assignment and its cross), the cross-slot shape stays rejected when the declaration is engineered
+  to hide each scan's opposite failing slot, the L-1 single-scan witness stays rejected, and each of
+  the four well-formedness rejections is pinned. Both non-narrowing witnesses were mutation-checked:
+  making `bind_query_correctness` read `pattern_scans` turns them red. NOT externally audited
+  (sq-qhy4).
 - **M-1 / L-2** are already covered by **CR-G8 / sq-j506** and **CR-G9** respectively — no new bead
   (the auditor should weigh gating `DualLeafV1` out of production until sq-j506 is audited).
 
