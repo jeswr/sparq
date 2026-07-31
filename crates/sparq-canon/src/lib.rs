@@ -147,6 +147,16 @@ pub use rdf12::{
     issue_dataset_rdf12_with,
 };
 
+// **Opt-in (`concept` feature).** `urn:concept:` content-addressed record
+// verification — the multibase/multihash envelope plus the
+// recompute-and-byte-compare ingestion guard over this crate's RDFC-1.0 digest.
+// Documented entirely by its own `//!` module docs (which is also where its
+// intra-doc links must resolve): an outer doc comment here would be merged into
+// them and resolved in *this* module's scope instead, breaking every link to a
+// `concept`-module item under `cargo doc --all-features`.
+#[cfg(feature = "concept")]
+pub mod concept;
+
 /// The hash-function trait RDFC-1.0 is parameterized over (`digest::Digest`),
 /// re-exported so callers of [`canonicalize_quads_with`], [`digest_quads_with`],
 /// or [`issue_quads_with`] can name a hasher (e.g. `sha2::Sha256`,
