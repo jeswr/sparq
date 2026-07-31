@@ -42,9 +42,22 @@
 # hiccup on a PR head must never red a later gate evaluation on that same SHA). The
 # labels/comments it writes are exactly the fix lane's normal inputs.
 #
-# FLAKE-CLASSIFIED failures: an infra-flavoured dequeue reason (e.g. QUEUE_CLEARED,
-# ROLL_BACK) is noted in the comment but STILL routes to review:changes — the fix lane's
-# ci-flavour owns re-runs, so the routing is identical by design.
+# ── [OPUS-5] #4619: an infra dequeue must not name an exit the author cannot satisfy ──
+# `review:changes` means THE AUTHOR MUST CHANGE SOMETHING. After a queue/runner-owned
+# dequeue there is nothing to change. The case #4619 measured is PR #4331: dequeued
+# `CI_TIMEOUT` with the head unmoved, `review:pass` still head-bound, and `gate`
+# completed/success over 107 check-runs with zero non-passing. It sat indefinitely,
+# because the state it was routed to has no exit condition its author could satisfy and
+# nothing re-queued it. Latent at N=1 when it was found, not a live outage.
+#
+# So the classifier now decides OWNERSHIP from the reason FIRST. Code-flavoured reasons
+# (CHECKS_FAILED, MERGE_CONFLICT, CI_FAILURE, …) are unchanged — they really are the
+# author's. Queue/runner-flavoured ones (CI_TIMEOUT, ROLL_BACK) get `route=requeue`: the
+# machine-owned lane below, which keeps the verdict and re-arms, and is BOUNDED by the
+# PR's queue-attempt count so a genuinely-unmergeable PR cannot loop — when that budget
+# is spent the classifier returns `demote` and the author gets it after all.
+# QUEUE_CLEARED is deliberately excluded: clearing the queue is a human act, and
+# re-queueing what an operator just cleared would fight the operator.
 #
 # ── [OPUS-5] #4652: the ONE exception — a CI_TIMEOUT with ZERO check-suites ────────
 # A `CI_TIMEOUT` has two utterly different causes and until now both got the same
@@ -58,11 +71,13 @@
 #
 # The two are separated by the SUITE COUNT, never by the reason alone:
 # `scripts/merge-group-watchdog.py classify-dequeue` re-derives the live check-suite
-# count for the recorded group head and prints `route=preserve|demote`. FAIL-SAFE in
-# every direction — a missing marker, an unreadable count, a non-zero count, a stale
-# observation, or a crashed classifier all yield `demote`, i.e. today's behaviour. The
-# `if:` on the routing step below is written as `route != 'preserve'` so an EMPTY or
-# MISSING output (the classifier step failed, the output was lost) still demotes.
+# count for the recorded group head and prints `route=preserve|requeue|demote`
+# ([OPUS-5] #4619 added the third). FAIL-SAFE in every direction — a missing marker, an
+# unreadable count, a non-zero count, a stale observation, or a crashed classifier all
+# decline `preserve`, and a crashed classifier yields `demote`, i.e. today's behaviour.
+# The `if:` on the routing step below is written as `route != 'preserve' && route !=
+# 'requeue'` so an EMPTY or MISSING output (the classifier step failed, the output was
+# lost) still demotes.
 #
 # The same classifier also recognises the watchdog's OWN recovery: the watchdog
 # re-enqueues via dequeue+enqueue, which itself fires `pull_request.dequeued`, and
@@ -195,16 +210,61 @@ jobs:
             || echo "::warning::could not comment the zero-dispatch notification on PR #${PR_NUMBER} (routing is intact)."
           echo "PR #${PR_NUMBER}: zero-dispatch ${DEQUEUE_REASON} — verdict preserved."
 
-      # FAIL-SAFE `if:` — written as `!= 'preserve'` so an EMPTY or MISSING classifier
-      # output (step failed, output lost) still routes to the fix lane exactly as it did
-      # before #4652. Never invert this to `== 'demote'`.
+      # [OPUS-5] #4619. The MACHINE-OWNED lane for a queue/runner dequeue. Same shape as
+      # the preserve route above — the verdict stays where it is, no label is touched,
+      # the arm is restored — because the two differ only in the CLAIM being made: this
+      # one does not assert the merge_group event was never dispatched, only that the
+      # reason is not the author's and the head's required `gate` is green. The loop
+      # bound lives in the classifier (queue attempts since the verdict was granted), so
+      # by the time this step runs, re-arming is already the decided outcome.
+      - name: Re-queue the infra-flavoured dequeue (machine-owned)
+        # Deliberately NOT `!cancelled()`, for the same reason as the preserve step: a
+        # machine lane may only be entered on a POSITIVE verdict from a step that
+        # actually succeeded. The implicit `success()` is correct here.
+        if: github.event.pull_request.merged != true && steps.classify.outputs.route == 'requeue'
+        env:
+          CLASSIFY_DETAIL: ${{ steps.classify.outputs.detail }}
+        run: |
+          set -euo pipefail
+
+          STATE=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state -q .state)
+          if [ "$STATE" != "OPEN" ]; then
+            echo "PR #${PR_NUMBER} is ${STATE} — nothing to re-queue; exiting 0."
+            exit 0
+          fi
+
+          # THE MACHINE EXIT. rearm-sweeper.yml is the durable backstop if this direct
+          # re-arm fails, because a PR carrying review:pass with no live arm is exactly
+          # the population that sweep restores.
+          gh pr merge "$PR_NUMBER" --repo "$REPO" --auto \
+            || echo "::warning::re-arm of PR #${PR_NUMBER} returned non-zero — rearm-sweeper.yml is the backstop."
+
+          body_file=$(mktemp)
+          {
+            printf '%s\n\n' "> 🤖 SPARQ agent — merge-queue feedback."
+            printf '%s\n\n' "This PR was dequeued with a **queue/runner-owned** reason (\`${DEQUEUE_REASON}\`) — nothing in this PR's diff is at fault, and its required \`gate\` is still green on the unchanged head, so there is nothing for the author to change (sparq-org/sparq#4619)."
+            printf '%s\n\n' "**Its review verdict is kept and it has been re-queued** rather than demoted to \`review:changes\`, which would name an exit condition nobody could satisfy. The re-queue is bounded: once this tree's queue-attempt budget is spent, a further infra dequeue routes to \`review:changes\` for a human look."
+            printf '%s\n' "Classifier: \`${CLASSIFY_DETAIL}\`"
+          } > "$body_file"
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "$body_file" \
+            || echo "::warning::could not comment the re-queue notification on PR #${PR_NUMBER} (routing is intact)."
+          echo "PR #${PR_NUMBER}: infra dequeue ${DEQUEUE_REASON} — verdict kept, re-queued."
+
+      # FAIL-SAFE `if:` — written as a pair of `!=` tests so an EMPTY or MISSING
+      # classifier output (step failed, output lost) still routes to the fix lane exactly
+      # as it did before #4652/#4619. Never invert either to `== 'demote'`.
       - name: Route genuine dequeue to the fix lane
         # `!cancelled() &&` is LOAD-BEARING. A step `if:` with no status function
         # defaults to `success()`, so a FAILED or TIMED-OUT classify step would SKIP
         # this one — keeping `review:pass` and leaving the arm enabled, i.e. the exact
         # opposite of fail-closed. The empty-output case was handled; the failed-step
         # case was not, and a string-matching test could not see the difference.
-        if: "!cancelled() && github.event.pull_request.merged != true && steps.classify.outputs.route != 'preserve'"
+        if: "!cancelled() && github.event.pull_request.merged != true && steps.classify.outputs.route != 'preserve' && steps.classify.outputs.route != 'requeue'"
+        env:
+          # Read-only, and only ever printed into the notification body — never
+          # interpolated into a command. Empty when the classify step failed outright,
+          # which is exactly the fail-safe case this step exists to cover.
+          CLASSIFY_DETAIL: ${{ steps.classify.outputs.detail }}
         run: |
           set -euo pipefail
 
@@ -308,12 +368,21 @@ jobs:
             run_lines="The failed merge-group run was not discoverable from the Actions API at notification time (no non-success \`merge_group\` run recorded for \`gh-readonly-queue/*/pr-${PR_NUMBER}-*\`) — check this PR's checks tab for the queue history."
           fi
 
-          # Infra-flake note: a timeout/queue-side reason is flagged, but the routing
-          # is deliberately IDENTICAL — the fix lane's ci-flavour handles re-runs.
+          # [OPUS-5] #4619. Reaching THIS step with a queue/infra-flavoured reason means
+          # the machine-owned re-queue lane did not take it — the attempt budget is
+          # spent, the head's `gate` is not green, the verdict is no longer for this
+          # tree, the reason is outside INFRA_DEQUEUE_REASONS, or the classifier itself
+          # failed. Say so by carrying the classifier's own detail rather than asserting
+          # a specific cause; the old note claimed "the fix lane's ci-flavour owns
+          # re-runs", which named no exit condition the author could act on at all.
+          detail_note=""
+          if [ -n "${CLASSIFY_DETAIL:-}" ]; then
+            detail_note=" — classifier: \`${CLASSIFY_DETAIL}\`"
+          fi
           flake_note=""
           case "$DEQUEUE_REASON" in
             CI_TIMEOUT|QUEUE_CLEARED|ROLL_BACK)
-              flake_note=$'\n'"Reason \`${DEQUEUE_REASON}\` is queue/infra-flavoured (likely not a fault in this PR's diff); it is still routed to \`review:changes\` because the fix lane's ci-flavour owns re-runs."
+              flake_note=$'\n'"Reason \`${DEQUEUE_REASON}\` is queue/infra-flavoured (likely not a fault in this PR's diff), and the machine re-queue lane (sparq-org/sparq#4619) did not take it${detail_note}, so a human look is warranted."
               ;;
           esac
 

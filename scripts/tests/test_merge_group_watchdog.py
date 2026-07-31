@@ -106,6 +106,10 @@ class _NoNetwork:
 BASE = "3cc1bf828c1335577069f5fa65d832c0ae1c8c38"
 HEAD = "1bfb0174f5cc2da1ed9dfe7997b7ab089e7cab26"
 REF = f"gh-readonly-queue/main/pr-99900001-{BASE}"
+# The PR's OWN head, distinct from the merge-group head above: the #4619 re-verification
+# reads `gate` on the PR head, and a fake that answered both from one sha could not tell
+# a wrong-sha lookup from a right one.
+PR_HEAD = "f44083c7a4f5d0b1e2c3a49586b7c8d9e0f1a2b3"
 BUILT = mgw.parse_iso("2026-07-27T23:04:37Z")  # measured branch_creation timestamp
 NOW = mgw.parse_iso("2026-07-27T23:20:00Z")
 
@@ -299,7 +303,7 @@ class TestCapAndIdempotence(unittest.TestCase):
 
 
 class TestDequeueRouting(unittest.TestCase):
-    """Both arms of the CI_TIMEOUT split, keyed on the suite count."""
+    """The three routes: the zero-dispatch preserve, the bounded re-queue, the demote."""
 
     @staticmethod
     def verdict(**overrides) -> "mgw.VerdictState":
@@ -307,6 +311,7 @@ class TestDequeueRouting(unittest.TestCase):
             review_pass_at=NOW - timedelta(hours=2),
             head_moved_at=NOW - timedelta(hours=3),
             last_enqueued_at=NOW - timedelta(hours=1),
+            queue_attempts_since_verdict=1,
         )
         fields.update(overrides)
         return mgw.VerdictState(**fields)
@@ -318,6 +323,7 @@ class TestDequeueRouting(unittest.TestCase):
             markers=(marker(),),
             verdict=self.verdict(),
             live_suites=lambda _sha: 0,
+            head_gate=lambda: mgw.GATE_SUCCESS,
             now=NOW + timedelta(minutes=40),
         )
         kwargs.update(overrides)
@@ -328,35 +334,49 @@ class TestDequeueRouting(unittest.TestCase):
         self.assertEqual(result.route, mgw.ROUTE_PRESERVE)
         self.assertTrue(result.reenqueue)
 
-    def test_arm_b_ci_timeout_with_suites_present_still_demotes(self):
-        # The legitimate signal: checks genuinely ran and ran long. Keep demoting.
-        self.assertEqual(self.route(live_suites=lambda _s: 8).route, mgw.ROUTE_DEMOTE)
-        self.assertEqual(self.route(live_suites=lambda _s: 1).route, mgw.ROUTE_DEMOTE)
+    def test_arm_b_ci_timeout_with_suites_present_re_queues_not_demotes(self):
+        # #4619. Checks genuinely ran, so the ZERO-DISPATCH claim cannot be made — but a
+        # CI_TIMEOUT is still not something the author can change, so it must not land on
+        # `review:changes`. It takes the bounded machine lane instead. This is the exact
+        # shape of #4331.
+        for suites in (8, 1):
+            result = self.route(live_suites=lambda _s, n=suites: n)
+            self.assertEqual(result.route, mgw.ROUTE_REQUEUE, suites)
+            self.assertTrue(result.reenqueue)
+            # ...and the stronger claim's decline is still reported, not swallowed.
+            self.assertIn("check-suite(s)", result.detail)
 
-    def test_the_split_is_the_suite_count_not_the_reason(self):
-        # Same reason, opposite outcome, purely because the suite count differs.
+    def test_the_preserve_split_is_the_suite_count_not_the_reason(self):
+        # Same reason, different ROUTE, purely because the suite count differs: only the
+        # zero-suite case may claim the merge_group event was never dispatched.
         zero = self.route(reason="CI_TIMEOUT", live_suites=lambda _s: 0)
         many = self.route(reason="CI_TIMEOUT", live_suites=lambda _s: 8)
         self.assertEqual(zero.route, mgw.ROUTE_PRESERVE)
-        self.assertEqual(many.route, mgw.ROUTE_DEMOTE)
+        self.assertEqual(many.route, mgw.ROUTE_REQUEUE)
+        # Neither is the author's problem, which is the whole point of #4619.
+        self.assertNotEqual(zero.route, mgw.ROUTE_DEMOTE)
+        self.assertNotEqual(many.route, mgw.ROUTE_DEMOTE)
 
-    def test_unreadable_suite_count_demotes(self):
+    def test_unreadable_suite_count_declines_the_preserve(self):
         result = self.route(live_suites=lambda _s: None)
-        self.assertEqual(result.route, mgw.ROUTE_DEMOTE)
+        # It may not PRESERVE — that claim needs a positively-read zero.
+        self.assertNotEqual(result.route, mgw.ROUTE_PRESERVE)
         # "could not read it" and "it was 8" are the same ROUTE but different
         # operational facts, and the emitted row is the only place an operator sees
         # which one happened. Deleting the `count is None` arm would fall through to
-        # `count != 0` and still demote — behaviourally equivalent, diagnostically
+        # `count != 0` and still decline — behaviourally equivalent, diagnostically
         # blind — so the distinction is asserted explicitly rather than left to a
         # mutant that "survives" by being invisible.
         self.assertIn("could not re-derive", result.detail)
         self.assertNotIn("check-suite(s)", result.detail)
 
     def test_a_marker_for_a_different_pr_is_ignored(self):
-        self.assertEqual(self.route(pr_number=99900099).route, mgw.ROUTE_DEMOTE)
+        # No trusted observation about THIS PR, so no preserve. (The infra lane still
+        # applies — it never reads a marker at all.)
+        self.assertNotEqual(self.route(pr_number=99900099).route, mgw.ROUTE_PRESERVE)
 
-    def test_no_marker_demotes(self):
-        self.assertEqual(self.route(markers=()).route, mgw.ROUTE_DEMOTE)
+    def test_no_marker_declines_the_preserve(self):
+        self.assertNotEqual(self.route(markers=()).route, mgw.ROUTE_PRESERVE)
 
     def test_the_newest_marker_wins(self):
         # A PR can accumulate several observations across queue attempts. The route
@@ -376,16 +396,17 @@ class TestDequeueRouting(unittest.TestCase):
             self.assertEqual(result.route, mgw.ROUTE_PRESERVE)
             self.assertEqual(seen, [HEAD], order)
 
-    def test_marker_predating_this_queue_attempt_demotes(self):
-        self.assertEqual(
-            self.route(verdict=self.verdict(last_enqueued_at=NOW + timedelta(minutes=1))).route,
-            mgw.ROUTE_DEMOTE,
+    def test_marker_predating_this_queue_attempt_declines_the_preserve(self):
+        result = self.route(
+            verdict=self.verdict(last_enqueued_at=NOW + timedelta(minutes=1))
         )
+        self.assertNotEqual(result.route, mgw.ROUTE_PRESERVE)
+        self.assertIn("predates this queue attempt", result.detail)
 
-    def test_missing_enqueue_event_demotes(self):
-        self.assertEqual(
-            self.route(verdict=self.verdict(last_enqueued_at=None)).route, mgw.ROUTE_DEMOTE
-        )
+    def test_missing_enqueue_event_declines_the_preserve(self):
+        result = self.route(verdict=self.verdict(last_enqueued_at=None))
+        self.assertNotEqual(result.route, mgw.ROUTE_PRESERVE)
+        self.assertIn("no added_to_merge_queue timeline event", result.detail)
 
     # ── the verdict may only survive a dequeue for the tree it was granted for ──
     def test_arm_1_an_infrastructure_dequeue_leaves_the_verdict_intact(self):
@@ -495,13 +516,20 @@ class TestDequeueRouting(unittest.TestCase):
         )
         self.assertEqual(self.route(verdict=regranted).route, mgw.ROUTE_PRESERVE)
 
-    def test_stale_marker_demotes(self):
-        self.assertEqual(self.route(now=NOW + timedelta(hours=7)).route, mgw.ROUTE_DEMOTE)
+    def test_stale_marker_declines_the_preserve(self):
+        result = self.route(now=NOW + timedelta(hours=7))
+        self.assertNotEqual(result.route, mgw.ROUTE_PRESERVE)
+        self.assertIn("freshness bound", result.detail)
 
-    def test_other_reasons_keep_todays_behaviour(self):
-        for reason in ("CI_FAILURE", "MERGE_CONFLICT", "QUEUE_CLEARED", "ROLL_BACK",
-                       "BRANCH_PROTECTIONS", "ALREADY_MERGED"):
-            self.assertEqual(self.route(reason=reason).route, mgw.ROUTE_DEMOTE, reason)
+    def test_author_owned_reasons_keep_todays_behaviour(self):
+        # THE CONTROL DIRECTION of #4619. A reason the author CAN act on must still land
+        # on `review:changes`, and must be decided before any evidence is read — no
+        # marker, gate or budget may carry it into a machine lane.
+        for reason in ("CI_FAILURE", "CHECKS_FAILED", "MERGE_CONFLICT", "QUEUE_CLEARED",
+                       "BRANCH_PROTECTIONS", "ALREADY_MERGED", "INVALID_MERGE_COMMIT"):
+            result = self.route(reason=reason)
+            self.assertEqual(result.route, mgw.ROUTE_DEMOTE, reason)
+            self.assertIn("author-owned", result.detail, reason)
 
     def test_watchdogs_own_dequeue_preserves_without_a_second_reenqueue(self):
         result = self.route(reason="MANUAL", now=NOW + timedelta(seconds=30))
@@ -526,6 +554,188 @@ class TestDequeueRouting(unittest.TestCase):
         self.assertEqual(self.route(reason=" ci_timeout ").route, mgw.ROUTE_PRESERVE)
         self.assertEqual(self.route(reason="").route, mgw.ROUTE_DEMOTE)
         self.assertEqual(self.route(reason=None).route, mgw.ROUTE_DEMOTE)
+
+
+class TestInfraDequeueHasAMachineExit(unittest.TestCase):
+    """#4619 — `review:changes` must never name an exit its author cannot satisfy.
+
+    BOTH DIRECTIONS, or the guard is half a guard: an infra-flavoured dequeue must NOT
+    land on `review:changes`, and a code-flavoured one must still land there.
+
+    Every case here runs with `live_suites=8` — checks genuinely ran — because that is
+    the population #4652's zero-dispatch split deliberately leaves demoted and #4619 is
+    about. `route()`/`verdict()` are BORROWED from the suite above rather than copied so
+    the two fixtures cannot drift; they are re-bound rather than INHERITED so that
+    suite's own cases are not silently executed a second time under this name.
+    """
+
+    verdict = staticmethod(TestDequeueRouting.verdict)
+    route = TestDequeueRouting.route
+
+    def infra(self, **overrides) -> "mgw.Route":
+        kwargs = dict(reason="CI_TIMEOUT", live_suites=lambda _s: 8)
+        kwargs.update(overrides)
+        return self.route(**kwargs)
+
+    # ── direction 1: an infra dequeue does NOT land on review:changes ──────────────
+    def test_the_4331_shape_does_not_route_to_review_changes(self):
+        # #4331 exactly: CI_TIMEOUT, head unmoved, verdict head-bound, gate green.
+        result = self.infra()
+        self.assertNotEqual(result.route, mgw.ROUTE_DEMOTE)
+        self.assertEqual(result.route, mgw.ROUTE_REQUEUE)
+        # The machine exit itself: something must put it back in the queue.
+        self.assertTrue(result.reenqueue)
+
+    def test_roll_back_is_a_siblings_failure_not_this_prs(self):
+        self.assertEqual(self.infra(reason="ROLL_BACK").route, mgw.ROUTE_REQUEUE)
+
+    # ── direction 2: a code-flavoured dequeue still does ───────────────────────────
+    def test_a_code_flavoured_dequeue_still_routes_to_review_changes(self):
+        # THE CONTROL. Without this the change is a routing hole: every dequeue would
+        # keep its verdict and re-arm, which is far worse than the bug being fixed.
+        for reason in ("CHECKS_FAILED", "MERGE_CONFLICT", "CI_FAILURE"):
+            self.assertEqual(self.infra(reason=reason).route, mgw.ROUTE_DEMOTE, reason)
+
+    def test_queue_cleared_is_a_human_act_and_is_not_re_queued(self):
+        # An operator who clears the queue must not be fought by a bot that re-queues
+        # what they just removed. Stated separately from the code-flavoured control so
+        # adding it to INFRA_DEQUEUE_REASONS cannot pass silently.
+        self.assertNotIn("QUEUE_CLEARED", mgw.INFRA_DEQUEUE_REASONS)
+        self.assertEqual(self.infra(reason="QUEUE_CLEARED").route, mgw.ROUTE_DEMOTE)
+
+    # ── the bound: a genuinely-failing PR cannot loop ──────────────────────────────
+    def test_the_re_queue_is_bounded_by_the_queue_attempt_count(self):
+        cap = mgw.DEFAULT_MAX_QUEUE_ATTEMPTS
+        for attempts in range(1, cap):
+            self.assertEqual(
+                self.infra(verdict=self.verdict(queue_attempts_since_verdict=attempts)).route,
+                mgw.ROUTE_REQUEUE,
+                attempts,
+            )
+        for attempts in (cap, cap + 1, cap + 9):
+            result = self.infra(
+                verdict=self.verdict(queue_attempts_since_verdict=attempts)
+            )
+            self.assertEqual(result.route, mgw.ROUTE_DEMOTE, attempts)
+            self.assertIn("budget is exhausted", result.detail)
+
+    def test_an_unestablishable_attempt_count_is_not_zero_attempts(self):
+        # An unbounded lane is not a lane. Treating an unreadable timeline as "no
+        # attempts yet" would remove the only thing stopping the loop.
+        result = self.infra(verdict=self.verdict(queue_attempts_since_verdict=None))
+        self.assertEqual(result.route, mgw.ROUTE_DEMOTE)
+        self.assertIn("could not be established", result.detail)
+
+    # ── the re-verification: proof there is nothing to change ──────────────────────
+    def test_the_head_gate_must_be_green_at_the_unchanged_head(self):
+        for gate in (mgw.GATE_FAILURE, mgw.GATE_PENDING, mgw.GATE_MISSING,
+                     mgw.GATE_UNKNOWN):
+            result = self.infra(head_gate=lambda g=gate: g)
+            self.assertEqual(result.route, mgw.ROUTE_DEMOTE, gate)
+            self.assertIn(gate, result.detail, gate)
+
+    def test_the_gate_read_is_only_paid_on_the_arm_that_needs_it(self):
+        # A THUNK, not a value: the classifier must not spend two API reads on every
+        # code-flavoured dequeue, which is the overwhelming majority.
+        calls: list[int] = []
+
+        def gate():
+            calls.append(1)
+            return mgw.GATE_SUCCESS
+
+        self.infra(reason="MERGE_CONFLICT", head_gate=gate)
+        self.assertEqual(calls, [])
+        self.infra(head_gate=gate)
+        self.assertEqual(calls, [1])
+
+    # ── the verdict precondition still binds every machine lane ────────────────────
+    def test_a_moved_head_forfeits_the_re_queue_too(self):
+        # Never re-arm a verdict onto a tree it was not granted for — the re-queue lane
+        # is a machine lane, not an exemption from the precondition.
+        result = self.infra(verdict=self.verdict(head_moved_at=NOW - timedelta(minutes=1)))
+        self.assertEqual(result.route, mgw.ROUTE_DEMOTE)
+        self.assertIn("the head moved", result.detail)
+
+    def test_no_verdict_means_no_re_queue(self):
+        self.assertEqual(
+            self.infra(verdict=self.verdict(review_pass_at=None)).route, mgw.ROUTE_DEMOTE
+        )
+
+    def test_manual_never_reaches_the_re_queue_lane(self):
+        # MANUAL is a human withdrawal unless a fresh watchdog marker proves otherwise.
+        # It must never fall through into the infra lane, which reads no marker at all.
+        self.assertNotIn("MANUAL", mgw.INFRA_DEQUEUE_REASONS)
+        self.assertEqual(
+            self.infra(reason="MANUAL", markers=()).route, mgw.ROUTE_DEMOTE
+        )
+        self.assertEqual(
+            self.infra(reason="MANUAL", now=NOW + timedelta(hours=2)).route,
+            mgw.ROUTE_DEMOTE,
+        )
+
+
+class TestHeadGateResolution(unittest.TestCase):
+    """The `gate` re-verification #4619 requires. Fail-safe in every direction."""
+
+    @staticmethod
+    def payload(rows, total=None):
+        return {"total_count": len(rows) if total is None else total, "check_runs": rows}
+
+    @staticmethod
+    def check(name="gate", status="completed", conclusion="success",
+              started="2026-07-27T23:00:00Z", ident=1):
+        # NOT named `run`: `TestCase.run` is what unittest calls to execute the test,
+        # so a helper by that name silently breaks the whole class.
+        return {"name": name, "status": status, "conclusion": conclusion,
+                "started_at": started, "id": ident}
+
+    def test_green_gate_reads_success(self):
+        self.assertEqual(
+            mgw.resolve_head_gate(self.payload([self.check()])), mgw.GATE_SUCCESS
+        )
+
+    def test_newest_run_wins_over_a_cancelled_twin(self):
+        # GitHub leaves the cancelled twin of a superseded run on the head beside the
+        # run that replaced it; "any cancelled row" would mask a green newest.
+        rows = [
+            self.check(conclusion="cancelled", started="2026-07-27T22:00:00Z", ident=1),
+            self.check(conclusion="success", started="2026-07-27T23:00:00Z", ident=2),
+        ]
+        for order in (rows, list(reversed(rows))):
+            self.assertEqual(mgw.resolve_head_gate(self.payload(order)), mgw.GATE_SUCCESS)
+
+    def test_a_red_or_pending_gate_is_never_success(self):
+        self.assertEqual(
+            mgw.resolve_head_gate(self.payload([self.check(conclusion="failure")])),
+            mgw.GATE_FAILURE,
+        )
+        self.assertEqual(
+            mgw.resolve_head_gate(self.payload([self.check(conclusion="timed_out")])),
+            mgw.GATE_FAILURE,
+        )
+        self.assertEqual(
+            mgw.resolve_head_gate(self.payload([self.check(status="in_progress", conclusion=None)])),
+            mgw.GATE_PENDING,
+        )
+
+    def test_a_short_read_is_unknown_never_missing(self):
+        # An unpaginated/truncated response must not be reported as "there is no gate".
+        self.assertEqual(mgw.resolve_head_gate(self.payload([], total=7)), mgw.GATE_UNKNOWN)
+        self.assertEqual(mgw.resolve_head_gate(self.payload([])), mgw.GATE_MISSING)
+
+    def test_the_draft_tier_name_cannot_stand_in_for_the_ready_one(self):
+        # `gate` is a strict PREFIX of `gate, draft-tier`, so a prefix test would
+        # resolve the wrong tier's verdict. A draft cannot be in the merge queue.
+        self.assertEqual(
+            mgw.resolve_head_gate(self.payload([self.check(name="gate, draft-tier")])),
+            mgw.GATE_MISSING,
+        )
+
+    def test_a_malformed_payload_is_unknown(self):
+        for bad in ("not-a-payload", [], {"total_count": 1}, {"check_runs": []},
+                    {"total_count": True, "check_runs": []},
+                    {"total_count": 0, "check_runs": "nope"}):
+            self.assertEqual(mgw.resolve_head_gate(bad), mgw.GATE_UNKNOWN, bad)
 
 
 class TestMarkerCodec(unittest.TestCase):
@@ -633,6 +843,14 @@ class ScriptedGh:
         # Every group head the fake knows about; anything else 404s, so a lookup
         # against the wrong sha cannot silently succeed.
         self.known_shas: set[str] = {HEAD}
+        # #4619: the PR's own head and the `gate` check-runs on it. Keyed by sha for the
+        # same reason as /check-suites — a fake that answers every URL identically
+        # cannot catch a lookup against the group head instead of the PR head.
+        self.pr_head_oid: str = PR_HEAD
+        self.gate_runs: list[dict] = [
+            {"name": "gate", "status": "completed", "conclusion": "success",
+             "started_at": "2026-07-27T23:10:00Z", "id": 1}
+        ]
 
     def __call__(self, argv: list[str]) -> str:
         self.calls.append(argv)
@@ -665,6 +883,16 @@ class ScriptedGh:
                  "body": argv[argv.index("--body") + 1]}
             )
             return ""
+        if argv[:2] == ["pr", "view"]:
+            return self.pr_head_oid + "\n"
+        if "/check-runs" in joined:
+            path = next(a for a in argv if "/check-runs" in a)
+            sha = path.split("/commits/", 1)[1].split("/", 1)[0]
+            if sha != self.pr_head_oid:
+                raise mgw.GhError(f"gh api: HTTP 404 — no such commit {sha}")
+            return json.dumps(
+                {"total_count": len(self.gate_runs), "check_runs": self.gate_runs}
+            )
         if "/check-suites" in joined:
             # SHA-KEYED on purpose. A fake that answers every /check-suites URL with
             # the same payload cannot tell the group HEAD from its BASE (or from
@@ -975,8 +1203,17 @@ class TestMarkerAuthorIsPartOfThePredicate(unittest.TestCase):
             suites=0, comments=[_marker_comment(author=ATTACKER)]
         )
         route = harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT")
-        self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
-        self.assertFalse(route.reenqueue)
+        self.assertNotEqual(route.route, mgw.ROUTE_PRESERVE)
+        # THE PROPERTY THAT ACTUALLY MATTERS, and it survives #4619 adding a second
+        # re-arming route: the forgery must buy the attacker NOTHING. The re-queue lane
+        # reads no marker at all — it is decided by the platform's dequeue reason, the
+        # maintainer's live head-bound verdict, the head's own `gate` and the attempt
+        # budget, none of which a PR commenter can influence — so the route is the same
+        # with the forged comment as without it.
+        clean = FakeWatchdog.build(suites=0, comments=[])
+        self.assertEqual(
+            route.route, clean.watchdog.classify_dequeue(99900001, "CI_TIMEOUT").route
+        )
 
     def test_forged_zero_sha_head_is_ignored(self):
         harness = FakeWatchdog.build(
@@ -1208,8 +1445,14 @@ class TestMarkerIsBoundToThisPrAndHead(unittest.TestCase):
             "/pr-99900001-", "/pr-9999-"
         )
         harness = FakeWatchdog.build(suites=0, comments=[other])
+        # It may not carry the ZERO-DISPATCH claim, which is the only route a marker
+        # unlocks. (The bounded re-queue lane reads no marker, so it is unaffected.)
+        self.assertNotEqual(
+            harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT").route,
+            mgw.ROUTE_PRESERVE,
+        )
         self.assertEqual(
-            harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT").route, mgw.ROUTE_DEMOTE
+            harness.watchdog.classify_dequeue(99900001, "MANUAL").route, mgw.ROUTE_DEMOTE
         )
 
     def test_pr_and_ref_must_agree(self):
@@ -1227,8 +1470,12 @@ class TestMarkerIsBoundToThisPrAndHead(unittest.TestCase):
             suites=0, comments=[{"user": {"login": TRUSTED_AUTHOR}, "body": body}]
         )
         route = harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT")
-        self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
+        self.assertNotEqual(route.route, mgw.ROUTE_PRESERVE)
         self.assertIn("action", route.detail)
+        # ...and on the arm where a marker is the ONLY evidence, it demotes outright.
+        self.assertEqual(
+            harness.watchdog.classify_dequeue(99900001, "MANUAL").route, mgw.ROUTE_DEMOTE
+        )
 
 
 class TestCapExhaustionBehaviour(unittest.TestCase):
@@ -1237,12 +1484,16 @@ class TestCapExhaustionBehaviour(unittest.TestCase):
     Recovery is marker -> dequeue -> enqueue, so the marker is always ~30 s OLDER than
     the `added_to_merge_queue` it produces. On the next attempt the newest trusted
     marker therefore predates that attempt, the queue-attempt binding refuses it, and
-    the platform CI_TIMEOUT DEMOTES. That is correct — the only trusted observation
-    names a superseded head — but it is the opposite of what four separate comments
-    used to claim.
+    the ZERO-DISPATCH PRESERVE is not available. That is correct — the only trusted
+    observation names a superseded head — but it is the opposite of what four separate
+    comments used to claim.
+
+    [OPUS-5] #4619 amends only the DESTINATION, never this binding: the preserve is
+    still refused, and the dequeue now falls to the bounded re-queue lane until the
+    queue-attempt budget is spent, at which point it demotes as it always did.
     """
 
-    def test_after_exhaustion_a_ci_timeout_demotes(self):
+    def test_after_exhaustion_the_zero_dispatch_preserve_is_refused(self):
         harness = FakeWatchdog.build(
             suites=0,
             comments=[_marker_comment(observed=NOW - timedelta(minutes=20))],
@@ -1254,8 +1505,27 @@ class TestCapExhaustionBehaviour(unittest.TestCase):
             ],
         )
         route = harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT")
-        self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
+        self.assertNotEqual(route.route, mgw.ROUTE_PRESERVE)
         self.assertIn("predates this queue attempt", route.detail)
+
+    def test_exhausting_the_queue_attempt_budget_reaches_the_author(self):
+        # The terminal state after #4619: once the tree has burned its queue attempts,
+        # a further CI_TIMEOUT really does land on review:changes. Without this the
+        # re-queue lane would have no floor.
+        harness = FakeWatchdog.build(
+            suites=0,
+            comments=[_marker_comment(observed=NOW - timedelta(minutes=20))],
+            timeline=[
+                {"event": "labeled", "created_at": "2026-07-27T22:20:00Z",
+                 "label": {"name": "review:pass"}},
+                {"event": "added_to_merge_queue", "created_at": "2026-07-27T22:30:00Z"},
+                {"event": "added_to_merge_queue", "created_at": "2026-07-27T22:50:00Z"},
+                {"event": "added_to_merge_queue", "created_at": "2026-07-27T23:15:00Z"},
+            ],
+        )
+        route = harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT")
+        self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
+        self.assertIn("budget is exhausted", route.detail)
 
     def test_the_cap_row_does_not_claim_the_verdict_is_preserved(self):
         row = decide(recoveries_in_window=2)
@@ -1398,11 +1668,70 @@ class TestTheWatchdogIsNotSilentByDefault(unittest.TestCase):
 
 class TestClassifyEndToEnd(unittest.TestCase):
     def test_live_suite_count_is_re_derived_not_read_off_the_marker(self):
-        # The marker says suites=0, but the LIVE count now reads 8. The route must
-        # follow the live re-derivation, not the recorded value.
+        # The marker says suites=0, but the LIVE count now reads 8. The zero-dispatch
+        # PRESERVE must follow the live re-derivation, not the recorded value.
         harness = FakeWatchdog.build(suites=8, comments=[_marker_comment()])
         route = harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT")
+        self.assertNotEqual(route.route, mgw.ROUTE_PRESERVE)
+        self.assertIn("check-suite(s)", route.detail)
+
+    def test_a_timeout_after_real_checks_takes_the_bounded_requeue_lane(self):
+        # #4619 end to end, through the real timeline parser and the real gate read:
+        # checks ran, so no preserve — but the author has nothing to change, so it must
+        # not be demoted to review:changes either.
+        harness = FakeWatchdog.build(suites=8, comments=[_marker_comment()])
+        route = harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT")
+        self.assertEqual(route.route, mgw.ROUTE_REQUEUE)
+        self.assertTrue(route.reenqueue)
+        # The gate was read on the PR's OWN head, not the merge-group head.
+        gate_reads = [c for c in harness.gh.calls if any("/check-runs" in a for a in c)]
+        self.assertTrue(gate_reads, harness.gh.calls)
+        self.assertTrue(any(PR_HEAD in a for a in gate_reads[0]), gate_reads[0])
+
+    def test_a_red_head_gate_hands_the_timeout_back_to_the_author(self):
+        harness = FakeWatchdog.build(suites=8, comments=[_marker_comment()])
+        harness.gh.gate_runs = [
+            {"name": "gate", "status": "completed", "conclusion": "failure",
+             "started_at": "2026-07-27T23:10:00Z", "id": 1}
+        ]
+        route = harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT")
         self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
+
+    def test_the_attempt_budget_is_counted_off_the_real_timeline(self):
+        # Three added_to_merge_queue events since the grant exhausts the budget, so the
+        # PR is handed to a human rather than looping. Exercises verdict_state()'s
+        # counter, not a hand-built VerdictState.
+        harness = FakeWatchdog.build(
+            suites=8,
+            comments=[_marker_comment()],
+            timeline=[
+                {"event": "labeled", "created_at": "2026-07-27T22:20:00Z",
+                 "label": {"name": "review:pass"}},
+                {"event": "added_to_merge_queue", "created_at": "2026-07-27T22:30:00Z"},
+                {"event": "added_to_merge_queue", "created_at": "2026-07-27T22:45:00Z"},
+                {"event": "added_to_merge_queue", "created_at": "2026-07-27T22:58:53Z"},
+            ],
+        )
+        route = harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT")
+        self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
+        self.assertIn("budget is exhausted", route.detail)
+        # ...and an enqueue that PREDATES the grant does not consume that budget: the
+        # tree being queued then was a different one.
+        fresh = FakeWatchdog.build(
+            suites=8,
+            comments=[_marker_comment()],
+            timeline=[
+                {"event": "added_to_merge_queue", "created_at": "2026-07-27T21:00:00Z"},
+                {"event": "added_to_merge_queue", "created_at": "2026-07-27T21:30:00Z"},
+                {"event": "labeled", "created_at": "2026-07-27T22:20:00Z",
+                 "label": {"name": "review:pass"}},
+                {"event": "added_to_merge_queue", "created_at": "2026-07-27T22:58:53Z"},
+            ],
+        )
+        self.assertEqual(
+            fresh.watchdog.classify_dequeue(99900001, "CI_TIMEOUT").route,
+            mgw.ROUTE_REQUEUE,
+        )
 
     def test_zero_live_count_preserves(self):
         harness = FakeWatchdog.build(suites=0, comments=[_marker_comment()])
@@ -1425,7 +1754,7 @@ class TestClassifyEndToEnd(unittest.TestCase):
             ],
         )
         route = harness.watchdog.classify_dequeue(99900001, "CI_TIMEOUT")
-        self.assertEqual(route.route, mgw.ROUTE_DEMOTE)
+        self.assertNotEqual(route.route, mgw.ROUTE_PRESERVE)
         self.assertIn("predates this queue attempt", route.detail)
 
     def test_a_marker_after_the_latest_enqueue_still_binds(self):
@@ -2125,11 +2454,16 @@ class TestFeedbackWiring(unittest.TestCase):
     # deliberate change must update this line.
     DEMOTE_GUARD = (
         "!cancelled() && github.event.pull_request.merged != true "
-        "&& steps.classify.outputs.route != 'preserve'"
+        "&& steps.classify.outputs.route != 'preserve' "
+        "&& steps.classify.outputs.route != 'requeue'"
     )
     PRESERVE_GUARD = (
         "github.event.pull_request.merged != true "
         "&& steps.classify.outputs.route == 'preserve'"
+    )
+    REQUEUE_GUARD = (
+        "github.event.pull_request.merged != true "
+        "&& steps.classify.outputs.route == 'requeue'"
     )
 
     def test_the_demote_guard_is_fail_closed(self):
@@ -2147,10 +2481,12 @@ class TestFeedbackWiring(unittest.TestCase):
         # because the implicit default is success().
         demote = _step(self.wf, "feedback", "Route genuine dequeue")["if"]
         self.assertRegex(demote, r"!cancelled\(\)|always\(\)")
-        # ...and the preserve route must NOT, since it may only act on a positive
-        # verdict from a step that actually succeeded.
-        preserve = _step(self.wf, "feedback", "Preserve the verdict")["if"]
-        self.assertNotRegex(preserve, r"!cancelled\(\)|always\(\)")
+        # ...and NEITHER machine lane may, since each acts only on a positive verdict
+        # from a step that actually succeeded.
+        for name in ("Preserve the verdict", "Re-queue the infra-flavoured dequeue"):
+            self.assertNotRegex(
+                _step(self.wf, "feedback", name)["if"], r"!cancelled\(\)|always\(\)", name
+            )
 
     def test_the_preserve_guard_is_fail_open_in_the_safe_direction(self):
         guard = _step(self.wf, "feedback", "Preserve the verdict")["if"]
@@ -2176,18 +2512,48 @@ class TestFeedbackWiring(unittest.TestCase):
     def test_the_route_literal_is_the_same_string_on_both_sides(self):
         # CROSS-FILE CONTRACT. The Python constant and the YAML `if:` literal are two
         # halves of one comparison; renaming or case-drifting either side silently
-        # makes the preserve route unreachable (and, worse, fails SILENTLY GREEN
-        # because the fail-safe `!= 'preserve'` then always demotes).
+        # makes that route unreachable (and, worse, fails SILENTLY GREEN because the
+        # fail-safe `!= …` then always demotes).
         raw = FEEDBACK_YML.read_text(encoding="utf-8")
-        self.assertIn(f"steps.classify.outputs.route == '{mgw.ROUTE_PRESERVE}'", raw)
-        self.assertIn(f"steps.classify.outputs.route != '{mgw.ROUTE_PRESERVE}'", raw)
+        for constant in (mgw.ROUTE_PRESERVE, mgw.ROUTE_REQUEUE):
+            self.assertIn(f"steps.classify.outputs.route == '{constant}'", raw, constant)
+            self.assertIn(f"steps.classify.outputs.route != '{constant}'", raw, constant)
 
-    def test_the_two_routes_are_mutually_exclusive(self):
+    def test_the_three_routes_are_mutually_exclusive(self):
         demote = _step(self.wf, "feedback", "Route genuine dequeue")["if"]
         preserve = _step(self.wf, "feedback", "Preserve the verdict")["if"]
-        self.assertNotEqual(demote, preserve)
+        requeue = _step(self.wf, "feedback", "Re-queue the infra-flavoured dequeue")["if"]
+        self.assertEqual(len({demote, preserve, requeue}), 3)
         self.assertIn("route != 'preserve'", demote)
+        self.assertIn("route != 'requeue'", demote)
         self.assertIn("route == 'preserve'", preserve)
+        self.assertIn("route == 'requeue'", requeue)
+
+    def test_the_requeue_guard_is_pinned_whole(self):
+        self.assertEqual(
+            _step(self.wf, "feedback", "Re-queue the infra-flavoured dequeue")["if"],
+            self.REQUEUE_GUARD,
+        )
+
+    def test_the_requeue_route_is_the_machine_exit_it_claims_to_be(self):
+        # #4619's whole point: the infra lane must NOT demote the label, and it MUST
+        # put the PR back in the queue. A step that only commented would leave the same
+        # hold-with-no-exit the issue is about, with every string assertion still green.
+        step = _step(self.wf, "feedback", "Re-queue the infra-flavoured dequeue")
+        run = step["run"]
+        for forbidden in ("--add-label", "--remove-label", "--disable-auto", "gh pr edit"):
+            self.assertNotIn(forbidden, run, forbidden)
+        self.assertIn("gh pr merge", run)
+        self.assertIn("--auto", run)
+        # ...and it must not act on a closed/merged PR.
+        lines = [ln.strip() for ln in run.splitlines()]
+        idx = next(i for i, ln in enumerate(lines) if '"$STATE" != "OPEN"' in ln)
+        self.assertTrue(any(ln == "exit 0" for ln in lines[idx : idx + 4]), lines)
+        first_mutation = next(
+            i for i, ln in enumerate(lines)
+            if ln.startswith("gh pr merge") or ln.startswith("gh pr comment")
+        )
+        self.assertLess(idx, first_mutation, lines)
 
     def test_preserve_route_never_demotes_the_label(self):
         # Preserving the verdict IS leaving the labels alone: the route must issue no
@@ -2267,15 +2633,16 @@ class TestFeedbackWiring(unittest.TestCase):
         self.assertEqual(list(on), ["pull_request_target"])
         self.assertEqual(on["pull_request_target"]["types"], ["dequeued"])
 
-    def test_step_order_classify_before_both_routes(self):
+    def test_step_order_classify_before_every_route(self):
         order = {name: i for i, name in enumerate(self.names)}
         classify = next(i for n, i in order.items() if n and "Classify the dequeue" in n)
-        preserve = next(i for n, i in order.items() if n and "Preserve the verdict" in n)
-        demote = next(i for n, i in order.items() if n and "Route genuine dequeue" in n)
         checkout = next(i for n, i in order.items() if n and "Checkout the dequeue" in n)
         self.assertLess(checkout, classify)
-        self.assertLess(classify, preserve)
-        self.assertLess(classify, demote)
+        for needle in ("Preserve the verdict", "Re-queue the infra-flavoured dequeue",
+                       "Route genuine dequeue"):
+            self.assertLess(
+                classify, next(i for n, i in order.items() if n and needle in n), needle
+            )
 
 
 class TestWatchdogWorkflowWiring(unittest.TestCase):
@@ -2849,6 +3216,79 @@ class TestTheResweepLoopIsExecutedNotJustRead(unittest.TestCase):
         for other in _steps(wf, "watch"):
             self.assertNotIn("continue-on-error", other,
                              other.get("name") or other.get("uses"))
+
+
+class TestTheRequeueStepIsExecutedNotJustRead(unittest.TestCase):
+    """#4619's machine exit is a SHELL BODY, so it is verified by RUNNING it.
+
+    Every assertion here survives a structural inspection: a mutant that drops the
+    `gh pr merge --auto`, inverts the OPEN guard, or lets a failed re-arm abort the step
+    leaves the step present, named, guarded and still containing every asserted string.
+    Only execution separates them.
+    """
+
+    def _execute(self, *, state="OPEN", merge_rc=0):
+        import subprocess
+        import tempfile
+
+        run = _step(_yaml(FEEDBACK_YML), "feedback",
+                    "Re-queue the infra-flavoured dequeue")["run"]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / "calls.log").write_text("", encoding="utf-8")
+            (tmp / "gh").write_text(
+                "#!/usr/bin/env bash\n"
+                f'printf "%s\\n" "$*" >> "{tmp}/calls.log"\n'
+                'case "$1 $2" in\n'
+                f'  "pr view") echo "{state}";;\n'
+                f'  "pr merge") exit {merge_rc};;\n'
+                "esac\n",
+                encoding="utf-8",
+            )
+            (tmp / "gh").chmod(0o755)
+            proc = subprocess.run(
+                ["bash", "-c", run],
+                env={
+                    "PATH": f"{tmp}:/usr/bin:/bin",
+                    "PR_NUMBER": "4331",
+                    "REPO": "sparq-org/sparq",
+                    "DEQUEUE_REASON": "CI_TIMEOUT",
+                    "CLASSIFY_DETAIL": "queue attempt 1/3",
+                },
+                capture_output=True,
+                text=True,
+            )
+            calls = [
+                line for line in (tmp / "calls.log").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            return proc, calls
+
+    def test_an_open_pr_is_re_armed_and_told_why(self):
+        proc, calls = self._execute()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        # THE MACHINE EXIT: the arm is actually re-issued. A step that only commented
+        # would leave exactly the hold-with-no-exit #4619 is about.
+        self.assertTrue(any(c.startswith("pr merge 4331") and "--auto" in c for c in calls), calls)
+        self.assertTrue(any(c.startswith("pr comment 4331") for c in calls), calls)
+        # ...and NO label is touched: keeping the verdict IS leaving it where it is.
+        self.assertFalse(any("edit" in c or "label" in c for c in calls), calls)
+        self.assertFalse(any("--disable-auto" in c for c in calls), calls)
+
+    def test_a_closed_pr_is_left_alone(self):
+        # The dequeue event races the PR closing; re-arming a closed PR is not a no-op.
+        proc, calls = self._execute(state="CLOSED")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual([c.split()[1] for c in calls], ["view"], calls)
+
+    def test_a_failed_re_arm_warns_and_still_notifies(self):
+        # `set -e` with an unguarded `gh pr merge` would abort here, so the PR would be
+        # left with no arm AND no explanation. rearm-sweeper.yml is the backstop, and
+        # the comment is what says so.
+        proc, calls = self._execute(merge_rc=1)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("::warning::", proc.stdout)
+        self.assertTrue(any(c.startswith("pr comment 4331") for c in calls), calls)
 
 
 class TestSuiteIsWiredIntoCI(unittest.TestCase):
