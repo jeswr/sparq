@@ -139,6 +139,16 @@ pub enum MpcError {
     /// works at the MINIMAL `n = 2t+1` because soundness comes from the *secret*
     /// `α`, not from codeword redundancy. `detail` describes the batch that failed.
     /// `[OPUS-4.8]`
+    ///
+    /// [OPUS-5] sq-km34 — this variant also carries the one integrity refusal on an
+    /// authenticated open batch that the `σ` check *structurally cannot* make: a
+    /// value-level precondition on an opened value that is nevertheless
+    /// MAC-consistent. The equality operator's mask nonzero-witness
+    /// ([`crate::auth_equal`]) is the case in point — a zeroed mask satisfies
+    /// `α·0 = 0`, so `σ = 0`, yet it forces a false match on every pair. Both
+    /// failures mean the same thing to a caller (an authenticated open batch was
+    /// deviated from and NO value is returned), so they share this variant rather
+    /// than splitting the abort surface; `detail` always names which gate fired.
     MacCheckFailed { detail: String },
 }
 

@@ -440,6 +440,16 @@ impl HiddenValueJoin {
     /// NOT claimed otherwise (pinned by a boundary test; a true fix needs a MAC,
     /// deferred WI-4 / bead sq-6d6g). Detection at `n > 2t + 1` thus requires
     /// running the equality test on MORE than the minimal party count.
+    ///
+    /// [OPUS-5] sq-km34 — **the MAC now exists**: [`crate::auth_equal`] is the
+    /// malicious-with-abort twin of this primitive, and it detects the same
+    /// deviation AT the minimal `n = 2t+1` (soundness from the secret `α`, not from
+    /// RS redundancy). This method is UNCHANGED and stays the cheap semi-honest
+    /// path — the deliberate parallel to `compare` vs `auth_compare`. Switching
+    /// [`HiddenValueJoin`] over, and reporting the promoted tier through
+    /// `operator_descriptor`/[`crate::backend::OperatorClass::EqualityJoin`], is the
+    /// separate registry-wiring bead sq-km34.7; until it lands the tier this
+    /// primitive reports is still the semi-honest-only one described above.
     fn secure_equal(&self, dealer: &mut ShamirDealer, a: Fp, b: Fp) -> Result<bool, MpcError> {
         // Secret-share both keys, then run the shared-input core. The scalar path
         // deals its own shares; the batched path deals a whole key COLUMN up front

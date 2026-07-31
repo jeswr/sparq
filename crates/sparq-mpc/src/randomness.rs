@@ -42,6 +42,20 @@
 //! [`DistributedRandomness::shared_nonzero_mask`] is documented semi-honest-only
 //! until it lands.
 //!
+//! [OPUS-5] sq-km34 — **partially closed, for one operator, from the other side.**
+//! The malicious-with-abort equality [`crate::auth_equal`] does not try to make the
+//! mask harder to bias; it makes a biased mask *detectable at use*, by opening an
+//! authenticated NONZERO WITNESS `u = r·s` (fresh nonzero `s`, same batched MAC-check
+//! as the verdict) and refusing every verdict in the batch unless `u ≠ 0`. Since
+//! `u = 0 ⇔ r = 0 ∨ s = 0`, the `r = 0` flip becomes a fail-closed abort — the
+//! zero-test half of the "zero-test-and-redraw" named above, with abort in place of
+//! redraw. Two things it does NOT do, so the residual above still stands for
+//! everything else: it is **local to that operator** (this trait's contract and every
+//! other mask consumer are unchanged), and it delivers **detection, not secrecy or
+//! bias-resistance** — the mask is still drawn by the
+//! [`RandomnessModel::TrustedDealerSim`] dealer, so "no party knows `r`" remains what
+//! a validated dealer-less implementation must supply.
+//!
 //! ## Status — seam only, no fake crypto
 //!
 //! The ONLY implementor here is [`ShamirDealer`], which reports

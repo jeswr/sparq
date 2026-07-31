@@ -137,6 +137,19 @@ pub mod compare;
 // the secret α). Reported as OperatorClass::Comparison @ Malicious+Abort. See the
 // module docs and `research/mpc-malicious-security-design.md`.
 pub mod auth_compare;
+// [OPUS-5] sq-km34 (the CORE promotion; design §6 step 5): the malicious-with-abort
+// twin of the degree-2t EQUALITY open — Hole 1, the headline hole. The masked
+// difference `m = d·r` is an authenticated value, batched-MAC-checked before it is
+// opened, so a forged product share / a wrong degree_reduce re-sharing / an
+// inconsistent input all abort fail-closed at the MINIMAL n=2t+1, where degree-2t has
+// ZERO Reed-Solomon redundancy and the semi-honest `join::secure_equal` documents the
+// same deviation as information-theoretically undetectable. It also closes Hole 3's
+// `r = 0` false match — which the MAC alone CANNOT see (α·0 = 0 is MAC-consistent) —
+// with an authenticated mask NONZERO WITNESS `u = r·s` opened in the same batch.
+// Registry/per-operator reporting (`OperatorClass::EqualityJoin` still reports
+// SemiHonestOnly) is the separate bead sq-km34.7. See the module docs for the exact
+// residuals and `research/mpc-malicious-security-design.md`.
+pub mod auth_equal;
 // [OPUS-4.8] sq-6fv7 (sq-ka8m residual): the IT-MAC-HARDENED twin of
 // `compare::disclose_threshold_verdict` — the federation £100k path that operates
 // on an EXISTING secret-shared sum. sq-ka8m's `auth_compare` made the cleartext
@@ -352,6 +365,13 @@ pub use compare::{
 // [OPUS-4.8] sq-ka8m: the malicious-secure (honest-majority, with-abort) comparison
 // surface — IT-MAC-carried decompose+compare chain, verdict MAC-checked before open.
 pub use auth_compare::{malicious_greater_than, malicious_threshold, open_auth_verdict};
+// [OPUS-5] sq-km34: the malicious-with-abort EQUALITY surface — the masked difference
+// `m = d·r` authenticated + batched-MAC-checked before open (closing Hole 1 at the
+// minimal n=2t+1), with the authenticated mask nonzero-witness `u = r·s` closing the
+// Hole-3 `r = 0` false match the MAC alone cannot see. `auth_equal_verdicts` is the
+// batched core (one σ open per BATCH — the design §5 amortisation an all-pairs join
+// needs); the `malicious_secure_equal*` entries are the cleartext-key conveniences.
+pub use auth_equal::{auth_equal_verdicts, malicious_secure_equal, malicious_secure_equal_batch};
 // [OPUS-4.8] sq-6fv7: the IT-MAC-hardened disclose path over an EXISTING sum — the
 // three decomposition opens (a², c=sum+r, verdict) routed through the MAC-check.
 // [SONNET-4.6] Review round 2 — RENAMED from `malicious_disclose_threshold_verdict`.
