@@ -89,21 +89,60 @@
 //! [`OperatorClass::AuthenticatedEqualityJoin`](crate::backend::OperatorClass::AuthenticatedEqualityJoin),
 //! as against the semi-honest-only
 //! [`OperatorClass::EqualityJoin`](crate::backend::OperatorClass::EqualityJoin) the
-//! unauthenticated path still honestly reports. Concretely, for any deviation by
-//! `≤ t` parties on the authenticated path, the opened product is either UNCHANGED
-//! or the check fires with probability `≥ 1 − 1/p`. A corrupt party controls only the
-//! messages it SENDS, so its entire influence on the `auth_mul` collapses into a shift
-//! `δ_i` of the degree-`2t` product it re-shares in the VALUE reduce and `δ'_i` of the
-//! one it re-shares in the MAC reduce — deviating on its share of an OPERAND is the
-//! special case `(δ_i, δ'_i) = (d_i·ε, (α·d)_i·ε)` for the mask operand and
-//! `(r_i·ε, r_i·ε')` for the difference operand. The check then opens
-//! `σ = Σ λ_i·(δ'_i − α·δ_i) = Δ_m − α·Δ_v`, and the adversary knows every term of
-//! `Δ_m` and `Δ_v` but not `α`: zeroing `σ` without guessing `α` forces
-//! `Δ_v = Σ λ_i·δ_i = 0`, i.e. not changing the answer. `α` is uniform given any `≤ t`
-//! shares, so the residual forgery probability is `1/p`. This — NOT the operand-order
-//! asymmetry above — is what backs the `Malicious` descriptor, and it is pinned over
-//! the real `auth_mul` by `t_party_deviation_on_the_difference_operand_is_caught` and
-//! `t_party_deviation_on_the_mask_operand_is_caught`.
+//! unauthenticated path still honestly reports.
+//!
+//! **Step 1 — what one corrupt party can shift.** A corrupt party controls only the
+//! messages it SENDS, so its entire influence on the `auth_mul` of product `j` collapses
+//! into a shift `δ_{i,j}` of the degree-`2t` product it re-shares in the VALUE reduce and
+//! `δ'_{i,j}` of the one it re-shares in the MAC reduce — deviating on its share of an
+//! OPERAND is the special case `(δ, δ') = (d_i·ε, (α·d)_i·ε)` for the mask operand and
+//! `(r_i·ε, r_i·ε')` for the difference operand. Weighting by the reduce's recombination
+//! coefficients `λ_i` (shared by every product in the batch — the same `2t+1` points
+//! recombine each one), product `j` lands on `(m_j + Δ_{v,j}, α·m_j + Δ_{m,j})` with
+//! `Δ_{v,j} = Σ_i λ_i·δ_{i,j}` and `Δ_{m,j} = Σ_i λ_i·δ'_{i,j}`. Product `j`'s own bit can
+//! change only if `Δ_{v,j} ≠ 0`.
+//!
+//! **Step 2 — the check is over the BATCH, so BOTH weightings appear.**
+//! [`malicious_secure_equal_batch`] hands the whole product vector to ONE
+//! [`MacSession::mac_check_and_open`], which derives Fiat–Shamir coefficients `χ_1..χ_k`
+//! from the already-fixed share vectors and opens a SINGLE
+//!
+//! ```text
+//! σ = Σ_j χ_j·(Δ_{m,j} − α·Δ_{v,j}) = Σ_j χ_j·Δ_{m,j} − α·A,   A := Σ_j χ_j·Δ_{v,j}
+//! ```
+//!
+//! — the recombination weights `λ_i` inside each `Δ`, the challenge weights `χ_j` across
+//! products. `σ = 0` therefore splits into two genuinely DIFFERENT failure cases, and only
+//! the first is about `α`:
+//!
+//! 1. **Aggregate shift `A ≠ 0` — forgery against `α`.** `σ = 0` then requires
+//!    `Σ_j χ_j·Δ_{m,j} = α·A`, i.e. producing `α` from a view in which it is uniform (any
+//!    `≤ t` shares of `[α]` leave it uniform). Probability `1/p ≈ 2^{−61}`.
+//! 2. **Aggregate shift `A = 0` with some `Δ_{v,j} ≠ 0` — a random-linear-combination
+//!    collision.** The adversary leaves the MAC reduces alone (`Δ_{m,j} = 0`) and picks
+//!    nonzero per-product value shifts orthogonal to the challenge vector, changing
+//!    individual opened products and individual equality bits. This needs NO knowledge of
+//!    `α` and is ruled out ONLY by the `χ_j`: for a deviation fixed BEFORE `χ` is known, a
+//!    nonzero `(Δ_{v,j})_j` satisfies `A = 0` with probability `1/p` over a uniform `χ`.
+//!
+//! So the honest statement is: for any `≤ t`-party deviation the batch either ABORTS or
+//! leaves every opened product — hence every returned bit — unchanged, **except with
+//! probability `≤ 2/p ≈ 2^{−60}` per batch**. It is *not* true that `σ = 0` implies the
+//! answers are unchanged, and it is *not* true that a zero aggregate shift means no
+//! product moved; both are consequences of the `1/p` bounds above, not of `α` secrecy.
+//! Case 2's `1/p` is moreover the NON-ADAPTIVE bound: because `χ` is Fiat–Shamir over the
+//! shares, an adversary free to re-choose its `δ` and re-derive the coin is grinding at the
+//! `≈ 2^61` COMPUTATIONAL bound documented on [`MacSession::mac_check_and_open`] — which
+//! is also where the scope of that coin (a trusted-dealer-simulation transcript, not a
+//! distributed public coin) is stated. In this 61-bit field that margin is not comfortable.
+//!
+//! This — NOT the operand-order asymmetry above — is what backs the `Malicious`
+//! descriptor. Case 1 is pinned over the real `auth_mul` by
+//! `t_party_deviation_on_the_difference_operand_is_caught` and
+//! `t_party_deviation_on_the_mask_operand_is_caught` (one product each); case 2 is pinned
+//! over the real batch check by `t_party_cross_pair_cancellation_on_a_batch_is_caught`,
+//! which mounts a two-product cancellation and shows both that it aborts and that removing
+//! the challenge binding makes the same deviation PASS with both verdicts flipped.
 //!
 //! **Residuals (honest, not closed here).**
 //! - The trusted-dealer simulation (`RandomnessModel::TrustedDealerSim`, bead
@@ -204,9 +243,11 @@ fn match_bit(m: Fp) -> bool {
 ///
 /// Returns `a == b`, or [`MpcError::MacCheckFailed`] if the batched IT-MAC check
 /// caught a tamper on the authenticated path (a forged share at the open, a wrong
-/// `degree_reduce` re-sharing, a corrupted difference). It NEVER returns a wrong
-/// boolean because a tampered product was opened: the check runs BEFORE the verdict
-/// is available to be acted on (the coZK-2025/1026 discipline).
+/// `degree_reduce` re-sharing, a corrupted difference). No tampered product is ever
+/// opened into a verdict the caller can act on before it is checked — the check runs
+/// FIRST (the coZK-2025/1026 discipline) — so a wrong boolean requires the check itself
+/// to have been defeated, which the module docs' adversary model bounds at `≤ 2/p` per
+/// batch (non-adaptively; `≈ 2^61` grinding against the Fiat–Shamir coin). Not "never".
 ///
 /// `a`, `b` are passed in the clear ONLY because this routine plays ALL parties in
 /// one process (exactly as the dealer that shares them does); they are secret-shared
@@ -278,7 +319,12 @@ mod tests {
     //!   malicious model — the ONLY tests that back the `Malicious` descriptor. Both
     //!   deviate exactly as a corrupt party can (the messages it sends into the two
     //!   degree-reduces of the production `auth_mul`), never by rewriting a whole
-    //!   sharing.
+    //!   sharing. Both check ONE product, so they pin the α-forgery case only.
+    //! - `t_party_cross_pair_cancellation_on_a_batch_is_caught`: the BATCHED half of the
+    //!   same model — the failure case the single-product σ equation does NOT cover,
+    //!   where nonzero per-product shifts cancel in `Σ_j χ_j·Δ_{v,j}` without touching
+    //!   `α`. Carries its own mutation witness (drop the challenge binding and the same
+    //!   deviation passes with both verdicts flipped).
     //! - `corrupt_dealer_rewrite_of_the_{difference,mask}_*`: the STRICTLY STRONGER
     //!   corrupt-dealer residual (`RandomnessModel::TrustedDealerSim`), where a whole
     //!   share vector is rewritten. The difference-side one doubles as the
@@ -540,6 +586,126 @@ mod tests {
                     b
                 ),
                 other => panic!("unexpected outcome from the MAC-check: {:?}", other),
+            }
+        }
+    }
+
+    /// **THE `≤ t`-PARTY MODEL, BATCHED — CROSS-PAIR CANCELLATION.** The two tests above
+    /// pin `σ = Δ_m − α·Δ_v` for ONE checked product, but the production entry point
+    /// [`malicious_secure_equal_batch`] checks a RANDOM LINEAR COMBINATION of the whole
+    /// vector, so the σ actually opened is `Σ_j χ_j·(Δ_{m,j} − α·Δ_{v,j})`. A VALUE-ONLY
+    /// deviation (`Δ_{m,j} = 0`) therefore never has to forge against `α` at all: it only
+    /// needs the aggregate `A = Σ_j χ_j·Δ_{v,j}` to vanish, which several NONZERO
+    /// per-product shifts can do while changing individual opened products and individual
+    /// equality bits. That is module-docs failure case 2, a different argument from case
+    /// 1, and the challenge binding — not `α` secrecy — is what rules it out.
+    ///
+    /// This mounts exactly that attack at the minimal `n = 2t+1 = 3` with the whole
+    /// `t = 1` budget: TWO products in ONE batch, both equal-keys (honest verdict
+    /// "match"), with party 0 shifting their VALUE reduces by `(δ, −δ)` and leaving both
+    /// MAC reduces untouched. Since the two reduces recombine over the same points, the
+    /// net shifts are `Δ_{v,0} = λ_0·δ` and `Δ_{v,1} = −λ_0·δ`, which cancel under ANY
+    /// pair of EQUAL coefficients. Three assertions:
+    ///
+    /// 1. **WITNESS** — the deviation is real and verdict-changing: opening the tampered
+    ///    products directly (i.e. with the batch check removed) yields two NONZERO values,
+    ///    flipping both "match" bits to "no match".
+    /// 2. the PRODUCTION [`MacSession::mac_check_and_open`] ABORTS, because the
+    ///    Fiat–Shamir `χ_0 ≠ χ_1` leave `A = λ_0·δ·(χ_0 − χ_1) ≠ 0`.
+    /// 3. **MUTATION** — the identical σ arithmetic with the challenge binding removed
+    ///    (`χ_j ≡ 1`) PASSES and hands back both flipped verdicts. So assertion 2 is
+    ///    red-on-wrong-answer and the `χ_j` are load-bearing rather than decorative.
+    ///
+    /// The multiplication is the production `auth_mul`, deviated only in the messages one
+    /// party sends into its two degree-reduces, and the check is the production batched
+    /// one. `[SONNET-4.6]`
+    #[test]
+    fn t_party_cross_pair_cancellation_on_a_batch_is_caught() {
+        let backend = ShamirBackend::new_seeded(3, 0xCA11).unwrap();
+        let t = backend.threshold();
+        assert_eq!(backend.parties(), 2 * t + 1, "the minimal honest-majority n");
+        let corrupt = 0usize; // |{corrupt}| = 1 = t
+        let delta = Fp::new(7);
+        // Δ_{v,0} = λ_0·δ and Δ_{v,1} = −λ_0·δ: cancels under ANY pair of EQUAL
+        // coefficients, including the χ_j ≡ 1 of the mutation below.
+        let shifts = [delta, delta.neg()];
+
+        /// Two equal-keys products (honest verdict "match") under ONE session, each with
+        /// party `corrupt` deviating in its VALUE reduce only (`δ_mac = 0` — this attack
+        /// never touches `α`). The multiplication is the production `auth_mul`, deviated
+        /// only in the messages that one party sends into its two degree-reduces.
+        fn tampered_batch(
+            session: &mut MacSession<'_>,
+            corrupt: usize,
+            shifts: [Fp; 2],
+        ) -> Vec<AuthenticatedShare> {
+            let mut products = Vec::with_capacity(2);
+            for (key, shift) in [(5u64, shifts[0]), (9u64, shifts[1])] {
+                let aa = session.authenticated_share(Fp::new(key));
+                let bb = session.authenticated_share(Fp::new(key));
+                let d = auth_sub(&aa, &bb).unwrap();
+                let mask = session.draw_nonzero_fp();
+                let r = session.authenticated_share(mask);
+                let deviations = [(corrupt, shift, Fp::zero())];
+                products.push(
+                    session
+                        .auth_mul_with_party_deviations_for_test(&d, &r, &deviations)
+                        .unwrap(),
+                );
+            }
+            products
+        }
+
+        // 1. WITNESS: with the batch check removed (open the products directly), BOTH
+        //    "match" verdicts flip — so the deviation is genuinely verdict-changing and
+        //    assertions 2/3 are about something that matters.
+        {
+            let mut dealer = backend.dealer();
+            let mut session = dealer.new_mac_session();
+            let products = tampered_batch(&mut session, corrupt, shifts);
+            for (j, m) in products.iter().enumerate() {
+                let opened = backend.reconstruct(m.value_shares()).unwrap();
+                assert!(
+                    !match_bit(opened),
+                    "product {} must open to a FLIPPED verdict (equal keys open to 0 when \
+                     honest); otherwise this cancellation test proves nothing",
+                    j
+                );
+            }
+        }
+
+        // 2. The PRODUCTION batched check ABORTS: χ_0 != χ_1, so the per-product shifts
+        //    do not cancel in A = Σ_j χ_j·Δ_{v,j}.
+        {
+            let mut dealer = backend.dealer();
+            let mut session = dealer.new_mac_session();
+            let products = tampered_batch(&mut session, corrupt, shifts);
+            let outcome = session.mac_check_and_open(&products);
+            assert!(
+                matches!(outcome, Err(MpcError::MacCheckFailed { .. })),
+                "a two-product (delta, -delta) cancellation must abort: A = lambda_0*delta*\
+                 (chi_0 - chi_1) != 0 under the Fiat-Shamir challenges — got {:?}",
+                outcome
+            );
+        }
+
+        // 3. MUTATION: the identical σ arithmetic with the challenge binding removed
+        //    (χ_j ≡ 1) PASSES and returns both flipped verdicts. This is exactly what
+        //    assertion 2 buys, and it is why the argument cannot rest on α secrecy.
+        {
+            let mut dealer = backend.dealer();
+            let mut session = dealer.new_mac_session();
+            let products = tampered_batch(&mut session, corrupt, shifts);
+            let opened = session
+                .mac_check_and_open_without_challenge_binding_for_test(&products)
+                .expect("with chi_j == 1 the aggregate shift cancels, so the check passes");
+            for (j, m) in opened.iter().enumerate() {
+                assert!(
+                    !match_bit(*m),
+                    "mutation witness: without challenge binding, product {} opens to a FLIPPED \
+                     verdict — the cross-pair cancellation is ADMITTED",
+                    j
+                );
             }
         }
     }

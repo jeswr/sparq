@@ -1208,13 +1208,28 @@ impl MacSession<'_> {
         if values.is_empty() {
             return Ok(Vec::new());
         }
-        let t = self.dealer.threshold();
-        let n = self.dealer.parties();
         // 1. Challenge coefficients χ_j, bound by Fiat–Shamir to the shares being
         //    checked (so they are unavoidably derived AFTER those are fixed). The
         //    transcript is simulator-private state — see `mac_check_challenges` for why
         //    that is NOT a distributed public coin.
-        let chis = mac_check_challenges(n, t, values);
+        let chis = mac_check_challenges(self.dealer.parties(), self.dealer.threshold(), values);
+        self.mac_check_and_open_with_challenges(values, &chis)
+    }
+
+    /// Steps 2–4 of [`Self::mac_check_and_open`] over a GIVEN challenge vector. Split
+    /// out so the challenge derivation is a substitutable input: the production entry
+    /// point above passes the Fiat–Shamir `χ_j`, and
+    /// [`Self::mac_check_and_open_without_challenge_binding_for_test`] passes `χ_j ≡ 1`
+    /// so a test can WITNESS what the binding actually buys (cross-pair cancellation is
+    /// admitted without it). `values` must be non-empty and `chis` the same length.
+    fn mac_check_and_open_with_challenges(
+        &mut self,
+        values: &[crate::authenticated::AuthenticatedShare],
+        chis: &[Fp],
+    ) -> Result<Vec<Fp>, MpcError> {
+        debug_assert_eq!(chis.len(), values.len(), "one challenge per checked value");
+        let t = self.dealer.threshold();
+        let n = self.dealer.parties();
 
         // 2./3. Build [σ] = Σ_j χ_j·[m_{y_j}] − (Σ_j χ_j·y_j)·[α] as a free local
         //       linear combination, and accumulate the public y = Σ_j χ_j·y_j.
@@ -1260,6 +1275,30 @@ impl MacSession<'_> {
             });
         }
         Ok(opened)
+    }
+
+    /// [SONNET-4.6] sq-km34 — **test-only MUTATION of the §2.5 check: the same σ
+    /// arithmetic with the CHALLENGE BINDING REMOVED** (`χ_j ≡ 1`, i.e. the plain
+    /// unweighted sum `σ = Σ_j (m_{y_j} − y_j·α)`).
+    ///
+    /// It exists so a test can exhibit what the random linear combination is load-bearing
+    /// FOR. With `χ_j ≡ 1` the check quantity collapses to `Σ_j Δ_{m,j} − α·Σ_j Δ_{v,j}`,
+    /// so a `≤ t`-party deviation that shifts two products' VALUE reduces by `(δ, −δ)`
+    /// cancels in the aggregate and PASSES — while flipping both individual verdicts, and
+    /// without ever touching `α`. The production [`Self::mac_check_and_open`] weights the
+    /// same shifts by `χ_0 ≠ χ_1` and aborts. Pinned by `auth_equal`'s
+    /// `t_party_cross_pair_cancellation_on_a_batch_is_caught`. `#[cfg(test)]`; not
+    /// reachable from any production path.
+    #[cfg(test)]
+    pub(crate) fn mac_check_and_open_without_challenge_binding_for_test(
+        &mut self,
+        values: &[crate::authenticated::AuthenticatedShare],
+    ) -> Result<Vec<Fp>, MpcError> {
+        if values.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ones = vec![Fp::one(); values.len()];
+        self.mac_check_and_open_with_challenges(values, &ones)
     }
 
     /// The §2.5 batched MAC-check as a pure GATE — [`Self::mac_check_and_open`] with the
