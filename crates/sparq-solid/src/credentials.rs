@@ -450,7 +450,7 @@ mod tests {
     fn one_credential_subject_binds_however_often_it_is_repeated() {
         let alice = subject_triple(named("https://alice.ex/card#me"));
         assert_eq!(
-            credential_subject(&[alice.clone()]).expect("one subject"),
+            credential_subject(std::slice::from_ref(&alice)).expect("one subject"),
             "https://alice.ex/card#me"
         );
         // the SAME subject stated twice is still unambiguous
@@ -482,7 +482,10 @@ mod tests {
         let literal = subject_triple(oxrdf::Term::Literal(oxrdf::Literal::new_simple_literal(
             "not-a-webid",
         )));
-        assert!(matches!(credential_subject(&[literal.clone()]), Err(VcAdmitError::NoSubject)));
+        assert!(matches!(
+            credential_subject(std::slice::from_ref(&literal)),
+            Err(VcAdmitError::NoSubject)
+        ));
         // a literal alongside an IRI is AMBIGUOUS, not "the IRI wins"
         let alice = subject_triple(named("https://alice.ex/card#me"));
         assert!(matches!(
