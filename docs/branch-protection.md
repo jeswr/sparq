@@ -466,9 +466,84 @@ un-draft moment.
   still enters the merge queue and waits for its required checks.
 - **Use the merge queue.** The live `merge_queue` rule groups with `ALLGREEN`, admits at
   most 8 entries per merge, and gives required checks 60 minutes to report
-  (`check_response_timeout_minutes: 60`).
+  (`check_response_timeout_minutes: 60`). Its **throughput** parameters — how many
+  entries the queue speculatively builds, and the minimum-group-size wait — are recorded
+  in *Merge-queue throughput settings* below.
 - **Require conversation resolution before merging** (all PR review threads resolved —
   `required_review_thread_resolution: true`).
+
+### Merge-queue throughput settings (sq-6vshe.16)
+
+<!-- [OPUS-5] sq-6vshe.16 / issue #2759 — LEVER 3 of
+     research/ci-mergequeue-speedup-2026-07.md §3.3. Records the throughput parameter
+     set, the min-entries-wait audit VERDICT, and the CodeQL merge_group placement
+     re-verdict. INVARIANT: no required-check change — the sole required context stays
+     `gate`; ALLGREEN grouping and squash-only are untouched by all three items. -->
+
+The `merge_queue` rule's throughput parameters:
+
+| Parameter | Value | Effect |
+|---|---|---|
+| `max_entries_to_build` | `3` | entries built speculatively **in parallel** — the queue's drain capacity |
+| `max_entries_to_merge` | `8` | entries merged in one group (the cap the omnibus batcher folds overflow past) |
+| `min_entries_to_merge` | `1` | one queued entry is enough to form a group |
+| `min_entries_to_merge_wait_minutes` | `5` | **inert** at `min_entries_to_merge: 1` — see (b) |
+| `grouping_strategy` | `ALLGREEN` | one red leg requeues the whole entry |
+| `check_response_timeout_minutes` | `60` | required-check reporting deadline |
+
+Provenance: `max_entries_to_merge`, `grouping_strategy` and
+`check_response_timeout_minutes` are in the verified live-ruleset table at the end of
+this document. The other three are read from the 2026-07-10 profile of ruleset
+`17688455` (`research/ci-mergequeue-speedup-2026-07.md` §1, §3.3, §6) and are **not**
+re-verified against the live API at this commit — this is a doc-only change. Confirm
+them with the `gh api …/rulesets/<id>` recipe below before acting on (a).
+
+**(a) `max_entries_to_build` 3 → 5 — approved in principle, NOT yet requested; blocked
+on `sq-6vshe.14`.** Drain capacity scales directly with this number: a full 8-deep queue
+takes `ceil(8/3) = 3` entry-wall waves at 3 and `ceil(8/5) = 2` at 5 — a third off a
+full-depth drain — and the entry-failure rate measured over the profile window (**0
+failed of the last 250 `merge_group` runs**) means the extra speculative builds are
+almost never discarded work. But it is **conditional, and the condition is not yet met**:
+5 concurrent entries × ~30 jobs needs the runner-pool headroom that the redundant
+push-to-main waves currently burn, and the same profile measured **43–225 s of per-job
+runner-queue delay during a 3-entry burst**. Raising parallelism *before* the push-skip
+lands would worsen that contention, not relieve it. `sq-6vshe.14` (the `queue-validated`
+push-skip, §3.1 of the design record) has **not** landed — no such job exists anywhere in
+`.github/workflows/` as of this commit — so the ruleset edit stays **unrequested**.
+Agents cannot edit rulesets, so when the precondition clears the edit is carried as a
+maintainer steer issue, not applied from a PR.
+
+**(b) `min_entries_to_merge_wait_minutes: 5` — AUDITED; verdict INERT, no edit needed.**
+The concern was that this is a flat ~5 minute tax on every quiet-period (single-entry)
+merge. It is not. The field is a **ceiling on waiting, not a floor**: per the rulesets
+API it is the time the queue waits *after the first entry is queued, while the minimum
+entry count is **not** met*, before going ahead and merging anyway. With
+`min_entries_to_merge: 1` that minimum is satisfied by the first entry itself, so the
+wait condition is never entered and the timer never binds. This is corroborated by the
+measured entry-wall decomposition, which `ceil(position / capacity) × entry-wall` plus
+the async ruleset evals accounts for with no residual flat term. The verdict rests on
+that field semantics plus the decomposition, **not** on a direct measurement: nobody has
+diffed the enqueue→merge timestamps of an isolated quiet-period single-entry merge. That
+observation would settle it outright and is the cheap confirmation to run if a
+quiet-period merge ever *looks* like it stalled ~5 m before merging. Setting it to `0` would
+be a cosmetic no-op and is therefore **not** requested — but the pairing is load-bearing:
+if `min_entries_to_merge` is ever raised above 1 this value becomes live, and the ~5 m
+quiet-period tax becomes real and must be re-audited then.
+
+**(c) CodeQL on the queue-blocking path — re-verdict KEEP; measured non-pole.**
+Re-confirming `sq-6vshe.6` / issue #1815 with `merge_group`-specific data: over the
+profile window CodeQL ran **3.8 m median / 4.2 m max (n ≈ 19)** on the merge-queue ref,
+against a 15.1 m median entry wall set by `CI` (14.4 m median). It is buildless and it is
+not the pole — the 20–40 minute figure that originally motivated moving it predates the
+buildless migration. Moving a security gate off the queue-blocking path to save ≈ 0 is
+all risk and no win: **REJECTED**, and the alerts-at-zero posture plus the ruleset's
+`code_scanning` rule stay intact. **Read this against the 2026-07-18 operational
+disable** (*Merge-queue subset* above): the conclusion stands, but its premise no longer
+describes today's CI — `codeql.yml` is `disabled_manually`, so no CodeQL check-run is
+produced on any event and it costs the queue nothing at all right now. The standing
+meaning is forward-looking: when PR #3427 settles the successor policy and CodeQL runs
+again, **queue latency is not a valid argument for keeping it off the blocking path** —
+that premise was measured and falsified.
 
 ## How this maps to the merge discipline
 
@@ -607,7 +682,13 @@ the sections above:
 | `code_quality` | `severity: all` | Required reviews |
 | `code_scanning` | `CodeQL`, `alerts_threshold: errors_and_warnings`, `security_alerts_threshold: all` | Required reviews |
 | `copilot_code_review` | `review_on_push: true`, `review_draft_pull_requests: false` | Required reviews |
-| `merge_queue` | `grouping_strategy: ALLGREEN`, `max_entries_to_merge: 8`, `check_response_timeout_minutes: 60` | Other settings; Omnibus batching |
+| `merge_queue` | `grouping_strategy: ALLGREEN`, `max_entries_to_merge: 8`, `check_response_timeout_minutes: 60` | Other settings; Merge-queue throughput settings; Omnibus batching |
+
+The `Key parameters` column is a selection, not an exhaustive dump: the `merge_queue`
+row's remaining throughput parameters (`max_entries_to_build`, `min_entries_to_merge`,
+`min_entries_to_merge_wait_minutes`) are recorded in *Merge-queue throughput settings*
+above, sourced from the 2026-07-10 profile snapshot rather than re-verified here — fold
+them into this row the next time the ruleset is dumped and verified.
 
 If a future check finds drift (e.g. a rule added or a parameter changed), update **this
 table and the matching section above in the same commit** so the doc-of-record never lags

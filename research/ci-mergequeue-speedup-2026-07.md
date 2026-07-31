@@ -173,6 +173,22 @@ rebuild. The honest remaining deltas, in measured order:
 the gain appears from position >6 and during bursts (drain rate ×1.67). Plus up to 5 m
 flat if the min-entries wait proves non-inert.
 
+> **RESOLVED (sq-6vshe.16, issue #2759) — see `docs/branch-protection.md` §*Merge-queue
+> throughput settings*, now the doc-of-record for all three items.** [OPUS-5]
+> **(a)** `max_entries_to_build` 3→5 approved in principle but **NOT requested**: lever 1
+> (`sq-6vshe.14`) has not landed — no `queue-validated` push-skip job exists in
+> `.github/workflows/` — so the pool-headroom precondition is unmet.
+> **(b)** the `min_entries_to_merge_wait_minutes: 5` audit **closes as INERT**: the field
+> is a ceiling on waiting while `min_entries_to_merge` is unmet, not a floor, so at
+> `min_entries_to_merge: 1` it never binds. The "up to 5 m flat" line above is therefore
+> **not** a real saving — no edit needed (re-audit if `min_entries_to_merge` ever rises
+> above 1).
+> **(c)** the CodeQL KEEP verdict stands on the measurement but has been **overtaken by
+> events**: `codeql.yml` was operationally disabled on 2026-07-18, so it produces no
+> check-run on any event and costs the queue nothing today. Its forward-looking meaning
+> is that queue latency is not a valid argument against re-enabling it on the blocking
+> path (PR #3427 owns the successor policy).
+
 ### 3.4 Lever 4 — skip tests for unaffected crates in the merge group
 
 Change-based selection ALREADY runs on `merge_group` with the sound fail-closed rule set
@@ -244,7 +260,7 @@ tail, not the median. No bead here — owned by the sibling; do not double-imple
 |------|-------|------|---------|-----------|-------|
 | 1 | push-to-main skip (validated SHAs) | sq-6vshe.14 | SAFE (fail-open) | 200–400 runner-min/merge; −0.5–2 m wall; collapse-tail removal; unlocks #3 | **SAFE-QUICK-WIN** |
 | 2 | bench → nightly EC2 | (sibling lane) | SAFE as designed there | −3.7 m leg + flake-requeue tail | in-flight |
-| 3 | queue settings (build 3→5; min-wait audit) | sq-6vshe.16 | SAFE after #1 | drain ×1.67 deep-queue; ≤5 m flat if wait non-inert | **SAFE-QUICK-WIN** (maintainer ruleset edit) |
+| 3 | queue settings (build 3→5; min-wait audit) | sq-6vshe.16 | SAFE after #1 | drain ×1.67 deep-queue; the min-wait audit closed **inert** (§3.3 RESOLVED) so the "≤5 m flat" it once promised is **0** | **SAFE-QUICK-WIN** (maintainer ruleset edit, still blocked on #1) |
 | 4 | coverage off merge_group | sq-6vshe.17 | recoverable-ratchet argument, needs protocol | −2–6 m median entry wall | **NEEDS-CAREFUL-DESIGN** |
 | 5 | test-shard rebalance | sq-6vshe.7 (existing, annotated) | SAFE | −3–5 m engine-entry p90 | existing bead |
 | 6 | cache/artifact diet + sccache A/B | sq-6vshe.15 | SAFE, measure-first | −0.5–2 m | SAFE |
