@@ -103,6 +103,7 @@ jobs:
       # MUST consume the same GH_TOKEN expression as the sweep step below, or it would
       # attest a token the sweep does not use (pinned by the wiring test).
       - name: Probe arm capability (one loud error, never per-PR)
+        id: probe
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           REPO: ${{ github.repository }}
@@ -139,7 +140,30 @@ jobs:
       # It fails open on everything pending or unreadable and bounds its mutations per
       # tick — see scripts/rearm-sweeper.py's stuck-arm section. Pinned by
       # scripts/tests/test_arm_capability_wiring.py::TestStuckArmWiring.
+      #
+      # [OPUS-5] #4642 — WHY THIS STEP CARRIES AN `if:` AT ALL, when every other step here
+      # is deliberately unconditional. A step with no `if:` is skipped the moment ANY
+      # earlier step fails, so this terminal was skipped precisely when the step in front
+      # of it broke — and the step in front of it is the one that breaks. MEASURED in #4642
+      # over the 200 most recent runs of this workflow: 5 failed, and both retained failures
+      # were the "Re-arm dropped reviewed PRs" step directly above. An armed-but-unmergeable
+      # PR has no other exit, so the tick that most needs the sweep is the tick that skipped
+      # it.
+      #
+      # NOT `always()`. This step MUTATES the repository (disarm / relabel / comment /
+      # update-branch), and `always()` would run it through a cancellation. Two conditions,
+      # each for one reason:
+      #   * `!cancelled()` — a failed predecessor still runs the sweep; a cancelled run
+      #     does not.
+      #   * `steps.probe.outcome == 'success'` — preserves the probe's "fail loud ONCE, at
+      #     the start" contract. A token that cannot arm cannot remediate either, so
+      #     without this the sweep would trade one ::error for a per-PR wall of 403s.
+      #     `outcome` (not `conclusion`) is the pre-`continue-on-error` result, so it
+      #     cannot be laundered green by marking the probe continue-on-error.
+      # The permitted expression is pinned EXACTLY, and every other `if:` on a sweep step
+      # reds, in test_arm_capability_wiring.py::TestTheYamlSeamIsGating.
       - name: Sweep armed-but-unmergeable PRs to a counted terminal state
+        if: ${{ !cancelled() && steps.probe.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           REPO: ${{ github.repository }}
