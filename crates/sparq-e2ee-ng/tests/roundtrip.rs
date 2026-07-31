@@ -475,6 +475,61 @@ fn wrap_capability_rejects_a_capability_that_violates_separation() {
 }
 
 #[test]
+fn wrap_capability_rejects_a_structurally_invalid_public_grant() {
+    // Separation-correct secrets are NOT enough: every `PublicGrant` field is
+    // public, so a caller can hand `wrap_capability` a read capability whose
+    // grant half only `PublicGrant::decode` would have caught. Wrapping such a
+    // grant would produce bytes that `unwrap_capability` must reject on the far
+    // side, so it has to fail here instead.
+    let recipient = RecipientSecretKey::from_bytes([5u8; 32]);
+    let read_cap = || Capability::new_read(sample_grant(), Secret32([9u8; 32])).unwrap();
+
+    // An unsupported suite.
+    let mut cap = read_cap();
+    cap.grant.suite = "urn:jeswr:w3id:e2ee-ng:suite:not-a-suite".to_string();
+    assert!(matches!(
+        wrap_capability(&cap, &recipient.public()),
+        Err(Error::UnknownSuite)
+    ));
+
+    // An inverted validity window.
+    let mut cap = read_cap();
+    cap.grant.validity = Validity { not_before: 200, not_after: 100 };
+    assert!(matches!(
+        wrap_capability(&cap, &recipient.public()),
+        Err(Error::Schema(_))
+    ));
+
+    // A max_epoch ceiling behind the epoch the grant is scoped to.
+    let mut cap = read_cap();
+    cap.grant.max_epoch = Some(Epoch(3));
+    assert!(matches!(
+        wrap_capability(&cap, &recipient.public()),
+        Err(Error::Schema(_))
+    ));
+
+    // A branch set assigned directly rather than via `set_branch_scope`, so not
+    // strictly ascending by branch id.
+    let mut cap = read_cap();
+    cap.grant.extra_branches = vec![ScopedBranch {
+        branch: BranchId::from_bytes([1u8; 32]),
+        topic: TopicId::from_bytes([4u8; 32]),
+    }];
+    assert!(matches!(
+        wrap_capability(&cap, &recipient.public()),
+        Err(Error::NonCanonical(_))
+    ));
+
+    // The baseline the four above differ from by exactly one field still wraps
+    // AND opens with the matching recipient — the invariant this guards is that
+    // a successful typed wrap is always openable, not that wrapping is hard.
+    let cap = read_cap();
+    let wrapped = wrap_capability(&cap, &recipient.public()).unwrap();
+    let opened = unwrap_capability(&recipient, &wrapped, lim()).unwrap();
+    assert_eq!(opened.grant, cap.grant);
+}
+
+#[test]
 fn wrap_capability_rejects_low_order_recipient_key() {
     let cap = Capability::new_read(sample_grant(), Secret32([9u8; 32])).unwrap();
     let low_order = RecipientPublicKey([0u8; 32]);

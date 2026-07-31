@@ -508,37 +508,21 @@ impl PublicGrant {
         if version != Some(VERSION) {
             return Err(Error::Schema("capability version"));
         }
-        let suite = suite.ok_or(Error::Schema("missing suite"))?;
-        check_suite(&suite)?;
         // The wire authority array must ALREADY be canonical (sorted, deduplicated):
         // normalizing here would accept multiple byte encodings of one logical
         // grant, breaking the bytes-level contract behind cap_id / admin_sig.
+        // This is a *bytes-level* check, so it stays here rather than in
+        // `validate_structure`: an in-memory array is re-canonicalized by
+        // `signing_entries`, so only the wire form can be non-canonical.
         let authority = authority.ok_or(Error::Schema("missing authority"))?;
         if authority != canon_authorities(authority.clone()) {
             return Err(Error::NonCanonical("authority array not sorted/deduplicated"));
         }
-        let validity = validity.ok_or(Error::Schema("missing validity"))?;
-        if validity.not_before > validity.not_after {
-            return Err(Error::Schema("validity not_before > not_after"));
-        }
-        // The publisher public key is present iff publish is granted: a grant
-        // without publish authority must not carry (and have authenticated) an
-        // unrelated publisher key.
-        if authority.contains(&Authority::Publish) != publisher_pub.is_some() {
-            return Err(Error::Separation("publisher key presence must match publish authority"));
-        }
-        let epoch = epoch.ok_or(Error::Schema("missing epoch"))?;
-        // The ceiling is a forward bound on the grant's own scope: a grant whose
-        // max_epoch precedes the epoch it is scoped to could never be exercised,
-        // so it is a malformed grant rather than a maximally-narrow one.
-        if max_epoch.is_some_and(|m| m.0 < epoch.0) {
-            return Err(Error::Schema("max_epoch precedes the grant epoch"));
-        }
-        let branch = branch.ok_or(Error::Schema("missing branch"))?;
-        let topic = topic.ok_or(Error::Schema("missing topic"))?;
-        // An ABSENT field 18 is the single-branch form, so an empty array would
-        // be a second encoding of one logical grant — reject it rather than
-        // normalize, or `cap_id` stops being a function of the grant.
+        // Likewise bytes-level: an ABSENT field 18 is the single-branch form, so
+        // an empty array would be a second encoding of one logical grant —
+        // reject it rather than normalize, or `cap_id` stops being a function of
+        // the grant. (An in-memory empty `extra_branches` IS the single-branch
+        // form and is omitted by `signing_entries`.)
         let extra_branches = match extra_branches {
             Some(v) if v.is_empty() => {
                 return Err(Error::NonCanonical(
@@ -548,31 +532,64 @@ impl PublicGrant {
             Some(v) => v,
             None => Vec::new(),
         };
-        // Validated over the WHOLE set (primary entry first), so this also pins
-        // the primary branch as the lowest-ordered one: the same branch set can
-        // therefore only be encoded one way.
-        if !extra_branches.is_empty() {
-            let mut scope = Vec::with_capacity(1 + extra_branches.len());
-            scope.push(ScopedBranch { branch, topic });
-            scope.extend_from_slice(&extra_branches);
-            check_scope(&scope)?;
-        }
-        Ok(PublicGrant {
+        let g = PublicGrant {
             repo: repo.ok_or(Error::Schema("missing repo"))?,
-            branch,
-            epoch,
-            topic,
+            branch: branch.ok_or(Error::Schema("missing branch"))?,
+            epoch: epoch.ok_or(Error::Schema("missing epoch"))?,
+            topic: topic.ok_or(Error::Schema("missing topic"))?,
             authority,
-            validity,
+            validity: validity.ok_or(Error::Schema("missing validity"))?,
             brokers: brokers.ok_or(Error::Schema("missing brokers"))?,
-            suite,
+            suite: suite.ok_or(Error::Schema("missing suite"))?,
             cap_nonce: cap_nonce.ok_or(Error::Schema("missing cap_nonce"))?,
             publisher_pub,
             parent_grant_id: parent,
             max_epoch,
             extra_branches,
             admin_sig,
-        })
+        };
+        g.validate_structure()?;
+        Ok(g)
+    }
+
+    /// The structural invariants of a well-formed grant, checked on the
+    /// **in-memory** value rather than on its wire bytes.
+    ///
+    /// This is the shared routine behind both directions: [`Self::decode_from`]
+    /// runs it on every decoded grant, and [`wrap_capability`] runs it on a
+    /// caller-constructed one, so a grant that a caller assembled field-by-field
+    /// (every [`PublicGrant`] field is public) cannot be wrapped into bytes that
+    /// its intended recipient would then be forced to reject.
+    ///
+    /// The two *bytes-level* canonicality rules — a sorted/deduplicated wire
+    /// authority array and an omitted-not-empty extra-branch field — are
+    /// deliberately NOT here: `signing_entries` establishes both when it
+    /// encodes, so they can only be violated by a wire encoding, and
+    /// [`Self::decode_from`] checks them directly.
+    pub(crate) fn validate_structure(&self) -> Result<()> {
+        check_suite(&self.suite)?;
+        if self.validity.not_before > self.validity.not_after {
+            return Err(Error::Schema("validity not_before > not_after"));
+        }
+        // The publisher public key is present iff publish is granted: a grant
+        // without publish authority must not carry (and have authenticated) an
+        // unrelated publisher key.
+        if self.authority.contains(&Authority::Publish) != self.publisher_pub.is_some() {
+            return Err(Error::Separation("publisher key presence must match publish authority"));
+        }
+        // The ceiling is a forward bound on the grant's own scope: a grant whose
+        // max_epoch precedes the epoch it is scoped to could never be exercised,
+        // so it is a malformed grant rather than a maximally-narrow one.
+        if self.max_epoch.is_some_and(|m| m.0 < self.epoch.0) {
+            return Err(Error::Schema("max_epoch precedes the grant epoch"));
+        }
+        // Validated over the WHOLE set (primary entry first), so this also pins
+        // the primary branch as the lowest-ordered one: the same branch set can
+        // therefore only be encoded one way.
+        if !self.extra_branches.is_empty() {
+            check_scope(&self.branch_scope())?;
+        }
+        Ok(())
     }
 }
 
@@ -844,8 +861,15 @@ pub const CAPABILITY_WRAP_AAD: &[u8] = b"urn:jeswr:w3id:e2ee-ng:draft:2026-07 ca
 /// zeroizes its own copy before returning), and the AAD is not a caller-chosen
 /// string that the two ends can disagree on.
 ///
-/// The capability is [`Capability::validate`]d first, so a malformed one fails here
-/// rather than producing bytes that [`unwrap_capability`] would always reject.
+/// The capability is validated first — both the read/publish/admin separation
+/// invariants ([`Capability::validate`]) and the public grant's structural ones
+/// (`PublicGrant::validate_structure`, the same routine
+/// [`PublicGrant::decode`] runs) — so a malformed one fails here rather than
+/// producing bytes that [`unwrap_capability`] would always reject. Every
+/// [`PublicGrant`] field is public, so the grant half needs checking too:
+/// separation-correct secrets can still sit on a grant carrying an unsupported
+/// suite, an inverted validity window, a `max_epoch` behind its epoch, or a
+/// non-canonical branch set.
 ///
 /// Zeroizing covers this function's plaintext buffer; it does not retroactively
 /// erase the intermediate CBOR fragments `encode_secret` allocates internally —
@@ -877,6 +901,7 @@ pub const CAPABILITY_WRAP_AAD: &[u8] = b"urn:jeswr:w3id:e2ee-ng:draft:2026-07 ca
 pub fn wrap_capability(cap: &Capability, recipient: &RecipientPublicKey) -> Result<WrappedSecret> {
     use zeroize::Zeroize;
     cap.validate()?;
+    cap.grant.validate_structure()?;
     let mut plaintext = cap.encode_secret();
     let wrapped = wrap::wrap(recipient, &plaintext, CAPABILITY_WRAP_AAD);
     plaintext.zeroize();
