@@ -118,6 +118,37 @@ MiB, +~1.0 MiB / +85%, before gzip). If you do not need validation and bundle
 size matters, build the lean variant — `npm run build:wasm:lean` — which omits
 SHACL entirely (`SparqStore.validate` then throws a clear error if called).
 
+### CommonJS (`require`) consumers
+
+The main entry (`@jeswr/sparq`) is ESM-only: it is built from the `--target web`
+wasm-pack output, whose glue is a real ESM module. From CommonJS, reach it with a
+dynamic import — supported in CJS since Node 12.17, and the way to get the full
+RDF/JS wrapper (`SparqStore`, `Dataset`, `DataFactory`, …):
+
+```js
+const { SparqStore } = await import('@jeswr/sparq');   // inside an async function
+```
+
+`npm run build` **also** produces a `--target nodejs` build of the same engine,
+with the same feature set, into `wasm-node/`. That one is plain CommonJS and
+instantiates the module eagerly at `require()` time (it `readFileSync`s the
+`.wasm` next to the glue), so it is `require()`-able and needs **no `init()`**:
+
+```js
+const { Store } = require('@jeswr/sparq/wasm-node');   // synchronous, no await
+
+const store = Store.load('<http://e/a> <http://e/b> <http://e/c> .', 'ntriples');
+console.log(store.size, store.ask('ASK { ?s ?p ?o }'));   // `size` is a getter
+store.free();
+```
+
+That subpath exposes the **raw generated `Store`** (the same surface documented
+under *Raw wasm `Store`* in `skills/javascript-wasm/SKILL.md`) — strings in,
+SPARQL-JSON strings out, explicit `.free()` — not the RDF/JS wrapper. Use it when
+you want a synchronous engine in a CommonJS file; use `await import(...)` when you
+want `SparqStore`/`Dataset`. The two builds are separate artifacts, so a package
+that only ever uses one still downloads both in the tarball.
+
 ## Usage
 
 ```js
