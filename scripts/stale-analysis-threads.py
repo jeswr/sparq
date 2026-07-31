@@ -31,11 +31,16 @@
 # ------------------------------------------
 #     A thread is resolved ONLY when the analysis that filed it is PROVABLY NOT RUNNING.
 #
-# "Provably" = the Actions API reports that workflow's `state` as one of the disabled
-# states. `active` means the analysis CAN supersede its own thread, so this script must
-# do nothing and leave the thread to the tool that owns it. Anything else — a 404, an
-# unreadable response, an unrecognised state — is UNKNOWN and also does nothing. There is
-# no configuration in which an ambiguous read causes a resolve; that is the self-test's
+# "Provably" needs TWO reads to agree, because DISABLING A WORKFLOW ONLY STOPS FUTURE
+# TRIGGERS: a run that started (or was queued) before the switch flipped keeps going, and
+# that run still owns its threads and can still supersede them. So the sweep is authorised
+# only when the Actions API reports that workflow's `state` as one of the disabled states
+# AND its run census reports every run it has ever started as finished. `active`, or a
+# disabled workflow with an unfinished run, means the analysis CAN supersede its own
+# thread, so this script must do nothing and leave the thread to the tool that owns it.
+# Anything else — a 404, an unreadable response, an unrecognised state, a run census that
+# cannot be read or does not add up — is UNKNOWN and also does nothing. There is no
+# configuration in which an ambiguous read causes a resolve; that is the self-test's
 # headline guard (its "THE HEADLINE GUARD" block: a LIVE analysis must not even enumerate
 # PRs, and inverting the DEAD filter reds it).
 #
@@ -44,6 +49,9 @@
 #     reply — or one comment from a live/undeclared author — disqualifies the thread. A
 #     truncated comment page means the authors are not fully known, which disqualifies it
 #     too (fail open, never guess).
+#   * A PR is swept WHOLE or not at all. If its review threads overflow the enumeration
+#     page, the set of threads is not fully known, so every thread on that PR is skipped
+#     (counted, never resolved) rather than half-sweeping a PR that stays blocked anyway.
 #   * Only threads that are still unresolved are touched; resolving is idempotent, so a
 #     second tick finds nothing and posts nothing.
 #   * Every mutation is bounded per run (`--max-resolves`) and every skipped thread is
@@ -101,9 +109,17 @@ ANALYSES: tuple[Analysis, ...] = (
 )
 
 # Actions API workflow states. `active` is the ONLY state that means "can still supersede
-# its own threads"; the disabled family is the only one that authorises a resolve.
+# its own threads"; the disabled family is a NECESSARY, not sufficient, condition for a
+# resolve (the run census below is the other half).
 STATE_ACTIVE = "active"
 DISABLED_STATES = frozenset({"disabled_manually", "disabled_inactivity", "disabled_fork"})
+
+# The only run `status` that means a run has finished. Every other value the Actions API
+# reports (queued / in_progress / waiting / requested / pending, plus anything GitHub adds
+# later) means the run may still be writing threads, so the census counts runs by asking
+# for the COMPLETED total and the total total: unfinished = total - completed. That
+# subtraction is closed under new statuses, which a per-status allow-list would not be.
+RUN_STATUS_COMPLETED = "completed"
 
 LIVE = "live"
 DEAD = "dead"
@@ -114,6 +130,7 @@ UNKNOWN = "unknown"
 SKIP_RESOLVED = "already-resolved"
 SKIP_NO_COMMENTS = "no-comments"
 SKIP_AUTHORS_TRUNCATED = "authors-truncated"
+SKIP_PR_THREADS_TRUNCATED = "pr-threads-truncated"
 SKIP_OTHER_AUTHOR = "not-a-dead-analysis"
 ELIGIBLE = "eligible"
 
@@ -212,6 +229,46 @@ def workflow_verdict(state: object) -> str:
     if text in DISABLED_STATES:
         return DEAD
     return UNKNOWN
+
+
+def parse_run_total(raw: object) -> int | None:
+    """`total_count` off one workflow-runs page, or None if the page is unreadable.
+
+    None is the FAIL-CLOSED answer and is decision-bearing: a census we cannot read is not
+    evidence that nothing is running. `bool` is rejected explicitly because it is an `int`.
+    """
+    if not isinstance(raw, dict):
+        return None
+    total = raw.get("total_count")
+    if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+        return None
+    return total
+
+
+def newest_run(raw: object) -> dict | None:
+    """The newest run on a workflow-runs page (they come newest-first), if it is readable."""
+    runs = raw.get("workflow_runs") if isinstance(raw, dict) else None
+    if not isinstance(runs, list) or not runs or not isinstance(runs[0], dict):
+        return None
+    return runs[0]
+
+
+def parse_run_created(raw: object) -> str | None:
+    """The newest run's `created_at`. Receipt evidence only — NEVER decision-bearing."""
+    run = newest_run(raw)
+    created = run.get("created_at") if run else None
+    return str(created) if created else None
+
+
+def parse_run_status(raw: object) -> str | None:
+    """The newest run's `status`, normalized. None = not readable, which is FAIL-CLOSED."""
+    run = newest_run(raw)
+    if run is None:
+        return None
+    status = run.get("status")
+    if not isinstance(status, str) or not status.strip():
+        return None
+    return status.strip().lower()
 
 
 @dataclass(frozen=True)
@@ -342,6 +399,7 @@ class Sweeper:
     resolved: int = 0
     deferred: int = 0
     truncated_enumeration: bool = False
+    truncated_prs: set[int] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         try:
@@ -360,7 +418,11 @@ class Sweeper:
         return json.loads(self.gh_read(argv))
 
     def analysis_state(self, analysis: Analysis) -> AnalysisState:
-        """Is this analysis still running? The whole authority for every mutation below."""
+        """Is this analysis still running? The whole authority for every mutation below.
+
+        DEAD requires BOTH halves: a disabled workflow `state` (no NEW run can start) and a
+        run census proving no started run is still going (nothing OLD is still writing).
+        """
         try:
             raw = self._read_json(
                 ["api", f"repos/{self.owner}/{self.name}/actions/workflows/{analysis.workflow}"]
@@ -371,27 +433,77 @@ class Sweeper:
         except json.JSONDecodeError as error:
             return AnalysisState(analysis, UNKNOWN, f"unparseable: {error}")
         state = raw.get("state") if isinstance(raw, dict) else None
+        text = str(state or "unreported")
         verdict = workflow_verdict(state)
-        last_run = self.last_run_at(analysis) if verdict == DEAD else None
-        return AnalysisState(analysis, verdict, str(state or "unreported"), last_run)
+        if verdict != DEAD:
+            return AnalysisState(analysis, verdict, text)
+        census = self.run_census(analysis)
+        if census is None:
+            # A census we could not read is not proof of quiescence. Fail closed.
+            return AnalysisState(analysis, UNKNOWN, f"{text}, run census unreadable")
+        unfinished, last_run = census
+        if unfinished:
+            # Disabled, but a run started before the switch flipped is still going and
+            # still owns its threads — it can supersede them itself.
+            return AnalysisState(
+                analysis, LIVE, f"{text}, {unfinished} run(s) not finished", last_run
+            )
+        return AnalysisState(analysis, DEAD, text, last_run)
 
-    def last_run_at(self, analysis: Analysis) -> str | None:
-        """Best-effort evidence for the receipt. NEVER decision-bearing: None is fine."""
+    def run_census(self, analysis: Analysis) -> tuple[int, str | None] | None:
+        """(unfinished run count, newest run's `created_at`), or None if unreadable.
+
+        TWO independent signals, and either one alone blocks the sweep:
+
+        * the COUNTS — every run this workflow ever started (`total_count`) minus the ones
+          reported `completed`. Counted server-side, so no page bound can hide a run, and
+          the subtraction is closed under statuses GitHub adds later;
+        * the NEWEST run's own `status`, read off the page. `total_count` is an aggregate
+          this script cannot verify, so it is not trusted alone: a run that is still going
+          is overwhelmingly the newest one, and its status is a fact on the page.
+
+        The two reads cannot race a new run into existence because the caller has already
+        established that the workflow is disabled. Any unreadable, malformed or incoherent
+        answer (unparseable page, missing `total_count`, an unreadable status on a run that
+        exists, completed > total) returns None, which the caller treats as UNKNOWN.
+        """
+        every = self._run_page(analysis)
+        if every is None:
+            return None
+        completed = self._run_page(analysis, status=RUN_STATUS_COMPLETED)
+        if completed is None:
+            return None
+        total, last_run, newest_status = every
+        done, _, _ = completed
+        if done > total:
+            return None
+        unfinished = total - done
+        if total:
+            if newest_status is None:
+                return None  # a run exists but its status is unreadable: fail closed.
+            if newest_status != RUN_STATUS_COMPLETED:
+                unfinished = max(unfinished, 1)
+        return unfinished, last_run
+
+    def _run_page(
+        self, analysis: Analysis, status: str | None = None
+    ) -> tuple[int, str | None, str | None] | None:
+        """One runs page as (total_count, newest created_at, newest status). None = unreadable."""
+        query = "per_page=1" + (f"&status={status}" if status else "")
         try:
             raw = self._read_json(
                 [
                     "api",
                     f"repos/{self.owner}/{self.name}/actions/workflows/"
-                    f"{analysis.workflow}/runs?per_page=1",
+                    f"{analysis.workflow}/runs?{query}",
                 ]
             )
         except (GhError, json.JSONDecodeError):
             return None
-        runs = raw.get("workflow_runs") if isinstance(raw, dict) else None
-        if not isinstance(runs, list) or not runs or not isinstance(runs[0], dict):
+        total = parse_run_total(raw)
+        if total is None:
             return None
-        created = runs[0].get("created_at")
-        return str(created) if created else None
+        return total, parse_run_created(raw), parse_run_status(raw)
 
     def open_pr_threads(self) -> dict[int, list[Thread]]:
         """Every open PR's review threads, bounded by `max_pages`."""
@@ -418,6 +530,11 @@ class Sweeper:
                     self.truncated_enumeration = True
                 if threads:
                     by_pr.setdefault(threads[0].pr, []).extend(threads)
+                    if truncated:
+                        # ...and this PR's thread set is not fully known, so run() must
+                        # sweep NONE of it. Nested review-thread pagination is not
+                        # implemented, so the tail is unreachable, not merely deferred.
+                        self.truncated_prs.add(threads[0].pr)
             page = pulls.get("pageInfo") or {}
             if not page.get("hasNextPage"):
                 return by_pr
@@ -487,6 +604,16 @@ class Sweeper:
         dead_logins = frozenset(by_login)
 
         for pr, threads in sorted(self.open_pr_threads().items()):
+            if pr in self.truncated_prs:
+                # A PR is swept WHOLE or not at all, and its thread set overflowed the
+                # page — so the threads past the first page cannot even be read. Count
+                # them (the census stays total) and resolve none of them.
+                self.count(SKIP_PR_THREADS_TRUNCATED, len(threads))
+                self.log(
+                    f"::warning title={PROGRAM} PR threads truncated::#{pr} has more "
+                    "review threads than one page — swept none of them."
+                )
+                continue
             eligible: list[Thread] = []
             for thread in threads:
                 verdict = classify_thread(thread, dead_logins)
@@ -587,8 +714,11 @@ def _workflow_payload(state: str) -> str:
     return json.dumps({"id": 1, "name": "codeql", "state": state})
 
 
-def _runs_payload(created: str) -> str:
-    return json.dumps({"workflow_runs": [{"created_at": created}]})
+def _runs_payload(created: str, total: int = 1, status: str | None = "completed") -> str:
+    run = {"created_at": created}
+    if status is not None:
+        run["status"] = status
+    return json.dumps({"total_count": total, "workflow_runs": [run] if total else []})
 
 
 def _thread_node(node_id, *, authors, resolved=False, path="a.rs", line=7,
@@ -642,12 +772,19 @@ class FakeGh:
     """Records every argv and answers from canned payloads. No subprocess, ever."""
 
     def __init__(self, *, workflow_state="disabled_manually", pages=None,
-                 resolve_error=None, comment_error=None, last_run="2026-07-18T14:01:00Z"):
+                 resolve_error=None, comment_error=None, last_run="2026-07-18T14:01:00Z",
+                 runs_total=1, runs_completed=1, runs_error=None, newest_status="completed"):
         self.workflow_state = workflow_state
         self.pages = list(pages or [])
         self.resolve_error = resolve_error
         self.comment_error = comment_error
         self.last_run = last_run
+        # The run census: how many runs this workflow ever started, and how many finished.
+        # Equal totals = quiescent; runs_total > runs_completed = something is still going.
+        self.runs_total = runs_total
+        self.runs_completed = runs_completed
+        self.runs_error = runs_error
+        self.newest_status = newest_status
         self.calls: list[list[str]] = []
         self.page_index = 0
 
@@ -681,7 +818,11 @@ class FakeGh:
             thread_id = next(a.split("=", 1)[1] for a in argv if a.startswith("threadId="))
             return _resolve_payload(thread_id)
         if "/runs?" in joined:
-            return _runs_payload(self.last_run)
+            if self.runs_error:
+                raise GhError(self.runs_error)
+            if f"status={RUN_STATUS_COMPLETED}" in joined:
+                return _runs_payload(self.last_run, self.runs_completed)
+            return _runs_payload(self.last_run, self.runs_total, self.newest_status)
         if "actions/workflows/" in joined:
             if self.workflow_state is None:
                 raise GhError("HTTP 404: Not Found")
@@ -713,6 +854,23 @@ def self_test() -> None:
     # Everything undeclared is UNKNOWN — including a state GitHub invents later.
     for state in (None, "", "queued", "disabled_something_new", 7):
         assert workflow_verdict(state) == UNKNOWN, state
+
+    # The run census is decision-bearing, so an unreadable page reads as None, not 0.
+    assert parse_run_total({"total_count": 0}) == 0
+    assert parse_run_total({"total_count": 12}) == 12
+    for bad in (None, [], {}, {"total_count": None}, {"total_count": "3"},
+                {"total_count": True}, {"total_count": -1}):
+        assert parse_run_total(bad) is None, bad
+    assert parse_run_created(json.loads(_runs_payload("2026-07-18T14:01:00Z"))) \
+        == "2026-07-18T14:01:00Z"
+    assert parse_run_created(json.loads(_runs_payload("x", total=0))) is None
+    assert parse_run_created({"workflow_runs": [{}]}) is None
+    assert parse_run_status(json.loads(_runs_payload("x", status=" In_Progress "))) \
+        == "in_progress"
+    assert parse_run_status(json.loads(_runs_payload("x"))) == RUN_STATUS_COMPLETED
+    for bad in (None, {"workflow_runs": []}, {"workflow_runs": [{}]},
+                {"workflow_runs": [{"status": ""}]}, {"workflow_runs": [{"status": 7}]}):
+        assert parse_run_status(bad) is None, bad
 
     dead = frozenset({CODEQL})
     bot = Thread("t", 1, False, False, "a.rs", 7, (CODEQL,), False)
@@ -765,6 +923,43 @@ def self_test() -> None:
         _sweeper(probe).run()
         assert probe.mutations() == [], state
 
+    # ---- THE SECOND HALF OF THE INVARIANT: disabled is not the same as quiescent -------
+    # `disabled_manually` only stops the NEXT trigger. A run queued or in progress when the
+    # switch flipped still owns its threads, so the sweep must not start. Delete the
+    # `if unfinished:` branch in analysis_state() and this goes red.
+    busy = FakeGh(pages=[page], runs_total=4, runs_completed=3)
+    sweeper = _sweeper(busy)
+    sweeper.run()
+    assert busy.mutations() == [], busy.mutations()
+    assert busy.page_index == 0, "an unfinished run must not even enumerate PRs"
+    assert sweeper.resolved == 0 and sweeper.failures == []
+    # Counts that AGREE are not enough either: `total_count` is a server-side aggregate
+    # this script cannot verify, so the newest run's own status must also say it finished.
+    # Delete the `if newest_status != RUN_STATUS_COMPLETED` branch and this goes red.
+    for status in ("in_progress", "queued", "waiting", "some_status_github_adds_later"):
+        running = FakeGh(pages=[page], newest_status=status)
+        sweeper = _sweeper(running)
+        sweeper.run()
+        assert running.mutations() == [] and running.page_index == 0, status
+        assert sweeper.resolved == 0, status
+        # ...and it is LIVE, not UNKNOWN: the analysis is running, it was not unreadable.
+        assert sweeper.analysis_state(ANALYSES[0]).verdict == LIVE, status
+    # An unreadable or malformed census fails closed identically — as UNKNOWN, because
+    # nothing was learned. Reporting it LIVE would claim a fact the read never gave us.
+    for census in (dict(runs_error="HTTP 500"), dict(runs_total=0, runs_completed=1),
+                   dict(newest_status=None)):
+        blind = FakeGh(pages=[page], **census)
+        sweeper = _sweeper(blind)
+        sweeper.run()
+        assert blind.mutations() == [] and blind.page_index == 0, census
+        assert sweeper.resolved == 0, census
+        assert sweeper.analysis_state(ANALYSES[0]).verdict == UNKNOWN, census
+    # ...while a disabled workflow whose every run has COMPLETED does sweep.
+    quiet = FakeGh(pages=[page], runs_total=57, runs_completed=57)
+    sweeper = _sweeper(quiet)
+    sweeper.run()
+    assert sweeper.resolved == 2, sweeper.resolved
+
     # ---- the sweep itself --------------------------------------------------------------
     fake = FakeGh(pages=[page])
     sweeper = _sweeper(fake)
@@ -807,8 +1002,12 @@ def self_test() -> None:
 
     class TwoWorkflowGh(FakeGh):
         def __call__(self, argv):
-            if "actions/workflows/other.yml" in " ".join(argv):
+            joined = " ".join(argv)
+            if "actions/workflows/other.yml" in joined:
                 self.calls.append(list(argv))
+                # Disabled AND quiescent — every run it ever started reports completed.
+                if "/runs?" in joined:
+                    return _runs_payload(self.last_run)
                 return _workflow_payload("disabled_inactivity")
             return super().__call__(argv)
 
@@ -865,13 +1064,21 @@ def self_test() -> None:
     assert any("enumeration truncated" in line for line in logged), logged
     assert fake.page_index == 2, fake.page_index
 
-    # A per-PR thread page overflow is flagged too.
-    fake = FakeGh(pages=[_graphql_payload(
-        [_pr_node(30, [_thread_node("R", authors=[CODEQL])], threads_truncated=True)]
-    )])
+    # A per-PR thread page overflow fails CLOSED: nested review-thread pagination is not
+    # implemented, so the threads past the page are unreachable, and a half-swept PR stays
+    # blocked anyway. Every thread read is still counted, so the census stays total.
+    fake = FakeGh(pages=[_graphql_payload([
+        _pr_node(30, [_thread_node("R", authors=[CODEQL])], threads_truncated=True),
+        _pr_node(31, [_thread_node("S", authors=[CODEQL])]),
+    ])])
     sweeper = _sweeper(fake)
     sweeper.run()
-    assert sweeper.truncated_enumeration and sweeper.resolved == 1
+    assert sweeper.truncated_enumeration and sweeper.truncated_prs == {30}
+    assert sweeper.counts == {SKIP_PR_THREADS_TRUNCATED: 1, ELIGIBLE: 1}, sweeper.counts
+    # ...and only the whole-known PR was touched.
+    assert sweeper.resolved == 1, sweeper.resolved
+    assert [argv for argv in fake.comments() if "30" in argv] == [], "PR 30 gets no comment"
+    assert fake.resolves() and "S" in " ".join(fake.resolves()[0]), fake.resolves()
 
     # ---- failures are collected, never swallowed ---------------------------------------
     fake = FakeGh(pages=[two_prs], resolve_error="Resource not accessible by integration")

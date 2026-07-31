@@ -466,11 +466,15 @@ Two lanes bound that failure mode, and neither weakens the rule:
   naming `threads-resolved` as the condition that un-parks it.
 - **Exitable** — `.github/workflows/stale-analysis-threads.yml` (daily;
   `scripts/stale-analysis-threads.py`) resolves a thread **only** when the Actions API
-  reports the workflow that files it as disabled, every comment in it is from that
-  analysis, and no human has replied. An `active` workflow — or any state the API does not
-  report — sweeps nothing, because a live analysis can still clear its own threads. Every
-  resolve is receipted on the PR (one comment per analysis), naming that analysis, the
-  workflow state that authorised the sweep, and every thread it resolved.
+  reports the workflow that files it as disabled **and** reports every run that workflow
+  ever started as finished, every comment in it is from that analysis, and no human has
+  replied. An `active` workflow, a disabled one with a queued/in-progress run (disabling
+  stops the next trigger, not the run already going), or any state or run census the API
+  does not report readably — sweeps nothing, because a live analysis can still clear its
+  own threads. A PR whose review threads overflow one enumeration page is swept whole or
+  not at all, so it is skipped entirely rather than half-resolved. Every resolve is
+  receipted on the PR (one comment per analysis), naming that analysis, the workflow state
+  that authorised the sweep, and every thread it resolved.
 
   This resolves a *thread*, never a *finding*: the `code_scanning` alert rule above is a
   separate gate and is untouched, and re-enabling the workflow re-files anything still
