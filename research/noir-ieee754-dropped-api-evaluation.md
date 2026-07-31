@@ -128,7 +128,8 @@ fn abs(self) -> Self {
 
 No rounding, no packing, no `round_pack_normalized`, no new `unconstrained` block, and no
 new arithmetic on the exponent or mantissa lanes. That is what makes it separable from §4's
-kernel surgery and from §8's audit-window constraint.
+kernel surgery. It does **not** exempt it from §8's audit-window constraint — it ships as a
+face-repo tag bump like everything else here, so §8 governs when it lands.
 
 ### 3.3 The soundness obligation (not a claim)
 
@@ -346,9 +347,20 @@ three items, and the difference is worth acting on:
 
 - **`abs`/`neg` (§3) are additive and outside the audited kernel arithmetic** — a sign-lane
   transform on an already-canonical decode, no `round_pack_normalized` involvement, no new
-  `unconstrained` block. Subject to §7.7 holding, it is the item that **can** land without
-  disturbing an audit snapshot. It is also the item with a real consumer. Those two facts
-  point the same way.
+  `unconstrained` block. Subject to §7.7 holding, that makes it the **lowest review-delta**
+  of the three, and it is also the one with a real consumer.
+  **It does not follow that it is snapshot-neutral.** The implementation lands in the face
+  repo and reaches this estate as a **tag bump** (§0, §7.6), and the `IEEE754-CONSTR` row in
+  `zk-audit-readiness-dossier.md` §2 pins its evidence to a *specific* face-repo tag
+  (`sparq_ieee754 @ v0.11.0`, static-analysed at a pinned commit under `sq-l9ulg`). Bumping
+  that tag changes the dependency source and the published trust-base surface under review,
+  whether or not any instantiated `zk/compose` circuit changes. **No audit-scope evidence in
+  this repo establishes that an additive sign-lane API is inside the accepted audit delta.**
+  So the same "before or after a snapshot, never across it" rule applies by default; the
+  only thing that lifts it is the **external auditor explicitly confirming** that additive,
+  non-kernel API additions are within the accepted delta for the pinned artefact. Until that
+  confirmation exists, treat the low review-delta as an argument about *cost of re-review*,
+  not as permission to land mid-window.
 - **Directed rounding (§4) reopens `round_pack_normalized`** — #3140 §8's
   "before or after a snapshot, never across it" rule stands unchanged.
 - **`from_field_bits` (§5.4) touches the trust-boundary entry point** — treat it exactly like
@@ -359,11 +371,14 @@ three items, and the difference is worth acting on:
 
 ## 9. Recommendation to the maintainer
 
-1. **Greenlight `abs` (+ `neg` if absent) now.** It is the only one of the three with a named
-   consumer this repo has already committed to on paper, it is the cheapest to implement, it
-   has the clearest canonicality argument, and it is the one that does not collide with an
-   audit snapshot. Conditions: §3.4's two traps avoided, §3.5's NaN convention pinned, §7.1–.4
-   and §7.6–.9 discharged.
+1. **Greenlight `abs` (+ `neg` if absent), scheduled around the audit window.** It is the only
+   one of the three with a named consumer this repo has already committed to on paper, it is
+   the cheapest to implement, it has the clearest canonicality argument, and it carries the
+   smallest re-review delta. Conditions: §3.4's two traps avoided, §3.5's NaN convention
+   pinned, §7.1–.4 and §7.6–.9 discharged — **and §8's audit coordination**: because it ships
+   as a face-repo tag bump, it lands **before or after** the pinned audit snapshot unless the
+   external auditor confirms additive sign-lane APIs are within the accepted delta. Low
+   review-risk is not the same as snapshot-safe, and this record does not claim the latter.
 2. **Close item (2) onto #3140.** No second decision, no duplicated record.
 3. **Decline `Field`↔float in the shapes it was dropped in.** `From<Field>` and the numeric
    `Field`-value conversion should be declined outright (§5.4); `to_field` should be declined
