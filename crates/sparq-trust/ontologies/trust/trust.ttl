@@ -114,7 +114,7 @@ trust:scope a rdf:Property, owl:ObjectProperty ;
 
 trust:freshWithin a rdf:Property, owl:DatatypeProperty ;
   rdfs:label "fresh within"@en ;
-  rdfs:comment "Maximum staleness admitted, as an xsd:duration consulted against Session.now. The temporal gate, orthogonal to source/type/scope (§2.3.2 item 9). It MUST be enforced as a per-request Rust side-condition, NOT an in-reasoner predicate (§3.3) — time is not a reasoner fact."@en ;
+  rdfs:comment "Maximum staleness admitted, as an xsd:duration consulted against Session.now. The temporal gate, orthogonal to source/type/scope (§2.3.2 item 9). It MUST be enforced as a per-request Rust side-condition, NOT an in-reasoner predicate (§3.3) — time is not a reasoner fact. The lexical value MUST lie in the exactly-representable day/time subset (PnDTnHnMnS — the non-negative, whole-second part of the xsd:dayTimeDuration lexical space): the nominal year/month designators (P1Y, P6M) have no exact seconds value without an anchor instant, so they are rejected fail-closed rather than approximated — a policy meaning 'a year' must write P365D."@en ;
   rdfs:domain trust:TrustRule ;
   rdfs:range xsd:duration ;
   rdfs:isDefinedBy trust: .
