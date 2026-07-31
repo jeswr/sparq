@@ -100,6 +100,17 @@ codepoint-positional substring is bead `sq-hjvte`) while SPARQL `SUBSTR` is code
 indexed. They agree exactly on single-byte content and only there, so sampling multibyte
 would pin a known beaded gap rather than detect a regression.
 
+**Known scope limit — scalars only.** Every corpus entry is a SCALAR (string, numeric,
+`xs:dateTime`); the harness samples no sequence-valued or aggregate function, so it carries
+no evidence either way about `fn:avg` / `fn:sum` / `fn:min` / `fn:max` on any input. The
+one conformance question raised there has been **decided and recorded**, not implemented:
+`fn:avg(())` returns the empty sequence per XPath F&O §15.4.4, while `noir_XPath` rejects
+fail-closed — the decision is to KEEP the refusal (Noir has no empty-sequence inhabitant, and
+refusing can only make a witness unsatisfiable whereas coercing to an in-band `0` would make
+a false proposition witnessable). See the `fn:avg(())` bullet in
+[`skills/zk-query-proofs/SKILL.md`](../../../skills/zk-query-proofs/SKILL.md) for the full
+rationale, the reachability argument, and the condition under which it expires (`sq-jxh15`).
+
 A green run makes **no soundness or privacy claim**. The ZK estate remains research-grade
 and **NOT externally audited** (`sq-qhy4`).
 
