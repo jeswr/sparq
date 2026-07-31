@@ -171,6 +171,15 @@ crates = ["sparq-conformance"]
 pattern = "bench/reason-diff/rl/**"
 crates = ["sparq-reason-diff"]
 
+# [OPUS-5] sq-3xsx0: the competitor Datalog encodings (Nemo `.rls`, VLog `.dlog`)
+# whose OWL-RL rules must stay set-identical to sparq's own closure. sparq-reason's
+# datalog_intersection_arity.rs reads both files at runtime (an
+# env!("CARGO_MANIFEST_DIR")-relative read) to assert `cls-int1` is the arity-generic
+# list walk, so an encoding edit must re-run that guard.
+[[map]]
+pattern = "bench/reason-encodings/**"
+crates = ["sparq-reason"]
+
 # ZK-compose gate-count + SPARQL-feature catalog fixtures (committed JSON),
 # include_str!'d by sparq-zk-compose's gate_count/sparql_catalog tests.
 [[map]]
