@@ -192,10 +192,23 @@ deltas.
 
 ### 2.5 Explicitly deferred (designed-only; recorded so nobody "helpfully" builds them)
 
-- **Multi-hop endorsement (depth > 1)** — the closure and the meta-scope invariant are
-  specified above, but the prototype ships depth 1 (the eIDAS/DIATF trusted-list shape).
-  Depth > 1 needs the certification-authority scope shape + the `sq-pfae.9` cost bound
-  first.
+- ~~**Multi-hop endorsement (depth > 1)**~~ — **SHIPPED** as a library capability by
+  `sq-13096` (issue #3087). `graph::derive_effective_rules` now iterates up to `depth_bound`
+  hops, re-deriving the ⊆ ceiling per hop. The precondition this entry named is met, not
+  waived: the **certification-authority scope shape** is the §2.4-rule-3 meta-scope gate,
+  enforced by `graph::confers_certification_authority` — a DERIVED rule may act as an edge
+  source at a deeper hop only if its own shape SELECTS `trustx:Certification` statements
+  (`sh:targetSubjectsOf`/`sh:targetObjectsOf trustx:certifies`, or `sh:targetClass
+  trustx:Certification`), so an attribute-scoped issuer still cannot extend a chain. No new
+  vocabulary was needed — the existing `trustx:` terms plus the shape ARE that scope.
+  **The `sq-pfae.9` cost bound is NOT separately closed;** what stands in for it is the
+  structural bound the closure now carries — each edge contributes at most one derived rule
+  to the whole closure, so `derived.len() <= certifications.len()` at any `depth_bound`, and
+  work is `O(depth_bound × edges × frontier)`. **Every shipped call site still passes
+  `depth_bound = 1`** (`TrustStore::effective_rules_at`, the `sparq-server` `solid-authz-trust`
+  handler): raising it is a deliberate policy change, not a default, and no shipped behaviour
+  changed. <!-- [OPUS-5] sq-13096 status update; the rest of this record is the original
+  2026-07 snapshot. 🤖 SPARQ agent. -->
 - **Threshold / k-of-n corroboration** (RT^T-style "admit only if ≥k independent trusted
   issuers attest"). Monotone and implementable as a Rust-side admission count over
   *distinct verified issuer keys* — but requested nowhere in #940/#1592, and

@@ -205,7 +205,7 @@ The `trustx:Certification` vocabulary (`framework_vocab`, design record
 `research/trust-expression-spec.md` §3.4 / D4) says who vouches for whom, over what
 scope, in what window — but has **no pod-side evaluation**: admission consumes a flat
 `Vec<TrustRule>`. The `graph` module (behind the default-OFF **`cert-graph`** feature)
-adds `derive_effective_rules`: a **depth-bounded (v1: depth-1), attenuation-only,
+adds `derive_effective_rules`: a **depth-bounded (depth-N, `sq-13096`), attenuation-only,
 fail-closed** certification-edge closure that runs **AHEAD of** — and produces the rule
 set consumed **verbatim by** — the UNCHANGED admission gate (stratum 1 above). It changes
 **no** gate; it is a pure pre-processing step.
@@ -226,10 +226,27 @@ certifier's key** — a CHECKED signature, never a self-asserted `trustx:certifi
 Every derived rule satisfies `derived ⊆ (anchor ∩ cert scope ∩ validity window)`: a
 certification can only **NARROW**, never **WIDEN**, the certifier's own authority. Concretely:
 
-- **Anchor.** The certifier MUST be a **direct** anchor rule (`source` + matching key) in
-  the input `direct_rules` — only authority the pod already holds can be conferred. (This
-  is the depth bound made concrete: a *derived* rule is never re-used as an anchor, so the
-  closure is a single pass and cannot transitively chain.)
+- **Anchor.** The certifier MUST be an anchor rule (`source` + matching key) available to
+  the hop being evaluated — only authority the pod already holds can be conferred. This is
+  the depth bound made concrete: hop 1's anchors are the input `direct_rules`, and hop *k*'s
+  are EXACTLY the rules hop *k−1* derived, so the closure chains transitively but never past
+  `depth_bound` hops. A chain longer than the bound has its tail left underived, and the
+  ceiling is re-derived at every hop, so `derived_N ⊆ … ⊆ derived_1 ⊆ anchor` — a broadening
+  at ANY hop is denied at that hop.
+- **Meta-scope non-escalation** (`research/trust-graph-authorisation-2026-07.md` §2.4 rule 3
+  — the invariant that record made the precondition for depth>1). A certification confers the
+  authority to **ISSUE** statements of a scope; it does NOT on its own confer the authority to
+  **CONFER**, which is strictly stronger. So a *derived* rule may act as an edge SOURCE at a
+  deeper hop only if its own incoming certification scope covers certification-issuing itself
+  — concretely, only if its statement-type shape **selects** `trustx:Certification` statements
+  (`sh:targetSubjectsOf`/`sh:targetObjectsOf trustx:certifies`, or `sh:targetClass
+  trustx:Certification`). Being certified for `schema:age` makes you an ISSUER, not a
+  REGISTRAR; without this gate `GOV certifies MID (for age)` would let MID confer age
+  authority on issuers GOV and the pod never considered — a broadening in the META dimension,
+  invisible to the shape ceiling because the conferred rule is strictly inside MID's own
+  shape. Fail-closed (unknown ⇒ no certification authority). DIRECT anchors are EXEMPT: they
+  are the pod's own explicit decision, and exempting them is what keeps `depth_bound = 1`
+  byte-identical to the pre-`sq-13096` closure.
 - **Statement-type narrowing — target-set-CONTRAVARIANT, conformance-COVARIANT.** A SHACL
   shape selects focus nodes by the **UNION** of its target predicates
   (`sh:targetSubjectsOf` / `sh:targetObjectsOf` / `sh:targetNode` / `sh:targetClass` /
@@ -261,9 +278,18 @@ certification can only **NARROW**, never **WIDEN**, the certifier's own authorit
 - **Time.** An expired / not-yet-valid / inverted-window (missing positive status) edge
   ⇒ NOTHING (positive, existence-of-a-covering-window semantics; OWA/monotonicity, §3.3
   D3).
-- **No cycle amplification.** A self-certifying edge, or one whose certified issuer already
-  anchors the certifier, is dropped — it can add no new authority and is the shape a cycle
-  would use to launder a broadening.
+- **No cycle amplification, within OR across rounds.** A self-certifying edge, or one whose
+  certified issuer already holds a matching-key rule in the closure so far (a direct anchor
+  OR one derived at an earlier hop), is dropped — it can add no new authority and is the
+  shape a cycle would use to launder a broadening. Reading the WHOLE closure-so-far, rather
+  than only `direct_rules`, is what makes a cross-round cycle (`A → B → A`) converge instead
+  of amplifying, and it bounds the whole closure at **one derived rule per edge** —
+  `derived.len() <= certifications.len()` at any `depth_bound`. A visited set keyed on each
+  certification's INPUT INDEX states that bound redundantly; it is belt-and-braces, not the
+  guard (see the `graph` module docs). It is keyed per RECORD, not per `(certifier,
+  certified_issuer)` pair, so two distinct signed records sharing both endpoints — differing
+  in `certified_key`, scope, window or signature — stay independently eligible; one firing at
+  hop *k* must not skip a sibling that only becomes anchored at hop *k+1*.
 - **Strict additivity.** Zero certifications (or none surviving the gate) ⇒ output is
   `direct_rules` **byte-identical**; a `depth_bound` of `0` short-circuits identically.
 

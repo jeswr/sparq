@@ -1391,7 +1391,10 @@ fn trust_authz_decide(
     }
 
     // ── 5. Run the cert-graph closure ────────────────────────────────────────
-    // Depth-1 closure: derived rules are NOT re-used as anchors (sq-tu4e discipline).
+    // The handler's POLICY choice of `depth_bound = 1`, not a library limit:
+    // `derive_effective_rules` is depth-N (sq-13096). One hop keeps a request's effective
+    // rules traceable to a certifier the request itself directly anchored; raising it would
+    // admit framework-of-frameworks chains and is a deliberate policy change, not a default.
     let pre_count = direct_rules.len();
     let effective_rules = derive_effective_rules(&direct_rules, &certifications, now_unix_secs, 1);
     let cert_graph_derived = effective_rules.len() > pre_count;

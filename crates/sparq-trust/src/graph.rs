@@ -1,8 +1,8 @@
 //! # `graph.rs` — the depth-bounded certification-edge trust-graph closure (fail-closed)
 //!
 //! The pod-side evaluation the merged `trustx:Certification` vocabulary
-//! ([`crate::framework_vocab`]) lacked: [`derive_effective_rules`] runs a **depth-bounded**
-//! (v1: depth-1), **attenuation-only**, **fail-closed** closure over signed
+//! ([`crate::framework_vocab`]) lacked: [`derive_effective_rules`] runs a **depth-bounded
+//! (depth-N)**, **attenuation-only**, **fail-closed** closure over signed
 //! certification edges to derive additional [`TrustRule`]s **AHEAD of** — and consumed
 //! by — the UNCHANGED admission gate ([`mod@crate::admit`]). It is a pure PRE-PROCESSING
 //! step: it produces the `Vec<TrustRule>` admission then consumes verbatim; it does not
@@ -14,7 +14,7 @@
 //!                                ▼
 //!   ┌──────────────────────────────────────────────────────────────────┐
 //!   │  derive_effective_rules  (this module, NEW, OPT-IN `cert-graph`)   │
-//!   │  depth-1 · attenuation-only · fail-closed certification closure    │
+//!   │  depth-N · attenuation-only · fail-closed certification closure    │
 //!   │  every derived rule ⊆ (anchor ∩ cert scope ∩ validity window)      │
 //!   └──────────────────────────────────────────────────────────────────┘
 //!                                │  effective_rules == direct_rules ++ derived
@@ -28,8 +28,9 @@
 //! another issuer (the **certified issuer**) is certified — under a framework, over a
 //! **scope**, within a **validity window** — to issue statements of that scope. A
 //! Trusted-List / DIATF-register entry IS one such edge. The closure lets a pod that
-//! anchors trust in a *certifier* transitively (depth-1) admit facts from issuers that
-//! certifier vouches for — but ONLY narrowed to what the certifier itself may confer.
+//! anchors trust in a *certifier* transitively (up to `depth_bound` hops) admit facts from
+//! issuers that certifier vouches for — but ONLY narrowed to what the certifier itself may
+//! confer, and, at hop *k*, only to what hop *k−1* itself derived.
 //!
 //! ## The HARD invariant — fail-closed, attenuation-ONLY (a broadening bug is escalation)
 //!
@@ -37,12 +38,16 @@
 //! certifier does not hold is a **privilege escalation**, not a bug to paper over. The
 //! closure therefore guarantees:
 //!
-//! - **Attenuation only.** Every derived rule's scope is the *intersection*
+//! - **Attenuation only, at EVERY depth.** Every derived rule's scope is the *intersection*
 //!   `anchor_scope ∩ cert_scope ∩ validity_window` and its statement-type shape is the
 //!   *intersection* of the anchor's shape with the cert's — a certification can only
 //!   **NARROW**, never **WIDEN**, the certifier's own authority. Where narrowing cannot
 //!   be *proven* (undecidable SHACL-shape containment), the edge contributes **NOTHING**
 //!   (design §3.4: "undecidable containment ⇒ NOT contained ⇒ contributes nothing").
+//!   The ⊆ ceiling is **re-derived per hop** against the rule the previous hop produced —
+//!   never against the root anchor — so the chain telescopes:
+//!   `derived_N ⊆ derived_{N-1} ⊆ … ⊆ derived_1 ⊆ anchor`. A hop that broadens is denied
+//!   *at that hop*, and the tail beyond it is therefore never reached.
 //! - **Target-set-CONTRAVARIANT, conformance-COVARIANT shape containment.** SHACL shapes
 //!   have two kinds of statement: **selection/target** predicates (`sh:targetSubjectsOf`,
 //!   `sh:targetObjectsOf`, `sh:targetNode`, `sh:targetClass`, `sh:targetWhere`, the
@@ -71,13 +76,51 @@
 //!   nothing). A forged/absent signature ⇒ NOTHING.
 //! - **Fail-closed on time.** An expired / not-yet-valid / (positive-)status-missing edge
 //!   ⇒ NOTHING; the derived rule's freshness is `min(anchor.fresh_within, window)`.
-//! - **No cycle-driven amplification.** A self-certifying edge (`certifier ==
-//!   certified_issuer`), or one whose certified issuer already anchors the certifier, is
-//!   dropped: it can add no authority the graph did not already hold, and admitting it
-//!   would let a cycle launder a broadening.
-//! - **Depth-bounded.** v1 is depth-1: derived rules are NOT themselves used as anchors
-//!   for a further round (no in-reasoner recursion; the `sq-tu4e` discipline is untouched).
-//!   A `depth_bound` of `0` short-circuits to `direct_rules`.
+//! - **No cycle-driven amplification, within OR across rounds.** The load-bearing mechanism
+//!   is the CYCLE gate, now evaluated against the whole closure-so-far rather than only the
+//!   direct anchors: a self-certifying edge (`certifier == certified_issuer`), or one whose
+//!   certified issuer already holds a matching-key rule (direct OR derived at an earlier
+//!   hop), is dropped — it can add no authority the graph did not already hold, and admitting
+//!   it would let a cycle launder a broadening. A cycle `A → B → A` (or any longer loop)
+//!   therefore converges after one traversal instead of re-entering and re-attenuating
+//!   forever, and each edge contributes at most ONE rule to the whole closure —
+//!   **`derived.len() <= certifications.len()` at any `depth_bound`** — so depth cannot
+//!   multiply authority.
+//!
+//!   A **visited set keyed on each certification's INPUT INDEX** sits alongside it as a
+//!   REDUNDANT, explicit statement of that same bound. Stated honestly: it is belt-and-braces,
+//!   not the guard — disabling it turns NO test in this crate red, because the cycle gate
+//!   already denies every edge it would have skipped (an edge that has fired leaves its
+//!   certified issuer holding a matching-key rule). It is kept because it makes the
+//!   ≤1-rule-per-edge bound a visible loop invariant rather than a consequence of reasoning
+//!   about the cycle gate's key-equality test. Do NOT cite it as the reason a cycle is safe;
+//!   cite the cycle gate. The key is the index and NOT `(certifier, certified_issuer)`:
+//!   distinct signed records may share both endpoints while differing in `certified_key`
+//!   (or scope/window/signature), and an endpoint-pair key would let one record firing at
+//!   hop *k* silently skip a sibling that only becomes anchored at hop *k+1* — a valid
+//!   derivation lost, and one the cycle gate does NOT redundantly cover, since the fired
+//!   record's rule binds a different key than the sibling certifies.
+//! - **Depth-bounded.** The closure runs at most `depth_bound` rounds: round 1's anchors are
+//!   `direct_rules`; round *k*'s anchors are exactly the rules round *k−1* derived that also
+//!   pass the meta-scope gate below. It is iterative, not recursive-in-the-reasoner (the
+//!   `sq-tu4e` discipline is untouched), and it stops early the moment a round derives
+//!   nothing (or derives nothing that may certify). A `depth_bound` of `0` short-circuits to
+//!   `direct_rules`; a chain LONGER than `depth_bound` simply has its tail left underived
+//!   (fail-closed — the tail is denied, never approximated).
+//! - **Meta-scope non-escalation (the depth>1 precondition).** A certification confers the
+//!   authority to ISSUE statements of a scope; it does NOT on its own confer the authority to
+//!   CONFER, which is strictly stronger. So a DERIVED rule may act as an edge source at a
+//!   deeper hop only if its own incoming certification scope covers certification-issuing
+//!   itself — concretely, only if its statement-type shape SELECTS `trustx:Certification`
+//!   statements (the module-private `confers_certification_authority`). Being certified for
+//!   `schema:age` makes you an ISSUER, not a REGISTRAR: without this gate,
+//!   `GOV certifies MID (for age)` would
+//!   let MID confer age authority on issuers GOV and the pod never considered — MID gaining
+//!   an authority its certification never granted, which is a broadening in the meta
+//!   dimension. `research/trust-graph-authorisation-2026-07.md` §2.4 rule 3 states the
+//!   invariant and §2.5 made it the stated precondition for depth>1; this is where it is
+//!   enforced. DIRECT anchors are exempt (they are the pod's own explicit decision), which is
+//!   also what keeps `depth_bound = 1` byte-identical to the v1 closure.
 //! - **Strict additivity.** ZERO certifications (or none that survive the gate) ⇒ output
 //!   is `direct_rules` **byte-identical** (same rules, same order, cloned verbatim).
 //! - **Opt-in.** The whole module is behind the default-OFF `cert-graph` feature; with it
@@ -100,7 +143,18 @@
 //! [OPUS-4.8] sq-pfae.15 (epic sq-pfae, issue #940; design record
 //! `research/trust-expression-spec.md` §3.4). Written while Fable unavailable — flag for
 //! re-review when Fable returns. 🤖 SPARQ agent — certification-edge trust-graph closure.
+//!
+//! [OPUS-5] sq-13096 (issue #3087) — the depth-N generalisation: the v1 closure was
+//! DEPTH-1 ONLY (a derived rule was never re-used as an anchor, so a framework-of-frameworks
+//! chain `A certifies B, B certifies C` derived nothing for `C`). It now iterates rounds up
+//! to `depth_bound` with a per-record visited set, a per-hop
+//! re-derivation of the ⊆ ceiling, and the SAME signature/time/shape gates per hop — plus the
+//! meta-scope non-escalation gate above, which the depth>1 deferral in
+//! `research/trust-graph-authorisation-2026-07.md` §2.5 named as its precondition and which
+//! the bead's own spec did not enumerate.
+//! 🤖 SPARQ agent — transitive framework-of-frameworks certification.
 
+use crate::framework_vocab::{TRUSTX_CERTIFICATION, TRUSTX_CERTIFIES};
 use crate::policy::{ShapeRef, TrustRule};
 use crate::vocab::{RDF_TYPE, SH_NS};
 use oxrdf::{NamedNode, Term};
@@ -189,9 +243,9 @@ pub struct Certification {
 /// a rejected edge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EdgeRejection {
-    /// The certifier names no anchor [`TrustRule`] in `direct_rules`, OR the anchor it
+    /// The certifier names no anchor [`TrustRule`] in the hop's anchor set, OR the anchor it
     /// names binds a different key than `certifier_key` — the pod does not anchor this
-    /// certifier, so it can confer nothing.
+    /// certifier (at this hop), so it can confer nothing.
     NoAnchor,
     /// The edge signature is absent or did not verify under `certifier_key` over the
     /// domain-separated [`certification_message`] (a self-asserted / forged edge).
@@ -199,15 +253,21 @@ pub enum EdgeRejection {
     /// The window is ill-formed (`valid_until < valid_from`) or does not cover `now`
     /// (expired / not-yet-valid) — fail-closed on time.
     OutOfWindow,
-    /// `certifier == certified_issuer` (self-certification), or the certified issuer
-    /// already anchors the certifier — a cycle that could launder a broadening or add
-    /// no new authority. Dropped.
+    /// `certifier == certified_issuer` (self-certification), or the certified issuer already
+    /// holds a matching-key rule in the closure so far (a direct anchor, or one derived at an
+    /// earlier hop) — a cycle that could launder a broadening or add no new authority.
+    /// Dropped.
     Cyclic,
     /// The certification scope is NOT provably contained in the certifier's anchor scope
     /// (a broadening attempt, or an undecidable containment). Attenuation-only ⇒ dropped.
     Broadening,
-    /// The `depth_bound` was `0`, or this edge would only be reachable at a depth beyond
-    /// the bound (v1 depth-1: derived rules are never re-used as anchors).
+    /// The `depth_bound` was `0` — no hop is permitted at all, so no edge can derive.
+    ///
+    /// An edge that is merely *deeper* than the bound is NOT reported here: it never gets a
+    /// hop to be evaluated at, so [`explain_edge`] against the anchors it would have needed
+    /// reports [`EdgeRejection::NoAnchor`] (its certifier is not in that anchor set). The
+    /// closure-level statement is the behavioural one — a chain longer than `depth_bound`
+    /// has its tail left underived (see [`derive_effective_rules`]).
     OverDepth,
 }
 
@@ -221,19 +281,35 @@ pub enum EdgeRejection {
 /// - `certifications` — the signed [`Certification`] edges (from a framework's published
 ///   Trusted-List / register). Each is CHECKED, never trusted on assertion.
 /// - `now_unix_secs` — the evaluation instant, checked against each edge's window.
-/// - `depth_bound` — the closure depth. v1 uses `1`: derived rules are NOT re-used as
-///   anchors for a further round. `0` short-circuits to `direct_rules` verbatim.
+/// - `depth_bound` — the maximum number of certification HOPS. `1` is the depth-1 closure
+///   (only `direct_rules` may certify); `2` additionally admits a framework-of-frameworks
+///   chain `A certifies B, B certifies C`; `0` short-circuits to `direct_rules` verbatim.
+///   A chain longer than `depth_bound` has its tail left **underived** (fail-closed).
 ///
 /// The result is `direct_rules` (cloned **verbatim, in order** — strict additivity) with
-/// the surviving derived rules appended. **Zero surviving certifications ⇒ output is
-/// `direct_rules` byte-identical**; the admission gate then consumes the result exactly as
-/// it consumes a hand-authored policy — no gate change.
+/// the surviving derived rules appended, **shallowest hop first**. **Zero surviving
+/// certifications ⇒ output is `direct_rules` byte-identical**; the admission gate then
+/// consumes the result exactly as it consumes a hand-authored policy — no gate change.
 ///
 /// Every derived rule satisfies the HARD invariant `derived ⊆ (anchor ∩ cert scope ∩
-/// validity window)` (module docs): a certification can only NARROW the certifier's
-/// authority. Any unverifiable / expired / out-of-window / cyclic / over-depth /
-/// broadening edge contributes NOTHING. See [`explain_edge`] for the per-edge reason a
-/// forged / broadening / expired edge is denied.
+/// validity window)` (module docs) — **at every depth**, because hop *k* re-derives the ⊆
+/// ceiling against the rule hop *k−1* produced, so the chain telescopes
+/// `derived_N ⊆ … ⊆ derived_1 ⊆ anchor`. Any unverifiable / expired / out-of-window /
+/// cyclic / over-depth / broadening edge contributes NOTHING, at whichever hop it is
+/// reached. See [`explain_edge`] for the per-edge reason a forged / broadening / expired
+/// edge is denied.
+///
+/// ## Termination and the no-amplification bound
+///
+/// Rounds are capped by `depth_bound` and stop early as soon as a round derives nothing.
+/// **Each edge contributes at most ONE rule to the whole closure**, at the SHALLOWEST hop
+/// that admits it — so `derived.len() <= certifications.len()` regardless of `depth_bound`,
+/// and a cycle `A → B → A` cannot re-enter to amplify. That bound is enforced by the CYCLE
+/// gate (an edge that has fired leaves its certified issuer holding a matching-key rule,
+/// which the gate then rejects); the cross-round `seen` set — keyed on each certification's
+/// INPUT INDEX, so two records sharing both endpoints stay independently eligible — states the
+/// same bound redundantly and is documented as belt-and-braces in the module docs, not as the
+/// guard.
 pub fn derive_effective_rules(
     direct_rules: &[TrustRule],
     certifications: &[Certification],
@@ -248,53 +324,197 @@ pub fn derive_effective_rules(
         return effective;
     }
 
-    // v1: DEPTH-1 only. Derived rules are NEVER re-used as anchors — a certifier must be a
-    // DIRECT (`direct_rules`) anchor. This makes the closure a single pass over the edges
-    // and forecloses cycle-driven amplification structurally (a derived rule cannot certify
-    // anything). A future depth-N generalisation would iterate with a visited set + a
-    // per-round re-derivation of the ⊆ ceiling; it is deliberately NOT v1 (`sq-tu4e`).
-    for cert in certifications {
-        if let Some(rule) = derive_one(direct_rules, cert, now_unix_secs) {
-            effective.push(rule);
+    // The cross-round visited set (sq-13096). Keyed on the certification's INDEX in
+    // `certifications`, it is populated ONLY on a SUCCESSFUL derivation — a record that failed
+    // at hop k (typically `NoAnchor`, because its certifier had not been derived yet) MUST stay
+    // eligible at hop k+1, which is exactly what makes the chain transitive. Once a record HAS
+    // derived, it never derives again at a deeper hop.
+    //
+    // The index is a collision-free per-RECORD identity. Keying on `(certifier,
+    // certified_issuer)` instead would conflate distinct signed records that share both
+    // endpoints but differ in `certified_key` (or scope/window/signature): one such record
+    // firing at hop k would mark the pair seen and silently skip its sibling at hop k+1, even
+    // though the sibling is a valid derivation the moment its own matching certifier rule
+    // reaches the frontier. GATE 1 does not cover that case — the fired record leaves the
+    // certified issuer holding a rule under a DIFFERENT key, so the cycle gate does not match.
+    //
+    // HONEST NOTE — with the index key this remains REDUNDANT with GATE 1, not the guard. A
+    // fired record leaves its certified issuer holding a rule under exactly that record's
+    // `certified_key`, so the cycle gate (which reads the whole closure-so-far) already rejects
+    // the re-attempt; disabling this set turns no test red. It is kept because it makes the
+    // ≤1-rule-per-record bound a visible loop invariant. Cite GATE 1, not this, for cycle safety.
+    let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // The anchors usable at the CURRENT hop: hop 1 is the direct anchors; hop k>1 is EXACTLY
+    // the rules hop k-1 derived. Restricting to the previous round's output (rather than all
+    // of `effective`) is what gives `depth_bound` its meaning — and costs nothing, since any
+    // edge an earlier round's anchors could have derived either already did (and is `seen`)
+    // or failed a gate that a re-attempt against the same anchors would fail identically.
+    let mut frontier: Vec<TrustRule> = direct_rules.to_vec();
+
+    for hop in 1..=depth_bound {
+        // Collected separately so `effective` stays a stable SNAPSHOT for the whole round:
+        // the cycle gate must not see rules derived earlier in THIS round, or the outcome
+        // would depend on the order of `certifications` (two certifiers vouching for the
+        // same issuer at the same hop must both derive, exactly as at depth-1).
+        let mut derived_this_round: Vec<TrustRule> = Vec::new();
+        let mut edges_this_round: Vec<usize> = Vec::new();
+        for (idx, cert) in certifications.iter().enumerate() {
+            if seen.contains(&idx) {
+                continue;
+            }
+            // `hop == 1` marks the anchors as the pod's DIRECT rules, which exempts them from
+            // the meta-scope gate in GATE 2 — see `derive_one_explained`.
+            if let Some(rule) = derive_one(&frontier, &effective, cert, now_unix_secs, hop == 1) {
+                derived_this_round.push(rule);
+                edges_this_round.push(idx);
+            }
         }
+        if derived_this_round.is_empty() {
+            // Fixpoint: no edge is reachable from this frontier, so no deeper hop can be
+            // either. Stop early rather than spinning out the remaining rounds.
+            break;
+        }
+        seen.extend(edges_this_round);
+        effective.extend(derived_this_round.iter().cloned());
+        frontier = derived_this_round;
     }
     effective
+}
+
+/// Whether a DERIVED rule may itself act as a certification edge SOURCE at a deeper hop —
+/// the **meta-scope non-escalation** gate (`research/trust-graph-authorisation-2026-07.md`
+/// §2.4 rule 3, the precondition that record set on depth>1).
+///
+/// A certification confers the authority to ISSUE statements of a scope. It does NOT, on its
+/// own, confer the authority to CONFER — that is a strictly stronger, meta-level authority.
+/// An entity may act as an edge source only if its own incoming certification scope covers
+/// certification-issuing itself, which here means its statement-type shape must **select**
+/// `trustx:Certification` statements:
+///
+/// - `sh:targetSubjectsOf trustx:certifies` / `sh:targetObjectsOf trustx:certifies`, or
+/// - `sh:targetClass trustx:Certification`.
+///
+/// Only ROOT-level SELECTION edges count ([`selection_edges`]) — a conformance constraint
+/// mentioning the term selects nothing. Anything else — including
+/// [`CertScope::AnyService`] over an attribute-only anchor — is **NOT** certification
+/// authority: unknown ⇒ no proof ⇒ fail closed, exactly as everywhere else in this module.
+///
+/// Note the shape is the ceiling on BOTH readings at once, which is what makes this
+/// composable: a registrar anchored to select `trustx:certifies` AND `schema:age` can pass an
+/// `age`-narrowed rule down a chain (selection only ever shrinks), and the issuer at the end
+/// — whose shape no longer selects `trustx:certifies` — cannot extend the chain further.
+fn confers_certification_authority(shape: &ShapeRef) -> bool {
+    let certifies = format!("I{}", TRUSTX_CERTIFIES);
+    let certification = format!("I{}", TRUSTX_CERTIFICATION);
+    selection_edges(shape).iter().any(|(predicate, object)| {
+        match predicate.strip_prefix(SH_NS) {
+            Some("targetSubjectsOf" | "targetObjectsOf") => *object == certifies,
+            Some("targetClass") => *object == certification,
+            // Every other selection form (targetNode, targetWhere, implicit-class typing, an
+            // un-modelled `sh:target*`) carries no proof that certification statements are in
+            // scope ⇒ no certification authority.
+            _ => false,
+        }
+    })
 }
 
 /// Explain, per edge, why it did (`Ok`) or did NOT (`Err`) contribute — the fail-closed
 /// reason the adversarial matrix asserts against. It mirrors [`derive_effective_rules`]'s
 /// gate exactly (same checks, same order), returning the derived [`TrustRule`] on success
-/// or the [`EdgeRejection`] on the FIRST failing gate. Depth is the closure's `depth_bound`
-/// (v1 depth-1): a `depth_bound` of `0` denies every edge as [`EdgeRejection::OverDepth`].
+/// or the [`EdgeRejection`] on the FIRST failing gate.
+///
+/// The last two arguments identify the **single hop** being explained, and they must agree:
+///
+/// - `anchors` — the closure state at that hop. Pass the pod's `direct_rules` for hop 1; for
+///   hop *k* of a multi-hop chain pass `derive_effective_rules(direct_rules, certs, now,
+///   k - 1)`.
+/// - `hop` — the 1-based hop index. `0` denies every edge as [`EdgeRejection::OverDepth`]
+///   (no hop is permitted at all). `1` marks `anchors` as the pod's DIRECT rules, which
+///   exempts them from the meta-scope gate; `>= 1 + 1` marks them as DERIVED, so only an
+///   anchor whose shape selects `trustx:Certification` statements may certify.
+///
+/// ## Why ONE slice is enough, and where it is an over-approximation
+///
+/// The shared gate takes TWO rule sets, and the closure feeds it two DIFFERENT ones at hop
+/// *k > 1*: the **frontier** (exactly what hop *k−1* derived — the certifying set, GATE 2)
+/// and the **known** set (the whole closure so far — the cycle set, GATE 1). `explain_edge`
+/// has one slice and passes it as both, so the set documented above is EXACT for GATE 1 and a
+/// strict **superset** for GATE 2 — it also carries the direct anchors and every round older
+/// than *k−1*, none of which the closure could certify from at that hop. Routing through one
+/// shared gate is therefore NOT on its own why the two paths agree: that is a property of the
+/// per-hop gate, not of the composed closure.
+///
+/// They agree anyway, and GATE 1 is the reason. Take any candidate anchor `R` this call
+/// offers that hop *k*'s real frontier did not: `R` was ITSELF the frontier at some earlier
+/// round *j*, and the edge's verdict against `R` is the same at both hops — GATES 3 and 4 do
+/// not read the anchor set at all, GATE 5 reads only `R`, and GATE 1 saw a SMALLER closure at
+/// round *j* so it was there if anything laxer (as was GATE 2, if *j* was hop 1: direct
+/// anchors skip the meta-scope gate). So if `R` would admit the edge here, the closure
+/// already admitted it at round *j*. That earlier admission leaves the certified issuer
+/// holding a matching-key rule, and GATE 1 — which
+/// reads the WHOLE closure so far — denies the re-attempt as [`EdgeRejection::Cyclic`]. So an
+/// `Ok` here is an edge the closure derives at THIS hop, and the same rule; an `Err` is an
+/// edge it does not derive at all. Pinned, mutation-witnessed, by
+/// `an_older_round_certifier_cannot_re_admit_an_edge_at_a_later_hop` in
+/// `tests/certification_graph_e2e.rs` — disable GATE 1's scan of the known set and it goes red.
+///
+/// Two honest caveats, both on the REASON and never on admission (so neither can escalate):
+/// an edge the closure admitted at a SHALLOWER hop reports `Cyclic` here, where the closure's
+/// loop simply skipped it as already-derived; and an edge whose certifier has left the
+/// frontier reports whichever gate the stale anchor fails (e.g.
+/// [`EdgeRejection::Broadening`]) rather than the [`EdgeRejection::NoAnchor`] the closure
+/// reaches first.
+///
+/// Pass hop `1` with a set of DERIVED anchors and you are asking a different question (what a
+/// pod would decide if it anchored those rules directly), and will get that question's answer.
 pub fn explain_edge(
-    direct_rules: &[TrustRule],
+    anchors: &[TrustRule],
     cert: &Certification,
     now_unix_secs: i64,
-    depth_bound: u32,
+    hop: u32,
 ) -> Result<TrustRule, EdgeRejection> {
-    if depth_bound == 0 {
+    if hop == 0 {
         return Err(EdgeRejection::OverDepth);
     }
-    derive_one_explained(direct_rules, cert, now_unix_secs)
+    derive_one_explained(anchors, anchors, cert, now_unix_secs, hop == 1)
 }
 
-/// The depth-1 per-edge derivation used by the fast path: `Some(rule)` iff every gate
-/// passes, else `None` (the reason is discarded — see [`explain_edge`] for it).
+/// The per-hop derivation used by the fast path: `Some(rule)` iff every gate passes, else
+/// `None` (the reason is discarded — see [`explain_edge`] for it).
 fn derive_one(
-    direct_rules: &[TrustRule],
+    anchors: &[TrustRule],
+    known: &[TrustRule],
     cert: &Certification,
     now_unix_secs: i64,
+    anchors_are_direct: bool,
 ) -> Option<TrustRule> {
-    derive_one_explained(direct_rules, cert, now_unix_secs).ok()
+    derive_one_explained(anchors, known, cert, now_unix_secs, anchors_are_direct).ok()
 }
 
-/// The single shared gate, returning the derived rule OR the first [`EdgeRejection`]. Both
-/// [`derive_effective_rules`] (via [`derive_one`]) and [`explain_edge`] route through here,
-/// so the fast path and the explained path can NEVER diverge on what they admit.
+/// The single shared gate for ONE hop, returning the derived rule OR the first
+/// [`EdgeRejection`]. Both [`derive_effective_rules`] (via [`derive_one`], once per round)
+/// and [`explain_edge`] route through here, so ON THE SAME TWO INPUTS the fast path and the
+/// explained path can NEVER diverge on what they admit — including on the meta-scope gate,
+/// which is why that gate lives HERE and not in the closure's round loop. `explain_edge`
+/// cannot in fact supply the same two inputs at hop k>1 (it has one slice); that it still
+/// agrees is a separate argument, made on [`explain_edge`] itself.
+///
+/// The two rule slices play DIFFERENT roles and are only the same at hop 1:
+/// - `anchors` — the rules that may CERTIFY at this hop (GATE 2). At hop 1 the pod's direct
+///   anchors; at hop k>1 exactly what hop k-1 derived. This is what bounds the depth.
+/// - `known` — every rule the closure holds so far (direct + all previously derived), used
+///   ONLY by the cycle gate (GATE 1) so a loop that re-certifies an issuer the graph already
+///   vouches for adds nothing. Widening the cycle gate to the whole closure is what stops a
+///   CROSS-ROUND cycle from laundering a broadening.
+///
+/// `anchors_are_direct` says whether `anchors` is the pod's own Control-gated rule set (hop
+/// 1) or a set the closure DERIVED (hop k>1). It selects the meta-scope gate in GATE 2.
 fn derive_one_explained(
-    direct_rules: &[TrustRule],
+    anchors: &[TrustRule],
+    known: &[TrustRule],
     cert: &Certification,
     now_unix_secs: i64,
+    anchors_are_direct: bool,
 ) -> Result<TrustRule, EdgeRejection> {
     // GATE 1 — CYCLE. A self-certifying edge, or one whose certified issuer already anchors
     // the certifier, is dropped BEFORE any other work: it can confer no authority the graph
@@ -303,27 +523,52 @@ fn derive_one_explained(
     if cert.certifier.as_str() == cert.certified_issuer.as_str() {
         return Err(EdgeRejection::Cyclic);
     }
-    if direct_rules.iter().any(|r| {
+    if known.iter().any(|r| {
         r.source.as_str() == cert.certified_issuer.as_str()
             && public_key_to_hex(&r.issuer_key) == public_key_to_hex(&cert.certified_key)
     }) {
-        // The "certified" issuer is already a DIRECT anchor with this key — the edge would
-        // form a cycle (issuer certifies its own certifier / itself) and adds nothing.
+        // The "certified" issuer ALREADY holds a rule in the closure under this key — a
+        // direct anchor, or one derived at an earlier hop. The edge would close a cycle
+        // (`A → B → A`, or any longer loop) and can add no authority the graph did not
+        // already hold, so it is dropped. Checking against the WHOLE closure so far, not just
+        // `direct_rules`, is what keeps a CROSS-ROUND cycle from laundering a broadening: a
+        // deeper hop cannot re-grant an issuer a wider rule than the one it already earned.
         return Err(EdgeRejection::Cyclic);
     }
 
-    // GATE 2 — ANCHOR. The certifier MUST be a direct anchor whose key matches. This is the
-    // depth bound made concrete: only a `direct_rules` source (never a derived rule) can
-    // certify. It also binds the certifier's key to the one the pod anchors, so a graph
-    // cannot name a certifier whose key it does not already hold.
-    // All direct anchors the certifier holds (a certifier may be anchored for several
-    // statement-types over the same key — e.g. `age` AND `name`). We keep the WHOLE set so
-    // GATE 5 can pick the one the certification provably narrows, never just the first.
-    let candidate_anchors: Vec<&TrustRule> = direct_rules
+    // GATE 2 — ANCHOR. The certifier MUST be an anchor OF THIS HOP whose key matches. This is
+    // the depth bound made concrete: at hop 1 only a `direct_rules` source may certify, and at
+    // hop k only what hop k-1 derived — so an edge is never evaluated at a depth the caller
+    // did not authorise. It also binds the certifier's key to the one the pod holds for it
+    // (directly, or as attested by the previous hop's signed edge), so a graph cannot name a
+    // certifier whose key it does not already hold.
+    // All anchors the certifier holds (a certifier may be anchored for several statement-types
+    // over the same key — e.g. `age` AND `name`). We keep the WHOLE set so GATE 5 can pick the
+    // one the certification provably narrows, never just the first.
+    //
+    // META-SCOPE NON-ESCALATION (`research/trust-graph-authorisation-2026-07.md` §2.4 rule 3 —
+    // the precondition that record set on depth>1). At hop k>1 the anchors are DERIVED rules,
+    // and a certification confers the authority to ISSUE statements of a scope, NOT the
+    // authority to CONFER, which is strictly stronger. So a derived rule may certify only if
+    // its own incoming certification scope covers certification-issuing itself — i.e. only if
+    // its shape SELECTS `trustx:Certification` statements. Being certified to issue
+    // `schema:age` makes you an ISSUER, not a REGISTRAR: without this, `GOV certifies MID (for
+    // age)` would let MID confer age authority on an issuer GOV and the pod never considered.
+    // That broadening is invisible to GATE 5, because the rule MID confers IS inside MID's own
+    // shape — it is a broadening in the META dimension, which is exactly why the design record
+    // called it moot at depth 1 and deferred depth>1 pending "the certification-authority scope
+    // shape". The shape IS that scope, so no new vocabulary is needed.
+    //
+    // DIRECT anchors are deliberately EXEMPT: they are the pod's own explicit decision about
+    // who may confer, and exempting them is what keeps `depth_bound = 1` byte-identical to the
+    // pre-sq-13096 closure. An anchor that fails this gate is simply not a candidate, so the
+    // edge reports `NoAnchor` — fail-closed, and honest (the pod anchors no CERTIFIER here).
+    let candidate_anchors: Vec<&TrustRule> = anchors
         .iter()
         .filter(|r| {
             r.source.as_str() == cert.certifier.as_str()
                 && public_key_to_hex(&r.issuer_key) == public_key_to_hex(&cert.certifier_key)
+                && (anchors_are_direct || confers_certification_authority(&r.shape))
         })
         .collect();
     if candidate_anchors.is_empty() {
@@ -356,6 +601,9 @@ fn derive_one_explained(
     // the chosen anchor is always genuine pod authority). If NO candidate anchor is narrowed by
     // this cert scope, it is a broadening ⇒ contributes nothing. Where narrowing cannot be
     // PROVEN (undecidable SHACL-shape containment), each attempt yields None ⇒ Broadening.
+    // At hop k>1 the candidate anchors are hop k-1's DERIVED rules, so this same check
+    // re-derives the ⊆ ceiling against the already-attenuated shape — the chain telescopes
+    // (derived_k ⊆ derived_{k-1} ⊆ … ⊆ anchor) and a broadening at ANY hop is denied there.
     let (anchor, derived_shape) = candidate_anchors
         .iter()
         .find_map(|a| narrowed_shape(&a.shape, &cert.scope).map(|s| (*a, s)))
@@ -1051,6 +1299,251 @@ mod tests {
         assert!(matches!(
             explain_edge(&[anchor2], &cert, 1_000, 0),
             Err(EdgeRejection::OverDepth)
+        ));
+    }
+
+    // ── DEPTH-N closure (sq-13096) ──────────────────────────────────────────
+
+    /// A REGISTRAR shape: `predicate_shape(age)` PLUS a root `sh:targetSubjectsOf
+    /// trustx:certifies` selection edge. It selects both age statements AND certification
+    /// statements, so a rule carrying it passes the meta-scope gate and may act as an edge
+    /// source at a deeper hop — unlike a plain attribute shape.
+    fn registrar_shape(p: &str) -> ShapeRef {
+        additive_target(p, TRUSTX_CERTIFIES)
+    }
+
+    /// A three-node framework-of-frameworks chain `GOV → MID → LEAF`, all `AnyService`,
+    /// all in-window, each hop signed by the previous node's key. GOV is anchored with a
+    /// REGISTRAR shape, so `AnyService` passes that certification authority down to MID and
+    /// MID may extend the chain. Returns the GOV anchor and the two edges in chain order.
+    fn two_hop_chain() -> (TrustRule, Certification, Certification) {
+        let (gov_sk, gov_pk) = keypair(1);
+        let (mid_sk, mid_pk) = keypair(2);
+        let (_leaf_sk, leaf_pk) = keypair(3);
+        let anchor_rule = anchor(
+            GOV_URL,
+            gov_pk,
+            registrar_shape("https://schema.org/age"),
+            "https://pod.ex/resourceX",
+            30 * 86400,
+        );
+        let hop1 = signed_cert(
+            GOV_URL,
+            &gov_sk,
+            "https://mid.ex",
+            mid_pk,
+            CertScope::AnyService,
+            0,
+            i64::MAX / 2,
+        );
+        let hop2 = signed_cert(
+            "https://mid.ex",
+            &mid_sk,
+            "https://leaf.ex",
+            leaf_pk,
+            CertScope::AnyService,
+            0,
+            i64::MAX / 2,
+        );
+        (anchor_rule, hop1, hop2)
+    }
+
+    #[test]
+    fn depth_two_derives_the_second_hop_depth_one_does_not() {
+        let (anchor_rule, hop1, hop2) = two_hop_chain();
+        let anchors = [anchor_rule];
+        let certs = [hop1, hop2];
+        // depth 1: only MID derives — the tail is left underived (the v1 behaviour, intact).
+        let d1 = derive_effective_rules(&anchors, &certs, 1_000, 1);
+        assert_eq!(d1.len(), 2, "depth 1 ⇒ anchor + the FIRST hop only");
+        assert!(d1.iter().all(|r| r.source.as_str() != "https://leaf.ex"));
+        // depth 2: MID (hop 1) then LEAF (hop 2, anchored on the DERIVED MID rule).
+        let d2 = derive_effective_rules(&anchors, &certs, 1_000, 2);
+        assert_eq!(d2.len(), 3, "depth 2 ⇒ anchor + both hops");
+        assert_eq!(d2[1].source.as_str(), "https://mid.ex", "shallowest hop first");
+        assert_eq!(d2[2].source.as_str(), "https://leaf.ex");
+        // Transitive attenuation: every hop stays inside the ROOT anchor's ceiling.
+        assert_eq!(d2[2].scope.as_str(), d2[0].scope.as_str(), "resource scope is the root ceiling");
+        assert!(d2[2].fresh_within_secs <= d2[1].fresh_within_secs);
+        assert!(d2[1].fresh_within_secs <= d2[0].fresh_within_secs);
+    }
+
+    #[test]
+    fn depth_beyond_the_chain_length_adds_nothing_and_terminates() {
+        // A generous depth_bound must not invent rules past the end of the chain: the
+        // closure reaches its fixpoint at hop 2 and stops.
+        let (anchor_rule, hop1, hop2) = two_hop_chain();
+        let anchors = [anchor_rule];
+        let certs = [hop1, hop2];
+        let deep = derive_effective_rules(&anchors, &certs, 1_000, 64);
+        assert_eq!(deep.len(), 3, "no rule beyond the chain's own length");
+        // The no-amplification bound: derived count <= edge count, whatever the depth.
+        assert!(deep.len() - anchors.len() <= certs.len());
+    }
+
+    #[test]
+    fn cross_round_cycle_derives_nothing_at_any_depth() {
+        // `GOV → MID` and `MID → GOV`. Hop 1 derives MID. Hop 2 would close the loop back
+        // onto GOV — which already holds a matching-key rule — so the CYCLE gate (GATE 1,
+        // reading the whole closure-so-far, not just the direct anchors) denies it and
+        // NOTHING new is derived, at any depth.
+        let (gov_sk, gov_pk) = keypair(1);
+        let (mid_sk, mid_pk) = keypair(2);
+        let anchor_rule = anchor(
+            GOV_URL,
+            gov_pk,
+            registrar_shape("https://schema.org/age"),
+            "https://pod.ex/resourceX",
+            30 * 86400,
+        );
+        let forward = signed_cert(GOV_URL, &gov_sk, "https://mid.ex", mid_pk, CertScope::AnyService, 0, i64::MAX / 2);
+        let back = signed_cert("https://mid.ex", &mid_sk, GOV_URL, gov_pk, CertScope::AnyService, 0, i64::MAX / 2);
+        for depth in [1u32, 2, 3, 8] {
+            let out = derive_effective_rules(std::slice::from_ref(&anchor_rule), &[forward.clone(), back.clone()], 1_000, depth);
+            assert_eq!(out.len(), 2, "depth {}: anchor + MID only — the cycle adds nothing", depth);
+            assert_eq!(out[1].source.as_str(), "https://mid.ex");
+        }
+    }
+
+    /// DIRECT unit coverage of the meta-scope predicate: only a shape that SELECTS
+    /// certification statements confers the authority to certify.
+    #[test]
+    fn confers_certification_authority_only_for_certification_selection() {
+        // An attribute-only shape is an ISSUER scope, not a REGISTRAR scope.
+        assert!(!confers_certification_authority(&predicate_shape("https://schema.org/age")));
+        // A registrar shape selects `trustx:certifies` subjects ⇒ may certify.
+        assert!(confers_certification_authority(&registrar_shape("https://schema.org/age")));
+        // `sh:targetObjectsOf trustx:certifies` and `sh:targetClass trustx:Certification`
+        // are the other two accepted selection forms.
+        for (pred, obj) in [
+            ("http://www.w3.org/ns/shacl#targetObjectsOf", TRUSTX_CERTIFIES),
+            ("http://www.w3.org/ns/shacl#targetClass", TRUSTX_CERTIFICATION),
+        ] {
+            let mut s = predicate_shape("https://schema.org/age");
+            if let Term::BlankNode(root) = s.root.clone() {
+                s.triples.push(Triple::new(root, iri(pred), iri(obj)));
+            }
+            assert!(confers_certification_authority(&s), "{} {} confers", pred, obj);
+        }
+        // Fail-closed on every near miss: the term in a CONFORMANCE position selects nothing;
+        // the wrong object under a certification-capable predicate proves nothing; and
+        // `sh:targetNode` carries no proof that certification statements are in scope.
+        let mut conformance_only = predicate_shape("https://schema.org/age");
+        if let Term::BlankNode(prop) = conformance_only.triples[1].object.clone() {
+            conformance_only.triples.push(Triple::new(
+                prop,
+                iri("http://www.w3.org/ns/shacl#path"),
+                iri(TRUSTX_CERTIFIES),
+            ));
+        }
+        assert!(
+            !confers_certification_authority(&conformance_only),
+            "the term in a conformance position selects nothing ⇒ no certification authority"
+        );
+        assert!(!confers_certification_authority(&additive_target(
+            "https://schema.org/age",
+            TRUSTX_CERTIFICATION // targetSubjectsOf the CLASS is not the `certifies` predicate
+        )));
+        let mut target_node = predicate_shape("https://schema.org/age");
+        if let Term::BlankNode(root) = target_node.root.clone() {
+            target_node.triples.push(Triple::new(
+                root,
+                iri("http://www.w3.org/ns/shacl#targetNode"),
+                iri(TRUSTX_CERTIFIES),
+            ));
+        }
+        assert!(!confers_certification_authority(&target_node));
+    }
+
+    /// THE META-SCOPE ESCALATION, end-to-end. GOV is anchored ONLY for `age` — an issuer
+    /// scope, not a registrar scope. GOV legitimately certifies MID for `age`. MID then
+    /// certifies LEAF for `age` — perfectly INSIDE MID's own derived shape, so every
+    /// attenuation gate passes. It must STILL be denied: MID was certified to ISSUE age
+    /// statements, never to CONFER age authority on anyone else, and admitting it would let a
+    /// chain of ordinary issuers launder pod authority to an issuer GOV never vouched for.
+    /// (`research/trust-graph-authorisation-2026-07.md` §2.4 rule 3, §2.5.)
+    #[test]
+    fn an_attribute_scoped_derived_rule_cannot_certify_at_a_deeper_hop() {
+        let (gov_sk, gov_pk) = keypair(1);
+        let (mid_sk, mid_pk) = keypair(2);
+        let (_leaf_sk, leaf_pk) = keypair(3);
+        // NOTE the anchor shape: attribute-only, NOT `registrar_shape`.
+        let anchor_rule = anchor(
+            GOV_URL,
+            gov_pk,
+            predicate_shape("https://schema.org/age"),
+            "https://pod.ex/resourceX",
+            30 * 86400,
+        );
+        let hop1 = signed_cert(GOV_URL, &gov_sk, "https://mid.ex", mid_pk, CertScope::AnyService, 0, i64::MAX / 2);
+        // Strictly INSIDE MID's derived `age` shape — nothing but the meta-scope gate denies it.
+        let hop2 = signed_cert(
+            "https://mid.ex",
+            &mid_sk,
+            "https://leaf.ex",
+            leaf_pk,
+            CertScope::AnyService,
+            0,
+            i64::MAX / 2,
+        );
+        for depth in [2u32, 3, 16] {
+            let out = derive_effective_rules(
+                std::slice::from_ref(&anchor_rule),
+                &[hop1.clone(), hop2.clone()],
+                1_000,
+                depth,
+            );
+            assert_eq!(out.len(), 2, "depth {}: MID derives, LEAF must NOT", depth);
+            assert!(out.iter().all(|r| r.source.as_str() != "https://leaf.ex"));
+        }
+        // Control: with a REGISTRAR anchor — MID's certification scope now covers
+        // certification-issuing — the very same hop 2 IS admitted. So the gate denies on
+        // meta-scope, not on some unrelated defect of the fixture.
+        let registrar_anchor = anchor(
+            GOV_URL,
+            gov_pk,
+            registrar_shape("https://schema.org/age"),
+            "https://pod.ex/resourceX",
+            30 * 86400,
+        );
+        let out = derive_effective_rules(&[registrar_anchor], &[hop1, hop2], 1_000, 2);
+        assert_eq!(out.len(), 3, "a registrar-scoped chain still admits LEAF");
+        assert_eq!(out[2].source.as_str(), "https://leaf.ex");
+    }
+
+    #[test]
+    fn a_broadening_second_hop_is_denied_and_kills_the_tail() {
+        // GOV is anchored as a REGISTRAR for `age`; GOV → MID (AnyService) so MID inherits it.
+        // MID then tries to certify LEAF for `name` — outside MID's OWN derived ceiling. That
+        // hop is a broadening and must contribute nothing even though hop 1 was legitimate.
+        let (gov_sk, gov_pk) = keypair(1);
+        let (mid_sk, mid_pk) = keypair(2);
+        let (_leaf_sk, leaf_pk) = keypair(3);
+        let anchor_rule = anchor(
+            GOV_URL,
+            gov_pk,
+            registrar_shape("https://schema.org/age"),
+            "https://pod.ex/resourceX",
+            30 * 86400,
+        );
+        let hop1 = signed_cert(GOV_URL, &gov_sk, "https://mid.ex", mid_pk, CertScope::AnyService, 0, i64::MAX / 2);
+        let hop2 = signed_cert(
+            "https://mid.ex",
+            &mid_sk,
+            "https://leaf.ex",
+            leaf_pk,
+            CertScope::Shape(predicate_shape("https://schema.org/name")),
+            0,
+            i64::MAX / 2,
+        );
+        let out = derive_effective_rules(std::slice::from_ref(&anchor_rule), &[hop1.clone(), hop2.clone()], 1_000, 4);
+        assert_eq!(out.len(), 2, "the broadening 2nd hop derives nothing at any depth");
+        assert!(out.iter().all(|r| r.source.as_str() != "https://leaf.ex"));
+        // And the explained path names the gate, run against hop 1's own output.
+        let hop1_out = derive_effective_rules(std::slice::from_ref(&anchor_rule), std::slice::from_ref(&hop1), 1_000, 1);
+        assert!(matches!(
+            explain_edge(&hop1_out, &hop2, 1_000, 2),
+            Err(EdgeRejection::Broadening)
         ));
     }
 

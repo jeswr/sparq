@@ -193,7 +193,9 @@ impl TrustDocument {
 
     /// Build a Control-gated trust document that also carries signed certification edges.
     /// The certifications are fed into `crate::graph::derive_effective_rules` by the store's
-    /// `effective_rules` method, using `now_unix_secs` at call time (depth-1 closure).
+    /// `effective_rules` method, using `now_unix_secs` at call time. The store passes
+    /// `depth_bound = 1` — a POLICY choice of this call site, not a library limit: the
+    /// closure itself is depth-N (`sq-13096`).
     ///
     /// Require: `cert-graph` feature (and `framework-vocab`, which it enables).
     ///
@@ -416,7 +418,12 @@ impl TrustStore {
             server.rules(),
             server.certifications(),
             now_secs,
-            1, // v1: depth-1 closure (sq-tu4e discipline)
+            // The store's POLICY choice, not a library limit: `derive_effective_rules` is
+            // depth-N (sq-13096), and this call site opts into a single hop so a pod's
+            // effective rules stay traceable to one directly-anchored certifier. Raising it
+            // is a deliberate policy change (it would admit framework-of-frameworks chains),
+            // so it is not done implicitly here.
+            1,
         );
         #[cfg(not(feature = "cert-graph"))]
         let direct_rules: Vec<TrustRule> = server.rules().to_vec();
