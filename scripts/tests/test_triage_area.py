@@ -334,6 +334,37 @@ class TestRuleTableHygiene(unittest.TestCase):
                   "programs; docs/SKILL examples beyond the API reference."),
             ["sparq-reason", "sparq-cli"])
 
+    def test_prose_cannot_impersonate_an_author_declaration(self):
+        """T0 outranks every rule below it, so a declaration-shaped fragment that is
+        really PROSE takes the highest-trust path with nothing to catch it — the
+        failure is silent by construction. Asserted against declared_areas() rather
+        than classify(): the claim is that the T0 TIER declines, not that the issue
+        is unclassifiable — these bodies may still be labelled by T1/T2 on their own
+        honest evidence, and should be.
+
+        Note `\\b` alone does NOT close the first hole: `-` is already a word
+        boundary, so `\\btool-surface:` matches. The guard is a lookbehind that
+        excludes `-` and `/` as well as word characters."""
+        for why, body in (
+            # A field name embedded in a longer hyphenated word.
+            ("sub-word field name",
+             "we exercise the tool-surface: sparq-core is one of them"),
+            # A Rust path. MEASURED on the live backlog: `crate::verbalize` made
+            # sq-rd6g parse as a four-area author declaration.
+            ("rust `crate::` path",
+             "sparq-vectors labels.rs (crate::verbalize ambiguous fn-vs-module); "
+             "sparq-geo gml.rs"),
+            # A trailing colon whose value is the NEXT line. MEASURED: sq-rsd3v.1.
+            ("value on the following line",
+             "the nullifier is NEW in-circuit soundness surface:\n"
+             "computed from the witnessed sparq-py handle"),
+        ):
+            self.assertEqual(TA.declared_areas(body, CRATES), [], why)
+        # Anti-vacuity: the same field, standing alone, still declares — so the three
+        # cases above fail because of the GUARDS, not because T0 stopped working.
+        self.assertEqual(TA.declared_areas("surface: sparq-core", CRATES),
+                         ["sparq-core"])
+
     def test_scope_is_declared_and_only_ever_title_or_text(self):
         """`scope` is a two-valued dispatch in classify(); a typo'd third value
         would silently fall through to the body-matching branch."""
@@ -407,13 +438,21 @@ class TestScopeDiscipline(unittest.TestCase):
         the pinned allow-list in TestRuleTableHygiene is what makes a rule leaving
         this set a reviewed act rather than a silent one."""
         leaked = []
+        checked = 0
         for rid, _scope, rx, _rule_areas, _why in title_rules():
             witness, _anchored = rule_witness(rx)
             got = TA.classify(NEUTRAL_TITLE, witness, CRATES)
             if got[1].startswith(f"T1 {rid}:"):
                 leaked.append(f"{rid} fired from a body-only {witness!r} -> {got[0]}")
+            checked += 1
         self.assertEqual(leaked, [], "title-scoped rules matched the body:\n  "
                                      + "\n  ".join(leaked))
+        # Non-vacuity, as in test_every_rule_has_a_witness_that_actually_matches: an
+        # empty `title_rules()` would satisfy the property above without exercising a
+        # single rule. Re-derived from TA.RULES rather than from title_rules(), so a
+        # helper that returns [] is caught rather than confirmed.
+        self.assertEqual(checked, len([r for r in TA.RULES if r[1] == "title"]))
+        self.assertGreater(checked, 0)
 
     def test_a_text_scoped_rule_does_fire_from_the_body(self):
         """The other direction of the same dispatch. The `text`-scoped rules exist
@@ -422,14 +461,20 @@ class TestScopeDiscipline(unittest.TestCase):
         silently stop them finding it and quietly shrink the tool's yield. Without
         this, only one of the two branches of the scope dispatch is pinned."""
         missed = []
+        checked = 0
         for rid, _scope, rx, _areas, _why in text_rules():
             witness, _anchored = rule_witness(rx)
             got = TA.classify(NEUTRAL_TITLE, witness, CRATES)
             if not got[1].startswith(f"T1 {rid}:"):
                 missed.append(f"{rid} did not fire on body-only {witness!r} "
                               f"(got {got[1]!r})")
+            checked += 1
         self.assertEqual(missed, [], "text-scoped rules ignored the body:\n  "
                                      + "\n  ".join(missed))
+        # Non-vacuity — see the sibling above. `text_rules() -> []` would otherwise
+        # pass, and it is the smaller of the two lists, so the tautology is cheaper.
+        self.assertEqual(checked, len([r for r in TA.RULES if r[1] == "text"]))
+        self.assertGreater(checked, 0)
 
     def test_the_scope_immune_rules_are_exactly_the_fully_anchored_ones(self):
         """Keeps the exemption above honest: a rule is exempt only because every

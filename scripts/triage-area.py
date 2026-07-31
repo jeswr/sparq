@@ -320,8 +320,16 @@ RULES = [
 
 
 # --- T0: an explicit author declaration in the body -----------------------------
+# The field name must stand ALONE, the separator must not be a Rust `::`, and the
+# value must start on the SAME LINE. Without those three guards ordinary prose
+# impersonates an author declaration and takes the highest-trust path — measured on
+# the live backlog, `... (crate::verbalize ambiguous fn-vs-module); sparq-geo gml.rs
+# ...` parsed as a four-area declaration, and `NEW in-circuit soundness surface:\n(a)
+# nf = Poseidon2(...)` parsed as a one-area one. `[a-z0-9_/-]` (not `\b`) is the left
+# guard because `\b` still admits `tool-surface:` — `-` is already a word boundary.
 _DECL = re.compile(
-    r"(?:crate_or_surface|crates?|surface)\s*[:=]\s*(.+?)(?:\||\n|\.\s|$)", re.I)
+    r"(?<![a-z0-9_/-])(?:crate_or_surface|crates?|surface)"
+    r"[^\S\n]*[:=](?!:)[^\S\n]*(.+?)(?:\||\n|\.\s|$)", re.I)
 _SURFACE_TOKENS = {"site": "site", "gui": "gui", "docs": "docs", "bench": "bench",
                    "ci": "ci", "js": "js"}
 # Path fragments a declaration may use instead of a bare token —
@@ -341,7 +349,12 @@ def declared_areas(body, crates):
     The span ends at the first `|`, newline, or SENTENCE BREAK: sq-p4zci's field
     reads "crates: sparq-reason + sparq-cli. CLI flag + ... docs/SKILL examples",
     and running to end-of-line would derive a spurious `area:docs` from the prose
-    that follows the declaration."""
+    that follows the declaration.
+
+    Symmetrically, the field NAME must stand alone and the value must start on the
+    same line — see the guards on `_DECL`. A declaration-shaped fragment buried in a
+    sentence is prose, not a declaration, and must fall through to T1/T2 rather than
+    claim the tier that beats every rule below it."""
     out = []
     for m in _DECL.finditer(body or ""):
         span = m.group(1).lower()
@@ -495,6 +508,24 @@ def self_test():
     # A declaration that names no real crate must NOT invent one.
     f += _chk("declared new-crate -> parked",
               c("BI/SQL facade", "crate_or_surface: NEW opt-in crate | effort:XL"), [])
+
+    # ...and PROSE must not impersonate one. T0 beats every rule below it, so a
+    # declaration-shaped fragment that is really prose silently hijacks the
+    # highest-trust path. Asserted against declared_areas() rather than classify(),
+    # because the point is that the T0 TIER declines — these bodies may still be
+    # classified by T1/T2, and should be, on their own honest evidence.
+    d = lambda b: declared_areas(b, crates)
+    f += _chk("sub-word field name is not a declaration",
+              d("we exercise the tool-surface: sparq-core is one of them"), [])
+    f += _chk("rust `crate::` path is not a declaration",
+              d("already served by (crate::verbalize); sparq-server too"), [])
+    f += _chk("a value on the next line is not a declaration",
+              d("the nullifier is NEW in-circuit soundness surface:\n"
+                "computed from sparq-py witnesses"), [])
+    # ...while the real field, alone on its line, still declares (anti-vacuity: the
+    # three checks above must fail because of the GUARDS, not because the tier died).
+    f += _chk("a real declaration still declares", d("surface: sparq-core"),
+              ["sparq-core"])
 
     # FAIL CLOSED is the headline behaviour: no evidence => no label.
     f += _chk("no evidence -> parked", c("do the thing", "it would be nice"), [])
