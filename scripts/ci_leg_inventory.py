@@ -56,12 +56,31 @@ three consequences that bound what the table means:
      an --overrides file first; that is working as intended, not a gap to paper over by
      loosening a pattern.
 
-`wait` is `job.started_at - run.run_started_at`: queue time AND time spent blocked on an
-upstream `needs:`. Those are not separable from this payload either, and for topology
-work they are usually wanted together — a shard that idles because `build-archive` has
-not finished yet is a topology fact, not a runner-availability fact. (Runner availability
-proper is scripts/ci_execution_latency_alarm.py's job, and its measured finding is that
-pickup lag is near zero, so a large `wait` here is almost always the `needs:` edge.)
+`wait` is `job.started_at - <the run's wait anchor>`: the workflow-level queue interval
+AND time spent blocked on an upstream `needs:`. Those are not separable from this payload
+either, and for topology work they are usually wanted together — a shard that idles
+because `build-archive` has not finished yet is a topology fact, not a runner-availability
+fact. (Runner availability proper is scripts/ci_execution_latency_alarm.py's job, and its
+measured finding is that pickup lag is near zero, so a large `wait` here is almost always
+the `needs:` edge.)
+
+That anchor is the run's `created_at` — when the run was QUEUED — and deliberately NOT its
+`run_started_at`, which is when the run began EXECUTING: anchoring at the latter drops the
+workflow-level queue interval from every leg of every run while this column still claims to
+be queue time. Two measured caveats bound what that buys, and neither is a reason to anchor
+at the wrong field. See run_wait_anchor().
+
+  - ON THIS CORPUS THAT INTERVAL IS ZERO. scripts/ci_execution_latency_alarm.py's census
+    found `run_started_at - created_at` to be EXACTLY 0.0 across all 44,123 attempt-1 runs
+    of sparq + agent-account-registry — identically zero, which is what two fields set
+    TOGETHER look like, not two events with an interval between them. So in practice
+    `wait` here is the `needs:` edge, and a zero queue component is NOT evidence that
+    nothing queued: these fields do not report enqueue at any threshold. Real enqueue
+    timing would need a different source (a `workflow_job` queued->in_progress webhook).
+  - A RE-RUN'S `created_at` IS STALE. `run_attempt > 1` resets `run_started_at` but leaves
+    `created_at` on ATTEMPT 1, so anchoring a re-run there would report the hours a human
+    took to press the button as queue time (measured: 99 minutes on one such run). Those
+    runs anchor at `run_started_at`, and their `wait` is dependency delay only.
 
 =============================================================================
 THE TRAP THE LEG NAMES SET — do not skip
@@ -239,7 +258,27 @@ def leg_family(job_name: str) -> str:
     return head or name
 
 
-def decompose_job(job: dict, run_started_at=None, overrides=None) -> dict:
+def run_wait_anchor(run: dict):
+    """The instant a run's legs STARTED WAITING — the anchor every leg's `wait` measures from.
+
+    `created_at` is when the run was queued; `run_started_at` is when it began executing.
+    The gap between them is the workflow-level queue interval, which belongs INSIDE `wait`
+    (see the header, including the measurement showing that gap is zero on this corpus), so
+    `created_at` wins. EXCEPT on a re-run: `run_attempt > 1` resets `run_started_at` but
+    leaves `created_at` at the ORIGINAL attempt's creation, so that timestamp is refused as
+    an anchor rather than reported as an hours-long queue — those runs anchor at
+    `run_started_at`. Returns None when the run carries neither, leaving decompose_job on
+    the job's own `created_at`.
+    """
+    if not isinstance(run, dict):
+        raise InventoryError("run payload is not an object")
+    created = run.get("created_at")
+    if created and run.get("run_attempt") in (None, 1):
+        return created
+    return run.get("run_started_at")
+
+
+def decompose_job(job: dict, wait_anchor=None, overrides=None) -> dict:
     """One job -> its wall-time decomposition. Pure; no I/O."""
     if not isinstance(job, dict):
         raise InventoryError("job payload is not an object")
@@ -247,10 +286,11 @@ def decompose_job(job: dict, run_started_at=None, overrides=None) -> dict:
     if not name:
         raise InventoryError("job payload carries no name")
     total = _span(job.get("started_at"), job.get("completed_at"))
-    # `wait` is queue + blocked-on-`needs:`; see the header. Measured from the RUN's start
-    # so it is comparable across legs of the same run; falls back to the job's own
-    # created_at (pure queue) when the run timestamp is unavailable.
-    wait_from = run_started_at or job.get("created_at")
+    # `wait` is the workflow queue interval + blocked-on-`needs:`; see the header. Measured
+    # from the RUN's wait anchor (run_wait_anchor: its created_at, or run_started_at on a
+    # re-run) so it is comparable across legs of the same run; falls back to the job's own
+    # created_at (that leg's queue time alone) when the run carries no usable timestamp.
+    wait_from = wait_anchor or job.get("created_at")
     wait = _span(wait_from, job.get("started_at"))
 
     buckets: dict[str, float] = {}
@@ -481,7 +521,7 @@ def fetch_jobs(repo: str, run_id) -> list[dict]:
     raise InventoryError(f"run {run_id}: job listing exceeded {JOBS_PAGE_CAP} pages")
 
 
-def decompose_run(jobs, run_started_at, overrides) -> list[dict]:
+def decompose_run(jobs, wait_anchor, overrides) -> list[dict]:
     """The one place a run's jobs become inventory rows — shared by the gh path and the
     fixture path so the exclusion rule below has a single, testable home.
 
@@ -489,7 +529,7 @@ def decompose_run(jobs, run_started_at, overrides) -> list[dict]:
     duration to contribute and must never be medianed in as a fast one: that would
     understate exactly the legs this table exists to steer.
     """
-    return [decompose_job(job, run_started_at, overrides)
+    return [decompose_job(job, wait_anchor, overrides)
             for job in (jobs or [])
             if job.get("conclusion") not in (None, "cancelled", "skipped")]
 
@@ -498,15 +538,18 @@ def collect(repo: str, workflow: str, event: str | None, branch: str | None,
             limit: int, overrides) -> list[dict]:
     decomposed = []
     for run in fetch_runs(repo, workflow, event, branch, limit):
-        started = run.get("run_started_at") or run.get("created_at")
-        decomposed.extend(decompose_run(fetch_jobs(repo, run["id"]), started, overrides))
+        anchor = run_wait_anchor(run)
+        decomposed.extend(decompose_run(fetch_jobs(repo, run["id"]), anchor, overrides))
     return decomposed
 
 
 def collect_fixture(payload: dict, overrides) -> list[dict]:
-    """Hermetic input: {"runs": [{"run_started_at": ..., "jobs": [<job>, ...]}, ...]}.
+    """Hermetic input: {"runs": [{"created_at": ..., "jobs": [<job>, ...]}, ...]}.
 
-    Also accepts a bare {"jobs": [...]} for a single saved
+    A run entry carries whichever of `created_at` / `run_started_at` / `run_attempt` the
+    saved payload had; run_wait_anchor picks the `wait` anchor from them exactly as the
+    live path does, and a fixture with neither timestamp falls back to each job's own
+    `created_at`. Also accepts a bare {"jobs": [...]} for a single saved
     `gh api repos/o/r/actions/runs/<id>/jobs` dump.
     """
     if not isinstance(payload, dict):
@@ -518,8 +561,7 @@ def collect_fixture(payload: dict, overrides) -> list[dict]:
         runs = [payload]
     decomposed = []
     for run in runs:
-        started = run.get("run_started_at") or run.get("created_at")
-        decomposed.extend(decompose_run(run.get("jobs"), started, overrides))
+        decomposed.extend(decompose_run(run.get("jobs"), run_wait_anchor(run), overrides))
     return decomposed
 
 
@@ -538,7 +580,10 @@ def render_markdown(rows: list[dict], decomposed: list[dict], *, source: str,
         f"{len(rows)} legs over {len(decomposed)} completed job observations; every cell "
         "is the MEDIAN across runs.",
         "",
-        "`wait` = queue + time blocked on an upstream `needs:`. `constant` = per-job tax "
+        "`wait` = from the run being QUEUED (its `created_at`; `run_started_at` on a "
+        "re-run, whose `created_at` is the original attempt's) to the leg starting — in "
+        "practice the time blocked on an upstream `needs:`, since GitHub's run timestamps "
+        "are measured not to carry enqueue time (module header). `constant` = per-job tax "
         "(set-up/checkout/toolchain/cache/tool-install/artifact/disk/fixture-fetch). "
         "`test-run` on a leg that has no separate compile step means compile+run "
         "together — see the module header before reading that column as run time.",

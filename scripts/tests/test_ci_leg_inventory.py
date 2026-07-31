@@ -24,6 +24,13 @@ suite is organised around the three ways a measurement tool lies:
      empty table. Same failure class ci_execution_latency_alarm.py's empty-scan-set guard
      exists for.
 
+  4. IT MEASURES FROM THE WRONG INSTANT.   `wait` is anchored at the run's `created_at`
+     (queued), not `run_started_at` (began executing); the ordinary API payload always
+     carries both, so anchoring at the latter would drop the workflow queue interval from
+     every leg with nothing to make the miss visible. The anchor cases hold the two
+     timestamps distinct — on the live corpus they are equal — so the wrong anchor reds,
+     as does using a re-run's stale `created_at`.
+
 Plus the finding functions, where the easy bug is a one-sided predicate: `fold_candidates`
 requires BOTH short AND overhead-dominated, and `family_imbalance` must ignore a
 single-leg family. Each has a negative case that reds if the conjunction is loosened.
@@ -171,7 +178,7 @@ class TestDecompose(unittest.TestCase):
                    span_step("Cache cargo + target", 110, 20),
                    span_step("Build + archive test binaries (nextest archive)", 130, 200),
                    span_step("Doctests (nextest does not run these)", 330, 60)],
-        ), run_started_at=stamp(40))
+        ), wait_anchor=stamp(40))
         self.assertEqual(entry["classes"]["constant"], 30.0)
         self.assertEqual(entry["classes"]["compile"], 200.0)
         self.assertEqual(entry["classes"]["test-run"], 60.0)
@@ -180,9 +187,9 @@ class TestDecompose(unittest.TestCase):
         # 300s job, 290s of steps -> 10s of runner start-up/teardown outside any step.
         self.assertEqual(entry["ungrouped_s"], 10.0)
 
-    def test_wait_is_measured_from_the_runs_start_so_needs_edges_are_visible(self):
+    def test_wait_is_measured_from_the_runs_anchor_so_needs_edges_are_visible(self):
         entry = inv.decompose_job(job("test shard", start=300, end=400),
-                                  run_started_at=stamp(0))
+                                  wait_anchor=stamp(0))
         self.assertEqual(entry["wait_s"], 300.0)
 
     def test_wait_falls_back_to_the_jobs_own_created_at(self):
@@ -222,6 +229,78 @@ class TestDecompose(unittest.TestCase):
         self.assertEqual(inv.leg_family("build + archive test binaries (+ doctests once)"),
                          "build + archive test binaries")
         self.assertEqual(inv.leg_family("clippy"), "clippy")
+
+
+class TestWaitAnchor(unittest.TestCase):
+    """Which instant `wait` is measured FROM — the difference between a queue-time column
+    and a dependency-delay column.
+
+    A run's `created_at` is when it was QUEUED, `run_started_at` when it began EXECUTING.
+    Anchoring at the latter drops the workflow queue interval from every leg while the
+    column still claims to be queue time, and since the ordinary payload always carries
+    `run_started_at` there is no live case in which the miss shows up. These cases are
+    therefore DEFINITIONAL — on this corpus the two timestamps are measured to be equal
+    (module header), so they are held distinct here precisely so the wrong anchor reds.
+    The re-run exception is pinned the same way: `run_attempt > 1` leaves `created_at` on
+    the ORIGINAL attempt, so using it would report idle-before-re-run as queue time.
+    """
+
+    def test_a_first_attempt_anchors_at_the_runs_created_at_not_its_start(self):
+        run = {"created_at": stamp(0), "run_started_at": stamp(30), "run_attempt": 1}
+        self.assertEqual(inv.run_wait_anchor(run), stamp(0))
+
+    def test_a_run_with_no_attempt_field_is_treated_as_a_first_attempt(self):
+        run = {"created_at": stamp(0), "run_started_at": stamp(30)}
+        self.assertEqual(inv.run_wait_anchor(run), stamp(0))
+
+    def test_a_rerun_refuses_its_stale_created_at(self):
+        # `created_at` here is the FIRST attempt's; reporting it would turn every leg's
+        # wait into the age of the original run.
+        run = {"created_at": stamp(0), "run_started_at": stamp(30), "run_attempt": 4}
+        self.assertEqual(inv.run_wait_anchor(run), stamp(30))
+
+    def test_a_run_carrying_neither_timestamp_yields_no_anchor(self):
+        # None, not a guess: decompose_job then falls back to the job's own created_at.
+        self.assertIsNone(inv.run_wait_anchor({"id": 7}))
+
+    def test_a_non_object_run_fails_loud(self):
+        with self.assertRaises(inv.InventoryError):
+            inv.run_wait_anchor(["not-a-run"])
+
+
+class TestLiveCollection(unittest.TestCase):
+    """The gh path end-to-end, because that is where the anchor choice actually bites:
+    a live run always carries `run_started_at`, so an anchor bug never reaches the
+    job-`created_at` fallback the fixture tests exercise."""
+
+    def stub_gh(self, runs_payload, jobs_payload):
+        def fake(args):
+            return runs_payload if "/workflows/" in args[-1] else jobs_payload
+
+        original = inv._gh
+        inv._gh = fake
+        self.addCleanup(lambda: setattr(inv, "_gh", original))
+
+    RUN_QUEUED, RUN_STARTED, JOB_STARTED = 0, 30, 100
+
+    def live(self, attempt):
+        self.stub_gh(
+            {"workflow_runs": [{"id": 7, "run_attempt": attempt,
+                                "created_at": stamp(self.RUN_QUEUED),
+                                "run_started_at": stamp(self.RUN_STARTED)}]},
+            {"jobs": [job("test (load-aware shard bulk 1/3)",
+                          start=self.JOB_STARTED, end=400, created=self.RUN_QUEUED)]})
+        [entry] = inv.collect("o/r", "ci.yml", None, None, 1, None)
+        return entry
+
+    def test_wait_covers_the_run_queue_interval_and_the_needs_delay(self):
+        # Queued at 0, executing at 30 (a 30s workflow queue), leg starts at 100 (a further
+        # 70s blocked on `needs:`). `wait` is BOTH — 70.0 here would mean the queue
+        # interval had been dropped.
+        self.assertEqual(self.live(attempt=1)["wait_s"], 100.0)
+
+    def test_a_rerun_reports_dependency_delay_only(self):
+        self.assertEqual(self.live(attempt=2)["wait_s"], 70.0)
 
 
 # ---------------------------------------------------------------------------------
@@ -353,6 +432,14 @@ class TestFixture(unittest.TestCase):
                              "jobs": [job("leg", start=10, end=20)]}]}
         [entry] = inv.collect_fixture(payload, None)
         self.assertEqual(entry["wait_s"], 10.0)
+
+    def test_a_fixture_run_anchors_on_created_at_exactly_as_the_live_path_does(self):
+        # Same anchor rule on both paths, or a fixture replay of a live run would not
+        # reproduce that run's table.
+        payload = {"runs": [{"created_at": stamp(0), "run_started_at": stamp(30),
+                             "jobs": [job("leg", start=100, end=200, created=0)]}]}
+        [entry] = inv.collect_fixture(payload, None)
+        self.assertEqual(entry["wait_s"], 100.0)
 
     def test_a_bare_jobs_dump_is_accepted(self):
         [entry] = inv.collect_fixture({"jobs": [job("leg", start=0, end=20)]}, None)
