@@ -7,7 +7,7 @@
 #   2. Build the harness (zk/xpath/differential/).
 #   3. Generate the oracle Noir test file — every expected value read back from sparq's
 #      own Rust SPARQL/XSD scalar evaluator, cross-checked bit-for-bit against native f64
-#      (doubles) and against an explicit XPath F&O 5.4.3 window (substring).
+#      (doubles) and against an explicit XPath F&O 3.1 sec. 5.4.3 fn:substring window.
 #   4. Create a temporary Nargo package depending on the RELEASED noir_XPath face repo.
 #   5. Run `nargo test` — every differential test function must pass.
 #   6. SELF-TEST: for EACH generated test function, re-generate the file with one

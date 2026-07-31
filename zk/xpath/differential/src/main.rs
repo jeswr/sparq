@@ -16,7 +16,7 @@
 //! * **IEEE cross-check** — every `xs:double` result is recomputed with native Rust `f64`
 //!   (the hardware IEEE-754 reference) and compared BIT-for-BIT.
 //! * **F&O cross-check** — every `fn:substring` result is recomputed with an explicit
-//!   XPath F&O §5.4.3 window reference implemented here.
+//!   XPath F&O 3.1 §5.4.3 `fn:substring` window reference implemented here.
 //!
 //! Where a cross-check fires, the case is NOT silently dropped or downgraded: it is
 //! recorded in [`DIVERGENCES`] and emitted as a **LIVE** assertion carrying the
@@ -144,7 +144,7 @@ fn oracle_double_bits(g: &Graph, expr: &str, expect_ieee: f64) -> u64 {
 // Spec references used as cross-checks
 // ---------------------------------------------------------------------------
 
-/// XPath F&O §5.4.3 `fn:substring($s, $start, $length)` over CODEPOINTS.
+/// XPath F&O 3.1 §5.4.3 `fn:substring` — `fn:substring($s, $start, $length)` over CODEPOINTS.
 ///
 /// The window is `round(start) <= p < round(start) + round(length)` on 1-based positions
 /// and is NOT shifted when `start < 1`: a start below 1 CONSUMES part of the length
@@ -160,7 +160,7 @@ fn fo_substring(s: &str, start: i64, length: i64) -> String {
         .collect()
 }
 
-/// XPath F&O §4.4.3 `fn:round` for `xs:double`: round to nearest, TIES TOWARD +∞
+/// XPath F&O 3.1 §4.4.4 `fn:round` for `xs:double`: round to nearest, TIES TOWARD +∞
 /// (`0.5 -> 1`, `-0.5 -> -0.0`, `-1.5 -> -1`), preserving the sign of a zero result.
 fn fo_round_double(v: f64) -> f64 {
     if v.is_nan() || v.is_infinite() || v == 0.0 {
@@ -204,8 +204,9 @@ const DIVERGENCES: &[Divergence] = &[
         expr: "SUBSTR(s, start, len) for start < 1",
         sparq: "clamps start to 1 and then takes `len` characters",
         spec: "the window [start, start+len) is NOT shifted, so a start below 1 consumes length",
-        why: "sparq-engine exec.rs SubStr uses `start.max(1) - 1` then `.take(len)`; F&O \
-              §5.4.3 keeps the window. e.g. SUBSTR(\"12345\", 0, 3) is \"12\", not \"123\".",
+        why: "sparq-engine exec.rs SubStr uses `start.max(1) - 1` then `.take(len)`; F&O 3.1 \
+              §5.4.3 `fn:substring` keeps the window. e.g. SUBSTR(\"12345\", 0, 3) is \"12\", \
+              not \"123\".",
     },
     Divergence {
         expr: "ROUND(xsd:double(\"-0.5\"))",
@@ -300,10 +301,10 @@ fn substring_corpus() -> Vec<(&'static str, usize, i64, i64)> {
     ]
 }
 
-/// `op:numeric-divide` on two `xs:integer` operands. F&O §4.2.6 makes this the DECIMAL
-/// quotient (`7 div 2 = 3.5`); `noir_XPath` implements the documented double
-/// approximation, so the oracle is asked for the double quotient of the promoted
-/// operands. Non-exact quotients are the cases the qt3 corpus never recorded.
+/// `op:numeric-divide` on two `xs:integer` operands. F&O 3.1 §4.2.4 `op:numeric-divide`
+/// makes this the DECIMAL quotient (`7 div 2 = 3.5`); `noir_XPath` implements the
+/// documented double approximation, so the oracle is asked for the double quotient of the
+/// promoted operands. Non-exact quotients are the cases the qt3 corpus never recorded.
 const DIVIDE_CORPUS: &[(i64, i64)] =
     &[(7, 2), (1, 3), (10, 5), (-7, 2), (7, -2), (-7, -2), (1, 7), (2, 3), (100, 7), (0, 5)];
 
@@ -322,7 +323,7 @@ const MIXED_CORPUS: &[(i64, &str)] = &[
 ];
 
 /// `xs:double -> xs:integer` casts (`fn:round` is NOT applied — the cast truncates toward
-/// zero per F&O §17.1.1).
+/// zero per F&O 3.1 §19.1.2.4 "Casting to xs:integer").
 const CAST_CORPUS: &[&str] = &["3.9", "-3.9", "0", "-0.5", "2.5", "9007199254740992", "-2.5"];
 
 /// `fn:round` on `xs:double`.
@@ -544,8 +545,8 @@ fn header(out: &mut String, mode: &FaultMode) {
     writeln!(out, "// SPEC-REFERENCE, whose value comes from the generator's XPath F&O reference").unwrap();
     writeln!(out, "// because the oracle itself diverges there (see RECORDED ORACLE DIVERGENCES).").unwrap();
     writeln!(out, "// Doubles are additionally cross-checked BIT-for-BIT against native Rust f64, and").unwrap();
-    writeln!(out, "// fn:substring against an explicit XPath F&O 5.4.3 window reference; an UNRECORDED").unwrap();
-    writeln!(out, "// cross-check mismatch ABORTS generation.").unwrap();
+    writeln!(out, "// fn:substring against an explicit XPath F&O 3.1 sec. 5.4.3 fn:substring window reference;").unwrap();
+    writeln!(out, "// an UNRECORDED cross-check mismatch ABORTS generation.").unwrap();
     writeln!(out, "//").unwrap();
     writeln!(out, "// TCB, honestly: (1) the sparq Rust XSD evaluator is itself UNAUDITED — it is the").unwrap();
     writeln!(out, "// repo's reference semantics, not a proven implementation; (2) coverage is a").unwrap();
@@ -660,9 +661,9 @@ fn gen_string_predicates(out: &mut String, g: &Graph, c: &mut Counts, f: &mut Fa
 
 fn gen_substring(out: &mut String, g: &Graph, c: &mut Counts, f: &mut Faults) {
     writeln!(out, "/// fn:substring — ASCII-only (see the byte-vs-codepoint scope limit above).").unwrap();
-    writeln!(out, "/// Oracle: SPARQL `SUBSTR`, cross-checked against the F&O 5.4.3 window. The `start < 1`").unwrap();
-    writeln!(out, "/// rows are SPEC-REFERENCE (see the header): sparq-engine shifts the window, so their").unwrap();
-    writeln!(out, "/// expected value is F&O's, and they assert noir_XPath against the SPEC.").unwrap();
+    writeln!(out, "/// Oracle: SPARQL `SUBSTR`, cross-checked against the F&O 3.1 sec. 5.4.3 fn:substring").unwrap();
+    writeln!(out, "/// window. The `start < 1` rows are SPEC-REFERENCE (see the header): sparq-engine shifts").unwrap();
+    writeln!(out, "/// the window, so their expected value is F&O's, and they assert noir_XPath against the SPEC.").unwrap();
     writeln!(out, "#[test]").unwrap();
     writeln!(out, "fn differential_oracle_substring() {{").unwrap();
     for (i, &(value, cap, start, length)) in substring_corpus().iter().enumerate() {
@@ -678,9 +679,10 @@ fn gen_substring(out: &mut String, g: &Graph, c: &mut Counts, f: &mut Faults) {
              F&O {spec_answer:?}. Investigate before pinning — do not widen DIVERGENCES blindly."
         );
         if diverges {
-            writeln!(out, "    // SPEC-REFERENCE (start < 1): sparq-engine says {sparq_answer:?}, F&O 5.4.3 says").unwrap();
-            writeln!(out, "    // {spec_answer:?}. noir_XPath is correct here (sq-3x7dl.6) and the oracle is not, so").unwrap();
-            writeln!(out, "    // the row asserts the SPEC value LIVE — it holds noir_XPath to F&O, not to sparq.").unwrap();
+            writeln!(out, "    // SPEC-REFERENCE (start < 1): sparq-engine says {sparq_answer:?}, F&O 3.1 sec. 5.4.3").unwrap();
+            writeln!(out, "    // fn:substring says {spec_answer:?}. noir_XPath is correct here (sq-3x7dl.6) and the").unwrap();
+            writeln!(out, "    // oracle is not, so the row asserts the SPEC value LIVE — it holds noir_XPath to").unwrap();
+            writeln!(out, "    // F&O, not to sparq.").unwrap();
             writeln!(out, "    // Drop the special-casing (not the assertion) when the engine is fixed.").unwrap();
             // One length assertion plus one per expected byte.
             c.spec_reference += 1 + spec_answer.len();
@@ -710,14 +712,16 @@ fn gen_substring(out: &mut String, g: &Graph, c: &mut Counts, f: &mut Faults) {
 }
 
 fn gen_divide(out: &mut String, g: &Graph, c: &mut Counts, f: &mut Faults) {
-    writeln!(out, "/// op:numeric-divide on two xs:integer operands — the DECIMAL quotient (F&O 4.2.6),").unwrap();
-    writeln!(out, "/// implemented as the documented double approximation, and DISTINCT from").unwrap();
-    writeln!(out, "/// op:numeric-integer-divide (sq-3x7dl.4 de-aliasing). Oracle: SPARQL double").unwrap();
-    writeln!(out, "/// division of the promoted operands, bit-cross-checked against native f64.").unwrap();
+    writeln!(out, "/// op:numeric-divide on two xs:integer operands — the DECIMAL quotient").unwrap();
+    writeln!(out, "/// (F&O 3.1 sec. 4.2.4 op:numeric-divide), implemented as the documented double").unwrap();
+    writeln!(out, "/// approximation, and DISTINCT from op:numeric-integer-divide (sq-3x7dl.4").unwrap();
+    writeln!(out, "/// de-aliasing). Oracle: SPARQL double division of the promoted operands,").unwrap();
+    writeln!(out, "/// bit-cross-checked against native f64.").unwrap();
     writeln!(out, "///").unwrap();
     writeln!(out, "/// The `numeric_divide_int` (idiv) rows are the DE-ALIASING control and are NOT").unwrap();
     writeln!(out, "/// oracle-derived — SPARQL exposes no `idiv` builtin, so their reference is Rust's").unwrap();
-    writeln!(out, "/// integer division, which truncates toward zero exactly as F&O 4.2.5 requires.").unwrap();
+    writeln!(out, "/// integer division, which truncates toward zero exactly as F&O 3.1 sec. 4.2.5").unwrap();
+    writeln!(out, "/// op:numeric-integer-divide requires.").unwrap();
     writeln!(out, "#[test]").unwrap();
     writeln!(out, "fn differential_oracle_numeric_divide() {{").unwrap();
     for &(a, b) in DIVIDE_CORPUS {
@@ -747,10 +751,11 @@ fn gen_divide(out: &mut String, g: &Graph, c: &mut Counts, f: &mut Faults) {
 }
 
 fn gen_round(out: &mut String, g: &Graph, c: &mut Counts, f: &mut Faults) {
-    writeln!(out, "/// fn:round for xs:double — ties toward +INFINITY (F&O 4.4.3), sign of zero").unwrap();
-    writeln!(out, "/// preserved. Oracle: SPARQL `ROUND`, bit-cross-checked against the F&O reference. The").unwrap();
-    writeln!(out, "/// -0.5 row is SPEC-REFERENCE (see the header): sparq-engine loses the sign of a zero").unwrap();
-    writeln!(out, "/// result, so its expected value is F&O's and it asserts noir_XPath against the SPEC.").unwrap();
+    writeln!(out, "/// fn:round for xs:double — ties toward +INFINITY (F&O 3.1 sec. 4.4.4 fn:round), sign").unwrap();
+    writeln!(out, "/// of zero preserved. Oracle: SPARQL `ROUND`, bit-cross-checked against the F&O").unwrap();
+    writeln!(out, "/// reference. The -0.5 row is SPEC-REFERENCE (see the header): sparq-engine loses the").unwrap();
+    writeln!(out, "/// sign of a zero result, so its expected value is F&O's and it asserts noir_XPath").unwrap();
+    writeln!(out, "/// against the SPEC.").unwrap();
     writeln!(out, "#[test]").unwrap();
     writeln!(out, "fn differential_oracle_round_double() {{").unwrap();
     for lex in ROUND_CORPUS {
@@ -770,10 +775,10 @@ fn gen_round(out: &mut String, g: &Graph, c: &mut Counts, f: &mut Faults) {
             spec.to_bits()
         );
         if diverges {
-            writeln!(out, "    // SPEC-REFERENCE: sparq-engine returns +0.0 (bits 0x{sparq_bits:016x}); F&O 4.4.3").unwrap();
-            writeln!(out, "    // requires NEGATIVE zero for an argument in [-0.5, 0). The row asserts the SPEC").unwrap();
-            writeln!(out, "    // value LIVE — it holds noir_XPath to F&O, not to sparq. Drop the special-casing").unwrap();
-            writeln!(out, "    // (not the assertion) when the engine is fixed.").unwrap();
+            writeln!(out, "    // SPEC-REFERENCE: sparq-engine returns +0.0 (bits 0x{sparq_bits:016x}); F&O 3.1").unwrap();
+            writeln!(out, "    // sec. 4.4.4 fn:round requires NEGATIVE zero for an argument in [-0.5, 0). The").unwrap();
+            writeln!(out, "    // row asserts the SPEC value LIVE — it holds noir_XPath to F&O, not to sparq.").unwrap();
+            writeln!(out, "    // Drop the special-casing (not the assertion) when the engine is fixed.").unwrap();
             c.spec_reference += 1;
         }
         c.assertions += 1;
@@ -835,7 +840,8 @@ fn gen_mixed_compare(out: &mut String, g: &Graph, c: &mut Counts, f: &mut Faults
 }
 
 fn gen_cast(out: &mut String, g: &Graph, c: &mut Counts, f: &mut Faults) {
-    writeln!(out, "/// xs:integer(xs:double) — TRUNCATES toward zero (F&O 17.1.1); it does NOT round.").unwrap();
+    writeln!(out, "/// xs:integer(xs:double) — TRUNCATES toward zero (F&O 3.1 sec. 19.1.2.4 \"Casting to").unwrap();
+    writeln!(out, "/// xs:integer\"); it does NOT round.").unwrap();
     writeln!(out, "/// Oracle: SPARQL `xsd:integer(xsd:double(...))`.").unwrap();
     writeln!(out, "#[test]").unwrap();
     writeln!(out, "fn differential_oracle_double_to_integer_cast() {{").unwrap();

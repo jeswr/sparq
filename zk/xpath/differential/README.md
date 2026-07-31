@@ -39,8 +39,8 @@ Each answer is then cross-checked, and a mismatch **aborts generation**:
 
 - **IEEE** — every `xs:double` answer is recomputed with native Rust `f64` and compared
   bit-for-bit, so a lossy serialization can never pin a wrong bit pattern.
-- **F&O** — every `fn:substring` answer is recomputed against an explicit XPath F&O §5.4.3
-  window reference.
+- **F&O** — every `fn:substring` answer is recomputed against an explicit XPath F&O 3.1
+  §5.4.3 `fn:substring` window reference.
 
 Where sparq's evaluator is itself wrong against the spec that `noir_XPath` implements, the
 case is **not** dropped or downgraded: it stays a **live assertion**, but against the **F&O
