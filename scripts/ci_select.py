@@ -87,7 +87,8 @@ _FULL_TRIGGERS: list[tuple[str, str]] = [
 # [OPUS-4.8] The broad `.github/` and `scripts/` full-run triggers above are
 # CORRECT-BY-DEFAULT but OVER-BROAD: a PR that changes ONLY orchestration/workflow
 # tooling (PR/issue/bead automation, routing, the merge-queue batchers, agent
-# config) forces the FULL Rust matrix even though NOTHING it touches is read by any
+# config) — or [OPUS-5] #3005 only DEPLOYMENT/INFRA config (deploy/**) — forces the
+# FULL Rust matrix even though NOTHING it touches is read by any
 # Rust build/test/clippy/coverage/bench/fuzz/CodeQL job. The maintainer's ask:
 # stop running the engine CI on those PRs (they dominate the drain).
 #
@@ -125,6 +126,19 @@ _ORCHESTRATION_SAFE: list[str] = [
     "orchestration/",       # routing.toml + orchestration policy (the #3416 class)
     ".claude/",             # agent definitions / skills / workflows / settings
     ".beads/",              # the bead task DB (never read by any build/test)
+    # [OPUS-5] #3005 (sq-g25hr): DEPLOYMENT / INFRASTRUCTURE config — Terraform,
+    # Helm charts, k8s + cloud templates, PaaS descriptors, the demo compose files
+    # and their prose. Not "orchestration" in the PR/bead-automation sense, but this
+    # allowlist encodes a PROPERTY, not a topic: proven inert for the Rust matrix.
+    # AUDIT (the observation in #3005 — the 7 cloud-deploy PRs #2314-2322 each ran
+    # the FULL required suite): no crate source references deploy/ (no include_str!/
+    # include_bytes!/path read), and no Rust-CI workflow reads it — the only
+    # workflows that do are the deploy lanes themselves (deploy-lint.yml,
+    # deploy-terraform-lint.yml — zero cargo invocations), pages.yml, docs-quality.yml
+    # and one release.yml COMMENT, none of which are gated by this selector. Those
+    # deploy/docs lanes still run on these PRs, so nothing that actually validates
+    # deploy/ is skipped — only the Rust matrix that never looked at it.
+    "deploy/",
     # Orchestration-only workflow files (PR/issue/bead/merge automation — none run
     # cargo build/test/clippy/coverage/bench/fuzz/CodeQL).
     ".github/workflows/triage-issue.yml",
@@ -137,6 +151,11 @@ _ORCHESTRATION_SAFE: list[str] = [
     ".github/workflows/differential-update.yml",
     ".github/workflows/kb-dump.yml",
     ".github/workflows/pkg-ingest.yml",
+    # [OPUS-5] #3005: the deploy lanes that own deploy/** (yaml/terraform/shell lint
+    # only — `grep -c cargo` == 0 in both). A deploy PR that edits its own lane
+    # definition must not thereby re-arm the whole Rust matrix.
+    ".github/workflows/deploy-lint.yml",
+    ".github/workflows/deploy-terraform-lint.yml",
     # NOTE deliberately NOT here: selection-alarm.yml / formal-alarm.yml — they are
     # monitors for the Rust/formal lanes (borderline), so they keep triggering full
     # (fail-closed; the value of skipping them is negligible and the audit is cleaner).

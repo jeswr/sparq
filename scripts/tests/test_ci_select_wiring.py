@@ -62,6 +62,7 @@ OWNERSHIP_TOML = REPO_ROOT / "ci" / "path-ownership.toml"  # [OPUS-4.8] sq-fmx4u
 # [OPUS-4.8] path-aware CI audit: the merge_group changed-files gates.
 CONTAINER_SCAN_YML = REPO_ROOT / ".github" / "workflows" / "container-scan.yml"
 SUPPLY_CHAIN_YML = REPO_ROOT / ".github" / "workflows" / "supply-chain.yml"
+CODEQL_YML = REPO_ROOT / ".github" / "workflows" / "codeql.yml"  # [OPUS-5] #3005
 
 FAIL_CLOSED_DISJUNCT = "needs.select.outputs.mode != 'selected'"
 NEEDLE_RE = re.compile(
@@ -2267,6 +2268,185 @@ class TestMergeGroupChangeClassGate(unittest.TestCase):
         self.assertNotIn("changes", self.fuzz["jobs"],
                          "fuzz.yml grew a `changes` job — its merge-group gating is the "
                          "select pre-job; keep one gate, not two")
+
+
+class TestCodeQLMergeGroupChangeClassGate(unittest.TestCase):
+    """[OPUS-5] #3005 (sq-g25hr): the docs/deploy-only fast lane.
+
+    codeql.yml's `Decide rust_changed` step used to hard-force rust_changed=true on
+    merge_group (GitHub ignores `paths` there), so every enqueue paid a full workspace
+    extraction + analysis — including the 7 cloud-deploy PRs (#2314-2322) that
+    contained zero Rust. It now runs the SAME batch-diff change-class gate ci.yml +
+    feature-matrix.yml already run.
+
+    NOTE the issue's "CodeQL-rust ~20-40min" premise is STALE (codeql.yml's header
+    records the measured post-buildless-migration wall time, which is far lower), so
+    this is a consistency/modest-saving change rather than the headline win #3005
+    predicts. These tests pin the gate's SHAPE and SOUNDNESS, not any wall-clock claim:
+      * the merge_group branch exists and is FAIL-SAFE (defaults true, the #3421
+        deepening fetch + cat-file SHA guards, `|| cls=engine` on the classifier);
+      * classification is DELEGATED to scripts/ci_select.py (single source of truth) —
+        no duplicated grep path list in the workflow;
+      * the skip-class set is EXACTLY {docs-only, orchestration-only}; engine/mixed/any
+        unknown token forces the full analysis (this is what makes the gate
+        unspoofable — the class is computed from the DIFF, never from a label);
+      * push/schedule still force the full analysis;
+      * the gate stays a job-level `if:` on the `analyze` job (its existing shape) and
+        `CodeQL analysis (rust)` is NOT an individually-required check."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.wf = _load(CODEQL_YML)
+        cls.select_mod = _ci_select_module()
+
+    def _decide(self) -> dict:
+        for step in self.wf["jobs"]["changes"]["steps"]:
+            if str(step.get("name", "")).startswith("Decide rust_changed"):
+                return step
+        self.fail("codeql.yml missing the `Decide rust_changed` step")
+
+    def test_still_triggers_on_merge_group(self):
+        # The trigger must STAY: CodeQL surfaces a check on PRs, so it must also
+        # appear on the queue ref or the required ci-summary waits for a sibling that
+        # never arrives. This gate makes the run CHEAP, it does not remove it.
+        self.assertIn("merge_group", _on_block(self.wf),
+                      "codeql must keep its merge_group trigger (the ci-summary "
+                      "sibling contract); #3005 narrows the WORK, not the trigger")
+
+    def test_merge_group_branch_present_and_fail_safe(self):
+        run = str(self._decide().get("run", ""))
+        self.assertIn('"${EVENT_NAME}" = "merge_group"', run,
+                      "decide step must special-case merge_group")
+        self.assertIn("rust=true", run,
+                      "merge_group branch must default rust=true (fail-safe)")
+        self.assertIn("|| cls=engine", run,
+                      "a classifier invocation failure must fall back to cls=engine")
+        self.assertIn("git cat-file -e", run,
+                      "the #3421 SHA-resolution guard must precede the diff")
+        self.assertIn("fail-safe", run.lower(),
+                      "the fail-safe fallback must be documented + taken")
+        env = self._decide().get("env", {}) or {}
+        self.assertEqual(str(env.get("MG_BASE_SHA", "")),
+                         "${{ github.event.merge_group.base_sha }}")
+        self.assertEqual(str(env.get("MG_HEAD_SHA", "")),
+                         "${{ github.event.merge_group.head_sha }}")
+
+    def test_batch_diff_fetch_deepens_the_shallow_checkout(self):
+        # Same trap as #3421: the `changes` job checks out at depth 1, so a plain SHA
+        # fetch leaves base/head PRESENT but unconnected — both cat-file guards pass
+        # and the three-dot diff then dies with "no merge base", permanently forcing
+        # cls=engine and silently reducing this gate to a no-op.
+        run = str(self._decide().get("run", ""))
+        fetches = [ln for ln in run.splitlines() if "git fetch" in ln]
+        self.assertTrue(fetches, "merge_group branch must fetch the SHA pair")
+        for ln in fetches:
+            self.assertIn("--depth=2147483647", ln,
+                          "every batch-diff fetch must deepen the shallow checkout "
+                          f"or the gate never skips: {ln.strip()!r}")
+
+    def test_classification_is_delegated_not_duplicated(self):
+        run = str(self._decide().get("run", ""))
+        self.assertIn("scripts/ci_select.py --classify-only", run,
+                      "the merge_group branch must invoke the classifier, the single "
+                      "source of truth")
+        self.assertNotIn("grep -Eq", run,
+                         "the merge_group branch must NOT re-encode the class path "
+                         "sets as a grep — no duplicated path lists")
+
+    def test_skip_class_set_is_exactly_docs_and_orchestration(self):
+        docs = self.select_mod._CLASS_DOCS
+        orch = self.select_mod._CLASS_ORCHESTRATION
+        run = str(self._decide().get("run", ""))
+        self.assertIn(f"{docs}|{orch}) rust=false", run,
+                      f"the skip case-arm must cover exactly {docs}|{orch}")
+        self.assertIn("*) rust=true", run,
+                      "the wildcard arm must force the full analysis")
+        self.assertNotIn("mixed) rust=false", run)
+        self.assertNotIn("engine) rust=false", run)
+
+    def test_push_and_schedule_still_force_the_full_analysis(self):
+        run = str(self._decide().get("run", ""))
+        # The trailing else-arm is the push/schedule path and must force true.
+        self.assertIn("full CodeQL", run,
+                      "the non-PR/non-merge_group arm must still force the full analysis")
+        tail = run.rsplit("else", 1)[-1]
+        self.assertIn("rust_changed=true", tail,
+                      "the final else-arm (push / schedule) must force rust_changed=true")
+
+    def test_analyze_job_is_gated_on_the_decide_output(self):
+        cond = str(self.wf["jobs"]["analyze"].get("if", ""))
+        self.assertIn("needs.changes.outputs.rust_changed == 'true'", cond,
+                      "the analyze job must stay gated on the decide output")
+
+
+class TestDeployPathsAreRustInert(unittest.TestCase):
+    """[OPUS-5] #3005 (sq-g25hr): `deploy/**` and the two deploy lane definitions are
+    on the audited orchestration-safe allowlist, so a cloud-deploy PR classifies
+    orchestration-only and skips the Rust matrix instead of paying the full suite.
+
+    THE SOUNDNESS OBLIGATION (§2 — a skip is a PROOF of non-interference): this test
+    re-derives that proof every run, so the entry cannot silently rot the day a crate
+    or a Rust-CI workflow starts reading deploy/."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.select_mod = _ci_select_module()
+
+    def test_deploy_paths_classify_orchestration_only(self):
+        cls_ = self.select_mod.classify_change([
+            "deploy/aws/main.tf",
+            "deploy/helm/sparq/values.yaml",
+            "deploy/paas/render.yaml",
+            "deploy/README.md",
+            ".github/workflows/deploy-lint.yml",
+            ".github/workflows/deploy-terraform-lint.yml",
+        ])
+        self.assertEqual(cls_, self.select_mod._CLASS_ORCHESTRATION,
+                         "a deploy-only diff must classify orchestration-only (#3005) — "
+                         "this is the class the merge_group skip case-arms match on")
+
+    def test_a_single_rust_hunk_defeats_the_deploy_fast_lane(self):
+        # THE ANTI-SPOOF INVARIANT: the class is computed from the DIFF. Adding any
+        # crate source file to an otherwise deploy-only batch must force the full run,
+        # so a code change can never ride the fast lane by looking like config.
+        for engine_path in ("crates/sparq-core/src/lib.rs", "Cargo.lock",
+                            "crates/sparq-engine/Cargo.toml"):
+            cls_ = self.select_mod.classify_change(["deploy/aws/main.tf", engine_path])
+            self.assertNotIn(
+                cls_, (self.select_mod._CLASS_ORCHESTRATION, self.select_mod._CLASS_DOCS),
+                f"{engine_path} in the batch must defeat the fast lane, got {cls_!r}")
+
+    def test_deploy_tree_is_not_read_by_any_rust_ci_workflow(self):
+        # The inertness proof for the directory entry. OrchestrationSafeInertnessTests
+        # exempts directory prefixes from its grep ("audited by convention"); deploy/
+        # is a large, externally-authored tree, so audit it explicitly here instead.
+        wf_dir = REPO_ROOT / ".github" / "workflows"
+        rust_ci = [
+            "ci.yml", "feature-matrix.yml", "codeql.yml", "supply-chain.yml",
+            "bench.yml", "fuzz.yml", "miri.yml", "asan.yml", "kani.yml",
+            "metamorph.yml", "vectorized-feature-off.yml", "ci-select.yml",
+            "ci-summary.yml", "formal-verification.yml", "differential.yml",
+            "shacl-diff-fuzz.yml", "nightly-full-sweep.yml", "datalog-souffle.yml",
+        ]
+        for name in rust_ci:
+            path = wf_dir / name
+            if not path.exists():
+                continue
+            self.assertNotIn(
+                "deploy/", path.read_text(encoding="utf-8"),
+                f"{name} references deploy/ — the tree is NOT inert for the Rust "
+                "matrix; remove 'deploy/' from _ORCHESTRATION_SAFE (fail-closed)")
+
+    def test_deploy_lane_workflows_run_no_cargo(self):
+        # The two allowlisted lane definitions must stay cargo-free: they are what
+        # actually validates deploy/**, and they keep running on these PRs.
+        for name in ("deploy-lint.yml", "deploy-terraform-lint.yml"):
+            path = REPO_ROOT / ".github" / "workflows" / name
+            self.assertTrue(path.exists(), f"{name} missing (stale allowlist entry)")
+            self.assertNotIn(
+                "cargo", path.read_text(encoding="utf-8"),
+                f"{name} grew a cargo invocation — it is no longer Rust-inert and must "
+                "come off _ORCHESTRATION_SAFE")
 
 
 if __name__ == "__main__":

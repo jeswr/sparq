@@ -79,12 +79,19 @@ jobs:
   #     ONLY (docs/branch-protection.md §Draft-tier CI, last paragraph): a draft head
   #     already carries no PR CodeQL analysis and the rule tolerates that absence.
   #     A non-Rust PR is the same posture — there is genuinely no Rust to analyse.
-  #   * SAFE-BY-DEFAULT: rust_changed is forced 'true' on EVERY event except a
-  #     `pull_request` (push-to-main, merge_group, weekly schedule all run CodeQL in
-  #     full), and the Rust path set is broad: any *.rs / **/Cargo.toml / Cargo.lock /
-  #     rust-toolchain* / any build.rs (covered by *.rs? build.rs IS a .rs file) /
-  #     the codeql wiring itself. If the diff cannot be computed, we never silently
-  #     skip: off the PR path we hard-force 'true'.
+  #   * SAFE-BY-DEFAULT: rust_changed is forced 'true' on push-to-main and the weekly
+  #     schedule (both always analyse in full), and the Rust path set is broad: any
+  #     *.rs / **/Cargo.toml / Cargo.lock / rust-toolchain* / any build.rs (covered by
+  #     *.rs? build.rs IS a .rs file) / the codeql wiring itself. If the diff cannot be
+  #     computed, we never silently skip: every unresolvable case hard-forces 'true'.
+  #   * [OPUS-5] #3005: `merge_group` is no longer a blanket force-true — it takes the
+  #     batch-diff CHANGE-CLASS gate in the decide step below (the same layer ci.yml and
+  #     feature-matrix.yml already run), so a docs-only/deploy-only batch skips an
+  #     analysis that had no Rust to analyse. This does NOT revisit the placement
+  #     decision above: CodeQL still runs on every PR and on every rust-affecting
+  #     merge group, so the alerts-at-zero pre-merge posture is unchanged. Fail-safe in
+  #     every direction: any class other than docs-only/orchestration-only, any unknown
+  #     token, any unresolvable SHA pair and any classifier error all resolve to 'true'.
   changes:
     name: detect rust changes (codeql)
     runs-on: ubuntu-latest
@@ -111,14 +118,70 @@ jobs:
               - '.github/codeql/**'
       - name: Decide rust_changed (safe-by-default off the PR path)
         id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            echo "rust_changed=true" >> "$GITHUB_OUTPUT"
-            echo "event=${{ github.event_name }} -> forcing rust_changed=true (full CodeQL)"
-          else
+          if [ "${EVENT_NAME}" = "pull_request" ]; then
             echo "rust_changed=${{ steps.filter.outputs.rust }}" >> "$GITHUB_OUTPUT"
             echo "pull_request -> paths-filter says rust=${{ steps.filter.outputs.rust }}"
+          elif [ "${EVENT_NAME}" = "merge_group" ]; then
+            # [OPUS-5] #3005 (sq-g25hr) MERGE-GROUP CHANGE-CLASS GATE — the same layer
+            # ci.yml + feature-matrix.yml already run, extended to this workflow. This
+            # step used to hard-force rust_changed=true on merge_group (GitHub ignores
+            # `paths` there), so EVERY enqueue paid a full workspace extraction +
+            # analysis — including the docs/deploy-only batches #3005 is about.
+            # HONEST SIZING: #3005 bills CodeQL as a "~20-40min" pole, but that premise
+            # is STALE — see the measured placement note in this file's header: since
+            # the `build-mode: none` buildless migration the analysis is a few minutes,
+            # not tens. So this gate is a MODEST, consistency-motivated saving on
+            # rust-inert batches, NOT the headline win the issue predicts; the header's
+            # measurement is authoritative over the issue text.
+            # Now: diff the queued batch (base_sha...head_sha) and classify it via
+            # scripts/ci_select.py --classify-only, the SAME classify_change() the
+            # `select` pre-job runs. docs-only/orchestration-only batch => skip the
+            # analysis; ANY other class, an unknown token, an unresolvable SHA pair, or a
+            # classifier error => full (fail-safe).
+            #
+            # SOUND (§2 — a skip is a proof of non-interference): CodeQL analyses the
+            # RUST workspace. A batch classified docs-only/orchestration-only provably
+            # contains no Rust/Cargo/toolchain change, so the analysis result is
+            # identical to the one already on main; there is nothing new to analyse. The
+            # classes are the classifier's audited inert allowlists — a batch containing
+            # ANY crates/** source hunk classifies engine (or mixed) and runs in full, so
+            # the gate cannot be satisfied by mislabelling a code change as docs-only:
+            # the class is computed from the diff, never from a PR label or title.
+            rust=true
+            ok=true
+            # --depth=2147483647 (git's INFINITE_DEPTH; --unshallow that is also valid on
+            # a complete repo): this job's checkout is depth-1, and the classifier's
+            # three-dot diff needs the merge-base — a shallow SHA fetch leaves both
+            # commits PRESENT (the cat-file guards pass) but unconnected, so
+            # `git diff base...head` dies with "no merge base" and the fail-safe would
+            # silently force class=engine on EVERY batch, reducing this gate to a no-op.
+            git fetch --no-tags --quiet --depth=2147483647 origin "${MG_BASE_SHA}" "${MG_HEAD_SHA}" 2>/dev/null \
+              || git fetch --no-tags --quiet --depth=2147483647 origin "${MG_BASE_SHA}" 2>/dev/null \
+              || ok=false
+            git cat-file -e "${MG_BASE_SHA}^{commit}" 2>/dev/null || ok=false
+            git cat-file -e "${MG_HEAD_SHA}^{commit}" 2>/dev/null || ok=false
+            if [ "${ok}" = "true" ]; then
+              cls="$(python3 scripts/ci_select.py --classify-only --event merge_group \
+                       --base "${MG_BASE_SHA}" --head "${MG_HEAD_SHA}")" || cls=engine
+              case "${cls}" in
+                docs-only|orchestration-only) rust=false ;;
+                *) rust=true ;;
+              esac
+            else
+              echo "::warning::could not resolve merge_group base/head SHAs for the batch diff — running the full CodeQL analysis (fail-safe)."
+            fi
+            echo "rust_changed=${rust}" >> "$GITHUB_OUTPUT"
+            echo "merge_group -> change_class=${cls:-<unresolved>} rust_changed=${rust}"
+          else
+            # push-to-main / weekly schedule -> always analyse in full.
+            echo "rust_changed=true" >> "$GITHUB_OUTPUT"
+            echo "event=${EVENT_NAME} -> forcing rust_changed=true (full CodeQL)"
           fi
 
   analyze:
@@ -135,8 +198,12 @@ jobs:
     # non-pull_request event satisfies the first disjunct => RUN.
     # [OPUS-4.8] path-aware CI: ALSO skipped when the PR diff touches no Rust
     # (needs.changes.outputs.rust_changed == 'false') — nothing for CodeQL to
-    # analyse. rust_changed is forced 'true' off the PR path (see `changes`), so
-    # merge_group / push-to-main / schedule always analyse in full.
+    # analyse. push-to-main / schedule always force rust_changed=true (see `changes`).
+    # [OPUS-5] #3005: a merge_group batch now resolves rust_changed from the batch
+    # diff's change class, so a docs/deploy-only enqueue skips this job too. That is
+    # the SAME `skipped`-is-non-failing accounting the two skips above already rely
+    # on — `CodeQL analysis (rust)` is not an individually required context; the
+    # single required context is `ci-summary / gate`.
     if: >-
       (github.event_name != 'pull_request' || github.event.pull_request.draft != true) &&
       needs.changes.outputs.rust_changed == 'true'
