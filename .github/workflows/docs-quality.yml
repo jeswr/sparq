@@ -72,6 +72,15 @@
 #                       READMEs. Deterministic (line-count/grep), no network; carries a
 #                       hermetic --self-test step. The exact string `readme-template (template)`
 #                       is deliberately pinned as the step name (de-facto REQUIRED gate).
+#     • inference-report-drift — the committed inference-conformance-report.md must state
+#                       the SAME `pass + documented divergence` total as the conformance
+#                       scoreboard's `ratchet_floor` and as ci.yml's enforced `RATCHET=`
+#                       (scripts/check-inference-report-drift.py; sq-1d528 / issue #3171).
+#                       Equality both ways: a lower total means the tracked report is stale
+#                       (the #1428 finding — it had drifted a whole suite behind), a higher
+#                       one means the ratchet was never raised with the improvement. Runs
+#                       here, not in the Rust-gated inference-conformance job, because the
+#                       drift lands in PRs that never run that job. Deterministic, no build.
 #     • ci-scripts     — the CI-helper self-tests + workflow lints bucket (absorbed whole;
 #                       it was already the in-file precedent for step-bucket consolidation).
 #
@@ -382,6 +391,28 @@ jobs:
         run: python3 scripts/preflight.py --self-test
       - name: preflight — checker tests + worker-brief block consistency — GATING
         run: python3 scripts/tests/test_preflight.py
+
+      # ---- inference-conformance report drift (sq-1d528 / issue #3171) ----
+      # [OPUS-5] The inference ratchet number lives in four places and only one is
+      # machine-regenerated: the scoreboard export's `ratchet_floor` (source of
+      # truth), ci.yml's `RATCHET=` + job name, and the COMMITTED
+      # inference-conformance-report.md. CI enforces the floor against the report it
+      # regenerates in-job and then throws that copy away as an artifact — nothing
+      # compared it to the copy in git, so sq-pbz04.1.3 (#1428) found the tracked
+      # report a full suite behind the enforced snapshot with every gate green. A
+      # stale committed report is a published-honesty problem: it is what a reader
+      # (and research/inference-completeness-audit.md) takes as the current state.
+      # This gate pins report `pass + documented divergence` == scoreboard floor ==
+      # ci.yml RATCHET, EQUALITY in both directions (below = stale report; above =
+      # an improvement whose ratchet was never raised, leaving CI guarding a number
+      # the engine already beat). It lives HERE rather than in the
+      # inference-conformance job because that job is Rust-gated + selection-gated —
+      # the drift lands in a PR that never runs it. Deterministic (text/JSON parse),
+      # no cargo build, no network, so it costs the shared runner milliseconds.
+      - name: Self-test the inference-report drift gate (both directions)
+        run: python3 scripts/check-inference-report-drift.py --self-test
+      - name: inference-report drift (report == scoreboard floor == ci.yml RATCHET) — GATING
+        run: python3 scripts/check-inference-report-drift.py
 
       - name: Demo deployment manifests
         run: |
