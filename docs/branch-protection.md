@@ -274,7 +274,8 @@ no check-run there either — not a byte-identical copy of the PR check-set.)
 
 **The integrity invariant — a draft-tier gate result must NEVER admit a PR to the
 merge queue.** The load-bearing mechanism is rule 1 (structural); rules 2–8 are
-belts (all in `scripts/ci_summary_gate.py`, unit-tested in
+belts, and rule 9 is diagnosis + a recorded decision rather than a belt (all in
+`scripts/ci_summary_gate.py`, unit-tested in
 `scripts/tests/test_ci_summary_gate.py`; the name/trigger wiring pinned by
 `scripts/tests/test_ci_select_wiring.py`):
 
@@ -368,6 +369,25 @@ belts (all in `scripts/ci_summary_gate.py`, unit-tested in
    reaches at budget exhaustion — never a new pass — and it stands down whenever the
    set is still settling, the PR reads non-draft, or the draft state is unreadable
    (then the pre-#3781 budget-exhaustion path renders the verdict unchanged).
+9. **Both draft-tier refusals say that re-running the gate is futile, and the
+   idle-head case deliberately has no exit (#4614).** [OPUS-5] Two carry-overs from
+   the superseded #3765:
+   * **Re-run futility is stated, not implied.** Rule 8's fast fail and rule 4's
+     budget-exhaustion belt both end with the shared `UNSAT_HOLD_REMEDY` tail
+     (`scripts/ci_summary_gate.py`): re-running `ci-summary` re-runs no *selecting*
+     workflow, so a bare `gh run rerun` cannot make the missing full-tier select
+     appear — only `gh pr ready` or a new head commit does. The audience is the
+     automated repair lanes, whose reflex for any RED is otherwise "re-run it".
+   * **The idle head gets no exit — decided, not overlooked.** Rule 8 fires only on
+     a live draft read of `True`. If the PR reads NON-draft, or the draft read
+     fails, the gate polls to the absolute budget. That is deliberate: the exit is
+     licensed by a causal fact (only a non-draft payload produces a full-tier
+     select), and no equivalent fact exists for an idle head — the successor may
+     merely be late. #3765's alternative, a head-activity probe counting
+     non-terminal Actions runs on the head SHA, is circumstantial evidence and
+     would buy speed by introducing a new false-RED mode on PRs with zero failing
+     legs. Burning the budget is slow; a false RED is a regression. Prior art if
+     revisited: closed branch `fable/gate-unsatisfiable-hold-3758` at `dc92b4af`.
 
 **Why the queue can never latch a draft-tier result.** Rule 1 is structural: the
 queue and branch protection admit a PR only on a successful check-run of the
