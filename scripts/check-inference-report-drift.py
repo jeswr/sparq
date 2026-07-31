@@ -39,8 +39,12 @@
 #
 # WHAT THIS CHECKS (deterministic, in-repo, NO network / NO cargo / stdlib only):
 #   C1  every `## Overall (…)` heading ci.yml's `inference-conformance` job names is
-#       the heading report.rs actually emits (and it names it at least twice — the
-#       existence grep and the count grep).
+#       the heading report.rs actually emits, AND the job still carries both
+#       load-bearing commands — the `grep -qE` existence probe and the `grep -A2`
+#       count-source probe — each exactly once, over the report path, spelling that
+#       heading. (Counting mentions is NOT sufficient: the real job also names the
+#       heading in an `echo ::error::` diagnostic and in a comment, so a block that
+#       has lost a command outright still carries two or more mentions.)
 #   C2  the committed report contains that exact heading, exactly once.
 #   C3  the emitter still spells the four buckets ci.yml greps for, AND the committed
 #       report's totals line is inside ci.yml's own `grep -A2` window after the
@@ -90,7 +94,17 @@ HEADING_EMIT_RE = re.compile(r'writeln!\(\s*md,\s*"(##\s+Overall[^"]*?)\\n"')
 # divergence'` depend on, as spelled in the emitter's format string.
 EMITTER_BUCKETS = "pass / {} fail / {} documented divergence / {} out-of-scope"
 # A `## Overall (…)` mention in workflow text (after un-escaping the grep regex).
+# NOTE: a mention is only evidence of SPELLING — comments and `echo ::error::`
+# diagnostics mention the heading too. The two grep COMMANDS are matched below.
 HEADING_MENTION_RE = re.compile(r"##\s+Overall\s+\([^)\n]*\)")
+# ci.yml's existence probe — `grep -qE '^## Overall \(…\)' <report>` (ERE, so the
+# parens arrive backslash-escaped; `_unescape_grep` normalises them).
+EXISTENCE_GREP_RE = re.compile(r"grep\s+-qE\s+'(?P<pattern>[^'\n]*)'\s+(?P<path>[^\s;|&)]+)")
+# ci.yml's count-source probe — `grep -A2 '^## Overall (…)' <report>`, piped into
+# the `**<N> pass /` filter (BRE, so the parens are literal and unescaped).
+COUNT_GREP_RE = re.compile(
+    r"grep\s+-A(?P<ctx>\d+)\s+'(?P<pattern>[^'\n]*)'\s+(?P<path>[^\s;|&)]+)"
+)
 COUNT_LINE_RE = re.compile(
     r"^\*\*(\d+) pass / (\d+) fail / (\d+) documented divergence / (\d+) out-of-scope"
 )
@@ -146,6 +160,66 @@ def emitted_heading(emitter_src: str) -> tuple[str | None, list[str]]:
             "deliberately changed."
         ]
     return found[0].strip(), []
+
+
+def heading_grep_offences(block: str, job_id: str, heading: str) -> list[str]:
+    """C1's load-bearing half: ci.yml's TWO heading greps, checked independently.
+
+    Counting `## Overall (…)` mentions across the job block is NOT enough. The real
+    `inference-conformance` job names the heading four times — the `grep -qE`
+    existence probe, the `echo ::error::` diagnostic beneath it, the comment above
+    the extractor, and the `grep -A2` count-source probe. Deleting either COMMAND
+    therefore leaves the other command plus two pieces of prose, so a mention count
+    of >= 2 survives while the documented two-grep contract is broken. Each command
+    is matched by its own shape instead, required to appear EXACTLY ONCE over the
+    report path, and required to spell the heading the emitter writes.
+    """
+    offences: list[str] = []
+    specs = (
+        (
+            "existence",
+            EXISTENCE_GREP_RE,
+            f"grep -qE '^{heading}' {REPORT} — with the parens BACKSLASH-escaped, "
+            "since -E makes bare parens a group",
+            "it is what distinguishes a missing/empty report (an INFRA flake) from a "
+            "genuine regression, so without it an aborted run reports a phantom "
+            "'regressed below the ratchet (0 < N)'",
+        ),
+        (
+            "count-source",
+            COUNT_GREP_RE,
+            f"grep -A{GREP_AFTER_CONTEXT} '^{heading}' {REPORT}",
+            "it is the only step that turns the report into the number compared "
+            "against `RATCHET=`",
+        ),
+    )
+    for kind, cmd_re, shape, why in specs:
+        found = [m for m in cmd_re.finditer(block) if m.group("path") == REPORT]
+        if len(found) != 1:
+            offences.append(
+                f"{CI_WORKFLOW} job `{job_id}`: expected exactly ONE {kind} grep over "
+                f"`{REPORT}` (`{shape}`), found {len(found)}. Naming the heading in a "
+                f"comment or an `echo ::error::` diagnostic is not a substitute — "
+                f"{why}. Did a step get rewritten?"
+            )
+            continue
+        m = found[0]
+        pattern = _unescape_grep(m.group("pattern"))
+        if heading not in pattern:
+            offences.append(
+                f"{CI_WORKFLOW} job `{job_id}`: the {kind} grep matches `{pattern}`, "
+                f"which does not name the heading {EMITTER} emits (`{heading}`). The "
+                "ratchet step would report a phantom INFRA failure instead of parsing "
+                "the report."
+            )
+        if kind == "count-source" and int(m.group("ctx")) != GREP_AFTER_CONTEXT:
+            offences.append(
+                f"{CI_WORKFLOW} job `{job_id}`: the count-source grep reads "
+                f"`-A{m.group('ctx')}` lines of context, but C3 below models ci.yml's "
+                f"window as `-A{GREP_AFTER_CONTEXT}`. Move GREP_AFTER_CONTEXT here in "
+                "lock-step with ci.yml, or C3 checks a window the gate no longer uses."
+            )
+    return offences
 
 
 def binary_suites(scoreboard: dict) -> list[dict]:
@@ -205,22 +279,20 @@ def check(root: Path, bound: list[str] | None = None) -> list[str]:
                 "without updating the registry silently unbinds the floor."
             )
         else:
+            # Spelling: no stale heading anywhere in the job — commands, comments
+            # and `::error::` diagnostics alike (a stale diagnostic misleads too).
             mentions = HEADING_MENTION_RE.findall(_unescape_grep(block))
             wrong = sorted({m for m in mentions if m != heading})
             if wrong:
                 offences.append(
-                    f"{CI_WORKFLOW} job `{job_id}` greps for heading(s) "
+                    f"{CI_WORKFLOW} job `{job_id}` names heading(s) "
                     f"{wrong!r} but {EMITTER} emits `{heading}`. The ratchet step "
                     "would report a phantom INFRA failure instead of parsing the "
                     "report."
                 )
-            elif len(mentions) < 2:
-                offences.append(
-                    f"{CI_WORKFLOW} job `{job_id}` names the `## Overall (…)` "
-                    f"heading {len(mentions)} time(s); the ratchet step needs both "
-                    "the existence grep and the `grep -A2` count grep. Did a step "
-                    "get rewritten?"
-                )
+            # Presence: both load-bearing commands, independently. Prose mentions
+            # cannot stand in for a deleted grep.
+            offences += heading_grep_offences(block, job_id, heading)
 
     # C2 — the committed report carries that exact heading, once.
     report_lines = report_text.splitlines()
@@ -356,12 +428,21 @@ jobs:
       - name: Enforce ratchet
         run: |
           RATCHET=7
-          if ! grep -qE '^## Overall \\(all inference suites\\)' inference-conformance-report.md; then
-            echo "::error::no '## Overall (all inference suites)' section"
+          if [ ! -s inference-conformance-report.md ] || ! grep -qE '^## Overall \\(all inference suites\\)' inference-conformance-report.md; then
+            echo "::error::report missing/empty — no '## Overall (all inference suites)' section. INFRA failure, not a regression."
             exit 1
           fi
+          # The Overall section emits:
+          # **<N> pass / <M> fail / <D> documented divergence / <K> out-of-scope — ...**
+          # (suite subtotals use the same shape, so parse the line after the
+          # final "## Overall (all inference suites)")
           OVERALL=$(grep -A2 '^## Overall (all inference suites)' inference-conformance-report.md | grep -E '\\*\\*[0-9]+ pass /')
 """
+# The fixture deliberately mirrors the real job's PROSE — the `::error::`
+# diagnostic and the four-line comment — because that prose is what let a
+# mention-COUNT check pass with a load-bearing grep deleted. The two removal
+# mutations below still go red without it, but only WITH it do they reproduce the
+# masking condition and so demonstrate the per-command check earns its keep.
 
 _FIX_EMITTER = r'''
 pub fn render() -> String {
@@ -481,6 +562,24 @@ _MUTATIONS = [
         CI_WORKFLOW,
         "grep -qE '^## Overall \\(all inference suites\\)'",
         "grep -qE '^## Overall \\(all suites\\)'",
+    ),
+    (
+        "C1 existence grep DELETED (comment + ::error:: diagnostic still mention it)",
+        CI_WORKFLOW,
+        " || ! grep -qE '^## Overall \\(all inference suites\\)' inference-conformance-report.md",
+        "",
+    ),
+    (
+        "C1 count-source grep DELETED (comment + ::error:: diagnostic still mention it)",
+        CI_WORKFLOW,
+        "grep -A2 '^## Overall (all inference suites)' inference-conformance-report.md | ",
+        "",
+    ),
+    (
+        "C1 count-source grep widened past the -A2 window C3 models",
+        CI_WORKFLOW,
+        "grep -A2 '^## Overall (all inference suites)'",
+        "grep -A5 '^## Overall (all inference suites)'",
     ),
     (
         "job rename unbinds the registry's ci_job from ci.yml",
