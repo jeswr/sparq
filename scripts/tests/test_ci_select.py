@@ -805,29 +805,41 @@ class OrchestrationSafeInertnessTests(unittest.TestCase):
 
 
 class ReleaseOnlyWorkflowInertnessTests(unittest.TestCase):
-    """[OPUS-5] THE RELEASE-ONLY INERTNESS OBLIGATION (issue #2536). Each
-    _RELEASE_ONLY_WORKFLOWS entry is allowlisted on ONE proof: it has no
-    pull_request / pull_request_target / merge_group trigger, so it can never run as
-    a PR check and therefore cannot change any PR result whatever the edit says.
-    This test re-derives that proof from the REAL workflow files, so the day someone
-    gives release.yml a `pull_request:` trigger the allowlist entry goes RED instead
-    of silently becoming unsound. Stdlib only (no PyYAML) — the `on:` block is
-    extracted textually, comments stripped."""
+    """[OPUS-5] THE RELEASE-ONLY INERTNESS OBLIGATION (issue #2536). A
+    _RELEASE_ONLY_WORKFLOWS entry is allowlisted on TWO proofs, both re-derived here
+    from the REAL workflow files so the day either stops holding the entry goes RED
+    instead of silently becoming unsound:
+
+      (1) it has no pull_request / pull_request_target / merge_group trigger of its
+          own, so it can never run as a PR check directly; and
+      (2) it is not `uses:`-invoked, directly or TRANSITIVELY, by any workflow that
+          DOES carry such a trigger, so it cannot enter a PR check by reference.
+
+    (2) derives its caller corpus from every workflow in `.github/workflows` — NOT
+    from a hand-maintained list, which would miss a new caller among the repo's many
+    other PR-triggered workflows and leave an allowlisted file able to change a PR
+    result while ci_select kept suppressing the selection for edits to it.
+
+    Stdlib only (no PyYAML) — the `on:` block is extracted textually, comments
+    stripped."""
 
     _PR_TRIGGERS = ("pull_request", "pull_request_target", "merge_group")
 
     @staticmethod
-    def _on_block(text: str) -> str:
+    def _strip_comments(text: str) -> str:
+        return "\n".join(raw.split("#", 1)[0].rstrip() for raw in text.splitlines())
+
+    @classmethod
+    def _on_block(cls, text: str) -> str:
         """The top-level `on:` block with comments stripped. Ends at the next
         column-0 key. Comment stripping is what makes the token scan below sound:
         release.yml's header PROSE says "NO pull_request", which must not read as a
         trigger."""
         out: list[str] = []
         inside = False
-        for raw in text.splitlines():
-            line = raw.split("#", 1)[0].rstrip()
+        for line in cls._strip_comments(text).splitlines():
             if not inside:
-                if re.match(r"^on:", line):
+                if re.match(r"^[\"']?on[\"']?:", line):
                     inside = True
                     out.append(line)
                 continue
@@ -835,6 +847,49 @@ class ReleaseOnlyWorkflowInertnessTests(unittest.TestCase):
                 break  # next top-level key ends the block
             out.append(line)
         return "\n".join(out)
+
+    @classmethod
+    def _has_pr_trigger(cls, on_block: str) -> bool:
+        return any(re.search(rf"\b{t}\b", on_block) for t in cls._PR_TRIGGERS)
+
+    @classmethod
+    def _pr_reachable(cls, wf_dir: Path) -> dict[str, tuple[str, ...]]:
+        """Every workflow that can execute as part of a PR check, mapped to a WITNESS
+        chain from the PR-triggered root that reaches it.
+
+        Derived, never hand-maintained (that is the whole point): the roots are ALL
+        workflows in `wf_dir` whose parsed top-level `on:` block carries a
+        pull_request / pull_request_target / merge_group trigger, and reachability
+        follows local `uses: ./.github/workflows/X.yml` reusable-workflow edges
+        TRANSITIVELY — so a PR workflow calling an intermediate that calls a
+        release-only workflow is caught. Fail-closed: a file whose `on:` block cannot
+        be parsed is treated as a PR root."""
+        graph: dict[str, set[str]] = {}
+        roots: set[str] = set()
+        for path in sorted(wf_dir.glob("*.yml")) + sorted(wf_dir.glob("*.yaml")):
+            rel = f".github/workflows/{path.name}"
+            text = path.read_text(encoding="utf-8")
+            graph[rel] = {
+                f".github/workflows/{name}"
+                for name in re.findall(
+                    r"uses:\s*\./\.github/workflows/([A-Za-z0-9._-]+)",
+                    cls._strip_comments(text),
+                )
+            }
+            block = cls._on_block(text)
+            if not block.strip() or cls._has_pr_trigger(block):
+                roots.add(rel)
+
+        chains: dict[str, tuple[str, ...]] = {r: (r,) for r in roots}
+        stack = sorted(roots)
+        while stack:
+            node = stack.pop()
+            for callee in sorted(graph.get(node, ())):
+                if callee in chains:
+                    continue
+                chains[callee] = chains[node] + (callee,)
+                stack.append(callee)
+        return chains
 
     def test_no_release_only_workflow_runs_on_a_pull_request(self):
         for entry in cs._RELEASE_ONLY_WORKFLOWS:
@@ -851,23 +906,95 @@ class ReleaseOnlyWorkflowInertnessTests(unittest.TestCase):
                         f"PR-triggered workflow must keep forcing the full matrix).",
                     )
 
-    def test_no_rust_ci_workflow_invokes_a_release_only_workflow(self):
-        # Second obligation: a Rust-CI workflow must not `uses:`-call one of these (that
-        # would make the release file part of a PR check by reference). The only such
-        # edge in the repo is release.yml -> release-verify.yml, i.e. WITHIN the set.
-        wf_dir = REPO_ROOT / ".github" / "workflows"
-        rust_ci = OrchestrationSafeInertnessTests._RUST_CI_WORKFLOWS
-        blob = "\n".join(
-            (wf_dir / name).read_text(encoding="utf-8")
-            for name in rust_ci
-            if (wf_dir / name).exists()
-        )
+    def test_no_release_only_workflow_is_reachable_from_a_pr_trigger(self):
+        # Second obligation, and the one that has to be FAIL-CLOSED over the WHOLE
+        # workflow directory: a release-only workflow must not be `uses:`-invoked —
+        # directly OR transitively — by anything that runs on a PR. Scanning a
+        # hand-maintained list of Rust-CI callers would miss a new caller among the
+        # repo's many other PR-triggered workflows, and that caller would make the
+        # allowlisted file able to change a PR result while ci_select still suppressed
+        # the selection for edits to it. So derive the caller corpus instead.
+        chains = self._pr_reachable(REPO_ROOT / ".github" / "workflows")
         for entry in cs._RELEASE_ONLY_WORKFLOWS:
             with self.subTest(workflow=entry):
-                self.assertNotRegex(
-                    blob, rf"uses:\s*\./{re.escape(entry)}\b",
-                    f"{entry} is `uses:`-invoked by a Rust-CI workflow — it is NOT inert.",
-                )
+                if entry in chains:
+                    self.fail(
+                        f"{entry} is reachable from a PR-triggered workflow via "
+                        f"{' -> '.join(chains[entry])} — it CAN affect a PR check and is NOT "
+                        f"inert; remove it from _RELEASE_ONLY_WORKFLOWS (fail-closed).",
+                    )
+
+    def test_pr_reachability_catches_a_caller_outside_the_rust_ci_list(self):
+        # Regression fixture for exactly the hole the derived corpus closes: the caller
+        # is a PR-triggered workflow that is NOT in _RUST_CI_WORKFLOWS, and it reaches
+        # the release-only workflow TRANSITIVELY through an intermediate reusable
+        # workflow. Both hops must be followed.
+        with tempfile.TemporaryDirectory() as tmp:
+            wf_dir = Path(tmp)
+            (wf_dir / "some-pr-lane.yml").write_text(
+                "name: some-pr-lane\non:\n  pull_request:\n"
+                "jobs:\n  call:\n    uses: ./.github/workflows/intermediate.yml\n",
+                encoding="utf-8",
+            )
+            (wf_dir / "intermediate.yml").write_text(
+                "name: intermediate\non:\n  workflow_call:\n"
+                "jobs:\n  call:\n    uses: ./.github/workflows/release.yml\n",
+                encoding="utf-8",
+            )
+            (wf_dir / "release.yml").write_text(
+                "name: release\non:\n  push:\n    tags: ['v*']\njobs:\n  x:\n    runs-on: a\n",
+                encoding="utf-8",
+            )
+            (wf_dir / "unrelated.yml").write_text(
+                "name: unrelated\non:\n  workflow_dispatch:\njobs:\n  x:\n    runs-on: a\n",
+                encoding="utf-8",
+            )
+            chains = self._pr_reachable(wf_dir)
+
+            self.assertIn(".github/workflows/release.yml", chains)
+            self.assertEqual(
+                chains[".github/workflows/release.yml"],
+                (".github/workflows/some-pr-lane.yml",
+                 ".github/workflows/intermediate.yml",
+                 ".github/workflows/release.yml"),
+            )
+            # ...and it stays quiet on a workflow no PR trigger reaches.
+            self.assertNotIn(".github/workflows/unrelated.yml", chains)
+
+    def test_pr_reachability_ignores_commented_out_and_prose_triggers(self):
+        # The scan must not go red on a workflow whose PROSE says "pull_request" or
+        # whose caller edge is commented out — that would be a false alarm, not
+        # fail-closed. (release.yml's real header says "NO pull_request".)
+        with tempfile.TemporaryDirectory() as tmp:
+            wf_dir = Path(tmp)
+            (wf_dir / "caller.yml").write_text(
+                "# NOTE: never runs on pull_request.\nname: caller\non:\n"
+                "  workflow_dispatch:  # not a pull_request either\n"
+                "jobs:\n  call:\n    # uses: ./.github/workflows/release.yml\n"
+                "    runs-on: a\n",
+                encoding="utf-8",
+            )
+            (wf_dir / "release.yml").write_text(
+                "name: release\non:\n  push:\n    tags: ['v*']\njobs:\n  x:\n    runs-on: a\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(self._pr_reachable(wf_dir), {})
+
+    def test_pr_reachability_fails_closed_on_an_unparseable_on_block(self):
+        # A workflow whose `on:` block cannot be found is treated as a PR root, so an
+        # unreadable trigger can never silently license a skip.
+        with tempfile.TemporaryDirectory() as tmp:
+            wf_dir = Path(tmp)
+            (wf_dir / "weird.yml").write_text(
+                "name: weird\njobs:\n  call:\n    uses: ./.github/workflows/release.yml\n",
+                encoding="utf-8",
+            )
+            (wf_dir / "release.yml").write_text(
+                "name: release\non:\n  push:\n    tags: ['v*']\njobs:\n  x:\n    runs-on: a\n",
+                encoding="utf-8",
+            )
+            chains = self._pr_reachable(wf_dir)
+            self.assertIn(".github/workflows/release.yml", chains)
 
     def test_release_only_workflows_are_actually_allowlisted(self):
         # The splice into _ORCHESTRATION_SAFE is what makes the carve-out take effect;

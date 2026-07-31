@@ -137,9 +137,12 @@ _FULL_TRIGGERS: list[tuple[str, str]] = [
 # a PR cannot change any PR result, so editing one is inert for this PR's checks by
 # construction, independently of what the edit says. (release.yml's own header
 # states this contract: "NO schedule, NO pull_request, so this workflow NEVER runs
-# as a PR check and never gates a PR".) Second obligation, also tested: none of
-# these is `uses:`-invoked by a Rust-CI workflow — the only such edge in the repo is
-# release.yml -> release-verify.yml, i.e. WITHIN this set.
+# as a PR check and never gates a PR".) Second obligation, also tested and DERIVED
+# rather than hand-maintained: none of these is `uses:`-invoked — directly or
+# TRANSITIVELY — by any workflow under `.github/workflows` whose own `on:` block
+# carries a pull_request / pull_request_target / merge_group trigger, so none can
+# enter a PR check by reference either. (The one reusable-workflow edge into this
+# set is release.yml -> release-verify.yml, i.e. WITHIN it, from a non-PR root.)
 #
 # This is a claim about PR-time CI ONLY. A release build is of course still exercised
 # — by these workflows themselves, on the tag/dispatch that actually cuts a release,
