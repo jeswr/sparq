@@ -215,7 +215,7 @@ class TestSettleAndGracefulTimeout(unittest.TestCase):
         flip = [[GREEN, PENDING], [GREEN, R("coverage")]] * 4
         code, out = run(tiny_cfg(), flip, depth=20)
         self.assertEqual(code, 0)
-        self.assertIn("rendering the verdict on the final all-terminal set", out)
+        self.assertIn("rendering the verdict on the final gating set", out)
 
     def test_graceful_timeout_real_failure_still_fails(self):
         flip = [[GREEN, PENDING], [GREEN, R("coverage")]] * 3 \
@@ -409,6 +409,10 @@ class TestAdaptiveSaturationBudget(unittest.TestCase):
 
 # [OPUS-5] The live #3783 shape: `gate` run 30149978128 on main (e8a41ab8c) declared a
 # "genuine hang" while these three legs had been executing for 11 minutes.
+# NB these names are deliberately NOT in DECLARED_ADVISORY above, so TestLivenessVeto
+# exercises the veto over AWAITED (gating) legs — which is what that fix is about. The
+# #3786 tests below install the real registry declaration for them and pin the
+# complementary property: a DECLARED-advisory leg is not awaited at all.
 KANI_LIVE = [
     R("kani sparq-core (dict mmap validator totality) (bounded proofs, informational)",
       status="in_progress", conclusion=None, started="2026-07-25T08:20:50Z", rid=1),
@@ -573,6 +577,182 @@ class TestVerdictTaxonomy(unittest.TestCase):
             "#3783: a genuinely failing gating check must keep reading as FAILED — the "
             "taxonomy must not launder a real defect into 'could not determine'.",
         )
+
+
+# [OPUS-5] #3786 — the REAL registry key for the kani lane, verbatim from
+# .github/advisory-registry.json (workflow kani.yml / job_id kani). Installing it is
+# what makes the fixtures below the ACTUAL incident rather than a lookalike.
+KANI_REGISTRY_KEY = "kani ${{ matrix.suite.name }} (bounded proofs, informational)"
+
+
+class TestAwaitOnlyGatingLegs(unittest.TestCase):
+    """[OPUS-5] #3786 — the gate must not BLOCK on siblings whose conclusion it
+    EXCLUDES from the verdict by construction.
+
+    `gate` run 30149978128 on `main` polled 43 minutes and then declared a hang while
+    waiting on three DECLARED-advisory `kani` legs that a late `schedule` cron had
+    posted onto the head SHA (kani.yml has no push/pull_request trigger). The gate
+    spent its whole budget waiting for an answer it had already decided to ignore.
+
+    Both directions are pinned: advisory legs are NOT awaited (first group), and every
+    GATING leg still is — awaited, judged, and able to fail the gate (second group).
+    """
+
+    def setUp(self):
+        self._saved = g._DECLARED_ADVISORY
+        g.set_declared_advisory(DECLARED_ADVISORY + (KANI_REGISTRY_KEY,))
+        # Sanity: the declaration really does cover the live leg names, so a failure
+        # below is about the WAIT rule and not about a mis-typed fixture.
+        for r in KANI_LIVE:
+            assert g.is_advisory(r["name"]), r["name"]
+
+    def tearDown(self):
+        g._DECLARED_ADVISORY = self._saved
+
+    @staticmethod
+    def _run_counting(cfg, polls, depth=0):
+        """run() plus the number of polls actually consumed — the budget burn is the
+        thing #3786 is about, so it has to be observable."""
+        out = io.StringIO()
+        fetch = scripted(polls)
+        with redirect_stdout(out):
+            code = g.run_gate(cfg, fetch, lambda: depth, sleep_fn=lambda s: None)
+        return code, out.getvalue(), fetch.state["calls"]
+
+    def test_pending_advisory_legs_do_not_block_convergence(self):
+        # THE INCIDENT. Every gating leg is terminal + green; the only outstanding
+        # siblings are the three DECLARED-advisory kani proofs, still executing.
+        cfg = tiny_cfg()
+        code, out, calls = self._run_counting(cfg, [[GREEN, GREEN2] + KANI_LIVE], depth=0)
+        self.assertEqual(
+            code, 0,
+            "#3786 REGRESSION: the gate did not converge while the only outstanding "
+            "siblings were DECLARED-advisory legs whose conclusion render_verdict "
+            "excludes anyway. That is the 43-minute wait on `gate` run 30149978128 — "
+            "the gate waiting for an answer it had already decided to ignore.\n" + out,
+        )
+        self.assertLessEqual(
+            calls, cfg.min_polls + cfg.settle_polls,
+            "#3786: convergence must happen as soon as the GATING legs settle — the "
+            f"loop burned {calls} of {cfg.max_total_polls} polls.\n" + out,
+        )
+        self.assertIn("PASSED", out)
+        # ...and it must SAY it is not waiting for them, rather than silently dropping
+        # them from the log.
+        self.assertIn("declared-advisory leg(s) running but NOT awaited", out)
+
+    def test_a_pending_gating_leg_is_still_awaited(self):
+        # THE DISCRIMINATION. One gating leg is still queued beside the advisory ones:
+        # the gate must NOT conclude, and must exhaust its budget fail-closed.
+        code, out, calls = self._run_counting(
+            tiny_cfg(), [[GREEN, PENDING] + KANI_LIVE], depth=20)
+        self.assertEqual(
+            code, 1,
+            "#3786 OVER-CORRECTION: a still-running GATING leg was not awaited. Only "
+            "the legs the verdict already ignores may be skipped.\n" + out,
+        )
+        self.assertNotIn("PASSED", out)
+        self.assertEqual(calls, 8, out)  # the full absolute cap of tiny_cfg()
+
+    def test_a_gating_failure_is_still_caught_beside_advisory_legs(self):
+        # Not awaiting advisory legs must never let a real red through.
+        code, out, _ = self._run_counting(tiny_cfg(), [[GREEN, RED] + KANI_LIVE], depth=0)
+        self.assertEqual(code, 1, out)
+        self.assertIn("FAILED", out)
+        self.assertIn("- ✗ clippy: failure", out)
+
+    def test_an_advisory_failure_still_cannot_red_the_gate(self):
+        # The excluded set is UNCHANGED by #3786 — in both directions.
+        advisory_red = R(KANI_LIVE[0]["name"], conclusion="failure")
+        code, out, _ = self._run_counting(tiny_cfg(), [[GREEN, advisory_red]], depth=0)
+        self.assertEqual(code, 0, out)
+
+    def test_a_live_advisory_leg_does_not_veto_a_hang_among_gating_legs(self):
+        # The liveness veto (#3783) reads the AWAITED legs. An advisory kani proof
+        # executing says nothing about a gating leg that never started, so the genuine
+        # hang must still fire.
+        code, out, _ = self._run_counting(
+            tiny_cfg(), [[GREEN, PENDING] + KANI_LIVE], depth=0)
+        self.assertEqual(code, 1)
+        self.assertIn(
+            "genuine hang", out,
+            "#3786: live_siblings must be read over the GATING legs — an executing "
+            "DECLARED-advisory leg is not evidence about work this gate waits on, so "
+            "it must not veto a hang among the legs that DO gate.\n" + out,
+        )
+
+    def test_progress_is_measured_over_gating_legs_only(self):
+        # An advisory leg LANDING is not progress on awaited work. Here a gating leg
+        # never starts while a cron trickles terminal advisory check-runs onto the SHA
+        # — one more per poll. Counted over all siblings, that rising completion count
+        # reads as "progress" and buys a saturation extension for a set that is, on the
+        # awaited legs, completely stuck; counted over the gating legs it is flat, so
+        # the hang fires at the BASE budget where it should.
+        adv = [R(r["name"]) for r in KANI_LIVE]  # terminal, declared advisory
+        polls = [[GREEN, PENDING] + adv[:i] for i in range(len(adv) + 1)]
+        code, out, _ = self._run_counting(tiny_cfg(), polls, depth=0)
+        self.assertEqual(code, 1)
+        self.assertNotIn(
+            "Extending the wait", out,
+            "#3786: completed_hist must count GATING completions only. Advisory "
+            "check-runs arriving on the head SHA made a stuck awaited set look like it "
+            "was progressing, and bought it a saturation extension.\n" + out,
+        )
+        self.assertIn("genuine hang", out, out)
+
+
+class TestEmptyGatingBelt(unittest.TestCase):
+    """[OPUS-5] #3786 — the ONE exit-0 path not awaiting advisory legs could widen.
+
+    render_verdict passes an EMPTY gating set ("stable empty set"). Without a belt, a
+    poll whose only registered siblings are advisory-and-pending could reach that pass
+    before any gating leg registers. The belt holds the set open while NO gating leg
+    has been discovered and something is still pending, so the empty-set pass stays
+    reachable under exactly the conditions it was reachable under before #3786.
+    """
+
+    def setUp(self):
+        self._saved = g._DECLARED_ADVISORY
+        g.set_declared_advisory(DECLARED_ADVISORY + (KANI_REGISTRY_KEY,))
+
+    def tearDown(self):
+        g._DECLARED_ADVISORY = self._saved
+
+    def test_advisory_only_pending_set_never_passes(self):
+        # THE WIDENING, CLOSED. No gating leg has registered; the only siblings are
+        # advisory and still running. Concluding here would authorise a merge over a
+        # commit whose gating legs may simply not have registered yet.
+        code, out = run(tiny_cfg(), [KANI_LIVE], depth=0)
+        self.assertEqual(
+            code, 1,
+            "#3786 EXIT-0 WIDENING: the gate passed a 'stable empty set' while the "
+            "only siblings on the head SHA were advisory legs STILL RUNNING — i.e. it "
+            "concluded before any gating leg had a chance to register. The "
+            "empty-gating belt (empty_gating_hold) is missing.\n" + out,
+        )
+        self.assertIn("NO gating check-run ever discovered", out)
+        self.assertIn("UNDETERMINED (not a test failure)", out)
+
+    def test_the_belt_releases_once_the_advisory_legs_conclude(self):
+        # ...and it is only a HOLD: the pre-#3786 empty-set pass is unchanged once
+        # nothing is outstanding (a stable, genuinely empty gating set).
+        terminal_advisory = [R(r["name"]) for r in KANI_LIVE]
+        code, out = run(tiny_cfg(), [terminal_advisory], depth=0)
+        self.assertEqual(code, 0, out)
+        self.assertIn("PASSED", out)
+
+    def test_the_belt_does_not_hold_a_real_gating_set(self):
+        # The hold applies ONLY when no gating leg exists at all — a commit with
+        # gating legs converges on them, advisory legs pending or not.
+        code, out = run(tiny_cfg(), [[GREEN] + KANI_LIVE], depth=0)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("empty-gating belt", out)
+
+    def test_a_truly_empty_sibling_set_still_passes(self):
+        # The docs-only commit that triggers nothing: unchanged.
+        code, out = run(tiny_cfg(), [[]])
+        self.assertEqual(code, 0, out)
+        self.assertIn("stable empty set", out)
 
 
 class TestDescopedEc2Lane(unittest.TestCase):
@@ -2202,7 +2382,7 @@ class TestNoLegRunExclusion(unittest.TestCase):
         code, out = self._drive(resolver)
         self.assertEqual(code, 0, out)
         self.assertIn(
-            "attempt 1: 3 check-run(s), 2 running", out,
+            "attempt 1: 3 check-run(s) (3 gating), 2 gating running", out,
             "the in-flight real leg must still be counted as PENDING — a vacuous "
             "label-flip run superseded it, so the gate stopped waiting for the real "
             f"matrix (#3781). Output:\n{out}")

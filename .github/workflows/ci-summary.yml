@@ -15,8 +15,9 @@
 # SEMANTICS: success / skipped / neutral are non-failing; a genuine newest-run
 # failure / timed_out / action_required / stale fails the gate. Cancelled runs are
 # re-dispatched once, never treated as a test failure. The gate EXCLUDES ITSELF (no
-# self-deadlock). It waits until EVERY discovered sibling check-run is terminal
-# (pending == 0) AND that all-terminal state has HELD for a short settle window,
+# self-deadlock). It waits until every GATING sibling check-run is terminal
+# (pending == 0; declared-advisory legs are not awaited — see §AWAIT ONLY WHAT IS
+# JUDGED below) AND that gating-all-terminal state has HELD for a short settle window,
 # bounded below by a startup-race floor and above by the job timeout. This converges
 # FAST once the last sibling finishes — including a `build + test` MATRIX whose shards
 # register/complete at staggered times — instead of repeatedly re-waiting a long
@@ -94,6 +95,20 @@
 # the step-level `continue-on-error`/`|| true` in those jobs is a best-effort first
 # line, and THIS declared-registry rule is the load-bearing backstop that makes
 # DECLARED advisory failures strictly non-gating regardless of how the job concludes.
+#
+# AWAIT ONLY WHAT IS JUDGED (#3786). [OPUS-5] A DECLARED-advisory leg is not merely
+# excluded from the VERDICT — it is not WAITED ON either. The loop used to block on
+# every discovered sibling, so on 2026-07-25 `gate` run 30149978128 burned its whole
+# 43-minute budget on `main` waiting for three `kani … (bounded proofs,
+# informational)` legs whose conclusion it had already decided to ignore (they landed
+# on the head SHA from an unrelated `schedule` cron — kani.yml has no push /
+# pull_request trigger — and re-armed the settle window of an already-running push
+# gate). Soundness: the ignored set is UNCHANGED, so no gating failure can be missed;
+# every gating leg is still awaited to terminal and still judged. The one exit-0 path
+# this could widen — the "stable empty set" pass — is belted: the loop holds the set
+# open while NO gating leg has registered and some sibling is still pending, and
+# budget exhaustion there is a fail-closed UNDETERMINED. Full argument in the
+# ci_summary_gate.py header, §AWAIT ONLY WHAT IS JUDGED.
 #
 # CHANGE-BASED TEST-SELECTION semantics (bead sq-fmx4u.3). [FABLE-5] The wide
 # per-crate lanes in ci.yml / feature-matrix.yml may now be SKIPPED (or, for the
