@@ -94,7 +94,7 @@ fn backward_rules_are_echoed_with_their_arrow() {
 
 #[test]
 fn a_premise_blank_node_is_echoed_as_a_blank_node() {
-    // The parser rewrites a rule-scoped premise blank to `?__bn<i>_<label>`; that
+    // The parser rewrites a rule-scoped premise blank to `?__bn.<i>.<label>`; that
     // engine-internal name must never reach the output.
     let src = r#"@prefix : <http://ex/>.
 { _:s a :Human } => { :Someone a :Mortal }.
@@ -104,6 +104,67 @@ fn a_premise_blank_node_is_echoed_as_a_blank_node() {
     assert!(!doc.contains("__bn"), "no engine-internal variable name: {doc}");
     assert!(doc.contains("_:s"), "{doc}");
     assert_eq!(doc, reason_n3_pass_all(&doc, RuleVars::N3).expect("round two"));
+}
+
+/// GH #5372 review round 1: `--pass-all-ground` must ground a rule variable that sits
+/// inside a quoted `{ … }` formula too. N3 quantifies `?x` in the OUTERMOST formula, so the
+/// nested `?x` is the same variable — and formula arguments are the ordinary shape for the
+/// `log:` builtins, not a corner case. Left ungrounded, the "no `?x`" contract is false.
+#[test]
+fn grounded_mode_grounds_variables_inside_a_quoted_formula() {
+    let src = r#"@prefix : <http://ex/>.
+{ ?s :says { ?x a :Good } } => { ?s a :Trusted }.
+"#;
+    let doc = reason_n3_pass_all(src, RuleVars::VarIris).expect("pass-all-ground");
+    assert!(!doc.contains('?'), "no syntactic variable at any depth: {doc}");
+    assert!(doc.contains("<http://www.w3.org/2000/10/swap/var#x>"), "the nested one: {doc}");
+    assert!(doc.contains("<http://www.w3.org/2000/10/swap/var#s>"), "{doc}");
+    // The un-grounded form still writes that nested variable as `?x`.
+    let plain = reason_n3_pass_all(src, RuleVars::N3).expect("pass-all");
+    assert!(plain.contains("{ ?x "), "{plain}");
+
+    // The documented boundary: VarIris grounds RULES, not data. A formula-valued FACT is
+    // echoed verbatim in the closure half, `?x` and all — so "no `?` in the document" is
+    // a claim about rule documents, not about every input.
+    let with_a_formula_fact = ":a <http://ex/p> { ?x <http://ex/q> :b }.\n";
+    let doc = reason_n3_pass_all(with_a_formula_fact, RuleVars::VarIris).expect("pass-all");
+    assert!(doc.contains("{ ?x "), "a formula-valued fact keeps its variable: {doc}");
+}
+
+/// GH #5372 review round 1: `?__bn0_x` is a LEGAL N3 variable (a variable name is letters,
+/// digits, `_`, `-` and non-ASCII `PN_CHARS`), so the serializer must not read it as the
+/// parser's own premise-blank rewrite. Decoding by spelling turned it into `_:x` — and for a
+/// variable occurring only in the conclusion, that silently converts a bound variable into a
+/// fresh-per-firing existential. The rewrite now uses a name a document CANNOT write, which
+/// is the property the last assertion here pins.
+#[test]
+fn a_source_variable_spelled_like_the_rewrite_stays_a_variable() {
+    let src = r#"@prefix : <http://ex/>.
+{ ?__bn0_x a :Human } => { ?__bn0_x a :Mortal }.
+:a a :Human.
+"#;
+    let doc = reason_n3_pass_all(src, RuleVars::N3).expect("pass-all");
+    assert!(doc.contains("?__bn0_x"), "the author's variable survives verbatim: {doc}");
+    assert!(!doc.contains("_:"), "and is never demoted to a blank node: {doc}");
+    // Still a live rule over the same closure, and re-emitting is a fixpoint.
+    assert!(doc.contains(&format!("<http://ex/a> <{TYPE}> <http://ex/Mortal> .")), "{doc}");
+    assert_eq!(doc, reason_n3_pass_all(&doc, RuleVars::N3).expect("round two"));
+
+    // The conclusion-only occurrence is where the old decode actually changed meaning.
+    let concl_only = r#"@prefix : <http://ex/>.
+{ ?y a :Human } => { ?y :peer ?__bn7_z }.
+:a a :Human.
+"#;
+    let doc = reason_n3_pass_all(concl_only, RuleVars::N3).expect("pass-all");
+    assert!(doc.contains("?__bn7_z"), "{doc}");
+    assert!(!doc.contains("_:"), "{doc}");
+
+    // Why the reverse mapping is now exact rather than a guess: the rewrite's own name
+    // (`__bn.<i>.<label>`) contains a `.`, and a variable name is lexed by `read_name`,
+    // which stops at one. So the engine-internal name is UNFORGEABLE — a document that
+    // tries to write it does not parse, and no legal `?…` can ever decode to a blank node.
+    let forged = "@prefix : <http://ex/>.\n{ ?__bn.0.x a :Human } => { :a a :Mortal }.\n";
+    assert!(reason_n3_pass_all(forged, RuleVars::N3).is_err(), "{forged}");
 }
 
 #[test]

@@ -15,9 +15,12 @@
 //! source text), which is why two details differ from the input document verbatim:
 //!
 //! * **Premise blank nodes.** The parser rewrites a rule-scoped premise blank `_:x` to a
-//!   fresh rule variable `?__bn<rule>_x` (N3 semantics: a premise existential matches like a
+//!   fresh rule variable `?__bn.<rule>.x` (N3 semantics: a premise existential matches like a
 //!   variable). [`write_rule`] maps that name back to `_:x`, so the emitted rule re-parses
-//!   to the same rule rather than leaking an engine-internal variable name.
+//!   to the same rule rather than leaking an engine-internal variable name. The name is one
+//!   no document can write — an N3 variable name cannot contain a `.` — so this reverses the
+//!   parser's own rewrite and only that: a source variable spelled `?__bn0_x` is legal, is
+//!   NOT the rewrite, and stays a variable.
 //! * **Prefixes / layout.** Everything is written in full `<…>` IRI form, one statement per
 //!   line — no `@prefix` declarations are reconstructed. The document is semantically the
 //!   same N3, not byte-identical to the input.
@@ -32,8 +35,14 @@ const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 pub const VAR_NS: &str = "http://www.w3.org/2000/10/swap/var#";
 
 /// The engine-internal prefix the N3 parser gives a rewritten premise blank node
-/// (`_:x` in rule `i` becomes `?__bn{i}_x`) — reversed by [`write_rule`].
-const PREMISE_BLANK_VAR: &str = "__bn";
+/// (`_:x` in rule `i` becomes the variable `__bn.{i}.x`) — reversed by [`write_rule`].
+///
+/// The `.` is load-bearing, not decoration: the parser's variable-name lexer (`read_name`)
+/// stops at a `.`, so NO variable a document can write is ever spelled this way. That is
+/// what makes [`premise_blank_label`] a decode of the parser's own provenance rather than a
+/// guess from a spelling a user could also pick — `?__bn0_x`, the underscore form, IS a
+/// legal source variable and must stay a variable.
+pub(super) const PREMISE_BLANK_VAR: &str = "__bn.";
 
 fn quote_into(v: &str, out: &mut String) {
     for c in v.chars() {
@@ -145,10 +154,17 @@ pub enum RuleVars {
     /// so the document can be fed straight back into the reasoner.
     N3,
     /// SWAP `var:` IRIs, `<http://www.w3.org/2000/10/swap/var#x>` ([`VAR_NS`]) — EYE
-    /// `--pass-all-ground`. No syntactic variable survives, so the whole document is
-    /// ordinary RDF-shaped N3 for a downstream consumer that cannot handle `?x`. It is
-    /// NOT re-reasonable: re-parsed, those IRIs are constants, and the rule only fires on
-    /// literally-matching `var:` data. Blank nodes are left as blank nodes.
+    /// `--pass-all-ground`. EVERY variable of the echoed rule is grounded, at any depth:
+    /// through lists and quoted triples, and into quoted `{ … }` formulae too (an N3 `?x`
+    /// is quantified in the outermost formula, so the same name is the same variable
+    /// however deeply it is nested). No `?x` survives in a rule, which is what a
+    /// downstream consumer that cannot handle one needs. It is NOT re-reasonable:
+    /// re-parsed, those IRIs are constants, and the rule only fires on literally-matching
+    /// `var:` data. Blank nodes are left as blank nodes.
+    ///
+    /// This grounds RULES. A formula-valued FACT is data and is echoed verbatim, so a
+    /// document that asserts one carrying a variable (`:a :p { ?x :q :b }.`) still shows
+    /// that `?x` in the closure half — see [`crate::reason_n3_pass_all`].
     VarIris,
 }
 
@@ -190,13 +206,20 @@ fn write_formula(stmts: &[[Term; 3]], vars: RuleVars, out: &mut String) {
     out.push_str(" }");
 }
 
-/// A rule-side term prepared for output: the parser's `?__bn<i>_x` premise-blank variables
+/// A rule-side term prepared for output: the parser's `?__bn.<i>.x` premise-blank variables
 /// become `_:x` again, and — under [`RuleVars::VarIris`] — every remaining variable becomes
 /// its `var:` IRI.
 ///
-/// Recursion mirrors the parser's own rule rewrite (`rewrite_term`, `into_formulae = false`):
-/// it descends through lists and quoted triples, which are transparent rule structure, but
-/// NOT into a quoted `{ … }` formula, whose variables belong to that formula.
+/// The premise-blank half mirrors the parser's own rule rewrite (`rewrite_term`,
+/// `into_formulae = false`): it descends through lists and quoted triples, which are
+/// transparent rule structure, but a quoted `{ … }` formula's BLANKS are graph-local and
+/// were never rewritten, so there is nothing to undo in there.
+///
+/// Variables are different, and [`RuleVars::VarIris`] therefore does descend into a
+/// formula: an N3 `?x` is quantified in the OUTERMOST formula, so the `?x` inside a quoted
+/// graph is the same rule variable (`apply_deep` substitutes bindings into formulae). Left
+/// alone it would leave a `?x` in a document whose whole point is to carry none — N3
+/// builtins routinely take formula arguments, so that is a common shape, not a corner.
 fn rule_term(t: &Term, vars: RuleVars) -> Term {
     match t {
         Term::List(ms) => Term::List(ms.iter().map(|m| rule_term(m, vars)).collect()),
@@ -205,6 +228,11 @@ fn rule_term(t: &Term, vars: RuleVars) -> Term {
             rule_term(&tr[1], vars),
             rule_term(&tr[2], vars),
         ])),
+        Term::Formula(ts) if vars == RuleVars::VarIris => Term::Formula(
+            ts.iter()
+                .map(|r| [rule_term(&r[0], vars), rule_term(&r[1], vars), rule_term(&r[2], vars)])
+                .collect(),
+        ),
         Term::Var(v) => match premise_blank_label(v) {
             Some(label) => Term::Blank(label.to_string()),
             None if vars == RuleVars::VarIris => Term::Iri(format!("{VAR_NS}{v}")),
@@ -214,11 +242,17 @@ fn rule_term(t: &Term, vars: RuleVars) -> Term {
     }
 }
 
-/// The original blank-node label behind a rewritten premise blank `__bn<digits>_<label>`,
-/// or `None` for an ordinary variable.
+/// The original blank-node label behind a rewritten premise blank
+/// `__bn.<digits>.<label>`, or `None` for an ordinary variable.
+///
+/// Exact, not heuristic: only the parser can mint a variable name containing a `.`
+/// ([`PREMISE_BLANK_VAR`]), so a `Some` here is that rewrite and nothing else. The rule
+/// index and the `.` separator are both mandatory, and a label may itself contain dots
+/// (`_:a.b` is a legal Turtle blank label) — hence the split on the FIRST dot after the
+/// digits, which cannot be part of either.
 fn premise_blank_label(v: &str) -> Option<&str> {
     let rest = v.strip_prefix(PREMISE_BLANK_VAR)?;
-    let (digits, label) = rest.split_once('_')?;
+    let (digits, label) = rest.split_once('.')?;
     (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())).then_some(label)
 }
 
@@ -256,25 +290,33 @@ mod tests {
 
     #[test]
     fn recognises_only_well_formed_premise_blank_names() {
-        assert_eq!(premise_blank_label("__bn0_x"), Some("x"));
-        assert_eq!(premise_blank_label("__bn12_a_b"), Some("a_b"));
-        assert_eq!(premise_blank_label("__bnx_y"), None); // no digits
-        assert_eq!(premise_blank_label("__bn0"), None); // no separator
+        assert_eq!(premise_blank_label("__bn.0.x"), Some("x"));
+        assert_eq!(premise_blank_label("__bn.12.a.b"), Some("a.b")); // `_:a.b` is a legal label
+        assert_eq!(premise_blank_label("__bn.x.y"), None); // no digits
+        assert_eq!(premise_blank_label("__bn.0"), None); // no separator
         assert_eq!(premise_blank_label("x"), None);
+        // The underscore spelling is a LEGAL source variable, not the parser's rewrite:
+        // decoding it would turn `?__bn0_x` into `_:x` (GH #5372 review round 1).
+        assert_eq!(premise_blank_label("__bn0_x"), None);
     }
 
     #[test]
-    fn var_iris_grounding_skips_blanks_and_nested_formulae() {
+    fn var_iris_grounds_nested_formulae_and_keeps_blanks() {
+        // A quoted formula's `?y` is the SAME rule variable (N3 quantifies `?y` in the
+        // outermost formula), so the grounded form must carry no `?` at any depth.
         let inner = Term::Formula(vec![[
             Term::Var("y".into()),
             Term::Iri("http://ex/p".into()),
             Term::Var("y".into()),
         ]]);
-        // A nested formula's variables are formula-scoped: left alone.
-        assert_eq!(rendered(&rule_term(&inner, RuleVars::VarIris)), rendered(&inner));
+        let ground = rendered(&rule_term(&inner, RuleVars::VarIris));
+        assert!(!ground.contains('?'), "{ground}");
+        assert_eq!(ground, format!("{{ <{VAR_NS}y> <http://ex/p> <{VAR_NS}y> . }}"));
+        // `RuleVars::N3` leaves the formula exactly as parsed.
+        assert_eq!(rendered(&rule_term(&inner, RuleVars::N3)), rendered(&inner));
         // A rewritten premise blank goes back to `_:x` in BOTH styles.
         for style in [RuleVars::N3, RuleVars::VarIris] {
-            let t = rule_term(&Term::Var("__bn3_x".into()), style);
+            let t = rule_term(&Term::Var("__bn.3.x".into()), style);
             assert_eq!(rendered(&t), "_:x");
         }
         assert_eq!(

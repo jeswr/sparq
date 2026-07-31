@@ -281,9 +281,12 @@ pub fn reason_n3_proof(dict: &mut Dict, src: &str) -> Result<(Vec<[Id; 3]>, Vec<
 /// firing, so such a document grows on each re-run — the same caveat EYE carries.
 ///
 /// HONESTY: the mapping onto the two EYE flags is BY CONSTRUCTION — closure + echoed rules,
-/// and "ground" read as "no syntactic variable survives" — not a differential against an EYE
-/// binary (none runs in this repo's gates). Treat the document as sparq's own `--pass-all`
-/// equivalent, not as byte-for-byte EYE output.
+/// and "ground" read as "no syntactic variable survives IN A RULE" — not a differential
+/// against an EYE binary (none runs in this repo's gates). Treat the document as sparq's own
+/// `--pass-all` equivalent, not as byte-for-byte EYE output. [`RuleVars::VarIris`] grounds
+/// the rules at every depth, quoted `{ … }` formulae included; it does NOT rewrite the
+/// closure half, so a document that ASSERTS a formula-valued fact carrying a variable
+/// (`:a :p { ?x :q :b }.` — data, not a rule) still echoes that `?x` verbatim.
 pub fn reason_n3_pass_all(src: &str, vars: RuleVars) -> Result<String, String> {
     let parsed = parser::parse(src)?;
     // Clone the rules BEFORE the closure runs: `run_closure` reorders each premise for
