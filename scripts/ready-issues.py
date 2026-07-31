@@ -363,15 +363,22 @@ def keys_conflict(a, b, roots=None):
 # holder PAIRS that share at least one changed file):
 #
 #     area          holder pairs   sharing >=1 file
-#     area:ci            120          6   ( 5%)   -> exempt
-#     area:docs           66          2   ( 3%)   -> exempt
-#     area:deps            3          3   (100%)  -> NOT exempt (every pair collides on
+#     area:ci            435         40   ( 9.2%) -> exempt
+#     area:docs          630         30   ( 4.8%) -> exempt
+#     area:deps           21         21   (100%)  -> NOT exempt (every pair collides on
 #                                                    Cargo.lock; serialising it is correct)
 #     crate areas          -          -   (57.1%) -> NOT exempt
 #                                                    (research/crate-region-parallelism.md §4)
 #
-# So the reservation on `ci`/`docs` was refusing ~99% of a partition-starved frontier to prevent a
-# 3-5% file collision, while `deps` and the crate areas are serialising real overlap and stay.
+# HONESTY NOTE: an earlier table reported 5% for `ci` and 3% for `docs`. Its pair counter dropped
+# every PR whose changed-file list was empty, conflating a failed read (which must be excluded) with
+# a genuinely empty PR (which intersects nothing but still belongs in the denominator). The larger
+# pair counts above retain genuinely empty PRs and exclude only named failed reads; every count is
+# the full nCr pair count for its holder set.
+#
+# So the reservation on `ci`/`docs` was refusing most of a partition-starved frontier to prevent a
+# single-digit-percent file collision, while `deps` and the crate areas are serialising real overlap
+# and stay.
 # Measured counterfactual on that same snapshot, through this engine: baseline frontier 1;
 # `ci` non-reserving 2; `ci`+`docs` non-reserving 3; adding `deps` would give 4 (not taken).
 #
