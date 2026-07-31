@@ -73,8 +73,16 @@ resource object at all).
 
 ## 3. Output confinement
 
-**Theorem (grant confinement).** Every simple grant/deny triple `⟨p, auth:MODE, r⟩ ∈ V` is
-derived from control documents at `org(r)`.
+**Theorem (grant *anchoring* confinement).** Every simple grant/deny triple
+`⟨p, auth:MODE, r⟩ ∈ V` is **anchored** by a control document at `org(r)`: the
+`solidx:appliesTo` / `solidx:appliesToResource` premise that every grant rule carries can be
+satisfied only through `?r`'s own or inherited `.acl`/`.acr`, and those lie at `org(r)`.
+
+Read the scope of that claim precisely. It says the *anchor* is at `org(r)`, hence that the
+grant's object — and so its slice attribution (§5.1) — is at `org(r)`. It does **not** say the
+grant is derived *only* from documents at `org(r)`: the remaining premises of the same rule
+bodies are matched against the merged fact set and may be satisfied by triples stored anywhere
+in `Ctl(S)` (§4.1).
 
 *Proof sketch, WAC (`rules/wac.n3`).* Every grant rule requires `?auth solidx:appliesTo ?r`,
 which is derivable in only two ways:
@@ -107,12 +115,21 @@ triple are not grant triples at all (§4.3).
 
 ## 4. What breaks the naive splice
 
-### 4.1 ACP cross-document policy indirection (an input dependency, unbounded by origin)
+### 4.1 Cross-document indirection: the reasoner input is one merged fact set
 
+`assemble_facts` (`loader.rs`, step 3) walks **every** control graph and pushes its triples —
+skolemized, and minus the `solidx:`-predicate triples the derivation-vocabulary guard drops —
+into a single flat fact set. The only provenance it retains is a separate
+`⟨s, solidx:inDoc, D⟩` fact per subject `s` of document `D` — added *alongside* the triples,
+never used to filter them. So for any subject `?s`, what the reasoner sees about `?s` is the
+**union of the triples about `?s` over every control graph in `Ctl(S)` that mentions it**. A
+control document's IRI names *where a triple is stored*; it never constrains *which subjects
+that document may describe*, because RDF subjects are not confined to their IRI-named
+document. Two distinct hazards follow.
+
+**(a) Reference indirection — the referenced IRI is at another origin.**
 `acp-a.n3` derives effective policies as `?acr acp:accessControl ?c . ?c acp:apply ?pol`. The
-IRI `?pol` is not constrained to `?acr`'s document. A policy body — `?pol acp:allow ?mode`,
-`?pol acp:allOf ?m`, `?m acp:agent ?a` — is whatever triples the input carries for that
-subject, and the input carries a control document's triples verbatim. So
+IRI `?pol` is not constrained to `?acr`'s document:
 
 ```turtle
 <https://p.ex/.acr>     acp:accessControl <https://p.ex/.acr#c> .
@@ -131,10 +148,55 @@ is a grant at origin `P` whose *body* lives at origin `O`. Consequences:
 - Policy bodies can only live in `.acr` documents (content graphs are never fed to the
   reasoner — design record §2.4), so the closure is finite and bounded by `Ctl(S)`.
 
-**WAC has no such indirection**: `?auth solidx:inDoc ?acl` is a premise of both `appliesTo`
-rules, so an Authorization only ever acts through the document it is written in. A `put_acl`
-to a `.acl` at `O` therefore cannot change any other origin's grants. WAC is the strictly
-easier half and should ship first.
+**(b) Split subjects — the containing document is not computable from the subject IRI.**
+Hazard (a) is *not* discharged by resolving `<https://o.ex/.acr#pol>` to the graph
+`<https://o.ex/.acr>`, which is the obvious walk and the wrong one. Nothing requires that
+subject's triples to be stored there; a third, differently named control document supplies
+them just as effectively:
+
+```turtle
+# graph <https://p.ex/.acr>
+<https://p.ex/.acr>        acp:accessControl <https://p.ex/.acr#c> .
+<https://p.ex/.acr#c>      acp:apply         <https://o.ex/.acr#pol> .
+# graph <https://o.ex/.acr>  — the "obvious" home of #pol, and it may say nothing about it
+# graph <https://q.ex/other.acr>  — a THIRD document whose name resembles neither
+<https://o.ex/.acr#pol>    acp:allow  acl:Read .
+<https://o.ex/.acr#pol>    acp:allOf  <https://q.ex/other.acr#m> .
+<https://q.ex/other.acr#m> acp:agent  <https://alice.ex/#me> .
+```
+
+The full materializer merges `Q` and derives the allow. A dependency walk that fragment-strips
+the object IRI and pulls the like-named graph reaches `O` and never reaches `Q`, so `Q` is
+outside `P`'s scoped closure: a later write to `Q` re-derives only `org(Q)`, leaving `P`'s
+retained slice stale — **including a stale allow** when `Q`'s `acp:allow` or matcher facts are
+narrowed or deleted. That is the fail-open direction, and it is not covered by a regression
+that stores the body in `O`'s correspondingly named graph.
+
+The fix is to stop inferring provenance from names: define dependencies from **actual triple
+occurrence** (§5.2), or enforce a document-locality invariant at write admission so that the
+name really does determine the document (§5.2, and it is a behaviour change, not an
+assumption the scoped path may help itself to).
+
+**WAC narrows this but does not escape it.** `?auth solidx:inDoc ?acl` is a premise of both
+`appliesTo` rules, so an Authorization can only *anchor* to a resource through the own or
+inherited ACL it is declared in — a foreign document cannot introduce a wholly new
+Authorization for `?r`. But `inDoc` pins the anchor only: the rest of the same rule bodies —
+`?auth a acl:Authorization`, `?auth acl:accessTo ?r`, `?auth acl:default ?c`, `?auth acl:mode`,
+and the `acl:agent`/`acl:agentGroup`/`acl:origin` triples behind `solidx:grantsAgent` — are
+matched against the merged fact set like any others. So once `?auth` appears in `O`'s `.acl`
+at all, a `.acl` at `Q` carrying `⟨?auth, acl:agent, mallory⟩` widens `O`'s grant. **WAC's
+`rdeps` is therefore empty only under the document-locality invariant, not provably.** WAC is
+still the easier half — no reference indirection, so its dependency set is exactly "the
+control graphs mentioning subjects already declared in `O`'s own/inherited ACLs" — and should
+still ship first, but on the same occurrence index, not on the naming convention.
+
+**(c) Open question this record does not resolve.** The same merged-fact-set property means a
+control document at `Q` can also carry triples whose subject is *another origin's* `.acr` —
+e.g. `⟨<https://p.ex/.acr>, acp:accessControl, <https://q.ex/other.acr#c>⟩` — and the shipped
+full materializer will honour it. Whether that is intended (one dataset, one trust domain) or
+a cross-tenant injection surface is a question about the **existing** materializer, not about
+scoping, and it is out of scope here; the document-locality invariant below would close it as
+a side effect. Recorded so it is not mistaken for something the scoped path introduces.
 
 ### 4.2 The global principal lattice (`isCandAgent` / `isCandClient` / `isCandIssuer`)
 
@@ -294,19 +356,46 @@ Add to `PodStore` (all reconstructible from the graph; never authoritative):
 | --- | --- | --- |
 | `resource_facts` | the `solidx:isResource` fact set + the `solidx:parent`/`ancestor` closure `common.n3` derives from it | a content-graph add/remove — **never** by `put_acl`/`delete_acl` (§5.5) |
 | `lattice` | the `isWebId`, `isCandAgent`, `isCandClient`, `isCandIssuer` sets | any control-document write that changes it → **full fallback** (§4.2) |
-| `deps` | control document → the control documents its policies reference (§4.1 closure) | recomputed for the written document only |
+| `subjects` | subject term → the set of control graphs containing ≥1 triple with that subject (§4.1b) | the written document's entries only |
+| `deps` | control document → the control documents its policies actually read (§4.1 closure, over `subjects`) | recomputed for the written document only |
 | `rdeps` | the reverse of `deps`: control document → origins whose slice reads it | derived from `deps` |
 | `slices` | `org → V\|org`, the installed view partitioned per §5.1 | replaced per re-derived origin |
 
-`deps` is computed by a **predicate-restricted** reachability walk from a document's triples:
-follow object IRIs of `acp:{accessControl, memberAccessControl, apply, allOf, anyOf, noneOf}`
-and `acl:agentGroup`, strip the fragment, and pull in the named graph if it is a control graph
-(for `agentGroup`, a group document). A conservative alternative — follow *every* object IRI —
-is strictly safer and cheaper to argue; prefer it unless measurement (on the bench harness,
-not the work box) shows the precise walk is needed. Either way the predicate list must be
-guarded by an **exhaustiveness test** that re-reads `rules/*.n3` and fails when a linkage
-predicate appears in a rule body but not in the list — otherwise a future rule silently
-un-sounds the scoping.
+`deps` is computed from **actual triple occurrence**, never by fragment-stripping an IRI to
+guess its document (§4.1b). Build `subjects` in the same pass `assemble_facts` already makes
+over `Ctl(S)`, then take `deps*(D)` as the least fixed point of:
+
+1. seed the frontier with the subjects appearing in `D`'s own triples;
+2. for each frontier subject `s`, add **every** control graph in `subjects[s]` to the
+   dependency set — this is the step the naming-convention walk gets wrong;
+3. from those graphs' triples about `s`, follow the object IRIs of the linkage predicates
+   `acp:{accessControl, memberAccessControl, apply, allOf, anyOf, noneOf}` and
+   `acl:agentGroup`, and push the resulting terms onto the frontier;
+4. iterate until the dependency set stops growing (finite: bounded by `Ctl(S)`).
+
+Group documents are the one place naming *is* the mechanism and stay as they are: `acl:agentGroup`
+selects a **content** graph by fragment-stripped IRI, which is how `loader::collect_agents`
+already resolves it, so that lookup is faithful to what the full materializer does.
+
+`rdeps` is the reverse of that relation, keyed by the graphs step 2 actually yielded. So a
+write to any control graph that *contributes triples* about a reachable subject invalidates
+the origins reading it, whether or not the graph's name resembles the subject's.
+
+A conservative alternative — follow *every* object IRI, and treat every control graph
+mentioning any reachable subject as a dependency — is strictly safer and cheaper to argue;
+prefer it unless measurement (on the bench harness, not the work box) shows the precise walk
+is needed. Either way the predicate list must be guarded by an **exhaustiveness test** that
+re-reads `rules/*.n3` and fails when a linkage predicate appears in a rule body but not in the
+list — otherwise a future rule silently un-sounds the scoping.
+
+**The alternative is to make the naming convention true.** Enforce a **document-locality
+invariant** at write admission — reject a control document carrying a triple whose subject's
+fragment-stripped IRI is not that document — and validate it on load. That collapses every
+`subjects[s]` to a singleton, makes the cheap fragment-stripping walk correct, and makes WAC's
+`rdeps` genuinely empty (§4.1). The cost is that it rejects documents the shipped full
+materializer accepts today, so it is a **behaviour change with a migration story**, owed its
+own bead and its own conformance review — not something a scoped-materialization child may
+assume. Pick one of the two explicitly; the fast path is unsound under neither-of-the-above.
 
 ### 5.3 The write path
 
@@ -315,8 +404,9 @@ On `put_acl(D)` / `delete_acl(D)` with `O = org(D)`:
 1. Swap the document as today (parse-first, capture the prior slot for rollback).
 2. Recompute `lattice`. **If it changed, fall back to the existing full re-materialization**
    and return — the fast path is not attempted.
-3. `affected = {O} ∪ { org' : D ∈ deps(org') }` — i.e. `O` plus `rdeps(D)`. For WAC,
-   `rdeps(D)` is provably empty (§4.1) and this collapses to `{O}`.
+3. `affected = {O} ∪ { org' : D ∈ deps(org') }` — i.e. `O` plus `rdeps(D)`, with `rdeps`
+   built on triple occurrence (§5.2). For WAC `rdeps(D)` is *narrow* but **not** empty; it
+   collapses to `{O}` only under the document-locality invariant (§4.1, §5.2).
 4. For each `org ∈ affected`, assemble the **scoped input**: `resource_facts` restricted to
    `org` (memoized, §5.5), plus the triples of every control document in `deps*(org)` (the
    closure), plus every group document those reference, plus the pinned `lattice` seed facts,
@@ -378,6 +468,12 @@ on the bench harness before assuming the scoping is where the time goes.
   `ccae3aec`.** They are premise-level arguments, not machine-checked. A rule change can
   invalidate them silently, which is why §5.2's exhaustiveness test and §7's property test
   are mandatory parts of the deliverable rather than nice-to-haves.
+- **No document-locality invariant is claimed or enforced.** The store today accepts a
+  control document describing any subject, including another document's (§4.1b), and this
+  record does not change that — it only requires the dependency index to be computed from
+  where triples actually are. Whether the merged-fact-set behaviour §4.1c describes is the
+  intended trust model is an open question about the shipped materializer, left to its own
+  bead.
 
 ---
 
@@ -418,6 +514,8 @@ each of the hazards above:
 | 5 | `acl:agentGroup` pointing at a group document at a third origin, group doc then edited | group-doc dependency tracking (§5.4) |
 | 6 | Container-chain inheritance: `.acl` written at `/a/`, resources under `/a/b/c` | scoped input drops the ancestor chain |
 | 7 | `delete_acl` of the only ACL granting a foreign-subject principal | stale retained slice (fail-open) |
+| 8 | ACP split subject: `P`'s ACR applies `<o#pol>`, but `<o#pol>`'s `acp:allow` + `acp:allOf` matcher facts live in a *differently named* `<https://q.ex/other.acr>`; then narrow, then delete, `Q` | `deps` located the body by fragment-stripped IRI instead of by subject occurrence, so `Q ∉ deps*(P)` (§4.1b) |
+| 9 | WAC split subject: `<o.acl#auth>` is declared in `O`'s `.acl` (so `inDoc` holds) but its `acl:agent` is supplied by a `.acl` at `Q`; edit `Q` | WAC's `rdeps` was assumed empty rather than computed from occurrence (§4.1) |
 
 **Non-vacuity obligation.** Before any child PR opens, delete or invert its headline guard —
 the `affected`-set computation, the lattice-fallback branch, the splice overlap check — and
@@ -425,6 +523,13 @@ run the suite. If nothing reds, the test is vacuous and the PR is not ready. Nam
 that died in the PR body. A suite that asserts only `accessible()` equivalence will **not**
 red on hazard 2 (§4.2 shows the divergence is decision-inert today), which is precisely why
 triple-set equality is mandated and not optional.
+
+Hazards 8 and 9 carry a **named** mutation obligation on top of that, because they are the two
+the naming-convention shortcut passes by accident: drop the occurrence lookup (§5.2 step 2) so
+`deps*` is computed by fragment-stripping alone, and re-run. Hazard 8 must red — `Q` is now
+missing from `P`'s closure — and hazard 9 with it. A dependency index that stays green under
+that mutation is discovering `Q` some other way, or the fixture is not actually split, and the
+regression proves nothing.
 
 ---
 
@@ -442,13 +547,17 @@ Ordered by dependency; each is single-crate (`sparq-solid`) and separately merge
 3. **Global principal-lattice summary + fallback** (§4.2, §5.2). Maintain the four sets;
    detect change on a control-document write; wire the full-path fallback. No scoping yet —
    the fallback fires every time, so this is a pure no-op refactor with the summary under test.
-4. **Dependency + reverse-dependency index** (§5.2, §4.1), including the linkage-predicate
-   exhaustiveness test against `rules/*.n3`. Still no scoping.
-5. **The property-test harness** (§7) with all seven regressions, run against the *unscoped*
+4. **Subject-occurrence + dependency/reverse-dependency index** (§5.2, §4.1). Built on
+   `subjects` — the subject → containing-control-graphs map — **not** on fragment-stripped
+   IRIs; ships the linkage-predicate exhaustiveness test against `rules/*.n3` and the
+   split-subject discovery test (hazards 8–9). Still no scoping.
+5. **The property-test harness** (§7) with all nine regressions, run against the *unscoped*
    store first (it must pass trivially) so the harness is proven non-broken before it is the
    oracle for anything.
-6. **WAC scoped materialize + splice** (§5.1, §5.3). The easy half — `rdeps` provably empty,
-   no policy indirection. Gated by child 5.
+6. **WAC scoped materialize + splice** (§5.1, §5.3). The easier half — no reference
+   indirection, so `deps*` is just the control graphs mentioning subjects already declared in
+   `O`'s own/inherited ACLs — but `rdeps` is empty only under the document-locality invariant,
+   so it still consumes child 4's occurrence index (§4.1). Gated by 4 and 5.
 7. **ACP scoped materialize + splice** (§5.3 with the full `affected` set). Gated by 4 and 6.
 8. **`AuthIndex` per-origin patch** (§5.3 step 6), replacing the whole-view `from_graph` on
    the scoped path. Keep the `reindex_with` diff as the safety net.
