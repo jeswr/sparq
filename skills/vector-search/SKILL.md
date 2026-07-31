@@ -1612,8 +1612,8 @@ gate/threshold outside its range, an all-zero/non-finite/duplicate-id input.
 
 ### 23. External-key interoperability table — DRAFT profile (opt-in, feature = `external-key`) [SONNET-4.6] sq-lhcot.2 / #2789
 
-**Read this first: the profile is NOT frozen.** It is being co-designed with Kern/PSS on GitHub
-#1746; `EXTERNAL_KEY_PROFILE_VERSION` is `0`, which means *draft*, and the frozen profile will carry
+**Read this first: the profile is NOT frozen.** It is being co-designed with Kern/PSS on
+GitHub #1746; `EXTERNAL_KEY_PROFILE_VERSION` is `0`, which means *draft*, and the frozen profile will carry
 a version `>= 1` that this build **rejects** rather than mis-parsing. Nothing written under version 0
 carries a compatibility promise. Do not persist a draft table you are not prepared to regenerate. The
 specification is `research/spqv-external-key-profile.md`; open questions **K1–K7** (notably store
