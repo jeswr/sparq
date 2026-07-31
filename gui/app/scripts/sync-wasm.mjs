@@ -28,6 +28,12 @@ const dest = join(here, "..", "public", "wasm");
 // them here shipped ~46 KiB of dead bytes per build. Type-checking reads js/wasm/ directly.
 const files = ["sparq_wasm.js", "sparq_wasm_bg.wasm"];
 
+// [GPT-5] sq-ixc3.17 — the ZK tool loads this circuit only after the user invokes proving.
+// Keep the circuit source in the site's canonical public asset tree and mirror it into the
+// GUI export alongside the wasm runtime.
+const zkCircuitSrc = join(here, "..", "..", "..", "site", "public", "zk", "filter_int_d2.json");
+const zkCircuitDest = join(here, "..", "public", "zk", "filter_int_d2.json");
+
 /** Remove a stale non-runtime file an OLDER sync may have left in public/wasm/. */
 async function rmStale(...paths) {
   for (const p of paths) {
@@ -51,6 +57,9 @@ for (const f of files) {
 }
 await rmStale(join(dest, "sparq_wasm.d.ts"));
 console.log(`[sync-wasm] copied ${files.length} files → public/wasm/`);
+await mkdir(dirname(zkCircuitDest), { recursive: true });
+await copyFile(zkCircuitSrc, zkCircuitDest);
+console.log("[sync-wasm] copied filter_int_d2.json → public/zk/");
 
 // [SONNET-4.6] sq-b66fc — accumulate manifest entries: logicalName → hashed filename.
 /** @type {Record<string, string>} */
