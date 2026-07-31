@@ -89,6 +89,15 @@ pub fn reason_n3_proof(dict: &mut Dict, src: &str)
     -> Result<(Vec<[Id;3]>, Vec<ProofStep>), String>;          // EYE --proof analogue
 pub fn reason_n3_terms(src: &str, base: Option<&str>) -> Result<N3Closure, String>; // term-level, no Dict
 pub fn reason_n3_terms_with_resolver(src, base, resolver: Option<&Resolver>) -> Result<N3Closure, String>;
+// EYE --pass-all / --pass-all-ground: the closure PLUS the document's own rules, echoed
+// back as ONE N3 document (the chainer consumes rules, so --pass output alone can derive
+// nothing further). Closure statements are sorted (deterministic), then rules in document
+// order — full <…> IRIs, no @prefix reconstruction, so NOT byte-identical to EYE's writer.
+pub fn reason_n3_pass_all(src: &str, vars: RuleVars) -> Result<String, String>;
+pub enum RuleVars { N3, VarIris }  // `?x` (re-parses as the same rule, so re-running is a
+    // fixpoint) | SWAP `var:` IRIs (`--pass-all-ground`: no `?x` survives in a RULE, at any
+    // depth — quoted `{ … }` formulae included — but the rule is then constants; the grounded
+    // form is for RDF consumers, not re-reasoning)
 pub fn reason_n3_stratified(dict: &mut Dict, strata: &[&str])   // stratum-by-stratum closure; carries
     -> Result<StratifiedN3Closure, String>;  // each closure in memory (no re-serialize); the sound
     // driver for the non-monotonic ops (store-scoped log:notIncludes, log:collectAllIn/forAllIn);
@@ -678,6 +687,7 @@ the profile.
 - **OWL incremental fallback is silent.** `MaterializedOwlGraph` drops to `OwlMode::Fallback` (re-materializes via `materialize_owl_rl` every mutation, still correct) when the base uses `owl:sameAs`, Functional/InverseFunctional, property chains, restrictions, cardinality, hasKey, oneOf, intersection/union — and on any TBox mutation. Check `.mode()` / `.full_rebuilds()` if incremental cost matters. These usually live in a static TBox, so the mode is decided once at load.
 - **N3 incremental qualification is narrow.** `MaterializedN3Graph` only runs `N3Mode::Counting` (truly incremental) for a monotone, input-stratified rule fragment: forward rules with ground-IRI predicates, no conclusion blank nodes, builtins limited to the parity whitelist (`log:uri`, `log:equalTo`/`notEqualTo`, `string:concatenation`/`scrape`/`encodeForUri`), and negation only via the store-scoped `?x log:notIncludes { … }` idiom over input-only predicates. Anything else → `N3Mode::Fallback`; always consult `.fallback_reason()` (`None` ⇔ counting active). The full *batch* N3 engine (`reason_n3`) supports the much larger `math:`/`string:`/`list:`/`time:`/`log:` builtin set and goal-directed `<=` rules.
 - **N3 `math:` exact arithmetic is on the SHARED substrate tower (`sq-pbz04.5.1`, seam 2).** The chainer's exact add / subtract / multiply / negate / abs core (and the scale-aligned comparison the max/min and value-equality paths use) DELEGATES to `sparq-substrate::numeric::Dec` — a base, non-optional `numeric`-slice dependency, the SAME exact fixed-point `mant * 10^-scale` decimal the SPARQL engine's FILTER/BIND path drives — so the reasoner and the engine can never diverge on exact-decimal arithmetic (`0.1 + 0.2` is exactly `0.3`; `('2.7' '2') math:difference` is exactly `0.7`). The private `NumVal` enum stays a thin EYE-compat ADAPTER over that core: EYE's own edges are byte-identical and stay adapter-resident — lexical-shape string coercion, the `numval_term` result rendering (whole-`f64` → `xsd:integer`), `math:remainder`'s divisor-sign integer semantics, `math:integerQuotient`'s floor, `math:quotient`'s scale-34 exactness rule (non-terminating → `f64`, exact integer/integer → `xsd:integer`, NOT substrate `Dec::checked_div`'s always-decimal scale-18 rounding), integer `math:exponentiation`, and the `Int`-collapse rendering of floor/ceiling. The i128↔i64 wrinkle: the chainer `Int` tier is `i128` while substrate `Num::Int` is `i64`, so an out-of-`i64`-range integer is carried as substrate `Dec { mant, scale: 0 }` (exact for the full `i128` range; a mantissa overflow falls back to `f64` exactly as before). N3/EYE differential + expressivity floors and `RIF_CORE_FLOOR` are all byte-identical (the closure is unchanged; a direct old-`NumVal`-vs-substrate differential over the `>i64::MAX` / `0.1+0.2` / INF-NaN / `2.7-2` matrix pins it).
+- **`reason_n3_pass_all` echoes rules, with two caveats.** `RuleVars::N3` output re-parses to the same rules, so re-running it is a FIXPOINT — *unless* a rule mints an existential (a blank node in its CONCLUSION), which gets a fresh `_:__sk…` label per firing, so such a document grows on every re-run (the same caveat EYE carries). `RuleVars::VarIris` (the `--pass-all-ground` form) replaces `?x` with `<http://www.w3.org/2000/10/swap/var#x>` throughout the echoed RULES — at every depth, quoted `{ … }` formulae included, since N3 quantifies `?x` in the outermost formula — but the rule is then made of CONSTANTS, so feeding that document back to the reasoner does **not** re-derive anything. It grounds rules, not data: a document that ASSERTS a formula-valued fact carrying a variable (`:a :p { ?x :q :b }.`) still echoes that `?x` in the closure half, so "no `?` anywhere" holds for rule documents, not for every input. Parity is by construction (closure + rules), not byte-verified against EYE's own writer: sparq emits full `<…>` IRIs with no `@prefix` reconstruction and sorts the closure statements.
 - **`why()` is a witness, not a proof set.** It returns the first derivation in deterministic order, or `None` if the triple isn't in the closure or `ExplainOpts` caps (default depth 128, 65 536 nodes) are exceeded — not an enumeration of all derivations.
 - **Deletion semantics:** `delete` removes *base* (asserted) triples; a deleted base triple still derivable from the remainder stays in the closure, and deleting a derived-only fact is a no-op (standard materialized-view semantics).
 
@@ -691,8 +701,11 @@ boundary:
 
 - **Output modes.** `derivations` (default, EYE `--pass-only-new`) → `Reasoner.reasonN3New`;
   `deductive_closure` (`--pass`) → `Reasoner.reasonN3`; `none` → empty. The `…_plus_rules` modes
-  (`--pass-all` / `--pass-all-ground`, which echo rules into the output) **throw** — sparq's
-  chainer consumes rules and emits only ground triples (a deferred follow-up bead, not faked).
+  (`--pass-all` / `--pass-all-ground`) still **throw in the npm package**: the *reasoner* half
+  now exists — `reason_n3_pass_all(src, RuleVars::…)` emits the closure plus the echoed rules
+  (`sq-xqchl.2`) — but it is not yet exposed as a `sparq-reason-wasm` entry point, so the
+  package has nothing to call. Wiring the binding + the two `switch` arms is the remaining
+  step; until it lands the modes fail loudly rather than return a different result set.
 - **Query filter.** `n3reasoner(data, query)` maps the EYE `--query` rule to a SPARQL `CONSTRUCT`
   over the materialised closure (`Reasoner.reasonN3Query`). Query rules using **builtins /
   `{ … }` formulae / `( … )` lists fail closed** (a clear error, never a wrong answer).

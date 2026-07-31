@@ -42,8 +42,36 @@ required-features = ["stdio"]
 # (a server binary opts in) and uses only `std::io`, so it pulls no new dependency;
 # gating it keeps the library surface a pure data-transform for embedders that wire
 # their own transport. [OPUS-4.8]
-default = []
+# [SONNET-4.6] sq-mc06h: `algebra-rewrite` and `dp-planner` are in the DEFAULT set —
+# sparq-mcp is a NATIVE engine-embedding user surface with no bundle-size floor, so the
+# same binary-crate reasoning that put them in sparq-cli / sparq-server / sparq-py applies
+# here: an agent's `query`/`construct` tool call must execute the same plans the CLI and
+# the canonical benchmarks measure, not a rewrite-dark/greedy-GOO variant. Both forward a
+# sparq-engine opt-in that is `[]` (zero new dependencies, no `unsafe`) and is
+# RESULT-EQUIVALENT, so the default dependency graph and every tool's answer are unchanged
+# — only which plan runs. The sparq-engine LIBRARY default stays OFF (lean library
+# consumers choose explicitly), and an embedder who wants the unoptimised engine can build
+# this crate with `--no-default-features`. (`sparq-wasm` deliberately does NOT get this: it
+# has a bundle-size floor. See the bead for the per-surface decision.)
+default = ["algebra-rewrite", "dp-planner"]
 stdio = []
+# [SONNET-4.6] sq-mc06h: forwards sparq-engine's opt-in pre-execution algebra rewrite pass
+# (#1735 / sq-7d3dj.30.1) — the result-equivalent `FILTER(?v = <iri>)` constant substitution
+# + `FILTER(!bound) → Minus` anti-join applied before evaluation. IRI constants ONLY (a
+# literal equality is left verbatim — the sq-lr2ii avoidance contract). The pass's soundness
+# revert-witnesses run in the `sparq-engine (algebra-rewrite)` feature-matrix leg;
+# `tests/planner_features_default.rs` is this crate's tripwire that the forwarding works and
+# the default set keeps it lit.
+algebra-rewrite = ["sparq-engine/algebra-rewrite"]
+# [SONNET-4.6] sq-mc06h: forwards sparq-engine's opt-in DPccp join-order planner
+# (sq-7d3dj.30.5 / #1732). Once compiled it is DEFAULT-ON inside the engine (the
+# `Install::Default` state), so every connected BGP a tool call evaluates with 3..=63
+# patterns that fits the connected-subgraph budget is planned as a cost-optimal BUSHY tree
+# instead of by greedy GOO — no `with_dp_planner` call is needed on the tool path, and a
+# caller can still opt out per-scope via `sparq_engine::without_dp_planner`. Result-
+# equivalent (join ORDER only); the invariant is asserted exhaustively by sparq-engine's
+# `tests/query_features/dp_planner_differential.rs` in its own feature-matrix leg.
+dp-planner = ["sparq-engine/dp-planner"]
 # [GPT-5.6] sq-bvkn6: JSON-LD ingest for the Solid resource_put path. OFF by
 # default; forwarding sparq-core's opt-in parser keeps the lean MCP build free of
 # oxjsonld while allowing application/ld+json pod documents when requested.
@@ -150,3 +178,11 @@ serde_json = "1"
 [dev-dependencies]
 # The round-trip tests load a graph from Turtle text.
 oxttl.workspace = true
+# [SONNET-4.6] sq-mc06h: `tests/planner_features_default.rs` parses a query so it can assert
+# the `algebra-rewrite` pass actually rewrites the trigger shape (and leaves a literal
+# equality verbatim). TEST-ONLY — it does not touch the shipped dependency graph — and zero
+# supply-chain delta either way: the workspace-pinned `spargebra` is already an unconditional
+# dependency of `sparq-engine`, so every sparq-mcp build has always compiled it. (It also
+# appears as an OPTIONAL normal dependency above, pulled in only by the `nlq` feature; the
+# dev entry is what makes it available to tests in the DEFAULT, nlq-off configuration.)
+spargebra = { workspace = true }

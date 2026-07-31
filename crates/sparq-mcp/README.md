@@ -13,7 +13,7 @@ dataset as first-class MCP tools; SPARQL **`update` is OFF by default**. It is a
 wrapper over the existing engine read API (`sparq-engine` query path + `sparq-introspect`
 schema mining): nothing in the workspace depends on it, the default engine build does not
 compile it, and it adds **zero engine capability** and **no heavy dependency** (JSON-RPC
-2.0 framing is hand-rolled over `serde_json`).
+2.0 framing is hand-rolled over `serde_json`). Its **default** feature set does light two sparq-engine planner opt-ins — `algebra-rewrite` and `dp-planner` — so a tool call executes the same plans the CLI and the canonical benchmarks measure; both are result-equivalent and pull zero new dependencies, and `--no-default-features` opts out. <!-- [SONNET-4.6] sq-mc06h -->
 
 ## 🚀 Quickstart
 
@@ -75,10 +75,9 @@ so a hostile argument is refused rather than rendered. <!-- [SONNET-4.6] sq-sjey
 `PodStore` (named graph per document, WAC/ACP-authorized, bound to one session) with LDP
 tools per the MCP-Solid proposal draft — session-scoped `query`, `resource_get`,
 `container_list` (containment from stored `ldp:contains` data, never IRI-path guessing),
-and gated `update` / `resource_put` / `resource_delete` / `container_create`. A resource
-the session cannot read errors **identically to one that does not exist**; `.acl`/`.acr`
-writes route through the pod store's atomic fail-closed ACL write-through. `resource_get`
-serves N-Triples or `text/turtle` on `accept` (anything else refused, never coerced), and
+`introspect` / `shapes` / `stats` mined from **only the documents the session may read** (all three derive from the same authorized `DatasetView` `query` runs under, so no grants means an empty schema and zero totals — the base server's whole-graph versions would instead hand one principal the classes, predicates and volume of documents it cannot open, an aggregate leak no per-resource check catches) <!-- [SONNET-4.6] sq-8n6iv -->, and gated `update` / `resource_put` / `resource_delete` / `container_create`. A resource the session cannot read errors **identically to one that does not exist**; `.acl`/`.acr` writes route
+through the pod store's atomic fail-closed ACL write-through. `resource_get` serves
+N-Triples or `text/turtle` on `accept` (anything else refused, never coerced), and
 **non-RDF binaries are scoped out by decision** (an RDF pod has nowhere to put the bytes). <!-- [SONNET-4.6] sq-wbsf5 --> Its own `resources` surface adds **`subscribe: true`**:
 `resources/subscribe` binds a Solid Notifications subscription, a change queues a
 **content-free** `notifications/resources/updated` (topic + ActivityStreams verb, never
