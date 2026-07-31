@@ -58,4 +58,10 @@ const copied = [...REQUIRED, ...OPTIONAL.filter((f) => existsSync(resolve(src, f
 for (const f of copied) cpSync(resolve(src, f), resolve(dst, f));
 writeFileSync(resolve(dst, 'package.json'), `${JSON.stringify({ type: 'commonjs' }, null, 2)}\n`);
 
-console.log(`copy-wasm-node: copied ${copied.length} artifacts + a commonjs marker into ${dst}`);
+// STDERR, not stdout. `build` runs from the `prepack` lifecycle, and `prepack` runs inside
+// `npm pack --dry-run --json` — whose STDOUT is a machine-read data channel: guardrails/
+// check-package.mjs captures it and `JSON.parse`s it. A progress line on stdout lands ahead
+// of that JSON and makes the parse throw, which the guardrail reports as the package being
+// unpackable. Every other step in the chain (wasm-pack, tsc, the `cp`/`rm` copies) already
+// keeps stdout clean for exactly this reason.
+console.error(`copy-wasm-node: copied ${copied.length} artifacts + a commonjs marker into ${dst}`);
