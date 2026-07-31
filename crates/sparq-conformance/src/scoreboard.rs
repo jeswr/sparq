@@ -945,8 +945,13 @@ pub const SUITES: &[Suite] = &[
         // [OPUS-4.8] sq-26vwp — raised to 73: +10 assertions for variable/mixed body
         // Equal resolved by compile-time substitution/unification (V1/V2, ?x=<t>
         // substitution, head-var bind, chained collapse, distinct-ground fail-closed).
+        // [SONNET-4.6] sq-anyad — raised to 76: the distinct-ground Equal item of
+        // equal_atom_audit grew from 1 fail-closed assertion to 4 (numeric value-equal
+        // validates + fires, numeric value-unequal is vacuous, non-numeric still fails
+        // closed) when the NUMERIC half of the value-space deferral landed on the
+        // sq-v5evr comparator.
         // Mirrors RIF_CORE_FLOOR in rif_core_suite.rs (scoreboard_floors guard checks sync).
-        ratchet_floor: 73,
+        ratchet_floor: 76,
         floor_basis: "expressivity assertions (sparq EXTENSION over the RIF-Core subset, \
                       NOT the normative W3C SPARQL-RIF conformance suite)",
         note: "EXTENSION ratchet — sparq's own faithful expressivity battery over the \
