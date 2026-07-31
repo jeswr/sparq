@@ -81,7 +81,9 @@
 //!    Everything else stays fail-closed with [`RifError::DistinctGroundEqual`] —
 //!    the NON-numeric literal-equality half (`pred:boolean-equal`,
 //!    `pred:literal-not-identical` over strings/booleans/dates), an IRI or `List`
-//!    operand, an ill-formed numeric lexical, a `NaN` operand (for which
+//!    operand, an ill-formed numeric lexical — including a lexical outside the value
+//!    space of its declared derived integer datatype, so `"-1"^^xsd:positiveInteger`
+//!    and `"128"^^xsd:byte` are REFUSED rather than decided — a `NaN` operand (for which
 //!    `cmp_relational` reports a type error rather than a verdict), and an
 //!    out-of-tower exact-tier value paired with an `xsd:float`/`xsd:double` operand
 //!    (which would need the float's exact decimal expansion). Those stay deferred;
@@ -582,7 +584,8 @@ pub enum RifError {
     /// value-space equality cannot decide** — e.g. `"true"^^xsd:boolean =
     /// "1"^^xsd:boolean` (`pred:boolean-equal`), two distinct strings
     /// (`pred:literal-not-identical`), an IRI or `List` operand, an ill-formed
-    /// numeric lexical, or a `NaN` operand (a type error, not a verdict).
+    /// numeric lexical (including a derived-integer facet violation such as
+    /// `"-1"^^xsd:positiveInteger`), or a `NaN` operand (a type error, not a verdict).
     ///
     /// Two distinct grounds that ARE both well-formed numeric literals no longer
     /// reach this error: they are decided by the shared substrate comparator
@@ -979,12 +982,86 @@ fn resolve_body_equalities(rule: &Rule) -> Result<Resolved, RifError> {
     Ok(Resolved { rule: Rule { head, body }, satisfiable })
 }
 
+/// The inclusive `(min, max)` VALUE-SPACE bounds of a **derived** XSD integer datatype,
+/// with `None` on a side that is unbounded. The outer `None` means `datatype` carries no
+/// bounding facet at all — `xsd:integer` itself (unbounded both ways), or an IRI that is
+/// not an integer datatype.
+///
+/// XSD derives each of these from `xsd:integer` by a `minInclusive`/`maxInclusive` facet
+/// pair, and a derived type's LEXICAL space is exactly the lexicals mapping into its
+/// value space — so `"-1"^^xsd:positiveInteger` and `"128"^^xsd:byte` are not well-formed
+/// literals of their declared datatype, however well-formed the digit string is.
+///
+/// This deliberately does NOT reuse `dtype::integer_subtype_ok`, which encodes the same
+/// XSD table for D-entailment: that module is behind the `d-entail` feature while this
+/// one is behind `rif-core` (reusing it would make `rif-core` drag in the whole
+/// D-entailment module), and its signature is `i128`-bounded whereas this path must also
+/// bound-check an out-of-tower lexical. The two tables are the same XSD §3.4 derivation
+/// and must stay in step — folding them into one crate-internal table is tracked as
+/// follow-up work rather than done here. [OPUS-5]
+fn integer_facet_bounds(datatype: &str) -> Option<(Option<i128>, Option<i128>)> {
+    let local = datatype.strip_prefix(XSD)?;
+    Some(match local {
+        "long" => (Some(i64::MIN as i128), Some(i64::MAX as i128)),
+        "int" => (Some(i32::MIN as i128), Some(i32::MAX as i128)),
+        "short" => (Some(i16::MIN as i128), Some(i16::MAX as i128)),
+        "byte" => (Some(i8::MIN as i128), Some(i8::MAX as i128)),
+        "unsignedLong" => (Some(0), Some(u64::MAX as i128)),
+        "unsignedInt" => (Some(0), Some(u32::MAX as i128)),
+        "unsignedShort" => (Some(0), Some(u16::MAX as i128)),
+        "unsignedByte" => (Some(0), Some(u8::MAX as i128)),
+        "nonNegativeInteger" => (Some(0), None),
+        "positiveInteger" => (Some(1), None),
+        "nonPositiveInteger" => (None, Some(0)),
+        "negativeInteger" => (None, Some(-1)),
+        // `xsd:integer` is unfaceted; anything else is not a derived integer datatype.
+        _ => return None,
+    })
+}
+
+/// Whether `lex` lies inside the value space of its DECLARED integer datatype — the
+/// bounds/sign facet check neither `as_numeric` (which classifies every XSD integer
+/// datatype by the same `i64`/`i128` parse) nor [`exact_decimal_lexical`] performs.
+/// Without it, a facet-violating literal such as `"-1"^^xsd:positiveInteger` or
+/// `"128"^^xsd:byte` would be treated as a valid numeric operand and could DECIDE an
+/// `Equal` atom — contradicting the fail-closed contract for an ill-formed literal.
+///
+/// `true` for a datatype with no bounding facet, so the unfaceted `xsd:integer` /
+/// `xsd:decimal` paths are unchanged. The comparison runs through
+/// `sparq_substrate::numeric::cmp_plain_decimal`, so it is exact at ARBITRARY precision:
+/// an out-of-tower lexical is bounds-checked as faithfully as a small one, and a lexical
+/// that is not a plain decimal at all fails closed here too. [OPUS-5]
+fn integer_facets_ok(datatype: &str, lex: &str) -> bool {
+    let Some((min, max)) = integer_facet_bounds(datatype) else {
+        return true;
+    };
+    if let Some(lo) = min {
+        // `None` (not a plain decimal) fails closed alongside an under-range value.
+        if !matches!(
+            cmp_plain_decimal(lex, &lo.to_string()),
+            Some(Ordering::Equal | Ordering::Greater)
+        ) {
+            return false;
+        }
+    }
+    if let Some(hi) = max {
+        if !matches!(
+            cmp_plain_decimal(lex, &hi.to_string()),
+            Some(Ordering::Equal | Ordering::Less)
+        ) {
+            return false;
+        }
+    }
+    true
+}
+
 /// The typed numeric value of a ground RIF term, or `None` when the term is not a
 /// numeric literal the tower can REPRESENT (an IRI, a `List`, a non-numeric datatype
-/// such as `xsd:boolean`/`xsd:string`, an ill-formed lexical, an unparseable datatype
-/// IRI — **or** a well-formed `xsd:integer`/`xsd:decimal` whose exact value is outside
-/// the tower's `i128` mantissa; [`exact_decimal_lexical`] is the fallback that keeps
-/// those decidable). Delegates to the SHARED substrate classifier
+/// such as `xsd:boolean`/`xsd:string`, an ill-formed lexical, a lexical outside the
+/// value space of its declared derived integer datatype (see [`integer_facets_ok`]), an
+/// unparseable datatype IRI — **or** a well-formed `xsd:integer`/`xsd:decimal` whose
+/// exact value is outside the tower's `i128` mantissa; [`exact_decimal_lexical`] is the
+/// fallback that keeps those decidable). Delegates to the SHARED substrate classifier
 /// `sparq_substrate::numeric::as_numeric` — the substrate's public literal →
 /// numeric-tower classifier, shared with sparq-engine's value path, so the RIF
 /// front-end can never diverge from it on what *is* a number.
@@ -992,6 +1069,9 @@ fn resolve_body_equalities(rule: &Rule) -> Result<Resolved, RifError> {
 fn numeric_value(t: &Term) -> Option<Num> {
     match t {
         Term::Lit { lex, datatype } => {
+            if !integer_facets_ok(datatype.as_str(), lex.as_str()) {
+                return None;
+            }
             let dt = oxrdf::NamedNode::new(datatype.as_str()).ok()?;
             as_numeric(&oxrdf::Literal::new_typed_literal(lex.as_str(), dt))
         }
@@ -1008,12 +1088,14 @@ fn numeric_value(t: &Term) -> Option<Num> {
 /// would otherwise be left undecidable. Keeping the lexical as a STRING lets
 /// `sparq_substrate::numeric::cmp_plain_decimal` compare it exactly by string
 /// arithmetic — no `f64` promotion, so no lossy verdict. An integer lexical must carry
-/// no `.` at all (`"1.5"^^xsd:integer` is ill-formed and stays fail-closed); the digit
-/// shape itself is validated by `cmp_plain_decimal`. [OPUS-5]
+/// no `.` at all (`"1.5"^^xsd:integer` is ill-formed and stays fail-closed) and must lie
+/// inside the value space of its declared derived integer datatype ([`integer_facets_ok`]
+/// — this fallback must not rescue a facet violation `numeric_value` just refused); the
+/// digit shape itself is validated by `cmp_plain_decimal`. [OPUS-5]
 fn exact_decimal_lexical(t: &Term) -> Option<&str> {
     match t {
         Term::Lit { lex, datatype } if sparq_core::is_integer_datatype(datatype.as_str()) => {
-            if lex.contains('.') {
+            if lex.contains('.') || !integer_facets_ok(datatype.as_str(), lex.as_str()) {
                 None
             } else {
                 Some(lex.as_str())
@@ -1039,7 +1121,9 @@ fn exact_decimal_lexical(t: &Term) -> Option<&str> {
 /// * `None` — NOT decidable here, so the caller fails closed: a non-numeric literal
 ///   on either side (`pred:boolean-equal`, `pred:literal-not-identical` over
 ///   strings / booleans / dates — the half of sq-anyad that is still deferred), an
-///   IRI or `List` operand, an ill-formed numeric lexical, a `NaN` operand
+///   IRI or `List` operand, an ill-formed numeric lexical (including one outside the
+///   value space of its declared derived integer datatype, e.g.
+///   `"-1"^^xsd:positiveInteger` — see [`integer_facets_ok`]), a `NaN` operand
 ///   (`cmp_relational` reports NaN as a type error rather than a verdict, and this
 ///   front-end refuses rather than choosing an answer for it), or an out-of-tower
 ///   exact-tier value paired with an `xsd:float`/`xsd:double` operand (deciding that
@@ -1759,6 +1843,84 @@ mod tests {
             );
             let mut dict = Dict::new();
             assert!(d.closure(&mut dict).is_err(), "closure must refuse DistinctGroundEqual");
+        }
+    }
+
+    /// (3c'') A lexical outside the VALUE SPACE of its declared derived integer datatype
+    /// is not a well-formed literal of that datatype, however well-formed the digit
+    /// string is — so it must fail closed rather than decide the atom. `as_numeric`
+    /// classifies every XSD integer datatype by the same `i64`/`i128` parse and the
+    /// exact-lexical fallback carries no bound, so this is the facet check both paths
+    /// need (`integer_facets_ok`). [OPUS-5]
+    #[test]
+    fn body_equal_derived_integer_facet_violations_fail_closed() {
+        // A magnitude past `i128`, so it also exercises the arbitrary-precision path.
+        const HUGE: &str = "170141183460469231731687303715884105728";
+        let huge_unsigned = (HUGE, "unsignedByte");
+        for (l, r) in [
+            // Sign facets on the unbounded derived types.
+            (("-1", "positiveInteger"), ("-1", "integer")),
+            (("0", "positiveInteger"), ("0", "integer")),
+            (("-1", "nonNegativeInteger"), ("-1", "integer")),
+            (("1", "nonPositiveInteger"), ("1", "integer")),
+            (("0", "negativeInteger"), ("0", "integer")),
+            // Fixed-width signed ranges.
+            (("128", "byte"), ("128", "integer")),
+            (("-129", "byte"), ("-129", "integer")),
+            (("32768", "short"), ("32768", "integer")),
+            // Unsigned: negative, and past the width.
+            (("-1", "unsignedLong"), ("-1", "integer")),
+            (("18446744073709551616", "unsignedLong"), ("18446744073709551616", "integer")),
+            (("256", "unsignedByte"), ("256", "integer")),
+            // Out of tower AND out of facet range: the exact-lexical fallback must not
+            // rescue what the tower path refused.
+            (huge_unsigned, (HUGE, "integer")),
+        ] {
+            let d = distinct_ground_equal_doc(l, r);
+            assert!(
+                matches!(d.validate(), Err(RifError::DistinctGroundEqual { .. })),
+                "{:?} violates its datatype's value-space facet and must fail closed",
+                l
+            );
+            let mut dict = Dict::new();
+            assert!(d.closure(&mut dict).is_err(), "closure must refuse a facet violation");
+        }
+    }
+
+    /// (3c''') The controls for the facet check: the INCLUSIVE boundary values of each
+    /// derived integer datatype are valid, so they are still DECIDED against the
+    /// equal-valued `xsd:integer` and the rule fires. Without these the facet check could
+    /// be off by one (or reject everything) and (3c'') would still pass. [OPUS-5]
+    #[test]
+    fn body_equal_derived_integer_facet_boundaries_are_valid_and_decided() {
+        for (l, r) in [
+            (("1", "positiveInteger"), ("1", "integer")),
+            (("0", "nonNegativeInteger"), ("0", "integer")),
+            (("0", "nonPositiveInteger"), ("0", "integer")),
+            (("-1", "negativeInteger"), ("-1", "integer")),
+            (("127", "byte"), ("127", "integer")),
+            (("-128", "byte"), ("-128.0", "decimal")),
+            (("255", "unsignedByte"), ("255", "integer")),
+            (("0", "unsignedLong"), ("-0.0", "double")),
+            (("18446744073709551615", "unsignedLong"), ("18446744073709551615", "integer")),
+            // `xsd:integer` itself is unfaceted: an arbitrarily large value stays valid.
+            (
+                ("170141183460469231731687303715884105728", "integer"),
+                ("+170141183460469231731687303715884105728", "integer"),
+            ),
+        ] {
+            let d = distinct_ground_equal_doc(l, r);
+            d.validate().unwrap_or_else(|e| {
+                panic!("{:?} is inside its datatype's value space and must validate: {}", l, e)
+            });
+            let mut dict = Dict::new();
+            let closure = d.closure(&mut dict).expect("closure succeeds");
+            assert!(
+                has(&dict, &closure, "http://ex/a", RDF_TYPE, "http://ex/C"),
+                "{:?} = {:?} is a valid value-EQUAL pair, so the rule must fire",
+                l,
+                r
+            );
         }
     }
 
