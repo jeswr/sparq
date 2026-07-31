@@ -394,7 +394,7 @@
       "is_extension": true,
       "label": "RIF-Core expressivity (monotone Horn subset)",
       "note": "EXTENSION ratchet — sparq's own faithful expressivity battery over the RIF-CORE (monotone Horn) subset implemented by sparq-reason's rif:: front-end (frame/membership/subclass/equality, recursion, numeric/string/list builtins with range-restriction safety, monotonicity, the canonical rif01 uncle rule); the normative SPARQL-RIF Core Entailment Regime + full RIF-BLD/PRD are documented out-of-scope, asserted genuinely-rejected, never faked as passes",
-      "ratchet_floor": 73,
+      "ratchet_floor": 76,
       "runner": {
         "crate": "sparq-conformance",
         "feature": "rif-core",
@@ -562,7 +562,7 @@
   "totals": {
     "conformance_floor_total": 5435,
     "conformance_suites": 25,
-    "extension_assertion_total": 19703,
+    "extension_assertion_total": 19706,
     "extension_suites": 11
   }
 }

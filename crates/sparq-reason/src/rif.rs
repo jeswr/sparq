@@ -59,13 +59,27 @@
 //!    fires exactly for the individuals that manage themselves — with no `owl:sameAs`
 //!    assertion needed (reflexivity honoured) and without over-firing on distinct
 //!    nodes that merely carry an `owl:sameAs` triple.
-//! 4. **`t1 = t2` (two distinct NON-variable terms)** — rejected fail-closed with
-//!    [`RifError::DistinctGroundEqual`]. Value-space equality across XSD types (e.g.
-//!    `"1"^^xsd:integer = "1.0"^^xsd:decimal`) needs the shared value-space
-//!    comparator (sq-v5evr, issue #1646); until it lands the front-end refuses
-//!    rather than answering incorrectly. Because substitution runs to a fixpoint
+//! 4. **`t1 = t2` (two distinct NON-variable terms)** — [SONNET-4.6] sq-anyad:
+//!    decided by **NUMERIC value-space equality** when BOTH sides are well-formed
+//!    numeric literals, via the SHARED substrate comparator
+//!    `sparq_substrate::numeric::Num::cmp_relational` (sq-v5evr, issue #1646 —
+//!    the same comparator this crate's `compare`, `datalog` and `dtype` paths
+//!    already drive, so the RIF front-end cannot diverge from them). Across
+//!    the XSD numeric tiers `"1"^^xsd:integer = "1.0"^^xsd:decimal` is TRUE, so
+//!    the atom is ELIMINATED exactly like `t = t`; `"1"^^xsd:integer =
+//!    "2"^^xsd:integer` is FALSE, which makes the body UNSATISFIABLE — the rule
+//!    is still range-restriction checked and then dropped at lowering, deriving
+//!    nothing (vacuously true, and monotone: it could never have contributed a
+//!    fact).
+//!    Everything else stays fail-closed with [`RifError::DistinctGroundEqual`] —
+//!    the NON-numeric literal-equality half (`pred:boolean-equal`,
+//!    `pred:literal-not-identical` over strings/booleans/dates), an IRI or `List`
+//!    operand, an ill-formed numeric lexical, and a `NaN` operand (for which
+//!    `cmp_relational` reports a type error rather than a verdict). That half is
+//!    still deferred; the front-end refuses rather than answering incorrectly.
+//!    Because substitution runs to a fixpoint
 //!    FIRST, a chained `?x = ?y , ?y = "2"^^xsd:decimal` reduces both sides to the
-//!    constant and the ground-identity / distinct-ground checks are re-run on the
+//!    constant and the ground-identity / value-space checks are re-run on the
 //!    substituted terms.
 //!
 //! `Equal` in a HEAD is rejected with [`RifError::EqualInConclusion`] (a Core
@@ -100,6 +114,15 @@
 
 use crate::n3::Term as N3Term;
 use sparq_core::dict::{Dict, Id};
+// [SONNET-4.6] sq-anyad — the SHARED value-space numeric tower: the RIF Equal-atom
+// path decides distinct-ground NUMERIC equality with the substrate's own
+// `as_numeric` classifier (the same one sparq-engine's value path uses) and its
+// relational comparator `Num::cmp_relational` (sq-v5evr, #1646 — already driven by
+// this crate's `compare`, `datalog` and `dtype` paths), so no second numeric
+// comparison core enters the reasoner. The `numeric` slice is a NON-optional dep of
+// this crate (see Cargo.toml), so this pulls in no new dependency and no new feature.
+use sparq_substrate::numeric::{as_numeric, Num};
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -145,11 +168,17 @@ pub const UNIMPLEMENTED: &[&str] = &[
     // RifError::EqualInConclusion. Body Equal is resolved at compile time by
     // substitution/unification (t=t eliminated; ?x=t substituted; ?x=?y unified).
     // ONLY distinct-GROUND value-equality remains deferred (fail-closed), below.
+    // [SONNET-4.6] sq-anyad — the NUMERIC half is now IMPLEMENTED (sq-v5evr landed);
+    // only the non-numeric literal-equality half remains deferred.
     "pred:boolean-equal / pred:literal-not-identical / equality of distinct value-equal \
-     GROUND constants DEFERRED (fail-closed): need value-space equality beyond the numeric \
-     tower (sq-v5evr comparator, issue #1646, a named consumer) — rejects with \
-     DistinctGroundEqual pending that seam. Variable and mixed body Equal (?x=?y, ?x=t) are \
-     handled soundly by compile-time substitution/unification (sq-26vwp); body t=t works.",
+     NON-NUMERIC GROUND constants DEFERRED (fail-closed): needs value-space equality \
+     beyond the numeric tower (booleans, strings, dates) — rejects with \
+     DistinctGroundEqual (sq-anyad). The NUMERIC half IS implemented: distinct ground \
+     numeric literals are decided by the shared substrate comparator Num::cmp_relational \
+     (sq-v5evr, issue #1646), so \"1\"^^xsd:integer = \"1.0\"^^xsd:decimal holds and an \
+     unequal numeric pair makes the rule vacuous. Variable and mixed body Equal (?x=?y, \
+     ?x=t) are handled soundly by compile-time substitution/unification (sq-26vwp); body \
+     t=t works.",
     "guard predicates (pred:is-literal-integer etc.) DEFERRED: would require inventing \
      non-EYE N3 builtins, polluting the chainer's EYE-differential story — deferred.",
     "func:substring / func:substring-before / func:substring-after / func:string-join / \
@@ -535,12 +564,18 @@ pub enum RifError {
     /// `validate()` rejects any rule whose head contains an `Equal` atom with this
     /// error. [SONNET-4.6] sq-pbz04.5.4
     EqualInConclusion,
-    /// A body `Equal` atom has two **distinct non-variable** terms (e.g.
-    /// `"1"^^xsd:integer = "1.0"^^xsd:decimal`). This requires **value-space
-    /// equality** across XSD types, which depends on the shared value-space
-    /// comparator (sq-v5evr, issue #1646, not yet merged). Until that seam lands
-    /// this front-end rejects rather than answering incorrectly.
-    /// [SONNET-4.6] sq-pbz04.5.4
+    /// A body `Equal` atom has two **distinct non-variable** terms that **numeric
+    /// value-space equality cannot decide** — e.g. `"true"^^xsd:boolean =
+    /// "1"^^xsd:boolean` (`pred:boolean-equal`), two distinct strings
+    /// (`pred:literal-not-identical`), an IRI or `List` operand, an ill-formed
+    /// numeric lexical, or a `NaN` operand (a type error, not a verdict).
+    ///
+    /// Two distinct grounds that ARE both well-formed numeric literals no longer
+    /// reach this error: they are decided by the shared substrate comparator
+    /// `Num::cmp_relational` (sq-v5evr, issue #1646) — value-equal eliminates the
+    /// atom, value-unequal makes the rule vacuous. The NON-numeric literal-equality
+    /// half stays fail-closed rather than answering incorrectly.
+    /// [SONNET-4.6] sq-pbz04.5.4 / sq-anyad
     DistinctGroundEqual {
         /// The left-hand term (rendered as a string for display).
         left: String,
@@ -587,12 +622,14 @@ impl fmt::Display for RifError {
                 "RIF-Core does not permit Equal (=) in a rule conclusion; use RIF-BLD \
                  for equality-in-head semantics (Core syntactic restriction)"
             ),
-            // [SONNET-4.6] sq-pbz04.5.4
+            // [SONNET-4.6] sq-pbz04.5.4 / sq-anyad
             RifError::DistinctGroundEqual { left, right } => write!(
                 f,
-                "RIF-Core body Equal with distinct ground terms ({} = {}) requires \
-                 value-space equality (e.g. xsd:integer 1 vs xsd:decimal 1.0); \
-                 deferred pending sq-v5evr value-space comparator (#1646)",
+                "RIF-Core body Equal with distinct ground terms ({} = {}) that NUMERIC \
+                 value-space equality cannot decide (a non-numeric literal, an IRI/List \
+                 operand, an ill-formed numeric lexical, or NaN); the non-numeric \
+                 literal-equality half (pred:boolean-equal / pred:literal-not-identical) \
+                 is deferred — sq-anyad",
                 left, right
             ),
             RifError::Nonmonotonic { what } => write!(
@@ -636,9 +673,12 @@ impl Document {
     /// * Body `Equal` atoms are resolved by compile-time substitution / unification
     ///   (`resolve_body_equalities`) BEFORE range-restriction, so `?x = t` binds
     ///   `?x` (substitution) while `?x = ?x` binds nothing (elimination). A body
-    ///   `Equal` reducing to two **distinct non-variable** terms is rejected
-    ///   fail-closed (`RifError::DistinctGroundEqual`) pending the value-space
-    ///   comparator (sq-v5evr/#1646).
+    ///   `Equal` reducing to two **distinct non-variable** terms is decided by
+    ///   numeric value-space equality when both are numeric literals (sq-anyad, via
+    ///   the sq-v5evr comparator) and otherwise rejected fail-closed
+    ///   (`RifError::DistinctGroundEqual`). Range-restriction is checked even for a
+    ///   rule whose body is value-space UNSATISFIABLE (`1 = 2`), so an unsafe rule
+    ///   is still reported rather than silently swallowed by the vacuity.
     pub fn validate(&self) -> Result<(), RifError> {
         for rule in &self.rules {
             // Head atoms must be positive and must NOT be Equal.
@@ -662,7 +702,11 @@ impl Document {
             // bind — a head var bound solely by `?x = t` is now genuinely bound; a head
             // var bound solely by `?x = ?x` is now genuinely unbound (correctly caught
             // by the UnboundHeadVar sweep below).
-            let resolved = resolve_body_equalities(rule)?;
+            // [SONNET-4.6] sq-anyad — the `satisfiable` flag is deliberately IGNORED
+            // here: a value-space-unsatisfiable body (`1 = 2`) still gets the full
+            // range-restriction sweep, so an unsafe rule is reported loudly instead of
+            // being excused by its vacuity. Only lowering acts on the flag.
+            let resolved = resolve_body_equalities(rule)?.rule;
             // Walk the RESOLVED body left to right, growing the set of bound variables.
             // A positive atom binds all its variables (matched against facts). A
             // FUNCTION builtin requires its input args bound and then binds its
@@ -741,7 +785,16 @@ impl Document {
             // [OPUS-4.8] sq-26vwp — lower the RESOLVED rule (body `Equal` atoms
             // substituted/unified away). A rule whose body becomes empty after
             // resolution (e.g. `?x # C :- ?x = <a>`) is an unconditional FACT.
-            let rule = resolve_body_equalities(rule)?;
+            let resolved = resolve_body_equalities(rule)?;
+            // [SONNET-4.6] sq-anyad — a body `Equal` that reduced to two numerically
+            // UNEQUAL ground literals (`1 = 2`) makes the body unsatisfiable: the rule
+            // is VACUOUS, so it emits nothing at all. Dropping it is exact (it could
+            // never have fired) and preserves monotonicity. This check precedes the
+            // empty-body case so `s # C :- 1 = 2` is NOT mistaken for a fact.
+            if !resolved.satisfiable {
+                continue;
+            }
+            let rule = resolved.rule;
             if rule.body.is_empty() {
                 // Fact(s): emit each head atom as a ground triple.
                 for h in &rule.head {
@@ -819,6 +872,17 @@ fn lower_body_atom(atom: &Atom) -> String {
     }
 }
 
+/// The outcome of resolving a rule's body `Equal` atoms. [SONNET-4.6] sq-anyad
+struct Resolved {
+    /// The rule with every body `Equal` removed (eliminated / substituted / unified).
+    rule: Rule,
+    /// `false` when a body `Equal` reduced to two ground NUMERIC literals that are
+    /// value-space UNEQUAL (`1 = 2`): the body can never be satisfied, so the rule
+    /// is vacuous and must not be lowered. `validate` ignores this (it still checks
+    /// range-restriction); `to_n3_source` drops the rule.
+    satisfiable: bool,
+}
+
 /// Resolve every body `Equal` atom of `rule` by **compile-time substitution /
 /// unification**, returning an equivalent rule whose body contains NO `Equal`
 /// atoms. [OPUS-4.8] sq-26vwp — this is RIF-Core's ground-identity equality done
@@ -830,13 +894,17 @@ fn lower_body_atom(atom: &Atom) -> String {
 /// * `?x = t` (one side a variable) → substitute `t` for `?x` throughout head+body
 ///   (the variable becomes bound-by-substitution).
 /// * `?x = ?y` (two distinct variables) → unify: rename one to the other everywhere.
-/// * `t1 = t2` (two distinct NON-variable terms) → [`RifError::DistinctGroundEqual`]
-///   (value-space equality is deferred to sq-v5evr/#1646 — fail closed).
+/// * `t1 = t2` (two distinct NON-variable terms) → [SONNET-4.6] sq-anyad: decided by
+///   [`ground_value_equal`] when both are numeric literals — value-EQUAL drops the
+///   atom like `t = t`, value-UNEQUAL marks the whole rule unsatisfiable
+///   ([`Resolved::satisfiable`]); anything else is [`RifError::DistinctGroundEqual`]
+///   (the non-numeric literal-equality half stays fail-closed).
 ///
 /// An `Equal` equating a variable to a compound `List` term containing that same
 /// variable is rejected (occurs-check) rather than looped.
-fn resolve_body_equalities(rule: &Rule) -> Result<Rule, RifError> {
+fn resolve_body_equalities(rule: &Rule) -> Result<Resolved, RifError> {
     let mut subst: BTreeMap<String, Term> = BTreeMap::new();
+    let mut satisfiable = true;
     // Iterate to a fixpoint: applying a new binding can expose a further
     // ground-identity or distinct-ground equality among the remaining atoms.
     loop {
@@ -859,12 +927,24 @@ fn resolve_body_equalities(rule: &Rule) -> Result<Rule, RifError> {
                         changed = true;
                     }
                     _ => {
-                        // Two distinct NON-variable terms: value-space equality,
-                        // deferred to sq-v5evr — fail closed (never guess).
-                        return Err(RifError::DistinctGroundEqual {
-                            left: format!("{:?}", l),
-                            right: format!("{:?}", r),
-                        });
+                        // Two distinct NON-variable terms. [SONNET-4.6] sq-anyad —
+                        // the NUMERIC half is decided by the shared substrate
+                        // comparator; everything else fails closed (never guess).
+                        match ground_value_equal(&l, &r) {
+                            // Value-space EQUAL across the numeric tiers (e.g.
+                            // 1^^integer = 1.0^^decimal): trivially true, like `t = t`.
+                            Some(true) => continue,
+                            // Value-space UNEQUAL: the body can never be satisfied.
+                            // Keep resolving (later atoms may still substitute) but
+                            // record that the rule is vacuous.
+                            Some(false) => satisfiable = false,
+                            None => {
+                                return Err(RifError::DistinctGroundEqual {
+                                    left: format!("{:?}", l),
+                                    right: format!("{:?}", r),
+                                })
+                            }
+                        }
                     }
                 }
             }
@@ -882,7 +962,45 @@ fn resolve_body_equalities(rule: &Rule) -> Result<Rule, RifError> {
         .filter(|a| !matches!(a, Atom::Equal { .. }))
         .map(|a| apply_subst_atom(a, &subst))
         .collect();
-    Ok(Rule { head, body })
+    Ok(Resolved { rule: Rule { head, body }, satisfiable })
+}
+
+/// The typed numeric value of a ground RIF term, or `None` when the term is not a
+/// well-formed numeric literal (an IRI, a `List`, a non-numeric datatype such as
+/// `xsd:boolean`/`xsd:string`, an ill-formed lexical, or an unparseable datatype
+/// IRI). Delegates to the SHARED substrate classifier
+/// `sparq_substrate::numeric::as_numeric` — the substrate's public literal →
+/// numeric-tower classifier, shared with sparq-engine's value path, so the RIF
+/// front-end can never diverge from it on what *is* a number.
+/// [SONNET-4.6] sq-anyad
+fn numeric_value(t: &Term) -> Option<Num> {
+    match t {
+        Term::Lit { lex, datatype } => {
+            let dt = oxrdf::NamedNode::new(datatype.as_str()).ok()?;
+            as_numeric(&oxrdf::Literal::new_typed_literal(lex.as_str(), dt))
+        }
+        _ => None,
+    }
+}
+
+/// Decide a body `Equal` between two DISTINCT ground terms by **numeric value-space
+/// equality**. [SONNET-4.6] sq-anyad — the numeric half of the deferral, unblocked by
+/// the substrate comparator `Num::cmp_relational` (sq-v5evr, issue #1646).
+///
+/// * `Some(true)` / `Some(false)` — both sides are well-formed numeric literals and
+///   the comparator decided them. Comparison is across the XSD numeric tiers
+///   (integer / decimal / float / double), so `"1"^^xsd:integer` equals
+///   `"1.0"^^xsd:decimal` and `"1.0E0"^^xsd:double`.
+/// * `None` — NOT decidable here, so the caller fails closed: a non-numeric literal
+///   on either side (`pred:boolean-equal`, `pred:literal-not-identical` over
+///   strings / booleans / dates — the half of sq-anyad that is still deferred), an
+///   IRI or `List` operand, an ill-formed numeric lexical, or a `NaN` operand
+///   (`cmp_relational` reports NaN as a type error rather than a verdict, and this
+///   front-end refuses rather than choosing an answer for it).
+fn ground_value_equal(l: &Term, r: &Term) -> Option<bool> {
+    let a = numeric_value(l)?;
+    let b = numeric_value(r)?;
+    a.cmp_relational(b).map(|o| o == Ordering::Equal)
 }
 
 /// Insert `v -> t` into `subst`, keeping the map idempotent (every existing value
@@ -1451,30 +1569,204 @@ mod tests {
         );
     }
 
-    /// (3) Distinct ground constants in a body Equal (`"1"^^xsd:integer =
-    /// "1.0"^^xsd:decimal`) require value-space equality (sq-v5evr, #1646, not yet
-    /// merged). The validator MUST reject fail-closed rather than answer incorrectly.
-    #[test]
-    fn body_equal_distinct_ground_constants_fail_closed() {
-        let xsd_int = format!("{}integer", XSD);
-        let xsd_dec = format!("{}decimal", XSD);
+    // ---- [SONNET-4.6] sq-anyad — distinct-ground body Equal: the NUMERIC half is
+    // decided by the shared substrate comparator (sq-v5evr / #1646); the non-numeric
+    // literal-equality half (pred:boolean-equal / pred:literal-not-identical) stays
+    // fail-closed. ----
+
+    /// A `?x # C :- ?x # D , <l> = <r>` document whose body carries one distinct-ground
+    /// `Equal`, plus the fact `<a> # D`. `Term::Lit` operands are built from
+    /// `(lex, datatype-local-name)` pairs.
+    fn distinct_ground_equal_doc(l: (&str, &str), r: (&str, &str)) -> Document {
+        let lit = |(lex, dt): (&str, &str)| Term::Lit {
+            lex: lex.to_string(),
+            datatype: format!("{}{}", XSD, dt),
+        };
         let mut d = Document::new();
+        d.push(Rule::fact(Atom::Member { obj: iri("http://ex/a"), class: iri("http://ex/D") }));
         d.push(Rule::implies(
             vec![Atom::Member { obj: var("x"), class: iri("http://ex/C") }],
             vec![
                 Atom::Member { obj: var("x"), class: iri("http://ex/D") },
-                Atom::Equal {
-                    left: Term::Lit { lex: "1".into(), datatype: xsd_int },
-                    right: Term::Lit { lex: "1.0".into(), datatype: xsd_dec },
-                },
+                Atom::Equal { left: lit(l), right: lit(r) },
             ],
+        ));
+        d
+    }
+
+    /// (3a) Distinct ground NUMERIC constants that are value-space EQUAL (`"1"^^xsd:integer
+    /// = "1.0"^^xsd:decimal`) are now DECIDED — the atom is trivially true and eliminated
+    /// like `t = t`, so the rule fires. Equality is across the XSD numeric tiers
+    /// (integer / decimal / float / double), exactly as `Num::cmp_relational` defines it.
+    #[test]
+    fn body_equal_value_equal_numeric_grounds_are_eliminated_and_the_rule_fires() {
+        for (l, r) in [
+            (("1", "integer"), ("1.0", "decimal")),
+            (("1", "integer"), ("1.0E0", "double")),
+            (("2.50", "decimal"), ("2.5", "float")),
+            (("-0.0", "double"), ("0", "integer")),
+        ] {
+            let d = distinct_ground_equal_doc(l, r);
+            d.validate().unwrap_or_else(|e| {
+                panic!("value-equal numeric grounds {:?} = {:?} must validate: {}", l, r, e)
+            });
+            let mut dict = Dict::new();
+            let closure = d.closure(&mut dict).expect("closure succeeds");
+            assert!(
+                has(&dict, &closure, "http://ex/a", RDF_TYPE, "http://ex/C"),
+                "{:?} = {:?} is value-space TRUE, so the rule must fire",
+                l,
+                r
+            );
+        }
+    }
+
+    /// (3b) Distinct ground NUMERIC constants that are value-space UNEQUAL (`1 = 2`) make
+    /// the body unsatisfiable: the rule is VACUOUS — the document still validates, the
+    /// closure still succeeds, and the head is simply never derived. The control document
+    /// (same rule without the Equal) DOES derive it, so this pins the vacuity rather than
+    /// a broken rule.
+    #[test]
+    fn body_equal_value_unequal_numeric_grounds_make_the_rule_vacuous() {
+        let d = distinct_ground_equal_doc(("1", "integer"), ("2", "integer"));
+        d.validate().expect("an unsatisfiable-but-safe rule is valid");
+        let mut dict = Dict::new();
+        let closure = d.closure(&mut dict).expect("closure succeeds");
+        assert!(
+            !has(&dict, &closure, "http://ex/a", RDF_TYPE, "http://ex/C"),
+            "1 = 2 is value-space FALSE, so the rule must derive NOTHING"
+        );
+        // Control: the identical rule with a value-EQUAL Equal does derive the head.
+        let ctrl = distinct_ground_equal_doc(("1", "integer"), ("1.00", "decimal"));
+        let mut cdict = Dict::new();
+        let cclosure = ctrl.closure(&mut cdict).expect("closure succeeds");
+        assert!(
+            has(&cdict, &cclosure, "http://ex/a", RDF_TYPE, "http://ex/C"),
+            "control: the same rule fires when the ground Equal is value-space TRUE"
+        );
+    }
+
+    /// (3b') A rule whose body is value-space unsatisfiable is STILL range-restriction
+    /// checked — vacuity must not excuse an unsafe rule (`validate` deliberately ignores
+    /// the satisfiability flag; only lowering acts on it).
+    #[test]
+    fn unsatisfiable_body_is_still_range_restriction_checked() {
+        let lit = |lex: &str| Term::Lit {
+            lex: lex.to_string(),
+            datatype: format!("{}integer", XSD),
+        };
+        let mut d = Document::new();
+        d.push(Rule::implies(
+            vec![Atom::Member { obj: var("y"), class: iri("http://ex/C") }],
+            vec![Atom::Equal { left: lit("1"), right: lit("2") }],
+        ));
+        assert!(
+            matches!(d.validate(), Err(RifError::UnboundHeadVar { .. })),
+            "an unsafe head variable is reported even though the body is unsatisfiable"
+        );
+    }
+
+    /// (3c) The still-PENDING half: distinct ground constants that numeric value-space
+    /// equality cannot decide stay fail-closed with `DistinctGroundEqual` —
+    /// `pred:boolean-equal` (booleans), `pred:literal-not-identical` (strings), a
+    /// non-numeric datatype, and an ill-formed numeric lexical. sq-anyad does NOT guess
+    /// an answer for these.
+    #[test]
+    fn body_equal_non_numeric_distinct_grounds_still_fail_closed() {
+        for (l, r) in [
+            // pred:boolean-equal — the boolean value space is NOT the numeric tower.
+            (("true", "boolean"), ("1", "boolean")),
+            (("true", "boolean"), ("false", "boolean")),
+            // pred:literal-not-identical over strings.
+            (("a", "string"), ("b", "string")),
+            // Temporal literals: outside the numeric tower entirely (no shared temporal
+            // value space exists in the substrate — see the UNIMPLEMENTED ledger).
+            (("2026-07-31", "date"), ("2026-07-30", "date")),
+            // Ill-formed numeric lexical: not a well-formed number, so not decidable.
+            (("abc", "integer"), ("1", "integer")),
+            // Numeric datatype on one side only.
+            (("1", "integer"), ("1", "string")),
+        ] {
+            let d = distinct_ground_equal_doc(l, r);
+            assert!(
+                matches!(d.validate(), Err(RifError::DistinctGroundEqual { .. })),
+                "{:?} = {:?} is not numerically decidable and must fail closed",
+                l,
+                r
+            );
+            let mut dict = Dict::new();
+            assert!(d.closure(&mut dict).is_err(), "closure must refuse DistinctGroundEqual");
+        }
+    }
+
+    /// (3d) A `NaN` operand is a comparator TYPE ERROR (`cmp_relational` returns `None`),
+    /// not a verdict — so it fails closed rather than being silently answered `false`.
+    /// Two syntactically IDENTICAL `NaN` terms are still trivially true by RIF-Core
+    /// ground identity (they never reach the value-space path).
+    #[test]
+    fn body_equal_nan_operand_fails_closed_but_identity_still_holds() {
+        let d = distinct_ground_equal_doc(("NaN", "double"), ("1", "double"));
+        assert!(
+            matches!(d.validate(), Err(RifError::DistinctGroundEqual { .. })),
+            "a NaN operand is a type error for cmp_relational -> fail closed"
+        );
+        let identical = distinct_ground_equal_doc(("NaN", "double"), ("NaN", "double"));
+        identical.validate().expect("identical terms are ground-identical (reflexivity)");
+    }
+
+    /// (3e) Non-literal operands (IRIs, `List`s) are never numeric, so they keep the
+    /// pre-existing fail-closed behaviour.
+    #[test]
+    fn body_equal_iri_and_list_grounds_still_fail_closed() {
+        let mut d = Document::new();
+        d.push(Rule::implies(
+            vec![Atom::Member { obj: iri("http://ex/s"), class: iri("http://ex/C") }],
+            vec![Atom::Equal { left: iri("http://ex/a"), right: iri("http://ex/b") }],
         ));
         assert!(
             matches!(d.validate(), Err(RifError::DistinctGroundEqual { .. })),
-            "distinct ground constants in body Equal must be fail-closed (pending sq-v5evr)"
+            "distinct IRI constants are not numerically decidable"
         );
+        let mut d2 = Document::new();
+        d2.push(Rule::implies(
+            vec![Atom::Member { obj: iri("http://ex/s"), class: iri("http://ex/C") }],
+            vec![Atom::Equal {
+                left: Term::List(vec![Term::int(1)]),
+                right: Term::int(1),
+            }],
+        ));
+        assert!(
+            matches!(d2.validate(), Err(RifError::DistinctGroundEqual { .. })),
+            "a List operand is not a numeric literal"
+        );
+    }
+
+    /// (3f) The value-space check is re-run on terms CREATED by substitution: `?x = 1 ,
+    /// ?y = "1.0"^^xsd:decimal , ?x = ?y` reduces the last atom to `1 = 1.0`, which is
+    /// value-space TRUE — so the rule fires (the mirror of the `<a> = <b>` fail-closed
+    /// case below).
+    #[test]
+    fn body_equal_subst_created_numeric_ground_is_decided() {
+        let dec = |lex: &str| Term::Lit {
+            lex: lex.to_string(),
+            datatype: format!("{}decimal", XSD),
+        };
+        let mut d = Document::new();
+        d.push(Rule::implies(
+            vec![Atom::Member { obj: iri("http://ex/s"), class: iri("http://ex/C") }],
+            vec![
+                Atom::Equal { left: var("x"), right: Term::int(1) },
+                Atom::Equal { left: var("y"), right: dec("1.0") },
+                Atom::Equal { left: var("x"), right: var("y") },
+            ],
+        ));
+        d.validate().expect("substitution-created 1 = 1.0 is value-space TRUE");
         let mut dict = Dict::new();
-        assert!(d.closure(&mut dict).is_err(), "closure must refuse DistinctGroundEqual");
+        let closure = d.closure(&mut dict).expect("closure succeeds");
+        assert!(
+            has(&dict, &closure, "http://ex/s", RDF_TYPE, "http://ex/C"),
+            "the substitution-created numeric equality holds, so the fact is derived"
+        );
     }
 
     // ---- [OPUS-4.8] sq-26vwp — variable / mixed Equal via compile-time substitution ----
@@ -1680,7 +1972,8 @@ mod tests {
 
     /// A substitution can CREATE a distinct-ground equality: `?x = <a> , ?y = <b> ,
     /// ?x = ?y` makes the last atom reduce to `<a> = <b>` -> fail-closed
-    /// `DistinctGroundEqual` (pending sq-v5evr), re-derived after substitution.
+    /// `DistinctGroundEqual` (IRIs are not numerically decidable — sq-anyad),
+    /// re-derived after substitution.
     #[test]
     fn body_equal_subst_creates_distinct_ground_fail_closed() {
         let mut d = Document::new();
@@ -1733,13 +2026,19 @@ mod tests {
             e.to_string().contains("conclusion"),
             "EqualInConclusion display mentions conclusion"
         );
+        // [SONNET-4.6] sq-anyad — the message now names the NON-numeric half as the
+        // remaining deferral (the numeric half is implemented).
         let e = RifError::DistinctGroundEqual {
-            left: "1^^integer".into(),
-            right: "1.0^^decimal".into(),
+            left: "true^^boolean".into(),
+            right: "1^^boolean".into(),
         };
         assert!(
-            e.to_string().contains("sq-v5evr"),
+            e.to_string().contains("sq-anyad"),
             "DistinctGroundEqual display references the deferral bead"
+        );
+        assert!(
+            e.to_string().contains("pred:boolean-equal"),
+            "DistinctGroundEqual display names the still-deferred non-numeric half"
         );
     }
 
