@@ -38,6 +38,7 @@ import {
   getRunning,
   killEndpointRunningQuery,
   killQuery,
+  QueryRegistryHttpError,
   subscribeRunning,
   trackQuery,
   type EndpointRunningQuery,
@@ -228,6 +229,9 @@ export function PlanExplorer() {
         <QueryMonitor
           endpointUrl={endpointBlocked ? "" : endpointUrl.trim()}
           endpointToken={endpointToken}
+          tokenOverPlaintext={endpointWarnings.some(
+            (warning) => warning.code === "token-over-plaintext",
+          )}
         />
       </div>
     </div>
@@ -377,9 +381,11 @@ function EndpointStrip({
 function QueryMonitor({
   endpointUrl,
   endpointToken,
+  tokenOverPlaintext,
 }: {
   endpointUrl: string;
   endpointToken: string;
+  tokenOverPlaintext: boolean;
 }) {
   const running = React.useSyncExternalStore(subscribeRunning, getRunning, getRunning);
   // Re-render each second while anything is in flight, so the elapsed readout is live.
@@ -389,6 +395,12 @@ function QueryMonitor({
     const t = setInterval(forceTick, 1000);
     return () => clearInterval(t);
   }, [running.length]);
+
+  const [monitoredEndpoint, setMonitoredEndpoint] = React.useState<{
+    url: string;
+    token: string;
+  } | null>(null);
+  const canMonitor = endpointUrl !== "" && !tokenOverPlaintext;
 
   return (
     <div className="px-3 py-2" data-plan-monitor>
@@ -406,9 +418,41 @@ function QueryMonitor({
           ))}
         </ul>
       )}
-      {endpointUrl !== "" && (
-        <EndpointQueryMonitor endpointUrl={endpointUrl} endpointToken={endpointToken} />
-      )}
+      <div className="mt-2 border-t border-border pt-2">
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            Running queries — endpoint (all clients)
+          </h3>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={!monitoredEndpoint && !canMonitor}
+            onClick={() =>
+              setMonitoredEndpoint(
+                monitoredEndpoint ? null : { url: endpointUrl, token: endpointToken },
+              )
+            }
+            data-plan-endpoint-monitor-toggle
+          >
+            {monitoredEndpoint ? "Stop monitoring" : "Monitor endpoint"}
+          </Button>
+        </div>
+        {tokenOverPlaintext && (
+          <p className="py-1 text-xs text-muted-foreground">
+            Endpoint monitoring is unavailable while a bearer token would be sent over plaintext.
+          </p>
+        )}
+        {monitoredEndpoint ? (
+          <EndpointQueryMonitor
+            endpointUrl={monitoredEndpoint.url}
+            endpointToken={monitoredEndpoint.token}
+          />
+        ) : (
+          <p className="py-1 text-xs text-muted-foreground">
+            Server-side monitoring is opt-in and starts only when requested.
+          </p>
+        )}
+      </div>
     </div>
   );
 }
@@ -416,7 +460,36 @@ function QueryMonitor({
 type EndpointMonitorState =
   | { kind: "loading" }
   | { kind: "loaded"; queries: EndpointRunningQuery[] }
-  | { kind: "error"; message: string };
+  | { kind: "error"; message: string; destructive: boolean };
+
+function endpointRegistryMessage(error: unknown): {
+  message: string;
+  retry: boolean;
+  destructive: boolean;
+} {
+  if (error instanceof QueryRegistryHttpError) {
+    if (error.status === 404 || error.status === 405) {
+      return {
+        message:
+          "Server-side registry not enabled (start sparq-server with --features query-registry).",
+        retry: false,
+        destructive: false,
+      };
+    }
+    if (error.status === 401 || error.status === 403) {
+      return {
+        message: "Token not accepted for the registry read gate.",
+        retry: false,
+        destructive: false,
+      };
+    }
+  }
+  return {
+    message: error instanceof Error ? error.message : String(error),
+    retry: true,
+    destructive: true,
+  };
+}
 
 function EndpointQueryMonitor({
   endpointUrl,
@@ -427,70 +500,106 @@ function EndpointQueryMonitor({
 }) {
   const [state, setState] = React.useState<EndpointMonitorState>({ kind: "loading" });
   const [killing, setKilling] = React.useState<string | null>(null);
+  const [killError, setKillError] = React.useState<string | null>(null);
+  const controllerRef = React.useRef<AbortController | null>(null);
+  const requestSequence = React.useRef(0);
 
-  const refresh = React.useCallback(
-    async (signal?: AbortSignal) => {
+  React.useEffect(() => {
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    setState({ kind: "loading" });
+    const poll = async () => {
+      const sequence = ++requestSequence.current;
       try {
+        const queries = await fetchEndpointRunningQueries(
+          endpointUrl,
+          endpointToken.trim() || undefined,
+          fetch,
+          controller.signal,
+        );
+        if (controller.signal.aborted) return;
+        if (sequence === requestSequence.current) setState({ kind: "loaded", queries });
+        timeout = setTimeout(() => void poll(), 2000);
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        if (sequence !== requestSequence.current) {
+          timeout = setTimeout(() => void poll(), 2000);
+          return;
+        }
+        const result = endpointRegistryMessage(error);
+        setState({ kind: "error", message: result.message, destructive: result.destructive });
+        if (result.retry) timeout = setTimeout(() => void poll(), 2000);
+      }
+    };
+    void poll();
+    return () => {
+      controller.abort();
+      controllerRef.current = null;
+      if (timeout) clearTimeout(timeout);
+    };
+  }, [endpointUrl, endpointToken]);
+
+  const kill = React.useCallback(
+    async (id: string) => {
+      setKilling(id);
+      setKillError(null);
+      const signal = controllerRef.current?.signal;
+      const sequence = ++requestSequence.current;
+      try {
+        await killEndpointRunningQuery(
+          endpointUrl,
+          id,
+          endpointToken.trim() || undefined,
+          fetch,
+          signal,
+        );
+        if (signal?.aborted) return;
         const queries = await fetchEndpointRunningQueries(
           endpointUrl,
           endpointToken.trim() || undefined,
           fetch,
           signal,
         );
-        setState({ kind: "loaded", queries });
+        if (!signal?.aborted && sequence === requestSequence.current) {
+          setState({ kind: "loaded", queries });
+        }
       } catch (error) {
         if (signal?.aborted) return;
-        setState({
-          kind: "error",
-          message: error instanceof Error ? error.message : String(error),
-        });
+        if (error instanceof QueryRegistryHttpError && error.status === 404) {
+          setState((current) =>
+            current.kind === "loaded"
+              ? { kind: "loaded", queries: current.queries.filter((query) => query.id !== id) }
+              : current,
+          );
+        } else {
+          setKillError(error instanceof Error ? error.message : String(error));
+        }
+      } finally {
+        if (!signal?.aborted) setKilling(null);
       }
     },
     [endpointUrl, endpointToken],
   );
 
-  React.useEffect(() => {
-    const controller = new AbortController();
-    setState({ kind: "loading" });
-    void refresh(controller.signal);
-    const interval = setInterval(() => void refresh(controller.signal), 2000);
-    return () => {
-      controller.abort();
-      clearInterval(interval);
-    };
-  }, [refresh]);
-
-  const kill = React.useCallback(
-    async (id: string) => {
-      setKilling(id);
-      try {
-        await killEndpointRunningQuery(
-          endpointUrl,
-          id,
-          endpointToken.trim() || undefined,
-        );
-        await refresh();
-      } catch (error) {
-        setState({
-          kind: "error",
-          message: error instanceof Error ? error.message : String(error),
-        });
-      } finally {
-        setKilling(null);
-      }
-    },
-    [endpointUrl, endpointToken, refresh],
-  );
-
   return (
-    <div className="mt-2 border-t border-border pt-2" data-plan-endpoint-monitor>
-      <h3 className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-        Running queries — endpoint (all clients)
-      </h3>
+    <div data-plan-endpoint-monitor>
+      {killError && (
+        <p className="py-1 text-xs text-destructive" role="status" data-plan-endpoint-kill-error>
+          {killError}
+        </p>
+      )}
       {state.kind === "loading" ? (
         <p className="py-1 text-xs text-muted-foreground">Loading server registry…</p>
       ) : state.kind === "error" ? (
-        <p className="py-1 text-xs text-destructive" role="status" data-plan-endpoint-monitor-error>
+        <p
+          className={cn(
+            "py-1 text-xs",
+            state.destructive ? "text-destructive" : "text-muted-foreground",
+          )}
+          role="status"
+          data-plan-endpoint-monitor-error
+        >
           {state.message}
         </p>
       ) : state.queries.length === 0 ? (

@@ -80,7 +80,7 @@ test("fetchEndpointRunningQueries – derives the server root, authenticates, an
             id: "0000000000000001",
             kind: "query",
             start: 1_700_000_000_000,
-            fingerprint: "fnv1a64:0123456789abcdef",
+            fingerprint: "0123456789abcdef",
             elapsed_ms: 250,
           },
         ],
@@ -100,7 +100,61 @@ test("fetchEndpointRunningQueries – derives the server root, authenticates, an
     Accept: "application/json",
     Authorization: "Bearer secret",
   });
-  assert.equal(rows[0]?.fingerprint, "fnv1a64:0123456789abcdef");
+  assert.equal(rows[0]?.fingerprint, "0123456789abcdef");
+});
+
+test("fetchEndpointRunningQueries – preserves a reverse-proxy path prefix", async () => {
+  let requestUrl = "";
+  const fetchImpl: typeof fetch = async (input) => {
+    requestUrl = String(input);
+    return new Response(JSON.stringify({ queries: [] }), { status: 200 });
+  };
+  await fetchEndpointRunningQueries("https://example.test/sparq/sparql", undefined, fetchImpl);
+  assert.equal(requestUrl, "https://example.test/sparq/queries");
+});
+
+test("fetchEndpointRunningQueries – rejects unsupported protocols", async () => {
+  await assert.rejects(
+    fetchEndpointRunningQueries("ftp://example.test/sparql"),
+    /must use http:\/\/ or https:\/\//,
+  );
+});
+
+test("fetchEndpointRunningQueries – exposes HTTP status and rejects malformed envelopes", async () => {
+  for (const status of [404, 401]) {
+    const unavailable: typeof fetch = async () => new Response(null, { status });
+    await assert.rejects(
+      fetchEndpointRunningQueries("https://example.test/sparql", undefined, unavailable),
+      (error: unknown) =>
+        error instanceof Error &&
+        error.message === `Running-query list failed (HTTP ${status}).` &&
+        "status" in error &&
+        error.status === status,
+    );
+  }
+
+  const malformed: typeof fetch = async () =>
+    new Response(JSON.stringify({ queries: 3 }), { status: 200 });
+  await assert.rejects(
+    fetchEndpointRunningQueries("https://example.test/sparql", undefined, malformed),
+    /invalid response/,
+  );
+});
+
+test("fetchEndpointRunningQueries – forwards the abort signal", async () => {
+  const controller = new AbortController();
+  let requestInit: RequestInit | undefined;
+  const fetchImpl: typeof fetch = async (_input, init) => {
+    requestInit = init;
+    return new Response(JSON.stringify({ queries: [] }), { status: 200 });
+  };
+  await fetchEndpointRunningQueries(
+    "https://example.test/sparql",
+    undefined,
+    fetchImpl,
+    controller.signal,
+  );
+  assert.equal(requestInit?.signal, controller.signal);
 });
 
 test("fetchEndpointRunningQueries – rejects malformed registry rows", async () => {
@@ -133,4 +187,28 @@ test("killEndpointRunningQuery – encodes the id and sends the bearer token", a
     Accept: "application/json",
     Authorization: "Bearer token",
   });
+});
+
+test("killEndpointRunningQuery – forwards abort and exposes failure status", async () => {
+  const controller = new AbortController();
+  let requestInit: RequestInit | undefined;
+  const fetchImpl: typeof fetch = async (_input, init) => {
+    requestInit = init;
+    return new Response(null, { status: 404 });
+  };
+  await assert.rejects(
+    killEndpointRunningQuery(
+      "https://example.test/sparql",
+      "finished",
+      undefined,
+      fetchImpl,
+      controller.signal,
+    ),
+    (error: unknown) =>
+      error instanceof Error &&
+      error.message === "Kill failed (HTTP 404)." &&
+      "status" in error &&
+      error.status === 404,
+  );
+  assert.equal(requestInit?.signal, controller.signal);
 });

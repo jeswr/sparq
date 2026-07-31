@@ -115,7 +115,12 @@ function registryUrl(endpointUrl: string): string {
   if (endpoint.protocol !== "http:" && endpoint.protocol !== "https:") {
     throw new Error("Endpoint URL must use http:// or https://.");
   }
-  return new URL("/queries", endpoint).toString();
+  const segments = endpoint.pathname.split("/").filter(Boolean);
+  if (segments.length > 0) segments.pop();
+  endpoint.pathname = `/${[...segments, "queries"].join("/")}`;
+  endpoint.search = "";
+  endpoint.hash = "";
+  return endpoint.toString();
 }
 
 function registryHeaders(token?: string): Record<string, string> {
@@ -161,7 +166,7 @@ export async function fetchEndpointRunningQueries(
     signal,
   });
   if (!response.ok) {
-    throw new Error(`Running-query list failed (HTTP ${response.status}).`);
+    throw new QueryRegistryHttpError("Running-query list", response.status);
   }
   const body: unknown = await response.json();
   const queries =
@@ -184,13 +189,26 @@ export async function killEndpointRunningQuery(
   id: string,
   token?: string,
   fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal,
 ): Promise<void> {
   const url = `${registryUrl(endpointUrl)}/${encodeURIComponent(id)}`;
   const response = await fetchImpl(url, {
     method: "DELETE",
     headers: registryHeaders(token),
+    signal,
   });
   if (!response.ok) {
-    throw new Error(`Kill failed (HTTP ${response.status}).`);
+    throw new QueryRegistryHttpError("Kill", response.status);
+  }
+}
+
+/** An HTTP failure returned by sparq-server's optional query registry. */
+export class QueryRegistryHttpError extends Error {
+  constructor(
+    operation: string,
+    readonly status: number,
+  ) {
+    super(`${operation} failed (HTTP ${status}).`);
+    this.name = "QueryRegistryHttpError";
   }
 }
