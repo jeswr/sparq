@@ -415,31 +415,49 @@ jobs:
           # key is removed). A stable `shared-key` is still worth keeping so this job's
           # dep cache is the one every branch's run restores.
           shared-key: "test-workspace"
-          # [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE DISCIPLINE (the doctrine
-          # anchor; every other rust-cache step in this file points here). RESTORE is
-          # unconditional — PR heads and `gh-readonly-queue/*` entries both branch off
-          # main and read main's entry, which is where the dep-cache hit comes from.
-          # SAVE happens on push-to-main ONLY, for two reasons:
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE. THIS IS THE CANONICAL NOTE; every other rust-cache step in this
+          # file carries the same `save-if` and points back here. Both beads reached the
+          # same posture from opposite ends (sq-h2gz6 as the follow-up to sq-3sbrr /
+          # #1395, which did this for the feature-matrix legs; sq-6vshe.15 as lever 2 of
+          # the CI structural-speedup program) — this note is their union.
+          #
+          # RESTORE is unconditional — PR heads and `gh-readonly-queue/*` entries both
+          # branch off main and read main's entry, which is where the dep-cache hit
+          # comes from. SAVE happens on push-to-main ONLY, for two reasons:
           #   1. A save from a merge-queue entry is DEAD ON ARRIVAL. Actions cache
           #      scoping makes an entry written from `refs/heads/gh-readonly-queue/<base>/
           #      pr-<N>-<sha>` visible to that ref alone, and GitHub deletes that ref the
           #      moment the entry merges or is ejected — nothing can ever restore it. The
           #      save is pure post-step wall-clock on the queue's critical path.
-          #   2. Branch-scoped saves churn the repo's shared 10 GB Actions-cache budget
-          #      and LRU-evict the main-scoped entries every branch actually restores.
-          #      This is sq-3sbrr's doctrine, already applied to feature-matrix.yml and
-          #      the wasm lanes; this file's 20 cache steps (plus the one in
-          #      vectorized-feature-off.yml) were the gap left on the queue path.
-          # WHY main-only is safe here: every job in this file that carries a rust-cache
-          # step also RUNS on push-to-main (`ci_select.py` treats `push` as mode=full) or
-          # on `schedule`, whose ref IS the default branch — so each shared-key still gets
-          # seeded. No job is left permanently cold by this.
+          #   2. Branch-scoped saves churn the repo's shared 10 GB Actions-cache budget,
+          #      which GitHub LRU-evicts against, so those write-only copies push the
+          #      WARM main-scoped entries out and the heavy jobs (coverage, conformance,
+          #      mutants) restore COLD and pay the dependency-compile floor from scratch.
+          #      Caching was present but self-defeating. This is sq-3sbrr's doctrine,
+          #      already applied to feature-matrix.yml and the wasm lanes; this file's
+          #      cache steps (plus the one in vectorized-feature-off.yml) were the gap
+          #      left on the queue path.
+          #
+          # WHY main-only is safe rather than a permanent cold start: EVERY key here
+          # still has a seeder.
+          #   - the per-commit jobs are seeded by the post-merge push-to-main run — the
+          #     `changes` job forces rust_changed=true on any non-PR/non-merge_group
+          #     event (`ci_select.py` treats `push` as mode=full), so `push` runs the
+          #     full matrix;
+          #   - `coverage-nightly` / `mutants-nightly-advisory` never run on push (they
+          #     hang off `nightly-gate`, which is schedule/workflow_dispatch only), and
+          #     are seeded by the 03:17 UTC cron — a scheduled run's ref IS
+          #     refs/heads/main, so save-if holds there too.
+          # No job is left permanently cold by this.
+          #
           # COST: a PR that changes `Cargo.lock` re-resolves/rebuilds deps on each push
           # instead of once. Accepted — that PR class is rare, and it is exactly the
           # class whose branch-scoped save was evicting main's entry for everyone else.
           # COUPLING (read before landing sq-6vshe.14): main-scope freshness now depends
           # ENTIRELY on push-to-main runs. .14 skips queue-validated push legs and must
           # keep its promised cache-primer leg, or these caches go stale.
+          # The posture is pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # [OPUS-4.8] sq-x4jy: cargo-nextest is the test runner — each test in its OWN
       # process (a stray abort can't take the whole binary down), a never-executed
@@ -957,9 +975,10 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE DISCIPLINE: restore always,
-          # save on push-to-main only (rationale on `build-archive` above; pinned by
-          # scripts/tests/test_mergequeue_cache_posture.py).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build sparq-wasm for the browser target
         run: cargo build -p sparq-wasm --target wasm32-unknown-unknown
@@ -1297,9 +1316,10 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE DISCIPLINE: restore always,
-          # save on push-to-main only (rationale on `build-archive` above; pinned by
-          # scripts/tests/test_mergequeue_cache_posture.py).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # GATES: the whole workspace (sparq-py included) is clippy-clean under -D warnings.
       # A new warning — from new code or a Rust-stable bump that adds a lint — fails CI.
@@ -1448,9 +1468,10 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE DISCIPLINE: restore always,
-          # save on push-to-main only (rationale on `build-archive` above; pinned by
-          # scripts/tests/test_mergequeue_cache_posture.py).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: cargo check on the declared MSRV
         # [SONNET-4.6] Test targets must compile at the declared floor too; they can
@@ -1531,9 +1552,10 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE DISCIPLINE: restore always,
-          # save on push-to-main only (rationale on `build-archive` above; pinned by
-          # scripts/tests/test_mergequeue_cache_posture.py).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch W3C test suites (pinned)
         run: ./scripts/fetch-conformance.sh
@@ -1666,9 +1688,10 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE DISCIPLINE: restore always,
-          # save on push-to-main only (rationale on `build-archive` above; pinned by
-          # scripts/tests/test_mergequeue_cache_posture.py).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch W3C SHACL test suite (pinned)
         run: ./crates/sparq-shacl/fetch-shacl-tests.sh
@@ -1804,9 +1827,10 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE DISCIPLINE: restore always,
-          # save on push-to-main only (rationale on `build-archive` above; pinned by
-          # scripts/tests/test_mergequeue_cache_posture.py).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run OGC GeoSPARQL topology compliance ratchet
         # The runner asserts its own floor (OGC_RATCHET_FLOOR) + fail==0; capture the
@@ -1951,9 +1975,10 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE DISCIPLINE: restore always,
-          # save on push-to-main only (rationale on `build-archive` above; pinned by
-          # scripts/tests/test_mergequeue_cache_posture.py).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run Solid WAC + ACP decision-parity suites
         # The runners assert their own pinned floors; capture the output so the grep
@@ -2062,9 +2087,10 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE DISCIPLINE: restore always,
-          # save on push-to-main only (rationale on `build-archive` above; pinned by
-          # scripts/tests/test_mergequeue_cache_posture.py).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch SolidLab ODRL Test Suite (pinned)
         run: bash scripts/fetch-odrl-suite.sh
@@ -2169,9 +2195,10 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE DISCIPLINE: restore always,
-          # save on push-to-main only (rationale on `build-archive` above; pinned by
-          # scripts/tests/test_mergequeue_cache_posture.py).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run sparq-text BM25 differential oracle
         # The runner asserts its own floor (TEXT_ORACLE_FLOOR) + per-hit score
@@ -2279,9 +2306,10 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE DISCIPLINE: restore always,
-          # save on push-to-main only (rationale on `build-archive` above; pinned by
-          # scripts/tests/test_mergequeue_cache_posture.py).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run sparq-rsp RSP expressivity / SRBench correctness oracle
         # The runner asserts its own floor (RSP_EXPRESSIVITY_FLOOR) + every
@@ -2394,9 +2422,10 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE DISCIPLINE: restore always,
-          # save on push-to-main only (rationale on `build-archive` above; pinned by
-          # scripts/tests/test_mergequeue_cache_posture.py).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch W3C JSON-LD 1.1 API test suite (toRdf/fromRdf/compact, pinned)
         run: ./scripts/fetch-jsonld-tests.sh
@@ -2537,9 +2566,10 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE DISCIPLINE: restore always,
-          # save on push-to-main only (rationale on `build-archive` above; pinned by
-          # scripts/tests/test_mergequeue_cache_posture.py).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Clippy the gated harness surface (service-loopback feature ON)
         # The REAL gate for the feature-gated code: -D warnings over all targets with the
@@ -2699,9 +2729,10 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE DISCIPLINE: restore always,
-          # save on push-to-main only (rationale on `build-archive` above; pinned by
-          # scripts/tests/test_mergequeue_cache_posture.py).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch inference test suites (pinned)
         run: ./scripts/fetch-inference-suites.sh
@@ -3166,16 +3197,37 @@ jobs:
       # the ACTIVE (pinned) toolchain. Idempotent, and a no-op if it is already there.
       - name: Ensure llvm-tools-preview on the pinned toolchain
         run: rustup component add llvm-tools-preview
-      # Per-shard cache key: each shard builds a DIFFERENT crate subset (different
-      # instrumented objects), so keying the cache by shard keeps them from clobbering /
-      # thrashing one another's saved target dir.
+      # [OPUS-5] sq-h2gz6: ONE shared dep cache for ALL shards (was `key:
+      # coverage-shard-${{ matrix.shard }}`, i.e. one cache per matrix leg — 4 of them
+      # before sq-piapk split the engine shard out, 3 now).
+      #
+      # The per-shard key's premise was "each shard builds a DIFFERENT crate subset
+      # (different instrumented objects), so keying by shard keeps them from clobbering
+      # one another". That premise is about sparq's OWN crates — and rust-cache never
+      # stores those: it deletes workspace-member artifacts from the target dir before
+      # saving, so what a shard actually persists is the EXTERNAL dependency closure,
+      # compiled from the same Cargo.lock with the same llvm-cov instrumentation flags
+      # in every shard. Near-identical caches, one budget slot each.
+      #
+      # Collapsing them frees ~2 slots of the shared 10 GB Actions-cache budget (the
+      # sq-3sbrr / #1395 finding: budget pressure is what LRU-evicts the warm entries
+      # and makes the heavy jobs restore cold). Per-shard feature unification can still
+      # make one shard's dep set a superset of another's, so a shared entry is a partial
+      # restore for some shards rather than an exact one — cargo just recompiles the
+      # difference, which is strictly better than the cold rebuild an evicted key
+      # forces, and carries no stale-artifact risk (fingerprints + the key already
+      # embed Cargo.lock, the rustc version and the Cargo.toml hashes).
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE DISCIPLINE: restore always,
-          # save on push-to-main only (rationale on `build-archive` above; pinned by
-          # scripts/tests/test_mergequeue_cache_posture.py).
+          shared-key: coverage-measure
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Full rationale on the
+          # `build-archive` cache step above; pinned by
+          # scripts/tests/test_mergequeue_cache_posture.py. Saving on main only also
+          # removes the concurrent-save race the per-shard key was working around: on
+          # main the shards still run together, but a duplicate-key save is a benign
+          # no-op (the cache API rejects the second writer), not a clobber.
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          key: coverage-shard-${{ matrix.shard }}
       - name: Install cargo-llvm-cov
         # [OPUS-4.8] sq-tool-pin: taiki-e/install-action picks the tool from its @<tool> ref;
         # SHA-pinning (our code-scanning=0 policy) drops that ref, so an explicit `with: tool:`
@@ -3374,10 +3426,14 @@ jobs:
       # shared-key cache warms the deps; keying by part avoids save-race clobbering.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE DISCIPLINE: restore always,
-          # save on push-to-main only (rationale on `build-archive` above; pinned by
-          # scripts/tests/test_mergequeue_cache_posture.py).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          # [OPUS-5] sq-h2gz6: the per-part key is LEFT ALONE here — it is outside this
+          # bead's named scope (coverage-shard-N), and unlike those shards the merge job
+          # below deliberately points at part 1's key.
           key: coverage-engine-run-${{ matrix.part }}
       - name: Install cargo-llvm-cov + nextest
         # [OPUS-4.8] sq-tool-pin: explicit `with: tool:` is MANDATORY when SHA-pinning
@@ -3442,9 +3498,10 @@ jobs:
       # Reuse a run partition's dep cache to warm the merge job's object compile.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE DISCIPLINE: restore always,
-          # save on push-to-main only (rationale on `build-archive` above; pinned by
-          # scripts/tests/test_mergequeue_cache_posture.py).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
           key: coverage-engine-run-1
       - name: Install cargo-llvm-cov + nextest
@@ -3790,9 +3847,10 @@ jobs:
         run: rustup component add llvm-tools-preview
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE DISCIPLINE: restore always,
-          # save on push-to-main only (rationale on `build-archive` above; pinned by
-          # scripts/tests/test_mergequeue_cache_posture.py).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-llvm-cov
         # [OPUS-4.8] sq-tool-pin: explicit `with: tool:` is MANDATORY when SHA-pinning
@@ -4175,9 +4233,10 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE DISCIPLINE: restore always,
-          # save on push-to-main only (rationale on `build-archive` above; pinned by
-          # scripts/tests/test_mergequeue_cache_posture.py).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-mutants
         uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # cargo-mutants
@@ -4325,9 +4384,10 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE DISCIPLINE: restore always,
-          # save on push-to-main only (rationale on `build-archive` above; pinned by
-          # scripts/tests/test_mergequeue_cache_posture.py).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-geiger
         uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
