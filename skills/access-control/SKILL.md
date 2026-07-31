@@ -124,7 +124,11 @@ Materialize the authorization view from the access-control documents, then enfor
   `VcRequirement::new(requirement, issuer_did, credential_type).with_claim(pred, obj)` plus
   `VerifiedCredentials::admit_data_integrity(credential_triples, proof, resolver, reqs)`,
   which verifies a W3C Data Integrity `eddsa-rdfc-2022` proof via `sparq-vc` and records the
-  requirements the credential satisfies for its `credentialSubject`. **Honest scope:**
+  requirements the credential satisfies for its `credentialSubject` — refused
+  (`VcAdmitError::AmbiguousSubject`, nothing recorded) unless the graph names exactly ONE
+  distinct subject, since the proof binds to the RDFC-1.0 CANONICAL form and a two-subject
+  credential would otherwise bind its holding to whichever subject was presented first.
+  **Honest scope:**
   authenticity + integrity + non-repudiation ONLY — it reveals the whole credential to the
   verifier and makes **no** privacy, unlinkability, zero-knowledge or selective-disclosure
   claim; revocation and expiry are not checked (a holding lasts until re-materialization).

@@ -188,9 +188,13 @@ impl VcRequirement {
 pub enum VcAdmitError {
     /// The `eddsa-rdfc-2022` Data Integrity proof did not verify over the presented triples.
     Proof(sparq_vc::VcError),
-    /// The credential graph names no `credentialSubject`, so there is no agent to bind the
-    /// holding to.
+    /// The credential graph names no `credentialSubject` IRI, so there is no agent to bind
+    /// the holding to.
     NoSubject,
+    /// The credential graph names more than one distinct `credentialSubject`, so which agent
+    /// the holding would bind to depends on the order the triples were presented in. Refused
+    /// fail-closed — carries the number of distinct subjects found.
+    AmbiguousSubject(usize),
     /// The subject WebID is inside the reserved `urn:sparq:` principal space (or carries the
     /// pair-principal delimiter) and could impersonate a minted principal.
     ReservedSubject(String),
@@ -204,6 +208,11 @@ impl std::fmt::Display for VcAdmitError {
             VcAdmitError::NoSubject => {
                 write!(f, "credential names no <{}> subject", CREDENTIAL_SUBJECT)
             }
+            VcAdmitError::AmbiguousSubject(n) => write!(
+                f,
+                "credential names {} distinct <{}> subjects, so the holding would be ambiguous",
+                n, CREDENTIAL_SUBJECT
+            ),
             VcAdmitError::ReservedSubject(s) => {
                 write!(f, "credential subject <{}> is in the reserved principal space", s)
             }
@@ -236,6 +245,9 @@ impl VerifiedCredentials {
     ///
     /// A requirement is satisfied iff **all** of:
     /// * the proof verifies over `credential` (Ed25519 over the RDFC-1.0 canonical form);
+    /// * the credential graph names exactly **one** distinct `credentialSubject` — the proof
+    ///   binds to the graph's canonical form, so a credential with two subjects would bind
+    ///   its holding to whichever one was presented first, and is refused instead;
     /// * the verified `verificationMethod` is the requirement's `issuer` DID, or a fragment
     ///   of it (`did:key:z6Mk…#z6Mk…`) — i.e. the accepted issuer actually signed;
     /// * the credential subject carries `rdf:type <credential_type>`;
@@ -254,9 +266,13 @@ impl VerifiedCredentials {
     /// # Errors
     ///
     /// [`VcAdmitError::Proof`] if the signature/issuer resolution fails,
-    /// [`VcAdmitError::NoSubject`] if the credential names no `credentialSubject`, and
-    /// [`VcAdmitError::ReservedSubject`] if that subject is inside the reserved
-    /// `urn:sparq:` principal space.
+    /// [`VcAdmitError::NoSubject`] if the credential names no `credentialSubject` IRI,
+    /// [`VcAdmitError::AmbiguousSubject`] if it names more than one distinct
+    /// `credentialSubject`, and [`VcAdmitError::ReservedSubject`] if that subject is inside
+    /// the reserved `urn:sparq:` principal space.
+    ///
+    /// Every one of these refuses the WHOLE credential: no holding is recorded for any
+    /// requirement, so an ambiguous or reserved-space presentation cannot half-succeed.
     pub fn admit_data_integrity<R: sparq_vc::did::DidResolver>(
         &mut self,
         credential: &[oxrdf::Triple],
@@ -266,7 +282,7 @@ impl VerifiedCredentials {
     ) -> Result<Vec<String>, VcAdmitError> {
         let verified =
             sparq_vc::verify(credential, proof, resolver).map_err(VcAdmitError::Proof)?;
-        let subject = credential_subject(credential).ok_or(VcAdmitError::NoSubject)?;
+        let subject = credential_subject(credential)?;
         if !crate::loader::session_value_allowed(&subject) {
             return Err(VcAdmitError::ReservedSubject(subject));
         }
@@ -293,15 +309,33 @@ impl VerifiedCredentials {
     }
 }
 
-/// The credential's `credentialSubject` IRI, if it names one.
+/// The credential's one `credentialSubject` IRI — refused unless the graph names exactly one
+/// distinct subject.
+///
+/// Order-independence is a *security* property here, not a tidiness one: the
+/// `eddsa-rdfc-2022` proof binds to the RDFC-1.0 CANONICAL form of the graph, so one signed
+/// credential still verifies when its triples are presented in any order. Taking the FIRST
+/// `credentialSubject` object would therefore let a re-ordered presentation of the *same*
+/// valid credential bind the holding to a different agent. So every distinct object of the
+/// predicate is collected and anything but exactly one is an error.
+///
+/// A non-IRI object (blank node, literal) still counts as a distinct subject: it names no
+/// bindable agent, but counting it keeps a mixed graph AMBIGUOUS rather than silently
+/// binding to whichever object happens to be a named node.
 #[cfg(feature = "acp-vc")]
-fn credential_subject(credential: &[oxrdf::Triple]) -> Option<String> {
-    credential.iter().find_map(|t| match (&t.predicate, &t.object) {
-        (p, oxrdf::Term::NamedNode(o)) if p.as_str() == CREDENTIAL_SUBJECT => {
-            Some(o.as_str().to_owned())
+fn credential_subject(credential: &[oxrdf::Triple]) -> Result<String, VcAdmitError> {
+    let mut distinct: Vec<&oxrdf::Term> = Vec::new();
+    for t in credential {
+        if t.predicate.as_str() == CREDENTIAL_SUBJECT && !distinct.contains(&&t.object) {
+            distinct.push(&t.object);
         }
-        _ => None,
-    })
+    }
+    match distinct.as_slice() {
+        [oxrdf::Term::NamedNode(o)] => Ok(o.as_str().to_owned()),
+        // none at all, or a single object that is not an IRI to bind a holding to
+        [] | [_] => Err(VcAdmitError::NoSubject),
+        many => Err(VcAdmitError::AmbiguousSubject(many.len())),
+    }
 }
 
 /// The issuer DID a `verificationMethod` belongs to — the part before any `#fragment`.
@@ -393,6 +427,74 @@ mod tests {
                 ("https://bob.ex/card#me".to_owned(), "https://req.ex/r2".to_owned()),
             ]
         );
+    }
+
+    #[cfg(feature = "acp-vc")]
+    fn subject_triple(object: oxrdf::Term) -> oxrdf::Triple {
+        oxrdf::Triple::new(
+            oxrdf::NamedOrBlankNode::NamedNode(oxrdf::NamedNode::new_unchecked(
+                "https://issuer.ex/creds/1",
+            )),
+            oxrdf::NamedNode::new_unchecked(CREDENTIAL_SUBJECT),
+            object,
+        )
+    }
+
+    #[cfg(feature = "acp-vc")]
+    fn named(iri: &str) -> oxrdf::Term {
+        oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(iri))
+    }
+
+    #[cfg(feature = "acp-vc")]
+    #[test]
+    fn one_credential_subject_binds_however_often_it_is_repeated() {
+        let alice = subject_triple(named("https://alice.ex/card#me"));
+        assert_eq!(
+            credential_subject(&[alice.clone()]).expect("one subject"),
+            "https://alice.ex/card#me"
+        );
+        // the SAME subject stated twice is still unambiguous
+        assert_eq!(
+            credential_subject(&[alice.clone(), alice]).expect("one distinct subject"),
+            "https://alice.ex/card#me"
+        );
+    }
+
+    #[cfg(feature = "acp-vc")]
+    #[test]
+    fn two_distinct_credential_subjects_are_refused_in_either_order() {
+        let alice = subject_triple(named("https://alice.ex/card#me"));
+        let bob = subject_triple(named("https://bob.ex/card#me"));
+        // Both slice orders below are the same GRAPH, so the binding must not depend on which
+        // one is presented. (That a real SIGNED credential does verify under either order is
+        // pinned end-to-end by `tests/acp_vc_backend.rs`, which carries an actual proof.)
+        for order in [vec![alice.clone(), bob.clone()], vec![bob, alice]] {
+            assert!(
+                matches!(credential_subject(&order), Err(VcAdmitError::AmbiguousSubject(2))),
+                "an ambiguous subject must be refused, not resolved by slice order"
+            );
+        }
+    }
+
+    #[cfg(feature = "acp-vc")]
+    #[test]
+    fn a_non_iri_subject_binds_nothing_and_still_counts_toward_ambiguity() {
+        let literal = subject_triple(oxrdf::Term::Literal(oxrdf::Literal::new_simple_literal(
+            "not-a-webid",
+        )));
+        assert!(matches!(credential_subject(&[literal.clone()]), Err(VcAdmitError::NoSubject)));
+        // a literal alongside an IRI is AMBIGUOUS, not "the IRI wins"
+        let alice = subject_triple(named("https://alice.ex/card#me"));
+        assert!(matches!(
+            credential_subject(&[literal, alice]),
+            Err(VcAdmitError::AmbiguousSubject(2))
+        ));
+    }
+
+    #[cfg(feature = "acp-vc")]
+    #[test]
+    fn a_credential_with_no_subject_triple_is_refused() {
+        assert!(matches!(credential_subject(&[]), Err(VcAdmitError::NoSubject)));
     }
 
     #[cfg(feature = "acp-vc")]

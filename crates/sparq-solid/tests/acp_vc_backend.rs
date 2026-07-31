@@ -169,6 +169,46 @@ fn an_unmet_claim_or_type_satisfies_nothing() {
     );
 }
 
+/// A SIGNED credential naming two distinct `credentialSubject`s is refused in EITHER
+/// presentation order, and records no holding for either candidate.
+///
+/// This is the order-dependence property: the `eddsa-rdfc-2022` proof binds to the RDFC-1.0
+/// CANONICAL form, so one signed graph verifies whichever order its triples arrive in. A
+/// backend that took the first `credentialSubject` it saw would hand the SAME valid
+/// credential to alice under one order and to bob under the other — the assertion below that
+/// both orders fail on *ambiguity* (not on the proof) is what pins that down.
+#[test]
+fn a_two_subject_credential_is_refused_in_either_order() {
+    let (key, did, vm) = issuer_key();
+    let mut cred = credential(ALICE);
+    cred.push(triple("https://issuer.ex/creds/1", CREDENTIAL_SUBJECT, Term::NamedNode(iri(BOB))));
+    cred.push(triple(BOB, RDF_TYPE, Term::NamedNode(iri(AGE_CREDENTIAL))));
+    cred.push(triple(BOB, AGE_BAND, Term::Literal(Literal::new_simple_literal("18+"))));
+    let proof = sign(&cred, &key, &ProofConfig::new(vm)).expect("signs");
+
+    // the same signed graph, with bob's `credentialSubject` moved to the front
+    let mut bob_first = cred.clone();
+    bob_first.swap(0, 3);
+
+    for order in [cred, bob_first] {
+        let req = VcRequirement::new(OVER_18, &did, AGE_CREDENTIAL)
+            .with_claim(AGE_BAND, Term::Literal(Literal::new_simple_literal("18+")));
+        let mut creds = VerifiedCredentials::new();
+        let err = creds
+            .admit_data_integrity(&order, &proof, &DidKeyResolver, &[req])
+            .expect_err("two subjects must be refused, not resolved by slice order");
+        assert!(format!("{}", err).contains("ambiguous"), "got: {}", err);
+        assert!(creds.is_empty(), "an ambiguous credential must record no holding");
+
+        let mut store = PodStore::new(Graph::load_dataset(&pod(), "nquads").expect("loads"));
+        store
+            .materialize_acp_with_credentials(&AccessProvenance::new(), &creds)
+            .expect("materializes");
+        assert!(!can_read(&store, ALICE));
+        assert!(!can_read(&store, BOB));
+    }
+}
+
 /// A credential whose subject is in the reserved `urn:sparq:` principal space is refused
 /// before it can be recorded — it could otherwise impersonate a minted pair/triple principal.
 #[test]
