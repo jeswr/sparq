@@ -2854,6 +2854,13 @@ jobs:
     # is coverage-nightly), skip a doc-only PR. push/merge_group force rust_changed=true.
     if: github.event_name != 'schedule' && needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
+    # [SONNET-4.6] sq-6vshe.17: `issues: read` is what the ratchet-ADVANCE pause step needs
+    # to probe for an open post-merge coverage alarm. Least privilege — this job never
+    # writes anything (the alarm is FILED by `coverage-demoted-filer`, which owns the write
+    # scope), and the probe fails OPEN if the read is unavailable.
+    permissions:
+      contents: read
+      issues: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Test-presence gate (fast, no compile)
@@ -2873,6 +2880,25 @@ jobs:
         run: |
           git fetch --no-tags --depth=1 origin main
           python3 scripts/coverage-gate.py --check-monotonic --base-ref origin/main
+      - name: Ratchet-ADVANCE pause while post-merge coverage is RED (sq-6vshe.17) [SONNET-4.6]
+        # [SONNET-4.6] sq-6vshe.17: the second half of the demotion protocol. Because the
+        # coverage MEASUREMENT is demoted off merge_group, `main` is an enforcement point;
+        # while its coverage is RED (an open `[demoted-lane] lane=coverage-ratchet-main`
+        # issue, filed by `coverage-demoted-filer`), RAISING a floor is unverifiable
+        # book-keeping — the measured numbers a raise cites are exactly the numbers in
+        # doubt. So a branch that RAISES a floor is blocked until that alarm closes.
+        #
+        # Deliberately narrow + non-blocking by default:
+        #   * only a RAISE of an existing floor blocks; a new crate row, an unchanged
+        #     floor, and the RECOVERY path (a governed lowering under --allow-lower) never
+        #     do — see coverage-gate.py floor_advances();
+        #   * the alarm probe FAILS OPEN (no gh / no token / API error => PASS), so an
+        #     unavailable GitHub API can never red this fast gating job;
+        #   * `issues: read` is the only permission it needs.
+        # Unit-tested (pure seam + injected probe): coverage-gate.py --self-test.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/coverage-gate.py --check-advance-allowed --base-ref origin/main
 
   coverage-measure:
     # [OPUS-4.8] PER-CRATE line-coverage RATCHET (sq-hbg7), now SHARDED for merge-queue
@@ -2915,10 +2941,14 @@ jobs:
     # gated identically by the merge job's `coverage-gate.py --check`.
     name: coverage ratchet (shard ${{ matrix.shard }}/3)
     # [OPUS-4.8] sq-fmx4u.6 (design §5.2, phase 2): coverage is a function of
-    # compiled code + tests, so it stays ALWAYS-RUN with ONE exception — skip only
-    # when the affected closure is PROVABLY EMPTY (every changed path SAFE-listed /
+    # compiled code + tests, so its SELECTION exception is a single narrow one — skip
+    # only when the affected closure is PROVABLY EMPTY (every changed path SAFE-listed /
     # non-crate, so mode=selected AND affected==[]). Any NON-empty closure keeps it
     # running, because a dependency change can shift executed lines in dependents.
+    # [SONNET-4.6] (This comment used to say "ALWAYS-RUN with ONE exception". Two
+    # EVENT-level demotions have since been layered on top of the selection rule —
+    # draft-tier CI and the sq-6vshe.17 merge_group demotion, both documented below —
+    # so the "always-run" framing is scoped to the SELECTION axis only.)
     # Same fail-closed guard shape build-archive uses: `mode != 'selected'` (full/
     # shadow/empty output) => RUN, and `affected != '[]'` => RUN; both false (the
     # SAFE-only case) => skip (the shard reports `skipped`, which the `coverage`
@@ -2927,13 +2957,40 @@ jobs:
     # nightly full coverage backstop is `coverage-nightly` (schedule), unaffected.
     # [FABLE-5] Draft-tier CI: coverage is SKIPPED on draft PR heads entirely (the
     # instrumented rebuild is one of the heaviest lanes; the ready_for_review
-    # full-tier run + the merge_group run both re-measure it before any merge, and
-    # a draft-tier gate can never admit a PR — docs/branch-protection.md
-    # §Draft-tier CI). The guard is fail-open off the PR path: any non-pull_request
-    # event (push/merge_group) satisfies the first disjunct => RUN.
+    # full-tier run re-measures it, and a draft-tier gate can never admit a PR —
+    # docs/branch-protection.md §Draft-tier CI). The guard is fail-open off the PR
+    # path: any non-pull_request event (push) satisfies the first disjunct => RUN.
+    #
+    # [SONNET-4.6] sq-6vshe.17 (research/ci-mergequeue-speedup-2026-07.md §3.4a):
+    # the coverage MEASUREMENT is DEMOTED off the merge_group blocking path. MEASURED
+    # MOTIVE: these instrumented shards (448-785 s each) are the merge-group entry
+    # POLE whenever change-based selection skips the test shards. WHY it is designable
+    # at all: coverage is a RATCHET, not a correctness test — a floor regression that
+    # slips through a queued BATCH is detectable and RECOVERABLE post-merge, unlike a
+    # functional bug. Enforcement topology after this change:
+    #   * pull_request  — UNCHANGED, and the PRIMARY gate (every PR still measures).
+    #   * merge_group   — the measure legs are skipped (this guard). `coverage-floors`
+    #                     (fast, no-compile: presence + monotonicity + shard-partition)
+    #                     STILL RUNS here, so a batch can never LOWER a committed floor.
+    #   * push-to-main  — UNCHANGED and now load-bearing: the post-merge measurement is
+    #                     the enforcement point for the batch-stacking case. It is
+    #                     EXEMPT from any future push-run skip (sq-6vshe.14) — pinned by
+    #                     scripts/tests/test_ci_select_wiring.py so the exemption cannot
+    #                     be silently dropped when that lever lands.
+    #   * a main red    — auto-files a P1 bead + deduped issue via the demotion protocol
+    #                     (`coverage-demoted-filer` below) AND pauses further ratchet
+    #                     ADVANCES until green (`coverage-floors`
+    #                     --check-advance-allowed).
+    # RESIDUAL RISK, stated honestly: two PRs each individually >= floor can merge to a
+    # combined tree < floor. Rare, caught ~15 min later on main, recoverable by
+    # revert/fix-forward — and no committed floor is ever silently lowered.
+    # The skipped legs report `skipped`, which the `coverage` aggregator counts as
+    # satisfied, so the ci-summary gate still sees ONE terminal coverage check on the
+    # merge_group ref — never an expected-but-missing one.
     needs: [changes, coverage-floors, select]
     if: >-
       github.event_name != 'schedule' &&
+      github.event_name != 'merge_group' &&
       (github.event_name != 'pull_request' || github.event.pull_request.draft != true) &&
       needs.changes.outputs.rust_changed == 'true' &&
       (needs.select.outputs.mode != 'selected' || needs.select.outputs.affected != '[]')
@@ -3124,9 +3181,15 @@ jobs:
     name: coverage engine run (partition ${{ matrix.part }}/3)
     # [FABLE-5] Draft-tier CI: skipped on draft PR heads, same rationale + guard
     # shape as coverage-measure above (fail-open off the PR path).
+    # [SONNET-4.6] sq-6vshe.17: DEMOTED off merge_group with the same guard + the same
+    # recoverable-ratchet argument as coverage-measure above (this partitioned engine
+    # measurement is the other half of the instrumented pole). `coverage-engine-merge`
+    # needs `coverage-engine-run.result == 'success'`, so it skips with these — and the
+    # `coverage` aggregator counts both `skipped` results as satisfied.
     needs: [changes, coverage-floors, select]
     if: >-
       github.event_name != 'schedule' &&
+      github.event_name != 'merge_group' &&
       (github.event_name != 'pull_request' || github.event.pull_request.draft != true) &&
       needs.changes.outputs.rust_changed == 'true' &&
       (needs.select.outputs.mode != 'selected' || needs.select.outputs.affected != '[]')
@@ -3336,6 +3399,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate coverage floor + shard results
+        env:
+          EVENT: ${{ github.event_name }}
         run: |
           floors='${{ needs.coverage-floors.result }}'
           measure='${{ needs.coverage-measure.result }}'
@@ -3352,8 +3417,128 @@ jobs:
           done
           if [ "$rc" -eq 0 ]; then
             echo "### coverage ratchet + test-presence gate: PASS" >> "$GITHUB_STEP_SUMMARY"
+            # [SONNET-4.6] sq-6vshe.17: say plainly WHAT passed on the merge_group ref, so a
+            # reviewer reading a green merge-queue coverage check never reads it as "the
+            # per-crate line-% was re-measured on the merged tree". It was not: only the
+            # fast no-compile floor gates ran here (presence + monotonicity + shard
+            # partition). The MEASUREMENT ran on the PR head and runs again on push-to-main.
+            if [ "$EVENT" = "merge_group" ]; then
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "> NOTE (sq-6vshe.17): on the \`merge_group\` ref this verdict covers the" \
+                   "fast no-compile FLOOR gates only (test-presence, floor monotonicity," \
+                   "shard-partition). The instrumented per-crate line-% MEASUREMENT is" \
+                   "demoted off the queue's blocking path — it gated the PR head and" \
+                   "re-runs on push-to-main, where a red auto-files a P1 and pauses further" \
+                   "ratchet advances." >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
           exit "$rc"
+
+  # [SONNET-4.6] sq-6vshe.17 (research/ci-mergequeue-speedup-2026-07.md §3.4a) — the
+  # DEMOTED-LANE SAFETY NET for the coverage MEASUREMENT demoted off merge_group.
+  # The measure legs' FULL FORM runs at PR level AND on push-to-main. This tiny job is
+  # the "cannot silently rot" backstop the demotion protocol mandates (the same shape as
+  # `heavy-recall-demoted-filer` above): if a coverage MEASURE leg FAILS on the canonical
+  # push-to-main build — the batch-stacking regression a merge_group run no longer catches
+  # — it auto-files a P1 bead + a deduped GitHub issue naming the lane + run, via
+  # scripts/ci-file-demoted-lane-failure.py. That issue is ALSO what the `coverage-floors`
+  # ratchet-ADVANCE pause reads, so a red main both tracks the finding to closure and stops
+  # the ratchet from advancing on numbers that are in doubt.
+  # It files ONLY when a DEMOTED leg failed: a `coverage-floors` red on main is a normal
+  # red main build (those gates never left the queue), not a demoted-lane finding.
+  # SEPARATE job so the write scope stays off the coverage matrix — least privilege,
+  # matching the heavy-recall / fuzz / differential filer precedent.
+  coverage-demoted-filer:
+    name: coverage demoted-lane safety-net (push-to-main)
+    # Only the aggregate verdict is needed — it already folds in every measure leg, and an
+    # unused `needs` edge would just add a false dependency.
+    needs: [coverage]
+    # push-to-main only, and only when the coverage aggregate did not succeed. `always()`
+    # so this runs despite the failed `needs`; the body then confirms a DEMOTED leg was the
+    # culprit.
+    if: >-
+      always() && github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.coverage.result != 'success' && needs.coverage.result != 'skipped'
+    runs-on: ubuntu-latest
+    # Scoped write: append the bead + best-effort push (contents), file/comment the issue
+    # (issues), read this run's job list to detect which leg failed (actions).
+    permissions:
+      contents: write
+      issues: write
+      actions: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Detect a failed DEMOTED coverage measure leg in this run
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # List THIS workflow-run's jobs and find a FAILED leg whose measurement is the
+          # part demoted off merge_group. The regex matches EXACTLY the three demoted job
+          # names — "coverage ratchet (shard N/3)", "coverage engine run (partition N/3)",
+          # "coverage engine merge + ratchet (per-crate)" — and NOT the still-queued
+          # "coverage floors (…)", the "coverage ratchet + test-presence gate (per-crate)"
+          # aggregate, or the nightly "coverage (nightly, …)" tier. Pinned by
+          # scripts/tests/test_ci_select_wiring.py against the live job names.
+          failed="$(gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" \
+            --jq '.jobs[] | select(.conclusion == "failure") | select(.name | test("^coverage (ratchet \\(shard |engine )")) | .name' \
+            | head -n1 || true)"
+          if [ -z "$failed" ]; then
+            echo "No DEMOTED coverage measure leg failed in this run (a coverage-floors red is a normal red main build) — nothing to file."
+            echo "file=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Failed demoted coverage leg detected: $failed"
+            echo "file=true" >> "$GITHUB_OUTPUT"
+            echo "leg_name=$failed" >> "$GITHUB_OUTPUT"
+          fi
+      - name: File the demoted-lane P1 bead + issue
+        if: steps.detect.outputs.file == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          LEG_NAME: ${{ steps.detect.outputs.leg_name }}
+        run: |
+          set -euo pipefail
+          # Self-test the filer first (hermetic; no gh, no writes) so a script regression
+          # is caught here, not silently.
+          python3 scripts/ci-file-demoted-lane-failure.py --self-test
+          # --lane MUST stay coverage-ratchet-main: coverage-gate.py COVERAGE_ALARM_LANE
+          # reads back the SAME token to decide whether to pause ratchet advances. The
+          # wiring test pins the two together.
+          python3 scripts/ci-file-demoted-lane-failure.py \
+            --lane "coverage-ratchet-main" \
+            --bead-prefix "cv" \
+            --full-form "instrumented per-crate coverage measurement on push-to-main ($LEG_NAME)" \
+            --per-pr-form "runs at PR level; demoted off merge_group (sq-6vshe.17) — the merge queue keeps the fast no-compile floor gates only" \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+      - name: Commit + push the auto-filed bead (best-effort)
+        if: steps.detect.outputs.file == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          if git diff --quiet -- .beads/issues.jsonl; then
+            echo "no bead appended (dedupe hit) — nothing to push."
+            exit 0
+          fi
+          git config user.name "sparq-ci[bot]"
+          git config user.email "sparq-ci@users.noreply.github.com"
+          git add .beads/issues.jsonl
+          git commit -m "chore(ci): auto-file demoted coverage-measure lane failure (sq-6vshe.17). [SONNET-4.6]"
+          push_rc=0
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main || push_rc=$?
+          if [ "$push_rc" -ne 0 ]; then
+            echo "::warning title=demoted-lane bead push declined::Could not push the auto-filed bead to protected main (git push exit ${push_rc}; likely GH013 ruleset rejection). The GitHub issue filed in the previous step is the durable record; the orchestrator beads it on the next issue sweep."
+          else
+            echo "pushed the demoted-lane bead to main."
+          fi
 
   nightly-gate:
     # [OPUS-4.8] Freshness gate for ALL nightly (schedule-triggered) jobs: run them
