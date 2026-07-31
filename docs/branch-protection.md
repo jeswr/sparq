@@ -37,6 +37,8 @@ without a second concurrent author to race against). The required check is:
 > header of `ci-summary.yml` for the full semantics (newest-run resolution, bounded
 > cancelled-run re-dispatch, stability window, and self-exclusion).
 
+<!-- -->
+
 > **In progress (bead sq-lfmvd):** a second, **slotless** aggregator —
 > the `ci-summary-status` COMMIT STATUS published by
 > [`ci-summary-status.yml`](../.github/workflows/ci-summary-status.yml) — now runs in
