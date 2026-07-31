@@ -621,7 +621,9 @@ pub struct Delegation {
 /// for recipient-wrapped / out-of-band transfer — or, for the recipient-wrapped
 /// case, prefer [`wrap_capability`] / [`unwrap_capability`], which do that under a
 /// fixed domain-separation AAD without exposing the plaintext to the caller.
-#[derive(Debug)]
+///
+/// Its [`Debug`](core::fmt::Debug) is hand-written and redacts every secret
+/// field — see the impl below.
 pub struct Capability {
     /// The public, signable grant.
     pub grant: PublicGrant,
@@ -631,6 +633,33 @@ pub struct Capability {
     pub publisher_sk: Option<[u8; 32]>,
     /// Admin private key seed (§8.2 field 12) — present for an admin capability.
     pub admin_sk: Option<[u8; 32]>,
+}
+
+/// Debug stand-in for a secret field: prints `REDACTED` where the bytes would
+/// go, so an `Option<[u8; 32]>` seed renders as `Some(REDACTED)` / `None`.
+struct Redacted;
+
+impl core::fmt::Debug for Redacted {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("REDACTED")
+    }
+}
+
+/// Hand-written so `{:?}` NEVER prints private key material (§4.2: secret fields
+/// must not reach logs). `read_secret` is a [`Secret32`] and redacts through its
+/// own `Debug`, but `publisher_sk` / `admin_sk` are bare `[u8; 32]` seeds that a
+/// derived `Debug` would print verbatim. Only their *presence* is shown, which
+/// [`Capability::validate`] already ties one-to-one to the public grant's
+/// authority set.
+impl core::fmt::Debug for Capability {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Capability")
+            .field("grant", &self.grant)
+            .field("read_secret", &self.read_secret)
+            .field("publisher_sk", &self.publisher_sk.as_ref().map(|_| Redacted))
+            .field("admin_sk", &self.admin_sk.as_ref().map(|_| Redacted))
+            .finish()
+    }
 }
 
 impl Capability {
@@ -1159,6 +1188,43 @@ mod tests {
         assert_eq!(admin_cap.admin_sk, Some([5u8; 32]));
         admin_cap.zeroize_secrets();
         assert_eq!(admin_cap.admin_sk, Some([0u8; 32]));
+    }
+
+    /// `{:?}` must never disclose private key material: the two bare seed fields
+    /// are redacted like `read_secret`'s `Secret32` already is, so a capability
+    /// reaching a log/panic message leaks only which authorities it bears. A
+    /// derived `Debug` would print the seed bytes verbatim and fail here.
+    #[test]
+    fn debug_redacts_private_key_seeds() {
+        let mut base = base_grant(
+            RepoId::from_bytes([1u8; 32]),
+            BranchId::from_bytes([2u8; 32]),
+            Epoch(7),
+            TopicId::from_bytes([3u8; 32]),
+            Validity { not_before: 100, not_after: 200 },
+            vec!["wss://broker.example".to_string()],
+        );
+        // Pin the otherwise-random nonce so the whole rendering is deterministic
+        // and the "no seed byte anywhere" assertions below cannot flake.
+        base.cap_nonce = [4u8; 32];
+
+        // A seed byte distinct from every public field's fill byte, so a hit in
+        // the rendering can only have come from the seed itself.
+        let publisher = SecretSigningKey::from_seed([0xAB; 32]);
+        let write = Capability::new_write(base.clone(), Secret32([0xCD; 32]), &publisher).unwrap();
+        let s = format!("{write:?}");
+        assert!(s.contains("publisher_sk: Some(REDACTED)"), "{s}");
+        assert!(s.contains("admin_sk: None"), "{s}");
+        assert!(s.contains("read_secret: Some(Secret32(REDACTED))"), "{s}");
+        assert!(!s.contains("171"), "publisher seed byte leaked: {s}");
+        assert!(!s.contains("205"), "read secret byte leaked: {s}");
+
+        let admin = SecretSigningKey::from_seed([0xAB; 32]);
+        let admin_cap = Capability::new_admin(base, &admin).unwrap();
+        let s = format!("{admin_cap:?}");
+        assert!(s.contains("admin_sk: Some(REDACTED)"), "{s}");
+        assert!(s.contains("publisher_sk: None"), "{s}");
+        assert!(!s.contains("171"), "admin seed byte leaked: {s}");
     }
 
     /// The epoch ceiling is a forward bound, so a grant whose `max_epoch`
