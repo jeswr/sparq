@@ -504,6 +504,120 @@ jobs:
             echo "- **Malformed fragment** — a broken or duplicate-name leg in \`.github/feature-matrix.d/<crate>.yml\`."
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # [OPUS-5] sq-nd4yj — PRE-MERGE C1: run the structural guard on the tree the merge
+  # WOULD produce (PR head ⊕ the CURRENT base tip), not the one GitHub froze when this
+  # run was triggered.
+  #
+  # WHY. C1 (`scripts/check-feature-test-execution.py --check`, run in `setup` above) is
+  # a WHOLE-TREE invariant: a feature-gated test in one crate is covered by an executor
+  # declared elsewhere in the tree (a `.github/feature-matrix.d/*.yml` leg, a coverage.sh
+  # case arm, an allowlist entry). The two halves are separately mergeable, so a MERGE
+  # can break the invariant while NEITHER SIDE breaks it alone — the base grows a gated
+  # test whose leg this PR deletes or renames, or vice versa. `setup`'s C1 cannot see
+  # that: on `pull_request` the checked-out `refs/pull/N/merge` is the head merged with
+  # the base AS OF THE EVENT, and GitHub does not re-run the checks when the base moves
+  # afterwards — a stale green over a tree nobody will ever ship.
+  #
+  # THE INCIDENT, ACCURATELY (sq-nd4yj, traced in git — it is NOT quite what the bead
+  # title says). PR #2193 merged (f65702d1) WITH its `sparq-algos (topology)` leg. The
+  # NEXT drain merge, #2194's f65702d1⊕304fa6fa = 700ec341, conflicted on that same
+  # fragment plus the leg-name golden; the hand resolution kept the branch side and so
+  # DROPPED the topology leg while the gated tests stayed. Neither parent violated C1;
+  # the merge result did. C1 then failed in `setup` on main and on every branch built
+  # off it — no matrix assembled, no opt-in legs spawned, gate RED for every open PR —
+  # until f6a06580 restored the leg.
+  #
+  # WHAT THIS JOB DOES AND DOES NOT CLAIM. It re-merges the current base tip and re-runs
+  # the SAME `--check` — no new rule, no relaxed rule — so a merge-only violation fails
+  # HERE, on the PR. It would NOT have caught 700ec341 itself, and this is worth being
+  # blunt about: that merge (a) CONFLICTED, and GitHub publishes no `refs/pull/N/merge`
+  # for a conflicting PR, so no PR check of any kind grades that tree, and (b) was
+  # resolved locally and pushed straight to main, which runs no PR CI at all. What it
+  # DOES catch is the same class's silent half — two edits git merges CLEANLY into a
+  # tree that violates C1 — which is the reachable-through-PR-CI instance and the one no
+  # existing check sees before the merge queue. The merge_group run does grade the
+  # batch-merged tree, so it is the current catcher; this job moves that verdict onto
+  # the PR, before a red dequeues a whole batch. For a locally-resolved push the
+  # push-to-main run of this workflow remains the only backstop. A CONFLICTING test
+  # merge is reported as a warning and NOT evaluated — grading a conflicted working tree
+  # would be a verdict about a tree that will never exist. Note what that means for the
+  # check-run: the guard STEP is skipped, so the JOB still concludes green (a step skip
+  # is not a job skip) and only the `::warning` annotation records that nothing was
+  # graded. That is deliberate — see the two reasons above — but it is a green that
+  # asserts nothing, so read the annotation before trusting it.
+  #
+  # WHY A SEPARATE JOB rather than another step in `setup`: a failing step in `setup`
+  # withholds the ENTIRE opt-in matrix — every `opt-in <crate> (…)` check goes expected-
+  # but-MISSING, the trap the failure-attribution step above exists to explain. A
+  # merge-only C1 violation deserves its own red check-run, not a wall of phantom
+  # missing legs.
+  #
+  # GATING: the job name carries neither "advisory" nor "informational" and is declared
+  # in no `.github/advisory-registry.json` entry, so `ci-summary / gate` treats it as a
+  # required sibling. On merge_group/push/schedule it skips (skipped => non-failing).
+  # Wiring pinned by scripts/tests/test_feature_matrix_assemble.py (TestPreMergeC1Job).
+  premerge-c1:
+    needs: [changes]
+    if: github.event_name == 'pull_request' && needs.changes.outputs.rust_changed == 'true'
+    name: pre-merge C1 (feature-gated test execution)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          # The test merge below needs the base BRANCH and a shared ancestor with it. A
+          # default pull_request checkout fetches only `refs/pull/N/merge` at depth 1, so
+          # `origin/<base branch>` is not present there at all, and a shallow graft has no
+          # merge base to work from either (the same class of shallow-checkout breakage
+          # the `changes` job's three-dot diff documents). fetch-depth: 0 fetches the
+          # branches with full history — ~76 MB of .git here, cheaper than hand-rolling a
+          # deepening fetch.
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install PyYAML
+        # The same hash-pinned full-closure PyYAML the `setup` job installs — the guard
+        # loads the .github/feature-matrix.d fragments to build its executor map.
+        run: pip install --require-hashes -r .github/requirements/docs-quality.txt
+      - name: Test-merge the current base tip into the PR head
+        id: merge
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          # FAIL CLOSED on a broken assumption: if the base branch is not in the local
+          # repo, the checkout above did not do what this job depends on, and the merge
+          # would "fail" for a reason that has nothing to do with the PR. Red, never a
+          # silent skip.
+          git rev-parse --verify --quiet "origin/${BASE_REF}^{commit}" > /dev/null || {
+            echo "::error title=pre-merge C1 could not run::origin/${BASE_REF} is missing from the checkout — the fetch-depth: 0 checkout in this job is a precondition of the test merge."
+            exit 1
+          }
+          # `--no-commit` leaves the merged tree in the working directory (all we need);
+          # an unchanged base is "Already up to date." and exits 0, which simply re-runs
+          # the guard on the same tree `setup` saw. A non-zero exit here is a CONFLICT.
+          if git -c user.name=sparq-ci -c user.email=sparq-ci@users.noreply.github.com \
+               merge --no-commit --no-ff "origin/${BASE_REF}"; then
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+            git merge --abort || true
+            echo "::warning title=pre-merge C1 not evaluated::This PR conflicts with origin/${BASE_REF}, so the merged tree could not be built and the pre-merge C1 guard did not run. Merge the base branch in (or rebase); the guard re-evaluates on the next push, and the merge queue checks the batch-merged tree regardless."
+          fi
+      - name: Structural guard C1 on the merged tree
+        # Deliberately gated on a CLEAN test merge: running the guard against a
+        # conflicted working tree would grade a tree that is not the merge result.
+        if: steps.merge.outputs.merged == 'true'
+        run: |
+          set -euo pipefail
+          if ! python3 scripts/check-feature-test-execution.py --check; then
+            echo "::error title=pre-merge C1 failed on the MERGED tree::The C1 structural guard FAILS on the tree this PR would produce once merged with the current base branch. (The 'assemble feature matrix' job grades the event-time merge ref instead, so it can be green while this is red — the violation lives in the merge, not in either side.) A feature-gated test and the CI executor that runs it — a .github/feature-matrix.d leg, a scripts/coverage.sh case arm, or an allowlist entry — are on opposite sides of it. Add the missing leg in THIS PR: merging as-is reds C1 on main, which withholds the whole opt-in matrix on every branch (sq-nd4yj)."
+            exit 1
+          fi
+
   opt-in-features:
     needs: [changes, setup]
     # [FABLE-5] sq-fmx4u.3: `legs != '0'` skips this job when enforced selection

@@ -912,6 +912,111 @@ class TestGroupedWorkflowWiring(unittest.TestCase):
                 "the reporter (PR #3511 review findings 2 + 4)")
 
 
+class TestPreMergeC1Job(unittest.TestCase):
+    """[OPUS-5] sq-nd4yj: pins the PRE-MERGE C1 job in feature-matrix.yml.
+
+    C1 (scripts/check-feature-test-execution.py) is a WHOLE-TREE invariant — a
+    feature-gated test in one crate is covered by an executor declared elsewhere in the
+    tree — so a MERGE can break it while NEITHER SIDE breaks it alone. That is the sq-nd4yj
+    incident: 700ec341 (#2194's drain merge) dropped the `sparq-algos (topology)` leg that
+    #2193 had just landed, while the gated tests stayed, and C1 then RED-ded main and every
+    branch until f6a06580. The `setup` job's C1 cannot see that class: on `pull_request` it
+    grades `refs/pull/N/merge`, frozen at event time, and GitHub does not re-run the checks
+    when the base moves. The `premerge-c1` job re-merges the CURRENT base tip and re-runs
+    the SAME `--check`. (Scope, stated in the job's own header: it grades CLEAN merges only
+    — a conflicting PR has no merge ref for anyone to grade, and a locally-resolved push to
+    main runs no PR CI, which is how 700ec341 itself got in.) Each assertion below is one
+    of the properties that makes the job able to do that; delete the job, or weaken any of
+    them, and this test goes red.
+
+    TEXT-BASED (block slicing on the job's fixed indent) rather than yaml.safe_load, on
+    purpose: PyYAML is an install step in CI but is absent on a bare dev box, where the
+    yaml-based classes above cannot run at all. The rest of the file already reads
+    WORKFLOW as text for the same kind of contract (the static-`include:` check)."""
+
+    JOB_ID = "premerge-c1"
+    JOB_NAME = "pre-merge C1 (feature-gated test execution)"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = WORKFLOW.read_text(encoding="utf-8")
+        cls.block = cls._job_block(cls.text, cls.JOB_ID)
+
+    @staticmethod
+    def _job_block(text: str, job_id: str) -> str:
+        """The `jobs.<job_id>` mapping, verbatim: from its 2-space-indented key line to
+        (exclusive) the next line at that indent. Job-level keys sit at 4 spaces and
+        steps deeper, so the terminator is unambiguous."""
+        lines = text.splitlines()
+        try:
+            start = lines.index(f"  {job_id}:")
+        except ValueError:
+            raise AssertionError(
+                f"feature-matrix.yml declares no `{job_id}` job — the pre-merge C1 guard "
+                "(sq-nd4yj) is GONE, so a violation that only exists in the merged tree "
+                "(gated test on one side, its matrix leg on the other) reaches main and "
+                "reds C1 on every branch."
+            ) from None
+        out = [lines[start]]
+        for line in lines[start + 1:]:
+            if re.match(r"^  \S", line):
+                break
+            out.append(line)
+        return "\n".join(out)
+
+    def test_runs_the_c1_guard_itself(self):
+        """The point of the job: the SAME check, not a re-implementation of it."""
+        self.assertIn(
+            "python3 scripts/check-feature-test-execution.py --check", self.block,
+            "the pre-merge job must run the real C1 guard on the merged tree")
+
+    def test_merges_the_current_base_tip(self):
+        """Without this the job grades the same stale tree `setup` already graded."""
+        self.assertIn('merge --no-commit --no-ff "origin/${BASE_REF}"', self.block,
+                      "the job must test-merge the CURRENT base tip into the PR head")
+        self.assertIn("BASE_REF: ${{ github.event.pull_request.base.ref }}", self.block,
+                      "BASE_REF must come from the PR's base branch")
+
+    def test_checkout_has_the_merge_base(self):
+        """A default pull_request checkout fetches only `refs/pull/N/merge` at depth 1 —
+        no `origin/<base_ref>` to merge and no shared ancestor — so the test merge, and
+        with it the guard, would never evaluate."""
+        self.assertIn("fetch-depth: 0", self.block)
+        self.assertIn("persist-credentials: false", self.block)
+
+    def test_guard_step_is_gated_on_a_clean_test_merge(self):
+        """A conflicted working tree is not the merge result; grading it would be a
+        verdict about a tree that will never exist."""
+        self.assertIn("if: steps.merge.outputs.merged == 'true'", self.block)
+        self.assertIn("git merge --abort", self.block)
+
+    def test_pull_request_only_and_path_filtered(self):
+        """merge_group/push already check out an actually-merged tree, so re-merging
+        there is meaningless; `rust_changed` keeps a non-Rust PR off this runner."""
+        self.assertIn("github.event_name == 'pull_request'", self.block)
+        self.assertIn("needs.changes.outputs.rust_changed == 'true'", self.block)
+        self.assertIn("needs: [changes]", self.block)
+
+    def test_job_is_unprivileged(self):
+        """It checks out the PR merge ref; it needs nothing but the source."""
+        self.assertIn("permissions:\n      contents: read\n", self.block)
+        self.assertNotIn("checks: write", self.block)
+
+    def test_job_gates(self):
+        """Post-#3773 a check gates unless DECLARED advisory; assert both halves — the
+        name carries no advisory token, and nothing declares this check advisory."""
+        self.assertIn(f"name: {self.JOB_NAME}", self.block)
+        self.assertNotRegex(self.JOB_NAME, ADVISORY_RE)
+        registry = json.loads(
+            (REPO_ROOT / ".github" / "advisory-registry.json").read_text(encoding="utf-8")
+        )
+        declared = {k.lower() for k in registry if not k.startswith("_")}
+        self.assertNotIn(
+            self.JOB_NAME.lower(), declared,
+            "the pre-merge C1 check must not be declared advisory — a merge-only C1 "
+            "violation must BLOCK the merge, which is the whole point (sq-nd4yj)")
+
+
 class TestReportWorkflowTrustBoundary(unittest.TestCase):
     """Pins the DEFAULT-BRANCH-owned reporter workflow (PR #3511 review finding 1):
     feature-matrix-report.yml is triggered by workflow_run on feature-matrix, so
