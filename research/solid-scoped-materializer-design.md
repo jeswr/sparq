@@ -114,10 +114,10 @@ IRI `?pol` is not constrained to `?acr`'s document. A policy body — `?pol acp:
 `?pol acp:allOf ?m`, `?m acp:agent ?a` — is whatever triples the input carries for that
 subject, and the input carries a control document's triples verbatim. So
 
-```
+```turtle
 <https://p.ex/.acr>     acp:accessControl <https://p.ex/.acr#c> .
-<https://p.ex/.acr#c>   acp:apply         <https://o.ex/.acr#pol> .   ← in P's document
-<https://o.ex/.acr#pol> acp:allow         acl:Read .                  ← in O's document
+<https://p.ex/.acr#c>   acp:apply         <https://o.ex/.acr#pol> .   # ← in P's document
+<https://o.ex/.acr#pol> acp:allow         acl:Read .                  # ← in O's document
 ```
 
 is a grant at origin `P` whose *body* lives at origin `O`. Consequences:
@@ -140,7 +140,7 @@ easier half and should ship first.
 
 `acp-a.n3` closes accept-sets downward over candidates:
 
-```
+```n3
 { ?m solidx:acceptsAgentP auth:Authenticated . ?a solidx:isCandAgent true }
 => { ?m solidx:acceptsAgentP ?a } .
 ```
@@ -394,7 +394,7 @@ materializer.
 
 Concretely, as a `proptest`/hand-rolled generator over a small alphabet:
 
-```
+```text
 for each generated sequence:
     scoped = PodStore::new(seed)   // scoped write path enabled
     full   = PodStore::new(seed)   // forced full re-materialization
