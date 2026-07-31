@@ -94,8 +94,13 @@
 pub mod compiled;
 mod model;
 pub mod parser;
+// [OPUS-5] sq-xqchl.2 (GH #3143) — the crate's single N3 writer (terms, statements, and
+// whole rules). Rule serialization is what lets a caller emit EYE's "closure PLUS rules"
+// output ([`reason_n3_pass_all`]) even though the chainer itself consumes rules.
+pub mod serialize;
 
 pub use model::{Rule, Term};
+pub use serialize::{RuleKind, RuleVars};
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{Dict, Id};
 use std::collections::HashMap;
@@ -249,6 +254,63 @@ pub fn reason_n3_proof(dict: &mut Dict, src: &str) -> Result<(Vec<[Id; 3]>, Vec<
     let parsed = parser::parse(src)?;
     let (facts, steps) = run_closure(parsed, None, None, StepMode::Full);
     intern_closure(dict, &facts, &steps)
+}
+
+/// The EYE **`--pass-all`** / **`--pass-all-ground`** output document: the deductive
+/// closure (base facts PLUS every entailed fact — what [`reason_n3`] computes) followed by
+/// the document's own RULES, echoed back as N3 statements.
+///
+/// The chainer consumes rules, so `--pass`-style output alone loses them: feed a closure to
+/// a second reasoner and it can derive nothing further. This entry point keeps the rules in
+/// the document, which is exactly what the two `…_plus_rules` output modes of the eye-js
+/// compatibility surface mean (`sq-xqchl.2`, GH #3143).
+///
+/// `vars` selects how rule variables are rendered — [`RuleVars::N3`] (`?x`, the
+/// `--pass-all` form, re-parses as the same rule) or [`RuleVars::VarIris`] (SWAP `var:`
+/// IRIs, the `--pass-all-ground` form, no syntactic variables left). Backward (`<=`) rules
+/// are echoed too, with their arrow.
+///
+/// Output shape (**not** byte-compatible with EYE's own writer, which reconstructs
+/// `@prefix` declarations and has its own statement order): full `<…>` IRIs, one statement
+/// per line, closure statements SORTED (so the document is deterministic — the closure
+/// itself is an unordered set), then rules in document order.
+///
+/// Re-running this over its own output is a FIXPOINT for a monotone rule set whose
+/// conclusions mint no fresh existentials: the closure is already saturated and the rules
+/// round-trip. A rule with a blank node in its CONCLUSION mints a fresh `_:__sk…` label per
+/// firing, so such a document grows on each re-run — the same caveat EYE carries.
+///
+/// HONESTY: the mapping onto the two EYE flags is BY CONSTRUCTION — closure + echoed rules,
+/// and "ground" read as "no syntactic variable survives IN A RULE" — not a differential
+/// against an EYE binary (none runs in this repo's gates). Treat the document as sparq's own
+/// `--pass-all` equivalent, not as byte-for-byte EYE output. [`RuleVars::VarIris`] grounds
+/// the rules at every depth, quoted `{ … }` formulae included; it does NOT rewrite the
+/// closure half, so a document that ASSERTS a formula-valued fact carrying a variable
+/// (`:a :p { ?x :q :b }.` — data, not a rule) still echoes that `?x` verbatim.
+pub fn reason_n3_pass_all(src: &str, vars: RuleVars) -> Result<String, String> {
+    let parsed = parser::parse(src)?;
+    // Clone the rules BEFORE the closure runs: `run_closure` reorders each premise for
+    // builtin readiness, and the echo should reflect the document, not that plan.
+    let (rules, backward_rules) = (parsed.rules.clone(), parsed.backward_rules.clone());
+    let (facts, _steps) = run_closure(parsed, None, None, StepMode::None);
+    let mut statements: Vec<String> = facts
+        .all
+        .iter()
+        .map(|f| {
+            let mut s = String::new();
+            serialize::write_statement(f, &mut s);
+            s
+        })
+        .collect();
+    statements.sort_unstable();
+    let mut out = statements.concat();
+    for r in &rules {
+        serialize::write_rule(r, RuleKind::Forward, vars, &mut out);
+    }
+    for r in &backward_rules {
+        serialize::write_rule(r, RuleKind::Backward, vars, &mut out);
+    }
+    Ok(out)
 }
 
 /// A stratified run's result ([`reason_n3_stratified`]).
