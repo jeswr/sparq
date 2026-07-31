@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { simulateThreshold, workspaceIntegers } from "./mpc-sim.ts";
+import { simulateThreshold, workspaceIntegers } from "./mpc-sim.js";
 
 test("reveals the threshold verdict while retaining a share matrix", () => {
   const result = simulateThreshold(
