@@ -205,12 +205,15 @@ crates = ["sparq-conformance"]
 # [FABLE-5] sq-tonhr.2: the COMMITTED cargo-fuzz seed corpus (fuzz/seeds/<target>/),
 # read via an env!("CARGO_MANIFEST_DIR")-relative path by sparq-conformance's parser
 # differential harness (tests/parser_differential.rs) as a known-tricky-input corpus
-# for the sparq-vs-oxttl line-syntax cross-check. The out-of-workspace fuzz/ crate
-# also consumes these seeds, but it is not a workspace member, so this map lists
-# the workspace-crate readers only (the fuzz lane itself is seeded via [lanes]).
+# for the sparq-vs-oxttl line-syntax cross-check. sparq-canon reads one seed of the
+# same corpus with `include_str!` (tests/fuzz_seed_dedup.rs), pinning the RDFC-1.0
+# set-semantics reproducer in the stable `cargo test` gate. The out-of-workspace
+# fuzz/ crate also consumes these seeds, but it is not a workspace member, so this
+# map lists the workspace-crate readers only (the fuzz lane itself is seeded via
+# [lanes]).
 [[map]]
 pattern = "fuzz/seeds/**"
-crates = ["sparq-conformance"]
+crates = ["sparq-conformance", "sparq-canon"]
 
 # [FABLE-5] sq-1s2.4 (PR #3622): the browser age-gate's precomputed `operand_enc`
 # anchors, read at runtime by sparq-zk-compose's build-time drift guard
