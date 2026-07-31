@@ -1091,6 +1091,23 @@ jobs:
         run: python3 scripts/auto-arm.py --self-test
       - name: "Arm-path wiring inspection (contents: write + probe-before-arm — #3760)"
         run: python3 scripts/tests/test_arm_capability_wiring.py
+      # [OPUS-5] #4542 — the OTHER end of the stuck-arm sweep. `blocked-threads` parks a PR
+      # with a receipt naming `threads-resolved` as its un-park condition; this policy is
+      # what can satisfy that condition when the analysis that filed the threads has been
+      # disabled and can no longer supersede them. It MUTATES review state, so its whole
+      # safety argument is one invariant — a thread is resolved only when the Actions API
+      # reports its producing workflow DISABLED; `active`/unknown sweeps nothing — and that
+      # invariant is asserted here, on the PR that could weaken it, rather than first at
+      # 07:19 UTC on live review threads. Hermetic: stdlib only, every gh seam injected.
+      # (name quoted: an unquoted YAML scalar drops everything from ` #` as a comment)
+      - name: "Self-test the stale-analysis thread sweep (disabled-analysis invariant — #4542)"
+        run: python3 scripts/stale-analysis-threads.py --self-test
+      # ...and its YAML seam, parsed STRUCTURALLY: the sweep lane never runs on a PR head,
+      # holds exactly the three permissions it uses, self-tests BEFORE it mutates, and is
+      # not stuck in --dry-run. The suite also pins its OWN invocation here, so deleting
+      # either of these two steps reds the gate. Needs PyYAML (shared setup above).
+      - name: "Stale-analysis sweep wiring inspection (never a gate; live, bounded — #4542)"
+        run: python3 scripts/tests/test_stale_analysis_threads_wiring.py
       # [OPUS-5] sq-w1dxx: release.yml's container contract was pinned by a test that NOTHING
       # ran, so every assertion in it was decorative. Wire it in beside its sibling tests.
       # sq-fvzi6 pins the multi-arch push; sq-n6rv + sq-p9xq pin sparq-server's trigger-gated

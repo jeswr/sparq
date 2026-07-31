@@ -448,6 +448,35 @@ un-draft moment.
 - **Code-quality rule active.** The live ruleset also carries a `code_quality` rule
   (`severity: all`), GitHub's built-in PR quality signal, alongside the checks above.
 
+### Thread resolution vs. a disabled analysis (issue #4542)
+
+`required_review_thread_resolution` composes badly with a **disabled** analysis, and the
+composition has to be managed rather than assumed away. Most threads here are filed by an
+analysis, not a human, and an analysis normally clears its own threads by re-running: the
+finding disappears, the thread goes outdated, and the PR unblocks. Disable that workflow
+and only the first half survives — the thread stays, nothing can supersede it, and the PR
+is `BLOCKED` with every individual CI signal green. Measured 2026-07-27: `codeql.yml`
+`disabled_manually` since 2026-07-18, PR #3451 held by ten `github-advanced-security`
+threads while armed for auto-merge for 33 hours.
+
+Two lanes bound that failure mode, and neither weakens the rule:
+
+- **Visible** — `.github/workflows/rearm-sweeper.yml`'s stuck-arm phase (#4534) classifies
+  such a PR `blocked-threads`, disarms it, parks it, and leaves a machine-readable receipt
+  naming `threads-resolved` as the condition that un-parks it.
+- **Exitable** — `.github/workflows/stale-analysis-threads.yml` (daily;
+  `scripts/stale-analysis-threads.py`) resolves a thread **only** when the Actions API
+  reports the workflow that files it as disabled, every comment in it is from that
+  analysis, and no human has replied. An `active` workflow — or any state the API does not
+  report — sweeps nothing, because a live analysis can still clear its own threads. Every
+  resolve is receipted on the PR (one comment per analysis), naming that analysis, the
+  workflow state that authorised the sweep, and every thread it resolved.
+
+  This resolves a *thread*, never a *finding*: the `code_scanning` alert rule above is a
+  separate gate and is untouched, and re-enabling the workflow re-files anything still
+  live on its next analysis. The declared analysis→workflow table is a literal in the
+  script (`ANALYSES`), so widening it is a reviewable diff.
+
 ## History and push rules
 
 - **Require linear history** — merges to `main` must not introduce merge commits. The live

@@ -1,0 +1,88 @@
+# [OPUS-5] Issue #4542 — give a review thread from a DISABLED analysis an automated exit.
+#
+# The `main` ruleset requires review-thread resolution (docs/branch-protection.md
+# § Required reviews). Most threads on this repository are filed by an analysis, not a
+# human, and an analysis normally supersedes its own threads by re-running. Disable the
+# analysis and that second half disappears while its threads stay on the PR forever: the
+# PR is BLOCKED with every CI signal green and nothing reports a problem. Measured
+# 2026-07-27 (#4542): `codeql.yml` `disabled_manually` since 2026-07-18, PR #3451 blocked
+# by ten `github-advanced-security` threads, armed for 33 hours.
+#
+# #4534's stuck-arm sweep already makes that shape VISIBLE (class `blocked-threads`,
+# parked with a receipt naming `threads-resolved` as the un-park condition). This lane is
+# what can satisfy that condition.
+#
+# NOT A GATE, and it cannot become one from here: `schedule` + `workflow_dispatch` only,
+# so it never runs on a PR head, registers no check-run, and is invisible to the
+# `ci-summary / gate` aggregator (.github/workflows/ci-summary.yml). No advisory-registry
+# entry is needed or valid for it.
+#
+# THE INVARIANT, enforced in scripts/stale-analysis-threads.py and pinned by its
+# self-test: a thread is resolved ONLY when the Actions API reports the workflow that
+# files it as DISABLED. `active` — or any unreadable/unknown state — sweeps nothing, so
+# an analysis that can still supersede its own threads always keeps that job. Resolving a
+# THREAD is not dismissing a FINDING: the ruleset's `code_scanning` alert rule is
+# untouched and re-enabling the workflow re-files anything still live.
+name: stale-analysis threads
+
+on:
+  schedule:
+    # Daily, off-peak, on an odd minute no other lane in this repo uses. The condition it
+    # sweeps is created by a repository SETTING change (a workflow being disabled), not by
+    # a push, so it needs a heartbeat rather than a sub-hourly cron.
+    - cron: "19 7 * * *"
+  workflow_dispatch:
+
+# Least privilege, and every scope is load-bearing:
+#   contents: read       — check out the trusted default-branch policy.
+#   pull-requests: write — `resolveReviewThread` and the per-PR receipt comment. Without
+#                          it every mutation 403s; that is LOUD (collected failure +
+#                          ::error + exit 1), never a silent no-op.
+#   actions: read        — read the producing workflow's `state`. This is the ENTIRE
+#                          authority for the sweep: with no readable state every analysis
+#                          classifies UNKNOWN and the run resolves nothing.
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: stale-analysis-threads
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: resolve threads filed by a disabled analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Always execute the trusted default-branch policy, including on manual dispatch.
+      - name: Checkout sweep policy
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          # The WHOLE directory, never a file-by-file manifest: this script imports
+          # scripts/gh_retry.py, and an enumeration that forgets a sibling import is what
+          # bricked the arm lane in #3776 (see rearm-sweeper.yml for the full account).
+          sparse-checkout: scripts
+
+      # Hermetic (stdlib only, every gh seam injected). It runs BEFORE any mutation so a
+      # regression in the policy reds this job instead of resolving the wrong thread.
+      # It also gates every PR from docs-quality.yml's quick-gates job.
+      - name: Self-test the sweep policy
+        run: |
+          python3 scripts/gh_retry.py --self-test
+          python3 scripts/stale-analysis-threads.py --self-test
+
+      # Bounded blast radius: at most 10 threads per tick, and a PR is swept whole or not
+      # at all (a half-swept PR stays blocked and would re-comment next tick). Every
+      # thread it declines is still classified and counted in the run log.
+      - name: Sweep review threads whose analysis is disabled
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: >-
+          python3 scripts/stale-analysis-threads.py
+          --repo "$REPO"
+          --max-resolves 10
