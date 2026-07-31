@@ -2741,8 +2741,48 @@ jobs:
           # seeder argument are on the `build-archive` cache step above (the canonical
           # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # [OPUS-5] #4935 — AVAILABILITY DECOUPLING for the only two corpora in this
+      # GATING lane that come from a non-GitHub third party: the OWL 2 test-case
+      # export (an Internet Archive snapshot, fetched over plain http://) and the
+      # W3C RIF WG Core_v1.22 archive. Both are FIXED, sha256-pinned exports, yet
+      # they were re-downloaded live on every run — so a bad few minutes at
+      # web.archive.org concluded this leg `failure` with nothing measured, which
+      # ci-summary correctly fail-fasts on, ejecting unrelated PRs from the merge
+      # queue (merge group e5c2e01c, 2026-07-28: six 30s connect timeouts, no
+      # assertion failed, PR #4925 ejected). Restoring them from the Actions cache
+      # makes the network a CACHE-MISS-ONLY path: fetch-inference-suites.sh
+      # short-circuits on the pinned digest (`fetch_pinned_file` / the RIF stamp),
+      # so a hit performs zero network I/O. The ratchet is untouched — a genuine
+      # regression still reds, because the corpus arriving from cache vs. network
+      # is invisible to the runner. Key hashes the fetch script, so ANY pin change
+      # busts it (over-busting on an unrelated comment edit only costs one cold
+      # fetch). Pinned by scripts/tests/test_inference_corpus_cache.py.
+      - name: Restore the pinned OWL 2 / RIF corpora
+        id: inference-corpus-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            tests/w3c/owl2
+            tests/w3c/rif-core
+          key: inference-corpus-v1-${{ runner.os }}-${{ hashFiles('scripts/fetch-inference-suites.sh') }}
       - name: Fetch inference test suites (pinned)
+        # On a cache hit this fetches only the two github.com clones (rdf-tests,
+        # N3); the OWL/RIF steps report "already present (sha256 ok)".
         run: ./scripts/fetch-inference-suites.sh
+      # Save from main-scoped runs only — repo cache-save doctrine (sq-3sbrr /
+      # sq-6vshe.15): an entry written from a PR or `gh-readonly-queue/` ref is
+      # scoped to that ref, which is deleted on merge/ejection, so it is pure
+      # unreachable churn against the shared 10 GB budget. PRs and merge groups
+      # RESTORE main's entry — which is exactly where the hit that protects the
+      # queue comes from. Skipped on a hit: cache entries are immutable.
+      - name: Save the pinned OWL 2 / RIF corpora (main-scoped runs)
+        if: github.ref == 'refs/heads/main' && steps.inference-corpus-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            tests/w3c/owl2
+            tests/w3c/rif-core
+          key: inference-corpus-v1-${{ runner.os }}-${{ hashFiles('scripts/fetch-inference-suites.sh') }}
       - name: Run inference suites
         # [OPUS-4.8] sq-shacl-flake (generalized from #1236): STEP-LEVEL transient
         # self-heal. This `cargo run` WRITES inference-conformance-report.md as a side
