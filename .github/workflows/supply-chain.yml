@@ -247,7 +247,7 @@ jobs:
           rustup default stable
           rustup show active-toolchain
       - name: Install cargo-deny + cargo-vet + cargo-cyclonedx
-        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
         with:
           tool: cargo-deny,cargo-vet@0.10.2,cargo-cyclonedx
 
