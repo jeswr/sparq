@@ -229,8 +229,9 @@ export function PlanExplorer() {
         <QueryMonitor
           endpointUrl={endpointBlocked ? "" : endpointUrl.trim()}
           endpointToken={endpointToken}
-          tokenOverPlaintext={endpointWarnings.some(
-            (warning) => warning.code === "token-over-plaintext",
+          tokenTransitRisk={endpointWarnings.some(
+            (warning) =>
+              warning.code === "token-over-plaintext" && warning.level === "warning",
           )}
         />
       </div>
@@ -381,11 +382,11 @@ function EndpointStrip({
 function QueryMonitor({
   endpointUrl,
   endpointToken,
-  tokenOverPlaintext,
+  tokenTransitRisk,
 }: {
   endpointUrl: string;
   endpointToken: string;
-  tokenOverPlaintext: boolean;
+  tokenTransitRisk: boolean;
 }) {
   const running = React.useSyncExternalStore(subscribeRunning, getRunning, getRunning);
   // Re-render each second while anything is in flight, so the elapsed readout is live.
@@ -400,7 +401,13 @@ function QueryMonitor({
     url: string;
     token: string;
   } | null>(null);
-  const canMonitor = endpointUrl !== "" && !tokenOverPlaintext;
+  const canMonitor = endpointUrl !== "" && !tokenTransitRisk;
+
+  React.useEffect(() => {
+    setMonitoredEndpoint((current) =>
+      current && (current.url !== endpointUrl || current.token !== endpointToken) ? null : current,
+    );
+  }, [endpointUrl, endpointToken]);
 
   return (
     <div className="px-3 py-2" data-plan-monitor>
@@ -437,7 +444,7 @@ function QueryMonitor({
             {monitoredEndpoint ? "Stop monitoring" : "Monitor endpoint"}
           </Button>
         </div>
-        {tokenOverPlaintext && (
+        {tokenTransitRisk && (
           <p className="py-1 text-xs text-muted-foreground">
             Endpoint monitoring is unavailable while a bearer token would be sent over plaintext.
           </p>
@@ -519,7 +526,10 @@ function EndpointQueryMonitor({
           controller.signal,
         );
         if (controller.signal.aborted) return;
-        if (sequence === requestSequence.current) setState({ kind: "loaded", queries });
+        if (sequence === requestSequence.current) {
+          setState({ kind: "loaded", queries });
+          setKillError(null);
+        }
         timeout = setTimeout(() => void poll(), 2000);
       } catch (error) {
         if (controller.signal.aborted) return;
@@ -576,7 +586,9 @@ function EndpointQueryMonitor({
           setKillError(error instanceof Error ? error.message : String(error));
         }
       } finally {
-        if (!signal?.aborted) setKilling(null);
+        if (!signal?.aborted) {
+          setKilling((current) => (current === id ? null : current));
+        }
       }
     },
     [endpointUrl, endpointToken],

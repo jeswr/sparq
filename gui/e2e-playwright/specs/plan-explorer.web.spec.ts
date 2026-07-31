@@ -229,7 +229,10 @@ test.describe("plan-explorer (web persona)", () => {
     });
 
     await page.locator("[data-plan-endpoint-url]").fill(MOCK_URL);
+    await page.locator("[data-plan-endpoint-token]").fill("sentinel-read-token");
+    expect(listCalls).toBe(0);
     await expect(page.locator("[data-plan-endpoint-monitor-row]")).toBeHidden();
+    await expect(page.locator("[data-plan-endpoint-monitor-toggle]")).toBeEnabled();
     await page.locator("[data-plan-endpoint-monitor-toggle]").click();
     await expect(page.locator("[data-plan-endpoint-monitor-row]")).toBeVisible();
     await page.locator("[data-plan-endpoint-kill]").click();
@@ -240,6 +243,7 @@ test.describe("plan-explorer (web persona)", () => {
 
   test("endpoint registry disabled is informational and polling stops", async ({ page }) => {
     let calls = 0;
+    await page.clock.install();
     await page.route("http://127.0.0.1:7788/queries**", (route) => {
       calls += 1;
       void route.fulfill({ status: 404 });
@@ -250,7 +254,15 @@ test.describe("plan-explorer (web persona)", () => {
     const message = page.locator("[data-plan-endpoint-monitor-error]");
     await expect(message).toContainText("registry not enabled");
     await expect(message).toHaveClass(/text-muted-foreground/);
+    await page.clock.fastForward(5_000);
     expect(calls).toBe(1);
+  });
+
+  test("endpoint monitoring blocks a token only for non-loopback plaintext", async ({ page }) => {
+    await page.locator("[data-plan-endpoint-url]").fill("http://example.test/sparql");
+    await page.locator("[data-plan-endpoint-token]").fill("sentinel-read-token");
+    await expect(page.locator("[data-plan-endpoint-monitor-toggle]")).toBeDisabled();
+    await expect(page.getByText("bearer token would be sent over plaintext")).toBeVisible();
   });
 
   test("Query tool EXPLAIN now renders the shared operator tree", async ({ page }) => {

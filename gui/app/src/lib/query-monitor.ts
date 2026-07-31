@@ -116,6 +116,7 @@ function registryUrl(endpointUrl: string): string {
     throw new Error("Endpoint URL must use http:// or https://.");
   }
   const segments = endpoint.pathname.split("/").filter(Boolean);
+  // [SONNET-4.6] Assume the registry is a sibling of the SPARQL endpoint.
   if (segments.length > 0) segments.pop();
   endpoint.pathname = `/${[...segments, "queries"].join("/")}`;
   endpoint.search = "";
