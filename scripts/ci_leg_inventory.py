@@ -195,6 +195,14 @@ _RULES: tuple[tuple[str, str], ...] = (
     (r"^summari[sz]e|^aggregate |^report |^emit |^resolve |^decide |^assert |^detect |"
      r"^file |^commit |scoreboard|shadow .*report", "script"),
     (r"^compute |^merge |^measure .*size|^introspect |^lint|^validate |^verify ", "script"),
+    # A RENDERED report is bookkeeping over an artifact some earlier step already
+    # produced. The `^report ` anchor above only catches it when "report" leads the name;
+    # the coverage post-steps put the subject first ("Cone coverage report (…)"). This
+    # rule is LAST in the group on purpose — the compile/test-run/artifact steps that
+    # merely mention a report ("Build instrumented engine objects (for `report`, …)",
+    # "Compile + run partition N/3 (--no-report, …)", "Upload report") all match an
+    # earlier rule, so first-match-wins keeps them out of `script`. [SONNET-4.6]
+    (r"coverage report|\breport$", "script"),
 )
 _COMPILED = tuple((re.compile(pat, re.IGNORECASE), bucket) for pat, bucket in _RULES)
 

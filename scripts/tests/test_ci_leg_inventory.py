@@ -124,6 +124,9 @@ class TestClassify(unittest.TestCase):
         ("Enforce ratchet (pass count must not regress)", "script"),
         ("Test-presence gate (fast, no compile)", "script"),
         ("Summarize", "script"),
+        # A rendered report names its subject first, so the `^report ` anchor misses it.
+        ("Cone coverage report (sq-6vshe.8 / sq-3dr4t) [SONNET-4.6]", "script"),
+        ("Report unsafe usage (sparq-core, where the unsafe lives)", "script"),
     ]
 
     def test_every_case_lands_in_its_bucket(self):
@@ -151,6 +154,21 @@ class TestClassify(unittest.TestCase):
         self.assertEqual(
             inv.CLASS_OF_BUCKET[inv.classify_step("Test (nextest, shard heavy-diskann)")],
             "test-run")
+
+    def test_a_step_that_merely_mentions_a_report_keeps_its_real_bucket(self):
+        # The other direction of the "rendered report is bookkeeping" rule. These are the
+        # real ci.yml names carrying the word `report` while doing the expensive work;
+        # first-match-wins must reach them before the trailing script rule, or minutes of
+        # compile and test-run time would be laundered into `other`.
+        for name, expected in (
+            ("Build instrumented engine objects (for `report`, no test run)", "compile"),
+            ("Clippy the served-conformance report emitter (both served-surface features ON)",
+             "compile"),
+            ("Compile + run partition 2/3 (--no-report, emit .profraw)", "compile"),
+            ("Upload report", "artifact"),
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(inv.classify_step(name), expected)
 
     def test_overrides_win_over_every_rule(self):
         name = "clippy (deny warnings)"
