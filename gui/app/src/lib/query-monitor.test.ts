@@ -10,7 +10,9 @@ import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  fetchEndpointRunningQueries,
   getRunning,
+  killEndpointRunningQuery,
   killQuery,
   resetQueryMonitorForTests,
   subscribeRunning,
@@ -63,4 +65,72 @@ test("getRunning – returns a fresh snapshot reference per change (useSyncExter
   assert.notEqual(getRunning(), before, "reference changes when the list changes");
   const during = getRunning();
   assert.equal(getRunning(), during, "reference is stable between changes");
+});
+
+test("fetchEndpointRunningQueries – derives the server root, authenticates, and parses rows", async () => {
+  let requestUrl = "";
+  let requestInit: RequestInit | undefined;
+  const fetchImpl: typeof fetch = async (input, init) => {
+    requestUrl = String(input);
+    requestInit = init;
+    return new Response(
+      JSON.stringify({
+        queries: [
+          {
+            id: "0000000000000001",
+            kind: "query",
+            start: 1_700_000_000_000,
+            fingerprint: "fnv1a64:0123456789abcdef",
+            elapsed_ms: 250,
+          },
+        ],
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  };
+
+  const rows = await fetchEndpointRunningQueries(
+    "http://127.0.0.1:3030/sparql",
+    " secret ",
+    fetchImpl,
+  );
+  assert.equal(requestUrl, "http://127.0.0.1:3030/queries");
+  assert.equal(requestInit?.method, "GET");
+  assert.deepEqual(requestInit?.headers, {
+    Accept: "application/json",
+    Authorization: "Bearer secret",
+  });
+  assert.equal(rows[0]?.fingerprint, "fnv1a64:0123456789abcdef");
+});
+
+test("fetchEndpointRunningQueries – rejects malformed registry rows", async () => {
+  const fetchImpl: typeof fetch = async () =>
+    new Response(JSON.stringify({ queries: [{ id: 7 }] }), { status: 200 });
+  await assert.rejects(
+    fetchEndpointRunningQueries("http://127.0.0.1:3030/sparql", undefined, fetchImpl),
+    /invalid row/,
+  );
+});
+
+test("killEndpointRunningQuery – encodes the id and sends the bearer token", async () => {
+  let requestUrl = "";
+  let requestInit: RequestInit | undefined;
+  const fetchImpl: typeof fetch = async (input, init) => {
+    requestUrl = String(input);
+    requestInit = init;
+    return new Response(null, { status: 204 });
+  };
+
+  await killEndpointRunningQuery(
+    "https://example.test/sparql",
+    "query/id",
+    "token",
+    fetchImpl,
+  );
+  assert.equal(requestUrl, "https://example.test/queries/query%2Fid");
+  assert.equal(requestInit?.method, "DELETE");
+  assert.deepEqual(requestInit?.headers, {
+    Accept: "application/json",
+    Authorization: "Bearer token",
+  });
 });
