@@ -87,7 +87,8 @@ _FULL_TRIGGERS: list[tuple[str, str]] = [
 # [OPUS-4.8] The broad `.github/` and `scripts/` full-run triggers above are
 # CORRECT-BY-DEFAULT but OVER-BROAD: a PR that changes ONLY orchestration/workflow
 # tooling (PR/issue/bead automation, routing, the merge-queue batchers, agent
-# config) forces the FULL Rust matrix even though NOTHING it touches is read by any
+# config, or a release/publish workflow that never runs on a PR at all — #2536)
+# forces the FULL Rust matrix even though NOTHING it touches is read by any
 # Rust build/test/clippy/coverage/bench/fuzz/CodeQL job. The maintainer's ask:
 # stop running the engine CI on those PRs (they dominate the drain).
 #
@@ -120,6 +121,44 @@ _FULL_TRIGGERS: list[tuple[str, str]] = [
 # bench.yml, fuzz.yml, miri.yml, asan.yml, kani.yml, metamorph.yml,
 # vectorized-feature-off.yml, ci-select.yml, ci-summary.yml, conformance/coverage
 # lanes); `.github/feature-matrix.d/**`; `.github/codeql/**`; `.github/actions/**`.
+
+# --- RELEASE-ONLY workflow carve-out (issue #2536) ---------------------------
+# [OPUS-5] A PR that touches ONLY a release/publish workflow — the motivating case
+# was #2533, which changed a single COMMENT in one — still forced the entire Rust
+# matrix via the broad `.github/` trigger. That is pure waste, and it is waste with
+# an unusually CRISP disproof.
+#
+# THE INERTNESS PROOF (stronger than the general orchestration argument above, and
+# ENFORCED by scripts/tests/test_ci_select.py `ReleaseOnlyWorkflowInertnessTests`):
+# every file listed here has NO `pull_request` / `pull_request_target` /
+# `merge_group` trigger. It therefore CANNOT RUN AS A PR CHECK AT ALL — it fires
+# only on a tag push, a `release` publication, a `workflow_dispatch`, or a
+# `workflow_call` from another release-only workflow. A workflow that never runs on
+# a PR cannot change any PR result, so editing one is inert for this PR's checks by
+# construction, independently of what the edit says. (release.yml's own header
+# states this contract: "NO schedule, NO pull_request, so this workflow NEVER runs
+# as a PR check and never gates a PR".) Second obligation, also tested: none of
+# these is `uses:`-invoked by a Rust-CI workflow — the only such edge in the repo is
+# release.yml -> release-verify.yml, i.e. WITHIN this set.
+#
+# This is a claim about PR-time CI ONLY. A release build is of course still exercised
+# — by these workflows themselves, on the tag/dispatch that actually cuts a release,
+# where they run in full. Skipping the PR-time Rust matrix removes no release
+# coverage; it removes coverage of crates the edit provably cannot reach.
+#
+# NOT here (deliberately): build-matrix.yml. It is `workflow_call`-only, so it too
+# never runs on a PR — but it is the SHARED Rust build definition that dist.yml and
+# release.yml both invoke, and keeping the workspace's build matrix fail-closed is
+# worth more than the rare skip. Absence of proof is not required here; conservatism
+# is a free choice when the path almost never changes.
+_RELEASE_ONLY_WORKFLOWS: list[str] = [
+    ".github/workflows/dist.yml",           # workflow_dispatch only (ad-hoc tier builds)
+    ".github/workflows/release.yml",        # push tags v* + workflow_dispatch
+    ".github/workflows/release-plz.yml",    # push branches main
+    ".github/workflows/publish.yml",        # release published + workflow_dispatch
+    ".github/workflows/release-verify.yml",  # workflow_call (release.yml) + workflow_dispatch
+]
+
 _ORCHESTRATION_SAFE: list[str] = [
     # Orchestration configuration + agent harness (never compiled/tested by cargo).
     "orchestration/",       # routing.toml + orchestration policy (the #3416 class)
@@ -140,6 +179,9 @@ _ORCHESTRATION_SAFE: list[str] = [
     # NOTE deliberately NOT here: selection-alarm.yml / formal-alarm.yml — they are
     # monitors for the Rust/formal lanes (borderline), so they keep triggering full
     # (fail-closed; the value of skipping them is negligible and the audit is cleaner).
+    # [OPUS-5] Release/publish workflows (issue #2536): none has a pull_request /
+    # merge_group trigger, so none can run as a PR check — see the proof above.
+    *_RELEASE_ONLY_WORKFLOWS,
     # Orchestration-only scripts (PR/issue/bead/routing/dispatch automation). Each is
     # pinned inert by the OrchestrationSafeInertnessTests grep.
     "scripts/triage.py",

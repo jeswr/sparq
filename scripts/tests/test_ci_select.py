@@ -27,6 +27,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -576,6 +577,32 @@ class ChangeClassTests(unittest.TestCase):
         self.assertEqual(sel.affected, [])
         self.assertEqual(sel.change_class, "orchestration-only")
 
+    def test_release_only_workflow_edit_is_safe(self):
+        # [OPUS-5] issue #2536, the motivating case: PR #2533 changed only a COMMENT in a
+        # release workflow and still paid the full Rust matrix. A release/publish workflow
+        # has no pull_request trigger, so it cannot run as a PR check => proven inert.
+        sel = self._select([".github/workflows/release.yml"])
+        self.assertEqual(sel.mode, "selected")
+        self.assertEqual(sel.affected, [])
+        self.assertEqual(sel.change_class, "orchestration-only")
+
+    def test_every_release_only_workflow_is_safe(self):
+        # The whole set, not just the representative: each alone must select an empty
+        # closure. A future addition to _RELEASE_ONLY_WORKFLOWS is covered automatically.
+        for wf in cs._RELEASE_ONLY_WORKFLOWS:
+            with self.subTest(workflow=wf):
+                sel = self._select([wf])
+                self.assertEqual(sel.mode, "selected")
+                self.assertEqual(sel.affected, [])
+
+    def test_release_workflow_plus_crate_change_still_runs_that_crate(self):
+        # The carve-out only ever REMOVES a path from the full trigger; it must never
+        # swallow a real crate change riding alongside it.
+        sel = self._select([".github/workflows/release.yml", "crates/app/src/lib.rs"])
+        self.assertEqual(sel.mode, "selected")
+        self.assertEqual(sel.affected, ["app"])
+        self.assertEqual(sel.change_class, "mixed")
+
     def test_rename_crossing_classes_forces_full(self):
         # git diff --no-renames reports a move as delete+add of BOTH paths. Moving an
         # orchestration script INTO a crate dir surfaces both paths: the crate path is
@@ -775,6 +802,91 @@ class OrchestrationSafeInertnessTests(unittest.TestCase):
                 path.exists(),
                 f"orchestration-safe entry {entry} does not exist on disk (stale allowlist)",
             )
+
+
+class ReleaseOnlyWorkflowInertnessTests(unittest.TestCase):
+    """[OPUS-5] THE RELEASE-ONLY INERTNESS OBLIGATION (issue #2536). Each
+    _RELEASE_ONLY_WORKFLOWS entry is allowlisted on ONE proof: it has no
+    pull_request / pull_request_target / merge_group trigger, so it can never run as
+    a PR check and therefore cannot change any PR result whatever the edit says.
+    This test re-derives that proof from the REAL workflow files, so the day someone
+    gives release.yml a `pull_request:` trigger the allowlist entry goes RED instead
+    of silently becoming unsound. Stdlib only (no PyYAML) — the `on:` block is
+    extracted textually, comments stripped."""
+
+    _PR_TRIGGERS = ("pull_request", "pull_request_target", "merge_group")
+
+    @staticmethod
+    def _on_block(text: str) -> str:
+        """The top-level `on:` block with comments stripped. Ends at the next
+        column-0 key. Comment stripping is what makes the token scan below sound:
+        release.yml's header PROSE says "NO pull_request", which must not read as a
+        trigger."""
+        out: list[str] = []
+        inside = False
+        for raw in text.splitlines():
+            line = raw.split("#", 1)[0].rstrip()
+            if not inside:
+                if re.match(r"^on:", line):
+                    inside = True
+                    out.append(line)
+                continue
+            if line and not line[0].isspace():
+                break  # next top-level key ends the block
+            out.append(line)
+        return "\n".join(out)
+
+    def test_no_release_only_workflow_runs_on_a_pull_request(self):
+        for entry in cs._RELEASE_ONLY_WORKFLOWS:
+            with self.subTest(workflow=entry):
+                path = REPO_ROOT / entry
+                self.assertTrue(path.exists(), f"{entry} does not exist on disk")
+                block = self._on_block(path.read_text(encoding="utf-8"))
+                self.assertTrue(block.strip(), f"{entry}: no `on:` block found")
+                for trig in self._PR_TRIGGERS:
+                    self.assertNotRegex(
+                        block, rf"\b{trig}\b",
+                        f"{entry} has a `{trig}` trigger, so it CAN run as a PR check — it is "
+                        f"NOT inert; remove it from _RELEASE_ONLY_WORKFLOWS (fail-closed: a "
+                        f"PR-triggered workflow must keep forcing the full matrix).",
+                    )
+
+    def test_no_rust_ci_workflow_invokes_a_release_only_workflow(self):
+        # Second obligation: a Rust-CI workflow must not `uses:`-call one of these (that
+        # would make the release file part of a PR check by reference). The only such
+        # edge in the repo is release.yml -> release-verify.yml, i.e. WITHIN the set.
+        wf_dir = REPO_ROOT / ".github" / "workflows"
+        rust_ci = OrchestrationSafeInertnessTests._RUST_CI_WORKFLOWS
+        blob = "\n".join(
+            (wf_dir / name).read_text(encoding="utf-8")
+            for name in rust_ci
+            if (wf_dir / name).exists()
+        )
+        for entry in cs._RELEASE_ONLY_WORKFLOWS:
+            with self.subTest(workflow=entry):
+                self.assertNotRegex(
+                    blob, rf"uses:\s*\./{re.escape(entry)}\b",
+                    f"{entry} is `uses:`-invoked by a Rust-CI workflow — it is NOT inert.",
+                )
+
+    def test_release_only_workflows_are_actually_allowlisted(self):
+        # The splice into _ORCHESTRATION_SAFE is what makes the carve-out take effect;
+        # assert via the matcher the selector really consults.
+        for entry in cs._RELEASE_ONLY_WORKFLOWS:
+            with self.subTest(workflow=entry):
+                self.assertIn(entry, cs._ORCHESTRATION_SAFE)
+                self.assertTrue(cs._orchestration_safe_match(entry))
+
+    def test_a_rust_ci_workflow_is_not_release_only(self):
+        # Guard the boundary in the other direction: no Rust-CI workflow may sneak into
+        # the release-only set (that WOULD skip lanes the edit can change).
+        for entry in cs._RELEASE_ONLY_WORKFLOWS:
+            with self.subTest(workflow=entry):
+                self.assertNotIn(
+                    Path(entry).name,
+                    OrchestrationSafeInertnessTests._RUST_CI_WORKFLOWS,
+                    f"{entry} is a Rust-CI workflow; it must keep forcing the full matrix.",
+                )
 
 
 class RealMetadataShapeTests(unittest.TestCase):
