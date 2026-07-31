@@ -32,6 +32,10 @@
 #   when_new_paths    = ["glob", ...]  # like when_paths but only counts ADDED files (status "A")
 #   exclude_new_paths = ["glob", ...]  # added paths matching these are DROPPED from the
 #                                      #   when_new_paths pool (a sub-tree owned by another gate)
+#   unless_paths      = ["glob", ...]  # SUPPRESSION: if ANY changed file matches, the rule
+#                                      #   does NOT fire (the PR already did the follow-on work)
+#   when_new_crate_public = true       # refine a new-crate rule to PUBLIC crates only —
+#                                      #   a `publish = false` stub is exempt (same as gate G1)
 #   when_label        = "label"        # PR must carry this label (opt-in rules)
 #   when_title        = "regex"        # case-insensitive regex over the PR title
 #
@@ -79,6 +83,120 @@
 # non-blocking advisory, restore a SAFETY-NET reactive rule here — but it must
 # CHECK that the crate genuinely lacks the bench/SKILL on `main` before creating
 # (don't blindly mint), not re-emit unconditionally as the old rule did.
+
+# --- New PUBLIC crate → the UN-GATEABLE remainder  [OPUS-5] (#2547) ------------
+# G1 owns the three artifacts that CAN ship in the same PR (bench registration,
+# README, SKILL.md). It deliberately does not — and cannot — require the rest of
+# what a new public surface owes, because those artifacts are produced out-of-band
+# and are judgment calls:
+#
+#   * the website card (`site/src/data/surfaces.ts` is the single IA source for the
+#     nav, the home grid and the Cmd-K palette; a surface page follows separately),
+#   * the mdBook guide chapter (`book/src/SUMMARY.md` + a page, published by
+#     docs.yml — the guide's pages are `{{#include}}` wrappers over the crate
+#     README / SKILL anchors, so the page is a deliberate authoring step), and
+#   * the test-method plan — WHICH of the workspace's methods (proptest, fuzz
+#     target, Miri, Kani, mutation, differential/metamorphic oracle, a conformance
+#     ratchet) actually apply to this crate, and wiring the ones that do.
+#
+# Blocking a merge on any of those would be wrong (the answer is often "none, and
+# here is why"), so they are REACTIVE follow-ons instead — the exact split the
+# design record draws between the proactive and reactive halves (§2.1 vs §2.2).
+#
+# Noise control, learned from the removed bench/SKILL rule (bead sq-l0a0):
+#   * `when_new_crate_public` — an internal `publish = false` stub (47 of the 67
+#     crates today) mints NOTHING, mirroring G1's own stub exemption; and
+#   * `unless_paths` — a PR that already added the website card / guide page in the
+#     same diff mints no follow-on for it.
+# Each rule is separate so one satisfied artifact suppresses only its own follow-on.
+
+[[rule]]
+id = "new-crate-site-advert"
+description = "A new PUBLIC crate landed without a website entry; advertise the surface."
+when_new_paths = ["crates/*/Cargo.toml"]
+when_new_crate_public = true
+unless_paths = [
+  "site/src/data/surfaces.ts",
+  "site/src/app/surface/**",
+  "site/src/app/capabilities/**",
+]
+
+[[rule.create]]
+dedup_key = "site-advert-{crate}"
+title = "site: advertise the new {crate} surface on the website"
+# [OPUS-5] area:site + kind:site → triage promotes to status:ready (role:site).
+labels = ["docs", "kind:site", "area:site"]
+body = """
+Merged PR #{pr} ({pr_title}) added the new public crate `crates/{crate}`, and no
+website entry landed with it.
+
+Add it to the site IA — a `Surface` entry in `site/src/data/surfaces.ts` (slug,
+href, title, blurb, and an HONEST `tier`), which is the single source the sidebar
+nav, the home theme grid and the Cmd-K palette all derive from — plus a
+`site/src/app/surface/<slug>/page.tsx` if the surface warrants its own page.
+
+If the crate is genuinely not a user-facing surface (an internal library that
+happens to be publishable), say so on this issue and close it.
+"""
+
+[[rule]]
+id = "new-crate-guide-docs"
+description = "A new PUBLIC crate landed without an mdBook guide chapter."
+when_new_paths = ["crates/*/Cargo.toml"]
+when_new_crate_public = true
+unless_paths = ["book/src/**"]
+
+[[rule.create]]
+dedup_key = "guide-doc-{crate}"
+title = "docs: add an mdBook guide chapter for the new {crate} surface"
+# [OPUS-5] area:docs → triage promotes to status:ready (role:docs) at creation.
+labels = ["docs", "kind:docs", "area:docs"]
+body = """
+Merged PR #{pr} ({pr_title}) added the new public crate `crates/{crate}`. Its
+README + `SKILL.md` are guaranteed by merge gate G1, but the published guide
+(`book/`, rendered by `.github/workflows/docs.yml`) was not touched.
+
+Add a chapter: a `book/src/` page plus its `SUMMARY.md` entry. Guide pages are
+thin `{{#include}}` wrappers over the canonical `README.md` / `skills/<surface>/SKILL.md`
+anchor regions — single-source the prose from there rather than writing a second
+copy, so the chapter cannot drift.
+
+If the crate does not warrant a guide chapter, note why here and close.
+"""
+
+[[rule]]
+id = "new-crate-test-methods"
+description = "A new PUBLIC crate landed; decide which test methods apply and wire them."
+when_new_paths = ["crates/*/Cargo.toml"]
+when_new_crate_public = true
+
+[[rule.create]]
+dedup_key = "test-methods-{crate}"
+title = "test: wire the applicable test methods for the new crate {crate}"
+# [OPUS-5] area:{crate} is the crate the work lands in; kind:test → role:impl.
+labels = ["kind:test", "area:{crate}"]
+body = """
+Merged PR #{pr} ({pr_title}) added the new public crate `crates/{crate}`.
+A registered benchmark is already guaranteed at merge (gate G1) and the base gate
+runs the workspace test suite. This follow-on covers the methods that CANNOT be
+gated, because whether each applies is a judgment call.
+
+Walk the list, wire the ones that apply, and record on this issue why each
+skipped method does not:
+
+- property-based tests (`proptest`) for any parser / encoder / algebraic invariant;
+- a `fuzz/fuzz_targets/` target for anything that consumes untrusted bytes or text;
+- a differential / metamorphic oracle against an existing implementation or a
+  slower reference path (`.github/workflows/differential.yml`, `metamorph.yml`);
+- the Miri lane (`.github/workflows/miri.yml`) if the crate has any `unsafe`;
+- a Kani proof (`.github/workflows/kani.yml`) for a small, safety-critical invariant;
+- mutation coverage — check the crate's guards actually go red (`mutants-diff.yml`);
+- a conformance ratchet, if the crate implements a spec with a public test suite;
+- the per-crate coverage floor (`scripts/coverage-gate.py`) once the crate is real.
+
+Closing this with "unit tests only, because <reason>" is a legitimate outcome —
+the point is that the decision is made and recorded, not that every method ships.
+"""
 
 # --- Changed public feature → docs / SKILL.md update ---------------------------
 # Trigger: a change under a published crate's surface, the CLI, the HTTP server,

@@ -30,6 +30,15 @@
 #       A `publish = false` stub is internal-only and exempt from (c) — and, via
 #       the same marker, exempt from (a) as well.
 #
+# [OPUS-5] (#2547) G1 owns only the artifacts that CAN ship in the same PR. The
+# rest of what a new PUBLIC crate owes — a website surface entry, an mdBook guide
+# chapter, and a decision about which test methods apply — is produced out-of-band
+# and is a judgment call ("unit tests only, because …" is a legitimate answer), so
+# blocking a merge on it would be wrong. Those arrive as reactive follow-on issues
+# from the `new-crate-site-advert` / `new-crate-guide-docs` / `new-crate-test-methods`
+# rules in scripts/flow-on-rules.toml, which call `crate_is_stub` below so both
+# halves agree on what "a public crate" is.
+#
 # ESCAPE HATCH (design §2.1): `publish = false` in the new crate's Cargo.toml
 # marks it an intentional stub — exempt from the bench (a) and SKILL (c)
 # requirements. The README (b) is still required (a stub still needs a one-line

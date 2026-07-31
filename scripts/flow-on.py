@@ -78,6 +78,11 @@ def _load_script_module(stem: str):
 # the reactive engine and the proactive gate can never drift.
 _pad = _load_script_module("pub_api_diff")
 
+# [OPUS-5] (#2547) The new-crate rules reuse merge gate G1's OWN stub predicate
+# (`publish = false` → an internal stub) rather than re-implementing it, so the
+# proactive gate and the reactive follow-ons agree on what "a public crate" means.
+_gnc = _load_script_module("gate-new-crate")
+
 # [FABLE-5] (#2474) The shared static-triage pass, also used by triage-issue.yml and
 # the retriage cron — flow-on computes each follow-on's routing labels with it so
 # the three triage surfaces can never drift.
@@ -131,6 +136,16 @@ class Rule:
     # not mis-fire the "new top-level circuit" follow-on. Only filters the
     # `when_new_paths` check; other predicates are unaffected.
     exclude_new_paths: list[str] = field(default_factory=list)
+    # [OPUS-5] (#2547) SUPPRESSION: if ANY changed path matches one of these
+    # globs the rule does NOT fire — the PR already did the follow-on work in the
+    # same diff, so minting an issue would be noise. This is the declarative form
+    # of the hard-coded SKILL_PATHS suppression the docs rule uses.
+    unless_paths: list[str] = field(default_factory=list)
+    # [OPUS-5] (#2547) When true the rule fires only if the PR ADDS a crate
+    # manifest for a PUBLIC crate (no `publish = false`). An internal stub — 47 of
+    # this workspace's 67 crates today — needs no website card, guide page or
+    # test-method plan, and G1 exempts it from bench/SKILL for the same reason.
+    when_new_crate_public: bool = False
     when_label: str | None = None
     when_title: str | None = None
     creates: list[CreateTemplate] = field(default_factory=list)
@@ -170,6 +185,8 @@ def load_rules(path: Path) -> list[Rule]:
             when_paths=list(raw.get("when_paths", [])),
             when_new_paths=list(raw.get("when_new_paths", [])),
             exclude_new_paths=list(raw.get("exclude_new_paths", [])),
+            unless_paths=list(raw.get("unless_paths", [])),
+            when_new_crate_public=bool(raw.get("when_new_crate_public", False)),
             when_label=raw.get("when_label"),
             when_title=raw.get("when_title"),
             creates=creates,
@@ -198,6 +215,31 @@ def _first_segment_after(prefix: str, paths: list[str]) -> str | None:
     return None
 
 
+# [OPUS-5] (#2547) A brand-new crate is identified by an ADDED `crates/<x>/Cargo.toml`
+# — the same signal merge gate G1 keys on (scripts/gate-new-crate.py::added_crates).
+_NEW_CRATE_MANIFEST_RE = re.compile(r"^crates/([^/]+)/Cargo\.toml$")
+
+
+def new_crate(added: list[str]) -> str | None:
+    """The name of the first crate whose Cargo.toml was ADDED, else None."""
+    for p in added:
+        m = _NEW_CRATE_MANIFEST_RE.match(p)
+        if m:
+            return m.group(1)
+    return None
+
+
+def crate_is_public(crate: str) -> bool:
+    """True iff the crate is a PUBLIC surface — i.e. NOT a `publish = false` stub.
+
+    Delegates to merge gate G1's predicate so the reactive and proactive halves
+    cannot drift. It reads the manifest from the checkout, which for the merged
+    PR the flow-on workflow runs on contains the added crate. A manifest that is
+    not readable is treated as public — G1's strict default, so an anomaly
+    surfaces as a follow-on rather than being silently swallowed."""
+    return not _gnc.crate_is_stub(crate, [])
+
+
 def build_context(
     pr: int,
     pr_title: str,
@@ -209,7 +251,10 @@ def build_context(
     Prefer ADDED paths for crate/suite (the rules that use them are new-* rules),
     falling back to all changed paths so changed-surface rules still resolve."""
     pool_for_dir = added + changed  # added first so "new crate" wins
-    crate = _first_segment_after("crates/", pool_for_dir)
+    # [OPUS-5] (#2547) Prefer the crate whose MANIFEST was added: on a PR that adds
+    # `crates/foo/` while also touching `crates/bar/src/lib.rs`, path order alone
+    # could name `bar` in a new-crate follow-on's title and dedup key.
+    crate = new_crate(added) or _first_segment_after("crates/", pool_for_dir)
     suite = _first_segment_after("bench/", pool_for_dir) or _first_segment_after("zk/", pool_for_dir)
     surface = _first_segment_after("skills/", pool_for_dir)
     # [OPUS-4.8] sq-fyzq7: the NEW top-level `zk/` circuit family, for the
@@ -299,6 +344,16 @@ def rule_matches(
             new_pool = [p for p in added if not _any_glob_match(rule.exclude_new_paths, [p])]
         if not _any_glob_match(rule.when_new_paths, new_pool):
             return False
+    # [OPUS-5] (#2547) Declarative suppression: the same PR already did the work.
+    if rule.unless_paths and _any_glob_match(rule.unless_paths, changed):
+        return False
+    # [OPUS-5] (#2547) Public-crate refinement for the new-crate rules: an internal
+    # `publish = false` stub gets no website / guide / test-method follow-on, the
+    # same escape hatch G1 gives it for bench + SKILL.
+    if rule.when_new_crate_public:
+        crate = new_crate(added)
+        if not crate or not crate_is_public(crate):
+            return False
     if rule.when_label is not None and rule.when_label not in labels:
         return False
     if rule.when_title is not None and not re.search(rule.when_title, title, re.IGNORECASE):
@@ -363,7 +418,14 @@ def evaluate(
                 f"\n\n> 🤖 SPARQ agent — auto-generated by the flow-on engine "
                 f"(rule `{rule.id}`) from merged PR #{pr}. Reconcile into a bead."
             )
-            labels_full = list(dict.fromkeys(BASE_LABELS + tmpl.labels))
+            # [OPUS-5] (#2547) Labels are placeholder-expanded like the title and
+            # body, so a per-crate routing label (`area:{crate}`) resolves to the
+            # crate the follow-on's work actually lands in. A rule that uses a
+            # placeholder here must guarantee it is non-empty when the rule fires
+            # (`when_new_crate_public` does, for `{crate}`).
+            labels_full = list(
+                dict.fromkeys(BASE_LABELS + [expand(lb, ctx) for lb in tmpl.labels])
+            )
             # [FABLE-5] (#2474) dispatch-visibility: append role/priority/status
             # routing labels at creation (see routing_labels for why the event
             # path can never label these issues).

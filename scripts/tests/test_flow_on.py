@@ -53,6 +53,12 @@ class RuleLoadingTest(unittest.TestCase):
             # [OPUS-4.8] ZK circuit gate-count follow-on (a PR-description
             # deliverable, present in the rules file) — enforce the contract.
             "new-zk-circuit-gatecount",
+            # [OPUS-5] (#2547) The un-gateable remainder a new PUBLIC crate owes,
+            # split one rule per artifact so a satisfied artifact suppresses only
+            # its own follow-on.
+            "new-crate-site-advert",
+            "new-crate-guide-docs",
+            "new-crate-test-methods",
         ):
             self.assertIn(required, ids)
         # [OPUS-4.8] (bead sq-l0a0) The new-crate bench/SKILL follow-on rule was
@@ -111,6 +117,113 @@ class NewCrateTest(unittest.TestCase):
         added: list[str] = []
         fos = self._eval(changed=changed, added=added)
         self.assertNotIn("new-crate-bench-and-skill", {fo.rule_id for fo in fos})
+
+
+class NewPublicCrateFollowOnTest(unittest.TestCase):
+    """[OPUS-5] (#2547) The un-gateable half of new-crate completeness.
+
+    G1 blocks the merge until a new crate ships a registered bench + README +
+    SKILL. The rest of what a new PUBLIC surface owes — a website card, an mdBook
+    guide chapter, and a decision about which test methods apply — is produced
+    out-of-band and is a judgment call, so it is minted as follow-on issues here.
+
+    The public/stub distinction is read from the REAL manifests on disk via merge
+    gate G1's own predicate, so these tests use two real crates rather than mocks:
+    a publishable one and a `publish = false` stub."""
+
+    PUBLIC_CRATE = "sparq-core"
+    STUB_CRATE = "sparq-canon"
+    RULE_IDS = {"new-crate-site-advert", "new-crate-guide-docs", "new-crate-test-methods"}
+
+    def setUp(self):
+        self.rules = flow_on.load_rules(RULES)
+        # Guard the fixtures: if either crate's publish status ever flips, fail
+        # HERE with a clear message instead of silently voiding the assertions.
+        self.assertTrue(
+            flow_on.crate_is_public(self.PUBLIC_CRATE),
+            f"fixture crate {self.PUBLIC_CRATE} is no longer publishable",
+        )
+        self.assertFalse(
+            flow_on.crate_is_public(self.STUB_CRATE),
+            f"fixture crate {self.STUB_CRATE} is no longer a publish=false stub",
+        )
+
+    def _eval(self, changed, added, title="feat: new crate"):
+        fos = flow_on.evaluate(self.rules, 900, title, changed, added, [])
+        return {fo.rule_id: fo for fo in fos if fo.rule_id in self.RULE_IDS}
+
+    def test_new_public_crate_mints_site_guide_and_test_method_follow_ons(self):
+        added = [
+            f"crates/{self.PUBLIC_CRATE}/Cargo.toml",
+            f"crates/{self.PUBLIC_CRATE}/src/lib.rs",
+            f"crates/{self.PUBLIC_CRATE}/README.md",
+        ]
+        changed = added + ["bench/benchmarks.toml", "skills/sparql/SKILL.md"]
+        by_rule = self._eval(changed=changed, added=added)
+        self.assertEqual(set(by_rule), self.RULE_IDS)
+        self.assertEqual(
+            {fo.dedup_key for fo in by_rule.values()},
+            {
+                f"site-advert-{self.PUBLIC_CRATE}",
+                f"guide-doc-{self.PUBLIC_CRATE}",
+                f"test-methods-{self.PUBLIC_CRATE}",
+            },
+        )
+
+    def test_internal_stub_crate_mints_nothing(self):
+        # A `publish = false` stub is exempt — the same escape hatch G1 gives it
+        # for bench + SKILL. 47 of the workspace's 67 crates are stubs today, so
+        # without this the rules would be a noise firehose.
+        added = [f"crates/{self.STUB_CRATE}/Cargo.toml"]
+        self.assertEqual(self._eval(changed=added, added=added), {})
+
+    def test_site_entry_in_the_same_pr_suppresses_only_the_site_follow_on(self):
+        added = [f"crates/{self.PUBLIC_CRATE}/Cargo.toml"]
+        changed = added + ["site/src/data/surfaces.ts"]
+        by_rule = self._eval(changed=changed, added=added)
+        self.assertNotIn("new-crate-site-advert", by_rule)
+        self.assertIn("new-crate-guide-docs", by_rule)
+        self.assertIn("new-crate-test-methods", by_rule)
+
+    def test_guide_page_in_the_same_pr_suppresses_only_the_guide_follow_on(self):
+        added = [f"crates/{self.PUBLIC_CRATE}/Cargo.toml"]
+        changed = added + ["book/src/SUMMARY.md", "book/src/getting-started/new.md"]
+        by_rule = self._eval(changed=changed, added=added)
+        self.assertNotIn("new-crate-guide-docs", by_rule)
+        self.assertIn("new-crate-site-advert", by_rule)
+        self.assertIn("new-crate-test-methods", by_rule)
+
+    def test_modifying_an_existing_crate_mints_nothing(self):
+        # The manifest must be ADDED: an edit to an existing crate is not a new
+        # surface and must not re-mint the whole set on every touch.
+        changed = [
+            f"crates/{self.PUBLIC_CRATE}/Cargo.toml",
+            f"crates/{self.PUBLIC_CRATE}/src/lib.rs",
+        ]
+        self.assertEqual(self._eval(changed=changed, added=[]), {})
+
+    def test_test_method_follow_on_is_routed_to_the_new_crate_area(self):
+        # The per-crate `area:{crate}` label is placeholder-expanded, so the
+        # follow-on routes to the crate its work lands in (an unexpanded
+        # `area:{crate}` literal would be a garbage label on a real issue).
+        added = [f"crates/{self.PUBLIC_CRATE}/Cargo.toml"]
+        fo = self._eval(changed=added, added=added)["new-crate-test-methods"]
+        self.assertIn(f"area:{self.PUBLIC_CRATE}", fo.labels)
+        self.assertNotIn("area:{crate}", fo.labels)
+
+    def test_placeholder_names_the_added_crate_not_another_touched_one(self):
+        # A PR that adds a file to an EXISTING crate as well as the new crate's
+        # manifest must name the crate whose MANIFEST was added — picking the
+        # first `crates/<x>/` path in the diff would name the wrong one here.
+        added = [
+            "crates/sparq-engine/src/exec/new_join.rs",
+            f"crates/{self.PUBLIC_CRATE}/Cargo.toml",
+        ]
+        changed = list(added)
+        by_rule = self._eval(changed=changed, added=added)
+        for fo in by_rule.values():
+            self.assertIn(self.PUBLIC_CRATE, fo.dedup_key)
+            self.assertNotIn("sparq-engine", fo.dedup_key)
 
 
 class ChangedSurfaceTest(unittest.TestCase):
@@ -341,6 +454,11 @@ class RoutingLabelsTest(unittest.TestCase):
             # new-zk-circuit-gatecount
             dict(changed=["zk/arith/Nargo.toml"], added=["zk/arith/Nargo.toml"],
                  labels=[], title="zk arith", pub_changed=None),
+            # [OPUS-5] (#2547) the three new-PUBLIC-crate rules (site / guide /
+            # test-methods) — sparq-core is a real publishable crate on disk.
+            dict(changed=["crates/sparq-core/Cargo.toml"],
+                 added=["crates/sparq-core/Cargo.toml"], labels=[],
+                 title="feat: new crate", pub_changed=None),
         ]
         out = []
         for fx in fixtures:
@@ -369,6 +487,11 @@ class RoutingLabelsTest(unittest.TestCase):
         self.assertIn("role:docs", by_rule["new-bench-dashboard-row"].labels)
         self.assertIn("role:perf", by_rule["competitor-feature-gather"].labels)
         self.assertIn("role:soundness", by_rule["new-zk-circuit-gatecount"].labels)
+        # [OPUS-5] (#2547) kind:site → role:site (the website card is site work);
+        # kind:test → role:impl (wiring a fuzz target / proptest is impl work).
+        self.assertIn("role:site", by_rule["new-crate-site-advert"].labels)
+        self.assertIn("role:docs", by_rule["new-crate-guide-docs"].labels)
+        self.assertIn("role:impl", by_rule["new-crate-test-methods"].labels)
         for fo in by_rule.values():
             self.assertIn("priority:P3", fo.labels, fo.rule_id)
 
