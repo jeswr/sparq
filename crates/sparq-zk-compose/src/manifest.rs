@@ -1840,26 +1840,42 @@ pub struct ProofManifest {
     /// # Why it exists (the same-constant-layout ambiguity)
     /// Without it the verifier resolves pattern→scan by constant MEMBERSHIP
     /// (`crate::verifier`'s `scan_matches_pattern`), so two query patterns
-    /// sharing a constant layout — e.g. `{ ?s <age> ?v . ?v <age> ?o }`, both
+    /// sharing a constant layout — e.g. `{ ?x <age> ?v . ?x <age> ?c }`, both
     /// `(?, <age>, ?)` — are BOTH matched by the SAME scan sub-proof and the
     /// verifier cannot tell which one it was meant to answer. The FILTER gate
     /// then has to fail CLOSED and demand the filter be discharged at EVERY slot
     /// the filtered variable occupies across EVERY pattern the scan matches
-    /// (sq-q9r5e / audit L-1) — correct, but an over-demand: an honest prover
-    /// with two DISTINCT scans answering two same-layout patterns, where the
-    /// filtered variable sits at different slots in each, cannot build an
-    /// accepted manifest. Declaring the mapping lets the verifier demand exactly
-    /// the slots the DECLARED answering scan binds.
+    /// (sq-q9r5e / audit L-1) — correct, but an over-demand. Under
+    /// `FILTER(?v >= 18)`, an honest prover answering pattern 0 from `{alice age
+    /// 25}` and pattern 1 from `{alice age 5}` presents a GENUINE joined solution
+    /// (`?x = alice`, `?v = 25`, `?c = 5`) — yet membership also matches the
+    /// second scan to pattern 0 and demands a true-verdict `?v >= 18` proof over
+    /// its `5`, which no honest prover can supply. Declaring the mapping lets the
+    /// verifier demand exactly the slots the DECLARED answering scan binds.
     ///
     /// # It is DECLARED, not trusted — the verifier re-checks it
-    /// `crate::verifier`'s `bind_pattern_scans` gate rejects a declaration that
-    /// is mis-sized (not one entry per query pattern), leaves a pattern
+    /// `crate::verifier`'s `resolve_pattern_scans` gate rejects a declaration
+    /// that is mis-sized (not one entry per query pattern), leaves a pattern
     /// unanswered (empty entry), names a sub-proof that is out of range / not a
     /// scan / whose bb-bound `pattern_is_const`/`pattern_const_enc` do NOT match
     /// the pattern's constants, or leaves a scan sub-proof DANGLING (declared for
-    /// no pattern at all — its disclosed rows would carry no FILTER/attribution
-    /// obligation). So a declaration can only ever be a sub-set of the membership
-    /// relation, and every disclosed scan row is attributed to some pattern.
+    /// no pattern at all). So a declaration can only ever be a sub-set of the
+    /// membership relation, and every disclosed scan is attributed to a pattern.
+    ///
+    /// # It is a READING CLAIM, and that puts an obligation on the CONSUMER
+    /// Declaring NARROWS what acceptance certifies — from "no constant-compatible
+    /// reading of the disclosed rows binds the filtered variable to an ungated
+    /// value" down to "the DECLARED reading is gated". In the example above the
+    /// `5` is disclosed and never filter-gated. Reading it at pattern 0 is a
+    /// DIFFERENT solution the manifest does not claim, and a prover that wants to
+    /// claim it must declare that scan for pattern 0 — which is then rejected,
+    /// so a declaration cannot present a FILTER-violating solution as proved. But
+    /// a relying party MUST read the disclosed rows AS `pattern_scans` says; one
+    /// that instead re-evaluates the query over the disclosed rows alone can
+    /// recover solutions this manifest proves nothing about. That reading rule is
+    /// an interface contract, NOT a cryptographically established property, and
+    /// no soundness claim is made for it. A consumer unwilling to honour it
+    /// should refuse a manifest whose `pattern_scans` is non-empty.
     ///
     /// # EMPTY = not declared (legacy manifests keep the fail-closed behaviour)
     /// An empty vector means "no declaration"; the verifier falls back to the

@@ -4664,20 +4664,39 @@ fn scan_matches_pattern(inputs: &ProofInputs, consts: &[Option<oxrdf::Term>; 3])
 /// - **INFERRED** (`pattern_scans` empty — legacy manifests). Constant
 ///   MEMBERSHIP (`scan_matches_pattern`), the pre-existing behaviour.
 ///
-/// # Why declaring can only narrow, and why that is sound
+/// # What a declaration CHANGES about the acceptance statement (read this)
 /// The `PatternScanMismatch` check forces every declared `(pattern, scan)` pair
 /// to satisfy `scan_matches_pattern`, so a valid declaration is always a SUBSET
-/// of the inferred membership relation. Downstream gates therefore see at most
-/// the obligations the inference would have produced — a declaration RELAXES,
-/// it never weakens a check the prover could not already have satisfied.
+/// of the inferred membership relation and downstream gates see at most the
+/// obligations the inference would have produced. That is a genuine RELAXATION,
+/// and it NARROWS what acceptance certifies:
+/// - **Without** a declaration, acceptance says: no disclosed scan row can be
+///   read — under ANY constant-compatible pattern assignment — as binding the
+///   filtered variable to a value no `filter_int` proved true.
+/// - **With** one, acceptance says only: under the DECLARED reading, every
+///   disclosed row's filtered-variable slots carry a true-verdict proof.
 ///
-/// The relaxation is sound because the declaration is also what a relying party
-/// reads the disclosed rows AS: `pattern_scans[pi]` is the manifest's own claim
-/// about which sub-proofs' rows constitute pattern `pi`'s solution. Two
-/// obligations make that claim total, so no disclosed row escapes gating:
-/// (1) every pattern is answered (no empty entry), and (2) every scan sub-proof
-/// is declared for at least one pattern (no dangling scan). Without (2) a prover
-/// could disclose an extra same-layout scan whose rows are gated by nothing.
+/// The gap is real, and the no-empty / no-dangling rules do NOT close it. A scan
+/// declared for pattern `pj` may still MATCH pattern `pi` by constants, and its
+/// rows read at `pi` can bind the filtered variable to a violating value that no
+/// sub-proof gates. Concretely, for `{ ?x <age> ?v . ?x <age> ?c FILTER(?v>=18)}`
+/// over the committed graphs `{alice age 25}` and `{alice age 5}`, declaring
+/// scan(25)→pattern 0 and scan(5)→pattern 1 is ACCEPTED while the `5` is never
+/// filter-gated.
+///
+/// What the declaration still forecloses is CLAIMING that reading: a prover that
+/// wants the `?v = 5` solution must declare scan(5) for pattern 0, and is then
+/// rejected because the `5` slot has no gating edge (witness
+/// `pattern_scans_cannot_claim_an_ungated_reading`). So a declaration cannot
+/// present a FILTER-violating solution as proved — but it does move an
+/// obligation onto the CONSUMER: the disclosed rows must be read AS
+/// `pattern_scans` says. A relying party that ignores the declaration and
+/// re-evaluates the query over the disclosed rows alone can recover solutions
+/// this manifest proves nothing about. That reading rule is a documented
+/// interface contract, NOT a cryptographically established property, and no
+/// soundness claim is made for it (sq-qhy4 — no external audit). A consumer
+/// unwilling to honour it should refuse a manifest whose `pattern_scans` is
+/// non-empty and demand the membership regime instead.
 ///
 /// # What deliberately still uses MEMBERSHIP
 /// `global_attributions` (the Q6 cross-graph obligation namespace) and
