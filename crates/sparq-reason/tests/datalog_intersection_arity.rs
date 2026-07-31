@@ -33,6 +33,11 @@ use std::path::PathBuf;
 const EX: &str = "http://ex/";
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 
+/// An id-level triple, the shape both `datalog::eval`'s input facts and its closure use.
+type Triple = [Id; 3];
+/// An individual paired with the intersection classes it must be derived to belong to.
+type Membership = (Id, Vec<Id>);
+
 /// Prefixes + `scm-int`'s list walk (`intTail`), shared by both rule shapes: the encodings
 /// derive the guard relation once and both `cls-int1` forms sit downstream of it.
 const PREAMBLE: &str = r#"
@@ -72,7 +77,7 @@ fn iri(d: &mut Dict, local: &str) -> Id {
 /// individuals typed with a prefix of `A B C D` of length 1..=4.
 ///
 /// Returns the facts plus the interned ids used by the assertions.
-fn fixture(d: &mut Dict) -> (Vec<[Id; 3]>, Vec<(Id, Vec<Id>)>) {
+fn fixture(d: &mut Dict) -> (Vec<Triple>, Vec<Membership>) {
     let ty = d.intern_iri(RDF_TYPE);
     let inter = d.intern_iri("http://www.w3.org/2002/07/owl#intersectionOf");
     let first = d.intern_iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#first");
@@ -108,12 +113,12 @@ fn fixture(d: &mut Dict) -> (Vec<[Id; 3]>, Vec<(Id, Vec<Id>)>) {
 /// Derived `rdf:type` facts whose object is one of the intersection classes — i.e. exactly
 /// the `cls-int1` memberships, with the fixture's own type assertions and the helper
 /// relations filtered out.
-fn memberships(d: &mut Dict, facts: &[[Id; 3]], src: &str) -> FxHashSet<[Id; 3]> {
+fn memberships(d: &mut Dict, facts: &[Triple], src: &str) -> FxHashSet<Triple> {
     let ty = d.intern_iri(RDF_TYPE);
     let classes: FxHashSet<Id> = (1..=4usize).map(|n| iri(d, &format!("I{}", n))).collect();
     let program = parse_program(d, src).expect("program parses");
     let closure = eval(d, facts, &program).expect("program is stratifiable");
-    let inputs: FxHashSet<[Id; 3]> = facts.iter().copied().collect();
+    let inputs: FxHashSet<Triple> = facts.iter().copied().collect();
     closure
         .into_iter()
         .filter(|f| !inputs.contains(f) && f[1] == ty && classes.contains(&f[2]))
@@ -124,7 +129,7 @@ fn memberships(d: &mut Dict, facts: &[[Id; 3]], src: &str) -> FxHashSet<[Id; 3]>
 fn generic_cls_int1_covers_every_list_arity() {
     let mut d = Dict::new();
     let (facts, expected) = fixture(&mut d);
-    let want: FxHashSet<[Id; 3]> = {
+    let want: FxHashSet<Triple> = {
         let ty = d.intern_iri(RDF_TYPE);
         expected
             .iter()
@@ -152,7 +157,7 @@ fn arity_capped_cls_int1_misses_three_plus_conjunct_intersections() {
     // The bug the generalisation fixes: a 3+-conjunct intersection derives NOTHING.
     let ty = d.intern_iri(RDF_TYPE);
     let (i3, i4) = (iri(&mut d, "I3"), iri(&mut d, "I4"));
-    let missed: FxHashSet<[Id; 3]> = generic.difference(&capped).copied().collect();
+    let missed: FxHashSet<Triple> = generic.difference(&capped).copied().collect();
     assert!(
         !missed.is_empty() && missed.iter().all(|f| f[2] == i3 || f[2] == i4),
         "the arity-capped decode must miss the arity-3/4 memberships and only those; \
@@ -168,7 +173,7 @@ fn arity_capped_cls_int1_misses_three_plus_conjunct_intersections() {
     // ...and the argument that the pinned LUBM closure counts are unaffected: on the list
     // lengths LUBM actually uses (1 and 2), the two shapes agree fact-for-fact.
     let (i1, i2) = (iri(&mut d, "I1"), iri(&mut d, "I2"));
-    let short = |s: &FxHashSet<[Id; 3]>| -> FxHashSet<[Id; 3]> {
+    let short = |s: &FxHashSet<Triple>| -> FxHashSet<Triple> {
         s.iter()
             .copied()
             .filter(|f| f[2] == i1 || f[2] == i2)
