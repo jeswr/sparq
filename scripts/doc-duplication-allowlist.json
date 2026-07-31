@@ -1,0 +1,4 @@
+{
+ "_doc": "File-PAIR exemptions for scripts/check-doc-duplication.py (bead sq-w9sr; specification: research/docs-site-single-sourcing-anti-drift.md §4). This is the COARSE escape hatch — it exempts every shared block between two named files, so it is for pairs whose whole relationship is a sanctioned mirror. For a single intentionally-repeated block, prefer the inline `<!-- doc-duplication-allow: <why> -->` marker, which is narrower and reviewable in the diff. Each entry needs `a`, `b` (repo-relative paths, fnmatch globs allowed) and a `why`; the checker RAISES on an entry missing any of the three, and its --self-test parses this file so a malformed entry reds the docs-quality gate. NEVER add a pair to make a real duplicate pass: the gate's finding count is a direct measure of un-single-sourced content, so an exemption is a claim that the repeat is deliberate and cannot drift. Single-source the block instead (§5 injection, §6 tested examples).",
+ "pairs": []
+}

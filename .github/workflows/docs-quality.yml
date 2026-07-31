@@ -62,6 +62,15 @@
 #                       documents the invariant in prose) + a narrow `// perf-neutrality-allow:
 #                       <reason>` per-line opt-out for a cold path. scripts/check-no-dyn-dispatch.py;
 #                       bead sq-0ja86. Deterministic, grep-only, no network, no build.
+#     • doc-duplication — (sq-w9sr / #5019, spec: research/docs-site-single-sourcing-anti-drift.md
+#                       §4) EXACT tier: an identical normalised block in two different files on
+#                       the published doc surface (root *.md + docs/ + book/src/ + skills/ +
+#                       crates/*/README.md) fails the build. Normalisation strips markdown link
+#                       TARGETS, so the same paragraph copied between two mounts still matches.
+#                       Injected/`{{#include}}`d content exists once in the source tree, so this
+#                       sees only HAND-copies. Escapes: an inline `doc-duplication-allow: <why>`
+#                       marker, or a file-PAIR entry with a `why` in
+#                       scripts/doc-duplication-allowlist.json. The NEAR tier is advisory (below).
 #     • readme-template — crate-README length cap + 🚀/✨/📚 sections + License
 #                       (scripts/check-readme-template.py --enforce). PROMOTED from advisory
 #                       to HARD by sq-8ic6's deferred half once the sq-9jw5 README-overhaul
@@ -81,6 +90,10 @@
 #                       not-yet-clean dirs (bench/, .claude/) so any backlog stays visible.
 #     • vale          — prose hygiene: weasel words, wordy phrases, adjective puffery.
 #     • external-links — lychee online: dead http(s) links (network-flaky → advisory).
+#     • doc-duplication (near tier) — the advisory half of the gate above: 8-gram Jaccard
+#                       over the same surface. ADVISORY because of a BACKLOG (measured 20
+#                       hand-copied pairs, all inspected), not a tool defect. Promotes by
+#                       moving the step into quick-gates and dropping `--advisory`.
 #     • docs-duplication — jscpd copy/paste detection over the doc surface, configured by the
 #                       repo-root `.jscpd.json`. ADVISORY, and the reason is a MEASURED tool
 #                       limitation, not a backlog — see the step body for the evidence: jscpd's
@@ -321,6 +334,36 @@ jobs:
       # the build instead of advising. The check is deterministic (grep-only, no network). [OPUS-4.8]
       - name: no-perf-numbers (docs) — GATING
         run: python3 scripts/check-no-perf-numbers.py --enforce
+
+      # ---- doc-duplication (exact tier) ----
+      # [OPUS-5] sq-w9sr / issue #5019, specified in
+      # research/docs-site-single-sourcing-anti-drift.md §4. The docs mandate is a site that
+      # cannot silently drift from the canonical prose: where content must appear twice it is
+      # INJECTED at build time, not maintained twice. A `{{#include}}`d region exists exactly
+      # ONCE in the source tree, so a scanner over the committed markdown sees only the
+      # HAND-copies — which is what makes this gate cheap (it needs no knowledge of any
+      # injection mechanism) and its finding count a direct measure of un-single-sourced content.
+      #
+      # EXACT tier GATES from day one: an identical normalised block in two different files on
+      # the published surface (root *.md + docs/ + book/src/ + skills/ + crates/*/README.md)
+      # fails the build. Normalisation strips markdown link TARGETS while keeping link text —
+      # the load-bearing step, since a paragraph copied between two mounts usually differs ONLY
+      # in whether its links are repo-relative or absolute. Measured GREEN on this tree (0 exact
+      # pairs across 1987 comparable blocks in 142 files), so gating costs nothing today and
+      # stops the next hand-copy. The NEAR tier is the advisory half, in quick-advisory below.
+      # Escapes are narrow and reviewed in the diff: an inline `<!-- doc-duplication-allow:
+      # <why> -->` on the block, or a file-PAIR entry with a `why` in
+      # scripts/doc-duplication-allowlist.json — never a surface exclusion.
+      # Deterministic: stdlib-only, no network, no build.
+      #
+      # The self-test runs in this same HARD job, per the repo's standing rule for every gate:
+      # hermetic fixtures prove the checker FIRES on a planted duplicate (including one that
+      # differs only in its link targets) and stays QUIET on distinct prose and on each
+      # sanctioned escape, so a coverage regression also reds ci-summary.
+      - name: Self-test the doc-duplication gate (both directions)
+        run: python3 scripts/check-doc-duplication.py --self-test
+      - name: doc-duplication (exact tier) — no hand-copied blocks across doc locations — GATING
+        run: python3 scripts/check-doc-duplication.py
 
       # ---- former job: no-dyn-dispatch (substrate) ----
       # [OPUS-4.8] sq-0ja86 (epic sq-6tykl / sq-qonbz — the shared zero-overhead eval substrate):
@@ -1294,6 +1337,30 @@ jobs:
             console.log("and judge a finding for yourself.");
           ' >> "$GITHUB_STEP_SUMMARY" \
             || echo "⚠️ docs-duplication: summary generation failed — see the step log." >> "$GITHUB_STEP_SUMMARY"
+
+      # ---- doc-duplication (near tier) ----
+      # [OPUS-5] sq-w9sr / issue #5019 — the ADVISORY half of the §4 two-tier gate whose
+      # exact half gates in quick-gates above. Two structural differences from the jscpd
+      # step above, which is why both exist: this one is markdown-aware (it strips link
+      # TARGETS, YAML frontmatter and `BEGIN-INJECT` regions before comparing, so a
+      # paragraph copied between two mounts still matches), and its findings are FILE
+      # PAIRS on the published doc surface rather than token clones.
+      #
+      # WHY ADVISORY, and it is a BACKLOG not a tool defect (§4): 20 near-duplicate pairs
+      # exist on the surface today — the mutual `*-wasm` how-to stanzas, the SKILL.md <->
+      # crate-README code examples §3 names as the dominant duplicate kind, and the two
+      # engine-facade seam READMEs. Every one of the 20 was read by hand when this landed
+      # and is a genuine hand-copy, so the threshold is not decorative; gating on day one
+      # would simply red every merge on that backlog. Closing it is §10 items 2 (the
+      # BEGIN-INJECT generator) and 3 (migrating the duplicated code examples into
+      # crates/*/examples with ANCHOR regions, injected into both consumers).
+      # PROMOTION is one edit: MOVE this step into the quick-gates job and drop
+      # `--advisory` (the registry entry for this job stays, since its other steps do).
+      # `--advisory` is what makes the step exit 0 on findings; the job-level
+      # continue-on-error is defence-in-depth only (PR #42: it does not stop a check-run
+      # concluding failure). Deterministic: stdlib-only, no network, no build.
+      - name: doc-duplication (near tier, advisory) — 8-gram Jaccard over the published doc surface
+        run: python3 scripts/check-doc-duplication.py --near --advisory
 
       # ---- former job: vale (prose, advisory) ----
       - name: vale (prose, advisory) — vendored styles, no network
