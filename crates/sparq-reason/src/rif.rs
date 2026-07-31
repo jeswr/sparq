@@ -71,12 +71,21 @@
 //!    is still range-restriction checked and then dropped at lowering, deriving
 //!    nothing (vacuously true, and monotone: it could never have contributed a
 //!    fact).
+//!    The shared tower is exact only within an `i128` mantissa, so a WELL-FORMED
+//!    `xsd:integer`/`xsd:decimal` beyond that range is classified out of it. Such a
+//!    pair is NOT left undecidable: when both sides are exact-tier lexicals they are
+//!    compared EXACTLY by `sparq_substrate::numeric::cmp_plain_decimal` (string
+//!    arithmetic, arbitrary precision, no `f64` promotion), so
+//!    `"+1<39 digits>" = "1<39 digits>"` is TRUE and an unequal huge pair is vacuous.
+//!    [OPUS-5]
 //!    Everything else stays fail-closed with [`RifError::DistinctGroundEqual`] —
 //!    the NON-numeric literal-equality half (`pred:boolean-equal`,
 //!    `pred:literal-not-identical` over strings/booleans/dates), an IRI or `List`
-//!    operand, an ill-formed numeric lexical, and a `NaN` operand (for which
-//!    `cmp_relational` reports a type error rather than a verdict). That half is
-//!    still deferred; the front-end refuses rather than answering incorrectly.
+//!    operand, an ill-formed numeric lexical, a `NaN` operand (for which
+//!    `cmp_relational` reports a type error rather than a verdict), and an
+//!    out-of-tower exact-tier value paired with an `xsd:float`/`xsd:double` operand
+//!    (which would need the float's exact decimal expansion). Those stay deferred;
+//!    the front-end refuses rather than answering incorrectly.
 //!    Because substitution runs to a fixpoint
 //!    FIRST, a chained `?x = ?y , ?y = "2"^^xsd:decimal` reduces both sides to the
 //!    constant and the ground-identity / value-space checks are re-run on the
@@ -121,7 +130,7 @@ use sparq_core::dict::{Dict, Id};
 // this crate's `compare`, `datalog` and `dtype` paths), so no second numeric
 // comparison core enters the reasoner. The `numeric` slice is a NON-optional dep of
 // this crate (see Cargo.toml), so this pulls in no new dependency and no new feature.
-use sparq_substrate::numeric::{as_numeric, Num};
+use sparq_substrate::numeric::{as_numeric, cmp_plain_decimal, Num};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -130,6 +139,8 @@ use std::fmt;
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const RDFS_SUBCLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
 const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+/// The one EXACT non-integer numeric tier — see [`exact_decimal_lexical`]. [OPUS-5]
+const XSD_DECIMAL: &str = "http://www.w3.org/2001/XMLSchema#decimal";
 /// N3 builtin namespaces the RIF builtins lower onto (the chainer recognises these).
 const MATH: &str = "http://www.w3.org/2000/10/swap/math#";
 const STRING: &str = "http://www.w3.org/2000/10/swap/string#";
@@ -176,7 +187,10 @@ pub const UNIMPLEMENTED: &[&str] = &[
      DistinctGroundEqual (sq-anyad). The NUMERIC half IS implemented: distinct ground \
      numeric literals are decided by the shared substrate comparator Num::cmp_relational \
      (sq-v5evr, issue #1646), so \"1\"^^xsd:integer = \"1.0\"^^xsd:decimal holds and an \
-     unequal numeric pair makes the rule vacuous. Variable and mixed body Equal (?x=?y, \
+     unequal numeric pair makes the rule vacuous; an integer/decimal beyond that tower's \
+     i128 mantissa is decided EXACTLY by cmp_plain_decimal string arithmetic, and only \
+     such an out-of-tower value paired with an xsd:float/xsd:double operand stays \
+     fail-closed. Variable and mixed body Equal (?x=?y, \
      ?x=t) are handled soundly by compile-time substitution/unification (sq-26vwp); body \
      t=t works.",
     "guard predicates (pred:is-literal-integer etc.) DEFERRED: would require inventing \
@@ -966,9 +980,11 @@ fn resolve_body_equalities(rule: &Rule) -> Result<Resolved, RifError> {
 }
 
 /// The typed numeric value of a ground RIF term, or `None` when the term is not a
-/// well-formed numeric literal (an IRI, a `List`, a non-numeric datatype such as
-/// `xsd:boolean`/`xsd:string`, an ill-formed lexical, or an unparseable datatype
-/// IRI). Delegates to the SHARED substrate classifier
+/// numeric literal the tower can REPRESENT (an IRI, a `List`, a non-numeric datatype
+/// such as `xsd:boolean`/`xsd:string`, an ill-formed lexical, an unparseable datatype
+/// IRI — **or** a well-formed `xsd:integer`/`xsd:decimal` whose exact value is outside
+/// the tower's `i128` mantissa; [`exact_decimal_lexical`] is the fallback that keeps
+/// those decidable). Delegates to the SHARED substrate classifier
 /// `sparq_substrate::numeric::as_numeric` — the substrate's public literal →
 /// numeric-tower classifier, shared with sparq-engine's value path, so the RIF
 /// front-end can never diverge from it on what *is* a number.
@@ -983,24 +999,64 @@ fn numeric_value(t: &Term) -> Option<Num> {
     }
 }
 
+/// The plain-decimal lexical of a ground term in an **EXACT** numeric tier (an XSD
+/// integer datatype or `xsd:decimal`), carrying NO magnitude bound — `None` otherwise.
+///
+/// This is the arbitrary-precision escape hatch for [`ground_value_equal`]: [`Num`] is
+/// exact only within an `i128` mantissa, so a perfectly well-formed
+/// `xsd:integer`/`xsd:decimal` beyond that range is classified out by `as_numeric` and
+/// would otherwise be left undecidable. Keeping the lexical as a STRING lets
+/// `sparq_substrate::numeric::cmp_plain_decimal` compare it exactly by string
+/// arithmetic — no `f64` promotion, so no lossy verdict. An integer lexical must carry
+/// no `.` at all (`"1.5"^^xsd:integer` is ill-formed and stays fail-closed); the digit
+/// shape itself is validated by `cmp_plain_decimal`. [OPUS-5]
+fn exact_decimal_lexical(t: &Term) -> Option<&str> {
+    match t {
+        Term::Lit { lex, datatype } if sparq_core::is_integer_datatype(datatype.as_str()) => {
+            if lex.contains('.') {
+                None
+            } else {
+                Some(lex.as_str())
+            }
+        }
+        Term::Lit { lex, datatype } if datatype.as_str() == XSD_DECIMAL => Some(lex.as_str()),
+        _ => None,
+    }
+}
+
 /// Decide a body `Equal` between two DISTINCT ground terms by **numeric value-space
 /// equality**. [SONNET-4.6] sq-anyad — the numeric half of the deferral, unblocked by
 /// the substrate comparator `Num::cmp_relational` (sq-v5evr, issue #1646).
 ///
-/// * `Some(true)` / `Some(false)` — both sides are well-formed numeric literals and
-///   the comparator decided them. Comparison is across the XSD numeric tiers
-///   (integer / decimal / float / double), so `"1"^^xsd:integer` equals
-///   `"1.0"^^xsd:decimal` and `"1.0E0"^^xsd:double`.
+/// * `Some(true)` / `Some(false)` — the pair was decided. Either both sides are
+///   representable in the shared tower and `Num::cmp_relational` compared them across
+///   the XSD numeric tiers (integer / decimal / float / double), so `"1"^^xsd:integer`
+///   equals `"1.0"^^xsd:decimal` and `"1.0E0"^^xsd:double`; or — when one side is a
+///   well-formed `xsd:integer`/`xsd:decimal` too large for the tower's `i128` mantissa
+///   — both sides are exact-tier lexicals and
+///   `sparq_substrate::numeric::cmp_plain_decimal` compared them EXACTLY by string
+///   arithmetic, at arbitrary precision and with no `f64` promotion. [OPUS-5]
 /// * `None` — NOT decidable here, so the caller fails closed: a non-numeric literal
 ///   on either side (`pred:boolean-equal`, `pred:literal-not-identical` over
 ///   strings / booleans / dates — the half of sq-anyad that is still deferred), an
-///   IRI or `List` operand, an ill-formed numeric lexical, or a `NaN` operand
+///   IRI or `List` operand, an ill-formed numeric lexical, a `NaN` operand
 ///   (`cmp_relational` reports NaN as a type error rather than a verdict, and this
-///   front-end refuses rather than choosing an answer for it).
+///   front-end refuses rather than choosing an answer for it), or an out-of-tower
+///   exact-tier value paired with an `xsd:float`/`xsd:double` operand (deciding that
+///   would need the exact decimal expansion of the binary float — a wider seam than
+///   this bead, tracked rather than guessed).
 fn ground_value_equal(l: &Term, r: &Term) -> Option<bool> {
-    let a = numeric_value(l)?;
-    let b = numeric_value(r)?;
-    a.cmp_relational(b).map(|o| o == Ordering::Equal)
+    match (numeric_value(l), numeric_value(r)) {
+        (Some(a), Some(b)) => a.cmp_relational(b).map(|o| o == Ordering::Equal),
+        // At least one side is not tower-representable. It can still be a WELL-FORMED
+        // integer/decimal beyond the `i128` mantissa — decide those exactly rather than
+        // reporting a valid pair as undecidable. [OPUS-5]
+        _ => {
+            let a = exact_decimal_lexical(l)?;
+            let b = exact_decimal_lexical(r)?;
+            cmp_plain_decimal(a, b).map(|o| o == Ordering::Equal)
+        }
+    }
 }
 
 /// Insert `v -> t` into `subst`, keeping the map idempotent (every existing value
@@ -1684,8 +1740,15 @@ mod tests {
             (("2026-07-31", "date"), ("2026-07-30", "date")),
             // Ill-formed numeric lexical: not a well-formed number, so not decidable.
             (("abc", "integer"), ("1", "integer")),
+            // Ill-formed BEYOND the tower too: a fraction part is invalid for
+            // xsd:integer, so the exact-lexical fallback must not rescue it. [OPUS-5]
+            (("170141183460469231731687303715884105728.5", "integer"), ("1", "integer")),
             // Numeric datatype on one side only.
             (("1", "integer"), ("1", "string")),
+            // Out-of-tower exact value vs a BINARY float tier: deciding this needs the
+            // float's exact decimal expansion, which this front-end does not do — so it
+            // fails closed rather than promoting the huge integer to a lossy f64. [OPUS-5]
+            (("170141183460469231731687303715884105728", "integer"), ("1.0E0", "double")),
         ] {
             let d = distinct_ground_equal_doc(l, r);
             assert!(
@@ -1696,6 +1759,78 @@ mod tests {
             );
             let mut dict = Dict::new();
             assert!(d.closure(&mut dict).is_err(), "closure must refuse DistinctGroundEqual");
+        }
+    }
+
+    /// (3c') Well-formed `xsd:integer`/`xsd:decimal` values BEYOND the shared tower's
+    /// `i128` mantissa are still DECIDED — `as_numeric` classifies them out, so the
+    /// exact plain-decimal fallback compares the lexicals by string arithmetic. Two
+    /// lexical forms of the same >i128 value (leading `+`, padding zeros, decimal
+    /// spelling of an integer) are value-EQUAL, so the rule fires. [OPUS-5]
+    #[test]
+    fn body_equal_out_of_tower_value_equal_numerics_are_decided_and_the_rule_fires() {
+        // i128::MAX + 1 — one past the exact tower, so `as_numeric` returns None.
+        const HUGE: &str = "170141183460469231731687303715884105728";
+        let signed = format!("+{}", HUGE);
+        let padded = format!("000{}", HUGE);
+        let as_decimal = format!("{}.00", HUGE);
+        let frac = format!("{}.5", HUGE);
+        let frac_padded = format!("+{}.50", HUGE);
+        for (l, r) in [
+            // The reviewer's case: the same >i128 integer with and without a `+`.
+            ((HUGE, "integer"), (signed.as_str(), "integer")),
+            // Leading zeros are insignificant in the value space.
+            ((HUGE, "integer"), (padded.as_str(), "integer")),
+            // Cross-tier: the decimal spelling of the same huge integer.
+            ((HUGE, "integer"), (as_decimal.as_str(), "decimal")),
+            // Both sides out of tower, in the decimal tier.
+            ((frac.as_str(), "decimal"), (frac_padded.as_str(), "decimal")),
+        ] {
+            let d = distinct_ground_equal_doc(l, r);
+            d.validate().unwrap_or_else(|e| {
+                panic!("value-equal out-of-tower numerics {:?} = {:?} must validate: {}", l, r, e)
+            });
+            let mut dict = Dict::new();
+            let closure = d.closure(&mut dict).expect("closure succeeds");
+            assert!(
+                has(&dict, &closure, "http://ex/a", RDF_TYPE, "http://ex/C"),
+                "{:?} = {:?} is value-space TRUE beyond i128, so the rule must fire",
+                l,
+                r
+            );
+        }
+    }
+
+    /// (3c'') The mirror: UNEQUAL well-formed values beyond the tower make the rule
+    /// VACUOUS (it validates and derives nothing) rather than failing closed — including
+    /// a pair that differs only past the i128 boundary, which a lossy `f64` fallback
+    /// would wrongly report equal. [OPUS-5]
+    #[test]
+    fn body_equal_out_of_tower_value_unequal_numerics_make_the_rule_vacuous() {
+        const HUGE: &str = "170141183460469231731687303715884105728";
+        // Differs from HUGE by ONE — far below an f64 ulp at this magnitude, so a lossy
+        // float fallback would wrongly report the pair equal. String arithmetic does not.
+        const HUGE_PLUS_ONE: &str = "170141183460469231731687303715884105729";
+        let negated = format!("-{}", HUGE);
+        let frac5 = format!("{}.5", HUGE);
+        let frac6 = format!("{}.6", HUGE);
+        for (l, r) in [
+            ((HUGE, "integer"), (HUGE_PLUS_ONE, "integer")),
+            ((HUGE, "integer"), (negated.as_str(), "integer")),
+            ((frac5.as_str(), "decimal"), (frac6.as_str(), "decimal")),
+        ] {
+            let d = distinct_ground_equal_doc(l, r);
+            d.validate().unwrap_or_else(|e| {
+                panic!("an unsatisfiable-but-safe out-of-tower rule is valid: {}", e)
+            });
+            let mut dict = Dict::new();
+            let closure = d.closure(&mut dict).expect("closure succeeds");
+            assert!(
+                !has(&dict, &closure, "http://ex/a", RDF_TYPE, "http://ex/C"),
+                "{:?} = {:?} is value-space FALSE beyond i128, so the rule derives NOTHING",
+                l,
+                r
+            );
         }
     }
 
