@@ -187,7 +187,15 @@ jobs:
           set -euo pipefail
           out="${RUNNER_TEMP}/simd-tests.txt"
           listed=0
-          cargo nextest list -p sparq-vectors --features "${VECTORS_FEATURES}" \
+          # `--color never` is LOAD-BEARING, not cosmetic: this listing is MACHINE-PARSED by the
+          # grep below. The workflow-level `CARGO_TERM_COLOR: always` is bound to nextest's
+          # `--color` flag, so nextest colourises even when stdout is a FILE — and its human list
+          # output styles the module path and the final name segment as SEPARATE spans, emitting
+          # `<esc>…m simd::tests <esc>[0m` + `::` + `<esc>…m <name>`. The literal `simd::tests::`
+          # is then never contiguous, the grep counts 0, and this guard fails CLOSED on a build
+          # that did compile the kernels. Force plain text for the parsed output; the run step
+          # below keeps colour for the human log.
+          cargo nextest list -p sparq-vectors --features "${VECTORS_FEATURES}" --color never \
             -E 'package(sparq-vectors) & test(/^simd::tests::/)' > "${out}"
           listed="$(grep -c 'simd::tests::' "${out}" || true)"
           cat "${out}"
