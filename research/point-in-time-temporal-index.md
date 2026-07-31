@@ -240,6 +240,41 @@ it still sets `contains_rebase`.
   (The alternative in the review — persisting `published_at` as a second header line — buys
   no information the shared-authority fix does not, and costs a format break, because
   `decode_record_body` fails closed on an unknown header key.)
+- **Every lineage baseline is recorded — the initial generation is not implicit.**
+  `record_commit` records the *destination* generation of a transition
+  (`change_stream.rs:550`) and rejects anything that is not strictly forward
+  (`change_stream.rs:525`), so the generation a stream **starts from** never gets a record
+  of its own: it is only ever named as a `from`. The ring, by contrast, stamps generation 0
+  at construction (`ring.rs:200-203`) and `GenerationRing::as_of` returns it like any other.
+  Left alone the two disagree over a real, reachable interval — every `t` from the initial
+  generation's `published_at` up to the first commit resolves to that generation in the ring
+  and to **nothing** in the index — which is exactly the overlap equivalence phase 2 must
+  prove, failing on the first test that arms a log before the first write. A store that has
+  published but never committed is the degenerate case of the same hole: the log holds no
+  commit records, so `retained_min` (§4.3) is a `min` over an empty set and is undefined.
+
+  The fix is a **baseline record**: when a log is armed against a ring, and again on every
+  re-baseline, append one record carrying the baseline generation's number, that
+  generation's `published_at` as its instant, an **empty** change set, and `rebase = false`.
+  The on-disk format is unchanged — an empty commit record is already representable and
+  already replays as a no-op in both directions — but it must be appended by its own entry
+  point, not by `record_commit`, whose strict forward check exists to reject non-forward
+  commits and must keep doing so. It then chains normally: it sets `last_generation`, so the
+  first real `record_commit(from = baseline, …)` passes its discontinuity check unchanged,
+  and being a commit record it participates in the per-segment timestamp bounds above.
+
+  Two consequences the phase owes:
+  - **The re-baseline path needs the generation, not just its number.** `rebase_to` /
+    `rebase_to_new_lineage` take a `u64` (`change_stream.rs:621`) and so cannot stamp the new
+    lineage's `published_at`. Either they gain a variant taking the `Generation` (or its
+    instant) that emits the gap record **followed by** a baseline record, or the new lineage
+    has no anchor until its first commit — in which case resolution for a `t` in that window
+    must **fail closed**, because the greatest-qualifying-`seq` rule would otherwise return
+    the *superseded* lineage's last commit, a state the store was not in at `t`.
+  - **A log written by an earlier build has no baseline record for its own start.** Same
+    compatibility decision as the timestamp-authority change above, and it must be taken
+    together with it: the equivalence guarantee begins where the new build begins, and phase
+    2 states where that is.
 - **Built from the log, never trusted over it.** Rebuildable by a full scan on open; the
   persisted form is a cache, and a mismatch against the segment set on disk means rebuild,
   not fail. This keeps the index off the crash-safety critical path entirely — the log
@@ -311,10 +346,19 @@ summaries of §4.1; for the ring, the `min` of the retained generations' `publis
 instant does not: under a rollback a newer retained record can carry an earlier instant, so
 an instant below the oldest retained record's may still be perfectly servable.
 
+`retained_min` is composed over the sources that actually contribute entries; a source
+contributing none is **skipped**, never read as a `min` over the empty set. The ring is
+never empty — it always holds a current generation — so `retained_min` is always defined,
+and it is the ring's alone whenever the change-stream feature is off or the log holds no
+records (never armed, or every segment trimmed). The servable window is then exactly the
+ring's, the table below applies unchanged, and there is no state in which the server must
+answer with an undefined threshold. This is the composition rule phase 6 generalises to the
+three-source horizon.
+
 | Condition | Status | Rationale |
 |---|---|---|
 | Unparsable / naive timestamp / both `at` and `generation` | 400 | Client error, retry cannot help without a fix. |
-| `t >= retained_min` | 200 | Some retained record qualifies; serve the greatest qualifying `seq` (§4.1). This includes a `t` far in the *future*, which resolves to the current generation exactly as `GenerationRing::as_of` does. There is deliberately **no** "timestamp is after the current generation" rejection: under a clock rollback the current generation's instant is not an upper bound on published instants, so that test would reject requests the ring can answer. `?generation=N` beyond current keeps its existing 400 (`http.rs:5590`) — generation numbers *are* ordered within a lineage; instants are not. |
+| `t >= retained_min` | 200 | Some retained record qualifies; serve the greatest qualifying `seq` (§4.1). The qualifying record may be a lineage **baseline** record (§4.1) — that is what makes the interval between a lineage's first publication and its first commit servable, and what makes a store that has published but never committed servable at all. This includes a `t` far in the *future*, which resolves to the current generation exactly as `GenerationRing::as_of` does. There is deliberately **no** "timestamp is after the current generation" rejection: under a clock rollback the current generation's instant is not an upper bound on published instants, so that test would reject requests the ring can answer. `?generation=N` beyond current keeps its existing 400 (`http.rs:5590`) — generation numbers *are* ordered within a lineage; instants are not. |
 | `t < retained_min`, nothing has been trimmed | 400 | `t` precedes every state the store has ever held. Definite, and retry cannot help. |
 | `t < retained_min`, records have been trimmed | 410 Gone, typed body flagged **indeterminate** | Either the qualifying records aged out or `t` precedes all history — the trimmed instants are gone, so after a clock step the two are genuinely indistinguishable. The body says so, and quotes `retained_min` plus the oldest retained `seq`/generation labelled as *the oldest retained record*, never as "the earliest servable instant". A false definite 410 here would contradict the overlap equivalence the design promises. |
 | Span crosses a `rebase` gap | 409 Conflict | Distinct from "trimmed": the history is intact on both sides but the span was never captured. A different operator remedy (restore from a backup), so a different code. |
@@ -410,7 +454,14 @@ and touches `resolve_pin` only; if IVM is already in flight, Phase 0 waits behin
    non-default `RingConfig::clock`, i.e. a run in which publication and log-recording
    instants would differ; `retained_min` moves exactly with `apply_retention`; a
    rebase-spanning resolution is refused and a `rebase` record is never returned as an
-   answer.
+   answer. **The baseline cases are mandatory**, because they are where the overlap
+   equivalence is easiest to lose: a `t` at or after the initial generation's `published_at`
+   but strictly before the first commit resolves to that initial generation, matching
+   `GenerationRing::as_of` rather than returning `None`; a log armed against a ring that has
+   **never committed** has a defined `retained_min` and resolves every `t >= retained_min`
+   to the baseline generation; and after a re-baseline, a `t` between the new lineage's
+   publication and its first commit either resolves to the new lineage's baseline or is
+   refused, never to the superseded lineage's last commit.
 3. **Bounded change-log reads** — M, `sparq-serve`. `read_range` / iterator per §4.2;
    `poll` unchanged. **Acceptance:** replaying a span allocates proportionally to the span,
    not the log; fail-closed behaviour below the trim horizon is preserved.
@@ -425,7 +476,9 @@ and touches `resolve_pin` only; if IVM is already in flight, Phase 0 waits behin
    concurrency cap; `/streams` `AT_TIMESTAMP`. **Acceptance:** a timestamp older than the
    ring but at or above the log's `retained_min` returns correct historical results; the
    410 body quotes `retained_min` and carries the indeterminate flag when records have been
-   trimmed; tests cover both feature states.
+   trimmed; a store with **no commits** — and one whose log has been trimmed empty — answers
+   from the ring's `retained_min` alone (§4.3) and behaves exactly as the phase-1 ring-only
+   surface does, with no 5xx and no undefined threshold; tests cover both feature states.
 6. **Unified retention horizon** — M, `sparq-server` + `sparq-serve`. One operator-facing
    history-horizon knob composing ring retention, change-log retention, and base-backup
    retention, so the advertised horizon is a single honest number rather than the emergent
