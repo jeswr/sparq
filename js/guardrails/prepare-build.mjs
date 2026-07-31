@@ -61,7 +61,13 @@ if (!hasWasmPack) {
   process.exit(1);
 }
 
-console.log('prepare: building @jeswr/sparq (wasm-pack + tsc) for the git-pin install...');
+// STDERR, not stdout, for the same reason as scripts/copy-wasm-node.mjs (#3396): `prepare`
+// runs inside `npm pack --dry-run --json`, whose STDOUT is a machine-read data channel —
+// guardrails/check-package.mjs captures it and parses it as JSON. A progress line on stdout
+// lands ahead of that JSON and breaks the parse, which the guardrail then misreports as the
+// package being unpackable. CI does not hit it today only because `prepack` has already
+// built wasm/ + wasm-node/ + dist/ by then, so the silent early-exit above fires first.
+console.error('prepare: building @jeswr/sparq (wasm-pack + tsc) for the git-pin install...');
 // [OPUS-4.8] sq-gl3cf — `shell: true` so this resolves the `npm` launcher on WINDOWS too.
 // Without it, execFileSync('npm', …) does no PATHEXT/`.cmd` resolution and dies with
 // `spawnSync npm ENOENT` (errno -4058) on Windows — which is what failed the win-x64
