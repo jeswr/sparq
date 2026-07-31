@@ -443,6 +443,24 @@ jobs:
         run: bash scripts/reconcile-merged-beads.sh --dry-run-self-test
       - name: Self-test reconcile-merged-beads.sh (exact-match + gating + apply/idempotency, end-to-end)
         run: bash scripts/tests/test_reconcile_merged_beads.sh
+      # [SONNET-4.6] sq-2xdg: the export-sync sweep — the missing CREATE/UPDATE direction.
+      # Every other bead automation is CLOSE-only (bead-autoclose is issue-native and
+      # close-only; reconcile-merged-beads only closes) and agent PRs may never stage
+      # `.beads/`, so bead creates lived only on the work box until this script published
+      # them. It WRITES the committed source-of-record, which makes its safety properties
+      # sharp: the merge must be additive-and-update and NEVER delete (a fresh/partial box
+      # must not be able to erase the board), an OLDER local record must never overwrite a
+      # newer committed one, the caller's checkout must be untouched (it runs while agents
+      # build in that checkout), and the PR title must carry no `sq-` token or
+      # bead-autoclose would close beads on every sync. Both the pure self-test AND the
+      # end-to-end harness run here — the latter is hermetic (stub bd/gh, a real git repo
+      # confined to a mktemp sandbox with a local bare remote; no network, no real tracker).
+      - name: shellcheck bead-export-sync.sh + its end-to-end harness
+        run: shellcheck scripts/bead-export-sync.sh scripts/tests/test_bead_export_sync.sh
+      - name: Self-test bead-export-sync.sh (no-delete + stale-write guard, hermetic)
+        run: bash scripts/bead-export-sync.sh --dry-run-self-test
+      - name: Self-test bead-export-sync.sh (dry-run default + publish + idempotency, end-to-end)
+        run: bash scripts/tests/test_bead_export_sync.sh
       # [FABLE-5] PR #3488 review: the canonical BEIR gather's honesty must be
       # MACHINE-enforced, not narrative — a failed/partial/invalid gather must never
       # emit the GATHER_DONE success sentinel or canonical=true, and the serial-console
