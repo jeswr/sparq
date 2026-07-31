@@ -171,7 +171,7 @@ binding reuses `sq-pfae.3`'s did:key/did:web work):
 
 ```turtle
 [] a trustx:TrustRequirements ;
-   trustx:question   <urn:q1> ;             # binds TR to Q
+   trustx:question   <urn:q1> ;             # names the question TR was authored for (opaque label — §7.7)
    trustx:trustsIssuer <did:web:x.example>, <did:web:y.example>, <did:web:z.example> ;
    trustx:requiresValidStatusAt "2026-07-05T00:00:00Z"^^xsd:dateTime .
 ```
@@ -357,6 +357,16 @@ conformance-honesty discipline).
 6. No performance numbers appear in this record or the spec; the integration
    paper takes numbers only from the canonical evidence pipeline (work-box
    timings are non-canonical).
+7. **`trustx:question` is a label, not an enforced binding.** The clear path
+   checks that `TR` names exactly one question IRI but defines no canonical
+   resolution or digest scheme tying that IRI to a query string, so it never
+   verifies that `Q` *is* the named question — a `TR` authored for question A
+   paired with an unrelated supported query B parses and evaluates. The
+   question↔query association belongs to whoever authenticates the request
+   (e.g. a signature over `(Q, TR, nonce)` or a trusted question publication),
+   exactly like the `MethodPrecheck` policy resolution. An authoritative
+   in-band binding (a digest-IRI question scheme over a canonical query form)
+   is future work.
 
 ## 8. Decomposition — child beads of `sq-6syab`
 

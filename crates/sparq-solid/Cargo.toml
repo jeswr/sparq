@@ -25,7 +25,15 @@ rustdoc-args = ["--cfg", "docsrs"]
 # (required to publish — crates.io strips `path`).
 sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = false }
 sparq-engine = { path = "../sparq-engine", version = "0.1.0", default-features = false }
-sparq-reason = { path = "../sparq-reason", version = "0.1.0", default-features = false }
+# [SONNET-4.6] sq-zgbso.4 (epic sq-zgbso, issue #1582): the materializer evaluates the
+# WAC/ACP rules on the id-level COMPILED evaluator (`sparq_reason::n3::compiled`), so the
+# `compiled-rules` slice is REQUIRED, not optional — the rule text is lowered to the IR
+# once per process and the facts enter as `[Id; 3]` straight from the source `Graph`, with
+# no per-call N3 text round trip. It pulls only the `sparq-substrate` rows+join slices
+# (an in-tree path dep, no new external crate); `sparq-core`/`sparq-engine` are untouched.
+sparq-reason = { path = "../sparq-reason", version = "0.1.0", default-features = false, features = [
+    "compiled-rules",
+] }
 # [OPUS-4.8] sq-h3uk: the ODRL→AUTH_GRAPH bridge. OPTIONAL + behind the `odrl-bridge`
 # feature (OFF by default), so the default sparq-solid build carries zero ODRL code,
 # deps, or runtime cost — sparq-policy is NOT forced onto the default build. Research

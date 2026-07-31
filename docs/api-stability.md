@@ -49,8 +49,8 @@ below.
 **Everything not explicitly listed as tier-1 is tier-2.** Tier-2 is the default: it may
 change or be removed in any release, including a minor pre-`1.0` release, without a
 deprecation window. This includes — non-exhaustively — the rest of `sparq-serve` (the
-scheduler, the `backup` / `change-stream` / `result-cache` opt-in features, the write-side
-footprint/commit internals), the graph-filtering and materialization halves of
+scheduler, the `backup` / `change-stream` / `change-sink` / `result-cache` opt-in features, the
+write-side footprint/commit internals), the graph-filtering and materialization halves of
 `sparq-solid` (`query_as` / `update_as` / `materialize_*` / the conformance harnesses), and
 every other crate in the workspace (`sparq-core`, `sparq-engine`, `sparq-server`'s HTTP
 router and types, and the opt-in capability crates). A consumer may still use tier-2

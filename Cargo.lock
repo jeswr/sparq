@@ -4381,15 +4381,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustls-pemfile"
-version = "2.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
-dependencies = [
- "rustls-pki-types",
-]
-
-[[package]]
 name = "rustls-pki-types"
 version = "1.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4925,8 +4916,11 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "oxigraph",
+ "oxrdf 0.3.3",
  "serde_json",
+ "sparq-canon",
  "sparq-core",
+ "sparq-difftest",
  "sparq-engine",
 ]
 
@@ -4964,6 +4958,7 @@ dependencies = [
  "sparq-engine",
  "sparq-hdt",
  "sparq-reason",
+ "sparq-reason-el",
  "sparq-server",
  "sparq-terse",
  "zstd",
@@ -5034,7 +5029,10 @@ version = "0.1.0"
 dependencies = [
  "bigdecimal",
  "num-bigint 0.5.1",
+ "oxrdf 0.2.4",
+ "rdf-canon",
  "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -5305,7 +5303,6 @@ dependencies = [
  "redis",
  "reqwest",
  "rustls",
- "rustls-pemfile",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -5315,6 +5312,9 @@ dependencies = [
  "sparq-engine",
  "sparq-http3",
  "sparq-policy",
+ "sparq-solid",
+ "sparq-trust",
+ "sparq-zk",
  "subtle",
  "thiserror 2.0.18",
  "tokio",
@@ -5329,6 +5329,7 @@ dependencies = [
 name = "sparq-lws-wasm"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "console_error_panic_hook",
  "futures-executor",
@@ -5351,6 +5352,7 @@ dependencies = [
  "oxttl 0.2.3",
  "serde",
  "serde_json",
+ "spargebra",
  "sparq-core",
  "sparq-engine",
  "sparq-forms",
@@ -5576,6 +5578,7 @@ dependencies = [
  "futures-util",
  "h3",
  "h3-quinn",
+ "http-body",
  "hyper",
  "hyper-util",
  "mimalloc",
@@ -5585,7 +5588,6 @@ dependencies = [
  "quinn",
  "reqwest",
  "rustls",
- "rustls-pemfile",
  "serde_json",
  "sparesults",
  "spargebra",
@@ -5738,11 +5740,14 @@ name = "sparq-trust"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "getrandom 0.4.2",
  "oxrdf 0.3.3",
  "oxttl 0.2.3",
  "serde_json",
+ "spargebra",
  "sparq-canon",
  "sparq-core",
+ "sparq-engine",
  "sparq-reason",
  "sparq-shacl",
  "sparq-zk",
@@ -5803,6 +5808,7 @@ dependencies = [
  "getrandom 0.2.17",
  "getrandom 0.3.4",
  "js-sys",
+ "oxjsonld",
  "oxrdf 0.3.3",
  "serde_json",
  "sparq-canon",
@@ -5822,6 +5828,18 @@ dependencies = [
  "oxrdf 0.3.3",
  "sparq-core",
 ]
+
+[[package]]
+name = "sparq-wrapper-gen"
+version = "0.1.0"
+
+[[package]]
+name = "sparq-wrapper-integration"
+version = "0.1.0"
+
+[[package]]
+name = "sparq-wrapper-shacl"
+version = "0.1.0"
 
 [[package]]
 name = "sparq-zk"

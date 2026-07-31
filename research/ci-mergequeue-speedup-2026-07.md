@@ -150,6 +150,35 @@ rebuild. The honest remaining deltas, in measured order:
 **Safety: SAFE** (cache poisoning discipline per sq-6vshe.5 applies; measure-first).
 **Est. saved:** −0.5–2 m entry wall, mostly from (1).
 
+> **Status 2026-07-30 [SONNET-4.6] — sq-6vshe.15 landed items 1+2; item 3 is NOT done.**
+>
+> - **(1) partially done, and NOT the 90 s the profile attributed to compression.** The
+>   `nextest-archive` upload now sets `compression-level: 0`, so upload-artifact stops
+>   re-running its default DEFLATE-6 zip pass over an already-zstd-compressed
+>   `nextest.tar.zst`. That removes re-compression CPU only; the 90 s step is CPU **plus**
+>   transfer, and this change does not shrink the bytes, so the saving is un-quantified
+>   until the next re-profile — no number is claimed here. The other two options the lever
+>   listed (nextest `--zstd-level` retune, pruning non-test content from the archive) were
+>   **NOT** attempted: both change the archive's bytes/content, so both need the
+>   before/after test-count parity measurement this bead had no measured baseline for.
+> - **(2) done, over a lane set much smaller than §2.1 implies.** `save-if: ${{ github.ref
+>   == 'refs/heads/main' }}` is now on every `Swatinem/rust-cache` step in every workflow
+>   that still triggers on `merge_group`. **That is only `ci.yml` (20 steps),
+>   `feature-matrix.yml` (6, already compliant under sq-3sbrr) and
+>   `vectorized-feature-off.yml` (1)** — most §2.1 lanes no longer trigger on
+>   `merge_group` at all (`fuzz.yml`, `zk-toolchain.yml` and `formal-verification.yml`
+>   under the 2026-07-18 maintainer directive; `bench.yml` under sq-6vshe.6), and the
+>   nightly-only lanes asan/miri/kani never were queue-triggered. So this bead added the
+>   guard to **21 steps**, not to the whole tree.
+>   **Re-profile §2.1 before acting on any other lever here**: the record's own §6 caveat
+>   ("re-profile if the lane set has materially changed") has now fired.
+>   Pinned structurally by `scripts/tests/test_mergequeue_cache_posture.py`.
+>   NEW COUPLING for **sq-6vshe.14**: main-scope cache freshness now depends entirely on
+>   push-to-main runs, so .14 must keep its promised cache-primer leg.
+> - **(3) NOT done — no verdict either way.** No sccache A/B was run, so there is neither
+>   an adoption nor an honest negative result to record; the ≥60 s bar is untested. Nothing
+>   about sccache is wired. Tracked as a follow-up issue.
+
 ### 3.3 Lever 3 — prioritize/parallelize the thing about to merge → **bead sq-6vshe.16**
 
 - **CodeQL: KEEP on the blocking path.** Measured 3.8 m median (buildless). Moving a
@@ -173,6 +202,22 @@ rebuild. The honest remaining deltas, in measured order:
 the gain appears from position >6 and during bursts (drain rate ×1.67). Plus up to 5 m
 flat if the min-entries wait proves non-inert.
 
+> **RESOLVED (sq-6vshe.16, issue #2759) — see `docs/branch-protection.md` §*Merge-queue
+> throughput settings*, now the doc-of-record for all three items.** [OPUS-5]
+> **(a)** `max_entries_to_build` 3→5 approved in principle but **NOT requested**: lever 1
+> (`sq-6vshe.14`) has not landed — no `queue-validated` push-skip job exists in
+> `.github/workflows/` — so the pool-headroom precondition is unmet.
+> **(b)** the `min_entries_to_merge_wait_minutes: 5` audit **closes as INERT**: the field
+> is a ceiling on waiting while `min_entries_to_merge` is unmet, not a floor, so at
+> `min_entries_to_merge: 1` it never binds. The "up to 5 m flat" line above is therefore
+> **not** a real saving — no edit needed (re-audit if `min_entries_to_merge` ever rises
+> above 1).
+> **(c)** the CodeQL KEEP verdict stands on the measurement but has been **overtaken by
+> events**: `codeql.yml` was operationally disabled on 2026-07-18, so it produces no
+> check-run on any event and costs the queue nothing today. Its forward-looking meaning
+> is that queue latency is not a valid argument against re-enabling it on the blocking
+> path (PR #3427 owns the successor policy).
+
 ### 3.4 Lever 4 — skip tests for unaffected crates in the merge group
 
 Change-based selection ALREADY runs on `merge_group` with the sound fail-closed rule set
@@ -192,6 +237,30 @@ The residual risk is the batch-stacking case: two PRs individually ≥ floor mer
 < floor — rare, caught ~15 m later on main, recoverable, floor never silently lowered.
 This needs an explicit maintainer-visible design (proceed-and-document), not a quick flip.
 **Est. saved:** −2–6 m median entry wall (run 29105286547 would have been ~7 m, not 11.9 m).
+
+> **IMPLEMENTED 2026-07-29 (bead sq-6vshe.17), as proposed above.** The
+> maintainer-visible design is recorded in `docs/branch-protection.md` §*Coverage
+> MEASUREMENT off the merge queue* (the proceed-and-document requirement); the wiring is
+> in `ci.yml` and pinned behaviourally by
+> `scripts/tests/test_ci_select_wiring.py::TestCoverageMergeGroupDemotion`.
+> Deltas from the sketch above, all narrowing:
+> * the fast **no-compile** floor gates (`coverage-floors`: test-presence, floor
+>   MONOTONICITY, shard-partition) were **kept on `merge_group`** — they are well under a
+>   minute and they are what makes "no committed floor is silently lowered" true of a
+>   *batch*, not just of a PR. Only the instrumented MEASURE legs were demoted.
+> * the push-to-main run is left **unchanged** rather than narrowed to "only its coverage
+>   legs": lever 1 (sq-6vshe.14) is not implemented yet, so there is no push-run skip to
+>   be exempt from. The exemption is instead pinned as a **test** that REDs if a future
+>   push-run skip covers coverage — the coordination point, made mechanical.
+> * "blocks further ratchet advances until green" landed as
+>   `coverage-gate.py --check-advance-allowed`: it blocks only a **raise** of an existing
+>   floor while the `[demoted-lane] lane=coverage-ratchet-main` alarm is open, never the
+>   recovery path (a governed lowering under `--allow-lower`), never a new crate row, and
+>   it fails **open** if the alarm probe is unavailable.
+>
+> The estimated saving above is a **projection from the 2026-07-10 profile, not a measured
+> post-change result**; the next merge-group entry-wall sample is what will confirm or
+> refute it.
 
 **(b) Selection-soundness memo + the fmx4u §7 P8 decision → bead sq-6vshe.18 — SAFE.**
 The union-diff-vs-target-tip argument that makes merge-group selection sound under
@@ -220,7 +289,7 @@ tail, not the median. No bead here — owned by the sibling; do not double-imple
 |------|-------|------|---------|-----------|-------|
 | 1 | push-to-main skip (validated SHAs) | sq-6vshe.14 | SAFE (fail-open) | 200–400 runner-min/merge; −0.5–2 m wall; collapse-tail removal; unlocks #3 | **SAFE-QUICK-WIN** |
 | 2 | bench → nightly EC2 | (sibling lane) | SAFE as designed there | −3.7 m leg + flake-requeue tail | in-flight |
-| 3 | queue settings (build 3→5; min-wait audit) | sq-6vshe.16 | SAFE after #1 | drain ×1.67 deep-queue; ≤5 m flat if wait non-inert | **SAFE-QUICK-WIN** (maintainer ruleset edit) |
+| 3 | queue settings (build 3→5; min-wait audit) | sq-6vshe.16 | SAFE after #1 | drain ×1.67 deep-queue; the min-wait audit closed **inert** (§3.3 RESOLVED) so the "≤5 m flat" it once promised is **0** | **SAFE-QUICK-WIN** (maintainer ruleset edit, still blocked on #1) |
 | 4 | coverage off merge_group | sq-6vshe.17 | recoverable-ratchet argument, needs protocol | −2–6 m median entry wall | **NEEDS-CAREFUL-DESIGN** |
 | 5 | test-shard rebalance | sq-6vshe.7 (existing, annotated) | SAFE | −3–5 m engine-entry p90 | existing bead |
 | 6 | cache/artifact diet + sccache A/B | sq-6vshe.15 | SAFE, measure-first | −0.5–2 m | SAFE |

@@ -119,14 +119,47 @@ topk-lazy-strkey = ["sparq-engine/topk-lazy-strkey"]
 # is absent. ZERO new dependencies: the streaming RFC-4180 CSV reader is first-party, R2RML
 # mappings parse through sparq-core's Turtle parser, and generated triples stream as N-Triples
 # chunks into the existing parallel ingest (`Graph::load_reader_parallel`) — so `.csv.gz` /
-# `.csv.zst` / `.csv.bz2` inputs reuse `open_reader`'s transparent decompression. Enable with
-# `cargo build -p sparq-cli --features tabular`.
+# `.csv.zst` / `.csv.bz2` inputs reuse `open_reader`'s transparent decompression. [OPUS-5]
+# (sq-u1z86) extends the subset with cross-CSV joins (`rr:parentTriplesMap` +
+# `rr:joinCondition`, a keyed hash join), named-graph output (`rr:graphMap`/`rr:graph` →
+# N-Quads + a dataset load) and `--row-provenance`, still with zero new dependencies.
+# Enable with `cargo build -p sparq-cli --features tabular`.
 tabular = []
 # [GPT-5.6] (sq-lsp7k.28) `diff <file-a> <file-b> [--exact]` compares the two RDF
 # triple sets and emits a deterministic N-Triples patch. OFF by default: without this
 # feature the dispatch arm, implementation, and subprocess contract tests are absent.
 # The implementation uses only sparq-core's existing load path and adds no dependency.
 diff = []
+# [OPUS-5] (sq-2ch27, Phase E6 of research/owl2-el-ql-reasoning-spike.md §5) `el` — the OWL 2 EL
+# CLASSIFIER surface: `--reason el` on `query`, `reason <f> <fmt> el`, and the `classify`
+# subcommand. Pulls the separate opt-in `sparq-reason-el` crate WITH its `rbox` feature, so the
+# CLI surface is the E1+E2 capability this bead depends on (CR1–CR6 class saturation PLUS the
+# CR10/CR11 role automaton — `rdfs:subPropertyOf` inclusions, `owl:propertyChainAxiom`,
+# `owl:TransitiveProperty`). OFF by default: the default CLI build carries no EL code, the
+# `classify` subcommand is absent, and `--reason el` is a hard exit-2 error naming this feature —
+# never a silent fall-back to the RL profile (which is SOUND but INCOMPLETE for EL classification).
+# SCOPE — the CLI surface is E1+E2 ONLY, NOT the whole OWL 2 EL profile. `cdomain` (CR7–CR9,
+# concrete domains) is deliberately NOT forwarded, so every concrete-domain axiom a valid EL
+# ontology may use — faceted `owl:onDatatype`/`owl:withRestrictions` ranges, literal
+# `owl:hasValue`/`owl:oneOf` — is DEFERRED into `Report::skipped_axioms` and NOT applied: on such
+# an input the emitted lattice can be INCOMPLETE. `classify`/`--reason el` print the count as an
+# explanatory stderr NOTE, so the gap is reported per run, but the capability claim stays scoped
+# to the E1+E2 fragment. (Adding the CLI `cdomain` surface — plus its end-to-end test and
+# feature-matrix leg — is separate follow-up work; the library API has it today.)
+# No new third-party dependency: sparq-reason-el rides sparq-core + oxrdf + rustc-hash, all
+# already in the CLI's tree. Enable with `cargo build -p sparq-cli --features el`.
+el = ["dep:sparq-reason-el", "sparq-reason-el/rbox"]
+# [SONNET-4.6] (sq-p4zci, design record research/stratified-datalog-rules.md §6 item 6)
+# `datalog` — the STRATIFIED DATALOG surface: `--reason datalog:<rules.dlog>` on `query` and
+# `reason <f> <fmt> datalog:<rules.dlog>`. Forwards the already-present `sparq-reason` dep's
+# opt-in `datalog` feature (the parser + stratification checker + per-stratum evaluator), so
+# there is NO new dependency — sparq-reason is already a plain dep, and the feature pulls only
+# the `sparq-substrate` rows+join slices it already builds on. OFF by default: the default CLI
+# build carries no Datalog code, and `--reason datalog:…` is a hard exit-2 error naming this
+# feature. There is deliberately no fall-back profile — RDFS/OWL-RL are monotone and cannot
+# express negation as failure or aggregation, so downgrading would silently change semantics.
+# Enable with `cargo build -p sparq-cli --features datalog`.
+datalog = ["sparq-reason/datalog"]
 
 [dependencies]
 # `version` alongside `path` on the sparq-* deps: cargo uses the path locally and the
@@ -172,6 +205,11 @@ mimalloc = { version = "0.1", optional = true }
 # Opt-in reasoning (RDFS/OWL-RL materialization) — engaged only by `--reason` / the `reason`
 # subcommand; the default query/build path never touches it.
 sparq-reason = { path = "../sparq-reason", version = "0.1.0" }
+# [OPUS-5] (sq-2ch27) Behind the opt-in `el` feature only: the OWL 2 EL consequence-based
+# classifier (`sparq_reason_el::classify_graph`) behind `--reason el` / `classify`. OFF by
+# default — a build without the feature links none of it. Adds no third-party dependency
+# (sparq-core + oxrdf + rustc-hash are all already in the CLI's tree).
+sparq-reason-el = { path = "../sparq-reason-el", version = "0.1.0", optional = true }
 # Opt-in HDT ingestion (the `hdt` feature; see [features] for why it is not default).
 sparq-hdt = { path = "../sparq-hdt", version = "0.1.0", optional = true }
 # [OPUS-4.8] (sq-vczh2) Behind the opt-in `terse` feature only: the verifiable LLM-ergonomic

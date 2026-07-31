@@ -84,7 +84,7 @@ trustx:TrustRequirements a rdfs:Class, owl:Class ;
 
 trustx:question a rdf:Property, owl:ObjectProperty ;
   rdfs:label "question"@en ;
-  rdfs:comment "Binds the trust requirements to the SPARQL query they scope (the query's identifying IRI). Makes a trust-requirements graph reusable across queries by naming which one it applies to (design §3.2)."@en ;
+  rdfs:comment "Names the question (an opaque identifying IRI) a trust-requirements document was authored for, making the document reusable by reference. A correlation label only: this vocabulary defines no canonical resolution or digest scheme from the IRI to a query string, so verifying that a given SPARQL query IS the named question is owned by whoever authenticates the request — e.g. a signature over (query, requirements, nonce) or a trusted publication of the question (design §3.2, §7.7)."@en ;
   rdfs:domain trustx:TrustRequirements ;
   rdfs:range rdfs:Resource ;
   rdfs:isDefinedBy <https://sparq.dev/ns/trust-framework> .

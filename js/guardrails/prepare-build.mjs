@@ -26,11 +26,16 @@ import { fileURLToPath } from 'node:url';
 
 const pkgDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const wasmArtifact = resolve(pkgDir, 'wasm', 'sparq_wasm_bg.wasm');
+// [OPUS-5] sq-2hk — the `--target nodejs` CommonJS sibling is part of a complete
+// build too, so a tree that has wasm/ + dist/ but no wasm-node/ is NOT "already
+// built": skipping there would hand a git-pin consumer a package whose
+// `./wasm-node` export resolves to nothing.
+const wasmNodeArtifact = resolve(pkgDir, 'wasm-node', 'sparq_wasm_bg.wasm');
 const distEntry = resolve(pkgDir, 'dist', 'index.js');
 const sourceCrate = resolve(pkgDir, '..', 'crates', 'sparq-wasm', 'Cargo.toml');
 
 // Already built (or shipping a built tree) — nothing to do.
-if (existsSync(wasmArtifact) && existsSync(distEntry)) {
+if (existsSync(wasmArtifact) && existsSync(wasmNodeArtifact) && existsSync(distEntry)) {
   process.exit(0);
 }
 
@@ -56,7 +61,13 @@ if (!hasWasmPack) {
   process.exit(1);
 }
 
-console.log('prepare: building @jeswr/sparq (wasm-pack + tsc) for the git-pin install...');
+// STDERR, not stdout, for the same reason as scripts/copy-wasm-node.mjs (#3396): `prepare`
+// runs inside `npm pack --dry-run --json`, whose STDOUT is a machine-read data channel —
+// guardrails/check-package.mjs captures it and parses it as JSON. A progress line on stdout
+// lands ahead of that JSON and breaks the parse, which the guardrail then misreports as the
+// package being unpackable. CI does not hit it today only because `prepack` has already
+// built wasm/ + wasm-node/ + dist/ by then, so the silent early-exit above fires first.
+console.error('prepare: building @jeswr/sparq (wasm-pack + tsc) for the git-pin install...');
 // [OPUS-4.8] sq-gl3cf — `shell: true` so this resolves the `npm` launcher on WINDOWS too.
 // Without it, execFileSync('npm', …) does no PATHEXT/`.cmd` resolution and dies with
 // `spawnSync npm ENOENT` (errno -4058) on Windows — which is what failed the win-x64

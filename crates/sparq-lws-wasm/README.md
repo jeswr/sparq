@@ -6,8 +6,9 @@ owns a single-threaded in-memory pod and drives the real axum router as a Tower
 service. The JavaScript host supplies the HTTP listener and authenticated WebID.
 
 > This local-development adapter is not a production Solid server. Storage is
-> process-local and ephemeral; TLS and OIDC verification stay in the host; PoP,
-> notifications, networking, and persistent backends are excluded from wasm.
+> in linear memory and ephemeral unless the host opts into snapshots; TLS and
+> OIDC verification stay in the host; PoP, notifications, networking, and remote
+> storage backends are excluded from wasm.
 
 ## 🚀 Quickstart
 
@@ -66,6 +67,14 @@ console.log(response.status);
   the counters and the knob. The total is of live bytes rather than pages ever grown, so
   bytes returned to the allocator restore headroom — but that an LDP `DELETE` frees enough
   to re-admit a refused request is not yet demonstrated end to end.
+- [GPT-5.6] Persistence is opt-in and lives behind the same `Store` trait.
+  `SolidServer.withSnapshot(baseUrl, ownerWebid, bytes)` builds the pod behind a
+  journaling store decorator; `snapshot()` returns the bytes the host writes to
+  `node:fs` or IndexedDB, and handing them back to `withSnapshot` rebuilds the
+  pod's contents after a listener restart. `new SolidServer(...)` is unchanged
+  and journals nothing, so `snapshot()` is `undefined` for it. Restart preserves
+  the content-derived `ETag` but re-stamps `Last-Modified`; the host owns the
+  durable medium and the flush policy.
 - No Tokio reactor, native listener, filesystem, TLS, OIDC verifier, PoP,
   notifications, or network backend is linked into the wasm artifact.
 

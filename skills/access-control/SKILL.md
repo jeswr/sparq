@@ -230,6 +230,31 @@ Materialize the authorization view from the access-control documents, then enfor
   (proposed-stable)** — the proposed semver-stable per-resource decision surface (freeze
   pending maintainer ratification, #1346 / #1248; see
   [`docs/api-stability.md`](../../docs/api-stability.md)).
+- `store.decide_create(&Session, container: &str, child_name: &str, Mode) -> WacDecision` /
+  `is_control_document_name(name: &str) -> bool` — the **CREATE decision + its
+  control-document guard** ([OPUS-5] sq-gg0qq.5, issue #2571). Minting a container child
+  needs only `acl:Append`, but an access-control document is governed by `acl:Control`, so
+  an Append-only principal who POSTs `Slug: secret.acl` passes the container's mode check
+  and still ends up authoring `<container>/secret.acl` — the document the ACL resolver
+  afterwards consults as `<container>/secret`'s governing ACL. The escalation is carried by
+  the NAME, so a mode-only `decide` cannot see it. `decide_create` runs the name through
+  `is_control_document_name` BEFORE the mode question and refuses `.acl`/`.acr` for **every**
+  principal, `Control` holders included (the legitimate route to author an ACL is a
+  `Control`-gated write of the governed resource's own ACL, never a child mint — so the
+  create path stays uniformly closed). The guard is deliberately broader than the exact-case
+  suffix the resolver derives: case variants (`secret.ACL`), the container-child trailing
+  slash (`secret.acl/`), the bare `.acl`/`.acr`, and percent-encoded spellings (`secret%2Eacl`,
+  `secret.ac%6C`, double-encoded, or a smuggled `%2F`) are all refused; a mid-path `.acl`
+  (`x.acl/child`) and a name that merely contains `acl` are not. Unusable child names (empty,
+  `.`/`..`, any decoded path separator) and a non-slash-terminated `container` are refused
+  the same way. **The refusal is DEFINITIVE (`Resolved` ⇒ 403), never retryable** — it does
+  not depend on the ACL state, so a transient/`Unloaded` condition can never downgrade it to
+  "try again". When the name is benign the decision is exactly `decide(container, mode)`,
+  fail-closed contract unchanged. `mode` is what the create verb requires on the CONTAINER
+  (`Append` for POST, `Write` for a PUT-create); this crate's rules do not materialize WAC's
+  `Write` ⇒ `Append` subsumption, so ask for the mode you mean. `is_control_document_name`
+  is public so a resource server applies the SAME predicate at its own mint chokepoint and
+  the two cannot drift.
 - `WacDecision::acl_link_header() -> Option<String>` / `AclScope::as_acl_predicate() ->
   &'static str` — **effective-ACL provenance surface** (FR-5, sq-snopa.4): the `<acl-iri>;
   rel="acl"` RFC-8288 [`Link`](https://solidproject.org/TR/protocol#acl-resource) value a
@@ -270,7 +295,11 @@ Materialize the authorization view from the access-control documents, then enfor
   the query lane would refuse to honour. The
   **FR-5 `Link: <acl-iri>; rel="acl"` response header** (sq-snopa.7) is now wired: `/authz/decide`
   and `/authz/wac-allow` emit it from `acl_link_header()` / `resolve_acl()` when a governing ACL
-  was discovered; `None` ⇒ no header (fail-closed). See the `http-server` skill. That HTTP layer
+  was discovered; `None` ⇒ no header (fail-closed). The **STATEFUL lane** (sq-snopa.8) has also
+  LANDED: `"source":"server"` authorises over the server's OWN loaded store instead of a body
+  dataset, materialising this same `PodStore` once per ring generation (so an `.acl` write
+  re-materialises by construction) and refusing — never silently un-enforcing — an ODRL-carrying
+  store or a `trust` block. See the `http-server` skill. That HTTP layer
   does NOT authenticate — it takes an already-resolved session, exactly as this library does. The
   `decide` `scope` is the ACL-*document* discovery scope, while whether a grant within that ACL
   applies is the verdict the oracle computes.
@@ -290,7 +319,10 @@ Materialize the authorization view from the access-control documents, then enfor
   `odrl:invalid` **with** a detected conflict, or an unknown strategy IRI is **REFUSED** — every
   `materialize_odrl_*` entry materializes nothing and returns `BridgeOutcome { refused: true, .. }`
   with a `REFUSED (odrl:conflict): …` reason, rather than silently coercing it into deny-overrides.
-  An unset `odrl:conflict` defaults to `prohibit` (not refused). See the `usage-control-policy` skill.
+  An unset `odrl:conflict` operates under `prohibit` (not refused) — sparq's own fail-closed default, a
+  **deliberate divergence** from the ODRL 2.2 IM default of `invalid`, not a spec default the bridge is
+  following (the ODRL Formal Semantics CG report supplies no conflict default either — its
+  conflict-resolution machinery is explicitly pending). See the `usage-control-policy` skill.
 - `store.materialize_odrl_permission_conditional(&Policy, &Request) -> BridgeOutcome` —
   **opt-in** (`odrl-bridge`; [OPUS-4.8] sq-hiz4): persists a *faithfully-mappable* ODRL
   constraint as a re-checked ACP `auth:ConditionalGrant` (agent matcher) instead of a
@@ -704,6 +736,84 @@ the CURRENT delegator grant, the audit drops the revoked actions); (ii) it adds 
 and no privacy — principals are named in the clear. Pure `oxrdf` (**no `sparq-prov` dependency** — that
 would drag `sparq-engine` onto the crate's dep graph); OFF in the default build.
 
+### LWS-server admission seam — opt-in `trust-graph` on `sparq-lws-core` ([OPUS-5] sq-hed3q)
+
+The pod-side wiring above lives in `sparq-solid`'s `PodStore`. The **native LWS server**
+(`sparq-lws-core`, `skills/solid-lws-server/SKILL.md`) decides access with the flat-`.acl` WAC
+authorizer, which has no notion of an issuer-signed credential. `sparq_lws_core::authz::trust_admit`
+(behind that crate's **own default-OFF `trust-graph` feature**, distinct from the `sparq-solid`
+feature of the same name) is the adapter between the two: it runs the `sparq_trust::admit` gate and
+re-expresses its output in this crate's `AccessMode`/`Decision` vocabulary.
+
+```toml
+sparq-lws-core = { path = "crates/sparq-lws-core", features = ["trust-graph"] }
+```
+
+```rust
+use sparq_lws_core::authz::trust_admit::{trust_admit_verdict, union_trust_grants};
+use sparq_lws_core::authz::trust_admit::{PresentedCredential, TrustRule, TrustSession};
+use sparq_trust::policy::{parse_policy, ControlGate};
+
+// Build rules ONLY from the Control-gated authoring channel. `parse_policy` demands a
+// `ControlGate`, whose sole constructor `assert_control_gated()` is the caller ASSERTING it has
+// verified the policy graph was authored behind `acl:Control` — a loudly-named assertion, not an
+// enforced proof. `TrustRule`'s fields are public, so a caller can also build one by hand; doing
+// so from anything but the Control-gated `.acr` channel is the one mistake that re-opens the
+// trust root of the whole pipeline.
+let rules: Vec<TrustRule> = parse_policy(&policy_triples, ControlGate::assert_control_gated())?;
+
+let session = TrustSession { agent: requester_webid, now_unix_secs: now };
+let verdict = trust_admit_verdict(&credential, &rules, &session, &target, abac_rule_n3);
+
+// The only way a grant reaches a decision: an ADDITIVE union onto whatever WAC decided, and only
+// for the (requester, resource) pair the grant was issued for — pass the CURRENT request's
+// authenticated WebID (`None` when anonymous) and requested resource, which are re-checked against
+// the grant's stored holder/target.
+let decision = union_trust_grants(wac_decision, verdict.as_ref(), Some(&session.agent), &target);
+```
+
+`abac_rule_n3` is the controller-authored rule carried in the same Control-gated `.acr` channel,
+e.g. `{ ?x schema:age ?y . ?y math:greaterThan 18 } => { ?x auth:read <https://pod.ex/resourceX> } .`
+
+Load-bearing behaviour, each adversarially tested in
+`crates/sparq-lws-core/tests/lws_trust_admit.rs`:
+
+- **NOT handler-wired — enabling the feature changes no request's outcome.** `trust_admit_verdict`
+  is a pure function; `ldp::handler`'s `authorize_read`/`authorize_mode` call sites are untouched,
+  so nothing consults it unless *you* call it. Hot-path wiring is a separate, soundness-sensitive
+  follow-up. With the feature OFF the module is not compiled and neither `sparq-solid` nor
+  `sparq-trust` enters the dependency graph (strict additivity, as for `sparq-solid`'s G6).
+- **Allow-only union.** `Decision::Allow(m)` gains modes and never loses any; `Decision::Forbidden`
+  becomes `Allow(granted)` — the authenticated-but-unauthorized case a credential-gated resource
+  exists for, and the ONLY route by which a WAC denial becomes an allow. A `TrustGrantSet` has no
+  public constructor, so that route is unforgeable from outside the module.
+- **Bound to the pair it was issued for.** A verdict is `Clone` and a caller may hold it across
+  requests, so `union_onto`/`union_trust_grants` take the CURRENT authenticated WebID and requested
+  resource and re-check them against the grant's stored `holder()`/`target()`; the raw union is
+  private. On a mismatch — another resource, another authenticated agent, or none — the WAC decision
+  is returned **unchanged**, so a grant minted for Jesse/`resourceX` cannot lift the denial on
+  Jesse/`resourceY` or on Mallory/`resourceX`.
+- **Unauthenticated is NEVER lifted.** `Decision::Unauthenticated` is returned unchanged even for a
+  `Control` grant — a deliberate fail-closed narrowing: that variant means no verified WebID, so the
+  credential's holder binding has nothing to bind against and a caller could otherwise name any
+  `session.agent` it liked. Authenticate first (`skills/solid-lws-server/SKILL.md` § *Authenticate
+  requests*), then the seam can apply.
+- **Fail-closed, `None` never an error.** A forged or malformed issuer signature, a credential whose
+  subject is not the authenticated requester, one outside the rule's freshness window or
+  `trust:scope`, a revoked one, an unparseable `.acr` rule, or a grant derived for a different
+  requester or resource each admit nothing. A rule deriving an `auth:deny*` for this requester and
+  resource refuses the **whole** verdict — an allow-only union cannot express the denial, so
+  honouring only its sibling allows would invert the controller's intent.
+- **The combined (not static) half of the `sq-xc4y` split.** The seam is consulted per request, so it
+  uses `sparq_trust::admit`, which evaluates the session-dependent class (holder binding, freshness)
+  live rather than freezing it into a long-lived `<urn:sparq:auth>` view.
+
+**Honest scope.** RESEARCH prototype, the **clear path** — the credential and the holder binding are
+both in the clear. No privacy, unlinkability, anonymity, or ZK-soundness claim; the ZK estate whose
+commitment/signature primitives it composes with is externally **UNAUDITED** (`sq-qhy4`, external
+accredited-cryptographer sign-off pending) and the issuer key is operator-asserted. Do not read an
+admitted grant as a security guarantee.
+
 ### Security-properties vocabulary — opt-in `secprop-vocab` ([OPUS-4.8] sq-5oru9, epic sq-0dksu)
 
 The `sparq_trust::secprop` module (behind the **default-OFF `secprop-vocab`** cargo feature) is the
@@ -859,9 +969,38 @@ NARROW). `justify_status_decision(grant, &entry, status, at_time)` renders a **m
 justification** for the allow OR the deny (a `prov:Activity` typed `trust:StatusCheck`, `prov:generated`
 the grant, with `trust:statusDecision` = the reason token + the checked index/purpose) — the bead's
 *minimal denial justification*. Revocation propagates by **full re-materialise** (the §4.4 stale window
-is *bounded* by `max_age_secs`, not closed — no in-reasoner incremental retraction). Pure-Rust base layer
+is *bounded* by `max_age_secs`, not closed — no in-reasoner incremental retraction; see the
+`StatusDelta` paragraph below for the bounded incremental *selection* step). Pure-Rust base layer
 (no new default dep); OFF in the default build. One honesty boundary remains: it adds **no privacy** (the
 index + list are clear; the resolver learns which credential is checked).
+
+**Incremental status delta — re-check only the affected grants** (`StatusDelta`, same `status-list`
+feature, [OPUS-5] `sq-pfae.14`). Retraction is still re-materialisation, but an **epoch bump** no longer
+has to re-run the gate over every grant. `StatusDelta::between(list_iri, &prev, &next)` (or
+`between_with_limit(.., max_changed_indices)`; the default cap is `DEFAULT_MAX_CHANGED_INDICES`) diffs two
+`StatusBitstring` snapshots of ONE list and names the slots that moved: `changed_indices()`,
+`requires_full_recheck()`, `unbounded_reason()` (a `DeltaUnbounded`), `successor_as_of_unix_secs()`, and
+the two predicates that form the **skip contract** — skip an entry's re-check only when
+`delta.valid_at(now, max_age_secs) && !delta.affects(&entry)`. `affects` is the per-slot bit selection;
+`valid_at` is the **whole-list** freshness precondition, and it is load-bearing rather than decorative:
+staleness is a property of the *snapshot*, not of a slot, so a future-dated successor moves an unchanged
+slot from `Live` to `Stale` without `affects` ever seeing it. Under that contract a skipped entry
+satisfies `verdict(prev).admits() ⇒ verdict(next).admits()`, i.e. skipping can never leave a grant
+admitted that the full re-run would deny (the stronger `verdict(prev) == verdict(next)` holds when both
+snapshots are fresh). **Why this does not break stratification:** it is a *selection* computed from two **input**
+snapshots — it derives no verdict, reads no derived fact, and retracts nothing in the reasoner, so the
+input-stratified / one-side-bound seeding discipline (`sq-tu4e`: no NAF over derived facts) is untouched.
+**Fail-closed:** a successor that is not strictly newer (`NotNewer`), a change in the list's bit coverage
+(`CoverageChanged` — indices moving in/out of range flip to/from `Unknown`), or more changes than the
+limit (`LimitExceeded`) all yield `requires_full_recheck()`, i.e. the pre-`sq-pfae.14` full re-run, and
+`affects` then reports **every** entry on the list as affected. **Honest residue:** the delta does NOT
+close the §4.4 stale-authority window — an entry whose bit did not change still ages into
+`LiveStatus::Stale` and `affects` will say `false` for it, so `valid_at` (and the caller's own `max_age_secs`-driven
+re-check) is still required; a delta binds exactly one `statusListCredential`; and deep-chain delegation
+revocation is still not incremental. The skip contract is pinned by an exhaustive differential test over
+every single-byte snapshot pair × a `now` sweep covering both-fresh, prev-aged-out and future-successor
+instants (`status_list::tests::unaffected_entries_are_safe_to_skip_across_the_bump`), plus
+`valid_at_rejects_a_future_dated_successor_that_affects_cannot_see`.
 
 **Verified status-list issuer signature** (`VerifyingLiveStatusCheck`, same `status-list` feature,
 [OPUS-4.8] `sq-pfae.13`). The base `LiveStatusCheck` trusts the list AS FETCHED. `VerifyingLiveStatusCheck`

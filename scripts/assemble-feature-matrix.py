@@ -92,7 +92,10 @@ REQUIRED_KEYS = {"name", "crate", "features", "test"}
 # cache). When absent, a crate-source-size heuristic supplies the default — see
 # leg_weight(). The weight only steers bin-packing (--grouped); it never changes
 # WHICH legs run or their gate-critical `opt-in <name>` check-run names.
-OPTIONAL_KEYS = {"tier", "tier-reason", "weight"}
+# [OPUS-5] `test-reason` is a second enforcer-only key: a written justification on a
+# `test: false` leg for why that (crate, feature)'s coverage lives outside `cargo test`.
+# Like `tier-reason` the assembler only ALLOWS it; feature-matrix-tiers.py reads it.
+OPTIONAL_KEYS = {"tier", "tier-reason", "test-reason", "weight"}
 VALID_TIERS = ("test", "check")
 
 # [FABLE-5] CI-economy grouping (maintainer directive 2026-07-18): bin-pack the
@@ -174,8 +177,8 @@ def load_legs():
                 sys.exit(1)
             keys = set(leg.keys())
             # [SONNET-4.6] sq-ldg8c: REQUIRED_KEYS must all be present; extras are allowed
-            # ONLY from OPTIONAL_KEYS (tier / tier-reason). Any other key is still a HARD
-            # error (the pre-tier behaviour, minus the two now-permitted optional keys).
+            # ONLY from OPTIONAL_KEYS (tier / tier-reason / test-reason / weight). Any other
+            # key is still a HARD error (the pre-tier behaviour, minus the optional keys).
             missing = REQUIRED_KEYS - keys
             extra = keys - REQUIRED_KEYS - OPTIONAL_KEYS
             if missing or extra:
