@@ -2379,14 +2379,58 @@ class TestCodeQLMergeGroupChangeClassGate(unittest.TestCase):
                       "the analyze job must stay gated on the decide output")
 
 
+# [OPUS-5] #3005: the CRATE-SIDE half of the deploy/ inertness proof.
+#
+# ci_select.py's audit note claims "no crate source references deploy/ (no
+# include_str!/include_bytes!/path read)". Scanning only the workflow files leaves
+# that half unenforced: a later `include_str!("../../../deploy/…")`, a build.rs
+# `rerun-if-changed=../../deploy/…`, a `#[path = "../../deploy/…"]` or a manifest
+# `path = "../../deploy/…"` dependency would make a deploy change alter the Rust
+# artifact while the workflow scan stayed green and the Rust lanes kept skipping.
+# So audit the BUILD INPUTS too, fail-closed.
+#
+# A reference is any `deploy/` path token or `../…/deploy` escape. Whole-line
+# comments are exempt (`//` in Rust, `#` in TOML): prose that merely NAMES the tree
+# is genuinely inert, and only whole-line comments are exempt so `#[path = …]` — a
+# real Rust build input that starts with `#` — is still audited.
+_DEPLOY_REF_RE = re.compile(r"(?:\.\./)+deploy\b|(?<![\w./-])deploy/")
+
+
+def _deploy_reference_hits(label: str, text: str) -> list[str]:
+    """Lines in one build input that reference the deploy/ tree (`label:lineno: line`)."""
+    comment = "//" if label.endswith(".rs") else "#"
+    hits = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if line.lstrip().startswith(comment):
+            continue  # a prose mention is not a build input
+        if _DEPLOY_REF_RE.search(line):
+            hits.append(f"{label}:{lineno}: {line.strip()}")
+    return hits
+
+
+def _rust_build_inputs() -> list[Path]:
+    """Every source/manifest the Rust matrix compiles: the workspace crates, the
+    fuzz crate and the vendored path deps (all `*.rs`, incl. build.rs, plus every
+    Cargo.toml), and the root manifest + lockfile."""
+    paths: list[Path] = []
+    for root in ("crates", "fuzz", "vendor"):
+        base = REPO_ROOT / root
+        if not base.is_dir():
+            continue
+        paths += sorted(base.rglob("*.rs")) + sorted(base.rglob("Cargo.toml"))
+    paths += [p for p in (REPO_ROOT / "Cargo.toml", REPO_ROOT / "Cargo.lock") if p.exists()]
+    return paths
+
+
 class TestDeployPathsAreRustInert(unittest.TestCase):
     """[OPUS-5] #3005 (sq-g25hr): `deploy/**` and the two deploy lane definitions are
     on the audited orchestration-safe allowlist, so a cloud-deploy PR classifies
     orchestration-only and skips the Rust matrix instead of paying the full suite.
 
     THE SOUNDNESS OBLIGATION (§2 — a skip is a PROOF of non-interference): this test
-    re-derives that proof every run, so the entry cannot silently rot the day a crate
-    or a Rust-CI workflow starts reading deploy/."""
+    re-derives that proof every run — over the Rust-CI workflows AND over the crate
+    build inputs — so the entry cannot silently rot the day a crate, a build script,
+    a manifest or a Rust-CI workflow starts reading deploy/."""
 
     @classmethod
     def setUpClass(cls):
@@ -2436,6 +2480,54 @@ class TestDeployPathsAreRustInert(unittest.TestCase):
                 "deploy/", path.read_text(encoding="utf-8"),
                 f"{name} references deploy/ — the tree is NOT inert for the Rust "
                 "matrix; remove 'deploy/' from _ORCHESTRATION_SAFE (fail-closed)")
+
+    def test_no_rust_build_input_references_the_deploy_tree(self):
+        # The other half of the inertness proof: the workflow scan above says nothing
+        # about the CRATES. A deploy/ reference from a source file, a build script, a
+        # `#[path]` attribute or a manifest would make deploy/ a Rust build input.
+        inputs = _rust_build_inputs()
+        # Non-vacuity: a broken glob must not make this pass by scanning nothing.
+        self.assertIn(REPO_ROOT / "crates" / "sparq-core" / "src" / "lib.rs", inputs)
+        self.assertGreater(len(inputs), 500,
+                           "the build-input corpus collapsed — the audit would be vacuous")
+        hits = []
+        for path in inputs:
+            rel = path.relative_to(REPO_ROOT).as_posix()
+            hits += _deploy_reference_hits(rel, path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            hits, [],
+            "a Rust build input references deploy/ — the tree is NOT inert for the "
+            "Rust matrix; remove 'deploy/' from _ORCHESTRATION_SAFE (fail-closed)")
+
+    def test_the_build_input_audit_catches_a_crate_side_deploy_dependency(self):
+        # WITNESS (mutation): the audit above is only worth its green if a real
+        # crate-side deploy/ dependency turns it RED. Each of these representative
+        # references must be flagged; deleting _DEPLOY_REF_RE or the scan loop kills
+        # this test.
+        must_flag = [
+            ("crates/sparq-core/src/lib.rs",
+             'const CHART: &str = include_str!("../../../deploy/helm/sparq/values.yaml");'),
+            ("crates/sparq-core/src/lib.rs",
+             'let raw = std::fs::read_to_string("deploy/paas/render.yaml")?;'),
+            ("crates/sparq-core/src/lib.rs", '#[path = "../../deploy/generated.rs"]'),
+            ("crates/sparq-py/build.rs",
+             'println!("cargo:rerun-if-changed=../../deploy/aws/main.tf");'),
+            ("crates/sparq-core/Cargo.toml",
+             'sparq-deploycfg = { path = "../../deploy/crates/cfg" }'),
+        ]
+        for label, line in must_flag:
+            self.assertTrue(_deploy_reference_hits(label, line),
+                            f"the build-input audit missed {line!r}")
+        # …and must not fire on a prose mention or an unrelated identifier, or the
+        # audit would be abandoned for noise rather than kept fail-closed.
+        must_not_flag = [
+            ("crates/sparq-core/src/lib.rs", "// see deploy/helm for the chart"),
+            ("crates/sparq-core/Cargo.toml", "# packaged separately under deploy/"),
+            ("crates/sparq-core/src/lib.rs", "let rate = redeploy/2;"),
+        ]
+        for label, line in must_not_flag:
+            self.assertEqual(_deploy_reference_hits(label, line), [],
+                             f"the build-input audit false-positived on {line!r}")
 
     def test_deploy_lane_workflows_run_no_cargo(self):
         # The two allowlisted lane definitions must stay cargo-free: they are what

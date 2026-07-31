@@ -131,8 +131,11 @@ _ORCHESTRATION_SAFE: list[str] = [
     # and their prose. Not "orchestration" in the PR/bead-automation sense, but this
     # allowlist encodes a PROPERTY, not a topic: proven inert for the Rust matrix.
     # AUDIT (the observation in #3005 — the 7 cloud-deploy PRs #2314-2322 each ran
-    # the FULL required suite): no crate source references deploy/ (no include_str!/
-    # include_bytes!/path read), and no Rust-CI workflow reads it — the only
+    # the FULL required suite), re-derived every run by TestDeployPathsAreRustInert
+    # in scripts/tests/test_ci_select_wiring.py: no Rust build input references
+    # deploy/ — no crate source, build script, `#[path]` attribute or Cargo manifest
+    # (no include_str!/include_bytes!/path read/path dep) — and no Rust-CI workflow
+    # reads it either; the only
     # workflows that do are the deploy lanes themselves (deploy-lint.yml,
     # deploy-terraform-lint.yml — zero cargo invocations), pages.yml, docs-quality.yml
     # and one release.yml COMMENT, none of which are gated by this selector. Those
