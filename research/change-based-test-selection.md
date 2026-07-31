@@ -60,7 +60,9 @@ small selector script (§7 position P1).
 - `merge_group`: same diff against the target branch tip. A queue entry's diff
   therefore contains the union of every queued change ahead of it — exactly
   the conservative set, so selection stays sound inside the queue while still
-  saving width (§7 P8).
+  saving width (§7 P8). *(The full soundness argument, including the case where
+  the payload's `base_sha` yields only the entry's own change rather than the
+  union, is §10.)*
 - `schedule` / `workflow_dispatch` / the `ci-full` label: no diff — `mode=full`
   (§6).
 - If the base SHA cannot be fetched (shallow-clone trouble, force-push race):
@@ -473,6 +475,10 @@ failed nightly jobs with suspect landed PRs and auto-files a deduplicated issue.
 - **P8 — selection applies to `merge_group` too**: the queue-entry diff vs
   the target tip is the union of queued content — conservative by
   construction, and queue width is where the throughput pain concentrates.
+  *(sq-6vshe.18, 2026-07-31: the soundness argument is written out in §10,
+  which also covers the batch-stacking case and closes the maintainer's
+  stricter-rule option — `event == merge_group ⇒ mode = full` — as
+  **KEEP-selected**.)*
 - **P9 — the SAFE list starts empty** and only audit-proven entries join it.
 - **P10 — enforce only after the shadow window** (§6.4); nightly full +
   `ci-full` label remain permanent backstops. *(sq-fmx4u.5, 2026-07-03:
@@ -499,3 +505,182 @@ Once enforced, fold the operative rules (§2, §4.1, the scoped-lane table)
 into the AGENTS.md gate documentation, keep the ownership map + selector as
 the living source of truth, and rewrite this record's "will" into "does" — or
 delete it in favor of the CI docs, per the research-record graduation rule.
+
+## 10. Appendix A — merge-group selection soundness (the §7 P8 memo)
+
+<!-- [OPUS-5] bead sq-6vshe.18 / issue #3073 — LEVER 4b of
+     research/ci-mergequeue-speedup-2026-07.md §3.4b. Codifies the union-diff /
+     batch-stacking soundness argument that previously lived only in a bead note, and
+     closes the open maintainer decision on the stricter `event==merge_group ⇒ full`
+     rule. INVARIANT: docs-only — no selector behaviour changes in this section; any
+     behaviour change goes through its own PR. -->
+
+**Bead sq-6vshe.18, 2026-07-31.** Selection has run on `merge_group` since the
+enforcement flip (§6 graduation note, §7 P8) and demonstrably skips there — run
+`29105286547` had **every** test shard selection-skipped under a successful `select`,
+leaving a coverage shard as the entry's critical path (`ci-mergequeue-speedup-2026-07.md`
+§2.2). The argument that makes those skips *sound* was, until this section, a bead note.
+This appendix states it, states its premises, states what would falsify it, and records
+the maintainer decision it was blocking.
+
+### 10.1 What the selector actually sees on `merge_group`
+
+`.github/workflows/ci-select.yml` binds `BASE`/`HEAD` from the event payload
+(`github.event.pull_request.base.sha || github.event.merge_group.base_sha`, and the
+matching `head_sha`) and passes them to the selector as `--base`/`--head` for both the
+`pull_request` and `merge_group` cases; `scripts/ci_select.py` then runs
+`git diff --name-only --no-renames <base>...<head>` (`git_changed_paths`). The workflow
+checks out at `fetch-depth: 0` so the merge-base is always resolvable, and an
+unfetchable base fail-closes to `mode=full` regardless.
+
+`head_sha` is the tip of the queue entry's ephemeral
+`gh-readonly-queue/…` branch, which contains **this entry's change stacked on top of
+every entry ahead of it in the group**. That much is not in doubt.
+
+`base_sha` admits two readings, and this record does not claim to have settled which
+GitHub uses for a stacked entry:
+
+* **(U) union reading** — `base_sha` is the *target branch tip* the group was formed on.
+  The three-dot diff is then the union of entries `1..N` — §3.1's original wording.
+* **(S) stacked reading** — `base_sha` is the head of entry `N-1`'s queue branch. Since
+  `head` descends from `base`, three-dot degenerates to two-dot and the diff is
+  **entry N's own change only** — strictly *smaller* than the union.
+
+Reading (U) is trivially sound: a superset of the real change set feeds a monotone
+closure (§3.3, P2), so the selected job set is a superset of the necessary one. The
+non-obvious case — and the one the maintainer flagged — is (S). §10.2 shows the
+selection is sound there too, so the decision does not hang on resolving (U) vs (S).
+
+### 10.2 The batch-stacking argument (soundness under reading (S))
+
+Let the group hold entries `1..K` in queue order, and let `T_i` denote the tree at
+entry `i`'s head (i.e. changes `1..i` applied). Under ALLGREEN every entry runs its own
+checks on its own `T_i` (§10.3, premise A). Write `Δ_i` for entry `i`'s own change set
+and `cl(Δ)` for the reverse-dependency closure of `Δ` (§3.3).
+
+Under reading (S), entry `i`'s run selects `cl(Δ_i)` and executes those crates' tests
+**against `T_i`** — not against `Δ_i` in isolation. That pairing is what carries the
+argument:
+
+> **Claim.** For every workspace crate `C` and every entry `i ≤ K`, `C`'s test outcome
+> on `T_i` is *identical* to its outcome on `T_j`, where `j ≤ i` is the last entry at
+> which `C` was selected (`j = 0`, the already-gated target tip, if `C` was never
+> selected) — and that run at `T_j` actually happened.
+
+Note what the claim deliberately does **not** assume: that `C` was run at `T_{i-1}`.
+Under selection it usually was not, which is exactly why the induction has to be over
+*outcomes*, not over observed runs.
+
+*Proof sketch, by induction on `i`.* Base `i = 0`: `T_0` is the target branch tip — a
+previously merged, gate-passed state — and `j = 0` trivially. Step: assume the claim for
+`i-1`. Two cases for entry `i`.
+
+* `C ∈ cl(Δ_i)`. Then entry `i` selected `C` and ran it **on `T_i`** (that pairing is the
+  whole point: the ephemeral queue branch already carries `Δ_1..Δ_i`). So `j = i` and the
+  claim holds directly.
+* `C ∉ cl(Δ_i)`. The closure is taken over package-level edges of *all* kinds with
+  features ignored, hence a superset of any real influence path (§3.3, §7 P2); so by the
+  skip invariant's contrapositive (§2), `Δ_i` cannot change `C`'s outcome, i.e.
+  outcome(`C`, `T_i`) = outcome(`C`, `T_{i-1}`). Apply the induction hypothesis. ∎
+
+Since `T_0` is green and the claim pairs every crate's outcome with a run that actually
+happened at a tree containing every change that could have moved it, no red can hide in
+the batch. Two corollaries are worth stating explicitly, because they are what the "two
+individually green PRs that are red together" worry is really about:
+
+* **Cross-entry interaction is covered.** A bug needing both `Δ_a` and `Δ_b` (`a < b`) to
+  manifest fails in some crate `C` whose outcome depends on both, so
+  `C ∈ cl(Δ_a) ∩ cl(Δ_b)`. Entry `b`'s run selects `C` and runs it on `T_b`, which
+  contains both changes. The *later* entry is the one that catches it — which is why
+  queue order does not matter.
+* **The merged result is covered.** `main` after the batch has the content of `T_K`. A
+  crate last run at `T_i` for `i < K` is, by the claim, one whose outcome `Δ_{i+1..K}`
+  cannot change, so its `T_i` verdict is still its `T_K` verdict. Squash-merging mints a
+  new SHA (cf. issue #1897, which is a *lever-1* concern about which SHA carries the
+  green verdict) but does not change the *tree content*, and this argument is about
+  trees — so the squash does not weaken it.
+
+Note that (S) is the *tighter* selection and (U) the looser one; the argument above
+covers (S), and (U) selects a superset of it. Soundness therefore holds under either
+reading, which is why resolving the payload semantics is a nice-to-have, not a blocker.
+
+### 10.3 Load-bearing premises (what must not drift)
+
+The argument is not unconditional. It rests on exactly four premises:
+
+| # | Premise | Where it is established | Pinned by |
+|---|---|---|---|
+| A | `grouping_strategy: ALLGREEN` — **every** entry runs its own required checks on its own `T_i` | live ruleset `17688455`, verified 2026-07-03 (§5.3 graduation note); `docs/branch-protection.md` *Merge-queue throughput settings* | **nothing in-repo** — see the residual below |
+| B | `ci-summary / gate` is the **sole** required context, so a `skipped` leg satisfies protection and no per-leg name can hang the queue | §5.3 graduation note (same verification) | `scripts/tests/test_ci_select_wiring.py::TestRequiredCheckAnchor` (gate job named `gate`, no `if:` guard, `ci-summary.yml` triggers on `merge_group`) |
+| C | The closure is a **superset** of real influence — all dependency kinds, features ignored, whole-crate granularity | §3.3, §7 P2/P4 | the selector's golden tests (§6.5) |
+| D | Every ambiguity **fails closed to `mode=full`** — unmapped path, unresolvable base, any internal error | §4.1, §4.3, §7 P6 | `ci_select.py` fail-safe boundary + its per-rule tests |
+
+**What would falsify the argument.** Flipping the queue to `HEADGREEN` breaks premise A
+outright: only the head entry's checks would run, so only `cl(Δ_K)` would be exercised
+and `cl(Δ_1..K-1)` would go untested on the merged tree — the induction loses every step
+but the last. Adding an individual per-crate leg to `required_status_checks` breaks
+premise B (a selection-skipped leg would then be a required check that can go missing).
+Sub-crate path refinement (rejected in P4) would put premise C at risk.
+
+**Residual (unpinned).** Premise A is a *remote ruleset* setting. Unlike premise B, no
+in-repo test can observe it, so a maintainer flipping `ALLGREEN → HEADGREEN` would
+silently invalidate this argument with no gate going red. The `gh api …/rulesets/<id>`
+recipe in `docs/branch-protection.md` is the manual check; mechanising it is captured as
+follow-up work, not done here (docs-only bead).
+
+### 10.4 Decision: the stricter `event == merge_group ⇒ mode = full` rule
+
+**The option.** A one-line change in `ci_select.py` — drop `merge_group` from the
+`args.event not in ("pull_request", "merge_group")` guard — would make every queue entry
+run the full matrix. It is the maximally conservative posture and needs no argument at
+all to justify.
+
+**The cost.** It would reverse most of lever 4. From the 2026-07-10 profile
+(`ci-mergequeue-speedup-2026-07.md` §2.1–2.2): today's median entry wall is dominated by
+`ci.yml`, and an entry whose test shards are selection-skipped lands near the low end of
+that distribution (run `29105286547`: 11.9 m, coverage the pole) while an
+engine-touching full-matrix entry sits near the top (run `29105265898`: 18.9 m, the
+serial `build+archive → slowest shard` chain). Forcing full would put *every* entry on
+the second shape and would also restore the full opt-in `feature-matrix` leg set in
+place of the ~15–20 selected engine legs. **Projected effect: roughly +4–10 m on the
+median entry wall**, plus the runner-slot contention that lengthens tails during a
+drain. This is a projection derived from the cited profile, **not** a measured
+post-change result — the honest way to obtain the real number is to flip it and sample
+merge-group entry walls, which is precisely the experiment the projection says is not
+worth running.
+
+**Recommendation: KEEP selection on `merge_group` (do not adopt the stricter rule).**
+Rationale, in order of weight:
+
+1. §10.2 shows the skips are sound under *both* readings of the payload, given premises
+   A–D — so the stricter rule buys defence against premise *drift*, not against a known
+   hole.
+2. That drift is already fenced twice over. The **nightly full-matrix backstop** (§6.1)
+   re-runs everything on `main` and would surface any batch-induced red within a day,
+   and the **sq-va7at selection alarm** (`scripts/ci_selection_alarm.py`, shipped in
+   PR #1526) correlates a nightly failure with the PRs that landed since the last green
+   nightly and auto-files a deduplicated issue naming the suspects.
+3. The failure being defended against is *recoverable*: a red on `main` is visible,
+   attributable, and revertible — unlike a silently-lowered gate.
+4. `ci-full` (§6.2) remains the per-change escape hatch, and `CI_SELECT_MODE=shadow`
+   remains the global one, so adopting the stricter rule permanently is not the only way
+   to get a conservative run when one is wanted.
+
+Authored under the **proceed-and-document** rule: this closes the decision as *keep-
+selected* so the rest of lever 4 is unblocked. It is a recommendation with its premises
+and its falsifiers written down, not a maintainer sign-off — a maintainer who weighs
+premise A's unpinned status more heavily than the projected 4–10 m can overturn it with
+the one-line change above, and §10.3 says exactly what to re-check if they do.
+
+### 10.5 Explicit non-extensions (REJECTED — recorded so they are not re-proposed)
+
+Lever 4 is **not** being extended to the following. Each was considered and rejected on
+measured grounds; the shared shape is *small win, real risk*.
+
+| Candidate | Measured today | Verdict |
+|---|---|---|
+| conformance ratchets | 44–76 s each, run in parallel | **REJECTED** — never the pole; scoping them adds selector surface for no wall-clock |
+| `container-scan` | 3.6 m median, parallel | **REJECTED** — parallel, not the pole |
+| CodeQL language-scoping | 3.8 m median, confirmed non-pole (§2.1) | **REJECTED** — it is the *security* gate and the `code_scanning` ruleset expects analyses to be produced; narrowing the analysed language set risks a missing-analysis stall for a saving the profile shows is ~0 |
+
+(Timings from `ci-mergequeue-speedup-2026-07.md` §2.1–2.2, 2026-07-10 profile.)

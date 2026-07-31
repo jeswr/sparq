@@ -274,6 +274,22 @@ Not worth extending selection to: conformance ratchets (44–76 s each, parallel
 never the pole), container-scan (3.6 m, parallel), codeql language-scoping (security
 gate, 3.8 m, the code_scanning ruleset expects analyses — small win, real risk).
 
+> **DONE 2026-07-31 (bead sq-6vshe.18), docs-only.** The memo is
+> `research/change-based-test-selection.md` **§10** (cross-linked from that record's
+> §3.1 and §7 P8), and the rejected non-extensions above are recorded there as §10.5 so
+> they are not re-proposed. Deltas from the sketch above:
+> * the argument is stated to hold under **both** readings of the `merge_group` payload
+>   — the union-diff reading in §3.1 *and* the tighter "entry's own change only" reading
+>   — via an induction over queue entries (§10.2). Soundness therefore does not depend on
+>   settling the `base_sha` semantics, which this record does not claim to have settled.
+> * the four load-bearing premises are tabulated with what pins each (§10.3). One is
+>   **unpinned**: `grouping_strategy: ALLGREEN` is a remote ruleset setting no in-repo
+>   test can observe, so a flip to `HEADGREEN` would silently invalidate the argument.
+>   Mechanising that check is follow-up work, not part of this docs-only bead.
+> * the decision is closed as **KEEP-selected** under proceed-and-document, with the
+>   stricter rule's cost given as a **projection** from the §2.1–2.2 profile
+>   (≈ +4–10 m median entry wall), explicitly not a measured post-change result.
+
 ### 3.5 Lever 5 — benchmarks → nightly EC2 (sibling lane; cross-reference only)
 
 The `Benchmarks` merge-group leg ("run + track benchmarks", 233 s + select) gates today.
