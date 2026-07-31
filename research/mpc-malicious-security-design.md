@@ -125,11 +125,24 @@ sq-km34 exists to close.**
 > **[OPUS-5] LANDED (sq-km34, §6 step 5): `crates/sparq-mpc/src/auth_equal.rs`.** The
 > authenticated equality operator computes `[[m]] = auth_mul([[d]], [[r]])` and routes it
 > through the §2.5 batched check before any verdict is read from it, so the
-> forged-product-share flip is a fail-closed abort at the minimal `n = 2t+1`
-> (`forged_product_share_at_the_equality_open_aborts_at_minimal_n`; the input-side
-> inconsistency is `forged_input_key_share_aborts_at_minimal_n`, and the Hole-2 in-reduce
-> deviation the two `wrong_degree_reduce_in_the_*_multiplication_aborts_at_minimal_n`
-> tests, each with a mutation half showing the rejected MAC carry returns a WRONG verdict).
+> forged-product-share flip stops being a silent wrong answer at the minimal `n = 2t+1`.
+> **Two layers deliver that, and the module keeps them apart rather than crediting both to
+> the MAC.** (i) Authenticated multiplication reduces `m` to degree `t` BEFORE it is
+> opened, and `n = 2t+1` points at degree `t` carry `t` points of RS redundancy — so the
+> literal Hole-1 deviation (one corrupt opener forging its OWN product share) is off-codeword
+> and the robust open resolves it, aborting `MpcError::Tampered` when the Berlekamp–Welch
+> budget `⌊(n−t−1)/2⌋` cannot repair it and CORRECTING it when it can
+> (`single_forged_share_at_the_equality_open_is_resolved_by_the_robust_degree_t_open`, which
+> asserts `σ` is *not* what fires). (ii) The IT-MAC covers what redundancy structurally
+> cannot see — a *consistent* degree-`t` codeword of a value the protocol did not compute.
+> Within the honest-majority threshold that shape is reached INSIDE the multiplication, by
+> one deviating re-sharing party (the Hole-2 deviation, the two
+> `wrong_degree_reduce_in_the_*_multiplication_aborts_at_minimal_n` tests, each with a
+> mutation half showing the rejected MAC carry returns a WRONG verdict); at the open boundary
+> it is isolated by `consistent_codeword_at_the_equality_open_aborts_on_the_mac`, which
+> substitutes all `n` shares and is labelled as the ABOVE-threshold injection it is rather
+> than as a single forged share. The input-side inconsistency is
+> `forged_input_key_share_aborts_at_minimal_n`.
 > **Ordering, precisely:** `mac_check_and_open` reconstructs the batch FIRST and verifies
 > `σ` second, releasing nothing on failure — so this is detect-and-abort on everything
 > acted upon, NOT check-before-broadcast, and the module does not claim to close the

@@ -666,11 +666,17 @@ LANDED on `main`** — see the per-item ✅ DONE notes.
    adversarial catch-tests, the bench AXIS-1 lift) is decomposed into **`sq-km34.2–.9` (OPEN)**.
    **[OPUS-5] The headline cell itself is now BUILT** — `auth_equal.rs` (design §6 step 5):
    the masked difference is authenticated and batched-MAC-checked before any verdict is read
-   from it, so a
-   forged product share / a wrong `degree_reduce` re-sharing / an inconsistent input all
-   abort at the minimal N, and the `r = 0` false match (which the MAC alone CANNOT see,
-   because `α·0 = 0`) is caught by an authenticated mask nonzero-witness `u = r·s` opened in
-   the same batch. It does **not** close the coZK-2025/1026 confidentiality interaction: the
+   from it, so no deviation at the minimal N yields a silent wrong verdict. **Two layers do
+   that, kept apart rather than both credited to the MAC:** the authenticated mult reduces
+   `m` to degree `t` before the open, and `n = 2t+1` points at degree `t` carry `t` points of
+   RS redundancy — so a forged product share from one corrupt opener is off-codeword and the
+   ROBUST open resolves it (abort, or correction inside the Berlekamp–Welch budget), while
+   the IT-MAC covers the shape redundancy structurally cannot see, a *consistent* codeword of
+   a value the protocol never computed: a wrong `degree_reduce` re-sharing (the
+   within-threshold route, one re-sharing party) / a tampered input MAC / an inconsistent
+   input all abort with `MacCheckFailed`. The `r = 0` false match (which the MAC alone CANNOT
+   see, because `α·0 = 0`) is caught by an authenticated mask nonzero-witness `u = r·s` opened
+   in the same batch. It does **not** close the coZK-2025/1026 confidentiality interaction: the
    check runs AFTER the reconstruction (open → verify → release), so a deviating party still
    sees the opened value before the abort — one selective-failure guess at the key
    difference. What is delivered is that no opened value is *acted on* before its check.

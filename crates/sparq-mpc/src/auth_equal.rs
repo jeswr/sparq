@@ -4,9 +4,11 @@
 // §2.5 — open, then verify, then release; NOT verify-then-broadcast, see the transcript
 // -order section below), and the mask `[[r]]` carries an authenticated NONZERO WITNESS
 // `u = r·s` opened in the same batch — so the Hole-1 forged-share flip, the Hole-2 wrong
-// re-sharing, and the Hole-3 `r = 0` false-match are all fail-closed aborts where the
-// semi-honest `join::HiddenValueJoin::secure_equal` had ZERO Reed-Solomon redundancy to
-// detect anything.
+// re-sharing, and the Hole-3 `r = 0` false-match all stop being silent wrong answers where
+// the semi-honest `join::HiddenValueJoin::secure_equal` had ZERO Reed-Solomon redundancy to
+// detect anything. TWO layers do that work and this module is careful not to conflate them:
+// the degree reduction restores RS redundancy at the open, and the secret `α` covers what
+// RS structurally cannot see — see "Which layer closes Hole 1" below.
 //! Honest-majority **malicious-with-abort** secret-shared equality — the IT-MAC
 //! upgrade of the semi-honest degree-`2t` equality open (design
 //! `research/mpc-malicious-security-design.md` Hole 1, the headline hole).
@@ -49,6 +51,38 @@
 //! is a degree-`t` open of a value carrying a MAC that the batched check then verifies —
 //! not the bare, unauthenticated degree-`2t` open the semi-honest path performs. No
 //! verdict is derived from a value the check has not covered.
+//!
+//! ### Which layer closes Hole 1 — the degree drop first, the MAC for what RS cannot see
+//!
+//! Hole 1 is stated against the semi-honest degree-`2t` open, and the fix has two distinct
+//! parts that it would be an over-claim to merge:
+//!
+//! - **The degree drop restores redundancy.** Opening at degree `t` on `n = 2t+1` points
+//!   leaves `t` redundant points, so a deviation confined to the ≤ `t` shares an adversary
+//!   controls is OFF the codeword and [`ShamirBackend::reconstruct`]'s robust path handles
+//!   it: [`MpcError::Tampered`] when the Berlekamp–Welch budget `e = ⌊(n−t−1)/2⌋` cannot
+//!   repair it, or a CORRECTION back to the true value when it can. So the literal
+//!   "one party forges its own product share" form of Hole 1 is closed by reducing the
+//!   degree, **not** by the MAC — pinned by
+//!   `single_forged_share_at_the_equality_open_is_resolved_by_the_robust_degree_t_open`,
+//!   which asserts `σ` is *not* what fires.
+//! - **The secret `α` covers the shape RS structurally cannot see:** a *consistent*
+//!   degree-`t` codeword of a value the protocol did not compute. Redundancy is no help
+//!   against a valid codeword at any `n`. Within the honest-majority threshold that shape
+//!   is reachable INSIDE the multiplication, where one deviating re-sharing party shifts
+//!   the reduced secret by `λ·δ` and every share stays on one degree-`t` polynomial
+//!   (Hole 2 — `wrong_degree_reduce_in_the_verdict_multiplication_aborts_at_minimal_n`,
+//!   whose mutation half shows the rejected MAC carry returning a WRONG verdict). At the
+//!   open boundary the same shape needs all `n` final shares replaced, which is an
+//!   above-threshold adversary; that injection
+//!   (`consistent_codeword_at_the_equality_open_aborts_on_the_mac`) is kept because it
+//!   isolates the property at the boundary, and it is labelled as above-threshold rather
+//!   than passed off as a single forged share.
+//!
+//! What the MAC therefore buys over "reduce the degree and open robustly" is coverage of
+//! the consistent-codeword class — the in-reduce deviation, the tampered input MAC, and
+//! any other tamper that leaves the value sharing well-formed — which is exactly the class
+//! redundancy cannot address at any `n`.
 //!
 //! ### Transcript ORDER — the check does NOT precede the open (stated exactly)
 //!
@@ -100,8 +134,9 @@
 //! - `[[m]] = auth_mul([[d]], [[r]])` puts the **data** (`d`, hence both join keys) in
 //!   the MAC-carrying FIRST slot. Every deviation that could change the *verdict* by
 //!   changing the data — a forged input share, a tampered input MAC, a wrong re-sharing
-//!   in either reduce, a forged share on the final open — lands in a slot the check
-//!   covers, and aborts.
+//!   in either reduce — lands in a slot the check covers, and aborts. (A forged share on
+//!   the FINAL open is a different matter: at degree `t` the robust open resolves it one
+//!   layer earlier, so it is not evidence for the MAC — see "Which layer closes Hole 1".)
 //! - the adopted SECOND slot holds only the mask `r`, whose value is irrelevant to the
 //!   verdict *provided it is nonzero* — and that proviso is exactly what the witness
 //!   gate below establishes.
@@ -255,13 +290,26 @@ enum Deviation {
     /// pair; the unsound carry demonstrates exactly that wrong verdict.
     #[cfg(test)]
     ZeroMaskAndWitnessReduceReshare(crate::shamir::MacCarry),
-    /// **Test-only, Hole 1 at THIS operator's open boundary.** After the gadget has built
-    /// `[[m]]`, every share of its VALUE sharing is shifted by `1` — a consistent
-    /// degree-`t` codeword of `m + 1`, so the robust open cannot flag it — while its MAC
-    /// is left alone. This is the forged-product-share flip the semi-honest path suffers
-    /// information-theoretically undetectably at `n = 2t+1`.
+    /// **Test-only, the SINGLE-PARTY deviation at THIS operator's open boundary.** After
+    /// the gadget has built `[[m]]`, EXACTLY ONE party's share of the VALUE sharing is
+    /// shifted by `1`; every honest party's share, and the whole MAC sharing, are
+    /// preserved. This is the deviation one corrupt opener can actually mount — and it is
+    /// **not** what the IT-MAC catches: the authenticated product has already been reduced
+    /// to degree `t`, where the same `n = 2t+1` points carry `t` points of Reed–Solomon
+    /// redundancy, so the shifted share is OFF the codeword and the robust open resolves
+    /// it first (abort, or correction back to the true `m`).
     #[cfg(test)]
-    ForgedProductShareAtOpen,
+    SingleForgedShareAtOpen,
+    /// **Test-only, the CONSISTENT-CODEWORD deviation at the open boundary.** EVERY share
+    /// of `[[m]]`'s VALUE sharing is shifted by `1` — a valid degree-`t` codeword of
+    /// `m + 1`, so there is nothing for Reed–Solomon to see — while its MAC is left alone.
+    /// Substituting all `n` final shares is ABOVE the honest-majority threshold, so this
+    /// models no single opener; it is the open-boundary ISOLATION of the one shape only
+    /// the secret `α` can detect, a perfectly consistent sharing of the WRONG value. The
+    /// within-threshold route to that same shape is the Hole-2 in-reduce deviation
+    /// ([`Deviation::VerdictReduceReshare`]), which one re-sharing party does mount.
+    #[cfg(test)]
+    ConsistentCodewordAtOpen,
 }
 
 /// **Malicious-with-abort secret-shared equality over already-authenticated keys** —
@@ -272,9 +320,14 @@ enum Deviation {
 /// batch has passed. Returns the verdicts positionally aligned with `pairs`.
 ///
 /// **Aborts, never a wrong answer.** Returns [`MpcError::MacCheckFailed`] if the batched
-/// check fails (a forged share, a tampered input MAC, a wrong `degree_reduce`
-/// re-sharing, a tampered open) **or** if any pair's mask nonzero-witness opens to `0`
-/// (the Hole-3 `r = 0` false-match deviation). Every witness is validated before ANY
+/// check fails (an inconsistent input sharing, a tampered input MAC, a wrong
+/// `degree_reduce` re-sharing — every deviation that leaves a *consistent* codeword of a
+/// wrong value) **or** if any pair's mask nonzero-witness opens to `0` (the Hole-3
+/// `r = 0` false-match deviation). A deviation that instead leaves an opened sharing
+/// OFF the degree-`t` codeword — the ≤ `t` forged shares a within-threshold adversary can
+/// place at the open — surfaces one layer earlier, as [`MpcError::Tampered`] from the
+/// robust open, or is corrected outright when the Berlekamp–Welch budget allows (module
+/// docs, "Which layer closes Hole 1"). Every witness is validated before ANY
 /// verdict is derived, so a batch with one bad mask yields no verdicts at all. Note the
 /// exact ordering (module docs, "Transcript ORDER"): the batch is **opened, then
 /// verified**, so this is abort-before-*acting*, not check-before-broadcast.
@@ -315,11 +368,14 @@ fn auth_equal_verdicts_with(
     for (a, b) in pairs {
         #[cfg_attr(not(test), allow(unused_mut))]
         let (mut m, u) = equality_gadget(session, a, b, deviation)?;
-        // Hole 1 at the open boundary: forge the product's value codeword AFTER the
-        // gadget committed its MAC — the deviation the semi-honest path cannot see.
+        // Deviations at the open boundary: tamper the product's VALUE sharing AFTER the
+        // gadget has committed its MAC. The two variants differ in which layer sees them —
+        // one share is off-codeword (robust open), all shares is a valid codeword (MAC).
         #[cfg(test)]
-        if matches!(deviation, Deviation::ForgedProductShareAtOpen) {
-            m = shift_value_shares(&m);
+        match deviation {
+            Deviation::SingleForgedShareAtOpen => m = forge_one_value_share(&m, FORGED_OPEN_PARTY),
+            Deviation::ConsistentCodewordAtOpen => m = shift_value_shares(&m),
+            _ => {}
         }
         batch.push(m);
         batch.push(u);
@@ -440,6 +496,24 @@ fn shift_value_shares(av: &AuthenticatedShare) -> AuthenticatedShare {
         .expect("shifting share values keeps the party points and length identical")
 }
 
+/// **Test-only.** The single opening party whose own share
+/// [`Deviation::SingleForgedShareAtOpen`] forges.
+#[cfg(test)]
+const FORGED_OPEN_PARTY: usize = 0;
+
+/// **Test-only.** Shift EXACTLY ONE party's share of `av`'s VALUE sharing by `1`, leaving
+/// every other party's share and the whole MAC sharing untouched — the deviation a single
+/// corrupt opener can mount. At degree `t` on `n = 2t+1` points this is an OFF-CODEWORD
+/// point (contrast [`shift_value_shares`], which produces a valid codeword of a wrong
+/// value), so the robust open — not the MAC — is what resolves it.
+#[cfg(test)]
+fn forge_one_value_share(av: &AuthenticatedShare, party_index: usize) -> AuthenticatedShare {
+    let mut value = av.value_shares().to_vec();
+    value[party_index].y = value[party_index].y.add(Fp::one());
+    AuthenticatedShare::new(value, av.mac_shares().to_vec())
+        .expect("forging one share value keeps the party points and length identical")
+}
+
 /// Mint a pair's mask under the requested [`Deviation`]. Every non-mask deviation (and
 /// production) takes the single fresh-nonzero arm.
 fn draw_mask(session: &mut MacSession, deviation: Deviation) -> AuthenticatedShare {
@@ -530,9 +604,9 @@ mod tests {
         b
     }
 
-    /// Shift a sharing's value by `δ = 1` without touching its MAC — the canonical
-    /// "forged share / inconsistent input" deviation. The same helper the
-    /// [`Deviation::ForgedProductShareAtOpen`] injection uses, so the input-side and
+    /// Shift a sharing's value by `δ = 1` without touching its MAC — a consistent
+    /// codeword of the wrong value, the "inconsistent input" deviation. The same helper
+    /// the [`Deviation::ConsistentCodewordAtOpen`] injection uses, so the input-side and
     /// product-side tests deviate identically.
     use super::shift_value_shares as tamper_value;
 
@@ -587,10 +661,12 @@ mod tests {
     /// sharing, which flows into `d` — the MAC-carrying FIRST operand of the verdict
     /// gate — so the defect propagates into `m`'s MAC and `σ ≠ 0`.
     ///
-    /// The Hole-1 headline deviation (a forged share on the PRODUCT, at this operator's
-    /// own open boundary) is a different injection point and is pinned separately by
-    /// `forged_product_share_at_the_equality_open_aborts_at_minimal_n`; the in-reduce
-    /// Hole-2 deviation by the two `wrong_degree_reduce_…` tests below.
+    /// Deviations at this operator's own open boundary are separate injection points,
+    /// pinned by `single_forged_share_at_the_equality_open_is_resolved_by_the_robust_
+    /// degree_t_open` (the within-threshold one, which the robust open handles) and
+    /// `consistent_codeword_at_the_equality_open_aborts_on_the_mac` (the RS-invisible one
+    /// only `α` sees); the in-reduce Hole-2 deviation by the two `wrong_degree_reduce_…`
+    /// tests below.
     #[test]
     fn forged_input_key_share_aborts_at_minimal_n() {
         for n in MINIMAL_N {
@@ -634,29 +710,105 @@ mod tests {
         matches!(got, Err(MpcError::MacCheckFailed { detail }) if detail.contains("batched IT-MAC check"))
     }
 
-    /// ACCEPTANCE (sq-km34, **THE headline Hole-1 deviation, at THIS operator's open
-    /// boundary**): a forged share on the masked-difference PRODUCT — injected after the
-    /// gadget has committed `m`'s MAC, exactly where the semi-honest path opens `m`
-    /// undefended — aborts instead of flipping the match bit.
+    /// ACCEPTANCE (Hole 1, the **SINGLE-PARTY** deviation — and an honest statement of
+    /// WHICH layer catches it): one corrupt opener shifts its OWN share of the
+    /// masked-difference product, every honest party's share preserved. This is the
+    /// deviation a within-threshold adversary can actually mount at the open boundary.
+    ///
+    /// On the SEMI-HONEST path that same edit is information-theoretically invisible and
+    /// silently flips the match bit, because the open there is degree `2t` on `n = 2t+1`
+    /// points — zero redundancy (pinned by `adversarial_tests::tampered_share_in_secure_
+    /// equality_open_is_undetectable_at_n_eq_2t_plus_1`). Here the authenticated product
+    /// has already been reduced to degree `t`, where the same `n = 2t+1` points carry `t`
+    /// points of RS redundancy, so the shifted share is OFF the codeword and the **robust
+    /// open** resolves it — before, and independently of, the MAC:
+    ///
+    /// - with no Berlekamp–Welch correction budget (`e_max = ⌊(n−t−1)/2⌋ = 0`, i.e.
+    ///   `n = 3`) it aborts with [`MpcError::Tampered`];
+    /// - with a budget (`n = 5, 7`) the share is CORRECTED and the operator returns the
+    ///   HONEST verdict.
+    ///
+    /// Either way `σ` is **not** what fires — asserted here, so this module cannot credit
+    /// the IT-MAC with catching a deviation the degree reduction already handles. What the
+    /// MAC uniquely adds at this boundary is the RS-invisible consistent-codeword shape,
+    /// pinned by `consistent_codeword_at_the_equality_open_aborts_on_the_mac`.
+    #[test]
+    fn single_forged_share_at_the_equality_open_is_resolved_by_the_robust_degree_t_open() {
+        for n in MINIMAL_N {
+            let b = backend(n, 0xFB_0000 + n as u64);
+            let t = b.threshold();
+            // Berlekamp–Welch budget of the degree-`t` open on `n` points.
+            let e_max = (n - t - 1) / 2;
+            let (ka, kb) = (Fp::new(42), Fp::new(42)); // EQUAL keys → honest verdict true.
+
+            let mut dealer = b.dealer();
+            let mut session = dealer.new_mac_session();
+            let x = session.authenticated_share(ka);
+            let y = session.authenticated_share(kb);
+            let got = auth_equal_verdicts_with(
+                &mut session,
+                &[(x, y)],
+                Deviation::SingleForgedShareAtOpen,
+            );
+            assert!(
+                !aborted_on_sigma(&got),
+                "n = {n}: a SINGLE forged share is off-codeword at degree t, so the robust open \
+                 must resolve it — crediting the IT-MAC here would overstate what the MAC adds; \
+                 got {got:?}"
+            );
+            if e_max == 0 {
+                assert!(
+                    matches!(got, Err(MpcError::Tampered { .. })),
+                    "n = {n}: with no correction budget (e_max = 0) the robust degree-t open must \
+                     ABORT on the off-curve share, got {got:?}"
+                );
+            } else {
+                assert_eq!(
+                    got.expect("within the correction budget the robust open recovers the true m"),
+                    vec![true],
+                    "n = {n}: with e_max = {e_max} >= 1 the forged share is CORRECTED, so the \
+                     operator returns the honest verdict for EQUAL keys"
+                );
+            }
+
+            assert!(
+                malicious_secure_equal(&b, ka, kb).unwrap(),
+                "n = {n}: the honest control on the same EQUAL keys must report `equal`"
+            );
+        }
+    }
+
+    /// ACCEPTANCE (sq-km34, **what the IT-MAC uniquely closes at this operator's open
+    /// boundary**): a *consistent degree-`t` codeword* of the WRONG product — every share
+    /// shifted by the same `1`, injected after the gadget has committed `m`'s MAC — has
+    /// nothing for Reed–Solomon to see, and aborts on `σ`.
+    ///
+    /// **Threat-model scope, stated plainly:** replacing all `n` final shares with a
+    /// coordinated codeword is ABOVE the honest-majority threshold, so this injection
+    /// models no single opener (the single-opener deviation is the test above, and the
+    /// robust open — not the MAC — resolves it). It is here to ISOLATE the shape at the
+    /// open boundary: a perfectly consistent sharing of a value the protocol did not
+    /// compute, which no amount of codeword redundancy can flag and only the secret `α`
+    /// detects. The **within-threshold** route to exactly that shape is the Hole-2
+    /// in-reduce deviation, which ONE re-sharing party does mount and which
+    /// `wrong_degree_reduce_in_the_verdict_multiplication_aborts_at_minimal_n` drives
+    /// through the production path — including a mutation half showing the rejected MAC
+    /// carry returns a silent WRONG verdict.
     ///
     /// Two-sided so it cannot pass vacuously:
     ///
-    /// 1. **The attack is real and RS-invisible.** The forged value sharing is a
-    ///    *consistent* degree-`t` codeword (every share shifted by the same `1`), so the
-    ///    robust open accepts it and returns `m + 1`. For a pair of EQUAL keys the honest
-    ///    `m` is `0`, so the semi-honest verdict rule `m == 0` would read the forged open
-    ///    as **"not equal"** — a silent WRONG answer, which is precisely what
-    ///    `adversarial_tests::tampered_share_in_secure_equality_open_is_undetectable_at_
-    ///    n_eq_2t_plus_1` pins on the unauthenticated path.
+    /// 1. **The substituted codeword is RS-invisible and changes the answer.** The robust
+    ///    open accepts it and returns `m + 1`; for EQUAL keys the honest `m` is `0`, so the
+    ///    verdict rule `m == 0` would read it as **"not equal"** — a wrong answer.
     /// 2. **The IT-MAC catches it**, via `σ ≠ 0` (not via the witness gate — asserted),
     ///    and the honest control on the same keys still returns the true verdict.
     #[test]
-    fn forged_product_share_at_the_equality_open_aborts_at_minimal_n() {
+    fn consistent_codeword_at_the_equality_open_aborts_on_the_mac() {
         for n in MINIMAL_N {
             let b = backend(n, 0xF7_0000 + n as u64);
             let (ka, kb) = (Fp::new(42), Fp::new(42)); // EQUAL keys → honest m = 0.
 
-            // --- 1. the attack is real: a consistent codeword of the WRONG product ---
+            // --- 1. RS sees nothing: a consistent codeword of the WRONG product ---
             {
                 let mut dealer = b.dealer();
                 let mut session = dealer.new_mac_session();
@@ -671,12 +823,12 @@ mod tests {
                 let forged = shift_value_shares(&m);
                 let opened = b
                     .reconstruct(forged.value_shares())
-                    .expect("the forged sharing is a CONSISTENT degree-t codeword — RS sees nothing");
+                    .expect("the substituted sharing is a CONSISTENT degree-t codeword — RS sees nothing");
                 assert_ne!(
                     opened,
                     Fp::zero(),
-                    "n = {n}: the forged product opens NONZERO, so the unauthenticated verdict \
-                     rule `m == 0` would report `not equal` for EQUAL keys — a silent wrong answer"
+                    "n = {n}: the substituted product opens NONZERO, so the unauthenticated \
+                     verdict rule `m == 0` would report `not equal` for EQUAL keys"
                 );
             }
 
@@ -685,15 +837,12 @@ mod tests {
             let mut session = dealer.new_mac_session();
             let x = session.authenticated_share(ka);
             let y = session.authenticated_share(kb);
-            let got = auth_equal_verdicts_with(
-                &mut session,
-                &[(x, y)],
-                Deviation::ForgedProductShareAtOpen,
-            );
+            let got =
+                auth_equal_verdicts_with(&mut session, &[(x, y)], Deviation::ConsistentCodewordAtOpen);
             assert!(
                 aborted_on_sigma(&got),
-                "n = {n}: a forged product share must abort on the batched IT-MAC check at the \
-                 minimal n = 2t+1, got {got:?}"
+                "n = {n}: a consistent codeword of the wrong product must abort on the batched \
+                 IT-MAC check at the minimal n = 2t+1, got {got:?}"
             );
             assert!(
                 malicious_secure_equal(&b, ka, kb).unwrap(),
