@@ -972,5 +972,89 @@ class TestWorkflowAdmissionSeam(unittest.TestCase):
         self.assertIn("scripts/tests/test_ci_selection_alarm.py", text)
 
 
+class _IssueListStub:
+    """Emulates BOTH gh list shapes faithfully, so either implementation of
+    `open_issue_exists` is EXECUTABLE here and a regression fails on the MISSED MARKER
+    rather than on an unrecognised command line:
+
+      * `gh api --paginate --slurp` follows the Link chain to exhaustion and returns a
+        LIST OF PAGES (without `--paginate`, only the first page);
+      * `gh issue list --limit N` returns only the NEWEST N rows.
+
+    That fidelity is the whole point — a stub that ignored `--limit` would let the
+    truncating call pass this test.
+    """
+
+    def __init__(self, corpus: list[dict]):
+        self.corpus = corpus
+        self.calls: list[list[str]] = []
+
+    def __call__(self, cmd, cwd=None, check=True):  # noqa: ANN001 — mirrors _run
+        self.calls.append(list(cmd))
+        if cmd[:2] == ["gh", "api"]:
+            pages = [self.corpus[i:i + 100] for i in range(0, len(self.corpus), 100)]
+            return json.dumps(pages if "--paginate" in cmd else pages[:1])
+        if cmd[:3] == ["gh", "issue", "list"]:
+            limit = int(cmd[cmd.index("--limit") + 1]) if "--limit" in cmd else len(self.corpus)
+            return json.dumps(sorted(self.corpus, key=lambda r: -r["number"])[:limit])
+        raise AssertionError(f"unstubbed command: {cmd}")
+
+
+class TestDedupeDoesNotFailOpenOnATruncatedPage(unittest.TestCase):
+    """sparq-org/sparq#4985. `open_issue_exists` is the ONLY thing standing between this
+    alarm and a duplicate issue on every nightly run, and it used to read the open set
+    through `gh issue list --limit 100`. `--limit` truncates SILENTLY, so once the
+    labelled open set passes a page the marker search stops seeing the tail, answers
+    "no duplicate", and the non-spam invariant fails OPEN with no signal whatsoever.
+
+    The corpus below is 300 labelled open issues with the marker on one of the OLDEST —
+    exactly the row a newest-first truncation drops.
+    """
+
+    MARKED = 7          # oldest-end issue number: dropped by any newest-first cap < 294
+
+    def _corpus(self, key: str) -> list[dict]:
+        rows = [{"number": n, "body": f"{A.key_marker(f'unrelated-{n}')}\nbody"}
+                for n in range(1, 301)]
+        rows[self.MARKED - 1]["body"] = f"prose\n{A.key_marker(key)}\nmore prose"
+        return rows
+
+    def test_marker_on_an_old_issue_is_still_seen(self):
+        key = "sparq-engine/nightly"
+        stub = _IssueListStub(self._corpus(key))
+        A._run, real = stub, A._run
+        try:
+            self.assertTrue(
+                A.open_issue_exists(key, "o/r"),
+                "the dedupe MISSED a marker sitting past the first page — the alarm "
+                "would file a duplicate on every run (#4985)",
+            )
+        finally:
+            A._run = real
+
+    def test_absent_marker_still_reads_as_absent(self):
+        """Negative control: 'see everything' must not degrade into 'always dedupe'."""
+        stub = _IssueListStub(self._corpus("sparq-engine/nightly"))
+        A._run, real = stub, A._run
+        try:
+            self.assertFalse(A.open_issue_exists("sparq-geo/nightly", "o/r"))
+        finally:
+            A._run = real
+
+    def test_a_pull_request_body_cannot_suppress_the_alarm(self):
+        """The REST issues endpoint returns PRs too — `gh issue list` did not. A PR
+        quoting the marker must not be read as an existing alarm issue."""
+        key = "sparq-geo/nightly"
+        corpus = self._corpus("sparq-engine/nightly")
+        corpus.append({"number": 999, "pull_request": {"url": "…"},
+                       "body": A.key_marker(key)})
+        stub = _IssueListStub(corpus)
+        A._run, real = stub, A._run
+        try:
+            self.assertFalse(A.open_issue_exists(key, "o/r"))
+        finally:
+            A._run = real
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

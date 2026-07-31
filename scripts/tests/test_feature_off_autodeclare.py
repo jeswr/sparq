@@ -792,6 +792,41 @@ def test_census_sweep_uses_the_newest_run_per_name() -> None:
               got == want, f"{label}: expected in_class_red={want}, got {got}")
 
 
+def test_census_refuses_a_truncated_pr_page() -> None:
+    """sparq-org/sparq#4985. `gh pr list --limit N` truncates SILENTLY — no error, no
+    warning, just a short list — and gh has no "there was more" flag, so a saturated page
+    is indistinguishable from a complete one. A census that enumerates part of the
+    population reports a WRONG total confidently, which is worse than not running.
+
+    Both directions are pinned: a SATURATED page must raise, and a page one row under the
+    cap must still be returned (otherwise "always raise" would satisfy the test).
+    """
+    cap = A.OPEN_PR_PAGE_CAP
+    seen: list[list[str]] = []
+
+    def rows(n: int):
+        def runner(argv):
+            seen.append(list(argv))
+            return json.dumps([{"number": 4000 + i, "headRefOid": f"sha{i}",
+                                "isDraft": False, "title": "t"} for i in range(n)])
+        return runner
+
+    try:
+        A._default_pr_lister("o/r", runner=rows(cap))
+        check("test_census_refuses_a_truncated_pr_page", False,
+              "a SATURATED open-PR page was accepted and would be counted as the whole class")
+    except SystemExit as exc:
+        check("test_census_refuses_a_truncated_pr_page", "TRUNCATES SILENTLY" in str(exc),
+              f"wrong failure: {exc}")
+    check("test_census_refuses_a_truncated_pr_page",
+          len(A._default_pr_lister("o/r", runner=rows(cap - 1))) == cap - 1,
+          "a page one row UNDER the cap must still be returned")
+    # A guard is unreachable if the QUERY asks for less than the guard checks.
+    check("test_census_refuses_a_truncated_pr_page",
+          seen[0][seen[0].index("--limit") + 1] == str(cap),
+          f"the query does not ask for the full cap: {seen[0]}")
+
+
 def test_prebuilt_bundles_do_not_skip_the_neutral_proof() -> None:
     """Handing in already-built base/head bundles must NOT short-circuit the obligations.
 
@@ -1031,6 +1066,7 @@ TESTS = [
     test_census_sweep_counts_the_live_class,
     test_census_sweep_matches_leg_name_by_equality,
     test_census_sweep_uses_the_newest_run_per_name,
+    test_census_refuses_a_truncated_pr_page,
     test_prebuilt_bundles_do_not_skip_the_neutral_proof,
     test_comment_only_drift_is_declared,
     test_inactive_cfg_item_drift_is_declared,
@@ -1159,6 +1195,12 @@ MUTANTS = [
      '            if leg is None or (c.get("started_at") or "") >= (leg.get("started_at") or ""):',
      "            if True:",
      "test_census_sweep_uses_the_newest_run_per_name"),
+    ("M15-census-accepts-a-truncated-page",
+     "drop the saturation guard, so a silently-truncated gh page is counted as the "
+     "whole open-PR population (#4985)",
+     '    return _assert_not_truncated(json.loads(out), OPEN_PR_PAGE_CAP, "open PRs")',
+     "    return json.loads(out)",
+     "test_census_refuses_a_truncated_pr_page"),
     ("M14-builder-obeys-shared-target-dir",
      "let an inherited CARGO_TARGET_DIR redirect the build, reintroducing the stale-bundle bug",
      '        env={**os.environ, "CARGO_TARGET_DIR": os.path.join(tree, "target")},',

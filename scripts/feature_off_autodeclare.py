@@ -619,13 +619,43 @@ def _gh_json(path: str) -> object:
     return json.loads(proc.stdout)
 
 
-def _default_pr_lister(repo: str) -> list[dict]:
-    proc = subprocess.run(
-        ["gh", "pr", "list", "--repo", repo, "--state", "open", "--limit", "200",
-         "--json", "number,headRefOid,isDraft,title"],
-        capture_output=True, text=True, check=True,
-    )
-    return json.loads(proc.stdout)
+# [OPUS-5] sparq-org/sparq#4985. `gh pr list --limit N` truncates SILENTLY — no error, no
+# warning, just a short list — and gh exposes no "there was more" flag. A census that
+# quietly enumerates part of the population reports a WRONG total confidently, which is
+# worse than not running: the cap therefore sits far above the live open-PR count and a
+# saturated page is refused rather than counted.
+OPEN_PR_PAGE_CAP = 1000
+
+
+def _assert_not_truncated(rows: list, cap: int, what: str) -> list:
+    """Refuse a `gh --limit` page that came back SATURATED.
+
+    Kept local rather than lifted into a shared sibling module: each of these scripts is
+    a standalone entry point run by its own workflow, and a new cross-script import has to
+    be kept in step with that workflow's checkout manifest (the #3776 failure mode) — a
+    coupling not worth taking on for an eight-line assertion.
+    """
+    if len(rows) >= cap:
+        raise SystemExit(
+            f"feature-off census: the {what} fetch returned {len(rows)} rows at its "
+            f"--limit {cap} cap. gh TRUNCATES SILENTLY, so this snapshot is probably "
+            f"partial and the census tally would understate the class with no signal. "
+            f"Raise the cap deliberately (OPEN_PR_PAGE_CAP)."
+        )
+    return rows
+
+
+def _default_pr_lister(repo: str, runner=None) -> list[dict]:
+    # `runner` exists so the truncation guard below is reachable from the hermetic suite;
+    # production always takes the subprocess path.
+    argv = ["gh", "pr", "list", "--repo", repo, "--state", "open",
+            "--limit", str(OPEN_PR_PAGE_CAP),
+            "--json", "number,headRefOid,isDraft,title"]
+    if runner is not None:
+        out = runner(argv)
+    else:
+        out = subprocess.run(argv, capture_output=True, text=True, check=True).stdout
+    return _assert_not_truncated(json.loads(out), OPEN_PR_PAGE_CAP, "open PRs")
 
 
 def _default_check_lister(repo: str, sha: str) -> list[dict]:

@@ -52,6 +52,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -209,14 +210,26 @@ def ensure_labels(repo: str) -> None:
 
 
 def open_issue_exists(repo: str, workflow: str) -> bool:
+    # [OPUS-5] sparq-org/sparq#4985. This was `gh issue list --limit 100`. `--limit`
+    # truncates SILENTLY, so past 100 open `formal-alarm` issues this dedupe
+    # would stop seeing the tail, report "no duplicate", and the alarm would file a
+    # duplicate on every daily run — the non-spam invariant failing OPEN with no
+    # signal. `gh api --paginate` exhausts the Link chain, so there is no cap left to
+    # erode. PRs are dropped: the issues endpoint returns both, and a PR body quoting
+    # a marker must not suppress a real alarm.
     out = _run_gh(
         [
-            "gh", "issue", "list", "--repo", repo, "--state", "open",
-            "--label", BASE_LABELS[0], "--json", "number,body", "--limit", "100",
+            "gh", "api", "--paginate", "--slurp",
+            f"repos/{repo}/issues?state=open"
+            f"&labels={urllib.parse.quote(BASE_LABELS[0])}&per_page=100",
         ]
     )
     marker = f"{KEY_PREFIX}: {workflow}"
-    return any(marker in (item.get("body") or "") for item in json.loads(out or "[]"))
+    return any(
+        marker in (item.get("body") or "")
+        for page in json.loads(out or "[]") if isinstance(page, list)
+        for item in page if isinstance(item, dict) and "pull_request" not in item
+    )
 
 
 def file_issue(repo: str, v: dict) -> None:
@@ -385,6 +398,46 @@ def self_test() -> int:
             "--now", "2026-07-07T12:00:00Z", "--dry-run", "--repo", "x/y",
         ])
         check(rc == 2, "missing manifest => fail-loud exit 2")
+
+    # 9. DEDUPE MUST NOT FAIL OPEN ON A TRUNCATED PAGE (sparq-org/sparq#4985).
+    #    `open_issue_exists` is the only thing between this alarm and a duplicate issue
+    #    every single day, and it used to read the open set through
+    #    `gh issue list --limit 100`. `--limit` truncates SILENTLY, so past a page the
+    #    marker search stops seeing the tail and answers "no duplicate" — the non-spam
+    #    invariant failing OPEN with no signal.
+    #
+    #    The stub emulates BOTH gh shapes faithfully — `gh api --paginate --slurp`
+    #    exhausts the Link chain and returns a LIST OF PAGES, `gh issue list --limit N`
+    #    returns only the newest N — so restoring the capped call is EXECUTABLE here and
+    #    fails on the MISSED MARKER rather than on an unrecognised command line. A stub
+    #    that ignored `--limit` would let the truncating call pass.
+    corpus = [{"number": n, "body": f"{KEY_PREFIX}: other-{n}.yml"} for n in range(1, 301)]
+    corpus[6]["body"] = f"{KEY_PREFIX}: miri.yml"        # issue #7: the oldest end
+    # The REST issues endpoint returns PRs too (`gh issue list` did not). A PR quoting a
+    # marker must NOT be read as an existing alarm issue.
+    corpus.append({"number": 999, "pull_request": {"url": "…"},
+                   "body": f"{KEY_PREFIX}: kani.yml"})
+
+    def _stub_gh(args: list[str]) -> str:
+        if args[:2] == ["gh", "api"]:
+            pages = [corpus[i:i + 100] for i in range(0, len(corpus), 100)]
+            return json.dumps(pages if "--paginate" in args else pages[:1])
+        if args[:3] == ["gh", "issue", "list"]:
+            cap = int(args[args.index("--limit") + 1]) if "--limit" in args else len(corpus)
+            return json.dumps(sorted(corpus, key=lambda r: -r["number"])[:cap])
+        raise AssertionError(f"unstubbed gh invocation: {args}")
+
+    real_gh = globals()["_run_gh"]
+    globals()["_run_gh"] = _stub_gh
+    try:
+        seen_old = open_issue_exists("o/r", "miri.yml")
+        seen_absent = open_issue_exists("o/r", "formal-verification.yml")
+        seen_pr_only = open_issue_exists("o/r", "kani.yml")
+    finally:
+        globals()["_run_gh"] = real_gh
+    check(seen_old, "dedupe sees a marker on the 7th-oldest of 300 labelled open issues")
+    check(not seen_absent, "dedupe stays negative for an unmarked lane (non-vacuous)")
+    check(not seen_pr_only, "a PULL REQUEST body carrying the marker does not dedupe")
 
     if failures:
         for f in failures:

@@ -147,6 +147,15 @@ MAX_CONSTITUENTS = 15
 # (re-arm, §7) against worst-case queue churn from a persistently-failing omnibus.
 MAX_OMNIBUS_AGE_HOURS = 4
 
+# [OPUS-5] sparq-org/sparq#4985. The batcher's ENTIRE input is one `gh pr list` page, and
+# `--limit N` truncates SILENTLY: no error, no warning, just a short list. A truncated
+# fetch does not fail the run — it batches the head of the queue and never sees the tail,
+# so throughput degrades with no signal at all, which is precisely the shape that is hard
+# to attribute. gh exposes no "there was more" flag, so SATURATION is the only detectable
+# signal: the cap sits far above the live open-PR population and `assert_not_truncated`
+# refuses to act on a saturated page.
+OPEN_PR_PAGE_CAP = 1000
+
 OMNIBUS_PREFIX = "sparq-omnibus/"
 # Omnibus change-classes (issue #3433). SLIM batches carry only constituents whose
 # diffs are docs-/orchestration-only, so their merge-group run is the slim lane set
@@ -547,16 +556,41 @@ def run_git(argv: list, check: bool = True) -> int:
     return subprocess.run(["git"] + argv, check=check).returncode
 
 
+def assert_not_truncated(rows: list, cap: int, what: str) -> list:
+    """Refuse to act on a `gh --limit` page that came back SATURATED.
+
+    A saturated page is indistinguishable from a complete one — gh returns exactly `cap`
+    rows either way — so the batcher would silently stop seeing the TAIL of the queue.
+    Raising makes the day that happens loud instead.
+
+    Kept local rather than lifted into a shared sibling module: each of these scripts is
+    a standalone entry point run by its own workflow, and a new cross-script import has to
+    be kept in step with that workflow's checkout manifest (the #3776 failure mode) — a
+    coupling not worth taking on for an eight-line assertion.
+    """
+    if len(rows) >= cap:
+        raise SystemExit(
+            f"[{PROG}] ERROR: the {what} fetch returned {len(rows)} rows at its "
+            f"--limit {cap} cap. gh TRUNCATES SILENTLY, so this snapshot is probably "
+            f"partial and batching from it would quietly ignore the tail of the queue. "
+            f"Raise the cap deliberately (OPEN_PR_PAGE_CAP)."
+        )
+    return rows
+
+
 def gather_state(repo: str, now: datetime, batch_enabled: bool = True) -> dict:
     """Snapshot the live GitHub/git state the pure plan() consumes.
 
     Deliberately TWO-PHASE: one LIGHT list over all open PRs (a single query carrying
-    body+statusCheckRollup for 200 PRs overloads the GraphQL stream), then targeted
-    per-PR views only where the policy needs the heavy fields (open omnibus PRs and the
-    overflow candidates)."""
+    body+statusCheckRollup for the whole open set overloads the GraphQL stream), then
+    targeted per-PR views only where the policy needs the heavy fields (open omnibus PRs
+    and the overflow candidates). The light list omits the expensive body/rollup fields,
+    which is what makes the OPEN_PR_PAGE_CAP headroom affordable."""
     fields = "number,headRefName,title,author,labels,isDraft,autoMergeRequest"
-    raw = json.loads(run_gh(["pr", "list", "--repo", repo, "--state", "open",
-                             "--limit", "200", "--json", fields]))
+    raw = assert_not_truncated(
+        json.loads(run_gh(["pr", "list", "--repo", repo, "--state", "open",
+                           "--limit", str(OPEN_PR_PAGE_CAP), "--json", fields])),
+        OPEN_PR_PAGE_CAP, "open PRs")
     open_prs = []
     for pr in raw:
         am = pr.get("autoMergeRequest")
@@ -1069,6 +1103,48 @@ def self_test() -> int:
     armed = [c for c in calls if c[0] == "gh" and c[1][:2] == ["pr", "merge"]]
     check("slim all-conflict: only the engine omnibus armed", armed,
           [("gh", ["pr", "merge", engine_branch, "--repo", "sparq-org/sparq", "--auto"])])
+
+    # --- #4985: a SATURATED open-PR page must be REFUSED, never batched from ------------
+    # gh returns exactly `--limit` rows whether or not more existed, so a saturated page
+    # is indistinguishable from a complete one and the batcher would quietly batch only
+    # the head of the queue. Driven THROUGH gather_state (not by calling the assertion
+    # directly) so deleting the CALL SITE goes red, not just deleting the function.
+    saturated_argv = []
+
+    def stub_gh_saturated(argv, capture=True):
+        saturated_argv.append(list(argv))
+        # Any call AFTER the open-PR list means the snapshot was accepted. Refusing here
+        # keeps a removed guard LOUD and the self-test HERMETIC — otherwise gather_state
+        # walks on into a real `git fetch` and reds on the sandbox instead of the defect.
+        if argv[:2] != ["pr", "list"] or "--state" not in argv:
+            raise AssertionError(f"gather_state continued past a saturated page: {argv[:4]}")
+        return json.dumps([{"number": 4000 + i, "headRefName": f"f/{i}", "title": "t",
+                            "author": {"login": "someone"}, "labels": [],
+                            "isDraft": False, "autoMergeRequest": None}
+                           for i in range(OPEN_PR_PAGE_CAP)])
+
+    def stub_git_forbidden(argv, check=True):
+        raise AssertionError(f"gather_state ran git past a saturated page: {argv[:3]}")
+
+    run_gh, run_git = stub_gh_saturated, stub_git_forbidden
+    try:
+        gather_state("sparq-org/sparq", now)
+        check("a SATURATED open-PR page is refused (#4985)", "no raise", "SystemExit")
+    except SystemExit as exc:
+        check("a SATURATED open-PR page is refused (#4985)",
+              "TRUNCATES SILENTLY" in str(exc), True)
+    except AssertionError as exc:
+        check("a SATURATED open-PR page is refused (#4985)", f"continued: {exc}", "SystemExit")
+    finally:
+        run_gh, run_git = real_gh, real_git
+    # The guard is only reachable if the QUERY asks for as much as the guard checks: a
+    # cap of 1000 policed against a `--limit 200` fetch can never fire.
+    check("the open-PR query asks for the full cap",
+          saturated_argv[0][saturated_argv[0].index("--limit") + 1], str(OPEN_PR_PAGE_CAP))
+    # Negative control: the guard is not simply "always raise".
+    check("a page one row UNDER the cap is accepted",
+          len(assert_not_truncated([{}] * (OPEN_PR_PAGE_CAP - 1), OPEN_PR_PAGE_CAP, "x")),
+          OPEN_PR_PAGE_CAP - 1)
 
     if failures:
         for f in failures:

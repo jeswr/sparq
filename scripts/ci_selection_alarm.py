@@ -80,6 +80,7 @@ import os
 import re
 import subprocess
 import sys
+import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -599,24 +600,42 @@ def ensure_label(label: str) -> None:
 
 
 def open_issue_exists(key: str, repo: str) -> bool:
-    # Idempotency: list ALL open selection-alarm issues and EXACT-match the body
-    # marker. We deliberately do NOT pass `--search` — a triage key contains
+    # Idempotency: read ALL open selection-alarm issues and EXACT-match the body
+    # marker. We deliberately do NOT pass a `--search` term — a triage key contains
     # punctuation (parens/slashes) that gh's search tokeniser handles unreliably,
-    # which could MISS an existing issue and break dedupe (mint a duplicate). The
-    # deduped label keeps the open set tiny, so listing 100 is cheap.
+    # which could MISS an existing issue and break dedupe (mint a duplicate).
+    #
+    # [OPUS-5] sparq-org/sparq#4985. This was `gh issue list --limit 100`, and that
+    # cap made the dedupe FAIL OPEN: `--limit` truncates SILENTLY — no error, no
+    # warning, just a short list — so past 100 open `selection-alarm` issues the
+    # marker search stops seeing the tail, reports "no duplicate", and the alarm
+    # mints a duplicate on EVERY nightly run. The invariant this function exists to
+    # hold would break with no signal at all, which is why the cap is removed rather
+    # than raised: `gh api --paginate` follows the Link headers to exhaustion, so
+    # there is nothing left to erode as the labelled open set grows (same pattern as
+    # scripts/retriage.py `_fetch_label` and scripts/ready-issues.py `_fetch`).
+    #
+    # The issues endpoint returns PRs too; they are dropped so the population stays
+    # exactly the one `gh issue list` returned — a PR body quoting a marker must not
+    # suppress a real alarm.
     marker = key_marker(key)
     out = _run(
         [
-            "gh", "issue", "list", "--repo", repo, "--state", "open",
-            "--label", "selection-alarm", "--json", "number,body", "--limit", "100",
+            "gh", "api", "--paginate", "--slurp",
+            f"repos/{repo}/issues?state=open"
+            f"&labels={urllib.parse.quote(BASE_LABELS[0])}&per_page=100",
         ],
         check=False,
     )
     try:
-        issues = json.loads(out or "[]")
+        pages = json.loads(out or "[]")
     except json.JSONDecodeError:
         return False
-    return any(marker in (i.get("body") or "") for i in issues)
+    return any(
+        marker in (i.get("body") or "")
+        for page in pages if isinstance(page, list)
+        for i in page if isinstance(i, dict) and "pull_request" not in i
+    )
 
 
 def create_issue(title: str, body: str, labels: list[str], repo: str) -> str:

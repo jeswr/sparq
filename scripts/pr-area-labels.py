@@ -70,6 +70,14 @@ GLOBAL = "__global__"          # mirrors ready-issues.py / dispatch-claim.py
 AREA_PREFIX = "area:"
 CRATES_DIR = "crates"
 
+# [OPUS-5] sparq-org/sparq#4985. `gh pr list --limit N` truncates SILENTLY — no error, no
+# warning, just a short list — and gh exposes no "there was more" flag, so SATURATION is
+# the only detectable signal. A backfill that quietly enumerates part of the open set
+# leaves the unseen PRs unlabelled and therefore in the serialising `__global__`
+# partition, with nothing in the output saying so. Cap far above the live population and
+# refuse a saturated page (`assert_not_truncated`).
+OPEN_PR_PAGE_CAP = 1000
+
 
 class PolicyError(RuntimeError):
     """A malformed ci/area-labels.toml. Fail loudly — never silently label nothing."""
@@ -313,6 +321,28 @@ def _gh(args, runner=None, attempts=3, sleep=None):
     raise RuntimeError(f"gh {' '.join(args)} failed after {attempts} attempt(s): {last}")
 
 
+def assert_not_truncated(rows, cap, what):
+    """Refuse to act on a `gh --limit` page that came back SATURATED.
+
+    A saturated page is indistinguishable from a complete one — gh returns exactly `cap`
+    rows either way — so the backfill would silently skip the tail of the open set.
+
+    Kept local rather than lifted into a shared sibling module: each of these scripts is
+    a standalone entry point run by its own workflow, and a new cross-script import has to
+    be kept in step with that workflow's checkout manifest (the #3776 failure mode) — a
+    coupling not worth taking on for an eight-line assertion.
+    """
+    if len(rows) >= cap:
+        raise SystemExit(
+            f"pr-area-labels: the {what} fetch returned {len(rows)} rows at its "
+            f"--limit {cap} cap. gh TRUNCATES SILENTLY, so this snapshot is probably "
+            f"partial and the backfill would leave the unseen PRs unlabelled (and so in "
+            f"the serialising __global__ partition) without saying so. Raise --limit "
+            f"deliberately."
+        )
+    return rows
+
+
 def known_area_labels(repo, runner=None):
     """The area names that already exist as labels. Fail-closed: an empty/failed read
     yields an empty set, so NOTHING is labelled and every PR stays `__global__` —
@@ -370,15 +400,15 @@ def fetch_pr(repo, number, runner=None):
     }, data.get("changedFiles"), runner=runner)
 
 
-def fetch_open_prs(repo, limit=300, runner=None):
+def fetch_open_prs(repo, limit=OPEN_PR_PAGE_CAP, runner=None):
     # Same rule as fetch_pr: the list call carries metadata + the authoritative count,
     # never the capped GraphQL `files` connection. The per-PR REST enumeration costs one
     # extra call per open PR; a backfill is a hand-run, dry-run-by-default operation, and
-    # a wrong narrow label is not worth saving ~90 requests.
+    # a wrong narrow label is not worth saving the requests.
     raw = _gh(["pr", "list", "--repo", repo, "--state", "open", "--limit", str(limit),
                "--json", "number,labels,changedFiles,isDraft,title"], runner=runner)
     out = []
-    for data in json.loads(raw):
+    for data in assert_not_truncated(json.loads(raw), limit, "open PRs"):
         out.append(_with_changed_files(repo, {
             "number": data.get("number"),
             "labels": [lb.get("name") for lb in data.get("labels") or []],
@@ -436,7 +466,9 @@ def main(argv=None, runner=None, out=None):
                     help="actually add the labels (default: dry run, touch nothing)")
     ap.add_argument("--dry-run", action="store_true",
                     help="explicit no-op default; mutually exclusive with --apply")
-    ap.add_argument("--limit", type=int, default=300, help="backfill PR page ceiling")
+    ap.add_argument("--limit", type=int, default=OPEN_PR_PAGE_CAP,
+                    help="backfill PR page ceiling. Saturating it is a hard error, not a "
+                         "silent truncation (#4985).")
     ap.add_argument("--pace", type=float, default=0.0,
                     help="seconds to wait between label writes during a backfill. Adding a "
                          "label fires a `pull_request: labeled` event, and ci/bench/fuzz/"

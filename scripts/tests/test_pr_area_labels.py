@@ -982,5 +982,46 @@ class TestSelfTestIsActuallyInvoked(unittest.TestCase):
         self.assertNotIn("if", self.wf["jobs"]["validate"])
 
 
+class TestBackfillRefusesATruncatedPage(unittest.TestCase):
+    """sparq-org/sparq#4985. `gh pr list --limit N` truncates SILENTLY — no error, no
+    warning, just a short list — and gh has no "there was more" flag, so a saturated page
+    is indistinguishable from a complete one. A backfill that quietly enumerates part of
+    the open set leaves the unseen PRs with no `area:` label, i.e. parked in the
+    serialising `__global__` partition, and prints nothing to say so.
+
+    Small caps are used so the fixture stays cheap; the guard is cap-relative.
+    """
+
+    @staticmethod
+    def _runner(count):
+        def fake(args):
+            if args[:2] == ["pr", "list"]:
+                return json.dumps([
+                    {"number": 1000 + i, "labels": [], "changedFiles": 1,
+                     "title": "t", "isDraft": False} for i in range(count)])
+            raise AssertionError(
+                f"fetch_open_prs continued past a saturated page: {args[:3]}")
+        return fake
+
+    def test_a_saturated_page_is_refused(self):
+        with self.assertRaises(SystemExit) as raised:
+            M.fetch_open_prs(REPO, limit=5, runner=self._runner(5))
+        self.assertIn("TRUNCATES SILENTLY", str(raised.exception))
+
+    def test_a_page_one_row_under_the_cap_is_accepted(self):
+        """Negative control: the guard is not simply 'always raise'. The per-PR file
+        enumeration runs here, which is why the stub above only allows `pr list` — a
+        refusal that fired too early would surface as its AssertionError."""
+        prs = M.fetch_open_prs(REPO, limit=5, runner=FakeGH(
+            {1000 + i: {"labels": [], "files": ["crates/sparq-core/a.rs"]}
+             for i in range(4)}, ["area:sparq-core"]))
+        self.assertEqual(len(prs), 4)
+
+    def test_the_cli_default_leaves_headroom_over_the_live_backlog(self):
+        """A cap only helps if it sits well above the population it bounds; #4985 filed
+        this class because 200 was ~2.2x a 93-PR open set."""
+        self.assertGreaterEqual(M.OPEN_PR_PAGE_CAP, 1000)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

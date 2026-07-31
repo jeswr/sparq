@@ -89,9 +89,37 @@ SPARQ_AGENT_BRANCH_RE = re.compile(r"^sparq-agent/")
 
 SELF_ID = "> 🤖 SPARQ agent"
 
+# [OPUS-5] sparq-org/sparq#4985. `gh pr list --limit N` truncates SILENTLY: no error, no
+# warning, just a short list. gh exposes no "there was more" flag, so SATURATION is the
+# only signal available — hence a cap set far above the live population plus the
+# assertion below, which turns a silent truncation into a visible one.
+OPEN_PR_PAGE_CAP = 1000
+
 
 def log(msg: str) -> None:
     print(f"[{PROG}] {msg}", file=sys.stderr)
+
+
+def assert_not_truncated(rows, cap, what):
+    """Refuse to act on a `gh --limit` page that came back SATURATED.
+
+    A saturated page is indistinguishable from a complete one — gh returns exactly `cap`
+    rows either way — so the groomer would silently stop seeing the TAIL of the backlog
+    and degrade invisibly. Raising instead makes the day that happens loud.
+
+    Kept local rather than lifted into a shared sibling module: each of these scripts is
+    a standalone entry point run by its own workflow, and a new cross-script import has to
+    be kept in step with that workflow's checkout manifest (the #3776 failure mode) — a
+    coupling not worth taking on for an eight-line assertion.
+    """
+    if len(rows) >= cap:
+        raise SystemExit(
+            f"[{PROG}] ERROR: the {what} fetch returned {len(rows)} rows at its "
+            f"--limit {cap} cap. gh TRUNCATES SILENTLY, so this snapshot is probably "
+            f"partial and acting on it would groom only part of the backlog with no "
+            f"signal. Raise the cap deliberately (OPEN_PR_PAGE_CAP)."
+        )
+    return rows
 
 
 # --------------------------------------------------------------------------------------
@@ -436,11 +464,12 @@ def _normalise_checks(status_check_rollup):
 
 def collect_prs(repo, gh_json=_gh_json):
     """Fetch the light open-PR snapshot used to decide which details are needed."""
-    prs = gh_json([
-        "pr", "list", "--repo", repo, "--state", "open", "--limit", "200",
+    prs = assert_not_truncated(gh_json([
+        "pr", "list", "--repo", repo, "--state", "open",
+        "--limit", str(OPEN_PR_PAGE_CAP),
         "--json",
         "number,title,author,isDraft,headRefName,labels,updatedAt",
-    ])
+    ]), OPEN_PR_PAGE_CAP, "open PRs")
     norm = []
     for p in prs:
         norm.append({
@@ -507,12 +536,28 @@ def enrich_prs(prs, existing_markers, repo, exclude_pr, now, gh_json=_gh_json):
     return errors
 
 
-def collect_existing_markers(repo):
-    """Every dedupe marker present in the body of an OPEN issue."""
-    issues = _gh_json([
-        "issue", "list", "--repo", repo, "--state", "open", "--limit", "500",
-        "--json", "body",
+def collect_existing_markers(repo, gh_json=_gh_json):
+    """Every dedupe marker present in the body of an OPEN issue.
+
+    [OPUS-5] sparq-org/sparq#4985. This was `gh issue list --limit 500`, and unlike the
+    call sites that issue tabulated this one was ALREADY past its cap: #4985 counted 1707
+    open issues on the live repo, `--limit` truncates SILENTLY (newest-first, no error, no
+    warning), so every marker on an older issue was invisible. A marker this function
+    fails to see is a dedupe MISS, and a dedupe miss re-files an issue the groomer already
+    filed — the non-spam invariant failing OPEN, quietly.
+
+    The markers are spread over two different label sets (`area:deps`/`kind:deps` for
+    dep-upgrade issues, `backlog:stale` for stale-PR issues), so there is no single label
+    scope to narrow by: the fetch is the whole open set, exhausted via `gh api
+    --paginate` (same pattern as scripts/ready-issues.py `_fetch`). PRs are dropped —
+    the issues endpoint returns both, and `gh issue list` did not return PRs.
+    """
+    pages = gh_json([
+        "api", "--paginate", "--slurp",
+        f"repos/{repo}/issues?state=open&per_page=100",
     ])
+    issues = [i for page in pages if isinstance(page, list)
+              for i in page if isinstance(i, dict) and "pull_request" not in i]
     markers = set()
     marker_re = re.compile(r"<!-- (?:dep-upgrade|pr-backlog):[^>]+ -->")
     for it in issues:
@@ -672,6 +717,52 @@ def self_test() -> int:
     check("large-list fixture uses one light list query", len(collection_calls) == 1)
     check("mutation tripwire: list query excludes files/statusCheckRollup",
           list_fields.isdisjoint({"files", "statusCheckRollup"}))
+
+    # --- #4985: a SATURATED `gh pr list` page must be REFUSED, not groomed ---------------
+    # gh returns exactly `--limit` rows whether or not more existed, so a saturated page is
+    # indistinguishable from a complete one. Without this the groomer silently stops seeing
+    # the tail of the backlog. `assert_not_truncated` is exercised THROUGH collect_prs (not
+    # called directly) so deleting the call site — not just the function — goes red.
+    def saturated_gh(argv):
+        return [dict(large_raw[0], number=3000 + i) for i in range(OPEN_PR_PAGE_CAP)]
+
+    try:
+        collect_prs(repo, gh_json=saturated_gh)
+        check("a SATURATED open-PR page is refused (#4985)", False)
+    except SystemExit as e:
+        check("a SATURATED open-PR page is refused (#4985)", "TRUNCATES SILENTLY" in str(e))
+
+    def one_short_gh(argv):
+        return [dict(large_raw[0], number=3000 + i) for i in range(OPEN_PR_PAGE_CAP - 1)]
+
+    check("a page one row UNDER the cap is accepted (the guard is not just 'always raise')",
+          len(collect_prs(repo, gh_json=one_short_gh)) == OPEN_PR_PAGE_CAP - 1)
+
+    # --- #4985: marker dedupe must READ EVERY open issue, not the newest page ------------
+    # This call site was ALREADY truncating in production (`--limit 500` against a
+    # >500-issue open backlog), so a marker on an older issue was invisible and the groomer
+    # re-filed an issue it had already filed. The stub emulates BOTH gh shapes faithfully —
+    # `gh api --paginate --slurp` returns a LIST OF PAGES, `gh issue list --limit N` returns
+    # only the newest N — so reverting the fetch fails on the MISSED MARKER rather than on
+    # an unrecognised command line.
+    marker_corpus = [{"number": n, "body": "no marker here"} for n in range(1, 1201)]
+    marker_corpus[4]["body"] = "prose\n<!-- pr-backlog:103 -->\ntail"     # issue #5: oldest end
+    marker_corpus.append({"number": 9999, "pull_request": {"url": "…"},
+                          "body": "<!-- dep-upgrade:serde@1.0.204 -->"})  # a PR, not an issue
+
+    def marker_gh(argv):
+        if argv[:2] == ["api", "--paginate"]:
+            return [marker_corpus[i:i + 100] for i in range(0, len(marker_corpus), 100)]
+        if argv[:2] == ["issue", "list"]:
+            cap = int(argv[argv.index("--limit") + 1])
+            return sorted(marker_corpus, key=lambda r: -r["number"])[:cap]
+        raise AssertionError(f"unexpected marker gh call: {argv}")
+
+    found_markers = collect_existing_markers(repo, gh_json=marker_gh)
+    check("a marker on the 5th-oldest of 1200 open issues is still SEEN (#4985)",
+          "<!-- pr-backlog:103 -->" in found_markers)
+    check("a PULL REQUEST body carrying a marker is not counted as an existing issue",
+          "<!-- dep-upgrade:serde@1.0.204 -->" not in found_markers)
 
     collection_stderr = io.StringIO()
     with redirect_stderr(collection_stderr):
