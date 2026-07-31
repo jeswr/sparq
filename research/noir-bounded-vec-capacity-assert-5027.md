@@ -87,20 +87,35 @@ unaudited ZK work sound.
 patch that test still **passes**, because the assert still fires during execution —
 which is the whole point of routing it through the unconstrained hint. So the existing
 test cannot distinguish "constrained check" from "unconstrained hint", and the PR adds
-none that can. A witness for the actual property has to observe the constraint system,
-not the execution: the §10.2 step-2 differential (`nargo execute --force` vs
-`--force-brillig`) is the cheapest existing instrument, and an ACIR-level check that a
-capacity-violating witness is rejected is the direct one.
+none that can.
+
+Nor does §10.2's step-2 differential (`nargo execute --force` vs `--force-brillig`)
+close that gap. Both sides are *execution* paths, and the new unconstrained assertion
+makes **both** reject during honest witness generation whether or not any constraint
+binds a malicious witness — so the differential stays green under exactly the
+under-constrained implementation it would need to catch. Run it as what it is, an
+execution-equivalence check, and not as the soundness regression guard.
+
+A witness for the actual property has to bypass or mutate honest witness generation —
+supply a witness whose out-of-range `self.storage[self.len]` write is *not* caught by
+the prover-side hint — and show that the constraint system / verifier rejects it.
+**No test available today establishes that**, neither in the PR nor at `master`, and
+this record does not claim one exists; the flip stays blocked pending one (§4 item 2).
 
 **3.2 The measured table is not reproducible in-repo.**
 The commit message carries a before/after table (ACIR opcodes and UltraHonk gates on
 the SIZE=500 reproducer) plus "0 delta" on the standard benchmark corpus and on the
-sparq compose corpus. Two observations, one supporting and one not:
+sparq compose corpus. Two observations, neither of which establishes the numbers as
+taken:
 
-- *Supporting:* "sparq compose corpus (8 packages)" and the four named standard
-  benchmarks match §5.2's baseline corpus exactly — 8 compose packages and 4 noir
-  benchmark packages. The numbers were evidently taken against this program's own corpus.
-- *Not supporting:* the gate row is the one figure later program records say the fleet
+- *Consistent, but not evidence of provenance:* "sparq compose corpus (8 packages)"
+  and the four named standard benchmarks match §5.2's baseline corpus exactly — 8
+  compose packages and 4 noir benchmark packages. That is a consistency check on the
+  **labels** only. Matching names and package counts do not establish that the
+  commands were run, that the reported values came from those runs, or what
+  toolchain/commit produced them; measurement execution and provenance remain
+  **unverified**.
+- *Not reproducible:* the gate row is the one figure later program records say the fleet
   environment could not produce — §10.8's capability table records no `bb`, and §10.10
   records "no `nargo`, no `bb`, no build". The harness bead `sq-i50o4` that would make
   any of this re-runnable has not landed. The row is therefore **unreproducible today**,
@@ -117,10 +132,13 @@ the flip, not a nicety.
 The bead's implementation work is **done and should not be repeated**. The open
 actions, in order:
 
-1. @jeswr re-takes or confirms the §3.2 gate row (blocked on `sq-i50o4` for a
-   reproducible version).
+1. @jeswr confirms the §3.2 gate row's provenance or re-takes it (blocked on
+   `sq-i50o4` for a reproducible version).
 2. Add a test that is red when the capacity bound is not enforced at constraint level
-   (§3.1) — without it the PR has no regression guard for the property it trades away.
+   (§3.1) — one that bypasses or mutates honest witness generation and demonstrates
+   verifier/constraint-system rejection of an out-of-range index, **not** an
+   execution-path differential. Until such a test exists the PR carries no regression
+   guard for the property the elision relies on, and stays blocked on it.
 3. Upgrade the commit/PR safety justification from the ACVM execution-time error to
    the `array_index_needs_explicit_oob_check` contract (§2), which is the citable
    in-tree reason and is the argument a noir maintainer will want to see.
