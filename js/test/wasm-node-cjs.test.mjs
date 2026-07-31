@@ -54,7 +54,9 @@ test('require() of the nodejs-target glue yields a ready Store — no init() ste
   // Used immediately, with no init: this is the whole contract of the second target.
   const store = engine.Store.load('<http://e/a> <http://e/b> <http://e/c> .', 'ntriples');
   try {
-    assert.equal(store.size(), 1);
+    // `size` is a `#[wasm_bindgen(getter)]` on the Rust `Store`, so it is a PROPERTY on
+    // the generated class, not a method (`heapBytes()` next to it is the method).
+    assert.equal(store.size, 1);
     assert.equal(store.ask('ASK { ?s ?p ?o }'), true);
     const rows = JSON.parse(store.query('SELECT ?o WHERE { ?s ?p ?o }')).results.bindings;
     assert.deepEqual(

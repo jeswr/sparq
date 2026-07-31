@@ -138,7 +138,7 @@ instantiates the module eagerly at `require()` time (it `readFileSync`s the
 const { Store } = require('@jeswr/sparq/wasm-node');   // synchronous, no await
 
 const store = Store.load('<http://e/a> <http://e/b> <http://e/c> .', 'ntriples');
-console.log(store.size(), store.ask('ASK { ?s ?p ?o }'));
+console.log(store.size, store.ask('ASK { ?s ?p ?o }'));   // `size` is a getter
 store.free();
 ```
 
