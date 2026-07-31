@@ -303,7 +303,7 @@ leaks the boolean) or needs P5 to keep the sum itself secret (OPEN — see §4.2
 |---|---|---|---|
 | SH, HM, any N | **BUILT** | equality-to-zero: `d=a−b`, mask `m=d·r`, open `m`; `m==0 ⇔ equal`. 1 mult + 1 open. Leaks only the match bit. | `secure_equal` (`join.rs:411`) |
 | Mal, HM, over-provisioned N | KNOWN→partial | same with checked open; full malicious needs IT-MAC | `reconstruct_degree` checks the 2t open where redundancy exists |
-| Mal, HM, **minimal N=2t+1** | **[OPUS-5] BUILT (sq-km34)** — the *protocol*; the registry cell is still `SemiHonestOnly` until sq-km34.7 | **IT-MAC** on the degree-2t product (NOT RS redundancy — there is none at degree 2t when n=2t+1), **plus** a mask nonzero-witness `u = r·s` opened in the same batch (a zeroed mask is MAC-consistent, so the MAC alone cannot see it) | `auth_equal` (`auth_equal.rs`): `[[m]] = auth_mul([[d]],[[r]])` MAC-checked before open, one `σ` per BATCH. Closes the coZK-2025/1026 interaction for this operator (nothing is acted on before the check). Residual: mask SECRECY still `TrustedDealerSim` (**sq-yyro**); `HiddenValueJoin` still runs the semi-honest `secure_equal`; unaudited (**sq-qhy4**) |
+| Mal, HM, **minimal N=2t+1** | **[OPUS-5] BUILT (sq-km34)** — the *protocol*; the registry cell is still `SemiHonestOnly` until sq-km34.7 | **IT-MAC** on the degree-2t product (NOT RS redundancy — there is none at degree 2t when n=2t+1), **plus** a mask nonzero-witness `u = r·s` opened in the same batch (a zeroed mask is MAC-consistent, so the MAC alone cannot see it) | `auth_equal` (`auth_equal.rs`): `[[m]] = auth_mul([[d]],[[r]])` MAC-checked before any verdict is read from it, one `σ` per BATCH. Does NOT close the coZK-2025/1026 interaction — the check runs AFTER the open (open → verify → release), so the delivered property is "nothing is *acted on* before the check", not "nothing inconsistent is broadcast". Residual: that one-guess selective-failure leak; mask SECRECY still `TrustedDealerSim` (**sq-yyro**); `HiddenValueJoin` still runs the semi-honest `secure_equal`; unaudited (**sq-qhy4**) |
 | any, DM | KNOWN | SPDZ equality (MAC-checked) | no backend |
 
 #### Inner JOIN (hidden key) / cross-credential hidden join
@@ -665,12 +665,16 @@ LANDED on `main`** — see the per-item ✅ DONE notes.
    (MAC-carrying mult, batched MAC-check, malicious equality/comparison, registry wiring,
    adversarial catch-tests, the bench AXIS-1 lift) is decomposed into **`sq-km34.2–.9` (OPEN)**.
    **[OPUS-5] The headline cell itself is now BUILT** — `auth_equal.rs` (design §6 step 5):
-   the masked difference is authenticated and batched-MAC-checked before the open, so a
+   the masked difference is authenticated and batched-MAC-checked before any verdict is read
+   from it, so a
    forged product share / a wrong `degree_reduce` re-sharing / an inconsistent input all
    abort at the minimal N, and the `r = 0` false match (which the MAC alone CANNOT see,
    because `α·0 = 0`) is caught by an authenticated mask nonzero-witness `u = r·s` opened in
-   the same batch. This closes the coZK-2025/1026 confidentiality interaction *for this
-   operator* — no opened value is acted on before its check. Still OPEN around it: registry /
+   the same batch. It does **not** close the coZK-2025/1026 confidentiality interaction: the
+   check runs AFTER the reconstruction (open → verify → release), so a deviating party still
+   sees the opened value before the abort — one selective-failure guess at the key
+   difference. What is delivered is that no opened value is *acted on* before its check.
+   Still OPEN around it: registry /
    per-operator reporting (**`sq-km34.7`**, so `OperatorClass::EqualityJoin` still reports
    `SemiHonestOnly` and `HiddenValueJoin` still calls the semi-honest `secure_equal`), mask
    SECRECY / dealer-less generation (**`sq-yyro`** — the witness proves the mask was nonzero,

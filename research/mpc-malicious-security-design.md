@@ -124,9 +124,18 @@ sq-km34 exists to close.**
 
 > **[OPUS-5] LANDED (sq-km34, §6 step 5): `crates/sparq-mpc/src/auth_equal.rs`.** The
 > authenticated equality operator computes `[[m]] = auth_mul([[d]], [[r]])` and routes it
-> through the §2.5 batched check before the open, so the forged-product-share flip is a
-> fail-closed abort at the minimal `n = 2t+1`
-> (`forged_input_key_share_aborts_at_minimal_n`). Two design points that were NOT in the
+> through the §2.5 batched check before any verdict is read from it, so the
+> forged-product-share flip is a fail-closed abort at the minimal `n = 2t+1`
+> (`forged_product_share_at_the_equality_open_aborts_at_minimal_n`; the input-side
+> inconsistency is `forged_input_key_share_aborts_at_minimal_n`, and the Hole-2 in-reduce
+> deviation the two `wrong_degree_reduce_in_the_*_multiplication_aborts_at_minimal_n`
+> tests, each with a mutation half showing the rejected MAC carry returns a WRONG verdict).
+> **Ordering, precisely:** `mac_check_and_open` reconstructs the batch FIRST and verifies
+> `σ` second, releasing nothing on failure — so this is detect-and-abort on everything
+> acted upon, NOT check-before-broadcast, and the module does not claim to close the
+> coZK-2025/1026 confidentiality interaction on its own (the residual is a one-guess
+> selective-failure test on the key difference; see the module's transcript-order section).
+> Two design points that were NOT in the
 > plan and are load-bearing, both mutation-verified (swapping either makes a test go red on
 > a silent WRONG answer): (a) the **operand order** — `d` must take `auth_mul`'s
 > MAC-carrying FIRST slot, because a value tamper on the SECOND operand is *adopted* (§2.4,
@@ -590,10 +599,13 @@ sq-pwr — ids recorded in the report:
    `auth_compare` shape), with `auth_equal_verdicts` as the batched core so an all-pairs
    join's `|L|·|R|` opens share ONE `σ` (measured, not asserted). Beyond the plan it carries
    the mask **nonzero witness** (Hole-3 note) and pins the load-bearing `auth_mul` operand
-   order. **NOT done here, deliberately:** `HiddenValueJoin` is untouched and the reported
-   tier is unchanged — swapping the join over and promoting `operator_descriptor` is step 7
-   (sq-km34.7), so "promotes `EqualityJoin` from `SemiHonestOnly → Abort`" is true of the
-   protocol and not yet of the registry.
+   order. Note that "MAC-check before open" in this step's original wording is not what the
+   landed primitive does: §2.5 opens the batch and verifies afterwards, so the delivered
+   property is *no verdict is derived from an unverified open*, not *nothing inconsistent is
+   broadcast*. **NOT done here, deliberately:** `HiddenValueJoin` is untouched and the
+   reported tier is unchanged — swapping the join over and promoting `operator_descriptor`
+   is step 7 (sq-km34.7), so "promotes `EqualityJoin` from `SemiHonestOnly → Abort`" is true
+   of the protocol and not yet of the registry.
 6. **Malicious-secure comparison (depends on sq-rrz4 + this stack).** When the secure
    greater-than lands (sq-rrz4), build it on authenticated mul/reduce so the boolean verdict is
    MAC-checked. Acceptance: secure verdict == plaintext `(sum > threshold)`, tamper in any gate

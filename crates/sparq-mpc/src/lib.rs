@@ -139,8 +139,10 @@ pub mod compare;
 pub mod auth_compare;
 // [OPUS-5] sq-km34 (the CORE promotion; design §6 step 5): the malicious-with-abort
 // twin of the degree-2t EQUALITY open — Hole 1, the headline hole. The masked
-// difference `m = d·r` is an authenticated value, batched-MAC-checked before it is
-// opened, so a forged product share / a wrong degree_reduce re-sharing / an
+// difference `m = d·r` is an authenticated value covered by the batched MAC-check
+// before ANY verdict is derived from it (the batch is OPENED, then verified, and
+// nothing is released on a failing check — see the module's transcript-order note),
+// so a forged product share / a wrong degree_reduce re-sharing / an
 // inconsistent input all abort fail-closed at the MINIMAL n=2t+1, where degree-2t has
 // ZERO Reed-Solomon redundancy and the semi-honest `join::secure_equal` documents the
 // same deviation as information-theoretically undetectable. It also closes Hole 3's
@@ -366,8 +368,9 @@ pub use compare::{
 // surface — IT-MAC-carried decompose+compare chain, verdict MAC-checked before open.
 pub use auth_compare::{malicious_greater_than, malicious_threshold, open_auth_verdict};
 // [OPUS-5] sq-km34: the malicious-with-abort EQUALITY surface — the masked difference
-// `m = d·r` authenticated + batched-MAC-checked before open (closing Hole 1 at the
-// minimal n=2t+1), with the authenticated mask nonzero-witness `u = r·s` closing the
+// `m = d·r` authenticated + batched-MAC-checked before any verdict is read from it
+// (closing Hole 1 at the minimal n=2t+1 — detect-and-abort, the check runs AFTER the
+// open), with the authenticated mask nonzero-witness `u = r·s` closing the
 // Hole-3 `r = 0` false match the MAC alone cannot see. `auth_equal_verdicts` is the
 // batched core (one σ open per BATCH — the design §5 amortisation an all-pairs join
 // needs); the `malicious_secure_equal*` entries are the cleartext-key conveniences.
