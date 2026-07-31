@@ -99,8 +99,10 @@ read.validate()?; write.validate()?; adm.validate()?;                     // sep
   ephemeral-*static* ECDH: **not forward-secret** — compromise of the recipient's
   long-term private key exposes previously recorded wraps.
 - **`capability`** — `PublicGrant` (deterministic encode/decode, `cap_id`,
-  admin `sign`/`verify`), `Capability` (`new_read`/`new_write`/`new_admin`,
-  `validate`, `encode_secret`/`decode_secret`), and `delegate` (narrow-only).
+  admin `sign`/`verify`, and a **branch set**: `ScopedBranch` +
+  `branch_scope`/`set_branch_scope`/`covers_branch`), `Capability`
+  (`new_read`/`new_write`/`new_admin`, `validate`,
+  `encode_secret`/`decode_secret`), and `delegate` (narrow-only).
 - **`envelope`** — `BlockEnvelope` (`seal_block`/`seal_block_random`/`open_block`,
   padded to `PAD_CLASSES`, `digest`/`commit_id`) and `Commit` (author `sign`/`verify`,
   `encode`/`decode`).
@@ -139,10 +141,20 @@ read.validate()?; write.validate()?; adm.validate()?;                     // sep
   already obtained. `HistoryPolicy` is an honest disclosure of that, not a secrecy
   guarantee.
 - **Delegation only narrows.** `delegate` rejects any child grant that widens the
-  authority set, validity window, or epoch bound relative to its parent. The epoch
-  bound is the child's own signed `PublicGrant::max_epoch` ceiling — the child keeps
-  the parent's exact `epoch` and its epoch-specific `topic`, so a narrowed grant
-  never claims an epoch that disagrees with the topic it carries.
+  branch set, authority set, validity window, or epoch bound relative to its parent.
+  The epoch bound is the child's own signed `PublicGrant::max_epoch` ceiling — the
+  child keeps the parent's exact `epoch`, so a narrowed grant never claims an epoch
+  that disagrees with the topics it carries.
+- **A branch set is authorization, not key distribution.** A grant is scoped to one
+  or more branches (`Delegation::branches` selects a subset out of the parent's set;
+  `None` inherits it), and each branch in scope carries its own epoch-specific topic,
+  so delegation never invents routing material and re-delegation can never recover a
+  branch an ancestor dropped. But a `Capability` still bears exactly **one** branch
+  read secret (design §8.2 field 10), so a multi-branch grant needs the other
+  branches' key material delivered separately — per §4.2, "cryptographic key
+  possession remains necessary; the signed grant alone is not a decryption key". The
+  set is canonical (ascending, primary = lowest, topics distinct) and is admin-signed;
+  a single-branch grant omits the field and encodes exactly as it always did.
 - **Determinism is load-bearing.** `cap_id` and `CommitId` are hashes of canonical
   bytes; the golden vectors in `tests/vectors.rs` pin the exact wire format. A
   change to those bytes is a wire-format break, not a refactor.
