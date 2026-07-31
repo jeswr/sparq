@@ -830,6 +830,10 @@ impl Drop for Capability {
 /// rewriting the epoch scope out from under a topic. Cryptographic key
 /// possession is still required to act — a signed grant alone is not a
 /// decryption key.
+///
+/// A `parent` whose own branch set is not canonical is rejected outright, on
+/// either path, so a child is never admin-signed over a branch set that
+/// [`PublicGrant::decode`] would then reject.
 pub fn delegate(
     parent: &PublicGrant,
     admin: &SecretSigningKey,
@@ -840,6 +844,17 @@ pub fn delegate(
     // name a branch the parent lacked, and re-delegation cannot recover a branch
     // an ancestor already dropped.
     let parent_scope = parent.branch_scope();
+    // The parent's OWN set is validated first, before either branch below. Every
+    // field of a `PublicGrant` is public, so a parent can reach here without ever
+    // having been through `decode` / `set_branch_scope` — and the inheriting path
+    // copies its set verbatim. Without this the child would inherit a
+    // non-canonical set, get admin-signed over it (`signing_bytes` validates
+    // nothing), and then `verify` on the child would succeed while
+    // `PublicGrant::decode(child.encode())` rejects it: an authenticated but
+    // structurally invalid grant. The error propagates unchanged rather than
+    // being relabelled `Delegation`, since it is the parent that is malformed,
+    // not this delegation request.
+    check_scope(&parent_scope)?;
     let child_scope = match d.branches {
         None => parent_scope,
         Some(sel) => {

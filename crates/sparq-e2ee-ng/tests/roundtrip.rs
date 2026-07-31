@@ -684,6 +684,74 @@ fn delegation_narrows_branch_set() {
     assert_eq!(narrow(&child, None).unwrap().branch_scope(), child.branch_scope());
 }
 
+/// Every `PublicGrant` field is public, so a parent can be hand-built (or
+/// mutated) into a non-canonical branch set without ever passing through
+/// `decode` / `set_branch_scope`. `delegate` must reject such a parent on BOTH
+/// paths — the inheriting one (`branches: None`, which copies the parent's set
+/// verbatim) as much as the selecting one. Otherwise it would admin-sign a child
+/// over a malformed set: `verify` would then succeed on a grant its own `decode`
+/// rejects, i.e. an authenticated but structurally invalid grant.
+#[test]
+fn delegation_rejects_a_non_canonical_parent() {
+    let admin = SecretSigningKey::from_seed([1u8; 32]);
+    let good = branch_set_grant();
+
+    // Each of these is a shape `PublicGrant::decode` refuses; the primary entry
+    // of `branch_set_grant` is sb(0x10, 0xA1).
+    let bad_sets = [
+        // extras out of ascending order
+        vec![sb(0x30, 0xA3), sb(0x20, 0xA2)],
+        // an extra repeating the primary branch
+        vec![sb(0x10, 0xA9), sb(0x20, 0xA2)],
+        // an extra below the primary (the primary must be the lowest)
+        vec![sb(0x05, 0xA5), sb(0x20, 0xA2)],
+        // two branches claiming one epoch-specific topic
+        vec![sb(0x20, 0xA1)],
+    ];
+
+    for bad in bad_sets {
+        let mut parent = good.clone();
+        parent.extra_branches = bad;
+        parent.sign(&admin);
+        // The malformed parent really is one `decode` refuses...
+        assert!(PublicGrant::decode(&parent.encode(), lim()).is_err());
+
+        for branches in [
+            None,
+            // ...and selecting out of it is refused too, including a selection
+            // that would look canonical on its own.
+            Some(vec![BranchId::from_bytes([0x20; 32])]),
+        ] {
+            let r = delegate(
+                &parent,
+                &admin,
+                Delegation {
+                    branches,
+                    authority: vec![Authority::Admin],
+                    validity: Validity { not_before: 120, not_after: 180 },
+                    max_epoch: None,
+                },
+            );
+            // No child at all — never a signed one.
+            assert!(r.is_err(), "delegate minted a child from a non-canonical parent");
+        }
+    }
+
+    // The same delegation off the canonical parent still succeeds, so the guard
+    // rejects malformed parents rather than delegation generally.
+    delegate(
+        &good,
+        &admin,
+        Delegation {
+            branches: None,
+            authority: vec![Authority::Admin],
+            validity: Validity { not_before: 120, not_after: 180 },
+            max_epoch: None,
+        },
+    )
+    .unwrap();
+}
+
 // ============================================================================
 // Block & commit envelopes
 // ============================================================================
