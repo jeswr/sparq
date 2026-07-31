@@ -16,6 +16,11 @@
 //! fields** (`K_read`, private keys) that MUST be recipient-wrapped
 //! ([`crate::wrap`]) or moved out of band — never placed in RDF, logs, URLs, or
 //! topic messages (§4.2).
+//!
+//! A grant is scoped to a **branch set** ([`ScopedBranch`]) — usually one
+//! branch, since a read secret and a topic are per-branch — and [`delegate`]
+//! may narrow that set along with the authority set, validity window, and epoch
+//! ceiling (§4.2), never widen any of them.
 
 use crate::cbor::{
     enc_array, enc_bytes, enc_map, enc_text, enc_uint, read_struct_map, Limits, Reader,
@@ -74,17 +79,68 @@ pub struct Validity {
     pub not_after: u64,
 }
 
+/// One branch in a grant's **branch set** (§4.2), paired with the
+/// epoch-specific [`TopicId`] that routes it. A topic is epoch-specific to *one*
+/// branch (§4.1), so a branch is never in scope without the topic it is reached
+/// by — carrying the pair keeps a multi-branch grant self-consistent instead of
+/// naming branches it has no routing material for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScopedBranch {
+    /// The branch in scope.
+    pub branch: BranchId,
+    /// That branch's epoch-specific topic, for the grant's [`PublicGrant::epoch`].
+    pub topic: TopicId,
+}
+
+/// Canonicalize a branch set: ascending by branch id, rejecting a degenerate
+/// set. The result's first entry is the grant's *primary* branch (§8.2 fields
+/// 3 + 5) and the rest go in the extra-branch field.
+fn canon_scope(mut scope: Vec<ScopedBranch>) -> Result<Vec<ScopedBranch>> {
+    if scope.is_empty() {
+        return Err(Error::Schema("branch set must not be empty"));
+    }
+    scope.sort_by_key(|e| e.branch);
+    check_scope(&scope)?;
+    Ok(scope)
+}
+
+/// Fail-closed checks on an already-ordered branch set (primary entry first):
+///
+/// * **strictly ascending** branch ids — this both deduplicates and pins exactly
+///   one byte encoding per logical branch set, which is what `cap_id` and the
+///   admin signature rest on;
+/// * **pairwise-distinct topics** — an epoch-specific topic identifies one
+///   branch (§4.1), so two branches sharing one is a malformed grant rather than
+///   a narrow one.
+fn check_scope(scope: &[ScopedBranch]) -> Result<()> {
+    if scope.windows(2).any(|w| w[1].branch <= w[0].branch) {
+        return Err(Error::NonCanonical(
+            "branch set not strictly ascending by branch id",
+        ));
+    }
+    let mut topics: Vec<TopicId> = scope.iter().map(|e| e.topic).collect();
+    topics.sort();
+    if topics.windows(2).any(|w| w[0] == w[1]) {
+        return Err(Error::Schema("two branches share one epoch-specific topic"));
+    }
+    Ok(())
+}
+
 /// The **public grant** — everything a broker may see and the exact bytes an
 /// admin signature authenticates. Contains no secret key material.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicGrant {
     /// Repository identifier (§8.2 field 2).
     pub repo: RepoId,
-    /// Branch identifier (§8.2 field 3).
+    /// **Primary** branch identifier (§8.2 field 3) — the lowest-ordered branch
+    /// of the grant's branch set, and the branch [`Self::topic`] and a
+    /// [`Capability::read_secret`] belong to. For a single-branch grant (the
+    /// common case, and the only shape the profile's own §8.2 example shows)
+    /// this is simply *the* branch.
     pub branch: BranchId,
     /// Epoch this grant is scoped to (§8.2 field 4).
     pub epoch: Epoch,
-    /// Epoch-specific topic (§8.2 field 5).
+    /// Epoch-specific topic (§8.2 field 5) of [`Self::branch`].
     pub topic: TopicId,
     /// Authorities granted (§8.2 field 6), canonicalized.
     pub authority: Vec<Authority>,
@@ -107,6 +163,24 @@ pub struct PublicGrant {
     /// is scoped to, whereas `max_epoch` bounds how far a delegated chain may be
     /// carried forward. `None` means unbounded; when set it MUST be `>= epoch`.
     pub max_epoch: Option<Epoch>,
+    /// The branch set's **additional** branches beyond [`Self::branch`] (profile
+    /// field 18), each with its epoch-specific topic. Empty (and omitted from
+    /// the wire) for a single-branch grant, so a single-branch grant encodes
+    /// byte-for-byte as it did before the branch set existed.
+    ///
+    /// This must already be **canonical**: strictly ascending by branch id and
+    /// every entry greater than [`Self::branch`], with topics distinct across
+    /// the whole set. Use [`Self::set_branch_scope`] to establish that (and
+    /// [`Self::branch_scope`] to read the whole set back) rather than assigning
+    /// here; a non-canonical set is rejected by [`Self::decode`].
+    ///
+    /// The set is an **authorization** constraint on the admin-signed grant. It
+    /// is not key distribution: a [`Capability`] still carries exactly one
+    /// branch read secret (§8.2 field 10), so acting on the other branches
+    /// needs their key material delivered separately — per §4.2, "cryptographic
+    /// key possession remains necessary; the signed grant alone is not a
+    /// decryption key".
+    pub extra_branches: Vec<ScopedBranch>,
     /// Admin signature over the canonical public grant (§8.2 field 14).
     pub admin_sig: Option<[u8; SIGNATURE_LEN]>,
 }
@@ -129,11 +203,16 @@ const K_ADMIN_SIG: u64 = 14;
 const K_PUBLISHER_PK: u64 = 15;
 const K_PARENT_GRANT: u64 = 16;
 const K_MAX_EPOCH: u64 = 17;
+const K_EXTRA_BRANCHES: u64 = 18;
 const VERSION: u64 = 0;
 
 // validity sub-map keys
 const K_NB: u64 = 1;
 const K_NA: u64 = 2;
+
+// extra-branch entry sub-map keys
+const K_SB_BRANCH: u64 = 1;
+const K_SB_TOPIC: u64 = 2;
 
 impl PublicGrant {
     /// The canonical public-grant fields **excluding** the admin signature
@@ -178,7 +257,67 @@ impl PublicGrant {
         if let Some(m) = &self.max_epoch {
             e.push((K_MAX_EPOCH, enc_uint(m.0)));
         }
+        // Omitted entirely when the branch set is just the primary branch, so a
+        // single-branch grant's bytes (and therefore its cap_id and every golden
+        // vector) are unchanged. Unlike the authority array this is emitted
+        // verbatim rather than re-canonicalized: an authority token is an atom,
+        // so sorting/deduplicating it preserves meaning, whereas each branch
+        // entry binds a topic — silently reordering or dropping one would
+        // silently change which topic the grant binds to which branch. A
+        // non-canonical set is therefore validated (and rejected) on decode,
+        // never rewritten here.
+        if !self.extra_branches.is_empty() {
+            e.push((
+                K_EXTRA_BRANCHES,
+                enc_array(
+                    &self
+                        .extra_branches
+                        .iter()
+                        .map(|s| {
+                            enc_map(vec![
+                                (K_SB_BRANCH, enc_bytes(s.branch.as_bytes())),
+                                (K_SB_TOPIC, enc_bytes(s.topic.as_bytes())),
+                            ])
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+            ));
+        }
         e
+    }
+
+    /// The grant's whole **branch set** (§4.2) in canonical order: the primary
+    /// branch entry ([`Self::branch`] + [`Self::topic`]) followed by
+    /// [`Self::extra_branches`]. A single-branch grant yields one entry.
+    pub fn branch_scope(&self) -> Vec<ScopedBranch> {
+        let mut v = Vec::with_capacity(1 + self.extra_branches.len());
+        v.push(ScopedBranch { branch: self.branch, topic: self.topic });
+        v.extend_from_slice(&self.extra_branches);
+        v
+    }
+
+    /// Whether `branch` is in this grant's branch set — the membership test an
+    /// authorization check makes before honouring the grant for a branch.
+    pub fn covers_branch(&self, branch: &BranchId) -> bool {
+        self.branch == *branch || self.extra_branches.iter().any(|e| e.branch == *branch)
+    }
+
+    /// Replace the grant's branch set with `scope`, canonicalizing it: the
+    /// lowest-ordered entry becomes the primary branch/topic and the rest become
+    /// [`Self::extra_branches`] in ascending order.
+    ///
+    /// Fails closed on an empty set, a repeated branch, or two branches sharing
+    /// one epoch-specific topic. The grant's admin signature (if any) is **not**
+    /// refreshed — re-[`sign`](Self::sign) after changing the scope.
+    pub fn set_branch_scope(&mut self, scope: Vec<ScopedBranch>) -> Result<()> {
+        let canon = canon_scope(scope)?;
+        let Some((primary, rest)) = canon.split_first() else {
+            return Err(Error::Schema("branch set must not be empty"));
+        };
+        self.branch = primary.branch;
+        self.topic = primary.topic;
+        self.extra_branches = rest.to_vec();
+        Ok(())
     }
 
     /// The exact bytes the admin signs / the `cap_id` hashes.
@@ -242,6 +381,7 @@ impl PublicGrant {
         let mut publisher_pub = None;
         let mut parent = None;
         let mut max_epoch = None;
+        let mut extra_branches: Option<Vec<ScopedBranch>> = None;
         let mut admin_sig = None;
 
         read_struct_map(r, |r, key| match key {
@@ -323,6 +463,31 @@ impl PublicGrant {
                 max_epoch = Some(Epoch(r.uint()?));
                 Ok(true)
             }
+            K_EXTRA_BRANCHES => {
+                let n = r.array_header()?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    let mut b = None;
+                    let mut t = None;
+                    read_struct_map(r, |r, k| match k {
+                        K_SB_BRANCH => {
+                            b = Some(BranchId::from_bytes(r.bytes_fixed::<32>()?));
+                            Ok(true)
+                        }
+                        K_SB_TOPIC => {
+                            t = Some(TopicId::from_bytes(r.bytes_fixed::<32>()?));
+                            Ok(true)
+                        }
+                        _ => Ok(false),
+                    })?;
+                    v.push(ScopedBranch {
+                        branch: b.ok_or(Error::Schema("missing branch in branch-set entry"))?,
+                        topic: t.ok_or(Error::Schema("missing topic in branch-set entry"))?,
+                    });
+                }
+                extra_branches = Some(v);
+                Ok(true)
+            }
             K_ADMIN_SIG => {
                 admin_sig = Some(r.bytes_fixed::<SIGNATURE_LEN>()?);
                 Ok(true)
@@ -366,11 +531,34 @@ impl PublicGrant {
         if max_epoch.is_some_and(|m| m.0 < epoch.0) {
             return Err(Error::Schema("max_epoch precedes the grant epoch"));
         }
+        let branch = branch.ok_or(Error::Schema("missing branch"))?;
+        let topic = topic.ok_or(Error::Schema("missing topic"))?;
+        // An ABSENT field 18 is the single-branch form, so an empty array would
+        // be a second encoding of one logical grant — reject it rather than
+        // normalize, or `cap_id` stops being a function of the grant.
+        let extra_branches = match extra_branches {
+            Some(v) if v.is_empty() => {
+                return Err(Error::NonCanonical(
+                    "empty extra-branch array; omit the field for a single-branch grant",
+                ))
+            }
+            Some(v) => v,
+            None => Vec::new(),
+        };
+        // Validated over the WHOLE set (primary entry first), so this also pins
+        // the primary branch as the lowest-ordered one: the same branch set can
+        // therefore only be encoded one way.
+        if !extra_branches.is_empty() {
+            let mut scope = Vec::with_capacity(1 + extra_branches.len());
+            scope.push(ScopedBranch { branch, topic });
+            scope.extend_from_slice(&extra_branches);
+            check_scope(&scope)?;
+        }
         Ok(PublicGrant {
             repo: repo.ok_or(Error::Schema("missing repo"))?,
-            branch: branch.ok_or(Error::Schema("missing branch"))?,
+            branch,
             epoch,
-            topic: topic.ok_or(Error::Schema("missing topic"))?,
+            topic,
             authority,
             validity,
             brokers: brokers.ok_or(Error::Schema("missing brokers"))?,
@@ -379,16 +567,23 @@ impl PublicGrant {
             publisher_pub,
             parent_grant_id: parent,
             max_epoch,
+            extra_branches,
             admin_sig,
         })
     }
 }
 
 /// Constraints a delegated grant may narrow (never widen) relative to its parent
-/// (§4.2). Branch stays fixed; the authority set, validity window, and an
+/// (§4.2): the **branch set**, the authority set, the validity window, and an
 /// optional maximum epoch may only shrink.
 #[derive(Debug, Clone)]
 pub struct Delegation {
+    /// Branches the child may act on — MUST be a non-empty **subset** of the
+    /// parent's branch set. `None` inherits the parent's set unchanged, so a
+    /// delegation can never reach a branch the parent was not already scoped to.
+    /// Each retained branch keeps the parent's epoch-specific topic for it; a
+    /// delegation never invents routing material.
+    pub branches: Option<Vec<BranchId>>,
     /// Authorities the child may exercise — MUST be a subset of the parent's.
     pub authority: Vec<Authority>,
     /// Child validity window — MUST be within the parent's.
@@ -572,7 +767,7 @@ impl Capability {
                 r.skip_value()?;
                 Ok(true)
             }
-            K_AUTHORITY | K_VALIDITY | K_BROKERS | K_SUITE => {
+            K_AUTHORITY | K_VALIDITY | K_BROKERS | K_SUITE | K_EXTRA_BRANCHES => {
                 r.skip_value()?;
                 Ok(true)
             }
@@ -626,18 +821,54 @@ impl Drop for Capability {
 }
 
 /// Delegate a **new** public grant from `parent`, narrowing constraints, and
-/// sign it with the admin key. The child's authority set MUST be a subset of the
-/// parent's, its validity window within the parent's, and its `max_epoch` (if
-/// any) no greater than the parent's ceiling. The child always keeps the
-/// parent's exact `epoch` and epoch-specific `topic` — an epoch ceiling is
-/// carried in the separate, admin-signed `max_epoch` field, never by rewriting
-/// the epoch scope out from under the topic. Cryptographic key possession is
-/// still required to act — a signed grant alone is not a decryption key.
+/// sign it with the admin key. The child's branch set MUST be a subset of the
+/// parent's, its authority set a subset of the parent's, its validity window
+/// within the parent's, and its `max_epoch` (if any) no greater than the
+/// parent's ceiling. The child always keeps the parent's exact `epoch`, and each
+/// branch it retains keeps that branch's epoch-specific topic — an epoch ceiling
+/// is carried in the separate, admin-signed `max_epoch` field, never by
+/// rewriting the epoch scope out from under a topic. Cryptographic key
+/// possession is still required to act — a signed grant alone is not a
+/// decryption key.
 pub fn delegate(
     parent: &PublicGrant,
     admin: &SecretSigningKey,
     d: Delegation,
 ) -> Result<PublicGrant> {
+    // The branch set narrows by SELECTION out of the parent's set: an entry is
+    // only ever copied from the parent (with its topic), so a delegation cannot
+    // name a branch the parent lacked, and re-delegation cannot recover a branch
+    // an ancestor already dropped.
+    let parent_scope = parent.branch_scope();
+    let child_scope = match d.branches {
+        None => parent_scope,
+        Some(sel) => {
+            if sel.is_empty() {
+                return Err(Error::Delegation("branch set must not be empty"));
+            }
+            let mut out: Vec<ScopedBranch> = Vec::with_capacity(sel.len());
+            for b in &sel {
+                // A repeated branch is rejected rather than silently collapsed,
+                // so the child's set is exactly the one that was asked for.
+                if out.iter().any(|e| e.branch == *b) {
+                    return Err(Error::Delegation("duplicate branch in branch set"));
+                }
+                match parent_scope.iter().find(|e| e.branch == *b) {
+                    Some(e) => out.push(*e),
+                    None => return Err(Error::Delegation("branch not in parent branch set")),
+                }
+            }
+            // Sorts the selection into canonical order. Its remaining
+            // fail-closed checks can only trip if the PARENT's own set was
+            // malformed, so that error propagates unchanged rather than being
+            // relabelled as a mistake in this delegation request.
+            canon_scope(out)?
+        }
+    };
+    let Some((primary, extra_branches)) = child_scope.split_first() else {
+        return Err(Error::Delegation("branch set must not be empty"));
+    };
+
     let child_auth = canon_authorities(d.authority);
     let parent_auth = canon_authorities(parent.authority.clone());
     for a in &child_auth {
@@ -678,9 +909,9 @@ pub fn delegate(
     }
     let mut child = PublicGrant {
         repo: parent.repo,
-        branch: parent.branch,
+        branch: primary.branch,
         epoch: parent.epoch,
-        topic: parent.topic,
+        topic: primary.topic,
         authority: child_auth,
         validity: d.validity,
         brokers: parent.brokers.clone(),
@@ -689,6 +920,7 @@ pub fn delegate(
         publisher_pub,
         parent_grant_id: Some(parent.cap_id()),
         max_epoch,
+        extra_branches: extra_branches.to_vec(),
         admin_sig: None,
     };
     child.sign(admin);
@@ -697,7 +929,8 @@ pub fn delegate(
 
 /// Convenience constructor for a base public grant with a fresh random cap nonce.
 /// The suite is fixed to the bound v0 suite; authority/publisher fields are set
-/// by the [`Capability`] constructors.
+/// by the [`Capability`] constructors. The branch set starts as the single
+/// `branch` given here — widen it with [`PublicGrant::set_branch_scope`].
 #[allow(clippy::too_many_arguments)]
 pub fn base_grant(
     repo: RepoId,
@@ -720,6 +953,7 @@ pub fn base_grant(
         publisher_pub: None,
         parent_grant_id: None,
         max_epoch: None,
+        extra_branches: Vec::new(),
         admin_sig: None,
     }
 }
@@ -827,6 +1061,69 @@ mod tests {
         let ok = PublicGrant::decode(&g.encode(), Limits::default()).unwrap();
         assert_eq!(ok.max_epoch, Some(Epoch(7)));
         assert_eq!(ok.epoch, Epoch(7));
+    }
+
+    /// A grant whose extra-branch field is written by hand (bypassing
+    /// [`PublicGrant::set_branch_scope`]) must fail closed on decode unless the
+    /// whole branch set is canonical: strictly ascending from the primary entry,
+    /// with distinct topics, and absent rather than empty when there is only one
+    /// branch. Otherwise one logical branch set would have several encodings and
+    /// `cap_id` / the admin signature would stop pinning it.
+    #[test]
+    fn decode_rejects_non_canonical_branch_set() {
+        let scoped = |b: u8, t: u8| ScopedBranch {
+            branch: BranchId::from_bytes([b; 32]),
+            topic: TopicId::from_bytes([t; 32]),
+        };
+        let mut g = base_grant(
+            RepoId::from_bytes([1u8; 32]),
+            BranchId::from_bytes([0x20; 32]),
+            Epoch(7),
+            TopicId::from_bytes([0xA2; 32]),
+            Validity { not_before: 100, not_after: 200 },
+            vec!["wss://broker.example".to_string()],
+        );
+        g.authority = vec![Authority::Read];
+
+        // Canonical: two extras, both above the primary, ascending, topics distinct.
+        g.extra_branches = vec![scoped(0x30, 0xA3), scoped(0x40, 0xA4)];
+        let ok = PublicGrant::decode(&g.encode(), Limits::default()).unwrap();
+        assert_eq!(ok.branch_scope().len(), 3);
+        assert!(ok.covers_branch(&BranchId::from_bytes([0x40; 32])));
+
+        for bad in [
+            // extras out of order
+            vec![scoped(0x40, 0xA4), scoped(0x30, 0xA3)],
+            // an extra repeating the primary branch
+            vec![scoped(0x20, 0xA9)],
+            // an extra below the primary (the primary must be the lowest)
+            vec![scoped(0x10, 0xA1)],
+            // a duplicated extra
+            vec![scoped(0x30, 0xA3), scoped(0x30, 0xA9)],
+        ] {
+            g.extra_branches = bad;
+            assert!(matches!(
+                PublicGrant::decode(&g.encode(), Limits::default()),
+                Err(Error::NonCanonical(_))
+            ));
+        }
+
+        // A topic is epoch-specific to ONE branch: sharing one is malformed.
+        g.extra_branches = vec![scoped(0x30, 0xA2)];
+        assert!(matches!(
+            PublicGrant::decode(&g.encode(), Limits::default()),
+            Err(Error::Schema(_))
+        ));
+
+        // A present-but-empty array is a second encoding of the single-branch
+        // form; only omitting the field is canonical.
+        g.extra_branches = vec![];
+        let mut entries = g.signing_entries();
+        entries.push((K_EXTRA_BRANCHES, enc_array(&[])));
+        assert!(matches!(
+            PublicGrant::decode(&enc_map(entries), Limits::default()),
+            Err(Error::NonCanonical(_))
+        ));
     }
 
     /// A read-only grant carrying a publisher_pub violates the
