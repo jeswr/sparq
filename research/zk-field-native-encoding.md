@@ -963,9 +963,21 @@ load-bearing today; it becomes load-bearing the moment any lane degrades instead
 rejecting. Since the tag is free to choose, choose it so the separation does not depend
 on that rule holding everywhere, forever:
 
-`LANG_NONE = 1` is safe because a real `LANG_CONST` is a blake3 output, which a small tag
-cannot alias. The value slot is not like that — its real occupants ARE small field
-elements. Every shipped member B1-range-decomposes its handle
+`LANG_NONE = 1` is separated from a real `LANG_CONST` only **probabilistically**, and this
+record must not say otherwise. A real `LANG_CONST` is `blake3_field(lang)` — a hash
+*reduced into the circuit field*, which CAN equal `1`. Picking a small reserved tag makes
+that collision negligible, not impossible; the language slot is collision-resistant and
+domain-separated, never provably disjoint. The enforceable sharpening is the same shape
+§14.1 demands of the value slot — a fail-closed `assert(lang_const != LANG_NONE)` at
+ingest, mirrored wherever a witnessed `LANG_CONST` enters a circuit — and until that
+ships, "no committed language tag hashes to `LANG_NONE`" is a **retained assumption**,
+registered as an OPEN audit obligation in §14.3. (The shipped host and Noir constants
+today assert nothing and their doc comments overclaim; captured as follow-up work, not
+fixed by this record.)
+
+The value slot is worse than probabilistic, which is why it gets an assert and not a
+caveat: its real occupants ARE small field elements, so a `0`/`1` tag collides with
+certainty rather than negligibly. Every shipped member B1-range-decomposes its handle
 (`assert_max_bit_size::<64>()`), and the signed lanes fold the sign by field negation
 (`0 - magnitude`, in the decimal and dateTime members), so the reachable handle band is
 
@@ -1038,5 +1050,8 @@ obligations.
 Both §14 rules — the reserved-tag band exclusion on `VALUE_NONE`, and the double lane's
 in-circuit canonical fold together with the residual it leaves to sq-mslu — are registered
 as OPEN external-audit obligations under CR-G8 / sq-qhy4 alongside the rest of this
-record. No soundness or privacy property is claimed for either, pending the external
-sign-off.
+record. So is the §14.1 **`LANG_NONE` separation assumption**: unlike `VALUE_NONE`'s
+exclusion it is today *unasserted*, resting on collision-resistance of `blake3_field` over
+the language-tag domain rather than on a check, and it stays an assumption until the
+fail-closed ingest/circuit assert §14.1 names actually ships. No soundness or privacy
+property is claimed for any of the three, pending the external sign-off.
