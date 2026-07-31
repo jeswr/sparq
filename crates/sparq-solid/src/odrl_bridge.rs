@@ -136,8 +136,9 @@ use sparq_policy::{
     conflict_admissibility, evaluate, matched_prohibition, parse_policy_str, prohibition_status,
     Operator, Policy, ProhibitionStatus, Request, Rule, Value,
 };
-use sparq_reason::reason_n3;
+use sparq_reason::n3::compiled::{compile, eval, intern_facts, CompiledRuleSet};
 use std::fmt::Write as _;
+use std::sync::OnceLock;
 
 /// [OPUS-5] Stratum A0 — the operand/combinator-arity guard whose `odrlx:shape
 /// odrlx:Ambiguous` marks stratum A's and C's satisfaction rules negate. See
@@ -147,6 +148,30 @@ const ODRL_A: &str = include_str!("../rules/odrl-a.n3");
 const ODRL_B: &str = include_str!("../rules/odrl-b.n3");
 const ODRL_C: &str = include_str!("../rules/odrl-c.n3");
 const ODRL_D: &str = include_str!("../rules/odrl-d.n3");
+
+/// The five ODRL strata (`rules/odrl-{a0,a,b,c,d}.n3`, in evaluation order) lowered to
+/// the id-level compiled IR, once per process — the same `OnceLock` shape
+/// `crate::materialize`'s `wac_rules`/`acp_rules` use after sq-zgbso.4.
+///
+/// [SONNET-4.6] sq-zgbso.5: compilation is deterministic over `const` rule text, so the
+/// result is cached verbatim — including a failure, which is returned as an ordinary
+/// `Err` (a rule leaving the compiled subset must surface as a materialize error and a
+/// refusal, never a panic and never a silently empty auth view).
+fn odrl_rules() -> Result<&'static [CompiledRuleSet; 5], String> {
+    static RULES: OnceLock<Result<[CompiledRuleSet; 5], String>> = OnceLock::new();
+    RULES
+        .get_or_init(|| {
+            Ok([
+                compile(ODRL_A0)?,
+                compile(ODRL_A)?,
+                compile(ODRL_B)?,
+                compile(ODRL_C)?,
+                compile(ODRL_D)?,
+            ])
+        })
+        .as_ref()
+        .map_err(|e| format!("ODRL rules: {}", e))
+}
 
 /// The ODRL namespace prefix (`odrl:`), re-exported for caller convenience.
 pub const ODRL_NS: &str = sparq_policy::ODRL_NS;
@@ -2122,8 +2147,10 @@ pub(crate) mod count {
 
 // ============================================================================
 // [SONNET-4.6] sq-zgbso.2 — N3-stratum ODRL bridge.
-// Runs the stateless ODRL core as four stratified reason_n3 calls
-// (rules/odrl-{a,b,c,d}.n3), mirroring the WAC/ACP stratification pattern.
+// Runs the stateless ODRL core as five stratified rule evaluations
+// (rules/odrl-{a0,a,b,c,d}.n3), mirroring the WAC/ACP stratification pattern —
+// on the id-level COMPILED evaluator since sq-zgbso.5, as WAC/ACP are since
+// sq-zgbso.4.
 // Decision-equivalent to the one-shot Rust bridge for the supported constraint
 // types (dateTime lteq/gteq over the canonical UTC lexical subset, recipient
 // eq/neq, odrl:or, odrl:and) — on permissions AND prohibitions.
@@ -2171,7 +2198,10 @@ pub(crate) mod count {
 /// `=>`, quoted graphs, and every other Turtle-extension construct are syntax
 /// errors → `Err`), and only the parsed ground terms are re-serialized — with
 /// IRI validation and literal escaping — into the reasoner input. The raw text
-/// never reaches [`reason_n3`], so a crafted policy cannot smuggle rules or
+/// never reaches the reasoner — the strata are compiled separately, from `const`
+/// rule text, and the policy/request facts enter through a fact-ONLY interner
+/// (`sparq_reason::n3::compiled::intern_facts`) that rejects outright any document
+/// carrying rules — so a crafted policy cannot smuggle rules or
 /// out-of-band triples that derive `auth:*` grants directly. The request is
 /// serialized the same way, as validated RDF terms (`<urn:odrl-req>` subject,
 /// `odrl:dateTime` for the temporal evidence): a request field that is not a
@@ -2211,8 +2241,11 @@ pub(crate) mod count {
 /// `xsd:dateTime` lexical form is outside the canonical UTC subset,
 /// a constraint node is ambiguous (several operand triples in one position, or several
 /// logical combinators), a prohibition is outside the supported stateless scope, a rule
-/// carries more than one logical constraint, a request field is not a valid IRI, or the
-/// N3 reasoner rejects the assembled source in any stratum.
+/// carries more than one logical constraint, a request field is not a valid IRI, the
+/// reasoner rejects the assembled fact source, or a rule file falls outside the compiled
+/// evaluator's N3 subset (a build-time property of the `const` `rules/odrl-*.n3`, so in
+/// practice that last one cannot fire at runtime — but it is reported as an error rather
+/// than a panic, and nothing is materialized).
 pub fn materialize_odrl_n3(
     graph: &mut Graph,
     policy_ttl: &str,
@@ -2253,49 +2286,41 @@ pub fn materialize_odrl_n3(
     let policy_facts = triples_to_n3(&policy_triples);
     let req_n3 = serialize_request_n3(request)?;
 
-    // Stratum A0: the operand/combinator-arity guard (odrlx:shape odrlx:Ambiguous) the
-    // stratum A/C satisfaction rules negate. [OPUS-5]
-    let src_a0 = format!("{policy_facts}\n{req_n3}\n{ODRL_A0}");
-    let mut dict_a0 = Dict::new();
-    let closure_a0 = reason_n3(&mut dict_a0, &src_a0)?;
-    let f_a0 = closure_ids_to_n3(&dict_a0, &closure_a0);
-
-    // Stratum A: action facts + atomicSat + lcSat(or)
-    let src_a = format!("{f_a0}\n{ODRL_A}");
-    let mut dict_a = Dict::new();
-    let closure_a = reason_n3(&mut dict_a, &src_a)?;
-    let f_a = closure_ids_to_n3(&dict_a, &closure_a);
-
-    // Stratum B: andSubUnsat + anyRuleConstrUnsat + unconstrained prohibMatches/denies
-    let src_b = format!("{f_a}\n{ODRL_B}");
-    let mut dict_b = Dict::new();
-    let closure_b = reason_n3(&mut dict_b, &src_b)?;
-    let f_b = closure_ids_to_n3(&dict_b, &closure_b);
-
-    // Stratum C: lcSat(and) + CONSTRAINED prohibMatches/denies
-    let src_c = format!("{f_b}\n{ODRL_C}");
-    let mut dict_c = Dict::new();
-    let closure_c = reason_n3(&mut dict_c, &src_c)?;
-    let f_c = closure_ids_to_n3(&dict_c, &closure_c);
-
-    // Stratum D: permission grants (NAF over the now-complete prohibMatches)
-    let src_d = format!("{f_c}\n{ODRL_D}");
-    let mut dict_d = Dict::new();
-    let closure_d = reason_n3(&mut dict_d, &src_d)?;
+    // [SONNET-4.6] sq-zgbso.5 — the five strata, in evaluation order:
+    //   A0: the operand/combinator-arity guard (odrlx:shape odrlx:Ambiguous) the
+    //       stratum A/C satisfaction rules negate [OPUS-5]
+    //   A:  action facts + atomicSat + lcSat(or)
+    //   B:  andSubUnsat + anyRuleConstrUnsat + unconstrained prohibMatches/denies
+    //   C:  lcSat(and) + CONSTRAINED prohibMatches/denies
+    //   D:  permission grants (NAF over the now-complete prohibMatches)
+    //
+    // They now chain entirely at the id level, in ONE dictionary, over the compiled IR
+    // (`odrl_rules()`) — each stratum's closure IS the next one's fact set, so a negated
+    // predicate is still complete before the stratum that negates it runs (design doc
+    // §3.5) and the four intermediate closure → N3 text → re-parse round trips are gone.
+    // The stratification, the rule text, and the fact set entering stratum A0 are all
+    // unchanged: this is a behaviour-identical switch of the evaluation seam, and
+    // `tests/odrl_n3_differential.rs` is the oracle that says so.
+    let rules = odrl_rules()?;
+    let mut dict = Dict::new();
+    let mut closure = intern_facts(&mut dict, &format!("{}\n{}", policy_facts, req_n3))?;
+    for stratum in rules {
+        closure = eval(&mut dict, &closure, stratum);
+    }
 
     // Extract auth:* triples from the final closure.
     let mut new_triples: Vec<[Term; 3]> = Vec::new();
     let mut grant_triple: Option<(String, String, String)> = None;
     let mut deny_triple: Option<(String, String, String)> = None;
 
-    for t in &closure_d {
-        let Term::NamedNode(p) = dict_d.term(t[1]) else { continue };
+    for t in &closure {
+        let Term::NamedNode(p) = dict.term(t[1]) else { continue };
         let p_str = p.as_str();
         if !p_str.starts_with(AUTH_NS) {
             continue;
         }
-        let Term::NamedNode(s) = dict_d.term(t[0]) else { continue };
-        let Term::NamedNode(o) = dict_d.term(t[2]) else { continue };
+        let Term::NamedNode(s) = dict.term(t[0]) else { continue };
+        let Term::NamedNode(o) = dict.term(t[2]) else { continue };
         let triple = [
             Term::NamedNode(NamedNode::new_unchecked(s.as_str())),
             Term::NamedNode(NamedNode::new_unchecked(p_str)),
@@ -2769,15 +2794,6 @@ fn serialize_request_n3(req: &Request) -> Result<String, String> {
     }
     let _ = writeln!(out, "    .");
     Ok(out)
-}
-
-/// Re-serialize a reasoning closure as N3 ground facts for the next stratum.
-fn closure_ids_to_n3(dict: &Dict, closure: &[[sparq_core::dict::Id; 3]]) -> String {
-    let mut out = String::with_capacity(closure.len() * 64);
-    for t in closure {
-        let _ = writeln!(out, "{} {} {} .", dict.term(t[0]), dict.term(t[1]), dict.term(t[2]));
-    }
-    out
 }
 
 #[cfg(test)]

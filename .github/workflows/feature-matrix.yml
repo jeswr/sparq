@@ -862,6 +862,18 @@ jobs:
         run: cargo build -p sparq-server --no-default-features
       - name: Test (-p sparq-server --no-default-features) — the still-compiled pure-serialiser suites
         run: cargo test -p sparq-server --no-default-features
+      - name: Rustdoc (-p sparq-server --no-default-features, -D warnings)
+        # [OPUS-5] sq-d661l: the repo-wide rustdoc gate (ci.yml) runs --all-features, where
+        # an intra-doc link from an ALWAYS-compiled doc-comment to a `server`-gated item
+        # RESOLVES — the break only surfaces in the async-stack-less doc build, and this lane
+        # ran build/test/clippy but NOT rustdoc, so that state was unchecked and had rotted
+        # (lib.rs -> health_probe::run_probe / http::harden / ServerConfig::*, redact.rs ->
+        # ServerConfig::redact_logs; fixed under sq-d661l by demoting each to a code span, the
+        # standing rule for cfg-gated link targets). This step locks that state, mirroring the
+        # sparq-geo lane below.
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc -p sparq-server --no-deps --no-default-features
       - name: Clippy (--no-default-features --all-targets -D warnings)
         run: cargo clippy -p sparq-server --no-default-features --all-targets -- -D warnings
 

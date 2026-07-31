@@ -1,6 +1,6 @@
 ---
 name: agent-tools
-description: Use when an LLM/agent should access a sparq RDF dataset over the Model Context Protocol (MCP) as first-class tools — run SPARQL queries, mine the dataset schema, list class profiles or namespace prefixes, read stats or a VoID descriptor, optionally SHACL-validate against caller-supplied shapes or derive a shape-aware describe_form FormDescription for a focus node, and (gated, off by default) apply SPARQL updates. Covers the opt-in sparq-mcp crate — a JSON-RPC 2.0 MCP server (initialize, tools/list, tools/call, plus the default-build read-only resources/list, resources/read, prompts/list and prompts/get surfaces that expose the dataset VoID descriptor, the default graph and each named graph as N-Triples resources and serve four canned query prompts — explore-dataset, count-by-class, class-overview, predicate-usage — whose IRI arguments are RFC-3987-validated before they reach a SPARQL IRIREF) exposing query (SELECT/ASK to SPARQL-JSON), construct (CONSTRUCT/DESCRIBE to N-Triples), introspect (effective schema as JSON or token-budgeted text), stats, classes (class IRIs with instance and predicate counts), prefixes (namespace declarations and term counts), void (W3C VoID N-Triples), an opt-in read-only validate tool, and a gated update tool that is OFF by default; the transport-agnostic handle_message dispatch core plus the optional stdio feature; and the honest trust model (a local agent-tool server with no built-in auth, read-only by default, queries bounded by a QueryBudget). Also covers the opt-in solid feature — SolidMcpServer, a pod-backed server over sparq-solid's PodStore with WAC/ACP-authorized session-scoped query plus LDP resource tools (resource_get, container_list from stored ldp:contains data, and gated resource_put/resource_delete/container_create with existence non-disclosure and atomic ACL write-through), plus the MCP resources capability with subscribe:true — resources/list, resources/read, resources/subscribe and content-free notifications/resources/updated bound to Solid Notifications semantics, authorized at subscribe time and again at every delivery. Also covers the opt-in nlq feature's two natural-language tools — ask (NL to SPARQL, validated and executed server-side, returning the executed query plus its real result rows) and nl_query (the translate-only variant — the same grounding and validation, but the query is returned unexecuted with executed:false and no rows, for review before you run it with query). Complements genai-retrieval (sparq-nlq/sparq-introspect) — that is the NL-to-SPARQL loop; this is the MCP front door.
+description: Use when an LLM/agent should access a sparq RDF dataset over the Model Context Protocol (MCP) as first-class tools — run SPARQL queries, mine the dataset schema, list class profiles or namespace prefixes, read stats or a VoID descriptor, optionally SHACL-validate against caller-supplied shapes or derive a shape-aware describe_form FormDescription for a focus node, and (gated, off by default) apply SPARQL updates. Covers the opt-in sparq-mcp crate — a JSON-RPC 2.0 MCP server (initialize, tools/list, tools/call, plus the default-build read-only resources/list, resources/read, prompts/list and prompts/get surfaces that expose the dataset VoID descriptor, the default graph and each named graph as N-Triples resources and serve four canned query prompts — explore-dataset, count-by-class, class-overview, predicate-usage — whose IRI arguments are RFC-3987-validated before they reach a SPARQL IRIREF) exposing query (SELECT/ASK to SPARQL-JSON), construct (CONSTRUCT/DESCRIBE to N-Triples), introspect (effective schema as JSON or token-budgeted text), stats, classes (class IRIs with instance and predicate counts), prefixes (namespace declarations and term counts), void (W3C VoID N-Triples), an opt-in read-only validate tool, and a gated update tool that is OFF by default; the transport-agnostic handle_message dispatch core plus the optional stdio feature; and the honest trust model (a local agent-tool server with no built-in auth, read-only by default, queries bounded by a QueryBudget). Also covers the opt-in solid feature — SolidMcpServer, a pod-backed server over sparq-solid's PodStore with WAC/ACP-authorized session-scoped query plus LDP resource tools (resource_get, container_list from stored ldp:contains data, and gated resource_put/resource_delete/container_create with existence non-disclosure and atomic ACL write-through) and session-scoped introspect/shapes/stats mined only from the documents the session may read (closing the whole-graph aggregate leak the base server's versions would open in a multi-principal deployment), plus the MCP resources capability with subscribe:true — resources/list, resources/read, resources/subscribe and content-free notifications/resources/updated bound to Solid Notifications semantics, authorized at subscribe time and again at every delivery. Also covers the opt-in nlq feature's two natural-language tools — ask (NL to SPARQL, validated and executed server-side, returning the executed query plus its real result rows) and nl_query (the translate-only variant — the same grounding and validation, but the query is returned unexecuted with executed:false and no rows, for review before you run it with query). Complements genai-retrieval (sparq-nlq/sparq-introspect) — that is the NL-to-SPARQL loop; this is the MCP front door.
 ---
 
 # sparq agent-tools (MCP)
@@ -120,6 +120,9 @@ at construction — the MCP-Solid proposal draft's local-trusted-agent deploymen
 | `query` | `wrap_for_view_opt_in` + `query_json_view_with_budget` | session-scoped; empty default graph, union opt-in via the reserved `FROM` IRI |
 | `resource_get` | the document's named graph, serialized | same dataset `query` reads — the two surfaces cannot disagree; optional `accept` picks `application/n-triples` (default) or `text/turtle` |
 | `container_list` | `ldp:contains` triples in the container's OWN graph | data-derived, never IRI-path guessing |
+| `introspect` | `sparq_introspect::Introspection` over the session's authorized projection | schema of the readable documents only — never the whole pod |
+| `shapes` | the same miner, one class | a class only unreadable documents use reports as absent |
+| `stats` | totals over the same projection | two sessions get different totals; no grants ⇒ zeros |
 | `update` *(gated)* | `PodStore::update_as` / `update_as_acp` | per-graph session write check, fail-closed |
 | `resource_put` *(gated)* | atomic named-graph swap (+ containment link on create) | `.acl`/`.acr` route through `put_acl`/`put_acl_acp` |
 | `resource_delete` *(gated)* | slot removal + containment unlink | non-empty containers rejected; `.acl` via `delete_acl` |
@@ -132,6 +135,22 @@ fail-closed rollback**; creation is authorized at the closest existing parent co
 (the Solid creation rule); every content write re-materializes the view so the next
 tool call sees it. RDF sources only (Turtle / N-Triples, plus JSON-LD under the `jsonld`
 feature) — see the content-negotiation and non-RDF notes below.
+
+**Session-scoped aggregates — [SONNET-4.6] sq-8n6iv.** The base server's `introspect` /
+`shapes` / `stats` mine the WHOLE served graph. In a multi-principal deployment that is
+an **aggregate leak**: it discloses the classes, predicates, vocabularies and volume of
+documents the caller cannot open, and no per-resource check catches it because no
+resource was read. Pod mode therefore does not reuse them. All three are mined from one
+input — the session's *authorized projection*, CONSTRUCTed through the SAME
+`sparq_engine::DatasetView` the `query` tool evaluates under — so an unauthorized
+document contributes to no count in any of them, and a session with no grants gets an
+empty schema and zero totals rather than the pod's real ones. The projection is rebuilt
+per call (a write or an `.acl` change must not leave a stale schema behind) and runs
+under the configured `QueryBudget`, whose `max_rows` **refuses rather than truncates** —
+so an over-budget pod yields an error, never a quietly undercounted schema. What the
+projection *does* legitimately include is data in readable documents that happens to name
+an unreadable one — e.g. a readable container's `ldp:contains` link to a container the
+session cannot read, the same disclosure `container_list` already makes.
 
 **Content negotiation + the non-RDF story — [SONNET-4.6] sq-wbsf5.** `resource_get`
 takes an optional `accept` and serves either `application/n-triples` (the default when
@@ -279,6 +298,32 @@ Batches are accepted whatever revision was negotiated — an array is only ever 
 reply to an array, so a client on a batch-free revision is never handed one it did not
 ask for.
 
+### Which engine plans a tool call runs (default-on, [SONNET-4.6] sq-mc06h)
+
+`sparq-mcp` is a **native** engine-embedding surface with no bundle-size floor, so — like
+`sparq-cli`, `sparq-server` and the `sparq-rdf` Python wheel — its **default** feature set
+lights two `sparq-engine` planner opt-ins that the engine LIBRARY leaves off:
+
+- **`algebra-rewrite`** — the pre-execution algebra rewrite pass: `FILTER(?v = <iri>)`
+  IRI-constant substitution plus `FILTER(!bound)` → anti-join, applied before evaluation.
+  IRI constants **only** — a literal equality is never rewritten (the `sq-lr2ii` avoidance
+  contract).
+- **`dp-planner`** — the DPccp join-order planner. A connected BGP of 3 or more patterns
+  that fits the connected-subgraph budget is planned as a cost-optimal **bushy** join tree
+  instead of by greedy GOO. It is default-on once compiled, so a `tools/call` gets it with
+  no explicit install; `sparq_engine::without_dp_planner` opts out for one scope.
+
+Both are **result-equivalent** — they change which plan runs, never the answer — and pull
+**zero** new dependencies, so the default dependency graph is unchanged. The point is that
+an agent's `query` / `construct` call executes the same plans the CLI and the canonical
+benchmarks measure, rather than a rewrite-dark, greedy-GOO variant of the same engine.
+Build `sparq-mcp` with `--no-default-features` for the unoptimised engine.
+
+This is a **per-surface** decision, not a blanket one: `sparq-wasm` deliberately keeps both
+off, because that surface has a bundle-size floor the native ones do not.
+`crates/sparq-mcp/tests/planner_features_default.rs` is the tripwire that the default set
+keeps them lit and that the forwarding actually reaches the engine.
+
 The standard MCP stdio transport is behind the **`stdio`** feature:
 `sparq_mcp::serve_stdio(&mut server)` runs the line-delimited JSON-RPC loop over this
 process's stdin/stdout. For an arbitrary reader/writer pair use `sparq_mcp::serve`.
@@ -329,6 +374,7 @@ Opt-in crate at workspace v0.1.0; verified against branch `main` (default `class
 2026-07-13 [GPT-5.6], sq-cekgj; default `prefixes` tool 2026-07-13 [GPT-5.6], sq-kx5b0;
 default `void` tool 2026-07-12 [GPT-5.6], sq-2kkym;
 default resources + prompts surfaces 2026-07-28 [SONNET-4.6], sq-sjey1;
+default-on `algebra-rewrite` + `dp-planner` 2026-07-30 [SONNET-4.6], sq-mc06h;
 pod mode 2026-07-11 [FABLE-5]).
 Tested by a real in-memory MCP round-trip (default features), a real stdio serve-loop
 round-trip, and a spawned-process session against the shipped binary (feature `stdio`,

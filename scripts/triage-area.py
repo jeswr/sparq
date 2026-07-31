@@ -49,6 +49,15 @@
 #   python3 scripts/triage-area.py --apply        # apply (add area:*, drop needs:area)
 #
 # Maintainer authorisation for the automated pass: sparq-org/sparq#1135 (2026-07-26).
+#
+# WHO RUNS IT. `.github/workflows/triage-area.yml` runs `--apply` on a half-hourly cron
+# (#3816). Until that lane existed this script was hand-invoked only, which made the
+# `needs:area` park TERMINAL in automation: `retriage.py` emits PROMOTING deltas and so
+# structurally cannot lift the park, and every other consumer reads the missing `area:` as
+# a reason to skip the issue. The cron re-runs the self-test AND
+# scripts/tests/test_triage_area.py before it writes anything, and always reports the
+# left-parked residue to the run summary — the issues no rule can attribute are a visible
+# count for a human, not silence.
 import argparse
 import json
 import os

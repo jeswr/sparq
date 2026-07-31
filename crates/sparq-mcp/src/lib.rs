@@ -40,6 +40,10 @@
 //!   and `resources/subscribe` / `resources/unsubscribe` with `subscribe: true`), bound
 //!   to Solid Notifications semantics: content-free `notifications/resources/updated`
 //!   messages, authorized at subscribe time AND at every delivery. [SONNET-4.6] sq-cmjmr
+//!   Its `introspect` / `shapes` / `stats` tools are mined from the session's AUTHORIZED
+//!   projection rather than the whole pod: [`McpServer`]'s whole-graph versions would
+//!   disclose the schema and volume of documents the principal cannot open — an
+//!   aggregate leak no per-resource check catches. [SONNET-4.6] sq-8n6iv
 //! - `templates` (feature `templates`) — the `template_list` / `template_invoke` tools:
 //!   named parameterized SPARQL templates registered on `ServerConfig::templates` and
 //!   invoked with typed JSON arguments through the injection-safe algebra binding

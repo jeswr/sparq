@@ -34,3 +34,21 @@
   crate: "sparq-zk"
   features: "secprop-annotations"
   test: true
+
+# [OPUS-5] sq-wklnb: the OFF-circuit W3C VC ingest bridge. The `vc_bridge`
+# module, its in-module tests, and `tests/vc_bridge_w3c_vectors.rs`
+# (`#![cfg(feature = "vc-bridge")]` — the canonical W3C Data-Integrity vectors
+# for `eddsa-rdfc-2022` + `ecdsa-rdfc-2019`) are ALL behind the default-OFF
+# `vc-bridge` feature, so ci.yml's default-feature lane compiles them empty and
+# runs ZERO of them — the same silent-skip gap (#1171) the secprop leg above
+# closes. Without this leg the byte-level interop vectors would never execute,
+# which is exactly the failure mode they exist to catch: a transposed
+# `proofConfigHash || documentHash` concatenation leaves every self-signed
+# in-module test green and only the published vectors go red.
+# The feature pulls ed25519-dalek/p256/sha2 (verify primitives only — no JSON-LD
+# processor). Off-circuit, ingest-time host verification; asserts no in-circuit
+# or query-soundness property and is NOT externally audited (sq-qhy4).
+- name: "sparq-zk (vc-bridge — W3C Data-Integrity ingest bridge + canonical interop vectors)"
+  crate: "sparq-zk"
+  features: "vc-bridge"
+  test: true

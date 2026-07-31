@@ -16,7 +16,7 @@ import {
   termToNT,
   type SparqlJsonTerm,
 } from './sparql.js';
-import { SparqSource } from './source.js';
+import { SparqSource, type SparqSourceOptions } from './source.js';
 import { asResultStream, ResultStream, type SparqResultStream } from './result-stream.js';
 import { DataFactory, Quad, Variable } from './terms.js';
 import { init, WasmStore } from './wasm.js';
@@ -704,9 +704,12 @@ export class SparqStore implements RDF.StringSparqlQueryable<RDF.BindingsResultS
    * `removeMatches` / `deleteGraph` consume/mutate via streams. The backing store stays the
    * source of truth; the adapter only re-views its primitives as the streaming interface, so a
    * sparq store drops into any RDF/JS Stream pipeline.
+   *
+   * @param options see `SparqSourceOptions` — `chunkSize` sets the quads-per-delta the adapter
+   *   applies while consuming an incoming stream (1024; `0` buffers the whole stream).
    */
-  asSource(): SparqSource {
-    return new SparqSource(this);
+  asSource(options: SparqSourceOptions = {}): SparqSource {
+    return new SparqSource(this, options);
   }
 
   /** Releases the wasm-side memory. The store must not be used afterwards. */

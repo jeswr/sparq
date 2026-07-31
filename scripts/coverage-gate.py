@@ -264,9 +264,18 @@ def check(summary_path, floor_path, require_all):
     # the nightly/per-commit --check-robust invocations do NOT pass. An unmeasured crate
     # with an effective floor of 0 (the ARTIFACT_ZERO crates) is not %-gated anyway, so
     # its measure-failure is reported but not fatal (the test-presence gate guards it).
+    #
+    # [SONNET-4.6] sq-3dr4t: a third shape joins those two — INHERITED. Under enforced
+    # changed-cone coverage (COVERAGE_CONE, see scripts/coverage.sh) a crate outside the
+    # PR's reverse-dep closure is deliberately not measured, and coverage.sh records it in
+    # the summary's `cone.inherited` list. Such a crate is a MISSING crate (same
+    # non-fatal-without---require-all semantics — its floor verdict is inherited from
+    # main's last full run) but it is reported under its own label so an INTENDED skip is
+    # never indistinguishable from a crate that silently fell out of this tier.
     s = load(summary_path); floors = load(floor_path)["crates"]
     measured = s["crates"]
     tier = s.get("tier")            # [OPUS-4.8] sq-bjct: tier-aware nightly_floor
+    cone_inherited = set((s.get("cone") or {}).get("inherited") or [])
     fails, missing, unmeasured, oks = [], [], [], []
     # [SONNET-4.6] sq-iwf3c: (crate, measured, committed floor, seed-procedure floor) for
     # each `seed_pending` entry that this tier actually measured — see the header.
@@ -294,7 +303,11 @@ def check(summary_path, floor_path, require_all):
     for crate, val, floor in oks:
         print(f"  ok   {crate:<20} {val:6.2f}% >= floor {floor}")
     for crate, floor in missing:
-        print(f"  --   {crate:<20} MISSING (not in this tier's summary)")
+        if crate in cone_inherited:
+            print(f"  --   {crate:<20} INHERITED (outside the PR's changed cone — "
+                  f"unchanged since main; floor {floor} verdict carried forward)")
+        else:
+            print(f"  --   {crate:<20} MISSING (not in this tier's summary)")
     for crate, floor in unmeasured:
         if floor > 0:
             print(f"  FAIL {crate:<20} UNMEASURED (measure step errored) "
@@ -334,10 +347,11 @@ def check(summary_path, floor_path, require_all):
     if require_all and missing:
         print(f"::error::{len(missing)} floor crate(s) absent from the summary "
               f"(--require-all): {', '.join(c for c, _ in missing)}")
+    n_inherited = sum(1 for c, _ in missing if c in cone_inherited)
     print(f"\ncoverage gate: {len(oks)} ok / {len(fails)} fail / "
           f"{len(unmeasured)} unmeasured ({len(unmeasured_gated)} gated) / "
-          f"{len(missing)} missing / {len(pending)} seed_pending "
-          f"({len(stale_seeds)} stale)")
+          f"{len(missing) - n_inherited} missing / {n_inherited} inherited (changed cone) / "
+          f"{len(pending)} seed_pending ({len(stale_seeds)} stale)")
     return 1 if bad else 0
 
 # --- pure aggregation primitives (unit-tested by --self-test) -----------------
@@ -1022,20 +1036,29 @@ def self_test():
     # tempfile` here would make the name local for the WHOLE function body and turn those
     # earlier uses into an UnboundLocalError).
     import contextlib, io
-    def run_check(summary_crates, floor_crates, require_all, tier=None):
-        """Drive the real check() over tempfile summary + floor; return its exit code."""
+    def run_check(summary_crates, floor_crates, require_all, tier=None, cone=None,
+                  capture=None):
+        """Drive the real check() over tempfile summary + floor; return its exit code.
+        `cone` populates the summary's sq-3dr4t `cone` block; `capture` (a list) collects
+        check()'s stdout so a test can assert on the per-crate labels."""
         sdoc = {"crates": {k: (crate(*v) if isinstance(v, tuple) else crate(v))
                            for k, v in summary_crates.items()}}
         if tier is not None:
             sdoc["tier"] = tier
+        if cone is not None:
+            sdoc["cone"] = cone
         fdoc = {"crates": floor_crates}
         with tempfile.NamedTemporaryFile("w", suffix=".sum.json", delete=False) as sf, \
              tempfile.NamedTemporaryFile("w", suffix=".floor.json", delete=False) as ff:
             json.dump(sdoc, sf); sp = sf.name
             json.dump(fdoc, ff); fp = ff.name
         try:
-            with contextlib.redirect_stdout(io.StringIO()):
-                return check(sp, fp, require_all)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = check(sp, fp, require_all)
+            if capture is not None:
+                capture.append(buf.getvalue())
+            return rc
         finally:
             os.unlink(sp); os.unlink(fp)
 
@@ -1064,6 +1087,40 @@ def self_test():
     assert run_check({"sparq-core": (0, False)}, FLC, require_all=False,
                      tier="nightly") == 1, \
         "sparq-core failing to measure (fixtures absent) must FAIL the nightly gate"
+
+    # === INHERITED (enforced changed cone, sq-3dr4t) [SONNET-4.6] ================
+    # A crate the cone filter deliberately did not measure is absent from `crates`, so it
+    # keeps the MISSING pass/fail semantics — but it MUST be reported under its own label,
+    # or an intended skip is indistinguishable from a crate that silently fell out of the
+    # tier (exactly the sq-039g failure class, one level up).
+    CONE = {"filter": ["a"], "measured": ["a"], "inherited": ["b"]}
+    FLI = {"a": {"floor": 80}, "b": {"floor": 80}}
+    log_i = []
+    assert run_check({"a": 90.0}, FLI, require_all=False, cone=CONE, capture=log_i) == 0, \
+        "an inherited (outside-cone) crate must not fail the gate"
+    assert "b" in log_i[0] and "INHERITED" in log_i[0], \
+        f"the skipped crate must be labeled INHERITED, got:\n{log_i[0]}"
+    assert "MISSING" not in log_i[0], \
+        f"an inherited crate must NOT be reported as plain MISSING:\n{log_i[0]}"
+    assert "1 inherited (changed cone)" in log_i[0], \
+        f"the tally must count inherited crates separately:\n{log_i[0]}"
+    # WITHOUT the cone block the same absent crate is plain MISSING (proving the block,
+    # not something else, produces the label).
+    log_m = []
+    assert run_check({"a": 90.0}, FLI, require_all=False, capture=log_m) == 0
+    assert "MISSING" in log_m[0] and "INHERITED" not in log_m[0], \
+        f"an absent crate with no cone block stays MISSING:\n{log_m[0]}"
+    # An absent crate NOT listed in cone.inherited is still plain MISSING even when a cone
+    # block exists — the label follows the recorded list, not the mere presence of a cone.
+    log_p = []
+    assert run_check({"a": 90.0}, {"a": {"floor": 80}, "c": {"floor": 80}},
+                     require_all=False, cone=CONE, capture=log_p) == 0
+    assert "c" in log_p[0] and "MISSING" in log_p[0], \
+        f"a crate outside cone.inherited must stay MISSING:\n{log_p[0]}"
+    # An inherited crate that DID somehow get measured below floor still FAILS — the label
+    # is reporting only and can never rescue a real breach.
+    assert run_check({"a": 90.0, "b": 10.0}, FLI, require_all=False, cone=CONE) == 1, \
+        "a measured, below-floor crate must fail even if listed as inherited"
 
     # --- `seed_pending`: a carried-forward floor is settled by the measurement (sq-iwf3c)
     # [SONNET-4.6] The failure mode this closes: coverage.sh starts measuring a crate over

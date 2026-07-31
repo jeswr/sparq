@@ -1145,8 +1145,21 @@ core spine; **P5, P6, P7** depend on P3/P4; **P7 (privacy) is hard-gated on `sq-
    GZIP seam, MSB-first clear-index — distinct from the LSB-first ZK `StatusListSnapshot`
    mirror), `admit_with_status` gates the REAL admission path **fail-closed on
    set/unknown/stale**, and `justify_status_decision` renders the minimal PROV-O allow/deny
-   justification. Open residue (captured beads): verifying the status-list VC's own issuer
-   signature; incremental (non-re-materialise) revocation. [OPUS-4.8]
+   justification. The status-list VC's OWN issuer signature is verified by the opt-in
+   `VerifyingLiveStatusCheck` (`sq-pfae.13`, fail-closed on unsigned/bad-sig/wrong-key).
+   **Incremental revocation is bounded, not delivered (`sq-pfae.14`).** `StatusDelta::between`
+   diffs two snapshots of one list across an **epoch bump** and names the changed slots, so the
+   caller re-runs the UNCHANGED gate over only the affected grants. It is a *selection* over two
+   **input** snapshots — no verdict, no derived-fact read, no in-reasoner retraction — so the
+   input-stratified / one-side-bound seeding discipline (`sq-tu4e`) is untouched; a not-newer,
+   coverage-changed, or over-limit delta falls back to the full re-check (fail-closed). The skip
+   contract needs BOTH halves — `valid_at(now, max_age)` (a whole-list freshness precondition,
+   since staleness is a property of the snapshot, not of a slot) AND `!affects(entry)` — under
+   which a skipped entry satisfies `verdict(prev) admits ⇒ verdict(next) admits`. **Open
+   residue:** this does NOT close the §4.4 stale-authority window — an unchanged bit still ages
+   into `Stale` and `affects` will not flag it, which is why `valid_at` is required; a delta
+   binds exactly one status list; and deep-chain delegation revocation (§4.4) remains full
+   re-materialisation. [OPUS-4.8] [OPUS-5]
 7. **P7 — Privacy/ZK admission feasibility (design + caveated prototype, G4).** Show the
    trust-graph derivation can run under sparq's ZK estate to give ZKAP-equivalent unlinkable
    predicate access. ZKAPs-grade unlinkability needs the **three-part composite** (§5.3): the

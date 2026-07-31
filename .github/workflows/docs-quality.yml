@@ -527,10 +527,14 @@ jobs:
           python3 scripts/triage.py --self-test
           python3 scripts/retriage.py --self-test
       # [OPUS-5] #1135: scripts/triage-area.py is the third member of that triage
-      # family — it CLEARS the `needs:area` park triage.py sets. It runs by hand
-      # (no cron), so without a PR-time gate a rule-table edit would only be
-      # discovered by mislabeling live issues, and a wrong `area:` routes a worker
-      # at the wrong crate. Both suites are hermetic (stdlib only, no gh/network):
+      # family — it CLEARS the `needs:area` park triage.py sets. As of #3816 it also
+      # runs unattended every half hour (.github/workflows/triage-area.yml), which
+      # makes this PR-time gate load-bearing rather than merely prudent: without it a
+      # rule-table edit would first be observed by mislabeling LIVE issues on the next
+      # cron fire, and a wrong `area:` routes a worker at the wrong crate. The cron
+      # re-runs both suites itself before it writes, so this gate and that one fail on
+      # the same regression — here on the PR, there before any label is touched.
+      # Both suites are hermetic (stdlib only, no gh/network):
       # the script's own rule self-test, plus the independent safety tests
       # (fail-closed / no unpark-without-an-area / no invented label / the three
       # rule orderings that were measured wrong on the live backlog).
@@ -584,6 +588,19 @@ jobs:
         run: python3 scripts/check-install-action-tool.py --self-test
       - name: "Enforce explicit `with: tool:` on every SHA-pinned install-action — GATING"
         run: python3 scripts/check-install-action-tool.py
+      # [SONNET-4.6] sq-6vshe.11: every cargo-llvm-cov job MUST set a job-level RUSTFLAGS,
+      # and they must all set the SAME value. cargo picks ONE rustflags source (first match
+      # wins, never merged) and cargo-llvm-cov sets RUSTFLAGS/CARGO_ENCODED_RUSTFLAGS to
+      # inject `-C instrument-coverage` — which silently DROPS ci.yml's workflow-level
+      # CARGO_TARGET_<triple>_RUSTFLAGS lld flag in exactly those jobs. Nothing fails when
+      # that happens; the flag just stops applying, which is how it went unnoticed from
+      # sq-6vshe.1 until it was measured. The sameness half additionally protects the engine
+      # coverage split, whose cross-runner .profraw merge is only valid while the run and
+      # merge jobs compile with identical inputs. Stdlib-only, no compile, no deps.
+      - name: Self-test coverage RUSTFLAGS gate (pure logic)
+        run: python3 scripts/check-coverage-rustflags.py --self-test
+      - name: "Enforce job-level RUSTFLAGS on every cargo-llvm-cov job — GATING"
+        run: python3 scripts/check-coverage-rustflags.py
       # [OPUS-4.8] sq-u59rq: the stacked-PR arm guard. A deterministic PreToolUse command-hook
       # (.claude/settings.json, sibling to the perf-reviewer) that DENIES `gh pr merge … --auto`
       # when the PR's baseRefName ≠ main — so we never squash-merge a stacked PR into its base
@@ -841,6 +858,13 @@ jobs:
       # content-parity contract. Hermetic + stdlib-only (no PyYAML needed).
       - name: Merge-queue cache/artifact posture (save-if + archive diet — sq-6vshe.15)
         run: python3 scripts/tests/test_mergequeue_cache_posture.py
+      # [OPUS-5] sq-khm3f: same invisible-regression shape as the posture test above.
+      # The gating `js` lane installs wasm-pack as a PREBUILT, SHA-pinned, exactly-
+      # versioned binary; reverting to `cargo install wasm-pack` would keep the lane
+      # green on a good day while re-exposing it to a transient crates.io blip
+      # (which red-gated PR #1131). Hermetic + stdlib-only (no PyYAML needed).
+      - name: js lane wasm-pack install posture (prebuilt + pinned — sq-khm3f)
+        run: python3 scripts/tests/test_js_wasm_pack_install.py
       # [OPUS-4.8] sq-va7at: the nightly selection-bug ALARM
       # (scripts/ci_selection_alarm.py, .github/workflows/selection-alarm.yml,
       # design §6.1). Hermetic unittest suite (NO gh, NO git, NO cargo, NO network;
@@ -898,12 +922,18 @@ jobs:
       # [SONNET-4.6] sq-1cb6l: the 5 remaining hermetic test suites found by the
       # #1670 audit, wired here alongside the other ci-scripts self-tests.
       #
-      # test_cone_coverage.py (27 tests) — the cone-based coverage selector
+      # test_cone_coverage.py (49 tests) — the cone-based coverage selector
       # (scripts/cone_coverage.py): compute_cone() closure math, §4.1 full-run
-      # triggers, dev-dep propagation, shadow/enforce mode flags, shadow_report()
+      # triggers, dev-dep propagation, shadow/enforce mode flags, report()
       # label semantics, shard-filtering intersection, and the empty-all_members
-      # fallback. Stdlib-only, no cargo/network.
-      - name: Self-test cone_coverage.py (cone selector + shadow_report — sq-1cb6l)
+      # fallback. [SONNET-4.6] sq-3dr4t adds the ENFORCE-flip guards: cone_from_selection()
+      # (the path CI uses — narrows for an explicit select mode=selected and NOTHING
+      # else), which cases write a NARROWING --crates-output (cone+enforce ONLY — shadow,
+      # mode=full and every fail-safe write EMPTY), the enforce-mode report's inherited
+      # rows and divergence-detection-unavailable honesty, and coverage.sh's COVERAGE_CONE
+      # intersection driven through `coverage.sh --print-crates` (including the
+      # whitespace-only-cone no-op). Stdlib-only, no cargo/network.
+      - name: Self-test cone_coverage.py (cone selector + cone report — sq-1cb6l)
         run: python3 scripts/tests/test_cone_coverage.py
       # test_drift_scan.py (37 tests) — the periodic drift scanner
       # (scripts/drift-scan.py): all 5 scanner classes (bench-missing,
@@ -938,6 +968,17 @@ jobs:
       # only, no git/network.
       - name: Self-test check-install-action-tool.py (fixtures + live invariant — sq-1cb6l)
         run: python3 scripts/tests/test_install_action_tool.py
+      # [SONNET-4.6] test_coverage_rustflags.py (17 tests) — supplements the
+      # check-coverage-rustflags.py --self-test + enforce run above: the pure
+      # fixtures (job-level vs step-level env, CSV `tool:` list, bare `run: cargo
+      # llvm-cov`, no-compile coverage job out of scope, value divergence), the
+      # scalar parser (a mis-parsed value would fake a divergence), the live
+      # workflows invariant, and TWO vacuity guards — the scan must find at least
+      # one cargo-llvm-cov job, and it must specifically cover the
+      # coverage-engine-{run,merge} pair whose RUSTFLAGS must match for the
+      # cross-runner .profraw merge to be valid. Stdlib-only, no git/network.
+      - name: Self-test check-coverage-rustflags.py (fixtures + live invariant — sq-6vshe.11)
+        run: python3 scripts/tests/test_coverage_rustflags.py
       # [OPUS-5] sparq-org/sparq#4652: the zero-dispatch merge-group watchdog
       # (scripts/merge-group-watchdog.py, .github/workflows/merge-group-watchdog.yml)
       # plus the CI_TIMEOUT routing split it feeds in merge-queue-feedback.yml. Both
