@@ -48,7 +48,7 @@ register distinguishes two trust classes of `unsafe`:
 
 ## Register
 
-**91 `unsafe` sites** across 9 crates (the other crates contain no first-party `unsafe`).
+**92 `unsafe` sites** across 9 crates (the other crates contain no first-party `unsafe`).
 Counts and the file:line list are produced by `scripts/unsafe-gate.py --list` and
 must equal `bench/unsafe-snapshot.json`. Two crates are special allocator cases:
 **`sparq-lws-core`** (sq-gg0qq.2) ships a `forbid(unsafe_code)` lib + bin
@@ -68,7 +68,7 @@ Recurring invariant shorthands used below:
   borrow's duration and is not mutated by us; external concurrent mutation is explicitly
   out of contract (documented stance, same as the rest of the mmap surface).
 
-### `sparq-core` — 50 sites (the unsafe core: mmap loaders, zero-copy dict, parallel build)
+### `sparq-core` — 51 sites (the unsafe core: mmap loaders, zero-copy dict, parallel build, N-Triples span decode)
 
 | File:line | Kind | Invariant relied on | Why sound / how bounded |
 |---|---|---|---|
@@ -111,6 +111,7 @@ Recurring invariant shorthands used below:
 | `src/dictspill.rs:723` | `unsafe impl Send for SlotPtr` | `*mut u64` only touches its own hash-routed slot | disjoint writes, no reads until the parallel scope ends. |
 | `src/dictspill.rs:726` | `unsafe impl Sync for SlotPtr` | same as 723 | `Copy` handle shared; writes disjoint. |
 | `src/dictspill.rs:741` | ptr `write` (scatter) | `i < len`; slot hash-routed to this shard | `debug_assert!(i<len)`; disjoint by hash routing. (`dict-spill` feature ⇒ outside the `miri` lane; covered by the deterministic corruption oracle + fuzz.) |
+| `src/nt.rs:525` | `from_utf8_unchecked` | **`CHUNK-UTF8`** — the chunk buffer was proved valid UTF-8 by `validate_chunk_utf8` at the entry point, and the span ends are ASCII delimiters, hence character boundaries | The `nt` module has exactly TWO entry points (`parse_chunk`, `parse_quads_chunk`) and both validate the whole chunk on their first line, before any byte is scanned; every span this module cuts is bounded by a byte the scanner matched against an ASCII constant (`<` `>` `"` `\` `_` `:` `.` `@`, whitespace, `is_ascii_alphanumeric()`), and UTF-8 is self-synchronising, so those indices are character boundaries. Bounded by: `debug_assert!` re-check of the full precondition on EVERY call in debug/test builds; the `miri` lane (this module is default-features, no mmap — squarely in scope); `parse_chunk_rejects_invalid_utf8` / `parse_quads_chunk_rejects_invalid_utf8` pin the entry-point validation, `multibyte_spans_at_every_delimiter_round_trip` / `escaped_and_multibyte_literal_span_round_trips` / `language_tag_terminated_by_multibyte_errors_cleanly` pin the boundary argument at each delimiter. NOT a **B5** site: the input is an in-memory chunk that is fully validated in-process before any unchecked access, so hostile input yields a clean `Err` with a byte offset, never UB. See the full `CHUNK-UTF8` argument in the source doc-comment. (sq-7d3dj.21) [OPUS-5] |
 | `src/extsort.rs:15` | slice reinterpret (write) | POD-bytes | `as_bytes` over `[Id;3]` for writing a run. |
 | `src/extsort.rs:38` | `unchecked_advise_range` | read-only map, range already consumed | `DontNeed`/`FreeReusable` only drops the resident copy of clean file pages; never read again. |
 | `src/extsort.rs:85` | `Mmap::map` | own-for-lifetime | run files written by us, not mutated during the merge. |
@@ -309,7 +310,7 @@ standard toolchain. Miri does not model a `#[global_allocator]` that calls `Syst
 
 ## NEEDS-REVIEW
 
-**None.** Every one of the 91 sites now carries a literal `// SAFETY:` comment
+**None.** Every one of the 92 sites now carries a literal `// SAFETY:` comment
 immediately preceding the `unsafe` block/impl, mechanically enforced by
 `clippy::undocumented_unsafe_blocks` (MS-G2 closed, sq-8wbn, [OPUS-4.8]) — set
 at crate root on unsafe-bearing libraries (including `sparq-lws-wasm`, sq-wubkf)
