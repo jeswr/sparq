@@ -902,12 +902,18 @@ jobs:
       # [SONNET-4.6] sq-1cb6l: the 5 remaining hermetic test suites found by the
       # #1670 audit, wired here alongside the other ci-scripts self-tests.
       #
-      # test_cone_coverage.py (27 tests) — the cone-based coverage selector
+      # test_cone_coverage.py (49 tests) — the cone-based coverage selector
       # (scripts/cone_coverage.py): compute_cone() closure math, §4.1 full-run
-      # triggers, dev-dep propagation, shadow/enforce mode flags, shadow_report()
+      # triggers, dev-dep propagation, shadow/enforce mode flags, report()
       # label semantics, shard-filtering intersection, and the empty-all_members
-      # fallback. Stdlib-only, no cargo/network.
-      - name: Self-test cone_coverage.py (cone selector + shadow_report — sq-1cb6l)
+      # fallback. [SONNET-4.6] sq-3dr4t adds the ENFORCE-flip guards: cone_from_selection()
+      # (the path CI uses — narrows for an explicit select mode=selected and NOTHING
+      # else), which cases write a NARROWING --crates-output (cone+enforce ONLY — shadow,
+      # mode=full and every fail-safe write EMPTY), the enforce-mode report's inherited
+      # rows and divergence-detection-unavailable honesty, and coverage.sh's COVERAGE_CONE
+      # intersection driven through `coverage.sh --print-crates` (including the
+      # whitespace-only-cone no-op). Stdlib-only, no cargo/network.
+      - name: Self-test cone_coverage.py (cone selector + cone report — sq-1cb6l)
         run: python3 scripts/tests/test_cone_coverage.py
       # test_drift_scan.py (37 tests) — the periodic drift scanner
       # (scripts/drift-scan.py): all 5 scanner classes (bench-missing,
