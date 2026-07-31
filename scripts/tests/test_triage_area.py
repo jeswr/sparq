@@ -452,5 +452,119 @@ class TestScopeDiscipline(unittest.TestCase):
         self.assertEqual(areas("ieee754 OPT: gate-neutral kernels.nr cleanups"), ["zk"])
 
 
+class TestUnattributedCensus(unittest.TestCase):
+    """#5004 — the class the `--label needs:area` query cannot see.
+
+    Per #5004 — a claim about the private registry that nothing here can check — its
+    `curate-frontier.py` skips any issue whose area it cannot derive and re-skips it every
+    tick forever. The half that IS checkable is the board: sparq's residue report (#3816)
+    is built on the PARK query, so it counts only issues that already carry the park, while
+    `triage.py` withholds that park from epics, from externally-gated issues and from
+    anything still missing a role or a priority, and `retriage.py` computes the park delta
+    and discards it (PROMOTING deltas only). A no-area issue that was never parked
+    therefore appears in NEITHER report — which is the whole finding.
+
+    These pin the census predicate rather than the prose: the split is what makes the
+    previously-invisible half a number, so each half is asserted independently.
+    """
+
+    @staticmethod
+    def _iss(number, *labels, title="whatever"):
+        return {"number": number, "title": title,
+                "labels": [{"name": lb} for lb in labels]}
+
+    def test_the_unparked_half_is_counted(self):
+        """THE HEADLINE. A no-area issue with no park is the class #5004 is about; if the
+        census only ever returned parked issues it would restate the report that already
+        exists and close nothing."""
+        parked, unparked = TA.census([self._iss(1)])
+        self.assertEqual([it["number"] for it in unparked], [1])
+        self.assertEqual(parked, [])
+
+    def test_the_parked_half_is_reported_separately(self):
+        """The two halves must not be merged: the parked one is already covered by the
+        residue report, so collapsing them would hide how much of the count is NEW."""
+        parked, unparked = TA.census([self._iss(2, TA.PARK_LABEL)])
+        self.assertEqual([it["number"] for it in parked], [2])
+        self.assertEqual(unparked, [])
+
+    def test_the_withheld_park_classes_are_exactly_what_shows_up_unparked(self):
+        """The three shapes `triage.py` deliberately refuses to park — an epic, an
+        externally-gated issue, and one missing a role/priority — are the population
+        `retriage.py` hands on and nothing picks up. They are the census's reason to
+        exist, so assert them by name rather than trusting one generic fixture."""
+        _, unparked = TA.census([
+            self._iss(31, "kind:epic", "priority:P1", "role:impl"),
+            self._iss(32, "priority:P1", "role:impl", "needs:user"),
+            self._iss(33),  # the zero-label class
+        ])
+        self.assertEqual([it["number"] for it in unparked], [31, 32, 33])
+
+    def test_an_attributable_issue_is_not_in_the_class(self):
+        """`area:` present => the curator CAN stage it => it is not the residue. Including
+        the drifted shape (a human added an area but left the park on): counting it would
+        inflate the number with work that is already routable."""
+        parked, unparked = TA.census([
+            self._iss(4, "area:sparq-core"),
+            self._iss(5, "area:sparq-core", TA.PARK_LABEL),
+        ])
+        self.assertEqual((parked, unparked), ([], []))
+
+    def test_the_count_is_printed_even_when_the_class_is_empty(self):
+        """ALWAYS-PRINTED is the point — #5004's finding is silence, and a count emitted
+        only when it is non-zero is indistinguishable from a lane that stopped running."""
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            TA.print_census([self._iss(6, "area:sparq-core")])
+        tally = [ln for ln in buf.getvalue().splitlines() if ln.startswith("== ")]
+        self.assertEqual(len(tally), 1, buf.getvalue())
+        self.assertIn("0 open issue(s) carry no area: label", tally[0])
+
+    def test_the_report_prefixes_cannot_be_sed_by_the_classifier_report(self):
+        """triage-area.yml runs two report steps, and the classifier's extracts `^-- `
+        and `^   LEFT `. They read separate logs today, so this pins the property that
+        keeps them separable if that ever stops being true: were the census to reuse
+        either prefix, one step would absorb the other's lines and the number would be
+        WRONG rather than missing — the harder failure to notice."""
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            TA.print_census([self._iss(7), self._iss(8, TA.PARK_LABEL)])
+        lines = buf.getvalue().splitlines()
+        self.assertEqual([ln for ln in lines if ln.startswith(("-- ", "   LEFT "))], [])
+        self.assertEqual([ln.split()[1] for ln in lines if ln.startswith("   UNPARKED ")],
+                         ["#7"], buf.getvalue())
+
+    def test_a_fetch_at_the_limit_raises_instead_of_undercounting(self):
+        """The census asks for the WHOLE board, not just the park. A fetch that quietly
+        stops at CENSUS_LIMIT reports FEWER unattributed issues than exist and reads
+        exactly like a shrinking backlog — #5004's failure mode, reintroduced by the fix."""
+        rows = [{"number": n, "title": "x", "labels": []} for n in range(TA.CENSUS_LIMIT)]
+        real = TA._gh
+        TA._gh = lambda a: __import__("json").dumps(rows)
+        self.addCleanup(lambda: setattr(TA, "_gh", real))
+        with self.assertRaises(TA.CensusTruncated):
+            TA.open_issues()
+
+    def test_the_census_mode_writes_nothing(self):
+        """It reports on a live board from a job that holds `issues: write`. Assert on the
+        argv it hands `gh`, not on the absence of an apply call: `--census` must reach the
+        LIST API only."""
+        calls = []
+        real = TA._gh
+        TA._gh = lambda a: (calls.append(list(a)),
+                            __import__("json").dumps(
+                                [{"number": 9, "title": "x", "labels": []}]))[1]
+        self.addCleanup(lambda: setattr(TA, "_gh", real))
+        real_argv = sys.argv
+        sys.argv = ["triage-area.py", "--census"]
+        self.addCleanup(lambda: setattr(sys, "argv", real_argv))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(TA.main(), 0)
+        self.assertEqual([c[:2] for c in calls], [["issue", "list"]], calls)
+        for argv in calls:
+            self.assertNotIn("--add-label", argv)
+            self.assertNotIn("--remove-label", argv)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
