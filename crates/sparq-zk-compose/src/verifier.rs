@@ -4606,6 +4606,21 @@ fn scan_matches_pattern(inputs: &ProofInputs, consts: &[Option<oxrdf::Term>; 3])
 /// #5/#6 — the verdict gates row inclusion; an `expected==false` row may not be
 /// presented as passing).
 ///
+/// # EVERY slot, not the first (sq-q9r5e / audit L-1)
+/// A scan is matched to a query pattern by constant MEMBERSHIP, so ONE scan can
+/// answer SEVERAL patterns — and those patterns may place the filtered variable
+/// at DIFFERENT slots. The obligation is therefore per `(scan, row, slot)` over
+/// the FULL set of slots `?v` occupies across the patterns that scan answers,
+/// not the first such slot. Gating only the first accepted a manifest whose
+/// other disclosed ?v column was never proven against the FILTER (confirmed
+/// reachable; witness `filter_reject_ungated_second_slot_within_scan`).
+///
+/// This is deliberately FAIL-CLOSED on the pattern→scan ambiguity: where two
+/// patterns share a constant layout the verifier cannot tell which one a given
+/// scan was meant to answer, so it demands the FILTER be discharged for every
+/// slot that scan could be read at. A manifest that cannot supply those proofs
+/// is REJECTED rather than accepted on the strength of one of them.
+///
 /// A FILTER with no such edge ⇒ REJECT (audit #10 FILTER-add / a `filter_int`
 /// over the wrong operand). Stage 2 already enforced the edge's scanned-slot
 /// encoding equals the filter `operand_enc` (so #7 operand substitution is
@@ -4655,27 +4670,52 @@ fn bind_query_correctness(manifest: &ProofManifest) -> Result<(), CheckError> {
                 ProofInputs::Scan { rows, row_count, .. } => (rows, *row_count as usize),
                 _ => continue,
             };
-            // Is this scan the one that answers a pattern ?v binds in, and at
-            // which slot does ?v sit there?
-            let slot = positions.iter().find_map(|(pi, si)| {
-                consts
-                    .get(*pi)
-                    .filter(|c| scan_matches_pattern(&sp.inputs, c))
-                    .map(|_| *si)
-            });
-            let Some(slot) = slot else { continue };
+            // EVERY slot ?v sits at across EVERY query pattern this scan
+            // answers — not just the first.
+            //
+            // [OPUS-5] sq-q9r5e (audit L-1, `research/zk-audit-gpt56-2026-07.md`):
+            // this was a `find_map`, which took only the FIRST matching
+            // (pattern, slot) pair. Pattern→scan is resolved by constant
+            // MEMBERSHIP (`scan_matches_pattern`), not an explicit mapping, so
+            // ONE scan can answer SEVERAL query patterns — and when those
+            // patterns place the filtered variable at DIFFERENT slots (e.g. a
+            // `(?, P, ?)` scan answering both `(?s P ?v)` and `(?v P ?o)`),
+            // every one of those slots is a column the relying party reads ?v
+            // off. Gating only the first left the others ungated, so a row whose
+            // second-slot binding of ?v was never proven against the FILTER was
+            // presented as satisfying it (CONFIRMED reachable: the structural
+            // gate accepted such a manifest — witness
+            // `filter_reject_ungated_second_slot_within_scan` in `tests/e2e.rs`).
+            //
+            // Collecting ALL matching slots is the FAIL-CLOSED direction and
+            // matches the discipline `bind_attributions` already applies (it
+            // checks EVERY scan matching a pattern, never a first match). A
+            // BTreeSet dedups the case where two patterns place ?v at the same
+            // slot, and gives a deterministic order for the error path.
+            let slots: BTreeSet<usize> = positions
+                .iter()
+                .filter(|(pi, _)| {
+                    consts.get(*pi).is_some_and(|c| scan_matches_pattern(&sp.inputs, c))
+                })
+                .map(|(_, si)| *si)
+                .collect();
+            if slots.is_empty() {
+                continue;
+            }
             any_scan_answered = true;
             // Every ACTIVE disclosed row must have a true-verdict filter_int
-            // edge at this slot with matching (op, bound).
+            // edge at EACH such slot with matching (op, bound).
             for row in 0..row_count.min(rows.len()) {
-                let gated = manifest.binding_edges.iter().any(|edge| {
-                    edge.from_proof == spi
-                        && edge.from_row == row
-                        && edge.from_slot == slot
-                        && filter_edge_true(manifest, edge.to_proof, *op, *bound)
-                });
-                if !gated {
-                    return Err(CheckError::UnboundFilter { variable: variable.clone() });
+                for &slot in &slots {
+                    let gated = manifest.binding_edges.iter().any(|edge| {
+                        edge.from_proof == spi
+                            && edge.from_row == row
+                            && edge.from_slot == slot
+                            && filter_edge_true(manifest, edge.to_proof, *op, *bound)
+                    });
+                    if !gated {
+                        return Err(CheckError::UnboundFilter { variable: variable.clone() });
+                    }
                 }
             }
         }

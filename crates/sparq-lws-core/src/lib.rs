@@ -83,10 +83,10 @@ pub mod authz;
 pub mod body_limit;
 mod clock;
 pub mod error;
-/// Provider-issued WebIDs hosted OUTSIDE the pod — the identity host (the RSS adaptation of
-/// prod-solid-server `decisions/0020`; design in `docs/design/webid-outside-pod.md`). The id-docs
-/// live in a reserved namespace the LDP surface refuses outright (no `.acl` can ever exist ⇒ no
-/// WAC grant can ever apply), served GET/HEAD-only by a Host-keyed route with no authorization.
+/// Provider-issued WebIDs hosted OUTSIDE the pod — the identity host (the RSS adaptation of PSS
+/// `decisions/0020`; design in `research/lws-design-records.md` §4). The id-docs live in a reserved
+/// namespace the LDP surface refuses outright (no `.acl` can ever exist ⇒ no WAC grant can ever
+/// apply), served GET/HEAD-only by a Host-keyed route with no authorization.
 pub mod identity;
 pub mod ldp;
 #[cfg(not(target_arch = "wasm32"))]
@@ -95,9 +95,9 @@ pub mod nodelay;
 pub mod notifications;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod overload;
-/// Tiered proof-of-possession (RFC 8705 cert-bound tokens, later DPoP-SK) — the negotiated,
-/// opt-in fast paths that keep DPoP as the mandatory Solid-OIDC baseline. See
-/// `docs/design/high-throughput-pop-auth.md`. T1a lands the confirmation dispatch + cert-bound
+/// Tiered proof-of-possession (RFC 8705 cert-bound tokens, later DPoP-SK) — the negotiated, opt-in
+/// fast paths that keep DPoP as the mandatory Solid-OIDC baseline. See
+/// `research/lws-design-records.md` §7. T1a lands the confirmation dispatch + cert-bound
 /// verification core; the acceptor + verifier wiring are tracked follow-ups.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod pop;

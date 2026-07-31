@@ -327,6 +327,11 @@ jobs:
         if: steps.changes.outputs.rust_changed == 'true'
         with:
           shared-key: vectorized-feature-off-wasm
+          # [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE DISCIPLINE: restore always,
+          # save on push-to-main only. Full rationale on ci.yml's `build-archive` job;
+          # this lane gates on `merge_group` too, so its queue-ref saves were equally
+          # unrestorable. Pinned by scripts/tests/test_mergequeue_cache_posture.py.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Resolve base SHA (per event)
         id: base
