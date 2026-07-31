@@ -39,11 +39,15 @@
 #                                                         #   event awareness (see below)
 # Exit non-zero (with a diagnostic on stderr) on any malformed fragment.
 #
-# THE TWO-FILE SCOPE RULE ([SONNET-4.6] issue #2384). Adding, renaming or removing a leg
-# is a TWO-FILE change: the crate fragment AND the gate-name golden
+# THE TWO-FILE SCOPE RULE ([SONNET-4.6] issue #2384). The rule keys off the emitted
+# leg-NAME set, nothing else. Adding, renaming or removing a leg is a TWO-FILE change:
+# the crate fragment AND the gate-name golden
 # `scripts/tests/feature-matrix-legnames.golden.txt`, which test_feature_matrix_assemble.py
-# compares byte-for-byte. Any bead / issue / PR that scopes a fragment MUST also scope the
-# golden, or its own spec forbids the update it requires. Regenerate it (never hand-edit):
+# compares byte-for-byte. Any bead / issue / PR that changes the emitted leg-name set MUST
+# also scope the golden, or its own spec forbids the update it requires. A fragment edit
+# that CANNOT change a `name:` — `features`, `test`, `tier`, `tier-reason` or comments —
+# leaves the name set untouched and stays a SINGLE-file change; do not scope the golden
+# into it. Regenerate the golden (never hand-edit):
 #   python3 scripts/assemble-feature-matrix.py --names \
 #     > scripts/tests/feature-matrix-legnames.golden.txt
 # See `.github/feature-matrix.d/README.md` for the full contract.
