@@ -400,7 +400,7 @@ to the maintainer's binding brevity feedback (2026-07-05):
 | noir#13263 | 1 — div/mod by oversized constant (theme c) | `sq-3qwv1` done | draft open, `MERGEABLE`, no human review |
 | noir#13264 | 2 — truncate after AND mask (#8628) | `sq-9xhoa` in-progress | draft open, `MERGEABLE`, no human review |
 | noir#13265 | 3 — single-limb `to_bits`/`to_radix` | `sq-fwcuo` in-progress | draft open, `MERGEABLE`, no human review |
-| noir#13266 | 4 — dominating-bound range/`Lt` elision (#9463) | `sq-rxir8` in-progress | draft open, `MERGEABLE`, no human review |
+| noir#13266 | 4 — dominating-bound range/`Lt` elision (#9463) | `sq-rxir8` in-progress | draft open, `MERGEABLE`, no human review — **implementation COMPLETE, do NOT re-implement; five pre-flip findings, see §10.12** |
 
 The pending gate on all four is @jeswr's author review (§6 protocol: only he
 flips draft → ready). jeswr's original #12780/#12781/#12927 also remain open
@@ -708,3 +708,44 @@ simple-element array index, via `array_index_needs_explicit_oob_check`
 (`ssa_gen/context.rs:131-136`) — is the one a maintainer will want. On that reading
 the elision is *plausibly* dominated by the array write's own bound; it is **not
 certified sound** by this bead, per `sq-qhy4`.
+
+### 10.12 `sq-rxir8` (row 4, redundant range/`Lt` elision, noir#9463) — implemented upstream as a draft; pre-flip review (2026-07-31)
+
+> 🤖 **SPARQ agent** [OPUS-5]. Full record:
+> `noir-redundant-range-check-elision-9463.md`.
+
+**Tracking correction, the same shape as §10.11.** The bead was routed as an
+implementation task and is **already implemented**: draft PR **noir#13266**
+(*"feat(ssa): remove range checks and unsigned lt comparisons implied by a dominating
+bound"*, @jeswr, 3 commits ending `cebd23f8`, opened 2026-07-04) adds
+`ssa/opt/remove_redundant_range_checks.rs` (513 lines incl. 13 SSA tests), its two
+one-line registrations and one `execution_success` fixture — 8 files, +561/−0, no
+existing behaviour edited. §10.1 records the PR but its row read as "in-progress",
+which a fleet agent picking the bead up cold reads as un-started. **Do not
+re-implement it.**
+
+Verified at `master` on 2026-07-31: the PR is still `DRAFT`, unmerged, with **zero
+human review comments** (the only thread comment is the do-not-force-push bot), and
+`ssa/opt/mod.rs` still carries no `remove_redundant_range_checks` — nor an equivalent.
+The insertion anchor (`ssa/mod.rs:395-396`) and the mirrored sibling pass are
+unchanged, so the textual rebase looks trivial; the measurements are what has gone
+stale. No §10.2 acceptance criterion was run in that session — no noir checkout, no
+`nargo`, no `bb` — so nothing from this bead is a measurement.
+
+What the record *does* add is a premise-by-premise check of the PR's soundness
+argument against `master` sources (flattening's predicate-baking for `Constrain` /
+`RangeCheck` at `flatten_cfg.rs:1422-1426` / `1472-1478`; the no-circularity
+ordering; the dominance-clearing transitivity), plus five findings to clear before
+@jeswr flips draft → ready:
+
+| finding | why it blocks or matters |
+|---|---|
+| **The `execution_success` fixture cannot go red for any over-firing.** `Prover.toml` has `a = 9` and the asserts are `a < 16`, `a < 17`, `a < 10` — all true at 9, so eliding *any* of them leaves the honest run and its output snapshot identical, and no ACIR/SSA snapshot pins the reversed-direction control | the PR body calls that control "semantically active"; it is present but not load-bearing. A companion `execution_failure` fixture with `a = 12` makes it red-on-wrong-answer. The six `assert_ssa_does_not_change` unit tests remain the real over-firing guards and are shape-specific |
+| **A competing sibling PR is live:** noir#12927 (same author, **not** a draft, updated 2026-06-05) adds `ssa/ir/dfg/range_analysis.rs` **and its own `ssa/opt/range_check_elision.rs`** | §8 step 3 / §10.3 scope the #12927 coordination pre-flight to `sq-jj3ne`; it applies to row 4 as well, and now. Each body needs a one-line supersedes/independent statement before either flips |
+| **The pipeline invariant the `mod` guard rests on is not asserted.** `simple_optimization.rs:71` resets `enable_side_effects` to constant `1` per block, sound only under upstream's "predicate confined to a single block" invariant — which `array_get.rs:238-247` guards with a `#[cfg(debug_assertions)]` pre-check that **already existed at the PR's base commit** | not a demonstrated live bug (post-flatten ACIR is single-block; Brillig has no `EnableSideEffectsIf`), but a ~10-line hardening in the idiom of the file next door, and upstream's own comment says the assert exists to catch a future pipeline change "rather than letting it silently emit an unsound fold" |
+| **#9463's second example no longer reproduces at HEAD:** `array_index_needs_explicit_oob_check` (`ssa_gen/context.rs:131-136`) emits no explicit check for ACIR + simple element type, so `t[a % 3]` over `[u32; 3]` has no `lt` to elide | the PR's fixture already works around this with a composite element type and says so; the consequence — the `mod`-derived fact reaches composite-element ACIR indexing and Brillig, not the issue's literal example — deserves one line upstream, and is consistent with the PR's own "external corpus unchanged" caveat |
+| **The gate rows are unreproducible here; the ACIR half is not.** No `bb` (`sq-i50o4` unlanded), so the `circuit_size` rows wait — but `nargo info` needs no backend, so §10.8's recipe can re-take the ACIR-opcode rows and the no-regression sweep at current master today. The body's "555 programs" also does not reconcile with its own "508 + 9" detail | §5.1 makes gates the arbiter and §4.2's #10159 lesson is that opcodes alone mislead, so the gate rows stay load-bearing — but the cheap half of the confirmation is not blocked, and `noir-optimization-paper.md` §1.2 has already carried "555" forward |
+
+Per `sq-qhy4` the record does **not** certify the pass sound; it establishes only
+that the premises the PR states are the ones the compiler provides. Nothing was
+posted upstream from this bead.
