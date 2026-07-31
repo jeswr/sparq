@@ -3348,16 +3348,15 @@ jobs:
       # shared-key cache warms the deps; keying by part avoids save-race clobbering.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE DISCIPLINE: restore always,
-          # save on push-to-main only (rationale on `build-archive` above; pinned by
-          # scripts/tests/test_mergequeue_cache_posture.py).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          # [OPUS-5] sq-h2gz6: the per-part key is LEFT ALONE here — it is outside this
+          # bead's named scope (coverage-shard-N), and unlike those shards the merge job
+          # below deliberately points at part 1's key.
           key: coverage-engine-run-${{ matrix.part }}
-          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — full rationale on the
-          # `build-archive` cache step above. The per-part key is LEFT ALONE here: it is
-          # outside this bead's named scope (coverage-shard-N), and unlike those shards
-          # the merge job below deliberately points at part 1's key.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-llvm-cov + nextest
         # [OPUS-4.8] sq-tool-pin: explicit `with: tool:` is MANDATORY when SHA-pinning
         # install-action (the @<tool> ref is dropped by the pin). Both tools are needed:
@@ -3416,14 +3415,12 @@ jobs:
       # Reuse a run partition's dep cache to warm the merge job's object compile.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE DISCIPLINE: restore always,
-          # save on push-to-main only (rationale on `build-archive` above; pinned by
-          # scripts/tests/test_mergequeue_cache_posture.py).
+          # [OPUS-5] sq-h2gz6 + [SONNET-4.6] sq-6vshe.15 lever 2 — CACHE-SAVE
+          # DISCIPLINE: restore always, save on push-to-main only. Rationale + the
+          # seeder argument are on the `build-archive` cache step above (the canonical
+          # note); pinned by scripts/tests/test_mergequeue_cache_posture.py.
           save-if: ${{ github.ref == 'refs/heads/main' }}
           key: coverage-engine-run-1
-          # [OPUS-5] sq-h2gz6: RESTORE-ONLY off main — full rationale on the
-          # `build-archive` cache step above.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-llvm-cov + nextest
         uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # cargo-llvm-cov
         with:
