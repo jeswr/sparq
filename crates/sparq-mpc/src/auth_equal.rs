@@ -44,28 +44,42 @@
 //! integrity rests on the secret `α` rather than on RS over-determination — which
 //! is exactly why it works at `n = 2t+1` where RS has nothing to work with.
 //!
-//! ## Operand order is load-bearing (do NOT swap the `auth_mul` arguments)
+//! ## Operand order — a defence against the corrupt-DEALER residual, NOT the `≤ t` model
 //!
 //! [`MacSession::auth_mul`] carries the MAC forward through its **first** operand
-//! (`[α·z] = reduce([α·x]·[y])`), so a consistent value-only tamper on the SECOND
-//! operand is *adopted*: the product and its MAC both track the tampered operand and
-//! `σ` stays `0` (the documented [`crate::auth_disclose`] limitation). This module
-//! therefore multiplies `auth_mul(&d, &r)` — **difference first, mask second** — so:
+//! (`[α·z] = reduce([α·x]·[y])`), so a **globally consistent** value-only rewrite of
+//! the SECOND operand — every one of the `n` shares shifted, i.e. a valid degree-`t`
+//! sharing of a DIFFERENT secret `r'` — is *adopted*: the product and its MAC both
+//! track `r'` and `σ` stays `0` (the documented [`crate::auth_disclose`] limitation).
 //!
-//! - a tamper on `[[d]]` (the operand that carries the SECRET keys) is **caught**:
-//!   `σ = α·d·r − (d+δ)·r·α = −α·δ·r ≠ 0`
-//!   (pinned by `tamper_on_the_difference_operand_is_caught`, which goes RED if the
-//!   arguments are ever swapped);
-//! - a tamper on `[[r]]` sits in the adopted slot, but the mask is *only* required
-//!   to be nonzero: the adopted product is `d·r'`, which is zero iff `d` is zero, so
-//!   the **verdict is preserved** unless the adversary lands `r' = 0` — and `r` is
-//!   secret, so it can only guess it (probability `1/p ≈ 2^{−61}`). Pinned by
-//!   `tamper_on_the_mask_operand_preserves_the_verdict`.
+//! **Which adversary can do that matters.** Producing a consistent rewrite requires the
+//! DEALER (or all `n` parties): `≤ t` parties provably cannot, because `t+1` untouched
+//! points already pin a degree-`t` polynomial. Operand order is therefore a hardening
+//! against the `RandomnessModel::TrustedDealerSim` residual listed below — it is **not**
+//! the basis of the `≤ t`-party `Malicious` claim, which rests entirely on the `σ`
+//! argument in the next section. Against that residual the order does matter, so this
+//! module multiplies `auth_mul(&d, &r)` — **difference first, mask second**:
 //!
-//! That asymmetry is why the equality test can be promoted here while
-//! [`crate::auth_disclose`] cannot: the disclose path's range proof puts a
-//! *load-bearing* mask in the adopted slot (zeroing it switches the proof off),
-//! whereas here the adopted slot holds a mask whose only job is to be nonzero.
+//! - a consistent rewrite of `[[d]]` (the operand that carries the SECRET keys) is
+//!   **caught**: `σ = α·d·r − (d+δ)·r·α = −α·δ·r ≠ 0`
+//!   (pinned by `corrupt_dealer_rewrite_of_the_difference_is_caught`, which goes RED if
+//!   the arguments are ever swapped);
+//! - a consistent rewrite of `[[r]]` sits in the adopted slot, but the mask is *only*
+//!   required to be nonzero: the adopted product is `d·r'`, which is zero iff `d` is
+//!   zero, so the **verdict is preserved** unless the adversary lands `r' = 0` — and `r`
+//!   is secret, so it can only guess it (probability `1/p ≈ 2^{−61}`). Pinned by
+//!   `corrupt_dealer_rewrite_of_the_mask_preserves_the_verdict`.
+//!
+//! In that residual model the asymmetry is also why the equality test can be promoted
+//! here while [`crate::auth_disclose`] cannot: the disclose path's range proof puts a
+//! *load-bearing* mask in the adopted slot (zeroing it switches the proof off), whereas
+//! here the adopted slot holds a mask whose only job is to be nonzero.
+//!
+//! Under the `≤ t`-party model there is **no adopted slot at all** and the asymmetry
+//! disappears: a corrupt party can only change the messages it sends, which shifts the
+//! two re-sharings by some `(δ_i, δ'_i)` — never by a consistent replacement of a shared
+//! secret — so a mask-side deviation is *caught* rather than adopted (pinned by
+//! `t_party_deviation_on_the_mask_operand_is_caught`).
 //!
 //! ## Adversary model, stated precisely (no over-claim)
 //!
@@ -77,11 +91,19 @@
 //! [`OperatorClass::EqualityJoin`](crate::backend::OperatorClass::EqualityJoin) the
 //! unauthenticated path still honestly reports. Concretely, for any deviation by
 //! `≤ t` parties on the authenticated path, the opened product is either UNCHANGED
-//! or the check fires with probability `≥ 1 − 1/p`: writing the per-party
-//! deviations as `δ_i` (value mult) and `δ'_i` (MAC mult), the check opens
-//! `σ = Σ λ_i·((α·d)_i·δ'_i − α·d_i·δ_i)`, which the adversary can only zero — without
-//! knowing `α` — by also zeroing the value shift `Σ λ_i·d_i·δ_i`, i.e. by not changing
-//! the answer.
+//! or the check fires with probability `≥ 1 − 1/p`. A corrupt party controls only the
+//! messages it SENDS, so its entire influence on the `auth_mul` collapses into a shift
+//! `δ_i` of the degree-`2t` product it re-shares in the VALUE reduce and `δ'_i` of the
+//! one it re-shares in the MAC reduce — deviating on its share of an OPERAND is the
+//! special case `(δ_i, δ'_i) = (d_i·ε, (α·d)_i·ε)` for the mask operand and
+//! `(r_i·ε, r_i·ε')` for the difference operand. The check then opens
+//! `σ = Σ λ_i·(δ'_i − α·δ_i) = Δ_m − α·Δ_v`, and the adversary knows every term of
+//! `Δ_m` and `Δ_v` but not `α`: zeroing `σ` without guessing `α` forces
+//! `Δ_v = Σ λ_i·δ_i = 0`, i.e. not changing the answer. `α` is uniform given any `≤ t`
+//! shares, so the residual forgery probability is `1/p`. This — NOT the operand-order
+//! asymmetry above — is what backs the `Malicious` descriptor, and it is pinned over
+//! the real `auth_mul` by `t_party_deviation_on_the_difference_operand_is_caught` and
+//! `t_party_deviation_on_the_mask_operand_is_caught`.
 //!
 //! **Residuals (honest, not closed here).**
 //! - The trusted-dealer simulation (`RandomnessModel::TrustedDealerSim`, bead
@@ -128,10 +150,12 @@ fn check_party_count(n: usize, t: usize) -> Result<(), MpcError> {
 /// chain — can build `|L|·|R|` products under ONE session and pay a SINGLE `σ` open
 /// for the whole batch (the §5 amortisation; see [`malicious_secure_equal_batch`]).
 ///
-/// `a`, `b` must be authenticated under `session`'s key. The mask's MAC is not
-/// load-bearing (see the module docs' operand-order note): `auth_mul(&d, &r)` puts
-/// the SECRET difference in the MAC-covered slot and the mask in the adopted one, so
-/// tampering the mask cannot flip a verdict without landing `r' = 0`. `[OPUS-5]`
+/// `a`, `b` must be authenticated under `session`'s key. Against a `≤ t`-party
+/// adversary BOTH operands are covered by the `σ` check; the operand order
+/// `auth_mul(&d, &r)` additionally hardens the corrupt-DEALER residual, where a
+/// globally consistent rewrite of the second operand is adopted — and there the mask
+/// is the safe thing to have adopted, since `d·r'` cannot flip a verdict without
+/// landing `r' = 0`. See the module docs' operand-order note. `[OPUS-5]`
 pub fn auth_masked_equality_product(
     session: &mut MacSession,
     a: &AuthenticatedShare,
@@ -143,9 +167,9 @@ pub fn auth_masked_equality_product(
 
 /// Mask an ALREADY-FORMED authenticated difference: draw a fresh nonzero `r` and
 /// return `[[d·r]]`. Split out of [`auth_masked_equality_product`] so the
-/// operand-order guard (`tamper_on_the_difference_operand_is_caught`) can hand in a
-/// TAMPERED `[[d]]` and still exercise the PRODUCTION multiplication — a guard that
-/// re-spelled `auth_mul` itself would not go red when this call is mutated.
+/// operand-order guard (`corrupt_dealer_rewrite_of_the_difference_is_caught`) can hand
+/// in a REWRITTEN `[[d]]` and still exercise the PRODUCTION multiplication — a guard
+/// that re-spelled `auth_mul` itself would not go red when this call is mutated.
 fn mask_authenticated_difference(
     session: &mut MacSession,
     d: &AuthenticatedShare,
@@ -155,13 +179,15 @@ fn mask_authenticated_difference(
     // m = 0 even for unequal keys (a false match).
     let mask_value = session.draw_nonzero_fp();
     let r = session.authenticated_share(mask_value);
-    // m = d·r — ONE MAC-carrying multiplication. ORDER IS LOAD-BEARING: the
-    // difference (which carries the secret keys) goes in the MAC-covered FIRST slot
-    // so a tamper on it is caught; the mask goes in the adopted SECOND slot where a
-    // tamper is verdict-preserving unless it hits r' = 0. Swapping these would move
-    // the forgeable slot onto the secret difference and let a deviating party turn a
-    // match into a non-match. See the module docs and
-    // `tamper_on_the_difference_operand_is_caught`.
+    // m = d·r — ONE MAC-carrying multiplication. A <= t-party deviation on EITHER
+    // operand is caught by the σ check, so order is not what makes this malicious-
+    // secure. Order still matters against the corrupt-DEALER residual, where a
+    // globally consistent rewrite of the SECOND operand is adopted: the difference
+    // (which carries the secret keys) goes in the MAC-covered FIRST slot so a rewrite
+    // of it is caught, and the mask goes in the adopted SECOND slot where a rewrite is
+    // verdict-preserving unless it hits r' = 0. Swapping these would move the
+    // dealer-forgeable slot onto the secret difference. See the module docs and
+    // `corrupt_dealer_rewrite_of_the_difference_is_caught`.
     session.auth_mul(d, &r)
 }
 
@@ -248,8 +274,17 @@ mod tests {
     //!   the promotion a demonstrated property, not a claim — the same class of
     //!   deviation is invisible to the degree-`2t` open at `n = 2t+1` and ABORTS on
     //!   the authenticated path.
-    //! - `tamper_on_the_difference_operand_is_caught`: the operand-order mutation
-    //!   guard (goes RED if `auth_mul(&d, &r)` is ever swapped).
+    //! - `t_party_deviation_on_the_{difference,mask}_operand_*`: the actual `≤ t`-party
+    //!   malicious model — the ONLY tests that back the `Malicious` descriptor. Both
+    //!   deviate exactly as a corrupt party can (the messages it sends into the two
+    //!   degree-reduces of the production `auth_mul`), never by rewriting a whole
+    //!   sharing.
+    //! - `corrupt_dealer_rewrite_of_the_{difference,mask}_*`: the STRICTLY STRONGER
+    //!   corrupt-dealer residual (`RandomnessModel::TrustedDealerSim`), where a whole
+    //!   share vector is rewritten. The difference-side one doubles as the
+    //!   operand-order mutation guard (goes RED if `auth_mul(&d, &r)` is ever swapped);
+    //!   the mask-side one pins the adopted-slot boundary. Neither is evidence about
+    //!   `≤ t` parties, which provably cannot produce such a rewrite.
     //! - `batched_equality_spends_one_sigma_open`: the §5 amortisation, MEASURED.
     use super::*;
     use crate::backend::{
@@ -259,11 +294,18 @@ mod tests {
     use crate::field::P;
     use crate::shamir::{self, ShamirBackend, Share};
 
-    /// Consistently shift the VALUE sharing of an authenticated share by `delta`
-    /// (add it to EVERY share) WITHOUT touching the MAC — a perfectly consistent
-    /// degree-`t` codeword of a DIFFERENT value, which Reed–Solomon cannot detect at
-    /// any `n`. Only the IT-MAC catches it.
-    fn tamper_value(av: &AuthenticatedShare, delta: Fp) -> AuthenticatedShare {
+    /// **CORRUPT-DEALER model (strictly stronger than `≤ t` parties).** Shift the VALUE
+    /// sharing of an authenticated share by `delta` on EVERY one of the `n` shares,
+    /// leaving the MAC alone — a perfectly consistent degree-`t` codeword of a DIFFERENT
+    /// value, which Reed–Solomon cannot detect at any `n`. Only the IT-MAC catches it.
+    ///
+    /// **This is NOT a `≤ t`-party deviation and no test using it is evidence about
+    /// one.** `t+1` untouched points already pin a degree-`t` polynomial, so rewriting
+    /// the whole vector needs the dealer (or all `n` parties) — it belongs to the
+    /// `RandomnessModel::TrustedDealerSim` residual in the module docs. The `≤ t`-party
+    /// deviations live in `t_party_deviation_*` below, which go through
+    /// `auth_mul_with_party_deviations_for_test` instead. `[SONNET-4.6]`
+    fn rewrite_every_value_share(av: &AuthenticatedShare, delta: Fp) -> AuthenticatedShare {
         let value: Vec<Share> = av
             .value_shares()
             .iter()
@@ -381,7 +423,7 @@ mod tests {
 
         // Now shift the opened product (the deviation the degree-2t open above could
         // not see) — the MAC-check must abort rather than yield a flipped verdict.
-        let tampered = tamper_value(&m, Fp::new(1));
+        let tampered = rewrite_every_value_share(&m, Fp::new(1));
         let outcome = session.mac_check_and_open(std::slice::from_ref(&tampered));
         assert!(
             matches!(outcome, Err(MpcError::MacCheckFailed { .. })),
@@ -390,46 +432,168 @@ mod tests {
         );
     }
 
-    /// OPERAND-ORDER MUTATION GUARD, over the PRODUCTION multiplication. A consistent
-    /// value tamper on the DIFFERENCE operand — the one carrying the secret keys —
-    /// must be caught. It is caught only because `mask_authenticated_difference`
-    /// multiplies `auth_mul(d, &r)`, putting `d` in the MAC-COVERED first slot; swap
-    /// the arguments and `d` lands in the slot `auth_mul` ADOPTS, the check passes,
-    /// and a deviating party can turn a match into a non-match. This test drives the
-    /// production helper (not a re-spelled `auth_mul`) precisely so it goes RED on
-    /// that mutation.
+    /// **THE `≤ t`-PARTY MODEL, DIFFERENCE SIDE** — one of the two tests that actually
+    /// back the `Malicious` descriptor. At the MINIMAL `n = 2t+1 = 3` a single corrupt
+    /// party IS the whole `t`-budget, and its entire influence on
+    /// `auth_mul(&d, &r)` is the pair of degree-`2t` products it re-shares. Feeding a
+    /// deviated share of the DIFFERENCE into its two local products shifts them by
+    /// `r_i·ε` (value, from `d_i·r_i`) and `r_i·ε'` (MAC, from `(α·d)_i·r_i`) — the
+    /// deltas are derived HERE from that party's own local view, not invented.
+    ///
+    /// All three strategies must abort: value-share only, MAC-share only, and the two
+    /// chosen JOINTLY (the coordinated case, the only one that could hope to cancel
+    /// `σ = λ_i·r_i·(ε' − α·ε)` — and only by hitting `ε' = α·ε`, i.e. guessing the
+    /// secret `α`, probability `1/p`). Equal keys, so the honest verdict is "match" and
+    /// a silent pass would be a flipped verdict, not a harmless one. `[SONNET-4.6]`
     #[test]
-    fn tamper_on_the_difference_operand_is_caught() {
+    fn t_party_deviation_on_the_difference_operand_is_caught() {
+        let backend = ShamirBackend::new_seeded(3, 0xD1FF).unwrap();
+        let t = backend.threshold();
+        assert_eq!(backend.parties(), 2 * t + 1, "the minimal honest-majority n");
+
+        for (eps_value, eps_mac) in [
+            (Fp::new(7), Fp::zero()),
+            (Fp::zero(), Fp::new(7)),
+            (Fp::new(7), Fp::new(11)),
+        ] {
+            let mut dealer = backend.dealer();
+            let mut session = dealer.new_mac_session();
+            let a = session.authenticated_share(Fp::new(1234));
+            let b = session.authenticated_share(Fp::new(1234));
+            let d = auth_sub(&a, &b).unwrap();
+            // The mask draw is re-spelled from `mask_authenticated_difference` so the
+            // deviation can be injected into the multiplication; the multiplication
+            // itself is the production one, deviated only in the messages ONE party
+            // sends. (The PRODUCTION-path guard is
+            // `corrupt_dealer_rewrite_of_the_difference_is_caught` below.)
+            let mask = session.draw_nonzero_fp();
+            let r = session.authenticated_share(mask);
+
+            let corrupt = 0usize; // |{corrupt}| = 1 = t
+            let r_i = r.value_shares()[corrupt].y;
+            let deviations = [(corrupt, r_i.mul(eps_value), r_i.mul(eps_mac))];
+            let m = session
+                .auth_mul_with_party_deviations_for_test(&d, &r, &deviations)
+                .unwrap();
+
+            let outcome = session.mac_check_and_open(std::slice::from_ref(&m));
+            assert!(
+                matches!(outcome, Err(MpcError::MacCheckFailed { .. })),
+                "a <= t-party difference-side deviation (eps = {:?}, eps' = {:?}) must abort \
+                 (sigma = lambda_i*r_i*(eps' - alpha*eps) != 0) — got {:?}",
+                eps_value,
+                eps_mac,
+                outcome
+            );
+        }
+    }
+
+    /// **THE `≤ t`-PARTY MODEL, MASK SIDE** — the strongest mask-side strategy available
+    /// from a corrupt party's LOCAL view, which is NOT the "adopted `d·r'`" of the
+    /// corrupt-dealer test below. A corrupt party cannot replace the shared mask by a
+    /// different secret `r'` (that needs every share); it can only feed `r_i + ε` into
+    /// its two local products, shifting them by `d_i·ε` (value, from `d_i·r_i`) and
+    /// `(α·d)_i·ε` (MAC, from `(α·d)_i·r_i`).
+    ///
+    /// Those two shifts are NOT related by the factor `α` — `(α·d)_i` is a share of the
+    /// independently-dealt `[α·d]`, not `α` times the share `d_i` — so
+    /// `σ = λ_i·ε·((α·d)_i − α·d_i) ≠ 0` and the deviation is **caught**, not adopted.
+    /// The assertion is the exact security property (`abort` OR the honest verdict), so
+    /// it is non-vacuous either way: with the MAC-check defeated, the equal-keys case
+    /// would open to `λ_i·d_i·ε ≠ 0` and flip "match" to "no match". `[SONNET-4.6]`
+    #[test]
+    fn t_party_deviation_on_the_mask_operand_is_caught() {
+        for (a, b, honest) in [(5u64, 5u64, true), (5, 6, false)] {
+            let backend = ShamirBackend::new_seeded(3, 0x1123 + a).unwrap();
+            let t = backend.threshold();
+            assert_eq!(backend.parties(), 2 * t + 1, "the minimal honest-majority n");
+            let mut dealer = backend.dealer();
+            let mut session = dealer.new_mac_session();
+            let aa = session.authenticated_share(Fp::new(a));
+            let bb = session.authenticated_share(Fp::new(b));
+            let d = auth_sub(&aa, &bb).unwrap();
+            let mask = session.draw_nonzero_fp();
+            let r = session.authenticated_share(mask);
+
+            let corrupt = 0usize; // |{corrupt}| = 1 = t
+            let eps = Fp::new(9);
+            let deviations = [(
+                corrupt,
+                d.value_shares()[corrupt].y.mul(eps),
+                d.mac_shares()[corrupt].y.mul(eps),
+            )];
+            let m = session
+                .auth_mul_with_party_deviations_for_test(&d, &r, &deviations)
+                .unwrap();
+
+            match session.mac_check_and_open(std::slice::from_ref(&m)) {
+                // The expected outcome: sigma = lambda_i*eps*((alpha*d)_i - alpha*d_i) != 0.
+                Err(MpcError::MacCheckFailed { .. }) => {}
+                // Admitted only for the 1/p case where the shifts happen to cancel —
+                // and then the verdict must still be the honest one.
+                Ok(opened) => assert_eq!(
+                    match_bit(opened[0]),
+                    honest,
+                    "a <= t-party mask-side deviation that slips past the check must still \
+                     leave the ({} == {}) verdict intact",
+                    a,
+                    b
+                ),
+                other => panic!("unexpected outcome from the MAC-check: {:?}", other),
+            }
+        }
+    }
+
+    /// CORRUPT-DEALER RESIDUAL + OPERAND-ORDER MUTATION GUARD, over the PRODUCTION
+    /// multiplication. A globally consistent rewrite of the DIFFERENCE operand — the one
+    /// carrying the secret keys — must be caught. It is caught only because
+    /// `mask_authenticated_difference` multiplies `auth_mul(d, &r)`, putting `d` in the
+    /// MAC-COVERED first slot; swap the arguments and `d` lands in the slot `auth_mul`
+    /// ADOPTS, the check passes, and the dealer can turn a match into a non-match. This
+    /// test drives the production helper (not a re-spelled `auth_mul`) precisely so it
+    /// goes RED on that mutation.
+    ///
+    /// **Scope:** `rewrite_every_value_share` rewrites all `n` shares, so this is the
+    /// `TrustedDealerSim` residual, STRICTLY STRONGER than the `≤ t`-party model. The
+    /// `≤ t` difference-side claim is pinned separately by
+    /// `t_party_deviation_on_the_difference_operand_is_caught`.
+    #[test]
+    fn corrupt_dealer_rewrite_of_the_difference_is_caught() {
         let backend = ShamirBackend::new_seeded(3, 0xD1FF).unwrap();
         let mut dealer = backend.dealer();
         let mut session = dealer.new_mac_session();
 
-        // Equal keys ⇒ honest d = 0 ⇒ honest verdict "match". Corrupt d to a
+        // Equal keys ⇒ honest d = 0 ⇒ honest verdict "match". Rewrite d into a
         // consistent sharing of δ ≠ 0 without fixing its MAC: the attack that would
         // turn the match into a non-match.
         let a = session.authenticated_share(Fp::new(1234));
         let b = session.authenticated_share(Fp::new(1234));
-        let d = tamper_value(&auth_sub(&a, &b).unwrap(), Fp::new(7));
+        let d = rewrite_every_value_share(&auth_sub(&a, &b).unwrap(), Fp::new(7));
 
         let m = mask_authenticated_difference(&mut session, &d).unwrap();
 
         let outcome = session.mac_check_and_open(std::slice::from_ref(&m));
         assert!(
             matches!(outcome, Err(MpcError::MacCheckFailed { .. })),
-            "a tampered difference operand must abort (σ = −α·δ·r ≠ 0); if this passes, the \
+            "a rewritten difference operand must abort (σ = −α·δ·r ≠ 0); if this passes, the \
              auth_mul operands were swapped and the secret operand sits in the adopted slot — got \
              {outcome:?}"
         );
     }
 
-    /// HONEST SCOPE of the adopted slot: a consistent value tamper on the MASK
-    /// operand is NOT caught (`auth_mul` adopts a second-operand tamper — the
-    /// documented `auth_disclose` limitation), but it is **verdict-preserving**: the
-    /// adopted product is `d·r'`, zero iff `d` is zero. Flipping a verdict this way
-    /// needs `r' = 0`, i.e. guessing the secret mask. This test states that boundary
-    /// exactly rather than claiming "any tamper aborts".
+    /// CORRUPT-DEALER RESIDUAL, MASK SIDE — the HONEST SCOPE of the adopted slot. A
+    /// globally consistent value rewrite of the MASK operand is NOT caught (`auth_mul`
+    /// adopts a consistent second-operand rewrite — the documented `auth_disclose`
+    /// limitation), but it is **verdict-preserving**: the adopted product is `d·r'`,
+    /// zero iff `d` is zero. Flipping a verdict this way needs `r' = 0`, i.e. guessing
+    /// the secret mask. This test states that boundary exactly rather than claiming
+    /// "any tamper aborts".
+    ///
+    /// **Scope:** again the `TrustedDealerSim` residual — `≤ t` parties cannot produce
+    /// this rewrite, and their strongest mask-side strategy is CAUGHT rather than
+    /// adopted (`t_party_deviation_on_the_mask_operand_is_caught`).
     #[test]
-    fn tamper_on_the_mask_operand_preserves_the_verdict() {
+    fn corrupt_dealer_rewrite_of_the_mask_preserves_the_verdict() {
         for (a, b, want) in [(5u64, 5u64, true), (5, 6, false)] {
             let backend = ShamirBackend::new_seeded(3, 0x1123 + a).unwrap();
             let mut dealer = backend.dealer();
@@ -440,15 +604,15 @@ mod tests {
             let mask = session.draw_nonzero_fp();
             // Shift the mask by a value the adversary picks blind (it does not know
             // `mask`, so it cannot aim at `r' = 0`).
-            let r = tamper_value(&session.authenticated_share(mask), Fp::new(9));
+            let r = rewrite_every_value_share(&session.authenticated_share(mask), Fp::new(9));
             let m = session.auth_mul(&d, &r).unwrap();
             let opened = session
                 .mac_check_and_open(std::slice::from_ref(&m))
-                .expect("a second-operand tamper is ADOPTED — this is the honest scope boundary");
+                .expect("a consistent second-operand rewrite is ADOPTED — the scope boundary");
             assert_eq!(
                 match_bit(opened[0]),
                 want,
-                "adopting a mask tamper must not change the ({a} == {b}) verdict"
+                "adopting a mask rewrite must not change the ({a} == {b}) verdict"
             );
         }
     }
@@ -518,7 +682,7 @@ mod tests {
             let b = session.authenticated_share(Fp::new(i));
             products.push(auth_masked_equality_product(&mut session, &a, &b).unwrap());
         }
-        products[2] = tamper_value(&products[2], Fp::new(5));
+        products[2] = rewrite_every_value_share(&products[2], Fp::new(5));
         assert!(matches!(
             session.mac_check_and_open(&products),
             Err(MpcError::MacCheckFailed { .. })

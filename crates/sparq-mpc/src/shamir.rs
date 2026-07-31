@@ -629,25 +629,62 @@ impl ShamirDealer {
             "only the first 2t+1 recombination parties re-share"
         );
         assert_eq!(shares_2t.len(), self.n, "expected the full n-party sharing");
+        let recomb_points: Vec<u64> = shares_2t[..2 * self.t + 1].iter().map(|s| s.x).collect();
+        // The reduced secret is shifted by exactly λ_{reshare_party}·δ.
+        *secret_shift = lagrange_zero_weights(&recomb_points)[reshare_party].mul(delta);
+        self.degree_reduce_with_reshare_deviations_for_test(shares_2t, &[(reshare_party, delta)])
+    }
+
+    /// [SONNET-4.6] sq-km34 — **test-only degree-reduce in which a SET of at most `t`
+    /// corrupt recombination parties each re-share `h_i + δ_i`** (the multi-deviator
+    /// generalisation of [`Self::degree_reduce_tamper_inside_reshare_for_test`], which
+    /// now delegates here).
+    ///
+    /// This is the deviation an honest-majority adversary actually has: a corrupt party
+    /// controls ONLY the messages it sends, so its whole influence on the reduction is
+    /// the value it re-shares. The model admits up to `t` such parties choosing their
+    /// `δ_i` JOINTLY, which a single-deviator harness cannot exhibit. `share()` still
+    /// emits a perfectly consistent degree-`t` codeword for each of them, so — exactly
+    /// as in the single-party case — there is nothing off-curve for Reed–Solomon to
+    /// flag; the reduced secret is simply shifted by `Σ_i λ_i·δ_i`.
+    ///
+    /// Contrast with rewriting EVERY share of an operand (`auth_equal`'s
+    /// `rewrite_every_value_share`): that produces a consistent sharing of a DIFFERENT
+    /// secret and needs the dealer or all `n` parties — `≤ t` parties provably cannot,
+    /// since `t+1` untouched points already pin a degree-`t` polynomial.
+    /// `#[cfg(test)]`; not on any production path. `[SONNET-4.6]`
+    #[cfg(test)]
+    pub(crate) fn degree_reduce_with_reshare_deviations_for_test(
+        &mut self,
+        shares_2t: &[Share],
+        deviations: &[(usize, Fp)],
+    ) -> Result<Vec<Share>, MpcError> {
+        assert_eq!(shares_2t.len(), self.n, "expected the full n-party sharing");
+        assert!(
+            deviations.len() <= self.t,
+            "the honest-majority model admits at most t = {} deviating parties, got {}",
+            self.t,
+            deviations.len()
+        );
+        for &(party, _) in deviations {
+            assert!(
+                party < 2 * self.t + 1,
+                "only the first 2t+1 recombination parties re-share"
+            );
+        }
 
         let recomb_points: Vec<u64> = shares_2t[..2 * self.t + 1].iter().map(|s| s.x).collect();
         let lambdas = lagrange_zero_weights(&recomb_points);
 
-        // The deviation: the `reshare_party`-th party re-shares `h_i + δ` instead of
-        // `h_i`. `share()` still emits a perfectly consistent degree-t codeword — the
-        // tamper is invisible to any consistency / RS check, exactly the Hole-2 point.
+        // The deviation: each corrupt party re-shares `h_i + δ_i` instead of `h_i`.
         let mut resharings: Vec<Vec<Share>> = Vec::with_capacity(2 * self.t + 1);
         for (i, s) in shares_2t[..2 * self.t + 1].iter().enumerate() {
-            let to_share = if i == reshare_party {
-                s.y.add(delta)
-            } else {
-                s.y
-            };
-            resharings.push(self.share(to_share));
+            let delta = deviations
+                .iter()
+                .find(|&&(party, _)| party == i)
+                .map_or(Fp::zero(), |&(_, d)| d);
+            resharings.push(self.share(s.y.add(delta)));
         }
-
-        // The reduced secret is shifted by exactly λ_{reshare_party}·δ.
-        *secret_shift = lambdas[reshare_party].mul(delta);
 
         let mut reduced: Vec<Share> = shares_2t
             .iter()
@@ -1008,6 +1045,48 @@ impl MacSession<'_> {
             mac_delta,
             &mut scratch,
         )?;
+        crate::authenticated::AuthenticatedShare::new(z, mac)
+    }
+
+    /// [SONNET-4.6] sq-km34 — **test-only `auth_mul` under a genuine `≤ t`-PARTY
+    /// deviation.** Each entry of `deviations` is `(recombination party, δ_value,
+    /// δ_mac)`: that party re-shares `h_i + δ_value` in the VALUE reduce and
+    /// `h'_i + δ_mac` in the MAC reduce, the two chosen jointly. Everything else is the
+    /// PRODUCTION [`Self::auth_mul`] — the same two `mul_shares_raw` rounds and the same
+    /// sound `[α·z] = reduce([α·x]·[y])` carry.
+    ///
+    /// **Why this is the right shape for the malicious model.** A corrupt party controls
+    /// only the messages it sends, so its ENTIRE influence on an `auth_mul` collapses
+    /// into exactly this pair of per-party shifts — including the strategy "feed a wrong
+    /// share of one OPERAND into my two local products", which for a deviation `ε` on
+    /// the party's share of the second operand is
+    /// `(δ_value, δ_mac) = (x_i·ε, (α·x)_i·ε)`, and on its shares of the first operand
+    /// is `(y_i·ε, y_i·ε')`. It CANNOT rewrite a shared operand into a sharing of a
+    /// DIFFERENT secret — that needs the dealer (or all `n` parties), and is the
+    /// separate corrupt-dealer residual `auth_equal`'s `rewrite_every_value_share`
+    /// models.
+    ///
+    /// The net secret shifts are `Δ_v = Σ λ_i·δ_value_i` and `Δ_m = Σ λ_i·δ_mac_i`, so
+    /// the §2.5 check opens `σ = Δ_m − α·Δ_v` — zero with `Δ_v ≠ 0` only by guessing the
+    /// secret `α`. Used by `auth_equal`'s `≤ t`-party tests, which derive the two deltas
+    /// from a corrupt party's local view. `#[cfg(test)]`; no production path.
+    #[cfg(test)]
+    pub(crate) fn auth_mul_with_party_deviations_for_test(
+        &mut self,
+        x: &crate::authenticated::AuthenticatedShare,
+        y: &crate::authenticated::AuthenticatedShare,
+        deviations: &[(usize, Fp, Fp)],
+    ) -> Result<crate::authenticated::AuthenticatedShare, MpcError> {
+        let value_devs: Vec<(usize, Fp)> = deviations.iter().map(|&(p, dv, _)| (p, dv)).collect();
+        let mac_devs: Vec<(usize, Fp)> = deviations.iter().map(|&(p, _, dm)| (p, dm)).collect();
+        let z_2t = mul_shares_raw(x.value_shares(), y.value_shares())?;
+        let z = self
+            .dealer
+            .degree_reduce_with_reshare_deviations_for_test(&z_2t, &value_devs)?;
+        let mac_2t = mul_shares_raw(x.mac_shares(), y.value_shares())?;
+        let mac = self
+            .dealer
+            .degree_reduce_with_reshare_deviations_for_test(&mac_2t, &mac_devs)?;
         crate::authenticated::AuthenticatedShare::new(z, mac)
     }
 
