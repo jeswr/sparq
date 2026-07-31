@@ -90,6 +90,19 @@ Supporting invariants worth keeping in front of the implementer:
   lineages is explicitly unsupported.
 - A `rebase` record is an **honest hole**: the span `(previous generation, generation]` was
   never captured (`change_stream.rs:562-601`).
+- **`seq` is the only totally-ordered key.** Record `seq` advances monotonically always;
+  `generation` may *restart* after `rebase_to_new_lineage` (`change_stream.rs:613`), and
+  timestamps are wall-clock and may step backwards. Anything that needs an order — most of
+  all the index of §4.1 — must key on `seq`.
+- **The change log stamps its own clock, not the ring's.** `record_commit` calls
+  `SystemTime::now()` directly (`change_stream.rs:544`), whereas `Generation::published_at`
+  comes from the ring's *configured*, injectable clock (`ring.rs:88`, `ring.rs:203`,
+  `ring.rs:266`). The two instants differ by at least a `diff_changes` pass — which is
+  O(full graph), §1.2b — and under an injected clock they need not be related at all. So
+  `ChangeRecord::timestamp_unix_nanos` does **not** identify the publication instant of the
+  generation it records; its own docstring calls it "advisory ordering metadata only —
+  `seq` is the authoritative order" (`change_stream.rs:159-162`). Indexing it as-is and
+  claiming equivalence with `GenerationRing::as_of` would be false; §4.1 fixes this first.
 
 ### 1.3 Backup + delta artifacts — a working forward-replay path
 
@@ -188,22 +201,80 @@ A sidecar over the change-log directory holding one entry per segment:
 
 ```text
 first_seq, last_seq, first_generation, last_generation,
-min_timestamp_unix_nanos, max_timestamp_unix_nanos,
+min_timestamp_unix_nanos, max_timestamp_unix_nanos,   // over COMMIT records only
 contains_rebase: bool
 ```
 
+The timestamp bounds are computed over **commit records only**: a `rebase` record carries no
+publication instant (see the first bullet below) and can never be an `as_of` answer, so
+including it would make the bounds — and the `retained_min` of §4.3 — inexact. A segment
+holding only `rebase` records therefore has no bounds and is always skipped by resolution;
+it still sets `contains_rebase`.
+
+- **One timestamp authority — settled before anything is indexed.** Per §1.2, a
+  `ChangeRecord`'s timestamp is stamped by `record_commit`'s own `SystemTime::now()` and is
+  not the `published_at` of the generation it captures, so indexing it cannot reproduce ring
+  semantics. The fix is the cheap one: **`record_commit` stamps `to.published_at()`** — it
+  already holds the `to` generation and the accessor is public (`ring.rs:140`) — so both
+  paths read one authority, the ring's configured clock. This needs no new record field and
+  no new header line, but it does redefine the existing field's *meaning*, and the design
+  owes three consequences:
+  - the `ChangeRecord::timestamp_unix_nanos` docstring changes from "wall clock at
+    `record_commit` time / advisory only" to "the publication instant of the generation this
+    record captures, per the ring's configured clock";
+  - records written by earlier builds carry the old meaning and are off by a `diff_changes`
+    pass, undetectably after the fact. The index must therefore **not** claim ring
+    equivalence over the pre-change prefix. Phase 2 must pick and state one of: bump
+    `SEGMENT_FORMAT_VERSION` (`change_stream.rs:106` — `ChangeLog::open` already rejects an
+    unknown version fail-closed) so the prefix is identifiable, or document that the
+    equivalence guarantee begins at the first segment written by the new build. Silently
+    mixing the two meanings is the failure mode this bullet exists to prevent;
+  - age-based retention compares record timestamps against `SystemTime::now()`
+    (`apply_retention`, `change_stream.rs:398`). Once records carry the ring's clock, a host
+    that injects a non-default `RingConfig::clock` must drive retention through
+    `apply_retention_at` with `now` from that same clock, or the two disagree.
+
+  A `rebase` record has **no** publication instant — `append_gap` receives a generation
+  number, not a `Generation` (`change_stream.rs:621`). Its timestamp stays a recording-time
+  stamp; it is excluded from `as_of` resolution and participates only via `contains_rebase`.
+  (The alternative in the review — persisting `published_at` as a second header line — buys
+  no information the shared-authority fix does not, and costs a format break, because
+  `decode_record_body` fails closed on an unknown header key.)
 - **Built from the log, never trusted over it.** Rebuildable by a full scan on open; the
   persisted form is a cache, and a mismatch against the segment set on disk means rebuild,
   not fail. This keeps the index off the crash-safety critical path entirely — the log
   remains the only durable source of truth.
 - **Updated by retention.** `apply_retention` already reports `first_retained_seq`
-  (`change_stream.rs:251-266`); dropping segments drops index entries, and the trim horizon
-  becomes a *timestamp* horizon the server can quote in an error message.
-- **Resolution.** `as_of(t)` binary-searches segments on `max_timestamp`, then scans within
-  the one candidate segment. Wall-clock timestamps are not monotonic under clock steps, so
-  the within-segment scan must resolve ties the same way `GenerationRing::as_of` does —
-  toward the newest qualifying record — and the two implementations must be tested against
-  each other on the overlap where the ring and the log both cover an instant.
+  (`change_stream.rs:251-266`); dropping segments drops index entries, and the retained
+  window shrinks with them. What the server can honestly quote as the resulting horizon is
+  *not* simply a timestamp — see §4.3.
+- **Resolution — ordered on `seq`, never on the timestamp.** `GenerationRing::as_of(t)` is
+  specified and implemented as an O(retained) **reverse scan** returning the newest retained
+  generation with `published_at <= t` (`ring.rs:325-338`), where "newest" means highest
+  generation number, not latest timestamp. That definition stays total and unambiguous when
+  the clock steps backwards; a timestamp-ordered one does not. The index must answer exactly
+  that question: **the record with the greatest `seq` among those whose publication instant
+  is `<= t`.**
+
+  Segment summaries are ordered by `first_seq`, which is always monotonic. Their timestamp
+  bounds are **not** ordered and must never be a binary-search key: under a clock step a
+  later segment can hold both a larger and a smaller instant than an earlier one, so a
+  search on `max_timestamp` can skip past the segment holding the answer and return an older
+  generation or none at all. `as_of(t)` therefore walks segments **newest-first**, using the
+  bounds only to prune and to stop early:
+  - `min_timestamp > t` → the segment can hold no qualifying record; skip it whole.
+  - `max_timestamp <= t` → every commit record in the segment qualifies, so its last commit
+    record is the answer; stop without reading further back.
+  - otherwise scan the segment's records newest-first (skipping `rebase` records); the first
+    record with instant `<= t` is the answer, and because every newer segment was pruned by
+    the `min_timestamp` rule, its `seq` is the greatest qualifying `seq` in the whole log.
+
+  Cost is the summary list plus, in the monotonic case, one segment body — the newest
+  segment inspected satisfies a terminating condition immediately. The worst case, a clock
+  that stepped backwards across the entire retained log, degrades to a full scan of the
+  retained window; that is the price of a total answer, and it is bounded by the same
+  retention window the horizon quotes. Phase 2 tests this against a brute-force scan on
+  randomised non-monotonic logs, and against `GenerationRing::as_of` on the overlap.
 - **`contains_rebase` is the fail-closed flag.** If the span between the chosen anchor and
   the target crosses a `rebase` record, reconstruction is **refused**, not attempted. This
   is the single most important correctness rule in the design: a rebase marks a span that
@@ -232,11 +303,20 @@ time with no offset must be rejected rather than assumed to be UTC.
 
 Status semantics, extending the existing discipline rather than inventing one:
 
+The conditions are stated against the **retained minimum instant** — `retained_min`, the
+smallest instant over the retained window (the `min` of the per-segment `min_timestamp`
+summaries of §4.1; for the ring, the `min` of the retained generations' `published_at`).
+`retained_min` is the exact threshold for "does anything in the retained window qualify for
+`t`", and it stays exact when the clock steps backwards. The *oldest retained* record's
+instant does not: under a rollback a newer retained record can carry an earlier instant, so
+an instant below the oldest retained record's may still be perfectly servable.
+
 | Condition | Status | Rationale |
 |---|---|---|
 | Unparsable / naive timestamp / both `at` and `generation` | 400 | Client error, retry cannot help without a fix. |
-| Timestamp after the current generation | 400 | Matches the existing "not yet published" rule (`http.rs:5590`). |
-| Timestamp before the temporal horizon | 410 Gone | Matches the existing aged-out rule; the message must quote the *horizon timestamp*, not just a generation number. |
+| `t >= retained_min` | 200 | Some retained record qualifies; serve the greatest qualifying `seq` (§4.1). This includes a `t` far in the *future*, which resolves to the current generation exactly as `GenerationRing::as_of` does. There is deliberately **no** "timestamp is after the current generation" rejection: under a clock rollback the current generation's instant is not an upper bound on published instants, so that test would reject requests the ring can answer. `?generation=N` beyond current keeps its existing 400 (`http.rs:5590`) — generation numbers *are* ordered within a lineage; instants are not. |
+| `t < retained_min`, nothing has been trimmed | 400 | `t` precedes every state the store has ever held. Definite, and retry cannot help. |
+| `t < retained_min`, records have been trimmed | 410 Gone, typed body flagged **indeterminate** | Either the qualifying records aged out or `t` precedes all history — the trimmed instants are gone, so after a clock step the two are genuinely indistinguishable. The body says so, and quotes `retained_min` plus the oldest retained `seq`/generation labelled as *the oldest retained record*, never as "the earliest servable instant". A false definite 410 here would contradict the overlap equivalence the design promises. |
 | Span crosses a `rebase` gap | 409 Conflict | Distinct from "trimmed": the history is intact on both sides but the span was never captured. A different operator remedy (restore from a backup), so a different code. |
 | Reconstruction exceeds the configured budget | 400 with a typed body | See §4.4. Not 503 — it is a property of the request, not of server health. |
 
@@ -311,12 +391,26 @@ and touches `resolve_pin` only; if IVM is already in flight, Phase 0 waits behin
    honest arbitrary-timestamp query *within the retention window* and closes the
    round-trip gap of §1.1 with no new storage. **Acceptance:** a query at a timestamp
    between two publishes returns the earlier generation's data and reports that
-   generation's number and timestamp; a timestamp below the ring's oldest retained
-   generation is 410; both feature states behave identically where the window overlaps.
+   generation's number and timestamp; a timestamp below the ring's `retained_min` is 410
+   (or 400 when nothing has been evicted); both feature states behave identically where
+   the window overlaps. **Rollback cases are mandatory**, via `RingConfig::clock`: with a
+   clock that steps backwards mid-run, (a) a `t` below the *oldest retained* generation's
+   instant but at or above `retained_min` is served, not rejected; (b) a `t` above the
+   *current* generation's instant is served as the greatest qualifying generation, never
+   400; (c) the resolved generation equals `GenerationRing::as_of(t)` for every `t` in a
+   randomised sweep.
 2. **`TemporalIndex`** — M, `sparq-serve`. Per-segment index of §4.1, rebuild-on-open,
-   retention-aware, `contains_rebase`. **Acceptance:** `as_of` agrees with a brute-force
-   scan over randomised logs including non-monotonic timestamps; the horizon moves exactly
-   with `apply_retention`; a rebase-spanning resolution is refused.
+   retention-aware, `contains_rebase`, and the single-timestamp-authority change
+   (`record_commit` stamps `to.published_at()`) with its stated
+   version/compatibility decision. **Acceptance:** `as_of` agrees with a brute-force
+   greatest-qualifying-`seq` scan over randomised logs including non-monotonic timestamps —
+   including a case where the answer lies in a segment whose `max_timestamp` is *smaller*
+   than an older segment's, which is precisely what a binary search on `max_timestamp` gets
+   wrong; `as_of` agrees with `GenerationRing::as_of` on the overlap under an injected
+   non-default `RingConfig::clock`, i.e. a run in which publication and log-recording
+   instants would differ; `retained_min` moves exactly with `apply_retention`; a
+   rebase-spanning resolution is refused and a `rebase` record is never returned as an
+   answer.
 3. **Bounded change-log reads** — M, `sparq-serve`. `read_range` / iterator per §4.2;
    `poll` unchanged. **Acceptance:** replaying a span allocates proportionally to the span,
    not the log; fail-closed behaviour below the trim horizon is preserved.
@@ -329,14 +423,18 @@ and touches `resolve_pin` only; if IVM is already in flight, Phase 0 waits behin
 5. **Server surface beyond the ring** — M, `sparq-server`. Extend `?at=` through the
    planner; the full §4.3 status table including 409-on-rebase; the snapshot cache and
    concurrency cap; `/streams` `AT_TIMESTAMP`. **Acceptance:** a timestamp older than the
-   ring but inside the log's horizon returns correct historical results; the 410 message
-   quotes a timestamp horizon; tests cover both feature states.
+   ring but at or above the log's `retained_min` returns correct historical results; the
+   410 body quotes `retained_min` and carries the indeterminate flag when records have been
+   trimmed; tests cover both feature states.
 6. **Unified retention horizon** — M, `sparq-server` + `sparq-serve`. One operator-facing
    history-horizon knob composing ring retention, change-log retention, and base-backup
    retention, so the advertised horizon is a single honest number rather than the emergent
    minimum of three independent policies; surfaced in status output and in the 410 body.
    **Acceptance:** the advertised horizon is never later than any instant the server can
-   actually serve, under randomised retention schedules.
+   actually serve, under randomised retention schedules **and randomised clock steps**.
+   Whatever composition rule the phase picks, it must compose the three sources'
+   `retained_min` values (§4.3), not their oldest-retained-record instants — the latter is
+   the quantity a clock rollback makes wrong.
 7. **Docs, SKILL surface, and the privacy statement** — S. §4.5 written for operators, in
    the crate README and the relevant `SKILL.md`, including the explicit statement that
    deleted data stays queryable within the horizon and that trim is the erasure mechanism.
