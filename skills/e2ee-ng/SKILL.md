@@ -102,7 +102,10 @@ read.validate()?; write.validate()?; adm.validate()?;                     // sep
   admin `sign`/`verify`, and a **branch set**: `ScopedBranch` +
   `branch_scope`/`set_branch_scope`/`covers_branch`), `Capability`
   (`new_read`/`new_write`/`new_admin`, `validate`,
-  `encode_secret`/`decode_secret`), and `delegate` (narrow-only).
+  `encode_secret`/`decode_secret`), `wrap_capability`/`unwrap_capability` (the
+  typed §4.2 secret-transfer path: encode-secret + recipient-wrap under the fixed
+  `CAPABILITY_WRAP_AAD`, plaintext never handed to the caller), and `delegate`
+  (narrow-only).
 - **`envelope`** — `BlockEnvelope` (`seal_block`/`seal_block_random`/`open_block`,
   padded to `PAD_CLASSES`, `digest`/`commit_id`) and `Commit` (author `sign`/`verify`,
   `encode`/`decode`).
@@ -121,7 +124,12 @@ read.validate()?; write.validate()?; adm.validate()?;                     // sep
 
 - **Secrets never go on the wire in the clear.** `K_read` and private keys live in
   the secret-bearing `Capability::encode_secret` output (a bearer secret) — wrap it
-  with `wrap` before it leaves protected local storage. `PublicGrant::encode` (what
+  with `wrap` before it leaves protected local storage. Prefer
+  `wrap_capability`/`unwrap_capability`: same two steps, but the AAD is the fixed
+  `CAPABILITY_WRAP_AAD` (so a capability wrapping cannot be confused with a DEK or
+  bare-`K_read` wrapping made under a caller-chosen label), the capability is
+  `validate`d before it is wrapped, and the plaintext is zeroized rather than
+  handed to you. `PublicGrant::encode` (what
   a broker sees) carries **no** secret field and `PublicGrant::decode` **rejects** a
   secret field if one is present.
 - **The opaque header is AD-bound, not serialized.** `open_block` needs the same

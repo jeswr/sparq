@@ -15,7 +15,9 @@
 //! admission, and the thing an admin signature authenticates) and **secret
 //! fields** (`K_read`, private keys) that MUST be recipient-wrapped
 //! ([`crate::wrap`]) or moved out of band — never placed in RDF, logs, URLs, or
-//! topic messages (§4.2).
+//! topic messages (§4.2). [`wrap_capability`] / [`unwrap_capability`] are the
+//! typed form of that recipient-wrapped path, under a fixed domain-separation
+//! AAD ([`CAPABILITY_WRAP_AAD`]).
 //!
 //! A grant is scoped to a **branch set** ([`ScopedBranch`]) — usually one
 //! branch, since a read secret and a topic are per-branch — and [`delegate`]
@@ -29,6 +31,7 @@ use crate::error::{Error, Result};
 use crate::ids::{BranchId, CapId, Epoch, RepoId, Secret32, TopicId};
 use crate::sign::{PublicVerifyingKey, SecretSigningKey, PUBLIC_KEY_LEN, SIGNATURE_LEN};
 use crate::suite::{check_suite, SUITE_V0};
+use crate::wrap::{self, RecipientPublicKey, RecipientSecretKey, WrappedSecret};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
@@ -598,7 +601,9 @@ pub struct Delegation {
 
 /// A full capability, optionally bearing secrets. The secret fields never appear
 /// in the public grant; serialize them only via [`Capability::encode_secret`]
-/// for recipient-wrapped / out-of-band transfer.
+/// for recipient-wrapped / out-of-band transfer — or, for the recipient-wrapped
+/// case, prefer [`wrap_capability`] / [`unwrap_capability`], which do that under a
+/// fixed domain-separation AAD without exposing the plaintext to the caller.
 #[derive(Debug)]
 pub struct Capability {
     /// The public, signable grant.
@@ -818,6 +823,85 @@ impl Drop for Capability {
     fn drop(&mut self) {
         self.zeroize_secrets();
     }
+}
+
+/// The fixed domain-separation AAD every capability wrapping is bound to.
+///
+/// [`wrap_capability`] / [`unwrap_capability`] always pass exactly these bytes as
+/// the AEAD associated data, so a capability wrapping can never be opened as — or
+/// substituted for — a wrapping made for another purpose (a per-object DEK, a bare
+/// `K_read`, a future wrapped payload), each of which carries its own label under
+/// the generic [`crate::wrap::wrap`]. The label is versioned like the key-schedule
+/// labels (§8.3): a v1 capability wrapping would use a distinct one.
+pub const CAPABILITY_WRAP_AAD: &[u8] = b"urn:jeswr:w3id:e2ee-ng:draft:2026-07 capability-wrap v0";
+
+/// Recipient-wrap a capability **including its secret fields** — the recommended
+/// secret-transfer path of §4.2.
+///
+/// This is [`Capability::encode_secret`] followed by [`crate::wrap::wrap`] under the
+/// fixed [`CAPABILITY_WRAP_AAD`], with two things the hand-rolled two-step does not
+/// give you: the caller never handles the bearer-secret plaintext (this helper
+/// zeroizes its own copy before returning), and the AAD is not a caller-chosen
+/// string that the two ends can disagree on.
+///
+/// The capability is [`Capability::validate`]d first, so a malformed one fails here
+/// rather than producing bytes that [`unwrap_capability`] would always reject.
+///
+/// Zeroizing covers this function's plaintext buffer; it does not retroactively
+/// erase the intermediate CBOR fragments `encode_secret` allocates internally —
+/// that exposure is unchanged from calling `encode_secret` directly.
+///
+/// ```
+/// use sparq_e2ee_ng::capability::{
+///     base_grant, unwrap_capability, wrap_capability, Capability, Validity,
+/// };
+/// use sparq_e2ee_ng::cbor::Limits;
+/// use sparq_e2ee_ng::ids::{BranchId, Epoch, RepoId, Secret32, TopicId};
+/// use sparq_e2ee_ng::wrap::RecipientSecretKey;
+///
+/// let grant = base_grant(
+///     RepoId::random(),
+///     BranchId::random(),
+///     Epoch(0),
+///     TopicId::random(),
+///     Validity { not_before: 0, not_after: 100 },
+///     vec!["wss://broker.example".to_string()],
+/// );
+/// let cap = Capability::new_read(grant, Secret32::random()).unwrap();
+///
+/// let recipient = RecipientSecretKey::generate();
+/// let wrapped = wrap_capability(&cap, &recipient.public()).unwrap();
+/// let opened = unwrap_capability(&recipient, &wrapped, Limits::default()).unwrap();
+/// assert_eq!(opened.grant, cap.grant);
+/// ```
+pub fn wrap_capability(cap: &Capability, recipient: &RecipientPublicKey) -> Result<WrappedSecret> {
+    use zeroize::Zeroize;
+    cap.validate()?;
+    let mut plaintext = cap.encode_secret();
+    let wrapped = wrap::wrap(recipient, &plaintext, CAPABILITY_WRAP_AAD);
+    plaintext.zeroize();
+    wrapped
+}
+
+/// Open a capability wrapped by [`wrap_capability`], with the recipient's private
+/// key.
+///
+/// Fails closed as [`Error::Decrypt`] on a wrong key, tampered ciphertext, or a
+/// wrapping made under any other AAD (including one produced by the generic
+/// [`crate::wrap::wrap`] with a caller-chosen label); the decrypted plaintext then
+/// goes through [`Capability::decode_secret`], so canonical-encoding and
+/// read/publish/admin separation are still enforced on untrusted input. The
+/// decrypted plaintext buffer is zeroized before returning either way.
+pub fn unwrap_capability(
+    sk: &RecipientSecretKey,
+    wrapped: &WrappedSecret,
+    limits: Limits,
+) -> Result<Capability> {
+    use zeroize::Zeroize;
+    let mut plaintext = wrap::unwrap(sk, wrapped, CAPABILITY_WRAP_AAD)?;
+    let cap = Capability::decode_secret(&plaintext, limits);
+    plaintext.zeroize();
+    cap
 }
 
 /// Delegate a **new** public grant from `parent`, narrowing constraints, and
